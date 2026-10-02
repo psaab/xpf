@@ -2617,8 +2617,8 @@ func TestUnleasedOraclePlacement10751(t *testing.T) {
 	wantAdmitV6 := `iifname "ge-0-0-9" meta nfproto ipv6 udp dport 546 accept`
 	for name, payload := range map[string]string{
 		"real":  buildHostInboundFilterPayloadWithOverlay(views, []string{"10.9.9.9"}, nil, nil, nil, true, nil, unleasedV4, unleasedV6),
-		"fence": buildHostInboundFencePayload(views, nil, nil, nil, unleasedV4, unleasedV6),
-		"gap":   buildHostInboundGapFencePayload([]string{"10.0.0.2"}, nil, nil, unleasedV4, unleasedV6, nil, nil, nil),
+		"fence": buildHostInboundFencePayload(views, nil, nil, nil, nil, unleasedV4, unleasedV6),
+		"gap":   buildHostInboundGapFencePayload(views, []string{"10.0.0.2"}, nil, nil, nil, unleasedV4, unleasedV6, nil, nil, nil),
 	} {
 		for _, want := range []string{wantDropV4, wantDropV6, wantAdmitV4, wantAdmitV6} {
 			if !strings.Contains(payload, want) {
@@ -2908,8 +2908,8 @@ func TestGapExceptLifelineSharedDayTwo10751(t *testing.T) {
 // shared stays bare-DROPped on every ingress).
 func TestGapLifelineExceptionPlacement10751(t *testing.T) {
 	payload := buildHostInboundGapFencePayload(
-		[]string{"10.0.0.5", "10.0.0.9"}, nil, nil, nil, nil,
-		[]string{"10.0.0.5"}, nil, []string{"em0", "fxp0"})
+		nil, []string{"10.0.0.5", "10.0.0.9"}, nil, nil, nil,
+		nil, nil, []string{"10.0.0.5"}, nil, []string{"em0", "fxp0"})
 	wantExcept := `iifname { "em0", "fxp0" } ip daddr 10.0.0.5 accept`
 	wantExceptSdif := `meta sdifname { "em0", "fxp0" } ip daddr 10.0.0.5 accept`
 	wantDrop := `ip daddr { 10.0.0.5, 10.0.0.9 } drop`
@@ -2929,7 +2929,7 @@ func TestGapLifelineExceptionPlacement10751(t *testing.T) {
 		strings.Index(payload, wantExceptSdif) > strings.Index(payload, wantDrop) {
 		t.Errorf("gap oracle places an exception after the bare DROP (lifeline management would be denied):\n%s", payload)
 	}
-	plain := buildHostInboundGapFencePayload([]string{"10.0.0.9"}, nil, nil, nil, nil, nil, nil, nil)
+	plain := buildHostInboundGapFencePayload(nil, []string{"10.0.0.9"}, nil, nil, nil, nil, nil, nil, nil, nil)
 	if strings.Contains(plain, "iifname") || strings.Contains(plain, "sdifname") {
 		t.Errorf("gap oracle without shared must emit no iifname/sdifname rule:\n%s", plain)
 	}

@@ -27,10 +27,11 @@
 //     replies, family-split — without these a DHCP-pending boot could never
 //     acquire the lease that ends barrier retention).
 //
-// Rules 2-4 are hostInboundFenceMandatoryAdmitsNetlink(p, nil): the SAME shared
-// admits as the #5644 cold-boot fence and #5789 gap fence, minus configured
-// WireGuard ports (unknown before config loads). Rule 5 admits only DHCP
-// CLIENT ports, family-split to match steady state (dhcp→ip, dhcpv6→ip6):
+// Rules 2-4 are hostInboundFenceMandatoryAdmitsNetlink(p): the shared,
+// scope-independent admits used by the #5644 cold-boot fence and #5789 gap
+// fence. WireGuard zones are unknown before config loads, so this barrier does
+// not emit a WG exception. Rule 5 admits only DHCP CLIENT ports, family-split
+// to match steady state (dhcp→ip, dhcpv6→ip6):
 // from-any dport-only, reaching dhclient parsing which validates transaction
 // IDs (the DHCP server ports 67/547 stay blocked).
 //
@@ -207,7 +208,7 @@ func emitEarlyInputBarrierAdmitsWithLifeline(p *nlPlan, lifelines []string) {
 		p.rule().iifname(lifelines).emit(verdictAccept()...)
 	}
 	p.rule().iifname([]string{earlyInputBarrierLoopback}).emit(verdictAccept()...)
-	hostInboundFenceMandatoryAdmitsNetlink(p, nil)
+	hostInboundFenceMandatoryAdmitsNetlink(p)
 	emitEarlyInputBarrierDHCPClient(p)
 }
 

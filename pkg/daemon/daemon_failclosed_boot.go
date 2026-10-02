@@ -148,11 +148,11 @@ func (d *Daemon) installFailClosedBootHostFences(failClosedLoad bool) {
 	// and preserves their established replacement semantics.
 	sets := dpuserspace.FenceAddrSets{UnzonedV4: dataV4, UnzonedV6: dataV6}
 	wgListenPorts := []uint16(nil) // no trustworthy config exists to derive WG ports
-	if err := d.installHostInboundColdBootFence(sets, wgListenPorts); err != nil {
+	if err := d.installHostInboundColdBootFence(sets, wgListenPorts, nil); err != nil {
 		slog.Error("fail-closed boot: live-address host-inbound fence failed; host services may remain reachable on data addresses until a successful config apply",
 			"err", err, "v4", dataV4, "v6", dataV6)
 	}
-	if err := d.installLo0ColdBootFence(sets, wgListenPorts); err != nil {
+	if err := d.installLo0ColdBootFence(sets, nil); err != nil {
 		slog.Error("fail-closed boot: live-address lo0 fence failed; host services may remain reachable on data addresses until a successful config apply",
 			"err", err, "v4", dataV4, "v6", dataV6)
 	}

@@ -27,8 +27,10 @@ needs the kernel `nf_tables` MODULE but no `nft` BINARY:
   per-zone service accepts + default-deny drops, junos-host DENY
   subchains (#4146), the addressed-but-unzoned catch-all (#4420).
 - `InstallColdBootFence(FenceSpec)` — the #5644 cold-boot fail-closed
-  fence (mandatory admits + address drops, no service accepts).
-- `InstallGapFence(GapFenceSpec)` — the #5789 additive coverage-gap fence.
+  fence (scope-independent mandatory admits, per-zone WG accepts, and
+  address drops; no service accepts).
+- `InstallGapFence(GapFenceSpec)` — the #5789 additive coverage-gap fence,
+  with per-zone WG accepts limited to uncovered addresses.
 - `InstallLo0(Lo0FilterSpec)` — the lo0 loopback input filter (#3445/#3392).
 - `DeleteTable(name)` — idempotent teardown (fail-closed on a real error).
 

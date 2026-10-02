@@ -303,28 +303,31 @@ type HostInboundSpec struct {
 }
 
 // FenceSpec is the cold-boot fail-closed fence render request (#5644): the
-// address sets to DROP plus the mandatory-admit WG ports.
+// address sets to DROP and per-zone WireGuard admission inputs.
 type FenceSpec struct {
 	Views         []HostInboundZoneView
 	UnzonedV4     []string
 	UnzonedV6     []string
-	WGListenPorts []uint16
+	WGListenPorts []uint16 // stale-reply guard only; WG accepts use WGZonePorts.
+	WGZonePorts   map[string][]uint16 // per-zone daddr-scoped WG accepts.
 	// UnleasedV4/V6, as in HostInboundSpec (fence stands pre-handoff).
 	UnleasedV4 []string
 	UnleasedV6 []string
 }
 
 // GapFenceSpec is the additive coverage-gap fence render request (#5789): the
-// uncovered addresses to DROP plus the mandatory-admit WG ports. Uncovered
+// uncovered addresses to DROP plus scoped WireGuard admission inputs. Uncovered
 // addresses shared with a lifeline are ALSO listed in SharedV4/V6: the gap
 // denies them on data ingress (bare DROP) while a preceding exception
 // admits them on lifeline ingress (M1 ingress-aware scope — a global
 // withhold would leave them fail-open post-handoff, when no barrier
 // stands behind the gap).
 type GapFenceSpec struct {
+	Views         []HostInboundZoneView // WG accepts intersect these addresses with Uncovered.
 	UncoveredV4   []string
 	UncoveredV6   []string
-	WGListenPorts []uint16
+	WGListenPorts []uint16 // stale-reply guard only; WG accepts use WGZonePorts.
+	WGZonePorts   map[string][]uint16 // per-zone daddr-scoped WG accepts.
 	// UnleasedV4/V6, as in HostInboundSpec (uniform backstop).
 	UnleasedV4 []string
 	UnleasedV6 []string

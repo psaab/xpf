@@ -134,8 +134,8 @@ func runNftNetlinkParityInner(t *testing.T) {
 	})
 
 	t.Run("cold_boot_fence", func(t *testing.T) {
-		oracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, nil, nil)
-		spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wg}
+		oracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, wgZones, nil, nil)
+		spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wg, WGZonePorts: wgZones}
 		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallColdBootFence(spec) })
 	})
 
@@ -145,16 +145,16 @@ func runNftNetlinkParityInner(t *testing.T) {
 		// buildFenceTablePayload with cold_boot_fence, so this case proves the
 		// xpf_lo0 table wrapper (name + priority) composes with the shared fence
 		// rules bit-identically to the netlink InstallLo0ColdBootFence.
-		oracle := buildLo0FencePayload(views, unzonedV4, unzonedV6, wg)
-		spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wg}
+		oracle := buildLo0FencePayload(views, unzonedV4, unzonedV6, wgZones)
+		spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGZonePorts: wgZones}
 		parityCheck(t, xnft.Lo0TableName, oracle, func() error { return inst.InstallLo0ColdBootFence(spec) })
 	})
 
 	t.Run("gap_fence", func(t *testing.T) {
 		uncoveredV4 := []string{"10.0.1.1", "10.0.9.1"}
 		uncoveredV6 := []string{"2001:db8:1::1"}
-		oracle := buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6, wg, nil, nil, nil, nil, nil)
-		spec := xnft.GapFenceSpec{UncoveredV4: uncoveredV4, UncoveredV6: uncoveredV6, WGListenPorts: wg}
+		oracle := buildHostInboundGapFencePayload(views, uncoveredV4, uncoveredV6, wg, wgZones, nil, nil, nil, nil, nil)
+		spec := xnft.GapFenceSpec{Views: toNftViews(views), UncoveredV4: uncoveredV4, UncoveredV6: uncoveredV6, WGListenPorts: wg, WGZonePorts: wgZones}
 		parityCheck(t, xnft.HostInboundGapTableName, oracle, func() error { return inst.InstallGapFence(spec) })
 	})
 
@@ -176,12 +176,12 @@ func runNftNetlinkParityInner(t *testing.T) {
 		spec.UnleasedV4, spec.UnleasedV6 = unleasedV4, unleasedV6
 		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
 
-		foracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, unleasedV4, unleasedV6)
-		fspec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wg, UnleasedV4: unleasedV4, UnleasedV6: unleasedV6}
+		foracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, wgZones, unleasedV4, unleasedV6)
+		fspec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wg, WGZonePorts: wgZones, UnleasedV4: unleasedV4, UnleasedV6: unleasedV6}
 		parityCheck(t, xnft.HostInboundTableName, foracle, func() error { return inst.InstallColdBootFence(fspec) })
 
-		gapOracle := buildHostInboundGapFencePayload([]string{"10.0.1.1"}, nil, wg, unleasedV4, unleasedV6, nil, nil, nil)
-		gspec := xnft.GapFenceSpec{UncoveredV4: []string{"10.0.1.1"}, WGListenPorts: wg, UnleasedV4: unleasedV4, UnleasedV6: unleasedV6}
+		gapOracle := buildHostInboundGapFencePayload(views, []string{"10.0.1.1"}, nil, wg, wgZones, unleasedV4, unleasedV6, nil, nil, nil)
+		gspec := xnft.GapFenceSpec{Views: toNftViews(views), UncoveredV4: []string{"10.0.1.1"}, WGListenPorts: wg, WGZonePorts: wgZones, UnleasedV4: unleasedV4, UnleasedV6: unleasedV6}
 		parityCheck(t, xnft.HostInboundGapTableName, gapOracle, func() error { return inst.InstallGapFence(gspec) })
 	})
 
@@ -194,11 +194,11 @@ func runNftNetlinkParityInner(t *testing.T) {
 		uncovered := []string{"10.0.0.5", "10.0.0.9"}
 		shared := []string{"10.0.0.5"}
 		lifelines := []string{"fxp0", "em0"}
-		oracle := buildHostInboundGapFencePayload(uncovered, nil, wg, nil, nil, shared, nil, lifelines)
+		oracle := buildHostInboundGapFencePayload(nil, uncovered, nil, wg, wgZones, nil, nil, shared, nil, lifelines)
 		if !strings.Contains(oracle, "iifname") || !strings.Contains(oracle, "accept") {
 			t.Fatal("gap oracle emitted no exception rule; the diff below would be vacuous")
 		}
-		spec := xnft.GapFenceSpec{UncoveredV4: uncovered, WGListenPorts: wg, SharedV4: shared, LifelineNetdevs: lifelines}
+		spec := xnft.GapFenceSpec{UncoveredV4: uncovered, WGListenPorts: wg, WGZonePorts: wgZones, SharedV4: shared, LifelineNetdevs: lifelines}
 		parityCheck(t, xnft.HostInboundGapTableName, oracle, func() error { return inst.InstallGapFence(spec) })
 	})
 

@@ -79,6 +79,7 @@ func hostInboundScenario() HostInboundSpec {
 		UnzonedV4:     []string{"10.0.99.1"},
 		UnzonedV6:     []string{"2001:db8:99::1"},
 		WGListenPorts: []uint16{51820, 51821},
+		WGZonePorts:   map[string][]uint16{"trust": {51820}, "mgmt": {51821}},
 		Programs: []JunosHostProgram{
 			{
 				Zone:                  "untrust",
@@ -218,14 +219,18 @@ func fenceScenario() FenceSpec {
 		UnzonedV4:     hi.UnzonedV4,
 		UnzonedV6:     hi.UnzonedV6,
 		WGListenPorts: hi.WGListenPorts,
+		WGZonePorts:   hi.WGZonePorts,
 	}
 }
 
 func gapFenceScenario() GapFenceSpec {
+	hi := hostInboundScenario()
 	return GapFenceSpec{
+		Views:         hi.Views,
 		UncoveredV4:   []string{"10.0.1.1", "10.0.9.1"},
 		UncoveredV6:   []string{"2001:db8:1::1"},
-		WGListenPorts: []uint16{51820},
+		WGListenPorts: hi.WGListenPorts,
+		WGZonePorts:   hi.WGZonePorts,
 	}
 }
 

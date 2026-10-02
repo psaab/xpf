@@ -207,8 +207,8 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 			"v6_defined", lo0FilterDefined(cfg, filterV6, true))
 		if !d.lo0Enforced.Load() {
 			sets := dpuserspace.BuildFenceAddrSets(cfg, dpuserspace.BuildZoneHostInboundViews(cfg))
-			wgListenPorts := cfg.WireGuardListenPorts()
-			if fenceErr := d.installLo0ColdBootFence(sets, wgListenPorts); fenceErr != nil {
+			wgZonePorts := cfg.WireGuardZonePorts()
+			if fenceErr := d.installLo0ColdBootFence(sets, wgZonePorts); fenceErr != nil {
 				return errors.Join(err, fenceErr)
 			}
 		}
@@ -231,8 +231,8 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 			"v6_defined", lo0FilterDefined(cfg, filterV6, true))
 		if !d.lo0Enforced.Load() {
 			sets := dpuserspace.BuildFenceAddrSets(cfg, dpuserspace.BuildZoneHostInboundViews(cfg))
-			wgListenPorts := cfg.WireGuardListenPorts()
-			if fenceErr := d.installLo0ColdBootFence(sets, wgListenPorts); fenceErr != nil {
+			wgZonePorts := cfg.WireGuardZonePorts()
+			if fenceErr := d.installLo0ColdBootFence(sets, wgZonePorts); fenceErr != nil {
 				return errors.Join(err, fenceErr)
 			}
 		}
@@ -266,8 +266,8 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 			// security zone at all — where the zone-model builders return nothing
 			// and the fence would otherwise be an empty `policy accept` shell.
 			sets := dpuserspace.BuildFenceAddrSets(cfg, dpuserspace.BuildZoneHostInboundViews(cfg))
-			wgListenPorts := cfg.WireGuardListenPorts()
-			if fenceErr := d.installLo0ColdBootFence(sets, wgListenPorts); fenceErr != nil {
+			wgZonePorts := cfg.WireGuardZonePorts()
+			if fenceErr := d.installLo0ColdBootFence(sets, wgZonePorts); fenceErr != nil {
 				return errors.Join(fmt.Errorf("apply lo0 nftables filter: %w", err), fenceErr)
 			}
 		}
@@ -286,8 +286,8 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 		slog.Error("lo0 installer rendered no rules after daemon preflight; renderer parity is broken and the live table may be an empty policy-accept shell",
 			"v4", filterV4, "v6", filterV6)
 		sets := dpuserspace.BuildFenceAddrSets(cfg, dpuserspace.BuildZoneHostInboundViews(cfg))
-		wgListenPorts := cfg.WireGuardListenPorts()
-		if fenceErr := d.installLo0ColdBootFence(sets, wgListenPorts); fenceErr != nil {
+		wgZonePorts := cfg.WireGuardZonePorts()
+		if fenceErr := d.installLo0ColdBootFence(sets, wgZonePorts); fenceErr != nil {
 			return errors.Join(err, fenceErr)
 		}
 		return err
@@ -411,11 +411,11 @@ func lo0RenderedRuleCount(cfg *config.Config, filterV4, filterV6 string) int {
 // filter, so a later failure re-fences from a possibly-now-addressed snapshot.
 // On failure (nft itself is broken) the error is returned and joined into the commit
 // result; the daemon has done all it can.
-func (d *Daemon) installLo0ColdBootFence(sets dpuserspace.FenceAddrSets, wgListenPorts []uint16) error {
+func (d *Daemon) installLo0ColdBootFence(sets dpuserspace.FenceAddrSets, wgZonePorts map[string][]uint16) error {
 	views, unzonedV4, unzonedV6 := sets.Views, sets.UnzonedV4, sets.UnzonedV6
 	fenceHasScopedDrop := hostInboundHasEnforceableView(views) || len(unzonedV4) > 0 || len(unzonedV6) > 0
 	logFenceWithheld(xnft.Lo0TableName, sets)
-	spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wgListenPorts}
+	spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGZonePorts: wgZonePorts}
 	if err := nftInstaller.InstallLo0ColdBootFence(spec); err != nil {
 		err = tagNftInstallErr(err)
 		slog.Error("COLD-BOOT FAIL-OPEN GUARD: lo0 install failed AND the fail-closed "+
@@ -737,14 +737,10 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		}
 		return nil
 	}
-	// #5582: the configured WireGuard listen port(s). The XDP shim steers
-	// local-destination UDP on the WG listen ports to the kernel WG sockets, so
-	// the host-inbound filter must admit those ports or a fresh passive handshake to a
-	// restricted zoned address is dropped by the per-zone catch-all. Empty (nil)
-	// when no WG tunnel is configured — buildHostInboundFilterPayload then emits
-	// no WG accept, so the restricted-default posture is unchanged.
+	// #5582/#11076: configured WireGuard listen ports. The flat set remains
+	// scope-independent input to stale-reply and conntrack bookkeeping; actual
+	// admits use the per-zone map so unserved addresses keep default-deny.
 	wgListenPorts := cfg.WireGuardListenPorts()
-	// #11076: per-zone WG admission scope for the host-inbound builders.
 	wgZonePorts := cfg.WireGuardZonePorts()
 	// #5789: the exact firewall-local destination set this generation wants a
 	// catch-all DROP for. Compared on failure against the retained generation's
@@ -826,7 +822,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			// drop` would lock out management), and every firewall-local address
 			// covered rather than only the zone-model ones.
 			sets := dpuserspace.BuildFenceAddrSetsFromSnapshots(cfg, snaps1, views)
-			if fenceErr := d.installHostInboundColdBootFence(sets, wgListenPorts); fenceErr != nil {
+			if fenceErr := d.installHostInboundColdBootFence(sets, wgListenPorts, wgZonePorts); fenceErr != nil {
 				// The real install failed AND no fallback stands: record the
 				// staleness — the worst applied state — alongside the error.
 				d.noteHostInboundApplyFailed(time.Now())
@@ -860,14 +856,15 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			var sharedV4, sharedV6 []string
 			if len(uncoveredV4)+len(uncoveredV6) > 0 {
 				withheld := dpuserspace.BuildFenceAddrSetsFromSnapshots(cfg, snaps1, views)
-				sharedV4 = hostInboundSharedAddrs(uncoveredV4, withheld.WithheldV4)
-				sharedV6 = hostInboundSharedAddrs(uncoveredV6, withheld.WithheldV6)
+				sharedV4 = intersectHostInboundAddresses(uncoveredV4, withheld.WithheldV4)
+				sharedV6 = intersectHostInboundAddresses(uncoveredV6, withheld.WithheldV6)
 			}
 			if len(uncoveredV4) > 0 || len(uncoveredV6) > 0 {
 				spec := xnft.GapFenceSpec{
+					Views:       toNftViews(views),
 					UncoveredV4: uncoveredV4, UncoveredV6: uncoveredV6,
-					WGListenPorts: wgListenPorts,
-					UnleasedV4:    unleasedV4, UnleasedV6: unleasedV6,
+					WGListenPorts: wgListenPorts, WGZonePorts: wgZonePorts,
+					UnleasedV4: unleasedV4, UnleasedV6: unleasedV6,
 					SharedV4: sharedV4, SharedV6: sharedV6,
 					LifelineNetdevs: dpuserspace.HostInboundLifelineIngressNetdevs(cfg),
 				}
@@ -1153,13 +1150,12 @@ func (d *Daemon) installHostInboundGapFence(spec xnft.GapFenceSpec) error {
 // installHostInboundColdBootFence installs the #5644 (M37) cold-boot
 // fail-closed host-inbound fence: a minimal xpf_hostinbound table that DENIES
 // every host-bound service to firewall-local addresses in its rendered
-// snapshot, admitting only the mandatory L3 / return traffic
-// (established/related, raw ESP+AH for
-// host-terminated IPsec, IPv6 ND, v4/v6 PMTUD+error, and the configured
-// WireGuard listen port(s)). It is attempted only when the real host-inbound
-// ruleset failed to load and hostInboundEnforced is false. False can coexist
-// with a successfully loaded zero-drop table shell; it does not prove table
-// absence.
+// snapshot, admitting only mandatory L3 / return traffic (established/related,
+// raw ESP+AH for host-terminated IPsec, IPv6 ND, v4/v6 PMTUD+error) and
+// per-zone-scoped WireGuard listen ports. It is attempted only when the real
+// host-inbound ruleset failed to load and hostInboundEnforced is false. False
+// can coexist with a successfully loaded zero-drop table shell; it does not
+// prove table absence.
 //
 // WHY THE FENCE SURFACE IS NOT A SEPARATE FILE (#7714 Seam A, measured and
 // declined). The fence functions look like a cluster — 9 of them, 333 lines,
@@ -1212,7 +1208,7 @@ func (d *Daemon) installHostInboundGapFence(spec xnft.GapFenceSpec) error {
 // ruleset's desiredDrop, which #6492 made a different set in both directions —
 // becomes hostInboundCoveredAddrs, letting a later failed rerender detect a
 // subsequently-appeared uncovered address.
-func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets, wgListenPorts []uint16) error {
+func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets, wgListenPorts []uint16, wgZonePorts map[string][]uint16) error {
 	views, unzonedV4, unzonedV6 := sets.Views, sets.UnzonedV4, sets.UnzonedV6
 	fenceHasScopedDrop := hostInboundHasEnforceableView(views) || len(unzonedV4) > 0 || len(unzonedV6) > 0 || len(sets.UnleasedV4) > 0 || len(sets.UnleasedV6) > 0
 	logFenceWithheld(xnft.HostInboundTableName, sets)
@@ -1223,7 +1219,7 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 	fenceCovered := hostInboundDesiredDropAddrs(views, unzonedV4, unzonedV6)
 	// #6387 PR-3: install via netlink (parity-proven equivalent to the exec-`nft`
 	// buildHostInboundFencePayload oracle).
-	spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wgListenPorts, UnleasedV4: sets.UnleasedV4, UnleasedV6: sets.UnleasedV6}
+	spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wgListenPorts, WGZonePorts: wgZonePorts, UnleasedV4: sets.UnleasedV4, UnleasedV6: sets.UnleasedV6}
 	if err := nftInstaller.InstallColdBootFence(spec); err != nil {
 		err = tagNftInstallErr(err)
 		slog.Error("COLD-BOOT FAIL-OPEN GUARD: host-inbound install failed AND the fail-closed "+
@@ -1252,17 +1248,18 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 
 // buildHostInboundFencePayload assembles the #5644 cold-boot fail-closed fence
 // payload (see installHostInboundColdBootFence). It is the atomic-replace
-// xpf_hostinbound table reduced to: the global mandatory accepts, then a
-// catch-all DROP for every firewall-local address represented by the supplied
-// snapshot — NO per-service accepts, NO named counters. Empty address inputs
-// intentionally produce a zero-drop table shell. Split out as a pure function
-// so tests can parse-check the full payload without invoking nft. A syntax error
-// on any line rejects the WHOLE payload (atomic load), retaining only the exact
-// prior generation, if one exists — exactly like the real builder.
-func buildHostInboundFencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, unleasedV4, unleasedV6 []string) string {
+// xpf_hostinbound table reduced to: the scope-independent mandatory accepts,
+// per-zone scoped WG accepts, then a catch-all DROP for every firewall-local
+// address represented by the supplied snapshot — NO per-service accepts, NO
+// named counters. Empty address inputs intentionally produce a zero-drop table
+// shell. Split out as a pure function so tests can parse-check the full payload
+// without invoking nft. A syntax error on any line rejects the WHOLE payload
+// (atomic load), retaining only the exact prior generation, if one exists —
+// exactly like the real builder.
+func buildHostInboundFencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6 []string) string {
 	// Same hook/priority as the real host-inbound chain so the fence occupies the
 	// same evaluation slot (#3364).
-	return buildFenceTablePayload(xnft.HostInboundTableName, nftHostInboundPriority, views, unzonedV4, unzonedV6, wgListenPorts, unleasedV4, unleasedV6, true)
+	return buildFenceTablePayload(xnft.HostInboundTableName, nftHostInboundPriority, views, unzonedV4, unzonedV6, wgListenPorts, wgZonePorts, unleasedV4, unleasedV6, true)
 }
 
 // buildLo0FencePayload assembles the #6476 lo0 cold-boot fail-closed fence
@@ -1275,14 +1272,14 @@ func buildHostInboundFencePayload(views []dpuserspace.ZoneHostInboundView, unzon
 // replaces it. Used by the T1 parity gate to prove the netlink
 // InstallLo0ColdBootFence is bit-equivalent. Empty address inputs intentionally
 // produce a zero-drop shell.
-func buildLo0FencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16) string {
-	return buildFenceTablePayload(xnft.Lo0TableName, nftLo0FilterPriority, views, unzonedV4, unzonedV6, wgListenPorts, nil, nil, false)
+func buildLo0FencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgZonePorts map[string][]uint16) string {
+	return buildFenceTablePayload(xnft.Lo0TableName, nftLo0FilterPriority, views, unzonedV4, unzonedV6, nil, wgZonePorts, nil, nil, false)
 }
 
 // buildFenceTablePayload renders a fail-closed cold-boot fence into the named
 // inet table at the given hook-input priority: optionally the host-inbound
-// stale-reply guard, then shared mandatory admits (hostInboundFenceMandatoryAdmits)
-// and a catch-all DROP for every firewall-local address the real ruleset would
+// stale-reply guard, then shared mandatory admits, scoped per-zone WG accepts,
+// and catch-all DROPs for every firewall-local address the real ruleset would
 // scope — per host-inbound-configured zone (default-deny parity, #3405) and the
 // addressed-but-unzoned set (#4420 HI-2). These sets exclude lifeline INTERFACES,
 // not lifeline address VALUES: a management address shared onto a non-lifeline
@@ -1292,7 +1289,7 @@ func buildLo0FencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, un
 // The same body serves the host-inbound fence (with reply guard) and lo0 fence
 // (without it), so their shared admit/deny posture cannot drift. Empty address
 // inputs intentionally produce a zero-drop table shell.
-func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, unleasedV4, unleasedV6 []string, guardStaleReplies bool) string {
+func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6 []string, guardStaleReplies bool) string {
 	var rules []string
 	rules = append(rules, "add table inet "+tableName)
 	rules = append(rules, "delete table inet "+tableName)
@@ -1304,7 +1301,8 @@ func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.
 			xnft.HostInboundStaleReplyFenceRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts),
 		)...)
 	}
-	rules = append(rules, hostInboundFenceMandatoryAdmits(wgListenPorts)...)
+	rules = append(rules, hostInboundFenceMandatoryAdmits()...)
+	emitHostInboundFenceWGAdmits(&rules, views, wgZonePorts)
 	emitUnleasedDHCPAdmits(&rules, unleasedV4, unleasedV6)
 	for _, v := range views {
 		if len(v.V4Addrs) > 0 {
@@ -1326,16 +1324,12 @@ func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.
 	return strings.Join(rules, "\n") + "\n"
 }
 
-// hostInboundFenceMandatoryAdmits returns the fence chain's mandatory-admit lines
-// — return traffic and core L3 control, NOT a service exposure (mirrors the real
-// chain's global accepts, counters omitted). Shared by the whole-table cold-boot
-// fence (buildHostInboundFencePayload) and the additive gap fence
-// (buildHostInboundGapFencePayload, #5789) so their admit posture can never drift
-// apart: both must let established/related, host-terminated IPsec (ESP/AH), IPv6
-// ND, v4/v6 PMTUD+error, and the configured WireGuard listen ports through while
-// dropping host-bound services to the fenced addresses.
-func hostInboundFenceMandatoryAdmits(wgListenPorts []uint16) []string {
-	admits := []string{
+// hostInboundFenceMandatoryAdmits returns scope-independent fence admits:
+// return traffic and core L3 control, NOT a service exposure. Shared by the
+// whole-table cold-boot and additive gap fences so their mandatory posture
+// cannot drift apart.
+func hostInboundFenceMandatoryAdmits() []string {
+	return []string{
 		"    ct state established,related accept",
 		// Raw ESP (50) / AH (51) so the kernel XFRM stack can decrypt
 		// host-terminated IPsec (mirrors the real chain and userspace passthrough).
@@ -1345,14 +1339,36 @@ func hostInboundFenceMandatoryAdmits(wgListenPorts []uint16) []string {
 		"    icmpv6 type { 133, 134, 135, 136, 137 } accept",
 		"    icmp type { destination-unreachable, time-exceeded, parameter-problem } accept",
 	}
-	// The XDP shim steers local-destination UDP on the steered WG listen ports
-	// to the kernel WG sockets; admit them so a responder-only tunnel is not
-	// black-holed by the fence (mirrors emitHostInboundWireGuardAccept). No-op
-	// when WG is unset.
-	if len(wgListenPorts) > 0 {
-		admits = append(admits, "    udp dport "+renderWireGuardPortSpec(wgListenPorts)+" accept")
+}
+
+func emitHostInboundFenceWGAdmits(rules *[]string, views []dpuserspace.ZoneHostInboundView, wgZonePorts map[string][]uint16) {
+	for _, v := range views {
+		ports := wgZonePorts[v.Zone]
+		if len(ports) == 0 {
+			continue
+		}
+		if len(v.V4Addrs) > 0 {
+			emitHostInboundZoneWireGuardAccept(rules, "ip daddr "+nftAddrSet(v.V4Addrs), ports)
+		}
+		if len(v.V6Addrs) > 0 {
+			emitHostInboundZoneWireGuardAccept(rules, "ip6 daddr "+nftAddrSet(v.V6Addrs), ports)
+		}
 	}
-	return admits
+}
+
+func emitHostInboundGapFenceWGAdmits(rules *[]string, views []dpuserspace.ZoneHostInboundView, uncoveredV4, uncoveredV6 []string, wgZonePorts map[string][]uint16) {
+	for _, v := range views {
+		ports := wgZonePorts[v.Zone]
+		if len(ports) == 0 {
+			continue
+		}
+		if scoped := intersectHostInboundAddresses(v.V4Addrs, uncoveredV4); len(scoped) > 0 {
+			emitHostInboundZoneWireGuardAccept(rules, "ip daddr "+nftAddrSet(scoped), ports)
+		}
+		if scoped := intersectHostInboundAddresses(v.V6Addrs, uncoveredV6); len(scoped) > 0 {
+			emitHostInboundZoneWireGuardAccept(rules, "ip6 daddr "+nftAddrSet(scoped), ports)
+		}
+	}
 }
 
 // hostInboundStaleReplyGuardText renders the #10752/#10764 catalog drops before
@@ -1471,16 +1487,15 @@ func hostInboundWithoutAddrs(addrs, drop []string) []string {
 	return out
 }
 
-// hostInboundSharedAddrs returns the subset of addrs also present in
-// withheld: uncovered destinations shared with a lifeline, which the M1
-// gap admits on lifeline ingress ahead of the bare DROP. Order follows
-// addrs; nil when either side is empty.
-func hostInboundSharedAddrs(addrs, withheld []string) []string {
-	if len(addrs) == 0 || len(withheld) == 0 {
+// intersectHostInboundAddresses returns the exact-string intersection of two
+// address lists in the first list's order without mutating either input. The
+// gap fence uses it for lifeline-shared exceptions and per-zone WG scope.
+func intersectHostInboundAddresses(addrs, candidates []string) []string {
+	if len(addrs) == 0 || len(candidates) == 0 {
 		return nil
 	}
-	keep := make(map[string]bool, len(withheld))
-	for _, a := range withheld {
+	keep := make(map[string]bool, len(candidates))
+	for _, a := range candidates {
 		keep[a] = true
 	}
 	var out []string
@@ -1495,8 +1510,9 @@ func hostInboundSharedAddrs(addrs, withheld []string) []string {
 // buildHostInboundGapFencePayload assembles the #5789 ADDITIVE gap fence: a
 // SEPARATE inet xpf_hostinbound_gap table at nftHostInboundGapPriority (strictly
 // AFTER the main xpf_hostinbound table) that denies ONLY the supplied uncovered
-// firewall-local addresses, admitting the same mandatory L3 / return traffic as
-// the cold-boot fence. Unlike the whole-table cold-boot fence it does NOT replace
+// firewall-local addresses, admitting the same mandatory L3 / return traffic
+// and per-zone-scoped WG ports only for addresses included in the gap. Unlike
+// the whole-table cold-boot fence it does NOT replace
 // xpf_hostinbound, so the retained generation's per-service ACCEPTS for
 // already-covered addresses stay intact (the issue's "do not weaken retained
 // valid rules"): a covered address is service-accepted or catch-all-dropped by
@@ -1512,7 +1528,7 @@ func hostInboundSharedAddrs(addrs, withheld []string) []string {
 // Callers must only invoke this with a non-empty uncovered set (an
 // all-empty payload would be a pointless zero-drop shell); an empty set
 // instead deletes the table.
-func buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6 []string, wgListenPorts []uint16, unleasedV4, unleasedV6, sharedV4, sharedV6, lifelineNetdevs []string) string {
+func buildHostInboundGapFencePayload(views []dpuserspace.ZoneHostInboundView, uncoveredV4, uncoveredV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6, sharedV4, sharedV6, lifelineNetdevs []string) string {
 	var rules []string
 	rules = append(rules, "add table inet xpf_hostinbound_gap")
 	rules = append(rules, "delete table inet xpf_hostinbound_gap")
@@ -1522,7 +1538,8 @@ func buildHostInboundGapFencePayload(uncoveredV4, uncoveredV6 []string, wgListen
 	rules = append(rules, hostInboundStaleReplyGuardText(
 		xnft.HostInboundStaleReplyGuardRules(nil, uncoveredV4, uncoveredV6, wgListenPorts, false),
 	)...)
-	rules = append(rules, hostInboundFenceMandatoryAdmits(wgListenPorts)...)
+	rules = append(rules, hostInboundFenceMandatoryAdmits()...)
+	emitHostInboundGapFenceWGAdmits(&rules, views, uncoveredV4, uncoveredV6, wgZonePorts)
 	emitUnleasedDHCPAdmits(&rules, unleasedV4, unleasedV6)
 	// #10751 M1/Opus9: admit shared values on lifeline ingress ahead of
 	// the bare DROP (mirrors the netlink builder; parity-pinned). Two
@@ -1774,14 +1791,11 @@ func hostInboundHasEnforceableView(views []dpuserspace.ZoneHostInboundView) bool
 //     set omitting `ping` does not black-hole PMTUD/ND/error delivery. This set
 //     is mirrored by the userspace host-inbound exemption (#3171) so kernel and
 //     XSK LocalDelivery agree. Echo-request stays gated on the `ping` service.
-//     3b. #5582: when WireGuard is configured, a coarse
-//     `udp dport <configured-wg-listen-port(s)> accept` (emitHostInbound
-//     WireGuardAccept). The shim steers local-destination UDP on the WG listen
-//     port to the kernel WG socket, so the host-inbound filter must admit it or a
-//     fresh passive handshake to a restricted zoned address is dropped by the
-//     per-zone catch-all. A single global input-hook rule (input = host-destined
-//     only), so it mirrors the shim's local-destination scope without touching
-//     transit UDP; only the WG port is opened, so the restricted default holds.
+//     3b. #11076: when WireGuard is configured, each serving zone admits its
+//     own listen ports only to that zone's local destination addresses. The XDP
+//     shim steers local-destination UDP to the kernel WG socket, so restricted
+//     zones retain fresh passive-handshake access without a global or unzoned
+//     port exception; all other host-bound addresses keep default-deny.
 //
 //  4. VRF slave names with no surviving zone are denied by `meta sdifname`
 //     before any zone rule scoped to their shared LOCAL_IN master. Ingress-zone
@@ -2200,55 +2214,6 @@ func hostInboundScreenFloodMatchesText(screen xnft.HostInboundScreenFloodRule) s
 	return strings.Join(parts, " ")
 }
 
-// emitHostInboundWireGuardAccept appends the #5582 dynamic WireGuard listen-port
-// admission: a single coarse `udp dport <configured-wg-port(s)> accept` on the
-// host-inbound input hook.
-//
-// The XDP shim deliberately steers local-destination UDP on the configured WG
-// listen ports to the kernel (userspace-xdp wg_steer_to_kernel) so the userspace
-// WireGuard control socket receives the outer transport. Without this accept a
-// FRESH passive (responder-only) handshake — conntrack NEW, so neither the
-// early reply-direction established accept nor the residual full established
-// accept covers it — misses the per-zone service accepts and is dropped by the
-// host-inbound catch-all (or the #4420 addressed-but-unzoned catch-all), so a
-// supported responder-only WireGuard listener can never come up on a restricted
-// zoned address.
-//
-// The rule is emitted ONCE, not per zone. The nft input hook only ever sees
-// host-destined packets, so a bare `udp dport <port>` admits the WG port to
-// EVERY firewall-local address — exactly the shim's `is_local_destination`
-// steering scope — while transit/forward UDP (which traverses the forward hook,
-// never this input chain) is untouched, so transit/DNAT UDP on the WG port is
-// never shunted around policy. Only the configured WG port(s) are opened; every
-// other host-bound service stays governed by the per-zone default-deny, so the
-// restricted-default posture is preserved.
-//
-// The port set is the compile-time SSOT config.WireGuardListenPorts() (all
-// configured WG tunnels). The shim's WG-RX steering is set-valued (#9587):
-// it steers up to MaxSteeredWireGuardPorts listen ports (first-MAX in
-// emitter order), not just the first.
-//
-// #9016: this comment previously called the second port's rule "a no-op at the
-// kernel (nothing steers that port up)". It is NOT a no-op. The rule is what
-// ADMITS that port's traffic to the host: handshake and cookie records for
-// every configured port, and transport records for ports outside the steered
-// set, reach the tunnels' bound sockets here (the helper spawns a control
-// thread per wireguard endpoint). Ports inside the steered set additionally
-// ride the AF_XDP fast path; ports outside it do not — "unsteered" means
-// "not on the fast path", not "inert".
-//
-// #9521: what that socket does with it changed. Handshake and cookie records
-// are processed as before, so admitting every configured port is still
-// load-bearing — without it an unsteered tunnel could not complete even a
-// passive handshake to a restricted zone. A TRANSPORT record that reaches an
-// unsteered port's socket is now dropped by the helper instead of being
-// decrypted onto the wgN TUN for the kernel to forward with no zone policy.
-// This filter is deliberately NOT where that is enforced: an input-hook admit
-// list cannot refuse `ct established` traffic answering a handshake xpf itself
-// initiated (the chain accepts established traffic ahead of this rule), a zone
-// that admits every host-inbound service accepts the port regardless, and no
-// table is installed at all when nothing needs one. The helper's socket is the
-// one place every such record converges.
 // renderWireGuardPortSpec renders the WireGuard listen-port set as an nft
 // destination-port value: a single port ("51820") or an anonymous set
 // ("{ 51820, 51821 }"). Ports arrive sorted+deduped from

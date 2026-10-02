@@ -101,7 +101,7 @@ func TestColdBootFenceIsLifelineSafe(t *testing.T) {
 	cfg := hostInboundTestConfig()
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
 	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
-	fence := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, nil, nil, nil)
+	fence := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, nil, nil, nil, nil)
 
 	// em0's cluster-control address must never be fenced (lifeline).
 	if strings.Contains(fence, "10.99.0.1") {
@@ -120,7 +120,7 @@ func TestColdBootFenceAdmitsMandatoryL3(t *testing.T) {
 	cfg := hostInboundTestConfig()
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
 	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
-	fence := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, nil, nil, nil)
+	fence := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, nil, nil, nil, nil)
 
 	for _, want := range []string{
 		"ct state established,related accept",
@@ -134,15 +134,25 @@ func TestColdBootFenceAdmitsMandatoryL3(t *testing.T) {
 	}
 }
 
-// TestColdBootFenceAdmitsWireGuardPort proves the fence admits the configured
-// WireGuard listen port so a responder-only tunnel is not black-holed while the
-// fence is active (mirrors the real chain's WG admit).
+// TestColdBootFenceAdmitsWireGuardPort proves that a responder-only tunnel's
+// configured listen port remains available only on the address scope of its
+// serving zone while the cold-boot fence is active.
 func TestColdBootFenceAdmitsWireGuardPort(t *testing.T) {
-	cfg := hostInboundTestConfig()
+	cfg := hostInboundWireGuardTestConfig()
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
-	fence := buildHostInboundFencePayload(views, nil, nil, []uint16{51820}, nil, nil)
-	if !strings.Contains(fence, "udp dport 51820 accept") {
-		t.Errorf("fence must admit the configured WG listen port:\n%s", fence)
+	fence := buildHostInboundFencePayload(views, nil, nil, cfg.WireGuardListenPorts(), cfg.WireGuardZonePorts(), nil, nil)
+	for _, want := range []string{
+		"ip daddr 172.16.50.8 udp dport 51820 accept",
+		"ip6 daddr 2001:db8:50::8 udp dport 51820 accept",
+	} {
+		if !strings.Contains(fence, want) {
+			t.Errorf("fence must emit scoped WG accept %q:\n%s", want, fence)
+		}
+	}
+	for _, line := range strings.Split(fence, "\n") {
+		if strings.Contains(line, "udp dport 51820 accept") && !strings.Contains(line, "daddr") {
+			t.Errorf("fence must not globally admit WG port 51820:\n%s", fence)
+		}
 	}
 }
 
@@ -425,7 +435,7 @@ func TestColdBootFenceUnzonedDropPublishesState5759(t *testing.T) {
 			sets := dpuserspace.FenceAddrSets{
 				Views: tc.views, UnzonedV4: tc.unzonedV4, UnzonedV6: tc.unzonedV6,
 			}
-			if err := d.installHostInboundColdBootFence(sets, nil); err != nil {
+			if err := d.installHostInboundColdBootFence(sets, nil, nil); err != nil {
 				t.Fatalf("installHostInboundColdBootFence: %v", err)
 			}
 			if calls != 1 {

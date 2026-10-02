@@ -377,15 +377,14 @@ func TestHostInboundTeardownClearsCoverageAndGap_5789(t *testing.T) {
 }
 
 // TestHostInboundGapFenceMirrorsColdBootAdmits_5789 guards that the additive gap
-// fence and the whole-table cold-boot fence keep an IDENTICAL mandatory-admit
-// posture (they share hostInboundFenceMandatoryAdmits). If one grows an admit the
-// other lacks, a fenced address could black-hole return/ND traffic on one path
-// but not the other.
+// fence and the whole-table cold-boot fence keep an IDENTICAL scope-independent
+// mandatory L3 posture. Per-zone WG admits are separately destination-scoped by
+// each fence's zone data.
 func TestHostInboundGapFenceMirrorsColdBootAdmits_5789(t *testing.T) {
-	wg := []uint16{51820}
-	coldBoot := buildHostInboundFencePayload(buildAndCheckViews(t, hostInboundTestConfig()), nil, nil, wg, nil, nil)
-	gap := buildHostInboundGapFencePayload([]string{"172.16.50.9"}, nil, wg, nil, nil, nil, nil, nil)
-	for _, admit := range hostInboundFenceMandatoryAdmits(wg) {
+	views := buildAndCheckViews(t, hostInboundTestConfig())
+	coldBoot := buildHostInboundFencePayload(views, nil, nil, nil, nil, nil, nil)
+	gap := buildHostInboundGapFencePayload(views, []string{"172.16.50.9"}, nil, nil, nil, nil, nil, nil, nil, nil)
+	for _, admit := range hostInboundFenceMandatoryAdmits() {
 		if !strings.Contains(coldBoot, admit) {
 			t.Errorf("cold-boot fence missing shared admit %q", strings.TrimSpace(admit))
 		}

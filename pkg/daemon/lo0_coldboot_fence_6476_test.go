@@ -150,25 +150,25 @@ func TestColdBootLo0FenceIsLifelineSafe(t *testing.T) {
 }
 
 // TestColdBootLo0FenceAdmitsMandatoryL3 proves the lo0 fence still admits return
-// traffic and mandatory L3 control (established, raw ESP/AH, IPv6 ND, v4/v6
-// PMTUD+error) plus the configured WireGuard listen port, so the deny-all fence
-// does not black-hole core operation. It shares hostInboundFenceMandatoryAdmits
-// with the host-inbound fence, so the admit posture cannot drift.
+// traffic and mandatory L3 control plus the configured WG port on the serving
+// zone's address scope, so the deny-all fence does not black-hole core operation.
 func TestColdBootLo0FenceAdmitsMandatoryL3(t *testing.T) {
 	cfg := lo0FenceTestConfig()
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
 	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
-	fence := buildLo0FencePayload(views, unzonedV4, unzonedV6, []uint16{51820})
+	wgZonePorts := map[string][]uint16{"wan": {51820}}
+	fence := buildLo0FencePayload(views, unzonedV4, unzonedV6, wgZonePorts)
 
 	for _, want := range []string{
 		"ct state established,related accept",
 		"meta l4proto { 50, 51 } accept",
 		"icmpv6 type { 133, 134, 135, 136, 137 } accept",
 		"icmp type { destination-unreachable, time-exceeded, parameter-problem } accept",
-		"udp dport 51820 accept",
+		"ip daddr 172.16.50.8 udp dport 51820 accept",
+		"ip6 daddr 2001:db8:50::8 udp dport 51820 accept",
 	} {
 		if !strings.Contains(fence, want) {
-			t.Errorf("lo0 fence missing mandatory L3 admit %q\n---\n%s", want, fence)
+			t.Errorf("lo0 fence missing scoped mandatory admit %q\n---\n%s", want, fence)
 		}
 	}
 }
