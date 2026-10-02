@@ -41,6 +41,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/cluster-env.sh"
 # shellcheck source=test/incus/iperf-throughput-lib.sh
 source "${SCRIPT_DIR}/iperf-throughput-lib.sh"
+# shellcheck source=test/incus/failover-clock-lib.sh
+source "${SCRIPT_DIR}/failover-clock-lib.sh"
 
 IPERF_TARGET="${IPERF_TARGET:-$IPERF_TARGET4}"
 # #9691: measure the UNSHAPED class. iperf3 defaults to port 5201, which
@@ -241,6 +243,16 @@ if $fw0_back; then
 else
 	fail "fw0 xpfd did not come back within ${REBOOT_WAIT}s"
 fi
+
+# #11872: fw0's crash reboot can leave its clock minutes behind in the no-NTP
+# loss lab. Resync BOTH nodes from one host UTC reading before verifying
+# rejoin/takeover readiness and crashing fw1 for the return failover.
+if failover_resync_node_clocks "$FW0" "$FW1"; then
+	pass "both firewall clocks resynced from host UTC after crash reboot"
+else
+	fail "could not resync both firewall clocks from host UTC after crash reboot"
+fi
+
 
 # Wait for cluster to stabilize (gRPC takes ~15s after systemctl active)
 sleep 20

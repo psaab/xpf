@@ -11,7 +11,7 @@ BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)
 
 # eBPF compilation flags
-.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log check-userspace-dt-needed proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib
+.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log check-userspace-dt-needed proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib test-failover-clock-lib
 
 all: generate build build-ctl
 
@@ -761,6 +761,10 @@ test-deploy: build build-ctl
 # against a mocked fake VM. No incus, no cluster, no network — pure bash logic.
 test-deploy-lib:
 	bash ./test/incus/deploy-lib-selftest.sh
+
+# Hermetically test failover clock resync after a crash reboot (#11872).
+test-failover-clock-lib:
+	bash ./test/incus/failover-clock-selftest.sh
 
 # Self-test the mutation-harness scoring library (scripts/mutate-lib.sh).
 # Hermetic: fixture logs only, no repo/compiler/cluster. The cell that matters

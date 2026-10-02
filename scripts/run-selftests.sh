@@ -407,6 +407,8 @@ run_bash test/incus/cluster-env-selftest.sh
 run_bash test/incus/cos-apply-lib-selftest.sh
 run_bash test/incus/host-inbound-selftest.sh
 run_bash test/incus/iperf-throughput-selftest.sh
+# #11872: host-clock resync after crash reboot; mocked incus/date, no cluster.
+run_bash test/incus/failover-clock-selftest.sh
 run_bash test/incus/screen-probe-selftest.sh
 run_bash test/incus/target-services-selftest.sh
 run_bash test/incus/with-cluster-selftest.sh
