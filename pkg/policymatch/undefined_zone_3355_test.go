@@ -232,14 +232,11 @@ func TestNoZonesDefinedNoTransitMatchZoneGate(t *testing.T) {
 	}
 }
 
-// TestUndefinedFromZoneJunosHostUnmatched covers matchJunosHost: an undefined
-// ingress zone makes evaluate_junos_host_policy return None (from_id == 0), so
-// the simulator returns HostInboundUnmatched (local delivery), never a matched
-// host rule.
-//
-// FAIL-ON-REVERT: removing the zoneKnown guard in matchJunosHost makes the
-// host rule match (Matched=true), failing the HostInboundUnmatched assertion.
-func TestUndefinedFromZoneJunosHostUnmatched(t *testing.T) {
+// TestUndefinedFromZoneJunosHostFromAny exercises the #10644 zone-0 exception:
+// an unknown ingress skips the exact-pair tier but still reaches from-any.
+// FAIL-ON-REVERT: restoring the early return in matchJunosHost reports local
+// delivery instead of matching this explicit permit.
+func TestUndefinedFromZoneJunosHostFromAny(t *testing.T) {
 	cfg := &config.Config{
 		Security: config.SecurityConfig{
 			DefaultPolicy: config.PolicyDeny,
@@ -264,10 +261,10 @@ func TestUndefinedFromZoneJunosHostUnmatched(t *testing.T) {
 	}
 
 	res := Match(cfg, Query{FromZone: "bogus", ToZone: JunosHostZone, Protocol: "tcp", DstPort: 22})
-	if res.Matched {
-		t.Fatalf("undefined ingress zone matched a junos-host rule (#3355); res = %+v", res)
+	if !res.Matched || res.Action != config.PolicyPermit || res.PolicyName != "host-permit" {
+		t.Fatalf("undefined ingress must reach the from-any junos-host rule (#10644); res = %+v", res)
 	}
-	if !res.HostInboundUnmatched {
-		t.Fatalf("want HostInboundUnmatched for an undefined ingress zone, got %+v", res)
+	if res.HostInboundUnmatched {
+		t.Fatalf("a matched from-any policy must not report local delivery; res = %+v", res)
 	}
 }

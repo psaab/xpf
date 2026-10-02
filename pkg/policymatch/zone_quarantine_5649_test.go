@@ -69,9 +69,9 @@ func TestQuarantinedZoneNoTransitMatch(t *testing.T) {
 	}
 }
 
-// TestQuarantinedZoneJunosHostUnmatched covers the matchJunosHost sibling
-// path: a quarantined ingress zone must resolve to HostInboundUnmatched, not a
-// matched host rule, mirroring TestUndefinedFromZoneJunosHostUnmatched.
+// TestQuarantinedZoneJunosHostUnmatched covers matchJunosHost: a quarantined
+// ingress is runtime zone 0 and cannot match its exact host rule. With no
+// from-any/global policy, local delivery remains the host-gate fallback.
 func TestQuarantinedZoneJunosHostUnmatched(t *testing.T) {
 	cfg := zoneQuarantineCfg(t)
 

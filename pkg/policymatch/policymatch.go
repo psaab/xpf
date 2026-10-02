@@ -1505,9 +1505,11 @@ func Match(cfg *config.Config, q Query) (res Result) {
 // matchJunosHost mirrors the dataplane host gate evaluate_junos_host_policy
 // (policy.rs) for a `to-zone junos-host` query (#3285). It consults, in Junos
 // most-specific-first order: exact `from-zone <ingress> to-zone junos-host`
-// rules, then the `from-zone any to-zone junos-host` wildcard, then a GLOBAL
-// policy `match to-zone junos-host` (#3639 / #3611 Piece B). There is NO
-// implicit host default-deny and NO transit-default fallback: an unmatched
+// rules for a defined ingress zone, then the `from-zone any to-zone junos-host`
+// wildcard, then a GLOBAL policy `match to-zone junos-host` (#3639 / #3611
+// Piece B). Zone 0 skips only the exact-pair tier; from-any and unscoped global
+// host policies can still explicitly govern unknown ingress (#10644). There is
+// NO implicit host default-deny and NO transit-default fallback: an unmatched
 // host-bound flow falls through to local delivery (the management lifeline
 // guarantee), so the simulator returns HostInboundUnmatched rather than
 // inheriting the transit default verdict. `to-zone any` and `from-zone any
@@ -1533,15 +1535,11 @@ func matchJunosHostWithMemo(
 		return r
 	}
 
-	// #3355: evaluate_junos_host_policy returns None for from_id == 0 (the
-	// unknown/undefined ingress zone), mirroring the #3110 unzoned guard. An
-	// undefined query from-zone therefore matches no host-bound rule; local
-	// delivery proceeds (the management lifeline), so surface
-	// HostInboundUnmatched rather than running the host tiers against an
-	// unresolved ingress zone.
-	if !zoneKnown(cfg, q.FromZone) {
-		return withHI(Result{HostInboundUnmatched: true})
-	}
+	// An unknown/undefined ingress resolves to runtime zone id 0. It cannot
+	// match an exact zone-pair, but the runtime still evaluates from-any and
+	// unscoped global junos-host rules for that id (#10644). Keep the exact tier
+	// guarded below and allow the remaining tiers to run; local delivery is
+	// still the no-match fallback.
 
 	// #6576: track a port-bearing DENY/REJECT this walk SKIPS because a
 	// non-first fragment carries no L4 header, exactly as the transit walk
@@ -1549,19 +1547,23 @@ func matchJunosHostWithMemo(
 	// did not follow.
 	frag := newFragDenyTrackerWithMemo(cfg, q, ids, addressMemo)
 
-	// Exact ingress -> junos-host.
-	for setIdx, zpp := range cfg.Security.Policies {
-		if zpp == nil || zpp.ToZone != JunosHostZone || zpp.FromZone != q.FromZone {
-			continue
-		}
-		for sliceIdx, pol := range zpp.Policies {
-			if pol == nil {
+	// Exact ingress -> junos-host. Runtime zone id 0 is not eligible for this
+	// tier, even if a malformed or leniently loaded config contains a policy
+	// named for the query's unknown zone.
+	if zoneKnown(cfg, q.FromZone) {
+		for setIdx, zpp := range cfg.Security.Policies {
+			if zpp == nil || zpp.ToZone != JunosHostZone || zpp.FromZone != q.FromZone {
 				continue
 			}
-			if ruleMatchesWithMemo(cfg, q, pol, addressMemo) {
-				return withHI(frag.override(matchedResult(ids, pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)))
+			for sliceIdx, pol := range zpp.Policies {
+				if pol == nil {
+					continue
+				}
+				if ruleMatchesWithMemo(cfg, q, pol, addressMemo) {
+					return withHI(frag.override(matchedResult(ids, pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)))
+				}
+				frag.note(pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)
 			}
-			frag.note(pol, false, zpp.FromZone, zpp.ToZone, setIdx, sliceIdx)
 		}
 	}
 	// from-zone any -> junos-host.
@@ -1736,13 +1738,12 @@ func reportedScopeZone(scope []string, flowZone string) string {
 	}
 }
 
-// zoneKnown reports whether a query zone is DEFINED for the runtime's `id != 0`
-// eligibility guard (#3355). The runtime resolves an unconfigured zone name to
-// the reserved unknown id 0, which is ineligible for zone-pair / wildcard /
-// global / junos-host policies (policy.rs evaluate_policy_result_with_icmp gates
-// the whole transit block on from_id != 0 && to_id != 0; evaluate_junos_host_policy
-// returns None for from_id == 0). A zone is "known" iff it is present in
-// cfg.Security.Zones AND is not QUARANTINED (#5649, C181-C14/C20).
+// zoneKnown reports whether a query zone is DEFINED for policy tiers that
+// require a concrete configured zone (#3355). An unconfigured name resolves to
+// runtime id 0, which cannot match transit tiers or exact zone-pair rules. The
+// host-bound evaluator has a deliberate exception: from-any and unscoped global
+// junos-host policies remain eligible for id 0 (#10644). A zone is "known" iff
+// it is present in cfg.Security.Zones AND is not QUARANTINED (#5649, C181-C14/C20).
 //
 // This mirrors the runtime UNCONDITIONALLY — there is deliberately NO
 // empty-Zones leniency. policy.rs applies the from_id/to_id != 0 gate for every
