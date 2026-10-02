@@ -282,7 +282,7 @@ func classifyOneView(v ZoneHostInboundView, proto uint8, hasProto bool, dstPort 
 
 	// Global pre-accepts (ICMP error/PMTUD, IPv6 ND, ESP/AH), mirroring the
 	// top-of-chain nft accepts (#3171). Needs the protocol.
-	if hasProto && hostInboundGlobalAccept(proto, icmpType) {
+	if hasProto && hostInboundGlobalAccept(proto, icmpType, family) {
 		return HostInboundAdmission{Status: HostInboundGlobalAccept}
 	}
 
@@ -462,19 +462,21 @@ func l4MatchAdmits(m config.L4Match, proto uint8, dstPort int, icmpType *uint8) 
 // IPv6 ND subtypes, are admitted regardless of the zone's host-inbound-traffic
 // set. Echo-request (v4 8 / v6 128) and IPv4 router-advert/solicit (9/10) are
 // NOT global — they stay gated on the `ping` / `router-discovery` tokens.
-func hostInboundGlobalAccept(proto uint8, icmpType *uint8) bool {
-	// Raw ESP / AH data plane (nft `meta l4proto { 50, 51 } accept`).
+func hostInboundGlobalAccept(proto uint8, icmpType *uint8, family string) bool {
 	if proto == 50 || proto == 51 {
 		return true
 	}
 	if icmpType == nil {
 		return false
 	}
+	if (proto == config.HostInboundProtoICMP && family != "ip") || (proto == config.HostInboundProtoICMPv6 && family != "ip6") {
+		return false
+	}
 	t := *icmpType
 	switch proto {
-	case config.HostInboundProtoICMP: // ICMPv4 errors: dest-unreach(3), time-exceeded(11), param-problem(12)
+	case config.HostInboundProtoICMP:
 		return t == 3 || t == 11 || t == 12
-	case config.HostInboundProtoICMPv6: // ICMPv6 errors 1-4 + ND 133-137
+	case config.HostInboundProtoICMPv6:
 		switch t {
 		case 1, 2, 3, 4, 133, 134, 135, 136, 137:
 			return true
