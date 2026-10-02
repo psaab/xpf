@@ -49,39 +49,41 @@ const ALG_TYPE_FTP: u8 = 1;
 const ALG_TYPE_SIP: u8 = 2;
 const ALG_TYPE_DNS: u8 = 3;
 
-/// Derive the conntrack `alg_type` for a session from its forward 5-tuple,
-/// honouring the `security alg <proto> disable` bitfield (#2008 H3/H4).
-///
-/// Previously `alg_type` was hardcoded to 0, so the `alg disable` knob had
-/// zero runtime effect: it parsed and compiled into `flow_config_map` but no
-/// reader consumed it. This derives the ALG type from the well-known service
-/// port (FTP TCP/21, SIP UDP+TCP/5060, DNS UDP/53) UNLESS the matching ALG is
-/// disabled, in which case the session is tagged `none` (0) — exactly the
-/// Junos semantics of `alg disable` (the ALG is turned off; traffic is NOT
-/// dropped). The service port is the destination port for a forward session;
-/// the reverse direction's source port mirrors it, so both directions of an
-/// ALG session resolve to the same type.
-pub(super) fn alg_type_for_session(protocol: u8, src_port: u16, dst_port: u16, disable: u8) -> u8 {
-    // The well-known ALG service port can appear as either the forward dst
-    // (client -> server) or, for a session keyed in the reverse direction,
-    // the src. Treat a match on either port slot as the same ALG.
-    let on_port = |p: u16| src_port == p || dst_port == p;
+/// Derive the conntrack `alg_type` for a session from its direction-aware
+/// service port, honouring the `security alg <proto> disable` bitfield
+/// (#2008 H3/H4). The service port is the destination port on a forward
+/// session and the source port on a reverse-keyed session; accepting either
+/// slot unconditionally mis-tags arbitrary client source ports.
+pub(super) fn alg_type_for_session(
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    is_reverse: bool,
+    disable: u8,
+) -> u8 {
+    let on_service_port = |port: u16| {
+        if is_reverse {
+            src_port == port
+        } else {
+            dst_port == port
+        }
+    };
     match protocol {
-        PROTO_UDP if on_port(53) => {
+        PROTO_UDP if on_service_port(53) => {
             if disable & ALG_DISABLE_DNS != 0 {
                 ALG_TYPE_NONE
             } else {
                 ALG_TYPE_DNS
             }
         }
-        PROTO_TCP if on_port(21) => {
+        PROTO_TCP if on_service_port(21) => {
             if disable & ALG_DISABLE_FTP != 0 {
                 ALG_TYPE_NONE
             } else {
                 ALG_TYPE_FTP
             }
         }
-        PROTO_UDP | PROTO_TCP if on_port(5060) => {
+        PROTO_UDP | PROTO_TCP if on_service_port(5060) => {
             if disable & ALG_DISABLE_SIP != 0 {
                 ALG_TYPE_NONE
             } else {
@@ -201,8 +203,13 @@ pub(super) fn build_conntrack_value_v4(
     // documented default below rather than stamping a zero window.
     timeout_secs: u32,
 ) -> Option<BpfSessionValueV4> {
-    let alg_type =
-        alg_type_for_session(key.protocol, key.src_port, key.dst_port, alg_disable_flags);
+    let alg_type = alg_type_for_session(
+        key.protocol,
+        key.src_port,
+        key.dst_port,
+        metadata.is_reverse,
+        alg_disable_flags,
+    );
 
     // Build reverse key
     let rev = reverse_session_key(key, decision.nat);
@@ -433,8 +440,13 @@ pub(super) fn build_conntrack_value_v6(
     // documented default below rather than stamping a zero window.
     timeout_secs: u32,
 ) -> Option<BpfSessionValueV6> {
-    let alg_type =
-        alg_type_for_session(key.protocol, key.src_port, key.dst_port, alg_disable_flags);
+    let alg_type = alg_type_for_session(
+        key.protocol,
+        key.src_port,
+        key.dst_port,
+        metadata.is_reverse,
+        alg_disable_flags,
+    );
 
     let rev = reverse_session_key(key, decision.nat);
     let rev_key = match rev.src_ip {
@@ -520,7 +532,7 @@ mod alg_type_tests {
     fn dns_session_tagged_when_alg_enabled() {
         // UDP/53 client (ephemeral src) -> server.
         assert_eq!(
-            alg_type_for_session(PROTO_UDP, 41234, 53, 0),
+            alg_type_for_session(PROTO_UDP, 41234, 53, false, 0),
             ALG_TYPE_DNS,
             "DNS session must be tagged DNS when the DNS ALG is enabled"
         );
@@ -529,7 +541,7 @@ mod alg_type_tests {
     #[test]
     fn ftp_session_tagged_when_alg_enabled() {
         assert_eq!(
-            alg_type_for_session(PROTO_TCP, 51000, 21, 0),
+            alg_type_for_session(PROTO_TCP, 51000, 21, false, 0),
             ALG_TYPE_FTP,
             "FTP session must be tagged FTP when the FTP ALG is enabled"
         );
@@ -537,8 +549,24 @@ mod alg_type_tests {
 
     #[test]
     fn sip_session_tagged_when_alg_enabled() {
-        assert_eq!(alg_type_for_session(PROTO_UDP, 5060, 5060, 0), ALG_TYPE_SIP);
-        assert_eq!(alg_type_for_session(PROTO_TCP, 40000, 5060, 0), ALG_TYPE_SIP);
+        assert_eq!(alg_type_for_session(PROTO_UDP, 5060, 5060, false, 0), ALG_TYPE_SIP);
+        assert_eq!(alg_type_for_session(PROTO_TCP, 40000, 5060, false, 0), ALG_TYPE_SIP);
+    }
+
+    #[test]
+    fn forward_source_service_port_does_not_tag_unrelated_destination() {
+        for (protocol, src_port) in [
+            (PROTO_UDP, 53),
+            (PROTO_TCP, 21),
+            (PROTO_UDP, 5060),
+            (PROTO_TCP, 5060),
+        ] {
+            assert_eq!(
+                alg_type_for_session(protocol, src_port, 9999, false, 0),
+                ALG_TYPE_NONE,
+                "client source port {src_port} alone must not create an ALG tag"
+            );
+        }
     }
 
     // The enforcement under test (#2008 H3): when `security alg dns disable`
@@ -549,7 +577,7 @@ mod alg_type_tests {
     #[test]
     fn dns_session_not_tagged_when_alg_disabled() {
         assert_eq!(
-            alg_type_for_session(PROTO_UDP, 41234, 53, ALG_DISABLE_DNS),
+            alg_type_for_session(PROTO_UDP, 41234, 53, false, ALG_DISABLE_DNS),
             ALG_TYPE_NONE,
             "`security alg dns disable` must turn the DNS ALG off (alg_type=none)"
         );
@@ -560,7 +588,7 @@ mod alg_type_tests {
     #[test]
     fn ftp_session_not_tagged_when_alg_disabled() {
         assert_eq!(
-            alg_type_for_session(PROTO_TCP, 51000, 21, ALG_DISABLE_FTP),
+            alg_type_for_session(PROTO_TCP, 51000, 21, false, ALG_DISABLE_FTP),
             ALG_TYPE_NONE,
             "`security alg ftp disable` must turn the FTP ALG off (alg_type=none)"
         );
@@ -569,7 +597,7 @@ mod alg_type_tests {
     #[test]
     fn sip_session_not_tagged_when_alg_disabled() {
         assert_eq!(
-            alg_type_for_session(PROTO_UDP, 5060, 5060, ALG_DISABLE_SIP),
+            alg_type_for_session(PROTO_UDP, 5060, 5060, false, ALG_DISABLE_SIP),
             ALG_TYPE_NONE,
             "`security alg sip disable` must turn the SIP ALG off (alg_type=none)"
         );
@@ -581,32 +609,29 @@ mod alg_type_tests {
     #[test]
     fn disabling_dns_does_not_affect_ftp() {
         assert_eq!(
-            alg_type_for_session(PROTO_TCP, 51000, 21, ALG_DISABLE_DNS),
+            alg_type_for_session(PROTO_TCP, 51000, 21, false, ALG_DISABLE_DNS),
             ALG_TYPE_FTP
         );
         assert_eq!(
-            alg_type_for_session(PROTO_UDP, 41234, 53, ALG_DISABLE_FTP),
+            alg_type_for_session(PROTO_UDP, 41234, 53, false, ALG_DISABLE_FTP),
             ALG_TYPE_DNS
         );
     }
 
-    // A session keyed in the REVERSE direction carries the well-known ALG
-    // service port in the SRC slot (server -> client), not the dst. The
-    // `on_port` helper checks `src_port == p || dst_port == p`, so the ALG
-    // type must still resolve. Both directions of one ALG session map to the
-    // same alg_type, which is required for the reverse conntrack entry the
-    // publisher installs alongside the forward entry.
+    // A reverse-keyed session carries the service port in the source slot.
+    // The explicit `is_reverse` argument selects that slot; forward sessions
+    // never match merely because a client chose a well-known source port.
     #[test]
     fn dns_reverse_keyed_session_tagged_on_src_port() {
         // UDP 53 (server) -> ephemeral (client): well-known port in src slot.
         assert_eq!(
-            alg_type_for_session(PROTO_UDP, 53, 41234, 0),
+            alg_type_for_session(PROTO_UDP, 53, 41234, true, 0),
             ALG_TYPE_DNS,
             "reverse-keyed DNS session must match the well-known port on the src slot"
         );
         // The disable bit still suppresses it in the reverse direction.
         assert_eq!(
-            alg_type_for_session(PROTO_UDP, 53, 41234, ALG_DISABLE_DNS),
+            alg_type_for_session(PROTO_UDP, 53, 41234, true, ALG_DISABLE_DNS),
             ALG_TYPE_NONE,
             "`security alg dns disable` must apply to reverse-keyed sessions too"
         );
@@ -616,12 +641,12 @@ mod alg_type_tests {
     fn ftp_reverse_keyed_session_tagged_on_src_port() {
         // TCP 21 (server) -> ephemeral (client): well-known port in src slot.
         assert_eq!(
-            alg_type_for_session(PROTO_TCP, 21, 51000, 0),
+            alg_type_for_session(PROTO_TCP, 21, 51000, true, 0),
             ALG_TYPE_FTP,
             "reverse-keyed FTP session must match the well-known port on the src slot"
         );
         assert_eq!(
-            alg_type_for_session(PROTO_TCP, 21, 51000, ALG_DISABLE_FTP),
+            alg_type_for_session(PROTO_TCP, 21, 51000, true, ALG_DISABLE_FTP),
             ALG_TYPE_NONE,
             "`security alg ftp disable` must apply to reverse-keyed sessions too"
         );
@@ -632,13 +657,19 @@ mod alg_type_tests {
     // tagged — non-ALG ports are always `none` regardless of the flags.
     #[test]
     fn non_alg_port_is_always_none() {
-        assert_eq!(alg_type_for_session(PROTO_TCP, 12345, 443, 0), ALG_TYPE_NONE);
         assert_eq!(
-            alg_type_for_session(PROTO_TCP, 12345, 443, 0xff),
+            alg_type_for_session(PROTO_TCP, 12345, 443, false, 0),
+            ALG_TYPE_NONE
+        );
+        assert_eq!(
+            alg_type_for_session(PROTO_TCP, 12345, 443, false, 0xff),
             ALG_TYPE_NONE
         );
         // Wrong protocol on an ALG port (e.g. TCP/53) is not the DNS ALG.
-        assert_eq!(alg_type_for_session(PROTO_TCP, 41234, 53, 0), ALG_TYPE_NONE);
+        assert_eq!(
+            alg_type_for_session(PROTO_TCP, 41234, 53, false, 0),
+            ALG_TYPE_NONE
+        );
     }
 }
 
