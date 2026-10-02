@@ -74,7 +74,7 @@ func validateIPsecStaticRouteTrafficSelectors11422(
 						owner = name
 					}
 					if ipsecTSAddressSetsCoverPrefix11422(
-						renderedIPsecSelectorPairs11380(vpn), destination) {
+						ModeledIPsecSelectorPairs11380(vpn), destination) {
 						covered = true
 						break
 					}
@@ -101,7 +101,7 @@ func ipsecRouteDestinationPrefix11422(destination string) (netip.Prefix, bool) {
 }
 
 func ipsecTSAddressSetsCoverPrefix11422(
-	children []ipsecSelectorPair11380,
+	children []ModeledIPsecSelectorPair11380,
 	prefix netip.Prefix,
 ) bool {
 	first := prefix.Masked().Addr()

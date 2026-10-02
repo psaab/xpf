@@ -51,9 +51,9 @@ func validateIPsecBindTrafficSelectorOverlapStrict(cfg *Config) error {
 			continue
 		}
 		_, ifID := XFRMIfNameAndID(bind)
-		selectorSets := make([][]ipsecSelectorPair11380, len(names))
+		selectorSets := make([][]ModeledIPsecSelectorPair11380, len(names))
 		for i, name := range names {
-			selectorSets[i] = renderedIPsecSelectorPairs11380(vpns[name])
+			selectorSets[i] = ModeledIPsecSelectorPairs11380(vpns[name])
 		}
 		for i := range names {
 			for j := i + 1; j < len(names); j++ {
@@ -84,12 +84,16 @@ type ipsecTSAddressSet11380 struct {
 	known  bool
 }
 
-type ipsecSelectorPair11380 struct {
+// ModeledIPsecSelectorPair11380 is one local/remote selector pair as expanded
+// by the strict shared-bind gate, before address-set parsing.
+type ModeledIPsecSelectorPair11380 struct {
+	Local  string
+	Remote string
 	local  ipsecTSAddressSet11380
 	remote ipsecTSAddressSet11380
 }
 
-func (a ipsecSelectorPair11380) overlaps(b ipsecSelectorPair11380) bool {
+func (a ModeledIPsecSelectorPair11380) overlaps(b ModeledIPsecSelectorPair11380) bool {
 	return ipsecTSAddressSetsOverlap11380(a.local, b.local) &&
 		ipsecTSAddressSetsOverlap11380(a.remote, b.remote)
 }
@@ -113,10 +117,11 @@ func ipsecTSAddressSetsOverlap11380(a, b ipsecTSAddressSet11380) bool {
 	return false
 }
 
-// renderedIPsecSelectorPairs11380 follows effectiveTrafficSelectors in
+// ModeledIPsecSelectorPairs11380 follows effectiveTrafficSelectors in
 // pkg/ipsec/policy.go: default route-based selectors, identity fallbacks,
 // omitted-side behavior, and explicit children are modeled as they render.
-func renderedIPsecSelectorPairs11380(vpn *IPsecVPN) []ipsecSelectorPair11380 {
+// The IPsec package's parity test compares its public selector strings.
+func ModeledIPsecSelectorPairs11380(vpn *IPsecVPN) []ModeledIPsecSelectorPair11380 {
 	if vpn == nil {
 		return nil
 	}
@@ -136,7 +141,9 @@ func renderedIPsecSelectorPairs11380(vpn *IPsecVPN) []ipsecSelectorPair11380 {
 				remote = IPsecRouteBasedDefaultTrafficSelector
 			}
 		}
-		return []ipsecSelectorPair11380{{
+		return []ModeledIPsecSelectorPair11380{{
+			Local:  local,
+			Remote: remote,
 			local:  parseIPsecTSAddressSet11380(local),
 			remote: parseIPsecTSAddressSet11380(remote),
 		}}
@@ -147,13 +154,13 @@ func renderedIPsecSelectorPairs11380(vpn *IPsecVPN) []ipsecSelectorPair11380 {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	pairs := make([]ipsecSelectorPair11380, 0, len(names))
+	pairs := make([]ModeledIPsecSelectorPair11380, 0, len(names))
 	for _, name := range names {
 		ts := vpn.TrafficSelectors[name]
 		if ts == nil {
 			// The compiled config does not produce nil selector values, but an
 			// unknown child cannot prove this VPN's union disjoint.
-			pairs = append(pairs, ipsecSelectorPair11380{})
+			pairs = append(pairs, ModeledIPsecSelectorPair11380{})
 			continue
 		}
 		local, remote := vpn.LocalID, vpn.RemoteID
@@ -179,7 +186,9 @@ func renderedIPsecSelectorPairs11380(vpn *IPsecVPN) []ipsecSelectorPair11380 {
 				remote = IPsecRouteBasedDefaultTrafficSelector
 			}
 		}
-		pairs = append(pairs, ipsecSelectorPair11380{
+		pairs = append(pairs, ModeledIPsecSelectorPair11380{
+			Local:  local,
+			Remote: remote,
 			local:  parseIPsecTSAddressSet11380(local),
 			remote: parseIPsecTSAddressSet11380(remote),
 		})
