@@ -228,6 +228,39 @@ func buildSyslogClients(cfg *config.Config) []*logging.SyslogClient {
 	return clients
 }
 
+// buildFallbackInstanceConfig builds the per-instance FRR config for the
+// callback-free CLI path, matching the daemon assembler's route and protocol
+// fields.
+func buildFallbackInstanceConfig(ri *config.RoutingInstanceConfig) frr.InstanceConfig {
+	vrfName := "vrf-" + ri.Name
+	tableID := 0
+	forwarding := ri.InstanceType == "forwarding"
+	if forwarding {
+		// Forwarding instances have no VRF device; their statics render into
+		// their dedicated kernel table.
+		vrfName = ""
+		tableID = ri.TableID
+	}
+	inst := frr.InstanceConfig{
+		Name:              ri.Name,
+		VRFName:           vrfName,
+		TableID:           tableID,
+		OSPF:              ri.OSPF,
+		OSPFv3:            ri.OSPFv3,
+		BGP:               ri.BGP,
+		RIP:               ri.RIP,
+		ISIS:              ri.ISIS,
+		StaticRoutes:      ri.StaticRoutes,
+		Inet6StaticRoutes: ri.Inet6StaticRoutes,
+	}
+	if forwarding {
+		// An empty VRFName means "the GLOBAL instance" to generateProtocols,
+		// so forwarding-instance protocols must not leak into the global scope.
+		inst.OSPF, inst.OSPFv3, inst.BGP, inst.RIP, inst.ISIS = nil, nil, nil, nil, nil
+	}
+	return inst
+}
+
 // applyToDataplane drives the legacy CLI-side apply sequence: tunnel
 // interfaces, eBPF compile, FRR config, then IPsec. Only used when the
 // daemon does not wire applyConfigFn (e.g. CLI spawned standalone for
@@ -321,33 +354,7 @@ func (c *CLI) applyToDataplane(cfg *config.Config) error {
 			}
 		}
 		for _, ri := range cfg.RoutingInstances {
-			// Mirror daemon assembleFRRConfig (#1827 PR-2): forwarding
-			// instances have no VRF device — render their statics into
-			// the instance's dedicated kernel table.
-			vrfName := "vrf-" + ri.Name
-			tableID := 0
-			forwarding := ri.InstanceType == "forwarding"
-			if forwarding {
-				vrfName = ""
-				tableID = ri.TableID
-			}
-			inst := frr.InstanceConfig{
-				Name:         ri.Name,
-				VRFName:      vrfName,
-				TableID:      tableID,
-				OSPF:         ri.OSPF,
-				OSPFv3:       ri.OSPFv3,
-				BGP:          ri.BGP,
-				StaticRoutes: ri.StaticRoutes,
-			}
-			if forwarding {
-				// #9409: same drop as the daemon's assembleFRRConfig. An empty
-				// VRFName means "the GLOBAL instance" to generateProtocols, so
-				// carrying an instance's protocols through here would activate
-				// them globally.
-				inst.OSPF, inst.OSPFv3, inst.BGP = nil, nil, nil
-			}
-			fc.Instances = append(fc.Instances, inst)
+			fc.Instances = append(fc.Instances, buildFallbackInstanceConfig(ri))
 		}
 		if err := c.frr.ApplyFull(fc); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: FRR apply failed: %v\n", err)
