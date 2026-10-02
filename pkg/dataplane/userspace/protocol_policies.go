@@ -195,10 +195,11 @@ type FirewallTermSnapshot struct {
 	// whole snapshot instead. omitempty + the Rust serde default keep wire
 	// parity with an older control plane that omits the field (#1961).
 	AddressUnrepresentable bool `json:"address_unrepresentable,omitempty"`
-	// FromUnrepresentable (#9875/#11334/#11896) is set when the term's `from`
-	// block carries a constraint the dataplane does NOT enforce: an unrecognized
-	// leaf (term.UnknownFrom, #3307), a literal-address `except` construct
-	// (term.UnknownFrom, #11334), or a value-bearing leaf written with NO operand
+	// FromUnrepresentable (#9875/#11334/#11451/#11896) is set when the term's
+	// `from` block carries a constraint the dataplane does NOT enforce: an
+	// unrecognized leaf (term.UnknownFrom, #3307), a literal-address `except`
+	// construct (term.UnknownFrom, #11334), an unresolved except prefix-list
+	// (#11451), or a value-bearing leaf written with NO operand
 	// (term.ValuelessFrom, #8480); it is also set when the term has conflicting
 	// terminal actions (#11896). Those shapes compile to a missing or ambiguous
 	// enforcement intent. Strict commit rejects them; the tolerant load /

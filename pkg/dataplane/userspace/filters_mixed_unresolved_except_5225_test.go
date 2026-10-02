@@ -6,9 +6,9 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #5225: a firewall-filter term that carries BOTH an UNRESOLVED positive
-// prefix-list ref AND an `except` ref (unresolved OR resolved-empty), with no
-// RESOLVED positive scope, must NOT compose to match-ALL on an `accept` term.
+// #5225: a firewall-filter term that carries an UNRESOLVED positive
+// prefix-list ref AND a DEFINED-but-EMPTY `except` ref, with no RESOLVED
+// positive scope, must NOT compose to match-ALL on an `accept` term.
 //
 // The #4338 "any except X" compose (ResolveFilterPrefixListAddrs) fires on
 // `hasExcept && !hasPositiveRef && addrsAllMatchAny(positive)` and lowers the
@@ -37,19 +37,24 @@ import (
 // `return exceptPrefixes, true, true`) and the accept assertions below go RED —
 // the accept term composes back to except=true = admit-ALL.
 func TestResolvePrefixListAddrsUnresolvedPositivePlusExceptFailsClosedByAction_5225(t *testing.T) {
-	// Empty config: BOTH referenced prefix-lists are undefined -> unresolved on
-	// the tolerant path (pl == nil for each).
-	cfg := &config.Config{}
+	// Positive refs are unresolved; both except lists are defined but empty.
+	// This isolates #5225 from #11451's unresolved-except handling.
+	cfg := &config.Config{PolicyOptions: config.PolicyOptionsConfig{
+		PrefixLists: map[string]*config.PrefixList{
+			"empty_exc4": {Name: "empty_exc4"},
+			"empty_exc6": {Name: "empty_exc6"},
+		},
+	}}
 
 	// refs order: positive first, then except (natural config order). The lowering
 	// is order-independent, but pin the realistic ordering.
 	refs4 := []config.PrefixListRef{
 		{Name: "undef_pos4", Except: false},
-		{Name: "undef_exc4", Except: true},
+		{Name: "empty_exc4", Except: true},
 	}
 	refs6 := []config.PrefixListRef{
 		{Name: "undef_pos6", Except: false},
-		{Name: "undef_exc6", Except: true},
+		{Name: "empty_exc6", Except: true},
 	}
 
 	acceptCases := []struct {
@@ -118,13 +123,11 @@ func TestResolvePrefixListAddrsUnresolvedPositivePlusExceptFailsClosedByAction_5
 	}
 }
 
-// A RESOLVED positive prefix-list ref alongside an `except` ref is the mixed
-// positive+except shape (#3359). It is NOT the #5225 case (hasPositiveRef=true, so
-// the compose gate never fires) and must be UNCHANGED by the #5225 fix:
-// POSITIVE-WINS — the except side is dropped and the term lowers to the resolved
-// positive scope (except=false). This holds for EVERY action, so the action-gated
-// #5225 branch must never touch it.
-func TestResolvePrefixListAddrsResolvedPositivePlusExceptUnchanged_5225(t *testing.T) {
+// A RESOLVED positive prefix-list ref alongside an UNRESOLVED `except` ref is
+// still fail-closed by action. The missing negative set makes preserving the
+// positive match unsafe: non-deny actions match nothing; discard/reject match
+// all so traffic cannot fall through to a later permit.
+func TestResolvePrefixListAddrsResolvedPositivePlusUnresolvedExceptFailsClosedByAction_11451(t *testing.T) {
 	cfg := &config.Config{
 		PolicyOptions: config.PolicyOptionsConfig{
 			PrefixLists: map[string]*config.PrefixList{
@@ -136,47 +139,50 @@ func TestResolvePrefixListAddrsResolvedPositivePlusExceptUnchanged_5225(t *testi
 		{Name: "good", Except: false},
 		{Name: "undef_exc", Except: true},
 	}
-	for _, action := range []string{"accept", "discard", "reject", ""} {
-		t.Run("action="+action, func(t *testing.T) {
+	for _, tc := range []struct {
+		action     string
+		wantExcept bool
+	}{
+		{"accept", false}, {"discard", true}, {"reject", true}, {"", false},
+	} {
+		t.Run("action="+tc.action, func(t *testing.T) {
 			addrs, except, constrained := resolvePrefixListAddrs(
-				nil, refs, cfg, "f", "t", "source", action,
+				nil, refs, cfg, "f", "t", "source", tc.action,
 			)
-			if except {
-				t.Fatalf("resolved positive + except must stay positive-wins "+
-					"(except=false), got except=true addrs=%v", addrs)
-			}
 			if !constrained {
 				t.Fatalf("a resolved positive scope must stay constrained, got constrained=false")
 			}
-			if len(addrs) != 1 || addrs[0] != "10.0.0.0/8" {
-				t.Fatalf("positive-wins must keep the resolved positive scope, got addrs=%v", addrs)
+			if except != tc.wantExcept || len(addrs) != 0 {
+				t.Fatalf("unresolved except action=%q: got except=%v addrs=%v, want except=%v and no prefixes",
+					tc.action, except, addrs, tc.wantExcept)
 			}
 		})
 	}
 }
 
-// A GENUINE match-any positive (`0.0.0.0/0` literal, NO unresolved positive ref)
-// alongside an unresolved except ref is the #4338/#5097 "any except X" lockdown
-// idiom, X unresolved. The #5225 action-gate must NOT touch it — it composes to
-// match-ALL (except=true) for EVERY action, including `accept` (admit any except
-// the — here empty — unresolved set). This is the discriminator proving the fix
-// keys off hasUnresolvedPositiveRef, not merely off "empty positive + except".
-func TestResolvePrefixListAddrsGenuineMatchAnyPlusUnresolvedExceptUnchanged_5225(t *testing.T) {
+// A match-any positive (`0.0.0.0/0`) with an UNRESOLVED except is fail-closed
+// by action: it cannot use the empty complement as match-all for an accept or
+// PBR term, while a deny must continue matching all to prevent permit fallthrough.
+func TestResolvePrefixListAddrsGenuineMatchAnyPlusUnresolvedExceptFailsClosedByAction_11451(t *testing.T) {
 	cfg := &config.Config{}
-	for _, action := range []string{"accept", "discard", "reject", ""} {
-		t.Run("action="+action, func(t *testing.T) {
+	for _, tc := range []struct {
+		action     string
+		wantExcept bool
+	}{
+		{"accept", false}, {"discard", true}, {"reject", true}, {"", false},
+	} {
+		t.Run("action="+tc.action, func(t *testing.T) {
 			addrs, except, constrained := resolvePrefixListAddrs(
 				[]string{"0.0.0.0/0"},
 				[]config.PrefixListRef{{Name: "undef_exc", Except: true}},
-				cfg, "f", "t", "source", action,
+				cfg, "f", "t", "source", tc.action,
 			)
-			if !except || !constrained {
-				t.Fatalf("genuine match-any + unresolved except must compose to "+
-					"except=true, constrained=true for action=%q; got except=%v "+
-					"constrained=%v addrs=%v", action, except, constrained, addrs)
+			if !constrained {
+				t.Fatalf("match-any + unresolved except must stay constrained, got false")
 			}
-			if len(addrs) != 0 {
-				t.Fatalf("compose prefixes = %v, want empty (unresolved except set)", addrs)
+			if except != tc.wantExcept || len(addrs) != 0 {
+				t.Fatalf("match-any + unresolved except action=%q: got except=%v addrs=%v, want except=%v and no prefixes",
+					tc.action, except, addrs, tc.wantExcept)
 			}
 		})
 	}

@@ -217,20 +217,45 @@ func unrepresentableFromLeaves(term *config.FirewallFilterTerm) []string {
 	leaves = append(leaves, term.ValuelessFrom...)
 	return leaves
 }
+func lo0HasUnresolvedPrefixListExcept(
+	term *config.FirewallFilterTerm,
+	prefixLists map[string]*config.PrefixList,
+) bool {
+	if term == nil {
+		return false
+	}
+	for _, ref := range term.SourcePrefixLists {
+		if ref.Except && prefixLists[ref.Name] == nil {
+			return true
+		}
+	}
+	for _, ref := range term.DestPrefixLists {
+		if ref.Except && prefixLists[ref.Name] == nil {
+			return true
+		}
+	}
+	return false
+}
 
-// nftRefuseUnrepresentableFrom is the #9875/#11896 refusal rule, CONSTANT by
-// design: no term-controlled text is interpolated into it. UnknownFrom holds
-// raw node names and the lexer permits embedded quotes, so a refusal that
-// quoted leaf names would make rejection isolation depend on diagnostic
-// contents — a crafted name could break out of the comment. Conflicting
-// terminal actions also use this whole-plan refusal rather than installing
-// their conservative discard as a drop. The nft-invalid bareword rejects the
-// atomic load and prior generation is retained however hostile the input;
+// nftRefuseUnrepresentableFrom is the #9875/#11451/#11896 refusal rule,
+// CONSTANT by design: no term-controlled text is interpolated into it.
+// UnknownFrom holds raw node names and the lexer permits embedded quotes, so
+// a refusal that quoted leaf names would make rejection isolation depend on
+// diagnostic contents — a crafted name could break out of the comment.
+// Conflicting terminal actions and unresolved except prefix-lists also use this
+// whole-plan refusal rather than installing a partial or widened term. The
+// nft-invalid bareword rejects the atomic load and prior generation is retained;
 // offending leaves/actions are reported via slog at the emit site instead.
 const nftRefuseUnrepresentableFrom = `comment "unrepresentable from" __xpf_refuse_unrepresentable_from__`
 
 func nftRulesFromTerm(term *config.FirewallFilterTerm, family string, prefixLists map[string]*config.PrefixList) []string {
 	var parts []string
+
+	if lo0HasUnresolvedPrefixListExcept(term, prefixLists) {
+		slog.Warn("lo0 kernel nftables mirror: refusing load over unresolved except prefix-list",
+			"term", term.Name)
+		return []string{nftRefuseUnrepresentableFrom}
+	}
 
 	// #9875, DISPOSITION B: a whole `from` leaf the dataplane does not
 	// enforce (term.UnknownFrom, #3307) or a value-bearing leaf written

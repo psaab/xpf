@@ -1107,14 +1107,16 @@ func (p *pbrManager) clear() error {
 //     (FRA_DPORT_RANGE). Multi-value protocol/port sets expand to one ip rule per
 //     value; a port range maps to a single [lo,hi] rule range.
 //   - UNREPRESENTABLE (fail-closed, whole term dropped + degraded): a non-empty
-//     address `except` set, an unknown DSCP name, `source-port-except` /
-//     `destination-port-except` (no negated port selector), `tcp-flags`,
-//     `icmp-type` / `icmp-code`, `is-fragment`, `flexible-match-range`, and any
-//     unresolved / unenforceable `from` leaf. Emitting the address/protocol/port
-//     half while silently dropping these would WIDEN the match and steer traffic
-//     the operator constrained away (the #3730 over-steer); dropping the term is
-//     the fail-safe under-steer (steered traffic falls back to the main table),
-//     and the userspace filter path still enforces the term exactly.
+//     address `except` set or an unresolved `except` prefix-list (an unresolved
+//     negative scope must not become an empty-set match-all), an unknown DSCP
+//     name, `source-port-except` / `destination-port-except` (no negated port
+//     selector), `tcp-flags`, `icmp-type` / `icmp-code`, `is-fragment`,
+//     `flexible-match-range`, and any unresolved / unenforceable `from` leaf.
+//     Emitting the address/protocol/port half while silently dropping these
+//     would WIDEN the match and steer traffic the operator constrained away (the
+//     #3730 over-steer); dropping the term is the fail-safe under-steer (steered
+//     traffic falls back to the main table), and the userspace filter path still
+//     enforces the term exactly.
 //
 // The returned error is non-nil when the build is DEGRADED: a term carries an
 // ip-rule-unrepresentable predicate (per the matrix above), a later steer may
@@ -1979,8 +1981,10 @@ func hasRealString(vals []string) bool {
 //     no rule for the term — omitting the rule is the correct realization of
 //     "steer nothing" for FBF (an omitted rule cannot steer).
 //   - err: the direction cannot be represented as an ip rule (a non-empty
-//     address `except` set; ip rule has no negated from/to). The caller skips
-//     the term (fail-safe: never steer the wrong traffic) and reports degraded.
+//     address `except` set, or an unresolved `except` reference; ip rule has no
+//     negated from/to and an unknown negative set cannot become match-all). The
+//     caller skips the term (fail-safe: never steer the wrong traffic) and
+//     reports degraded.
 func resolvePBRDirection(
 	literal []string,
 	refs []config.PrefixListRef,
@@ -1996,6 +2000,8 @@ func resolvePBRDirection(
 	hasPositiveRef := false
 	hasExcept := false
 	exceptCount := 0
+	hasUnresolvedExcept := false
+	var unresolvedExceptName string
 	unconstrainedSeen := false
 
 	addNorm := func(tok string) error {
@@ -2021,14 +2027,19 @@ func resolvePBRDirection(
 		pl := pls[ref.Name]
 		if pl == nil {
 			// Unresolved reference. The strict gate rejects this at commit; on
-			// the tolerant/peer-sync path it contributes no prefixes, but the
-			// direction stays constrained so we fail closed (positive) /
-			// match-all (except) per the empty-set semantics below.
+			// the tolerant/peer-sync path it contributes no prefixes. An
+			// unresolved except cannot be treated like a defined-empty except:
+			// match-all would steer the very traffic the missing list may have
+			// excluded. The term is dropped below with a degraded error.
 			slog.Warn("PBR: filter prefix-list reference unresolved",
 				"filter", filterName, "term", termName, "direction", direction,
 				"prefix-list", ref.Name)
 			if ref.Except {
 				hasExcept = true
+				hasUnresolvedExcept = true
+				if unresolvedExceptName == "" {
+					unresolvedExceptName = ref.Name
+				}
 			} else {
 				hasPositiveRef = true
 			}
@@ -2047,6 +2058,13 @@ func resolvePBRDirection(
 				}
 			}
 		}
+	}
+
+	if hasUnresolvedExcept {
+		return nil, false, fmt.Errorf(
+			"PBR %s scope of filter %s term %s references unresolved `except` prefix-list %q; "+
+				"steering for this term is dropped (fail-safe under-steer to the main table)",
+			direction, filterName, termName, unresolvedExceptName)
 	}
 
 	// Pure-except: an `except` set is the SOLE scope for this direction.
