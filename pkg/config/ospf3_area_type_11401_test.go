@@ -32,7 +32,7 @@ func TestOSPFv3AreaTypeIsReadFromEverySpelling11401(t *testing.T) {
 		// `stub no-summaries;` inside the container arrives as one node with
 		// Keys=["stub","no-summaries"] and no children; FindChild alone
 		// cannot see it (the #9656 packed branch).
-		"braced container with packed leaf": {"        area 0.0.0.1 {\n            area-type {\n                stub no-summaries;\n            }\n        }", "stub", true},
+		"braced container with packed leaf":       {"        area 0.0.0.1 {\n            area-type {\n                stub no-summaries;\n            }\n        }", "stub", true},
 		"braced container nssa with no-summaries": {"        area 0.0.0.1 {\n            area-type {\n                nssa {\n                    no-summaries;\n                }\n            }\n        }", "nssa", true},
 	} {
 		t.Run(name, func(t *testing.T) {

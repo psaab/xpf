@@ -62,4 +62,3 @@ func TestOSPFInterfaceAreaReuseRendererKeepsFirst11400(t *testing.T) {
 		})
 	}
 }
-
