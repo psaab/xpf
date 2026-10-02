@@ -374,6 +374,12 @@ delegate to the owning domain. Exported types:
   priority.
 
 
+  Rib-group admission is bounded independently for IPv4 and IPv6 (#11442):
+  each address family can install up to 1000 connected-prefix rules. The
+  applier keeps a separate admission cursor per family, so a v4-first list
+  that fills the IPv4 allowance does not suppress later IPv6 leaks. Strict
+  commit validation counts each family's leak set against the same per-family
+  limit.
   The shared priority range is wide enough for IPv6 and does not determine
   admission order. It replaces the former independent sequential priority
   bands, whose source-kind ordering could let a broader leak beat a more
