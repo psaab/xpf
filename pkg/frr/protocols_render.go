@@ -285,6 +285,8 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 	// the WHOLE managed section — a single remote-as-0 neighbor would brick the
 	// frr-reload for every valid peer on the box. Building the set once here
 	// guarantees the three loops can never diverge on which neighbors render.
+	// ApplyFull rejects cross-group duplicate addresses. Do not collapse entries
+	// here: same-group duplicates can be separate policy-bearing AST fragments.
 	var validNeighbors []*config.BGPNeighbor
 	if bgp != nil {
 		validNeighbors = make([]*config.BGPNeighbor, 0, len(bgp.Neighbors))
