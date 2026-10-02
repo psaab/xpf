@@ -1508,10 +1508,9 @@ func validateFilterRoutingInstanceConflictStrict(cfg *Config) error {
 // The walk is deterministic (filters sorted by name, terms in config order) so
 // the first-reported error is stable across runs. On the tolerant load /
 // peer-sync path the caller downgrades the returned error to a warning (#1960
-// no-brick); the last-wins term.Action still drives the dataplane, so a
-// leniently-loaded contradictory term forwards deterministically — but the
-// operator never reaches that state through a commit. Mirrors
-// validateFilterRoutingInstanceConflictStrict.
+// no-brick) and replaces conflicting term actions with discard, so an authored
+// last-wins accept cannot be installed. The operator never reaches that state
+// through a commit. Mirrors validateFilterRoutingInstanceConflictStrict.
 func validateFilterTerminalConflictStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -1531,8 +1530,7 @@ func validateFilterTerminalConflictStrict(cfg *Config) error {
 				if term == nil {
 					continue
 				}
-				// #4375: reject MORE THAN ONE distinct terminating action.
-				if len(term.TerminalActions) >= 2 {
+				if filterHasConflictingTerminalActions(term.TerminalActions) {
 					// Collect distinct terminals in first-seen order so the
 					// error is stable and reads in the order the operator
 					// wrote them.
@@ -1544,14 +1542,12 @@ func validateFilterTerminalConflictStrict(cfg *Config) error {
 							distinct = append(distinct, a)
 						}
 					}
-					if len(distinct) > 1 {
-						return fmt.Errorf(
-							"firewall family %s filter %q term %q: conflicting "+
-								"terminating actions %s — a term may have at most one "+
-								"terminating action (accept/reject/discard are mutually "+
-								"exclusive)",
-							family, name, term.Name, strings.Join(distinct, " and "))
-					}
+					return fmt.Errorf(
+						"firewall family %s filter %q term %q: conflicting "+
+							"terminating actions %s — a term may have at most one "+
+							"terminating action (accept/reject/discard are mutually "+
+							"exclusive)",
+						family, name, term.Name, strings.Join(distinct, " and "))
 				}
 				// #5142 (security, fail-CLOSED): a SINGLE terminating action
 				// (discard/reject/accept) co-located with `then next term` is a

@@ -123,3 +123,53 @@ func TestFilterDuplicateSameTerminalAllowed_4375(t *testing.T) {
 		t.Fatalf("two identical `then discard` blocks (one distinct terminal) must compile: %v", err)
 	}
 }
+
+// A tolerant load or peer-sync must remain bootable while never installing a
+// last-wins allow from contradictory terminals (#11507).
+func TestFilterTerminalConflictPoisonsLenientAction11507(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		compile func(*ConfigTree) (*Config, error)
+		actions []string
+	}{
+		{
+			name:    "load last accept",
+			compile: CompileConfigLenient,
+			actions: []string{"discard", "accept"},
+		},
+		{
+			name: "peer sync last accept",
+			compile: func(tree *ConfigTree) (*Config, error) {
+				return CompileConfigForNodeLenient(tree, 1)
+			},
+			actions: []string{"reject", "accept"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmds := make([]string, 0, len(tc.actions))
+			for _, action := range tc.actions {
+				cmds = append(cmds, "set firewall family inet filter f term t then "+action)
+			}
+			cfg, err := tc.compile(buildFilterTree(t, cmds...))
+			if err != nil {
+				t.Fatalf("tolerant compile must remain bootable (#1960 no-brick): %v", err)
+			}
+			term := cfg.Firewall.FiltersInet["f"].Terms[0]
+			if term.Action != "discard" {
+				t.Fatalf("conflicting terminals %v installed Action=%q; want fail-closed discard",
+					term.TerminalActions, term.Action)
+			}
+			foundWarning := false
+			for _, warning := range cfg.Warnings {
+				if strings.Contains(warning, "firewall filter terminal-action conflict") &&
+					strings.Contains(warning, "conflicting terminating actions") {
+					foundWarning = true
+					break
+				}
+			}
+			if !foundWarning {
+				t.Fatalf("tolerant compile must warn about the conflict; warnings=%v", cfg.Warnings)
+			}
+		})
+	}
+}

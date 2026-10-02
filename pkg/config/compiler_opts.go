@@ -1107,8 +1107,9 @@ type compileOpts struct {
 	// compiled to whichever came last — an ambiguous config accepted with one
 	// side of the operator's intent lost. The tolerant load / peer-sync paths
 	// downgrade to a warning so an already-persisted or peer-synced config still
-	// BOOTS (#1960 no-brick); the last-wins Action drives the dataplane
-	// deterministically. Sibling of lenientFilterRoutingInstanceConflict (#3308).
+	// BOOTS (#1960 no-brick), and poison each conflicting term to `discard` so
+	// last-write-wins cannot install an accidental allow. Sibling of
+	// lenientFilterRoutingInstanceConflict (#3308).
 	lenientFilterTerminalConflict bool
 	// lenientPolicerThenConflict (#8445) downgrades the policer `then`
 	// terminal-vs-marking gate (validateFirewallPolicerThenConflictStrict) from

@@ -1552,12 +1552,12 @@ type FirewallFilterTerm struct {
 	// what they wrote (#4375, avo-review-007 H3). This slice is the
 	// mutual-exclusion channel: validateFilterTerminalConflictStrict hard-rejects
 	// any term whose distinct-terminal count exceeds one; the tolerant load /
-	// peer-sync path downgrades to a warning (#1960 no-brick) and the last-wins
-	// Action still drives the dataplane. Junos treats accept/reject/discard as
-	// mutually exclusive (a term has exactly one terminating action); the
-	// non-terminating modifiers (count/log/forwarding-class/loss-priority/dscp/
-	// traffic-class/policer/routing-instance) coexist with a terminal and are NOT
-	// recorded here.
+	// peer-sync path warns (#1960 no-brick) and changes conflicting terms to
+	// discard so the last-wins Action cannot install an accidental accept.
+	// Junos treats accept/reject/discard as mutually exclusive (a term has
+	// exactly one terminating action); the non-terminating modifiers
+	// (count/log/forwarding-class/loss-priority/dscp/traffic-class/policer/
+	// routing-instance) coexist with a terminal and are NOT recorded here.
 	TerminalActions []string
 	// UnknownActions records `then` tokens that are neither a recognized
 	// terminating action nor a recognized modifier (#2399 finding 032-16).
