@@ -128,3 +128,14 @@ func TestControlRequestCapLockstepWithRust(t *testing.T) {
 			MaxControlRequestBytes, rustMaxControlRequestBytes)
 	}
 }
+
+// TestControlResponseCapLockstepWithRust keeps the helper's response refusal
+// threshold aligned with Go's bounded control-socket reader.
+func TestControlResponseCapLockstepWithRust(t *testing.T) {
+	const rustMaxControlResponseBytes = 64 * 1024 * 1024 // userspace-dp/src/protocol/control.rs
+	if MaxControlResponseBytes != rustMaxControlResponseBytes {
+		t.Fatalf("Go MaxControlResponseBytes=%d must equal Rust MAX_CONTROL_RESPONSE_BYTES=%d "+
+			"(lockstep, see userspace-dp/src/protocol/control.rs)",
+			MaxControlResponseBytes, rustMaxControlResponseBytes)
+	}
+}

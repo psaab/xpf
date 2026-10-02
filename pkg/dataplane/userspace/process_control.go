@@ -247,27 +247,32 @@ func (m *Manager) requestDetailedAtSocket(req ControlRequest, controlSocket stri
 	// deadline still admits GB-scale allocation at memory bandwidth, and
 	// ControlResponse retains four unbounded slice fields.
 	bounded := boundedResponseReader(conn)
-	if err := json.NewDecoder(bufio.NewReader(bounded)).Decode(&resp); err != nil {
+	var decodeErr error
+	if req.Type == "fib_dump" {
+		decodeErr = decodeFIBDumpResponse(bounded, &resp)
+	} else {
+		decodeErr = json.NewDecoder(bufio.NewReader(bounded)).Decode(&resp)
+	}
+	if decodeErr != nil {
 		// #9322: the cap is checked FIRST. A truncated body reaches
 		// json.Decoder as io.ErrUnexpectedEOF, byte-identical to a helper that
-		// died mid-write, so without this the #1961 sentence below claims the
-		// helper rejected a request it actually ANSWERED — and sends the
-		// operator to a helper log with nothing in it.
+		// died mid-write. FIB additionally drains its framed response so a
+		// complete JSON prefix cannot hide over-cap suffix bytes.
 		if bounded.truncated {
-			return ControlResponse{}, responseCapError(req.Type, err)
+			return ControlResponse{}, responseCapError(req.Type, decodeErr)
 		}
 		// A bare EOF here means the helper closed the socket without writing a
 		// response — it rejected the request before replying (e.g. a request
 		// that failed to decode, like the #1961 wire-type mismatch). Surface an
 		// actionable hint instead of the opaque "EOF" that masked #1961 across
 		// multiple sessions.
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		if errors.Is(decodeErr, io.EOF) || errors.Is(decodeErr, io.ErrUnexpectedEOF) {
 			return ControlResponse{}, fmt.Errorf(
 				"control socket closed with no response to %q request (EOF); the "+
 					"helper rejected it before replying — check the helper log "+
-					"for a decode/handler error: %w", req.Type, err)
+					"for a decode/handler error: %w", req.Type, decodeErr)
 		}
-		return ControlResponse{}, err
+		return ControlResponse{}, decodeErr
 	}
 	if !resp.OK {
 		if resp.Error == "" {
