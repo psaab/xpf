@@ -623,26 +623,47 @@ correct runtime resolution; the only remedy is correcting
   cannot forge the operator-facing `slog.Error`; a stable per-process
   sender id excludes the socket's own looped-back broadcast (including
   beacons sent just before a heartbeat restart), and a manager-lifetime
-  nonce cache (4096 entries, evict-expired-then-oldest, 5s sweep)
-  suppresses exact replays across watcher restarts. Beacon transmits are
-  capped at 10/s regardless of heartbeat cadence (which the schema allows
-  down to 1ms), so honest traffic holds at most ~600 live entries
-  against the 4096 cap. A verified
-  same-cluster/same-node-id beacon from another sender calls
-  `NoteDuplicateNodeIDBeacon`, which shares the 30s duplicate-node-id
-  limiter. Like the join point, it only warns — the peer stays absent and
-  both nodes can promote independently, and the warning names that
-  outcome. Beacons never touch liveness, replay state, or election.
+  nonce cache (4096 entries, 5s sweep) suppresses exact replays across
+  watcher restarts. Suppression deadlines use the receiver's monotonic clock
+  and retain a nonce until 30s after receipt, or 30s after a future-skewed
+  timestamp's nominal freshness expiry. Expired entries are removed first;
+  live entries are never evicted to make room, so cache pressure cannot
+  reopen their replay window. At capacity, new beacons are suppressed until
+  entries expire and one health warning is logged per 30s. An accepted-PSK
+  sender able to sustain distinct authenticated beacons can keep this
+  warn-only detector saturated and silence new duplicate signals; heartbeat
+  liveness and election remain unchanged. Beacon transmits are capped at 10/s
+  regardless of heartbeat cadence (which the schema allows down to 1ms), so
+  honest traffic holds at most ~600 live entries against the 4096 cap. A
+  verified same-cluster/same-node-id beacon from another sender calls
+  `NoteDuplicateNodeIDBeacon`, which shares the 30s duplicate-node-id limiter.
+  Like the join point, it only warns — the peer
+  stays absent and both nodes can promote independently. The warning
+  explicitly says that it does not prove current peer liveness and directs
+  operators to correct `/etc/xpf/node-id` when both chassis are present. The
+  nonce cache survives heartbeat tenure replacement, but not a process
+  restart: without durable replay state, a still-fresh captured beacon is
+  indistinguishable from a live peer after restart. A clock rollback can also
+  restore freshness after cache expiry: at the maximum +30s future skew, the
+  signed timestamp is fresh at its 60s cache deadline, so a 1s rollback just
+  after expiry makes it fresh again. Disciplined wall clocks remain required.
+  That warning is limited to one event per 30s and directs the operator to
+  verify the peer and rotate the control-link PSK on both nodes if unexpected.
+  Beacons never touch liveness or election.
 
   Three operating prerequisites, stated so the blast radius is honest.
   (1) **Time sync.** Freshness is a ±30s wall-clock window validated at
   both edges; nodes further than 30s apart silently miss genuine
   duplicates (warn path only — never an election effect), so the pair
   must hold wall-clock within 30s of each other (NTP/Chrony).
-  (2) **Best-effort bringup.** Unkeyed, IPv6-only, or /31-or-narrower
-  control links skip the watcher, as do broadcast-derivation and socket
-  failures — every skip is a `Debug` log and the heartbeat proceeds, so a
-  skipped detector is invisible at operator log levels by design.
+  (2) **Best-effort bringup.** The beacon requires a configured control-link
+  PSK and an IPv4 subnet broadcast; IPv6-only and /31-or-narrower control
+  links cannot use it. Unsupported addressing and broadcast/socket setup or
+  runtime send/read failures are visible as a rate-limited `Warn` (at most
+  once per 30s), while heartbeat startup and forwarding proceed.
+  An unkeyed cluster also has no authenticated beacon; #6611 reports
+  missing/weak keys without turning a weak-but-configured key into a
+  commit brick.
   Receiving a broadcast sourced from the local address additionally
   depends on the best-effort `net.ipv4.conf.all.accept_local=1` posture
   (`daemon_run_bringup.go`); if that write failed, the kernel drops the
@@ -650,9 +671,10 @@ correct runtime resolution; the only remedy is correcting
   (3) **Wire proof pending.** Same-source-IP broadcast delivery on the
   real control L2 (actual VRF + `accept_local` posture) is lab-unproven;
   the in-gate live test covers authenticated warn/silence over loopback
-  sockets, not L2 delivery. A dual-PRIMARY shared-shape wire proof is a
-  tracked follow-up; until it lands this paragraph — not the mechanism
-  above — is the delivery claim.
+  sockets, not L2 delivery. The required follow-up is a two-host/control-L2
+  proof in the shared-address dual-PRIMARY shape, including actual VRF,
+  `accept_local`, sysctl failure and socket failure behavior. Until then,
+  this paragraph — not the mechanism above — is the delivery claim.
 
 - **Election tie-break (`electRG`, `election.go`).** If a same-node-id
   peer ever does reach election (the direct API / tests, or any future
@@ -2392,21 +2414,23 @@ connection is authenticated, then seals every subsequent frame.
 
 ## Operating the control-link PSK (#6611)
 
-All three authenticated control channels above — heartbeat (PR-A), fabric
-gRPC (#4357) and session sync (#4369) — key off ONE leaf:
+All three authenticated control channels — heartbeat (PR-A), fabric gRPC
+(#4357) and session sync (#4369) — plus the day-0 duplicate-identity beacon
+key off ONE leaf:
 
 ```
 set chassis cluster authentication-key <key>
 ```
 
-Each channel deliberately fails **OPEN** when that leaf is absent, which is
-what makes a rolling key rollout possible. The cost is that an unkeyed
-cluster runs its whole control channel unauthenticated: any host that can
-reach the control segment can forge a heartbeat to drive election, call the
-allowlisted fabric RPCs (read/clear sessions, cross-node failover), and open
-a session-sync connection. Before #6611 every config this repository shipped,
-documented and tested was unkeyed, so the enforcing branches were dead code
-in practice.
+The three channels deliberately fail **OPEN** when that leaf is absent, which
+is what makes a rolling key rollout possible. The beacon is disabled without
+the PSK because it cannot authenticate a duplicate identity. The cost is that
+an unkeyed cluster runs the other control channels unauthenticated: any host
+that can reach the control segment can forge a heartbeat to drive election,
+call the allowlisted fabric RPCs (read/clear sessions, cross-node failover),
+and open a session-sync connection. Before #6611 every config this repository
+shipped, documented and tested was unkeyed, so the enforcing branches were
+dead code in practice.
 
 ### Where the key is required
 
@@ -2933,6 +2957,9 @@ short key would create a new brick class, including via the unattended
 `bootstrapFromFile` path, for an operator who already configured
 authentication. It warns below `MinAdvisedControlLinkKeyLen` (16 characters)
 and when the key looks like one of this repository's published placeholders.
+These checks cover the duplicate-identity beacon too: anyone who knows a weak
+or published PSK can sign a beacon that passes authentication and triggers its
+warn-only duplicate-node-id signal. Warnings never disclose the key.
 
 Trimming makes the gate STRICTER than the runtime, not identical to it, and
 on the tolerant path that difference is observable: a leniently-loaded

@@ -598,40 +598,6 @@ func beaconTestNonce(i int) [16]byte {
 	return n
 }
 
-// TestDuplicateIdentityReplayEvictsOldest_10745 pins oldest-first eviction
-// (R2-2): at capacity the entry with the earliest deadline goes, newer
-// entries keep suppressing, and the evicted nonce — still freshness-valid —
-// reads as new again. Random-victim eviction reds the survivor assertions.
-func TestDuplicateIdentityReplayEvictsOldest_10745(t *testing.T) {
-	var c duplicateIdentityReplayCache
-	base := time.Unix(1700000000, 0)
-	for i := range duplicateIdentityReplayCap {
-		if c.checkAndRecord(beaconTestNonce(i), base.Add(time.Duration(i+1)*time.Millisecond), base) {
-			t.Fatalf("insert %d reported replay on first sight", i)
-		}
-	}
-	if got := c.len(); got != duplicateIdentityReplayCap {
-		t.Fatalf("cache holds %d entries, want a full cap of %d", got, duplicateIdentityReplayCap)
-	}
-	// One more insert overflows: only the earliest deadline (index 0) may go.
-	if c.checkAndRecord(beaconTestNonce(duplicateIdentityReplayCap), base.Add(time.Hour), base) {
-		t.Fatal("overflow insert reported replay for a fresh nonce")
-	}
-	if got := c.len(); got != duplicateIdentityReplayCap {
-		t.Fatalf("cache holds %d entries after overflow, want capped %d", got, duplicateIdentityReplayCap)
-	}
-	// Survivors first (replay checks mutate nothing on a hit).
-	for _, i := range []int{1, duplicateIdentityReplayCap / 2, duplicateIdentityReplayCap - 1, duplicateIdentityReplayCap} {
-		if !c.checkAndRecord(beaconTestNonce(i), base.Add(time.Hour), base) {
-			t.Fatalf("nonce %d no longer suppresses — eviction did not take the oldest", i)
-		}
-	}
-	// The evicted oldest reads as new even though its deadline is unexpired.
-	if c.checkAndRecord(beaconTestNonce(0), base.Add(time.Hour), base) {
-		t.Fatal("evicted oldest nonce still suppresses — nothing was evicted at capacity")
-	}
-}
-
 // TestDuplicateIdentitySendIntervalFloorsAt10PerSecond_10745 pins the R2-2
 // rate decoupling: sub-100ms heartbeat cadences (schema allows 1ms) must
 // not drive beacon transmits — the cache cap is sized for 10/s x 60s.

@@ -6826,7 +6826,10 @@ an entropy floor — a one-character key passes. Key strength is a continuum and
 (below `MinAdvisedControlLinkKeyLen` = 16 characters, or a key matching one of
 this repository's published `CHANGE-ME`/`EXAMPLE-ONLY` placeholders) rather
 than rejected — hard-rejecting a weak-but-real key would create a new brick
-class for an operator who already configured authentication.
+class for an operator who already configured authentication. The same PSK
+signs the authenticated duplicate-identity beacon; a weak or published value
+can therefore forge the beacon's warn-only duplicate-node-id signal, but these
+warnings never disclose the key.
 
 ### The rotation overlap leaf (#6630)
 
@@ -6837,8 +6840,8 @@ compiles to `ClusterConfig.ControlLinkAuthKeyAlt`, is `Secret`-typed, and is in
 `ast_redact.go`'s secret keyword set in its own right (`##SECRET-DATA##` in
 raw-AST renders). `ClusterAuthKeyStrengthWarnings` judges it on the same terms
 as the primary — a weak or published value there forges the control channel
-just as effectively, and a rotation is exactly when an operator reaches for a
-throwaway.
+and duplicate-identity beacon just as effectively, and a rotation is exactly
+when an operator reaches for a throwaway.
 
 Two strict refusals attach to it, both downgraded to warnings on the tolerant
 path for the #1960 no-brick reason:
