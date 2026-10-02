@@ -3064,12 +3064,18 @@ never lock an operator out of a remote box it manages.
   (`reconcileRouteLeakSnapshot`), and maintains the managed VRF miss-terminator
   desired state after networkd activation (`ReassertVRFMissTerminator`). #5844,
   #5696, #10421, and #10458 make those failures visible as deferred commit
-  errors, while this owner retries the idempotent reconciles. DHCP-learned
-  management-VRF routes in table 999 are also reconciled before networkd; their
-  error is latched into a separate management-route leg of the same routing
-  debt, including errors from management-only DHCP callbacks. After networkd
-  rebinds the management interfaces, the full apply reconciles those routes
-  again so any state lost during reconfigure is restored before completion.
+  errors, while this owner retries the idempotent reconciles. Configured
+  management-scoped statics and the system backup-router are installed with
+  `RTPROT_STATIC` in table 999 by `applyMgmtVRFStaticRoutesTo`, independently of
+  FRR and DHCP. Those routes are excluded from FRR's default-table statics;
+  implicit gateways are matched against live table-999 connected routes as
+  well as configured prefixes, covering DHCP-only management addresses.
+  DHCP-learned management-VRF routes are reconciled alongside them before
+  networkd; their error is latched into a separate management-route leg of the
+  same routing debt, including errors from management-only DHCP callbacks.
+  After networkd rebinds the management interfaces, the full apply reconciles
+  those routes again so any state lost during reconfigure is restored before
+  completion.
   Management DHCP default and classless suppression also checks the covering
   operator route's kernel Priority (route metric): only values <= 200 suppress
   a DHCP route. A high-metric static or discard route therefore cannot hide the

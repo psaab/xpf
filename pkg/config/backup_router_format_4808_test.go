@@ -6,15 +6,11 @@ import (
 )
 
 // #4808: `system backup-router <next-hop> [destination <prefix>]` stored both
-// values as raw strings with NO IP-format validation at all — only the
-// FAMILY of an explicit destination vs. next-hop was checked (#2911). A
-// syntactically malformed next-hop or destination sailed through commit
-// uncaught and was rendered directly into frr.conf's
-// `<ip|ipv6> route <dst> <next-hop> 250` line, which frr-reload rejects,
-// failing the ENTIRE static route load (not just the backup-router line).
-//
-// All tests use the production ParseSetCommand + SetPath path (buildTree),
-// never NewParser (the flat-set gotcha in CLAUDE.md).
+// values as raw strings without IP-format validation — only the family of an
+// explicit destination and next-hop was checked (#2911). A malformed value
+// could not be installed as a route in management table 999; strict commit must
+// reject it, while tolerant loads warn and let the daemon omit the invalid
+// route rather than preventing startup.
 
 func hasBackupRouterFormatWarning(cfg *Config, substr string) bool {
 	for _, w := range cfg.Warnings {

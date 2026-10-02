@@ -6,11 +6,10 @@ import (
 )
 
 // #9820: an IPv4-mapped next-hop is refused as a backup-router (product
-// restriction) at strict commit and warned on the tolerant path —
-// regardless of the destination. Mapped destinations keep the gate's
-// long-standing behavior (v6-NH/mapped-dst ACCEPTS under matching v6;
-// v4-NH/mapped-dst REFUSES as a mismatch); the render belt is what moves
-// (Codex-B3).
+// restriction) at strict commit and warned on the tolerant path, regardless
+// of destination. Explicit destination family checking remains independent:
+// a v6 next-hop and mapped-v6 prefix match families, while a v4 next-hop does
+// not. These remain config-gate contracts for the table-999 route owner.
 //
 // FAIL-ON-REVERT: drop the FRRAddrIsMapped arm from
 // validateBackupRouterDst and the mapped REFUSE cells compile clean.
@@ -62,8 +61,8 @@ func TestBackupRouterMappedNextHopLenientWarns_9820(t *testing.T) {
 }
 
 func TestBackupRouterMappedDestinationGateUnmoved_9820(t *testing.T) {
-	// B3 row 1: v6 NH + mapped dst — the gate ACCEPTS (v6 == v6), as
-	// before. The belt is what changes (it used to veto this row).
+	// B3 row 1: v6 NH + mapped destination — the config gate ACCEPTS (v6 == v6),
+	// as before; this is independent of the mapped-next-hop restriction.
 	tree := flatTreeFromSets(t,
 		"set system backup-router 2001:db8::1 destination ::ffff:10.0.0.0/104")
 	cfg := assertCommitAccepts(t, tree)
@@ -105,8 +104,7 @@ func TestBackupRouterPlainControls_9820(t *testing.T) {
 }
 
 // GLM-F2: a zoned literal is refused as malformed (net.ParseIP rejects
-// zones), so the belt must agree by omitting it — netip alone would
-// accept it and the renderer would emit a line FRR refuses.
+// zones); tolerant loads retain it, and the netlink reconciler omits it.
 func TestBackupRouterZonedNextHopRefused_9820(t *testing.T) {
 	tree := flatTreeFromSets(t, "set system backup-router fe80::1%eth0")
 	_, err := CompileConfig(tree)
@@ -118,6 +116,6 @@ func TestBackupRouterZonedNextHopRefused_9820(t *testing.T) {
 		t.Fatalf("lenient load must NOT fail, got: %v", err)
 	}
 	if cfg.System.BackupRouter != "fe80::1%eth0" {
-		t.Fatalf("lenient compile must retain the zoned value for the belt: %q", cfg.System.BackupRouter)
+		t.Fatalf("lenient compile must retain the zoned value for the netlink reconciler to omit: %q", cfg.System.BackupRouter)
 	}
 }

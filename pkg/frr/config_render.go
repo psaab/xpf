@@ -8,7 +8,6 @@
 //   - renderGenerateRoutes:      blackhole static routes for `generate` routes.
 //   - renderDHCPDefaults:        DHCP-learned default routes (AD 200), with
 //     suppression when explicit static defaults exist.
-//   - renderBackupRouter:        backup-router default (AD 250).
 //   - renderClusterModeDefaults: cluster-mode blackhole defaults (AD 250).
 //   - resolveECMP:               forwarding-table export policy → ecmpMaxPaths
 //     and (side effect) fc.ConsistentHash.
@@ -783,96 +782,6 @@ func renderDHCPDefaults(b *strings.Builder, fc *FullConfig) {
 	if wrote {
 		b.WriteString("!\n")
 	}
-}
-
-// renderBackupRouter emits the system backup-router as a fallback default
-// gateway with admin distance 250.
-func renderBackupRouter(b *strings.Builder, fc *FullConfig) {
-	if fc.BackupRouter == "" {
-		return
-	}
-	// #8597 (muse-004 K24): the same #6795 belt generateStaticRouteInTable
-	// carries, on the backup-router operands it was never extended to.
-	//
-	// The gap was a VALIDATOR/RENDERER DISAGREEMENT, not a missing check in
-	// isolation. validateBackupRouterDst (compiler_system.go, #4808/#2911)
-	// rejects a malformed next-hop, a malformed destination, and a
-	// next-hop/destination FAMILY MISMATCH at strict commit — and on the
-	// tolerant Store.Load / Store.SyncApply path downgrades each to a warning
-	// whose text ends "(ignored: backup-router default route not installed
-	// until corrected)". This renderer ignored nothing: it interpolated the
-	// value verbatim, so the promise in the log was false and the line it
-	// emitted failed the WHOLE managed-section reload. One vtysh add-batch
-	// exits non-zero on any CMD_WARNING_CONFIG_FAILED, so every other route on
-	// the box goes with it, and the operator's log actively points AWAY from
-	// the cause.
-	//
-	// All FOUR of the validator's checks are mirrored (malformed next-hop,
-	// mapped next-hop, malformed destination, family mismatch), not the two
-	// an operand-shape reading suggests. A v4 next-hop with a v6 destination
-	// individually well-formed on both operands and still renders
-	// `ipv6 route <v6dst> <v4nh>`, which fills the interface-name slot
-	// (normally inactive absent a same-named interface — #9820 corrected
-	// the old blanket "frr-reload rejects" mechanism claim).
-	//
-	// Skipping is the fail-closed answer, and it is what the validator already
-	// told the operator would happen. The alternative is losing the entire
-	// managed section, which takes the routes that ARE valid with it.
-	if !validFRRNextHopAddress(fc.BackupRouter) {
-		slog.Warn("frr: skipping backup-router route: next-hop is not a "+
-			"valid IP gateway address",
-			"next_hop", fc.BackupRouter, "issue", "#8597")
-		return
-	}
-	if fc.BackupRouterDst != "" && !validFRRRoutePrefix(fc.BackupRouterDst) {
-		slog.Warn("frr: skipping backup-router default route: destination is not a "+
-			"renderable prefix",
-			"next_hop", fc.BackupRouter, "destination", fc.BackupRouterDst,
-			"issue", "#8597")
-		return
-	}
-	// #9820: an IPv4-mapped next-hop is refused at commit (product
-	// restriction) and skipped here on the tolerant path, before the
-	// family comparison it would otherwise pass or fail under a false
-	// reason (it previously rendered `ipv6 route ::/0 ::ffff:… 250`).
-	if config.FRRAddrIsMapped(fc.BackupRouter) {
-		slog.Warn("frr: skipping backup-router route: IPv4-mapped IPv6 "+
-			"next-hops are not supported for backup-router (the commit-time "+
-			"gate warned this route would be ignored)",
-			"next_hop", fc.BackupRouter, "issue", "#9820")
-		return
-	}
-	if fc.BackupRouterDst != "" &&
-		config.FRRAddrFamily(fc.BackupRouterDst) != config.FRRAddrFamily(fc.BackupRouter) {
-		slog.Warn("frr: skipping backup-router route: destination family does "+
-			"not match next-hop family; backup-router requires a next-hop and "+
-			"destination of the same address family (#9820)",
-			"next_hop", fc.BackupRouter, "destination", fc.BackupRouterDst,
-			"issue", "#9820")
-		return
-	}
-	// Match the route prefix family to the next-hop (backup-router) family,
-	// not the destination family. An IPv6 backup-router with an empty/default
-	// destination must default to ::/0 and emit `ipv6 route ::/0 <v6nh>`;
-	// a v6 next-hop wants a v6 default. (The old comment claimed the
-	// `0.0.0.0/0` alternative — `ip route 0.0.0.0/0 <v6nh>` — is
-	// frr-reload-rejected; `ip route` in fact accepts a v6 gateway, so the
-	// default is about intent, not reload survival. #9820.)
-	nhV6 := config.FRRAddrFamily(fc.BackupRouter) == "v6"
-	dst := fc.BackupRouterDst
-	if dst == "" {
-		if nhV6 {
-			dst = "::/0"
-		} else {
-			dst = "0.0.0.0/0"
-		}
-	}
-	prefix := "ip"
-	if nhV6 || config.FRRAddrFamily(dst) == "v6" {
-		prefix = "ipv6"
-	}
-	fmt.Fprintf(b, "%s route %s %s 250\n", prefix, dst, fc.BackupRouter)
-	b.WriteString("!\n")
 }
 
 // renderPreferredRoutes emits the ip-monitoring effective-route overlay

@@ -39,14 +39,14 @@ package daemon
 import (
 	"context"
 	"errors"
-	"log/slog"
-	"os"
-	"strings"
-
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/frr"
 	"github.com/psaab/xpf/pkg/ipmon"
 	"github.com/psaab/xpf/pkg/rpm"
+	"github.com/vishvananda/netlink"
+	"log/slog"
+	"os"
+	"strings"
 )
 
 // routeOverlaySetter caches the overlay for full snapshot builds.
@@ -100,10 +100,19 @@ func (d *Daemon) commitOverlayForConfig(cfg *config.Config) []config.RouteOverla
 // compiled config plus the ip-monitoring overlay. It is the sole
 // constructor for BOTH the full apply path and the routes-only
 // actuator (the complete contract: static routes, generate-routes,
-// DHCP routes, policy export, backup-router, interface hints, RethMap,
-// IPv6 next-hop interfaces, ClusterMode, per-VRF instances, and the
-// overlay's PreferredRoutes).
+// DHCP routes, policy export, management-route exclusion, interface hints,
+// RethMap, IPv6 next-hop interfaces, ClusterMode, per-VRF instances, and
+// the overlay's PreferredRoutes).
 func (d *Daemon) assembleFRRConfig(cfg *config.Config, overlay []config.RouteOverlayEntry) *frr.FullConfig {
+	current := mgmtStaticRouteConnectedInventory(managementVRFIfaceSet(cfg))
+	return d.assembleFRRConfigWithMgmtRouteInventory(cfg, overlay, current)
+}
+
+func (d *Daemon) assembleFRRConfigWithMgmtRouteInventory(
+	cfg *config.Config,
+	overlay []config.RouteOverlayEntry,
+	mgmtRouteInventory [2][]netlink.Route,
+) *frr.FullConfig {
 	// #11310: the config gate rejects cross-instance IGP interface references,
 	// and this render belt makes tolerant loads inert rather than activating an
 	// interface in the wrong FRR routing instance. Resolve all operands in one
@@ -165,22 +174,25 @@ func (d *Daemon) assembleFRRConfig(cfg *config.Config, overlay []config.RouteOve
 	dhcpRoutes := d.collectDHCPRoutes()
 	ribRoutes, ribRouteInventoryFailed := d.collectFRRClasslessRIBRoutes(cfg, dhcpRoutes)
 
+	// Management-owned global statics have their separate table-999 netlink
+	// owner; do not also emit them as unscoped FRR routes in the data table.
+	mgmtSet := managementVRFIfaceSet(cfg)
+	staticRoutes, inet6StaticRoutes := mgmtStaticRoutesForFRR(
+		cfg, mgmtSet, ipv6NextHopInterfaces[""], mgmtRouteInventory)
 	fc := &frr.FullConfig{
 		OSPF:                    globalProtocols.OSPF,
 		OSPFv3:                  globalProtocols.OSPFv3,
 		BGP:                     globalProtocols.BGP,
 		RIP:                     globalProtocols.RIP,
 		ISIS:                    globalProtocols.ISIS,
-		StaticRoutes:            cfg.RoutingOptions.StaticRoutes,
-		Inet6StaticRoutes:       cfg.RoutingOptions.Inet6StaticRoutes,
+		StaticRoutes:            staticRoutes,
+		Inet6StaticRoutes:       inet6StaticRoutes,
 		GenerateRoutes:          cfg.RoutingOptions.GenerateRoutes,
 		DHCPRoutes:              dhcpRoutes,
 		RIBRoutes:               ribRoutes,
 		RIBRouteInventoryFailed: ribRouteInventoryFailed,
 		PolicyOptions:           &cfg.PolicyOptions,
 		ForwardingTableExport:   cfg.RoutingOptions.ForwardingTableExport,
-		BackupRouter:            cfg.System.BackupRouter,
-		BackupRouterDst:         cfg.System.BackupRouterDst,
 		InterfaceBandwidths:     ifaceBandwidths,
 		InterfacePointToPoint:   ifaceP2P,
 		RethMap:                 cfg.RethToPhysical(),
