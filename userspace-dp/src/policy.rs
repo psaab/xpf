@@ -1570,7 +1570,7 @@ impl AppCatalog {
         // protocol-only entry — then by lowest app_id WITHIN a tier. This is the
         // exact binary-specificity rule the AppID-disabled Go fallback already
         // uses (`resolveTupleFallback`, #2578: `portBased` beats protocol-only,
-        // ties broken by name == lowest id in sorted-name order), so the same
+        // ties broken by the lowest assigned app_id), so the same
         // 5-tuple resolves to the same application label whether AppID is ON
         // (this catalog) or OFF (the Go fallback). `exact_dst` entries are always
         // port-constrained, so they participate in the port-constrained tier.
