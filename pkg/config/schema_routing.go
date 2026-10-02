@@ -114,14 +114,12 @@ func staticRouteNode() *schemaNode {
 					// renders as a FLOATING backup at its own admin distance — it is
 					// NO LONGER folded into the single route-level preference (that
 					// fold was the #3871 bug: it made every next-hop equal-cost).
-					// The typing is still the same i32 wire field gated for the
-					// route-level `preference` leaf (#3827): a negative / i32-
-					// overflow value is rejected at commit (naming the leaf) instead
-					// of only tripping the Rust snapshot backstop
-					// (RoutePreferenceOutOfRange) with retained-prior-state.
+					// Use the same strictly-positive range as the route-level leaf:
+					// FRR defaults an omitted static distance to 1, while the Rust FIB
+					// preserves 0, so accepting 0 here would make the two diverge.
 					"preference": {desc: "Preference", args: 1, placeholder: "<value>",
-						valueType: ValueInteger, valueDesc: "Route preference / administrative distance (0..2147483647; lower = more preferred, default 5)",
-						valueExamples: []string{"5", "100"}, validator: ValidateInteger(0, maxWireI32), children: nil},
+						valueType: ValueInteger, valueDesc: "Route preference / administrative distance (1..2147483647; lower = more preferred, default 5)",
+						valueExamples: []string{"5", "100"}, validator: ValidateInteger(1, maxWireI32), children: nil},
 					// Metric is carried per qualified next-hop (NextHopEntry.Metric,
 					// #3871) and reaches IGP export through synthesized FRR
 					// redistribution route-maps (#11447). It does not affect
@@ -133,13 +131,13 @@ func staticRouteNode() *schemaNode {
 			"reject":     {desc: "Reject route (send ICMP unreachable)", children: nil},
 			"next-table": {desc: "Resolve in another routing table", args: 1, placeholder: "<table>", children: nil},
 			"rib-group":  {desc: "Static route RIB group (route export is not implemented)", args: 1, placeholder: "<group-name>", children: nil},
-			// #3771 (L1): validate the route preference at the Go commit boundary
-			// — a non-negative admin distance representable on the i32 wire. This
-			// is the primary gate; the Rust helper backstops it
-			// (RoutePreferenceOutOfRange) for a corrupt / version-drifted snapshot.
+			// #3771/#11454: validate route preference at the Go commit boundary
+			// as a positive i32 administrative distance. FRR defaults an omitted
+			// distance operand to 1, while the Rust FIB preserves 0; excluding 0
+			// prevents the render paths below from silently changing its meaning.
 			"preference": {desc: "Route preference (administrative distance)", args: 1, placeholder: "<value>",
-				valueType: ValueInteger, valueDesc: "Route preference / administrative distance (0..2147483647; lower = more preferred, default 5)",
-				valueExamples: []string{"5", "100"}, validator: ValidateInteger(0, maxWireI32), children: nil},
+				valueType: ValueInteger, valueDesc: "Route preference / administrative distance (1..2147483647; lower = more preferred, default 5)",
+				valueExamples: []string{"5", "100"}, validator: ValidateInteger(1, maxWireI32), children: nil},
 		},
 	}
 }
