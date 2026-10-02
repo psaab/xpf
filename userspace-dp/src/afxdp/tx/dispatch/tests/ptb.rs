@@ -1071,14 +1071,8 @@ fn tunnel_nodf_in_mtu_takes_no_ptb_arm_10705() {
 #[test]
 fn mtu_signalled_forward_does_not_enqueue_mirror_clone_11432() {
     let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
-    let (bindings, _dbg, _counters, _reasons) = run_ptb_dispatch_with_mirror(
-        forwarding_for_ptb(1400),
-        0,
-        true,
-        0,
-        1600,
-        0,
-    );
+    let (bindings, _dbg, _counters, _reasons) =
+        run_ptb_dispatch_with_mirror(forwarding_for_ptb(1400), 0, true, 0, 1600, 0);
 
     assert_eq!(
         bindings[1].tx_pipeline.pending_tx_local.len()
@@ -1090,23 +1084,14 @@ fn mtu_signalled_forward_does_not_enqueue_mirror_clone_11432() {
         bindings[2].tx_pipeline.pending_tx_prepared.is_empty(),
         "an MTU-signalled packet must not produce an analyzer clone"
     );
-    assert_eq!(
-        bindings[0].live.mirrored_packets.load(Ordering::Relaxed),
-        0
-    );
+    assert_eq!(bindings[0].live.mirrored_packets.load(Ordering::Relaxed), 0);
 }
 
 #[test]
 fn successful_forward_commits_one_mirror_clone_11432() {
     let frame = large_udp_v4_df_frame(1400);
-    let (bindings, dbg, _counters, reasons) = run_ptb_dispatch_with_mirror(
-        forwarding_for_ptb(1500),
-        0,
-        true,
-        0,
-        1400,
-        0,
-    );
+    let (bindings, dbg, _counters, reasons) =
+        run_ptb_dispatch_with_mirror(forwarding_for_ptb(1500), 0, true, 0, 1400, 0);
 
     assert_eq!(
         bindings[1].tx_pipeline.pending_tx_local.len()
@@ -1121,7 +1106,11 @@ fn successful_forward_commits_one_mirror_clone_11432() {
         dbg.enqueue_ok,
     );
     let mirrors = &bindings[2].tx_pipeline.pending_tx_prepared;
-    assert_eq!(mirrors.len(), 1, "one successfully forwarded packet yields one clone");
+    assert_eq!(
+        mirrors.len(),
+        1,
+        "one successfully forwarded packet yields one clone"
+    );
     let mirror = mirrors.front().expect("mirror request");
     assert!(mirror.mirror_clone);
     assert_eq!(

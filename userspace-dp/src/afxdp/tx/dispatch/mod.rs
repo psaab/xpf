@@ -1030,7 +1030,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
             recycle_ingress_frame(ingress_binding, source_offset, now_ns);
             continue;
         };
-        let staged_mirror = stage_sampled_mirror_clone(
+        let mut staged_mirror = stage_sampled_mirror_clone(
             forwarding,
             request.meta.ingress_ifindex as i32,
             request.meta.ingress_vlan_id,
@@ -1258,6 +1258,9 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                 if can_rewrite_in_place {
                     let selected_tcp_mss =
                         select_tcp_mss(forwarding, &request.decision, &request.meta);
+                    if let Some(staged) = staged_mirror.as_mut() {
+                        snapshot_staged_mirror_clone(staged, source_frame);
+                    }
                     match rewrite_forwarded_frame_in_place(
                         unsafe { &*ingress_area },
                         request.desc,
@@ -1633,6 +1636,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
                     forwarding,
                     request.ingress_queue_id,
                     staged,
+                    source_frame,
                     now_ns,
                 );
             }

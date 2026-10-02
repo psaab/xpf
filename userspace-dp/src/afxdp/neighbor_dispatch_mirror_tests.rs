@@ -669,7 +669,7 @@
             11,
             MirrorRuntimeConfig {
                 output_ifindex: 33,
-                rate: 0,
+                rate: 2,
             },
         );
 
@@ -710,6 +710,10 @@
         );
 
         assert!(binding.pending_neigh.is_empty());
+        assert_eq!(
+            binding.mirror_sample_counter, 1,
+            "a successfully forwarded sampled packet commits the next sample slot"
+        );
         assert_eq!(binding.live.mirrored_packets.load(Ordering::Relaxed), 1);
         assert_eq!(
             binding.live.mirrored_bytes.load(Ordering::Relaxed),
@@ -801,7 +805,10 @@
             &mut retry_dbg,
         );
         assert!(binding.pending_neigh.is_empty());
-        assert_eq!(binding.mirror_sample_counter, 0);
+        assert_eq!(
+            binding.mirror_sample_counter, 1,
+            "a failed neighbor rewrite must not commit the next sample slot"
+        );
         assert_eq!(binding.live.mirrored_packets.load(Ordering::Relaxed), 1);
         assert_eq!(right[1].tx_pipeline.pending_tx_prepared.len(), 1);
     }

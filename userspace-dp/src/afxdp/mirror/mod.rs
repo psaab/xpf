@@ -4,8 +4,8 @@ mod fast_path;
 mod resolver;
 
 pub(in crate::afxdp) use fast_path::{
-    commit_staged_mirror_clone, enqueue_admitted_mirror_clone_to_live, enqueue_sampled_mirror_clone,
-    stage_sampled_mirror_clone, StagedMirrorClone,
+    commit_staged_mirror_clone, enqueue_admitted_mirror_clone_to_live,
+    enqueue_sampled_mirror_clone, snapshot_staged_mirror_clone, stage_sampled_mirror_clone,
 };
 // `enqueue_mirror_clone`, `enqueue_mirror_clone_to_live`, and
 // `enqueue_sampled_mirror_clone_to_live` are reachable from `crate::afxdp` but

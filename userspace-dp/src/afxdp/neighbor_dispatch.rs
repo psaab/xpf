@@ -887,7 +887,7 @@ pub(super) fn retry_pending_neigh(
             binding.tx_pipeline.pending_fill_frames.push_back(pkt.addr);
             continue;
         }
-        let staged_mirror = stage_sampled_mirror_clone(
+        let mut staged_mirror = stage_sampled_mirror_clone(
             forwarding,
             pkt.meta.ingress_ifindex as i32,
             pkt.meta.ingress_vlan_id,
@@ -896,6 +896,9 @@ pub(super) fn retry_pending_neigh(
             pkt.meta.into(),
             pkt.flow_key.as_ref(),
         );
+        if let Some(staged) = staged_mirror.as_mut() {
+            snapshot_staged_mirror_clone(staged, source_frame);
+        }
         let selected_tcp_mss = select_tcp_mss(forwarding, &decision, &pkt.meta.into());
         let Some(rewrite_result) = rewrite_forwarded_frame_in_place(
             &*area,
@@ -1015,6 +1018,7 @@ pub(super) fn retry_pending_neigh(
                     forwarding,
                     ingress_queue,
                     staged,
+                    source_frame,
                     now_ns,
                 );
             }
