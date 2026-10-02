@@ -394,10 +394,11 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// is unconditionally before every early-return path in the body (the only
 	// aborting one is the dataplane apply at compileErrorMustAbortApply).
 	//
-	// reconcileSNMP is idempotent: an unchanged SNMP stanza is a no-op (no
-	// listener bounce). The in-place swap holds the agent's cfgMu so the UDP
-	// listener and in-flight polls are not interrupted. During the boot apply
-	// it no-ops the start (snmpBootReady is still false) so the boot block
+	// reconcileSNMP is idempotent: an unchanged SNMP stanza and management-VRF
+	// bind are a no-op (no listener bounce). The in-place SNMP stanza swap holds
+	// the agent's cfgMu so the UDP listener and in-flight polls are not
+	// interrupted; a changed VRF bind restarts the listener. During the boot
+	// apply it no-ops the start (snmpBootReady is still false) so the boot block
 	// owns the first start, which honors config-only / bootstrap suppression.
 	d.reconcileSNMP(cfg)
 

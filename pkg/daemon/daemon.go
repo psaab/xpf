@@ -646,8 +646,9 @@ type Daemon struct {
 	snmpCtx            context.Context    // lifetime context for the agent + monitor goroutines
 	snmpCancel         context.CancelFunc // cancels snmpCtx (day-2 disable / shutdown)
 	snmpWg             *sync.WaitGroup    // joins the listener + link-state monitor goroutines
-	snmpHash           uint64             // FxHash-free FNV of the live SNMP stanza (idempotence gate)
+	snmpHash           uint64             // FxHash-free FNV of the SNMP stanza and its management-VRF bind
 	snmpHashSet        bool               // true once snmpHash reflects a running agent
+	snmpVRFDevice      string             // VRF device pinned by the running listener; empty means main table
 	snmpMonitorRunning bool               // true while the link-state trap monitor goroutine is live
 	snmpBootReady      bool               // set true after the boot block; gates the reconcile START path
 	// snmpServe binds the agent's UDP/161 listener and then serves for the
