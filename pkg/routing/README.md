@@ -594,7 +594,7 @@ delegate to the owning domain. Exported types:
   whose dimensions multiply to millions of tuples exhausted memory/CPU DURING
   expansion — the cap did not protect against the blow-up it was meant to bound
   (a commit/apply/scrape DoS: `BuildPBRRules` runs on the apply path and on the
-  `PBRBuildStats` Prometheus scrape). The builder now computes each term's
+  `PBRBuildRulesAndStats` Prometheus scrape). The builder now computes each term's
   product SIZE from the resolved dimension lengths (`pbrTermProduct`, O(dimensions)
   with a saturating multiply) BEFORE the nested loop and DROPS WHOLE any term
   that would push the running total past the remaining priority-window budget —

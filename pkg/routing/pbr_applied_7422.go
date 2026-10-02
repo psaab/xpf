@@ -23,20 +23,12 @@ import (
 // mismatch check explicitly cannot verify the DSCP selector (or action). The
 // priority-band SSOT is shared with the install side (#4479); rules outside it
 // are not ours.
-// PBRAppliedCount returns even-priority PBR-band occupancy across both address
-// families and whether readback SUCCEEDED. It intentionally does not claim
-// these rules match the desired config; use PBRAppliedStatus for the sampled
-// observable mismatch count.
 //
 // The bool is not advisory. A failed RuleList is indistinguishable from "no
 // rules installed" in the count alone, and reporting 0 against a non-zero
 // desired count would look exactly like a total install failure. A caller that
 // cannot read must omit both readback metrics rather than publish fabricated
 // zeros. Both families must succeed.
-func PBRAppliedCount(ops ruleOps) (count int, ok bool) {
-	count, _, ok = PBRAppliedStatus(ops, nil)
-	return
-}
 
 // PBRAppliedStatus returns PBR-band occupancy, the number of mismatched
 // expected lookup slots, and whether both family readbacks succeeded.
@@ -54,21 +46,17 @@ func PBRAppliedStatus(ops ruleOps, desired []PBRRule) (bandOccupancy, mismatched
 	}
 	lo := uint32(config.PBRRulePriorityBase)
 	hi := lo + uint32(config.PBRRuleWindow)
-	expected := make([]netlink.Rule, len(desired))
-	expectedOK := make([]bool, len(desired))
-	for i := range desired {
-		expected[i], expectedOK[i] = pbrExpectedLookupRule(desired[i], int(lo)+2*i)
-	}
-
-	type lookupKey struct {
-		family   int
-		priority int
-	}
 	type observedSlot struct {
-		count   int
-		matched bool
+		expected   netlink.Rule
+		expectedOK bool
+		count      int
+		matched    bool
 	}
-	observed := make(map[lookupKey]observedSlot)
+	slots := make([]observedSlot, len(desired))
+	for index, pbr := range desired {
+		slots[index].expected, slots[index].expectedOK =
+			pbrExpectedLookupRule(pbr, int(lo)+2*index)
+	}
 	for _, family := range []int{syscall.AF_INET, syscall.AF_INET6} {
 		rules, err := ops.RuleList(family)
 		if err != nil {
@@ -81,42 +69,26 @@ func PBRAppliedStatus(ops ruleOps, desired []PBRRule) (bandOccupancy, mismatched
 				continue
 			}
 			bandOccupancy++
-			key := lookupKey{family: family, priority: priority}
-			slot := observed[key]
 			index := (priority - int(lo)) / 2
-			if slot.count == 0 {
-				if index >= 0 && index < len(desired) &&
-					desired[index].Family == family && expectedOK[index] {
-					slot.matched = pbrNetlinkRuleMatches(expected[index], rule)
-				}
-			} else if !slot.matched {
-				if index >= 0 && index < len(desired) &&
-					desired[index].Family == family && expectedOK[index] &&
-					pbrNetlinkRuleMatches(expected[index], rule) {
-					slot.matched = true
-				}
+			if index >= len(desired) || desired[index].Family != family {
+				mismatched++
+				continue
 			}
+			slot := &slots[index]
 			slot.count++
-			observed[key] = slot
+			if slot.expectedOK && !slot.matched &&
+				pbrNetlinkRuleMatches(slot.expected, rule) {
+				slot.matched = true
+			}
 		}
 	}
 
-	seen := make([]bool, len(desired))
-	for key, slot := range observed {
-		index := (key.priority - int(lo)) / 2
-		if index < 0 || index >= len(desired) || desired[index].Family != key.family {
-			mismatched += slot.count
-			continue
-		}
-		seen[index] = true
-		if !slot.matched {
+	for _, slot := range slots {
+		if slot.count == 0 || !slot.matched {
 			mismatched++
 		}
-		mismatched += slot.count - 1
-	}
-	for _, present := range seen {
-		if !present {
-			mismatched++
+		if slot.count > 1 {
+			mismatched += slot.count - 1
 		}
 	}
 	return bandOccupancy, mismatched, true
@@ -170,12 +142,6 @@ func pbrNetlinkRuleMatches(expected, observed netlink.Rule) bool {
 // mismatch behavior can be exercised with an in-memory ruleOps fake.
 func PBRAppliedStatusLive(desired []PBRRule) (int, int, bool) {
 	return PBRAppliedStatus(netlinkRuleOps{}, desired)
-}
-
-// PBRAppliedCountLive is retained for callers that need only band occupancy.
-func PBRAppliedCountLive() (int, bool) {
-	count, _, ok := PBRAppliedStatusLive(nil)
-	return count, ok
 }
 
 // netlinkRuleOps is the live implementation, listing through the package-level

@@ -13,8 +13,8 @@ import (
 // two independent computations that agree today and drift tomorrow — an alias
 // that drifts is two metrics with one name's worth of trust, and the drift is
 // invisible because each is individually plausible. So this asserts equality of
-// the VALUES, and the production code emits both from a single PBRBuildStats
-// call so they cannot differ.
+// the VALUES, and production emits both from a single PBRBuildRulesAndStats
+// result so they cannot differ.
 //
 // The alias points at _desired, never at _applied. Redefining a published
 // metric's meaning under existing alert expressions is the same hazard as

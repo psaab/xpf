@@ -3,11 +3,10 @@ package api
 import "github.com/prometheus/client_golang/prometheus"
 
 func (c *xpfCollector) initForwardingDescriptors() {
-	// #4422: policy-based-routing (filter-based-forwarding) build health.
-	// xpf_pbr_rules_installed is the number of kernel `ip rule` FBF entries
-	// the active config's routing-instance filter terms yield (the
-	// desired-install set). Config-derived (routing.PBRBuildStats, a pure
-	// function of config), emitted BEFORE the dataplane gate.
+	// #4422/#7422/#11440: policy-based-routing (filter-based-forwarding)
+	// build-health and kernel readback. PBRBuildRulesAndStats produces the
+	// desired rules and degraded-term count from active config (no netlink);
+	// config-derived gauges emit before the dataplane gate.
 	// #7422 row 12: the name says "installed" and the value is DESIRED. It is
 	// a published metric, so it keeps its CURRENT config-derived meaning and
 	// becomes an alias of xpf_pbr_rules_desired below — never of _applied.
@@ -17,28 +16,28 @@ func (c *xpfCollector) initForwardingDescriptors() {
 	// reports the switch. Renaming outright fails to an alert that STOPS
 	// FIRING, which is invisible until the moment it is needed.
 	//
-	// DEPRECATED. Replaced by xpf_pbr_rules_desired (identical value) and
-	// xpf_pbr_rules_applied (kernel readback). REMOVAL IS NOT SCHEDULED HERE:
-	// the compatibility surface belongs to whoever owns the dashboards and
-	// alert rules, and that decision needs a named owner. Before it is removed,
-	// every alert expression and dashboard panel selecting
-	// xpf_pbr_rules_installed must have been moved to one of the two
-	// replacements — "deprecated for a release" with no removal trigger becomes
-	// permanent, so the trigger is stated as a condition rather than a date.
+	// DEPRECATED. Replaced by xpf_pbr_rules_desired (identical value),
+	// xpf_pbr_rules_applied (PBR-band lookup-entry count), and
+	// xpf_pbr_rules_mismatched (desired/readback structural comparison).
+	// REMOVAL IS NOT SCHEDULED HERE: the compatibility surface belongs to
+	// whoever owns the dashboards and alert rules, and that decision needs a
+	// named owner. Before it is removed, every alert expression and dashboard
+	// panel selecting xpf_pbr_rules_installed must have been moved to the
+	// replacements.
 	c.pbrRulesInstalled = prometheus.NewDesc(
 		"xpf_pbr_rules_installed",
 		"DEPRECATED alias of xpf_pbr_rules_desired — the number of kernel "+
 			"ip-rule filter-based-forwarding entries the active config's "+
-			"routing-instance filter terms YIELD, not the number the kernel "+
-			"accepted. Use xpf_pbr_rules_desired, or xpf_pbr_rules_applied for "+
-			"the readback (#4422, #7422).",
+			"routing-instance filter terms YIELD. Use _desired for this value, "+
+			"or compare it with _applied and _mismatched readback (#4422, #7422, "+
+			"#11440).",
 		nil, nil,
 	)
 	// #7422 row 12: the honest name for the config-derived value. Identical to
 	// xpf_pbr_rules_installed by construction — both are emitted from the same
-	// PBRBuildStats call, and a test asserts they carry the SAME VALUE rather
-	// than merely both existing. An alias that drifts is two metrics with one
-	// name's worth of trust.
+	// PBRBuildRulesAndStats result, and the alias test asserts they carry the
+	// SAME VALUE rather than merely both existing. An alias that drifts is two
+	// metrics with one name's worth of trust.
 	c.pbrRulesDesired = prometheus.NewDesc(
 		"xpf_pbr_rules_desired",
 		"Number of kernel ip-rule filter-based-forwarding entries the active "+
@@ -52,17 +51,18 @@ func (c *xpfCollector) initForwardingDescriptors() {
 	// Both readback metrics are OMITTED when either family listing fails.
 	c.pbrRulesApplied = prometheus.NewDesc(
 		"xpf_pbr_rules_applied",
-		"Number of even-priority slots occupied in the PBR rule priority band "+
-			"(band occupancy only; this does not prove the rules match the active "+
+		"Number of even-priority rule entries in the PBR priority band "+
+			"(band occupancy only; this does not prove the entries match the active "+
 			"config). Absent when netlink readback fails (#7422, #11440).",
 		nil, nil,
 	)
 	c.pbrRulesMismatched = prometheus.NewDesc(
 		"xpf_pbr_rules_mismatched",
-		"Number of missing, mismatched, unexpected, or duplicate PBR lookup slots "+
-			"compared with the desired rules using netlink-visible fields. "+
-			"netlink v1.3.1 RuleList does not expose FRA_DSCP or rule action, so "+
-			"those fields cannot be checked. Absent when readback fails (#11440).",
+		"Number of missing or structurally mismatched desired lookup rules, "+
+			"plus unexpected or duplicate in-band lookup entries, compared using "+
+			"netlink-visible fields. RuleList does not expose FRA_DSCP or the rule "+
+			"action, so those fields cannot be checked. Absent when readback fails "+
+			"(#11440).",
 		nil, nil,
 	)
 	// #4422/#11307: number of routing-instance filter terms DROPPED from the

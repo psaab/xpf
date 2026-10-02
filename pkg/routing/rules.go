@@ -1248,14 +1248,6 @@ func PBRBuildRulesAndStats(cfg *config.Config) (rules []PBRRule, degraded int) {
 	return rules, 1
 }
 
-// PBRBuildStats retains the desired-rule count API for callers that need only
-// the two historical build-health counts. Collectors needing structural
-// readback should use PBRBuildRulesAndStats so rule construction happens once.
-func PBRBuildStats(cfg *config.Config) (installed, degraded int) {
-	rules, degraded := PBRBuildRulesAndStats(cfg)
-	return len(rules), degraded
-}
-
 // pbrAttachment binds a firewall filter to the Linux ingress interface it is
 // attached to as an interface-unit input filter. Carrying the interface
 // identity (not just the filter name, #5117) lets BuildPBRRules scope each

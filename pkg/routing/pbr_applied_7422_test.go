@@ -33,7 +33,7 @@ func rule7422(prio int) netlink.Rule { return netlink.Rule{Priority: prio} }
 // mismatches are counted separately against desired rules by
 // PBRAppliedStatus; occupancy still counts an in-band even slot without
 // claiming its table or match fields are correct.
-func TestPBRAppliedCountBandAndValidity7422(t *testing.T) {
+func TestPBRAppliedStatusBandAndValidity7422(t *testing.T) {
 	base := config.PBRRulePriorityBase
 	top := base + config.PBRRuleWindow
 
@@ -72,7 +72,7 @@ func TestPBRAppliedCountBandAndValidity7422(t *testing.T) {
 		{"nil ops invalidates", nil, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := PBRAppliedCount(tc.ops)
+			got, _, ok := PBRAppliedStatus(tc.ops, nil)
 			if ok != tc.wantK {
 				t.Fatalf("validity = %v, want %v", ok, tc.wantK)
 			}
@@ -119,6 +119,36 @@ func TestPBRAppliedStatusDetectsWrongTableInBand11440(t *testing.T) {
 		t.Fatalf("wrong-table in-band rule: occupancy=%d mismatched=%d ok=%v, want 1/1/true",
 			occupancy, mismatched, ok)
 	}
+	wrongMatch := expected
+	wrongMatch.IifName = "eth1"
+	occupancy, mismatched, ok = PBRAppliedStatus(
+		fakeRuleOps7422{v4: []netlink.Rule{wrongMatch}},
+		desired,
+	)
+	if !ok || occupancy != 1 || mismatched != 1 {
+		t.Fatalf("wrong-match in-band rule: occupancy=%d mismatched=%d ok=%v, want 1/1/true",
+			occupancy, mismatched, ok)
+	}
+	duplicate := []netlink.Rule{expected, expected}
+	occupancy, mismatched, ok = PBRAppliedStatus(
+		fakeRuleOps7422{v4: duplicate},
+		desired,
+	)
+	if !ok || occupancy != 2 || mismatched != 1 {
+		t.Fatalf("duplicate in-band rule: occupancy=%d mismatched=%d ok=%v, want 2/1/true",
+			occupancy, mismatched, ok)
+	}
+
+	unexpectedPriority := expected
+	unexpectedPriority.Priority += 2
+	occupancy, mismatched, ok = PBRAppliedStatus(
+		fakeRuleOps7422{v4: []netlink.Rule{unexpectedPriority}},
+		desired,
+	)
+	if !ok || occupancy != 1 || mismatched != 2 {
+		t.Fatalf("unexpected in-band rule: occupancy=%d mismatched=%d ok=%v, want 1/2/true",
+			occupancy, mismatched, ok)
+	}
 
 	occupancy, mismatched, ok = PBRAppliedStatus(fakeRuleOps7422{}, desired)
 	if !ok || occupancy != 0 || mismatched != 1 {
@@ -131,13 +161,13 @@ func TestPBRAppliedStatusDetectsWrongTableInBand11440(t *testing.T) {
 // pass if the family loop returned early with whatever it had — the metric
 // would silently halve during an IPv6 hiccup, which is worse than an absent
 // series because it looks like a real regression.
-func TestPBRAppliedCountRefusesAPartialRead7422(t *testing.T) {
+func TestPBRAppliedStatusRefusesAPartialRead7422(t *testing.T) {
 	base := config.PBRRulePriorityBase
 	ops := fakeRuleOps7422{
 		v4:    []netlink.Rule{rule7422(base), rule7422(base + 1)},
 		errV6: errors.New("v6 unavailable"),
 	}
-	got, ok := PBRAppliedCount(ops)
+	got, _, ok := PBRAppliedStatus(ops, nil)
 	if ok {
 		t.Fatalf("a failed v6 read must invalidate the whole count, got %d with ok=true", got)
 	}

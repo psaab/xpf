@@ -2065,23 +2065,23 @@ func TestBuildPBRRules_IifNamePerInterface(t *testing.T) {
 	}
 }
 
-// TestPBRBuildStats pins the #4422 observability contract: PBRBuildStats returns
-// the installed ip-rule count and the count of routing-instance filter terms
-// DROPPED from the kernel FBF mirror (fail-closed under-steer), matching what
-// BuildPBRRules produces. These feed the xpf_pbr_rules_installed /
-// xpf_pbr_degraded_terms gauges.
-func TestPBRBuildStats(t *testing.T) {
+// TestPBRBuildRulesAndStats pins the #4422 observability contract: the desired
+// ip-rule set and the count of routing-instance filter terms DROPPED from the
+// kernel FBF mirror (fail-closed under-steer) match what BuildPBRRules produces.
+// These feed the desired/installed-alias and degraded-term gauges.
+func TestPBRBuildRulesAndStats(t *testing.T) {
 	instances := []*config.RoutingInstanceConfig{
 		{Name: "ATT", TableID: 101},
 	}
 
 	t.Run("nil config is zero", func(t *testing.T) {
-		if installed, degraded := PBRBuildStats(nil); installed != 0 || degraded != 0 {
-			t.Errorf("PBRBuildStats(nil) = %d/%d, want 0/0", installed, degraded)
+		rules, degraded := PBRBuildRulesAndStats(nil)
+		if len(rules) != 0 || degraded != 0 {
+			t.Errorf("PBRBuildRulesAndStats(nil) = %d rules/%d degraded, want 0/0", len(rules), degraded)
 		}
 	})
 
-	t.Run("installed counts built rules", func(t *testing.T) {
+	t.Run("desired rules count built rules", func(t *testing.T) {
 		filter := &config.FirewallFilter{
 			Name: "fbf",
 			Terms: []*config.FirewallFilterTerm{
@@ -2089,9 +2089,9 @@ func TestPBRBuildStats(t *testing.T) {
 				{Name: "b", DestAddresses: []string{"192.168.0.0/16"}, RoutingInstance: "ATT"},
 			},
 		}
-		installed, degraded := PBRBuildStats(pbrTestConfig("inet", filter, instances, nil))
-		if installed != 2 {
-			t.Errorf("installed = %d, want 2", installed)
+		rules, degraded := PBRBuildRulesAndStats(pbrTestConfig("inet", filter, instances, nil))
+		if len(rules) != 2 {
+			t.Errorf("desired rules = %d, want 2", len(rules))
 		}
 		if degraded != 0 {
 			t.Errorf("degraded = %d, want 0", degraded)
@@ -2109,9 +2109,9 @@ func TestPBRBuildStats(t *testing.T) {
 				{Name: "bad2", SourceAddresses: []string{"10.0.3.0/24"}, RoutingInstance: "ATT", Action: "reject"},
 			},
 		}
-		installed, degraded := PBRBuildStats(pbrTestConfig("inet", filter, instances, nil))
-		if installed != 1 {
-			t.Errorf("installed = %d, want 1 (only the valid term steers)", installed)
+		rules, degraded := PBRBuildRulesAndStats(pbrTestConfig("inet", filter, instances, nil))
+		if len(rules) != 1 {
+			t.Errorf("desired rules = %d, want 1 (only the valid term steers)", len(rules))
 		}
 		if degraded != 2 {
 			t.Errorf("degraded = %d, want 2 (both contradictory terms dropped)", degraded)

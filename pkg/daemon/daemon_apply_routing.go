@@ -371,8 +371,8 @@ func (d *Daemon) applyPolicyRoutingRules(cfg *config.Config) error {
 			// only; on the fast path it is still steered, and a slow-path packet
 			// UNDER-steers to the main table (the fail-safe direction — never an
 			// address-only OVER-steer / cross-VRF leak, rules.go BuildPBRRules).
-			// The degradation is already observable (this WARN + the #4422
-			// PBRBuildStats degraded gauge), not silent. ApplyPBRRules(pbrRules)
+			// The degradation is already observable (this WARN and the
+			// xpf_pbr_degraded_terms gauge), not silent. ApplyPBRRules(pbrRules)
 			// below fully reconciles whatever WAS built (deleting any stale
 			// rule), so no stale-or-missing cross-VRF policy survives in the
 			// mirror — the #5844 bug class is the netlink RuleAdd/RuleDel failure

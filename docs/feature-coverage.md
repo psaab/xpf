@@ -404,14 +404,15 @@ the userspace dataplane admission boundary is in
   `xpf_host_inbound_icmp_nd_accept_total{type}` (#4759 — the GLOBAL ICMP-error /
   ND accept rules on the `inet xpf_hostinbound` chain, counted per type-class
   `icmp6_nd` / `icmp6_error` / `icmp4_error`; AGGREGATE across all zones because
-  those accept rules are global, not per-zone). Policy-based
   routing (filter-based-forwarding) build health is exported as the
   gauges `xpf_pbr_rules_desired` (config-derived), `xpf_pbr_rules_applied`
-  (kernel readback, omitted when the read fails) and `xpf_pbr_degraded_terms`
-  — with `xpf_pbr_rules_installed` retained as a deprecated alias of
-  `xpf_pbr_rules_desired`
-  (#4422 — the count of routing-instance filter terms dropped from the kernel
-  FBF mirror by the fail-closed under-steer rule; see `docs/multi-wan.md`).
+  (even-priority entry count in the PBR priority band, not a structural
+  verification), `xpf_pbr_rules_mismatched` (missing or structurally different
+  expected rules plus unexpected/duplicate entries, using netlink-visible
+  fields), and `xpf_pbr_degraded_terms`; both readback gauges are omitted if
+  either address-family read fails. `xpf_pbr_rules_installed` remains a
+  deprecated alias of `xpf_pbr_rules_desired` (#4422, #7422, #11440 — see
+  `docs/multi-wan.md` for readback limits).
 - **SNMP**: system + ifTable MIB. Community `clients` source-IP restriction
   ENFORCED (#4289): `snmp community <c> clients { <prefix> [restrict]; }`
   scopes a community to the listed source prefixes — a v2c query from a source

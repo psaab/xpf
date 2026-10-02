@@ -7,13 +7,13 @@ import (
 )
 
 // TestPBRStatusEmittedWhenDataplaneUnloaded is the #4422 fail-on-revert proof:
-// the PBR/FBF build-health gauges are derived from the active config
-// (routing.PBRBuildStats, a pure function — no netlink), so they must be emitted
-// even with the dataplane unloaded (config-only / degraded boot). Collect must
-// call collectPBRStatus BEFORE the `dp == nil || !dp.IsLoaded()` early-return;
-// moving it back below the gate makes this RED. Both gauges are emitted
-// unconditionally so a zero-degradation state is a present sample distinct from
-// "collector absent" — the alerting hook is xpf_pbr_degraded_terms > 0.
+// desired PBR rules and build-health gauges are derived from the active config
+// (routing.PBRBuildRulesAndStats, a pure function — no netlink), so they must be
+// emitted even with the dataplane unloaded (config-only / degraded boot). Collect
+// must call collectPBRStatus BEFORE the `dp == nil || !dp.IsLoaded()` early-return;
+// moving it back below the gate makes this RED. Config-derived gauges are emitted
+// unconditionally so a zero-degradation state is present; the alerting hook is
+// xpf_pbr_degraded_terms > 0.
 func TestPBRStatusEmittedWhenDataplaneUnloaded(t *testing.T) {
 	s := &Server{} // dp intentionally nil, store nil — degraded / config-only boot.
 	reg := prometheus.NewPedanticRegistry()
