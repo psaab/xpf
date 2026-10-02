@@ -5508,6 +5508,7 @@ fn forwarding_instance_link_local_gateway_uses_authorized_default_interface_1142
         "a quarantined default-domain sentinel must not qualify as FI egress"
     );
 
+    // #11684 extends the FI scope to qualified global IPv6 gateways.
     let non_link_local = build_forwarding_state(&snapshot(
         vec!["ISP-B.inet6.0".into()],
         "ISP-B.inet6.0",
@@ -5518,8 +5519,8 @@ fn forwarding_instance_link_local_gateway_uses_authorized_default_interface_1142
     ));
     assert_eq!(
         non_link_local.routes_v6["ISP-B.inet6.0"][0].next_hops[0].ifindex,
-        0,
-        "the cross-table exception must not authorize non-link-local gateways"
+        101,
+        "a marked FI table may use a default-instance interface for a global gateway"
     );
 
     let wrong_table = build_forwarding_state(&snapshot(
@@ -5548,6 +5549,147 @@ fn forwarding_instance_link_local_gateway_uses_authorized_default_interface_1142
         same_instance.routes_v6["ISP-B.inet6.0"][0].next_hops[0].ifindex,
         102,
         "same-table link-local qualification must not depend on the cross-table marker"
+    );
+}
+
+/// #11684: a forwarding-instance route's qualified global gateway may use
+/// the default-instance interface selected by Go's connected-prefix lookup.
+/// This is narrower than a general cross-instance escape: only the exact
+/// forwarding table marker plus a default-domain interface authorizes it.
+/// The same marker must not authorize those gateways in an unrelated VR.
+#[test]
+fn forwarding_instance_global_gateway_uses_authorized_default_interface_11684() {
+    let snapshot = ConfigSnapshot {
+        forwarding_tables: vec!["ISP-B.inet.0".into(), "ISP-B.inet6.0".into()],
+        interfaces: vec![InterfaceSnapshot {
+            name: "reth0.80".into(),
+            ifindex: 101,
+            hardware_addr: "02:00:00:00:80:01".into(),
+            addresses: vec![
+                crate::protocol::snapshot::InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "172.16.80.2/24".into(),
+                    ..Default::default()
+                },
+                crate::protocol::snapshot::InterfaceAddressSnapshot {
+                    family: "inet6".into(),
+                    address: "2001:db8:80::2/64".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }],
+        neighbors: vec![
+            crate::NeighborSnapshot {
+                interface: "reth0.80".into(),
+                ifindex: 101,
+                family: "inet".into(),
+                ip: "172.16.80.1".into(),
+                mac: "02:00:00:00:80:fe".into(),
+                state: "reachable".into(),
+                ..Default::default()
+            },
+            crate::NeighborSnapshot {
+                interface: "reth0.80".into(),
+                ifindex: 101,
+                family: "inet6".into(),
+                ip: "2001:db8:80::1".into(),
+                mac: "02:00:00:00:80:fe".into(),
+                state: "reachable".into(),
+                ..Default::default()
+            },
+        ],
+        routes: vec![
+            crate::RouteSnapshot {
+                table: "ISP-B.inet.0".into(),
+                family: "inet".into(),
+                destination: "0.0.0.0/0".into(),
+                next_hops: vec!["172.16.80.1@reth0.80".into()],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "ISP-B.inet6.0".into(),
+                family: "inet6".into(),
+                destination: "::/0".into(),
+                next_hops: vec!["2001:db8:80::1@reth0.80".into()],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "VRF-A.inet.0".into(),
+                family: "inet".into(),
+                destination: "192.0.2.0/24".into(),
+                next_hops: vec!["172.16.80.1@reth0.80".into()],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "VRF-A.inet6.0".into(),
+                family: "inet6".into(),
+                destination: "2001:db8:cafe::/48".into(),
+                next_hops: vec!["2001:db8:80::1@reth0.80".into()],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+
+    let v4 = state
+        .routes_v4
+        .get("ISP-B.inet.0")
+        .expect("forwarding-instance IPv4 table")
+        .iter()
+        .find(|route| route.prefix.contains("203.0.113.7".parse().unwrap()))
+        .expect("IPv4 default route");
+    assert_eq!(v4.next_hops[0].ifindex, 101);
+    let resolved_v4 = lookup_forwarding_resolution_v4(
+        &state,
+        None,
+        "203.0.113.7".parse().unwrap(),
+        "ISP-B.inet.0",
+        0,
+        true,
+        None,
+    );
+    assert_eq!(
+        resolved_v4.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "qualified IPv4 global gateway must be forwardable"
+    );
+    assert_eq!(resolved_v4.egress_ifindex, 101);
+
+    let v6 = state
+        .routes_v6
+        .get("ISP-B.inet6.0")
+        .expect("forwarding-instance IPv6 table")
+        .iter()
+        .find(|route| route.prefix.contains("2001:db8:beef::7".parse().unwrap()))
+        .expect("IPv6 default route");
+    assert_eq!(v6.next_hops[0].ifindex, 101);
+    let resolved_v6 = lookup_forwarding_resolution_v6(
+        &state,
+        None,
+        "2001:db8:beef::7".parse().unwrap(),
+        "ISP-B.inet6.0",
+        0,
+        true,
+        None,
+    );
+    assert_eq!(
+        resolved_v6.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "qualified IPv6 global gateway must be forwardable"
+    );
+    assert_eq!(resolved_v6.egress_ifindex, 101);
+
+    assert_eq!(
+        state.routes_v4["VRF-A.inet.0"][0].next_hops[0].ifindex,
+        0,
+        "an ISP-B marker must not authorize its default interface in a VRF IPv4 table"
+    );
+    assert_eq!(
+        state.routes_v6["VRF-A.inet6.0"][0].next_hops[0].ifindex,
+        0,
+        "an ISP-B marker must not authorize its default interface in a VRF IPv6 table"
     );
 }
 

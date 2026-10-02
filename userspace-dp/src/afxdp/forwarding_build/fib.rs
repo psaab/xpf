@@ -409,9 +409,12 @@ pub(super) fn populate_fabrics(
 
 /// #2389: resolve EVERY configured next-hop of a static route into a
 /// `RouteNextHopV4` candidate. A discard / next-table route has no forwarding
-/// next-hop (returns empty). An explicit `@interface` resolves only when that
-/// interface belongs to the route's canonical table; an unknown or foreign
-/// interface stays unresolved and never falls back to gateway inference.
+/// next-hop (returns empty). An explicit `@interface` resolves when it belongs
+/// to the route's canonical table. In a Go-marked forwarding-instance table,
+/// an explicit default-instance interface in routing domain zero is also
+/// accepted for a qualified gateway (#11420, #11684); other explicit
+/// cross-instance interfaces stay unresolved and never fall back to gateway
+/// inference.
 /// Without an explicit interface, infer the connected interface that contains
 /// the gateway IP, scoped to the route's own canonical `table` (#4446). This
 /// keeps the egress ifindex baked into `RouteEntryV4.next_hops` consistent with
@@ -457,10 +460,10 @@ pub(in crate::afxdp) fn resolve_route_next_hops_v4(
         .collect()
 }
 
-/// #2389/#4446: v6 twin of [`resolve_route_next_hops_v4`]. A qualified
-/// link-local gateway may use a default-instance interface only when Go marks
-/// this exact table as forwarding and the interface belongs to routing domain
-/// zero (#11420). Other explicit cross-instance interfaces stay unresolved.
+/// #2389/#4446: v6 twin of [`resolve_route_next_hops_v4`]. In a Go-marked
+/// forwarding-instance table, a qualified gateway may use a default-instance
+/// interface in routing domain zero (#11420, #11684). Other explicit
+/// cross-instance interfaces stay unresolved.
 /// Bare gateways infer egress only from connected prefixes in their own table.
 pub(in crate::afxdp) fn resolve_route_next_hops_v6(
     route: &RouteSnapshot,
@@ -514,7 +517,7 @@ fn route_table_instance(table: &str) -> Option<&str> {
 
 fn explicit_ifindex_in_route_table(
     name: &str,
-    allow_forwarding_instance_default_link_local: bool,
+    allow_forwarding_instance_default_gateway: bool,
     names: &BTreeMap<String, i32>,
     linux_names: &BTreeMap<String, i32>,
     state: &ForwardingState,
@@ -532,7 +535,7 @@ fn explicit_ifindex_in_route_table(
         .copied()
         .unwrap_or(0)
         == 0;
-    (allow_forwarding_instance_default_link_local
+    (allow_forwarding_instance_default_gateway
         && interface_instance.is_empty()
         && is_default_domain
         && state.forwarding_tables.contains(table))
@@ -548,7 +551,14 @@ fn resolve_next_hop_target_v4(
     table: &str,
 ) -> (i32, u16) {
     if let Some(name) = interface {
-        return explicit_ifindex_in_route_table(name, false, names, linux_names, state, table)
+        return explicit_ifindex_in_route_table(
+            name,
+            next_hop.is_some(),
+            names,
+            linux_names,
+            state,
+            table,
+        )
             .map(|ifindex| {
                 (
                     ifindex,
@@ -577,7 +587,7 @@ fn resolve_next_hop_target_v6(
     if let Some(name) = interface {
         return explicit_ifindex_in_route_table(
             name,
-            next_hop.is_some_and(|ip| ip.is_unicast_link_local()),
+            next_hop.is_some(),
             names,
             linux_names,
             state,
