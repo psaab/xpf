@@ -719,6 +719,10 @@ func isMatchPoliciesSelector(key string) bool {
 	return false
 }
 
+// matchPoliciesHandler is the REST adapter for the shared policy simulator.
+// Its route is charged PermControl by readAuthz, matching gRPC MatchPolicies
+// because a tuple query returns policy/host-inbound verdicts (#11674). The
+// handler body validates and simulates selectors; it is not the authz boundary.
 func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 	// #3709: validate request grammar BEFORE the cfg == nil verdict so a
 	// malformed / duplicate / missing-zone query fails the SAME way during the

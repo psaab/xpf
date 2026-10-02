@@ -31,8 +31,8 @@ import (
 //     is PermView (GetStatus, GetSystemInfo, config-render RPCs) —
 //     excluding the multiplexed ShowText FLOOR (PermControl, the highest
 //     tier any of its ~127 topics needs; decoded show topics price at
-//     PermView via showTextTopicPermission). Every REST read is PermView
-//     by deliberate tested contract (TestReadRoutesAreAllViewTier_6660).
+//     PermView via showTextTopicPermission). Ordinary REST reads are PermView;
+//     /security/match is their tested PermControl exception (#11674).
 //     Config-render requests that read a candidate are additionally
 //     charged PermConfig by the dedicated candidate-read gate; that
 //     separate protection does not apply to these three status facts.
@@ -41,9 +41,9 @@ import (
 //   - Loosening discloses nothing new: the identical facts already serve
 //     at PermView over REST, and this RPC does not read candidate content.
 //     Candidate-reading config renders retain their separate PermConfig
-//     gate, while dirty flags are explicitly out of the candidate-content
-//     disclosure property (the #9889 census). Tightening REST instead would
-//     break view-only consumers and the tested all-reads-PermView contract.
+//     gate; dirty flags are explicitly out of the candidate-content disclosure
+//     property (#9889). Tightening REST instead would break view-only
+//     consumers; the ordinary-read tier retains the #11674 match exception.
 //   - The PermConfig entry was lumped into the lifecycle block in a single
 //     commit (03134d9a60) with no per-method deliberation.
 //
@@ -51,8 +51,9 @@ import (
 // REST twin is pinned in pkg/api/config_status_authz_10019_test.go. The
 // production diff (one entry) is the proof no other tier changed:
 // TestEveryServiceMethodHasAPermission_5278 guards key-set coverage in
-// both directions, never tier values, while TestReadRoutesAreAllViewTier_6660
-// pins every REST read at PermView.
+// both directions, never tier values. The ordinary REST read tier, with the
+// #11674 simulator exception, is pinned by
+// TestReadRoutesAreViewTierExceptMatchSimulator_6660.
 
 // TestGetConfigModeStatusCostsView_10019 pins the gate price through the
 // LOOKUP rather than the map, so a table entry unreachable through

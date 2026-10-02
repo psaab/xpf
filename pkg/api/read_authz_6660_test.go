@@ -165,12 +165,14 @@ func TestReadPermissionTableNamesOnlyRealRoutes_6660(t *testing.T) {
 	}
 }
 
-// TestReadRoutesAreAllViewTier_6660 pins the contract stated in the table's doc:
-// every read is a `show`-equivalent, so every entry is PermView. A finer tier
-// invented here would be a policy the CLI's own table does not have, and the two
-// would drift.
-func TestReadRoutesAreAllViewTier_6660(t *testing.T) {
+// TestReadRoutesAreViewTierExceptMatchSimulator_6660 pins the ordinary
+// read-route tier: every entry is PermView except the tuple policy simulator,
+// whose PermControl exception is pinned by TestMatchPoliciesRESTCostsControl_11674.
+func TestReadRoutesAreViewTierExceptMatchSimulator_6660(t *testing.T) {
 	for route, perm := range restReadPermissions {
+		if route == "GET /api/v1/security/match" {
+			continue
+		}
 		if perm != config.PermView {
 			t.Errorf("read route %q requires %v, want PermView", route, perm)
 		}

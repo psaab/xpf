@@ -98,11 +98,11 @@ func authorizedMutationPrincipal(r *http.Request) (authz.Principal, bool) {
 // firewall that is reconnaissance, which is why every one of these routes is a
 // `show`-equivalent and Junos gates `show` on `view`.
 //
-// EVERY ROUTE IS PermView, deliberately, rather than a per-route tier. These
-// are all show verbs; inventing finer tiers here would be a policy the CLI's
-// own table does not have, and the two would drift. The finer question the
-// issue raises -- whether a read should be REDACTED by class rather than
-// denied -- is a different contract and is left open.
+// Most read routes are PermView `show` verbs; the policy simulator is the
+// deliberate exception. `GET /api/v1/security/match` exposes the same arbitrary
+// 5-tuple verdict as gRPC MatchPolicies, so it is PermControl too (#11674).
+// The finer question whether reads should be REDACTED by class rather than
+// denied is a different contract and remains open.
 //
 // /health and /metrics are NOT here and stay open. They carry no configuration,
 // authCheck already exempts them, and the in-tree harnesses read /metrics
@@ -129,25 +129,27 @@ var restReadPermissions = map[string]config.LoginClassPermission{
 	"GET /api/v1/show-text":            config.PermView,
 
 	// Operational state.
-	"GET /api/v1/status":                               config.PermView,
-	"GET /api/v1/system/info":                          config.PermView,
-	"GET /api/v1/system/buffers":                       config.PermView,
-	"GET /api/v1/interfaces":                           config.PermView,
-	"GET /api/v1/interfaces/detail":                    config.PermView,
-	"GET /api/v1/routes":                               config.PermView,
-	"GET /api/v1/routing/bgp":                          config.PermView,
-	"GET /api/v1/routing/ospf":                         config.PermView,
-	"GET /api/v1/dhcp/identifiers":                     config.PermView,
-	"GET /api/v1/dhcp/leases":                          config.PermView,
-	"GET /api/v1/events/stream":                        config.PermView,
-	"GET /api/v1/logs/stream":                          config.PermView,
-	"GET /api/v1/statistics/global":                    config.PermView,
-	"GET /api/v1/statistics/interfaces":                config.PermView,
-	"GET /api/v1/statistics/zones":                     config.PermView,
-	"GET /api/v1/services/flow-exporters":              config.PermView,
-	"GET /api/v1/security/events":                      config.PermView,
-	"GET /api/v1/security/ipsec/sa":                    config.PermView,
-	"GET /api/v1/security/match":                       config.PermView,
+	"GET /api/v1/status":                  config.PermView,
+	"GET /api/v1/system/info":             config.PermView,
+	"GET /api/v1/system/buffers":          config.PermView,
+	"GET /api/v1/interfaces":              config.PermView,
+	"GET /api/v1/interfaces/detail":       config.PermView,
+	"GET /api/v1/routes":                  config.PermView,
+	"GET /api/v1/routing/bgp":             config.PermView,
+	"GET /api/v1/routing/ospf":            config.PermView,
+	"GET /api/v1/dhcp/identifiers":        config.PermView,
+	"GET /api/v1/dhcp/leases":             config.PermView,
+	"GET /api/v1/events/stream":           config.PermView,
+	"GET /api/v1/logs/stream":             config.PermView,
+	"GET /api/v1/statistics/global":       config.PermView,
+	"GET /api/v1/statistics/interfaces":   config.PermView,
+	"GET /api/v1/statistics/zones":        config.PermView,
+	"GET /api/v1/services/flow-exporters": config.PermView,
+	"GET /api/v1/security/events":         config.PermView,
+	"GET /api/v1/security/ipsec/sa":       config.PermView,
+	// #11674: same policy-reconnaissance class gate as gRPC MatchPolicies
+	// (#11077); this simulator is not an ordinary view-tier inventory read.
+	"GET /api/v1/security/match":                       config.PermControl,
 	"GET /api/v1/security/nat/destination":             config.PermView,
 	"GET /api/v1/security/nat/deterministic":           config.PermView,
 	"GET /api/v1/security/nat/pools":                   config.PermView,
