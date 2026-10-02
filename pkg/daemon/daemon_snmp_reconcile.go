@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"github.com/mdlayher/genetlink"
+	nl "github.com/mdlayher/netlink"
+	"golang.org/x/sys/unix"
 	"hash/fnv"
 	"log/slog"
 	"net"
@@ -188,6 +191,108 @@ func snmpConfigHash(cfg *config.Config) uint64 {
 // than silently reported as an empty ifTable (#5523 C179-123).
 var snmpLinkLister = netlink.LinkList
 
+// snmpLinkSpeedReader reads the physical link rate in Mbps from ethtool's
+// generic-netlink LINKMODES_GET family. Missing or unsupported link rates are
+// represented as zero; TxQLen is unrelated to the interface's bandwidth.
+var snmpLinkSpeedReader = readSNMPLinkSpeeds
+
+func readSNMPLinkSpeeds(links []netlink.Link) map[int]uint32 {
+	speeds := make(map[int]uint32, len(links))
+	conn, err := genetlink.Dial(nil)
+	if err != nil {
+		return speeds
+	}
+	defer conn.Close()
+	family, err := conn.GetFamily("ethtool")
+	if err != nil {
+		return speeds
+	}
+	for _, link := range links {
+		attrs := link.Attrs()
+		if attrs.Name == "lo" || attrs.Index <= 0 {
+			continue
+		}
+		speed, err := readEthtoolLinkSpeed(conn, family.ID, attrs.Index)
+		if err == nil {
+			speeds[attrs.Index] = speed
+		}
+	}
+	return speeds
+}
+
+func readEthtoolLinkSpeed(conn *genetlink.Conn, familyID uint16, ifIndex int) (uint32, error) {
+	attrs := nl.NewAttributeEncoder()
+	attrs.Nested(uint16(unix.ETHTOOL_A_LINKMODES_HEADER), func(header *nl.AttributeEncoder) error {
+		header.Uint32(uint16(unix.ETHTOOL_A_HEADER_DEV_INDEX), uint32(ifIndex))
+		return nil
+	})
+	data, err := attrs.Encode()
+	if err != nil {
+		return 0, err
+	}
+	messages, err := conn.Execute(genetlink.Message{
+		Header: genetlink.Header{
+			Command: uint8(unix.ETHTOOL_MSG_LINKMODES_GET),
+			Version: 1,
+		},
+		Data: data,
+	}, familyID, nl.Request)
+	if err != nil {
+		return 0, err
+	}
+	for _, message := range messages {
+		if message.Header.Command != uint8(unix.ETHTOOL_MSG_LINKMODES_GET_REPLY) {
+			continue
+		}
+		speed, found, err := parseEthtoolLinkSpeed(message.Data)
+		if err != nil {
+			return 0, err
+		}
+		if found {
+			return speed, nil
+		}
+	}
+	return 0, fmt.Errorf("ethtool link-modes reply omitted link speed")
+}
+
+func parseEthtoolLinkSpeed(data []byte) (uint32, bool, error) {
+	attrs, err := nl.NewAttributeDecoder(data)
+	if err != nil {
+		return 0, false, err
+	}
+	var speed uint32
+	found := false
+	for attrs.Next() {
+		if attrs.Type() == uint16(unix.ETHTOOL_A_LINKMODES_SPEED) {
+			speed = attrs.Uint32()
+			found = true
+		}
+	}
+	if err := attrs.Err(); err != nil {
+		return 0, false, err
+	}
+	if speed == ^uint32(0) { // Linux SPEED_UNKNOWN is -1, encoded as all ones.
+		return 0, found, nil
+	}
+	return speed, found, nil
+}
+
+func snmpIfSpeedValues(speedMbps uint32) (ifSpeed, ifHighSpeed uint32) {
+	if speedMbps == 0 || speedMbps == ^uint32(0) {
+		return 0, 0
+	}
+	ifHighSpeed = speedMbps
+	// ifSpeed is 32-bit bits/s; saturate rates beyond its range while
+	// ifHighSpeed retains the full ethtool rate in Mbps.
+	maxSpeed := ^uint32(0)
+	if speedMbps > maxSpeed/1_000_000 {
+		ifSpeed = maxSpeed
+	} else {
+		ifSpeed = speedMbps * 1_000_000
+	}
+	return ifSpeed, ifHighSpeed
+}
+
 // snmpIfDataWarnInterval bounds how often buildSNMPIfData emits its
 // netlink-failure warning. buildSNMPIfData runs once per SNMP poll and a
 // manager may poll several times a second, so a persistently failing
@@ -277,6 +382,10 @@ func buildSNMPIfData() []snmp.IfData {
 		slog.Info("SNMP ifTable read recovered",
 			"suppressed_failures", suppressed)
 	}
+	var speedMbpsByIndex map[int]uint32
+	if len(links) > 0 {
+		speedMbpsByIndex = snmpLinkSpeedReader(links)
+	}
 	var result []snmp.IfData
 	for _, link := range links {
 		attrs := link.Attrs()
@@ -300,10 +409,7 @@ func buildSNMPIfData() []snmp.IfData {
 		if attrs.OperState == netlink.OperUp || attrs.OperState == netlink.OperUnknown {
 			oper = 1
 		}
-		speed := uint32(0)
-		if attrs.TxQLen > 0 {
-			speed = 1000000000 // default 1Gbps
-		}
+		ifSpeed, ifHighSpeed := snmpIfSpeedValues(speedMbpsByIndex[attrs.Index])
 		var stats *netlink.LinkStatistics
 		if attrs.Statistics != nil {
 			stats = attrs.Statistics
@@ -313,11 +419,11 @@ func buildSNMPIfData() []snmp.IfData {
 			IfDescr:     attrs.Name,
 			IfType:      ifType,
 			IfMtu:       attrs.MTU,
-			IfSpeed:     speed,
+			IfSpeed:     ifSpeed,
 			AdminStatus: admin,
 			OperStatus:  oper,
 			IfName:      attrs.Name,
-			IfHighSpeed: speed / 1_000_000, // bps -> Mbps
+			IfHighSpeed: ifHighSpeed,
 		}
 		if stats != nil {
 			deriveIfCounters(&entry, stats)
