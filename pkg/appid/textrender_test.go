@@ -100,3 +100,21 @@ func TestRenderStatusNilConfigUsesNoActiveSentinel(t *testing.T) {
 		t.Errorf("expected nil-config sentinel:\n%s", out)
 	}
 }
+
+// #11829 [C-07]: the status text claimed same-tier ties are "broken by
+// name", stale since #5296/#10722. Both the Go fallback
+// (resolveTupleFallback: lowest assigned app_id) and
+// docs/services-application-identification.md agree on lowest assigned
+// app_id, so the operator-facing text must say the same.
+func TestRenderStatusDocumentsAssignedIDTieBreak_11829(t *testing.T) {
+	cfg := &config.Config{}
+	var buf strings.Builder
+	RenderStatus(&buf, cfg)
+	out := buf.String()
+	if !strings.Contains(out, "ties broken by lowest assigned app_id") {
+		t.Errorf("status text must document lowest-assigned-app_id tie-break, got:\n%s", out)
+	}
+	if strings.Contains(out, "ties broken by name") {
+		t.Errorf("status text still carries stale by-name tie-break wording:\n%s", out)
+	}
+}

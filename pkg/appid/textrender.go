@@ -53,7 +53,7 @@ func RenderStatus(buf *strings.Builder, cfg *config.Config) {
 	buf.WriteString("     (protocol, src/dst port). The user-defined\n")
 	buf.WriteString("     `applications` are scanned FIRST (deterministic\n")
 	buf.WriteString("     best-match: a port-constrained app wins over a\n")
-	buf.WriteString("     protocol-only one, ties broken by name); only when\n")
+	buf.WriteString("     protocol-only one, ties broken by lowest assigned app_id); only when\n")
 	buf.WriteString("     none match does a built-in port→name heuristic\n")
 	buf.WriteString("     (junos-http=80, junos-ssh=22, etc.) apply.\n")
 	buf.WriteString("\n")
