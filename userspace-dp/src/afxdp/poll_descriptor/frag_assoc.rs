@@ -492,6 +492,7 @@ pub(super) fn flowless_pre_routing_destination_nat(
     wire: FlowlessNatWireInfo,
     ingress_zone_override: Option<u16>,
     fabric_ingress_scope_ifindex: Option<i32>,
+    packet_icmp: Option<(u8, u8)>,
 ) -> FlowlessPreRoutingNat {
     if forwarding.static_nat.is_empty()
         && forwarding.dnat_table.is_empty()
@@ -559,6 +560,7 @@ pub(super) fn flowless_pre_routing_destination_nat(
                 scope.zone_name,
                 scope.ifname,
                 scope.routing_instance,
+                packet_icmp,
             )
         {
             return FlowlessPreRoutingNat::Untranslatable;
@@ -585,7 +587,7 @@ pub(super) fn flowless_pre_routing_destination_nat(
             scope.zone_name,
             scope.ifname,
             scope.routing_instance,
-            None,
+            packet_icmp,
         ) {
             return flowless_pre_routing_translation(decision, counter, wire);
         }
@@ -643,6 +645,7 @@ pub(super) fn flowless_requires_nat_translation(
     forwarding: &ForwardingState,
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
+    packet_icmp: Option<(u8, u8)>,
     ingress_zone_override: Option<u16>,
     fabric_ingress_scope_ifindex: Option<i32>,
     from_zone_id: u16,
@@ -658,6 +661,7 @@ pub(super) fn flowless_requires_nat_translation(
         forwarding,
         l3_flow,
         meta,
+        packet_icmp,
         fabric_ingress_scope_ifindex,
         from_zone_id,
         to_zone_id,
@@ -671,6 +675,7 @@ pub(super) fn flowless_requires_nat_translation(
         forwarding,
         l3_flow,
         meta,
+        packet_icmp,
         ingress_zone_override,
         fabric_ingress_scope_ifindex,
         to_zone_id,
@@ -685,6 +690,7 @@ pub(super) fn flowless_source_nat_requires_translation(
     forwarding: &ForwardingState,
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
+    packet_icmp: Option<(u8, u8)>,
     fabric_ingress_scope_ifindex: Option<i32>,
     from_zone_id: u16,
     to_zone_id: u16,
@@ -733,6 +739,7 @@ pub(super) fn flowless_source_nat_requires_translation(
         egress_ifindex,
         l3_flow,
         now_ns,
+        packet_icmp,
     ) {
         return true;
     }
@@ -740,6 +747,7 @@ pub(super) fn flowless_source_nat_requires_translation(
         forwarding,
         l3_flow,
         meta,
+        packet_icmp,
         fabric_ingress_scope_ifindex,
         from_zone_id,
         to_zone_id,
@@ -755,6 +763,7 @@ fn flowless_destination_nat_requires_translation(
     forwarding: &ForwardingState,
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
+    packet_icmp: Option<(u8, u8)>,
     ingress_zone_override: Option<u16>,
     fabric_ingress_scope_ifindex: Option<i32>,
     to_zone_id: u16,
@@ -793,7 +802,7 @@ fn flowless_destination_nat_requires_translation(
                     scope.zone_name,
                     scope.ifname,
                     scope.routing_instance,
-                    None,
+                    packet_icmp,
                 )
         } else {
             forwarding
@@ -807,7 +816,7 @@ fn flowless_destination_nat_requires_translation(
                     scope.zone_name,
                     scope.ifname,
                     scope.routing_instance,
-                    None,
+                    packet_icmp,
                 )
                 .is_some()
         };
@@ -833,6 +842,7 @@ fn flowless_destination_nat_requires_translation(
         forwarding,
         l3_flow,
         meta,
+        packet_icmp,
         ingress_zone_override,
         fabric_ingress_scope_ifindex,
         to_zone_id,
@@ -850,6 +860,7 @@ pub(super) fn flowless_no_route_requires_nat_translation(
     forwarding: &ForwardingState,
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
+    packet_icmp: Option<(u8, u8)>,
     ingress_zone_override: Option<u16>,
     fabric_ingress_scope_ifindex: Option<i32>,
     from_zone_id: u16,
@@ -869,6 +880,7 @@ pub(super) fn flowless_no_route_requires_nat_translation(
             forwarding,
             l3_flow,
             meta,
+            packet_icmp,
             ingress_zone_override,
             fabric_ingress_scope_ifindex,
             from_zone_id,
@@ -887,6 +899,7 @@ pub(super) fn flowless_no_route_requires_nat_translation(
             forwarding,
             l3_flow,
             meta,
+            packet_icmp,
             ingress_zone_override,
             fabric_ingress_scope_ifindex,
             from_zone_id,
@@ -1112,6 +1125,7 @@ pub(super) fn flowless_nat_rule_possible(
     forwarding: &ForwardingState,
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
+    packet_icmp: Option<(u8, u8)>,
     ingress_zone_override: Option<u16>,
     fabric_ingress_scope_ifindex: Option<i32>,
     from_zone_id: u16,
@@ -1123,6 +1137,7 @@ pub(super) fn flowless_nat_rule_possible(
         forwarding,
         l3_flow,
         meta,
+        packet_icmp,
         fabric_ingress_scope_ifindex,
         from_zone_id,
         to_zone_id,
@@ -1132,6 +1147,7 @@ pub(super) fn flowless_nat_rule_possible(
         forwarding,
         l3_flow,
         meta,
+        packet_icmp,
         ingress_zone_override,
         fabric_ingress_scope_ifindex,
         to_zone_id,
@@ -1143,6 +1159,7 @@ fn flowless_source_nat_rule_possible(
     forwarding: &ForwardingState,
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
+    packet_icmp: Option<(u8, u8)>,
     fabric_ingress_scope_ifindex: Option<i32>,
     from_zone_id: u16,
     to_zone_id: u16,
@@ -1174,6 +1191,7 @@ fn flowless_source_nat_rule_possible(
                 l3_flow.src_ip,
                 l3_flow.dst_ip,
                 meta.protocol,
+                packet_icmp,
             )
         })
     } else {
@@ -1185,6 +1203,7 @@ fn flowless_source_nat_rule_possible(
             l3_flow.src_ip,
             l3_flow.dst_ip,
             meta.protocol,
+            packet_icmp,
             false,
         )
     }
@@ -1194,6 +1213,7 @@ fn flowless_destination_nat_rule_possible(
     forwarding: &ForwardingState,
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
+    packet_icmp: Option<(u8, u8)>,
     ingress_zone_override: Option<u16>,
     fabric_ingress_scope_ifindex: Option<i32>,
     to_zone_id: u16,
@@ -1213,6 +1233,7 @@ fn flowless_destination_nat_rule_possible(
         ingress.zone_name,
         ingress.ifname,
         ingress.routing_instance,
+        packet_icmp,
     ) {
         return true;
     }
@@ -1265,6 +1286,7 @@ pub(in crate::afxdp) fn retry_flowless_fragment_nat(
     forwarding: &ForwardingState,
     flow: &SessionFlow,
     meta: UserspaceDpMeta,
+    packet_icmp: Option<(u8, u8)>,
     fabric_ingress_zone: Option<u16>,
     from_zone_id: u16,
     to_zone_id: u16,
@@ -1291,6 +1313,7 @@ pub(in crate::afxdp) fn retry_flowless_fragment_nat(
         forwarding,
         flow,
         meta,
+        packet_icmp,
         None,
         None,
         from_zone_id,
@@ -1304,6 +1327,7 @@ pub(in crate::afxdp) fn retry_flowless_fragment_nat(
         forwarding,
         flow,
         meta,
+        packet_icmp,
         None,
         None,
         to_zone_id,
@@ -1317,6 +1341,7 @@ pub(in crate::afxdp) fn retry_flowless_fragment_nat(
         forwarding,
         flow,
         meta,
+        packet_icmp,
         None,
         from_zone_id,
         to_zone_id,
@@ -1368,7 +1393,7 @@ pub(in crate::afxdp) fn retry_flowless_fragment_nat(
         flow,
         now_ns,
         true,
-        None,
+        packet_icmp,
         worker_id,
         &mut counter,
     ) {
@@ -1409,3 +1434,7 @@ pub(super) fn session_gated_reverse_fragment_requires_nat_translation(
         },
     )
 }
+
+#[cfg(test)]
+#[path = "flowless_icmp_nat_tests_11509.rs"]
+mod flowless_icmp_nat_tests_11509;

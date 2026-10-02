@@ -84,9 +84,10 @@ use frag_assoc::{
     same_family_or_plain_install_forward_fragment_assoc,
     session_gated_reverse_fragment_requires_nat_translation,
 };
+pub(in crate::afxdp) use host_inbound_policy::policy_packet_icmp;
 use host_inbound_policy::{
     JunosHostLocalPolicy, emit_host_inbound_deny, host_bound_policy_dst, junos_host_local_policy,
-    policy_packet_icmp, session_host_bound_policy_dst,
+    session_host_bound_policy_dst,
 };
 use nat64_icmp_error::try_translate_nat64_icmp_error;
 use rx_telemetry::record_rx_descriptor_telemetry;
@@ -6279,6 +6280,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 now_secs,
                                 l3_flow,
                                 meta,
+                                policy_packet_icmp(packet_frame, meta),
                                 nat_wire_info,
                                 ingress_zone_override,
                                 ingress_nat_scope_ifindex,
@@ -6542,6 +6544,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 worker_ctx.forwarding,
                                 l3_flow,
                                 meta,
+                                policy_icmp,
                                 ingress_nat_scope_ifindex,
                                 from_zone_id,
                                 to_zone_id,
@@ -6553,6 +6556,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 worker_ctx.forwarding,
                                 l3_flow,
                                 meta,
+                                policy_icmp,
                                 ingress_zone_override,
                                 ingress_nat_scope_ifindex,
                                 from_zone_id,
@@ -7785,6 +7789,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 worker_ctx.forwarding,
                                                 adj_flow,
                                                 meta,
+                                                policy_packet_icmp(packet_frame, meta),
                                                 ingress_zone_override,
                                                 ingress_nat_scope_ifindex,
                                                 from_zone_id,
@@ -8285,6 +8290,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 worker_ctx.forwarding,
                                                 &l3_flow,
                                                 meta,
+                                                policy_icmp,
                                                 ingress_zone_override,
                                                 ingress_nat_scope_ifindex,
                                                 from_zone_id,
@@ -8297,6 +8303,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 worker_ctx.forwarding,
                                                 &l3_flow,
                                                 meta,
+                                                policy_icmp,
                                                 ingress_zone_override,
                                                 ingress_nat_scope_ifindex,
                                                 from_zone_id,

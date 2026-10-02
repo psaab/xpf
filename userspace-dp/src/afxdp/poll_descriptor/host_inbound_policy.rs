@@ -23,7 +23,10 @@ use super::*;
 /// terms consume), so the policy and filter planes agree on which type/code a
 /// frame carries. Cold-path only (policy is evaluated on session miss).
 #[inline]
-pub(super) fn policy_packet_icmp(packet_frame: &[u8], meta: UserspaceDpMeta) -> Option<(u8, u8)> {
+pub(in crate::afxdp) fn policy_packet_icmp(
+    packet_frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> Option<(u8, u8)> {
     if !matches!(meta.protocol, PROTO_ICMP | PROTO_ICMPV6) {
         return None;
     }

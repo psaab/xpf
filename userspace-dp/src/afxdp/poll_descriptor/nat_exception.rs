@@ -191,6 +191,7 @@ pub(super) fn source_nat_would_translate_flowless(
     egress_ifindex: i32,
     flow: &SessionFlow,
     now_ns: u64,
+    packet_icmp: Option<(u8, u8)>,
 ) -> bool {
     let mut matched_counter = None;
     match source_nat_decision_with_holder(
@@ -207,7 +208,7 @@ pub(super) fn source_nat_would_translate_flowless(
         // before allocating, so this remains a read-only probe for any
         // flowless packet.
         true,
-        None,
+        packet_icmp,
         // #6522: side-effect-free by the contract above — it mints no pool
         // mapping, so there is no allocation to record a holder on.
         crate::nat::NatHolder::Untracked,

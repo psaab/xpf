@@ -207,6 +207,7 @@ pub(super) fn flowless_base_resolution(
     now_secs: u64,
     l3_flow: &SessionFlow,
     meta: UserspaceDpMeta,
+    packet_icmp: Option<(u8, u8)>,
     nat_wire_info: super::frag_assoc::FlowlessNatWireInfo,
     ingress_zone_override: Option<u16>,
     fabric_ingress_scope_ifindex: Option<i32>,
@@ -219,6 +220,7 @@ pub(super) fn flowless_base_resolution(
         nat_wire_info,
         ingress_zone_override,
         fabric_ingress_scope_ifindex,
+        packet_icmp,
     ) {
         super::frag_assoc::FlowlessPreRoutingNat::None => (NatDecision::default(), None),
         super::frag_assoc::FlowlessPreRoutingNat::Translated { decision, counter } => {
