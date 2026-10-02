@@ -480,6 +480,8 @@ COMPARED	protocols ospf export
 flag (read, but value-less)	protocols ospf passive
 COMPARED	protocols ospf reference-bandwidth
 COMPARED	protocols ospf router-id
+flag (read, but value-less)	protocols ospf3 area <*> area-type nssa no-summaries
+flag (read, but value-less)	protocols ospf3 area <*> area-type stub no-summaries
 COMPARED	protocols ospf3 area <*> interface <*> bfd-liveness-detection minimum-interval
 COMPARED	protocols ospf3 area <*> interface <*> bfd-liveness-detection multiplier
 COMPARED	protocols ospf3 area <*> interface <*> cost
@@ -601,6 +603,8 @@ COMPARED	routing-instances <*> protocols ospf export
 flag (read, but value-less)	routing-instances <*> protocols ospf passive
 COMPARED	routing-instances <*> protocols ospf reference-bandwidth
 COMPARED	routing-instances <*> protocols ospf router-id
+flag (read, but value-less)	routing-instances <*> protocols ospf3 area <*> area-type nssa no-summaries
+flag (read, but value-less)	routing-instances <*> protocols ospf3 area <*> area-type stub no-summaries
 COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> bfd-liveness-detection minimum-interval
 COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> bfd-liveness-detection multiplier
 COMPARED	routing-instances <*> protocols ospf3 area <*> interface <*> cost

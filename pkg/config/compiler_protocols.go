@@ -747,6 +747,27 @@ func compileProtocols(node *Node, proto *ProtocolsConfig) error {
 				}
 			}
 
+			// Parse area-type (stub/nssa), using the schema-driven packed-body
+			// reader at both levels so elided, braced-leaf, and braced-container
+			// spellings all populate the same model. Junos calls the flag
+			// "no-summaries"; FRR's area command uses "no-summary".
+			areaSchema := schemaForPath("protocols", "ospf3", "area")
+			areaTypeSchema := schemaForPath("protocols", "ospf3", "area", "area-type")
+			for _, typeNode := range packedBodyChildren(areaInst.node, areaSchema) {
+				if typeNode.Name() != "area-type" {
+					continue
+				}
+				for _, typeChild := range packedBodyChildren(typeNode, areaTypeSchema) {
+					switch typeChild.Name() {
+					case "stub", "nssa":
+						area.AreaType = typeChild.Name()
+						if hasPackedChild9656(typeChild, areaTypeSchema, "no-summaries") {
+							area.NoSummary = true
+						}
+					}
+				}
+			}
+
 			proto.OSPFv3.Areas = append(proto.OSPFv3.Areas, area)
 		}
 	}

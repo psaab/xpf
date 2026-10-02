@@ -260,6 +260,21 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		if ecmpMaxPaths > 1 {
 			fmt.Fprintf(&b, " maximum-paths %d\n", ecmpMaxPaths)
 		}
+		for _, area := range ospfv3.Areas {
+			if area == nil || area.AreaType == "" {
+				continue
+			}
+			if !validFRROSPFArea(area.ID) || (area.AreaType != "stub" && area.AreaType != "nssa") {
+				slog.Warn("frr: omitting an OSPFv3 area-type stanza with an invalid area id or type (#11401)",
+					"area", sanitizeFRRValue(area.ID), "area_type", sanitizeFRRValue(area.AreaType))
+				continue
+			}
+			if area.NoSummary {
+				fmt.Fprintf(&b, " area %s %s no-summary\n", area.ID, area.AreaType)
+			} else {
+				fmt.Fprintf(&b, " area %s %s\n", area.ID, area.AreaType)
+			}
+		}
 		for _, export := range ospfv3.Export {
 			b.WriteString(m.resolveRedistribute(export, policyOptions, "ospf6", bgpAcceptDefault, qnhMetrics))
 		}
