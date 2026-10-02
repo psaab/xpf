@@ -9,7 +9,7 @@ import (
 // credentials. Warnings reach commit responses, apply logs, and the config GET,
 // so the producer must redact before storing the message.
 func TestArchivalWarningRedactsCredentialURL11771(t *testing.T) {
-	const secretURL = "scp://alice:secret@archive.example/configs"
+	const secretURL = "scp://alice@archive.example/configs"
 	input := `system {
     archival {
         configuration {

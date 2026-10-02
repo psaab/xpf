@@ -24,6 +24,8 @@ xpf (0.0.0) unstable; urgency=medium
     (#11770).
   * Redact credential-bearing URLs from archival and RPM validation warnings
     before storing them in compiled configuration (#11771).
+  * Reject archival URLs with inline passwords and redact destinations and
+    transfer diagnostics before logging them (#11774).
   * Scope WireGuard admits in cold-boot and coverage-gap host-input fences
     to addresses in zones serving each listen port (#11572).
   * Persist feed shrink-guard high-water counts and hashes across daemon
