@@ -488,20 +488,18 @@ func validateApplicationSyntaxStrict(cfg *Config) error {
 					"ports",
 				name, app.UnknownDirectLeaves[0])
 		}
-		// #4337: a per-application `alg <name>` outside the four xpf implements
-		// (dns/ftp/sip/tftp) is NO LONGER hard-rejected here. The #3353 commit
-		// reject is deliberately relaxed to an accepted-but-inert advisory
-		// (ValidateConfig, compiler_validate_warn.go). Rationale: the
-		// per-application ALG is NOT carried into the userspace dataplane
-		// snapshot (the only ALG signal on the wire is the GLOBAL
-		// alg_disable_flags bitfield), so even a KNOWN name is informational
-		// today — rejecting an UNKNOWN one blocked real vSRX drop-in configs
-		// that tag applications with ALGs xpf does not implement (e.g.
-		// `alg ssh`) for a knob with no functional effect. The unknown name now
-		// commits with an advisory naming the unenforced alg so a typo is still
-		// surfaced; a KNOWN name commits silently, keeping its (informational)
-		// behavior. Enforcement of the per-application ALG is deferred to the
-		// per-application slice of #2008.
+		// #4337: an `alg <name>` outside the four xpf implements
+		// (dns/ftp/sip/tftp) is NOT hard-rejected here. That commit reject was
+		// relaxed to an accepted-with-advisory path (ValidateConfig,
+		// compiler_validate_warn.go) because rejecting UNKNOWN names blocked
+		// real vSRX drop-in configs that tag apps with unsupported ALGs (e.g.
+		// `alg ssh`). #11673 also warns when a supported per-app pin cannot
+		// produce a userspace ALG tag: the pin is not carried into the snapshot,
+		// and tags are inferred only from standard FTP/DNS/SIP service tuples
+		// (TFTP has no tag). This is warning-only; no dataplane behavior changes.
+		// Unknown names still get an advisory naming the unenforced alg, and
+		// recognized pins matching a taggable tuple retain their existing
+		// behavior. Enforcement of per-application pins is deferred to #2008.
 	}
 	// #3890: an unrecognized member statement inside an opaque application-set
 	// body. The schema declares `application-set` as an args:1 leaf

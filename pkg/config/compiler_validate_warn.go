@@ -232,23 +232,25 @@ func ValidateConfig(cfg *Config) []string {
 				warnings = append(warnings, fmt.Sprintf("application %s: %v", name, err))
 			}
 		}
-		// #4337: a per-application `alg <name>` outside the four the dataplane
-		// implements (dns/ftp/sip/tftp) is accepted-but-inert, not hard-rejected
-		// (relaxed from the #3353 commit reject — real vSRX app defs tag apps
-		// with ALGs xpf does not implement, e.g. `alg ssh`, a pure drop-in
-		// blocker). The per-application ALG is not carried into the userspace
-		// snapshot (the wire has only the global alg_disable_flags bitfield), so
-		// even a KNOWN name is informational; warn only for an UNKNOWN one so a
-		// typo is still surfaced. Mirrors the global `security alg`
-		// accepted-but-inert advisory (#4232). Enforcement deferred to the
-		// per-application ALG slice of #2008.
-		if app.ALG != "" && !validApplicationALG(app.ALG) {
-			warnings = append(warnings, fmt.Sprintf(
-				"application %s: alg %q accepted but not enforced — xpf implements "+
-					"per-application ALG control only for dns/ftp/sip/tftp; an "+
-					"unrecognized alg name commits but has no effect (enforcement "+
-					"deferred to the per-application ALG slice of #2008)",
-				name, app.ALG))
+		// #4337: unsupported names remain accepted with an advisory so real vSRX
+		// application definitions are not blocked by ALGs xpf does not implement.
+		// #11673: known names also warn when the application's protocol/port
+		// cannot produce a userspace ALG tag. The per-application pin is absent
+		// from the snapshot; tags are inferred from well-known service tuples
+		// (FTP TCP/21, DNS UDP/53, SIP TCP/UDP/5060), and TFTP has no tag.
+		// Neither case changes the dataplane or rejects the config. Keep unknown
+		// names distinct so their original typo/name advisory remains explicit.
+		if app.ALG != "" {
+			if !validApplicationALG(app.ALG) {
+				warnings = append(warnings, fmt.Sprintf(
+					"application %s: alg %q accepted but not enforced — xpf implements "+
+						"per-application ALG control only for dns/ftp/sip/tftp; an "+
+						"unrecognized alg name commits but has no effect (enforcement "+
+						"deferred to the per-application ALG slice of #2008)",
+					name, app.ALG))
+			} else if !applicationALGHasDataplaneTag(app) {
+				warnings = append(warnings, applicationALGInertWarning(name, app))
+			}
 		}
 	}
 
