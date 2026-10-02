@@ -51,9 +51,9 @@ func validateIPsecBindTrafficSelectorOverlapStrict(cfg *Config) error {
 			continue
 		}
 		_, ifID := XFRMIfNameAndID(bind)
-		selectorSets := make([][]ipsecSelectorPair11380, len(names))
+		selectorSets := make([][]ModeledIPsecSelectorPair11380, len(names))
 		for i, name := range names {
-			selectorSets[i] = renderedIPsecSelectorPairs11380(vpns[name])
+			selectorSets[i] = ModeledIPsecSelectorPairs11380(vpns[name])
 		}
 		for i := range names {
 			for j := i + 1; j < len(names); j++ {
@@ -74,38 +74,45 @@ func validateIPsecBindTrafficSelectorOverlapStrict(cfg *Config) error {
 	return nil
 }
 
-type ipsecTSAddressRange11380 struct {
-	first netip.Addr
-	last  netip.Addr
+// ModeledIPsecSelectorAddressRange11380 is an inclusive address interval in
+// one side of a traffic-selector pair.
+type ModeledIPsecSelectorAddressRange11380 struct {
+	First netip.Addr
+	Last  netip.Addr
 }
 
-type ipsecTSAddressSet11380 struct {
-	ranges []ipsecTSAddressRange11380
-	known  bool
+// ModeledIPsecSelectorAddressSet11380 is one parsed selector side. Known is
+// false for an omitted or unparseable selector, whose semantics are dynamic.
+type ModeledIPsecSelectorAddressSet11380 struct {
+	Ranges []ModeledIPsecSelectorAddressRange11380
+	Known  bool
 }
 
-type ipsecSelectorPair11380 struct {
-	local  ipsecTSAddressSet11380
-	remote ipsecTSAddressSet11380
+// ModeledIPsecSelectorPair11380 is one local/remote pair as modeled by the
+// strict shared-bind gate. The IPsec package's parity test compares these
+// parsed sets with the renderer's effective selector pairs.
+type ModeledIPsecSelectorPair11380 struct {
+	Local  ModeledIPsecSelectorAddressSet11380
+	Remote ModeledIPsecSelectorAddressSet11380
 }
 
-func (a ipsecSelectorPair11380) overlaps(b ipsecSelectorPair11380) bool {
-	return ipsecTSAddressSetsOverlap11380(a.local, b.local) &&
-		ipsecTSAddressSetsOverlap11380(a.remote, b.remote)
+func (a ModeledIPsecSelectorPair11380) overlaps(b ModeledIPsecSelectorPair11380) bool {
+	return ipsecTSAddressSetsOverlap11380(a.Local, b.Local) &&
+		ipsecTSAddressSetsOverlap11380(a.Remote, b.Remote)
 }
 
 // An omitted or unparseable side has dynamic/unknown strongSwan semantics. It
 // is not proof of disjointness, so conservatively treat it as overlapping.
-func ipsecTSAddressSetsOverlap11380(a, b ipsecTSAddressSet11380) bool {
-	if !a.known || !b.known {
+func ipsecTSAddressSetsOverlap11380(a, b ModeledIPsecSelectorAddressSet11380) bool {
+	if !a.Known || !b.Known {
 		return true
 	}
-	for _, left := range a.ranges {
-		for _, right := range b.ranges {
-			if left.first.Is4() != right.first.Is4() {
+	for _, left := range a.Ranges {
+		for _, right := range b.Ranges {
+			if left.First.Is4() != right.First.Is4() {
 				continue
 			}
-			if left.first.Compare(right.last) <= 0 && right.first.Compare(left.last) <= 0 {
+			if left.First.Compare(right.Last) <= 0 && right.First.Compare(left.Last) <= 0 {
 				return true
 			}
 		}
@@ -113,10 +120,11 @@ func ipsecTSAddressSetsOverlap11380(a, b ipsecTSAddressSet11380) bool {
 	return false
 }
 
-// renderedIPsecSelectorPairs11380 follows effectiveTrafficSelectors in
+// ModeledIPsecSelectorPairs11380 follows effectiveTrafficSelectors in
 // pkg/ipsec/policy.go: default route-based selectors, identity fallbacks,
 // omitted-side behavior, and explicit children are modeled as they render.
-func renderedIPsecSelectorPairs11380(vpn *IPsecVPN) []ipsecSelectorPair11380 {
+// The IPsec package's parity test compares these parsed sets directly.
+func ModeledIPsecSelectorPairs11380(vpn *IPsecVPN) []ModeledIPsecSelectorPair11380 {
 	if vpn == nil {
 		return nil
 	}
@@ -136,9 +144,9 @@ func renderedIPsecSelectorPairs11380(vpn *IPsecVPN) []ipsecSelectorPair11380 {
 				remote = IPsecRouteBasedDefaultTrafficSelector
 			}
 		}
-		return []ipsecSelectorPair11380{{
-			local:  parseIPsecTSAddressSet11380(local),
-			remote: parseIPsecTSAddressSet11380(remote),
+		return []ModeledIPsecSelectorPair11380{{
+			Local:  parseIPsecTSAddressSet11380(local),
+			Remote: parseIPsecTSAddressSet11380(remote),
 		}}
 	}
 
@@ -147,13 +155,13 @@ func renderedIPsecSelectorPairs11380(vpn *IPsecVPN) []ipsecSelectorPair11380 {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	pairs := make([]ipsecSelectorPair11380, 0, len(names))
+	pairs := make([]ModeledIPsecSelectorPair11380, 0, len(names))
 	for _, name := range names {
 		ts := vpn.TrafficSelectors[name]
 		if ts == nil {
 			// The compiled config does not produce nil selector values, but an
 			// unknown child cannot prove this VPN's union disjoint.
-			pairs = append(pairs, ipsecSelectorPair11380{})
+			pairs = append(pairs, ModeledIPsecSelectorPair11380{})
 			continue
 		}
 		local, remote := vpn.LocalID, vpn.RemoteID
@@ -179,46 +187,52 @@ func renderedIPsecSelectorPairs11380(vpn *IPsecVPN) []ipsecSelectorPair11380 {
 				remote = IPsecRouteBasedDefaultTrafficSelector
 			}
 		}
-		pairs = append(pairs, ipsecSelectorPair11380{
-			local:  parseIPsecTSAddressSet11380(local),
-			remote: parseIPsecTSAddressSet11380(remote),
+		pairs = append(pairs, ModeledIPsecSelectorPair11380{
+			Local:  parseIPsecTSAddressSet11380(local),
+			Remote: parseIPsecTSAddressSet11380(remote),
 		})
 	}
 	return pairs
 }
 
-func parseIPsecTSAddressSet11380(value string) ipsecTSAddressSet11380 {
+func parseIPsecTSAddressSet11380(value string) ModeledIPsecSelectorAddressSet11380 {
 	if value == "" {
-		return ipsecTSAddressSet11380{}
+		return ModeledIPsecSelectorAddressSet11380{}
 	}
 	parts := strings.Split(value, ",")
-	set := ipsecTSAddressSet11380{known: true, ranges: make([]ipsecTSAddressRange11380, 0, len(parts))}
+	set := ModeledIPsecSelectorAddressSet11380{
+		Known:  true,
+		Ranges: make([]ModeledIPsecSelectorAddressRange11380, 0, len(parts)),
+	}
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
-			return ipsecTSAddressSet11380{}
+			return ModeledIPsecSelectorAddressSet11380{}
 		}
-		var r ipsecTSAddressRange11380
+		var r ModeledIPsecSelectorAddressRange11380
 		if dash := strings.IndexByte(part, '-'); dash >= 0 {
 			first, firstErr := netip.ParseAddr(part[:dash])
 			last, lastErr := netip.ParseAddr(part[dash+1:])
 			if firstErr != nil || lastErr != nil || first.Zone() != "" || last.Zone() != "" ||
 				first.Is4In6() || last.Is4In6() || first.Is4() != last.Is4() || first.Compare(last) > 0 {
-				return ipsecTSAddressSet11380{}
+				return ModeledIPsecSelectorAddressSet11380{}
 			}
-			r = ipsecTSAddressRange11380{first: first, last: last}
+			r = ModeledIPsecSelectorAddressRange11380{First: first, Last: last}
 		} else if prefix, err := netip.ParsePrefix(part); err == nil {
 			if prefix.Addr().Is4In6() {
-				return ipsecTSAddressSet11380{}
+				return ModeledIPsecSelectorAddressSet11380{}
 			}
 			prefix = prefix.Masked()
-			r = ipsecTSAddressRange11380{first: prefix.Addr(), last: ipsecTSPrefixLast11380(prefix)}
+			r = ModeledIPsecSelectorAddressRange11380{
+				First: prefix.Addr(),
+				Last:  ipsecTSPrefixLast11380(prefix),
+			}
 		} else if addr, err := netip.ParseAddr(part); err == nil && addr.Zone() == "" && !addr.Is4In6() {
-			r = ipsecTSAddressRange11380{first: addr, last: addr}
+			r = ModeledIPsecSelectorAddressRange11380{First: addr, Last: addr}
 		} else {
-			return ipsecTSAddressSet11380{}
+			return ModeledIPsecSelectorAddressSet11380{}
 		}
-		set.ranges = append(set.ranges, r)
+		set.Ranges = append(set.Ranges, r)
 	}
 	return set
 }
