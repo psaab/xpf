@@ -2931,10 +2931,11 @@ never lock an operator out of a remote box it manages.
   configuration`, the peer resync and `/health` all reported the promoted
   one — and unlike the commit path there is no caller to report to, so
   nothing retried it until some later unrelated apply happened to succeed.
-  `configApplyDebt` latches the failure and `configApplyReassertLoop`
-  (started unconditionally in `Run`, beside the loops below) re-applies
-  until it converges; `ConfigApplyDebt()` feeds `/health`, which returns
-  503 while it is owed.
+  The same divergence is possible when cold boot loads an active config but
+  its first full apply fails. Both paths now latch `configApplyDebt`; the
+  `configApplyReassertLoop` (started unconditionally in `Run`, beside the
+  loops below) re-applies until it converges, and `ConfigApplyDebt()` feeds
+  `/health`, which returns 503 while it is owed.
 
   The retry re-reads the ACTIVE config rather than replaying the config
   whose apply failed, and that is load-bearing rather than incidental: a
@@ -2945,11 +2946,11 @@ never lock an operator out of a remote box it manages.
   discharges the debt after an unrelated successful commit, which would
   otherwise leave a permanent false degraded on a converged node.
 
-  SCOPE: this covers the auto-rollback path only. Every caller-less apply
-  (boot load, DHCP lease callback, feed refresh, config poll) has the same
-  shape and #9693 already owns the ROUTING tail for all of them — but on
-  those paths the store has NOT advanced, so the reported configuration is
-  still the enforced one and the consequence is different.
+  SCOPE: this covers auto-rollback and cold-boot applies. Every other
+  caller-less apply (DHCP lease callback, feed refresh, config poll) has the
+  same shape and #9693 already owns the ROUTING tail for all of them — but
+  on those paths the store has NOT advanced, so the reported configuration
+  is still the enforced one and the consequence is different.
 
   Separately, `fabricIPVLANReassertLoop` is the persistent recovery owner the
   overlay never had: `applyFabricIPVLAN` runs only from a config apply on BOTH

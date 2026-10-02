@@ -31,11 +31,12 @@ import (
 // SCOPE, stated because the general gap is wider than this fix. Every apply
 // with no caller — boot load, the DHCP lease callback, a feed refresh, the
 // config poll — has the same shape, and #9693 already owns the ROUTING tail for
-// all of them. This debt covers the auto-rollback path only, which is the one
-// where the store has ALREADY advanced, so the reported configuration and the
-// enforced one disagree. On the other caller-less paths the store has not moved
-// and the reported configuration is still the enforced one; widening to them is
-// a separate decision with a different consequence, and bundling it here would
+// all of them. This debt covers auto-rollback and cold-boot applies: in both
+// paths the active config is already the one the daemon reports, so a failed
+// apply can leave the dataplane enforcing a different config with no caller to
+// report to. On the DHCP, feed and config-poll paths the store has not moved, so
+// the reported configuration is still the enforced one; widening to them is a
+// separate decision with a different consequence, and bundling it here would
 // make this change's blast radius the whole apply path.
 
 // configApplyReassertInterval paces the retry owner, matching its sibling
