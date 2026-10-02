@@ -1860,9 +1860,9 @@ var rejectMessageTypes = map[string]bool{
 }
 
 // compileFilterThenTail11355 preserves recognized actions nested beneath
-// `next [term]` or `reject [message-type]`. SetPath can make those tails
-// children of an otherwise valid action, so the ordinary direct-child walk
-// would miss them.
+// `next [term]` or `reject [message-type]`, including a bare reject.
+// SetPath can make those tails children of an otherwise valid action, so the
+// ordinary direct-child walk would miss them.
 func compileFilterThenTail11355(action *Node, term *FirewallFilterTerm) {
 	if action == nil || term == nil {
 		return
@@ -1900,6 +1900,7 @@ func compileFilterThenTail11355(action *Node, term *FirewallFilterTerm) {
 			hasKeyedMessageType = true
 		}
 		keys = append(keys, action.Keys[i:]...)
+		tailSchema := filterThenSchema8971()
 		for _, child := range action.Children {
 			if child == nil {
 				continue
@@ -1911,7 +1912,10 @@ func compileFilterThenTail11355(action *Node, term *FirewallFilterTerm) {
 				children = append(children, child.Children...)
 				continue
 			}
-			if hasKeyedMessageType {
+			// With an unkeyed reject, preserve recognized `then` actions as
+			// tails; the main walk keeps unrecognized children on UnknownActions.
+			if hasKeyedMessageType ||
+				(tailSchema != nil && resolveSchemaChild(tailSchema, child.Name()) != nil) {
 				children = append(children, child)
 			}
 		}
@@ -2127,11 +2131,13 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 				// Unknown token after reject — a typo. Flag it.
 				term.UnknownActions = append(term.UnknownActions, "reject "+child.Keys[1])
 			} else {
+				thenActionSchema := filterThenSchema8971()
 				for _, mt := range child.Children {
 					if len(mt.Keys) >= 1 {
 						if rejectMessageTypes[mt.Keys[0]] {
 							term.RejectMessageType = mt.Keys[0]
-						} else {
+						} else if thenActionSchema == nil ||
+							resolveSchemaChild(thenActionSchema, mt.Keys[0]) == nil {
 							term.UnknownActions = append(term.UnknownActions, "reject "+mt.Keys[0])
 						}
 					}

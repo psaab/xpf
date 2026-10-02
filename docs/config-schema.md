@@ -13559,8 +13559,9 @@ codes plus `tcp-reset`) commits as a plain reject and captures the type on
 `FirewallFilterTerm.RejectMessageType` for fidelity — the dataplane acts only
 on `FilterAction::Reject` today, so the type is compile-time-only (no wire
 field); and `then next term` / `then next` (explicit fall-through) commits as
-a no-op, marked `FirewallFilterTerm.NextTerm`. A token after `reject` that is
-NOT a known message-type is still a typo and IS flagged.
+a no-op, marked `FirewallFilterTerm.NextTerm`. After bare `reject`, a
+recognized action tail is not a message type; an unrecognized token that is
+neither a known message type nor a recognized action tail is still a typo.
 
 **(11355) Flat-set action tails after `next term` / `reject <type>` were
 silently dropped.** `SetPath` can nest recognized actions beneath `next` (not a
@@ -13569,13 +13570,20 @@ direct-child action walk missed them. `compileFilterThen` now feeds these tails
 back through the same action parser. Recognized modifiers populate their typed
 fields, so existing validation catches contradictions such as routing-instance
 with next-term/reject. The nested `count c1` in `reject tcp-reset count c1`
-remains effective. Unknown tails continue through `UnknownActions` and
-trigger strict rejection or tolerant warning. Flat-set and packed-line forms
-share these results. Bare `next term` and a single known reject message type
-remain valid. Regression coverage:
+remains effective; unknown tails continue through `UnknownActions` and trigger
+strict rejection or tolerant warning. Flat-set and packed-line forms share
+these results. Bare `next term` and a single known reject message type remain
+valid.
+The same applies beneath bare `reject`: recognized action children, including
+`count c1` in nested and flat-set forms, remain effective without being
+misclassified as reject-message types. An unknown child such as `blorp` remains
+a strict error (#11683). Regression coverage:
 `pkg/config/compiler_filter_action_test.go`
 (`TestFilterAction_TailsAreConsistentAcrossFlatAndPacked11355`,
 `TestFilterAction_HierarchicalNestedRejectTailPreservesCount11355`).
+`pkg/config/compiler_filter_action_11683_test.go`
+(`TestFilterAction_UnkeyedRejectPreservesNestedCount11683`,
+`TestFilterAction_UnknownUnkeyedRejectChildStillRejected11683`).
 Defense-in-depth in the Rust filter: a NON-EMPTY unrecognized action (only
 reachable via a mixed-version snapshot now that commit rejects it) fails
 CLOSED to `Discard`, never `Accept`; the empty string keeps the
