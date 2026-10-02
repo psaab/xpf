@@ -1098,6 +1098,11 @@ sync.
   broadcast), so the reject, Time-Exceeded, and PTB paths apply ONE
   bad-source set covering both the limited and directed broadcast. Same
   cold-path scan, no new counter, fail-closed silent drop.
+  #11438: non-first-fragment suppression is IPv4-only. IPv6 routers may
+  generate a PTB for an oversized non-first fragment; the builder quotes its
+  bytes as-is (including the Fragment header) and does not interpret fragment
+  payload as a transport header. The PTB test pins the 1500-byte fragment on a
+  1400-MTU egress plus the 1280-byte boundary.
   #2472: AFTER the RFC suppression + output-classification gates, all three
   locally-generated error reasons (Time Exceeded, PTB/Frag-Needed, and
   policy/filter `reject`) now also pass through a per-reason token-bucket

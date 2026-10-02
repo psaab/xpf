@@ -113,6 +113,51 @@ fn inbound_v6_udp(payload_len: usize) -> (Vec<u8>, UserspaceDpMeta) {
     (frame, meta)
 }
 
+/// Build an inbound IPv6 non-first fragment whose total L3 length is
+/// `packet_len`. The Fragment header carries offset 185 (8-byte units) and
+/// M=1; fragment payload is opaque and is never parsed as UDP here.
+fn inbound_v6_non_first_frag(packet_len: usize) -> (Vec<u8>, UserspaceDpMeta) {
+    assert!(packet_len >= 48);
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&FW_MAC);
+    frame.extend_from_slice(&SENDER_MAC);
+    frame.extend_from_slice(&0x86ddu16.to_be_bytes());
+    let l3 = frame.len();
+    let payload_len = packet_len - 40;
+    frame.push(0x60);
+    frame.extend_from_slice(&[0x00, 0x00, 0x00]);
+    frame.extend_from_slice(&(payload_len as u16).to_be_bytes());
+    frame.push(44); // next header = Fragment
+    frame.push(64);
+    frame.extend_from_slice(
+        &"2001:559:8585:bf01::20"
+            .parse::<Ipv6Addr>()
+            .unwrap()
+            .octets(),
+    );
+    frame.extend_from_slice(
+        &"2001:559:8585:80::200"
+            .parse::<Ipv6Addr>()
+            .unwrap()
+            .octets(),
+    );
+    frame.push(17); // Fragment.Next Header = UDP
+    frame.push(0); // reserved
+    frame.extend_from_slice(&((185u16 << 3) | 1).to_be_bytes()); // offset 185, M=1
+    frame.extend_from_slice(&0x1234_5678u32.to_be_bytes());
+    frame.extend(std::iter::repeat(0xCDu8).take(payload_len - 8));
+
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: PTB_IFINDEX as u32,
+        l3_offset: l3 as u16,
+        l4_offset: (l3 + 48) as u16,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 17,
+        ..UserspaceDpMeta::default()
+    };
+    (frame, meta)
+}
+
 #[test]
 fn oversized_v4_df_udp_emits_frag_needed() {
     // L3 = 20 + 8 + 1500 = 1528 > 1400 MTU, DF set.
@@ -328,6 +373,95 @@ fn non_first_fragment_v4_is_suppressed() {
     assert!(
         ptb_reply_suppressed(&frame, meta, l3, &ForwardingState::default()),
         "non-first fragment must be suppressed"
+    );
+}
+
+/// #11438: an oversized IPv6 NON-FIRST fragment must still get a Packet Too
+/// Big — the non-first-fragment PTB suppression is IPv4-only. A 1500-byte
+/// fragment on a 1400-MTU egress decides EmitPacketTooBig, is NOT
+/// suppressed, and builds a type-2 PTB quoting the fragment as-is (raw L3
+/// bytes — the builder never parses L4). Counter-cases: a 1280-byte
+/// fragment (the IPv6 minimum MTU) fits the 1400 egress (Forward, no
+/// over-fire), and a pathologically small egress MTU advertises the 1280
+/// floor rather than an illegal value.
+#[test]
+fn oversized_v6_non_first_fragment_gets_ptb_11438() {
+    // 1500-on-1400: oversized middle fragment.
+    let (frame, meta) = inbound_v6_non_first_frag(1500);
+    let l3 = meta.l3_offset as usize;
+    assert!(
+        is_non_first_fragment(&frame[l3..], meta.addr_family),
+        "fixture must be a genuine v6 non-first fragment (offset 185, M=1)"
+    );
+    assert_eq!(
+        forwarded_egress_mtu_decision(&frame, l3, meta.addr_family, 1400),
+        EgressMtuDecision::EmitPacketTooBig { next_hop_mtu: 1400 },
+        "a 1500-byte v6 fragment on a 1400 egress must decide PTB"
+    );
+    assert!(
+        !ptb_reply_suppressed(&frame, meta, l3, &ForwardingState::default()),
+        "#11438: an oversized v6 non-first fragment must NOT suppress the PTB"
+    );
+    // The reply quotes the fragment as-is: v6 header + Fragment header bytes
+    // verbatim at the head of the quote.
+    let fwd = forwarding_with_egress(1400);
+    let out = build_packet_too_big_v6(&frame, meta, PTB_IFINDEX, &fwd, 1400)
+        .expect("PTB for a v6 non-first fragment must build");
+    let icmp = 14 + 40;
+    assert_eq!(out[icmp], 2, "ICMPv6 type 2 (Packet Too Big)");
+    assert_eq!(out[icmp + 1], 0, "ICMPv6 code 0");
+    assert_eq!(
+        u32::from_be_bytes([out[icmp + 4], out[icmp + 5], out[icmp + 6], out[icmp + 7]]),
+        1400,
+        "MTU in the 32-bit ICMPv6 PTB field"
+    );
+    assert_eq!(
+        &out[icmp + 8..icmp + 8 + 48],
+        &frame[l3..l3 + 48],
+        "PTB must quote the v6 + Fragment headers as-is"
+    );
+    assert!(out.len() - 14 <= 1280, "reply L3 size <= 1280");
+
+    // A non-first ICMPv6 fragment's payload starts with arbitrary bytes, not
+    // an ICMP type. Type 1 is an error on an unfragmented packet, but must not
+    // suppress this valid fragment's PTB.
+    let mut icmp_fragment = frame.clone();
+    icmp_fragment[l3 + 40] = PROTO_ICMPV6; // Fragment.Next Header = ICMPv6
+    icmp_fragment[l3 + 48] = 1; // opaque fragment payload looks like type 1
+    let icmp_fragment_meta = UserspaceDpMeta {
+        protocol: PROTO_ICMPV6,
+        ..meta
+    };
+    assert!(
+        !ptb_reply_suppressed(
+            &icmp_fragment,
+            icmp_fragment_meta,
+            l3,
+            &ForwardingState::default()
+        ),
+        "#11438: an ICMPv6-looking payload in a non-first fragment is not an ICMP error"
+    );
+
+    // 1280 boundary: a minimum-MTU-sized fragment fits the 1400 egress.
+    let (small, small_meta) = inbound_v6_non_first_frag(1280);
+    let small_l3 = small_meta.l3_offset as usize;
+    assert_eq!(
+        forwarded_egress_mtu_decision(&small, small_l3, small_meta.addr_family, 1400),
+        EgressMtuDecision::Forward,
+        "a 1280-byte v6 fragment fits the 1400 egress (no over-fire)"
+    );
+
+    // Tiny-MTU floor: the same oversized fragment on a 100-byte egress
+    // advertises 1280 (the v6 minimum), still unsuppressed.
+    match forwarded_egress_mtu_decision(&frame, l3, meta.addr_family, 100) {
+        EgressMtuDecision::EmitPacketTooBig { next_hop_mtu } => {
+            assert_eq!(next_hop_mtu, 1280, "v6 advertised MTU floored at 1280");
+        }
+        other => panic!("expected PTB, got {other:?}"),
+    }
+    assert!(
+        !ptb_reply_suppressed(&frame, meta, l3, &ForwardingState::default()),
+        "#11438: the 1280-floored v6 fragment PTB must NOT be suppressed"
     );
 }
 

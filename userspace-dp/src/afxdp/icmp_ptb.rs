@@ -431,15 +431,17 @@ fn ipv4_df_set(packet: &[u8]) -> bool {
 }
 
 /// RFC error-suppression gate shared by the PTB path. Mirrors the reject
-/// path: never reply to a non-first fragment (no transport header to quote
-/// / key), to a trigger frame whose link-layer (L2) destination was
-/// group/broadcast (RFC 1812 §4.3.2.7 / RFC 4443 §2.4(e), #2325 — a
-/// datagram delivered as an L2 broadcast/multicast must not generate an
-/// error), to a trigger packet whose IP (L3) destination was
+/// path for non-first IPv4 fragments (no transport header to quote/key), and
+/// also suppresses replies to trigger frames whose link-layer (L2)
+/// destination was group/broadcast (RFC 1812 §4.3.2.7 / RFC 4443 §2.4(e),
+/// #2325 — a datagram delivered as an L2 broadcast/multicast must not
+/// generate an error), to trigger packets whose IP (L3) destination was
 /// multicast/broadcast (#2314 — a multicast flood must not be amplified
-/// into an ICMP-error backscatter storm), or to an inbound ICMP/ICMPv6
-/// *error* message (avoid error loops and amplification). Returns true
-/// when a PTB MUST be suppressed.
+/// into an ICMP-error backscatter storm), or to inbound ICMP/ICMPv6 *error*
+/// messages (avoid error loops and amplification). IPv6 non-first fragments
+/// are eligible for PTB: RFC 4443 permits quoting their fragment payload
+/// without interpreting it as a transport header. Returns true when a PTB
+/// MUST be suppressed.
 ///
 /// `forwarding` supplies the connected-route table for the #2411 IPv4
 /// directed-broadcast check (RFC 1812 §4.3.2.7): a PTB to the all-ones
@@ -469,7 +471,14 @@ pub(in crate::afxdp) fn ptb_reply_suppressed(
     let Some(packet) = frame.get(l3_offset..) else {
         return true;
     };
-    if is_non_first_fragment(packet, meta.addr_family) {
+    // Record fragment status once. IPv4 non-first fragments have no
+    // transport header to quote/key, so suppress their PTB per RFC 792.
+    // IPv6 PTB may quote a non-first fragment as-is (RFC 4443), and must
+    // not share this IPv4-only rule.
+    let non_first_fragment = is_non_first_fragment(packet, meta.addr_family);
+    let v6_non_first_fragment =
+        meta.addr_family as i32 == libc::AF_INET6 && non_first_fragment;
+    if meta.addr_family as i32 == libc::AF_INET && non_first_fragment {
         return true;
     }
     // #2367: never generate a PTB in reply to a datagram whose IP SOURCE
@@ -505,7 +514,10 @@ pub(in crate::afxdp) fn ptb_reply_suppressed(
     if meta.addr_family as i32 == libc::AF_INET && dest_is_directed_broadcast(forwarding, packet) {
         return true;
     }
-    if matches!(meta.protocol, PROTO_ICMP | PROTO_ICMPV6) {
+    // The L4 offset on a non-first IPv6 fragment points into opaque fragment
+    // payload; a byte that resembles an ICMP error type is not evidence of an
+    // inbound ICMP error. Skip type-based loop suppression for that case.
+    if matches!(meta.protocol, PROTO_ICMP | PROTO_ICMPV6) && !v6_non_first_fragment {
         let Some(&icmp_type) = frame.get(meta.l4_offset as usize) else {
             return true;
         };
