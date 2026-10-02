@@ -2698,3 +2698,47 @@ fn cleared_idle_key_expires_after_ha_replay_horizon_10784() {
     );
     assert_eq!(allocator.export_display_leases(after_horizon_ns).len(), 1);
 }
+
+#[test]
+fn synced_pat_reserve_refuses_when_live_flow_cap_is_full_11692() {
+    let addrs = pool();
+    // Address-only tokens consume tracked-flow capacity without occupying a
+    // PAT bitmap port, leaving a real free port for the synced reserve attempt.
+    let allocator = PortAllocator::new(1, 20_000, 20_001);
+    for (src, sport) in [
+        ("10.0.70.1", 41_000),
+        ("10.0.70.2", 41_001),
+    ] {
+        let token = allocator
+            .reserve_address_only(
+                flow(src, sport),
+                IpAddr::V4(addrs[0]),
+                NatHolder::Untracked,
+            )
+            .expect("address-only token fills one tracked-flow slot");
+        assert!(!allocator.holds_port(0, token.port));
+    }
+    assert_eq!(allocator.live_flow_count(), 2);
+    assert_eq!(allocator.debug_occupied_count(), 0);
+
+    let synced_flow = flow("10.0.70.3", 41_002);
+    assert!(
+        !allocator.reserve_flow_maybe_persistent(
+            synced_flow,
+            TranslatedTuple {
+                ip: IpAddr::V4(addrs[0]),
+                port: 20_000,
+            },
+            0,
+            false,
+            2_000,
+            NatHolder::Untracked,
+            None,
+            false,
+            &mut None,
+        ),
+        "a free PAT port must not let a synced flow exceed max_tracked_flows"
+    );
+    assert_eq!(allocator.live_flow_count(), 2);
+    assert_eq!(allocator.debug_occupied_count(), 0);
+}

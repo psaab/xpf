@@ -4329,6 +4329,14 @@ impl PortAllocator {
         if live.address_only_owns_wire_identity(&flow, translated) {
             return false;
         }
+        // #11692: synced reservations share the same tracked-flow budget as
+        // local PAT and address-only allocations. This one check precedes all
+        // three insertion shapes below (joining a lease, minting a lease, or
+        // recording a non-persistent flow), while the live mutex is held.
+        if live.live_by_flow.len() >= self.shared.max_tracked_flows {
+            self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
         // #7360: a PERSISTENT synced flow joins its source's lease instead of
         // reserving the port again.
         //
