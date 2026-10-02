@@ -20,9 +20,9 @@ import (
 // to a static default's next-hop instead of the learned one.
 //
 // These tests pin the import's SAFETY PROPERTIES, not just its happy path.
-// Every rejection below is load-bearing: the whole reason this fix is safe to
-// ship for a black-hole-class bug is that the importer can only ever add a
-// forwarding path, never remove or redirect one.
+// Every rejection below is load-bearing: unicast imports need complete,
+// scoped gateways; explicit FRR blackholes are the only admitted negative
+// routes; and HA's 4242 sentinel remains owned by the helper.
 
 func mustCIDR(t *testing.T, s string) *net.IPNet {
 	t.Helper()
@@ -205,30 +205,18 @@ func TestImportAdoptsFRRStaticdDHCPRoutes(t *testing.T) {
 	}
 }
 
-// SAFETY PROPERTY: the importer can only ever ADD A FORWARDING PATH.
-//
-// Non-unicast route types are never adopted, so no kernel discard/blackhole/
-// unreachable route can be published into the helper FIB — the importer can
-// therefore never convert a working forwarding path into a drop. That is what
-// makes this fix safe to ship for a bug whose bad outcome is a black-hole.
-//
-// ONE VARIABLE. Each route below is byte-identical to the BGP route that
+// SAFETY PROPERTY: only the discard route type is the non-forwarding
+// exception to learned unicast import. Unreachable and prohibit routes stay
+// out of the helper FIB; HA's inactive-RG blackholes are excluded by their
+// priority sentinel in a separate cell below.
+// ONE VARIABLE. Each tested route is byte-identical to the BGP route that
 // TestImportAdoptsBGPLearnedRoute proves IS imported — same gateway, same
-// protocol, same prefix shape — and differs ONLY in Type. So a rejection here
-// can only be attributable to the unicast gate.
-//
-// (An earlier version of this test used realistic gateway-LESS blackhole
-// routes and passed for the wrong reason: they were already rejected by the
-// gateway-less rule, so removing the unicast gate entirely left the test
-// GREEN. Measured, not assumed.)
-//
-// RED on revert: delete importableRoute's `r.Type != unix.RTN_UNICAST` gate.
-func TestImportRejectsNonUnicastEvenWhenOtherwiseImportable(t *testing.T) {
+// protocol, same prefix shape — and differs ONLY in Type.
+func TestImportRejectsUnsupportedNegativeRoutesEvenWhenOtherwiseImportable11398(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		routeTyp int
 	}{
-		{"blackhole", unix.RTN_BLACKHOLE},
 		{"unreachable", unix.RTN_UNREACHABLE},
 		{"prohibit", unix.RTN_PROHIBIT},
 	} {
@@ -248,14 +236,9 @@ func TestImportRejectsNonUnicastEvenWhenOtherwiseImportable(t *testing.T) {
 	}
 }
 
-// The HA inactive-RG blackhole route, in its REAL shape.
-//
-// pkg/daemon installs these as RTN_BLACKHOLE with the 4242 priority sentinel
-// and no gateway, so BOTH the unicast gate and the gateway-less rule exclude
-// it — deliberately belt-and-braces, since adopting it would double-enforce an
-// HA ownership decision the helper already makes for itself via its
-// HAInactive disposition. This test pins the realistic input; the unicast
-// PREDICATE is bound by the one-variable test above.
+// The HA inactive-RG blackhole route uses the same RTN_BLACKHOLE type now
+// admitted for FRR blackholes, so its priority sentinel must remain excluded.
+// The helper already enforces this ownership decision with HAInactive.
 func TestImportRejectsHABlackholeSentinelRoute(t *testing.T) {
 	withRouteLister(t, staticLister(v4Main(netlink.Route{
 		Dst:      mustCIDR(t, "10.0.61.0/24"),
@@ -436,5 +419,27 @@ func TestLearnedRouteTableIDsIsBoundedAndDeduped(t *testing.T) {
 	want := []int{mainTableID, 100, 200}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("table ids = %v, want %v", got, want)
+	}
+}
+
+// FRR-installed blackholes must reach the helper FIB with discard semantics;
+// the ordinary less-specific default remains a separate forwarding route.
+func TestImportAdoptsFRRBlackholeAsDiscard11398(t *testing.T) {
+	withRouteLister(t, staticLister(v4Main(netlink.Route{
+		Dst:      mustCIDR(t, "10.0.0.0/8"),
+		Type:     unix.RTN_BLACKHOLE,
+		Priority: 20,
+		Protocol: netlink.RouteProtocol(rtprotZStatic),
+	})))
+
+	got, err := ImportLearnedRoutes([]int{mainTableID})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want the single FRR blackhole route imported, got %+v", got)
+	}
+	if got[0].Destination != "10.0.0.0/8" || !got[0].Discard || len(got[0].NextHops) != 0 {
+		t.Fatalf("imported blackhole route = %+v, want discard 10.0.0.0/8 with no next hops", got[0])
 	}
 }

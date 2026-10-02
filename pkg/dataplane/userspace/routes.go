@@ -425,6 +425,23 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	addRoutes("inet.0", "inet", cfg.RoutingOptions.StaticRoutes, "", "")
 	addRoutes("inet6.0", "inet6", cfg.RoutingOptions.Inet6StaticRoutes, "", "")
 
+	// FRR installs a blackhole route for every generate-route. Mirror that
+	// negative route even when it is acting as an aggregate over more-specific
+	// contributors, so userspace LPM cannot fall through to a less-specific
+	// default on destinations the kernel discards.
+	for _, route := range cfg.RoutingOptions.GenerateRoutes {
+		if route == nil {
+			continue
+		}
+		table, family := normalizeRouteSnapshotFamily("inet.0", "inet", route.Prefix)
+		addSnapshot(RouteSnapshot{
+			Table:       table,
+			Family:      family,
+			Destination: route.Prefix,
+			Discard:     true,
+		})
+	}
+
 	if len(cfg.RoutingInstances) > 0 {
 		insts := make([]*config.RoutingInstanceConfig, 0, len(cfg.RoutingInstances))
 		for _, ri := range cfg.RoutingInstances {
@@ -1373,6 +1390,7 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 			Table:          table,
 			Family:         family,
 			Destination:    dest,
+			Discard:        lr.Discard,
 			NextHops:       lr.NextHops,
 			NextHopWeights: nonDefaultRouteWeights(lr.NextHopWeights),
 			Preference:     routing.LearnedRouteImportPreference,

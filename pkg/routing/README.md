@@ -1139,10 +1139,10 @@ toward such a destination therefore either:
 
 | predicate | why |
 |---|---|
-| `Type == RTN_UNICAST` | the importer may only ever ADD a forwarding path — it can never publish a discard/blackhole/unreachable route and so can never turn forwarding into a drop. Also excludes the HA inactive-RG blackholes (`RTN_BLACKHOLE`, priority 4242) by construction |
+| `Type == RTN_UNICAST` or `RTN_BLACKHOLE` | unicast routes add an exact forwarding path; blackholes add the kernel's explicit discard prefix with no next hop, preserving longest-prefix drop behavior. The HA inactive-RG blackhole sentinel (`RTN_BLACKHOLE`, priority 4242) remains excluded |
 | protocol in `learnedRouteProtocols` | keyed on the same RTPROT constants `rtProtoName` maps, including FRR's `RTPROT_ZSTATIC` (196). `RTPROT_REDIRECT` is deliberately excluded |
-| has a next-hop gateway | a gateway-less route is directly connected and already reaches the FIB from the interface snapshot; requiring one also keeps clear of the Rust side's bare-gateway ifindex inference |
-| every ECMP leg has a gateway | an ECMP set is imported **whole or not at all** — a half-imported set is the same defect class as an ECMP half-override |
+| unicast route has a next-hop gateway | a gateway-less unicast route is directly connected and already reaches the FIB from the interface snapshot; requiring one also keeps clear of the Rust side's bare-gateway ifindex inference. Blackhole routes are gateway-less by design |
+| every unicast ECMP leg has a gateway | an ECMP set is imported **whole or not at all** — a half-imported set is the same defect class as an ECMP half-override |
 
 A `nil` `Dst` is normalised to `0.0.0.0/0` / `::/0` — that is how a default
 route can arrive, and it is the route the import most exists to capture.
