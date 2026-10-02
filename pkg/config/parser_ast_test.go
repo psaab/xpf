@@ -5117,16 +5117,19 @@ func TestValidateConfig_ArchiveSitesPasswordWarns(t *testing.T) {
 	sawPasswordWarn := false
 	wrongURLWarn := false
 	for _, w := range warnings {
-		if strings.Contains(w, "scp://alice@host1/configs") && strings.Contains(w, "inline password") {
+		if strings.Contains(w, "host1/configs") && strings.Contains(w, "inline password") {
 			sawPasswordWarn = true
+			if strings.Contains(w, "alice@") {
+				t.Errorf("archival warning exposed archive-site userinfo: %q", w)
+			}
 		}
 		// bob did not configure a password; should not warn.
-		if strings.Contains(w, "scp://bob@host2/configs") && strings.Contains(w, "inline password") {
+		if strings.Contains(w, "host2/configs") && strings.Contains(w, "inline password") {
 			wrongURLWarn = true
 		}
 	}
 	if !sawPasswordWarn {
-		t.Error("expected warning about scp://alice@host1/configs inline password")
+		t.Error("expected inline-password warning for host1/configs")
 	}
 	if wrongURLWarn {
 		t.Error("should NOT warn about host2 — no password was configured")

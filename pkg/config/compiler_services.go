@@ -234,11 +234,14 @@ func validateRPMHTTPGetSchemeStrict(cfg *Config) error {
 			// ip-monitoring failover. Reject the empty host at commit so the
 			// operator sees it instead of a silently dead probe. hostErr is
 			// the shared message for both target forms below.
+			// #11771: this error is downgraded to Warnings on tolerant load.
+			// Redact the target here, and do not include url.Parse's error:
+			// url.Error embeds the original credential-bearing URL.
 			hostErr := func() error {
 				return fmt.Errorf(
 					"services rpm probe %q test %q: http-get target %q has no host "+
 						"(an http-get probe needs a hostname or IP address to connect to)",
-					probe.Name, test.Name, test.Target)
+					probe.Name, test.Name, RedactURL(test.Target))
 			}
 			// A scheme is present only with the "://" separator; a bare
 			// host:port is schemeless (the runtime prepends http://).
@@ -255,8 +258,8 @@ func validateRPMHTTPGetSchemeStrict(cfg *Config) error {
 			}
 			u, err := url.Parse(test.Target)
 			if err != nil {
-				return fmt.Errorf("services rpm probe %q test %q: invalid http-get target URL %q: %w",
-					probe.Name, test.Name, test.Target, err)
+				return fmt.Errorf("services rpm probe %q test %q: invalid http-get target URL %q",
+					probe.Name, test.Name, RedactURL(test.Target))
 			}
 			switch u.Scheme {
 			case "http", "https":
@@ -265,7 +268,7 @@ func validateRPMHTTPGetSchemeStrict(cfg *Config) error {
 				return fmt.Errorf(
 					"services rpm probe %q test %q: http-get target %q uses unsupported scheme %q "+
 						"(only http and https are valid for an http-get probe)",
-					probe.Name, test.Name, test.Target, u.Scheme)
+					probe.Name, test.Name, RedactURL(test.Target), u.Scheme)
 			}
 			if u.Hostname() == "" {
 				return hostErr()
