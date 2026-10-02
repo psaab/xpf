@@ -23,3 +23,21 @@ failover_main_iperf_running() {
 		[[ "$cmdline" == *iperf3* && "$cmdline" == *"-c $2"* && "$cmdline" == *"-p $3"* && "$cmdline" == *"-P $4"* ]]
 	' _ "$1" "$2" "$3" "$4" &>/dev/null
 }
+# failover_wait_main_iperf_result <log> <timeout>
+#   Wait up to timeout seconds for the client to flush its final result. The
+#   control process can exit before its final control exchange reaches the log.
+failover_wait_main_iperf_result() {
+	local log="$1" timeout="$2"
+	incus exec "$CLUSTER_LAN_HOST" -- bash -c '
+		log=$1
+		remaining=$2
+		while (( remaining > 0 )); do
+			if grep -Eq "iperf Done|\\[SUM\\].*sender" "$log" 2>/dev/null; then
+				exit 0
+			fi
+			sleep 1
+			remaining=$((remaining - 1))
+		done
+		grep -Eq "iperf Done|\\[SUM\\].*sender" "$log" 2>/dev/null
+	' _ "$log" "$timeout" &>/dev/null
+}

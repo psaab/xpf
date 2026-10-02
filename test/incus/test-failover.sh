@@ -822,24 +822,18 @@ check_v6_transit "after manual failover"
 #
 # Cost, counted rather than asserted: the 120s iperf3 starts at line ~207 and by
 # the time control reaches here the script has already spent 8 + SYNC_WAIT + 3 +
-# (reboot wait) + 20 + 5 seconds plus a 5-packet probe. With a typical reboot
-# that leaves ~35-55s of iperf3 still to run, so the wait below overlaps it and
-# Phase 5 just waits out the remainder — free. Only when the reboot consumes the
-# full REBOOT_WAIT budget does any of it become extra wall clock, and then at
-# most V6_RECHECK_DELAY of it.
+# (reboot wait) + 20 + 5 seconds plus a 5-packet probe. That typically leaves
+# ~35-55s of iperf3 still to run. Phase 5 waits for its terminal log marker for
+# at most IPERF_DURATION seconds; normally this overlaps the remaining run and
+# its final control exchange.
 sleep "$V6_RECHECK_DELAY"
 check_v6_transit "${V6_RECHECK_DELAY}s after manual failover"
 
-# ── Phase 5: Wait for iperf3 to complete and validate results ───────
+# ── Phase 5: Wait for an iperf3 result and validate it ───────────────
 
-info "Waiting for iperf3 to complete"
+info "Waiting for iperf3 final result (up to ${IPERF_DURATION}s)"
 
-for i in $(seq 1 "$IPERF_DURATION"); do
-	if ! main_iperf_running; then
-		break
-	fi
-	sleep 1
-done
+failover_wait_main_iperf_result /tmp/iperf3-failover.log "$IPERF_DURATION" || true
 
 # Check iperf3 completed successfully.
 # iperf3's control socket may close during failover even though all data
