@@ -1105,7 +1105,7 @@ func ValidateConfig(cfg *Config) []string {
 	if cfg.System.Archival != nil {
 		for _, url := range cfg.System.Archival.ArchiveSitesWithPassword {
 			warnings = append(warnings, fmt.Sprintf(
-				"system archival archive-sites %q: inline password is accepted but ignored — archival uses scp BatchMode and relies on SSH keys, not passwords", url))
+				"system archival archive-sites %q: inline password is accepted but ignored — archival uses scp BatchMode and relies on SSH keys, not passwords", RedactURL(url)))
 		}
 	}
 
