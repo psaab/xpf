@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "f826f1c80a277a865385e63f1e0fa2a56a193b3fc0db7c3e703a53042ecbe7e4"
+	snapshotShapeGolden8892 = "2627a7ccb2a2c4547aa9a79802327ebadc20960f244a704423d877c021e61ef5"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -418,7 +418,10 @@ const (
 	// v39 -> v40 BUMPED (#11404): InterfaceSnapshot.LinkUp carries kernel
 	// admin/oper liveness for interface-only ECMP egress. A v39 helper ignores
 	// it, keeping the known-down path this field closes.
-	snapshotShapeVersion8892 = 40
+	// v40 -> v41 BUMPED (#11420): ConfigSnapshot.ForwardingTables identifies
+	// FI tables so Rust can authorize a qualified IPv6 link-local gateway's
+	// default-domain egress without permitting ordinary foreign-VRF scope.
+	snapshotShapeVersion8892 = 41
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

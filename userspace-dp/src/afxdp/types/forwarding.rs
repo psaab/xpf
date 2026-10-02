@@ -126,10 +126,14 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) connected_v6: Vec<ConnectedRouteV6>,
     pub(in crate::afxdp) routes_v4: FastMap<String, Vec<RouteEntryV4>>,
     pub(in crate::afxdp) routes_v6: FastMap<String, Vec<RouteEntryV6>>,
+    /// Canonical tables explicitly typed by Go as forwarding instances. Only
+    /// these tables may bind a qualified IPv6 link-local gateway to an
+    /// interface in default routing domain 0; quarantined and ordinary
+    /// virtual-router cross-table scopes remain refused (#11074, #11420).
+    pub(in crate::afxdp) forwarding_tables: FastSet<String>,
     /// #9955: synthetic next-table entries are kernel ip rules, not peers
     /// in the destination table's FIB. Keep a priority-ordered per-source-
     /// table collection so lookup can perform the kernel's rule stage before
-    /// the table-local longest-prefix match.
     pub(in crate::afxdp) leak_rules_v4: FastMap<String, Vec<LeakRuleV4>>,
     pub(in crate::afxdp) leak_rules_v6: FastMap<String, Vec<LeakRuleV6>>,
     /// #9951: O(1)-candidate liveness indexes for stamped session hits.
@@ -459,8 +463,7 @@ pub(in crate::afxdp) struct ForwardingState {
     /// Shared inbound XFRM-SA existence snapshot used by Stage 11's
     /// ESP-in-UDP gate. The Arc is carried across forwarding rebuilds so a
     /// config apply cannot transiently empty the monitor's live table.
-    pub(in crate::afxdp) ipsec_sa:
-        std::sync::Arc<crate::afxdp::forwarding::IpsecSaStore>,
+    pub(in crate::afxdp) ipsec_sa: std::sync::Arc<crate::afxdp::forwarding::IpsecSaStore>,
     /// Immutable bind-less IPsec selector fence compiled from the snapshot.
     /// Deliberately has no SA-state dependency: matching cleartext is dropped
     /// during both SA-up and SA-down windows.

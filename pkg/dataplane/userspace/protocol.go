@@ -374,7 +374,11 @@ const (
 	// admin/oper state used to avoid interface-only ECMP through a known-down
 	// egress. A v39 helper ignores it and keeps the old liveness behavior, so
 	// exact equality fences that mixed pairing.
-	ProtocolVersion = 40
+	// v40 -> v41 (#11420): ConfigSnapshot.ForwardingTables authorizes only
+	// the default-domain interface for a qualified FI link-local gateway. A
+	// v40 helper cannot apply that table-scoped exception, so exact equality
+	// fences the mixed route contract.
+	ProtocolVersion = 41
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -767,8 +771,16 @@ type ConfigSnapshot struct {
 	TunnelEndpoints  []TunnelEndpointSnapshot `json:"tunnel_endpoints,omitempty"`
 	Neighbors        []NeighborSnapshot       `json:"neighbors,omitempty"`
 	Routes           []RouteSnapshot          `json:"routes,omitempty"`
-	Flow             FlowSnapshot             `json:"flow,omitempty"`
-	DefaultPolicy    string                   `json:"default_policy,omitempty"`
+	// ForwardingTables identifies the family-qualified tables backed by
+	// `instance-type forwarding`. The Rust FIB uses this explicit marker to
+	// allow a forwarding-instance route's qualified gateway to target a
+	// default-instance interface without relaxing the #11074 foreign-VRF
+	// check.
+	// Additive and omitted when empty. Protocol v41 fences older helpers,
+	// which refuse rather than silently ignore this route authority.
+	ForwardingTables []string     `json:"forwarding_tables,omitempty"`
+	Flow             FlowSnapshot `json:"flow,omitempty"`
+	DefaultPolicy    string       `json:"default_policy,omitempty"`
 	// WgSteeredListenPorts (#9587) is the bounded SET of WireGuard listen
 	// ports the shim steers onto its AF_XDP WireGuard path (at most
 	// config.MaxSteeredWireGuardPorts, selected by config.SplitSteeredPorts):

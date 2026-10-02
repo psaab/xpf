@@ -127,6 +127,23 @@ func TestConnectedNetworkPrefix(t *testing.T) {
 	}
 }
 
+func TestIPv6LinkCandidate(t *testing.T) {
+	for _, tc := range []struct {
+		address string
+		want    bool
+	}{
+		{"2001:db8::1/64", true},
+		{"fe80::1/64", true},
+		{"::1/128", true},
+		{"192.0.2.1/24", false},
+		{"not-an-address", false},
+	} {
+		if got := IPv6LinkCandidate(tc.address); got != tc.want {
+			t.Errorf("IPv6LinkCandidate(%q) = %v, want %v", tc.address, got, tc.want)
+		}
+	}
+}
+
 func TestTargetReturnPathWarningsCoverNextTableAndPBR(t *testing.T) {
 	cfg := ribGroupLeakConfig(nil, []string{"10.0.30.1/24"})
 	unit := cfg.Interfaces.Interfaces["ge-0/0/1"].Units[0]
