@@ -138,6 +138,10 @@ func TestNATRuleCounterReadsRequireInstalledRule11743(t *testing.T) {
 					t.Errorf("ReadNATRuleCounter calls = %d, want %d; output:\n%s",
 						dp.counterReads, state.wantRead, out)
 				}
+				if renderer.name == "destination pool" &&
+					!strings.Contains(out, "Referenced by: drs1/dr1 (from untrust)") {
+					t.Errorf("destination pool output missing Referenced-by line; output:\n%s", out)
+				}
 			})
 		}
 	}
