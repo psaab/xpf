@@ -344,6 +344,45 @@ func dhcpConnectedCoveringPrefix(connected []netip.Prefix, learned netip.Prefix)
 	return netip.Prefix{}
 }
 
+// mgmtVRFAddressConnectedPrefixes gathers lease and configured management prefixes.
+func mgmtVRFAddressConnectedPrefixes(cfg *config.Config, leases []*dhcp.Lease,
+	mgmtSet map[string]bool, family int) []netip.Prefix {
+	familyBits := net.IPv4len * 8
+	if family == netlink.FAMILY_V6 {
+		familyBits = net.IPv6len * 8
+	}
+
+	var prefixes []netip.Prefix
+	for _, lease := range leases {
+		if lease == nil || !mgmtSet[lease.Interface] ||
+			!lease.Address.IsValid() || lease.Address.Addr().BitLen() != familyBits {
+			continue
+		}
+		prefixes = append(prefixes, lease.Address.Masked())
+	}
+	if cfg == nil {
+		return prefixes
+	}
+	for name, iface := range cfg.Interfaces.Interfaces {
+		if iface == nil {
+			continue
+		}
+		for _, unit := range iface.Units {
+			if unit == nil || !mgmtSet[config.DHCPLeaseIfName(name, unit)] {
+				continue
+			}
+			for _, raw := range unit.Addresses {
+				prefix, err := netip.ParsePrefix(raw)
+				if err != nil || prefix.Addr().BitLen() != familyBits {
+					continue
+				}
+				prefixes = append(prefixes, prefix.Masked())
+			}
+		}
+	}
+	return prefixes
+}
+
 // mgmtVRFTableID is the kernel routing table backing the management VRF, for
 // the netlink route reconcile below (#9622: config.ManagementVRFTableID).
 const mgmtVRFTableID = config.ManagementVRFTableID
@@ -489,6 +528,11 @@ func (d *Daemon) applyMgmtVRFRoutesTo(nlh mgmtRouteProgrammer, leases []*dhcp.Le
 			errs = append(errs, fmt.Errorf("mgmt VRF route inventory: %w", operatorInventoryErr))
 		}
 	}
+	if needsControlFabricInventory {
+		connectedPrefixesV4 = append(connectedPrefixesV4, mgmtVRFAddressConnectedPrefixes(cfg, leases, mgmtSet, netlink.FAMILY_V4)...)
+		connectedPrefixesV6 = append(connectedPrefixesV6, mgmtVRFAddressConnectedPrefixes(cfg, leases, mgmtSet, netlink.FAMILY_V6)...)
+	}
+
 	// Resolve route-bearing management links before selecting defaults so a
 	// missing interface cannot win and suppress a usable gateway.
 	type resolvedLeaseLink struct {
