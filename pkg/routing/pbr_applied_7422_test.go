@@ -29,12 +29,10 @@ func (f fakeRuleOps7422) RuleList(family int) ([]netlink.Rule, error) {
 
 func rule7422(prio int) netlink.Rule { return netlink.Rule{Priority: prio} }
 
-// #7422 row 12: xpf_pbr_rules_applied counts PBR steering lookup rules, not
-// their paired unreachable shadows, and reports whether readback SUCCEEDED.
-//
-// The lookup occupies the even priority in each pair because netlink v1.3.1
-// does not expose a rule's fib-rule action on readback. Rows straddle the
-// priority-band edges and both positions of a pair.
+// #7422/#11440: the applied gauge reports PBR-band occupancy only. Structural
+// mismatches are counted separately against desired rules by
+// PBRAppliedStatus; occupancy still counts an in-band even slot without
+// claiming its table or match fields are correct.
 func TestPBRAppliedCountBandAndValidity7422(t *testing.T) {
 	base := config.PBRRulePriorityBase
 	top := base + config.PBRRuleWindow
@@ -82,6 +80,50 @@ func TestPBRAppliedCountBandAndValidity7422(t *testing.T) {
 				t.Fatalf("count = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPBRAppliedStatusDetectsWrongTableInBand11440(t *testing.T) {
+	base := config.PBRRulePriorityBase
+	desired := []PBRRule{{
+		Family:  syscall.AF_INET,
+		TableID: 100,
+		IifName: "eth0",
+		Src:     "192.0.2.0/24",
+		Dst:     "198.51.100.8/32",
+		IPProto: 6,
+		Sport:   &PBRPortRange{Lo: 1000, Hi: 2000},
+		Dport:   &PBRPortRange{Lo: 443, Hi: 443},
+	}}
+	expected, valid := pbrExpectedLookupRule(desired[0], base)
+	if !valid {
+		t.Fatal("fixture rule must materialize")
+	}
+
+	occupancy, mismatched, ok := PBRAppliedStatus(
+		fakeRuleOps7422{v4: []netlink.Rule{expected}},
+		desired,
+	)
+	if !ok || occupancy != 1 || mismatched != 0 {
+		t.Fatalf("matching rule: occupancy=%d mismatched=%d ok=%v, want 1/0/true",
+			occupancy, mismatched, ok)
+	}
+
+	wrongTable := expected
+	wrongTable.Table++
+	occupancy, mismatched, ok = PBRAppliedStatus(
+		fakeRuleOps7422{v4: []netlink.Rule{wrongTable}},
+		desired,
+	)
+	if !ok || occupancy != 1 || mismatched != 1 {
+		t.Fatalf("wrong-table in-band rule: occupancy=%d mismatched=%d ok=%v, want 1/1/true",
+			occupancy, mismatched, ok)
+	}
+
+	occupancy, mismatched, ok = PBRAppliedStatus(fakeRuleOps7422{}, desired)
+	if !ok || occupancy != 0 || mismatched != 1 {
+		t.Fatalf("missing desired rule: occupancy=%d mismatched=%d ok=%v, want 0/1/true",
+			occupancy, mismatched, ok)
 	}
 }
 

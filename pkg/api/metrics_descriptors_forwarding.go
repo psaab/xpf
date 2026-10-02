@@ -46,16 +46,23 @@ func (c *xpfCollector) initForwardingDescriptors() {
 			"config-derived and emitted before the dataplane gate (#7422).",
 		nil, nil,
 	)
-	// #7422 row 12: the applied fact the old name implied. Read back from the
-	// kernel by counting ip rules in the PBR priority band. OMITTED ENTIRELY
-	// when the readback fails: publishing a fabricated 0 against a non-zero
-	// desired count would look exactly like a total install failure, which is
-	// the loudest possible false alarm.
+	// #7422/#11440: this is band occupancy, not proof that the in-band lookup
+	// rules match the active config. `xpf_pbr_rules_mismatched` reports missing
+	// and structurally different expected slots for the netlink-visible fields.
+	// Both readback metrics are OMITTED when either family listing fails.
 	c.pbrRulesApplied = prometheus.NewDesc(
 		"xpf_pbr_rules_applied",
-		"Number of filter-based-forwarding ip rules actually present in the "+
-			"kernel, counted in the PBR priority band. Absent when the netlink "+
-			"readback fails — compare against xpf_pbr_rules_desired (#7422).",
+		"Number of even-priority slots occupied in the PBR rule priority band "+
+			"(band occupancy only; this does not prove the rules match the active "+
+			"config). Absent when netlink readback fails (#7422, #11440).",
+		nil, nil,
+	)
+	c.pbrRulesMismatched = prometheus.NewDesc(
+		"xpf_pbr_rules_mismatched",
+		"Number of missing, mismatched, unexpected, or duplicate PBR lookup slots "+
+			"compared with the desired rules using netlink-visible fields. "+
+			"netlink v1.3.1 RuleList does not expose FRA_DSCP or rule action, so "+
+			"those fields cannot be checked. Absent when readback fails (#11440).",
 		nil, nil,
 	)
 	// #4422/#11307: number of routing-instance filter terms DROPPED from the

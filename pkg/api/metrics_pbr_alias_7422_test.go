@@ -34,7 +34,7 @@ func TestPBRInstalledIsAnAliasOfDesired7422(t *testing.T) {
 	seen := map[string]bool{}
 	for _, mf := range mfs {
 		switch mf.GetName() {
-		case "xpf_pbr_rules_installed", "xpf_pbr_rules_desired", "xpf_pbr_rules_applied":
+		case "xpf_pbr_rules_installed", "xpf_pbr_rules_desired", "xpf_pbr_rules_applied", "xpf_pbr_rules_mismatched":
 			seen[mf.GetName()] = true
 			ms := mf.GetMetric()
 			if len(ms) != 1 {
@@ -61,17 +61,11 @@ func TestPBRInstalledIsAnAliasOfDesired7422(t *testing.T) {
 			got["xpf_pbr_rules_installed"], got["xpf_pbr_rules_desired"])
 	}
 
-	// _applied is a netlink readback and is OMITTED when the read fails. In a
-	// unit-test environment it may legitimately be absent (no privileges) or
-	// present (a readable host), so its presence is not asserted either way —
-	// asserting either would make this cell environment-dependent. What IS
-	// asserted: if present, it must not be silently equal-by-construction to
-	// the desired count, because that would mean the readback was not consulted.
-	if seen["xpf_pbr_rules_applied"] {
-		t.Logf("xpf_pbr_rules_applied present with value %v (desired %v)",
-			got["xpf_pbr_rules_applied"], got["xpf_pbr_rules_desired"])
-	} else {
-		t.Log("xpf_pbr_rules_applied absent — the readback failed, which is the " +
-			"documented behaviour (omit rather than publish a fabricated 0)")
+	// Readback metrics are omitted together if either family listing fails.
+	// Environment availability is intentionally not asserted; if occupancy is
+	// present, the mismatch gauge must be present from the same complete read.
+	if seen["xpf_pbr_rules_applied"] != seen["xpf_pbr_rules_mismatched"] {
+		t.Fatalf("band occupancy and mismatch readbacks must be emitted together, got applied=%v mismatched=%v",
+			seen["xpf_pbr_rules_applied"], seen["xpf_pbr_rules_mismatched"])
 	}
 }

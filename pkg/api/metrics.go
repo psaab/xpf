@@ -77,6 +77,7 @@ type xpfCollector struct {
 	pbrRulesInstalled            *prometheus.Desc
 	pbrRulesDesired              *prometheus.Desc
 	pbrRulesApplied              *prometheus.Desc
+	pbrRulesMismatched            *prometheus.Desc
 	pbrDegradedTerms             *prometheus.Desc
 	tcEgressPacketsTotal         *prometheus.Desc
 	syncookieTotal               *prometheus.Desc
@@ -974,6 +975,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.pbrRulesInstalled
 	ch <- c.pbrRulesDesired
 	ch <- c.pbrRulesApplied
+	ch <- c.pbrRulesMismatched
 	ch <- c.pbrDegradedTerms
 	ch <- c.tcEgressPacketsTotal
 	ch <- c.syncookieTotal
