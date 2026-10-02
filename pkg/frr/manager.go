@@ -448,11 +448,6 @@ type FullConfig struct {
 	// ForwardingTableExport is the export policy for the forwarding table (ECMP).
 	ForwardingTableExport string
 
-	// BackupRouter is the fallback default gateway (system backup-router).
-	// Installed with admin distance 250 so it's only used when all other defaults fail.
-	BackupRouter    string // next-hop IP (e.g. "192.168.50.1")
-	BackupRouterDst string // destination prefix (e.g. "192.168.0.0/16"), default "0.0.0.0/0"
-
 	// InterfaceBandwidths maps interface names to bandwidth in bits per second.
 	// FRR emits "bandwidth <kbps>" in interface blocks (used by OSPF auto-cost).
 	InterfaceBandwidths map[string]uint64
@@ -544,21 +539,20 @@ type FullConfig struct {
 //  2. generate-routes (blackhole)
 //  3. inet6 static routes
 //  4. DHCP-learned defaults (admin distance 200)
-//  5. backup-router (admin distance 250)
-//  6. cluster-mode blackhole defaults (admin distance 250)
-//  7. ip-monitoring preferred routes (admin distance 1, #1827)
-//  8. per-VRF static routes
-//  9. policy-options (prefix-lists, route-maps, communities)
-//  10. interface settings (bandwidth, point-to-point)
-//  11. global dynamic protocols (OSPF/OSPFv3/BGP/RIP/ISIS)
-//  12. per-VRF dynamic protocols
+//  5. cluster-mode blackhole defaults (admin distance 250)
+//  6. ip-monitoring preferred routes (admin distance 1, #1827)
+//  7. per-VRF static routes
+//  8. policy-options (prefix-lists, route-maps, communities)
+//  9. interface settings (bandwidth, point-to-point)
+//  10. global dynamic protocols (OSPF/OSPFv3/BGP/RIP/ISIS)
+//  11. per-VRF dynamic protocols
 func (m *Manager) ApplyFull(fc *FullConfig) error {
 	if fc == nil {
 		return m.Clear()
 	}
 
 	hasContent := fc.OSPF != nil || fc.OSPFv3 != nil || fc.BGP != nil || fc.RIP != nil || fc.ISIS != nil ||
-		len(fc.StaticRoutes) > 0 || len(fc.Inet6StaticRoutes) > 0 || len(fc.GenerateRoutes) > 0 || len(fc.DHCPRoutes) > 0 || fc.BackupRouter != "" || fc.ClusterMode ||
+		len(fc.StaticRoutes) > 0 || len(fc.Inet6StaticRoutes) > 0 || len(fc.GenerateRoutes) > 0 || len(fc.DHCPRoutes) > 0 || fc.ClusterMode ||
 		len(fc.PreferredRoutes) > 0
 	for _, inst := range fc.Instances {
 		if inst.OSPF != nil || inst.OSPFv3 != nil || inst.BGP != nil || inst.RIP != nil || inst.ISIS != nil || len(inst.StaticRoutes) > 0 || len(inst.Inet6StaticRoutes) > 0 {
@@ -713,16 +707,13 @@ func (m *Manager) buildManagedSection(fc *FullConfig) string {
 	// 4. DHCP-learned default routes (admin distance 200).
 	renderDHCPDefaults(&b, fc)
 
-	// 5. Backup router: fallback default gateway with admin distance 250
-	renderBackupRouter(&b, fc)
-
-	// 6. Cluster mode: blackhole default route as fallback for fabric redirect.
+	// 5. Cluster mode: blackhole default route as fallback for fabric redirect.
 	renderClusterModeDefaults(&b, fc)
 
-	// 7. ip-monitoring preferred routes (admin distance 1, #1827).
+	// 6. ip-monitoring preferred routes (admin distance 1, #1827).
 	m.renderPreferredRoutes(&b, fc)
 
-	// 8. Per-VRF static routes. Forwarding instances (VRFName == "",
+	// 7. Per-VRF static routes. Forwarding instances (VRFName == "",
 	// TableID > 0) render into their dedicated kernel table instead of
 	// the default one (#1827 PR-2 divergence fix).
 	for _, inst := range fc.Instances {
@@ -737,7 +728,7 @@ func (m *Manager) buildManagedSection(fc *FullConfig) string {
 		}
 	}
 
-	// 9. Policy options: prefix-lists and route-maps. Collect the set of
+	// 8. Policy options: prefix-lists and route-maps. Collect the set of
 	// policy-statements applied as a BGP route-map in/out (default instance
 	// + every VRF) so a BGP policy with no explicit default action renders a
 	// terminating `permit` (Junos BGP default-accept) rather than FRR's
@@ -795,7 +786,7 @@ func (m *Manager) buildManagedSection(fc *FullConfig) string {
 	rRIP := resolveRIPIfNames(resolveIfName, fc.RIP)
 	rISIS := resolveISISIfNames(resolveIfName, fc.ISIS)
 
-	// 10. Interface-level settings (bandwidth, point-to-point).
+	// 9. Interface-level settings (bandwidth, point-to-point).
 	//
 	// Fed the RESOLVED OSPF set: its ospfNetworkType suppression keys on the
 	// OSPF interface name and compares it against InterfaceBandwidths /
@@ -824,7 +815,7 @@ func (m *Manager) buildManagedSection(fc *FullConfig) string {
 		b.WriteString(m.generateProtocolsWithQNH11447(rOSPF, rOSPFv3, fc.BGP, rRIP, rISIS, "", ecmpMaxPaths, policyOptions, bgpAcceptDefault, globalMetrics, bfdSec))
 	}
 
-	// 12. Per-VRF dynamic protocols
+	// 11. Per-VRF dynamic protocols
 	for i, inst := range fc.Instances {
 		if inst.OSPF != nil || inst.OSPFv3 != nil || inst.BGP != nil || inst.RIP != nil || inst.ISIS != nil {
 			var instanceMetrics *qnhMetricScope11447
@@ -841,7 +832,7 @@ func (m *Manager) buildManagedSection(fc *FullConfig) string {
 		}
 	}
 
-	// 13. Single consolidated top-level BFD block (profiles + peers),
+	// 12. Single consolidated top-level BFD block (profiles + peers),
 	// emitted exactly once outside any router/instance scope.
 	b.WriteString(bfdSec.render())
 

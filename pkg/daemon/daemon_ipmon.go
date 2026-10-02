@@ -165,22 +165,23 @@ func (d *Daemon) assembleFRRConfig(cfg *config.Config, overlay []config.RouteOve
 	dhcpRoutes := d.collectDHCPRoutes()
 	ribRoutes, ribRouteInventoryFailed := d.collectFRRClasslessRIBRoutes(cfg, dhcpRoutes)
 
+	// Management-owned global statics have their separate table-999 netlink
+	// owner; do not also emit them as unscoped FRR routes in the data table.
+	staticRoutes, inet6StaticRoutes := mgmtStaticRoutesForFRR(cfg, managementVRFIfaceSet(cfg), ipv6NextHopInterfaces[""])
 	fc := &frr.FullConfig{
 		OSPF:                    globalProtocols.OSPF,
 		OSPFv3:                  globalProtocols.OSPFv3,
 		BGP:                     globalProtocols.BGP,
 		RIP:                     globalProtocols.RIP,
 		ISIS:                    globalProtocols.ISIS,
-		StaticRoutes:            cfg.RoutingOptions.StaticRoutes,
-		Inet6StaticRoutes:       cfg.RoutingOptions.Inet6StaticRoutes,
+		StaticRoutes:            staticRoutes,
+		Inet6StaticRoutes:       inet6StaticRoutes,
 		GenerateRoutes:          cfg.RoutingOptions.GenerateRoutes,
 		DHCPRoutes:              dhcpRoutes,
 		RIBRoutes:               ribRoutes,
 		RIBRouteInventoryFailed: ribRouteInventoryFailed,
 		PolicyOptions:           &cfg.PolicyOptions,
 		ForwardingTableExport:   cfg.RoutingOptions.ForwardingTableExport,
-		BackupRouter:            cfg.System.BackupRouter,
-		BackupRouterDst:         cfg.System.BackupRouterDst,
 		InterfaceBandwidths:     ifaceBandwidths,
 		InterfacePointToPoint:   ifaceP2P,
 		RethMap:                 cfg.RethToPhysical(),

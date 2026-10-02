@@ -795,29 +795,21 @@ master ambiguous. LOCAL_IN identifies the shared VRF master, so admitting a
 lifeline member would otherwise suppress ingress judgement for its data
 co-members.
 
-**Backup-router destination family must match the next-hop (#2911):**
-`renderBackupRouter` (`pkg/frr/config_render.go`) keys the static-route
-prefix keyword (`ip` vs `ipv6`) on the NEXT-HOP family (#2891/#2907). An
-explicit `system backup-router <nh> destination <prefix>` whose prefix is a
-DIFFERENT family than the next-hop therefore renders a mismatched-family
-static — e.g. `backup-router 2001:db8::1 destination 0.0.0.0/0` →
-`ipv6 route 0.0.0.0/0 2001:db8::1 250` — where the v4 prefix fails the
-`ipv6 route` prefix matcher and fails the static config load (the reverse
-arm, a v4 next-hop on a v6 destination, instead fills the
-interface-name slot — #9820 corrected the old blanket rejection claim to
-this per-direction account). `validateBackupRouterDst`
-(`compiler_system.go`) hard-rejects an explicit family mismatch at commit,
-naming both addresses and families, and also refuses an IPv4-mapped
-next-hop outright (#9820 product restriction); the tolerant load/peer-sync
-path downgrades to a warning (`lenientBackupRouterDst`) so an
-already-persisted or peer-synced config an older binary accepted still
-boots (#1960 no-brick). Commit gate and render belt classify families
-with the shared `FRRAddrFamily` predicate (mapped ⇒ v6 literal
-classification) — including mapped *destinations*, which the belt used to
-veto under a false reason and now judges by the same rule as the gate.
-An EMPTY destination is left to #2907's next-hop-family-aware default
-(never a mismatch); a matched-family explicit destination passes. Same
-fail-closed-on-load doctrine as #3043.
+**System backup-router is reconciled in the management table (#11449):**
+`system backup-router <nh> [destination <prefix>]` is installed by
+`pkg/daemon/mgmtvrf_static_routes.go` through netlink as `RTPROT_STATIC` in
+kernel table 999. An empty destination defaults to `0.0.0.0/0` for IPv4 or
+`::/0` for IPv6, with metric 250. It is no longer rendered as an unscoped
+global FRR route, so it does not change the data table and continues to work
+when FRR is stopped.
+
+`validateBackupRouterDst` (`compiler_system.go`) rejects malformed next-hops,
+IPv4-mapped next-hops, malformed explicit destinations, and explicit
+destination/next-hop family mismatches at strict commit. The tolerant
+load/peer-sync path warns and retains bootability; the netlink reconciler
+skips values that cannot safely become a table-999 route. Family comparison
+uses the shared `FRRAddrFamily` predicate; mapped destinations classify as
+IPv6, while mapped next-hops remain a product restriction.
 
 **VRRP virtual-address must fall within a unit subnet (#3013):** a
 `vrrp-group <id> virtual-address <vip>` is authored under a

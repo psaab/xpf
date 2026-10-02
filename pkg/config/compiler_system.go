@@ -3836,23 +3836,11 @@ func findNamedNode(nodes []*Node, name string) *Node {
 // whose EXPLICIT `destination` is malformed or of a different address
 // family than the next-hop.
 //
-// Background: renderBackupRouter (pkg/frr) emits a fallback default route
-//
-//	<ip|ipv6> route <destination> <next-hop> 250
-//
-// where the route-prefix keyword is keyed on the next-hop family (#2907 /
-// #2891). Both tokens are stored as raw strings by compileSystem's
-// `"backup-router"` case with no IP-format validation at all (#4808) — a
-// syntactically malformed next-hop ("192.168.1.x") or destination
-// ("10.0.0.0/99") sails through commit uncaught and is rendered directly
-// into frr.conf. An explicit destination of the WRONG family renders a
-// mismatched-family static instead — e.g. `backup-router 2001:db8::1` +
-// `destination 0.0.0.0/0` → `ipv6 route 0.0.0.0/0 2001:db8::1 250`
-// (#2911), where the v4 prefix fails the `ipv6 route` prefix matcher and
-// fails the static config load. (A v6-destination/v4-next-hop line instead
-// fills the interface-name slot — normally inactive, not reload-fatal.
-// #9820 corrected the old blanket "FRR rejects a mismatched-family static
-// route" mechanism claim to this per-direction account.)
+// Runtime: pkg/daemon reconciles the backup-router through netlink as an
+// RTPROT_STATIC route in management table 999 with metric 250. An empty
+// destination defaults to the next-hop family (v6 → ::/0, v4 → 0.0.0.0/0).
+// The route must be excluded when either operand is malformed or their
+// families disagree so an unusable fallback is never acknowledged.
 //
 // Checks, in order:
 //  1. next-hop must parse as an IP address at all (#4808).
@@ -3868,8 +3856,8 @@ func findNamedNode(nodes []*Node, name string) *Node {
 // destination is left to #2907's next-hop-family-aware default (v6
 // next-hop → ::/0, v4 → 0.0.0.0/0) and is never malformed or a mismatch.
 //
-// Family classification uses FRRAddrFamily (netip; IPv4-mapped IPv6
-// literal → v6 literal classification), shared with the render belt.
+// Family classification uses FRRAddrFamily (netip; IPv4-mapped IPv6 literals
+// classify as v6), shared with the netlink route programmer.
 //
 // Strict (commit / commit-check): hard-reject on the first failing check,
 // naming the offending value. Lenient (load / peer-sync): warn (accumulating
@@ -3889,9 +3877,8 @@ func validateBackupRouterDst(cfg *Config, lenient bool) ([]string, error) {
 
 	var warnings []string
 
-	// #4808: next-hop must be a well-formed IP address. Rendered verbatim as
-	// the FRR static route's next-hop; a malformed value cannot serve as a
-	// gateway.
+	// #4808: next-hop must be a well-formed IP address. The netlink
+	// table-999 route requires an IP gateway.
 	if net.ParseIP(nh) == nil {
 		msg := fmt.Sprintf(
 			"system backup-router %s: not a valid IP address; backup-router "+
@@ -3929,8 +3916,7 @@ func validateBackupRouterDst(cfg *Config, lenient bool) ([]string, error) {
 	if _, _, err := net.ParseCIDR(dst); err != nil {
 		msg := fmt.Sprintf(
 			"system backup-router destination %s: not a valid CIDR prefix; "+
-				"FRR rejects a malformed destination, which fails the entire "+
-				"static config load (frr-reload)", dst)
+				"the management table-999 backup route cannot be installed", dst)
 		if !lenient {
 			return nil, fmt.Errorf("%s", msg)
 		}

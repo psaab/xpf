@@ -7,9 +7,9 @@ import (
 
 // #2911: commit-time validation for `system backup-router` whose EXPLICIT
 // destination prefix is a different address family than the next-hop. Such a
-// config renders an FRR-invalid static line (e.g. `ipv6 route 0.0.0.0/0
-// <v6nh>`) which frr-reload rejects, failing the ENTIRE static config load —
-// the exact breakage #2907 (#2891) set out to prevent for the empty-dst case.
+// config cannot install the backup route into management table 999 and must be
+// rejected rather than silently omit the route at commit time. The matched and
+// empty-destination cases ensure only explicit mismatches fail.
 //
 // All tests use the production ParseSetCommand + SetPath path (buildTree),
 // never NewParser (the flat-set gotcha in CLAUDE.md).
@@ -77,9 +77,9 @@ func TestBackupRouterMatchedFamilyCommits(t *testing.T) {
 	}
 }
 
-// Empty destination still commits and leaves #2907's family-aware default
-// intact — no mismatch reject for v4 OR v6 next-hop. Guards against a #2907
-// regression.
+// Empty destination still commits and leaves the family-aware default to the
+// table-999 netlink reconciler — no mismatch reject for v4 OR v6 next-hop.
+// Guards against a #2907 regression.
 func TestBackupRouterEmptyDestCommits(t *testing.T) {
 	for _, nh := range []string{"2001:db8::1", "192.168.50.1"} {
 		tree := buildTree(t, []string{
@@ -93,7 +93,7 @@ func TestBackupRouterEmptyDestCommits(t *testing.T) {
 			t.Fatalf("backup-router next-hop not stored: got %q want %q", cfg.System.BackupRouter, nh)
 		}
 		if cfg.System.BackupRouterDst != "" {
-			t.Fatalf("empty destination should stay empty (rendered by #2907 default), got %q", cfg.System.BackupRouterDst)
+			t.Fatalf("empty destination should stay empty for the netlink reconciler to default: %q", cfg.System.BackupRouterDst)
 		}
 		if hasBackupRouterFamilyWarning(cfg) {
 			t.Fatalf("empty destination must not warn, warnings=%v", cfg.Warnings)

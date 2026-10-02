@@ -2320,23 +2320,12 @@ type compileOpts struct {
 	// there is no longer an unsupported-scope reject to make lenient.
 	// lenientBackupRouterDst (#2911) downgrades the backup-router
 	// destination/next-hop family-mismatch gate (validateBackupRouterDst)
-	// from a hard compile error to a cfg.Warnings entry. #2907 (#2891)
-	// made the EMPTY backup-router destination default next-hop-family-aware
-	// (a v6 next-hop with no explicit destination defaults to ::/0), but an
-	// EXPLICIT destination whose family MISMATCHES the next-hop — e.g.
-	// `backup-router 2001:db8::1` + `destination 0.0.0.0/0` — still renders an
-	// FRR-invalid static line (`ipv6 route 0.0.0.0/0 2001:db8::1 250`):
-	// the v4 prefix fails the `ipv6 route` prefix matcher and fails the
-	// static config load. (The reverse arm — v4 next-hop on a v6
-	// destination — instead fills the interface-name slot; #9820
-	// corrected the old blanket "frr-reload rejects a mismatched-family
-	// static" claim to this per-direction account.) The strict commit /
-	// commit-check path hard-rejects so the operator-error is visible
-	// (naming both addresses and families); the tolerant load / peer-sync
-	// paths downgrade to a warning so
-	// an already-persisted or peer-synced config an older binary accepted still
-	// BOOTS (#1960 fail-closed-on-load class). Same doctrine as
-	// lenientReservedZoneNames.
+	// from a hard compile error to a cfg.Warnings entry. An empty destination
+	// defaults to the next-hop family (#2907); an explicit mismatch cannot be
+	// installed into management table 999. Strict commit / commit-check
+	// hard-rejects with both addresses and families; tolerant load / peer-sync
+	// warns and keeps the daemon bootable, while the netlink reconciler omits
+	// the invalid backup route until corrected (#1960).
 	lenientBackupRouterDst bool
 	// lenientSecureTunnelBindIface (#2933) downgrades the secure-tunnel
 	// bind-interface alias-collision gate (validateSecureTunnelBindInterfaceAST)
