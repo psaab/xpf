@@ -366,3 +366,75 @@ fn nat64_icmpv6_nonfirst_fragment_does_not_take_generic_ptb_path_11720() {
         "the NAT64 Fragment Header means this ICMPv6 tail must skip generic IPv6 PTB signaling"
     );
 }
+#[test]
+fn nat64_wg_fragment_budget_uses_translated_allowedips_peer_11722() {
+    let mut snapshot = crate::afxdp::test_fixtures::wg_two_peer_dnat_snapshot();
+    snapshot
+        .interfaces
+        .iter_mut()
+        .find(|interface| interface.ifindex == 13)
+        .expect("peer B physical underlay")
+        .mtu = 1400;
+    let mut forwarding = crate::afxdp::forwarding_build::build_forwarding_state(&snapshot);
+    forwarding.egress.insert(
+        11,
+        EgressInterface {
+            bind_ifindex: 11,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x16, 0, 1],
+            zone_id: TEST_TRUST_ZONE_ID,
+            redundancy_group: 0,
+            primary_v4: Some(Ipv4Addr::new(10, 0, 1, 1)),
+            primary_v6: Some("2001:db8::fe".parse().unwrap()),
+        },
+    );
+    let peer_b_dst = Ipv4Addr::new(10, 200, 0, 9);
+    let mut frame = nat64_ipv6_frame(1400, PROTO_UDP);
+    let mut synthetic_dst = "64:ff9b::".parse::<Ipv6Addr>().unwrap().octets();
+    synthetic_dst[12..].copy_from_slice(&peer_b_dst.octets());
+    frame[38..54].copy_from_slice(&synthetic_dst);
+
+    let mut decision = test_forwarding_decision_to_bound_ifindex(22);
+    decision.resolution.egress_ifindex = 400;
+    decision.resolution.tunnel_endpoint_id = 1;
+    decision.nat.nat64 = true;
+    decision.nat.rewrite_src = Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)));
+    decision.nat.rewrite_dst = Some(IpAddr::V4(peer_b_dst));
+    let mut request = test_live_forward_request_for_frame(frame.len(), decision);
+    request.meta.addr_family = libc::AF_INET6 as u8;
+    request.meta.protocol = PROTO_UDP;
+    request.meta.l3_offset = 14;
+    request.meta.l4_offset = 54;
+
+    assert_eq!(
+        nat64_v4_egress_mtu(&frame, request.meta, &decision, &forwarding),
+        crate::afxdp::wg::mss::wg_inner_mtu(libc::AF_INET, 1400),
+        "NAT64 fragmentation must use the translated IPv4 destination's \
+         peer-B underlay (1400), not the unmatched IPv6 destination's \
+         first-peer fallback (1500)"
+    );
+
+    let _rate_limit = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    let ingress = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let (ptb, mtu_signalled) = compute_forwarded_egress_ptb(
+        &frame,
+        request.meta,
+        &decision,
+        &forwarding,
+        true,
+        false,
+        &ingress.identity(),
+        &recent_exceptions,
+    );
+    assert!(mtu_signalled, "the 1400-byte inner exceeds peer B's MTU");
+    let ptb = ptb.expect("oversized NAT64 inner must emit a Packet Too Big");
+    let icmp = 14 + 40;
+    assert_eq!(ptb[icmp], 2, "ICMPv6 Packet Too Big");
+    assert_eq!(
+        u32::from_be_bytes([ptb[icmp + 4], ptb[icmp + 5], ptb[icmp + 6], ptb[icmp + 7]]),
+        (crate::afxdp::wg::mss::wg_inner_mtu(libc::AF_INET, 1400) + 20) as u32,
+        "PTB budget must use peer B's 1400-byte underlay, not peer A's 1500"
+    );
+}

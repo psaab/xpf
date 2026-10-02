@@ -1694,6 +1694,42 @@ fn post_transform_wg_inner_mtu_is_per_peer_underlay() {
         mtu_a, mtu_b,
         "per-peer underlay MTUs must differ for asymmetric peers"
     );
+
+    // NAT64's pre-translation IPv6 destination cannot match the IPv4
+    // AllowedIPs trie. The MTU path must key peer B from rewrite_dst, exactly
+    // as the translated inner frame does when WireGuard encapsulates it.
+    let peer_b_dst_v4 = Ipv4Addr::new(10, 124, 0, 9);
+    let (mut source_frame, source_meta) = inbound_v6_udp(1280);
+    let mut synthetic_dst = "64:ff9b::".parse::<Ipv6Addr>().unwrap().octets();
+    synthetic_dst[12..].copy_from_slice(&peer_b_dst_v4.octets());
+    set_v6_dst(
+        &mut source_frame,
+        source_meta.l3_offset as usize,
+        Ipv6Addr::from(synthetic_dst),
+    );
+    let mut nat64_decision = decision;
+    nat64_decision.nat.nat64 = true;
+    nat64_decision.nat.rewrite_dst = Some(IpAddr::V4(peer_b_dst_v4));
+    let source_meta = ForwardPacketMeta::from(source_meta);
+    let nat64_dst = post_transform_inner_destination(
+        &source_frame,
+        source_meta,
+        &nat64_decision,
+        true,
+    );
+    assert_eq!(nat64_dst, Some(IpAddr::V4(peer_b_dst_v4)));
+    assert_eq!(
+        post_transform_inner_mtu(
+            &nat64_decision,
+            &state,
+            true,
+            source_meta.addr_family,
+            0,
+            nat64_dst,
+        ),
+        crate::afxdp::wg::mss::wg_inner_mtu(libc::AF_INET, 1400) + 20,
+        "the original IPv6 destination must not fall back to peer A's 1500-byte underlay"
+    );
 }
 
 /// #8896: a NAT64 packet routed through a tunnel must have BOTH budgets
