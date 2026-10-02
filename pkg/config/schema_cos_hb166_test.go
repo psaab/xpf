@@ -233,6 +233,34 @@ func TestHB166_Completion_NewLeavesPresent(t *testing.T) {
 	}
 }
 
+// #11813 [C1/C14]: interface-level classifier bindings must expose the same
+// inet-precedence schema child as unit-level bindings. The compiler already
+// consumes both shapes; this pins the schema-driven completion surface.
+func TestCoSInterfaceLevelInetPrecedenceClassifierCompletion_11813(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path []string
+	}{
+		{
+			name: "unit",
+			path: []string{"class-of-service", "interfaces", "reth0", "unit", "80", "classifiers"},
+		},
+		{
+			name: "interface level",
+			path: []string{"class-of-service", "interfaces", "reth0", "classifiers"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CompleteSetPathWithValues(tc.path, nil)
+			for _, want := range []string{"dscp", "inet-precedence", "ieee-802.1"} {
+				if !containsCompletionName(got, want) {
+					t.Fatalf("expected %q completion, got %v", want, completionNames(got))
+				}
+			}
+		})
+	}
+}
+
 // --- T-4: BA classifier code-point -> unmaterialized queue commit warning ---
 
 // TestHB166_T4_ClassifierUnmaterializedQueue_Warns pins the fable-review-166
