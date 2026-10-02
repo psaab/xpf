@@ -158,11 +158,12 @@ upfront what they're getting and not getting.
      destination-port)` constraints all match the session, else a
      built-in port→name guess (`junos-http=80`, `junos-https=443`,
      `junos-ssh=22`, `junos-ftp=21`, etc. — the 15-entry
-     `builtinFallbacks` map). The fallback honors a configured
-     `source-port` constraint as well as the destination port, so
-     a source-port-scoped custom app is not matched on dst-port
-     alone (#3428); the session source port is threaded into
-     `ResolveSessionName` for this purpose.
+     `builtinFallbacks` map). If neither matches, return `UNKNOWN`,
+     the same filterable no-match sentinel used when AppID is enabled.
+     The fallback honors a configured `source-port` constraint as well
+     as the destination port, so a source-port-scoped custom app is not
+     matched on dst-port alone (#3428); the session source port is
+     threaded into `ResolveSessionName` for this purpose.
 
 **Filter matching is case-sensitive (#5820)**: `SessionMatches`
 (`pkg/appid/runtime.go`) compares an operator `show ... application

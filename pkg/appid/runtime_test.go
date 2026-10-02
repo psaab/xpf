@@ -225,6 +225,21 @@ func TestResolveSessionNameUnknownWhenEnabled(t *testing.T) {
 	}
 }
 
+// #11818: a disabled tuple-fallback miss uses the same filterable sentinel as
+// the enabled AppID path.
+func TestResolveSessionNameUnknownWhenDisabled(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Services.ApplicationIdentification = false
+
+	got := ResolveSessionName(nil, cfg, 6, 40000, 4321, 0)
+	if got != Unknown {
+		t.Fatalf("ResolveSessionName() on disabled no-match = %q, want %q", got, Unknown)
+	}
+	if !SessionMatches(Unknown, nil, cfg, 6, 40000, 4321, 0) {
+		t.Fatal("SessionMatches(\"UNKNOWN\") must include disabled-path no-match sessions")
+	}
+}
+
 func TestResolveSessionNameFallbackWhenDisabled(t *testing.T) {
 	cfg := &config.Config{
 		Applications: config.ApplicationsConfig{
