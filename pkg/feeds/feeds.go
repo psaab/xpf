@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -221,9 +222,9 @@ func checkFeedRedirect(req *http.Request, via []*http.Request) error {
 type Manager struct {
 	mu    sync.RWMutex
 	feeds map[string]*feedState // keyed by feed-name (or feed-server name for single-feed servers)
-	// shrinkHistory retains each feed's acknowledged shrink epoch across
-	// same-manager removal/recreation. It is intentionally manager-lifetime
-	// state; it is not a durable config store.
+	// shrinkHistory retains each feed's cumulative-shrink epoch across
+	// same-manager removal/recreation and is initialized from the daemon's
+	// durable high-water record at cold boot.
 	shrinkHistory map[string]feedShrinkHistory
 	client        *http.Client
 
@@ -248,10 +249,18 @@ type Manager struct {
 	// void callback committed the content hash regardless of the apply result,
 	// so an identical refetch saw "unchanged" and the good content sat
 	// un-enforced forever).
-	onUpdate func() error // callback when feeds are updated; returns apply result
+	onUpdate               func() error // callback when feeds are updated; returns apply result
+	onShrinkHistoryChanged func()
 
 	// now is the clock source, overridable in tests for HoldInterval timing.
 	now func() time.Time
+}
+
+// ShrinkHighWater is the durable per-feed cumulative-shrink epoch baseline.
+type ShrinkHighWater struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+	Hash  string `json:"hash"`
 }
 
 type feedShrinkHistory struct {
@@ -268,9 +277,10 @@ type feedState struct {
 	// drop-after-N-seconds opt-in.
 	holdInterval time.Duration
 	shrinkGuard  shrinkGuardThresholds
-	// A feed's cumulative-shrink baseline is the largest installed set in the
+	// A feed's cumulative-shrink baseline is the largest installed set in its
 	// current epoch. It decays only when that exact shrink candidate is
-	// acknowledged. Manager history preserves it across same-name recreation.
+	// acknowledged. Manager history carries it across reconfigurations and is
+	// persisted by the daemon for cold boot.
 	shrinkHighWaterCount int
 	shrinkHighWaterHash  [32]byte
 
@@ -367,6 +377,58 @@ func New(onUpdate func() error) *Manager {
 		onUpdate: onUpdate,
 		now:      time.Now,
 	}
+}
+
+// SetShrinkHighWaterChangedCallback installs a callback invoked after a feed's
+// durable shrink baseline advances. The callback runs without the manager lock.
+func (m *Manager) SetShrinkHighWaterChangedCallback(callback func()) {
+	m.mu.Lock()
+	m.onShrinkHistoryChanged = callback
+	m.mu.Unlock()
+}
+
+// RestoreShrinkHighWater loads validated per-feed baselines before Apply starts
+// producers. Invalid records are ignored so one malformed entry cannot prevent
+// other feeds from recovering their epochs.
+func (m *Manager) RestoreShrinkHighWater(records []ShrinkHighWater) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.shrinkHistory == nil {
+		m.shrinkHistory = make(map[string]feedShrinkHistory)
+	}
+	for name := range m.shrinkHistory {
+		delete(m.shrinkHistory, name)
+	}
+	for _, record := range records {
+		if record.Name == "" || record.Count <= 0 || record.Count > maxFeedPrefixes || len(record.Hash) != 64 {
+			continue
+		}
+		raw, err := hex.DecodeString(record.Hash)
+		if err != nil || len(raw) != 32 {
+			continue
+		}
+		var hash [32]byte
+		copy(hash[:], raw)
+		m.shrinkHistory[record.Name] = feedShrinkHistory{highWaterCount: record.Count, highWaterHash: hash}
+	}
+}
+
+// ShrinkHighWaterSnapshot returns a deterministic copy suitable for durable
+// storage. Refusal and acknowledgement state is intentionally excluded.
+func (m *Manager) ShrinkHighWaterSnapshot() []ShrinkHighWater {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	records := make([]ShrinkHighWater, 0, len(m.shrinkHistory))
+	for name, history := range m.shrinkHistory {
+		if history.highWaterCount <= 0 {
+			continue
+		}
+		records = append(records, ShrinkHighWater{
+			Name: name, Count: history.highWaterCount, Hash: fmt.Sprintf("%x", history.highWaterHash),
+		})
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].Name < records[j].Name })
+	return records
 }
 
 // SetPrivateFeedAllowlist installs the explicit lab override for private feed
@@ -1767,6 +1829,8 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 			"name", fs.name)
 		return
 	}
+	priorHighWaterCount := fs.shrinkHighWaterCount
+	priorHighWaterHash := fs.shrinkHighWaterHash
 	// changed = the installed enforced content differs from the prior install.
 	// Drives the display/degraded logging (a content change), independent of
 	// whether that content has been PUBLISHED.
@@ -1898,10 +1962,16 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 		fs.shrinkHighWaterHash = res.hash
 	}
 	m.rememberShrinkHighWaterLocked(fs.name, fs.shrinkHighWaterCount, fs.shrinkHighWaterHash)
+	historyChanged := fs.shrinkHighWaterCount != priorHighWaterCount ||
+		fs.shrinkHighWaterHash != priorHighWaterHash
+	historyChangedCallback := m.onShrinkHistoryChanged
 	// Any successful install re-baselines last-good and clears an outstanding
 	// refusal/acknowledgement. An ack can never apply to a later candidate.
 	clearShrinkCandidate(fs)
 	m.mu.Unlock()
+	if historyChanged && historyChangedCallback != nil {
+		historyChangedCallback()
+	}
 	if bootstrapDiffersFromHighWater {
 		slog.Warn("dynamic-address: bootstrap below or changed from remembered high-water — installing with audit warning",
 			"name", fs.name, "remembered_prefixes", rememberedHighWaterCount,
