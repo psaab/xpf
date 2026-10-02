@@ -162,6 +162,9 @@ response cap with framing/status headroom, and the handler checks the complete
 serialized response before sending it. A refusal is an error (`ok=false`) with
 no generation or routes; the Go client also treats a truncated control
 response as an error, never as a successful empty FIB.
+The Go client also requires the complete newline-terminated FIB frame and
+drains the bounded response before accepting it, so a valid JSON prefix with
+EOF or an over-cap suffix is never reported as a successful empty FIB.
 
 ## Callers
 
