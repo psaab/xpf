@@ -1338,6 +1338,27 @@ func siblingSuppliesTypedValue(siblings []*Node, leafName string, leafSchema *sc
 	return false
 }
 
+// unknownTopLevelStanzaSchemaError marks the deliberate, one-level closed-world
+// check for root keywords the compiler cannot consume. Tolerant ingress records
+// this class on Config.Warnings without treating it as a typed-leaf violation.
+type unknownTopLevelStanzaSchemaError struct{ msg string }
+
+func (e *unknownTopLevelStanzaSchemaError) Error() string { return e.msg }
+
+func unknownTopLevelStanzaSchemaErrorForKeyword(kw string) error {
+	return &unknownTopLevelStanzaSchemaError{
+		msg: fmt.Sprintf("unknown configuration stanza %q: it is not a recognised top-level keyword, "+
+			"so everything configured under it would be silently discarded", kw),
+	}
+}
+
+// IsUnknownTopLevelStanzaSchemaError reports whether err is the schema
+// rejection for an unmodeled root stanza, including when wrapped.
+func IsUnknownTopLevelStanzaSchemaError(err error) bool {
+	var unknown *unknownTopLevelStanzaSchemaError
+	return errors.As(err, &unknown)
+}
+
 // typedLeafSchemaError marks a schema rejection from a typed validator or
 // typed-value structure, including validated keys, multi/tail values, and
 // modifiers. The tolerant configstore path persists only this class as a
@@ -1442,8 +1463,7 @@ func checkUnknownTopLevelStanza(tree *ConfigTree) error {
 		}
 		kw := child.Keys[0]
 		if resolveSchemaChild(setSchema, kw) == nil {
-			return fmt.Errorf("unknown configuration stanza %q: it is not a recognised top-level keyword, "+
-				"so everything configured under it would be silently discarded", kw)
+			return unknownTopLevelStanzaSchemaErrorForKeyword(kw)
 		}
 	}
 	return nil

@@ -382,6 +382,7 @@ func (s *Server) showSecurityAlarms(cfg *config.Config, topic string, buf *strin
 	if cfg != nil {
 		warnings := config.ValidateConfig(cfg)
 		warnings = append(warnings, config.ToleratedTypedLeafWarnings(cfg)...)
+		warnings = append(warnings, config.ToleratedUnknownTopLevelStanzaWarnings(cfg)...)
 		for _, w := range warnings {
 			alarmCount++
 			if detail {

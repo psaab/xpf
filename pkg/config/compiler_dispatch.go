@@ -101,6 +101,11 @@ func compileSections(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 				opts.lenientBridgeDomainVlanID, &cfg.Warnings); err != nil {
 				return fmt.Errorf("bridge-domains: %w", err)
 			}
+		default:
+			if opts.lenientUnknownTopLevelStanza && resolveSchemaChild(setSchema, node.Name()) == nil {
+				err := unknownTopLevelStanzaSchemaErrorForKeyword(node.Name())
+				cfg.Warnings = append(cfg.Warnings, ToleratedUnknownTopLevelStanzaWarning(err))
+			}
 		}
 	}
 	return nil
