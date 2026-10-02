@@ -5,6 +5,10 @@ type protocolScopeOpts struct {
 	// interface ownership mismatches to warnings during tolerant loading. The
 	// strict commit and commit-check paths reject the same cross-scope refs.
 	lenientProtocolInterfaceMembership11310 bool
+	// lenientOSPFAreaInterface11400 downgrades interfaces assigned to multiple
+	// OSPF areas to warnings on tolerant loads. The renderer retains the first
+	// area's membership and drops later conflicting activations.
+	lenientOSPFAreaInterface11400 bool
 }
 
 // compileOpts carries per-call compilation policy. It is threaded into
@@ -3113,7 +3117,7 @@ func lenientCompileOpts() compileOpts {
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,
 		lenientForwardingInstanceMembers:       true,
-		protocolScopeOpts:                      protocolScopeOpts{lenientProtocolInterfaceMembership11310: true},
+		protocolScopeOpts:                      protocolScopeOpts{lenientProtocolInterfaceMembership11310: true, lenientOSPFAreaInterface11400: true},
 		lenientDHCPRelayDHCPv6:                 true,
 		lenientWireguardRoutingInstance:        true,
 		lenientDHCPRelayChildTokens:            true,
