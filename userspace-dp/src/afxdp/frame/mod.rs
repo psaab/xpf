@@ -130,9 +130,9 @@ pub(in crate::afxdp) use tcp::{
     frame_has_tcp_rst, tcp_payload_offset,
 };
 pub(super) use tcp::{extract_tcp_flags_and_window, extract_tcp_window, tcp_flags_str};
-// #4074: the ICMP identifier-bearing query-type gate, reused by the NAT
-// identifier rewriter (`apply_nat_icmp_identifier_rewrite`).
-use inspect::icmp_identifier_bearing;
+// #4074: the ICMP identifier-bearing query-type gate shared with the quoted
+// ICMP parser and NAT identifier rewriter.
+pub(in crate::afxdp) use inspect::icmp_identifier_bearing;
 // #1352: clamp_tcp_mss_frame is now imported directly by the per-family
 // helpers in frame/build/{ipv4,ipv6}.rs.
 

@@ -1529,10 +1529,10 @@ pub(in crate::afxdp) fn declared_l3_end(frame: &[u8], l3: usize, addr_family: u8
 /// next-hop MTU / pointer / unused word — NOT a port.
 ///
 /// This is the single predicate shared by the frame port parser
-/// (`parse_flow_ports`) and the metadata-fallback gate in
-/// `parse_session_flow_from_bytes` (#3290), so both arms honor the SAME
-/// query-type rule and the shim's ungated pseudo-port can never install a
-/// fake session for a non-query ICMP packet.
+/// (`parse_flow_ports`), the metadata-fallback gate in
+/// `parse_session_flow_from_bytes` (#3290), and embedded ICMP quote parsing.
+/// All three honor the SAME query-type rule, so non-bearing control/error
+/// fields are never promoted to a pseudo-port or quoted identifier.
 #[inline]
 pub(in crate::afxdp) fn icmp_identifier_bearing(protocol: u8, icmp_type: u8) -> bool {
     match protocol {

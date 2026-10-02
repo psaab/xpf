@@ -218,8 +218,13 @@ pub(in crate::afxdp::icmp_embed) fn parse_embedded_v4(
         ) {
             return None;
         }
-        let bytes = frame.get(l4_off + 4..l4_off + 6)?;
-        (u16::from_be_bytes([bytes[0], bytes[1]]), 0)
+        let src_port = if crate::afxdp::frame::icmp_identifier_bearing(proto, frame[l4_off]) {
+            let bytes = frame.get(l4_off + 4..l4_off + 6)?;
+            u16::from_be_bytes([bytes[0], bytes[1]])
+        } else {
+            0
+        };
+        (src_port, 0)
     } else {
         (0, 0)
     };
@@ -383,8 +388,13 @@ pub(in crate::afxdp::icmp_embed) fn parse_embedded_v6(
         ) {
             return None;
         }
-        let bytes = frame.get(l4_off + 4..l4_off + 6)?;
-        (u16::from_be_bytes([bytes[0], bytes[1]]), 0)
+        let src_port = if crate::afxdp::frame::icmp_identifier_bearing(proto, frame[l4_off]) {
+            let bytes = frame.get(l4_off + 4..l4_off + 6)?;
+            u16::from_be_bytes([bytes[0], bytes[1]])
+        } else {
+            0
+        };
+        (src_port, 0)
     } else {
         (0, 0)
     };
@@ -768,6 +778,22 @@ mod embedded_v6_parse_tests {
             parse_embedded_v6(&inner, 0, false, inner.len()).expect("truncated RFC-minimum v6 quote must still parse");
         assert_eq!((hdr.src_port, hdr.dst_port), (0x1111, 0x2222));
     }
+
+    #[test]
+    fn embedded_v6_quote_identifier_requires_bearing_type_11510() {
+        let mut error = embedded_v6(&[], PROTO_ICMPV6);
+        error[40..48].copy_from_slice(&[1, 4, 0, 0, 0x12, 0x34, 0, 0]);
+        let error = parse_embedded_v6(&error, 0, false, 48).expect("error quote parses");
+        assert_eq!(
+            error.src_port, 0,
+            "ICMPv6 destination-unreachable bytes 4-5 are not an identifier"
+        );
+
+        let mut echo = embedded_v6(&[], PROTO_ICMPV6);
+        echo[40..48].copy_from_slice(&[128, 0, 0, 0, 0x12, 0x34, 0, 0]);
+        let echo = parse_embedded_v6(&echo, 0, false, 48).expect("echo quote parses");
+        assert_eq!(echo.src_port, 0x1234);
+    }
 }
 
 #[cfg(test)]
@@ -860,6 +886,22 @@ mod embedded_v4_fragment_tests {
             (0x1111, 0x2222),
             "the quoted ports are within the (large) declared length → read them"
         );
+    }
+
+    #[test]
+    fn embedded_v4_quote_identifier_requires_bearing_type_11510() {
+        let mut error = embedded_v4(0, PROTO_ICMP);
+        error[20..28].copy_from_slice(&[3, 1, 0, 0, 0x12, 0x34, 0, 0]);
+        let error = parse_embedded_v4(&error, 0, false, 28).expect("error quote parses");
+        assert_eq!(
+            error.src_port, 0,
+            "ICMPv4 destination-unreachable bytes 4-5 are not an identifier"
+        );
+
+        let mut echo = embedded_v4(0, PROTO_ICMP);
+        echo[20..28].copy_from_slice(&[8, 0, 0, 0, 0x12, 0x34, 0, 0]);
+        let echo = parse_embedded_v4(&echo, 0, false, 28).expect("echo quote parses");
+        assert_eq!(echo.src_port, 0x1234);
     }
 }
 
