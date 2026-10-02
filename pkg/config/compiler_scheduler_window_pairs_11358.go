@@ -102,6 +102,11 @@ func collectSchedulerWindowPairFindings11358(tree *ConfigTree, findings map[sche
 		if value == "" {
 			return
 		}
+		// Compare semantic times, not spelling (omitted seconds and a
+		// one-digit hour in HH:MM:SS are accepted by the scheduler parser).
+		if parsed, err := parseSchedulerTimeOfDay(value); err == nil {
+			value = parsed.Format("15:04:05")
+		}
 		key := schedulerWindowKey11358{scheduler: scheduler, day: day}
 		if windows == nil {
 			windows = make(map[schedulerWindowKey11358]*schedulerWindowBoundaryValues11358)
