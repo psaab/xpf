@@ -213,17 +213,23 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				// dynamic routing, not just OSPF. RIP and IS-IS already guard
 				// this; OSPF was the only path that did not.
 				if iface.AuthKey != "" && iface.AuthType == "md5" {
-					b.WriteString(" ip ospf authentication message-digest\n")
-					keyID := iface.AuthKeyID
-					if keyID == 0 {
-						keyID = 1
-					}
+					// #11462: compute the token FIRST and gate BOTH lines on it.
+					// Emitting the mode line unconditionally left auth-with-no-key
+					// when the key held whitespace (#9050 omits only the key line):
+					// simple mode then uses zero bytes and message-digest resolves
+					// to NULL auth -- neither fails closed.
 					if tok, ok := authTokenOrOmit("ospf-md5", iface.AuthKey.Reveal()); ok {
+						b.WriteString(" ip ospf authentication message-digest\n")
+						keyID := iface.AuthKeyID
+						if keyID == 0 {
+							keyID = 1
+						}
 						fmt.Fprintf(&b, " ip ospf message-digest-key %d md5 %s\n", keyID, tok)
 					}
 				} else if iface.AuthKey != "" && iface.AuthType == "simple" {
-					b.WriteString(" ip ospf authentication\n")
+					// #11462: same token-first gate as the md5 arm above.
 					if tok, ok := authTokenOrOmit("ospf-simple", iface.AuthKey.Reveal()); ok {
+						b.WriteString(" ip ospf authentication\n")
 						fmt.Fprintf(&b, " ip ospf authentication-key %s\n", tok)
 					}
 				}
