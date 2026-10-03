@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "bee6dff89bf6b6826006c979a05b77790a3358734674b4c18566b48c90088f6a"
+	snapshotShapeGolden8892 = "5f4e9345745e784ae17eb811e3adeaf98396190bbd1951a98801f245ecca3e01"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -429,6 +429,10 @@ const (
 	// v43 -> v44 BUMPED (#11423): TunnelEndpointSnapshot.LinkUp carries
 	// keepalive-driven tunnel liveness; an old helper would keep down ECMP
 	// members live. The shape digest therefore moves with the contract.
+	// v44 STANDS (#11387): BridgeDomainConfig.Members and
+	// InterfaceUnit.FamilyInet are compiler-only (`json:"-"`), so the helper's
+	// ConfigSnapshot JSON wire is unchanged. This reflection digest sees these
+	// Go-only fields, so refresh it without a bump.
 	snapshotShapeVersion8892 = 44
 )
 

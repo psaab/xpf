@@ -3883,6 +3883,22 @@ The check stays in the compiler rather than moving to a typed `validator` in
 whether the compiler's own loop ever widened, so the regression test could not
 tell a fix from a no-op.
 
+**Bridge-domain ports are explicit logical-unit members (#11387).** A
+`bridge-domains <name> interface <interface>.<unit>` statement names a
+configured logical unit; the unit's `vlan-id` supplies its VID. For example,
+`interface ge-0/0/0.0` can name unit 0 with `vlan-id 100`, which attaches the
+Linux VLAN device `ge-0-0-0.100`. The VID must appear in `vlan-id-list`, the
+interface must be VLAN-tagged, and a VID may belong to only one bridge domain.
+The compiler resolves membership to `(interface, VID)` and never attaches
+another trunk's same-numbered VLAN by VID alone. A security-zoned `family inet`
+unit with a VID listed by a bridge domain must also be named explicitly as
+that domain's member, even if its family stanza has only a filter and no
+address or DHCP; a missing statement is a commit error. Tolerant load warns,
+while runtime quarantines ambiguous VID assignments rather than bridging
+them. ARP/LLDP still pass from XDP to the local kernel L2 path; networkd's
+explicit `Bridge=` attachments bound the kernel bridge flood to the declared
+members.
+
 **And an escape can become live when someone else fixes the value-drop.** The
 archive-sites escape is inert TODAY only because the value is also dropped. A
 follow-up that widens that read without widening the leading-dash check in the

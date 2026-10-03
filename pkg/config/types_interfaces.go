@@ -121,6 +121,10 @@ type InterfaceUnit struct {
 	// fields, matching the per-family Surface B policy split (#2663).
 	DynamicDNSInet  *InterfaceDynamicDNSConfig // family inet  { dynamic-dns ... }
 	DynamicDNSInet6 *InterfaceDynamicDNSConfig // family inet6 { dynamic-dns ... }
+	// FamilyInet records that `family inet` was authored even when its
+	// address-family stanza contains no address or DHCP state. It is compiler
+	// evidence for zoned bridge membership validation, not snapshot wire data.
+	FamilyInet bool `json:"-"`
 }
 
 // InterfaceDynamicDNSConfig is one per-interface, per-family Surface A DDNS

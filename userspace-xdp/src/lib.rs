@@ -513,8 +513,11 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         // legacy-tagged and this single-unwrap shim cannot adjudicate it
         // (see `is_vlan_tpid`). #5879 refuses QinQ configs, so there is no
         // stacked-VLAN identity to steer it by. Drop-and-count fail-closed
-        // instead of the silent XDP_PASS below, which on a bridged port
-        // forwards with no zone policy. Flat comparisons; no unwrap loop.
+        // instead of passing a frame whose tag identity is ambiguous. The
+        // #11387 bridge-port allowlist is enforced by networkd membership:
+        // ordinary ARP/LLDP may pass below, but the kernel bridge can flood
+        // them only among explicitly declared (interface, VID) members.
+        // Flat comparisons; no unwrap loop.
         //
         // Disclosed cost, not an oversight: a single legacy-TPID outer
         // (0x9100/0x9200/0x9300) may hide ARP/LLDP the shim never unwraps, so
@@ -570,10 +573,12 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // failure, and is now true of all of them.
     //
     // Deliberately NOT hoisted above the non-IP arm directly above: ARP and LLDP
-    // must keep taking `pass_non_ip_l2_direct` (a plain XDP_PASS) on EVERY
-    // interface. Routing them through `cpumap_or_pass` instead would send them
-    // to a remote CPU, which does not drive the local L2 state machine — see
-    // that function's own comment. Placing the test here changes the fate of no
+    // must keep taking `pass_non_ip_l2_direct` (a plain XDP_PASS) so the local
+    // kernel L2 state machine can resolve neighbors. #11387 confines any
+    // subsequent kernel bridge flood to explicit (interface, VID) members;
+    // this pass does not itself create bridge membership. Routing non-IP frames
+    // through `cpumap_or_pass` would send them to a remote CPU, which does not
+    // drive that state machine. Placing the test here changes the fate of no
     // packet except the one this fixes.
     if unsafe { USERSPACE_INGRESS_IFACES.get(&ingress_ifindex) }.map_or(true, |v| *v == 0) {
         return Ok(cpumap_or_pass(ctrl));
@@ -2236,7 +2241,6 @@ fn parse_l4(
         _ => Some((l4_offset, 0, 0, 0, 0, false)),
     }
 }
-
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
