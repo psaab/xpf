@@ -5,6 +5,10 @@ xpf (0.0.0) unstable; urgency=medium
   * Reject invalid OSPF MD5 key IDs rather than defaulting them to 1 or
     rendering values FRR cannot accept (#11794).
 
+  * Bound CoDel target milliseconds to the largest value that converts safely
+    to nanoseconds; reject unparseable values strictly and warn on tolerant
+    loads instead of silently using zero (#11825).
+
   * Keep foreign DSCP-scoped destination rules out of the userspace FIB
     mirror rather than widening them into unconditional NextTable leaks
     (#11685).

@@ -432,6 +432,10 @@ func ValidatePercent(min, max float64) LeafValidator {
 // review on PR #1845: no schema-only caps).
 const MaxDurationMillis = int64(math.MaxInt64) / int64(time.Millisecond)
 
+// MaxCodelTargetMillis is the largest millisecond count whose conversion to
+// uint64 nanoseconds by `ms * 1_000_000` cannot wrap.
+const MaxCodelTargetMillis = int64(math.MaxUint64 / 1_000_000)
+
 // MaxDNSTTLSeconds is the largest TTL a DNS record can carry: the RR header's
 // TTL is a 32-bit unsigned wire field (RFC 1035 §3.2.1), so a larger value does
 // not fail — it WRAPS. 2^32 becomes 0, and a zero TTL tells every resolver not

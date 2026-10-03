@@ -540,13 +540,35 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 				// validateClassOfServiceStrict (commit time).
 				sched.EqualFlowTargetPolicy = nodeVal(child)
 			case "codel-target":
-				// #1614 A3: value in milliseconds; store as
-				// nanoseconds. Empty value = 0 = disabled.
-				if v := nodeVal(child); v != "" {
-					if ms, err := strconv.ParseUint(v, 10, 64); err == nil {
-						sched.CodelTargetNS = ms * 1_000_000
+				// #11825: never silently turn an unparseable value into zero,
+				// and bound milliseconds before conversion to uint64 nanoseconds.
+				v := nodeVal(child)
+				if v == "" {
+					msg := fmt.Sprintf("class-of-service schedulers %s codel-target is missing an integer value", sched.Name)
+					if !opts.lenientCodelTarget11825 {
+						return fmt.Errorf("%s", msg)
 					}
+					*warnings = append(*warnings, msg+"; ignored on tolerant load (#11825)")
+					continue
 				}
+				ms, err := strconv.ParseUint(v, 10, 64)
+				if err != nil {
+					msg := fmt.Sprintf("class-of-service schedulers %s codel-target %q is not an unsigned integer", sched.Name, v)
+					if !opts.lenientCodelTarget11825 {
+						return fmt.Errorf("%s", msg)
+					}
+					*warnings = append(*warnings, msg+"; ignored on tolerant load (#11825)")
+					continue
+				}
+				if ms > uint64(MaxCodelTargetMillis) {
+					msg := fmt.Sprintf("class-of-service schedulers %s codel-target %d ms exceeds the maximum %d ms safe for uint64 nanoseconds", sched.Name, ms, MaxCodelTargetMillis)
+					if !opts.lenientCodelTarget11825 {
+						return fmt.Errorf("%s", msg)
+					}
+					*warnings = append(*warnings, msg+"; clamped on tolerant load (#11825)")
+					ms = uint64(MaxCodelTargetMillis)
+				}
+				sched.CodelTargetNS = ms * 1_000_000
 			}
 		}
 		cos.Schedulers[sched.Name] = sched
