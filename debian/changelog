@@ -38,6 +38,8 @@ xpf (0.0.0) unstable; urgency=medium
     completion, matching the compiler's existing support (#11813).
   * Preserve `?` help descriptions after typed option values in operational
     command paths (#11832).
+  * Expose the session-filter `nat` alias in both show and clear command trees,
+    matching the local session parsers (#11831).
   * Read interface link rates from ethtool generic netlink and report unknown
     speed as zero instead of inferring 1Gbps from TxQLen (#11700).
   * Return the filterable UNKNOWN sentinel for AppID-disabled no-match sessions

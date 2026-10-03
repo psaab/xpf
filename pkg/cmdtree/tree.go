@@ -585,6 +585,7 @@ var OperationalTree = map[string]*Node{
 						}
 						return names
 					}},
+					"nat":             {Desc: "Show only sessions with NAT translation"},
 					"nat-only":        {Desc: "Show only sessions with NAT translation"},
 					"source-nat-pool": {Desc: "Filter sessions by source NAT pool", DynamicFn: sourceNATPoolNames},
 					"sort-by": {Desc: "Sort sessions for top-talkers", Children: map[string]*Node{
@@ -980,6 +981,7 @@ var OperationalTree = map[string]*Node{
 						return names
 					}},
 					"application": {Desc: "Filter sessions by application name", ValueType: ValueIdentifier},
+					"nat":         {Desc: "Clear only sessions with NAT translation"},
 					"nat-only":    {Desc: "Clear only sessions with NAT translation"},
 					"source-nat-pool": {Desc: "Clear sessions translated by a source NAT pool", DynamicFn: func(cfg *config.Config) []string {
 						if cfg == nil || cfg.Security.NAT.SourcePools == nil {
