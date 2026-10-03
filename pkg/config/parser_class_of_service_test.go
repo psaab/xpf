@@ -450,6 +450,48 @@ func TestCompileClassOfServiceBothBufferFieldsRejected(t *testing.T) {
 	}
 }
 
+func TestCompileClassOfServiceBufferTemporalMixedFormsRejected11789(t *testing.T) {
+	tests := []struct {
+		name     string
+		bytes    uint64
+		percent  float64
+		temporal uint64
+	}{
+		{name: "bytes and temporal", bytes: 16_000_000, temporal: 50_000},
+		{name: "percent and temporal", percent: 10, temporal: 50_000},
+		{name: "all three forms", bytes: 16_000_000, percent: 10, temporal: 50_000},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cos := &ClassOfServiceConfig{
+				Schedulers: map[string]*CoSScheduler{
+					"voice": {
+						Name:                 "voice",
+						BufferSizeBytes:      tc.bytes,
+						BufferSizePercent:    tc.percent,
+						BufferSizeTemporalUS: tc.temporal,
+					},
+				},
+				SchedulerMaps:       make(map[string]*CoSSchedulerMap),
+				ForwardingClasses:   make(map[string]*CoSForwardingClass),
+				DSCPClassifiers:     make(map[string]*CoSDSCPClassifier),
+				IEEE8021Classifiers: make(map[string]*CoSIEEE8021Classifier),
+				DSCPRewriteRules:    make(map[string]*CoSDSCPRewriteRule),
+				Interfaces:          make(map[string]*CoSInterface),
+			}
+			err := validateClassOfServiceStrict(cos)
+			if err == nil {
+				t.Fatal("validateClassOfServiceStrict accepted multiple buffer-size forms")
+			}
+			for _, want := range []string{"buffer-size", "voice", "temporal", "one form"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("validation error %q does not name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
 func TestCompileClassOfServiceFairnessRSSExpectations(t *testing.T) {
 	lines := []string{
 		"set class-of-service fairness rss-expectation interface ge-0/0/2 queue 4 balanced",

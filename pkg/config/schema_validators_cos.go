@@ -238,7 +238,9 @@ func ValidateByteSizeOrPercent(raw string, _ *Config) error {
 // vSRX-config import parity and compiles to a stored microsecond value the
 // dataplane does not yet resolve to bytes (a commit advisory surfaces the
 // inertness).
-func ValidateCoSBufferSizeTail(tokens []string, _ [][]string) error {
+// Same-key sibling tails are checked as a set so a hierarchical merge cannot
+// combine different forms while each leaf remains individually well-formed.
+func ValidateCoSBufferSizeTail(tokens []string, siblingTails [][]string) error {
 	const forms = "a byte-size (e.g. 16m), a percent (e.g. 10%), or `temporal <microseconds>`"
 	if len(tokens) == 0 {
 		return fmt.Errorf("missing value (expected %s)", forms)
@@ -254,15 +256,78 @@ func ValidateCoSBufferSizeTail(tokens []string, _ [][]string) error {
 		for _, t := range rest[1:] {
 			return fmt.Errorf("unknown modifier %q after temporal", t)
 		}
+	} else {
+		if err := ValidateByteSizeOrPercent(tokens[0], nil); err != nil {
+			return fmt.Errorf("not a valid buffer-size (expected %s): %w", forms, err)
+		}
+		for _, t := range tokens[1:] {
+			return fmt.Errorf("unknown modifier %q", t)
+		}
+	}
+	return validateCoSBufferSizeForms(tokens, siblingTails, forms)
+}
+
+func validateCoSBufferSizeForms(tokens []string, siblingTails [][]string, forms string) error {
+	hasBytes, hasPercent, hasTemporal := false, false, false
+	addForm := func(tail []string) {
+		switch coSBufferSizeForm(tail) {
+		case "bytes":
+			hasBytes = true
+		case "percent":
+			hasPercent = true
+		case "temporal":
+			hasTemporal = true
+		}
+	}
+	addForm(tokens)
+	for _, siblingTail := range siblingTails {
+		addForm(siblingTail)
+	}
+	formCount := 0
+	if hasBytes {
+		formCount++
+	}
+	if hasPercent {
+		formCount++
+	}
+	if hasTemporal {
+		formCount++
+	}
+	if formCount <= 1 {
 		return nil
 	}
-	if err := ValidateByteSizeOrPercent(tokens[0], nil); err != nil {
-		return fmt.Errorf("not a valid buffer-size (expected %s): %w", forms, err)
+	found := make([]string, 0, formCount)
+	if hasBytes {
+		found = append(found, "byte-size")
 	}
-	for _, t := range tokens[1:] {
-		return fmt.Errorf("unknown modifier %q", t)
+	if hasPercent {
+		found = append(found, "percent")
 	}
-	return nil
+	if hasTemporal {
+		found = append(found, "temporal")
+	}
+	return fmt.Errorf(
+		"buffer-size forms are mutually exclusive (found %s); choose exactly one of %s",
+		strings.Join(found, ", "), forms)
+}
+
+func coSBufferSizeForm(tokens []string) string {
+	if len(tokens) == 0 {
+		return ""
+	}
+	if tokens[0] == "temporal" {
+		if len(tokens) == 2 && validateCoSTemporalValue(tokens[1]) == nil {
+			return "temporal"
+		}
+		return ""
+	}
+	if len(tokens) != 1 || ValidateByteSizeOrPercent(tokens[0], nil) != nil {
+		return ""
+	}
+	if strings.HasSuffix(strings.TrimSpace(tokens[0]), "%") {
+		return "percent"
+	}
+	return "bytes"
 }
 
 // validateCoSTemporalValue accepts a `buffer-size temporal` operand: a positive
