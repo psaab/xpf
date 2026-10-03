@@ -314,6 +314,14 @@ func resolveTupleFallback(proto uint8, srcPort, dstPort uint16, cfg *config.Conf
 		}
 	}
 	for name, ba := range builtinFallbacks {
+		// A user-defined app owns its name even when its tuple does not match
+		// this session. Do not resurrect the stale builtin tuple for a
+		// redefined predefined name on the AppID-disabled path (#11817).
+		if cfg != nil {
+			if _, shadowed := cfg.Applications.Applications[name]; shadowed {
+				continue
+			}
+		}
 		if ba.proto == proto && ba.port == dstPort {
 			return name
 		}
