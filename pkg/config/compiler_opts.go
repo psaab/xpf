@@ -1375,11 +1375,12 @@ type compileOpts struct {
 	// now flagged. Same doctrine as lenientPolicyMatchApplications.
 	lenientPolicyMatchAddressSetMembers bool
 
-	// lenientAddressSetMembersDefined (#9490) downgrades the address-set member
-	// reference gate (validateAddressSetMembersDefinedStrict) to a warning on the
+	// lenientAddressSetMembersDefined (#9490/#11822) downgrades the address-set
+	// member gate (validateAddressSetMembersDefinedStrict) to a warning on the
 	// tolerant load / peer-sync paths, so a persisted config an older binary
-	// accepted still boots (#1960). The runtime resolver drops the dangling
-	// member either way.
+	// accepted still boots (#1960). Unknown member statements are recorded and
+	// poison the set's runtime expansion; dangling references already fail
+	// closed at the resolver.
 	lenientAddressSetMembersDefined bool
 	// lenientRibGroupRefs (#2226) downgrades the rib-group import-rib
 	// cross-reference gate (validateRibGroupImportRibReferencesStrict) from a

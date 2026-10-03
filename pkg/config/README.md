@@ -591,6 +591,18 @@ such a policy, so a leniently-loaded bad config is no worse off, now flagged. Th
 lenient path and for unreferenced sets (which never reach the runtime gate, so
 they stay warn-only). Same fail-closed-on-load doctrine as #3144/#3146.
 
+**Unknown address-set member keywords fail closed (#11822):** the address-set
+member switch now records every unrecognized keyword on `AddressSet.UnknownMembers`
+instead of silently dropping it. `validateAddressSetMembersDefinedStrict`
+rejects the under-populated set at commit (including an unreferenced set) with a
+diagnostic explaining that a deny could permit traffic; the tolerant
+load/peer-sync path keeps bootability but adds the same diagnosis to compiled
+warnings. The set is poisoned on that path: `ExpandAddressSet`, the strict
+policy-resolution mirror, userspace address expansion, representability, and
+NAT expansion refuse the set rather than retaining its valid-looking subset.
+Zone-local address-set folds carry the unknown-member taint too. A recognized
+`description` remains accepted metadata and is not a member.
+
 **IPv4-mapped IPv6 address-book prefixes are rejected before commit (#10688):**
 Go's `net.IP.To4()` files `::ffff:a.b.c.d/nn` into `prefixes_v4`, but the
 userspace helper parses the colon-bearing prefix as IPv6 and rejects the entire

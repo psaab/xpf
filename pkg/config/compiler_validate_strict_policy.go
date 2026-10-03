@@ -345,6 +345,14 @@ func policyMatchAddressBookResolves(ab *AddressBook, name string) error {
 			}
 			return false
 		}
+		if len(set.UnknownMembers) > 0 {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("address-set %q has unknown member statement %q; "+
+					"the dropped member leaves the set under-populated",
+					ref, set.UnknownMembers[0])
+			}
+			return false
+		}
 		if seen[ref] {
 			return true // cycle: already counted up the stack (mirror runtime)
 		}
