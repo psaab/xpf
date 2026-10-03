@@ -12779,7 +12779,6 @@ Regression coverage: `pkg/config/compiler_default_policy_conflict_11821_test.go`
 checks both duplicate shapes and action orders, strict rejection, tolerant
 warnings and fail-closed compilation, and acceptance of identical duplicates.
 
-
 ### #3534 — `default-policy-log session-init|session-close` (implicit default RT_FLOW logging)
 
 Split from #3363 Part 2. Operators want the implicit default-policy verdict to
