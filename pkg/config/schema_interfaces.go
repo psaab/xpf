@@ -29,10 +29,9 @@ package config
 // analog of the chassis `validateChassisClusterStrict` (#4434) — NOT
 // through this schema walker. `track-interface priority-cost`
 // (already strict-rejected by the #1814 AST pre-walk in the
-// compiler — typing here would shadow those curated errors), the
-// dhcp/dhcpv6 client knobs and tunnel keepalives (deferred:
-// low-risk pass-through integers), `speed`/`duplex`/`encapsulation`
-// (free-form pass-through strings).
+// compiler — typing here would shadow those curated errors), and the
+// low-risk pass-through integers and `speed`/`encapsulation` (pass-through
+// strings). `duplex` is the strict `full`/`half`/`auto` enum.
 // The interfaces wildcard identity token is TYPED (keyValidator
 // ValidateInterfaceName, #6834). The name is interpolated into four sites in
 // the generated systemd units, one of which — `[Match] Name=` in the .network
@@ -60,8 +59,11 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 		validator:     ValidateIntegerMin(1),
 		children:      nil,
 	},
-	"speed":  {desc: "Link speed", args: 1, children: nil},
-	"duplex": {desc: "Link duplex mode", args: 1, children: nil},
+	"speed": {desc: "Link speed", args: 1, children: nil},
+	"duplex": {desc: "Interface duplex mode (full | half | auto)", args: 1, placeholder: "<mode>",
+		valueType: ValueEnumOf, valueDesc: "Duplex mode (full | half | auto)",
+		valueExamples: []string{"full", "half", "auto"},
+		validator:     ValidateEnum([]string{"full", "half", "auto"}), children: nil},
 	"bandwidth": {
 		desc:          "Interface bandwidth",
 		args:          1,

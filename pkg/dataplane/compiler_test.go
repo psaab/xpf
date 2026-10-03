@@ -436,14 +436,14 @@ func TestParseDuplex(t *testing.T) {
 		want  string
 	}{
 		{"full", "full"},
-		{"Full", "full"},
-		{"FULL", "full"},
+		{"Full", ""},
+		{"FULL", ""},
 		{"half", "half"},
-		{"Half", "half"},
+		{"Half", ""},
 		{"", ""},
 		{"auto", ""},
 		{"bogus", ""},
-		{"  full  ", "full"}, // whitespace trimmed
+		{"  full  ", ""},
 	}
 	for _, tt := range tests {
 		got := parseDuplex(tt.input)

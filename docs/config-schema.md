@@ -10235,6 +10235,9 @@ reserved for whole-dataplane selection where a rewrite shim
   subsystems — one dedicated pass later), `track-interface priority-cost`
   (#1814 pre-walk owns it), `cpu-governor` (pass-through by design), dhcp
   client knobs, tunnel keepalives.
+  The interface `duplex` leaf is the typed `full`/`half`/`auto` enum (#11824):
+  strict commits reject other or case-varied tokens, tolerant loads warn and
+  clear invalid values, and the networkd renderer emits only canonical values.
 - **#2524 (ring-entries bound):** `system dataplane ring-entries` was
   min-only (`ValidateIntegerMin(1)`) — any large value committed and was
   handed to the Rust helper, which preallocates ~3×ring_entries UMEM frames

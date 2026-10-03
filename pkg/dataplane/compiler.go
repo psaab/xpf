@@ -1791,9 +1791,10 @@ func parseSpeed(s string) string {
 	}
 }
 
-// parseDuplex converts Junos duplex values to ethtool duplex values.
+// parseDuplex returns only explicit ethtool overrides; auto and invalid values
+// leave the device's negotiated setting untouched.
 func parseDuplex(d string) string {
-	switch strings.ToLower(strings.TrimSpace(d)) {
+	switch d {
 	case "full":
 		return "full"
 	case "half":
