@@ -1857,9 +1857,10 @@ func ValidateConfig(cfg *Config) []string {
 	// receives on an AF_PACKET raw socket that is delivered before the netfilter
 	// input hook, DHCPv6 because the ff02::1:2 request matches no per-zone
 	// unicast `daddr` rule and falls through the input chain's accept policy.
-	// Neither #4455 arm can see this (they cross-check routing protocols against
-	// FRR), so this shape produced no advisory at all before #6460. WARN-only;
-	// the per-zone enforcement is PLAN-KILLed with #4455 Component A.
+	// #11571's managed-routing cross-check applies only to FRR protocols, and
+	// its nft/Rust catalog gate intentionally excludes DHCP's distinct groups
+	// and delivery paths. This DHCP-specific shape therefore needs its own
+	// advisory; the DHCP request path remains outside that enforcement.
 	warnings = append(warnings, validateDHCPServerHostInboundBypassWarnings(cfg)...)
 	warnings = append(warnings, validateDHCPSocketTypeWarnings(cfg)...)
 
