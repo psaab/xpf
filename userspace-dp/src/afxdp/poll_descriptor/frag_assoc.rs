@@ -1382,6 +1382,7 @@ pub(in crate::afxdp) fn retry_flowless_fragment_nat(
         .get(&from_zone_id)
         .map_or("", String::as_str);
     let mut counter = None;
+    let mut matched_static = None;
     match super::nat_exception::source_nat_decision_for_flow(
         forwarding,
         meta.ingress_ifindex as i32,
@@ -1396,6 +1397,7 @@ pub(in crate::afxdp) fn retry_flowless_fragment_nat(
         packet_icmp,
         worker_id,
         &mut counter,
+        &mut matched_static,
     ) {
         Ok(decision) if decision.rewrite_src.is_some() => {
             RetryFlowlessFragmentNat::Translate { decision, counter }

@@ -51,6 +51,7 @@ pub(super) fn source_nat_decision_for_flow(
     packet_icmp: Option<(u8, u8)>,
     worker_id: u32,
     matched_counter: &mut Option<std::sync::Arc<crate::nat::NatRuleCounter>>,
+    matched_static: &mut Option<bool>,
 ) -> Result<NatDecision, SourceNatFailure> {
     source_nat_decision_with_holder(
         forwarding,
@@ -66,6 +67,7 @@ pub(super) fn source_nat_decision_for_flow(
         packet_icmp,
         crate::nat::NatHolder::Worker(worker_id),
         matched_counter,
+        matched_static,
     )
 }
 
@@ -104,8 +106,12 @@ fn source_nat_decision_with_holder(
     // counter (None when no rule matched or the rule has no counter). The
     // caller increments it once per committed translated forward flow.
     matched_counter: &mut Option<std::sync::Arc<crate::nat::NatRuleCounter>>,
+    // #11600: distinguish static from dynamic translations even if both NAT
+    // branches produce the same tuple.
+    matched_static: &mut Option<bool>,
 ) -> Result<NatDecision, SourceNatFailure> {
     *matched_counter = None;
+    *matched_static = None;
     // #3096: resolve the interface / routing-instance scope for this flow once
     // (cold path). The static-NAT reverse (SNAT) direction matches the rule's
     let scope = super::super::forwarding::nat_scope_ctx_for_flow(
@@ -135,6 +141,7 @@ fn source_nat_decision_with_holder(
         scope.egress_routing_instance,
     ) {
         *matched_counter = counter;
+        *matched_static = Some(true);
         return Ok(decision);
     }
     match match_source_nat_for_flow_result_at(
@@ -152,7 +159,12 @@ fn source_nat_decision_with_holder(
         holder,
         matched_counter,
     ) {
-        SourceNatLookup::Matched(decision) => Ok(decision),
+        SourceNatLookup::Matched(decision) => {
+            if decision.rewrite_src.is_some() {
+                *matched_static = Some(false);
+            }
+            Ok(decision)
+        }
         SourceNatLookup::NoMatch => {
             *matched_counter = None;
             Ok(NatDecision::default())
@@ -194,6 +206,7 @@ pub(super) fn source_nat_would_translate_flowless(
     packet_icmp: Option<(u8, u8)>,
 ) -> bool {
     let mut matched_counter = None;
+    let mut matched_static = None;
     match source_nat_decision_with_holder(
         forwarding,
         ingress_ifindex,
@@ -213,6 +226,7 @@ pub(super) fn source_nat_would_translate_flowless(
         // mapping, so there is no allocation to record a holder on.
         crate::nat::NatHolder::Untracked,
         &mut matched_counter,
+        &mut matched_static,
     ) {
         Ok(decision) => decision.rewrite_src.is_some() || decision.rewrite_dst.is_some(),
         Err(_) => true,

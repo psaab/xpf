@@ -1345,6 +1345,88 @@ pub(crate) fn source_nat_tuple_translation_possible(
     false
 }
 
+/// Whether the translation already carried by an established flow remains
+/// expressible by the first live source-NAT rule for its original tuple.
+///
+/// This is a read-only revalidation probe: it does not allocate a new pool
+/// address/port or mutate interface-NAT state. Keeping a stale translation is
+/// valid only when the live rule still permits that exact address/port.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn source_nat_translation_matches(
+    rules: &[SourceNatRule],
+    scope: &NatScopeCtx<'_>,
+    from_zone: &str,
+    to_zone: &str,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    translated_src: IpAddr,
+    translated_src_port: Option<u16>,
+    egress_v4: Option<Ipv4Addr>,
+    egress_v6: Option<Ipv6Addr>,
+) -> bool {
+    for rule in rules {
+        let rule_match = rule.matches(
+            scope,
+            from_zone,
+            to_zone,
+            src_ip,
+            dst_ip,
+            false,
+            protocol,
+            src_port,
+            dst_port,
+            false,
+            packet_icmp,
+        );
+        if rule_match == L4Match::NoMatch {
+            continue;
+        }
+        if rule.lenient_match_dropped {
+            return false;
+        }
+        if rule.off {
+            if rule_match == L4Match::Possible {
+                continue;
+            }
+            return false;
+        }
+        if rule.interface_mode {
+            let expected = match src_ip {
+                IpAddr::V4(_) => egress_v4.map(IpAddr::V4),
+                IpAddr::V6(_) => egress_v6.map(IpAddr::V6),
+            };
+            return expected == Some(translated_src);
+        }
+        if rule.pool_mode {
+            if rule.pool_failure.is_some() {
+                return false;
+            }
+            let address_matches = match translated_src {
+                IpAddr::V4(addr) => rule.pool_addresses_v4.contains(&addr),
+                IpAddr::V6(addr) => rule.pool_addresses_v6.contains(&addr),
+            };
+            if !address_matches {
+                return false;
+            }
+            if rule.no_translation
+                || (!crate::ip_proto::has_l4_ports(protocol) && packet_icmp.is_none())
+            {
+                return translated_src_port.is_none();
+            }
+            return translated_src_port.map_or(
+                (rule.pool_port_low..=rule.pool_port_high).contains(&src_port),
+                |port| (rule.pool_port_low..=rule.pool_port_high).contains(&port),
+            );
+        }
+        return false;
+    }
+    false
+}
+
 /// Does a flowless packet possibly match a translating source-NAT rule using
 /// its known scope, addresses, protocol, and readable ICMP type/code? Protocol
 /// 255 is the non-first fragment's unknown sentinel; it means possible, never a

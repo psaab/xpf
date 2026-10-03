@@ -117,7 +117,7 @@
 //!   #7212's static-filter revocation can still be driven from there. That is a
 //!   per-interface filter question, not a zone one.
 
-use super::policy_revalidation::PolicyRevocation;
+use super::policy_revalidation::{PolicyRevocation, PolicyRevocationReason};
 use super::*;
 use crate::policy::{PolicyEvaluationResult, evaluate_policy_result_without_counting};
 use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin};
@@ -407,6 +407,7 @@ pub(super) fn foreign_hit_verdict(
             decision,
             metadata,
             origin,
+            reason: PolicyRevocationReason::ZonePolicy,
         }),
         None => ForeignHitVerdict::Drop(deny),
     }
