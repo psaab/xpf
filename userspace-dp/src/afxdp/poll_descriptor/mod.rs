@@ -336,8 +336,8 @@ use filter::{
     lo0_action_for_solicited_reply, revalidate_static_pbr_route_on_session_hit,
 };
 use policy_revalidation::{
-    revalidate_zone_policy_on_session_hit, tun_origin_forward, tun_origin_reverse,
-    tun_origin_reverse_exempt,
+    revalidate_zone_policy_on_session_hit, source_nat_revocation_on_session_hit,
+    tun_origin_forward, tun_origin_reverse, tun_origin_reverse_exempt,
 };
 
 // Per-batch packet processing lifted from `poll_binding` (#678).
@@ -2194,7 +2194,22 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // per-packet drop. The reverse denial is therefore
                         // recorded and enforced AFTER the revocation block, so
                         // a due revocation still takes the one teardown.
-                        let owner_icmp_verdict = if foreign_arrival_zone.is_none() {
+                        // Source-NAT revalidation is independent of the
+                        // policy-generation/ICMP/foreign-hit gates: even a
+                        // fresh policy verdict cannot keep a translation the
+                        // live NAT configuration no longer permits.
+                        let mut session_hit_revocation = source_nat_revocation_on_session_hit(
+                            worker_ctx.forwarding,
+                            sessions,
+                            &resolved.key,
+                            &resolved.metadata,
+                            resolved.decision,
+                            flow,
+                            resolved.origin,
+                        );
+                        let owner_icmp_verdict = if session_hit_revocation.is_none()
+                            && foreign_arrival_zone.is_none()
+                        {
                             owner_hit_icmp_verdict(
                                 worker_ctx.forwarding,
                                 &resolved.metadata,
@@ -2212,7 +2227,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         let reverse_icmp_denied =
                             matches!(owner_icmp_verdict, Some(OwnerHitIcmpVerdict::Drop(_)))
                                 && resolved.metadata.is_reverse;
-                        if !reverse_icmp_denied
+                        if session_hit_revocation.is_none()
+                            && !reverse_icmp_denied
                             && let Some(OwnerHitIcmpVerdict::Drop(deny)) = owner_icmp_verdict
                         {
                             emit_session_hit_policy_deny_event(
@@ -2230,65 +2246,67 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
-                        let zone_policy_revocation = match foreign_arrival_zone {
-                            None => revalidate_zone_policy_on_session_hit(
-                                worker_ctx.forwarding,
-                                sessions,
-                                &resolved.key,
-                                &resolved.metadata,
-                                resolved.decision,
-                                Some(flow),
-                                meta,
-                                // #9384: THIS packet's fabric ingress. The from-zone
-                                // is resolved live from the arrival interface, and a
-                                // fabric-punted packet arrives on the fabric link —
-                                // not in the flow's zone — so it keeps the entry's
-                                // recorded zone instead.
-                                packet_fabric_ingress,
-                                fabric_link_ingress,
-                                worker_ctx.ha_state,
-                                worker_ctx.dynamic_neighbors,
-                                now_ns,
-                                now_secs,
-                                meta.ingress_ifindex as i32,
-                                ha_startup_grace_until_secs,
-                                resolved.origin,
-                            ),
-                            Some(arrival_zone) => match foreign_hit_verdict(
-                                worker_ctx.forwarding,
-                                sessions,
-                                &resolved.key,
-                                &resolved.metadata,
-                                resolved.decision,
-                                flow,
-                                meta,
-                                packet_frame,
-                                arrival_zone,
-                                may_revoke,
-                            ) {
-                                ForeignHitVerdict::Forward => None,
-                                ForeignHitVerdict::Drop(deny) => {
-                                    emit_session_hit_policy_deny_event(
-                                        worker_ctx.forwarding,
-                                        worker_ctx.event_stream,
-                                        resolved.decision,
-                                        flow,
-                                        meta,
-                                        arrival_zone,
-                                        resolved.metadata.egress_zone,
-                                        deny,
-                                        now_ns,
-                                    );
-                                    telemetry.dbg.foreign_authority_drops += 1;
-                                    binding.scratch.scratch_recycle.push(desc.addr);
-                                    continue;
-                                }
-                                ForeignHitVerdict::Revoke(revocation) => Some(revocation),
-                            },
-                        };
-                        if let Some(revocation) = zone_policy_revocation {
-                            // The live zone policy denies this FLOW. Same
-                            // pair-aware teardown the filter revocation uses
+                        if session_hit_revocation.is_none() {
+                            session_hit_revocation = match foreign_arrival_zone {
+                                None => revalidate_zone_policy_on_session_hit(
+                                    worker_ctx.forwarding,
+                                    sessions,
+                                    &resolved.key,
+                                    &resolved.metadata,
+                                    resolved.decision,
+                                    Some(flow),
+                                    meta,
+                                    // #9384: THIS packet's fabric ingress. The from-zone
+                                    // is resolved live from the arrival interface, and a
+                                    // fabric-punted packet arrives on the fabric link —
+                                    // not in the flow's zone — so it keeps the entry's
+                                    // recorded zone instead.
+                                    packet_fabric_ingress,
+                                    fabric_link_ingress,
+                                    worker_ctx.ha_state,
+                                    worker_ctx.dynamic_neighbors,
+                                    now_ns,
+                                    now_secs,
+                                    meta.ingress_ifindex as i32,
+                                    ha_startup_grace_until_secs,
+                                    resolved.origin,
+                                ),
+                                Some(arrival_zone) => match foreign_hit_verdict(
+                                    worker_ctx.forwarding,
+                                    sessions,
+                                    &resolved.key,
+                                    &resolved.metadata,
+                                    resolved.decision,
+                                    flow,
+                                    meta,
+                                    packet_frame,
+                                    arrival_zone,
+                                    may_revoke,
+                                ) {
+                                    ForeignHitVerdict::Forward => None,
+                                    ForeignHitVerdict::Drop(deny) => {
+                                        emit_session_hit_policy_deny_event(
+                                            worker_ctx.forwarding,
+                                            worker_ctx.event_stream,
+                                            resolved.decision,
+                                            flow,
+                                            meta,
+                                            arrival_zone,
+                                            resolved.metadata.egress_zone,
+                                            deny,
+                                            now_ns,
+                                        );
+                                        telemetry.dbg.foreign_authority_drops += 1;
+                                        binding.scratch.scratch_recycle.push(desc.addr);
+                                        continue;
+                                    }
+                                    ForeignHitVerdict::Revoke(revocation) => Some(revocation),
+                                },
+                            };
+                        }
+                        if let Some(revocation) = session_hit_revocation {
+                            // A stale source translation or denied zone-policy FLOW
+                            // uses the same pair-aware teardown as filter revocation.
                             // (#5622): forward AND reverse deleted, source-NAT /
                             // NAT64 reservation released exactly once via the
                             // forward entry, forward close delta emitted. Then
@@ -2343,11 +2361,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     &mut binding.scratch.scratch_filter_revoked_keys,
                                 );
                             }
-                            telemetry.dbg.policy_revoked_sessions += 1;
-                            binding
-                                .live
-                                .policy_revoked_sessions
-                                .fetch_add(1, Ordering::Relaxed);
+                            if revocation.reason
+                                == policy_revalidation::PolicyRevocationReason::ZonePolicy
+                            {
+                                telemetry.dbg.policy_revoked_sessions += 1;
+                                binding
+                                    .live
+                                    .policy_revoked_sessions
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
@@ -4245,6 +4267,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // NAT64: cross-family translation takes
                                 // priority over same-family SNAT.
                                 let mut source_nat_release_key = None;
+                                let mut source_nat_static = None;
                                 // #2218: the matched SNAT/static-SNAT rule's
                                 // per-rule hit counter, captured from the
                                 // decision helper; incremented once at the
@@ -4438,6 +4461,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // #2218: capture the matched rule's counter via
                                         // the out-param.
                                         let mut snat_match_counter = None;
+                                        let mut snat_match_static = None;
                                         match source_nat_decision_for_flow(
                                             worker_ctx.forwarding,
                                             meta.ingress_ifindex as i32,
@@ -4455,12 +4479,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             // mints — see `nat::NatHolder`.
                                             worker_id,
                                             &mut snat_match_counter,
+                                            &mut snat_match_static,
                                         ) {
                                             Ok(snat_decision) => {
                                                 decision.nat = decision.nat.merge(snat_decision);
                                                 source_nat_release_key =
                                                     Some(nat_match_flow.forward_key.clone());
                                                 source_nat_counter = snat_match_counter;
+                                                source_nat_static = snat_match_static;
                                             }
                                             Err(failure) => {
                                                 record_source_nat_failure(
@@ -4909,6 +4935,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             meta.tcp_flags,
                                         );
                                     if forward_installed {
+                                        sessions.mark_source_nat_revalidated(
+                                            &flow.forward_key,
+                                            source_nat_static,
+                                        );
                                         if let Some(incarnation) = leak_incarnation {
                                             sessions.stamp_leak_incarnation(
                                                 &flow.forward_key,
@@ -8628,6 +8658,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // session miss → policy deny (no rule for WAN→LAN).
                                 let mut pending_decision = decision;
                                 let mut source_nat_release_key = None;
+                                let mut source_nat_static = None;
                                 // #2218: matched SNAT/static-SNAT rule counter
                                 // for the seeded translated flow; incremented at
                                 // the committed seed install below.
@@ -8735,6 +8766,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 Some(nat_match_flow.forward_key.clone());
                                         } else {
                                             let mut snat_match_counter = None;
+                                            let mut snat_match_static = None;
                                             match source_nat_decision_for_flow(
                                                 worker_ctx.forwarding,
                                                 meta.ingress_ifindex as i32,
@@ -8752,6 +8784,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 // mints — see `nat::NatHolder`.
                                                 worker_id,
                                                 &mut snat_match_counter,
+                                                &mut snat_match_static,
                                             ) {
                                                 Ok(snat_decision) => {
                                                     pending_decision.nat =
@@ -8759,6 +8792,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     source_nat_release_key =
                                                         Some(nat_match_flow.forward_key.clone());
                                                     source_nat_counter = snat_match_counter;
+                                                    source_nat_static = snat_match_static;
                                                 }
                                                 Err(failure) => {
                                                     record_source_nat_failure(
@@ -8884,6 +8918,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             meta.tcp_flags,
                                         );
                                     if pending_installed {
+                                        sessions.mark_source_nat_revalidated(
+                                            &flow.forward_key,
+                                            source_nat_static,
+                                        );
                                         if let Some(incarnation) = pending_leak_incarnation {
                                             sessions.stamp_leak_incarnation(
                                                 &flow.forward_key,

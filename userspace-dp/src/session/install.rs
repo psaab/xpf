@@ -315,6 +315,11 @@ impl SessionTable {
             entry: SessionEntry {
                 decision,
                 forwarding_generation: self.forwarding_revalidation_gen,
+                source_nat_revalidated: self
+                    .forwarding_revalidation_gen
+                    .valid
+                    .then_some(self.forwarding_revalidation_gen),
+                source_nat_static: None,
                 policy_generation,
                 metadata: metadata.clone(),
                 origin,
@@ -638,6 +643,8 @@ impl SessionTable {
             entry: SessionEntry {
                 decision,
                 forwarding_generation: ForwardingGenerationStamp::default(),
+                source_nat_revalidated: None,
+                source_nat_static: None,
                 policy_generation: 0,
                 metadata: metadata.clone(),
                 origin,

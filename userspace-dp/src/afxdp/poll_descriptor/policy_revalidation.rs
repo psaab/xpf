@@ -220,6 +220,7 @@ use crate::policy::evaluate_policy_result_without_counting_at;
 use crate::session::{
     PolicyGateAnswer, PolicyGateCurrent, PolicyRevalidationKind, PolicyRevalidationTarget,
     SessionDecision, SessionKey, SessionMetadata, SessionOrigin, SessionTable,
+    SourceNatRevalidationTarget,
 };
 use std::sync::{Arc, Mutex};
 
@@ -265,12 +266,18 @@ pub(crate) fn should_alarm_route_change(
         && (last_alarm_ns == 0
             || now_ns.saturating_sub(last_alarm_ns) >= ROUTE_CHANGE_ALARM_INTERVAL_NS)
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PolicyRevocationReason {
+    ZonePolicy,
+    StaleSourceNat,
+}
 
 pub(super) struct PolicyRevocation {
     pub(super) canonical_key: Option<SessionKey>,
     pub(super) decision: SessionDecision,
     pub(super) metadata: SessionMetadata,
     pub(super) origin: SessionOrigin,
+    pub(super) reason: PolicyRevocationReason,
 }
 
 /// #9604: where the cold judgment reads the FROM-zone from. A
@@ -306,6 +313,194 @@ struct PolicyJudgmentInput {
     from_source: FromZoneSource,
     now_ns: u64,
 }
+
+/// Check whether a stored forward source translation remains expressible by
+/// the same live NAT branch for its original tuple. This is read-only: it
+/// never allocates a replacement address, port, or interface-NAT identity.
+/// Static and dynamic SNAT can produce identical tuples, so equality of the
+/// translated address alone is not enough to carry authorization across a
+/// config generation.
+fn source_nat_translation_still_valid(
+    forwarding: &ForwardingState,
+    decision: &SessionDecision,
+    metadata: &SessionMetadata,
+    forward_key: &SessionKey,
+    stored_static: Option<bool>,
+) -> (bool, Option<bool>) {
+    let nat = decision.nat;
+    let Some(translated_src) = nat.rewrite_src else {
+        return (true, None);
+    };
+    if nat.nat64 || nat.nptv6 {
+        return (true, None);
+    }
+
+    let ingress_ifindex = metadata.ingress_ifindex as i32;
+    let egress_ifindex = decision.resolution.egress_ifindex;
+    let Some(egress) = forwarding.egress.get(&egress_ifindex) else {
+        return (false, None);
+    };
+    let (from_zone_id, to_zone_id) = if metadata.fabric_ingress || ingress_ifindex == 0 {
+        (metadata.ingress_zone, metadata.egress_zone)
+    } else {
+        crate::afxdp::forwarding::zone_pair_ids_for_flow_with_override(
+            forwarding,
+            ingress_ifindex,
+            None,
+            egress_ifindex,
+        )
+    };
+    let Some(from_zone) = forwarding.zone_id_to_name.get(&from_zone_id) else {
+        return (false, None);
+    };
+    let Some(to_zone) = forwarding.zone_id_to_name.get(&to_zone_id) else {
+        return (false, None);
+    };
+    let scope = crate::afxdp::forwarding::nat_scope_ctx_for_flow(
+        forwarding,
+        ingress_ifindex,
+        metadata.ingress_vlan_id,
+        None,
+        egress_ifindex,
+        forward_key.routing_domain,
+    );
+    let source_nat_dst = nat.rewrite_dst.unwrap_or(forward_key.dst_ip);
+    let source_nat_dport = nat.rewrite_dst_port.unwrap_or(forward_key.dst_port);
+
+    // Translation provenance is local-only and the wire NAT decision does not
+    // distinguish dynamic from static SNAT. If it is unavailable, fail closed:
+    // accepting whichever new branch happens to match could launder a dynamic
+    // allocation through a same-tuple static rule installed by this commit.
+    if stored_static.is_none() {
+        return (false, None);
+    }
+    // Static source NAT has independent provenance and precedence over
+    // dynamic source NAT. Never let a newly installed static mapping validate
+    // a session whose existing translation came from a dynamic pool/interface
+    // rule, even if it happens to translate to the same tuple.
+    if let Some((static_nat, _)) = forwarding.static_nat.match_snat_with_counter_scoped(
+        forward_key.src_ip,
+        forward_key.src_port,
+        Some(source_nat_dst),
+        to_zone,
+        scope.egress_ifname,
+        scope.egress_routing_instance,
+    ) {
+        let valid = stored_static != Some(false)
+            && static_nat.rewrite_src == Some(translated_src)
+            && static_nat.rewrite_src_port == nat.rewrite_src_port;
+        return (valid, valid.then_some(true));
+    }
+    if stored_static == Some(true) {
+        return (false, None);
+    }
+
+    let valid = crate::nat::source_nat_translation_matches(
+        &forwarding.source_nat_rules,
+        &scope,
+        from_zone,
+        to_zone,
+        forward_key.src_ip,
+        source_nat_dst,
+        forward_key.protocol,
+        forward_key.src_port,
+        source_nat_dport,
+        nat.source_nat_icmp,
+        translated_src,
+        nat.rewrite_src_port,
+        egress.primary_v4,
+        egress.primary_v6,
+    );
+    (valid, valid.then_some(false))
+}
+
+/// Revalidate source NAT before any policy-generation, ICMP, host-delivery, or
+/// foreign-hit early exit. A reverse hit is judged through its forward
+/// companion; a forward hit with no local entry is checked sessionlessly and
+/// drops this packet without claiming ownership of the peer's session.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn source_nat_revocation_on_session_hit(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    session_key: &SessionKey,
+    metadata: &SessionMetadata,
+    decision: SessionDecision,
+    flow: &SessionFlow,
+    origin: SessionOrigin,
+) -> Option<PolicyRevocation> {
+    let (forward_key, forward_decision, forward_metadata, forward_origin, canonical_key, stored_static) =
+        if metadata.is_reverse {
+            let reverse_key = sessions.revalidation_canonical_key(session_key)?;
+            let (reverse_decision, _, _) = sessions.entry_with_origin(&reverse_key)?;
+            let forward_query =
+                crate::session::reverse_session_key(&reverse_key, reverse_decision.nat);
+            let canonical_key = match sessions.source_nat_revalidation_target(&forward_query) {
+                SourceNatRevalidationTarget::Fresh | SourceNatRevalidationTarget::NoLocalEntry => {
+                    return None;
+                }
+                SourceNatRevalidationTarget::Stale { key, static_nat } => (key, static_nat),
+            };
+            let (forward_decision, forward_metadata, forward_origin) =
+                sessions.entry_with_origin(&canonical_key.0)?;
+            (
+                canonical_key.0.clone(),
+                forward_decision,
+                forward_metadata,
+                forward_origin,
+                Some(canonical_key.0),
+                canonical_key.1,
+            )
+        } else {
+            match sessions.source_nat_revalidation_target(session_key) {
+                SourceNatRevalidationTarget::Fresh => return None,
+                SourceNatRevalidationTarget::Stale {
+                    key: canonical_key,
+                    static_nat,
+                } => {
+                    let (forward_decision, forward_metadata, forward_origin) =
+                        sessions.entry_with_origin(&canonical_key)?;
+                    (
+                        canonical_key.clone(),
+                        forward_decision,
+                        forward_metadata,
+                        forward_origin,
+                        Some(canonical_key),
+                        static_nat,
+                    )
+                }
+                SourceNatRevalidationTarget::NoLocalEntry => (
+                    flow.forward_key.clone(),
+                    decision,
+                    metadata.clone(),
+                    origin,
+                    None,
+                    None,
+                ),
+            }
+        };
+
+    let (valid, static_nat) = source_nat_translation_still_valid(
+        forwarding,
+        &forward_decision,
+        &forward_metadata,
+        &forward_key,
+        stored_static,
+    );
+    if valid {
+        if let Some(canonical_key) = canonical_key.as_ref() {
+            sessions.mark_source_nat_revalidated(canonical_key, static_nat);
+        }
+        return None;
+    }
+    Some(PolicyRevocation {
+        canonical_key,
+        decision: forward_decision,
+        metadata: forward_metadata,
+        origin: forward_origin,
+        reason: PolicyRevocationReason::StaleSourceNat,
+    })
+}
+
 
 /// Outcome of the cold judgment. Stamping lives with the caller: PERMIT-only,
 /// never on decline or revoke (fail-closed).
@@ -359,6 +554,7 @@ fn revocation_for_hit(
         decision,
         metadata,
         origin,
+        reason: PolicyRevocationReason::ZonePolicy,
     })
 }
 
@@ -466,16 +662,6 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     // anywhere declines ICMP box-wide, which is precisely #8356's behaviour.
     // The failure mode of the coarseness is "no worse than before", never "acts
     // on a verdict it could not derive".
-    if forwarding
-        .policy
-        .icmp_verdict_may_depend_on_type(meta.protocol)
-    {
-        return if gate.fail_closed_icmp {
-            revocation_for_hit(sessions, session_key)
-        } else {
-            None
-        };
-    }
     // GATE 2: one probe answers both "which entry does this WIRE tuple name"
     // and "is its policy verdict stale". `Fresh` — the answer for every packet
     // but one per session per generation — costs a single hash and a compare.
@@ -574,6 +760,18 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
         },
         now_ns,
     };
+    // ICMP's packet-scoped policy decline remains unchanged, but obsolete NAT
+    // is revoked first because it is independent of the packet type.
+    if forwarding
+        .policy
+        .icmp_verdict_may_depend_on_type(input.protocol)
+    {
+        return if gate.fail_closed_icmp {
+            revocation_for_hit(sessions, session_key)
+        } else {
+            None
+        };
+    }
     match zone_policy_deny_on_session_hit(forwarding, &input) {
         ZonePolicyJudgment::Permit => {
             sessions.mark_policy_revalidated(
@@ -600,6 +798,7 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
                 decision: input.decision,
                 metadata: input.metadata,
                 origin,
+                reason: PolicyRevocationReason::ZonePolicy,
             })
         }
     }
@@ -930,6 +1129,7 @@ fn sessionless_zone_policy_verdict(
             decision: input.decision,
             metadata: input.metadata,
             origin,
+            reason: PolicyRevocationReason::ZonePolicy,
         }),
     }
 }
@@ -1270,16 +1470,6 @@ fn reverse_hit_zone_policy(
     if tun_origin_forward(&fwd_decision, &fwd_metadata, fwd_origin) {
         return None;
     }
-    if forwarding
-        .policy
-        .icmp_verdict_may_depend_on_type(fwd_key.protocol)
-    {
-        return if rev_fail_closed_icmp || companion_needs_live {
-            revocation_for_hit(sessions, session_key)
-        } else {
-            None
-        };
-    }
     let from_source = match reverse_companion_from_source(sessions, fwd_origin, &fwd_metadata) {
         Some(from_source) => from_source,
         // Helper returns None only for ReverseFlow origin (exhaustive match:
@@ -1304,6 +1494,16 @@ fn reverse_hit_zone_policy(
         from_source,
         now_ns,
     };
+    if forwarding
+        .policy
+        .icmp_verdict_may_depend_on_type(input.protocol)
+    {
+        return if rev_fail_closed_icmp || companion_needs_live {
+            revocation_for_hit(sessions, session_key)
+        } else {
+            None
+        };
+    }
     match zone_policy_deny_on_session_hit(forwarding, &input) {
         ZonePolicyJudgment::Permit => {
             // #10507: reverse evidence only proves the reverse row's policy
@@ -1323,6 +1523,7 @@ fn reverse_hit_zone_policy(
             decision: fwd_decision,
             metadata: fwd_metadata,
             origin: fwd_origin,
+            reason: PolicyRevocationReason::ZonePolicy,
         }),
     }
 }
@@ -1543,423 +1744,5 @@ fn zone_policy_deny_on_session_hit(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// #11075: the route-change alarm fires exactly when a generation step
-    /// lands with live sessions, rate-limited to one line per interval.
-    #[test]
-    fn route_change_alarm_edge_matrix_11075() {
-        // Advance + live sessions + never alarmed -> fire.
-        assert!(should_alarm_route_change(7, 8, 100, 0, 1_000));
-        // Same generation -> silent.
-        assert!(!should_alarm_route_change(8, 8, 100, 0, 1_000));
-        // No live sessions -> silent.
-        assert!(!should_alarm_route_change(7, 8, 0, 0, 1_000));
-        // Within the interval -> silent.
-        assert!(!should_alarm_route_change(
-            7,
-            8,
-            100,
-            1_000,
-            1_000 + ROUTE_CHANGE_ALARM_INTERVAL_NS - 1
-        ));
-        // Past the interval -> fire again.
-        assert!(should_alarm_route_change(
-            7,
-            8,
-            100,
-            1_000,
-            1_000 + ROUTE_CHANGE_ALARM_INTERVAL_NS
-        ));
-    }
-
-    fn marker_forward_10038() -> (SessionDecision, SessionMetadata, SessionOrigin) {
-        (
-            SessionDecision {
-                resolution: ForwardingResolution {
-                    disposition: ForwardingDisposition::ForwardCandidate,
-                    local_ifindex: 0,
-                    egress_ifindex: 400,
-                    tx_ifindex: 6,
-                    tunnel_endpoint_id: 1,
-                    next_hop: None,
-                    neighbor_mac: None,
-                    src_mac: None,
-                    tx_vlan_id: 0,
-                    route_mtu: 0,
-                    transport_route_mtu: 0,
-                },
-                nat: NatDecision::default(),
-                install_table_domain: 0,
-                install_table_check: 0,
-            },
-            SessionMetadata {
-                ingress_zone: 5,
-                egress_zone: 5,
-                ingress_zone_check: 0,
-                egress_zone_check: 0,
-                ingress_ifindex: 0,
-                ingress_vlan_id: 0,
-                owner_rg_id: 1,
-                fabric_ingress: false,
-                is_reverse: false,
-                nat64_reverse: None,
-                log_session_init: false,
-                log_session_close: false,
-                policy_id: 0,
-                inactivity_timeout_ns: None,
-                policy_counter_idx: 0,
-                policy_counter: None,
-            },
-            SessionOrigin::TunOrigin,
-        )
-    }
-
-    /// #10038: the discriminator truth table — positive provenance. ONLY
-    /// `TunOrigin` matches; every other origin (the full HA-synced family
-    /// included — a `SyncImport` is NEVER TUN-origin, however closely its
-    /// metadata aliases) fails, as does flipping any shape conjunct alone.
-    #[test]
-    fn tun_origin_forward_table_10038() {
-        let (decision, metadata, origin) = marker_forward_10038();
-        assert!(tun_origin_forward(&decision, &metadata, origin));
-        // Every other origin fails — including the whole HA-synced family:
-        // SyncImport (the legacy-transit alias — see the dedicated cell
-        // below), SharedMaterialize, WorkerLocalImport, SharedPromote (TUN
-        // never promotes, so a promoted entry is by definition not TUN),
-        // ForwardFlow/ReverseFlow (MISS installs, the spoof-plant shape),
-        // LocalMiss and the transient seeds.
-        for origin in [
-            SessionOrigin::SyncImport,
-            SessionOrigin::SharedMaterialize,
-            SessionOrigin::WorkerLocalImport,
-            SessionOrigin::SharedPromote,
-            SessionOrigin::ForwardFlow,
-            SessionOrigin::ReverseFlow,
-            SessionOrigin::LocalMiss,
-            SessionOrigin::MissingNeighborSeed,
-            SessionOrigin::FabricPuntSeed,
-        ] {
-            assert!(
-                !tun_origin_forward(&decision, &metadata, origin),
-                "{origin:?} must not match"
-            );
-        }
-        // Each remaining conjunct flipped alone.
-        let mut rev = metadata.clone();
-        rev.is_reverse = true;
-        assert!(!tun_origin_forward(&decision, &rev, origin));
-        let mut ingress = metadata.clone();
-        ingress.ingress_ifindex = 400;
-        assert!(!tun_origin_forward(&decision, &ingress, origin));
-        let mut untunneled = decision;
-        untunneled.resolution.tunnel_endpoint_id = 0;
-        assert!(!tun_origin_forward(&untunneled, &metadata, origin));
-        let mut admitted = metadata.clone();
-        admitted.policy_counter_idx = 1;
-        assert!(!tun_origin_forward(&decision, &admitted, origin));
-    }
-
-    /// #10038: the exemption's companion lookup — local-first (a non-marker
-    /// local forward DECIDES, shadowing a shared marker), shared-only marker
-    /// exempts (the WG production shape), lone reverse fails closed, and a
-    /// degenerate self-inverse key fails closed.
-    #[test]
-    fn tun_origin_reverse_exempt_lookup_10038() {
-        let nat = NatDecision::default();
-        let fwd_key = SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol: 17,
-            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 123, 0, 1)),
-            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 123, 0, 5)),
-            src_port: 5001,
-            dst_port: 5002,
-            discriminator: crate::session::TunnelDiscriminator::None,
-            routing_domain: 0,
-        };
-        let rev_key = crate::session::reverse_session_key(&fwd_key, nat);
-        assert_ne!(fwd_key, rev_key);
-        let (decision, metadata, _) = marker_forward_10038();
-        let install_local =
-            |sessions: &mut SessionTable, origin: SessionOrigin, ingress: u32, policy_idx: u32| {
-                let mut meta = metadata.clone();
-                meta.ingress_ifindex = ingress;
-                meta.policy_counter_idx = policy_idx;
-                assert!(
-                    sessions.install_with_protocol_with_origin(
-                        fwd_key.clone(),
-                        decision,
-                        meta,
-                        origin,
-                        122_000_000_000,
-                        17,
-                        0,
-                    ),
-                    "local forward must install"
-                );
-            };
-        let shared_entry = |origin: SessionOrigin| SyncedSessionEntry {
-            key: fwd_key.clone(),
-            decision,
-            metadata: metadata.clone(),
-            leak_incarnation: 0,
-            origin,
-            protocol: 17,
-            tcp_flags: 0,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-        };
-        let fresh_shared = || Arc::new(Mutex::new(FastMap::default()));
-
-        // Local marker → exempt.
-        let mut sessions = SessionTable::new();
-        install_local(&mut sessions, SessionOrigin::TunOrigin, 0, 0);
-        assert!(tun_origin_reverse_exempt(
-            &sessions,
-            &fresh_shared(),
-            &rev_key,
-            nat
-        ));
-
-        // Local non-marker + shared marker → DENY (local shadows shared).
-        let mut sessions = SessionTable::new();
-        install_local(&mut sessions, SessionOrigin::ForwardFlow, 400, 1);
-        let shared = fresh_shared();
-        shared
-            .lock()
-            .expect("shared map")
-            .insert(fwd_key.clone(), shared_entry(SessionOrigin::TunOrigin));
-        assert!(!tun_origin_reverse_exempt(
-            &sessions, &shared, &rev_key, nat
-        ));
-
-        // Shared-only marker → exempt (WG production: the forward never
-        // materializes locally).
-        let sessions = SessionTable::new();
-        let shared = fresh_shared();
-        shared
-            .lock()
-            .expect("shared map")
-            .insert(fwd_key.clone(), shared_entry(SessionOrigin::TunOrigin));
-        assert!(tun_origin_reverse_exempt(&sessions, &shared, &rev_key, nat));
-
-        // Shared-only non-marker → deny.
-        let sessions = SessionTable::new();
-        let shared = fresh_shared();
-        shared
-            .lock()
-            .expect("shared map")
-            .insert(fwd_key.clone(), shared_entry(SessionOrigin::ForwardFlow));
-        assert!(!tun_origin_reverse_exempt(
-            &sessions, &shared, &rev_key, nat
-        ));
-
-        // Lone reverse (no forward anywhere) → deny (fail-closed).
-        let sessions = SessionTable::new();
-        assert!(!tun_origin_reverse_exempt(
-            &sessions,
-            &fresh_shared(),
-            &rev_key,
-            nat
-        ));
-
-        // Degenerate self-inverse key (src==dst, ports equal) → deny.
-        let loop_key = SessionKey {
-            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
-            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
-            src_port: 5,
-            dst_port: 5,
-            ..fwd_key.clone()
-        };
-        assert_eq!(
-            crate::session::reverse_session_key(&loop_key, nat),
-            loop_key
-        );
-        let sessions = SessionTable::new();
-        assert!(!tun_origin_reverse_exempt(
-            &sessions,
-            &fresh_shared(),
-            &loop_key,
-            nat
-        ));
-    }
-
-    /// #10522 Cell 3: an owner-arrival reverse LocalDelivery with a
-    /// TUN-origin forward companion is exempt from the two NEW-session gates.
-    /// That exemption is an explicit per-packet proof and keeps the trusted
-    /// outlet positive control intact.
-    #[test]
-    fn tun_origin_reverse_exempt_gate_proof_selects_trusted_10522() {
-        let nat = NatDecision::default();
-        let fwd_key = SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol: 17,
-            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 123, 0, 1)),
-            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 123, 0, 5)),
-            src_port: 5001,
-            dst_port: 5002,
-            discriminator: crate::session::TunnelDiscriminator::None,
-            routing_domain: 0,
-        };
-        let rev_key = crate::session::reverse_session_key(&fwd_key, nat);
-        let (decision, metadata, _) = marker_forward_10038();
-        let mut sessions = SessionTable::new();
-        assert!(sessions.install_with_protocol_with_origin(
-            fwd_key,
-            decision,
-            metadata,
-            SessionOrigin::TunOrigin,
-            122_000_000_000,
-            17,
-            0,
-        ));
-        let shared = Arc::new(Mutex::new(FastMap::default()));
-        let gate_proof = tun_origin_reverse_exempt(&sessions, &shared, &rev_key, nat);
-        assert!(gate_proof, "owner-arrival TUN-origin reply must be exempt");
-        assert!(
-            crate::afxdp::tx::dispatch::reinject_host_authorized(
-                ForwardingDisposition::LocalDelivery,
-                gate_proof,
-            ),
-            "the exemption proof must preserve the trusted LocalDelivery outlet",
-        );
-    }
-
-    /// Parent-review item 5: the legacy-HA-transit alias is closed. A
-    /// legacy-peer's transit import — `SyncImport`, tunnel egress, folded
-    /// zero ingress, zeroed counter (`session_sync.rs` defaults missing
-    /// fields to 0), even a PRESERVED admitting PolicyID (per
-    /// `sync_gen_guard_test.go`) — satisfies every shape conjunct yet must
-    /// NOT match: only positive `TunOrigin` provenance matches. Pinned at
-    /// both the predicate and the exemption-lookup level.
-    #[test]
-    fn tun_origin_legacy_ha_transit_import_does_not_match_10038() {
-        let (decision, mut metadata, _) = marker_forward_10038();
-        // The legacy import shape: admitting PolicyID preserved, counter
-        // zeroed by wire truncation.
-        metadata.policy_id = 41;
-        assert!(
-            !tun_origin_forward(&decision, &metadata, SessionOrigin::SyncImport),
-            "a legacy transit import must not match, PolicyID or not"
-        );
-        // And through the exemption lookup: a shared SyncImport alias-shape
-        // forward must not exempt its reverse.
-        let nat = NatDecision::default();
-        let fwd_key = SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol: 17,
-            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 123, 0, 1)),
-            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 123, 0, 5)),
-            src_port: 5001,
-            dst_port: 5002,
-            discriminator: crate::session::TunnelDiscriminator::None,
-            routing_domain: 0,
-        };
-        let rev_key = crate::session::reverse_session_key(&fwd_key, nat);
-        let sessions = SessionTable::new();
-        let shared = Arc::new(Mutex::new(FastMap::default()));
-        shared.lock().expect("shared map").insert(
-            fwd_key.clone(),
-            SyncedSessionEntry {
-                key: fwd_key.clone(),
-                decision,
-                metadata,
-                leak_incarnation: 0,
-                origin: SessionOrigin::SyncImport,
-                protocol: 17,
-                tcp_flags: 0,
-                generation: 0,
-                session_id: 0,
-                tcp_close_class: 0,
-            },
-        );
-        assert!(
-            !tun_origin_reverse_exempt(&sessions, &shared, &rev_key, nat),
-            "a legacy alias-shape forward must not exempt"
-        );
-        // Provenance lifecycle: local (never peer-synced, never promoted),
-        // preserved across materialize/replica (else the first HIT would
-        // re-tag the marker away).
-        assert!(SessionOrigin::TunOrigin.is_local_tun_origin());
-        assert!(!SessionOrigin::TunOrigin.is_peer_synced());
-        assert!(!SessionOrigin::TunOrigin.is_promotable_synced());
-        assert_eq!(
-            SessionOrigin::TunOrigin.materialized_shared_hit_origin(),
-            SessionOrigin::TunOrigin
-        );
-        assert_eq!(
-            SessionOrigin::TunOrigin.worker_replica_origin(),
-            SessionOrigin::TunOrigin
-        );
-    }
-
-    fn gate_current_base_10507() -> ForwardingResolution {
-        ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 24,
-            tx_ifindex: 24,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-            route_mtu: 0,
-            transport_route_mtu: 0,
-        }
-    }
-
-    /// #10507 rule-4 mapping pin: only would-forward WITH a valid egress
-    /// is LocalForwarding; would-forward WITHOUT egress is NoEgress
-    /// (fail-closed), never NonLocal (which would coast/retain). All
-    /// other dispositions map NonLocal via the wildcard arm.
-    #[test]
-    fn gate_current_splits_noegress_from_nonlocal_10507() {
-        assert_eq!(
-            policy_gate_current_for_resolution(gate_current_base_10507()),
-            PolicyGateCurrent::LocalForwarding
-        );
-        let mut noegress = gate_current_base_10507();
-        noegress.egress_ifindex = 0;
-        noegress.tx_ifindex = 0;
-        assert_eq!(
-            policy_gate_current_for_resolution(noegress),
-            PolicyGateCurrent::LocalForwardingNoEgress,
-            "would-forward without egress is rule-4 fail-closed, never NonLocal"
-        );
-        let mut missing = gate_current_base_10507();
-        missing.disposition = ForwardingDisposition::MissingNeighbor;
-        assert_eq!(
-            policy_gate_current_for_resolution(missing),
-            PolicyGateCurrent::LocalForwarding
-        );
-        let mut missing_noegress = gate_current_base_10507();
-        missing_noegress.disposition = ForwardingDisposition::MissingNeighbor;
-        missing_noegress.egress_ifindex = 0;
-        assert_eq!(
-            policy_gate_current_for_resolution(missing_noegress),
-            PolicyGateCurrent::LocalForwardingNoEgress
-        );
-        for disposition in [
-            ForwardingDisposition::FabricRedirect,
-            ForwardingDisposition::NoRoute,
-            ForwardingDisposition::HAInactive,
-            ForwardingDisposition::TableUnavailable,
-            ForwardingDisposition::LocalDelivery,
-            ForwardingDisposition::PolicyDenied,
-            ForwardingDisposition::DiscardRoute,
-            ForwardingDisposition::NextTableUnsupported,
-        ] {
-            let mut nonlocal = gate_current_base_10507();
-            nonlocal.disposition = disposition;
-            nonlocal.egress_ifindex = 0;
-            assert_eq!(
-                policy_gate_current_for_resolution(nonlocal),
-                PolicyGateCurrent::NonLocal,
-                "non-local dispositions stay NonLocal even with egress 0 (#9513 retention)"
-            );
-        }
-    }
-}
+#[path = "policy_revalidation_tests.rs"]
+mod tests;

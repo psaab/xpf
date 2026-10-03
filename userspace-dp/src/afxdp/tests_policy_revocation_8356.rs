@@ -43,6 +43,7 @@ use crate::test_zone_ids::*;
 use crate::{
     FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, NatAppTermWire,
     NeighborSnapshot, PolicyRuleSnapshot, RouteSnapshot, SourceNATRuleSnapshot,
+    StaticNATRuleSnapshot,
 };
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -8967,5 +8968,463 @@ fn lone_reverse_fresh_live_revokes_without_companion_10635() {
         session_count(&sessions),
         0,
         "the revoked reverse must be gone"
+    );
+}
+fn source_nat_rule_11600() -> SourceNATRuleSnapshot {
+    SourceNATRuleSnapshot {
+        name: "pool-a".into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["10.0.61.0/24".into()],
+        destination_addresses: vec!["8.8.8.8/32".into()],
+        match_destination_ports: vec![crate::NatPortRangeWire {
+            low: 8443,
+            high: 8443,
+        }],
+        pool_name: "pool-a".into(),
+        pool_addresses: vec!["172.16.80.100/32".into()],
+        port_low: 20000,
+        port_high: 20999,
+        ..Default::default()
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceNatUpdate11600 {
+    Removed,
+    Unchanged,
+    StaticReplacement,
+}
+
+/// Advance packet metadata and the descriptor driver's snapshot validation
+/// together. The stock helper pins validation at 7/9 and would make an 8/9
+/// commit look fresh to the NAT revalidation stamp.
+fn txn_run_descriptor_at_generation_11600(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    frame: &[u8],
+    tcp_flags: u8,
+    config_generation: u64,
+    fib_generation: u32,
+) -> DebugPollCounters {
+    let validation = crate::afxdp::types::ValidationState {
+        snapshot_installed: true,
+        config_generation,
+        fib_generation,
+    };
+    let mut meta = txn_meta_v4(
+        LAN_IFINDEX as u32,
+        tcp_flags,
+        frame.len() as u16,
+    );
+    meta.config_generation = config_generation;
+    meta.fib_generation = fib_generation;
+    let (_batch, dbg) = txn_run_descriptor_with_validation(
+        binding,
+        sessions,
+        forwarding,
+        &txn_ha_state(),
+        frame,
+        meta,
+        validation,
+    );
+    dbg
+}
+
+fn drive_removed_source_nat_rule_11600(
+    update: SourceNatUpdate11600,
+) -> (SessionTable, DebugPollCounters, SessionKey, SessionKey, NatDecision) {
+    let mut admitted_snapshot = nat_snapshot();
+    admitted_snapshot.generation = 7;
+    admitted_snapshot.fib_generation = 9;
+    admitted_snapshot.source_nat_rules = vec![source_nat_rule_11600()];
+    let remote = Ipv4Addr::new(8, 8, 8, 8);
+    let external_remote = Ipv4Addr::new(198, 51, 100, 200);
+    admitted_snapshot.destination_nat_rules =
+        vec![crate::DestinationNATRuleSnapshot {
+            name: "dnat-before-snat-11600".into(),
+            from_zone: "lan".into(),
+            destination_address: external_remote.to_string(),
+            destination_port: DPORT,
+            protocol: "tcp".into(),
+            pool_address: remote.to_string(),
+            pool_port: 8443,
+            ..Default::default()
+        }];
+    let admitted_forwarding = build_forwarding_state(&admitted_snapshot);
+    let mut sessions = SessionTable::new();
+    let mut admission_binding = binding_for_9604(LAN_IFINDEX, "reth1.0");
+    let syn = build_txn_tcp_syn_frame_v4(
+        SRC,
+        external_remote,
+        SPORT,
+        DPORT,
+        TCP_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let syn_meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_SYN, syn.len() as u16);
+    let (_batch, admitted_dbg) = txn_run_descriptor_checked(
+        &mut admission_binding,
+        &mut sessions,
+        &admitted_forwarding,
+        &txn_ha_state(),
+        &syn,
+        syn_meta,
+        true,
+    );
+    assert_eq!(
+        admitted_dbg.tx, 1,
+        "the real source-NAT miss path must admit the established-flow fixture"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "the source-NAT admission must install its forward/reverse pair"
+    );
+
+    let mut forward_key = None;
+    let mut reverse_key = None;
+    let mut stored_nat = None;
+    sessions.iter_with_origin(|key, decision, metadata, _origin| {
+        if metadata.is_reverse {
+            reverse_key = Some(key.clone());
+        } else {
+            forward_key = Some(key.clone());
+            stored_nat = Some(decision.nat);
+        }
+    });
+    let forward_key = forward_key.expect("the admitted flow has a forward entry");
+    let reverse_key = reverse_key.expect("the admitted flow has a reverse entry");
+    let stored_nat = stored_nat.expect("the forward entry carries its source translation");
+    assert!(
+        stored_nat.rewrite_src.is_some() && stored_nat.rewrite_src_port.is_some(),
+        "fixture must install a pool-mode SNAT translation before testing its staleness"
+    );
+    assert_eq!(
+        stored_nat.rewrite_dst,
+        Some(IpAddr::V4(remote)),
+        "SNAT validation fixture must first DNAT to the destination-address match"
+    );
+    assert_eq!(
+        stored_nat.rewrite_dst_port,
+        Some(8443),
+        "SNAT validation fixture must first DNAT to the destination-port match"
+    );
+
+    let mut updated_snapshot = admitted_snapshot;
+    updated_snapshot.generation = 8;
+    match update {
+        SourceNatUpdate11600::Removed | SourceNatUpdate11600::StaticReplacement => {
+            updated_snapshot.source_nat_rules.clear();
+        }
+        SourceNatUpdate11600::Unchanged => {}
+    }
+    if update == SourceNatUpdate11600::StaticReplacement {
+        updated_snapshot.static_nat_rules = vec![StaticNATRuleSnapshot {
+            name: "same-translation-static-snat-11600".into(),
+            from_zone: "wan".into(),
+            external_ip: "172.16.80.100".into(),
+            internal_ip: SRC.to_string(),
+            // Source port SPORT is translated to the dynamic pool's first
+            // port (20000), making this a genuinely identical NAT decision.
+            match_destination_port: 20000,
+            mapped_port: SPORT,
+            ..Default::default()
+        }];
+    }
+    let updated_forwarding = build_forwarding_state(&updated_snapshot);
+    if update == SourceNatUpdate11600::StaticReplacement {
+        let scope = crate::afxdp::forwarding::nat_scope_ctx_for_flow(
+            &updated_forwarding,
+            LAN_IFINDEX,
+            0,
+            None,
+            WAN_IFINDEX,
+            forward_key.routing_domain,
+        );
+        let (replacement_nat, _) = updated_forwarding
+            .static_nat
+            .match_snat_with_counter_scoped(
+                IpAddr::V4(SRC),
+                SPORT,
+                Some(IpAddr::V4(remote)),
+                "wan",
+                scope.egress_ifname,
+                scope.egress_routing_instance,
+            )
+            .expect("replacement static rule matches the old flow");
+        assert_eq!(replacement_nat.rewrite_src, stored_nat.rewrite_src);
+        assert_eq!(
+            replacement_nat.rewrite_src_port,
+            stored_nat.rewrite_src_port
+        );
+    }
+    sessions.set_policy_revalidation_phase(8, false);
+    sessions.mark_policy_revalidated(
+        &forward_key,
+        crate::session::PolicyRevalidationKind::LiveEgress,
+    );
+    let mut binding = binding_for_9604(LAN_IFINDEX, "reth1.0");
+    let frame = build_txn_tcp_syn_frame_v4(
+        SRC,
+        external_remote,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let dbg = txn_run_descriptor_at_generation_11600(
+        &mut binding,
+        &mut sessions,
+        &updated_forwarding,
+        &frame,
+        TCP_ACK,
+        updated_snapshot.generation,
+        updated_snapshot.fib_generation,
+    );
+    assert_eq!(
+        dbg.session_hit, 1,
+        "the post-commit packet must exercise the established-session path"
+    );
+    (sessions, dbg, forward_key, reverse_key, stored_nat)
+}
+
+#[test]
+fn removed_snat_rule_revokes_stale_translation_but_keeps_unchanged_rule_11600() {
+    let (removed, _, key, reverse_key, _) =
+        drive_removed_source_nat_rule_11600(SourceNatUpdate11600::Removed);
+    assert_eq!(
+        session_count(&removed),
+        0,
+        "removed SNAT rule A must not keep translating its established session"
+    );
+    assert!(
+        removed.entry_with_origin(&key).is_none(),
+        "the stale-A forward session entry must be removed"
+    );
+    assert!(
+        removed.entry_with_origin(&reverse_key).is_none(),
+        "the stale-A reverse companion must be removed"
+    );
+
+    let (unchanged, _, unchanged_key, unchanged_reverse_key, original_nat) =
+        drive_removed_source_nat_rule_11600(SourceNatUpdate11600::Unchanged);
+    assert_eq!(
+        session_count(&unchanged),
+        2,
+        "the unchanged SNAT rule must preserve the established pair"
+    );
+    let (decision, _, _) = unchanged
+        .entry_with_origin(&unchanged_key)
+        .expect("unchanged rule keeps the established forward entry");
+    assert_eq!(
+        decision.nat, original_nat,
+        "the unchanged-rule hit retains the exact established translation"
+    );
+    assert!(
+        unchanged
+            .entry_with_origin(&unchanged_reverse_key)
+            .is_some(),
+        "the unchanged-rule hit keeps the reverse companion"
+    );
+}
+#[test]
+fn dynamic_snat_to_static_same_translation_revokes_old_session_11600() {
+    let (replaced, _, key, reverse_key, _) =
+        drive_removed_source_nat_rule_11600(SourceNatUpdate11600::StaticReplacement);
+    assert_eq!(
+        session_count(&replaced),
+        0,
+        "new static SNAT must not authorize an old dynamic pool translation, even for the same tuple"
+    );
+    assert!(replaced.entry_with_origin(&key).is_none());
+    assert!(replaced.entry_with_origin(&reverse_key).is_none());
+}
+
+fn drive_static_snat_session_11600() -> (SessionTable, SessionKey, SessionKey, NatDecision) {
+    let mut admitted_snapshot = nat_snapshot();
+    admitted_snapshot.generation = 7;
+    admitted_snapshot.fib_generation = 9;
+    admitted_snapshot.source_nat_rules.clear();
+    admitted_snapshot.static_nat_rules = vec![StaticNATRuleSnapshot {
+        name: "static-snat-11600".into(),
+        from_zone: "wan".into(),
+        external_ip: "203.0.113.10".into(),
+        internal_ip: SRC.to_string(),
+        ..Default::default()
+    }];
+    let admitted_forwarding = build_forwarding_state(&admitted_snapshot);
+    let mut sessions = SessionTable::new();
+    let mut admission_binding = binding_for_9604(LAN_IFINDEX, "reth1.0");
+    let remote = Ipv4Addr::new(8, 8, 8, 8);
+    let syn = build_txn_tcp_syn_frame_v4(
+        SRC,
+        remote,
+        SPORT,
+        DPORT,
+        TCP_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let syn_meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_SYN, syn.len() as u16);
+    let (_batch, admitted_dbg) = txn_run_descriptor_checked(
+        &mut admission_binding,
+        &mut sessions,
+        &admitted_forwarding,
+        &txn_ha_state(),
+        &syn,
+        syn_meta,
+        true,
+    );
+    assert_eq!(admitted_dbg.tx, 1, "static SNAT must admit the control flow");
+    assert_eq!(session_count(&sessions), 2, "static SNAT installs its pair");
+
+    let mut forward_key = None;
+    let mut reverse_key = None;
+    let mut static_nat = None;
+    sessions.iter_with_origin(|key, decision, metadata, _origin| {
+        if metadata.is_reverse {
+            reverse_key = Some(key.clone());
+        } else {
+            forward_key = Some(key.clone());
+            static_nat = Some(decision.nat);
+        }
+    });
+    let forward_key = forward_key.expect("static flow has a forward entry");
+    let reverse_key = reverse_key.expect("static flow has a reverse entry");
+    let static_nat = static_nat.expect("static flow stores its translation");
+    assert_eq!(static_nat.rewrite_src, Some("203.0.113.10".parse().unwrap()));
+
+    let mut updated_snapshot = admitted_snapshot;
+    updated_snapshot.generation = 8;
+    let updated_forwarding = build_forwarding_state(&updated_snapshot);
+    sessions.set_policy_revalidation_phase(8, false);
+    sessions.mark_policy_revalidated(
+        &forward_key,
+        crate::session::PolicyRevalidationKind::LiveEgress,
+    );
+    let mut binding = binding_for_9604(LAN_IFINDEX, "reth1.0");
+    let ack = build_txn_tcp_syn_frame_v4(
+        SRC,
+        remote,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let dbg = txn_run_descriptor_at_generation_11600(
+        &mut binding,
+        &mut sessions,
+        &updated_forwarding,
+        &ack,
+        TCP_ACK,
+        updated_snapshot.generation,
+        updated_snapshot.fib_generation,
+    );
+    assert_eq!(dbg.session_hit, 1, "static control uses the established hit path");
+    (sessions, forward_key, reverse_key, static_nat)
+}
+
+#[test]
+fn static_snat_remains_valid_without_a_dynamic_snat_rule_11600() {
+    let (sessions, forward_key, reverse_key, static_nat) = drive_static_snat_session_11600();
+    assert_eq!(
+        session_count(&sessions),
+        2,
+        "the static-NAT control must not be mistaken for removed dynamic SNAT"
+    );
+    let (decision, _, _) = sessions
+        .entry_with_origin(&forward_key)
+        .expect("unchanged static translation keeps the forward entry");
+    assert_eq!(decision.nat, static_nat, "static translation stays unchanged");
+    assert!(
+        sessions.entry_with_origin(&reverse_key).is_some(),
+        "static session keeps its reverse companion"
+    );
+}
+
+#[test]
+fn interface_snat_revalidates_fib_generation_egress_address_change_11600() {
+    let mut admitted_snapshot = nat_snapshot();
+    admitted_snapshot.generation = 7;
+    admitted_snapshot.fib_generation = 9;
+    let admitted_forwarding = build_forwarding_state(&admitted_snapshot);
+    let mut sessions = SessionTable::new();
+    let mut admission_binding = binding_for_9604(LAN_IFINDEX, "reth1.0");
+    let remote = Ipv4Addr::new(8, 8, 8, 8);
+    let syn = build_txn_tcp_syn_frame_v4(
+        SRC,
+        remote,
+        SPORT,
+        DPORT,
+        TCP_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let syn_meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_SYN, syn.len() as u16);
+    let (_batch, admitted_dbg) = txn_run_descriptor_checked(
+        &mut admission_binding,
+        &mut sessions,
+        &admitted_forwarding,
+        &txn_ha_state(),
+        &syn,
+        syn_meta,
+        true,
+    );
+    assert_eq!(admitted_dbg.tx, 1, "interface SNAT admits the baseline flow");
+    let mut forward_key = None;
+    let mut original_nat = None;
+    sessions.iter_with_origin(|key, decision, metadata, _origin| {
+        if !metadata.is_reverse {
+            forward_key = Some(key.clone());
+            original_nat = Some(decision.nat);
+        }
+    });
+    let forward_key = forward_key.expect("interface-SNAT forward session is installed");
+    let original_nat = original_nat.expect("interface-SNAT decision is stored");
+    assert_eq!(original_nat.rewrite_src, Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))));
+
+    let mut updated_snapshot = admitted_snapshot;
+    updated_snapshot.fib_generation = 10;
+    let wan = updated_snapshot
+        .interfaces
+        .iter_mut()
+        .find(|interface| interface.ifindex == WAN_IFINDEX)
+        .expect("WAN interface fixture exists");
+    wan.addresses
+        .iter_mut()
+        .find(|address| address.family == "inet")
+        .expect("WAN IPv4 address fixture exists")
+        .address = "172.16.80.9/24".into();
+    let updated_forwarding = build_forwarding_state(&updated_snapshot);
+    sessions.set_policy_revalidation_phase(7, false);
+    sessions.mark_policy_revalidated(
+        &forward_key,
+        crate::session::PolicyRevalidationKind::LiveEgress,
+    );
+    let mut binding = binding_for_9604(LAN_IFINDEX, "reth1.0");
+    let ack = build_txn_tcp_syn_frame_v4(
+        SRC,
+        remote,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let dbg = txn_run_descriptor_at_generation_11600(
+        &mut binding,
+        &mut sessions,
+        &updated_forwarding,
+        &ack,
+        TCP_ACK,
+        updated_snapshot.generation,
+        updated_snapshot.fib_generation,
+    );
+    assert_eq!(
+        dbg.session_hit, 1,
+        "FIB-only commit packet must reach the established-session path"
+    );
+    assert_eq!(
+        session_count(&sessions),
+        0,
+        "a FIB-only egress-address change must revalidate and revoke old interface SNAT"
     );
 }

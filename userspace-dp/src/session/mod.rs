@@ -734,6 +734,19 @@ pub(crate) enum PolicyRevalidationTarget {
     /// path, or a reused slab slot. Nothing to stamp, nothing to tear down.
     NoLocalEntry,
 }
+
+/// #11600: source-NAT validity is separate from zone-policy freshness. A
+/// successful probe is cached for the config/FIB pair; stale entries carry
+/// their canonical key plus the NAT origin recorded on this node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SourceNatRevalidationTarget {
+    Fresh,
+    Stale {
+        key: SessionKey,
+        static_nat: Option<bool>,
+    },
+    NoLocalEntry,
+}
 /// #10507: receiver-local provenance for the zone-policy stamp.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PolicyRevalidationKind {
@@ -789,6 +802,20 @@ struct SessionEntry {
     /// Node-local stamp: the session resolution is reusable only within this
     /// config/FIB generation pair.
     forwarding_generation: ForwardingGenerationStamp,
+    /// #11600: config/FIB generation pair under which the stored source
+    /// translation was checked. A full pair, not just the config generation:
+    /// an interface-mode translation is bound to its egress primary address
+    /// and a FIB-only commit can move the egress, so a config-only stamp
+    /// would keep a translation the new egress no longer permits. `None`
+    /// means peer-originated or otherwise unvalidated state.
+    source_nat_revalidated: Option<ForwardingGenerationStamp>,
+    /// #11600: which NAT branch minted the stored source translation —
+    /// `Some(true)` static, `Some(false)` dynamic (pool/interface). The wire
+    /// NAT decision does not carry this provenance; `None` means it is
+    /// unavailable and source-NAT revalidation fails closed for translated
+    /// sessions rather than allowing a new static rule to launder an old
+    /// dynamic mapping with an identical tuple.
+    source_nat_static: Option<bool>,
     /// Generation paired with `metadata.policy_id`. Admission stamps it, and
     /// commit-time policy rebind advances it with the numeric ID; unrelated
     /// forwarding revalidation never changes this association.
@@ -2273,6 +2300,29 @@ impl SessionTable {
         }
     }
 
+    /// #11600: independently gate the stored source translation by the
+    /// current config/FIB pair. The common fresh answer avoids a tuple clone
+    /// on hits; route-only changes can also change interface-mode SNAT.
+    pub(crate) fn source_nat_revalidation_target(
+        &self,
+        key: &SessionKey,
+    ) -> SourceNatRevalidationTarget {
+        let Some(record) = self.revalidation_record(key) else {
+            return SourceNatRevalidationTarget::NoLocalEntry;
+        };
+        if self.forwarding_revalidation_gen.valid
+            && record.entry.source_nat_revalidated
+                == Some(self.forwarding_revalidation_gen)
+        {
+            SourceNatRevalidationTarget::Fresh
+        } else {
+            SourceNatRevalidationTarget::Stale {
+                key: record.key.clone(),
+                static_nat: record.entry.source_nat_static,
+            }
+        }
+    }
+
     /// #10507: the receiver-local provenance paired with the zone policy
     /// stamp. The hit-row fast path answers freshness+authority through
     /// [`SessionTable::policy_revalidation_gate`] (one probe on the hit key);
@@ -2326,6 +2376,25 @@ impl SessionTable {
             record.entry.policy_revalidated_gen = live_gen;
             record.entry.policy_scheduler_expired = self.policy_scheduler_expired;
             record.entry.policy_revalidation_kind = kind;
+        }
+    }
+
+    /// #11600: persist a successful source-NAT predicate check and its
+    /// provenance. Takes the canonical key so aliases and reverse hits stamp
+    /// the judged forward row.
+    pub(crate) fn mark_source_nat_revalidated(
+        &mut self,
+        key: &SessionKey,
+        static_nat: Option<bool>,
+    ) {
+        let generation = self.forwarding_revalidation_gen;
+        if let Some(handle) = self.key_to_handle.get(key).copied()
+            && let Some(record) = self.entries.get_mut(handle as usize)
+            && record.key == *key
+        {
+            record.entry.source_nat_revalidated =
+                generation.valid.then_some(generation);
+            record.entry.source_nat_static = static_nat;
         }
     }
 
@@ -3271,6 +3340,8 @@ impl SessionTable {
                 .get_mut(handle as usize)
                 .expect("handle validated above");
             record.entry.decision = decision;
+            record.entry.source_nat_revalidated = None;
+            record.entry.source_nat_static = None;
             record.entry.forwarding_generation = self.forwarding_revalidation_gen;
             record.entry.metadata = metadata.clone();
             record.entry.origin = origin;
@@ -3683,6 +3754,8 @@ impl SessionTable {
                 .get_mut(handle as usize)
                 .expect("handle validated above");
             record.entry.decision = decision;
+            record.entry.source_nat_revalidated = None;
+            record.entry.source_nat_static = None;
             record.entry.metadata = metadata;
             // #10507 A2 (Main-approved deviation, Option A — see A1): Fresh-only.
             // Stale retains its Recorded fence; Fresh resets to force cold.
