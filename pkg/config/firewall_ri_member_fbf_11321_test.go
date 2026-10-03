@@ -29,10 +29,10 @@ func memberFBFTree11321(t *testing.T, family, ownerType string) *ConfigTree {
 }
 
 // #11321: a VRF member's kernel lookup is intercepted by the earlier l3mdev
-// lookup / pref-2000 miss terminator before the FBF band, whereas the Rust
-// session-miss helper still honors the explicit PBR override. Strict commit
-// must gate the divergent shape; tolerant load must keep booting and surface a
-// warning. Both address families are covered.
+// lookup / pref-2000 miss terminator before the FBF band, while the Rust
+// session-miss helper honors explicit PBR. Strict commit rejects this divergent
+// shape; tolerant load must keep booting but suppress the FBF override on both
+// planes and surface the degradation. Both address families are covered.
 func TestFBFOnRoutingInstanceMemberIsGatedAtCommit11321(t *testing.T) {
 	for _, family := range []string{"inet", "inet6"} {
 		t.Run(family, func(t *testing.T) {
@@ -56,8 +56,8 @@ func TestFBFOnRoutingInstanceMemberWarnsOnTolerantLoad11321(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tolerant load must keep the prior config bootable: %v", err)
 	}
-	if got := cfg.Firewall.FiltersInet["member-fbf"].Terms[0].RoutingInstance; got != "steer-ri" {
-		t.Fatalf("tolerant load stripped the legacy FBF action: got %q, want steer-ri", got)
+	if got := cfg.Firewall.FiltersInet["member-fbf"].Terms[0]; got.RoutingInstance != "" || got.Action != "accept" {
+		t.Fatalf("tolerant load must retain the matched term but remove its FBF override as a terminal accept: got routing-instance %q action %q", got.RoutingInstance, got.Action)
 	}
 	found := false
 	for _, warning := range cfg.Warnings {

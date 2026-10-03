@@ -1161,9 +1161,10 @@ func (p *pbrManager) clear() error {
 // The returned error is non-nil when the build is DEGRADED: a term carries an
 // ip-rule-unrepresentable predicate (per the matrix above), a later steer may
 // overlap a preceding terminating term (#11325), an attachment is unresolvable
-// or on loopback with routing-instance terms (#9810 LEAD-O4), or the expansion
-// exceeds maxPBRSteeringRules. The successfully-built rules are still returned so the
-// caller can install them and surface the degradation.
+// or on loopback with routing-instance terms (#9810 LEAD-O4), a VRF-member FBF
+// override is preempted by l3mdev and its miss terminator (#11589), or the
+// expansion exceeds maxPBRSteeringRules. Successfully-built rules are still
+// returned so the caller can install them and surface the degradation.
 func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 	if cfg == nil {
 		return nil, nil
@@ -1174,6 +1175,25 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 	tableIDs := make(map[string]int)
 	for _, inst := range cfg.RoutingInstances {
 		tableIDs[inst.Name] = inst.TableID
+	}
+	// VRF-member ingress is consumed by l3mdev before the PBR band. Map the
+	// shared member-device resolver's Linux names so the defensive builder also
+	// refuses a preempted steer if called with an unsanitized config.
+	memberDeviceOwners := make(map[string]string)
+	tunnelNames := cfg.TunnelNameMap()
+	for _, inst := range cfg.RoutingInstances {
+		if inst == nil || inst.Name == "" || inst.InstanceType == "forwarding" ||
+			config.IsReservedRoutingInstanceName(inst.Name) {
+			continue
+		}
+		for _, member := range config.RoutingInstanceMemberDeviceKeysForInstance(cfg, tunnelNames, inst) {
+			if member.LinuxName == "" {
+				continue
+			}
+			if _, exists := memberDeviceOwners[member.LinuxName]; !exists {
+				memberDeviceOwners[member.LinuxName] = inst.Name
+			}
+		}
 	}
 
 	inetAttached, inet6Attached := collectAttachedInputFilters(cfg)
@@ -1232,6 +1252,21 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 						"hijack); steering for this attachment is dropped (fail-safe "+
 						"under-steer)",
 					att.Filter, att.Iif))
+				continue
+			}
+			if owner, isVRFMember := memberDeviceOwners[att.Iif]; isVRFMember &&
+				filterHasRoutingInstanceTerm(filter) {
+				for _, term := range filter.Terms {
+					if term == nil || term.RoutingInstance == "" {
+						continue
+					}
+					errs = append(errs, fmt.Errorf(
+						"PBR filter %s term %s: `then routing-instance %s` on VRF-member "+
+							"ingress %q (member of %q) is preempted by l3mdev pref 1000 "+
+							"and the VRF miss terminator pref 2000 before the PBR band; "+
+							"steering is dropped (fail-safe native-table fallback, #11589)",
+						att.Filter, term.Name, term.RoutingInstance, att.Iif, owner))
+				}
 				continue
 			}
 			// Budget the remaining lookup/terminator pairs so a term whose

@@ -22,9 +22,12 @@ import (
 // with no faithful kernel-band realization.
 //
 // This gate is strict at commit / commit-check to prevent a newly-authored
-// divergent configuration. Its tolerant-load arm warns instead, preserving
-// the #1960 no-brick contract for previously committed configs. The warning
-// names the family, filter, term, attachment unit, and owning member instance.
+// divergent configuration. Tolerant load / peer-sync preserves #1960 boot
+// safety by warning and removing the member FBF override from the compiled
+// filter; when the FBF action was the term's only terminal action, accept is
+// retained so the matching packet still terminates in its native VRF.
+// Diagnostics name the family, filter, term, attachment unit, and owning
+// member instance.
 //
 // Scope notes:
 //   - Only non-forwarding, non-reserved instances bind a VRF: forwarding has no
@@ -48,9 +51,24 @@ func validateMemberFBFKernelBandStrict(cfg *Config) error {
 // resolver used by VRF binding and dataplane membership, including bare-member
 // fan-out and logical/Linux aliases.
 func memberFBFKernelBandWarnings11321(cfg *Config) []string {
+	return memberFBFKernelBandDiagnostics11321(cfg, false)
+}
+
+// suppressMemberFBFKernelBand11321 removes the unreachable FBF override from
+// each affected compiled filter term and returns the corresponding diagnostics.
+// Clearing only RoutingInstance leaves the authored match and any explicit
+// terminal action intact. A routing-instance action by itself is terminal in
+// the helper, so preserve that disposition as accept when there is no authored
+// action or explicit next-term.
+func suppressMemberFBFKernelBand11321(cfg *Config) []string {
+	return memberFBFKernelBandDiagnostics11321(cfg, true)
+}
+
+func memberFBFKernelBandDiagnostics11321(cfg *Config, suppress bool) []string {
 	if cfg == nil {
 		return nil
 	}
+	var termsToSuppress []*FirewallFilterTerm
 	// Logical interface unit and kernel-device identity -> owning VRF-bound
 	// instance. Carry both views: the filter binding is logical, while the
 	// routing manager binds the resolved Linux device.
@@ -142,16 +160,28 @@ func memberFBFKernelBandWarnings11321(cfg *Config) []string {
 					if term == nil || term.RoutingInstance == "" {
 						continue
 					}
+					target := term.RoutingInstance
 					warnings = append(warnings, fmt.Sprintf(
 						"firewall family %s filter %q term %q `then routing-instance %s` "+
 							"is attached as input on routing-instance member interface %q "+
 							"(member of %q): the kernel l3mdev rule (pref 1000) and VRF miss "+
 							"terminator (pref 2000) precede the PBR band (%d-%d), so the "+
-							"kernel slow path never consults the member FBF rule while the "+
-							"userspace dataplane steers (#11321)",
-						h.family, h.filter, term.Name, term.RoutingInstance, unitRef, ownerRI,
+							"kernel slow path uses the native table while the userspace "+
+							"dataplane would steer to the FBF target (#11321)",
+						h.family, h.filter, term.Name, target, unitRef, ownerRI,
 						PBRRulePriorityBase, PBRRulePriorityBase+PBRRuleWindow-1))
+					if suppress {
+						termsToSuppress = append(termsToSuppress, term)
+					}
 				}
+			}
+		}
+	}
+	if suppress {
+		for _, term := range termsToSuppress {
+			term.RoutingInstance = ""
+			if term.Action == "" && !term.NextTerm {
+				term.Action = "accept"
 			}
 		}
 	}

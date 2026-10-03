@@ -224,19 +224,19 @@ func runUniformGatesFilter(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	}
 
 	// #11321: a kernel PBR rule for FBF attached to a non-forwarding
-	// routing-instance member is structurally unreachable. The kernel's l3mdev
-	// lookup at pref 1000 wins first, and its pref-2000 miss terminator ends a
-	// table miss before the 29000-29999 PBR band; Rust's ingress helper still
-	// honors the FBF override. Strict commit refuses the divergent configuration;
-	// tolerant load / peer-sync warns so a previously committed config still
-	// boots (#1960 no-brick).
-	if err := validateMemberFBFKernelBandStrict(cfg); err != nil {
-		if opts.lenientMemberFBFKernelBand {
+	// routing-instance member is structurally unreachable: the l3mdev lookup
+	// (pref 1000) and its miss terminator (pref 2000) precede the 29000-29999
+	// PBR band, while the Rust helper would honor the override. Strict commit
+	// rejects the divergence. Tolerant load / peer-sync keeps #1960 boot safety
+	// but removes the override from the compiled filter, so both planes use the
+	// native VRF table and the packet's firewall term remains terminal.
+	if opts.lenientMemberFBFKernelBand {
+		if warnings := suppressMemberFBFKernelBand11321(cfg); len(warnings) != 0 {
 			cfg.Warnings = append(cfg.Warnings,
-				fmt.Sprintf("FBF on routing-instance member interface (downgraded to warning on tolerant path): %v", err))
-		} else {
-			return err
+				fmt.Sprintf("FBF override on routing-instance member skipped on tolerant path (#11321): %s", warnings[0]))
 		}
+	} else if err := validateMemberFBFKernelBandStrict(cfg); err != nil {
+		return err
 	}
 
 	// #4375 (avo-review-007 H3) firewall-filter conflicting-terminal-actions gate.
