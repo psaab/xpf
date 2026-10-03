@@ -239,6 +239,58 @@ func TestHashAPIAuthSecretsKeepsDeniedShortLegacyVerifierStable10825(t *testing.
 	}
 }
 
+func TestHashAPIAuthSecretsReportsDeniedLeafPaths11820(t *testing.T) {
+	tree := parseAPIAuthSecretsTree10825(t,
+		"set system services web-management api-auth user admin password tiny-basic",
+		"set system services web-management api-auth api-key tiny-key-a",
+		"set system services web-management api-auth api-key tiny-key-b",
+		"set system services web-management api-auth key automation secret named-tiny",
+		"set system services web-management api-auth user healthy password correct-horse-battery",
+		"set groups g-auth system services web-management api-auth user group-user password group-tiny",
+	)
+
+	changed, paths, err := HashAPIAuthSecretsWithInvalidPaths(tree)
+	if err != nil || !changed {
+		t.Fatalf("HashAPIAuthSecretsWithInvalidPaths = (%v, %v, %v), want changes without error", changed, paths, err)
+	}
+	wantPaths := []string{
+		`system services web-management api-auth user "admin" password`,
+		"system services web-management api-auth api-key",
+		`system services web-management api-auth key "automation" secret`,
+		`groups "g-auth" system services web-management api-auth user "group-user" password`,
+	}
+	if len(paths) != len(wantPaths) {
+		t.Fatalf("denied credential paths = %v, want one entry per distinct leaf %v", paths, wantPaths)
+	}
+	for _, want := range wantPaths {
+		found := false
+		for _, path := range paths {
+			if path == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("denied credential paths %v do not contain %q", paths, want)
+		}
+	}
+	for _, secret := range []string{"tiny-basic", "tiny-key-a", "tiny-key-b", "named-tiny", "group-tiny"} {
+		for _, path := range paths {
+			if strings.Contains(path, secret) {
+				t.Errorf("credential path %q contains secret value %q", path, secret)
+			}
+		}
+	}
+	if strings.Contains(strings.Join(paths, "\n"), "$xpf-invalid$") {
+		t.Fatalf("denied credential paths contain a verifier marker: %v", paths)
+	}
+
+	changed, paths, err = HashAPIAuthSecretsWithInvalidPaths(tree)
+	if err != nil || changed || len(paths) != 0 {
+		t.Fatalf("rehashing stored verifiers = (%v, %v, %v), want no change and no paths", changed, paths, err)
+	}
+}
+
 func TestHashAPIAuthSecretsDoesNotLaunderTaggedVerifier10825(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
