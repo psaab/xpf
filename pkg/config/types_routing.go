@@ -608,8 +608,8 @@ type BGPNeighbor struct {
 	DefaultOriginate     bool     // advertise default route to this neighbor
 	AllowASIn            int      // allow own AS in path N times (0 = disabled)
 	RemovePrivateAS      bool     // strip private AS numbers from updates
-	PrefixLimitInet      int      // max IPv4 prefixes (0 = unlimited)
-	PrefixLimitInet6     int      // max IPv6 prefixes (0 = unlimited)
+	PrefixLimitInet      int      // max IPv4 prefixes (1..4294967295; 0 = unlimited only when unset)
+	PrefixLimitInet6     int      // max IPv6 prefixes (1..4294967295; 0 = unlimited only when unset)
 }
 
 // TunnelConfig defines a GRE, IPIP, or other tunnel interface.

@@ -548,7 +548,7 @@ func parseNextTableInstance(table string) string {
 	return table
 }
 
-func compileRoutingInstances(node *Node, cfg *Config) error {
+func compileRoutingInstances(node *Node, cfg *Config, opts compileOpts) error {
 	// Assign each routing-instance a STABLE kernel routing table id derived from
 	// its NAME (#3855), never a positional counter. Positional assignment
 	// (100, 101, … by config order) renumbered every survivor after a deleted
@@ -673,7 +673,7 @@ func compileRoutingInstances(node *Node, cfg *Config) error {
 				}
 			case "protocols":
 				var proto ProtocolsConfig
-				if err := compileProtocols(prop, &proto); err != nil {
+				if err := compileProtocols(prop, &proto, opts, &cfg.Warnings); err != nil {
 					return fmt.Errorf("instance %s protocols: %w", instanceName, err)
 				}
 				ri.OSPF = proto.OSPF

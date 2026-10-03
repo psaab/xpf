@@ -457,14 +457,14 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 				"inet": {desc: "IPv4", children: map[string]*schemaNode{
 					"unicast": {desc: "Unicast", children: map[string]*schemaNode{
 						"prefix-limit": {desc: "Prefix limit", children: map[string]*schemaNode{
-							"maximum": {desc: "Maximum prefixes", args: 1, placeholder: "<count>", children: nil},
+							"maximum": {desc: "Maximum prefixes", args: 1, valueType: ValueInteger, valueDesc: "BGP prefix limit (1..4294967295)", valueExamples: []string{"1000"}, validator: ValidateInteger(1, maxWireU32), placeholder: "<count>", children: nil},
 						}},
 					}},
 				}},
 				"inet6": {desc: "IPv6", children: map[string]*schemaNode{
 					"unicast": {desc: "Unicast", children: map[string]*schemaNode{
 						"prefix-limit": {desc: "Prefix limit", children: map[string]*schemaNode{
-							"maximum": {desc: "Maximum prefixes", args: 1, placeholder: "<count>", children: nil},
+							"maximum": {desc: "Maximum prefixes", args: 1, valueType: ValueInteger, valueDesc: "BGP prefix limit (1..4294967295)", valueExamples: []string{"1000"}, validator: ValidateInteger(1, maxWireU32), placeholder: "<count>", children: nil},
 						}},
 					}},
 				}},
@@ -492,14 +492,14 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 					"inet": {desc: "IPv4", children: map[string]*schemaNode{
 						"unicast": {desc: "Unicast", children: map[string]*schemaNode{
 							"prefix-limit": {desc: "Prefix limit", children: map[string]*schemaNode{
-								"maximum": {desc: "Maximum prefixes", args: 1, placeholder: "<count>", children: nil},
+								"maximum": {desc: "Maximum prefixes", args: 1, valueType: ValueInteger, valueDesc: "BGP prefix limit (1..4294967295)", valueExamples: []string{"1000"}, validator: ValidateInteger(1, maxWireU32), placeholder: "<count>", children: nil},
 							}},
 						}},
 					}},
 					"inet6": {desc: "IPv6", children: map[string]*schemaNode{
 						"unicast": {desc: "Unicast", children: map[string]*schemaNode{
 							"prefix-limit": {desc: "Prefix limit", children: map[string]*schemaNode{
-								"maximum": {desc: "Maximum prefixes", args: 1, placeholder: "<count>", children: nil},
+								"maximum": {desc: "Maximum prefixes", args: 1, valueType: ValueInteger, valueDesc: "BGP prefix limit (1..4294967295)", valueExamples: []string{"1000"}, validator: ValidateInteger(1, maxWireU32), placeholder: "<count>", children: nil},
 							}},
 						}},
 					}},

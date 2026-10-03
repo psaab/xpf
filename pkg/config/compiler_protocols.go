@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-func compileProtocols(node *Node, proto *ProtocolsConfig) error {
+func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warnings *[]string) error {
 	raNode := node.FindChild("router-advertisement")
 	if raNode != nil {
 		if err := compileRouterAdvertisement(raNode, proto); err != nil {
@@ -505,20 +505,32 @@ func compileProtocols(node *Node, proto *ProtocolsConfig) error {
 							switch child.Keys[1] {
 							case "inet":
 								familyInet = true
-								groupPrefixLimitInet = parsePrefixLimit(child)
+								if err := applyPrefixLimit11793(child, &groupPrefixLimitInet, true,
+									fmt.Sprintf("BGP group %q family inet", groupInst.name), opts, warnings); err != nil {
+									return err
+								}
 							case "inet6":
 								familyInet6 = true
-								groupPrefixLimitInet6 = parsePrefixLimit(child)
+								if err := applyPrefixLimit11793(child, &groupPrefixLimitInet6, true,
+									fmt.Sprintf("BGP group %q family inet6", groupInst.name), opts, warnings); err != nil {
+									return err
+								}
 							}
 						} else {
 							for _, fc := range child.Children {
 								switch fc.Name() {
 								case "inet":
 									familyInet = true
-									groupPrefixLimitInet = parsePrefixLimit(fc)
+									if err := applyPrefixLimit11793(fc, &groupPrefixLimitInet, true,
+										fmt.Sprintf("BGP group %q family inet", groupInst.name), opts, warnings); err != nil {
+										return err
+									}
 								case "inet6":
 									familyInet6 = true
-									groupPrefixLimitInet6 = parsePrefixLimit(fc)
+									if err := applyPrefixLimit11793(fc, &groupPrefixLimitInet6, true,
+										fmt.Sprintf("BGP group %q family inet6", groupInst.name), opts, warnings); err != nil {
+										return err
+									}
 								}
 							}
 						}
@@ -636,7 +648,9 @@ func compileProtocols(node *Node, proto *ProtocolsConfig) error {
 							// node -- see compiler_bgp_neighbor_merge_9192.go.
 							neighborOwnExport := ownExport9192[neighbor]
 							neighborOwnImport := ownImport9192[neighbor]
-							applyBGPNeighborProps9192(neighbor, child, &neighborOwnExport, &neighborOwnImport)
+							if err := applyBGPNeighborProps9192(neighbor, child, &neighborOwnExport, &neighborOwnImport, opts, warnings); err != nil {
+								return fmt.Errorf("BGP group %q neighbor %q: %w", groupInst.name, nAddr, err)
+							}
 							ownExport9192[neighbor] = neighborOwnExport
 							ownImport9192[neighbor] = neighborOwnImport
 						}
@@ -1216,32 +1230,6 @@ func parseASNumber(v string) (uint32, bool) {
 		return 0, false
 	}
 	return uint32(n), true
-}
-
-// nodeVal returns the value for a property node, handling both AST shapes.
-// Hierarchical: Keys: ["prop", "value"] → returns "value"
-// Flat set:     Keys: ["prop"], Children: [Node{Keys:["value"]}] → returns "value"
-// parsePrefixLimit extracts the maximum prefix count from a family inet/inet6 node.
-// Walks: inet -> unicast -> prefix-limit -> maximum -> value
-func parsePrefixLimit(famNode *Node) int {
-	unicast := famNode.FindChild("unicast")
-	if unicast == nil {
-		return 0
-	}
-	pl := unicast.FindChild("prefix-limit")
-	if pl == nil {
-		return 0
-	}
-	mx := pl.FindChild("maximum")
-	if mx == nil {
-		return 0
-	}
-	if v := nodeVal(mx); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return 0
 }
 
 // parseExportExtensions extracts export-extension values from an ipv4-template or

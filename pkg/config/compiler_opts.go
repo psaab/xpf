@@ -835,6 +835,10 @@ type compileOpts struct {
 	// metric to a warning on tolerant load / peer-sync; the FRR renderer
 	// independently omits out-of-domain values.
 	lenientISISMetric11823 bool
+	// lenientBGPPrefixLimit11793 downgrades malformed BGP maximum-prefix values
+	// to warnings on tolerant loads. Neighbor overrides with an invalid value
+	// leave the inherited group maximum intact.
+	lenientBGPPrefixLimit11793 bool
 	// lenientRouteFilterMatchTypes (#2525) downgrades the route-filter
 	// match-type gate (validateRouteFilterMatchTypesStrict) from a hard
 	// compile error to a cfg.Warnings entry. The strict commit / commit-check
@@ -3135,6 +3139,7 @@ func lenientCompileOpts() compileOpts {
 		lenientFRRAuthValues:                   true,
 		lenientOSPFMD5KeyID11794:               true,
 		lenientISISMetric11823:                 true,
+		lenientBGPPrefixLimit11793:             true,
 		lenientRouteFilterMatchTypes:           true,
 		lenientApplicationSpecs:                true,
 		lenientApplicationNameCollisions:       true,
