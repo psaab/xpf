@@ -940,7 +940,10 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			if iface.Passive {
 				b.WriteString(" isis passive\n")
 			}
-			if iface.Metric > 0 {
+			if iface.Metric < 0 || iface.Metric > config.MaxISISMetric {
+				slog.Warn("frr: omitting invalid IS-IS interface metric (#11823)",
+					"interface", sanitizeFRRValue(iface.Name), "metric", iface.Metric)
+			} else if iface.Metric > 0 {
 				fmt.Fprintf(&b, " isis metric %d\n", iface.Metric)
 			}
 			if iface.AuthKey != "" {

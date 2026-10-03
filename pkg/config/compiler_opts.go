@@ -831,6 +831,10 @@ type compileOpts struct {
 	// from a strict commit error to a warning on tolerant load / peer-sync.
 	// The FRR render belt independently omits the invalid authentication lines.
 	lenientOSPFMD5KeyID11794 bool
+	// lenientISISMetric11823 downgrades an invalid compiled IS-IS interface
+	// metric to a warning on tolerant load / peer-sync; the FRR renderer
+	// independently omits out-of-domain values.
+	lenientISISMetric11823 bool
 	// lenientRouteFilterMatchTypes (#2525) downgrades the route-filter
 	// match-type gate (validateRouteFilterMatchTypesStrict) from a hard
 	// compile error to a cfg.Warnings entry. The strict commit / commit-check
@@ -3124,6 +3128,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRoutingExportRef:                true,
 		lenientFRRAuthValues:                   true,
 		lenientOSPFMD5KeyID11794:               true,
+		lenientISISMetric11823:                 true,
 		lenientRouteFilterMatchTypes:           true,
 		lenientApplicationSpecs:                true,
 		lenientApplicationNameCollisions:       true,

@@ -430,6 +430,11 @@ type RIPConfig struct {
 	AuthType     string   // "md5" or "simple"
 }
 
+// MaxISISMetric is the FRR wide-style IS-IS interface metric ceiling. FRR
+// defaults to wide metric-style; the narrower style's alternate ceiling is
+// not configured by xpf.
+const MaxISISMetric = (1 << 24) - 1
+
 // ISISConfig holds IS-IS routing configuration.
 type ISISConfig struct {
 	NET             string // ISO NET address (e.g. "49.0001.0100.0000.0001.00")
@@ -447,7 +452,7 @@ type ISISInterface struct {
 	Name          string
 	Level         string // override per-interface
 	Passive       bool
-	Metric        int    // 0 = default
+	Metric        int    // 0 = default; negative marks a malformed parsed value
 	AuthKey       Secret // per-interface authentication key; redacted on marshal (#2053)
 	AuthType      string // "md5" or "simple"
 	BFD           bool   // enable BFD on this interface
