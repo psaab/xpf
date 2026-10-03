@@ -134,6 +134,16 @@ func (d *Daemon) onDHCPAddressChange() {
 	}
 }
 
+// onDHCPUnchangedLease is the #11497 escape hatch for a content-identical
+// T1/T2 renewal. Healthy renewals stay silent; while a double nft failure is
+// owed, the lease commit re-drives the active config without waiting for the
+// next 30s retry tick.
+func (d *Daemon) onDHCPUnchangedLease() {
+	if d.hostInboundGapOwed() {
+		d.applyActiveConfig()
+	}
+}
+
 // reapplyIPsecForLeaseChange re-renders + reloads swanctl when a DHCP
 // lease change may have moved the kernel address an IPsec gateway is
 // dynamically bound to (#2884). It is called from onDHCPAddressChange's

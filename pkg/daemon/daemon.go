@@ -1522,6 +1522,10 @@ type Daemon struct {
 	svcReloadDebt serviceReloadDebt
 	// routingDebt is the #9693 routing reconcile debt (routing_reconcile_debt_9693.go).
 	routingDebt routingReconcileDebt
+	// #11497: a day-2 real+gap nft failure leaves the newcomer without a
+	// protecting table. A scoped retry owner re-drives the active config until
+	// the real host-inbound install converges.
+	hostInboundGapDebt hostInboundGapDebt
 	// #9811: the caller-less auto-rollback apply's retry owner. Zero value
 	// owes nothing.
 	configDebt configApplyDebt

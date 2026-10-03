@@ -227,6 +227,8 @@ func (d *Daemon) applyConfigUnderSem(cfg *config.Config) {
 		slog.Warn("apply config failed", "err", err)
 		return
 	}
+	// A complete successful background apply converges any prior retry debt.
+	d.noteHostInboundGapApplyResult(nil)
 	// #4957: the active config completed a full apply through the boot /
 	// background (DHCP callback, feed, config-poll, in-process CLI commit,
 	// rollback) path. Stamp it applied so a peer config-sync of the same text
@@ -362,6 +364,14 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	if cfg == nil {
 		return nil
 	}
+	// Successful full applies discharge scoped gap debt even when the active
+	// config no longer renders a host-inbound table to install (for example,
+	// a config change removed the last enforcing scope).
+	defer func() {
+		if retErr == nil {
+			d.noteHostInboundGapApplyResult(nil)
+		}
+	}()
 
 	// #5281 defense-in-depth: refuse to reconcile once a factory reset has
 	// entered the terminal reset generation. The commit / sync / rollback entry

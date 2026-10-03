@@ -260,6 +260,56 @@ func TestCommitLeaseUnchangedRenewalNoCallback(t *testing.T) {
 	}
 }
 
+// TestUnchangedRenewalInvokesOnlyTheDebtRetryHook11497 preserves the #1777
+// quiet-renewal contract while proving the #11497 exception: a daemon with
+// pending host-inbound convergence debt can opt in to one callback for an
+// otherwise-content-identical T1/T2 renewal.
+func TestUnchangedRenewalInvokesOnlyTheDebtRetryHook11497(t *testing.T) {
+	m := NewManagerForTesting(nil)
+	var retries int
+	m.SetUnchangedLeaseCallback(func() { retries++ })
+	key := clientKey{iface: "ge-0-0-3", family: AFInet}
+	prev := v4Lease("10.0.0.5/24")
+	if err := m.commitLease(key, prev, nil, nil, nil, false); err != nil {
+		t.Fatalf("initial commitLease: %v", err)
+	}
+	disarmRecompile(m)
+
+	renewed := v4Lease("10.0.0.5/24", func(l *Lease) {
+		l.Obtained = prev.Obtained.Add(30 * time.Minute)
+	})
+	if err := m.commitLease(key, renewed, prev, nil, nil, false); err != nil {
+		t.Fatalf("unchanged renewal commitLease: %v", err)
+	}
+	if retries != 1 {
+		t.Fatalf("debt retry hook calls = %d, want 1 for the unchanged renewal", retries)
+	}
+	if recompileArmed(m) {
+		t.Fatal("unchanged renewal must not arm the ordinary content-change recompile")
+	}
+
+	changed := v4Lease("10.0.0.5/24", func(l *Lease) {
+		l.DNS = []netip.Addr{netip.MustParseAddr("10.0.0.54")}
+	})
+	if err := m.commitLease(key, changed, renewed, nil, nil, false); err != nil {
+		t.Fatalf("changed renewal commitLease: %v", err)
+	}
+	if retries != 1 {
+		t.Fatalf("debt retry hook calls = %d after changed renewal, want unchanged at 1", retries)
+	}
+	if !recompileArmed(m) {
+		t.Fatal("changed lease content must retain the ordinary recompile path")
+	}
+	disarmRecompile(m)
+	m.commitRouterAdvertisementState(key, changed, changed)
+	if retries != 1 {
+		t.Fatalf("RA-only state update invoked the DHCP unchanged-renewal hook; calls=%d", retries)
+	}
+	if recompileArmed(m) {
+		t.Fatal("unchanged RA-only state update must not arm a DHCP recompile")
+	}
+}
+
 // TestCommitLeaseChangedContentFiresCallback: renewals that move the
 // address or change DNS must fire the callback so the daemon's
 // recompile picks up the new state.

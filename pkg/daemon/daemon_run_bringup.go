@@ -161,6 +161,7 @@ func (d *Daemon) initManagers(failClosed bool) error {
 			return fmt.Errorf("create DHCP manager: %w", err)
 		}
 		d.dhcp = dm
+		dm.SetUnchangedLeaseCallback(d.onDHCPUnchangedLease)
 	}
 
 	// Resolver injection MUST precede Start(): the run-loop goroutine

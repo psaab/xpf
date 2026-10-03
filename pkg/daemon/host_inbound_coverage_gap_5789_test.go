@@ -107,9 +107,9 @@ func TestHostInboundCoverageGapFencesNewAddressAfterFailedRerender_5789(t *testi
 // cell pins the failure half: when that recompile's real transaction FAILS
 // (injected), the SAME apply must install the additive gap DROP for the
 // VRF lease with no new event — the window stays bounded by the apply
-// instead of stretching to the next trigger. The double failure (gap also
-// fails) is the explicitly-unbounded residual documented at the
-// gap-failure join in daemon_nft.go (no wall-clock retry owner).
+// instead of stretching to the next trigger. The distinct double-failure
+// case (gap install also fails) is now retried by the scoped #11497 owner;
+// see TestDoubleNftFailAutoConverges11497.
 func TestVRFLeaseWindowBoundedByGapAfterFailedRerender10751(t *testing.T) {
 	orig := nftInstaller
 	t.Cleanup(func() { nftInstaller = orig })
@@ -221,6 +221,10 @@ func TestVRFLeaseWindowBoundedByGapAfterFailedRerender10751(t *testing.T) {
 	if _, ok := d.hostInboundCoveredAddrs[hostInboundDropAddrKey('6', "2001:db8:9::9")]; ok {
 		t.Error("covered set must NOT include the gap-only VRF lease (retained real table does not cover it)")
 	}
+	if owed, failures, _ := d.HostInboundGapDebt(); owed || failures != 0 {
+		t.Fatalf("single real-install failure with a successful gap fence must not owe the double-failure retry (owed=%v failures=%d)", owed, failures)
+	}
+
 }
 
 // TestHostInboundProgramOnlyThenAddressGapFence_5789 is issue path 2: a successful

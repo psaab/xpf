@@ -756,6 +756,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		defer wg.Done()
 		d.configApplyReassertLoop(ctx)
 	}()
+	// #11497: bounded retry owner for a double host-inbound real+gap nft
+	// failure. The loop is idle except for one debt check per 30s interval
+	// and is joined with the daemon lifetime on shutdown.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		d.hostInboundGapReassertLoop(ctx)
+	}()
 
 	// #1387 inc-2: start the always-on DHCP dynamic-DNS reconcile loop. It
 	// is constructed UNCONDITIONALLY (idle when disabled) so an
