@@ -41,6 +41,27 @@ func (s *SessionSync) SetConnectedForTesting(connected bool) {
 	s.stats.Connected.Store(connected)
 }
 
+// SetPeerReceiveAgeForTesting injects the last inbound sync receive age
+// without a wire round trip. It lets daemon hook tests exercise the real
+// receive-recency predicate at controlled ages (#11682).
+func (s *SessionSync) SetPeerReceiveAgeForTesting(age time.Duration, received bool) {
+	if !received {
+		s.lastPeerRxMono.Store(0)
+		return
+	}
+	s.lastPeerRxMono.Store(MonotonicNanos() - int64(age))
+}
+
+// PeerNeverSeenSyncFreshForTesting evaluates the currently installed
+// never-seen sync-proof hook, if any. The production callback contract is a
+// fast lock-free read and does not re-enter Manager.
+func (m *Manager) PeerNeverSeenSyncFreshForTesting() bool {
+	m.mu.RLock()
+	fn := m.peerNeverSeenSyncFreshFn
+	m.mu.RUnlock()
+	return fn != nil && fn()
+}
+
 // SetPeerSnapshotProtocolVersionForTesting injects the peer's advertised
 // config-snapshot version without a capability-frame exchange.
 func (s *SessionSync) SetPeerSnapshotProtocolVersionForTesting(v uint16) {
