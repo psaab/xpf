@@ -70,6 +70,13 @@ package make that class of divergence unrepresentable rather than
 something a mirrored test table has to catch. Per-frontend tests then
 assert only that each surface routes through these functions.
 
+For the CoS filter pair, `name` and `type` are keywords only in key
+positions. The next token is always the value, even when it literally equals
+`name` or `type`; thus `name type` selects an object named `type`. To combine
+such a name with another filter, put that filter first (for example,
+`type dscp name type`). A filter keyword is dangling only when it is the final
+token.
+
 `showtext_topic.go` is the second instance (#8058), and it is here for the
 same reason at a larger scale. The ShowText topic for a command existed
 twice on opposite sides of a trust boundary: the remote `cli` binary
