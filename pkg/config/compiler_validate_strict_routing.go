@@ -1060,6 +1060,37 @@ func validateGlobalInterfaceRoutesRibGroupStrict(cfg *Config) error {
 		strings.Join(selectors, ", "))
 }
 
+// validatePerInstanceInterfaceRoutesRibGroupStrict rejects a selector whose
+// rib-group name has no definition in routing-options. A dangling selector
+// never enters the route-leak applier, so accepting it silently discards the
+// operator's requested interface-route leak.
+func validatePerInstanceInterfaceRoutesRibGroupStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	ribGroups := cfg.RoutingOptions.RibGroups
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.Name == "" {
+			continue
+		}
+		for _, selector := range []struct{ family, name string }{
+			{"inet", ri.InterfaceRoutesRibGroup},
+			{"inet6", ri.InterfaceRoutesRibGroupV6},
+		} {
+			if selector.name == "" {
+				continue
+			}
+			if group, ok := ribGroups[selector.name]; ok && group != nil {
+				continue
+			}
+			return fmt.Errorf(
+				"routing-instance %q: interface-routes rib-group %s %q references undefined rib-group",
+				ri.Name, selector.family, selector.name)
+		}
+	}
+	return nil
+}
+
 // ribInstanceFromName extracts the routing-instance prefix from a non-default
 // rib name of the EXACT form "<instance>.inet.0" or "<instance>.inet6.0",
 // returning ok=false for any other shape. The instance prefix must be

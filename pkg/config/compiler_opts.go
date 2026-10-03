@@ -1406,6 +1406,10 @@ type compileOpts struct {
 	// global main-to-instance connected-route import gate to a warning on
 	// tolerant loads, so a previously persisted config remains bootable.
 	lenientGlobalInterfaceRoutesRibGroup bool
+	// lenientInstanceRibGroupRefs keeps a dangling per-instance selector
+	// bootable on tolerant loads; ValidateConfig emits the named warning in
+	// the tail phase.
+	lenientInstanceRibGroupRefs bool
 	// lenientNextTableRefs (#5693) downgrades the next-table target
 	// definedness gate (validateNextTableTargetReferencesStrict) from a hard
 	// compile error to a cfg.Warnings entry. A static route whose
@@ -3160,6 +3164,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRibGroupRefs:                    true,
 		lenientRibGroupImportPolicy:            true,
 		lenientGlobalInterfaceRoutesRibGroup:   true,
+		lenientInstanceRibGroupRefs:            true,
 		lenientNextTableRefs:                   true,
 		lenientForwardingInstanceProtocols:     true,
 		lenientForwardingInstanceMembers:       true,

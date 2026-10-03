@@ -225,6 +225,7 @@ func TestClosingTheInstanceDoesNotCloseWhatItContains9323(t *testing.T) {
 		{"rib-static-route", []string{
 			"set routing-instances VRF-A routing-options rib VRF-A.inet.0 static route 10.0.0.0/8 next-hop 10.0.0.1"}},
 		{"interface-routes-ribgroup", []string{
+			"set routing-options rib-groups rg1 import-rib inet.0",
 			"set routing-instances VRF-A routing-options interface-routes rib-group inet rg1"}},
 		{"static-qualified-next-hop", []string{
 			"set routing-instances VRF-A routing-options static route 0.0.0.0/0 qualified-next-hop 10.0.0.1 preference 5"}},
