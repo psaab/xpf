@@ -24,14 +24,23 @@ func TestGenerateRoutePolicyRejectedAndWarned11456(t *testing.T) {
 		cfg.RoutingOptions.GenerateRoutes[0].Policy != "contributors" {
 		t.Fatalf("tolerant compile did not preserve generate route: %+v", cfg.RoutingOptions.GenerateRoutes)
 	}
-	for _, warning := range cfg.Warnings {
-		if strings.Contains(warning, "generate route") &&
-			strings.Contains(warning, "contributors") &&
-			strings.Contains(warning, "NOT INSTALLED") {
-			return
+	warningCount := func(warnings []string) int {
+		count := 0
+		for _, warning := range warnings {
+			if strings.Contains(warning, "generate route") &&
+				strings.Contains(warning, "contributors") &&
+				strings.Contains(warning, "NOT INSTALLED") {
+				count++
+			}
 		}
+		return count
 	}
-	t.Fatalf("tolerant compile did not warn that the policy-bearing route is not installed: %v", cfg.Warnings)
+	if count := warningCount(cfg.Warnings); count != 1 {
+		t.Fatalf("tolerant compile warning count = %d, want one NOT INSTALLED warning: %v", count, cfg.Warnings)
+	}
+	if count := warningCount(ValidateConfig(cfg)); count != 1 {
+		t.Fatalf("ValidateConfig warning count = %d, want one NOT INSTALLED alarm: %v", count, ValidateConfig(cfg))
+	}
 }
 
 func TestGenerateRoutePolicyAddRemove11456(t *testing.T) {
