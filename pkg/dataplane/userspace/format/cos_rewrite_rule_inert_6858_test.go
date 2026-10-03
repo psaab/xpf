@@ -451,3 +451,26 @@ func TestFormatCoSRewriteRulesDanglingInterfaceBindingIsNotEnforced6858(t *testi
 			"as enforced:\n%s", line)
 	}
 }
+func TestFormatCoSRewriteRulesZoneAuthoredBindOnlyTunnelIsEnforced11788(t *testing.T) {
+	const rule = "rw-dscp"
+	cfg := compileCoSRewriteSet6858(t,
+		"set class-of-service forwarding-classes queue 0 best-effort",
+		"set class-of-service rewrite-rules dscp "+rule+
+			" forwarding-class best-effort loss-priority low code-point be",
+		"set class-of-service interfaces st0 unit 1 rewrite-rules dscp "+rule,
+		"set security ipsec vpn vpn1 bind-interface st0.1",
+		"set security zones security-zone vpn interfaces st0.1",
+		"set system dataplane-type userspace",
+	)
+	if cfg.Interfaces.Interfaces["st0"] != nil {
+		t.Fatal("premise broken: st0 unexpectedly has an [interfaces] stanza")
+	}
+	if _, ok := cfg.SecureTunnelNetdevForRef("st0.1"); !ok {
+		t.Fatal("premise broken: st0.1 is not a bound secure-tunnel unit")
+	}
+	line := ruleHeaderLine(t, FormatCoSRewriteRules(cfg, rule, "dscp"), rule)
+	if !strings.Contains(line, "Enforced: yes") {
+		t.Errorf("a zone-authored bind-only secure-tunnel unit carrying the rewrite rule "+
+			"must report enforced:\n%s", line)
+	}
+}

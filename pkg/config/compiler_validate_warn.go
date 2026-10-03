@@ -103,6 +103,77 @@ func ToleratedTypedLeafWarnings(cfg *Config) []string {
 	return warnings
 }
 
+// ZoneAuthoredBoundSecureTunnelUnitRefs returns non-quarantined zone unit
+// refs that resolve to a secure-tunnel binding. The warning pass calls it only
+// for a CoS interface with no [interfaces] stanza, so matching refs are
+// candidates for bind-only row synthesis.
+func ZoneAuthoredBoundSecureTunnelUnitRefs(cfg *Config) map[string]struct{} {
+	if cfg == nil || len(cfg.Security.Zones) == 0 {
+		return nil
+	}
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	sort.Strings(zoneNames)
+	excludedZones := ZoneQuarantineExclusions(zoneNames)
+	quarantinedRefs := QuarantinedZoneInterfaceKeys(cfg)
+	refs := make(map[string]struct{})
+	for _, zoneName := range zoneNames {
+		if _, excluded := excludedZones[zoneName]; excluded {
+			continue
+		}
+		zone := cfg.Security.Zones[zoneName]
+		if zone == nil {
+			continue
+		}
+		for _, rawRef := range zone.Interfaces {
+			for _, ref := range zoneIfaceLogicalKeys(cfg, rawRef) {
+				split := cfg.SplitInterfaceUnitRef(ref)
+				if !split.HasUnit || split.UnitTok == "" {
+					continue
+				}
+				if _, quarantined := quarantinedRefs[split.Literal]; quarantined {
+					continue
+				}
+				if _, bound := cfg.SecureTunnelNetdevForRef(split.Literal); !bound {
+					continue
+				}
+				refs[split.Literal] = struct{}{}
+			}
+		}
+	}
+	return refs
+}
+
+// coSInterfaceCoveredByZoneSecureTunnelUnits reports whether a stanza-less
+// CoS interface consists only of non-nil unit bindings backed by matching
+// zone-authored secure-tunnel unit refs. Interface-level bindings are
+// excluded: that compiler fold requires an [interfaces] stanza and is not
+// represented by the synthesized unit row.
+func coSInterfaceCoveredByZoneSecureTunnelUnits(
+	cfg *Config,
+	iface *CoSInterface,
+	zoneTunnelRefs map[string]struct{},
+) bool {
+	if cfg == nil || iface == nil || iface.Level != nil || len(iface.Units) == 0 {
+		return false
+	}
+	for unitNum, unit := range iface.Units {
+		if unit == nil {
+			return false
+		}
+		ref := cfg.SplitInterfaceUnitRef(fmt.Sprintf("%s.%d", iface.Name, unitNum))
+		if !ref.HasUnit || ref.UnitTok == "" {
+			return false
+		}
+		if _, ok := zoneTunnelRefs[ref.Literal]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // ValidateConfig performs non-fatal validation on a compiled config.
 // Returns warnings for unresolved references and operator-visible
 // compatibility/deprecation conditions.
@@ -1522,22 +1593,27 @@ func ValidateConfig(cfg *Config) []string {
 				warnedPriorityLowMinShare = true
 			}
 		}
+		var zoneTunnelRefs map[string]struct{}
+		zoneTunnelRefsChecked := false
 		for _, iface := range cos.Interfaces {
 			if iface == nil {
 				continue
 			}
-			// #hb166 G-6: a class-of-service binding whose interface (or
-			// logical unit) is not configured under [interfaces] commits
-			// cleanly but shapes nothing — the dataplane applier only
-			// visits CoS bindings inside the cfg.Interfaces iteration, so
-			// a typo'd interface name or an unconfigured unit is a silent
-			// no-op. Warn (not reject: the interface could be added
-			// later) so the operator knows the binding is currently inert.
+			// #hb166 G-6: a CoS binding with no [interfaces] stanza is usually
+			// inert. A zone-authored, bound secure-tunnel unit is the exception:
+			// its synthesized snapshot row now carries unit CoS (#11788). Keep
+			// the warning for every other missing interface or unit binding.
 			ifCfg := cfg.Interfaces.Interfaces[iface.Name]
 			if ifCfg == nil {
-				warnings = append(warnings, fmt.Sprintf(
-					"class-of-service interface %s is bound but not configured under [interfaces]; its shaping/classifiers are inert until the interface is configured",
-					iface.Name))
+				if !zoneTunnelRefsChecked {
+					zoneTunnelRefs = ZoneAuthoredBoundSecureTunnelUnitRefs(cfg)
+					zoneTunnelRefsChecked = true
+				}
+				if !coSInterfaceCoveredByZoneSecureTunnelUnits(cfg, iface, zoneTunnelRefs) {
+					warnings = append(warnings, fmt.Sprintf(
+						"class-of-service interface %s is bound but not configured under [interfaces]; its shaping/classifiers are inert until the interface is configured",
+						iface.Name))
+				}
 			}
 			if iface.Level != nil {
 				warnPriorityLowMinShareInert(iface.Level.PriorityLowMinShareBytes)

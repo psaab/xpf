@@ -2112,6 +2112,64 @@ func TestCompileClassOfServiceBindingConfiguredInterfaceNoWarnHB166G6(t *testing
 	}
 }
 
+func TestCompileClassOfServiceBindOnlyTunnelWarningIsNarrow11788(t *testing.T) {
+	tests := []struct {
+		name                        string
+		zoneAuthoredTunnelUnit      bool
+		wantMissingInterfaceWarning bool
+	}{
+		{
+			name:                        "zone-authored bound tunnel unit",
+			zoneAuthoredTunnelUnit:      true,
+			wantMissingInterfaceWarning: false,
+		},
+		{
+			name:                        "bound tunnel unit without zone reference",
+			zoneAuthoredTunnelUnit:      false,
+			wantMissingInterfaceWarning: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := []string{
+				"set security ipsec vpn vpn1 bind-interface st0.1",
+				"set class-of-service interfaces st0 unit 1 shaping-rate 3g",
+				"set system dataplane-type userspace",
+			}
+			if tc.zoneAuthoredTunnelUnit {
+				lines = append(lines,
+					"set security zones security-zone vpn interfaces st0.1",
+					"set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24",
+					"set security zones security-zone trust interfaces ge-0/0/0.0")
+			}
+			cfg, err := CompileConfig(buildCoSTree4021(t, lines))
+			if err != nil {
+				t.Fatalf("compile error: %v", err)
+			}
+			if cfg.Interfaces.Interfaces["st0"] != nil {
+				t.Fatal("premise broken: st0 unexpectedly has an [interfaces] stanza")
+			}
+			if _, ok := cfg.SecureTunnelNetdevForRef("st0.1"); !ok {
+				t.Fatal("premise broken: st0.1 is not a bound secure-tunnel unit")
+			}
+			unit := cfg.ClassOfService.Interfaces["st0"].Units[1]
+			if unit == nil {
+				t.Fatal("premise broken: CoS unit st0.1 was not compiled")
+			}
+			var found bool
+			for _, warning := range cosWarnings(cfg) {
+				if strings.Contains(warning, "class-of-service interface st0 is bound but not configured under [interfaces]") {
+					found = true
+				}
+			}
+			if found != tc.wantMissingInterfaceWarning {
+				t.Fatalf("missing-interface warning found = %t, want %t; warnings: %v",
+					found, tc.wantMissingInterfaceWarning, cosWarnings(cfg))
+			}
+		})
+	}
+}
+
 // #hb166 G-10: a unit that overrides shaping-rate but sets no burst-size
 // must NOT inherit the interface-level burst-size (a shaper is a coupled
 // (rate, burst) pair). RED on revert: mergeCoSInterfaceLevelInto inherits

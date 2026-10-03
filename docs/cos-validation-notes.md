@@ -159,40 +159,50 @@ one test, in `pkg/config`, and the formatter stayed green.
 `Enforced:` has THREE states, not two. For a `dscp` rule the answer also
 depends on whether anything **the dataplane will read** binds it:
 
-- **`yes`** — some CONFIGURED logical interface unit references the rule.
+- **`yes`** — a logical-unit snapshot row references the rule. That can be a
+  configured interface unit or a zone-authored bind-only secure-tunnel unit
+  synthesized from `bind-interface` (#11788).
 - **`no (not bound — no interface unit references this rule)`** — the rule
-  is configured and nothing binds it. An unbound rule rewrites nothing:
-  the runtime table is populated only for the rule an interface
-  references (`tables.dscp_rewrite_rules.get(&iface.
+  is configured and nothing the snapshot builder emits binds it. An unbound
+  rule rewrites nothing: the runtime table is populated only for the rule an
+  interface references (`tables.dscp_rewrite_rules.get(&iface.
   cos_dscp_rewrite_rule)`, `forwarding_build/cos.rs`).
 - **`no (not bound — class-of-service interfaces <if> unit <n> is not a
   configured logical interface unit)`** — the operator DID write a
-  binding, but against an interface or unit that has no `interfaces`
-  stanza (#6858 round 3).
+  binding, but against an interface/unit that produces no snapshot row (#6858
+  round 3).
 
 That third state is not hypothetical. `set class-of-service interfaces
 ge-9-9-9 unit 0 rewrite-rules dscp rw` COMMITS with no `interfaces
 ge-9-9-9` anywhere — one typo in an interface name, or a unit number that
-does not match the logical unit, is enough. The commit does warn
-(`compiler_validate_warn.go:1586` / `:1599`, "class-of-service interface
-%s is bound but not configured under [interfaces]"), and that advisory is
-precisely the "scrolls past once" signal this whole command exists to
-replace with a standing operational view. A warning at commit time is not
-a licence for the show command to answer the question wrongly six months
-later.
+does not match a logical unit, is enough. `ValidateConfig` still warns about
+that inert binding, and the advisory remains the "scrolls past once" signal
+this command replaces with a standing operational view.
 
-**The predicate must mirror `buildInterfaceSnapshots`**
+Issue #11788 is the narrow exception: a unit CoS binding can be live without
+an `[interfaces]` stanza when its exact logical-unit ref is zone-authored and
+resolves to a secure-tunnel `bind-interface`. The userspace builder synthesizes
+that row and publishes the same CoS unit fields as the normal interface path.
+`ValidateConfig` suppresses the missing-interface warning only when every
+unit binding on that CoS interface has such a secure-tunnel zone ref; ordinary
+missing names, unrelated units, and interface-level bindings still warn.
+
+**The predicate must mirror the complete `buildInterfaceSnapshots` path**
 (`pkg/dataplane/userspace/interfaces.go`). That builder walks
-`cfg.Interfaces.Interfaces` and, for each REAL logical unit, reads
+`cfg.Interfaces.Interfaces` for configured units and also synthesizes
+zone-authored bind-only secure-tunnel unit rows. Both paths read
 `cfg.ClassOfService.Interfaces[name].Units[unitNum]` to stamp
-`CoSDSCPRewriteRule` onto the snapshot — so `cosBoundDSCPRewriteRules`
-walks from the same side. Walking `cos.Interfaces` instead (the shape it
-had before round 3) reported `Enforced: yes` for a binding the helper can
-never see, which is the dangerous direction: it converts an unanswered
-question into a confidently wrong "DSCP remarking is happening". The
-reason names the dead reference, because an operator who did write the
-binding reads a bare "not bound" as "you forgot to bind it" and looks in
-the wrong place. `TestFormatCoSRewriteRulesDanglingInterfaceBindingIsNotEnforced6858` pins both dangling shapes plus the bound positive control.
+`CoSDSCPRewriteRule`, so `cosBoundDSCPRewriteRules` includes both row shapes.
+Walking `cos.Interfaces` alone (the shape it had before round 3) reported
+`Enforced: yes` for a binding the snapshot could never see. That is still the
+dangerous direction for an ordinary typo or unconfigured unit: it converts an
+unanswered question into a confidently wrong "DSCP remarking is happening".
+The missing reference is named because an operator who did write the binding
+reads a bare "not bound" as "you forgot to bind it" and looks in the wrong
+place. `TestFormatCoSRewriteRulesDanglingInterfaceBindingIsNotEnforced6858`
+pins the dangling shapes plus the bound positive control, and
+`TestFormatCoSRewriteRulesZoneAuthoredBindOnlyTunnelIsEnforced11788` pins the
+secure-tunnel exception.
 
 The command still answers from CONFIG, not from the live snapshot, so
 `yes` means "the dataplane is given this rule for this unit", not "this
