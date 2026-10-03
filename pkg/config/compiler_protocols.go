@@ -526,7 +526,10 @@ func compileProtocols(node *Node, proto *ProtocolsConfig) error {
 						groupDefaultOriginate = true
 					case "loops":
 						if v := nodeVal(child); v != "" {
-							if n, err := strconv.Atoi(v); err == nil {
+							n, err := strconv.Atoi(v)
+							if err != nil || n == 0 {
+								groupAllowASIn = -1
+							} else {
 								groupAllowASIn = n
 							}
 						}

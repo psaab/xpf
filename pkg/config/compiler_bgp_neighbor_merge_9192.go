@@ -144,7 +144,10 @@ func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ow
 			}
 		case "loops":
 			if v := nodeVal(prop); v != "" {
-				if n, err := strconv.Atoi(v); err == nil {
+				n, err := strconv.Atoi(v)
+				if err != nil || n == 0 {
+					neighbor.AllowASIn = -1
+				} else {
 					neighbor.AllowASIn = n
 				}
 			}

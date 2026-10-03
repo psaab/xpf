@@ -8,6 +8,9 @@ xpf (0.0.0) unstable; urgency=medium
     out-of-range values instead of silently dropping the configured cost
     (#11823).
 
+  * Bound BGP `loops` to FRR's supported AS-path loop range (1..10); invalid
+    values are rejected at commit and omitted on tolerant-load rendering
+    (#11795).
 
   * Bound CoDel target milliseconds to the largest value that converts safely
     to nanoseconds; reject unparseable values strictly and warn on tolerant

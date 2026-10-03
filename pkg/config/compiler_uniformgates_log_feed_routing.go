@@ -350,6 +350,17 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 			return err
 		}
 	}
+	// #11795: Junos `loops` maps to FRR `allowas-in`, which accepts counts
+	// 1..10. Keep direct compiler callers fail-closed too; schema validation
+	// handles every authored group and neighbor statement at commit time.
+	if err := validateBGPAllowASInStrict(cfg); err != nil {
+		if opts.lenientBGPAllowASIn11795 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("BGP loops (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 
 	// #9007 duplicate BGP neighbor across groups. One address renders once per
 	// group that names it, so FRR receives two divergent definitions -- two
