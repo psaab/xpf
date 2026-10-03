@@ -2,23 +2,20 @@ package config
 
 import (
 	"encoding/json"
-	"fmt"
 	"testing"
 )
 
-// #8807 / #8787: the twelve predicate-B keywords that were recorded as
+// #8807 / #8787 originally recorded twelve predicate-B keywords as
 // UNDECLARED and never measured for consequence.
 //
-// #8787 established existence -- "the compiler names it and the schema never
-// declares it" -- and stopped there. Existence is not a verdict: an undeclared
-// keyword may be read anyway, refused on purpose, or silently dropped, and only
-// the third is a defect. All 12 remaining rows are still undeclared today
-// (checked by walking the live schema), so the recorded fact holds; what
-// follows is what it COSTS.
+// #11780 declared routing-policy `next` in the schema and moved its
+// consequence coverage to compiler_routing_next_policy_11780_test.go. The
+// eleven remaining rows below are still undeclared today (checked by walking
+// the live schema); what follows is what they COST.
 //
 // Measured, every one of them:
 //
-//	READ                8  compiled result changes; the value reaches a field
+//	READ                7  compiled result changes; the value reaches a field
 //	STRICT-REJECT       0  refused on purpose, with a specific message
 //	ACCEPTED + ADVISORY 4  accepted, warned as unenforced, value not compiled
 //	SILENTLY DROPPED    0
@@ -72,7 +69,7 @@ func signature8807(t *testing.T, text string) (js string, warnings int, strictOK
 	return string(b), warnings, serr == nil
 }
 
-func TestTheTwelveUndeclaredKeywordsHaveNoSilentDrop8807(t *testing.T) {
+func TestRemainingUndeclaredKeywordsHaveNoSilentDrop8807(t *testing.T) {
 	for _, c := range undeclCases8807() {
 		c := c
 		t.Run(c.kw, func(t *testing.T) {
@@ -113,7 +110,7 @@ func TestTheTwelveUndeclaredKeywordsHaveNoSilentDrop8807(t *testing.T) {
 // undeclared. If one gains a schema declaration its consequence changes -- it
 // becomes completable, validated, and visible to the census machinery -- and the
 // row above stops describing it.
-func TestTheTwelveAreStillUndeclared8807(t *testing.T) {
+func TestRemainingUndeclaredKeywordsAreStillUndeclared8807(t *testing.T) {
 	declared := map[string]bool{}
 	seen := map[*schemaNode]bool{}
 	var walk func(n *schemaNode, d int)
@@ -139,7 +136,7 @@ func TestTheTwelveAreStillUndeclared8807(t *testing.T) {
 	for _, c := range undeclCases8807() {
 		if declared[c.kw] {
 			t.Errorf("#8807: %q is now DECLARED somewhere in the schema. That is progress, not a "+
-				"regression -- but its row in TestTheTwelveUndeclaredKeywordsHaveNoSilentDrop8807 "+
+				"regression -- but its row in TestRemainingUndeclaredKeywordsHaveNoSilentDrop8807 "+
 				"describes an undeclared keyword and no longer applies. Re-measure it and move it "+
 				"out of this list.", c.kw)
 		}
@@ -154,9 +151,6 @@ func undeclCases8807() []undeclCase8807 {
 		return "interfaces {\n interface-range r1 {\n  description d;\n" + b + "\n }\n}\n"
 	}
 	sn := func(b string) string { return "snmp {\n community public;\n" + b + "\n}\n" }
-	fw := func(then string) string {
-		return "firewall {\n family inet {\n  filter f1 {\n   term t1 {\n    from { protocol tcp; }\n" + then + "\n   }\n  }\n }\n}\n"
-	}
 	return []undeclCase8807{
 		// system services dhcp-local-server group <g> pool <p> — the pool
 		// container is itself undeclared, so these three sit under an
@@ -169,12 +163,6 @@ func undeclCases8807() []undeclCase8807 {
 		// "no members" advisory disappearing, not as a new field.
 		{"member", ir(""), ir("  member ge-0-0-1;"), kwRead},
 		{"member-range", ir(""), ir("  member-range ge-0-0-1 to ge-0-0-3;"), kwRead},
-		// then next — #8787 recorded this as "measured clean, both spellings
-		// leave Action empty". Action is the wrong field: `next term` sets
-		// NextTerm, and the compiled result does change. The base leg is
-		// `then { }` so the two differ ONLY by the keyword; comparing against
-		// `then { accept; }` confounds it with the removed action.
-		{"next", fw("    then { }"), fw("    then { next term; }"), kwRead},
 		// snmp knobs: accepted and warned as unenforced, by design. The
 		// compiler names each one precisely to emit that advisory.
 		{"view", sn(""), sn(" view v1 { oid .1.3.6.1; }"), kwAdvisory},
@@ -185,5 +173,3 @@ func undeclCases8807() []undeclCase8807 {
 			"system {\n dataplane-type userspace;\n dataplane { userspace { workers 4; } }\n}\n", kwRead},
 	}
 }
-
-var _ = fmt.Sprintf

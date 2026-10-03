@@ -329,6 +329,14 @@ func (m *Manager) renderQNHMetricPolicyMap11447(po *config.PolicyOptionsConfig, 
 	}
 	rules, next := renderQNHMetricTerms11447(scope, routeMap, 10)
 	body, seq := m.renderPolicyTermSequences(po, routeMap, routeMap, ps, next)
+	hasNextPolicy := policyHasNextPolicyTerm(ps)
+	if hasNextPolicy {
+		nextPolicySequence := seq
+		if ps.DefaultAction == "accept" || ps.DefaultAction == "reject" {
+			nextPolicySequence += 10
+		}
+		body = renderNextPolicyTarget(body, nextPolicySequence)
+	}
 	var b strings.Builder
 	b.WriteString(rules)
 	b.WriteString(body)
@@ -340,6 +348,9 @@ func (m *Manager) renderQNHMetricPolicyMap11447(po *config.PolicyOptionsConfig, 
 		trailingAction = "deny"
 	}
 	fmt.Fprintf(&b, "route-map %s %s %d\nexit\n", frrName(routeMap), trailingAction, seq)
+	if hasNextPolicy && (ps.DefaultAction == "accept" || ps.DefaultAction == "reject") {
+		fmt.Fprintf(&b, "route-map %s deny %d\nexit\n", frrName(routeMap), seq+10)
+	}
 	return b.String()
 }
 

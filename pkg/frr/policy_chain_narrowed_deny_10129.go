@@ -70,7 +70,8 @@ func narrowedSurvivorShape10129(kept []string, po *config.PolicyOptionsConfig) s
 		if ps == nil {
 			continue
 		}
-		if ps.DefaultAction == "accept" || ps.DefaultAction == "reject" {
+		if (ps.DefaultAction == "accept" || ps.DefaultAction == "reject") &&
+			!policyHasNextPolicyTerm(ps) {
 			return "terminating-default"
 		}
 		if len(ps.Terms) == 0 {
@@ -78,9 +79,27 @@ func narrowedSurvivorShape10129(kept []string, po *config.PolicyOptionsConfig) s
 			continue
 		}
 		for _, term := range ps.Terms {
+			if term == nil {
+				continue
+			}
+			// `next policy` transfers every matching route around this
+			// member's remaining terms and explicit default. Later
+			// unconditional actions therefore cannot prove that the
+			// survivor terminates before the next member / fallback.
+			if term.NextPolicy && term.Action == "" {
+				break
+			}
+			if term.NextPolicy && term.Action != "" {
+				// Contradictory actions render as deny: matching routes
+				// terminate while non-matching routes continue.
+				if !policyTermHasAuthoredMatch10129(term) {
+					return "match-all"
+				}
+				continue
+			}
 			// Any unconditional terminating term stops FRR/Junos
 			// evaluation, even when later terms are present.
-			if term != nil && !policyTermHasAuthoredMatch10129(term) &&
+			if !policyTermHasAuthoredMatch10129(term) &&
 				(term.Action == "accept" || term.Action == "reject") {
 				return "match-all"
 			}
@@ -104,9 +123,10 @@ func narrowedSurvivorShape10129(kept []string, po *config.PolicyOptionsConfig) s
 
 // narrowedAliasEligible10129 identifies the suffix-safe subset whose missing
 // authored members can be closed without changing the surviving chain
-// semantics. Terminating-default and match-all-final-term survivors remain on
-// the shared map because their explicit termination makes a trailing deny
-// unreachable. Fall-through and empty survivors receive a private deny alias.
+// semantics. Explicit defaults and match-all terms with no `next policy`
+// remain on the shared map because every route terminates before a fallback.
+// Fall-through and empty survivors receive a private deny alias; a next-policy
+// term also makes its private deny landing sequence reachable.
 func narrowedAliasEligible10129(site narrowedChainSite, po *config.PolicyOptionsConfig) bool {
 	if len(site.Kept) == 0 || !site.GhostsAreSuffix {
 		return false
@@ -167,8 +187,8 @@ func narrowedGhostsAfterTerminator10821(site narrowedChainSite, po *config.Polic
 
 // renderNarrowedChainAlias10129 renders a deny-terminated attached-map alias
 // without mutating the shared standalone or composed map. Explicit member
-// defaults remain authoritative; only a no-default fall-through reaches the
-// alias's explicit deny.
+// defaults still govern ordinary fall-through; `next policy` may bypass them
+// and reaches the alias's fail-closed landing sequence.
 func (m *Manager) renderNarrowedChainAlias10129(po *config.PolicyOptionsConfig, kept []string) (string, string) {
 	name := narrowedAliasName10129(kept)
 	if po == nil || po.PolicyStatements == nil {
@@ -181,7 +201,8 @@ func (m *Manager) renderNarrowedChainAlias10129(po *config.PolicyOptionsConfig, 
 		}
 		// Standalone aliases use the fail-closed non-BGP default for a
 		// no-default policy while preserving explicit accept/reject.
-		return name, m.renderRouteMapForPolicy(po, name, ps, policyTrailingAction(kept[0], ps, nil))
+		return name, m.renderRouteMapForPolicyWithFallback(
+			po, name, ps, policyTrailingAction(kept[0], ps, nil), "deny")
 	}
 	return name, m.renderComposedRouteMapWithDefault(po, name, kept, "deny")
 }

@@ -181,17 +181,16 @@ func redistAliasCollision(po *config.PolicyOptionsConfig, bgpAcceptDefault map[s
 	return nil
 }
 
-// policyNeedsRedistAlias reports whether policy-statement name renders a
-// BGP-default-accept trailing permit that must NOT be shared with an IGP
-// redistribute use of the same name (#4481). It is true only when the policy is
-// applied as a BGP route-map in/out (bgpAcceptDefault carries these names, per
-// collectBGPRouteMapPolicies) AND carries no explicit policy-level default
-// action — the exact case in which policyTrailingAction returns "permit" for a
-// route that matches no term. An explicit `then accept` / `then reject` renders
-// the same trailing action in every context, so no alias is needed.
+// policyNeedsRedistAlias reports whether policy-statement name's BGP-only
+// permit semantics must NOT be shared with an IGP redistribute use (#4481).
+// That divergence exists when the BGP attachment falls off a no-default policy,
+// or when a `next policy` term bypasses an explicit default. The latter needs a
+// context-specific landing sequence: BGP permits after the chain, while
+// redistribute remains fail-closed.
 func policyNeedsRedistAlias(name string, ps *config.PolicyStatement, bgpAcceptDefault map[string]bool) bool {
 	return ps != nil && bgpAcceptDefault[name] &&
-		ps.DefaultAction != "accept" && ps.DefaultAction != "reject"
+		((ps.DefaultAction != "accept" && ps.DefaultAction != "reject") ||
+			policyHasNextPolicyTerm(ps))
 }
 
 // policyTrailingAction resolves the trailing default-sequence action
@@ -472,17 +471,23 @@ func (m *Manager) generatePolicyOptionsWithQNH11447(po *config.PolicyOptionsConf
 		}
 		// Base route-map: Junos BGP default-accept (#2998) vs the fail-closed
 		// redistribute/forwarding-table default, resolved per use context.
-		b.WriteString(m.renderRouteMapForPolicy(po, name, ps, policyTrailingAction(name, ps, bgpAcceptDefault)))
+		fallbackAction := "deny"
+		if bgpAcceptDefault[name] {
+			fallbackAction = "permit"
+		}
+		b.WriteString(m.renderRouteMapForPolicyWithFallback(
+			po, name, ps, policyTrailingAction(name, ps, bgpAcceptDefault), fallbackAction))
 		b.WriteString("!\n")
 		// #4481: FRR route-maps are keyed by NAME — one object shared by every
-		// use site. A policy applied as a BGP route-map in/out with no explicit
-		// default renders a trailing PERMIT (Junos BGP default-accept, #2998).
-		// If the SAME policy is also used for an IGP redistribute, that permit
-		// would leak every non-matching route into the IGP. Emit a per-use-site
-		// fail-closed alias for the redistribute contexts; resolveRedistribute
-		// references it instead of the shared permit-default map.
+		// use site. BGP default-accept needs a permit landing sequence both
+		// when a policy has no explicit default and when `next policy` bypasses
+		// an explicit default. If the same policy is used by IGP redistribution,
+		// its landing sequence must instead fail closed; emit a per-use-site
+		// alias and have resolveRedistribute reference that map.
 		if policyNeedsRedistAlias(name, ps, bgpAcceptDefault) {
-			b.WriteString(m.renderRouteMapForPolicy(po, redistFailClosedRouteMap(name), ps, "deny"))
+			aliasAction := policyTrailingAction(name, ps, nil)
+			b.WriteString(m.renderRouteMapForPolicyWithFallback(
+				po, redistFailClosedRouteMap(name), ps, aliasAction, "deny"))
 			b.WriteString("!\n")
 		}
 		for _, scope := range qnhMetrics.scopes() {
@@ -551,12 +556,31 @@ func communityListMissingAtRender(po *config.PolicyOptionsConfig, name string) b
 	return false
 }
 
+const nextPolicySequenceMarker = "on-match goto XPF_NEXT_POLICY_SEQUENCE"
+
+func policyHasNextPolicyTerm(ps *config.PolicyStatement) bool {
+	if ps == nil {
+		return false
+	}
+	for _, term := range ps.Terms {
+		if term != nil && term.NextPolicy && term.Action == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func renderNextPolicyTarget(body string, sequence int) string {
+	return strings.ReplaceAll(body, nextPolicySequenceMarker, fmt.Sprintf("on-match goto %d", sequence))
+}
+
 func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, routeMapName, plPrefix string, ps *config.PolicyStatement, startSeq int) (string, int) {
 	var b strings.Builder
 	seq := startSeq
 	for _, term := range ps.Terms {
 		action := "permit"
-		if term.Action == "reject" {
+		validNextPolicy := term.NextPolicy && term.Action == ""
+		if term.Action == "reject" && !term.NextPolicy || term.NextPolicy && term.Action != "" {
 			action = "deny"
 		}
 
@@ -576,17 +600,17 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 		// which is exactly Junos fall-through. We emit it for every
 		// non-terminating term (rendered as `permit` above). A terminating
 		// term — `then accept` (permit, stop) or `then reject` (deny, stop)
-		// — must NOT get `on-match next`, so its FRR semantics match Junos
-		// terminating semantics. The `on-match next` line is written after
-		// the term's match/set clauses, immediately before `exit`, below.
+		// — must NOT get `on-match next`. `then next policy` is distinct:
+		// it stops this policy's remaining terms and bypasses its explicit
+		// default, so its matched sequence gets an `on-match goto` resolved
+		// to the next policy's first sequence (or the chain fallback).
 		//
-		// `on-match next` only fires on a MATCHED sequence: if a term's
-		// match clauses fail, FRR moves to the next sequence regardless, so
-		// emitting it on a non-terminating term never changes the behavior
-		// of a non-matching term. Falling off the end of all terms still
-		// hits the policy's default-action sequence (emitted after this
-		// loop), preserving the overall default behavior.
-		nonTerminating := term.Action != "accept" && term.Action != "reject"
+		// Both continuations fire only on a MATCHED sequence: if a term's
+		// match clauses fail, FRR moves to the next sequence regardless.
+		// Ordinary fall-through reaches the policy default; next-policy
+		// jumps over it. The selected continuation is emitted after the
+		// term's match/set clauses, immediately before `exit`, below.
+		nonTerminating := !term.NextPolicy && term.Action != "accept" && term.Action != "reject"
 
 		// #9881 fail-closed term rule (parent-review HIGH): the access-list
 		// loop omits flagged/invalid lists, but a `match as-path` reference
@@ -628,7 +652,7 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 			}
 		}
 		if anyDanglingAsp {
-			if term.Action == "reject" {
+			if action == "deny" {
 				slog.Warn("frr: reject term matches on as-path list absent from frr.conf; rendering deny-all",
 					"route_map", routeMapName, "term", term.Name)
 				fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(routeMapName), seq)
@@ -662,7 +686,7 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 			}
 		}
 		if anyDanglingCommunity {
-			if term.Action == "reject" {
+			if action == "deny" {
 				slog.Warn("frr: reject term matches on community list absent from frr.conf; rendering deny-all",
 					"route_map", routeMapName, "term", term.Name)
 				fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(routeMapName), seq)
@@ -1008,7 +1032,9 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 			// and must continue to later terms. A terminating term gets none
 			// in either half (the v4-route case stops at the v4 sequence; the
 			// v6-route case stops at the v6 sequence).
-			if nonTerminating {
+			if validNextPolicy {
+				fmt.Fprintf(&b, " %s\n", nextPolicySequenceMarker)
+			} else if nonTerminating {
 				b.WriteString(" on-match next\n")
 			}
 
@@ -1124,7 +1150,19 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 // without leaking its permit default across FRR's name-keyed route-map object
 // (#4481 / #2998 / #2607 / #2642).
 func (m *Manager) renderRouteMapForPolicy(po *config.PolicyOptionsConfig, emitName string, ps *config.PolicyStatement, trailingAction string) string {
+	return m.renderRouteMapForPolicyWithFallback(po, emitName, ps, trailingAction, trailingAction)
+}
+
+func (m *Manager) renderRouteMapForPolicyWithFallback(po *config.PolicyOptionsConfig, emitName string, ps *config.PolicyStatement, trailingAction, fallbackAction string) string {
 	body, seq := m.renderPolicyTermSequences(po, emitName, emitName, ps, 10)
+	hasNextPolicy := policyHasNextPolicyTerm(ps)
+	if hasNextPolicy {
+		nextPolicySequence := seq
+		if ps.DefaultAction == "accept" || ps.DefaultAction == "reject" {
+			nextPolicySequence += 10
+		}
+		body = renderNextPolicyTarget(body, nextPolicySequence)
+	}
 	var b strings.Builder
 	b.WriteString(body)
 
@@ -1136,6 +1174,10 @@ func (m *Manager) renderRouteMapForPolicy(po *config.PolicyOptionsConfig, emitNa
 	// policyTrailingAction for the case matrix.
 	fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(emitName), trailingAction, seq)
 	b.WriteString("exit\n")
+	if hasNextPolicy && (ps.DefaultAction == "accept" || ps.DefaultAction == "reject") {
+		fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(emitName), fallbackAction, seq+10)
+		b.WriteString("exit\n")
+	}
 	return b.String()
 }
 
@@ -1148,13 +1190,15 @@ func (m *Manager) renderRouteMapForPolicy(po *config.PolicyOptionsConfig, emitNa
 //   - Each policy's terms evaluate IN ORDER (A, then B, then C). A term's
 //     terminating `then accept`/`then reject` wins immediately (permit/deny,
 //     stop); a non-terminating term applies its set clauses and falls through
-//     (on-match next), exactly as the single-policy render does.
-//   - A policy with an EXPLICIT policy-level default (`then accept`/`then
-//     reject`) TERMINATES the chain with a match-all permit/deny — later
-//     policies are unreachable (Junos: the default action is terminating).
-//   - A policy with NO explicit default FALLS THROUGH to the next policy
-//     (Junos next-policy), so a route BLOCK-PRIVATE would reject is caught by
-//     BLOCK-PRIVATE before ALLOW-CUSTOMER ever runs.
+//     (on-match next). `then next policy` jumps around remaining terms and the
+//     policy default to the next policy's first sequence.
+//   - An explicit policy-level default (`then accept`/`then reject`) normally
+//     terminates the chain with a match-all permit/deny. A `next policy` term
+//     can bypass that default for routes matching that term; unmatched routes
+//     still reach the authored default.
+//   - A policy with NO explicit default falls through to the next policy,
+//     so a route BLOCK-PRIVATE would reject is caught by BLOCK-PRIVATE before
+//     ALLOW-CUSTOMER ever runs.
 //   - If the route falls off the end of EVERY policy, the Junos BGP
 //     default-ACCEPT applies (#2998). A composed chain only ever renders in a
 //     BGP `route-map in`/`out` context, so that fall-off default is permit.
@@ -1168,10 +1212,11 @@ func (m *Manager) renderComposedRouteMap(po *config.PolicyOptionsConfig, compose
 }
 
 // renderComposedRouteMapWithDefault is the common chain renderer. The
-// fallbackAction is emitted only when every member falls through; explicit
-// policy defaults still terminate exactly as authored. Production narrowed
-// aliases pass "deny" here without mutating the shared composed map or
-// changing ordinary BGP chains.
+// fallbackAction is reached by ordinary fall-through after every member and
+// by `next policy` in the last reachable member. Explicit policy defaults
+// terminate ordinary fall-through but can be skipped by a `next policy` term.
+// Production narrowed aliases pass "deny" here without mutating the shared
+// composed map or changing ordinary BGP chains.
 func (m *Manager) renderComposedRouteMapWithDefault(po *config.PolicyOptionsConfig, composedName string, chain []string, fallbackAction string) string {
 	// #5732 render-side belt: this composed route-map numbers its members'
 	// sequences with ONE running counter, so a chain whose members each pass the
@@ -1199,7 +1244,14 @@ func (m *Manager) renderComposedRouteMapWithDefault(po *config.PolicyOptionsConf
 		m.noteQuarantined(composedName)
 		return renderQuarantineDenyRouteMap(composedName)
 	}
-	var b strings.Builder
+	type policyPart struct {
+		body        string
+		nextPolicy  bool
+		startSeq    int
+		defaultSeq  int
+		defaultVerb string
+	}
+	parts := make([]policyPart, 0, len(chain))
 	seq := 10
 	terminated := false
 	for _, name := range chain {
@@ -1209,30 +1261,48 @@ func (m *Manager) renderComposedRouteMapWithDefault(po *config.PolicyOptionsConf
 			continue
 		}
 		body, next := m.renderPolicyTermSequences(po, composedName, composedName+"-"+name, ps, seq)
-		b.WriteString(body)
+		part := policyPart{body: body, nextPolicy: policyHasNextPolicyTerm(ps), startSeq: seq}
 		seq = next
 		switch ps.DefaultAction {
 		case "accept":
-			fmt.Fprintf(&b, "route-map %s permit %d\n", frrName(composedName), seq)
-			b.WriteString("exit\n")
+			part.defaultVerb = "permit"
+			part.defaultSeq = seq
 			seq += 10
-			terminated = true
+			terminated = !part.nextPolicy
 		case "reject":
-			fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(composedName), seq)
-			b.WriteString("exit\n")
+			part.defaultVerb = "deny"
+			part.defaultSeq = seq
 			seq += 10
-			terminated = true
+			terminated = !part.nextPolicy
 		}
+		parts = append(parts, part)
 		if terminated {
 			break
+		}
+	}
+
+	var b strings.Builder
+	fallbackSeq := seq
+	for i, part := range parts {
+		target := fallbackSeq
+		if i+1 < len(parts) {
+			target = parts[i+1].startSeq
+		}
+		if part.nextPolicy {
+			part.body = renderNextPolicyTarget(part.body, target)
+		}
+		b.WriteString(part.body)
+		if part.defaultVerb != "" {
+			fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(composedName), part.defaultVerb, part.defaultSeq)
+			b.WriteString("exit\n")
 		}
 	}
 	if !terminated {
 		// The ordinary composed BGP attachment falls off to Junos
 		// default-ACCEPT (#2998). A narrowed alias passes "deny" here so
 		// the dropped authored members cannot silently widen that attached
-		// map; explicit member defaults above remain authoritative.
-		fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(composedName), fallbackAction, seq)
+		// map; explicit member defaults remain authoritative.
+		fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(composedName), fallbackAction, fallbackSeq)
 		b.WriteString("exit\n")
 	}
 	return b.String()

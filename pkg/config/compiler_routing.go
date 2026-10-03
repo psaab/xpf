@@ -1293,6 +1293,8 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 					term.Action = "accept"
 				case "reject":
 					term.Action = "reject"
+				case "next":
+					recordPolicyNextAction11780(term, nodeVal(ac))
 				case "next-hop":
 					term.NextHop = nodeVal(ac)
 				case "load-balance":
@@ -1336,10 +1338,19 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 				}
 			}
 			if len(tc.Keys) >= 2 {
-				term.Action = tc.Keys[1]
+				parsePolicyTermInlineKeys(term, tc.Keys)
 			}
 		}
 	}
+}
+func recordPolicyNextAction11780(term *PolicyTerm, value string) {
+	if value == "policy" {
+		term.NextPolicy = true
+		return
+	}
+	term.invalidNextPolicy11780 = true
+	term.invalidNextPolicyValue11780 = value
+	term.Action = "reject"
 }
 
 // applyCommunityAction interprets the tokens of a `then community` clause and
@@ -1403,7 +1414,7 @@ var policyTermInlineKeywords = map[string]bool{
 	"route-filter": true, "next-hop": true, "load-balance": true,
 	"local-preference": true, "metric": true, "metric-type": true,
 	"community": true, "as-path": true, "as-path-prepend": true,
-	"origin": true, "accept": true, "reject": true,
+	"origin": true, "accept": true, "reject": true, "next": true,
 }
 
 // parsePolicyTermInlineKeys handles flat set syntax where remaining keys
@@ -1420,8 +1431,27 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string) {
 		case "then":
 			inFrom = false
 			if i+1 < len(keys) {
+				if keys[i+1] == "next" {
+					i++
+					value := ""
+					if i+1 < len(keys) {
+						i++
+						value = keys[i]
+					}
+					recordPolicyNextAction11780(term, value)
+					continue
+				}
 				i++
 				term.Action = keys[i]
+			}
+		case "next":
+			if !inFrom {
+				value := ""
+				if i+1 < len(keys) {
+					i++
+					value = keys[i]
+				}
+				recordPolicyNextAction11780(term, value)
 			}
 		case "protocol":
 			// "from protocol [ bgp ospf static ]" — the lexer strips the
@@ -1559,9 +1589,13 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string) {
 				term.Origin = keys[i]
 			}
 		case "accept":
-			term.Action = "accept"
+			if !inFrom {
+				term.Action = "accept"
+			}
 		case "reject":
-			term.Action = "reject"
+			if !inFrom {
+				term.Action = "reject"
+			}
 		}
 	}
 }

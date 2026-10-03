@@ -163,6 +163,16 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
+	if err := validatePolicyNextPolicyActions11780(cfg); err != nil {
+		if opts.lenientPolicyNextAction11780 {
+			failClosedMalformedNextPolicyActions11780(cfg)
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("routing policy next-policy action (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #5701: route-map sequence-number overflow gate. A policy-statement whose
 	// per-term Cartesian expansion (families x from-prefix-list x from-community
 	// x from-as-path) produces more sequences than the FRR route-map
