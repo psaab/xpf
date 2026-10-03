@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Keep custom login classes with `permissions all` from rendering secrets in
+    cleartext on the console; only the built-in `super-user` class keeps that
+    exception (#11775).
+
   * Describe AppID-disabled tie-breaks using the lowest assigned app_id in
     the application-identification status output (#11829).
 

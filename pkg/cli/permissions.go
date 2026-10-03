@@ -79,29 +79,20 @@ func (c *CLI) checkPermission(parts []string) error {
 // configuration | display set` and harvest every IKE PSK, SNMP community and
 // authentication-key in cleartext.
 //
-// We therefore redact for every login class EXCEPT super-user (the only class
-// carrying PermAll). super-user == the console root that #4057 protected and
-// that already has direct DB filesystem access, so it still reads cleartext to
-// copy a secret; read-only, config-viewer and operator see ##SECRET-DATA##. An
-// UNSET login class (CLI spawned without RBAC configured — the legacy
+// We therefore redact for every non-empty login class EXCEPT the built-in
+// `super-user` class. `mapJunosPermissions` maps `all` and `super-user` tokens
+// on custom classes to PermAll for command authorization, but PermAll is not a
+// secret-display exemption: those custom classes still see ##SECRET-DATA##.
+// The exact `super-user` class retains the console exception; read-only,
+// config-viewer, operator and every custom class are redacted.
+//
+// An UNSET login class (CLI spawned without RBAC configured — the legacy
 // allow-everything mode, mirroring checkPermission's empty-class shortcut) is
 // treated as privileged and reads cleartext, so a deployment with no `system
-// login` classes is bit-identical to before this change. An UNKNOWN class
-// fails closed (redacted).
+// login` classes is bit-identical to before this change. Every other class,
+// including an UNKNOWN class, fails closed (redacted).
 func (c *CLI) showConfigRedacted() bool {
-	if c.userClass == "" {
-		return false
-	}
-	perms, ok := c.resolveClassPerms(c.userClass)
-	if !ok {
-		return true
-	}
-	for _, p := range perms {
-		if p == config.PermAll {
-			return false
-		}
-	}
-	return true
+	return c.userClass != "" && c.userClass != ClassRootDefault
 }
 
 // showActiveConfigPath renders an active-config subtree as hierarchical text,

@@ -261,8 +261,10 @@ classes hold". The premise is false for **custom** classes, which may carry
 the real store and checker: a session bound to a custom class holding
 `[view configure]` is denied `request system reboot` and gets
 `showConfigRedacted == true`; after that same session commits
-`set system login class <its-own-class> permissions all`, the identical checks
-return **allowed** and **false** — secrets in cleartext — with no re-login.
+`set system login class <its-own-class> permissions all`, the command check
+returns **allowed** while `showConfigRedacted` remains **true** — PermAll grants
+command authorization but does not change the custom class's identity or grant
+cleartext secret display.
 
 The accurate statement of the boundary is the asymmetry:
 
@@ -1340,29 +1342,27 @@ path-scoped subtrees), `show system rollback <N> [| display set | compare]`,
 configuration rescue`, and the config-mode `show` / `show | compare` — mask
 secret leaves (IKE pre-shared-keys, SNMP communities, BGP/OSPF
 authentication-keys, WireGuard private keys, encrypted passwords, DDNS
-tokens/keys) with `##SECRET-DATA##` for **every login class except
-`super-user`**. This mirrors Junos (which never renders a cleartext secret in
-`show configuration` for any class) and the always-redacted REST/gRPC
-`ShowConfig` path (#4051): a VIEW-only `read-only`, `config-viewer`, or
-`operator` login can no longer harvest cleartext firewall secrets through the
-console. The redaction predicate is `CLI.showConfigRedacted()`
-(`pkg/cli/permissions.go`): it routes rendering through the `*Redacted`
-configstore methods (the same `RedactedClone` renderers REST/gRPC use) for any
-class **without** `PermAll`.
+tokens/keys) with `##SECRET-DATA##` for every configured login class except
+the exact built-in `super-user` class. A custom class holding Junos
+`permissions all` (or the `super-user` token) still maps to `PermAll` for
+command authorization, but does not get the cleartext display exception. This
+mirrors Junos (which never renders a cleartext secret in `show configuration`
+for any class) and the always-redacted REST/gRPC `ShowConfig` path (#4051).
+The redaction predicate is `CLI.showConfigRedacted()`
+(`pkg/cli/permissions.go`): it selects between cleartext and `*Redacted`
+configstore renderers by the exact login-class identity, not by `PermAll`.
 
-`super-user` still reads cleartext — it is the console root that already has
-direct config-DB filesystem access, so masking it would only obstruct the
-operator copying a secret while providing no protection (the deliberate #4057
-allowance). An **unset/empty** class (no `system login` configured — the legacy
-no-RBAC allow-everything mode) is likewise treated as privileged and reads
-cleartext, so a deployment with no login classes is bit-identical to before the
-change. An **unknown** class fails **closed** (redacted). Config mode requires
-`PermConfig` (super-user only today), so the config-mode candidate show paths
-render cleartext in practice; they are wired through the same gate as
-defense-in-depth should a lower class ever gain config-view access. The raw
-`rescue.conf` text (a full cleartext-secret config dump, #4056) is reparsed +
-redacted before display and fails **closed** — a parse error returns an error
-rather than the cleartext bytes.
+The built-in `super-user` class retains the console cleartext exception; this
+preserves the root operator's ability to copy secrets, and any account assigned
+that class follows the same rule. An **unset/empty** class (no `system login`
+configured — the legacy no-RBAC allow-everything mode) is likewise treated as
+privileged and reads cleartext. An **unknown** class fails **closed**
+(redacted). Config mode requires `PermConfig`, which a custom `permissions all`
+class also holds; candidate display still uses the identity predicate, so that
+custom class remains redacted. The raw `rescue.conf` text (a full
+cleartext-secret config dump, #4056) is reparsed + redacted before display and
+fails **closed** — a parse error returns an error rather than the cleartext
+bytes.
 
 **Reading the CANDIDATE configuration requires `PermConfig` (#9324).**
 
@@ -1434,14 +1434,15 @@ active config directly and so bypassed that path: `show system services`
 `  <name>: <auth>`. Both are PermView `show` commands reachable by
 `read-only` / `config-viewer` / `operator`, so the SNMP community string — a
 read/write credential — leaked in cleartext to view-only classes. They now
-reuse the same `CLI.showConfigRedacted()` predicate: for any class without
-`PermAll` the community **name** is masked to `##SECRET-DATA##` while the
-authorization **mode** (`read-only` / `read-write`) stays visible; `super-user`
-and the unset/legacy class still read the cleartext name (parity with the #4099
-config-render decision above) — **on the in-process console CLI only; see the
-next paragraph for `cli`**. The TSIG key already showed `(secret redacted)` and
-SNMPv3 renders auth/priv protocol names only, so the community name was the
-last cleartext SNMP secret on these two surfaces.
+reuse the same `CLI.showConfigRedacted()` identity predicate: the community
+**name** is masked to `##SECRET-DATA##` for every class except the exact
+built-in `super-user` class and the unset/legacy class; custom `permissions all`
+does not grant a cleartext exception. The authorization **mode** (`read-only` /
+`read-write`) stays visible (parity with the #4099 config-render decision above)
+— **on the in-process console CLI only; see the next paragraph for `cli`**.
+The TSIG key already showed `(secret redacted)` and SNMPv3 renders auth/priv
+protocol names only, so the community name was the last cleartext SNMP secret
+on these two surfaces.
 
 **The same masking on the REST and gRPC surfaces (#5315, #6532).** The CLI is
 not the only place that formats the typed active config by hand. The REST

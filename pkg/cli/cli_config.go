@@ -460,14 +460,13 @@ func (c *CLI) handleConfigShow(args []string) error {
 	// Check for pipe commands
 	line := strings.Join(args, " ")
 
-	// Secret redaction (#4099): route the config-mode config display through
-	// the #4051 *Redacted store methods for a login class that
-	// showConfigRedacted() flags. Config mode requires PermConfig (super-user
-	// today), so this is defense-in-depth — cleartext for the current
-	// reachable class, and automatically masked should a non-super-user ever
-	// gain config-view access. The redacted candidate variants take the path
-	// directly (nil/empty == whole tree) and mirror the cleartext siblings'
-	// nil-source defaults.
+	// Secret redaction (#4099): route config-mode display through the #4051
+	// *Redacted store methods whenever showConfigRedacted() flags. Custom
+	// `permissions all` classes can enter configure mode, but that grant does
+	// not imply cleartext access: the predicate keys on the exact built-in
+	// `super-user` class, so custom classes remain redacted. The redacted
+	// candidate variants take the path directly (nil/empty == whole tree) and
+	// mirror the cleartext siblings' nil-source defaults.
 	redact := c.showConfigRedacted()
 
 	if strings.Contains(line, "| compare") {

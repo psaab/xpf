@@ -393,10 +393,12 @@ func configWarnings(cfg *config.Config) []string {
 
 func (s *Server) ShowConfig(_ context.Context, req *pb.ShowConfigRequest) (*pb.ShowConfigResponse, error) {
 	// Secrets are masked on this raw-AST render RPC (#4051), matching the
-	// #2053 typed-struct redaction. The redacted renderers take the path
-	// directly (nil/empty selects the whole tree) and mirror the cleartext
-	// siblings' nil-source defaults; the cleartext Show* SSOT still backs HA
-	// config sync, the DR archive and persistence.
+	// #2053 typed-struct redaction. This stays unconditional for every remote
+	// caller, including one authorized by PermAll; unlike the in-process CLI,
+	// this path has no built-in-super-user class identity exception. The redacted
+	// renderers take the path directly (nil/empty selects the whole tree) and
+	// mirror the cleartext siblings' nil-source defaults; the cleartext Show*
+	// SSOT still backs HA config sync, the DR archive and persistence.
 	var path []string
 	if len(req.Path) > 0 {
 		path = req.Path
