@@ -1,5 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Compile every sibling `rib-groups` container so repeated definitions
+    preserve all imports (#12022).
+
   * Limit each dynamic command value to one word in tab completion and `?`
     help, matching the command walker’s one-value grammar (#11835).
   * Reject invalid OSPF MD5 key IDs rather than defaulting them to 1 or

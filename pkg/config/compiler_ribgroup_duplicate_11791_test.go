@@ -75,6 +75,30 @@ routing-options { rib-groups { leak { import-rib blue.inet.0; } } }`)
 	}
 }
 
+func TestDuplicateRibGroupContainersMerge11791(t *testing.T) {
+	cfg := compileRibGroup11791(t, `routing-instances {
+    blue { instance-type virtual-router; }
+}
+routing-options {
+    rib-groups { leak { import-rib inet.0; } }
+    rib-groups { leak { import-rib blue.inet.0; } }
+}`)
+	got := cfg.RoutingOptions.RibGroups["leak"].ImportRibs
+	want := []string{"inet.0", "blue.inet.0"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sibling rib-groups containers yielded %v, want merged %v", got, want)
+	}
+	count := 0
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "duplicate rib-group definition") && strings.Contains(warning, "leak") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("got %d duplicate rib-group warnings, want one naming leak: %v", count, cfg.Warnings)
+	}
+}
+
 func TestDuplicateRibGroupDefinitionsAreAnnounced11791(t *testing.T) {
 	tree, parseErrs := NewParser(duplicateRibGroup11791).Parse()
 	if len(parseErrs) != 0 {
