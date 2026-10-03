@@ -431,6 +431,8 @@ pub(super) fn stage_flow_cache_hit(
                 meta.dscp,
                 meta.ingress_pcp,
                 meta.ingress_vlan_present != 0,
+                meta.ingress_ifindex,
+                meta.ingress_vlan_id,
             )
         } else {
             None

@@ -1,9 +1,9 @@
 use super::build_cos_state;
 use crate::protocol::snapshot::{ConfigSnapshot, InterfaceSnapshot};
 use crate::protocol::{
-    ClassOfServiceSnapshot, CoSDSCPRewriteRuleEntrySnapshot, CoSDSCPRewriteRuleSnapshot,
-    CoSForwardingClassSnapshot, CoSSchedulerMapEntrySnapshot, CoSSchedulerMapSnapshot,
-    CoSSchedulerSnapshot,
+    ClassOfServiceSnapshot, CoSDSCPClassifierEntrySnapshot, CoSDSCPClassifierSnapshot,
+    CoSDSCPRewriteRuleEntrySnapshot, CoSDSCPRewriteRuleSnapshot, CoSForwardingClassSnapshot,
+    CoSSchedulerMapEntrySnapshot, CoSSchedulerMapSnapshot, CoSSchedulerSnapshot,
 };
 
 fn snapshot_with_cos(
@@ -180,4 +180,33 @@ fn base_interface_alias_does_not_conflict_with_unit_cos() {
 
     let state = build_cos_state(&snapshot).expect("base alias is not a sibling CoS unit");
     assert_eq!(state.interfaces[&42].shaping_rate_bytes, 15_000_000);
+}
+
+#[test]
+fn classifier_bindings_for_shared_unit_ifindex_must_match_11386() {
+    let mut dscp_bound = unit("wg0.0", 42, 0);
+    dscp_bound.cos_dscp_classifier = "trusted".to_string();
+    let unbound = unit("wg0.1", 42, 0);
+    let cos = ClassOfServiceSnapshot {
+        forwarding_classes: vec![
+            CoSForwardingClassSnapshot {
+                name: "best-effort".to_string(),
+                queue: 0,
+            },
+            CoSForwardingClassSnapshot {
+                name: "network-control".to_string(),
+                queue: 7,
+            },
+        ],
+        dscp_classifiers: vec![CoSDSCPClassifierSnapshot {
+            name: "trusted".to_string(),
+            entries: vec![CoSDSCPClassifierEntrySnapshot {
+                forwarding_class: "network-control".to_string(),
+                loss_priority: "high".to_string(),
+                dscp_values: vec![56],
+            }],
+        }],
+        ..Default::default()
+    };
+    assert_duplicate_ifindex(&snapshot_with_cos(vec![dscp_bound, unbound], cos));
 }

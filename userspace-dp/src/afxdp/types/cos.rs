@@ -16,6 +16,10 @@ use super::*;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(in crate::afxdp) struct CoSState {
     pub(in crate::afxdp) interfaces: FastMap<i32, CoSInterfaceConfig>,
+    /// Classifier bindings are retained independently of `interfaces`: the
+    /// egress CoS admission gate can omit an ingress-only unit while its
+    /// bindings still decide whether wire markings are trusted.
+    pub(in crate::afxdp) ingress_classifier_bindings: FastMap<i32, CoSIngressClassifierBindings>,
     pub(in crate::afxdp) dscp_classifiers: FastMap<String, CoSDSCPClassifierConfig>,
     pub(in crate::afxdp) ieee8021_classifiers: FastMap<String, CoSIEEE8021ClassifierConfig>,
     pub(in crate::afxdp) dscp_rewrite_rules: FastMap<String, CoSDSCPRewriteRuleConfig>,
@@ -28,6 +32,15 @@ pub(in crate::afxdp) struct CoSState {
     /// classification to key the DSCP rewrite on `(forwarding-class,
     /// loss-priority)` instead of forwarding-class alone.
     pub(in crate::afxdp) lp_rewrite: FastMap<i32, CoSLossPriorityRewrite>,
+}
+
+/// Classifier-type bindings on an ingress unit, independent of its egress
+/// shaping / scheduler state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::afxdp) struct CoSIngressClassifierBindings {
+    pub(in crate::afxdp) dscp: bool,
+    pub(in crate::afxdp) inet_precedence: bool,
+    pub(in crate::afxdp) ieee8021: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
