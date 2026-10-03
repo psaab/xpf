@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -982,11 +983,10 @@ func TestValidateConfigIdempotentAndNonMutating(t *testing.T) {
 	}
 }
 
-// #1614 A4: ValidateConfig emits an operator-visible warning when
-// the sum of exact-class transmit-rates on an interface unit exceeds
-// the unit's shaping-rate. The warning surfaces the oversubscription
-// policy (proportional default vs guarantee-rate opt-in) so operators
-// see which distribution will actually apply.
+// #1614 A4 / #11810: ValidateConfig warns when configured transmit-rate
+// claims exceed the interface unit's shaping-rate. The warning includes
+// absolute, resolved-percent, and resolved-remainder claims, and surfaces the
+// policy so operators see which exact-class distribution applies.
 func TestValidateCoSOversubscriptionWarning(t *testing.T) {
 	lines := []string{
 		"set class-of-service forwarding-classes queue 0 best-effort",
@@ -1019,7 +1019,7 @@ func TestValidateCoSOversubscriptionWarning(t *testing.T) {
 	// Sum of exact rates is 21g, shaping is 10g — warning must fire.
 	gotWarn := false
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "sum of exact-class transmit-rates") &&
+		if strings.Contains(w, "sum of configured transmit-rate claims") &&
 			strings.Contains(w, "ge-0/0/2") &&
 			strings.Contains(w, "proportional") {
 			gotWarn = true
@@ -1065,7 +1065,7 @@ func TestValidateCoSOversubscriptionWarningGuaranteeRate(t *testing.T) {
 	}
 	gotWarn := false
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "sum of exact-class transmit-rates") &&
+		if strings.Contains(w, "sum of configured transmit-rate claims") &&
 			strings.Contains(w, "guarantee-rate 0.7") {
 			gotWarn = true
 			break
@@ -1091,6 +1091,118 @@ func TestValidateCoSOversubscriptionWarningGuaranteeRate(t *testing.T) {
 	if unit.OversubscriptionGuaranteeFraction != 0.7 {
 		t.Fatalf("expected OversubscriptionGuaranteeFraction=0.7; got %f",
 			unit.OversubscriptionGuaranteeFraction)
+	}
+}
+
+// TestValidateCoSOversubscriptionWarningResolvesTransmitRateForms11810 pins
+// the warning's claim calculation to the dataplane's byte-rate resolution.
+// The percent-only cases omit `exact` deliberately: exact is not an
+// eligibility gate for the aggregate demand warning.
+func TestValidateCoSOversubscriptionWarningResolvesTransmitRateForms11810(t *testing.T) {
+	rows := []struct {
+		name        string
+		rates       [][]string
+		wantBPS     uint64
+		wantWarning bool
+	}{
+		{
+			name: "percent oversubscription",
+			rates: [][]string{
+				{"percent", "60"},
+				{"percent", "60"},
+			},
+			wantBPS:     1_500_000_000,
+			wantWarning: true,
+		},
+		{
+			name: "mixed absolute and percent oversubscription",
+			rates: [][]string{
+				{"8g"},
+				{"percent", "30"},
+			},
+			wantBPS:     1_375_000_000,
+			wantWarning: true,
+		},
+		{
+			name: "overcommitted percent leaves zero remainder",
+			rates: [][]string{
+				{"percent", "60"},
+				{"percent", "60"},
+				{"remainder"},
+			},
+			wantBPS:     1_500_000_000,
+			wantWarning: true,
+		},
+		{
+			name: "remainder fills unused shaping capacity",
+			rates: [][]string{
+				{"percent", "40"},
+				{"remainder"},
+			},
+		},
+		{
+			name: "under-capacity percent",
+			rates: [][]string{
+				{"percent", "40"},
+			},
+		},
+	}
+
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			lines := []string{
+				"set class-of-service interfaces ge-0/0/2 unit 80 shaping-rate 10g",
+				"set class-of-service interfaces ge-0/0/2 unit 80 scheduler-map edge-map",
+				"set system dataplane-type userspace",
+			}
+			for i, rate := range row.rates {
+				scheduler := fmt.Sprintf("sched-%d", i)
+				forwardingClass := fmt.Sprintf("class-%d", i)
+				lines = append(lines,
+					fmt.Sprintf("set class-of-service forwarding-classes queue %d %s", i+1, forwardingClass),
+					fmt.Sprintf("set class-of-service schedulers %s transmit-rate %s", scheduler, strings.Join(rate, " ")),
+					fmt.Sprintf("set class-of-service scheduler-maps edge-map forwarding-class %s scheduler %s", forwardingClass, scheduler),
+				)
+			}
+
+			tree := &ConfigTree{}
+			for _, line := range lines {
+				path, err := ParseSetCommand(line)
+				if err != nil {
+					t.Fatalf("ParseSetCommand(%q): %v", line, err)
+				}
+				if err := tree.SetPath(path); err != nil {
+					t.Fatalf("SetPath(%q): %v", line, err)
+				}
+			}
+			if err := SchemaValidate(tree, nil); err != nil {
+				t.Fatalf("SchemaValidate: %v", err)
+			}
+			cfg, err := CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("compile: %v", err)
+			}
+
+			var gotWarning string
+			for _, warning := range cfg.Warnings {
+				if strings.Contains(warning, "sum of configured transmit-rate claims") {
+					gotWarning = warning
+					break
+				}
+			}
+			if !row.wantWarning {
+				if gotWarning != "" {
+					t.Fatalf("unexpected oversubscription warning: %s", gotWarning)
+				}
+				return
+			}
+			if gotWarning == "" {
+				t.Fatalf("expected oversubscription warning; got: %v", cfg.Warnings)
+			}
+			if want := fmt.Sprintf("(%d B/s) exceeds shaping-rate (1250000000 B/s)", row.wantBPS); !strings.Contains(gotWarning, want) {
+				t.Fatalf("warning %q does not report the resolved sum and shaping-rate %q", gotWarning, want)
+			}
+		})
 	}
 }
 

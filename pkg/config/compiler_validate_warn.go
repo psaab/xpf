@@ -1671,11 +1671,11 @@ func ValidateConfig(cfg *Config) []string {
 			warnings = append(warnings, "class-of-service shaping, classifier attachment, and dscp rewrite-rule attachment are only implemented in the userspace dataplane; configuration is accepted but will not take effect on this dataplane")
 		}
 
-		// #1614 A4: operator-visible warning when the sum of an
-		// interface unit's exact-class transmit-rates exceeds the
-		// unit's shaping-rate. Under oversubscription, every class
-		// will receive less than its configured rate; the visible
-		// distribution depends on the unit's oversubscription-policy.
+		// #1614 A4 / #11810: warn when the sum of configured transmit-rate
+		// claims (absolute, percent resolved against the unit shaping-rate,
+		// and resolved remainder shares) exceeds the unit's shaping-rate.
+		// This remains non-fatal; the runtime accepts oversubscription and
+		// the unit's configured policy governs exact-class distribution.
 		warnings = append(warnings, validateCoSOversubscriptionWarnings(cos)...)
 	}
 
