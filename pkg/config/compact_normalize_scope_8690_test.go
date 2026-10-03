@@ -955,12 +955,8 @@ var knownUnexaminable8690 = []string{
 	// do not share this verdict; they are `sibling-blocked` in the register.
 	"services rpm probe xpfarg test xpfarg target",
 
-	"class-of-service fairness rss-expectation interface xpfarg queue",
-	"class-of-service fairness rss-expectation interface xpfarg queue xpfarg active-workers",
-	"class-of-service fairness rss-expectation interface xpfarg queue xpfarg at-least-active-workers",
-	"class-of-service fairness rss-expectation interface xpfarg queue xpfarg cstruct",
-	"class-of-service fairness rss-expectation interface xpfarg queue xpfarg cstruct-max",
-	"class-of-service fairness rss-expectation interface xpfarg queue xpfarg max-worker-flow-share",
+	// #11796 typed the RSS queue key and made malformed expectation fixtures
+	// buildable in lenient mode, so those sites need no exclusions here.
 	"firewall three-color-policer",
 	"firewall three-color-policer xpfarg single-rate committed-burst-size",
 	"firewall three-color-policer xpfarg single-rate committed-information-rate",

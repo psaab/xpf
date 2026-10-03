@@ -15,26 +15,27 @@ import (
 // with a stated reason reads as settled: nobody re-derives it.
 //
 // This pins the LENIENT-path behaviour of the three entries in that group, so
-// the annotation is a measurement rather than prose. Two of them accept the
-// duplicate; one refuses on both paths and is correctly skipped. If any of
-// those three answers changes, this reds — and a new entry added to that group
-// owes the same measurement before its reason can say "refused".
+// the annotation is a measurement rather than prose. The two policy duplicates
+// merge to one. The RSS fixture remains refused on strict compile but is now
+// tolerated on lenient load with a warning and no expectation rows (#11796).
+// If any answer changes, this reds — and a new entry added to that group owes
+// the same measurement before its reason can say "refused".
 //
-// #8752 UPDATE — the two accepting entries used to keep BOTH objects silently,
+// #8752 UPDATE — the two policy duplicates used to keep BOTH objects silently,
 // and that was the defect. They now fold to ONE, because the #8752 merge runs
-// on exactly the path this cell is about. The strict-path premise is unchanged
-// and is still asserted below: both are still REFUSED at commit, so the skip
-// entries remain correctly skipped, and the reason they were suspect — that
-// their exemption rested on a strict-path-only fact — is what got answered
-// rather than what got removed. The expectations here and the census
-// annotation in duplicate_block_conservation_inventory_8436.go were updated
-// together, as this cell's own failure message required.
+// on exactly the path this cell is about. The RSS case exercises the separate
+// tolerant-load contract: strict compilation still refuses its unrecognized
+// `expectation` children, while lenient compilation warns and omits the rows.
+// Its census skip remains because the fixture builder cannot provide a valid
+// integer queue name for that site.
 func TestSkippedOnRefusalStillNeedsTheLenientAnswer8752(t *testing.T) {
 	cases := []struct {
-		name          string
-		text          string
-		lenientAccept bool
-		wantObjects   int
+		name           string
+		text           string
+		lenientAccept  bool
+		wantObjects    int
+		wantRSSRows    int
+		wantRSSWarning bool
 	}{
 		{
 			name: "security policies from-zone <a> <b> <c> policy",
@@ -54,14 +55,14 @@ func TestSkippedOnRefusalStillNeedsTheLenientAnswer8752(t *testing.T) {
 			lenientAccept: true, wantObjects: 1,
 		},
 		{
-			// Correctly skipped: refused on BOTH paths, so the exemption does
-			// not rest on a strict-path-only fact.
+			// The unknown `expectation` children still fail strict validation.
+			// The tolerant path must warn and omit both malformed queue rows.
 			name: "class-of-service fairness rss-expectation interface <i> queue",
 			text: `class-of-service { fairness { rss-expectation { interface ge-0/0/0 {
 					queue 0 { expectation balanced; }
 					queue 0 { expectation any; }
 				} } } }`,
-			lenientAccept: false, wantObjects: 0,
+			lenientAccept: true, wantRSSRows: 0, wantRSSWarning: true,
 		},
 	}
 
@@ -70,11 +71,10 @@ func TestSkippedOnRefusalStillNeedsTheLenientAnswer8752(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("%s: fixture must parse: %v", c.name, perrs)
 		}
-		// The strict path is expected to refuse all three — that is the stated
-		// reason for the skip, and asserting it keeps this cell honest about
-		// what it is adding rather than re-litigating.
+		// The strict path must refuse every malformed fixture; the lenient
+		// path's acceptance and omission behaviour is measured below.
 		if _, err := compileConfigWithOpts(tree, compileOpts{}); err == nil {
-			t.Errorf("%s: the STRICT path accepted the duplicate, so the skip entry's stated "+
+			t.Errorf("%s: the STRICT path accepted the malformed input, so the skip entry's stated "+
 				"reason (\"REFUSED at commit\") is no longer true and the entry needs "+
 				"re-deriving on both paths", c.name)
 		}
@@ -90,15 +90,26 @@ func TestSkippedOnRefusalStillNeedsTheLenientAnswer8752(t *testing.T) {
 		if !gotAccept {
 			continue
 		}
-		n := 0
-		for _, z := range cfg.Security.Policies {
-			n += len(z.Policies)
+		if c.wantObjects > 0 {
+			policyRows := 0
+			for _, zone := range cfg.Security.Policies {
+				policyRows += len(zone.Policies)
+			}
+			policyRows += len(cfg.Security.GlobalPolicies)
+			if policyRows != c.wantObjects {
+				t.Errorf("%s: lenient compile produced %d security policy rows, want %d", c.name, policyRows, c.wantObjects)
+			}
 		}
-		n += len(cfg.Security.GlobalPolicies)
-		if n != c.wantObjects {
-			t.Errorf("%s: lenient compile produced %d objects, want %d. Fewer means the fold "+
-				"now merges (good — update this expectation and the skip annotation "+
-				"together); more means it duplicates further", c.name, n, c.wantObjects)
+
+		rssRows := 0
+		if cfg.ClassOfService != nil {
+			rssRows = len(cfg.ClassOfService.FairnessExpectations)
+		}
+		if rssRows != c.wantRSSRows {
+			t.Errorf("%s: lenient compile produced %d RSS rows, want %d", c.name, rssRows, c.wantRSSRows)
+		}
+		if c.wantRSSWarning && !strings.Contains(strings.Join(cfg.Warnings, "\n"), "rss-expectation") {
+			t.Errorf("%s: lenient compile accepted malformed RSS rows without a warning: %v", c.name, cfg.Warnings)
 		}
 	}
 }

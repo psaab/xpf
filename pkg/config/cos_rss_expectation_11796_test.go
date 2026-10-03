@@ -127,6 +127,68 @@ system { dataplane-type userspace; }
 	}
 }
 
+// TestCoSFairnessRSSExpectationFlatRunCannotHideAlias11796 keeps a same-line
+// SetPath chain from accepting only its first RSS expectation.
+func TestCoSFairnessRSSExpectationFlatRunCannotHideAlias11796(t *testing.T) {
+	tree := flatTreeFromSets(t,
+		"set class-of-service fairness rss-expectation interface ge-0/0/2 queue 4 active-workers 2 at-least-active-workers 3",
+		"set system dataplane-type userspace",
+	)
+	if _, err := CompileConfig(tree); err == nil ||
+		!strings.Contains(err.Error(), "duplicate at-least-active-workers expectation") {
+		t.Fatalf("strict compile error = %v, want duplicate active-workers alias diagnostic", err)
+	}
+
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile rejected duplicate RSS aliases: %v", err)
+	}
+	if !warningContains11796(cfg.Warnings, "duplicate at-least-active-workers expectation") {
+		t.Fatalf("lenient compile did not warn about the duplicate RSS aliases: %v", cfg.Warnings)
+	}
+	if got := len(cfg.ClassOfService.FairnessExpectations); got != 0 {
+		t.Fatalf("lenient compile retained %d row(s) after a duplicate alias, want the malformed row omitted", got)
+	}
+}
+
+// TestCoSFairnessRSSExpectationCompactFlagsNormalize11796 ensures the compact
+// flag spellings preserve the same any/balanced rows as their block forms.
+func TestCoSFairnessRSSExpectationCompactFlagsNormalize11796(t *testing.T) {
+	fixtures := map[string]string{
+		"block": `class-of-service { fairness { rss-expectation { interface ge-0/0/2 {
+			queue 4 { any; }
+			queue 5 { balanced; }
+		} } } }`,
+		"compact": `class-of-service { fairness { rss-expectation { interface ge-0/0/2 {
+			queue 4 any;
+			queue 5 balanced;
+		} } } }`,
+	}
+	for name, text := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			tree, parseErrs := NewParser(text).Parse()
+			if len(parseErrs) != 0 {
+				t.Fatalf("parse errors: %v", parseErrs)
+			}
+			cfg, err := CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("strict compile rejected %s RSS flags: %v", name, err)
+			}
+			got := cfg.ClassOfService.FairnessExpectations
+			if len(got) != 2 {
+				t.Fatalf("%s RSS rows = %#v, want queue 4 any and queue 5 balanced", name, got)
+			}
+			gotByQueue := map[uint8]string{}
+			for _, row := range got {
+				gotByQueue[row.QueueID] = row.RSSExpectation
+			}
+			if len(gotByQueue) != 2 || gotByQueue[4] != "any" || gotByQueue[5] != "balanced" {
+				t.Fatalf("%s RSS rows = %#v, want queue 4 any and queue 5 balanced", name, got)
+			}
+		})
+	}
+}
+
 func warningContains11796(warnings []string, parts ...string) bool {
 	for _, warning := range warnings {
 		if !strings.Contains(warning, "rss-expectation") {

@@ -834,6 +834,12 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 	if fairnessNode := node.FindChild("fairness"); fairnessNode != nil {
 		if rssNode := fairnessNode.FindChild("rss-expectation"); rssNode != nil {
 			seen := make(map[string]string)
+			// #9156: expand only schema-resolving chained leaf runs before
+			// collecting an expectation. A flat `active-workers 2
+			// at-least-active-workers 3` chain otherwise exposes only the head
+			// and silently installs the incomplete expectation.
+			queueSchema := resolveSchemaPath9235(
+				"class-of-service", "fairness", "rss-expectation", "interface", "queue")
 			warnRSS := func(detail error) {
 				if warnings != nil {
 					*warnings = append(*warnings, fmt.Sprintf(
@@ -860,6 +866,7 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 					return detail
 				}
 				for _, queueNode := range ifaceNode.FindChildren("queue") {
+					queueNode = expandResolvingRun9792(queueNode, queueSchema)
 					if len(queueNode.Keys) < 2 {
 						continue
 					}
