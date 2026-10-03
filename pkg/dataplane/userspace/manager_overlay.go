@@ -206,6 +206,13 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 	next.FIBGeneration = m.readFIBGeneration()
 	next.GeneratedAt = time.Now().UTC()
 	next.Config = cfg
+	// Keepalive link transitions trigger this routes-only publish. Resample the
+	// endpoint link state so the Rust FIB withdraws and restores tunnel ECMP
+	// members even when no operator config commit occurs.
+	next.TunnelEndpoints = append([]TunnelEndpointSnapshot(nil), next.TunnelEndpoints...)
+	for i := range next.TunnelEndpoints {
+		next.TunnelEndpoints[i].LinkUp = snapshotLinkUp(next.TunnelEndpoints[i].LinuxName)
+	}
 	m.refreshCaptureAuthorityLocked(&next)
 	resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
 	// #3772 (M9): a transient ip-rule enumeration failure aborts the

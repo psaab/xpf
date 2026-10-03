@@ -361,6 +361,9 @@ func (t *tunnelManager) keepaliveTick(tunnelName string, state *KeepaliveState, 
 			"failures", state.Failures)
 	}
 	state.mu.Unlock()
+	if callback := t.livenessChange.Load(); callback != nil {
+		(*callback)(tunnelName, wantUp)
+	}
 }
 
 // nextSeq returns a fresh monotonic 16-bit sequence number for a probe

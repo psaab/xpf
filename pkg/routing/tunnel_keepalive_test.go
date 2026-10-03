@@ -226,6 +226,29 @@ func TestKeepaliveRecoversUpOnce(t *testing.T) {
 	}
 }
 
+func TestKeepaliveLivenessCallbackTracksCommittedTransitions11423(t *testing.T) {
+	ops := newKaOps()
+	tm := &tunnelManager{ops: ops}
+	state, gen := newKAState(true, 3, 1)
+	var transitions []bool
+	tm.setLivenessChangeCallback(func(_ string, up bool) {
+		transitions = append(transitions, up)
+	})
+
+	dead := &fakeProber{results: []probeOutcome{{result: ProbeDead, kind: UnsupportedNone}}}
+	tickN(tm, "gr0", state, dead, gen, 0, 3)
+	if len(transitions) != 1 || transitions[0] {
+		t.Fatalf("down transitions = %v, want [false]", transitions)
+	}
+
+	alive := &fakeProber{results: []probeOutcome{{result: ProbeAlive, kind: UnsupportedNone}}}
+	tm.keepaliveTick("gr0", state, alive, gen, 0)
+	tickN(tm, "gr0", state, alive, gen, 0, 2)
+	if len(transitions) != 2 || transitions[0] || !transitions[1] {
+		t.Fatalf("down/up transitions = %v, want [false true]", transitions)
+	}
+}
+
 // --- §9 Unsupported(structural): never LinkSet*, KeepaliveUp nil, info "unknown" ---
 func TestKeepaliveStructuralUnsupportedHolds(t *testing.T) {
 	ops := newKaOps()
@@ -306,6 +329,10 @@ func TestKeepaliveLinkSetDownErrorRetries(t *testing.T) {
 	ops.setDownErr = errors.New("netlink busy")
 	tm := &tunnelManager{ops: ops}
 	state, gen := newKAState(true, 3, 1)
+	var transitions []bool
+	tm.setLivenessChangeCallback(func(_ string, up bool) {
+		transitions = append(transitions, up)
+	})
 	prober := &fakeProber{results: []probeOutcome{{result: ProbeDead, kind: UnsupportedNone}}}
 
 	tickN(tm, "gr0", state, prober, gen, 0, 4)
@@ -315,6 +342,9 @@ func TestKeepaliveLinkSetDownErrorRetries(t *testing.T) {
 	}
 	if ops.downs() < 2 {
 		t.Fatalf("expected repeated LinkSetDown attempts, got %d", ops.downs())
+	}
+	if len(transitions) != 0 {
+		t.Fatalf("failed LinkSetDown emitted liveness transitions %v", transitions)
 	}
 	// Now LinkSetDown succeeds → exactly one effective down.
 	ops.mu.Lock()
@@ -327,6 +357,9 @@ func TestKeepaliveLinkSetDownErrorRetries(t *testing.T) {
 	}
 	if ops.downs() != beforeDowns+1 {
 		t.Fatalf("expected one more LinkSetDown on the successful tick, got %d -> %d", beforeDowns, ops.downs())
+	}
+	if len(transitions) != 1 || transitions[0] {
+		t.Fatalf("successful LinkSetDown transitions = %v, want [false]", transitions)
 	}
 }
 

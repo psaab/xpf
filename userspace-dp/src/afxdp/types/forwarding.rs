@@ -161,6 +161,9 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) install_tables: FastMap<u32, InstallTables>,
     pub(in crate::afxdp) tunnel_endpoints: FastMap<u16, TunnelEndpoint>,
     pub(in crate::afxdp) tunnel_endpoint_by_ifindex: FastMap<i32, u16>,
+    /// #11423: endpoint ids whose tunnel devices are explicitly down in the
+    /// snapshot. Missing liveness remains compatible with older snapshots.
+    pub(in crate::afxdp) tunnel_endpoints_down: FastSet<u16>,
     /// #2327: kind-segregated, outer-tuple-keyed index for the GRE
     /// decap fast path. Keyed by the OUTER tuple as seen FROM THE
     /// ENDPOINT's perspective — `(outer_family, endpoint.source,

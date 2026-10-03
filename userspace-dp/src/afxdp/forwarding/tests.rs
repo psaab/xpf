@@ -4980,6 +4980,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
         linux_name: "ge-0-0-1".to_string(),
         ifindex: 11,
         hardware_addr: "02:00:00:00:00:11".to_string(),
+        routing_instance: "sfmix".to_string(),
         addresses: vec![crate::InterfaceAddressSnapshot {
             family: "inet".to_string(),
             address: "192.0.2.1/24".to_string(),
@@ -4997,9 +4998,9 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
         router: true,
         link_local: false,
     });
-    // One inet.0 ECMP prefix with a mixed direct + tunnel next-hop set.
+    // One sfmix.inet.0 ECMP prefix with a mixed direct + tunnel next-hop set.
     snapshot.routes.push(crate::RouteSnapshot {
-        table: "inet.0".to_string(),
+        table: "sfmix.inet.0".to_string(),
         family: "inet".to_string(),
         destination: "203.0.113.0/24".to_string(),
         next_hop_weights: vec![],
@@ -5015,7 +5016,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
     let state = build_forwarding_state(&snapshot);
 
     // The FIB retains BOTH next-hops, and exactly one carries a tunnel id.
-    let route = &state.routes_v4.get("inet.0").expect("table")[0];
+    let route = &state.routes_v4.get("sfmix.inet.0").expect("table")[0];
     assert_eq!(route.next_hops.len(), 2, "ECMP route must retain both hops");
     assert!(
         route.next_hops.iter().any(|nh| nh.tunnel_endpoint_id == 1),
@@ -5036,7 +5037,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
             &state,
             None,
             Ipv4Addr::new(203, 0, 113, 5),
-            "inet.0",
+            "sfmix.inet.0",
             0,
             true,
             Some(h),
@@ -5068,7 +5069,114 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
         saw_tunnel_id,
         "a tunnel selection must carry tunnel_endpoint_id 1",
     );
+    // #11423: the Go snapshot feeds the keepalive-driven TUN link state
+    // through this same endpoint row. While down, every new flow must
+    // converge to the live direct ECMP member; recovery restores sharing.
+    let mut down_snapshot = snapshot.clone();
+    let mut down_wire =
+        serde_json::to_value(&down_snapshot.tunnel_endpoints[0]).expect("encode GRE endpoint");
+    down_wire["link_up"] = serde_json::Value::Bool(false);
+    down_snapshot.tunnel_endpoints[0] =
+        serde_json::from_value(down_wire).expect("decode down GRE endpoint");
+    let down = build_forwarding_state(&down_snapshot);
+
+    let mut recovered_snapshot = down_snapshot.clone();
+    let mut recovered_wire =
+        serde_json::to_value(&recovered_snapshot.tunnel_endpoints[0]).expect("encode GRE endpoint");
+    recovered_wire["link_up"] = serde_json::Value::Bool(true);
+    recovered_snapshot.tunnel_endpoints[0] =
+        serde_json::from_value(recovered_wire).expect("decode recovered GRE endpoint");
+    let recovered = build_forwarding_state(&recovered_snapshot);
+
+    let mut recovered_egresses = std::collections::BTreeSet::new();
+    for hash in 0u64..64 {
+        let dead = lookup_forwarding_resolution_v4(
+            &down,
+            None,
+            Ipv4Addr::new(203, 0, 113, 5),
+            "sfmix.inet.0",
+            0,
+            true,
+            Some(hash),
+        );
+        assert_eq!(dead.disposition, ForwardingDisposition::ForwardCandidate);
+        assert_eq!(
+            (dead.egress_ifindex, dead.tunnel_endpoint_id),
+            (11, 0),
+            "flow hash {hash} must converge to the direct member while GRE is down"
+        );
+        let live = lookup_forwarding_resolution_v4(
+            &recovered,
+            None,
+            Ipv4Addr::new(203, 0, 113, 5),
+            "sfmix.inet.0",
+            0,
+            true,
+            Some(hash),
+        );
+        recovered_egresses.insert(live.egress_ifindex);
+    }
+    assert_eq!(
+        recovered_egresses,
+        std::collections::BTreeSet::from([11, 362]),
+        "restored GRE endpoint must rejoin IPv4 ECMP"
+    );
 }
+/// #11423: a sole tunnel next-hop can be selected as the preferred
+/// MissingNeighbor fallback even though the endpoint is known down. Final
+/// tunnel resolution must refuse that fallback instead of forwarding via its
+/// healthy outer underlay, and resume forwarding after the endpoint recovers.
+#[test]
+fn single_tunnel_route_withdraws_when_endpoint_down_and_recovers() {
+    let mut snapshot = native_gre_snapshot(true);
+    let destination = Ipv4Addr::new(203, 0, 113, 5);
+    let live = build_forwarding_state(&snapshot);
+    let initial = lookup_forwarding_resolution_v4(
+        &live,
+        None,
+        destination,
+        "sfmix.inet.0",
+        0,
+        true,
+        Some(0),
+    );
+    assert_eq!(initial.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(initial.tunnel_endpoint_id, 1);
+
+    snapshot.tunnel_endpoints[0].link_up = Some(false);
+    let down = build_forwarding_state(&snapshot);
+    let withdrawn = lookup_forwarding_resolution_v4(
+        &down,
+        None,
+        destination,
+        "sfmix.inet.0",
+        0,
+        true,
+        Some(0),
+    );
+    assert_eq!(
+        withdrawn.disposition,
+        ForwardingDisposition::NoRoute,
+        "a sole down tunnel hop must not forward through its live outer underlay"
+    );
+    assert_eq!(withdrawn.tunnel_endpoint_id, 0);
+
+    snapshot.tunnel_endpoints[0].link_up = Some(true);
+    let recovered = build_forwarding_state(&snapshot);
+    let resumed = lookup_forwarding_resolution_v4(
+        &recovered,
+        None,
+        destination,
+        "sfmix.inet.0",
+        0,
+        true,
+        Some(0),
+    );
+    assert_eq!(resumed.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(resumed.tunnel_endpoint_id, 1);
+    assert_eq!(resumed.egress_ifindex, 362);
+}
+
 
 /// #2923 (review finding #1): a tunnel candidate whose OUTER underlay route is
 /// WITHDRAWN must be DEAD, not live. `resolve_tunnel_outer` still returns
@@ -5185,6 +5293,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
         linux_name: "ge-0-0-1".to_string(),
         ifindex: 11,
         hardware_addr: "02:00:00:00:00:11".to_string(),
+        routing_instance: "sfmix".to_string(),
         addresses: vec![crate::InterfaceAddressSnapshot {
             family: "inet6".to_string(),
             address: "2001:db8:ec::1/64".to_string(),
@@ -5202,10 +5311,10 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
         router: true,
         link_local: false,
     });
-    // One inet6.0 INNER ECMP prefix mixing a direct v6 hop + the tunnel hop.
+    // One sfmix.inet6.0 INNER ECMP prefix mixing a direct v6 hop + the tunnel hop.
     // (Disjoint from the GRE outer prefix 2602:ffd3:0:2::/64.)
     snapshot.routes.push(crate::RouteSnapshot {
-        table: "inet6.0".to_string(),
+        table: "sfmix.inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "2001:db8:dead::/48".to_string(),
         next_hop_weights: vec![],
@@ -5220,15 +5329,15 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
     });
     let state = build_forwarding_state(&snapshot);
 
-    // The inet6.0 table also holds the GRE outer prefix; find OUR mixed prefix.
+    // The sfmix.inet6.0 table also holds the GRE outer prefix; find OUR mixed prefix.
     let dead_net: Ipv6Addr = "2001:db8:dead::".parse().unwrap();
     let route = state
         .routes_v6
-        .get("inet6.0")
+        .get("sfmix.inet6.0")
         .expect("table")
         .iter()
         .find(|r| r.prefix.contains(dead_net))
-        .expect("mixed inet6.0 ECMP route present");
+        .expect("mixed sfmix.inet6.0 ECMP route present");
     assert_eq!(route.next_hops.len(), 2, "ECMP route must retain both hops");
     assert!(
         route.next_hops.iter().any(|nh| nh.tunnel_endpoint_id == 1),
@@ -5242,7 +5351,7 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
             &state,
             None,
             "2001:db8:dead::5".parse::<Ipv6Addr>().unwrap(),
-            "inet6.0",
+            "sfmix.inet6.0",
             0,
             true,
             Some(h),
@@ -5273,6 +5382,57 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
     assert!(
         saw_tunnel_id,
         "a v6 tunnel selection must carry tunnel_endpoint_id 1",
+    );
+    // #11423: the v6 ECMP branch obeys the same keepalive-driven endpoint
+    // withdrawal and recovery as the v4 branch.
+    let mut down_snapshot = snapshot.clone();
+    let mut down_wire =
+        serde_json::to_value(&down_snapshot.tunnel_endpoints[0]).expect("encode GRE endpoint");
+    down_wire["link_up"] = serde_json::Value::Bool(false);
+    down_snapshot.tunnel_endpoints[0] =
+        serde_json::from_value(down_wire).expect("decode down GRE endpoint");
+    let down = build_forwarding_state(&down_snapshot);
+
+    let mut recovered_snapshot = down_snapshot.clone();
+    let mut recovered_wire =
+        serde_json::to_value(&recovered_snapshot.tunnel_endpoints[0]).expect("encode GRE endpoint");
+    recovered_wire["link_up"] = serde_json::Value::Bool(true);
+    recovered_snapshot.tunnel_endpoints[0] =
+        serde_json::from_value(recovered_wire).expect("decode recovered GRE endpoint");
+    let recovered = build_forwarding_state(&recovered_snapshot);
+
+    let mut recovered_egresses = std::collections::BTreeSet::new();
+    for hash in 0u64..64 {
+        let dead = lookup_forwarding_resolution_v6(
+            &down,
+            None,
+            "2001:db8:dead::5".parse::<Ipv6Addr>().unwrap(),
+            "sfmix.inet6.0",
+            0,
+            true,
+            Some(hash),
+        );
+        assert_eq!(dead.disposition, ForwardingDisposition::ForwardCandidate);
+        assert_eq!(
+            (dead.egress_ifindex, dead.tunnel_endpoint_id),
+            (11, 0),
+            "v6 flow hash {hash} must converge to the direct member while GRE is down"
+        );
+        let live = lookup_forwarding_resolution_v6(
+            &recovered,
+            None,
+            "2001:db8:dead::5".parse::<Ipv6Addr>().unwrap(),
+            "sfmix.inet6.0",
+            0,
+            true,
+            Some(hash),
+        );
+        recovered_egresses.insert(live.egress_ifindex);
+    }
+    assert_eq!(
+        recovered_egresses,
+        std::collections::BTreeSet::from([11, 362]),
+        "restored GRE endpoint must rejoin IPv6 ECMP"
     );
 }
 

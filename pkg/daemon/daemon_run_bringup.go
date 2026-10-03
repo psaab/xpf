@@ -54,6 +54,9 @@ func (d *Daemon) initManagers(failClosed bool) error {
 			slog.Warn("failed to create routing manager", "err", err)
 		} else {
 			d.routing = rm
+			rm.SetTunnelLivenessChangeCallback(func(string, bool) {
+				d.markRouteListenerImmediately()
+			})
 			// #10765: probe-pin tables and priorities are shared with host
 			// policy routing until xpf owns the host. Sweep only while the
 			// host-routing ownership gate is active.

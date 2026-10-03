@@ -64,6 +64,12 @@ pub(in crate::afxdp) fn resolve_tunnel_forwarding_resolution(
     };
     let logical_ifindex = endpoint.logical_ifindex;
     let destination = endpoint.destination;
+    // Route selection preserves a preferred drivable member as a cold-path
+    // fallback when every member is non-live. Never let that fallback reopen a
+    // down tunnel through an otherwise healthy outer underlay.
+    if state.tunnel_endpoints_down.contains(&tunnel_endpoint_id) {
+        return no_route_resolution(Some(destination));
+    }
     let Some(outer) = resolve_tunnel_outer(state, dynamic_neighbors, tunnel_endpoint_id, depth)
     else {
         return no_route_resolution(Some(destination));

@@ -15,6 +15,14 @@ type TunnelEndpointSnapshot struct {
 	Key             uint32 `json:"key,omitempty"`
 	TTL             int    `json:"ttl,omitempty"`
 	TransportTable  string `json:"transport_table,omitempty"`
+	// LinkUp reports whether the tunnel netdev is usable for forwarding:
+	// administratively up and not in a definite-down oper state (#11423).
+	// The interface snapshot's liveness sample uses the same kernel verdict
+	// as #11404; GRE keepalive drives its anchor TUN down only after a failed
+	// probe threshold and restores it only after a successful probe, so this
+	// value withdraws / restores the endpoint without a config commit.
+	// Nil means unknown (legacy sender); the Rust side treats it as live.
+	LinkUp *bool `json:"link_up,omitempty"`
 
 	// WireGuard clean-room termination (see docs/pr/wireguard-clean/plan.md).
 	// All fields are wire-compatible additions: a daemon built before the

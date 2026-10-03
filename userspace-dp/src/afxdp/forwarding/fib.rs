@@ -1332,6 +1332,9 @@ pub(in crate::afxdp) fn ecmp_hash_flow_seeded(seed: u64, key: &crate::session::S
 /// which restricts selection to direct candidates and starves the tunnel path
 /// even when its underlay is fully up.
 ///
+/// #11423: an endpoint explicitly marked link-down by keepalive is dead even
+/// if its outer route remains forwardable. Older snapshots without link state
+/// preserve the prior underlay-only liveness behavior.
 /// A tunnel next-hop is live iff its endpoint exists AND the OUTER transport
 /// resolves to a FORWARDABLE disposition. `resolve_tunnel_outer` already
 /// rejects the structurally-broken cases (unknown endpoint, local-delivery
@@ -1363,6 +1366,9 @@ fn tunnel_next_hop_live(
     tunnel_endpoint_id: u16,
     depth: usize,
 ) -> bool {
+    if state.tunnel_endpoints_down.contains(&tunnel_endpoint_id) {
+        return false;
+    }
     matches!(
         resolve_tunnel_outer(state, dynamic_neighbors, tunnel_endpoint_id, depth)
             .map(|outer| outer.disposition),

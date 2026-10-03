@@ -53,6 +53,64 @@ func TestBuildTunnelEndpointSnapshotsBuildsUnitEndpoint(t *testing.T) {
 	}
 }
 
+func TestBuildTunnelEndpointSnapshotsCarriesLinkState11423(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"gr-0/0/0": {
+			Name: "gr-0/0/0",
+			Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0},
+			},
+			Tunnel: &config.TunnelConfig{
+				Name:        "gr-0-0-0",
+				Mode:        "gre",
+				Source:      "192.0.2.1",
+				Destination: "192.0.2.2",
+			},
+		},
+	}
+	up, down := true, false
+	for _, tc := range []struct {
+		name string
+		up   *bool
+	}{
+		{name: "up", up: &up},
+		{name: "down", up: &down},
+		{name: "unknown", up: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			endpoints := buildTunnelEndpointSnapshots(cfg, []InterfaceSnapshot{{
+				Name:      "gr-0/0/0.0",
+				LinuxName: "gr-0-0-0",
+				Ifindex:   362,
+				LinkUp:    tc.up,
+			}})
+			if len(endpoints) != 1 {
+				t.Fatalf("endpoint count = %d, want 1", len(endpoints))
+			}
+			if got := endpoints[0].LinkUp; (got == nil) != (tc.up == nil) ||
+				(got != nil && *got != *tc.up) {
+				t.Fatalf("endpoint link_up = %v, want %v", got, tc.up)
+			}
+			wire, err := json.Marshal(endpoints[0])
+			if err != nil {
+				t.Fatalf("marshal endpoint: %v", err)
+			}
+			var fields map[string]any
+			if err := json.Unmarshal(wire, &fields); err != nil {
+				t.Fatalf("decode endpoint wire: %v", err)
+			}
+			if tc.up == nil {
+				if _, present := fields["link_up"]; present {
+					t.Fatalf("unknown liveness should be omitted: %s", wire)
+				}
+			} else if fields["link_up"] != *tc.up {
+				t.Fatalf("wire link_up = %v, want %v: %s", fields["link_up"], *tc.up, wire)
+			}
+		})
+	}
+}
+
 func TestBuildTunnelEndpointSnapshotsUsesConfiguredTransportTable(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{

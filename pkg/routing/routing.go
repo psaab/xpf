@@ -212,6 +212,15 @@ func (m *Manager) ApplyTunnels(tunnels []*config.TunnelConfig) error {
 	return m.tunnel.Apply(tunnels)
 }
 
+// SetTunnelLivenessChangeCallback registers a callback for committed
+// keepalive-driven link transitions. It runs after the successful netlink
+// operation and outside the keepalive state lock.
+func (m *Manager) SetTunnelLivenessChangeCallback(callback func(tunnelName string, up bool)) {
+	if m.tunnel != nil {
+		m.tunnel.setLivenessChangeCallback(callback)
+	}
+}
+
 // ClearTunnels removes all previously created tunnel interfaces.
 func (m *Manager) ClearTunnels() error { return m.tunnel.Clear() }
 

@@ -1009,6 +1009,12 @@ pub(crate) struct TunnelEndpointSnapshot {
     pub ttl: i32,
     #[serde(rename = "transport_table", default)]
     pub transport_table: String,
+    /// #11423: explicit tunnel-netdev liveness, sampled alongside the
+    /// interface LinkUp verdict. GRE keepalive down/up transitions drive
+    /// LinkSetDown/LinkSetUp on this TUN; Missing means a legacy sender or
+    /// snapshot that did not report state and preserves historical behavior.
+    #[serde(rename = "link_up", default, skip_serializing_if = "Option::is_none")]
+    pub link_up: Option<bool>,
     // WireGuard fields. All `#[serde(default)]` so this stays
     // wire-compatible with old daemons that don't populate them.
     // See docs/pr/wireguard-clean/plan.md for the design.
@@ -1114,6 +1120,7 @@ impl std::fmt::Debug for TunnelEndpointSnapshot {
             .field("key", &self.key)
             .field("ttl", &self.ttl)
             .field("transport_table", &self.transport_table)
+            .field("link_up", &self.link_up)
             .field("wg_listen_port", &self.wg_listen_port)
             .field("wg_local_privkey_hex", &privkey_state)
             // wg_peers uses TunnelWgPeerSnapshot's own Debug, which
