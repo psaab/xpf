@@ -4383,10 +4383,10 @@ fn app_catalog_precedence_parity_fixture() {
             "case {name:?}: lookup_directional app_id = {got_id}, want {expected_id}"
         );
 
-        // Resolve the id back to a name (0 == UNKNOWN == the empty string, which
-        // is how the show path renders a no-match on the disabled side).
+        // Resolve the id to the session-display label shared by both paths.
+        // App ID 0 is the UNKNOWN sentinel even though no catalog name is stored.
         let got_name = if got_id == 0 {
-            ""
+            "UNKNOWN"
         } else {
             id_to_name
                 .get(&got_id)

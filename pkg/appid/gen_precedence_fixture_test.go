@@ -98,7 +98,7 @@ func TestRegeneratePrecedenceFixture(t *testing.T) {
 		},
 		{
 			name: "no_match_resolves_unknown",
-			note: "No user app matches tcp/4321 (4321 is deliberately absent from the Go builtinFallbacks table — the S1 predefined-vs-builtin set gap is out of scope), so both paths resolve UNKNOWN (id 0 / empty name).",
+			note: "No user app matches tcp/4321 (4321 is deliberately absent from the Go builtinFallbacks table — the S1 predefined-vs-builtin set gap is out of scope), so both paths resolve to the UNKNOWN sentinel (app_id 0).",
 			apps: []precedenceParityApp{
 				{Name: "aaa-http", Protocol: "tcp", DestinationPort: "80"},
 			},

@@ -78,8 +78,11 @@ and resolves session display names from the dataplane's assigned `app_id`.
   no reverse-direction service-slot model (S2). When AppID is **enabled** in
   `services.application-identification` and the dataplane has not
   assigned an `app_id` for the session (`appID == 0`), the function
-  returns `UNKNOWN` rather than guessing from port heuristics. Used
-  for session display in the CLI and gRPC paths. (`pkg/logging`
+  returns `UNKNOWN` rather than guessing from port heuristics. When
+  disabled, a miss in both configured and built-in tuple fallbacks
+  returns the same sentinel, so the `application UNKNOWN` filter
+  selects no-match sessions consistently under either setting. The resolver
+  is used for session display in the CLI and gRPC paths. (`pkg/logging`
   resolves app names through its own `EventReader.resolveAppName`,
   and `pkg/flowexport` does not call this function — the wiring
   isn't shared with NetFlow / syslog.)

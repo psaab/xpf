@@ -153,9 +153,9 @@ func TestBuildCatalogTypeConstrainedICMPHonestUnknown(t *testing.T) {
 // guard for the Go display/session-name tuple fallback (AppID-disabled path).
 // matchTuple is protocol + port only, so a type-constrained ICMP app would
 // otherwise match EVERY ICMP session and false-label it. A non-echo ICMP must
-// resolve to a protocol-only ICMP app when one is referenced, or to empty
-// (honest UNKNOWN), never to the type-constrained app. Reverting the
-// icmpTypeConstrained skip in resolveTupleFallback turns this RED.
+// resolve to a protocol-only app when one is referenced, or UNKNOWN when no
+// protocol-only fallback exists. Reverting the `icmpTypeConstrained` skip in
+// resolveTupleFallback turns this RED.
 func TestResolveTupleFallbackSkipsTypeConstrainedICMP(t *testing.T) {
 	// Case 1: only a type-constrained ICMP app is defined. An ICMP session must
 	// NOT be labeled with it (no protocol-only fallback to fall back to).
@@ -167,13 +167,13 @@ func TestResolveTupleFallbackSkipsTypeConstrainedICMP(t *testing.T) {
 	// Non-echo ICMP (type 3 destination-unreachable). srcPort/dstPort are the
 	// L4 tuple; ICMP has none, so both are 0. appID 0 (unstamped) forces the
 	// tuple fallback.
-	if got := ResolveSessionName(nil, cfg, 1, 0, 0, 0); got == "my-echo" {
-		t.Fatalf("non-echo ICMP resolved to %q via the tuple fallback; a type-constrained ICMP app must not label arbitrary ICMP (#3781)", got)
+	if got := ResolveSessionName(nil, cfg, 1, 0, 0, 0); got != Unknown {
+		t.Fatalf("non-echo ICMP resolved to %q, want %q without a protocol-only app (#3781)", got, Unknown)
 	}
 	// An echo (type 8) likewise gets no positive label from the interim (that
 	// is the deferred type-aware match) — the guarantee is only NO FALSE LABEL.
-	if got := ResolveSessionName(nil, cfg, 1, 0, 0, 0); got != "" && got != Unknown {
-		t.Fatalf("type-constrained ICMP app produced label %q; the interim renders honest UNKNOWN/empty, not a false or positive label", got)
+	if got := ResolveSessionName(nil, cfg, 1, 0, 0, 0); got != Unknown {
+		t.Fatalf("echo ICMP resolved to %q, want %q without a protocol-only app (#3781)", got, Unknown)
 	}
 
 	// Case 2: a protocol-only ICMP app is also defined. The honest label for any

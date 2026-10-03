@@ -179,9 +179,10 @@ func CatalogNames(cfg *config.Config, includeAll bool) ([]string, error) {
 	return sortedNames(names), nil
 }
 
-// ResolveSessionName returns the session application name using the actual
-// dataplane-assigned app_id when available. When AppID is enabled, unknown
-// sessions are reported as UNKNOWN instead of guessed from port heuristics.
+// ResolveSessionName returns the session application name using the active
+// AppID setting. When enabled, unknown sessions are reported as UNKNOWN rather
+// than guessed from port heuristics. When disabled, the tuple fallback returns
+// the same sentinel if neither a configured app nor a built-in guess matches.
 //
 // srcPort is the session source port; it is required so the tuple fallback can
 // honor a configured `source-port` constraint (#3428). Both the source and the
@@ -317,7 +318,8 @@ func resolveTupleFallback(proto uint8, srcPort, dstPort uint16, cfg *config.Conf
 			return name
 		}
 	}
-	return ""
+	// #11818: a no-match is the filterable UNKNOWN sentinel for either mode.
+	return Unknown
 }
 
 // matchTuple reports whether a session (proto, srcPort, dstPort) satisfies a
