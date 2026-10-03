@@ -318,6 +318,49 @@ func QuarantinedZoneInterfaceKeys(cfg *Config) map[string]struct{} {
 	return keys
 }
 
+// ZoneAuthoredBoundSecureTunnelUnitRefs returns non-quarantined unit refs
+// using the same logical-key expansion and quarantine rules as runtime zone
+// mapping, then retains only refs that resolve to a secure-tunnel binding.
+// Callers use these refs to recognize bind-only snapshot candidates.
+func ZoneAuthoredBoundSecureTunnelUnitRefs(cfg *Config) map[string]struct{} {
+	if cfg == nil || len(cfg.Security.Zones) == 0 {
+		return nil
+	}
+	zoneNames := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		zoneNames = append(zoneNames, name)
+	}
+	sort.Strings(zoneNames)
+	excludedZones := ZoneQuarantineExclusions(zoneNames)
+	quarantinedRefs := QuarantinedZoneInterfaceKeys(cfg)
+	refs := make(map[string]struct{})
+	for _, zoneName := range zoneNames {
+		if _, excluded := excludedZones[zoneName]; excluded {
+			continue
+		}
+		zone := cfg.Security.Zones[zoneName]
+		if zone == nil {
+			continue
+		}
+		for _, rawRef := range zone.Interfaces {
+			for _, ref := range zoneIfaceLogicalKeys(cfg, rawRef) {
+				split := cfg.SplitInterfaceUnitRef(ref)
+				if !split.HasUnit || split.UnitTok == "" {
+					continue
+				}
+				if _, quarantined := quarantinedRefs[split.Literal]; quarantined {
+					continue
+				}
+				if _, bound := cfg.SecureTunnelNetdevForRef(split.Literal); !bound {
+					continue
+				}
+				refs[split.Literal] = struct{}{}
+			}
+		}
+	}
+	return refs
+}
+
 // validateZoneInterfaceMembershipStrict hard-rejects a configuration that
 // assigns the same interface to more than one security zone (#3072).
 //
