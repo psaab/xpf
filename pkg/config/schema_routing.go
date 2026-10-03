@@ -216,6 +216,12 @@ var schemaPolicyOptions = &schemaNode{desc: "Policy options", children: map[stri
 				"as-path":      {desc: "AS path", args: 1, multi: true, placeholder: "<name>", children: nil},
 			}},
 			"then": {desc: "Action", children: map[string]*schemaNode{
+				// `then next policy` leaves this policy's remaining terms and
+				// default action, then continues at the next policy in the chain.
+				"next": {desc: "Continue with the next policy", args: 1,
+					valueType: ValueEnumOf, valueDesc: "Policy continuation (policy)",
+					valueExamples: []string{"policy"}, validator: ValidateEnum([]string{"policy"}),
+					placeholder: "<policy>", children: nil},
 				"accept":       {desc: "Accept route", children: nil},
 				"reject":       {desc: "Reject route", children: nil},
 				"next-hop":     {desc: "Next hop", args: 1, placeholder: "<address>", children: nil},

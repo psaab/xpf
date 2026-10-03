@@ -8,38 +8,51 @@ import (
 )
 
 // FRR route-map sequence numbers occupy the command range
-// `route-map WORD <permit|deny> (1-65535)`. The pkg/frr renderer
-// (renderPolicyTermSequences / renderComposedRouteMap) numbers each emitted
-// term sequence in steps of routeMapSeqStep starting at routeMapSeqStep, then
-// appends ONE trailing default-action sequence, so a policy that expands to N
-// term sequences uses a highest sequence number of routeMapSeqStep*(N+1).
-// Once that exceeds frrMaxRouteMapSeq FRR rejects the `route-map` line with
-// CMD_WARNING_CONFIG_FAILED, and a single failed line makes the whole
-// vtysh-batched frr-reload exit non-zero — poisoning the ENTIRE managed-section
-// reload, not just this policy (#5701).
+// `route-map WORD <permit|deny> (1-65535)`. The pkg/frr renderer numbers
+// sequences in steps of routeMapSeqStep. The pre-fallback count includes all
+// rendered term variants and an explicit policy default when `next policy`
+// can jump over it; one final fallback follows that count. A map with N
+// pre-fallback sequences therefore has highest sequence number
+// routeMapSeqStep*(N+1). Once that exceeds frrMaxRouteMapSeq FRR rejects the
+// `route-map` line with CMD_WARNING_CONFIG_FAILED, and a single failed line
+// makes the whole vtysh-batched frr-reload exit non-zero — poisoning the ENTIRE
+// managed-section reload, not just this policy (#5701).
 const (
 	frrMaxRouteMapSeq = 65535
 	routeMapSeqStep   = 10
-	// MaxRouteMapSequences is the largest number of per-term route-map
-	// sequences a single policy-statement may expand to before its highest FRR
-	// sequence number (routeMapSeqStep*(N+1), including the trailing default)
-	// would exceed frrMaxRouteMapSeq. 65535/10 - 1 = 6552.
+	// MaxRouteMapSequences is the largest number of pre-fallback route-map
+	// sequences a policy-statement may expand to before the final fallback's
+	// highest FRR sequence number (routeMapSeqStep*(N+1)) would exceed
+	// frrMaxRouteMapSeq. 65535/10 - 1 = 6552.
 	MaxRouteMapSequences = frrMaxRouteMapSeq/routeMapSeqStep - 1
 )
 
-// RouteMapSequenceCount returns the number of FRR route-map TERM sequences the
-// pkg/frr renderer will emit for ps (EXCLUDING the single trailing
-// default-action sequence). It mirrors the renderer's Cartesian expansion
-// exactly: per term, (2 when the term's route-filters mix IPv4 and IPv6
-// families, else 1) x max(1,|from prefix-list|) x max(1,|from community|) x
-// max(1,|from as-path|), summed over terms.
+// policyStatementHasNextPolicy reports whether any term jumps to the next policy.
+func policyStatementHasNextPolicy(ps *PolicyStatement) bool {
+	if ps == nil {
+		return false
+	}
+	for _, term := range ps.Terms {
+		if term != nil && term.NextPolicy && term.Action == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// RouteMapSequenceCount returns the FRR route-map sequences before the final
+// fallback for ps: all rendered term variants, plus an explicit policy-default
+// sequence when `then next policy` can jump over it. It mirrors the renderer's
+// Cartesian expansion exactly: per term, (2 when the term's route-filters mix
+// IPv4 and IPv6 families, else 1) x max(1,|from prefix-list|) x
+// max(1,|from community|) x max(1,|from as-path|), summed over terms.
 //
-// The count depends only on the term's OR-set lengths and route-filter family
-// mix — NOT on the referenced list CONTENTS — because emitVariants emits one
-// route-map sequence per NAME, not per prefix. Every multiply and the running
-// sum are overflow-checked (checkedMulU64 / saturating add): a pathological
-// crafted policy saturates to math.MaxUint64 rather than wrapping back down
-// into the in-bound range, so it never under-reports an over-ceiling policy.
+// The term-variant count depends only on each term's OR-set lengths and
+// route-filter family mix — NOT on referenced list CONTENTS — because
+// emitVariants emits one route-map sequence per NAME, not per prefix. Every
+// multiply and the running sum are overflow-checked (checkedMulU64 /
+// saturating add): a pathological crafted policy saturates to math.MaxUint64
+// rather than wrapping back down into the in-bound range.
 // #7526: po carries the prefix-list table, because the count depends on WHAT
 // the referenced lists hold, not just how many are named. The renderer expands
 // one prefix-list NAME into one match line per family it holds
@@ -71,21 +84,25 @@ func RouteMapSequenceCount(po *PolicyOptionsConfig, ps *PolicyStatement) uint64 
 		}
 		total += v
 	}
+	if policyStatementHasNextPolicy(ps) &&
+		(ps.DefaultAction == "accept" || ps.DefaultAction == "reject") {
+		if total == math.MaxUint64 {
+			return total
+		}
+		total++
+	}
 	return total
 }
 
-// ComposedChainSequenceCount returns the number of FRR route-map TERM sequences
-// the pkg/frr renderer's renderComposedRouteMap emits for an ordered BGP policy
-// CHAIN (an `import`/`export [ A B ... ]` list of length >= 2, #5277): the SUM
-// of RouteMapSequenceCount over the chain's members, TRUNCATED at the first
-// member carrying an explicit terminating policy default action (`then accept`/
-// `then reject` at the policy level → DefaultAction "accept"/"reject"), because
-// renderComposedRouteMap stops composing the chain at that member (later members
-// are unreachable and never rendered).
+// ComposedChainSequenceCount returns the FRR route-map sequences before the
+// final fallback for an ordered BGP policy chain (`import`/`export [ A B ... ]`,
+// #5277): the sum of RouteMapSequenceCount over members, truncated after the
+// first explicit policy default with no `next policy` term. That default
+// terminates ordinary fall-through and no route can reach later members.
 //
-// Like the single-policy RouteMapSequenceCount this EXCLUDES the one trailing /
-// terminating default sequence, so the SAME MaxRouteMapSequences ceiling applies
-// — the composed map's highest FRR sequence number is routeMapSeqStep*(count+1).
+// Like the single-policy RouteMapSequenceCount this EXCLUDES the final fallback
+// sequence, so the SAME MaxRouteMapSequences ceiling applies — the composed
+// map's highest FRR sequence number is routeMapSeqStep*(count+1).
 // nil / undefined members are skipped, matching renderComposedRouteMap's
 // `if ps == nil { continue }` (the chain is pre-filtered to defined statements).
 // The running sum is saturating so a pathological chain never wraps back into
@@ -107,9 +124,10 @@ func ComposedChainSequenceCount(po *PolicyOptionsConfig, pss map[string]*PolicyS
 		} else {
 			total += n
 		}
-		// renderComposedRouteMap emits this member's terminating default and
-		// BREAKS — later members are not rendered, so they add no sequences.
-		if ps.DefaultAction == "accept" || ps.DefaultAction == "reject" {
+		// An explicit policy default normally terminates the chain. A matched
+		// `next policy` term jumps around it, making the following member reachable.
+		if (ps.DefaultAction == "accept" || ps.DefaultAction == "reject") &&
+			!policyStatementHasNextPolicy(ps) {
 			break
 		}
 	}

@@ -123,6 +123,14 @@ type PolicyTerm struct {
 	// repetition (the count of repeats is the whole point). Empty = no
 	// prepend clause is rendered.
 	ASPathPrepend []string
+	// NextPolicy skips the remaining terms and the policy default, then resumes
+	// at the next policy in the evaluated policy chain.
+	NextPolicy bool
+	// invalidNextPolicy11780 preserves malformed packed `then next <value>`
+	// tokens long enough for strict compilation to reject them. Tolerant
+	// compilation also records Action=reject so the renderer fails closed.
+	invalidNextPolicy11780      bool
+	invalidNextPolicyValue11780 string
 }
 
 // RouteFilter matches a prefix with a match type.
