@@ -1,13 +1,7 @@
 use super::*;
 
-/// #11386: classifier trust on the logical ingress unit. Wire markings from a
-/// unit without the corresponding binding must not select an egress BA queue.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct BaIngressTrust {
-    pub(super) dscp: bool,
-    pub(super) inet_precedence: bool,
-    pub(super) ieee8021: bool,
-}
+/// Behavior-aggregate trust from the ingress unit's classifier bindings.
+pub(super) type BaIngressTrust = crate::afxdp::types::CoSIngressClassifierBindings;
 
 /// Read the classifier-type bindings from the logical ingress unit.
 pub(super) fn ba_ingress_trust(
@@ -15,20 +9,27 @@ pub(super) fn ba_ingress_trust(
     ingress_ifindex: u32,
     ingress_vlan_id: u16,
 ) -> BaIngressTrust {
+    // Locally generated replies have no wire ingress; their DSCP/PCP is
+    // stack-assigned and retains the pre-gate egress BA behavior.
+    if ingress_ifindex == 0 {
+        return BaIngressTrust {
+            dscp: true,
+            inet_precedence: true,
+            ieee8021: true,
+        };
+    }
     let logical = resolve_ingress_logical_ifindex(
         forwarding,
         ingress_ifindex as i32,
         ingress_vlan_id,
     )
     .unwrap_or(ingress_ifindex as i32);
-    let Some(ingress) = forwarding.cos.interfaces.get(&logical) else {
-        return BaIngressTrust::default();
-    };
-    BaIngressTrust {
-        dscp: !ingress.dscp_classifier.is_empty(),
-        inet_precedence: !ingress.inet_precedence_classifier.is_empty(),
-        ieee8021: !ingress.ieee8021_classifier.is_empty(),
-    }
+    forwarding
+        .cos
+        .ingress_classifier_bindings
+        .get(&logical)
+        .copied()
+        .unwrap_or_default()
 }
 
 /// Resolve the BA queue, considering only classifier types bound on ingress.

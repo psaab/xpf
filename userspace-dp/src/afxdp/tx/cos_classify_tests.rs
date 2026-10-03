@@ -1181,19 +1181,19 @@ fn flowless_packet_gets_ba_classification_from_dscp() {
     );
 }
 fn ba_trust_snapshot_11386(trusted_ingress: bool) -> ConfigSnapshot {
-    let interface = |ifindex, cos_dscp_classifier: &str| InterfaceSnapshot {
+    let interface = |ifindex, cos_dscp_classifier: &str, usable_cos: bool| InterfaceSnapshot {
         ifindex,
-        cos_shaping_rate_bytes_per_sec: 10_000_000,
-        cos_scheduler_map: "wan-map".into(),
+        cos_shaping_rate_bytes_per_sec: if usable_cos { 10_000_000 } else { 0 },
+        cos_scheduler_map: if usable_cos { "wan-map" } else { "" }.into(),
         cos_dscp_classifier: cos_dscp_classifier.into(),
-        cos_dscp_rewrite_rule: "ba-rw".into(),
+        cos_dscp_rewrite_rule: if usable_cos { "ba-rw" } else { "" }.into(),
         ..Default::default()
     };
     ConfigSnapshot {
         interfaces: if trusted_ingress {
-            vec![interface(202, "ba"), interface(5, "ba")]
+            vec![interface(202, "ba", true), interface(5, "ba", false)]
         } else {
-            vec![interface(202, "ba")]
+            vec![interface(202, "ba", true)]
         },
         class_of_service: Some(ClassOfServiceSnapshot {
             forwarding_classes: vec![
@@ -1267,7 +1267,7 @@ fn ba_trust_snapshot_11386(trusted_ingress: bool) -> ConfigSnapshot {
 
 /// #11386: an egress-bound BA classifier may trust the marking only when the
 /// logical ingress unit binds that classifier type. A guest's self-marked CS7
-/// stays in BE, while CS7 on a trusted ingress lands in network-control.
+/// stays in BE, while CS7 on a trusted binding-only ingress lands in NC.
 ///
 /// FAIL-ON-REVERT: before the ingress gate, the guest packet is classified by
 /// the egress unit's CS7 mapping and resolves to queue 7 instead of queue 0.
@@ -1282,6 +1282,10 @@ fn ba_classifier_requires_ingress_unit_binding_11386() {
     let key = inet_precedence_test_key();
     let guest = build_forwarding_state(&ba_trust_snapshot_11386(false));
     let trusted = build_forwarding_state(&ba_trust_snapshot_11386(true));
+    assert!(
+        trusted.cos.interfaces.get(&5).is_none(),
+        "the trusted ingress fixture must bind CoS without being admitted as an egress shaper"
+    );
 
     for (name, forwarding, expected) in [
         ("guest WAN ingress", &guest, 0),
@@ -1340,6 +1344,17 @@ fn ba_classifier_requires_ingress_unit_binding_11386() {
     }
 }
 
+/// A locally generated reply has no wire ingress; its own DSCP is stack-set,
+/// so preserve the pre-gate egress BA classification.
+#[test]
+fn generated_reply_keeps_local_ba_marking_trusted_11386() {
+    let forwarding = build_forwarding_state(&ba_trust_snapshot_11386(false));
+    let frame = generated_v4_frame(crate::afxdp::PROTO_TCP, 56 << 2, 80, 49152);
+    let verdict = classify_generated_reply(&forwarding, 202, &frame, 0);
+    assert!(!verdict.drop);
+    assert_eq!(verdict.cos_queue_id, Some(7));
+    assert_eq!(verdict.dscp_rewrite, Some(46));
+}
 
 fn scheduler_map_without_best_effort_snapshot_11428() -> ConfigSnapshot {
     ConfigSnapshot {

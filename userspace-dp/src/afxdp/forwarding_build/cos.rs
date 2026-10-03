@@ -1345,14 +1345,29 @@ pub(super) fn build_cos_state(
     // expedited-as-default state.
     let tables = build_cos_classifier_tables(cos)?;
     let mut state = CoSState::default();
-    // CoS runtime state is keyed by ifindex. Logical units sharing a netdev
-    // therefore must produce the same runtime config; the base row is not a
-    // CoS unit and is deliberately excluded from this alias check.
-    let mut first_unit_by_ifindex: FastMap<i32, (&InterfaceSnapshot, bool)> = FastMap::default();
+    // CoS runtime state and ingress bindings are keyed by ifindex. Logical
+    // units sharing a netdev must therefore produce identical state; the base
+    // row is not a CoS unit and is deliberately excluded from this alias check.
+    let mut first_unit_by_ifindex: FastMap<
+        i32,
+        (&InterfaceSnapshot, bool, CoSIngressClassifierBindings),
+    > = FastMap::default();
     for iface in &snapshot.interfaces {
         if iface.ifindex <= 0 {
             continue;
         }
+        let ingress_bindings = CoSIngressClassifierBindings {
+            dscp: !iface.cos_dscp_classifier.is_empty()
+                && tables.dscp_classifiers.contains_key(&iface.cos_dscp_classifier),
+            inet_precedence: !iface.cos_inet_precedence_classifier.is_empty()
+                && tables
+                    .inet_precedence_classifiers
+                    .contains_key(&iface.cos_inet_precedence_classifier),
+            ieee8021: !iface.cos_ieee8021_classifier.is_empty()
+                && tables
+                    .ieee8021_classifiers
+                    .contains_key(&iface.cos_ieee8021_classifier),
+        };
         // #7337: report a dangling interface reference BEFORE the admission
         // decision, so the shape where the interface is admitted on another
         // input and the reference is silently inert is reported too — not only
@@ -1379,8 +1394,9 @@ pub(super) fn build_cos_state(
             .transpose()?;
         let duplicate_unit = if iface.is_unit == Some(true) {
             match first_unit_by_ifindex.get(&iface.ifindex).copied() {
-                Some((first_iface, first_had_cos)) => {
+                Some((first_iface, first_had_cos, first_bindings)) => {
                     let same_cos = first_had_cos == built.is_some()
+                        && first_bindings == ingress_bindings
                         && built.as_ref().is_none_or(|(cfg, lp)| {
                             state.interfaces.get(&iface.ifindex) == Some(cfg)
                                 && state.lp_rewrite.get(&iface.ifindex) == Some(lp)
@@ -1397,13 +1413,24 @@ pub(super) fn build_cos_state(
                     true
                 }
                 None => {
-                    first_unit_by_ifindex.insert(iface.ifindex, (iface, built.is_some()));
+                    first_unit_by_ifindex.insert(
+                        iface.ifindex,
+                        (iface, built.is_some(), ingress_bindings),
+                    );
                     false
                 }
             }
         } else {
             false
         };
+        if !duplicate_unit
+            && iface.is_unit != Some(false)
+            && ingress_bindings != CoSIngressClassifierBindings::default()
+        {
+            state
+                .ingress_classifier_bindings
+                .insert(iface.ifindex, ingress_bindings);
+        }
         if let Some((cfg, lp_rewrite)) = built {
             // Identical aliases share the first unit's already-built runtime
             // state. Differing state was rejected above, before either
