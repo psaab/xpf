@@ -190,3 +190,145 @@ func TestCoSBufferSizeTemporalMissingValue_Rejected(t *testing.T) {
 		t.Fatal("expected error for `buffer-size temporal` with no value")
 	}
 }
+
+func TestCoSBufferSizeMixedSiblingFormsRejected11789(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name: "bytes and temporal",
+			input: `class-of-service {
+    schedulers {
+        be {
+            buffer-size 16m;
+            buffer-size temporal 50000;
+        }
+    }
+}`,
+		},
+		{
+			name: "percent and temporal",
+			input: `class-of-service {
+    schedulers {
+        be {
+            buffer-size 10%;
+            buffer-size temporal 50000;
+        }
+    }
+}`,
+		},
+		{
+			name: "bytes and percent",
+			input: `class-of-service {
+    schedulers {
+        be {
+            buffer-size 16m;
+            buffer-size 10%;
+        }
+    }
+}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tree, parseErrs := config.NewParser(tc.input).Parse()
+			if len(parseErrs) != 0 {
+				t.Fatalf("parse error: %v", parseErrs[0])
+			}
+			err := config.SchemaValidate(tree, nil)
+			if err == nil {
+				t.Fatal("SchemaValidate accepted sibling buffer-size forms")
+			}
+			for _, want := range []string{"buffer-size", "mutually exclusive"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("schema error %q does not name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestCoSBufferSizeSameSiblingFormRemainsAllowed11789(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{
+			name: "byte sizes",
+			input: `class-of-service {
+    schedulers { be { buffer-size 16m; buffer-size 32m; } }
+}`,
+		},
+		{
+			name: "percentages",
+			input: `class-of-service {
+    schedulers { be { buffer-size 10%; buffer-size 20%; } }
+}`,
+		},
+		{
+			name: "temporal values",
+			input: `class-of-service {
+    schedulers { be { buffer-size temporal 50000; buffer-size temporal 100000; } }
+}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree, parseErrs := config.NewParser(tc.input).Parse()
+			if len(parseErrs) != 0 {
+				t.Fatalf("parse error: %v", parseErrs[0])
+			}
+			if err := config.SchemaValidate(tree, nil); err != nil {
+				t.Fatalf("same-arm sibling buffer-size values must remain accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestCoSBufferSizeLaterHierarchicalFormReplacesEarlier11789(t *testing.T) {
+	tests := []struct {
+		name           string
+		first, second  string
+		wantBytes      bool
+		wantPercent    float64
+		wantTemporalUS uint64
+	}{
+		{name: "bytes replace temporal", first: "temporal 50000", second: "16m", wantBytes: true},
+		{name: "percent replaces temporal", first: "temporal 50000", second: "10%", wantPercent: 10},
+		{name: "temporal replaces bytes", first: "16m", second: "temporal 50000", wantTemporalUS: 50_000},
+		{name: "temporal replaces percent", first: "10%", second: "temporal 50000", wantTemporalUS: 50_000},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			input := `class-of-service {
+    schedulers {
+        be { buffer-size ` + tc.first + `; }
+    }
+    schedulers {
+        be { buffer-size ` + tc.second + `; }
+    }
+}`
+			tree, parseErrs := config.NewParser(input).Parse()
+			if len(parseErrs) != 0 {
+				t.Fatalf("parse error: %v", parseErrs[0])
+			}
+			cfg, err := config.CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("CompileConfig: %v", err)
+			}
+			sched := cfg.ClassOfService.Schedulers["be"]
+			if sched == nil {
+				t.Fatal("expected be scheduler")
+			}
+			if gotBytes := sched.BufferSizeBytes > 0; gotBytes != tc.wantBytes {
+				t.Errorf("BufferSizeBytes present = %t, want %t (value=%d)", gotBytes, tc.wantBytes, sched.BufferSizeBytes)
+			}
+			if sched.BufferSizePercent != tc.wantPercent {
+				t.Errorf("BufferSizePercent = %v, want %v", sched.BufferSizePercent, tc.wantPercent)
+			}
+			if sched.BufferSizeTemporalUS != tc.wantTemporalUS {
+				t.Errorf("BufferSizeTemporalUS = %d, want %d", sched.BufferSizeTemporalUS, tc.wantTemporalUS)
+			}
+		})
+	}
+}

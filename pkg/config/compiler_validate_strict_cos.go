@@ -633,16 +633,32 @@ func validateClassOfServiceStrict(cos *ClassOfServiceConfig) error {
 				"class-of-service scheduler %q transmit-rate percent %.4g is not a finite value in range (0,100]",
 				sched.Name, sched.TransmitRatePercent)
 		}
-		// Both buffer-size forms set simultaneously is ambiguous. The compiler
-		// always clears the unused field (see compiler_class_of_service.go
-		// buffer-size case), so this can only arise in constructed or
-		// externally-assembled configs. Reject early rather than silently
-		// applying the "byte-size wins" runtime preference.
-		if sched.BufferSizeBytes > 0 && sched.BufferSizePercent > 0 {
+		// The compiler clears unused buffer-size fields, so multiple populated
+		// forms indicate a constructed or externally-assembled config. Reject
+		// instead of silently applying the runtime's byte-size preference.
+		bufferSizeForms := 0
+		if sched.BufferSizeBytes > 0 {
+			bufferSizeForms++
+		}
+		if sched.BufferSizePercent > 0 {
+			bufferSizeForms++
+		}
+		if sched.BufferSizeTemporalUS > 0 {
+			bufferSizeForms++
+		}
+		if bufferSizeForms > 1 {
+			if sched.BufferSizeBytes > 0 && sched.BufferSizePercent > 0 &&
+				sched.BufferSizeTemporalUS == 0 {
+				return fmt.Errorf(
+					"class-of-service scheduler %q has both buffer-size bytes (%d) "+
+						"and buffer-size percent (%.4g%%) set; use one form only",
+					sched.Name, sched.BufferSizeBytes, sched.BufferSizePercent)
+			}
 			return fmt.Errorf(
-				"class-of-service scheduler %q has both buffer-size bytes (%d) "+
-					"and buffer-size percent (%.4g%%) set; use one form only",
-				sched.Name, sched.BufferSizeBytes, sched.BufferSizePercent)
+				"class-of-service scheduler %q has multiple buffer-size forms "+
+					"set (bytes=%d, percent=%.4g%%, temporal=%d us); use one form only",
+				sched.Name, sched.BufferSizeBytes, sched.BufferSizePercent,
+				sched.BufferSizeTemporalUS)
 		}
 	}
 	// #4228 Gap 2: a traffic-control-profile shaping-rate is EITHER an absolute

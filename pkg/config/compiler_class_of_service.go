@@ -524,9 +524,11 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 					if percent, err := parsePercentWithSuffixStrict(v); err == nil {
 						sched.BufferSizeBytes = 0
 						sched.BufferSizePercent = percent
+						sched.BufferSizeTemporalUS = 0
 					} else {
 						sched.BufferSizeBytes = parseBurstSizeLimit(v)
 						sched.BufferSizePercent = 0
+						sched.BufferSizeTemporalUS = 0
 					}
 				}
 			case "surplus-sharing":
