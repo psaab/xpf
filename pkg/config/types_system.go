@@ -1551,19 +1551,21 @@ type FirewallFilterTerm struct {
 	// term's `then` blocks, in order and including duplicates. Action itself is
 	// single-valued and last-write-wins, so a term with `then accept` AND `then
 	// reject` would silently resolve to whichever came last — the operator's
-	// intent was ambiguous and the compiled behavior did not necessarily match
-	// what they wrote (#4375, avo-review-007 H3). This slice is the
-	// mutual-exclusion channel: validateFilterTerminalConflictStrict hard-rejects
-	// any term whose distinct-terminal count exceeds one; the tolerant load /
-	// peer-sync path warns (#1960 no-brick) and retains discard as the conservative
-	// compiled action. The snapshot and lo0 renderers also set FromUnrepresentable
-	// on a conflict, causing the userspace helper / kernel lo0 plan to refuse the
-	// whole candidate and retain prior-good state (#11896), rather than install
-	// the action as a fresh drop. Junos treats accept/reject/discard as mutually
-	// exclusive (a term has exactly one terminating action); the non-terminating
-	// modifiers (count/log/forwarding-class/loss-priority/dscp/traffic-class/
-	// policer/routing-instance) coexist with a terminal and are NOT recorded here.
+	// intent is ambiguous. This slice is the mutual-exclusion channel:
+	// validateFilterTerminalConflictStrict hard-rejects any term whose distinct-
+	// terminal count exceeds one; tolerant loads warn and retain discard as the
+	// conservative compiled action. The snapshot and lo0 renderers also refuse
+	// the whole candidate on a conflict (#11896). The non-terminating modifiers
+	// (count/log/forwarding-class/loss-priority/dscp/traffic-class/policer) are
+	// not recorded here. Routing-instance is a terminating FBF action and is
+	// recorded separately below.
 	TerminalActions []string
+	// routingInstanceTargetFirst and routingInstanceTargetConflict retain the
+	// first target and first distinct target seen by compileFilterThen. This
+	// distinguishes harmless repeats from conflicting FBF destinations without
+	// allocating a history slice for ordinary single-target terms.
+	routingInstanceTargetFirst    string
+	routingInstanceTargetConflict string
 	// UnknownActions records `then` tokens that are neither a recognized
 	// terminating action nor a recognized modifier (#2399 finding 032-16).
 	// Strict commit hard-rejects any term carrying an entry here; the tolerant
