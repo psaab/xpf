@@ -182,9 +182,10 @@ func FormatCoSClassifiers(cfg *config.Config, nameFilter, typeFilter string) str
 		lp    string
 	}
 	type classifierBlock struct {
-		name   string
-		cpType string
-		rows   []cpRow
+		name      string
+		cpType    string
+		rows      []cpRow
+		entryless bool
 	}
 	var blocks []classifierBlock
 
@@ -241,23 +242,41 @@ func FormatCoSClassifiers(cfg *config.Config, nameFilter, typeFilter string) str
 	// Three bits, like ieee-802.1, so the existing cpRow rendering needs no
 	// change. The type filter accepts the same token the config uses.
 	if typeFilter == "" || typeFilter == "inet-precedence" {
-		for _, name := range sortedMapKeys(cos.INetPrecedenceClassifierDefs) {
+		// The compiler records every configured name, but only creates a Defs
+		// entry when it contains at least one valid forwarding-class/code-point
+		// mapping. Union both sources so entryless classifiers remain visible.
+		names := sortedMapKeys(cos.INetPrecedenceClassifierDefs)
+		seen := make(map[string]struct{}, len(names)+len(cos.INetPrecedenceClassifiers))
+		for _, name := range names {
+			seen[name] = struct{}{}
+		}
+		for _, name := range cos.INetPrecedenceClassifiers {
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
 			if nameFilter != "" && name != nameFilter {
 				continue
 			}
 			c := cos.INetPrecedenceClassifierDefs[name]
-			blk := classifierBlock{name: name, cpType: "inet-precedence"}
-			for _, e := range c.Entries {
-				if e == nil {
-					continue
-				}
-				for _, cp := range e.Precedences {
-					blk.rows = append(blk.rows, cpRow{
-						value: uint16(cp),
-						bits:  3,
-						fc:    e.ForwardingClass,
-						lp:    lossPriorityOrDefault(e.LossPriority),
-					})
+			blk := classifierBlock{name: name, cpType: "inet-precedence", entryless: c == nil}
+			if c != nil {
+				for _, e := range c.Entries {
+					if e == nil {
+						continue
+					}
+					for _, cp := range e.Precedences {
+						blk.rows = append(blk.rows, cpRow{
+							value: uint16(cp),
+							bits:  3,
+							fc:    e.ForwardingClass,
+							lp:    lossPriorityOrDefault(e.LossPriority),
+						})
+					}
 				}
 			}
 			blocks = append(blocks, blk)
@@ -277,6 +296,10 @@ func FormatCoSClassifiers(cfg *config.Config, nameFilter, typeFilter string) str
 			b.WriteString("\n")
 		}
 		fmt.Fprintf(&b, "Classifier: %s, Code point type: %s\n", blk.name, blk.cpType)
+		if blk.entryless {
+			b.WriteString("  No entries configured\n")
+			continue
+		}
 		sort.SliceStable(blk.rows, func(i, j int) bool { return blk.rows[i].value < blk.rows[j].value })
 		tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(tw, "  Code point\tForwarding class\tLoss priority")
