@@ -24,6 +24,9 @@ xpf (0.0.0) unstable; urgency=medium
     cleartext on the console; only the built-in `super-user` class keeps that
     exception (#11775).
 
+  * Keep user-redefined application names from being resurrected by the
+    AppID-disabled built-in fallback (#11817).
+
   * Describe AppID-disabled tie-breaks using the lowest assigned app_id in
     the application-identification status output (#11829).
 
