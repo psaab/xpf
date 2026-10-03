@@ -154,6 +154,10 @@ type LoginClass struct {
 // PermView floor lets the class holder log in and view even when no token maps
 // precisely; `unauthorized` (empty token set) grants nothing.
 //
+// `all` and `super-user` map to PermAll even on a custom class because this bit
+// describes command authorization. It does not grant the CLI's cleartext
+// secret-display exception, which is keyed to the exact built-in class name.
+//
 // CRITICAL (no privilege escalation, review of #4311): the mapping must never
 // grant MORE than the Junos token permits. Two Junos tokens are deceptive:
 //   - `reset` permits restarting software DAEMONS (`restart <process>`), NOT

@@ -32,8 +32,10 @@ var cliSecretSet = []string{
 	`set system root-authentication encrypted-password "$6$CLILEAK00$ROOTPWHASH0000000000000000000000000000000000000000000000000000000000000000000000000000"`,
 	"set security ike policy pol1 pre-shared-key ascii-text CLI-LEAK-IKE-PSK",
 	"set snmp community CLI-LEAK-SNMP-COMMUNITY authorization read-only",
+	"set routing-options autonomous-system 65000",
 	"set protocols bgp group ext authentication-key CLI-LEAK-BGP-AUTHPW",
 	"set interfaces wg0 tunnel wireguard private-key CLI-LEAK-WG-PRIVKEY",
+	"set system login class noc-admin permissions all",
 }
 
 var cliSecretSentinels = []string{
@@ -57,7 +59,7 @@ func newCLISecretStore(t *testing.T) *configstore.Store {
 }
 
 // classWantsRedaction is the per-class expectation table shared by the show
-// path tests: redact everyone EXCEPT super-user and the unset (no-RBAC) class.
+// path tests: redact every non-empty class except the built-in super-user.
 var classWantsRedaction = []struct {
 	class  string
 	redact bool
@@ -68,6 +70,7 @@ var classWantsRedaction = []struct {
 	{"read-only", true},
 	{"config-viewer", true},
 	{"unauthorized", true}, // fail-closed
+	{"noc-admin", true},    // custom permissions all still redacts
 }
 
 // TestCLIShowConfigurationRedactsPerClass is the primary #4099 RED-on-revert

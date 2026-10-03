@@ -18,7 +18,7 @@ func TestCustomLoginClassRuntimeRBAC(t *testing.T) {
 		t.Fatalf("EnterConfigure(): %v", err)
 	}
 	sets := []string{
-		// noc-admin: permissions all -> super-user (everything).
+		// noc-admin: permissions all -> PermAll for command authorization.
 		"set system login class noc-admin permissions all",
 		// viewer-plus: view + clear only.
 		"set system login class viewer-plus permissions [ view clear ]",
@@ -37,7 +37,7 @@ func TestCustomLoginClassRuntimeRBAC(t *testing.T) {
 		parts []string
 		allow bool
 	}{
-		{"noc-admin", []string{"configure"}, true},           // all -> super-user
+		{"noc-admin", []string{"configure"}, true},           // all -> PermAll
 		{"noc-admin", []string{"clear", "security"}, true},   //
 		{"viewer-plus", []string{"show", "version"}, true},   // view granted
 		{"viewer-plus", []string{"clear", "security"}, true}, // clear granted
@@ -56,11 +56,10 @@ func TestCustomLoginClassRuntimeRBAC(t *testing.T) {
 		}
 	}
 
-	// showConfigRedacted: the all-permissions custom class carries PermAll, so
-	// it reads cleartext like super-user; the view-only custom class must be
-	// redacted.
-	if (&CLI{store: store, userClass: "noc-admin"}).showConfigRedacted() {
-		t.Errorf("noc-admin (permissions all) should NOT redact (has PermAll)")
+	// `permissions all` still grants PermAll to command authorization, but only
+	// the built-in super-user login class may read config secrets in cleartext.
+	if !(&CLI{store: store, userClass: "noc-admin"}).showConfigRedacted() {
+		t.Errorf("noc-admin (permissions all) should redact secret output")
 	}
 	if !(&CLI{store: store, userClass: "viewer-plus"}).showConfigRedacted() {
 		t.Errorf("viewer-plus (view/clear only) SHOULD redact secrets")

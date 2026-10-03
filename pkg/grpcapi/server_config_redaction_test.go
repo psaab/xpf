@@ -10,12 +10,14 @@ import (
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
-// grpcSecretSet stages the secrets the #4051 issue names explicitly (IKE PSK +
-// SNMP community) plus representative others, each with a distinctive cleartext
-// sentinel so a leak is identifiable.
+// grpcSecretSet stages a custom `permissions all` class alongside the secrets
+// named by #4051, proving remote ShowConfig remains redacted independently of
+// CLI login-class privileges.
 var grpcSecretSet = []string{
+	"set system login class noc-admin permissions all",
 	"set security ike policy pol1 pre-shared-key ascii-text GRPC-LEAK-IKE-PSK",
 	"set snmp community GRPC-LEAK-SNMP-COMMUNITY authorization read-only",
+	"set routing-options autonomous-system 65000",
 	"set protocols bgp group ext authentication-key GRPC-LEAK-BGP-AUTHPW",
 	"set interfaces wg0 tunnel wireguard private-key GRPC-LEAK-WG-PRIVKEY",
 }

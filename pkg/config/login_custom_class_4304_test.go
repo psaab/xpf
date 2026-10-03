@@ -36,6 +36,7 @@ func TestCustomLoginClassCommitsWithAdvisory(t *testing.T) {
 	if len(lc.MappedPermissions) != 1 || lc.MappedPermissions[0] != PermAll {
 		t.Fatalf("permissions all -> %v, want [PermAll]", lc.MappedPermissions)
 	}
+	// PermAll still governs command authorization; secret display uses class identity.
 	if lc.IdleTimeout != 30 {
 		t.Fatalf("idle-timeout = %d, want 30", lc.IdleTimeout)
 	}
