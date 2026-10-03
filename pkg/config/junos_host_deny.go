@@ -860,13 +860,15 @@ func junosHostSvcAdmitsIKE(svc []string) bool {
 //
 // A netdev admits IKE / RSTs ident if ANY interface ref whose host-bound traffic
 // arrives on it (its own logical unit, or — for a VLAN subunit riding a physical
-// parent — the parent) admits it. The union mirrors the coarse host-inbound gate
-// (which keys on the interface's effective set, InterfaceHostInboundEffective)
-// so IKE warning metadata and the retained ident RST scope never miss a
-// configured per-interface override, while a sibling interface that configured
-// no exception is left out. A genuinely zone-level exception (authored on the
-// zone's own host-inbound-traffic) is folded into every interface's effective
-// set, so its subset equals `netdevs`.
+// parent — the parent) admits it. For VRF members, LOCAL_IN sees the VRF master;
+// the raw member netdev is therefore translated to its master before filtering
+// against `netdevs`. The union mirrors the coarse host-inbound gate (which keys on
+// the interface's effective set, InterfaceHostInboundEffective) so IKE warning
+// metadata and the retained ident RST scope never miss a configured per-interface
+// override, while a sibling interface that configured no exception is left out.
+// A genuinely zone-level exception (authored on the zone's own
+// host-inbound-traffic) is folded into every interface's effective set, so its
+// subset equals `netdevs`.
 //
 // The netdev→ref row walk mirrors JunosHostZoneIngressNetdevs exactly (physical
 // row + one row per unit, plus the physical parent for a VLAN subunit) so the
@@ -902,7 +904,14 @@ func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, 
 	// scope; that is a separate #5565 hardening decision.
 	type verdict struct{ ike, ident, fullAdmit bool }
 	byNetdev := make(map[string]*verdict, len(netdevs))
+	vrfMasterByNetdev := junosHostVRFMasterNetdevs(cfg, tunNames)
 	note := func(nd, ref string) {
+		if master, enslaved := vrfMasterByNetdev[nd]; enslaved {
+			if master == "" {
+				return
+			}
+			nd = master
+		}
 		if nd == "" || !keep[nd] {
 			return
 		}
@@ -996,16 +1005,10 @@ const (
 	// SAME parent carries another zone's tagged VLAN subunits). Scoping a deny
 	// by it would over-fire on the other zone's ingress.
 	junosHostNetdevAmbiguous = "cross-zone-ambiguous"
-	// junosHostNetdevVRFEnslaved (#6619): the netdev is enslaved to an l3mdev
-	// VRF master by the routing-instance bind in pkg/daemon
-	// (applyVRFReconcile -> BindInterfaceToVRF -> LinkSetMaster). At the
-	// netfilter LOCAL_IN hook the l3mdev rcv handler has already replaced
-	// skb->dev with the VRF device, so `meta iifname` reports the MASTER and an
-	// `iifname "<enslaved>"` rule matches nothing. Measured on the kernel floor
-	// this project targets, at the exact hook and priority xpf_hostinbound
-	// installs: 0 hits on the enslaved name, 3 on the master, and 3 on an
-	// unconditional counter — the hook runs exactly once, so there is no second
-	// pass carrying the enslaved name.
+	// junosHostNetdevVRFEnslaved (#6619): a member whose LOCAL_IN-visible
+	// master cannot be resolved because a device is claimed by conflicting
+	// routing instances. A normal VRF member is instead scoped by its master;
+	// scoping the raw enslaved name would never match LOCAL_IN.
 	junosHostNetdevVRFEnslaved = "vrf-enslaved"
 )
 
@@ -1049,14 +1052,12 @@ type junosHostZoneNetdevCoverage struct {
 }
 
 // JunosHostZoneIngressNetdevs returns, per security zone, the sorted set of
-// kernel netdev names a host-bound packet on that zone arrives with — the
-// iifname scope for the zone's #4146 junos-host DROP rules. It EXCLUDES
-// lifelines, any netdev claimed by MORE THAN ONE zone (an ambiguous shared
-// physical parent — e.g. a zone on a trunk's untagged unit-0 while the SAME
-// parent carries other zones' tagged VLAN subunits) so a zone's deny can never
-// over-fire on another zone's ingress, and any netdev enslaved to an l3mdev VRF
-// (#6619) because `iifname` at LOCAL_IN names the VRF master, not the enslaved
-// device, so such a rule matches nothing.
+// LOCAL_IN-visible iifname scopes for the zone's #4146 junos-host DROP rules.
+// It excludes lifelines and any effective netdev claimed by MORE THAN ONE
+// zone (for example, a shared trunk parent or a VRF master shared by members
+// from different zones) so a deny can never over-fire on sibling-zone ingress.
+// A uniquely-owned VRF-member netdev is normalized to its `vrf-<instance>`
+// master, which is what LOCAL_IN reports.
 //
 // It is the SSOT for the iifname scope: the dataplane BuildJunosHostPrograms
 // consumes JunosHostDenyProgram.IngressNetdevs (populated from this) for kernel
@@ -1065,9 +1066,7 @@ type junosHostZoneNetdevCoverage struct {
 // that resolved SOME of its candidates emits rules while still not enforcing the
 // policy on every ingress path, and a non-empty check cannot tell that from full
 // coverage (#6564 member 8). The netdev-name resolution mirrors the dataplane
-// interface-snapshot LinuxName (userspace.snapshotLinuxName) exactly, pinned
-// byte-for-byte by TestJunosHostZoneNetdevsMatchSnapshot so the two planes
-// cannot drift.
+// interface-snapshot LinuxName (userspace.snapshotLinuxName) exactly.
 func JunosHostZoneIngressNetdevs(cfg *Config) map[string][]string {
 	cov := junosHostZoneNetdevCoverageMap(cfg)
 	if len(cov) == 0 {
@@ -1085,19 +1084,64 @@ func JunosHostZoneIngressNetdevs(cfg *Config) map[string][]string {
 	return out
 }
 
-// junosHostVRFEnslavedNetdevs returns the set of kernel netdev names the daemon
-// binds to an l3mdev VRF master. It mirrors applyVRFReconcile
-// (pkg/daemon/daemon_apply_interfaces.go) exactly: every interface member of
-// every routing instance whose instance-type is not `forwarding` (a forwarding
-// instance creates no VRF device and enslaves nothing).
-//
-// Members are resolved through netdevByRef — the SAME ref->netdev map the
-// candidate walk builds — so a bare physical member (`ge-0/0/1`) and its
-// untagged unit-0, which share one netdev, are both covered by a single entry,
-// and a member naming no configured interface contributes nothing (it cannot be
-// a zone candidate either). A VLAN subunit is a distinct kernel device with its
-// own master, so enslaving the parent does NOT enslave the subunit — keying on
-// the netdev rather than the ref gets that right without a special case.
+// junosHostVRFMasterNetdevs maps every daemon-bound routing-instance device key
+// to the l3mdev master visible at LOCAL_IN. RI list members use the daemon's
+// member-key resolver; explicit tunnel routing-instance stanzas use the shared
+// tunnel-claim traversal. A present empty value means conflicting or unsupported
+// ownership, so no zone may guess which master is effective.
+func junosHostVRFMasterNetdevs(cfg *Config, tunnelNames map[string]string) map[string]string {
+	out := map[string]string{}
+	if cfg == nil {
+		return out
+	}
+	masters := map[string]string{ManagementVRFInstanceName: ManagementVRFDeviceName}
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.Name == "" || ri.InstanceType == "forwarding" ||
+			IsReservedRoutingInstanceName(ri.Name) {
+			continue
+		}
+		masters[ri.Name] = LinuxIfName("vrf-" + ri.Name)
+	}
+	recordMaster := func(nd, master string) {
+		if nd == "" {
+			return
+		}
+		if previous, exists := out[nd]; exists {
+			if previous != master {
+				out[nd] = ""
+			}
+			return
+		}
+		out[nd] = master
+	}
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.Name == "" || ri.InstanceType == "forwarding" ||
+			IsReservedRoutingInstanceName(ri.Name) {
+			continue
+		}
+		master := masters[ri.Name]
+		for _, key := range RoutingInstanceMemberDeviceKeysForInstance(cfg, tunnelNames, ri) {
+			recordMaster(key.LinuxName, master)
+		}
+	}
+	// The tunnel manager binds explicit stanza devices directly, outside the
+	// RI interface-list binder above. Use the same deterministic ownership
+	// claims as membership conflict detection (#11310), and retain an empty
+	// target for stanza owners with no known VRF so their deny stays warned.
+	for _, claim := range routingInstanceTunnelDeviceClaims(cfg) {
+		if claim.Instance == "" {
+			continue
+		}
+		recordMaster(claim.LinuxName, masters[claim.Instance])
+	}
+	return out
+}
+
+// junosHostVRFEnslavedNetdevs returns direct candidate netdevs with an
+// authored VRF member identity. Snapshot-derived host-inbound views augment
+// generated fan-down keys from their own LOCAL_IN master mapping; this
+// config-only set retains the pre-existing raw-device semantics used by the
+// coarse/unzoned host-inbound paths.
 func junosHostVRFEnslavedNetdevs(cfg *Config, netdevByRef map[string]string) map[string]bool {
 	out := map[string]bool{}
 	for _, ri := range cfg.RoutingInstances {
@@ -1108,11 +1152,6 @@ func junosHostVRFEnslavedNetdevs(cfg *Config, netdevByRef map[string]string) map
 			if member == "" {
 				continue
 			}
-			// #9821: probe the fan-down's canonical first key so a padded
-			// declared-unit member (`p.0.01`) normalizes onto the netdev the
-			// binders bind (`p.0.1`); bare members probe the literal as
-			// before (base netdev only — no bare fan-down here, matching
-			// the pre-existing undotted behavior).
 			probe := CanonicalInterfaceUnitRef(member)
 			if keys := InterfaceUnitRefKeys(cfg, member); len(keys) > 0 {
 				probe = keys[0]
@@ -1125,9 +1164,9 @@ func junosHostVRFEnslavedNetdevs(cfg *Config, netdevByRef map[string]string) map
 	return out
 }
 
-// junosHostZoneNetdevCoverageMap resolves every zone's iifname scope and records
-// what it could NOT use, so the projection can distinguish "nothing to enforce"
-// from "could not fully enforce".
+// junosHostZoneNetdevCoverageMap resolves every zone's LOCAL_IN-visible iifname
+// scope and records what it could NOT use, so the projection can distinguish
+// "nothing to enforce" from "could not fully enforce".
 func junosHostZoneNetdevCoverageMap(cfg *Config) map[string]junosHostZoneNetdevCoverage {
 	// #8862: hoisted. junosHostLinuxName rebuilds the tunnel-name map on every
 	// call and that map walks every interface and every unit, so resolving one
@@ -1140,15 +1179,12 @@ func junosHostZoneNetdevCoverageMap(cfg *Config) map[string]junosHostZoneNetdevC
 	zoneByIface := junosHostZoneByInterface(cfg)
 	// cand[zone][netdev] records whether the netdev is the zone's OWN ingress
 	// device (true) or only a conservative PARENT superset candidate (false).
-	// The distinction decides whether losing it is a coverage GAP: a subunit's
-	// own netdev is where its frames actually arrive, whereas the physical
-	// parent is added for the bondless-RETH case where they may ride the member
-	// instead. Losing a parent candidate costs a plain 802.1Q zone nothing —
-	// tagged frames are demuxed to the subunit netdev — so treating it as a gap
-	// would warn on every trunk that carries an untagged unit-0 in one zone and
-	// tagged subunits in others, which is an ordinary correct config.
-	cand := map[string]map[string]bool{}   // zone -> netdev -> isOwn
-	claims := map[string]map[string]bool{} // netdev -> zone set
+	// Candidates are rewritten to the LOCAL_IN-visible VRF master before
+	// ownership is resolved. The distinction decides whether losing a parent
+	// candidate is a coverage gap: a subunit's own netdev is where its frames
+	// actually arrive, whereas the physical parent is added for the bondless-
+	// RETH case where they may ride the member.
+	cand := map[string]map[string]bool{} // zone -> raw netdev -> isOwn
 	addCand := func(zone, nd string, own bool) {
 		if zone == "" || nd == "" {
 			return
@@ -1157,10 +1193,6 @@ func junosHostZoneNetdevCoverageMap(cfg *Config) map[string]junosHostZoneNetdevC
 			cand[zone] = map[string]bool{}
 		}
 		cand[zone][nd] = cand[zone][nd] || own
-		if claims[nd] == nil {
-			claims[nd] = map[string]bool{}
-		}
-		claims[nd][zone] = true
 	}
 	// One "row" per physical interface + one per unit, mirroring the dataplane
 	// interface snapshot: the row's own netdev is the candidate, plus (for a VLAN
@@ -1183,14 +1215,9 @@ func junosHostZoneNetdevCoverageMap(cfg *Config) map[string]junosHostZoneNetdevC
 		ifNames = append(ifNames, n)
 	}
 	sort.Strings(ifNames)
-	// Pass 1: ref -> netdev for every physical and unit row, so the VRF member
-	// list resolves through the SAME name rule the candidates use.
-	netdevByRef := junosHostNetdevByRef(cfg, func(ifName string, unit *InterfaceUnit) string {
-		return junosHostLinuxNameWith(cfg, ifName, unit, tunNames)
-	})
-	enslaved := junosHostVRFEnslavedNetdevs(cfg, netdevByRef)
-	// Pass 2: the candidate walk. One "row" per physical interface + one per
-	// unit, mirroring the dataplane interface snapshot.
+	vrfMasterByNetdev := junosHostVRFMasterNetdevs(cfg, tunNames)
+	// Walk every physical interface + unit row, mirroring the dataplane
+	// interface snapshot.
 	for _, ifName := range ifNames {
 		iface := cfg.Interfaces.Interfaces[ifName]
 		if iface == nil {
@@ -1213,37 +1240,92 @@ func junosHostZoneNetdevCoverageMap(cfg *Config) map[string]junosHostZoneNetdevC
 		}
 	}
 	out := map[string]junosHostZoneNetdevCoverage{}
+	// A VRF master is safe for a zone-scoped fine DENY only when every
+	// enslaved member has an OWN candidate in a zone. An unzoned or lifeline
+	// co-member also arrives with the same LOCAL_IN iifname, so a rule on the
+	// master would over-fire on traffic that has no zone identity.
+	ownedVRFMember := map[string]bool{}
+	for _, nds := range cand {
+		for slave, own := range nds {
+			if own {
+				ownedVRFMember[slave] = true
+			}
+		}
+	}
+	unownedVRFMaster := map[string]bool{}
+	for slave, master := range vrfMasterByNetdev {
+		if master != "" && !ownedVRFMember[slave] {
+			unownedVRFMaster[master] = true
+		}
+	}
+	effectiveCand := map[string]map[string]bool{}   // zone -> LOCAL_IN netdev -> isOwn
+	effectiveClaims := map[string]map[string]bool{} // LOCAL_IN netdev -> zone set
+	unresolved := map[string]map[string]bool{}      // zone -> own netdev with conflicting VRF masters
+	addEffective := func(zone, nd string, own bool) {
+		if effectiveCand[zone] == nil {
+			effectiveCand[zone] = map[string]bool{}
+		}
+		effectiveCand[zone][nd] = effectiveCand[zone][nd] || own
+		if effectiveClaims[nd] == nil {
+			effectiveClaims[nd] = map[string]bool{}
+		}
+		effectiveClaims[nd][zone] = true
+	}
 	for zone, nds := range cand {
-		var c junosHostZoneNetdevCoverage
+		for nd, own := range nds {
+			if master, enslaved := vrfMasterByNetdev[nd]; enslaved {
+				if master == "" {
+					if own {
+						if unresolved[zone] == nil {
+							unresolved[zone] = map[string]bool{}
+						}
+						unresolved[zone][nd] = true
+					}
+					continue
+				}
+				nd = master
+			}
+			addEffective(zone, nd, own)
+		}
+	}
+	for zone, nds := range effectiveCand {
+		c := out[zone]
 		names := make([]string, 0, len(nds))
 		for nd := range nds {
 			names = append(names, nd)
 		}
 		sort.Strings(names)
 		for _, nd := range names {
-			reason := ""
-			switch {
-			// Ambiguity is reported first: it is the pre-existing reason and the
-			// one an operator resolves by re-zoning, whereas an enslaved netdev
-			// is not scopable by any zoning change.
-			case len(claims[nd]) != 1:
-				reason = junosHostNetdevAmbiguous
-			case enslaved[nd]:
-				reason = junosHostNetdevVRFEnslaved
-			}
-			if reason == "" {
-				c.Scoped = append(c.Scoped, nd)
+			if len(effectiveClaims[nd]) != 1 || unownedVRFMaster[nd] {
+				// As with raw candidates, a dropped parent superset is not a
+				// coverage gap: only an OWN ingress device must be covered.
+				if nds[nd] {
+					c.Unscopable = append(c.Unscopable,
+						junosHostUnscopableNetdev{Netdev: nd, Reason: junosHostNetdevAmbiguous})
+				}
 				continue
 			}
-			// Only an OWN netdev that could not be scoped is a coverage gap. A
-			// dropped PARENT superset candidate is not: the subunit's own netdev
-			// still covers where its frames arrive.
-			if nds[nd] {
-				c.Unscopable = append(c.Unscopable,
-					junosHostUnscopableNetdev{Netdev: nd, Reason: reason})
-			}
+			c.Scoped = append(c.Scoped, nd)
 		}
 		out[zone] = c
+	}
+	for zone, nds := range unresolved {
+		c := out[zone]
+		names := make([]string, 0, len(nds))
+		for nd := range nds {
+			names = append(names, nd)
+		}
+		sort.Strings(names)
+		for _, nd := range names {
+			c.Unscopable = append(c.Unscopable,
+				junosHostUnscopableNetdev{Netdev: nd, Reason: junosHostNetdevVRFEnslaved})
+		}
+		out[zone] = c
+	}
+	for zone := range cand {
+		if _, exists := out[zone]; !exists {
+			out[zone] = junosHostZoneNetdevCoverage{}
+		}
 	}
 	return out
 }

@@ -513,9 +513,9 @@ func TestJunosHostIKEOverlapWarningPartialCoverage10524(t *testing.T) {
 	}
 }
 
-// TestJunosHostVRFUnscopableCoverageWarning11068 proves a VRF-enslaved direct
-// ingress path keeps its policy warning and names the exact kernel scope failure.
-func TestJunosHostVRFUnscopableCoverageWarning11068(t *testing.T) {
+// TestJunosHostVRFMemberScopeSuppressesWarning11573 proves LOCAL_IN master
+// scoping makes the VRF-member deny enforceable and suppresses its gap warning.
+func TestJunosHostVRFMemberScopeSuppressesWarning11573(t *testing.T) {
 	cfg := jhTestConfig()
 	cfg.RoutingInstances = []*RoutingInstanceConfig{{
 		Name: "tenant", InstanceType: "virtual-router", Interfaces: []string{"ge-0/0/1.0"},
@@ -525,27 +525,16 @@ func TestJunosHostVRFUnscopableCoverageWarning11068(t *testing.T) {
 		Policies: []*Policy{jhDeny("block-vrf", []string{"bad-net"}, []string{"any"})},
 	}}
 	coverage := junosHostZoneNetdevCoverageMap(cfg)["untrust"]
-	if len(coverage.Scoped) != 0 || len(coverage.Unscopable) != 1 ||
-		coverage.Unscopable[0].Reason != junosHostNetdevVRFEnslaved {
-		t.Fatalf("fixture must have one VRF-unscopable ingress and no usable scope: %+v", coverage)
+	if len(coverage.Scoped) != 1 || coverage.Scoped[0] != "vrf-tenant" || len(coverage.Unscopable) != 0 {
+		t.Fatalf("VRF-member coverage = %+v, want the LOCAL_IN-visible master vrf-tenant with no gap", coverage)
 	}
 	key := JunosHostZonePairPolicyKey("untrust", "block-vrf")
-	proj := BuildJunosHostDenyProjection(cfg)
-	if proj.RenderedPolicyKeys[key] {
-		t.Fatalf("VRF-unscopable deny must not suppress its warning: %+v", proj)
+	if !BuildJunosHostDenyProjection(cfg).RenderedPolicyKeys[key] {
+		t.Fatalf("enforceable VRF-member deny must suppress its warning")
 	}
-	var got []string
 	for _, warning := range validateJunosHostDirectDeliveryWarnings(cfg) {
 		if strings.Contains(warning, "#4146") {
-			got = append(got, warning)
-		}
-	}
-	if len(got) != 1 {
-		t.Fatalf("expected one direct-path warning for the unscopable VRF deny, got %v", got)
-	}
-	for _, want := range []string{"block-vrf", "untrust", "ge-0-0-1", "VRF-enslaved", "LOCAL_IN iifname is the VRF master"} {
-		if !strings.Contains(got[0], want) {
-			t.Errorf("VRF coverage warning missing %q:\n%s", want, got[0])
+			t.Fatalf("fully-scoped VRF-member deny must not retain a direct-path warning: %s", warning)
 		}
 	}
 }
