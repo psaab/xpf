@@ -1857,6 +1857,9 @@ same-keyed destination used to merge into the FIRST one only.
   blocks is one level, which is the rule the #9422 sibling-except union already
   applies to `apply-groups-except` and the pre-passes apply across roots
   (#5741).
+- Nested `apply-groups` context lookup also unions all same-keyed source
+  containers, so a group body split across repeated blocks keeps every
+  inherited child (#11778).
 
 **Group expansion of zone statements written as leaves (#9801, #9831):**
 `mergeNodes` (`ast_groups.go`) treats `security-zone trust;` as the zone it
