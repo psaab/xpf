@@ -888,6 +888,12 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 			[]string{"pool", "rule"},
 			nil,
 		),
+		userspaceSNATPoolIdleLeaseImportCapacityTotal: prometheus.NewDesc(
+			"xpf_userspace_source_nat_pool_idle_lease_import_capacity_total",
+			"idle-lease import capacity",
+			[]string{"pool", "rule"},
+			nil,
+		),
 		// #8447: the persistent-NAT admission pair.
 		userspaceSNATPoolPersistentAdmittedTotal: prometheus.NewDesc(
 			"xpf_userspace_source_nat_pool_persistent_admitted_total",
@@ -917,15 +923,16 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 	}
 	status := dpuserspace.ProcessStatus{
 		SourceNATPools: []dpuserspace.SourceNATPoolStatus{{
-			PoolName:         "pool-a",
-			RuleName:         "snat-a",
-			LiveFlows:        2,
-			MaxTrackedFlows:  64,
-			UsedPorts:        1,
-			PersistentLeases: 1,
-			AllocationsTotal: 3,
-			ReusesTotal:      5,
-			ExhaustionTotal:  7,
+			PoolName:                     "pool-a",
+			RuleName:                     "snat-a",
+			LiveFlows:                    2,
+			MaxTrackedFlows:              64,
+			UsedPorts:                    1,
+			PersistentLeases:             1,
+			AllocationsTotal:             3,
+			ReusesTotal:                  5,
+			ExhaustionTotal:              7,
+			IdleLeaseImportCapacityTotal: 17,
 			// #4800: distinct from each other and from every other field
 			// above, so a mis-wired collector cannot pass by coincidence.
 			LiveLockAcquisitionsTotal: 11,
@@ -947,11 +954,10 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 	for m := range ch {
 		got = append(got, m)
 	}
-	// 6 pre-#4800 series + the live-lock (denominator, contended) pair
-	// + the #8447 persistent-NAT (admitted, declined) pair + the #9896
-	// max-tracked-flows denominator for the live gauge.
-	if len(got) != 11 {
-		t.Fatalf("emitUserspaceSourceNATPoolMetrics: want 11 metrics, got %d", len(got))
+	// 6 core pool metrics + two persistent-NAT pairs + the capacity counter
+	// + the #9896 max-tracked-flows denominator.
+	if len(got) != 12 {
+		t.Fatalf("emitUserspaceSourceNATPoolMetrics: want 12 metrics, got %d", len(got))
 	}
 
 	labels := map[string]string{"pool": "pool-a", "rule": "snat-a"}
@@ -962,6 +968,7 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceSNATPoolAllocationsTotal, labels, 3)
 	assertCounterClose(t, got, c.userspaceSNATPoolReusesTotal, labels, 5)
 	assertCounterClose(t, got, c.userspaceSNATPoolExhaustionsTotal, labels, 7)
+	assertCounterClose(t, got, c.userspaceSNATPoolIdleLeaseImportCapacityTotal, labels, 17)
 	// #4800: both legs of the pair carry through to Prometheus. Distinct
 	// fixture values so a collector that emitted the same field twice
 	// (acquisitions into the contended series, or vice versa) fails here

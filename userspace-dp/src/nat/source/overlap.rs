@@ -177,6 +177,36 @@ impl PoolAddressOwners {
                 && owner.allocator.holds_address_only_identity(rkey)
         })
     }
+    /// Is the imported reverse scope already owned by a PEER address-only
+    /// identity? PAT occupancy is checked separately by `peer_holds`.
+    fn peer_holds_address_only_import_identity(
+        &self,
+        own: &PortAllocator,
+        protocol: u8,
+        translated: TranslatedTuple,
+        remote: Option<(IpAddr, u16)>,
+        address_only: bool,
+    ) -> bool {
+        let owners = match translated.ip {
+            IpAddr::V4(v4) => self.v4.get(&v4),
+            IpAddr::V6(v6) => self.v6.get(&v6),
+        };
+        owners.into_iter().flatten().any(|owner| {
+            if owner.allocator.same_allocator(own) {
+                return false;
+            }
+            if address_only {
+                owner
+                    .allocator
+                    .peer_import_idle_address_only_contended(protocol, translated, remote)
+            } else {
+                owner
+                    .allocator
+                    .peer_import_idle_pat_address_only_contended(protocol, translated, remote)
+            }
+        })
+    }
+
 }
 
 impl SourceNatRule {
@@ -201,6 +231,56 @@ impl SourceNatRule {
             Some(owners) => owners.peer_holds_address_only(&self.pool_allocator, rkey),
             None => false,
         }
+    }
+
+    /// #11496: compose the peer overlap guards with idle imports' remote scope.
+    ///
+    /// PAT occupancy is remote-agnostic. Address-only ownership uses the same
+    /// exact / host / any-remote prefix checks as same-allocator imports.
+    pub(crate) fn peer_holds_idle_import_identity(
+        &self,
+        protocol: u8,
+        translated_ip: IpAddr,
+        translated_port: u16,
+        remote: Option<(IpAddr, u16)>,
+        address_only: bool,
+    ) -> bool {
+        let Some(owners) = self.overlap_owners.as_deref() else {
+            return false;
+        };
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.peer_holds_identity(translated_ip, translated_port) {
+            return true;
+        }
+        match remote {
+            Some((dst_ip, dst_port)) if dst_port != 0 => {
+                self.peer_holds_address_only_identity(&AddressOnlyReverseKey {
+                    protocol,
+                    translated_ip,
+                    translated_port,
+                    dst_ip,
+                    dst_port,
+                })
+            }
+            _ => owners.peer_holds_address_only_import_identity(
+                &self.pool_allocator,
+                protocol,
+                TranslatedTuple {
+                    ip: translated_ip,
+                    port: translated_port,
+                },
+                remote,
+                address_only,
+            ),
+        }
+    }
+
+    /// Roll back an idle import refused by the post-claim peer-overlap check.
+    pub(crate) fn rollback_idle_lease_import(
+        &self,
+        rec: &crate::nat::idle_lease_sync_8121::IdleLeaseRecord,
+    ) -> bool {
+        self.pool_allocator.rollback_idle_lease_import(rec)
     }
 }
 

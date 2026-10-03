@@ -432,6 +432,11 @@ fn a_full_imported_table_refuses_local_mints_11475() {
         IdleLeaseImport::SkippedCapacity
     );
     assert_eq!(allocator.snapshot().persistent_leases, 2);
+    assert_eq!(
+        allocator.snapshot().idle_lease_import_capacity_total,
+        1,
+        "capacity refusal must be durably observable on its pool"
+    );
     assert!(
         !allocator.holds_port(0, 20_001),
         "capacity refusal must not claim an otherwise-free PAT port"
@@ -629,6 +634,7 @@ fn an_address_only_import_refuses_live_reverse_identity_contention_11475() {
         IdleLeaseImport::Installed,
         "a different exact remote port remains admissible"
     );
+    assert!(pat_allocator.rollback_idle_lease_import(&rec));
     assert!(pat_allocator.release_flow(pat_owner, translated, 2_500, NatHolder::Untracked));
     rec.src_ip = "10.0.61.51".parse().unwrap();
     rec.remote = Some(("8.8.8.8".parse().unwrap(), 0));
@@ -668,6 +674,7 @@ fn an_address_only_import_refuses_live_reverse_identity_contention_11475() {
         IdleLeaseImport::Installed,
         "a different exact remote port remains admissible"
     );
+    assert!(address_only_allocator.rollback_idle_lease_import(&rec));
     assert!(address_only_allocator.release_flow(
         address_only_owner,
         owned,
@@ -681,6 +688,7 @@ fn an_address_only_import_refuses_live_reverse_identity_contention_11475() {
         IdleLeaseImport::Installed,
         "releasing the address-only owner must clear the any-remote prefix index"
     );
+    assert!(address_only_allocator.rollback_idle_lease_import(&rec));
     rec.remote = Some(("8.8.8.8".parse().unwrap(), 0));
     assert_eq!(
         address_only_allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 3_000),
@@ -694,6 +702,158 @@ fn an_address_only_import_refuses_live_reverse_identity_contention_11475() {
         unscoped_allocator.import_idle_lease(&rec, &pool_addrs, TIMEOUT_NS, 2_000),
         IdleLeaseImport::Installed,
         "any-remote leases install when no live owner overlaps their tuple"
+    );
+}
+
+/// Imported address-only leases stay indexed through exact, host, and
+/// any-remote scopes until rollback removes the persistent owner.
+#[test]
+fn address_only_idle_owner_index_tracks_import_and_rollback_11496() {
+    let addrs = ["203.0.113.10".parse().unwrap()];
+    let pool_addrs = ipv4_pool(&addrs);
+    let allocator = PortAllocator::new(1, 20_000, 20_002);
+    let translated_ip = IpAddr::V4(addrs[0]);
+    let owner = idle_record_for(
+        flow("10.0.61.50", 20_000),
+        translated_ip,
+        20_000,
+        true,
+        Some(("8.8.8.8".parse().unwrap(), 443)),
+    );
+    let mut candidate = idle_record_for(
+        flow("10.0.61.51", 20_000),
+        translated_ip,
+        20_000,
+        true,
+        Some(("8.8.8.8".parse().unwrap(), 443)),
+    );
+
+    assert_eq!(
+        allocator.import_idle_lease(&owner, &pool_addrs, TIMEOUT_NS, 1_000),
+        IdleLeaseImport::Installed
+    );
+    assert_eq!(
+        allocator.import_idle_lease(&candidate, &pool_addrs, TIMEOUT_NS, 1_001),
+        IdleLeaseImport::SkippedIdentityBusy,
+        "exact remote scope must see the persistent owner"
+    );
+    candidate.remote = Some(("8.8.8.8".parse().unwrap(), 0));
+    assert_eq!(
+        allocator.import_idle_lease(&candidate, &pool_addrs, TIMEOUT_NS, 1_001),
+        IdleLeaseImport::SkippedIdentityBusy,
+        "host scope must see the exact persistent owner"
+    );
+    candidate.remote = None;
+    assert_eq!(
+        allocator.import_idle_lease(&candidate, &pool_addrs, TIMEOUT_NS, 1_001),
+        IdleLeaseImport::SkippedIdentityBusy,
+        "any-remote scope must see the exact persistent owner"
+    );
+    candidate.remote = Some(("8.8.8.8".parse().unwrap(), 444));
+    assert_eq!(
+        allocator.import_idle_lease(&candidate, &pool_addrs, TIMEOUT_NS, 1_001),
+        IdleLeaseImport::Installed,
+        "a different exact remote port remains admissible"
+    );
+    assert!(allocator.rollback_idle_lease_import(&candidate));
+    assert!(allocator.rollback_idle_lease_import(&owner));
+    candidate.remote = Some(("8.8.8.8".parse().unwrap(), 443));
+    assert_eq!(
+        allocator.import_idle_lease(&candidate, &pool_addrs, TIMEOUT_NS, 1_002),
+        IdleLeaseImport::Installed,
+        "rolling back the owner must remove each persistent scope key"
+    );
+    assert!(allocator.rollback_idle_lease_import(&candidate));
+    let mut wildcard_owner = owner.clone();
+    wildcard_owner.src_ip = "10.0.61.52".parse().unwrap();
+    wildcard_owner.remote = None;
+    assert_eq!(
+        allocator.import_idle_lease(&wildcard_owner, &pool_addrs, TIMEOUT_NS, 1_003),
+        IdleLeaseImport::Installed
+    );
+    assert_eq!(
+        allocator.import_idle_lease(&candidate, &pool_addrs, TIMEOUT_NS, 1_004),
+        IdleLeaseImport::SkippedIdentityBusy,
+        "an any-remote owner must block a narrower exact import"
+    );
+    assert!(allocator.rollback_idle_lease_import(&wildcard_owner));
+
+    wildcard_owner.src_ip = "10.0.61.53".parse().unwrap();
+    wildcard_owner.remote = Some(("8.8.8.8".parse().unwrap(), 0));
+    assert_eq!(
+        allocator.import_idle_lease(&wildcard_owner, &pool_addrs, TIMEOUT_NS, 1_005),
+        IdleLeaseImport::Installed
+    );
+    assert_eq!(
+        allocator.import_idle_lease(&candidate, &pool_addrs, TIMEOUT_NS, 1_006),
+        IdleLeaseImport::SkippedIdentityBusy,
+        "a host-scope owner must block a narrower exact import"
+    );
+    assert!(allocator.rollback_idle_lease_import(&wildcard_owner));
+}
+
+#[test]
+fn a_pat_mint_refuses_an_idle_address_only_lease_identity_11496() {
+    let addrs = ["203.0.113.10".parse().unwrap()];
+    let pool_addrs = ipv4_pool(&addrs);
+    let allocator = PortAllocator::new(1, 20_000, 20_000);
+    let owner = idle_record_for(
+        flow("10.0.61.50", 20_000),
+        IpAddr::V4(addrs[0]),
+        20_000,
+        true,
+        Some(("8.8.8.8".parse().unwrap(), 443)),
+    );
+    assert_eq!(
+        allocator.import_idle_lease(&owner, &pool_addrs, TIMEOUT_NS, 1_000),
+        IdleLeaseImport::Installed
+    );
+
+    let pat = allocator.allocate_translation(
+        flow("10.0.61.51", 20_000),
+        PoolAddressFamily::V4(&addrs),
+        0,
+        false,
+        true,
+        PersistentNatPermit::TargetHostPort,
+        TIMEOUT_NS,
+        1_001,
+        NatHolder::Untracked,
+    );
+    assert!(
+        pat.is_err(),
+        "a PAT mint must not claim an idle address-only wire identity"
+    );
+    assert_eq!(allocator.snapshot().persistent_leases, 1);
+}
+
+#[test]
+fn clearing_idle_address_only_import_removes_reverse_identity_index_11496() {
+    let addrs = ["203.0.113.10".parse().unwrap()];
+    let pool_addrs = ipv4_pool(&addrs);
+    let allocator = PortAllocator::new(1, 20_000, 20_000);
+    let owner = idle_record_for(
+        flow("10.0.61.50", 20_000),
+        IpAddr::V4(addrs[0]),
+        20_000,
+        true,
+        Some(("8.8.8.8".parse().unwrap(), 443)),
+    );
+    assert_eq!(
+        allocator.import_idle_lease(&owner, &pool_addrs, TIMEOUT_NS, 1_000),
+        IdleLeaseImport::Installed
+    );
+    assert_eq!(allocator.clear_persistent_leases(1_001), 1);
+
+    let mut replacement = owner.clone();
+    replacement.src_ip = "10.0.61.51".parse().unwrap();
+    let after_horizon_ns = 1_001_u64
+        .saturating_add(super::allocator::PERSISTENT_NAT_CLEAR_REPLAY_HORIZON_NS)
+        .saturating_add(1);
+    assert_eq!(
+        allocator.import_idle_lease(&replacement, &pool_addrs, TIMEOUT_NS, after_horizon_ns),
+        IdleLeaseImport::Installed,
+        "clearing the old owner must remove its reverse-identity index entry"
     );
 }
 
@@ -859,8 +1019,7 @@ fn an_imported_idle_lease_cannot_resurrect_a_retired_lease_10789_f4() {
     let retired = {
         let mut live = active.debug_live();
         let lease = live
-            .persistent_by_source
-            .remove(&key)
+            .remove_persistent_lease(&key)
             .expect("A's local lease must exist");
         let expiry = (lease.expires_at_ns, key);
         live.lease_expirations.remove(&expiry);
@@ -1350,7 +1509,7 @@ fn every_persistent_lease_creation_site_has_a_sync_route_8121() {
                     current = name.trim().to_string();
                 }
             }
-            if t.contains("persistent_by_source.insert(") {
+            if t.contains(".insert_persistent_lease(") {
                 found.push(current.clone());
             }
         }
@@ -2082,7 +2241,7 @@ fn clearing_idle_leases_revokes_allocator_and_stale_ha_import_10784() {
     );
     assert_eq!(
         allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), TIMEOUT_NS, 3_001),
-        IdleLeaseImport::SkippedExisting,
+        IdleLeaseImport::SkippedClearFenced,
         "a pre-clear HA export must not reinstall a revoked mapping"
     );
 
@@ -2109,7 +2268,7 @@ fn lease_exports_prune_expired_clear_fences_11486() {
     assert_eq!(allocator.clear_persistent_leases(clear_ns), 1);
     assert_eq!(
         allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), TIMEOUT_NS, clear_ns + 1),
-        IdleLeaseImport::SkippedExisting
+        IdleLeaseImport::SkippedClearFenced
     );
 
     let expires_at = clear_ns
@@ -2158,7 +2317,7 @@ fn clear_fence_survives_expired_same_key_replacement_10784() {
     drop(live);
     assert_eq!(
         allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), min_timeout_ns, 5_100_000_000),
-        IdleLeaseImport::SkippedExisting
+        IdleLeaseImport::SkippedClearFenced
     );
     assert!(allocator.debug_live().persistent_by_source.is_empty());
 }
@@ -2218,7 +2377,7 @@ fn clear_fence_survives_expired_address_only_replacement_10784() {
     drop(live);
     assert_eq!(
         allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), min_timeout_ns, 5_100_000_000),
-        IdleLeaseImport::SkippedExisting
+        IdleLeaseImport::SkippedClearFenced
     );
     assert!(allocator.debug_live().persistent_by_source.is_empty());
 }
@@ -2380,7 +2539,7 @@ fn clear_fences_preclear_import_for_unknown_key_10784() {
     assert_eq!(receiver.clear_persistent_leases(3_000_000_000), 0);
     assert_eq!(
         receiver.import_idle_lease(&stale, &ipv4_pool(&addrs), TIMEOUT_NS, 3_100_000_000),
-        IdleLeaseImport::SkippedExisting
+        IdleLeaseImport::SkippedClearFenced
     );
     assert!(receiver.debug_live().persistent_by_source.is_empty());
     assert_eq!(
@@ -2548,7 +2707,7 @@ fn clearing_idle_address_only_lease_rejects_stale_import_10784() {
     assert_eq!(allocator.clear_persistent_leases(3_000), 1);
     assert_eq!(
         allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), TIMEOUT_NS, 3_001),
-        IdleLeaseImport::SkippedExisting
+        IdleLeaseImport::SkippedClearFenced
     );
     assert!(allocator.export_display_leases(3_001).is_empty());
 }
@@ -2687,7 +2846,7 @@ fn cleared_idle_key_expires_after_ha_replay_horizon_10784() {
     assert_eq!(allocator.clear_persistent_leases(3_000), 1);
     assert_eq!(
         allocator.import_idle_lease(&stale, &ipv4_pool(&addrs), TIMEOUT_NS, 3_001),
-        IdleLeaseImport::SkippedExisting
+        IdleLeaseImport::SkippedClearFenced
     );
 
     let after_horizon_ns = 60_000_003_001;

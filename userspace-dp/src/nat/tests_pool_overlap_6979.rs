@@ -931,3 +931,60 @@ fn same_pool_name_different_addresses_stays_independent_9389() {
          the addresses in the allocator key are what keeps them apart"
     );
 }
+
+/// Both allocators can claim before either peer check runs. The post-claim
+/// import check must therefore undo its PAT bit and persistent entry when the
+/// peer's already-visible claim wins.
+#[test]
+fn idle_import_post_claim_peer_conflict_rolls_back_pat_claim_11496() {
+    let rules = parse_source_nat_rules(&[
+        persistent_rule("r1", "P", "10.0.0.0/8", SHARED),
+        persistent_rule("r2", "Q", "10.0.0.0/8", SHARED),
+    ]);
+    let local_flow = flow("10.0.1.7", 40001);
+    let imported = IdleLeaseRecord {
+        protocol: local_flow.protocol,
+        src_ip: local_flow.src_ip,
+        src_port: local_flow.src_port,
+        routing_scope: local_flow.routing_scope,
+        remote: None,
+        translated_ip: SHARED.parse().expect("shared address"),
+        translated_port: 20_000,
+        address_only: false,
+        remaining_ns: 60_000_000_000,
+        timeout_ns: 60_000_000_000,
+    };
+    let addresses: Vec<IpAddr> = rules[0]
+        .pool_addresses_v4
+        .iter()
+        .copied()
+        .map(IpAddr::V4)
+        .collect();
+    assert_eq!(
+        rules[0].pool_allocator.import_idle_lease(
+            &imported,
+            &addresses,
+            rules[0].persistent_nat_timeout_ns,
+            1_000,
+        ),
+        IdleLeaseImport::Installed
+    );
+    assert_eq!(
+        rules[1].pool_allocator.try_claim_translated_port(0, 20_000),
+        Some(true),
+        "simulate a concurrent peer mint that claimed before either peer check"
+    );
+    assert!(rules[0].peer_holds_idle_import_identity(
+        imported.protocol,
+        imported.translated_ip,
+        imported.translated_port,
+        imported.remote,
+        imported.address_only,
+    ));
+    assert!(rules[0].pool_allocator.rollback_idle_lease_import(&imported));
+    assert_eq!(rules[0].pool_allocator.snapshot().persistent_leases, 0);
+    assert!(
+        !rules[0].pool_allocator.holds_port(0, imported.translated_port),
+        "post-claim refusal must return the imported PAT bit"
+    );
+}

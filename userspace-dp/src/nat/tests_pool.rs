@@ -8913,7 +8913,7 @@ fn renamed_empty_clear_batch_fence_reaches_fresh_allocator_10784() {
             renamed[0].persistent_nat_timeout_ns,
             5 * NS_PER_SEC,
         ),
-        IdleLeaseImport::SkippedExisting,
+        IdleLeaseImport::SkippedClearFenced,
         "a fresh renamed allocator must inherit the empty-clear batch barrier"
     );
 }
@@ -8968,7 +8968,7 @@ fn renamed_key_fence_reaches_reused_destination_allocator_10784() {
             renamed[0].persistent_nat_timeout_ns,
             5 * NS_PER_SEC,
         ),
-        IdleLeaseImport::SkippedExisting,
+        IdleLeaseImport::SkippedClearFenced,
         "the reused destination must inherit the renamed source key fence"
     );
     assert!(
@@ -10384,7 +10384,7 @@ fn empty_clear_batch_fence_survives_retained_pool_key_change_10784() {
             refreshed[0].persistent_nat_timeout_ns,
             5 * NS_PER_SEC,
         ),
-        IdleLeaseImport::SkippedExisting,
+        IdleLeaseImport::SkippedClearFenced,
         "a peer record with an unknown key is still behind the carried batch fence"
     );
     assert!(
@@ -10479,7 +10479,7 @@ fn extended_per_key_clear_fence_survives_retained_pool_key_change_10784() {
             refreshed[0].persistent_nat_timeout_ns,
             68 * NS_PER_SEC,
         ),
-        IdleLeaseImport::SkippedExisting,
+        IdleLeaseImport::SkippedClearFenced,
         "the extended per-key fence must outlive the expired batch fence"
     );
     assert!(

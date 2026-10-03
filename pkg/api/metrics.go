@@ -189,9 +189,10 @@ type xpfCollector struct {
 	userspaceSNATPoolAllocationsTotal *prometheus.Desc
 	userspaceSNATPoolReusesTotal      *prometheus.Desc
 	// #8447: persistent-NAT admission pair.
-	userspaceSNATPoolPersistentAdmittedTotal *prometheus.Desc
-	userspaceSNATPoolPersistentDeclinedTotal *prometheus.Desc
-	userspaceSNATPoolExhaustionsTotal        *prometheus.Desc
+	userspaceSNATPoolPersistentAdmittedTotal      *prometheus.Desc
+	userspaceSNATPoolPersistentDeclinedTotal      *prometheus.Desc
+	userspaceSNATPoolExhaustionsTotal             *prometheus.Desc
+	userspaceSNATPoolIdleLeaseImportCapacityTotal *prometheus.Desc
 	// #4800: the per-pool NAT-allocator leg of the new-flow-install
 	// contention surface. Always emitted as a pair — a contention count
 	// without its denominator is not interpretable.
@@ -1037,6 +1038,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.userspaceSNATPoolPersistentAdmittedTotal
 	ch <- c.userspaceSNATPoolPersistentDeclinedTotal
 	ch <- c.userspaceSNATPoolExhaustionsTotal
+	ch <- c.userspaceSNATPoolIdleLeaseImportCapacityTotal
 	ch <- c.userspaceSNATPoolLiveLockAcquisitionsTotal
 	ch <- c.userspaceSNATPoolLiveLockContendedTotal
 	ch <- c.dhcpLeasesActive

@@ -439,6 +439,10 @@ pub(crate) struct SourceNatPoolStatus {
     pub reuses_total: u64,
     #[serde(rename = "exhaustion_total", default)]
     pub exhaustion_total: u64,
+    /// #11496: remote idle-lease imports refused because the bounded
+    /// persistent-lease table was full after its pressure-GC pass.
+    #[serde(rename = "idle_lease_import_capacity_total", default)]
+    pub idle_lease_import_capacity_total: u64,
     /// #9902 F-026: the reporting allocator's instance id (see
     /// `PortAllocatorShared::allocator_id`). Lets the control plane tell a
     /// rebuilt allocator (fresh zeroed counters) from the one it baselined.

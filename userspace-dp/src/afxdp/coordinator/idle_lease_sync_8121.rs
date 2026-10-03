@@ -40,6 +40,7 @@ pub(crate) struct PoolDisplayLease {
 pub(crate) struct IdleLeaseImportCounts {
     pub(crate) installed: u32,
     pub(crate) skipped_existing: u32,
+    pub(crate) skipped_clear_fenced: u32,
     pub(crate) skipped_expired: u32,
     pub(crate) skipped_unknown_address: u32,
     pub(crate) skipped_port_busy: u32,
@@ -152,6 +153,12 @@ impl Coordinator {
     ) -> IdleLeaseImportCounts {
         let mut counts = IdleLeaseImportCounts::default();
         for rec in records {
+            // The allocation-site ownership probes below are advisory fast
+            // paths: they run BEFORE the allocator's claim/bit mutations, so
+            // they cannot observe a racing peer mint. Mint-then-check closes
+            // the window (`match_rules::reject_peer_owned_identity`): claim
+            // our token first, run the SAME query after it is visible, and
+            // roll ours back when a peer published the same wire identity.
             let Some(rule) = self
                 .forwarding
                 .source_nat_rules
@@ -170,11 +177,42 @@ impl Coordinator {
                 .map(IpAddr::V4)
                 .chain(rule.pool_addresses_v6.iter().copied().map(IpAddr::V6))
                 .collect();
-            match rule
-                .pool_allocator
-                .import_idle_lease(&rec.lease, &addrs, rule.persistent_nat_timeout_ns, now_ns)
+            // Fast path only: skip records a stable peer already owns before
+            // touching this allocator. Racy peer mints are settled by the
+            // allocator's post-claim recheck, which rolls our claim back.
+            let lease = &rec.lease;
+            if rule.peer_holds_idle_import_identity(
+                lease.protocol,
+                lease.translated_ip,
+                lease.translated_port,
+                lease.remote,
+                lease.address_only,
+            ) {
+                counts.skipped_identity_busy += 1;
+                continue;
+            }
+            let outcome = rule.pool_allocator.import_idle_lease(
+                &rec.lease,
+                &addrs,
+                rule.persistent_nat_timeout_ns,
+                now_ns,
+            );
+            if matches!(outcome, IdleLeaseImport::Installed)
+                && rule.peer_holds_idle_import_identity(
+                    lease.protocol,
+                    lease.translated_ip,
+                    lease.translated_port,
+                    lease.remote,
+                    lease.address_only,
+                )
+                && rule.rollback_idle_lease_import(lease)
             {
+                counts.skipped_identity_busy += 1;
+                continue;
+            }
+            match outcome {
                 IdleLeaseImport::Installed => counts.installed += 1,
+                IdleLeaseImport::SkippedClearFenced => counts.skipped_clear_fenced += 1,
                 IdleLeaseImport::SkippedExisting => counts.skipped_existing += 1,
                 IdleLeaseImport::SkippedExpired => counts.skipped_expired += 1,
                 IdleLeaseImport::SkippedUnknownAddress => counts.skipped_unknown_address += 1,

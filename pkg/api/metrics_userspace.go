@@ -465,6 +465,12 @@ func (c *xpfCollector) emitUserspaceSourceNATPoolMetrics(ch chan<- prometheus.Me
 			float64(pool.ExhaustionTotal),
 			labels...,
 		)
+		ch <- prometheus.MustNewConstMetric(
+			c.userspaceSNATPoolIdleLeaseImportCapacityTotal,
+			prometheus.CounterValue,
+			float64(pool.IdleLeaseImportCapacityTotal),
+			labels...,
+		)
 		// #4800: the (denominator, contended) pair for this pool's residual
 		// live-state mutex. Emitted unconditionally so the connection-rate
 		// harness sees an explicit 0 from a pool that never contended,

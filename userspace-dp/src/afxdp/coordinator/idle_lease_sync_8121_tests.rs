@@ -82,6 +82,47 @@ fn mint_local_idle_lease(coord: &Coordinator, pool: &str) -> PoolIdleLease {
         .expect("fixture: coordinator must export its locally-minted idle lease")
 }
 
+/// Leave a locally allocated identity live in its pool. The imported lease
+/// fixture mirrors that identity but has a distinct source key.
+fn mint_active_local_identity(
+    coord: &Coordinator,
+    pool: &str,
+    address_only: bool,
+) -> PoolIdleLease {
+    let src_ip: std::net::IpAddr = "10.0.61.50".parse().unwrap();
+    let dst_ip: std::net::IpAddr = "8.8.8.8".parse().unwrap();
+    let nat = match coord.test_match_source_nat_result_for_tuple(
+        "lan",
+        "wan",
+        src_ip,
+        dst_ip,
+        6,
+        40000,
+        443,
+        None,
+        None,
+        1_000,
+    ) {
+        crate::nat::SourceNatLookup::Matched(nat) => nat,
+        other => panic!("fixture: local source NAT must match, got {other:?}"),
+    };
+    PoolIdleLease {
+        pool_name: pool.to_string(),
+        lease: crate::nat::IdleLeaseRecord {
+            protocol: 6,
+            src_ip,
+            src_port: 40000,
+            routing_scope: 0,
+            remote: Some((dst_ip, 443)),
+            translated_ip: nat.rewrite_src.expect("fixture: source NAT rewrites source IP"),
+            translated_port: nat.rewrite_src_port.unwrap_or(40_000),
+            address_only,
+            remaining_ns: TIMEOUT_NS,
+            timeout_ns: TIMEOUT_NS,
+        },
+    }
+}
+
 /// Two coordinators exercise both directions of the real route: A advertises
 /// its local lease, B imports it, then B's next export is empty and A receives
 /// no record to install. Imported state remains visible in SHOW elsewhere; this
@@ -270,5 +311,104 @@ fn clear_revokes_allocator_leases_and_rejects_stale_peer_import_10784() {
 
     let delayed = coord.import_idle_persistent_leases(&[stale], 4_001);
     assert_eq!(delayed.installed, 0);
-    assert_eq!(delayed.skipped_existing, 1);
+    assert_eq!(
+        (delayed.skipped_clear_fenced, delayed.skipped_existing),
+        (1, 0),
+        "a clear fence is a distinct import refusal, not an existing lease"
+    );
+}
+/// Idle imports must not claim a wire tuple held by an overlapping peer pool.
+#[test]
+fn an_address_only_import_refuses_a_peer_pool_pat_identity_11496() {
+    let mut p = pool_rule("r1", "P", &["203.0.113.1"]);
+    p.from_zone = "dmz".to_string();
+    p.port_low = 40_000;
+    p.port_high = 40_000;
+    let mut q = pool_rule("r2", "Q", &["203.0.113.1"]);
+    q.port_low = 40_000;
+    q.port_high = 40_000;
+    let mut coord = Coordinator::new();
+    coord.forwarding.source_nat_rules = parse_source_nat_rules(&[p, q]);
+
+    let peer = mint_active_local_identity(&coord, "Q", false);
+    let mut imported = record("P", "10.0.61.51", "203.0.113.1", peer.lease.translated_port);
+    imported.lease.address_only = true;
+    imported.lease.translated_port = imported.lease.src_port;
+    imported.lease.remote = peer.lease.remote;
+
+    let counts = coord.import_idle_persistent_leases(&[imported], 3_000);
+    assert_eq!(
+        (counts.installed, counts.skipped_identity_busy),
+        (0, 1),
+        "a peer PAT occupancy bit owns the same wire identity: {counts:?}"
+    );
+    assert_eq!(
+        coord.export_display_persistent_leases(4_000).len(),
+        1,
+        "the refused import must not create a second lease"
+    );
+}
+
+/// Address-only peer state has no PAT occupancy bit; imports must consult its
+/// reverse-identity ownership index too.
+#[test]
+fn a_pat_import_refuses_a_peer_pool_address_only_identity_11496() {
+    let mut p = pool_rule("r1", "P", &["203.0.113.1"]);
+    p.from_zone = "dmz".to_string();
+    p.port_low = 40_000;
+    p.port_high = 40_000;
+    let mut q = pool_rule("r2", "Q", &["203.0.113.1"]);
+    q.pool_no_translation = true;
+    let mut coord = Coordinator::new();
+    coord.forwarding.source_nat_rules = parse_source_nat_rules(&[p, q]);
+
+    let peer = mint_active_local_identity(&coord, "Q", true);
+    let mut imported = record("P", "10.0.61.51", "203.0.113.1", peer.lease.translated_port);
+    imported.lease.remote = peer.lease.remote;
+
+    let counts = coord.import_idle_persistent_leases(&[imported], 3_000);
+    assert_eq!(
+        (counts.installed, counts.skipped_identity_busy),
+        (0, 1),
+        "a peer address-only reverse identity owns the same wire tuple: {counts:?}"
+    );
+    assert_eq!(
+        coord.export_display_persistent_leases(4_000).len(),
+        1,
+        "the refused import must not create a second lease"
+    );
+}
+
+/// Idle address-only records own their exact reverse identity across peers too.
+#[test]
+fn sequential_address_only_idle_imports_reject_overlapping_pool_identity_11496() {
+    let mut p = pool_rule("r1", "P", &["203.0.113.1"]);
+    p.from_zone = "dmz".to_string();
+    let q = pool_rule("r2", "Q", &["203.0.113.1"]);
+    let mut coord = Coordinator::new();
+    coord.forwarding.source_nat_rules = parse_source_nat_rules(&[p, q]);
+
+    let mut peer = record("Q", "10.0.61.50", "203.0.113.1", 40_000);
+    peer.lease.address_only = true;
+    peer.lease.translated_port = peer.lease.src_port;
+    assert_eq!(
+        coord.import_idle_persistent_leases(&[peer], 3_000).installed,
+        1,
+        "the first pool's idle address-only lease must install"
+    );
+
+    let mut candidate = record("P", "10.0.61.51", "203.0.113.1", 40_000);
+    candidate.lease.address_only = true;
+    candidate.lease.translated_port = candidate.lease.src_port;
+    let counts = coord.import_idle_persistent_leases(&[candidate], 3_001);
+    assert_eq!(
+        (counts.installed, counts.skipped_identity_busy),
+        (0, 1),
+        "the peer's idle reverse identity must block an overlapping import: {counts:?}"
+    );
+    assert_eq!(
+        coord.export_display_persistent_leases(4_000).len(),
+        1,
+        "the conflicting candidate must not become a second idle lease"
+    );
 }

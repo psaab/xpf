@@ -21,6 +21,10 @@ type SourceNATPoolStatus struct {
 	AllocationsTotal               uint64 `json:"allocations_total,omitempty"`
 	ReusesTotal                    uint64 `json:"reuses_total,omitempty"`
 	ExhaustionTotal                uint64 `json:"exhaustion_total,omitempty"`
+	// IdleLeaseImportCapacityTotal counts imported idle leases refused after
+	// the bounded pressure-GC pass found the persistent table still full.
+	// JSON name matches the Rust pool status field.
+	IdleLeaseImportCapacityTotal uint64 `json:"idle_lease_import_capacity_total,omitempty"`
 	// #9902 F-026: the reporting allocator's instance id. Same id ⇒ same
 	// counter instance (deltas comparable); changed id ⇒ the allocator was
 	// rebuilt (rebaseline silently). 0 from a helper older than the field.

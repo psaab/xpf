@@ -46,6 +46,7 @@ fn idle_lease_import_is_notable(counts: &IdleLeaseImportCounts, malformed: u32) 
     counts.installed > 0
         || counts.skipped_port_busy > 0
         || counts.skipped_identity_busy > 0
+        || counts.skipped_clear_fenced > 0
         || counts.skipped_capacity > 0
         || counts.skipped_unknown_pool > 0
         || counts.skipped_unknown_address > 0
@@ -83,6 +84,11 @@ pub(super) fn from_wire(w: &IdleLeaseWire) -> Option<PoolIdleLease> {
         || w.remaining_ns == 0
         || w.timeout_ns < MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS
     {
+        return None;
+    }
+    // Address-only bindings preserve the source port. A mismatched peer value
+    // is malformed rather than a different translated identity.
+    if w.address_only && w.translated_port != w.src_port {
         return None;
     }
     // A release may re-arm expiry after the exporter samples `remaining_ns`;
@@ -149,10 +155,11 @@ pub(super) fn import(
     let counts = guard.afxdp.import_idle_persistent_leases_now(&records);
     if idle_lease_import_is_notable(&counts, malformed) {
         eprintln!(
-            "xpf-dp: idle-lease import installed={} existing={} expired={} unknown_addr={} \
-             unknown_pool={} port_busy={} identity_busy={} capacity={} malformed={}",
+            "xpf-dp: idle-lease import installed={} existing={} clear_fenced={} expired={} \
+             unknown_addr={} unknown_pool={} port_busy={} identity_busy={} capacity={} malformed={}",
             counts.installed,
             counts.skipped_existing,
+            counts.skipped_clear_fenced,
             counts.skipped_expired,
             counts.skipped_unknown_address,
             counts.skipped_unknown_pool,
@@ -208,6 +215,14 @@ mod tests {
                 "unknown address — the nodes disagree about the pool's addresses",
                 IdleLeaseImportCounts {
                     skipped_unknown_address: 1,
+                    ..zero
+                },
+                0,
+            ),
+            (
+                "clear-fenced stale lease — the clear must be visible even after the entry is gone",
+                IdleLeaseImportCounts {
+                    skipped_clear_fenced: 1,
                     ..zero
                 },
                 0,
@@ -390,6 +405,22 @@ mod tests {
         assert_eq!(parsed.lease.timeout_ns, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS);
         assert_eq!(parsed.lease.remaining_ns, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS);
     }
+    #[test]
+    fn address_only_import_requires_the_preserved_source_port_11496() {
+        let mut w = wire();
+        w.address_only = true;
+        w.translated_port = w.src_port;
+        let parsed = from_wire(&w).expect("matching preserved source port is valid");
+        assert_eq!(parsed.lease.translated_port, w.src_port);
+
+        w.translated_port += 1;
+        assert!(
+            from_wire(&w).is_none(),
+            "address-only imports cannot carry a translated port different \
+             from the source port"
+        );
+    }
+
 }
 
 /// #8615: the DISPLAY export. One-way by construction — there is no
