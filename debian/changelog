@@ -7,6 +7,10 @@ xpf (0.0.0) unstable; urgency=medium
   * Describe AppID-disabled tie-breaks using the lowest assigned app_id in
     the application-identification status output (#11829).
 
+  * Cover route-overlay FIB-only generation changes with an established-session
+    regression for v2 egress, re-seeding, and unchanged-route cache hits
+    (#11599).
+
   * Expose interface-level inet-precedence classifier bindings in CLI
     completion, matching the compiler's existing support (#11813).
   * Preserve `?` help descriptions after typed option values in operational
