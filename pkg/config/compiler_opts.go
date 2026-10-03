@@ -1497,6 +1497,9 @@ type compileOpts struct {
 	// leniently-loaded config renders nothing for it rather than poisoning the
 	// reload. Same doctrine as lenientNextTableRefs.
 	lenientPolicyRouteMapSeq bool
+	// lenientPolicyNextAction11780 downgrades malformed or contradictory
+	// routing-policy `then next policy` actions to a warning on tolerant loads.
+	lenientPolicyNextAction11780 bool
 	// lenientRouteDispositionConflict (#5633) downgrades the static-route
 	// disposition-conflict gate (validateStaticRouteDispositionConflictStrict)
 	// from a hard compile error to a cfg.Warnings entry. Repeated same-prefix
@@ -3191,6 +3194,7 @@ func lenientCompileOpts() compileOpts {
 		lenientDHCPRelayV4Config:               true,
 		lenientRoutingRuleWindows:              true,
 		lenientPolicyRouteMapSeq:               true,
+		lenientPolicyNextAction11780:           true,
 		lenientRouteDispositionConflict:        true,
 		lenientStaticNextHopFamily:             true,
 		lenientGenerateRoutePolicy:             true,
