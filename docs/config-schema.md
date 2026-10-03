@@ -10377,10 +10377,20 @@ reserved for whole-dataplane selection where a rewrite shim
   exist by default in Junos regardless of scheduler-map), so a hard reject
   would refuse configs Junos accepts and configs the xpf test suite already
   asserts compile (`TestCompileClassOfServiceHierarchicalDSCPClassifier`).
-  The commit warn fires iff the dataplane would have blackholed — its
-  materialization + admission model mirrors `build_cos_iface_config`
-  exactly. Coverage: `TestHB166_T4_ClassifierUnmaterializedQueue_Warns` /
-  `TestHB166_T4_ClassifierMaterializedQueue_NoWarn` (`pkg/config`),
+  The commit warning model follows the dataplane admission gate. The existing
+  blackhole warning fires for an admitted interface with an unmaterialized
+  classifier target. #11784 C9+C10 also warn when a classifier-only or
+  rewrite-only binding targets only non-best-effort classes and no other CoS
+  knob admits the unit; in that case the dataplane builds no CoS runtime, so the
+  configured binding is inert. Shaping-rate or a resolved scheduler-map still
+  admits the interface and suppresses this new inert-binding warning. Coverage:
+  `TestHB166_T4_ClassifierUnmaterializedQueue_Warns` /
+  `TestHB166_T4_ClassifierMaterializedQueue_NoWarn` and
+  `TestCoSClassifierOnlyAllNonBestEffortWarns11784` /
+  `TestCoSRewriteOnlyAllNonBestEffortWarns11784` /
+  `TestCoSRewriteOnlyWithShapingAdmissionDoesNotWarn11784` /
+  `TestCoSClassifierWithShapingAdmissionKeepsBlackholeWarning11784`
+  (`pkg/config`),
   `build_cos_state_classifier_unmaterialized_queue_falls_back_to_default`
   and `resolve_cos_queue_idx_falls_back_to_default_on_explicit_queue_miss`
   (`userspace-dp`).

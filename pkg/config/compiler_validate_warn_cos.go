@@ -74,35 +74,32 @@ func validateCoSOversubscriptionWarnings(cos *ClassOfServiceConfig) []string {
 // asserts compile.
 //
 // The materialization + admission model mirrors
-// forwarding_build/cos.rs::build_cos_iface_config exactly so the warning fires
-// iff the dataplane would have blackholed the code-point: only when the
-// interface is actually admitted to CoS (a resolved scheduler-map, a
-// shaping-rate, a classifier code-point that DOES hit a materialized queue, or
-// a rewrite targeting a materialized class). An un-admitted interface builds no
-// CoS runtime, so its classifier is inert and nothing blackholes — no warning.
+// forwarding_build/cos.rs::build_cos_iface_config. An admitted interface with
+// a blackholed code-point warns per class. A classifier-only (#11784 C9) or
+// rewrite-only (C10) binding to all-non-best-effort classes is also reported
+// when no CoS knob admits the interface: the dataplane builds no runtime and
+// those bindings are inert.
 func classOfServiceClassifierQueueWarnings(cos *ClassOfServiceConfig, ifaceName string, unit *CoSInterfaceUnit) []string {
 	if cos == nil || unit == nil {
 		return nil
 	}
 	dscpCls := cos.DSCPClassifiers[unit.DSCPClassifier]
 	ieeeCls := cos.IEEE8021Classifiers[unit.IEEE8021Classifier]
-	// #7082: the THIRD behavior-aggregate arm. #6847 added inet-precedence to
-	// build_cos_iface_config, and this function's own doc comment promises the
-	// model "mirrors build_cos_iface_config EXACTLY so the warning fires iff the
-	// dataplane would have blackholed the code-point". With only two arms that
-	// sentence was false for every unit whose blackholing classifier was the
-	// inet-precedence one: the dataplane fell back to best-effort and the
-	// operator was told nothing.
-	//
+	// #7082: include the third behavior-aggregate arm in the same
+	// per-code-point analysis as DSCP and IEEE 802.1 classifiers. #6847
+	// added inet-precedence to build_cos_iface_config; omitting it here
+	// would miss the existing blackhole warning whenever that classifier
+	// mapped a code-point to an unmaterialized queue.
 	// Defs, not the name list, is right HERE — unlike the definedness check in
 	// compiler_validate_warn.go — because this arm needs the ENTRIES to know
 	// which forwarding-classes the classifier maps to. A classifier with no
 	// entries maps no code-point and so can blackhole nothing, which is exactly
 	// the nil case below.
 	inetCls := cos.INetPrecedenceClassifierDefs[unit.INetPrecedenceClassifier]
-	if dscpCls == nil && ieeeCls == nil && inetCls == nil {
-		// No classifier attached (or the reference is undefined — flagged
-		// elsewhere): nothing can blackhole.
+	rewriteRule := cos.DSCPRewriteRules[unit.DSCPRewriteRule]
+	if dscpCls == nil && ieeeCls == nil && inetCls == nil && rewriteRule == nil {
+		// No classifier or rewrite-rule attached (or the reference is
+		// undefined — flagged elsewhere): nothing can blackhole.
 		return nil
 	}
 
@@ -171,20 +168,56 @@ func classOfServiceClassifierQueueWarnings(cos *ClassOfServiceConfig, ifaceName 
 
 	// A rewrite rule targeting a materialized class also admits the interface.
 	rewriteHit := false
-	if rr := cos.DSCPRewriteRules[unit.DSCPRewriteRule]; rr != nil {
-		for _, e := range rr.Entries {
+	var rewriteMisses map[string]int
+	if rewriteRule != nil {
+		for _, e := range rewriteRule.Entries {
 			if e == nil {
 				continue
 			}
-			if fc := cos.ForwardingClasses[e.ForwardingClass]; fc != nil && matQueues[fc.Queue] {
+			fc := cos.ForwardingClasses[e.ForwardingClass]
+			if fc == nil {
+				continue
+			}
+			if matQueues[fc.Queue] {
 				rewriteHit = true
-				break
+			} else {
+				if rewriteMisses == nil {
+					rewriteMisses = make(map[string]int)
+				}
+				rewriteMisses[e.ForwardingClass] = fc.Queue
 			}
 		}
 	}
 
 	admitted := schedMapResolved || unit.ShapingRateBytes > 0 || anyHit || rewriteHit
-	if !admitted || len(blackholed) == 0 {
+	if !admitted {
+		// With no other admission knob, a classifier or rewrite targeting
+		// only unmaterialized non-best-effort classes never gets a CoS
+		// runtime. Make those otherwise-silent bindings visible.
+		var warnings []string
+		classes := make([]string, 0, len(blackholed))
+		for class := range blackholed {
+			classes = append(classes, class)
+		}
+		sort.Strings(classes)
+		for _, class := range classes {
+			warnings = append(warnings, fmt.Sprintf(
+				"class-of-service interface %s unit %d has classifier binding(s) to forwarding-class %q (queue %d), but no CoS knob admits this all-non-best-effort binding; the userspace dataplane builds no CoS runtime for the unit",
+				ifaceName, unit.Unit, class, blackholed[class]))
+		}
+		classes = classes[:0]
+		for class := range rewriteMisses {
+			classes = append(classes, class)
+		}
+		sort.Strings(classes)
+		for _, class := range classes {
+			warnings = append(warnings, fmt.Sprintf(
+				"class-of-service interface %s unit %d has dscp rewrite-rule %q bound to forwarding-class %q (queue %d), but no CoS knob admits this all-non-best-effort binding; the userspace dataplane never rewrites egress traffic for the unit",
+				ifaceName, unit.Unit, unit.DSCPRewriteRule, class, rewriteMisses[class]))
+		}
+		return warnings
+	}
+	if len(blackholed) == 0 {
 		return nil
 	}
 
