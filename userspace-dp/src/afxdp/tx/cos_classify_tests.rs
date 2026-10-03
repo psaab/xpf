@@ -1032,16 +1032,25 @@ fn resolve_cos_queue_id_prefers_egress_output_filter_forwarding_class() {
 #[test]
 fn flowless_packet_gets_ba_classification_from_dscp() {
     let snapshot = ConfigSnapshot {
-        interfaces: vec![InterfaceSnapshot {
-            name: "reth0.0".into(),
-            ifindex: 202,
-            hardware_addr: "02:bf:72:00:80:08".into(),
-            cos_shaping_rate_bytes_per_sec: 10_000_000,
-            cos_shaping_burst_bytes: 256_000,
-            cos_scheduler_map: "wan-map".into(),
-            cos_dscp_classifier: "ba".into(),
-            ..Default::default()
-        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "reth0.0".into(),
+                ifindex: 202,
+                hardware_addr: "02:bf:72:00:80:08".into(),
+                cos_shaping_rate_bytes_per_sec: 10_000_000,
+                cos_shaping_burst_bytes: 256_000,
+                cos_scheduler_map: "wan-map".into(),
+                cos_dscp_classifier: "ba".into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                ifindex: 5,
+                cos_shaping_rate_bytes_per_sec: 10_000_000,
+                cos_scheduler_map: "wan-map".into(),
+                cos_dscp_classifier: "ba".into(),
+                ..Default::default()
+            },
+        ],
         class_of_service: Some(ClassOfServiceSnapshot {
             forwarding_classes: vec![
                 CoSForwardingClassSnapshot {
@@ -1171,6 +1180,166 @@ fn flowless_packet_gets_ba_classification_from_dscp() {
          interface default queue"
     );
 }
+fn ba_trust_snapshot_11386(trusted_ingress: bool) -> ConfigSnapshot {
+    let interface = |ifindex, cos_dscp_classifier: &str| InterfaceSnapshot {
+        ifindex,
+        cos_shaping_rate_bytes_per_sec: 10_000_000,
+        cos_scheduler_map: "wan-map".into(),
+        cos_dscp_classifier: cos_dscp_classifier.into(),
+        cos_dscp_rewrite_rule: "ba-rw".into(),
+        ..Default::default()
+    };
+    ConfigSnapshot {
+        interfaces: if trusted_ingress {
+            vec![interface(202, "ba"), interface(5, "ba")]
+        } else {
+            vec![interface(202, "ba")]
+        },
+        class_of_service: Some(ClassOfServiceSnapshot {
+            forwarding_classes: vec![
+                CoSForwardingClassSnapshot {
+                    name: "best-effort".into(),
+                    queue: 0,
+                },
+                CoSForwardingClassSnapshot {
+                    name: "network-control".into(),
+                    queue: 7,
+                },
+            ],
+            dscp_classifiers: vec![CoSDSCPClassifierSnapshot {
+                name: "ba".into(),
+                entries: vec![CoSDSCPClassifierEntrySnapshot {
+                    forwarding_class: "network-control".into(),
+                    loss_priority: "high".into(),
+                    dscp_values: vec![56],
+                }],
+            }],
+            schedulers: vec![
+                CoSSchedulerSnapshot {
+                    name: "be-sched".into(),
+                    priority: "low".into(),
+                    transmit_rate_bytes: 4_000_000,
+                    buffer_size_bytes: 128_000,
+                    ..Default::default()
+                },
+                CoSSchedulerSnapshot {
+                    name: "nc-sched".into(),
+                    priority: "high".into(),
+                    transmit_rate_bytes: 6_000_000,
+                    buffer_size_bytes: 64_000,
+                    ..Default::default()
+                },
+            ],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "wan-map".into(),
+                entries: vec![
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "best-effort".into(),
+                        scheduler: "be-sched".into(),
+                    },
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "network-control".into(),
+                        scheduler: "nc-sched".into(),
+                    },
+                ],
+            }],
+            ieee8021_classifiers: vec![],
+            dscp_rewrite_rules: vec![CoSDSCPRewriteRuleSnapshot {
+                name: "ba-rw".into(),
+                entries: vec![
+                    CoSDSCPRewriteRuleEntrySnapshot {
+                        forwarding_class: "best-effort".into(),
+                        loss_priority: "low".into(),
+                        dscp_value: 8,
+                    },
+                    CoSDSCPRewriteRuleEntrySnapshot {
+                        forwarding_class: "network-control".into(),
+                        loss_priority: "high".into(),
+                        dscp_value: 46,
+                    },
+                ],
+            }],
+            inet_precedence_classifiers: vec![],
+        }),
+        ..Default::default()
+    }
+}
+
+/// #11386: an egress-bound BA classifier may trust the marking only when the
+/// logical ingress unit binds that classifier type. A guest's self-marked CS7
+/// stays in BE, while CS7 on a trusted ingress lands in network-control.
+///
+/// FAIL-ON-REVERT: before the ingress gate, the guest packet is classified by
+/// the egress unit's CS7 mapping and resolves to queue 7 instead of queue 0.
+#[test]
+fn ba_classifier_requires_ingress_unit_binding_11386() {
+    let meta = UserspaceDpMeta {
+        ingress_ifindex: 5,
+        addr_family: libc::AF_INET as u8,
+        dscp: 56,
+        ..Default::default()
+    };
+    let key = inet_precedence_test_key();
+    let guest = build_forwarding_state(&ba_trust_snapshot_11386(false));
+    let trusted = build_forwarding_state(&ba_trust_snapshot_11386(true));
+
+    for (name, forwarding, expected) in [
+        ("guest WAN ingress", &guest, 0),
+        ("trusted ingress", &trusted, 7),
+    ] {
+        let expected_rewrite = if expected == 0 { Some(8) } else { Some(46) };
+        let fresh = resolve_cos_tx_selection(
+            forwarding,
+            202,
+            meta,
+            Some(&key),
+            TermMatchExtra::default(),
+        );
+        assert_eq!(fresh.queue_id, Some(expected), "{name} fresh CoS selection");
+        assert_eq!(
+            fresh.dscp_rewrite, expected_rewrite,
+            "{name} CoS rewrite must follow the trusted classifier",
+        );
+
+        let cached = resolve_cached_cos_tx_selection(forwarding, 202, meta, &key);
+        assert_eq!(cached.queue_id, Some(expected), "{name} cached seed selection");
+        assert_eq!(cached.dscp_rewrite, expected_rewrite, "{name} cached seed rewrite");
+        let (hit_queue, hit_rewrite) = reclassify_cached_ba_queue_and_lp_rewrite(
+            forwarding,
+            202,
+            meta.dscp,
+            meta.ingress_pcp,
+            meta.ingress_vlan_present != 0,
+            meta.ingress_ifindex,
+            meta.ingress_vlan_id,
+        )
+        .expect("egress BA binding requests per-packet cache-hit classification");
+        assert_eq!(hit_queue, expected, "{name} cached hit selection");
+        assert_eq!(hit_rewrite, expected_rewrite, "{name} cached hit rewrite");
+
+        assert_eq!(
+            resolve_cos_queue_id(forwarding, 202, meta, None),
+            Some(expected),
+            "{name} flowless fresh CoS selection",
+        );
+        assert_eq!(
+            resolve_cached_cos_tx_queue_id(forwarding, 202, meta, None),
+            Some(expected),
+            "{name} flowless cached CoS selection",
+        );
+        assert_eq!(
+            crate::afxdp::mirror::mirror_cos_queue_id(
+                forwarding,
+                202,
+                crate::afxdp::types::ForwardPacketMeta::from(meta),
+                None,
+            ),
+            Some(expected),
+            "{name} flowless mirror CoS selection",
+        );
+    }
+}
+
 
 fn scheduler_map_without_best_effort_snapshot_11428() -> ConfigSnapshot {
     ConfigSnapshot {
@@ -3675,14 +3844,23 @@ fn resolve_cos_queue_id_falls_back_to_default_queue_without_filter_match() {
 #[test]
 fn resolve_cos_queue_id_uses_dscp_classifier_when_filters_do_not_set_class() {
     let snapshot = ConfigSnapshot {
-        interfaces: vec![InterfaceSnapshot {
-            ifindex: 202,
-            hardware_addr: "02:bf:72:00:80:08".into(),
-            cos_shaping_rate_bytes_per_sec: 10_000_000,
-            cos_scheduler_map: "wan-map".into(),
-            cos_dscp_classifier: "wan-classifier".into(),
-            ..Default::default()
-        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                ifindex: 202,
+                hardware_addr: "02:bf:72:00:80:08".into(),
+                cos_shaping_rate_bytes_per_sec: 10_000_000,
+                cos_scheduler_map: "wan-map".into(),
+                cos_dscp_classifier: "wan-classifier".into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                ifindex: 999,
+                cos_shaping_rate_bytes_per_sec: 10_000_000,
+                cos_scheduler_map: "wan-map".into(),
+                cos_dscp_classifier: "wan-classifier".into(),
+                ..Default::default()
+            },
+        ],
         class_of_service: Some(ClassOfServiceSnapshot {
             forwarding_classes: vec![
                 CoSForwardingClassSnapshot {
@@ -3781,14 +3959,23 @@ fn resolve_cos_queue_id_uses_dscp_classifier_when_filters_do_not_set_class() {
 #[test]
 fn resolve_cos_queue_id_uses_ieee8021_classifier_when_filters_do_not_set_class() {
     let snapshot = ConfigSnapshot {
-        interfaces: vec![InterfaceSnapshot {
-            ifindex: 202,
-            hardware_addr: "02:bf:72:00:80:08".into(),
-            cos_shaping_rate_bytes_per_sec: 10_000_000,
-            cos_scheduler_map: "wan-map".into(),
-            cos_ieee8021_classifier: "wan-pcp".into(),
-            ..Default::default()
-        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                ifindex: 202,
+                hardware_addr: "02:bf:72:00:80:08".into(),
+                cos_shaping_rate_bytes_per_sec: 10_000_000,
+                cos_scheduler_map: "wan-map".into(),
+                cos_ieee8021_classifier: "wan-pcp".into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                ifindex: 999,
+                cos_shaping_rate_bytes_per_sec: 10_000_000,
+                cos_scheduler_map: "wan-map".into(),
+                cos_ieee8021_classifier: "wan-pcp".into(),
+                ..Default::default()
+            },
+        ],
         class_of_service: Some(ClassOfServiceSnapshot {
             forwarding_classes: vec![
                 CoSForwardingClassSnapshot {
@@ -4243,17 +4430,27 @@ fn resolve_cos_tx_selection_preserves_output_filter_dscp_rewrite_without_forward
 #[test]
 fn cos_dscp_rewrite_keys_on_forwarding_class_and_loss_priority() {
     let snapshot = ConfigSnapshot {
-        interfaces: vec![InterfaceSnapshot {
-            name: "reth0.0".into(),
-            ifindex: 202,
-            hardware_addr: "02:bf:72:00:80:08".into(),
-            cos_shaping_rate_bytes_per_sec: 10_000_000,
-            cos_shaping_burst_bytes: 256_000,
-            cos_scheduler_map: "wan-map".into(),
-            cos_dscp_classifier: "ba".into(),
-            cos_dscp_rewrite_rule: "rw".into(),
-            ..Default::default()
-        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "reth0.0".into(),
+                ifindex: 202,
+                hardware_addr: "02:bf:72:00:80:08".into(),
+                cos_shaping_rate_bytes_per_sec: 10_000_000,
+                cos_shaping_burst_bytes: 256_000,
+                cos_scheduler_map: "wan-map".into(),
+                cos_dscp_classifier: "ba".into(),
+                cos_dscp_rewrite_rule: "rw".into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                ifindex: 5,
+                cos_shaping_rate_bytes_per_sec: 10_000_000,
+                cos_scheduler_map: "wan-map".into(),
+                cos_dscp_classifier: "ba".into(),
+                cos_dscp_rewrite_rule: "rw".into(),
+                ..Default::default()
+            },
+        ],
         class_of_service: Some(ClassOfServiceSnapshot {
             forwarding_classes: vec![
                 CoSForwardingClassSnapshot {
@@ -6274,15 +6471,25 @@ fn inet_precedence_fixture(
         scheduler: scheduler.into(),
     };
     ConfigSnapshot {
-        interfaces: vec![InterfaceSnapshot {
-            ifindex: 202,
-            hardware_addr: "02:bf:72:00:80:08".into(),
-            cos_shaping_rate_bytes_per_sec: 10_000_000,
-            cos_scheduler_map: "wan-map".into(),
-            cos_dscp_classifier: dscp_classifier.into(),
-            cos_inet_precedence_classifier: inet_precedence_classifier.into(),
-            ..Default::default()
-        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                ifindex: 202,
+                hardware_addr: "02:bf:72:00:80:08".into(),
+                cos_shaping_rate_bytes_per_sec: 10_000_000,
+                cos_scheduler_map: "wan-map".into(),
+                cos_dscp_classifier: dscp_classifier.into(),
+                cos_inet_precedence_classifier: inet_precedence_classifier.into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                ifindex: 999,
+                cos_shaping_rate_bytes_per_sec: 10_000_000,
+                cos_scheduler_map: "wan-map".into(),
+                cos_dscp_classifier: dscp_classifier.into(),
+                cos_inet_precedence_classifier: inet_precedence_classifier.into(),
+                ..Default::default()
+            },
+        ],
         class_of_service: Some(ClassOfServiceSnapshot {
             forwarding_classes: vec![
                 CoSForwardingClassSnapshot {
