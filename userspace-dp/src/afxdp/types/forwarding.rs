@@ -1182,6 +1182,9 @@ pub(in crate::afxdp) struct ConnectedRouteV6 {
     /// #10645: this row's interface HOST address (unmasked); see
     /// `ConnectedRouteV4::host`.
     pub(in crate::afxdp) host: Ipv6Addr,
+    /// Linux interface-address scope copied from `InterfaceAddressSnapshot`;
+    /// link-local gateway inference only accepts RT_SCOPE_UNIVERSE (0).
+    pub(in crate::afxdp) scope: i32,
     pub(in crate::afxdp) ifindex: i32,
     pub(in crate::afxdp) tunnel_endpoint_id: u16,
     /// #2388: canonical routing-table name this connected route belongs to.

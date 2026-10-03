@@ -934,6 +934,7 @@ pub(super) fn populate_interfaces(
                     state.connected_v6.push(ConnectedRouteV6 {
                         prefix: PrefixV6::from_net(v6),
                         host: v6.addr(),
+                        scope: addr.scope,
                         ifindex: iface.ifindex,
                         tunnel_endpoint_id,
                         table: connected_table_v6.clone(),

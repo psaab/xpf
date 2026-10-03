@@ -758,16 +758,20 @@ pub(in crate::afxdp) fn infer_connected_route_target_v6(
 ) -> Option<(i32, u16)> {
     if ip.is_unicast_link_local() {
         // #11322: the daemon adds a synthetic fe80::/64 candidate for every
-        // IPv6-capable interface. Mirror that with all connected IPv6 rows in
-        // this table, not only rows whose observed prefix contains the gateway:
-        // link-local addresses may be absent from a snapshot. The daemon only
-        // infers a scope when candidates collapse to one egress; returning the
-        // first sorted entry made the helper forward an ambiguous route.
+        // IPv6-capable interface. Mirror that with connected IPv6 rows in this
+        // table, not only rows whose observed prefix contains the gateway:
+        // link-local addresses may be absent from a snapshot. Address scope is
+        // carried from the interface snapshot: only RT_SCOPE_UNIVERSE (0) is
+        // an eligible candidate. This excludes incidental kernel LINK rows
+        // (such as networkd's automatic fe80 address) while preserving an
+        // explicitly configured link-local address, whose configured scope is
+        // Universe. As before, only infer when candidates collapse to one
+        // egress; returning the first sorted entry would forward ambiguously.
         let mut target: Option<(i32, u16)> = None;
         for entry in state
             .connected_v6
             .iter()
-            .filter(|entry| entry.table == table)
+            .filter(|entry| entry.table == table && entry.scope == 0)
         {
             let candidate = (entry.ifindex, entry.tunnel_endpoint_id);
             match target {

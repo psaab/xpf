@@ -16643,6 +16643,7 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v6_11315() {
     forwarding.connected_v6.push(ConnectedRouteV6 {
         prefix: PrefixV6::from_net(Ipv6Net::new("2001:db8:1::".parse().unwrap(), 64).unwrap()),
         host: "2001:db8:1::".parse().unwrap(),
+        scope: 0,
         ifindex,
         tunnel_endpoint_id: 0,
         table: "inet6.0".to_string(),

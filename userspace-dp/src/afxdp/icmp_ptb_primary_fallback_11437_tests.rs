@@ -22,6 +22,7 @@ fn connected_v6_11437(ifindex: i32, table: &str, host: Ipv6Addr) -> ConnectedRou
             ipnet::Ipv6Net::new(host, 128).expect("connected /128"),
         ),
         host,
+        scope: 0,
         ifindex,
         tunnel_endpoint_id: 0,
         table: table.to_string(),

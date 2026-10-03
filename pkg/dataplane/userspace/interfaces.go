@@ -1524,22 +1524,27 @@ func mergeInterfaceAddressSnapshots(live []InterfaceAddressSnapshot, configured 
 	if len(configured) == 0 {
 		return live
 	}
-	seen := make(map[string]bool, len(live)+len(configured))
+	indices := make(map[string]int, len(live)+len(configured))
 	out := make([]InterfaceAddressSnapshot, 0, len(live)+len(configured))
 	for _, addr := range live {
 		key := addr.Family + "/" + addr.Address
-		if seen[key] {
+		if _, exists := indices[key]; exists {
 			continue
 		}
-		seen[key] = true
+		indices[key] = len(out)
 		out = append(out, addr)
 	}
 	for _, addr := range configured {
 		key := addr.Family + "/" + addr.Address
-		if seen[key] {
+		if index, exists := indices[key]; exists {
+			// A configured address is the authoritative source for its scope.
+			// In particular, explicitly configured fe80:: addresses carry
+			// Universe scope here so the dataplane can distinguish them from
+			// incidental kernel link-local addresses.
+			out[index].Scope = addr.Scope
 			continue
 		}
-		seen[key] = true
+		indices[key] = len(out)
 		out = append(out, addr)
 	}
 	sort.Slice(out, func(i, j int) bool {
