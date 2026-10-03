@@ -70,14 +70,15 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 	// fails in runPreWalkGates before compileInterfaces runs.
 	var invalidRethRG map[string]bool
 	for _, child := range node.Children {
-		// The `wan0 bandwidth 1g` form leaves its leaf on the interface node.
 		interfaceSchema := interfaceSchema9792()
-		bandwidthNode := packedBody(child, interfaceSchema).FindChild("bandwidth")
+		ifLeaves := expandResolvingRun9792(child, interfaceSchema) // #9792: expand a lenient-path packed run (#9235).
+		// A direct `wan0 bandwidth 1g` tail or a leaf exposed by run expansion
+		// can make a parser-marked leaf into a valid interface container.
+		bandwidthNode := packedBody(ifLeaves, interfaceSchema).FindChild("bandwidth")
 		if child.IsLeaf && bandwidthNode == nil {
 			continue
 		}
 		ifName := child.Name()
-		ifLeaves := expandResolvingRun9792(child, interfaceSchema) // #9792: expand a lenient-path packed run (#9235).
 		ifc := &InterfaceConfig{
 			Name:  ifName,
 			Units: make(map[int]*InterfaceUnit),
