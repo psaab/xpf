@@ -896,6 +896,10 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 		// files. The active config is durable; this flags a degraded
 		// recovery aid, so it does not 503.
 		RollbackHistoryDegradedFn: d.store.RollbackHistoryDegraded,
+		// #11805: local auto-archive failures are non-fatal to forwarding,
+		// but must be visible in /health and the archive health/failure metrics.
+		ArchiveDegradedFn:     d.store.ArchiveDegraded,
+		ArchiveFailureCountFn: d.store.ArchiveFailureCount,
 		// #10751: surface bootstrap lifeline-guard swap failure (non-fatal
 		// field + gauge; the daemon is up and fail-closed).
 		EarlyInputGuardSwapFailedFn: d.EarlyInputGuardSwapFailed,

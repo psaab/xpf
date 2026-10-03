@@ -432,6 +432,20 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 			"flags a degraded recovery aid, not a forwarding outage.",
 		nil, nil,
 	)
+	c.archiveDegraded = prometheus.NewDesc(
+		"xpf_config_archive_degraded",
+		"1 while the latest local auto-archive scan, write, or rotation "+
+			"failed; 0 after a fully successful local archive. The active "+
+			"config remains durable, but its best-effort recovery copy or "+
+			"retention may be incomplete (#11805).",
+		nil, nil,
+	)
+	c.archiveFailures = prometheus.NewDesc(
+		"xpf_config_archive_failures_total",
+		"Total local auto-archive scan, write, or rotation failures since "+
+			"daemon start (#11805).",
+		nil, nil,
+	)
 	c.earlyInputGuardSwapFailed = prometheus.NewDesc(
 		"xpf_early_input_guard_swap_failed",
 		"1 while the latest bootstrap lifeline-guard swap failed and the "+

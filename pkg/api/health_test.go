@@ -307,6 +307,38 @@ func TestHealthHandler_ReportsRollbackHistoryDegraded(t *testing.T) {
 	}
 }
 
+// TestHealthHandlerReportsArchiveDegraded11805 surfaces the local archive
+// recovery-copy failure and count without returning 503: the active config is
+// still durable and the daemon can continue forwarding.
+func TestHealthHandlerReportsArchiveDegraded11805(t *testing.T) {
+	s := &Server{
+		archiveDegradedFn: func() bool { return true },
+		archiveFailureCountFn: func() uint64 {
+			return 2
+		},
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/health", nil)
+	s.healthHandler(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want 200 for non-fatal archive degradation", rr.Code)
+	}
+	var resp Response
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	data, ok := resp.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("data = %T, want map", resp.Data)
+	}
+	if degraded, _ := data["archive_degraded"].(bool); !degraded {
+		t.Error("archive_degraded should be true in /health")
+	}
+	if got, ok := data["archive_failure_count"].(float64); !ok || got != 2 {
+		t.Errorf("archive_failure_count = %v, want 2", data["archive_failure_count"])
+	}
+}
+
 // TestHealthHandler_ReportsJournalPermsDegraded pins #9898 F-113: while the
 // configstore reports a degraded journal permission repair, /health surfaces
 // the journal_perms_degraded field as true — but stays 200/ok, because

@@ -1864,6 +1864,13 @@ owned by the `journal/` subpackage.
   `RollbackHistoryDegraded()` — and journals a `rollback_persist_error`
   entry, so a stale-on-restart rollback history is visible rather than
   silent. The bit clears on the next fully-successful save.
+- Auto-archive degradation (#11805): an unconfirmed archive-sequence scan,
+  archive write failure, or failed rotation leaves the config commit
+  successful but sets `ArchiveDegraded()` and appends an
+  `archive_persist_error` journal entry. The daemon exposes the non-fatal
+  `archive_degraded` health field and `xpf_config_archive_degraded` gauge;
+  `xpf_config_archive_failures_total` counts failures. Only a later archive
+  whose write and rotation both succeed clears the bit.
 - `loadRollbackHistory` / `cleanupRollbackFiles` stop ONLY on a
   genuinely-missing slot (`os.IsNotExist`), not on an arbitrary read/
   remove error (#3441 L2/L3): a transient or permission error on an

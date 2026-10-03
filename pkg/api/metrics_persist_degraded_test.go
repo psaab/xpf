@@ -136,3 +136,39 @@ func TestJournalPermsDegradedGauge(t *testing.T) {
 		})
 	}
 }
+
+// TestArchiveDegradedMetrics11805 keeps local archive state visible before the
+// dataplane gate, so an unloaded daemon still reports both current degradation
+// and cumulative failed attempts.
+func TestArchiveDegradedMetrics11805(t *testing.T) {
+	s := &Server{ // dp intentionally nil — control-plane metrics must still emit
+		archiveDegradedFn: func() bool { return true },
+		archiveFailureCountFn: func() uint64 {
+			return 3
+		},
+	}
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(newCollector(s))
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	foundGauge, foundCounter := false, false
+	for _, mf := range mfs {
+		switch mf.GetName() {
+		case "xpf_config_archive_degraded":
+			foundGauge = true
+			if got := mf.GetMetric()[0].GetGauge().GetValue(); got != 1 {
+				t.Errorf("archive degraded gauge = %v, want 1", got)
+			}
+		case "xpf_config_archive_failures_total":
+			foundCounter = true
+			if got := mf.GetMetric()[0].GetCounter().GetValue(); got != 3 {
+				t.Errorf("archive failure counter = %v, want 3", got)
+			}
+		}
+	}
+	if !foundGauge || !foundCounter {
+		t.Fatalf("archive metrics missing with dataplane unloaded: gauge=%v counter=%v", foundGauge, foundCounter)
+	}
+}

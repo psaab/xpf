@@ -339,6 +339,12 @@ type xpfCollector struct {
 	// so this is an observability signal for a degraded recovery aid, not
 	// a forwarding/durability emergency.
 	rollbackHistoryDegraded *prometheus.Desc
+	// #11805: 0/1 gauge for failed local auto-archive writes/rotation. This is
+	// a recovery-copy failure, not a forwarding or active-config durability
+	// failure.
+	archiveDegraded *prometheus.Desc
+	// Cumulative failed local auto-archive attempts since daemon start.
+	archiveFailures *prometheus.Desc
 
 	// #10751: 0/1 gauge — 1 while the latest bootstrap lifeline-guard swap
 	// failed (global barrier retained; remote recovery may be blocked).
@@ -1094,6 +1100,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.ipsecCaptureDeliveredTotal
 	ch <- c.configPersistDegraded
 	ch <- c.rollbackHistoryDegraded
+	ch <- c.archiveDegraded
+	ch <- c.archiveFailures
 	ch <- c.earlyInputGuardSwapFailed
 	ch <- c.journalPermsDegraded
 	ch <- c.userspacePolicyContentRejected
@@ -1508,6 +1516,20 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		ch <- prometheus.MustNewConstMetric(c.rollbackHistoryDegraded,
 			prometheus.GaugeValue, v)
+	}
+
+	// #11805: local archive health remains visible even when the dataplane
+	// is not loaded; the counter counts each failed scan/write/rotation attempt.
+	if c.srv.archiveDegradedFn != nil {
+		v := 0.0
+		if c.srv.archiveDegradedFn() {
+			v = 1
+		}
+		ch <- prometheus.MustNewConstMetric(c.archiveDegraded, prometheus.GaugeValue, v)
+	}
+	if c.srv.archiveFailureCountFn != nil {
+		ch <- prometheus.MustNewConstMetric(c.archiveFailures,
+			prometheus.CounterValue, float64(c.srv.archiveFailureCountFn()))
 	}
 
 	// #10751: bootstrap lifeline-guard swap failure. Control-plane health:
