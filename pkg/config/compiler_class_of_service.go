@@ -834,6 +834,13 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 	if fairnessNode := node.FindChild("fairness"); fairnessNode != nil {
 		if rssNode := fairnessNode.FindChild("rss-expectation"); rssNode != nil {
 			seen := make(map[string]string)
+			warnRSS := func(detail error) {
+				if warnings != nil {
+					*warnings = append(*warnings, fmt.Sprintf(
+						"class-of-service fairness rss-expectation (downgraded to warning on tolerant path; malformed row omitted): %v",
+						detail))
+				}
+			}
 			// #hb166 G-9: rss-expectation is keyed by the STABLE xpf
 			// interface name (e.g. ge-0-0-2), not the transient kernel
 			// ifindex. The name is resolved to the current ifindex at
@@ -845,7 +852,12 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 				}
 				ifaceName := ifaceNode.Keys[1]
 				if ifaceName == "" {
-					return fmt.Errorf("class-of-service fairness rss-expectation interface: expected non-empty interface name")
+					detail := fmt.Errorf("class-of-service fairness rss-expectation interface: expected non-empty interface name")
+					if opts.lenientCoSFairnessRSSExpectation {
+						warnRSS(detail)
+						continue
+					}
+					return detail
 				}
 				for _, queueNode := range ifaceNode.FindChildren("queue") {
 					if len(queueNode.Keys) < 2 {
@@ -853,15 +865,30 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 					}
 					queue, err := strconv.Atoi(queueNode.Keys[1])
 					if err != nil || queue < 0 || queue > 255 {
-						return fmt.Errorf("class-of-service fairness rss-expectation interface %s queue %q: expected queue 0..255", ifaceName, queueNode.Keys[1])
+						detail := fmt.Errorf("class-of-service fairness rss-expectation interface %s queue %q: expected queue 0..255", ifaceName, queueNode.Keys[1])
+						if opts.lenientCoSFairnessRSSExpectation {
+							warnRSS(detail)
+							continue
+						}
+						return detail
 					}
 					expr, err := collectCoSFairnessRSSExpectation(queueNode)
 					if err != nil {
-						return fmt.Errorf("class-of-service fairness rss-expectation interface %s queue %d: %w", ifaceName, queue, err)
+						detail := fmt.Errorf("class-of-service fairness rss-expectation interface %s queue %d: %w", ifaceName, queue, err)
+						if opts.lenientCoSFairnessRSSExpectation {
+							warnRSS(detail)
+							continue
+						}
+						return detail
 					}
 					parsed, err := fairnesscontract.ParseRSSExpectation(expr)
 					if err != nil {
-						return fmt.Errorf("class-of-service fairness rss-expectation interface %s queue %d: %w", ifaceName, queue, err)
+						detail := fmt.Errorf("class-of-service fairness rss-expectation interface %s queue %d: %w", ifaceName, queue, err)
+						if opts.lenientCoSFairnessRSSExpectation {
+							warnRSS(detail)
+							continue
+						}
+						return detail
 					}
 					key := fmt.Sprintf("%s/%d", ifaceName, queue)
 					canonical := parsed.Canonical()
@@ -869,7 +896,12 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 						if existing == canonical {
 							continue
 						}
-						return fmt.Errorf("class-of-service fairness rss-expectation interface %s queue %d: duplicate expectation %q conflicts with %q", ifaceName, queue, canonical, existing)
+						detail := fmt.Errorf("class-of-service fairness rss-expectation interface %s queue %d: duplicate expectation %q conflicts with %q", ifaceName, queue, canonical, existing)
+						if opts.lenientCoSFairnessRSSExpectation {
+							warnRSS(detail)
+							continue
+						}
+						return detail
 					}
 					seen[key] = canonical
 					cos.FairnessExpectations = append(cos.FairnessExpectations, &CoSFairnessExpectation{
