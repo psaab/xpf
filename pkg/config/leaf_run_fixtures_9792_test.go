@@ -55,16 +55,13 @@ var leafRunFixtures9156 = map[string]leafRunFixture9156{
 	"class-of-service fairness rss-expectation interface xpfarg queue xpfarg [active-workers -> at-least-active-workers]": {
 		container: strings.Fields("class-of-service fairness rss-expectation interface ge-0/0/1 queue 0"),
 	},
-	// ORACLE did not compile: `requires positive committed-information-rate`.
-	// The rates take bandwidth values, and the context completes each rate set
-	// WITHOUT the two leaves under test, so the comparison stays about them.
-	"firewall three-color-policer xpfarg single-rate [committed-burst-size -> committed-information-rate]": {
-		headVal: "1k", tailVal: "1m", ctx: "excess-burst-size 1k; ",
-		runRefused: "the one-line run drops committed-information-rate and the policer is refused: `requires positive committed-information-rate`",
-	},
-	"firewall three-color-policer xpfarg two-rate [committed-burst-size -> committed-information-rate]": {
-		headVal: "1k", tailVal: "1m", ctx: "peak-information-rate 2m; peak-burst-size 2k; ",
-		runRefused: "the one-line run drops committed-information-rate and the policer is refused: `requires positive committed-information-rate`",
+	// These rows used to enumerate committed-burst-size as an untyped
+	// admission head. It is now typed with CIR/CBS diagnostics (#11827), so the
+	// leaf-run gate no longer treats it as a head.
+	// The `then` comparison needs a complete rate set now that strict schema
+	// validation checks the rate leaves before compiling the action.
+	"firewall three-color-policer xpfarg then [forwarding-class -> loss-priority]": {
+		preamble: "firewall { three-color-policer { xpfarg { single-rate { committed-information-rate 1m; committed-burst-size 1k; excess-burst-size 1k; } } } } ",
 	},
 	// ORACLE did not compile: `references undefined scheduler "xpfaaa"`.
 	// scheduler-name names a top-level scheduler; #8690's preambleFor defines it.

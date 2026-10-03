@@ -19,6 +19,10 @@ xpf (0.0.0) unstable; urgency=medium
     to nanoseconds; reject unparseable values strictly and warn on tolerant
     loads instead of silently using zero (#11825).
 
+  * Type three-color policer rate and burst leaves for token-specific strict
+    diagnostics while preserving Junos fractional-rate, bare-byte, and
+    tolerant-load behavior (#11827).
+
   * Keep foreign DSCP-scoped destination rules out of the userspace FIB
     mirror rather than widening them into unconditional NextTable leaks
     (#11685).
