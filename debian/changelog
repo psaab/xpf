@@ -3,6 +3,9 @@ xpf (0.0.0) unstable; urgency=medium
   * Warn when an unrelated commit disables a short legacy web-management
     API-auth credential, naming its leaf without exposing the credential value
     (#11820).
+  * On tolerant load, isolate FBF on VRF-member attachments to a suppressed
+    filter clone, preserve valid non-member uses of shared filters, and report
+    each dropped steer through degraded PBR health (#11589).
 
   * Keep custom login classes with `permissions all` from rendering secrets in
     cleartext on the console; only the built-in `super-user` class keeps that

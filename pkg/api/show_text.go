@@ -207,6 +207,10 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 						// restore/peer-sync loads.
 						continue
 					}
+					if source, _ := filter.SuppressedMemberFBF11321(); source != "" {
+						// Keep internal #11589 clones out of the authored-config view.
+						continue
+					}
 					fmt.Fprintf(&buf, "Filter: %s (family: %s)\n", name, family)
 					for _, term := range filter.Terms {
 						if term == nil {

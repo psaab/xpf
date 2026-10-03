@@ -29,10 +29,10 @@ func memberFBFTree11321(t *testing.T, family, ownerType string) *ConfigTree {
 }
 
 // #11321: a VRF member's kernel lookup is intercepted by the earlier l3mdev
-// lookup / pref-2000 miss terminator before the FBF band, whereas the Rust
-// session-miss helper still honors the explicit PBR override. Strict commit
-// must gate the divergent shape; tolerant load must keep booting and surface a
-// warning. Both address families are covered.
+// lookup / pref-2000 miss terminator before the FBF band, while the Rust
+// session-miss helper honors explicit PBR. Strict commit rejects this divergent
+// shape; tolerant load must keep booting but suppress the FBF override on both
+// planes and surface the degradation. Both address families are covered.
 func TestFBFOnRoutingInstanceMemberIsGatedAtCommit11321(t *testing.T) {
 	for _, family := range []string{"inet", "inet6"} {
 		t.Run(family, func(t *testing.T) {
@@ -57,7 +57,13 @@ func TestFBFOnRoutingInstanceMemberWarnsOnTolerantLoad11321(t *testing.T) {
 		t.Fatalf("tolerant load must keep the prior config bootable: %v", err)
 	}
 	if got := cfg.Firewall.FiltersInet["member-fbf"].Terms[0].RoutingInstance; got != "steer-ri" {
-		t.Fatalf("tolerant load stripped the legacy FBF action: got %q, want steer-ri", got)
+		t.Fatalf("tolerant load must preserve the authored filter: got routing-instance %q, want steer-ri", got)
+	}
+	cloneName := cfg.Interfaces.Interfaces["ge-0/0/1"].Units[0].FilterInputV4
+	clone := cfg.Firewall.FiltersInet[cloneName]
+	if cloneName == "member-fbf" || clone == nil || len(clone.Terms) != 1 ||
+		clone.Terms[0].RoutingInstance != "" || clone.Terms[0].Action != "accept" {
+		t.Fatalf("tolerant load must rebind only the member attachment to a stripped terminal-accept clone: filter=%q clone=%+v", cloneName, clone)
 	}
 	found := false
 	for _, warning := range cfg.Warnings {
@@ -109,13 +115,18 @@ func TestFBFOnLinuxAliasRoutingInstanceMemberIsGated11321(t *testing.T) {
 	}
 }
 
-// Forwarding instances do not create/bind a Linux VRF device, so their member
-// interface's kernel lookup can reach the PBR band. Unattached filters also
-// cannot make this specific kernel/userspace member divergence.
+// Forwarding instances do not bind a Linux VRF, so #11321 itself must exclude
+// them from the VRF-member FBF gate. A separate #11312 validator rejects
+// forwarding-instance interface members. Unattached filters also cannot make
+// this specific kernel/userspace member divergence.
 func TestFBFMemberGateExcludesForwardingAndUnattachedInterfaces11321(t *testing.T) {
 	tree := memberFBFTree11321(t, "inet", "forwarding")
-	if _, err := CompileConfig(tree); err != nil {
-		t.Fatalf("FBF on a forwarding-instance member should remain allowed: %v", err)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile for forwarding-member gate control: %v", err)
+	}
+	if warnings := memberFBFKernelBandWarnings11321(cfg); len(warnings) != 0 {
+		t.Fatalf("forwarding-instance members must remain outside the VRF-member FBF gate: %v", warnings)
 	}
 
 	tree = buildFilterTree(t,

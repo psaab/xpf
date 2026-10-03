@@ -155,14 +155,24 @@ func (c *CLI) showFirewallFilters() error {
 
 	// Sort filter names for deterministic output (matches compiler order)
 	inetNames := make([]string, 0, len(cfg.Firewall.FiltersInet))
-	for name := range cfg.Firewall.FiltersInet {
-		inetNames = append(inetNames, name)
+	for name, filter := range cfg.Firewall.FiltersInet {
+		if filter == nil {
+			continue
+		}
+		if source, _ := filter.SuppressedMemberFBF11321(); source == "" {
+			inetNames = append(inetNames, name)
+		}
 	}
 	sort.Strings(inetNames)
 
 	inet6Names := make([]string, 0, len(cfg.Firewall.FiltersInet6))
-	for name := range cfg.Firewall.FiltersInet6 {
-		inet6Names = append(inet6Names, name)
+	for name, filter := range cfg.Firewall.FiltersInet6 {
+		if filter == nil {
+			continue
+		}
+		if source, _ := filter.SuppressedMemberFBF11321(); source == "" {
+			inet6Names = append(inet6Names, name)
+		}
 	}
 	sort.Strings(inet6Names)
 

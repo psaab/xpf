@@ -1464,6 +1464,9 @@ type ThreeColorPolicerConfig struct {
 type FirewallFilter struct {
 	Name  string
 	Terms []*FirewallFilterTerm
+	// Internal #11321 clone provenance, omitted from public config output.
+	memberFBFSource11321 string
+	memberFBFTerms11321  []string
 	// InterfaceSpecific records the Junos `interface-specific` flag
 	// (fable-167 F-3a, #4316). In Junos it instantiates a distinct
 	// counter/policer instance per interface the filter is attached to; xpf
