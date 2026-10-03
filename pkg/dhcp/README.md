@@ -201,19 +201,21 @@ the debounced `onAddressChange` callback when content changed.
 - **Address moves are re-acquisition-equivalent**: if a renewal returns
   a different address, the old one is removed and the new one applied
   via the same netlink mechanisms the fresh-acquisition path uses.
-- **Content-unchanged renewals are silent**: the callback re-enters the
-  daemon's `applyConfig` (full recompile) and thus `Reconcile`; firing
-  it on every T1 interval would recompile the dataplane periodically
-  for nothing. `Reconcile` keys on config identity (never lease state),
-  so a fire is never a restart-loop hazard — only recompile churn.
-  An IA_PD reply with **no prefixes** (silence) retains previously
-  delegated prefixes and does not count as a change (the #1844
-  anti-outage rule). A prefix returned with **valid-lifetime 0** is an
-  RFC 8415 §12.1 *withdrawal*, not silence: `reconcileDelegatedPDs`
-  removes it from the held set per-prefix (`(prior \ withdrawn) ∪ live`,
-  never a blunt clear-all) so it is neither stored nor re-advertised, and
-  fires the recompile so the RA sender drops it (#4874 B). See the
-  zero-lifetime IA_PD note under Gotchas.
+- **Content-unchanged renewals are normally silent (#1777)**: the callback
+  re-enters the daemon's `applyConfig` (full recompile) and thus `Reconcile`;
+  firing it on every T1 interval would recompile the dataplane periodically
+  for nothing. When a caller registers the optional unchanged-lease hook, it
+  fires only on such renewals and outside the manager lock; the daemon uses
+  that exception solely while #11497 host-inbound gap debt is owed.
+  `Reconcile` keys on config identity (never lease state), so the re-drive
+  cannot restart clients in a loop — only recompile churn.
+  An IA_PD reply with **no prefixes** (silence) retains previously delegated
+  prefixes and does not count as a change (the #1844 anti-outage rule). A
+  prefix returned with **valid-lifetime 0** is an RFC 8415 §12.1 *withdrawal*,
+  not silence: `reconcileDelegatedPDs` removes it from the held set per-prefix
+  (`(prior \ withdrawn) ∪ live`, never a blunt clear-all) so it is neither
+  stored nor re-advertised, and fires the recompile so the RA sender drops it
+  (#4874 B). See the zero-lifetime IA_PD note under Gotchas.
 - The decision logic is concentrated in `commitLease` / `renewalTimers`
   / `leaseContentChanged` / `delegatedPrefixesChanged` and pinned by
   `commit_test.go`. The run-loop state machine itself (the

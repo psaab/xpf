@@ -208,11 +208,11 @@ func reconcileDelegatedPDs(prior, live, withdrawn []DelegatedPrefix) (result []D
 //     rule); v4 must never touch the iface-keyed PD map that a co-resident
 //     v6 client owns.
 //   - The debounced onAddressChange callback fires only when lease
-//     content actually changed. The callback re-enters the daemon's
-//     applyConfig (full recompile) and thus Reconcile; an
-//     unchanged-content renewal must not trigger that every T1
-//     interval. Reconcile keys strictly on config identity (#1793), so
-//     firing is never a restart-loop hazard — only recompile churn.
+//     content actually changed. A content-identical renewal is normally
+//     silent (#1777); the optional unchanged-renewal hook fires only for
+//     a caller that has explicitly requested a debt-triggered re-drive
+//     (#11497), and runs outside m.mu. Reconcile still keys on config
+//     identity (#1793), so this cannot restart clients in a loop.
 //
 // prev is the lease currently applied to the interface (nil on first
 // acquisition); prevPDs the delegated prefixes currently stored (for the
@@ -242,7 +242,7 @@ func (m *Manager) commitLease(key clientKey, lease, prev *Lease, prefixes, prevP
 	}
 	m.mu.Unlock()
 
-	m.notifyLeaseStateChanged(prev, lease, applyPDs && delegatedPrefixesChanged(prevPDs, prefixes))
+	m.notifyLeaseStateChanged(prev, lease, applyPDs && delegatedPrefixesChanged(prevPDs, prefixes), true)
 	return nil
 }
 
@@ -253,10 +253,10 @@ func (m *Manager) commitRouterAdvertisementState(key clientKey, lease, prev *Lea
 	m.mu.Lock()
 	m.leases[key] = lease
 	m.mu.Unlock()
-	m.notifyLeaseStateChanged(prev, lease, false)
+	m.notifyLeaseStateChanged(prev, lease, false, false)
 }
 
-func (m *Manager) notifyLeaseStateChanged(prev, lease *Lease, pdChanged bool) {
+func (m *Manager) notifyLeaseStateChanged(prev, lease *Lease, pdChanged, retryUnchangedLease bool) {
 	// Gateway-only changes are relevant to interface-typed ip-monitoring
 	// next-hops; address/DNS-only changes do not fire this hook.
 	if prev == nil || prev.Gateway != lease.Gateway {
@@ -264,5 +264,19 @@ func (m *Manager) notifyLeaseStateChanged(prev, lease *Lease, pdChanged bool) {
 	}
 	if prev == nil || leaseContentChanged(prev, lease) || pdChanged {
 		m.scheduleRecompile()
+		return
+	}
+	if !retryUnchangedLease {
+		return
+	}
+	// #11497: a content-identical T1/T2 renewal is normally silent (#1777),
+	// but a scoped caller may request one callback while convergence debt is
+	// outstanding. That lets a renewal re-drive the failed address apply
+	// without making healthy renewals trigger a full recompile.
+	m.mu.Lock()
+	onUnchangedLease := m.onUnchangedLease
+	m.mu.Unlock()
+	if onUnchangedLease != nil {
+		onUnchangedLease()
 	}
 }

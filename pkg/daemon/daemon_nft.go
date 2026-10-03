@@ -869,33 +869,13 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 					LifelineNetdevs: dpuserspace.HostInboundLifelineIngressNetdevs(cfg),
 				}
 				if gapErr := d.installHostInboundGapFence(spec); gapErr != nil {
-					// #7181: the apply failed AND the gap could not be installed.
-					// Record the staleness before returning -- this is the worst
-					// applied state and the one an operator most needs surfaced.
-					//
-					// #10751 BLOCKING-5 residual (day-2 double failure,
-					// EXPLICITLY UNBOUNDED): both atomic nft transactions are
-					// down, so the newcomer stays reachable until the NEXT
-					// trigger (lease-content change, commit, feed/poll/sync
-					// apply, restart) — no wall-clock retry owner exists on
-					// this path. The joined error dies at applyConfigUnderSem
-					// (Warn plus void return, no debt latch); the #9811
-					// full-apply loop never latches here (its scope comment
-					// excludes caller-less paths as a separate decision);
-					// the routing/conntrack/service loops never reach
-					// host-inbound; a content-identical T1 renew is gated out
-					// at commitLease. A VRF-enslaved unzoned lease is the
-					// sharpest case (no backstop covers it either). Single
-					// real-install failure IS bounded synchronously (this gap
-					// — see TestVRFLeaseWindowBoundedByGapAfterFailedRerender10751);
-					// only the double failure waits unboundedly: while nft is
-					// down no retry could install anyway, and once it heals
-					// convergence still waits for the next trigger. Widening
-					// #9811 to latch here would bound it at 30s: filed as
-					// #11497 (retry/convergence owner) and ACCEPTED at the
-					// round-10 tally — the residual stands until then.
+					// A day-2 double failure has no protecting fence for the
+					// newcomer. Latch exactly this state so the scoped 30s owner
+					// can re-drive the active config after nftables recovers.
+					joinedErr := errors.Join(fmt.Errorf("apply host-inbound nftables filter: %w", err), gapErr)
+					d.noteHostInboundGapApplyResult(joinedErr)
 					d.noteHostInboundApplyFailed(time.Now())
-					return errors.Join(fmt.Errorf("apply host-inbound nftables filter: %w", err), gapErr)
+					return joinedErr
 				}
 				// Baseline records the UNCONDITIONALLY-denied subset:
 				// shared is conditionally denied (data ingress only),
@@ -1093,6 +1073,8 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// #7181: advance the applied generation and clear the staleness flag and any
 	// gap-fence marker -- the real table now covers the desired set on its own.
 	d.noteHostInboundApplySucceeded()
+	// A successful real ruleset supersedes any prior failed gap-only attempt.
+	d.noteHostInboundGapApplyResult(nil)
 	// #5789: the retained generation now covers EXACTLY this desired drop set.
 	// Record it so a later failed rerender can tell which destinations a
 	// subsequently-appeared address left uncovered.

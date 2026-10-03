@@ -3648,6 +3648,14 @@ never lock an operator out of a remote box it manages.
   branch; a zoned NON-lifeline DHCP interface (e.g. a standalone `fxp1`) now forces
   the full recompile that builds its address-scoped host-inbound fence, closing the
   addressless→addressed gap where the broad class exempted it from that reapply.
+  **Gap-failure convergence (#11497):** if a day-2 real host-inbound install
+  fails and the additive coverage-gap fence fails in the same apply, the daemon
+  latches scoped retry debt and re-applies the active config every 30s until the
+  real table succeeds. The loop is joined to the daemon lifetime; a successful
+  gap fence alone is sufficient protection and does not create this debt.
+  A content-identical DHCP T1/T2 renewal may also re-drive the config while
+  this debt is owed, without making healthy renewals trigger recompiles.
+
   **Lifeline exclusion — by INTERFACE and by address VALUE (#7284):**
   management/cluster-control interfaces (`fxp0` or explicitly configured
   chassis-cluster control/fabric links) are excluded from the address sets, so an
