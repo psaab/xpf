@@ -2953,6 +2953,10 @@ type compileOpts struct {
 	// first key slot of an `address` leaf and would otherwise let the garbage
 	// through unremarked — the same silence the issue is about.
 	lenientInterfaceAddressList bool
+	// lenientInterfaceBandwidth (#11801) warns and leaves malformed interface
+	// bandwidth unset on tolerant loads so an already-persisted config still
+	// boots; strict compilation rejects the value with its leaf path.
+	lenientInterfaceBandwidth bool
 
 	// lenientVlanUnitMTU (#9837) downgrades the tagged-unit-MTU gate — a
 	// tagged unit whose family MTU exceeds the interface-level `mtu` — from
@@ -3244,6 +3248,7 @@ func lenientCompileOpts() compileOpts {
 		lenientFabricMemberDefined:             true,
 		lenientInterfaceAddressList:            true,
 		lenientVlanUnitMTU:                     true,
+		lenientInterfaceBandwidth:              true,
 		lenientInterfaceNumericBounds:          true,
 		lenientBareLeafInstance9838:            true,
 		lenientSystemHostname:                  true,

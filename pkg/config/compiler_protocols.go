@@ -1294,6 +1294,30 @@ func parseBandwidthBps(s string) uint64 {
 	return parseScaledDecimalUnit(s)
 }
 
+// parseBandwidthBpsStrict is the error-returning sibling of
+// parseBandwidthBps used by the #1319 SchemaValidate path (#11801).
+//
+// The legacy parseBandwidthBps silently returns 0 on garbage input, which the
+// compiler reads as "unset" — so `interfaces <name> bandwidth asd` committed
+// clean and then zeroed the CoS line-rate base behind TCP percent resolution
+// (coSInterfaceLineRateBytes), the ipmon base (daemon_ipmon.go), and the FRR
+// cost input (cli/apply.go) with no diagnostic naming the leaf. The schema
+// validator (ValidateInterfaceBandwidth) and compiler call this strict variant,
+// keeping the gate and compiled value in parity. Strict compilation rejects a
+// bad leaf with its config path; tolerant compilation warns and leaves the
+// interface bandwidth unset so existing persisted configs still load.
+// The legacy zero-return contract and valid-value conversion are unchanged.
+func parseBandwidthBpsStrict(s string) (uint64, error) {
+	bps, err := parseScaledDecimalUnitStrict(s)
+	if err != nil {
+		return 0, err
+	}
+	if bps == 0 {
+		return 0, fmt.Errorf("bandwidth must be positive (got %q)", s)
+	}
+	return bps, nil
+}
+
 // parseBandwidthLimit parses a Junos bandwidth-limit value (in bits/sec) to bytes/sec.
 // "1m" = 1,000,000 bps = 125,000 bytes/s; "10g" = 10 Gbps; "500k" = 500,000 bps; plain number = bps.
 func parseBandwidthLimit(s string) uint64 {

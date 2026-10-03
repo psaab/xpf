@@ -70,11 +70,15 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 	// fails in runPreWalkGates before compileInterfaces runs.
 	var invalidRethRG map[string]bool
 	for _, child := range node.Children {
-		if child.IsLeaf {
+		interfaceSchema := interfaceSchema9792()
+		ifLeaves := expandResolvingRun9792(child, interfaceSchema) // #9792: expand a lenient-path packed run (#9235).
+		// A direct `wan0 bandwidth 1g` tail or a leaf exposed by run expansion
+		// can make a parser-marked leaf into a valid interface container.
+		bandwidthNode := packedBody(ifLeaves, interfaceSchema).FindChild("bandwidth")
+		if child.IsLeaf && bandwidthNode == nil {
 			continue
 		}
 		ifName := child.Name()
-		ifLeaves := expandResolvingRun9792(child, interfaceSchema9792()) // #9792: expand a lenient-path packed run (#9235).
 		ifc := &InterfaceConfig{
 			Name:  ifName,
 			Units: make(map[int]*InterfaceUnit),
@@ -110,10 +114,21 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			ifc.Disable = true
 		}
 
-		// Interface bandwidth (bits per second)
-		if bwNode := ifLeaves.FindChild("bandwidth"); bwNode != nil {
-			if v := nodeVal(bwNode); v != "" {
-				ifc.Bandwidth = parseBandwidthBps(v)
+		// Interface bandwidth (bits per second). The interface node's own
+		// packed tail is distinct from #9792's nested-run expansion; consume it
+		// through the schema so braced and brace-elided bandwidth agree.
+		if bwNode := bandwidthNode; bwNode != nil {
+			v := nodeVal(bwNode)
+			if bps, err := parseBandwidthBpsStrict(v); err != nil {
+				path := "interfaces " + ifName + " bandwidth"
+				if !opts.lenientInterfaceBandwidth {
+					return fmt.Errorf("%s: %w", path, err)
+				}
+				if warnings != nil {
+					*warnings = append(*warnings, fmt.Sprintf("%s: %v; ignoring invalid bandwidth", path, err))
+				}
+			} else {
+				ifc.Bandwidth = bps
 			}
 		}
 
