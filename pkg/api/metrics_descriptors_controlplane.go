@@ -159,8 +159,8 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 	c.remoteArchivePendingSites = prometheus.NewDesc(
 		"xpf_config_remote_archive_pending_sites",
 		"Number of archive sites still owed a copy of the current config "+
-			"(#11806). A new current-config attempt replaces older remote "+
-			"copy debt; zero means every attempted site completed successfully.",
+			"(#11806). New attempts replace older current-config debt; the "+
+			"obligation is also dropped when its destination is no longer configured.",
 		nil, nil,
 	)
 	c.remoteArchiveFailures = prometheus.NewDesc(

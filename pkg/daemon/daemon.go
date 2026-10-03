@@ -1792,18 +1792,21 @@ type Daemon struct {
 	syslogHash    string
 	syslogHashSet bool
 
-	// archiveTransfer performs the transfer-on-commit upload of one
-	// serialized active-config file to an archive site. nil ⇒ the default
-	// scp transport (scpArchiveTransfer). Overridable so tests can capture
-	// the uploaded file's bytes and assert archiveConfig serializes the
-	// CURRENT active config (Store.ShowActive), not the stale boot file
-	// d.opts.ConfigFile (#3867).
+	// archiveTransfer performs one upload from a serialized active-config file.
+	// The commit, periodic-timer, and retained-debt paths share this transport;
+	// nil selects the default scpArchiveTransfer implementation. Overridable
+	// so tests can capture uploaded bytes and assert they match the active config
+	// rather than the stale boot file d.opts.ConfigFile (#3867).
 	archiveTransfer func(ctx context.Context, srcPath, dest string) error
+	// archiveQueue serializes complete remote archive attempts. Transfers use
+	// one stable remote filename per site, so overlapping uploads could let an
+	// older snapshot overwrite a newer one even if debt bookkeeping is fenced.
+	archiveQueueMu   sync.Mutex
+	archiveQueueTail chan struct{}
 	// archiveDebt retains current-config remote archive copies owed after a
 	// failed staging or site transfer (#11806). It is independent of the timer
 	// lifecycle: transfer-on-commit and periodic attempts share the same debt.
 	archiveDebt remoteArchiveDebt
-
 	// --- periodic configuration-archival timer (#4078) ---
 	// archiveTimer groups the periodic-archival timer supervision state: the
 	// (interval|sites) hash-gate key, the per-generation stop channel, their

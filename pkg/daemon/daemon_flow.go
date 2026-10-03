@@ -1082,27 +1082,72 @@ func parseSrcPort(addr string) uint16 {
 // scp THAT, preserving the historical remote filename (the boot-file
 // basename) and the scp transport.
 func (d *Daemon) archiveConfig(cfg *config.Config) {
-	if cfg == nil || cfg.System.Archival == nil || !cfg.System.Archival.TransferOnCommit ||
-		len(cfg.System.Archival.ArchiveSites) == 0 {
-		// A newer commit that no longer requests transfer-on-commit supersedes
-		// older remote-copy debt. Periodic archival, when configured, will still
-		// take a fresh current-config copy on its next timer tick.
-		d.archiveDebt.clear()
+	var archival *config.ArchivalConfig
+	if cfg != nil {
+		archival = cfg.System.Archival
+	}
+	if archival == nil || !archival.TransferOnCommit || len(archival.ArchiveSites) == 0 {
+		// A non-transfer-on-commit commit still owes periodic sites their
+		// current-config copy. Retain only sites that remain configured for
+		// periodic archival; otherwise the obligation has been withdrawn.
+		var periodicSites []string
+		if archival != nil && archival.TransferInterval > 0 {
+			periodicSites = append([]string(nil), archival.ArchiveSites...)
+		}
+		d.enqueueArchive(func() { d.archiveDebt.retain(periodicSites) })
 		return
 	}
-	d.archiveToSites(cfg.System.Archival.ArchiveSites)
+	d.archiveToSites(archival.ArchiveSites)
 }
 
-// archiveToSites serializes the CURRENT active configuration (Store.ShowActive
-// — the same hierarchical text `show configuration` renders) to a transient
-// 0600 temp file and uploads it to every archive site via the archiveTransfer
-// seam (default scpArchiveTransfer). It is the shared archive-to-site path used
-// by BOTH transfer-on-commit (archiveConfig, invoked on each commit apply) and
-// the periodic transfer-interval timer (runArchiveTimer, #4078) — the periodic
-// path reuses this exact transport rather than reimplementing it. The uploaded
-// remote filename preserves the historical basename (the boot-file basename,
-// default xpf.conf).
+// enqueueArchive orders archive snapshots and debt transitions. An archive site
+// holds one canonical remote filename; FIFO attempts ensure an old snapshot can
+// never finish after and overwrite a newer one. Work is serialized with periodic
+// ticks and config changes while callers remain non-blocking.
+func (d *Daemon) enqueueArchive(run func()) {
+	d.archiveQueueMu.Lock()
+	previous := d.archiveQueueTail
+	done := make(chan struct{})
+	d.archiveQueueTail = done
+	d.archiveQueueMu.Unlock()
+
+	go func() {
+		if previous != nil {
+			<-previous
+		}
+		defer close(done)
+		run()
+	}()
+}
+
+// archiveToSites queues serialization of the CURRENT active configuration
+// (Store.ShowActive) and its remote transfers. The queue prevents an older
+// asynchronous transfer from finishing after a newer snapshot and overwriting
+// the remote copy.
 func (d *Daemon) archiveToSites(sites []string) {
+	if len(sites) == 0 {
+		return
+	}
+	sitesCopy := append([]string(nil), sites...)
+	d.enqueueArchive(func() { d.archiveToSitesNow(sitesCopy) })
+}
+
+// archiveToSitesNow performs one serialized remote archive attempt. Its caller
+// owns the archive queue until every site has finished reading the staged file.
+func (d *Daemon) archiveToSitesNow(sites []string) {
+	// The config compiler preserves archive-site order; collapse duplicate
+	// destinations here so one attempt cannot concurrently write the same
+	// remote filename twice.
+	seen := make(map[string]struct{}, len(sites))
+	uniqueSites := sites[:0]
+	for _, site := range sites {
+		if _, exists := seen[site]; exists {
+			continue
+		}
+		seen[site] = struct{}{}
+		uniqueSites = append(uniqueSites, site)
+	}
+	sites = uniqueSites
 	if len(sites) == 0 {
 		return
 	}
@@ -1187,11 +1232,8 @@ func (d *Daemon) archiveToSites(sites []string) {
 		}(site)
 	}
 
-	// Remove the temp file only after every upload finishes reading it.
-	go func() {
-		wg.Wait()
-		os.RemoveAll(tmpDir)
-	}()
+	wg.Wait()
+	os.RemoveAll(tmpDir)
 }
 
 // scpArchiveTransfer is the default transfer-on-commit transport: scp the
