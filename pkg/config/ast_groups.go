@@ -200,10 +200,7 @@ func (t *ConfigTree) stripApplyGroups(vars map[string]string) error {
 func stripApplyGroupsInNodes(nodes []*Node, vars map[string]string) error {
 	for _, child := range nodes {
 		if child.Name() == "apply-groups" {
-			name := ""
-			if len(child.Keys) > 1 {
-				name = resolveVars(child.Keys[1], vars)
-			}
+			name := firstApplyGroupName(child, vars)
 			return fmt.Errorf("apply-groups references undefined group %q", name)
 		}
 		if !child.IsLeaf {
@@ -213,6 +210,36 @@ func stripApplyGroupsInNodes(nodes []*Node, vars map[string]string) error {
 		}
 	}
 	return nil
+}
+
+func firstApplyGroupName(n *Node, vars map[string]string) string {
+	if len(n.Keys) > 1 {
+		return resolveVars(n.Keys[1], vars)
+	}
+	for _, member := range n.Children {
+		for _, key := range member.Keys {
+			if key != "" {
+				return resolveVars(key, vars)
+			}
+		}
+	}
+	return ""
+}
+
+// appendApplyGroupNames appends names carried on either the statement's keys
+// (inline and bracket-list spellings) or its leaf-list children (block spelling).
+func appendApplyGroupNames(into []string, n *Node, vars map[string]string) []string {
+	for _, key := range n.Keys[1:] {
+		into = append(into, resolveVars(key, vars))
+	}
+	for _, member := range n.Children {
+		for _, key := range member.Keys {
+			if key != "" {
+				into = append(into, resolveVars(key, vars))
+			}
+		}
+	}
+	return into
 }
 
 // walkGroupToContext walks a group definition's tree to match the ancestor
@@ -260,14 +287,12 @@ func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath
 		return fmt.Errorf("apply-groups nesting exceeds maximum depth of %d (possible generated or pathological config)", maxGroupExpandDepth)
 	}
 	// First, collect apply-groups references at this level.
-	// Support bracket-list syntax: apply-groups [ name1 name2 ] produces
-	// Keys = ["apply-groups", "name1", "name2"].
+	// Support bracket-list syntax, where names are statement keys, and block
+	// leaf-list syntax, where names are child keys.
 	var applyNames []string
 	for _, n := range *nodes {
 		if n.Name() == "apply-groups" {
-			for _, key := range n.Keys[1:] {
-				applyNames = append(applyNames, resolveVars(key, vars))
-			}
+			applyNames = appendApplyGroupNames(applyNames, n, vars)
 		}
 	}
 

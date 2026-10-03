@@ -36,6 +36,8 @@ xpf (0.0.0) unstable; urgency=medium
     before storing them in compiled configuration (#11771).
   * Reject archival URLs with inline passwords and redact destinations and
     transfer diagnostics before logging them (#11774).
+  * Read block-spelled `apply-groups` and `apply-groups-except` leaf-list
+    members so group inheritance and exclusions match inline syntax (#11777).
   * Scope WireGuard admits in cold-boot and coverage-gap host-input fences
     to addresses in zones serving each listen port (#11572).
   * Persist feed shrink-guard high-water counts and hashes across daemon
