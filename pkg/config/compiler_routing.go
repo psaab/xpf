@@ -137,17 +137,17 @@ func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig, instanceName st
 		ro.StaticRoutes = compileStaticRoutes(staticNode, ro.StaticRoutes)
 	}
 
-	// Parse rib-groups. Duplicate named blocks are folded before compilation;
-	// this accumulator also unions definitions across repeated routing-options roots.
-	if rgNode := node.FindChild("rib-groups"); rgNode != nil {
+	// Parse every rib-groups container. Duplicate names in one container are
+	// folded before compilation; definitions across containers or roots merge
+	// here in source order.
+	for _, rgNode := range node.FindChildren("rib-groups") {
 		if ro.RibGroups == nil {
 			ro.RibGroups = make(map[string]*RibGroup)
 		}
 		for _, inst := range namedInstances(rgNode.FindChildren("")) {
 			mergeRibGroupDefinition(ro.RibGroups, compileRibGroup(inst.name, inst.node), warnings)
 		}
-		// Also handle direct children (non-named instances). Merge duplicate
-		// definitions in source order so split blocks match flat-set leaf lists.
+		// Also handle direct children (non-named instances).
 		for _, child := range rgNode.Children {
 			mergeRibGroupDefinition(ro.RibGroups, compileRibGroup(child.Name(), child), warnings)
 		}
