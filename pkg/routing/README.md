@@ -914,6 +914,15 @@ opened a socket and returned `true` without sending anything, so a dead
 peer behind a valid route read up forever and the fail-safe
 `LinkSetDown` was unreachable.)
 
+When a probe transition successfully changes the tunnel link state, the
+routing manager notifies the daemon outside the keepalive lock. The daemon
+marks its coalesced routes-only refresh immediately; that publish resamples
+each tunnel endpoint's `link_up` state and bumps the userspace FIB only after
+the snapshot succeeds. The Rust FIB excludes an endpoint reported down from
+ECMP and admits it again after recovery, so userspace forwarding converges
+without an operator commit. Older snapshots omit `link_up` and retain their
+prior underlay-only liveness behavior.
+
 - **Mechanism**: unprivileged datagram ICMP (`udp4`/`udp6` via
   `golang.org/x/net/icmp`), the same mechanism as the tested
   `pkg/cluster/monitor.go` precedent. Requires `net.ipv4.ping_group_range`

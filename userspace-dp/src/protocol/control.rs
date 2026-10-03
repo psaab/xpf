@@ -238,6 +238,8 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 /// Go omits their configured and live addresses, and Rust also honors the
 /// flag when deriving connected routes, local-delivery addresses, and egress
 /// primaries. Exact-version gating refuses helpers that cannot honor the flag.
+// v43 -> v44 (#11423): TunnelEndpointSnapshot.link_up carries keepalive-driven
+// tunnel netdev liveness so down GRE ECMP members are not selected.
 pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 43;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a

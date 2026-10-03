@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/vishvananda/netlink"
 )
 
 func overlayTestConfig() *config.Config {
@@ -693,5 +694,82 @@ func TestPublishRouteOverlaySnapshotFailureKeepsBaseline(t *testing.T) {
 	got = m.routeOverlaySnapshot()
 	if len(got) != 1 || got[0].NextHop != "172.16.80.2" {
 		t.Fatalf("cache did not advance to B after a successful retry: %+v", got)
+	}
+}
+
+func TestRouteOverlayRepublishRefreshesTunnelLiveness11423(t *testing.T) {
+	previousLookup := linkByNameFn
+	t.Cleanup(func() { linkByNameFn = previousLookup })
+	linkUp := true
+	linkByNameFn = func(name string) (netlink.Link, error) {
+		operState := netlink.LinkOperState(netlink.OperDown)
+		flags := net.Flags(0)
+		if linkUp {
+			operState = netlink.OperUp
+			flags = net.FlagUp
+		}
+		return &netlink.Device{LinkAttrs: netlink.LinkAttrs{
+			Name: name, Flags: flags, OperState: operState,
+		}}, nil
+	}
+
+	dir := t.TempDir()
+	controlSock, reqCh := overlayControlServer(t, dir)
+	cfg := &config.Config{}
+	m := New()
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	m.cfg.ControlSocket = controlSock
+	m.generation = 7
+	initiallyUp := true
+	m.lastSnapshot = &ConfigSnapshot{
+		Config:     cfg,
+		Generation: 7,
+		TunnelEndpoints: []TunnelEndpointSnapshot{{
+			ID: 1, LinuxName: "gre0", LinkUp: &initiallyUp,
+		}},
+	}
+	if h, ok := snapshotContentHash(m.lastSnapshot); ok {
+		m.lastSnapshotHash = h
+	}
+	m.lastStatus.ConfigSnapshotProtocolVersion = ProtocolVersion
+
+	linkUp = false
+	published, err := m.PublishRouteOverlaySnapshot(cfg, nil, nil)
+	if err != nil || !published {
+		t.Fatalf("down-link publish = (%v, %v), want a published snapshot", published, err)
+	}
+	var downReq ControlRequest
+	select {
+	case downReq = <-reqCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no snapshot published for tunnel link-down")
+	}
+	if downReq.Snapshot == nil || len(downReq.Snapshot.TunnelEndpoints) != 1 {
+		t.Fatalf("down snapshot tunnel endpoints = %+v, want one endpoint", downReq.Snapshot)
+	}
+	if downReq.Snapshot.TunnelEndpoints[0].LinkUp == nil ||
+		*downReq.Snapshot.TunnelEndpoints[0].LinkUp {
+		t.Fatalf("down snapshot tunnel link_up = %v, want false",
+			downReq.Snapshot.TunnelEndpoints[0].LinkUp)
+	}
+
+	linkUp = true
+	published, err = m.PublishRouteOverlaySnapshot(cfg, nil, nil)
+	if err != nil || !published {
+		t.Fatalf("recovery publish = (%v, %v), want a published snapshot", published, err)
+	}
+	var upReq ControlRequest
+	select {
+	case upReq = <-reqCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no snapshot published for tunnel link recovery")
+	}
+	if upReq.Snapshot == nil || len(upReq.Snapshot.TunnelEndpoints) != 1 {
+		t.Fatalf("recovery snapshot tunnel endpoints = %+v, want one endpoint", upReq.Snapshot)
+	}
+	if upReq.Snapshot.TunnelEndpoints[0].LinkUp == nil ||
+		!*upReq.Snapshot.TunnelEndpoints[0].LinkUp {
+		t.Fatalf("recovery snapshot tunnel link_up = %v, want true",
+			upReq.Snapshot.TunnelEndpoints[0].LinkUp)
 	}
 }

@@ -68,13 +68,33 @@ func routeEventWarrantsRefresh(tableID int, importedTableIDs []int) bool {
 	return false
 }
 
+// markRouteListenerImmediately preserves keepalive liveness changes even if a
+// transition races listener startup.
+func (d *Daemon) markRouteListenerImmediately() {
+	if loop := d.routeListenerLoop.Load(); loop != nil {
+		loop.MarkImmediately()
+		return
+	}
+	d.routeListenerPending.Store(true)
+	if loop := d.routeListenerLoop.Load(); loop != nil && d.routeListenerPending.Swap(false) {
+		loop.MarkImmediately()
+	}
+}
+
+func (d *Daemon) setRouteListenerLoop(loop *coalesce.Loop) {
+	d.routeListenerLoop.Store(loop)
+	if d.routeListenerPending.Swap(false) {
+		loop.MarkImmediately()
+	}
+}
+
 // routeListener subscribes to kernel route events and marks the coalescer.
 //
 // Subscription lifetime and resubscribe-on-error follow
 // daemon_neighbor_listener.go, which is the working sibling for this shape.
 func (d *Daemon) routeListener(ctx context.Context, loop *coalesce.Loop) {
 	loop.SetTimings(routeRefreshDebounce, routeRefreshThrottle)
-	d.routeListenerLoop.Store(loop)
+	d.setRouteListenerLoop(loop)
 	loop.Start()
 	defer loop.Stop()
 
@@ -217,14 +237,13 @@ func (d *Daemon) importedRouteTableIDs() []int {
 	return routing.LearnedRouteTableIDs(instance)
 }
 
-// actuateLearnedRouteRefresh republishes the routes-only snapshot so the
-// helper FIB picks up routes the kernel has learned since the last publish.
+// actuateLearnedRouteRefresh republishes a routes-only snapshot so the helper
+// FIB picks up learned kernel routes and committed tunnel keepalive transitions.
 //
 // It deliberately does NOT touch FRR and does NOT change the ip-monitoring
 // overlay: the overlay is passed through as the ipmon engine currently holds
-// it, so this is a pure re-read of the kernel FIB. That is why it is safe to
-// run on a route event — the only thing that changes is the learned-route set
-// buildRouteSnapshots imports (#7409), and a redundant republish is idempotent.
+// it. The publish refreshes learned routes and tunnel endpoint link state;
+// duplicate publishes remain idempotent.
 //
 // Returns whether it CONVERGED, in pkg/coalesce's contract: false keeps the
 // state dirty and the loop retries on the next throttle-paced sweep rather

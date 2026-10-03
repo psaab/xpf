@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"context"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/coalesce"
 	"github.com/psaab/xpf/pkg/routing"
 )
 
@@ -70,5 +72,26 @@ func TestImportedTableSetComesFromTheImporter7437(t *testing.T) {
 	if len(want) < 2 {
 		t.Fatalf("LearnedRouteTableIDs(%v) returned %v; the fixture must produce more "+
 			"than the main table or the agreement above is vacuous", instance, want)
+	}
+}
+
+func TestKeepaliveLivenessMarkBeforeRouteListenerStartup11423(t *testing.T) {
+	d := &Daemon{}
+	d.markRouteListenerImmediately()
+
+	var actuations int
+	loop := coalesce.New(func(context.Context) bool {
+		actuations++
+		return true
+	})
+	loop.SetTimings(0, 0)
+	d.setRouteListenerLoop(loop)
+	loop.Tick(context.Background())
+
+	if actuations != 1 {
+		t.Fatalf("startup loop actuations = %d, want one for the pending liveness change", actuations)
+	}
+	if d.routeListenerPending.Load() {
+		t.Fatal("route listener startup did not consume the pending liveness mark")
 	}
 }

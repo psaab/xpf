@@ -152,6 +152,9 @@ pub(super) fn populate_tunnel_endpoints(
                 wg_peers,
             },
         );
+        if endpoint.link_up == Some(false) {
+            state.tunnel_endpoints_down.insert(endpoint.id);
+        }
         // #5193 (A1-b7-F1): ids are unique by the preflight above, but two rows
         // can still name one ifindex (two logical names resolved to the same
         // link). Keep the FIRST — silently overwriting made the decap/connected

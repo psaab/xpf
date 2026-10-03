@@ -65,6 +65,8 @@ type TunnelStatus struct {
 // shared Manager.ifaceMu; keepalives belong to this domain (their only
 // user is tunnel apply/clear), so mu protects both tunnels and the
 // keepalives map as one cohesive critical section.
+type tunnelLivenessChangeCallback func(tunnelName string, up bool)
+
 type tunnelManager struct {
 	ops       linkOps
 	vrfBinder vrfBinder
@@ -77,6 +79,9 @@ type tunnelManager struct {
 	mu         sync.Mutex
 	tunnels    []string                    // tunnels successfully applied this round (GetStatus source)
 	keepalives map[string]*keepaliveRunner // tunnel name -> runner
+	// livenessChange is atomically replaceable because the keepalive runner
+	// reads it without taking the tunnel manager lock.
+	livenessChange atomic.Pointer[tunnelLivenessChangeCallback]
 
 	// linkGen is the per-tunnel monotonic generation counter (#1918 §6
 	// Axis D, defense-in-depth recreate guard). The MAP structure is
@@ -163,6 +168,15 @@ func (t *tunnelManager) linkGenForLocked(name string) *atomic.Uint64 {
 // mu.
 func (t *tunnelManager) bumpLinkGenLocked(name string) {
 	t.linkGenForLocked(name).Add(1)
+}
+
+func (t *tunnelManager) setLivenessChangeCallback(callback func(tunnelName string, up bool)) {
+	if callback == nil {
+		t.livenessChange.Store(nil)
+		return
+	}
+	typed := tunnelLivenessChangeCallback(callback)
+	t.livenessChange.Store(&typed)
 }
 
 // Apply reconciles the kernel tunnel devices against the desired config

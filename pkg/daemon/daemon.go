@@ -226,6 +226,9 @@ type Daemon struct {
 	// a refresh edge.
 	routeListenerCatchUps atomic.Uint64
 	routeListenerLoop     atomic.Pointer[coalesce.Loop]
+	// routeListenerPending preserves urgent refresh requests that arrive before
+	// the route listener loop is installed during startup.
+	routeListenerPending atomic.Bool
 
 	// #7194: last session-delta schema fingerprint advertised by the RUNNING
 	// helper, recorded from the ProcessStatus that DrainSessionDeltas returns.
