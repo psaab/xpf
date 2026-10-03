@@ -1044,6 +1044,7 @@ fn filter_forwarding_class_miss_pins_default_over_lower_precedence() {
         });
         if ba_fallback {
             snapshot.interfaces[0].filter_input_v4.clear();
+            snapshot.interfaces[0].cos_dscp_classifier = "wan-ba".into();
             snapshot.interfaces[1].cos_dscp_classifier = "wan-ba".into();
             cos.dscp_classifiers.push(CoSDSCPClassifierSnapshot {
                 name: "wan-ba".into(),
