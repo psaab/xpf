@@ -3121,6 +3121,53 @@ fn forwarding_resolution_reports_egress_and_neighbor() {
 }
 
 #[test]
+fn go_built_config_and_kernel_fib_snapshot_resolves_per_table_11419() {
+    use std::collections::BTreeSet;
+
+    let snapshot = fib_import_golden_snapshot_11419();
+    let state = build_forwarding_state(&snapshot);
+    let resolve = |dst, table, hash| {
+        lookup_forwarding_resolution_inner_ecmp(&state, None, dst, Some(table), Some(hash))
+    };
+
+    let main = resolve(
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 23)),
+        "inet.0",
+        1,
+    );
+    assert_eq!(main.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(main.egress_ifindex, 12, "MAIN must use its own configured route");
+    assert_eq!(
+        main.next_hop,
+        Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)))
+    );
+
+    let expected_blue = BTreeSet::from([
+        (13, Some(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1)))),
+        (14, Some(IpAddr::V4(Ipv4Addr::new(198, 19, 0, 1)))),
+    ]);
+    for (destination, label) in [
+        (Ipv4Addr::new(198, 51, 100, 23), "configured blue ECMP"),
+        (Ipv4Addr::new(203, 0, 113, 23), "kernel-learned blue ECMP"),
+    ] {
+        let mut selected = BTreeSet::new();
+        for hash in 0..256 {
+            let resolution = resolve(IpAddr::V4(destination), "blue.inet.0", hash);
+            assert_eq!(
+                resolution.disposition,
+                ForwardingDisposition::ForwardCandidate,
+                "{label} hash {hash} must resolve from the Go-built snapshot"
+            );
+            selected.insert((resolution.egress_ifindex, resolution.next_hop));
+        }
+        assert_eq!(
+            selected, expected_blue,
+            "{label} must preserve both matching egress/nexthop pairs in blue.inet.0"
+        );
+    }
+}
+
+#[test]
 fn forwarding_resolution_supports_next_table_recursion() {
     let state = build_forwarding_state(&forwarding_snapshot_with_next_table(true));
     let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));

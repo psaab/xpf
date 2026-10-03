@@ -1,0 +1,168 @@
+{
+  "version": 44,
+  "generation": 1,
+  "generated_at": "2026-01-01T00:00:00Z",
+  "summary": {
+    "host_name": "",
+    "dataplane_type": "",
+    "interface_count": 0,
+    "zone_count": 0,
+    "policy_count": 0,
+    "scheduler_count": 0,
+    "ha_enabled": false
+  },
+  "capabilities": {
+    "forwarding_supported": false
+  },
+  "map_pins": {},
+  "zones": [
+    {
+      "name": "trust",
+      "id": 1
+    },
+    {
+      "name": "wan",
+      "id": 2
+    }
+  ],
+  "interfaces": [
+    {
+      "name": "main.0",
+      "zone": "trust",
+      "linux_name": "main0",
+      "ifindex": 12,
+      "egress_zone": "trust",
+      "unit_count": 0,
+      "tunnel": false,
+      "addresses": [
+        {
+          "family": "inet",
+          "address": "192.0.2.2/24"
+        }
+      ],
+      "is_unit": false
+    },
+    {
+      "name": "blue-a.0",
+      "zone": "wan",
+      "routing_instance": "blue",
+      "linux_name": "bluea",
+      "ifindex": 13,
+      "egress_zone": "wan",
+      "unit_count": 0,
+      "tunnel": false,
+      "addresses": [
+        {
+          "family": "inet",
+          "address": "198.18.0.2/24"
+        }
+      ],
+      "is_unit": false
+    },
+    {
+      "name": "blue-b.0",
+      "zone": "wan",
+      "routing_instance": "blue",
+      "linux_name": "blueb",
+      "ifindex": 14,
+      "egress_zone": "wan",
+      "unit_count": 0,
+      "tunnel": false,
+      "addresses": [
+        {
+          "family": "inet",
+          "address": "198.19.0.2/24"
+        }
+      ],
+      "is_unit": false
+    }
+  ],
+  "neighbors": [
+    {
+      "interface": "main0",
+      "ifindex": 12,
+      "family": "inet",
+      "ip": "192.0.2.1",
+      "mac": "00:11:22:33:44:12",
+      "state": "reachable",
+      "router": true
+    },
+    {
+      "interface": "bluea",
+      "ifindex": 13,
+      "family": "inet",
+      "ip": "198.18.0.1",
+      "mac": "00:11:22:33:44:13",
+      "state": "reachable",
+      "router": true
+    },
+    {
+      "interface": "blueb",
+      "ifindex": 14,
+      "family": "inet",
+      "ip": "198.19.0.1",
+      "mac": "00:11:22:33:44:14",
+      "state": "reachable",
+      "router": true
+    }
+  ],
+  "routes": [
+    {
+      "table": "blue.inet.0",
+      "family": "inet",
+      "destination": "198.18.0.0/24",
+      "discard": false
+    },
+    {
+      "table": "blue.inet.0",
+      "family": "inet",
+      "destination": "198.19.0.0/24",
+      "discard": false
+    },
+    {
+      "table": "blue.inet.0",
+      "family": "inet",
+      "destination": "198.51.100.0/24",
+      "next_hops": [
+        "198.18.0.1",
+        "198.19.0.1"
+      ],
+      "discard": false
+    },
+    {
+      "table": "blue.inet.0",
+      "family": "inet",
+      "destination": "203.0.113.0/24",
+      "next_hops": [
+        "198.18.0.1",
+        "198.19.0.1"
+      ],
+      "discard": false,
+      "preference": 200
+    },
+    {
+      "table": "inet.0",
+      "family": "inet",
+      "destination": "192.0.2.0/24",
+      "discard": false
+    },
+    {
+      "table": "inet.0",
+      "family": "inet",
+      "destination": "198.51.100.0/24",
+      "next_hops": [
+        "192.0.2.1"
+      ],
+      "discard": false
+    }
+  ],
+  "flow": {},
+  "userspace": {
+    "binary": "",
+    "control_socket": "",
+    "state_file": "",
+    "workers": 0,
+    "ring_entries": 0,
+    "poll_mode": ""
+  }
+}

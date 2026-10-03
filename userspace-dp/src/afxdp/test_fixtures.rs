@@ -118,6 +118,15 @@ pub(super) fn v5(mut snapshot: ConfigSnapshot) -> ConfigSnapshot {
     snapshot
 }
 
+/// The complete snapshot JSON emitted by the Go route builder after importing
+/// the fixed kernel dump in `pkg/dataplane/userspace/fib_import_golden_11419_test.go`.
+/// Unlike the fixtures below, this is not hand-authored Rust state: the FIB
+/// consumer decodes precisely the bytes produced by the Go-side golden.
+pub(super) fn fib_import_golden_snapshot_11419() -> crate::ConfigSnapshot {
+    serde_json::from_str(include_str!("../../../testdata/fib_import_11419.json"))
+        .expect("Go-built FIB import golden snapshot must decode")
+}
+
 pub(super) fn forwarding_snapshot(include_neighbor: bool) -> ConfigSnapshot {
     v5(ConfigSnapshot {
         zones: vec![ZoneSnapshot {
