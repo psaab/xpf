@@ -1614,6 +1614,11 @@ pub(super) fn txn_run_descriptor_inner_with_slow_path(
         None,
         123_000_000_000,
         123,
+        ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        },
         None,
     )
 }
@@ -1646,6 +1651,11 @@ pub(super) fn txn_run_descriptor_with_shared_nat(
         Some(shared_owner_rg_indexes),
         123_000_000_000,
         123,
+        ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        },
         None,
     )
 }
@@ -1685,6 +1695,46 @@ pub(super) fn txn_run_descriptor_at(
         None,
         now_ns,
         123,
+        ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        },
+        None,
+    )
+}
+
+/// Drive one real poll-descriptor packet using the supplied snapshot validation
+/// pair. Most packet fixtures use the canonical 7/9 pair; generation-transition
+/// cells use this seam to advance validation together with packet metadata.
+pub(super) fn txn_run_descriptor_with_validation(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    validation: ValidationState,
+) -> (BatchCounters, DebugPollCounters) {
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    txn_run_descriptor_inner_with_slow_path_impl(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        &local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        None,
+        None,
+        None,
+        None,
+        123_000_000_000,
+        123,
+        validation,
         None,
     )
 }
@@ -1718,10 +1768,14 @@ pub(super) fn txn_run_descriptor_with_screen_state(
         None,
         123_000_000_000,
         123,
+        ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        },
         Some(screen),
     )
 }
-
 
 pub(super) fn txn_run_descriptor_inner_with_slow_path_and_ike(
     binding: &mut BindingWorker,
@@ -1752,6 +1806,11 @@ pub(super) fn txn_run_descriptor_inner_with_slow_path_and_ike(
         None,
         123_000_000_000,
         123,
+        ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        },
         None,
     )
 }
@@ -1772,6 +1831,7 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
     shared_owner_rg_indexes_override: Option<&SharedSessionOwnerRgIndexes>,
     now_ns: u64,
     now_secs: u64,
+    validation: ValidationState,
     screen_state: Option<&mut ScreenState>,
 ) -> (BatchCounters, DebugPollCounters) {
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
@@ -1859,11 +1919,7 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
         1,
         sessions,
         screen,
-        ValidationState {
-            snapshot_installed: true,
-            config_generation: 7,
-            fib_generation: 9,
-        },
+        validation,
         now_ns,
         now_secs,
         0,

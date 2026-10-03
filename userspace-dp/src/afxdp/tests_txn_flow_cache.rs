@@ -21,6 +21,8 @@ use crate::{
     SourceNATRuleSnapshot, StaticNATRuleSnapshot, ThreeColorPolicerSnapshot, ZoneSnapshot,
 };
 
+const TCP_FLAG_ACK: u8 = crate::tcp_flags::TCP_ACK;
+
 // I1/I2/I3: at cap, a NAT'd new flow is REFUSED — trigger packet dropped
 // (not forwarded), nothing installed (forward NOR reverse), nothing
 // flow-cached, refusal counted.
@@ -4485,5 +4487,248 @@ fn permitted_flowbacked_no_route_with_snat_is_not_reinjected_11066() {
     assert_eq!(
         scoped_batch.nat_flowbacked_no_route_untranslated_dropped, 0,
         "an unmatched scoped NAT rule is not a NAT-withheld drop"
+    );
+}
+
+/// #11599: exercise an established packet through the real poll loop across a
+/// route-overlay FIB-only generation bump. The changed default moves from
+/// gateway .1 to .2 while a more-specific control route remains on .1. The
+/// first ACK after the bump must resolve and reseed; the next ACK must hit the
+/// flow cache with the new egress.
+#[test]
+fn route_overlay_fib_bump_reseeds_packet_egress_11599() {
+    let mut snapshot = nat_snapshot();
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".to_string(),
+        ifindex: 12,
+        family: "inet".to_string(),
+        ip: "172.16.80.2".to_string(),
+        mac: "00:11:22:33:44:66".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        link_local: false,
+        ..Default::default()
+    });
+    snapshot.routes.push(RouteSnapshot {
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "9.9.9.9/32".to_string(),
+        next_hop_weights: vec![],
+        next_hops: vec!["172.16.80.1@reth0.80".to_string()],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
+    let v1_forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let v1 = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 9,
+    };
+    let v2 = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 10,
+    };
+
+    let run_packet = |binding: &mut BindingWorker,
+                      sessions: &mut SessionTable,
+                      forwarding: &ForwardingState,
+                      frame: &[u8],
+                      flags: u8,
+                      validation: ValidationState| {
+        let mut meta = txn_meta_v4(24, flags, frame.len() as u16);
+        meta.config_generation = validation.config_generation;
+        meta.fib_generation = validation.fib_generation;
+        txn_run_descriptor_with_validation(
+            binding,
+            sessions,
+            forwarding,
+            &ha_state,
+            frame,
+            meta,
+            validation,
+        )
+    };
+    let frame = |destination, source_port, flags| {
+        build_txn_tcp_syn_frame_v4(
+            Ipv4Addr::new(10, 0, 61, 102),
+            destination,
+            source_port,
+            443,
+            flags,
+            TEST_LAN_MAC,
+        )
+    };
+    let assert_egress = |binding: &BindingWorker, next_hop: Ipv4Addr, mac: [u8; 6]| {
+        let packet = binding
+            .scratch
+            .scratch_forwards
+            .last()
+            .expect("packet must reach the forward egress queue");
+        assert_eq!(
+            packet.decision.resolution.disposition,
+            ForwardingDisposition::ForwardCandidate
+        );
+        assert_eq!(
+            packet.decision.resolution.egress_ifindex, 12,
+            "packet must leave through the WAN interface"
+        );
+        assert_eq!(
+            packet.decision.resolution.next_hop,
+            Some(IpAddr::V4(next_hop)),
+            "packet must use the expected route-overlay gateway"
+        );
+        assert_eq!(packet.decision.resolution.neighbor_mac, Some(mac));
+    };
+
+    // Establish and cache two real packet flows under v1: the default route
+    // uses .1, as does the unchanged, more-specific control route.
+    for (destination, source_port) in [
+        (Ipv4Addr::new(8, 8, 8, 8), 40_000),
+        (Ipv4Addr::new(9, 9, 9, 9), 40_001),
+    ] {
+        let syn = frame(destination, source_port, TCP_FLAG_SYN);
+        let (batch, dbg) = run_packet(
+            &mut binding,
+            &mut sessions,
+            &v1_forwarding,
+            &syn,
+            TCP_FLAG_SYN,
+            v1,
+        );
+        assert_eq!(batch.validated_packets, 1);
+        assert_eq!(dbg.tx, 1, "v1 SYN must establish and forward");
+        assert_egress(
+            &binding,
+            Ipv4Addr::new(172, 16, 80, 1),
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        );
+
+        let ack = frame(destination, source_port, TCP_FLAG_ACK);
+        let (batch, dbg) = run_packet(
+            &mut binding,
+            &mut sessions,
+            &v1_forwarding,
+            &ack,
+            TCP_FLAG_ACK,
+            v1,
+        );
+        assert_eq!(batch.validated_packets, 1);
+        assert_eq!(dbg.tx, 1, "v1 ACK must forward and seed the cache");
+        assert_egress(
+            &binding,
+            Ipv4Addr::new(172, 16, 80, 1),
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        );
+    }
+    assert_eq!(sessions.len(), 4, "the two established flows have session pairs");
+    assert_eq!(
+        txn_flow_cache_entries(&binding),
+        2,
+        "both ACKs must seed one flow-cache entry"
+    );
+    assert_eq!(binding.flow.flow_cache.hits, 0);
+
+    // Publish overlay v2: the default route moves to .2, but the control /32
+    // still resolves through .1. Only the FIB generation advances; config stays
+    // at 7, the route-only consumption case from #11599.
+    snapshot.routes[0].next_hops = vec!["172.16.80.2@reth0.80".to_string()];
+    let v2_forwarding = build_forwarding_state(&snapshot);
+    assert!(
+        v2_forwarding
+            .neighbors
+            .contains_key(&(12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1)))),
+        "the v1 neighbor remains live so the test isolates generation revalidation"
+    );
+    let v2_next_hop = Ipv4Addr::new(172, 16, 80, 2);
+    let v2_mac = [0x00, 0x11, 0x22, 0x33, 0x44, 0x66];
+
+    // First packet after the FIB-only bump must miss the old flow-cache stamp,
+    // re-resolve the established session against v2, and seed the new decision.
+    let flow_cache_hits_before_bump = binding.flow.flow_cache.hits;
+    let ack = frame(Ipv4Addr::new(8, 8, 8, 8), 40_000, TCP_FLAG_ACK);
+    let (batch, dbg) = run_packet(
+        &mut binding,
+        &mut sessions,
+        &v2_forwarding,
+        &ack,
+        TCP_FLAG_ACK,
+        v2,
+    );
+    assert_eq!(batch.validated_packets, 1);
+    assert_eq!(dbg.tx, 1, "first post-bump packet must egress v2");
+    assert_eq!(
+        binding.flow.flow_cache.hits, flow_cache_hits_before_bump,
+        "the v1 cache entry must be invalidated, not served as a hit"
+    );
+    assert_egress(&binding, v2_next_hop, v2_mac);
+
+    // Second packet at the same generation must take the flow-cache hit and
+    // still emit the v2 gateway/MAC. This distinguishes correct reseeding from
+    // re-stamping the old v1 decision under the new FIB generation.
+    let ack = frame(Ipv4Addr::new(8, 8, 8, 8), 40_000, TCP_FLAG_ACK);
+    let (batch, dbg) = run_packet(
+        &mut binding,
+        &mut sessions,
+        &v2_forwarding,
+        &ack,
+        TCP_FLAG_ACK,
+        v2,
+    );
+    assert_eq!(batch.validated_packets, 1);
+    assert_eq!(dbg.tx, 1);
+    assert_eq!(
+        binding.flow.flow_cache.hits,
+        flow_cache_hits_before_bump + 1,
+        "second post-bump packet must be a real flow-cache hit"
+    );
+    assert_egress(&binding, v2_next_hop, v2_mac);
+
+    // The unchanged /32 control must remain on .1 after its own one-time
+    // generation miss/reseed, then hit the flow cache on its next packet.
+    let ack = frame(Ipv4Addr::new(9, 9, 9, 9), 40_001, TCP_FLAG_ACK);
+    let (batch, dbg) = run_packet(
+        &mut binding,
+        &mut sessions,
+        &v2_forwarding,
+        &ack,
+        TCP_FLAG_ACK,
+        v2,
+    );
+    assert_eq!(batch.validated_packets, 1);
+    assert_eq!(dbg.tx, 1);
+    assert_egress(
+        &binding,
+        Ipv4Addr::new(172, 16, 80, 1),
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+    );
+    let hits_before_control_rehit = binding.flow.flow_cache.hits;
+    let ack = frame(Ipv4Addr::new(9, 9, 9, 9), 40_001, TCP_FLAG_ACK);
+    let (batch, dbg) = run_packet(
+        &mut binding,
+        &mut sessions,
+        &v2_forwarding,
+        &ack,
+        TCP_FLAG_ACK,
+        v2,
+    );
+    assert_eq!(batch.validated_packets, 1);
+    assert_eq!(dbg.tx, 1);
+    assert_eq!(
+        binding.flow.flow_cache.hits,
+        hits_before_control_rehit + 1,
+        "unchanged-route control must stay on the fast cache path after reseeding"
+    );
+    assert_egress(
+        &binding,
+        Ipv4Addr::new(172, 16, 80, 1),
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
     );
 }
