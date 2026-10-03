@@ -1,5 +1,2897 @@
 [
   {
+    "key": "cos-compile/lenient/generic",
+    "config": {
+      "Security": {
+        "Zones": {},
+        "Policies": null,
+        "GlobalPolicies": null,
+        "DefaultPolicy": 1,
+        "NAT": {
+          "Source": null,
+          "SourcePools": null,
+          "AddressPersistent": false,
+          "Destination": null,
+          "Static": null,
+          "NAT64": null,
+          "NATv6v4": null,
+          "PoolUtilizationAlarm": null,
+          "ProxyARP": null,
+          "SourceInterfacePortOverloadingOff": false
+        },
+        "Screen": {},
+        "AddressBook": null,
+        "Log": {
+          "Mode": "",
+          "Format": "",
+          "SourceInterface": "",
+          "Streams": null,
+          "Report": false,
+          "Profiles": null
+        },
+        "Flow": {
+          "TCPSession": null,
+          "UDPSessionTimeout": 0,
+          "ICMPSessionTimeout": 0,
+          "TCPMSSAllTCP": 0,
+          "TCPMSSIPsecVPN": 0,
+          "TCPMSSGreIn": 0,
+          "TCPMSSGreOut": 0,
+          "AllowDNSReply": false,
+          "AllowEmbeddedICMP": false,
+          "AllowUnstampedFabricIngress": false,
+          "GREPerformanceAcceleration": false,
+          "PowerModeDisable": false,
+          "SynFloodProtectionMode": "",
+          "Traceoptions": null,
+          "AgingEarlyAgeout": 0,
+          "AgingHighWatermark": 0,
+          "AgingLowWatermark": 0,
+          "AgingUnknownLeaves": null,
+          "RouteChangeTimeout": 0,
+          "SyncICMPSession": false,
+          "ForceIPReassembly": false,
+          "MulticastSessionLifetime": 0,
+          "PreserveIncomingFragmentSize": false
+        },
+        "ALG": {
+          "DNSDisable": false,
+          "FTPDisable": false,
+          "SIPDisable": false,
+          "TFTPDisable": false,
+          "UnsupportedProtos": null
+        },
+        "IPsec": {
+          "IKEProposals": null,
+          "IKEPolicies": null,
+          "Gateways": null,
+          "Proposals": null,
+          "Policies": null,
+          "VPNs": null
+        },
+        "DynamicAddress": {
+          "FeedServers": null,
+          "AddressBindings": null
+        },
+        "SSHKnownHosts": null,
+        "PolicyStatsEnabled": false,
+        "PreIDDefaultPolicy": null,
+        "DefaultPolicyLogSessionInit": false,
+        "DefaultPolicyLogSessionClose": false,
+        "PolicyRematch": false,
+        "PolicyRematchExtensive": false
+      },
+      "Interfaces": {
+        "Interfaces": {
+          "ge-0/0/2": {
+            "Name": "ge-0/0/2",
+            "Description": "",
+            "MTU": 0,
+            "Speed": "",
+            "Duplex": "",
+            "VlanTagging": false,
+            "FlexibleVlanTagging": false,
+            "Encapsulation": "",
+            "Bandwidth": 0,
+            "Disable": false,
+            "RedundantParent": "",
+            "LAGParent": "",
+            "RedundancyGroup": 0,
+            "FabricMembers": null,
+            "LocalFabricMember": "",
+            "BondMode": "",
+            "AggregatedEtherOpts": null,
+            "Units": {
+              "80": {
+                "Number": 80,
+                "Description": "",
+                "VlanID": 0,
+                "InnerVlanID": 0,
+                "PointToPoint": false,
+                "Addresses": [
+                  "10.0.80.1/24"
+                ],
+                "PrimaryAddress": "",
+                "PreferredAddress": "",
+                "MTU": 0,
+                "DHCP": false,
+                "DHCPOptions": null,
+                "DHCPv6": false,
+                "DHCPv6Client": null,
+                "DADDisable": false,
+                "UnnumberedInet": "",
+                "TargetedBroadcast": false,
+                "SamplingInput": false,
+                "SamplingOutput": false,
+                "FilterInputV4": "",
+                "FilterOutputV4": "",
+                "FilterInputV6": "",
+                "FilterOutputV6": "",
+                "VRRPGroups": null,
+                "Tunnel": null,
+                "DynamicDNSInet": null,
+                "DynamicDNSInet6": null
+              }
+            },
+            "Tunnel": null,
+            "NativeVlanID": 0,
+            "GratuitousARPReply": false,
+            "NoGratuitousARPRequest": false
+          }
+        }
+      },
+      "Applications": {
+        "Applications": {},
+        "ApplicationSets": {},
+        "MixedDirectTermApps": null
+      },
+      "RoutingOptions": {
+        "StaticRoutes": null,
+        "Inet6StaticRoutes": null,
+        "UnhandledRibs": null,
+        "GenerateRoutes": null,
+        "ForwardingTableExport": "",
+        "ForwardingTableExports": null,
+        "AutonomousSystem": 0,
+        "RibGroups": null,
+        "InterfaceRoutesRibGroup": "",
+        "InterfaceRoutesRibGroupV6": ""
+      },
+      "Protocols": {
+        "OSPF": null,
+        "OSPFv3": null,
+        "BGP": null,
+        "RIP": null,
+        "ISIS": null,
+        "RouterAdvertisement": null,
+        "LLDP": null
+      },
+      "RoutingInstances": null,
+      "Firewall": {
+        "FiltersInet": null,
+        "FiltersInet6": null,
+        "Policers": null,
+        "ThreeColorPolicers": null
+      },
+      "ClassOfService": {
+        "ForwardingClasses": {
+          "best-effort": {
+            "Name": "best-effort",
+            "Queue": 0
+          },
+          "voice": {
+            "Name": "voice",
+            "Queue": 5
+          }
+        },
+        "DSCPClassifiers": {
+          "wan-classifier": {
+            "Name": "wan-classifier",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "DSCPValues": "AA=="
+              }
+            ]
+          }
+        },
+        "IEEE8021Classifiers": {
+          "wan-pcp": {
+            "Name": "wan-pcp",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "CodePoints": "AA=="
+              }
+            ]
+          }
+        },
+        "INetPrecedenceClassifierDefs": {
+          "prec-cl": {
+            "Name": "prec-cl",
+            "Entries": [
+              {
+                "ForwardingClass": "voice",
+                "LossPriority": "low",
+                "Precedences": "BQ=="
+              }
+            ]
+          }
+        },
+        "DSCPRewriteRules": {
+          "wan-rewrite": {
+            "Name": "wan-rewrite",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "DSCPValue": 46
+              }
+            ]
+          }
+        },
+        "IEEE8021RewriteRules": {},
+        "Schedulers": {
+          "be-sched": {
+            "Name": "be-sched",
+            "TransmitRateBytes": 625000000,
+            "TransmitRateExact": true,
+            "TransmitRatePercent": 0,
+            "TransmitRateRemainder": false,
+            "Priority": "low",
+            "BufferSizeBytes": 8000000,
+            "BufferSizePercent": 0,
+            "BufferSizeTemporalUS": 0,
+            "SurplusSharing": false,
+            "EqualFlowEnforcement": false,
+            "EqualFlowTargetPolicy": "",
+            "CodelTargetNS": 0
+          }
+        },
+        "SchedulerMaps": {
+          "edge-map": {
+            "Name": "edge-map",
+            "Entries": {
+              "best-effort": {
+                "ForwardingClass": "best-effort",
+                "Scheduler": "be-sched"
+              }
+            }
+          }
+        },
+        "Interfaces": {
+          "ge-0/0/2": {
+            "Name": "ge-0/0/2",
+            "Units": {
+              "80": {
+                "Unit": 80,
+                "ShapingRateBytes": 1125000000,
+                "BurstSizeBytes": 0,
+                "SchedulerMap": "edge-map",
+                "DSCPClassifier": "wan-classifier",
+                "IEEE8021Classifier": "wan-pcp",
+                "INetPrecedenceClassifier": "",
+                "DSCPRewriteRule": "wan-rewrite",
+                "IEEE8021RewriteRule": "",
+                "OutputTrafficControlProfile": "",
+                "OversubscriptionPolicy": "",
+                "OversubscriptionGuaranteeFraction": 0,
+                "PriorityLowMinShareBytes": 0
+              }
+            },
+            "Level": null
+          }
+        },
+        "FairnessExpectations": null,
+        "INetPrecedenceClassifiers": [
+          "prec-cl"
+        ],
+        "INetPrecedenceRewriteRules": null,
+        "EXPRewriteRules": null,
+        "TrafficControlProfiles": {
+          "wan-tcp": {
+            "Name": "wan-tcp",
+            "ShapingRateBytes": 1125000000,
+            "ShapingRatePercent": 0,
+            "GuaranteedRateBytes": 0,
+            "DelayBufferRateBytes": 0,
+            "SchedulerMap": "edge-map"
+          }
+        }
+      },
+      "Services": {
+        "FlowMonitoring": null,
+        "RPM": null,
+        "IPMonitoring": null,
+        "ApplicationIdentification": false
+      },
+      "ForwardingOptions": {
+        "Sampling": null,
+        "DHCPRelay": null,
+        "FamilyInet6Mode": "",
+        "PortMirroring": null,
+        "AllowDataplaneSleep": false
+      },
+      "System": {
+        "HostName": "",
+        "DomainName": "",
+        "DomainSearch": null,
+        "TimeZone": "",
+        "NameServers": null,
+        "NTPServers": null,
+        "NTPServerOptions": null,
+        "NTPThreshold": 0,
+        "NTPThresholdAction": "",
+        "NoRedirects": false,
+        "BackupRouter": "",
+        "BackupRouterDst": "",
+        "Lo0FilterInputV4": "",
+        "Lo0FilterInputV6": "",
+        "DataplaneType": "userspace",
+        "UserspaceDataplane": null,
+        "InternetOptions": null,
+        "Services": null,
+        "Syslog": null,
+        "DHCPServer": {
+          "DHCPLocalServer": null,
+          "DHCPv6LocalServer": null,
+          "DynamicDNS": null,
+          "DynamicDNSv6": null
+        },
+        "SNMP": null,
+        "Login": null,
+        "LoginDroppedByPacking": false,
+        "RootAuthentication": null,
+        "Archival": null,
+        "MasterPassword": "",
+        "LicenseAutoUpdate": "",
+        "DisabledProcesses": null,
+        "PersistGroupsInheritance": false,
+        "ManagementInterface": ""
+      },
+      "PolicyOptions": {
+        "PrefixLists": null,
+        "Communities": null,
+        "ASPaths": null,
+        "PolicyStatements": null
+      },
+      "Schedulers": null,
+      "Chassis": {
+        "Cluster": null,
+        "DeviceMap": null
+      },
+      "EventOptions": null,
+      "BridgeDomains": null,
+      "Warnings": [
+        "class-of-service dscp/802.1p classifier loss-priority now drives egress dscp rewrite-rule selection (#3995) but is not yet enforced for drop-precedence / WRED buffer management"
+      ],
+      "LenientNATTerminalActionRules": null
+    },
+    "error": ""
+  },
+  {
+    "key": "cos-compile/lenient/node0",
+    "config": {
+      "Security": {
+        "Zones": {},
+        "Policies": null,
+        "GlobalPolicies": null,
+        "DefaultPolicy": 1,
+        "NAT": {
+          "Source": null,
+          "SourcePools": null,
+          "AddressPersistent": false,
+          "Destination": null,
+          "Static": null,
+          "NAT64": null,
+          "NATv6v4": null,
+          "PoolUtilizationAlarm": null,
+          "ProxyARP": null,
+          "SourceInterfacePortOverloadingOff": false
+        },
+        "Screen": {},
+        "AddressBook": null,
+        "Log": {
+          "Mode": "",
+          "Format": "",
+          "SourceInterface": "",
+          "Streams": null,
+          "Report": false,
+          "Profiles": null
+        },
+        "Flow": {
+          "TCPSession": null,
+          "UDPSessionTimeout": 0,
+          "ICMPSessionTimeout": 0,
+          "TCPMSSAllTCP": 0,
+          "TCPMSSIPsecVPN": 0,
+          "TCPMSSGreIn": 0,
+          "TCPMSSGreOut": 0,
+          "AllowDNSReply": false,
+          "AllowEmbeddedICMP": false,
+          "AllowUnstampedFabricIngress": false,
+          "GREPerformanceAcceleration": false,
+          "PowerModeDisable": false,
+          "SynFloodProtectionMode": "",
+          "Traceoptions": null,
+          "AgingEarlyAgeout": 0,
+          "AgingHighWatermark": 0,
+          "AgingLowWatermark": 0,
+          "AgingUnknownLeaves": null,
+          "RouteChangeTimeout": 0,
+          "SyncICMPSession": false,
+          "ForceIPReassembly": false,
+          "MulticastSessionLifetime": 0,
+          "PreserveIncomingFragmentSize": false
+        },
+        "ALG": {
+          "DNSDisable": false,
+          "FTPDisable": false,
+          "SIPDisable": false,
+          "TFTPDisable": false,
+          "UnsupportedProtos": null
+        },
+        "IPsec": {
+          "IKEProposals": null,
+          "IKEPolicies": null,
+          "Gateways": null,
+          "Proposals": null,
+          "Policies": null,
+          "VPNs": null
+        },
+        "DynamicAddress": {
+          "FeedServers": null,
+          "AddressBindings": null
+        },
+        "SSHKnownHosts": null,
+        "PolicyStatsEnabled": false,
+        "PreIDDefaultPolicy": null,
+        "DefaultPolicyLogSessionInit": false,
+        "DefaultPolicyLogSessionClose": false,
+        "PolicyRematch": false,
+        "PolicyRematchExtensive": false
+      },
+      "Interfaces": {
+        "Interfaces": {
+          "ge-0/0/2": {
+            "Name": "ge-0/0/2",
+            "Description": "",
+            "MTU": 0,
+            "Speed": "",
+            "Duplex": "",
+            "VlanTagging": false,
+            "FlexibleVlanTagging": false,
+            "Encapsulation": "",
+            "Bandwidth": 0,
+            "Disable": false,
+            "RedundantParent": "",
+            "LAGParent": "",
+            "RedundancyGroup": 0,
+            "FabricMembers": null,
+            "LocalFabricMember": "",
+            "BondMode": "",
+            "AggregatedEtherOpts": null,
+            "Units": {
+              "80": {
+                "Number": 80,
+                "Description": "",
+                "VlanID": 0,
+                "InnerVlanID": 0,
+                "PointToPoint": false,
+                "Addresses": [
+                  "10.0.80.1/24"
+                ],
+                "PrimaryAddress": "",
+                "PreferredAddress": "",
+                "MTU": 0,
+                "DHCP": false,
+                "DHCPOptions": null,
+                "DHCPv6": false,
+                "DHCPv6Client": null,
+                "DADDisable": false,
+                "UnnumberedInet": "",
+                "TargetedBroadcast": false,
+                "SamplingInput": false,
+                "SamplingOutput": false,
+                "FilterInputV4": "",
+                "FilterOutputV4": "",
+                "FilterInputV6": "",
+                "FilterOutputV6": "",
+                "VRRPGroups": null,
+                "Tunnel": null,
+                "DynamicDNSInet": null,
+                "DynamicDNSInet6": null
+              }
+            },
+            "Tunnel": null,
+            "NativeVlanID": 0,
+            "GratuitousARPReply": false,
+            "NoGratuitousARPRequest": false
+          }
+        }
+      },
+      "Applications": {
+        "Applications": {},
+        "ApplicationSets": {},
+        "MixedDirectTermApps": null
+      },
+      "RoutingOptions": {
+        "StaticRoutes": null,
+        "Inet6StaticRoutes": null,
+        "UnhandledRibs": null,
+        "GenerateRoutes": null,
+        "ForwardingTableExport": "",
+        "ForwardingTableExports": null,
+        "AutonomousSystem": 0,
+        "RibGroups": null,
+        "InterfaceRoutesRibGroup": "",
+        "InterfaceRoutesRibGroupV6": ""
+      },
+      "Protocols": {
+        "OSPF": null,
+        "OSPFv3": null,
+        "BGP": null,
+        "RIP": null,
+        "ISIS": null,
+        "RouterAdvertisement": null,
+        "LLDP": null
+      },
+      "RoutingInstances": null,
+      "Firewall": {
+        "FiltersInet": null,
+        "FiltersInet6": null,
+        "Policers": null,
+        "ThreeColorPolicers": null
+      },
+      "ClassOfService": {
+        "ForwardingClasses": {
+          "best-effort": {
+            "Name": "best-effort",
+            "Queue": 0
+          },
+          "voice": {
+            "Name": "voice",
+            "Queue": 5
+          }
+        },
+        "DSCPClassifiers": {
+          "wan-classifier": {
+            "Name": "wan-classifier",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "DSCPValues": "AA=="
+              }
+            ]
+          }
+        },
+        "IEEE8021Classifiers": {
+          "wan-pcp": {
+            "Name": "wan-pcp",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "CodePoints": "AA=="
+              }
+            ]
+          }
+        },
+        "INetPrecedenceClassifierDefs": {
+          "prec-cl": {
+            "Name": "prec-cl",
+            "Entries": [
+              {
+                "ForwardingClass": "voice",
+                "LossPriority": "low",
+                "Precedences": "BQ=="
+              }
+            ]
+          }
+        },
+        "DSCPRewriteRules": {
+          "wan-rewrite": {
+            "Name": "wan-rewrite",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "DSCPValue": 46
+              }
+            ]
+          }
+        },
+        "IEEE8021RewriteRules": {},
+        "Schedulers": {
+          "be-sched": {
+            "Name": "be-sched",
+            "TransmitRateBytes": 625000000,
+            "TransmitRateExact": true,
+            "TransmitRatePercent": 0,
+            "TransmitRateRemainder": false,
+            "Priority": "low",
+            "BufferSizeBytes": 8000000,
+            "BufferSizePercent": 0,
+            "BufferSizeTemporalUS": 0,
+            "SurplusSharing": false,
+            "EqualFlowEnforcement": false,
+            "EqualFlowTargetPolicy": "",
+            "CodelTargetNS": 0
+          }
+        },
+        "SchedulerMaps": {
+          "edge-map": {
+            "Name": "edge-map",
+            "Entries": {
+              "best-effort": {
+                "ForwardingClass": "best-effort",
+                "Scheduler": "be-sched"
+              }
+            }
+          }
+        },
+        "Interfaces": {
+          "ge-0/0/2": {
+            "Name": "ge-0/0/2",
+            "Units": {
+              "80": {
+                "Unit": 80,
+                "ShapingRateBytes": 1125000000,
+                "BurstSizeBytes": 0,
+                "SchedulerMap": "edge-map",
+                "DSCPClassifier": "wan-classifier",
+                "IEEE8021Classifier": "wan-pcp",
+                "INetPrecedenceClassifier": "",
+                "DSCPRewriteRule": "wan-rewrite",
+                "IEEE8021RewriteRule": "",
+                "OutputTrafficControlProfile": "",
+                "OversubscriptionPolicy": "",
+                "OversubscriptionGuaranteeFraction": 0,
+                "PriorityLowMinShareBytes": 0
+              }
+            },
+            "Level": null
+          }
+        },
+        "FairnessExpectations": null,
+        "INetPrecedenceClassifiers": [
+          "prec-cl"
+        ],
+        "INetPrecedenceRewriteRules": null,
+        "EXPRewriteRules": null,
+        "TrafficControlProfiles": {
+          "wan-tcp": {
+            "Name": "wan-tcp",
+            "ShapingRateBytes": 1125000000,
+            "ShapingRatePercent": 0,
+            "GuaranteedRateBytes": 0,
+            "DelayBufferRateBytes": 0,
+            "SchedulerMap": "edge-map"
+          }
+        }
+      },
+      "Services": {
+        "FlowMonitoring": null,
+        "RPM": null,
+        "IPMonitoring": null,
+        "ApplicationIdentification": false
+      },
+      "ForwardingOptions": {
+        "Sampling": null,
+        "DHCPRelay": null,
+        "FamilyInet6Mode": "",
+        "PortMirroring": null,
+        "AllowDataplaneSleep": false
+      },
+      "System": {
+        "HostName": "",
+        "DomainName": "",
+        "DomainSearch": null,
+        "TimeZone": "",
+        "NameServers": null,
+        "NTPServers": null,
+        "NTPServerOptions": null,
+        "NTPThreshold": 0,
+        "NTPThresholdAction": "",
+        "NoRedirects": false,
+        "BackupRouter": "",
+        "BackupRouterDst": "",
+        "Lo0FilterInputV4": "",
+        "Lo0FilterInputV6": "",
+        "DataplaneType": "userspace",
+        "UserspaceDataplane": null,
+        "InternetOptions": null,
+        "Services": null,
+        "Syslog": null,
+        "DHCPServer": {
+          "DHCPLocalServer": null,
+          "DHCPv6LocalServer": null,
+          "DynamicDNS": null,
+          "DynamicDNSv6": null
+        },
+        "SNMP": null,
+        "Login": null,
+        "LoginDroppedByPacking": false,
+        "RootAuthentication": null,
+        "Archival": null,
+        "MasterPassword": "",
+        "LicenseAutoUpdate": "",
+        "DisabledProcesses": null,
+        "PersistGroupsInheritance": false,
+        "ManagementInterface": ""
+      },
+      "PolicyOptions": {
+        "PrefixLists": null,
+        "Communities": null,
+        "ASPaths": null,
+        "PolicyStatements": null
+      },
+      "Schedulers": null,
+      "Chassis": {
+        "Cluster": null,
+        "DeviceMap": null
+      },
+      "EventOptions": null,
+      "BridgeDomains": null,
+      "Warnings": [
+        "class-of-service dscp/802.1p classifier loss-priority now drives egress dscp rewrite-rule selection (#3995) but is not yet enforced for drop-precedence / WRED buffer management"
+      ],
+      "LenientNATTerminalActionRules": null
+    },
+    "error": ""
+  },
+  {
+    "key": "cos-compile/lenient/node1",
+    "config": {
+      "Security": {
+        "Zones": {},
+        "Policies": null,
+        "GlobalPolicies": null,
+        "DefaultPolicy": 1,
+        "NAT": {
+          "Source": null,
+          "SourcePools": null,
+          "AddressPersistent": false,
+          "Destination": null,
+          "Static": null,
+          "NAT64": null,
+          "NATv6v4": null,
+          "PoolUtilizationAlarm": null,
+          "ProxyARP": null,
+          "SourceInterfacePortOverloadingOff": false
+        },
+        "Screen": {},
+        "AddressBook": null,
+        "Log": {
+          "Mode": "",
+          "Format": "",
+          "SourceInterface": "",
+          "Streams": null,
+          "Report": false,
+          "Profiles": null
+        },
+        "Flow": {
+          "TCPSession": null,
+          "UDPSessionTimeout": 0,
+          "ICMPSessionTimeout": 0,
+          "TCPMSSAllTCP": 0,
+          "TCPMSSIPsecVPN": 0,
+          "TCPMSSGreIn": 0,
+          "TCPMSSGreOut": 0,
+          "AllowDNSReply": false,
+          "AllowEmbeddedICMP": false,
+          "AllowUnstampedFabricIngress": false,
+          "GREPerformanceAcceleration": false,
+          "PowerModeDisable": false,
+          "SynFloodProtectionMode": "",
+          "Traceoptions": null,
+          "AgingEarlyAgeout": 0,
+          "AgingHighWatermark": 0,
+          "AgingLowWatermark": 0,
+          "AgingUnknownLeaves": null,
+          "RouteChangeTimeout": 0,
+          "SyncICMPSession": false,
+          "ForceIPReassembly": false,
+          "MulticastSessionLifetime": 0,
+          "PreserveIncomingFragmentSize": false
+        },
+        "ALG": {
+          "DNSDisable": false,
+          "FTPDisable": false,
+          "SIPDisable": false,
+          "TFTPDisable": false,
+          "UnsupportedProtos": null
+        },
+        "IPsec": {
+          "IKEProposals": null,
+          "IKEPolicies": null,
+          "Gateways": null,
+          "Proposals": null,
+          "Policies": null,
+          "VPNs": null
+        },
+        "DynamicAddress": {
+          "FeedServers": null,
+          "AddressBindings": null
+        },
+        "SSHKnownHosts": null,
+        "PolicyStatsEnabled": false,
+        "PreIDDefaultPolicy": null,
+        "DefaultPolicyLogSessionInit": false,
+        "DefaultPolicyLogSessionClose": false,
+        "PolicyRematch": false,
+        "PolicyRematchExtensive": false
+      },
+      "Interfaces": {
+        "Interfaces": {
+          "ge-0/0/2": {
+            "Name": "ge-0/0/2",
+            "Description": "",
+            "MTU": 0,
+            "Speed": "",
+            "Duplex": "",
+            "VlanTagging": false,
+            "FlexibleVlanTagging": false,
+            "Encapsulation": "",
+            "Bandwidth": 0,
+            "Disable": false,
+            "RedundantParent": "",
+            "LAGParent": "",
+            "RedundancyGroup": 0,
+            "FabricMembers": null,
+            "LocalFabricMember": "",
+            "BondMode": "",
+            "AggregatedEtherOpts": null,
+            "Units": {
+              "80": {
+                "Number": 80,
+                "Description": "",
+                "VlanID": 0,
+                "InnerVlanID": 0,
+                "PointToPoint": false,
+                "Addresses": [
+                  "10.0.80.1/24"
+                ],
+                "PrimaryAddress": "",
+                "PreferredAddress": "",
+                "MTU": 0,
+                "DHCP": false,
+                "DHCPOptions": null,
+                "DHCPv6": false,
+                "DHCPv6Client": null,
+                "DADDisable": false,
+                "UnnumberedInet": "",
+                "TargetedBroadcast": false,
+                "SamplingInput": false,
+                "SamplingOutput": false,
+                "FilterInputV4": "",
+                "FilterOutputV4": "",
+                "FilterInputV6": "",
+                "FilterOutputV6": "",
+                "VRRPGroups": null,
+                "Tunnel": null,
+                "DynamicDNSInet": null,
+                "DynamicDNSInet6": null
+              }
+            },
+            "Tunnel": null,
+            "NativeVlanID": 0,
+            "GratuitousARPReply": false,
+            "NoGratuitousARPRequest": false
+          }
+        }
+      },
+      "Applications": {
+        "Applications": {},
+        "ApplicationSets": {},
+        "MixedDirectTermApps": null
+      },
+      "RoutingOptions": {
+        "StaticRoutes": null,
+        "Inet6StaticRoutes": null,
+        "UnhandledRibs": null,
+        "GenerateRoutes": null,
+        "ForwardingTableExport": "",
+        "ForwardingTableExports": null,
+        "AutonomousSystem": 0,
+        "RibGroups": null,
+        "InterfaceRoutesRibGroup": "",
+        "InterfaceRoutesRibGroupV6": ""
+      },
+      "Protocols": {
+        "OSPF": null,
+        "OSPFv3": null,
+        "BGP": null,
+        "RIP": null,
+        "ISIS": null,
+        "RouterAdvertisement": null,
+        "LLDP": null
+      },
+      "RoutingInstances": null,
+      "Firewall": {
+        "FiltersInet": null,
+        "FiltersInet6": null,
+        "Policers": null,
+        "ThreeColorPolicers": null
+      },
+      "ClassOfService": {
+        "ForwardingClasses": {
+          "best-effort": {
+            "Name": "best-effort",
+            "Queue": 0
+          },
+          "voice": {
+            "Name": "voice",
+            "Queue": 5
+          }
+        },
+        "DSCPClassifiers": {
+          "wan-classifier": {
+            "Name": "wan-classifier",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "DSCPValues": "AA=="
+              }
+            ]
+          }
+        },
+        "IEEE8021Classifiers": {
+          "wan-pcp": {
+            "Name": "wan-pcp",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "CodePoints": "AA=="
+              }
+            ]
+          }
+        },
+        "INetPrecedenceClassifierDefs": {
+          "prec-cl": {
+            "Name": "prec-cl",
+            "Entries": [
+              {
+                "ForwardingClass": "voice",
+                "LossPriority": "low",
+                "Precedences": "BQ=="
+              }
+            ]
+          }
+        },
+        "DSCPRewriteRules": {
+          "wan-rewrite": {
+            "Name": "wan-rewrite",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "DSCPValue": 46
+              }
+            ]
+          }
+        },
+        "IEEE8021RewriteRules": {},
+        "Schedulers": {
+          "be-sched": {
+            "Name": "be-sched",
+            "TransmitRateBytes": 625000000,
+            "TransmitRateExact": true,
+            "TransmitRatePercent": 0,
+            "TransmitRateRemainder": false,
+            "Priority": "low",
+            "BufferSizeBytes": 8000000,
+            "BufferSizePercent": 0,
+            "BufferSizeTemporalUS": 0,
+            "SurplusSharing": false,
+            "EqualFlowEnforcement": false,
+            "EqualFlowTargetPolicy": "",
+            "CodelTargetNS": 0
+          }
+        },
+        "SchedulerMaps": {
+          "edge-map": {
+            "Name": "edge-map",
+            "Entries": {
+              "best-effort": {
+                "ForwardingClass": "best-effort",
+                "Scheduler": "be-sched"
+              }
+            }
+          }
+        },
+        "Interfaces": {
+          "ge-0/0/2": {
+            "Name": "ge-0/0/2",
+            "Units": {
+              "80": {
+                "Unit": 80,
+                "ShapingRateBytes": 1125000000,
+                "BurstSizeBytes": 0,
+                "SchedulerMap": "edge-map",
+                "DSCPClassifier": "wan-classifier",
+                "IEEE8021Classifier": "wan-pcp",
+                "INetPrecedenceClassifier": "",
+                "DSCPRewriteRule": "wan-rewrite",
+                "IEEE8021RewriteRule": "",
+                "OutputTrafficControlProfile": "",
+                "OversubscriptionPolicy": "",
+                "OversubscriptionGuaranteeFraction": 0,
+                "PriorityLowMinShareBytes": 0
+              }
+            },
+            "Level": null
+          }
+        },
+        "FairnessExpectations": null,
+        "INetPrecedenceClassifiers": [
+          "prec-cl"
+        ],
+        "INetPrecedenceRewriteRules": null,
+        "EXPRewriteRules": null,
+        "TrafficControlProfiles": {
+          "wan-tcp": {
+            "Name": "wan-tcp",
+            "ShapingRateBytes": 1125000000,
+            "ShapingRatePercent": 0,
+            "GuaranteedRateBytes": 0,
+            "DelayBufferRateBytes": 0,
+            "SchedulerMap": "edge-map"
+          }
+        }
+      },
+      "Services": {
+        "FlowMonitoring": null,
+        "RPM": null,
+        "IPMonitoring": null,
+        "ApplicationIdentification": false
+      },
+      "ForwardingOptions": {
+        "Sampling": null,
+        "DHCPRelay": null,
+        "FamilyInet6Mode": "",
+        "PortMirroring": null,
+        "AllowDataplaneSleep": false
+      },
+      "System": {
+        "HostName": "",
+        "DomainName": "",
+        "DomainSearch": null,
+        "TimeZone": "",
+        "NameServers": null,
+        "NTPServers": null,
+        "NTPServerOptions": null,
+        "NTPThreshold": 0,
+        "NTPThresholdAction": "",
+        "NoRedirects": false,
+        "BackupRouter": "",
+        "BackupRouterDst": "",
+        "Lo0FilterInputV4": "",
+        "Lo0FilterInputV6": "",
+        "DataplaneType": "userspace",
+        "UserspaceDataplane": null,
+        "InternetOptions": null,
+        "Services": null,
+        "Syslog": null,
+        "DHCPServer": {
+          "DHCPLocalServer": null,
+          "DHCPv6LocalServer": null,
+          "DynamicDNS": null,
+          "DynamicDNSv6": null
+        },
+        "SNMP": null,
+        "Login": null,
+        "LoginDroppedByPacking": false,
+        "RootAuthentication": null,
+        "Archival": null,
+        "MasterPassword": "",
+        "LicenseAutoUpdate": "",
+        "DisabledProcesses": null,
+        "PersistGroupsInheritance": false,
+        "ManagementInterface": ""
+      },
+      "PolicyOptions": {
+        "PrefixLists": null,
+        "Communities": null,
+        "ASPaths": null,
+        "PolicyStatements": null
+      },
+      "Schedulers": null,
+      "Chassis": {
+        "Cluster": null,
+        "DeviceMap": null
+      },
+      "EventOptions": null,
+      "BridgeDomains": null,
+      "Warnings": [
+        "class-of-service dscp/802.1p classifier loss-priority now drives egress dscp rewrite-rule selection (#3995) but is not yet enforced for drop-precedence / WRED buffer management"
+      ],
+      "LenientNATTerminalActionRules": null
+    },
+    "error": ""
+  },
+  {
+    "key": "cos-compile/strict/generic",
+    "config": {
+      "Security": {
+        "Zones": {},
+        "Policies": null,
+        "GlobalPolicies": null,
+        "DefaultPolicy": 1,
+        "NAT": {
+          "Source": null,
+          "SourcePools": null,
+          "AddressPersistent": false,
+          "Destination": null,
+          "Static": null,
+          "NAT64": null,
+          "NATv6v4": null,
+          "PoolUtilizationAlarm": null,
+          "ProxyARP": null,
+          "SourceInterfacePortOverloadingOff": false
+        },
+        "Screen": {},
+        "AddressBook": null,
+        "Log": {
+          "Mode": "",
+          "Format": "",
+          "SourceInterface": "",
+          "Streams": null,
+          "Report": false,
+          "Profiles": null
+        },
+        "Flow": {
+          "TCPSession": null,
+          "UDPSessionTimeout": 0,
+          "ICMPSessionTimeout": 0,
+          "TCPMSSAllTCP": 0,
+          "TCPMSSIPsecVPN": 0,
+          "TCPMSSGreIn": 0,
+          "TCPMSSGreOut": 0,
+          "AllowDNSReply": false,
+          "AllowEmbeddedICMP": false,
+          "AllowUnstampedFabricIngress": false,
+          "GREPerformanceAcceleration": false,
+          "PowerModeDisable": false,
+          "SynFloodProtectionMode": "",
+          "Traceoptions": null,
+          "AgingEarlyAgeout": 0,
+          "AgingHighWatermark": 0,
+          "AgingLowWatermark": 0,
+          "AgingUnknownLeaves": null,
+          "RouteChangeTimeout": 0,
+          "SyncICMPSession": false,
+          "ForceIPReassembly": false,
+          "MulticastSessionLifetime": 0,
+          "PreserveIncomingFragmentSize": false
+        },
+        "ALG": {
+          "DNSDisable": false,
+          "FTPDisable": false,
+          "SIPDisable": false,
+          "TFTPDisable": false,
+          "UnsupportedProtos": null
+        },
+        "IPsec": {
+          "IKEProposals": null,
+          "IKEPolicies": null,
+          "Gateways": null,
+          "Proposals": null,
+          "Policies": null,
+          "VPNs": null
+        },
+        "DynamicAddress": {
+          "FeedServers": null,
+          "AddressBindings": null
+        },
+        "SSHKnownHosts": null,
+        "PolicyStatsEnabled": false,
+        "PreIDDefaultPolicy": null,
+        "DefaultPolicyLogSessionInit": false,
+        "DefaultPolicyLogSessionClose": false,
+        "PolicyRematch": false,
+        "PolicyRematchExtensive": false
+      },
+      "Interfaces": {
+        "Interfaces": {
+          "ge-0/0/2": {
+            "Name": "ge-0/0/2",
+            "Description": "",
+            "MTU": 0,
+            "Speed": "",
+            "Duplex": "",
+            "VlanTagging": false,
+            "FlexibleVlanTagging": false,
+            "Encapsulation": "",
+            "Bandwidth": 0,
+            "Disable": false,
+            "RedundantParent": "",
+            "LAGParent": "",
+            "RedundancyGroup": 0,
+            "FabricMembers": null,
+            "LocalFabricMember": "",
+            "BondMode": "",
+            "AggregatedEtherOpts": null,
+            "Units": {
+              "80": {
+                "Number": 80,
+                "Description": "",
+                "VlanID": 0,
+                "InnerVlanID": 0,
+                "PointToPoint": false,
+                "Addresses": [
+                  "10.0.80.1/24"
+                ],
+                "PrimaryAddress": "",
+                "PreferredAddress": "",
+                "MTU": 0,
+                "DHCP": false,
+                "DHCPOptions": null,
+                "DHCPv6": false,
+                "DHCPv6Client": null,
+                "DADDisable": false,
+                "UnnumberedInet": "",
+                "TargetedBroadcast": false,
+                "SamplingInput": false,
+                "SamplingOutput": false,
+                "FilterInputV4": "",
+                "FilterOutputV4": "",
+                "FilterInputV6": "",
+                "FilterOutputV6": "",
+                "VRRPGroups": null,
+                "Tunnel": null,
+                "DynamicDNSInet": null,
+                "DynamicDNSInet6": null
+              }
+            },
+            "Tunnel": null,
+            "NativeVlanID": 0,
+            "GratuitousARPReply": false,
+            "NoGratuitousARPRequest": false
+          }
+        }
+      },
+      "Applications": {
+        "Applications": {},
+        "ApplicationSets": {},
+        "MixedDirectTermApps": null
+      },
+      "RoutingOptions": {
+        "StaticRoutes": null,
+        "Inet6StaticRoutes": null,
+        "UnhandledRibs": null,
+        "GenerateRoutes": null,
+        "ForwardingTableExport": "",
+        "ForwardingTableExports": null,
+        "AutonomousSystem": 0,
+        "RibGroups": null,
+        "InterfaceRoutesRibGroup": "",
+        "InterfaceRoutesRibGroupV6": ""
+      },
+      "Protocols": {
+        "OSPF": null,
+        "OSPFv3": null,
+        "BGP": null,
+        "RIP": null,
+        "ISIS": null,
+        "RouterAdvertisement": null,
+        "LLDP": null
+      },
+      "RoutingInstances": null,
+      "Firewall": {
+        "FiltersInet": null,
+        "FiltersInet6": null,
+        "Policers": null,
+        "ThreeColorPolicers": null
+      },
+      "ClassOfService": {
+        "ForwardingClasses": {
+          "best-effort": {
+            "Name": "best-effort",
+            "Queue": 0
+          },
+          "voice": {
+            "Name": "voice",
+            "Queue": 5
+          }
+        },
+        "DSCPClassifiers": {
+          "wan-classifier": {
+            "Name": "wan-classifier",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "DSCPValues": "AA=="
+              }
+            ]
+          }
+        },
+        "IEEE8021Classifiers": {
+          "wan-pcp": {
+            "Name": "wan-pcp",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "CodePoints": "AA=="
+              }
+            ]
+          }
+        },
+        "INetPrecedenceClassifierDefs": {
+          "prec-cl": {
+            "Name": "prec-cl",
+            "Entries": [
+              {
+                "ForwardingClass": "voice",
+                "LossPriority": "low",
+                "Precedences": "BQ=="
+              }
+            ]
+          }
+        },
+        "DSCPRewriteRules": {
+          "wan-rewrite": {
+            "Name": "wan-rewrite",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "DSCPValue": 46
+              }
+            ]
+          }
+        },
+        "IEEE8021RewriteRules": {},
+        "Schedulers": {
+          "be-sched": {
+            "Name": "be-sched",
+            "TransmitRateBytes": 625000000,
+            "TransmitRateExact": true,
+            "TransmitRatePercent": 0,
+            "TransmitRateRemainder": false,
+            "Priority": "low",
+            "BufferSizeBytes": 8000000,
+            "BufferSizePercent": 0,
+            "BufferSizeTemporalUS": 0,
+            "SurplusSharing": false,
+            "EqualFlowEnforcement": false,
+            "EqualFlowTargetPolicy": "",
+            "CodelTargetNS": 0
+          }
+        },
+        "SchedulerMaps": {
+          "edge-map": {
+            "Name": "edge-map",
+            "Entries": {
+              "best-effort": {
+                "ForwardingClass": "best-effort",
+                "Scheduler": "be-sched"
+              }
+            }
+          }
+        },
+        "Interfaces": {
+          "ge-0/0/2": {
+            "Name": "ge-0/0/2",
+            "Units": {
+              "80": {
+                "Unit": 80,
+                "ShapingRateBytes": 1125000000,
+                "BurstSizeBytes": 0,
+                "SchedulerMap": "edge-map",
+                "DSCPClassifier": "wan-classifier",
+                "IEEE8021Classifier": "wan-pcp",
+                "INetPrecedenceClassifier": "",
+                "DSCPRewriteRule": "wan-rewrite",
+                "IEEE8021RewriteRule": "",
+                "OutputTrafficControlProfile": "",
+                "OversubscriptionPolicy": "",
+                "OversubscriptionGuaranteeFraction": 0,
+                "PriorityLowMinShareBytes": 0
+              }
+            },
+            "Level": null
+          }
+        },
+        "FairnessExpectations": null,
+        "INetPrecedenceClassifiers": [
+          "prec-cl"
+        ],
+        "INetPrecedenceRewriteRules": null,
+        "EXPRewriteRules": null,
+        "TrafficControlProfiles": {
+          "wan-tcp": {
+            "Name": "wan-tcp",
+            "ShapingRateBytes": 1125000000,
+            "ShapingRatePercent": 0,
+            "GuaranteedRateBytes": 0,
+            "DelayBufferRateBytes": 0,
+            "SchedulerMap": "edge-map"
+          }
+        }
+      },
+      "Services": {
+        "FlowMonitoring": null,
+        "RPM": null,
+        "IPMonitoring": null,
+        "ApplicationIdentification": false
+      },
+      "ForwardingOptions": {
+        "Sampling": null,
+        "DHCPRelay": null,
+        "FamilyInet6Mode": "",
+        "PortMirroring": null,
+        "AllowDataplaneSleep": false
+      },
+      "System": {
+        "HostName": "",
+        "DomainName": "",
+        "DomainSearch": null,
+        "TimeZone": "",
+        "NameServers": null,
+        "NTPServers": null,
+        "NTPServerOptions": null,
+        "NTPThreshold": 0,
+        "NTPThresholdAction": "",
+        "NoRedirects": false,
+        "BackupRouter": "",
+        "BackupRouterDst": "",
+        "Lo0FilterInputV4": "",
+        "Lo0FilterInputV6": "",
+        "DataplaneType": "userspace",
+        "UserspaceDataplane": null,
+        "InternetOptions": null,
+        "Services": null,
+        "Syslog": null,
+        "DHCPServer": {
+          "DHCPLocalServer": null,
+          "DHCPv6LocalServer": null,
+          "DynamicDNS": null,
+          "DynamicDNSv6": null
+        },
+        "SNMP": null,
+        "Login": null,
+        "LoginDroppedByPacking": false,
+        "RootAuthentication": null,
+        "Archival": null,
+        "MasterPassword": "",
+        "LicenseAutoUpdate": "",
+        "DisabledProcesses": null,
+        "PersistGroupsInheritance": false,
+        "ManagementInterface": ""
+      },
+      "PolicyOptions": {
+        "PrefixLists": null,
+        "Communities": null,
+        "ASPaths": null,
+        "PolicyStatements": null
+      },
+      "Schedulers": null,
+      "Chassis": {
+        "Cluster": null,
+        "DeviceMap": null
+      },
+      "EventOptions": null,
+      "BridgeDomains": null,
+      "Warnings": [
+        "class-of-service dscp/802.1p classifier loss-priority now drives egress dscp rewrite-rule selection (#3995) but is not yet enforced for drop-precedence / WRED buffer management"
+      ],
+      "LenientNATTerminalActionRules": null
+    },
+    "error": ""
+  },
+  {
+    "key": "cos-compile/strict/node0",
+    "config": {
+      "Security": {
+        "Zones": {},
+        "Policies": null,
+        "GlobalPolicies": null,
+        "DefaultPolicy": 1,
+        "NAT": {
+          "Source": null,
+          "SourcePools": null,
+          "AddressPersistent": false,
+          "Destination": null,
+          "Static": null,
+          "NAT64": null,
+          "NATv6v4": null,
+          "PoolUtilizationAlarm": null,
+          "ProxyARP": null,
+          "SourceInterfacePortOverloadingOff": false
+        },
+        "Screen": {},
+        "AddressBook": null,
+        "Log": {
+          "Mode": "",
+          "Format": "",
+          "SourceInterface": "",
+          "Streams": null,
+          "Report": false,
+          "Profiles": null
+        },
+        "Flow": {
+          "TCPSession": null,
+          "UDPSessionTimeout": 0,
+          "ICMPSessionTimeout": 0,
+          "TCPMSSAllTCP": 0,
+          "TCPMSSIPsecVPN": 0,
+          "TCPMSSGreIn": 0,
+          "TCPMSSGreOut": 0,
+          "AllowDNSReply": false,
+          "AllowEmbeddedICMP": false,
+          "AllowUnstampedFabricIngress": false,
+          "GREPerformanceAcceleration": false,
+          "PowerModeDisable": false,
+          "SynFloodProtectionMode": "",
+          "Traceoptions": null,
+          "AgingEarlyAgeout": 0,
+          "AgingHighWatermark": 0,
+          "AgingLowWatermark": 0,
+          "AgingUnknownLeaves": null,
+          "RouteChangeTimeout": 0,
+          "SyncICMPSession": false,
+          "ForceIPReassembly": false,
+          "MulticastSessionLifetime": 0,
+          "PreserveIncomingFragmentSize": false
+        },
+        "ALG": {
+          "DNSDisable": false,
+          "FTPDisable": false,
+          "SIPDisable": false,
+          "TFTPDisable": false,
+          "UnsupportedProtos": null
+        },
+        "IPsec": {
+          "IKEProposals": null,
+          "IKEPolicies": null,
+          "Gateways": null,
+          "Proposals": null,
+          "Policies": null,
+          "VPNs": null
+        },
+        "DynamicAddress": {
+          "FeedServers": null,
+          "AddressBindings": null
+        },
+        "SSHKnownHosts": null,
+        "PolicyStatsEnabled": false,
+        "PreIDDefaultPolicy": null,
+        "DefaultPolicyLogSessionInit": false,
+        "DefaultPolicyLogSessionClose": false,
+        "PolicyRematch": false,
+        "PolicyRematchExtensive": false
+      },
+      "Interfaces": {
+        "Interfaces": {
+          "ge-0/0/2": {
+            "Name": "ge-0/0/2",
+            "Description": "",
+            "MTU": 0,
+            "Speed": "",
+            "Duplex": "",
+            "VlanTagging": false,
+            "FlexibleVlanTagging": false,
+            "Encapsulation": "",
+            "Bandwidth": 0,
+            "Disable": false,
+            "RedundantParent": "",
+            "LAGParent": "",
+            "RedundancyGroup": 0,
+            "FabricMembers": null,
+            "LocalFabricMember": "",
+            "BondMode": "",
+            "AggregatedEtherOpts": null,
+            "Units": {
+              "80": {
+                "Number": 80,
+                "Description": "",
+                "VlanID": 0,
+                "InnerVlanID": 0,
+                "PointToPoint": false,
+                "Addresses": [
+                  "10.0.80.1/24"
+                ],
+                "PrimaryAddress": "",
+                "PreferredAddress": "",
+                "MTU": 0,
+                "DHCP": false,
+                "DHCPOptions": null,
+                "DHCPv6": false,
+                "DHCPv6Client": null,
+                "DADDisable": false,
+                "UnnumberedInet": "",
+                "TargetedBroadcast": false,
+                "SamplingInput": false,
+                "SamplingOutput": false,
+                "FilterInputV4": "",
+                "FilterOutputV4": "",
+                "FilterInputV6": "",
+                "FilterOutputV6": "",
+                "VRRPGroups": null,
+                "Tunnel": null,
+                "DynamicDNSInet": null,
+                "DynamicDNSInet6": null
+              }
+            },
+            "Tunnel": null,
+            "NativeVlanID": 0,
+            "GratuitousARPReply": false,
+            "NoGratuitousARPRequest": false
+          }
+        }
+      },
+      "Applications": {
+        "Applications": {},
+        "ApplicationSets": {},
+        "MixedDirectTermApps": null
+      },
+      "RoutingOptions": {
+        "StaticRoutes": null,
+        "Inet6StaticRoutes": null,
+        "UnhandledRibs": null,
+        "GenerateRoutes": null,
+        "ForwardingTableExport": "",
+        "ForwardingTableExports": null,
+        "AutonomousSystem": 0,
+        "RibGroups": null,
+        "InterfaceRoutesRibGroup": "",
+        "InterfaceRoutesRibGroupV6": ""
+      },
+      "Protocols": {
+        "OSPF": null,
+        "OSPFv3": null,
+        "BGP": null,
+        "RIP": null,
+        "ISIS": null,
+        "RouterAdvertisement": null,
+        "LLDP": null
+      },
+      "RoutingInstances": null,
+      "Firewall": {
+        "FiltersInet": null,
+        "FiltersInet6": null,
+        "Policers": null,
+        "ThreeColorPolicers": null
+      },
+      "ClassOfService": {
+        "ForwardingClasses": {
+          "best-effort": {
+            "Name": "best-effort",
+            "Queue": 0
+          },
+          "voice": {
+            "Name": "voice",
+            "Queue": 5
+          }
+        },
+        "DSCPClassifiers": {
+          "wan-classifier": {
+            "Name": "wan-classifier",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "DSCPValues": "AA=="
+              }
+            ]
+          }
+        },
+        "IEEE8021Classifiers": {
+          "wan-pcp": {
+            "Name": "wan-pcp",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "CodePoints": "AA=="
+              }
+            ]
+          }
+        },
+        "INetPrecedenceClassifierDefs": {
+          "prec-cl": {
+            "Name": "prec-cl",
+            "Entries": [
+              {
+                "ForwardingClass": "voice",
+                "LossPriority": "low",
+                "Precedences": "BQ=="
+              }
+            ]
+          }
+        },
+        "DSCPRewriteRules": {
+          "wan-rewrite": {
+            "Name": "wan-rewrite",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "DSCPValue": 46
+              }
+            ]
+          }
+        },
+        "IEEE8021RewriteRules": {},
+        "Schedulers": {
+          "be-sched": {
+            "Name": "be-sched",
+            "TransmitRateBytes": 625000000,
+            "TransmitRateExact": true,
+            "TransmitRatePercent": 0,
+            "TransmitRateRemainder": false,
+            "Priority": "low",
+            "BufferSizeBytes": 8000000,
+            "BufferSizePercent": 0,
+            "BufferSizeTemporalUS": 0,
+            "SurplusSharing": false,
+            "EqualFlowEnforcement": false,
+            "EqualFlowTargetPolicy": "",
+            "CodelTargetNS": 0
+          }
+        },
+        "SchedulerMaps": {
+          "edge-map": {
+            "Name": "edge-map",
+            "Entries": {
+              "best-effort": {
+                "ForwardingClass": "best-effort",
+                "Scheduler": "be-sched"
+              }
+            }
+          }
+        },
+        "Interfaces": {
+          "ge-0/0/2": {
+            "Name": "ge-0/0/2",
+            "Units": {
+              "80": {
+                "Unit": 80,
+                "ShapingRateBytes": 1125000000,
+                "BurstSizeBytes": 0,
+                "SchedulerMap": "edge-map",
+                "DSCPClassifier": "wan-classifier",
+                "IEEE8021Classifier": "wan-pcp",
+                "INetPrecedenceClassifier": "",
+                "DSCPRewriteRule": "wan-rewrite",
+                "IEEE8021RewriteRule": "",
+                "OutputTrafficControlProfile": "",
+                "OversubscriptionPolicy": "",
+                "OversubscriptionGuaranteeFraction": 0,
+                "PriorityLowMinShareBytes": 0
+              }
+            },
+            "Level": null
+          }
+        },
+        "FairnessExpectations": null,
+        "INetPrecedenceClassifiers": [
+          "prec-cl"
+        ],
+        "INetPrecedenceRewriteRules": null,
+        "EXPRewriteRules": null,
+        "TrafficControlProfiles": {
+          "wan-tcp": {
+            "Name": "wan-tcp",
+            "ShapingRateBytes": 1125000000,
+            "ShapingRatePercent": 0,
+            "GuaranteedRateBytes": 0,
+            "DelayBufferRateBytes": 0,
+            "SchedulerMap": "edge-map"
+          }
+        }
+      },
+      "Services": {
+        "FlowMonitoring": null,
+        "RPM": null,
+        "IPMonitoring": null,
+        "ApplicationIdentification": false
+      },
+      "ForwardingOptions": {
+        "Sampling": null,
+        "DHCPRelay": null,
+        "FamilyInet6Mode": "",
+        "PortMirroring": null,
+        "AllowDataplaneSleep": false
+      },
+      "System": {
+        "HostName": "",
+        "DomainName": "",
+        "DomainSearch": null,
+        "TimeZone": "",
+        "NameServers": null,
+        "NTPServers": null,
+        "NTPServerOptions": null,
+        "NTPThreshold": 0,
+        "NTPThresholdAction": "",
+        "NoRedirects": false,
+        "BackupRouter": "",
+        "BackupRouterDst": "",
+        "Lo0FilterInputV4": "",
+        "Lo0FilterInputV6": "",
+        "DataplaneType": "userspace",
+        "UserspaceDataplane": null,
+        "InternetOptions": null,
+        "Services": null,
+        "Syslog": null,
+        "DHCPServer": {
+          "DHCPLocalServer": null,
+          "DHCPv6LocalServer": null,
+          "DynamicDNS": null,
+          "DynamicDNSv6": null
+        },
+        "SNMP": null,
+        "Login": null,
+        "LoginDroppedByPacking": false,
+        "RootAuthentication": null,
+        "Archival": null,
+        "MasterPassword": "",
+        "LicenseAutoUpdate": "",
+        "DisabledProcesses": null,
+        "PersistGroupsInheritance": false,
+        "ManagementInterface": ""
+      },
+      "PolicyOptions": {
+        "PrefixLists": null,
+        "Communities": null,
+        "ASPaths": null,
+        "PolicyStatements": null
+      },
+      "Schedulers": null,
+      "Chassis": {
+        "Cluster": null,
+        "DeviceMap": null
+      },
+      "EventOptions": null,
+      "BridgeDomains": null,
+      "Warnings": [
+        "class-of-service dscp/802.1p classifier loss-priority now drives egress dscp rewrite-rule selection (#3995) but is not yet enforced for drop-precedence / WRED buffer management"
+      ],
+      "LenientNATTerminalActionRules": null
+    },
+    "error": ""
+  },
+  {
+    "key": "cos-compile/strict/node1",
+    "config": {
+      "Security": {
+        "Zones": {},
+        "Policies": null,
+        "GlobalPolicies": null,
+        "DefaultPolicy": 1,
+        "NAT": {
+          "Source": null,
+          "SourcePools": null,
+          "AddressPersistent": false,
+          "Destination": null,
+          "Static": null,
+          "NAT64": null,
+          "NATv6v4": null,
+          "PoolUtilizationAlarm": null,
+          "ProxyARP": null,
+          "SourceInterfacePortOverloadingOff": false
+        },
+        "Screen": {},
+        "AddressBook": null,
+        "Log": {
+          "Mode": "",
+          "Format": "",
+          "SourceInterface": "",
+          "Streams": null,
+          "Report": false,
+          "Profiles": null
+        },
+        "Flow": {
+          "TCPSession": null,
+          "UDPSessionTimeout": 0,
+          "ICMPSessionTimeout": 0,
+          "TCPMSSAllTCP": 0,
+          "TCPMSSIPsecVPN": 0,
+          "TCPMSSGreIn": 0,
+          "TCPMSSGreOut": 0,
+          "AllowDNSReply": false,
+          "AllowEmbeddedICMP": false,
+          "AllowUnstampedFabricIngress": false,
+          "GREPerformanceAcceleration": false,
+          "PowerModeDisable": false,
+          "SynFloodProtectionMode": "",
+          "Traceoptions": null,
+          "AgingEarlyAgeout": 0,
+          "AgingHighWatermark": 0,
+          "AgingLowWatermark": 0,
+          "AgingUnknownLeaves": null,
+          "RouteChangeTimeout": 0,
+          "SyncICMPSession": false,
+          "ForceIPReassembly": false,
+          "MulticastSessionLifetime": 0,
+          "PreserveIncomingFragmentSize": false
+        },
+        "ALG": {
+          "DNSDisable": false,
+          "FTPDisable": false,
+          "SIPDisable": false,
+          "TFTPDisable": false,
+          "UnsupportedProtos": null
+        },
+        "IPsec": {
+          "IKEProposals": null,
+          "IKEPolicies": null,
+          "Gateways": null,
+          "Proposals": null,
+          "Policies": null,
+          "VPNs": null
+        },
+        "DynamicAddress": {
+          "FeedServers": null,
+          "AddressBindings": null
+        },
+        "SSHKnownHosts": null,
+        "PolicyStatsEnabled": false,
+        "PreIDDefaultPolicy": null,
+        "DefaultPolicyLogSessionInit": false,
+        "DefaultPolicyLogSessionClose": false,
+        "PolicyRematch": false,
+        "PolicyRematchExtensive": false
+      },
+      "Interfaces": {
+        "Interfaces": {
+          "ge-0/0/2": {
+            "Name": "ge-0/0/2",
+            "Description": "",
+            "MTU": 0,
+            "Speed": "",
+            "Duplex": "",
+            "VlanTagging": false,
+            "FlexibleVlanTagging": false,
+            "Encapsulation": "",
+            "Bandwidth": 0,
+            "Disable": false,
+            "RedundantParent": "",
+            "LAGParent": "",
+            "RedundancyGroup": 0,
+            "FabricMembers": null,
+            "LocalFabricMember": "",
+            "BondMode": "",
+            "AggregatedEtherOpts": null,
+            "Units": {
+              "80": {
+                "Number": 80,
+                "Description": "",
+                "VlanID": 0,
+                "InnerVlanID": 0,
+                "PointToPoint": false,
+                "Addresses": [
+                  "10.0.80.1/24"
+                ],
+                "PrimaryAddress": "",
+                "PreferredAddress": "",
+                "MTU": 0,
+                "DHCP": false,
+                "DHCPOptions": null,
+                "DHCPv6": false,
+                "DHCPv6Client": null,
+                "DADDisable": false,
+                "UnnumberedInet": "",
+                "TargetedBroadcast": false,
+                "SamplingInput": false,
+                "SamplingOutput": false,
+                "FilterInputV4": "",
+                "FilterOutputV4": "",
+                "FilterInputV6": "",
+                "FilterOutputV6": "",
+                "VRRPGroups": null,
+                "Tunnel": null,
+                "DynamicDNSInet": null,
+                "DynamicDNSInet6": null
+              }
+            },
+            "Tunnel": null,
+            "NativeVlanID": 0,
+            "GratuitousARPReply": false,
+            "NoGratuitousARPRequest": false
+          }
+        }
+      },
+      "Applications": {
+        "Applications": {},
+        "ApplicationSets": {},
+        "MixedDirectTermApps": null
+      },
+      "RoutingOptions": {
+        "StaticRoutes": null,
+        "Inet6StaticRoutes": null,
+        "UnhandledRibs": null,
+        "GenerateRoutes": null,
+        "ForwardingTableExport": "",
+        "ForwardingTableExports": null,
+        "AutonomousSystem": 0,
+        "RibGroups": null,
+        "InterfaceRoutesRibGroup": "",
+        "InterfaceRoutesRibGroupV6": ""
+      },
+      "Protocols": {
+        "OSPF": null,
+        "OSPFv3": null,
+        "BGP": null,
+        "RIP": null,
+        "ISIS": null,
+        "RouterAdvertisement": null,
+        "LLDP": null
+      },
+      "RoutingInstances": null,
+      "Firewall": {
+        "FiltersInet": null,
+        "FiltersInet6": null,
+        "Policers": null,
+        "ThreeColorPolicers": null
+      },
+      "ClassOfService": {
+        "ForwardingClasses": {
+          "best-effort": {
+            "Name": "best-effort",
+            "Queue": 0
+          },
+          "voice": {
+            "Name": "voice",
+            "Queue": 5
+          }
+        },
+        "DSCPClassifiers": {
+          "wan-classifier": {
+            "Name": "wan-classifier",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "DSCPValues": "AA=="
+              }
+            ]
+          }
+        },
+        "IEEE8021Classifiers": {
+          "wan-pcp": {
+            "Name": "wan-pcp",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "CodePoints": "AA=="
+              }
+            ]
+          }
+        },
+        "INetPrecedenceClassifierDefs": {
+          "prec-cl": {
+            "Name": "prec-cl",
+            "Entries": [
+              {
+                "ForwardingClass": "voice",
+                "LossPriority": "low",
+                "Precedences": "BQ=="
+              }
+            ]
+          }
+        },
+        "DSCPRewriteRules": {
+          "wan-rewrite": {
+            "Name": "wan-rewrite",
+            "Entries": [
+              {
+                "ForwardingClass": "best-effort",
+                "LossPriority": "low",
+                "DSCPValue": 46
+              }
+            ]
+          }
+        },
+        "IEEE8021RewriteRules": {},
+        "Schedulers": {
+          "be-sched": {
+            "Name": "be-sched",
+            "TransmitRateBytes": 625000000,
+            "TransmitRateExact": true,
+            "TransmitRatePercent": 0,
+            "TransmitRateRemainder": false,
+            "Priority": "low",
+            "BufferSizeBytes": 8000000,
+            "BufferSizePercent": 0,
+            "BufferSizeTemporalUS": 0,
+            "SurplusSharing": false,
+            "EqualFlowEnforcement": false,
+            "EqualFlowTargetPolicy": "",
+            "CodelTargetNS": 0
+          }
+        },
+        "SchedulerMaps": {
+          "edge-map": {
+            "Name": "edge-map",
+            "Entries": {
+              "best-effort": {
+                "ForwardingClass": "best-effort",
+                "Scheduler": "be-sched"
+              }
+            }
+          }
+        },
+        "Interfaces": {
+          "ge-0/0/2": {
+            "Name": "ge-0/0/2",
+            "Units": {
+              "80": {
+                "Unit": 80,
+                "ShapingRateBytes": 1125000000,
+                "BurstSizeBytes": 0,
+                "SchedulerMap": "edge-map",
+                "DSCPClassifier": "wan-classifier",
+                "IEEE8021Classifier": "wan-pcp",
+                "INetPrecedenceClassifier": "",
+                "DSCPRewriteRule": "wan-rewrite",
+                "IEEE8021RewriteRule": "",
+                "OutputTrafficControlProfile": "",
+                "OversubscriptionPolicy": "",
+                "OversubscriptionGuaranteeFraction": 0,
+                "PriorityLowMinShareBytes": 0
+              }
+            },
+            "Level": null
+          }
+        },
+        "FairnessExpectations": null,
+        "INetPrecedenceClassifiers": [
+          "prec-cl"
+        ],
+        "INetPrecedenceRewriteRules": null,
+        "EXPRewriteRules": null,
+        "TrafficControlProfiles": {
+          "wan-tcp": {
+            "Name": "wan-tcp",
+            "ShapingRateBytes": 1125000000,
+            "ShapingRatePercent": 0,
+            "GuaranteedRateBytes": 0,
+            "DelayBufferRateBytes": 0,
+            "SchedulerMap": "edge-map"
+          }
+        }
+      },
+      "Services": {
+        "FlowMonitoring": null,
+        "RPM": null,
+        "IPMonitoring": null,
+        "ApplicationIdentification": false
+      },
+      "ForwardingOptions": {
+        "Sampling": null,
+        "DHCPRelay": null,
+        "FamilyInet6Mode": "",
+        "PortMirroring": null,
+        "AllowDataplaneSleep": false
+      },
+      "System": {
+        "HostName": "",
+        "DomainName": "",
+        "DomainSearch": null,
+        "TimeZone": "",
+        "NameServers": null,
+        "NTPServers": null,
+        "NTPServerOptions": null,
+        "NTPThreshold": 0,
+        "NTPThresholdAction": "",
+        "NoRedirects": false,
+        "BackupRouter": "",
+        "BackupRouterDst": "",
+        "Lo0FilterInputV4": "",
+        "Lo0FilterInputV6": "",
+        "DataplaneType": "userspace",
+        "UserspaceDataplane": null,
+        "InternetOptions": null,
+        "Services": null,
+        "Syslog": null,
+        "DHCPServer": {
+          "DHCPLocalServer": null,
+          "DHCPv6LocalServer": null,
+          "DynamicDNS": null,
+          "DynamicDNSv6": null
+        },
+        "SNMP": null,
+        "Login": null,
+        "LoginDroppedByPacking": false,
+        "RootAuthentication": null,
+        "Archival": null,
+        "MasterPassword": "",
+        "LicenseAutoUpdate": "",
+        "DisabledProcesses": null,
+        "PersistGroupsInheritance": false,
+        "ManagementInterface": ""
+      },
+      "PolicyOptions": {
+        "PrefixLists": null,
+        "Communities": null,
+        "ASPaths": null,
+        "PolicyStatements": null
+      },
+      "Schedulers": null,
+      "Chassis": {
+        "Cluster": null,
+        "DeviceMap": null
+      },
+      "EventOptions": null,
+      "BridgeDomains": null,
+      "Warnings": [
+        "class-of-service dscp/802.1p classifier loss-priority now drives egress dscp rewrite-rule selection (#3995) but is not yet enforced for drop-precedence / WRED buffer management"
+      ],
+      "LenientNATTerminalActionRules": null
+    },
+    "error": ""
+  },
+  {
+    "key": "cos-warning-order/lenient/generic",
+    "config": {
+      "Security": {
+        "Zones": {},
+        "Policies": null,
+        "GlobalPolicies": null,
+        "DefaultPolicy": 1,
+        "NAT": {
+          "Source": null,
+          "SourcePools": null,
+          "AddressPersistent": false,
+          "Destination": null,
+          "Static": null,
+          "NAT64": null,
+          "NATv6v4": null,
+          "PoolUtilizationAlarm": null,
+          "ProxyARP": null,
+          "SourceInterfacePortOverloadingOff": false
+        },
+        "Screen": {},
+        "AddressBook": null,
+        "Log": {
+          "Mode": "",
+          "Format": "",
+          "SourceInterface": "",
+          "Streams": null,
+          "Report": false,
+          "Profiles": null
+        },
+        "Flow": {
+          "TCPSession": null,
+          "UDPSessionTimeout": 0,
+          "ICMPSessionTimeout": 0,
+          "TCPMSSAllTCP": 0,
+          "TCPMSSIPsecVPN": 0,
+          "TCPMSSGreIn": 0,
+          "TCPMSSGreOut": 0,
+          "AllowDNSReply": false,
+          "AllowEmbeddedICMP": false,
+          "AllowUnstampedFabricIngress": false,
+          "GREPerformanceAcceleration": false,
+          "PowerModeDisable": false,
+          "SynFloodProtectionMode": "",
+          "Traceoptions": null,
+          "AgingEarlyAgeout": 0,
+          "AgingHighWatermark": 0,
+          "AgingLowWatermark": 0,
+          "AgingUnknownLeaves": null,
+          "RouteChangeTimeout": 0,
+          "SyncICMPSession": false,
+          "ForceIPReassembly": false,
+          "MulticastSessionLifetime": 0,
+          "PreserveIncomingFragmentSize": false
+        },
+        "ALG": {
+          "DNSDisable": false,
+          "FTPDisable": false,
+          "SIPDisable": false,
+          "TFTPDisable": false,
+          "UnsupportedProtos": null
+        },
+        "IPsec": {
+          "IKEProposals": null,
+          "IKEPolicies": null,
+          "Gateways": null,
+          "Proposals": null,
+          "Policies": null,
+          "VPNs": null
+        },
+        "DynamicAddress": {
+          "FeedServers": null,
+          "AddressBindings": null
+        },
+        "SSHKnownHosts": null,
+        "PolicyStatsEnabled": false,
+        "PreIDDefaultPolicy": null,
+        "DefaultPolicyLogSessionInit": false,
+        "DefaultPolicyLogSessionClose": false,
+        "PolicyRematch": false,
+        "PolicyRematchExtensive": false
+      },
+      "Interfaces": {
+        "Interfaces": {}
+      },
+      "Applications": {
+        "Applications": {},
+        "ApplicationSets": {},
+        "MixedDirectTermApps": null
+      },
+      "RoutingOptions": {
+        "StaticRoutes": null,
+        "Inet6StaticRoutes": null,
+        "UnhandledRibs": null,
+        "GenerateRoutes": null,
+        "ForwardingTableExport": "",
+        "ForwardingTableExports": null,
+        "AutonomousSystem": 0,
+        "RibGroups": null,
+        "InterfaceRoutesRibGroup": "",
+        "InterfaceRoutesRibGroupV6": ""
+      },
+      "Protocols": {
+        "OSPF": null,
+        "OSPFv3": null,
+        "BGP": null,
+        "RIP": null,
+        "ISIS": null,
+        "RouterAdvertisement": null,
+        "LLDP": null
+      },
+      "RoutingInstances": null,
+      "Firewall": {
+        "FiltersInet": null,
+        "FiltersInet6": null,
+        "Policers": null,
+        "ThreeColorPolicers": null
+      },
+      "ClassOfService": {
+        "ForwardingClasses": {
+          "best-effort": {
+            "Name": "best-effort",
+            "Queue": 0
+          }
+        },
+        "DSCPClassifiers": {},
+        "IEEE8021Classifiers": {},
+        "INetPrecedenceClassifierDefs": null,
+        "DSCPRewriteRules": {},
+        "IEEE8021RewriteRules": {},
+        "Schedulers": {},
+        "SchedulerMaps": {},
+        "Interfaces": {},
+        "FairnessExpectations": null,
+        "INetPrecedenceClassifiers": [
+          "bad-precedence"
+        ],
+        "INetPrecedenceRewriteRules": null,
+        "EXPRewriteRules": null,
+        "TrafficControlProfiles": {}
+      },
+      "Services": {
+        "FlowMonitoring": null,
+        "RPM": null,
+        "IPMonitoring": null,
+        "ApplicationIdentification": false
+      },
+      "ForwardingOptions": {
+        "Sampling": null,
+        "DHCPRelay": null,
+        "FamilyInet6Mode": "",
+        "PortMirroring": null,
+        "AllowDataplaneSleep": false
+      },
+      "System": {
+        "HostName": "",
+        "DomainName": "",
+        "DomainSearch": null,
+        "TimeZone": "",
+        "NameServers": null,
+        "NTPServers": null,
+        "NTPServerOptions": null,
+        "NTPThreshold": 0,
+        "NTPThresholdAction": "",
+        "NoRedirects": false,
+        "BackupRouter": "",
+        "BackupRouterDst": "",
+        "Lo0FilterInputV4": "",
+        "Lo0FilterInputV6": "",
+        "DataplaneType": "userspace",
+        "UserspaceDataplane": null,
+        "InternetOptions": null,
+        "Services": null,
+        "Syslog": null,
+        "DHCPServer": {
+          "DHCPLocalServer": null,
+          "DHCPv6LocalServer": null,
+          "DynamicDNS": null,
+          "DynamicDNSv6": null
+        },
+        "SNMP": null,
+        "Login": null,
+        "LoginDroppedByPacking": false,
+        "RootAuthentication": null,
+        "Archival": null,
+        "MasterPassword": "",
+        "LicenseAutoUpdate": "",
+        "DisabledProcesses": null,
+        "PersistGroupsInheritance": false,
+        "ManagementInterface": ""
+      },
+      "PolicyOptions": {
+        "PrefixLists": null,
+        "Communities": null,
+        "ASPaths": null,
+        "PolicyStatements": null
+      },
+      "Schedulers": null,
+      "Chassis": {
+        "Cluster": null,
+        "DeviceMap": null
+      },
+      "EventOptions": null,
+      "BridgeDomains": null,
+      "Warnings": [
+        "class-of-service classifiers dscp \"bad-dscp\" (downgraded to warning on tolerant path): class-of-service dscp code-point 110 is out of range (must be 0..63)",
+        "class-of-service classifiers ieee-802.1 \"bad-pcp\" (downgraded to warning on tolerant path): class-of-service ieee-802.1 classifier code-point 9 is out of range (must be 0..7)",
+        "class-of-service classifiers inet-precedence \"bad-precedence\" (downgraded to warning on tolerant path): class-of-service inet-precedence classifier code-point \"foo\" is not a valid 0..7 value, 3-bit binary (000..111) or IP-precedence alias",
+        "class-of-service rewrite-rules dscp \"bad-dscp-rewrite\" (downgraded to warning on tolerant path): class-of-service dscp code-point 200 is out of range (must be 0..63)",
+        "class-of-service rewrite-rules ieee-802.1 \"bad-pcp-rewrite\" (downgraded to warning on tolerant path): class-of-service ieee-802.1 rewrite-rule code-point 9 is out of range (must be 0..7)"
+      ],
+      "LenientNATTerminalActionRules": null
+    },
+    "error": ""
+  },
+  {
+    "key": "cos-warning-order/lenient/node0",
+    "config": {
+      "Security": {
+        "Zones": {},
+        "Policies": null,
+        "GlobalPolicies": null,
+        "DefaultPolicy": 1,
+        "NAT": {
+          "Source": null,
+          "SourcePools": null,
+          "AddressPersistent": false,
+          "Destination": null,
+          "Static": null,
+          "NAT64": null,
+          "NATv6v4": null,
+          "PoolUtilizationAlarm": null,
+          "ProxyARP": null,
+          "SourceInterfacePortOverloadingOff": false
+        },
+        "Screen": {},
+        "AddressBook": null,
+        "Log": {
+          "Mode": "",
+          "Format": "",
+          "SourceInterface": "",
+          "Streams": null,
+          "Report": false,
+          "Profiles": null
+        },
+        "Flow": {
+          "TCPSession": null,
+          "UDPSessionTimeout": 0,
+          "ICMPSessionTimeout": 0,
+          "TCPMSSAllTCP": 0,
+          "TCPMSSIPsecVPN": 0,
+          "TCPMSSGreIn": 0,
+          "TCPMSSGreOut": 0,
+          "AllowDNSReply": false,
+          "AllowEmbeddedICMP": false,
+          "AllowUnstampedFabricIngress": false,
+          "GREPerformanceAcceleration": false,
+          "PowerModeDisable": false,
+          "SynFloodProtectionMode": "",
+          "Traceoptions": null,
+          "AgingEarlyAgeout": 0,
+          "AgingHighWatermark": 0,
+          "AgingLowWatermark": 0,
+          "AgingUnknownLeaves": null,
+          "RouteChangeTimeout": 0,
+          "SyncICMPSession": false,
+          "ForceIPReassembly": false,
+          "MulticastSessionLifetime": 0,
+          "PreserveIncomingFragmentSize": false
+        },
+        "ALG": {
+          "DNSDisable": false,
+          "FTPDisable": false,
+          "SIPDisable": false,
+          "TFTPDisable": false,
+          "UnsupportedProtos": null
+        },
+        "IPsec": {
+          "IKEProposals": null,
+          "IKEPolicies": null,
+          "Gateways": null,
+          "Proposals": null,
+          "Policies": null,
+          "VPNs": null
+        },
+        "DynamicAddress": {
+          "FeedServers": null,
+          "AddressBindings": null
+        },
+        "SSHKnownHosts": null,
+        "PolicyStatsEnabled": false,
+        "PreIDDefaultPolicy": null,
+        "DefaultPolicyLogSessionInit": false,
+        "DefaultPolicyLogSessionClose": false,
+        "PolicyRematch": false,
+        "PolicyRematchExtensive": false
+      },
+      "Interfaces": {
+        "Interfaces": {}
+      },
+      "Applications": {
+        "Applications": {},
+        "ApplicationSets": {},
+        "MixedDirectTermApps": null
+      },
+      "RoutingOptions": {
+        "StaticRoutes": null,
+        "Inet6StaticRoutes": null,
+        "UnhandledRibs": null,
+        "GenerateRoutes": null,
+        "ForwardingTableExport": "",
+        "ForwardingTableExports": null,
+        "AutonomousSystem": 0,
+        "RibGroups": null,
+        "InterfaceRoutesRibGroup": "",
+        "InterfaceRoutesRibGroupV6": ""
+      },
+      "Protocols": {
+        "OSPF": null,
+        "OSPFv3": null,
+        "BGP": null,
+        "RIP": null,
+        "ISIS": null,
+        "RouterAdvertisement": null,
+        "LLDP": null
+      },
+      "RoutingInstances": null,
+      "Firewall": {
+        "FiltersInet": null,
+        "FiltersInet6": null,
+        "Policers": null,
+        "ThreeColorPolicers": null
+      },
+      "ClassOfService": {
+        "ForwardingClasses": {
+          "best-effort": {
+            "Name": "best-effort",
+            "Queue": 0
+          }
+        },
+        "DSCPClassifiers": {},
+        "IEEE8021Classifiers": {},
+        "INetPrecedenceClassifierDefs": null,
+        "DSCPRewriteRules": {},
+        "IEEE8021RewriteRules": {},
+        "Schedulers": {},
+        "SchedulerMaps": {},
+        "Interfaces": {},
+        "FairnessExpectations": null,
+        "INetPrecedenceClassifiers": [
+          "bad-precedence"
+        ],
+        "INetPrecedenceRewriteRules": null,
+        "EXPRewriteRules": null,
+        "TrafficControlProfiles": {}
+      },
+      "Services": {
+        "FlowMonitoring": null,
+        "RPM": null,
+        "IPMonitoring": null,
+        "ApplicationIdentification": false
+      },
+      "ForwardingOptions": {
+        "Sampling": null,
+        "DHCPRelay": null,
+        "FamilyInet6Mode": "",
+        "PortMirroring": null,
+        "AllowDataplaneSleep": false
+      },
+      "System": {
+        "HostName": "",
+        "DomainName": "",
+        "DomainSearch": null,
+        "TimeZone": "",
+        "NameServers": null,
+        "NTPServers": null,
+        "NTPServerOptions": null,
+        "NTPThreshold": 0,
+        "NTPThresholdAction": "",
+        "NoRedirects": false,
+        "BackupRouter": "",
+        "BackupRouterDst": "",
+        "Lo0FilterInputV4": "",
+        "Lo0FilterInputV6": "",
+        "DataplaneType": "userspace",
+        "UserspaceDataplane": null,
+        "InternetOptions": null,
+        "Services": null,
+        "Syslog": null,
+        "DHCPServer": {
+          "DHCPLocalServer": null,
+          "DHCPv6LocalServer": null,
+          "DynamicDNS": null,
+          "DynamicDNSv6": null
+        },
+        "SNMP": null,
+        "Login": null,
+        "LoginDroppedByPacking": false,
+        "RootAuthentication": null,
+        "Archival": null,
+        "MasterPassword": "",
+        "LicenseAutoUpdate": "",
+        "DisabledProcesses": null,
+        "PersistGroupsInheritance": false,
+        "ManagementInterface": ""
+      },
+      "PolicyOptions": {
+        "PrefixLists": null,
+        "Communities": null,
+        "ASPaths": null,
+        "PolicyStatements": null
+      },
+      "Schedulers": null,
+      "Chassis": {
+        "Cluster": null,
+        "DeviceMap": null
+      },
+      "EventOptions": null,
+      "BridgeDomains": null,
+      "Warnings": [
+        "class-of-service classifiers dscp \"bad-dscp\" (downgraded to warning on tolerant path): class-of-service dscp code-point 110 is out of range (must be 0..63)",
+        "class-of-service classifiers ieee-802.1 \"bad-pcp\" (downgraded to warning on tolerant path): class-of-service ieee-802.1 classifier code-point 9 is out of range (must be 0..7)",
+        "class-of-service classifiers inet-precedence \"bad-precedence\" (downgraded to warning on tolerant path): class-of-service inet-precedence classifier code-point \"foo\" is not a valid 0..7 value, 3-bit binary (000..111) or IP-precedence alias",
+        "class-of-service rewrite-rules dscp \"bad-dscp-rewrite\" (downgraded to warning on tolerant path): class-of-service dscp code-point 200 is out of range (must be 0..63)",
+        "class-of-service rewrite-rules ieee-802.1 \"bad-pcp-rewrite\" (downgraded to warning on tolerant path): class-of-service ieee-802.1 rewrite-rule code-point 9 is out of range (must be 0..7)"
+      ],
+      "LenientNATTerminalActionRules": null
+    },
+    "error": ""
+  },
+  {
+    "key": "cos-warning-order/lenient/node1",
+    "config": {
+      "Security": {
+        "Zones": {},
+        "Policies": null,
+        "GlobalPolicies": null,
+        "DefaultPolicy": 1,
+        "NAT": {
+          "Source": null,
+          "SourcePools": null,
+          "AddressPersistent": false,
+          "Destination": null,
+          "Static": null,
+          "NAT64": null,
+          "NATv6v4": null,
+          "PoolUtilizationAlarm": null,
+          "ProxyARP": null,
+          "SourceInterfacePortOverloadingOff": false
+        },
+        "Screen": {},
+        "AddressBook": null,
+        "Log": {
+          "Mode": "",
+          "Format": "",
+          "SourceInterface": "",
+          "Streams": null,
+          "Report": false,
+          "Profiles": null
+        },
+        "Flow": {
+          "TCPSession": null,
+          "UDPSessionTimeout": 0,
+          "ICMPSessionTimeout": 0,
+          "TCPMSSAllTCP": 0,
+          "TCPMSSIPsecVPN": 0,
+          "TCPMSSGreIn": 0,
+          "TCPMSSGreOut": 0,
+          "AllowDNSReply": false,
+          "AllowEmbeddedICMP": false,
+          "AllowUnstampedFabricIngress": false,
+          "GREPerformanceAcceleration": false,
+          "PowerModeDisable": false,
+          "SynFloodProtectionMode": "",
+          "Traceoptions": null,
+          "AgingEarlyAgeout": 0,
+          "AgingHighWatermark": 0,
+          "AgingLowWatermark": 0,
+          "AgingUnknownLeaves": null,
+          "RouteChangeTimeout": 0,
+          "SyncICMPSession": false,
+          "ForceIPReassembly": false,
+          "MulticastSessionLifetime": 0,
+          "PreserveIncomingFragmentSize": false
+        },
+        "ALG": {
+          "DNSDisable": false,
+          "FTPDisable": false,
+          "SIPDisable": false,
+          "TFTPDisable": false,
+          "UnsupportedProtos": null
+        },
+        "IPsec": {
+          "IKEProposals": null,
+          "IKEPolicies": null,
+          "Gateways": null,
+          "Proposals": null,
+          "Policies": null,
+          "VPNs": null
+        },
+        "DynamicAddress": {
+          "FeedServers": null,
+          "AddressBindings": null
+        },
+        "SSHKnownHosts": null,
+        "PolicyStatsEnabled": false,
+        "PreIDDefaultPolicy": null,
+        "DefaultPolicyLogSessionInit": false,
+        "DefaultPolicyLogSessionClose": false,
+        "PolicyRematch": false,
+        "PolicyRematchExtensive": false
+      },
+      "Interfaces": {
+        "Interfaces": {}
+      },
+      "Applications": {
+        "Applications": {},
+        "ApplicationSets": {},
+        "MixedDirectTermApps": null
+      },
+      "RoutingOptions": {
+        "StaticRoutes": null,
+        "Inet6StaticRoutes": null,
+        "UnhandledRibs": null,
+        "GenerateRoutes": null,
+        "ForwardingTableExport": "",
+        "ForwardingTableExports": null,
+        "AutonomousSystem": 0,
+        "RibGroups": null,
+        "InterfaceRoutesRibGroup": "",
+        "InterfaceRoutesRibGroupV6": ""
+      },
+      "Protocols": {
+        "OSPF": null,
+        "OSPFv3": null,
+        "BGP": null,
+        "RIP": null,
+        "ISIS": null,
+        "RouterAdvertisement": null,
+        "LLDP": null
+      },
+      "RoutingInstances": null,
+      "Firewall": {
+        "FiltersInet": null,
+        "FiltersInet6": null,
+        "Policers": null,
+        "ThreeColorPolicers": null
+      },
+      "ClassOfService": {
+        "ForwardingClasses": {
+          "best-effort": {
+            "Name": "best-effort",
+            "Queue": 0
+          }
+        },
+        "DSCPClassifiers": {},
+        "IEEE8021Classifiers": {},
+        "INetPrecedenceClassifierDefs": null,
+        "DSCPRewriteRules": {},
+        "IEEE8021RewriteRules": {},
+        "Schedulers": {},
+        "SchedulerMaps": {},
+        "Interfaces": {},
+        "FairnessExpectations": null,
+        "INetPrecedenceClassifiers": [
+          "bad-precedence"
+        ],
+        "INetPrecedenceRewriteRules": null,
+        "EXPRewriteRules": null,
+        "TrafficControlProfiles": {}
+      },
+      "Services": {
+        "FlowMonitoring": null,
+        "RPM": null,
+        "IPMonitoring": null,
+        "ApplicationIdentification": false
+      },
+      "ForwardingOptions": {
+        "Sampling": null,
+        "DHCPRelay": null,
+        "FamilyInet6Mode": "",
+        "PortMirroring": null,
+        "AllowDataplaneSleep": false
+      },
+      "System": {
+        "HostName": "",
+        "DomainName": "",
+        "DomainSearch": null,
+        "TimeZone": "",
+        "NameServers": null,
+        "NTPServers": null,
+        "NTPServerOptions": null,
+        "NTPThreshold": 0,
+        "NTPThresholdAction": "",
+        "NoRedirects": false,
+        "BackupRouter": "",
+        "BackupRouterDst": "",
+        "Lo0FilterInputV4": "",
+        "Lo0FilterInputV6": "",
+        "DataplaneType": "userspace",
+        "UserspaceDataplane": null,
+        "InternetOptions": null,
+        "Services": null,
+        "Syslog": null,
+        "DHCPServer": {
+          "DHCPLocalServer": null,
+          "DHCPv6LocalServer": null,
+          "DynamicDNS": null,
+          "DynamicDNSv6": null
+        },
+        "SNMP": null,
+        "Login": null,
+        "LoginDroppedByPacking": false,
+        "RootAuthentication": null,
+        "Archival": null,
+        "MasterPassword": "",
+        "LicenseAutoUpdate": "",
+        "DisabledProcesses": null,
+        "PersistGroupsInheritance": false,
+        "ManagementInterface": ""
+      },
+      "PolicyOptions": {
+        "PrefixLists": null,
+        "Communities": null,
+        "ASPaths": null,
+        "PolicyStatements": null
+      },
+      "Schedulers": null,
+      "Chassis": {
+        "Cluster": null,
+        "DeviceMap": null
+      },
+      "EventOptions": null,
+      "BridgeDomains": null,
+      "Warnings": [
+        "class-of-service classifiers dscp \"bad-dscp\" (downgraded to warning on tolerant path): class-of-service dscp code-point 110 is out of range (must be 0..63)",
+        "class-of-service classifiers ieee-802.1 \"bad-pcp\" (downgraded to warning on tolerant path): class-of-service ieee-802.1 classifier code-point 9 is out of range (must be 0..7)",
+        "class-of-service classifiers inet-precedence \"bad-precedence\" (downgraded to warning on tolerant path): class-of-service inet-precedence classifier code-point \"foo\" is not a valid 0..7 value, 3-bit binary (000..111) or IP-precedence alias",
+        "class-of-service rewrite-rules dscp \"bad-dscp-rewrite\" (downgraded to warning on tolerant path): class-of-service dscp code-point 200 is out of range (must be 0..63)",
+        "class-of-service rewrite-rules ieee-802.1 \"bad-pcp-rewrite\" (downgraded to warning on tolerant path): class-of-service ieee-802.1 rewrite-rule code-point 9 is out of range (must be 0..7)"
+      ],
+      "LenientNATTerminalActionRules": null
+    },
+    "error": ""
+  },
+  {
+    "key": "cos-warning-order/strict/generic",
+    "config": null,
+    "error": "class-of-service: class-of-service classifiers dscp \"bad-dscp\": class-of-service dscp code-point 110 is out of range (must be 0..63)"
+  },
+  {
+    "key": "cos-warning-order/strict/node0",
+    "config": null,
+    "error": "class-of-service: class-of-service classifiers dscp \"bad-dscp\": class-of-service dscp code-point 110 is out of range (must be 0..63)"
+  },
+  {
+    "key": "cos-warning-order/strict/node1",
+    "config": null,
+    "error": "class-of-service: class-of-service classifiers dscp \"bad-dscp\": class-of-service dscp code-point 110 is out of range (must be 0..63)"
+  },
+  {
     "key": "ha-cluster-userspace/lenient/generic",
     "config": {
       "Security": {
