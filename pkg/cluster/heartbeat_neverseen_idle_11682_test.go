@@ -1,6 +1,10 @@
 package cluster
 
 import (
+	"context"
+	"fmt"
+	"io"
+	"net"
 	"testing"
 	"time"
 )
@@ -60,6 +64,134 @@ func TestColdBootIdleSyncAliveNeverConfirmedAbsent11682(t *testing.T) {
 		}
 		if m.IsLocalPrimary(0) {
 			t.Errorf("idle ACK age %v: node promoted while the idle peer is alive (dual-primary)", age)
+		}
+	}
+}
+
+// TestColdBootIdleSyncAckCadenceHoldsNeverSeenPeer11682 runs an actual sync
+// receiveLoop over a pipe. The peer answers the production heartbeat probes
+// with heartbeat ACK frames at a controlled, accelerated cadence while the
+// UDP receiver remains never-seen. It checks each heartbeat tick on the same
+// manager after cold-boot grace, including ages beyond the scaled 2s/10s stale
+// threshold but before the next ACK.
+func TestColdBootIdleSyncAckCadenceHoldsNeverSeenPeer11682(t *testing.T) {
+	const readDeadline = 50 * time.Millisecond
+	legacyProbeWindow := readDeadline / 5 // 2s guard scaled against a 10s probe interval.
+	m := coldBootManager(t)
+	m.SetRGReady(0, true, nil)
+	ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+	ss.readDeadline = readDeadline
+	ss.peerSilenceLimit = 4 * readDeadline
+	localConn, peerConn := net.Pipe()
+	ss.installConn(0, localConn)
+	// Make the install's initial timestamp stale. Only a frame read by the
+	// receive loop can re-establish the proof used below.
+	ss.lastPeerRxMono.Store(MonotonicNanos() - time.Second.Nanoseconds())
+
+	m.SetPeerNeverSeenSyncFreshFunc(func() bool {
+		return ss.IsConnected() && ss.PeerRecentlyActiveWithinSilenceWindow()
+	})
+	r := newHeartbeatReceiver(m, nil, DefaultHeartbeatThreshold, DefaultHeartbeatInterval, nil)
+	r.startedAt = time.Now().Add(-(heartbeatStartupGrace + time.Second))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	receiveDone := make(chan struct{})
+	go func() {
+		ss.receiveLoop(ctx, localConn)
+		close(receiveDone)
+	}()
+	peerDone := make(chan struct{})
+	ackTimes := make(chan time.Time, 16)
+	peerErr := make(chan error, 1)
+	go func() {
+		defer close(peerDone)
+		hdr := make([]byte, syncHeaderSize)
+		for {
+			if _, err := io.ReadFull(peerConn, hdr); err != nil {
+				return
+			}
+			if hdr[4] != syncMsgHeartbeat {
+				select {
+				case peerErr <- fmt.Errorf("unexpected sync message type %d, want heartbeat probe", hdr[4]):
+				default:
+				}
+				return
+			}
+			if err := writeMsg(peerConn, syncMsgHeartbeatAck, nil); err != nil {
+				select {
+				case peerErr <- fmt.Errorf("write heartbeat ACK: %w", err):
+				default:
+				}
+				return
+			}
+			ackTimes <- time.Now()
+		}
+	}()
+	defer func() {
+		cancel()
+		_ = localConn.Close()
+		_ = peerConn.Close()
+		<-receiveDone
+		<-peerDone
+	}()
+
+	select {
+	case <-ackTimes:
+	case err := <-peerErr:
+		t.Fatalf("idle peer failed to answer sync probe: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("receive loop did not send a sync heartbeat probe")
+	}
+	ackDeadline := time.After(time.Second)
+	for !ss.peerHeartbeatAckEver.Load() {
+		select {
+		case err := <-peerErr:
+			t.Fatalf("idle peer failed to answer sync probe: %v", err)
+		case <-ackDeadline:
+			t.Fatal("receive loop did not process the idle peer's heartbeat ACK")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if age, ok := ss.LastPeerReceiveAge(); !ok || age > readDeadline {
+		t.Fatalf("received heartbeat ACK did not refresh sync proof: age=%v received=%v", age, ok)
+	}
+
+	ticker := time.NewTicker(readDeadline / 10)
+	defer ticker.Stop()
+	runFor := 3 * readDeadline
+	timer := time.NewTimer(runFor)
+	defer timer.Stop()
+	ackCount, tickCount := 1, 0
+	crossedLegacyGap := false
+	for {
+		select {
+		case <-ackTimes:
+			ackCount++
+		case err := <-peerErr:
+			t.Fatalf("idle peer failed to answer sync probe: %v", err)
+		case <-ticker.C:
+			tickCount++
+			r.checkTimeout()
+			if age, ok := ss.LastPeerReceiveAge(); ok && age > legacyProbeWindow {
+				crossedLegacyGap = true
+			}
+			if peerConfirmedAbsent(m) {
+				t.Fatalf("idle ACK peer confirmed absent after %d heartbeat ticks", tickCount)
+			}
+			if peerEverSeen(m) {
+				t.Fatal("never-seen heartbeat state was rewritten by sync ACK")
+			}
+			if m.IsLocalPrimary(0) {
+				t.Fatalf("node promoted while the idle sync peer answered ACK probes (dual-primary)")
+			}
+		case <-timer.C:
+			if !crossedLegacyGap {
+				t.Fatal("test did not sample an ACK gap beyond the scaled 2s probe window")
+			}
+			if ackCount < 3 || tickCount < 10 {
+				t.Fatalf("controlled cadence too short: received ACKs=%d heartbeat ticks=%d", ackCount, tickCount)
+			}
+			return
 		}
 	}
 }
