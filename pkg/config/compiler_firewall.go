@@ -741,6 +741,8 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					// terminal action (accept/discard/reject) resolves last-wins
 					// across blocks (Junos merges duplicate stanzas), so the
 					// second block's action is applied, never silently dropped.
+					// Each routing-instance target is recorded separately so the
+					// validator can reject distinct FBF destinations.
 					for _, thenNode := range termBody.FindChildren("then") {
 						compileFilterThen(thenNode, term)
 					}
@@ -1961,6 +1963,16 @@ func FilterHasConflictingTerminalActions(actions []string) bool {
 	return false
 }
 
+func recordFilterRoutingInstanceTarget(term *FirewallFilterTerm, target string) {
+	if term.routingInstanceTargetFirst == "" {
+		term.routingInstanceTargetFirst = target
+		return
+	}
+	if term.routingInstanceTargetConflict == "" && target != term.routingInstanceTargetFirst {
+		term.routingInstanceTargetConflict = target
+	}
+}
+
 // failClosedFilterTerminalConflicts makes a leniently compiled conflicting
 // term deny traffic rather than letting its last-written terminal become an
 // accidental accept. The strict gate still rejects the same authored conflict;
@@ -2044,6 +2056,7 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 			case "routing-instance":
 				if v := arg(); v != "" {
 					term.RoutingInstance = v
+					recordFilterRoutingInstanceTarget(term, v)
 				}
 			case "count":
 				if v := arg(); v != "" {
@@ -2158,7 +2171,9 @@ func compileFilterThen(node *Node, term *FirewallFilterTerm) {
 			term.Syslog = true
 		case "routing-instance":
 			if len(child.Keys) >= 2 {
-				term.RoutingInstance = child.Keys[1]
+				target := child.Keys[1]
+				term.RoutingInstance = target
+				recordFilterRoutingInstanceTarget(term, target)
 			}
 		case "count":
 			if len(child.Keys) >= 2 {

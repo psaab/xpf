@@ -1405,31 +1405,40 @@ func validateFilterFromMatchStrict(cfg *Config) error {
 }
 
 // validateFilterRoutingInstanceConflictStrict hard-rejects a firewall-filter
-// term that co-locates `then routing-instance <x>` with a terminating
-// `then discard` / `then reject` — #3308.
+// term that names multiple distinct `then routing-instance` targets (#11814),
+// or co-locates one target with a terminating `then discard` / `then reject`
+// (#3308).
 //
-// Such a term is contradictory: it asks the dataplane to BOTH route the packet
-// via the named instance AND drop/reject it. Historically there was no
-// commit-time mutual-exclusion gate AND both forwarding paths honored the steer
-// while only logging the deny — a fail-open PBR whose audit trail lied. Both
-// paths now resolve the contradiction to the DENY: the userspace PBR runtime
-// (ingress_route_table_override, userspace-dp/src/afxdp/forwarding/mod.rs)
-// returns RouteOverride::Drop for a reject/discard term (#4392), and the kernel
-// `ip rule` mirror (buildPBRFromFilter, pkg/routing/rules.go) skips the steering
-// rule (#4534). This gate keeps the operator from authoring the contradiction at
-// commit; on the tolerant load / peer-sync path it warns and both runtimes drop
-// the term independently.
+// A term has only one RoutingInstance field, so multiple distinct targets
+// cannot be represented: compileFilterThen retains the first target and first
+// distinct alternative so the strict gate can reject the ambiguous last-wins
+// result without allocating a per-term history slice. Repeating the same target
+// is harmless.
+//
+// RI+discard/reject is a separate contradiction: the term asks the dataplane
+// to BOTH route the packet via the named instance AND drop/reject it.
+// Historically there was no commit-time mutual-exclusion gate AND both
+// forwarding paths honored the steer while only logging the deny — a fail-open
+// PBR whose audit trail lied. Both paths now resolve the contradiction to the
+// DENY: the userspace PBR runtime (ingress_route_table_override,
+// userspace-dp/src/afxdp/forwarding/mod.rs) returns RouteOverride::Drop for a
+// reject/discard term (#4392), and the kernel `ip rule` mirror
+// (buildPBRFromFilter, pkg/routing/rules.go) skips the steering rule (#4534).
+// This gate keeps the operator from authoring the contradiction at commit; on
+// the tolerant load / peer-sync path it warns and both runtimes drop the term
+// independently.
 //
 // The conflict is on the typed fields term.RoutingInstance (the
 // `then routing-instance` value) and term.Action ("discard" / "reject", set by
-// compileFilterThen). A routing-instance term with `then accept` (or no terminal
-// action) is the legitimate filter-based-forwarding case and is NOT rejected.
+// compileFilterThen). A single routing-instance target with `then accept` (or
+// no terminal action) is the legitimate filter-based-forwarding case and is
+// NOT rejected. Multiple distinct routing-instance targets are rejected
+// regardless of an explicit action.
 //
 // The walk is deterministic (filters sorted by name, terms in config order). On
 // the tolerant load / peer-sync path the caller downgrades the returned error to
-// a warning (#1960 no-brick); the runtime already routes-and-mislogs such a term
-// independently, but the operator never reaches that state through a commit.
-// Mirrors validateFilterPortExceptStrict.
+// a warning (#1960 no-brick); the operator never reaches that state through a
+// commit. Mirrors validateFilterPortExceptStrict.
 func validateFilterRoutingInstanceConflictStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -1446,7 +1455,18 @@ func validateFilterRoutingInstanceConflictStrict(cfg *Config) error {
 				continue
 			}
 			for _, term := range filter.Terms {
-				if term == nil || term.RoutingInstance == "" {
+				if term == nil {
+					continue
+				}
+				if term.routingInstanceTargetConflict != "" {
+					return fmt.Errorf(
+						"firewall family %s filter %q term %q: conflicting "+
+							"`then routing-instance %s` and `then routing-instance %s` — "+
+							"a term may steer to only one target",
+						family, name, term.Name,
+						term.routingInstanceTargetFirst, term.routingInstanceTargetConflict)
+				}
+				if term.RoutingInstance == "" {
 					continue
 				}
 				if term.Action == "discard" || term.Action == "reject" {
