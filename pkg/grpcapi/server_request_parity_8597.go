@@ -66,10 +66,11 @@ func (s *Server) rescueAction(action string) (*pb.SystemActionResponse, error) {
 	switch action {
 	case "rescue-save":
 		if err := s.store.SaveRescueConfig(); err != nil {
-			// #10769 d05-F8: a save refused by the reset fence reports the
-			// state, not a server failure — FailedPrecondition, like the
-			// "no configuration store" guard above.
-			if errors.Is(err, configstore.ErrRescueSaveFenced) {
+			// #10769 d05-F8 and #11803: a save refused by the reset fence or
+			// because there is no non-empty committed active config reports a
+			// failed precondition rather than a server failure.
+			if errors.Is(err, configstore.ErrRescueSaveFenced) ||
+				errors.Is(err, configstore.ErrRescueSaveNoCommittedConfig) {
 				return nil, status.Errorf(codes.FailedPrecondition, "save rescue configuration: %v", err)
 			}
 			return nil, status.Errorf(codes.Internal, "save rescue configuration: %v", err)

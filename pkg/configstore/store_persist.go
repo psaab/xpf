@@ -1720,6 +1720,10 @@ func (s *Store) ResumeArchival() {
 // claiming a safety net was written when it was not.
 var ErrRescueSaveFenced = errors.New("factory reset in progress: rescue configuration saves are rejected")
 
+// ErrRescueSaveNoCommittedConfig reports that there is no non-empty committed
+// configuration to save as the rescue configuration.
+var ErrRescueSaveNoCommittedConfig = errors.New("no non-empty committed configuration to save as rescue")
+
 // rescueWriteBarrier is a test seam invoked by SaveRescueConfig after it has
 // registered in rescueWG and before its durable write. Production is a no-op.
 var rescueWriteBarrier = func() {}
@@ -2070,6 +2074,9 @@ func (s *Store) rescuePath() string {
 
 // SaveRescueConfig saves the active config as rescue configuration.
 //
+// #11803: a save is rejected with ErrRescueSaveNoCommittedConfig if the active
+// config has never been committed or its formatted text is empty; an operator
+// rescue command must not replace the last good copy with bootstrap state.
 // #10769 d05-F8: the save honors the rescue fence set by QuiesceRescueWrites
 // at the start of a factory reset. A fenced save is REJECTED with
 // ErrRescueSaveFenced — never a silent no-op, because this is an explicit
@@ -2091,8 +2098,14 @@ func (s *Store) SaveRescueConfig() error {
 		s.mu.RUnlock()
 		return fmt.Errorf("save rescue config: %w", ErrRescueSaveFenced)
 	}
-	s.rescueWG.Add(1)
 	data := s.active.Format()
+	if !s.everCommitted || strings.TrimSpace(data) == "" {
+		// A rescue save is a safety net, not a way to replace the last good
+		// copy with a fresh bootstrap tree or an empty configuration.
+		s.mu.RUnlock()
+		return fmt.Errorf("save rescue config: %w", ErrRescueSaveNoCommittedConfig)
+	}
+	s.rescueWG.Add(1)
 	s.mu.RUnlock()
 	defer s.rescueWG.Done()
 	rescueWriteBarrier()

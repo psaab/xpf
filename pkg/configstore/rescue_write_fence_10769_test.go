@@ -15,6 +15,10 @@ import (
 // prior tenant's secret-bearing rescue.conf.
 func TestQuiesceRescueWritesJoinsAndRejectsSaves_10769(t *testing.T) {
 	s := newTestStore(t)
+
+	if _, err := s.SyncApply("system { host-name rescue-fence; }", nil); err != nil {
+		t.Fatalf("SyncApply rescue fixture: %v", err)
+	}
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var releaseOnce sync.Once
