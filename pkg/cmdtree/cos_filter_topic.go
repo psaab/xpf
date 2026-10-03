@@ -53,6 +53,12 @@ const CoSNameTypeArgsUsage = "usage: show class-of-service classifier|rewrite-ru
 // a bare trailing keyword (`show class-of-service classifier name`) used to
 // render every classifier; silently widening a scoped query is worse than
 // it. This mirrors the strict #3347 `show security log` parser.
+//
+// `name` and `type` are keywords only in filter-key positions. The following
+// token is always an opaque value, even when it equals a keyword, so configured
+// objects literally named "name" or "type" remain addressable. To combine a
+// keyword-looking name with another filter, put the other filter first
+// (`type dscp name type`).
 func ParseCoSNameTypeArgs(args []string) (nameFilter, typeFilter string, err error) {
 	if len(args) > 0 && args[0] != "name" && args[0] != "type" {
 		nameFilter = args[0]
@@ -61,13 +67,13 @@ func ParseCoSNameTypeArgs(args []string) (nameFilter, typeFilter string, err err
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "name":
-			if i+1 >= len(args) || args[i+1] == "name" || args[i+1] == "type" {
+			if i+1 >= len(args) {
 				return "", "", fmt.Errorf("missing value for %q\n%s", "name", CoSNameTypeArgsUsage)
 			}
 			nameFilter = args[i+1]
 			i++
 		case "type":
-			if i+1 >= len(args) || args[i+1] == "name" || args[i+1] == "type" {
+			if i+1 >= len(args) {
 				return "", "", fmt.Errorf("missing value for %q\n%s", "type", CoSNameTypeArgsUsage)
 			}
 			typeFilter = args[i+1]

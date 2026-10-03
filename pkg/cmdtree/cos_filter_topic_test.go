@@ -35,7 +35,11 @@ func TestParseCoSNameTypeArgs6848(t *testing.T) {
 		{"bare name then type", []string{"rw-pcp", "type", "ieee-802.1"}, "rw-pcp", "ieee-802.1"},
 		{"keyword overrides bare", []string{"rw-dscp", "name", "rw-pcp"}, "rw-pcp", ""},
 		{"comma in bare name", []string{"rw,x"}, "rw,x", ""},
-		{"comma in keyword name", []string{"name", "rw,x", "type", "dscp"}, "rw,x", "dscp"},
+		{"keyword-looking name value name", []string{"name", "name"}, "name", ""},
+		{"keyword-looking name value type", []string{"name", "type"}, "type", ""},
+		{"keyword-looking type value name", []string{"type", "name"}, "", "name"},
+		{"keyword-looking name with type filter", []string{"name", "type", "type", "dscp"}, "type", "dscp"},
+		{"keyword-looking name after type filter", []string{"type", "dscp", "name", "type"}, "type", "dscp"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gotName, gotType, err := ParseCoSNameTypeArgs(tc.args)
@@ -58,7 +62,8 @@ func TestParseCoSNameTypeArgsRejectsUnknownAndDangling11834(t *testing.T) {
 	}{
 		{"unknown token", []string{"name", "rw-dscp", "naem"}, `unknown argument "naem"`},
 		{"dangling name", []string{"name"}, `missing value for "name"`},
-		{"name before next keyword", []string{"name", "type", "dscp"}, `missing value for "name"`},
+		{"keyword-looking value then unknown token", []string{"name", "type", "dscp"}, `unknown argument "dscp"`},
+		{"dangling type after name", []string{"name", "rw-dscp", "type"}, `missing value for "type"`},
 		{"dangling type", []string{"type"}, `missing value for "type"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
