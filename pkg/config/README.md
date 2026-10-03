@@ -1901,3 +1901,12 @@ names. Both rules apply only to `security-zone` statements directly under
   `multi` named containers such as `class-of-service schedulers`, and split
   keys the compiler canonicalises (`ospf area 0` against `area 0.0.0.0`). That
   work is #9859.
+
+**Connected subnet prefixes for rib-group leaks (#11452):** `RibGroupConnectedPrefixes`
+maps configured interface addresses to network prefixes, then sorts and compacts
+each leaking instance's set. Multiple addresses on one subnet therefore consume
+one kernel leak rule and one strict admission slot; warnings and reciprocal
+peer-prefix matching read that same set. The userspace route snapshot also
+compacts connected prefixes, retaining one FIB row for a subnet. Keep dedup at
+the shared config derivation rather than only in the applier so validation and
+installation cannot disagree.

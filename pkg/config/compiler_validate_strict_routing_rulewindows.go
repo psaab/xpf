@@ -93,10 +93,10 @@ func ribGroupImportsMain(groupName string, groups map[string]*RibGroup, tableIDs
 }
 
 // ribGroupLeakPrefixCount mirrors the forward leak set in
-// ribGroupManager.Apply. Counts are family-scoped to the corresponding
-// per-instance import-rib and once per source table (the runtime's
-// leakedTables guard). Repeated prefixes count repeatedly because the runtime
-// installs each one as a separate rule.
+// ribGroupManager.Apply. RibGroupConnectedPrefixes returns a sorted, unique
+// prefix set per leaking instance; counts are family-scoped to the
+// corresponding import-rib and once per source table (the runtime's
+// leakedTables guard).
 func ribGroupLeakPrefixCount(cfg *Config) (inet, inet6 int) {
 	if cfg == nil {
 		return 0, 0

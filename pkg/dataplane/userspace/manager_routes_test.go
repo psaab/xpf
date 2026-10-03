@@ -66,6 +66,25 @@ func TestBuildRouteSnapshotsIncludesConnectedPrefixes(t *testing.T) {
 	}
 }
 
+func TestBuildRouteSnapshotsCompactsDuplicateConnectedAddresses11452(t *testing.T) {
+	routes, _, err := buildRouteSnapshots(&config.Config{}, []InterfaceSnapshot{
+		{
+			Name: "reth1.0",
+			Addresses: []InterfaceAddressSnapshot{
+				{Family: "inet", Address: "10.0.30.3/24", Scope: int(netlink.SCOPE_UNIVERSE)},
+				{Family: "inet", Address: "10.0.30.2/24", Scope: int(netlink.SCOPE_UNIVERSE)},
+				{Family: "inet", Address: "10.0.30.1/24", Scope: int(netlink.SCOPE_UNIVERSE)},
+			},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routes) != 1 || routes[0].Table != "inet.0" || routes[0].Destination != "10.0.30.0/24" {
+		t.Fatalf("connected FIB rows = %+v, want one inet.0 row for 10.0.30.0/24", routes)
+	}
+}
+
 func TestBuildRouteSnapshotsDropsCrossFamilyRoutes11421(t *testing.T) {
 	oldRuleList := ruleListFn
 	t.Cleanup(func() { ruleListFn = oldRuleList })

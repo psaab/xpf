@@ -98,6 +98,26 @@ func TestRibGroupConnectedPrefixes(t *testing.T) {
 	}
 }
 
+func TestRibGroupConnectedPrefixesSortsAndCompacts11452(t *testing.T) {
+	cfg := ribGroupLeakConfig([]string{"inet.0"}, []string{
+		"10.0.31.1/24",
+		"10.0.30.3/24",
+		"10.0.30.2/24",
+		"10.0.30.1/24",
+	})
+
+	got := RibGroupConnectedPrefixes(cfg)["dmz-vr"]
+	want := []string{"10.0.30.0/24", "10.0.31.0/24"}
+	if len(got) != len(want) {
+		t.Fatalf("RibGroupConnectedPrefixes = %v, want sorted unique prefixes %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("RibGroupConnectedPrefixes = %v, want sorted unique prefixes %v", got, want)
+		}
+	}
+}
+
 // TestConnectedNetworkPrefix pins the shared address→network derivation used
 // by both the rib-group leak and the userspace FIB.
 func TestConnectedNetworkPrefix(t *testing.T) {
