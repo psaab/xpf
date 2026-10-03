@@ -158,6 +158,15 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 			continue
 		}
 
+		// A missing UID (zero) requests the system's normal automatic
+		// assignment. Invalid authored UIDs are kept negative by compilation
+		// on the tolerant path and must never silently take that route.
+		if user.UID < 0 {
+			slog.Warn("refusing to provision login user with invalid uid",
+				"user", user.Name, "uid", user.UID)
+			continue
+		}
+
 		// Check if user already exists. A non-zero exit means "user
 		// doesn't exist"; a timeout also lands here, in which case the
 		// useradd below fails with "already exists" and is logged. The `--`
@@ -181,17 +190,19 @@ func (d *Daemon) applySystemLogin(cfg *config.Config) (err error) {
 				fail(fmt.Errorf("create user %s: %w", user.Name, err))
 				continue
 			}
-			slog.Info("created system user", "user", user.Name, "uid", user.UID)
-			// Record provenance keyed by the account's actual UID so a
-			// later directive removal can lock THIS exact account (D2),
-			// while an out-of-band userdel+recreate with a different UID
-			// is left untouched (#1944 §5.4).
 			if uid, ok := lookupUID(user.Name); ok {
+				slog.Info("created system user", "user", user.Name, "uid", uid)
+				// Record provenance keyed by the account's actual UID so a
+				// later directive removal can lock THIS exact account (D2),
+				// while an out-of-band userdel+recreate with a different UID
+				// is left untouched (#1944 §5.4).
 				if err := markProvisioned(user.Name, uid); err != nil {
 					slog.Warn("failed to write provisioned-user marker",
 						"user", user.Name, "err", err)
 					fail(fmt.Errorf("mark provisioned %s: %w", user.Name, err))
 				}
+			} else {
+				slog.Info("created system user", "user", user.Name, "uid", "unknown")
 			}
 		} else {
 			// `id` may resolve NSS accounts that are not local. Only manage

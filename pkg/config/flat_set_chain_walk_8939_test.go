@@ -758,6 +758,10 @@ func TestFlatSetChainWalkRatchet8939(t *testing.T) {
 	// 39 vacuous rows. The current master has 88 unmeasured rows (one more than
 	// that snapshot); the three loser rows and 111 walked count remain unchanged.
 	// This is a population-count refresh, not a relaxation of the loss set.
+	// #11826 types `system login user <user> uid` as a positive integer.
+	// One synthetic chain probe with its generic value no longer passes strict
+	// schema admission, moving from vacuous to unmeasured (39->38, 91->92);
+	// the measured loser set and collector reach are unchanged.
 	// #11313: the `protocols bgp` process-AS chain candidate includes
 	// synthetic `local-as xpfval`, which is invalid. Give its packed and split
 	// spellings the same root-AS context outside the measured leaf window so

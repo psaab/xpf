@@ -2,15 +2,11 @@ package config
 
 import "testing"
 
-// #9391 (from the #9156 leaf-run gate): `system login user <u>` declares `uid`
-// with no valueType and no validator, so it is an ADMISSION HEAD —
-// validateModifierChild has nothing to reject the token that follows it with,
-// and the reader kept only the head.
-//
-// The loss is ONE-DIRECTIONAL and that is what makes it severe rather than
-// merely annoying. The reverse spelling is rejected (`class` IS typed), so a
-// class can never be GAINED this way — but whatever `class` is packed behind
-// `uid` is DROPPED, and any previously authored class STANDS.
+// #9391 (from the #9156 leaf-run gate): this regression covers a flat-set user
+// leaf chain (`uid` followed by `class`) that the compiler must still read in
+// order. Since #11826 typed `uid`, strict validation rejects that packed form;
+// tolerant compilation continues to interpret an already-stored chain without
+// dropping either leaf.
 
 func loginUsers9391(t *testing.T, lines ...string) map[string]*LoginUser {
 	t.Helper()
@@ -24,12 +20,9 @@ func loginUsers9391(t *testing.T, lines ...string) map[string]*LoginUser {
 			t.Fatalf("setpath %q: %v", l, err)
 		}
 	}
-	if err := SchemaValidateWithDefinitions(tree, tree, nil); err != nil {
-		t.Fatalf("STRICT REJECT (the arm cannot be read): %v", err)
-	}
-	cfg, err := CompileConfig(tree)
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
-		t.Fatalf("compile: %v", err)
+		t.Fatalf("lenient compile: %v", err)
 	}
 	out := map[string]*LoginUser{}
 	if cfg.System.Login != nil {
@@ -43,13 +36,11 @@ func loginUsers9391(t *testing.T, lines ...string) map[string]*LoginUser {
 // TestLoginUserDowngradeIsNotSilentlyDropped9391 is the harmful half, and it is
 // NOT the fail-closed one.
 //
-// An operator demoting an admin writes the idiomatic one-line `set`. Before
-// this fix the demotion was dropped and the user kept `super-user`:
-// reconcileSudoers keys the passwordless-root grant on Class == "super-user",
-// so the demoted admin KEPT the xpf-<user> NOPASSWD drop-in — exactly the #3889
-// defect that revocation sweep was written to close, reached again by spelling
-// — and pkg/authz evaluated the retained super-user class on every gRPC and
-// REST call.
+// The tolerant compiler must continue reading a legacy one-line `set` run
+// without dropping the class. New strict commits use separate leaf statements:
+// #11826 types `uid`, so the packed tail is rejected by schema validation.
+// Without #9391's reader expansion, an already-stored demotion could leave the
+// prior super-user class and its xpf-<user> NOPASSWD grant in place.
 func TestLoginUserDowngradeIsNotSilentlyDropped9391(t *testing.T) {
 	// ORACLE: the same demotion on separate lines.
 	oracle := loginUsers9391(t,
@@ -78,9 +69,8 @@ func TestLoginUserDowngradeIsNotSilentlyDropped9391(t *testing.T) {
 }
 
 // TestLoginUserFreshClassSurvivesTheRun9391 is the other half: a user with NO
-// prior class. That direction failed CLOSED (class="" denies at pkg/authz), so
-// it was an availability bug rather than an authorization one — but it is the
-// same drop and it is fixed by the same expansion.
+// prior class. The tolerant compiler must keep reading the legacy run; strict
+// validation rejects its packed UID tail after #11826.
 func TestLoginUserFreshClassSurvivesTheRun9391(t *testing.T) {
 	oracle := loginUsers9391(t,
 		"set system login user alice uid 2001",

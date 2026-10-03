@@ -397,29 +397,14 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				// below, so the authentication probe and the property switch
 				// cannot see different sets.
 				//
-				// `uid` declares no valueType and no validator, so it is an
-				// ADMISSION HEAD: validateModifierChild has nothing to reject
-				// the following token with, and `set system login user admin
-				// uid 2001 class read-only` committed CLEAN with the class
-				// dropped. The reverse spelling is rejected (`class` is typed),
-				// so the loss is one-directional — whatever `class` is packed
-				// behind `uid` is lost and ANY PREVIOUSLY AUTHORED CLASS STANDS.
-				//
-				// That is the harmful half, and it is not the fail-closed one.
-				// An operator DEMOTING an admin:
-				//
-				//	set system login user admin class super-user      (earlier)
-				//	set system login user admin uid 2001 class read-only
-				//	  -> class="super-user"          THE DEMOTION IS DROPPED
-				//
-				// reconcileSudoers (daemon_hostauth_apply.go) keys the
-				// passwordless-root grant on `Class == "super-user"`, so the
-				// demoted admin KEEPS the xpf-<user> NOPASSWD sudoers drop-in —
-				// which is exactly the #3889 defect that revocation sweep was
-				// written to close, reached again by spelling. pkg/authz then
-				// evaluates the retained super-user class on every gRPC and REST
-				// call.
-				//
+				// #9391 fixed the earlier flat-set omission: a user run such as
+				// `uid 2001 class read-only` must preserve both leaves when the
+				// tolerant compiler reads already-stored configuration. #11826
+				// types uid as a positive integer; strict compilation rejects an
+				// invalid value, while tolerant compilation marks it with a
+				// negative sentinel so apply cannot mistake it for an omitted UID
+				// (zero) and request automatic allocation.
+
 				// expandFlatRun rather than hoistAndSplitRun8939 DELIBERATELY:
 				// the stronger helper descends into a container leaf's body, and
 				// `authentication` is one whose packed spelling the #6662 gate
@@ -442,11 +427,24 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 				for _, prop := range userProps {
 					switch prop.Name() {
 					case "uid":
-						if v := nodeVal(prop); v != "" {
-							if n, err := strconv.Atoi(v); err == nil {
-								user.UID = n
-							}
+						raw := nodeVal(prop)
+						uid, uidErr := strconv.Atoi(raw)
+						if uidErr == nil && uid > 0 {
+							user.UID = uid
+							break
 						}
+						msg := fmt.Sprintf("system login user %s uid %q must be a positive integer", user.Name, raw)
+						if opts.lenientSystemLoginUID11826 {
+							// Negative is an internal invalid-value sentinel: zero
+							// means no UID was authored and asks useradd to allocate one.
+							user.UID = -1
+							if cfg != nil {
+								cfg.Warnings = append(cfg.Warnings,
+									msg+"; refusing automatic UID allocation on apply (#11826)")
+							}
+							break
+						}
+						return fmt.Errorf("%s", msg)
 					case "class":
 						user.Class = nodeVal(prop)
 					case "authentication":

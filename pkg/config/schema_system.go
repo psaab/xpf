@@ -332,7 +332,9 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		"user": {desc: "User name", args: 1, placeholder: "<username>",
 			keyValueType: ValueIdentifier, keyValueDesc: "POSIX login user name (lowercase letter/underscore then [a-z0-9_-])",
 			keyValidator: ValidateLoginUsername, children: map[string]*schemaNode{
-				"uid": {desc: "User ID", args: 1, placeholder: "<uid>", children: nil},
+				"uid": {desc: "User ID", args: 1, placeholder: "<uid>",
+					valueType: ValueInteger, valueDesc: "Positive integer; no repository-defined upper bound",
+					valueExamples: []string{"1000", "2001"}, validator: ValidateIntegerMin(1), children: nil},
 				// #2008 H6 / #4304 S-2: the class is validated against the
 				// system-defined built-ins UNION any custom `login class <name>`
 				// defined in the SAME candidate tree. The tree-aware validator
