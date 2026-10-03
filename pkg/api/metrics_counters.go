@@ -867,6 +867,11 @@ func (c *xpfCollector) collectFilterCounters(ch chan<- prometheus.Metric, dp api
 		sort.Strings(names)
 		for _, name := range names {
 			filter := filters[name]
+			if filter != nil {
+				if source, _ := filter.SuppressedMemberFBF11321(); source != "" {
+					continue
+				}
+			}
 
 			// Resolve the map-counter span for this filter, if the compile
 			// result carries it.

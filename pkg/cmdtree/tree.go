@@ -391,11 +391,21 @@ var OperationalTree = map[string]*Node{
 					return nil
 				}
 				names := make([]string, 0, len(cfg.Firewall.FiltersInet)+len(cfg.Firewall.FiltersInet6))
-				for n := range cfg.Firewall.FiltersInet {
-					names = append(names, n)
+				for n, filter := range cfg.Firewall.FiltersInet {
+					if filter == nil {
+						continue
+					}
+					if source, _ := filter.SuppressedMemberFBF11321(); source == "" {
+						names = append(names, n)
+					}
 				}
-				for n := range cfg.Firewall.FiltersInet6 {
-					names = append(names, n)
+				for n, filter := range cfg.Firewall.FiltersInet6 {
+					if filter == nil {
+						continue
+					}
+					if source, _ := filter.SuppressedMemberFBF11321(); source == "" {
+						names = append(names, n)
+					}
 				}
 				return names
 			},

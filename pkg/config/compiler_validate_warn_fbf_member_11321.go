@@ -68,7 +68,6 @@ func memberFBFKernelBandDiagnostics11321(cfg *Config, suppress bool) []string {
 	if cfg == nil {
 		return nil
 	}
-	var termsToSuppress []*FirewallFilterTerm
 	// Logical interface unit and kernel-device identity -> owning VRF-bound
 	// instance. Carry both views: the filter binding is logical, while the
 	// routing manager binds the resolved Linux device.
@@ -102,6 +101,8 @@ func memberFBFKernelBandDiagnostics11321(cfg *Config, suppress bool) []string {
 		return nil
 	}
 	var warnings []string
+	var cloneSequence int
+	suppressedCloneNames := make(map[string]string)
 	// Deterministic order: interfaces sorted, units numeric, terms in config
 	// order (same discipline as the other firewall warn gates).
 	ifNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
@@ -156,6 +157,7 @@ func memberFBFKernelBandDiagnostics11321(cfg *Config, suppress bool) []string {
 				if filter == nil {
 					continue
 				}
+				var suppressedTerms []string
 				for _, term := range filter.Terms {
 					if term == nil || term.RoutingInstance == "" {
 						continue
@@ -171,19 +173,72 @@ func memberFBFKernelBandDiagnostics11321(cfg *Config, suppress bool) []string {
 						h.family, h.filter, term.Name, target, unitRef, ownerRI,
 						PBRRulePriorityBase, PBRRulePriorityBase+PBRRuleWindow-1))
 					if suppress {
-						termsToSuppress = append(termsToSuppress, term)
+						suppressedTerms = append(suppressedTerms, term.Name)
+					}
+				}
+				if len(suppressedTerms) != 0 {
+					cloneKey := h.family + ":" + h.filter
+					cloneName := suppressedCloneNames[cloneKey]
+					if cloneName == "" {
+						cloneSequence++
+						cloneName = fmt.Sprintf("__xpf_11589_suppressed_%d", cloneSequence)
+						var filters map[string]*FirewallFilter
+						if h.family == "inet" {
+							filters = cfg.Firewall.FiltersInet
+						} else {
+							filters = cfg.Firewall.FiltersInet6
+						}
+						for filters[cloneName] != nil {
+							cloneSequence++
+							cloneName = fmt.Sprintf("__xpf_11589_suppressed_%d", cloneSequence)
+						}
+						clone := cloneFilterForMemberFBFSuppression11321(filter, h.filter, cloneName, suppressedTerms)
+						filters[cloneName] = clone
+						suppressedCloneNames[cloneKey] = cloneName
+					}
+					if h.family == "inet" {
+						unit.FilterInputV4 = cloneName
+					} else {
+						unit.FilterInputV6 = cloneName
 					}
 				}
 			}
 		}
 	}
-	if suppress {
-		for _, term := range termsToSuppress {
-			term.RoutingInstance = ""
-			if term.Action == "" && !term.NextTerm {
-				term.Action = "accept"
+	return warnings
+}
+func cloneFilterForMemberFBFSuppression11321(
+	filter *FirewallFilter,
+	sourceName, cloneName string,
+	suppressedTerms []string,
+) *FirewallFilter {
+	clone := *filter
+	clone.Name = cloneName
+	clone.memberFBFSource11321 = sourceName
+	clone.memberFBFTerms11321 = append([]string(nil), suppressedTerms...)
+	clone.Terms = make([]*FirewallFilterTerm, len(filter.Terms))
+	for i, term := range filter.Terms {
+		if term == nil {
+			continue
+		}
+		termClone := *term
+		if termClone.RoutingInstance != "" {
+			termClone.RoutingInstance = ""
+			if termClone.Action == "" && !termClone.NextTerm {
+				termClone.Action = "accept"
 			}
 		}
+		clone.Terms[i] = &termClone
 	}
-	return warnings
+	return &clone
+}
+
+// SuppressedMemberFBF11321 reports the authored filter and terms whose
+// routing-instance action was removed from a lenient per-attachment clone.
+// A non-empty source identifies an internal #11321 clone.
+func (f *FirewallFilter) SuppressedMemberFBF11321() (source string, terms []string) {
+	if f == nil {
+		return "", nil
+	}
+	return f.memberFBFSource11321, f.memberFBFTerms11321
 }

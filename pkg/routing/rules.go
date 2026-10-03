@@ -1217,6 +1217,18 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 				// (validateFilterAttachmentReferences / warn path); skip here.
 				continue
 			}
+			suppressedSource, suppressedTerms := filter.SuppressedMemberFBF11321()
+			if suppressedSource != "" {
+				for _, termName := range suppressedTerms {
+					errs = append(errs, fmt.Errorf(
+						"PBR filter %s term %s: lenient VRF-member FBF suppression from %s "+
+							"drops steering preempted by l3mdev pref 1000 and the VRF miss "+
+							"terminator pref 2000 before the PBR band (fail-safe native-table "+
+							"fallback, #11589)",
+						suppressedSource, termName, suppressedSource))
+				}
+				continue
+			}
 			if att.Iif == "" {
 				// #5117: the ingress interface could not be resolved to a kernel
 				// ifname. Fail closed — installing a global iif-less rule would
@@ -1308,10 +1320,12 @@ func BuildPBRRules(cfg *config.Config) ([]PBRRule, error) {
 // set; a later netlink failure is separate from this config-derived result.
 // `degraded` counts dropped terms for unrepresentable predicates, unknown DSCP,
 // contradictory or overlapping terms, undefined/unconstrained routing-instance
-// targets, loopback attachments, or priority-window overflow. A non-zero value
-// means the kernel slow path under-steers vs the userspace fast path (which
-// still enforces every term exactly). There is deliberately no "widened" count:
-// BuildPBRRules refuses to widen an unrepresentable match.
+// targets, loopback attachments, lenient VRF-member FBF suppression (#11589),
+// or priority-window overflow. A non-zero value means one or more authored
+// FBF steers were omitted from the kernel mirror. The lenient VRF-member case
+// also strips the userspace override so both planes use the native VRF table.
+// There is deliberately no "widened" count: BuildPBRRules refuses to widen an
+// unrepresentable match.
 func PBRBuildRulesAndStats(cfg *config.Config) (rules []PBRRule, degraded int) {
 	rules, err := BuildPBRRules(cfg)
 	if err == nil {

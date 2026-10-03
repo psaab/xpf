@@ -97,6 +97,9 @@ func filterLogOnlyTermNames(cfg *Config) []string {
 			if filter == nil {
 				continue
 			}
+			if filter.memberFBFSource11321 != "" {
+				continue
+			}
 			for _, term := range filter.Terms {
 				if term == nil || !term.Log || term.Syslog {
 					continue
