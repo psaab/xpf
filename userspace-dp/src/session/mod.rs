@@ -1273,10 +1273,10 @@ pub(crate) struct SessionTable {
     /// Per-worker, and deliberately not shared behind a lock: `resolve` runs on
     /// the data path for every PPTP GRE packet, and this tree keeps the packet
     /// path lock-free (shared maps exist only for HA import). Workers are fed
-    /// by `WorkerCommand::InstallPptpCall` / `ForgetPptpCall`, so every worker
-    /// holds the same set and a call resolves on whichever worker RSS lands its
-    /// data packets on — which is generally NOT the one that saw its control
-    /// channel.
+    /// by `WorkerCommand::InstallPptpCall`, per-call CDN and control-channel
+    /// forget commands, so every worker holds the same set and a call resolves
+    /// on whichever worker RSS lands its data packets on — which is generally
+    /// NOT the one that saw its control channel.
     ///
     /// It lives inside `SessionTable` because it is per-worker session-identity
     /// state with exactly this lifetime, and because `SessionTable` is already

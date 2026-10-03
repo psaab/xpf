@@ -12923,6 +12923,176 @@ fn forgetting_a_control_channel_forgets_every_association_11053() {
     assert_eq!(sessions.pptp().resolve(b, 0x4444), None);
 }
 
+/// A wire CDN removes the named call on every worker, retries a full worker
+/// queue, preserves unrelated calls, and permits the PAC ID to be reused.
+#[test]
+fn a_cdn_forgets_both_aliases_everywhere_and_allows_reuse_11601() {
+    use crate::session::pptp::{ControlChannelId, PptpCall};
+    use crate::session::pptp_control::{
+        PendingControlSegment, PptpControlInbox,
+        fixtures_7699::{call_disconnect_notify, outgoing_call_reply},
+    };
+
+    let (pac, pns): (IpAddr, IpAddr) = (
+        "198.51.100.7".parse().unwrap(),
+        "203.0.113.9".parse().unwrap(),
+    );
+    let control = ControlChannelId::new(pac, 1723, pns, 49152);
+    let queues: Vec<_> = (0..2)
+        .map(|_| Arc::new(Mutex::new(VecDeque::new())))
+        .collect();
+    let inbox = PptpControlInbox::default();
+    let mut local = SessionTable::new();
+    let mut worker_one = SessionTable::new();
+    let mut worker_two = SessionTable::new();
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let apply = |commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+                 sessions: &mut SessionTable| {
+        let _ = apply_worker_commands(
+            commands,
+            sessions,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            0,
+            &mut VecDeque::new(),
+        );
+    };
+
+    assert!(inbox.push(PendingControlSegment {
+        src: pac,
+        dst: pns,
+        src_port: 1723,
+        dst_port: 49152,
+        captured_ns: 10,
+        payload: outgoing_call_reply(0xAAAA, 0xBBBB, 1),
+    }));
+    assert!(inbox.push(PendingControlSegment {
+        src: pac,
+        dst: pns,
+        src_port: 1723,
+        dst_port: 49152,
+        captured_ns: 11,
+        payload: outgoing_call_reply(0xEEEE, 0xFFFF, 1),
+    }));
+    assert_eq!(
+        crate::afxdp::worker_queue::drain_pptp_control_inbox(
+            &inbox,
+            &mut local,
+            &queues,
+            1_000_000_000,
+        ),
+        2
+    );
+    apply(&queues[0], &mut worker_one);
+    apply(&queues[1], &mut worker_two);
+
+    let old_handle = PptpCall::new(pac, 0xAAAA, pns, 0xBBBB).handle();
+    let unrelated_handle = PptpCall::new(pac, 0xEEEE, pns, 0xFFFF).handle();
+    for sessions in [&local, &worker_one, &worker_two] {
+        assert_eq!(sessions.pptp().resolve(pac, 0xAAAA), Some(old_handle));
+        assert_eq!(sessions.pptp().resolve(pns, 0xBBBB), Some(old_handle));
+        assert_eq!(
+            sessions.pptp().resolve(pac, 0xEEEE),
+            Some(unrelated_handle),
+            "the unrelated call was installed before the CDN"
+        );
+    }
+
+    {
+        let mut pending = queues[1].lock().expect("worker queue");
+        for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+            pending.push_back(WorkerCommand::ForgetPptpCall(0xDEAD_BEEF));
+        }
+    }
+    assert!(inbox.push(PendingControlSegment {
+        src: pac,
+        dst: pns,
+        src_port: 1723,
+        dst_port: 49152,
+        captured_ns: 20,
+        payload: call_disconnect_notify(0xAAAA),
+    }));
+    assert_eq!(
+        crate::afxdp::worker_queue::drain_pptp_control_inbox(
+            &inbox,
+            &mut local,
+            &queues,
+            2_000_000_000,
+        ),
+        0,
+        "a CDN removes state but does not count as a learned association"
+    );
+    assert_eq!(local.pptp().resolve(pac, 0xAAAA), None);
+    assert_eq!(local.pptp().resolve(pns, 0xBBBB), None);
+    apply(&queues[0], &mut worker_one);
+    assert_eq!(worker_one.pptp().resolve(pac, 0xAAAA), None);
+    assert_eq!(worker_one.pptp().resolve(pns, 0xBBBB), None);
+    assert_eq!(
+        worker_one.pptp().resolve(pac, 0xEEEE),
+        Some(unrelated_handle),
+        "the CDN must not tear down a different call on the same channel"
+    );
+
+    queues[1].lock().expect("worker queue").clear();
+    assert_eq!(
+        crate::afxdp::worker_queue::drain_pptp_control_inbox(
+            &inbox,
+            &mut local,
+            &queues,
+            3_000_000_000,
+        ),
+        0,
+        "the periodic drain must retry the queue-refused CDN"
+    );
+    apply(&queues[1], &mut worker_two);
+    for sessions in [&local, &worker_one, &worker_two] {
+        assert_eq!(sessions.pptp().resolve(pac, 0xAAAA), None);
+        assert_eq!(sessions.pptp().resolve(pns, 0xBBBB), None);
+        assert_eq!(
+            sessions.pptp().resolve(pns, 0xFFFF),
+            Some(unrelated_handle)
+        );
+    }
+
+    assert!(inbox.push(PendingControlSegment {
+        src: pac,
+        dst: pns,
+        src_port: 1723,
+        dst_port: 49152,
+        captured_ns: 30,
+        payload: outgoing_call_reply(0xAAAA, 0xCCCC, 1),
+    }));
+    assert_eq!(
+        crate::afxdp::worker_queue::drain_pptp_control_inbox(
+            &inbox,
+            &mut local,
+            &queues,
+            4_000_000_000,
+        ),
+        1,
+        "the reused PAC call ID must learn the new peer handle"
+    );
+    apply(&queues[0], &mut worker_one);
+    apply(&queues[1], &mut worker_two);
+    let new_handle = PptpCall::new(pac, 0xAAAA, pns, 0xCCCC).handle();
+    assert_ne!(new_handle, old_handle);
+    for sessions in [&local, &worker_one, &worker_two] {
+        assert_eq!(sessions.pptp().resolve(pac, 0xAAAA), Some(new_handle));
+        assert_eq!(sessions.pptp().resolve(pns, 0xCCCC), Some(new_handle));
+        assert_eq!(sessions.pptp().resolve(pns, 0xBBBB), None);
+        assert_eq!(
+            sessions.pptp().resolve(pns, 0xFFFF),
+            Some(unrelated_handle)
+        );
+    }
+}
+
 /// #7699 stage 2 END-TO-END: control-channel BYTES through to an association a
 /// data packet resolves against.
 ///

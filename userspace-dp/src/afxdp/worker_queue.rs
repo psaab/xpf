@@ -1058,6 +1058,21 @@ fn retry_pending_pptp_control_forgets(
             }
         }
     }
+    for retry in inbox.take_call_forget_retries(now_ns) {
+        for queue in peer_worker_commands {
+            let queue_id = Arc::as_ptr(queue) as usize;
+            if !retry.unsent_queue_ids.contains(&queue_id) {
+                continue;
+            }
+            let mut pending = lock_recover(queue);
+            if push_bounded(
+                &mut pending,
+                WorkerCommand::ForgetPptpCallByControl(retry.disconnect),
+            ) {
+                inbox.mark_call_forget_sent(retry.disconnect, queue_id);
+            }
+        }
+    }
 }
 
 pub(in crate::afxdp) fn drain_pptp_control_inbox(
@@ -1069,28 +1084,51 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox(
     retry_pending_pptp_control_forgets(inbox, peer_worker_commands, now_ns);
     let mut learned = 0;
     for seg in inbox.take_pending(now_ns) {
-        let Some(call) = crate::session::pptp_control::learn_from_control_segment(
-            seg.src,
-            seg.dst,
-            &seg.payload,
-        ) else {
-            // Not a control message, truncated, or a call that did not connect.
-            // All three mean no association — the call's data takes the
-            // unassociated path, forwarded and counted.
-            continue;
-        };
+        let parsed = crate::session::pptp_control::parse_control_segment(&seg.payload);
         let control = crate::session::pptp::ControlChannelId::new(
             seg.src,
             seg.src_port,
             seg.dst,
             seg.dst_port,
         );
-        if let Err(e) = sessions.pptp_mut().install(call, control, seg.captured_ns) {
-            debug_log!("PPTP association refused on the local worker: {:?}", e);
-            continue;
+        match parsed {
+            crate::session::pptp_control::ControlParse::CallReply {
+                call_id,
+                peer_call_id,
+            } => {
+                let call = crate::session::pptp::PptpCall::new(
+                    seg.src,
+                    call_id,
+                    seg.dst,
+                    peer_call_id,
+                );
+                if let Err(e) = sessions.pptp_mut().install(call, control, seg.captured_ns) {
+                    debug_log!("PPTP association refused on the local worker: {:?}", e);
+                    continue;
+                }
+                broadcast_pptp_install(peer_worker_commands, call, control, seg.captured_ns);
+                learned += 1;
+            }
+            crate::session::pptp_control::ControlParse::CallDisconnect { call_id } => {
+                let disconnect = crate::session::pptp::PptpCallDisconnect {
+                    allocator: seg.src,
+                    call_id,
+                    control,
+                    disconnected_ns: seg.captured_ns,
+                };
+                // Broadcast even when local state is absent: another worker
+                // may still have the association, or may be the only one
+                // whose queue can accept this notification.
+                let _ = sessions
+                    .pptp_mut()
+                    .forget_call_disconnected_by(disconnect);
+                let unsent = broadcast_pptp_call_forget(peer_worker_commands, disconnect);
+                inbox.record_call_forget(disconnect, unsent);
+            }
+            crate::session::pptp_control::ControlParse::Ignored
+            | crate::session::pptp_control::ControlParse::Truncated
+            | crate::session::pptp_control::ControlParse::NotControl => {}
         }
-        broadcast_pptp_install(peer_worker_commands, call, control, seg.captured_ns);
-        learned += 1;
     }
     learned
 }
@@ -1114,6 +1152,26 @@ pub(in crate::afxdp) fn broadcast_pptp_forget(
         }
     }
     accepted
+}
+
+/// Broadcast a per-call CDN. Return only queues that refused it so the shared
+/// inbox can retry those recipients without duplicating accepted commands.
+pub(in crate::afxdp) fn broadcast_pptp_call_forget(
+    queues: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    disconnect: crate::session::pptp::PptpCallDisconnect,
+) -> Vec<usize> {
+    let mut unsent = Vec::new();
+    for queue in queues {
+        let queue_id = Arc::as_ptr(queue) as usize;
+        let mut pending = lock_recover(queue);
+        if !push_bounded(
+            &mut pending,
+            WorkerCommand::ForgetPptpCallByControl(disconnect),
+        ) {
+            unsent.push(queue_id);
+        }
+    }
+    unsent
 }
 
 #[cfg(test)]

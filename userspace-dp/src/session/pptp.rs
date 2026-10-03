@@ -149,6 +149,19 @@ impl ControlChannelId {
     }
 }
 
+/// A per-call disconnect observed on its PPTP control channel.
+///
+/// The allocator and call id are the PAC-assigned pair carried by a CDN; the
+/// channel and timestamp prevent a delayed notification from removing a
+/// different call learned after a tuple or 16-bit id was reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct PptpCallDisconnect {
+    pub(crate) allocator: IpAddr,
+    pub(crate) call_id: u16,
+    pub(crate) control: ControlChannelId,
+    pub(crate) disconnected_ns: u64,
+}
+
 /// A learned association plus the state that bounds its life.
 #[derive(Clone, Copy, Debug)]
 struct AssociationRecord {
@@ -400,6 +413,26 @@ impl PptpAssociations {
         self.by_allocator.remove(&(call.lo, call.lo_call_id));
         self.by_allocator.remove(&(call.hi, call.hi_call_id));
         true
+    }
+
+    /// Forget a call named by a CDN from its allocator and control channel.
+    ///
+    /// The notice timestamp fences delayed worker commands after a call id is
+    /// reused. A stale notice, or one from another control channel, is inert.
+    pub(crate) fn forget_call_disconnected_by(
+        &mut self,
+        disconnect: PptpCallDisconnect,
+    ) -> bool {
+        let Some(&handle) = self
+            .by_allocator
+            .get(&(disconnect.allocator, disconnect.call_id))
+        else {
+            return false;
+        };
+        let matches_notice = self.by_handle.get(&handle).is_some_and(|record| {
+            record.control == disconnect.control && record.learned_ns <= disconnect.disconnected_ns
+        });
+        matches_notice && self.remove(handle)
     }
 
     /// Count a version-1 packet that resolved to nothing.
@@ -744,6 +777,67 @@ mod expiry_tests_7699 {
         );
     }
 
+
+    /// A CDN removes both aliases; the PAC's call ID alone identifies the
+    /// association when combined with the control channel that taught it.
+    #[test]
+    fn a_call_disconnect_removes_both_aliases_and_allows_id_reuse_11601() {
+        let (pac, pns) = (ip("198.51.100.7"), ip("203.0.113.9"));
+        let control = ControlChannelId::new(pac, 49152, pns, 1723);
+        let mut associations = PptpAssociations::default();
+        let old_call = PptpCall::new(pac, 0xAAAA, pns, 0xBBBB);
+        let old_handle = associations.install(old_call, control, T0).expect("old call");
+        let disconnect = PptpCallDisconnect {
+            allocator: pac,
+            call_id: 0xAAAA,
+            control,
+            disconnected_ns: T0 + 1,
+        };
+
+        assert!(associations.forget_call_disconnected_by(disconnect));
+        assert_eq!(associations.resolve(pac, 0xAAAA), None);
+        assert_eq!(associations.resolve(pns, 0xBBBB), None);
+
+        let reused = PptpCall::new(pac, 0xAAAA, pns, 0xCCCC);
+        let new_handle = associations
+            .install(reused, control, T0 + 2)
+            .expect("reused PAC call id");
+        assert_ne!(new_handle, old_handle);
+        assert_eq!(associations.resolve(pac, 0xAAAA), Some(new_handle));
+        assert_eq!(associations.resolve(pns, 0xCCCC), Some(new_handle));
+        assert_eq!(associations.resolve(pns, 0xBBBB), None);
+    }
+
+    /// Delayed CDN retries must not delete a later install that reused the id.
+    #[test]
+    fn a_stale_or_wrong_channel_disconnect_preserves_the_call_11601() {
+        let (pac, pns) = (ip("198.51.100.7"), ip("203.0.113.9"));
+        let control = ControlChannelId::new(pac, 49152, pns, 1723);
+        let other_control = ControlChannelId::new(pac, 49153, pns, 1723);
+        let call = PptpCall::new(pac, 0xAAAA, pns, 0xBBBB);
+        let mut associations = PptpAssociations::default();
+        let handle = associations.install(call, control, T0).expect("call");
+
+        assert!(!associations.forget_call_disconnected_by(PptpCallDisconnect {
+            allocator: pac,
+            call_id: 0xAAAA,
+            control: other_control,
+            disconnected_ns: T0 + 2,
+        }));
+        assert_eq!(
+            associations.install(call, control, T0 + 3),
+            Ok(handle),
+            "an identical re-learn updates the install timestamp"
+        );
+        assert!(!associations.forget_call_disconnected_by(PptpCallDisconnect {
+            allocator: pac,
+            call_id: 0xAAAA,
+            control,
+            disconnected_ns: T0 + 2,
+        }));
+        assert_eq!(associations.resolve(pac, 0xAAAA), Some(handle));
+        assert_eq!(associations.resolve(pns, 0xBBBB), Some(handle));
+    }
     /// ANTI-VACUITY: a call still carrying data is NOT expired.
     ///
     /// Without this, the cell above is satisfied by an implementation that
@@ -758,21 +852,38 @@ mod expiry_tests_7699 {
             .install(PptpCall::new(pac, 0xAAAA, pns, 0xBBBB), ctl, T0)
             .expect("install");
 
-        // Data keeps flowing right up to the bound.
-        let touched_at = T0 + ASSOCIATION_IDLE_TIMEOUT_NS;
+        let before_bound = T0 + ASSOCIATION_IDLE_TIMEOUT_NS - 1;
+        assert_eq!(
+            t.resolve_and_touch(pns, 0xBBBB, before_bound),
+            Some(handle),
+            "a call carrying data just before the bound must resolve"
+        );
+        assert_eq!(
+            t.expire_idle(T0 + ASSOCIATION_IDLE_TIMEOUT_NS, ASSOCIATION_IDLE_TIMEOUT_NS),
+            0,
+            "a sweep after recent traffic must preserve the call"
+        );
+
+        // The call has now remained active for MORE than the idle bound.
+        let touched_at = T0 + ASSOCIATION_IDLE_TIMEOUT_NS + 1;
         assert_eq!(
             t.resolve_and_touch(pns, 0xBBBB, touched_at),
             Some(handle),
-            "a live call must resolve"
+            "a live call must still resolve after fifteen minutes"
         );
 
-        // A sweep just under a full timeout after that touch leaves it alone.
+        // A sweep at exactly one full idle timeout after that touch leaves it
+        // alone; timeout is based on traffic, not association age.
         assert_eq!(
-            t.expire_idle(touched_at + ASSOCIATION_IDLE_TIMEOUT_NS, ASSOCIATION_IDLE_TIMEOUT_NS),
+            t.expire_idle(
+                touched_at + ASSOCIATION_IDLE_TIMEOUT_NS,
+                ASSOCIATION_IDLE_TIMEOUT_NS
+            ),
             0,
             "a call refreshed by data traffic must survive; the bound is time \
              SINCE TRAFFIC, not age"
         );
+        assert_eq!(t.resolve(pac, 0xAAAA), Some(handle));
         assert_eq!(t.resolve(pns, 0xBBBB), Some(handle));
 
         // ...and one tick past it, the same call does age out — so the
