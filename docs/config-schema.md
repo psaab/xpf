@@ -15587,6 +15587,22 @@ Regression + fail-on-revert tests: `pkg/config/login_username_4895_test.go`
 (schema gate, hierarchical + flat-set) and
 `pkg/daemon/daemon_sudoers_username_4895_test.go` (daemon defense).
 
+### #11826 — login-user UID is a positive typed integer
+
+`system login user <name> uid <n>` is typed as an integer with a minimum of
+1. The issue's suggested UID ceilings were explicitly non-validated, so the
+schema does not invent an upper bound; values that cannot fit the compiler's
+native integer representation are still rejected by strict compilation.
+Tolerant Load / SyncApply names an invalid authored value in a warning and
+marks it invalid internally; daemon apply refuses that user rather than
+mistaking the invalid value for an omitted UID and asking `useradd` to allocate
+one. Omitting `uid` remains the distinct, supported automatic-assignment case.
+The creation log and UID-keyed provenance use the account's actual UID.
+
+Regression cells: `pkg/config/compiler_login_uid_11826_test.go` and
+`pkg/daemon/daemon_login_uid_11826_test.go`.
+
+
 ### #2978 — BGP `multipath ibgp` (iBGP ECMP / `maximum-paths ibgp`)
 
 `set protocols bgp multipath ibgp` enables iBGP equal-cost multipath. FRR's

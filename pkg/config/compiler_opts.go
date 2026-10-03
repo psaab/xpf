@@ -3017,6 +3017,12 @@ type compileOpts struct {
 	// Keys. Existing persisted or peer-synced names must still boot (#1960).
 	lenientSystemHostname bool
 
+	// lenientSystemLoginUID11826 downgrades an invalid configured login UID
+	// from a strict compile error to a warning on tolerant load / peer-sync.
+	// The compiler marks it invalid so daemon apply never turns it into
+	// useradd's automatic-UID behavior.
+	lenientSystemLoginUID11826 bool
+
 	// lenientSystemAAA10831 preserves boot and peer-sync behavior for an
 	// already-persisted unsupported AAA stanza while surfacing the local-only
 	// authentication limitation as a warning. New strict compiles reject it.
@@ -3269,6 +3275,7 @@ func lenientCompileOpts() compileOpts {
 		lenientInterfaceNumericBounds:          true,
 		lenientBareLeafInstance9838:            true,
 		lenientSystemHostname:                  true,
+		lenientSystemLoginUID11826:             true,
 		lenientSystemAAA10831:                  true,
 	}
 }
