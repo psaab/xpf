@@ -1799,6 +1799,10 @@ type Daemon struct {
 	// CURRENT active config (Store.ShowActive), not the stale boot file
 	// d.opts.ConfigFile (#3867).
 	archiveTransfer func(ctx context.Context, srcPath, dest string) error
+	// archiveDebt retains current-config remote archive copies owed after a
+	// failed staging or site transfer (#11806). It is independent of the timer
+	// lifecycle: transfer-on-commit and periodic attempts share the same debt.
+	archiveDebt remoteArchiveDebt
 
 	// --- periodic configuration-archival timer (#4078) ---
 	// archiveTimer groups the periodic-archival timer supervision state: the

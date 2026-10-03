@@ -1082,10 +1082,12 @@ func parseSrcPort(addr string) uint16 {
 // scp THAT, preserving the historical remote filename (the boot-file
 // basename) and the scp transport.
 func (d *Daemon) archiveConfig(cfg *config.Config) {
-	if cfg.System.Archival == nil || !cfg.System.Archival.TransferOnCommit {
-		return
-	}
-	if len(cfg.System.Archival.ArchiveSites) == 0 {
+	if cfg == nil || cfg.System.Archival == nil || !cfg.System.Archival.TransferOnCommit ||
+		len(cfg.System.Archival.ArchiveSites) == 0 {
+		// A newer commit that no longer requests transfer-on-commit supersedes
+		// older remote-copy debt. Periodic archival, when configured, will still
+		// take a fresh current-config copy on its next timer tick.
+		d.archiveDebt.clear()
 		return
 	}
 	d.archiveToSites(cfg.System.Archival.ArchiveSites)
@@ -1104,8 +1106,16 @@ func (d *Daemon) archiveToSites(sites []string) {
 	if len(sites) == 0 {
 		return
 	}
+	attempt := d.archiveDebt.begin(sites)
+	failAllSites := func(err error) {
+		for _, site := range sites {
+			d.archiveDebt.record(attempt, site, err)
+		}
+	}
 	if d.store == nil {
+		err := errors.New("no configuration store")
 		slog.Warn("config archival skipped: no configuration store")
+		failAllSites(err)
 		return
 	}
 
@@ -1115,7 +1125,9 @@ func (d *Daemon) archiveToSites(sites []string) {
 	// the stale install-time boot file.
 	active := d.store.ShowActive()
 	if active == "" {
+		err := errors.New("active configuration is empty")
 		slog.Warn("config archival skipped: active configuration is empty")
+		failAllSites(err)
 		return
 	}
 
@@ -1129,6 +1141,7 @@ func (d *Daemon) archiveToSites(sites []string) {
 	tmpDir, err := os.MkdirTemp("", "xpf-archive-")
 	if err != nil {
 		slog.Warn("config archival failed: create temp dir", "err", err)
+		failAllSites(err)
 		return
 	}
 	srcPath := filepath.Join(tmpDir, base)
@@ -1144,6 +1157,7 @@ func (d *Daemon) archiveToSites(sites []string) {
 	if err := fsatomic.WriteFileAtomic(srcPath, []byte(active), 0600); err != nil {
 		slog.Warn("config archival failed: write temp config", "err", err)
 		os.RemoveAll(tmpDir)
+		failAllSites(err)
 		return
 	}
 
@@ -1161,7 +1175,9 @@ func (d *Daemon) archiveToSites(sites []string) {
 			slog.Info("archiving config", "destination", redactedDest)
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			if err := transfer(ctx, srcPath, dest); err != nil {
+			err := transfer(ctx, srcPath, dest)
+			d.archiveDebt.record(attempt, dest, err)
+			if err != nil {
 				// scp output may echo argv; scrub the exact destination first.
 				redactedErr := strings.ReplaceAll(err.Error(), dest, redactedDest)
 				slog.Warn("config archival failed", "destination", redactedDest, "err", redactedErr)

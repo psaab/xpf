@@ -589,6 +589,14 @@ tracker issue #4407 carries the remaining increments.
   `ipsecSANudgeCh` and increment 2's `lastStandbyNeighborRefresh`) — it is the
   one-shot transfer-on-commit upload seam used by `archiveConfig` in
   `daemon_flow.go`, a different mechanism from the periodic timer grouped here.
+  - **Current-config remote archive debt (#11806).** A failed remote
+    transfer-on-commit keeps that destination pending until a later
+    current-config transfer succeeds. Transfer-on-commit and the periodic
+    timer share the same current active config snapshot and transport; a newer
+    commit replaces older pending state, while a commit without configured
+    transfer-on-commit destinations clears it. `xpf_config_remote_archive_pending_sites`
+    and `xpf_config_remote_archive_failures_total` expose current debt and
+    cumulative failed site attempts; no historical config ledger is retained.
   - **Interval overflow bound (#5784).** `transfer-interval` is an
     operator-settable value in MINUTES, bounded to `[1, 2880]` at commit
     (`schema_system.go`), so a normal commit cannot overflow

@@ -92,6 +92,10 @@ DENIES at runtime — the census is a build-time guard, so the request path fail
 closed independently of it.
 
 - `GET /metrics` — Prometheus exposition.
+  - Current-config remote archive debt is exposed as
+    `xpf_config_remote_archive_pending_sites` and
+    `xpf_config_remote_archive_failures_total`; these control-plane metrics are
+    emitted even when the dataplane is unloaded (#11806).
 - `GET /api/v1/...` — REST mirrors of the gRPC API: sessions, routes,
   NAT, DHCP, IPsec, VRRP, OSPF, BGP, etc.
   - `GET /api/v1/security/policies` enumerates zone-pair policies AND
