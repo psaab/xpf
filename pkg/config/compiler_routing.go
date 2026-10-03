@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -1683,9 +1684,10 @@ func RoutingInstanceConnectedPrefixes(cfg *Config) map[string][]string {
 	return out
 }
 
-// RibGroupConnectedPrefixes returns the connected-prefix subset whose
-// instances configure interface-routes rib-groups. It is the #3876 per-prefix
-// leak set and the source for #11062 reciprocal peer-prefix matching.
+// RibGroupConnectedPrefixes returns the sorted, duplicate-free
+// connected-prefix subset whose instances configure interface-routes
+// rib-groups. It is the #3876 per-prefix leak set and the source for #11062
+// reciprocal peer-prefix matching.
 func RibGroupConnectedPrefixes(cfg *Config) map[string][]string {
 	out := RoutingInstanceConnectedPrefixes(cfg)
 	if cfg == nil {
@@ -1698,6 +1700,10 @@ func RibGroupConnectedPrefixes(cfg *Config) map[string][]string {
 		if ri.Name == "" || (ri.InterfaceRoutesRibGroup == "" && ri.InterfaceRoutesRibGroupV6 == "") {
 			delete(out, ri.Name)
 		}
+	}
+	for name, prefixes := range out {
+		slices.Sort(prefixes)
+		out[name] = slices.Compact(prefixes)
 	}
 	return out
 }

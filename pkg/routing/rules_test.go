@@ -1351,3 +1351,67 @@ func TestPBRApplyRoutesDSCPThroughRuleAddDSCP7796(t *testing.T) {
 		t.Errorf("expected 6 installed IPv4 rules (three lookup/shadow pairs), got %d", total)
 	}
 }
+
+type eexistOnDuplicateRuleOps11452 struct {
+	*fakeRuleOps
+	addAttempts int
+}
+
+func (f *eexistOnDuplicateRuleOps11452) RuleAdd(rule *netlink.Rule) error {
+	f.addAttempts++
+	for _, existing := range f.rules[rule.Family] {
+		if reflect.DeepEqual(existing, *rule) {
+			return unix.EEXIST
+		}
+	}
+	return f.fakeRuleOps.RuleAdd(rule)
+}
+
+func TestRibGroupConnectedPrefixDedupPreventsEEXIST11452(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/1": {
+			Name: "ge-0/0/1",
+			Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0, Addresses: []string{
+					"10.0.30.1/24",
+					"10.0.30.2/24",
+					"10.0.30.3/24",
+				}},
+			},
+		},
+	}
+	cfg.RoutingOptions.RibGroups = map[string]*config.RibGroup{
+		"leak": {Name: "leak", ImportRibs: []string{"inet.0"}},
+	}
+	cfg.RoutingInstances = []*config.RoutingInstanceConfig{
+		{
+			Name:                    "dmz-vr",
+			TableID:                 101,
+			Interfaces:              []string{"ge-0/0/1.0"},
+			InterfaceRoutesRibGroup: "leak",
+		},
+	}
+
+	ops := &eexistOnDuplicateRuleOps11452{fakeRuleOps: newFakeRuleOps()}
+	manager := &ribGroupManager{ops: ops}
+	err := manager.Apply(
+		cfg.RoutingOptions.RibGroups,
+		cfg.RoutingInstances,
+		config.RibGroupConnectedPrefixes(cfg),
+	)
+	if errors.Is(err, unix.EEXIST) {
+		t.Fatalf("duplicate connected prefixes aggregated EEXIST: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("Apply with repeated interface subnet must succeed, got %v", err)
+	}
+	if ops.addAttempts != 1 || ops.adds != 1 || ops.count(unix.AF_INET) != 1 {
+		t.Fatalf("RuleAdd attempts=%d successful adds=%d installed v4 rules=%d, want 1 each",
+			ops.addAttempts, ops.adds, ops.count(unix.AF_INET))
+	}
+	rule := ops.rules[unix.AF_INET][0]
+	if rule.Dst == nil || rule.Dst.String() != "10.0.30.0/24" {
+		t.Fatalf("installed leak rule = %+v, want one destination 10.0.30.0/24", rule)
+	}
+}
