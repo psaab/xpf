@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
@@ -24,7 +23,13 @@ func (d *Daemon) bootstrapFromFile() error {
 	if err := configstore.CheckResetHandoff(); err != nil {
 		return err
 	}
-	data, err := os.ReadFile(d.opts.ConfigFile)
+	// #11828: read under the same MaxConfigSize ceiling every other ingress
+	// enforces. The pre-fix os.ReadFile materialised the whole file and only
+	// then hit checkConfigSize inside LoadOverride — the unbounded-alloc shape
+	// #6753 fixed on the CLI load paths. ReadBoundedConfigFile refuses an
+	// over-cap file while allocating at most MaxConfigSize+1 bytes, and wraps
+	// ErrExceedsLimit for structural caller checks.
+	data, err := configstore.ReadBoundedConfigFile(d.opts.ConfigFile)
 	if err != nil {
 		return fmt.Errorf("read config file: %w", err)
 	}
