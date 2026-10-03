@@ -19,6 +19,18 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
+func writeBGPMaximumPrefix11793(b *strings.Builder, address, family string, limit int) {
+	if limit <= 0 {
+		return
+	}
+	if uint64(limit) > uint64(^uint32(0)) {
+		slog.Warn("frr: omitting invalid BGP maximum-prefix value (#11793)",
+			"neighbor", sanitizeFRRValue(address), "family", family, "maximum", limit)
+		return
+	}
+	fmt.Fprintf(b, "  neighbor %s maximum-prefix %d\n", address, limit)
+}
+
 // ospfAreaIdentity11400 compares FRR's two valid spellings of a 32-bit area
 // ID as the same area. Invalid tolerant-path values stay keyed by raw spelling.
 func ospfAreaIdentity11400(id string) string {
@@ -677,9 +689,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				if n.DefaultOriginate {
 					fmt.Fprintf(&b, "  neighbor %s default-originate\n", n.Address)
 				}
-				if n.PrefixLimitInet > 0 {
-					fmt.Fprintf(&b, "  neighbor %s maximum-prefix %d\n", n.Address, n.PrefixLimitInet)
-				}
+				writeBGPMaximumPrefix11793(&b, n.Address, "inet", n.PrefixLimitInet)
 				// Outbound filter. The effective export CHAIN (neighbor's own
 				// list, else the global default) is pre-filtered to DEFINED
 				// policy-statements (filterDefinedPolicies), so bare/undefined
@@ -745,9 +755,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				if n.DefaultOriginate {
 					fmt.Fprintf(&b, "  neighbor %s default-originate\n", n.Address)
 				}
-				if n.PrefixLimitInet6 > 0 {
-					fmt.Fprintf(&b, "  neighbor %s maximum-prefix %d\n", n.Address, n.PrefixLimitInet6)
-				}
+				writeBGPMaximumPrefix11793(&b, n.Address, "inet6", n.PrefixLimitInet6)
 				rm := bgpNeighborExportRef(n, bgp, globalExportChain, policyOptions)
 				if alias := m.narrowedAliasRef10129(n, bgp, globalExportChain, policyOptions, true); alias != "" {
 					rm = alias

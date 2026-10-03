@@ -48,11 +48,11 @@ func compileSections(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 				return fmt.Errorf("routing-options: %w", err)
 			}
 		case "protocols":
-			if err := compileProtocols(node, &cfg.Protocols); err != nil {
+			if err := compileProtocols(node, &cfg.Protocols, opts, &cfg.Warnings); err != nil {
 				return fmt.Errorf("protocols: %w", err)
 			}
 		case "routing-instances":
-			if err := compileRoutingInstances(node, cfg); err != nil {
+			if err := compileRoutingInstances(node, cfg, opts); err != nil {
 				return fmt.Errorf("routing-instances: %w", err)
 			}
 		case "firewall":
