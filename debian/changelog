@@ -1,5 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Limit each dynamic command value to one word in tab completion and `?`
+    help, matching the command walker’s one-value grammar (#11835).
+
   * Keep foreign DSCP-scoped destination rules out of the userspace FIB
     mirror rather than widening them into unconditional NextTable leaks
     (#11685).

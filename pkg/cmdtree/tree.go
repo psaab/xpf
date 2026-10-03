@@ -1418,6 +1418,8 @@ func CompleteFromTree(tree map[string]*Node, words []string, partial string, cfg
 	// derived from ValueType instead of an explicit "<name>" node).
 	parentTyped := false
 	dynamicConsumed := false
+	// A dynamic node consumes at most one unmatched value (#11835).
+	dynamicFilled := false
 	// #5196 (A3-b1-F4): resolveTreeWord accepts unique keyword prefixes
 	// for traversal, but ContextDynamicFn providers scan the consumed
 	// words for exact keywords (e.g. the policy provider looks for
@@ -1437,7 +1439,8 @@ func CompleteFromTree(tree map[string]*Node, words []string, partial string, cfg
 				dynamicConsumed = true
 				continue
 			}
-			if currentNode != nil && currentNode.HasDynamic() {
+			if currentNode != nil && currentNode.HasDynamic() && !dynamicFilled {
+				dynamicFilled = true
 				dynamicConsumed = true
 				continue
 			}
@@ -1451,6 +1454,7 @@ func CompleteFromTree(tree map[string]*Node, words []string, partial string, cfg
 				if ph.Children != nil {
 					currentNode = ph
 					current = ph.Children
+					dynamicFilled = false
 				}
 				dynamicConsumed = true
 				continue
@@ -1465,6 +1469,7 @@ func CompleteFromTree(tree map[string]*Node, words []string, partial string, cfg
 		canonWords[wi] = name
 		currentNode = node
 		parentTyped = node.IsTypedLeaf()
+		dynamicFilled = false
 		if node.Children == nil {
 			if node.HasDynamic() && wi < len(words)-1 {
 				dynamicConsumed = true
@@ -1508,6 +1513,8 @@ func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial str
 	var currentNode *Node
 	parentTyped := false
 	dynamicConsumed := false
+	// A dynamic node consumes at most one unmatched value (#11835).
+	dynamicFilled := false
 	// #5196 (A3-b1-F4): canonicalize accepted keyword prefixes so
 	// ContextDynamicFn providers see exact keywords. Mirrors CompleteFromTree.
 	canonWords := append([]string(nil), words...)
@@ -1520,7 +1527,8 @@ func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial str
 				dynamicConsumed = true
 				continue
 			}
-			if currentNode != nil && currentNode.HasDynamic() {
+			if currentNode != nil && currentNode.HasDynamic() && !dynamicFilled {
+				dynamicFilled = true
 				dynamicConsumed = true
 				continue
 			}
@@ -1529,6 +1537,7 @@ func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial str
 				if ph.Children != nil {
 					currentNode = ph
 					current = ph.Children
+					dynamicFilled = false
 				}
 				dynamicConsumed = true
 				continue
@@ -1546,6 +1555,7 @@ func CompleteFromTreeWithDesc(tree map[string]*Node, words []string, partial str
 		canonWords[wi] = canonName
 		currentNode = node
 		parentTyped = node.IsTypedLeaf()
+		dynamicFilled = false
 		if node.Children == nil {
 			if node.HasDynamic() && wi < len(words)-1 {
 				dynamicConsumed = true
@@ -1662,6 +1672,8 @@ func LookupDesc(words []string, name string, configMode bool) string {
 	current := tree
 	var currentNode *Node
 	parentTyped := false
+	// A dynamic node consumes at most one unmatched value (#11835).
+	dynamicFilled := false
 	for _, w := range words {
 		_, node, _, ok := resolveTreeWord(current, w)
 		if !ok {
@@ -1671,8 +1683,10 @@ func LookupDesc(words []string, name string, configMode bool) string {
 				parentTyped = false
 				continue
 			}
-			// Dynamic value — skip but stay at same children level.
-			if currentNode != nil && currentNode.HasDynamic() {
+			// A dynamic value consumes one word, then the walk must resume in
+			// the node's children (or refuse an unmatched word).
+			if currentNode != nil && currentNode.HasDynamic() && !dynamicFilled {
+				dynamicFilled = true
 				continue
 			}
 			// Placeholder node consumes any value.
@@ -1680,6 +1694,7 @@ func LookupDesc(words []string, name string, configMode bool) string {
 				if ph.Children != nil {
 					currentNode = ph
 					current = ph.Children
+					dynamicFilled = false
 				}
 				continue
 			}
@@ -1687,6 +1702,7 @@ func LookupDesc(words []string, name string, configMode bool) string {
 		}
 		currentNode = node
 		parentTyped = node.IsTypedLeaf()
+		dynamicFilled = false
 		if node.Children == nil {
 			if parentTyped {
 				continue
