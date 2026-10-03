@@ -1,4 +1,4 @@
-# counts: losers=1 walked=109 vacuous=39 unmeasured=91 pre-rejected=2
+# counts: losers=1 walked=109 vacuous=38 unmeasured=92 pre-rejected=2
 # collector reach: 391 containers walked, 145 reached the census (139 dropped: no eligible leaf, 107 dropped: only one)
 services rpm probe arg1 test arg1 target  [address | url]  total  OPERATOR
 # pre-rejected #11355 strict-error/tolerant-warning:
