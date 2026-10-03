@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // #4689: archive rotation must tolerate a benign ENOENT. rotateArchives is
@@ -43,15 +44,16 @@ func TestArchiveRemoveErr_ENOENTTolerant(t *testing.T) {
 func TestRotateArchivesConcurrentNoError(t *testing.T) {
 	dir := t.TempDir()
 	const total = 40
-	for i := 0; i < total; i++ {
-		p := filepath.Join(dir, "config-"+string(rune('a'+i/10))+string(rune('0'+i%10))+".conf")
-		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+	base := time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)
+	for i := range total {
+		ts := base.Add(time.Duration(i) * time.Second)
+		if err := writeArchive(dir, 0, "x", ts, uint64(i+1)); err != nil {
 			t.Fatalf("seed archive %d: %v", i, err)
 		}
 	}
 
 	done := make(chan struct{}, 2)
-	for g := 0; g < 2; g++ {
+	for range 2 {
 		go func() {
 			rotateArchives(dir, 1)
 			done <- struct{}{}

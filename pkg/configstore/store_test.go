@@ -1334,12 +1334,13 @@ func TestArchiveRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create 5 archives with maxArchives=3
-	for i := 0; i < 5; i++ {
-		// Write with unique timestamps by using direct file creation
-		filename := filepath.Join(archiveDir, "config-20260101-00000"+string(rune('0'+i))+".conf")
-		os.MkdirAll(archiveDir, 0755)
-		os.WriteFile(filename, []byte("test"), 0644)
+	// Seed five current-format XPF snapshots, then apply maxArchives=3 rotation.
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := range 5 {
+		ts := base.Add(time.Duration(i) * time.Second)
+		if err := writeArchive(archiveDir, 0, "test", ts, uint64(i+1)); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// Run rotation

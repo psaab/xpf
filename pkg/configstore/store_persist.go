@@ -1491,11 +1491,11 @@ func (s *Store) ensureArchiveSeededLocked() bool {
 	return true
 }
 
-// parseArchiveSeq extracts the monotonic sequence number from an archive
-// filename of the form config-<ts>.<seq>.conf. The ts itself embeds a dot
-// (seconds.nanoseconds), so the seq is the LAST dot-delimited field before the
-// .conf suffix. Returns (0, false) for any name that is not a well-formed
-// archive filename (a legacy or foreign file) so callers can order it as oldest.
+// parseArchiveSeq extracts the monotonic sequence number from a current-format
+// archive filename of the form config-<ts>.<seq>.conf. The ts itself embeds a
+// dot (seconds.nanoseconds), so the seq is the LAST dot-delimited field before
+// the .conf suffix. Returns (0, false) for legacy snapshots and other names;
+// rotation treats legacy snapshots as oldest after filtering for XPF ownership.
 func parseArchiveSeq(name string) (uint64, bool) {
 	if !strings.HasPrefix(name, "config-") || !strings.HasSuffix(name, ".conf") {
 		return 0, false
@@ -1927,7 +1927,8 @@ func (s *Store) JournalPermsDegraded() bool {
 	return s.journal.PermRepairDegraded()
 }
 
-// rotateArchives keeps only the most recent maxArchives files.
+// rotateArchives keeps at most maxArchives recognized XPF snapshots and leaves
+// unrelated files in a shared archive directory untouched.
 func rotateArchives(dir string, maxArchives int) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -1936,7 +1937,7 @@ func rotateArchives(dir string, maxArchives int) {
 
 	var archives []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasPrefix(e.Name(), "config-") && strings.HasSuffix(e.Name(), ".conf") {
+		if !e.IsDir() && isXPFConfigArchiveSnapshot(e.Name()) {
 			archives = append(archives, e.Name())
 		}
 	}
@@ -1952,15 +1953,15 @@ func rotateArchives(dir string, maxArchives int) {
 	// so the ts-lexical prune would evict that newest archive as if it were the
 	// oldest. The seq always advances in commit order — and SetArchiveConfig
 	// seeds it across restarts, so it is globally monotonic — hence seq order is
-	// the true retention order. A filename with no parseable seq (legacy or
-	// foreign) sorts as oldest (pruned first), with a lexical tiebreak among
-	// such files and among equal seqs.
+	// the true retention order. A legacy pre-sequence archive has no parseable
+	// seq and sorts as oldest (pruned first), with lexical tiebreaks among legacy
+	// names and among equal sequences.
 	sort.Slice(archives, func(i, j int) bool {
 		si, oki := parseArchiveSeq(archives[i])
 		sj, okj := parseArchiveSeq(archives[j])
 		if oki != okj {
-			// A parseable seq always outranks an unparseable name, so the
-			// unparseable (legacy/foreign) one sorts first as oldest.
+			// A parseable seq always outranks a legacy name, so the legacy one
+			// sorts first as oldest.
 			return okj
 		}
 		if oki && okj && si != sj {
