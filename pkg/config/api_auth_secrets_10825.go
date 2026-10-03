@@ -151,6 +151,24 @@ func VerifyAPIAuthSecret(encoded, presented string) bool {
 // It intentionally mutates only the tree supplied by its caller; compile and
 // commit boundaries pass a private clone.
 func HashAPIAuthSecrets(tree *ConfigTree) (bool, error) {
+	changed, err := hashAPIAuthSecrets(tree, nil)
+	return changed, err
+}
+
+// HashAPIAuthSecretsWithInvalidPaths also reports distinct leaf paths whose
+// cleartext values were replaced by non-authenticating short-secret markers.
+// The paths never contain credential values; already-stored verifiers are not
+// reported.
+func HashAPIAuthSecretsWithInvalidPaths(tree *ConfigTree) (bool, []string, error) {
+	report := &apiAuthSecretHashReport{}
+	changed, err := hashAPIAuthSecrets(tree, report)
+	if err != nil {
+		return false, nil, err
+	}
+	return changed, report.invalidPaths, nil
+}
+
+func hashAPIAuthSecrets(tree *ConfigTree, report *apiAuthSecretHashReport) (bool, error) {
 	if tree == nil {
 		return false, nil
 	}
@@ -185,11 +203,16 @@ func HashAPIAuthSecrets(tree *ConfigTree) (bool, error) {
 					if isMalformedAPIAuthSecretTag(node.Keys[j]) {
 						return fmt.Errorf("api-auth secret has a malformed reserved verifier tag")
 					}
-					hash, err := hashAPIAuthSecretAtMinimum(node.Keys[j], apiAuthSecretMinRunes(keyword))
+					raw := node.Keys[j]
+					hash, err := hashAPIAuthSecretAtMinimum(raw, apiAuthSecretMinRunes(keyword))
 					if err != nil {
 						return err
 					}
-					if hash != node.Keys[j] {
+					if report != nil && !isStoredAPIAuthSecret(raw) &&
+						strings.HasPrefix(hash, apiAuthInvalidBcryptPrefix) {
+						report.addPath(apiAuthSecretLeafPath(nodeParent, node.Keys, i))
+					}
+					if hash != raw {
 						node.Keys[j] = hash
 						changed = true
 					}
@@ -211,11 +234,16 @@ func HashAPIAuthSecrets(tree *ConfigTree) (bool, error) {
 						if isMalformedAPIAuthSecretTag(child.Keys[j]) {
 							return fmt.Errorf("api-auth secret has a malformed reserved verifier tag")
 						}
-						hash, err := hashAPIAuthSecretAtMinimum(child.Keys[j], apiAuthSecretMinRunes(keyword))
+						raw := child.Keys[j]
+						hash, err := hashAPIAuthSecretAtMinimum(raw, apiAuthSecretMinRunes(keyword))
 						if err != nil {
 							return err
 						}
-						if hash != child.Keys[j] {
+						if report != nil && !isStoredAPIAuthSecret(raw) &&
+							strings.HasPrefix(hash, apiAuthInvalidBcryptPrefix) {
+							report.addPath(apiAuthSecretLeafPath(parent, nil, -1))
+						}
+						if hash != raw {
 							child.Keys[j] = hash
 							changed = true
 						}
@@ -233,6 +261,51 @@ func HashAPIAuthSecrets(tree *ConfigTree) (bool, error) {
 		return false, err
 	}
 	return changed, nil
+}
+
+type apiAuthSecretHashReport struct {
+	invalidPaths []string
+	seenPaths    map[string]struct{}
+}
+
+func (report *apiAuthSecretHashReport) addPath(path string) {
+	if report.seenPaths == nil {
+		report.seenPaths = make(map[string]struct{})
+	}
+	if _, exists := report.seenPaths[path]; exists {
+		return
+	}
+	report.seenPaths[path] = struct{}{}
+	report.invalidPaths = append(report.invalidPaths, path)
+}
+
+func apiAuthSecretLeafPath(parent, keys []string, keywordIndex int) string {
+	parts := make([]string, 0, len(parent)+keywordIndex+1)
+	parts = append(parts, parent...)
+	if keywordIndex >= 0 {
+		parts = append(parts, keys[:keywordIndex+1]...)
+	}
+	return formatAPIAuthSecretLeafPath(parts)
+}
+
+func formatAPIAuthSecretLeafPath(path []string) string {
+	if len(path) == 0 {
+		return ""
+	}
+	parts := append([]string(nil), path...)
+	scopeEnd, ok := apiAuthScopeEnd(parts[:len(parts)-1])
+	if ok {
+		if parts[0] == "groups" {
+			parts[1] = fmt.Sprintf("%q", parts[1])
+		}
+		if scopeEnd < len(parts)-1 {
+			switch parts[scopeEnd] {
+			case "user", "key":
+				parts[scopeEnd+1] = fmt.Sprintf("%q", parts[scopeEnd+1])
+			}
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 func isMalformedAPIAuthSecretTag(raw string) bool {
