@@ -316,18 +316,18 @@ func FormatCoSClassifiers(cfg *config.Config, nameFilter, typeFilter string) str
 // every schema family, which is the only way to observe the branches.
 var CoSRewriteRuleTypes = []string{"dscp", "ieee-802.1", "inet-precedence", "exp"}
 
-// cosBoundDSCPRewriteRules returns the set of dscp rewrite-rule NAMES that at
-// least one logical unit actually binds (#6858 fold), and the set of names that
-// are referenced ONLY from a `class-of-service interfaces` stanza naming an
-// interface/unit that does not exist under `interfaces` (#6858 round 3).
+// cosBoundDSCPRewriteRules returns dscp rewrite-rule names bound by an emitted
+// logical-unit row, plus names referenced only by a CoS unit with no matching
+// row (ordinary unconfigured refs remain dangling; eligible bind-only tunnel
+// units are included).
 //
 // The traversal deliberately MIRRORS buildInterfaceSnapshots
-// (pkg/dataplane/userspace/interfaces.go): that builder walks
-// cfg.Interfaces.Interfaces, and for each REAL logical unit looks up
+// (pkg/dataplane/userspace/interfaces.go): that builder walks configured
+// logical units and also synthesizes zone-authored bind-only secure-tunnel
+// unit rows. Both paths read the matching
 // cfg.ClassOfService.Interfaces[name].Units[unitNum] to stamp
-// CoSDSCPRewriteRule onto the snapshot. A class-of-service stanza whose
-// interface or unit has no counterpart there is never read, so its binding
-// cannot reach the helper.
+// CoSDSCPRewriteRule. An unconfigured CoS stanza that is not one of those
+// secure-tunnel units is never read, so its binding cannot reach the helper.
 //
 // Walking cos.Interfaces alone — which is what this did before — reported
 // "Enforced: yes" for exactly that config, and it commits clean: `set
@@ -348,6 +348,7 @@ func cosBoundDSCPRewriteRules(cfg *config.Config) (bound map[string]bool, dangli
 	if cfg == nil || cfg.ClassOfService == nil {
 		return bound, danglingRef, inertRef
 	}
+	zoneTunnelRefs := config.ZoneAuthoredBoundSecureTunnelUnitRefs(cfg)
 	for name, iface := range cfg.Interfaces.Interfaces {
 		if iface == nil {
 			continue
@@ -377,6 +378,35 @@ func cosBoundDSCPRewriteRules(cfg *config.Config) (bound map[string]bool, dangli
 			bound[cosUnit.DSCPRewriteRule] = true
 		}
 	}
+	for _, ref := range sortedMapKeys(zoneTunnelRefs) {
+		split := cfg.SplitInterfaceUnitRef(ref)
+		if !split.HasUnit || split.UnitTok == "" {
+			continue
+		}
+		unitNum, err := strconv.Atoi(split.UnitTok)
+		if err != nil {
+			continue
+		}
+		iface := cfg.Interfaces.Interfaces[split.Base]
+		if iface != nil && iface.Units[unitNum] != nil {
+			continue // the configured-unit pass already read this row
+		}
+		cosIface := cfg.ClassOfService.Interfaces[split.Base]
+		if cosIface == nil {
+			continue
+		}
+		cosUnit := cosIface.Units[unitNum]
+		if cosUnit == nil || cosUnit.DSCPRewriteRule == "" {
+			continue
+		}
+		if !cosRuleTargetsUnitClass(cfg, cosUnit) {
+			if _, ok := inertRef[cosUnit.DSCPRewriteRule]; !ok {
+				inertRef[cosUnit.DSCPRewriteRule] = fmt.Sprintf("%s unit %d", split.Base, unitNum)
+			}
+			continue
+		}
+		bound[cosUnit.DSCPRewriteRule] = true
+	}
 	// A rule bound anywhere it actually applies is enforced, whatever other
 	// interfaces do with it — so a real binding clears an inert note recorded
 	// from a different unit. Without this an operator who bound the rule
@@ -386,9 +416,8 @@ func cosBoundDSCPRewriteRules(cfg *config.Config) (bound map[string]bool, dangli
 		delete(inertRef, ruleName)
 	}
 	// Second pass: every CoS reference the snapshot builder will NOT read.
-	// Recorded so the operator is told WHERE the dead binding is rather than
-	// being told the rule is simply unbound, which reads as "you forgot to
-	// bind it" when they did bind it — to a name that does not exist.
+	// Zone-authored secure-tunnel unit refs were handled above and are omitted
+	// here; all other dangling references name the dead binding.
 	for _, name := range sortedMapKeys(cfg.ClassOfService.Interfaces) {
 		cosIface := cfg.ClassOfService.Interfaces[name]
 		if cosIface == nil {
@@ -402,6 +431,12 @@ func cosBoundDSCPRewriteRules(cfg *config.Config) (bound map[string]bool, dangli
 			}
 			if iface != nil && iface.Units[unitNum] != nil {
 				continue // a real logical unit: counted above
+			}
+			ref := cfg.SplitInterfaceUnitRef(fmt.Sprintf("%s.%d", name, unitNum))
+			if ref.HasUnit && ref.UnitTok != "" {
+				if _, ok := zoneTunnelRefs[ref.Literal]; ok {
+					continue // a zone-authored bind-only secure-tunnel unit
+				}
 			}
 			if _, ok := danglingRef[cosUnit.DSCPRewriteRule]; !ok {
 				danglingRef[cosUnit.DSCPRewriteRule] = fmt.Sprintf("%s unit %d", name, unitNum)
@@ -421,9 +456,9 @@ func cosBoundDSCPRewriteRules(cfg *config.Config) (bound map[string]bool, dangli
 //     runtime effect. The rewrite table is populated only for the rule an
 //     interface references (`tables.dscp_rewrite_rules.get(&iface.
 //     cos_dscp_rewrite_rule)`, forwarding_build/cos.rs), so an unbound rule
-//     rewrites nothing. A binding written against an interface or unit that
-//     does not exist under `interfaces` is in this state too — it commits
-//     clean and the snapshot builder never reads it — and is reported with the
+//     rewrites nothing. An ordinary binding written against an interface or
+//     unit with no emitted snapshot row is in this state too — it commits clean
+//     and the snapshot builder never reads it — and is reported with the
 //     reference named, because "not bound" alone reads as "you forgot to bind
 //     it" to an operator who did bind it, just to a name with a typo in it.
 //  3. Any other code-point type — the dataplane rewrites dscp only. Each

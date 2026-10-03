@@ -261,6 +261,78 @@ func TestBindOnlyTunnelRowMatchesTheStanzaSpelling7949(t *testing.T) {
 	}
 }
 
+func TestBindOnlyTunnelRowCarriesCoSFields11788(t *testing.T) {
+	cfgB, unitRef, wantDev := shapeBConfig7949(t, "st0.0", "st0", 0)
+	cfgA, unitRefA, wantDevA := spellingConfig(t, "st0.0", "st0", 0)
+	if unitRefA != unitRef || wantDevA != wantDev {
+		t.Fatalf("fixture mismatch: Shape A (%q, %q), Shape B (%q, %q)",
+			unitRefA, wantDevA, unitRef, wantDev)
+	}
+	stubTunnelLink7949(t, wantDev)
+
+	wantCoS := config.CoSInterfaceUnit{
+		Unit:                              0,
+		ShapingRateBytes:                  3_000_000_000,
+		BurstSizeBytes:                    12_345,
+		SchedulerMap:                      "vpn-egress",
+		DSCPClassifier:                    "vpn-dscp",
+		IEEE8021Classifier:                "vpn-dot1p",
+		INetPrecedenceClassifier:          "vpn-precedence",
+		DSCPRewriteRule:                   "vpn-rewrite",
+		OversubscriptionPolicy:            "guarantee-rate",
+		OversubscriptionGuaranteeFraction: 0.35,
+		PriorityLowMinShareBytes:          456_789,
+	}
+	addCoS := func(cfg *config.Config) {
+		unit := wantCoS
+		cfg.ClassOfService = &config.ClassOfServiceConfig{
+			Interfaces: map[string]*config.CoSInterface{
+				"st0": {
+					Name: "st0",
+					Units: map[int]*config.CoSInterfaceUnit{
+						0: &unit,
+					},
+				},
+			},
+		}
+	}
+	addCoS(cfgA)
+	addCoS(cfgB)
+
+	rowsA := buildInterfaceSnapshots(cfgA)
+	rowsB := buildInterfaceSnapshots(cfgB)
+	rowA, okA := rowByName7949(rowsA, unitRef)
+	rowB, okB := rowByName7949(rowsB, unitRef)
+	if !okA || !okB {
+		t.Fatalf("missing comparison row: Shape A=%t, Shape B=%t", okA, okB)
+	}
+	snapshotCoS := func(row InterfaceSnapshot) config.CoSInterfaceUnit {
+		return config.CoSInterfaceUnit{
+			ShapingRateBytes:                  row.CoSShapingRateBytesPerSec,
+			BurstSizeBytes:                    row.CoSBurstSize,
+			SchedulerMap:                      row.CoSSchedulerMap,
+			DSCPClassifier:                    row.CoSDSCPClassifier,
+			IEEE8021Classifier:                row.CoSIEEE8021Classifier,
+			INetPrecedenceClassifier:          row.CoSINetPrecedenceClassifier,
+			DSCPRewriteRule:                   row.CoSDSCPRewriteRule,
+			OversubscriptionPolicy:            row.CoSOversubscriptionPolicy,
+			OversubscriptionGuaranteeFraction: row.CoSOversubscriptionGuaranteeFraction,
+			PriorityLowMinShareBytes:          row.CoSPriorityLowMinShareBytes,
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		row  InterfaceSnapshot
+	}{{"Shape A", rowA}, {"Shape B", rowB}} {
+		if got := snapshotCoS(tc.row); !reflect.DeepEqual(got, wantCoS) {
+			t.Errorf("%s CoS fields = %#v, want %#v", tc.name, got, wantCoS)
+		}
+	}
+	if !reflect.DeepEqual(rowA, rowB) {
+		t.Errorf("CoS-configured tunnel rows differ:\n  Shape A: %+v\n  Shape B: %+v", rowA, rowB)
+	}
+}
+
 // TestBindOnlyTunnelConsumerDispositions7949 states the disposition of each
 // production consumer of snapshot.Interfaces for the new row.
 //

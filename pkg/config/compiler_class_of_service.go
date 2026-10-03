@@ -969,6 +969,34 @@ func applyCoSInterfaceLevelBindings(cfg *Config) {
 	}
 }
 
+// coSInterfaceCoveredByZoneSecureTunnelUnits reports whether a stanza-less
+// CoS interface consists only of non-nil unit bindings backed by matching
+// zone-authored secure-tunnel unit refs. Interface-level bindings are
+// excluded: that compiler fold requires an [interfaces] stanza and is not
+// represented by the synthesized unit row.
+func coSInterfaceCoveredByZoneSecureTunnelUnits(
+	cfg *Config,
+	iface *CoSInterface,
+	zoneTunnelRefs map[string]struct{},
+) bool {
+	if cfg == nil || iface == nil || iface.Level != nil || len(iface.Units) == 0 {
+		return false
+	}
+	for unitNum, unit := range iface.Units {
+		if unit == nil {
+			return false
+		}
+		ref := cfg.SplitInterfaceUnitRef(fmt.Sprintf("%s.%d", iface.Name, unitNum))
+		if !ref.HasUnit || ref.UnitTok == "" {
+			return false
+		}
+		if _, ok := zoneTunnelRefs[ref.Literal]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // mergeCoSInterfaceLevelInto fills any knob unset on unit from the
 // interface-level binding level. The unit-level value wins whenever it is
 // set (unit-level overrides interface-level).

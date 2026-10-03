@@ -2,6 +2,7 @@ package userspace
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -41,11 +42,12 @@ import (
 //
 // So every consumer's disposition toward a zoned secure-tunnel row is already
 // decided, shipped, and reviewed — by Shape A. This appends a row that is
-// FIELD-IDENTICAL to the one Shape A produces for the same tunnel, which makes
-// the per-consumer question "should the two spellings of one tunnel behave the
-// same?" rather than five independent judgements. #7949's acceptance criteria
-// are met as a parity assertion (secure_tunnel_bind_only_7949_test.go), which
-// cannot drift the way five hand-written expectations can.
+// FIELD-IDENTICAL to the one Shape A produces for the same tunnel, including
+// every unit CoS field from the same compiled binding and coSUnit* helpers.
+// This makes the per-consumer question "should the two spellings of one
+// tunnel behave the same?" rather than five independent judgements. #7949's
+// acceptance criteria are met as a parity assertion, with CoS pinned
+// separately in secure_tunnel_bind_only_7949_test.go.
 //
 // THE THREE REQUIREMENTS THE ISSUE PLACES ON ANY IMPLEMENTATION.
 //
@@ -173,6 +175,14 @@ func appendBindInterfaceOnlySecureTunnelRows(
 			parentLinux = config.LinuxIfName(base)
 			parentIfindex, _, _, _ = buildLinkSnapshot(parentLinux)
 		}
+		var cosUnit *config.CoSInterfaceUnit
+		if cfg.ClassOfService != nil && dotted && unit != "" {
+			if cosIface := cfg.ClassOfService.Interfaces[base]; cosIface != nil {
+				if unitNum, err := strconv.Atoi(unit); err == nil {
+					cosUnit = cosIface.Units[unitNum]
+				}
+			}
+		}
 		out = append(out, InterfaceSnapshot{
 			Name: ref,
 			// #9821 #22: same rule as the idents entry below — a dotted
@@ -192,11 +202,21 @@ func appendBindInterfaceOnlySecureTunnelRows(
 			// the honest value — matching what Shape A stamps on the same
 			// row, whose stanza carries no `tunnel` block either. SecureTunnel
 			// is the flag that classifies this row, and it is derived.
-			Tunnel:       false,
-			SecureTunnel: snapshotSecureTunnel(cfg, ref, dev, liveXfrm),
-			MTU:          mtu,
-			HardwareAddr: hardwareAddr,
-			Addresses:    addresses,
+			Tunnel:                               false,
+			SecureTunnel:                         snapshotSecureTunnel(cfg, ref, dev, liveXfrm),
+			MTU:                                  mtu,
+			HardwareAddr:                         hardwareAddr,
+			Addresses:                            addresses,
+			CoSShapingRateBytesPerSec:            coSUnitShapingRate(cosUnit),
+			CoSBurstSize:                         coSUnitBurstSize(cosUnit),
+			CoSSchedulerMap:                      coSUnitSchedulerMap(cosUnit),
+			CoSDSCPClassifier:                    coSUnitDSCPClassifier(cosUnit),
+			CoSIEEE8021Classifier:                coSUnitIEEE8021Classifier(cosUnit),
+			CoSINetPrecedenceClassifier:          coSUnitINetPrecedenceClassifier(cosUnit),
+			CoSDSCPRewriteRule:                   coSUnitDSCPRewriteRule(cosUnit),
+			CoSOversubscriptionPolicy:            coSUnitOversubscriptionPolicy(cosUnit),
+			CoSOversubscriptionGuaranteeFraction: coSUnitOversubscriptionFraction(cosUnit),
+			CoSPriorityLowMinShareBytes:          coSUnitPriorityLowMinShare(cosUnit),
 			// RedundancyGroup stays 0: a stanza-less tunnel authors no
 			// `redundancy-group` and has no RETH parent, so it cannot win
 			// resolveOwnerRGFromZone's `RedundancyGroup > 0` race. That is a

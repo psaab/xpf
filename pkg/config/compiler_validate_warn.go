@@ -1522,22 +1522,27 @@ func ValidateConfig(cfg *Config) []string {
 				warnedPriorityLowMinShare = true
 			}
 		}
+		var zoneTunnelRefs map[string]struct{}
+		zoneTunnelRefsChecked := false
 		for _, iface := range cos.Interfaces {
 			if iface == nil {
 				continue
 			}
-			// #hb166 G-6: a class-of-service binding whose interface (or
-			// logical unit) is not configured under [interfaces] commits
-			// cleanly but shapes nothing — the dataplane applier only
-			// visits CoS bindings inside the cfg.Interfaces iteration, so
-			// a typo'd interface name or an unconfigured unit is a silent
-			// no-op. Warn (not reject: the interface could be added
-			// later) so the operator knows the binding is currently inert.
+			// #hb166 G-6: a CoS binding with no [interfaces] stanza is usually
+			// inert. A zone-authored, bound secure-tunnel unit is the exception:
+			// its synthesized snapshot row now carries unit CoS (#11788). Keep
+			// the warning for every other missing interface or unit binding.
 			ifCfg := cfg.Interfaces.Interfaces[iface.Name]
 			if ifCfg == nil {
-				warnings = append(warnings, fmt.Sprintf(
-					"class-of-service interface %s is bound but not configured under [interfaces]; its shaping/classifiers are inert until the interface is configured",
-					iface.Name))
+				if !zoneTunnelRefsChecked {
+					zoneTunnelRefs = ZoneAuthoredBoundSecureTunnelUnitRefs(cfg)
+					zoneTunnelRefsChecked = true
+				}
+				if !coSInterfaceCoveredByZoneSecureTunnelUnits(cfg, iface, zoneTunnelRefs) {
+					warnings = append(warnings, fmt.Sprintf(
+						"class-of-service interface %s is bound but not configured under [interfaces]; its shaping/classifiers are inert until the interface is configured",
+						iface.Name))
+				}
 			}
 			if iface.Level != nil {
 				warnPriorityLowMinShareInert(iface.Level.PriorityLowMinShareBytes)
