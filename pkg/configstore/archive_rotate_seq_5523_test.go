@@ -124,3 +124,63 @@ func TestParseArchiveSeq(t *testing.T) {
 		}
 	}
 }
+
+// TestRotateArchivesPreservesForeignConfigFiles11804 pins archive ownership in
+// shared directories: retention counts and removes only XPF snapshot names.
+//
+// RED before fix: the prefix/suffix-only scan includes the foreign file, sorts
+// it as oldest, and removes it when the three real snapshots exceed max=2.
+func TestRotateArchivesPreservesForeignConfigFiles11804(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 6, 28, 12, 0, 0, 0, time.UTC)
+	for seq := uint64(1); seq <= 3; seq++ {
+		ts := base.Add(time.Duration(seq) * time.Second)
+		if err := writeArchive(dir, 0, fmt.Sprintf("archive-%d\n", seq), ts, seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const foreignName = "config-compliance-report.conf"
+	const foreignBody = "compliance-owned config export\n"
+	foreignPath := filepath.Join(dir, foreignName)
+	if err := os.WriteFile(foreignPath, []byte(foreignBody), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	rotateArchives(dir, 2)
+
+	got, err := os.ReadFile(foreignPath)
+	if err != nil {
+		t.Fatalf("rotation must preserve foreign archive-like file %q: %v", foreignName, err)
+	}
+	if string(got) != foreignBody {
+		t.Fatalf("foreign file %q changed to %q, want %q", foreignName, got, foreignBody)
+	}
+
+	remain := map[string]bool{}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !isXPFConfigArchiveSnapshot(entry.Name()) {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		remain[strings.TrimSpace(string(data))] = true
+	}
+	if len(remain) != 2 {
+		t.Fatalf("rotation must retain max=2 XPF snapshots, got %v", remain)
+	}
+	for _, want := range []string{"archive-2", "archive-3"} {
+		if !remain[want] {
+			t.Errorf("newer XPF archive %q must survive rotation; remain=%v", want, remain)
+		}
+	}
+	if remain["archive-1"] {
+		t.Errorf("oldest XPF archive must be pruned; remain=%v", remain)
+	}
+}

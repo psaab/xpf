@@ -1886,6 +1886,9 @@ owned by the `journal/` subpackage.
   `time.Now()` race). Rotation prunes by the parsed seq, and
   `SetArchiveConfig` seeds the per-process counter from the highest seq on
   disk so it stays globally monotonic across restarts (#5523 C179-060).
+  Retention counts only current or legacy XPF snapshot names accepted by
+  `isXPFConfigArchiveSnapshot`; unrelated `config-*.conf` files in a shared
+  directory are left untouched (#11804).
   The SYNCHRONOUS mirror `ArchiveConfig` writes to a dir passed as a
   PARAMETER (decoupled from the active `archiveDir`), so the shared counter —
   seeded from whatever dir `SetArchiveConfig` last activated — can sit BELOW

@@ -11,6 +11,8 @@ xpf (0.0.0) unstable; urgency=medium
     speed as zero instead of inferring 1Gbps from TxQLen (#11700).
   * Return the filterable UNKNOWN sentinel for AppID-disabled no-match sessions
     so `application UNKNOWN` selects the same population in either mode (#11818).
+  * Restrict config archive rotation to recognized XPF snapshot names so
+    foreign `config-*.conf` files in shared archive directories survive (#11804).
 
   * Keep family-less IPv6 BGP peers out of FRR's default IPv4-unicast AF and
     activate them under IPv6 unicast, whether or not they have policy (#11564).
