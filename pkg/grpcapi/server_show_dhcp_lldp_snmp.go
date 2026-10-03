@@ -458,6 +458,44 @@ func (s *Server) showDHCPRelay(cfg *config.Config, buf *strings.Builder) {
 			fmt.Fprintf(buf, "    Active server group: %s\n", g.ActiveServerGroup)
 		}
 	}
+	if relay.V6 != nil {
+		v6 := relay.V6
+		if len(v6.ServerGroups) > 0 {
+			buf.WriteString("DHCPv6 server groups:\n")
+			for _, name := range sortedMapKeys(v6.ServerGroups) {
+				sg := v6.ServerGroups[name]
+				if sg == nil {
+					continue
+				}
+				fmt.Fprintf(buf, "  %s: %s\n", name, strings.Join(sg.Servers, ", "))
+			}
+		}
+		if v6.ActiveServerGroup != "" {
+			fmt.Fprintf(buf, "  DHCPv6 default active server group: %s\n", v6.ActiveServerGroup)
+		}
+		if len(v6.Groups) > 0 {
+			buf.WriteString("DHCPv6 relay groups:\n")
+			for _, name := range sortedMapKeys(v6.Groups) {
+				g := v6.Groups[name]
+				if g == nil {
+					continue
+				}
+				fmt.Fprintf(buf, "  %s:\n", name)
+				fmt.Fprintf(buf, "    Interfaces: %s\n", strings.Join(g.Interfaces, ", "))
+				activeServerGroup := g.ActiveServerGroup
+				if activeServerGroup == "" {
+					activeServerGroup = v6.ActiveServerGroup
+				}
+				fmt.Fprintf(buf, "    Active server group: %s\n", activeServerGroup)
+				if g.InterfaceIDOverrideSet || g.InterfaceIDOverride != "" {
+					fmt.Fprintf(buf, "    Relay-agent interface-id: %s\n", g.InterfaceIDOverride)
+				}
+			}
+		}
+		if v6.InterfaceIDOverride != "" {
+			fmt.Fprintf(buf, "  DHCPv6 default relay-agent interface-id: %s\n", v6.InterfaceIDOverride)
+		}
+	}
 }
 
 // showLLDP renders the configured LLDP transmit interval, hold

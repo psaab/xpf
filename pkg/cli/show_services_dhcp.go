@@ -2,10 +2,14 @@ package cli
 
 import (
 	"fmt"
+	"io"
+	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/psaab/xpf/pkg/dhcp"
+	"github.com/psaab/xpf/pkg/dhcprelay"
 	"github.com/psaab/xpf/pkg/dhcpserver"
 	"github.com/psaab/xpf/pkg/termsafe"
 )
@@ -145,74 +149,179 @@ func (c *CLI) showDHCPRelay() error {
 			}
 		}
 	}
+	if relay.V6 != nil {
+		v6 := relay.V6
+		if len(v6.ServerGroups) > 0 {
+			fmt.Println("DHCPv6 server groups:")
+			for _, name := range sortedDHCPRelayKeys(v6.ServerGroups) {
+				sg := v6.ServerGroups[name]
+				if sg != nil {
+					fmt.Printf("  %s: %s\n", name, strings.Join(sg.Servers, ", "))
+				}
+			}
+		}
+		if v6.ActiveServerGroup != "" {
+			fmt.Printf("  DHCPv6 default active server group: %s\n", v6.ActiveServerGroup)
+		}
+		if len(v6.Groups) > 0 {
+			fmt.Println("DHCPv6 relay groups:")
+			for _, name := range sortedDHCPRelayKeys(v6.Groups) {
+				g := v6.Groups[name]
+				if g == nil {
+					continue
+				}
+				fmt.Printf("  %s:\n", name)
+				fmt.Printf("    Interfaces: %s\n", strings.Join(g.Interfaces, ", "))
+				activeServerGroup := g.ActiveServerGroup
+				if activeServerGroup == "" {
+					activeServerGroup = v6.ActiveServerGroup
+				}
+				fmt.Printf("    Active server group: %s\n", activeServerGroup)
+				if g.InterfaceIDOverrideSet || g.InterfaceIDOverride != "" {
+					fmt.Printf("    Relay-agent interface-id: %s\n", g.InterfaceIDOverride)
+				}
+			}
+		}
+		if v6.InterfaceIDOverride != "" {
+			fmt.Printf("  DHCPv6 default relay-agent interface-id: %s\n", v6.InterfaceIDOverride)
+		}
+	}
 
 	// Runtime statistics
 	if c.dhcpRelay != nil {
-		stats := c.dhcpRelay.Stats()
-		if len(stats) > 0 {
-			fmt.Println("\nRelay statistics:")
-			// #9406: the BOUND DEVICE is shown beside the configured
-			// interface. The two differ under the canonical Junos spelling
-			// (`ge-0/0/0.0` binds `ge-0-0-0`), and an all-zero counter row is
-			// otherwise indistinguishable from an idle segment — which is
-			// exactly how the relay being bound to nothing at all stayed
-			// invisible.
-			fmt.Printf("  %-16s %-16s %-18s %-18s %-18s %s\n", "Interface", "Bound device", "Requests relayed", "Replies forwarded", "Dropped (max-hops)", "Dropped (rate-limit)")
-			for _, s := range stats {
-				bound := s.KernelInterface
-				if bound == "" {
-					bound = s.Interface
-				}
-				fmt.Printf("  %-16s %-16s %-18d %-18d %-18d %d\n", s.Interface, bound, s.RequestsRelayed, s.RepliesForwarded, s.RequestsDroppedMaxHops, s.RequestsDroppedRateLimit)
-			}
-			// Reply-delivery breakdown (#2076). L2-fallback is the one to
-			// alert on: it means the raw-L2 path failed (CAP_NET_RAW,
-			// driver, or MTU) and the relay degraded to broadcast.
-			fmt.Println("\nReply delivery (#2076):")
-			fmt.Printf("  %-16s %-10s %-10s %-10s %-10s %-10s %-12s %s\n",
-				"Interface", "L2-unicast", "ciaddr", "bcast-flag", "bcast-fwd",
-				"no-target", "L2-fallback", "nak-bcast")
-			for _, s := range stats {
-				fmt.Printf("  %-16s %-10d %-10d %-10d %-10d %-10d %-12d %d\n",
-					s.Interface, s.RepliesL2Unicast, s.RepliesUnicastCiaddr,
-					s.RepliesBroadcastFlag1, s.RepliesBroadcastForced,
-					s.RepliesBroadcastNoTarget, s.RepliesBroadcastL2Fallback,
-					s.RepliesBroadcastNak)
-			}
-			// Reply source validation (#4163). A non-zero count means a reply
-			// arrived from a source IP that is NOT one of the configured DHCP
-			// servers and was dropped — a rogue-reply injection attempt, or a
-			// multi-homed server unicasting from an unlisted source IP.
-			fmt.Println("\nReply source validation (#4163):")
-			fmt.Printf("  %-16s %s\n", "Interface", "Dropped (unknown server)")
-			for _, s := range stats {
-				fmt.Printf("  %-16s %d\n", s.Interface, s.RepliesDroppedUnknownServer)
-			}
-			// Outstanding-request binding (#6562). A source IP is spoofable, so
-			// a reply must also answer a request the relay actually forwarded.
-			// "no-request" counts replies that did not bind — an injection
-			// attempt, OR a legitimate reply that missed the binding window,
-			// which is a client-visible DHCP failure. "Pending" is
-			// occupancy/capacity — the LEADING indicator: as it approaches
-			// capacity the relay is about to evict bindings and drop legitimate
-			// replies. "pending-evicted" is COINCIDENT, not leading — it only
-			// rises once bindings are already being lost. "forcerenew" counts
-			// DHCPFORCERENEW refused (RFC 3203 §6 requires RFC 3118 auth that a
-			// relay cannot verify).
-			fmt.Println("\nReply request binding (#6562):")
-			fmt.Printf("  %-16s %-14s %-22s %-16s %s\n",
-				"Interface", "Pending", "Dropped (no-request)", "Pending evicted",
-				"Refused (forcerenew)")
-			for _, s := range stats {
-				fmt.Printf("  %-16s %-14s %-22d %-16d %d\n",
-					s.Interface,
-					fmt.Sprintf("%d/%d", s.PendingSize, s.PendingCapacity),
-					s.RepliesDroppedNoRequest, s.PendingEvicted,
-					s.RepliesDroppedForceRenew)
-			}
-		}
+		writeDHCPRelayStats(os.Stdout, c.dhcpRelay.Stats())
 	}
 	return nil
+}
+
+func sortedDHCPRelayKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func writeDHCPRelayStats(out io.Writer, stats []dhcprelay.RelayStats) {
+	hasV4, hasV6 := false, false
+	for _, s := range stats {
+		if s.Family == "inet6" {
+			hasV6 = true
+		} else {
+			hasV4 = true
+		}
+	}
+	if hasV4 {
+		writeDHCPRelayFamilyStats(out, "Relay statistics", stats, false)
+	}
+	if hasV6 {
+		writeDHCPRelayFamilyStats(out, "DHCPv6 relay statistics (inet6)", stats, true)
+	}
+}
+
+func writeDHCPRelayFamilyStats(out io.Writer, heading string, stats []dhcprelay.RelayStats, v6 bool) {
+	fmt.Fprintf(out, "\n%s:\n", heading)
+	if v6 {
+		fmt.Fprintf(out, "  %-16s %-16s %-18s %-18s %-18s %s\n", "Interface", "Bound device", "Requests relayed", "Replies forwarded", "Dropped (backup)", "Dropped (rate-limit)")
+	} else {
+		fmt.Fprintf(out, "  %-16s %-16s %-18s %-18s %-18s %s\n", "Interface", "Bound device", "Requests relayed", "Replies forwarded", "Dropped (max-hops)", "Dropped (rate-limit)")
+	}
+	for _, s := range stats {
+		if (s.Family == "inet6") != v6 {
+			continue
+		}
+		bound := s.KernelInterface
+		if bound == "" {
+			bound = s.Interface
+		}
+		if v6 {
+			fmt.Fprintf(out, "  %-16s %-16s %-18d %-18d %-18d %d\n", s.Interface, bound, s.RequestsRelayed, s.RepliesForwarded, s.RequestsDroppedBackup, s.RequestsDroppedRateLimit)
+		} else {
+			fmt.Fprintf(out, "  %-16s %-16s %-18d %-18d %-18d %d\n", s.Interface, bound, s.RequestsRelayed, s.RepliesForwarded, s.RequestsDroppedMaxHops, s.RequestsDroppedRateLimit)
+		}
+	}
+
+	if !v6 {
+		fmt.Fprintln(out, "\nReply delivery (#2076):")
+		fmt.Fprintf(out, "  %-16s %-10s %-10s %-10s %-10s %-10s %-12s %s\n",
+			"Interface", "L2-unicast", "ciaddr", "bcast-flag", "bcast-fwd",
+			"no-target", "L2-fallback", "nak-bcast")
+		for _, s := range stats {
+			if s.Family == "inet6" {
+				continue
+			}
+			fmt.Fprintf(out, "  %-16s %-10d %-10d %-10d %-10d %-10d %-12d %d\n",
+				s.Interface, s.RepliesL2Unicast, s.RepliesUnicastCiaddr,
+				s.RepliesBroadcastFlag1, s.RepliesBroadcastForced,
+				s.RepliesBroadcastNoTarget, s.RepliesBroadcastL2Fallback,
+				s.RepliesBroadcastNak)
+		}
+	}
+
+	sourceHeading := "Reply source validation (#4163)"
+	if v6 {
+		sourceHeading = "DHCPv6 reply source validation (inet6)"
+	}
+	fmt.Fprintf(out, "\n%s:\n", sourceHeading)
+	fmt.Fprintf(out, "  %-16s %s\n", "Interface", "Dropped (unknown server)")
+	for _, s := range stats {
+		if (s.Family == "inet6") != v6 {
+			continue
+		}
+		fmt.Fprintf(out, "  %-16s %d\n", s.Interface, s.RepliesDroppedUnknownServer)
+	}
+
+	bindingHeading := "Reply request binding (#6562)"
+	if v6 {
+		bindingHeading = "DHCPv6 reply request binding (inet6)"
+		fmt.Fprintf(out, "\n%s:\n", bindingHeading)
+		fmt.Fprintf(out, "  %-16s %-14s %-22s %s\n",
+			"Interface", "Pending", "Dropped (no-request)", "Pending evicted")
+		for _, s := range stats {
+			if s.Family != "inet6" {
+				continue
+			}
+			fmt.Fprintf(out, "  %-16s %-14s %-22d %d\n",
+				s.Interface, fmt.Sprintf("%d/%d", s.PendingSize, s.PendingCapacity),
+				s.RepliesDroppedNoRequest, s.PendingEvicted)
+		}
+	} else {
+		fmt.Fprintf(out, "\n%s:\n", bindingHeading)
+		fmt.Fprintf(out, "  %-16s %-14s %-22s %-16s %s\n",
+			"Interface", "Pending", "Dropped (no-request)", "Pending evicted",
+			"Refused (forcerenew)")
+		for _, s := range stats {
+			if s.Family == "inet6" {
+				continue
+			}
+			fmt.Fprintf(out, "  %-16s %-14s %-22d %-16d %d\n",
+				s.Interface,
+				fmt.Sprintf("%d/%d", s.PendingSize, s.PendingCapacity),
+				s.RepliesDroppedNoRequest, s.PendingEvicted,
+				s.RepliesDroppedForceRenew)
+		}
+	}
+
+	if v6 {
+		fmt.Fprintf(out, "\nDHCPv6 drop reasons (inet6):\n")
+		fmt.Fprintf(out, "  %-32s %-10s %-10s %-10s %-10s %-10s %-10s %-10s %-10s %-12s %-12s %-12s %s\n",
+			"Interface", "Req-nested", "Req-parse", "Req-port", "Req-peer", "Req-build",
+			"Reply-iid", "Reply-parse", "Reply-invalid", "Reply-nested",
+			"Dispatch-parse", "Dispatch-empty", "Dispatch-unknown/ambiguous")
+		for _, s := range stats {
+			if s.Family != "inet6" {
+				continue
+			}
+			fmt.Fprintf(out, "  %-32s %-10d %-10d %-10d %-10d %-10d %-10d %-10d %-10d %-12d %-12d %-12d %d/%d\n",
+				s.Interface, s.RequestsDroppedNested, s.RequestsDroppedParse,
+				s.RequestsDroppedPort, s.RequestsDroppedPeer, s.RequestsDroppedBuild,
+				s.RepliesDroppedIID, s.RepliesDroppedParse, s.RepliesDroppedInvalid,
+				s.RepliesDroppedNested, s.RepliesDroppedDispatcherParse,
+				s.RepliesDroppedDispatcherEmptyIID, s.RepliesDroppedDispatcherUnknownIID,
+				s.RepliesDroppedDispatcherAmbiguous)
+		}
+	}
 }
 
 // newDHCPServer builds the dhcpserver.Manager used to read the live lease set

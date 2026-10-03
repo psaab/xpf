@@ -35,6 +35,9 @@ xpf (0.0.0) unstable; urgency=medium
   * Include the configured trust-option-82 setting in the CLI DHCP relay
     overrides summary (#11695).
 
+  * Render DHCPv6 relay groups and family-specific counters across show
+    surfaces without changing DHCPv4-only CLI output (#11694).
+
   * Drop IPv4-mapped and deprecated IPv4-compatible IPv6 frames before
     native ingress guards can bypass identity validation (#11669).
   * Retain RIP, IS-IS, and IPv6 static routes when standalone CLI apply builds
