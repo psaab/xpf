@@ -1151,8 +1151,9 @@ placeholder `##SECRET-DATA##` on every raw-AST DISPLAY surface — the REST
 typed-struct redaction on `GET /api/v1/config`. Consequently a REST `export`
 (or any `show configuration` render) is **secret-redacted, not a full-fidelity
 restorable backup**: re-applying it would commit `##SECRET-DATA##` as the
-literal secret for every secret leaf, so xpf **rejects the placeholder on
-commit-ingest** (`## SECRET-DATA` cannot round-trip). For a restorable backup use
+literal secret for every secret leaf, so xpf rejects the placeholder both on
+strict commit-ingest and at tolerant `Store.Load` / `Store.SyncApply` ingress,
+before the value can be promoted as a live secret. For a restorable backup use
 the cleartext DR/compliance archive or `request system configuration rescue
 save`; to restore, load from that archive/rescue or re-enter the secret in
 cleartext. (The cleartext SSOT still backs HA config sync, the DR archive and

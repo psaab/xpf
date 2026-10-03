@@ -809,30 +809,29 @@ func crossCheckLoginIdleTimeout10828(compiled *config.Config) error {
 //
 // Rationale: Store.Load and Store.SyncApply compile a config the operator
 // did NOT just author — a persisted active config on local boot, or a
-// config pushed from a possibly-un-upgraded cluster primary. A strict
-// reject here would (a) fail Store.Load on an upgraded node carrying a
-// legacy config, leaving the daemon with no active config (operational
-// blackout), and (b) fail Store.SyncApply on an upgraded standby
-// receiving such a config from an un-upgraded primary, alarm-looping HA
-// config sync. The operator's next strict candidate commit rejects it.
+// config pushed from a possibly-un-upgraded cluster primary. Rejecting
+// legacy typed values here could (a) fail Store.Load on an upgraded node
+// carrying a legacy config, leaving the daemon with no active config, or
+// (b) fail Store.SyncApply on an upgraded standby, alarm-looping HA sync.
+// The raw-AST redaction placeholder is the exception: RedactedClone emits it
+// only for display, so it can never be a valid persisted secret.
 //
 // (The original #1733 equal-flow worker-cap downgrade that motivated
 // this split was retired in #1830 (e) — the dataplane no longer caps
 // equal-flow-enforcement at 32 workers.)
 func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, error) {
 	// #1319 PR 2: the typed-leaf SchemaValidate gate is STRICT only on the
-	// operator-driven commit / commit-check path (compileTree). Here — the
-	// tolerant Store.Load / Store.SyncApply ingress for configs the
-	// operator did NOT just author — a violation downgrades to a warning.
-	// A persisted config written by an older binary (pre-gate, or before a
-	// leaf's range was typed/tightened) may carry values the current gate
-	// rejects; hard-failing would blackout-boot the node (Load) or
-	// alarm-loop HA config sync (SyncApply), even though the compiler
-	// accepted the value when it was committed and still compiles it the
-	// same way today. This is the same doctrine as the #1733/#1798/#1814
-	// lenient compile gates (see freetext.go); the operator's next strict
-	// commit rejects the stale value loudly.
+	// operator-driven commit / commit-check path (compileTree). The tolerant
+	// Store.Load / Store.SyncApply ingress downgrades legacy typed-leaf
+	// violations to warnings because older binaries may have committed them.
+	// A display-only redaction placeholder is not a legacy value and cannot be
+	// promoted as a secret, so preserve that specific guard error below.
+	// Other typed-leaf violations retain the #1733/#1798/#1814 lenient policy;
+	// see freetext.go.
 	schemaErr := s.schemaValidateExpandedTree(tree)
+	if config.IsRedactionPlaceholderIngestError(schemaErr) {
+		return nil, schemaErr
+	}
 	if schemaErr != nil {
 		switch {
 		case config.IsUnknownSecurityZoneChildSchemaError(schemaErr):

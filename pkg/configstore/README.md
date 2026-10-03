@@ -1670,8 +1670,9 @@ An ABSENT DB is NOT an error (`Load` returns nil; start-fresh).
 
 On a chassis cluster one candidate is committed on one node and config-sync
 carries the raw group tree to the other, which ingests it on the tolerant path
-(`SyncApply` -> `compileTreeLenient`, where strict gates only warn). So
-`compileTreeStrict` checks the peer's `${node}` expansion as well as the local
+(`SyncApply` -> `compileTreeLenient`, where legacy typed-leaf violations warn;
+the raw-AST redaction placeholder remains a hard rejection before promotion).
+So `compileTreeStrict` checks the peer's `${node}` expansion as well as the local
 one. It runs the `pkg/config` peer-effective registry first (#5876 source NAT,
 #4785 IPIP), then `validatePeerStrictPipeline`, which repeats the local strict
 steps for the peer node: `schemaValidateExpandedTreeForNode`,
@@ -1687,8 +1688,9 @@ reported as `chassis cluster peer node<N>: ...` wrapping the gate's own error.
   leaf that reaches the other node by config-sync is warned about on that
   node's tolerant ingress.
 - Standalone (`nodeID < 0`) runs no peer check. `Store.Load` and
-  `Store.SyncApply` never call `compileTreeStrict`, so a persisted config that
-  is invalid for this node still loads with warnings.
+  `Store.SyncApply` do not call `compileTreeStrict`; legacy typed-leaf
+  violations still load with warnings, but the redaction placeholder is
+  rejected before promotion.
 - `CheckText` (`xpfd check-config`) shares the function, so day-0 validation
   with `-node-id 0|1` refuses a shared config that is invalid on either node.
   The shipped `docs/ha-cluster*.conf` pass for both node ids

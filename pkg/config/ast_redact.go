@@ -339,13 +339,19 @@ func containsAnyOf(seq []string, names ...string) bool {
 // re-applies that text (a `load`/commit) would otherwise silently commit
 // "##SECRET-DATA##" as the LITERAL secret for every secret leaf — the IKE PSK,
 // key or community becomes the nonsense string and the tunnel/auth breaks. The
-// guard rejects that on commit-ingest so the redacted export cannot masquerade
-// as a restorable backup.
+// guard rejects it on strict commits and tolerant Load / SyncApply ingress so
+// the redacted export cannot masquerade as a restorable backup.
 var errRedactionPlaceholderIngest = errors.New(
 	"config contains the redaction placeholder " + SecretDataPlaceholder +
 		" — this is a redacted export (REST show/export / gRPC ShowConfig), not a " +
 		"restorable config; restore from the DR archive (request system " +
 		"configuration rescue) or re-enter the secret in cleartext")
+
+// IsRedactionPlaceholderIngestError reports whether err is the raw-AST secret
+// redaction-placeholder rejection, including when wrapped by an ingress path.
+func IsRedactionPlaceholderIngestError(err error) bool {
+	return errors.Is(err, errRedactionPlaceholderIngest)
+}
 
 // errRedactedURLIngest is the URL-leaf sibling of errRedactionPlaceholderIngest
 // (#6703). RedactURL rewrites a credential-bearing URL leaf to contain the
@@ -363,10 +369,9 @@ var errRedactedURLIngest = errors.New(
 
 // checkRedactionPlaceholder rejects a tree whose SECRET leaf value is exactly
 // SecretDataPlaceholder ("##SECRET-DATA##"). It is invoked by the commit-ingest
-// schema gate (SchemaValidateWithDefinitions), so on the strict operator commit
-// / commit-check path it FAILS the commit, while the tolerant Load / SyncApply
-// path downgrades it to a warning (compileTreeLenient) — the same strict/lenient
-// doctrine the #1319 typed-leaf gate uses.
+// schema gate (SchemaValidateWithDefinitions), so it fails strict operator
+// commits and remains a hard error on tolerant Load / SyncApply ingress: the
+// display-only placeholder is never a valid persisted secret.
 //
 // Scope is exactly RedactedClone's: the SAME secret-leaf set (secretIndices) is
 // used to detect the placeholder that RedactedClone used to PRODUCE it. A
