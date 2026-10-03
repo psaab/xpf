@@ -422,17 +422,20 @@ down/up — can disrupt the control-link UDP receive path for 10-15+ seconds:
   resolution demotes one. The floor lets a slow-to-appear peer be heard first.
 
 The floor releases after 30s, then #11566 checks the separate session-sync
-receive-recency proof before confirming the peer absent. A connected sync link
-with proof at most 2s old keeps `peerConfirmedAbsent` unset and the manager
-rechecks on each timeout tick; unlike `shouldSuppressPeerHeartbeatTimeout` for
-previously-seen peers, this hold has no 5s cap. If sync disconnects or the proof
-becomes stale, the never-seen path confirms absence and continues election. A
-genuinely absent or fully silent peer therefore still reaches single-node
-promotion after the startup grace. The manager records `peerConfirmedAbsent`
-separately from `peerEverSeen`: this releases the non-preempt hold while keeping
-the cold-boot readiness gate armed. A ready node promotes normally; an unready
-node stays secondary until the degraded fallback, which marks and warns on the
-degraded promotion. A peer heartbeat clears the confirmed-absent state.
+receive-recency proof before confirming the peer absent. #11682 uses the full
+sync peer-silence window (30s by default), not the 2s window used to suppress
+heartbeat timeouts for previously-seen peers. An idle sync peer has no session
+traffic and replies to heartbeat probes at the 10s sync read-deadline cadence;
+its receive proof remains fresh through the 2–10s gap between ACKs. The manager
+rechecks on every heartbeat timeout tick, with no 5s suppression cap. If sync
+disconnects or the proof becomes older than its silence window, the never-seen
+path confirms absence and continues election. A genuinely absent or fully
+silent peer therefore still reaches single-node promotion after the startup
+grace. The manager records `peerConfirmedAbsent` separately from
+`peerEverSeen`: this releases the non-preempt hold while keeping the cold-boot
+readiness gate armed. A ready node promotes normally; an unready node stays
+secondary until the degraded fallback, which marks and warns on the degraded
+promotion. A peer heartbeat clears the confirmed-absent state.
 
 ### Asymmetric peer visibility (#10775)
 

@@ -2248,6 +2248,15 @@ func (s *SessionSync) PeerRecentlyActive(maxAge time.Duration) bool {
 	return ok && age <= maxAge
 }
 
+// PeerRecentlyActiveWithinSilenceWindow reports whether an inbound sync
+// message has been observed within the full peer-silence timeout. This
+// window must cover the sync heartbeat/ACK cadence: an idle peer may send no
+// session traffic and reply only when the local read deadline triggers a
+// heartbeat probe.
+func (s *SessionSync) PeerRecentlyActiveWithinSilenceWindow() bool {
+	return s.PeerRecentlyActive(s.peerSilenceDuration())
+}
+
 // PeerHealthy reports whether the sync path is connected and, once the peer
 // has proved heartbeat-ack support, has been observed within the silence window.
 func (s *SessionSync) PeerHealthy() bool {
