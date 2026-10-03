@@ -205,5 +205,16 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
+	// #11823 follows existing routing gates to preserve strict first-error
+	// priority. Tolerant loads retain invalid values with a warning; the FRR
+	// renderer omits out-of-domain metrics.
+	if err := validateISISMetrics11823(cfg); err != nil {
+		if opts.lenientISISMetric11823 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("IS-IS interface metric (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 	return nil
 }

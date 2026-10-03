@@ -4,6 +4,10 @@ xpf (0.0.0) unstable; urgency=medium
     help, matching the command walker’s one-value grammar (#11835).
   * Reject invalid OSPF MD5 key IDs rather than defaulting them to 1 or
     rendering values FRR cannot accept (#11794).
+  * Type IS-IS interface metrics and reject malformed, negative, or
+    out-of-range values instead of silently dropping the configured cost
+    (#11823).
+
 
   * Bound CoDel target milliseconds to the largest value that converts safely
     to nanoseconds; reject unparseable values strictly and warn on tolerant

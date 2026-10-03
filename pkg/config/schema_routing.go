@@ -591,8 +591,14 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 			"level": {desc: "IS-IS circuit type for this interface", args: 1, placeholder: "<level>",
 				valueType: ValueEnumOf, valueDesc: "IS-IS interface level",
 				valueExamples: ISISCircuitTypeSpellings(), validator: ValidateISISCircuitType, children: nil},
-			"passive":            {desc: "Passive interface", children: nil},
-			"metric":             {desc: "Metric", args: 1, placeholder: "<value>", children: nil},
+			"passive": {desc: "Passive interface", children: nil},
+			// #11823: FRR defaults to wide metrics; its `isis metric` command
+			// accepts 0..16777215. Type and bound this leaf so parse failures
+			// cannot silently become Metric=0 (unset) and drop the path cost.
+			"metric": {desc: "IS-IS interface metric", args: 1, valueType: ValueInteger,
+				valueDesc:     "IS-IS wide metric (0..16777215; 0 uses the default)",
+				valueExamples: []string{"0", "10"}, placeholder: "<value>",
+				validator: ValidateInteger(0, MaxISISMetric), children: nil},
 			"authentication-key": {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
 			"authentication-type": {desc: "Authentication type", args: 1, placeholder: "<type>",
 				valueType: ValueEnumOf, valueDesc: "authentication type",

@@ -916,6 +916,10 @@ func compileProtocols(node *Node, proto *ProtocolsConfig) error {
 							if len(prop.Keys) >= 2 {
 								if v, err := strconv.Atoi(prop.Keys[1]); err == nil {
 									iface.Metric = v
+								} else {
+									// Preserve parse failure for the strict/tolerant
+									// metric gate; zero means "unset" to the renderer.
+									iface.Metric = -1
 								}
 							}
 						case "authentication-key":
