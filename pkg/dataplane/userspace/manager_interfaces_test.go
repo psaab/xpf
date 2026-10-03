@@ -239,6 +239,9 @@ func TestMergeInterfaceAddressSnapshots(t *testing.T) {
 		{Family: "inet", Address: "172.16.50.8/24", Scope: 0},
 		{Family: "inet6", Address: "2001:559:8585:50::8/64", Scope: 0},
 		{Family: "inet", Address: "169.254.1.1/32", Scope: 253},
+		// A configured explicit link-local address overlays the identical live
+		// row and must retain its Universe source scope for Rust inference.
+		{Family: "inet6", Address: "fe80::1/128", Scope: 0},
 	}
 
 	got := mergeInterfaceAddressSnapshots(live, configured)
@@ -260,6 +263,18 @@ func TestMergeInterfaceAddressSnapshots(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Fatalf("missing addresses: %+v from %+v", want, got)
+	}
+	foundConfiguredLL := false
+	for _, addr := range got {
+		if addr.Family == "inet6" && addr.Address == "fe80::1/128" {
+			foundConfiguredLL = true
+			if addr.Scope != 0 {
+				t.Fatalf("configured explicit link-local scope = %d, want Universe (0)", addr.Scope)
+			}
+		}
+	}
+	if !foundConfiguredLL {
+		t.Fatal("merged addresses lost configured explicit link-local row")
 	}
 }
 

@@ -381,3 +381,41 @@ func TestFBFOverlayIntoForwardingInstance(t *testing.T) {
 		}
 	}
 }
+
+// An ip-monitoring overlay is applied after the #11317 config-static
+// unresolved-gateway gate. Keep the bare link-local replacement in the helper
+// snapshot so Rust can perform scope-aware inference against live interface
+// rows instead of silently losing the monitored route.
+func TestLinkLocalRouteOverlayBypassesRecursiveStaticGate_11650(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RoutingOptions.Inet6StaticRoutes = []*config.StaticRoute{{
+		Destination: "2001:db8:beef::/48",
+		NextHops:    []config.NextHopEntry{{Address: "fe80::254"}},
+	}}
+	interfaces := []InterfaceSnapshot{{
+		Name:      "ge-0/0/1.0",
+		LinuxName: "ge-0-0-1",
+		Ifindex:   101,
+		Addresses: []InterfaceAddressSnapshot{{
+			Family: "inet6", Address: "fe80::1/64", Scope: 253,
+		}},
+	}}
+	overlay := []config.RouteOverlayEntry{{
+		Destination: "2001:db8:beef::/48",
+		NextHop:     "fe80::254",
+		Policy:      "wan-failover",
+	}}
+	routes, _, err := buildRouteSnapshots(cfg, interfaces, overlay)
+	if err != nil {
+		t.Fatalf("buildRouteSnapshots: %v", err)
+	}
+	var found []RouteSnapshot
+	for _, route := range routes {
+		if route.Table == "inet6.0" && route.Destination == "2001:db8:beef::/48" {
+			found = append(found, route)
+		}
+	}
+	if len(found) != 1 || len(found[0].NextHops) != 1 || found[0].NextHops[0] != "fe80::254" {
+		t.Fatalf("link-local monitoring overlay snapshots = %+v, want one bare-fe80 replacement", found)
+	}
+}

@@ -234,15 +234,10 @@ func TestFromSnapshotsEquivalence10751(t *testing.T) {
 	}
 }
 
-// TestConfiguredLinkLocalDuplicateLiveStillResolves10751: the config carries
-// static fe80::5/64 AND the kernel reports that same fe80::5/64 live with
-// scope-link (networkd installed it; the snapshot merge prefers the live
-// row, and the kernel derives link scope for fe80::/10). Configured
-// provenance must win: the family resolves instead of sticking pending
-// forever with the barrier never handing off. Installed coverage is
-// unchanged (fe80::5 stays denied).
-// RED on revert: scope-filter without the provenance override reports the
-// zone and the inet6 window.
+// TestConfiguredLinkLocalDuplicateLiveStillResolves10751: a configured
+// fe80::5/64 is also reported by the kernel with scope-link. Configuration
+// still satisfies host-inbound address bookkeeping while the installed view
+// keeps the address covered.
 func TestConfiguredLinkLocalDuplicateLiveStillResolves10751(t *testing.T) {
 	stubScopeLinkAddrs10751(t, []InterfaceAddressSnapshot{
 		{Family: "inet6", Address: "fe80::5/64", Scope: int(netlink.SCOPE_LINK)},
@@ -255,23 +250,6 @@ func TestConfiguredLinkLocalDuplicateLiveStillResolves10751(t *testing.T) {
 	}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
 		"ll": {Name: "ll", Interfaces: []string{"ge-0-0-6.0"}},
-	}
-	// Precondition proving the test exercises the merge-precedence shape:
-	// the merged snapshot row for fe80::5 must carry scope-link (live won).
-	mergedScope := -1
-	for _, snap := range BuildInterfaceSnapshots(cfg) {
-		if snap.Name != "ge-0-0-6.0" {
-			continue
-		}
-		for _, a := range snap.Addresses {
-			if hostIPFromCIDR(a.Address) == "fe80::5" {
-				mergedScope = a.Scope
-			}
-		}
-	}
-	if mergedScope != int(netlink.SCOPE_LINK) {
-		t.Fatalf("precondition: merged fe80::5 scope = %d, want SCOPE_LINK (%d) — the live row must win the merge or this cell is vacuous",
-			mergedScope, int(netlink.SCOPE_LINK))
 	}
 	if zones := AddresslessEnforcingZones(cfg); len(zones) != 0 {
 		t.Fatalf("AddresslessEnforcingZones = %+v, want silent: configured provenance resolves despite the live scope-link row", zones)
