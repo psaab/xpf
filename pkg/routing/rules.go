@@ -368,7 +368,38 @@ func nextTableFamilyOrdered(routes []*config.StaticRoute) []*config.StaticRoute 
 	return append(out, v6...)
 }
 
-// clear removes all ip rules in the next-table priority range.
+// isNonReservedRuleTable filters out kernel, management, and probe tables that
+// the route-leak installers never target. The remaining table value is only one
+// part of the stateless ownership shape; a foreign rule identical to an xpf rule
+// in every field cannot be distinguished without the configured table allowlist.
+func isNonReservedRuleTable(table int) bool {
+	if table <= 0 || table == int(unix.RT_TABLE_DEFAULT) || table == mainTableID ||
+		table == int(unix.RT_TABLE_LOCAL) || table == config.ManagementVRFTableID {
+		return false
+	}
+	return table < config.ProbeTableBase || table >= config.ProbeTableBase+config.ProbeTableCount
+}
+
+// hasNoAdditionalRuleSelectors reports whether a listed rule carries only the
+// selectors used by xpf leak and return rules. RuleList uses NewRule defaults
+// for unset Goto/Flow/suppression fields.
+func hasNoAdditionalRuleSelectors(r netlink.Rule) bool {
+	return r.Mark == 0 && r.Mask == nil && r.Tos == 0 && r.TunID == 0 &&
+		r.Goto == -1 && r.Flow == -1 && r.SuppressIfgroup == -1 &&
+		r.SuppressPrefixlen == -1 && !r.Invert && r.Dport == nil &&
+		r.Sport == nil && r.IPProto == 0 && r.UIDRange == nil && r.Protocol == 0
+}
+
+// hasExactlyOneVRFRuleInterface matches the iif- or oif-scoped selector emitted
+// by the #9819 return-rule installer. A bare "vrf-" name and both selectors are
+// not an xpf return-rule shape.
+func hasExactlyOneVRFRuleInterface(r netlink.Rule) bool {
+	return (r.IifName == "" && strings.HasPrefix(r.OifName, "vrf-") && len(r.OifName) > len("vrf-")) ||
+		(r.OifName == "" && strings.HasPrefix(r.IifName, "vrf-") && len(r.IifName) > len("vrf-"))
+}
+
+// clear removes stale xpf-shaped next-table rules from its current, previous,
+// and legacy priority windows.
 //
 // A per-family RuleList dump that fails transiently must NOT be silently
 // swallowed: continuing past it means the rules in that family's window
@@ -378,6 +409,7 @@ func nextTableFamilyOrdered(routes []*config.StaticRoute) []*config.StaticRoute 
 // failures and return them so Apply (and ultimately the daemon apply
 // loop) can observe — and a future caller could retry — instead of the
 // brief, unobservable self-healing-orphan window described in #2273.
+
 func (n *nextTableManager) clear() error {
 	var errs []error
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
@@ -387,13 +419,20 @@ func (n *nextTableManager) clear() error {
 			continue
 		}
 		for _, r := range rules {
+			leakShape := isNonReservedRuleTable(r.Table) && r.Src == nil &&
+				r.OifName == "" && hasNoAdditionalRuleSelectors(r)
 			inCurrent := r.Priority >= nextTableRulePriority &&
 				r.Priority < nextTableRulePriority+config.RouteLeakRulePriorityWindow &&
-				r.Dst != nil && r.IifName != ""
+				r.Dst != nil && r.IifName != "" && leakShape
 			inPrevious := r.Priority >= previousNextTableRulePriority &&
 				r.Priority < previousNextTableRulePriority+maxNextTableRules &&
-				r.Dst != nil && r.IifName != ""
-			inLegacy := r.Priority >= legacyNextTableRulePriority && r.Priority < legacyNextTableRulePriority+maxNextTableRules
+				r.Dst != nil && r.IifName != "" && leakShape
+			// Both pre-#9420 global and #9420 ingress-scoped legacy rules
+			// carried a destination and target table; iif is intentionally not
+			// part of this test so both stale generations are removed.
+			inLegacy := r.Priority >= legacyNextTableRulePriority &&
+				r.Priority < legacyNextTableRulePriority+maxNextTableRules &&
+				r.Dst != nil && leakShape
 			if inCurrent || inPrevious || inLegacy {
 				if err := n.ops.RuleDel(&r); err != nil {
 					if isRuleAlreadyGone(err) {
@@ -732,20 +771,13 @@ func splitConnectedPrefixesByFamily(prefixes []string) (v4, v6 []string) {
 	return v4, v6
 }
 
-// clear removes this manager's destination-only rules from the shared leak
-// priority range plus the two legacy rib-group windows. It scans three windows
-// so an in-place binary upgrade removes stale rules from every generation:
-//   - [ribGroupLeakRulePriority, +RouteLeakRulePriorityWindow): the current
-//     shared next-table/rib-group range, filtered to rules without IifName so
-//     next-table rules owned by the other manager survive.
-//   - [ribGroupRulePriority, +100): the pre-#3876 `from all lookup <table>`
-//     blanket window (33000-33099). Removing these on reconcile is what
-//     prevents an upgrade from leaving a shadowed-by-default blanket rule
-//     behind alongside the new per-prefix rules.
-//   - [200, 300): the original legacy window.
-//
-// It also removes the #9819 return rules at ribGroupReturnRulePriority, which
-// Apply re-adds per source and per connected peer prefix.
+// clear removes this manager's xpf-shaped rules from the shared leak range and
+// the legacy rib-group windows. Priority alone never grants ownership:
+//   - current leak rules require a destination-only lookup into a
+//     non-reserved routing table, leaving next-table rules (which have iif) intact;
+//   - old blanket rules require the emitted `from all lookup <table>` shape;
+//   - return rules require a peer-table destination and exactly one `vrf-*`
+//     iif/oif selector. The #9819 installer uses a peer table, never main.
 //
 // Per-family RuleList dump failures are aggregated and returned rather
 // than swallowed; see the rationale on nextTableManager.clear (#2273).
@@ -760,10 +792,18 @@ func (rg *ribGroupManager) clear() error {
 		for _, r := range rules {
 			inCurrent := r.Priority >= ribGroupLeakRulePriority &&
 				r.Priority < ribGroupLeakRulePriority+config.RouteLeakRulePriorityWindow &&
-				r.Dst != nil && r.IifName == ""
-			inOldBlanket := r.Priority >= ribGroupRulePriority && r.Priority < ribGroupRulePriority+100
-			inLegacy := r.Priority >= 200 && r.Priority < 300
-			inReturn := r.Priority == RibGroupReturnRulePriority // #9819
+				r.Dst != nil && r.IifName == "" && r.OifName == "" &&
+				r.Src == nil && isNonReservedRuleTable(r.Table) &&
+				hasNoAdditionalRuleSelectors(r)
+			legacyBlanketShape := r.Dst == nil && r.Src == nil &&
+				r.IifName == "" && r.OifName == "" &&
+				isNonReservedRuleTable(r.Table) && hasNoAdditionalRuleSelectors(r)
+			inOldBlanket := r.Priority >= ribGroupRulePriority &&
+				r.Priority < ribGroupRulePriority+100 && legacyBlanketShape
+			inLegacy := r.Priority >= 200 && r.Priority < 300 && legacyBlanketShape
+			inReturn := r.Priority == RibGroupReturnRulePriority &&
+				r.Dst != nil && r.Src == nil && isNonReservedRuleTable(r.Table) &&
+				hasExactlyOneVRFRuleInterface(r) && hasNoAdditionalRuleSelectors(r)
 			if inCurrent || inOldBlanket || inLegacy || inReturn {
 				if err := rg.ops.RuleDel(&r); err != nil {
 					if isRuleAlreadyGone(err) {
