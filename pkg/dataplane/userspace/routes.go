@@ -488,6 +488,10 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 			// inter-VRF traffic that the kernel/FRR still routes.
 			return nil, false, fmt.Errorf("route snapshot: list ip-rules for family %d: %w", family, err)
 		}
+		dscpRules, err := routeLeakDSCPSelectors(family)
+		if err != nil {
+			return nil, false, err
+		}
 		for _, rule := range rules {
 			// A Dst-less rule cannot be represented as a per-prefix NextTable
 			// leak. Rib-group imports and their scoped return rules carry Dst,
@@ -513,6 +517,9 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 				rule,
 				rule.Priority == routing.RibGroupReturnRulePriority,
 			) {
+				continue
+			}
+			if ipRuleHasDSCPSelector(family, rule, dscpRules) {
 				continue
 			}
 			familyStr := "inet"

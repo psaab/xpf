@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/routing"
 	"github.com/vishvananda/netlink"
 )
 
@@ -45,6 +46,7 @@ func TestMain(m *testing.M) {
 	}
 	persistentNatLeaseGenerationPath11486 = filepath.Join(dir, "generation.json")
 	ruleListFn = func(int) ([]netlink.Rule, error) { return nil, nil }
+	ruleDSCPSelectorsFn = func(int) ([]routing.RuleDSCPSelector, error) { return nil, nil }
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
