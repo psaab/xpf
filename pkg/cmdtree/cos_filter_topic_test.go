@@ -1,6 +1,9 @@
 package cmdtree
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // #6848/#6858: the shared `name <n>` / `type <t>` filter grammar and its
 // ShowText topic encoding.
@@ -30,24 +33,39 @@ func TestParseCoSNameTypeArgs6848(t *testing.T) {
 		{"keyword type", []string{"type", "dscp"}, "", "dscp"},
 		{"both keywords", []string{"name", "rw-pcp", "type", "ieee-802.1"}, "rw-pcp", "ieee-802.1"},
 		{"bare name then type", []string{"rw-pcp", "type", "ieee-802.1"}, "rw-pcp", "ieee-802.1"},
-		// A dangling keyword must not consume the following token as a value
-		// or panic on the missing one.
-		{"dangling name", []string{"name"}, "", ""},
-		{"dangling type", []string{"type"}, "", ""},
-		// A later explicit `name` wins over the bare positional: the operator
-		// typed the keyword form deliberately.
 		{"keyword overrides bare", []string{"rw-dscp", "name", "rw-pcp"}, "rw-pcp", ""},
-		// A name carrying the topic's own separators is a legal committed name
-		// (`set class-of-service rewrite-rules dscp "rw,x"` commits) and must
-		// reach the filter intact.
 		{"comma in bare name", []string{"rw,x"}, "rw,x", ""},
 		{"comma in keyword name", []string{"name", "rw,x", "type", "dscp"}, "rw,x", "dscp"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gotName, gotType := ParseCoSNameTypeArgs(tc.args)
+			gotName, gotType, err := ParseCoSNameTypeArgs(tc.args)
+			if err != nil {
+				t.Fatalf("ParseCoSNameTypeArgs(%q) error = %v", tc.args, err)
+			}
 			if gotName != tc.wantName || gotType != tc.wantType {
 				t.Errorf("ParseCoSNameTypeArgs(%q) = (%q, %q), want (%q, %q)",
 					tc.args, gotName, gotType, tc.wantName, tc.wantType)
+			}
+		})
+	}
+}
+
+func TestParseCoSNameTypeArgsRejectsUnknownAndDangling11834(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"unknown token", []string{"name", "rw-dscp", "naem"}, `unknown argument "naem"`},
+		{"dangling name", []string{"name"}, `missing value for "name"`},
+		{"name before next keyword", []string{"name", "type", "dscp"}, `missing value for "name"`},
+		{"dangling type", []string{"type"}, `missing value for "type"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := ParseCoSNameTypeArgs(tc.args)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ParseCoSNameTypeArgs(%q) error = %v, want containing %q",
+					tc.args, err, tc.want)
 			}
 		})
 	}

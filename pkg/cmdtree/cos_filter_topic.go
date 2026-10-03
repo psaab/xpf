@@ -22,7 +22,16 @@ package cmdtree
 // functions, so a divergence is not a bug to be caught by a mirrored test
 // table — it is unrepresentable.
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
+
+// CoSNameTypeArgsUsage is the canonical usage string for the `name <n>` /
+// `type <t>` filter grammar, shared by the local CLI and the remote `cli`
+// binary so a parse error reads identically on both (#11834).
+const CoSNameTypeArgsUsage = "usage: show class-of-service classifier|rewrite-rule " +
+	"[<name>] [name <name>] [type <type>]"
 
 // ParseCoSNameTypeArgs extracts the optional `name <n>` / `type <t>` filters
 // from the tokens following `show class-of-service classifier|rewrite-rule`.
@@ -36,9 +45,15 @@ import "strings"
 // did not implement.
 //
 // A later explicit `name` keyword wins over the bare positional: the operator
-// typed the keyword form deliberately. A dangling keyword with no following
-// token yields no filter rather than consuming the next keyword as a value.
-func ParseCoSNameTypeArgs(args []string) (nameFilter, typeFilter string) {
+// typed the keyword form deliberately.
+//
+// Parsing fails CLOSED (#11834): an unknown token or a filter keyword with no
+// value is an error, not a silently-ignored token that falls through to a
+// broader dump. A typo (`show class-of-service classifier type dscp tyep`) or
+// a bare trailing keyword (`show class-of-service classifier name`) used to
+// render every classifier; silently widening a scoped query is worse than
+// it. This mirrors the strict #3347 `show security log` parser.
+func ParseCoSNameTypeArgs(args []string) (nameFilter, typeFilter string, err error) {
 	if len(args) > 0 && args[0] != "name" && args[0] != "type" {
 		nameFilter = args[0]
 		args = args[1:]
@@ -46,18 +61,22 @@ func ParseCoSNameTypeArgs(args []string) (nameFilter, typeFilter string) {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "name":
-			if i+1 < len(args) {
-				nameFilter = args[i+1]
-				i++
+			if i+1 >= len(args) || args[i+1] == "name" || args[i+1] == "type" {
+				return "", "", fmt.Errorf("missing value for %q\n%s", "name", CoSNameTypeArgsUsage)
 			}
+			nameFilter = args[i+1]
+			i++
 		case "type":
-			if i+1 < len(args) {
-				typeFilter = args[i+1]
-				i++
+			if i+1 >= len(args) || args[i+1] == "name" || args[i+1] == "type" {
+				return "", "", fmt.Errorf("missing value for %q\n%s", "type", CoSNameTypeArgsUsage)
 			}
+			typeFilter = args[i+1]
+			i++
+		default:
+			return "", "", fmt.Errorf("unknown argument %q\n%s", args[i], CoSNameTypeArgsUsage)
 		}
 	}
-	return nameFilter, typeFilter
+	return nameFilter, typeFilter, nil
 }
 
 // CoSNameTypeTopic encodes the filters as a gRPC ShowText topic of the form

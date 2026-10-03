@@ -133,14 +133,22 @@ func (c *ctl) handleShow(args []string) error {
 			case "classifier":
 				// #4228 Gap 7: encode optional `name <n>` / `type <t>`
 				// filters into the topic params.
-				return c.showText(cosNameTypeTopic("cos-classifier", args[2:]))
+				topic, err := cosNameTypeTopic("cos-classifier", args[2:])
+				if err != nil {
+					return err
+				}
+				return c.showText(topic)
 			case "rewrite-rule":
 				// #6848: identical filter grammar to `classifier`, so it shares
 				// the same topic builder. Without this arm the command works in
 				// the local CLI and silently falls through to the help text on
 				// the REMOTE cli binary, which is the surface most operators
 				// actually use.
-				return c.showText(cosNameTypeTopic("cos-rewrite-rule", args[2:]))
+				topic, err := cosNameTypeTopic("cos-rewrite-rule", args[2:])
+				if err != nil {
+					return err
+				}
+				return c.showText(topic)
 			case "scheduler-map":
 				topic := "cos-scheduler-map"
 				if len(args) >= 3 {
@@ -538,7 +546,10 @@ func (c *ctl) showSystemInfo(typ string) error {
 // (pkg/grpcapi) also call. The remote and local paths do not merely agree on
 // the grammar by convention; they execute the same code, so they cannot give
 // different answers for the same keystrokes.
-func cosNameTypeTopic(prefix string, rest []string) string {
-	nameFilter, typeFilter := cmdtree.ParseCoSNameTypeArgs(rest)
-	return cmdtree.CoSNameTypeTopic(prefix, nameFilter, typeFilter)
+func cosNameTypeTopic(prefix string, rest []string) (string, error) {
+	nameFilter, typeFilter, err := cmdtree.ParseCoSNameTypeArgs(rest)
+	if err != nil {
+		return "", err
+	}
+	return cmdtree.CoSNameTypeTopic(prefix, nameFilter, typeFilter), nil
 }
