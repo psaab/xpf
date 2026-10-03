@@ -26,9 +26,11 @@ package config
 // The corpus deliberately exercises the order-dependent surfaces the
 // decomposition plan calls out: the flat vSRX chassis-cluster config is
 // compiled for node0 AND node1 (invariant #2, the #4329 NodeID stamp before
-// fabric derivation), a multi-strict-violation config proves the same FIRST
-// error is returned (invariant #6), and a many-lenient-downgrade config
-// proves the same warning ORDER on the tolerant path (invariant #7).
+// fabric derivation), CoS compile output and lenient downgrade warnings are
+// byte-pinned (including cfg.Warnings order), a multi-strict-violation config
+// proves the same FIRST error is returned (invariant #6), and a many-lenient-
+// downgrade config proves the same warning ORDER on the tolerant path
+// (invariant #7).
 
 import (
 	"bytes"
@@ -151,7 +153,20 @@ func TestCompileGolden4406(t *testing.T) {
 		return goldenParseHier(t, readFile("../../docs/ha-cluster.conf"))
 	}, &cases)
 
-	// (c) multi-strict-violation -> proves the same FIRST error is returned on
+	// (c) broad class-of-service compile output with populated classifiers,
+	// schedulers, scheduler-map, profile, rewrite-rule, and interface bindings.
+	goldenAppendMatrix(t, "cos-compile", func() *ConfigTree {
+		return goldenBuildSet(t, readFile("testdata/golden_4406_cos.set"))
+	}, &cases)
+
+	// (d) lenient CoS code-point downgrades across all classifier/rewrite
+	// families. Fixture lines reverse the compile-family order so cfg.Warnings
+	// pins deterministic warning ordering, not source-line order.
+	goldenAppendMatrix(t, "cos-warning-order", func() *ConfigTree {
+		return goldenBuildSet(t, readFile("testdata/golden_4406_cos_warnings.set"))
+	}, &cases)
+
+	// (e) multi-strict-violation -> proves the same FIRST error is returned on
 	// the strict cells and the same warning ORDER on the lenient cells
 	// (invariants #6/#7). Triggers several P1 pre-walk gates: VRRP
 	// authentication (#4288, an early gate that wins the strict first-error
@@ -160,7 +175,7 @@ func TestCompileGolden4406(t *testing.T) {
 		return goldenBuildSet(t, goldenStrictViolationsSet)
 	}, &cases)
 
-	// (d) many-lenient-downgrade -> exercises the tolerant-path warning
+	// (f) many-lenient-downgrade -> exercises the tolerant-path warning
 	// accumulation (invariant #7) across several P1 gates plus the
 	// expandInterfaceRanges (#4027) tree mutation.
 	goldenAppendMatrix(t, "lenient-downgrades", func() *ConfigTree {

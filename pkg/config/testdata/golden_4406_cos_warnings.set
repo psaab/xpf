@@ -1,0 +1,8 @@
+# Reverse family order on purpose; compiler warning order is its stable CoS dispatch order.
+set class-of-service rewrite-rules ieee-802.1 bad-pcp-rewrite forwarding-class best-effort loss-priority low code-point 9
+set class-of-service rewrite-rules dscp bad-dscp-rewrite forwarding-class best-effort loss-priority low code-point 200
+set class-of-service classifiers inet-precedence bad-precedence forwarding-class best-effort loss-priority low code-points foo
+set class-of-service classifiers ieee-802.1 bad-pcp forwarding-class best-effort loss-priority low code-points 9
+set class-of-service classifiers dscp bad-dscp forwarding-class best-effort loss-priority low code-points 110
+set class-of-service forwarding-classes queue 0 best-effort
+set system dataplane-type userspace

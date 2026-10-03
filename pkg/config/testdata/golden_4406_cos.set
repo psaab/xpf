@@ -1,0 +1,20 @@
+set class-of-service forwarding-classes queue 0 best-effort
+set class-of-service forwarding-classes queue 5 voice
+set class-of-service classifiers dscp wan-classifier forwarding-class best-effort loss-priority low code-points be
+set class-of-service classifiers ieee-802.1 wan-pcp forwarding-class best-effort loss-priority low code-points 0
+set class-of-service classifiers inet-precedence prec-cl forwarding-class voice loss-priority low code-points 5
+set class-of-service schedulers be-sched transmit-rate 5g
+set class-of-service schedulers be-sched transmit-rate exact
+set class-of-service schedulers be-sched priority low
+set class-of-service schedulers be-sched buffer-size 8m
+set class-of-service scheduler-maps edge-map forwarding-class best-effort scheduler be-sched
+set class-of-service traffic-control-profiles wan-tcp shaping-rate 9g
+set class-of-service traffic-control-profiles wan-tcp scheduler-map edge-map
+set class-of-service rewrite-rules dscp wan-rewrite forwarding-class best-effort loss-priority low code-point ef
+set class-of-service interfaces ge-0/0/2 unit 80 shaping-rate 9g
+set class-of-service interfaces ge-0/0/2 unit 80 scheduler-map edge-map
+set class-of-service interfaces ge-0/0/2 unit 80 classifiers dscp wan-classifier
+set class-of-service interfaces ge-0/0/2 unit 80 classifiers ieee-802.1 wan-pcp
+set class-of-service interfaces ge-0/0/2 unit 80 rewrite-rules dscp wan-rewrite
+set interfaces ge-0/0/2 unit 80 family inet address 10.0.80.1/24
+set system dataplane-type userspace
