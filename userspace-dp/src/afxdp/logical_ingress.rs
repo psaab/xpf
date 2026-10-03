@@ -18,7 +18,7 @@
 //! exactly the values it previously used inline.
 
 use super::*;
-use super::gre::{apply_decap_ecn_combine, packet_tcp_flags};
+use super::gre::{apply_decap_ecn_combine, inner_tos_byte, packet_tcp_flags};
 use std::sync::atomic::AtomicU64;
 
 /// Everything the shared body cannot derive for itself.
@@ -168,6 +168,8 @@ pub(in crate::afxdp) fn build_logical_ingress_packet(
         pkt_len,
         addr_family: params.inner_family,
         protocol: params.protocol,
+        // CoS selects from the inner codepoint, never the outer tunnel DSCP (#11809).
+        dscp: inner_tos_byte(&synthetic[14..], params.inner_family) >> 2,
         tcp_flags: packet_tcp_flags(params.inner_packet, params.inner_family, params.protocol, params.rel_l4_offset),
         // Caller-supplied: GRE passes GRE_DECAP_INGRESS_FLAG (#2486) so the
         // forward builder selects the `tcp-mss gre-in` clamp. Every protocol

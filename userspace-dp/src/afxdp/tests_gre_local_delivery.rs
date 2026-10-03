@@ -899,6 +899,115 @@ fn native_gre_decap_tagged_ingress_yields_self_consistent_frame_meta() {
     assert_eq!(decap.meta.addr_family, libc::AF_INET as u8);
 }
 
+/// #11809: the GRE-decapped inner DSCP, not the outer tunnel DSCP, selects the CoS queue.
+#[test]
+fn native_gre_decap_classifies_from_inner_dscp_11809() {
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.interfaces.push(crate::InterfaceSnapshot {
+        name: "dscp-egress".to_string(),
+        ifindex: 202,
+        cos_shaping_rate_bytes_per_sec: 10_000_000,
+        cos_shaping_burst_bytes: 256_000,
+        cos_scheduler_map: "wan-map".to_string(),
+        cos_dscp_classifier: "wan-classifier".to_string(),
+        ..Default::default()
+    });
+    snapshot.class_of_service = Some(ClassOfServiceSnapshot {
+        forwarding_classes: vec![
+            CoSForwardingClassSnapshot {
+                name: "best-effort".to_string(),
+                queue: 0,
+            },
+            CoSForwardingClassSnapshot {
+                name: "expedited-forwarding".to_string(),
+                queue: 1,
+            },
+        ],
+        dscp_classifiers: vec![CoSDSCPClassifierSnapshot {
+            name: "wan-classifier".to_string(),
+            entries: vec![CoSDSCPClassifierEntrySnapshot {
+                forwarding_class: "expedited-forwarding".to_string(),
+                loss_priority: String::new(),
+                dscp_values: vec![46],
+            }],
+        }],
+        ieee8021_classifiers: vec![],
+        dscp_rewrite_rules: vec![],
+        schedulers: vec![
+            CoSSchedulerSnapshot {
+                name: "be-sched".to_string(),
+                transmit_rate_bytes: 4_000_000,
+                transmit_rate_percent: 0.0,
+                transmit_rate_exact: false,
+                priority: "low".to_string(),
+                buffer_size_bytes: 128_000,
+                buffer_size_percent: 0.0,
+                surplus_sharing: false,
+                equal_flow_enforcement: false,
+                equal_flow_target_policy: String::new(),
+                codel_target_ns: 0,
+                ..Default::default()
+            },
+            CoSSchedulerSnapshot {
+                name: "ef-sched".to_string(),
+                transmit_rate_bytes: 6_000_000,
+                transmit_rate_percent: 0.0,
+                transmit_rate_exact: false,
+                priority: "strict-high".to_string(),
+                buffer_size_bytes: 64_000,
+                buffer_size_percent: 0.0,
+                surplus_sharing: false,
+                equal_flow_enforcement: false,
+                equal_flow_target_policy: String::new(),
+                codel_target_ns: 0,
+                ..Default::default()
+            },
+        ],
+        scheduler_maps: vec![CoSSchedulerMapSnapshot {
+            name: "wan-map".to_string(),
+            entries: vec![
+                CoSSchedulerMapEntrySnapshot {
+                    forwarding_class: "best-effort".to_string(),
+                    scheduler: "be-sched".to_string(),
+                },
+                CoSSchedulerMapEntrySnapshot {
+                    forwarding_class: "expedited-forwarding".to_string(),
+                    scheduler: "ef-sched".to_string(),
+                },
+            ],
+        }],
+        inet_precedence_classifiers: vec![],
+    });
+    let forwarding = build_forwarding_state(&snapshot);
+    let set_ipv4_dscp = |packet: &mut [u8], l3_offset: usize, dscp: u8| {
+        packet[l3_offset + 1] = dscp << 2;
+        packet[l3_offset + 10..l3_offset + 12].fill(0);
+        let checksum = checksum16(&packet[l3_offset..l3_offset + 20]);
+        packet[l3_offset + 10..l3_offset + 12].copy_from_slice(&checksum.to_be_bytes());
+    };
+
+    for (outer_dscp, inner_dscp, expected_queue) in [(0, 46, 1), (46, 0, 0)] {
+        let mut inner = build_gre_inner_icmp_packet_v4();
+        set_ipv4_dscp(&mut inner, 0, inner_dscp);
+        let mut frame = build_gre_to_self_outer_frame_v4(80, &inner);
+        set_ipv4_dscp(&mut frame, 18, outer_dscp);
+        let mut outer_meta = gre_to_self_outer_meta(80, frame.len());
+        outer_meta.dscp = outer_dscp;
+        let decap = try_native_gre_decap_from_frame(&frame, outer_meta, &forwarding)
+            .expect("well-formed GRE frame must decap");
+
+        assert_eq!(
+            decap.meta.dscp, inner_dscp,
+            "outer DSCP {outer_dscp} must not replace inner DSCP {inner_dscp}",
+        );
+        assert_eq!(
+            crate::afxdp::tx::resolve_cos_queue_id(&forwarding, 202, decap.meta, None),
+            Some(expected_queue),
+            "outer DSCP {outer_dscp}, inner DSCP {inner_dscp} must select the inner DSCP queue",
+        );
+    }
+}
+
 
 /// #2782 fail-on-revert: a Checksum-Present GRE frame (C bit set, valid
 /// checksum) MUST decap to the inner packet — exactly the inner bytes at

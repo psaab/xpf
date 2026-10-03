@@ -13,6 +13,8 @@ xpf (0.0.0) unstable; urgency=medium
     so `application UNKNOWN` selects the same population in either mode (#11818).
   * Restrict config archive rotation to recognized XPF snapshot names so
     foreign `config-*.conf` files in shared archive directories survive (#11804).
+  * Preserve the inner DSCP on GRE, WireGuard, and IPsec decapsulation so the
+    CoS behavior-aggregate classifier selects the intended queue (#11809).
 
   * Keep family-less IPv6 BGP peers out of FRR's default IPv4-unicast AF and
     activate them under IPv6 unicast, whether or not they have policy (#11564).

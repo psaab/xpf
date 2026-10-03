@@ -1199,6 +1199,13 @@ sync.
   are intentionally not flow-cached because DSCP is packet metadata, not
   part of the session cache key; session hits re-evaluate DSCP-sensitive
   input filters per packet.
+
+  **Logical tunnel ingress DSCP (#11809):** the shared GRE, WireGuard, and
+  IPsec decap builder stamps `UserspaceDpMeta::dscp` from the inner IP DS field
+  after the RFC 6040 ECN combine (`ToS` / Traffic Class shifted right by two),
+  so behavior-aggregate CoS classification follows the inner codepoint rather
+  than the outer tunnel DSCP.
+
   **Interface INPUT filter `then count` on cache hits (#3777):** the
   output/TX `then count` handles have been replayed on every flow-cache hit
   since #2573 (`tx_selection.filter_counters`); the INPUT side now mirrors
