@@ -1439,6 +1439,17 @@ as `10.3.0.0/24 via st0.0` with only `10.2.0.0/24` as the remote selector is
 rejected at strict commit because the XFRM output policy would drop it. The
 tolerant load / peer-sync path warns instead of preventing boot (#1960).
 
+**Static route IP gateways must match the destination family (#11421):** an
+IPv4 route with an IPv6 gateway is valid RFC5549 syntax for FRR/Linux, but the
+userspace IPv4 route parser treats that gateway as absent and can turn the
+route into `NoRoute`. The shared `StaticRouteNextHopFamilyMismatchReason`
+rejects either opposite-family direction at strict commit. On tolerant
+load/peer-sync it warns, excludes the entire route from helper and FRR
+forwarding, and feeds the same reason to the `NOT INSTALLED` show annotation.
+The Rust helper independently rejects cross-family route snapshots before
+parsing their next-hops, preserving the prior forwarding state if a corrupt or
+version-drifted producer bypasses the Go boundary.
+
 The separate #2933 AST gate still rejects distinct bind-interface spellings
 such as `st0` and `st0.0` that derive the same if_id, since only one xfrmi
 device can carry that id. It runs over the group-expanded, inactive-pruned AST

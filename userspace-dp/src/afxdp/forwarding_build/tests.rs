@@ -4806,6 +4806,92 @@ fn route_destination_unparseable_fails_closed() {
     }
 }
 
+/// #11421: cross-family gateway literals fail the helper snapshot CLOSED.
+/// `parse_route_next_hop` parses v4 only, so the accepted v4-dst/v6-gateway
+/// form became `(None, None)` and then NoRoute; the mirror v6-dst/v4-gateway
+/// lost its gateway too. The Go strict gate rejects both; this is the
+/// helper-boundary backstop for corrupt / hand-built / version-drifted input.
+///
+/// fail-on-revert: remove the family check in `populate_routes` and the
+/// `expect_err`s become RED.
+#[test]
+fn route_next_hop_family_mismatch_fails_closed_11421() {
+    for (table, dest, nh) in [
+        ("inet.0", "10.0.0.0/8", "2001:db8::1"),
+        ("inet.0", "10.0.0.0/8", "2001:db8::1@ge-0-0-1"),
+        ("inet.0", "10.0.0.0/8", "::ffff:192.0.2.1"),
+        ("inet6.0", "2001:db8::/32", "192.0.2.1"),
+        ("inet6.0", "2001:db8::/32", "192.0.2.1@ge-0-0-1"),
+    ] {
+        let snapshot = ConfigSnapshot {
+            routes: vec![crate::RouteSnapshot {
+                table: table.into(),
+                destination: dest.into(),
+                next_hops: vec![nh.into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let result = try_build_forwarding_state_with_policy_counters(
+            &snapshot,
+            &crate::policy::PolicyCounterStore::default(),
+        );
+        assert!(
+            result.is_err(),
+            "cross-family next-hop {nh:?} must fail the snapshot CLOSED, got {result:?}"
+        );
+        let err = result.expect_err("checked above");
+        match err {
+            crate::policy::SnapshotIntegrityError::RouteNextHopFamilyMismatch {
+                table: got_table,
+                destination,
+                next_hop,
+            } => {
+                assert_eq!(got_table, table);
+                assert_eq!(destination, dest);
+                assert_eq!(next_hop, nh);
+            }
+            other => panic!(
+                "next-hop {nh:?}: expected RouteNextHopFamilyMismatch, got {other:?}"
+            ),
+        }
+    }
+}
+
+/// #11421 anti-over-reject: valid same-family gateways and the existing
+/// interface-only/bare-interface forms continue to build.
+#[test]
+fn route_next_hop_matching_and_interface_only_still_build_11421() {
+    let snapshot = ConfigSnapshot {
+        routes: vec![
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                destination: "10.0.0.0/8".into(),
+                next_hops: vec!["192.0.2.1".into(), "192.0.2.2@ge-0-0-1".into()],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                destination: "172.16.0.0/12".into(),
+                next_hops: vec!["@ge-0-0-1".into(), "st0.0".into()],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "inet6.0".into(),
+                destination: "2001:db8::/32".into(),
+                next_hops: vec!["2001:db8::1".into(), "fe80::1@ge-0-0-1".into()],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    try_build_forwarding_state_with_policy_counters(
+        &snapshot,
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect("valid next-hop shapes must still build");
+}
+
 /// #6568 (member 1) anti-over-reject: every destination shape the Go producer
 /// can legitimately emit still builds. Without this, a gate that rejected
 /// EVERYTHING would satisfy the fail-closed test above while breaking all

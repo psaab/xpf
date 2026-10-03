@@ -358,6 +358,15 @@ func (m *Manager) generateStaticRouteInTable(sr *config.StaticRoute, vrfName str
 	if sr.NoInstall {
 		return ""
 	}
+
+	// #11421: strict validation and the helper's snapshot exclusion share this
+	// predicate. On a tolerant load / peer sync, omit the whole route rather
+	// than emitting an FRR route the userspace FIB cannot represent.
+	if reason := config.StaticRouteNextHopFamilyMismatchReason(sr); reason != "" {
+		slog.Warn("frr: skipping a static route with a mismatched address family (#11421)",
+			"destination", sr.Destination, "reason", reason)
+		return ""
+	}
 	// #6795: final operand-validity belt. Destination is a RAW STRING from the
 	// parser, and it is interpolated into every `ip route` line this function
 	// emits. A malformed value fails the WHOLE frr-reload — one vtysh
@@ -468,36 +477,14 @@ func (m *Manager) generateStaticRouteInTable(sr *config.StaticRoute, vrfName str
 		// suffix; either can reach here malformed on the tolerant load /
 		// peer-sync path. An unparseable gateway fails the frr-reload; one
 		// carrying whitespace splits into extra operands or an extra statement.
-		// Dropping the individual NEXT-HOP (not the whole route) is the right
-		// granularity: a `next-hop [ a b ]` ECMP list with one bad member should
-		// still install the good ones, and the no-next-hop case below already
-		// renders nothing rather than a Null0 blackhole (#3872).
+		// Dropping the individual NEXT-HOP (not the whole route) for these
+		// operand-shape failures is the right granularity: an ECMP list with
+		// one malformed member should still install its good members, and the
+		// no-next-hop case below renders nothing rather than a Null0 blackhole.
 		if nh.Address != "" && !validFRRNextHopAddress(nh.Address) {
 			continue
 		}
 		if ifName != "" && !validFRRInterfaceOperand(ifName) {
-			continue
-		}
-		// #9820: family belt. An IPv6 destination with an IPv4 next-hop
-		// renders a line FRR cannot use as a gateway route (FRR's `ipv6
-		// route` grammar takes only an IPv6 gateway or an interface), so
-		// the strict gate refuses it at commit and this belt omits the
-		// next-hop — with a warning — on the tolerant load / peer-sync
-		// path. Per-next-hop granularity, like the shape belt: one bad
-		// ECMP member must not kill the good ones.
-		//
-		// Ordering is load-bearing: the destination shape check above
-		// returned early for bad destinations, and the next-hop shape
-		// check `continue`d for non-IP addresses (`@`-forms, bare
-		// interface names), so both operands parse here and the family
-		// comparison cannot misfire.
-		if nh.Address != "" &&
-			config.FRRAddrFamily(sr.Destination) == "v6" &&
-			config.FRRAddrFamily(nh.Address) == "v4" {
-			slog.Warn("frr: skipping a static-route next-hop: IPv6 destination "+
-				"with IPv4 next-hop is unsupported (FRR's ipv6 route grammar takes "+
-				"only an IPv6 gateway or an interface) (#9820)",
-				"destination", sr.Destination, "next_hop", nh.Address)
 			continue
 		}
 		var nexthop string

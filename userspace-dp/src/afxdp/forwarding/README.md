@@ -244,6 +244,14 @@ next-hops, preference 0). The wire specimen lives in
       other family. This is NOT the #2448 malformed-destination case
       (the prefix is a valid CIDR). An EMPTY `family` is unconstrained
       (parse-only, the pre-fix behavior) and never a mismatch.
+    - **Route next-hop family (#11421).** Before parsing a numeric gateway,
+      `populate_routes` compares its IP family with the route destination and
+      rejects an opposite-family literal as
+      `SnapshotIntegrityError::RouteNextHopFamilyMismatch`. Without this
+      check, the IPv4 parser turns an otherwise-valid IPv6 gateway on an IPv4
+      route into `(None, None)` and an ifindex-zero `NoRoute`. Strict Go commit
+      validation rejects both directions; the helper check is the independent
+      fail-closed boundary for malformed or version-drifted snapshots.
     - **Route preference range (L1).** A NEGATIVE `preference` is
       rejected (`RoutePreferenceOutOfRange`): the `sort_routes`
       tie-break is ascending preference, so a negative value would sort

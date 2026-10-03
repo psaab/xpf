@@ -102,6 +102,36 @@ pub(super) fn sort_connected(state: &mut ForwardingState) {
         .sort_by(|a, b| b.prefix.prefix_len().cmp(&a.prefix.prefix_len()));
 }
 
+/// Reject a numeric next-hop literal that the family-specific parser below
+/// would otherwise turn into `(None, None)` (or an interface-only path).
+/// Non-IP tokens and explicit interface-only forms retain their existing
+/// parsing behavior.
+fn validate_route_next_hop_family(
+    route: &RouteSnapshot,
+    is_ipv6: bool,
+) -> Result<(), crate::policy::SnapshotIntegrityError> {
+    for next_hop in &route.next_hops {
+        let ip_part = next_hop
+            .split_once('@')
+            .map_or(next_hop.as_str(), |(address, _)| address);
+        let Ok(address) = ip_part.parse::<IpAddr>() else {
+            continue;
+        };
+        let mismatch = matches!(
+            (address, is_ipv6),
+            (IpAddr::V4(_), true) | (IpAddr::V6(_), false)
+        );
+        if mismatch {
+            return Err(crate::policy::SnapshotIntegrityError::RouteNextHopFamilyMismatch {
+                table: route.table.clone(),
+                destination: route.destination.clone(),
+                next_hop: next_hop.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn populate_routes(
     snapshot: &ConfigSnapshot,
     state: &mut ForwardingState,
@@ -145,6 +175,7 @@ pub(super) fn populate_routes(
                     family: route.family.clone(),
                 });
             }
+            validate_route_next_hop_family(route, false)?;
             // #4446: compute the route's canonical install table BEFORE
             // resolving its next-hops, so a bare-gateway static route infers
             // its egress ifindex ONLY from a connected prefix in its OWN
@@ -197,6 +228,7 @@ pub(super) fn populate_routes(
                     family: route.family.clone(),
                 });
             }
+            validate_route_next_hop_family(route, true)?;
             // #4446: canonical install table computed before next-hop
             // resolution (see the v4 arm) so the connected-prefix inference
             // is scoped to the route's own table.
@@ -610,6 +642,9 @@ fn resolve_next_hop_target_v6(
         .unwrap_or((0, 0))
 }
 
+/// Route literals are family-checked by `populate_routes` before this parser is
+/// called. Without that guard, a valid IPv6 gateway on an IPv4 route would
+/// silently produce `(None, None)` and the route would become NoRoute.
 pub(in crate::afxdp) fn parse_route_next_hop(spec: &str) -> (Option<Ipv4Addr>, Option<String>) {
     let (ip_part, if_part) = if let Some((lhs, rhs)) = spec.split_once('@') {
         (lhs, rhs)
