@@ -534,6 +534,11 @@ func (m *Manager) generateStaticRouteInTable(sr *config.StaticRoute, vrfName str
 // behavior) installed an aggregate no contributor supports, which
 // redistribution could then advertise. A policy-less generate route keeps its
 // established unconditional-blackhole meaning.
+//
+// #11781: Junos normally inherits a forwarding next-hop from the primary
+// contributor when `discard` is absent. xpf does not implement that
+// inheritance, so the established blackhole behavior is preserved and
+// validateGenerateRouteDiscardWarnings reports the mismatch to operators.
 func renderGenerateRoutes(b *strings.Builder, fc *FullConfig) {
 	if len(fc.GenerateRoutes) == 0 {
 		return

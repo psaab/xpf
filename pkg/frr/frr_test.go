@@ -4779,8 +4779,11 @@ func TestGenerateRoutesBlackhole(t *testing.T) {
 	fc := &FullConfig{
 		GenerateRoutes: []*config.GenerateRoute{
 			{Prefix: "192.168.0.0/16", Discard: true},
+			// Preserve the established blackhole behavior when no explicit
+			// discard is set; #11781 adds a validation warning for this mismatch.
 			{Prefix: "2001:db8::/32"},
 			{Prefix: "198.51.100.0/24", Policy: "contributors"},
+			{Prefix: "203.0.113.0/24", Policy: "contributors", Discard: true},
 		},
 	}
 	_ = m.ApplyFull(fc) // reload may fail without vtysh
@@ -4794,6 +4797,9 @@ func TestGenerateRoutesBlackhole(t *testing.T) {
 	}
 	if strings.Contains(got, "198.51.100.0/24") {
 		t.Errorf("policy-bearing generate route was rendered despite having no verified contributors:\n%s", got)
+	}
+	if strings.Contains(got, "203.0.113.0/24") {
+		t.Errorf("policy-bearing discard route was rendered despite having no verified contributors:\n%s", got)
 	}
 }
 
