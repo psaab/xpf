@@ -377,7 +377,9 @@ fn cached_cos_tx_selection_flowless(
     wire_l3: &SessionKey,
 ) -> CachedTxSelectionDescriptor {
     let iface = forwarding.cos.interfaces.get(&egress_ifindex);
-    let ba_trust = ba_ingress_trust(forwarding, meta.ingress_ifindex, meta.ingress_vlan_id);
+    let ba_trust = iface
+        .map(|_| ba_ingress_trust(forwarding, meta.ingress_ifindex, meta.ingress_vlan_id))
+        .unwrap_or_default();
     // #hb166 T-6(m): fragments / flowless packets carry no 5-tuple but
     // still carry a DSCP (and 802.1p PCP). Behavior-aggregate
     // classification is 5-tuple-independent — resolve it from `meta` so
@@ -509,7 +511,9 @@ fn resolve_cached_cos_tx_selection_impl(
         } => (egress_wire_key, ingress_flow_key),
     };
     let iface = forwarding.cos.interfaces.get(&egress_ifindex);
-    let ba_trust = ba_ingress_trust(forwarding, meta.ingress_ifindex, meta.ingress_vlan_id);
+    let ba_trust = iface
+        .map(|_| ba_ingress_trust(forwarding, meta.ingress_ifindex, meta.ingress_vlan_id))
+        .unwrap_or_default();
 
     // #3642: select the output-filter family from the (post-NAT) wire key the
     // caller passes, not `meta.addr_family`. For a NAT64 flow the egress family
@@ -719,12 +723,12 @@ pub(in crate::afxdp) fn reclassify_cached_ba_queue_and_lp_rewrite(
     ingress_ifindex: u32,
     ingress_vlan_id: u16,
 ) -> Option<(u8, Option<u8>)> {
-    let trust = ba_ingress_trust(forwarding, ingress_ifindex, ingress_vlan_id);
     forwarding
         .cos
         .interfaces
         .get(&egress_ifindex)
         .and_then(|iface| {
+            let trust = ba_ingress_trust(forwarding, ingress_ifindex, ingress_vlan_id);
             let queue_id = resolve_trusted_ba_queue_id(
                 iface,
                 dscp,
@@ -876,7 +880,9 @@ fn resolve_cos_tx_selection_internal(
         return CoSTxSelection::default();
     }
     let iface = forwarding.cos.interfaces.get(&egress_ifindex);
-    let ba_trust = ba_ingress_trust(forwarding, meta.ingress_ifindex, meta.ingress_vlan_id);
+    let ba_trust = iface
+        .map(|_| ba_ingress_trust(forwarding, meta.ingress_ifindex, meta.ingress_vlan_id))
+        .unwrap_or_default();
     let Some(flow_key) = flow_key else {
         // #hb166 T-6(m): flowless / fragment classification — run the
         // 5-tuple-independent behavior-aggregate (DSCP / 802.1p) lookup from
