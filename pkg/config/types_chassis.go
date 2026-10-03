@@ -221,4 +221,10 @@ type BridgeDomainConfig struct {
 	VlanIDs          []int  // member VLAN IDs
 	RoutingInterface string // IRB routing interface reference (e.g. "irb.0")
 	DomainType       string // bridge domain type (optional)
+	// Members (#11387) names the explicit bridge-port set: logical interface
+	// units (e.g. "ge-0/0/0.0") whose configured vlan-id supplies the VID for
+	// this domain's bridge. BridgeMaster is assigned member-only from this
+	// list — keyed on (interface, VID), never on bare VID — so same-VID units
+	// on other trunks are not kernel-bridged across zones.
+	Members []string `json:"-"`
 }

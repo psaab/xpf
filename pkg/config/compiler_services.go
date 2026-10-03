@@ -2576,7 +2576,10 @@ func compileEventOptions(node *Node, policies *[]*EventPolicy) error {
 // together.
 func compileBridgeDomains(node *Node, bds *[]*BridgeDomainConfig, lenient bool, warnings *[]string) error {
 	for _, child := range node.Children {
-		if child.IsLeaf {
+		// A compact bridge-domain interface statement is represented by the
+		// parser as a leaf whose Keys are [domain, interface, member...].
+		// Unlike an empty named domain, it carries configuration we compile.
+		if child.IsLeaf && !(len(child.Keys) > 1 && child.Keys[1] == "interface") {
 			continue
 		}
 		bdName := child.Name()
@@ -2634,6 +2637,19 @@ func compileBridgeDomains(node *Node, bds *[]*BridgeDomainConfig, lenient bool, 
 				}
 				bd.VlanIDs = append(bd.VlanIDs, v)
 			}
+		}
+		// A bridge-domain interface is an explicit port declaration. Keeping
+		// every spelling of the multi-value leaf lets the runtime use the
+		// configured (interface, VID) pair rather than inferring membership
+		// from the VID alone (#11387).
+		for _, memberNode := range bdLeaves.FindChildren("interface") {
+			bd.Members = append(bd.Members, plainListValues(memberNode)...)
+		}
+		// A compact bridge-domain leaf (`bridge-domains { bd0 interface
+		// ge-0/0/0.0; }`) is packed onto the domain node's Keys instead of
+		// represented as a child. Read that spelling too (#2419/#11387).
+		if len(bdLeaves.Keys) > 2 && bdLeaves.Keys[1] == "interface" {
+			bd.Members = append(bd.Members, bdLeaves.Keys[2:]...)
 		}
 
 		// Routing interface (e.g. "irb.0")

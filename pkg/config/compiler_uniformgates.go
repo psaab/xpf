@@ -179,5 +179,10 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesUnknownSecurityZoneChild11575(cfg, opts); err != nil {
 		return err
 	}
+	// #11387 follows every existing gate so bridge-port validation cannot
+	// displace an established first-error diagnostic.
+	if err := runUniformGatesBridgeDomainMembership11387(tree, cfg, opts); err != nil {
+		return err
+	}
 	return nil
 }

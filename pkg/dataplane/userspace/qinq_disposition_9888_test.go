@@ -270,6 +270,29 @@ func TestUserspaceXDPQinQSingleTagBehaviorUnchanged_9888(t *testing.T) {
 	}
 }
 
+// #11387: explicit networkd membership narrows the kernel bridge flood domain,
+// not the XDP disposition. A tagged ARP frame still reaches the local kernel
+// L2 state machine; the Go BridgeMaster cell proves only the declared
+// (interface, VID) pair can then participate in that flood.
+func TestUserspaceXDPQinQBridgeMemberARPRemainsKernelFloodable11387(t *testing.T) {
+	coll := loadUserspaceXDPTestCollection(t)
+	updateUserspaceXDPTestCtrl(t, coll, userspaceCtrlValue{
+		Enabled:            1,
+		MetadataVersion:    userspaceMetadataVersion,
+		Workers:            1,
+		QueueCount:         1,
+		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
+	})
+	updateUserspaceXDPTestIngress(t, coll, userspaceXDPTestRunIfindex(t))
+
+	ret := runUserspaceXDPTestPacket(t, coll, singleTagTestPacket(0x8100, 0x0806))
+	if ret != xdpActionPass {
+		t.Fatalf("member-port ARP action = %d, want XDP_PASS(%d) for kernel bridge flood", ret, xdpActionPass)
+	}
+	assertUserspaceXDPDegradedPathStatAbsent(t, coll, "transit_drop")
+	assertUserspaceXDPDegradedPathStatAbsent(t, coll, "pass_to_kernel")
+}
+
 func TestUserspaceXDPQinQDegradedPathDrops_9888(t *testing.T) {
 	// The degraded (ctrl-disabled) non-IP arm drops nested and legacy-tagged
 	// VLAN frames too. This is fail-closed on shapes the shim cannot

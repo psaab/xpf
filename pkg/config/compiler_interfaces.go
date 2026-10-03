@@ -547,6 +547,7 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 					}
 					switch afName {
 					case "inet":
+						unit.FamilyInet = true
 						// #9424: a BRACKETED list packs every address past the
 						// first onto this leaf's Keys (hierarchical) or into a
 						// child chain (flat set), and namedInstances reads slot

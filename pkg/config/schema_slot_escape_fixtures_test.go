@@ -277,6 +277,15 @@ func slotEscapeHistoricalRows() []slotEscapeRow {
 
 func slotEscapeRows() []slotEscapeRow {
 	return []slotEscapeRow{
+		{"bridge-domain interface member", "bridge-domains <*> interface",
+			[]string{
+				"set interfaces ge-0/0/0 vlan-tagging",
+				"set interfaces ge-0/0/0 unit 0 vlan-id 100",
+				"set interfaces ge-0/0/0 unit 0 family inet address 192.0.2.1/24",
+				"set security zones security-zone trust interfaces ge-0/0/0.0",
+				"set bridge-domains bd0 vlan-id-list 100",
+			},
+			"set bridge-domains bd0 interface", "ge-0/0/0.0", "ge-0/0/0.100"},
 		// -- security policies ------------------------------------------------
 		{"policies from-zone then log", "security policies from-zone <*> <*> <*> policy <*> then log",
 			slotEscPolicyBase(""),

@@ -1610,20 +1610,63 @@ func buildFabricBondModels(cfg *config.Config, result *CompileResult, seen map[s
 }
 
 // buildBridgeDomainModels emits bridge .netdev/.network entries for each bridge
-// domain and sets BridgeMaster on the VLAN sub-interfaces that belong to one.
+// domain and sets BridgeMaster only on its explicitly configured VLAN members.
 func buildBridgeDomainModels(cfg *config.Config, result *CompileResult, seen map[string]bool) {
 	// Bridge domains: generate bridge .netdev + .network entries and set
-	// BridgeMaster on VLAN sub-interfaces that belong to a bridge domain.
-	// Build vlanID → bridge device name map for bridge member assignment.
-	vlanToBridge := make(map[int]string)
+	// BridgeMaster on the exact (Linux interface, VID) member pairs. VID alone
+	// is not an identity: a different trunk's same-numbered unit must never be
+	// implicitly attached (#11387). Tolerant compilation can retain ambiguous
+	// legacy configs; quarantine every VID shared by different domains there.
+	vidDomain := make(map[int]string)
+	ambiguousVID := make(map[int]bool)
 	for _, bd := range cfg.BridgeDomains {
-		bridgeName := "br-" + bd.Name
+		if bd == nil {
+			continue
+		}
 		for _, vid := range bd.VlanIDs {
-			vlanToBridge[vid] = bridgeName
+			if owner, ok := vidDomain[vid]; ok && owner != bd.Name {
+				ambiguousVID[vid] = true
+			} else {
+				vidDomain[vid] = bd.Name
+			}
+		}
+	}
+	memberToBridge := make(map[string]string)
+	for _, bd := range cfg.BridgeDomains {
+		if bd == nil {
+			continue
+		}
+		bridgeName := "br-" + bd.Name
+		for _, raw := range bd.Members {
+			ref := cfg.SplitInterfaceUnitRef(raw)
+			if !ref.HasUnit {
+				continue
+			}
+			unitNumber, _, err := config.CanonicalLogicalUnit(ref.UnitTok)
+			if err != nil {
+				continue
+			}
+			ifc := cfg.Interfaces.Interfaces[ref.Base]
+			if ifc == nil || !ifc.VlanTagging {
+				continue
+			}
+			unit := ifc.Units[unitNumber]
+			if unit == nil {
+				continue
+			}
+			vid := unit.VlanID
+			if vid < 1 || vid > 4094 || ambiguousVID[vid] || vidDomain[vid] != bd.Name {
+				continue
+			}
+			memberName := fmt.Sprintf("%s.%d", config.LinuxIfName(ref.Base), vid)
+			memberToBridge[memberName] = bridgeName
 		}
 	}
 
 	for _, bd := range cfg.BridgeDomains {
+		if bd == nil {
+			continue
+		}
 		bridgeName := "br-" + bd.Name
 		if seen[bridgeName] {
 			continue
@@ -1653,20 +1696,18 @@ func buildBridgeDomainModels(cfg *config.Config, result *CompileResult, seen map
 		})
 	}
 
-	// Set BridgeMaster on VLAN sub-interfaces that are bridge domain members.
+	// Attach only explicitly named, configured VLAN netdevs. Passing non-IP
+	// frames to the kernel remains necessary for ARP/LLDP; this allowlist is
+	// what bounds the kernel bridge's L2 flood domain.
 	for i, mi := range result.ManagedInterfaces {
 		if !isConfiguredVLANSubInterface(mi.Name, cfg) {
 			continue
 		}
-		if idx := strings.IndexByte(mi.Name, '.'); idx >= 0 {
-			suffix := mi.Name[idx+1:]
-			if vid, err := strconv.Atoi(suffix); err == nil {
-				if bridge, ok := vlanToBridge[vid]; ok {
-					result.ManagedInterfaces[i].BridgeMaster = bridge
-				}
-			}
+		if bridge, ok := memberToBridge[mi.Name]; ok {
+			result.ManagedInterfaces[i].BridgeMaster = bridge
 		}
 	}
+
 }
 
 // stripUnmanagedInterfaces discovers every system interface and marks the
