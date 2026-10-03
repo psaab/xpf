@@ -525,6 +525,12 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// #11821: distinct explicit default-policy stanzas must not last-win.
+	defaultPolicyConflictWarnings, err := validateDefaultPolicyConflicts11821(
+		tree.Children, opts.lenientDefaultPolicyConflict11821)
+	if err != nil {
+		return nil, err
+	}
 
 	// #11013: security policies do not implement the firewall filter's
 	// `then next term` semantics. An unrecognized then sibling is dropped.
@@ -785,6 +791,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, policyThenDenyWarnings...)
 	warnings = append(warnings, policyThenCountAlarmWarnings...)
 	warnings = append(warnings, defaultPolicyWarnings...)
+	warnings = append(warnings, defaultPolicyConflictWarnings...)
 	warnings = append(warnings, policyThenSiblingWarnings...)
 	warnings = append(warnings, policyEnforcementWarnings...)
 	warnings = append(warnings, policyMissingMatchWarnings...)

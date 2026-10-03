@@ -12763,6 +12763,22 @@ and `pkg/dataplane/userspace/default_policy_3065_test.go`
 reads is `"deny"` for an unset config, `"permit"`/`"reject"` for the explicit
 overrides).
 
+### #11821 — Conflicting duplicate `default-policy` stanzas
+
+The enum schema validates each `default-policy` leaf independently, but
+repeated stanzas can select different device-wide no-match actions. Strict
+compilation now rejects conflicting values across repeated stanzas in one
+`policies` block or across repeated top-level `security` roots. Tolerant
+`Load` and `SyncApply` emit a named warning and compile the no-match default as
+`deny-all` after all roots have been processed, so a later `permit-all` cannot
+silently override an earlier `deny-all` (or vice versa). Repeated stanzas with
+the same action remain accepted. The existing #11367 gate continues to handle
+a single block containing multiple choice children.
+
+Regression coverage: `pkg/config/compiler_default_policy_conflict_11821_test.go`
+checks both duplicate shapes and action orders, strict rejection, tolerant
+warnings and fail-closed compilation, and acceptance of identical duplicates.
+
 ### #3534 — `default-policy-log session-init|session-close` (implicit default RT_FLOW logging)
 
 Split from #3363 Part 2. Operators want the implicit default-policy verdict to
