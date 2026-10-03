@@ -1,11 +1,14 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // #6611 review follow-up. The original PR claimed the strict cluster-auth gate
@@ -118,6 +121,31 @@ func TestBootstrapFromFileRejectsEmptyConfig_10735(t *testing.T) {
 	}
 	if d.store.EverCommitted() {
 		t.Fatal("empty config marked the fresh store ever-committed")
+	}
+}
+
+// TestBootstrapFromFileRejectsOversizedConfig_11828 pins the same 16 MiB
+// ceiling used by every configstore ingress at the first-boot file boundary.
+func TestBootstrapFromFileRejectsOversizedConfig_11828(t *testing.T) {
+	d, hasActive := bootstrapDaemon(t, "system { host-name oversized; }\n", -1)
+	f, err := os.OpenFile(d.opts.ConfigFile, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		t.Fatalf("open config: %v", err)
+	}
+	if err := f.Truncate(configstore.MaxConfigSize + 1); err != nil {
+		f.Close()
+		t.Fatalf("truncate oversized config: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close config: %v", err)
+	}
+
+	err = d.bootstrapFromFile()
+	if !errors.Is(err, configstore.ErrExceedsLimit) {
+		t.Fatalf("bootstrapFromFile(oversized config) error = %v, want size-limit error", err)
+	}
+	if hasActive() {
+		t.Fatal("oversized bootstrap config was committed")
 	}
 }
 
