@@ -109,6 +109,20 @@ const mgmtVRFTableID = config.ManagementVRFTableID
 // ruleListFn seam in pkg/dataplane/userspace routes.go.
 var learnedRouteListFn = netlink.RouteListFiltered
 
+// SetLearnedRouteListFnForTest installs a fake netlink route enumerator for
+// the duration of a test and returns a restore closure the caller defers via
+// t.Cleanup. It lives in production-compiled code (not _test.go) so the
+// cross-language FIB golden in pkg/dataplane/userspace can drive the REAL
+// ImportLearnedRoutes against a synthetic kernel dump (#11419): the golden
+// binds config → builder + learned import → snapshot JSON → Rust FIB, and a
+// seam confined to this package would force the golden to stub the very
+// importer it exists to cover. Never called from production code.
+func SetLearnedRouteListFnForTest(fn func(int, *netlink.Route, uint64) ([]netlink.Route, error)) func() {
+	prev := learnedRouteListFn
+	learnedRouteListFn = fn
+	return func() { learnedRouteListFn = prev }
+}
+
 // LearnedRoute is one kernel-FIB unicast or blackhole route that the userspace
 // dataplane FIB does not derive from configuration.
 // It is deliberately a flat value with no netlink types in it: the consumer
