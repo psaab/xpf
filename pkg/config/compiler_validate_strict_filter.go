@@ -1409,22 +1409,36 @@ func validateFilterFromMatchStrict(cfg *Config) error {
 // or co-locates one target with a terminating `then discard` / `then reject`
 // (#3308).
 //
-// A term has only one RoutingInstance field, so distinct FBF targets cannot be
-// represented without silently discarding one authored decision. Repeating the
-// same target is harmless. For RI+discard/reject, the term instead asks the
-// dataplane to route the packet via the named instance AND drop/reject it; both
-// runtimes resolve that contradiction to deny, and this gate keeps the operator
-// from authoring it at commit.
+// A term has only one RoutingInstance field, so multiple distinct targets
+// cannot be represented: compileFilterThen retains the first target and first
+// distinct alternative so the strict gate can reject the ambiguous last-wins
+// result without allocating a per-term history slice. Repeating the same target
+// is harmless.
 //
-// The target history is recorded separately from TerminalActions because
-// `then routing-instance <x>` is a terminating FBF action, not an
-// accept/reject/discard keyword. A single target with `then accept` (or no
-// explicit action) is the legitimate filter-based-forwarding case and is NOT
-// rejected.
+// RI+discard/reject is a separate contradiction: the term asks the dataplane
+// to BOTH route the packet via the named instance AND drop/reject it.
+// Historically there was no commit-time mutual-exclusion gate AND both
+// forwarding paths honored the steer while only logging the deny — a fail-open
+// PBR whose audit trail lied. Both paths now resolve the contradiction to the
+// DENY: the userspace PBR runtime (ingress_route_table_override,
+// userspace-dp/src/afxdp/forwarding/mod.rs) returns RouteOverride::Drop for a
+// reject/discard term (#4392), and the kernel `ip rule` mirror
+// (buildPBRFromFilter, pkg/routing/rules.go) skips the steering rule (#4534).
+// This gate keeps the operator from authoring the contradiction at commit; on
+// the tolerant load / peer-sync path it warns and both runtimes drop the term
+// independently.
 //
-// The walk is deterministic (filters sorted by name, terms in config order).
-// On the tolerant load / peer-sync path the caller downgrades an error to a
-// named warning (#1960 no-brick). Mirrors validateFilterPortExceptStrict.
+// The conflict is on the typed fields term.RoutingInstance (the
+// `then routing-instance` value) and term.Action ("discard" / "reject", set by
+// compileFilterThen). A single routing-instance target with `then accept` (or
+// no terminal action) is the legitimate filter-based-forwarding case and is
+// NOT rejected. Multiple distinct routing-instance targets are rejected
+// regardless of an explicit action.
+//
+// The walk is deterministic (filters sorted by name, terms in config order). On
+// the tolerant load / peer-sync path the caller downgrades the returned error to
+// a warning (#1960 no-brick); the operator never reaches that state through a
+// commit. Mirrors validateFilterPortExceptStrict.
 func validateFilterRoutingInstanceConflictStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil

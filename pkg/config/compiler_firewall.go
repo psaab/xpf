@@ -737,9 +737,11 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 						schemaForPath("firewall", "family", af, "filter", "term", "from"))
 
 					// #3850: apply EVERY `then {}` block. compileFilterThen
-					// accumulates modifiers; a terminal action (accept/discard/
-					// reject) resolves last-wins across blocks. Each
-					// routing-instance target is recorded separately so the
+					// accumulates modifiers (count/log/forwarding-class/...); a
+					// terminal action (accept/discard/reject) resolves last-wins
+					// across blocks (Junos merges duplicate stanzas), so the
+					// second block's action is applied, never silently dropped.
+					// Each routing-instance target is recorded separately so the
 					// validator can reject distinct FBF destinations.
 					for _, thenNode := range termBody.FindChildren("then") {
 						compileFilterThen(thenNode, term)
