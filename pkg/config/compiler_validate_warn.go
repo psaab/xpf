@@ -1645,6 +1645,8 @@ func ValidateConfig(cfg *Config) []string {
 				// accepts.
 				warnings = append(warnings,
 					classOfServiceClassifierQueueWarnings(cos, iface.Name, unit)...)
+				warnings = append(warnings,
+					classOfServiceFilterForwardingClassWarnings(cfg, cos, iface.Name, unit)...)
 			}
 		}
 		hasCoSRuntimeConfig := len(cos.Interfaces) > 0 ||

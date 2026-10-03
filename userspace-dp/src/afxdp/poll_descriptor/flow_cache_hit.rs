@@ -332,6 +332,15 @@ pub(super) fn stage_flow_cache_hit(
             flow_state.flow_cache.reclassify_hit_as_miss();
             return FlowCacheOutcome::FallThrough;
         }
+        if cached_descriptor
+            .tx_selection
+            .filter_forwarding_class_fallback_pinned
+        {
+            crate::afxdp::tx::FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL.fetch_add(
+                1,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
         // #2573: replay ALL matched `then count` term counters, not just the
         // last. A #2544 fall-through flow can match multiple count terms.
         cached_descriptor

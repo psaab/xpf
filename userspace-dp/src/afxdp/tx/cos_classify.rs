@@ -8,6 +8,12 @@ use crate::afxdp::mirror::MIRROR_TX_FRAME_RESERVE;
 #[path = "cos_classify_ba.rs"]
 mod ba;
 use ba::{ba_ingress_trust, resolve_trusted_ba_queue_id, BaIngressTrust};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// #11787: packets whose filter-selected forwarding-class has no materialized
+/// queue and therefore use the pinned interface default queue.
+pub(in crate::afxdp) static FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL: AtomicU64 =
+    AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::afxdp) struct CoSTxSelection {
@@ -31,11 +37,18 @@ pub(in crate::afxdp) struct CoSTxSelection {
     pub(in crate::afxdp) filter_log: Option<crate::filter::FilterLogMatch>,
 }
 
-fn map_cached_forwarding_class_queue(
+#[inline]
+fn map_filter_forwarding_class_queue(
     iface: &CoSInterfaceConfig,
-    forwarding_class: Option<&Arc<str>>,
-) -> Option<u8> {
-    forwarding_class.and_then(|class| iface.queue_by_forwarding_class.get(class.as_ref()).copied())
+    forwarding_class: Option<&str>,
+) -> (Option<u8>, bool) {
+    let Some(forwarding_class) = forwarding_class else {
+        return (None, false);
+    };
+    match iface.queue_by_forwarding_class.get(forwarding_class) {
+        Some(queue_id) => (Some(*queue_id), false),
+        None => (Some(iface.default_queue), true),
+    }
 }
 
 /// #2238: classification verdict for a LOCALLY-GENERATED reply frame,
@@ -415,6 +428,7 @@ fn cached_cos_tx_selection_flowless(
         // Flowless packets are re-resolved per packet (no cache entry),
         // so there is nothing to mark for hit-path re-classification.
         ba_reclassify: false,
+        filter_forwarding_class_fallback_pinned: false,
     }
 }
 
@@ -556,8 +570,14 @@ fn resolve_cached_cos_tx_selection_impl(
     // queue for the flow's lifetime and stays cached; a DSCP / 802.1p BA
     // classifier picks the queue from THIS packet's DSCP / PCP and must be
     // re-resolved on every hit.
-    let fc_queue =
-        iface.and_then(|iface| map_cached_forwarding_class_queue(iface, forwarding_class.as_ref()));
+    let (fc_queue, filter_forwarding_class_fallback_pinned) = iface
+        .map(|iface| {
+            map_filter_forwarding_class_queue(iface, forwarding_class.as_deref())
+        })
+        .unwrap_or((None, false));
+    if filter_forwarding_class_fallback_pinned {
+        FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
     let queue_id = fc_queue.or_else(|| {
         iface.and_then(|iface| {
             resolve_trusted_ba_queue_id(
@@ -626,6 +646,7 @@ fn resolve_cached_cos_tx_selection_impl(
         three_color_policers,
         filter_log,
         ba_reclassify,
+        filter_forwarding_class_fallback_pinned,
     }
 }
 
@@ -1129,7 +1150,8 @@ fn resolve_cos_tx_selection_internal(
     // Queue selection precedence: the output-filter forwarding-class, then the
     // ingress input-filter forwarding-class, then the DSCP behavior-aggregate
     // classifier, then the IP-precedence classifier (#6847), then the 802.1p
-    // classifier, then the interface default queue.
+    // classifier, then the interface default queue. An explicit filter class
+    // with no materialized queue pins that default rather than falling through.
     //
     // DSCP before inet-precedence is load-bearing, not incidental: the two read
     // the same DS field, so a unit binding both is rejected at commit
@@ -1138,14 +1160,15 @@ fn resolve_cos_tx_selection_internal(
     // boots (#1960). On that boot this order is what makes "DSCP wins" true,
     // which is what the Go warning tells the operator will happen. Both L3
     // arms precede the L2 802.1p arm.
-    let queue_id = output_result
+    let forwarding_class = output_result
         .forwarding_class
-        .and_then(|forwarding_class| iface.queue_by_forwarding_class.get(forwarding_class).copied())
-        .or_else(|| {
-            ingress_forwarding_class.and_then(|forwarding_class| {
-                iface.queue_by_forwarding_class.get(forwarding_class).copied()
-            })
-        })
+        .or(ingress_forwarding_class);
+    let (filter_fc_queue, filter_fc_fallback_pinned) =
+        map_filter_forwarding_class_queue(iface, forwarding_class);
+    if filter_fc_fallback_pinned {
+        FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    let queue_id = filter_fc_queue
         .or_else(|| {
             resolve_trusted_ba_queue_id(
                 iface,
