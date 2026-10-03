@@ -19,6 +19,9 @@ xpf (0.0.0) unstable; urgency=medium
     speed as zero instead of inferring 1Gbps from TxQLen (#11700).
   * Return the filterable UNKNOWN sentinel for AppID-disabled no-match sessions
     so `application UNKNOWN` selects the same population in either mode (#11818).
+  * Match omitted-protocol TCP+UDP applications in the AppID-disabled tuple
+    label fallback, keeping the label consistent with AppID-enabled catalogs
+    (#11816).
   * Restrict config archive rotation to recognized XPF snapshot names so
     foreign `config-*.conf` files in shared archive directories survive (#11804).
   * Preserve the inner DSCP on GRE, WireGuard, and IPsec decapsulation so the

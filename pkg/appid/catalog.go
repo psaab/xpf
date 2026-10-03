@@ -40,6 +40,20 @@ type Catalog struct {
 	AppNames map[uint16]string
 }
 
+// appProtocolCandidates is shared by catalog emission and the disabled
+// tuple fallback. An omitted protocol uses Junos's TCP+UDP default; an explicit
+// protocol contributes only its resolved number, and an invalid explicit
+// protocol contributes no candidates.
+func appProtocolCandidates(appProtocol string, resolved uint8, resolvedOK bool) ([2]uint8, int) {
+	if strings.TrimSpace(appProtocol) == "" {
+		return [2]uint8{6, 17}, 2
+	}
+	if !resolvedOK {
+		return [2]uint8{}, 0
+	}
+	return [2]uint8{resolved}, 1
+}
+
 // BuildCatalog produces the ordered application catalog for a config. The id
 // assignment MUST stay in lock-step with pkg/dataplane.compileApplications:
 // names come from CatalogNames(cfg, ApplicationIdentification), sorted, with
@@ -239,11 +253,8 @@ func BuildCatalog(cfg *config.Config) (Catalog, error) {
 				// only an omitted spec fans out; an explicit protocol (0 or any
 				// other) stays single. The `app.Protocol != "icmp"` guard is now
 				// subsumed — a non-empty protocol never fans out.
-				protos := []uint8{proto}
-				if strings.TrimSpace(app.Protocol) == "" {
-					protos = []uint8{6, 17}
-				}
-				for _, p := range protos {
+				protos, protoCount := appProtocolCandidates(app.Protocol, proto, protoOK)
+				for _, p := range protos[:protoCount] {
 					cat.Entries = append(cat.Entries, CatalogEntry{
 						Name:        name,
 						AppID:       appID,

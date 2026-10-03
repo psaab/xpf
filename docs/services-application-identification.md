@@ -118,6 +118,12 @@ upfront what they're getting and not getting.
    broad protocol-only app could shadow a specific port-based app on
    the enabled path only.
 
+   The omitted-protocol Junos default is TCP+UDP in both modes: the enabled
+   catalog fans out to those rows, and the disabled tuple fallback applies the
+   same protocol set (#11816). The regression test
+   `TestOmittedProtocolLabelsParityAcrossAppIDKnob11816` pins TCP/UDP agreement
+   and rejects other protocols.
+
    > **Behavior change (#5296):** for a session that matches MULTIPLE
    > overlapping same-tier catalog applications, the displayed
    > application-name label winner changes from "alphabetically-first
