@@ -459,6 +459,7 @@ func TestProcessStatusSourceNATPoolStatusRoundTrip(t *testing.T) {
 			AllocationsTotal:                 1,
 			ReusesTotal:                      3,
 			ExhaustionTotal:                  5,
+			IdleLeaseImportCapacityTotal:     17,
 		}},
 	}
 	raw, err := json.Marshal(&in)
@@ -471,6 +472,13 @@ func TestProcessStatusSourceNATPoolStatusRoundTrip(t *testing.T) {
 	}
 	if _, ok := obj["source_nat_pools"]; !ok {
 		t.Fatalf("source_nat_pools missing from ProcessStatus JSON: %s", string(raw))
+	}
+	var pools []map[string]json.RawMessage
+	if err := json.Unmarshal(obj["source_nat_pools"], &pools); err != nil || len(pools) != 1 {
+		t.Fatalf("decode source_nat_pools from helper-shaped status JSON: len=%d err=%v", len(pools), err)
+	}
+	if _, ok := pools[0]["idle_lease_import_capacity_total"]; !ok {
+		t.Fatalf("idle_lease_import_capacity_total missing from pool JSON: %s", string(raw))
 	}
 	var back ProcessStatus
 	if err := json.Unmarshal(raw, &back); err != nil {

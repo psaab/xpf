@@ -88,6 +88,11 @@ func (c *xpfCollector) initNATDescriptors() {
 		"Total source NAT pool allocator exhaustion events in the userspace dataplane.",
 		[]string{"pool", "rule"}, nil,
 	)
+	c.userspaceSNATPoolIdleLeaseImportCapacityTotal = prometheus.NewDesc(
+		"xpf_userspace_source_nat_pool_idle_lease_import_capacity_total",
+		"Total HA idle-lease imports refused because the bounded persistent-lease table remained full after pressure GC.",
+		[]string{"pool", "rule"}, nil,
+	)
 	c.userspaceSNATPoolLiveLockAcquisitionsTotal = prometheus.NewDesc(
 		"xpf_userspace_source_nat_pool_live_lock_acquisitions_total",
 		"Acquisitions of this source NAT pool's residual live-state mutex "+

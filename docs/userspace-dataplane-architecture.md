@@ -1226,8 +1226,12 @@ the NAT module applies it:
   after one bounded expiry-GC pressure pass, a still-full table refuses a new
   lease mint — and likewise refuses idle imports and local mints — so the cap
   bounds total table growth with shared fate across all three paths. Imported
-  leases also check live address-only and PAT owners across exact, target-host,
-  and any-remote scopes.
+  leases check overlapping peer PAT/address-only owners before and after claim;
+  persistent address-only ownership is indexed across exact, target-host, and
+  any-remote scopes, including ordinary PAT mints. A post-claim PAT conflict
+  rolls back under allocator lock. Clear-fenced imports have a distinct outcome.
+  capacity refusals increment `idle_lease_import_capacity_total`, exported as
+  `xpf_userspace_source_nat_pool_idle_lease_import_capacity_total`.
   HA idle-lease batches carry a sender origin and durable clear generation.
   Managers persist both outbound generations and each peer's high-water mark in
   `/var/lib/xpf/persistent-nat-lease-generation.json`; a newer generation

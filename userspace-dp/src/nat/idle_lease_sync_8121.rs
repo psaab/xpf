@@ -118,6 +118,9 @@ pub(crate) struct DisplayLeaseRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IdleLeaseImport {
     Installed,
+    /// A local clear fence still rejects this peer record. Kept separate from
+    /// ordinary existing leases so a pure stale batch is observable.
+    SkippedClearFenced,
     /// A lease already exists for this source. The LOCAL one wins — it may hold
     /// live flows this node is forwarding, and those outrank a remote idle
     /// record by definition.
@@ -254,15 +257,17 @@ impl PortAllocator {
             remote: rec.remote,
         };
         let mut live = self.lock_live();
-        if live.persistent_nat_import_is_clear_fenced(&key, now_ns)
-            || live.persistent_by_source.contains_key(&key)
-        {
+        if live.persistent_nat_import_is_clear_fenced(&key, now_ns) {
+            return IdleLeaseImport::SkippedClearFenced;
+        }
+        if live.persistent_by_source.contains_key(&key) {
             return IdleLeaseImport::SkippedExisting;
         }
         // Imports and synced-session mints share the persistent-table cap.
         // Give one bounded pressure-GC pass a chance to reclaim expired idle
         // leases; if still full, refuse this lease.
         if self.persistent_lease_capacity_reached(&mut live, now_ns) {
+            self.record_idle_lease_import_capacity();
             return IdleLeaseImport::SkippedCapacity;
         }
         let translated = TranslatedTuple {
@@ -288,7 +293,7 @@ impl PortAllocator {
             }
         }
         let expires_at_ns = now_ns.saturating_add(remaining_ns);
-        live.persistent_by_source.insert(
+        live.insert_persistent_lease(
             key,
             PersistentLease {
                 translated,
@@ -314,5 +319,26 @@ impl PortAllocator {
         // active held — the acceptance criterion's third bullet.
         PortAllocator::insert_lease_expiration_locked(&mut live, addr_index, expires_at_ns, key);
         IdleLeaseImport::Installed
+    }
+    /// Check a peer allocator's live ownership domains using the same scope
+    /// semantics as local idle-lease import admission.
+    pub(super) fn peer_import_idle_address_only_contended(
+        &self,
+        protocol: u8,
+        translated: TranslatedTuple,
+        remote: Option<(IpAddr, u16)>,
+    ) -> bool {
+        self.lock_live()
+            .import_idle_address_only_contended(protocol, translated, remote)
+    }
+
+    pub(super) fn peer_import_idle_pat_address_only_contended(
+        &self,
+        protocol: u8,
+        translated: TranslatedTuple,
+        remote: Option<(IpAddr, u16)>,
+    ) -> bool {
+        self.lock_live()
+            .import_idle_pat_address_only_contended(protocol, translated, remote)
     }
 }

@@ -335,6 +335,7 @@ func populatedCoverageStatus() dpuserspace.ProcessStatus {
 				PoolName: "p1", RuleName: "r1",
 				LiveFlows: 5, UsedPorts: 50, PersistentLeases: 0,
 				AllocationsTotal: 100, ReusesTotal: 10, ExhaustionTotal: 0,
+				IdleLeaseImportCapacityTotal: 9,
 			},
 		},
 		EventStream: &dpuserspace.EventStreamStatus{
@@ -593,6 +594,7 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_userspace_three_color_policer_drops_total",                    // three-color policer
 		"xpf_userspace_source_nat_pool_live_flows",                         // userspace SNAT pool
 		"xpf_userspace_source_nat_pool_max_tracked_flows",                  // userspace SNAT pool cap (#9896)
+		"xpf_userspace_source_nat_pool_idle_lease_import_capacity_total",   // #11496 imported-lease cap refusals
 		"xpf_userspace_neighbor_warm_drops_total",                          // neighbor-warm
 		"xpf_userspace_neg_neigh_fast_fail_total",                          // #1782 cold-start H1
 		"xpf_userspace_worker_cos_wheel_ticks_advanced_total",              // #1782 Step-1 (i) wheel sum

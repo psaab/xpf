@@ -510,6 +510,17 @@ struct ReverseIdentityHostKey {
     dst_ip: IpAddr,
 }
 
+/// Scoped keys for idle address-only persistent leases. Unlike live reverse
+/// owners, these leases have no flow entry to index them.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum PersistentAddressOnlyOwnerKey {
+    Exact(AddressOnlyReverseKey),
+    Host(ReverseIdentityHostKey),
+    HostWildcard(ReverseIdentityHostKey),
+    Any(ReverseIdentityBaseKey),
+    AnyWildcard(ReverseIdentityBaseKey),
+}
+
 /// #10190: the exact PAT reverse identity used by the same-allocator
 /// cross-domain guard. PAT allocations normally need only the per-address
 /// bitmap, but an address-only reservation keys the full reverse tuple
@@ -932,6 +943,9 @@ pub(super) struct PortAllocatorLiveState {
     address_only_owner_counts_by_host: FxHashMap<ReverseIdentityHostKey, u32>,
     pat_owner_counts_by_base: FxHashMap<ReverseIdentityBaseKey, u32>,
     pat_owner_counts_by_host: FxHashMap<ReverseIdentityHostKey, u32>,
+    /// #11496: idle address-only leases remain reverse-identity owners between
+    /// flow releases and expiry, so peer import checks need their own index.
+    persistent_address_only_owner_counts: FxHashMap<PersistentAddressOnlyOwnerKey, u32>,
     gc_counter: u32,
 }
 
@@ -941,6 +955,134 @@ impl PortAllocatorLiveState {
             lease_expirations_by_addr: vec![BTreeSet::new(); addr_count],
             ..Self::default()
         }
+    }
+
+    fn increment_persistent_address_only_owner(&mut self, key: PersistentAddressOnlyOwnerKey) {
+        let count = self
+            .persistent_address_only_owner_counts
+            .entry(key)
+            .or_insert(0);
+        *count = count.saturating_add(1);
+    }
+
+    fn decrement_persistent_address_only_owner(&mut self, key: PersistentAddressOnlyOwnerKey) {
+        if let Some(count) = self.persistent_address_only_owner_counts.get_mut(&key) {
+            if *count <= 1 {
+                self.persistent_address_only_owner_counts.remove(&key);
+            } else {
+                *count -= 1;
+            }
+        }
+    }
+
+    fn add_persistent_address_only_owner(
+        &mut self,
+        key: PersistentSourceKey,
+        lease: PersistentLease,
+    ) {
+        if !lease.address_only || lease.revoked {
+            return;
+        }
+        let base = ReverseIdentityBaseKey {
+            protocol: key.protocol,
+            translated_ip: lease.translated.ip,
+            translated_port: lease.translated.port,
+        };
+        self.increment_persistent_address_only_owner(PersistentAddressOnlyOwnerKey::Any(base));
+        match key.remote {
+            Some((dst_ip, dst_port)) => {
+                let host = ReverseIdentityHostKey { base, dst_ip };
+                self.increment_persistent_address_only_owner(
+                    PersistentAddressOnlyOwnerKey::Host(host),
+                );
+                if dst_port == 0 {
+                    self.increment_persistent_address_only_owner(
+                        PersistentAddressOnlyOwnerKey::HostWildcard(host),
+                    );
+                } else {
+                    self.increment_persistent_address_only_owner(
+                        PersistentAddressOnlyOwnerKey::Exact(AddressOnlyReverseKey {
+                            protocol: key.protocol,
+                            translated_ip: lease.translated.ip,
+                            translated_port: lease.translated.port,
+                            dst_ip,
+                            dst_port,
+                        }),
+                    );
+                }
+            }
+            None => {
+                self.increment_persistent_address_only_owner(
+                    PersistentAddressOnlyOwnerKey::AnyWildcard(base),
+                );
+            }
+        }
+    }
+
+    fn remove_persistent_address_only_owner(
+        &mut self,
+        key: PersistentSourceKey,
+        lease: PersistentLease,
+    ) {
+        if !lease.address_only || lease.revoked {
+            return;
+        }
+        let base = ReverseIdentityBaseKey {
+            protocol: key.protocol,
+            translated_ip: lease.translated.ip,
+            translated_port: lease.translated.port,
+        };
+        self.decrement_persistent_address_only_owner(PersistentAddressOnlyOwnerKey::Any(base));
+        match key.remote {
+            Some((dst_ip, dst_port)) => {
+                let host = ReverseIdentityHostKey { base, dst_ip };
+                self.decrement_persistent_address_only_owner(
+                    PersistentAddressOnlyOwnerKey::Host(host),
+                );
+                if dst_port == 0 {
+                    self.decrement_persistent_address_only_owner(
+                        PersistentAddressOnlyOwnerKey::HostWildcard(host),
+                    );
+                } else {
+                    self.decrement_persistent_address_only_owner(
+                        PersistentAddressOnlyOwnerKey::Exact(AddressOnlyReverseKey {
+                            protocol: key.protocol,
+                            translated_ip: lease.translated.ip,
+                            translated_port: lease.translated.port,
+                            dst_ip,
+                            dst_port,
+                        }),
+                    );
+                }
+            }
+            None => {
+                self.decrement_persistent_address_only_owner(
+                    PersistentAddressOnlyOwnerKey::AnyWildcard(base),
+                );
+            }
+        }
+    }
+
+    pub(super) fn insert_persistent_lease(
+        &mut self,
+        key: PersistentSourceKey,
+        lease: PersistentLease,
+    ) -> Option<PersistentLease> {
+        let previous = self.persistent_by_source.insert(key, lease);
+        if let Some(previous) = previous {
+            self.remove_persistent_address_only_owner(key, previous);
+        }
+        self.add_persistent_address_only_owner(key, lease);
+        previous
+    }
+
+    pub(super) fn remove_persistent_lease(
+        &mut self,
+        key: &PersistentSourceKey,
+    ) -> Option<PersistentLease> {
+        let lease = self.persistent_by_source.remove(key)?;
+        self.remove_persistent_address_only_owner(*key, lease);
+        Some(lease)
     }
     /// Drop expired clear fences during the cold-path lease snapshot refresh.
     /// This keeps the replay guard bounded even when no later clear occurs.
@@ -973,17 +1115,18 @@ impl PortAllocatorLiveState {
     /// the allocator key but issue different tokens. Keep this check local to
     /// the allocator rather than widening the key — key widening would split
     /// live leases and would require a carry-over migration.
+    /// Does a live flow or persistent address-only lease own this reverse tuple?
     fn address_only_owns_wire_identity(
         &self,
         flow: &SourceNatFlowKey,
         translated: TranslatedTuple,
     ) -> bool {
-        self.address_only_owners
-            .contains_key(&AddressOnlyReverseKey::for_flow(
-                flow,
-                translated.ip,
-                translated.port,
-            ))
+        self.idle_import_identity_contended(
+            flow.protocol,
+            translated,
+            Some((flow.dst_ip, flow.dst_port)),
+            false,
+        )
     }
     /// #11475: address-only idle imports claim no bitmap bit, so check both
     /// live ownership domains for their exact, target-host, or any-remote scope.
@@ -1029,7 +1172,17 @@ impl PortAllocatorLiveState {
                     dst_ip,
                     dst_port,
                 };
+                let host = ReverseIdentityHostKey { base, dst_ip };
                 self.address_only_owners.contains_key(&address_key)
+                    || self
+                        .persistent_address_only_owner_counts
+                        .contains_key(&PersistentAddressOnlyOwnerKey::Exact(address_key))
+                    || self
+                        .persistent_address_only_owner_counts
+                        .contains_key(&PersistentAddressOnlyOwnerKey::HostWildcard(host))
+                    || self
+                        .persistent_address_only_owner_counts
+                        .contains_key(&PersistentAddressOnlyOwnerKey::AnyWildcard(base))
                     || (check_pat_owners
                         && self.pat_owners.contains_key(&PatReverseKey {
                             protocol,
@@ -1042,10 +1195,19 @@ impl PortAllocatorLiveState {
             Some((dst_ip, _)) => {
                 let host = ReverseIdentityHostKey { base, dst_ip };
                 self.address_only_owner_counts_by_host.contains_key(&host)
+                    || self
+                        .persistent_address_only_owner_counts
+                        .contains_key(&PersistentAddressOnlyOwnerKey::Host(host))
+                    || self
+                        .persistent_address_only_owner_counts
+                        .contains_key(&PersistentAddressOnlyOwnerKey::AnyWildcard(base))
                     || (check_pat_owners && self.pat_owner_counts_by_host.contains_key(&host))
             }
             None => {
                 self.address_only_owner_counts_by_base.contains_key(&base)
+                    || self
+                        .persistent_address_only_owner_counts
+                        .contains_key(&PersistentAddressOnlyOwnerKey::Any(base))
                     || (check_pat_owners && self.pat_owner_counts_by_base.contains_key(&base))
             }
         }
@@ -1769,6 +1931,8 @@ struct PortAllocatorShared {
     allocations_total: AtomicU64,
     reuses_total: AtomicU64,
     exhaustion_total: AtomicU64,
+    /// #11496: idle-lease imports refused at the persistent-table capacity.
+    idle_lease_import_capacity_total: AtomicU64,
     // #8447: the persistent-NAT ADMISSION pair. Both arms are counted, never
     // just the failure: a lone "declined" counter reading zero is equally
     // consistent with "nothing was declined" and with "this path never ran",
@@ -1865,6 +2029,7 @@ impl Default for PortAllocator {
                 allocations_total: AtomicU64::new(0),
                 reuses_total: AtomicU64::new(0),
                 exhaustion_total: AtomicU64::new(0),
+                idle_lease_import_capacity_total: AtomicU64::new(0),
                 persistent_admitted_total: AtomicU64::new(0),
                 persistent_declined_total: AtomicU64::new(0),
                 live_lock_acquisitions: AtomicU64::new(0),
@@ -1959,6 +2124,7 @@ impl PortAllocator {
                 allocations_total: AtomicU64::new(0),
                 reuses_total: AtomicU64::new(0),
                 exhaustion_total: AtomicU64::new(0),
+                idle_lease_import_capacity_total: AtomicU64::new(0),
                 persistent_admitted_total: AtomicU64::new(0),
                 persistent_declined_total: AtomicU64::new(0),
                 live_lock_acquisitions: AtomicU64::new(0),
@@ -2073,6 +2239,9 @@ impl PortAllocator {
                 if !lease.revoked {
                     count += 1;
                 }
+                if !lease.revoked {
+                    live.remove_persistent_address_only_owner(key, lease);
+                }
                 lease.revoked = true;
                 let revoked_until_ns = if lease.active_flows == 0 {
                     replay_until_ns
@@ -2087,7 +2256,7 @@ impl PortAllocator {
                     }
                     continue;
                 }
-                live.persistent_by_source.remove(&key);
+                live.remove_persistent_lease(&key);
                 Self::remove_lease_expiration_locked(
                     &mut live,
                     lease.addr_index,
@@ -2254,18 +2423,25 @@ impl PortAllocator {
     /// `rkey`?
     ///
     /// The sibling of [`Self::holds_port`] for the OTHER ownership space. A
-    /// `port no-translation` / port-less flow claims no occupancy bit — its
-    /// token is an entry in `address_only_owners` — so `holds_port` answers
-    /// `false` for an address the allocator very much does own. #6979 F6 wired
-    /// only the bitmap question, which left both directions of the
-    /// address-only route open: a peer's preserved `X:P` did not stop a PAT
-    /// mint of `X:P`, and two address-only flows in different pools collided
-    /// whenever protocol and remote matched.
+    /// live port no-translation flow records its reverse token in
+    /// `address_only_owners`; an idle lease is tracked by the persistent
+    /// identity index. Neither claims a PAT occupancy bit, so a bitmap-only
+    /// peer check can miss both owners.
     ///
-    /// Unlike the bitmap this key is REMOTE-SPECIFIC, so a match is an exact
-    /// wire-identity collision rather than a conservative one.
+    /// `rkey` is an exact candidate. It conflicts with an exact owner at the
+    /// same remote endpoint or a persistent host/any-remote owner that covers
+    /// it; another exact remote port remains distinct.
     pub(crate) fn holds_address_only_identity(&self, rkey: &AddressOnlyReverseKey) -> bool {
-        self.lock_live().address_only_owners.contains_key(rkey)
+        let translated = TranslatedTuple {
+            ip: rkey.translated_ip,
+            port: rkey.translated_port,
+        };
+        self.lock_live().idle_import_identity_contended(
+            rkey.protocol,
+            translated,
+            Some((rkey.dst_ip, rkey.dst_port)),
+            false,
+        )
     }
 
     /// Test-only alias of [`Self::holds_port`]. Kept as an ALIAS rather than a
@@ -2466,6 +2642,39 @@ impl PortAllocator {
     #[allow(dead_code)]
     pub(super) fn try_claim_translated_port(&self, addr_index: usize, port: u16) -> Option<bool> {
         Some(self.shared.occupancy.get(addr_index)?.reserve(port))
+    }
+    /// Undo an idle import whose post-claim peer-overlap check found a racing
+    /// owner. Keep the table and occupancy-token rollback under `live` so no
+    /// same-allocator operation can reuse the lease between those mutations.
+    pub(super) fn rollback_idle_lease_import(
+        &self,
+        rec: &super::idle_lease_sync_8121::IdleLeaseRecord,
+    ) -> bool {
+        let key = PersistentSourceKey {
+            protocol: rec.protocol,
+            src_ip: rec.src_ip,
+            src_port: rec.src_port,
+            routing_scope: rec.routing_scope,
+            remote: rec.remote,
+        };
+        let mut live = self.lock_live();
+        let Some(lease) = live.persistent_by_source.get(&key).copied() else {
+            return false;
+        };
+        if !lease.imported
+            || lease.active_flows != 0
+            || lease.translated.ip != rec.translated_ip
+            || lease.translated.port != rec.translated_port
+            || lease.address_only != rec.address_only
+        {
+            return false;
+        }
+        Self::remove_lease_expiration_locked(&mut live, lease.addr_index, lease.expires_at_ns, key);
+        live.remove_persistent_lease(&key);
+        if !lease.address_only {
+            self.free_translated_port(lease.addr_index, lease.translated.port, true);
+        }
+        true
     }
     /// #11475/#11495: make room for an imported lease or a synced-session
     /// persistent mint using one bounded persistent-table pressure sweep.
@@ -2858,7 +3067,7 @@ impl PortAllocator {
                     // Keep the clear fence through its original deadline. The
                     // fresh lease remains local truth while it exists; peer
                     // imports stay fenced if it expires before the window.
-                    live.persistent_by_source.insert(
+                    live.insert_persistent_lease(
                         key,
                         PersistentLease {
                             translated,
@@ -2958,7 +3167,7 @@ impl PortAllocator {
                     lease.expires_at_ns,
                     key,
                 );
-                live.persistent_by_source.remove(&key);
+                live.remove_persistent_lease(&key);
                 if !lease.address_only {
                     self.free_translated_port(lease.addr_index, lease.translated.port, true);
                 }
@@ -3107,7 +3316,7 @@ impl PortAllocator {
             if !address_only {
                 self.free_translated_port(addr_index, translated.port, true);
             }
-            live.persistent_by_source.remove(&key);
+            live.remove_persistent_lease(&key);
         }
         LeaseReuse::NoLease
     }
@@ -3549,7 +3758,7 @@ impl PortAllocator {
                 );
             }
             if remove_lease {
-                live.persistent_by_source.remove(&key);
+                live.remove_persistent_lease(&key);
                 // #6041: an address-only lease holds no pool port bit — only a
                 // PAT lease frees its port when the fresh-activation rollback
                 // removes it.
@@ -4485,7 +4694,7 @@ impl PortAllocator {
         // and needs no origin parameter: `imported: true`.
         let persistent_key = persistent.map(|(persistent_key, timeout_ns)| {
             let timeout_ns = bounded_persistent_nat_timeout_ns(timeout_ns);
-            live.persistent_by_source.insert(
+            live.insert_persistent_lease(
                 persistent_key,
                 PersistentLease {
                     translated,
@@ -4779,7 +4988,7 @@ impl PortAllocator {
                     lease.active_flows = lease.active_flows.saturating_add(1);
                 }
                 None => {
-                    live.persistent_by_source.insert(
+                    live.insert_persistent_lease(
                         persistent_key,
                         PersistentLease {
                             translated,
@@ -5435,7 +5644,7 @@ impl PortAllocator {
             if !address_only {
                 self.free_translated_port(addr_index, translated.port, true);
             }
-            live.persistent_by_source.remove(&key);
+            live.remove_persistent_lease(&key);
         }
 
         let reusing = reuse_addr.is_some();
@@ -5584,7 +5793,7 @@ impl PortAllocator {
             // minted, and this path mints none.
         } else {
             // The batch/per-key clear fence survives this fresh local lease.
-            live.persistent_by_source.insert(
+            live.insert_persistent_lease(
                 key,
                 PersistentLease {
                     translated,
@@ -5713,6 +5922,10 @@ impl PortAllocator {
             allocations_total: self.shared.allocations_total.load(Ordering::Relaxed),
             reuses_total: self.shared.reuses_total.load(Ordering::Relaxed),
             exhaustion_total: self.shared.exhaustion_total.load(Ordering::Relaxed),
+            idle_lease_import_capacity_total: self
+                .shared
+                .idle_lease_import_capacity_total
+                .load(Ordering::Relaxed),
             persistent_admitted_total: self
                 .shared
                 .persistent_admitted_total
@@ -5747,6 +5960,12 @@ impl PortAllocator {
                 .map(|occ| occ.recycle_scan_walks.load(Ordering::Relaxed))
                 .sum(),
         }
+    }
+
+    pub(super) fn record_idle_lease_import_capacity(&self) {
+        self.shared
+            .idle_lease_import_capacity_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// #4676: run the opportunistic global expiry GC WITHOUT holding the alloc
@@ -5946,7 +6165,7 @@ impl PortAllocator {
         // so the caller frees it (recycle). Because the bit stays set until that
         // free, a concurrent claim cannot re-hand-out the port even after the
         // lease is gone from the map.
-        live.persistent_by_source.remove(&key);
+        live.remove_persistent_lease(&key);
         // #6041: an address-only persistent lease holds no pool port bit — its
         // reverse-identity tokens were cleared per flow on release — so there is
         // nothing to free on the occupancy bitmap. A PAT lease records its port.
@@ -6050,6 +6269,9 @@ pub(crate) struct PortAllocatorSnapshot {
     pub(crate) allocations_total: u64,
     pub(crate) reuses_total: u64,
     pub(crate) exhaustion_total: u64,
+    /// #11496: cumulative imports refused because the shared persistent-lease
+    /// table remained full after its bounded pressure-GC pass.
+    pub(crate) idle_lease_import_capacity_total: u64,
     /// #8447: persistent-NAT admissions that produced a translation.
     pub(crate) persistent_admitted_total: u64,
     /// #8447: persistent-NAT admissions that returned a failure instead.

@@ -39,6 +39,7 @@ pub(crate) fn source_nat_pool_statuses(rules: &[SourceNatRule]) -> Vec<SourceNat
                 allocations_total: snap.allocations_total,
                 reuses_total: snap.reuses_total,
                 exhaustion_total: snap.exhaustion_total,
+                idle_lease_import_capacity_total: snap.idle_lease_import_capacity_total,
                 allocator_id: snap.allocator_id,
                 persistent_admitted_total: snap.persistent_admitted_total,
                 persistent_declined_total: snap.persistent_declined_total,
