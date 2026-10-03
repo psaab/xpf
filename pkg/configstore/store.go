@@ -834,10 +834,14 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 	// commit rejects the stale value loudly.
 	schemaErr := s.schemaValidateExpandedTree(tree)
 	if schemaErr != nil {
-		if config.IsUnknownTopLevelStanzaSchemaError(schemaErr) {
+		switch {
+		case config.IsUnknownSecurityZoneChildSchemaError(schemaErr):
+			slog.Warn("unknown security-zone child in tolerated config; continuing (a strict commit would reject this)",
+				"err", schemaErr, "issue", "#11575")
+		case config.IsUnknownTopLevelStanzaSchemaError(schemaErr):
 			slog.Warn("unknown top-level stanza in tolerated config; continuing (a strict commit would reject this)",
 				"err", schemaErr, "issue", "#11576")
-		} else {
+		default:
 			slog.Warn("typed-leaf schema violation in tolerated config; continuing (a strict commit would reject this)",
 				"err", schemaErr, "issue", "#1319")
 		}
@@ -863,6 +867,22 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 			// compileSections records the same warning for direct lenient callers;
 			// avoid duplicating it on Store.Load / Store.SyncApply.
 			warning := config.ToleratedUnknownTopLevelStanzaWarning(schemaErr)
+			found := false
+			for _, existing := range compiled.Warnings {
+				if existing == warning {
+					found = true
+					break
+				}
+			}
+			if !found {
+				compiled.Warnings = append(compiled.Warnings, warning)
+			}
+		}
+		// The schema walk reports only its first closed-world violation. The
+		// compiled zone records every unknown direct child, so recover all
+		// zone+keyword warnings here (deduping the uniform compiler gate's
+		// identical warning) for Store.Load and Store.SyncApply.
+		for _, warning := range config.ToleratedUnknownSecurityZoneChildWarnings(compiled) {
 			found := false
 			for _, existing := range compiled.Warnings {
 				if existing == warning {

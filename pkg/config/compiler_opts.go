@@ -2144,6 +2144,11 @@ type compileOpts struct {
 	// the dataplane never represented the leaf, so a leniently-loaded profile
 	// runs without it independently. Same doctrine as lenientFilterFromMatch.
 	lenientScreenUnknown bool
+	// lenientUnknownSecurityZoneChild11575 keeps unknown security-zone children
+	// tolerant-loadable while compileZones records a warning. When the
+	// keyword may name an enforcement control, the compiler unbinds the zone
+	// so its dropped policy cannot appear healthy on the dataplane.
+	lenientUnknownSecurityZoneChild11575 bool
 	// lenientTrailingTokens (#3332) downgrades the trailing-token gate
 	// (validateTrailingTokensStrict) from a hard compile error to a
 	// cfg.Warnings entry. The strict commit / commit-check path hard-rejects
@@ -3178,6 +3183,7 @@ func lenientCompileOpts() compileOpts {
 		lenientScreenProfileRefs:               true,
 		lenientScreenNumeric:                   true,
 		lenientScreenUnknown:                   true,
+		lenientUnknownSecurityZoneChild11575:   true,
 		lenientTrailingTokens:                  true,
 		lenientAddressUnimplementedForms:       true,
 		lenientAddressBookMappedPrefixes:       true,

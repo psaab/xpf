@@ -36,7 +36,7 @@ func buildScreenSnapshots(cfg *config.Config) []ScreenProfileSnapshot {
 	sort.Strings(zoneNames)
 	for _, name := range zoneNames {
 		zone := cfg.Security.Zones[name]
-		if zone == nil || zone.ScreenProfile == "" {
+		if zone == nil || zone.DroppedEnforcementChild || zone.ScreenProfile == "" {
 			continue
 		}
 		sp := cfg.Security.Screen[zone.ScreenProfile]
@@ -429,7 +429,7 @@ func buildScreenMissingProfileRefs(cfg *config.Config) []ScreenMissingProfileRef
 	sort.Strings(zoneNames)
 	for _, name := range zoneNames {
 		zone := cfg.Security.Zones[name]
-		if zone == nil || (zone.ScreenProfile == "" && !zone.ScreenProfileConfigured) {
+		if zone == nil || zone.DroppedEnforcementChild || (zone.ScreenProfile == "" && !zone.ScreenProfileConfigured) {
 			// No screen configured for this zone — legit Pass, not a
 			// missing reference.
 			continue
@@ -651,7 +651,7 @@ func userspaceSynCookieProtectionActive(cfg *config.Config) bool {
 		return false
 	}
 	for _, zone := range cfg.Security.Zones {
-		if zone == nil || zone.ScreenProfile == "" {
+		if zone == nil || zone.DroppedEnforcementChild || zone.ScreenProfile == "" {
 			continue
 		}
 		profile := cfg.Security.Screen[zone.ScreenProfile]
@@ -738,7 +738,7 @@ func buildScreenInertProfileRefs(cfg *config.Config) []ScreenMissingProfileRef {
 	var out []ScreenMissingProfileRef
 	for _, name := range zoneNames {
 		zone := cfg.Security.Zones[name]
-		if zone == nil || zone.ScreenProfile == "" {
+		if zone == nil || zone.DroppedEnforcementChild || zone.ScreenProfile == "" {
 			continue // no screen configured — legit Pass, not a finding
 		}
 		if cfg.Security.Screen[zone.ScreenProfile] == nil {

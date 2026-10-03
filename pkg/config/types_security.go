@@ -426,6 +426,19 @@ type ZoneConfig struct {
 	Interfaces              []string
 	ScreenProfile           string // reference to screen profile name
 	ScreenProfileConfigured bool   `json:"-"` // distinguishes an authored empty binding from no screen statement (#10973)
+	// UnknownZoneChildren records security-zone child keywords the compiler
+	// does not model (#11575, the zone instance of the #3318 class).
+	// compileZones switched only on known child names with no default case,
+	// so a misspelled child (e.g. a typo'd `screen` keyword) was silently
+	// dropped — the operator believed a protection was enabled when it was
+	// absent, and the tolerant load / peer-sync path published no warning.
+	// The #11575 gate below rejects (strict) or warns (tolerant).
+	UnknownZoneChildren []string `json:"-"`
+	// DroppedEnforcementChild marks an unrecognized child whose spelling could
+	// denote screen/IDS, interface membership, host-inbound, or TCP-RST
+	// enforcement. Tolerant compilation leaves the zone unbound rather than
+	// applying an incomplete enforcement stanza.
+	DroppedEnforcementChild bool `json:"-"`
 	HostInboundTraffic      *HostInboundTraffic
 	// InterfaceHostInbound holds per-interface host-inbound-traffic overrides
 	// (#3362), keyed by the interface ref exactly as it appears under

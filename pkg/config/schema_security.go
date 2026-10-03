@@ -183,10 +183,12 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 	// tcp-rst, screen, host-inbound-traffic, and the zone-local
 	// address-book — each modeled below; host-inbound service tokens
 	// ride as leaf VALUES validated by validateHostInboundTokensStrict,
-	// not as keywords, so no service name can false-reject. Verified
-	// three ways: the AcceptsValid inventory commits every modeled leaf,
-	// 10/10 shipped/example configs validate, and the tolerant
-	// Load/SyncApply downgrade (#1960) is unchanged.
+	// not as keywords, so no service name can false-reject. Unknown direct
+	// zone children remain strict rejects; compileZones records them for the
+	// tolerant #11575 warning and unbinds zones whose unknown keyword may carry
+	// enforcement. Verified three ways: the AcceptsValid inventory commits every
+	// modeled leaf, shipped/example configs validate, and the tolerant
+	// Load/SyncApply path preserves a cfg.Warnings diagnostic.
 	"zones": {desc: "Security zones", closedWorld: true, children: map[string]*schemaNode{
 		"security-zone": {desc: "Security zone name", args: 1, valueHint: ValueHintZoneName, placeholder: "<zone-name>", children: map[string]*schemaNode{
 			"description": {desc: "Zone description", args: 1, scalar: true, placeholder: "<text>", children: nil},
