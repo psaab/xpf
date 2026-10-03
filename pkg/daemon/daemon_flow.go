@@ -1157,13 +1157,16 @@ func (d *Daemon) archiveToSites(sites []string) {
 		wg.Add(1)
 		go func(dest string) {
 			defer wg.Done()
-			slog.Info("archiving config", "destination", dest)
+			redactedDest := config.RedactURL(dest)
+			slog.Info("archiving config", "destination", redactedDest)
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if err := transfer(ctx, srcPath, dest); err != nil {
-				slog.Warn("config archival failed", "destination", dest, "err", err)
+				// scp output may echo argv; scrub the exact destination first.
+				redactedErr := strings.ReplaceAll(err.Error(), dest, redactedDest)
+				slog.Warn("config archival failed", "destination", redactedDest, "err", redactedErr)
 			} else {
-				slog.Info("config archived successfully", "destination", dest)
+				slog.Info("config archived successfully", "destination", redactedDest)
 			}
 		}(site)
 	}
@@ -1181,22 +1184,15 @@ func (d *Daemon) archiveToSites(sites []string) {
 // capturing transfer and assert archiveConfig serializes the CURRENT active
 // config rather than the stale boot file (#3867).
 //
-// #10298: host-key trust is enforced against the rendered
-// security { ssh-known-hosts } file (sshKnownHostsPath, written by
-// applySSHKnownHosts in daemon_system.go). StrictHostKeyChecking=yes plus
-// UserKnownHostsFile=<rendered> and GlobalKnownHostsFile=/dev/null make the
-// rendered file the sole trust source. A MITM'd archival endpoint — or a
-// legitimately rotated key the operator has not yet re-trusted — FAILS the
-// transfer instead of being silently accepted (the pre-fix
-// StrictHostKeyChecking=no accepted any presented key). BatchMode=yes is
-// retained so a verification failure fails fast instead of prompting.
-// A missing or empty rendered trust file fails closed here, before exec,
-// with an actionable error: archival without configured trust must never
-// silently fall back to unchecked mode. Rotation flow: update
-// security { ssh-known-hosts { host <archive-host> { ...; }; }; }, commit
-// (applySSHKnownHosts re-renders before archiveConfig runs), and the next
-// transfer trusts the new key.
+// #10298: scp trusts only the rendered sshKnownHostsPath: StrictHostKeyChecking=yes,
+// UserKnownHostsFile=<rendered>, and GlobalKnownHostsFile=/dev/null reject MITM
+// and unapproved rotations; BatchMode=yes fails fast without prompting.
+// Missing/empty trust fails closed before exec. Update security { ssh-known-hosts ... }
+// and commit to trust a rotated key before the next transfer.
 func scpArchiveTransfer(ctx context.Context, srcPath, dest string) error {
+	if config.URLHasPassword(dest) {
+		return fmt.Errorf("config archival refused: inline URL password is not supported; use SSH key authentication")
+	}
 	knownHosts := sshKnownHostsPath
 	if fi, err := os.Stat(knownHosts); err != nil || fi.Size() == 0 {
 		if err == nil {
@@ -1225,6 +1221,7 @@ func scpArchiveTransfer(ctx context.Context, srcPath, dest string) error {
 	).CombinedOutput()
 	if err != nil {
 		if trimmed := strings.TrimSpace(string(out)); trimmed != "" {
+			trimmed = strings.ReplaceAll(trimmed, dest, config.RedactURL(dest))
 			return fmt.Errorf("%w: %s", err, trimmed)
 		}
 		return err

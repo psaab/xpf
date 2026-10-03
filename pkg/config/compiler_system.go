@@ -546,10 +546,16 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts)
 					// site rather than slot 1 alone — so widening the read
 					// closes the gate escape instead of arming it.
 					for _, site := range archiveSiteEntries(asNode) {
+						// Reject URL-embedded passwords at commit: scp is
+						// invoked with BatchMode=yes, so the password cannot
+						// authenticate and otherwise reaches process argv and logs.
+						if URLHasPassword(site.url) {
+							return fmt.Errorf("system archival archive-sites %q: inline URL password is not supported; use SSH key authentication", RedactURL(site.url))
+						}
 						// #4589 A7 F-02: reject a leading-dash archive-site at
 						// commit. Runtime archival shells out to `scp <src> <dest>`;
 						// a `-`-prefixed URL is never a valid scp destination and,
-						// pre-`--`-separator, was parsed as an scp option (CWE-88).
+						// pre-`--`-separator, was parsed by scp's getopt as an OPTION.
 						if strings.HasPrefix(site.url, "-") {
 							return fmt.Errorf("system archival archive-sites %q: an archive-site URL must not begin with '-' (it is passed to scp as a destination, not an option)", site.url)
 						}

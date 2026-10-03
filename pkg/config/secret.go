@@ -182,6 +182,40 @@ func RedactURL(s string) string {
 	return s
 }
 
+// URLHasPassword reports whether s carries an inline password in its
+// authority userinfo ("user:password@" before the host, #11774). It is the
+// commit-gate predicate paired with RedactURL: RedactURL redacts ANY
+// userinfo (even a bare "user@"), but a bare user is a legitimate scp
+// destination (SSH-key auth selects the remote account), while a password
+// can never authenticate — archival shells out to `scp -o BatchMode=yes`,
+// which disables password prompts — and would only leak via logs and the
+// scp argv visible in /proc. Only a ':' inside the userinfo counts.
+// Authority-bounded exactly like RedactURL (same start/end rules): an '@'
+// in the path ("host/p@th") or query ("host?x=a@b") is past the authority
+// and is not userinfo, and a ':' in the host:port slot ("host:22",
+// "[::1]:22") is a port, not a password. TrimSpace'd first to stay in
+// lockstep with the other commit gates.
+func URLHasPassword(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	authStart := urlAuthorityStart(s)
+	authEnd := len(s)
+	for j := authStart; j < len(s); j++ {
+		if c := s[j]; c == '/' || c == '?' || c == '#' {
+			authEnd = j
+			break
+		}
+	}
+	authority := s[authStart:authEnd]
+	at := strings.LastIndex(authority, "@")
+	if at <= 0 {
+		return false
+	}
+	return strings.Contains(authority[:at], ":")
+}
+
 // urlAuthorityStart returns the index at which a URL-ish string's authority
 // begins.
 //
