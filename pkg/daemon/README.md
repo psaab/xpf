@@ -588,7 +588,7 @@ tracker issue #4407 carries the remaining increments.
   `archiveTransfer` stayed a flat `Daemon` field (like increment 1's
   `ipsecSANudgeCh` and increment 2's `lastStandbyNeighborRefresh`) as the
   shared transport seam. Transfer-on-commit, periodic timer, and debt retries
-  all use the FIFO upload queue in `daemon_flow.go`.
+  all use the FIFO upload queue in `daemon_archive_transfer_11806.go`.
   - **Current-config remote archive debt (#11806).** A failed site transfer
     remains pending until a later current-config transfer succeeds. Commit and
     periodic attempts share one FIFO upload queue, so an older asynchronous SCP
