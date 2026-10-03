@@ -4892,6 +4892,42 @@ fn route_next_hop_matching_and_interface_only_still_build_11421() {
     .expect("valid next-hop shapes must still build");
 }
 
+/// #11421: negative routes use their discard disposition, not the next-hop
+/// list. A stale cross-family member must not block a blackhole in the helper.
+#[test]
+fn route_discard_ignores_unused_cross_family_next_hop_11421() {
+    let snapshot = ConfigSnapshot {
+        routes: vec![
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                destination: "10.0.0.0/8".into(),
+                next_hops: vec!["2001:db8::1".into()],
+                discard: true,
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "inet6.0".into(),
+                destination: "2001:db8::/32".into(),
+                next_hops: vec!["192.0.2.1".into()],
+                discard: true,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = try_build_forwarding_state_with_policy_counters(
+        &snapshot,
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect("unused cross-family gateways must not block negative routes");
+    let v4 = state.routes_v4.get("inet.0").expect("v4 blackhole table");
+    assert_eq!(v4.len(), 1);
+    assert!(v4[0].discard, "v4 route must retain its discard disposition");
+    let v6 = state.routes_v6.get("inet6.0").expect("v6 blackhole table");
+    assert_eq!(v6.len(), 1);
+    assert!(v6[0].discard, "v6 route must retain its discard disposition");
+}
+
 /// #6568 (member 1) anti-over-reject: every destination shape the Go producer
 /// can legitimately emit still builds. Without this, a gate that rejected
 /// EVERYTHING would satisfy the fail-closed test above while breaking all

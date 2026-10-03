@@ -93,6 +93,40 @@ func TestStaticFamilyBeltKeptFormsByteIdentical_9820(t *testing.T) {
 	}
 }
 
+func TestStaticFamilyBeltKeepsNegativeRouteWithUnusedCrossFamilyGateway11421(t *testing.T) {
+	m := &Manager{}
+	for _, tc := range []struct {
+		name string
+		sr   *config.StaticRoute
+		want string
+	}{
+		{
+			name: "discard",
+			sr: &config.StaticRoute{
+				Destination: "10.0.0.0/8",
+				NextHops:    []config.NextHopEntry{{Address: "2001:db8::1"}},
+				Discard:     true,
+			},
+			want: "ip route 10.0.0.0/8 Null0\n",
+		},
+		{
+			name: "reject",
+			sr: &config.StaticRoute{
+				Destination: "10.0.0.0/8",
+				NextHops:    []config.NextHopEntry{{Address: "2001:db8::1"}},
+				Reject:      true,
+			},
+			want: "ip route 10.0.0.0/8 reject\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := m.generateStaticRouteInTable(tc.sr, "", 0, nil, nil, nil); got != tc.want {
+				t.Fatalf("negative route with an unused cross-family gateway = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // A same-family `@` form never reaches the address-family predicate: the
 // existing FRR operand-shape belt drops the raw token first. This cell is
 // NOT family-belt proof.

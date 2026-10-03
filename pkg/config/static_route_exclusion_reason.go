@@ -28,11 +28,12 @@ import (
 // lenient snapshot exclusion and the FRR render belt; StaticRouteExclusions
 // carries the same reason to every config-backed show surface.
 
-// StaticRouteNextHopFamilyMismatchReason reports when an IP next-hop's family
-// differs from its static route destination. Empty/interface-only next-hops,
-// unparsable address tokens, and next-table routes are not family mismatches.
+// StaticRouteNextHopFamilyMismatchReason reports when a forwarding next-hop's
+// family differs from its static route destination. Empty/interface-only
+// next-hops, unparsable address tokens, and next-table/discard/reject routes
+// are not family mismatches; those routes do not use an IP gateway.
 func StaticRouteNextHopFamilyMismatchReason(sr *StaticRoute) string {
-	if sr == nil || sr.NextTable != "" {
+	if sr == nil || sr.NextTable != "" || sr.Discard || sr.Reject {
 		return ""
 	}
 	destinationFamily := FRRAddrFamily(sr.Destination)

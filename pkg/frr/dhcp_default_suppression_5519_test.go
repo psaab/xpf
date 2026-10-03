@@ -137,12 +137,53 @@ func TestStaticRouteRendersFIB_5519(t *testing.T) {
 		{"next-hop", &config.StaticRoute{Destination: "0.0.0.0/0", NextHops: []config.NextHopEntry{{Address: "10.0.0.1"}}}, true},
 		{"discard", &config.StaticRoute{Destination: "0.0.0.0/0", Discard: true}, true},
 		{"reject", &config.StaticRoute{Destination: "0.0.0.0/0", Reject: true}, true},
+		{"cross-family-next-hop", &config.StaticRoute{Destination: "0.0.0.0/0", NextHops: []config.NextHopEntry{{Address: "2001:db8::1"}}}, false},
+		{"discard-with-unused-cross-family-next-hop", &config.StaticRoute{Destination: "0.0.0.0/0", Discard: true, NextHops: []config.NextHopEntry{{Address: "2001:db8::1"}}}, true},
 		{"next-table", &config.StaticRoute{Destination: "0.0.0.0/0", NextTable: "Comcast"}, false},
 	}
 	for _, tc := range cases {
 		if got := staticRouteRendersFIB(tc.sr); got != tc.want {
 			t.Errorf("staticRouteRendersFIB(%s) = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// #11421: a cross-family static default is not rendered, so it must not mask
+// the DHCP-learned fallback. Negative routes still use their discard/reject
+// disposition, independently of any unused next-hop list.
+func TestCrossFamilyStaticDefaultKeepsDHCPDefault11421(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		route  *config.StaticRoute
+		dhcp   DHCPRoute
+		want   string
+		isIPv6 bool
+	}{
+		{
+			name:  "IPv4",
+			route: &config.StaticRoute{Destination: "0.0.0.0/0", NextHops: []config.NextHopEntry{{Address: "2001:db8::1"}}},
+			dhcp:  DHCPRoute{Destination: "", Gateway: "10.0.2.1"},
+			want:  "ip route 0.0.0.0/0 10.0.2.1 200",
+		},
+		{
+			name:   "IPv6",
+			route:  &config.StaticRoute{Destination: "::/0", NextHops: []config.NextHopEntry{{Address: "192.0.2.1"}}},
+			dhcp:   DHCPRoute{Destination: "", Gateway: "fe80::1", Interface: "ge-0-0-2", IsIPv6: true},
+			want:   "ipv6 route ::/0 fe80::1 ge-0-0-2 200",
+			isIPv6: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := &FullConfig{DHCPRoutes: []DHCPRoute{tc.dhcp}}
+			if tc.isIPv6 {
+				fc.Inet6StaticRoutes = []*config.StaticRoute{tc.route}
+			} else {
+				fc.StaticRoutes = []*config.StaticRoute{tc.route}
+			}
+			if got := renderDHCP5519(fc); !strings.Contains(got, tc.want) {
+				t.Fatalf("unrenderable cross-family static default suppressed DHCP fallback %q:\n%s", tc.want, got)
+			}
+		})
 	}
 }
 

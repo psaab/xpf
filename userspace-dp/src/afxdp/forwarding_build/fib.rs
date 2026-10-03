@@ -105,11 +105,14 @@ pub(super) fn sort_connected(state: &mut ForwardingState) {
 /// Reject a numeric next-hop literal that the family-specific parser below
 /// would otherwise turn into `(None, None)` (or an interface-only path).
 /// Non-IP tokens and explicit interface-only forms retain their existing
-/// parsing behavior.
+/// parsing behavior. Negative and next-table routes do not use an IP gateway.
 fn validate_route_next_hop_family(
     route: &RouteSnapshot,
     is_ipv6: bool,
 ) -> Result<(), crate::policy::SnapshotIntegrityError> {
+    if route.discard || !route.next_table.is_empty() {
+        return Ok(());
+    }
     for next_hop in &route.next_hops {
         let ip_part = next_hop
             .split_once('@')

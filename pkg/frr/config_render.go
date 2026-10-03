@@ -173,14 +173,17 @@ func (m *Manager) generateInterfaceSettings(fc *FullConfig) string {
 
 // staticRouteRendersFIB reports whether generateStaticRouteInTable emits at
 // least one FRR FIB line for sr. It mirrors that renderer's emit structure:
-// next-table and no-install routes emit nothing; discard/reject routes emit a
-// negative route; other routes need at least one next-hop.
+// no-install, next-table and mismatched-family routes emit nothing; discard/
+// reject routes emit a negative route; other routes need at least one next-hop.
 //
 // A zero-next-hop, non-discard route (e.g. the last ECMP next-hop of a static
 // default was deleted, #3872) renders nothing and must not suppress the
 // DHCP-learned fallback (#5519).
 func staticRouteRendersFIB(sr *config.StaticRoute) bool {
 	if sr.NoInstall || sr.NextTable != "" {
+		return false
+	}
+	if config.StaticRouteNextHopFamilyMismatchReason(sr) != "" {
 		return false
 	}
 	return sr.Discard || sr.Reject || len(sr.NextHops) > 0

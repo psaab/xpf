@@ -359,3 +359,40 @@ func TestStaticRouteNextHopFamilyMismatchSharedExclusion11421(t *testing.T) {
 		t.Fatalf("next-table route does not use its next-hop as a forwarding gateway: %q", reason)
 	}
 }
+
+func TestNegativeStaticRoutesIgnoreUnusedCrossFamilyNextHops11421(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sr   *StaticRoute
+	}{
+		{
+			name: "discard",
+			sr: &StaticRoute{
+				Destination: "10.0.0.0/8",
+				NextHops:    []NextHopEntry{{Address: "2001:db8::1"}},
+				Discard:     true,
+			},
+		},
+		{
+			name: "reject",
+			sr: &StaticRoute{
+				Destination: "10.0.0.0/8",
+				NextHops:    []NextHopEntry{{Address: "2001:db8::1"}},
+				Reject:      true,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if reason := StaticRouteNextHopFamilyMismatchReason(tc.sr); reason != "" {
+				t.Fatalf("unused gateway on %s route reported as family mismatch: %q", tc.name, reason)
+			}
+			if reason := StaticRouteExcludedReason(tc.sr, false, nil); reason != "" {
+				t.Fatalf("negative route excluded instead of retaining its disposition: %q", reason)
+			}
+			cfg := &Config{RoutingOptions: RoutingOptionsConfig{StaticRoutes: []*StaticRoute{tc.sr}}}
+			if reason := StaticRouteExclusions(cfg)[tc.sr]; reason != "" {
+				t.Fatalf("whole-config exclusion dropped negative route: %q", reason)
+			}
+		})
+	}
+}
