@@ -7,7 +7,9 @@ require (
 	github.com/cilium/ebpf v0.20.0
 	github.com/google/nftables v0.3.0
 	github.com/insomniacslk/dhcp v0.0.0-20251020182700-175e84fbb167
+	github.com/mdlayher/genetlink v1.3.2
 	github.com/mdlayher/ndp v1.1.0
+	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42
 	github.com/miekg/dns v1.1.72
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
@@ -23,12 +25,11 @@ require (
 )
 
 require (
+	github.com/flynn/noise v1.1.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/flynn/noise v1.1.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/josharian/native v1.1.0 // indirect
-	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42 // indirect
 	github.com/mdlayher/packet v1.1.2 // indirect
 	github.com/mdlayher/socket v0.5.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
