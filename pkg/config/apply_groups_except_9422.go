@@ -93,9 +93,8 @@ func cloneExceptSet9862(set map[string]bool) map[string]bool {
 
 // collectExceptNames9862 union-adds the vars-resolved group names this
 // hierarchy level excludes into into, allocating it on first use. Bracket lists
-// (`apply-groups-except [ g1 g2 ]`) collapse onto one node's Keys, so every key
-// past the keyword is a group name; `${var}` names resolve the same way
-// `apply-groups` names do.
+// (`apply-groups-except [ g1 g2 ]`) collapse onto one node's Keys, while block
+// leaf-lists (`apply-groups-except { g1; g2; }`) carry one name per child.
 func collectExceptNames9862(nodes []*Node, vars map[string]string, into map[string]bool) map[string]bool {
 	for _, n := range nodes {
 		if n == nil || n.Name() != "apply-groups-except" {
@@ -106,6 +105,17 @@ func collectExceptNames9862(nodes []*Node, vars map[string]string, into map[stri
 				into = make(map[string]bool)
 			}
 			into[resolveVars(key, vars)] = true
+		}
+		for _, member := range n.Children {
+			for _, key := range member.Keys {
+				if key == "" {
+					continue
+				}
+				if into == nil {
+					into = make(map[string]bool)
+				}
+				into[resolveVars(key, vars)] = true
+			}
 		}
 	}
 	return into
