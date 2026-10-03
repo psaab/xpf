@@ -17,8 +17,8 @@ import (
 // the renderer works but not that the config compiler ever emits the shape it
 // renders. Here every rule is authored as real `set` syntax, committed through
 // the real store, and read back through the real ShowText dispatch — so the
-// four-family split (two with entry lists, two recorded as names only) is
-// demonstrated to be what the production path actually produces.
+// external four-family split is covered: two entry lists and two name-only
+// surfaces. The compiler's validation-only inert entries are not exposed here.
 //
 // It also covers the remote surface specifically: the local CLI and the gRPC
 // server are separate dispatchers, and a command wired into only one of them
@@ -126,12 +126,11 @@ func TestShowTextCoSRewriteRuleMarksInert6848(t *testing.T) {
 // honesty check.
 //
 // The renderer treats inet-precedence and exp as NAME-ONLY families — it prints
-// "Code points not modeled" instead of a code-point table. That is only correct
-// if the compiler genuinely discards their code points, so this authors a rule
-// WITH a code-point (5) in real set syntax and asserts the value does not
-// appear under that rule. If a future change starts modeling those entries,
-// this test fails and tells the next person to render them rather than leaving
-// a renderer that quietly under-reports real config.
+// "Code points not modeled" instead of a code-point table. The compiler now
+// validates their inner entries in Go-only definitions (#11811), but no wire or
+// runtime consumer exists and show intentionally does not expose those values.
+// This authors a rule WITH a code-point (5) in real set syntax and asserts the
+// value does not appear under that rule, binding the external rendering contract.
 func TestShowTextCoSRewriteRuleNameOnlyFamiliesAreProducible6848(t *testing.T) {
 	s := newCoSRewriteRuleServer(t)
 	for _, topic := range []string{

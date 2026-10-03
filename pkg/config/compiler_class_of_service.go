@@ -370,12 +370,99 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 
 	if rewriteRulesNode := node.FindChild("rewrite-rules"); rewriteRulesNode != nil {
 		// #4316 (fable-167 F-3b): inet-precedence and exp rewrite-rules are
-		// accepted but inert; record their names for the commit advisory.
+		// accepted but inert. Keep their configured names for the advisory and
+		// name-only show surface, but compile their inner entries into Go-only
+		// validation models so malformed code-points and loss-priorities are
+		// still rejected at strict commit (#11811).
 		for _, inst := range namedInstances(rewriteRulesNode.FindChildren("inet-precedence")) {
 			cos.INetPrecedenceRewriteRules = append(cos.INetPrecedenceRewriteRules, inst.name)
+			rewriteRule := &CoSINetPrecedenceRewriteRule{Name: inst.name}
+			for _, fcNode := range inst.node.FindChildren("forwarding-class") {
+				className := ""
+				if len(fcNode.Keys) >= 2 {
+					className = fcNode.Keys[1]
+				}
+				if className == "" {
+					continue
+				}
+				for _, lpNode := range fcNode.FindChildren("loss-priority") {
+					lossPriority := ""
+					if len(lpNode.Keys) >= 2 {
+						lossPriority = lpNode.Keys[1]
+					}
+					if lossPriority == "" {
+						lossPriority = nodeVal(lpNode)
+					}
+					codePoint, ok, err := collectCoS3BitRewriteCodePoint(lpNode, "inet-precedence")
+					if err != nil {
+						if opts.lenientCoSNumericCodePoint && isDowngradableCoSCodePointError(err) {
+							if warnings != nil {
+								*warnings = append(*warnings, fmt.Sprintf(
+									"class-of-service rewrite-rules inet-precedence %q (downgraded to warning on tolerant path): %v",
+									rewriteRule.Name, err))
+							}
+							continue
+						}
+						return fmt.Errorf("class-of-service rewrite-rules inet-precedence %q: %w", rewriteRule.Name, err)
+					}
+					if !ok {
+						continue
+					}
+					rewriteRule.Entries = append(rewriteRule.Entries, &CoSInertRewriteRuleEntry{
+						ForwardingClass: className,
+						LossPriority:    lossPriority,
+						CodePoint:       codePoint,
+					})
+				}
+			}
+			if len(rewriteRule.Entries) > 0 {
+				cos.INetPrecedenceRewriteRuleDefs[rewriteRule.Name] = rewriteRule
+			}
 		}
 		for _, inst := range namedInstances(rewriteRulesNode.FindChildren("exp")) {
 			cos.EXPRewriteRules = append(cos.EXPRewriteRules, inst.name)
+			rewriteRule := &CoSEXPRewriteRule{Name: inst.name}
+			for _, fcNode := range inst.node.FindChildren("forwarding-class") {
+				className := ""
+				if len(fcNode.Keys) >= 2 {
+					className = fcNode.Keys[1]
+				}
+				if className == "" {
+					continue
+				}
+				for _, lpNode := range fcNode.FindChildren("loss-priority") {
+					lossPriority := ""
+					if len(lpNode.Keys) >= 2 {
+						lossPriority = lpNode.Keys[1]
+					}
+					if lossPriority == "" {
+						lossPriority = nodeVal(lpNode)
+					}
+					codePoint, ok, err := collectCoS3BitRewriteCodePoint(lpNode, "exp")
+					if err != nil {
+						if opts.lenientCoSNumericCodePoint && isDowngradableCoSCodePointError(err) {
+							if warnings != nil {
+								*warnings = append(*warnings, fmt.Sprintf(
+									"class-of-service rewrite-rules exp %q (downgraded to warning on tolerant path): %v",
+									rewriteRule.Name, err))
+							}
+							continue
+						}
+						return fmt.Errorf("class-of-service rewrite-rules exp %q: %w", rewriteRule.Name, err)
+					}
+					if !ok {
+						continue
+					}
+					rewriteRule.Entries = append(rewriteRule.Entries, &CoSInertRewriteRuleEntry{
+						ForwardingClass: className,
+						LossPriority:    lossPriority,
+						CodePoint:       codePoint,
+					})
+				}
+			}
+			if len(rewriteRule.Entries) > 0 {
+				cos.EXPRewriteRuleDefs[rewriteRule.Name] = rewriteRule
+			}
 		}
 		for _, inst := range namedInstances(rewriteRulesNode.FindChildren("dscp")) {
 			rewriteRule := &CoSDSCPRewriteRule{Name: inst.name}

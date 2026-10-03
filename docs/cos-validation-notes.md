@@ -116,15 +116,16 @@ Two implementation facts worth knowing before changing this:
 
 - **The four families do not carry equal data.** `dscp` and `ieee-802.1`
   compile to full entry lists (forwarding-class, loss-priority,
-  code-point). `inet-precedence` and `exp` record only rule NAMES
-  (`ClassOfServiceConfig.INetPrecedenceRewriteRules` / `EXPRewriteRules`)
-  — the compiler builds no runtime structure because nothing consumes
-  one. Those two render a `Code points not modeled` line rather than an
-  empty table, which would imply a fidelity the config does not have.
-  `TestShowTextCoSRewriteRuleNameOnlyFamiliesAreProducible6848` authors a
-  rule *with* a code point in real set syntax and asserts it does not
-  surface, so this stays honest if the compiler ever starts modeling
-  them.
+  code-point), and the renderer prints those rows. `inet-precedence` and `exp`
+  keep their configured names for advisories and name-only show output
+  (`ClassOfServiceConfig.INetPrecedenceRewriteRules` /
+  `EXPRewriteRules`); the compiler now also validates their inner entries in
+  JSON-hidden Go-only definitions (#11811). No rewrite values go onto the wire
+  or reach a runtime consumer, so the renderer still prints `Code points not
+  modeled` rather than implying the dataplane enforces them.
+  `TestShowTextCoSRewriteRuleNameOnlyFamiliesAreProducible6848` authors a rule
+  with a code point in real set syntax and asserts it does not surface in show
+  output. This remains the external rendering contract.
 - **The family list lives in THREE places, and the config schema is the
   authority.** They are `format.CoSRewriteRuleTypes`, the cmdtree `type`
   completion children, and the renderer's own hardcoded per-family

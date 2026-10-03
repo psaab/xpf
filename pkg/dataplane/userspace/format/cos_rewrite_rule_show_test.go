@@ -17,11 +17,9 @@ import (
 // exactly the silence that made the problem worth fixing.
 
 // testCoSRewriteRuleConfig builds all four rewrite-rule families. The two
-// modeled families carry entry lists; inet-precedence and exp are recorded as
-// NAMES only, which is how the compiler stores them (#4316) — see
-// TestShowTextCoSRewriteRuleNameOnlyFamiliesAreProducible6848 in pkg/grpcapi
-// for the proof that this shape is what the real compiler emits, not a shape
-// invented here.
+// inert families are rendered as names only; although the compiler validates
+// their entries into Go-only definitions, those values have no wire/runtime
+// consumer and are intentionally not exposed by this show command.
 func testCoSRewriteRuleConfig() *config.Config {
 	cfg := testCoSConfig()
 	cfg.ClassOfService.DSCPRewriteRules = map[string]*config.CoSDSCPRewriteRule{
@@ -63,8 +61,8 @@ func testCoSRewriteRuleConfigUnbound() *config.Config {
 }
 
 // TestFormatCoSRewriteRulesRendersAllFourFamilies pins that no family is
-// silently dropped — including the two stored as names only, which have no
-// entries to iterate and would be the easy ones to omit.
+// silently dropped — including the two rendered as names only, with no visible
+// code-point rows, which would be the easy ones to omit.
 func TestFormatCoSRewriteRulesRendersAllFourFamilies(t *testing.T) {
 	out := FormatCoSRewriteRules(testCoSRewriteRuleConfig(), "", "")
 	for _, want := range []string{

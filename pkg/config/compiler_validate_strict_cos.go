@@ -491,6 +491,48 @@ func validateClassOfServiceLossPriorityStrict(cos *ClassOfServiceConfig) error {
 			}
 		}
 	}
+	// #11811: these egress rewrite families have no dataplane consumer yet, but
+	// their inner config must receive the same strict loss-priority validation
+	// as the enforced DSCP and inert 802.1p rewrite rules.
+	inetRewriteNames := make([]string, 0, len(cos.INetPrecedenceRewriteRuleDefs))
+	for name := range cos.INetPrecedenceRewriteRuleDefs {
+		inetRewriteNames = append(inetRewriteNames, name)
+	}
+	sort.Strings(inetRewriteNames)
+	for _, name := range inetRewriteNames {
+		rewriteRule := cos.INetPrecedenceRewriteRuleDefs[name]
+		if rewriteRule == nil {
+			continue
+		}
+		for _, entry := range rewriteRule.Entries {
+			if entry == nil {
+				continue
+			}
+			if err := checkEntry("rewrite-rules inet-precedence", rewriteRule.Name, entry.ForwardingClass, entry.LossPriority); err != nil {
+				return err
+			}
+		}
+	}
+
+	expRewriteNames := make([]string, 0, len(cos.EXPRewriteRuleDefs))
+	for name := range cos.EXPRewriteRuleDefs {
+		expRewriteNames = append(expRewriteNames, name)
+	}
+	sort.Strings(expRewriteNames)
+	for _, name := range expRewriteNames {
+		rewriteRule := cos.EXPRewriteRuleDefs[name]
+		if rewriteRule == nil {
+			continue
+		}
+		for _, entry := range rewriteRule.Entries {
+			if entry == nil {
+				continue
+			}
+			if err := checkEntry("rewrite-rules exp", rewriteRule.Name, entry.ForwardingClass, entry.LossPriority); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
