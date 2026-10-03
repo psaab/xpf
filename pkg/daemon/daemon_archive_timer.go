@@ -157,6 +157,9 @@ func (d *Daemon) runArchiveTimer(interval int, sites []string, stop <-chan struc
 		case <-ctxDone:
 			return
 		case <-tickC:
+			// Periodic attempts share archiveToSites with commit archiving;
+			// each tick therefore retries pending current-config site debt and
+			// clears only sites whose transfer completes successfully.
 			d.archiveToSites(sites)
 		}
 	}

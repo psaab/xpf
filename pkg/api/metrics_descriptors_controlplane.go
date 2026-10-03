@@ -156,6 +156,19 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 			"rather than a single transient failure already paid.",
 		[]string{"service"}, nil,
 	)
+	c.remoteArchivePendingSites = prometheus.NewDesc(
+		"xpf_config_remote_archive_pending_sites",
+		"Number of archive sites still owed a copy of the current config "+
+			"(#11806). New attempts replace older current-config debt; the "+
+			"obligation is also dropped when its destination is no longer configured.",
+		nil, nil,
+	)
+	c.remoteArchiveFailures = prometheus.NewDesc(
+		"xpf_config_remote_archive_failures_total",
+		"Total failed current-config remote archive site attempts since "+
+			"daemon start (#11806), including retries.",
+		nil, nil,
+	)
 	// #7615: the remaining debt-driven retry owners. Two siblings already
 	// publish (#6800, #6802); these complete the family. Proxy-ARP joined in
 	// #7685 — not by a drift predicate, which reports a routine self-corrected

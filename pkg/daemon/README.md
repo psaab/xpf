@@ -586,9 +586,19 @@ tracker issue #4407 carries the remaining increments.
   collision between the old `archiveTimerKey` field and the still-flat
   package-level `archiveTimerKey(interval, sites)` hash-gate helper.
   `archiveTransfer` stayed a flat `Daemon` field (like increment 1's
-  `ipsecSANudgeCh` and increment 2's `lastStandbyNeighborRefresh`) — it is the
-  one-shot transfer-on-commit upload seam used by `archiveConfig` in
-  `daemon_flow.go`, a different mechanism from the periodic timer grouped here.
+  `ipsecSANudgeCh` and increment 2's `lastStandbyNeighborRefresh`) as the
+  shared transport seam. Transfer-on-commit, periodic timer, and debt retries
+  all use the FIFO upload queue in `daemon_archive_transfer_11806.go`.
+  - **Current-config remote archive debt (#11806).** A failed site transfer
+    remains pending until a later current-config transfer succeeds. Commit and
+    periodic attempts share one FIFO upload queue, so an older asynchronous SCP
+    cannot finish after and overwrite a newer snapshot. The always-on 30s debt
+    owner retries transfer-on-commit-only failures; periodic ticks are an
+    additional retry path. A commit without transfer-on-commit preserves debt
+    for sites still configured for periodic archival, and drops debt only when
+    those obligations are withdrawn. `xpf_config_remote_archive_pending_sites`
+    and `xpf_config_remote_archive_failures_total` expose current debt and
+    cumulative failed site attempts; no historical config ledger is retained.
   - **Interval overflow bound (#5784).** `transfer-interval` is an
     operator-settable value in MINUTES, bounded to `[1, 2880]` at commit
     (`schema_system.go`), so a normal commit cannot overflow

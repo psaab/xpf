@@ -760,6 +760,9 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 		// cleanly, which is the blindness the retry owner exists to end.
 		ManagedServiceReloadOwedFn:     d.ManagedServiceReloadOwed,
 		ManagedServiceReloadFailuresFn: d.ManagedServiceReloadFailures,
+		// #11806: report the current-config remote DR-copy debt even when the
+		// dataplane is not loaded; commit and timer attempts share this state.
+		RemoteArchiveStatusFn: d.RemoteArchiveStatus,
 		// #7615: the remaining debt-driven retry owners on the same surface.
 		// An accessor with no production caller leaves the operator exactly as
 		// blind as before (#6852), which is why these assignments are pinned by

@@ -765,6 +765,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.hostInboundGapReassertLoop(ctx)
 	}()
 
+	// #11806: remote archive debt needs an owner independent of the periodic
+	// timer, because transfer-on-commit can be the only configured trigger.
+	// This loop is idle unless an archive attempt has left a site pending.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		d.remoteArchiveDebtReassertLoop(ctx)
+	}()
+
 	// #1387 inc-2: start the always-on DHCP dynamic-DNS reconcile loop. It
 	// is constructed UNCONDITIONALLY (idle when disabled) so an
 	// enabled→disabled commit can still withdraw published records; the loop

@@ -414,6 +414,10 @@ type Config struct {
 	// ManagedServiceReloadFailuresFn reports the monotonic per-service count of
 	// failed reload attempts, retries included (#6800). Same nil contract.
 	ManagedServiceReloadFailuresFn func() map[string]uint64
+	// RemoteArchiveStatusFn reports the number of current-config archive sites
+	// still owed a copy and the cumulative failed site attempts (#11806). Nil
+	// omits both metrics rather than publishing an authoritative zero.
+	RemoteArchiveStatusFn func() (pendingSites, failures uint64)
 	// #7615: the remaining debt-driven retry owners, on the same surface as the
 	// two above. Each reports whether its loop currently owes a repair; nil on
 	// a server that does not wire it, in which case the series is OMITTED
@@ -668,6 +672,7 @@ type Server struct {
 	hostInboundTCPloosePostureFailuresFn func() uint64
 	managedServiceReloadOwedFn           func() map[string]bool
 	managedServiceReloadFailuresFn       func() map[string]uint64
+	remoteArchiveStatusFn                func() (uint64, uint64)
 	raDeadSenderPendingFn                func() bool
 	proxyARPUnresolvedFn                 func() bool
 	fabricOverlayMissingFn               func() bool
@@ -799,6 +804,7 @@ func NewServer(cfg Config) *Server {
 		hostInboundTCPloosePostureFailuresFn: cfg.HostInboundTCPloosePostureFailuresFn,
 		managedServiceReloadOwedFn:           cfg.ManagedServiceReloadOwedFn,
 		managedServiceReloadFailuresFn:       cfg.ManagedServiceReloadFailuresFn,
+		remoteArchiveStatusFn:                cfg.RemoteArchiveStatusFn,
 		raDeadSenderPendingFn:                cfg.RADeadSenderPendingFn,
 		proxyARPUnresolvedFn:                 cfg.ProxyARPUnresolvedFn,
 		fabricOverlayMissingFn:               cfg.FabricOverlayMissingFn,

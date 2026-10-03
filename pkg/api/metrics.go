@@ -281,6 +281,10 @@ type xpfCollector struct {
 	// legs fail independently and drive different commands.
 	managedServiceReloadPending  *prometheus.Desc
 	managedServiceReloadFailures *prometheus.Desc
+	// #11806: current-config remote archive debt is a control-plane obligation
+	// and stays observable with the dataplane unloaded.
+	remoteArchivePendingSites *prometheus.Desc
+	remoteArchiveFailures     *prometheus.Desc
 
 	// #7615: the remaining debt-driven retry owners. Each is 1 while its loop
 	// owes a repair, so a node re-driving a failing recovery stops looking
@@ -1075,6 +1079,8 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.hostInboundTCPloosePostureFailures
 	ch <- c.managedServiceReloadPending
 	ch <- c.managedServiceReloadFailures
+	ch <- c.remoteArchivePendingSites
+	ch <- c.remoteArchiveFailures
 	ch <- c.raDeadSenderPending
 	ch <- c.proxyARPUnresolved
 	ch <- c.fabricOverlayMissing
@@ -1676,6 +1682,17 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(c.managedServiceReloadFailures,
 				prometheus.CounterValue, float64(failures[svc]), svc)
 		}
+	}
+
+	// #11806: remote archive debt and transfer failures are reported before
+	// the dataplane gate; a current-config DR copy is owed independently of
+	// dataplane readiness.
+	if c.srv.remoteArchiveStatusFn != nil {
+		pending, failures := c.srv.remoteArchiveStatusFn()
+		ch <- prometheus.MustNewConstMetric(c.remoteArchivePendingSites,
+			prometheus.GaugeValue, float64(pending))
+		ch <- prometheus.MustNewConstMetric(c.remoteArchiveFailures,
+			prometheus.CounterValue, float64(failures))
 	}
 
 	// #7615: emitted BEFORE the dataplane gate for the same reason as their
