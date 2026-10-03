@@ -88,14 +88,15 @@ install: build build-ctl
 	install -m 0755 cli $(PREFIX)/bin/cli
 
 # The single pre-commit gate. `test` runs BOTH the Go suite AND the Rust
-# userspace-dp cargo suite (#4006), then runs the shell-harness and Go-skip
-# censuses. The Rust AF_XDP dataplane is the only runtime forwarding path after
-# the #1373/#1476 eBPF retirement, so a forwarding / CoS / NAT / session-
-# correctness regression there must fail `make test`. The censuses are
-# separate file-scan gates: they make harness reachability and skipped Go cells
-# visible in the same default run as the code suites.
+# userspace-dp cargo suite (#4006), then runs the real-kernel routing leg
+# (#11418), the shell-harness census and the Go-skip census. The Rust AF_XDP
+# dataplane is the only runtime forwarding path after the #1373/#1476 eBPF
+# retirement, so a forwarding / CoS / NAT / session-correctness regression there
+# must fail `make test`. The censuses are separate file-scan gates: they make
+# harness reachability and skipped Go cells visible in the same default run as
+# the code suites.
 #
-# Aggregate semantics (#10496): all four legs run unconditionally in one serial
+# Aggregate semantics (#10496): all five legs run unconditionally in one serial
 # recipe, and the target fails if any leg failed. A serial prerequisite list
 # would stop at the first failure and never reach the remaining legs — exactly
 # when the aggregate signal matters most — so the legs are invoked via
@@ -107,6 +108,7 @@ test:
 	$(MAKE) test-go || status=$$?; \
 	$(MAKE) test-rust || status=$$?; \
 	$(MAKE) harness-census || status=$$?; \
+	$(MAKE) test-routing-kernel || status=$$?; \
 	$(MAKE) go-skip-census || status=$$?; \
 	echo ""; \
 	echo "make test: NOT EXAMINED by this run — the XDP shim's behavioural"; \
@@ -879,6 +881,32 @@ test-rule-dscp-lib:
 test-routing-kernel-lib:
 	sh ./test/routing/selftest-routing-kernel_9812.sh
 	sh ./test/routing/selftest-routing-probes_9812.sh
+
+# #11418: the routing real-kernel cells (#9420, #9819, #11319) are part of
+# `make test`, not only the opt-in `make selftest` / `test-routing-kernel-lib`.
+# They exercise kernel FIB behavior that ordinary Go tests cannot observe. The
+# forcing leg's by-name check catches an empty or stale `-run` selection.
+#
+# `make test` must remain usable on hosts that cannot create a private netns:
+# on those hosts the leg returns 77 and this target publishes NOT-EXAMINED
+# rather than silently treating the run as coverage. A host requiring these
+# cells can set XPF_REQUIRE_NETNS=1; in that mode a missing forcing prerequisite
+# fails instead of being reported as unexamined.
+.PHONY: test-routing-kernel
+test-routing-kernel:
+	@out=$$(sh ./test/routing/selftest-routing-kernel_9812.sh 2>&1); rc=$$?; \
+	echo "$$out"; \
+	if [ $$rc -eq 77 ]; then \
+		if [ -n "$${XPF_REQUIRE_NETNS:-}" ]; then \
+			echo "test-routing-kernel: FAIL — XPF_REQUIRE_NETNS=1, but the forcing prerequisites are unavailable."; \
+			exit 1; \
+		fi; \
+		echo "make test: NOT-EXAMINED — routing-kernel (#9420 next-table scope, #9819 VRF-miss terminator, #11319 PBR-before-leak)."; \
+		echo "  The host cannot create a private network namespace; the real-kernel cells did not run."; \
+		echo "  Run where unprivileged user namespaces are available, or set XPF_REQUIRE_NETNS=1 to fail instead."; \
+		exit 0; \
+	fi; \
+	exit $$rc
 
 # Self-tests for the #6936/#11306 FBF steering verdicts. The helper cells pin
 # fail-closed route parsing (including errors and ECMP); the peer-capture
