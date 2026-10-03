@@ -3034,7 +3034,7 @@ routing-options {
 	if len(errs) > 0 {
 		t.Fatalf("parse errors: %v", errs)
 	}
-	cfg, err := CompileConfig(tree)
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3069,7 +3069,7 @@ func TestGenerateRoutesSetSyntax(t *testing.T) {
 			t.Fatalf("SetPath(%v): %v", path, err)
 		}
 	}
-	cfg, err := CompileConfig(tree)
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
 		t.Fatal(err)
 	}

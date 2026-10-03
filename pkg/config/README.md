@@ -1453,6 +1453,14 @@ The Rust helper independently rejects cross-family route snapshots before
 parsing their next-hops, preserving the prior forwarding state if a corrupt or
 version-drifted producer bypasses the Go boundary.
 
+**Generate-route contributor policies are unsupported (#11456):**
+`routing-options generate route <prefix> policy <name>` is stored but xpf does
+not evaluate contributor policies or enumerate a complete contributor RIB.
+Strict commit rejects this form; tolerant load preserves historical config
+with a `NOT INSTALLED` warning. FRR and userspace install no policy-bearing
+aggregate. Remove the policy for the established unconditional-blackhole
+meaning.
+
 The separate #2933 AST gate still rejects distinct bind-interface spellings
 such as `st0` and `st0.0` that derive the same if_id, since only one xfrmi
 device can carry that id. It runs over the group-expanded, inactive-pruned AST

@@ -96,3 +96,39 @@ func lookupIPv4Snapshot11398(t *testing.T, routes []RouteSnapshot, destination s
 	}
 	return best
 }
+
+func TestGenerateRoutePolicyNotSnapshotted11456(t *testing.T) {
+	origRules := ruleListFn
+	t.Cleanup(func() { ruleListFn = origRules })
+	ruleListFn = func(int) ([]netlink.Rule, error) { return nil, nil }
+	withLearnedRoutes(t, fixedLearned())
+
+	cfg := &config.Config{}
+	cfg.RoutingOptions.GenerateRoutes = []*config.GenerateRoute{
+		{Prefix: "10.0.0.0/8"},
+		{Prefix: "198.51.100.0/24", Policy: "contributors"},
+	}
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("buildRouteSnapshots: %v", err)
+	}
+
+	var unconditionalFound, policyFound bool
+	for _, route := range routes {
+		if route.Table != "inet.0" {
+			continue
+		}
+		switch route.Destination {
+		case "10.0.0.0/8":
+			unconditionalFound = route.Discard
+		case "198.51.100.0/24":
+			policyFound = true
+		}
+	}
+	if !unconditionalFound {
+		t.Fatal("policy-less generate route must retain its established discard snapshot")
+	}
+	if policyFound {
+		t.Fatal("policy-bearing generate route must not be installed without a verified contributor")
+	}
+}

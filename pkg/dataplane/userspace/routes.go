@@ -425,12 +425,19 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	addRoutes("inet.0", "inet", cfg.RoutingOptions.StaticRoutes, "", "")
 	addRoutes("inet6.0", "inet6", cfg.RoutingOptions.Inet6StaticRoutes, "", "")
 
-	// FRR installs a blackhole route for every generate-route. Mirror that
-	// negative route even when it is acting as an aggregate over more-specific
-	// contributors, so userspace LPM cannot fall through to a less-specific
-	// default on destinations the kernel discards.
+	// FRR installs a blackhole route for every policy-less generate-route.
+	// Mirror that negative route even when it is acting as an aggregate over
+	// more-specific contributors, so userspace LPM cannot fall through to a
+	// less-specific default on destinations the kernel discards.
 	for _, route := range cfg.RoutingOptions.GenerateRoutes {
 		if route == nil {
+			continue
+		}
+		// #11456: mirror the FRR render gate. A policy-bearing aggregate
+		// renders no FRR blackhole (zero verified contributors), so the
+		// snapshot must not install a Discard the kernel lacks — that would
+		// be #11398 in reverse (userspace drops what the kernel forwards).
+		if route.Policy != "" {
 			continue
 		}
 		table, family := normalizeRouteSnapshotFamily("inet.0", "inet", route.Prefix)

@@ -113,6 +113,17 @@ Not covered here: the `vrf <name>` clause still goes through `sanitizeFRRValue`
 — so it is the weaker belt described under #6796, but the routing-instance name
 is validated at commit and is out of this issue's scope.
 
+### Generate-route contributor policies fail closed (#11456)
+
+`renderGenerateRoutes` emits the established blackhole only for a
+policy-less generated route. A route with `GenerateRoute.Policy` is omitted:
+xpf has no contributor-policy evaluator or complete contributor feed, and
+rendering the aggregate anyway could originate and redistribute a route with
+no verified contributor. Strict compilation rejects new policy-bearing
+routes; tolerant loads keep older configs bootable with a NOT INSTALLED
+warning, while this renderer and the userspace route snapshot both fail
+closed.
+
 ### `VRFName == ""` means the master table, and only the master table (#9409)
 
 `InstanceConfig.VRFName` is overloaded by construction. The daemon's

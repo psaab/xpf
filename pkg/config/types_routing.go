@@ -226,7 +226,7 @@ type RoutingOptionsConfig struct {
 // In FRR, these become blackhole/reject static routes or BGP aggregate-address.
 type GenerateRoute struct {
 	Prefix  string // route prefix (e.g. "192.168.0.0/16")
-	Policy  string // contributing route policy (optional)
+	Policy  string // contributing route policy (optional; #11456: unevaluable — a policy-bearing aggregate is not installed anywhere)
 	Discard bool   // discard traffic to this route (blackhole)
 }
 

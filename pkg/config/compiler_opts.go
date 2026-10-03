@@ -1500,6 +1500,13 @@ type compileOpts struct {
 	// the shared exclusion omits the route from FRR/helper snapshots and its
 	// reason is visible on config-backed show surfaces.
 	lenientStaticNextHopFamily bool
+	// lenientGenerateRoutePolicy (#11456) downgrades an unsupported
+	// contributing-route policy on `routing-options generate route` from a
+	// strict compile error to a cfg.Warnings entry. xpf has no policy evaluator
+	// or complete contributor feed; both FRR and userspace fail closed by
+	// omitting policy-bearing aggregates. The tolerant load / peer-sync path
+	// preserves already-persisted configuration while warning (#1960).
+	lenientGenerateRoutePolicy bool
 	// lenientDHCPStaticBindings (#2243 review) downgrades the DHCP-server
 	// static (fixed/reserved) host-binding gate (validateDHCPStaticBindingsStrict)
 	// from a hard compile error to a cfg.Warnings entry. The strict commit /
@@ -3143,6 +3150,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyRouteMapSeq:               true,
 		lenientRouteDispositionConflict:        true,
 		lenientStaticNextHopFamily:             true,
+		lenientGenerateRoutePolicy:             true,
 		lenientDHCPStaticBindings:              true,
 		lenientDHCPPoolSubnets:                 true,
 		lenientWireguardPeers:                  true,

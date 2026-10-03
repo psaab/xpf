@@ -450,3 +450,34 @@ func validateUnhandledRibWarnings(cfg *Config) []string {
 	}
 	return out
 }
+
+// validateGenerateRoutePolicyWarnings reports every `routing-options generate
+// route` carrying a contributing-route policy (#11456). The policy selects
+// which active routes generate the aggregate; xpf has no policy evaluator and
+// no complete contributor feed at render time, so the policy-bearing aggregate
+// is not installed by either renderer. Pre-fix, its blackhole originated
+// unconditionally and redistribution could advertise an aggregate no
+// contributor supports.
+//
+// Strict candidate compilation rejects the unsupported form in
+// validateGenerateRoutePolicyStrict. This warning remains in ValidateConfig
+// for leniently loaded historical configs and the operator-facing alarm
+// surface; the rendering gates keep those configs fail-closed.
+func validateGenerateRoutePolicyWarnings(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	var out []string
+	for _, gr := range cfg.RoutingOptions.GenerateRoutes {
+		if gr == nil || gr.Policy == "" {
+			continue
+		}
+		out = append(out, fmt.Sprintf(
+			"routing-options generate route %q policy %q NOT INSTALLED — xpf cannot "+
+				"evaluate contributing-route policies, so this aggregate has no verified "+
+				"contributor and neither FRR nor the forwarding plane installs it; remove "+
+				"the policy for the established unconditional-blackhole meaning.",
+			gr.Prefix, gr.Policy))
+	}
+	return out
+}

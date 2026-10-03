@@ -184,5 +184,14 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesBridgeDomainMembership11387(tree, cfg, opts); err != nil {
 		return err
 	}
+	// #11456: a contributing-route policy on a generate route cannot be
+	// evaluated against xpf's incomplete contributor feed. Append after every
+	// established gate so its unsupported-shape error does not steal an
+	// existing first-error slot. Strict compilation rejects it; the tolerant
+	// path preserves the config and lets ValidateConfig add the warning used by
+	// the alarm surface. Both renderers omit the aggregate.
+	if err := validateGenerateRoutePolicyStrict(cfg); err != nil && !opts.lenientGenerateRoutePolicy {
+		return err
+	}
 	return nil
 }

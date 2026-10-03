@@ -1818,3 +1818,43 @@ func validateBGPDuplicateNeighborStrict(cfg *Config) error {
 	}
 	return nil
 }
+
+// validateGenerateRoutePolicyStrict hard-rejects a `routing-options generate
+// route` carrying a contributing-route policy (#11456).
+//
+// The policy selects which active routes generate the aggregate; xpf has no
+// policy evaluator and no full contributor feed at render time (the FRR
+// RIBRoutes feed is DHCP-classless-scoped), so a policy-bearing aggregate has
+// zero VERIFIED contributors. Rendering it unconditionally (the pre-fix
+// behavior) installed an aggregate no contributor supports, which
+// redistribution could then advertise. Both renderers fail closed instead:
+// renderGenerateRoutes (pkg/frr/config_render.go) emits nothing for a
+// policy-bearing aggregate and buildRouteSnapshots
+// (pkg/dataplane/userspace/routes.go) installs no Discard for it. A
+// policy-less generate route keeps its established unconditional-blackhole
+// meaning.
+//
+// Strict on commit / commit-check (hard reject so the unsupported shape is
+// operator-visible); the call site downgrades this to a warning on the
+// tolerant load / peer-sync path (opts.lenientGenerateRoutePolicy, #1960) so
+// an already-persisted or peer-synced config still BOOTS — the renderers
+// then omit the aggregate (fail-closed). Global generate routes are the only
+// site; per-instance `generate` is parsed but never applied (#11314).
+func validateGenerateRoutePolicyStrict(cfg *Config) error {
+	if cfg == nil {
+		return nil
+	}
+	for _, gr := range cfg.RoutingOptions.GenerateRoutes {
+		if gr == nil || gr.Policy == "" {
+			continue
+		}
+		return fmt.Errorf(
+			"routing-options generate route %q policy %q is unsupported: xpf cannot "+
+				"evaluate contributing-route policies, so this aggregate has no verified "+
+				"contributor and is NOT INSTALLED anywhere (neither FRR nor the "+
+				"forwarding plane); remove the policy for the established "+
+				"unconditional-blackhole meaning",
+			gr.Prefix, gr.Policy)
+	}
+	return nil
+}
