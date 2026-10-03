@@ -30,7 +30,7 @@ type InterfaceConfig struct {
 	Name                string
 	Description         string                  // free-text interface description
 	MTU                 int                     // interface-level MTU (overridden by unit MTU)
-	Speed               string                  // interface speed (e.g. "1g", "10g", "auto")
+	Speed               string                  // interface speed (10m..100g notation or "auto")
 	Duplex              string                  // "full", "half", "auto"
 	VlanTagging         bool                    // 802.1Q trunk mode
 	FlexibleVlanTagging bool                    // flexible 802.1Q VLAN tagging (QinQ)

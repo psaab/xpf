@@ -54,7 +54,7 @@ func TestNetworkdUnitInterpolationInventory_10718(t *testing.T) {
 		"LACPTransmitRate": {"rate": 1},
 		"OriginalName":     {"ifc.OriginalName": 1},
 		"MACAddress":       {"ifc.MACAddress": 1},
-		"BitsPerSecond":    {"junosSpeedToNetworkd(ifc.Speed)": 1},
+		"BitsPerSecond":    {"speed": 1},
 		"Duplex":           {"ifc.Duplex": 1},
 		"VRF":              {"ifc.VRFName": 1},
 		"Bond":             {"ifc.BondMaster": 1},

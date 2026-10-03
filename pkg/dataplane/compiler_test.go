@@ -417,10 +417,11 @@ func TestParseSpeed(t *testing.T) {
 		{"25g", "25000"},
 		{"40g", "40000"},
 		{"100g", "100000"},
-		{"1000", "1000"},   // raw Mbps
-		{"10000", "10000"}, // raw Mbps
+		{"1000", ""},  // a bare number is not a typed speed token
+		{"10000", ""}, // raw Mbps is ambiguous and rejected at commit
 		{"bogus", ""},
-		{"  1g  ", "1000"}, // whitespace trimmed
+		{"  1g  ", "1000"}, // surrounding whitespace remains tolerated by the parser
+		{"1g 999999999999", ""},
 	}
 	for _, tt := range tests {
 		got := parseSpeed(tt.input)

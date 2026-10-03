@@ -30,8 +30,9 @@ package config
 // through this schema walker. `track-interface priority-cost`
 // (already strict-rejected by the #1814 AST pre-walk in the
 // compiler — typing here would shadow those curated errors), and the
-// low-risk pass-through integers and `speed`/`encapsulation` (pass-through
-// strings). `duplex` is the strict `full`/`half`/`auto` enum.
+// low-risk pass-through integers and `encapsulation`. `speed` is a typed
+// closed set so dataplane, networkd, and CoS consume one unambiguous link-rate
+// vocabulary. `duplex` is the strict `full`/`half`/`auto` enum.
 // The interfaces wildcard identity token is TYPED (keyValidator
 // ValidateInterfaceName, #6834). The name is interpolated into four sites in
 // the generated systemd units, one of which — `[Match] Name=` in the .network
@@ -59,7 +60,10 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 		validator:     ValidateIntegerMin(1),
 		children:      nil,
 	},
-	"speed": {desc: "Link speed", args: 1, children: nil},
+	"speed": {desc: "Link speed (10m | 100m | 1g | 2.5g | 5g | 10g | 25g | 40g | 100g | auto)", args: 1, placeholder: "<speed>",
+		valueType: ValueEnumOf, valueDesc: "Link speed (10m | 100m | 1g | 2.5g | 5g | 10g | 25g | 40g | 100g | auto)",
+		valueExamples: []string{"1g", "10g", "100g", "auto"},
+		validator:     ValidateInterfaceSpeed, children: nil},
 	"duplex": {desc: "Interface duplex mode (full | half | auto)", args: 1, placeholder: "<mode>",
 		valueType: ValueEnumOf, valueDesc: "Duplex mode (full | half | auto)",
 		valueExamples: []string{"full", "half", "auto"},

@@ -378,10 +378,9 @@ func TestApplyRefusesUnsafeUnitFieldsAndSweeps_10718(t *testing.T) {
 			poison: func(ifc *InterfaceConfig) { ifc.LACPRate = "fast\nDHCP=yes" },
 		},
 		{
-			name: "BitsPerSecond", field: "BitsPerSecond",
-			base: InterfaceConfig{Name: "ge-0-0-0", MACAddress: "52:54:00:aa:bb:cc",
-				Addresses: []string{"10.0.0.1/24"}, Speed: "1g"},
-			poison: func(ifc *InterfaceConfig) { ifc.Speed = "1g 999999999999" },
+			name: "UnsafeSpeed", field: "BitsPerSecond",
+			base:   InterfaceConfig{Name: "ge-0-0-0", MACAddress: "52:54:00:aa:bb:cc", Speed: "bogus"},
+			poison: func(ifc *InterfaceConfig) { ifc.Speed = "1g\nDHCP=yes" },
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

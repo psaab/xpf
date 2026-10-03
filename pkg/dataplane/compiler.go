@@ -1757,38 +1757,14 @@ func (r *CompileResult) applyEthtool(ifaceName string, ifCfg *config.InterfaceCo
 	}
 }
 
-// parseSpeed converts Junos speed values (e.g. "1g", "10g", "100m") to
-// ethtool speed in Mbps. Returns "" for unknown/auto/empty values.
+// parseSpeed converts a configured Junos speed to ethtool Mbps through the
+// shared interface-speed table. Unsupported and automatic speeds are unset.
 func parseSpeed(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	switch s {
-	case "", "auto":
-		return ""
-	case "10m":
-		return "10"
-	case "100m":
-		return "100"
-	case "1g":
-		return "1000"
-	case "2.5g":
-		return "2500"
-	case "5g":
-		return "5000"
-	case "10g":
-		return "10000"
-	case "25g":
-		return "25000"
-	case "40g":
-		return "40000"
-	case "100g":
-		return "100000"
-	default:
-		// Try to parse as raw Mbps number
-		if _, err := strconv.Atoi(s); err == nil {
-			return s
-		}
+	mbps, ok := config.InterfaceSpeedMbps(s)
+	if !ok {
 		return ""
 	}
+	return strconv.FormatUint(mbps, 10)
 }
 
 // parseDuplex returns only explicit ethtool overrides; auto and invalid values

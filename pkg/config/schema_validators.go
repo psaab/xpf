@@ -27,6 +27,35 @@ import (
 // import cycle.
 type LeafValidator func(raw string, cfg *Config) error
 
+// InterfaceSpeedMbps maps canonical interface `speed` tokens to Mbps. This
+// is the single conversion table shared by commit validation and all
+// consumers; `auto` means no fixed rate and is intentionally absent.
+var interfaceSpeedMbps = map[string]uint64{
+	"10m": 10, "100m": 100, "1g": 1000, "2.5g": 2500, "5g": 5000,
+	"10g": 10000, "25g": 25000, "40g": 40000, "100g": 100000,
+}
+
+// InterfaceSpeedMbps returns the Mbps value for a Junos interface-speed
+// token. It retains the existing consumers' case and surrounding-whitespace
+// tolerance; false means `auto` or an invalid value.
+func InterfaceSpeedMbps(raw string) (uint64, bool) {
+	mbps, ok := interfaceSpeedMbps[strings.ToLower(strings.TrimSpace(raw))]
+	return mbps, ok
+}
+
+// ValidateInterfaceSpeed rejects values that none of the speed consumers can
+// interpret (#11797), while preserving their existing case/space tolerance.
+func ValidateInterfaceSpeed(raw string, _ *Config) error {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "auto" {
+		return nil
+	}
+	if _, ok := interfaceSpeedMbps[s]; ok {
+		return nil
+	}
+	return fmt.Errorf("invalid interface speed %q (expected one of: 10m, 100m, 1g, 2.5g, 5g, 10g, 25g, 40g, 100g, auto)", raw)
+}
+
 // PositionalKeyValidator is the POSITION-AWARE variant of LeafValidator
 // used for a named-instance key slot with more than one identity arg
 // (#5576). The walker passes the 0-based arg index of each identity
