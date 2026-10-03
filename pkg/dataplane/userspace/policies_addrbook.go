@@ -327,12 +327,16 @@ func expandBookNameToCIDRs(cfg *config.Config, feedOverlay map[string][]string, 
 
 func expandBookNameToParsedCIDRsWithResolver(resolver *addressBookExpansionResolver, name string) ([]parsedAddressBookCIDR, []parsedAddressBookCIDR) {
 	values, _ := resolver.expand(name, make(map[string]bool))
+	if values.unknownMember {
+		return nil, nil
+	}
 	return values.v4, values.v6
 }
 
 type addressBookParsedExpansion struct {
-	v4 []parsedAddressBookCIDR
-	v6 []parsedAddressBookCIDR
+	v4            []parsedAddressBookCIDR
+	v6            []parsedAddressBookCIDR
+	unknownMember bool // the set or a nested member carried an unknown statement
 }
 
 type addressBookExpansionResolver struct {
@@ -368,15 +372,24 @@ func (r *addressBookExpansionResolver) expand(name string, visiting map[string]b
 			if addr != nil {
 				r.appendValue(&out, addr.UsableValue())
 			}
-		} else if set, ok := r.book.AddressSets[name]; ok {
+		} else if set, ok := r.book.AddressSets[name]; ok && set != nil {
+			if len(set.UnknownMembers) > 0 {
+				return addressBookParsedExpansion{unknownMember: true}, false
+			}
 			for _, member := range set.Addresses {
 				values, childCycle := r.expand(member, visiting)
+				if values.unknownMember {
+					return addressBookParsedExpansion{unknownMember: true}, false
+				}
 				out.v4 = append(out.v4, values.v4...)
 				out.v6 = append(out.v6, values.v6...)
 				cycle = cycle || childCycle
 			}
 			for _, nested := range set.AddressSets {
 				values, childCycle := r.expand(nested, visiting)
+				if values.unknownMember {
+					return addressBookParsedExpansion{unknownMember: true}, false
+				}
 				out.v4 = append(out.v4, values.v4...)
 				out.v6 = append(out.v6, values.v6...)
 				cycle = cycle || childCycle
@@ -434,33 +447,47 @@ func (r *addressBookExpansionResolver) appendCIDR(out *addressBookParsedExpansio
 }
 
 // expandBookNameRecursive resolves static and feed-backed names while treating
-// only path-local revisits as cycles. NAT lowering shares this traversal.
-func expandBookNameRecursive(ab *config.AddressBook, feedOverlay map[string][]string, name string, visited map[string]bool, _depth int) []string {
+// only path-local revisits as cycles. NAT lowering shares this traversal. The
+// second result is true when an address-set statement was dropped anywhere in
+// the expanded closure, so callers reject the whole set rather than use a
+// narrowed prefix subset.
+func expandBookNameRecursive(ab *config.AddressBook, feedOverlay map[string][]string, name string, visited map[string]bool, _depth int) ([]string, bool) {
 	if visited[name] {
-		return nil
+		return nil, false
 	}
 	visited[name] = true
 	defer func() { delete(visited, name) }()
 	var out []string
 	out = append(out, feedOverlay[name]...)
 	if ab == nil {
-		return out
+		return out, false
 	}
 	if addr, ok := ab.Addresses[name]; ok {
 		if value := addr.UsableValue(); value != "" {
 			out = append(out, value)
 		}
-		return out
+		return out, false
 	}
 	if set, ok := ab.AddressSets[name]; ok {
+		if set == nil || len(set.UnknownMembers) > 0 {
+			return nil, true
+		}
 		for _, member := range set.Addresses {
-			out = append(out, expandBookNameRecursive(ab, feedOverlay, member, visited, 0)...)
+			values, unknownMember := expandBookNameRecursive(ab, feedOverlay, member, visited, 0)
+			if unknownMember {
+				return nil, true
+			}
+			out = append(out, values...)
 		}
 		for _, nested := range set.AddressSets {
-			out = append(out, expandBookNameRecursive(ab, feedOverlay, nested, visited, 0)...)
+			values, unknownMember := expandBookNameRecursive(ab, feedOverlay, nested, visited, 0)
+			if unknownMember {
+				return nil, true
+			}
+			out = append(out, values...)
 		}
 	}
-	return out
+	return out, false
 }
 
 type parsedAddressBookCIDR struct {

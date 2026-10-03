@@ -423,7 +423,9 @@ func memberIsNestedSet(memberName string, apps *ApplicationsConfig) bool {
 }
 
 // ExpandAddressSet recursively expands an address-set to individual
-// address names. Handles nested address-sets with cycle detection.
+// address names. Handles nested address-sets with cycle detection. A set carrying
+// an unknown member statement is rejected rather than expanded to its surviving
+// subset (#11822).
 // Max depth 5.
 func ExpandAddressSet(name string, ab *AddressBook) ([]string, error) {
 	return expandAddrSet(name, ab, make(map[string]bool), 0)
@@ -440,6 +442,14 @@ func expandAddrSet(name string, ab *AddressBook, visited map[string]bool, depth 
 	as, ok := ab.AddressSets[name]
 	if !ok {
 		return nil, fmt.Errorf("address-set %q not found", name)
+	}
+	if as == nil {
+		return nil, fmt.Errorf("address-set %q is nil", name)
+	}
+	if len(as.UnknownMembers) > 0 {
+		return nil, fmt.Errorf("address-set %q has unknown member statement %q; "+
+			"the member was silently dropped and the set is under-populated",
+			name, as.UnknownMembers[0])
 	}
 
 	visited[name] = true

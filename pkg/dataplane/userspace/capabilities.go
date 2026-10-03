@@ -348,6 +348,9 @@ func resolveUserspaceAddressBookEntry(cfg *config.Config, name string) ([]string
 		if set == nil {
 			return false
 		}
+		if len(set.UnknownMembers) > 0 {
+			return false
+		}
 		if seenSets[ref] {
 			return true
 		}

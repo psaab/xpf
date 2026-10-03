@@ -215,6 +215,9 @@ func nameRepresentability(ab *config.AddressBook, feedOverlay map[string][]strin
 		// reference is unrepresentable.
 		return false, false
 	}
+	if set == nil || len(set.UnknownMembers) > 0 {
+		return false, false
+	}
 	visited[name] = true
 	defer delete(visited, name)
 	hasMember := false

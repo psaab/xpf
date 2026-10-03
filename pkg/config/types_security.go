@@ -1582,6 +1582,23 @@ type AddressSet struct {
 	Name        string
 	Addresses   []string // references to Address names
 	AddressSets []string // references to other AddressSet names (nested)
+	// UnknownMembers records the raw member keywords inside an address-set
+	// body that are NOT a recognized member statement (`address`,
+	// `address-set`, or `description`). The member switch in
+	// parseAddressBookEntries had no default arm, so a typo'd member keyword
+	// (e.g. `addres foo` for `address foo`, or a mistyped `address-set`) was
+	// SILENTLY DROPPED — the set was under-populated, and if it was referenced
+	// by a DENY policy the deny matched FEWER addresses than the operator
+	// intended (a fail-open under-match; traffic meant to be blocked is
+	// permitted). Mirroring ApplicationSet.UnknownMembers (#3890), the
+	// offending keyword is recorded here and the deferred gate
+	// (validateAddressSetMembersDefinedStrict) hard-rejects the first one on
+	// the strict commit path / warns on the tolerant load / peer-sync path.
+	// On the tolerant path the recorded keyword additionally poisons every
+	// resolver (strict mirror, runtime expansion, representability) so the
+	// narrowed set fails closed instead of passing with fewer members
+	// (#11822).
+	UnknownMembers []string
 }
 
 // ApplicationsConfig holds application definitions.

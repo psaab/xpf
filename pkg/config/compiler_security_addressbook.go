@@ -145,7 +145,10 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 			if _, exists := gb.AddressSets[q]; exists {
 				continue // no-clobber (see zoneLocalNamePrefix)
 			}
-			ns := &AddressSet{Name: q}
+			ns := &AddressSet{
+				Name:           q,
+				UnknownMembers: append([]string(nil), set.UnknownMembers...),
+			}
 			for _, m := range set.Addresses {
 				if localDefines(zoneName, m) {
 					ns.Addresses = append(ns.Addresses, zoneLocalQualify(zoneName, m))
@@ -400,6 +403,17 @@ func parseAddressBookEntries(node *Node, ab *AddressBook) {
 								idx.set[v] = struct{}{}
 								as.AddressSets = append(as.AddressSets, v)
 							}
+						}
+					case "description":
+						// Metadata is not a member and remains accepted, matching
+						// the schema's documented address-set description leaf.
+					default:
+						// #11822: address-set's closed-world body is opaque to
+						// tolerant schema diagnostics. Retain an unknown keyword
+						// so the deferred gate can warn, and resolvers can poison
+						// this under-populated set instead of passing its subset.
+						if kw := member.Name(); kw != "" {
+							as.UnknownMembers = append(as.UnknownMembers, kw)
 						}
 					}
 				}

@@ -5,16 +5,12 @@ import (
 	"sort"
 )
 
-// validateAddressSetMembersDefinedStrict (#9490) refuses an address-set member
-// that names no address or address-set.
-//
-// `address-set s1 { address a1 xpfbogus9206 v1; }` committed clean, and
-// Addresses carried all three names. The runtime resolver drops a name it
-// cannot find, so the set a policy matches on silently resolves to FEWER
-// members than it lists: #9088's shape on a security object. The policy-side
-// gate (validatePolicyMatchAddressSetMembersStrict) resolves only sets that a
-// policy references, and it runs after the #2008 token gate, so a set nothing
-// references yet, or a bad member beside a good one, was never refused.
+// validateAddressSetMembersDefinedStrict (#9490/#11822) refuses address-set
+// members that name no address or address-set, and unknown member statements
+// that the lenient compiler would otherwise drop. A dangling member leaves the
+// set short at runtime; an unknown statement silently drops an authored member
+// outright. Either can narrow a DENY policy and permit traffic the operator
+// meant to block.
 //
 // It runs on the compiled global book, after resolveZoneLocalAddressBooks has
 // folded zone-local books in and qualified the members they define locally.
@@ -52,6 +48,12 @@ func validateAddressSetMembersDefinedStrict(cfg *Config) error {
 		set := ab.AddressSets[name]
 		if set == nil {
 			continue
+		}
+		if len(set.UnknownMembers) > 0 {
+			return fmt.Errorf("address-set %s: unknown member statement %q; the "+
+				"unrecognized keyword is silently dropped, leaving the set under-populated "+
+				"and a deny policy referencing it able to permit traffic meant to be blocked",
+				show(name), set.UnknownMembers[0])
 		}
 		for _, kind := range []struct {
 			leaf    string
