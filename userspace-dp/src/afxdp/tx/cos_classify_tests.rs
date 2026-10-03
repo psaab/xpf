@@ -1021,6 +1021,84 @@ fn resolve_cos_queue_id_prefers_egress_output_filter_forwarding_class() {
     assert_eq!(queue_id, Some(1));
 }
 
+#[test]
+fn filter_forwarding_class_miss_pins_default_over_lower_precedence() {
+    let counter_before = FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL
+        .load(std::sync::atomic::Ordering::Relaxed);
+    for (name, ba_fallback) in [("ingress filter", false), ("BA classifier", true)] {
+        let mut snapshot = hb166_t3_middle_case_snapshot();
+        snapshot
+            .filters
+            .iter_mut()
+            .find(|filter| filter.name == "wan-count")
+            .expect("egress filter")
+            .terms[0]
+            .forwarding_class = "unmaterialized".into();
+        let cos = snapshot
+            .class_of_service
+            .as_mut()
+            .expect("CoS snapshot");
+        cos.forwarding_classes.push(CoSForwardingClassSnapshot {
+            name: "unmaterialized".into(),
+            queue: 7,
+        });
+        if ba_fallback {
+            snapshot.interfaces[0].filter_input_v4.clear();
+            snapshot.interfaces[0].cos_dscp_classifier = "wan-ba".into();
+            snapshot.interfaces[1].cos_dscp_classifier = "wan-ba".into();
+            cos.dscp_classifiers.push(CoSDSCPClassifierSnapshot {
+                name: "wan-ba".into(),
+                entries: vec![CoSDSCPClassifierEntrySnapshot {
+                    forwarding_class: "expedited-forwarding".into(),
+                    loss_priority: "low".into(),
+                    dscp_values: vec![0],
+                }],
+            });
+        }
+
+        let forwarding = build_forwarding_state(&snapshot);
+        let meta = UserspaceDpMeta {
+            ingress_ifindex: 5,
+            ingress_vlan_id: 0,
+            addr_family: libc::AF_INET as u8,
+            dscp: 0,
+            ..Default::default()
+        };
+        let key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            src_port: 12345,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        assert_eq!(
+            resolve_cos_queue_id(&forwarding, 202, meta, Some(&key)),
+            Some(0),
+            "{name} must not mask an explicit output-filter class miss"
+        );
+        let cached = resolve_cached_cos_tx_selection(&forwarding, 202, meta, &key);
+        assert_eq!(cached.queue_id, Some(0), "{name} cached fallback");
+        assert!(
+            cached.filter_forwarding_class_fallback_pinned,
+            "{name} miss must be retained in the cached descriptor"
+        );
+        assert!(
+            !cached.ba_reclassify,
+            "{name} miss must keep the default queue pinned on cache hits"
+        );
+    }
+    assert_eq!(
+        FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL
+            .load(std::sync::atomic::Ordering::Relaxed)
+            - counter_before,
+        4,
+        "one fallback counter increment per live or cached seed resolution"
+    );
+}
+
 // #hb166 T-6(m): fragments / flowless packets (flow_key == None) still carry
 // a DSCP. Behavior-aggregate (DSCP) classification is 5-tuple-independent, so
 // a marked fragment must land in its BA queue rather than the default queue.

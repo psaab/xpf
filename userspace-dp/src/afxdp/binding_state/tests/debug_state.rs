@@ -290,6 +290,7 @@ fn active_flow_debug_test_entry(
                 three_color_policers: crate::filter::CachedThreeColorPolicers::default(),
                 filter_log: None,
                 ba_reclassify: false,
+                filter_forwarding_class_fallback_pinned: false,
             },
             nat64: false,
             nptv6: false,

@@ -30,7 +30,9 @@ pub(super) use drain::{
 pub(super) mod cos_classify;
 pub(super) mod dispatch;
 pub(super) mod tcp_segmentation;
-pub(in crate::afxdp) use cos_classify::cos_queue_dscp_rewrite;
+pub(in crate::afxdp) use cos_classify::{
+    cos_queue_dscp_rewrite, FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL,
+};
 pub(super) use cos_classify::{
     CoSTxSelection, GeneratedReplyVerdict, classify_generated_reply, enqueue_local_into_cos,
     reclassify_cached_ba_queue_and_lp_rewrite, resolve_cached_cos_tx_queue_id,

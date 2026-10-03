@@ -1227,6 +1227,11 @@ sync.
   replaces the seed's CoS rewrite. Default-queue, filter-FC-pinned, and no-CoS
   flows keep their cached selection. The reclassification remains allocation-
   free and gated by `ba_reclassify`.
+  #11787: an explicit filter forwarding-class with no materialized queue resolves
+  to the interface default and is pinned in the cached descriptor. It does not
+  fall through to a lower-precedence BA classifier; the miss increments the
+  internal `FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL` counter, which is not yet
+  exported through ProcessStatus or Prometheus.
   `txn_flow_cache_hit_reclassifies_ba_dscp_per_packet_3778` pins the DSCP queue
   arm; `txn_flow_cache_hit_reclassifies_ba_pcp_per_packet_4422` pins the PCP
   queue arm; `txn_flow_cache_hit_reclassifies_ba_queue_and_lp_rewrite_per_packet_11430`

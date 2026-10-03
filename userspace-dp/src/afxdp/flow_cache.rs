@@ -75,10 +75,15 @@ pub(super) struct CachedTxSelectionDescriptor {
     // cache key. When this flag is set, hits re-resolve the current queue and
     // CoS rewrite. The separate `filter_dscp_rewrite` preserves filter
     // precedence; when false, queue and combined rewrite remain seed-cached.
-    // True iff a BA classifier is configured on egress AND no 5-tuple-stable
-    // filter forwarding-class pinned the queue. This keeps default-queue,
-    // filter-FC, and no-CoS flows off the per-packet reclassification path.
+    // True iff a BA classifier is configured on egress AND neither a mapped
+    // 5-tuple-stable filter forwarding-class nor an unmaterialized-class
+    // fallback pinned the queue. This keeps default-queue, filter-FC, and no-CoS
+    // flows off the per-packet reclassification path.
     pub(super) ba_reclassify: bool,
+    /// #11787: a filter class missed the materialized class map, so this
+    /// descriptor carries the default queue as a pinned fallback. Hits must not
+    /// reclassify through a BA classifier.
+    pub(super) filter_forwarding_class_fallback_pinned: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -331,3 +331,144 @@ func TestHB166_T4_ClassifierMaterializedQueue_NoWarn(t *testing.T) {
 		t.Fatalf("all classifier classes are materialized; must not warn; got: %v", cfg.Warnings)
 	}
 }
+
+// TestHB166_T5_FilterForwardingClassUnmaterialized_Warns checks the filter
+// marking path for every family/direction binding. A scheduler-map entry for
+// another defined class must not hide the missing filter forwarding-class.
+func TestHB166_T5_FilterForwardingClassUnmaterialized_Warns(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		family          string
+		direction       string
+		separateIngress bool
+		material        bool
+		wantWarn        bool
+	}{
+		{name: "inet input on other egress", family: "inet", direction: "input", separateIngress: true, wantWarn: true},
+		{name: "inet output", family: "inet", direction: "output", wantWarn: true},
+		{name: "inet6 input on other egress", family: "inet6", direction: "input", separateIngress: true, wantWarn: true},
+		{name: "inet6 output", family: "inet6", direction: "output", wantWarn: true},
+		{name: "materialized", family: "inet", direction: "output", material: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filterBinding := "set interfaces reth0 unit 80 family " + tc.family + " filter " + tc.direction + " f"
+			if tc.separateIngress {
+				filterBinding = "set interfaces reth1 unit 0 family " + tc.family + " filter " + tc.direction + " f"
+			}
+			cmds := []string{
+				"set interfaces reth0 unit 80 family inet address 198.51.100.80/24",
+				"set interfaces reth0 unit 80 family inet6 address 2001:db8:80::1/64",
+				"set interfaces reth1 unit 0 family inet address 198.51.100.1/24",
+				"set interfaces reth1 unit 0 family inet6 address 2001:db8:1::1/64",
+				"set class-of-service forwarding-classes queue 0 best-effort",
+				"set class-of-service forwarding-classes queue 5 voice",
+				"set class-of-service schedulers sched-be priority low",
+				"set class-of-service scheduler-maps be-only forwarding-class best-effort scheduler sched-be",
+				"set class-of-service interfaces reth0 unit 80 shaping-rate 10g",
+				"set class-of-service interfaces reth0 unit 80 scheduler-map be-only",
+				"set firewall family " + tc.family + " filter f term mark then forwarding-class voice",
+				"set firewall family " + tc.family + " filter f term mark then accept",
+				filterBinding,
+			}
+			if tc.material {
+				cmds = append(cmds,
+					"set class-of-service schedulers sched-voice priority strict-high",
+					"set class-of-service scheduler-maps be-only forwarding-class voice scheduler sched-voice")
+			}
+			cfg := hb166Compile(t, cmds...)
+			gotWarn := hb166HasWarning(cfg, `sets defined forwarding-class "voice"`)
+			if gotWarn != tc.wantWarn {
+				t.Fatalf("filter forwarding-class warning = %t, want %t; warnings: %v", gotWarn, tc.wantWarn, cfg.Warnings)
+			}
+		})
+	}
+}
+
+func TestHB166_T5_FilterForwardingClassSyntheticBestEffort_NoWarn(t *testing.T) {
+	cfg := hb166Compile(t,
+		"set class-of-service forwarding-classes queue 0 best-effort",
+		"set class-of-service forwarding-classes queue 5 voice",
+		"set class-of-service schedulers sched-voice priority strict-high",
+		"set class-of-service scheduler-maps voice-only forwarding-class voice scheduler sched-voice",
+		"set class-of-service interfaces reth0 unit 80 shaping-rate 10g",
+		"set class-of-service interfaces reth0 unit 80 scheduler-map voice-only",
+		"set firewall family inet filter f term mark then forwarding-class best-effort",
+		"set firewall family inet filter f term mark then accept",
+		"set interfaces reth0 unit 80 family inet filter output f",
+	)
+	if hb166HasWarning(cfg, `sets defined forwarding-class "best-effort"`) {
+		t.Fatalf("the runtime synthesizes best-effort when omitted from the scheduler-map; got warnings: %v", cfg.Warnings)
+	}
+}
+
+func TestHB166_T5_FilterForwardingClassNoRuntime_NoWarn(t *testing.T) {
+	cfg := hb166Compile(t,
+		"set class-of-service forwarding-classes queue 5 voice",
+		"set class-of-service interfaces reth0 unit 80 priority-low-min-share 100k",
+		"set firewall family inet filter f term mark then forwarding-class voice",
+		"set firewall family inet filter f term mark then accept",
+		"set interfaces reth0 unit 80 family inet address 198.51.100.80/24",
+		"set interfaces reth0 unit 80 family inet filter output f",
+	)
+	if hb166HasWarning(cfg, `sets defined forwarding-class "voice"`) {
+		t.Fatalf("priority-low-min-share alone admits no CoS runtime; got warnings: %v", cfg.Warnings)
+	}
+}
+
+func TestHB166_T5_FilterForwardingClassMaterializedByName_Warns(t *testing.T) {
+	cfg := hb166Compile(t,
+		"set class-of-service forwarding-classes queue 0 best-effort",
+		"set class-of-service forwarding-classes queue 5 voice",
+		"set class-of-service schedulers sched-be priority low",
+		"set class-of-service scheduler-maps be-only forwarding-class best-effort scheduler sched-be",
+		"set class-of-service interfaces reth0 unit 80 shaping-rate 10g",
+		"set class-of-service interfaces reth0 unit 80 scheduler-map be-only",
+		"set firewall family inet filter f term mark then forwarding-class voice",
+		"set firewall family inet filter f term mark then accept",
+		"set interfaces reth0 unit 80 family inet address 198.51.100.80/24",
+		"set interfaces reth0 unit 80 family inet filter output f",
+	)
+
+	// Model a legacy in-memory config where a non-materialized class shares the
+	// numeric queue ID of the materialized best-effort class. Runtime lookup is
+	// by forwarding-class name, so the warning must not collapse to queue IDs.
+	cfg.ClassOfService.ForwardingClasses["voice"].Queue = 0
+	for _, warning := range ValidateConfig(cfg) {
+		if strings.Contains(warning, `sets defined forwarding-class "voice"`) {
+			return
+		}
+	}
+	t.Fatalf("materialization is name-based; queue-ID alias must still warn: %v", cfg.Warnings)
+}
+
+func TestHB166_T5_FilterForwardingClassClassifierAdmission_Warns(t *testing.T) {
+	cfg := hb166Compile(t,
+		"set class-of-service forwarding-classes queue 0 best-effort",
+		"set class-of-service forwarding-classes queue 5 voice",
+		"set class-of-service classifiers dscp cls forwarding-class best-effort loss-priority low code-points 0",
+		"set class-of-service interfaces reth0 unit 80 classifiers dscp cls",
+		"set firewall family inet filter f term mark then forwarding-class voice",
+		"set firewall family inet filter f term mark then accept",
+		"set interfaces reth0 unit 80 family inet address 198.51.100.80/24",
+		"set interfaces reth0 unit 80 family inet filter output f",
+	)
+	if !hb166HasWarning(cfg, `sets defined forwarding-class "voice"`) {
+		t.Fatalf("classifier-admitted runtime must warn on a filter class miss; warnings: %v", cfg.Warnings)
+	}
+}
+
+func TestHB166_T5_FilterForwardingClassRewriteAdmission_Warns(t *testing.T) {
+	cfg := hb166Compile(t,
+		"set class-of-service forwarding-classes queue 0 best-effort",
+		"set class-of-service forwarding-classes queue 5 voice",
+		"set class-of-service rewrite-rules dscp rw forwarding-class best-effort loss-priority low code-point 0",
+		"set class-of-service interfaces reth0 unit 80 rewrite-rules dscp rw",
+		"set firewall family inet filter f term mark then forwarding-class voice",
+		"set firewall family inet filter f term mark then accept",
+		"set interfaces reth0 unit 80 family inet address 198.51.100.80/24",
+		"set interfaces reth0 unit 80 family inet filter output f",
+	)
+	if !hb166HasWarning(cfg, `sets defined forwarding-class "voice"`) {
+		t.Fatalf("rewrite-admitted runtime must warn on a filter class miss; warnings: %v", cfg.Warnings)
+	}
+}

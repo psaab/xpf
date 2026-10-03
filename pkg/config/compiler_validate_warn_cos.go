@@ -234,3 +234,164 @@ func classOfServiceClassifierQueueWarnings(cos *ClassOfServiceConfig, ifaceName 
 	}
 	return warnings
 }
+
+// classOfServiceMaterializedForwardingClasses returns the defined forwarding
+// classes whose queues are built from a unit's scheduler-map and whether that
+// map contains at least one usable class.
+func classOfServiceMaterializedForwardingClasses(cos *ClassOfServiceConfig, unit *CoSInterfaceUnit) (map[string]bool, bool) {
+	matClasses := map[string]bool{}
+	if cos == nil || unit == nil || unit.SchedulerMap == "" {
+		return matClasses, false
+	}
+	if sm := cos.SchedulerMaps[unit.SchedulerMap]; sm != nil {
+		for className := range sm.Entries {
+			if cos.ForwardingClasses[className] != nil {
+				matClasses[className] = true
+			}
+		}
+	}
+	return matClasses, len(matClasses) > 0
+}
+
+// classOfServiceUnitHasRuntime mirrors the CoS admission gate in
+// build_cos_iface_config. A filter alone does not create a CoS runtime.
+func classOfServiceUnitHasRuntime(cos *ClassOfServiceConfig, unit *CoSInterfaceUnit) bool {
+	if cos == nil || unit == nil {
+		return false
+	}
+	_, schedulerMapResolved := classOfServiceMaterializedForwardingClasses(cos, unit)
+	if schedulerMapResolved || unit.ShapingRateBytes > 0 {
+		return true
+	}
+
+	// Without a usable scheduler-map, the dataplane's pre-admission candidate
+	// queue set is the synthetic queue 0.
+	classTargetsDefaultQueue := func(className string) bool {
+		fc := cos.ForwardingClasses[className]
+		return fc != nil && fc.Queue == 0
+	}
+	if classifier := cos.DSCPClassifiers[unit.DSCPClassifier]; classifier != nil {
+		for _, entry := range classifier.Entries {
+			if entry != nil && classTargetsDefaultQueue(entry.ForwardingClass) {
+				return true
+			}
+		}
+	}
+	if classifier := cos.IEEE8021Classifiers[unit.IEEE8021Classifier]; classifier != nil {
+		for _, entry := range classifier.Entries {
+			if entry != nil && classTargetsDefaultQueue(entry.ForwardingClass) {
+				return true
+			}
+		}
+	}
+	if classifier := cos.INetPrecedenceClassifierDefs[unit.INetPrecedenceClassifier]; classifier != nil {
+		for _, entry := range classifier.Entries {
+			if entry != nil && classTargetsDefaultQueue(entry.ForwardingClass) {
+				return true
+			}
+		}
+	}
+	if rewrite := cos.DSCPRewriteRules[unit.DSCPRewriteRule]; rewrite != nil {
+		for _, entry := range rewrite.Entries {
+			if entry != nil && entry.ForwardingClass == "best-effort" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// classOfServiceFilterForwardingClassWarnings (#11787) reports a defined
+// filter forwarding-class that has no queue built on a CoS egress unit. Output
+// filters are local to that unit; input filter classes can survive to any egress.
+func classOfServiceFilterForwardingClassWarnings(cfg *Config, cos *ClassOfServiceConfig, ifaceName string, unit *CoSInterfaceUnit) []string {
+	if cfg == nil || cos == nil || unit == nil {
+		return nil
+	}
+	iface := cfg.Interfaces.Interfaces[ifaceName]
+	if iface == nil || iface.Units[unit.Unit] == nil {
+		return nil
+	}
+	ifUnit := iface.Units[unit.Unit]
+	if !classOfServiceUnitHasRuntime(cos, unit) {
+		return nil
+	}
+	// An output filter directly classifies this unit. An input filter's class
+	// survives to the packet's eventual egress, so conservatively check every
+	// configured input filter against this unit's materialized queue map.
+	type filterRef struct {
+		name      string
+		family    string
+		direction string
+		fw        *FirewallFilter
+	}
+	var filters []filterRef
+	seenFilters := map[*FirewallFilter]bool{}
+	addFilter := func(name, family, direction string, defs map[string]*FirewallFilter) {
+		if name == "" || defs[name] == nil || seenFilters[defs[name]] {
+			return
+		}
+		seenFilters[defs[name]] = true
+		filters = append(filters, filterRef{
+			name: name, family: family, direction: direction, fw: defs[name],
+		})
+	}
+	addFilter(ifUnit.FilterOutputV4, "inet", "output", cfg.Firewall.FiltersInet)
+	addFilter(ifUnit.FilterOutputV6, "inet6", "output", cfg.Firewall.FiltersInet6)
+	for _, ingressIface := range cfg.Interfaces.Interfaces {
+		if ingressIface == nil {
+			continue
+		}
+		for _, ingressUnit := range ingressIface.Units {
+			if ingressUnit == nil {
+				continue
+			}
+			addFilter(ingressUnit.FilterInputV4, "inet", "input", cfg.Firewall.FiltersInet)
+			addFilter(ingressUnit.FilterInputV6, "inet6", "input", cfg.Firewall.FiltersInet6)
+		}
+	}
+	sort.Slice(filters, func(i, j int) bool {
+		if filters[i].name != filters[j].name {
+			return filters[i].name < filters[j].name
+		}
+		if filters[i].family != filters[j].family {
+			return filters[i].family < filters[j].family
+		}
+		return filters[i].direction < filters[j].direction
+	})
+	matClasses, schedulerMapResolved := classOfServiceMaterializedForwardingClasses(cos, unit)
+	if !schedulerMapResolved {
+		matClasses = map[string]bool{"best-effort": true}
+	} else if !matClasses["best-effort"] {
+		// build_cos_iface_config synthesizes best-effort for every admitted
+		// unit whose scheduler-map omits the class.
+		matClasses["best-effort"] = true
+	}
+
+	var warnings []string
+	type termRef struct {
+		filter *FirewallFilter
+		name   string
+	}
+	seenTerms := map[termRef]bool{}
+	for _, ref := range filters {
+		for _, term := range ref.fw.Terms {
+			if term == nil || term.ForwardingClass == "" {
+				continue
+			}
+			key := termRef{filter: ref.fw, name: term.Name}
+			if seenTerms[key] {
+				continue
+			}
+			seenTerms[key] = true
+			fc := cos.ForwardingClasses[term.ForwardingClass]
+			if fc == nil || matClasses[term.ForwardingClass] {
+				continue
+			}
+			warnings = append(warnings, fmt.Sprintf(
+				"class-of-service interface %s unit %d may receive filter %q family %s %s term %q that sets defined forwarding-class %q (queue %d) which has no materialized queue on this interface; the userspace dataplane uses the pinned best-effort fallback",
+				ifaceName, unit.Unit, ref.name, ref.family, ref.direction, term.Name, term.ForwardingClass, fc.Queue))
+		}
+	}
+	return warnings
+}
