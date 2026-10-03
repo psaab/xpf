@@ -234,7 +234,11 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // IPv6 link-local gateway. A v40 helper cannot apply that table-scoped exception.
 // v41 -> v42 (#11503): ProcessStatus carries distinct ingress and egress
 // unzoned-policy-denial counters; old control planes cannot export these causes.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 42;
+/// v43 (#11463): InterfaceSnapshot.admin_disabled marks disabled identities.
+/// Go omits their configured and live addresses, and Rust also honors the
+/// flag when deriving connected routes, local-delivery addresses, and egress
+/// primaries. Exact-version gating refuses helpers that cannot honor the flag.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 43;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.

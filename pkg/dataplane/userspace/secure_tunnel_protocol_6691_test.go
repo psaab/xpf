@@ -150,10 +150,11 @@ const preSecureTunnelProtocolVersion = 4
 // moves it to v39 so VID-0 ingress selects the configured native VLAN unit.
 // #11404 moves it to v40 for InterfaceSnapshot.LinkUp kernel liveness; #11420
 // moves it to v41 for ConfigSnapshot.ForwardingTables FI link-local gateway
-// authorization; #11503 moves it to v42 for unzoned-denial cause counters.
+// authorization; #11503 moves it to v42 for unzoned-denial cause counters;
+// #11463 moves it to v43 for disabled-interface connected-address state.
 // Nothing about secure_tunnel changed, so
 // MinProtocolSecureTunnelRefusal (7) is untouched again.
-const secureTunnelSnapshotProtocolVersion = 42
+const secureTunnelSnapshotProtocolVersion = 43
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

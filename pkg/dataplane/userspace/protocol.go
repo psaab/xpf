@@ -377,7 +377,11 @@ const (
 	// fences the mixed route contract.
 	// v41 -> v42 (#11503): ProcessStatus carries distinct ingress and egress
 	// unzoned-policy-denial counters for status and metrics consumers.
-	ProtocolVersion = 42
+	// v42 -> v43 (#11463): InterfaceSnapshot.AdminDisabled records disabled
+	// rows; Go omits their configured and live addresses and Rust also honors
+	// the flag for connected/local/egress-primary derivation. The exact version
+	// gate prevents an older helper from silently ignoring disabled state.
+	ProtocolVersion = 43
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -1083,11 +1087,17 @@ type InterfaceSnapshot struct {
 	RoutingDomain   uint32 `json:"routing_domain,omitempty"`
 	LinuxName       string `json:"linux_name,omitempty"`
 	ParentLinuxName string `json:"parent_linux_name,omitempty"`
-	Ifindex         int    `json:"ifindex,omitempty"`
-	ParentIfindex   int    `json:"parent_ifindex,omitempty"`
-	LogicalOnly     bool   `json:"logical_only,omitempty"`
-	RXQueues        int    `json:"rx_queues,omitempty"`
-	VLANID          int    `json:"vlan_id,omitempty"`
+	// AdminDisabled is the configured administrative disable state of this
+	// interface identity. Disabled rows omit configured and live addresses;
+	// Rust also treats this flag as authoritative when deriving connected,
+	// local-delivery, and egress-primary state. The version gate rejects helpers
+	// that cannot honor this wire contract.
+	AdminDisabled bool `json:"admin_disabled,omitempty"`
+	Ifindex       int  `json:"ifindex,omitempty"`
+	ParentIfindex int  `json:"parent_ifindex,omitempty"`
+	LogicalOnly   bool `json:"logical_only,omitempty"`
+	RXQueues      int  `json:"rx_queues,omitempty"`
+	VLANID        int  `json:"vlan_id,omitempty"`
 	// NativeVLANID identifies the tagged unit that receives untagged frames
 	// on this base interface (#11434). Zero means no native VLAN; only base
 	// interface rows carry this field.
