@@ -279,8 +279,15 @@ var OperationalTree = map[string]*Node{
 					"interfaces": {Desc: "Show data-plane interfaces"},
 					"fairness":   {Desc: "Show userspace fairness RSS structure"},
 					"flows": {Desc: "Show userspace flow-to-worker diagnostics", Children: map[string]*Node{
-						"all":   {Desc: "Show all helper-reported flow-to-worker rows"},
-						"limit": {Desc: "Limit flow-to-worker rows"},
+						"all": {Desc: "Show all helper-reported flow-to-worker rows"},
+						"limit": {
+							Desc:      "Limit flow-to-worker rows",
+							ValueType: ValueInteger,
+							ValueDesc: "Positive number of flow rows",
+						},
+						// The dispatcher also accepts a bare row count and
+						// limit=N in one argument; the placeholder admits both.
+						"<limit>": {Desc: "Positive number of flow rows (or limit=N)"},
 					}},
 				}},
 				"ip-monitoring": {Desc: "Show IP monitoring information", Children: map[string]*Node{

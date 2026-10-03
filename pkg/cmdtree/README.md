@@ -259,6 +259,13 @@ one value of the declared kind at the next slot, and `?` completion
 surfaces `ValueDesc` + `ValueExamples` + the placeholder
 (`ValueType.Placeholder()`).
 
+#11830 models `show chassis cluster data-plane flows` limits as a typed
+integer after `limit`, and a single-value placeholder for the dispatcher's
+bare `N` and `limit=N` forms. The tree covers these spellings for
+canonicalization; the dispatcher parser remains authoritative for rejecting
+non-positive values and malformed selectors.
+
+
 `ValueType` is defined in `pkg/config` (`config.ValueType`) and re-exported
 here via aliases so cmdtree's operational leaves can carry it without a
 `config → cmdtree → config` import cycle. The typed-leaf fields on `Node`
