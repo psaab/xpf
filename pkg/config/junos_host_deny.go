@@ -1084,37 +1084,55 @@ func JunosHostZoneIngressNetdevs(cfg *Config) map[string][]string {
 	return out
 }
 
-// junosHostVRFMasterNetdevs mirrors the daemon's routing-instance member
-// binder: each device key in RoutingInstanceMemberDeviceKeysForInstance is
-// mapped to the l3mdev master visible at LOCAL_IN. This includes generated unit
-// devices from bare member refs and keeps VLAN subunits distinct when the
-// routing instance names only one explicit unit. A present empty value means
-// malformed input assigned the same device to conflicting masters; no zone may
-// guess which one is effective.
+// junosHostVRFMasterNetdevs maps every daemon-bound routing-instance device key
+// to the l3mdev master visible at LOCAL_IN. RI list members use the daemon's
+// member-key resolver; explicit tunnel routing-instance stanzas use the shared
+// tunnel-claim traversal. A present empty value means conflicting or unsupported
+// ownership, so no zone may guess which master is effective.
 func junosHostVRFMasterNetdevs(cfg *Config, tunnelNames map[string]string) map[string]string {
 	out := map[string]string{}
 	if cfg == nil {
 		return out
+	}
+	masters := map[string]string{ManagementVRFInstanceName: ManagementVRFDeviceName}
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.Name == "" || ri.InstanceType == "forwarding" ||
+			IsReservedRoutingInstanceName(ri.Name) {
+			continue
+		}
+		masters[ri.Name] = LinuxIfName("vrf-" + ri.Name)
+	}
+	recordMaster := func(nd, master string) {
+		if nd == "" {
+			return
+		}
+		if previous, exists := out[nd]; exists {
+			if previous != master {
+				out[nd] = ""
+			}
+			return
+		}
+		out[nd] = master
 	}
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil || ri.Name == "" || ri.InstanceType == "forwarding" ||
 			IsReservedRoutingInstanceName(ri.Name) {
 			continue
 		}
-		master := LinuxIfName("vrf-" + ri.Name)
+		master := masters[ri.Name]
 		for _, key := range RoutingInstanceMemberDeviceKeysForInstance(cfg, tunnelNames, ri) {
-			nd := key.LinuxName
-			if nd == "" {
-				continue
-			}
-			if previous, exists := out[nd]; exists {
-				if previous != master {
-					out[nd] = ""
-				}
-				continue
-			}
-			out[nd] = master
+			recordMaster(key.LinuxName, master)
 		}
+	}
+	// The tunnel manager binds explicit stanza devices directly, outside the
+	// RI interface-list binder above. Use the same deterministic ownership
+	// claims as membership conflict detection (#11310), and retain an empty
+	// target for stanza owners with no known VRF so their deny stays warned.
+	for _, claim := range routingInstanceTunnelDeviceClaims(cfg) {
+		if claim.Instance == "" {
+			continue
+		}
+		recordMaster(claim.LinuxName, masters[claim.Instance])
 	}
 	return out
 }
