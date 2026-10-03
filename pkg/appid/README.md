@@ -46,9 +46,11 @@ and resolves session display names from the dataplane's assigned `app_id`.
   but no `destination-port`, e.g. a user-defined GRE/ESP/AH application —
   matches on protocol alone (#2548; before that fix `matchTuple`
   rejected an empty port, so protocol-only apps never matched and their
-  sessions reported `UNKNOWN`). An app with neither protocol nor port is
-  never a match-all. When several configured apps match the same tuple,
-  `resolveTupleFallback` resolves deterministically by **specificity**: a
+  sessions reported `UNKNOWN`). An omitted protocol uses Junos's TCP+UDP
+  default (#11816), not every IP protocol. Without ports it matches
+  protocol-only TCP/UDP sessions; it is not an all-protocol match-all. When
+  several configured apps match the same tuple, `resolveTupleFallback` resolves
+  deterministically by **specificity**: a
   port-constrained app (`source-port` and/or `destination-port` set) wins
   over a protocol-only app of the same protocol, with remaining ties
   broken by the lowest assigned `app_id` (#2578/#10722). Before that,
@@ -173,6 +175,11 @@ An application with **no** `protocol` spec means "any L4": `BuildCatalog`
 and **UDP (17)** under a single shared `app_id` (the Junos custom-application
 default). ICMP is naturally excluded — an ICMP app carries a non-empty
 protocol.
+
+The AppID-disabled tuple fallback uses the same TCP+UDP set (#11816) before
+applying configured port constraints. A tolerated omitted-protocol app therefore
+labels the same TCP/UDP tuple with the knob on or off; it does not match GRE,
+ICMP, or other IP protocols.
 
 An **explicit** `protocol <n>` — including `protocol 0` (IANA HOPOPT) — names a
 single, specific protocol and compiles to exactly one `CatalogEntry` for that

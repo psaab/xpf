@@ -296,9 +296,17 @@ func TestMatchTupleProtocolOnly(t *testing.T) {
 	if matchTuple(6, 0, 8500, "tcp", "", "8443-8445") {
 		t.Error("port-range app must NOT match a dstPort outside the range")
 	}
-	// Empty appProto must NOT match-all.
+	// An omitted protocol is Junos any-L4 for TCP+UDP, not every IP protocol.
+	for _, proto := range []uint8{6, 17} {
+		if !matchTuple(proto, 0, 0, "", "", "") {
+			t.Errorf("omitted protocol must match TCP/UDP protocol %d", proto)
+		}
+	}
+	if !matchTuple(6, 0, 0, "  ", "", "") {
+		t.Error("whitespace-only protocol must use the omitted TCP+UDP default")
+	}
 	if matchTuple(47, 0, 0, "", "", "") {
-		t.Error("app with empty protocol must NOT match-all")
+		t.Error("omitted protocol must NOT match GRE or act as an all-protocol wildcard")
 	}
 }
 

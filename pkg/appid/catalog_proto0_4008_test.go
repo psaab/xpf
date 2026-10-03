@@ -63,6 +63,73 @@ func TestCatalogOmittedProtocolFansOut(t *testing.T) {
 	}
 }
 
+// TestOmittedProtocolLabelsParityAcrossAppIDKnob11816 pins the same user app
+// to TCP+UDP catalog rows when AppID is enabled and tuple labels when disabled.
+func TestOmittedProtocolLabelsParityAcrossAppIDKnob11816(t *testing.T) {
+	const (
+		appName = "omitted-l4-11816"
+		dstPort = 65000
+	)
+	configFor := func(enabled bool) *config.Config {
+		cfg := policyRefConfig(map[string]*config.Application{
+			appName: {Name: appName, DestinationPort: "65000"},
+		})
+		cfg.Services.ApplicationIdentification = enabled
+		return cfg
+	}
+
+	enabledConfig := configFor(true)
+	enabledCatalog, err := BuildCatalog(enabledConfig)
+	if err != nil {
+		t.Fatalf("BuildCatalog with AppID enabled: %v", err)
+	}
+	entries := entriesForName(enabledCatalog, appName)
+	if len(entries) != 2 {
+		t.Fatalf("omitted-protocol catalog entries = %v, want TCP and UDP rows", entries)
+	}
+	appIDByProtocol := make(map[uint8]uint16, 2)
+	for _, entry := range entries {
+		if entry.DstPortLow != dstPort || entry.DstPortHigh != dstPort {
+			t.Fatalf("omitted-protocol entry has unexpected port range: %+v", entry)
+		}
+		appIDByProtocol[entry.Protocol] = entry.AppID
+	}
+	if len(appIDByProtocol) != 2 || appIDByProtocol[6] == 0 || appIDByProtocol[17] == 0 {
+		t.Fatalf("omitted-protocol app IDs by protocol = %v, want TCP and UDP", appIDByProtocol)
+	}
+	if appIDByProtocol[6] != appIDByProtocol[17] {
+		t.Fatalf("TCP and UDP fan-out IDs differ: %v", appIDByProtocol)
+	}
+
+	disabledConfig := configFor(false)
+	disabledCatalog, err := BuildCatalog(disabledConfig)
+	if err != nil {
+		t.Fatalf("BuildCatalog with AppID disabled: %v", err)
+	}
+	for _, proto := range []uint8{6, 17} {
+		enabledLabel := ResolveSessionName(
+			enabledCatalog.AppNames, enabledConfig, proto, 40000, dstPort, appIDByProtocol[proto],
+		)
+		disabledLabel := ResolveSessionName(
+			disabledCatalog.AppNames, disabledConfig, proto, 40000, dstPort, 0,
+		)
+		if enabledLabel != appName || disabledLabel != enabledLabel {
+			t.Errorf(
+				"protocol %d labels: AppID enabled=%q, disabled=%q; want %q in both modes",
+				proto, enabledLabel, disabledLabel, appName,
+			)
+		}
+	}
+
+	// Omitted protocol is TCP+UDP, not an all-protocol match on either path.
+	if got := ResolveSessionName(enabledCatalog.AppNames, enabledConfig, 47, 40000, dstPort, 0); got != Unknown {
+		t.Errorf("enabled AppID fallback for GRE = %q, want %q", got, Unknown)
+	}
+	if got := ResolveSessionName(disabledCatalog.AppNames, disabledConfig, 47, 40000, dstPort, 0); got != Unknown {
+		t.Errorf("disabled tuple fallback for GRE = %q, want %q", got, Unknown)
+	}
+}
+
 // TestCatalogExplicitTCPMatchesOnlyTCP is the companion invariant: a normal
 // `protocol tcp` term matches ONLY TCP and is unaffected by the #4008 fix.
 func TestCatalogExplicitTCPMatchesOnlyTCP(t *testing.T) {

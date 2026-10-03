@@ -324,14 +324,21 @@ func resolveTupleFallback(proto uint8, srcPort, dstPort uint16, cfg *config.Conf
 
 // matchTuple reports whether a session (proto, srcPort, dstPort) satisfies a
 // configured application's protocol + source-port + destination-port
-// constraints. An empty appProto never match-alls. An empty appSrcPort /
-// appDstPort is "no constraint" for that port. A source-port AND a
-// destination-port constraint are both required to hold when present (#3428).
+// constraints. An omitted protocol shares the catalog's TCP+UDP default (#11816);
+// it is not an all-protocol wildcard. Empty appSrcPort / appDstPort is "no
+// constraint" for that port. Source and destination constraints both hold when
+// present (#3428).
 func matchTuple(proto uint8, srcPort, dstPort uint16, appProto, appSrcPort, appDstPort string) bool {
-	if appProto == "" {
-		return false
+	pn, ok := protocolNumber(appProto)
+	protocols, protocolCount := appProtocolCandidates(appProto, pn, ok)
+	protocolMatches := false
+	for _, candidate := range protocols[:protocolCount] {
+		if candidate == proto {
+			protocolMatches = true
+			break
+		}
 	}
-	if pn, ok := protocolNumber(appProto); !ok || pn != proto {
+	if !protocolMatches {
 		return false
 	}
 	// #3428: a configured `source-port` constraint must be honored. Previously
