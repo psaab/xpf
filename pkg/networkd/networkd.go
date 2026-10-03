@@ -996,8 +996,10 @@ func (m *Manager) generateLink(ifc InterfaceConfig) string {
 		fmt.Fprintf(&b, "BitsPerSecond=%s\n", junosSpeedToNetworkd(ifc.Speed))
 	}
 	switch ifc.Duplex {
-	case "full", "half", "auto":
+	case "full", "half":
 		fmt.Fprintf(&b, "Duplex=%s\n", ifc.Duplex)
+	case "auto":
+		b.WriteString("AutoNegotiation=yes\n")
 	}
 	if ifc.Description != "" {
 		fmt.Fprintf(&b, "Description=%s\n", sanitizeUnitValue(ifc.Description))
