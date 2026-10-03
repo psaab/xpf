@@ -1554,11 +1554,14 @@ type FirewallFilterTerm struct {
 	// intent is ambiguous. This slice is the mutual-exclusion channel:
 	// validateFilterTerminalConflictStrict hard-rejects any term whose distinct-
 	// terminal count exceeds one; tolerant loads warn and retain discard as the
-	// conservative compiled action. The snapshot and lo0 renderers also refuse
-	// the whole candidate on a conflict (#11896). The non-terminating modifiers
-	// (count/log/forwarding-class/loss-priority/dscp/traffic-class/policer) are
-	// not recorded here. Routing-instance is a terminating FBF action and is
-	// recorded separately below.
+	// conservative compiled action. The snapshot and lo0 renderers also set
+	// FromUnrepresentable on a conflict, causing the userspace helper / kernel
+	// lo0 plan to refuse the whole candidate and retain prior-good state (#11896).
+	// Junos treats accept/reject/discard as mutually exclusive (a term has
+	// exactly one terminating action); the non-terminating modifiers
+	// (count/log/forwarding-class/loss-priority/dscp/traffic-class/policer)
+	// coexist with a terminal and are NOT recorded here. Routing-instance is a
+	// terminating FBF action and is recorded separately below.
 	TerminalActions []string
 	// routingInstanceTargetFirst and routingInstanceTargetConflict retain the
 	// first target and first distinct target seen by compileFilterThen. This
