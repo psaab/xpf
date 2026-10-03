@@ -85,6 +85,25 @@ func ValidatePolicerBurstSize(raw string, _ *Config) error {
 	return nil
 }
 
+// validateThreeColorPolicerBurstSize11827 preserves the existing strict
+// compiler contract for three-color buckets: any positive, representable
+// byte count is accepted. The legacy firewall policer validator also adds
+// a 1500-byte minimum, which is outside this diagnostic-only change.
+func validateThreeColorPolicerBurstSize11827(raw string, _ *Config) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return fmt.Errorf("missing value (expected a positive burst size in bytes, e.g. 1k, 1500, 15k)")
+	}
+	n, err := parseBurstSizeLimitStrict(trimmed)
+	if err != nil {
+		return fmt.Errorf("not a valid burst size (expected bytes, optionally with a k/m/g suffix, e.g. 1k or 15k): %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("burst size must be positive (at least one byte)")
+	}
+	return nil
+}
+
 // ValidateCoSTransmitRateTail validates the whole tail of a CoS scheduler
 // `transmit-rate` leaf (#4228 Gap 2). Junos accepts three mutually-exclusive
 // heads — a bandwidth (10m), `percent <n>`, or `remainder` — each optionally
