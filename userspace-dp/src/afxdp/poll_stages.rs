@@ -1309,7 +1309,7 @@ fn ike_host_inbound_deny_zone(
 ) -> Option<u16> {
     let (ingress_logical, from_zone_id, _ingress_zone_override) =
         ike_host_inbound_gate_context(flow, meta, ingress_zone_override, now_secs, worker_ctx);
-    if crate::afxdp::forwarding::host_inbound_admits_iface(
+    if crate::afxdp::forwarding::host_inbound_admits_iface_for_destination(
         worker_ctx.forwarding,
         ingress_logical,
         from_zone_id,
@@ -1317,6 +1317,7 @@ fn ike_host_inbound_deny_zone(
         dst_port,
         matches!(flow.dst_ip, IpAddr::V6(_)),
         0,
+        flow.dst_ip,
     ) {
         None
     } else {

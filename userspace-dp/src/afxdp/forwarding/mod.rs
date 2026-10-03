@@ -29,7 +29,8 @@ pub(in crate::afxdp) use fabric::*;
 // (poll_descriptor, via `use self::forwarding::*`) and the forwarding-state
 // builder (forwarding_build::zones) can reach them.
 pub(in crate::afxdp) use host_inbound::{
-    host_inbound_admits, host_inbound_admits_iface, zone_host_inbound_from_snapshot,
+    host_inbound_admits, host_inbound_admits_for_destination, host_inbound_admits_iface,
+    host_inbound_admits_iface_for_destination, zone_host_inbound_from_snapshot,
     zone_host_inbound_from_tokens,
 };
 

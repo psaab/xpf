@@ -20,11 +20,11 @@ import (
 // for the narrow subset that DOES reach the XSK (DNAT-to-self, static-NAT to a
 // firewall service, embedded-ICMP, DNS edge cases).
 //
-// One view is produced per host-inbound-CONFIGURED zone, carrying the zone's
-// allowed Junos tokens plus its resolved firewall-local host addresses (bare
-// IPs, prefix stripped), split by family. The daemon maps the tokens to nft
-// matches and emits accept-the-listed / deny-the-rest rules scoped to those
-// addresses.
+// One or more views are produced per host-inbound-CONFIGURED zone, split by
+// effective per-interface token set when overrides apply. Each carries allowed
+// Junos tokens, the resolved firewall-local host addresses (bare IPs, prefix
+// stripped) by family, and the ingress scope that owns those tokens. The daemon
+// applies local-address rules plus ingress-scoped catalog multicast rules.
 type ZoneHostInboundView struct {
 	Zone string
 	// Interfaces lists the interface refs whose EFFECTIVE host-inbound token
@@ -33,11 +33,13 @@ type ZoneHostInboundView struct {
 	// SystemServices/Protocols. A zone with no per-interface override yields a
 	// single view per zone covering all its interfaces (pre-#3362 shape); a zone
 	// with an override yields one view per distinct effective token set, each
-	// scoped to that set's interface addresses. Sorted; informational/test only
-	// (the nft emission keys on the address set, which is per-interface).
+	// scoped to that set's interface addresses and ingress. Sorted;
+	// informational/test only (nft emission consumes both scope fields).
 	Interfaces     []string
 	SystemServices []string
 	Protocols      []string
+	// MulticastRules is the expanded family/group dimension of Protocols.
+	MulticastRules []config.HostInboundMulticastRule
 	V4Addrs        []string // bare host IPv4 addresses (no prefix)
 	V6Addrs        []string // bare host IPv6 addresses (no prefix)
 	// Screen flood limits are mirrored into the kernel input backstop because
@@ -49,11 +51,12 @@ type ZoneHostInboundView struct {
 	AlarmWithoutDrop     bool
 
 	// IngressNetdevs (#9637) are the kernel netdevs whose arriving host-bound
-	// packets this view judges, whichever local address they name. They come
-	// from the view's own interfaces, minus three kinds: a netdev another view
-	// also claims, a lifeline's netdev, and a netdev enslaved to an l3mdev VRF.
-	// VRF slaves are represented by their VRF master, which is the device name
-	// visible at LOCAL_IN. See hostInboundViewIngressNetdevsWithMasters.
+	// packets this view judges, whichever local address they name, plus routing
+	// multicast packets addressed to catalog groups. They come from the view's
+	// own interfaces, minus three kinds: a netdev another view also claims, a
+	// lifeline's netdev, and a netdev enslaved to an l3mdev VRF. VRF slaves are
+	// represented by their VRF master, visible at LOCAL_IN. See
+	// hostInboundViewIngressNetdevsWithMasters.
 	IngressNetdevs []string
 	// IngressDenyNetdevs (#10431) are netdevs whose host-inbound claims could
 	// not be assigned to one unambiguous view (for example, a shared parent).
@@ -310,16 +313,14 @@ func BuildZoneHostInboundViews(cfg *config.Config) []ZoneHostInboundView {
 // #3405: a zone that declared NO host-inbound-traffic stanza is NOT omitted —
 // it is treated as an empty stanza and gets a catch-all DROP scoped to its
 // firewall-local addresses (Junos default-deny: deny every host-bound
-// service/protocol not explicitly permitted). The only no-address case left is a
-// configured zone whose interfaces have neither a static config address nor any
-// live kernel address yet (e.g. a DHCP WAN before its first lease, or a backup
-// node before VIP install): it yields an empty address set and the daemon emits
-// no deny for it. Address appearance makes the address available to a later
-// snapshot; it does not itself prove re-render or nft publication. That
-// transient fail-open admit window is surfaced to operators by
-// AddresslessEnforcingZones (#3698) — the daemon logs a state-transition warning
-// and exports xpf_host_inbound_addressless_zones while the window is open, so it
-// is no longer silent.
+// service/protocol not explicitly permitted). A configured zone with no static
+// or live address yet (e.g. a DHCP WAN before its first lease, or a backup before
+// VIP install) has no unicast destination set to enforce. Its eligible ingress
+// view still applies catalog-group multicast policy. Address appearance makes
+// the local address available to a later snapshot; it does not itself prove
+// re-render or nft publication. That transient local-address fail-open window is
+// surfaced by AddresslessEnforcingZones (#3698) through a transition warning
+// and xpf_host_inbound_addressless_zones gauge.
 func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSnapshot, excludeScopeLink bool) []ZoneHostInboundView {
 	if cfg == nil || len(cfg.Security.Zones) == 0 {
 		return nil
@@ -353,10 +354,9 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 	overrideByIface := buildInterfaceHostInboundMap(cfg)
 
 	// Each emitted view is a group keyed by (zone, effective-token signature).
-	// Addresses accumulate per group; a group is created lazily on its first
-	// address so a configured-but-address-less interface stays omitted. A later
-	// snapshot can include an appeared address; this builder does not schedule or
-	// publish the re-render.
+	// Addresses accumulate per group; groups are created for every eligible
+	// interface even when it currently has no addresses, so ingress-scoped
+	// multicast policy still applies during addressless startup.
 	type group struct {
 		zone   string
 		svc    []string
@@ -435,11 +435,10 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 
 	// Seed a zone-default group (zone-level effective tokens, no override) for
 	// every configured zone so each configured zone yields at least one view —
-	// even when its only interface is a lifeline (no address contributed) — the
-	// pre-#3362 "one view per configured zone" contract. Non-overridden
-	// interfaces accumulate their addresses into this same group (identical
-	// signature); fully-overridden / address-less zones keep an empty view (the
-	// daemon emits no deny for it).
+	// even when its only interface is a lifeline (no address contributed). Non-
+	// overridden interfaces accumulate addresses into this same group. Fully
+	// overridden or addressless zones retain empty address views; eligible
+	// addressless ingress still receives catalog-group policy.
 	zoneNamesSorted := make([]string, 0, len(cfg.Security.Zones))
 	for name := range cfg.Security.Zones {
 		zoneNamesSorted = append(zoneNamesSorted, name)
@@ -539,7 +538,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		if snap.IsUnit {
 			claimNetdev(snap.LinuxName, snap.Zone+"\x00"+config.CanonicalHostInboundTokenSig(svc, proto))
 		}
-		var g *group
+		g := getGroup(snap.Zone, svc, proto, snap.Name)
 		for _, a := range snap.Addresses {
 			if excludeScopeLink && hostInboundScopeLinkUnresolved(snap.Name, a, configuredAddrs) {
 				continue
@@ -547,9 +546,6 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			host := hostIPFromCIDR(a.Address)
 			if host == "" {
 				continue
-			}
-			if g == nil {
-				g = getGroup(snap.Zone, svc, proto, snap.Name)
 			}
 			addAddr(g, host)
 		}
@@ -706,6 +702,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			Interfaces:           ifaces,
 			SystemServices:       g.svc,
 			Protocols:            g.proto,
+			MulticastRules:       config.HostInboundMulticastRules(g.proto),
 			V4Addrs:              v4,
 			V6Addrs:              v6,
 			IngressNetdevs:       hostInboundViewIngressNetdevsWithMasters(sig, netdevSigs, lifelineNetdevs, vrfEnslaved, vrfMasters),
@@ -1392,6 +1389,9 @@ type FenceAddrSets struct {
 	// omits the rules.
 	UnleasedV4 []string
 	UnleasedV6 []string
+	// Unzoned input scopes for catalog-group default-deny during cold boot.
+	UnzonedIngressNetdevs   []string
+	UnzonedIngressVRFSlaves []string
 }
 
 // BuildFenceAddrSets derives the cold-boot fence's drop scope from cfg and the
@@ -1404,6 +1404,8 @@ func buildFenceAddrSetsFromSnaps(cfg *config.Config, snaps []InterfaceSnapshot, 
 	if cfg == nil {
 		return out
 	}
+	out.UnzonedIngressNetdevs, out.UnzonedIngressVRFSlaves =
+		BuildUnzonedHostInboundIngressNetdevsFromSnapshots(cfg, snaps, views)
 	lifelines := hostInboundLifelineSet(cfg)
 	onLifeline := map[string]bool{}
 	local := map[string]bool{}

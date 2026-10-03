@@ -56,6 +56,8 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 			spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts, hostInboundTrustedReinject(spec),
 		))
 		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), true)
+		emitJunosHostMulticastProgramJumpsNetlink(p, spec.Programs)
+		emitHostInboundMulticastGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
 		for i, prog := range spec.Programs {
 			emitJunosHostProgramJumpNetlink(p, i, prog)
@@ -68,6 +70,8 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 			spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts, hostInboundTrustedReinject(spec),
 		))
 		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), true)
+		emitJunosHostMulticastProgramJumpsNetlink(p, spec.Programs)
+		emitHostInboundMulticastGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
 		p.rule().ctEstablishedRelated().ctDirectionReply().emit(verdictAccept()...)
 		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), false)
 		emitHostInboundICMPAcceptsNetlink(p)
@@ -246,6 +250,101 @@ func emitHostInboundICMPAcceptsNetlink(p *nlPlan) {
 		counterRef(HostInboundAcceptCounterName(HostInboundAcceptICMP6ND)).emit(verdictAccept()...)
 	p.rule().icmpType(famV4, []uint8{3, 11, 12}).
 		counterRef(HostInboundAcceptCounterName(HostInboundAcceptICMP4Error)).emit(verdictAccept()...)
+}
+
+// emitHostInboundMulticastGuardsNetlink mirrors the text oracle's
+// ingress-scoped group/protocol admits and catalog-group default drops. It is
+// deliberately before both established accepts; ambiguous/unzoned ingress and
+// shared VRF slaves get drops without zone accepts.
+func emitHostInboundMulticastGuardsNetlink(p *nlPlan, views []HostInboundZoneView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) {
+	ambiguous := hostInboundAmbiguousIngressNetdevs(views)
+	for _, f := range []nlFamily{famV4, famV6} {
+		family := familyToken(f)
+		groups := config.HostInboundMulticastGroupsForFamily(family)
+		if len(groups) == 0 {
+			continue
+		}
+		if len(unzonedIngressVRFSlaves) > 0 {
+			p.rule().sdifname(unzonedIngressVRFSlaves).daddr(f, groups, false).emit(verdictDrop()...)
+		}
+		if len(ambiguous) > 0 {
+			p.rule().iifname(ambiguous).daddr(f, groups, false).emit(verdictDrop()...)
+		}
+		if len(unzonedIngressNetdevs) > 0 {
+			p.rule().iifname(unzonedIngressNetdevs).daddr(f, groups, false).emit(verdictDrop()...)
+		}
+		for _, v := range views {
+			if len(v.IngressNetdevs) == 0 {
+				continue
+			}
+			if hostInboundAllowsAll(v) {
+				p.rule().iifname(v.IngressNetdevs).daddr(f, groups, false).emit(verdictAccept()...)
+			} else {
+				multicastRules := v.MulticastRules
+				if len(multicastRules) == 0 {
+					multicastRules = config.HostInboundMulticastRules(v.Protocols)
+				}
+				for _, multicastRule := range multicastRules {
+					if multicastRule.Family != family {
+						continue
+					}
+					for _, frag := range renderHIMatchFragments(config.HostInboundProtocolMatch(multicastRule.Protocol, family), f) {
+						a := p.rule().iifname(v.IngressNetdevs).daddr(f, []string{multicastRule.Group}, false)
+						frag.build(a)
+						a.emit(verdictAccept()...)
+					}
+				}
+			}
+			p.rule().iifname(v.IngressNetdevs).daddr(f, groups, false).emit(verdictDrop()...)
+		}
+	}
+}
+
+// emitHostInboundMulticastFenceDropsNetlink keeps the host-inbound cold-boot
+// fence fail-closed for every catalog group. The additive gap fence deliberately
+// does not call this: its later base chain must not override valid grants in the
+// retained main table.
+func emitHostInboundMulticastFenceDropsNetlink(p *nlPlan, views []HostInboundZoneView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) {
+	ambiguous := hostInboundAmbiguousIngressNetdevs(views)
+	for _, f := range []nlFamily{famV4, famV6} {
+		groups := config.HostInboundMulticastGroupsForFamily(familyToken(f))
+		if len(groups) == 0 {
+			continue
+		}
+		if len(unzonedIngressVRFSlaves) > 0 {
+			p.rule().sdifname(unzonedIngressVRFSlaves).daddr(f, groups, false).emit(verdictDrop()...)
+		}
+		if len(ambiguous) > 0 {
+			p.rule().iifname(ambiguous).daddr(f, groups, false).emit(verdictDrop()...)
+		}
+		if len(unzonedIngressNetdevs) > 0 {
+			p.rule().iifname(unzonedIngressNetdevs).daddr(f, groups, false).emit(verdictDrop()...)
+		}
+		for _, v := range views {
+			if len(v.IngressNetdevs) > 0 {
+				p.rule().iifname(v.IngressNetdevs).daddr(f, groups, false).emit(verdictDrop()...)
+			}
+		}
+	}
+}
+
+// emitJunosHostMulticastProgramJumpsNetlink mirrors the text oracle: explicit
+// fine-program denies inspect catalog-group packets before coarse multicast
+// admission, while permits return to the zone protocol gate.
+func emitJunosHostMulticastProgramJumpsNetlink(p *nlPlan, programs []JunosHostProgram) {
+	for i, prog := range programs {
+		if len(prog.IngressIfnames) == 0 {
+			continue
+		}
+		for _, f := range []nlFamily{famV4, famV6} {
+			groups := config.HostInboundMulticastGroupsForFamily(familyToken(f))
+			if len(groups) == 0 {
+				continue
+			}
+			p.rule().iifname(prog.IngressIfnames).daddr(f, groups, false).
+				emit(verdictJump(HostInboundJunosHostChainName(i, prog.Zone))...)
+		}
+	}
 }
 
 // emitHostInboundZoneWireGuardAcceptNetlink admits a zone's WireGuard tunnels

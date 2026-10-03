@@ -35,11 +35,12 @@ type PortRange struct {
 }
 
 // HostInboundZoneView mirrors dpuserspace.ZoneHostInboundView. Addresses are
-// bare host IPs (no prefix), as the daemon builder guarantees.
+// bare host IPs; multicast rules carry the catalog groups admitted by the view.
 type HostInboundZoneView struct {
 	Zone                 string
 	SystemServices       []string
 	Protocols            []string
+	MulticastRules       []config.HostInboundMulticastRule
 	V4Addrs              []string
 	V6Addrs              []string
 	ICMPFloodThreshold   uint32
@@ -302,8 +303,8 @@ type HostInboundSpec struct {
 	UnleasedV6 []string
 }
 
-// FenceSpec is the cold-boot fail-closed fence render request (#5644): the
-// address sets to DROP and per-zone WireGuard admission inputs.
+// FenceSpec is the cold-boot fail-closed fence render request (#5644): address
+// scopes, ingress scopes for catalog groups, and per-zone WireGuard inputs.
 type FenceSpec struct {
 	Views         []HostInboundZoneView
 	UnzonedV4     []string
@@ -313,6 +314,9 @@ type FenceSpec struct {
 	// UnleasedV4/V6, as in HostInboundSpec (fence stands pre-handoff).
 	UnleasedV4 []string
 	UnleasedV6 []string
+	// Unzoned ingress scopes for fail-closed catalog-group drops.
+	UnzonedIngressNetdevs   []string
+	UnzonedIngressVRFSlaves []string
 }
 
 // GapFenceSpec is the additive coverage-gap fence render request (#5789): the

@@ -399,6 +399,7 @@ fn note_unsupported_gre_version(frame: &[u8], meta: UserspaceDpMeta, forwarding:
                 forwarding,
                 ingress_logical_ifindex,
                 meta.addr_family as i32,
+                outer_dst,
             )
         });
     if !offered_to_gre_endpoint {
@@ -771,13 +772,14 @@ fn gre_outer_host_inbound_admits(
     forwarding: &ForwardingState,
     logical_ifindex: i32,
     outer_family: i32,
+    outer_dst: IpAddr,
 ) -> bool {
     let zone = forwarding
         .ifindex_to_zone_id
         .get(&logical_ifindex)
         .copied()
         .unwrap_or(0);
-    crate::afxdp::forwarding::host_inbound_admits_iface(
+    crate::afxdp::forwarding::host_inbound_admits_iface_for_destination(
         forwarding,
         logical_ifindex,
         zone,
@@ -785,6 +787,7 @@ fn gre_outer_host_inbound_admits(
         0,
         outer_family == libc::AF_INET6,
         0,
+        outer_dst,
     )
 }
 
@@ -925,7 +928,12 @@ fn match_tunnel_endpoint<'a>(
             ) {
                 continue;
             }
-            if gre_outer_host_inbound_admits(forwarding, ingress_logical_ifindex, outer_family) {
+            if gre_outer_host_inbound_admits(
+                forwarding,
+                ingress_logical_ifindex,
+                outer_family,
+                outer_dst,
+            ) {
                 return Some(endpoint);
             }
             return None;

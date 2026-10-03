@@ -601,17 +601,13 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// protection that needs no hold and vanishes on lease — plus
 	// TOP-placed per-family DHCP-client admits so the lease can arrive.
 	unleasedV4, unleasedV6 := dpuserspace.BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps1)
-	// #3698: surface the transient fail-open admit window. A configured
-	// host-inbound-enforcing zone whose non-lifeline interfaces have no
-	// resolvable address yet (DHCP WAN before its first lease, backup node before
-	// VIP install, or an unaddressed interface) contributes nothing to the deny
-	// scoping below, so host-bound traffic to a freshly-usable address can reach
-	// the kernel input path without the zone default-deny. Address appearance is
-	// available to a later snapshot, but enforcement changes only when a later
-	// applicable apply reaches this function and its nft transaction succeeds.
-	// These transition logs describe the pre-publication address snapshot, not nft
-	// installation success. Log only state TRANSITIONS (a zone entering/leaving
-	// the window) so repeated commits / DHCP renewals do not flood.
+	// #3698: surface the transient unicast local-address fail-open window. A
+	// configured zone whose non-lifeline interfaces have no resolvable address
+	// yet has no destination set for its unicast default-deny; ingress-scoped
+	// catalog multicast policy still applies. A later address can contribute only
+	// when an applicable apply reaches this function and its nft transaction
+	// succeeds. These transition logs describe the pre-publication address
+	// snapshot, not nft installation success.
 	d.logHostInboundAddresslessTransitions(cfg)
 	// #3710: the zone-level signal above collapses a MIXED zone (some interfaces
 	// addressed, some not; or one family up before the other) to "scoped" the
@@ -636,11 +632,12 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	// them). Only representable programs that resolve to >=1 non-lifeline netdev
 	// are returned; the un-representable remainder keeps the #4168 commit warning.
 	programs := dpuserspace.BuildJunosHostPrograms(cfg)
-	if overlay == nil && !hostInboundHasEnforceableView(views) && len(unzonedV4) == 0 && len(unzonedV6) == 0 && len(programs) == 0 && len(unleasedV4) == 0 && len(unleasedV6) == 0 {
-		// No host-inbound-configured zone with a resolvable address, no
-		// addressed-but-unzoned interface (#4420 HI-2), no junos-host DENY
-		// program (#4146), and no unleased DHCP interface (#10751 R7-B)
-		// — nothing to enforce. Remove any stale table.
+	if overlay == nil && !hostInboundHasIngressScope(views, unzonedIngressNetdevs, unzonedIngressVRFSlaves) &&
+		len(unzonedV4) == 0 && len(unzonedV6) == 0 &&
+		len(programs) == 0 && len(unleasedV4) == 0 && len(unleasedV6) == 0 {
+		// No zoned or unzoned ingress scope, address scope, junos-host DENY
+		// program (#4146), or unleased DHCP interface (#10751 R7-B) — nothing
+		// to enforce. Remove any stale table.
 		// DeleteTable is idempotent (absent -> nil, the common case), so a non-nil
 		// error here is a REAL teardown failure that left a stale deny in the kernel:
 		// surface it so the commit fails closed rather than reporting that
@@ -861,11 +858,15 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			}
 			if len(uncoveredV4) > 0 || len(uncoveredV6) > 0 {
 				spec := xnft.GapFenceSpec{
-					Views:       toNftViews(views),
-					UncoveredV4: uncoveredV4, UncoveredV6: uncoveredV6,
-					WGListenPorts: wgListenPorts, WGZonePorts: wgZonePorts,
-					UnleasedV4: unleasedV4, UnleasedV6: unleasedV6,
-					SharedV4: sharedV4, SharedV6: sharedV6,
+					Views:           toNftViews(views),
+					UncoveredV4:     uncoveredV4,
+					UncoveredV6:     uncoveredV6,
+					WGListenPorts:   wgListenPorts,
+					WGZonePorts:     wgZonePorts,
+					UnleasedV4:      unleasedV4,
+					UnleasedV6:      unleasedV6,
+					SharedV4:        sharedV4,
+					SharedV6:        sharedV6,
 					LifelineNetdevs: dpuserspace.HostInboundLifelineIngressNetdevs(cfg),
 				}
 				if gapErr := d.installHostInboundGapFence(spec); gapErr != nil {
@@ -1192,7 +1193,9 @@ func (d *Daemon) installHostInboundGapFence(spec xnft.GapFenceSpec) error {
 // subsequently-appeared uncovered address.
 func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets, wgListenPorts []uint16, wgZonePorts map[string][]uint16) error {
 	views, unzonedV4, unzonedV6 := sets.Views, sets.UnzonedV4, sets.UnzonedV6
-	fenceHasScopedDrop := hostInboundHasEnforceableView(views) || len(unzonedV4) > 0 || len(unzonedV6) > 0 || len(sets.UnleasedV4) > 0 || len(sets.UnleasedV6) > 0
+	fenceHasScopedDrop := hostInboundHasIngressScope(views, sets.UnzonedIngressNetdevs, sets.UnzonedIngressVRFSlaves) ||
+		len(unzonedV4) > 0 || len(unzonedV6) > 0 ||
+		len(sets.UnleasedV4) > 0 || len(sets.UnleasedV6) > 0
 	logFenceWithheld(xnft.HostInboundTableName, sets)
 	// #6492: the fence's own coverage, not the real ruleset's desired-drop set.
 	// The two now differ in BOTH directions (lifeline-shared addresses withheld,
@@ -1201,7 +1204,17 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 	fenceCovered := hostInboundDesiredDropAddrs(views, unzonedV4, unzonedV6)
 	// #6387 PR-3: install via netlink (parity-proven equivalent to the exec-`nft`
 	// buildHostInboundFencePayload oracle).
-	spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wgListenPorts, WGZonePorts: wgZonePorts, UnleasedV4: sets.UnleasedV4, UnleasedV6: sets.UnleasedV6}
+	spec := xnft.FenceSpec{
+		Views:                   toNftViews(views),
+		UnzonedV4:               unzonedV4,
+		UnzonedV6:               unzonedV6,
+		WGListenPorts:           wgListenPorts,
+		WGZonePorts:             wgZonePorts,
+		UnleasedV4:              sets.UnleasedV4,
+		UnleasedV6:              sets.UnleasedV6,
+		UnzonedIngressNetdevs:   sets.UnzonedIngressNetdevs,
+		UnzonedIngressVRFSlaves: sets.UnzonedIngressVRFSlaves,
+	}
 	if err := nftInstaller.InstallColdBootFence(spec); err != nil {
 		err = tagNftInstallErr(err)
 		slog.Error("COLD-BOOT FAIL-OPEN GUARD: host-inbound install failed AND the fail-closed "+
@@ -1214,14 +1227,14 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 	noteHostInboundInstalled()
 	if fenceHasScopedDrop {
 		d.hostInboundEnforced.Store(true)
-		// #5789: the address-scoped fence is now the retained enforcement; record
-		// exactly which destinations it covers so the day-2 coverage check works.
+		// #5789: the fence retains its address and ingress scopes; record its
+		// destination coverage separately for the day-2 address handoff check.
 		d.hostInboundCoveredAddrs = fenceCovered
-		slog.Warn("host-inbound real install failed; fallback succeeded with address-scoped DROPs for its rendered snapshot",
+		slog.Warn("host-inbound real install failed; fallback succeeded with address- and ingress-scoped DROPs for its rendered snapshot",
 			"fenced_zones", len(views), "fenced_unzoned_v4", len(unzonedV4),
 			"fenced_unzoned_v6", len(unzonedV6))
 	} else {
-		slog.Warn("host-inbound real install failed; fallback succeeded with zero address-scoped DROPs; hostInboundEnforced remains false and another fallback requires a later failed real invocation reaching host-inbound while false",
+		slog.Warn("host-inbound real install failed; fallback succeeded with zero address- and ingress-scoped DROPs; hostInboundEnforced remains false and another fallback requires a later failed real invocation reaching host-inbound while false",
 			"fenced_zones", len(views), "fenced_unzoned_v4", len(unzonedV4),
 			"fenced_unzoned_v6", len(unzonedV6))
 	}
@@ -1230,18 +1243,19 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 
 // buildHostInboundFencePayload assembles the #5644 cold-boot fail-closed fence
 // payload (see installHostInboundColdBootFence). It is the atomic-replace
-// xpf_hostinbound table reduced to: the scope-independent mandatory accepts,
-// per-zone scoped WG accepts, then a catch-all DROP for every firewall-local
-// address represented by the supplied snapshot — NO per-service accepts, NO
-// named counters. Empty address inputs intentionally produce a zero-drop table
-// shell. Split out as a pure function so tests can parse-check the full payload
-// without invoking nft. A syntax error on any line rejects the WHOLE payload
-// (atomic load), retaining only the exact prior generation, if one exists —
-// exactly like the real builder.
+// xpf_hostinbound table reduced to the scope-independent mandatory accepts,
+// per-zone scoped WG accepts, and catch-all address DROPs, plus catalog-group
+// DROPs on every represented ingress. It emits NO per-service accepts or named
+// counters. Empty address inputs can still produce ingress group drops; a truly
+// empty scope produces a zero-drop table shell. Split out as a pure function so
+// tests can parse-check the full payload without invoking nft. A syntax error
+// rejects the WHOLE payload and retains only the exact prior generation, if any.
 func buildHostInboundFencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6 []string) string {
-	// Same hook/priority as the real host-inbound chain so the fence occupies the
-	// same evaluation slot (#3364).
-	return buildFenceTablePayload(xnft.HostInboundTableName, nftHostInboundPriority, views, unzonedV4, unzonedV6, wgListenPorts, wgZonePorts, unleasedV4, unleasedV6, true)
+	return buildHostInboundFencePayloadWithIngress(views, unzonedV4, unzonedV6, wgListenPorts, wgZonePorts, unleasedV4, unleasedV6, nil, nil)
+}
+
+func buildHostInboundFencePayloadWithIngress(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) string {
+	return buildFenceTablePayload(xnft.HostInboundTableName, nftHostInboundPriority, views, unzonedV4, unzonedV6, wgListenPorts, wgZonePorts, unleasedV4, unleasedV6, true, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
 }
 
 // buildLo0FencePayload assembles the #6476 lo0 cold-boot fail-closed fence
@@ -1255,7 +1269,7 @@ func buildHostInboundFencePayload(views []dpuserspace.ZoneHostInboundView, unzon
 // InstallLo0ColdBootFence is bit-equivalent. Empty address inputs intentionally
 // produce a zero-drop shell.
 func buildLo0FencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgZonePorts map[string][]uint16) string {
-	return buildFenceTablePayload(xnft.Lo0TableName, nftLo0FilterPriority, views, unzonedV4, unzonedV6, nil, wgZonePorts, nil, nil, false)
+	return buildFenceTablePayload(xnft.Lo0TableName, nftLo0FilterPriority, views, unzonedV4, unzonedV6, nil, wgZonePorts, nil, nil, false, nil, nil)
 }
 
 // buildFenceTablePayload renders a fail-closed cold-boot fence into the named
@@ -1268,10 +1282,11 @@ func buildLo0FencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, un
 // interface is denied here like any other, and the drop carries no iifname
 // (#6492 Finding A). During the fence window even a `system-services all` zone
 // is denied (maximally fail-closed); the next clean commit restores the accepts.
-// The same body serves the host-inbound fence (with reply guard) and lo0 fence
-// (without it), so their shared admit/deny posture cannot drift. Empty address
-// inputs intentionally produce a zero-drop table shell.
-func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6 []string, guardStaleReplies bool) string {
+// The shared mandatory/address rules cannot drift between host-inbound and lo0;
+// only the host-inbound fence additionally drops catalog groups on represented
+// ingress before established accepts. Empty address inputs still permit those
+// ingress-scoped group drops; a truly empty scope emits no drops.
+func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6 []string, guardStaleReplies bool, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) string {
 	var rules []string
 	rules = append(rules, "add table inet "+tableName)
 	rules = append(rules, "delete table inet "+tableName)
@@ -1283,7 +1298,14 @@ func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.
 			xnft.HostInboundStaleReplyFenceRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts),
 		)...)
 	}
-	rules = append(rules, hostInboundFenceMandatoryAdmits()...)
+	mandatory := hostInboundFenceMandatoryAdmits()
+	if guardStaleReplies {
+		rules = append(rules, mandatory[0])
+		emitHostInboundMulticastFenceDrops(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
+		rules = append(rules, mandatory[1:]...)
+	} else {
+		rules = append(rules, mandatory...)
+	}
 	emitHostInboundFenceWGAdmits(&rules, views, wgZonePorts)
 	emitUnleasedDHCPAdmits(&rules, unleasedV4, unleasedV6)
 	for _, v := range views {
@@ -1312,10 +1334,10 @@ func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.
 // cannot drift apart.
 func hostInboundFenceMandatoryAdmits() []string {
 	return []string{
-		"    ct state established,related accept",
-		// Raw ESP (50) / AH (51) so the kernel XFRM stack can decrypt
-		// host-terminated IPsec (mirrors the real chain and userspace passthrough).
+		// Raw ESP (50) / AH (51) remains globally admitted before the
+		// catalog-group drops; established/related follows those guards.
 		"    meta l4proto { 50, 51 } accept",
+		"    ct state established,related accept",
 		// IPv6 ND + v4/v6 PMTUD/error control messages — mandatory link operation.
 		"    icmpv6 type { 1, 2, 3, 4 } accept",
 		"    icmpv6 type { 133, 134, 135, 136, 137 } accept",
@@ -1556,18 +1578,17 @@ func buildHostInboundGapFencePayload(views []dpuserspace.ZoneHostInboundView, un
 // applyHostInboundFilter.
 type hostInboundFailOpenState struct {
 	// addresslessZones is the set of configured host-inbound-enforcing zones
-	// observed in the transient fail-open admit window on the PREVIOUS apply
-	// (#3698): a zone with a non-lifeline interface but no resolvable address
-	// yet, so the daemon emits no host-inbound deny for it.
+	// observed in the transient unicast local-address fail-open window on the
+	// PREVIOUS apply (#3698): at least one non-lifeline interface has no
+	// resolvable address, so its unicast destination default-deny cannot be scoped.
 	addresslessZones map[string]bool
 
-	// addresslessIfaces is the set of {zone, interface-unit, family} host-inbound
-	// fail-open windows observed on the PREVIOUS apply (#3710), keyed as
-	// "<zone>|<iface>|<family>". This is the per-interface/per-family refinement
-	// of addresslessZones: a DHCP/DHCPv6 client on a non-lifeline unit with no
-	// resolved address in that family yet, which the zone-level signal hides in a
-	// MIXED zone (a DHCP-pending unit beside a statically-addressed sibling, or
-	// the v6 side of a dual-stack edge whose v6 lease lands after v4).
+	// addresslessIfaces is the set of {zone, interface-unit, family} unicast
+	// local-address fail-open windows observed on the PREVIOUS apply (#3710),
+	// keyed as "<zone>|<iface>|<family>". This refines addresslessZones: a
+	// DHCP/DHCPv6 client on a non-lifeline unit has no resolved address in that
+	// family yet, which the zone-level signal hides beside a statically-addressed
+	// sibling or on one side of a dual-stack edge.
 	addresslessIfaces map[string]bool
 
 	// ambiguousAddrs is the set of firewall-local addresses observed on the
@@ -1590,8 +1611,8 @@ type hostInboundFailOpenState struct {
 
 // logHostInboundAddresslessTransitions emits a state-transition log whenever a
 // configured host-inbound-enforcing zone ENTERS or LEAVES the transient
-// fail-open admit window (#3698) — a zone with a non-lifeline interface but no
-// resolvable address yet, for which the kernel host-inbound chain emits no deny.
+// unicast local-address fail-open window (#3698) — a non-lifeline interface has
+// no resolvable address yet, so its local-address default-deny cannot be scoped.
 // It compares the current addressless set against the set observed on the
 // previous apply (d.hostInboundFailOpen.addresslessZones) so a zone that stays addressless
 // across repeated commits / DHCP renewals is logged once (on entry), not every
@@ -1607,7 +1628,7 @@ func (d *Daemon) logHostInboundAddresslessTransitions(cfg *config.Config) {
 	for _, z := range dpuserspace.AddresslessEnforcingZones(cfg) {
 		current[z.Zone] = true
 		if !d.hostInboundFailOpen.addresslessZones[z.Zone] {
-			slog.Warn("host-inbound zone has no address yet — host-inbound default-deny NOT enforced for it until an address appears (transient fail-open admit window)",
+			slog.Warn("host-inbound zone has no address yet — local-address default-deny NOT enforced until an address appears (transient fail-open window); catalog multicast remains ingress-gated",
 				"zone", z.Zone, "interfaces", strings.Join(z.Interfaces, ","))
 		}
 	}
@@ -1615,7 +1636,7 @@ func (d *Daemon) logHostInboundAddresslessTransitions(cfg *config.Config) {
 		if !current[zone] {
 			// This reports snapshot recovery before nftApplyPayload runs; installation
 			// success is determined later in applyHostInboundFilter.
-			slog.Info("host-inbound zone now has an address — host-inbound default-deny enforced (fail-open admit window closed)",
+			slog.Info("host-inbound zone now has an address — local-address default-deny can be scoped (fail-open window closed)",
 				"zone", zone)
 		}
 	}
@@ -1623,28 +1644,24 @@ func (d *Daemon) logHostInboundAddresslessTransitions(cfg *config.Config) {
 }
 
 // logHostInboundAddresslessIfaceTransitions emits a state-transition log whenever
-// a {zone, interface-unit, family} ENTERS or LEAVES the transient host-inbound
-// fail-open admit window at per-interface/per-family granularity (#3710). The
+// a {zone, interface-unit, family} ENTERS or LEAVES the transient local-address
+// fail-open window at per-interface/per-family granularity (#3710). The
 // zone-level logHostInboundAddresslessTransitions above marks a zone scoped (and
 // stays silent) as soon as ANY of its interfaces resolves ANY address in EITHER
 // family, so a MIXED zone hides the gap: a DHCP-pending interface beside a
 // statically-addressed sibling, or the IPv6 side of a dual-stack edge whose v6
-// lease lands after its v4. Enforcement is per-destination-address and per-family
-// (the kernel chain emits `<fam> daddr <set> ... drop` separately for inet and
-// inet6), so those finer gaps are real fail-open windows the zone-level collapse
-// cannot express. It compares the current per-interface set against the set
-// observed on the previous apply (d.hostInboundFailOpen.addresslessIfaces) so a unit that
-// stays DHCP-pending across repeated commits / renewals is logged once (on
-// entry), not every apply. Runs under applySem (via applyHostInboundFilter), so
-// the map access needs no extra locking. The current set is also exported as the
-// xpf_host_inbound_addressless_interfaces gauge (pkg/api), scraped independently.
+// lease lands after its v4. Unicast enforcement is per destination address and
+// family, so those finer local-address gaps remain even while multicast groups
+// are gated by ingress. The current set is compared with the previous apply to
+// avoid repeated logs. Runs under applySem, and the set is exported as the
+// xpf_host_inbound_addressless_interfaces gauge (pkg/api).
 func (d *Daemon) logHostInboundAddresslessIfaceTransitions(cfg *config.Config) {
 	current := make(map[string]bool)
 	for _, i := range dpuserspace.AddresslessEnforcingInterfaces(cfg) {
 		key := i.Zone + "|" + i.Interface + "|" + i.Family
 		current[key] = true
 		if !d.hostInboundFailOpen.addresslessIfaces[key] {
-			slog.Warn("host-inbound interface has no address in this family yet — host-inbound default-deny NOT enforced for it until a lease arrives (transient fail-open admit window); the zone-level signal is hidden by an addressed sibling / family",
+			slog.Warn("host-inbound interface has no address in this family yet — local-address default-deny NOT enforced until a lease arrives (transient fail-open window); catalog multicast remains ingress-gated",
 				"zone", i.Zone, "interface", i.Interface, "family", i.Family, "reason", i.Reason)
 		}
 	}
@@ -1652,7 +1669,7 @@ func (d *Daemon) logHostInboundAddresslessIfaceTransitions(cfg *config.Config) {
 		if !current[key] {
 			// This reports snapshot recovery before nftApplyPayload runs; installation
 			// success is determined later in applyHostInboundFilter.
-			slog.Info("host-inbound interface now has an address in this family — host-inbound default-deny enforced (fail-open admit window closed)",
+			slog.Info("host-inbound interface now has an address in this family — local-address default-deny can be scoped (fail-open window closed)",
 				"key", key)
 		}
 	}
@@ -1716,24 +1733,24 @@ func (d *Daemon) logHostInboundAmbiguousIngressTransitions(views []dpuserspace.Z
 	d.hostInboundFailOpen.ambiguousIngress = current
 }
 
-// hostInboundHasEnforceableView reports whether at least one view in this
-// snapshot carries a resolvable address. It is the view term of the fallback's
-// address-scoped-DROP predicate; unzoned v4/v6 slices are separate terms.
-// Static, VRRP-VIP and DHCP/DHCPv6-learned addresses all
-// count: the live interface snapshot enumerates every kernel address via
-// AddrList(FAMILY_ALL), so a DHCP-only interface with a live lease IS scoped
-// (#3224 — see BuildZoneHostInboundViews). The only no-address case left is a
-// configured zone whose interfaces have no static address AND no live address
-// yet (e.g. a DHCP WAN before its first lease). That zone produces nothing for
-// this snapshot. A later address can contribute only when an applicable apply
-// reaches applyHostInboundFilter; nft success then determines kernel state.
+// hostInboundHasEnforceableView reports whether a view carries a local address
+// or ingress scope. Addressless ingress views remain significant because the
+// multicast catalog gate applies before any local address is configured;
+// legacy/manual address-only views remain supported.
 func hostInboundHasEnforceableView(views []dpuserspace.ZoneHostInboundView) bool {
 	for _, v := range views {
-		if len(v.V4Addrs) > 0 || len(v.V6Addrs) > 0 {
+		if len(v.V4Addrs) > 0 || len(v.V6Addrs) > 0 || len(v.IngressNetdevs) > 0 || len(v.IngressDenyNetdevs) > 0 {
 			return true
 		}
 	}
 	return false
+}
+
+// hostInboundHasIngressScope also includes unzoned physical and VRF ingress,
+// which needs a table-level catalog-group default-deny despite having no
+// address set.
+func hostInboundHasIngressScope(views []dpuserspace.ZoneHostInboundView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) bool {
+	return hostInboundHasEnforceableView(views) || len(unzonedIngressNetdevs) > 0 || len(unzonedIngressVRFSlaves) > 0
 }
 
 // buildHostInboundFilterPayload assembles the exact `nft -f -` payload for the
@@ -1988,6 +2005,8 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 			xnft.HostInboundStaleReplyGuardRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts, dataplaneFresh && (len(reinjectV4) > 0 || len(reinjectV6) > 0)),
 		)...)
 		emitHostInboundScreenFloodText(&rules, screenFloodRules, true)
+		emitJunosHostMulticastProgramJumps(&rules, programs)
+		emitHostInboundMulticastIngressGuards(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
 		// (2) Firewall-ORIGINATED reply traffic (host-OUTBOUND flow return).
 		// junos-host governs host-INBOUND original-direction only, so only the
 		// reply direction is admitted ahead of the fine DROP; the denied source's
@@ -2023,6 +2042,8 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 			xnft.HostInboundStaleReplyGuardRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts, dataplaneFresh && (len(reinjectV4) > 0 || len(reinjectV6) > 0)),
 		)...)
 		emitHostInboundScreenFloodText(&rules, screenFloodRules, true)
+		emitJunosHostMulticastProgramJumps(&rules, programs)
+		emitHostInboundMulticastIngressGuards(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
 		// Firewall-ORIGINATED reply traffic is accepted before ingress
 		// adjudication; original-direction established traffic reaches the
 		// residual accept only after the ingress-zone rules below.
@@ -2110,6 +2131,83 @@ func emitHostInboundICMPAccepts(rules *[]string) {
 	*rules = append(*rules, "    icmpv6 type { 1, 2, 3, 4 } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP6Error)+"\" accept")
 	*rules = append(*rules, "    icmpv6 type { 133, 134, 135, 136, 137 } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP6ND)+"\" accept")
 	*rules = append(*rules, "    icmp type { destination-unreachable, time-exceeded, parameter-problem } counter name \""+xnft.HostInboundAcceptCounterName(xnft.HostInboundAcceptICMP4Error)+"\" accept")
+}
+
+// emitHostInboundMulticastIngressGuards scopes routing multicast admission to
+// the unambiguous zone ingress and default-denies every other catalog group.
+// This runs before established/related accepts so old conntrack state cannot
+// bypass the current host-inbound gate. Lifeline interfaces are absent from all
+// supplied ingress sets; ambiguous and unzoned ingress gets drops only.
+func emitHostInboundMulticastIngressGuards(rules *[]string, views []dpuserspace.ZoneHostInboundView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) {
+	ambiguous := hostInboundAmbiguousIngressNetdevs(views)
+	for _, family := range []string{"ip", "ip6"} {
+		groups := config.HostInboundMulticastGroupsForFamily(family)
+		if len(groups) == 0 {
+			continue
+		}
+		if len(unzonedIngressVRFSlaves) > 0 {
+			scope := "meta sdifname " + nftIifnameSet(unzonedIngressVRFSlaves) + " " + family + " daddr "
+			*rules = append(*rules, "    "+scope+nftAddrSet(groups)+" drop")
+		}
+		if len(ambiguous) > 0 {
+			scope := "iifname " + nftIifnameSet(ambiguous) + " " + family + " daddr "
+			*rules = append(*rules, "    "+scope+nftAddrSet(groups)+" drop")
+		}
+		if len(unzonedIngressNetdevs) > 0 {
+			scope := "iifname " + nftIifnameSet(unzonedIngressNetdevs) + " " + family + " daddr "
+			*rules = append(*rules, "    "+scope+nftAddrSet(groups)+" drop")
+		}
+		for _, v := range views {
+			if len(v.IngressNetdevs) == 0 {
+				continue
+			}
+			scope := "iifname " + nftIifnameSet(v.IngressNetdevs) + " " + family + " daddr "
+			if hostInboundAllowsAll(v) {
+				*rules = append(*rules, "    "+scope+nftAddrSet(groups)+" accept")
+			} else {
+				multicastRules := v.MulticastRules
+				if len(multicastRules) == 0 {
+					multicastRules = config.HostInboundMulticastRules(v.Protocols)
+				}
+				for _, multicastRule := range multicastRules {
+					if multicastRule.Family != family {
+						continue
+					}
+					for _, match := range hostInboundProtocolMatches(multicastRule.Protocol, family) {
+						*rules = append(*rules, "    "+scope+multicastRule.Group+" "+match+" accept")
+					}
+				}
+			}
+			*rules = append(*rules, "    "+scope+nftAddrSet(groups)+" drop")
+		}
+	}
+}
+
+// emitHostInboundMulticastFenceDrops keeps the cold-boot fence fail-closed for
+// catalog groups. Ingress scopes exclude lifelines; shared VRF slaves are denied
+// before a zoned VRF-master scope can match.
+func emitHostInboundMulticastFenceDrops(rules *[]string, views []dpuserspace.ZoneHostInboundView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) {
+	ambiguous := hostInboundAmbiguousIngressNetdevs(views)
+	for _, family := range []string{"ip", "ip6"} {
+		groups := config.HostInboundMulticastGroupsForFamily(family)
+		if len(groups) == 0 {
+			continue
+		}
+		if len(unzonedIngressVRFSlaves) > 0 {
+			*rules = append(*rules, "    meta sdifname "+nftIifnameSet(unzonedIngressVRFSlaves)+" "+family+" daddr "+nftAddrSet(groups)+" drop")
+		}
+		if len(ambiguous) > 0 {
+			*rules = append(*rules, "    iifname "+nftIifnameSet(ambiguous)+" "+family+" daddr "+nftAddrSet(groups)+" drop")
+		}
+		if len(unzonedIngressNetdevs) > 0 {
+			*rules = append(*rules, "    iifname "+nftIifnameSet(unzonedIngressNetdevs)+" "+family+" daddr "+nftAddrSet(groups)+" drop")
+		}
+		for _, v := range views {
+			if len(v.IngressNetdevs) > 0 {
+				*rules = append(*rules, "    iifname "+nftIifnameSet(v.IngressNetdevs)+" "+family+" daddr "+nftAddrSet(groups)+" drop")
+			}
+		}
+	}
 }
 func appendHostInboundScreenFloodSet(rules *[]string, name, keyType string, size int) {
 	timeoutSeconds := int64(xnft.HostInboundScreenFloodMeterTimeout / time.Second)
@@ -2246,6 +2344,26 @@ func emitJunosHostProgramJump(rules *[]string, index int, p dpuserspace.JunosHos
 		*rules = append(*rules, "    iifname "+identIif+" tcp dport 113 reject with tcp reset")
 	}
 	*rules = append(*rules, "    iifname "+nftIifnameSet(p.IngressIfnames)+" jump "+xnft.HostInboundJunosHostChainName(index, p.Zone))
+}
+
+// emitJunosHostMulticastProgramJumps applies explicit `to-zone junos-host`
+// source/destination denies to catalog-group packets before the coarse
+// multicast accept/drop gate. The fine program returns on permits, leaving
+// host-inbound protocol policy as the sole admission authority.
+func emitJunosHostMulticastProgramJumps(rules *[]string, programs []dpuserspace.JunosHostProgram) {
+	for i, p := range programs {
+		if len(p.IngressIfnames) == 0 {
+			continue
+		}
+		chain := xnft.HostInboundJunosHostChainName(i, p.Zone)
+		for _, family := range []string{"ip", "ip6"} {
+			groups := config.HostInboundMulticastGroupsForFamily(family)
+			if len(groups) == 0 {
+				continue
+			}
+			*rules = append(*rules, "    iifname "+nftIifnameSet(p.IngressIfnames)+" "+family+" daddr "+nftAddrSet(groups)+" jump "+chain)
+		}
+	}
 }
 
 // emitJunosHostProgramChain appends a zone's subchain (#9504): every projected

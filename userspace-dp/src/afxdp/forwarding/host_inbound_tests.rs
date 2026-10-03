@@ -732,3 +732,320 @@ fn cold_forwarding_state_admits_every_host_inbound_service_6873() {
         );
     }
 }
+
+// #11571: catalog destinations require the exact protocol token, family,
+// group, and transport tuple. OSPFv2/v3 both use IP protocol 89, so a
+// transport-only admit would confuse family-specific groups and let an OSPF
+// zone receive traffic for another routing protocol's multicast destination.
+#[test]
+fn ospf_multicast_is_scoped_to_exact_group_family_and_token_11571() {
+    const ZONE: u16 = 51;
+    let mut v4 = ForwardingState::default();
+    v4.zone_host_inbound.insert(
+        ZONE,
+        zone_host_inbound_from_tokens(&[], &["ospf".to_string()]),
+    );
+    assert!(
+        host_inbound_admits_for_destination(
+            &v4,
+            ZONE,
+            89,
+            0,
+            false,
+            0,
+            "224.0.0.5".parse().unwrap(),
+        ),
+        "OSPFv2 on AllSPFRouters must be admitted by protocols ospf",
+    );
+    assert!(
+        host_inbound_admits_for_destination(
+            &v4,
+            ZONE,
+            89,
+            0,
+            false,
+            0,
+            "224.0.0.6".parse().unwrap(),
+        ),
+        "OSPFv2 on AllDRouters must be admitted by protocols ospf",
+    );
+    assert!(
+        !host_inbound_admits_for_destination(
+            &v4,
+            ZONE,
+            89,
+            0,
+            false,
+            0,
+            "224.0.0.9".parse().unwrap(),
+        ),
+        "the shared protocol number must not admit the RIP multicast group",
+    );
+    assert!(
+        !host_inbound_admits_for_destination(
+            &v4,
+            ZONE,
+            112,
+            0,
+            false,
+            0,
+            "224.0.0.5".parse().unwrap(),
+        ),
+        "OSPF groups must reject packets with the wrong IP protocol",
+    );
+    assert!(
+        !host_inbound_admits_for_destination(
+            &v4,
+            ZONE,
+            89,
+            0,
+            true,
+            0,
+            "224.0.0.5".parse().unwrap(),
+        ),
+        "a catalog destination with a mismatched family marker must fail closed",
+    );
+    assert!(
+        host_inbound_admits_for_destination(
+            &v4,
+            ZONE,
+            89,
+            0,
+            false,
+            0,
+            "192.0.2.5".parse().unwrap(),
+        ),
+        "non-catalog OSPF destinations retain the existing protocol-token behavior",
+    );
+
+    let mut v6 = ForwardingState::default();
+    v6.zone_host_inbound.insert(
+        ZONE,
+        zone_host_inbound_from_tokens(&[], &["ospf3".to_string()]),
+    );
+    assert!(
+        host_inbound_admits_for_destination(
+            &v6,
+            ZONE,
+            89,
+            0,
+            true,
+            0,
+            "ff02::5".parse().unwrap(),
+        ),
+        "OSPFv3 on AllSPFRouters must be admitted by protocols ospf3",
+    );
+    assert!(
+        host_inbound_admits_for_destination(
+            &v6,
+            ZONE,
+            89,
+            0,
+            true,
+            0,
+            "ff02::6".parse().unwrap(),
+        ),
+        "OSPFv3 on AllDRouters must be admitted by protocols ospf3",
+    );
+    assert!(
+        !host_inbound_admits_for_destination(
+            &v6,
+            ZONE,
+            89,
+            0,
+            true,
+            0,
+            "ff02::12".parse().unwrap(),
+        ),
+        "OSPFv3 token must not admit the VRRP multicast group",
+    );
+    assert!(
+        !host_inbound_admits_for_destination(
+            &v6,
+            ZONE,
+            112,
+            0,
+            true,
+            0,
+            "ff02::5".parse().unwrap(),
+        ),
+        "OSPFv3 groups must reject packets with the wrong IP protocol",
+    );
+    assert!(
+        !host_inbound_admits_for_destination(
+            &v6,
+            ZONE,
+            89,
+            0,
+            true,
+            0,
+            "224.0.0.5".parse().unwrap(),
+        ),
+        "protocols ospf3 must not admit an IPv4 OSPF group",
+    );
+}
+
+// #11571: VRRP has exact family-specific groups, and an interface-level
+// effective set replaces (rather than unions with) its zone's protocol tokens.
+#[test]
+fn vrrp_multicast_is_dual_family_default_deny_and_override_scoped_11571() {
+    const ZONE: u16 = 52;
+    const OVERRIDE_IFINDEX: i32 = 520;
+    let mut state = ForwardingState::default();
+    state.zone_host_inbound.insert(
+        ZONE,
+        zone_host_inbound_from_tokens(&[], &["VRRP".to_string()]),
+    );
+    assert!(
+        host_inbound_admits_for_destination(
+            &state,
+            ZONE,
+            112,
+            0,
+            false,
+            0,
+            "224.0.0.18".parse().unwrap(),
+        ),
+        "VRRPv4 must admit its 224.0.0.18 group",
+    );
+    assert!(
+        host_inbound_admits_for_destination(
+            &state,
+            ZONE,
+            112,
+            0,
+            true,
+            0,
+            "ff02::12".parse().unwrap(),
+        ),
+        "VRRPv6 must admit its ff02::12 group",
+    );
+    assert!(
+        !host_inbound_admits_for_destination(
+            &state,
+            ZONE,
+            112,
+            0,
+            false,
+            0,
+            "224.0.0.5".parse().unwrap(),
+        ),
+        "VRRP token must not admit the OSPFv2 group",
+    );
+    assert!(
+        !host_inbound_admits_for_destination(
+            &state,
+            ZONE,
+            112,
+            0,
+            true,
+            0,
+            "ff02::5".parse().unwrap(),
+        ),
+        "VRRP token must not admit the OSPFv3 group",
+    );
+    assert!(
+        !host_inbound_admits_for_destination(
+            &state,
+            ZONE,
+            89,
+            0,
+            false,
+            0,
+            "224.0.0.18".parse().unwrap(),
+        ),
+        "VRRP group must reject OSPF's protocol number",
+    );
+
+    let empty_zone = zone_host_inbound_from_tokens(&[], &[]);
+    let mut closed = ForwardingState::default();
+    closed.zone_host_inbound.insert(ZONE, empty_zone);
+    assert!(
+        !host_inbound_admits_for_destination(
+            &closed,
+            ZONE,
+            112,
+            0,
+            false,
+            0,
+            "224.0.0.18".parse().unwrap(),
+        ),
+        "an empty configured zone must default-deny a catalog group",
+    );
+    assert!(
+        !host_inbound_admits_for_destination(
+            &closed,
+            0,
+            112,
+            0,
+            true,
+            0,
+            "ff02::12".parse().unwrap(),
+        ),
+        "an absent/unzoned ingress must default-deny a catalog group",
+    );
+
+    // The interface's effective override is authoritative, not unioned with
+    // the zone tokens. A different interface still uses the zone fallback.
+    state.ifindex_host_inbound.insert(
+        OVERRIDE_IFINDEX,
+        zone_host_inbound_from_tokens(&[], &["ospf".to_string()]),
+    );
+    assert!(
+        host_inbound_admits_iface_for_destination(
+            &state,
+            OVERRIDE_IFINDEX,
+            ZONE,
+            89,
+            0,
+            false,
+            0,
+            "224.0.0.5".parse().unwrap(),
+        ),
+        "an OSPF interface override must admit its exact group",
+    );
+    assert!(
+        !host_inbound_admits_iface_for_destination(
+            &state,
+            OVERRIDE_IFINDEX,
+            ZONE,
+            112,
+            0,
+            false,
+            0,
+            "224.0.0.18".parse().unwrap(),
+        ),
+        "the OSPF override must replace the zone's VRRP token",
+    );
+    assert!(
+        host_inbound_admits_iface_for_destination(
+            &state,
+            OVERRIDE_IFINDEX + 1,
+            ZONE,
+            112,
+            0,
+            false,
+            0,
+            "224.0.0.18".parse().unwrap(),
+        ),
+        "an interface without an override must retain zone VRRP admission",
+    );
+
+    let mut wildcard = ForwardingState::default();
+    wildcard.zone_host_inbound.insert(
+        ZONE,
+        zone_host_inbound_from_tokens(&["any-service".to_string()], &[]),
+    );
+    assert!(
+        host_inbound_admits_for_destination(
+            &wildcard,
+            ZONE,
+            253,
+            0,
+            false,
+            0,
+            "224.0.0.18".parse().unwrap(),
+        ),
+        "the explicit any-service wildcard must retain its full-admit semantics",
+    );
+}

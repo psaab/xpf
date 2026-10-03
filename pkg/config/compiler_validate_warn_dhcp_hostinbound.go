@@ -10,14 +10,13 @@ import (
 // security zone's `host-inbound-traffic system-services` set does NOT admit the
 // matching DHCP token.
 //
-// WHY THIS IS ITS OWN ARM, AND NOT PART OF #4455. The #4455 (HI-1) pair —
-// validateHostInboundMulticastWarnings and validateHostInboundManagedRoutingMismatch
-// — covers host-bound ROUTING multicast (OSPF/RIP/PIM/VRRP/IGMP), and its
-// enforcement half (Component A, the per-zone `iifname` DROP gate) is
-// PLAN-KILLed. Neither arm can see the DHCP server: the managed-routing arm
-// cross-checks `protocols` tokens against FRR's OSPF/OSPFv3/RIP interface lists,
-// and the DHCP server is not a routing protocol and is not rendered into FRR.
-// So the config shape this file reports produced ZERO advisory before #6460.
+// WHY THIS IS ITS OWN ARM, AND NOT PART OF #11571. The #11571 enforcement gate
+// scopes host-bound multicast by routing-protocol token, destination group,
+// family, and ingress zone. DHCP server admission uses the separate
+// `system-services` grammar: DHCP is neither a routing protocol nor rendered
+// into FRR, so the managed-routing check cannot inspect it. In addition,
+// DHCPv4 and DHCPv6 bypass these enforcement surfaces for different reasons
+// described below, so this check needs its own diagnostics.
 //
 // THE MECHANISM, PER FAMILY. The two families are unenforced for DIFFERENT
 // reasons, and the message says which, because an operator who is told the wrong
