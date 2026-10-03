@@ -86,3 +86,30 @@ func TestLocalCoSRewriteRuleFilterWiring6858(t *testing.T) {
 		})
 	}
 }
+
+func TestLocalCoSFiltersRejectUnknownAndDangling11834(t *testing.T) {
+	c := newCoSRewriteRuleCLI(t)
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"rewrite-rule unknown", []string{"rewrite-rule", "name", "rw-dscp", "naem"}, `unknown argument "naem"`},
+		{"rewrite-rule dangling", []string{"rewrite-rule", "name"}, `missing value for "name"`},
+		{"classifier unknown", []string{"classifier", "name", "wan-classifier", "naem"}, `unknown argument "naem"`},
+		{"classifier dangling", []string{"classifier", "name"}, `missing value for "name"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := captureStdout(t, func() {
+				err := c.handleShowClassOfService(tc.args)
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("handleShowClassOfService(%q) error = %v, want containing %q",
+						tc.args, err, tc.want)
+				}
+			})
+			if out != "" {
+				t.Fatalf("invalid filter emitted unfiltered output:\n%s", out)
+			}
+		})
+	}
+}

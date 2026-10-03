@@ -23,7 +23,10 @@ func (c *CLI) handleShowClassOfService(args []string) error {
 		}
 		return c.showClassOfServiceInterface(selector)
 	case "classifier":
-		nameFilter, typeFilter := cmdtree.ParseCoSNameTypeArgs(args[1:])
+		nameFilter, typeFilter, err := cmdtree.ParseCoSNameTypeArgs(args[1:])
+		if err != nil {
+			return err
+		}
 		fmt.Print(dpformat.FormatCoSClassifiers(c.store.ActiveConfig(), nameFilter, typeFilter))
 		return nil
 	case "rewrite-rule":
@@ -31,7 +34,10 @@ func (c *CLI) handleShowClassOfService(args []string) error {
 		// sibling commands parse identically; the parser is shared rather than
 		// duplicated. #6858: it is shared with the REMOTE binary too — see
 		// cmdtree.ParseCoSNameTypeArgs.
-		nameFilter, typeFilter := cmdtree.ParseCoSNameTypeArgs(args[1:])
+		nameFilter, typeFilter, err := cmdtree.ParseCoSNameTypeArgs(args[1:])
+		if err != nil {
+			return err
+		}
 		fmt.Print(dpformat.FormatCoSRewriteRules(c.store.ActiveConfig(), nameFilter, typeFilter))
 		return nil
 	case "scheduler-map":

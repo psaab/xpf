@@ -253,6 +253,12 @@ dispatcher), `TestCoSNameTypeTopic6848` (`cmd/cli`), and
 the same operator tokens through both paths and requires identical output
 for both commands.
 
+The grammar fails closed for trailing tokens and missing keyword values
+(#11834). For example, `... classifier type dscp tyep` and `... classifier
+name` return a usage error instead of silently dropping the typo or filter
+and displaying the broader unfiltered result. The shared parser returns
+these errors to both CLI frontends before either renders output.
+
 ## How to read admission drop counters live
 
 Since #724, `show class-of-service interface` renders three per-queue

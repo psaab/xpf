@@ -103,7 +103,10 @@ func TestCoSRewriteRuleLocalRemoteParity6858(t *testing.T) {
 		},
 	} {
 		t.Run(tc.desc, func(t *testing.T) {
-			name, typ := cmdtree.ParseCoSNameTypeArgs(tc.args)
+			name, typ, err := cmdtree.ParseCoSNameTypeArgs(tc.args)
+			if err != nil {
+				t.Fatalf("ParseCoSNameTypeArgs(%q) error = %v", tc.args, err)
+			}
 			localOut := tc.local(name, typ)
 
 			topic := cmdtree.CoSNameTypeTopic(tc.prefix, name, typ)
