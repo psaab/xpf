@@ -1309,63 +1309,35 @@ func validateStaticRouteDispositionConflictStrict(cfg *Config) error {
 }
 
 // validateStaticNextHopFamilyStrict hard-rejects a static route whose
-// destination is IPv6 with a next-hop that is IPv4 (#9820).
+// destination and IP next-hop have different address families (#9820, #11421).
 //
-// FRR's `ipv6 route` grammar takes only an IPv6 gateway or an interface
-// (`ipv6_route_cmd`); an IPv4 literal cannot occupy the IPv6 gateway slot
-// (`ipv6_route_address_interface_cmd` requires X:X::X:X). The bare form
-// fills the interface-name slot (normally inactive absent a same-named
-// interface, which can install it); ordinary gateway-plus-interface
-// emissions fail parsing, and any alternative token reading is not the
-// authored IPv4-gateway route. Either way the authored gateway never
-// serves, while the commit reports success — or the line fails the whole
-// managed-section reload when an interface is present.
+// IPv6-destination/IPv4-next-hop is not usable by FRR's `ipv6 route`
+// grammar: an IPv4 literal cannot occupy the IPv6 gateway slot. Conversely,
+// IPv4-destination/IPv6-next-hop is valid FRR/Linux RFC5549 syntax, but the
+// userspace FIB parses IPv4 next-hops only for IPv4 routes. Accepting it would
+// silently make the route `NoRoute` on the helper dataplane.
+// Both directions share one family predicate across strict validation, helper
+// exclusion and FRR rendering. It classifies mapped IPv6 consistently with the
+// Rust address parser and does not mistake interface-only or non-IP operands
+// for gateways.
 //
-// The reverse direction (IPv4 destination, IPv6 next-hop) is a valid
-// `ip route` form and is kept — the gate is one-directional by
-// construction. Interface-only next-hops (no IP part) are
-// family-agnostic and pass, as do non-IP tokens and IPv4-mapped literals
-// (which classify v6 under FRRAddrFamily). Next-table routes render no
-// FRR line and are skipped.
+// Strict commit rejects either opposite-family direction. The tolerant
+// load/peer-sync path downgrades this to a warning (#1960), and the shared
+// exclusion drops the entire static route from the helper snapshot and FRR;
+// show surfaces annotate that same route as not installed. Rust independently
+// refuses mismatched literals in hand-built or corrupt snapshots.
 //
-// Strict on commit / commit-check (hard reject so the unsupported
-// combination is operator-visible); the call site downgrades this to a
-// warning on the tolerant load / peer-sync path
-// (opts.lenientStaticNextHopFamily, #1960) so an already-persisted or
-// peer-synced config still BOOTS — the renderer then skips the offending
-// next-hop (omit-with-warning, fail-closed). Global inet.0/inet6.0 are
-// walked first, then each routing-instance's routes in RoutingInstances
-// order, so the first-reported error is deterministic. Mirrors
-// validateStaticRouteDispositionConflictStrict.
+// Global inet.0 / inet6.0 are walked first, then each routing-instance's
+// routes in RoutingInstances order, so the first-reported error is
+// deterministic. Mirrors validateStaticRouteDispositionConflictStrict.
 func validateStaticNextHopFamilyStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
 	}
 	check := func(scope string, routes []*StaticRoute) error {
 		for _, sr := range routes {
-			if sr == nil || sr.NextTable != "" {
-				continue
-			}
-			if FRRAddrFamily(sr.Destination) != "v6" {
-				continue
-			}
-			for _, nh := range sr.NextHops {
-				ipPart := nh.Address
-				if i := strings.IndexByte(ipPart, '@'); i >= 0 {
-					ipPart = ipPart[:i]
-				}
-				if ipPart == "" || FRRAddrFamily(ipPart) != "v4" {
-					continue
-				}
-				disp := nh.Address
-				if !strings.Contains(disp, "@") && nh.Interface != "" {
-					disp += " interface " + nh.Interface
-				}
-				return fmt.Errorf(
-					"%s %q next-hop %q: IPv6 destination with IPv4 next-hop "+
-						"is unsupported; use an IPv6 gateway or a structured "+
-						"interface-only next-hop",
-					scope, sr.Destination, disp)
+			if reason := StaticRouteNextHopFamilyMismatchReason(sr); reason != "" {
+				return fmt.Errorf("%s %q: %s", scope, sr.Destination, reason)
 			}
 		}
 		return nil

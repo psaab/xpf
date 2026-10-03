@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-// #9820: an IPv6 static route with an IPv4 next-hop must be refused at
-// strict commit (all config forms) and downgraded to a warning on the
-// tolerant path. The reverse direction (IPv4-via-IPv6) is a valid FRR
-// form and must keep working.
+// #9820/#11421: a static route whose IP next-hop has a different address
+// family from its destination must be refused at strict commit and downgraded
+// to a warning on the tolerant path. IPv4-via-IPv6 is valid FRR/RFC5549 syntax,
+// but the userspace FIB cannot represent it.
 //
 // FAIL-ON-REVERT: neutralize validateStaticNextHopFamilyStrict (or drop
 // its call in runUniformGatesRoutingRibRPM) and every REFUSE cell below
@@ -79,6 +79,7 @@ func TestStaticNextHopFamilyLenientWarns_9820(t *testing.T) {
 			"set routing-instances blue instance-type virtual-router",
 			"set routing-instances blue routing-options static route 2001:db8::/32 next-hop 192.0.2.1",
 		},
+		{"set routing-options static route 10.0.0.0/8 next-hop 2001:db8::1"},
 	}
 	for i, s := range sets {
 		tree := flatTreeFromSets(t, s...)
@@ -110,20 +111,11 @@ func TestStaticNextHopFamilyAccepted_9820(t *testing.T) {
 		{"v6-via-v6", []string{
 			"set routing-options static route 2001:db8::/32 next-hop 2001:db8::1",
 		}},
-		{"v4-via-v6-kept", []string{
-			"set routing-options static route 10.0.0.0/8 next-hop 2001:db8::1",
-		}},
 		{"v6-via-mapped", []string{
 			"set routing-options static route 2001:db8::/32 next-hop ::ffff:192.0.2.1",
 		}},
-		{"v4-via-mapped", []string{
-			"set routing-options static route 10.0.0.0/8 next-hop ::ffff:192.0.2.1",
-		}},
 		{"rib-inet-v4-named", []string{
 			"set routing-options rib inet.0 static route 10.0.0.0/8 next-hop 192.0.2.1",
-		}},
-		{"rib-inet-v4-via-v6-named", []string{
-			"set routing-options rib inet.0 static route 10.0.0.0/8 next-hop 2001:db8::1",
 		}},
 		{"v6-discard", []string{
 			"set routing-options static route 2001:db8::/32 discard",
@@ -260,5 +252,147 @@ routing-options {
 	_, err := CompileConfig(tree)
 	if err == nil || !strings.Contains(err.Error(), "IPv6 destination with IPv4 next-hop") {
 		t.Fatalf("quoted ip@iface v4-NH must be refused by the family gate, got: %v", err)
+	}
+}
+
+func TestStaticNextHopFamilyRejectsV4DestinationV6Gateway11421(t *testing.T) {
+	cases := []struct {
+		name string
+		sets []string
+	}{
+		{"static", []string{
+			"set routing-options static route 10.0.0.0/8 next-hop 2001:db8::1",
+		}},
+		{"qualified-next-hop", []string{
+			"set routing-options static route 10.0.0.0/8 qualified-next-hop 2001:db8::1 preference 7",
+		}},
+		{"rib-inet", []string{
+			"set routing-options rib inet.0 static route 10.0.0.0/8 next-hop 2001:db8::1",
+		}},
+		{"mapped-v6-literal", []string{
+			"set routing-options static route 10.0.0.0/8 next-hop ::ffff:192.0.2.1",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := flatTreeFromSets(t, tc.sets...)
+			assertCommitRejects(t, tree, "IPv4 destination with IPv6 next-hop")
+		})
+	}
+}
+
+func TestStaticRouteNextHopFamilyMismatchSharedExclusion11421(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		sr        *StaticRoute
+		want      string
+		healthyNH string
+	}{
+		{
+			name: "IPv4 destination with IPv6 next-hop",
+			sr: &StaticRoute{
+				Destination: "10.0.0.0/8",
+				NextHops:    []NextHopEntry{{Address: "2001:db8::1"}},
+			},
+			want:      "IPv4 destination with IPv6 next-hop",
+			healthyNH: "192.0.2.254",
+		},
+		{
+			name: "IPv6 destination with IPv4 next-hop",
+			sr: &StaticRoute{
+				Destination: "2001:db8::/32",
+				NextHops:    []NextHopEntry{{Address: "192.0.2.1"}},
+			},
+			want:      "IPv6 destination with IPv4 next-hop",
+			healthyNH: "2001:db8::2",
+		},
+		{
+			name: "IPv4-mapped literal classifies as IPv6",
+			sr: &StaticRoute{
+				Destination: "10.0.0.0/8",
+				NextHops:    []NextHopEntry{{Address: "::ffff:192.0.2.1"}},
+			},
+			want:      "IPv4 destination with IPv6 next-hop",
+			healthyNH: "192.0.2.254",
+		},
+		{
+			name: "qualified interface is retained in reason",
+			sr: &StaticRoute{
+				Destination: "10.0.0.0/8",
+				NextHops:    []NextHopEntry{{Address: "2001:db8::1", Interface: "ge-0/0/1.0"}},
+			},
+			want:      "ge-0/0/1.0",
+			healthyNH: "192.0.2.254",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reason := StaticRouteNextHopFamilyMismatchReason(tc.sr)
+			if !strings.Contains(reason, tc.want) {
+				t.Fatalf("family mismatch reason = %q, want it to contain %q", reason, tc.want)
+			}
+			if got := StaticRouteExcludedReason(tc.sr, false, nil); got != reason {
+				t.Fatalf("per-route exclusion = %q, want the shared family reason %q", got, reason)
+			}
+			healthy := &StaticRoute{
+				Destination: tc.sr.Destination,
+				NextHops:    []NextHopEntry{{Address: tc.healthyNH}},
+			}
+			cfg := &Config{RoutingOptions: RoutingOptionsConfig{
+				StaticRoutes: []*StaticRoute{tc.sr, healthy},
+			}}
+			exclusions := StaticRouteExclusions(cfg)
+			if got := exclusions[tc.sr]; got != reason {
+				t.Fatalf("whole-config exclusion = %q, want %q", got, reason)
+			}
+			if got := exclusions[healthy]; got != "" {
+				t.Fatalf("same-family control route exclusion = %q, want empty", got)
+			}
+		})
+	}
+
+	nextTable := &StaticRoute{
+		Destination: "10.0.0.0/8",
+		NextTable:   "vrf-a",
+		NextHops:    []NextHopEntry{{Address: "2001:db8::1"}},
+	}
+	if reason := StaticRouteNextHopFamilyMismatchReason(nextTable); reason != "" {
+		t.Fatalf("next-table route does not use its next-hop as a forwarding gateway: %q", reason)
+	}
+}
+
+func TestNegativeStaticRoutesIgnoreUnusedCrossFamilyNextHops11421(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sr   *StaticRoute
+	}{
+		{
+			name: "discard",
+			sr: &StaticRoute{
+				Destination: "10.0.0.0/8",
+				NextHops:    []NextHopEntry{{Address: "2001:db8::1"}},
+				Discard:     true,
+			},
+		},
+		{
+			name: "reject",
+			sr: &StaticRoute{
+				Destination: "10.0.0.0/8",
+				NextHops:    []NextHopEntry{{Address: "2001:db8::1"}},
+				Reject:      true,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if reason := StaticRouteNextHopFamilyMismatchReason(tc.sr); reason != "" {
+				t.Fatalf("unused gateway on %s route reported as family mismatch: %q", tc.name, reason)
+			}
+			if reason := StaticRouteExcludedReason(tc.sr, false, nil); reason != "" {
+				t.Fatalf("negative route excluded instead of retaining its disposition: %q", reason)
+			}
+			cfg := &Config{RoutingOptions: RoutingOptionsConfig{StaticRoutes: []*StaticRoute{tc.sr}}}
+			if reason := StaticRouteExclusions(cfg)[tc.sr]; reason != "" {
+				t.Fatalf("whole-config exclusion dropped negative route: %q", reason)
+			}
+		})
 	}
 }

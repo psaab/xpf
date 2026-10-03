@@ -796,6 +796,18 @@ pub(crate) enum SnapshotIntegrityError {
         destination: String,
         family: String,
     },
+    /// #11421: a numeric next-hop literal belongs to the family opposite its
+    /// route destination. The family-specific parser would otherwise discard
+    /// the gateway as `(None, None)`, leaving the route at ifindex 0 and making
+    /// it return NoRoute while the kernel may still forward it (RFC5549).
+    /// The Go commit gate rejects this configuration; this is the helper
+    /// boundary backstop for corrupt / hand-built / version-drifted snapshots.
+    RouteNextHopFamilyMismatch {
+        table: String,
+        destination: String,
+        next_hop: String,
+    },
+
     /// #6568 (member 1): a `RouteSnapshot` carried a `destination` that parses
     /// as NEITHER `Ipv4Net` NOR `Ipv6Net`, so no FIB can hold it.
     ///
@@ -1230,6 +1242,15 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 f,
                 "route {:?} in table {:?} declares family {:?} that does not match the address family of its destination prefix — refusing to install it into the prefix-parsed FIB while the family metadata claims the other",
                 destination, table, family
+            ),
+            Self::RouteNextHopFamilyMismatch {
+                table,
+                destination,
+                next_hop,
+            } => write!(
+                f,
+                "route {:?} in table {:?} has next-hop {:?} from the other address family — refusing to drop its gateway silently and install a route that cannot forward as the kernel does",
+                destination, table, next_hop
             ),
             Self::RouteDestinationUnparseable { table, destination } => write!(
                 f,

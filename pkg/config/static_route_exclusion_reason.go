@@ -3,13 +3,14 @@ package config
 import (
 	"fmt"
 	"net"
+	"strings"
 )
 
 // Shared "is this static route actually installed?" predicate.
 //
 // #7357 items 3-5: `show route` / `show routing-options` render every
 // configured static route straight from config, while
-// buildRouteSnapshots (pkg/dataplane/userspace/routes.go) DROPS seven
+// buildRouteSnapshots (pkg/dataplane/userspace/routes.go) DROPS eight
 // classes of them. A dropped route printed as configured reads as an
 // installed route, which is the #6534 archetype: the operator checks the
 // surface after committing and it confirms a forwarding decision that is
@@ -19,9 +20,47 @@ import (
 // applied-set readback: every verdict below is a deterministic function of
 // the committed config, so the renderer can reach it without runtime state.
 //
-// Six of the seven reasons are per-route. The seventh (the next-table window)
+// Seven of the eight reasons are per-route. The eighth (the next-table window)
 // is ORDER-DEPENDENT and cannot be decided from one route, which is why
 // StaticRouteExclusions exists alongside this.
+//
+// StaticRouteNextHopFamilyMismatchReason is shared by strict validation, the
+// lenient snapshot exclusion and the FRR render belt; StaticRouteExclusions
+// carries the same reason to every config-backed show surface.
+
+// StaticRouteNextHopFamilyMismatchReason reports when a forwarding next-hop's
+// family differs from its static route destination. Empty/interface-only
+// next-hops, unparsable address tokens, and next-table/discard/reject routes
+// are not family mismatches; those routes do not use an IP gateway.
+func StaticRouteNextHopFamilyMismatchReason(sr *StaticRoute) string {
+	if sr == nil || sr.NextTable != "" || sr.Discard || sr.Reject {
+		return ""
+	}
+	destinationFamily := FRRAddrFamily(sr.Destination)
+	if destinationFamily == "" {
+		return ""
+	}
+	for _, nh := range sr.NextHops {
+		address, _, _ := strings.Cut(nh.Address, "@")
+		nextHopFamily := FRRAddrFamily(address)
+		if address == "" || nextHopFamily == "" || nextHopFamily == destinationFamily {
+			continue
+		}
+		destinationVersion, nextHopVersion := "IPv6", "IPv4"
+		if destinationFamily == "v4" {
+			destinationVersion, nextHopVersion = "IPv4", "IPv6"
+		}
+		display := nh.Address
+		if !strings.Contains(display, "@") && nh.Interface != "" {
+			display += " interface " + nh.Interface
+		}
+		return fmt.Sprintf(
+			"%s destination with %s next-hop %q is unsupported by userspace dataplane; "+
+				"use a same-family gateway or a structured interface-only next-hop",
+			destinationVersion, nextHopVersion, display)
+	}
+	return ""
+}
 
 // StaticRouteExcludedReason reports why buildRouteSnapshots drops `sr`, or ""
 // when it publishes it.
@@ -50,6 +89,9 @@ func StaticRouteExcludedReason(sr *StaticRoute, perInstance bool, definedInstanc
 		// the Junos `default` keyword and malformed destinations are not.
 		if !staticRouteDestinationUsable(sr.Destination) {
 			return fmt.Sprintf("destination %q is neither a CIDR prefix nor a bare IP address", sr.Destination)
+		}
+		if reason := StaticRouteNextHopFamilyMismatchReason(sr); reason != "" {
+			return reason
 		}
 		if !staticRouteHasDisposition(sr) {
 			return "route has no forwarding disposition (no next-hop, next-table, discard, or reject)"
@@ -112,7 +154,7 @@ func staticRouteDestinationUsable(destination string) bool {
 // StaticRouteExclusions returns the exclusion reason for every static route in
 // `cfg` that buildRouteSnapshots drops, keyed by the route pointer.
 //
-// It exists for the ORDER-DEPENDENT seventh reason. The kernel programs global
+// It exists for the ORDER-DEPENDENT eighth reason. The kernel programs global
 // next-table leaks as ip rules capped at NextTableRuleWindow entries — one
 // slot per default-instance ingress interface per leak since #9420 (#9810) —
 // and the applier advances that counter only for an ELIGIBLE route, drawn down

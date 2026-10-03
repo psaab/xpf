@@ -18,12 +18,12 @@ import "net/netip"
 // FRR area grammar takes only dotted-quad or integer) check
 // FRRAddrIsMapped explicitly.
 //
-// This is the single family predicate shared by the commit gates and the
-// FRR render belts (#9820): the static next-hop gate + belt, the
-// backup-router gate + belt + emission, and the static `ip`/`ipv6`
-// keying. It supersedes frrOperandIsV6 (which classified mapped as v4,
-// disagreeing with both the validator and the emission) and the inline
-// strings.Contains(s, ":") spellings on those guarded paths.
+// This is the single family predicate shared by the commit gates, static
+// route exclusion and FRR render belts (#9820/#11421): the static next-hop
+// gate + exclusion + belt, the backup-router gate + belt + emission, and the
+// static `ip`/`ipv6` keying. It supersedes frrOperandIsV6 (which classified
+// mapped as v4, disagreeing with both the validator and the emission) and the
+// inline strings.Contains(s, ":") spellings on those guarded paths.
 // natAddrFamily is untouched — NAT owns it.
 func FRRAddrFamily(s string) string {
 	if p, err := netip.ParsePrefix(s); err == nil {

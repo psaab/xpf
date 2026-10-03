@@ -731,6 +731,15 @@ step. Both are required — neither sees the other's case:
   installed only the first gateway. A plain list carries NO per-next-hop
   preference (all equal-cost) — kept distinct from the floating
   `qualified-next-hop` backup below.
+- **Static gateway family (#11421).** The userspace FIB requires a numeric
+  next-hop to match its route's destination family: an IPv6 gateway on an IPv4
+  route is valid RFC5549 syntax for FRR/Linux, but the helper parser otherwise
+  loses it and produces `NoRoute`. Strict commit rejects either family
+  mismatch. On tolerant load / peer-sync, the shared
+  `StaticRouteNextHopFamilyMismatchReason` drops the entire route from FRR and
+  the helper snapshot, while the shared static-route exclusion map gives the
+  show surfaces the same `NOT INSTALLED` reason. The Rust snapshot builder also
+  fails closed on a mismatched literal before its family-specific parser runs.
 - **Floating static via `qualified-next-hop` (#3871).** A static route's
   `qualified-next-hop <gw> { preference N; metric M; }` is the Junos floating-
   static idiom — a primary next-hop plus a LESS-preferred backup that installs

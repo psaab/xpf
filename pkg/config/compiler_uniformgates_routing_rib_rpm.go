@@ -137,19 +137,13 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
-	// #9820: static-route next-hop family gate. An IPv6 static route with
-	// an IPv4 next-hop commits clean today and renders `ipv6 route <v6dst>
-	// <v4nh> [ifname]` — but FRR's `ipv6 route` grammar takes only an
-	// IPv6 gateway or an interface, so the bare form fills the
-	// interface-name slot (normally inactive absent a same-named
-	// interface) and ordinary gateway-plus-interface emissions fail
-	// parsing. The reverse direction (IPv4-via-IPv6) is a valid `ip
-	// route` form and is kept. Strict on commit / commit-check (hard
-	// reject so the unsupported combination is operator-visible); lenient
-	// on load / peer-sync (warn — #1960; the renderer's
-	// generateStaticRouteInTable SKIPS the offending next-hop so a
-	// leniently-loaded config omits it with a warning rather than
-	// poisoning the reload). Mirrors
+	// #9820/#11421: static-route next-hop family gate. IPv6 destinations with
+	// IPv4 gateways cannot render as FRR `ipv6 route`; IPv4 destinations with
+	// IPv6 gateways are RFC5549-valid in FRR/kernel but the userspace FIB parses
+	// IPv4 next-hops only, silently turning them into NoRoute. Reject both
+	// directions at strict commit. The tolerant path warns (#1960), while the
+	// shared exclusion omits the entire route from FRR/helper snapshots and
+	// annotates config-backed show surfaces with the same reason. Mirrors
 	// validateStaticRouteDispositionConflictStrict.
 	if err := validateStaticNextHopFamilyStrict(cfg); err != nil {
 		if opts.lenientStaticNextHopFamily {

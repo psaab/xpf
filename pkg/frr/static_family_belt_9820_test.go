@@ -7,29 +7,27 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #9820: the static render belt omits an IPv4 next-hop on an IPv6
-// destination (per next-hop, with a warning) on the tolerant path, where
-// the strict gate's refusal is downgraded to a warning.
+// #9820/#11421: the static render belt omits an entire route if any numeric
+// next-hop has a different family from its destination. The shared predicate
+// also drives strict rejection, helper snapshot exclusion and show
+// annotations, so a partially-installed ECMP route cannot look fully active.
 //
-// FAIL-ON-REVERT: drop the family belt from generateStaticRouteInTable
-// and the omitted cells below render the inert/interface-fill lines
-// again — every omission assertion fires RED.
+// FAIL-ON-REVERT: remove the shared predicate call from
+// generateStaticRouteInTable and the omitted cells below render the invalid
+// route again — each omission assertion fires RED.
 
 func staticRoute9820(dest string, nhs ...config.NextHopEntry) *config.StaticRoute {
 	return &config.StaticRoute{Destination: dest, Preference: 5, NextHops: nhs}
 }
 
-func TestStaticFamilyBeltOmitsBadMemberKeepsGood_9820(t *testing.T) {
+func TestStaticFamilyBeltDropsRouteWithCrossFamilyMember_9820(t *testing.T) {
 	m := &Manager{}
 	out := m.generateStaticRouteInTable(staticRoute9820("2001:db8::/32",
 		config.NextHopEntry{Address: "192.0.2.1"},
 		config.NextHopEntry{Address: "2001:db8::1"},
 	), "", 0, nil, nil, nil)
-	if strings.Contains(out, "192.0.2.1") {
-		t.Fatalf("bad v4 next-hop reached frr.conf:\n%s", out)
-	}
-	if !strings.Contains(out, "ipv6 route 2001:db8::/32 2001:db8::1 5\n") {
-		t.Fatalf("good ECMP member missing:\n%s", out)
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("route with a cross-family member must be omitted entirely, got:\n%s", out)
 	}
 }
 
@@ -43,6 +41,30 @@ func TestStaticFamilyBeltAllBadRendersNothing_9820(t *testing.T) {
 	}
 }
 
+func TestStaticFamilyBeltOmitsEitherCrossFamilyDirection11421(t *testing.T) {
+	m := &Manager{}
+	for _, tc := range []struct {
+		name string
+		sr   *config.StaticRoute
+	}{
+		{"v4-destination-v6-gateway", staticRoute9820("10.0.0.0/8",
+			config.NextHopEntry{Address: "2001:db8::1"},
+			config.NextHopEntry{Address: "192.0.2.1"})},
+		{"v4-destination-v6-gateway-qualified", staticRoute9820("10.0.0.0/8",
+			config.NextHopEntry{Address: "2001:db8::1", Interface: "ge-0/0/1.0"})},
+		{"v4-destination-mapped-v6-gateway", staticRoute9820("10.0.0.0/8",
+			config.NextHopEntry{Address: "::ffff:192.0.2.1"})},
+		{"v6-destination-v4-gateway", staticRoute9820("2001:db8::/32",
+			config.NextHopEntry{Address: "192.0.2.1"})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := m.generateStaticRouteInTable(tc.sr, "", 0, nil, nil, nil); strings.TrimSpace(got) != "" {
+				t.Fatalf("cross-family next-hop must render nothing, got:\n%s", got)
+			}
+		})
+	}
+}
+
 func TestStaticFamilyBeltKeptFormsByteIdentical_9820(t *testing.T) {
 	m := &Manager{}
 	for _, tc := range []struct {
@@ -50,15 +72,12 @@ func TestStaticFamilyBeltKeptFormsByteIdentical_9820(t *testing.T) {
 		sr   *config.StaticRoute
 		want string
 	}{
-		{"v4-via-v6", staticRoute9820("10.0.0.0/8",
-			config.NextHopEntry{Address: "2001:db8::1"}),
-			"ip route 10.0.0.0/8 2001:db8::1 5\n"},
+		{"v4-via-v4", staticRoute9820("10.0.0.0/8",
+			config.NextHopEntry{Address: "192.0.2.1"}),
+			"ip route 10.0.0.0/8 192.0.2.1 5\n"},
 		{"v6-via-mapped", staticRoute9820("2001:db8::/32",
 			config.NextHopEntry{Address: "::ffff:192.0.2.1"}),
 			"ipv6 route 2001:db8::/32 ::ffff:192.0.2.1 5\n"},
-		{"v4-via-mapped", staticRoute9820("10.0.0.0/8",
-			config.NextHopEntry{Address: "::ffff:192.0.2.1"}),
-			"ip route 10.0.0.0/8 ::ffff:192.0.2.1 5\n"},
 		{"v6-interface-only", staticRoute9820("2001:db8::/32",
 			config.NextHopEntry{Interface: "ge-0/0/1.0"}),
 			"ipv6 route 2001:db8::/32 ge-0/0/1 5\n"},
@@ -74,13 +93,47 @@ func TestStaticFamilyBeltKeptFormsByteIdentical_9820(t *testing.T) {
 	}
 }
 
-// `@`-forms never reach the family belt: the shape belt drops the raw
-// token first (pre-existing). This cell documents the ordering — it is
+func TestStaticFamilyBeltKeepsNegativeRouteWithUnusedCrossFamilyGateway11421(t *testing.T) {
+	m := &Manager{}
+	for _, tc := range []struct {
+		name string
+		sr   *config.StaticRoute
+		want string
+	}{
+		{
+			name: "discard",
+			sr: &config.StaticRoute{
+				Destination: "10.0.0.0/8",
+				NextHops:    []config.NextHopEntry{{Address: "2001:db8::1"}},
+				Discard:     true,
+			},
+			want: "ip route 10.0.0.0/8 Null0\n",
+		},
+		{
+			name: "reject",
+			sr: &config.StaticRoute{
+				Destination: "10.0.0.0/8",
+				NextHops:    []config.NextHopEntry{{Address: "2001:db8::1"}},
+				Reject:      true,
+			},
+			want: "ip route 10.0.0.0/8 reject\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := m.generateStaticRouteInTable(tc.sr, "", 0, nil, nil, nil); got != tc.want {
+				t.Fatalf("negative route with an unused cross-family gateway = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A same-family `@` form never reaches the address-family predicate: the
+// existing FRR operand-shape belt drops the raw token first. This cell is
 // NOT family-belt proof.
 func TestStaticFamilyBeltAtFormsShapeDropped_9820(t *testing.T) {
 	m := &Manager{}
 	out := m.generateStaticRouteInTable(staticRoute9820("2001:db8::/32",
-		config.NextHopEntry{Address: "192.0.2.1@eth0"},
+		config.NextHopEntry{Address: "2001:db8::1@eth0"},
 	), "", 0, nil, nil, nil)
 	if strings.TrimSpace(out) != "" {
 		t.Fatalf("raw @-form must stay shape-dropped, got:\n%s", out)
@@ -116,20 +169,45 @@ func renderStaticFromLenientConfig(t *testing.T, setCmds ...string) (rendered st
 	return b.String(), cfg.Warnings
 }
 
-func TestStaticFamilyBeltLenientIntegration_9820(t *testing.T) {
+func TestStaticFamilyBeltLenientExcludesCrossFamilyRoute_9820(t *testing.T) {
 	got, warnings := renderStaticFromLenientConfig(t,
 		"set routing-options static route 2001:db8::/32 next-hop 192.0.2.1",
 		"set routing-options static route 2001:db8::/32 next-hop 2001:db8::1",
+		"set routing-options static route 2001:db8:1::/48 next-hop 2001:db8:1::1",
 	)
-	if strings.Contains(got, "192.0.2.1") {
-		t.Fatalf("tolerant render emitted the bad next-hop:\n%s", got)
+	if strings.Contains(got, "2001:db8::/32") || strings.Contains(got, "192.0.2.1") {
+		t.Fatalf("tolerant render emitted a route with a cross-family member:\n%s", got)
 	}
-	if !strings.Contains(got, "ipv6 route 2001:db8::/32 2001:db8::1 5\n") {
-		t.Fatalf("tolerant render dropped the good member:\n%s", got)
+	if !strings.Contains(got, "ipv6 route 2001:db8:1::/48 2001:db8:1::1 5\n") {
+		t.Fatalf("tolerant render dropped the healthy control route:\n%s", got)
 	}
 	found := false
 	for _, w := range warnings {
 		if strings.Contains(w, "static route next-hop family") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("lenient compile must warn next-hop family, warnings=%v", warnings)
+	}
+}
+
+func TestStaticFamilyBeltLenientIPv4ViaIPv6Integration11421(t *testing.T) {
+	got, warnings := renderStaticFromLenientConfig(t,
+		"set routing-options static route 10.0.0.0/8 next-hop 2001:db8::1",
+		"set routing-options static route 10.0.0.0/8 next-hop 192.0.2.1",
+		"set routing-options static route 10.1.0.0/16 next-hop 192.0.2.2",
+	)
+	if strings.Contains(got, "10.0.0.0/8") || strings.Contains(got, "2001:db8::1") {
+		t.Fatalf("tolerant render emitted a route with an unrepresentable gateway:\n%s", got)
+	}
+	if !strings.Contains(got, "ip route 10.1.0.0/16 192.0.2.2 5\n") {
+		t.Fatalf("tolerant render dropped the healthy control route:\n%s", got)
+	}
+	found := false
+	for _, warning := range warnings {
+		if strings.Contains(warning, "static route next-hop family") {
 			found = true
 			break
 		}

@@ -1491,15 +1491,14 @@ type compileOpts struct {
 	// precedence (discard > next-table > next-hop). Same doctrine as
 	// lenientNextTableRefs.
 	lenientRouteDispositionConflict bool
-	// lenientStaticNextHopFamily (#9820) downgrades the static-route
+	// lenientStaticNextHopFamily (#9820/#11421) downgrades the static-route
 	// next-hop family gate (validateStaticNextHopFamilyStrict) from a hard
-	// compile error to a cfg.Warnings entry. An IPv6 static route with an
-	// IPv4 next-hop renders a line FRR cannot use as a gateway route, so
-	// the strict commit / commit-check path hard-rejects it; the tolerant
-	// load / peer-sync paths warn so an already-persisted or peer-synced
-	// config still BOOTS (#1960) — the renderer skips the offending
-	// next-hop with a warning. Same doctrine as
-	// lenientRouteDispositionConflict.
+	// compile error to a cfg.Warnings entry. A gateway from the other family
+	// either cannot render under FRR's route grammar or is RFC5549-valid but
+	// cannot be represented by the userspace FIB. Strict commit rejects both;
+	// tolerant load / peer-sync warns so the config still BOOTS (#1960), while
+	// the shared exclusion omits the route from FRR/helper snapshots and its
+	// reason is visible on config-backed show surfaces.
 	lenientStaticNextHopFamily bool
 	// lenientDHCPStaticBindings (#2243 review) downgrades the DHCP-server
 	// static (fixed/reserved) host-binding gate (validateDHCPStaticBindingsStrict)
