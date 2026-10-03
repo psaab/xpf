@@ -1005,12 +1005,14 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 			ApplicationSets: make(map[string]*ApplicationSet),
 		},
 		ClassOfService: &ClassOfServiceConfig{
-			ForwardingClasses: make(map[string]*CoSForwardingClass),
-			DSCPClassifiers:   make(map[string]*CoSDSCPClassifier),
-			DSCPRewriteRules:  make(map[string]*CoSDSCPRewriteRule),
-			Schedulers:        make(map[string]*CoSScheduler),
-			SchedulerMaps:     make(map[string]*CoSSchedulerMap),
-			Interfaces:        make(map[string]*CoSInterface),
+			ForwardingClasses:             make(map[string]*CoSForwardingClass),
+			DSCPClassifiers:               make(map[string]*CoSDSCPClassifier),
+			DSCPRewriteRules:              make(map[string]*CoSDSCPRewriteRule),
+			INetPrecedenceRewriteRuleDefs: make(map[string]*CoSINetPrecedenceRewriteRule),
+			EXPRewriteRuleDefs:            make(map[string]*CoSEXPRewriteRule),
+			Schedulers:                    make(map[string]*CoSScheduler),
+			SchedulerMaps:                 make(map[string]*CoSSchedulerMap),
+			Interfaces:                    make(map[string]*CoSInterface),
 		},
 	}
 	cfg.Warnings = append(cfg.Warnings, preWalkWarnings...)

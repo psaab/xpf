@@ -15806,9 +15806,13 @@ advisory (`validateFirewallInterfaceSpecificWarnings`).
 and `rewrite-rules exp` to `schemaClassOfService` (completion + `?` help).
 
 The two REWRITE directions remain **accepted-but-inert** — the userspace
-dataplane rewrites `dscp` on egress only. Their names are recorded on
-`ClassOfServiceConfig` (`INetPrecedenceRewriteRules` / `EXPRewriteRules`)
-solely to drive a commit advisory; no runtime structure is built.
+dataplane rewrites `dscp` on egress only. Their names remain on
+`ClassOfServiceConfig` (`INetPrecedenceRewriteRules` / `EXPRewriteRules`) for
+the advisory and name-only show output. The compiler also builds JSON-hidden,
+Go-only validation models for each inner forwarding-class, loss-priority, and
+0..7 code-point entry (#11811); no rewrite structure is published to the wire
+or consumed by the dataplane. Strict commits reject invalid inner values, and
+tolerant loads warn and drop invalid code points.
 
 The `classifiers inet-precedence` half is **enforced since #6847**. #4316
 recorded only the classifier NAMES, and the unit-level `classifiers` schema

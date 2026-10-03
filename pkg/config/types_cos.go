@@ -35,15 +35,15 @@ type ClassOfServiceConfig struct {
 	Interfaces           map[string]*CoSInterface
 	FairnessExpectations []*CoSFairnessExpectation
 	// INetPrecedenceClassifiers / INetPrecedenceRewriteRules / EXPRewriteRules
-	// record the NAMES of `inet-precedence` classifiers, `inet-precedence`
-	// rewrite-rules, and `exp` rewrite-rules configured (fable-167 F-3b,
-	// #4316). These behavior-aggregate maps are accepted for Junos
-	// compatibility but INERT — the userspace dataplane classifies and
-	// rewrites on dscp / ieee-802.1 only. Names are recorded solely to drive
-	// the accepted-but-inert commit advisory; no runtime structure is built.
-	INetPrecedenceClassifiers  []string
-	INetPrecedenceRewriteRules []string
-	EXPRewriteRules            []string
+	// retain the configured NAMES for advisories and the name-only show surface.
+	// The two inert rewrite families' inner entries are also parsed into
+	// validation-only rule definitions below; no code point is sent to the
+	// dataplane or exposed in the compiled config's JSON form.
+	INetPrecedenceClassifiers     []string
+	INetPrecedenceRewriteRules    []string
+	EXPRewriteRules               []string
+	INetPrecedenceRewriteRuleDefs map[string]*CoSINetPrecedenceRewriteRule `json:"-"`
+	EXPRewriteRuleDefs            map[string]*CoSEXPRewriteRule            `json:"-"`
 	// TrafficControlProfiles holds the Junos hierarchical shaping profiles
 	// (`class-of-service traffic-control-profiles <name>`). A profile is
 	// bound to a logical interface's egress by
@@ -162,6 +162,32 @@ type CoSIEEE8021RewriteRuleEntry struct {
 	ForwardingClass string
 	LossPriority    string
 	PCPValue        uint8
+}
+
+// CoSInertRewriteRuleEntry is the validation-only mapping captured for the
+// currently unsupported 3-bit egress rewrite families. It is deliberately not
+// published to the wire; the configured names continue to drive the inert
+// advisory and name-only show output.
+type CoSInertRewriteRuleEntry struct {
+	ForwardingClass string
+	LossPriority    string
+	CodePoint       uint8
+}
+
+// CoSINetPrecedenceRewriteRule holds the inner entries of an inert
+// IP-precedence rewrite rule so commit validation can check the same loss
+// priority and 0..7 code-point contract as the 802.1p sibling.
+type CoSINetPrecedenceRewriteRule struct {
+	Name    string
+	Entries []*CoSInertRewriteRuleEntry
+}
+
+// CoSEXPRewriteRule holds the inner entries of an inert MPLS EXP rewrite rule
+// for strict commit validation. The definition remains Go-only until a
+// dataplane consumer exists.
+type CoSEXPRewriteRule struct {
+	Name    string
+	Entries []*CoSInertRewriteRuleEntry
 }
 
 // CoSScheduler defines the Phase 1 class scheduler knobs.

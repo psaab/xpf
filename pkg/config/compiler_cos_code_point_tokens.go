@@ -205,15 +205,18 @@ func collectCoSDSCPRewriteCodePoint(node *Node) (uint8, bool, error) {
 	return first, found, nil
 }
 
-// collectCoS8021RewriteCodePoint resolves the single 802.1p PCP code point a
-// rewrite-rule loss-priority entry writes (#4228 Gap 4). It mirrors
-// collectCoSDSCPRewriteCodePoint but over the 3-bit PCP domain (0..7, numeric
-// only — 802.1p has no symbolic aliases). Both the `code-point <n>` and the
-// `code-points <n>` alias spellings are read; the first value wins. A numeric
-// token outside 0..7 is REJECTED at commit rather than silently dropped or
-// masked to a different class (matching collectCoS8021CodePoints on the
-// classifier side).
+// collectCoS8021RewriteCodePoint preserves the public family-specific
+// diagnostic while sharing the 3-bit parser with inert inet-precedence and
+// EXP rewrites.
 func collectCoS8021RewriteCodePoint(node *Node) (uint8, bool, error) {
+	return collectCoS3BitRewriteCodePoint(node, "ieee-802.1")
+}
+
+// collectCoS3BitRewriteCodePoint resolves a single numeric rewrite value in the
+// 0..7 domain. Both `code-point` and its `code-points` alias are read; the first
+// value wins, but every token is checked so an invalid later token cannot hide
+// behind a valid first one.
+func collectCoS3BitRewriteCodePoint(node *Node, family string) (uint8, bool, error) {
 	parse := func(raw string) (uint8, bool, error) {
 		raw = strings.TrimSpace(strings.ToLower(raw))
 		if raw == "" {
@@ -221,21 +224,17 @@ func collectCoS8021RewriteCodePoint(node *Node) (uint8, bool, error) {
 		}
 		v, err := strconv.Atoi(raw)
 		if err != nil {
-			// #5194 A3-b2-F12: 802.1p has no symbolic aliases, so a non-numeric
-			// rewrite-rule token is always a typo. Reject it at commit
-			// (warn-and-drop on tolerant load) rather than silently dropping the
-			// rewrite entry, matching the classifier side.
 			return 0, false, newUnknownCodePointTokenError(
-				"class-of-service ieee-802.1 rewrite-rule code-point %q is not a valid 0..7 value", raw)
+				"class-of-service %s rewrite-rule code-point %q is not a valid 0..7 value",
+				family, raw)
 		}
 		if v < 0 || v > 7 {
 			return 0, false, newCodePointRangeError(
-				"class-of-service ieee-802.1 rewrite-rule code-point %d is out of range (must be 0..7)",
-				v)
+				"class-of-service %s rewrite-rule code-point %d is out of range (must be 0..7)",
+				family, v)
 		}
 		return uint8(v), true, nil
 	}
-	// #6697: first resolvable token wins, but every token is still checked.
 	var first uint8
 	found := false
 	for _, leaf := range []string{"code-point", "code-points"} {

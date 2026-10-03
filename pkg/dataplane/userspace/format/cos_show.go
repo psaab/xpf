@@ -594,18 +594,16 @@ func cosUnitMaterializedClasses(cfg *config.Config, cosUnit *config.CoSInterface
 // FormatCoSRewriteRules renders `show class-of-service rewrite-rule [name <n>]
 // [type <t>]` from the compiled config (#6848, #4228 Gap 7 residual).
 //
-// Four rewrite-rule families are modeled, and they do NOT all carry the same
-// depth of data — the renderer must not paper over that:
+// Four rewrite-rule families are rendered, and they do NOT all carry the same
+// externally visible data — the renderer must not paper over that:
 //
-//   - `dscp` and `ieee-802.1` compile to full entry lists
-//     (forwarding-class, loss-priority, code-point), so their code points are
-//     rendered.
-//   - `inet-precedence` and `exp` record only rule NAMES
-//     (ClassOfServiceConfig.INetPrecedenceRewriteRules / EXPRewriteRules,
-//     #4316) — the compiler builds no runtime structure for them because
-//     nothing consumes one. There are no code points to print, and inventing a
-//     table for them would imply a fidelity the config does not have, so they
-//     render as a name + an explicit "code points not modeled" line.
+//   - `dscp` and `ieee-802.1` have runtime consumers, so their code-point rows
+//     are rendered.
+//   - `inet-precedence` and `exp` retain rule names for the advisory and
+//     name-only show surface. The compiler validates their inner entries in
+//     JSON-hidden Go-only definitions (#11811), but no wire/runtime consumer
+//     exists; show continues to render an explicit "code points not modeled"
+//     line rather than imply enforcement.
 //
 // A nil/empty config yields the Junos-style "no rules configured" line rather
 // than an error: an unconfigured rewrite-rule set is a normal state.
