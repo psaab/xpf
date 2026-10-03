@@ -166,20 +166,19 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 			}),
 			children: nil,
 		},
-		// #1614 A3 CoDel AQM target queue delay in milliseconds. The
-		// value is typed so `codel-target banana` is REJECTED at commit
-		// (the compiler otherwise swallows the parse error and drops the
-		// value silently), but the AQM itself is NOT enforced — #1829
-		// Phase 2 was PLAN-KILLED. A commit warning
-		// (compiler_validate_warn.go CoS scheduler loop) surfaces the
-		// inertness when CodelTargetNS>0 (#4218).
+		// #1614 A3 CoDel AQM target queue delay in milliseconds. The bounded
+		// integer prevents the Go compiler's millisecond-to-nanosecond
+		// conversion from wrapping uint64 (#11825). The AQM itself is still
+		// not enforced — #1829 Phase 2 was PLAN-KILLED — so a commit warning
+		// (compiler_validate_warn.go CoS scheduler loop) surfaces inertness
+		// when CodelTargetNS>0 (#4218).
 		"codel-target": {
-			desc:          "CoDel AQM target queue delay in milliseconds (accepted for Junos compatibility; AQM not yet enforced by the userspace dataplane)",
+			desc:          "CoDel AQM target queue delay in milliseconds (0..18446744073709; accepted for Junos compatibility; AQM not yet enforced by the userspace dataplane)",
 			args:          1,
 			valueType:     ValueInteger,
-			valueDesc:     "CoDel target queue delay in milliseconds (non-negative integer; AQM not yet enforced)",
+			valueDesc:     "CoDel target queue delay in milliseconds (0..18446744073709; AQM not yet enforced)",
 			valueExamples: []string{"5", "10"},
-			validator:     ValidateIntegerMin(0),
+			validator:     ValidateInteger(0, MaxCodelTargetMillis),
 			children:      nil,
 		},
 	}},

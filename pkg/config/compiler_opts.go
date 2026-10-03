@@ -337,6 +337,9 @@ type compileOpts struct {
 	// says it is shaped. Distinct from lenientSchedulerMapRef, which governs the
 	// scheduler-map -> scheduler link one level down.
 	lenientCoSInterfaceRefs bool
+	// lenientCodelTarget11825 warns and drops unparseable CoDel targets, and
+	// clamps values above the safe millisecond-to-nanosecond ceiling.
+	lenientCodelTarget11825 bool
 
 	// lenientCoSLossPriority (#3995) downgrades the class-of-service
 	// classifier / rewrite-rule loss-priority value check
@@ -3062,6 +3065,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicySchedulerRef:              true,
 		lenientSchedulerMapRef:                 true,
 		lenientSchedulerWindowPairs11358:       true,
+		lenientCodelTarget11825:                true,
 		lenientCoSInterfaceRefs:                true,
 		lenientCoSLossPriority:                 true,
 		lenientCoSUnitClassifierConflict:       true,
