@@ -12,14 +12,9 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 				ambiguousDefaultPolicy = true
 				continue
 			}
-			var policyStr string
-			if len(child.Keys) >= 2 {
-				// Flat form: default-policy deny-all;
-				policyStr = child.Keys[1]
-			} else if len(child.Children) > 0 {
-				// Hierarchical form: default-policy { deny-all; }
-				policyStr = child.Children[0].Name()
-			}
+			// Keep the flat and hierarchical value extraction shared with the
+			// strict/lenient duplicate-stanza prewalk.
+			policyStr := defaultPolicyAction11821(child)
 			switch policyStr {
 			case "permit-all":
 				sec.DefaultPolicy = PolicyPermit

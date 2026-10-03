@@ -2458,6 +2458,9 @@ type compileOpts struct {
 	// lenientDefaultPolicyBlock11367 warns and keeps tolerant loads bootable;
 	// the compiler forces the ambiguous no-match policy to deny.
 	lenientDefaultPolicyBlock11367 bool
+	// lenientDefaultPolicyConflict11821 warns on conflicting duplicate
+	// default-policy stanzas; the post-dispatch compiler forces deny-all.
+	lenientDefaultPolicyConflict11821 bool
 	// lenientPolicyThenSiblings (#11013/#11023) downgrades unsupported
 	// security-policy `then` siblings and unknown `then log` modes to warnings
 	// on tolerant ingress. The compiler drops both forms, so compilePolicy
@@ -3239,6 +3242,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyThenDeny:                  true,
 		lenientPolicyThenCountAlarm:            true,
 		lenientDefaultPolicyBlock11367:         true,
+		lenientDefaultPolicyConflict11821:      true,
 		lenientPolicyThenSiblings:              true,
 		lenientPolicyEnforcementSubtrees:       true,
 		lenientPolicyMissingMatch:              true,

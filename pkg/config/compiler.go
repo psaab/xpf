@@ -1020,10 +1020,13 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	if err := compileSections(tree, cfg, opts); err != nil {
 		return nil, err
 	}
-	// #11367: compilePolicies handles an ambiguous block in its own policies
-	// stanza, but repeated security roots compile in author order. Ensure no
-	// later valid default-policy can override the fail-closed tolerant result.
-	if opts.lenientDefaultPolicyBlock11367 && hasAmbiguousDefaultPolicyBlock11367(tree.Children) {
+	// #11367 rejects an ambiguous choice block; #11821 rejects conflicting
+	// duplicate actions. Both tolerant paths must stay fail-closed after
+	// author-ordered security roots have compiled.
+	if (opts.lenientDefaultPolicyBlock11367 &&
+		hasAmbiguousDefaultPolicyBlock11367(tree.Children)) ||
+		(opts.lenientDefaultPolicyConflict11821 &&
+			hasConflictingDefaultPolicyStanzas11821(tree.Children)) {
 		cfg.Security.DefaultPolicy = PolicyDeny
 	}
 
