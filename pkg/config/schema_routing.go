@@ -365,9 +365,16 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 				// `md5` / `simple-password`), so an unmatched keyword here does
 				// not misconfigure authentication — it removes it, silently.
 				"authentication": {desc: "Authentication", closedWorld: true, children: map[string]*schemaNode{
-					"md5": {desc: "MD5 authentication", args: 1, placeholder: "<key-id>", children: map[string]*schemaNode{
-						"key": {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
-					}},
+					// #11794: the key-id is an identity argument consumed by FRR's
+					// `ip ospf message-digest-key <id>` command, not an untyped
+					// display token. 0, negatives, garbage, and >255 make the
+					// configured adjacency use a fabricated or FRR-invalid ID.
+					"md5": {desc: "MD5 authentication", args: 1, placeholder: "<key-id>",
+						keyValueType: ValueInteger, keyValueDesc: "OSPF MD5 key-id (1..255)",
+						keyValueExamples: []string{"1", "7", "255"},
+						keyValidator:     ValidateInteger(1, 255), children: map[string]*schemaNode{
+							"key": {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
+						}},
 					"simple-password": {desc: "Simple password", args: 1, placeholder: "<password>", children: nil},
 				}},
 				"bfd-liveness-detection": {desc: "BFD liveness detection", children: map[string]*schemaNode{

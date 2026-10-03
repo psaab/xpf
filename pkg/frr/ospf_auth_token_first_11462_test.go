@@ -14,6 +14,7 @@ func TestOSPFAuthTokenFirst11462(t *testing.T) {
 		name      string
 		authType  string
 		key       config.Secret
+		keyID     int
 		modeLine  string
 		keyPrefix string
 		keyLine   string
@@ -21,13 +22,13 @@ func TestOSPFAuthTokenFirst11462(t *testing.T) {
 	}{
 		{
 			name:     "md5 whitespace key",
-			authType: "md5", key: " \t ",
+			authType: "md5", key: " \t ", keyID: 1,
 			modeLine:  " ip ospf authentication message-digest\n",
 			keyPrefix: " ip ospf message-digest-key ", wantWarn: true,
 		},
 		{
 			name:     "md5 valid key",
-			authType: "md5", key: "s3cret",
+			authType: "md5", key: "s3cret", keyID: 1,
 			modeLine:  " ip ospf authentication message-digest\n",
 			keyPrefix: " ip ospf message-digest-key ",
 			keyLine:   " ip ospf message-digest-key 1 md5 s3cret\n",
@@ -55,7 +56,7 @@ func TestOSPFAuthTokenFirst11462(t *testing.T) {
 			ospf := &config.OSPFConfig{RouterID: "1.1.1.1", Areas: []*config.OSPFArea{{
 				ID: "0.0.0.0",
 				Interfaces: []*config.OSPFInterface{{
-					Name: "eth0", AuthType: tc.authType, AuthKey: tc.key,
+					Name: "eth0", AuthType: tc.authType, AuthKey: tc.key, AuthKeyID: tc.keyID,
 				}},
 			}}}
 			m := New()

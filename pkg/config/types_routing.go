@@ -554,7 +554,7 @@ type OSPFInterface struct {
 	NetworkType   string // "point-to-point", "broadcast", "" (default)
 	AuthType      string // "md5", "simple", "" (none)
 	AuthKey       Secret // authentication key/password; redacted on marshal (#2053)
-	AuthKeyID     int    // key-id for MD5 (1-255)
+	AuthKeyID     int    // key-id for MD5 (1-255); 0 means unset/invalid, never defaulted
 	BFD           bool   // enable BFD on this interface
 	BFDInterval   int    // BFD minimum-interval in ms (0 = default)
 	BFDMultiplier int    // BFD detect-multiplier (0 = default)
