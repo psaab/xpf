@@ -27,6 +27,9 @@ func TestFactoryResetFencesRescueSaves_10769(t *testing.T) {
 		if err != nil {
 			t.Fatalf("configstore.New: %v", err)
 		}
+		if _, err := store.SyncApply("system { host-name rescue-fence; }", nil); err != nil {
+			t.Fatalf("SyncApply rescue fixture: %v", err)
+		}
 		if err := store.SaveRescueConfig(); err != nil {
 			t.Fatalf("initial rescue save: %v", err)
 		}
@@ -82,6 +85,9 @@ func TestFactoryResetFencesRescueSaves_10769(t *testing.T) {
 		store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
 		if err != nil {
 			t.Fatalf("configstore.New: %v", err)
+		}
+		if _, err := store.SyncApply("system { host-name rescue-fence; }", nil); err != nil {
+			t.Fatalf("SyncApply rescue fixture: %v", err)
 		}
 		d := &Daemon{applySem: semaphore.NewWeighted(1), store: store}
 		wipeErr := errors.New("wipe failed")

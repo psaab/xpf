@@ -33,6 +33,9 @@ func TestDeleteRescueConfigDirSynced(t *testing.T) {
 	}
 
 	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
+	if _, err := s.SyncApply("system { host-name rescue-delete; }", nil); err != nil {
+		t.Fatalf("SyncApply rescue fixture: %v", err)
+	}
 	// Materialize a real rescue.conf through the production save path.
 	if err := s.SaveRescueConfig(); err != nil {
 		t.Fatalf("SaveRescueConfig: %v", err)
