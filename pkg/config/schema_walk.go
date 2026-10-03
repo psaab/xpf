@@ -114,12 +114,10 @@ func SchemaValidateWithDefinitions(tree, defsSource *ConfigTree, cfg *Config) er
 	// stored configuration as a side effect of validating it.
 	tree = normalizeCompactForValidation(tree)
 	// #4060: reject the raw-AST redaction placeholder ("##SECRET-DATA##") on
-	// commit-ingest. This is the symmetric guard for the #4051 display
-	// redaction — re-applying a secret-redacted REST export must not silently
-	// commit the placeholder as a literal secret (breaking IPsec/auth with a
-	// nonsense key). Strict on the operator commit path (fails the commit),
-	// downgraded to a warning on the tolerant Load / SyncApply path
-	// (compileTreeLenient), the same doctrine as the typed-leaf gate below.
+	// commit-ingest. This is the symmetric guard for #4051 display redaction:
+	// the value is a display artifact, never a valid configured secret.
+	// compileTreeLenient preserves this placeholder-specific error while other
+	// legacy typed-leaf violations continue to follow the tolerant policy.
 	if err := checkRedactionPlaceholder(tree); err != nil {
 		return err
 	}

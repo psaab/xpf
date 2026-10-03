@@ -1,6 +1,7 @@
 package configstore
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,6 +28,13 @@ import (
 // redaction: the ascii-text qualifier is kept, the key material is the masked
 // placeholder (quoted by FormatSet because '#' is a non-identifier char).
 const redactedPSKLine = `security ike policy pol1 pre-shared-key ascii-text "` + config.SecretDataPlaceholder + `"`
+const redactedPSKConfigText = `security {
+    ike {
+        policy pol1 {
+            pre-shared-key ascii-text "` + config.SecretDataPlaceholder + `";
+        }
+    }
+}`
 
 // TestCommitCheck_RejectsRedactionPlaceholder is the strict-path e2e: an
 // operator committing a re-applied redacted export is rejected at both
@@ -58,19 +66,40 @@ func TestCommitCheck_RejectsRedactionPlaceholder(t *testing.T) {
 // the CheckText gate (the #1879 `xpfd check-config` day-0 path), which parses
 // full config text — the shape a REST `load`/`import` of an exported file takes.
 func TestCheckText_RejectsRedactionPlaceholder(t *testing.T) {
-	redactedText := `security {
-    ike {
-        policy pol1 {
-            pre-shared-key ascii-text "` + config.SecretDataPlaceholder + `";
-        }
-    }
-}`
-	_, err := CheckText(redactedText, -1)
+	_, err := CheckText(redactedPSKConfigText, -1)
 	if err == nil {
 		t.Fatal("expected CheckText to reject the ##SECRET-DATA## placeholder, got nil")
 	}
 	if !strings.Contains(err.Error(), config.SecretDataPlaceholder) {
 		t.Fatalf("CheckText error should name the redaction placeholder: %v", err)
+	}
+}
+
+// SyncApply must not promote a redacted export as a live secret. The old
+// active config remains installed when the placeholder-specific error rejects
+// the peer-synced tree.
+func TestSyncApply_RejectsRedactionPlaceholder(t *testing.T) {
+	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
+	if _, err := s.SyncApply("system { host-name before-placeholder; }", nil); err != nil {
+		t.Fatalf("SyncApply baseline config: %v", err)
+	}
+
+	compiled, err := s.SyncApply(redactedPSKConfigText, nil)
+	if err == nil {
+		t.Fatal("SyncApply promoted the redaction placeholder as a live secret")
+	}
+	if !config.IsRedactionPlaceholderIngestError(err) {
+		t.Fatalf("SyncApply error = %v, want the placeholder-specific ingest rejection", err)
+	}
+	if !strings.Contains(err.Error(), config.SecretDataPlaceholder) ||
+		!strings.Contains(err.Error(), "pre-shared-key") {
+		t.Fatalf("SyncApply error = %v, want placeholder and offending path", err)
+	}
+	if compiled != nil {
+		t.Fatal("SyncApply returned a compiled config for a rejected placeholder")
+	}
+	if active := s.ActiveConfig(); active == nil || active.System.HostName != "before-placeholder" {
+		t.Fatalf("rejected peer config replaced the active config: %#v", active)
 	}
 }
 
@@ -92,34 +121,30 @@ func TestCommitCheck_AcceptsRealSecret(t *testing.T) {
 	}
 }
 
-// TestLoad_ToleratesStoredRedactionPlaceholder is the boot-safety half: a
-// placeholder that somehow reached persisted state must WARN-boot (lenient
-// path), not blackout the daemon — the same strict/lenient doctrine as the
-// #1319 typed-leaf gate. RedactedClone is display-only so this should never
-// happen in practice, but the tolerant path stays fail-open on ingest of a
-// config the operator did not just author; the next strict commit rejects it.
-func TestLoad_ToleratesStoredRedactionPlaceholder(t *testing.T) {
+// TestLoad_RejectsStoredRedactionPlaceholder is the tolerant-ingress exception
+// for the display-only sentinel. Unlike a legacy typed-leaf violation, a
+// redaction placeholder can never be a valid stored secret and must fail closed.
+func TestLoad_RejectsStoredRedactionPlaceholder(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config")
 	writeStoredConfig(t, cfgPath,
 		`set security ike policy pol1 pre-shared-key ascii-text "`+config.SecretDataPlaceholder+`"`)
 
 	s := newTestStoreAt(t, cfgPath)
-	if err := s.Load(); err != nil {
-		t.Fatalf("Load() must tolerate a stored placeholder (warn, not blackout), got: %v", err)
-	}
-	if s.ActiveConfig() == nil {
-		t.Fatal("ActiveConfig() is nil after tolerated Load")
-	}
-
-	// The next STRICT operator commit must still reject it.
-	if err := s.EnterConfigure(); err != nil {
-		t.Fatalf("EnterConfigure: %v", err)
-	}
-	_, err := s.CommitCheck()
+	err := s.Load()
 	if err == nil {
-		t.Fatal("CommitCheck must stay strict after a tolerated Load, got nil")
+		t.Fatal("Load() installed the redaction placeholder as a live secret")
 	}
-	if !strings.Contains(err.Error(), config.SecretDataPlaceholder) {
-		t.Fatalf("CommitCheck error should name the redaction placeholder: %v", err)
+	if !config.IsRedactionPlaceholderIngestError(err) {
+		t.Fatalf("Load() error = %v, want the placeholder-specific ingest rejection", err)
+	}
+	if !errors.Is(err, ErrConfigCompile) {
+		t.Fatalf("Load() error = %v, want an ErrConfigCompile fail-closed error", err)
+	}
+	if !strings.Contains(err.Error(), config.SecretDataPlaceholder) ||
+		!strings.Contains(err.Error(), "pre-shared-key") {
+		t.Fatalf("Load() error = %v, want placeholder and offending path", err)
+	}
+	if active := s.ActiveConfig(); active != nil {
+		t.Fatalf("Load() installed a compiled config containing the placeholder: %#v", active)
 	}
 }
