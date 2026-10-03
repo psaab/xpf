@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -256,19 +258,39 @@ func TestColdBootLo0FenceCatastrophicFailureSurfaced(t *testing.T) {
 }
 
 // TestColdBootLo0ZeroDropFenceLeavesEnforcedFalse proves that a cold-boot
-// fence rendered from a snapshot with NO firewall-local addresses is a zero-drop
-// shell and leaves lo0Enforced false, so a later failed real invocation
-// re-fences from a possibly-now-addressed snapshot.
+// fence rendered from a snapshot with no local addresses is a zero-drop shell
+// for lo0, even when an addressless host-inbound ingress makes the host-inbound
+// enforcement predicate true. It also leaves lo0Enforced false, so a later
+// failed real invocation re-fences from a possibly-now-addressed snapshot.
 func TestColdBootLo0ZeroDropFenceLeavesEnforcedFalse(t *testing.T) {
-	// An lo0 filter bound but NO firewall-local addresses (no zoned/unzoned
-	// interfaces), so the fence scopes nothing.
-	cfg := &config.Config{}
+	// The host-inbound catalog fence has an addressless ingress scope, but the lo0
+	// fence emits only destination-address drops and therefore remains zero-drop.
+	cfg := hostInboundTestConfig()
+	for _, iface := range cfg.Interfaces.Interfaces {
+		for _, unit := range iface.Units {
+			unit.Addresses = nil
+		}
+	}
 	cfg.System.Lo0FilterInputV4 = "protect-re"
 	cfg.Firewall.FiltersInet = map[string]*config.FirewallFilter{
 		"protect-re": {Name: "protect-re", Terms: []*config.FirewallFilterTerm{
 			{Name: "deny-rest", Action: "discard"},
 		}},
 	}
+	views := dpuserspace.BuildZoneHostInboundViews(cfg)
+	if !hostInboundHasEnforceableView(views) {
+		t.Fatal("precondition: addressless ingress must be enforceable for host-inbound")
+	}
+	for _, view := range views {
+		if len(view.V4Addrs) > 0 || len(view.V6Addrs) > 0 {
+			t.Fatalf("precondition: lo0 snapshot has no firewall-local addresses: %+v", view)
+		}
+	}
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
 	injected := errors.New("nftables: lo0 zero-drop cold boot")
 	var fenceCalls int
@@ -297,6 +319,13 @@ func TestColdBootLo0ZeroDropFenceLeavesEnforcedFalse(t *testing.T) {
 	}
 	if d.lo0Enforced.Load() {
 		t.Error("zero-drop fence must leave lo0Enforced false (re-fence on next failure)")
+	}
+	logged := logs.String()
+	if !strings.Contains(logged, "installed a zero-drop fence shell") {
+		t.Fatalf("addressless ingress must be reported as a zero-drop lo0 fence:\n%s", logged)
+	}
+	if strings.Contains(logged, "installed an address-scoped fail-closed fence") {
+		t.Fatalf("lo0 must not report an address-scoped fence without local addresses:\n%s", logged)
 	}
 }
 

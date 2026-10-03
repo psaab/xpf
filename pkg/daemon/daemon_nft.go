@@ -413,7 +413,13 @@ func lo0RenderedRuleCount(cfg *config.Config, filterV4, filterV6 string) int {
 // result; the daemon has done all it can.
 func (d *Daemon) installLo0ColdBootFence(sets dpuserspace.FenceAddrSets, wgZonePorts map[string][]uint16) error {
 	views, unzonedV4, unzonedV6 := sets.Views, sets.UnzonedV4, sets.UnzonedV6
-	fenceHasScopedDrop := hostInboundHasEnforceableView(views) || len(unzonedV4) > 0 || len(unzonedV6) > 0
+	fenceHasScopedDrop := len(unzonedV4) > 0 || len(unzonedV6) > 0
+	for _, view := range views {
+		if len(view.V4Addrs) > 0 || len(view.V6Addrs) > 0 {
+			fenceHasScopedDrop = true
+			break
+		}
+	}
 	logFenceWithheld(xnft.Lo0TableName, sets)
 	spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGZonePorts: wgZonePorts}
 	if err := nftInstaller.InstallLo0ColdBootFence(spec); err != nil {
