@@ -30,10 +30,11 @@ import "time"
 // #5789 gap fence for the difference. Rendering it as the first row is the
 // confidently-wrong answer #5719 refused to ship on the counter side.
 type HostInboundAppliedState struct {
-	// Established mirrors hostInboundEnforced: a real load or an
-	// address-scoped fallback has published a DROP at some generation. FALSE
-	// is the cold-boot / torn-down case — nothing has ever protected, so a
-	// projection must NOT report a configured default-deny as being in force.
+	// Established mirrors hostInboundEnforced: a real load or scoped fallback
+	// (a local-address or catalog-multicast ingress drop) has established some
+	// host-inbound protection at a generation. FALSE is the cold-boot /
+	// torn-down case — nothing has ever protected, so a projection must NOT
+	// report configured default-deny as being in force.
 	Established bool
 
 	// Generation counts SUCCESSFUL real installs. Zero means none has ever

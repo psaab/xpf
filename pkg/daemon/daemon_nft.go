@@ -646,7 +646,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			// Teardown FAILED: a stale xpf_hostinbound table may still be installed
 			// in the kernel. Surface the failure (fail closed) and — critically — do
 			// NOT clear hostInboundEnforced: the flag's meaning ("a real load or
-			// address-scoped fallback established a protecting table") may still hold
+			// a scoped fallback established host-inbound coverage") may still hold
 			// for the table this delete could not remove, so a later failed install
 			// must keep retaining it rather than fencing over a live table (#5790).
 			err = tagNftInstallErr(err)
@@ -797,15 +797,15 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		// reachable with NO host-inbound default-deny (fail-open), and the boot
 		// apply only logs+discards this error (applyConfig), so the daemon proceeds
 		// to publish host service / VIP / HA-ready over an unenforced input path.
-		// A false hostInboundEnforced means no successful real load or fallback with
-		// an address-scoped DROP has been published; it can coexist with a loaded
-		// zero-drop table shell. Gate the fallback on that historical state and
-		// render it from this invocation's exact address snapshot. When that snapshot
-		// has destinations, the fallback denies every non-lifeline firewall-local
-		// address while admitting only mandatory L3 / return traffic. The requested
-		// real apply still fails (we return its error). Another opportunity requires
-		// a later failed real invocation that reaches this function while state is
-		// still false.
+		// A false hostInboundEnforced means no successful real load or scoped
+		// cold-boot fallback (local-address or ingress-scoped multicast deny)
+		// has been published; it can coexist with an installed but zero-scope shell.
+		// Gate the fallback on that historical state and render it from this
+		// invocation's exact address snapshot. When it has destinations, the
+		// fallback denies every non-lifeline firewall-local address while admitting
+		// only mandatory L3 / return traffic. The requested real apply still fails
+		// (we return its error). Another opportunity requires a later failed real
+		// invocation reaching this function while state is still false.
 		// #10751 R6-A: record whether THIS apply installed the cold-boot
 		// fence: its coverage (lifeline-shared withheld) is the correct
 		// handoff baseline, not the larger real desired scope.
@@ -891,10 +891,10 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		}
 		var barrierHandoffErr error
 		if d.hostInboundEnforced.Load() {
-			// The real table or an address-scoped cold-boot/gap fence now
-			// protects the current address snapshot. A zero-drop fallback
-			// deliberately leaves the early barrier installed until a later
-			// successful install or no-enforcement teardown.
+			// The real table or a successful cold-boot/gap fence has established
+			// some host-inbound scope. A multicast-only cold-boot fence does not
+			// necessarily cover a pending local address, so the coverage and
+			// pending-intent checks below still decide whether to remove the barrier.
 			// B1: pre-handoff, a failed lo0 in this apply also retains the
 			// barrier — the fence covers only the host-inbound scope.
 			// #10751 R6-A/R7-C: handoff re-sample against the ACTUALLY
@@ -1178,19 +1178,20 @@ func (d *Daemon) installHostInboundGapFence(spec xnft.GapFenceSpec) error {
 // "Lifeline exclusion is by address VALUE, in the fence and the real table". It carries no named counters (a fence is
 // transient) so
 // it has fewer moving parts than the real payload and is more likely to load when
-// the real one hit a payload-specific nft error. After successful nft completion,
-// hostInboundEnforced is set true only when this exact payload contains an
-// address-scoped DROP. A successful zero-drop shell leaves false so a later
+// the real one hit a payload-specific nft error.
+// After successful nft completion, hostInboundEnforced is set true whenever
+// the fence contains a scoped drop: local-address, ingress-multicast-catalog, or
+// unleased-family ingress. A successful zero-scope shell leaves false so a later
 // failed real invocation reaching this function can try again with its snapshot.
 // On failure (nft itself is broken) the error is returned and joined into the
 // commit result; the caller logs it and the daemon has done all it can short of
 // holding forwarding.
 //
-// On a successful address-scoped fence the whole-table fence IS the retained
-// enforcement, so ITS OWN drop set — derived from sets, not from the real
-// ruleset's desiredDrop, which #6492 made a different set in both directions —
-// becomes hostInboundCoveredAddrs, letting a later failed rerender detect a
-// subsequently-appeared uncovered address.
+// On a successful fence, the whole-table fence IS the retained enforcement.
+// Its address-local drop set — derived from sets, not from the real ruleset's
+// desiredDrop, which #6492 made a different set in both directions — becomes
+// hostInboundCoveredAddrs. That map tracks unicast-address coverage only;
+// catalog-multicast drops are tracked by the retained ruleset itself.
 func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets, wgListenPorts []uint16, wgZonePorts map[string][]uint16) error {
 	views, unzonedV4, unzonedV6 := sets.Views, sets.UnzonedV4, sets.UnzonedV6
 	fenceHasScopedDrop := hostInboundHasIngressScope(views, sets.UnzonedIngressNetdevs, sets.UnzonedIngressVRFSlaves) ||

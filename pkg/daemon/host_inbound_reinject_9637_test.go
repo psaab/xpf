@@ -81,11 +81,21 @@ func TestHostInboundReinjectAcceptShape9637(t *testing.T) {
 				if s == "ct state established,related accept" {
 					residualIdx = i
 				}
-				// Program jumps also carry iifname but no daddr; stale-reply
-				// guards carry iifname+daddr but are ct-direction-reply drops
-				// before the reply accept. The first ingress-zone rule is the
-				// first iifname+daddr line that is neither.
-				if firstIngressIdx < 0 && strings.HasPrefix(s, "iifname ") && strings.Contains(l, "daddr") && !strings.Contains(l, `"xpf-usp0"`) && !strings.Contains(l, "ct direction reply") {
+				// #11571 catalog multicast group guards are a separate tuple gate,
+				// not the first ingress-zone service/address rule measured here.
+				isCatalogGroupGuard := false
+				for _, family := range []string{"ip", "ip6"} {
+					for _, group := range config.HostInboundMulticastGroupsForFamily(family) {
+						if nftLineHasExactAddress(l, group) {
+							isCatalogGroupGuard = true
+							break
+						}
+					}
+					if isCatalogGroupGuard {
+						break
+					}
+				}
+				if firstIngressIdx < 0 && strings.HasPrefix(s, "iifname ") && strings.Contains(l, "daddr") && !strings.Contains(l, `"xpf-usp0"`) && !strings.Contains(l, "ct direction reply") && !isCatalogGroupGuard {
 					firstIngressIdx = i
 				}
 			}

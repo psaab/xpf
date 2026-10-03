@@ -241,13 +241,12 @@ func TestColdBootFenceCatastrophicFailureSurfaced(t *testing.T) {
 	}
 }
 
-// TestColdBootZeroDropFenceRetriesAfterAddressAppears5759 proves that a
-// program-only fallback with no address-scoped DROP leaves the historical gate
-// false, allowing a later failed real invocation to fence an address visible in
-// that invocation's snapshot. The DHCP assertion proves classification only;
-// this test invokes applyHostInboundFilter directly and does not cover the
-// callback-to-applyTailReconciles path.
-func TestColdBootZeroDropFenceRetriesAfterAddressAppears5759(t *testing.T) {
+// TestColdBootCatalogFenceAddsAddressGap5759 proves that an addressless ingress
+// already has a catalog-multicast default-deny fence; when a DHCP address later
+// appears, a separate additive gap fence covers that newly visible unicast
+// destination without replacing the retained multicast fence. The DHCP assertion
+// proves classification only; this invokes applyHostInboundFilter directly.
+func TestColdBootCatalogFenceAddsAddressGap5759(t *testing.T) {
 	unit := &config.InterfaceUnit{Number: 0, DHCP: true}
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
@@ -305,7 +304,7 @@ func TestColdBootZeroDropFenceRetriesAfterAddressAppears5759(t *testing.T) {
 			t.Fatalf("D = %t, want %t solely from V", gotD, wantV)
 		}
 	}
-	assertProjection(false)
+	assertProjection(true)
 	if d.hostInboundEnforced.Load() {
 		t.Fatal("precondition: hostInboundEnforced must start false")
 	}
@@ -313,6 +312,7 @@ func TestColdBootZeroDropFenceRetriesAfterAddressAppears5759(t *testing.T) {
 	injected := errors.New("nftables: issue 5759 real load failure")
 	var realSpecs []xnft.HostInboundSpec
 	var fenceSpecs []xnft.FenceSpec
+	var gapSpecs []xnft.GapFenceSpec
 	orig := nftInstaller
 	nftInstaller = &fakeNftInstaller{
 		hostInbound: func(spec xnft.HostInboundSpec) error {
@@ -321,34 +321,44 @@ func TestColdBootZeroDropFenceRetriesAfterAddressAppears5759(t *testing.T) {
 		},
 		coldBootFence: func(spec xnft.FenceSpec) error {
 			fenceSpecs = append(fenceSpecs, spec)
-			return nil // the fence loads
+			return nil // the multicast fence loads
+		},
+		gapFence: func(spec xnft.GapFenceSpec) error {
+			gapSpecs = append(gapSpecs, spec)
+			return nil
 		},
 	}
 	defer func() { nftInstaller = orig }()
 
-	// --- Apply 1: addressless (program-only) — the fence is ZERO-DROP. ---
+	// --- Apply 1: addressless ingress — the fence denies catalog multicast. ---
 	err := d.applyHostInboundFilter(cfg)
 	if !errors.Is(err, injected) {
 		t.Fatalf("initial apply error = %v, want wrapped sentinel", err)
 	}
-	if d.hostInboundEnforced.Load() {
-		t.Fatal("zero-drop fallback must leave state false")
+	if !d.hostInboundEnforced.Load() {
+		t.Fatal("addressless multicast fallback must establish scoped enforcement")
 	}
-	if len(realSpecs) != 1 || len(fenceSpecs) != 1 {
-		t.Fatalf("apply 1 call counts: real=%d fence=%d, want 1/1", len(realSpecs), len(fenceSpecs))
+	if len(realSpecs) != 1 || len(fenceSpecs) != 1 || len(gapSpecs) != 0 {
+		t.Fatalf("apply 1 call counts: real=%d fence=%d gap=%d, want 1/1/0", len(realSpecs), len(fenceSpecs), len(gapSpecs))
 	}
 	// The real spec carries the junos-host iifname DENY for 10.0.0.5/32.
 	if !hostInboundProgramHasSrc(realSpecs[0], "xpf5759wan", "10.0.0.5/32") {
 		t.Fatalf("initial real spec missing the junos-host iifname deny for 10.0.0.5/32:\n%+v", realSpecs[0])
 	}
-	// The fallback fence is ZERO-DROP: no address-scoped drop in either family (a
-	// FenceSpec structurally carries no iifname/program scope, so a junos-host-only
-	// generation fences nothing).
 	if len(fenceViewAddrs(fenceSpecs[0], false)) != 0 || len(fenceViewAddrs(fenceSpecs[0], true)) != 0 {
-		t.Fatalf("initial fallback must be a zero-drop fence:\n%+v", fenceSpecs[0])
+		t.Fatalf("initial fallback must have no address-scoped drop:\n%+v", fenceSpecs[0])
+	}
+	if len(fenceSpecs[0].Views) != 1 || !sliceContains(fenceSpecs[0].Views[0].IngressNetdevs, "xpf5759wan") {
+		t.Fatalf("addressless catalog fence lost the zone's ingress scope: %+v", fenceSpecs[0].Views)
+	}
+	payload := buildHostInboundFencePayload(dpuserspace.BuildZoneHostInboundViews(cfg), nil, nil, nil, nil, nil, nil)
+	wantMulticastDrop := `iifname "xpf5759wan" ip daddr ` + nftAddrSet(config.HostInboundMulticastGroupsForFamily("ip")) + " drop"
+	if !strings.Contains(payload, wantMulticastDrop) {
+		t.Fatalf("addressless fallback must deny catalog multicast on its ingress:\n%s", payload)
 	}
 
-	// --- Apply 2: an address appears — the fence becomes ADDRESS-SCOPED. ---
+	// --- Apply 2: an address appears — the multicast fence stays; a gap fence
+	// covers the new v4 local destination without replacing the retained table. ---
 	unit.Addresses = []string{"198.51.100.57/24"}
 	assertProjection(true)
 	err = d.applyHostInboundFilter(cfg)
@@ -356,10 +366,10 @@ func TestColdBootZeroDropFenceRetriesAfterAddressAppears5759(t *testing.T) {
 		t.Fatalf("addressed apply error = %v, want wrapped sentinel", err)
 	}
 	if !d.hostInboundEnforced.Load() {
-		t.Fatal("address-scoped fallback must publish state true")
+		t.Fatal("address-gap fallback must preserve established enforcement")
 	}
-	if len(realSpecs) != 2 || len(fenceSpecs) != 2 {
-		t.Fatalf("apply 2 call counts: real=%d fence=%d, want 2/2", len(realSpecs), len(fenceSpecs))
+	if len(realSpecs) != 2 || len(fenceSpecs) != 1 || len(gapSpecs) != 1 {
+		t.Fatalf("apply 2 call counts: real=%d fence=%d gap=%d, want 2/1/1", len(realSpecs), len(fenceSpecs), len(gapSpecs))
 	}
 	// The addressed real spec still carries the program AND the appeared destination.
 	if !hostInboundProgramHasSrc(realSpecs[1], "xpf5759wan", "10.0.0.5/32") {
@@ -368,12 +378,12 @@ func TestColdBootZeroDropFenceRetriesAfterAddressAppears5759(t *testing.T) {
 	if !sliceContains(hostInboundViewAddrs(realSpecs[1], false), "198.51.100.57") {
 		t.Fatalf("addressed real spec missing the appeared destination 198.51.100.57:\n%+v", realSpecs[1])
 	}
-	// The address-scoped fence fences EXACTLY the appeared v4 address, nothing v6.
-	if got := fenceViewAddrs(fenceSpecs[1], false); len(got) != 1 || got[0] != "198.51.100.57" {
-		t.Fatalf("addressed fallback must fence exactly [198.51.100.57], got %v:\n%+v", got, fenceSpecs[1])
+	// The additive gap fences EXACTLY the appeared v4 address, nothing v6.
+	if !sliceContains(gapSpecs[0].UncoveredV4, "198.51.100.57") {
+		t.Fatalf("address-gap fallback must include 198.51.100.57, got %+v", gapSpecs[0])
 	}
-	if len(fenceViewAddrs(fenceSpecs[1], true)) != 0 {
-		t.Fatalf("addressed fallback must not fence a v6 address:\n%+v", fenceSpecs[1])
+	if len(gapSpecs[0].UncoveredV6) != 0 {
+		t.Fatalf("address-gap fallback must not fence a v6 address:\n%+v", gapSpecs[0])
 	}
 }
 

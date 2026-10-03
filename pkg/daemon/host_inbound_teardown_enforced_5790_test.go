@@ -107,7 +107,7 @@ func TestHostInboundTeardownClearsEnforcedThenFailedReinstallFences_5790(t *test
 	if !sliceContains(fenceViewAddrs(fenceSpec, true), "2001:db8:50::8") {
 		t.Errorf("step 3 fence must fence the enforced wan v6 address 2001:db8:50::8:\n%+v", fenceSpec)
 	}
-	// The fence established enforcement (address-scoped DROP) -> flag true again.
+	// The address-scoped fallback fence established enforcement.
 	if !d.hostInboundEnforced.Load() {
 		t.Error("step 3: hostInboundEnforced must be true after the address-scoped fence installs")
 	}
