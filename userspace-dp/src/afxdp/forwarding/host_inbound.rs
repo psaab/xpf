@@ -528,9 +528,11 @@ fn classify_protocol(token: &str, hi: &mut ZoneHostInbound) {
         // config.HostInboundProtocolFamily).
         "ospf" => {
             hi.ip_protocols_v4.insert(89);
+            hi.mcast_ospf = true;
         }
         "ospf3" => {
             hi.ip_protocols_v6.insert(89);
+            hi.mcast_ospf3 = true;
         }
         "bgp" => {
             hi.tcp_ports.insert(179);
@@ -538,9 +540,11 @@ fn classify_protocol(token: &str, hi: &mut ZoneHostInbound) {
         // #3225: RIPv2 is IPv4-only, RIPng is IPv6-only.
         "rip" => {
             hi.udp_ports_v4.insert(520);
+            hi.mcast_rip = true;
         }
         "ripng" => {
             hi.udp_ports_v6.insert(521);
+            hi.mcast_ripng = true;
         }
         // #3225/#10859: IGMP is IPv4 group membership; the IPv6 equivalent is
         // MLD over ICMPv6 (types 130-132 and 143), none of which are in the
@@ -550,12 +554,15 @@ fn classify_protocol(token: &str, hi: &mut ZoneHostInbound) {
         // host-inbound exception, so igmp stays IPv4-only here.
         "igmp" => {
             hi.ip_protocols_v4.insert(2);
+            hi.mcast_igmp = true;
         }
         "pim" => {
             hi.ip_protocols.insert(103);
+            hi.mcast_pim = true;
         }
         "vrrp" => {
             hi.ip_protocols.insert(112);
+            hi.mcast_vrrp = true;
         }
         // #3299: BFD admits single-hop control (3784) + echo (3785) AND
         // multi-hop control (4784, RFC 5883). Multi-hop is control-only; echo
@@ -594,6 +601,7 @@ fn classify_protocol(token: &str, hi: &mut ZoneHostInbound) {
         // ["dvmrp"]="ip"), so it admits proto 2 on v4 only — matching igmp.
         "dvmrp" => {
             hi.ip_protocols_v4.insert(2);
+            hi.mcast_dvmrp = true;
         }
         // #3311: IS-IS rides OSI/CLNP directly over L2 (LLC-encapsulated, NOT
         // IP), so it cannot be expressed in this IP-keyed admit model (proto
@@ -617,6 +625,7 @@ fn classify_protocol(token: &str, hi: &mut ZoneHostInbound) {
         "router-discovery" => {
             hi.icmp_types_v4.insert(ICMP4_ROUTER_ADVERTISEMENT);
             hi.icmp_types_v4.insert(ICMP4_ROUTER_SOLICITATION);
+            hi.mcast_router_discovery = true;
         }
         // Unknown / unmapped protocol token: ignore (fail-closed).
         _ => {}
@@ -805,6 +814,63 @@ pub(in crate::afxdp) fn host_inbound_admits(
         // (empty set) — denies anything its set does not admit (#3405).
         Some(hi) => hi.admits(protocol, dst_port, is_v6, icmp_type),
     }
+}
+
+/// Destination-aware admission used by real packet paths. Catalog group
+/// destinations are fail-closed even when the ingress zone is unknown; every
+/// non-catalog destination preserves `host_inbound_admits`' existing unknown
+/// zone behavior and service/protocol semantics.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn host_inbound_admits_for_destination(
+    state: &ForwardingState,
+    ingress_zone_id: u16,
+    protocol: u8,
+    dst_port: u16,
+    is_v6: bool,
+    icmp_type: u8,
+    dst_ip: IpAddr,
+) -> bool {
+    // Preserve the global ND and error/PMTUD exceptions before the zone gate.
+    if is_icmp_host_inbound_global_accept(protocol, is_v6, icmp_type) {
+        return true;
+    }
+
+    match state.zone_host_inbound.get(&ingress_zone_id) {
+        Some(hi) => hi.admits_destination(protocol, dst_port, is_v6, icmp_type, dst_ip),
+        None if is_host_inbound_multicast_group(dst_ip) => false,
+        None => host_inbound_admits(state, ingress_zone_id, protocol, dst_port, is_v6, icmp_type),
+    }
+}
+
+/// Ingress-interface-aware, destination-aware entry point for packet paths.
+/// Per-interface override admission is still authoritative; otherwise use the
+/// zone set. A catalog group with no zone entry is fail-closed.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn host_inbound_admits_iface_for_destination(
+    state: &ForwardingState,
+    ingress_ifindex: i32,
+    ingress_zone_id: u16,
+    protocol: u8,
+    dst_port: u16,
+    is_v6: bool,
+    icmp_type: u8,
+    dst_ip: IpAddr,
+) -> bool {
+    if is_icmp_host_inbound_global_accept(protocol, is_v6, icmp_type) {
+        return true;
+    }
+    if let Some(hi) = state.ifindex_host_inbound.get(&ingress_ifindex) {
+        return hi.admits_destination(protocol, dst_port, is_v6, icmp_type, dst_ip);
+    }
+    host_inbound_admits_for_destination(
+        state,
+        ingress_zone_id,
+        protocol,
+        dst_port,
+        is_v6,
+        icmp_type,
+        dst_ip,
+    )
 }
 
 /// #3362: per-packet host-inbound admit keyed by INGRESS INTERFACE first. When

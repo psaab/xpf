@@ -10,14 +10,13 @@ import (
 // security zone's `host-inbound-traffic system-services` set does NOT admit the
 // matching DHCP token.
 //
-// WHY THIS IS ITS OWN ARM, AND NOT PART OF #4455. The #4455 (HI-1) pair —
-// validateHostInboundMulticastWarnings and validateHostInboundManagedRoutingMismatch
-// — covers host-bound ROUTING multicast (OSPF/RIP/PIM/VRRP/IGMP), and its
-// enforcement half (Component A, the per-zone `iifname` DROP gate) is
-// PLAN-KILLed. Neither arm can see the DHCP server: the managed-routing arm
-// cross-checks `protocols` tokens against FRR's OSPF/OSPFv3/RIP interface lists,
-// and the DHCP server is not a routing protocol and is not rendered into FRR.
-// So the config shape this file reports produced ZERO advisory before #6460.
+// WHY THIS IS ITS OWN ARM, AND NOT PART OF #11571. The #11571 enforcement gate
+// scopes host-bound multicast by routing-protocol token, destination group,
+// family, and ingress zone. DHCP server admission uses the separate
+// `system-services` grammar: DHCP is neither a routing protocol nor rendered
+// into FRR, so the managed-routing check cannot inspect it. In addition,
+// DHCPv4 and DHCPv6 bypass these enforcement surfaces for different reasons
+// described below, so this check needs its own diagnostics.
 //
 // THE MECHANISM, PER FAMILY. The two families are unenforced for DIFFERENT
 // reasons, and the message says which, because an operator who is told the wrong
@@ -47,23 +46,22 @@ import (
 //
 //   - DHCPv6 (`system services dhcpv6-local-server`) — Kea's Dhcp6 has no raw
 //     mode; it receives on UDP. But a client's Solicit/Request is addressed to
-//     the All_DHCP_Relay_Agents_and_Servers multicast group ff02::1:2, and every
-//     per-zone host-inbound rule — the accepts AND the #3361 catch-all deny — is
-//     scoped `<fam> daddr <zone unicast addrs>` (pkg/nftables/netlink_hostinbound.go,
-//     emitHostInboundZoneNetlink). A multicast destination matches NEITHER, so it
-//     falls through the base chain's `policy accept`
-//     (pkg/nftables/netlink_installer.go) to the host stack. Same
-//     fall-through the #4455 routing-multicast gap rides, applied to a service
-//     rather than a routing protocol.
+//     the All_DHCP_Relay_Agents_and_Servers multicast group ff02::1:2. The
+//     #11571 group gate intentionally covers only the routing-multicast catalog,
+//     which does not contain this DHCP destination. The existing per-zone
+//     host-inbound rules for unicast addresses — accepts and the catch-all
+//     deny — therefore match neither this multicast destination, so it continues
+//     to fall through the base chain's `policy accept`
+//     (pkg/nftables/netlink_installer.go) to the host stack.
 //
-// WARN-ONLY, ZERO DATAPLANE SURFACE. No nft rule changes, no Rust change, no
-// `iifname` predicate. The config is valid Junos and the box already serves it;
-// rejecting would brick a commit on a working DHCP deployment for a condition
-// that has been true since the feature shipped (#1960 no-brick). This function
-// has no error return and takes no `lenient` flag, so the no-brick property is
-// structural rather than a convention a later edit could quietly invert — the
-// same posture the #5619 secure-tunnel-plaintext advisory takes for the same
-// reason.
+// WARN-ONLY FOR THIS DHCP PATH. This advisory does not install nft or Rust rules
+// for DHCP; the DHCP server's request paths remain outside the routing-multicast
+// gate. The config is valid Junos and the box already serves it; rejecting would
+// brick a commit on a working DHCP deployment for a condition that has been true
+// since the feature shipped (#1960 no-brick). This function has no error return
+// and takes no `lenient` flag, so the no-brick property is structural rather
+// than a convention a later edit could quietly invert — the same posture the
+// #5619 secure-tunnel-plaintext advisory takes for the same reason.
 //
 // WHY THE OPERATOR NEEDS TELLING. `host-inbound-traffic system-services` is the
 // knob a Junos operator reaches for to bound which segments a host service
@@ -103,7 +101,8 @@ import (
 //
 // SCOPE. Interfaces only; a group with no interfaces binds nothing. An interface
 // in no zone has no host-inbound dimension and is not reported (the zone lookup
-// simply misses) — that is the same treatment the #4455 Component B arm gives it.
+// simply misses) — the managed-routing migration gate likewise has no zone token
+// to cross-check for that interface.
 
 // dhcpHostInboundFamily is one DHCP family's advisory inputs: the stanza the
 // operator authored, the `system-services` token Junos gates it with, and the

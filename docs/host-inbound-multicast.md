@@ -1,108 +1,81 @@
 # Host-bound routing multicast admission (#4455, HI-1)
 
-This doc records the current behavior of host-bound **multicast** admission, the
-protocol→multicast-group catalog that the eventual per-zone enforcement will use,
-and the four coupled design decisions that keep the full enforcement deferred. It
-is a **design artifact**: today the catalog backs only a commit-time advisory and
-makes **no forwarding decision**.
+This document records the active host-bound **multicast** admission behavior,
+the protocol→multicast-group catalog, and the managed-routing migration gate.
+The catalog is an enforcement input shared by the Go/kernel nft builders and
+the Rust AF_XDP classifier; this is no longer a deferred design artifact or an
+advisory-only feature.
 
-## Current behavior: fail-open-but-bounded
+## Enforcement behavior
 
-The kernel `xpf_hostinbound` `chain input`
-(`pkg/daemon/daemon_nft.go`, `buildHostInboundFilterPayload`) is:
+The Go text oracle and netlink installer enforce the same per-ingress rule:
+catalog multicast is admitted only when the packet arrives on an unambiguous
+zone interface whose effective `host-inbound-traffic protocols` set includes
+the token that owns the exact destination group and protocol tuple. Interface
+overrides replace the zone-level protocol set. Matching is independent of
+firewall-local unicast addresses, so an addressless but configured ingress is
+still gated.
 
-```
-type filter hook input priority <p>; policy accept;
-ct state established,related accept
-meta l4proto { 50, 51 } accept            # raw ESP/AH (host-terminated IPsec)
-icmpv6 type { 1,2,3,4,133,134,135,136,137 } accept   # ND + PMTUD/error
-icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
-<per-zone>  <fam> daddr <zone-local-unicast-addrs> ... accept / counter drop
-```
+Each catalog group has a default-deny rule. A wrong group, family, IP protocol,
+ICMP type, or transport is denied; catalog traffic on unzoned or ambiguous
+ingress is denied as well. Non-catalog destinations retain their existing
+host-inbound behavior. The userspace classifier receives the actual destination
+IP at host-delivery decisions, including the GRE outer path, and applies the
+same group/family/protocol/token decision.
 
-Every per-zone rule is scoped by `<fam> daddr <zone-local-addrs>` — a set of the
-firewall's own **unicast** interface addresses. A host-bound packet addressed to
-a well-known routing **multicast** group (OSPF `224.0.0.5`, VRRP `224.0.0.18`,
-PIM `224.0.0.13`, …) matches **no** per-zone `daddr` set, so it falls through the
-chain's `policy accept` to the host stack **without** any per-zone
-`host-inbound-traffic protocols` scoping.
+Explicit `to-zone junos-host` fine-policy denies run before the coarse multicast
+gate, while the multicast guard itself precedes the residual established /
+related accept so conntrack cannot bypass the current zone decision. Existing
+global ND, PMTUD/error, and ESP/AH exceptions and the explicit
+`system-services any-service` wildcard retain their established behavior.
 
-The Rust AF_XDP classifier
-(`userspace-dp/src/afxdp/forwarding/host_inbound.rs`, `host_inbound_admits`) keys
-only on `(ingress_zone_id, protocol, dst_port, is_v6, icmp_type)` — it has **no
-destination-address dimension** — so it does not gate host-bound multicast
-either.
+The gate applies to the catalog below; it does not change DHCP, which uses a
+different destination and delivery path (see the DHCP sibling section).
+Host-bound routing multicast is therefore no longer packet-wide via the
+input-chain `policy accept` fall-through.
 
-**This is a Junos-parity/hardening gap, not an open door.** The exposure is
-bounded:
+## Managed-routing commit gate
 
-- The host kernel delivers multicast only to groups a configured daemon actually
-  **joined** (a routing daemon the operator enabled). Nothing is delivered to a
-  group with no local subscriber.
-- The always-on control set (IPv6 ND, PMTUD/error ICMP, ESP/AH) is already
-  globally accepted, independent of the zone token set.
+The strict compiler gate cross-checks the interfaces xpf renders into FRR for
+OSPFv2, OSPFv3, and RIP (global and routing-instance protocols) against the
+effective `host-inbound-traffic protocols` set for each interface in a
+security zone. A strict commit is rejected when that set omits the matching
+token (`ospf`, `ospf3`, or `rip`); `all` and an effective interface override
+that includes the token satisfy the gate. The error identifies the interface
+and zone and directs the operator to add the missing admission.
 
-So OSPF / VRRP / PIM do **not** break today. The gap is that their host-bound
-multicast is admitted **packet-wide** (on every ingress interface) rather than
-scoped to the zone whose `host-inbound-traffic protocols` opted in — broader than
-Junos, where host-bound routing multicast is admitted per-zone via
-`host-inbound-traffic protocols <x>`.
+Tolerant load / peer-sync follows the #1960 no-brick path: it keeps the
+configuration bootable and records a warning, but the packet remains
+default-denied until the protocol is explicitly admitted. This avoids silently
+breaking a managed routing daemon on strict commit without re-opening the
+multicast path on tolerant loads.
 
-## Commit-time advisory (shipped)
-
-`ValidateConfig` (`pkg/config/compiler_validate_warn_host_inbound.go`,
-`validateHostInboundMulticastWarnings`) emits a **WARN-only** commit-time
-advisory for each zone-level `host-inbound-traffic` stanza AND each per-interface
-override (#3362) whose `protocols` set admits a multicast routing protocol. The
-advisory names the zone (and interface), lists the concrete well-known groups,
-and states that the multicast is currently admitted packet-wide via the input
-chain's accept fall-through — a known parity gap (#4455). It is **never a hard
-reject**: the config is valid Junos, and rejecting or narrowing it would break a
-zone that relies on today's accept (see the migration decision below). This
-mirrors the #3226 `system-services all` SCOPING advisory pattern (that
-advisory warns that `all` no longer admits packet-wide; it is not itself a
-packet-wide admit).
-
-A **companion advisory** (`validateHostInboundManagedRoutingMismatch`, #4455
-Component B) closes the *inverse* blind spot: the advisory above fires only when
-a multicast token is **present** (the already-compliant case), so a zone running
-a managed FRR routing protocol with **no** matching token — the actual silent
-fail-open — was invisible. Component B cross-checks the interfaces xpf renders
-into FRR for OSPFv2/OSPFv3/RIP (`pkg/frr/policy_render.go`, global stanza and
-each routing-instance) against each interface's zone's effective
-`host-inbound-traffic protocols` set and WARNs when the matching token
-(`ospf`/`ospf3`/`rip`) is absent, so the operator can make the admission
-explicit. Zone attribution reuses the dataplane's `buildInterfaceZoneMap`
-semantics (`zoneIfaceLogicalKeys`: a bare zone member `reth0` claims every
-configured unit `reth0.10`), and the effective admission set reuses
-`ZoneConfig.InterfaceHostInboundEffective` (the per-interface override where one
-is declared — it REPLACES the zone-level set, #6515 — with #3720 physical-parent
-inheritance for logical units, `all`-expanded) — so
-the advisory matches runtime enforcement exactly (no missed or false warnings
-on unit interfaces). Same WARN-only,
-zero-dataplane-surface doctrine (the Component A per-zone `iifname` DROP
-enforcement stays deferred/PLAN-KILLed). BGP/LDP (unicast) and PIM (unmanaged)
-are out of scope.
+Zone attribution and effective-token resolution reuse the dataplane's existing
+helpers (`zoneIfaceLogicalKeys` and
+`ZoneConfig.InterfaceHostInboundEffective`), including bare-member unit
+expansion, interface-override replacement, and physical-parent inheritance.
+There is no longer a packet-wide multicast advisory for compliant zones.
+BGP/LDP/MSDP are unicast and PIM is unmanaged, so those protocols have no
+managed FRR interface source for this cross-check; their catalog groups are
+still enforced by the dataplane gate.
 
 ## The DHCP-server sibling (#6460)
 
-The same "the host-inbound stanza reads as enforced and is not" shape reaches the
-**DHCP server**, and neither advisory above can see it — both cross-check
-*routing protocols* against FRR, and the DHCP server is neither a routing
-protocol nor rendered into FRR. A third advisory
+The DHCP server remains a separate #6460 admission issue. The managed-routing
+gate cross-checks routing-protocol tokens against FRR, while the DHCP server is
+neither a routing protocol nor rendered into FRR. A separate advisory
 (`validateDHCPServerHostInboundBypassWarnings`,
-`pkg/config/compiler_validate_warn_dhcp_hostinbound.go`) covers it: it WARNs when
-a `system services dhcp-local-server` / `dhcpv6-local-server` group binds an
-interface whose zone's effective `host-inbound-traffic system-services` set omits
-`dhcp` / `dhcpv6`.
+`pkg/config/compiler_validate_warn_dhcp_hostinbound.go`) warns when a DHCP
+server binds an interface whose zone's effective `host-inbound-traffic
+system-services` set omits `dhcp` / `dhcpv6`.
 
-The two families are unenforced for **different** reasons, and the message says
-which — an operator told the wrong reason reaches for the wrong remedy:
+The two DHCP families bypass enforcement for **different** reasons, and the
+message names the relevant path:
 
 | Family | Why the zone token does not bound it |
 |---|---|
 | DHCPv4 (`dhcp`) | **Two planes, both bypassed (#7489).** (1) A client addresses its DISCOVER/REQUEST to the **255.255.255.255 broadcast**, and `should_fallback_early` (`userspace-xdp/src/lib.rs`) hands `dst_v4 == 0xffff_ffff` straight to the kernel — the request never enters the AF_XDP userspace dataplane or its host-inbound gate. (2) xpf renders Kea's `Dhcp4` with **no** `dhcp-socket-type` key (`pkg/dhcpserver/dhcpserver.go` emits `interfaces-config` with an `interfaces` list and nothing else), so Kea's default `raw` applies and the server receives on an **AF_PACKET** socket, delivered **before** the netfilter input hook. |
-| DHCPv6 (`dhcpv6`) | Kea's `Dhcp6` has no raw mode, but a client addresses the server at the **ff02::1:2** multicast group. Every per-zone host-inbound rule — the accepts AND the #3361 catch-all deny — is scoped `<fam> daddr <zone unicast addrs>` (`pkg/nftables/netlink_hostinbound.go`, `emitHostInboundZoneNetlink`), so a multicast destination matches neither and falls through the base chain's `policy accept` (`pkg/nftables/netlink_installer.go`). This is the same fall-through the routing-multicast gap above rides. |
+| DHCPv6 (`dhcpv6`) | Kea's `Dhcp6` has no raw mode, but a client addresses the server at **ff02::1:2**. This DHCP group is not in the routing-multicast catalog, so the routing group gate does not match it; it retains the separate DHCPv6 path and advisory described above. |
 
 The remedy in the message deliberately leads with **removing the interface from
 the group**, not with adding the token: adding the token cannot enforce anything
@@ -198,29 +171,27 @@ The practical consequence: routing DHCPv4 into the dataplane so the gate can
 proposal to enforce host-inbound for a raw-socket service has to be a
 deny-side-only change, leaving the admit path exactly as it is.
 
-Zone attribution and effective-admission resolution reuse the same two SSOTs
-Component B uses (`zoneIfaceLogicalKeys`, `ZoneConfig.InterfaceHostInboundEffective`),
-so the three advisories cannot drift in which interfaces they can see.
-WARN-only, zero dataplane surface, no error return and no `lenient` flag — the
-#1960 no-brick property is structural, matching the #5619 doctrine.
+The DHCP warning continues to use the same zone-attribution and effective-
+admission helpers, but it remains WARN-only because DHCP's delivery paths are
+not governed by the routing-multicast gate. The #1960 no-brick treatment for
+managed routing is implemented separately by the strict-commit / tolerant-load
+gate above.
 
-**Enforcement is not planned by default.** The v6 leg needs the same per-zone
-`iifname` class gate Component A was PLAN-KILLed for. The v4 leg cannot be
-closed by netfilter *on the default `raw` socket* at all — not because the
-input hook is bypassed unreached, but because it acts on a copy Kea never
-reads (#7318 measured an INPUT drop at priority -100 counting the packet on
-both the broadcast and the interface-unicast destination while Kea answered
-regardless).
+**The DHCP server's bypass is not repaired by routing-multicast enforcement.**
+The v6 leg's `ff02::1:2` group is not a catalog entry. The v4 leg reaches Kea's
+default `raw` socket through the broadcast / AF_PACKET path before the netfilter
+input hook; an input-chain drop cannot constrain a consumer that receives on
+that earlier path (#7318 measured the INPUT drop while Kea still answered).
 
 #7318 shipped the opt-in half: `system services dhcp-local-server
 dhcp-socket-type udp` moves Dhcp4 onto a UDP socket that does traverse the
 input hook, at which point the per-zone `dhcp` token governs the server path
 with no Component A required — because on UDP Kea does not receive broadcast
-at all, so the fall-through that Component A would have to close no longer has
-anything listening behind it. The DEFAULT is unchanged (`raw`), because udp
-serves relayed and renewing clients only and stops serving directly-attached
-address-less clients; that is a deployment choice, not a bug fix. Whether the
-default should ever flip is still open and deliberately unprejudiced.
+at all, so the broadcast-specific accept fall-through has no DHCP listener
+behind it. The DEFAULT is unchanged (`raw`), because udp serves relayed and
+renewing clients only and stops serving directly-attached address-less clients;
+that is a deployment choice, not a bug fix. Whether the default should ever flip
+is still open and deliberately unprejudiced.
 
 ## Protocol → multicast-group catalog
 
@@ -243,39 +214,41 @@ are deliberately absent. Family split mirrors `HostInboundProtocolFamily`.
 | `router-discovery` | `224.0.0.1`, `224.0.0.2` | — | IRDP advertisements / solicitations (IPv4); the IPv6 equivalent is ND RS/RA, already in the always-accepted set |
 
 `protocols all` expands (via `HostInboundAllExpansionProtocols`, #3199) to the
-routing-protocol set including every catalog member above, so it also triggers
-the advisory.
+routing-protocol set including every catalog member above. Those tokens produce
+the corresponding group/protocol tuples, so `all` admits only the catalog
+groups belonging to its expanded protocols.
 
-## Why the enforcement is deferred: four coupled decisions
+## Enforcement contract (#11571)
 
-Turning this catalog into an enforced per-zone multicast admission gate is a
-**behavior change** that is fail-**closed** on revert of today's accept, so it
-needs a converged plan. The four coupled decisions (tracked on #4455):
+1. **Ingress-zone scope.** Kernel rules use the ingress `iifname` (or the
+   equivalent VRF slave scope) together with the catalog group and protocol
+   tuple. Zone-level and interface-override rules use their effective protocol
+   set; ambiguous and unzoned ingress has no allow rule and falls into the
+   catalog-group deny.
 
-1. **New `iifname`-scoped rule structure.** Multicast admission is
-   per-zone/per-interface (the destination is a group, not a firewall address).
-   `buildHostInboundFilterPayload` has no `iifname` predicate today; the enforced
-   form needs a new `iifname <zone-members> ip daddr <groups> accept` rule
-   structure plus a multicast catch-all drop.
+2. **Default-deny catalog groups.** For every catalog group, only the exact
+   family/group/protocol tuple admitted by that ingress zone is accepted.
+   Addressless ingress views are still included. Non-catalog traffic keeps its
+   existing behavior; explicit global control exceptions and the documented
+   `any-service` wildcard are preserved.
 
-2. **The protocol→multicast-group catalog** (this doc / `hostInboundMulticastCatalog`)
-   agreed against Junos semantics. Settled here as the design artifact.
+3. **Policy and conntrack ordering.** Explicit `to-zone junos-host` fine-policy
+   decisions run before multicast admission. The multicast accept/drop rules
+   run before residual established/related accepts so an old conntrack entry
+   cannot bypass a changed zone decision.
 
-3. **#1960 migration gating.** Enforcing per-zone multicast admission is
-   fail-**closed** on revert of today's accept: a zone running an FRR routing
-   protocol **without** the matching `host-inbound-traffic protocols` knob
-   currently relies on the unconditional accept, and enforcement would break it
-   (Junos requires both). This needs the strict-on-commit / warn-on-tolerant-load
-   (#1960) treatment plus an operator migration story.
+4. **Failure paths.** A cold-boot host-inbound fence denies catalog multicast
+   when the main table is unavailable. The additive coverage-gap fence remains
+   limited to uncovered address scopes; it does not blanket-drop multicast
+   already admitted by the retained main table.
 
-4. **Kernel/Rust lockstep.** The multicast dimension must be added to BOTH the
-   nft set AND `host_inbound_admits` without split-brain — the Rust classifier
-   has no destination-address dimension to extend yet. The existing lockstep
-   contract (`docs/host-inbound-service-matrix.md`, the "keep in lockstep"
-   comments, and the Go↔Rust parity tests) governs this.
-
-Until those land, the catalog is inert design data and the commit-time advisory
-is the only operator-visible surface.
+5. **Kernel/Rust lockstep.** The Go catalog
+   (`pkg/config/host_inbound_multicast.go`), zone-view construction
+   (`pkg/dataplane/userspace/zones_host_inbound.go`), nft text/netlink builders,
+   and Rust destination-aware classifier
+   (`userspace-dp/src/afxdp/forwarding/host_inbound.rs`) enforce the same
+   catalog tuples. Regression tests cover both families, overrides, default
+   denies, and builder ordering.
 
 ## See also
 

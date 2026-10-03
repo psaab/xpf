@@ -704,6 +704,29 @@ pub(in crate::afxdp) struct ZoneHostInbound {
     /// by `admits` only when the packet is IPv6, so a `protocols ospf` (v2) zone
     /// does not open proto 89 on IPv6 and vice versa.
     pub(in crate::afxdp) ip_protocols_v6: FastSet<u8>,
+    /// #11571: per-token MULTICAST routing-protocol flags for exact
+    /// catalog-group gating (`host_inbound_multicast_gate`,
+    /// forwarding/host_inbound.rs). The port/proto/type sets above are
+    /// transport-only: `igmp` and `dvmrp` both admit proto 2 on v4, and
+    /// `ospf`/`ospf3` both ride proto 89, so the sets alone cannot tell
+    /// which well-known GROUP each token owns (igmp -> 224.0.0.1/22,
+    /// dvmrp -> 224.0.0.4, ospf -> v4 groups only, ospf3 -> v6 groups
+    /// only). These flags preserve the token identity through classify so
+    /// a catalog-group packet is admitted only on the exact
+    /// group+family+transport+token tuple. Set alongside the transport
+    /// sets in `classify_protocol` (including via the `protocols all`
+    /// expansion, which recurses through it); consulted ONLY for dsts in
+    /// the catalog — every other dst keeps the legacy transport-only
+    /// `admits()` behavior byte-identically.
+    pub(in crate::afxdp) mcast_ospf: bool,
+    pub(in crate::afxdp) mcast_ospf3: bool,
+    pub(in crate::afxdp) mcast_rip: bool,
+    pub(in crate::afxdp) mcast_ripng: bool,
+    pub(in crate::afxdp) mcast_pim: bool,
+    pub(in crate::afxdp) mcast_igmp: bool,
+    pub(in crate::afxdp) mcast_dvmrp: bool,
+    pub(in crate::afxdp) mcast_vrrp: bool,
+    pub(in crate::afxdp) mcast_router_discovery: bool,
 }
 
 impl ZoneHostInbound {
@@ -759,6 +782,102 @@ impl ZoneHostInbound {
                     }
             }
         }
+    }
+    /// Admission predicate for a packet with its actual destination IP.
+    ///
+    /// The ordinary service/protocol sets above intentionally remain the
+    /// admission model for non-catalog destinations. A destination in the
+    /// well-known routing multicast catalog is different: transport alone is
+    /// insufficient (`igmp` and `dvmrp` share protocol 2, while `ospf` and
+    /// `ospf3` share protocol 89), so admission requires the exact catalog
+    /// group, address family, transport, and effective protocol token.
+    pub(in crate::afxdp) fn admits_destination(
+        &self,
+        protocol: u8,
+        dst_port: u16,
+        is_v6: bool,
+        icmp_type: u8,
+        dst_ip: IpAddr,
+    ) -> bool {
+        // Preserve Junos' explicit `any-service` wildcard on every destination.
+        if self.all_services {
+            return true;
+        }
+
+        if is_host_inbound_multicast_group(dst_ip) {
+            if dst_ip.is_ipv6() != is_v6 {
+                return false;
+            }
+            return match dst_ip {
+                IpAddr::V4(group) => match group.octets() {
+                    [224, 0, 0, 1] => {
+                        (self.mcast_igmp && protocol == 2)
+                            || (self.mcast_router_discovery
+                                && protocol == 1
+                                && matches!(icmp_type, 9 | 10))
+                    }
+                    [224, 0, 0, 2] => {
+                        self.mcast_router_discovery
+                            && protocol == 1
+                            && matches!(icmp_type, 9 | 10)
+                    }
+                    [224, 0, 0, 4] => self.mcast_dvmrp && protocol == 2,
+                    [224, 0, 0, 5] | [224, 0, 0, 6] => {
+                        self.mcast_ospf && protocol == 89
+                    }
+                    [224, 0, 0, 9] => {
+                        self.mcast_rip && protocol == 17 && dst_port == 520
+                    }
+                    [224, 0, 0, 13] => self.mcast_pim && protocol == 103,
+                    [224, 0, 0, 18] => self.mcast_vrrp && protocol == 112,
+                    [224, 0, 0, 22] => self.mcast_igmp && protocol == 2,
+                    _ => false,
+                },
+                IpAddr::V6(group) => match group.segments() {
+                    [0xff02, 0, 0, 0, 0, 0, 0, 5]
+                    | [0xff02, 0, 0, 0, 0, 0, 0, 6] => {
+                        self.mcast_ospf3 && protocol == 89
+                    }
+                    [0xff02, 0, 0, 0, 0, 0, 0, 9] => {
+                        self.mcast_ripng && protocol == 17 && dst_port == 521
+                    }
+                    [0xff02, 0, 0, 0, 0, 0, 0, 13] => self.mcast_pim && protocol == 103,
+                    [0xff02, 0, 0, 0, 0, 0, 0, 18] => self.mcast_vrrp && protocol == 112,
+                    _ => false,
+                },
+            };
+        }
+
+        self.admits(protocol, dst_port, is_v6, icmp_type)
+    }
+}
+
+/// Whether `dst_ip` is any address in the Rust mirror of
+/// `config.HostInboundMulticastGroups`. Those groups receive strict
+/// token-specific gating; destinations outside the catalog stay on the
+/// pre-existing host-inbound path.
+pub(in crate::afxdp) fn is_host_inbound_multicast_group(dst_ip: IpAddr) -> bool {
+    match dst_ip {
+        IpAddr::V4(group) => matches!(
+            group.octets(),
+            [224, 0, 0, 1]
+                | [224, 0, 0, 2]
+                | [224, 0, 0, 4]
+                | [224, 0, 0, 5]
+                | [224, 0, 0, 6]
+                | [224, 0, 0, 9]
+                | [224, 0, 0, 13]
+                | [224, 0, 0, 18]
+                | [224, 0, 0, 22]
+        ),
+        IpAddr::V6(group) => matches!(
+            group.segments(),
+            [0xff02, 0, 0, 0, 0, 0, 0, 5]
+                | [0xff02, 0, 0, 0, 0, 0, 0, 6]
+                | [0xff02, 0, 0, 0, 0, 0, 0, 9]
+                | [0xff02, 0, 0, 0, 0, 0, 0, 13]
+                | [0xff02, 0, 0, 0, 0, 0, 0, 18]
+        ),
     }
 }
 

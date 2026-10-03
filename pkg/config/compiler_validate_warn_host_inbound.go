@@ -6,81 +6,10 @@ import (
 	"strings"
 )
 
-// validateHostInboundMulticastWarnings emits the #4455 (HI-1) commit-time
-// advisory for a zone whose `host-inbound-traffic protocols` admits a MULTICAST
-// routing protocol (OSPF/RIP/PIM/VRRP/IGMP/router-discovery/... — see the
-// protocol->group catalog in host_inbound_multicast.go and
-// docs/host-inbound-multicast.md).
-//
-// VERIFY-FIRST (current master): the kernel `xpf_hostinbound` `chain input`
-// (buildHostInboundFilterPayload) matches host-local UNICAST daddr only and runs
-// `policy accept`, so a host-bound packet to a well-known routing multicast group
-// (224.0.0.5, 224.0.0.18, ...) matches no per-zone `daddr` set and is admitted
-// PACKET-WIDE — on EVERY ingress interface — rather than scoped to the zone whose
-// `host-inbound-traffic protocols` opted in (as Junos implies). The Rust AF_XDP
-// classifier (host_inbound_admits) has no destination-address dimension, so it
-// does not gate host-bound multicast either. This is FAIL-OPEN-BUT-BOUNDED (the
-// host delivers only to groups a joined daemon subscribed; ND/PMTUD/ESP control
-// is already globally accepted), a parity/hardening gap — NOT an open door.
-//
-// WARN-only: the config is valid Junos, and the enforcement (a per-zone
-// `iifname`-scoped admission model on BOTH surfaces, the #1960 fail-closed-on-
-// revert migration gating, and the kernel/Rust lockstep) is DEFERRED (#4455), so
-// this must not reject or change forwarding. Mirrors the #3226 `system-services
-// all` packet-wide-admit advisory. Emitted for the zone-level stanza AND every
-// per-interface override (#3362); one advisory per stanza.
-func validateHostInboundMulticastWarnings(cfg *Config) []string {
-	if cfg == nil || cfg.Security.Zones == nil {
-		return nil
-	}
-	var warnings []string
-	advise := func(where string, protocols []string) {
-		toks := hostInboundMulticastTokensPresent(protocols)
-		if len(toks) == 0 {
-			return
-		}
-		warnings = append(warnings, fmt.Sprintf(
-			"%s: host-bound routing multicast (%s) is currently admitted "+
-				"PACKET-WIDE via the kernel input-chain accept fall-through, "+
-				"not scoped to this zone's ingress interface — a known "+
-				"Junos-parity gap (#4455), pending the per-zone iifname "+
-				"multicast admission model.", where,
-			hostInboundMulticastGroupSummary(toks)))
-	}
-	names := make([]string, 0, len(cfg.Security.Zones))
-	for name := range cfg.Security.Zones {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		zone := cfg.Security.Zones[name]
-		if zone == nil { // #3494: tolerant/HA-sync path may carry a nil zone value
-			continue
-		}
-		if zone.HostInboundTraffic != nil {
-			advise(
-				fmt.Sprintf("zone %q host-inbound-traffic", name),
-				zone.HostInboundTraffic.Protocols)
-		}
-		// #3362: per-interface overrides carry the same `protocols` grammar and
-		// the same packet-wide multicast breadth — warn on each.
-		for _, ifRef := range zone.SortedInterfaceHostInboundRefs() {
-			hi := zone.InterfaceHostInbound[ifRef]
-			if hi == nil {
-				continue
-			}
-			advise(
-				fmt.Sprintf("zone %q interface %q host-inbound-traffic", name, ifRef),
-				hi.Protocols)
-		}
-	}
-	return warnings
-}
-
 // hostInboundAdmitsRoutingProtocol reports whether a host-inbound-traffic
 // `protocols` token set admits the given routing-protocol token, honoring the
 // `all` expansion (#3199 — `all` expands to every routing protocol, so it
-// admits ospf/ospf3/rip). Used by the #4455 Component B advisory below.
+// admits ospf/ospf3/rip). Used by the #11571 strict/tolerant migration gate.
 func hostInboundAdmitsRoutingProtocol(protocols []string, token string) bool {
 	for _, p := range protocols {
 		if p == token {
@@ -97,30 +26,21 @@ func hostInboundAdmitsRoutingProtocol(protocols []string, token string) bool {
 	return false
 }
 
-// validateHostInboundManagedRoutingMismatch emits the #4455 (HI-1) Component B
-// commit-time WARN advisory: a managed FRR routing protocol — OSPFv2, OSPFv3, or
-// RIP, which xpf renders into FRR (pkg/frr/policy_render.go) — is enabled on an
-// interface whose security zone's EFFECTIVE `host-inbound-traffic protocols` set
-// (the per-interface override where declared, which REPLACES the zone-level set
-// — #6515, #3362; `all`-expanded) OMITS
-// the matching token (ospf/ospf3/rip).
+// validateHostInboundManagedRoutingMismatch finds managed FRR routing
+// protocols — OSPFv2, OSPFv3, or RIP, which xpf renders into FRR
+// (pkg/frr/policy_render.go) — enabled on an interface whose security zone's
+// effective `host-inbound-traffic protocols` set (the per-interface override
+// where declared, which REPLACES the zone-level set — #6515, #3362; `all`-
+// expanded) omits the matching token (ospf/ospf3/rip).
 //
-// This surfaces the ACTUAL silent multicast fail-open that the shipped
-// validateHostInboundMulticastWarnings misses: that advisory fires only when a
-// multicast token is PRESENT (the already-compliant case), so a zone running
-// OSPF/RIP with NO matching token — the real #4455 parity gap — is invisible
-// today. Component B closes that observability gap.
+// The resulting strict-commit error prevents an enabled routing daemon from
+// being silently isolated by the per-zone multicast gate. Tolerant load and
+// peer-sync paths surface the same diagnostics as warnings and remain bootable;
+// multicast without the explicit token remains denied.
 //
-// WARN-only, ZERO dataplane surface: no nft change, no Rust change, no `iifname`
-// predicate (the Component A DROP enforcement is PLAN-KILLed/deferred — the
-// host-bound routing multicast is admitted PACKET-WIDE via the kernel
-// input-chain `policy accept` fall-through regardless of the zone token). It
-// never rejects or changes forwarding; the config is valid Junos. Mirrors the
-// #3226/#4454 advisory doctrine and honors #1960 lenient-load.
-//
-// Scope: OSPFv2 (→ ospf), OSPFv3 (→ ospf3), RIP (→ rip), for both the global
-// `protocols` stanza and each routing-instance's protocols. BGP/LDP/MSDP are
-// unicast (no multicast group) and out of scope; PIM is unmanaged today
+// Scope: OSPFv2 (→ ospf), OSPFv3 (→ ospf3), and RIP (→ rip), for both the
+// global `protocols` stanza and each routing-instance's protocols. BGP/LDP/MSDP
+// are unicast (no multicast group) and out of scope; PIM is unmanaged today
 // (docs/feature-gaps.md) so it has no managed source to cross-check.
 func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 	if cfg == nil || cfg.Security.Zones == nil {
@@ -226,25 +146,23 @@ func validateHostInboundManagedRoutingMismatch(cfg *Config) []string {
 			if z == nil {
 				continue
 			}
-			// EFFECTIVE host-inbound protocols for this interface: the
+			// Effective host-inbound protocols for this interface: the
 			// per-interface override where declared (it REPLACES the zone-level
-			// set, #6515) WITH #3720 physical-parent inheritance for a logical
-			// unit — reuse the InterfaceHostInboundEffective SSOT so the
-			// advisory matches the dataplane's admission resolution exactly (a
-			// parent `reth0` override admitting ospf must cover unit `reth0.10`,
-			// else this warns falsely).
+			// set, #6515) with #3720 physical-parent inheritance for a logical
+			// unit. Reuse InterfaceHostInboundEffective so the strict gate matches
+			// the dataplane's admission resolution (a parent `reth0` override
+			// admitting ospf also covers unit `reth0.10`).
 			_, effProto, _ := z.InterfaceHostInboundEffective(ifn)
 			if hostInboundAdmitsRoutingProtocol(effProto, rp.token) {
 				continue
 			}
 			warnings = append(warnings, fmt.Sprintf(
-				"protocols %s is enabled on interface %q (security zone %q) but that "+
-					"zone's host-inbound-traffic protocols set omits %q — the protocol's "+
-					"host-bound multicast is currently admitted PACKET-WIDE via the kernel "+
-					"input-chain accept fall-through (a known Junos-parity gap, #4455), not "+
-					"scoped to the zone. Add `host-inbound-traffic protocols %s` to zone %q "+
-					"(or the interface override) to make the admission explicit.",
-				rp.proto, ifn, zname, rp.token, rp.token, zname))
+				"protocols %s is enabled on interface %q (security zone %q), but its "+
+					"effective host-inbound-traffic protocols set omits %q; host-bound "+
+					"multicast for %s is denied until that protocol is admitted. Add "+
+					"`host-inbound-traffic protocols %s` to zone %q (or the interface "+
+					"override) to allow it.",
+				rp.proto, ifn, zname, rp.token, rp.proto, rp.token, zname))
 		}
 	}
 	sort.Strings(warnings)

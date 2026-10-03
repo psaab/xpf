@@ -355,15 +355,11 @@ func ValidateConfig(cfg *Config) []string {
 		}
 	}
 
-	// #3226 / #3362 / #6515 / #6640: the host-inbound STANZA advisories moved to
-	// compiler_validate_warn_host_inbound.go, where their siblings already live
-	// (validateHostInboundMulticastWarnings, validateHostInboundManagedRouting-
-	// Mismatch, validateHostInboundOverrideReplaceWarnings). They were the last
-	// member of that family still inlined here.
-	//
-	// Called at exactly the point the inline block occupied: ValidateConfig
-	// returns an ORDERED slice and the advisory tests index into it, so moving
-	// the call would reorder warnings even though the set is unchanged.
+	// #3226 / #3362 / #6515 / #6640: host-inbound stanza advisories are
+	// centralized in compiler_validate_warn_host_inbound.go. Managed multicast
+	// admission is a strict/tolerant compile gate in compiler_tailgates.go.
+	// Keep these warnings at the original ValidateConfig position to preserve
+	// their ordering among the other structural diagnostics.
 	warnings = append(warnings, validateHostInboundStanzaWarnings(cfg)...)
 
 	// Validate address-book entries have valid CIDR or IP formats
@@ -1851,15 +1847,8 @@ func ValidateConfig(cfg *Config) []string {
 	// resolve, so it is the one case that has to be said out loud.
 	warnings = append(warnings, validateDHCPServerInterfaceRefWarnings(cfg)...)
 
-	// #4455 (HI-1): a zone that admits a multicast routing protocol relies on the
-	// kernel input-chain `policy accept` fall-through to deliver that protocol's
-	// host-bound multicast PACKET-WIDE (not scoped to the zone's ingress
-	// interface). Surface that Junos-parity/hardening gap at commit; the per-zone
-	// iifname enforcement remains deferred.
 	warnings = append(warnings, validateHostInboundZoneLevelDHCPWarnings(cfg)...)
 	warnings = append(warnings, validateHostInboundOverrideReplaceWarnings(cfg)...)
-	warnings = append(warnings, validateHostInboundMulticastWarnings(cfg)...)
-	warnings = append(warnings, validateHostInboundManagedRoutingMismatch(cfg)...)
 	warnings = append(warnings, validateDeviceMapHostInboundLifelineWarnings11365(cfg)...)
 
 	// #6460: a configured DHCP server answers on every interface its
@@ -1868,9 +1857,10 @@ func ValidateConfig(cfg *Config) []string {
 	// receives on an AF_PACKET raw socket that is delivered before the netfilter
 	// input hook, DHCPv6 because the ff02::1:2 request matches no per-zone
 	// unicast `daddr` rule and falls through the input chain's accept policy.
-	// Neither #4455 arm can see this (they cross-check routing protocols against
-	// FRR), so this shape produced no advisory at all before #6460. WARN-only;
-	// the per-zone enforcement is PLAN-KILLed with #4455 Component A.
+	// #11571's managed-routing cross-check applies only to FRR protocols, and
+	// its nft/Rust catalog gate intentionally excludes DHCP's distinct groups
+	// and delivery paths. This DHCP-specific shape therefore needs its own
+	// advisory; the DHCP request path remains outside that enforcement.
 	warnings = append(warnings, validateDHCPServerHostInboundBypassWarnings(cfg)...)
 	warnings = append(warnings, validateDHCPSocketTypeWarnings(cfg)...)
 

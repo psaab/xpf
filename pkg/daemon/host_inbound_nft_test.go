@@ -283,10 +283,19 @@ func TestHostInboundMLDQueryAndReportPaths10859(t *testing.T) {
 	for _, line := range strings.Split(payload, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.Contains(line, "ip6") && strings.HasSuffix(line, "drop") &&
-			(!strings.Contains(line, "daddr") || strings.Contains(line, "ff02::1")) {
+			(!strings.Contains(line, "daddr") || nftLineHasExactAddress(line, "ff02::1")) {
 			t.Errorf("MLD Query destination must not match an IPv6 host-inbound deny: %s", line)
 		}
 	}
+}
+
+func nftLineHasExactAddress(line, address string) bool {
+	for _, field := range strings.Fields(line) {
+		if strings.Trim(field, "{},") == address {
+			return true
+		}
+	}
+	return false
 }
 
 // TestHostInboundFilterNoStanzaDefaultDeny verifies #3405 (Junos/vSRX
@@ -631,19 +640,11 @@ func TestHostInboundFilterApplyFailureSurfaced(t *testing.T) {
 // real failure. Pre-fix the delete error was discarded entirely (`_, _ =`), so
 // this goes RED.
 func TestHostInboundFilterDeleteFailureSurfaced(t *testing.T) {
-	// A config with no enforceable host-inbound view drives the teardown branch.
-	// #3405 makes every zone host-inbound-enforcing (default-deny), so "no
-	// enforceable view" now means a zone with no firewall-local ADDRESS to scope
-	// a deny (rather than the pre-#3405 "no stanza"): the interface carries no
-	// address, so BuildZoneHostInboundViews yields an empty (address-less) view.
+	// A zone with no interfaces has neither local addresses nor ingress scope,
+	// so no host-inbound rule can be emitted and the teardown branch is real.
 	cfg := &config.Config{}
-	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
-		"reth0": {Name: "reth0", Units: map[int]*config.InterfaceUnit{
-			0: {Number: 0},
-		}},
-	}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
-		"trust": {Name: "trust", Interfaces: []string{"reth0.0"}},
+		"trust": {Name: "trust"},
 	}
 	if hostInboundHasEnforceableView(dpuserspace.BuildZoneHostInboundViews(cfg)) {
 		t.Fatal("test config must have no enforceable host-inbound view")

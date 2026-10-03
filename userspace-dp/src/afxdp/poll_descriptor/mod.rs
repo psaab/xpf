@@ -2468,11 +2468,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     worker_ctx.forwarding,
                                     ingress_logical,
                                     authority_zone,
+                                    host_bound_dst.0,
                                     // #9529: the service port after destination
                                     // translation; lo0 below stays on the wire frame.
                                     host_bound_dst.1,
-                                    matches!(flow.dst_ip, IpAddr::V6(_)),
-                                    // #3171: first L4 byte = ICMP/ICMPv6 type, so an
+                                    host_bound_dst.0.is_ipv6(),
                                     // error/PMTUD control message stays admitted on a
                                     // ping-less zone (mirrors the kernel chain). 0
                                     // for non-ICMP (ignored by host_inbound_admits).
@@ -3810,6 +3810,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // ADMITTED packet pays the lo0 evaluation. Gated on
                         // LocalDelivery so transit traffic never pays for it.
                         if resolution.disposition == ForwardingDisposition::LocalDelivery {
+                            let host_bound_dst = host_bound_policy_dst(
+                                flow,
+                                flow.forward_key.dst_port,
+                                Some(policy_dst_ip),
+                                Some(policy_dst_port),
+                            );
                             match host_inbound_gated_lo0_action(
                                 worker_ctx.forwarding,
                                 // #3609: the host-inbound override is keyed by
@@ -3818,16 +3824,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // the raw physical `meta.ingress_ifindex`.
                                 ingress_logical,
                                 from_zone_id,
-                                // #9529: the same post-translation port transit
-                                // policy judges (`policy_dst_port`, #2345).
-                                host_bound_policy_dst(
-                                    flow,
-                                    flow.forward_key.dst_port,
-                                    Some(policy_dst_ip),
-                                    Some(policy_dst_port),
-                                )
-                                .1,
-                                matches!(flow.dst_ip, IpAddr::V6(_)),
+                                host_bound_dst.0,
+                                host_bound_dst.1,
+                                host_bound_dst.0.is_ipv6(),
                                 // #3171: first L4 byte = ICMP/ICMPv6 type, so
                                 // error/PMTUD control messages are admitted on a
                                 // ping-less zone (mirrors the kernel chain). 0

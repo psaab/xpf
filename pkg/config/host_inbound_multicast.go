@@ -6,49 +6,26 @@ import (
 )
 
 // host_inbound_multicast.go is the protocol -> well-known multicast-group
-// catalog for host-bound routing multicast (#4455, HI-1).
+// catalog for host-bound routing multicast (#4455, HI-1, #11571).
 //
-// VERIFY-FIRST CONTEXT (current master). The kernel `xpf_hostinbound`
-// `chain input` (pkg/daemon/daemon_nft.go, buildHostInboundFilterPayload) runs
-// `type filter hook input ... policy accept` and matches host-local UNICAST
-// destination addresses only — every per-zone rule is scoped by
-// `<fam> daddr <zone-addrs>`. A host-bound packet addressed to a well-known
-// routing MULTICAST group (OSPF 224.0.0.5/6, VRRP 224.0.0.18, PIM 224.0.0.13,
-// ...) matches NO per-zone `daddr` set, so it falls through the chain's
-// `policy accept` to the host stack WITHOUT any per-zone
-// `host-inbound-traffic protocols` scoping. The Rust AF_XDP classifier
-// (host_inbound_admits, userspace-dp/src/afxdp/forwarding/host_inbound.rs) keys
-// only on (zone, protocol, dst_port, family, icmp_type) — it has NO
-// destination-address dimension — so it does not gate host-bound multicast
-// either.
+// The Go/kernel nft path scopes catalog-group accepts by ingress interface and
+// drops groups not admitted by that ingress zone. The Rust classifier mirrors
+// the same group dimension; keep its catalog mirror in lockstep. This is the
+// sole Go/kernel catalog source, and behavior outside its configured groups is
+// unchanged.
 //
-// This is FAIL-OPEN-BUT-BOUNDED, a Junos-parity/hardening gap rather than an
-// open door: the host kernel delivers multicast only to groups a configured
-// daemon actually joined (a routing daemon the operator enabled), and the
-// always-on control set (IPv6 ND, PMTUD/error ICMP, ESP/AH) is already globally
-// accepted. So OSPF/VRRP/PIM do NOT break today; the parity gap is that the
-// admission is PACKET-WIDE (on every ingress interface) instead of scoped to
-// the zone whose `host-inbound-traffic protocols` opted in.
-//
-// This catalog is the design artifact that settles decision (2) of the deferred
-// enforcement (#4455): the protocol -> multicast-group enumeration the eventual
-// per-zone `iifname`-scoped nft set and the Rust address dimension will admit.
-// TODAY it backs ONLY the commit-time advisory
-// (validateHostInboundMulticastWarnings) — it makes NO forwarding decision. The
-// full enforcement (a new `iifname` predicate on BOTH surfaces, the #1960
-// migration gating because enforcement is fail-CLOSED on revert of today's
-// accept, and the kernel/Rust lockstep) remains DEFERRED. See
-// docs/host-inbound-multicast.md for the four coupled decisions.
+// Managed OSPF/OSPF3/RIP configuration is checked by the compiler's strict
+// commit / tolerant-load migration gate. See docs/host-inbound-multicast.md for
+// the enforcement and migration contract.
 
-// HostInboundMulticastGroups is the well-known multicast groups a routing
-// protocol's host-bound control traffic is addressed to, split by family. A
-// dual-family protocol (pim, vrrp) populates both; a family-specific protocol
-// (ospf/rip/igmp/router-discovery are IPv4, ospf3/ripng are IPv6) populates
-// only its family, matching HostInboundProtocolFamily.
+// HostInboundMulticastGroups is the well-known multicast groups a protocol's
+// host-bound control traffic is addressed to, split by family. A dual-family
+// protocol (pim, vrrp) populates both; family-specific protocols populate only
+// their matching family, consistent with HostInboundProtocolFamily.
 type HostInboundMulticastGroups struct {
 	V4    []string // well-known IPv4 groups (nil for an IPv6-only protocol)
 	V6    []string // well-known IPv6 groups (nil for an IPv4-only protocol)
-	Label string   // short human label for the advisory / doc (e.g. "OSPFv2")
+	Label string   // short human-readable protocol label
 }
 
 // hostInboundMulticastCatalog maps a `host-inbound-traffic protocols` token to
@@ -94,7 +71,7 @@ func HostInboundMulticastProtocol(token string) (HostInboundMulticastGroups, boo
 }
 
 // HostInboundMulticastProtocolTokens returns the multicast routing-protocol
-// tokens (catalog keys) in sorted order, for deterministic advisory/doc output.
+// tokens (catalog keys) in sorted order.
 func HostInboundMulticastProtocolTokens() []string {
 	out := make([]string, 0, len(hostInboundMulticastCatalog))
 	for tok := range hostInboundMulticastCatalog {
@@ -102,6 +79,83 @@ func HostInboundMulticastProtocolTokens() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// HostInboundMulticastRule is one ingress-scoped enforcement tuple (#11571): a
+// lower-cased protocol token, family ("ip" or "ip6"), and catalog group address.
+type HostInboundMulticastRule struct {
+	Protocol string
+	Family   string
+	Group    string
+}
+
+// HostInboundMulticastRules expands the supplied tokens into deterministic
+// catalog enforcement tuples. Matching is case-insensitive and `all` expands
+// via HostInboundAllExpansionProtocols; non-catalog protocols produce no rules.
+// Results are sorted by protocol, family, and group with duplicates removed.
+func HostInboundMulticastRules(protocols []string) []HostInboundMulticastRule {
+	tokens := hostInboundMulticastTokensPresent(protocols)
+	if len(tokens) == 0 {
+		return nil
+	}
+	var out []HostInboundMulticastRule
+	for _, tok := range tokens {
+		g := hostInboundMulticastCatalog[tok]
+		for _, group := range g.V4 {
+			out = append(out, HostInboundMulticastRule{Protocol: tok, Family: "ip", Group: group})
+		}
+		for _, group := range g.V6 {
+			out = append(out, HostInboundMulticastRule{Protocol: tok, Family: "ip6", Group: group})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Protocol != out[j].Protocol {
+			return out[i].Protocol < out[j].Protocol
+		}
+		if out[i].Family != out[j].Family {
+			return out[i].Family < out[j].Family
+		}
+		return out[i].Group < out[j].Group
+	})
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// HostInboundMulticastGroups returns the sorted, deduplicated catalog addresses
+// for an nft family ("ip" or "ip6"). It returns a fresh slice that does not
+// alias catalog storage, or nil for an unknown family.
+func HostInboundMulticastGroupsForFamily(family string) []string {
+	fam := strings.ToLower(strings.TrimSpace(family))
+	wantV6 := false
+	switch fam {
+	case "ip":
+	case "ip6":
+		wantV6 = true
+	default:
+		return nil
+	}
+	var out []string
+	for _, g := range hostInboundMulticastCatalog {
+		if wantV6 {
+			out = append(out, g.V6...)
+		} else {
+			out = append(out, g.V4...)
+		}
+	}
+	sort.Strings(out)
+	n := 0
+	for _, group := range out {
+		if n == 0 || out[n-1] != group {
+			out[n] = group
+			n++
+		}
+	}
+	if n == 0 {
+		return nil
+	}
+	return out[:n]
 }
 
 // hostInboundMulticastTokensPresent returns the sorted set of MULTICAST
@@ -136,24 +190,4 @@ func hostInboundMulticastTokensPresent(protocols []string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// hostInboundMulticastGroupSummary renders a compact, deterministic
-// "PROTOCOL group[/group...]" summary for the given multicast tokens, for the
-// commit-time advisory text — e.g. "OSPFv2 224.0.0.5/224.0.0.6, PIM
-// 224.0.0.13/ff02::d". Tokens must already be filtered to catalog members
-// (hostInboundMulticastTokensPresent) and sorted.
-func hostInboundMulticastGroupSummary(tokens []string) string {
-	parts := make([]string, 0, len(tokens))
-	for _, tok := range tokens {
-		g, ok := hostInboundMulticastCatalog[tok]
-		if !ok {
-			continue
-		}
-		groups := make([]string, 0, len(g.V4)+len(g.V6))
-		groups = append(groups, g.V4...)
-		groups = append(groups, g.V6...)
-		parts = append(parts, g.Label+" "+strings.Join(groups, "/"))
-	}
-	return strings.Join(parts, ", ")
 }

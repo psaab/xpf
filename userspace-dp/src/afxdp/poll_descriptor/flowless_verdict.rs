@@ -100,6 +100,7 @@ pub(super) fn flowless_local_delivery_verdict(
         forwarding,
         logical_ingress_ifindex,
         from_zone_id,
+        flow.dst_ip,
         0,
         matches!(flow.dst_ip, IpAddr::V6(_)),
         0,

@@ -199,7 +199,7 @@ func TestEarlyInputBarrierHandoffFollowsEnforcement10751(t *testing.T) {
 		}
 	})
 
-	t.Run("zero-drop fallback keeps barrier", func(t *testing.T) {
+	t.Run("addressless multicast fallback keeps barrier for pending address", func(t *testing.T) {
 		var events []string
 		installErr := errors.New("real host-inbound load failed")
 		nftInstaller = &fakeNftInstaller{
@@ -208,7 +208,7 @@ func TestEarlyInputBarrierHandoffFollowsEnforcement10751(t *testing.T) {
 				return installErr
 			},
 			coldBootFence: func(xnft.FenceSpec) error {
-				events = append(events, "zero-drop-fallback")
+				events = append(events, "catalog-multicast-fallback")
 				return nil
 			},
 			earlyInputBarrierRemove: func() error {
@@ -218,16 +218,16 @@ func TestEarlyInputBarrierHandoffFollowsEnforcement10751(t *testing.T) {
 		}
 		d := &Daemon{}
 		if err := d.applyHostInboundFilter(addresslessProgramOnlyConfig10751(t)); !errors.Is(err, installErr) {
-			t.Fatalf("zero-drop fallback error = %v, want real install error", err)
+			t.Fatalf("catalog-only fallback error = %v, want real install error", err)
 		}
-		if got := strings.Join(events, ","); got != "real,zero-drop-fallback" {
-			t.Fatalf("zero-drop fallback lifecycle = %q, early barrier must remain until an address-scoped fence or real install", got)
+		if got := strings.Join(events, ","); got != "real,catalog-multicast-fallback" {
+			t.Fatalf("catalog-only fallback lifecycle = %q, barrier must remain until the pending local address is covered", got)
 		}
-		if d.hostInboundEnforced.Load() {
-			t.Fatal("zero-drop fallback must not claim enforcement")
+		if !d.hostInboundEnforced.Load() {
+			t.Fatal("addressless catalog fallback must publish multicast enforcement")
 		}
 		if d.earlyInputHandoffDone.Load() {
-			t.Fatal("zero-drop fallback must not mark the handoff done")
+			t.Fatal("catalog fallback must not hand off while the local-address intent is pending")
 		}
 	})
 

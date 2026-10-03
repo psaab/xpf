@@ -1594,6 +1594,7 @@ pub(super) fn host_inbound_gated_lo0_action(
     forwarding: &ForwardingState,
     logical_ingress_ifindex: i32,
     host_inbound_zone: u16,
+    dst_ip: IpAddr,
     dst_port: u16,
     is_v6: bool,
     icmp_first_l4_byte: u8,
@@ -1615,7 +1616,7 @@ pub(super) fn host_inbound_gated_lo0_action(
     // (`resolve_ingress_logical_ifindex`). Passing the physical bind port would
     // miss a VLAN sub-interface's override and silently fall back to the zone
     // set (the #3609 bug).
-    if !crate::afxdp::forwarding::host_inbound_admits_iface(
+    if !crate::afxdp::forwarding::host_inbound_admits_iface_for_destination(
         forwarding,
         logical_ingress_ifindex,
         host_inbound_zone,
@@ -1623,6 +1624,7 @@ pub(super) fn host_inbound_gated_lo0_action(
         dst_port,
         is_v6,
         icmp_first_l4_byte,
+        dst_ip,
     ) {
         return None;
     }
@@ -1788,6 +1790,7 @@ mod lo0_gate_tests {
             &fw,
             meta.ingress_ifindex as i32,
             DENY_ZONE,
+            flow.dst_ip,
             443,
             false,
             0,
@@ -1819,6 +1822,7 @@ mod lo0_gate_tests {
             &fw,
             meta.ingress_ifindex as i32,
             ADMIT_ZONE,
+            flow.dst_ip,
             443,
             false,
             0,
@@ -1885,6 +1889,7 @@ mod lo0_gate_tests {
             &fw,
             LOGICAL_IFINDEX,
             ADMIT_ZONE,
+            flow.dst_ip,
             443,
             false,
             0,
@@ -1979,6 +1984,7 @@ mod lo0_gate_tests {
                 fw,
                 LOGICAL_IFINDEX,
                 ADMIT_ZONE,
+                flow.dst_ip,
                 443,
                 false,
                 0,
@@ -2131,6 +2137,7 @@ mod lo0_gate_tests {
             &fw,
             meta1.ingress_ifindex as i32,
             ADMIT_ZONE,
+            flow1.dst_ip,
             5000,
             false,
             0,
@@ -2153,6 +2160,7 @@ mod lo0_gate_tests {
             &fw,
             meta2.ingress_ifindex as i32,
             ADMIT_ZONE,
+            flow2.dst_ip,
             5000,
             false,
             0,

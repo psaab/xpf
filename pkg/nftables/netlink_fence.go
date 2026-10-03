@@ -1,20 +1,24 @@
 package nftables
 
 // netlink_fence.go builds the #5644 cold-boot fail-closed fence and the #5789
-// additive coverage-gap fence via netlink, mirroring the fence text oracles in
-// pkg/daemon/daemon_nft.go. Both fences are the real host-inbound table with
-// every per-service ACCEPT removed: scope-independent mandatory admits, then
-// per-zone WireGuard accepts, followed by catch-all DROPs (no named counters)
-// for their fenced firewall-local addresses.
+// additive coverage-gap fence via netlink, mirroring the text oracles in
+// pkg/daemon/daemon_nft.go. The cold-boot fence removes per-service ACCEPTs and
+// drops catalog multicast groups on represented ingress before established
+// admits; the additive gap fence drops only its uncovered address set, leaving
+// the retained main table's multicast policy authoritative.
 
-// hostInboundFenceMandatoryAdmitsNetlink mirrors hostInboundFenceMandatoryAdmits:
-// the fence chain's scope-independent mandatory admits — established/related,
-// raw ESP/AH, IPv6 ND, and v4/v6 PMTUD/error. WireGuard admissions are emitted
-// separately with serving-zone destination scope. No named counters (a fence is
-// transient).
+// hostInboundFenceMandatoryAdmitsNetlink mirrors the text oracle's shared
+// mandatory admits: global ESP/AH, established/related, IPv6 ND, and v4/v6
+// PMTUD/error. Cold-boot multicast drops are inserted between ESP/AH and the
+// established-flow admit. WireGuard admissions have serving-zone scope; no
+// named counters are added to the transient fence.
 func hostInboundFenceMandatoryAdmitsNetlink(p *nlPlan) {
-	p.rule().ctEstablishedRelated().emit(verdictAccept()...)
 	p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
+	emitHostInboundFenceEstablishedAndL3AdmitsNetlink(p)
+}
+
+func emitHostInboundFenceEstablishedAndL3AdmitsNetlink(p *nlPlan) {
+	p.rule().ctEstablishedRelated().emit(verdictAccept()...)
 	p.rule().icmpType(famV6, []uint8{1, 2, 3, 4}).emit(verdictAccept()...)
 	p.rule().icmpType(famV6, []uint8{133, 134, 135, 136, 137}).emit(verdictAccept()...)
 	p.rule().icmpType(famV4, []uint8{3, 11, 12}).emit(verdictAccept()...)
@@ -116,7 +120,11 @@ func buildHostInboundFenceNetlink(p *nlPlan, spec FenceSpec) {
 	emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyFenceRules(
 		spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts,
 	))
-	buildFenceMandatoryDropsNetlink(p, spec)
+	// Preserve global ESP/AH, then deny catalog groups before established flows.
+	p.rule().l4protoSet([]uint8{50, 51}).emit(verdictAccept()...)
+	emitHostInboundMulticastFenceDropsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
+	emitHostInboundFenceEstablishedAndL3AdmitsNetlink(p)
+	buildFenceDropsAfterMandatoryAdmitsNetlink(p, spec)
 }
 
 // buildLo0FenceNetlink mirrors buildLo0FencePayload. The lo0 cold-boot fence
@@ -129,6 +137,10 @@ func buildLo0FenceNetlink(p *nlPlan, spec FenceSpec) {
 
 func buildFenceMandatoryDropsNetlink(p *nlPlan, spec FenceSpec) {
 	hostInboundFenceMandatoryAdmitsNetlink(p)
+	buildFenceDropsAfterMandatoryAdmitsNetlink(p, spec)
+}
+
+func buildFenceDropsAfterMandatoryAdmitsNetlink(p *nlPlan, spec FenceSpec) {
 	emitHostInboundFenceWGAdmitsNetlink(p, spec.Views, spec.WGZonePorts)
 	// #10751 F8-A: admit the DHCP client's own replies before the
 	// destination drops (no-op for lo0 — see emitUnleasedDHCPAdmitsNetlink).

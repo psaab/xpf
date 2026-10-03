@@ -1817,6 +1817,11 @@ type compileOpts struct {
 	// zone so it too fails CLOSED), so a leniently-loaded bad config is inert
 	// and consistent. Same doctrine as lenientPolicyZoneRefs.
 	lenientHostInboundTokens bool
+	// lenientHostInboundManagedMulticast downgrades enabled managed routing
+	// protocols without effective per-zone host-inbound admission from a strict
+	// commit error to a warning on tolerant loads / peer sync. The dataplane
+	// still denies that multicast until the operator adds the matching token.
+	lenientHostInboundManagedMulticast bool
 	// lenientDuplicateHostLocalAddress (#3718 Option B) downgrades the
 	// duplicate host-local-address gate (validateDuplicateHostLocalAddressStrict)
 	// from a hard compile error to a cfg.Warnings entry. The strict commit /
@@ -3160,6 +3165,7 @@ func lenientCompileOpts() compileOpts {
 		lenientNestedZonePair:                  true,
 		lenientZoneInterfacePackedTail:         true,
 		lenientHostInboundTokens:               true,
+		lenientHostInboundManagedMulticast:     true,
 		lenientDuplicateHostLocalAddress:       true,
 		lenientClusterAuthKey:                  true,
 		lenientDestNATAddresses:                true,

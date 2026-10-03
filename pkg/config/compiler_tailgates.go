@@ -7,28 +7,36 @@ import "fmt"
 // compileExpanded as step 3 of the #4406 god-orchestrator decomposition
 // (ps-review-011 / codex-173 #4).
 //
-// It runs the ValidateConfig structural warnings, then the interleaved
-// warn/err tail gates (VRRP track-config advisories, NAT pool-utilization
-// alarm, backup-router destination family, VRRP virtual-address subnet,
-// screen scan/sweep + SYN-flood sub-threshold advisories, VRF overlap,
-// static-NAT/NAT64 host-mask, NPTv6, NAT64 prefix, multi-peer WireGuard,
-// retired userspace/DPDK-knob + login-class + SSH-hardening advisories),
-// mutating the shared *Config in place. Each strict gate returns its first
-// error on the strict path; each lenient/advisory gate appends warnings.
+// It runs ValidateConfig structural warnings, the #11571 strict/tolerant
+// managed-multicast admission gate, then the interleaved warn/err tail gates
+// (VRRP track-config advisories, NAT pool-utilization alarm, backup-router
+// destination family, VRRP virtual-address subnet, screen scan/sweep +
+// SYN-flood sub-threshold advisories, VRF overlap, static-NAT/NAT64 host-mask,
+// NPTv6, NAT64 prefix, multi-peer WireGuard, retired userspace/DPDK-knob +
+// login-class + SSH-hardening advisories), mutating the shared *Config in
+// place. Each strict gate returns its first error on the strict path; each
+// lenient/advisory gate appends warnings.
 //
-// Behavior-preserving invariants (do NOT reorder relative to master): this is
-// the LAST phase of compileExpanded, running AFTER the P6b uniform fail-open
-// gates and BEFORE the final `return cfg, nil`, so the strict first-error slot
-// (invariant #6) and the tolerant-path warning accumulation ORDER (invariant
-// #7) are unchanged. The gate sequence and its warning-append order are a
-// verbatim lift of the tail block; it is covered by the reusable golden-output
-// gate in compile_golden_4406_test.go.
+// This is the LAST phase of compileExpanded, running AFTER the P6b uniform
+// fail-open gates and BEFORE the final `return cfg, nil`. The pre-existing
+// tail-gate sequence and warning-append order remain unchanged; #11571 adds
+// the managed-multicast migration gate immediately after ValidateConfig.
 func runTailGates(cfg *Config, opts compileOpts) error {
 	if warnings := ValidateConfig(cfg); len(warnings) > 0 {
 		for _, w := range warnings {
 			cfg.Warnings = append(cfg.Warnings, w)
 		}
 	}
+
+	// #11571: managed routing protocols enabled on a zone interface must be
+	// explicitly admitted by that interface's effective host-inbound protocol
+	// set. Strict commits reject a mismatch; tolerant loads preserve bootability
+	// while warning that the dataplane will deny the unmatched multicast.
+	hiWarnings := validateHostInboundManagedRoutingMismatch(cfg)
+	if !opts.lenientHostInboundManagedMulticast && len(hiWarnings) > 0 {
+		return fmt.Errorf("%s", hiWarnings[0])
+	}
+	cfg.Warnings = append(cfg.Warnings, hiWarnings...)
 
 	// #1814 typed-config track warnings (both strict and lenient paths):
 	// track-interface without any priority-cost (no effect),
