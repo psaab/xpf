@@ -244,24 +244,37 @@ func appendApplyGroupNames(into []string, n *Node, vars map[string]string) []str
 
 // walkGroupToContext walks a group definition's tree to match the ancestor
 // context path. Each element of ancestorPath is the Keys slice of a parent
-// node from root to the current level. Returns the children of the deepest
-// matching node, or nil if the group has no matching subtree.
-// Supports <*> wildcard matching in group keys.
+// node from root to the current level. Returns the union of children from all
+// matching nodes at the deepest context, or nil if no subtree matches.
+// Wildcard matching in group keys is supported at every path element.
 func walkGroupToContext(groupChildren []*Node, ancestorPath [][]string) []*Node {
 	current := groupChildren
 	for _, pathKeys := range ancestorPath {
 		var next []*Node
+		matched := false
+		ownsNext := false
 		for _, child := range current {
 			if child.IsLeaf {
 				continue
 			}
 			// Exact match or wildcard match (group keys may contain <*>).
 			if keysEqual(child.Keys, pathKeys) || keysMatchWildcard(pathKeys, child.Keys) {
-				next = child.Children
-				break
+				if !matched {
+					next = child.Children
+					matched = true
+					continue
+				}
+				// The one-match path can use its children directly. Once the
+				// second match appears, copy before appending so the union never
+				// writes into a source container's backing array.
+				if !ownsNext {
+					next = append([]*Node(nil), next...)
+					ownsNext = true
+				}
+				next = append(next, child.Children...)
 			}
 		}
-		if next == nil {
+		if !matched {
 			return nil // group doesn't have matching subtree at this context
 		}
 		current = next
