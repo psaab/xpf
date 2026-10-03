@@ -2,6 +2,9 @@ xpf (0.0.0) unstable; urgency=medium
 
   * Compile every sibling `rib-groups` container so repeated definitions
     preserve all imports (#12022).
+  * Preserve routing-policy `then next policy` control flow across flat and
+    hierarchical config, render FRR chain jumps with resolved destinations,
+    and retain fail-closed narrowed-chain fallbacks (#11780).
 
   * Limit each dynamic command value to one word in tab completion and `?`
     help, matching the command walker’s one-value grammar (#11835).
