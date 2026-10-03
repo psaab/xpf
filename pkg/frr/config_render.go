@@ -525,11 +525,24 @@ func (m *Manager) generateStaticRouteInTable(sr *config.StaticRoute, vrfName str
 // renderGenerateRoutes emits one blackhole static route per generate-route
 // (Junos `routing-options generate route X`). v4 vs v6 is picked by the
 // presence of ":" in the prefix.
+//
+// #11456: a route carrying a contributing-route policy renders NOTHING. The
+// policy selects which active routes generate the aggregate; xpf has no
+// policy evaluator and no full contributor feed at render time (RIBRoutes is
+// DHCP-classless-scoped), so a policy-bearing aggregate has zero VERIFIED
+// contributors and fails closed. Rendering it unconditionally (the pre-fix
+// behavior) installed an aggregate no contributor supports, which
+// redistribution could then advertise. A policy-less generate route keeps its
+// established unconditional-blackhole meaning.
 func renderGenerateRoutes(b *strings.Builder, fc *FullConfig) {
 	if len(fc.GenerateRoutes) == 0 {
 		return
 	}
 	for _, gr := range fc.GenerateRoutes {
+		// #11456: fail closed on a contributing-route policy. See above.
+		if gr.Policy != "" {
+			continue
+		}
 		// #6795: same belt. A generate-route renders a blackhole, so a
 		// malformed prefix here fails the frr-reload and takes every route with
 		// it — and a blackhole is the one route shape where a mangled operand
