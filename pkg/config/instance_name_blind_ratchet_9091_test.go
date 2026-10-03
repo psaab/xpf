@@ -148,9 +148,6 @@ var instanceNameBlindBaseline9091 = []string{
 	"/class-of-service/rewrite-rules/inet-precedence/forwarding-class",
 	"/class-of-service/rewrite-rules/inet-precedence/forwarding-class/loss-priority",
 	"/class-of-service/scheduler-maps",
-	"/class-of-service/schedulers",
-	"/class-of-service/schedulers/buffer-size",
-	"/class-of-service/schedulers/transmit-rate",
 	"/class-of-service/traffic-control-profiles",
 	"/event-options/policy",
 	"/event-options/policy/within",
@@ -277,11 +274,16 @@ var instanceNameBlindCeiling9091 = len(instanceNameBlindBaseline9091)
 // leaf-complete and armed rather than added to the blind baseline.
 // #11544 moves it 47 -> 49: the named API-auth user/key credential bodies are
 // leaf-complete, so typos inside them must be rejected rather than ignored.
+// #11800 moves it 49 -> 52: the CoS scheduler definition now rejects undeclared
+// scheduler children instead of accepting a typo that the compiler ignores.
 var instanceNameArmedBaseline9091 = []string{
 	"/chassis/cluster/control-ports/fpc",
 	"/chassis/cluster/redundancy-group/node",
 	"/chassis/device-map/interface",
 	"/class-of-service/scheduler-maps/forwarding-class",
+	"/class-of-service/schedulers",
+	"/class-of-service/schedulers/buffer-size",
+	"/class-of-service/schedulers/transmit-rate",
 	"/interfaces/*/unit/family/inet/address/vrrp-group/track-interface",
 	"/interfaces/*/unit/family/inet6/address/vrrp-group/track-interface",
 	"/policy-options/community",
