@@ -211,11 +211,11 @@ func validateLinkAggregationWarnings(cfg *Config) []string {
 // downgraded to a warning on the tolerant load / peer-sync paths. The
 // leak-cannot-be-realized advisory below is a DIFFERENT check and is unchanged.
 
-// validateRibGroupLeakWarnings emits commit-time warnings for
-// interface-routes rib-group imports the #3876 Phase-1 per-prefix leak
-// cannot fully realize, so the operator sees a fail-loud diagnostic instead
-// of a silent no-op:
+// validateRibGroupLeakWarnings emits commit-time warnings for per-instance
+// interface-routes selectors that name no rib-group, and for rib-group imports
+// the #3876 Phase-1 per-prefix leak cannot fully realize:
 //
+//   - A dangling selector would otherwise silently install no leak rules.
 //   - A source instance whose rib-group imports the main table but has NO
 //     enumerable static connected prefix (DHCP-only / unaddressed member
 //     interfaces): the leak installs no ip rule because there is no static
@@ -224,17 +224,15 @@ func validateLinkAggregationWarnings(cfg *Config) []string {
 //   - A rib-group importing a NON-MAIN (VRF→VRF) rib: Phase 1 leaks only into
 //     the main table; a VRF→VRF import target is not yet installed (Phase 2).
 //
-// The strict import-rib reference gate
-// (validateRibGroupImportRibReferencesStrict) is unchanged; these are
-// additional non-fatal WARN diagnostics.
+// Strict commits reject undefined selectors via
+// validatePerInstanceInterfaceRoutesRibGroupStrict; tolerant loads retain
+// bootability and get the named warning here. Other warnings are non-fatal
+// advisories for leak shapes that are accepted but not fully applied.
 func validateRibGroupLeakWarnings(cfg *Config) []string {
 	if cfg == nil {
 		return nil
 	}
 	ribGroups := cfg.RoutingOptions.RibGroups
-	if len(ribGroups) == 0 {
-		return nil
-	}
 	definedInstances := make(map[string]bool, len(cfg.RoutingInstances))
 	for _, ri := range cfg.RoutingInstances {
 		if ri != nil && ri.Name != "" {
@@ -252,13 +250,19 @@ func validateRibGroupLeakWarnings(cfg *Config) []string {
 		importsMain := false
 		var vrfTargets []string
 		seenVRF := make(map[string]bool)
-		for _, rgName := range []string{ri.InterfaceRoutesRibGroup, ri.InterfaceRoutesRibGroupV6} {
-			if rgName == "" {
+		for _, selector := range []struct{ family, name string }{
+			{"inet", ri.InterfaceRoutesRibGroup},
+			{"inet6", ri.InterfaceRoutesRibGroupV6},
+		} {
+			if selector.name == "" {
 				continue
 			}
-			rgDef, ok := ribGroups[rgName]
-			if !ok {
-				continue // unknown group — the reference gate/warn covers it
+			rgDef, ok := ribGroups[selector.name]
+			if !ok || rgDef == nil {
+				warnings = append(warnings, fmt.Sprintf(
+					"routing-instance %q: interface-routes rib-group %s %q references undefined rib-group",
+					ri.Name, selector.family, selector.name))
+				continue
 			}
 			for _, ribName := range rgDef.ImportRibs {
 				switch ribTargetKind(ribName, ri.Name, definedInstances) {

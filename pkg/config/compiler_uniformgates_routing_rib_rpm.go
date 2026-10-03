@@ -29,6 +29,15 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
+	// #11790: a per-instance interface-routes selector naming no rib-group
+	// used to compile as a silent no-op. Strict commits reject the dangling
+	// name; tolerant loads keep bootability and the tail ValidateConfig
+	// warning names the selector.
+	if err := validatePerInstanceInterfaceRoutesRibGroupStrict(cfg); err != nil &&
+		!opts.lenientInstanceRibGroupRefs {
+		return err
+	}
+
 	// #11314: a RIB-group import-policy cannot be evaluated by the route-leak
 	// path. Strict commits reject it rather than silently leaking routes the
 	// policy excludes; tolerant loads warn and preserve the pre-existing config.

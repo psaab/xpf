@@ -1072,7 +1072,14 @@ func TestRoutingInstanceInterfaceRoutesRibGroup(t *testing.T) {
             }
         }
     }
-}`
+}
+	routing-options {
+	    rib-groups {
+	        Other-ISPS { import-rib inet.0; }
+	        Other-ISP6 { import-rib inet6.0; }
+	    }
+	}
+`
 	p := NewParser(input)
 	tree, errs := p.Parse()
 	if errs != nil {
