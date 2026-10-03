@@ -59,7 +59,7 @@ type InterfaceConfig struct {
 	Disable          bool     // true = administratively disabled (keep down)
 	DADDisable       bool     // true = disable IPv6 Duplicate Address Detection
 	Speed            string   // link speed: "10M", "100M", "1G", "10G", etc.
-	Duplex           string   // "full", "half"
+	Duplex           string   // "full", "half", or "auto"
 	MTU              int      // interface MTU (0 = default)
 	Description      string   // interface description (maps to .network [Network] Description)
 	BondMaster       string   // LAG parent: bind this interface to a bond master (ae0, etc.)
@@ -995,8 +995,11 @@ func (m *Manager) generateLink(ifc InterfaceConfig) string {
 	if ifc.Speed != "" {
 		fmt.Fprintf(&b, "BitsPerSecond=%s\n", junosSpeedToNetworkd(ifc.Speed))
 	}
-	if ifc.Duplex != "" {
+	switch ifc.Duplex {
+	case "full", "half":
 		fmt.Fprintf(&b, "Duplex=%s\n", ifc.Duplex)
+	case "auto":
+		b.WriteString("AutoNegotiation=yes\n")
 	}
 	if ifc.Description != "" {
 		fmt.Fprintf(&b, "Description=%s\n", sanitizeUnitValue(ifc.Description))

@@ -108,7 +108,19 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			ifc.Speed = nodeVal(speedNode)
 		}
 		if duplexNode := child.FindChild("duplex"); duplexNode != nil {
-			ifc.Duplex = nodeVal(duplexNode)
+			duplex := nodeVal(duplexNode)
+			switch duplex {
+			case "full", "half", "auto":
+				ifc.Duplex = duplex
+			default:
+				msg := fmt.Sprintf("interfaces %s duplex %q: expected one of full, half, or auto", ifName, duplex)
+				if !opts.lenientInterfaceDuplex {
+					return fmt.Errorf("%s", msg)
+				}
+				if warnings != nil {
+					*warnings = append(*warnings, msg+"; ignoring invalid value on tolerant load (#11824)")
+				}
+			}
 		}
 		if child.FindChild("disable") != nil {
 			ifc.Disable = true
