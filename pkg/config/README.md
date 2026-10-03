@@ -204,10 +204,13 @@ distinction).
   config pass rejects scheduler-map percent totals above 100% on one
   interface unit. xpf rejects Junos `0%` intentionally because the
   additive wire field uses zero as the legacy absent value.
-  `parseBandwidthLimitStrict` / `parseBurstSizeLimitStrict` /
-  `parseScaledDecimalUnitStrict` in `compiler_protocols.go` are the
-  error-returning siblings of the legacy zero-return parsers — the legacy
-  versions keep their "unset = 0" contract for compatibility.
+  `parseBandwidthBpsStrict` / `parseBandwidthLimitStrict` /
+  `parseBurstSizeLimitStrict` / `parseScaledDecimalUnitStrict` in
+  `compiler_protocols.go` are the error-returning siblings of the legacy
+  zero-return parsers — the legacy versions keep their "unset = 0" contract
+  for compatibility. Interface-level `bandwidth` is schema-typed and strict
+  compilation also names malformed or zero values at the leaf; tolerant
+  loading warns and leaves that field unset so older persisted configs boot.
 
 ## Node modifiers
 

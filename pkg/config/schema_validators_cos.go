@@ -27,6 +27,15 @@ func ValidateRate(raw string, _ *Config) error {
 	return nil
 }
 
+// ValidateInterfaceBandwidth rejects malformed and zero interface bandwidth
+// values, which otherwise compile to the unset sentinel and silently disable
+// CoS line-rate percent resolution, ipmon's bandwidth base, and FRR's input.
+// The schema walker prefixes errors with the complete leaf path.
+func ValidateInterfaceBandwidth(raw string, _ *Config) error {
+	_, err := parseBandwidthBpsStrict(raw)
+	return err
+}
+
 // validateByteSize accepts the byte-size form the current CoS compiler
 // consumes. Reject bare integers here so `buffer-size 50` cannot pass
 // validation and compile as a 50-byte queue.

@@ -7,6 +7,8 @@ xpf (0.0.0) unstable; urgency=medium
     filter clone, preserve valid non-member uses of shared filters, and report
     each dropped steer through degraded PBR health (#11589).
 
+  * Reject malformed or zero interface bandwidth with a leaf-naming
+    diagnostic instead of compiling it to the unset zero value (#11801).
   * Keep custom login classes with `permissions all` from rendering secrets in
     cleartext on the console; only the built-in `super-user` class keeps that
     exception (#11775).
