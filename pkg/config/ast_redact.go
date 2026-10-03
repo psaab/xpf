@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -72,6 +74,148 @@ func (t *ConfigTree) RedactedClone() *ConfigTree {
 	c := t.Clone()
 	redactNodes(c.Children, nil)
 	return c
+}
+
+// FormatCompareRedacted returns a hierarchical diff with secret values
+// constant-masked on both arms. A changed secret also emits an adjacent
+// 8-hex SHA-256 fingerprint metadata line, so equality is preserved without
+// placing the fingerprint in the rendered value arm. URL credentials receive
+// the same treatment while their already-redacted URL context is preserved.
+func FormatCompareRedacted(oldTree, newTree *ConfigTree) string {
+	diff := FormatCompare(fingerprintRedactedClone(oldTree), fingerprintRedactedClone(newTree))
+	return maskCompareFingerprints(diff)
+}
+
+func fingerprintRedactedClone(t *ConfigTree) *ConfigTree {
+	if t == nil {
+		return nil
+	}
+	c := t.Clone()
+	fingerprintCompareNodes(c.Children, nil)
+	return c
+}
+
+func fingerprintCompareNodes(nodes []*Node, base []string) {
+	for _, n := range nodes {
+		full := append(append([]string(nil), base...), n.Keys...)
+		// Dedupe by path index, never value bytes: quoted strings may contain NUL.
+		secretIdxs := secretIndices(full)
+		urlIdxs := urlLeafIndices(full)
+		var seen map[int]struct{}
+		if len(secretIdxs)+len(urlIdxs) > 0 {
+			seen = make(map[int]struct{}, len(secretIdxs)+len(urlIdxs))
+		}
+		for _, idx := range secretIdxs {
+			if idx < len(base) || idx >= len(full) {
+				continue
+			}
+			if _, ok := seen[idx]; ok {
+				continue
+			}
+			seen[idx] = struct{}{}
+			valueIndex := idx - len(base)
+			n.Keys[valueIndex] = SecretDataPlaceholder + compareFingerprintSuffix(n.Keys[valueIndex])
+		}
+		for _, idx := range urlIdxs {
+			if idx < len(base) || idx >= len(full) {
+				continue
+			}
+			if _, ok := seen[idx]; ok {
+				continue
+			}
+			seen[idx] = struct{}{}
+			valueIndex := idx - len(base)
+			value := n.Keys[valueIndex]
+			redacted := RedactURL(value)
+			if redacted != value {
+				n.Keys[valueIndex] = redacted + compareURLFingerprintSuffix(value)
+			}
+		}
+		if !n.IsLeaf {
+			fingerprintCompareNodes(n.Children, full)
+		}
+	}
+}
+
+const compareFingerprintMarker = "\x00xpf-sha256="
+
+func compareFingerprintSuffix(value string) string {
+	fingerprint := sha256.Sum256([]byte(value))
+	return compareFingerprintMarker + hex.EncodeToString(fingerprint[:4]) + "\x00"
+}
+
+func compareURLFingerprintSuffix(value string) string {
+	authStart := urlAuthorityStart(value)
+	authEnd := len(value)
+	for i := authStart; i < len(value); i++ {
+		if value[i] == '/' || value[i] == '?' || value[i] == '#' {
+			authEnd = i
+			break
+		}
+	}
+	authority := value[authStart:authEnd]
+	var material strings.Builder
+	at := strings.LastIndex(authority, "@")
+	host := authority
+	if at >= 0 {
+		host = authority[at+1:]
+	}
+	if !urlHostPortPlausible(host) {
+		material.WriteString(authority)
+	} else if at >= 0 {
+		material.WriteString(authority[:at])
+	}
+	if query := strings.IndexByte(value, '?'); query >= 0 {
+		if material.Len() > 0 {
+			material.WriteByte('\x00')
+		}
+		material.WriteString(value[query:])
+	} else if fragment := strings.IndexByte(value, '#'); fragment >= 0 {
+		if material.Len() > 0 {
+			material.WriteByte('\x00')
+		}
+		material.WriteString(value[fragment:])
+	}
+	fingerprint := sha256.Sum256([]byte(material.String()))
+	return compareFingerprintMarker + hex.EncodeToString(fingerprint[:4]) + "\x00"
+}
+
+func maskCompareFingerprints(diff string) string {
+	var out strings.Builder
+	for _, line := range strings.SplitAfter(diff, "\n") {
+		maskedLine := line
+		var fingerprints []string
+		for {
+			start := strings.Index(maskedLine, compareFingerprintMarker)
+			if start < 0 {
+				break
+			}
+			hashStart := start + len(compareFingerprintMarker)
+			hashEnd := hashStart + 8
+			if hashEnd >= len(maskedLine) || maskedLine[hashEnd] != '\x00' {
+				break
+			}
+			fingerprints = append(fingerprints, maskedLine[hashStart:hashEnd])
+			maskedLine = maskedLine[:start] + maskedLine[hashEnd+1:]
+		}
+		out.WriteString(maskedLine)
+		if len(fingerprints) == 0 {
+			continue
+		}
+		action := ""
+		if strings.HasPrefix(line, "-") {
+			action = "removed"
+		} else if strings.HasPrefix(line, "+") {
+			action = "added"
+		}
+		if action == "" {
+			continue
+		}
+		for _, fingerprint := range fingerprints {
+			fmt.Fprintf(&out, "    [secret fingerprint %s: %s]\n", action, fingerprint)
+		}
+	}
+	return out.String()
 }
 
 // redactNodes walks nodes maintaining the flattened key path of all ancestors

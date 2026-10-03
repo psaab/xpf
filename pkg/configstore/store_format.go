@@ -457,17 +457,18 @@ func (s *Store) ShowRollbackSetRedacted(n int) (string, error) {
 	return forDisplay(entry.Config).FormatSet(), nil
 }
 
-// ShowCompareRedacted returns a hierarchical diff between the active and
-// candidate configs with secrets masked on BOTH sides. A secret CHANGE
-// therefore shows as no-change (both masked) rather than leaking either
-// value — the safe display choice absent a Junos-style $9$ ciphertext.
+// ShowCompareRedacted returns a hierarchical diff with secret values constant-
+// masked on both arms. Separate adjacent 8-hex SHA-256 fingerprint metadata
+// shows secret changes without placing a fingerprint in the config value.
+// Credential-bearing URLs retain RedactURL's safe context while fingerprinting
+// only the components RedactURL hides.
 func (s *Store) ShowCompareRedacted() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.candidate == nil {
 		return ""
 	}
-	diff := config.FormatCompare(forDisplay(s.active), forDisplay(s.candidate))
+	diff := config.FormatCompareRedacted(s.active, s.candidate)
 	if diff == "" {
 		return "[no changes]\n"
 	}

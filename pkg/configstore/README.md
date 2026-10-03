@@ -6,6 +6,15 @@ rename + parent-dir fsync — they survive power loss, not just crashes),
 with a JSONL audit journal and rolling commit history. AES-GCM at-rest
 encryption when a master password is set.
 
+## Redacted compare output
+
+`ShowCompareRedacted` keeps secret values constant-masked on both removed and
+added arms, then emits adjacent `[secret fingerprint removed: <8-hex>]` /
+`[secret fingerprint added: <8-hex>]` metadata for changed values. Identical
+configs still render `[no changes]`. Credential-bearing URLs retain
+`RedactURL`'s safe endpoint context; fingerprints cover only the URL components
+that redaction hides.
+
 The constructor is fail-closed (#1893): `New(filePath) (*Store, error)`
 returns an error when the `.configdb` directory cannot be created.
 There is no file-only fallback backend — every persistence path
