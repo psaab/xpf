@@ -5768,6 +5768,347 @@ fn ecmp_flow_member_stays_stable_across_hot_seeds() {
     );
 }
 
+/// Build identical logical ECMP membership with caller-selected kernel
+/// enumeration numbers, as seen on HA peers or after interface renumbering.
+fn ecmp_dual_enumeration_snapshot_11686(
+    if_a: i32,
+    if_b: i32,
+    with_snat: bool,
+) -> crate::ConfigSnapshot {
+    let interface = |name: &str, linux: &str, ifindex: i32, hw: &str, v4: &str, v6: &str| {
+        crate::InterfaceSnapshot {
+            name: name.to_string(),
+            zone: "wan".to_string(),
+            linux_name: linux.to_string(),
+            ifindex,
+            hardware_addr: hw.to_string(),
+            addresses: vec![
+                crate::InterfaceAddressSnapshot {
+                    family: "inet".to_string(),
+                    address: v4.to_string(),
+                    scope: 0,
+                },
+                crate::InterfaceAddressSnapshot {
+                    family: "inet6".to_string(),
+                    address: v6.to_string(),
+                    scope: 0,
+                },
+            ],
+            ..Default::default()
+        }
+    };
+    let neighbor = |linux: &str, ifindex: i32, family: &str, ip: &str, mac: &str| {
+        crate::NeighborSnapshot {
+            interface: linux.to_string(),
+            ifindex,
+            family: family.to_string(),
+            ip: ip.to_string(),
+            mac: mac.to_string(),
+            state: "reachable".to_string(),
+            router: true,
+            link_local: false,
+        }
+    };
+    crate::ConfigSnapshot {
+        zones: vec![
+            crate::ZoneSnapshot {
+                name: "lan".to_string(),
+                id: TEST_LAN_ZONE_ID,
+                ..Default::default()
+            },
+            crate::ZoneSnapshot {
+                name: "wan".to_string(),
+                id: TEST_WAN_ZONE_ID,
+                ..Default::default()
+            },
+        ],
+        interfaces: vec![
+            interface(
+                "ge-0/0/1",
+                "ge-0-0-1",
+                if_a,
+                "02:00:00:00:00:11",
+                "192.0.2.1/24",
+                "2001:db8:1::1/64",
+            ),
+            interface(
+                "ge-0/0/2",
+                "ge-0-0-2",
+                if_b,
+                "02:00:00:00:00:22",
+                "192.0.3.1/24",
+                "2001:db8:2::1/64",
+            ),
+        ],
+        routes: vec![
+            crate::RouteSnapshot {
+                table: "inet.0".to_string(),
+                family: "inet".to_string(),
+                destination: "203.0.113.0/24".to_string(),
+                next_hop_weights: vec![],
+                next_hops: vec![
+                    "192.0.2.2@ge-0/0/1".to_string(),
+                    "192.0.3.2@ge-0/0/2".to_string(),
+                ],
+                discard: false,
+                next_table: String::new(),
+                preference: 5,
+                rule_priority: 0,
+                mtu: 0,
+            },
+            crate::RouteSnapshot {
+                table: "inet.0".to_string(),
+                family: "inet".to_string(),
+                destination: "198.51.100.0/24".to_string(),
+                next_hop_weights: vec![],
+                next_hops: vec!["@ge-0/0/1".to_string(), "@ge-0/0/2".to_string()],
+                discard: false,
+                next_table: String::new(),
+                preference: 5,
+                rule_priority: 0,
+                mtu: 0,
+            },
+            crate::RouteSnapshot {
+                table: "inet6.0".to_string(),
+                family: "inet6".to_string(),
+                destination: "2001:db8:dead::/48".to_string(),
+                next_hop_weights: vec![],
+                next_hops: vec![
+                    "2001:db8:1::2@ge-0/0/1".to_string(),
+                    "2001:db8:2::2@ge-0/0/2".to_string(),
+                ],
+                discard: false,
+                next_table: String::new(),
+                preference: 5,
+                rule_priority: 0,
+                mtu: 0,
+            },
+        ],
+        neighbors: vec![
+            neighbor("ge-0-0-1", if_a, "inet", "192.0.2.2", "00:11:22:33:44:55"),
+            neighbor("ge-0-0-2", if_b, "inet", "192.0.3.2", "00:11:22:33:44:66"),
+            neighbor("ge-0-0-1", if_a, "inet6", "2001:db8:1::2", "00:11:22:33:44:77"),
+            neighbor("ge-0-0-2", if_b, "inet6", "2001:db8:2::2", "00:11:22:33:44:88"),
+            neighbor(
+                "ge-0-0-1",
+                if_a,
+                "inet",
+                "198.51.100.9",
+                "00:11:22:33:44:99",
+            ),
+            neighbor(
+                "ge-0-0-2",
+                if_b,
+                "inet",
+                "198.51.100.9",
+                "00:11:22:33:44:aa",
+            ),
+        ],
+        source_nat_rules: if with_snat {
+            vec![SourceNATRuleSnapshot {
+                name: "iface-snat".into(),
+                from_zone: "lan".into(),
+                to_zone: "wan".into(),
+                source_addresses: vec!["0.0.0.0/0".into()],
+                interface_mode: true,
+                ..Default::default()
+            }]
+        } else {
+            Vec::new()
+        },
+        ..Default::default()
+    }
+}
+
+fn ecmp_session_flow_11686(dst_ip: IpAddr, src_port: u16) -> SessionFlow {
+    let (src_ip, addr_family) = match dst_ip {
+        IpAddr::V4(_) => (
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)),
+            libc::AF_INET as u8,
+        ),
+        IpAddr::V6(_) => (
+            IpAddr::V6("2001:db8:100::7".parse().unwrap()),
+            libc::AF_INET6 as u8,
+        ),
+    };
+    SessionFlow {
+        src_ip,
+        dst_ip,
+        forward_key: crate::session::SessionKey {
+            addr_family,
+            protocol: PROTO_TCP,
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    }
+}
+
+fn resolve_ecmp_session_flow_11686(
+    state: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    flow: &SessionFlow,
+) -> ForwardingResolution {
+    let decision = SessionDecision {
+        resolution: no_route_resolution(None),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    lookup_forwarding_resolution_for_session(state, dynamic_neighbors, flow, decision)
+}
+
+/// #11686: candidate identity must be the stable logical interface name +
+/// gateway, not kernel ifindex. A peer that enumerates the same logical
+/// interfaces differently must resolve every v4, v6, and interface-only
+/// flow to the same member. The interface-only candidates were pure-ifindex
+/// identities before this fix.
+///
+/// FAIL-ON-REVERT: include candidate.ifindex in either candidate ID and the
+/// cross-enumeration assertions go RED for different flows.
+#[test]
+fn ecmp_members_stable_across_interface_enumerations_11686() {
+    let state_a = build_forwarding_state(&ecmp_dual_enumeration_snapshot_11686(11, 22, false));
+    let state_b = build_forwarding_state(&ecmp_dual_enumeration_snapshot_11686(101, 102, false));
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let member = |state: &ForwardingState, ifindex: i32| {
+        state
+            .ifindex_to_config_name
+            .get(&ifindex)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let mut spread_v4 = std::collections::BTreeSet::new();
+    let mut spread_iface_only = std::collections::BTreeSet::new();
+    let mut spread_v6 = std::collections::BTreeSet::new();
+
+    for flow_index in 0u16..64 {
+        let flow_id = 20000 + flow_index;
+        let v4_flow = ecmp_session_flow_11686("203.0.113.5".parse().unwrap(), flow_id);
+        let v4 = resolve_ecmp_session_flow_11686(&state_a, &dynamic_neighbors, &v4_flow);
+        let v4_peer = resolve_ecmp_session_flow_11686(&state_b, &dynamic_neighbors, &v4_flow);
+        assert_eq!(v4.disposition, ForwardingDisposition::ForwardCandidate);
+        assert_eq!(v4_peer.disposition, ForwardingDisposition::ForwardCandidate);
+        assert_eq!(
+            member(&state_a, v4.egress_ifindex),
+            member(&state_b, v4_peer.egress_ifindex),
+            "v4 5-tuple {v4_flow:?} must select the same logical member",
+        );
+        assert_eq!(v4.next_hop, v4_peer.next_hop);
+        spread_v4.insert(member(&state_a, v4.egress_ifindex));
+
+        let only_flow = ecmp_session_flow_11686("198.51.100.9".parse().unwrap(), flow_id);
+        let only = resolve_ecmp_session_flow_11686(&state_a, &dynamic_neighbors, &only_flow);
+        let only_peer =
+            resolve_ecmp_session_flow_11686(&state_b, &dynamic_neighbors, &only_flow);
+        assert_eq!(only.disposition, ForwardingDisposition::ForwardCandidate);
+        assert_eq!(only_peer.disposition, ForwardingDisposition::ForwardCandidate);
+        assert_eq!(
+            member(&state_a, only.egress_ifindex),
+            member(&state_b, only_peer.egress_ifindex),
+            "interface-only 5-tuple {only_flow:?} must retain its logical member",
+        );
+        spread_iface_only.insert(member(&state_a, only.egress_ifindex));
+
+        let v6_flow = ecmp_session_flow_11686("2001:db8:dead::5".parse().unwrap(), flow_id);
+        let v6 = resolve_ecmp_session_flow_11686(&state_a, &dynamic_neighbors, &v6_flow);
+        let v6_peer = resolve_ecmp_session_flow_11686(&state_b, &dynamic_neighbors, &v6_flow);
+        assert_eq!(v6.disposition, ForwardingDisposition::ForwardCandidate);
+        assert_eq!(v6_peer.disposition, ForwardingDisposition::ForwardCandidate);
+        assert_eq!(
+            member(&state_a, v6.egress_ifindex),
+            member(&state_b, v6_peer.egress_ifindex),
+            "v6 5-tuple {v6_flow:?} must select the same logical member",
+        );
+        assert_eq!(v6.next_hop, v6_peer.next_hop);
+        spread_v6.insert(member(&state_a, v6.egress_ifindex));
+    }
+    let both =
+        std::collections::BTreeSet::from(["ge-0/0/1".to_string(), "ge-0/0/2".to_string()]);
+    assert_eq!(spread_v4, both, "v4 gateway ECMP must spread across both members");
+    assert_eq!(
+        spread_iface_only, both,
+        "interface-only ECMP must spread across both members",
+    );
+    assert_eq!(spread_v6, both, "v6 gateway ECMP must spread across both members");
+}
+
+/// #11686: a flow's interface-SNAT source address is the selected member's
+/// primary address. Re-resolving the same synced flow under another kernel
+/// enumeration must not choose a different member and orphan the stored
+/// rewrite.
+#[test]
+fn ecmp_snat_rewrite_stable_across_interface_enumerations_11686() {
+    let state_a = build_forwarding_state(&ecmp_dual_enumeration_snapshot_11686(11, 22, true));
+    let state_b = build_forwarding_state(&ecmp_dual_enumeration_snapshot_11686(101, 102, true));
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut rewrites = std::collections::BTreeSet::new();
+
+    for flow_index in 0u16..64 {
+        let flow = ecmp_session_flow_11686(
+            "203.0.113.5".parse().unwrap(),
+            20000 + flow_index,
+        );
+        let rewrite = |state: &ForwardingState| {
+            let resolved =
+                resolve_ecmp_session_flow_11686(state, &dynamic_neighbors, &flow);
+            assert_eq!(
+                resolved.disposition,
+                ForwardingDisposition::ForwardCandidate,
+                "flow {:?} must resolve on both enumerations",
+                flow.forward_key,
+            );
+            let egress = state
+                .egress
+                .get(&resolved.egress_ifindex)
+                .and_then(|egress| egress.primary_v4)
+                .expect("selected member has an IPv4 egress address");
+            let mut counter = None;
+            match crate::nat::match_source_nat_result_for_tuple(
+                &state.iface_nat_allocators,
+                &state.source_nat_rules,
+                &crate::nat::NatScopeCtx::default(),
+                "lan",
+                "wan",
+                flow.src_ip,
+                flow.dst_ip,
+                Some(6),
+                flow.forward_key.src_port,
+                flow.forward_key.dst_port,
+                Some(egress),
+                None,
+                1_000_000,
+                false,
+                false,
+                crate::nat::NatHolder::Untracked,
+                &mut counter,
+            ) {
+                crate::nat::SourceNatLookup::Matched(decision) => decision.rewrite_src,
+                other => panic!(
+                    "flow {:?} did not match interface SNAT: {other:?}",
+                    flow.forward_key,
+                ),
+            }
+        };
+        let a = rewrite(&state_a);
+        let b = rewrite(&state_b);
+        assert_eq!(
+            a, b,
+            "flow {:?} must preserve its SNAT rewrite",
+            flow.forward_key,
+        );
+        rewrites.insert(a);
+    }
+    assert_eq!(
+        rewrites.len(),
+        2,
+        "SNAT rewrite stability must exercise both selected ECMP member addresses",
+    );
+}
+
 /// #2390: two same-prefix static routes with different preference must
 /// select the lower-preference one regardless of insertion order. The
 /// worse route is inserted FIRST. Revert (sort by prefix length only) →
