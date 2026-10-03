@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Keep foreign DSCP-scoped destination rules out of the userspace FIB
+    mirror rather than widening them into unconditional NextTable leaks
+    (#11685).
+
   * Warn when an unrelated commit disables a short legacy web-management
     API-auth credential, naming its leaf without exposing the credential value
     (#11820).
