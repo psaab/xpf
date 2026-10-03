@@ -670,9 +670,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				if n.RouteReflectorClient {
 					fmt.Fprintf(&b, "  neighbor %s route-reflector-client\n", n.Address)
 				}
-				if n.AllowASIn > 0 {
-					fmt.Fprintf(&b, "  neighbor %s allowas-in %d\n", n.Address, n.AllowASIn)
-				}
+				renderBGPAllowASIn(&b, n)
 				if n.RemovePrivateAS {
 					fmt.Fprintf(&b, "  neighbor %s remove-private-AS\n", n.Address)
 				}
@@ -740,9 +738,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				if n.RouteReflectorClient {
 					fmt.Fprintf(&b, "  neighbor %s route-reflector-client\n", n.Address)
 				}
-				if n.AllowASIn > 0 {
-					fmt.Fprintf(&b, "  neighbor %s allowas-in %d\n", n.Address, n.AllowASIn)
-				}
+				renderBGPAllowASIn(&b, n)
 				if n.RemovePrivateAS {
 					fmt.Fprintf(&b, "  neighbor %s remove-private-AS\n", n.Address)
 				}

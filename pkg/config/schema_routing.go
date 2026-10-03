@@ -451,7 +451,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 			"import":             {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
 			"authentication-key": {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
 			"default-originate":  {desc: "Default originate", children: nil},
-			"loops":              {desc: "Loops", args: 1, placeholder: "<count>", children: nil},
+			"loops":              {desc: "BGP AS-path loop count (1..10)", args: 1, valueType: ValueInteger, valueDesc: "Allowed occurrences of the local AS in a received AS path", valueExamples: []string{"1", "10"}, placeholder: "<count>", validator: ValidateInteger(1, MaxBGPAllowASIn), children: nil},
 			"remove-private":     {desc: "Remove private AS", children: nil},
 			"family": {desc: "Address family", compoundKey: true, children: map[string]*schemaNode{
 				"inet": {desc: "IPv4", children: map[string]*schemaNode{
@@ -486,7 +486,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 				"authentication-key":     {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
 				"route-reflector-client": {desc: "Route reflector client", children: nil},
 				"default-originate":      {desc: "Default originate", children: nil},
-				"loops":                  {desc: "Loops", args: 1, placeholder: "<count>", children: nil},
+				"loops":                  {desc: "BGP AS-path loop count (1..10)", args: 1, valueType: ValueInteger, valueDesc: "Allowed occurrences of the local AS in a received AS path", valueExamples: []string{"1", "10"}, placeholder: "<count>", validator: ValidateInteger(1, MaxBGPAllowASIn), children: nil},
 				"remove-private":         {desc: "Remove private AS", children: nil},
 				"family": {desc: "Address family", compoundKey: true, children: map[string]*schemaNode{
 					"inet": {desc: "IPv4", children: map[string]*schemaNode{
