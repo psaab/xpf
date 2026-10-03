@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"strconv"
-	"strings"
 
 	fairnesscontract "github.com/psaab/xpf/pkg/fairness"
 )
@@ -1121,10 +1120,9 @@ func resolveCoSTrafficControlProfiles(cfg *Config) {
 // coSInterfaceLineRateBytes returns the configured line rate of a physical
 // interface in bytes/sec, or 0 when unknown. It is the base against which a
 // `shaping-rate percent <n>` traffic-control-profile resolves (Junos resolves
-// shaping-rate percent against the interface speed). An explicit `bandwidth`
-// (already bits/sec) wins over the `speed` string; "auto"/"" (or an
-// unparseable value) yields 0, which leaves the percent inert with a commit
-// advisory rather than fabricating a rate.
+// shaping-rate percent against interface speed). An explicit `bandwidth`
+// (already bits/sec) wins over the typed speed value; `auto` yields 0, leaving
+// the percent inert with a commit advisory rather than fabricating a rate.
 func coSInterfaceLineRateBytes(cfg *Config, ifaceName string) uint64 {
 	if cfg == nil || ifaceName == "" {
 		return 0
@@ -1136,11 +1134,11 @@ func coSInterfaceLineRateBytes(cfg *Config, ifaceName string) uint64 {
 	if iface.Bandwidth > 0 {
 		return iface.Bandwidth / 8
 	}
-	speed := strings.ToLower(strings.TrimSpace(iface.Speed))
-	if speed == "" || speed == "auto" {
+	mbps, ok := InterfaceSpeedMbps(iface.Speed)
+	if !ok {
 		return 0
 	}
-	return parseBandwidthLimit(speed)
+	return mbps * 1_000_000 / 8
 }
 
 // resolveCoSPercentRateBytes resolves a Junos CoS `percent <n>` rate against a

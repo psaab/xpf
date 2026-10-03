@@ -10239,6 +10239,12 @@ reserved for whole-dataplane selection where a rewrite shim
   strict commits reject other or case-varied tokens, tolerant loads warn and
   clear invalid values; networkd writes `Duplex=full|half` and maps `auto` to
   `AutoNegotiation=yes`.
+  The interface `speed` leaf is the typed `10m`/`100m`/`1g`/`2.5g`/`5g`/
+  `10g`/`25g`/`40g`/`100g`/`auto` set (#11797). Unsupported tokens reject
+  strict commits and are warned/cleared on tolerant loads. The dataplane's
+  ethtool setting, networkd's numeric `BitsPerSecond=` value, and CoS's line
+  rate in bytes/sec all use the same Mbps table; `auto` and unsupported
+  renderer inputs emit no `BitsPerSecond=` directive.
 - **#2524 (ring-entries bound):** `system dataplane ring-entries` was
   min-only (`ValidateIntegerMin(1)`) — any large value committed and was
   handed to the Rust helper, which preallocates ~3×ring_entries UMEM frames

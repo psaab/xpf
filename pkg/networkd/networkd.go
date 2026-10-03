@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/rendersafe"
 )
@@ -58,7 +59,7 @@ type InterfaceConfig struct {
 	Unmanaged        bool     // true = not in config; keep down with no addresses
 	Disable          bool     // true = administratively disabled (keep down)
 	DADDisable       bool     // true = disable IPv6 Duplicate Address Detection
-	Speed            string   // link speed: "10M", "100M", "1G", "10G", etc.
+	Speed            string   // Junos link speed, converted to numeric networkd BitsPerSecond
 	Duplex           string   // "full", "half", or "auto"
 	MTU              int      // interface MTU (0 = default)
 	Description      string   // interface description (maps to .network [Network] Description)
@@ -855,8 +856,13 @@ func renderedUnitTokenError(ifc InterfaceConfig) error {
 				return err
 			}
 		}
-		if ifc.Speed != "" {
-			if err := unitTokenError("BitsPerSecond", junosSpeedToNetworkd(ifc.Speed)); err != nil {
+		if normalized := strings.ToLower(strings.TrimSpace(ifc.Speed)); normalized != "" && normalized != "auto" {
+			if err := unitTokenError("BitsPerSecond", ifc.Speed); err != nil {
+				return err
+			}
+		}
+		if speed := junosSpeedToNetworkd(ifc.Speed); speed != "" {
+			if err := unitTokenError("BitsPerSecond", speed); err != nil {
 				return err
 			}
 		}
@@ -992,8 +998,8 @@ func (m *Manager) generateLink(ifc InterfaceConfig) string {
 	if ifc.MTU > 0 {
 		fmt.Fprintf(&b, "MTUBytes=%d\n", ifc.MTU)
 	}
-	if ifc.Speed != "" {
-		fmt.Fprintf(&b, "BitsPerSecond=%s\n", junosSpeedToNetworkd(ifc.Speed))
+	if speed := junosSpeedToNetworkd(ifc.Speed); speed != "" {
+		fmt.Fprintf(&b, "BitsPerSecond=%s\n", speed)
 	}
 	switch ifc.Duplex {
 	case "full", "half":
@@ -1120,33 +1126,15 @@ func (m *Manager) generateNetwork(ifc InterfaceConfig) string {
 	return b.String()
 }
 
-// junosSpeedToNetworkd converts Junos speed notation to systemd-networkd BitsPerSecond.
-// Junos uses "10m", "100m", "1g", "10g", "25g", "40g", "100g", "auto".
-// networkd expects numeric bps value (e.g. "1000000000" for 1G).
+// junosSpeedToNetworkd converts the shared Junos Mbps value to networkd's
+// numeric BitsPerSecond representation. `auto` and unsupported values have
+// no fixed rate and intentionally produce no directive.
 func junosSpeedToNetworkd(speed string) string {
-	s := strings.ToLower(strings.TrimSpace(speed))
-	switch s {
-	case "10m":
-		return "10000000"
-	case "100m":
-		return "100000000"
-	case "1g":
-		return "1000000000"
-	case "2.5g":
-		return "2500000000"
-	case "5g":
-		return "5000000000"
-	case "10g":
-		return "10000000000"
-	case "25g":
-		return "25000000000"
-	case "40g":
-		return "40000000000"
-	case "100g":
-		return "100000000000"
-	default:
-		return speed // pass through as-is
+	mbps, ok := config.InterfaceSpeedMbps(speed)
+	if !ok {
+		return ""
 	}
+	return strconv.FormatUint(mbps*1_000_000, 10)
 }
 
 // addressIsIPv6 reports whether a CIDR address string (e.g.

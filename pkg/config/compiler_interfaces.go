@@ -103,9 +103,25 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			}
 		}
 
-		// Speed and duplex (ether-options or gigether-options)
+		// Speed tokens are typed in the schema and rechecked here for callers
+		// that compile directly. Tolerant loads discard an unsupported legacy
+		// token with a warning so one bad value cannot block activation.
 		if speedNode := child.FindChild("speed"); speedNode != nil {
-			ifc.Speed = nodeVal(speedNode)
+			raw := nodeVal(speedNode)
+			speed := strings.ToLower(strings.TrimSpace(raw))
+			if speed == "auto" {
+				ifc.Speed = speed
+			} else if _, ok := InterfaceSpeedMbps(speed); ok {
+				ifc.Speed = speed
+			} else {
+				msg := fmt.Sprintf("interfaces %s speed %q: %v", ifName, raw, ValidateInterfaceSpeed(raw, nil))
+				if !opts.lenientInterfaceSpeed {
+					return fmt.Errorf("%s", msg)
+				}
+				if warnings != nil {
+					*warnings = append(*warnings, msg+"; ignoring invalid speed")
+				}
+			}
 		}
 		if duplexNode := child.FindChild("duplex"); duplexNode != nil {
 			duplex := nodeVal(duplexNode)

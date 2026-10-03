@@ -2989,6 +2989,9 @@ type compileOpts struct {
 	// lenientInterfaceDuplex (#11824) warns and clears invalid duplex values
 	// on tolerant loads; strict compilation rejects them.
 	lenientInterfaceDuplex bool
+	// lenientInterfaceSpeed (#11797) warns and clears unsupported speed
+	// tokens on tolerant loads; strict compilation rejects them.
+	lenientInterfaceSpeed bool
 
 	// lenientVlanUnitMTU (#9837) downgrades the tagged-unit-MTU gate — a
 	// tagged unit whose family MTU exceeds the interface-level `mtu` — from
@@ -3295,6 +3298,7 @@ func lenientCompileOpts() compileOpts {
 		lenientVlanUnitMTU:                     true,
 		lenientInterfaceBandwidth:              true,
 		lenientInterfaceDuplex:                 true,
+		lenientInterfaceSpeed:                  true,
 		lenientInterfaceNumericBounds:          true,
 		lenientBareLeafInstance9838:            true,
 		lenientSystemHostname:                  true,
