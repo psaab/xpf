@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig, instanceName string) error {
+func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig, instanceName string, warnings *[]string) error {
 	// #11314: SetPath can encode multiple routing-options leaves as a chain
 	// under the first leaf. Split declared siblings before FindChild so a
 	// router-id does not silently swallow a following autonomous-system. Work
@@ -137,23 +137,19 @@ func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig, instanceName st
 		ro.StaticRoutes = compileStaticRoutes(staticNode, ro.StaticRoutes)
 	}
 
-	// Parse rib-groups
+	// Parse rib-groups. Duplicate named blocks are folded before compilation;
+	// this accumulator also unions definitions across repeated routing-options roots.
 	if rgNode := node.FindChild("rib-groups"); rgNode != nil {
 		if ro.RibGroups == nil {
 			ro.RibGroups = make(map[string]*RibGroup)
 		}
 		for _, inst := range namedInstances(rgNode.FindChildren("")) {
-			rg := compileRibGroup(inst.name, inst.node)
-			ro.RibGroups[rg.Name] = rg
+			mergeRibGroupDefinition(ro.RibGroups, compileRibGroup(inst.name, inst.node), warnings)
 		}
-		// Also handle direct children (non-named instances)
+		// Also handle direct children (non-named instances). Merge duplicate
+		// definitions in source order so split blocks match flat-set leaf lists.
 		for _, child := range rgNode.Children {
-			name := child.Name()
-			if _, exists := ro.RibGroups[name]; exists {
-				continue
-			}
-			rg := compileRibGroup(name, child)
-			ro.RibGroups[rg.Name] = rg
+			mergeRibGroupDefinition(ro.RibGroups, compileRibGroup(child.Name(), child), warnings)
 		}
 	}
 
@@ -638,7 +634,7 @@ func compileRoutingInstances(node *Node, cfg *Config) error {
 				ri.Interfaces = append(ri.Interfaces, firewallMatchValues(prop)...)
 			case "routing-options":
 				var ro RoutingOptionsConfig
-				if err := compileRoutingOptions(prop, &ro, instanceName); err != nil {
+				if err := compileRoutingOptions(prop, &ro, instanceName, &cfg.Warnings); err != nil {
 					return fmt.Errorf("instance %s routing-options: %w", instanceName, err)
 				}
 				ri.StaticRoutes = ro.StaticRoutes
@@ -1576,6 +1572,23 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string) {
 // import the same way (#3876).
 const mainRIBTableID = 254
 
+// mergeRibGroupDefinition accumulates import-rib entries from repeated blocks
+// into the first definition, matching the union produced by flat-set syntax.
+// Repeats across separate routing-options roots are also announced to the user.
+func mergeRibGroupDefinition(ribGroups map[string]*RibGroup, next *RibGroup, warnings *[]string) {
+	if next == nil {
+		return
+	}
+	if first := ribGroups[next.Name]; first != nil {
+		first.ImportRibs = append(first.ImportRibs, next.ImportRibs...)
+		if warnings != nil {
+			*warnings = append(*warnings, duplicateBlockMergeWarning9023("rib-groups "+next.Name))
+		}
+		return
+	}
+	ribGroups[next.Name] = next
+}
+
 // compileRibGroup builds one RibGroup from the AST node that carries its body.
 //
 // It exists because compileRoutingOptions reaches a rib-group by TWO arms — the
@@ -1610,6 +1623,7 @@ const mainRIBTableID = 254
 // flat-set path (verified against the parsed ASTs — `import-rib [ inet.0
 // inet.2 ]` yields Keys=["import-rib","inet.0","inet.2"] with no bracket
 // token), which is why every other #2419 reader in this package omits it.
+
 func compileRibGroup(name string, node *Node) *RibGroup {
 	rg := &RibGroup{Name: name}
 	for _, irNode := range node.FindChildren("import-rib") {

@@ -38,12 +38,14 @@ package config
 // Explicit rather than a predicate, so a container joins by a reviewed decision
 // -- the same discipline compactNormalizeInScope settled on.
 //
-// The `*` keyword is reserved for routing-instances, whose immediate child key
-// is the operator-defined instance name rather than a fixed Junos keyword.
+// The `*` keyword is for containers whose immediate child key is a dynamic
+// operator-defined name, currently routing-instances and rib-groups.
 var dupBlockMergeSites9023 = []struct{ parent, keyword string }{
 	{"snmp", "trap-group"},
 	{"sampling", "instance"},
 	{"routing-instances", "*"},
+	// #11791: the named groups' import-rib lists accumulate across blocks.
+	{"rib-groups", "*"},
 
 	// Issue 9209. These four became visible when #9024 taught the #8436 census
 	// to build a NESTED fixture: each has only container children, so no
@@ -103,7 +105,7 @@ func mergeDuplicateBlocks9023(tree *ConfigTree) []string {
 				continue
 			}
 			if site.keyword == "*" {
-				for _, name := range mergeDuplicateRoutingInstances9023(n) {
+				for _, name := range mergeDuplicateNamedChildren9023(n) {
 					merged = append(merged, site.parent+" "+name)
 				}
 				continue
@@ -152,10 +154,9 @@ func mergeDuplicateRoutingInstanceContainers9023(children []*Node) ([]*Node, boo
 	return kept, true
 }
 
-// mergeDuplicateRoutingInstances9023 folds repeated dynamic instance-name
-// children of one routing-instances container, preserving both packed leaf
-// tails and braced bodies just like mergeInstancesUnder.
-func mergeDuplicateRoutingInstances9023(parent *Node) []string {
+// mergeDuplicateNamedChildren9023 folds repeated dynamic-name children into
+// the first occurrence, preserving packed leaf tails and braced bodies.
+func mergeDuplicateNamedChildren9023(parent *Node) []string {
 	if parent == nil {
 		return nil
 	}

@@ -38,9 +38,8 @@ var ErrEBPFDataplaneRetired = errors.New(
 		"use 'set system dataplane-type userspace' " +
 		"(see #1373)")
 
-// duplicateBlockMergeWarning9023 gives the 9023 fold a truthful warning for
-// routing instances, whose former behavior emitted separate typed records
-// rather than replacing one AST block with another.
+// duplicateBlockMergeWarning9023 gives dynamic named-block folds truthful
+// diagnostics for routing instances and rib-group definitions.
 func duplicateBlockMergeWarning9023(what string) string {
 	if what == "routing-instances" {
 		return "duplicate `routing-instances` containers were merged in source order (#9023)"
@@ -48,6 +47,11 @@ func duplicateBlockMergeWarning9023(what string) string {
 	if strings.HasPrefix(what, "routing-instances ") {
 		name := strings.TrimPrefix(what, "routing-instances ")
 		return "duplicate routing-instance definition `" + name + "` was merged into one typed instance in source order (#11459/#9023)"
+	}
+	if strings.HasPrefix(what, "rib-groups ") {
+		name := strings.TrimPrefix(what, "rib-groups ")
+		return "duplicate rib-group definition `" + name + "` was merged into one " +
+			"rib-group in source order (#11791)"
 	}
 	return "duplicate block `" + what + "` — the repeated statements were merged into the " +
 		"first occurrence (#9023); previously the later block replaced the earlier " +
