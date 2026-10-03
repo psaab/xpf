@@ -16,31 +16,57 @@ func defaultPolicyTree11821(t *testing.T, text string) *ConfigTree {
 
 func TestConflictingDefaultPolicyStanzasRejectedAndFailClosed11821(t *testing.T) {
 	cases := []struct {
-		name string
-		text string
+		name   string
+		text   string
+		first  string
+		second string
 	}{
 		{
-			name: "one policies block permit then deny",
+			name:   "one policies block permit then deny",
+			first:  "permit-all",
+			second: "deny-all",
 			text: `security { policies {
 				default-policy { permit-all; }
 				default-policy { deny-all; }
 			} }`,
 		},
 		{
-			name: "one policies block deny then permit",
+			name:   "one policies block deny then permit",
+			first:  "deny-all",
+			second: "permit-all",
 			text: `security { policies {
 				default-policy { deny-all; }
 				default-policy { permit-all; }
 			} }`,
 		},
 		{
-			name: "repeated security roots permit then deny",
+			name:   "repeated policies blocks in one security root",
+			first:  "permit-all",
+			second: "deny-all",
+			text: `security {
+				policies { default-policy { permit-all; } }
+				policies { default-policy { deny-all; } }
+			}`,
+		},
+		{
+			name:   "repeated security roots permit then deny",
+			first:  "permit-all",
+			second: "deny-all",
 			text: `security { policies { default-policy { permit-all; } } }
 			security { policies { default-policy { deny-all; } } }`,
 		},
 		{
-			name: "repeated security roots deny then permit",
+			name:   "repeated security roots deny then permit",
+			first:  "deny-all",
+			second: "permit-all",
 			text: `security { policies { default-policy { deny-all; } } }
+			security { policies { default-policy { permit-all; } } }`,
+		},
+		{
+			name:   "repeated security roots reject then permit",
+			first:  "reject-all",
+			second: "permit-all",
+			text: `security { policies { default-policy { reject-all; } } }
 			security { policies { default-policy { permit-all; } } }`,
 		},
 	}
@@ -51,7 +77,7 @@ func TestConflictingDefaultPolicyStanzasRejectedAndFailClosed11821(t *testing.T)
 			if err == nil {
 				t.Fatal("strict compile accepted conflicting default-policy stanzas")
 			}
-			for _, want := range []string{"security policies default-policy", "permit-all", "deny-all", "#11821"} {
+			for _, want := range []string{"security policies default-policy", tc.first, tc.second, "#11821"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("strict error %q does not name %q", err, want)
 				}
@@ -67,8 +93,8 @@ func TestConflictingDefaultPolicyStanzasRejectedAndFailClosed11821(t *testing.T)
 			foundWarning := false
 			for _, warning := range cfg.Warnings {
 				if strings.Contains(warning, "security policies default-policy") &&
-					strings.Contains(warning, "permit-all") &&
-					strings.Contains(warning, "deny-all") &&
+					strings.Contains(warning, tc.first) &&
+					strings.Contains(warning, tc.second) &&
 					strings.Contains(warning, "#11821") {
 					foundWarning = true
 					break
