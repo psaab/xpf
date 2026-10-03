@@ -4781,6 +4781,7 @@ func TestGenerateRoutesBlackhole(t *testing.T) {
 		GenerateRoutes: []*config.GenerateRoute{
 			{Prefix: "192.168.0.0/16", Discard: true},
 			{Prefix: "2001:db8::/32"},
+			{Prefix: "198.51.100.0/24", Policy: "contributors"},
 		},
 	}
 	_ = m.ApplyFull(fc) // reload may fail without vtysh
@@ -4791,6 +4792,9 @@ func TestGenerateRoutesBlackhole(t *testing.T) {
 	}
 	if !strings.Contains(got, "ipv6 route 2001:db8::/32 blackhole") {
 		t.Errorf("missing IPv6 blackhole route in:\n%s", got)
+	}
+	if strings.Contains(got, "198.51.100.0/24") {
+		t.Errorf("policy-bearing generate route was rendered despite having no verified contributors:\n%s", got)
 	}
 }
 

@@ -1691,11 +1691,6 @@ func ValidateConfig(cfg *Config) []string {
 	// validateUnhandledRibWarnings for the #1960 reasoning.
 	warnings = append(warnings, validateUnhandledRibWarnings(cfg)...)
 
-	// #11456: a generate route carrying a contributing-route policy is not
-	// installed anywhere (no evaluator, no contributor feed — fail closed).
-	// Warn rather than reject — the strict acceptance predates the fix (#1960).
-	warnings = append(warnings, validateGenerateRoutePolicyWarnings(cfg)...)
-
 	// #1387: DHCP dynamic-DNS live-backend validation. Increment 2 wired the
 	// live RFC 2136 backend, so the increment-1 "no records are published"
 	// deferred-backend warning is retired. The warnings here flag a config

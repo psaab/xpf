@@ -184,5 +184,18 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesBridgeDomainMembership11387(tree, cfg, opts); err != nil {
 		return err
 	}
+	// #11456: a contributing-route policy on a generate route cannot be
+	// evaluated against xpf's incomplete contributor feed. Append after every
+	// established gate so its unsupported-shape error does not steal an
+	// existing first-error slot. The tolerant path keeps old configs bootable
+	// but warns; both FRR and userspace renderers omit the aggregate.
+	if err := validateGenerateRoutePolicyStrict(cfg); err != nil {
+		if opts.lenientGenerateRoutePolicy {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("generate route policy (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 	return nil
 }
