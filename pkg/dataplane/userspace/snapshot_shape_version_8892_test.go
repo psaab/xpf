@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "e3fca04db8c3201a60a5d88168d2c0b57343324ae5cb42dc13ddfbff2e38c071"
+	snapshotShapeGolden8892 = "bee6dff89bf6b6826006c979a05b77790a3358734674b4c18566b48c90088f6a"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -424,12 +424,12 @@ const (
 	// v41 -> v42 BUMPED (#11503): ProcessStatus adds two status-wire cause
 	// counters; this golden digest stays unchanged because ProcessStatus is
 	// outside the ConfigSnapshot shape walk.
-// v42 -> v43 BUMPED (#11463): InterfaceSnapshot.AdminDisabled prevents
-	// disabled interface addresses from seeding connected and local state.
-	// v43 -> v44 BUMPED (#11423): TunnelEndpointSnapshot.link_up carries
+	// v42 -> v43 BUMPED (#11463): InterfaceSnapshot.AdminDisabled excludes
+	// disabled route members from the userspace FIB.
+	// v43 -> v44 BUMPED (#11423): TunnelEndpointSnapshot.LinkUp carries
 	// keepalive-driven tunnel liveness; an old helper would keep down ECMP
 	// members live. The shape digest therefore moves with the contract.
-	snapshotShapeVersion8892 = 43
+	snapshotShapeVersion8892 = 44
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

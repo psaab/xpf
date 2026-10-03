@@ -377,13 +377,12 @@ const (
 	// fences the mixed route contract.
 	// v41 -> v42 (#11503): ProcessStatus carries distinct ingress and egress
 	// unzoned-policy-denial counters for status and metrics consumers.
-// v42 -> v43 (#11463): InterfaceSnapshot.AdminDisabled records disabled
-	// rows; Go omits their configured and live addresses and Rust also honors
-	// the flag for connected/local/egress-primary derivation. The exact version
-	// gate prevents an older helper from silently ignoring disabled state.
-	// v43 -> v44 (#11423): TunnelEndpointSnapshot.LinkUp carries keepalive-driven
-	// tunnel netdev liveness; an older helper keeps down GRE ECMP members live.
-	ProtocolVersion = 43
+	// v42 -> v43 (#11463): InterfaceSnapshot.AdminDisabled carries disabled
+	// member state into userspace route derivation; a v42 helper keeps them live.
+	// v43 -> v44 (#11423; v43 is used by #11463): TunnelEndpointSnapshot.LinkUp
+	// carries keepalive-driven tunnel netdev liveness; an older helper keeps
+	// down GRE ECMP members live.
+	ProtocolVersion = 44
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
