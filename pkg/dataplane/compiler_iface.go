@@ -651,7 +651,7 @@ func buildZoneConfig(zone *config.ZoneConfig, name string, zid uint16, result *C
 	}
 
 	// Look up screen profile ID for this zone
-	if zone.ScreenProfile != "" {
+	if zone.ScreenProfile != "" && !zone.DroppedEnforcementChild {
 		if sid, ok := result.ScreenIDs[zone.ScreenProfile]; ok {
 			zc.ScreenProfileID = sid
 			slog.Info("zone screen profile assigned",
@@ -731,6 +731,13 @@ func programZoneMaps(dp DataPlane, cfg *config.Config, result *CompileResult) (*
 				Name: "zone:" + name,
 				Reason: "nil zone slot — every interface in this zone was dropped from the " +
 					"required set and none can be enumerated",
+			})
+			continue
+		}
+		if zone.DroppedEnforcementChild {
+			result.recordUnarmedSurface(UnarmedSurface{
+				Name:   "zone:" + name,
+				Reason: "unknown enforcement-bearing security-zone child was dropped; zone excluded from dataplane maps",
 			})
 			continue
 		}
@@ -932,7 +939,7 @@ func (st *zoneMapState) mapZoneInterface(dp DataPlane, cfg *config.Config, resul
 			}
 		}
 	}
-	if zone.ScreenProfile != "" {
+	if zone.ScreenProfile != "" && !zone.DroppedEnforcementChild {
 		profile, ok := cfg.Security.Screen[zone.ScreenProfile]
 		if !ok {
 			return fmt.Errorf("screen profile %q not found for zone %q",
@@ -2084,7 +2091,7 @@ func validateZoneScreenReferences(cfg *config.Config, result *CompileResult) err
 		// A nil zone slot is reachable on the tolerant / HA-peer-sync paths and
 		// programZoneMaps skips it, so skip it here too: this sweep must reject
 		// exactly what the loop rejects, never more.
-		if zone == nil || zone.ScreenProfile == "" {
+		if zone == nil || zone.ScreenProfile == "" || zone.DroppedEnforcementChild {
 			continue
 		}
 		if result != nil {

@@ -393,6 +393,12 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		// persisted, or a peer sends, still loads. Strict where the operator
 		// can fix it, tolerant where refusing would brick the node.
 		if closed {
+			if parent == securityZoneSchema9792() && len(path) > 0 {
+				return &unknownSecurityZoneChildSchemaError{
+					path:    strings.Join(redactSecretPath(path), " "),
+					keyword: keyword,
+				}
+			}
 			return fmt.Errorf("%s: unknown configuration keyword %q under closed-world subtree",
 				strings.Join(redactSecretPath(path), " "), keyword)
 		}

@@ -173,5 +173,11 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
+	// #11575 follows every established uniform gate to preserve strict
+	// first-error priority. Unknown zone children are warned on tolerant
+	// compile; enforcement-bearing typos have already left the zone unbound.
+	if err := runUniformGatesUnknownSecurityZoneChild11575(cfg, opts); err != nil {
+		return err
+	}
 	return nil
 }

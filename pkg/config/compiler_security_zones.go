@@ -566,8 +566,24 @@ func compileZones(node *Node, sec *SecurityConfig) error {
 					zone.AddressBook = ab
 				}
 				parseAddressBookEntries(prop, ab)
+			default:
+				recordUnknownSecurityZoneChild11575(zone, prop.Name())
 			}
 		}
+	}
+	// A dropped child whose spelling could name an enforcement control makes
+	// the zone's effective intent ambiguous. Tolerant Load/SyncApply keeps the
+	// node bootable but removes every interface binding and screen claim, so
+	// neither the kernel dataplane nor userspace can present a healthy zone.
+	// Apply after all repeated security-zone blocks so later siblings cannot
+	// restore bindings after the poison was recorded.
+	for _, zone := range sec.Zones {
+		if zone == nil || !zone.DroppedEnforcementChild {
+			continue
+		}
+		zone.Interfaces = nil
+		zone.ScreenProfile = ""
+		zone.ScreenProfileConfigured = false
 	}
 	return nil
 }
