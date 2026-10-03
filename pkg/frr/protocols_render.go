@@ -207,24 +207,19 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				// `authentication { md5 1; }` — a clean commit — emitted
 				// `ip ospf message-digest-key 1 md5` with no argument, and
 				// `authentication { simple-password; }` emitted
-				// `ip ospf authentication-key` with none. vtysh rejects a
-				// keyword missing its argument, and ONE rejected line fails the
-				// entire managed-section reload (#1880/#2223) — taking down all
-				// dynamic routing, not just OSPF. RIP and IS-IS already guard
-				// this; OSPF was the only path that did not.
+				// `ip ospf authentication-key`, both vtysh-rejected keywords
+				// that fail the whole managed-section reload (#1880/#2223).
 				if iface.AuthKey != "" && iface.AuthType == "md5" {
-					// #11462: compute the token FIRST and gate BOTH lines on it.
-					// Emitting the mode line unconditionally left auth-with-no-key
-					// when the key held whitespace (#9050 omits only the key line):
-					// simple mode then uses zero bytes and message-digest resolves
-					// to NULL auth -- neither fails closed.
-					if tok, ok := authTokenOrOmit("ospf-md5", iface.AuthKey.Reveal()); ok {
+					// #11794: no renderer default. A tolerant load or an
+					// externally-assembled Config may bypass SchemaValidate;
+					// emit neither half of the authentication pair unless the
+					// configured key-id is in FRR's 1..255 domain.
+					if iface.AuthKeyID < 1 || iface.AuthKeyID > 255 {
+						slog.Warn("frr: omitting OSPF MD5 authentication with an invalid key-id (#11794)",
+							"interface", sanitizeFRRValue(iface.Name), "key_id", iface.AuthKeyID)
+					} else if tok, ok := authTokenOrOmit("ospf-md5", iface.AuthKey.Reveal()); ok {
 						b.WriteString(" ip ospf authentication message-digest\n")
-						keyID := iface.AuthKeyID
-						if keyID == 0 {
-							keyID = 1
-						}
-						fmt.Fprintf(&b, " ip ospf message-digest-key %d md5 %s\n", keyID, tok)
+						fmt.Fprintf(&b, " ip ospf message-digest-key %d md5 %s\n", iface.AuthKeyID, tok)
 					}
 				} else if iface.AuthKey != "" && iface.AuthType == "simple" {
 					// #11462: same token-first gate as the md5 arm above.

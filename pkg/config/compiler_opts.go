@@ -824,6 +824,10 @@ type compileOpts struct {
 	// chars (sanitizeFRRValue) so the malformed line stays inert/single-line.
 	// Same doctrine as lenientRoutingExportRef.
 	lenientFRRAuthValues bool
+	// lenientOSPFMD5KeyID11794 downgrades an invalid compiled OSPF MD5 key-id
+	// from a strict commit error to a warning on tolerant load / peer-sync.
+	// The FRR render belt independently omits the invalid authentication lines.
+	lenientOSPFMD5KeyID11794 bool
 	// lenientRouteFilterMatchTypes (#2525) downgrades the route-filter
 	// match-type gate (validateRouteFilterMatchTypesStrict) from a hard
 	// compile error to a cfg.Warnings entry. The strict commit / commit-check
@@ -3098,6 +3102,7 @@ func lenientCompileOpts() compileOpts {
 		lenientVLANMap:                         true,
 		lenientRoutingExportRef:                true,
 		lenientFRRAuthValues:                   true,
+		lenientOSPFMD5KeyID11794:               true,
 		lenientRouteFilterMatchTypes:           true,
 		lenientApplicationSpecs:                true,
 		lenientApplicationNameCollisions:       true,

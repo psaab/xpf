@@ -186,7 +186,14 @@ func compileProtocols(node *Node, proto *ProtocolsConfig) error {
 							case "md5":
 								iface.AuthType = "md5"
 								if v := nodeVal(authChild); v != "" {
-									if n, err := strconv.Atoi(v); err == nil {
+									n, err := strconv.Atoi(v)
+									if err != nil {
+										// Preserve an unmistakably invalid value for
+										// validateOSPFMD5KeyIDs11794. Zero used to be
+										// ambiguous with the renderer's fabricated
+										// default key-id, hiding Atoi failures.
+										iface.AuthKeyID = -1
+									} else {
 										iface.AuthKeyID = n
 									}
 								}

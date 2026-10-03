@@ -193,5 +193,17 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := validateGenerateRoutePolicyStrict(cfg); err != nil && !opts.lenientGenerateRoutePolicy {
 		return err
 	}
+	// #11794: a key-id outside FRR's 1..255 domain must not reach the renderer.
+	// Appended after existing uniform gates so a new error cannot steal their
+	// established first-error priority. Tolerant loads preserve the config with
+	// a warning; the renderer omits an invalid MD5 authentication block.
+	if err := validateOSPFMD5KeyIDs11794(cfg); err != nil {
+		if opts.lenientOSPFMD5KeyID11794 {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("OSPF MD5 key-id (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
 	return nil
 }

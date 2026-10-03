@@ -2394,21 +2394,20 @@ func TestGenerateProtocols_OSPFMD5Auth(t *testing.T) {
 	}
 }
 
-func TestGenerateProtocols_OSPFMD5AuthDefaultKeyID(t *testing.T) {
+func TestGenerateProtocols_OSPFMD5AuthUnsetKeyIDOmitted11794(t *testing.T) {
 	m := New()
 	ospf := &config.OSPFConfig{
-		Areas: []*config.OSPFArea{
-			{
-				ID: "0.0.0.0",
-				Interfaces: []*config.OSPFInterface{
-					{Name: "trust0", AuthType: "md5", AuthKey: "key1"},
-				},
-			},
-		},
+		Areas: []*config.OSPFArea{{
+			ID: "0.0.0.0",
+			Interfaces: []*config.OSPFInterface{{
+				Name: "trust0", AuthType: "md5", AuthKey: "key1",
+			}},
+		}},
 	}
 	got := m.generateProtocols(ospf, nil, nil, nil, nil, "", 0, nil, nil)
-	if !strings.Contains(got, "message-digest-key 1 md5 key1") {
-		t.Errorf("default key-id should be 1, got:\n%s", got)
+	if strings.Contains(got, "ip ospf authentication message-digest") ||
+		strings.Contains(got, "ip ospf message-digest-key") {
+		t.Errorf("unset key-id must not fabricate key 1 or emit partial MD5 auth:\n%s", got)
 	}
 }
 

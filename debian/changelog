@@ -2,6 +2,8 @@ xpf (0.0.0) unstable; urgency=medium
 
   * Limit each dynamic command value to one word in tab completion and `?`
     help, matching the command walker’s one-value grammar (#11835).
+  * Reject invalid OSPF MD5 key IDs rather than defaulting them to 1 or
+    rendering values FRR cannot accept (#11794).
 
   * Keep foreign DSCP-scoped destination rules out of the userspace FIB
     mirror rather than widening them into unconditional NextTable leaks
