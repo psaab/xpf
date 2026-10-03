@@ -489,12 +489,14 @@ so the three cannot drift into describing the same ALG differently.
 **PPTP (#7699), stated precisely because "Missing" is no longer accurate and
 "Done" would be a claim the box cannot honour.**
 
-What EXISTS: the TCP/1723 control-channel parser (Outgoing-Call-Reply), the
-per-call association table with a locally derived direction-symmetric handle,
-cross-worker publication of a learned call, an idle expiry that does not depend
-on seeing a teardown, and — as of the data-channel resolve — a GRE version-1
-data packet resolving its call id to that handle, so two simultaneous calls
-between one endpoint pair no longer alias into one session.
+What EXISTS: the TCP/1723 control-channel parser (Outgoing-Call-Reply and
+Call-Disconnect-Notify), the per-call association table with a locally derived
+direction-symmetric handle, cross-worker publication of learned calls and
+per-call CDN teardown of both call-id aliases, control-channel FIN/RST cleanup,
+an idle expiry that refreshes on data traffic and remains a fallback if teardown
+is missed, and — as of the data-channel resolve — a GRE version-1 data packet
+resolving its call id to that handle. Two simultaneous calls between one
+endpoint pair no longer alias into one session.
 
 What does NOT exist, and why each is listed rather than fixed:
 
@@ -503,10 +505,6 @@ What does NOT exist, and why each is listed rather than fixed:
   unimplemented, which is why this row is not "Done": an operator can configure
   nothing here, and the separation above happens on its own under
   `gre-performance-acceleration`.
-* **Control-channel CLOSE observation.** Nothing recognises the FIN/RST that
-  would forget a call's associations, so the idle timeout is the only
-  association lifetime that runs on a live box. Bounded, but later than a
-  teardown would be.
 * **Association survival across a failover.** HA session sync carries no tunnel
   discriminator at all (the #7188 limitation the commit advisory names), so a
   synced PPTP session arrives at the peer with a zero discriminator and its

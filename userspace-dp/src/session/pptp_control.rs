@@ -1,12 +1,12 @@
-//! RFC 2637 PPTP control-channel parsing (#7699 stage 2).
+//! RFC 2637 PPTP control-channel parsing (#7699 stage 2, #11601 per-call teardown).
 //!
 //! # What this is for
 //!
 //! A PPTP GRE data packet carries only ONE of a call's two Call IDs — the one
 //! belonging to the peer it is sent to — so the pair that identifies a call can
-//! only be learned from the control channel on TCP/1723. This module turns a
-//! control-channel segment into that pair; [`crate::session::pptp`] turns the
-//! pair into the direction-neutral handle the dataplane keys on.
+//! only be learned from the control channel on TCP/1723. An Outgoing-Call-Reply
+//! announces both IDs, while a Call-Disconnect-Notify names the PAC-allocated
+//! ID to forget; [`crate::session::pptp`] owns the direction-neutral association.
 //!
 //! # What this is NOT
 //!
@@ -16,9 +16,10 @@
 //! [`ControlParse::Truncated`] otherwise. That is a designed degradation, not a
 //! defaulted one: a truncated message means *no association learned*, which
 //! routes into the unassociated path stage 1 already built — the packet
-//! forwards and is counted. PPTP control messages are small (an
-//! Outgoing-Call-Reply is 32 bytes) and a stack that splits one across segments
-//! is pathological, but it must land somewhere defined rather than nowhere.
+//! forwards and is counted. PPTP control messages are small (32-byte
+//! Outgoing-Call-Reply and 148-byte Call-Disconnect-Notify), and a stack that
+//! splits one across segments is pathological, but it must land somewhere
+//! defined rather than nowhere.
 //!
 //! Also not: call-ID rewriting for NAT, a general ALG framework, or IPv6.
 //!
@@ -29,8 +30,9 @@
 //! co-locating them buys nothing anyway because RSS hashes the flow tuple — the
 //! two channels are not reliably on the same worker. Once the session/policy
 //! path admits a TCP/1723 segment, the data path COPIES it into this inbox and
-//! moves on; the worker's periodic work drains it, parses, installs and
-//! broadcasts. A denied pre-policy segment never enters the inbox.
+//! moves on; the worker's periodic work drains it, parses, learns calls, applies
+//! per-call disconnects and broadcasts both changes. A denied pre-policy
+//! segment never enters the inbox.
 //!
 //! The association is not needed for the control packet itself — it is needed
 //! for the GRE data packets that follow.
@@ -103,6 +105,9 @@ struct InboxInner {
     /// Control closes refused by a full peer queue, retried by periodic drain.
     pending_forgets: Vec<PendingChannelForget>,
     last_forget_retry_ns: u64,
+    /// Per-call CDN commands refused by full peer queues.
+    pending_call_forgets: Vec<PendingCallForget>,
+    last_call_forget_retry_ns: u64,
 }
 
 /// A control close still waiting for bounded peer-worker queues to accept it.
@@ -110,6 +115,13 @@ struct InboxInner {
 pub(crate) struct PendingChannelForget {
     pub(crate) control: crate::session::pptp::ControlChannelId,
     pub(crate) closed_ns: u64,
+    pub(crate) unsent_queue_ids: Vec<usize>,
+}
+
+/// A CDN still waiting for bounded peer-worker queues to accept it.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingCallForget {
+    pub(crate) disconnect: crate::session::pptp::PptpCallDisconnect,
     pub(crate) unsent_queue_ids: Vec<usize>,
 }
 
@@ -238,6 +250,37 @@ impl PptpControlInbox {
         }
     }
 
+    /// Remember queues that refused a CDN for later bounded retry.
+    pub(crate) fn record_call_forget(
+        &self,
+        disconnect: crate::session::pptp::PptpCallDisconnect,
+        unsent_queue_ids: Vec<usize>,
+    ) {
+        if unsent_queue_ids.is_empty() {
+            return;
+        }
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(existing) = inner
+            .pending_call_forgets
+            .iter_mut()
+            .find(|pending| pending.disconnect == disconnect)
+        {
+            for queue_id in unsent_queue_ids {
+                if !existing.unsent_queue_ids.contains(&queue_id) {
+                    existing.unsent_queue_ids.push(queue_id);
+                }
+            }
+        } else {
+            inner.pending_call_forgets.push(PendingCallForget {
+                disconnect,
+                unsent_queue_ids,
+            });
+        }
+    }
+
     /// Take a snapshot of due close retries. Queue locks are acquired only
     /// after this inbox lock has been released.
     pub(crate) fn take_channel_forget_retries(&self, now_ns: u64) -> Vec<PendingChannelForget> {
@@ -254,6 +297,22 @@ impl PptpControlInbox {
         inner.pending_forgets.clone()
     }
 
+    /// Take due CDN retries without holding the inbox lock while workers are
+    /// queued.
+    pub(crate) fn take_call_forget_retries(&self, now_ns: u64) -> Vec<PendingCallForget> {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if inner.last_call_forget_retry_ns != 0
+            && now_ns.saturating_sub(inner.last_call_forget_retry_ns) < CONTROL_DRAIN_INTERVAL_NS
+        {
+            return Vec::new();
+        }
+        inner.last_call_forget_retry_ns = now_ns;
+        inner.pending_call_forgets.clone()
+    }
+
     /// Acknowledge a close accepted by one peer queue.
     pub(crate) fn mark_channel_forget_sent(
         &self,
@@ -267,6 +326,24 @@ impl PptpControlInbox {
         };
         inner.pending_forgets.retain_mut(|pending| {
             if pending.control == control && pending.closed_ns == closed_ns {
+                pending.unsent_queue_ids.retain(|id| *id != queue_id);
+            }
+            !pending.unsent_queue_ids.is_empty()
+        });
+    }
+
+    /// Acknowledge a CDN accepted by one peer queue.
+    pub(crate) fn mark_call_forget_sent(
+        &self,
+        disconnect: crate::session::pptp::PptpCallDisconnect,
+        queue_id: usize,
+    ) {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner.pending_call_forgets.retain_mut(|pending| {
+            if pending.disconnect == disconnect {
                 pending.unsent_queue_ids.retain(|id| *id != queue_id);
             }
             !pending.unsent_queue_ids.is_empty()
@@ -294,6 +371,11 @@ const MSG_TYPE_CONTROL: u16 = 1;
 /// ID` is the sender's own, and `Peer's Call ID` echoes the requester's. An
 /// Outgoing-Call-Request alone names one side and cannot pair a call.
 const CTRL_OUTGOING_CALL_REPLY: u16 = 8;
+/// RFC 2637 §2.13 Control Message Type 13 — Call-Disconnect-Notify.
+const CTRL_CALL_DISCONNECT_NOTIFY: u16 = 13;
+/// Total length of a Call-Disconnect-Notify, including its 12-byte header and
+/// 128-byte Call Statistics field (RFC 2637 §2.13).
+const CALL_DISCONNECT_NOTIFY_LEN: usize = 148;
 /// Total length of an Outgoing-Call-Reply, header included (RFC 2637 §2.8).
 const OUTGOING_CALL_REPLY_LEN: usize = 32;
 /// RFC 2637 §2.8 Result Code 1 — Connected. Any other value is a call that did
@@ -303,7 +385,7 @@ const RESULT_CONNECTED: u8 = 1;
 
 /// What a control-channel segment yielded.
 ///
-/// Four outcomes rather than `Option`, because the reasons are operationally
+/// Five outcomes rather than `Option`, because the reasons are operationally
 /// different and two of them are not errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ControlParse {
@@ -313,6 +395,8 @@ pub(crate) enum ControlParse {
     /// destination. That asymmetry is the whole reason the pair must be learned
     /// here rather than derived from a data packet.
     CallReply { call_id: u16, peer_call_id: u16 },
+    /// A complete Call-Disconnect-Notify naming the PAC-allocated call id.
+    CallDisconnect { call_id: u16 },
     /// A well-formed control message this stage does not learn from — a
     /// different message type, or a reply whose Result Code says the call did
     /// not connect.
@@ -346,6 +430,20 @@ pub(crate) fn parse_control_segment(payload: &[u8]) -> ControlParse {
         return ControlParse::NotControl;
     }
     let ctrl_type = u16::from_be_bytes([payload[8], payload[9]]);
+    if ctrl_type == CTRL_CALL_DISCONNECT_NOTIFY {
+        if declared_len != CALL_DISCONNECT_NOTIFY_LEN {
+            return ControlParse::Ignored;
+        }
+        // The CDN carries a fixed 128-byte statistics tail; do not remove
+        // state from a partial message.
+        if payload.len() < CALL_DISCONNECT_NOTIFY_LEN {
+            return ControlParse::Truncated;
+        }
+        // RFC 2637 §2.13: this is the Call ID assigned by the PAC that sent
+        // the segment, so the association table is queried under `src`.
+        let call_id = u16::from_be_bytes([payload[12], payload[13]]);
+        return ControlParse::CallDisconnect { call_id };
+    }
     if ctrl_type != CTRL_OUTGOING_CALL_REPLY {
         return ControlParse::Ignored;
     }
@@ -391,7 +489,10 @@ pub(crate) fn learn_from_control_segment(
             dst,
             peer_call_id,
         )),
-        ControlParse::Ignored | ControlParse::Truncated | ControlParse::NotControl => None,
+        ControlParse::CallDisconnect { .. }
+        | ControlParse::Ignored
+        | ControlParse::Truncated
+        | ControlParse::NotControl => None,
     }
 }
 
@@ -423,11 +524,33 @@ pub(crate) mod fixtures_7699 {
         assert_eq!(m.len(), OUTGOING_CALL_REPLY_LEN, "fixture must match the RFC length");
         m
     }
+    /// Build a Call-Disconnect-Notify exactly as RFC 2637 §2.13 lays it out.
+    pub(crate) fn call_disconnect_notify(call_id: u16) -> Vec<u8> {
+        let mut m = Vec::with_capacity(CALL_DISCONNECT_NOTIFY_LEN);
+        m.extend_from_slice(&(CALL_DISCONNECT_NOTIFY_LEN as u16).to_be_bytes()); // Length
+        m.extend_from_slice(&MSG_TYPE_CONTROL.to_be_bytes()); // PPTP Message Type
+        m.extend_from_slice(&MAGIC_COOKIE.to_be_bytes()); // Magic Cookie
+        m.extend_from_slice(&CTRL_CALL_DISCONNECT_NOTIFY.to_be_bytes()); // Control Message Type
+        m.extend_from_slice(&0u16.to_be_bytes()); // Reserved0
+        m.extend_from_slice(&call_id.to_be_bytes()); // PAC-assigned Call ID
+        m.push(1); // Result Code
+        m.push(0); // Error Code
+        m.extend_from_slice(&0u16.to_be_bytes()); // Cause Code
+        m.extend_from_slice(&0u16.to_be_bytes()); // Reserved1
+        m.extend_from_slice(&[0; 128]); // Call Statistics
+        assert_eq!(
+            m.len(),
+            CALL_DISCONNECT_NOTIFY_LEN,
+            "fixture must match the RFC length"
+        );
+        m
+    }
 }
 
 #[cfg(test)]
 mod tests_7699 {
     use super::fixtures_7699::outgoing_call_reply;
+    use super::fixtures_7699::call_disconnect_notify;
     use super::*;
 
     fn ip(s: &str) -> std::net::IpAddr {
@@ -554,6 +677,33 @@ mod tests_7699 {
         let mut other = outgoing_call_reply(1, 2, RESULT_CONNECTED);
         other[8..10].copy_from_slice(&7u16.to_be_bytes()); // Outgoing-Call-Request
         assert_eq!(parse_control_segment(&other), ControlParse::Ignored);
+    }
+    #[test]
+    fn call_disconnect_notify_yields_the_pac_allocated_call_id_11601() {
+        let (pac, pns) = (ip("198.51.100.7"), ip("203.0.113.9"));
+        let msg = call_disconnect_notify(0xAAAA);
+        assert_eq!(
+            parse_control_segment(&msg),
+            ControlParse::CallDisconnect { call_id: 0xAAAA }
+        );
+        assert!(
+            learn_from_control_segment(pac, pns, &msg).is_none(),
+            "a CDN removes an association; it never installs one"
+        );
+        let mut wrong_length = msg.clone();
+        wrong_length[..2].copy_from_slice(
+            &((CALL_DISCONNECT_NOTIFY_LEN - 1) as u16).to_be_bytes(),
+        );
+        assert_eq!(
+            parse_control_segment(&wrong_length),
+            ControlParse::Ignored,
+            "only the fixed RFC 2637 CDN length is accepted"
+        );
+        assert_eq!(
+            parse_control_segment(&msg[..CALL_DISCONNECT_NOTIFY_LEN - 1]),
+            ControlParse::Truncated,
+            "an incomplete statistics tail must not complete a CDN"
+        );
     }
 }
 

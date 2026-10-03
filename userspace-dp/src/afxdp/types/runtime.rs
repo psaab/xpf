@@ -857,6 +857,9 @@ pub(in crate::afxdp) enum WorkerCommand {
     /// worker that keeps a stale association re-pairs a REUSED 16-bit call id
     /// onto a dead handle, which is a mis-attribution rather than a leak.
     ForgetPptpCall(u32),
+    /// #11601: forget a call named by its allocator's CDN, fenced by the
+    /// control channel and capture time so a delayed event cannot erase reuse.
+    ForgetPptpCallByControl(crate::session::pptp::PptpCallDisconnect),
     /// #11053: forget calls learned on this channel by its close, independently
     /// of each worker's local handle set.
     ForgetPptpControlChannel {
