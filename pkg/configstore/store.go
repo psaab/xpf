@@ -498,6 +498,26 @@ type Store struct {
 	// and a journal entry so the loss is visible instead of warning-only.
 	// Cleared by the next fully-successful saveRollbackFiles().
 	rollbackPersistDegraded bool
+	// archivePersistDegraded records that the most recent auto-archive attempt
+	// failed to durably write its timestamped config copy (#11805). The commit
+	// itself still succeeds — the canonical active config persisted via the
+	// #1799 persist-before-promote path — but the on-box archive of that
+	// version is missing (scan failure skipped the write, the write failed, or
+	// rotation failed). Surfaced via ArchiveDegraded() and a journal entry so
+	// the loss is visible instead of warning-only. Cleared by the next
+	// fully-successful archive (write plus rotation both succeeded).
+	archivePersistDegraded bool
+	// archiveFailureCount counts every auto-archive failure since process
+	// start (scan skip, write error, rotation error). Monotonic: a later
+	// success clears archivePersistDegraded but never rewinds this total.
+	// Surfaced via ArchiveFailureCount() and the
+	// xpf_config_archive_failures_total counter. Guarded by s.mu with the bit
+	// above so a scrape observes a consistent pair.
+	archiveFailureCount uint64
+	// archiveAttempt and archiveSettled fence async writer completions so an
+	// older commit cannot clear or overwrite the outcome of a newer archive.
+	archiveAttempt        uint64
+	archiveSettledAttempt uint64
 
 	// appliedDigest is the digest of the active config TEXT that most recently
 	// completed a full apply to the dataplane/kernel (#4957). It is written by

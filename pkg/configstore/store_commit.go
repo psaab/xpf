@@ -361,6 +361,11 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 	// same lock before it Wait()s — so no Add can start after the fence, and the
 	// WaitGroup counter never rises from zero concurrently with Wait.
 	if s.archiveDir != "" && !s.archiveFenced.Load() {
+		// Each commit owns one local archive attempt. Completion is async, so
+		// the attempt number prevents an older writer from overwriting the
+		// health result of a newer commit.
+		s.archiveAttempt++
+		archiveAttempt := s.archiveAttempt
 		// #6404: re-attempt the archive-seq reseed if a prior SetArchiveConfig
 		// scan of this dir failed (archiveSeedDir != archiveDir).
 		// commitWithDescriptionLocked runs under s.mu.Lock (write), so
@@ -378,6 +383,7 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 			// commit's archive entirely — the next commit after the scan
 			// recovers archives correctly. Skipping one archive during a
 			// scan-failure window is strictly safer than writing a mis-seq'd one.
+			s.noteArchiveResultLocked(archiveAttempt, fmt.Errorf("archive sequence reseed scan failed"))
 			slog.Warn("archive seq unconfirmed after scan failure; skipping this commit's archive, will archive on the next successful commit",
 				"dir", s.archiveDir)
 		} else {
@@ -401,9 +407,11 @@ func (s *Store) commitWithDescriptionLocked(description, principal string) (*con
 					return
 				}
 				archiveWriteBarrier()
-				if err := writeArchive(dir, max, data, ts, seq); err != nil {
+				err := writeArchive(dir, max, data, ts, seq)
+				if err != nil {
 					slog.Warn("auto-archive failed", "err", err)
 				}
+				s.noteArchiveResult(archiveAttempt, err)
 			}()
 		}
 	}

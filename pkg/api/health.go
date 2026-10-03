@@ -83,6 +83,16 @@ func (s *Server) healthHandler(w http.ResponseWriter, _ *http.Request) {
 		payload["rollback_history_degraded"] = s.rollbackHistoryDegradedFn()
 	}
 
+	// #11805: local auto-archive is a best-effort recovery copy, so its
+	// failure is visible to probes but does not make an otherwise-forwarding
+	// daemon unhealthy.
+	if s.archiveDegradedFn != nil {
+		payload["archive_degraded"] = s.archiveDegradedFn()
+	}
+	if s.archiveFailureCountFn != nil {
+		payload["archive_failure_count"] = s.archiveFailureCountFn()
+	}
+
 	// #10751: bootstrap lifeline-guard swap failure is likewise a non-fatal
 	// field. The daemon is up and fail-closed (global barrier retained);
 	// only remote recovery may be blocked.

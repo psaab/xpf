@@ -1531,6 +1531,11 @@ func parseArchiveSeq(name string) (uint64, bool) {
 // reliably forced to fail from a unit test, least of all when tests run as root.
 var archiveDirReader = os.ReadDir
 
+// archiveRotateDirReader reads archive names during rotation. It is separate
+// from archiveDirReader, which reads the directory for seq reseeding, so tests
+// can distinguish the two failure surfaces.
+var archiveRotateDirReader = os.ReadDir
+
 // archiveScanBudget bounds how long the archive-seq reseed scan may hold the
 // global store mutex waiting for the archive directory to answer (#6776).
 //
@@ -1896,9 +1901,12 @@ func writeArchive(archiveDir string, maxArchives int, data string, ts time.Time,
 
 	slog.Info("config archived", "path", path)
 
-	// Rotate old archives
+	// Rotate old archives. A failed scan/removal means retention is incomplete,
+	// so surface it to the caller instead of reporting a full success.
 	if maxArchives > 0 {
-		rotateArchives(archiveDir, maxArchives)
+		if err := rotateArchives(archiveDir, maxArchives); err != nil {
+			return fmt.Errorf("rotate archives: %w", err)
+		}
 	}
 	return nil
 }
@@ -1915,6 +1923,56 @@ func (s *Store) RollbackHistoryDegraded() bool {
 	return s.rollbackPersistDegraded
 }
 
+// ArchiveDegraded reports whether the latest auto-archive attempt failed.
+// The active config commit itself succeeded; only its best-effort archive
+// copy was lost. A fully-successful later archive (including rotation) clears
+// the bit.
+func (s *Store) ArchiveDegraded() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.archivePersistDegraded
+}
+
+// ArchiveFailureCount returns the cumulative number of failed auto-archive
+// attempts since this process started. Success clears ArchiveDegraded but
+// never rewinds this monotonic counter.
+func (s *Store) ArchiveFailureCount() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.archiveFailureCount
+}
+
+// noteArchiveResultLocked records the completion of the latest archive attempt.
+// The caller holds s.mu. A delayed writer from an older commit cannot override
+// the status for a newer commit.
+func (s *Store) noteArchiveResultLocked(attempt uint64, err error) {
+	if err != nil {
+		s.archiveFailureCount++
+	}
+	if attempt != s.archiveAttempt || attempt <= s.archiveSettledAttempt {
+		return
+	}
+	s.archiveSettledAttempt = attempt
+	if err == nil {
+		s.archivePersistDegraded = false
+		return
+	}
+	if !s.archivePersistDegraded {
+		s.journalLog(&JournalEntry{
+			Action:    "archive_persist_error",
+			Detail:    "auto-archive scan, write, or rotation failed; the committed config copy is missing or retention is incomplete",
+			Principal: "system:configstore",
+		})
+	}
+	s.archivePersistDegraded = true
+}
+
+func (s *Store) noteArchiveResult(attempt uint64, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.noteArchiveResultLocked(attempt, err)
+}
+
 // JournalPermsDegraded reports whether journal permission repair is in a
 // failed state: a pre-0600 segment could not be tightened and
 // world-readable history (which may carry operator free text) may still be
@@ -1928,11 +1986,13 @@ func (s *Store) JournalPermsDegraded() bool {
 }
 
 // rotateArchives keeps at most maxArchives recognized XPF snapshots and leaves
-// unrelated files in a shared archive directory untouched.
-func rotateArchives(dir string, maxArchives int) {
-	entries, err := os.ReadDir(dir)
+// unrelated files in a shared archive directory untouched. A failed scan or
+// removal is returned so an archive is not reported healthy when retention
+// could not be completed.
+func rotateArchives(dir string, maxArchives int) error {
+	entries, err := archiveRotateDirReader(dir)
 	if err != nil {
-		return
+		return fmt.Errorf("scan archive directory for rotation: %w", err)
 	}
 
 	var archives []string
@@ -1943,7 +2003,7 @@ func rotateArchives(dir string, maxArchives int) {
 	}
 
 	if len(archives) <= maxArchives {
-		return
+		return nil
 	}
 
 	// Sort by the monotonic per-filename SEQ (#5523 C179-060), NOT lexically by
@@ -1970,13 +2030,17 @@ func rotateArchives(dir string, maxArchives int) {
 		return archives[i] < archives[j]
 	})
 
-	// Remove oldest.
-	for i := 0; i < len(archives)-maxArchives; i++ {
-		path := filepath.Join(dir, archives[i])
+	// Remove oldest. Concurrent commits can race to remove the same file;
+	// archiveRemoveErr suppresses the benign loser-side ENOENT.
+	var removeErrors []error
+	for _, name := range archives[:len(archives)-maxArchives] {
+		path := filepath.Join(dir, name)
 		if err := archiveRemoveErr(path); err != nil {
 			slog.Warn("failed to remove old archive", "path", path, "err", err)
+			removeErrors = append(removeErrors, fmt.Errorf("remove old archive %s: %w", path, err))
 		}
 	}
+	return errors.Join(removeErrors...)
 }
 
 // archiveRemoveErr removes a single rotated archive file and returns the error

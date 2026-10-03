@@ -275,6 +275,14 @@ type Config struct {
 	// reported as a non-fatal field plus the gauge for alerting. Optional;
 	// if nil, the field and gauge are omitted.
 	RollbackHistoryDegradedFn func() bool
+	// ArchiveDegradedFn reports whether the latest local auto-archive failed.
+	// The committed config remains active and durable; only its best-effort
+	// recovery copy (or archive retention) failed. Optional; non-fatal health
+	// field plus gauge are omitted when nil.
+	ArchiveDegradedFn func() bool
+	// ArchiveFailureCountFn returns the cumulative count of failed local
+	// auto-archive attempts. Optional; the counter is omitted when nil.
+	ArchiveFailureCountFn func() uint64
 	// JournalPermsDegradedFn surfaces the configstore journal's
 	// permission-repair-degraded state via /health and the
 	// xpf_config_journal_perms_degraded gauge (#9898 F-113, mirrors the
@@ -643,6 +651,8 @@ type Server struct {
 	configApplyDebtFn                    func() (bool, uint64, string)
 	rollbackHistoryDegradedFn            func() bool
 	journalPermsDegradedFn               func() bool
+	archiveDegradedFn                    func() bool
+	archiveFailureCountFn                func() uint64
 	neighborPhaseAgeFn                   func() map[string]float64
 	frrReloadDegradedFn                  func() bool
 	frrQuarantinedRouteMapsFn            func() []string
@@ -770,6 +780,8 @@ func NewServer(cfg Config) *Server {
 		configPersistDegradedFn:              cfg.ConfigPersistDegradedFn,
 		earlyInputGuardSwapFailedFn:          cfg.EarlyInputGuardSwapFailedFn,
 		rollbackHistoryDegradedFn:            cfg.RollbackHistoryDegradedFn,
+		archiveDegradedFn:                    cfg.ArchiveDegradedFn,
+		archiveFailureCountFn:                cfg.ArchiveFailureCountFn,
 		journalPermsDegradedFn:               cfg.JournalPermsDegradedFn,
 		configApplyDebtFn:                    cfg.ConfigApplyDebtFn,
 		neighborPhaseAgeFn:                   cfg.NeighborPhaseAgeFn,

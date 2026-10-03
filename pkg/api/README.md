@@ -44,6 +44,12 @@ liveness/readiness. Prometheus metrics endpoint. SSE event streams.
   `rollback_history_degraded` field plus the
   `xpf_config_rollback_persist_degraded` 0/1 gauge (also emitted even
   when the dataplane is not loaded) for alerting.
+  `ArchiveDegradedFn` (#11805) reports failed local auto-archive scans,
+  writes, or rotation as the non-fatal `archive_degraded` health field and
+  `xpf_config_archive_degraded` gauge; `ArchiveFailureCountFn` exposes the
+  cumulative `xpf_config_archive_failures_total` counter. Both are emitted
+  even when the dataplane is not loaded, and a later complete archive clears
+  the degraded gauge without rewinding the counter.
   `JournalPermsDegradedFn` (#9898 F-113, same injection pattern) reports
   whether journal permission repair is degraded (a segment could not be
   tightened to owner-only 0600); likewise non-fatal
