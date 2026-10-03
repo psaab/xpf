@@ -5,6 +5,9 @@
 
 use super::*;
 use crate::afxdp::mirror::MIRROR_TX_FRAME_RESERVE;
+#[path = "cos_classify_ba.rs"]
+mod ba;
+use ba::{ba_ingress_trust, resolve_trusted_ba_queue_id, BaIngressTrust};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::afxdp) struct CoSTxSelection {
@@ -33,52 +36,6 @@ fn map_cached_forwarding_class_queue(
     forwarding_class: Option<&Arc<str>>,
 ) -> Option<u8> {
     forwarding_class.and_then(|class| iface.queue_by_forwarding_class.get(class.as_ref()).copied())
-}
-
-/// #11386: per-type behavior-aggregate trust from the ingress unit's classifier
-/// bindings.
-///
-/// Egress-bound BA classifiers must not trust wire markings arriving from an
-/// ingress unit that does not bind that classifier type. A guest-zone sender
-/// self-marking DSCP CS7/EF (or PCP 7) would otherwise land in the egress
-/// NC/EF queue plus an onward DSCP rewrite, because every BA arm below keys
-/// only on `egress_ifindex` + wire marking. Junos assigns the forwarding
-/// class at ingress (unclassified = best-effort); gating each BA arm on the
-/// ingress unit binding that classifier type is the equivalent here.
-///
-/// Resolved from the LOGICAL ingress ifindex (VLAN unit), exactly like the
-/// ingress-filter identity, falling back to the physical ifindex when no
-/// logical row exists. An ingress with no CoS state (the common LAN-port
-/// case) trusts nothing: every BA arm is skipped and the packet falls to the
-/// egress default (best-effort) queue with LOW loss-priority. Host-originated
-/// frames (`ingress_ifindex == 0`) likewise carry no ingress binding and fall
-/// to the default queue; filter `then forwarding-class` still pins them.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct BaIngressTrust {
-    dscp: bool,
-    inet_precedence: bool,
-    ieee8021: bool,
-}
-/// Read the classifier-type bindings from the logical ingress unit.
-fn ba_ingress_trust(
-    forwarding: &ForwardingState,
-    ingress_ifindex: u32,
-    ingress_vlan_id: u16,
-) -> BaIngressTrust {
-    let logical = resolve_ingress_logical_ifindex(
-        forwarding,
-        ingress_ifindex as i32,
-        ingress_vlan_id,
-    )
-    .unwrap_or(ingress_ifindex as i32);
-    let Some(ingress) = forwarding.cos.interfaces.get(&logical) else {
-        return BaIngressTrust::default();
-    };
-    BaIngressTrust {
-        dscp: !ingress.dscp_classifier.is_empty(),
-        inet_precedence: !ingress.inet_precedence_classifier.is_empty(),
-        ieee8021: !ingress.ieee8021_classifier.is_empty(),
-    }
 }
 
 /// #2238: classification verdict for a LOCALLY-GENERATED reply frame,
@@ -301,37 +258,6 @@ fn flowless_cos_ba_queue_id(
     )
     .unwrap_or(iface.default_queue)
 }
-
-/// Resolve the per-packet BA queue, allowing each wire-marking classifier only
-/// when the corresponding classifier type is bound on ingress (#11386).
-fn resolve_trusted_ba_queue_id(
-    iface: &CoSInterfaceConfig,
-    dscp: u8,
-    ingress_pcp: u8,
-    vlan_present: bool,
-    trust: BaIngressTrust,
-) -> Option<u8> {
-    (if trust.dscp {
-        resolve_cos_dscp_classifier_queue_id(iface, dscp)
-    } else {
-        None
-    })
-    .or_else(|| {
-        if trust.inet_precedence {
-            resolve_cos_inet_precedence_classifier_queue_id(iface, dscp)
-        } else {
-            None
-        }
-    })
-    .or_else(|| {
-        if trust.ieee8021 {
-            resolve_cos_ieee8021_classifier_queue_id(iface, ingress_pcp, vlan_present)
-        } else {
-            None
-        }
-    })
-}
-
 
 /// #5158: cached-seed TX-selection variant for the POST-NAT transit forward
 /// path. `egress_wire_key` (the post-NAT on-wire tuple, #3642) drives the
