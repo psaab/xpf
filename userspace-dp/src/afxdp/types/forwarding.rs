@@ -1126,6 +1126,9 @@ pub(in crate::afxdp) struct MirrorRuntimeConfig {
 pub(in crate::afxdp) struct RouteNextHopV4 {
     pub(in crate::afxdp) next_hop: Option<Ipv4Addr>,
     pub(in crate::afxdp) ifindex: i32,
+    /// Stable logical interface identity; unlike ifindex, it is shared by
+    /// HA peers and survives node-local kernel renumbering.
+    pub(in crate::afxdp) logical_interface_id: u64,
     pub(in crate::afxdp) tunnel_endpoint_id: u16,
     pub(in crate::afxdp) weight: u32,
 }
@@ -1134,8 +1137,22 @@ pub(in crate::afxdp) struct RouteNextHopV4 {
 pub(in crate::afxdp) struct RouteNextHopV6 {
     pub(in crate::afxdp) next_hop: Option<Ipv6Addr>,
     pub(in crate::afxdp) ifindex: i32,
+    /// Stable logical interface identity shared across HA peers, independent of
+    /// the node-local ifindex.
+    pub(in crate::afxdp) logical_interface_id: u64,
     pub(in crate::afxdp) tunnel_endpoint_id: u16,
     pub(in crate::afxdp) weight: u32,
+}
+
+/// Stable 64-bit, FNV-1a-derived identity for a configured interface name.
+/// Computed while building the snapshot so per-flow ECMP ranking reads one word.
+pub(in crate::afxdp) fn ecmp_logical_interface_id(interface: &str) -> u64 {
+    interface
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+        ^ interface.len() as u64
 }
 
 #[derive(Clone, Debug)]
@@ -1281,6 +1298,7 @@ impl RouteEntryV4 {
             next_hops: vec![RouteNextHopV4 {
                 next_hop,
                 ifindex,
+                logical_interface_id: 0,
                 tunnel_endpoint_id,
                 weight: 1,
             }],
@@ -1309,6 +1327,7 @@ impl RouteEntryV6 {
             next_hops: vec![RouteNextHopV6 {
                 next_hop,
                 ifindex,
+                logical_interface_id: 0,
                 tunnel_endpoint_id,
                 weight: 1,
             }],

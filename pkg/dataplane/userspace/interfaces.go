@@ -1386,6 +1386,10 @@ func unanimousUnitZone(cfg *config.Config, identities map[string]string, authore
 // netdev's LIVE addresses through it) is unit-testable without a real kernel
 // interface — the #5699 base-vs-unit-0 double-emission only manifests when the
 // base netdev actually carries the (unit-0-collapsed) live address.
+// Its ifindex is a node-local data-plane handle, not ECMP identity: HA peers
+// may enumerate the same logical interfaces differently, and this value is
+// refreshed at publish. The snapshot row's Name remains the shared identity
+// from which userspace derives stable ECMP candidate IDs.
 var buildLinkSnapshot = func(linuxName string) (ifindex int, mtu int, hardwareAddr string, addresses []InterfaceAddressSnapshot) {
 	if linuxName == "" {
 		return 0, 0, "", nil

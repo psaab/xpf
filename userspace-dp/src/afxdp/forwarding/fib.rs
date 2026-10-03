@@ -1238,9 +1238,13 @@ fn ecmp_hash_v6(ip: Ipv6Addr) -> u64 {
     ecmp_hash_bytes((bits as u64) ^ ((bits >> 64) as u64))
 }
 
+fn ecmp_candidate_interface_id(identity: u64, interface_id: u64) -> u64 {
+    ecmp_hash_bytes(identity ^ ecmp_hash_bytes(interface_id ^ 0x494e_0000_0000_0001))
+}
+
 /// Hash the complete family-specific next-hop tuple with explicit tags for
-/// address presence and field boundaries. This avoids process-randomized
-/// hashing so candidate identity is stable across reloads and workers.
+/// address presence and field boundaries. Logical interface name replaces
+/// kernel ifindex so HA peers and renumbered nodes rank the same member.
 fn ecmp_candidate_id_v4(candidate: &RouteNextHopV4) -> u64 {
     let mut identity = ecmp_hash_bytes(0x7634_0000_0000_0000);
     identity = match candidate.next_hop {
@@ -1249,12 +1253,9 @@ fn ecmp_candidate_id_v4(candidate: &RouteNextHopV4) -> u64 {
         ),
         None => ecmp_hash_bytes(identity ^ 0x4e48_0000_0000_0000),
     };
-    identity = ecmp_hash_bytes(
-        identity ^ ecmp_hash_bytes(candidate.ifindex as u32 as u64 ^ 0x4946_0000_0000_0002),
-    );
+    identity = ecmp_candidate_interface_id(identity, candidate.logical_interface_id);
     ecmp_hash_bytes(
-        identity
-            ^ ecmp_hash_bytes(candidate.tunnel_endpoint_id as u64 ^ 0x5445_0000_0000_0003),
+        identity ^ ecmp_hash_bytes(candidate.tunnel_endpoint_id as u64 ^ 0x5445_0000_0000_0003),
     )
 }
 
@@ -1272,12 +1273,9 @@ fn ecmp_candidate_id_v6(candidate: &RouteNextHopV6) -> u64 {
         }
         None => ecmp_hash_bytes(identity ^ 0x4e48_0000_0000_0000),
     };
-    identity = ecmp_hash_bytes(
-        identity ^ ecmp_hash_bytes(candidate.ifindex as u32 as u64 ^ 0x4946_0000_0000_0002),
-    );
+    identity = ecmp_candidate_interface_id(identity, candidate.logical_interface_id);
     ecmp_hash_bytes(
-        identity
-            ^ ecmp_hash_bytes(candidate.tunnel_endpoint_id as u64 ^ 0x5445_0000_0000_0003),
+        identity ^ ecmp_hash_bytes(candidate.tunnel_endpoint_id as u64 ^ 0x5445_0000_0000_0003),
     )
 }
 

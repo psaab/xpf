@@ -485,9 +485,23 @@ pub(in crate::afxdp) fn resolve_route_next_hops_v4(
                 state,
                 table,
             );
+            let logical_interface = interface
+                .as_deref()
+                .filter(|name| names.contains_key(*name))
+                .or_else(|| {
+                    state
+                        .ifindex_to_config_name
+                        .get(&ifindex)
+                        .map(String::as_str)
+                })
+                .or(interface.as_deref())
+                .unwrap_or("");
             RouteNextHopV4 {
                 next_hop,
                 ifindex,
+                logical_interface_id: crate::afxdp::types::ecmp_logical_interface_id(
+                    logical_interface,
+                ),
                 tunnel_endpoint_id,
                 weight,
             }
@@ -530,9 +544,23 @@ pub(in crate::afxdp) fn resolve_route_next_hops_v6(
                 state,
                 table,
             );
+            let logical_interface = interface
+                .as_deref()
+                .filter(|name| names.contains_key(*name))
+                .or_else(|| {
+                    state
+                        .ifindex_to_config_name
+                        .get(&ifindex)
+                        .map(String::as_str)
+                })
+                .or(interface.as_deref())
+                .unwrap_or("");
             RouteNextHopV6 {
                 next_hop,
                 ifindex,
+                logical_interface_id: crate::afxdp::types::ecmp_logical_interface_id(
+                    logical_interface,
+                ),
                 tunnel_endpoint_id,
                 weight,
             }
