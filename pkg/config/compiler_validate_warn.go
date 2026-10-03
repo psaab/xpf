@@ -1544,6 +1544,20 @@ func ValidateConfig(cfg *Config) []string {
 						iface.Name))
 				}
 			}
+			// #11785: the interface-level binding is folded only onto declared
+			// logical units. Keep Level for configuration fidelity, but warn
+			// when a configured interface has no unit for it to reach.
+			if iface.Level != nil && ifCfg != nil && len(ifCfg.Units) == 0 {
+				warning := fmt.Sprintf(
+					"class-of-service interface %s has an interface-level binding but no configured logical units under [interfaces]; its Level binding is inert (#11785)",
+					iface.Name)
+				if iface.Level.DSCPClassifier != "" && iface.Level.INetPrecedenceClassifier != "" {
+					warning += fmt.Sprintf(
+						": it binds both a dscp classifier (%q) and an inet-precedence classifier (%q), which classify the same IPv4 TOS byte; bind at most one",
+						iface.Level.DSCPClassifier, iface.Level.INetPrecedenceClassifier)
+				}
+				warnings = append(warnings, warning)
+			}
 			if iface.Level != nil {
 				warnPriorityLowMinShareInert(iface.Level.PriorityLowMinShareBytes)
 			}

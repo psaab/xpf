@@ -2314,3 +2314,146 @@ func TestEqualFlowEnforcementAcceptsEveryRateForm9366(t *testing.T) {
 		})
 	}
 }
+
+// #11785: an interface-level binding has no runtime target when its configured
+// interface stanza has no logical units. Keep the warning scoped to that shape:
+// a folded Level binding with units remains valid, while deleting the last unit
+// must surface the now-inert binding.
+func TestCompileClassOfServiceLevelBindingWithoutUnitsWarns11785(t *testing.T) {
+	hasNoUnitWarning := func(cfg *Config) bool {
+		for _, warning := range cosWarnings(cfg) {
+			if strings.Contains(warning, "no configured logical units") {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("zero units", func(t *testing.T) {
+		cfg, err := CompileConfig(buildCoSTree4021(t, []string{
+			"set interfaces ge-0/0/2 mtu 1500",
+			"set class-of-service interfaces ge-0/0/2 shaping-rate 3g",
+		}))
+		if err != nil {
+			t.Fatalf("compile error: %v", err)
+		}
+		if ifCfg := cfg.Interfaces.Interfaces["ge-0/0/2"]; ifCfg == nil || len(ifCfg.Units) != 0 {
+			t.Fatalf("fixture must configure ge-0/0/2 with zero units, got %#v", ifCfg)
+		}
+		if !hasNoUnitWarning(cfg) {
+			t.Fatalf("interface-level CoS binding with zero units must warn; warnings=%v", cosWarnings(cfg))
+		}
+	})
+	t.Run("Level nil", func(t *testing.T) {
+		cfg, err := CompileConfig(buildCoSTree4021(t, []string{
+			"set interfaces ge-0/0/2 mtu 1500",
+			"set class-of-service interfaces ge-0/0/2 unit 0 shaping-rate 3g",
+		}))
+		if err != nil {
+			t.Fatalf("compile error: %v", err)
+		}
+		cosIface := cfg.ClassOfService.Interfaces["ge-0/0/2"]
+		if cosIface == nil || cosIface.Level != nil {
+			t.Fatalf("fixture must compile a CoS interface without a Level binding, got %#v", cosIface)
+		}
+		if ifCfg := cfg.Interfaces.Interfaces["ge-0/0/2"]; ifCfg == nil || len(ifCfg.Units) != 0 {
+			t.Fatalf("fixture must configure ge-0/0/2 with zero units, got %#v", ifCfg)
+		}
+		if hasNoUnitWarning(cfg) {
+			t.Fatalf("unit-only CoS binding must not trigger the Level-only warning; warnings=%v", cosWarnings(cfg))
+		}
+	})
+
+	t.Run("configured unit", func(t *testing.T) {
+		cfg, err := CompileConfig(buildCoSTree4021(t, []string{
+			"set interfaces ge-0/0/2 unit 0 family inet address 10.0.0.1/24",
+			"set class-of-service interfaces ge-0/0/2 shaping-rate 3g",
+		}))
+		if err != nil {
+			t.Fatalf("compile error: %v", err)
+		}
+		if hasNoUnitWarning(cfg) {
+			t.Fatalf("Level binding folded onto a configured unit must not warn; warnings=%v", cosWarnings(cfg))
+		}
+	})
+	t.Run("missing interfaces stanza", func(t *testing.T) {
+		cfg, err := CompileConfig(buildCoSTree4021(t, []string{
+			"set class-of-service interfaces ge-0/0/2 shaping-rate 3g",
+		}))
+		if err != nil {
+			t.Fatalf("compile error: %v", err)
+		}
+		cosIface := cfg.ClassOfService.Interfaces["ge-0/0/2"]
+		if cosIface == nil || cosIface.Level == nil {
+			t.Fatalf("fixture must retain the interface-level binding, got %#v", cosIface)
+		}
+		if ifCfg := cfg.Interfaces.Interfaces["ge-0/0/2"]; ifCfg != nil {
+			t.Fatalf("fixture must omit the [interfaces] stanza, got %#v", ifCfg)
+		}
+		if hasNoUnitWarning(cfg) {
+			t.Fatalf("missing [interfaces] stanza must not trigger the zero-unit warning; warnings=%v", cosWarnings(cfg))
+		}
+	})
+
+	t.Run("delete last unit", func(t *testing.T) {
+		tree := buildCoSTree4021(t, []string{
+			"set interfaces ge-0/0/2 unit 0 family inet address 10.0.0.1/24",
+			"set interfaces ge-0/0/2 description keep-ifcfg",
+			"set class-of-service interfaces ge-0/0/2 shaping-rate 3g",
+		})
+		cfg, err := CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("initial compile error: %v", err)
+		}
+		if hasNoUnitWarning(cfg) {
+			t.Fatalf("Level binding with unit 0 must not warn before deletion; warnings=%v", cosWarnings(cfg))
+		}
+		path, err := ParseSetCommand("delete interfaces ge-0/0/2 unit 0")
+		if err != nil {
+			t.Fatalf("ParseSetCommand delete: %v", err)
+		}
+		if err := tree.DeletePath(path); err != nil {
+			t.Fatalf("DeletePath last unit: %v", err)
+		}
+		cfg, err = CompileConfig(tree)
+		if err != nil {
+			t.Fatalf("compile after deleting last unit: %v", err)
+		}
+		if !hasNoUnitWarning(cfg) {
+			t.Fatalf("deleting the last unit must expose the inert Level binding; warnings=%v", cosWarnings(cfg))
+		}
+	})
+}
+
+// The same zero-unit warning must identify both names when the Level binding
+// carries the incompatible dscp + inet-precedence pair (#6847).
+func TestCompileClassOfServiceZeroUnitLevelClassifierConflictWarningNames11785(t *testing.T) {
+	lines := append(cosINetPrecedenceBase(),
+		"set class-of-service classifiers dscp dscp-cl forwarding-class voice loss-priority low code-points 46",
+		"set interfaces ge-0/0/2 mtu 1500",
+		"set class-of-service interfaces ge-0/0/2 classifiers dscp dscp-cl",
+		"set class-of-service interfaces ge-0/0/2 classifiers inet-precedence prec-cl",
+	)
+	cfg, err := CompileConfig(buildCoSTree4021(t, lines))
+	if err != nil {
+		t.Fatalf("compile error: %v", err)
+	}
+	var zeroUnitWarning string
+	for _, warning := range cosWarnings(cfg) {
+		if strings.Contains(warning, "no configured logical units") {
+			zeroUnitWarning = warning
+			break
+		}
+	}
+	if zeroUnitWarning == "" {
+		t.Fatalf("zero-unit classifier warning was not emitted; warnings=%v", cosWarnings(cfg))
+	}
+	for _, want := range []string{
+		"dscp classifier", "dscp-cl",
+		"inet-precedence classifier", "prec-cl", "bind at most one",
+	} {
+		if !strings.Contains(zeroUnitWarning, want) {
+			t.Errorf("zero-unit warning %q does not contain %q", zeroUnitWarning, want)
+		}
+	}
+}
