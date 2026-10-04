@@ -8611,6 +8611,18 @@ separate `from community c3` sibling keeps every value (`[c1 c2 c3]`).
 Fail-on-revert covered by `TestPolicyFromCommunity*`, `TestPolicyFromPrefixList*`,
 and `TestPolicyFromASPath*` in `pkg/config/policy_from_multileaf_2689_test.go`.
 
+### Unsupported routing-policy `from` dimensions fail closed (#11779)
+
+Routing-policy terms compile only `protocol`, `prefix-list`, `route-filter`,
+`community`, and `as-path` matches. Previously, another `from` leaf such as
+`rib`, `instance`, `neighbor`, `next-hop`, `metric`, or `tag` was ignored,
+which could turn a constrained `then accept` term into an unconditional accept.
+Strict compilation now rejects unsupported `from` leaves in hierarchical,
+packed, and flat-set forms. Tolerant loads preserve their names in
+`PolicyTerm.UnknownFrom`, force the affected term to `reject`, clear
+`NextPolicy`, and emit a warning. Fail-on-revert coverage is in
+`pkg/config/routing_policy_unknown_from_11779_test.go`.
+
 The policy-statement ACTION `then as-path-prepend "<asn> <asn> ..."` (#2892) is
 the same class on the `then` side. The leaf is `multi:true`
 (`schema_routing.go`: `policy-options policy-statement <name> term <name> then

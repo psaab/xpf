@@ -15,6 +15,9 @@ xpf (0.0.0) unstable; urgency=medium
   * Preserve routing-policy `then next policy` control flow across flat and
     hierarchical config, render FRR chain jumps with resolved destinations,
     and retain fail-closed narrowed-chain fallbacks (#11780).
+  * Reject routing-policy `from` match leaves the compiler cannot represent;
+    tolerant loads record the leaf and fail closed by rejecting the term
+    (#11779).
 
   * Limit each dynamic command value to one word in tab completion and `?`
     help, matching the command walker’s one-value grammar (#11835).

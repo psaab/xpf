@@ -1449,14 +1449,14 @@ func firewallPrefixListRefs(child *Node) []PrefixListRef {
 	return refs
 }
 
-// firewallPackedUnknownFromLeaves returns schema-unknown leaves carried on a
-// packed `from` node. The generic packed-body expander cannot safely synthesize
-// an unknown leaf because its operand arity is not in the schema, but the
-// firewall compiler already has an explicit UnknownFrom contract for exactly
-// that case. Consume the unknown leaf's opaque tail until the next unquoted
+// packedUnknownFromLeaves returns schema-unknown leaves carried on a packed
+// `from` node. The generic packed-body expander cannot safely synthesize an
+// unknown leaf because its operand arity is not in the schema; firewall and
+// routing-policy callers preserve these leaves through their UnknownFrom
+// markers. Consume the unknown leaf's opaque tail until the next unquoted
 // schema-known `from` head; this preserves the first leaf name without
 // mistaking its value for another leaf.
-func firewallPackedUnknownFromLeaves(node *Node, schema *schemaNode) []string {
+func packedUnknownFromLeaves(node *Node, schema *schemaNode) []string {
 	if node == nil || schema == nil || len(node.Keys) == 0 {
 		return nil
 	}
@@ -1599,7 +1599,7 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string, rang
 		// Family-independent fallback for family-less / unknown AST shapes.
 		fromSchema = schemaForPath("firewall", "family", "inet", "filter", "term", "from")
 	}
-	for _, unknown := range firewallPackedUnknownFromLeaves(node, fromSchema) {
+	for _, unknown := range packedUnknownFromLeaves(node, fromSchema) {
 		// The packed scanner emits each opaque leaf once; retaining the
 		// existing append semantics for ordinary child nodes keeps duplicate
 		// authored leaves observable to the existing strict gate.
