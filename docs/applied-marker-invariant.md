@@ -185,7 +185,7 @@ failed to ask:
 2. Is the applier reachable from a periodic converger, or only from a
    transition edge? An edge-only applier loses every failure.
 
-## Measurement 3 — the typed marker is PLAN-KILLED; the registry is built (#7343)
+## Measurement 3 — the typed marker is PLAN-KILLED; the lexical registry was later retired (#7343)
 
 The triage above proposed two mechanisms. Classifying all **42** population
 sites (the count in Measurement 1 was 43; one has since moved) settles which is
@@ -238,15 +238,16 @@ no error *by design*, `process_status`'s readback mirrors bookkeeping the helper
 has *already confirmed*, and its dedup-skip advances when nothing was published
 *and that is correct*.
 
-### What was built instead: the driver registry (I2)
+### What #7343 built at the time: the driver registry (I2; now retired)
 
-`pkg/refactoraudit/applied_marker_registry_7343_test.go` is item 2, and it is
-the half #7343 identified as load-bearing — *"storage without a driver is the
-bug."* It holds two tables: real markers, each naming the periodic symbol that
-re-drives it and why its stamp is correct; and non-markers, each with its
-reason.
+At the time, `pkg/refactoraudit/applied_marker_registry_7343_test.go` was item
+2, intended to classify source assignments and name periodic re-drivers. The
+inventory described below records what that test asserted historically; it is
+not an active repository gate.
 
-Three properties are asserted, and all five mutations of them red:
+
+At the time, three lexical properties were asserted, and five mutations of
+those checks red:
 
 1. **Every population assignment is classified.** A new marker added anywhere in
    the tree arrives as an unclassified statement and fails. This is the
@@ -257,12 +258,14 @@ Three properties are asserted, and all five mutations of them red:
    `ClaimApplyRetry` as its driver — not a `//nolint`, which is precisely the
    suppression #6533 was killed for.
 
-The inventory is keyed on **(file, statement, count)**, not `file:line`: a
-line-keyed registry goes stale on any edit above a site and would fail for
-reasons unrelated to convergence, while counting identical statements per file
-is stable under line drift and still fails when a new assignment appears.
+The historical inventory was keyed on **(file, statement, count)**, not
+`file:line`, to reduce line-drift churn.
 
-**The two reviewer questions below still stand.** The registry checks that a
-driver exists and is named; it does not check that the driver's predicate is
-`desired != applied`, and it cannot tell you whether a *new* marker's stamp is
-on a failure path. That judgement remains review-enforced.
+
+**Current policy:** the lexical registry test and its source-text helpers were
+removed. Counting assignments and searching for driver symbol spellings does
+not exercise publication, rejection, or retry behavior and must not be
+reintroduced as a source-text allowlist. Keep the two reviewer questions
+above, and pin real state transitions with behavior tests at their owning
+appliers, including rejection preserving published state and retry
+convergence.

@@ -262,6 +262,9 @@ type xpfCollector struct {
 	// failed and swanctl local_addrs are still bound to a stale lease
 	// address (the retry loop has not yet reconverged).
 	ipsecRebindPending *prometheus.Desc
+	// #11530: 0/1 gauge — 1 while a link-triggered snapshot refresh or its
+	// FIB-generation invalidation failed and the daemon's worker is retrying.
+	interfaceLinkSnapshotPending *prometheus.Desc
 
 	// #6802: 0/1 gauge — 1 while a host-inbound kernel-conntrack revocation
 	// has FAILED and not yet been re-driven. While set, direct-kernel
@@ -1072,6 +1075,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.frrPolicyChainsNarrowedShape
 	ch <- c.natRulesLenientTerminalAction
 	ch <- c.ipsecRebindPending
+	ch <- c.interfaceLinkSnapshotPending
 	ch <- c.schedulerRepublishFailed
 	ch <- c.schedulerRepublishStale
 	ch <- c.schedulerRepublishFailClosed
@@ -1628,6 +1632,17 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 			v = 1
 		}
 		ch <- prometheus.MustNewConstMetric(c.ipsecRebindPending,
+			prometheus.GaugeValue, v)
+	}
+
+	// #11530: emit the retry-debt signal before the dataplane gate; a helper
+	// publish may have succeeded even though its FIB invalidation is still owed.
+	if c.srv.interfaceLinkSnapshotPendingFn != nil {
+		v := 0.0
+		if c.srv.interfaceLinkSnapshotPendingFn() {
+			v = 1
+		}
+		ch <- prometheus.MustNewConstMetric(c.interfaceLinkSnapshotPending,
 			prometheus.GaugeValue, v)
 	}
 

@@ -2355,6 +2355,31 @@ ConfigSnapshot {
 }
 ```
 
+**Live interface-link refresh (#11530).** Apply-time link revalidation keeps a
+new snapshot from carrying stale ifindexes, but a later RTNL `NEWLINK` or
+`DELLINK` can still change an active interface row. The daemon's always-on link
+subscription queues only exact Linux names backing retained desired-config
+base/unit identities or authored bind-only secure-tunnel rows, and a single
+worker debounces the event burst before taking the normal apply semaphore. The
+manager then rebuilds interface rows from the active desired config and current
+kernel link state, revalidates immediately before publication, and fences
+callbacks carrying a superseded config.
+A delete therefore publishes the missing row without losing the configured
+identity needed to restore it on a same-name recreation. Identical rebuilt
+snapshots are skipped; after a successful interface-row publication, the FIB
+generation is bumped under the same apply serialization. A failed publication
+or FIB bump stays owed for a bounded retry, and a successful RTNL
+resubscription queues a config-scoped refresh to cover events lost while the
+socket was down.
+
+The worker acquires `applySem` with the run context while preserving the
+background-apply shutdown/bootstrap fences. Cancellation during a queued
+acquire lets the worker join without releasing another apply's permit and does
+not clear refresh debt as though a publication had succeeded. Failures remain
+visible through the control-plane
+`xpf_interface_link_snapshot_refresh_pending` gauge until a later worker pass
+publishes current link state and confirms its FIB-generation bump.
+
 **Route-snapshot construction invariants (`buildRouteSnapshots`,
 `pkg/dataplane/userspace/routes.go`).** The builder derives the `routes`
 section from config statics, connected prefixes, and the kernel ip-rule

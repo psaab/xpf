@@ -90,6 +90,13 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 			"local_addrs reconverge on the current lease.",
 		nil, nil,
 	)
+	c.interfaceLinkSnapshotPending = prometheus.NewDesc(
+		"xpf_interface_link_snapshot_refresh_pending",
+		"1 while an RTNL-triggered userspace interface snapshot refresh or its "+
+			"FIB-generation invalidation has failed and not yet converged "+
+			"(#11530). The daemon retries the owed refresh autonomously.",
+		nil, nil,
+	)
 	// #6802: a failed host-inbound conntrack revocation is deliberately NOT a
 	// commit failure — the nft table is already applied, so enforcement for NEW
 	// connections holds, and rolling the commit back over a transient conntrack

@@ -504,12 +504,17 @@ type Daemon struct {
 	// clockSkewAlarmTestTick overrides the production cadence in tests.
 	clockSkewAlarmTestTick time.Duration
 	// pendingFIBBump records an UNCONFIRMED FIB-generation bump after a
-	// successful route-overlay publish (#1844, Codex plan r2-1): the
-	// bump_fib_generation control message failed, so the next actuation
-	// must retry the bump even when its publish is a duplicate-skip —
-	// otherwise cached flow routes stay pinned to pre-failover paths.
-	// Mutated only by the route-overlay actuators under applySem.
+	// successful route-overlay or interface-link snapshot publish (#1844,
+	// #11530): the bump_fib_generation control message failed, so the next
+	// actuator or link-refresh pass retries the bump even when its publish is a
+	// duplicate-skip — otherwise cached flow routes stay pinned to stale paths.
+	// Mutated only by route-overlay actuators and interface-link refreshes under
+	// applySem.
 	pendingFIBBump bool
+	// interfaceLinkSnapshotPending is the health signal for a failed RTNL
+	// snapshot refresh or its FIB-generation invalidation. The single worker
+	// retries the owed refresh; metrics read this atomically.
+	interfaceLinkSnapshotPending atomic.Bool
 	// #2461: one exporter per per-flow-server template group, so a
 	// collector receives the template it referenced (was a single exporter
 	// using the first map-iteration template for every collector).
