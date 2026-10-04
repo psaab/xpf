@@ -169,6 +169,7 @@ fn tun_origin_reverse_exempt_lookup_10038() {
         generation: 0,
         session_id: 0,
         tcp_close_class: 0,
+        tcp_handshake_state: 0,
     };
     let fresh_shared = || Arc::new(Mutex::new(FastMap::default()));
 
@@ -332,6 +333,7 @@ fn tun_origin_legacy_ha_transit_import_does_not_match_10038() {
             generation: 0,
             session_id: 0,
             tcp_close_class: 0,
+            tcp_handshake_state: 0,
         },
     );
     assert!(

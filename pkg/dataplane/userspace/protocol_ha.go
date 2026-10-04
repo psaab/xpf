@@ -235,6 +235,9 @@ type SessionSyncRequest struct {
 	// closing, which imports exactly as before. userspace-dp's
 	// SessionSyncRequest declares the same key.
 	TCPCloseClass uint8 `json:"tcp_close_class,omitempty"`
+	// TCPHandshakeState (#10888): helper TCP handshake phase, independent from
+	// TCP close state. 0 is legacy/absent and preserves established imports.
+	TCPHandshakeState uint8 `json:"tcp_handshake_state,omitempty"`
 	// PeerDelete (#9714) marks a delete sent on behalf of the PEER (the
 	// cluster-stale apply and the #6368 install rollback). The helper refuses such a
 	// delete for a key it holds as a LOCAL session whose owner redundancy group is
@@ -445,6 +448,9 @@ type SessionDeltaInfo struct {
 	// A close-state "update" delta carries the session's new class. An open
 	// carries its current class, so a bulk resync can restore a dropped update.
 	TCPCloseClass uint8 `json:"tcp_close_class,omitempty"`
+	// TCPHandshakeState (#10888): independent handshake phase; 0 is legacy/
+	// absent and preserves established imports.
+	TCPHandshakeState uint8 `json:"tcp_handshake_state,omitempty"`
 	// PurgeRetirement (#9752): this Close retires exactly its key — the
 	// sender already decided the pair (fenced removal, linked or deliberately
 	// preserved companion, conditional worker delete). Every downstream

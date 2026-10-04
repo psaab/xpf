@@ -1513,6 +1513,12 @@ type SessionSync struct {
 	// see stampCloseClassLocked.
 	closeClassSentV4 map[dataplane.SessionKey]sentCloseClass
 	closeClassSentV6 map[dataplane.SessionKeyV6]sentCloseClass
+	// #10888: per tuple, the TCP handshake state this node last SENT for one
+	// session incarnation (matched on SessionID), so mirror-sourced sweeps
+	// cannot regress the opening/handshake phase to legacy zero. Guarded by
+	// genSentMu, beside the generation maps it mirrors.
+	tcpHandshakeSentV4 map[dataplane.SessionKey]sentTCPHandshakeState
+	tcpHandshakeSentV6 map[dataplane.SessionKeyV6]sentTCPHandshakeState
 	// #9752: per tuple, the installing-table identity this node last SENT for
 	// one session incarnation (matched on SessionID), so a mirror-sourced
 	// resend cannot regress it to (0,0). Guarded by genSentMu, beside the
@@ -2015,6 +2021,8 @@ func (s *SessionSync) initGenState() {
 	s.genSentV6 = make(map[dataplane.SessionKeyV6]uint64)
 	s.closeClassSentV4 = make(map[dataplane.SessionKey]sentCloseClass)
 	s.closeClassSentV6 = make(map[dataplane.SessionKeyV6]sentCloseClass)
+	s.tcpHandshakeSentV4 = make(map[dataplane.SessionKey]sentTCPHandshakeState)
+	s.tcpHandshakeSentV6 = make(map[dataplane.SessionKeyV6]sentTCPHandshakeState)
 	s.installTableSentV4 = make(map[dataplane.SessionKey]sentInstallTable)
 	s.installTableSentV6 = make(map[dataplane.SessionKeyV6]sentInstallTable)
 	s.sourceNatICMPSentV4 = make(map[dataplane.SessionKey]sourceNatICMPMemo)

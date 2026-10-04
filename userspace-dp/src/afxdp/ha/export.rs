@@ -303,6 +303,7 @@ impl crate::afxdp::Coordinator {
                 bulk_resync: false,
                 // #9412: carry the synced entry's close class on the bulk export.
                 tcp_close_class: entry.tcp_close_class,
+                tcp_handshake_state: entry.tcp_handshake_state,
                 purge_retirement: false,
             });
         }

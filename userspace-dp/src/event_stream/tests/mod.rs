@@ -147,6 +147,7 @@ fn test_close_delta(kind: crate::session::SessionDeltaKind) -> crate::session::S
         session_id: 0,
         bulk_resync: false,
         tcp_close_class: 0,
+        tcp_handshake_state: 0,
         purge_retirement: false,
     }
 }

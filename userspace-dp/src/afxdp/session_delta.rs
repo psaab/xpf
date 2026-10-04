@@ -430,6 +430,8 @@ pub(in crate::afxdp) fn session_delta_info(
         tunnel_discriminator: delta.key.discriminator.to_wire(),
         // #9412: the close class, on the JSON leg exactly as on the binary frame.
         tcp_close_class: delta.tcp_close_class,
+        // #10888: carry the independent handshake phase on the JSON leg.
+        tcp_handshake_state: delta.tcp_handshake_state,
         // #9752: the installing-table identity, on the JSON leg exactly as on
         // the binary frame's trailing pair. Read from `delta.decision`, the
         // SAME decision the binary open frame encodes, so the two legs cannot
@@ -493,6 +495,7 @@ pub(in crate::afxdp) fn export_close_direct(
         session_id: tombstone.session_id,
         bulk_resync: true,
         tcp_close_class: tombstone.close_class,
+        tcp_handshake_state: 0,
         purge_retirement: false,
     };
     session_delta_info(ident, &delta, zone_id_to_name)

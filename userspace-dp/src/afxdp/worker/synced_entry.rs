@@ -44,6 +44,9 @@ pub(crate) struct SyncedSessionEntry {
     /// carried), from `SessionSyncRequest.tcp_close_class` on a peer import.
     /// `upsert_synced_with_origin` applies it. Local publishes carry `0`.
     pub(crate) tcp_close_class: u8,
+    /// #10888: the owning node's TCP handshake state (`0` = legacy/established).
+    /// `upsert_synced_with_origin` applies it independently of close class.
+    pub(crate) tcp_handshake_state: u8,
 }
 
 impl SyncedSessionEntry {
@@ -67,6 +70,7 @@ impl SyncedSessionEntry {
             tcp_flags: self.tcp_flags,
             session_id: self.session_id,
             tcp_close_class: self.tcp_close_class,
+            tcp_handshake_state: self.tcp_handshake_state,
         }
     }
 }

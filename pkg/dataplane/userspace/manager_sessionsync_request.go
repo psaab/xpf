@@ -122,6 +122,8 @@ func (m *Manager) buildSessionSyncRequestV4(op string, key dataplane.SessionKey,
 		req.TunnelDiscriminator = val.TunnelDiscriminator
 		// #9412: forward the close class so the standby imports the close state.
 		req.TCPCloseClass = val.TCPCloseClass
+		// #10888: forward handshake state separately from the close class.
+		req.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(val.TCPHandshakeState)
 		// #9752: forward the installing-table identity so the standby imports
 		// a PBR-steered session with the table its steer installed.
 		req.InstallTableDomain = val.InstallTableDomain
@@ -235,6 +237,8 @@ func (m *Manager) buildSessionSyncRequestV6(op string, key dataplane.SessionKeyV
 		req.TunnelDiscriminator = val.TunnelDiscriminator
 		// #9412: forward the close class so the standby imports the close state.
 		req.TCPCloseClass = val.TCPCloseClass
+		// #10888: v6 handshake state is independent from the close class.
+		req.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(val.TCPHandshakeState)
 		// #9752: forward the installing-table identity so the standby imports
 		// a PBR-steered session with the table its steer installed.
 		req.InstallTableDomain = val.InstallTableDomain

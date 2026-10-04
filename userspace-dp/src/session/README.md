@@ -283,38 +283,26 @@ sites (install, lookup-refresh, update_session). The override resolves from
 the entry's `ingress_zone`; an empty override map (no zone configures a
 timeout) is byte-identical to pre-#3527.
 
-**HA-sync interaction (#3152).** The `established` field is node-local
-derived state and is NOT carried on the cross-node session-sync wire (no
-wire-format change). Sync-delta emission/gating is unchanged, so HA
-failover semantics are untouched — a half-open session is neither
-specially suppressed from nor specially forced onto the peer. A
-peer-synced session is imported as ESTABLISHED (`upsert_synced_with_
-origin`), NOT re-derived as OPENING from the synced `tcp_flags`. Two
-reasons: (1) the short opening window is a FORWARDING-NODE protection
-against a locally-received bare-SYN flood, and the standby never receives
-that flood directly (it receives synced sessions); (2) the synced
-`tcp_flags` are the install-time flags (the opening SYN for a SYN-created
-flow) and are not guaranteed to be re-published as the primary's
-handshake completes, so deriving OPENING on import could misclassify a
-LIVE established flow on the standby and reap its synced copy at the short
-stale-synced ceiling (`STALE_SYNCED_CEILING_MULT × opening`), breaking
-failover for any flow older than that ceiling. Importing as ESTABLISHED
-preserves the exact pre-#3152 standby behaviour (full established timeout
-+ #2120 standby retention). The half-open table-exhaustion mitigation
-still holds end to end: the primary (the flood target) reaps its
-half-opens at `tcp_opening_ns` and emits a Close delta
-(`session/expire.rs`) that propagates to the standby, removing the synced
-copy promptly without the standby needing its own OPENING window.
+**HA-sync interaction (#10888).** TCP handshake phase crosses the session-sync
+wire in `tcp_handshake_state`, independent of the close class and `tcp_flags`
+(`tcp_flags` remains zero on the production import path). Values 1–4 represent
+OPENING, handshake-pending, SYN-ACK-first-pending, and ESTABLISHED; 0/absent
+retains the legacy established-import behavior. The peer's `SessionUpdate`
+records the reverse SYN-ACK and final-ACK transitions without emitting another
+flow-create event, so the standby does not infer completion from stale
+install-time flags.
 
-The #3527 per-zone opening override composes with this cleanly (the #3315
-plan §11.1 open question). Like `established`, the override is node-local
-derived state and does NOT cross the session-sync wire: it is re-derived
-per node from each node's config snapshot (HA requires identical config,
-so both build the same map). Because a peer-synced session is imported
-ESTABLISHED, its OPENING branch is never taken, so the override is
-irrelevant on the standby for synced sessions — `upsert_synced_with_origin`
-passes `None` explicitly. The override only governs locally-received
-bare-SYN floods on whichever node is forwarding.
+The receiver restores both opening and pending-handshake states with the
+opening timeout (including its local per-zone override); only a completed
+handshake uses the established/application idle timeout. SYN-ACK-first imports
+retain their asymmetric reverse-ACK completion rule. A delivered close class
+continues to take precedence over the opening timeout.
+
+If the primary's Close is lost, a synced opening or pending handshake is
+reaped at its original opening deadline rather than being retained for the
+application timeout or receiving another stale-synced hold interval. Normal
+primary Close propagation still removes the standby copy promptly. Legacy
+peers that omit the field continue to import as established.
 
 **RST vs FIN close (#3046).** A graceful FIN close keeps the full 30 s
 `TCP_CLOSING_TIMEOUT_NS` (TIME_WAIT-style window for half-closed /
