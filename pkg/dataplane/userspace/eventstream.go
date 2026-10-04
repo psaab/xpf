@@ -1896,7 +1896,7 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 		d.SourceNatICMPCode = payload[off+2]
 		off += 3
 	}
-	// #11070: ingress interface identity and stable policy rule identity are
+	// #11070: ingress interface identity and the stable policy rule ID are
 	// appended after the ICMP identity. Older helpers omit these fields.
 	if off+6 <= len(payload) {
 		d.IngressIfindex = int(binary.LittleEndian.Uint32(payload[off : off+4]))
@@ -1908,6 +1908,13 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 		off += 2
 		if ruleIDLen <= len(payload)-off {
 			d.PolicyRuleID = string(payload[off : off+ruleIDLen])
+			off += ruleIDLen
+			// #10888: the new state byte follows the (always-present on new
+			// senders) policy-rule-ID length prefix and bytes. A legacy frame
+			// that ends after the rule ID defaults to 0.
+			if off < len(payload) {
+				d.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
+			}
 		}
 	}
 

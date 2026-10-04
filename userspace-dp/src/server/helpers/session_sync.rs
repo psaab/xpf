@@ -370,6 +370,7 @@ pub(crate) fn build_synced_session_entry(
         // #9412: the owning node's close class. Applied on install, where the
         // copy gets its close bits and its close window.
         tcp_close_class: req.tcp_close_class,
+        tcp_handshake_state: req.tcp_handshake_state,
         key,
         decision: crate::session::SessionDecision {
             resolution: afxdp::ForwardingResolution {

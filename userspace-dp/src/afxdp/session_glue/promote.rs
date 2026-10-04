@@ -161,6 +161,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
             // #9412: republish the promoted session with its LIVE close class, so
             // a worker materializing it from the shared maps keeps the close state.
             tcp_close_class: sessions.close_class_wire_for(key),
+            tcp_handshake_state: sessions.handshake_state_wire_for(key),
         };
         publish_shared_session(
             shared.sessions,

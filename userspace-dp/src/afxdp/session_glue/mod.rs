@@ -2921,6 +2921,7 @@ fn materialize_shared_session_hit(
                 // a closing peer copy is not reset to the established window by the
                 // worker that happens to see its next packet.
                 tcp_close_class: replica.tcp_close_class,
+                tcp_handshake_state: replica.tcp_handshake_state,
             },
             false,
         );

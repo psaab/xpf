@@ -1301,6 +1301,11 @@ pub(crate) struct SessionSyncRequest {
     /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionSyncRequest`).
     #[serde(rename = "tcp_close_class", default)]
     pub tcp_close_class: u8,
+    /// #10888: the owning node's TCP handshake state. 0 (absent/legacy) keeps
+    /// the established import behavior; nonzero values are defined by the
+    /// SessionDeltaInfo/Go wire contract.
+    #[serde(rename = "tcp_handshake_state", default)]
+    pub tcp_handshake_state: u8,
     /// #9714: this delete was sent on behalf of the PEER (the cluster-stale apply
     /// and the #6368 install rollback). The helper refuses such a delete for a key
     /// it holds as a LOCAL session whose owner redundancy group is locally active,

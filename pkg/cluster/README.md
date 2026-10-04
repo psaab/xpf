@@ -3952,10 +3952,24 @@ outside the monitor loop:
       pre-#9412 window), never toward an early reap.
   - **Not the generation.** The generation cannot key it, because every send draws
     a fresh one.
-- **Lifetime and locking.** Evicted in `takeDeleteGenV4/V6`. Bounded by the
-  effective sender cap (`sentCap()`), which starts at the default and grows only
-  on full-of-live demand; held under `genSentMu`, inside the sections that
-  already took it.
+- **TCP-handshake-state resend memo (#10888)**: BPF mirror rows do not carry
+  the sync-only `TCPHandshakeState`, so sweep and bulk resends need the same
+  kind of recovery as close class.
+  - `tcpHandshakeSentV4/V6` preserves the greatest sent stage for the same
+    `(key, SessionID)`; a changed incarnation resets it, and state 0 is not
+    memoized. The stage is restored on mirror-based resends, not derived from
+    `tcp_flags`.
+  - A received state update advances the memo from OPENING (1) through either
+    pending stage (2/3) to ESTABLISHED (4). Unknown wire values normalize to
+    ESTABLISHED for legacy-compatible imports.
+  - **SessionID is identity equality only, never ordering.** As with close
+    class, the generation cannot key this memo because every send draws a fresh
+    one.
+- **Lifetime and locking.** Close-class and handshake-state memos are evicted in
+`takeDeleteGenV4/V6`. Both are bounded by the effective sender cap
+(`sentCap()`), which starts at the default and grows only on full-of-live
+demand; both are held under `genSentMu`, inside the sections that already took
+it.
   - **The one arrival order identity cannot see.** An old incarnation's own
     closing frame can land after a reused tuple's newer frame. The install guard
     above refuses it (`TestLateOldIncarnationCloseFrameIsRefused9412`).

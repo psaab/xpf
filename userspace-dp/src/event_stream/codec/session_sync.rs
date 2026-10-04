@@ -26,6 +26,31 @@ impl EventFrame {
         session_id: u64,
         tcp_close_class: u8,
     ) -> Self {
+        Self::encode_session_open_with_handshake_state(
+            seq,
+            key,
+            decision,
+            metadata,
+            zone_name_to_id,
+            fabric_redirect_sync,
+            session_id,
+            tcp_close_class,
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn encode_session_open_with_handshake_state(
+        seq: u64,
+        key: &SessionKey,
+        decision: &SessionDecision,
+        metadata: &SessionMetadata,
+        zone_name_to_id: &FxHashMap<String, u16>,
+        fabric_redirect_sync: bool,
+        session_id: u64,
+        tcp_close_class: u8,
+        tcp_handshake_state: u8,
+    ) -> Self {
         Self::encode_session_record(
             MSG_SESSION_OPEN,
             seq,
@@ -36,12 +61,12 @@ impl EventFrame {
             fabric_redirect_sync,
             session_id,
             tcp_close_class,
+            tcp_handshake_state,
         )
     }
 
-    /// #9412: a close-state update. It uses the OPEN record layout on
-    /// `MSG_SESSION_UPDATE`, so the Go decoder upserts the peer's copy, and it
-    /// is never an RT_FLOW SESSION_CREATE.
+    /// #9412/#10888: an Update carries the same current close and handshake state
+    /// as an Open while remaining distinct from an RT_FLOW SESSION_CREATE.
     pub(crate) fn encode_session_update(
         seq: u64,
         key: &SessionKey,
@@ -51,6 +76,31 @@ impl EventFrame {
         fabric_redirect_sync: bool,
         session_id: u64,
         tcp_close_class: u8,
+    ) -> Self {
+        Self::encode_session_update_with_handshake_state(
+            seq,
+            key,
+            decision,
+            metadata,
+            zone_name_to_id,
+            fabric_redirect_sync,
+            session_id,
+            tcp_close_class,
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn encode_session_update_with_handshake_state(
+        seq: u64,
+        key: &SessionKey,
+        decision: &SessionDecision,
+        metadata: &SessionMetadata,
+        zone_name_to_id: &FxHashMap<String, u16>,
+        fabric_redirect_sync: bool,
+        session_id: u64,
+        tcp_close_class: u8,
+        tcp_handshake_state: u8,
     ) -> Self {
         Self::encode_session_record(
             MSG_SESSION_UPDATE,
@@ -62,8 +112,10 @@ impl EventFrame {
             fabric_redirect_sync,
             session_id,
             tcp_close_class,
+            tcp_handshake_state,
         )
     }
+
 
     #[allow(clippy::too_many_arguments)]
     fn encode_session_record(
@@ -76,6 +128,7 @@ impl EventFrame {
         fabric_redirect_sync: bool,
         session_id: u64,
         tcp_close_class: u8,
+        tcp_handshake_state: u8,
     ) -> Self {
         let mut buf = [0u8; EVENT_FRAME_CAPACITY];
         let mut pos = FRAME_HEADER_SIZE; // skip header, fill later
@@ -341,20 +394,27 @@ impl EventFrame {
         pos += 4;
         buf[pos..pos + 2].copy_from_slice(&metadata.ingress_vlan_id.to_le_bytes());
         pos += 2;
-        // #11070: the peer must resolve a hit counter by stable rule identity,
-        // never by this node's potentially stale positional index. The
-        // length-gated u16 trailer is omitted when it cannot fit; the receiver
-        // then deliberately leaves that session unattributed.
-        if !policy_rule_id.is_empty()
-            && policy_rule_id.len() <= u16::MAX as usize
-            && pos + 2 + policy_rule_id.len() <= buf.len()
+        // #11070: prefix the stable rule identity with its u16 byte length.
+        // The zero-length prefix is explicit so #10888's handshake byte has a
+        // stable position even when no rule identity is carried.
+        let rule_id = policy_rule_id.as_bytes();
+        let rule_id_len = if rule_id.len() <= u16::MAX as usize
+            && pos + 2 + rule_id.len() + 1 <= buf.len()
         {
-            let len = policy_rule_id.len() as u16;
-            buf[pos..pos + 2].copy_from_slice(&len.to_le_bytes());
-            pos += 2;
-            buf[pos..pos + len as usize].copy_from_slice(policy_rule_id.as_bytes());
-            pos += len as usize;
+            rule_id.len()
+        } else {
+            0
+        };
+        buf[pos..pos + 2].copy_from_slice(&(rule_id_len as u16).to_le_bytes());
+        pos += 2;
+        if rule_id_len != 0 {
+            buf[pos..pos + rule_id_len].copy_from_slice(&rule_id[..rule_id_len]);
+            pos += rule_id_len;
         }
+        // #10888: current TCP handshake state follows the variable rule id;
+        // zero retains legacy import semantics for old producers.
+        buf[pos] = tcp_handshake_state;
+        pos += 1;
 
         // Write header
         let payload_len = (pos - FRAME_HEADER_SIZE) as u32;

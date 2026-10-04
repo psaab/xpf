@@ -310,6 +310,7 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
         generation: 0,
         session_id: 0,
         tcp_close_class: 0,
+        tcp_handshake_state: 0,
     };
     // Table-scoped synthesis (item 6): the reply target resolves in the
     // tunnel's instance table, so a VRF reverse finds its connected/local

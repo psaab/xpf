@@ -512,6 +512,7 @@ fn adopted_peer_id_cannot_collide_with_a_local_id_6311() {
             tcp_flags: 0x10,
             session_id: peer_id,
             tcp_close_class: 0,
+            tcp_handshake_state: 0,
         },
         false,
     ));
@@ -631,6 +632,7 @@ fn synced_import_adopts_peer_session_id_5212() {
             tcp_flags: 0x10,
             session_id: peer_id,
             tcp_close_class: 0,
+            tcp_handshake_state: 0,
         },
         false,
     ));
@@ -655,6 +657,7 @@ fn synced_import_adopts_peer_session_id_5212() {
             tcp_flags: 0,
             session_id: 0,
             tcp_close_class: 0,
+            tcp_handshake_state: 0,
         },
         false,
     ));
@@ -2853,6 +2856,7 @@ fn demote_flips_worker_replica_to_sync_import_10366() {
                 tcp_flags: 0x10,
                 session_id: 0,
                 tcp_close_class: 0,
+                tcp_handshake_state: 0,
             },
             false,
         ));
@@ -2896,6 +2900,7 @@ fn demote_then_refresh_preserves_replica_origin_10366() {
             tcp_flags: 0x10,
             session_id: 0,
             tcp_close_class: 0,
+            tcp_handshake_state: 0,
         },
         false,
     ));
@@ -4580,7 +4585,7 @@ fn reference_update_session(
         session_timeout_ns(
             protocol,
             tcp_flags,
-            entry.established,
+            entry.established && !entry.handshake_pending,
             &table.timeouts,
             entry.metadata.inactivity_timeout_ns,
             // #3527: mirror update_session — resolve the per-zone half-open
@@ -4594,6 +4599,7 @@ fn reference_update_session(
     if was_peer_synced && !origin.is_peer_synced() && !metadata.is_reverse {
         // #9412: production's promote stamps the entry's close class; mirror it.
         let tcp_close_class = table.close_class_wire_for(key);
+        let tcp_handshake_state = table.handshake_state_wire_for(key);
         table.push_delta(SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Open,
         key: key.clone(),
         decision,
@@ -4609,6 +4615,7 @@ fn reference_update_session(
         session_id: 0,
         bulk_resync: false,
         tcp_close_class,
+        tcp_handshake_state,
         purge_retirement: false, });
     }
     true
@@ -7088,6 +7095,7 @@ fn session_limit_ha_import_promote_demote_count() {
             tcp_flags: 0x10,
             session_id: 0,
             tcp_close_class: 0,
+            tcp_handshake_state: 0,
         },
         false,
     ));
@@ -7165,6 +7173,7 @@ fn session_limit_worker_replica_excluded_then_promote_backcounts_10310() {
             tcp_flags: 0x10,
             session_id: 0,
             tcp_close_class: 0,
+            tcp_handshake_state: 0,
         },
         false,
     ));
@@ -7236,6 +7245,7 @@ fn session_limit_synced_sessions_enforced_after_failover() {
                 tcp_flags: 0x10,
                 session_id: 0,
                 tcp_close_class: 0,
+                tcp_handshake_state: 0,
             },
             false,
         ));
@@ -7285,6 +7295,7 @@ fn session_limit_synced_reimport_nets_to_one() {
                 tcp_flags: 0x10,
                 session_id: 0,
                 tcp_close_class: 0,
+                tcp_handshake_state: 0,
             },
             true,
         ));
@@ -7323,6 +7334,7 @@ fn session_limit_synced_reverse_import_excluded() {
             tcp_flags: 0x10,
             session_id: 0,
             tcp_close_class: 0,
+            tcp_handshake_state: 0,
         },
         false,
     ));
@@ -7496,6 +7508,7 @@ fn session_limit_counts_match_live_counted_entries_invariant() {
             tcp_flags: 0x10,
             session_id: 0,
             tcp_close_class: 0,
+            tcp_handshake_state: 0,
         },
         false,
     );
@@ -7693,6 +7706,7 @@ fn session_limit_destination_backcount_on_enable_covers_preexisting_sessions() {
             tcp_flags: 0x10,
             session_id: 0,
             tcp_close_class: 0,
+            tcp_handshake_state: 0,
         },
         false,
     );
@@ -8072,6 +8086,7 @@ fn open_delta(key: SessionKey) -> SessionDelta {
     session_id: 0,
     bulk_resync: false,
     tcp_close_class: 0,
+    tcp_handshake_state: 0,
     purge_retirement: false, }
 }
 
@@ -9017,6 +9032,64 @@ fn syn_ack_first_reverse_ack_promotes_to_established_10891() {
     table.expire_stale_entries(past_opening);
     assert!(table.entry_by_key(&forward).is_some());
     assert!(table.entry_by_key(&reverse).is_some());
+}
+
+#[test]
+fn tcp_syn_open_delta_carries_opening_state_10888() {
+    let mut table = SessionTable::new();
+    let key = key_v4();
+    let now = 1_000_000_000u64;
+    assert!(table.install_with_protocol(
+        key,
+        decision(),
+        metadata(),
+        now,
+        PROTO_TCP,
+        TCP_SYN,
+    ));
+    let opens = table.drain_deltas(8);
+    assert_eq!(opens.len(), 1);
+    assert_eq!(opens[0].kind, SessionDeltaKind::Open);
+    assert_eq!(
+        opens[0].tcp_handshake_state, 1,
+        "#10888: a bare-SYN Open must advertise OPENING to the peer"
+    );
+}
+
+/// #10888: handshake transitions, not just Open/resync, must update the peer's
+/// opening state so it can begin the established timeout only after completion.
+#[test]
+fn syn_ack_and_final_ack_emit_handshake_state_updates_10888() {
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let now = 1_000_000_000u64;
+    let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_SYN);
+
+    assert!(
+        table
+            .lookup(&reverse, now + 1_000_000, TCP_SYN | TCP_ACK)
+            .is_some()
+    );
+    let syn_ack_updates: Vec<_> = table
+        .drain_deltas(8)
+        .into_iter()
+        .filter(|delta| delta.kind == SessionDeltaKind::Update)
+        .collect();
+    assert_eq!(syn_ack_updates.len(), 1, "SYN-ACK promotion must sync once");
+    assert_eq!(syn_ack_updates[0].tcp_handshake_state, 2);
+    assert_eq!(table.handshake_state_wire_for(&forward), 2);
+    assert_eq!(table.handshake_state_wire_for(&reverse), 2);
+
+    assert!(table.lookup(&forward, now + 2_000_000, TCP_ACK).is_some());
+    let final_ack_updates: Vec<_> = table
+        .drain_deltas(8)
+        .into_iter()
+        .filter(|delta| delta.kind == SessionDeltaKind::Update)
+        .collect();
+    assert_eq!(final_ack_updates.len(), 1, "final ACK must sync once");
+    assert_eq!(final_ack_updates[0].tcp_handshake_state, 4);
+    assert_eq!(table.handshake_state_wire_for(&forward), 4);
+    assert_eq!(table.handshake_state_wire_for(&reverse), 4);
 }
 
 /// #6752, the second half of the fix: the companion probe must not resurrect a
@@ -10304,6 +10377,7 @@ fn import_ipsec_alias_test_session(
             tcp_flags: TCP_SYN | TCP_ACK,
             session_id: 1,
             tcp_close_class: 0,
+            tcp_handshake_state: 0,
         },
         false,
     )

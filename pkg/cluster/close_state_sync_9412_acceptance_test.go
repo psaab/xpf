@@ -74,3 +74,43 @@ func TestTheCloseClassCrossesTheClusterWire9412(t *testing.T) {
 			"decoded TCPCloseClass=%v", c)
 	}
 }
+
+func TestTCPHandshakeStateCrossesClusterWire10888(t *testing.T) {
+	v4 := dataplane.SessionValue{
+		TCPCloseClass: 1, TCPState: 3,
+		TCPHandshakeState: dataplane.TCPHandshakeStateHandshakePending,
+	}
+	key4 := rtflowKeyV4(41002)
+	payload4 := encodeSessionV4Payload(key4, v4)
+	_, got4, ok := decodeSessionV4Payload(payload4)
+	if !ok || got4.TCPHandshakeState != dataplane.TCPHandshakeStateHandshakePending ||
+		got4.TCPCloseClass != v4.TCPCloseClass || got4.TCPState != v4.TCPState {
+		t.Fatalf("v4 handshake round-trip: ok=%v state=%d close=%d tcp=%d",
+			ok, got4.TCPHandshakeState, got4.TCPCloseClass, got4.TCPState)
+	}
+	// A truncated frame with the empty-ID prefix but no state still falls back
+	// to legacy/established import behavior.
+	_, legacy4, ok := decodeSessionV4Payload(payload4[:len(payload4)-1])
+	if !ok || legacy4.TCPHandshakeState != dataplane.TCPHandshakeStateAbsent {
+		t.Fatalf("v4 truncated legacy state: ok=%v state=%d", ok, legacy4.TCPHandshakeState)
+	}
+
+	v6 := dataplane.SessionValueV6{
+		PolicyRuleID: "lan->wan/allow-web",
+		TCPHandshakeState: dataplane.TCPHandshakeStateSynAckFirstPending,
+	}
+	key6 := dataplane.SessionKeyV6{SrcPort: 41003, DstPort: 5201, Protocol: 6}
+	payload6 := encodeSessionV6Payload(key6, v6)
+	_, got6, ok := decodeSessionV6Payload(payload6)
+	if !ok || got6.PolicyRuleID != v6.PolicyRuleID ||
+		got6.TCPHandshakeState != dataplane.TCPHandshakeStateSynAckFirstPending {
+		t.Fatalf("v6 handshake round-trip: ok=%v rule=%q state=%d",
+			ok, got6.PolicyRuleID, got6.TCPHandshakeState)
+	}
+	_, legacy6, ok := decodeSessionV6Payload(payload6[:len(payload6)-1])
+	if !ok || legacy6.PolicyRuleID != v6.PolicyRuleID ||
+		legacy6.TCPHandshakeState != dataplane.TCPHandshakeStateAbsent {
+		t.Fatalf("v6 legacy tail: ok=%v rule=%q state=%d",
+			ok, legacy6.PolicyRuleID, legacy6.TCPHandshakeState)
+	}
+}

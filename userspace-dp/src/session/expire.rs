@@ -219,6 +219,9 @@ impl SessionTable {
                     // `entry` borrow is dropped.
                     let e_nat = entry.decision.nat;
                     let e_reset = entry.reset;
+                    let e_is_opening = key.protocol == PROTO_TCP
+                        && !entry.closing
+                        && (!entry.established || entry.handshake_pending);
                     // #4380: the companion idle-retention probe applies ONLY to
                     // the owner-side idle-expiry path — the `Age` HA decision or
                     // the `ha == None` standalone path (both start eligible). The
@@ -239,6 +242,7 @@ impl SessionTable {
                             e_origin,
                             e_owner_rg,
                             e_is_reverse,
+                            e_is_opening,
                             e_fabric_ingress,
                             e_last_seen_ns,
                             e_expires_after_ns,
@@ -422,6 +426,7 @@ impl SessionTable {
                             session_id: removed.session_id,
                             bulk_resync: false,
                             tcp_close_class: 0,
+                            tcp_handshake_state: 0,
                             purge_retirement: false, };
                             (!self.push_expiry_close_delta(close.clone())).then_some(close)
                         } else {
@@ -619,6 +624,7 @@ impl SessionTable {
         origin: SessionOrigin,
         owner_rg_id: i32,
         is_reverse: bool,
+        is_opening: bool,
         fabric_ingress: bool,
         last_seen_ns: u64,
         expires_after_ns: u64,
@@ -629,6 +635,15 @@ impl SessionTable {
         // standby state (matches the existing fabric-skip convention).
         if fabric_ingress {
             return StandbyGateDecision::Age;
+        }
+        // #10888: an opening import has only its original opening deadline.
+        // Once that deadline is crossed, a missing primary Close must not
+        // grant a second stale-ceiling interval based on its app timeout.
+        if is_opening
+            && origin.is_peer_synced()
+            && now_ns.saturating_sub(last_seen_ns) > expires_after_ns
+        {
+            return StandbyGateDecision::ReapStaleSynced;
         }
         let peer_synced = origin.is_peer_synced();
         // forwards_here: does THIS node forward this session right now?
@@ -659,7 +674,7 @@ impl SessionTable {
             // for owner_rg_id <= 0 is a whole-node-standby (node_active
             // false) — held. So an aged owner_rg_id<=0-on-active-node is
             // observed separately below, not here.
-            let _ = (is_reverse, last_seen_ns);
+            let _ = is_reverse;
             // Measure the hold duration from when the entry FIRST entered
             // the held state. On the very first hold observation
             // `first_held_ns` is still 0 (the HOLD branch below stamps it

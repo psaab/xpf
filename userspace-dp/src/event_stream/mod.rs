@@ -716,22 +716,20 @@ impl EventStreamWorkerHandle {
         zone_name_to_id: &FxHashMap<String, u16>,
     ) -> EventFrame {
         match delta.kind {
-            SessionDeltaKind::Open => EventFrame::encode_session_open(
+            SessionDeltaKind::Open => EventFrame::encode_session_open_with_handshake_state(
                 seq,
                 &delta.key,
                 &delta.decision,
                 &delta.metadata,
                 zone_name_to_id,
                 delta.fabric_redirect_sync,
-                // #5212: the delta's stable RT_FLOW session id, carried on the
-                // HA session-sync open frame so the peer adopts it on import.
                 delta.session_id,
-                // #9412: the session's current close class.
                 delta.tcp_close_class,
+                delta.tcp_handshake_state,
             ),
             // #9412: a close-state update rides the OPEN record layout on its own
             // message type (3), which the Go decoder already reads as an upsert.
-            SessionDeltaKind::Update => EventFrame::encode_session_update(
+            SessionDeltaKind::Update => EventFrame::encode_session_update_with_handshake_state(
                 seq,
                 &delta.key,
                 &delta.decision,
@@ -740,6 +738,7 @@ impl EventStreamWorkerHandle {
                 delta.fabric_redirect_sync,
                 delta.session_id,
                 delta.tcp_close_class,
+                delta.tcp_handshake_state,
             ),
             SessionDeltaKind::Close => EventFrame::encode_session_close_with_ingress(
                 seq,

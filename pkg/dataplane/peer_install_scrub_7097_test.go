@@ -467,12 +467,11 @@ func TestSessionValueFieldCountIsPinned7097(t *testing.T) {
 		// source-NAT selection across HA reconstruction. They are cluster-
 		// stable packet identity, not node-local resources, and must remain on
 		// the synced value.
-		// 45/46 since #11070 added PolicyRuleID, classified NOT node-local. It
-		// identifies the admitting rule by stable configuration identity so the
-		// receiver can rebind its own counter; it names no local resource.
+		// 46/47 since #10888 added TCPHandshakeState, classified as sync-only
+		// metadata, not a BPF field or a node-local resource.
 
-		{"SessionValue", reflect.TypeOf(SessionValue{}), 45},
-		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 46},
+		{"SessionValue", reflect.TypeOf(SessionValue{}), 46},
+		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 47},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.typ.NumField(); got != tc.want {
