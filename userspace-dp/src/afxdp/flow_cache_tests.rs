@@ -114,6 +114,8 @@ fn make_entry(
         decision: make_decision(ForwardingDisposition::ForwardCandidate),
         metadata: make_metadata(owner_rg_id),
         stamp,
+        policy_deny: None,
+        deny_expires_at_secs: 0,
         observed_bytes: 0,
         last_used_epoch: 0,
         neighbor_mac_epoch: 0,
@@ -539,7 +541,8 @@ fn non_cacheable_dispositions_rejected() {
         ForwardingDisposition::NoRoute,
         ForwardingDisposition::MissingNeighbor,
         ForwardingDisposition::HAInactive,
-        ForwardingDisposition::PolicyDenied,
+        ForwardingDisposition::NextTableUnsupported,
+        ForwardingDisposition::TableUnavailable,
         ForwardingDisposition::LocalDelivery,
     ];
     for disposition in non_cacheable {
@@ -552,6 +555,159 @@ fn non_cacheable_dispositions_rejected() {
     }
 }
 
+#[test]
+fn policy_denied_and_discard_route_are_cacheable_drops() {
+    let meta_tcp = make_meta(PROTO_TCP);
+    let meta_udp = make_meta(PROTO_UDP);
+    for disposition in [
+        ForwardingDisposition::PolicyDenied,
+        ForwardingDisposition::DiscardRoute,
+    ] {
+        assert!(
+            FlowCacheEntry::should_cache(meta_tcp, make_decision(disposition)),
+            "{disposition:?} should be cacheable for established TCP"
+        );
+        assert!(
+            FlowCacheEntry::should_cache(meta_udp, make_decision(disposition)),
+            "{disposition:?} should be cacheable for UDP"
+        );
+    }
+
+    let syn = UserspaceDpMeta {
+        tcp_flags: 0x02,
+        ..meta_tcp
+    };
+    assert!(
+        !FlowCacheEntry::should_cache(
+            syn,
+            make_decision(ForwardingDisposition::PolicyDenied)
+        ),
+        "TCP SYN denies stay on the slow path so control packets cannot skip session state"
+    );
+}
+
+#[test]
+fn policy_deny_cache_expires_and_generation_fences_verdict() {
+    let rg_epochs = default_rg_epochs();
+    let key = make_key();
+    let stamp = FlowCacheStamp {
+        config_generation: 5,
+        fib_generation: 3,
+        owner_rg_id: 1,
+        owner_rg_epoch: 0,
+        owner_rg_lease_until: 0,
+    };
+    let mut entry = make_entry(key.clone(), stamp, 1);
+    entry.decision = make_decision(ForwardingDisposition::PolicyDenied);
+    entry.policy_deny = Some(CachedPolicyDeny {
+        action: crate::policy::PolicyAction::Deny,
+        policy_id: 7,
+        application_id: 0,
+        reply_allowed: true,
+    });
+    entry.deny_expires_at_secs = 6;
+    let mut cache = FlowCache::new();
+    cache.insert(entry);
+    let lookup = FlowCacheLookup {
+        ingress_ifindex: 7,
+        logical_ingress_ifindex: 7,
+        config_generation: 5,
+        fib_generation: 3,
+    };
+    assert!(cache.lookup(&key, lookup, 5, &rg_epochs).is_some());
+    assert!(
+        cache.lookup(&key, lookup, 6, &rg_epochs).is_none(),
+        "the deny must miss at its one-second expiry"
+    );
+
+    for (config_generation, fib_generation) in [(6, 3), (5, 4)] {
+        let mut entry = make_entry(key.clone(), stamp, 1);
+        entry.decision = make_decision(ForwardingDisposition::PolicyDenied);
+        entry.policy_deny = Some(CachedPolicyDeny {
+            action: crate::policy::PolicyAction::Deny,
+            policy_id: 7,
+            application_id: 0,
+            reply_allowed: true,
+        });
+        entry.deny_expires_at_secs = 10;
+        let mut cache = FlowCache::new();
+        cache.insert(entry);
+        assert!(
+            cache
+                .lookup(
+                    &key,
+                    FlowCacheLookup {
+                        ingress_ifindex: 7,
+                        logical_ingress_ifindex: 7,
+                        config_generation,
+                        fib_generation,
+                    },
+                    5,
+                    &rg_epochs,
+                )
+                .is_none(),
+            "policy/FIB commit must invalidate the stale deny"
+        );
+    }
+}
+
+#[test]
+fn from_deny_decision_retains_policy_replay_and_expiry_state() {
+    let rg_epochs = default_rg_epochs();
+    let (flow, meta, validation, mut decision, forwarding, ha_state) =
+        make_v4_round_trip_inputs();
+    decision.resolution.disposition = ForwardingDisposition::PolicyDenied;
+    let policy_counter = std::sync::Arc::new(crate::policy::PolicyRuleCounter::default());
+    let input_filter_log = Some(CachedInputFilterLog {
+        log_match: crate::filter::FilterLogMatch {
+            filter_id: 4,
+            term_id: 8,
+            action: crate::filter::FilterAction::Accept,
+        },
+        ingress_zone_id: TEST_TRUST_ZONE_ID,
+    });
+    let entry = FlowCacheEntry::from_deny_decision(
+        &flow,
+        meta,
+        validation,
+        decision,
+        1,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        7,
+        Some(policy_counter.clone()),
+        Some(CachedPolicyDeny {
+            action: crate::policy::PolicyAction::Reject,
+            policy_id: 9,
+            application_id: 3,
+            reply_allowed: true,
+        }),
+        input_filter_log,
+        crate::filter::CachedFilterCounters::default(),
+        42,
+        &forwarding,
+        &ha_state,
+        &rg_epochs,
+    )
+    .expect("eligible PolicyDenied flow should seed a replayable entry");
+
+    assert_eq!(
+        entry.decision.resolution.disposition,
+        ForwardingDisposition::PolicyDenied
+    );
+    assert_eq!(entry.policy_deny.unwrap().action, crate::policy::PolicyAction::Reject);
+    assert_eq!(entry.metadata.policy_id, 9);
+    assert_eq!(entry.metadata.ingress_zone, TEST_TRUST_ZONE_ID);
+    assert_eq!(entry.metadata.egress_zone, TEST_UNTRUST_ZONE_ID);
+    assert_eq!(entry.metadata.policy_counter_idx, 7);
+    assert!(std::sync::Arc::ptr_eq(
+        entry.metadata.policy_counter.as_ref().unwrap(),
+        &policy_counter
+    ));
+    assert_eq!(entry.descriptor.input_filter_log, input_filter_log);
+    assert_eq!(entry.deny_expires_at_secs, 42);
+    assert_eq!(entry.neighbor_shard, NEIGHBOR_SHARD_NONE);
+}
 // ----------------------------------------------------------------
 // (g) ForwardCandidate is cacheable
 // ----------------------------------------------------------------
@@ -3142,7 +3298,7 @@ fn tunnel_flow_cache_keys_mac_change_shard_on_outer_neighbor_not_logical_ifindex
 }
 
 #[test]
-fn expired_scheduler_lease_evicts_only_scheduled_policy_cache_entries() {
+fn expired_scheduler_lease_evicts_scheduled_deny_cache_entries() {
     let mut zones = rustc_hash::FxHashMap::default();
     zones.insert("trust".to_string(), TEST_TRUST_ZONE_ID);
     zones.insert("untrust".to_string(), TEST_UNTRUST_ZONE_ID);
@@ -3176,6 +3332,14 @@ fn expired_scheduler_lease_evicts_only_scheduled_policy_cache_entries() {
     };
     let scheduled_key = make_key();
     let mut scheduled_entry = make_entry(scheduled_key.clone(), stamp, 1);
+    scheduled_entry.decision = make_decision(ForwardingDisposition::PolicyDenied);
+    scheduled_entry.policy_deny = Some(CachedPolicyDeny {
+        action: crate::policy::PolicyAction::Deny,
+        policy_id: 1,
+        application_id: 0,
+        reply_allowed: true,
+    });
+    scheduled_entry.deny_expires_at_secs = 200;
     scheduled_entry.metadata.policy_counter_idx = 1;
     let mut default_key = scheduled_key.clone();
     default_key.src_port += 1;

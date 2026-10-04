@@ -1219,6 +1219,18 @@ sync.
   the captured set is deduped against `tx_selection.filter_counters`
   (`retain_absent_from`) so a count-plus-forwarding-class input term the cos
   TX-selection rebuild already folded in is not recorded twice.
+
+  **Short-lived flow-backed deny caching (#11073):** `PolicyDenied` and
+  `DiscardRoute` decisions are cached only for UDP and established TCP ACK
+  traffic. Entries expire after one second and require matching config/FIB
+  generations, RG epoch/lease, and scheduler lease. Policy-deny hits replay the
+  policy hit counter, accepted INPUT `then count` / `then log`, RT_FLOW event,
+  and exception accounting; an explicit `reject` reports REJECT only when its
+  reply was actually enqueued. `DiscardRoute` stays a silent route drop.
+  Transient `NoRoute` / `MissingNeighbor` dispositions, flowless packets,
+  control traffic, and flows with DSCP- or per-packet-L4-sensitive INPUT
+  filters remain uncached.
+
   **Per-packet CoS BA queue and LP rewrite on cache hits (#3778/#11430):** DSCP /
   IEEE 802.1p behavior-aggregate classifiers select each packet's egress queue
   and classifier-assigned loss priority; the flow-cache key excludes DSCP/PCP.

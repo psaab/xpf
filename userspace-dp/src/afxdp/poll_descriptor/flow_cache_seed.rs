@@ -4,16 +4,14 @@
 // `flow_cache_hit.rs` sibling (#1327 Step 1); colocating the seed here
 // lets the cache's eviction invariants — the #1861 §5.4 refused-install
 // gate, the #3048/#3918/#5147 pre-resolve shard-epoch stamp, the
-// #3073/#3322 policy-counter stamps — be reviewed as ONE contract
-// against the hit path that consumes them.
+// #3073/#3322 policy-counter stamps, and #11073's denial metadata — be
+// reviewed as ONE contract against the hit path that consumes them.
 //
-// Pure code-motion: the helper body is the verbatim inline block (only
-// the enclosing module and the `#[inline]` hint changed). The seed runs
-// once per cache-miss forward (the session-install slow path), never per
-// established-flow packet, so it is cold-ish; `#[inline]` keeps the body
-// in the caller's CGU — the same hint the #946 Phase-1
-// `poll_stages.rs` extractions carry — so LLVM is free to produce the
-// same IR as the original inline code.
+// The forwarding seed remains the extracted inline block and runs once per
+// cache-miss forward (the session-install slow path), never per established
+// flow packet. The separate deny seed runs only for flow-backed terminal
+// PolicyDenied/DiscardRoute decisions. Both are cold-path writes; neither
+// adds work to an established forwarding hit.
 //
 // Epoch-handling contract (moved verbatim from the inline block): the
 // stamped neighbor-MAC epoch MUST come from the caller's PRE-RESOLVE
@@ -199,4 +197,64 @@ pub(super) fn stage_flow_cache_seed(
     }
     }
     // ── End flow cache population ────────────────
+}
+
+/// Seed a flow-backed terminal deny/drop after its cold-path accounting has
+/// completed. Unlike forwarding seeds, these entries carry no live-session
+/// dependency or neighbor descriptor; lookup generation, scheduler, RG, and
+/// short-expiry fences authorize replay.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn stage_flow_cache_deny_seed(
+    flow_cache: &mut FlowCache,
+    flow: Option<&SessionFlow>,
+    meta: UserspaceDpMeta,
+    validation: ValidationState,
+    decision: SessionDecision,
+    flow_cache_owner_rg_id: i32,
+    ingress_zone: u16,
+    egress_zone: u16,
+    policy_counter_idx: u32,
+    policy_counter: Option<std::sync::Arc<crate::policy::PolicyRuleCounter>>,
+    policy_deny: Option<CachedPolicyDeny>,
+    filter_match_extra: TermMatchExtra<'static>,
+    ingress_zone_override: Option<u16>,
+    now_secs: u64,
+    worker_ctx: &WorkerContext,
+) {
+    let Some(flow) = flow else {
+        return;
+    };
+    let input_filter_counters = evaluate_non_pbr_input_filter_counters_cached(
+        worker_ctx.forwarding,
+        Some(flow),
+        meta,
+    );
+    let input_filter_log = evaluate_non_pbr_input_filter_log_only(
+        worker_ctx.forwarding,
+        filter_match_extra,
+        Some(flow),
+        meta,
+        ingress_zone_override,
+    );
+    if let Some(entry) = FlowCacheEntry::from_deny_decision(
+        flow,
+        meta,
+        validation,
+        decision,
+        flow_cache_owner_rg_id,
+        ingress_zone,
+        egress_zone,
+        policy_counter_idx,
+        policy_counter,
+        policy_deny,
+        input_filter_log,
+        input_filter_counters,
+        now_secs.saturating_add(DENY_CACHE_TTL_SECS),
+        worker_ctx.forwarding,
+        worker_ctx.ha_state,
+        worker_ctx.rg_epochs,
+    ) {
+        flow_cache.insert(entry);
+    }
 }

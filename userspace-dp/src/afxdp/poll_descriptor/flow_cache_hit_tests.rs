@@ -29,7 +29,7 @@
 // call-site regressions green.
 
 use super::*;
-use crate::afxdp::flow_cache::{FlowCacheEntry, FlowCacheStamp};
+use crate::afxdp::flow_cache::{CachedPolicyDeny, FlowCacheEntry, FlowCacheStamp};
 use crate::afxdp::umem::MmapArea;
 use crate::ip_proto::{PROTO_TCP, PROTO_UDP};
 use crate::test_zone_ids::*;
@@ -374,6 +374,8 @@ fn cached_entry() -> FlowCacheEntry {
             owner_rg_epoch: 0,
             owner_rg_lease_until: 0,
         },
+        policy_deny: None,
+        deny_expires_at_secs: 0,
         observed_bytes: 0,
         last_used_epoch: 0,
         neighbor_mac_epoch: 0,
@@ -867,6 +869,8 @@ struct StageRun {
     /// forward/tx debug counter on every successful in-place cache hit.
     dbg_forward: u64,
     dbg_tx: u64,
+    dbg_policy_deny: u64,
+    dbg_disposition_other: u64,
     /// #6304: how many times THIS call reached
     /// `try_acquire_pending_tx_admission` — the shared cross-worker CAS whose
     /// per-packet cost #6114 removed by sampling first. Zero for a packet the
@@ -1201,6 +1205,8 @@ fn run_stage_seeded(
         mirror_sample_counter,
         dbg_forward: dbg.forward,
         dbg_tx: dbg.tx,
+        dbg_policy_deny: dbg.policy_deny,
+        dbg_disposition_other: dbg.disposition_other,
         admission_attempts,
         counters,
         tx_frame,
@@ -3030,6 +3036,23 @@ fn logging_cached_entry(input: bool, output: bool) -> FlowCacheEntry {
     entry
 }
 
+fn cached_deny_entry(
+    disposition: ForwardingDisposition,
+    policy_deny: Option<CachedPolicyDeny>,
+) -> FlowCacheEntry {
+    let mut entry = logging_cached_entry(true, false);
+    entry.decision.resolution.disposition = disposition;
+    entry.decision.resolution.next_hop = None;
+    entry.decision.resolution.neighbor_mac = None;
+    entry.decision.resolution.src_mac = None;
+    if let Some(deny) = policy_deny {
+        entry.metadata.policy_id = deny.policy_id;
+    }
+    entry.policy_deny = policy_deny;
+    entry.deny_expires_at_secs = 3;
+    entry
+}
+
 /// Drain every event the run produced, decoded.
 fn drained_events(
     fixture: &LiveCallSiteFixture,
@@ -4116,4 +4139,258 @@ fn flow_cache_hit_defers_oversized_tcp_to_segmentation_path_11376() {
     let frame = oversized_tcp_v4_frame_11376(1500, false);
     let run = run_stage(&fixture, &frame, 0);
     assert_oversized_cache_hit_uses_pending_egress_11376(&run);
+}
+
+#[test]
+fn policy_deny_cache_hit_replays_counts_logs_and_exception_without_session_11073() {
+    use crate::event_stream::codec::DataplaneEventKind;
+
+    let fixture =
+        LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    let frame = tcp_v4_ack_frame();
+    let input_counter = Arc::new(crate::filter::FilterTermCounter::default());
+    let policy_counter = Arc::new(crate::policy::PolicyRuleCounter::default());
+    let mut entry = cached_deny_entry(
+        ForwardingDisposition::PolicyDenied,
+        Some(CachedPolicyDeny {
+            action: crate::policy::PolicyAction::Deny,
+            policy_id: 77,
+            application_id: 19,
+            reply_allowed: true,
+        }),
+    );
+    entry.metadata.policy_counter_idx = 1;
+    entry.metadata.policy_counter = Some(policy_counter.clone());
+    entry
+        .descriptor
+        .input_filter_counters
+        .push(input_counter.clone());
+
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        accounted_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            session: None,
+            ..StageSeed::default()
+        },
+    );
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
+    assert_eq!(run.flow_cache_tallies.0, 1, "the deny entry must be hit");
+    assert_eq!(
+        run.session_lookup_miss_counts,
+        (0, 0, 0),
+        "denial replay must not require or consult a forwarding session"
+    );
+    assert_eq!(run.counters.policy_denied_packets, 1);
+    assert_eq!(run.dbg_policy_deny, 1);
+    assert_eq!(run.dbg_disposition_other, 0);
+    assert_eq!(input_counter.packets.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        input_counter.bytes.load(Ordering::Relaxed),
+        frame.len() as u64
+    );
+    assert_eq!(policy_counter.test_packet_count(), 1);
+    assert_eq!(policy_counter.test_byte_count(), frame.len() as u64);
+
+    let events = drained_events(&fixture);
+    let deny_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == DataplaneEventKind::PolicyDeny)
+        .collect();
+    assert_eq!(deny_events.len(), 1, "each hit must replay RT_FLOW policy deny");
+    assert_eq!(deny_events[0].action, 0, "plain deny remains a silent DENY");
+    assert_eq!(deny_events[0].policy_id, 77);
+    assert_eq!(deny_events[0].application_id, 19);
+    assert_eq!(deny_events[0].ingress_zone_id, TEST_TRUST_ZONE_ID);
+    assert_eq!(deny_events[0].egress_zone_id, TEST_UNTRUST_ZONE_ID);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                event.reason == FilterLogSource::Input.wire_reason()
+                    && event.kind == DataplaneEventKind::FilterLog
+            })
+            .count(),
+        1,
+        "accepted INPUT then-log must be replayed before the policy denial"
+    );
+    assert_eq!(
+        fixture
+            .recent_exceptions
+            .lock()
+            .expect("exception ring lock")
+            .back()
+            .map(|event| event.reason),
+        Some("policy_denied")
+    );
+    assert_eq!(
+        fixture
+            .last_resolution
+            .lock()
+            .expect("last resolution lock")
+            .as_ref()
+            .map(|event| event.resolution.disposition),
+        Some(ForwardingDisposition::PolicyDenied)
+    );
+}
+
+#[test]
+fn discard_route_cache_hit_replays_drop_accounting_without_policy_event_11073() {
+    use crate::event_stream::codec::DataplaneEventKind;
+
+    let fixture =
+        LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    let frame = tcp_v4_ack_frame();
+    let entry = cached_deny_entry(ForwardingDisposition::DiscardRoute, None);
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        accounted_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            session: None,
+            ..StageSeed::default()
+        },
+    );
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
+    assert_eq!(run.flow_cache_tallies.0, 1);
+    assert_eq!(run.session_lookup_miss_counts, (0, 0, 0));
+    assert_eq!(run.counters.discard_route_packets, 1);
+    assert_eq!(run.counters.policy_denied_packets, 0);
+    assert_eq!(run.dbg_policy_deny, 0);
+    assert_eq!(run.dbg_disposition_other, 1);
+    assert!(
+        drained_events(&fixture)
+            .iter()
+            .all(|event| event.kind != DataplaneEventKind::PolicyDeny),
+        "DiscardRoute must remain a silent route drop, not a policy event"
+    );
+    assert_eq!(
+        fixture
+            .recent_exceptions
+            .lock()
+            .expect("exception ring lock")
+            .back()
+            .map(|event| event.reason),
+        Some("discard_route")
+    );
+}
+
+#[test]
+fn cached_policy_reject_synthesizes_reply_before_truthful_reject_event_11073() {
+    use crate::event_stream::codec::DataplaneEventKind;
+
+    let _bucket_guard = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        1_000_000,
+    );
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom)
+        .with_ingress_primary_v4()
+        .with_event_stream();
+    let frame = vlan_tagged_udp_v4_frame();
+    let key = udp_test_key();
+    let mut entry = cached_deny_entry(
+        ForwardingDisposition::PolicyDenied,
+        Some(CachedPolicyDeny {
+            action: crate::policy::PolicyAction::Reject,
+            policy_id: 81,
+            application_id: 53,
+            reply_allowed: true,
+        }),
+    );
+    entry.key = key.clone();
+    entry.descriptor.input_filter_log = None;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        udp_test_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            session: None,
+            flow: Some(SessionFlow {
+                src_ip: key.src_ip,
+                dst_ip: key.dst_ip,
+                forward_key: key,
+            }),
+            tx_headroom: Some((128, 256)),
+            ..StageSeed::default()
+        },
+    );
+    assert_eq!(run.flow_cache_tallies.0, 1);
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "reject reply handling must still consume the denied ingress packet"
+    );
+    assert_eq!(
+        run.tx_pipeline.pending_tx_local.len(),
+        1,
+        "a cached Reject must synthesize the same active UDP reject reply"
+    );
+    let events = drained_events(&fixture);
+    let event = events
+        .iter()
+        .find(|event| event.kind == DataplaneEventKind::PolicyDeny)
+        .expect("cached reject must emit an RT_FLOW policy event");
+    assert_eq!(
+        event.action,
+        crate::afxdp::event_emit::RT_FLOW_ACTION_REJECT,
+        "the event follows the successfully enqueued reply"
+    );
+    assert_eq!(event.policy_id, 81);
+}
+
+#[test]
+fn cached_no_route_reject_is_silent_and_logs_deny_not_reject_11073() {
+    use crate::event_stream::codec::DataplaneEventKind;
+
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom)
+        .with_ingress_primary_v4()
+        .with_event_stream();
+    let frame = vlan_tagged_udp_v4_frame();
+    let key = udp_test_key();
+    let mut entry = cached_deny_entry(
+        ForwardingDisposition::PolicyDenied,
+        Some(CachedPolicyDeny {
+            action: crate::policy::PolicyAction::Reject,
+            policy_id: 82,
+            application_id: 53,
+            reply_allowed: false,
+        }),
+    );
+    entry.key = key.clone();
+    entry.descriptor.input_filter_log = None;
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        udp_test_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            session: None,
+            flow: Some(SessionFlow {
+                src_ip: key.src_ip,
+                dst_ip: key.dst_ip,
+                forward_key: key,
+            }),
+            tx_headroom: Some((128, 256)),
+            ..StageSeed::default()
+        },
+    );
+    assert_eq!(run.flow_cache_tallies.0, 1);
+    assert!(run.tx_pipeline.pending_tx_local.is_empty());
+    let events = drained_events(&fixture);
+    let event = events
+        .iter()
+        .find(|event| event.kind == DataplaneEventKind::PolicyDeny)
+        .expect("NoRoute policy denial must replay its RT_FLOW event");
+    assert_eq!(
+        event.action, 0,
+        "NoRoute cannot synthesize a reply and must report DENY, not REJECT"
+    );
 }
