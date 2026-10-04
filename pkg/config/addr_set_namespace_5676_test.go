@@ -16,10 +16,10 @@ import (
 // permit/deny rule covers with no diagnostic.
 //
 // The fix hard-rejects the collision on the strict commit / commit-check path
-// (validateAddressBookNameCollisionStrict, wired in runEarlyStrictAndFolds) and
-// downgrades to a warning on the tolerant load / peer-sync path
-// (CompileConfigLenient, opts.lenientAddressBookNameCollision), keeping the
-// deterministic address-first winner the runtime already used.
+// (validateAddressBookNameCollisionStrict, wired in runEarlyStrictAndFolds).
+// Tolerant loads still boot and retain the typed entries with a warning, but
+// record the colliding name so userspace policy references fail closed with the
+// __unsupported_address__ sentinel and a non-empty rejection mirror (#12049).
 //
 // FAIL-ON-REVERT: dropping the `if err := validateAddressBookNameCollisionStrict(
 // cfg); ... ` dispatch in compiler_earlystrict.go turns every strict-reject case
@@ -96,10 +96,9 @@ func TestAddrSetCollisionZoneLocalRejectedAtCommit(t *testing.T) {
 	}
 }
 
-// TestAddrSetCollisionLenientDowngrades — the tolerant load / peer-sync path
-// (#1960 no-brick) must NOT fail-closed on a pre-existing collision: it records
-// a warning and boots, keeping the deterministic address-first winner so the
-// config forwards exactly as before.
+// TestAddrSetCollisionLenientDowngrades — tolerant load / peer-sync (#1960)
+// must remain bootable and report the collision; the dataplane separately
+// refuses any policy reference to the ambiguous name (#12049).
 func TestAddrSetCollisionLenientDowngrades(t *testing.T) {
 	tree := buildTree(t, []string{
 		"set security address-book global address blocklist 10.0.1.0/24",
@@ -131,80 +130,6 @@ func TestAddrSetCollisionLenientDowngrades(t *testing.T) {
 	}
 }
 
-// TestAddrSetCollisionDeterministicWinner is the security-relevant resolution
-// assertion: given a collision, resolution is DETERMINISTIC — the plain
-// `address` WINS (address-first), matching the runtime name→prefix resolver
-// bit-for-bit. So a policy `match source-address blocklist` / `deny` covers
-// exactly the plain address's prefix, never an unpredictable mix, and an
-// operator/reviewer can reason about which traffic the rule covers. The winner
-// is a property of the two KINDS, not of config-set order (both orderings
-// resolve identically).
-func TestAddrSetCollisionDeterministicWinner(t *testing.T) {
-	build := func(t *testing.T, cmds []string) *AddressBook {
-		t.Helper()
-		cfg, err := CompileConfigLenient(buildTree(t, cmds))
-		if err != nil {
-			t.Fatalf("lenient compile: %v", err)
-		}
-		return cfg.Security.AddressBook
-	}
-
-	addressFirst := build(t, []string{
-		"set security address-book global address blocklist 10.0.1.0/24",
-		"set security address-book global address other 10.9.9.9/32",
-		"set security address-book global address-set blocklist address other",
-		"set security policies from-zone trust to-zone untrust policy deny-grp match source-address blocklist",
-		"set security policies from-zone trust to-zone untrust policy deny-grp match destination-address any",
-		"set security policies from-zone trust to-zone untrust policy deny-grp match application any",
-		"set security policies from-zone trust to-zone untrust policy deny-grp then deny",
-	})
-	setFirst := build(t, []string{
-		"set security address-book global address other 10.9.9.9/32",
-		"set security address-book global address-set blocklist address other",
-		"set security address-book global address blocklist 10.0.1.0/24",
-	})
-
-	for name, ab := range map[string]*AddressBook{"address-first": addressFirst, "set-first": setFirst} {
-		kind, collision := resolveAddressBookNameKind(ab, "blocklist")
-		if !collision {
-			t.Fatalf("[%s] expected resolveAddressBookNameKind to report a collision", name)
-		}
-		if kind != AddrRefAddress {
-			t.Fatalf("[%s] expected the plain address to win the collision (address-first), got kind=%d", name, kind)
-		}
-	}
-}
-
-// TestAddrSetNameKindNamespaceAware — ABSENT a collision, the two kinds are
-// distinguishable and each resolves to its own kind; an undefined name is None.
-func TestAddrSetNameKindNamespaceAware(t *testing.T) {
-	cfg, err := CompileConfig(buildTree(t, []string{
-		"set security address-book global address lone-addr 10.0.1.0/24",
-		"set security address-book global address member 10.0.2.0/24",
-		"set security address-book global address-set lone-set address member",
-	}))
-	if err != nil {
-		t.Fatalf("non-colliding book must compile clean: %v", err)
-	}
-	ab := cfg.Security.AddressBook
-	cases := []struct {
-		name     string
-		wantKind AddressBookRefKind
-		wantColl bool
-	}{
-		{"lone-addr", AddrRefAddress, false},
-		{"lone-set", AddrRefAddressSet, false},
-		{"member", AddrRefAddress, false},
-		{"undefined", AddrRefNone, false},
-	}
-	for _, tc := range cases {
-		kind, coll := resolveAddressBookNameKind(ab, tc.name)
-		if kind != tc.wantKind || coll != tc.wantColl {
-			t.Fatalf("resolveAddressBookNameKind(%q) = (%d, %v), want (%d, %v)",
-				tc.name, kind, coll, tc.wantKind, tc.wantColl)
-		}
-	}
-}
 
 // TestAddrSetNoCollisionCompilesUnchanged — configs that do NOT collide must
 // keep compiling clean on the strict path: only an address, only a set, an

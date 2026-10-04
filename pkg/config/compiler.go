@@ -977,6 +977,10 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	// section dispatch (P4), returning its warnings in source order for the P3
 	// append below and the FIRST gate error. Behavior-preserving lift; do NOT
 	// reorder P1 relative to P2+.
+	var applicationNameCollisions map[string]struct{}
+	if opts.lenientApplicationNameCollisions {
+		opts.applicationNameCollisions = &applicationNameCollisions
+	}
 	preWalkWarnings, err := runPreWalkGates(tree, opts)
 	if err != nil {
 		return nil, err
@@ -1015,6 +1019,9 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 			Interfaces:                    make(map[string]*CoSInterface),
 		},
 	}
+	if applicationNameCollisions != nil {
+		cfg.Applications.CollidingNames = applicationNameCollisions
+	}
 	cfg.Warnings = append(cfg.Warnings, preWalkWarnings...)
 
 	// P4 (#4406 step 2): section-compile dispatch. Extracted into
@@ -1025,6 +1032,9 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	// P5 cross-section derivations below.
 	if err := compileSections(tree, cfg, opts); err != nil {
 		return nil, err
+	}
+	if opts.lenientAddressBookNameCollision {
+		recordDroppedNamedAddressBookCollisions(tree, cfg)
 	}
 	// #11367 rejects an ambiguous choice block; #11821 rejects conflicting
 	// duplicate actions. Both tolerant paths must stay fail-closed after

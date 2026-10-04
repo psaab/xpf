@@ -136,6 +136,9 @@ func ApplicationReferenceMatchDrops(name string, apps *ApplicationsConfig) []str
 	if apps == nil || name == "" || name == "any" {
 		return nil
 	}
+	if _, collision := apps.CollidingNames[name]; collision {
+		return []string{fmt.Sprintf("application %q: its name is ambiguous due to a collision", name)}
+	}
 	var out []string
 	seenApps := make(map[string]bool)
 	addApp := func(appName string, app *Application) {
@@ -159,7 +162,14 @@ func ApplicationReferenceMatchDrops(name string, apps *ApplicationsConfig) []str
 	var walkSet func(setName string, depth int)
 	walkSet = func(setName string, depth int) {
 		// Past the expansion's own nesting limit the expansion already fails.
-		if depth > 3 || seenSets[setName] {
+		if depth > 3 {
+			return
+		}
+		if _, collision := apps.CollidingNames[setName]; collision {
+			out = append(out, fmt.Sprintf("application-set %q: its name is ambiguous due to a collision", setName))
+			return
+		}
+		if seenSets[setName] {
 			return
 		}
 		seenSets[setName] = true
@@ -178,6 +188,10 @@ func ApplicationReferenceMatchDrops(name string, apps *ApplicationsConfig) []str
 				setName, ref))
 		}
 		for _, member := range set.Applications {
+			if _, collision := apps.CollidingNames[member]; collision {
+				out = append(out, fmt.Sprintf("application-set %q: member %q has an ambiguous colliding name", setName, member))
+				continue
+			}
 			if memberIsNestedSet(member, apps) {
 				walkSet(member, depth+1)
 				continue

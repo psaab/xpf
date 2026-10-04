@@ -147,6 +147,11 @@ func nameRepresentable(ab *config.AddressBook, feedOverlay map[string][]string, 
 // resolves normally in the branch above (no regression); a static alias with NO
 // declared binding of that name is untouched (no over-block).
 func nameRepresentability(ab *config.AddressBook, feedOverlay map[string][]string, bindings map[string]*config.AddressBinding, name string, visited map[string]bool) (representable, concrete bool) {
+	if ab != nil {
+		if _, collision := ab.CollidingNames[name]; collision {
+			return false, false
+		}
+	}
 	if name == "" {
 		return false, false
 	}

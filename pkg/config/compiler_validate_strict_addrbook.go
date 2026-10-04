@@ -22,29 +22,17 @@ const (
 	AddrRefAddressSet
 )
 
-// resolveAddressBookNameKind classifies name within ab and reports whether the
-// name COLLIDES — i.e. is defined as BOTH a plain `address` AND an
+// resolveAddressBookNameKind classifies a name within ab and reports whether
+// the name COLLIDES — i.e. it is defined as BOTH a plain `address` AND an
 // `address-set` in the same book (the #5676 shadow).
 //
-// `address` and `address-set` share one operator-visible namespace (an operator
-// types a single token in `match source-address <name>`), yet land in two
-// separate maps, so a same-name collision is possible. Before #5676 that
-// collision resolved silently and INCONSISTENTLY-looking but actually
-// address-first everywhere a name is turned into prefixes: the dataplane
-// resolver (pkg/dataplane/userspace expandBookNameRecursive / nameRepresentability
-// / capabilities) and the host-inbound deny compiler (junos_host_deny) all check
-// `ab.Addresses[name]` before `ab.AddressSets[name]`. So a plain `address`
-// silently SHADOWED a same-named `address-set`, dropping the set's other members
-// and CHANGING which traffic a permit/deny rule covers with no diagnostic.
-//
-// This helper is the single source of truth for that deterministic winner: on a
-// collision the plain `address` WINS (address-first), matching the runtime
-// resolver bit-for-bit. The strict admission gate
-// (validateAddressBookNameCollisionStrict) hard-rejects the collision so it can
-// never be freshly authored; the tolerant load / peer-sync path KEEPS this
-// address-first winner (so a reload does not silently change the forwarding an
-// already-running config has been doing — the #1960 no-behavior-change-on-boot
-// doctrine) and only warns.
+// `address` and `address-set` share one operator-visible namespace but land in
+// separate maps, so a same-name collision is possible. Before #12049, userspace
+// policy resolution checked `ab.Addresses[name]` before `ab.AddressSets[name]`;
+// the plain address therefore shadowed the set and silently changed which
+// traffic the rule covered. Strict admission rejects the ambiguity. On tolerant
+// load, the collision marker is retained so policy references are refused with
+// the unsupported-address sentinel rather than selecting either definition.
 func resolveAddressBookNameKind(ab *AddressBook, name string) (kind AddressBookRefKind, collision bool) {
 	if ab == nil {
 		return AddrRefNone, false
@@ -72,15 +60,14 @@ func resolveAddressBookNameKind(ab *AddressBook, name string) (kind AddressBookR
 // operator can author `address blocklist 10.0.0.0/24` AND
 // `address-set blocklist { address other; ... }` in the same book with no
 // commit error. A security-policy `match source-address blocklist` /
-// `destination-address blocklist` is then AMBIGUOUS: every place a name is
-// resolved to prefixes checks Addresses before AddressSets (address-first — see
-// resolveAddressBookNameKind), so the plain address silently WINS and the
-// same-named address-set's other members are dropped. A deny built on the SET
-// then covers only the single address (an under-block — traffic the operator
-// meant to deny is permitted); symmetrically a permit built on the address is
-// unaffected but the operator's mental model (a group) is wrong. This is a
-// silent, security-relevant change to which traffic a rule covers — an
-// admission / root-identity defect (codex-review-182 M10, High).
+// `destination-address blocklist` is then AMBIGUOUS: before #12049 userspace
+// resolution checked Addresses before AddressSets, so the plain address
+// silently WINS and the same-named address-set's other members are dropped. A
+// deny built on the SET then covers only the single address (an under-block —
+// traffic the operator meant to deny is permitted); symmetrically a permit
+// built on the address is unaffected but the operator's mental model (a group)
+// is wrong. This is a silent, security-relevant change to which traffic a rule
+// covers — an admission / root-identity defect (codex-review-182 M10, High).
 //
 // Junos itself forbids a same-name `address` + `address-set` in one address
 // book (the CLI rejects the second definition at commit), so there is no
@@ -96,12 +83,11 @@ func resolveAddressBookNameKind(ab *AddressBook, name string) (kind AddressBookR
 // collision is reported against the clean zone name rather than the synthetic
 // key. The caller (runEarlyStrictAndFolds) enforces that ordering.
 //
-// Strict on commit / commit-check (hard reject so the ambiguity is
-// operator-visible); the call site downgrades this to a warning on the tolerant
+// Strict on commit / commit-check hard-rejects the ambiguity. The tolerant
 // load / peer-sync path (opts.lenientAddressBookNameCollision, #1960 no-brick)
-// so an already-persisted or peer-synced config carrying a pre-existing
-// collision still BOOTS — the runtime then resolves the deterministic
-// address-first winner exactly as it already did. Mirrors
+// downgrades it to a warning so an existing config still BOOTS, records all
+// colliding names on AddressBook, and lets userspace reject any policy that
+// references one with a non-empty rejection mirror. Mirrors
 // validateAddressBookEntryNamesStrict.
 func validateAddressBookNameCollisionStrict(cfg *Config) error {
 	if cfg == nil {
@@ -129,6 +115,44 @@ func validateAddressBookNameCollisionStrict(cfg *Config) error {
 	}
 	return nil
 }
+func recordAddressBookNameCollisions(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	record := func(ab *AddressBook) {
+		names := addressBookCollisionNames(ab)
+		if len(names) == 0 {
+			return
+		}
+		if ab.CollidingNames == nil {
+			ab.CollidingNames = make(map[string]struct{}, len(names))
+		}
+		for _, name := range names {
+			ab.CollidingNames[name] = struct{}{}
+		}
+	}
+	record(cfg.Security.AddressBook)
+	for _, zone := range cfg.Security.Zones {
+		if zone != nil {
+			record(zone.AddressBook)
+		}
+	}
+}
+
+func addressBookCollisionNames(ab *AddressBook) []string {
+	if ab == nil {
+		return nil
+	}
+	names := make([]string, 0, len(ab.Addresses))
+	for name := range ab.Addresses {
+		if _, collision := resolveAddressBookNameKind(ab, name); collision {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 
 // addressBookNameCollision returns the first same-name `address` +
 // `address-set` collision in ab (walked in sorted name order for a
@@ -137,25 +161,20 @@ func addressBookNameCollision(scope string, ab *AddressBook) error {
 	if ab == nil {
 		return nil
 	}
-	names := make([]string, 0, len(ab.Addresses))
-	for n := range ab.Addresses {
-		names = append(names, n)
+	names := addressBookCollisionNames(ab)
+	if len(names) == 0 {
+		return nil
 	}
-	sort.Strings(names)
-	for _, n := range names {
-		if _, collision := resolveAddressBookNameKind(ab, n); collision {
-			return fmt.Errorf(
-				"%s defines %q as BOTH an `address` and an `address-set`; "+
-					"the two share one namespace, so a policy `match "+
-					"source-address %s` / `destination-address %s` resolves "+
-					"ambiguously and the plain address silently shadows the "+
-					"same-named address-set (dropping its other members and "+
-					"changing which traffic a permit/deny rule covers). Rename one "+
-					"of the two entries so every policy reference is unambiguous",
-				scope, n, n, n)
-		}
-	}
-	return nil
+	n := names[0]
+	return fmt.Errorf(
+		"%s defines %q as BOTH an `address` and an `address-set`; "+
+			"the two share one namespace, so a policy `match "+
+			"source-address %s` / `destination-address %s` resolves "+
+			"ambiguously and the plain address silently shadows the "+
+			"same-named address-set (dropping its other members and "+
+			"changing which traffic a permit/deny rule covers). Rename one "+
+			"of the two entries so every policy reference is unambiguous",
+		scope, n, n, n)
 }
 
 // validateAddressBookMappedPrefixesStrict rejects IPv4-mapped IPv6 address-book

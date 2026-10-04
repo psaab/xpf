@@ -1537,6 +1537,10 @@ type SynFloodConfig struct {
 type AddressBook struct {
 	Addresses   map[string]*Address
 	AddressSets map[string]*AddressSet
+	// CollidingNames records entries the tolerant compiler must not resolve
+	// because more than one definition claimed the same operator-visible name.
+	// It is compiler metadata, not persisted configuration or wire state.
+	CollidingNames map[string]struct{} `json:"-"`
 }
 
 // Address is a named address entry (IP prefix).
@@ -1616,6 +1620,10 @@ type ApplicationsConfig struct {
 	// gate (validateApplicationStructureStrict) hard-rejects them on the strict
 	// commit path / warns on the tolerant load / peer-sync path (#3366).
 	MixedDirectTermApps []string
+	// CollidingNames records names rejected by the strict application namespace
+	// gate. Tolerant policy expansion refuses these references rather than
+	// resolving whichever map write happened to win.
+	CollidingNames map[string]struct{} `json:"-"`
 }
 
 // ApplicationSet groups multiple applications or nested application-sets.

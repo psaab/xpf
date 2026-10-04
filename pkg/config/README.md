@@ -1849,6 +1849,25 @@ so the policy lowers to the #3261 `__unsupported__` sentinel. The helper refuses
 the whole snapshot (a running node keeps its previous one), and the mirror names
 the application.
 
+**Tolerant name-collision quarantine (#12049):** strict application namespace
+gates (#3339/#3472) and the strict same-name `address`/`address-set` gate
+(#5676) are unchanged. A tolerant load or peer-sync still compiles these
+pre-existing configurations, but records the colliding names and refuses a
+policy reference that could otherwise resolve to a different winner. Nested
+application-set references are checked with the same collision registry;
+address-book collisions are carried through the zone-local fold. The policy is
+lowered to the existing `__unsupported__` or `__unsupported_address__` sentinel,
+and `PolicyContentRejectionReasons` names the refused token so the helper keeps
+previous-good state (or boots default-deny) rather than publishing a
+first/last-wins interpretation.
+
+An unsupported named `security address-book <name>` stanza is also rejected by
+strict schema validation and ignored by the current typed compiler on tolerant
+loads. If one of its entries shares a name with the compiled global book, that
+reference is quarantined instead of falling through to the unrelated global
+entry. Non-colliding application and address references keep their existing
+wire representation.
+
 Only MATCH leaves count. `applicationMatchLeaves9525` and
 `applicationSettingLeaves9525` partition `valueTakingApplicationLeaves`, so a
 bad, dangling or conflicting timeout or `alg`, which does not change what

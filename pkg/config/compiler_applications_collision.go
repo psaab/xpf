@@ -42,11 +42,11 @@ import (
 // Strict path (commit / commit-check, lenient=false): the first collision is a
 // hard compile error naming the offending name. Lenient path (load / peer-sync,
 // lenient=true): every collision is returned as a warning and compilation
-// continues with the existing last-write-wins behavior, so an already-persisted
-// or peer-synced config that an older binary silently accepted still BOOTS
-// (#1960 / #3261 fail-closed-on-load doctrine). compileApplications is unchanged
-// — the lenient path deliberately keeps producing the (arbitrary but stable)
-// last-write-wins maps it always did.
+// continues with the existing last-write-wins maps so the config still BOOTS
+// (#1960 / #3261 fail-closed-on-load doctrine). The colliding names are also
+// recorded as compiler metadata; userspace refuses policy references to them
+// with the unsupported-application sentinel and a non-empty rejection mirror,
+// rather than publishing the arbitrary map winner.
 //
 // Scope notes:
 //   - Only USER-authored AST stanzas are examined. The predefined junos-* table
@@ -76,7 +76,7 @@ import (
 // under strict commit (warned on the tolerant load / peer-sync path), and a
 // generated name that shadows a predefined junos-* application (M03) is always
 // surfaced as a warning. See section 5 below.
-func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string, error) {
+func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string, map[string]struct{}, error) {
 	// The compiler compiles EVERY top-level `applications` node (compiler.go's
 	// `for _, node := range tree.Children` switch hits `case "applications"`
 	// once per node), so a collision SPLIT across two sibling `applications {}`
@@ -91,10 +91,17 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 		}
 	}
 	if len(appsNodes) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	var warnings []string
+	var collidingNames map[string]struct{}
+	markCollision := func(name string) {
+		if collidingNames == nil {
+			collidingNames = make(map[string]struct{})
+		}
+		collidingNames[name] = struct{}{}
+	}
 	emit := func(format string, args ...any) error {
 		msg := fmt.Sprintf(format, args...)
 		if !lenient {
@@ -132,13 +139,14 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 	//    namespace). Reported in first-seen order for a deterministic error.
 	for _, name := range appOrder {
 		if appCounts[name] > 1 {
+			markCollision(name)
 			if err := emit(
 				"applications application %q is defined %d times — a duplicate "+
 					"application definition is silently last-write-wins (the later "+
 					"definition replaces the earlier with no commit error); remove "+
 					"the duplicate or rename it (#3339)",
 				name, appCounts[name]); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
@@ -152,13 +160,14 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 	sort.Strings(setNames)
 	for _, name := range setNames {
 		if setCounts[name] > 1 {
+			markCollision(name)
 			if err := emit(
 				"applications application-set %q is defined %d times — a duplicate "+
 					"application-set definition is silently last-write-wins (the "+
 					"later definition replaces the earlier with no commit error); "+
 					"remove the duplicate or rename it (#3339)",
 				name, setCounts[name]); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
@@ -172,6 +181,7 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 	//    application first-seen order.
 	for _, name := range appOrder {
 		if setCounts[name] > 0 {
+			markCollision(name)
 			if err := emit(
 				"name %q is defined as BOTH an application and an "+
 					"application-set — they share one namespace, so the "+
@@ -180,7 +190,7 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 					"referencing %q may enforce one definition while AppID catalogs "+
 					"the other; rename one of them (#3339)",
 				name, name); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
@@ -255,6 +265,7 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 					if seen[t.Name] {
 						if !dupReported[t.Name] {
 							dupReported[t.Name] = true
+							markCollision(t.Name)
 							if err := emit(
 								"applications application %q has terms that generate "+
 									"the duplicate application name %q — the later term "+
@@ -263,7 +274,7 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 									"duplicate member; give the terms distinct names "+
 									"(#3339)",
 								appName, t.Name); err != nil {
-								return nil, err
+								return nil, nil, err
 							}
 						}
 						continue
@@ -306,6 +317,7 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 
 		// 5a. H03 — cross-parent generated-name collision.
 		if len(parents) > 1 {
+			markCollision(g)
 			if err := emit(
 				"applications %v each generate the per-term application name %q — "+
 					"the generated name collides across parents and the later term "+
@@ -313,7 +325,7 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 					"commit error); rename a term or parent so the generated %q is "+
 					"unique (#3472)",
 				parents, g, g); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 
@@ -327,6 +339,7 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 		//     ambiguously, which is the defect; the message describes the namespace
 		//     collision rather than a specific map write that does not always hold.
 		if appCounts[g] > 0 {
+			markCollision(g)
 			if err := emit(
 				"generated per-term application name %q (from %v) collides with the "+
 					"authored application name %q in the flat application namespace — "+
@@ -335,12 +348,13 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 					"last-write-wins (with no commit error) and policy / AppID may "+
 					"enforce or label the wrong application; rename one of them (#3472)",
 				g, parents, g); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 
 		// 5c. H02 — generated name collides with an authored application-set.
 		if setCounts[g] > 0 {
+			markCollision(g)
 			if err := emit(
 				"generated per-term application name %q (from %v) collides with the "+
 					"authored application-set %q — they share one flat namespace but live "+
@@ -349,7 +363,7 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 					"token enforces one definition and is attributed to the other; rename "+
 					"one of them (#3472)",
 				g, parents, g); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 
@@ -375,5 +389,5 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 		}
 	}
 
-	return warnings, nil
+	return warnings, collidingNames, nil
 }

@@ -219,13 +219,18 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// definitions. Strict (commit / commit-check): the first collision hard-
 	// rejects. Lenient (load / peer-sync): warn so an already-persisted or
 	// peer-synced config an older binary silently accepted still BOOTS (#1960 /
-	// #3261). Runs on the group-expanded, inactive-pruned AST because the
-	// colliding definitions are merged away by last-write-wins by the time the
-	// typed maps exist — only the raw AST still carries every definition.
-	appCollisionWarnings, err := validateApplicationNameCollisionsAST(
+	// #3261), and record ambiguous names so userspace refuses references rather
+	// than publishing a winner. Runs on the group-expanded, inactive-pruned AST
+	// because the colliding definitions are merged away by last-write-wins by
+	// the time the typed maps exist — only the raw AST still carries every
+	// definition.
+	appCollisionWarnings, appCollisionNames, err := validateApplicationNameCollisionsAST(
 		tree.Children, opts.lenientApplicationNameCollisions)
 	if err != nil {
 		return nil, err
+	}
+	if opts.applicationNameCollisions != nil {
+		*opts.applicationNameCollisions = appCollisionNames
 	}
 
 	// #3884 (fable-review-161 F-030) firewall-filter cross-family name-collision
