@@ -9,17 +9,6 @@ import (
 // diagnostics for Junos routing knobs that the compiler accepts but does not
 // apply.
 func routingKnobWarning11314(path []string, keyword string) string {
-	if keyword != bgpSAFIUnicast11815 && len(path) >= 2 &&
-		path[len(path)-2] == "family" &&
-		(path[len(path)-1] == "inet" || path[len(path)-1] == "inet6") {
-		for i := 0; i+1 < len(path); i++ {
-			if path[i] == "protocols" && path[i+1] == "bgp" {
-				return fmt.Sprintf(
-					"%s: BGP address-family SAFI %q is unsupported; only unicast is compiled, so this family is not activated (#11815)",
-					strings.Join(path, " "), keyword)
-			}
-		}
-	}
 	if keyword == "rib-group" && len(path) >= 3 &&
 		path[len(path)-3] == "static" && path[len(path)-2] == "route" {
 		hasRoutingOptions := false
@@ -102,6 +91,12 @@ func warnUnknownRoutingLeaves10707(tree *ConfigTree) []string {
 				continue
 			}
 			keyword := node.Keys[0]
+			// BGP SAFI diagnostics belong to the compiler gate, not this
+			// child walker: a hierarchical one-liner can carry the SAFI in
+			// node.Keys without a child keyword to visit.
+			if isBGPSAFIWarningOwned11815(path, keyword) {
+				continue
+			}
 			if message := routingKnobWarning11314(path, keyword); message != "" {
 				appendWarning(message)
 				continue

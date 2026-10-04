@@ -107,15 +107,9 @@ func TestBGPFamilySAFI11815LenientLabeledUnicastIsNotUnicast(t *testing.T) {
 	if n.FamilyInet || !n.UnsupportedInetSAFI {
 		t.Fatalf("labeled-unicast compiled as inet=%v unsupported=%v, want inet=false unsupported=true", n.FamilyInet, n.UnsupportedInetSAFI)
 	}
-	found := false
-	for _, warning := range cfg.Warnings {
-		if strings.Contains(warning, "labeled-unicast") && strings.Contains(warning, "#11815") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("missing SAFI warning in %v", cfg.Warnings)
+	warnings := bgpSAFIWarnings11815(cfg)
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "labeled-unicast") {
+		t.Fatalf("SAFI warning = %v, want one labeled-unicast warning", warnings)
 	}
 	wire, err := json.Marshal(n)
 	if err != nil {
@@ -141,6 +135,54 @@ func TestBGPFamilySAFI11815LenientUnionRetainsSupportedUnicast(t *testing.T) {
 	if !n.FamilyInet || !n.UnsupportedInetSAFI {
 		t.Fatalf("mixed SAFIs lost a supported/unhandled family: inet=%v unsupported=%v", n.FamilyInet, n.UnsupportedInetSAFI)
 	}
+	warnings := bgpSAFIWarnings11815(cfg)
+	if len(warnings) != 1 ||
+		!strings.Contains(warnings[0], "labeled-unicast") ||
+		!strings.Contains(warnings[0], "skipped") ||
+		!strings.Contains(warnings[0], "unicast remains activated") ||
+		strings.Contains(warnings[0], "this family is not activated") {
+		t.Fatalf("mixed SAFI warning = %v, want unsupported SAFI skipped with unicast still activated", warnings)
+	}
+}
+
+func TestBGPFamilySAFI11815LenientHierarchicalOneLinerWarns(t *testing.T) {
+	tree := hierTree(t, `protocols {
+    bgp {
+        local-as 65001;
+        group external {
+            peer-as 65002;
+            family inet labeled-unicast;
+            neighbor 192.0.2.1;
+        }
+    }
+}`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	if cfg.Protocols.BGP == nil || len(cfg.Protocols.BGP.Neighbors) != 1 {
+		t.Fatalf("compiled BGP neighbor missing: %+v", cfg.Protocols.BGP)
+	}
+	n := cfg.Protocols.BGP.Neighbors[0]
+	if n.FamilyInet || !n.UnsupportedInetSAFI {
+		t.Fatalf("packed labeled-unicast compiled as inet=%v unsupported=%v, want inert", n.FamilyInet, n.UnsupportedInetSAFI)
+	}
+	warnings := bgpSAFIWarnings11815(cfg)
+	if len(warnings) != 1 ||
+		!strings.Contains(warnings[0], "labeled-unicast") ||
+		!strings.Contains(warnings[0], "this family is not activated") {
+		t.Fatalf("packed hierarchical SAFI warnings = %v, want one inactive labeled-unicast diagnostic", warnings)
+	}
+}
+
+func bgpSAFIWarnings11815(cfg *Config) []string {
+	var warnings []string
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "#11815") {
+			warnings = append(warnings, warning)
+		}
+	}
+	return warnings
 }
 
 func TestBGPFamilySAFI11815SplitHierarchicalShapeRejects(t *testing.T) {

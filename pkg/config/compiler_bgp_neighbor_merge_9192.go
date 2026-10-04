@@ -199,7 +199,7 @@ func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ow
 		case "family":
 			applyNeighborFamily := func(familyNode *Node, afi string) error {
 				scope := fmt.Sprintf("BGP neighbor %q family %s", neighbor.Address, afi)
-				unicast, unsupported, err := applyBGPFamilySAFI11815(familyNode, scope, opts)
+				unicast, unsupported, err := applyBGPFamilySAFI11815(familyNode, scope, opts, warnings)
 				if err != nil {
 					return err
 				}

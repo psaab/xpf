@@ -443,7 +443,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			groupChildren := expandFlatRun(groupInst.node.Children, bgpGroupSchema9181())
 			applyGroupFamily := func(familyNode *Node, afi string) error {
 				scope := fmt.Sprintf("BGP group %q family %s", groupInst.name, afi)
-				unicast, unsupported, err := applyBGPFamilySAFI11815(familyNode, scope, opts)
+				unicast, unsupported, err := applyBGPFamilySAFI11815(familyNode, scope, opts, warnings)
 				if err != nil {
 					return err
 				}
