@@ -13,6 +13,8 @@ const FLOW_CACHE_SIZE: usize = 4096;
 const FLOW_CACHE_WAYS: usize = 4;
 const FLOW_CACHE_SETS: usize = FLOW_CACHE_SIZE / FLOW_CACHE_WAYS;
 const FLOW_CACHE_SET_MASK: usize = FLOW_CACHE_SETS - 1;
+/// Denial entries expire quickly even when config/FIB generations remain stable.
+pub(super) const DENY_CACHE_TTL_SECS: u64 = 1;
 pub(super) const ACTIVE_WINDOW_EPOCHS: u16 = 10;
 pub(super) const FLOW_WORKER_MAP_MAX_PER_BINDING: usize = 256;
 const _: () = assert!(FLOW_CACHE_SETS.is_power_of_two());
@@ -95,7 +97,7 @@ pub(super) struct CachedInputFilterLog {
 /// Precomputed rewrite descriptor for an established flow.
 /// All fields are constant for the lifetime of the session.
 /// Per-packet cost: write MACs + TTL-- + apply precomputed csum deltas.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct RewriteDescriptor {
     pub(super) dst_mac: [u8; 6],
     pub(super) src_mac: [u8; 6],
@@ -209,6 +211,15 @@ impl FlowCacheLookup {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CachedPolicyDeny {
+    pub(super) action: crate::policy::PolicyAction,
+    pub(super) policy_id: u32,
+    pub(super) application_id: u16,
+    /// `false` for NoRoute denies, which cannot honor a `reject` action.
+    pub(super) reply_allowed: bool,
+}
+
 /// Per-flow cache entry with key validation.
 #[derive(Clone)]
 pub(super) struct FlowCacheEntry {
@@ -229,6 +240,12 @@ pub(super) struct FlowCacheEntry {
     pub(super) logical_ingress_ifindex: i32,
     pub(super) descriptor: RewriteDescriptor,
     pub(super) decision: SessionDecision,
+    /// Policy-deny details needed to replay truthful RT_FLOW and reject replies.
+    /// `None` identifies a non-policy drop such as `DiscardRoute`.
+    pub(super) policy_deny: Option<CachedPolicyDeny>,
+    /// Zero for forwarding entries; terminal drops expire at the monotonic
+    /// second passed to lookup, in addition to generation fences.
+    pub(super) deny_expires_at_secs: u64,
     pub(super) metadata: SessionMetadata,
     /// Validation stamp captured at insert time. Stale entries are treated as
     /// misses without requiring per-entry scans at RG transition.
@@ -423,7 +440,12 @@ impl FlowCacheEntry {
         // blackhole on a VRRP gateway MAC failover.
         neighbor_mac_epoch: u32,
     ) -> Option<Self> {
-        if !Self::should_cache(meta, decision) {
+        if !Self::should_cache(meta, decision)
+            || !matches!(
+                decision.resolution.disposition,
+                ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
+            )
+        {
             return None;
         }
         // #963 PR-A: refuse to *cache* a fast-path descriptor whose
@@ -621,6 +643,8 @@ impl FlowCacheEntry {
                 apply_nat_on_fabric,
             },
             decision,
+            policy_deny: None,
+            deny_expires_at_secs: 0,
             metadata: SessionMetadata {
                 ingress_zone: ingress_zone.unwrap_or(0),
                 egress_zone: 0,
@@ -677,6 +701,112 @@ impl FlowCacheEntry {
             // and re-resolved to the current neighbor state.
             neighbor_mac_epoch,
             neighbor_shard,
+        })
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn from_deny_decision(
+        flow: &SessionFlow,
+        meta: UserspaceDpMeta,
+        validation: ValidationState,
+        decision: SessionDecision,
+        flow_owner_rg_id: i32,
+        ingress_zone: u16,
+        egress_zone: u16,
+        policy_counter_idx: u32,
+        policy_counter: Option<Arc<crate::policy::PolicyRuleCounter>>,
+        policy_deny: Option<CachedPolicyDeny>,
+        input_filter_log: Option<CachedInputFilterLog>,
+        input_filter_counters: crate::filter::CachedFilterCounters,
+        deny_expires_at_secs: u64,
+        forwarding: &ForwardingState,
+        ha_state: &BTreeMap<i32, HAGroupRuntime>,
+        rg_epochs: &[AtomicU32; MAX_RG_EPOCHS],
+    ) -> Option<Self> {
+        let disposition = decision.resolution.disposition;
+        if !Self::should_cache(meta, decision)
+            || !matches!(
+                disposition,
+                ForwardingDisposition::PolicyDenied | ForwardingDisposition::DiscardRoute
+            )
+            || (disposition == ForwardingDisposition::PolicyDenied) != policy_deny.is_some()
+        {
+            return None;
+        }
+
+        let logical_ingress_ifindex = resolve_ingress_logical_ifindex(
+            forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+        )
+        .unwrap_or(meta.ingress_ifindex as i32);
+        let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
+        // The cache key omits DSCP and per-packet L4 predicates. An input
+        // filter can deny before zone policy on a later packet with the same
+        // flow key, so only cache when its verdict is tuple-stable.
+        if crate::filter::interface_input_filter_has_dscp_match(
+            &forwarding.filter_state,
+            logical_ingress_ifindex,
+            is_v6,
+        ) || crate::filter::interface_input_filter_has_per_packet_l4_match(
+            &forwarding.filter_state,
+            logical_ingress_ifindex,
+            is_v6,
+        ) {
+            return None;
+        }
+
+        let owner_rg_id = if flow_owner_rg_id > 0 {
+            flow_owner_rg_id
+        } else {
+            owner_rg_for_resolution(forwarding, decision.resolution)
+        };
+        Some(Self {
+            key: flow.forward_key.clone(),
+            ingress_ifindex: meta.ingress_ifindex as i32,
+            logical_ingress_ifindex,
+            descriptor: RewriteDescriptor {
+                input_filter_log,
+                input_filter_counters,
+                ..RewriteDescriptor::default()
+            },
+            decision,
+            metadata: SessionMetadata {
+                ingress_zone,
+                egress_zone,
+                ingress_zone_check: crate::session::zone_vintage_check_for_id(
+                    &forwarding.zone_id_to_name,
+                    ingress_zone,
+                ),
+                egress_zone_check: crate::session::zone_vintage_check_for_id(
+                    &forwarding.zone_id_to_name,
+                    egress_zone,
+                ),
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                owner_rg_id,
+                fabric_ingress: false,
+                is_reverse: false,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: policy_deny.map_or(0, |deny| deny.policy_id),
+                inactivity_timeout_ns: None,
+                policy_counter_idx,
+                policy_counter,
+            },
+            stamp: FlowCacheStamp::capture(
+                validation.config_generation,
+                validation.fib_generation,
+                owner_rg_id,
+                ha_state,
+                rg_epochs,
+            ),
+            policy_deny,
+            deny_expires_at_secs,
+            observed_bytes: u64::from(meta.pkt_len),
+            last_used_epoch: 0,
+            neighbor_mac_epoch: 0,
+            neighbor_shard: NEIGHBOR_SHARD_NONE,
         })
     }
 }
@@ -1060,6 +1190,15 @@ impl FlowCache {
                 }
                 if entry.stamp.owner_rg_lease_until != 0
                     && now_secs > entry.stamp.owner_rg_lease_until
+                {
+                    self.entries[entry_idx] = None;
+                    self.evictions += 1;
+                    self.demote_lru(set, way as u8);
+                    self.misses += 1;
+                    return None;
+                }
+                if entry.deny_expires_at_secs != 0
+                    && now_secs >= entry.deny_expires_at_secs
                 {
                     self.entries[entry_idx] = None;
                     self.evictions += 1;

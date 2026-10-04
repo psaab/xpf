@@ -70,7 +70,7 @@ pub(in crate::afxdp) use embedded_icmp::{
     try_reverse_embedded_icmp_error,
 };
 use flow_cache_hit::{FlowCacheOutcome, stage_flow_cache_hit};
-use flow_cache_seed::stage_flow_cache_seed;
+use flow_cache_seed::{stage_flow_cache_deny_seed, stage_flow_cache_seed};
 use flowless_verdict::{
     FlowlessLocalVerdict, flowless_base_resolution, flowless_local_delivery_verdict,
     ipv6_ext_header_over_limit_drop,
@@ -5495,6 +5495,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // resolved from the POST-translation dst port
                                 // (#2520/#3058) so a DNAT'd deny logs the inside
                                 // app, not UNKNOWN(pre-NAT port).
+                                let policy_app_id = resolve_policy_deny_app_id(
+                                    &worker_ctx.forwarding.app_catalog,
+                                    flow,
+                                    policy_dst_port,
+                                );
                                 deny_reply_and_emit(
                                     &mut binding.tx_pipeline,
                                     worker_ctx.forwarding,
@@ -5510,11 +5515,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     owner_rg_id,
                                     policy_result.policy_id,
                                     policy_result.action,
-                                    resolve_policy_deny_app_id(
-                                        &worker_ctx.forwarding.app_catalog,
-                                        flow,
-                                        policy_dst_port,
-                                    ),
+                                    policy_app_id,
                                     now_ns,
                                 );
                                 telemetry.dbg.policy_deny += 1;
@@ -5541,6 +5542,36 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // reply outcome.
                                 decision.resolution.disposition =
                                     ForwardingDisposition::PolicyDenied;
+                                stage_flow_cache_deny_seed(
+                                    &mut binding.flow.flow_cache,
+                                    Some(flow),
+                                    meta,
+                                    validation,
+                                    decision,
+                                    owner_rg_id,
+                                    from_zone_id,
+                                    to_zone_id,
+                                    policy_result.policy_counter_idx,
+                                    worker_ctx
+                                        .forwarding
+                                        .policy
+                                        .hit_counter_by_idx(policy_result.policy_counter_idx)
+                                        .cloned(),
+                                    Some(CachedPolicyDeny {
+                                        action: policy_result.action,
+                                        policy_id: policy_result.policy_id,
+                                        application_id: policy_app_id,
+                                        reply_allowed: true,
+                                    }),
+                                    crate::afxdp::frame::term_match_extra_from_frame(
+                                        packet_frame,
+                                        meta,
+                                    )
+                                    .to_static(),
+                                    ingress_zone_override,
+                                    now_secs,
+                                    worker_ctx,
+                                );
                             }
                         } else if decision.resolution.disposition
                             == ForwardingDisposition::HAInactive
@@ -7606,6 +7637,44 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // entirely.
                             recycle_now = true;
                         }
+                        ForwardingDisposition::DiscardRoute => {
+                            if let Some(flow) = flow.as_ref() {
+                                let ingress_logical = resolve_ingress_logical_ifindex(
+                                    worker_ctx.forwarding,
+                                    meta.ingress_ifindex as i32,
+                                    meta.ingress_vlan_id,
+                                )
+                                .unwrap_or(meta.ingress_ifindex as i32);
+                                let (from_zone_id, to_zone_id) =
+                                    zone_pair_ids_for_flow_with_override(
+                                        worker_ctx.forwarding,
+                                        ingress_logical,
+                                        ingress_zone_override,
+                                        decision.resolution.egress_ifindex,
+                                    );
+                                stage_flow_cache_deny_seed(
+                                    &mut binding.flow.flow_cache,
+                                    Some(flow),
+                                    meta,
+                                    validation,
+                                    decision,
+                                    flow_cache_owner_rg_id,
+                                    from_zone_id,
+                                    to_zone_id,
+                                    0,
+                                    None,
+                                    None,
+                                    crate::afxdp::frame::term_match_extra_from_frame(
+                                        packet_frame,
+                                        meta,
+                                    )
+                                    .to_static(),
+                                    ingress_zone_override,
+                                    now_secs,
+                                    worker_ctx,
+                                );
+                            }
+                        }
                         ForwardingDisposition::NoRoute => {
                             telemetry.dbg.no_route += 1;
                             if cfg!(feature = "debug-log") {
@@ -7789,6 +7858,40 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     telemetry.dbg.policy_deny += 1;
                                     decision.resolution.disposition =
                                         ForwardingDisposition::PolicyDenied;
+                                    if let Some(flow) = flow.as_ref() {
+                                        stage_flow_cache_deny_seed(
+                                            &mut binding.flow.flow_cache,
+                                            Some(flow),
+                                            meta,
+                                            validation,
+                                            decision,
+                                            owner_rg_id,
+                                            from_zone_id,
+                                            to_zone_id,
+                                            policy_result.policy_counter_idx,
+                                            worker_ctx
+                                                .forwarding
+                                                .policy
+                                                .hit_counter_by_idx(
+                                                    policy_result.policy_counter_idx,
+                                                )
+                                                .cloned(),
+                                            Some(CachedPolicyDeny {
+                                                action: policy_result.action,
+                                                policy_id: policy_result.policy_id,
+                                                application_id: app_id,
+                                                reply_allowed: false,
+                                            }),
+                                            crate::afxdp::frame::term_match_extra_from_frame(
+                                                packet_frame,
+                                                meta,
+                                            )
+                                            .to_static(),
+                                            ingress_zone_override,
+                                            now_secs,
+                                            worker_ctx,
+                                        );
+                                    }
                                 }
                                 // #10679/#11066: permitted NoRoute packets may
                                 // reach the kernel FIB only when no missing
@@ -8132,6 +8235,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // inbound dst translation (#2345/#3058); the
                                         // AppID is resolved from the POST-translation
                                         // dst port (#2520/#3058).
+                                        let policy_app_id = resolve_policy_deny_app_id(
+                                            &worker_ctx.forwarding.app_catalog,
+                                            flow,
+                                            policy_dst_port,
+                                        );
                                         deny_reply_and_emit(
                                             &mut binding.tx_pipeline,
                                             worker_ctx.forwarding,
@@ -8147,16 +8255,43 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             owner_rg_id,
                                             policy_result.policy_id,
                                             policy_result.action,
-                                            resolve_policy_deny_app_id(
-                                                &worker_ctx.forwarding.app_catalog,
-                                                flow,
-                                                policy_dst_port,
-                                            ),
+                                            policy_app_id,
                                             now_ns,
                                         );
-                                        telemetry.dbg.policy_deny += 1;
                                         decision.resolution.disposition =
                                             ForwardingDisposition::PolicyDenied;
+                                        stage_flow_cache_deny_seed(
+                                            &mut binding.flow.flow_cache,
+                                            Some(flow),
+                                            meta,
+                                            validation,
+                                            decision,
+                                            owner_rg_id,
+                                            from_zone_id,
+                                            to_zone_id,
+                                            policy_result.policy_counter_idx,
+                                            worker_ctx
+                                                .forwarding
+                                                .policy
+                                                .hit_counter_by_idx(
+                                                    policy_result.policy_counter_idx,
+                                                )
+                                                .cloned(),
+                                            Some(CachedPolicyDeny {
+                                                action: policy_result.action,
+                                                policy_id: policy_result.policy_id,
+                                                application_id: policy_app_id,
+                                                reply_allowed: true,
+                                            }),
+                                            crate::afxdp::frame::term_match_extra_from_frame(
+                                                packet_frame,
+                                                meta,
+                                            )
+                                            .to_static(),
+                                            ingress_zone_override,
+                                            now_secs,
+                                            worker_ctx,
+                                        );
                                         record_forwarding_disposition(
                                             &worker_ctx.ident,
                                             DispositionCounters::Hot(telemetry.counters),

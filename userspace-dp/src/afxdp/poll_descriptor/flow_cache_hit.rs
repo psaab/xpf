@@ -198,6 +198,99 @@ pub(super) fn stage_flow_cache_hit(
         let cached_decision = cached.decision;
         let cached_descriptor = &cached.descriptor;
         let cached_metadata = &cached.metadata;
+        if matches!(
+            cached_decision.resolution.disposition,
+            ForwardingDisposition::PolicyDenied | ForwardingDisposition::DiscardRoute
+        ) {
+            if cached_decision.resolution.disposition == ForwardingDisposition::PolicyDenied
+                && cached.policy_deny.is_none()
+            {
+                // A policy-deny entry without replay metadata cannot preserve
+                // its event/reject contract. Refuse it rather than silently
+                // serving an incomplete cached verdict.
+                flow_state
+                    .flow_cache
+                    .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
+                flow_state.flow_cache.reclassify_hit_as_miss();
+                return FlowCacheOutcome::FallThrough;
+            }
+            cached_descriptor
+                .input_filter_counters
+                .for_each(|counter| {
+                    crate::filter::record_filter_counter(counter, meta.pkt_len as u64);
+                });
+            emit_cached_input_filter_log(
+                worker_ctx.forwarding,
+                worker_ctx.event_stream,
+                flow,
+                meta,
+                cached_descriptor,
+                now_ns,
+            );
+            if let Some(deny) = cached.policy_deny {
+                if deny.reply_allowed {
+                    super::reject_reply::deny_reply_and_emit(
+                        tx_pipeline,
+                        worker_ctx.forwarding,
+                        worker_ctx.event_stream,
+                        worker_ctx.ident.ifindex,
+                        packet_frame,
+                        meta,
+                        flow,
+                        telemetry.counters,
+                        &cached_decision.nat,
+                        cached_metadata.ingress_zone,
+                        cached_metadata.egress_zone,
+                        cached_metadata.owner_rg_id,
+                        deny.policy_id,
+                        deny.action,
+                        deny.application_id,
+                        now_ns,
+                    );
+                } else {
+                    super::emit_policy_deny_event(
+                        worker_ctx.event_stream,
+                        flow,
+                        &cached_decision.nat,
+                        meta,
+                        cached_metadata.ingress_zone,
+                        cached_metadata.egress_zone,
+                        cached_metadata.owner_rg_id,
+                        deny.policy_id,
+                        deny.action,
+                        deny.application_id,
+                        false,
+                        now_ns,
+                    );
+                }
+                if let Some(counter) = worker_ctx.forwarding.policy.resolve_session_hit_counter(
+                    cached_metadata.policy_counter.as_ref(),
+                    cached_metadata.policy_counter_idx,
+                ) {
+                    crate::policy::record_policy_hit_counter(counter, meta.pkt_len as u64);
+                }
+            }
+            let resolution_debug =
+                ResolutionDebug::from_flow(meta.ingress_ifindex as i32, flow);
+            record_forwarding_disposition(
+                &worker_ctx.ident,
+                DispositionCounters::Hot(telemetry.counters),
+                cached_decision.resolution,
+                meta.pkt_len as u32,
+                Some(meta),
+                Some(&resolution_debug),
+                worker_ctx.recent_exceptions,
+                worker_ctx.last_resolution,
+                worker_ctx.forwarding,
+            );
+            match cached_decision.resolution.disposition {
+                ForwardingDisposition::PolicyDenied => telemetry.dbg.policy_deny += 1,
+                ForwardingDisposition::DiscardRoute => telemetry.dbg.disposition_other += 1,
+                _ => unreachable!("only cached terminal denies reach this branch"),
+            }
+            scratch.scratch_recycle.push(desc.addr);
+            return FlowCacheOutcome::Consumed;
+        }
         // #11413: a Consumed FlowCache hit bypasses the slow-path destination
         // class gate, so reject it before liveness, rewrite, accounting or TX.
         if transit_destination_class_drop(

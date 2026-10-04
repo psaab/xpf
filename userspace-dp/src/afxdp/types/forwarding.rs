@@ -1598,45 +1598,25 @@ pub(crate) enum ForwardingDisposition {
 }
 
 impl ForwardingDisposition {
-    /// Whether this disposition produces a stable forwarding decision that can
-    /// be stored in the per-worker flow cache.
+    /// Whether this disposition can be stored in the per-worker flow cache.
     ///
-    /// Cacheable:
-    ///   - `ForwardCandidate`: Normal forwarded traffic with a resolved
-    ///     neighbor and egress interface. The common fast path.
-    ///   - `FabricRedirect`: Targets a fabric overlay binding. Cacheable
-    ///     because each cache entry captures the owning RG epoch into
-    ///     `FlowCacheStamp::owner_rg_epoch` at insert time
-    ///     (`flow_cache.rs:60-83`), and `FlowCache::lookup`
-    ///     (`flow_cache.rs:314-347`) treats the entry as a miss when
-    ///     `current_epoch != entry.stamp.owner_rg_epoch`. The owning RG
-    ///     bumps its epoch on every active/standby flip, so the window
-    ///     in which a cached `FabricRedirect` could point at a stale
-    ///     fabric peer is bounded by the next RG epoch bump (#1065).
+    /// Forwarding decisions use config/FIB generation, RG epoch, and
+    /// neighbor-epoch fencing. Policy-denied and discard-route drops are also
+    /// cacheable: those entries carry the same config/FIB fences and a short
+    /// expiry so neither a policy change nor a route change can preserve a
+    /// stale denial.
     ///
-    /// Not cacheable:
-    ///   - `LocalDelivery`: Delivered to the kernel stack, not forwarded
-    ///     through XSK bindings. No rewrite descriptor to cache.
-    ///   - `HAInactive`: The owning RG is not active on this node. Transient
-    ///     state that changes on failover — must never be cached.
-    ///   - `PolicyDenied`: Packet was denied by policy. Drop decisions are
-    ///     not cached to allow policy changes to take effect immediately.
-    ///   - `NoRoute`: No route to destination. Transient — may resolve when
-    ///     FIB is updated.
-    ///   - `MissingNeighbor`: Route exists but ARP/NDP is unresolved.
-    ///     Transient — resolves when the neighbor entry appears.
-    ///   - `DiscardRoute`: Matched a discard/reject route. Not cacheable for
-    ///     the same reason as PolicyDenied.
-    ///   - `NextTableUnsupported`: Inter-VRF route leaking hit an
-    ///     unsupported next-table. Permanent miss, not worth caching.
-    ///   - `TableUnavailable`: the session's installing table is not
-    ///     resolvable in the current config (retired/unknown instance or
-    ///     owner change). Terminal drop, never cached (a re-added table
-    ///     heals through the slow path instead).
+    /// `NoRoute`, `MissingNeighbor`, `HAInactive`, `NextTableUnsupported`,
+    /// and `TableUnavailable` remain uncached: they are transient, ownership
+    /// dependent, or otherwise not worth persisting. `LocalDelivery` is not a
+    /// forwarded flow and has no rewrite descriptor.
     pub(in crate::afxdp) fn is_cacheable(self) -> bool {
         matches!(
             self,
-            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::FabricRedirect
+            ForwardingDisposition::ForwardCandidate
+                | ForwardingDisposition::FabricRedirect
+                | ForwardingDisposition::PolicyDenied
+                | ForwardingDisposition::DiscardRoute
         )
     }
 

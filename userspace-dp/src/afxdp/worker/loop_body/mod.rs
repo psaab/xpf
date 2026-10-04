@@ -3390,6 +3390,8 @@ mod flow_cache_invalidation_tests {
                 owner_rg_epoch: 0,
                 owner_rg_lease_until: 0,
             },
+            policy_deny: None,
+            deny_expires_at_secs: 0,
             observed_bytes: 0,
             last_used_epoch: 0,
             neighbor_mac_epoch: 0,

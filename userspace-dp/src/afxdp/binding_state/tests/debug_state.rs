@@ -328,6 +328,8 @@ fn active_flow_debug_test_entry(
             policy_counter: None,
         },
         stamp,
+        policy_deny: None,
+        deny_expires_at_secs: 0,
         observed_bytes: 0,
         last_used_epoch: 0,
         neighbor_mac_epoch: 0,
