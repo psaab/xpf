@@ -125,20 +125,21 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 	}
 	// #5676 — reject a same-name `address` + `address-set` collision within one
 	// address book (global or zone-local). The two kinds share one operator-
-	// visible namespace but land in separate maps, so a plain address silently
-	// shadowed a same-named address-set at name→prefix resolution (address-first
-	// everywhere), changing which traffic a permit/deny rule covers with no
-	// diagnostic. MUST run here, on the PRISTINE books BEFORE the zone-local fold
-	// mints synthetic zone-local/<zone>/<name> names — so a global `address foo`
-	// and a different zone's zone-local `address-set foo` (distinct namespaces
-	// post-fold) are not misreported as a collision, and a real zone-local
-	// collision is named against the clean zone. Strict on commit / commit-check
-	// (hard reject; Junos forbids the collision outright); tolerant load /
-	// peer-sync downgrade to a warning (#1960 no-brick — the runtime keeps the
-	// deterministic address-first winner it already used). Mirrors
+	// visible namespace but land in separate maps, so before #12049 a plain
+	// address silently shadowed a same-named address-set at userspace
+	// name→prefix resolution (address-first), changing which traffic a
+	// permit/deny rule covers with no diagnostic. MUST run here, on the PRISTINE
+	// books BEFORE the zone-local fold mints synthetic zone-local/<zone>/<name>
+	// names — so a global `address foo` and a different zone's zone-local
+	// `address-set foo` (distinct namespaces post-fold) are not misreported as a
+	// collision, and a real zone-local collision is named against the clean zone.
+	// Strict on commit / commit-check hard-rejects; tolerant load / peer-sync
+	// downgrades to a warning so the config still boots, and records the
+	// colliding names so userspace refuses their policy references. Mirrors
 	// validateAddressBookEntryNamesStrict.
 	if err := validateAddressBookNameCollisionStrict(cfg); err != nil {
 		if opts.lenientAddressBookNameCollision {
+			recordAddressBookNameCollisions(cfg)
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("address-book name collision (downgraded to warning on tolerant path): %v", err))
 		} else {

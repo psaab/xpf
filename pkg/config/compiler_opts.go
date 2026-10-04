@@ -903,18 +903,13 @@ type compileOpts struct {
 	// lenientApplicationNameCollisions (#3339, Codex review 080 M07/M08)
 	// downgrades the application / application-set name-collision gate
 	// (validateApplicationNameCollisionsAST) from a hard compile error to a
-	// cfg.Warnings entry. The strict commit / commit-check path hard-rejects a
-	// duplicate application or application-set definition, a name authored as both
-	// an application and an application-set (an explicit set silently overwriting
-	// the implicit set minted for a multi-term application), or two terms whose
-	// generated per-term application names collide — all of which compileApplications
-	// resolves last-write-wins with no commit error, leaving policy expansion and
-	// the AppID catalog free to pick different definitions. The tolerant load /
-	// peer-sync paths downgrade to a warning so an already-persisted or peer-synced
-	// config an older binary silently accepted still BOOTS (#1960 no-brick); the
-	// last-write-wins maps it always produced are unchanged on that path. Same
-	// doctrine as lenientApplicationSpecs / lenientApplicationSetMembers.
+	// cfg.Warnings entry. The strict commit / commit-check path hard-rejects
+	// duplicate or cross-namespace authored names and generated per-term name
+	// collisions. On the tolerant path, the existing last-write-wins maps are
+	// retained for boot compatibility, but colliding references are recorded and
+	// refused during userspace expansion rather than matching an arbitrary winner.
 	lenientApplicationNameCollisions bool
+	applicationNameCollisions       *map[string]struct{}
 
 	// lenientReservedApplicationNames (#5821, #12048) downgrades the
 	// reserved-name gate (validateReservedApplicationNamesStrict) from a hard
@@ -1756,17 +1751,13 @@ type compileOpts struct {
 	// cfg.Warnings entry. An address book (global or zone-local) that defines
 	// the SAME name as BOTH a plain `address` and an `address-set` was
 	// previously unvalidated — the two kinds share one operator-visible
-	// namespace but are stored in separate maps, so every name→prefix resolver
-	// (dataplane expandBookNameRecursive, host-inbound junos_host_deny) silently
-	// resolved address-first and the plain address SHADOWED the same-named
-	// address-set, dropping the set's other members and changing which traffic a
-	// permit/deny rule covers. The strict commit / commit-check path
-	// hard-rejects so the ambiguity is operator-visible (Junos forbids the
-	// collision outright); the tolerant load / peer-sync paths warn so an
-	// already-persisted or peer-synced config carrying a pre-existing collision
-	// still BOOTS (#1960) — the runtime keeps the deterministic address-first
-	// winner it already used, so a leniently-loaded config forwards exactly as
-	// before, now flagged. Same doctrine as lenientAddressBookNames.
+	// namespace but are stored in separate maps, so a userspace policy resolver
+	// silently selected the plain address and dropped the set's other members,
+	// changing which traffic a permit/deny rule covers. The strict commit /
+	// commit-check path hard-rejects the ambiguity. Tolerant load / peer-sync
+	// keeps the config bootable (#1960) but records colliding names so any policy
+	// reference is refused with the unsupported-address sentinel and rejection
+	// mirror. Same doctrine as lenientAddressBookNames.
 	lenientAddressBookNameCollision bool
 	// lenientZoneInterfaceMembership (#3072) downgrades the zone-interface
 	// membership gate (validateZoneInterfaceMembershipStrict) from a hard

@@ -336,6 +336,9 @@ func resolveUserspaceAddressBookEntry(cfg *config.Config, name string) ([]string
 		if ref == "" {
 			return false
 		}
+		if _, collision := addressBook.CollidingNames[ref]; collision {
+			return false
+		}
 		if addr := addressBook.Addresses[ref]; addr != nil {
 			value := addr.UsableValue()
 			if value == "" {

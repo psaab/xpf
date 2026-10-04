@@ -130,6 +130,14 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 		if z == nil || z.AddressBook == nil {
 			continue
 		}
+		if len(z.AddressBook.CollidingNames) > 0 {
+			if gb.CollidingNames == nil {
+				gb.CollidingNames = make(map[string]struct{}, len(z.AddressBook.CollidingNames))
+			}
+			for name := range z.AddressBook.CollidingNames {
+				gb.CollidingNames[zoneLocalQualify(zoneName, name)] = struct{}{}
+			}
+		}
 		for name, addr := range z.AddressBook.Addresses {
 			q := zoneLocalQualify(zoneName, name)
 			if _, exists := gb.Addresses[q]; exists {
@@ -273,6 +281,47 @@ func compileAddressBook(node *Node, sec *SecurityConfig) error {
 		parseAddressBookEntries(g, sec.AddressBook)
 	}
 	return nil
+}
+
+// recordDroppedNamedAddressBookCollisions quarantines a token present in both
+// the compiled global book and an unsupported named-book stanza. Schema
+// validation rejects named books on strict commits, but tolerant loads keep
+// compiling and compileAddressBook intentionally reads only `global`; without
+// this marker a policy reference silently resolves to the unrelated global row.
+func recordDroppedNamedAddressBookCollisions(tree *ConfigTree, cfg *Config) {
+	if tree == nil || cfg == nil || cfg.Security.AddressBook == nil {
+		return
+	}
+	global := cfg.Security.AddressBook
+	markIfGlobalName := func(name string) {
+		if _, exists := global.Addresses[name]; !exists {
+			if _, exists := global.AddressSets[name]; !exists {
+				return
+			}
+		}
+		if global.CollidingNames == nil {
+			global.CollidingNames = make(map[string]struct{})
+		}
+		global.CollidingNames[name] = struct{}{}
+	}
+	for _, root := range tree.Children {
+		if root == nil || root.Name() != "security" {
+			continue
+		}
+		for _, addressBook := range root.FindChildren("address-book") {
+			for _, namedBook := range addressBook.Children {
+				if namedBook.Name() == "global" {
+					continue
+				}
+				for _, entry := range namedInstances(namedBook.FindChildren("address")) {
+					markIfGlobalName(entry.name)
+				}
+				for _, entry := range namedInstances(namedBook.FindChildren("address-set")) {
+					markIfGlobalName(entry.name)
+				}
+			}
+		}
+	}
 }
 
 // addressSetMemberValues extracts every value carried by an address-set

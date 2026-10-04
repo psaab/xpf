@@ -65,7 +65,17 @@ func buildPolicySnapshotsWithAddressBook(cfg *config.Config, activeState map[str
 		case "":
 			return true
 		}
-		if config.IsPolicyAddressWildcardKeyword(tok) || isUserspaceLiteralAddress(tok) {
+		if config.IsPolicyAddressWildcardKeyword(tok) {
+			return true
+		}
+		// An address-book collision takes precedence over literal/feed resolution:
+		// names like CIDRs and feed-bound names still denote ambiguous book entries.
+		if ab := cfg.Security.AddressBook; ab != nil {
+			if _, collision := ab.CollidingNames[tok]; collision {
+				return false
+			}
+		}
+		if isUserspaceLiteralAddress(tok) {
 			return true
 		}
 		if _, feedBound := feedOverlay[tok]; feedBound {
