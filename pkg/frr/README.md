@@ -772,17 +772,23 @@ step. Both are required — neither sees the other's case:
   folded into a single route-level `Preference`, so every next-hop rendered at
   equal cost and the floating static became equal-cost ECMP that load-balanced
   over the backup. A plain `next-hop [ a b ]` bracket LIST is equal-cost ECMP
-- **IGP export metric (#11447).** FRR's static-route CLI still has no
-  per-next-hop metric operand, so `NextHopEntry.Metric` is not emitted on the
-  `ip route` line. It is applied to IGP redistribution only, never as BGP MED.
-  For a bare IGP `redistribute static` or a policy term whose source is
-  `static`, xpf synthesizes route-map entries that match both the
-  destination and the configured qualified next-hop before `set metric M`.
-  This keeps a plain primary for the same prefix at its own metric; later
-  authored policy terms run afterward, so an explicit `then metric` overrides
-  the QNH fallback. The metric is for IGP export, not forwarding preference.
-  `preference` remains REQUIRED to make a qualified next-hop a floating backup:
-  a metric-only QNH keeps the route-level administrative distance.
+- **IGP export metric (#11447).** The qualified-next-hop metric reaches IGP
+  redistribution through synthesized route-maps, matching destination and
+  next-hop before `set metric M`; it is never exported as BGP MED. Explicit
+  policy terms still run afterward and can override the QNH export metric.
+- **Userspace static failover by QNH metric (#11792).** The userspace snapshot
+  builder emits one row per effective-preference/metric tier, preserving the
+  authored preference and ordering equal-preference rows by metric. Rust tries
+  those rows in order, load-balances within the first reachable equal-metric
+  tier, and falls through to the next tier only when the whole current tier is
+  unavailable. The management-VRF installer uses increasing Linux route
+  priorities because `RTA_PRIORITY` is its single route-ordering field.
+  **FRR 10.6 limitation (see [stable/10.6 static-route commands](https://docs.frrouting.org/en/stable-10.6/static.html#static-route-commands)):**
+  its syntax accepts a distance but no per-route metric; same-distance
+  next-hops are installed as ECMP regardless of line order. The FRR renderer
+  deliberately preserves its prior distance behavior, so metric-only backup
+  ordering is not available in FRR 10.6. Do not synthesize admin distances
+  from QNH metrics.
 - **Negative routes: `discard` vs `reject` (#5298).** A static route's
   terminal `discard` or `reject` action installs an ACTIVE no-next-hop route
   so matching traffic is dropped instead of following a less-specific route.

@@ -138,74 +138,75 @@ func mgmtStaticRoutesDesired(
 				continue
 			}
 
-			byPreference := make(map[int][]*netlink.NexthopInfo)
+			byPriority := make(map[int][]*netlink.NexthopInfo)
 			routeScoped, routeAvailable := true, true
-			for _, nextHop := range static.NextHops {
-				if nextHop.Address == "" && nextHop.Interface == "" {
-					routeScoped = false
-					break
-				}
-				var gateway net.IP
-				if nextHop.Address != "" {
-					gateway = net.ParseIP(nextHop.Address)
-					if gateway == nil || mgmtStaticIPFamily(gateway) != family {
+			for _, tier := range config.StaticRouteNextHopTiers(static) {
+				for _, nextHop := range tier.NextHops {
+					if nextHop.Address == "" && nextHop.Interface == "" {
 						routeScoped = false
 						break
 					}
-				}
+					var gateway net.IP
+					if nextHop.Address != "" {
+						gateway = net.ParseIP(nextHop.Address)
+						if gateway == nil || mgmtStaticIPFamily(gateway) != family {
+							routeScoped = false
+							break
+						}
+					}
 
-				linkIndex := 0
-				if nextHop.Interface != "" {
-					linkName := cfg.ResolveKernelIfName(nextHop.Interface)
-					if !config.IsManagementIfName(linkName) || !mgmtSet[linkName] {
-						routeScoped = false
-						break
-					}
-					link, err := nlh.LinkByName(linkName)
-					if err != nil || link == nil || link.Attrs() == nil || link.Attrs().Index <= 0 {
-						slog.Warn("mgmt VRF static route: interface not available",
-							"interface", linkName, "destination", static.Destination, "err", err)
-						routeAvailable = false
-						break
-					}
-					linkIndex = link.Attrs().Index
-				} else {
-					linkIndex, routeScoped = mgmtStaticConnectedLinkIndex(gateway, connected[mgmtStaticFamilyIndex(family)])
-					if !routeScoped && family == netlink.FAMILY_V6 {
-						if inferred := inferredV6[nextHop.Address]; inferred != "" {
-							linkName := cfg.ResolveKernelIfName(inferred)
-							if config.IsManagementIfName(linkName) && mgmtSet[linkName] {
-								link, err := nlh.LinkByName(linkName)
-								if err == nil && link != nil && link.Attrs() != nil && link.Attrs().Index > 0 {
-									linkIndex, routeScoped = link.Attrs().Index, true
+					linkIndex := 0
+					if nextHop.Interface != "" {
+						linkName := cfg.ResolveKernelIfName(nextHop.Interface)
+						if !config.IsManagementIfName(linkName) || !mgmtSet[linkName] {
+							routeScoped = false
+							break
+						}
+						link, err := nlh.LinkByName(linkName)
+						if err != nil || link == nil || link.Attrs() == nil || link.Attrs().Index <= 0 {
+							slog.Warn("mgmt VRF static route: interface not available",
+								"interface", linkName, "destination", static.Destination, "err", err)
+							routeAvailable = false
+							break
+						}
+						linkIndex = link.Attrs().Index
+					} else {
+						linkIndex, routeScoped = mgmtStaticConnectedLinkIndex(gateway, connected[mgmtStaticFamilyIndex(family)])
+						if !routeScoped && family == netlink.FAMILY_V6 {
+							if inferred := inferredV6[nextHop.Address]; inferred != "" {
+								linkName := cfg.ResolveKernelIfName(inferred)
+								if config.IsManagementIfName(linkName) && mgmtSet[linkName] {
+									link, err := nlh.LinkByName(linkName)
+									if err == nil && link != nil && link.Attrs() != nil && link.Attrs().Index > 0 {
+										linkIndex, routeScoped = link.Attrs().Index, true
+									}
 								}
 							}
 						}
+						if !routeScoped {
+							break
+						}
 					}
-					if !routeScoped {
-						break
-					}
-				}
 
-				preference := static.Preference
-				if nextHop.HasPreference {
-					preference = nextHop.Preference
+					byPriority[tier.ManagementPrio] = append(byPriority[tier.ManagementPrio], &netlink.NexthopInfo{
+						LinkIndex: linkIndex,
+						Gw:        gateway,
+					})
 				}
-				byPreference[preference] = append(byPreference[preference], &netlink.NexthopInfo{
-					LinkIndex: linkIndex,
-					Gw:        gateway,
-				})
+				if !routeScoped || !routeAvailable {
+					break
+				}
 			}
 			if !routeScoped || !routeAvailable {
 				continue
 			}
-			preferences := make([]int, 0, len(byPreference))
-			for preference := range byPreference {
-				preferences = append(preferences, preference)
+			priorities := make([]int, 0, len(byPriority))
+			for priority := range byPriority {
+				priorities = append(priorities, priority)
 			}
-			sort.Ints(preferences)
-			for _, preference := range preferences {
-				hops := byPreference[preference]
+			sort.Ints(priorities)
+			for _, priority := range priorities {
+				hops := byPriority[priority]
 				sort.Slice(hops, func(i, j int) bool {
 					if hops[i].LinkIndex != hops[j].LinkIndex {
 						return hops[i].LinkIndex < hops[j].LinkIndex
@@ -219,7 +220,7 @@ func mgmtStaticRoutesDesired(
 					Type:     unix.RTN_UNICAST,
 					Protocol: unix.RTPROT_STATIC,
 					Realm:    mgmtStaticRouteRealm,
-					Priority: preference,
+					Priority: priority,
 				}
 				if len(hops) == 1 {
 					route.LinkIndex = hops[0].LinkIndex

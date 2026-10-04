@@ -45,6 +45,10 @@ type RouteSnapshot struct {
 	// absent/unknown and imposes no extra constraint. An old helper would
 	// ignore it and forward oversized DF packets, so snapshot v38 fences it.
 	MTU int `json:"mtu,omitempty"`
+	// metricTierOrder is an in-process stable-sort hint for config-derived
+	// same-preference QNH rows. It is intentionally unexported and never goes
+	// on the snapshot wire; row order is the contract consumed by the Rust FIB.
+	metricTierOrder int
 }
 
 type NeighborSnapshot struct {

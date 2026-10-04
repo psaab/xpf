@@ -120,11 +120,13 @@ func staticRouteNode() *schemaNode {
 					"preference": {desc: "Preference", args: 1, placeholder: "<value>",
 						valueType: ValueInteger, valueDesc: "Route preference / administrative distance (1..2147483647; lower = more preferred, default 5)",
 						valueExamples: []string{"5", "100"}, validator: ValidateInteger(1, maxWireI32), children: nil},
-					// Metric is carried per qualified next-hop (NextHopEntry.Metric,
-					// #3871) and reaches IGP export through synthesized FRR
-					// redistribution route-maps (#11447). It does not affect
-					// administrative distance; `preference` controls floating.
-					"metric": {desc: "IGP export metric", args: 1, placeholder: "<value>", children: nil},
+					// In userspace installs, metric orders equal-preference
+					// next-hops into failover tiers; equal metrics remain ECMP.
+					// Management-VRF routes use Linux priorities for the tiers.
+					// FRR 10.6 has no static-route metric operand, so equal-
+					// preference paths remain ECMP there. #11447 also uses the
+					// metric for IGP export through synthesized route-maps.
+					"metric": {desc: "IGP export and userspace failover metric", args: 1, placeholder: "<value>", children: nil},
 				}},
 			"no-install": {desc: "Do not install this static route", children: nil},
 			"discard":    {desc: "Discard (blackhole) route", children: nil},

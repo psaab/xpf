@@ -312,10 +312,12 @@ type NextHopEntry struct {
 	// backup instead of preferring the primary.
 	Preference    int
 	HasPreference bool
-	// Metric is this next-hop's `qualified-next-hop <gw> { metric M; }` value
-	// (#3871). It is not a static-route CLI operand; #11447 carries it into
-	// IGP redistribution route-maps, where destination and next-hop matching
-	// preserve per-qualified-next-hop export costs. Valid only when HasMetric.
+	// Metric is the qualified-next-hop metric (#3871). Userspace static
+	// installs order metric tiers after effective preference, keeping equal
+	// preference/metric paths in ECMP. The management-VRF installer encodes
+	// tiers in Linux's single route-priority field; FRR 10.6 has no static
+	// metric operand and keeps same-distance paths in ECMP. #11447 also carries
+	// the metric into IGP redistribution route-maps. Valid only when HasMetric.
 	Metric    int
 	HasMetric bool
 }
@@ -323,7 +325,7 @@ type NextHopEntry struct {
 // StaticRoute defines a single static route.
 type StaticRoute struct {
 	Destination string         // CIDR: "10.0.0.0/8" or "::/0"
-	NextHops    []NextHopEntry // multiple next-hops = ECMP
+	NextHops    []NextHopEntry // preference/metric tiers; equal tiers form ECMP
 	Discard     bool           // null route (blackhole): silently drop matching traffic
 	// Reject installs an unreachable route: matching traffic is dropped AND an
 	// ICMP unreachable is returned to the source (Junos `route <p> reject` →
