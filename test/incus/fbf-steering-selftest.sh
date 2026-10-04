@@ -181,12 +181,12 @@ checki IPMON_MISSING_POLICY INVALID "$ipmon_state"
 ipmon_state="$(fbf_ipmon_policy_state fbf-fallback $'Policy - fbf-fallback (Status: FAIL)\nPolicy - fbf-fallback (Status: PASS)' 2>/dev/null || printf INVALID)"
 checki IPMON_DUPLICATE_POLICY INVALID "$ipmon_state"
 
-ROUTE_ACTION=$'Instance Prefix Next-Hop State\nISP-B.inet.0 0.0.0.0/0 172.16.50.1 APPLIED'
-if fbf_ipmon_route_action_present ISP-B.inet.0 0.0.0.0/0 172.16.50.1 APPLIED "$ROUTE_ACTION"; then got=YES; else got=NO; fi
+ROUTE_ACTION=$'Instance Prefix Next-Hop State\nISP-B 0.0.0.0/0 172.16.50.1 APPLIED'
+if fbf_ipmon_route_action_present ISP-B 0.0.0.0/0 172.16.50.1 APPLIED "$ROUTE_ACTION"; then got=YES; else got=NO; fi
 checki IPMON_FALLBACK_ACTION YES "$got"
-if fbf_ipmon_route_action_present ISP-B.inet.0 0.0.0.0/0 172.16.50.1 PENDING "$ROUTE_ACTION"; then got=YES; else got=NO; fi
+if fbf_ipmon_route_action_present ISP-B 0.0.0.0/0 172.16.50.1 PENDING "$ROUTE_ACTION"; then got=YES; else got=NO; fi
 checki IPMON_PENDING_ACTION NO "$got"
-if fbf_ipmon_route_action_present ISP-B.inet.0 0.0.0.0/0 172.16.80.1 APPLIED "$ROUTE_ACTION"; then got=YES; else got=NO; fi
+if fbf_ipmon_route_action_present ISP-B 0.0.0.0/0 172.16.80.1 APPLIED "$ROUTE_ACTION"; then got=YES; else got=NO; fi
 checki IPMON_WRONG_NEXT_HOP NO "$got"
 
 checkv() {
@@ -213,7 +213,15 @@ checki NEIGHBOR_ABSENT ABSENT "$neighbor"
 neighbor="$(fbf_neighbor_snapshot 172.16.80.1 wan80 \
 	'[{ "dst":"172.16.80.1", "dev":"wan80", "lladdr":"02:00:00:00:80:01", "state":"PERMANENT", "flags":["router"] }]' \
 	2>/dev/null || printf INVALID)"
-checki NEIGHBOR_PERMANENT_ROUTER $'PRESENT\t02:00:00:00:80:01\tPERMANENT\trouter' "$neighbor"
+checki NEIGHBOR_PERMANENT_ROUTER 'PRESENT|02:00:00:00:80:01|PERMANENT|router' "$neighbor"
+neighbor="$(fbf_neighbor_snapshot 172.16.80.1 wan80 \
+	'[{ "dst":"172.16.80.1", "dev":"wan81", "lladdr":"02:00:00:00:80:02", "state":"PERMANENT" }]' \
+	2>/dev/null || printf INVALID)"
+checki NEIGHBOR_OTHER_DEVICE_INVALID INVALID "$neighbor"
+neighbor="$(fbf_neighbor_snapshot 172.16.80.1 wan80 \
+	'[{ "dst":"172.16.80.1", "dev":"wan80", "state":"FAILED" }, { "dst":"172.16.80.1", "dev":"wan81", "state":"FAILED" }]' \
+	2>/dev/null || printf INVALID)"
+checki NEIGHBOR_CROSS_DEVICE_AMBIGUOUS_INVALID INVALID "$neighbor"
 neighbor="$(fbf_neighbor_snapshot 172.16.80.1 wan80 \
 	'[{ "dst":"172.16.80.1", "dev":"wan80", "lladdr":"02:00:00:00:80:01", "state":"REACHABLE", "flags":["unknown"] }]' \
 	2>/dev/null || printf INVALID)"
@@ -222,11 +230,22 @@ neighbor="$(fbf_neighbor_snapshot 172.16.80.1 wan80 \
 	'[{ "dst":"172.16.80.1", "dev":"wan80", "state":"FAILED" }, { "dst":"172.16.80.1", "dev":"wan80", "state":"FAILED" }]' \
 	2>/dev/null || printf INVALID)"
 checki NEIGHBOR_DUPLICATE_INVALID INVALID "$neighbor"
+neighbor="$(fbf_neighbor_snapshot 172.16.80.1 wan80 \
+	'[{ "dst":"172.16.80.1", "dev":"wan80", "state":"FAILED" }]' \
+	2>/dev/null || printf INVALID)"
+checki NEIGHBOR_FAILED_EMPTY_LLADDR 'PRESENT||FAILED|' "$neighbor"
+IFS='|' read -r neighbor_kind neighbor_lladdr neighbor_nud neighbor_flags <<<"$neighbor"
+checki NEIGHBOR_FAILED_EMPTY_LLADDR_PARSE 'PRESENT||FAILED|' \
+	"$neighbor_kind|$neighbor_lladdr|$neighbor_nud|$neighbor_flags"
+neighbor="$(fbf_neighbor_snapshot 172.16.80.1 wan80 \
+	'[{ "dst":"172.16.80.1", "dev":"wan80", "state":"NONE" }]' \
+	2>/dev/null || printf INVALID)"
+checki NEIGHBOR_NONE_EMPTY_LLADDR 'PRESENT||NONE|' "$neighbor"
 
 fallback_capture() {
 	local marked_source="${1:-172.16.50.8}" marked_tos="${2:-0x68}"
 	local marked_id="${3:-44001}" control_id="${4:-44002}"
-	local control_source="${5:-172.16.50.8}" marked_ip_id="${6:-}" control_ip_id="${7:-}"
+	local control_source="${5:-172.16.80.8}" marked_ip_id="${6:-}" control_ip_id="${7:-}"
 	local seq marked_packet_id control_packet_id
 	for seq in 1 2 3; do
 		marked_packet_id="$seq"
@@ -241,8 +260,8 @@ fallback_capture() {
 }
 checkf() {
 	local name="$1" want="$2" source="${3:-172.16.50.8}" tos="${4:-0x68}"
-	local control_source="${5:-172.16.50.8}" got
-	got="$(fbf_peer_fallback_verdict 172.16.80.201 3 44001 44002 172.16.50.8 \
+	local control_source="${5:-172.16.80.8}" got
+	got="$(fbf_peer_fallback_verdict 172.16.80.201 3 44001 44002 172.16.50.8 172.16.80.8 \
 		"$(fallback_capture "$source" "$tos" 44001 44002 "$control_source")")"
 	checki "$name" "$want" "${got%% *}"
 }
@@ -250,11 +269,13 @@ checkf() {
 checkf FALLBACK_SOURCE_NAT_PASS PASS
 checkf FALLBACK_OLD_SOURCE_FAIL FAIL 172.16.80.8
 checkf FALLBACK_WRONG_DSCP_FAIL FAIL 172.16.50.8 0x0
-checkf FALLBACK_CONTROL_SOURCE_FAIL FAIL 172.16.50.8 0x68 172.16.80.8
-stale_ids="$(fallback_capture 172.16.50.8 0x68 44003 44004 172.16.50.8 44001 44002)"
-verdict="$(fbf_peer_fallback_verdict 172.16.80.201 3 44001 44002 172.16.50.8 "$stale_ids")"
+checkf FALLBACK_CONTROL_SOURCE_FAIL FAIL 172.16.50.8 0x68 172.16.50.8
+stale_ids="$(fallback_capture 172.16.50.8 0x68 44003 44004 172.16.80.8 44001 44002)"
+verdict="$(fbf_peer_fallback_verdict 172.16.80.201 3 44001 44002 \
+	172.16.50.8 172.16.80.8 "$stale_ids")"
 checki FALLBACK_STALE_IDS_FAIL FAIL "${verdict%% *}"
-verdict="$(fbf_peer_fallback_verdict 172.16.80.201 3 44001 44002 172.16.50.8 '')"
+verdict="$(fbf_peer_fallback_verdict 172.16.80.201 3 44001 44002 \
+	172.16.50.8 172.16.80.8 '')"
 checki FALLBACK_NO_CAPTURE_FAIL FAIL "${verdict%% *}"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

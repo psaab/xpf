@@ -4,8 +4,9 @@
 # Runs the real harness under its real private lock-cell entry point against a
 # deterministic fake Incus surface. The healthy case exercises IPv4+IPv6
 # steering and IPv4 fallback; negative controls cover no transition, a
-# blackholed fallback, a stale ISP-B userspace egress, and the original healthy
-# leg's wrong-next-hop/drop failures. No cluster, build, or network is used.
+# blackholed fallback, a stale ISP-B userspace egress, a missing peer return
+# route, and the healthy leg's wrong-next-hop/drop failures. No cluster, build,
+# or network is used.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -86,13 +87,13 @@ case "$command" in
 					elif [[ ${FBF_FAKE_SCENARIO} == disabled-transition &&
 						-f "${FBF_FAKE_STATE_DIR}/poisoned" ]]; then
 						printf 'Policy - fbf-fallback (Status: PASS)\n'
-						printf 'Route-Action\nISP-B.inet.0 0.0.0.0/0 172.16.80.1 APPLIED\n'
+						printf 'Route-Action\nISP-B 0.0.0.0/0 172.16.80.1 APPLIED\n'
 					elif [[ -f "${FBF_FAKE_STATE_DIR}/poisoned" ]]; then
 						printf 'Policy - fbf-fallback (Status: FAIL)\n'
-						printf 'Route-Action\nISP-B.inet.0 0.0.0.0/0 172.16.50.1 APPLIED\n'
+						printf 'Route-Action\nISP-B 0.0.0.0/0 172.16.50.1 APPLIED\n'
 					else
 						printf 'Policy - fbf-fallback (Status: PASS)\n'
-						printf 'Route-Action\nISP-B.inet.0 0.0.0.0/0 172.16.80.1 APPLIED\n'
+						printf 'Route-Action\nISP-B 0.0.0.0/0 172.16.80.1 APPLIED\n'
 					fi
 					;;
 				*)
@@ -146,7 +147,13 @@ case "$command" in
 		;;
 	ip)
 		args="$*"
-		if [[ "$target" == *xpf-mouse-target && $args == *'neigh show to 2001:559:8585:80::1'* ]]; then
+		if [[ "$target" == *xpf-mouse-target && $args == *'route get 172.16.50.8'* ]]; then
+			if [[ ${FBF_FAKE_SCENARIO} == missing-return ]]; then
+				echo 'RTNETLINK answers: Network is unreachable' >&2
+				exit 2
+			fi
+			printf '172.16.50.8 via 172.16.80.1 dev eth0 src 172.16.80.201 uid 0\n'
+		elif [[ "$target" == *xpf-mouse-target && $args == *'neigh show to 2001:559:8585:80::1'* ]]; then
 			printf '2001:559:8585:80::1 dev eth0 lladdr 02:00:00:00:80:01 REACHABLE\n'
 		elif [[ "$target" == *xpf-mouse-target && $args == *'neigh show to 172.16.80.1'* ]]; then
 			printf '172.16.80.1 dev eth0 lladdr 02:00:00:00:80:01 REACHABLE\n'
@@ -260,8 +267,8 @@ case "$command" in
 				else
 					mac4=02:00:00:00:80:08
 					mac6=02:00:00:00:80:08
-					src4=172.16.50.8
-					src6=2001:559:8585:50::8
+					src4=172.16.80.8
+					src6=2001:559:8585:80::8
 					tos4=0x0
 					tos6=0x0
 				fi
@@ -273,7 +280,7 @@ case "$command" in
 				tos4=0x68
 			else
 				mac4=02:00:00:00:80:08
-				src4=172.16.50.8
+				src4=172.16.80.8
 				tos4=0x0
 			fi
 			for seq in 1 2 3 4 5; do
@@ -330,6 +337,14 @@ run_case() {
 				pass=$((pass + 1)); printf 'ok   %-26s -> IPv4 fallback and IPv4/IPv6 healthy steering PASS\n' "$scenario"
 			else
 				fail=$((fail + 1)); printf 'FAIL %-26s -> expected completed PASS (exit %s)\n' "$scenario" "$rc"; cat "$output"
+			fi
+			;;
+		missing-return)
+			if (( rc == 2 )) && grep -Fq 'VOID: VLAN-80 peer has no route to ISP-A interface-SNAT source 172.16.50.8' "$output" \
+				&& ! grep -Fq 'committing FBF two-upstream fixture' "$output"; then
+				pass=$((pass + 1)); printf 'ok   %-26s -> missing return route is VOID before mutation\n' "$scenario"
+			else
+				fail=$((fail + 1)); printf 'FAIL %-26s -> absent peer return route must void before mutation (exit %s)\n' "$scenario"; cat "$output"
 			fi
 			;;
 		baseline-drop)
@@ -416,6 +431,7 @@ run_case wrong-egress wrong-egress
 run_case disabled-transition no-transition
 run_case fallback-drop fallback-drop
 run_case fallback-wrong-egress wrong-source
+run_case missing-return missing-return
 run_case foreign-latest ownership-refused
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ $fail -eq 0 ]]

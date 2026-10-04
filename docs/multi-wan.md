@@ -541,11 +541,20 @@ using the two WAN VLANs as distinguishable egress paths: ISP-A =
 `test/incus/test-fbf-steering.sh` is exposed as `make
 test-fbf-steering`. It retains the healthy IPv4/IPv6 steering checks, then
 tests IPv4 fallback by poisoning only the firewall's ISP-B neighbor entry.
-The gate requires `fbf-fallback` to report FAIL, its ISP-A route action to
-report APPLIED, and the IPv4 PBR table to contain the exclusive ISP-A
-default. It then requires fresh marked probes to receive replies and the
-VLAN-80 peer to capture their unique IDs with AF31 DSCP and the ISP-A
-interface-SNAT source address; a fresh unmarked control is correlated too.
+The gate requires `fbf-fallback` to report FAIL and its `ISP-B` route
+action for `0.0.0.0/0` via ISP-A to report APPLIED; `FormatStatus` renders
+the instance token as `ISP-B` (the kernel RIB is `ISP-B.inet.0`). The IPv4
+PBR table must then contain the exclusive ISP-A default. At the VLAN-80
+peer, fresh marked IDs must be captured with AF31 DSCP and the ISP-A
+interface-SNAT source; the independent unmarked control must have DSCP 0
+and ISP-B interface-SNAT source. The marked probes also require replies.
+The peer's actual return path to ISP-A's interface-SNAT address must use
+the VLAN-80 capture interface. Setup assigns the peer its VLAN-80 address
+but does not install a dedicated route back to ISP-A; the operator's
+topology must provide a usable path. The gate performs only a read-only
+`ip -4 route get` preflight (and VOIDs unless it selects the capture
+interface); it does not provision routes, and that lookup is not packet
+proof. A PASS still requires captured replies to the marked probes.
 The harness restores the exact pre-test config and neighbor predecessor.
 The make recipe records the run through the `smoke-cells` adapter and
 requires executable attestation. Missing prerequisites are VOID, while a

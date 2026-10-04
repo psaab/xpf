@@ -164,25 +164,20 @@ stop_peer_capture() {
 
 read_neighbor_snapshot() {
 	local json
-	json="$(incus exec "$TARGET" -- ip -4 -j -details neigh show to "$ISP_B_GW4" dev "$WAN80_IFACE")" || return 1
+	# `ip -j neigh ... dev` omits `dev` from JSON, which the snapshot must verify.
+	json="$(incus exec "$TARGET" -- ip -4 -j -details neigh show to "$ISP_B_GW4")" || return 1
 	fbf_neighbor_snapshot "$ISP_B_GW4" "$WAN80_IFACE" "$json"
 }
 
 restore_neighbor() {
 	local current
-	local -a restore_args flags
 	(( NEIGHBOR_MUTATION_STARTED )) || return 0
 	if [[ "$NEIGHBOR_KIND" == ABSENT ]]; then
 		incus exec "$TARGET" -- ip -4 neigh del "$ISP_B_GW4" dev "$WAN80_IFACE" >/dev/null 2>&1 || true
 	else
-		restore_args=(ip -4 neigh replace "$ISP_B_GW4" dev "$WAN80_IFACE")
-		[[ -z "$NEIGHBOR_LLADDR" ]] || restore_args+=(lladdr "$NEIGHBOR_LLADDR")
-		restore_args+=(nud "$NEIGHBOR_NUD")
-		if [[ -n "$NEIGHBOR_FLAGS" ]]; then
-			IFS=, read -r -a flags <<<"$NEIGHBOR_FLAGS"
-			restore_args+=("${flags[@]}")
-		fi
-		incus exec "$TARGET" -- "${restore_args[@]}" >/dev/null 2>&1 || true
+		fbf_restore_neighbor "$ISP_B_GW4" "$WAN80_IFACE" "$NEIGHBOR_LLADDR" \
+			"$NEIGHBOR_NUD" "$NEIGHBOR_FLAGS" incus exec "$TARGET" -- \
+			>/dev/null 2>&1 || true
 	fi
 	for _ in 1 2 3; do
 		current="$(read_neighbor_snapshot)" || return 1
@@ -354,6 +349,16 @@ ISP_B_SNAT4="${ISP_B_ADDRS[0]}"
 [[ "$ISP_A_SNAT4" =~ $IPV4_RE && "$ISP_B_SNAT4" =~ $IPV4_RE && "$ISP_A_SNAT4" != "$ISP_B_SNAT4" ]] \
 	|| void "baseline WAN interface addresses cannot distinguish ISP-A from ISP-B"
 info "Interface-SNAT witness: ISP-A=$ISP_A_SNAT4 ISP-B=$ISP_B_SNAT4"
+PEER_RETURN_ROUTE="$(incus exec "$EGRESS_HOST" -- ip -4 route get "$ISP_A_SNAT4")" \
+	|| void "VLAN-80 peer has no route to ISP-A interface-SNAT source $ISP_A_SNAT4"
+PEER_RETURN_DEV="$(awk -v destination="$ISP_A_SNAT4" '
+	$1 == destination {
+		for (i = 1; i < NF; i++) if ($i == "dev") print $(i+1)
+	}
+' <<<"$PEER_RETURN_ROUTE")"
+[[ "$PEER_RETURN_DEV" == "$EGRESS_IFACE" ]] \
+	|| void "VLAN-80 peer return route to $ISP_A_SNAT4 must use capture interface $EGRESS_IFACE"
+info "VLAN-80 peer return route to ISP-A SNAT source uses $EGRESS_IFACE"
 
 PRE_POLICY_STATUS="$(cli_read 'show services ip-monitoring status')" || void "cannot read baseline ip-monitoring status"
 [[ -n "${PRE_POLICY_STATUS//[[:space:]]/}" ]] || void "baseline ip-monitoring status is unreadable"
@@ -472,7 +477,7 @@ STATUS="$(cli_read 'show services ip-monitoring status')" || void "cannot read i
 INITIAL_POLICY_STATE="$(fbf_ipmon_policy_state fbf-fallback "$STATUS" 2>/dev/null)" \
 	|| void "ip-monitoring status omits or ambiguously reports fbf-fallback"
 [[ "$INITIAL_POLICY_STATE" == PASS ]] || void "ISP-B was not healthy before injection (fbf-fallback status: $INITIAL_POLICY_STATE)"
-fbf_ipmon_route_action_present ISP-B.inet.0 0.0.0.0/0 "$ISP_B_GW4" APPLIED "$STATUS" \
+fbf_ipmon_route_action_present ISP-B 0.0.0.0/0 "$ISP_B_GW4" APPLIED "$STATUS" \
 	|| void "ip-monitoring did not report the healthy ISP-B default as APPLIED"
 pass "initial ip-monitoring health is PASS with ISP-B route action APPLIED"
 
@@ -563,16 +568,14 @@ mapfile -t WAN80_DEVS < <(awk -v gateway="$ISP_B_GW4" '
 WAN80_IFACE="${WAN80_DEVS[0]}"
 [[ "$WAN80_IFACE" =~ ^[[:alnum:]_.:-]+$ ]] || void "ISP-B route lookup returned an invalid kernel device"
 
-NEIGH_JSON="$(incus exec "$TARGET" -- ip -4 -j -details neigh show to "$ISP_B_GW4" dev "$WAN80_IFACE")" \
-	|| void "cannot snapshot the exact ISP-B neighbor predecessor"
-NEIGH_SNAPSHOT="$(fbf_neighbor_snapshot "$ISP_B_GW4" "$WAN80_IFACE" "$NEIGH_JSON" 2>/dev/null)" \
+NEIGH_SNAPSHOT="$(read_neighbor_snapshot)" \
 	|| void "ISP-B neighbor snapshot is malformed or cannot be restored safely"
 NEIGHBOR_SNAPSHOT="$NEIGH_SNAPSHOT"
 if [[ "$NEIGH_SNAPSHOT" == ABSENT ]]; then
 	NEIGHBOR_KIND=ABSENT
 else
-	IFS=$'\t' read -r NEIGHBOR_KIND NEIGHBOR_LLADDR NEIGHBOR_NUD NEIGHBOR_FLAGS <<<"$NEIGH_SNAPSHOT"
-	[[ "$NEIGHBOR_KIND" == PRESENT ]] || void "ISP-B neighbor snapshot has an unsupported form"
+	IFS='|' read -r NEIGHBOR_KIND NEIGHBOR_LLADDR NEIGHBOR_NUD NEIGHBOR_FLAGS <<<"$NEIGH_SNAPSHOT"
+	[[ "$NEIGHBOR_KIND" == PRESENT && -n "$NEIGHBOR_NUD" ]] || void "ISP-B neighbor snapshot has an unsupported form"
 fi
 
 new_dead_mac() {
@@ -620,7 +623,7 @@ wait_for_fallback() {
 			PASS) saw_pass=1 ;;
 			FAIL)
 				saw_fail=1
-				if fbf_ipmon_route_action_present ISP-B.inet.0 0.0.0.0/0 "$ISP_A_GW4" APPLIED "$status"; then
+				if fbf_ipmon_route_action_present ISP-B 0.0.0.0/0 "$ISP_A_GW4" APPLIED "$status"; then
 					routes="$(incus exec "$TARGET" -- ip -4 route show table "$PBR_TABLE4")" \
 						|| void "cannot read IPv4 PBR table during failover"
 					if [[ -n "$routes" ]] && ! route_dump_shape_valid "$routes"; then
@@ -664,7 +667,7 @@ case "$FAILOVER_PING_VERDICT" in
 	*)       fail "IPv4 marked fallback probe failed: ${FAILOVER_PING_VERDICT#FAIL }" ;;
 esac
 FAILOVER_CAPTURE_VERDICT="$(fbf_peer_fallback_verdict "$PING_DST4" "$MIN_ECHO_REPLIES" \
-	"$FAILOVER_MARKED_ID4" "$FAILOVER_CONTROL_ID4" "$ISP_A_SNAT4" "$PEER_CAPTURE_OUTPUT")"
+	"$FAILOVER_MARKED_ID4" "$FAILOVER_CONTROL_ID4" "$ISP_A_SNAT4" "$ISP_B_SNAT4" "$PEER_CAPTURE_OUTPUT")"
 case "$FAILOVER_CAPTURE_VERDICT" in
 	PASS\ *) pass "${FAILOVER_CAPTURE_VERDICT#PASS }" ;;
 	*)       fail "IPv4 fallback egress witness failed: ${FAILOVER_CAPTURE_VERDICT#FAIL }" ;;

@@ -340,18 +340,20 @@ if not isinstance(rows, list):
 if not rows:
     print("ABSENT")
     raise SystemExit(0)
-if len(rows) != 1 or not isinstance(rows[0], dict):
-    raise SystemExit("neighbor query did not return exactly one row")
-row = rows[0]
-if row.get("dst") != gateway or row.get("dev") != device:
+if any(not isinstance(row, dict) for row in rows):
+    raise SystemExit("neighbor query returned a non-object row")
+if any(row.get("dst") != gateway or row.get("dev") != device for row in rows):
     raise SystemExit("neighbor row does not match requested gateway/device")
+if len(rows) != 1:
+    raise SystemExit("neighbor query did not return exactly one target row")
+row = rows[0]
 state = row.get("state")
 if isinstance(state, list):
     if len(state) != 1:
         raise SystemExit("neighbor row has ambiguous NUD state")
     state = state[0]
 if not isinstance(state, str) or state not in {
-    "PERMANENT", "NOARP", "REACHABLE", "STALE", "DELAY", "PROBE",
+    "NONE", "PERMANENT", "NOARP", "REACHABLE", "STALE", "DELAY", "PROBE",
     "INCOMPLETE", "FAILED",
 }:
     raise SystemExit("neighbor row has unsupported NUD state")
@@ -368,34 +370,61 @@ if not isinstance(flags, list) or any(not isinstance(flag, str) for flag in flag
 allowed = {"extern_learn", "extern_valid", "managed", "router", "use"}
 if any(flag not in allowed for flag in flags):
     raise SystemExit("neighbor row has an unsupported flag")
-print("PRESENT\t{}\t{}\t{}".format(lladdr.lower(), state, ",".join(sorted(set(flags)))))
+print("PRESENT|{}|{}|{}".format(lladdr.lower(), state, ",".join(sorted(set(flags)))))
 ' "$gateway" "$device" <<<"$json"
 }
 
-# fbf_peer_fallback_verdict <destination> <minimum> <marked-id> <control-id>
-#   <expected-interface-snat-source> <tcpdump-output>
+# fbf_restore_neighbor <gateway> <device> <lladdr-or-empty> <NUD> <csv-flags> [command-prefix...]
 #
-# Unlike the healthy-leg MAC comparison, this fallback witness correlates only
-# the two fresh IPv4 ICMP flows and requires the marked request to carry the
-# source address of ISP-A's interface-mode SNAT. Replies and the status/route
-# surfaces alone cannot certify that the userspace FIB followed the transition.
+# Restore the modifiable neighbor attributes through iproute2. The optional
+# command prefix lets the gate run the same argv remotely while the netns smoke
+# exercises it locally with real `ip`.
+fbf_restore_neighbor() {
+	(( $# >= 5 )) || return 1
+	local gateway="$1" device="$2" lladdr="$3" nud="$4" flags_csv="$5"
+	shift 5
+	local -a ip_args flags
+	nud="${nud,,}"
+	case "$nud" in
+		none|permanent|noarp|reachable|stale|delay|probe|incomplete|failed) ;;
+		*) printf 'unsupported neighbor NUD state: %s\n' "${nud:-missing}" >&2; return 1 ;;
+	esac
+	ip_args=("$@" ip -4 neigh replace "$gateway" dev "$device")
+	[[ -z "$lladdr" ]] || ip_args+=(lladdr "$lladdr")
+	ip_args+=(nud "$nud")
+	if [[ -n "$flags_csv" ]]; then
+		IFS=, read -r -a flags <<<"$flags_csv"
+		ip_args+=("${flags[@]}")
+	fi
+	"${ip_args[@]}"
+}
+
+# fbf_peer_fallback_verdict <destination> <minimum> <marked-id> <control-id>
+#   <expected-marked-source> <expected-control-source> <tcpdump-output>
+#
+# Correlate the two fresh IPv4 flows independently. Marked traffic must use
+# ISP-A's interface-mode SNAT after fallback; the unmarked control follows the
+# main table's connected ISP-B route and must use that interface's source.
 fbf_peer_fallback_verdict() {
 	local destination="${1:-}" minimum="${2:-}" marked_id="${3:-}" control_id="${4:-}"
-	local expected_source="${5:-}" output="${6:-}" minimum_num stats marked controls
-	local wrong_marked_dscp wrong_control_dscp wrong_source
+	local expected_marked_source="${5:-}" expected_control_source="${6:-}" output="${7:-}"
+	local minimum_num stats marked controls wrong_marked_dscp wrong_control_dscp
+	local wrong_marked_source wrong_control_source
 	local -r numeric_id_re='^[0-9]+$'
 	local -r ipv4_re='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
-	if [[ ! "$destination" =~ $ipv4_re || ! "$expected_source" =~ $ipv4_re ||
+	if [[ ! "$destination" =~ $ipv4_re || ! "$expected_marked_source" =~ $ipv4_re ||
+	    ! "$expected_control_source" =~ $ipv4_re ||
 	    ! "$minimum" =~ $numeric_id_re || ! "$marked_id" =~ $numeric_id_re ||
 	    ! "$control_id" =~ $numeric_id_re || "$marked_id" == "$control_id" ]] ||
 	    (( 10#$minimum == 0 || 10#$marked_id == 0 || 10#$marked_id > 65535 ||
 	       10#$control_id == 0 || 10#$control_id > 65535 )); then
-		printf 'FAIL %s\n' "fallback peer capture: invalid destination, source, minimum or ICMP identifier"
+		printf 'FAIL %s\n' "fallback peer capture: invalid destination, sources, minimum or ICMP identifier"
 		return 0
 	fi
 	minimum_num=$((10#$minimum))
 	stats="$(awk -v destination="$destination" -v marked_id="$marked_id" \
-	    -v control_id="$control_id" -v expected_source="$expected_source" '
+	    -v control_id="$control_id" -v expected_marked_source="$expected_marked_source" \
+	    -v expected_control_source="$expected_control_source" '
 		/ICMP echo request/ && index($0, " > " destination ":") {
 			source = substr($0, 1, index($0, " > " destination ":") - 1)
 			sub(/^.*[[:space:]]/, "", source)
@@ -404,30 +433,38 @@ fbf_peer_fallback_verdict() {
 			if (index($0, "ICMP echo request, id " marked_id ",") > 0) {
 				marked++
 				if (!is_marked_dscp) wrong_marked_dscp = 1
-				if (source != expected_source) wrong_source = 1
+				if (source != expected_marked_source) wrong_marked_source = 1
 			}
 			if (index($0, "ICMP echo request, id " control_id ",") > 0) {
 				controls++
 				if (!is_control_dscp) wrong_control_dscp = 1
-				if (source != expected_source) wrong_source = 1
+				if (source != expected_control_source) wrong_control_source = 1
 			}
 		}
-		END { print marked+0, controls+0, wrong_marked_dscp+0, wrong_control_dscp+0, wrong_source+0 }
+		END {
+			print marked+0, controls+0, wrong_marked_dscp+0, wrong_control_dscp+0,
+			    wrong_marked_source+0, wrong_control_source+0
+		}
 	' <<<"$output")"
-	read -r marked controls wrong_marked_dscp wrong_control_dscp wrong_source <<<"$stats"
+	read -r marked controls wrong_marked_dscp wrong_control_dscp \
+	    wrong_marked_source wrong_control_source <<<"$stats"
 	if (( wrong_marked_dscp || wrong_control_dscp )); then
 		printf 'FAIL %s\n' "fallback peer capture saw a correlated request with the wrong DSCP class"
 		return 0
 	fi
-	if (( wrong_source )); then
-		printf 'FAIL %s\n' "correlated marked/control requests did not use expected ISP-A interface-SNAT source ${expected_source}"
+	if (( wrong_marked_source )); then
+		printf 'FAIL %s\n' "correlated marked requests did not use expected ISP-A interface-SNAT source ${expected_marked_source}"
+		return 0
+	fi
+	if (( wrong_control_source )); then
+		printf 'FAIL %s\n' "correlated unmarked controls did not use expected ISP-B interface-SNAT source ${expected_control_source}"
 		return 0
 	fi
 	if (( marked < minimum_num || controls < minimum_num )); then
 		printf 'FAIL %s\n' "fallback peer capture saw ${marked} marked and ${controls} unmarked correlated IPv4 requests; needs at least ${minimum_num} of each"
 		return 0
 	fi
-	printf 'PASS %s\n' "fallback peer capture correlated ${marked} marked and ${controls} unmarked IPv4 requests from ISP-A interface-SNAT source ${expected_source}"
+	printf 'PASS %s\n' "fallback peer capture correlated ${marked} marked requests from ISP-A and ${controls} unmarked controls from ISP-B"
 }
 
 
