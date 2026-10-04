@@ -75,6 +75,59 @@ func validateThreeColorPolicerMarkingWarnings(cfg *Config) []string {
 	return warnings
 }
 
+// validateSingleRatePolicerMarkingWarnings keeps the accepted single-rate
+// policer's marking action visible to the operator (#11812). The userspace
+// runtime meters non-discard policers but does not apply loss-priority marking or
+// forwarding-class selection; excess traffic remains forwarded. This is an
+// advisory, not a rejection: #9882's meter-only behavior is intentional.
+func validateSingleRatePolicerMarkingWarnings(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Firewall.Policers))
+	for name, pol := range cfg.Firewall.Policers {
+		if pol != nil && pol.ThenAction != "" && pol.ThenAction != "discard" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	warnings := make([]string, 0, len(names))
+	for _, name := range names {
+		warnings = append(warnings, fmt.Sprintf(
+			"firewall policer %q `then %s` is retained but not applied by the "+
+				"userspace dataplane: the policer meters, but the requested loss-priority "+
+				"marking or forwarding-class selection is not applied and excess traffic remains forwarded",
+			name, cfg.Firewall.Policers[name].ThenAction))
+	}
+	return warnings
+}
+
+// validateLogicalInterfacePolicerWarnings reports that the accepted sharing
+// flag survives compilation but has no runtime consumer (#11812). Userspace
+// creates policer state per (family, filter, term), not one instance shared
+// across protocol families on an interface.
+func validateLogicalInterfacePolicerWarnings(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cfg.Firewall.Policers))
+	for name, pol := range cfg.Firewall.Policers {
+		if pol != nil && pol.LogicalInterfacePolicer {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	warnings := make([]string, 0, len(names))
+	for _, name := range names {
+		warnings = append(warnings, fmt.Sprintf(
+			"firewall policer %q `logical-interface-policer` is retained but not "+
+				"applied: userspace policer state is scoped per (family, filter, term), "+
+				"not shared across protocol families on the interface",
+			name))
+	}
+	return warnings
+}
+
 // validateThreeColorPolicerDisarmWarnings emits a WARN-only commit-time
 // message for every color-aware three-color policer (#10502).
 //

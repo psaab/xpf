@@ -269,6 +269,13 @@ type PolicerSnapshot struct {
 	BandwidthBps  uint64 `json:"bandwidth_bps"`
 	BurstBytes    uint64 `json:"burst_bytes"`
 	DiscardExcess bool   `json:"discard_excess"`
+	// ThenAction and LogicalInterfacePolicer retain single-rate semantics not
+	// represented by the existing snapshot fields. Discard remains represented by
+	// DiscardExcess. The Rust DTO currently ignores these optional additive JSON
+	// keys; they are retention-only until a consumer is implemented. Commit-time
+	// warnings identify both limitations.
+	ThenAction              string `json:"then_action,omitempty"`
+	LogicalInterfacePolicer bool   `json:"logical_interface_policer,omitempty"`
 }
 
 type ThreeColorPolicerSnapshot struct {

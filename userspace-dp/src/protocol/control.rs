@@ -239,7 +239,10 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // v43 -> v44 (#11423; v43 is used by #11463): TunnelEndpointSnapshot.link_up
 // carries keepalive-driven tunnel netdev liveness so dead GRE members are not
 // selected.
-pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 44;
+// v44 -> v45 (#11812): PolicerSnapshot adds optional single-rate marking and
+// logical-interface-policer fields; the Go and Rust snapshot versions move
+// with the shape even though the current Rust runtime does not consume them.
+pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 45;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a
 /// snapshot reuses the installed generation with a different content digest.
