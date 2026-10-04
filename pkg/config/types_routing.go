@@ -850,7 +850,7 @@ type RoutingInstanceConfig struct {
 	// (#3870). When the instance's BGP omits `local-as`, the BGP AS is
 	// resolved from this instance-level AS if set, else the GLOBAL
 	// routing-options autonomous-system (Junos inheritance). 0 = unset.
-	AutonomousSystem          uint32
+	AutonomousSystem uint32
 	// GenerateRoutes carries this instance's `routing-options generate`
 	// aggregates (#11782). compileRoutingInstances copies fields off the
 	// per-instance RoutingOptionsConfig one by one; without this slot, parsed
@@ -863,8 +863,8 @@ type RoutingInstanceConfig struct {
 	// ForwardingTableExport and ForwardingTableExports carry the instance's
 	// selected `forwarding-table export` policy and all authored values (#11782),
 	// preserving the global scalar-vs-list contract documented above.
-	ForwardingTableExport  string
-	ForwardingTableExports []string
+	ForwardingTableExport     string
+	ForwardingTableExports    []string
 	TableID                   int    // Linux kernel routing table number (auto-assigned)
 	InterfaceRoutesRibGroup   string // interface-routes { rib-group inet <name>; }
 	InterfaceRoutesRibGroupV6 string // interface-routes { rib-group inet6 <name>; }
