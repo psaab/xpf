@@ -1807,6 +1807,7 @@ pub(super) fn synthesized_synced_reverse_entry_in_table(
         // re-installed the reverse copy on the established window, and
         // `companion_keeps_alive` then held the closing forward alive with it.
         tcp_close_class: entry.tcp_close_class,
+        tcp_handshake_state: entry.tcp_handshake_state,
     })
 }
 
@@ -2063,6 +2064,7 @@ pub(super) fn install_reverse_session_from_forward_match(
             generation: 0,
             session_id: 0,
             tcp_close_class: 0,
+            tcp_handshake_state: sessions.handshake_state_wire_for(reverse_key),
         };
         publish_shared_session(
             shared_sessions,

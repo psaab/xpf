@@ -572,6 +572,62 @@ impl TcpCloseClass {
     }
 }
 
+/// #10888: the TCP handshake phase carried across HA independently of close
+/// state. Zero is reserved for legacy peers, which import as established.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TcpHandshakeState {
+    Opening,
+    HandshakePending,
+    SynAckFirstPending,
+    Established,
+}
+
+impl TcpHandshakeState {
+    #[inline]
+    pub(crate) fn to_wire(self) -> u8 {
+        match self {
+            Self::Opening => 1,
+            Self::HandshakePending => 2,
+            Self::SynAckFirstPending => 3,
+            Self::Established => 4,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn from_wire(wire: u8) -> Option<Self> {
+        match wire {
+            1 => Some(Self::Opening),
+            2 => Some(Self::HandshakePending),
+            3 => Some(Self::SynAckFirstPending),
+            4 => Some(Self::Established),
+            _ => None,
+        }
+    }
+}
+
+impl SessionEntry {
+    /// #10888: encode only the states whose semantics are meaningful to TCP HA.
+    /// The asymmetric SYN-ACK-first marker must survive failover so the
+    /// completing reverse ACK remains distinguishable from a retransmission.
+    #[inline]
+    pub(crate) fn tcp_handshake_state_wire(&self, protocol: u8) -> u8 {
+        if protocol != PROTO_TCP {
+            return 0;
+        }
+        if self.syn_ack_first && self.handshake_pending {
+            TcpHandshakeState::SynAckFirstPending
+        } else if self.handshake_pending {
+            TcpHandshakeState::HandshakePending
+        } else if self.established {
+            TcpHandshakeState::Established
+        } else {
+            TcpHandshakeState::Opening
+        }
+        .to_wire()
+    }
+}
+
+
 impl SessionEntry {
     /// #7342: the close class this entry's accumulated state puts it in.
     ///
@@ -877,9 +933,9 @@ struct SessionEntry {
     /// timeout, false keeps the global protocol timeout until a genuine reverse
     /// packet promotes both halves; sessions without an app override start true.
     ///
-    /// Node-local derived state: this is not serialized. TCP peer-synced entries
-    /// remain established; non-TCP app-timeout imports remain gated because
-    /// reply evidence is not carried on the HA wire.
+    /// #10888 carries TCP handshake state explicitly. A legacy or absent wire
+    /// value retains established import behavior; non-TCP reply evidence still
+    /// remains local because the wire field is TCP-only.
     established: bool,
     /// #6752/#10891: `handshake_pending` marks the gap after a SYN-ACK is seen
     /// (or a SYN-ACK-first session is installed) but before its completing ACK.
@@ -912,15 +968,15 @@ struct SessionEntry {
     ///     half off it for as long as the retransmissions continue
     ///     (`retransmitted_synack_does_not_resurrect_the_forward_half_6752`).
     ///
-    /// Node-local derived state, like `established`: `SessionEntry` is not
-    /// serialized, so this is not on any wire and an HA peer re-derives it from
-    /// the segments it sees.
+    /// #10888 serializes this pending phase as HandshakePending or
+    /// SynAckFirstPending, preserving the opening deadline and completion rule.
     handshake_pending: bool,
     /// #10891: the OPENING session was installed from a SYN-ACK. While true,
     /// only a non-SYN ACK on the reverse half completes the handshake; this
     /// prevents a retransmitted SYN-ACK in the installing direction from
     /// clearing `handshake_pending`.
     syn_ack_first: bool,
+    /// #10888 carries this marker as the distinct SynAckFirstPending wire state.
     /// #965: absolute wheel tick at which this session is scheduled to
     /// be checked for expiration. Updated on every push to the wheel.
     /// A WheelEntry whose `scheduled_tick != entry.wheel_tick` is a
@@ -2814,6 +2870,14 @@ impl SessionTable {
             .unwrap_or(0)
     }
 
+    /// #10888: the live entry's handshake state for Open/Update sync deltas.
+    #[inline]
+    pub(crate) fn handshake_state_wire_for(&self, key: &SessionKey) -> u8 {
+        self.entry_by_key(key)
+            .map(|entry| entry.tcp_handshake_state_wire(key.protocol))
+            .unwrap_or(0)
+    }
+
     /// #8125: the session's OWN inactivity window, in whole seconds, for the
     /// `Timeout:` column of `show security flow session`.
     ///
@@ -3025,29 +3089,27 @@ impl SessionTable {
     /// and adjacent — the repeated-parameter-cluster shape this repo's API rule
     /// says to fold into a context struct, and one where a transposition
     /// between `close`, `reset` and `fin` would be silent.
-    /// #9412: push a close-state `Update` for the session `matched_key` belongs
-    /// to, iff its close class changed from `class_before` (wire form).
+    /// #9412/#10888: push an Update for a close-class or handshake-state
+    /// transition, keyed on the forward entry that every sync delta names.
+    /// `matched_key` is canonical (not an alias); a reverse match resolves its
+    /// companion exactly as `propagate_tcp_state_to_companion` does.
     ///
-    /// Keyed on the FORWARD entry, which is what every sync delta names. A FIN
-    /// seen on the reverse half resolves its forward companion the way
-    /// `propagate_tcp_state_to_companion` does.
-    ///
-    /// A peer-synced copy never announces: that would echo the owner's own
-    /// state back to it, the same sync loop the install-time Open avoids.
-    ///
-    /// Volume, against #8593: at most one delta per class TRANSITION, and a
-    /// retransmitted FIN in the same class emits nothing. A session can
-    /// therefore emit at most three over its life (CLOSING, TIME_WAIT, RST).
-    pub(in crate::session) fn emit_close_state_update(
+    /// Peer imports stay silent to avoid echoing the owner's state. A
+    /// worker-local replica announces only with the installer's carried id.
+    /// Emission is transition-only: retransmissions in the same wire state
+    /// produce no extra deltas.
+    pub(in crate::session) fn emit_session_state_update(
         &mut self,
         matched_key: &SessionKey,
         class_before: u8,
+        handshake_state_before: u8,
     ) {
         let Some(matched) = self.entry_by_key(matched_key) else {
             return;
         };
         let class_after = matched.tcp_close_class_wire();
-        if class_after == class_before {
+        let handshake_state_after = matched.tcp_handshake_state_wire(matched_key.protocol);
+        if class_after == class_before && handshake_state_after == handshake_state_before {
             return;
         }
         let forward_key = if matched.metadata.is_reverse {
@@ -3095,8 +3157,9 @@ impl SessionTable {
             observed_tcp_flags: forward.observed_tcp_flags,
             session_id: forward.session_id,
             bulk_resync: false,
-            tcp_close_class: class_after,
+            tcp_close_class: forward.tcp_close_class_wire(),
             purge_retirement: false,
+            tcp_handshake_state: forward.tcp_handshake_state_wire(forward_key.protocol),
         };
         self.push_delta(delta);
     }
@@ -3403,17 +3466,14 @@ impl SessionTable {
             } else {
                 // #3227: a real-traffic refresh re-stamps the idle window from
                 // the (possibly updated) metadata's per-app override.
-                // #3152: an un-established TCP session uses the short opening
-                // window via session_timeout_ns(established=false).
+                // #3152/#10888: imported TCP handshakes remain on the opening
+                // window until the carried pending state is cleared.
                 session_timeout_ns(
                     protocol,
                     tcp_flags,
-                    record.entry.established,
+                    record.entry.established && !record.entry.handshake_pending,
                     &self.timeouts,
                     metadata.inactivity_timeout_ns,
-                    // #3527: opening-window override for an OPENING refresh
-                    // (a SYN retransmit on a still-half-open session). Ignored
-                    // once `established`.
                     opening_override_ns,
                 )
             };
@@ -3498,13 +3558,15 @@ impl SessionTable {
             // same entry as created_ns/counters), so the Open delta announcing
             // the new local ownership carries the id already assigned at import.
             let session_id = self.entry_by_key(key).map(|e| e.session_id).unwrap_or(0);
-            // #9412: a promote re-announces the session, so it carries the close
-            // class the entry already holds.
+            // #9412/#10888: a promote re-announces the live close and
+            // handshake states rather than resetting the peer to legacy defaults.
             let tcp_close_class = self.close_class_wire_for(key);
+            let tcp_handshake_state = self.handshake_state_wire_for(key);
             let policy_generation = self.entry_by_key(key).map(|e| e.policy_generation).unwrap_or(0);
             self.push_delta(SessionDelta {
                 provenance: crate::session::ExportProvenance::Incremental,
                 tcp_close_class,
+                tcp_handshake_state,
                 purge_retirement: false,
                 kind: SessionDeltaKind::Open,
                 key: key.clone(),
@@ -4608,6 +4670,11 @@ mod tcp_flags_zero_on_sync_path_9412_tests;
 #[cfg(test)]
 #[path = "close_state_sync_9412_acceptance_tests.rs"]
 mod close_state_sync_9412_acceptance_tests;
+// #10888: OPENING and handshake-pending state must survive sync import and
+// remain bounded by the original opening deadline when a Close is lost.
+#[cfg(test)]
+#[path = "opening_state_sync_10888_tests.rs"]
+mod opening_state_sync_10888_tests;
 // #9582: a close seen only by a worker replica of a local session is announced, with
 // the installer's id. Written before the fix.
 #[cfg(test)]

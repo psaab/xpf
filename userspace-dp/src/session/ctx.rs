@@ -49,6 +49,9 @@ pub(crate) struct SessionInstall {
     /// #9412: the TCP close class a peer stated for this session on the HA wire
     /// (`0` = open or not carried). Only `upsert_synced_with_origin` consults it.
     pub(crate) tcp_close_class: u8,
+    /// #10888: owning-node TCP handshake state (`0` = legacy/established).
+    /// Only `upsert_synced_with_origin` consults it.
+    pub(crate) tcp_handshake_state: u8,
 }
 
 /// In-place update or promotion of an existing session. Carries a

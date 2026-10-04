@@ -107,6 +107,7 @@ fn entry(key: SessionKey, origin: SessionOrigin, session_id: u64) -> SyncedSessi
         generation: 0,
         session_id,
         tcp_close_class: 0,
+        tcp_handshake_state: 0,
     }
 }
 

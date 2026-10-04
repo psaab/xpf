@@ -1421,6 +1421,68 @@ fn sync_session_upsert_with_valid_entry_succeeds() {
 }
 
 #[test]
+fn delivered_session_close_deletes_synced_opening_10888() {
+    let state = new_state(ProcessStatus::default());
+    let mut upsert = req("sync_session");
+    upsert.session_sync = Some(SessionSyncRequest {
+        operation: "upsert".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        tcp_handshake_state: 1,
+        ..SessionSyncRequest::default()
+    });
+    let upsert_response = run_request(state.clone(), upsert);
+    assert!(
+        upsert_response.ok,
+        "OPENING sync import failed: {}",
+        upsert_response.error
+    );
+    assert!(
+        state
+            .lock()
+            .expect("state")
+            .afxdp
+            .synced_session_entry_count_for_test()
+            > 0,
+        "fixture: opening import must exist before its delivered Close"
+    );
+
+    let mut close = req("sync_session");
+    close.session_sync = Some(SessionSyncRequest {
+        operation: "delete".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        ..SessionSyncRequest::default()
+    });
+    let close_response = run_request(state.clone(), close);
+    assert!(
+        close_response.ok,
+        "delivered Close delete failed: {}",
+        close_response.error
+    );
+    assert_eq!(
+        state
+            .lock()
+            .expect("state")
+            .afxdp
+            .synced_session_entry_count_for_test(),
+        0,
+        "the actual SessionSync delete control must remove the OPENING import"
+    );
+}
+
+#[test]
 fn sync_session_upsert_with_malformed_mac_is_rejected() {
     let mut request = req("sync_session");
     request.session_sync = Some(SessionSyncRequest {

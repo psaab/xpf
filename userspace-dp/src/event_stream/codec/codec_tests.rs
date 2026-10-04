@@ -1277,6 +1277,7 @@ fn test_close_flags() {
         session_id: 0,
         bulk_resync: false,
         tcp_close_class: 0,
+        tcp_handshake_state: 0,
         purge_retirement: false,
     };
     let flags = close_flags(&delta);
@@ -1524,26 +1525,31 @@ fn test_encode_session_update_matches_the_shared_golden_9412() {
     );
     assert_eq!(frame.data[4], MSG_SESSION_UPDATE);
     let bytes = &frame.data[..frame.len as usize];
-    assert_eq!(bytes[bytes.len() - 18], 2, "#9412: the close class precedes the session-sync trailers");
+    assert_eq!(bytes[bytes.len() - 21], 2, "#9412: the close class precedes the session-sync trailers");
     assert_eq!(
-        u32::from_le_bytes(bytes[bytes.len() - 17..bytes.len() - 13].try_into().unwrap()),
+        u32::from_le_bytes(bytes[bytes.len() - 20..bytes.len() - 16].try_into().unwrap()),
         525_590,
         "#9752: the golden tail carries the domain"
     );
     assert_eq!(
-        u32::from_le_bytes(bytes[bytes.len() - 13..bytes.len() - 9].try_into().unwrap()),
+        u32::from_le_bytes(bytes[bytes.len() - 16..bytes.len() - 12].try_into().unwrap()),
         3_318_534_811,
         "#9752: the golden tail carries the check"
     );
     assert_eq!(
-        &bytes[bytes.len() - 9..bytes.len() - 6],
+        &bytes[bytes.len() - 12..bytes.len() - 9],
         &[1, 13, 0],
         "#11064: the golden tail carries a valid ICMP type/code pair"
     );
     assert_eq!(
-        &bytes[bytes.len() - 6..],
+        &bytes[bytes.len() - 9..bytes.len() - 3],
         &[0, 0, 0, 0, 0, 0],
         "#11070: the golden fixture carries a zero ingress identity"
+    );
+    assert_eq!(
+        &bytes[bytes.len() - 3..],
+        &[0, 0, 0],
+        "#10888: the golden fixture carries an empty rule ID and legacy handshake state"
     );
     let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     let path = concat!(
@@ -1577,7 +1583,30 @@ fn test_encode_session_open_carries_the_close_class_9412() {
         1,
     );
     assert_eq!(frame.data[4], MSG_SESSION_OPEN);
-    assert_eq!(frame.data[frame.len as usize - 18], 1); // Session trailers follow the close class.
+    assert_eq!(frame.data[frame.len as usize - 21], 1); // Close class precedes the session-sync trailer.
+}
+
+#[test]
+fn session_update_carries_tcp_handshake_state_10888() {
+    let zones = test_zone_map();
+    let frame = EventFrame::encode_session_update_with_handshake_state(
+        8,
+        &test_key_v4(),
+        &test_decision(),
+        &test_metadata(),
+        &zones,
+        false,
+        0,
+        0,
+        3,
+    );
+    let bytes = &frame.data[..frame.len as usize];
+    assert_eq!(bytes[4], MSG_SESSION_UPDATE);
+    assert_eq!(
+        &bytes[bytes.len() - 3..],
+        &[0, 0, 3],
+        "#10888: a SYN-ACK-first pending Update has an empty rule ID prefix and its handshake stage"
+    );
 }
 
 /// #9752: open AND update frames carry the installing-table identity as the

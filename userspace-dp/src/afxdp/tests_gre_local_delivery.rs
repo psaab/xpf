@@ -815,6 +815,7 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
         generation: 0,
         session_id: 0,
         tcp_close_class: 0,
+        tcp_handshake_state: 0,
     };
     publish_shared_session(
         &shared_sessions,

@@ -46,6 +46,7 @@
   "src_mac": "",
   "src_port": 55068,
   "tcp_close_class": 0,
+  "tcp_handshake_state": 0,
   "timestamp": "1970-01-01T00:00:00Z",
   "tunnel_discriminator": 1,
   "tunnel_endpoint_id": 0,

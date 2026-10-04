@@ -131,9 +131,9 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	// the field it knows and ignores the rest.
 	// #7239 RoutingDomain (4) and #9412 TCPCloseClass (1) ride behind the
 	// fields above, then #9752 InstallTableDomain+Check (4+4), #10227 high
-	// SessionValue.Flags (1), and #11064 source-NAT ICMP identity (3). Over-
-	// allocating is harmless: the result is buf[:off].
-	buf := make([]byte, keySize+valSize+8+8+8+8+4+8+4+1+8+1+3)
+	// SessionValue.Flags (1), #11064 source-NAT ICMP identity (3), and up to
+	// three bytes for the optional rule-ID prefix plus handshake state.
+	buf := make([]byte, keySize+valSize+8+8+8+8+4+8+4+1+8+1+3+3)
 	off := 0
 	copy(buf[off:], key.SrcIP[:])
 	off += 4
@@ -303,17 +303,11 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	off++
 	buf[off] = val.SourceNatICMPCode
 	off++
-	// #11070: policy rule ID follows the ICMP identity; length-gated on
-	// decode. Order is load-bearing: master already ships ICMP at this
-	// position, so the rule trailer appends after it.
-	if len(val.PolicyRuleID) != 0 && len(val.PolicyRuleID) <= int(^uint16(0)) {
-		var ruleIDLen [2]byte
-		binary.LittleEndian.PutUint16(ruleIDLen[:], uint16(len(val.PolicyRuleID)))
-		buf = append(buf[:off], ruleIDLen[:]...)
-		buf = append(buf, val.PolicyRuleID...)
-		return buf
-	}
-	return buf[:off]
+	// #11070/#10888: policy rule ID and handshake state are an optional
+	// length-prefixed tail. A nonzero handshake state needs an explicit
+	// zero-length rule-ID prefix when there is no rule ID, so the decoder can
+	// distinguish it from a legacy frame. Zero handshake state adds no bytes.
+	return appendSessionRuleIDAndHandshake(buf[:off], val.PolicyRuleID, val.TCPHandshakeState)
 }
 func encodeSessionV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) []byte {
 	payload := encodeSessionV6Payload(key, val)
@@ -487,17 +481,28 @@ func encodeSessionV6Payload(key dataplane.SessionKeyV6, val dataplane.SessionVal
 	off++
 	buf[off] = val.SourceNatICMPCode
 	off++
-	// #11070: policy rule ID follows the ICMP identity; length-gated on
-	// decode. Order is load-bearing: master already ships ICMP at this
-	// position, so the rule trailer appends after it.
-	if len(val.PolicyRuleID) != 0 && len(val.PolicyRuleID) <= int(^uint16(0)) {
-		var ruleIDLen [2]byte
-		binary.LittleEndian.PutUint16(ruleIDLen[:], uint16(len(val.PolicyRuleID)))
-		buf = append(buf[:off], ruleIDLen[:]...)
-		buf = append(buf, val.PolicyRuleID...)
-		return buf
+	// #11070/#10888: v6 uses the same optional rule-ID/handshake tail.
+	return appendSessionRuleIDAndHandshake(buf[:off], val.PolicyRuleID, val.TCPHandshakeState)
+}
+
+// appendSessionRuleIDAndHandshake preserves the existing optional rule-ID tail
+// and adds the handshake byte only when known. A state without a rule ID gets
+// an explicit zero-length prefix so new decoders can distinguish it from a
+// legacy payload.
+func appendSessionRuleIDAndHandshake(payload []byte, ruleID string, handshakeState uint8) []byte {
+	if len(ruleID) > int(^uint16(0)) {
+		ruleID = ""
 	}
-	return buf[:off]
+	if len(ruleID) != 0 || handshakeState != dataplane.TCPHandshakeStateAbsent {
+		var ruleIDLen [2]byte
+		binary.LittleEndian.PutUint16(ruleIDLen[:], uint16(len(ruleID)))
+		payload = append(payload, ruleIDLen[:]...)
+		payload = append(payload, ruleID...)
+	}
+	if handshakeState != dataplane.TCPHandshakeStateAbsent {
+		payload = append(payload, handshakeState)
+	}
+	return payload
 }
 
 // PurgeRetirementOnly is the one cluster-owned interpretation of the
@@ -907,13 +912,18 @@ func decodeSessionV4Payload(payload []byte) (dataplane.SessionKey, dataplane.Ses
 		val.SourceNatICMPCode = payload[off+2]
 		off += 3
 	}
-	// #11070: length-gated policy rule ID after the ICMP identity (encode
-	// order is authoritative; see above).
+	// #11070/#10888: length-gated policy rule ID and handshake state tail.
 	if off+2 <= len(payload) {
 		ruleIDLen := int(binary.LittleEndian.Uint16(payload[off : off+2]))
 		off += 2
 		if ruleIDLen <= len(payload)-off {
-			val.PolicyRuleID = string(payload[off : off+ruleIDLen])
+			if ruleIDLen != 0 {
+				val.PolicyRuleID = string(payload[off : off+ruleIDLen])
+			}
+			off += ruleIDLen
+			if off < len(payload) {
+				val.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
+			}
 		}
 	}
 	return key, val, true
@@ -1112,13 +1122,18 @@ func decodeSessionV6Payload(payload []byte) (dataplane.SessionKeyV6, dataplane.S
 		val.SourceNatICMPCode = payload[off+2]
 		off += 3
 	}
-	// #11070: length-gated policy rule ID after the ICMP identity (encode
-	// order is authoritative; see above).
+	// #11070/#10888: length-gated policy rule ID and handshake state tail.
 	if off+2 <= len(payload) {
 		ruleIDLen := int(binary.LittleEndian.Uint16(payload[off : off+2]))
 		off += 2
 		if ruleIDLen <= len(payload)-off {
-			val.PolicyRuleID = string(payload[off : off+ruleIDLen])
+			if ruleIDLen != 0 {
+				val.PolicyRuleID = string(payload[off : off+ruleIDLen])
+			}
+			off += ruleIDLen
+			if off < len(payload) {
+				val.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
+			}
 		}
 	}
 	return key, val, true

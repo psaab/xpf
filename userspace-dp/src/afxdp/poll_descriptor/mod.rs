@@ -5083,6 +5083,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             // row and the #9412 sender memo use (#5212).
                                             session_id: sessions.session_id_for(&flow.forward_key),
                                             tcp_close_class: 0,
+                                            tcp_handshake_state: sessions.handshake_state_wire_for(&flow.forward_key),
                                         };
                                         // #1789: count failed publishes so
                                         // map-at-capacity / stale-fd
@@ -5465,6 +5466,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             // fresh id at install — no carried id.
                                             session_id: 0,
                                             tcp_close_class: 0,
+                                            tcp_handshake_state: sessions.handshake_state_wire_for(&flow.forward_key),
                                         };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,
@@ -9095,6 +9097,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             // adopt it (see the forward-flow publish above).
                                             session_id: sessions.session_id_for(&flow.forward_key),
                                             tcp_close_class: 0,
+                                            tcp_handshake_state: sessions.handshake_state_wire_for(&flow.forward_key),
                                         };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,

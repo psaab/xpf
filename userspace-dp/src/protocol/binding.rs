@@ -1552,6 +1552,13 @@ pub(crate) struct SessionDeltaInfo {
     /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
     #[serde(rename = "tcp_close_class", default)]
     pub tcp_close_class: u8,
+    /// #10888: TCP handshake state, independent of the close class.
+    /// 0 is absent/legacy and preserves established import behavior.
+    ///
+    /// The rename MUST match the Go struct tag
+    /// (`pkg/dataplane/userspace/protocol_ha.go`, `SessionDeltaInfo`).
+    #[serde(rename = "tcp_handshake_state", default)]
+    pub tcp_handshake_state: u8,
     /// #9752: the session's installing route-table domain id (0 = default
     /// table), at parity with the binary open frame's trailing u32 pair.
     /// Additive: an old daemon ignores the keys and imports default-table

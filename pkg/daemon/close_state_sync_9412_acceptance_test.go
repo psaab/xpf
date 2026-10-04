@@ -89,6 +89,27 @@ func TestConvertCarriesTheCloseClass9412(t *testing.T) {
 	}
 }
 
+func TestConvertCarriesTCPHandshakeState10888(t *testing.T) {
+	zoneIDs := map[string]uint16{"lan": 1, "wan": 2}
+	delta4 := closeClassDelta9412(t, "open", 0)
+	delta4.TCPHandshakeState = dataplane.TCPHandshakeStateHandshakePending
+	_, val4, ok := userspaceSessionFromDeltaV4(delta4, zoneIDs)
+	if !ok || val4.TCPHandshakeState != dataplane.TCPHandshakeStateHandshakePending {
+		t.Fatalf("v4 handshake conversion: ok=%v state=%d",
+			ok, val4.TCPHandshakeState)
+	}
+
+	delta6 := closeClassDelta9412(t, "open", 0)
+	delta6.AddrFamily = dataplane.AFInet6
+	delta6.SrcIP, delta6.DstIP = "2001:db8::1", "2001:db8::2"
+	delta6.TCPHandshakeState = dataplane.TCPHandshakeStateSynAckFirstPending
+	_, val6, ok := userspaceSessionFromDeltaV6(delta6, zoneIDs)
+	if !ok || val6.TCPHandshakeState != dataplane.TCPHandshakeStateSynAckFirstPending {
+		t.Fatalf("v6 handshake conversion: ok=%v state=%d",
+			ok, val6.TCPHandshakeState)
+	}
+}
+
 func primaryForRG1Daemon9412() (*Daemon, *cluster.SessionSync) {
 	ss := &cluster.SessionSync{
 		IsPrimaryFn:      func() bool { return true },

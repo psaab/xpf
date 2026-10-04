@@ -1448,6 +1448,7 @@ fn synced_entry_for(
         generation: 0,
         session_id: 0,
         tcp_close_class: 0,
+        tcp_handshake_state: 0,
     }
 }
 
@@ -2384,6 +2385,7 @@ fn cancel_keys_test_delta(purge_retirement: bool) -> SessionDelta {
     session_id: 0,
     bulk_resync: false,
     tcp_close_class: 0,
+    tcp_handshake_state: 0,
     purge_retirement, }
 }
 

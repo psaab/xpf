@@ -69,7 +69,7 @@ func TestSessionSyncRequestCarriesTheCloseClass9412(t *testing.T) {
 	m := &Manager{bpfShim: dataplane.New()}
 
 	var v4 dataplane.SessionValue
-	if err := json.Unmarshal([]byte(`{"IngressZone":1,"EgressZone":2,"TCPCloseClass":1}`), &v4); err != nil {
+	if err := json.Unmarshal([]byte(`{"IngressZone":1,"EgressZone":2,"TCPCloseClass":1,"TCPHandshakeState":1}`), &v4); err != nil {
 		t.Fatalf("FIXTURE: %v", err)
 	}
 	req := m.buildSessionSyncRequestV4("upsert", dataplane.SessionKey{Protocol: 6}, &v4)
@@ -78,9 +78,12 @@ func TestSessionSyncRequestCarriesTheCloseClass9412(t *testing.T) {
 			"request carries tcp_close_class=%v. The standby helper imports the "+
 			"session as not-closing.", got)
 	}
+	if got := jsonField9412(t, req, "tcp_handshake_state"); got != float64(1) {
+		t.Fatalf("the synced v4 value said Opening and the sync request carries tcp_handshake_state=%v", got)
+	}
 
 	var v6 dataplane.SessionValueV6
-	if err := json.Unmarshal([]byte(`{"IngressZone":1,"EgressZone":2,"TCPCloseClass":2}`), &v6); err != nil {
+	if err := json.Unmarshal([]byte(`{"IngressZone":1,"EgressZone":2,"TCPCloseClass":2,"TCPHandshakeState":3}`), &v6); err != nil {
 		t.Fatalf("FIXTURE: %v", err)
 	}
 	reqV6 := m.buildSessionSyncRequestV6("upsert", dataplane.SessionKeyV6{Protocol: 6}, &v6)
@@ -88,11 +91,17 @@ func TestSessionSyncRequestCarriesTheCloseClass9412(t *testing.T) {
 		t.Fatalf("#9412 ACCEPTANCE: the synced v6 value said TIME_WAIT and the sync "+
 			"request carries tcp_close_class=%v", got)
 	}
+	if got := jsonField9412(t, reqV6, "tcp_handshake_state"); got != float64(3) {
+		t.Fatalf("the synced v6 value said SynAckFirstPending and the sync request carries tcp_handshake_state=%v", got)
+	}
 
 	// CONTROL: a value that is not closing must not invent a class.
 	plain := m.buildSessionSyncRequestV4("upsert", dataplane.SessionKey{Protocol: 6},
 		&dataplane.SessionValue{IngressZone: 1, EgressZone: 2})
 	if got := jsonField9412(t, plain, "tcp_close_class"); got != nil && got != float64(0) {
 		t.Fatalf("a not-closing value produced tcp_close_class=%v", got)
+	}
+	if got := jsonField9412(t, plain, "tcp_handshake_state"); got != nil && got != float64(0) {
+		t.Fatalf("a legacy handshake value produced tcp_handshake_state=%v", got)
 	}
 }

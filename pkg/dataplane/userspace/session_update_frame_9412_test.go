@@ -83,6 +83,33 @@ func TestCloseClassWireKeyLockstepWithRust9412(t *testing.T) {
 	}
 }
 
+func TestTCPHandshakeStateWireKeyLockstepWithRust10888(t *testing.T) {
+	const decl = `#[serde(rename = "tcp_handshake_state", default)]`
+	for _, c := range []struct {
+		rust string
+		typ  reflect.Type
+	}{
+		{"../../../userspace-dp/src/protocol/binding.rs", reflect.TypeOf(SessionDeltaInfo{})},
+		{"../../../userspace-dp/src/protocol/control.rs", reflect.TypeOf(SessionSyncRequest{})},
+	} {
+		src, err := os.ReadFile(c.rust)
+		if err != nil {
+			t.Fatalf("read %s: %v", c.rust, err)
+		}
+		if !strings.Contains(string(src), decl) {
+			t.Fatalf("%s no longer declares %s: the Rust wire key moved", c.rust, decl)
+		}
+		f, ok := c.typ.FieldByName("TCPHandshakeState")
+		if !ok {
+			t.Fatalf("%s has no TCPHandshakeState field", c.typ.Name())
+		}
+		if tag := strings.Split(f.Tag.Get("json"), ",")[0]; tag != "tcp_handshake_state" {
+			t.Fatalf("%s.TCPHandshakeState json tag = %q, want Rust key tcp_handshake_state",
+				c.typ.Name(), tag)
+		}
+	}
+}
+
 func TestInstallTableWireKeyLockstepWithRust9752(t *testing.T) {
 	for _, c := range []struct {
 		rust  string

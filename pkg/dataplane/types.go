@@ -416,6 +416,11 @@ type SessionValue struct {
 	// It is deliberately NOT TCPState. That is the BPF mirror's own field and
 	// keeps its original meaning (#9412: add a field, never redefine one).
 	TCPCloseClass uint8
+	// TCPHandshakeState (#10888) is independent from TCP close class and
+	// TCPState. Wire values: 0 absent/legacy (imports as established), 1
+	// Opening, 2 HandshakePending, 3 SynAckFirstPending, 4 Established.
+	// This userspace-sync-only metadata is not part of the BPF/C conntrack ABI.
+	TCPHandshakeState uint8
 	// InstallTableDomain/InstallTableCheck (#9752) are the session's
 	// installing route-table identity the owning node's helper states: the
 	// FNV-1a/64 instance-name domain id + high-32 owner check, (0,0) for the
@@ -818,6 +823,9 @@ type SessionValueV6 struct {
 	// It is deliberately NOT TCPState. That is the BPF mirror's own field and
 	// keeps its original meaning (#9412: add a field, never redefine one).
 	TCPCloseClass uint8
+	// TCPHandshakeState (#10888): v6 twin of the sync-only handshake phase
+	// above, with the same 0-4 wire values. It is not part of the BPF/C ABI.
+	TCPHandshakeState uint8
 	// InstallTableDomain/InstallTableCheck (#9752): v6 analogue of the v4
 	// fields above — same semantics, same wire placement (trailing u32s
 	// after TCPCloseClass on the v6 cluster payload).
@@ -1093,6 +1101,26 @@ const (
 	SessStateTimeWait    = 7
 	SessStateClosed      = 8
 )
+
+// TCP handshake state values are sync-only metadata. Zero intentionally means
+// absent/legacy and imports with established behavior; these values are
+// separate from both TCPState and TCPCloseClass.
+const (
+	TCPHandshakeStateAbsent             uint8 = 0
+	TCPHandshakeStateOpening             uint8 = 1
+	TCPHandshakeStateHandshakePending    uint8 = 2
+	TCPHandshakeStateSynAckFirstPending  uint8 = 3
+	TCPHandshakeStateEstablished         uint8 = 4
+)
+
+// NormalizeTCPHandshakeState maps unknown wire values to Established, preserving
+// the pre-field import behavior.
+func NormalizeTCPHandshakeState(state uint8) uint8 {
+	if state > TCPHandshakeStateEstablished {
+		return TCPHandshakeStateEstablished
+	}
+	return state
+}
 
 // Policy action constants.
 const (
