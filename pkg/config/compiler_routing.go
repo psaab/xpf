@@ -1225,66 +1225,166 @@ func markMalformedPolicyFromList11779(term *PolicyTerm, leaf, keyword string) {
 	)
 }
 
-// policyTermFromChildren11779 reads the typed children represented by a
-// packed policy `from` node. If packedBody cannot expand the whole tail because
-// a route-filter trailer is outside the schema arity, split the raw tail by
-// each known child's schema arity so later siblings are not dropped.
-func policyTermFromChildren11779(term *PolicyTerm, fromNode *Node, fromSchema *schemaNode) []*Node {
+// policyTermFromChildren11779 reads typed children from a policy `from` node.
+// The compact normalizer can fold a packed tail into a child before this reader
+// runs, so every returned child goes through the same schema-arity split.
+func policyTermFromChildren11779(term *PolicyTerm, fromNode *Node, fromSchema *schemaNode, hasTermThen bool) []*Node {
 	if fromNode == nil {
 		return nil
 	}
-	body := packedBody(fromNode, fromSchema)
-	if body != fromNode {
-		return body.Children
-	}
-	consumed, _ := consumeNodeKeys(fromNode.Keys, fromSchema)
-	if consumed >= len(fromNode.Keys) || fromNode.Name() != "from" {
+	if fromNode.Name() != "from" {
 		return fromNode.Children
 	}
-	nodes := append([]*Node(nil), fromNode.Children...)
-	routeFilterSchema := resolveSchemaChild(fromSchema, "route-filter")
-	for i := consumed; i < len(fromNode.Keys); {
-		if fromNode.KeyQuoted(i) {
-			break
-		}
-		childSchema := resolveSchemaChild(fromSchema, fromNode.Keys[i])
-		if childSchema == nil {
-			break
-		}
-		n, _ := consumeNodeKeys(fromNode.Keys[i:], childSchema)
-		if childSchema == routeFilterSchema {
-			n = packedRouteFilterWidth(fromNode.Keys, i, n)
-		}
-		if childSchema.multi && childSchema.children == nil && n > 1 &&
-			fromNode.KeyBracketed(i+n-1) {
-			firstValue := i + n - 1
-			if !fromNode.KeyQuoted(firstValue) &&
-				policyTermClauseKeyword11779(fromNode.Keys[firstValue]) {
-				markMalformedPolicyFromList11779(
-					term, fromNode.Keys[i], fromNode.Keys[firstValue])
-			}
-			for n < len(fromNode.Keys)-i && fromNode.KeyBracketed(i+n) {
-				next := i + n
-				if !fromNode.KeyQuoted(next) &&
-					policyTermClauseKeyword11779(fromNode.Keys[next]) {
-					markMalformedPolicyFromList11779(
-						term, fromNode.Keys[i], fromNode.Keys[next])
-					break
+
+	splitChildren := func(children []*Node, preserveUnknown bool) []*Node {
+		var split []*Node
+		for i, child := range children {
+			parts := splitPolicyTermFromRun11779(
+				term, child, fromSchema, hasTermThen, preserveUnknown)
+			if len(parts) == 1 && parts[0] == child {
+				if split != nil {
+					split = append(split, child)
 				}
-				n++
+				continue
+			}
+			if split == nil {
+				split = make([]*Node, 0, len(children))
+				split = append(split, children[:i]...)
+			}
+			split = append(split, parts...)
+		}
+		if split == nil {
+			return children
+		}
+		return split
+	}
+
+	body := packedBody(fromNode, fromSchema)
+	if body != fromNode {
+		return splitChildren(body.Children, false)
+	}
+	consumed, _ := consumeNodeKeys(fromNode.Keys, fromSchema)
+	if consumed >= len(fromNode.Keys) {
+		return splitChildren(fromNode.Children, true)
+	}
+	// With a raw packed tail, children may be value continuations of its first
+	// leaf (not independent statements). Preserve those children and split only
+	// the tail; the packed unknown scanner owns its opaque remainder.
+	nodes := append([]*Node(nil), fromNode.Children...)
+	tail := &Node{Keys: fromNode.Keys[consumed:]}
+	if len(fromNode.KeysQuoted) == len(fromNode.Keys) {
+		tail.setKeysQuoted(fromNode.KeysQuoted[consumed:])
+	}
+	if len(fromNode.KeysBracketed) == len(fromNode.Keys) {
+		tail.setKeysBracketed(fromNode.KeysBracketed[consumed:])
+	}
+	return append(nodes, splitPolicyTermFromRun11779(
+		term, tail, fromSchema, hasTermThen, false)...)
+}
+
+// splitPolicyTermFromRun11779 separates schema-known match siblings in a
+// normalizer-folded child. Raw from-node tails leave opaque remainders to
+// packedUnknownFromLeaves; folded children have no raw tail left, so preserve
+// their opaque remainder as a synthetic child for the ordinary unknown gate.
+func splitPolicyTermFromRun11779(
+	term *PolicyTerm, run *Node, fromSchema *schemaNode, hasTermThen, preserveUnknown bool,
+) []*Node {
+	if run == nil || len(run.Keys) == 0 || len(run.Children) > 0 || fromSchema == nil {
+		return []*Node{run}
+	}
+	keys := run.Keys
+	var nodes []*Node
+	appendSpan := func(start, end int) {
+		if start == 0 && end == len(keys) {
+			nodes = append(nodes, run)
+			return
+		}
+		part := *run
+		part.Keys = append([]string(nil), keys[start:end]...)
+		part.Children = nil
+		part.IsLeaf = true
+		if len(run.KeysQuoted) == len(keys) {
+			part.setKeysQuoted(run.KeysQuoted[start:end])
+		} else {
+			part.setKeysQuoted(nil)
+		}
+		if len(run.KeysBracketed) == len(keys) {
+			part.setKeysBracketed(run.KeysBracketed[start:end])
+		} else {
+			part.setKeysBracketed(nil)
+		}
+		nodes = append(nodes, &part)
+	}
+
+	previousMultiValue, previousBracketedList := false, false
+	routeFilterSchema := resolveSchemaChild(fromSchema, "route-filter")
+	for i := 0; i < len(keys); {
+		if run.KeyQuoted(i) {
+			if previousMultiValue {
+				return []*Node{run}
+			}
+			if preserveUnknown {
+				appendSpan(i, len(keys))
+			}
+			break
+		}
+		childSchema := resolveSchemaChild(fromSchema, keys[i])
+		if childSchema == nil {
+			if preserveUnknown {
+				if previousMultiValue && !previousBracketedList {
+					return []*Node{run}
+				}
+				appendSpan(i, len(keys))
+			}
+			break
+		}
+		n, _ := consumeNodeKeys(keys[i:], childSchema)
+		if childSchema == routeFilterSchema {
+			n = packedRouteFilterWidth(keys, i, n)
+			if n == 3 && i+n < len(keys) {
+				switch keys[i+2] {
+				case "upto", "prefix-length-range", "through":
+					if resolveSchemaChild(fromSchema, keys[i+n]) == nil {
+						n++
+					}
+				}
 			}
 		}
 		if n <= 0 {
 			break
 		}
-		child := &Node{Keys: append([]string(nil), fromNode.Keys[i:i+n]...)}
-		if len(fromNode.KeysQuoted) == len(fromNode.Keys) {
-			child.setKeysQuoted(fromNode.KeysQuoted[i : i+n])
+		if childSchema.multi && childSchema.children == nil && n > 1 &&
+			run.KeyBracketed(i+n-1) {
+			firstValue := i + n - 1
+			if !run.KeyQuoted(firstValue) &&
+				policyTermClauseKeyword11779(keys[firstValue]) &&
+				!hasTermThen &&
+				!policyTermHasUnbracketedClauseBoundary11779(
+					keys, run.KeysBracketed, run.KeysQuoted, firstValue+1) {
+				markMalformedPolicyFromList11779(
+					term, keys[i], keys[firstValue])
+			}
+			for n < len(keys)-i && run.KeyBracketed(i+n) {
+				next := i + n
+				if !run.KeyQuoted(next) &&
+					policyTermClauseKeyword11779(keys[next]) &&
+					!hasTermThen &&
+					!policyTermHasUnbracketedClauseBoundary11779(
+						keys, run.KeysBracketed, run.KeysQuoted, next+1) {
+					markMalformedPolicyFromList11779(term, keys[i], keys[next])
+					break
+				}
+				n++
+			}
 		}
-		if len(fromNode.KeysBracketed) == len(fromNode.Keys) {
-			child.setKeysBracketed(fromNode.KeysBracketed[i : i+n])
+		previousMultiValue = childSchema.multi && childSchema.children == nil &&
+			childSchema.args == 1
+		previousBracketedList = previousMultiValue &&
+			n > 1 && run.KeyBracketed(i+n-1)
+		if i == 0 && n == len(keys) {
+			return []*Node{run}
 		}
-		nodes = append(nodes, child)
+		appendSpan(i, i+n)
 		i += n
 	}
 	return nodes
@@ -1293,6 +1393,13 @@ func policyTermFromChildren11779(term *PolicyTerm, fromNode *Node, fromSchema *s
 // parsePolicyTermChildren handles hierarchical form of policy term
 // where "from" and "then" are child nodes.
 func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
+	hasTermThen := false
+	for _, child := range children {
+		if child != nil && child.Name() == "then" {
+			hasTermThen = true
+			break
+		}
+	}
 	for _, tc := range children {
 		switch tc.Name() {
 		case "from":
@@ -1300,7 +1407,7 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 			for _, unknown := range packedUnknownFromLeaves(tc, fromSchema) {
 				term.UnknownFrom = append(term.UnknownFrom, unknown)
 			}
-			for _, fc := range policyTermFromChildren11779(term, tc, fromSchema) {
+			for _, fc := range policyTermFromChildren11779(term, tc, fromSchema, hasTermThen) {
 				switch fc.Name() {
 				case "protocol":
 					// Junos "from protocol [ bgp ospf static ]" matches any
@@ -1530,11 +1637,23 @@ func policyTermClauseKeyword11779(key string) bool {
 	return key == "from" || key == "then"
 }
 
+func policyTermHasUnbracketedClauseBoundary11779(
+	keys []string, bracketed, quoted []bool, start int,
+) bool {
+	for i := start; i < len(keys); i++ {
+		if (i >= len(bracketed) || !bracketed[i]) &&
+			(i >= len(quoted) || !quoted[i]) &&
+			policyTermClauseKeyword11779(keys[i]) {
+			return true
+		}
+	}
+	return false
+}
+
 // appendInlineBracketedMatchValues11779 reads values from a multi-value from
 // leaf without crossing into an unquoted `from`/`then` clause boundary. A
-// clause keyword that is itself marked bracketed means the closing bracket
-// was lost; return it to the caller so the term is rejected rather than
-// treating the action tail as match values.
+// bracketed clause keyword is malformed only when no unbracketed boundary
+// follows to prove the list was closed.
 func appendInlineBracketedMatchValues11779(
 	dst, keys []string, bracketed, quoted []bool, i int,
 ) ([]string, int, string) {
@@ -1544,7 +1663,9 @@ func appendInlineBracketedMatchValues11779(
 	next := i + 1
 	if next < len(bracketed) && bracketed[next] &&
 		(next >= len(quoted) || !quoted[next]) &&
-		policyTermClauseKeyword11779(keys[next]) {
+		policyTermClauseKeyword11779(keys[next]) &&
+		!policyTermHasUnbracketedClauseBoundary11779(
+			keys, bracketed, quoted, next+1) {
 		return dst, i, keys[next]
 	}
 	i = next
@@ -1553,7 +1674,9 @@ func appendInlineBracketedMatchValues11779(
 		bracketed[i] && bracketed[i+1] {
 		next = i + 1
 		if (next >= len(quoted) || !quoted[next]) &&
-			policyTermClauseKeyword11779(keys[next]) {
+			policyTermClauseKeyword11779(keys[next]) &&
+			!policyTermHasUnbracketedClauseBoundary11779(
+				keys, bracketed, quoted, next+1) {
 			return dst, i, keys[next]
 		}
 		i = next

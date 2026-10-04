@@ -8617,10 +8617,15 @@ Routing-policy terms compile only `protocol`, `prefix-list`, `route-filter`,
 `community`, and `as-path` matches. Previously, another `from` leaf such as
 `rib`, `instance`, `neighbor`, `next-hop`, `metric`, or `tag` was ignored,
 which could turn a constrained `then accept` term into an unconditional accept.
-Strict compilation now rejects unsupported `from` leaves in hierarchical,
-packed, and flat-set forms. Tolerant loads preserve their names in
-`PolicyTerm.UnknownFrom`, force the affected term to `reject`, clear
-`NextPolicy`, and emit a warning. Fail-on-revert coverage is in
+Strict compilation now rejects unsupported `from` leaves in hierarchical, packed,
+flat-set, and compact-normalized forms, including opaque tokens following a
+bracketed match list. Compact-normalized supported siblings are split back into
+their typed matches rather than being absorbed as values of the first leaf.
+Tolerant loads preserve unsupported names in `PolicyTerm.UnknownFrom`, force
+the affected term to `reject`, clear `NextPolicy`, and emit a warning. A bare
+value that spells a clause keyword remains valid inside a balanced bracketed
+list when the actual clause boundary is unbracketed; an unclosed list still
+fails closed. Fail-on-revert coverage is in
 `pkg/config/routing_policy_unknown_from_11779_test.go`.
 
 The policy-statement ACTION `then as-path-prepend "<asn> <asn> ..."` (#2892) is

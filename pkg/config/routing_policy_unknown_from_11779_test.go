@@ -375,6 +375,70 @@ func TestRoutingPolicyPackedRouteFilterPreservesTypedSibling11779(t *testing.T) 
 	}
 }
 
+// FAIL-ON-REVERT: compact-normalized `from` children must be re-split by
+// schema arity so an opaque trailer fails closed and a supported sibling stays
+// a distinct typed match.
+func TestRoutingPolicyNormalizedFromTail11779(t *testing.T) {
+	unknown := `policy-options {
+ prefix-list PL1 10.0.0.0/8;
+ policy-statement P {
+  term T {
+   from prefix-list [ PL1 ] rib inet.0;
+   then accept;
+  }
+ }
+}`
+	if _, err := CompileConfig(parsePolicyTreeFromSource11779(t, unknown)); err == nil ||
+		!strings.Contains(err.Error(), "rib") || !strings.Contains(err.Error(), "#11779") {
+		t.Fatalf("unknown normalized trailer was not rejected: %v", err)
+	}
+	cfg, err := CompileConfigLenient(parsePolicyTreeFromSource11779(t, unknown))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+	if len(term.PrefixList) != 1 || term.PrefixList[0] != "PL1" ||
+		len(term.UnknownFrom) != 1 || term.UnknownFrom[0] != "rib" ||
+		term.Action != "reject" || term.NextPolicy {
+		t.Fatalf("unknown trailer widened tolerant term: PrefixList=%v UnknownFrom=%v Action=%q NextPolicy=%v",
+			term.PrefixList, term.UnknownFrom, term.Action, term.NextPolicy)
+	}
+	if len(cfg.Warnings) == 0 {
+		t.Fatal("tolerant compile did not warn about the quarantined unknown match")
+	}
+
+	sibling := `policy-options {
+ prefix-list PL1 10.0.0.0/8;
+ policy-statement P {
+  term T {
+   from route-filter 10.0.0.0/8 exact prefix-list PL1;
+   then accept;
+  }
+ }
+}`
+	for _, lenient := range []bool{false, true} {
+		tree := parsePolicyTreeFromSource11779(t, sibling)
+		var got *Config
+		if lenient {
+			got, err = CompileConfigLenient(tree)
+		} else {
+			got, err = CompileConfig(tree)
+		}
+		if err != nil {
+			t.Fatalf("lenient=%v supported siblings rejected: %v", lenient, err)
+		}
+		term := got.PolicyOptions.PolicyStatements["P"].Terms[0]
+		if term.Action != "accept" || len(term.UnknownFrom) != 0 ||
+			len(term.PrefixList) != 1 || term.PrefixList[0] != "PL1" ||
+			len(term.RouteFilters) != 1 ||
+			term.RouteFilters[0].Prefix != "10.0.0.0/8" ||
+			term.RouteFilters[0].MatchType != "exact" {
+			t.Fatalf("lenient=%v supported siblings collapsed: PrefixList=%v RouteFilters=%+v UnknownFrom=%v Action=%q",
+				lenient, term.PrefixList, term.RouteFilters, term.UnknownFrom, term.Action)
+		}
+	}
+}
+
 // FAIL-ON-REVERT: an unclosed bracketed match must stop before a clause
 // keyword and fail closed instead of swallowing `then accept` as list values.
 func TestRoutingPolicyUnclosedBracketedFromListFailsClosed11779(t *testing.T) {
@@ -434,6 +498,48 @@ func TestRoutingPolicyQuotedClauseKeywordInBracketedFromList11779(t *testing.T) 
 			term.Action != "accept" || len(term.PrefixList) != 2 ||
 			term.PrefixList[0] != "then" || term.PrefixList[1] != "PL2" {
 			t.Fatalf("lenient=%v quoted clause value changed: term=%+v", lenient, term)
+		}
+	}
+}
+
+// FAIL-ON-REVERT: a bare `then` prefix-list name is a value in a balanced
+// bracketed list for every term/from shape; quotes are optional.
+func TestRoutingPolicyClosedBracketedBareClauseValues11779(t *testing.T) {
+	for _, shape := range []string{"packed-term", "packed-from", "from-block"} {
+		for _, value := range []string{"then", `"then"`} {
+			t.Run(shape+"/"+strings.ReplaceAll(value, `"`, "quoted-"), func(t *testing.T) {
+				src := `policy-options {
+ prefix-list then 10.0.0.0/8;
+ prefix-list PL2 172.16.0.0/12;
+ policy-statement P {
+  term T ` + map[string]string{
+					"packed-term": `from prefix-list [ ` + value + ` PL2 ] then accept;`,
+					"packed-from": `{ from prefix-list [ ` + value + ` PL2 ]; then accept; }`,
+					"from-block":  `{ from { prefix-list [ ` + value + ` PL2 ]; } then accept; }`,
+				}[shape] + `
+ }
+}`
+				for _, lenient := range []bool{false, true} {
+					tree := parsePolicyTreeFromSource11779(t, src)
+					var got *Config
+					var err error
+					if lenient {
+						got, err = CompileConfigLenient(tree)
+					} else {
+						got, err = CompileConfig(tree)
+					}
+					if err != nil {
+						t.Fatalf("lenient=%v compile: %v", lenient, err)
+					}
+					term := got.PolicyOptions.PolicyStatements["P"].Terms[0]
+					if term.invalidFromSyntax11779 != "" || len(term.UnknownFrom) != 0 ||
+						term.Action != "accept" || len(term.PrefixList) != 2 ||
+						term.PrefixList[0] != "then" || term.PrefixList[1] != "PL2" {
+						t.Fatalf("lenient=%v closed-list value changed: PrefixList=%v UnknownFrom=%v invalid=%q Action=%q",
+							lenient, term.PrefixList, term.UnknownFrom, term.invalidFromSyntax11779, term.Action)
+					}
+				}
+			})
 		}
 	}
 }

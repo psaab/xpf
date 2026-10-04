@@ -478,6 +478,14 @@ path downgrades to a warning AND `compilePolicy` defaults an actionless
 policy's `Action` to `PolicyDeny`, so a leniently-loaded bad config fails
 closed rather than open. See `docs/config-schema.md` "#3043".
 
+**Unsupported routing-policy `from` leaves fail closed through compact
+normalization (#11779):** strict compilation rejects an unsupported dimension
+even when compact normalization folds it into a supported match leaf; tolerant
+loads retain the unknown dimension and reject the affected term. Schema-known
+sibling matches remain separately typed. Balanced bracketed match lists may
+contain bare values that spell clause keywords (for example, `then`); an
+unclosed list still fails closed.
+
 Distinct conflicting terminal actions on a lenient load retain the compiler's
 last-wins action only as an internal parse result; `LenientContentDropped`
 poisons the policy snapshot with the unsupported sentinel, so the partial
