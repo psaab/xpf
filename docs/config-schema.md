@@ -8142,6 +8142,20 @@ accept-with-advisory knobs #2078/#4231 and false-reject valid-but-unmodeled
 Junos, the #4191 class). Both the remaining per-subtree flips and the
 blanket-flip doctrine decision remain tracked on #4313.
 
+**CoS scheduler children now reject unknown keywords (#11800).** The
+`class-of-service schedulers <name>` body was open-world, while the compiler
+consumes only schema-declared scheduler fields; an unrecognized child such as
+`priorty high` therefore appeared in `show configuration` but left
+`CoSScheduler.Priority` empty. The schema now closes only this scheduler
+definition subtree, not the class-of-service root or sibling CoS subtrees.
+The supported fields and the `transmit-rate` / `buffer-size` tail forms remain
+accepted in flat-set and hierarchical syntax. Junos `drop-profile-map` is not
+implemented by the userspace scheduler and is rejected rather than silently
+ignored. Strict commit / commit-check rejects an unknown child; tolerant load
+still follows the existing no-brick path. `schema_closedworld_cos_scheduler_11800_test.go`
+pins the typo, arbitrary unknowns, supported children, both AST shapes, and
+tolerant loading.
+
 **`security zones` + `security policies` closed (#9878).** The two
 enforcement subtrees were open-world, so a typo silently dropped a whole
 stanza with a clean commit while `show configuration` still displayed it.

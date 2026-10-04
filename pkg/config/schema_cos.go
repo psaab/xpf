@@ -83,7 +83,10 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 			}},
 		}},
 	}},
-	"schedulers": {desc: "Scheduler definitions (transmit rate, priority, buffer)", args: 1, multi: true, placeholder: "<scheduler-name>", children: map[string]*schemaNode{
+	// #11800: this subtree closes the unknown-child path through the
+	// compiler's scheduler switch. Unsupported Junos children (such as
+	// drop-profile-map) are rejected rather than echoed and silently ignored.
+	"schedulers": {desc: "Scheduler definitions (transmit rate, priority, buffer)", args: 1, multi: true, placeholder: "<scheduler-name>", closedWorld: true, children: map[string]*schemaNode{
 		// #1319 typed leaves. Re-homed from the cmdtree overlay
 		// (cmdtree.ConfigClassOfServiceSchedulers, retired in this PR)
 		// onto setSchema so the live config-mode `set ... ?` completer
