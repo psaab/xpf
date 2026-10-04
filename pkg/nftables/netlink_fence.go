@@ -63,44 +63,69 @@ func emitHostInboundGapFenceWGAdmitsNetlink(p *nlPlan, spec GapFenceSpec) {
 	}
 }
 
-// emitUnleasedDHCPAdmitsNetlink mirrors emitUnleasedDHCPAdmits: the per-family
-// DHCP-client admits for still-unleased netdevs — `iifname <dev> udp dport
-// <68|546> accept`, family-guarded exactly like the early-input barrier's own
-// DHCP admits (input_barrier_10751.go). Placed with the mandatory admits,
-// BEFORE every destination rule: on an already-up link the unzoned
-// link-local DROP would otherwise shadow a first ADVERTISE/OFFER (a
-// multicast-originated reply is not conntrack-established, so only the
-// DHCP admit lets it through), deadlocking acquisition behind the LAST
-// interface DROP. Scoped to the unleased netdevs of each family, so leased
-// families stay under pure destination judgement. Expression order (iifname,
-// nfproto, l4proto, dport) matches the oracle text — parity-pinned. A no-op
-// for the lo0 fence (its spec never carries unleased netdevs).
-func emitUnleasedDHCPAdmitsNetlink(p *nlPlan, unleasedV4, unleasedV6 []string) {
-	if len(unleasedV4) > 0 {
-		r := p.rule().iifname(unleasedV4)
+// emitDHCPBackstopAdmitsNetlink mirrors emitDHCPBackstopAdmits: top-placed
+// per-family DHCP-client admits for backstop interfaces. The sdifname subset is
+// derived from configured VRF ownership, so ordinary links emit no inert rule
+// and VRF guards exist before kernel enslavement.
+func emitDHCPBackstopAdmitsNetlink(p *nlPlan, backstopV4, backstopV6, vrfSlavesV4, vrfSlavesV6 []string) {
+	if len(backstopV4) > 0 {
+		r := p.rule().iifname(backstopV4)
 		r.needNfproto(famV4)
 		r.l4Port(protoUDP, "dport", portsFromUint16([]uint16{earlyInputBarrierDHCPv4ClientPort}), false).emit(verdictAccept()...)
 	}
-	if len(unleasedV6) > 0 {
-		r := p.rule().iifname(unleasedV6)
+	if len(vrfSlavesV4) > 0 {
+		r := p.rule().sdifname(vrfSlavesV4)
+		r.needNfproto(famV4)
+		r.l4Port(protoUDP, "dport", portsFromUint16([]uint16{earlyInputBarrierDHCPv4ClientPort}), false).emit(verdictAccept()...)
+	}
+	if len(backstopV6) > 0 {
+		r := p.rule().iifname(backstopV6)
+		r.needNfproto(famV6)
+		r.l4Port(protoUDP, "dport", portsFromUint16([]uint16{earlyInputBarrierDHCPv6ClientPort}), false).emit(verdictAccept()...)
+	}
+	if len(vrfSlavesV6) > 0 {
+		r := p.rule().sdifname(vrfSlavesV6)
 		r.needNfproto(famV6)
 		r.l4Port(protoUDP, "dport", portsFromUint16([]uint16{earlyInputBarrierDHCPv6ClientPort}), false).emit(verdictAccept()...)
 	}
 }
 
-// emitUnleasedDropNetlink appends one family-guarded backstop DROP
-// (`iifname <dev> meta nfproto <fam> drop`, mirroring
-// emitUnleasedHostInboundDeny). The guard is load-bearing: a bare iifname
-// DROP would also deny the other family's fallthrough on a mixed-leased
-// interface. No-op on an empty set. Expression order (iifname, nfproto)
-// matches the oracle text — parity-pinned.
-func emitUnleasedDropNetlink(p *nlPlan, f nlFamily, netdevs []string) {
-	if len(netdevs) == 0 {
-		return
+// emitDHCPBackstopDropNetlink mirrors the final text-oracle drops. Ordinary
+// devices match iifname; only the configured VRF-slave subset uses sdifname.
+// nfproto prevents one family's backstop from shadowing the other family.
+func emitDHCPBackstopDropNetlink(p *nlPlan, f nlFamily, netdevs, vrfSlaves []string) {
+	if len(netdevs) > 0 {
+		r := p.rule().iifname(netdevs)
+		r.needNfproto(f)
+		r.emit(verdictDrop()...)
 	}
-	r := p.rule().iifname(netdevs)
-	r.needNfproto(f)
-	r.emit(verdictDrop()...)
+	if len(vrfSlaves) > 0 {
+		r := p.rule().sdifname(vrfSlaves)
+		r.needNfproto(f)
+		r.emit(verdictDrop()...)
+	}
+}
+
+// emitDHCPBackstopGapDropNetlink keeps the interface-wide fallback from
+// overriding addresses already covered by the retained main table. Empty
+// retained sets preserve the unconditional backstop behavior.
+func emitDHCPBackstopGapDropNetlink(p *nlPlan, f nlFamily, netdevs, vrfSlaves, retained []string) {
+	emit := func(r *ruleAsm) {
+		if len(retained) > 0 {
+			r.daddr(f, retained, true)
+		}
+		r.emit(verdictDrop()...)
+	}
+	if len(netdevs) > 0 {
+		r := p.rule().iifname(netdevs)
+		r.needNfproto(f)
+		emit(r)
+	}
+	if len(vrfSlaves) > 0 {
+		r := p.rule().sdifname(vrfSlaves)
+		r.needNfproto(f)
+		emit(r)
+	}
 }
 
 // buildHostInboundFenceNetlink mirrors buildHostInboundFencePayload: the
@@ -142,9 +167,7 @@ func buildFenceMandatoryDropsNetlink(p *nlPlan, spec FenceSpec) {
 
 func buildFenceDropsAfterMandatoryAdmitsNetlink(p *nlPlan, spec FenceSpec) {
 	emitHostInboundFenceWGAdmitsNetlink(p, spec.Views, spec.WGZonePorts)
-	// #10751 F8-A: admit the DHCP client's own replies before the
-	// destination drops (no-op for lo0 — see emitUnleasedDHCPAdmitsNetlink).
-	emitUnleasedDHCPAdmitsNetlink(p, spec.UnleasedV4, spec.UnleasedV6)
+	emitDHCPBackstopAdmitsNetlink(p, spec.UnleasedV4, spec.UnleasedV6, spec.UnleasedVRFSlavesV4, spec.UnleasedVRFSlavesV6)
 	for _, v := range spec.Views {
 		if len(v.V4Addrs) > 0 {
 			p.rule().daddr(famV4, v.V4Addrs, false).emit(verdictDrop()...)
@@ -159,25 +182,23 @@ func buildFenceDropsAfterMandatoryAdmitsNetlink(p *nlPlan, spec FenceSpec) {
 	if len(spec.UnzonedV6) > 0 {
 		p.rule().daddr(famV6, spec.UnzonedV6, false).emit(verdictDrop()...)
 	}
-	// #10751 R7-B: unleased-DHCP interface backstop (see the real builder).
-	emitUnleasedDropNetlink(p, famV4, spec.UnleasedV4)
-	emitUnleasedDropNetlink(p, famV6, spec.UnleasedV6)
+	// #10751/#11577: keep backstop interfaces denied after destination rules.
+	emitDHCPBackstopDropNetlink(p, famV4, spec.UnleasedV4, spec.UnleasedVRFSlavesV4)
+	emitDHCPBackstopDropNetlink(p, famV6, spec.UnleasedV6, spec.UnleasedVRFSlavesV6)
 }
 
 // buildHostInboundGapFenceNetlink mirrors buildHostInboundGapFencePayload: the
-// mandatory admits, the lifeline-ingress exception for shared values, then a
-// catch-all DROP for ONLY the supplied uncovered addresses. The caller has
-// created the table + `input` chain (priority nftHostInboundGapPriority,
-// policy accept).
+// mandatory admits, the lifeline-ingress exception for shared values, explicit
+// drops for supplied uncovered addresses, then family-scoped DHCP backstops
+// excluding retained covered destinations. The caller has created the table +
+// `input` chain (priority nftHostInboundGapPriority, policy accept).
 func buildHostInboundGapFenceNetlink(p *nlPlan, spec GapFenceSpec) {
 	emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
 		nil, spec.UncoveredV4, spec.UncoveredV6, spec.WGListenPorts, false,
 	))
 	hostInboundFenceMandatoryAdmitsNetlink(p)
 	emitHostInboundGapFenceWGAdmitsNetlink(p, spec)
-	// #10751 F8-A: admit the DHCP client's own replies before the
-	// destination drops (see emitUnleasedDHCPAdmitsNetlink).
-	emitUnleasedDHCPAdmitsNetlink(p, spec.UnleasedV4, spec.UnleasedV6)
+	emitDHCPBackstopAdmitsNetlink(p, spec.UnleasedV4, spec.UnleasedV6, spec.UnleasedVRFSlavesV4, spec.UnleasedVRFSlavesV6)
 	// #10751 M1/Opus9: lifeline-shared values stay reachable on
 	// lifeline ingress (exception ACCEPTs) while denied everywhere
 	// else (bare DROP below). TWO rules per family: iifname covers
@@ -208,7 +229,7 @@ func buildHostInboundGapFenceNetlink(p *nlPlan, spec GapFenceSpec) {
 	if len(spec.UncoveredV6) > 0 {
 		p.rule().daddr(famV6, spec.UncoveredV6, false).emit(verdictDrop()...)
 	}
-	// #10751 R7-B: unleased-DHCP interface backstop (see the real builder).
-	emitUnleasedDropNetlink(p, famV4, spec.UnleasedV4)
-	emitUnleasedDropNetlink(p, famV6, spec.UnleasedV6)
+	// #10751/#11577: keep backstop interfaces denied after destination rules.
+	emitDHCPBackstopGapDropNetlink(p, famV4, spec.UnleasedV4, spec.UnleasedVRFSlavesV4, spec.RetainedV4)
+	emitDHCPBackstopGapDropNetlink(p, famV6, spec.UnleasedV6, spec.UnleasedVRFSlavesV6, spec.RetainedV6)
 }

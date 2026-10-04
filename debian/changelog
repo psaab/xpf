@@ -51,6 +51,10 @@ xpf (0.0.0) unstable; urgency=medium
     filter clone, preserve valid non-member uses of shared filters, and report
     each dropped steer through degraded PBR health (#11589).
 
+  * Keep DHCP families in enforcing zones behind persistent, family-scoped
+    interface drops from before lease appearance through the debounced policy
+    reapply, including VRF-slave ingress (#11577).
+
   * Reject malformed or zero interface bandwidth with a leaf-naming
     diagnostic instead of compiling it to the unset zero value (#11801).
   * Refuse rescue saves without a non-empty committed config, preserving the

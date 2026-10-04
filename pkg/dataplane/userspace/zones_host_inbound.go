@@ -1182,6 +1182,135 @@ func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapsh
 	return v4, v6
 }
 
+// HostInboundDHCPBackstops lists DHCP backstop netdevs by family and
+// separately identifies the configured VRF-slave subset needing sdifname.
+type HostInboundDHCPBackstops struct {
+	V4          []string
+	V6          []string
+	VRFSlavesV4 []string
+	VRFSlavesV6 []string
+}
+
+// BuildDHCPHostInboundBackstopNetdevs combines unzoned pending-lease backstops
+// with persistent interface backstops for DHCP families in enforcing zones.
+// The latter stay installed after an address appears until configuration
+// removes DHCP intent or makes the effective zone policy full-admit; this
+// closes the address-appearance-to-debounced-reapply window (#11577). VRF
+// membership is derived from configured virtual-router ownership, not the
+// current link state, so the sdifname guard is present before enslavement.
+func BuildDHCPHostInboundBackstopNetdevs(cfg *config.Config, snaps []InterfaceSnapshot) HostInboundDHCPBackstops {
+	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
+		return HostInboundDHCPBackstops{}
+	}
+	backstops := HostInboundDHCPBackstops{}
+	backstops.V4, backstops.V6 = BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps)
+	zoned := buildZonedDHCPHostInboundBackstopNetdevs(cfg)
+	seenV4, seenV6 := make(map[string]bool, len(backstops.V4)+len(zoned.V4)), make(map[string]bool, len(backstops.V6)+len(zoned.V6))
+	for _, dev := range backstops.V4 {
+		seenV4[dev] = true
+	}
+	for _, dev := range backstops.V6 {
+		seenV6[dev] = true
+	}
+	for _, dev := range zoned.V4 {
+		if !seenV4[dev] {
+			seenV4[dev] = true
+			backstops.V4 = append(backstops.V4, dev)
+		}
+	}
+	for _, dev := range zoned.V6 {
+		if !seenV6[dev] {
+			seenV6[dev] = true
+			backstops.V6 = append(backstops.V6, dev)
+		}
+	}
+	sort.Strings(backstops.V4)
+	sort.Strings(backstops.V6)
+	backstops.VRFSlavesV4 = zoned.VRFSlavesV4
+	backstops.VRFSlavesV6 = zoned.VRFSlavesV6
+	return backstops
+}
+
+func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) HostInboundDHCPBackstops {
+	backstops := HostInboundDHCPBackstops{}
+	vrfEnslaved := config.HostInboundDHCPVRFEnslavedNetdevs(cfg)
+	lifelines := hostInboundLifelineSet(cfg)
+	zoneByIface := buildInterfaceZoneMap(cfg)
+	overrides := buildInterfaceHostInboundMap(cfg)
+	quarantined := quarantinedZoneNames(cfg)
+	seenV4, seenV6, seenVRFV4, seenVRFV6 := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
+	ifNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
+	for name := range cfg.Interfaces.Interfaces {
+		ifNames = append(ifNames, name)
+	}
+	sort.Strings(ifNames)
+	for _, ifName := range ifNames {
+		iface := cfg.Interfaces.Interfaces[ifName]
+		if iface == nil {
+			continue
+		}
+		unitNums := make([]int, 0, len(iface.Units))
+		for number := range iface.Units {
+			unitNums = append(unitNums, number)
+		}
+		sort.Ints(unitNums)
+		for _, number := range unitNums {
+			unit := iface.Units[number]
+			if unit == nil {
+				continue
+			}
+			unitRef := fmt.Sprintf("%s.%d", ifName, number)
+			zoneName := zoneByIface[unitRef]
+			zone := cfg.Security.Zones[zoneName]
+			if zoneName == "" || zone == nil || hostInboundLifelineInterface(unitRef, lifelines) {
+				continue
+			}
+			if _, excluded := quarantined[zoneName]; excluded {
+				continue
+			}
+			services, _ := effectiveHostInboundTokens(zone, unitRef, overrides[unitRef])
+			fullAdmit := false
+			for _, service := range services {
+				if config.HostInboundFullAdmitService(service) {
+					fullAdmit = true
+					break
+				}
+			}
+			if fullAdmit {
+				continue
+			}
+			linuxName := snapshotLinuxName(cfg, ifName, iface, unit)
+			if linuxName == "" {
+				continue
+			}
+			if unit.DHCP && !seenV4[linuxName] {
+				seenV4[linuxName] = true
+				backstops.V4 = append(backstops.V4, linuxName)
+			}
+			if (unit.DHCPv6 || unit.DHCPv6Client != nil) && !seenV6[linuxName] {
+				seenV6[linuxName] = true
+				backstops.V6 = append(backstops.V6, linuxName)
+			}
+			if !vrfEnslaved[linuxName] {
+				continue
+			}
+			if unit.DHCP && !seenVRFV4[linuxName] {
+				seenVRFV4[linuxName] = true
+				backstops.VRFSlavesV4 = append(backstops.VRFSlavesV4, linuxName)
+			}
+			if (unit.DHCPv6 || unit.DHCPv6Client != nil) && !seenVRFV6[linuxName] {
+				seenVRFV6[linuxName] = true
+				backstops.VRFSlavesV6 = append(backstops.VRFSlavesV6, linuxName)
+			}
+		}
+	}
+	sort.Strings(backstops.V4)
+	sort.Strings(backstops.V6)
+	sort.Strings(backstops.VRFSlavesV4)
+	sort.Strings(backstops.VRFSlavesV6)
+	return backstops
+}
+
 // HostInboundLifelineIngressNetdevs returns the sorted linux netdev names
 // of true lifelines whose ingress must keep management reachability to
 // lifeline-shared values (#10751 M1/Opus9): fxp0 plus the linux names of every
@@ -1382,13 +1511,17 @@ type FenceAddrSets struct {
 	UnzonedV6  []string
 	WithheldV4 []string
 	WithheldV6 []string
-	// UnleasedV4/V6 are LOCAL_IN netdevs of unzoned DHCP units with no
-	// lease yet in that family (#10751 R7-B/F8-A): per-family interface
-	// DROPs (LAST) so a first lease lands already denied, plus
-	// per-family DHCP-client admits (TOP) so it can still arrive. Empty
-	// omits the rules.
+	// UnleasedV4/V6 are LOCAL_IN netdevs protected by a family-guarded DHCP
+	// backstop: unzoned units are included while that family has no address,
+	// and enforcing-zone units remain included for as long as DHCP intent is
+	// configured. DHCP-client admits are placed before destination rules and
+	// interface DROPs after them.
 	UnleasedV4 []string
 	UnleasedV6 []string
+	// UnleasedVRFSlavesV4/V6 are the configured VRF-slave subset, matched by
+	// sdifname; config ownership keeps the guard present before enslavement.
+	UnleasedVRFSlavesV4 []string
+	UnleasedVRFSlavesV6 []string
 	// Unzoned input scopes for catalog-group default-deny during cold boot.
 	UnzonedIngressNetdevs   []string
 	UnzonedIngressVRFSlaves []string
@@ -1477,7 +1610,9 @@ func buildFenceAddrSetsFromSnaps(cfg *config.Config, snaps []InterfaceSnapshot, 
 	sort.Strings(withheld)
 	out.UnzonedV4, out.UnzonedV6 = splitFams(rest)
 	out.WithheldV4, out.WithheldV6 = splitFams(withheld)
-	out.UnleasedV4, out.UnleasedV6 = BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps)
+	backstops := BuildDHCPHostInboundBackstopNetdevs(cfg, snaps)
+	out.UnleasedV4, out.UnleasedV6 = backstops.V4, backstops.V6
+	out.UnleasedVRFSlavesV4, out.UnleasedVRFSlavesV6 = backstops.VRFSlavesV4, backstops.VRFSlavesV6
 	return out
 }
 

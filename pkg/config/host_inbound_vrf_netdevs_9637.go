@@ -17,6 +17,47 @@ func HostInboundVRFEnslavedNetdevs(cfg *Config) map[string]bool {
 	}))
 }
 
+// HostInboundDHCPVRFEnslavedNetdevs returns configured VRF members eligible for
+// persistent DHCP host-inbound backstops. Unlike the coarse
+// HostInboundVRFEnslavedNetdevs set, this follows the production binder's full
+// member fan-down so a bare RI member covers configured VLAN children. It
+// excludes management-class, conflicted, and tunnel-owned devices, which the
+// list-member binder does not bind.
+func HostInboundDHCPVRFEnslavedNetdevs(cfg *Config) map[string]bool {
+	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 || len(cfg.RoutingInstances) == 0 {
+		return nil
+	}
+	tunnelNames := cfg.TunnelNameMap()
+	excluded := make(map[string]bool)
+	for _, conflict := range cfg.QuarantinedRIMemberDeviceConflicts {
+		if conflict.LinuxName != "" {
+			excluded[conflict.LinuxName] = true
+		}
+	}
+	for _, conflict := range RoutingInstanceMemberDeviceConflicts(cfg, tunnelNames) {
+		excluded[conflict.LinuxName] = true
+	}
+	for _, claim := range routingInstanceTunnelDeviceClaims(cfg) {
+		if claim.LinuxName != "" {
+			excluded[claim.LinuxName] = true
+		}
+	}
+
+	out := make(map[string]bool)
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.Name == "" || ri.InstanceType == "forwarding" || IsReservedRoutingInstanceName(ri.Name) {
+			continue
+		}
+		for _, key := range RoutingInstanceMemberDeviceKeysForInstance(cfg, tunnelNames, ri) {
+			if key.LinuxName == "" || IsManagementIfName(key.LinuxName) || excluded[key.LinuxName] {
+				continue
+			}
+			out[key.LinuxName] = true
+		}
+	}
+	return out
+}
+
 // junosHostNetdevByRef maps every physical interface ref and every unit ref
 // ("<if>.<unit>") to its kernel netdev through name.
 func junosHostNetdevByRef(cfg *Config, name func(ifName string, unit *InterfaceUnit) string) map[string]string {

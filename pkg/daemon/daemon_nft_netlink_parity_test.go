@@ -97,7 +97,8 @@ func runNftNetlinkParityInner(t *testing.T) {
 		issueUnzonedIngress := []string{"fw-unzoned"}
 		issueUnzonedVRFSlaves := []string{"vrf-unzoned"}
 		oracle := buildHostInboundFilterPayloadWithUnzonedIngress(
-			issueViews, issueUnzonedV4, nil, issueUnzonedIngress, issueUnzonedVRFSlaves, nil, nil, true, nil, nil, nil,
+			issueViews, issueUnzonedV4, nil, issueUnzonedIngress, issueUnzonedVRFSlaves,
+			nil, nil, true, nil, nil, nil, dhcpBackstopVRFLists{},
 		)
 		spec := toNftHostInboundSpecWithUnzonedIngress(
 			issueViews, issueUnzonedV4, nil, issueUnzonedIngress, issueUnzonedVRFSlaves, nil, nil, nil, true, nil,
@@ -134,7 +135,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 	})
 
 	t.Run("cold_boot_fence", func(t *testing.T) {
-		oracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, wgZones, nil, nil)
+		oracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, wgZones, nil, nil, dhcpBackstopVRFLists{})
 		spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wg, WGZonePorts: wgZones}
 		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallColdBootFence(spec) })
 	})
@@ -153,7 +154,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 	t.Run("gap_fence", func(t *testing.T) {
 		uncoveredV4 := []string{"10.0.1.1", "10.0.9.1"}
 		uncoveredV6 := []string{"2001:db8:1::1"}
-		oracle := buildHostInboundGapFencePayload(views, uncoveredV4, uncoveredV6, wg, wgZones, nil, nil, nil, nil, nil)
+		oracle := buildHostInboundGapFencePayload(views, uncoveredV4, uncoveredV6, wg, wgZones, nil, nil, nil, nil, nil, dhcpBackstopVRFLists{}, nil, nil)
 		spec := xnft.GapFenceSpec{Views: toNftViews(views), UncoveredV4: uncoveredV4, UncoveredV6: uncoveredV6, WGListenPorts: wg, WGZonePorts: wgZones}
 		parityCheck(t, xnft.HostInboundGapTableName, oracle, func() error { return inst.InstallGapFence(spec) })
 	})
@@ -168,7 +169,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 		// scope.
 		unleasedV4 := []string{"ge-0-0-8", "ge-0-0-9"}
 		unleasedV6 := []string{"ge-0-0-9"}
-		oracle := buildHostInboundFilterPayloadWithOverlay(views, unzonedV4, unzonedV6, programs, wgZones, true, nil, unleasedV4, unleasedV6)
+		oracle := buildHostInboundFilterPayloadWithOverlay(views, unzonedV4, unzonedV6, programs, wgZones, true, nil, unleasedV4, unleasedV6, dhcpBackstopVRFLists{})
 		if !strings.Contains(oracle, "udp dport 68 accept") || !strings.Contains(oracle, "udp dport 546 accept") {
 			t.Fatal("real oracle emitted no unleased DHCP admits; the diff below would be vacuous")
 		}
@@ -176,13 +177,43 @@ func runNftNetlinkParityInner(t *testing.T) {
 		spec.UnleasedV4, spec.UnleasedV6 = unleasedV4, unleasedV6
 		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
 
-		foracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, wgZones, unleasedV4, unleasedV6)
+		foracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, wgZones, unleasedV4, unleasedV6, dhcpBackstopVRFLists{})
 		fspec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wg, WGZonePorts: wgZones, UnleasedV4: unleasedV4, UnleasedV6: unleasedV6}
 		parityCheck(t, xnft.HostInboundTableName, foracle, func() error { return inst.InstallColdBootFence(fspec) })
 
-		gapOracle := buildHostInboundGapFencePayload(views, []string{"10.0.1.1"}, nil, wg, wgZones, unleasedV4, unleasedV6, nil, nil, nil)
+		gapOracle := buildHostInboundGapFencePayload(views, []string{"10.0.1.1"}, nil, wg, wgZones, unleasedV4, unleasedV6, nil, nil, nil, dhcpBackstopVRFLists{}, nil, nil)
 		gspec := xnft.GapFenceSpec{Views: toNftViews(views), UncoveredV4: []string{"10.0.1.1"}, WGListenPorts: wg, WGZonePorts: wgZones, UnleasedV4: unleasedV4, UnleasedV6: unleasedV6}
 		parityCheck(t, xnft.HostInboundGapTableName, gapOracle, func() error { return inst.InstallGapFence(gspec) })
+	})
+	t.Run("dhcp_vrf_backstop", func(t *testing.T) {
+		vrfDevices := []string{"ge-0-0-5"}
+		vrfBackstop := dhcpBackstopVRFLists{v4: vrfDevices, v6: vrfDevices}
+		oracle := buildHostInboundFilterPayloadWithOverlay(nil, nil, nil, nil, nil, true, nil, vrfDevices, vrfDevices, vrfBackstop)
+		spec := xnft.HostInboundSpec{
+			UnleasedV4: vrfDevices, UnleasedV6: vrfDevices,
+			UnleasedVRFSlavesV4: vrfDevices, UnleasedVRFSlavesV6: vrfDevices,
+		}
+		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallHostInbound(spec) })
+
+		fenceOracle := buildHostInboundFencePayload(nil, nil, nil, nil, nil, vrfDevices, vrfDevices, vrfBackstop)
+		fenceSpec := xnft.FenceSpec{
+			UnleasedV4: vrfDevices, UnleasedV6: vrfDevices,
+			UnleasedVRFSlavesV4: vrfDevices, UnleasedVRFSlavesV6: vrfDevices,
+		}
+		parityCheck(t, xnft.HostInboundTableName, fenceOracle, func() error { return inst.InstallColdBootFence(fenceSpec) })
+
+		uncovered := []string{"198.51.100.5"}
+		uncoveredV6 := []string{"2001:db8:1::5"}
+		retainedV4 := []string{"198.51.100.2"}
+		retainedV6 := []string{"2001:db8:1::2"}
+		gapOracle := buildHostInboundGapFencePayload(nil, uncovered, uncoveredV6, nil, nil, vrfDevices, vrfDevices, nil, nil, nil, vrfBackstop, retainedV4, retainedV6)
+		gapSpec := xnft.GapFenceSpec{
+			UncoveredV4: uncovered, UncoveredV6: uncoveredV6,
+			UnleasedV4: vrfDevices, UnleasedV6: vrfDevices,
+			UnleasedVRFSlavesV4: vrfDevices, UnleasedVRFSlavesV6: vrfDevices,
+			RetainedV4: retainedV4, RetainedV6: retainedV6,
+		}
+		parityCheck(t, xnft.HostInboundGapTableName, gapOracle, func() error { return inst.InstallGapFence(gapSpec) })
 	})
 
 	t.Run("gap_shared_exception", func(t *testing.T) {
@@ -194,7 +225,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 		uncovered := []string{"10.0.0.5", "10.0.0.9"}
 		shared := []string{"10.0.0.5"}
 		lifelines := []string{"fxp0", "em0"}
-		oracle := buildHostInboundGapFencePayload(nil, uncovered, nil, wg, wgZones, nil, nil, shared, nil, lifelines)
+		oracle := buildHostInboundGapFencePayload(nil, uncovered, nil, wg, wgZones, nil, nil, shared, nil, lifelines, dhcpBackstopVRFLists{}, nil, nil)
 		if !strings.Contains(oracle, "iifname") || !strings.Contains(oracle, "accept") {
 			t.Fatal("gap oracle emitted no exception rule; the diff below would be vacuous")
 		}

@@ -111,7 +111,7 @@ func TestNftLocalDeliveryPriorityConstantsOrdered(t *testing.T) {
 // greater than the main host-inbound chain's — the #5789 evaluation-order
 // invariant at the payload level (mirrors the #3364 lo0-vs-host-inbound check).
 func TestNftHostInboundGapFenceChainPriority(t *testing.T) {
-	gapPayload := buildHostInboundGapFencePayload(nil, []string{"172.16.50.8"}, nil, nil, nil, nil, nil, nil, nil, nil)
+	gapPayload := buildHostInboundGapFencePayload(nil, []string{"172.16.50.8"}, nil, nil, nil, nil, nil, nil, nil, nil, dhcpBackstopVRFLists{}, nil, nil)
 	gapPri := nftHookInputPriority(t, "host-inbound-gap", gapPayload)
 	if gapPri != nftHostInboundGapPriority {
 		t.Errorf("gap payload priority %d != nftHostInboundGapPriority %d", gapPri, nftHostInboundGapPriority)

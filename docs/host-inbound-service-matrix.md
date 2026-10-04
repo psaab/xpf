@@ -1290,6 +1290,13 @@ snapshot produces a zero-drop table shell:
   JOINS the commit error (fail-closed); the gap is torn down by the next
   successful real install (best effort — a lingering gap fences only,
   never opens) and on a successful teardown.
+  The later-chain DHCP backstop is also destination-conditional: it drops only
+  addresses outside the retained generation's syntactically valid, family-matched
+  coverage set (and remains unconditional when that set is empty). This denies
+  same-interface arrivals that were absent from both the retained view and the
+  explicit gap snapshot, without overriding retained service permits or denies;
+  a v6-only gap therefore keeps covered IPv4 decisions intact. The gap adds no
+  ACCEPT bypass.
 - `installHostInboundColdBootFence` / `buildHostInboundFencePayload`
   (`daemon_nft.go`) build the fence: the same atomic-replace `xpf_hostinbound`
   table reduced to the global mandatory admits (`ct established,related`, raw

@@ -77,6 +77,9 @@ func TestHostInboundCoverageGapFencesNewAddressAfterFailedRerender_5789(t *testi
 			"additive gap fence was installed — the stale-coverage-but-enforced case took the day-2 "+
 			"retention branch and left 172.16.50.9 fail-open (gap installs=%d)", gapCalls)
 	}
+	if !sliceContains(gapSpec.RetainedV4, "172.16.50.8") || !sliceContains(gapSpec.RetainedV6, "2001:db8:50::8") {
+		t.Errorf("gap backstop must preserve valid retained addresses by family: v4=%v v6=%v", gapSpec.RetainedV4, gapSpec.RetainedV6)
+	}
 	// The gap denies the NEW address...
 	if !sliceContains(gapSpec.UncoveredV4, "172.16.50.9") {
 		t.Errorf("gap fence must deny the newly-appeared address 172.16.50.9:\n%+v", gapSpec)
@@ -386,8 +389,8 @@ func TestHostInboundTeardownClearsCoverageAndGap_5789(t *testing.T) {
 // each fence's zone data.
 func TestHostInboundGapFenceMirrorsColdBootAdmits_5789(t *testing.T) {
 	views := buildAndCheckViews(t, hostInboundTestConfig())
-	coldBoot := buildHostInboundFencePayload(views, nil, nil, nil, nil, nil, nil)
-	gap := buildHostInboundGapFencePayload(views, []string{"172.16.50.9"}, nil, nil, nil, nil, nil, nil, nil, nil)
+	coldBoot := buildHostInboundFencePayload(views, nil, nil, nil, nil, nil, nil, dhcpBackstopVRFLists{})
+	gap := buildHostInboundGapFencePayload(views, []string{"172.16.50.9"}, nil, nil, nil, nil, nil, nil, nil, nil, dhcpBackstopVRFLists{}, nil, nil)
 	for _, admit := range hostInboundFenceMandatoryAdmits() {
 		if !strings.Contains(coldBoot, admit) {
 			t.Errorf("cold-boot fence missing shared admit %q", strings.TrimSpace(admit))
@@ -395,5 +398,74 @@ func TestHostInboundGapFenceMirrorsColdBootAdmits_5789(t *testing.T) {
 		if !strings.Contains(gap, admit) {
 			t.Errorf("gap fence missing shared admit %q", strings.TrimSpace(admit))
 		}
+	}
+}
+
+func TestHostInboundCoveredFamilyAddrsValidatesKeys11577(t *testing.T) {
+	v4, v6 := hostInboundCoveredFamilyAddrs(map[string]struct{}{
+		"4|192.0.2.2":              {},
+		"4|192.0.2.1":              {},
+		"4|2001:db8::4":            {},
+		"4|not-an-address":         {},
+		"4|::ffff:192.0.2.4":       {},
+		"6|2001:0db8::2":           {},
+		"6|2001:db8::2":            {},
+		"6|192.0.2.3":              {},
+		"6|2001:db8::3/128":        {},
+		"6|fe80::1%ge-0-0-1":       {},
+		"7|198.51.100.1":           {},
+		"missing-family-separator": {},
+	})
+	if got, want := strings.Join(v4, ","), "192.0.2.1,192.0.2.2"; got != want {
+		t.Fatalf("valid covered IPv4 addresses = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(v6, ","), "2001:0db8::2,2001:db8::2"; got != want {
+		t.Fatalf("valid covered IPv6 addresses = %q, want %q", got, want)
+	}
+}
+
+func TestHostInboundGapBackstopExcludesRetainedAddresses11577(t *testing.T) {
+	uncoveredV4 := []string{"192.0.2.3"}
+	uncoveredV6 := []string{"2001:db8::3"}
+	retainedV4 := []string{"192.0.2.2"}
+	retainedV6 := []string{"2001:db8::2"}
+	regular := []string{"ge-0-0-1"}
+	vrfSlave := []string{"ge-0-0-5"}
+	backstop := dhcpBackstopVRFLists{v4: vrfSlave, v6: vrfSlave}
+	build := func(gapV4, gapV6 []string) string {
+		return buildHostInboundGapFencePayload(
+			nil, gapV4, gapV6, nil, nil, regular, regular, nil, nil, nil,
+			backstop, retainedV4, retainedV6,
+		)
+	}
+	payload := build(uncoveredV4, uncoveredV6)
+	for _, rule := range []string{
+		`iifname "ge-0-0-1" meta nfproto ipv4 ip daddr != 192.0.2.2 drop`,
+		`meta sdifname "ge-0-0-5" meta nfproto ipv4 ip daddr != 192.0.2.2 drop`,
+		`iifname "ge-0-0-1" meta nfproto ipv6 ip6 daddr != 2001:db8::2 drop`,
+		`meta sdifname "ge-0-0-5" meta nfproto ipv6 ip6 daddr != 2001:db8::2 drop`,
+	} {
+		if !strings.Contains(payload, rule) {
+			t.Errorf("gap fence lacks retained-address-scoped backstop %q:\n%s", rule, payload)
+		}
+	}
+	for _, family := range []struct {
+		drop, backstop string
+	}{
+		{drop: "ip daddr " + nftAddrSet(uncoveredV4) + " drop", backstop: `iifname "ge-0-0-1" meta nfproto ipv4 ip daddr !=`},
+		{drop: "ip6 daddr " + nftAddrSet(uncoveredV6) + " drop", backstop: `iifname "ge-0-0-1" meta nfproto ipv6 ip6 daddr !=`},
+	} {
+		dropAt, backstopAt := strings.Index(payload, family.drop), strings.Index(payload, family.backstop)
+		if dropAt < 0 || backstopAt <= dropAt {
+			t.Errorf("explicit uncovered destination drop must precede the conditional backstop: drop=%d backstop=%d\n%s", dropAt, backstopAt, payload)
+		}
+	}
+
+	v6Only := build(nil, uncoveredV6)
+	if !strings.Contains(v6Only, `iifname "ge-0-0-1" meta nfproto ipv4 ip daddr != 192.0.2.2 drop`) {
+		t.Fatalf("IPv6-only gap omitted the IPv4 retained-address exclusion:\n%s", v6Only)
+	}
+	if strings.Contains(v6Only, "ip daddr "+nftAddrSet(uncoveredV4)+" drop") {
+		t.Fatalf("IPv6-only gap emitted an explicit IPv4 uncovered drop:\n%s", v6Only)
 	}
 }
