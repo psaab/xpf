@@ -157,3 +157,178 @@ func TestRoutingPolicySupportedFromDimensionsRemainCompiled11779(t *testing.T) {
 		t.Fatalf("supported from dimensions were marked unknown: %v", term.UnknownFrom)
 	}
 }
+
+func parsePolicyTreeFromSource11779(t *testing.T, src string) *ConfigTree {
+	t.Helper()
+	tree, errs := NewParser(src).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse test source: %v", errs)
+	}
+	return tree
+}
+
+// FAIL-ON-REVERT: a route-filter's trailing argument belongs to that leaf, not
+// to UnknownFrom. Strictly supported match types preserve their typed fields;
+// `through` remains rejected by its backend gate, not by #11779. Tolerant
+// compilation must retain the typed term without forcing its action to reject.
+func TestRoutingPolicyPackedRouteFilterTrailersRemainTyped11779(t *testing.T) {
+	for _, tc := range []struct {
+		matchType, trailing string
+		wantUpto            int
+		wantRangeLow        int
+		wantRangeHigh       int
+		wantThrough         string
+		strictReject        bool
+	}{
+		{matchType: "upto", trailing: "/24", wantUpto: 24},
+		{matchType: "prefix-length-range", trailing: "/16-/24", wantRangeLow: 16, wantRangeHigh: 24},
+		{matchType: "through", trailing: "10.0.0.0/16", wantThrough: "10.0.0.0/16", strictReject: true},
+	} {
+		t.Run(tc.matchType, func(t *testing.T) {
+			src := fmt.Sprintf(`policy-options {
+ policy-statement P {
+  term T {
+   from route-filter 10.0.0.0/8 %s %s;
+   then accept;
+  }
+ }
+}`, tc.matchType, tc.trailing)
+			check := func(path string, cfg *Config) {
+				t.Helper()
+				ps := cfg.PolicyOptions.PolicyStatements["P"]
+				if ps == nil || len(ps.Terms) != 1 {
+					t.Fatalf("%s compiled policy terms = %+v, want one term", path, ps)
+				}
+				term := ps.Terms[0]
+				if len(term.UnknownFrom) != 0 || term.Action != "accept" {
+					t.Fatalf("%s misclassified supported route-filter trailer: UnknownFrom=%v Action=%q",
+						path, term.UnknownFrom, term.Action)
+				}
+				if len(term.RouteFilters) != 1 {
+					t.Fatalf("%s compiled route-filters = %+v, want one", path, term.RouteFilters)
+				}
+				rf := term.RouteFilters[0]
+				if rf.Prefix != "10.0.0.0/8" || rf.MatchType != tc.matchType ||
+					rf.UptoLen != tc.wantUpto || rf.RangeLow != tc.wantRangeLow ||
+					rf.RangeHigh != tc.wantRangeHigh || rf.ThroughPrefix != tc.wantThrough {
+					t.Fatalf("%s compiled route-filter = %+v, want prefix=10.0.0.0/8 match=%s trailing=%s",
+						path, rf, tc.matchType, tc.trailing)
+				}
+			}
+
+			cfg, err := CompileConfig(parsePolicyTreeFromSource11779(t, src))
+			if tc.strictReject {
+				if err == nil || !strings.Contains(err.Error(), "through") ||
+					strings.Contains(err.Error(), "#11779") {
+					t.Fatalf("strict compile error = %v, want the route-filter through gate and no #11779 error", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("supported route-filter trailer rejected on strict compile: %v", err)
+				}
+				check("strict", cfg)
+			}
+
+			cfg, err = CompileConfigLenient(parsePolicyTreeFromSource11779(t, src))
+			if err != nil {
+				t.Fatalf("tolerant compile: %v", err)
+			}
+			check("tolerant", cfg)
+			for _, warning := range cfg.Warnings {
+				if strings.Contains(warning, "#11779") {
+					t.Fatalf("tolerant compile reported supported route-filter as unknown: %q", warning)
+				}
+			}
+		})
+	}
+}
+
+// FAIL-ON-REVERT: each second bracketed value must remain part of its
+// supported multi-value match, rather than being recorded as an unknown leaf.
+func TestRoutingPolicyPackedTermBracketedFromValuesRemainAccepted11779(t *testing.T) {
+	src := `policy-options {
+ prefix-list PL1 10.0.0.0/8;
+ prefix-list PL2 172.16.0.0/12;
+ community C1 members 65000:1;
+ community C2 members 65000:2;
+ as-path AP1 "^65000";
+ as-path AP2 "^65001";
+ policy-statement P {
+  term T-PL from prefix-list [ PL1 PL2 ] then accept;
+  term T-COMM from community [ C1 C2 ] then accept;
+  term T-ASPATH from as-path [ AP1 AP2 ] then accept;
+ }
+}`
+	want := map[string][][]string{
+		"T-PL":     {{"PL1", "PL2"}, nil, nil},
+		"T-COMM":   {nil, {"C1", "C2"}, nil},
+		"T-ASPATH": {nil, nil, {"AP1", "AP2"}},
+	}
+	for _, lenient := range []bool{false, true} {
+		tree := parsePolicyTreeFromSource11779(t, src)
+		var cfg *Config
+		var err error
+		if lenient {
+			cfg, err = CompileConfigLenient(tree)
+		} else {
+			cfg, err = CompileConfig(tree)
+		}
+		if err != nil {
+			t.Fatalf("lenient=%v compile: %v", lenient, err)
+		}
+		terms := cfg.PolicyOptions.PolicyStatements["P"].Terms
+		if len(terms) != len(want) {
+			t.Fatalf("lenient=%v compiled %d terms, want %d", lenient, len(terms), len(want))
+		}
+		for _, term := range terms {
+			wantValues := want[term.Name]
+			gotValues := [][]string{term.PrefixList, term.FromCommunity, term.FromASPath}
+			for i := range gotValues {
+				if len(gotValues[i]) != len(wantValues[i]) {
+					t.Errorf("lenient=%v term %s values[%d]=%v, want %v",
+						lenient, term.Name, i, gotValues[i], wantValues[i])
+					continue
+				}
+				for j := range gotValues[i] {
+					if gotValues[i][j] != wantValues[i][j] {
+						t.Errorf("lenient=%v term %s values[%d]=%v, want %v",
+							lenient, term.Name, i, gotValues[i], wantValues[i])
+						break
+					}
+				}
+			}
+			if len(term.UnknownFrom) != 0 || term.Action != "accept" {
+				t.Errorf("lenient=%v term %s changed supported match semantics: UnknownFrom=%v Action=%q",
+					lenient, term.Name, term.UnknownFrom, term.Action)
+			}
+		}
+	}
+}
+
+// A multi-value loop must stop at the bracket boundary. Otherwise the
+// following unsupported leaf would be swallowed as another prefix-list name.
+func TestRoutingPolicyUnknownAfterPackedBracketedFromStillFailsClosed11779(t *testing.T) {
+	src := `policy-options {
+ prefix-list PL1 10.0.0.0/8;
+ prefix-list PL2 172.16.0.0/12;
+ policy-statement P {
+  term T from prefix-list [ PL1 PL2 ] rib inet.0 then accept;
+ }
+}`
+	_, strictErr := CompileConfig(parsePolicyTreeFromSource11779(t, src))
+	if strictErr == nil || !strings.Contains(strictErr.Error(), "rib") ||
+		!strings.Contains(strictErr.Error(), "#11779") {
+		t.Fatalf("unsupported leaf after bracketed values was not rejected: %v", strictErr)
+	}
+
+	cfg, err := CompileConfigLenient(parsePolicyTreeFromSource11779(t, src))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+	if len(term.UnknownFrom) != 1 || term.UnknownFrom[0] != "rib" ||
+		term.Action != "reject" || term.NextPolicy {
+		t.Fatalf("unsupported trailing leaf did not fail closed: UnknownFrom=%v Action=%q NextPolicy=%v",
+			term.UnknownFrom, term.Action, term.NextPolicy)
+	}
+}
