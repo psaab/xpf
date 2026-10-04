@@ -914,6 +914,17 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 	if s.feedOverlayFn != nil {
 		overlay = s.feedOverlayFn()
 	}
+	var publicationDebt map[string]bool
+	if s.feedsFn != nil {
+		for name, info := range s.feedsFn() {
+			if info.PublicationDebt {
+				if publicationDebt == nil {
+					publicationDebt = make(map[string]bool)
+				}
+				publicationDebt[name] = true
+			}
+		}
+	}
 	// #3104: thread live per-scheduler active-state so the simulator skips a
 	// scheduler-inactive policy exactly like the runtime (policy.rs
 	// try_match_rule), falling through to the next active rule / default-policy.
@@ -952,9 +963,10 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 		NonFirstFragment: nonFirstFrag,
 		// #5579: scope the host-inbound classifier to this ingress interface's
 		// effective view (validated above). "" = zone-scoped, unchanged.
-		IngressInterface: ingressIface,
-		FeedOverlay:      overlay,
-		PolicyInactiveFn: inactiveFn,
+		IngressInterface:    ingressIface,
+		FeedOverlay:         overlay,
+		FeedPublicationDebt: publicationDebt,
+		PolicyInactiveFn:    inactiveFn,
 	})
 	// #3285: a `to-zone junos-host` query that matched no host-bound policy is
 	// not a transit default — the dataplane host gate returns None (local
@@ -994,8 +1006,11 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if !res.Matched {
 		writeOK(w, MatchPoliciesResult{
-			Action:      res.DisplayAction(),
-			DefaultUsed: res.DefaultUsed,
+			Action:                   res.DisplayAction(),
+			DefaultUsed:              res.DefaultUsed,
+			FeedPublicationDebt:      res.FeedPublicationDebt,
+			FeedPublicationDebtFeeds: res.FeedPublicationDebtNames,
+			FeedPublicationDebtNote:  res.FeedPublicationDebtNote(),
 			// #8318/#11067: expose direction-specific unknown-zone denies
 			// rather than making clients infer them from Action text.
 			UnzonedIngress: res.UnzonedIngress,

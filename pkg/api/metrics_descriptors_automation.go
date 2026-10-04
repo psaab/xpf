@@ -133,8 +133,15 @@ func (c *xpfCollector) initAutomationDescriptors() {
 		"xpf_feed_stale",
 		"1 while a dynamic-address feed's last-good snapshot is being "+
 			"retained as stale (a fetch has failed since the last good "+
-			"one and the snapshot is still enforced); 0 while fresh "+
-			"(#2050).",
+			"one); publication_debt separately reports whether the "+
+			"installed snapshot was confirmed applied (#2050, #10974).",
+		[]string{"feed"}, nil,
+	)
+	c.feedPublicationDebt = prometheus.NewDesc(
+		"xpf_feed_publication_debt",
+		"1 while the installed dynamic-address snapshot differs from the last "+
+			"snapshot confirmed applied to the dataplane (publication debt); "+
+			"0 when installed content is confirmed published (#10974).",
 		[]string{"feed"}, nil,
 	)
 	c.feedShrinkRefusalsTotal = prometheus.NewDesc(

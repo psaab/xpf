@@ -565,6 +565,10 @@ func (c *ctl) showMatchPolicies(args []string) error {
 	if err != nil {
 		return fmt.Errorf("%v", err)
 	}
+	if resp.FeedPublicationDebt {
+		fmt.Println(resp.FeedPublicationDebtNote)
+		return nil
+	}
 
 	if resp.Matched {
 		if resp.Global {

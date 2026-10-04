@@ -112,12 +112,17 @@ func (c *CLI) testPolicy(args []string) error {
 		NonFirstFragment: nonFirstFrag,
 		// #5579: scope the host-inbound classifier to this ingress interface's
 		// effective view (validated above). "" = zone-scoped, unchanged.
-		IngressInterface: sel.IngressInterface,
-		FeedOverlay:      c.feedOverlay(),
+		IngressInterface:    sel.IngressInterface,
+		FeedOverlay:         c.feedOverlay(),
+		FeedPublicationDebt: c.feedPublicationDebt(),
 		// #3104: skip scheduler-inactive policies like the runtime does, so the
 		// simulator falls through to the next active rule / default-policy.
 		PolicyInactiveFn: c.policyInactiveFn(),
 	})
+	if res.FeedPublicationDebt {
+		fmt.Println(res.FeedPublicationDebtNote())
+		return nil
+	}
 	if res.ContentRejected {
 		// #3727: the dataplane fails this config closed (unexpandable
 		// application-set) and enforces none of its policies — do NOT print a

@@ -300,14 +300,23 @@ The fix decouples the **installed-content** hash from the **published** hash:
   identical refetch re-evaluates `needsPublish == true` and **retries** the
   apply. The retry fires on the normal refresh cadence — one publish attempt per
   fetch, never a tight loop.
-- A **successfully-applied** feed has `publishedHash == fs.hash`, so an
-  identical refetch is suppressed (`needsPublish == false`) — **no thrash** and
-  no busy-loop, preserving the `#5282` no-re-fire-on-carry-forward contract
+- A successfully applied feed has `publishedHash == fs.hash`, so an identical
+  refetch is suppressed (`needsPublish == false`) — no thrash and no busy-loop,
+  preserving the `#5282` no-re-fire-on-carry-forward contract
   (`carryForwardSnapshot` inherits `publishedHash`/`hasPublished`).
-- The **hold-interval drop-to-empty** (`recordFailure`) resets
-  `publishedHash`/`hasPublished`, so a later recovery (refetch of the prior
-  content) re-fires `onUpdate` and re-enforces the recovered set rather than
-  seeing a stale published hash and suppressing the re-apply.
+- A hold-interval drop changes the desired installed state to empty. Its apply
+  advances the published marker to the empty-set hash only when accepted; a
+  rejected apply retains the previous marker and therefore remains publication
+  debt. A recovery fetch also differs from the published empty-set hash and
+  retries applying the recovered prefixes.
+
+`show security dynamic-address` distinguishes the installed snapshot hash from
+the last published hash and marks pending publication as `PUBLICATION-DEBT`.
+Binding status reports enforcement as indeterminate while a feed dependency has
+publication debt, and policy simulators do not certify a verdict from that
+unconfirmed feed content. The REST/gRPC match responses include the debt state
+and feed names. Prometheus exports `xpf_feed_publication_debt{feed="..."}` as a
+0/1 gauge so an alert can observe debt even when the feed has no fetch error.
 
 ## Refresh correctness & fail-safe behavior (#2050)
 
