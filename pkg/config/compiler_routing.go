@@ -1206,6 +1206,10 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 	for _, tc := range children {
 		switch tc.Name() {
 		case "from":
+			fromSchema := schemaForPath("policy-options", "policy-statement", "term", "from")
+			for _, unknown := range packedUnknownFromLeaves(tc, fromSchema) {
+				term.UnknownFrom = append(term.UnknownFrom, unknown)
+			}
 			for _, fc := range tc.Children {
 				switch fc.Name() {
 				case "protocol":
@@ -1278,6 +1282,8 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 					// every value via the firewallMatchValues SSOT — the prior
 					// nodeVal-only read kept just the first list entry (#2689).
 					term.FromASPath = append(term.FromASPath, firewallMatchValues(fc)...)
+				default:
+					term.UnknownFrom = append(term.UnknownFrom, fc.Name())
 				}
 			}
 		case "then":
@@ -1417,6 +1423,19 @@ var policyTermInlineKeywords = map[string]bool{
 	"origin": true, "accept": true, "reject": true, "next": true,
 }
 
+var policyTermFromUnsupportedThenKeywords11779 = map[string]bool{
+	"accept": true, "as-path-prepend": true, "load-balance": true,
+	"local-preference": true, "metric": true, "metric-type": true,
+	"next": true, "next-hop": true, "origin": true, "reject": true,
+}
+
+func skipUnknownPolicyTermFromTail11779(keys []string, i int) int {
+	for i+1 < len(keys) && !policyTermInlineKeywords[keys[i+1]] {
+		i++
+	}
+	return i
+}
+
 // parsePolicyTermInlineKeys handles flat set syntax where remaining keys
 // after the term name are inline key-value pairs like:
 // "from", "protocol", "direct" or "from", "route-filter", "10.0.0.0/8", "exact"
@@ -1424,6 +1443,11 @@ var policyTermInlineKeywords = map[string]bool{
 func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string) {
 	inFrom := false
 	for i := 0; i < len(keys); i++ {
+		if inFrom && policyTermFromUnsupportedThenKeywords11779[keys[i]] {
+			term.UnknownFrom = append(term.UnknownFrom, keys[i])
+			i = skipUnknownPolicyTermFromTail11779(keys, i)
+			continue
+		}
 		switch keys[i] {
 		case "from":
 			inFrom = true
@@ -1595,6 +1619,11 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string) {
 		case "reject":
 			if !inFrom {
 				term.Action = "reject"
+			}
+		default:
+			if inFrom {
+				term.UnknownFrom = append(term.UnknownFrom, keys[i])
+				i = skipUnknownPolicyTermFromTail11779(keys, i)
 			}
 		}
 	}
