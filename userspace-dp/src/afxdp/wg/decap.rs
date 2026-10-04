@@ -93,32 +93,6 @@ fn logical_ingress_ifindex(forwarding: &ForwardingState, meta: UserspaceDpMeta) 
     .unwrap_or(meta.ingress_ifindex as i32)
 }
 
-/// Does this underlay ingress admit the configured WireGuard listen port?
-/// Resolve the logical unit first so interface overrides and the zone map use
-/// the same identity as normal local delivery.
-fn wg_ingress_port_is_admitted(
-    dst_ip: std::net::IpAddr,
-    meta: UserspaceDpMeta,
-    forwarding: &ForwardingState,
-    dst_port: u16,
-) -> bool {
-    let ingress_ifindex = logical_ingress_ifindex(forwarding, meta);
-    let ingress_zone_id = forwarding
-        .ifindex_to_zone_id
-        .get(&ingress_ifindex)
-        .copied()
-        .unwrap_or(0);
-    crate::afxdp::forwarding::host_inbound_admits_iface_for_destination(
-        forwarding,
-        ingress_ifindex,
-        ingress_zone_id,
-        PROTO_UDP,
-        dst_port,
-        meta.addr_family as i32 == libc::AF_INET6,
-        0,
-        dst_ip,
-    )
-}
 
 /// The WG socket's outer source and packet destination must both be uniquely
 /// owned in the packet's actual ingress zone. TunnelEndpoint.zone is the
@@ -309,12 +283,12 @@ pub(in crate::afxdp) fn try_wg_decap_from_frame(
     if !wg_outer_zone_matches(forwarding, endpoint, meta, dst_ip) {
         return None;
     }
-    // Host-inbound must admit the configured listen port on the outer ingress.
-    // Returning None preserves the original frame for the normal local-delivery
-    // deny path.
-    if !wg_ingress_port_is_admitted(dst_ip, meta, forwarding, dst_port) {
-        return None;
-    }
+    // The configured endpoint lookup above already matched this UDP listen
+    // port in the ingress transport instance. This is a tunnel listener, not a
+    // host-inbound system service; unique source/destination ownership in this
+    // ingress zone is the admission boundary. A mismatch falls through to
+    // normal local delivery, where host-inbound tokens still govern other
+    // services.
 
     let mut decap_buf = scratch.decap_out.borrow_mut();
     // #9018: `.ok()?` used to collapse EVERY error arm here, and two of them
