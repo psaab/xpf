@@ -23,8 +23,8 @@
 #   COMPOSED      — only ever run as a step of another harness in this list;
 #                   it becomes reached for free when its caller does.
 #
-# 60 runnable harnesses on 2026-09-24: 29 reached and 31 declared unreached.
-# Of the declared set, 11 are GATE, 17 DIAGNOSTIC, and 3 COMPOSED.
+# 61 runnable harnesses on 2026-10-04: 31 reached and 30 declared unreached.
+# Of the declared set, 10 are GATE, 17 DIAGNOSTIC, and 3 COMPOSED.
 # #10716 deferral roster: every unrun GATE has a named owner and due date.
 # The shared loss cluster's live traffic/configuration gates are deferred to
 # @psaab by 2026-10-08; this does not convert a VOID measurement to PASS.
@@ -33,7 +33,6 @@
 #   test/incus/test-mouse-latency-matrix.sh — 12-cell live latency matrix.
 #   test/incus/test-mouse-latency.sh — single live latency measurement.
 #   test/incus/test-mouse-latency-same-class.sh — same-class live control.
-#   test/incus/test-fbf-steering.sh — two-upstream live steering smoke.
 #   test/incus/reverse-key-collision-probe.sh — live SNAT collision injection.
 #   test/incus/cos-simul-load-smoke.sh — all-11-class live CoS acceptance.
 #   test/incus/cos-gate1-small-four-alone.sh — live Gate 1 shape check.
@@ -46,7 +45,6 @@ test/incus/newflow-ceiling-harness.sh        GATE: #4800 connection-rate ceiling
 test/incus/test-mouse-latency-matrix.sh      GATE: the full 12-cell #905 mouse-latency matrix; mouse_latency_aggregate.py returns PASS/FAIL/INSUFFICIENT-DATA and nothing calls the harness that feeds it.
 test/incus/test-mouse-latency.sh             GATE: one #905 mouse-latency rep. Makefile:524 names it only in a COMMENT ("Run it after touching test-mouse-latency.sh"); the target beside that comment runs the hermetic selftest.
 test/incus/test-mouse-latency-same-class.sh  GATE: same-class 1 Gbps variant of the #905 rep — the control for the cross-class default.
-test/incus/test-fbf-steering.sh              GATE: #1827 two-upstream FBF steering smoke. `make test-fbf-steering-lib` runs fbf-steering-selftest.sh, not this — registered via a DIFFERENT TARGET's name.
 test/incus/reverse-key-collision-probe.sh    GATE: #1760 W2 live-fire NAT reverse-key collision watch.
 test/incus/cos-simul-load-smoke.sh           GATE: #1614 all-11-class simul-load acceptance gates. Calls cos-gate1-small-four-alone.sh, and the pair is collectively unreached.
 test/incus/cos-gate1-small-four-alone.sh     GATE: #1630 Gate 1 solo >=95% shape check. Only caller is cos-simul-load-smoke.sh, itself unreached.

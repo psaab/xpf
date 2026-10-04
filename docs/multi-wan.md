@@ -538,17 +538,23 @@ the loss userspace cluster baseline (`docs/ha-cluster-userspace.conf`),
 using the two WAN VLANs as distinguishable egress paths: ISP-A =
 `reth0.50` (gw 172.16.50.1, baseline master default), ISP-B =
 `reth0.80` (gw 172.16.80.1 / 2001:559:8585:80::1, FBF instance).
-`test/incus/test-fbf-steering.sh` applies it atomically (commit check
-→ commit → validate → rollback), then asserts: the ISP-B kernel table
-  (discovered via the PBR rule band 29000-29999) holds the instance default;
-the main table is not polluted; DSCP-af31 pings from the LAN host move
-the `fbf-steer`/`to-isp-b` hit counter while unmarked control pings do
-not; and `show services ip-monitoring status` lists `fbf-fallback`.
-Override `FBF_ISP_B_GW4` when 172.16.80.1 is not a live router in the
-target environment. Uplink-failure path divergence (blackhole the
-ISP-B gateway upstream, watch `fbf-fallback` repoint `ISP-B.inet.0`)
-remains a manual smoke step — the harness cannot mutate the provider
-side.
+`test/incus/test-fbf-steering.sh` is exposed as `make
+test-fbf-steering`. It retains the healthy IPv4/IPv6 steering checks, then
+tests IPv4 fallback by poisoning only the firewall's ISP-B neighbor entry.
+The gate requires `fbf-fallback` to report FAIL, its ISP-A route action to
+report APPLIED, and the IPv4 PBR table to contain the exclusive ISP-A
+default. It then requires fresh marked probes to receive replies and the
+VLAN-80 peer to capture their unique IDs with AF31 DSCP and the ISP-A
+interface-SNAT source address; a fresh unmarked control is correlated too.
+The harness restores the exact pre-test config and neighbor predecessor.
+The make recipe records the run through the `smoke-cells` adapter and
+requires executable attestation. Missing prerequisites are VOID, while a
+measured transition or traffic witness that disagrees is FAIL. IPv6 remains
+a healthy-steering check only; this gate does not measure IPv6 failover.
+The loss lab has one provider, so the reversible IPv4 neighbor-cache test
+does not establish provider-independent failover or dual-path throughput.
+No live fallback result is recorded until an operator-authorized run writes
+its ledger row.
 
 ## NAT interplay (PR-3)
 

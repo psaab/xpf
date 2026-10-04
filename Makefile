@@ -909,10 +909,12 @@ test-routing-kernel:
 	exit $$rc
 
 # Self-tests for the #6936/#11306 FBF steering verdicts. The helper cells pin
-# fail-closed route parsing (including errors and ECMP); the peer-capture
-# fixture requires marked requests to use the resolved ISP-B gateway MAC while
-# unmarked controls use a different L2 source. Replies and term hits alone
-# cannot pass. The Go half verifies the #6440 marker gate used by Incus scripts.
+# fail-closed route parsing (including errors and ECMP). Healthy steering is
+# checked against gateway MACs; IPv4 failover additionally correlates unique
+# marked-ping IDs and the interface-SNAT source observed at the peer. Replies
+# and term hits alone cannot pass. The Go half verifies the #6440 marker gate
+# used by Incus scripts.
+
 test-fbf-steering-lib:
 	bash ./test/incus/fbf-steering-selftest.sh
 	bash ./test/incus/fbf-steering-harness-selftest.sh
@@ -1315,6 +1317,18 @@ test-ha-crash:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-ha-crash --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/test-ha-crash.sh
+
+# #11378: IPv4 FBF fallback after a simulated ISP-B neighbor failure. Keep
+# gate execution, executable attestation, and the destructive smoke in one
+# #1875 lock cell. The script independently re-enters the lock and restores
+# its config and exact neighbor state; this gate does not claim IPv6 failover.
+.PHONY: test-fbf-steering
+test-fbf-steering:
+	./test/incus/with-cluster.sh "test-fbf-steering #11378" -- \
+		env BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate test-fbf-steering --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
+		-- ./test/incus/test-fbf-steering.sh
 
 # #9729: persistent-NAT binding survives promotion (#7360). DESTRUCTIVE and
 # self-locking: applies a persistent-NAT pool on the RG0 primary, reboots it,
