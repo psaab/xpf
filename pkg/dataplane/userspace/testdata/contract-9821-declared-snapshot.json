@@ -445,6 +445,10 @@
         "RIP": null,
         "ISIS": null,
         "AutonomousSystem": 0,
+        "GenerateRoutes": null,
+        "RibGroups": null,
+        "ForwardingTableExport": "",
+        "ForwardingTableExports": null,
         "TableID": 274651,
         "InterfaceRoutesRibGroup": "",
         "InterfaceRoutesRibGroupV6": ""
