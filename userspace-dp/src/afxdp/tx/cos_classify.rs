@@ -1825,13 +1825,8 @@ fn enqueue_cos_item(
         };
         let root_was_empty = root.nonempty_queues == 0;
         let queue = &mut root.queues[queue_idx];
-        // #707: aggregate cap scales with prospective-active flow count
-        // so the per-flow fast-retransmit floor can be satisfied, and
-        // the aggregate gate uses the same denominator as the per-flow
-        // clamp — otherwise the first packet of a new flow can get
-        // stuck at the boundary even when the per-flow path is trying
-        // to admit it. Compute `flow_bucket` once so both gates key off
-        // the same queue state snapshot.
+        // Compute `flow_bucket` once so both the per-flow gate and the
+        // queue's buffer gate key off the same state snapshot.
         let flow_bucket = if queue.flow_fair() {
             let ff = queue
                 .flow_fair_state
@@ -1841,7 +1836,24 @@ fn enqueue_cos_item(
         } else {
             0
         };
-        let buffer_limit = cos_flow_aware_buffer_limit(queue, flow_bucket);
+        // Shared_exact queues partition their configured base among workers,
+        // then restore the prospective-flow expansion (#707) over that share.
+        // Owner-local queues keep the unchanged flow-aware buffer limit.
+        let buffer_limit = if queue.shared_exact() {
+            // Only shared_exact admission needs the worker count; owner-local
+            // queues avoid an extra fast-interface lookup on this hot path.
+            let active_shards = binding
+                .cos
+                .cos_fast_interfaces
+                .get(&egress_ifindex)
+                .and_then(|iface| iface.shared_root_lease.as_ref())
+                .map(|lease| lease.active_shards())
+                .unwrap_or(1)
+                .max(1);
+            cos_shared_exact_buffer_limit(queue, flow_bucket, active_shards)
+        } else {
+            cos_flow_aware_buffer_limit(queue, flow_bucket)
+        };
         let flow_share_exceeded = if queue.flow_fair() {
             let ff = queue
                 .flow_fair_state

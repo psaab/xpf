@@ -5,7 +5,8 @@
 
 use super::*;
 use crate::afxdp::tx::test_support::*;
-use crate::afxdp::types::SharedCoSExactBacklog;
+use crate::afxdp::types::{SharedCoSExactBacklog, SharedCoSRootLease};
+use crate::afxdp::cos::admission::COS_FLOW_FAIR_MIN_SHARE_BYTES;
 use crate::filter::TermMatchExtra;
 use crate::{
     ClassOfServiceSnapshot, CoSDSCPClassifierEntrySnapshot, CoSDSCPClassifierSnapshot,
@@ -109,6 +110,336 @@ fn enqueue_exact_queue_publishes_shared_backlog_slot() {
     assert!(
         shared_exact_backlog.has_peer_backlog(1),
         "exact enqueue must publish immediately so peer workers do not undercount exact backlog",
+    );
+}
+
+/// #11768: the same configured shared_exact buffer is partitioned among all
+/// workers instead of being admitted independently on each worker.
+///
+/// FAIL-ON-REVERT: removing the shard divisor makes each worker admit a full
+/// 96 KB buffer, so the summed worker queues exceed the configured limit.
+#[test]
+fn shared_exact_enqueue_partitions_configured_buffer_across_workers() {
+    const SHARDS: usize = 4;
+    const BUFFER_BYTES: u64 = 96_000;
+    const PACKET_BYTES: u64 = 1_500;
+    const IFINDEX: i32 = 42;
+    const QUEUE_ID: u8 = 4;
+
+    let shared_root_lease = Arc::new(SharedCoSRootLease::new(
+        1_250_000_000,
+        BUFFER_BYTES,
+        SHARDS,
+    ));
+    let fast_interfaces = test_cos_fast_interfaces(
+        IFINDEX,
+        IFINDEX,
+        QUEUE_ID,
+        vec![(QUEUE_ID, test_queue_fast_path(true, 0, None, None))],
+        None,
+        Some(shared_root_lease),
+    );
+    let fast_path = fast_interfaces
+        .get(&IFINDEX)
+        .expect("interface fast path")
+        .clone();
+    let mut bindings = (0..SHARDS)
+        .map(|worker_id| {
+            let root = test_cos_runtime_with_queues(
+                1_250_000_000,
+                vec![CoSQueueConfig {
+                    queue_id: QUEUE_ID,
+                    forwarding_class: "shared-exact".into(),
+                    priority: 5,
+                    transmit_rate_bytes: 1_250_000_000,
+                    guarantee_enabled: true,
+                    exact: true,
+                    surplus_sharing: false,
+                    equal_flow_enforcement: false,
+                    equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+                    surplus_weight: 1,
+                    buffer_bytes: BUFFER_BYTES,
+                    dscp_rewrite: None,
+                    codel_target_ns: 0,
+                }],
+            );
+            let mut root = root;
+            enable_test_flow_fair(&mut root.queues[0]);
+            root.queues[0].config.shared_exact = true;
+            BindingWorker::new_for_cos_drain_test(
+                worker_id as u32,
+                worker_id as u32,
+                IFINDEX,
+                root,
+                fast_path.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for binding in &mut bindings {
+        let mut accepted = 0;
+        // Admission drops still return Ok, so detect them by the unchanged
+        // queued-byte count. Bound attempts in case the gate stops rejecting.
+        for _ in 0..=(BUFFER_BYTES / PACKET_BYTES) {
+            let queued_before = binding
+                .cos
+                .cos_interfaces
+                .get(&IFINDEX)
+                .expect("CoS runtime")
+                .queues[0]
+                .hot
+                .queued_bytes;
+            assert!(
+                enqueue_cos_item(
+                    binding,
+                    IFINDEX,
+                    Some(QUEUE_ID),
+                    PACKET_BYTES,
+                    test_flow_cos_item(5201, PACKET_BYTES as usize),
+                    0,
+                    None,
+                )
+                .is_ok(),
+                "interface and queue must remain available",
+            );
+            let queued_after = binding
+                .cos
+                .cos_interfaces
+                .get(&IFINDEX)
+                .expect("CoS runtime")
+                .queues[0]
+                .hot
+                .queued_bytes;
+            if queued_after == queued_before {
+                break;
+            }
+            accepted += queued_after - queued_before;
+        }
+        assert_eq!(
+            accepted,
+            BUFFER_BYTES / SHARDS as u64,
+            "each shard may use only its integer share of the configured buffer",
+        );
+    }
+
+    let queued_bytes = bindings
+        .iter()
+        .map(|binding| {
+            binding
+                .cos
+                .cos_interfaces
+                .get(&IFINDEX)
+                .expect("CoS runtime")
+                .queues[0]
+                .hot
+                .queued_bytes
+        })
+        .sum::<u64>();
+    assert!(
+        queued_bytes <= BUFFER_BYTES,
+        "shared_exact queued {queued_bytes} bytes across workers for a \
+         {BUFFER_BYTES}-byte configured buffer",
+    );
+}
+
+/// #11768 P1: even a high-rate shared_exact queue without a queue lease must
+/// obtain its shard count from the interface root lease, and a sub-frame
+/// division must not reject every packet on an empty queue.
+///
+/// FAIL-ON-REVERT: without the one-frame floor, 96,000 / 65 = 1,476 bytes
+/// rejects even this 1,500-byte packet.
+#[test]
+fn shared_exact_non_guaranteed_enqueue_keeps_frame_liveness_at_65_shards() {
+    const SHARDS: usize = 65;
+    const BUFFER_BYTES: u64 = 96_000;
+    const PACKET_BYTES: u64 = 1_500;
+    const IFINDEX: i32 = 43;
+    const QUEUE_ID: u8 = 4;
+
+    let shared_root_lease = Arc::new(SharedCoSRootLease::new(
+        1_250_000_000,
+        BUFFER_BYTES,
+        SHARDS,
+    ));
+    let fast_interfaces = test_cos_fast_interfaces(
+        IFINDEX,
+        IFINDEX,
+        QUEUE_ID,
+        vec![(QUEUE_ID, test_queue_fast_path(true, 0, None, None))],
+        None,
+        Some(shared_root_lease),
+    );
+    let fast_path = fast_interfaces
+        .get(&IFINDEX)
+        .expect("interface fast path")
+        .clone();
+    let mut root = test_cos_runtime_with_queues(
+        1_250_000_000,
+        vec![CoSQueueConfig {
+            queue_id: QUEUE_ID,
+            forwarding_class: "unleased-shared-exact".into(),
+            priority: 5,
+            transmit_rate_bytes: 1_250_000_000,
+            guarantee_enabled: false,
+            exact: false,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: BUFFER_BYTES,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+    );
+    root.queues[0].config.shared_exact = true;
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, IFINDEX, root, fast_path);
+
+    // A 96 KB buffer / 65 workers is less than one 4096-byte UMEM frame.
+    // The explicit floor allows two MTU packets, but rejects the third.
+    for _ in 0..3 {
+        assert!(
+            enqueue_cos_item(
+                &mut binding,
+                IFINDEX,
+                Some(QUEUE_ID),
+                PACKET_BYTES,
+                test_flow_cos_item(5301, PACKET_BYTES as usize),
+                0,
+                None,
+            )
+            .is_ok(),
+            "interface and queue must remain available",
+        );
+    }
+    let queued_bytes = binding
+        .cos
+        .cos_interfaces
+        .get(&IFINDEX)
+        .expect("CoS runtime")
+        .queues[0]
+        .hot
+        .queued_bytes;
+    assert_eq!(
+        queued_bytes,
+        2 * PACKET_BYTES,
+        "the active-shard root lease must supply the 4096-byte floor even \
+         when the non-guaranteed queue has no per-queue lease",
+    );
+}
+
+/// #707 preservation: the shard partition is the base, not a replacement
+/// for prospective-flow headroom in the live enqueue path.
+///
+/// FAIL-ON-REVERT: using only the partitioned base stops at 24 KB instead of
+/// the expected five-prospective-flow 120 KB aggregate room.
+#[test]
+fn shared_exact_enqueue_restores_flow_headroom_over_partitioned_base() {
+    const SHARDS: usize = 4;
+    const BUFFER_BYTES: u64 = 96_000;
+    const PACKET_BYTES: u64 = 1_500;
+    const IFINDEX: i32 = 44;
+    const QUEUE_ID: u8 = 4;
+    const ACTIVE_FLOWS: u64 = 4;
+
+    let shared_root_lease = Arc::new(SharedCoSRootLease::new(
+        1_250_000_000,
+        BUFFER_BYTES,
+        SHARDS,
+    ));
+    let fast_interfaces = test_cos_fast_interfaces(
+        IFINDEX,
+        IFINDEX,
+        QUEUE_ID,
+        vec![(QUEUE_ID, test_queue_fast_path(true, 0, None, None))],
+        None,
+        Some(shared_root_lease),
+    );
+    let fast_path = fast_interfaces
+        .get(&IFINDEX)
+        .expect("interface fast path")
+        .clone();
+    let mut root = test_cos_runtime_with_queues(
+        1_250_000_000,
+        vec![CoSQueueConfig {
+            queue_id: QUEUE_ID,
+            forwarding_class: "shared-exact-flow-fair".into(),
+            priority: 5,
+            transmit_rate_bytes: 1_250_000_000,
+            guarantee_enabled: true,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: BUFFER_BYTES,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+    );
+    enable_test_flow_fair(&mut root.queues[0]);
+    root.queues[0].config.shared_exact = true;
+    let flow = test_flow_cos_item(5302, PACKET_BYTES as usize);
+    let flow_bucket = {
+        let queue = &root.queues[0];
+        let state = queue.flow_fair_state.as_ref().expect("flow-fair state");
+        cos_flow_bucket_index(state.flow_hash_seed, cos_item_flow_key(&flow))
+    };
+    {
+        let state = test_flow_fair_state_mut(&mut root.queues[0]);
+        state.active_flow_buckets = ACTIVE_FLOWS as u16;
+        for extra in 0..(ACTIVE_FLOWS as usize) {
+            let bucket = (flow_bucket + extra + 1) % state.flow_bucket_bytes.len();
+            state.flow_bucket_bytes[bucket] = 1;
+        }
+    }
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, IFINDEX, root, fast_path);
+    let expected_limit = (ACTIVE_FLOWS + 1) * COS_FLOW_FAIR_MIN_SHARE_BYTES;
+
+    for _ in 0..=(expected_limit / PACKET_BYTES) {
+        let queued_before = binding
+            .cos
+            .cos_interfaces
+            .get(&IFINDEX)
+            .expect("CoS runtime")
+            .queues[0]
+            .hot
+            .queued_bytes;
+        assert!(
+            enqueue_cos_item(
+                &mut binding,
+                IFINDEX,
+                Some(QUEUE_ID),
+                PACKET_BYTES,
+                test_flow_cos_item(5302, PACKET_BYTES as usize),
+                0,
+                None,
+            )
+            .is_ok(),
+            "interface and queue must remain available",
+        );
+        let queued_after = binding
+            .cos
+            .cos_interfaces
+            .get(&IFINDEX)
+            .expect("CoS runtime")
+            .queues[0]
+            .hot
+            .queued_bytes;
+        if queued_after == queued_before {
+            break;
+        }
+    }
+    let queued_bytes = binding
+        .cos
+        .cos_interfaces
+        .get(&IFINDEX)
+        .expect("CoS runtime")
+        .queues[0]
+        .hot
+        .queued_bytes;
+    assert_eq!(
+        queued_bytes, expected_limit,
+        "the #707 prospective-flow expansion remains above the 24 KB shard base",
     );
 }
 

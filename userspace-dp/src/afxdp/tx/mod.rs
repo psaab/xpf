@@ -53,8 +53,9 @@ use super::cos::COS_MIN_BURST_BYTES;
 use super::cos::{
     LocalRoutingDecision, Step1Action, apply_cos_admission_ecn_policy, cos_flow_aware_buffer_limit,
     cos_flow_bucket_index, cos_item_flow_key, cos_queue_drain_all, cos_queue_flow_share_limit,
-    cos_queue_is_empty, cos_queue_push_back, cos_queue_restore_front, drain_shaped_tx,
-    ensure_cos_interface_runtime, mark_cos_queue_runnable, publish_committed_queue_vtime,
-    publish_cos_exact_backlog, redirect_prepared_cos_request_to_owner,
-    redirect_prepared_cos_request_to_owner_binding, resolve_local_routing_decision,
+    cos_queue_is_empty, cos_queue_push_back, cos_queue_restore_front, cos_shared_exact_buffer_limit,
+    drain_shaped_tx, ensure_cos_interface_runtime, mark_cos_queue_runnable,
+    publish_committed_queue_vtime, publish_cos_exact_backlog,
+    redirect_prepared_cos_request_to_owner, redirect_prepared_cos_request_to_owner_binding,
+    resolve_local_routing_decision,
 };
