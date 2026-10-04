@@ -643,13 +643,17 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			// by default in FRR. Keep family-less IPv4 neighbors in an explicit
 			// AF block so their existing IPv4 behavior is preserved when the
 			// controls are rendered in their actual address family below.
-			if (n.FamilyInet || ((policyDefault || hasAFNeighborAttributes) && !n.FamilyInet6)) && !isIPv6Peer {
+			hasUnsupportedSAFI := n.UnsupportedInetSAFI || n.UnsupportedInet6SAFI
+			// SAFIs xpf cannot render must not fall through to FRR's default
+			// IPv4-unicast activation (the original labeled-unicast miscompile,
+			// #11815). Explicitly supported unicast remains independently valid.
+			if (n.FamilyInet || ((policyDefault || hasAFNeighborAttributes) && !n.FamilyInet6 && !hasUnsupportedSAFI)) && !isIPv6Peer {
 				inet4Neighbors = append(inet4Neighbors, n)
 			}
-			if !n.FamilyInet && (n.FamilyInet6 || isIPv6Peer) {
+			if !n.FamilyInet && (n.FamilyInet6 || isIPv6Peer || hasUnsupportedSAFI) {
 				inet4DisabledNeighbors = append(inet4DisabledNeighbors, n)
 			}
-			if n.FamilyInet6 || (!n.FamilyInet && isIPv6Peer) {
+			if n.FamilyInet6 || (!n.FamilyInet && isIPv6Peer && !hasUnsupportedSAFI) {
 				inet6Neighbors = append(inet6Neighbors, n)
 			}
 		}

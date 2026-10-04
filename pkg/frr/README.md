@@ -1285,6 +1285,15 @@ step. Both are required — neither sees the other's case:
   `no neighbor <peer> activate` under ipv4 unicast (#11374), overriding FRR's
   default IPv4 auto-activation; the IPv6 route-maps therefore cannot leave an
   unfiltered IPv4 session active.
+- **BGP SAFI is part of family activation (#11815).** `family inet` and
+  `family inet6` retain Junos's bare-family unicast default, and an explicit
+  `unicast` SAFI activates the corresponding IPv4/IPv6 unicast block. Other
+  SAFIs, including `labeled-unicast`, are not rendered by xpf: strict compile
+  rejects them with an SAFI-specific diagnostic; tolerant load/sync warns and
+  keeps that AFI out of unicast activation (including FRR's default IPv4
+  activation). An explicit unicast SAFI alongside an unsupported SAFI remains
+  independently represented on the tolerant path; the strict path rejects the
+  mixed stanza.
 - **`resolveRedistribute` never emits an invalid `redistribute <name>`
   line (#2223).** FRR's `redistribute` requires a source-protocol token
   (`connected`/`static`/`ospf`/`bgp`/`rip`/`isis`/`kernel`); a bare
