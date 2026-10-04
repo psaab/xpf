@@ -716,6 +716,7 @@ pub(super) fn build_local_origin_tunnel_tx_request(
             generation: 0,
             session_id: 0,
             tcp_close_class: 0,
+            tcp_handshake_state: 0,
         })
     } else {
         None

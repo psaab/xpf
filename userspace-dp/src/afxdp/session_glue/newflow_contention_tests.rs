@@ -125,6 +125,7 @@ fn entry(src_port: u16) -> SyncedSessionEntry {
         generation: 0,
         session_id: 0,
         tcp_close_class: 0,
+        tcp_handshake_state: 0,
     }
 }
 

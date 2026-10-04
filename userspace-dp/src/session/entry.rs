@@ -729,6 +729,9 @@ pub(crate) struct SessionDelta {
     /// loss-of-sync resync, which is an Open re-export, also restore a dropped
     /// Update. Close deltas carry `0`.
     pub(crate) tcp_close_class: u8,
+    /// #10888: TCP handshake state at delta production. 0 is absent/legacy
+    /// (established behavior); nonzero values use `TcpHandshakeState::to_wire`.
+    pub(crate) tcp_handshake_state: u8,
     /// #9752: this Close retires exactly `key` — the drain must neither
     /// derive the reverse half nor replicate sibling deletes for it.
     ///

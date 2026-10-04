@@ -6,11 +6,11 @@ import (
 )
 
 // The event-stream producer appends ingress identity and stable policy rule ID
-// after the install-table and source-NAT ICMP trailers. Reverting either decode
-// leaves fabric ownership zone-approximate or drops the stable counter binding.
-func TestDecodeSessionEventCarriesIngressAndRuleIdentity11070(t *testing.T) {
+// after existing metadata, followed by the handshake-state byte. The variable
+// rule-ID length and truncated legacy frames must preserve their old defaults.
+func TestDecodeSessionEventCarriesIngressRuleAndHandshakeState10888(t *testing.T) {
 	const ruleID = "lan->wan/allow-web"
-	payload := make([]byte, 180+len(ruleID))
+	payload := make([]byte, 181+len(ruleID))
 	payload[0], payload[1] = 6, 6
 	binary.LittleEndian.PutUint64(payload[140:148], 0x1234)
 	binary.LittleEndian.PutUint64(payload[148:156], 0x55)
@@ -25,6 +25,7 @@ func TestDecodeSessionEventCarriesIngressAndRuleIdentity11070(t *testing.T) {
 	binary.LittleEndian.PutUint16(payload[176:178], 51)
 	binary.LittleEndian.PutUint16(payload[178:180], uint16(len(ruleID)))
 	copy(payload[180:], ruleID)
+	payload[180+len(ruleID)] = 3 // TCPHandshakeState: SynAckFirstPending
 
 	delta, ok := decodeSessionEvent(payload)
 	if !ok {
@@ -35,6 +36,31 @@ func TestDecodeSessionEventCarriesIngressAndRuleIdentity11070(t *testing.T) {
 		t.Fatalf("decoded identity = ICMP %v/%d/%d ifindex %d vlan %d rule %q",
 			delta.SourceNatICMPValid, delta.SourceNatICMPType, delta.SourceNatICMPCode,
 			delta.IngressIfindex, delta.IngressVLANID, delta.PolicyRuleID)
+	}
+	if delta.TCPHandshakeState != 3 {
+		t.Fatalf("decoded TCPHandshakeState = %d, want SynAckFirstPending (3)", delta.TCPHandshakeState)
+	}
+	unknownStagePayload := append([]byte(nil), payload...)
+	unknownStagePayload[len(unknownStagePayload)-1] = 99
+	unknownStageDelta, ok := decodeSessionEvent(unknownStagePayload)
+	if !ok || unknownStageDelta.TCPHandshakeState != 4 {
+		t.Fatalf("unknown handshake state: ok=%v state=%d, want true/Established (4)",
+			ok, unknownStageDelta.TCPHandshakeState)
+	}
+	emptyRulePayload := append([]byte(nil), payload[:180]...)
+	binary.LittleEndian.PutUint16(emptyRulePayload[178:180], 0)
+	emptyRulePayload = append(emptyRulePayload, 2)
+	emptyRuleDelta, ok := decodeSessionEvent(emptyRulePayload)
+	if !ok || emptyRuleDelta.PolicyRuleID != "" || emptyRuleDelta.TCPHandshakeState != 2 {
+		t.Fatalf("empty-rule frame: ok=%v rule=%q state=%d, want true/empty/HandshakePending",
+			ok, emptyRuleDelta.PolicyRuleID, emptyRuleDelta.TCPHandshakeState)
+	}
+	// A legacy frame with the rule ID but without the appended state defaults
+	// to 0 (established behavior).
+	legacyWithoutHandshake, ok := decodeSessionEvent(payload[:len(payload)-1])
+	if !ok || legacyWithoutHandshake.TCPHandshakeState != 0 {
+		t.Fatalf("legacy frame without handshake state: ok=%v state=%d, want true/0",
+			ok, legacyWithoutHandshake.TCPHandshakeState)
 	}
 
 	legacy, ok := decodeSessionEvent(payload[:169])

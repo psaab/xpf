@@ -129,6 +129,125 @@ func TestCloseClassNeverRegressesWithinAnIncarnation9412(t *testing.T) {
 	}
 }
 
+func sentHandshakeStatesV4_10888(t *testing.T, ss *SessionSync) []uint8 {
+	t.Helper()
+	var out []uint8
+	for len(ss.sendCh) > 0 {
+		msg := <-ss.sendCh
+		if len(msg) < syncHeaderSize || msg[4] != syncMsgSessionV4 {
+			continue
+		}
+		_, val, ok := decodeSessionV4Payload(msg[syncHeaderSize:])
+		if !ok {
+			t.Fatal("undecodable queued v4 session frame")
+		}
+		out = append(out, val.TCPHandshakeState)
+	}
+	return out
+}
+
+func sentHandshakeStatesV6_10888(t *testing.T, ss *SessionSync) []uint8 {
+	t.Helper()
+	var out []uint8
+	for len(ss.sendCh) > 0 {
+		msg := <-ss.sendCh
+		if len(msg) < syncHeaderSize || msg[4] != syncMsgSessionV6 {
+			continue
+		}
+		_, val, ok := decodeSessionV6Payload(msg[syncHeaderSize:])
+		if !ok {
+			t.Fatal("undecodable queued v6 session frame")
+		}
+		out = append(out, val.TCPHandshakeState)
+	}
+	return out
+}
+
+func TestSweepPreservesHandshakeStateAndTupleReuseResets10888(t *testing.T) {
+	t.Run("v4", func(t *testing.T) {
+		ss, dp, key := closeClassFixture9412(t, 77)
+		update := dp.v4sessions[key]
+		update.TCPHandshakeState = dataplane.TCPHandshakeStateSynAckFirstPending
+		ss.QueueSessionV4(key, update)
+		if got := sentHandshakeStatesV4_10888(t, ss); len(got) != 1 ||
+			got[0] != dataplane.TCPHandshakeStateSynAckFirstPending {
+			t.Fatalf("v4 delta state = %v, want SynAckFirstPending", got)
+		}
+		ss.syncSweep()
+		if got := sentHandshakeStatesV4_10888(t, ss); len(got) != 1 ||
+			got[0] != dataplane.TCPHandshakeStateSynAckFirstPending {
+			t.Fatalf("v4 same-incarnation mirror-zero sweep regressed state: %v", got)
+		}
+
+		reused := dp.v4sessions[key]
+		reused.SessionID = 78
+		reused.Created = monotonicSeconds()
+		reused.TCPHandshakeState = dataplane.TCPHandshakeStateOpening
+		dp.v4sessions[key] = reused
+		ss.syncSweep()
+		if got := sentHandshakeStatesV4_10888(t, ss); len(got) != 1 ||
+			got[0] != dataplane.TCPHandshakeStateOpening {
+			t.Fatalf("v4 tuple reuse inherited prior handshake state: %v", got)
+		}
+	})
+
+	t.Run("v6", func(t *testing.T) {
+		base := monotonicSeconds()
+		key := dataplane.SessionKeyV6{Protocol: 6, SrcPort: 47914, DstPort: 5205}
+		key.SrcIP[15], key.DstIP[15] = 1, 2
+		dp := &mockSweepDP{
+			v6sessions: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{
+				key: {State: dataplane.SessStateEstablished, Created: base - 5, SessionID: 91},
+			},
+			sessionCounter: 1,
+		}
+		ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+		ss.stats.Connected.Store(true)
+		ss.IsPrimaryFn = func() bool { return true }
+		ss.lastSweepTime = base - 10
+
+		update := dp.v6sessions[key]
+		update.TCPHandshakeState = dataplane.TCPHandshakeStateSynAckFirstPending
+		ss.QueueSessionV6(key, update)
+		if got := sentHandshakeStatesV6_10888(t, ss); len(got) != 1 ||
+			got[0] != dataplane.TCPHandshakeStateSynAckFirstPending {
+			t.Fatalf("v6 delta state = %v, want SynAckFirstPending", got)
+		}
+		ss.syncSweep()
+		if got := sentHandshakeStatesV6_10888(t, ss); len(got) != 1 ||
+			got[0] != dataplane.TCPHandshakeStateSynAckFirstPending {
+			t.Fatalf("v6 same-incarnation mirror-zero sweep regressed state: %v", got)
+		}
+
+		reused := dp.v6sessions[key]
+		reused.SessionID = 92
+		reused.Created = monotonicSeconds()
+		reused.TCPHandshakeState = dataplane.TCPHandshakeStateOpening
+		dp.v6sessions[key] = reused
+		ss.syncSweep()
+		if got := sentHandshakeStatesV6_10888(t, ss); len(got) != 1 ||
+			got[0] != dataplane.TCPHandshakeStateOpening {
+			t.Fatalf("v6 tuple reuse inherited prior handshake state: %v", got)
+		}
+	})
+}
+
+func TestDeleteClearsHandshakeStateMemo10888(t *testing.T) {
+	ss, dp, key := closeClassFixture9412(t, 77)
+	update := dp.v4sessions[key]
+	update.TCPHandshakeState = dataplane.TCPHandshakeStateHandshakePending
+	ss.QueueSessionV4(key, update)
+	_ = sentHandshakeStatesV4_10888(t, ss)
+
+	_ = ss.takeDeleteGenV4(key)
+	mirror := dp.v4sessions[key]
+	ss.QueueSessionV4(key, mirror)
+	if got := sentHandshakeStatesV4_10888(t, ss); len(got) != 1 ||
+		got[0] != dataplane.TCPHandshakeStateAbsent {
+		t.Fatalf("state survived tuple delete: got %v, want absent", got)
+	}
+}
+
 func TestSweepResendKeepsTheAnnouncedCloseClassV6_9412(t *testing.T) {
 	base := monotonicSeconds()
 	key := dataplane.SessionKeyV6{Protocol: 6, SrcPort: 47913, DstPort: 5204}
@@ -293,5 +412,34 @@ func TestCloseClassMemoIsBoundedAtTheGenerationCap9412(t *testing.T) {
 	stampCloseClassLocked(m, 7, 8, &resend, memoCap)
 	if resend != 3 {
 		t.Fatalf("#9412: at the cap a resend of a recorded incarnation must keep its class, got %d", resend)
+	}
+}
+
+
+func TestTCPHandshakeMemoIsBoundedAndUnknownIsEstablished10888(t *testing.T) {
+	const memoCap = 2
+	m := map[int]sentTCPHandshakeState{
+		1: {sessionID: 11, state: dataplane.TCPHandshakeStateHandshakePending},
+		2: {sessionID: 22, state: dataplane.TCPHandshakeStateOpening},
+	}
+
+	fresh := uint8(dataplane.TCPHandshakeStateSynAckFirstPending)
+	stampTCPHandshakeStateLocked(m, 3, 33, &fresh, memoCap)
+	if len(m) != memoCap || fresh != dataplane.TCPHandshakeStateSynAckFirstPending {
+		t.Fatalf("full memo len=%d state=%d, want len=%d and the frame's state preserved",
+			len(m), fresh, memoCap)
+	}
+
+	unknown := uint8(99)
+	stampTCPHandshakeStateLocked(m, 4, 44, &unknown, memoCap)
+	if len(m) != memoCap || unknown != dataplane.TCPHandshakeStateEstablished {
+		t.Fatalf("unknown state at memo cap len=%d state=%d, want bounded/Established",
+			len(m), unknown)
+	}
+
+	resend := uint8(dataplane.TCPHandshakeStateAbsent)
+	stampTCPHandshakeStateLocked(m, 1, 11, &resend, memoCap)
+	if resend != dataplane.TCPHandshakeStateHandshakePending {
+		t.Fatalf("same-incarnation resend regressed at cap: got %d, want HandshakePending", resend)
 	}
 }

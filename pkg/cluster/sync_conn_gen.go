@@ -55,15 +55,15 @@ func (s *SessionSync) noteHelperMirrorResult(af string, warned *atomic.Bool, err
 // while guard keys are forward sessions (#9915 F-044). Nothing reads it
 // directly except maxCap()'s clamp; every map goes through sentCap()/recvCap().
 //
-// EIGHTEEN map families share the two side caps. The sender side bounds TEN by
+// TWENTY map families share the two side caps. The sender side bounds TWELVE by
 // sentCap() — genSentV4/V6, closeClassSentV4/V6 (#9412),
-// installTableSentV4/V6 (#9752), sourceNatICMPSentV4/V6 (#11064), and
-// genSentScopedV4/V6 (#10512). The receiver side bounds EIGHT by recvCap() —
-// recvGenV4/V6 (with their #9719 tombstone orders, which index the same entries
-// rather than adding new ones), installTableRecvV4/V6,
-// sourceNatICMPRecvV4/V6 (#11064), and recvGenScopedV4/V6 (#10512, with their
-// own tombstone orders). Every family grows on full-of-live demand and
-// skip-records at the cap.
+// tcpHandshakeSentV4/V6 (#10888), installTableSentV4/V6 (#9752),
+// sourceNatICMPSentV4/V6 (#11064), and genSentScopedV4/V6 (#10512). The
+// receiver side bounds EIGHT by recvCap() — recvGenV4/V6 (with their #9719
+// tombstone orders, which index the same entries rather than adding new ones),
+// installTableRecvV4/V6, sourceNatICMPRecvV4/V6 (#11064), and
+// recvGenScopedV4/V6 (#10512, with their own tombstone orders). Every family
+// grows on full-of-live demand and skip-records at the cap.
 //
 // The EFFECTIVE cap starts at genGuardMapDefaultCap (the pre-#9915 static
 // value) and grows by doubling, per side, whenever a map is full of LIVE
@@ -71,7 +71,7 @@ func (s *SessionSync) noteHelperMirrorResult(af string, warned *atomic.Bool, err
 // cap down (growGuardCapSide) and every read clamps to the ceiling in force
 // (sentCap/recvCap); the receiver side is additionally reclaimed at a
 // namespace-reset bulk barrier (resetRecvGen), while sender maps self-drain on
-// delete-echo. All eighteen families are evicted on delete; the cap is a safety
+// delete-echo. All twenty families are evicted on delete; the cap is a safety
 // valve for keys whose delete never arrives (e.g. dropped close delta).
 //
 // Heap honesty (#9915 F-044 review): the ceiling costs nothing until the table
@@ -488,6 +488,9 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 	// #9412: keep this frame from regressing the close class already sent for
 	// the same incarnation (a mirror-sourced resend carries 0). Same lock.
 	s.stampCloseClassSentV4(key, val.SessionID, &val.TCPCloseClass)
+	// #10888: mirror resends must retain the last handshake phase sent for
+	// this session incarnation.
+	s.stampTCPHandshakeStateSentV4(key, val.SessionID, &val.TCPHandshakeState)
 	// #9752: keep this frame from regressing the installing-table identity
 	// already sent for the same incarnation (a mirror-sourced resend carries
 	// (0,0): the BPF mirror has no slot for sync-only fields). Same lock.
@@ -568,6 +571,8 @@ func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *datapla
 	// #9412: keep this frame from regressing the close class already sent for
 	// the same incarnation (a mirror-sourced resend carries 0). Same lock.
 	s.stampCloseClassSentV6(key, val.SessionID, &val.TCPCloseClass)
+	// #10888: v6 twin of the handshake-state resend memo.
+	s.stampTCPHandshakeStateSentV6(key, val.SessionID, &val.TCPHandshakeState)
 	// #9752: v6 twin of the installing-table memo above.
 	if s.installTableSentV6 == nil {
 		s.installTableSentV6 = make(map[dataplane.SessionKeyV6]sentInstallTable)
@@ -625,6 +630,75 @@ func (s *SessionSync) stampCloseClassSentV6(key dataplane.SessionKeyV6, sessionI
 	stampCloseClassLocked(s.closeClassSentV6, key, sessionID, class, s.sentCap())
 }
 
+// sentTCPHandshakeState records the greatest TCP handshake stage sent for one
+// session incarnation. The BPF mirror drops this sync-only field, so sweep and
+// bulk resends restore it from this bounded sender memo.
+type sentTCPHandshakeState struct {
+	sessionID uint64
+	state     uint8
+}
+
+// stampTCPHandshakeStateLocked preserves the monotonic stage for one tuple
+// and SessionID. A new SessionID discards the old value even when the new
+// state is zero; SessionID zero has no safe incarnation identity and is not
+// memoized. Callers hold genSentMu and enforce maxEntries.
+func stampTCPHandshakeStateLocked[K comparable](
+	m map[K]sentTCPHandshakeState,
+	key K,
+	sessionID uint64,
+	state *uint8,
+	maxEntries int,
+) {
+	next := dataplane.NormalizeTCPHandshakeState(*state)
+	if sessionID == 0 {
+		*state = next
+		return
+	}
+	rec, ok := m[key]
+	if ok && rec.sessionID != sessionID {
+		delete(m, key)
+		ok = false
+	}
+	if ok && rec.state > next {
+		next = rec.state
+	}
+	*state = next
+	if next == dataplane.TCPHandshakeStateAbsent {
+		return
+	}
+	if !ok && len(m) >= maxEntries {
+		// Skip-record-on-full; a missed memo degrades only a later mirror
+		// resend, never the currently queued stage.
+		return
+	}
+	m[key] = sentTCPHandshakeState{sessionID: sessionID, state: next}
+}
+
+func (s *SessionSync) stampTCPHandshakeStateSentV4(
+	key dataplane.SessionKey, sessionID uint64, state *uint8,
+) {
+	if s.tcpHandshakeSentV4 == nil {
+		s.tcpHandshakeSentV4 = make(map[dataplane.SessionKey]sentTCPHandshakeState)
+	}
+	if _, ok := s.tcpHandshakeSentV4[key]; !ok && len(s.tcpHandshakeSentV4) >= s.sentCap() {
+		s.growSentCap()
+	}
+	stampTCPHandshakeStateLocked(s.tcpHandshakeSentV4, key, sessionID, state, s.sentCap())
+}
+
+func (s *SessionSync) stampTCPHandshakeStateSentV6(
+	key dataplane.SessionKeyV6, sessionID uint64, state *uint8,
+) {
+	if s.tcpHandshakeSentV6 == nil {
+		s.tcpHandshakeSentV6 = make(map[dataplane.SessionKeyV6]sentTCPHandshakeState)
+	}
+	if _, ok := s.tcpHandshakeSentV6[key]; !ok && len(s.tcpHandshakeSentV6) >= s.sentCap() {
+		s.growSentCap()
+	}
+	stampTCPHandshakeStateLocked(s.tcpHandshakeSentV6, key, sessionID, state, s.sentCap())
+}
+
+
 // takeDeleteGenV4 returns the generation a delete for this wire key should
 // carry and evicts the sender-side stamp.
 //
@@ -666,6 +740,7 @@ func (s *SessionSync) takeDeleteGenV4(key dataplane.SessionKey) uint64 {
 	// #9412: the incarnation is being deleted; forget its close class. Before the
 	// early return, so a key with no generation stamp is still evicted.
 	delete(s.closeClassSentV4, key)
+	delete(s.tcpHandshakeSentV4, key)
 	// #9752: same for its installing-table identity.
 	delete(s.installTableSentV4, key)
 	delete(s.sourceNatICMPSentV4, key)
@@ -704,6 +779,7 @@ func (s *SessionSync) takeDeleteGenV6(key dataplane.SessionKeyV6) uint64 {
 	// #9412: the incarnation is being deleted; forget its close class. Before the
 	// early return, so a key with no generation stamp is still evicted.
 	delete(s.closeClassSentV6, key)
+	delete(s.tcpHandshakeSentV6, key)
 	// #9752: same for its installing-table identity.
 	delete(s.installTableSentV6, key)
 	delete(s.sourceNatICMPSentV6, key)

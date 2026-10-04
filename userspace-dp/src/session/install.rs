@@ -442,6 +442,7 @@ impl SessionTable {
         // peer must never hold TUN-derived state, so it is neither bulk- nor
         // live-synced; forwards still count toward per-IP limits above).
         if counted && !origin.is_peer_synced() && !origin.is_local_tun_origin() {
+            let tcp_handshake_state = self.handshake_state_wire_for(&key);
             self.push_delta(SessionDelta {
                 provenance: crate::session::ExportProvenance::Incremental,
                 kind: SessionDeltaKind::Open,
@@ -476,6 +477,7 @@ impl SessionTable {
                 } else {
                     0
                 },
+                tcp_handshake_state,
                 purge_retirement: false,
             });
         }
@@ -508,6 +510,7 @@ impl SessionTable {
                 session_id: 0,
                 // #9412: nor a close class; the real HA path threads it the same way.
                 tcp_close_class: 0,
+                tcp_handshake_state: 0,
             },
             allow_replace_local,
         )
@@ -565,12 +568,21 @@ impl SessionTable {
             tcp_flags,
             session_id: wire_session_id,
             tcp_close_class: wire_close_class,
+            tcp_handshake_state: wire_handshake_state,
         } = req;
         let session_limit_zone = metadata.ingress_zone;
         // #9412: the close class the owning node stated. `None` (0, or a class
         // this build does not know) imports exactly as before.
         let wire_close = if matches!(protocol, PROTO_TCP) {
             TcpCloseClass::from_wire(wire_close_class)
+        } else {
+            None
+        };
+        // #10888: zero/unknown preserves the legacy established import behavior.
+        // Stage 3 is the asymmetric SYN-ACK-first opening, which must retain
+        // its reverse-ACK completion rule.
+        let wire_handshake = if matches!(protocol, PROTO_TCP) {
+            TcpHandshakeState::from_wire(wire_handshake_state)
         } else {
             None
         };
@@ -637,7 +649,18 @@ impl SessionTable {
         };
         // #10889: a synced datagram has no carried reply-promotion bit, so an
         // app override stays gated until this node observes reverse traffic.
-        let established = matches!(protocol, PROTO_TCP) || metadata.inactivity_timeout_ns.is_none();
+        let (established, handshake_pending, syn_ack_first) =
+            if matches!(protocol, PROTO_TCP) {
+                match wire_handshake {
+                    Some(TcpHandshakeState::Opening) => (false, false, false),
+                    Some(TcpHandshakeState::HandshakePending) => (true, true, false),
+                    Some(TcpHandshakeState::SynAckFirstPending) => (false, true, true),
+                    Some(TcpHandshakeState::Established) | None => (true, false, false),
+                }
+            } else {
+                (metadata.inactivity_timeout_ns.is_none(), false, false)
+            };
+        let opening_override_ns = self.opening_override_for(metadata.ingress_zone);
         let record = SessionRecord {
             key: key.clone(),
             entry: SessionEntry {
@@ -656,52 +679,12 @@ impl SessionTable {
                 // stamp is the local re-import time; the local close that
                 // follows reports age from here.
                 created_ns: now_ns,
-                // #3152: peer-synced TCP entries remain ESTABLISHED, not
-                // re-derived as OPENING from carried `tcp_flags`. The short
-                // opening window protects against locally received bare-SYN
-                // floods; a standby never sees that flood directly.
-                //
-                // #9412 CORRECTION. This comment used to continue "Crucially, the
-                // synced `tcp_flags` are the install-time flags (the opening SYN
-                // for a SYN-created flow) and are not guaranteed to be
-                // re-published as the primary's handshake completes". That reads
-                // as though the sync path carries real flags that #3152 chooses
-                // not to trust, and it is what sent an external review down the
-                // "the import re-derives close-state from the carried
-                // `tcp_flags`" path. It does not. The production import
-                // constructor hardcodes `tcp_flags: 0`
-                // (`server/helpers/session_sync.rs`), so on a peer-synced entry
-                // there is nothing to derive FROM: the `closing`, `reset` and
-                // `fin_own` bits derived from `tcp_flags` below are ALWAYS false.
-                // Before #9412 that meant a session closing on the primary
-                // imported as open and reaped on the ESTABLISHED window (300 s).
-                // #9412 carries close state on its OWN wire field,
-                // `tcp_close_class`, which is applied below. It never rides
-                // `tcp_flags`, and `tcp_flags_zero_on_sync_path_9412_tests.rs`
-                // pins the hard zero so that stays true.
-                //
-                // #3152's CONCLUSION is unaffected and its reasoning still
-                // stands on its own: were the flags ever carried, deriving
-                // OPENING from them could misclassify a LIVE established flow on
-                // the standby and reap its synced copy at the short stale-synced
-                // ceiling (`STALE_SYNCED_CEILING_MULT × opening`), breaking failover
-                // for any flow older than that ceiling. Importing TCP as
-                // ESTABLISHED preserves the exact pre-#3152 standby behaviour
-                // (full established timeout + #2120 standby retention). The
-                // half-open table-exhaustion mitigation still holds end to end:
-                // the primary (the flood target) reaps its half-opens at
-                // `tcp_opening_ns` and emits a Close delta (session/expire.rs)
-                // that propagates to the standby, so the standby copy is
-                // removed promptly without needing its own OPENING window.
-                // #10889: no reply-evidence bit crosses HA; custom non-TCP
-                // imports stay on the global window until this node sees a
-                // reverse packet. TCP imports keep their established behavior.
+                // #10888: explicit sync state preserves opening and pending TCP
+                // handshakes across failover. Zero/unknown retains the legacy
+                // established import behavior.
                 established,
-                // #6752: a mid-stream pickup is seeded ESTABLISHED with no handshake
-                // to wait for — pending must stay false or it would be held on the
-                // opening window forever.
-                handshake_pending: false,
-                syn_ack_first: false,
+                handshake_pending,
+                syn_ack_first,
                 // #7212: a peer-synced import carries NO locally-derived
                 // input-filter verdict — the peer adjudicated it against the
                 // peer's own interfaces. `UNVALIDATED` makes the first packet
@@ -719,26 +702,17 @@ impl SessionTable {
                 policy_revalidated_gen: 0,
                 policy_scheduler_expired: false,
                 policy_revalidation_kind: PolicyRevalidationKind::Unvalidated,
-                // #9412: a peer-stated close class puts the copy on its close
-                // window, through the same formula the owning node used. Without
-                // one, TCP imports remain ESTABLISHED as before; custom
-                // non-TCP overrides stay on the global window until reply.
+                // #9412: a delivered Close class takes precedence over the
+                // opening handshake deadline.
                 expires_after_ns: match wire_close {
                     Some(class) => tcp_close_window_ns(class, &self.timeouts),
                     None => session_timeout_ns(
                         protocol,
                         tcp_flags,
-                        // #3152/#10889: TCP imports remain established; an
-                        // app-managed datagram import has no local reply proof.
-                        established,
+                        established && !handshake_pending,
                         &self.timeouts,
-                        // #3227: per-application idle timeout override (None = global).
                         metadata.inactivity_timeout_ns,
-                        // #3527: TCP imports are established, while non-TCP
-                        // protocols never consult the TCP-only opening override.
-                        // Passing None avoids deriving a local zone override on
-                        // HA import; locally received bare SYNs still use it.
-                        None,
+                        opening_override_ns,
                     ),
                 },
                 closing: wire_close.is_some() || (matches!(protocol, PROTO_TCP) && is_closing(tcp_flags)),
@@ -859,7 +833,9 @@ impl SessionTable {
         // #9412: the live entry's close class, so this re-export also restores a
         // close-state Update the incremental stream dropped.
         let tcp_close_class = self.close_class_wire_for(&key);
+        let tcp_handshake_state = self.handshake_state_wire_for(&key);
         Some(SessionDelta { provenance, tcp_close_class,
+        tcp_handshake_state,
         purge_retirement: false,
         kind: SessionDeltaKind::Open,
         key,
@@ -974,6 +950,7 @@ impl SessionTable {
         session_id,
         bulk_resync: false,
         tcp_close_class: 0,
+        tcp_handshake_state: 0,
         purge_retirement, });
     }
 

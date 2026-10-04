@@ -259,8 +259,7 @@ impl SessionTable {
         // #9412: the matched entry's close class BEFORE this packet (wire form),
         // captured inside the borrow below so a TRANSITION can be announced to
         // the peer once the borrow has ended.
-        let mut close_class_before = 0u8;
-        let (result, actual_key, propagate) = {
+        let (result, actual_key, propagate, close_class_before, handshake_state_before) = {
             let record = self.entries.get_mut(handle as usize)?;
             // #964 Step 1: path-specific validation defends against
             // a stale secondary index pointing at a slab slot that
@@ -279,7 +278,8 @@ impl SessionTable {
             }
             let is_tcp = matches!(key.protocol, PROTO_TCP);
             let entry = &mut record.entry;
-            close_class_before = entry.tcp_close_class_wire();
+            let close_class_before = entry.tcp_close_class_wire();
+            let handshake_state_before = entry.tcp_handshake_state_wire(key.protocol);
             // #10885: only close progress or traffic from the non-FINed
             // direction refreshes a closing entry. A RST-aborted entry and
             // both TIME_WAIT halves therefore keep a fixed deadline.
@@ -396,6 +396,8 @@ impl SessionTable {
                 ),
                 record.key.clone(),
                 propagate,
+                close_class_before,
+                handshake_state_before,
             )
         }; // <-- &mut self.entries borrow ends here
         // #4109: mirror the close (F17) / handshake promotion (F16) onto the
@@ -404,18 +406,21 @@ impl SessionTable {
         // from the matched CANONICAL key (`actual_key`, not the alias lookup
         // `key`) + its own nat, exactly as `account_packet` hops reverse→forward.
         // Skipped entirely when there is nothing to propagate.
-        let closed_this_packet = propagate.close;
-        if propagate.close || propagate.established || propagate.handshake_completed {
+        let state_transition =
+            propagate.close || propagate.established || propagate.handshake_completed;
+        if state_transition {
             self.propagate_tcp_state_to_companion(&actual_key, now_ns, propagate);
         }
-        // #9412: a closing packet may have moved the session to a new close
-        // class. Announce it to the peer, which otherwise keeps its install-time
-        // copy and reaps it on the established window after a failover. Runs
-        // after the companion propagation, so a TIME_WAIT reached through the
-        // other half is seen. `emit_close_state_update` emits only on a real
-        // class change, and only for a session this node owns.
-        if closed_this_packet {
-            self.emit_close_state_update(&actual_key, close_class_before);
+        // #9412/#10888: announce close-class and handshake-state transitions
+        // after companion propagation, so the forward entry's exported state
+        // reflects both directions. The emitter ignores unchanged states and
+        // peer-owned copies.
+        if state_transition {
+            self.emit_session_state_update(
+                &actual_key,
+                close_class_before,
+                handshake_state_before,
+            );
         }
         // Push the canonical key (NOT the alias lookup `key`) into
         // the wheel. push_to_wheel re-reads the record to compute
@@ -465,8 +470,7 @@ impl SessionTable {
             None => return,
         };
         let timeouts = self.timeouts;
-        let mut close_class_before = 0u8;
-        let (actual_key, propagate) = {
+        let (actual_key, propagate, close_class_before, handshake_state_before) = {
             let record = match self.entries.get_mut(handle as usize) {
                 Some(record) => record,
                 None => return,
@@ -478,7 +482,8 @@ impl SessionTable {
                 return;
             }
             let entry = &mut record.entry;
-            close_class_before = entry.tcp_close_class_wire();
+            let close_class_before = entry.tcp_close_class_wire();
+            let handshake_state_before = entry.tcp_handshake_state_wire(key.protocol);
             if !Self::stamp_tcp_close(entry, key, tcp_flags) {
                 return;
             }
@@ -494,10 +499,12 @@ impl SessionTable {
                     established: false,
                     handshake_completed: false,
                 },
+                close_class_before,
+                handshake_state_before,
             )
         };
         self.propagate_tcp_state_to_companion(&actual_key, now_ns, propagate);
-        self.emit_close_state_update(&actual_key, close_class_before);
+        self.emit_session_state_update(&actual_key, close_class_before, handshake_state_before);
         self.push_to_wheel(&actual_key, now_ns);
     }
 
