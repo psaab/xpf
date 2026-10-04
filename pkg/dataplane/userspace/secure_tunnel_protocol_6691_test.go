@@ -152,10 +152,11 @@ const preSecureTunnelProtocolVersion = 4
 // moves it to v41 for ConfigSnapshot.ForwardingTables FI link-local gateway
 // authorization; #11503 moves it to v42 for unzoned-denial cause counters;
 // #11463 moves it to v43 for disabled-member FIB filtering; #11423 moves it to
-// v44 for TunnelEndpointSnapshot.LinkUp keepalive-driven tunnel liveness.
-// Nothing about secure_tunnel changed, so MinProtocolSecureTunnelRefusal (7)
-// is untouched again.
-const secureTunnelSnapshotProtocolVersion = 44
+// v44 for TunnelEndpointSnapshot.LinkUp keepalive-driven tunnel liveness;
+// #11812 moves it to v45 for PolicerSnapshot optional single-rate marking and
+// logical-interface-policer fields. Nothing about secure_tunnel changed, so
+// MinProtocolSecureTunnelRefusal (7) is untouched again.
+const secureTunnelSnapshotProtocolVersion = 45
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

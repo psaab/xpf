@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "a03567c31193dcb0bf8bf3bd261f167b973cfe6537533216e38edf870a030661"
+	snapshotShapeGolden8892 = "b579834b5dcb821f4817efd55241ce31c8c7f4cc378cea4497d5abfced3b8084"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -433,6 +433,13 @@ const (
 	// InterfaceUnit.FamilyInet are compiler-only (`json:"-"`), so the helper's
 	// ConfigSnapshot JSON wire is unchanged. This reflection digest sees these
 	// Go-only fields, so refresh it without a bump.
+	// v44 STANDS (#11782): ConfigSnapshot.Config's recursive shape walk also
+	// sees RoutingInstanceConfig.GenerateRoutes, RibGroups,
+	// ForwardingTableExport, and ForwardingTableExports. Rust keeps `config`
+	// as opaque serde_json::Value and has no consumer for these retained values,
+	// so they move this Go digest without changing helper-consumed behavior.
+	// The clean base already had window drift: its digest was e138f7… rather
+	// than the old 5f4e… pin. Fold that pre-existing drift into this v45 golden.
 	// v44 -> v45 BUMPED (#11812): single-rate PolicerSnapshot adds optional
 	// marking-action and logical-interface-policer JSON fields. The keys are
 	// omitted by default and the current Rust runtime ignores them; warnings
