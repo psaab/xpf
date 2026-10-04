@@ -9,6 +9,17 @@ import (
 // diagnostics for Junos routing knobs that the compiler accepts but does not
 // apply.
 func routingKnobWarning11314(path []string, keyword string) string {
+	if keyword != bgpSAFIUnicast11815 && len(path) >= 2 &&
+		path[len(path)-2] == "family" &&
+		(path[len(path)-1] == "inet" || path[len(path)-1] == "inet6") {
+		for i := 0; i+1 < len(path); i++ {
+			if path[i] == "protocols" && path[i+1] == "bgp" {
+				return fmt.Sprintf(
+					"%s: BGP address-family SAFI %q is unsupported; only unicast is compiled, so this family is not activated (#11815)",
+					strings.Join(path, " "), keyword)
+			}
+		}
+	}
 	if keyword == "rib-group" && len(path) >= 3 &&
 		path[len(path)-3] == "static" && path[len(path)-2] == "route" {
 		hasRoutingOptions := false
