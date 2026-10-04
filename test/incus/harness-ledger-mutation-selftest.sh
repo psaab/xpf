@@ -189,6 +189,18 @@ MUTATIONS = {
         "        if today > expires:",
         "the UTC date boundary: a waiver survives its expiry day (#11056)",
     ),
+    "expected-red-local-date": (
+        PY_FILE, "py",
+        "        today = datetime.now(timezone.utc).date()",
+        "        today = datetime.now().date()",
+        "waiver expiry follows local midnight instead of the UTC boundary (#11056)",
+    ),
+    "expected-red-declaration-errors-ignored": (
+        PY_FILE, "py",
+        "            if decl_problems:",
+        "            if False:",
+        "a valid duplicate hides another expired or malformed declaration (#11056)",
+    ),
     "coverage-void-counts-as-measured": (
         PY_FILE, "py",
         '        measured_ever = [r for r in grows if r.get("verdict") in ("PASS", "FAIL")]',
