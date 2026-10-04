@@ -38,11 +38,22 @@ var ErrEBPFDataplaneRetired = errors.New(
 		"use 'set system dataplane-type userspace' " +
 		"(see #1373)")
 
-// duplicateBlockMergeWarning9023 gives dynamic named-block folds truthful
-// diagnostics for routing instances and rib-group definitions.
+// duplicateBlockMergeWarning9023 gives named and explicitly registered
+// unnamed-block folds truthful diagnostics.
 func duplicateBlockMergeWarning9023(what string) string {
 	if what == "routing-instances" {
 		return "duplicate `routing-instances` containers were merged in source order (#9023)"
+	}
+	if what == "routing-options static" {
+		return "duplicate unnamed `routing-options static` containers were merged in source order (#12043)"
+	}
+	for _, keyword := range []string{"routing-options", "protocols"} {
+		if strings.Count(what, " ") == 2 &&
+			strings.HasPrefix(what, "routing-instances ") && strings.HasSuffix(what, " "+keyword) {
+			scope := strings.TrimSuffix(what, " "+keyword)
+			return "duplicate unnamed `" + keyword + "` containers under " + scope +
+				" were merged in source order (#12043)"
+		}
 	}
 	if strings.HasPrefix(what, "routing-instances ") {
 		name := strings.TrimPrefix(what, "routing-instances ")
@@ -348,7 +359,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	// removes the duplicate and would therefore remove the diagnostic with it,
 	// swallowing exactly the information the gate was added to surface.
 	var dupMergeWarnings []string
-	// Issue 9023: repeated named BLOCKS merge on BOTH paths. The
+	// Issues 9023/#12043: registered duplicate containers merge on BOTH paths. The
 	// routing-instances dynamic-name fold (#11459) runs before typed compilation
 	// so strict and tolerant paths produce one deterministic record per name;
 	// the policy fold below remains tolerant-only because strict commits reject
@@ -712,7 +723,7 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	// removes the duplicate and would therefore remove the diagnostic with it,
 	// swallowing exactly the information the gate was added to surface.
 	var dupMergeWarnings []string
-	// Issue 9023: repeated named BLOCKS merge on BOTH paths. The
+	// Issues 9023/#12043: registered duplicate containers merge on BOTH paths. The
 	// routing-instances dynamic-name fold (#11459) runs before typed compilation
 	// so strict and tolerant paths produce one deterministic record per name;
 	// the policy fold below remains tolerant-only because strict commits reject
