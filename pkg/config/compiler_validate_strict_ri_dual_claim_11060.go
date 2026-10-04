@@ -43,7 +43,7 @@ func recordRIDualClaimConflicts(cfg *Config, conflicts []RoutingInstanceMemberDe
 		cfg.QuarantinedRIMemberDeviceConflicts, conflicts...)
 	for _, conflict := range conflicts {
 		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(
-			"routing-instance interface membership QUARANTINED on tolerant path: Linux device %q is claimed by %s; conflicting memberships will be removed and the device left unbound in the default routing instance (#11060)",
+			"routing-instance interface membership QUARANTINED on tolerant path: Linux device %q is claimed by %s; conflicting memberships will be removed and its session routing domain quarantined instead of default domain 0 (#9956 F-032, #11060)",
 			conflict.LinuxName, formatRoutingInstanceMemberClaims(conflict.Claims)))
 	}
 }

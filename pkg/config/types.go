@@ -477,8 +477,10 @@ type Config struct {
 	QuarantinedRoutingInstances []*RoutingInstanceConfig `json:"-"`
 	// QuarantinedRIMemberDeviceConflicts records tolerant-load #11060 device
 	// ownership conflicts after every ambiguous RI membership has been removed.
-	// The active config needs this compile-time evidence for apply-time alarms
-	// and config-derived metrics; it is not part of the wire/config shape.
+	// The userspace snapshot builders use this compile-time evidence to assign
+	// contested rows the #9956 F-032 sentinel session domain instead of 0.
+	// It also backs apply-time alarms and config-derived metrics; it is not part
+	// of the wire/config shape.
 	QuarantinedRIMemberDeviceConflicts []RoutingInstanceMemberDeviceConflict `json:"-"`
 	// QuarantinedRIMemberPrimaryClaims preserves uncontested primary device
 	// keys from bare refs whose fanout was partially quarantined. These typed

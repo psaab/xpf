@@ -306,8 +306,8 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 	}
 	zoneByInterface := buildInterfaceZoneMap(cfg)
 	ifaceRoutingInstance := buildInterfaceRoutingInstances(cfg)
-	// #9956 F-032: keys ONLY a quarantined instance claims take the sentinel
-	// session domain (never the default 0) via routingDomainForInterfaceKey.
+	// #9956 F-032: quarantined-instance members and #11060 contested device
+	// rows take the sentinel session domain (never default 0).
 	quarantinedKeys := quarantinedInterfaceKeys(cfg)
 	usedSyntheticIfindexes := make(map[int]struct{})
 	// Build RETH RG lookup: physical member → RETH's RedundancyGroup.

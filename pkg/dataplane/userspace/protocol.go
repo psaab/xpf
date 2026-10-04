@@ -1067,8 +1067,9 @@ type InterfaceSnapshot struct {
 	RoutingInstance string `json:"routing_instance,omitempty"`
 	// RoutingDomain is the #7160 (#2387) ROUTING DOMAIN id for
 	// RoutingInstance: `config.StableRoutingInstanceTableID(RoutingInstance)`
-	// for a named instance, 0 for the default instance — except an interface
-	// no surviving instance claims but a quarantined one does, which ships
+	// for a named instance, 0 for the default instance — except a row whose
+	// ownership was quarantined with no surviving RI (a dropped instance or
+	// #11060 multi-instance device claim), which ships
 	// QuarantinedRoutingInstanceDomain (2, #9956 F-032): nonzero so it never
 	// shares the default session space, outside the stable band so it never
 	// collides with a tenant, HA-refused on import. It is the discriminator
