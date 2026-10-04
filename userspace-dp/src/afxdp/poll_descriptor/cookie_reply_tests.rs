@@ -299,6 +299,51 @@ fn syn_cookie_reply_classifies_on_logical_vlan_ifindex_3035() {
     assert!(pipeline.pending_tx_local.is_empty());
 }
 
+/// #11786 fail-on-revert: classification and CoS enqueueing must use the
+/// logical VLAN unit, while the worker's TX pipeline remains on its physical
+/// parent binding.
+#[test]
+fn syn_cookie_reply_queues_on_logical_vlan_ifindex_11786() {
+    let (frame, mut meta, flow) = tcp_v4_syn_frame();
+    meta.ingress_ifindex = 11;
+    meta.ingress_vlan_id = 80;
+    let mut snapshot = vlan_drop_tcp_snapshot();
+    snapshot.interfaces[0].filter_output_v4.clear();
+    let mut forwarding = build_forwarding_state(&snapshot);
+    forwarding.tx_selection_enabled_v4 = true;
+    forwarding
+        .cos
+        .interfaces
+        .insert(202, crate::afxdp::tests_support::test_reply_cos_interface(4));
+
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+        0,
+    );
+    let mut counters = BatchCounters::default();
+    assert!(enqueue_syn_cookie_reply(
+        &mut pipeline,
+        &forwarding,
+        11,
+        &frame,
+        meta,
+        Some(&flow),
+        SynCookieReply::SynAck(SynCookieChallenge {
+            cookie_isn: 0xaabb_ccdd,
+            peer_mss: 1460,
+        }),
+        &mut counters,
+    ));
+
+    let request = pipeline
+        .pending_tx_local
+        .front()
+        .expect("generated SYN-ACK queued");
+    assert_eq!(request.egress_ifindex, 202, "CoS key is logical unit");
+    assert_eq!(request.cos_queue_id, Some(4), "logical default queue is selected");
+}
+
 /// #3035 non-VLAN regression: on an untagged interface the logical unit IS
 /// the bind ifindex (no (parent, vlan) mapping), so `resolve_ingress_-
 /// logical_ifindex` returns None and the classify falls back to the

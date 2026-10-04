@@ -334,7 +334,7 @@ pub(super) fn build_local_time_exceeded_request(
         decision: SessionDecision { resolution: ForwardingResolution {
             disposition: ForwardingDisposition::ForwardCandidate,
             local_ifindex: 0,
-            egress_ifindex: ingress_ident.ifindex,
+            egress_ifindex: logical_ingress,
             tx_ifindex: target_ifindex,
             tunnel_endpoint_id: 0,
             next_hop: None,

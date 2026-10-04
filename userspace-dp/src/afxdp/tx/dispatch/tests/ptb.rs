@@ -1165,3 +1165,42 @@ fn successful_forward_commits_one_mirror_clone_11432() {
     assert_eq!(bindings[0].live.mirrored_packets.load(Ordering::Relaxed), 1);
     assert!(!reasons.iter().any(|reason| reason == "egress_mtu_exceeded"));
 }
+
+/// #11786 fail-on-revert: PMTUD classification and the queued CoS key must
+/// agree on the logical VLAN unit; transmission still uses the physical bind.
+#[test]
+fn forwarded_ptb_queues_on_logical_vlan_ifindex_11786() {
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    let mut forwarding = forwarding_for_ptb(1400);
+    forwarding.egress.remove(&11);
+    forwarding.egress.insert(
+        202,
+        EgressInterface {
+            bind_ifindex: 11,
+            vlan_id: 80,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x16, 0x00, 0x01],
+            zone_id: TEST_TRUST_ZONE_ID,
+            redundancy_group: 0,
+            primary_v4: Some(std::net::Ipv4Addr::new(10, 0, 1, 1)),
+            primary_v6: None,
+        },
+    );
+    forwarding.ingress_logical_ifindex.insert((11, 80), 202);
+    forwarding.tx_selection_enabled_v4 = true;
+    forwarding
+        .cos
+        .interfaces
+        .insert(202, crate::afxdp::tests_support::test_reply_cos_interface(4));
+
+    let (bindings, _dbg, counters, _reasons) =
+        run_ptb_dispatch_with_forwarding_and_vlan(forwarding, 80);
+    let request = bindings[0]
+        .tx_pipeline
+        .pending_tx_local
+        .front()
+        .expect("generated Packet-Too-Big queued on ingress binding");
+    assert_eq!(request.egress_ifindex, 202, "CoS key is logical unit");
+    assert_eq!(request.cos_queue_id, Some(4), "logical default queue is selected");
+    assert_eq!(counters.ptb_output_filter_drops, 0);
+}
