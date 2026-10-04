@@ -1459,6 +1459,13 @@ path warns (`lenientIPsecBindTSOverlap`) rather than newly bricking an
 already-persisted config (#1960). This is a static admission proof; it does not
 replace the lab check that each routed prefix is encrypted only on its own SA.
 
+**Repeated unnamed routing containers merge (#12043):** hierarchical loads can
+retain sibling `routing-options { static { ... } }` blocks or repeated
+per-instance `routing-options` and `protocols` containers. Junos merges these
+stanzas, so strict compilation folds their contents in source order before
+building routes and protocols; every sibling's configuration survives, and the
+compiler emits a merge warning instead of silently selecting one block.
+
 **Static routes through XFRM must fit the remote selector union (#11422):**
 the typed gate checks global and routing-instance static routes whose
 next-hop interface names an IPsec bind device. The destination prefix must be
