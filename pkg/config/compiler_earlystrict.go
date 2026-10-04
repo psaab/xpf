@@ -189,6 +189,14 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 	// step with its own guard rather than slotted in alongside
 	// the independent set.
 	var strictErrs []error
+	// A tolerant load must not pass a bad priority through to Rust's
+	// whole-snapshot fail-closed rank parser. Clear it to the legacy-low
+	// default before the shared typed CoS strict validator runs; strict commits
+	// leave the token intact so validateClassOfServiceStrict rejects it.
+	if opts.lenientCoSSchedulerPriority {
+		cfg.Warnings = append(cfg.Warnings,
+			sanitizeClassOfServiceSchedulerPriorities(cfg.ClassOfService)...)
+	}
 	if err := validateClassOfServiceStrict(cfg.ClassOfService); err != nil {
 		strictErrs = append(strictErrs, err)
 	}

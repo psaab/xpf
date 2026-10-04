@@ -151,6 +151,87 @@ func validateClassOfServiceSchedulerMapRefsStrict(cos *ClassOfServiceConfig) err
 	return nil
 }
 
+// cosSchedulerPriorityValues is the complete Junos scheduler-priority set
+// accepted by the Rust CoS queue builder. Keep this aligned with the schema's
+// `priority` enum and `cos_priority_rank` in userspace-dp.
+var cosSchedulerPriorityValues = map[string]struct{}{
+	"low":         {},
+	"medium-low":  {},
+	"medium-high": {},
+	"high":        {},
+	"strict-high": {},
+}
+
+// CoSSchedulerPriorityValid reports whether priority is a known Junos
+// scheduler priority or the legitimate empty/unset value. The userspace
+// snapshot emitter uses this as a final boundary check.
+func CoSSchedulerPriorityValid(priority string) bool {
+	if priority == "" {
+		return true
+	}
+	_, ok := cosSchedulerPriorityValues[priority]
+	return ok
+}
+
+// validateClassOfServiceSchedulerPriorityStrict rejects a non-empty priority
+// that the Rust queue builder would fail closed on. Visit schedulers in stable
+// name order so commit-check errors are deterministic.
+func validateClassOfServiceSchedulerPriorityStrict(cos *ClassOfServiceConfig) error {
+	if cos == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cos.Schedulers))
+	for name := range cos.Schedulers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		sched := cos.Schedulers[name]
+		if sched == nil || CoSSchedulerPriorityValid(sched.Priority) {
+			continue
+		}
+		displayName := sched.Name
+		if displayName == "" {
+			displayName = name
+		}
+		return fmt.Errorf(
+			"class-of-service scheduler %q priority %q is unrecognized "+
+				"(must be one of: low, medium-low, medium-high, high, strict-high)",
+			displayName, sched.Priority)
+	}
+	return nil
+}
+
+// sanitizeClassOfServiceSchedulerPriorities clears every unrecognized priority
+// on tolerant loads. Empty is the documented legacy default (low) in Rust, so
+// this keeps the load bootable without passing the fail-closed token onward.
+func sanitizeClassOfServiceSchedulerPriorities(cos *ClassOfServiceConfig) []string {
+	if cos == nil {
+		return nil
+	}
+	names := make([]string, 0, len(cos.Schedulers))
+	for name := range cos.Schedulers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var warnings []string
+	for _, name := range names {
+		sched := cos.Schedulers[name]
+		if sched == nil || CoSSchedulerPriorityValid(sched.Priority) {
+			continue
+		}
+		displayName := sched.Name
+		if displayName == "" {
+			displayName = name
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"class-of-service scheduler %q priority %q (downgraded to warning on tolerant path; cleared to unset low default, issue #11798)",
+			displayName, sched.Priority))
+		sched.Priority = ""
+	}
+	return warnings
+}
+
 // cosLossPriorityValues is the set of loss-priority values Junos accepts on a
 // class-of-service DSCP / 802.1p classifier or DSCP rewrite-rule. It mirrors
 // cos_loss_priority_index in userspace-dp forwarding_build/cos.rs.
@@ -759,6 +840,12 @@ func validateClassOfServiceStrict(cos *ClassOfServiceConfig) error {
 					"(must not exceed 100%%)",
 				schedMap.Name, totalPercent)
 		}
+	}
+	// The Rust scheduler rank parser is deliberately fail-closed for every
+	// unknown non-empty priority. Keep the primary strict gate on the typed CoS
+	// model so direct compiled-config callers cannot bypass schema validation.
+	if err := validateClassOfServiceSchedulerPriorityStrict(cos); err != nil {
+		return err
 	}
 	return nil
 }
