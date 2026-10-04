@@ -796,9 +796,9 @@ conflicting RI memberships before either dataplane is built; unaffected
 generated units from a bare member are retained as explicit refs, and an
 uncontested primary key is retained as a typed base-only claim without keeping
 the fanout-capable bare reference. Conflicting tunnel stanzas are cleared, so
-the tunnel manager cannot re-enslave the quarantined device. The contested
-device is left unbound in the default routing context.
-warning and apply-time ERROR log name the device and competing claims, and
+the tunnel manager cannot re-enslave the quarantined device. Its snapshot row
+uses the #9956 F-032 sentinel session domain instead of default domain 0.
+Warnings and the apply-time ERROR log name the device and competing claims, and
 `xpf_routing_instance_member_device_conflicts` remains alertable for the active
 config (`> 0` means a tolerant-load quarantine is in effect).
 

@@ -1062,27 +1062,27 @@ func buildInterfaceRoutingInstances(cfg *config.Config) map[string]string {
 }
 
 // QuarantinedRoutingInstanceDomain is the session-domain label for an
-// interface no surviving routing instance claims but a quarantined one does
-// (#9956 F-032). 2, not 1: the HA session-sync codec maps wire 1 to
-// Present(default) (`routing_domain_wire.rs`), so 1 would reintroduce the
-// default-domain aliasing on the peer; 2 decodes Unrecognized and the peer
-// REFUSES the import (fail-closed) while bumping
+// interface whose routing-instance ownership was quarantined (#9956 F-032),
+// either because its whole instance was dropped or because multiple
+// instances claimed its Linux device (#11060). 2, not 1: the HA session-sync
+// codec maps wire 1 to Present(default) (`routing_domain_wire.rs`), so 1 would
+// reintroduce default-domain aliasing on the peer; 2 decodes Unrecognized and
+// the peer REFUSES the import (fail-closed) while bumping
 // SyncedImportUnknownRoutingDomain. Outside the stable band [100000, 999999),
-// so never a real tenant's domain — which matters because the #3855 door
-// means StableRoutingInstanceTableID(quarantined) EQUALS the survivor's. A
-// const, so both HA nodes agree with no synced state.
+// so never a real tenant's domain — which matters because the #3855 door means
+// StableRoutingInstanceTableID(quarantined) EQUALS the survivor's. A const, so
+// both HA nodes agree with no synced state.
 const QuarantinedRoutingInstanceDomain uint32 = 2
 
-// quarantinedInterfaceKeys expands every quarantined routing instance's
-// interface refs to the same alias and fanout contract as the survivor maps —
-// cross-spelled unit keys are translated to their declared stanza, while
-// existing same-spelling bare refs retain their normal fanout. A survivor map
-// always wins later in routingDomainForInterfaceKey, so these extra keys
-// cannot overwrite a surviving claim. That fanout reads cfg.Interfaces.Units,
-// never cfg.RoutingInstances, so dropped instances expand normally. Returns
-// nil when nothing was quarantined (the common case).
+// quarantinedInterfaceKeys expands whole quarantined instances' interface
+// refs to the same alias and fanout contract as the survivor maps. It also
+// marks every emitted row key whose Linux device has a recorded #11060
+// multi-instance claim. A survivor map always wins later in
+// routingDomainForInterfaceKey, so these extra keys cannot overwrite a
+// surviving claim. Returns nil when nothing was quarantined.
 func quarantinedInterfaceKeys(cfg *config.Config) map[string]struct{} {
-	if cfg == nil || len(cfg.QuarantinedRoutingInstances) == 0 {
+	if cfg == nil || (len(cfg.QuarantinedRoutingInstances) == 0 &&
+		len(cfg.QuarantinedRIMemberDeviceConflicts) == 0) {
 		return nil
 	}
 	out := make(map[string]struct{})
@@ -1100,13 +1100,39 @@ func quarantinedInterfaceKeys(cfg *config.Config) map[string]struct{} {
 			}
 		}
 	}
+	for _, conflict := range cfg.QuarantinedRIMemberDeviceConflicts {
+		if conflict.LinuxName == "" {
+			continue
+		}
+		for _, claim := range conflict.Claims {
+			for _, key := range config.RoutingInstanceMemberDeviceKeys(cfg, tunnelNames, claim.Member) {
+				if key.LinuxName == conflict.LinuxName {
+					out[key.InterfaceKey] = struct{}{}
+				}
+			}
+		}
+		for ifName, iface := range cfg.Interfaces.Interfaces {
+			if iface == nil {
+				continue
+			}
+			if snapshotLinuxName(cfg, ifName, iface, nil) == conflict.LinuxName {
+				out[ifName] = struct{}{}
+			}
+			for unitNum, unit := range iface.Units {
+				if unit != nil && snapshotLinuxName(cfg, ifName, iface, unit) == conflict.LinuxName {
+					out[fmt.Sprintf("%s.%d", ifName, unitNum)] = struct{}{}
+				}
+			}
+		}
+	}
 	return out
 }
 
 // routingDomainForInterfaceKey resolves the session domain for one snapshot
 // row key. Survivor-wins: a key the survivor map claims keeps the survivor's
-// domain (the byte-identical survivor path); a key ONLY the quarantined set
-// claims takes the sentinel; anything else keeps today's answer (0 = default).
+// domain (the byte-identical survivor path); a key only a quarantined instance
+// or contested Linux device claims takes the sentinel; anything else keeps
+// today's answer (0 = default).
 func routingDomainForInterfaceKey(key string, ifaceRI map[string]string, quarantined map[string]struct{}) uint32 {
 	if name, survives := ifaceRI[key]; survives {
 		return routingInstanceDomain(name)
@@ -1136,9 +1162,10 @@ func routingDomainForInterfaceKey(key string, ifaceRI map[string]string, quarant
 //
 // Quarantined interfaces do NOT flow through this function: row builders call
 // routingDomainForInterfaceKey, which returns QuarantinedRoutingInstanceDomain
-// (2) for a key only a quarantined instance claims (#9956 F-032). The #7160
-// band test pins THIS function's band; the sentinel deliberately lives outside
-// it (the #3855 door means the stable id itself would collide).
+// (2) for keys claimed by a quarantined instance or a contested device
+// (#9956 F-032/#11060). The #7160 band test pins THIS function's band; the
+// sentinel deliberately lives outside it (the #3855 door means the stable id
+// itself would collide).
 func routingInstanceDomain(name string) uint32 {
 	if name == "" {
 		return 0
