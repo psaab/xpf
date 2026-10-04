@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Reject user applications and application-sets named `any` at commit
+    because `match application any` resolves as match-all before name lookup;
+    warn on tolerant loads while preserving the keyword semantics (#12048).
+
   * Compile every sibling `rib-groups` container so repeated definitions
     preserve all imports (#12022).
   * Preserve routing-policy `then next policy` control flow across flat and
