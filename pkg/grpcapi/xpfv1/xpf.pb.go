@@ -7786,8 +7786,15 @@ type MatchPoliciesResponse struct {
 	// and cannot distinguish the zero-logical-egress NoRoute exception; clients
 	// should use this as the conservative resolved-egress simulator verdict.
 	UnzonedEgress bool `protobuf:"varint,27,opt,name=unzoned_egress,json=unzonedEgress,proto3" json:"unzoned_egress,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// #10974: feed_publication_debt marks a simulator result indeterminate when
+	// evaluation consulted installed feed content that was not confirmed applied
+	// to the dataplane. In this case matched/default_used are false and action
+	// carries the explanatory debt note rather than a simulated verdict.
+	FeedPublicationDebt      bool     `protobuf:"varint,28,opt,name=feed_publication_debt,json=feedPublicationDebt,proto3" json:"feed_publication_debt,omitempty"`
+	FeedPublicationDebtFeeds []string `protobuf:"bytes,29,rep,name=feed_publication_debt_feeds,json=feedPublicationDebtFeeds,proto3" json:"feed_publication_debt_feeds,omitempty"`
+	FeedPublicationDebtNote  string   `protobuf:"bytes,30,opt,name=feed_publication_debt_note,json=feedPublicationDebtNote,proto3" json:"feed_publication_debt_note,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *MatchPoliciesResponse) Reset() {
@@ -8007,6 +8014,27 @@ func (x *MatchPoliciesResponse) GetUnzonedEgress() bool {
 		return x.UnzonedEgress
 	}
 	return false
+}
+
+func (x *MatchPoliciesResponse) GetFeedPublicationDebt() bool {
+	if x != nil {
+		return x.FeedPublicationDebt
+	}
+	return false
+}
+
+func (x *MatchPoliciesResponse) GetFeedPublicationDebtFeeds() []string {
+	if x != nil {
+		return x.FeedPublicationDebtFeeds
+	}
+	return nil
+}
+
+func (x *MatchPoliciesResponse) GetFeedPublicationDebtNote() string {
+	if x != nil {
+		return x.FeedPublicationDebtNote
+	}
+	return ""
 }
 
 // HostInboundAdmission is the structured host-inbound-traffic classifier verdict
@@ -10041,7 +10069,8 @@ const file_xpf_proto_rawDesc = "" +
 	"\n" +
 	"_icmp_typeB\f\n" +
 	"\n" +
-	"_icmp_code\"\xe5\b\n" +
+	"_icmp_code\"\x95\n" +
+	"\n" +
 	"\x15MatchPoliciesResponse\x12\x1f\n" +
 	"\vpolicy_name\x18\x01 \x01(\tR\n" +
 	"policyName\x12\x16\n" +
@@ -10071,7 +10100,10 @@ const file_xpf_proto_rawDesc = "" +
 	"\x0froute_drop_note\x18\x18 \x01(\tR\rrouteDropNote\x128\n" +
 	"\x18fragment_associated_deny\x18\x19 \x01(\bR\x16fragmentAssociatedDeny\x12,\n" +
 	"\x12fragment_deny_note\x18\x1a \x01(\tR\x10fragmentDenyNote\x12%\n" +
-	"\x0eunzoned_egress\x18\x1b \x01(\bR\runzonedEgressB\f\n" +
+	"\x0eunzoned_egress\x18\x1b \x01(\bR\runzonedEgress\x122\n" +
+	"\x15feed_publication_debt\x18\x1c \x01(\bR\x13feedPublicationDebt\x12=\n" +
+	"\x1bfeed_publication_debt_feeds\x18\x1d \x03(\tR\x18feedPublicationDebtFeeds\x12;\n" +
+	"\x1afeed_publication_debt_note\x18\x1e \x01(\tR\x17feedPublicationDebtNoteB\f\n" +
 	"\n" +
 	"_policy_id\"\x9e\x01\n" +
 	"\x14HostInboundAdmission\x12:\n" +

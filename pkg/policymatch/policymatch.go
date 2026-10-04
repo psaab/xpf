@@ -421,13 +421,15 @@ type Query struct {
 
 	// FeedOverlay is the dynamic-address feed-prefix overlay (#2049): an
 	// address-name -> union-of-live-feed-CIDR-strings map, the same shape the
-	// snapshot builder consumes (feeds.Manager.SnapshotForBindings). When a
-	// policy address token names a feed-backed address-name, its feed CIDRs are
-	// merged with any static address-book content for that name. nil is valid
-	// (no feed enforcement / surface without live feed access); a feed-backed
-	// name then resolves to its static content only, matching the runtime
-	// fail-closed-before-first-fetch behavior.
+	// snapshot builder consumes. The simulator evaluates installed content but
+	// separately reports publication debt when that content was not confirmed
+	// applied, so callers never present this verdict as definitely enforced.
 	FeedOverlay map[string][]string
+	// FeedPublicationDebt identifies installed feed names not confirmed applied
+	// to the dataplane. Live operator simulators populate this alongside
+	// FeedOverlay. The result is marked indeterminate if evaluation consults one
+	// of these names, including through a nested address-set member (#10974).
+	FeedPublicationDebt map[string]bool
 
 	// PolicyInactiveFn, when non-nil, reports whether a policy bound to the
 	// given scheduler name is currently runtime-inactive (#3104). It mirrors
@@ -950,6 +952,29 @@ type Result struct {
 	// so an operator reads WHY the fragment is denied (the security-over-
 	// availability over-drop) rather than mistaking it for a first-fragment deny.
 	FragmentAssociatedDeny bool
+	// FeedPublicationDebt means evaluation consulted installed feed content
+	// which the dataplane did not confirm applying. Matched/default fields are
+	// cleared in Match's deferred stamp so callers cannot treat the simulation
+	// as an enforced verdict. Names identify each feed that made it uncertain.
+	FeedPublicationDebt      bool
+	FeedPublicationDebtNames []string
+}
+
+// FeedPublicationDebtNotePrefix is the stable operator-facing marker for an
+// indeterminate simulator answer caused by unpublished feed content.
+const FeedPublicationDebtNotePrefix = "feed publication debt:"
+
+// FeedPublicationDebtNote explains that an affected simulator result is
+// indeterminate until the pending feed snapshot is accepted by the dataplane.
+func (r Result) FeedPublicationDebtNote() string {
+	if !r.FeedPublicationDebt {
+		return ""
+	}
+	note := FeedPublicationDebtNotePrefix + " installed content was not confirmed applied"
+	if len(r.FeedPublicationDebtNames) > 0 {
+		note += " for feed(s) " + strings.Join(r.FeedPublicationDebtNames, ", ")
+	}
+	return note + "; dataplane may still enforce the previous-good snapshot"
 }
 
 // FragmentDenyNotePrefix is the stable leading token of the fragment-associated
@@ -1195,6 +1220,8 @@ const ContentRejectedShowLine = "policy content rejected: the dataplane fails th
 //   - concrete policy match -> "<action>"
 func (r Result) DisplayAction() string {
 	switch {
+	case r.FeedPublicationDebt:
+		return r.FeedPublicationDebtNote()
 	case r.ContentRejected:
 		return ContentRejectedActionString
 	case r.UnsupportedTupleFamily:
@@ -1359,6 +1386,24 @@ func Match(cfg *config.Config, q Query) (res Result) {
 	// is part of the cached query snapshot and matches the dataplane's ID walk.
 	ids := snapshot.policyIDs
 	var addressMemo addressExpansionMemo
+	if len(q.FeedPublicationDebt) > 0 {
+		addressMemo.publicationDebt = q.FeedPublicationDebt
+		defer func() {
+			if len(addressMemo.consultedPublicationDebt) == 0 {
+				return
+			}
+			names := make([]string, 0, len(addressMemo.consultedPublicationDebt))
+			for name := range addressMemo.consultedPublicationDebt {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			res = Result{
+				FeedPublicationDebt:      true,
+				FeedPublicationDebtNames: names,
+				Action:                   config.PolicyDeny,
+			}
+		}()
+	}
 	addressMemoPtr := &addressMemo
 
 	// #3285: host-bound (LocalDelivery) traffic is governed by the dataplane's
@@ -1874,7 +1919,29 @@ type resolvedAddressToken struct {
 }
 
 type addressExpansionMemo struct {
-	resolved map[string]resolvedAddressToken
+	resolved                 map[string]resolvedAddressToken
+	publicationDebt          map[string]bool
+	consultedPublicationDebt map[string]struct{}
+}
+
+func noteFeedPublicationDebt(cfg *config.Config, name string, memo *addressExpansionMemo) {
+	if memo == nil || cfg == nil {
+		return
+	}
+	mark := func(feed string) {
+		if memo.publicationDebt[feed] {
+			if memo.consultedPublicationDebt == nil {
+				memo.consultedPublicationDebt = make(map[string]struct{})
+			}
+			memo.consultedPublicationDebt[feed] = struct{}{}
+		}
+	}
+	mark(name)
+	if binding := cfg.Security.DynamicAddress.AddressBindings[name]; binding != nil {
+		for _, feed := range binding.FeedNames {
+			mark(feed)
+		}
+	}
 }
 
 // matchAddr replicates policy.rs try_match_rule's per-side address logic
@@ -2067,6 +2134,15 @@ func containsAnyV6(nets []*net.IPNet, ip net.IP) bool {
 // classifyPolicyAddresses (book-name precedence) and policy.rs's
 // parse_v3_literal_set / expandBookNameToCIDRs.
 func resolveToken(cfg *config.Config, overlay map[string][]string, tok string) (v4nets, v6nets []*net.IPNet, anyV4, anyV6 bool) {
+	return resolveTokenWithMemo(cfg, overlay, tok, nil)
+}
+
+func resolveTokenWithMemo(
+	cfg *config.Config,
+	overlay map[string][]string,
+	tok string,
+	memo *addressExpansionMemo,
+) (v4nets, v6nets []*net.IPNet, anyV4, anyV6 bool) {
 	if tok == "" {
 		return nil, nil, false, false
 	}
@@ -2088,7 +2164,7 @@ func resolveToken(cfg *config.Config, overlay map[string][]string, tok string) (
 		// address-set, mirroring the dataplane's expandBookNameRecursive. This
 		// keeps the in-process simulator in parity with what the AF_XDP helper
 		// enforces (a `deny <set-containing-a-feed>` denies the feed portion).
-		values := expandBookName(cfg, overlay, tok, make(map[string]bool))
+		values := expandBookNameWithMemo(cfg, overlay, tok, make(map[string]bool), memo)
 		for _, val := range values {
 			addCIDRValue(val, &v4nets, &v6nets, &anyV4, &anyV6)
 		}
@@ -2112,7 +2188,7 @@ func resolvePolicyAddressToken(
 		return resolvedAddressToken{anyV4: v4, anyV6: v6}
 	}
 	if memo == nil || !isBookName(cfg, overlay, tok) {
-		v4nets, v6nets, anyV4, anyV6 := resolveToken(cfg, overlay, tok)
+		v4nets, v6nets, anyV4, anyV6 := resolveTokenWithMemo(cfg, overlay, tok, memo)
 		return resolvedAddressToken{v4nets: v4nets, v6nets: v6nets, anyV4: anyV4, anyV6: anyV6}
 	}
 	if memo.resolved != nil {
@@ -2120,7 +2196,7 @@ func resolvePolicyAddressToken(
 			return resolved
 		}
 	}
-	v4nets, v6nets, anyV4, anyV6 := resolveToken(cfg, overlay, tok)
+	v4nets, v6nets, anyV4, anyV6 := resolveTokenWithMemo(cfg, overlay, tok, memo)
 	resolved := resolvedAddressToken{v4nets: v4nets, v6nets: v6nets, anyV4: anyV4, anyV6: anyV6}
 	if memo.resolved == nil {
 		memo.resolved = make(map[string]resolvedAddressToken)
@@ -2233,12 +2309,23 @@ func isBookName(cfg *config.Config, overlay map[string][]string, tok string) boo
 // (closing the feed-portion under-deny in the simulator too). overlay may be
 // nil; ab may be nil while overlay carries the name (a pure feed binding).
 func expandBookName(cfg *config.Config, overlay map[string][]string, name string, visited map[string]bool) []string {
+	return expandBookNameWithMemo(cfg, overlay, name, visited, nil)
+}
+
+func expandBookNameWithMemo(
+	cfg *config.Config,
+	overlay map[string][]string,
+	name string,
+	visited map[string]bool,
+	memo *addressExpansionMemo,
+) []string {
 	if visited[name] {
 		return nil
 	}
 	visited[name] = true
 	defer delete(visited, name)
 
+	noteFeedPublicationDebt(cfg, name, memo)
 	var out []string
 	if feeds := overlay[name]; len(feeds) > 0 {
 		out = append(out, feeds...)
@@ -2253,10 +2340,10 @@ func expandBookName(cfg *config.Config, overlay map[string][]string, name string
 	}
 	if as, ok := ab.AddressSets[name]; ok {
 		for _, member := range as.Addresses {
-			out = append(out, expandBookName(cfg, overlay, member, visited)...)
+			out = append(out, expandBookNameWithMemo(cfg, overlay, member, visited, memo)...)
 		}
 		for _, nested := range as.AddressSets {
-			out = append(out, expandBookName(cfg, overlay, nested, visited)...)
+			out = append(out, expandBookNameWithMemo(cfg, overlay, nested, visited, memo)...)
 		}
 		return out
 	}

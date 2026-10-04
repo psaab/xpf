@@ -268,6 +268,8 @@ type feedShrinkHistory struct {
 	highWaterHash  [32]byte
 }
 
+var emptyFeedHash = sha256.Sum256(nil)
+
 type feedState struct {
 	name string // feed-name or server name
 	url  string // fully resolved URL
@@ -880,6 +882,14 @@ func carryForwardSnapshot(dst, src *feedState) {
 	dst.shrinkLastWarn = src.shrinkLastWarn
 	dst.shrinkHighWaterCount = src.shrinkHighWaterCount
 	dst.shrinkHighWaterHash = src.shrinkHighWaterHash
+	// Carry the last confirmed publish state across a same-name producer
+	// replacement. The daemon's apply re-enforces a carried snapshot; matching
+	// content stays no-thrash, while an existing content mismatch remains
+	// publication debt and is retried on the first fetch. Preserve this marker
+	// even for a hold-dropped feed: if its empty apply was rejected, the old
+	// published hash is needed to keep that debt visible until a later apply.
+	dst.publishedHash = src.publishedHash
+	dst.hasPublished = src.hasPublished
 	if !src.hasSnapshot || len(src.prefixes) == 0 {
 		return
 	}
@@ -890,19 +900,6 @@ func carryForwardSnapshot(dst, src *feedState) {
 	dst.lastSuccess = src.lastSuccess
 	dst.invalidLines = src.invalidLines
 	dst.invalidSample = append([]string(nil), src.invalidSample...)
-	// Carry the published-hash tracking forward too (#5646). The prior
-	// producer's snapshot is being re-enforced by the SAME applyConfigLocked
-	// that runs this Apply (it reads SnapshotForBindings from the carried
-	// prefixes), so its apply state is inherited: if the predecessor had
-	// successfully published this content, the replacement inherits
-	// publishedHash == hash and does NOT re-fire onUpdate on its first
-	// identical refetch (preserves the #5282 no-thrash contract). If the
-	// predecessor had unpublished publication DEBT (content fetched but its
-	// apply kept being rejected), hasPublished is false here, so the
-	// replacement's first fetch re-fires and retries — the debt is not lost
-	// across a reconfigure.
-	dst.publishedHash = src.publishedHash
-	dst.hasPublished = src.hasPublished
 }
 
 // StopAll cancels all running feed refresh goroutines.
@@ -1101,6 +1098,16 @@ func (m *Manager) SnapshotForBindings(daCfg *config.DynamicAddressConfig) map[st
 	return out
 }
 
+// feedPublicationDebt reports whether the desired installed state has not
+// been confirmed applied. A hold-drop desires the empty set, represented by
+// emptyFeedHash even though it has no installed snapshot slice.
+func feedPublicationDebt(fs *feedState) bool {
+	if fs.hasSnapshot {
+		return !fs.hasPublished || fs.publishedHash != fs.hash
+	}
+	return fs.holdDropped && (!fs.hasPublished || fs.publishedHash != emptyFeedHash)
+}
+
 // AllFeeds returns a snapshot of all feed states for display.
 func (m *Manager) AllFeeds() map[string]FeedInfo {
 	m.mu.RLock()
@@ -1112,9 +1119,14 @@ func (m *Manager) AllFeeds() map[string]FeedInfo {
 		// drop). The zero [32]byte would otherwise format as all-zero hex and
 		// masquerade as a real digest.
 		hash := ""
+		publishedHash := ""
 		if fs.hasSnapshot {
 			hash = fmt.Sprintf("%x", fs.hash)
 		}
+		if fs.hasPublished {
+			publishedHash = fmt.Sprintf("%x", fs.publishedHash)
+		}
+		publicationDebt := feedPublicationDebt(fs)
 		candidateHash := ""
 		candidateBaselineHash := ""
 		if fs.shrinkRefused {
@@ -1140,6 +1152,9 @@ func (m *Manager) AllFeeds() map[string]FeedInfo {
 			LastError:                   fs.lastError,
 			StaleSince:                  fs.staleSince,
 			Hash:                        hash,
+			PublishedHash:               publishedHash,
+			HasPublished:                fs.hasPublished,
+			PublicationDebt:             publicationDebt,
 			InvalidLines:                fs.invalidLines,
 			InvalidSample:               append([]string(nil), fs.invalidSample...),
 			Degraded:                    fs.invalidLines > 0,
@@ -1198,6 +1213,17 @@ type FeedInfo struct {
 	// HoldDropped is true after a hold-interval drop and until the next
 	// successful fetch (#9689).
 	HoldDropped bool
+	// PublishedHash is the hex sha256 of the snapshot last CONFIRMED applied
+	// to the dataplane ("" when nothing has ever been published). Hash above
+	// is the INSTALLED snapshot; the two differ while publication debt is
+	// outstanding (a rejected onUpdate apply, #10974). HasPublished
+	// distinguishes "never successfully published" from a genuine digest, and
+	// PublicationDebt reports installed != published — the content is fetched
+	// but the dataplane did not accept it, so every consumer showing the
+	// installed set as enforced must instead flag the debt.
+	PublishedHash   string
+	HasPublished    bool
+	PublicationDebt bool
 
 	// ShrinkRefused is the live refusal alarm; ShrinkRefusalCount is the
 	// manager-lifetime per-feed counter. The candidate tuple is present only
@@ -2090,8 +2116,6 @@ func dropSnapshotToEmptyLocked(fs *feedState) {
 	fs.staleSince = time.Time{}
 	fs.invalidLines = 0
 	fs.invalidSample = nil
-	fs.publishedHash = [32]byte{}
-	fs.hasPublished = false
 	fs.holdDropped = true
 	clearShrinkCandidate(fs)
 }
@@ -2120,8 +2144,15 @@ func (m *Manager) finishFailure(fs *feedState, transition feedFailureTransition,
 			if err := m.onUpdate(); err != nil {
 				slog.Warn("dynamic-address: drop-to-empty apply rejected — dataplane retains last-good set",
 					"name", fs.name, "err", err)
+				return
 			}
 		}
+		m.mu.Lock()
+		if cur, ok := m.feeds[fs.name]; ok && cur == fs && fs.holdDropped {
+			fs.publishedHash = emptyFeedHash
+			fs.hasPublished = true
+		}
+		m.mu.Unlock()
 		return
 	}
 	if !logRetained {

@@ -417,6 +417,7 @@ type xpfCollector struct {
 	// gauge is 1 while a retained snapshot is being served as stale.
 	feedSecondsSinceSuccess *prometheus.Desc
 	feedStale               *prometheus.Desc
+	feedPublicationDebt     *prometheus.Desc
 	feedShrinkRefusalsTotal *prometheus.Desc
 	feedShrinkRefused       *prometheus.Desc
 	// #9165: per-collector remote-syslog drop counters. Control-plane —
@@ -1137,6 +1138,7 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.feedStale
 	ch <- c.feedShrinkRefusalsTotal
 	ch <- c.feedShrinkRefused
+	ch <- c.feedPublicationDebt
 	ch <- c.syslogMessagesDropped
 	ch <- c.cosDrainLatencyBucket
 	ch <- c.cosDrainInvocationsTotal
@@ -1819,6 +1821,12 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 			}
 			ch <- prometheus.MustNewConstMetric(c.feedShrinkRefused,
 				prometheus.GaugeValue, shrinkRefused, name)
+			publicationDebt := 0.0
+			if info.PublicationDebt {
+				publicationDebt = 1
+			}
+			ch <- prometheus.MustNewConstMetric(c.feedPublicationDebt,
+				prometheus.GaugeValue, publicationDebt, name)
 		}
 	}
 

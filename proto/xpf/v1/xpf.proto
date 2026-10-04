@@ -1144,6 +1144,13 @@ message MatchPoliciesResponse {
   // and cannot distinguish the zero-logical-egress NoRoute exception; clients
   // should use this as the conservative resolved-egress simulator verdict.
   bool unzoned_egress = 27;
+  // #10974: feed_publication_debt marks a simulator result indeterminate when
+  // evaluation consulted installed feed content that was not confirmed applied
+  // to the dataplane. In this case matched/default_used are false and action
+  // carries the explanatory debt note rather than a simulated verdict.
+  bool feed_publication_debt = 28;
+  repeated string feed_publication_debt_feeds = 29;
+  string feed_publication_debt_note = 30;
 }
 
 // HostInboundAdmissionStatus classifies how the ingress zone's

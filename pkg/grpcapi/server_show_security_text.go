@@ -1088,6 +1088,14 @@ func renderDynamicAddressFeedStatusText(buf *strings.Builder, indent string, fi 
 	case !fi.StaleSince.IsZero():
 		fmt.Fprintf(buf, "%sSTALE since %s: fetches failing; last-good set retained\n", indent, fi.StaleSince.Format("2006-01-02 15:04:05"))
 	}
+	if fi.PublicationDebt {
+		published := fi.PublishedHash
+		if !fi.HasPublished {
+			published = "none"
+		}
+		fmt.Fprintf(buf, "%sPUBLICATION-DEBT: installed snapshot sha256=%s was not confirmed applied; last published sha256=%s (dataplane may still enforce the previous-good snapshot)\n",
+			indent, fi.Hash, published)
+	}
 	if fi.ShrinkRefusalCount > 0 {
 		fmt.Fprintf(buf, "%sShrink refusals: %d\n", indent, fi.ShrinkRefusalCount)
 	}

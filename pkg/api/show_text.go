@@ -286,6 +286,27 @@ func (s *Server) showTextHandler(w http.ResponseWriter, r *http.Request) {
 				buf.WriteString("\n")
 			}
 		}
+		if s.feedsFn != nil {
+			infos := s.feedsFn()
+			if len(infos) > 0 {
+				buf.WriteString("Feed runtime status:\n")
+				for _, feedName := range sortedKeys(infos) {
+					info := infos[feedName]
+					fmt.Fprintf(&buf, "  %s: installed prefixes=%d", feedName, info.Prefixes)
+					if info.PublicationDebt {
+						published := info.PublishedHash
+						if !info.HasPublished {
+							published = "none"
+						}
+						fmt.Fprintf(&buf, "; PUBLICATION-DEBT installed sha256=%s, last published sha256=%s (dataplane may still enforce previous-good snapshot)",
+							info.Hash, published)
+					} else if info.HasPublished {
+						fmt.Fprintf(&buf, "; published sha256=%s", info.PublishedHash)
+					}
+					buf.WriteString("\n")
+				}
+			}
+		}
 
 	case "address-book":
 		if cfg == nil || cfg.Security.AddressBook == nil {

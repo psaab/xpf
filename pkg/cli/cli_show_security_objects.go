@@ -370,9 +370,17 @@ func dynamicAddressBindingEnforcement(b *config.AddressBinding, runtimeFeeds map
 		return "unknown (no runtime feed status)"
 	}
 	ready, dropped, stale := 0, 0, 0
+	var publicationDebt []string
 	for _, feedName := range b.FeedNames {
 		fi, ok := runtimeFeeds[feedName]
 		switch {
+		case ok && fi.PublicationDebt:
+			publicationDebt = append(publicationDebt, feedName)
+			if fi.Prefixes > 0 {
+				ready++
+			} else if fi.HoldDropped {
+				dropped++
+			}
 		case ok && fi.Prefixes > 0:
 			ready++
 			if !fi.StaleSince.IsZero() {
@@ -383,6 +391,10 @@ func dynamicAddressBindingEnforcement(b *config.AddressBinding, runtimeFeeds map
 		default:
 			return "unresolved: a feed has no snapshot yet, so policies referencing this name are rejected and the previous-good policy set stays enforced"
 		}
+	}
+	if len(publicationDebt) > 0 {
+		return fmt.Sprintf("indeterminate: feed publication debt for %s; dataplane may still enforce the previous-good snapshot",
+			strings.Join(publicationDebt, ", "))
 	}
 	if dropped > 0 {
 		if b.FailMode == "drop" {
@@ -491,6 +503,14 @@ func renderDynamicAddressFeedStatus(w io.Writer, indent string, fi feeds.FeedInf
 		fmt.Fprintf(w, "%sHOLD-DROPPED: fetches failed past the hold interval; the last-good set was dropped\n", indent)
 	case !fi.StaleSince.IsZero():
 		fmt.Fprintf(w, "%sSTALE since %s: fetches failing; last-good set retained\n", indent, fi.StaleSince.Format("2006-01-02 15:04:05"))
+	}
+	if fi.PublicationDebt {
+		published := fi.PublishedHash
+		if !fi.HasPublished {
+			published = "none"
+		}
+		fmt.Fprintf(w, "%sPUBLICATION-DEBT: installed snapshot sha256=%s was not confirmed applied; last published sha256=%s (dataplane may still enforce the previous-good snapshot)\n",
+			indent, fi.Hash, published)
 	}
 	if fi.ShrinkRefusalCount > 0 {
 		fmt.Fprintf(w, "%sShrink refusals: %d\n", indent, fi.ShrinkRefusalCount)

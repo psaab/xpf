@@ -865,6 +865,13 @@ type MatchPoliciesResult struct {
 	// overlapping deny.
 	FragmentAssociatedDeny bool   `json:"fragment_associated_deny,omitempty"`
 	FragmentDenyNote       string `json:"fragment_deny_note,omitempty"`
+	// FeedPublicationDebt marks a result indeterminate when the simulator
+	// consulted installed feed content that the dataplane did not confirm
+	// applying (#10974). In this case Matched/DefaultUsed are false and Action
+	// carries the explanatory debt note rather than a simulated verdict.
+	FeedPublicationDebt      bool     `json:"feed_publication_debt,omitempty"`
+	FeedPublicationDebtFeeds []string `json:"feed_publication_debt_feeds,omitempty"`
+	FeedPublicationDebtNote  string   `json:"feed_publication_debt_note,omitempty"`
 }
 
 // MatchPoliciesHostInbound is the REST projection of the host-inbound-traffic

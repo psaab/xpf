@@ -324,6 +324,25 @@ func (c *CLI) feedOverlay() map[string][]string {
 	return c.feedOverlayFn()
 }
 
+// feedPublicationDebt reports feeds whose installed snapshot has not been
+// confirmed applied. The simulator uses this with feedOverlay to avoid
+// certifying a verdict from content the dataplane rejected (#10974).
+func (c *CLI) feedPublicationDebt() map[string]bool {
+	if c == nil || c.feedsFn == nil {
+		return nil
+	}
+	debt := make(map[string]bool)
+	for name, info := range c.feedsFn() {
+		if info.PublicationDebt {
+			debt[name] = true
+		}
+	}
+	if len(debt) == 0 {
+		return nil
+	}
+	return debt
+}
+
 // SetLLDPNeighborsFn sets a callback for retrieving live LLDP neighbor data.
 func (c *CLI) SetLLDPNeighborsFn(fn func() []*lldp.Neighbor) {
 	c.lldpNeighborsFn = fn

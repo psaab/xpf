@@ -372,6 +372,17 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 		if s.feedOverlayFn != nil {
 			overlay = s.feedOverlayFn()
 		}
+		var publicationDebt map[string]bool
+		if s.feedsFn != nil {
+			for name, info := range s.feedsFn() {
+				if info.PublicationDebt {
+					if publicationDebt == nil {
+						publicationDebt = make(map[string]bool)
+					}
+					publicationDebt[name] = true
+				}
+			}
+		}
 		res := policymatch.Match(cfg, policymatch.Query{
 			FromZone: fromZone,
 			ToZone:   toZone,
@@ -392,14 +403,17 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 			NonFirstFragment: nonFirstFrag,
 			// #5579: scope the host-inbound classifier to this ingress interface's
 			// effective view (validated above). "" = zone-scoped, unchanged.
-			IngressInterface: ingressIface,
-			FeedOverlay:      overlay,
+			IngressInterface:    ingressIface,
+			FeedOverlay:         overlay,
+			FeedPublicationDebt: publicationDebt,
 			// #3104: skip scheduler-inactive policies like the runtime does, so
 			// the `test policy` diagnostic falls through to the next active rule
 			// / default-policy, agreeing with the dataplane.
 			PolicyInactiveFn: s.policyInactiveFn(),
 		})
 		switch {
+		case res.FeedPublicationDebt:
+			fmt.Fprintf(buf, "%s\n", res.FeedPublicationDebtNote())
 		case res.ContentRejected:
 			// #3727: the dataplane fails this config closed (unexpandable
 			// application-set) and enforces none of its policies. Report the

@@ -249,6 +249,17 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 	if s.feedOverlayFn != nil {
 		overlay = s.feedOverlayFn()
 	}
+	var publicationDebt map[string]bool
+	if s.feedsFn != nil {
+		for name, info := range s.feedsFn() {
+			if info.PublicationDebt {
+				if publicationDebt == nil {
+					publicationDebt = make(map[string]bool)
+				}
+				publicationDebt[name] = true
+			}
+		}
+	}
 	res := policymatch.Match(cfg, policymatch.Query{
 		FromZone: req.FromZone,
 		ToZone:   req.ToZone,
@@ -271,8 +282,9 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 		NonFirstFragment: req.NonFirstFragment,
 		// #5579: scope the host-inbound classifier to this ingress interface's
 		// effective view (validated above). "" = zone-scoped, unchanged.
-		IngressInterface: req.IngressInterface,
-		FeedOverlay:      overlay,
+		IngressInterface:    req.IngressInterface,
+		FeedOverlay:         overlay,
+		FeedPublicationDebt: publicationDebt,
 		// #3104: skip scheduler-inactive policies like the runtime does, so the
 		// simulator falls through to the next active rule / default-policy.
 		PolicyInactiveFn: s.policyInactiveFn(),
@@ -319,10 +331,13 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 	}
 	if !res.Matched {
 		return &pb.MatchPoliciesResponse{
-			Matched:       false,
-			Action:        res.DisplayAction(),
-			DefaultUsed:   res.DefaultUsed,
-			UnzonedEgress: res.UnzonedEgress,
+			Matched:                  false,
+			Action:                   res.DisplayAction(),
+			DefaultUsed:              res.DefaultUsed,
+			UnzonedEgress:            res.UnzonedEgress,
+			FeedPublicationDebt:      res.FeedPublicationDebt,
+			FeedPublicationDebtFeeds: res.FeedPublicationDebtNames,
+			FeedPublicationDebtNote:  res.FeedPublicationDebtNote(),
 			// #3627 M06: echo the queried zone pair on no-match/default and
 			// unzoned paths, which carry no matched-policy scope.
 			QueriedFromZone: req.FromZone,
