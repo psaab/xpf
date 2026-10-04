@@ -2126,9 +2126,9 @@ fn gre_decap_session_hit_host_inbound_reads_inner_icmp_type_5615() {
 }
 
 
-/// #5615 helper: an untagged GRE-to-self OUTER frame (outer TTL 64) wrapping an
+/// #5615 helper: a VLAN-tagged GRE-to-self OUTER frame (outer TTL 64) wrapping an
 /// inner IPv4 ICMP echo request 10.255.0.2 -> `dst` with the given inner TTL.
-/// The outer TTL (frame[22]) is fixed at 64 by the builder while the inner TTL
+/// The outer TTL (frame[26]) is fixed at 64 by the builder while the inner TTL
 /// (synthetic[22] after decap) is `inner_ttl` — so a TTL read reverted to the
 /// outer `raw_frame` tests the wrong (non-expiring 64) byte.
 fn gre_frame_inner_icmp_echo_v4(dst: Ipv4Addr, inner_ttl: u8) -> Vec<u8> {
@@ -2140,10 +2140,10 @@ fn gre_frame_inner_icmp_echo_v4(dst: Ipv4Addr, inner_ttl: u8) -> Vec<u8> {
     let sum = checksum16(&inner[0..20]);
     inner[10] = (sum >> 8) as u8;
     inner[11] = sum as u8;
-    build_gre_to_self_outer_frame_with_inner(0x0800, &inner)
+    build_gre_to_self_outer_frame_v4(80, &inner)
 }
 
-/// #5615 helper: an untagged GRE-to-self OUTER frame (outer TTL 64) wrapping an
+/// #5615 helper: a VLAN-tagged GRE-to-self OUTER frame (outer TTL 64) wrapping an
 /// inner IPv4 UDP datagram 10.255.0.2 -> `dst` with the given inner TTL. UDP is
 /// flow-cache eligible, so a seed pass (inner TTL 64) followed by a TTL=1 pass
 /// exercises the flow-cache-HIT TTL path.
@@ -2179,7 +2179,7 @@ fn gre_frame_inner_udp_v4(dst: Ipv4Addr, inner_ttl: u8, sport: u16, dport: u16) 
     inner.extend_from_slice(&dport.to_be_bytes());
     inner.extend_from_slice(&8u16.to_be_bytes()); // UDP length
     inner.extend_from_slice(&0u16.to_be_bytes()); // UDP checksum 0 (optional, IPv4)
-    build_gre_to_self_outer_frame_with_inner(0x0800, &inner)
+    build_gre_to_self_outer_frame_v4(80, &inner)
 }
 
 /// #5615 helper: count the prebuilt ICMP Time Exceeded replies queued in the
@@ -2196,14 +2196,10 @@ fn prebuilt_te_count(binding: &BindingWorker) -> usize {
         .count()
 }
 
-/// #5615 GRE-to-self outer meta for a WAN-ingress binding (ifindex 12,
-/// reth0.80). Same shape as `gre_to_self_outer_meta` but with the ingress
-/// ifindex the TTL tests bind on so the locally-generated Time Exceeded resolves
-/// a real egress object (`forwarding.egress[12]`) and builds deterministically.
+/// #5615 tagged GRE-to-self outer metadata: parent ifindex 11 plus VID 80
+/// resolves to the logical WAN unit 12 (`reth0.80`).
 fn gre_to_self_outer_meta_wan(frame_len: usize) -> UserspaceDpMeta {
-    let mut meta = gre_to_self_outer_meta(0, frame_len);
-    meta.ingress_ifindex = 12;
-    meta
+    gre_to_self_outer_meta(80, frame_len)
 }
 
 
@@ -2211,7 +2207,7 @@ fn gre_to_self_outer_meta_wan(frame_len: usize) -> UserspaceDpMeta {
 /// A GRE-tunnelled inner ICMP echo to a TRANSIT destination (8.8.8.8) whose
 /// INNER TTL is 1 must generate an ICMP Time Exceeded on the session-MISS
 /// forward path — the TTL byte read from the decapped inner `packet_frame`
-/// (synthetic[22] = 1), NOT the outer `raw_frame` (frame[22] = outer TTL 64).
+/// (synthetic[22] = 1), NOT the outer `raw_frame` (frame[26] = outer TTL 64).
 ///
 /// - FIXED (`packet_frame`): `packet_ttl_would_expire` sees inner TTL 1 →
 ///   `build_local_time_exceeded_request` builds a prebuilt TE and CONSUMES the
@@ -2237,10 +2233,10 @@ fn gre_decap_session_miss_ttl_expiry_reads_inner_ttl_5615() {
 
     // Inner ICMP echo to transit 8.8.8.8, inner TTL = 1 (would expire).
     let frame = gre_frame_inner_icmp_echo_v4(Ipv4Addr::new(8, 8, 8, 8), 1);
-    assert_eq!(frame[22], 64, "outer IPv4 TTL byte must be 64 (differs from inner 1)");
+    assert_eq!(frame[26], 64, "outer IPv4 TTL byte must be 64 (differs from inner 1)");
     let meta = gre_to_self_outer_meta_wan(frame.len());
 
-    let (_batch, _dbg) = txn_run_descriptor_checked(
+    let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
@@ -2248,6 +2244,13 @@ fn gre_decap_session_miss_ttl_expiry_reads_inner_ttl_5615() {
         &frame,
         meta,
         true,
+    );
+    assert_eq!(dbg.rx, 1, "the tagged GRE descriptor must reach the poll path");
+    assert_eq!(batch.metadata_packets, 1, "the tagged GRE metadata must parse");
+    assert_eq!(batch.validated_packets, 1, "the tagged GRE packet must validate");
+    assert_eq!(
+        dbg.session_miss, 1,
+        "the decapped transit echo must reach the session-MISS TTL path"
     );
 
     assert_eq!(
@@ -2309,9 +2312,9 @@ fn gre_decap_session_hit_ttl_expiry_reads_inner_ttl_5615() {
 
     // Pass 2: same 5-tuple, inner TTL 1 — session-HIT TTL check.
     let frame_hit = gre_frame_inner_icmp_echo_v4(Ipv4Addr::new(8, 8, 8, 8), 1);
-    assert_eq!(frame_hit[22], 64, "outer IPv4 TTL byte must be 64 (differs from inner 1)");
+    assert_eq!(frame_hit[26], 64, "outer IPv4 TTL byte must be 64 (differs from inner 1)");
     let meta_hit = gre_to_self_outer_meta_wan(frame_hit.len());
-    txn_run_descriptor_checked(
+    let (batch_hit, dbg_hit) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
@@ -2320,6 +2323,9 @@ fn gre_decap_session_hit_ttl_expiry_reads_inner_ttl_5615() {
         meta_hit,
         true,
     );
+    assert_eq!(dbg_hit.rx, 1, "the tagged GRE hit must reach the poll path");
+    assert_eq!(batch_hit.validated_packets, 1, "the tagged GRE hit must validate");
+    assert_eq!(dbg_hit.session_hit, 1, "pass 2 must reach the session-HIT TTL path");
 
     assert_eq!(
         prebuilt_te_count(&binding),
@@ -2383,9 +2389,9 @@ fn gre_decap_flow_cache_hit_ttl_expiry_reads_inner_ttl_5615() {
 
     // Pass 2: same 5-tuple, inner UDP TTL 1 — flow-cache HIT TTL check.
     let frame_hit = gre_frame_inner_udp_v4(Ipv4Addr::new(8, 8, 8, 8), 1, 12345, 53);
-    assert_eq!(frame_hit[22], 64, "outer IPv4 TTL byte must be 64 (differs from inner 1)");
+    assert_eq!(frame_hit[26], 64, "outer IPv4 TTL byte must be 64 (differs from inner 1)");
     let meta_hit = gre_to_self_outer_meta_wan(frame_hit.len());
-    txn_run_descriptor_checked(
+    let (batch_hit, dbg_hit) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,
@@ -2393,6 +2399,12 @@ fn gre_decap_flow_cache_hit_ttl_expiry_reads_inner_ttl_5615() {
         &frame_hit,
         meta_hit,
         true,
+    );
+    assert_eq!(dbg_hit.rx, 1, "the tagged GRE hit must reach the poll path");
+    assert_eq!(batch_hit.validated_packets, 1, "the tagged GRE hit must validate");
+    assert_eq!(
+        binding.flow.flow_cache.hits, 1,
+        "pass 2 must reach the flow-cache-HIT TTL path"
     );
 
     assert_eq!(
