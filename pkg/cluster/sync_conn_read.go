@@ -657,7 +657,10 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// speak for the current one. See noteHeartbeatAck (sync_conn.go).
 		s.noteHeartbeatAck(conn)
 	case syncMsgConfig:
-		s.handleConfigPayload(conn, payload)
+		// This legacy message type is the cleartext #6629 fallback. Pass its
+		// wire posture into the shared handler so receive totals and the
+		// cleartext subtotal are recorded in one order (#11773).
+		s.handleConfigPayload(conn, payload, true)
 	case syncMsgConfigEncrypted:
 		// #6629: same payload, sealed under this connection's ephemeral key.
 		// Decrypt, then hand the plaintext to the SAME handler — the two arms
@@ -694,7 +697,7 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				"err", err, "remote", connRemoteAddrString(conn))
 			return
 		}
-		s.handleConfigPayload(conn, plaintext)
+		s.handleConfigPayload(conn, plaintext, false)
 	case syncMsgConfigKeyExchange:
 		s.handleConfigKeyExchange(conn, payload)
 	case syncMsgAuthUpgradeRequest:
@@ -1288,8 +1291,14 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 // the CONNECTION primed under, so a payload queued from a peer's prior boot can
 // be dropped at apply time rather than applying across a reset and stranding
 // the high-water.
-func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte) {
+func (s *SessionSync) handleConfigPayload(conn net.Conn, payload []byte, cleartext bool) {
 	s.stats.ConfigsReceived.Add(1)
+	if cleartext {
+		// Latch reception as well as sends: this node has the same exposure
+		// fact even when the peer selected the fallback.
+		s.stats.ConfigsReceivedCleartext.Add(1)
+		s.stats.CleartextSyncAlarmLatched.Store(true)
+	}
 	s.stats.LastConfigSyncTime.Store(time.Now().UnixNano())
 	configText, gen, ancestry := decodeConfigPayloadWithAncestry(payload)
 	s.stats.LastConfigSyncSize.Store(uint64(len(configText)))

@@ -470,6 +470,14 @@ func (s *SessionSync) queueConfigOnConn(
 	// Record-before-write closes the response race: the receiver may apply and
 	// acknowledge immediately after the socket accepts the frame.
 	s.stats.ConfigsSent.Add(1)
+	if !encrypted {
+		// Count only a successfully written fallback, not a blocked snapshot or
+		// failed socket write. This is deliberately monotonic for the daemon
+		// lifetime: once a secret crossed the link, a later sealed push cannot
+		// retire a capture already taken (#11773).
+		s.stats.ConfigsSentCleartext.Add(1)
+		s.stats.CleartextSyncAlarmLatched.Store(true)
+	}
 	slog.Info("cluster sync: config sent to peer", "size", len(configText), "gen", gen,
 		"encrypted", encrypted)
 	return true

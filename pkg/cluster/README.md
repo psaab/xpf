@@ -3027,6 +3027,15 @@ Read the scope literally:
   this as a confidential channel.
 - Against a peer that predates #6629 the push falls back to CLEARTEXT, with a
   warning. During a mixed-version window the old behaviour applies in full.
+- This build latches an alarm and increments its sender counter after a
+  successful cleartext send; it also latches and increments a receiver
+  counter on a legacy cleartext receive. The counters are visible in `show
+  chassis cluster status` and `show chassis cluster information`, and in the
+  `Config cleartext` row of `show chassis cluster statistics` and `show chassis
+  cluster data-plane statistics`. They remain visible for the daemon's
+  lifetime, including after the peer upgrades or the link reconnects. Resolve
+  the encryption fallback and, if a control-link PSK is configured, rotate it
+  afterwards, because a capture taken while the alarm was active still verifies.
 - **A capture taken before the upgrade is not retired by the upgrade.** Rotate
   the PSK after both nodes are on a #6629-capable build, for the same reason
   the #6169 note above gives: no code change invalidates frames an attacker

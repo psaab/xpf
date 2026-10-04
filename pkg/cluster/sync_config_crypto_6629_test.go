@@ -97,12 +97,14 @@ func TestConfigSyncPayloadDoesNotCarryThePSKInCleartext6629(t *testing.T) {
 	completeExchange(t, sender, senderConn, receiver, receiverConn)
 
 	cfg := configWithPSK()
-	go sender.QueueConfig(cfg)
+	sent := make(chan struct{}, 1)
+	go func() { sender.QueueConfig(cfg); sent <- struct{}{} }()
 
 	if err := receiverConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatalf("set read deadline: %v", err)
 	}
 	msgType, payload, raw := readOneFrame(t, receiverConn)
+	<-sent
 
 	if msgType != syncMsgConfigEncrypted {
 		t.Fatalf("config push must be sealed: got message type %d, want syncMsgConfigEncrypted (%d). "+
@@ -140,6 +142,13 @@ func TestConfigSyncPayloadDoesNotCarryThePSKInCleartext6629(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the receiver did not enqueue the decrypted config")
 	}
+	if sent := sender.Stats(); sent.ConfigsSentCleartext != 0 || sent.CleartextSyncAlarmLatched {
+		t.Fatalf("an encrypted send raised cleartext stats: %+v", sent)
+	}
+	if received := receiver.Stats(); received.ConfigsReceivedCleartext != 0 ||
+		received.CleartextSyncAlarmLatched {
+		t.Fatalf("an encrypted receive raised cleartext stats: %+v", received)
+	}
 }
 
 // TestConfigCryptoMixedVersionFallsBackToCleartext6629 pins the accepted
@@ -172,7 +181,8 @@ func TestConfigCryptoMixedVersionFallsBackToCleartext6629(t *testing.T) {
 
 	// No key exchange from the peer — a pre-#6629 build.
 	cfg := configWithPSK()
-	go sender.QueueConfig(cfg)
+	sent := make(chan struct{}, 1)
+	go func() { sender.QueueConfig(cfg); sent <- struct{}{} }()
 
 	if err := peerConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatalf("set read deadline: %v", err)
@@ -187,6 +197,7 @@ func TestConfigCryptoMixedVersionFallsBackToCleartext6629(t *testing.T) {
 		t.Fatalf("the cleartext fallback must be byte-identical to today's push.\n got: %q\nwant: %q",
 			text, cfg)
 	}
+	<-sent
 
 	// The legacy latch must be armed so the NEXT push does not pay the wait
 	// again — a per-push stall on the control path is exactly the kind of
@@ -197,6 +208,11 @@ func TestConfigCryptoMixedVersionFallsBackToCleartext6629(t *testing.T) {
 	if !legacy {
 		t.Fatal("the first expired wait must latch the peer as legacy, so a peer that never " +
 			"negotiates costs ONE bounded wait per connection rather than one per push")
+	}
+	stats := sender.Stats()
+	if stats.ConfigsSentCleartext != 1 || !stats.CleartextSyncAlarmLatched {
+		t.Fatalf("a successful mixed-version fallback must increment and latch cleartext observability, got %+v",
+			stats)
 	}
 }
 
