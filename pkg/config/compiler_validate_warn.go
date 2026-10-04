@@ -1712,6 +1712,7 @@ func ValidateConfig(cfg *Config) []string {
 	// validateUnhandledRibWarnings for the #1960 reasoning.
 	warnings = append(warnings, validateUnhandledRibWarnings(cfg)...)
 	warnings = append(warnings, validateGenerateRoutePolicyWarnings(cfg)...)
+	warnings = append(warnings, validateGenerateRouteDiscardWarnings(cfg)...)
 
 	// #1387: DHCP dynamic-DNS live-backend validation. Increment 2 wired the
 	// live RFC 2136 backend, so the increment-1 "no records are published"

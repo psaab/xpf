@@ -124,6 +124,12 @@ routes; tolerant loads keep older configs bootable with a NOT INSTALLED
 warning, while this renderer and the userspace route snapshot both fail
 closed.
 
+Junos generate routes without `discard` inherit the primary contributor's
+next-hop. xpf does not implement that inheritance, so it preserves the
+established blackhole rendering and warns at commit (also reported by
+`ValidateConfig` for active configuration) when a policy-less route omits
+`discard` (#11781).
+
 ### `VRFName == ""` means the master table, and only the master table (#9409)
 
 `InstanceConfig.VRFName` is overloaded by construction. The daemon's

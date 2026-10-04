@@ -1476,6 +1476,13 @@ with a `NOT INSTALLED` warning. FRR and userspace install no policy-bearing
 aggregate. Remove the policy for the established unconditional-blackhole
 meaning.
 
+**Generate-route `discard` parity is incomplete (#11781):** Junos inherits the
+primary contributing route's next-hop when `discard` is absent, but xpf does
+not implement that inheritance and preserves the established unconditional
+blackhole behavior in FRR and userspace. Strict commits and tolerant loads
+warn with the affected prefix; `ValidateConfig` repeats the warning for active
+configuration. Rendering and the userspace snapshot remain unchanged.
+
 The separate #2933 AST gate still rejects distinct bind-interface spellings
 such as `st0` and `st0.0` that derive the same if_id, since only one xfrmi
 device can carry that id. It runs over the group-expanded, inactive-pruned AST

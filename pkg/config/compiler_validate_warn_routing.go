@@ -485,3 +485,27 @@ func validateGenerateRoutePolicyWarnings(cfg *Config) []string {
 	}
 	return out
 }
+
+// validateGenerateRouteDiscardWarnings reports policy-less generate routes
+// without explicit `discard` (#11781). Junos normally inherits a forwarding
+// next-hop from the primary contributing route, but xpf does not implement
+// that inheritance: FRR and userspace preserve their established blackhole
+// behavior. The compiler puts this message in Config.Warnings on both strict
+// and tolerant paths; ValidateConfig repeats it for active-config visibility.
+func validateGenerateRouteDiscardWarnings(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	var out []string
+	for _, gr := range cfg.RoutingOptions.GenerateRoutes {
+		if gr == nil || gr.Policy != "" || gr.Discard {
+			continue
+		}
+		out = append(out, fmt.Sprintf(
+			"routing-options generate route %q has no discard action, but xpf does not "+
+				"inherit the primary contributing route's next-hop and installs this "+
+				"route as a blackhole; add discard only if that behavior is intended.",
+			gr.Prefix))
+	}
+	return out
+}
