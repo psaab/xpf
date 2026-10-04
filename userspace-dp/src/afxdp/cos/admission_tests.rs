@@ -1702,3 +1702,37 @@ fn clamp_flow_share_to_buffer_matches_clamp_when_buffer_above_floor() {
         "in-range value passes through"
     );
 }
+
+/// A shared_exact shard gets an integer partition of the queue-wide buffer.
+/// FAIL-ON-REVERT: replacing the division with the unscaled buffer makes the
+/// two-shard case admit twice the configured bytes.
+#[test]
+fn shared_exact_buffer_shard_limit_partitions_configured_bytes() {
+    assert_eq!(cos_shared_exact_buffer_shard_limit(96_000, 4), 24_000);
+    assert_eq!(
+        cos_shared_exact_buffer_shard_limit(96_003, 4) * 4,
+        96_000,
+        "integer remainder must not multiply the aggregate limit",
+    );
+    assert_eq!(
+        cos_shared_exact_buffer_shard_limit(96_000, 0),
+        96_000,
+        "no shard count must safely behave as one shard",
+    );
+}
+
+proptest::proptest! {
+    /// For every queue size and positive shard count, giving each shard the
+    /// truncated quotient keeps the aggregate cap at or below the configured
+    /// buffer and wastes fewer bytes than there are shards.
+    #[test]
+    fn shared_exact_buffer_shard_limit_never_exceeds_configured_bytes(
+        buffer_bytes in 0u64..=u64::MAX,
+        active_shards in 1usize..=256,
+    ) {
+        let shard_limit = cos_shared_exact_buffer_shard_limit(buffer_bytes, active_shards);
+        let aggregate_limit = shard_limit.saturating_mul(active_shards as u64);
+        proptest::prop_assert!(aggregate_limit <= buffer_bytes);
+        proptest::prop_assert!(buffer_bytes - aggregate_limit < active_shards as u64);
+    }
+}

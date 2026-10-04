@@ -307,6 +307,19 @@ pub(in crate::afxdp) fn cos_flow_aware_buffer_limit(
         .min(delay_cap.max(base))
 }
 
+/// Per-worker share of a shared_exact queue's configured buffer. Each
+/// participating worker applies this same integer share to its local queue,
+/// so the sum of all worker queues cannot exceed `buffer_bytes`; truncation
+/// leaves at most `active_shards - 1` unused bytes rather than overshooting
+/// the queue-wide limit.
+#[inline]
+pub(in crate::afxdp) fn cos_shared_exact_buffer_shard_limit(
+    buffer_bytes: u64,
+    active_shards: usize,
+) -> u64 {
+    buffer_bytes / active_shards.max(1) as u64
+}
+
 /// Core ECN admission decision, factored out so tests can drive it
 /// without spinning up a full `BindingWorker` while still exercising
 /// the exact code path that `enqueue_cos_item` uses. Mutates both the

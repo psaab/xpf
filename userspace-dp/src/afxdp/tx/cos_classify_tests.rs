@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::afxdp::tx::test_support::*;
-use crate::afxdp::types::SharedCoSExactBacklog;
+use crate::afxdp::types::{SharedCoSExactBacklog, SharedCoSRootLease};
 use crate::filter::TermMatchExtra;
 use crate::{
     ClassOfServiceSnapshot, CoSDSCPClassifierEntrySnapshot, CoSDSCPClassifierSnapshot,
@@ -109,6 +109,135 @@ fn enqueue_exact_queue_publishes_shared_backlog_slot() {
     assert!(
         shared_exact_backlog.has_peer_backlog(1),
         "exact enqueue must publish immediately so peer workers do not undercount exact backlog",
+    );
+}
+
+/// #11768: the same configured shared_exact buffer is partitioned among all
+/// workers instead of being admitted independently on each worker.
+///
+/// FAIL-ON-REVERT: removing the shard divisor makes each worker admit a full
+/// 96 KB buffer, so the summed worker queues exceed the configured limit.
+#[test]
+fn shared_exact_enqueue_partitions_configured_buffer_across_workers() {
+    const SHARDS: usize = 4;
+    const BUFFER_BYTES: u64 = 96_000;
+    const PACKET_BYTES: u64 = 1_500;
+    const IFINDEX: i32 = 42;
+    const QUEUE_ID: u8 = 4;
+
+    let shared_root_lease = Arc::new(SharedCoSRootLease::new(
+        1_250_000_000,
+        BUFFER_BYTES,
+        SHARDS,
+    ));
+    let fast_interfaces = test_cos_fast_interfaces(
+        IFINDEX,
+        IFINDEX,
+        QUEUE_ID,
+        vec![(QUEUE_ID, test_queue_fast_path(true, 0, None, None))],
+        None,
+        Some(shared_root_lease),
+    );
+    let fast_path = fast_interfaces
+        .get(&IFINDEX)
+        .expect("interface fast path")
+        .clone();
+    let mut bindings = (0..SHARDS)
+        .map(|worker_id| {
+            let root = test_cos_runtime_with_queues(
+                1_250_000_000,
+                vec![CoSQueueConfig {
+                    queue_id: QUEUE_ID,
+                    forwarding_class: "shared-exact".into(),
+                    priority: 5,
+                    transmit_rate_bytes: 1_250_000_000,
+                    guarantee_enabled: true,
+                    exact: true,
+                    surplus_sharing: false,
+                    equal_flow_enforcement: false,
+                    equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+                    surplus_weight: 1,
+                    buffer_bytes: BUFFER_BYTES,
+                    dscp_rewrite: None,
+                    codel_target_ns: 0,
+                }],
+            );
+            let mut root = root;
+            enable_test_flow_fair(&mut root.queues[0]);
+            root.queues[0].config.shared_exact = true;
+            BindingWorker::new_for_cos_drain_test(
+                worker_id as u32,
+                worker_id as u32,
+                IFINDEX,
+                root,
+                fast_path.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for binding in &mut bindings {
+        let mut accepted = 0;
+        // Admission drops still return Ok, so detect them by the unchanged
+        // queued-byte count. Bound attempts in case the gate stops rejecting.
+        for _ in 0..=(BUFFER_BYTES / PACKET_BYTES) {
+            let queued_before = binding
+                .cos
+                .cos_interfaces
+                .get(&IFINDEX)
+                .expect("CoS runtime")
+                .queues[0]
+                .hot
+                .queued_bytes;
+            assert!(
+                enqueue_cos_item(
+                    binding,
+                    IFINDEX,
+                    Some(QUEUE_ID),
+                    PACKET_BYTES,
+                    test_flow_cos_item(5201, PACKET_BYTES as usize),
+                    0,
+                    None,
+                )
+                .is_ok(),
+                "interface and queue must remain available",
+            );
+            let queued_after = binding
+                .cos
+                .cos_interfaces
+                .get(&IFINDEX)
+                .expect("CoS runtime")
+                .queues[0]
+                .hot
+                .queued_bytes;
+            if queued_after == queued_before {
+                break;
+            }
+            accepted += queued_after - queued_before;
+        }
+        assert_eq!(
+            accepted,
+            BUFFER_BYTES / SHARDS as u64,
+            "each shard may use only its integer share of the configured buffer",
+        );
+    }
+
+    let queued_bytes = bindings
+        .iter()
+        .map(|binding| {
+            binding
+                .cos
+                .cos_interfaces
+                .get(&IFINDEX)
+                .expect("CoS runtime")
+                .queues[0]
+                .hot
+                .queued_bytes
+        })
+        .sum::<u64>();
+    assert!(
+        queued_bytes <= BUFFER_BYTES,
+        "shared_exact queued {queued_bytes} bytes across workers for a \
+         {BUFFER_BYTES}-byte configured buffer",
     );
 }
 

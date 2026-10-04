@@ -281,6 +281,14 @@ mod.rs for further file-level breakdown.
   mirror the runtime `refresh_cos_interface_activity` R-5(a) path.)
   `release_unused_v8` reduces to the legacy `release_unused` for a legacy
   (v8=None) lease.
+- **Queue-wide shared_exact admission buffer (#11768).** The effective per-queue
+  buffer (`buffer_bytes.max(COS_MIN_BURST_BYTES)`) is divided by the active
+  shared shard count published in the interface's shared root lease. Every
+  worker applies the same integer share, so summed local `queued_bytes` stays
+  at or below the queue-wide buffer; any division remainder stays unused.
+  Shared queues do not independently apply the per-worker flow-aware expansion,
+  which would multiply the limit across workers. Owner-local queues keep their
+  existing flow-aware admission limit.
 - `COS_MIN_BURST_BYTES` (64 × MTU) is canonically owned by
   `token_bucket.rs`; siblings import it via the `cos/mod.rs`
   re-export.
