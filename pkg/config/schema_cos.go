@@ -353,7 +353,7 @@ var schemaClassOfService = &schemaNode{desc: "Class of service configuration", c
 	"fairness": {desc: "Dataplane fairness observability configuration", children: map[string]*schemaNode{
 		"rss-expectation": {desc: "Declarative RSS flow-distribution expectations evaluated against live dataplane status (shown in fairness output and exported as Prometheus gauges)", children: map[string]*schemaNode{
 			"interface": {desc: "Stable interface name to evaluate (resolved to the current kernel ifindex at evaluate time)", args: 1, multi: true, placeholder: "<interface-name>", children: map[string]*schemaNode{
-				"queue": {desc: "CoS queue ID to evaluate (0..255; exactly one expectation per queue)", args: 1, multi: true, placeholder: "<queue-id>", children: map[string]*schemaNode{
+				"queue": {desc: "CoS queue ID to evaluate (0..255; exactly one expectation per queue)", args: 1, multi: true, placeholder: "<queue-id>", keyValueType: ValueInteger, keyValueDesc: "CoS queue ID (0..255)", keyValueExamples: []string{"0", "4", "255"}, keyValidator: ValidateInteger(0, 255), children: map[string]*schemaNode{
 					"any":                     {desc: "No expectation; always passes", children: nil},
 					"balanced":                {desc: "Expect flows spread across min(flows, workers) workers with per-worker flow counts within 1", children: nil},
 					"active-workers":          {desc: "Alias for at-least-active-workers", args: 1, placeholder: "<count>", children: nil},

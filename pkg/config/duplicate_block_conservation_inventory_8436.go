@@ -260,11 +260,13 @@ var dupConservationSkipped8436 = []string{
 	// from-zone and global policy containers became probeable. The pinned census
 	// now checks them; their former skip rows are removed rather than retained.
 	//
-	// REFUSED at commit — "duplicate expectation \"any\" conflicts with
-	// \"balanced\"".
-	// #8752: the fixture remains unbuildable, and a complete fixture rejects
-	// this duplicate on both strict and lenient paths. The two policy skip rows
-	// removed for #11544 are now probeable; this refusal remains recorded.
+	// REFUSED at commit — the duplicate queue 0 fixture contains unrecognized
+	// `expectation` children, so strict compilation reports a missing recognized
+	// expectation. On lenient load, #11796 warns and omits both malformed rows.
+	// This census entry remains skipped because its synthesized `xpfname` queue
+	// ID is outside 0..255; the duplicate and merged fixtures both omit the row,
+	// so this population cannot measure queue conservation. The valid-queue
+	// behavior is pinned by TestSkippedOnRefusalStillNeedsTheLenientAnswer8752.
 	"class-of-service fairness rss-expectation interface xpfname queue",
 	// CONSERVES. The census fixture omits the required `match rpm-probe`; with a
 	// complete config the duplicate compiles identically to the merged form.

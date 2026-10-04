@@ -375,6 +375,11 @@ type compileOpts struct {
 	// it (warn) rather than fail-closed-on-load (#1960 class). Same
 	// doctrine as lenientCoSLossPriority.
 	lenientCoSForwardingClassQueue bool
+	// lenientCoSFairnessRSSExpectation (#11796) downgrades malformed RSS
+	// observability expectations from hard errors to warnings on tolerant
+	// load / peer-sync paths. Strict commits still reject them; the malformed
+	// row is omitted on lenient compile so it cannot brick boot or HA sync.
+	lenientCoSFairnessRSSExpectation bool
 
 	// lenientIPsecGatewayRefs (#2074) downgrades the IPsec VPN -> IKE
 	// gateway cross-reference check from a hard error to a warning on the
@@ -3104,6 +3109,7 @@ func lenientCompileOpts() compileOpts {
 		lenientCoSLossPriority:                 true,
 		lenientCoSUnitClassifierConflict:       true,
 		lenientCoSForwardingClassQueue:         true,
+		lenientCoSFairnessRSSExpectation:       true,
 		lenientIPsecGatewayRefs:                true,
 		lenientIKEPolicyChainRef:               true,
 		lenientIPsecEndpoints:                  true,

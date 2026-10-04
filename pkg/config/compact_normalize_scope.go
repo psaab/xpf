@@ -997,7 +997,7 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 	// forbidden `then` partials — the distinction the pair scoping exists to
 	// preserve.
 	switch containerKeyword + " " + head {
-	// class-of-service: 49 pairs.
+	// class-of-service: 51 pairs.
 	case "buffer-size temporal",
 		"class-of-service interfaces",
 		"class-of-service scheduler-maps",
@@ -1030,8 +1030,13 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 		"loss-priority code-point",
 		"loss-priority code-points",
 		"oversubscription-policy guarantee-rate",
+		// #11796: the two valueless RSS expectation flags are valid children of
+		// `queue`; admitting these exact pairs preserves `queue N any/balanced`
+		// as the same rows as their braced forms.
 		"queue active-workers",
+		"queue any",
 		"queue at-least-active-workers",
+		"queue balanced",
 		"queue cstruct",
 		"queue cstruct-max",
 		"queue max-worker-flow-share",
