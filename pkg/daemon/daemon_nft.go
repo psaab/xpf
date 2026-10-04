@@ -206,8 +206,9 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 			"v4_defined", lo0FilterDefined(cfg, filterV4, false),
 			"v6_defined", lo0FilterDefined(cfg, filterV6, true))
 		if !d.lo0Enforced.Load() {
-			sets := dpuserspace.BuildFenceAddrSets(cfg, dpuserspace.BuildZoneHostInboundViews(cfg))
-			wgZonePorts := cfg.WireGuardZonePorts()
+			views := dpuserspace.BuildZoneHostInboundViews(cfg)
+			sets := dpuserspace.BuildFenceAddrSets(cfg, views)
+			wgZonePorts := hostInboundWireGuardZonePorts(cfg, views)
 			if fenceErr := d.installLo0ColdBootFence(sets, wgZonePorts); fenceErr != nil {
 				return errors.Join(err, fenceErr)
 			}
@@ -230,8 +231,9 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 			"v4_defined", lo0FilterDefined(cfg, filterV4, false),
 			"v6_defined", lo0FilterDefined(cfg, filterV6, true))
 		if !d.lo0Enforced.Load() {
-			sets := dpuserspace.BuildFenceAddrSets(cfg, dpuserspace.BuildZoneHostInboundViews(cfg))
-			wgZonePorts := cfg.WireGuardZonePorts()
+			views := dpuserspace.BuildZoneHostInboundViews(cfg)
+			sets := dpuserspace.BuildFenceAddrSets(cfg, views)
+			wgZonePorts := hostInboundWireGuardZonePorts(cfg, views)
 			if fenceErr := d.installLo0ColdBootFence(sets, wgZonePorts); fenceErr != nil {
 				return errors.Join(err, fenceErr)
 			}
@@ -265,8 +267,9 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 			// firewall-local address, including on a router that declares no
 			// security zone at all — where the zone-model builders return nothing
 			// and the fence would otherwise be an empty `policy accept` shell.
-			sets := dpuserspace.BuildFenceAddrSets(cfg, dpuserspace.BuildZoneHostInboundViews(cfg))
-			wgZonePorts := cfg.WireGuardZonePorts()
+			views := dpuserspace.BuildZoneHostInboundViews(cfg)
+			sets := dpuserspace.BuildFenceAddrSets(cfg, views)
+			wgZonePorts := hostInboundWireGuardZonePorts(cfg, views)
 			if fenceErr := d.installLo0ColdBootFence(sets, wgZonePorts); fenceErr != nil {
 				return errors.Join(fmt.Errorf("apply lo0 nftables filter: %w", err), fenceErr)
 			}
@@ -285,8 +288,9 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 		d.lo0Enforced.Store(false)
 		slog.Error("lo0 installer rendered no rules after daemon preflight; renderer parity is broken and the live table may be an empty policy-accept shell",
 			"v4", filterV4, "v6", filterV6)
-		sets := dpuserspace.BuildFenceAddrSets(cfg, dpuserspace.BuildZoneHostInboundViews(cfg))
-		wgZonePorts := cfg.WireGuardZonePorts()
+		views := dpuserspace.BuildZoneHostInboundViews(cfg)
+		sets := dpuserspace.BuildFenceAddrSets(cfg, views)
+		wgZonePorts := hostInboundWireGuardZonePorts(cfg, views)
 		if fenceErr := d.installLo0ColdBootFence(sets, wgZonePorts); fenceErr != nil {
 			return errors.Join(err, fenceErr)
 		}
@@ -2338,8 +2342,7 @@ func hostInboundScreenFloodMatchesText(screen xnft.HostInboundScreenFloodRule) s
 
 // renderWireGuardPortSpec renders the WireGuard listen-port set as an nft
 // destination-port value: a single port ("51820") or an anonymous set
-// ("{ 51820, 51821 }"). Ports arrive sorted+deduped from
-// config.WireGuardZonePorts().
+// ("{ 51820, 51821 }"). Ports arrive sorted+deduped from the zone-map builder.
 func renderWireGuardPortSpec(ports []uint16) string {
 	if len(ports) == 1 {
 		return strconv.Itoa(int(ports[0]))
