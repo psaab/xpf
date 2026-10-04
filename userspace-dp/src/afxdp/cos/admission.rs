@@ -4,6 +4,7 @@
 // so admission stays agnostic to which sibling module owns the
 // constant.
 
+use crate::afxdp::tx_frame_capacity;
 use crate::afxdp::types::{
     CoSInterfaceRuntime, CoSPendingTxItem, CoSQueueRuntime, FlowFairState, WorkerCoSQueueFastPath,
 };
@@ -283,6 +284,15 @@ pub(in crate::afxdp) fn cos_flow_aware_buffer_limit(
     flow_bucket: usize,
 ) -> u64 {
     let base = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
+    cos_flow_aware_buffer_limit_from_base(queue, flow_bucket, base)
+}
+
+#[inline]
+fn cos_flow_aware_buffer_limit_from_base(
+    queue: &CoSQueueRuntime,
+    flow_bucket: usize,
+    base: u64,
+) -> u64 {
     if !queue.flow_fair() {
         return base;
     }
@@ -307,17 +317,34 @@ pub(in crate::afxdp) fn cos_flow_aware_buffer_limit(
         .min(delay_cap.max(base))
 }
 
-/// Per-worker share of a shared_exact queue's configured buffer. Each
-/// participating worker applies this same integer share to its local queue,
-/// so the sum of all worker queues cannot exceed `buffer_bytes`; truncation
-/// leaves at most `active_shards - 1` unused bytes rather than overshooting
-/// the queue-wide limit.
+/// Per-worker base cap for one shard of a shared_exact queue's configured
+/// buffer. Integer partitioning keeps ordinary shares from overshooting the
+/// queue-wide base. A one-frame floor preserves empty-queue liveness when the
+/// configured base is smaller than active_shards × frame capacity; in that
+/// degenerate regime, the summed per-worker bases may exceed the config.
 #[inline]
 pub(in crate::afxdp) fn cos_shared_exact_buffer_shard_limit(
     buffer_bytes: u64,
     active_shards: usize,
 ) -> u64 {
-    buffer_bytes / active_shards.max(1) as u64
+    (buffer_bytes / active_shards.max(1) as u64).max(tx_frame_capacity() as u64)
+}
+
+/// Shared_exact admission limit, using the partitioned queue base together
+/// with the standard prospective-flow expansion and #717 delay clamp.
+/// Keeping the expansion after partitioning preserves #707's aggregate room
+/// for each local prospective flow; with five flows, for example, the cap
+/// remains at least five × `COS_FLOW_FAIR_MIN_SHARE_BYTES` unless #717's
+/// per-worker delay envelope is tighter.
+#[inline]
+pub(in crate::afxdp) fn cos_shared_exact_buffer_limit(
+    queue: &CoSQueueRuntime,
+    flow_bucket: usize,
+    active_shards: usize,
+) -> u64 {
+    let buffer_bytes = queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES);
+    let shard_limit = cos_shared_exact_buffer_shard_limit(buffer_bytes, active_shards);
+    cos_flow_aware_buffer_limit_from_base(queue, flow_bucket, shard_limit)
 }
 
 /// Core ECN admission decision, factored out so tests can drive it

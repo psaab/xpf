@@ -1703,36 +1703,93 @@ fn clamp_flow_share_to_buffer_matches_clamp_when_buffer_above_floor() {
     );
 }
 
-/// A shared_exact shard gets an integer partition of the queue-wide buffer.
-/// FAIL-ON-REVERT: replacing the division with the unscaled buffer makes the
-/// two-shard case admit twice the configured bytes.
+/// A shared_exact shard partitions the configured buffer but keeps a full
+/// frame of empty-queue liveness even when the divisor produces a smaller
+/// slice.
 #[test]
-fn shared_exact_buffer_shard_limit_partitions_configured_bytes() {
+fn shared_exact_buffer_shard_limit_partitions_bytes_and_floors_to_frame() {
+    let frame_floor = tx_frame_capacity() as u64;
     assert_eq!(cos_shared_exact_buffer_shard_limit(96_000, 4), 24_000);
     assert_eq!(
         cos_shared_exact_buffer_shard_limit(96_003, 4) * 4,
         96_000,
-        "integer remainder must not multiply the aggregate limit",
+        "integer remainder must not multiply the aggregate base",
+    );
+    assert_eq!(
+        cos_shared_exact_buffer_shard_limit(96_000, 65),
+        frame_floor,
+        "65 shards would divide the 96 KB minimum base below one frame",
     );
     assert_eq!(
         cos_shared_exact_buffer_shard_limit(96_000, 0),
-        96_000,
+        96_000.max(frame_floor),
         "no shard count must safely behave as one shard",
     );
 }
 
+#[test]
+fn shared_exact_buffer_limit_restores_prospective_flow_headroom() {
+    let mut root = test_cos_runtime_with_queues(
+        1_250_000_000,
+        vec![CoSQueueConfig {
+            queue_id: 4,
+            forwarding_class: "shared-exact".into(),
+            priority: 5,
+            transmit_rate_bytes: 1_250_000_000,
+            guarantee_enabled: true,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: 96_000,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+    );
+    let queue = &mut root.queues[0];
+    enable_test_flow_fair(queue);
+    queue.config.shared_exact = true;
+
+    assert_eq!(
+        cos_shared_exact_buffer_limit(queue, 0, 4),
+        24_000,
+        "one prospective flow retains the 96 KB base divided over four shards",
+    );
+
+    let state = test_flow_fair_state_mut(queue);
+    state.active_flow_buckets = 4;
+    for bucket in 1..=4 {
+        state.flow_bucket_bytes[bucket] = 1;
+    }
+    let expected_headroom = 5 * COS_FLOW_FAIR_MIN_SHARE_BYTES;
+    assert_eq!(cos_flow_aware_buffer_limit(queue, 0), expected_headroom);
+    assert_eq!(
+        cos_shared_exact_buffer_limit(queue, 0, 4),
+        expected_headroom,
+        "partitioning must not remove #707 room for five prospective flows",
+    );
+}
+
 proptest::proptest! {
-    /// For every queue size and positive shard count, giving each shard the
-    /// truncated quotient keeps the aggregate cap at or below the configured
-    /// buffer and wastes fewer bytes than there are shards.
+    /// If integer division already gives each worker a full-frame share, its
+    /// summed base stays within the configured value. When it does not, the
+    /// explicit frame floor preserves admission liveness.
     #[test]
-    fn shared_exact_buffer_shard_limit_never_exceeds_configured_bytes(
+    fn shared_exact_buffer_shard_limit_respects_partition_and_frame_floor(
         buffer_bytes in 0u64..=u64::MAX,
         active_shards in 1usize..=256,
     ) {
+        let frame_floor = tx_frame_capacity() as u64;
+        let raw_share = buffer_bytes / active_shards as u64;
         let shard_limit = cos_shared_exact_buffer_shard_limit(buffer_bytes, active_shards);
-        let aggregate_limit = shard_limit.saturating_mul(active_shards as u64);
-        proptest::prop_assert!(aggregate_limit <= buffer_bytes);
-        proptest::prop_assert!(buffer_bytes - aggregate_limit < active_shards as u64);
+        proptest::prop_assert!(shard_limit >= frame_floor);
+        if raw_share >= frame_floor {
+            let aggregate_limit = shard_limit * active_shards as u64;
+            proptest::prop_assert!(aggregate_limit <= buffer_bytes);
+            proptest::prop_assert!(buffer_bytes - aggregate_limit < active_shards as u64);
+        } else {
+            proptest::prop_assert_eq!(shard_limit, frame_floor);
+        }
     }
 }

@@ -1836,10 +1836,9 @@ fn enqueue_cos_item(
         } else {
             0
         };
-        // A shared_exact configured buffer is queue-wide, unlike each
-        // worker's local queued_bytes. Do not independently flow-expand it
-        // on each worker; partition the operator's effective base buffer
-        // using the shared root lease's active shard count.
+        // Shared_exact queues partition their configured base among workers,
+        // then restore the prospective-flow expansion (#707) over that share.
+        // Owner-local queues keep the unchanged flow-aware buffer limit.
         let buffer_limit = if queue.shared_exact() {
             // Only shared_exact admission needs the worker count; owner-local
             // queues avoid an extra fast-interface lookup on this hot path.
@@ -1851,10 +1850,7 @@ fn enqueue_cos_item(
                 .map(|lease| lease.active_shards())
                 .unwrap_or(1)
                 .max(1);
-            cos_shared_exact_buffer_shard_limit(
-                queue.config.buffer_bytes.max(COS_MIN_BURST_BYTES),
-                active_shards,
-            )
+            cos_shared_exact_buffer_limit(queue, flow_bucket, active_shards)
         } else {
             cos_flow_aware_buffer_limit(queue, flow_bucket)
         };

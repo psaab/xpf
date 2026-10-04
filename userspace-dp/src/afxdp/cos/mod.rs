@@ -13,7 +13,7 @@ pub(super) mod tx_completion;
 
 pub(super) use admission::{
     apply_cos_admission_ecn_policy, cos_flow_aware_buffer_limit, cos_queue_flow_share_limit,
-    cos_shared_exact_buffer_shard_limit,
+    cos_shared_exact_buffer_limit,
 };
 pub(super) use builders::ensure_cos_interface_runtime;
 pub(super) use cross_binding::{
