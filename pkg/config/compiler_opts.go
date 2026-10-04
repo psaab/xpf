@@ -916,16 +916,16 @@ type compileOpts struct {
 	// doctrine as lenientApplicationSpecs / lenientApplicationSetMembers.
 	lenientApplicationNameCollisions bool
 
-	// lenientReservedApplicationNames (#5821) downgrades the reserved-name gate
-	// (validateReservedApplicationNamesStrict) from a hard compile error to a
-	// cfg.Warnings entry. The strict commit / commit-check path hard-rejects a
-	// user-defined `applications application <name>` or `application-set <name>`
-	// whose name equals the AppID unknown sentinel "UNKNOWN"
-	// (ReservedApplicationName) case-insensitively — a real catalog application
-	// so named is indistinguishable from the "no known application" sentinel on
-	// the AppID display/filter surface (ResolveSessionName / SessionMatches,
-	// pkg/appid/runtime.go), so a `show`/`clear ... application UNKNOWN` selector
-	// cannot separate the two and a filtered clear could delete both classes.
+	// lenientReservedApplicationNames (#5821, #12048) downgrades the
+	// reserved-name gate (validateReservedApplicationNamesStrict) from a hard
+	// compile error to a cfg.Warnings entry. The strict commit / commit-check
+	// path hard-rejects a user-defined `applications application <name>` or
+	// `application-set <name>` named exactly `UNKNOWN`, the AppID unknown
+	// sentinel (ReservedApplicationName), or exactly lowercase `any`, the
+	// match-all keyword resolved before named application/application-set
+	// lookup. `UNKNOWN` cannot be distinguished from unclassified sessions by
+	// `show`/`clear ... application UNKNOWN`; `any` definitions are unreachable
+	// because `match application any` always means match-all.
 	// This is a NEW fail-closed restriction that can reject a config an older
 	// binary accepted, so the tolerant load / peer-sync paths downgrade it to a
 	// warning: an already-persisted or peer-synced config carrying the reserved

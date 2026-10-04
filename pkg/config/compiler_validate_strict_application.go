@@ -811,11 +811,14 @@ func ApplicationsToValidateStrict(cfg *Config) map[string]struct{} {
 // equal so the reservation cannot drift away from the sentinel it protects.
 const ReservedApplicationName = "UNKNOWN"
 
+const reservedApplicationMatchAllKeyword = "any"
+
 // validateReservedApplicationNamesStrict hard-rejects, at commit /
 // commit-check, a user-defined `applications application <name>` or
-// `applications application-set <name>` whose name equals the AppID unknown
-// sentinel (ReservedApplicationName == "UNKNOWN") CASE-SENSITIVELY (#5821,
-// relaxed to exact-case in #5820).
+// `applications application-set <name>` whose name equals either the AppID
+// unknown sentinel (`UNKNOWN`, #5821) or the match-all application keyword
+// (`any`, #12048). Comparisons are case-sensitive (the exact-case reservation
+// was restored in #5820).
 //
 // Without this reservation the sentinel and a real catalog application share
 // one flat string on the AppID display/filter surface (ResolveSessionName /
@@ -829,19 +832,26 @@ const ReservedApplicationName = "UNKNOWN"
 // reservation is therefore case-sensitive, matching the case-exact namespace
 // contract of the store/catalog.
 //
+// The lower-case `any` keyword is consumed before user application or
+// application-set lookup by policy/NAT matchers, so a user definition named
+// `any` can never be referenced. Reject it with a diagnostic rather than
+// silently accepting dead configuration (#12048); names such as `ANY` remain
+// distinct.
+//
 // Applications and application-sets share one flat Junos namespace, and a
 // multi-term application additionally mints an implicit application-set under
 // its own name (cfg.Applications.ApplicationSets[<parent>]). Both maps are
 // walked so every authored spelling is caught: a simple `application UNKNOWN`
-// lands in Applications; an `application-set UNKNOWN` (or the implicit set of a
-// multi-term `application UNKNOWN`) lands in ApplicationSets. Generated per-term
-// names (`<parent>-<term>`) never equal the reserved name, so they are
-// unaffected. Iteration is sorted so the first-reported error is deterministic.
+// or `application any` lands in Applications; `application-set UNKNOWN` or
+// `application-set any` (or the implicit set of a multi-term application)
+// lands in ApplicationSets. Generated per-term names (`<parent>-<term>`) never
+// equal the reserved names, so they are unaffected. Iteration is sorted so the
+// first-reported error is deterministic.
 //
-// This is a NEW fail-closed restriction (#5821): a previously-valid config that
-// already named an application/application-set UNKNOWN now hard-rejects on the
-// operator's next commit — the intended fix, called out as a release-note
-// behavior change (mirroring the #5539 RETH-generic guard). Strict on the
+// This is a NEW fail-closed restriction: `UNKNOWN` (#5821) is rejected to
+// protect AppID's sentinel, and exact lower-case `any` (#12048) is rejected
+// because the match keyword makes a same-named object unreachable. A previously
+// valid config with either name hard-rejects on the operator's next commit —
 // commit / commit-check path; the call site (compiler_uniformgates.go,
 // lenientReservedApplicationNames) downgrades a returned error to a warning on
 // the tolerant load / peer-sync path so an already-persisted or peer-synced
@@ -859,7 +869,7 @@ func validateReservedApplicationNamesStrict(cfg *Config) error {
 	}
 	sort.Strings(appNames)
 	for _, name := range appNames {
-		if name == ReservedApplicationName {
+		if name == ReservedApplicationName || name == reservedApplicationMatchAllKeyword {
 			return reservedApplicationNameError("application", name)
 		}
 	}
@@ -869,7 +879,7 @@ func validateReservedApplicationNamesStrict(cfg *Config) error {
 	}
 	sort.Strings(setNames)
 	for _, name := range setNames {
-		if name == ReservedApplicationName {
+		if name == ReservedApplicationName || name == reservedApplicationMatchAllKeyword {
 			return reservedApplicationNameError("application-set", name)
 		}
 	}
@@ -877,9 +887,17 @@ func validateReservedApplicationNamesStrict(cfg *Config) error {
 }
 
 // reservedApplicationNameError builds the operator-visible commit error for a
-// user application / application-set that collides with the AppID unknown
-// sentinel. kind is "application" or "application-set".
+// user application / application-set whose name is reserved. kind is
+// "application" or "application-set".
 func reservedApplicationNameError(kind, name string) error {
+	if name == reservedApplicationMatchAllKeyword {
+		return fmt.Errorf(
+			"applications %s %q: %q is reserved as the match-all application "+
+				"keyword; `match application %s` always matches all applications "+
+				"before user application/application-set lookup, so this definition "+
+				"is unreachable and must be renamed (#12048)",
+			kind, name, name, name)
+	}
 	return fmt.Errorf(
 		"applications %s %q: %q is reserved as the AppID \"no known application\" "+
 			"sentinel and may not name a user application or application-set "+
