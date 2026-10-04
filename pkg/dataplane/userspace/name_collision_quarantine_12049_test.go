@@ -136,6 +136,38 @@ func TestLenientAddressBookNameCollisionsQuarantineReferences12049(t *testing.T)
 	}
 }
 
+func TestLenientAddressCollisionWithFeedOverlayIsQuarantined12049(t *testing.T) {
+	books := `address-book { global { address blocked 10.0.0.0/8; address other 192.0.2.1/32; address-set blocked { address other; } } }`
+	cfg, _ := compileNameCollision12049(t, "", books, "any", "blocked")
+	overlay := map[string][]string{"blocked": {"198.51.100.0/24"}}
+	rules, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, overlay)
+	if err != nil || len(rules) != 1 {
+		t.Fatalf("build policy snapshots: rules=%d err=%v", len(rules), err)
+	}
+	if !addressListHasSentinel(rules[0].SourceLiterals) || !addressListHasSentinel(rules[0].SourceAddresses) {
+		t.Fatalf("feed overlay must not bypass collision quarantine: literals=%v addresses=%v",
+			rules[0].SourceLiterals, rules[0].SourceAddresses)
+	}
+	reasons := PolicyContentRejectionReasons(cfg, overlay)
+	if len(reasons) == 0 || !strings.Contains(strings.Join(reasons, "\n"), "blocked") {
+		t.Fatalf("content-rejection mirror must name feed-backed collision, got %q", reasons)
+	}
+}
+
+func TestLenientLiteralLikeAddressCollisionIsQuarantined12049(t *testing.T) {
+	const collidingName = "10.0.1.0/24"
+	books := `address-book { global { address "` + collidingName + `" 10.0.0.0/8; address other 192.0.2.1/32; address-set "` + collidingName + `" { address other; } } }`
+	cfg, rules := compileNameCollision12049(t, "", books, "any", collidingName)
+	if !addressListHasSentinel(rules[0].SourceLiterals) || !addressListHasSentinel(rules[0].SourceAddresses) {
+		t.Fatalf("literal-like colliding address reference must lower to __unsupported_address__, literals=%v addresses=%v",
+			rules[0].SourceLiterals, rules[0].SourceAddresses)
+	}
+	reasons := PolicyContentRejectionReasons(cfg, nil)
+	if len(reasons) == 0 || !strings.Contains(strings.Join(reasons, "\n"), collidingName) {
+		t.Fatalf("content-rejection mirror must name literal-like colliding address, got %q", reasons)
+	}
+}
+
 func TestLenientAddressSetContainingCollisionQuarantinesReference12049(t *testing.T) {
 	books := `address-book { global { address blocked 10.0.0.0/8; address other 192.0.2.1/32; ` +
 		`address-set blocked { address other; } address-set group { address blocked; } } }`
