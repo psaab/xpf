@@ -976,8 +976,9 @@ enum ResolvedRouteV6<'a> {
     },
 }
 
-/// Choose the most-specific route, then the first preference tier with a live
-/// next-hop. If every tier is unresolved, preserve the preferred tier's
+/// Choose the most-specific route, then the first live preference/metric row.
+/// Same-preference QNH rows stay ordered by the Go producer; each row is an
+/// ECMP tier. If every row is unresolved, preserve the preferred row's
 /// drivable member so the existing MissingNeighbor path can resolve it.
 fn select_v4_route<'a>(
     state: &'a ForwardingState,
@@ -992,7 +993,6 @@ fn select_v4_route<'a>(
         .iter()
         .find(|entry| entry.table == table && entry.prefix.contains(ip));
     let mut matched_prefix_len = None;
-    let mut last_preference = None;
     let mut fallback = None;
     let mut spread_hash = ecmp_flow_hash;
 
@@ -1016,12 +1016,9 @@ fn select_v4_route<'a>(
                     }
                 }
             }
-            // Preserve stable first-match semantics for duplicate rows in
-            // one preference tier; #5678 emits each tier as one ECMP row.
-            if last_preference == Some(route.preference) {
-                continue;
-            }
-            last_preference = Some(route.preference);
+            // Go emits same-preference QNH metric tiers as ordered rows. Each
+            // row's next_hops remains ECMP; a later row is tried only when the
+            // current tier has no live member.
             if route.discard {
                 return Some(ResolvedRouteV4::Static {
                     route,
@@ -1103,7 +1100,6 @@ fn select_v6_route<'a>(
         .iter()
         .find(|entry| entry.table == table && entry.prefix.contains(ip));
     let mut matched_prefix_len = None;
-    let mut last_preference = None;
     let mut fallback = None;
     let mut spread_hash = ecmp_flow_hash;
 
@@ -1127,10 +1123,9 @@ fn select_v6_route<'a>(
                     }
                 }
             }
-            if last_preference == Some(route.preference) {
-                continue;
-            }
-            last_preference = Some(route.preference);
+            // Preserve same-preference metric-tier row order as in v4: ECMP
+            // within a row, fall through to the next row only if all members
+            // in the current tier are unavailable.
             if route.discard {
                 return Some(ResolvedRouteV6::Static {
                     route,

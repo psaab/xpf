@@ -20,6 +20,8 @@ var ruleListFn = netlink.RuleList
 
 // routeSnapshotDedupeKey returns the canonical identity used to suppress
 // duplicate route snapshots during route collection.
+// NextHops are part of the key so distinct same-preference QNH metric-tier
+// rows survive deduplication; equal-metric members are grouped in one row.
 func routeSnapshotDedupeKey(snap RouteSnapshot) string {
 	return fmt.Sprintf("%s|%s|%s|%s|%v|%s|%t|%d|%d|%d",
 		snap.Table, snap.Family, snap.Destination,
@@ -221,6 +223,8 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 		// collapsing rows that share a prefix and target but have different
 		// priorities would discard one stage-1 candidate and make the helper
 		// disagree with first-match kernel rule evaluation.
+		// NextHops are also part of the identity: same-preference QNH metric
+		// tiers have distinct next-hop groups and must survive as ordered rows.
 		key := routeSnapshotDedupeKey(snap)
 		if _, ok := seen[key]; ok {
 			return
@@ -357,68 +361,38 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 				RulePriority: nextTableRulePriorities[route],
 				Preference:   route.Preference,
 			}
-			// #5678: group next-hops by their EFFECTIVE preference. A
-			// qualified-next-hop carries its own admin distance (#3871
-			// HasPreference — the Junos floating-static idiom: a primary
-			// next-hop plus a less-preferred backup); a plain next-hop uses the
-			// route-level preference. Emit ONE snapshot per distinct preference
-			// so a backup lowers as a SEPARATE, higher-preference standby route,
-			// NOT co-installed with the primary as an equal-cost ECMP member.
-			// The Rust FIB tie-breaks same-prefix routes by ascending
-			// preference (#2390 sort_routes) and selects the lowest via
-			// first-match lookup, holding the higher-preference backup as a
-			// standby entry — so folding the backup into the primary's next-hop
-			// list load-balanced traffic across both instead of preferring the
-			// primary (the #5678 silent routing-semantics change). Next-hops
-			// that share a preference (a plain `next-hop [ a b ]` list, or
-			// qualified next-hops at the SAME distance) stay a single
-			// equal-cost ECMP snapshot — no regression for real ECMP. Mirrors
-			// the FRR renderer (pkg/frr/config_render.go), which emits one `ip
-			// route` line per next-hop at dist = nh.Preference when
-			// HasPreference else the route-level distance.
-			type prefGroup struct {
-				preference int
-				nextHops   []string
-			}
-			order := make([]int, 0, len(route.NextHops))
-			groups := make(map[int]*prefGroup)
-			for _, nh := range route.NextHops {
-				var target string
-				switch {
-				case nh.Address != "" && nh.Interface != "":
-					target = nh.Address + "@" + nh.Interface
-				case nh.Address != "":
-					target = nh.Address
-				case nh.Interface != "":
-					target = "@" + nh.Interface
-				default:
+			// QNH metric is the tie-breaker after each next-hop's effective
+			// preference. Emit a separate ordered snapshot per metric tier;
+			// equal preference/metric next-hops remain ECMP. FRR 10.6 does not
+			// support this per-route metric, so its static output stays unchanged.
+			haveNextHops := false
+			for _, tier := range config.StaticRouteNextHopTiers(route) {
+				nextHops := make([]string, 0, len(tier.NextHops))
+				for _, nh := range tier.NextHops {
+					switch {
+					case nh.Address != "" && nh.Interface != "":
+						nextHops = append(nextHops, nh.Address+"@"+nh.Interface)
+					case nh.Address != "":
+						nextHops = append(nextHops, nh.Address)
+					case nh.Interface != "":
+						nextHops = append(nextHops, "@"+nh.Interface)
+					}
+				}
+				if len(nextHops) == 0 {
 					continue
 				}
-				pref := route.Preference
-				if nh.HasPreference {
-					pref = nh.Preference
-				}
-				g, ok := groups[pref]
-				if !ok {
-					g = &prefGroup{preference: pref}
-					groups[pref] = g
-					order = append(order, pref)
-				}
-				g.nextHops = append(g.nextHops, target)
-			}
-			if len(order) == 0 {
-				// No forwarding next-hops (discard / reject / next-table, or
-				// every next-hop had an empty target): emit the base
-				// disposition unchanged so the negative-route / leak entry is
-				// preserved.
-				addConfigSnapshot(base)
-				continue
-			}
-			for _, pref := range order {
 				snap := base
-				snap.Preference = groups[pref].preference
-				snap.NextHops = groups[pref].nextHops
+				snap.Preference = tier.Preference
+				snap.metricTierOrder = tier.Metric
+				snap.NextHops = nextHops
 				addConfigSnapshot(snap)
+				haveNextHops = true
+			}
+			if !haveNextHops {
+				// No forwarding next-hops (discard / reject / next-table, or
+				// every next-hop had an empty target): preserve the base
+				// disposition so the negative-route / leak entry remains.
+				addConfigSnapshot(base)
 			}
 		}
 	}
@@ -634,8 +608,8 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	// Leak rows are stage-1 rules, so RulePriority orders them at the same
 	// destination. Equal-priority leaks retain producer order because kernel
 	// rules with a shared priority are installed and observed in that order.
-	// Ordinary rows keep the existing next-hop/weight/next-table/discard/
-	// preference ordering.
+	// Ordinary rows sort by preference, then the in-process QNH metric-tier
+	// hint, followed by next-hop/weight/next-table/discard details.
 	//
 	// A NextTable row is always a leak; an ordinary route never competes with
 	// it in this priority comparison. The Rust consumer builds a separate
@@ -657,6 +631,14 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 				return a.RulePriority < b.RulePriority
 			}
 			return false
+		}
+		if a.NextTable == "" && b.NextTable == "" {
+			if a.Preference != b.Preference {
+				return a.Preference < b.Preference
+			}
+			if a.metricTierOrder != b.metricTierOrder {
+				return a.metricTierOrder < b.metricTierOrder
+			}
 		}
 		an, bn := strings.Join(a.NextHops, ","), strings.Join(b.NextHops, ",")
 		if an != bn {

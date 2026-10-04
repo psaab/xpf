@@ -6220,6 +6220,141 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
     );
 }
 
+/// Same-preference QNH metric groups arrive as ordered rows: the first live
+/// row's next-hops remain ECMP, while a wholly unavailable row falls through
+/// to the next metric tier. RED-on-revert: skipping later rows with the same
+/// preference leaves the route unresolved after the primary tier goes down.
+#[test]
+fn same_preference_qnh_metric_rows_fail_over_without_cross_tier_ecmp_11792() {
+    let interface = |name: &str, linux_name: &str, ifindex: i32, address: &str| {
+        crate::InterfaceSnapshot {
+            name: name.to_string(),
+            zone: "wan".to_string(),
+            linux_name: linux_name.to_string(),
+            ifindex,
+            hardware_addr: format!("02:00:00:00:00:{:02x}", ifindex),
+            addresses: vec![crate::InterfaceAddressSnapshot {
+                family: "inet".to_string(),
+                address: address.to_string(),
+                scope: 0,
+            }],
+            ..Default::default()
+        }
+    };
+    let neighbor = |interface: &str, ifindex: i32, ip: &str| crate::NeighborSnapshot {
+        interface: interface.to_string(),
+        ifindex,
+        family: "inet".to_string(),
+        ip: ip.to_string(),
+        mac: "00:11:22:33:44:55".to_string(),
+        state: "reachable".to_string(),
+        router: true,
+        link_local: false,
+    };
+    let snapshot = crate::ConfigSnapshot {
+        zones: vec![crate::ZoneSnapshot {
+            name: "wan".to_string(),
+            id: TEST_WAN_ZONE_ID,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            interface("ge-0/0/1", "ge-0-0-1", 11, "192.0.2.1/24"),
+            interface("ge-0/0/2", "ge-0-0-2", 22, "192.0.3.1/24"),
+            interface("ge-0/0/3", "ge-0-0-3", 33, "192.0.4.1/24"),
+            interface("ge-0/0/4", "ge-0-0-4", 44, "192.0.5.1/24"),
+        ],
+        routes: vec![
+            // Metric-zero primary tier: two equal-metric ECMP paths.
+            crate::RouteSnapshot {
+                table: "inet.0".to_string(),
+                family: "inet".to_string(),
+                destination: "203.0.113.0/24".to_string(),
+                next_hops: vec![
+                    "192.0.2.2@ge-0-0-1".to_string(),
+                    "192.0.3.2@ge-0-0-2".to_string(),
+                ],
+                preference: 5,
+                ..Default::default()
+            },
+            // Higher-metric backup tier, ordered after the primary row.
+            crate::RouteSnapshot {
+                table: "inet.0".to_string(),
+                family: "inet".to_string(),
+                destination: "203.0.113.0/24".to_string(),
+                next_hops: vec![
+                    "192.0.4.2@ge-0-0-3".to_string(),
+                    "192.0.5.2@ge-0-0-4".to_string(),
+                ],
+                preference: 5,
+                ..Default::default()
+            },
+        ],
+        neighbors: vec![
+            neighbor("ge-0-0-1", 11, "192.0.2.2"),
+            neighbor("ge-0-0-2", 22, "192.0.3.2"),
+            neighbor("ge-0-0-3", 33, "192.0.4.2"),
+            neighbor("ge-0-0-4", 44, "192.0.5.2"),
+        ],
+        ..Default::default()
+    };
+
+    let primary_live = build_forwarding_state(&snapshot);
+    let mut primary_egresses = std::collections::BTreeSet::new();
+    for hash in 0u64..64 {
+        let resolved = lookup_forwarding_resolution_v4(
+            &primary_live,
+            None,
+            Ipv4Addr::new(203, 0, 113, 5),
+            "inet.0",
+            0,
+            true,
+            Some(hash),
+        );
+        assert_eq!(resolved.disposition, ForwardingDisposition::ForwardCandidate);
+        primary_egresses.insert(resolved.egress_ifindex);
+        assert!(
+            resolved.egress_ifindex == 11 || resolved.egress_ifindex == 22,
+            "flow {hash} crossed into higher-metric backup ifindex {} while primary is live",
+            resolved.egress_ifindex,
+        );
+    }
+    assert_eq!(
+        primary_egresses,
+        std::collections::BTreeSet::from([11, 22]),
+        "equal-metric next-hops in the first tier must remain ECMP",
+    );
+
+    let mut backup_only_snapshot = snapshot;
+    backup_only_snapshot
+        .neighbors
+        .retain(|neighbor| neighbor.ifindex == 33 || neighbor.ifindex == 44);
+    let backup_only = build_forwarding_state(&backup_only_snapshot);
+    let mut backup_egresses = std::collections::BTreeSet::new();
+    for hash in 0u64..64 {
+        let resolved = lookup_forwarding_resolution_v4(
+            &backup_only,
+            None,
+            Ipv4Addr::new(203, 0, 113, 5),
+            "inet.0",
+            0,
+            true,
+            Some(hash),
+        );
+        assert_eq!(resolved.disposition, ForwardingDisposition::ForwardCandidate);
+        backup_egresses.insert(resolved.egress_ifindex);
+        assert!(
+            resolved.egress_ifindex == 33 || resolved.egress_ifindex == 44,
+            "flow {hash} did not fail over to a live higher-metric next-hop: {}",
+            resolved.egress_ifindex,
+        );
+    }
+    assert_eq!(
+        backup_egresses,
+        std::collections::BTreeSet::from([33, 44]),
+        "equal-metric backup next-hops must remain ECMP after failover",
+    );
+}
+
 /// #2922: `select_route_next_hop` must evaluate the (impure) liveness
 /// predicate exactly ONCE per candidate — not twice (count + nth).
 ///

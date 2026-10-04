@@ -306,11 +306,11 @@ fn route_family_mismatch(family: &str, is_ipv6: bool) -> bool {
 }
 
 pub(super) fn sort_routes(state: &mut ForwardingState) {
-    // #2390: order each ordinary table by descending prefix length (longest-
-    // match first), then ASCENDING preference (lower = more preferred per
-    // Junos). The lookup stops below the best matching prefix and checks its
-    // preference tiers in order; stable sort preserves insertion order for
-    // same-prefix/same-preference rows.
+    // #2390/#11792: order each ordinary table by descending prefix length
+    // (longest-match first), then ascending Junos preference (lower = more
+    // preferred). Go represents same-preference QNH metric tiers as separate
+    // rows ordered by metric; stable sort preserves that producer order so
+    // lookup can ECMP within a row, then fall through to later metric rows.
     for routes in state.routes_v4.values_mut() {
         routes.sort_by(|a, b| {
             b.prefix
