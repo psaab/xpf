@@ -91,6 +91,12 @@ func warnUnknownRoutingLeaves10707(tree *ConfigTree) []string {
 				continue
 			}
 			keyword := node.Keys[0]
+			// BGP SAFI diagnostics belong to the compiler gate, not this
+			// child walker: a hierarchical one-liner can carry the SAFI in
+			// node.Keys without a child keyword to visit.
+			if isBGPSAFIWarningOwned11815(path, keyword) {
+				continue
+			}
 			if message := routingKnobWarning11314(path, keyword); message != "" {
 				appendWarning(message)
 				continue

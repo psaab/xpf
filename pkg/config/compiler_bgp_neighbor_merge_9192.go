@@ -197,18 +197,35 @@ func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ow
 			}
 			neighbor.Import = append(neighbor.Import, firewallMatchValues(prop)...)
 		case "family":
+			applyNeighborFamily := func(familyNode *Node, afi string) error {
+				scope := fmt.Sprintf("BGP neighbor %q family %s", neighbor.Address, afi)
+				unicast, unsupported, err := applyBGPFamilySAFI11815(familyNode, scope, opts, warnings)
+				if err != nil {
+					return err
+				}
+				if afi == "inet" {
+					neighbor.FamilyInet = neighbor.FamilyInet || unicast
+					neighbor.UnsupportedInetSAFI = neighbor.UnsupportedInetSAFI || unsupported
+					if unicast {
+						return applyPrefixLimit11793(familyNode, &neighbor.PrefixLimitInet, false, scope, opts, warnings)
+					}
+					return nil
+				}
+				neighbor.FamilyInet6 = neighbor.FamilyInet6 || unicast
+				neighbor.UnsupportedInet6SAFI = neighbor.UnsupportedInet6SAFI || unsupported
+				if unicast {
+					return applyPrefixLimit11793(familyNode, &neighbor.PrefixLimitInet6, false, scope, opts, warnings)
+				}
+				return nil
+			}
 			if len(prop.Keys) >= 2 {
 				switch prop.Keys[1] {
 				case "inet":
-					neighbor.FamilyInet = true
-					if err := applyPrefixLimit11793(prop, &neighbor.PrefixLimitInet, false,
-						fmt.Sprintf("BGP neighbor %q family inet", neighbor.Address), opts, warnings); err != nil {
+					if err := applyNeighborFamily(prop, "inet"); err != nil {
 						return err
 					}
 				case "inet6":
-					neighbor.FamilyInet6 = true
-					if err := applyPrefixLimit11793(prop, &neighbor.PrefixLimitInet6, false,
-						fmt.Sprintf("BGP neighbor %q family inet6", neighbor.Address), opts, warnings); err != nil {
+					if err := applyNeighborFamily(prop, "inet6"); err != nil {
 						return err
 					}
 				}
@@ -216,15 +233,11 @@ func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ow
 				for _, fc := range prop.Children {
 					switch fc.Name() {
 					case "inet":
-						neighbor.FamilyInet = true
-						if err := applyPrefixLimit11793(fc, &neighbor.PrefixLimitInet, false,
-							fmt.Sprintf("BGP neighbor %q family inet", neighbor.Address), opts, warnings); err != nil {
+						if err := applyNeighborFamily(fc, "inet"); err != nil {
 							return err
 						}
 					case "inet6":
-						neighbor.FamilyInet6 = true
-						if err := applyPrefixLimit11793(fc, &neighbor.PrefixLimitInet6, false,
-							fmt.Sprintf("BGP neighbor %q family inet6", neighbor.Address), opts, warnings); err != nil {
+						if err := applyNeighborFamily(fc, "inet6"); err != nil {
 							return err
 						}
 					}

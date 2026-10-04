@@ -406,6 +406,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			var groupExport []string
 			var groupImport []string
 			var familyInet, familyInet6 bool
+			var groupFamilyInetUnsupportedSAFI, groupFamilyInet6UnsupportedSAFI bool
 			var groupPrefixLimitInet, groupPrefixLimitInet6 int
 			var groupAuthKey string
 			var groupBFD bool
@@ -440,6 +441,28 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			// never sees a child named `neighbor`. The group is then
 			// configured with NOBODY IN IT, which reads as intentional.
 			groupChildren := expandFlatRun(groupInst.node.Children, bgpGroupSchema9181())
+			applyGroupFamily := func(familyNode *Node, afi string) error {
+				scope := fmt.Sprintf("BGP group %q family %s", groupInst.name, afi)
+				unicast, unsupported, err := applyBGPFamilySAFI11815(familyNode, scope, opts, warnings)
+				if err != nil {
+					return err
+				}
+				if afi == "inet" {
+					familyInet = familyInet || unicast
+					groupFamilyInetUnsupportedSAFI = groupFamilyInetUnsupportedSAFI || unsupported
+					if unicast {
+						return applyPrefixLimit11793(familyNode, &groupPrefixLimitInet, true, scope, opts, warnings)
+					}
+					return nil
+				}
+				familyInet6 = familyInet6 || unicast
+				groupFamilyInet6UnsupportedSAFI = groupFamilyInet6UnsupportedSAFI || unsupported
+				if unicast {
+					return applyPrefixLimit11793(familyNode, &groupPrefixLimitInet6, true, scope, opts, warnings)
+				}
+				return nil
+			}
+
 			for pass := 0; pass < 2; pass++ {
 				for _, child := range groupChildren {
 					isNeighbor := child.Name() == "neighbor"
@@ -499,20 +522,18 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 					case "import":
 						groupImport = append(groupImport, firewallMatchValues(child)...)
 					case "family":
-						// Hierarchical: family { inet { unicast; } inet6 { unicast; } }
-						// Flat (via schema): family node with children inet/inet6
+						// SAFI is part of the activation identity: only unicast
+						// maps to FamilyInet/FamilyInet6. Unsupported SAFIs are
+						// rejected on commit and remain inert on lenient loads
+						// (#11815).
 						if len(child.Keys) >= 2 {
 							switch child.Keys[1] {
 							case "inet":
-								familyInet = true
-								if err := applyPrefixLimit11793(child, &groupPrefixLimitInet, true,
-									fmt.Sprintf("BGP group %q family inet", groupInst.name), opts, warnings); err != nil {
+								if err := applyGroupFamily(child, "inet"); err != nil {
 									return err
 								}
 							case "inet6":
-								familyInet6 = true
-								if err := applyPrefixLimit11793(child, &groupPrefixLimitInet6, true,
-									fmt.Sprintf("BGP group %q family inet6", groupInst.name), opts, warnings); err != nil {
+								if err := applyGroupFamily(child, "inet6"); err != nil {
 									return err
 								}
 							}
@@ -520,15 +541,11 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 							for _, fc := range child.Children {
 								switch fc.Name() {
 								case "inet":
-									familyInet = true
-									if err := applyPrefixLimit11793(fc, &groupPrefixLimitInet, true,
-										fmt.Sprintf("BGP group %q family inet", groupInst.name), opts, warnings); err != nil {
+									if err := applyGroupFamily(fc, "inet"); err != nil {
 										return err
 									}
 								case "inet6":
-									familyInet6 = true
-									if err := applyPrefixLimit11793(fc, &groupPrefixLimitInet6, true,
-										fmt.Sprintf("BGP group %q family inet6", groupInst.name), opts, warnings); err != nil {
+									if err := applyGroupFamily(fc, "inet6"); err != nil {
 										return err
 									}
 								}
@@ -632,6 +649,8 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 									PrefixLimitInet:  groupPrefixLimitInet,
 									PrefixLimitInet6: groupPrefixLimitInet6,
 								}
+								neighbor.UnsupportedInetSAFI = groupFamilyInetUnsupportedSAFI
+								neighbor.UnsupportedInet6SAFI = groupFamilyInet6UnsupportedSAFI
 								proto.BGP.Neighbors = append(proto.BGP.Neighbors, neighbor)
 							}
 							// Per-neighbor overrides. neighborOwnExport /

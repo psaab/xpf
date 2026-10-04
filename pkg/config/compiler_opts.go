@@ -850,6 +850,9 @@ type compileOpts struct {
 	// to warnings on tolerant loads. Neighbor overrides with an invalid value
 	// leave the inherited group maximum intact.
 	lenientBGPPrefixLimit11793 bool
+	// lenientBGPSAFI11815 warns and preserves only explicitly supported
+	// unicast when loading older/peer-synced configs carrying another SAFI.
+	lenientBGPSAFI11815 bool
 	// lenientRouteFilterMatchTypes (#2525) downgrades the route-filter
 	// match-type gate (validateRouteFilterMatchTypesStrict) from a hard
 	// compile error to a cfg.Warnings entry. The strict commit / commit-check
@@ -3156,6 +3159,7 @@ func lenientCompileOpts() compileOpts {
 		lenientOSPFMD5KeyID11794:               true,
 		lenientISISMetric11823:                 true,
 		lenientBGPPrefixLimit11793:             true,
+		lenientBGPSAFI11815:                   true,
 		lenientRouteFilterMatchTypes:           true,
 		lenientApplicationSpecs:                true,
 		lenientApplicationNameCollisions:       true,
