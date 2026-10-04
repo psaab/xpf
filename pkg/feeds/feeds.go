@@ -1156,6 +1156,7 @@ func (m *Manager) AllFeeds() map[string]FeedInfo {
 			HasPublished:                fs.hasPublished,
 			PublicationDebt:             publicationDebt,
 			InvalidLines:                fs.invalidLines,
+			InvalidSample:               append([]string(nil), fs.invalidSample...),
 			Degraded:                    fs.invalidLines > 0,
 			HoldDropped:                 fs.holdDropped,
 			ShrinkRefused:               fs.shrinkRefused,
