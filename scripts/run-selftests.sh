@@ -664,8 +664,8 @@ if command -v python3 >/dev/null 2>&1; then
 	# are well-formed; this judges what they SAY — every (gate, env) pair's
 	# newest row against its band, red on REGRESSION or newest-FAIL, with
 	# FAILs inside the baseline window surfaced. Tolerated-red pairs live in
-	# test/incus/ledger-expected-red.txt (shrink-only: a declaration that is
-	# no longer red fails). The strict form (no declarations) is
+	# test/incus/ledger-expected-red.txt (UTC-expiring and shrink-only:
+	# expired or no-longer-red declarations fail). The strict form is
 	# `make harness-compare-all`, the loop/human entry point.
 	out=$(python3 test/incus/ledger_compare.py --all --ledger test/results/ledger.d --expected-red test/incus/ledger-expected-red.txt 2>&1)
 	rc=$?

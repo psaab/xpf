@@ -18,6 +18,7 @@ the empty set is never allowed to reach an assertion-free path.
 """
 
 import contextlib
+from datetime import date, datetime, timezone
 import io
 import json
 import os
@@ -27,6 +28,7 @@ import subprocess
 import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 
 from ledger_compare import (
     BAND_REL_FLOOR,
@@ -568,16 +570,41 @@ class AggregateComparison(unittest.TestCase):
         declared, problems = parse_expected_red(
             "# comment\n"
             "\n"
-            "gate-fail loss-userspace-cluster newest-FAIL, tracked in #10122\n"
+            "gate-fail loss-userspace-cluster expires=2026-10-04 "
+            "newest-FAIL, tracked in #10122\n",
+            today=date(2026, 10, 3),
         )
         self.assertEqual(problems, [])
         self.assertEqual(
             declared,
             {("gate-fail", "loss-userspace-cluster"): "newest-FAIL, tracked in #10122"},
         )
-        _d2, problems2 = parse_expected_red("gate-only\n")
-        self.assertEqual(len(problems2), 1)
-        self.assertIn("line 1", problems2[0])
+
+    def test_expected_red_expires_at_start_of_utc_date(self):
+        text = f"gate-fail {ENV} expires=2026-10-04 tracked #11056\n"
+        agg = compare_all([
+            row("2026-09-18T04:18:52Z", gate="gate-fail", verdict="FAIL")
+        ])
+        declared, problems = parse_expected_red(text, today=date(2026, 10, 3))
+        self.assertEqual(problems, [])
+        self.assertEqual(all_exit_status(agg, declared), 0)
+        declared, problems = parse_expected_red(text, today=date(2026, 10, 4))
+        self.assertEqual(declared, {})
+        self.assertEqual(len(problems), 1)
+        self.assertEqual(all_exit_status(agg, declared), 1)
+
+    def test_expected_red_requires_iso_expiry_and_reason(self):
+        for text in (
+            "gate-only",
+            f"gate-fail {ENV} tracked #11056",
+            f"gate-fail {ENV} expires=2026-10-04",
+            f"gate-fail {ENV} expires=2026-02-30 tracked #11056",
+            f"gate-fail {ENV} expires=20261004 tracked #11056",
+        ):
+            with self.subTest(text=text):
+                declared, problems = parse_expected_red(text, today=date(2026, 10, 3))
+                self.assertEqual(declared, {})
+                self.assertEqual(len(problems), 1)
 
     def test_all_exit_status_honors_declarations(self):
         # MUTATION: expected-red-stale-check-dropped.
@@ -626,12 +653,17 @@ class AggregateComparison(unittest.TestCase):
         self.assertIn("gate-reg @ ", buf.getvalue())
         decl = os.path.join(work, "expected.txt")
         with open(decl, "w") as fh:
-            fh.write(f"gate-fail {ENV} tracked\n")
-            fh.write(f"gate-reg {ENV} tracked\n")
+            fh.write(f"gate-fail {ENV} expires=2026-10-04 tracked\n")
+            fh.write(f"gate-reg {ENV} expires=2026-10-04 tracked\n")
         buf2 = io.StringIO()
-        with contextlib.redirect_stdout(buf2):
+        with contextlib.redirect_stdout(buf2), patch("ledger_compare.datetime") as clock:
+            clock.now.return_value = datetime(2026, 10, 3, tzinfo=timezone.utc)
             rc2 = main(["--all", "--ledger", work, "--expected-red", decl])
         self.assertEqual(rc2, 0)
+        with contextlib.redirect_stderr(io.StringIO()), patch("ledger_compare.datetime") as clock:
+            clock.now.return_value = datetime(2026, 10, 4, tzinfo=timezone.utc)
+            expired_rc = main(["--all", "--ledger", work, "--expected-red", decl])
+        self.assertEqual(expired_rc, 1)
         with open(os.path.join(work, "broken.json"), "w") as fh:
             fh.write("{not json\n")
         buf3 = io.StringIO()

@@ -104,6 +104,7 @@ repeat the confusion this whole layer was built to end.
 from __future__ import annotations
 
 import argparse
+from datetime import date, datetime, timezone
 import json
 import re
 
@@ -914,27 +915,47 @@ def compare_all(
     }
 
 
-def parse_expected_red(text: str) -> Tuple[Dict[Tuple[str, str], str], List[str]]:
-    """Parse an expected-red declaration file.
+def parse_expected_red(
+    text: str, *, today: Optional[date] = None
+) -> Tuple[Dict[Tuple[str, str], str], List[str]]:
+    """Parse time-bounded expected-red declarations (#11056).
 
-    One pair per line: ``gate env reason...`` — the reason is REQUIRED (it is
-    what makes a tolerated red reviewable; cite the tracking issue). Blank
-    lines and ``#`` comments are skipped. Returns (declared, problems);
-    problems is non-empty when any line is malformed.
+    One pair per line: ``gate env expires=YYYY-MM-DD reason...``. The
+    declaration expires at the START of that date in UTC. Blank lines and
+    ``#`` comments are skipped. Malformed or expired lines are problems,
+    never waivers. ``today`` allows deterministic boundary checks.
     """
+    if today is None:
+        today = datetime.now(timezone.utc).date()
     declared: Dict[Tuple[str, str], str] = {}
     problems: List[str] = []
     for lineno, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        parts = stripped.split(None, 2)
-        if len(parts) < 3:
+        parts = stripped.split(None, 3)
+        if len(parts) < 4:
             problems.append(
-                f"line {lineno}: expected `gate env reason...`, got {stripped!r}"
+                f"line {lineno}: expected `gate env expires=YYYY-MM-DD reason...`, "
+                f"got {stripped!r}"
             )
             continue
-        declared[(parts[0], parts[1])] = parts[2]
+        expiry = re.fullmatch(r"expires=([0-9]{4}-[0-9]{2}-[0-9]{2})", parts[2])
+        if expiry is None:
+            problems.append(f"line {lineno}: invalid expiry {parts[2]!r}")
+            continue
+        try:
+            expires = date.fromisoformat(expiry.group(1))
+        except ValueError:
+            problems.append(f"line {lineno}: invalid expiry {parts[2]!r}")
+            continue
+        if today >= expires:
+            problems.append(
+                f"line {lineno}: EXPIRED {parts[0]} @ {parts[1]}: "
+                f"{parts[2]} (UTC today {today.isoformat()})"
+            )
+            continue
+        declared[(parts[0], parts[1])] = parts[3]
     return declared, problems
 
 
@@ -1066,8 +1087,8 @@ COVERAGE_POSITIVE_CONTROL = "test-failover"
 def parse_coverage_declared(text: str) -> Tuple[Dict[str, str], List[str]]:
     """Parse a coverage-declaration file: `gate reason...` per line.
 
-    Same shape as parse_expected_red but per GATE (coverage is per gate over
-    any env; the envs a gate was measured in are reported, not gated).
+    Coverage is per gate over any env; unlike expected-red waivers, these
+    declarations do not suppress measured failures and have no expiry field.
     """
     declared: Dict[str, str] = {}
     problems: List[str] = []
@@ -1344,7 +1365,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         metavar="FILE",
         help=(
             "declaration file of tolerated-red pairs for --all, one `gate env "
-            "reason...` per line; undeclared red and stale declarations fail"
+            "expires=YYYY-MM-DD reason...` per line; UTC expiry, undeclared red "
+            "and stale declarations fail"
         ),
     )
     p.add_argument(

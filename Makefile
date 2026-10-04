@@ -1155,8 +1155,8 @@ harness-compare:
 # (#9922 F-086). Exit 1 = a REGRESSION or a newest-FAIL anywhere; undetermined
 # pairs (VOID / thin baselines) are surfaced, not failed. STRICT: no
 # expected-red declarations — the loop/human entry point. `make selftest` runs
-# the same aggregate with test/incus/ledger-expected-red.txt; a red pair that
-# is not declared there fails the suite.
+# the same aggregate with test/incus/ledger-expected-red.txt; undeclared reds,
+# expired waivers and stale declarations fail the suite.
 harness-compare-all:
 	@python3 ./test/incus/ledger_compare.py --all
 
