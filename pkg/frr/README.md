@@ -52,9 +52,10 @@ FRR_VTYSH_BINARY=/usr/bin/vtysh go test ./pkg/frr \
 ```
 
 Without `FRR_VTYSH_BINARY`, the test finds `vtysh` on `PATH`; an absent
-binary reports an explicit skip. An explicitly configured but unusable
-binary fails. Dry-run mode and private config/socket paths avoid live
-daemon connections or route changes. This gate proves FRR syntax/context
+binary reports an explicit skip. The absence check rejects present but
+unusable or uninspectable candidates; an explicitly configured unusable
+binary also fails. Dry-run mode and private config/socket paths avoid
+live daemon connections or route changes. This gate proves FRR syntax/context
 acceptance, not kernel route installation or traffic forwarding.
 
 ## File layout

@@ -32,7 +32,19 @@ func TestRenderedRoutingConfigAcceptedByFRR11417(t *testing.T) {
 		var err error
 		vtysh, err = exec.LookPath("vtysh")
 		if errors.Is(err, exec.ErrNotFound) {
-			t.Skip("FRR vtysh is unavailable; real routing-config validation cannot run")
+			// LookPath also returns ErrNotFound when every candidate is
+			// unusable. Only a genuinely absent installation may skip.
+			for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+				candidate := filepath.Join(dir, "vtysh")
+				_, statErr := os.Lstat(candidate)
+				if statErr == nil {
+					t.Fatalf("FRR vtysh exists on PATH but is unusable: %s", candidate)
+				}
+				if !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("inspect FRR vtysh candidate %s: %v", candidate, statErr)
+				}
+			}
+			t.Skip("FRR vtysh is absent from PATH; real routing-config validation cannot run")
 		}
 		if err != nil {
 			t.Fatalf("resolve FRR vtysh executable: %v", err)
