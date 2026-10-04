@@ -97,13 +97,13 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 	return reasons
 }
 
-// PolicyContentRejectionReasons is the config-level SSOT for "the userspace
-// helper would fail this config's policy snapshot CLOSED and enforce NONE of
-// it". It is the single mirror of the runtime fail-closed policy-content set,
-// shared with the `request security match-policies` simulator (pkg/policymatch)
-// so the simulator reports the dataplane's fail-closed retention instead of a
-// fabricated permit/deny/default verdict (#4394) — the same SSOT-reuse pattern
-// as RuntimePolicyIDs and ClassifyHostInbound (#4352).
+// PolicyContentRejectionReasons is the config-level SSOT for whether a built
+// userspace policy snapshot may be published. It mirrors the runtime
+// fail-closed policy-content set and applies the canonical CIDR-mask spelling
+// guard, shared with the `request security match-policies` simulator
+// (pkg/policymatch) so it reports snapshot retention instead of a fabricated
+// permit/deny/default verdict (#4394) — the same SSOT-reuse pattern as
+// RuntimePolicyIDs and ClassifyHostInbound (#4352).
 //
 // It mirrors the Go-visible whole-snapshot rejection checks, including:
 //
@@ -141,12 +141,16 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 //     address-book row's prefixes_v4 / prefixes_v6 array agrees with Rust's
 //     literal-family parser. Go's To4 folding can file an IPv4-mapped IPv6
 //     prefix into prefixes_v4; the helper rejects the whole snapshot.
-//
-// A non-empty result means the helper refuses this snapshot; an empty result
-// means none of these mirrored rejection conditions was observed. feedOverlay is
-// the live dynamic-address feed-prefix overlay (nil = no live feeds); callers
-// MUST pass the same overlay the production builder uses so the simulator agrees
-// with the helper on feed-backed address-names.
+//   - REDUNDANT LEADING-ZERO CIDR MASKS (#12047): strict commit rejects these
+//     spellings, and the mirror prevents a tolerant load from publishing the
+//     raw tokens retained by the address-book and policy builders.
+
+// A non-empty result means publication is refused before the helper receives
+// this snapshot; helper-rejection arms mirror its fail-closed checks. An empty
+// result means none of these conditions was observed. feedOverlay is the live
+// dynamic-address feed-prefix overlay (nil = no live feeds); callers MUST pass
+// the same overlay the production builder uses so the simulator agrees with the
+// helper on feed-backed address-names.
 
 func PolicyContentRejectionReasons(cfg *config.Config, feedOverlay map[string][]string) []string {
 	if cfg == nil {
@@ -188,6 +192,12 @@ func PolicyContentRejectionReasons(cfg *config.Config, feedOverlay map[string][]
 	// rejects the entire snapshot. Inspect the built rows so this arm follows
 	// the same feed-aware expansion and family split as publication.
 	reasons = append(reasons, collectAddressBookFamilyRejections(books)...)
+	// #12047: refuse publication if a built policy literal or address-book row
+	// retains a redundant leading-zero CIDR mask. The Go builders preserve that
+	// spelling on the wire; strict commits reject it, and this arm keeps tolerant
+	// loads from handing it to the helper.
+	reasons = append(reasons, collectAddressBookCIDRMaskRejections(books)...)
+	reasons = append(reasons, collectPolicyCIDRMaskRejections(policies)...)
 	if len(reasons) == 0 {
 		if _, cerr := buildAppCatalogSnapshot(cfg); cerr != nil {
 			reasons = append(reasons, fmt.Sprintf(
@@ -266,6 +276,50 @@ func collectAddressBookFamilyRejections(books []AddressBookSnapshot) []string {
 					book.Name, prefix))
 			}
 		}
+	}
+	return reasons
+}
+
+func collectAddressBookCIDRMaskRejections(books []AddressBookSnapshot) []string {
+	var reasons []string
+	for _, book := range books {
+		for _, prefix := range book.PrefixesV4 {
+			if config.CIDRMaskHasRedundantLeadingZero(prefix) {
+				reasons = append(reasons, fmt.Sprintf(
+					"address-book %q prefix %q has redundant leading-zero CIDR mask digits; userspace publication is refused (#12047)",
+					book.Name, prefix))
+			}
+		}
+		for _, prefix := range book.PrefixesV6 {
+			if config.CIDRMaskHasRedundantLeadingZero(prefix) {
+				reasons = append(reasons, fmt.Sprintf(
+					"address-book %q prefix %q has redundant leading-zero CIDR mask digits; userspace publication is refused (#12047)",
+					book.Name, prefix))
+			}
+		}
+	}
+	return reasons
+}
+
+func collectPolicyCIDRMaskRejections(policies []PolicyRuleSnapshot) []string {
+	var reasons []string
+	check := func(rule *PolicyRuleSnapshot, side string, bookIDs []uint32, literals, legacy []string) {
+		addrs := literals
+		if len(bookIDs) == 0 && len(literals) == 0 {
+			addrs = legacy
+		}
+		for _, addr := range addrs {
+			if config.CIDRMaskHasRedundantLeadingZero(addr) {
+				reasons = append(reasons, fmt.Sprintf(
+					"policy %s %s %q has redundant leading-zero CIDR mask digits; userspace publication is refused (#12047)",
+					policyRejectionScope(rule), side, addr))
+			}
+		}
+	}
+	for i := range policies {
+		rule := &policies[i]
+		check(rule, "source-address", rule.SourceBookIDs, rule.SourceLiterals, rule.SourceAddresses)
+		check(rule, "destination-address", rule.DestinationBookIDs, rule.DestinationLiterals, rule.DestinationAddresses)
 	}
 	return reasons
 }

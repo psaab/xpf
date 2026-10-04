@@ -79,6 +79,9 @@ func policyMatchAddressTokenRecognized(tok string, named map[string]bool) bool {
 	if named[tok] {
 		return true
 	}
+	if CIDRMaskHasRedundantLeadingZero(tok) {
+		return false
+	}
 	if _, _, err := net.ParseCIDR(tok); err == nil {
 		return true
 	}
@@ -959,14 +962,14 @@ func validatePolicyLogActionStrict(cfg *Config) error {
 }
 
 func policyMatchAddressError(scope, polName, field, addr string) error {
-	if scope != "" {
-		return fmt.Errorf(
-			"%s policy %q: %s %q is not a defined address-book entry, the `any` keyword, or a valid CIDR/IP address",
-			scope, polName, field, addr)
+	problem := "is not a defined address-book entry, the `any` keyword, or a valid CIDR/IP address"
+	if CIDRMaskHasRedundantLeadingZero(addr) {
+		problem = "has redundant leading-zero CIDR mask digits; use a canonical decimal mask"
 	}
-	return fmt.Errorf(
-		"policy %q: %s %q is not a defined address-book entry, the `any` keyword, or a valid CIDR/IP address",
-		polName, field, addr)
+	if scope != "" {
+		return fmt.Errorf("%s policy %q: %s %q %s", scope, polName, field, addr, problem)
+	}
+	return fmt.Errorf("policy %q: %s %q %s", polName, field, addr, problem)
 }
 
 // validateAddressBookEntryNamesStrict (#3061, relaxed in #4340) enforces the

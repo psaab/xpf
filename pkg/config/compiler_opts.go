@@ -2225,6 +2225,10 @@ type compileOpts struct {
 	// snapshot builder and helper disagree on its family. Strict commits reject
 	// it before an entire policy snapshot can be refused.
 	lenientAddressBookMappedPrefixes bool
+	// lenientAddressBookCIDRMaskSpelling (#12047) keeps an already-persisted
+	// address-book prefix with redundant mask zeros loadable while warning;
+	// strict commits reject it and the userspace mirror prevents publication.
+	lenientAddressBookCIDRMaskSpelling bool
 	// lenientFlowAging (#3440 H2) downgrades the flow-aging gate
 	// (validateFlowAgingStrict) from a hard compile error to a cfg.Warnings
 	// entry. The strict commit / commit-check path hard-rejects an unknown
@@ -3269,6 +3273,7 @@ func lenientCompileOpts() compileOpts {
 		lenientTrailingTokens:                  true,
 		lenientAddressUnimplementedForms:       true,
 		lenientAddressBookMappedPrefixes:       true,
+		lenientAddressBookCIDRMaskSpelling: true,
 		lenientFlowAging:                       true,
 		lenientChassisRG:                       true,
 		lenientVRRPGroupID:                     true,

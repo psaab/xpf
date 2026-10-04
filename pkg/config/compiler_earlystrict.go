@@ -158,6 +158,19 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
+	// #12047 — reject address-book CIDR masks with redundant leading zeros.
+	// These values are preserved verbatim for the wire, so even Go-valid
+	// spellings can be unsupported by the policy userspace parser. Run before
+	// the zone-local fold to name the authored entry; tolerant loads warn and
+	// the userspace mirror prevents publication.
+	if err := validateAddressBookCIDRMaskSpellingStrict(cfg); err != nil {
+		if opts.lenientAddressBookCIDRMaskSpelling {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("address-book CIDR mask spelling (downgraded to warning on tolerant path; userspace publication will refuse it): %v", err))
+		} else {
+			return err
+		}
+	}
 	// #3061 — fold zone-local address books into the global book under
 	// zone-qualified internal names and rewrite policy match tokens. Runs after
 	// the name gate (above) and before the policy match-address resolution
