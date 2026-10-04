@@ -332,3 +332,108 @@ func TestRoutingPolicyUnknownAfterPackedBracketedFromStillFailsClosed11779(t *te
 			term.UnknownFrom, term.Action, term.NextPolicy)
 	}
 }
+
+// FAIL-ON-REVERT: a route-filter trailer must not absorb a following
+// schema-known `prefix-list` sibling when its packed reader falls back.
+func TestRoutingPolicyPackedRouteFilterPreservesTypedSibling11779(t *testing.T) {
+	src := `policy-options {
+ prefix-list PL1 10.0.0.0/8;
+ policy-statement P {
+  term T {
+   from route-filter 10.0.0.0/8 upto /24 prefix-list PL1;
+   then accept;
+  }
+ }
+}`
+	for _, lenient := range []bool{false, true} {
+		tree := parsePolicyTreeFromSource11779(t, src)
+		var cfg *Config
+		var err error
+		if lenient {
+			cfg, err = CompileConfigLenient(tree)
+		} else {
+			cfg, err = CompileConfig(tree)
+		}
+		if err != nil {
+			t.Fatalf("lenient=%v compile: %v", lenient, err)
+		}
+		term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+		if term.Action != "accept" || len(term.UnknownFrom) != 0 {
+			t.Fatalf("lenient=%v lost supported from match: Action=%q UnknownFrom=%v",
+				lenient, term.Action, term.UnknownFrom)
+		}
+		if len(term.RouteFilters) != 1 ||
+			term.RouteFilters[0].Prefix != "10.0.0.0/8" ||
+			term.RouteFilters[0].MatchType != "upto" ||
+			term.RouteFilters[0].UptoLen != 24 {
+			t.Fatalf("lenient=%v route-filter = %+v, want typed upto /24",
+				lenient, term.RouteFilters)
+		}
+		if len(term.PrefixList) != 1 || term.PrefixList[0] != "PL1" {
+			t.Fatalf("lenient=%v prefix-list = %v, want [PL1]", lenient, term.PrefixList)
+		}
+	}
+}
+
+// FAIL-ON-REVERT: an unclosed bracketed match must stop before a clause
+// keyword and fail closed instead of swallowing `then accept` as list values.
+func TestRoutingPolicyUnclosedBracketedFromListFailsClosed11779(t *testing.T) {
+	src := `policy-options {
+ prefix-list PL1 10.0.0.0/8;
+ policy-statement P {
+  term T from prefix-list [ PL1 PL2 rib inet.0 then accept;
+ }
+}`
+	tree := parsePolicyTreeFromSource11779(t, src)
+	_, strictErr := CompileConfig(tree)
+	if strictErr == nil || !strings.Contains(strictErr.Error(), "closing bracket") ||
+		!strings.Contains(strictErr.Error(), "#11779") {
+		t.Fatalf("unclosed bracketed from-list was not rejected: %v", strictErr)
+	}
+
+	cfg, err := CompileConfigLenient(parsePolicyTreeFromSource11779(t, src))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+	if term.invalidFromSyntax11779 == "" || term.Action != "reject" || term.NextPolicy {
+		t.Fatalf("unclosed list did not fail closed: invalidFromSyntax=%q Action=%q NextPolicy=%v",
+			term.invalidFromSyntax11779, term.Action, term.NextPolicy)
+	}
+	if len(term.PrefixList) != 4 || term.PrefixList[0] != "PL1" ||
+		term.PrefixList[1] != "PL2" || term.PrefixList[2] != "rib" ||
+		term.PrefixList[3] != "inet.0" {
+		t.Fatalf("bracketed values crossed `then`: %v", term.PrefixList)
+	}
+}
+
+// A quoted clause keyword remains a valid match-list value; only an unquoted
+// clause boundary inside the bracketed run signals the missing closer.
+func TestRoutingPolicyQuotedClauseKeywordInBracketedFromList11779(t *testing.T) {
+	src := `policy-options {
+ prefix-list then 10.0.0.0/8;
+ prefix-list PL2 172.16.0.0/12;
+ policy-statement P {
+  term T from prefix-list [ "then" PL2 ] then accept;
+ }
+}`
+	for _, lenient := range []bool{false, true} {
+		tree := parsePolicyTreeFromSource11779(t, src)
+		var cfg *Config
+		var err error
+		if lenient {
+			cfg, err = CompileConfigLenient(tree)
+		} else {
+			cfg, err = CompileConfig(tree)
+		}
+		if err != nil {
+			t.Fatalf("lenient=%v compile: %v", lenient, err)
+		}
+		term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+		if term.invalidFromSyntax11779 != "" || len(term.UnknownFrom) != 0 ||
+			term.Action != "accept" || len(term.PrefixList) != 2 ||
+			term.PrefixList[0] != "then" || term.PrefixList[1] != "PL2" {
+			t.Fatalf("lenient=%v quoted clause value changed: term=%+v", lenient, term)
+		}
+	}
+}

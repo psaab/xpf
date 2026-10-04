@@ -1449,6 +1449,31 @@ func firewallPrefixListRefs(child *Node) []PrefixListRef {
 	return refs
 }
 
+// packedRouteFilterWidth returns the consumed width of a packed routing-policy
+// route-filter leaf starting at keys[i]: the schema's three-token span plus
+// the match-type trailer when one follows and validates. The scanner and the
+// typed fallback must agree on this boundary.
+func packedRouteFilterWidth(keys []string, i, n int) int {
+	if n != 3 || i+n >= len(keys) {
+		return n
+	}
+	switch keys[i+2] {
+	case "upto":
+		if _, ok := parseRouteFilterLen(keys[i+n]); ok {
+			return n + 1
+		}
+	case "prefix-length-range":
+		if _, _, ok := parseRouteFilterRange(keys[i+n]); ok {
+			return n + 1
+		}
+	case "through":
+		if _, err := parseCIDRStrict(keys[i+n], "10.0.0.0/24"); err == nil {
+			return n + 1
+		}
+	}
+	return n
+}
+
 // packedUnknownFromLeaves returns schema-unknown leaves carried on a packed
 // `from` node. The generic packed-body expander cannot safely synthesize an
 // unknown leaf because its operand arity is not in the schema; firewall and
@@ -1491,32 +1516,13 @@ func packedUnknownFromLeaves(node *Node, schema *schemaNode) []string {
 				}
 			}
 		}
+
 		if childSchema != nil {
 			n, refined := consumeNodeKeys(node.Keys[i:], childSchema)
-			if childSchema == resolveSchemaChild(schema, "route-filter") &&
-				n == 3 && i+n < len(node.Keys) {
-				// A packed routing-policy route-filter carries one trailing
-				// argument past the schema's args:2 span (the `/N` length for
-				// `upto`, the `/lo-/hi` range for `prefix-length-range`, or
-				// the CIDR for `through`). Absorb it by match-type so the
-				// scanner does not report the operator's own operand as an
-				// unknown `from` leaf (#11779 P1). Only the routing-policy
-				// `from` schema declares `route-filter`; firewall callers
-				// cannot reach this arm.
-				switch node.Keys[i+2] {
-				case "upto":
-					if _, ok := parseRouteFilterLen(node.Keys[i+n]); ok {
-						n++
-					}
-				case "prefix-length-range":
-					if _, _, ok := parseRouteFilterRange(node.Keys[i+n]); ok {
-						n++
-					}
-				case "through":
-					if _, err := parseCIDRStrict(node.Keys[i+n], "10.0.0.0/24"); err == nil {
-						n++
-					}
-				}
+			if childSchema == resolveSchemaChild(schema, "route-filter") {
+				// Keep this scan in lockstep with the typed policy-term
+				// fallback; otherwise the trailer becomes a false unknown.
+				n = packedRouteFilterWidth(node.Keys, i, n)
 			}
 			if childSchema.multi && childSchema.children == nil && n > 1 &&
 				node.KeyBracketed(i+n-1) {

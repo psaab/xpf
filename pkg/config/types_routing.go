@@ -69,6 +69,8 @@ type PolicyTerm struct {
 	PrefixList    []string // from prefix-list <name> (OR across entries)
 	FromCommunity []string // from community <name> (match community-list; OR)
 	FromASPath    []string // from as-path <name> (match as-path access-list; OR)
+	// invalidFromSyntax11779 preserves a malformed bracketed from-list boundary.
+	invalidFromSyntax11779 string
 	// UnknownFrom records `from` leaves the routing-policy compiler does not
 	// enforce (#11779). Preserving an unsupported match prevents it from
 	// disappearing and widening the term; strict compilation rejects it, while
