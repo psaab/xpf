@@ -157,7 +157,7 @@ func TestStaticRouteRibGroupHasSpecificWarning11314(t *testing.T) {
 	}
 }
 
-func TestInstanceRoutingOptionsDroppedKnobsHaveSpecificWarnings11314(t *testing.T) {
+func TestInstanceRoutingOptionsUnappliedKnobsHaveSpecificWarnings11314(t *testing.T) {
 	cases := []struct {
 		name string
 		tree func(*testing.T) *ConfigTree
@@ -169,6 +169,7 @@ func TestInstanceRoutingOptionsDroppedKnobsHaveSpecificWarnings11314(t *testing.
 					"set routing-instances edge instance-type vrf",
 					"set routing-instances edge routing-options rib-groups leaked import-rib inet.0",
 					"set routing-instances edge routing-options generate route 198.51.100.0/24 discard",
+					"set routing-instances edge routing-options forwarding-table export export-policy",
 				})
 			},
 		},
@@ -181,6 +182,7 @@ func TestInstanceRoutingOptionsDroppedKnobsHaveSpecificWarnings11314(t *testing.
 						routing-options {
 							rib-groups { leaked { import-rib inet.0; } }
 							generate { route 198.51.100.0/24 discard; }
+							forwarding-table { export export-policy; }
 						}
 					}
 				}`)
@@ -201,11 +203,14 @@ func TestInstanceRoutingOptionsDroppedKnobsHaveSpecificWarnings11314(t *testing.
 					if err != nil {
 						t.Fatalf("compile: %v", err)
 					}
-					if !hasRoutingKnobWarning11314(cfg, "routing-options", "rib-groups", "not copied") {
+					if !hasRoutingKnobWarning11314(cfg, "routing-options", "rib-groups", "not consumed") {
 						t.Errorf("missing specific per-instance rib-groups warning: %v", cfg.Warnings)
 					}
 					if !hasRoutingKnobWarning11314(cfg, "routing-options", "generate", "not applied") {
 						t.Errorf("missing specific per-instance generate warning: %v", cfg.Warnings)
+					}
+					if !hasRoutingKnobWarning11314(cfg, "routing-options", "forwarding-table", "NOT APPLIED") {
+						t.Errorf("missing specific per-instance forwarding-table warning: %v", cfg.Warnings)
 					}
 				})
 			}

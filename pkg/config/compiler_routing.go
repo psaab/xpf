@@ -646,6 +646,14 @@ func compileRoutingInstances(node *Node, cfg *Config, opts compileOpts) error {
 				// per-instance BGP that omits local-as can inherit it (falling
 				// back to the global routing-options AS in resolveBGPAutonomousSystem).
 				ri.AutonomousSystem = ro.AutonomousSystem
+				// #11782: carry the remaining parsed per-instance routing-options
+				// fields too. These are separate slots rather than global
+				// RoutingOptionsConfig state; omitting one here silently discarded
+				// the successfully compiled stanza when `ro` went out of scope.
+				ri.GenerateRoutes = ro.GenerateRoutes
+				ri.RibGroups = ro.RibGroups
+				ri.ForwardingTableExport = ro.ForwardingTableExport
+				ri.ForwardingTableExports = ro.ForwardingTableExports
 				// Parse interface-routes rib-group
 				if irNode := prop.FindChild("interface-routes"); irNode != nil {
 					if rgNode := irNode.FindChild("rib-group"); rgNode != nil {

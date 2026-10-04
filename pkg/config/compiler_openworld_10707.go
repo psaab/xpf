@@ -31,14 +31,22 @@ func routingKnobWarning11314(path []string, keyword string) string {
 		case "rib-groups":
 			return fmt.Sprintf(
 				"routing-instance %q routing-options rib-groups is ACCEPTED but NOT APPLIED: "+
-					"per-instance RIB-group definitions are not copied into the runtime "+
-					"configuration; define route-sharing groups globally under routing-options (#11314)",
+					"per-instance RIB-group definitions are retained in the compiled instance "+
+					"but are not consumed by the route-sharing runtime; define route-sharing "+
+					"groups globally under routing-options (#11314)",
 				path[1])
 		case "generate":
 			return fmt.Sprintf(
 				"routing-instance %q routing-options generate is ACCEPTED but NOT APPLIED: "+
-					"per-instance generated routes are not applied because the compiler does "+
-					"not carry them into that instance's forwarding configuration (#11314)",
+					"per-instance generated routes are retained in the compiled instance but are "+
+					"not applied to its forwarding configuration; configure generated routes "+
+					"globally under routing-options (#11314)",
+				path[1])
+		case "forwarding-table":
+			return fmt.Sprintf(
+				"routing-instance %q routing-options forwarding-table is ACCEPTED but NOT APPLIED: "+
+					"the export policy is retained in compiled instance state, but ECMP policy "+
+					"selection reads only global routing-options forwarding-table export (#11782)",
 				path[1])
 		}
 	}
