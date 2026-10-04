@@ -195,6 +195,11 @@ func (m *Manager) FormatStatus() string {
 		}
 		fmt.Fprintln(&b)
 	}
+	if syncStats := m.GetSyncStats(); syncStats != nil && syncStats.CleartextSyncAlarmLatched {
+		fmt.Fprintf(&b, "\nWarning: config sync has sent or received cleartext payloads (#11773; alarm latched).\n"+
+			"  Cleartext config payloads: sent %d, received %d. Investigate the fallback; if a control-link PSK is configured, rotate it after encrypted sync is restored.\n",
+			syncStats.ConfigsSentCleartext, syncStats.ConfigsReceivedCleartext)
+	}
 	return b.String()
 }
 
@@ -600,6 +605,10 @@ func (m *Manager) FormatInformation() string {
 		}
 		fmt.Fprintf(&b, "  Configs sent:     %d\n", syncStats.ConfigsSent)
 		fmt.Fprintf(&b, "  Configs received: %d\n", syncStats.ConfigsReceived)
+		if syncStats.CleartextSyncAlarmLatched {
+			fmt.Fprintf(&b, "  WARNING: config sync cleartext fallback has been used (alarm latched; sent %d, received %d)\n",
+				syncStats.ConfigsSentCleartext, syncStats.ConfigsReceivedCleartext)
+		}
 		if syncStats.ConfigsStaleIgnored > 0 {
 			fmt.Fprintf(&b, "  Configs stale-dropped: %d\n", syncStats.ConfigsStaleIgnored)
 		}
@@ -771,6 +780,11 @@ func (m *Manager) FormatStatistics() string {
 			syncStats.DeletesSent, syncStats.DeletesReceived)
 		fmt.Fprintf(&b, "    %-32s %-12d %d\n", "Config",
 			syncStats.ConfigsSent, syncStats.ConfigsReceived)
+		if syncStats.CleartextSyncAlarmLatched || syncStats.ConfigsSentCleartext > 0 ||
+			syncStats.ConfigsReceivedCleartext > 0 {
+			fmt.Fprintf(&b, "    %-32s %-12d %d\n", "Config cleartext",
+				syncStats.ConfigsSentCleartext, syncStats.ConfigsReceivedCleartext)
+		}
 		fmt.Fprintf(&b, "    %-32s %-12d %d\n", "IPsec SA",
 			syncStats.IPsecSASent, syncStats.IPsecSAReceived)
 		fmt.Fprintf(&b, "    %-32s %-12d %d\n", "DHCP leases",
@@ -923,6 +937,11 @@ func (m *Manager) FormatDataPlaneStatistics() string {
 		syncStats.DeletesSent, syncStats.DeletesReceived)
 	fmt.Fprintf(&b, "    %-32s %-12d %d\n", "Config",
 		syncStats.ConfigsSent, syncStats.ConfigsReceived)
+	if syncStats.CleartextSyncAlarmLatched || syncStats.ConfigsSentCleartext > 0 ||
+		syncStats.ConfigsReceivedCleartext > 0 {
+		fmt.Fprintf(&b, "    %-32s %-12d %d\n", "Config cleartext",
+			syncStats.ConfigsSentCleartext, syncStats.ConfigsReceivedCleartext)
+	}
 	fmt.Fprintf(&b, "    %-32s %-12d %d\n", "IPsec SA",
 		syncStats.IPsecSASent, syncStats.IPsecSAReceived)
 	fmt.Fprintf(&b, "    %-32s %-12d %d\n", "DHCP leases",
