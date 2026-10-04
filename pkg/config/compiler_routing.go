@@ -1049,8 +1049,12 @@ func compilePolicyOptions(node *Node, po *PolicyOptionsConfig) error {
 					// Hierarchical form
 					parsePolicyTermChildren(term, prop.Children)
 				} else if len(prop.Keys) > 2 {
-					// Flat form: remaining keys after term name are key-value pairs
-					parsePolicyTermInlineKeys(term, prop.Keys[2:])
+					// Flat form: remaining keys after term name are key-value pairs.
+					var bracketed []bool
+					if len(prop.KeysBracketed) == len(prop.Keys) {
+						bracketed = prop.KeysBracketed[2:]
+					}
+					parsePolicyTermInlineKeys(term, prop.Keys[2:], bracketed)
 				}
 			case "then":
 				// Default action at the policy level. #8939: the only two
@@ -1208,6 +1212,37 @@ func routeFilterTrailingToken(fc *Node) string {
 	return ""
 }
 
+// policyTermFromChildren11779 reads a policy `from` body through packedBody.
+// Route-filter's args:2 schema does not include its optional argument after
+// the match type, so such a packed leaf can remain opaque even though the
+// unknown-from scanner accounts for that argument. Recreate the route-filter
+// child with its full token tail so the ordinary reader preserves the
+// RouteFilter fields instead of accepting a match-any term.
+func policyTermFromChildren11779(fromNode *Node, fromSchema *schemaNode) []*Node {
+	if fromNode == nil {
+		return nil
+	}
+	body := packedBody(fromNode, fromSchema)
+	if body != fromNode {
+		return body.Children
+	}
+	if len(fromNode.Children) > 0 {
+		return fromNode.Children
+	}
+	if len(fromNode.Keys) < 4 || fromNode.Name() != "from" ||
+		fromNode.Keys[1] != "route-filter" {
+		return nil
+	}
+	routeFilter := &Node{Keys: append([]string(nil), fromNode.Keys[1:]...)}
+	if len(fromNode.KeysQuoted) == len(fromNode.Keys) {
+		routeFilter.setKeysQuoted(fromNode.KeysQuoted[1:])
+	}
+	if len(fromNode.KeysBracketed) == len(fromNode.Keys) {
+		routeFilter.setKeysBracketed(fromNode.KeysBracketed[1:])
+	}
+	return []*Node{routeFilter}
+}
+
 // parsePolicyTermChildren handles hierarchical form of policy term
 // where "from" and "then" are child nodes.
 func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
@@ -1218,7 +1253,7 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 			for _, unknown := range packedUnknownFromLeaves(tc, fromSchema) {
 				term.UnknownFrom = append(term.UnknownFrom, unknown)
 			}
-			for _, fc := range tc.Children {
+			for _, fc := range policyTermFromChildren11779(tc, fromSchema) {
 				switch fc.Name() {
 				case "protocol":
 					// Junos "from protocol [ bgp ospf static ]" matches any
@@ -1352,7 +1387,7 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 				}
 			}
 			if len(tc.Keys) >= 2 {
-				parsePolicyTermInlineKeys(term, tc.Keys)
+				parsePolicyTermInlineKeys(term, tc.Keys, tc.KeysBracketed)
 			}
 		}
 	}
@@ -1444,11 +1479,29 @@ func skipUnknownPolicyTermFromTail11779(keys []string, i int) int {
 	return i
 }
 
+// appendInlineBracketedMatchValues11779 reads the first value after a
+// multi-value from keyword, then consumes only the rest of that bracketed
+// list. Keeping the bracket boundary prevents an unknown following from leaf
+// from being mistaken for another supported match value.
+func appendInlineBracketedMatchValues11779(dst, keys []string, bracketed []bool, i int) ([]string, int) {
+	if i+1 >= len(keys) {
+		return dst, i
+	}
+	i++
+	dst = append(dst, keys[i])
+	for i+1 < len(keys) && i < len(bracketed) && i+1 < len(bracketed) &&
+		bracketed[i] && bracketed[i+1] {
+		i++
+		dst = append(dst, keys[i])
+	}
+	return dst, i
+}
+
 // parsePolicyTermInlineKeys handles flat set syntax where remaining keys
 // after the term name are inline key-value pairs like:
 // "from", "protocol", "direct" or "from", "route-filter", "10.0.0.0/8", "exact"
 // or "then", "accept"
-func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string) {
+func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed []bool) {
 	inFrom := false
 	for i := 0; i < len(keys); i++ {
 		if inFrom && policyTermFromUnsupportedThenKeywords11779[keys[i]] {
@@ -1495,10 +1548,8 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string) {
 				term.FromProtocols = append(term.FromProtocols, keys[i])
 			}
 		case "prefix-list":
-			if i+1 < len(keys) {
-				i++
-				term.PrefixList = append(term.PrefixList, keys[i])
-			}
+			term.PrefixList, i = appendInlineBracketedMatchValues11779(
+				term.PrefixList, keys, bracketed, i)
 		case "route-filter":
 			if i+2 < len(keys) {
 				rf := &RouteFilter{
@@ -1570,10 +1621,8 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string) {
 			}
 		case "community":
 			if inFrom {
-				if i+1 < len(keys) {
-					i++
-					term.FromCommunity = append(term.FromCommunity, keys[i])
-				}
+				term.FromCommunity, i = appendInlineBracketedMatchValues11779(
+					term.FromCommunity, keys, bracketed, i)
 				continue
 			}
 			// `then community` may carry an operation keyword
@@ -1602,10 +1651,8 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string) {
 				}
 			}
 		case "as-path":
-			if i+1 < len(keys) {
-				i++
-				term.FromASPath = append(term.FromASPath, keys[i])
-			}
+			term.FromASPath, i = appendInlineBracketedMatchValues11779(
+				term.FromASPath, keys, bracketed, i)
 		case "as-path-prepend":
 			// `then as-path-prepend 65001 65001 ...` — the lexer strips any
 			// quotes/brackets, so every ASN arrives as a separate key.
