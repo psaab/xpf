@@ -5,10 +5,10 @@ import "sort"
 // StaticRouteNextHopTier groups next-hops at one effective preference and
 // metric. Equal groups remain ECMP; the ordered list of groups is failover.
 type StaticRouteNextHopTier struct {
-	Preference      int
-	Metric          int
-	ManagementPrio  int
-	NextHops        []NextHopEntry
+	Preference     int
+	Metric         int
+	ManagementPrio int
+	NextHops       []NextHopEntry
 }
 
 // StaticRouteNextHopTiers returns next-hops grouped and ordered by effective

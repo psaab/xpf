@@ -21,9 +21,10 @@ func TestQualifiedNextHopMetricOrdersEqualPreference_11792(t *testing.T) {
 		Destination: "198.51.100.0/24",
 		Preference:  5,
 		NextHops: []config.NextHopEntry{
-			{Address: "192.0.2.1"}, // Unqualified default metric 0: primary.
-			{Address: "192.0.2.2", Metric: 10, HasMetric: true},
-			{Address: "192.0.2.3", Metric: 10, HasMetric: true},
+			{Address: "192.0.2.9"}, // Unqualified default metric 0: primary.
+			// Lexically .10 sorts before .9, opposing the metric tier order.
+			{Address: "192.0.2.10", Metric: 10, HasMetric: true},
+			{Address: "192.0.2.11", Metric: 10, HasMetric: true},
 			{Address: "192.0.2.4", Preference: 6, HasPreference: true},
 		},
 	}}
@@ -45,8 +46,8 @@ func TestQualifiedNextHopMetricOrdersEqualPreference_11792(t *testing.T) {
 		preference int
 		nextHops   []string
 	}{
-		{5, []string{"192.0.2.1"}},
-		{5, []string{"192.0.2.2", "192.0.2.3"}},
+		{5, []string{"192.0.2.9"}},
+		{5, []string{"192.0.2.10", "192.0.2.11"}},
 		{6, []string{"192.0.2.4"}},
 	}
 	for i, route := range matches {
