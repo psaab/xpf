@@ -336,27 +336,19 @@ fn enqueue_reject_reply(
     }
 
     // #2238: classify the GENERATED reply (TCP RST or ICMP/ICMPv6
-    // unreachable) by its OWN egress 5-tuple + egress interface — the
-    // reflected reply egresses on the interface it arrived on, so
-    // `ingress_ifindex` IS the egress. An output firewall filter terminal
-    // `discard`/`reject` (or three-color policer) on that interface drops
-    // the reply; a parse failure of our own built bytes fails CLOSED (§6.2).
+    // unreachable) by its OWN egress 5-tuple and interface — the logical
+    // ingress unit. Output filters and policers on that unit can suppress the
+    // reply; a parse failure of our own bytes fails CLOSED (§6.2). The request
+    // stays on the physical ingress binding's TX pipeline, but its CoS key is
+    // the logical interface so shaping uses the same unit as classification.
     // Pre-#2238 this enqueued an UNCLASSIFIED TxRequest (`cos_queue_id:
     // None, dscp_rewrite: None`) that the drain path honored verbatim — no
     // output filter / CoS / DSCP was ever applied to the reply.
     //
-    // #3035: classify on the LOGICAL egress ifindex, NOT the physical
-    // `ingress_ifindex`. CoS interfaces (forwarding_build/cos.rs) and output
-    // filters (filter/compiler.rs) are keyed by the logical unit ifindex; on
-    // a VLAN subinterface `ingress_ifindex` is the physical parent index, so
-    // classifying by it applied the parent's (or first subinterface's) CoS
-    // queue / DSCP rewrite / output filter instead of this unit's. Mirrors
-    // the #3026 generated-ICMP-error fix and the filter/CoS sites via the
-    // `resolve_ingress_logical_ifindex` SSOT (#3976: the same
-    // `logical_ingress_ifindex` computed above also keys the ICMP reject
-    // build); the physical `ingress_ifindex` is still used for the XSK
-    // transmit (`egress_ifindex`) below. For a non-VLAN port the logical and
-    // physical indexes coincide, so this is a no-op there.
+    // #3035: CoS interfaces and output filters are keyed by the logical unit
+    // ifindex, not physical `ingress_ifindex`. The resolver above mirrors the
+    // #3026 generated-ICMP fix and is shared with the #3976 reject-build path.
+    // Untagged logical and physical indexes coincide.
     //
     // #5569: this output-filter classification now runs BEFORE the per-zone
     // reject rate-limit token is consumed (the token block moved BELOW this
@@ -459,7 +451,7 @@ fn enqueue_reject_reply(
         expected_addr_family: meta.addr_family,
         expected_protocol: meta.protocol,
         flow_key: Some(flow.forward_key.clone()),
-        egress_ifindex: ingress_ifindex,
+        egress_ifindex: logical_ingress_ifindex,
         cos_queue_id: verdict.cos_queue_id,
         dscp_rewrite: verdict.dscp_rewrite,
         mirror_clone: false,

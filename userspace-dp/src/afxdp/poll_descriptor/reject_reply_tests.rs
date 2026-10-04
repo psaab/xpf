@@ -1364,6 +1364,51 @@ fn reject_reply_classifies_on_logical_vlan_ifindex_3035() {
     assert!(pipeline.pending_tx_local.is_empty());
 }
 
+/// #11786 fail-on-revert: a permitted reject is shaped on the logical VLAN
+/// CoS queue, not looked up against its physical XSK parent.
+#[test]
+fn reject_reply_queues_on_logical_vlan_ifindex_11786() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (frame, mut meta, flow) = tcp_v4_syn();
+    meta.ingress_ifindex = 11;
+    meta.ingress_vlan_id = 80;
+    let mut snapshot = vlan_drop_tcp_snapshot();
+    snapshot.interfaces[0].filter_output_v4.clear();
+    let mut forwarding = build_forwarding_state(&snapshot);
+    forwarding.tx_selection_enabled_v4 = true;
+    forwarding
+        .cos
+        .interfaces
+        .insert(202, crate::afxdp::tests_support::test_reply_cos_interface(4));
+
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+    assert!(enqueue_policy_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        11,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+    ));
+
+    let request = pipeline
+        .pending_tx_local
+        .front()
+        .expect("generated reject queued");
+    assert_eq!(request.egress_ifindex, 202, "CoS key is logical unit");
+    assert_eq!(request.cos_queue_id, Some(4), "logical default queue is selected");
+}
+
 /// #3035 non-VLAN regression: on an untagged interface the logical unit IS
 /// the ingress ifindex (no (parent, vlan) mapping), so `resolve_ingress_-
 /// logical_ifindex` returns None and the classify falls back to the
@@ -1512,8 +1557,8 @@ fn reject_reply_non_tcp_sources_from_logical_vlan_ifindex_3976() {
         .pending_tx_local
         .pop_front()
         .expect("reject ICMP port-unreachable request");
-    // Transmit on the PHYSICAL bind port (unchanged).
-    assert_eq!(req.egress_ifindex, 11);
+    // CoS uses the logical sub-if key; the request stays on the physical TX pipeline.
+    assert_eq!(req.egress_ifindex, 202);
     // The reply carries the sub-if's VLAN tag (VID 80), from the egress
     // vlan_id fallback (the inbound frame was untagged).
     assert_eq!(
@@ -1629,7 +1674,7 @@ fn filter_reject_non_tcp_v6_sources_from_logical_vlan_ifindex_3976() {
         .pending_tx_local
         .pop_front()
         .expect("reject ICMPv6 request");
-    assert_eq!(req.egress_ifindex, 11);
+    assert_eq!(req.egress_ifindex, 202, "CoS key is the logical VLAN unit");
     assert_eq!(
         &req.bytes[12..14],
         &[0x81, 0x00],

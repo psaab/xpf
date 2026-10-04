@@ -577,6 +577,95 @@ fn build_local_time_exceeded_request_resolves_logical_ingress_for_classify_6102(
     assert_eq!(counters.generated_reply_classify_parse_errors, 0);
 }
 
+/// #11786 fail-on-revert: a generated traceroute reply carries the logical
+/// CoS key in its pending request while retaining the physical XSK target.
+#[test]
+fn build_local_time_exceeded_request_queues_on_logical_vlan_ifindex_11786() {
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let frame = build_udp_frame_v4_full(
+        [0x00, 0x25, 0x90, 0x12, 0x34, 0x56],
+        client_ip,
+        dst_ip,
+        1,
+    );
+    let meta = UserspaceDpMeta {
+        l3_offset: 14,
+        l4_offset: 34,
+        ingress_ifindex: 11,
+        ingress_vlan_id: 80,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_UDP,
+        pkt_len: frame.len() as u16,
+        ..UserspaceDpMeta::default()
+    };
+    let desc = XdpDesc {
+        addr: 4096,
+        len: frame.len() as u32,
+        options: 0,
+    };
+    let ingress_ident = BindingIdentity {
+        slot: 0,
+        queue_id: 7,
+        worker_id: 0,
+        interface: Arc::<str>::from("reth0"),
+        ifindex: 11,
+    };
+    let flow = icmp_suppress_flow_v4(client_ip, dst_ip);
+    let mut forwarding = ForwardingState {
+        tx_selection_enabled_v4: true,
+        ..ForwardingState::default()
+    };
+    forwarding.ingress_logical_ifindex.insert((11, 80), 202);
+    forwarding.egress.insert(
+        202,
+        EgressInterface {
+            bind_ifindex: 11,
+            vlan_id: 80,
+            mtu: 1500,
+            src_mac: TEST_WAN_MAC,
+            zone_id: TEST_WAN_ZONE_ID,
+            redundancy_group: 1,
+            primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)),
+            primary_v6: None,
+        },
+    );
+    forwarding
+        .cos
+        .interfaces
+        .insert(202, test_reply_cos_interface(4));
+    forwarding
+        .ifindex_to_zone_id
+        .insert(11, TEST_LAN_ZONE_ID);
+    forwarding.time_exceeded_buckets.insert(
+        TEST_LAN_ZONE_ID,
+        Arc::new(crate::afxdp::icmp_ratelimit::ZoneLimiter::new()),
+    );
+
+    let mut counters = BatchCounters::default();
+    let request = build_local_time_exceeded_request(
+        &frame,
+        desc,
+        meta,
+        &ingress_ident,
+        &flow,
+        &forwarding,
+        &Arc::new(ShardedNeighborMap::new()),
+        &BTreeMap::new(),
+        0,
+        &mut counters,
+    )
+    .expect("Time Exceeded reply admitted");
+
+    assert_eq!(request.target_ifindex, 11, "physical XSK target is unchanged");
+    assert_eq!(
+        request.decision.resolution.egress_ifindex, 202,
+        "CoS egress key must be the logical VLAN unit"
+    );
+    assert_eq!(request.cos_queue_id, Some(4), "logical default queue is selected");
+}
+
 
 #[test]
 fn build_local_time_exceeded_request_skips_fabric_ingress_packets() {

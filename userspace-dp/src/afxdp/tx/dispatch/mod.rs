@@ -465,6 +465,8 @@ pub(in crate::afxdp) fn enqueue_forwarded_ptb_reply(
     }
 
     let ptb_len = ptb_bytes.len();
+    // `cos_queue_id` belongs to the classified logical unit. Keep that CoS key
+    // while the request stays on the physical ingress binding for XSK TX.
     ingress_binding
         .tx_pipeline
         .pending_tx_local
@@ -474,7 +476,7 @@ pub(in crate::afxdp) fn enqueue_forwarded_ptb_reply(
             expected_addr_family: meta.addr_family,
             expected_protocol: meta.protocol,
             flow_key: None,
-            egress_ifindex: ingress_ident.ifindex,
+            egress_ifindex: logical_ingress,
             cos_queue_id: verdict.cos_queue_id,
             dscp_rewrite: verdict.dscp_rewrite,
             mirror_clone: false,

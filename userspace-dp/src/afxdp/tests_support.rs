@@ -99,6 +99,40 @@ pub(super) fn build_output_filter_state(
     ).expect("filter state compiles")
 }
 
+/// Install a minimal shaped CoS interface for generated-reply queue tests.
+pub(super) fn test_reply_cos_interface(default_queue: u8) -> CoSInterfaceConfig {
+    CoSInterfaceConfig {
+        shaping_rate_bytes: 1_000_000,
+        burst_bytes: 64 * 1024,
+        default_queue,
+        dscp_classifier: String::new(),
+        ieee8021_classifier: String::new(),
+        inet_precedence_classifier: String::new(),
+        dscp_queue_by_dscp: [u8::MAX; 64],
+        ieee8021_queue_by_pcp: [u8::MAX; 8],
+        inet_precedence_queue_by_prec: [u8::MAX; 8],
+        queue_by_forwarding_class: FastMap::default(),
+        queues: vec![CoSQueueConfig {
+            queue_id: default_queue,
+            forwarding_class: "best-effort".into(),
+            priority: 5,
+            transmit_rate_bytes: 1_000_000,
+            guarantee_enabled: true,
+            exact: false,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: EqualFlowTargetPolicy::default(),
+            surplus_weight: 0,
+            buffer_bytes: 64 * 1024,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
+        oversubscription_policy: CoSOversubscriptionPolicy::default(),
+        oversubscription_guarantee_fraction: 0.0,
+        priority_low_min_share_bytes: 0,
+    }
+}
+
 
 /// Shared egress fixture for the suppression tests: ifindex 5 with a
 /// primary v4 and v6 so the emission cases can actually build a reply.

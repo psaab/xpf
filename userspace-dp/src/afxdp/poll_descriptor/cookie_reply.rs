@@ -90,9 +90,10 @@ pub(super) fn enqueue_syn_cookie_reply(
     // it applied the parent's (or first subinterface's) CoS queue / DSCP
     // rewrite / output filter instead of this unit's. Mirrors the #3026
     // generated-ICMP-error fix and the filter/CoS sites via the
-    // `resolve_ingress_logical_ifindex` SSOT; the physical `ifindex` is still
-    // used for the XSK transmit (`egress_ifindex`) below. For a non-VLAN port
-    // the logical and physical indexes coincide, so this is a no-op there.
+    // `resolve_ingress_logical_ifindex` SSOT; `classify_ifindex` is also stored
+    // as the TxRequest CoS key below. The request remains in this physical
+    // binding's pipeline, which selects the XSK device; for untagged ports
+    // logical and physical indexes coincide.
     let now_ns = monotonic_nanos();
     let classify_ifindex =
         resolve_ingress_logical_ifindex(forwarding, ifindex, meta.ingress_vlan_id)
@@ -114,7 +115,7 @@ pub(super) fn enqueue_syn_cookie_reply(
         expected_addr_family: meta.addr_family,
         expected_protocol: meta.protocol,
         flow_key: flow.map(|flow| flow.forward_key.clone()),
-        egress_ifindex: ifindex,
+        egress_ifindex: classify_ifindex,
         cos_queue_id: verdict.cos_queue_id,
         dscp_rewrite: verdict.dscp_rewrite,
         mirror_clone: false,

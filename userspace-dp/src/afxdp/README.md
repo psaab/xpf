@@ -123,9 +123,10 @@ sync.
         egress ifindex"): on a tagged sub-if with no untagged parent the egress
         lookup missed and the generated ICMP was silently dropped (traceroute
         `* * *` / PMTUD blackhole); with a parent it was mis-classified on the
-        parent's filter/CoS. `target_ifindex` (physical) is still used for the
-        XSK transmit, and the #5856 per-zone rate-limit bucket deliberately
-        stays keyed on the PHYSICAL `ingress_ident.ifindex`.
+        parent's filter/CoS. `target_ifindex` (physical) still selects the XSK
+        binding, while the generated TxRequest carries the logical ifindex as
+        its CoS queue key (#11786). The #5856 per-zone rate-limit bucket
+        deliberately stays keyed on the PHYSICAL `ingress_ident.ifindex`.
       - **#11410 — cold-neighbor replay:** `neighbor_dispatch.rs::retry_pending_neigh`
         uses the same PTB build/classify helpers after the replay output-filter
         drop verdict, so permitted oversized packets are signalled and dropped
@@ -136,9 +137,11 @@ sync.
         ICMP/ICMPv6 unreachable, and zone `tcp-rst` session-miss TCP resets)
         classify the generated reply (CoS queue / DSCP rewrite / output filter) on the
         LOGICAL egress unit ifindex resolved from the physical bind /
-        ingress ifindex via the SSOT, NOT the raw physical index. These two
-        pre-date #3034 (#2238) and were out of its scope; the physical
-        index is still used for the XSK transmit (`egress_ifindex`).
+        ingress ifindex via the SSOT, NOT the raw physical index. #11786 also
+        keeps that logical index on the queued TxRequest so the CoS consumer
+        selects the same unit's shaping queue; the physical binding remains
+        the XSK transmitter. These paths pre-date #3034 (#2238) and were out
+        of its scope.
       - **#3976 — non-TCP reject reply BUILD:** the ICMP/ICMPv6
         admin-prohibited unreachable synthesized by `reject_reply.rs`
         (`build_reject_icmp_unreachable`) also keys its egress lookup
