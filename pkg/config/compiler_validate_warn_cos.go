@@ -5,11 +5,13 @@ import (
 	"sort"
 )
 
-// validateCoSOversubscriptionWarnings emits commit-time warnings for
-// every CoS interface unit whose sum of exact-class transmit rates
-// exceeds the unit's configured shaping-rate. Warnings are non-fatal;
-// the runtime accepts the config and the new
-// oversubscription-policy knob (#1614 A1) governs distribution.
+// validateCoSOversubscriptionWarnings emits commit-time warnings for every
+// CoS interface unit whose sum of configured transmit-rate claims exceeds the
+// unit's shaping-rate. Absolute rates and percent rates count their resolved
+// byte/sec claims; remainder rates count only the leftover they actually
+// resolve to after those claims (#11810). Warnings are non-fatal; the runtime
+// accepts the config and the oversubscription-policy knob (#1614 A1) governs
+// distribution.
 func validateCoSOversubscriptionWarnings(cos *ClassOfServiceConfig) []string {
 	var warnings []string
 	if cos == nil {
@@ -27,34 +29,93 @@ func validateCoSOversubscriptionWarnings(cos *ClassOfServiceConfig) []string {
 			if !ok || schedMap == nil {
 				continue
 			}
-			var sumExact uint64
+			var sumClaimed uint64
+			var remainderQueues uint64
+			sumOverflowed := false
 			for _, entry := range schedMap.Entries {
 				if entry == nil || entry.Scheduler == "" {
 					continue
 				}
 				sched, ok := cos.Schedulers[entry.Scheduler]
-				if !ok || sched == nil || !sched.TransmitRateExact {
+				if !ok || sched == nil {
 					continue
 				}
-				sumExact += sched.TransmitRateBytes
+				claim := cosOversubscriptionClaimBytes(sched, unit.ShapingRateBytes)
+				if claim > 0 {
+					if ^uint64(0)-sumClaimed < claim {
+						sumClaimed = ^uint64(0)
+						sumOverflowed = true
+					} else {
+						sumClaimed += claim
+					}
+				} else if sched.TransmitRateRemainder {
+					// Match the dataplane pre-pass: a remainder scheduler is
+					// counted only when absolute/percent resolution did not
+					// produce a rate.
+					remainderQueues++
+				}
 			}
-			if sumExact <= unit.ShapingRateBytes {
+			if !sumOverflowed && remainderQueues > 0 && sumClaimed < unit.ShapingRateBytes {
+				share := (unit.ShapingRateBytes - sumClaimed) / remainderQueues
+				if share > 0 {
+					// The same floored share is assigned per remainder entry
+					// by cos_remainder_rate_bytes. The total cannot exceed
+					// the leftover, but use saturating addition to keep this
+					// diagnostic safe on externally-assembled configs.
+					for _, entry := range schedMap.Entries {
+						if entry == nil || entry.Scheduler == "" {
+							continue
+						}
+						sched, ok := cos.Schedulers[entry.Scheduler]
+						if !ok || sched == nil || !sched.TransmitRateRemainder ||
+							cosOversubscriptionClaimBytes(sched, unit.ShapingRateBytes) > 0 {
+							continue
+						}
+						if ^uint64(0)-sumClaimed < share {
+							sumClaimed = ^uint64(0)
+							sumOverflowed = true
+						} else {
+							sumClaimed += share
+						}
+					}
+				}
+			}
+			if !sumOverflowed && sumClaimed <= unit.ShapingRateBytes {
 				continue
 			}
-			policyTail := "proportional (default): each class receives classRate × shaping / sumExact (current behaviour)"
+			policyTail := "proportional (default): exact classes share the shaping-rate proportionally (current behaviour)"
 			if unit.OversubscriptionPolicy == "guarantee-rate" {
 				policyTail = fmt.Sprintf(
-					"guarantee-rate %g: small classes honoured to configured rate; larger classes share residual proportionally (see #1614)",
+					"guarantee-rate %g: small exact classes honoured to configured rate; larger exact classes share residual proportionally (see #1614)",
 					unit.OversubscriptionGuaranteeFraction,
 				)
 			}
 			warnings = append(warnings, fmt.Sprintf(
-				"class-of-service interfaces %s unit %d: sum of exact-class transmit-rates (%d B/s) exceeds shaping-rate (%d B/s); under oversubscription the configured oversubscription-policy=%s",
-				ifaceName, unitID, sumExact, unit.ShapingRateBytes, policyTail,
+				"class-of-service interfaces %s unit %d: sum of configured transmit-rate claims (%d B/s) exceeds shaping-rate (%d B/s); under oversubscription the configured oversubscription-policy=%s",
+				ifaceName, unitID, sumClaimed, unit.ShapingRateBytes, policyTail,
 			))
 		}
 	}
 	return warnings
+}
+
+// cosOversubscriptionClaimBytes resolves the guarantee claim used by the
+// oversubscription warning against this interface unit's shaping-rate. Its
+// precedence mirrors cos_effective_transmit_rate_bytes in
+// forwarding_build/cos.rs: an absolute rate wins, then a percent resolves
+// through the package's single Rust-rounding mirror. A remainder is resolved
+// separately from its sibling set by the caller.
+func cosOversubscriptionClaimBytes(sched *CoSScheduler, shapingRateBytes uint64) uint64 {
+	if sched == nil {
+		return 0
+	}
+	if sched.TransmitRateBytes > 0 {
+		return sched.TransmitRateBytes
+	}
+	if sched.TransmitRatePercent > 0 {
+		return resolveCoSPercentRateBytes(shapingRateBytes, sched.TransmitRatePercent)
+	}
+	return 0
 }
 
 // classOfServiceClassifierQueueWarnings (#hb166 T-4) flags a behavior-aggregate
