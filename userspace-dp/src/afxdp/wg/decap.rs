@@ -84,17 +84,93 @@ pub(in crate::afxdp) struct WgDecapPacket {
 /// re-checks `TunnelKind::Gre` against its own index. #11568 additionally
 /// requires the outer ingress to be in the endpoint's transport routing
 /// instance before either decap or underlay exemption can claim the datagram.
+fn logical_ingress_ifindex(forwarding: &ForwardingState, meta: UserspaceDpMeta) -> i32 {
+    resolve_ingress_logical_ifindex(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .unwrap_or(meta.ingress_ifindex as i32)
+}
+
+/// Does this underlay ingress admit the configured WireGuard listen port?
+/// Resolve the logical unit first so interface overrides and the zone map use
+/// the same identity as normal local delivery.
+fn wg_ingress_port_is_admitted(
+    dst_ip: std::net::IpAddr,
+    meta: UserspaceDpMeta,
+    forwarding: &ForwardingState,
+    dst_port: u16,
+) -> bool {
+    let ingress_ifindex = logical_ingress_ifindex(forwarding, meta);
+    let ingress_zone_id = forwarding
+        .ifindex_to_zone_id
+        .get(&ingress_ifindex)
+        .copied()
+        .unwrap_or(0);
+    crate::afxdp::forwarding::host_inbound_admits_iface_for_destination(
+        forwarding,
+        ingress_ifindex,
+        ingress_zone_id,
+        PROTO_UDP,
+        dst_port,
+        meta.addr_family as i32 == libc::AF_INET6,
+        0,
+        dst_ip,
+    )
+}
+
+/// The WG socket's outer source and packet destination must both be uniquely
+/// owned in the packet's actual ingress zone. TunnelEndpoint.zone is the
+/// separate inner-policy zone and is intentionally not consulted here.
+fn wg_outer_zone_matches(
+    forwarding: &ForwardingState,
+    endpoint: &TunnelEndpoint,
+    meta: UserspaceDpMeta,
+    dst_ip: std::net::IpAddr,
+) -> bool {
+    let ingress_ifindex = logical_ingress_ifindex(forwarding, meta);
+    let ingress_zone_id = forwarding
+        .ifindex_to_zone_id
+        .get(&ingress_ifindex)
+        .copied()
+        .unwrap_or(0);
+    if ingress_zone_id == 0 {
+        return false;
+    }
+    let local_zone = match dst_ip {
+        std::net::IpAddr::V4(ip) => forwarding
+            .wg_local_address_zone_v4
+            .get(&ip)
+            .copied()
+            .unwrap_or(0),
+        std::net::IpAddr::V6(ip) => forwarding
+            .wg_local_address_zone_v6
+            .get(&ip)
+            .copied()
+            .unwrap_or(0),
+    };
+    let source_zone = match endpoint.source {
+        std::net::IpAddr::V4(ip) => forwarding
+            .wg_local_address_zone_v4
+            .get(&ip)
+            .copied()
+            .unwrap_or(0),
+        std::net::IpAddr::V6(ip) => forwarding
+            .wg_local_address_zone_v6
+            .get(&ip)
+            .copied()
+            .unwrap_or(0),
+    };
+    local_zone != 0 && local_zone == ingress_zone_id && source_zone == ingress_zone_id
+}
+
 fn wg_endpoint_for_listen_port(
     forwarding: &ForwardingState,
     dst_port: u16,
     meta: UserspaceDpMeta,
 ) -> Option<(&TunnelEndpoint, &std::sync::Arc<super::WgEngine>)> {
-    let ingress_ifindex = resolve_ingress_logical_ifindex(
-        forwarding,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-    )
-    .unwrap_or(meta.ingress_ifindex as i32);
+    let ingress_ifindex = logical_ingress_ifindex(forwarding, meta);
     let ingress_instance = forwarding
         .ifindex_to_routing_instance
         .get(&ingress_ifindex)
@@ -148,9 +224,9 @@ pub(in crate::afxdp) fn is_wg_underlay_frame(
         return false;
     };
     let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
-    if wg_endpoint_for_listen_port(forwarding, dst_port, meta).is_none() {
+    let Some((endpoint, _)) = wg_endpoint_for_listen_port(forwarding, dst_port, meta) else {
         return false;
-    }
+    };
     // This helper is reached only for a mapped/compatible IPv6 packet. Mirror
     // the ingress gate's wire-L3 derivation and version check before trusting
     // the destination address.
@@ -172,9 +248,9 @@ pub(in crate::afxdp) fn is_wg_underlay_frame(
     let Ok(raw_dst) = <[u8; 16]>::try_from(&hdr[24..40]) else {
         return false;
     };
-    forwarding.owns_configured_ip(std::net::IpAddr::V6(
-        std::net::Ipv6Addr::from(raw_dst),
-    ))
+    let dst_ip = std::net::IpAddr::V6(std::net::Ipv6Addr::from(raw_dst));
+    wg_outer_zone_matches(forwarding, endpoint, meta, dst_ip)
+        && forwarding.owns_configured_ip(dst_ip)
 }
 
 
@@ -226,6 +302,19 @@ pub(in crate::afxdp) fn try_wg_decap_from_frame(
     }
 
     let (endpoint, engine) = wg_endpoint_for_listen_port(forwarding, dst_port, meta)?;
+
+    let dst_ip = outer_destination_ip(outer, meta)?;
+    // The listener's local source address and the datagram destination must
+    // both resolve uniquely to the actual ingress zone before AEAD work.
+    if !wg_outer_zone_matches(forwarding, endpoint, meta, dst_ip) {
+        return None;
+    }
+    // Host-inbound must admit the configured listen port on the outer ingress.
+    // Returning None preserves the original frame for the normal local-delivery
+    // deny path.
+    if !wg_ingress_port_is_admitted(dst_ip, meta, forwarding, dst_port) {
+        return None;
+    }
 
     let mut decap_buf = scratch.decap_out.borrow_mut();
     // #9018: `.ok()?` used to collapse EVERY error arm here, and two of them
@@ -368,6 +457,26 @@ fn outer_source_ip(outer: &[u8], meta: UserspaceDpMeta) -> Option<std::net::IpAd
         }
         libc::AF_INET6 => {
             let b = outer.get(l3.checked_add(8)?..l3.checked_add(24)?)?;
+            let mut a = [0u8; 16];
+            a.copy_from_slice(b);
+            Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(a)))
+        }
+        _ => None,
+    }
+}
+
+/// The outer datagram's DESTINATION address for host-inbound port admission.
+fn outer_destination_ip(outer: &[u8], meta: UserspaceDpMeta) -> Option<std::net::IpAddr> {
+    let l3 = crate::afxdp::frame::nibble_checked_l3(outer, meta.l3_offset, meta.addr_family)?.l3;
+    match meta.addr_family as i32 {
+        libc::AF_INET => {
+            let b = outer.get(l3.checked_add(16)?..l3.checked_add(20)?)?;
+            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                b[0], b[1], b[2], b[3],
+            )))
+        }
+        libc::AF_INET6 => {
+            let b = outer.get(l3.checked_add(24)?..l3.checked_add(40)?)?;
             let mut a = [0u8; 16];
             a.copy_from_slice(b);
             Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(a)))

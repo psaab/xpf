@@ -5,18 +5,19 @@ import (
 	"testing"
 )
 
-// #11076 (netlink production renderer): WireGuard admission is per-zone
-// daddr-scoped, ordered with zone policy — never a global bare accept.
+// #11574 (netlink production renderer): WireGuard admission requires the
+// transport-zone ingress and unique same-zone destination, never a global accept.
 func TestWireGuardAcceptIsZoneScopedNetlink11076(t *testing.T) {
 	p := newBuildPlan(t, "xpf_11076", hostInboundPriority)
 	buildHostInboundNetlink(p, HostInboundSpec{
 		Views: []HostInboundZoneView{
-			{Zone: "trust", SystemServices: []string{"ssh"}, V4Addrs: []string{"10.0.1.1"}, V6Addrs: []string{"2001:db8:1::1"}},
-			{Zone: "untrust", SystemServices: []string{"ping"}, V4Addrs: []string{"10.0.2.1"}},
+			{Zone: "trust", SystemServices: []string{"ssh"}, V4Addrs: []string{"10.0.1.1"}, V6Addrs: []string{"2001:db8:1::1"}, IngressNetdevs: []string{"trust0"}},
+			{Zone: "untrust", SystemServices: []string{"ping"}, V4Addrs: []string{"10.0.2.1"}, IngressNetdevs: []string{"untrust0"}},
 		},
 		UnzonedV4:   []string{"10.0.99.1"},
 		UnzonedV6:   []string{"2001:db8:99::1"},
-		WGZonePorts: map[string][]uint16{"trust": {51820}},
+		WGListenPorts: []uint16{51820},
+		WGZonePorts:   map[string][]uint16{"trust": {51820}},
 	})
 	if p.err != nil {
 		t.Fatalf("build error: %v", p.err)
@@ -52,16 +53,17 @@ func TestWireGuardAcceptIsZoneScopedNetlink11076(t *testing.T) {
 			t.Fatalf("non-serving zone admits the WG port: %s\nplan:\n%s", line, plan)
 		}
 	}
-	// Ordering: trust's scoped accept precedes trust's catch-all drop.
-	acceptIdx := strings.Index(plan, "ca6c")
-	dropIdx := -1
+	// Ordering: the matching iifname/daddr/port accept precedes the zone's
+	// service catch-all drop. Mismatch guards also mention ca6c but end in DROP.
+	acceptIdx, dropIdx := -1, -1
 	for _, r := range p.rules {
 		line := canonRule(p, r)
-		// The zone catch-all carries the per-zone deny counter (early
-		// stale-guard drops share the daddr but have no counter).
-		if strings.Contains(line, trustV4) && strings.Contains(line, "xpfhi_") && strings.HasSuffix(line, "verdict(0)") {
+		if acceptIdx < 0 && strings.Contains(line, trustV4) && strings.Contains(line, "ca6c") && strings.HasSuffix(line, "verdict(1)") {
+			acceptIdx = strings.Index(plan, line)
+		}
+		if dropIdx < 0 && strings.Contains(line, trustV4) && strings.Contains(line, "xpfhi_") &&
+			!strings.Contains(line, "ca6c") && strings.HasSuffix(line, "verdict(0)") {
 			dropIdx = strings.Index(plan, line)
-			break
 		}
 	}
 	if acceptIdx < 0 || dropIdx < 0 || acceptIdx > dropIdx {

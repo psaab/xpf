@@ -1,9 +1,254 @@
 package daemon
 
 import (
+	"net/netip"
+	"sort"
+
+	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	xnft "github.com/psaab/xpf/pkg/nftables"
 )
+
+// hostInboundWireGuardZonePorts maps a listener to the owner zone of its
+// configured outer source address, not the logical WireGuard tunnel zone.
+func hostInboundWireGuardZonePorts(cfg *config.Config, views []dpuserspace.ZoneHostInboundView) map[string][]uint16 {
+	if cfg == nil {
+		return nil
+	}
+	owners := make(map[netip.Addr]string)
+	ambiguous := make(map[netip.Addr]bool)
+	addrs := func(zone string, values []string) {
+		for _, value := range values {
+			addr, err := netip.ParseAddr(value)
+			if err != nil {
+				continue
+			}
+			addr = addr.Unmap()
+			if owner, ok := owners[addr]; ok && owner != zone {
+				ambiguous[addr] = true
+				continue
+			}
+			owners[addr] = zone
+		}
+	}
+	for _, view := range views {
+		addrs(view.Zone, view.V4Addrs)
+		addrs(view.Zone, view.V6Addrs)
+	}
+
+	byZone := make(map[string]map[uint16]bool)
+	addPort := func(zone string, port uint16) {
+		if byZone[zone] == nil {
+			byZone[zone] = make(map[uint16]bool)
+		}
+		byZone[zone][port] = true
+	}
+	addTunnel := func(tc *config.TunnelConfig) {
+		if tc == nil || tc.Mode != "wireguard" || tc.WgListenPort == 0 {
+			return
+		}
+		source, err := netip.ParseAddr(tc.Source)
+		if err != nil {
+			addPort("", tc.WgListenPort)
+			return
+		}
+		source = source.Unmap()
+		zone, ok := owners[source]
+		if !ok || ambiguous[source] || zone == "" {
+			// Preserve the selected port in the global deny set without granting
+			// an ingress-zone admit when its source owner is unknown.
+			addPort("", tc.WgListenPort)
+			return
+		}
+		addPort(zone, tc.WgListenPort)
+	}
+	for _, iface := range cfg.Interfaces.Interfaces {
+		if iface == nil {
+			continue
+		}
+		addTunnel(iface.Tunnel)
+		for _, unit := range iface.Units {
+			if unit != nil {
+				addTunnel(unit.Tunnel)
+			}
+		}
+	}
+	if len(byZone) == 0 {
+		return nil
+	}
+	out := make(map[string][]uint16, len(byZone))
+	for zone, ports := range byZone {
+		list := make([]uint16, 0, len(ports))
+		for port := range ports {
+			list = append(list, port)
+		}
+		sort.Slice(list, func(i, j int) bool { return list[i] < list[j] })
+		out[zone] = list
+	}
+	return out
+}
+
+func hostInboundWireGuardZoneAddresses(views []dpuserspace.ZoneHostInboundView, family string) (zones []string, addresses map[string][]string, ambiguous []string) {
+	owners := make(map[string]string)
+	ambiguousSet := make(map[string]bool)
+	for _, view := range views {
+		addrs := view.V4Addrs
+		if family == "ip6" {
+			addrs = view.V6Addrs
+		}
+		for _, addr := range addrs {
+			if owner, ok := owners[addr]; ok && owner != view.Zone {
+				ambiguousSet[addr] = true
+				continue
+			}
+			owners[addr] = view.Zone
+		}
+	}
+	addresses = make(map[string][]string)
+	seenZones := make(map[string]bool)
+	seenAddrs := make(map[string]map[string]bool)
+	for _, view := range views {
+		addrs := view.V4Addrs
+		if family == "ip6" {
+			addrs = view.V6Addrs
+		}
+		for _, addr := range addrs {
+			if ambiguousSet[addr] {
+				if !seenZones["\x00"+addr] {
+					ambiguous = append(ambiguous, addr)
+					seenZones["\x00"+addr] = true
+				}
+				continue
+			}
+			if owners[addr] != view.Zone {
+				continue
+			}
+			if !seenZones[view.Zone] {
+				zones = append(zones, view.Zone)
+				seenZones[view.Zone] = true
+			}
+			if seenAddrs[view.Zone] == nil {
+				seenAddrs[view.Zone] = make(map[string]bool)
+			}
+			if !seenAddrs[view.Zone][addr] {
+				addresses[view.Zone] = append(addresses[view.Zone], addr)
+				seenAddrs[view.Zone][addr] = true
+			}
+		}
+	}
+	return zones, addresses, ambiguous
+}
+
+func hostInboundWireGuardZoneIngress(views []dpuserspace.ZoneHostInboundView) map[string][]string {
+	ingress := make(map[string][]string)
+	seenDevice := make(map[string]map[string]bool)
+	for _, view := range views {
+		if len(view.IngressNetdevs) == 0 {
+			continue
+		}
+		if seenDevice[view.Zone] == nil {
+			seenDevice[view.Zone] = make(map[string]bool)
+		}
+		for _, device := range view.IngressNetdevs {
+			if !seenDevice[view.Zone][device] {
+				ingress[view.Zone] = append(ingress[view.Zone], device)
+				seenDevice[view.Zone][device] = true
+			}
+		}
+	}
+	return ingress
+}
+
+func hostInboundWGIntersectPorts(ports, listenPorts []uint16) []uint16 {
+	allowed := make(map[uint16]bool, len(ports))
+	for _, port := range ports {
+		allowed[port] = true
+	}
+	var out []uint16
+	for _, port := range listenPorts {
+		if allowed[port] {
+			out = append(out, port)
+		}
+	}
+	return out
+}
+
+func hostInboundWGSubtractPorts(listenPorts, allowedPorts []uint16) []uint16 {
+	allowed := make(map[uint16]bool, len(allowedPorts))
+	for _, port := range allowedPorts {
+		allowed[port] = true
+	}
+	var out []uint16
+	for _, port := range listenPorts {
+		if !allowed[port] {
+			out = append(out, port)
+		}
+	}
+	return out
+}
+
+func hostInboundWGAmbiguousAddresses(views []dpuserspace.ZoneHostInboundView, family string) []string {
+	_, _, ambiguous := hostInboundWireGuardZoneAddresses(views, family)
+	return ambiguous
+}
+
+// emitHostInboundWireGuardMismatchDrops runs before broad conntrack replies and
+// service accepts. Only a selected port arriving on the outer-source owner
+// zone's ingress and targeting that unique same-zone address escapes these
+// counted guards.
+func emitHostInboundWireGuardMismatchDrops(rules *[]string, views []dpuserspace.ZoneHostInboundView, unzoned []string, family string, listenPorts []uint16, zonePorts map[string][]uint16) {
+	if len(listenPorts) == 0 {
+		return
+	}
+	zones, addresses, ambiguous := hostInboundWireGuardZoneAddresses(views, family)
+	ingress := hostInboundWireGuardZoneIngress(views)
+	for _, zone := range zones {
+		addrs := addresses[zone]
+		if len(addrs) == 0 {
+			continue
+		}
+		allowed := hostInboundWGIntersectPorts(zonePorts[zone], listenPorts)
+		cn := xnft.HostInboundDenyCounterName(zone, family)
+		if len(allowed) == 0 || len(ingress[zone]) == 0 {
+			scope := family + " daddr " + nftAddrSet(addrs) + " udp dport " + renderWireGuardPortSpec(listenPorts)
+			*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
+			continue
+		}
+		if disallowed := hostInboundWGSubtractPorts(listenPorts, allowed); len(disallowed) > 0 {
+			scope := family + " daddr " + nftAddrSet(addrs) + " udp dport " + renderWireGuardPortSpec(disallowed)
+			*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
+		}
+		scope := "iifname != " + nftIifnameSet(ingress[zone]) + " " + family + " daddr " + nftAddrSet(addrs) +
+			" udp dport " + renderWireGuardPortSpec(allowed)
+		*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
+	}
+	if len(ambiguous) > 0 {
+		cn := xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, family)
+		scope := family + " daddr " + nftAddrSet(ambiguous) + " udp dport " + renderWireGuardPortSpec(listenPorts)
+		*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
+	}
+	if len(unzoned) > 0 {
+		cn := xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, family)
+		scope := family + " daddr " + nftAddrSet(unzoned) + " udp dport " + renderWireGuardPortSpec(listenPorts)
+		*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
+	}
+}
+
+func emitHostInboundWireGuardIngressAccepts(rules *[]string, views []dpuserspace.ZoneHostInboundView, family string, listenPorts []uint16, zonePorts map[string][]uint16) {
+	if len(listenPorts) == 0 {
+		return
+	}
+	zones, addresses, _ := hostInboundWireGuardZoneAddresses(views, family)
+	ingress := hostInboundWireGuardZoneIngress(views)
+	for _, zone := range zones {
+		allowed := hostInboundWGIntersectPorts(zonePorts[zone], listenPorts)
+		if len(allowed) == 0 || len(ingress[zone]) == 0 || len(addresses[zone]) == 0 {
+			continue
+		}
+		scope := "iifname " + nftIifnameSet(ingress[zone]) + " " + family + " daddr " + nftAddrSet(addresses[zone])
+		*rules = append(*rules, "    "+scope+" udp dport "+renderWireGuardPortSpec(allowed)+" accept")
+	}
+}
 
 // hostInboundIngressDestinations returns, per family, every firewall-local
 // address the host-inbound chain must judge: each view's addresses, then the
@@ -88,11 +333,11 @@ func emitHostInboundZoneIngress(rules *[]string, v dpuserspace.ZoneHostInboundVi
 	*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
 }
 
-// emitHostInboundAmbiguousIngressAccepts applies each address owner's rights
-// to packets arriving on an ambiguous effective netdev. The destination address
-// is the only remaining zone discriminator, so these scoped accepts precede
-// the counted ambiguous catch-all drop.
-func emitHostInboundAmbiguousIngressAccepts(rules *[]string, views []dpuserspace.ZoneHostInboundView, family string, wgZonePorts map[string][]uint16) {
+// emitHostInboundAmbiguousIngressAccepts applies each address owner's host
+// services to an ambiguous effective netdev. WireGuard is deliberately absent:
+// its exact ingress cannot be established on an ambiguous interface, and the
+// earlier selected-port guard drops it before these broad accepts.
+func emitHostInboundAmbiguousIngressAccepts(rules *[]string, views []dpuserspace.ZoneHostInboundView, family string) {
 	netdevs := hostInboundAmbiguousIngressNetdevs(views)
 	if len(netdevs) == 0 {
 		return
@@ -113,7 +358,6 @@ func emitHostInboundAmbiguousIngressAccepts(rules *[]string, views []dpuserspace
 		for _, m := range hostInboundMatchSet(v, family) {
 			*rules = append(*rules, "    "+scope+" "+m.match+" "+m.action)
 		}
-		emitHostInboundZoneWireGuardAccept(rules, scope, wgZonePorts[v.Zone])
 	}
 }
 

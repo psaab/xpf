@@ -55,6 +55,8 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
 			spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts, hostInboundTrustedReinject(spec),
 		))
+		emitHostInboundWireGuardMismatchDropsNetlink(p, spec.Views, spec.UnzonedV4, famV4, spec.WGListenPorts, spec.WGZonePorts)
+		emitHostInboundWireGuardMismatchDropsNetlink(p, spec.Views, spec.UnzonedV6, famV6, spec.WGListenPorts, spec.WGZonePorts)
 		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), true)
 		emitJunosHostMulticastProgramJumpsNetlink(p, spec.Programs)
 		emitHostInboundMulticastGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
@@ -69,6 +71,8 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
 			spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts, hostInboundTrustedReinject(spec),
 		))
+		emitHostInboundWireGuardMismatchDropsNetlink(p, spec.Views, spec.UnzonedV4, famV4, spec.WGListenPorts, spec.WGZonePorts)
+		emitHostInboundWireGuardMismatchDropsNetlink(p, spec.Views, spec.UnzonedV6, famV6, spec.WGListenPorts, spec.WGZonePorts)
 		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), true)
 		emitJunosHostMulticastProgramJumpsNetlink(p, spec.Programs)
 		emitHostInboundMulticastGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
@@ -96,6 +100,11 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 	// LOCAL_IN master, so a zoned sibling cannot admit an unzoned member.
 	emitHostInboundUnzonedVRFIngressDropNetlink(p, spec.UnzonedIngressVRFSlaves, famV4, ingressV4)
 	emitHostInboundUnzonedVRFIngressDropNetlink(p, spec.UnzonedIngressVRFSlaves, famV6, ingressV6)
+	// #11574: selected WG ports are admitted only for the matching unique
+	// destination-owner ingress zone. Their remaining tuples are denied before
+	// host-service or any-service rules can reach broad accepts.
+	emitHostInboundWireGuardIngressNetlink(p, spec.Views, famV4, spec.WGListenPorts, spec.WGZonePorts)
+	emitHostInboundWireGuardIngressNetlink(p, spec.Views, famV6, spec.WGListenPorts, spec.WGZonePorts)
 	// #9637: unambiguous ingress scopes take their zone's service rights first.
 	// Unzoned destination addresses are excluded so a zone cannot admit another
 	// interface's address; its catch-all still denies them below.
@@ -104,9 +113,9 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundZoneIngressNetlink(p, v, famV4, zoneIngressV4)
 		emitHostInboundZoneIngressNetlink(p, v, famV6, zoneIngressV6)
 	}
-	emitHostInboundAmbiguousIngressAcceptsNetlink(p, spec.Views, famV4, spec.WGZonePorts)
+	emitHostInboundAmbiguousIngressAcceptsNetlink(p, spec.Views, famV4)
 	emitHostInboundAmbiguousIngressDropNetlink(p, spec.Views, famV4, ingressV4)
-	emitHostInboundAmbiguousIngressAcceptsNetlink(p, spec.Views, famV6, spec.WGZonePorts)
+	emitHostInboundAmbiguousIngressAcceptsNetlink(p, spec.Views, famV6)
 	emitHostInboundAmbiguousIngressDropNetlink(p, spec.Views, famV6, ingressV6)
 	// #11409: physical ingress with no surviving zone is denied before the
 	// residual established accept and destination-only fallback.
@@ -114,8 +123,8 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 	emitHostInboundUnzonedIngressDropNetlink(p, spec.UnzonedIngressNetdevs, famV6, ingressV6)
 	p.rule().ctEstablishedRelated().emit(verdictAccept()...)
 	for _, v := range spec.Views {
-		emitHostInboundZoneNetlink(p, v, famV4, v.V4Addrs, spec.WGZonePorts[v.Zone])
-		emitHostInboundZoneNetlink(p, v, famV6, v.V6Addrs, spec.WGZonePorts[v.Zone])
+		emitHostInboundZoneNetlink(p, v, famV4, v.V4Addrs)
+		emitHostInboundZoneNetlink(p, v, famV6, v.V6Addrs)
 	}
 	emitUnzonedHostInboundDenyNetlink(p, famV4, "ip", spec.UnzonedV4)
 	emitUnzonedHostInboundDenyNetlink(p, famV6, "ip6", spec.UnzonedV6)
@@ -194,12 +203,22 @@ func declareHostInboundCounters(p *nlPlan, spec HostInboundSpec) {
 	ingressV4, ingressV6 := hostInboundIngressDestinations(spec.Views, spec.UnzonedV4, spec.UnzonedV6)
 	zoneIngressV4, zoneIngressV6 := hostInboundZoneIngressDestinations(spec.Views)
 	for _, v := range spec.Views {
-		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV4) {
+		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV4) ||
+			hostInboundWGGuardEmits(v.V4Addrs, spec.WGListenPorts) {
 			decl(HostInboundDenyCounterName(v.Zone, "ip"))
 		}
-		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV6) {
+		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV6) ||
+			hostInboundWGGuardEmits(v.V6Addrs, spec.WGListenPorts) {
 			decl(HostInboundDenyCounterName(v.Zone, "ip6"))
 		}
+	}
+	if hostInboundWGGuardEmits(spec.UnzonedV4, spec.WGListenPorts) ||
+		hostInboundWGGuardEmits(hostInboundWGAmbiguousAddresses(spec.Views, famV4), spec.WGListenPorts) {
+		decl(HostInboundDenyCounterName(unzonedHostInboundZoneLabel, "ip"))
+	}
+	if hostInboundWGGuardEmits(spec.UnzonedV6, spec.WGListenPorts) ||
+		hostInboundWGGuardEmits(hostInboundWGAmbiguousAddresses(spec.Views, famV6), spec.WGListenPorts) {
+		decl(HostInboundDenyCounterName(unzonedHostInboundZoneLabel, "ip6"))
 	}
 	if hostInboundEmitsAmbiguousIngressDrop(spec.Views, ingressV4) {
 		decl(HostInboundDenyCounterName(unzonedHostInboundZoneLabel, "ip"))
@@ -347,21 +366,9 @@ func emitJunosHostMulticastProgramJumpsNetlink(p *nlPlan, programs []JunosHostPr
 	}
 }
 
-// emitHostInboundZoneWireGuardAcceptNetlink admits a zone's WireGuard tunnels
-// (#11076): `daddr <zone-addrs> udp dport <zone-ports> accept`, rendered inside
-// the zone's own section after its service accepts and before its catch-all
-// deny — ordered with zone policy, never above it. No-op when the zone serves
-// no WG tunnels. Unzoned addresses match no zone section and keep falling to
-// the unzoned deny.
-func emitHostInboundZoneWireGuardAcceptNetlink(p *nlPlan, f nlFamily, addrs []string, wgPorts []uint16) {
-	if len(addrs) == 0 || len(wgPorts) == 0 {
-		return
-	}
-	p.rule().daddr(f, addrs, false).l4Port(protoUDP, "dport", portsFromUint16(wgPorts), false).emit(verdictAccept()...)
-}
 
 // emitHostInboundZoneNetlink mirrors emitHostInboundZone for one zone/family.
-func emitHostInboundZoneNetlink(p *nlPlan, v HostInboundZoneView, f nlFamily, addrs []string, wgPorts []uint16) {
+func emitHostInboundZoneNetlink(p *nlPlan, v HostInboundZoneView, f nlFamily, addrs []string) {
 	if len(addrs) == 0 {
 		return
 	}
@@ -379,7 +386,6 @@ func emitHostInboundZoneNetlink(p *nlPlan, v HostInboundZoneView, f nlFamily, ad
 			a.emit(verdictAccept()...)
 		}
 	}
-	emitHostInboundZoneWireGuardAcceptNetlink(p, f, addrs, wgPorts)
 	// Catch-all default-deny with named counter (#3361).
 	cn := HostInboundDenyCounterName(v.Zone, family)
 	p.rule().daddr(f, addrs, false).counterRef(cn).emit(verdictDrop()...)

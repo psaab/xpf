@@ -233,6 +233,27 @@ struct UserspaceBindingValue {
 struct UserspaceLocalV6Key {
     addr: [u8; 16],
 }
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UserspaceWgIngressZoneKey {
+    ifindex: u32,
+    vlan_id: u16,
+    reserved: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UserspaceWgAdmissionKey {
+    zone_id: u16,
+    port: u16,
+    addr_family: u8,
+    pad: [u8; 3],
+    addr: [u8; 16],
+}
+
+const _: [(); 8] = [(); mem::size_of::<UserspaceWgIngressZoneKey>()];
+const _: [(); 24] = [(); mem::size_of::<UserspaceWgAdmissionKey>()];
+
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -405,6 +426,19 @@ static USERSPACE_BINDINGS: Array<UserspaceBindingValue> =
 // ifindex axis across every dataplane map (see issue #814).
 #[map(name = "userspace_ingress_ifaces")]
 static USERSPACE_INGRESS_IFACES: HashMap<u32, u8> = HashMap::with_max_entries(MAX_INTERFACES, 0);
+
+// XDP must resolve the physical arrival interface and VLAN to one validated
+// security zone before it claims an outer WireGuard transport record.
+#[map(name = "userspace_wg_ingress_zones")]
+static USERSPACE_WG_INGRESS_ZONES: HashMap<UserspaceWgIngressZoneKey, u16> =
+    HashMap::with_max_entries(65_536, 0);
+
+// Entries exist only for unique local-address owners and WG ports served by
+// that same zone. Zone 0 and missing keys both fail closed.
+#[map(name = "userspace_wg_zone_admission")]
+static USERSPACE_WG_ZONE_ADMISSION: HashMap<UserspaceWgAdmissionKey, u8> =
+    HashMap::with_max_entries(131_072, 0);
+
 
 #[map(name = "userspace_heartbeat")]
 static USERSPACE_HEARTBEAT: Array<u64> = Array::with_max_entries(BINDING_SLOT_MAP_MAX_ENTRIES, 0);
@@ -845,19 +879,26 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 // predicate caught them and returned the same
                 // `cpumap_or_pass`. Declining here is what actually moves them
                 // onto the AF_XDP redirect.
-                let wg_worker_claim = (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0
-                    && wg_worker_claims_record(
-                        true,
-                        parsed.protocol == PROTO_UDP
-                            && wg_port_is_steered(
-                                parsed.flow_dst_port,
-                                &ctrl.wg_ports,
-                                ctrl.wg_port_count,
-                            ),
-                        true,
-                        parsed.udp_wg_transport_data,
-                    );
-                if is_local_destination(&parsed) && !wg_worker_claim {
+                let local_destination = is_local_destination(&parsed);
+                let wg_rx_enabled = (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0;
+                let wg_port_admitted = wg_rx_enabled
+                    && parsed.protocol == PROTO_UDP
+                    && wg_port_is_steered(
+                        parsed.flow_dst_port,
+                        &ctrl.wg_ports,
+                        ctrl.wg_port_count,
+                    )
+                    && local_destination
+                    && parsed.udp_wg_transport_data
+                    && wg_zone_admits_packet(&parsed, ingress_ifindex);
+                let wg_worker_claim = wg_worker_claims_record(
+                    wg_rx_enabled,
+                    wg_port_admitted,
+                    local_destination,
+                    parsed.udp_wg_transport_data,
+                );
+                if local_destination && !wg_worker_claim {
+
                     record_trace(
                         ctrl.flags,
                         ingress_ifindex,
@@ -1946,6 +1987,35 @@ fn should_fallback_early(pkt: &ParsedPacket) -> bool {
         AF_INET6 => early_filter::ipv6_early_pass_to_kernel(pkt.dst_addr),
         _ => true,
     }
+}
+
+fn wg_zone_admits_packet(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
+    if pkt.protocol != PROTO_UDP || pkt.flow_dst_port == 0 {
+        return false;
+    }
+    let ingress_key = UserspaceWgIngressZoneKey {
+        ifindex: ingress_ifindex,
+        vlan_id: if pkt.vlan_present {
+            pkt.vlan_id
+        } else {
+            u16::MAX
+        },
+        reserved: 0,
+    };
+    let Some(zone_id) = (unsafe { USERSPACE_WG_INGRESS_ZONES.get(&ingress_key) }) else {
+        return false;
+    };
+    if *zone_id == 0 {
+        return false;
+    }
+    let admission_key = UserspaceWgAdmissionKey {
+        zone_id: *zone_id,
+        port: pkt.flow_dst_port,
+        addr_family: pkt.addr_family,
+        pad: [0; 3],
+        addr: pkt.dst_addr,
+    };
+    unsafe { USERSPACE_WG_ZONE_ADMISSION.get(&admission_key) }.is_some()
 }
 
 fn is_local_destination(pkt: &ParsedPacket) -> bool {

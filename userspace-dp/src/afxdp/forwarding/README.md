@@ -711,6 +711,19 @@ share the same per-zone token set; keep the Go nft token→match mapping
 (`hostInboundServiceMatches`/`hostInboundProtocolMatches`) in sync with the
 Rust classifier here.**
 
+**WireGuard transport-data decap (#11574).** XDP redirects a local UDP
+transport-data record for a configured listen port only when its ingress zone,
+the unique owner zone of the local destination, and the unique owner zone of
+the tunnel's configured outer source address all match. The worker independently
+resolves the logical ingress and source/destination zone ownership, then applies
+`host_inbound_admits_iface_for_destination` to the outer destination and UDP
+listen port before authenticating or decapsulating. This preserves
+per-interface overrides. A denied candidate remains the original outer frame
+and reaches the ordinary LocalDelivery host-inbound gate, which accounts and
+drops it. The kernel input table applies the same selected-port/ingress/
+destination scope before broad replies and service accepts; no generic
+WireGuard service token or `any-service` grant is required.
+
 **The gate judges the POST-translation tuple (#9529).** Most traffic that reaches
 this secondary path is host-bound only BECAUSE of a destination translation
 (DNAT-to-self, static NAT to a firewall service), so which tuple it is judged on

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	xnft "github.com/psaab/xpf/pkg/nftables"
 )
 
 // hostInboundWireGuardTestConfig extends the restricted-zone fixture
@@ -17,45 +18,40 @@ import (
 // must admit it or the fresh handshake is dropped by wan's catch-all (#5582).
 func hostInboundWireGuardTestConfig() *config.Config {
 	cfg := hostInboundTestConfig()
-	// #11076: the tunnel's ingress zone is wan — WG admission scopes to
-	// wan's addresses. (An unzoned tunnel gets no accept; see the
-	// unzoned-warning test.)
-	cfg.Security.Zones["wan"].Interfaces = append(cfg.Security.Zones["wan"].Interfaces, "wg0")
+	// #11574: WG transport admission follows the outer source's owner zone.
 	cfg.Interfaces.Interfaces["wg0"] = &config.InterfaceConfig{
 		Name: "wg0",
 		Tunnel: &config.TunnelConfig{
 			Name:         "wg0",
 			Mode:         "wireguard",
+			Source:       "172.16.50.8",
 			WgListenPort: 51820,
 			WgPeers: []config.WgPeerConfig{
 				// Responder-only: no Endpoint -> passive listener (the #5582 case).
-				{PublicKeyHex: "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+				{PublicKeyHex: "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
 					AllowedIPs: []string{"10.9.0.0/24"}},
 			},
 		},
 	}
+	cfg.Security.Zones["lan"].Interfaces = append(cfg.Security.Zones["lan"].Interfaces, "wg0")
 	return cfg
 }
 
 // TestHostInboundFilterAdmitsWireGuardListenPort is the #5582 fail-on-revert
-// proof, re-scoped by #11076. With a WireGuard listener in wan,
-// buildHostInboundFilterPayload emits a DADDR-SCOPED `udp dport <port> accept`
-// inside wan's own section (v4+v6), admitting a fresh passive handshake
-// (conntrack NEW) to a RESTRICTED zoned address that would otherwise hit the
-// per-zone catch-all drop. The scoped accept precedes the wan catch-all drop.
-// No bare (daddr-less) accept may exist: unzoned/untrust addresses must not
-// reach the socket.
+// proof, re-scoped by #11574. Although the WireGuard tunnel is logically in lan,
+// its outer source address belongs to wan, so only wan ingress may reach that
+// listener on a uniquely wan-owned destination address.
 func TestHostInboundFilterAdmitsWireGuardListenPort(t *testing.T) {
 	cfg := hostInboundWireGuardTestConfig()
 	wgPorts := cfg.WireGuardListenPorts()
 	if len(wgPorts) != 1 || wgPorts[0] != 51820 {
 		t.Fatalf("WireGuardListenPorts() = %v, want [51820]", wgPorts)
 	}
-	wgZones := cfg.WireGuardZonePorts()
-	if len(wgZones) != 1 || len(wgZones["wan"]) != 1 || wgZones["wan"][0] != 51820 {
-		t.Fatalf("WireGuardZonePorts() = %v, want map[wan:[51820]]", wgZones)
-	}
 	views := buildAndCheckViews(t, cfg)
+	wgZones := hostInboundWireGuardZonePorts(cfg, views)
+	if len(wgZones) != 1 || len(wgZones["wan"]) != 1 || wgZones["wan"][0] != 51820 {
+		t.Fatalf("hostInboundWireGuardZonePorts() = %v, want map[wan:[51820]]", wgZones)
+	}
 	payload := buildHostInboundFilterPayload(views, nil, nil, nil, wgZones, true)
 
 	// Scoped accepts (v4+v6) inside wan's section.
@@ -93,6 +89,52 @@ func TestHostInboundFilterAdmitsWireGuardListenPort(t *testing.T) {
 	}
 	if strings.Contains(payload, "tcp dport 23") {
 		t.Errorf("WG admission must not widen the zone to other services (telnet leaked):\n%s", payload)
+	}
+}
+// TestHostInboundWireGuardPortGuardPrecedesAnyService verifies that a globally
+// selected WG port cannot use an any-service zone's broad host admission to
+// reach another zone's address or arrive on a non-owner ingress.
+func TestHostInboundWireGuardPortGuardPrecedesAnyService(t *testing.T) {
+	cfg := hostInboundWireGuardTestConfig()
+	cfg.Security.Zones["wan"].HostInboundTraffic.SystemServices = []string{"any-service"}
+	cfg.Security.Zones["lan"].HostInboundTraffic = &config.HostInboundTraffic{SystemServices: []string{"any-service"}}
+	views := buildAndCheckViews(t, cfg)
+	ports := hostInboundWireGuardZonePorts(cfg, views)
+	if len(ports["wan"]) != 1 || ports["wan"][0] != 51820 || len(ports["lan"]) != 0 {
+		t.Fatalf("WG transport-zone ports = %v, want only wan:[51820]", ports)
+	}
+	payload := buildHostInboundFilterPayload(views, nil, nil, nil, ports, true)
+
+	var wanIngress, lanIngress []string
+	for _, view := range views {
+		switch view.Zone {
+		case "wan":
+			wanIngress = view.IngressNetdevs
+		case "lan":
+			lanIngress = view.IngressNetdevs
+		}
+	}
+	if len(wanIngress) == 0 || len(lanIngress) == 0 {
+		t.Fatalf("fixture ingress scopes missing: wan=%v lan=%v", wanIngress, lanIngress)
+	}
+	allowed := "iifname " + nftIifnameSet(wanIngress) + " ip daddr 172.16.50.8 udp dport 51820 accept"
+	if !strings.Contains(payload, allowed) {
+		t.Fatalf("same-zone outer-source admission missing %q:\n%s", allowed, payload)
+	}
+	lanDrop := "ip daddr 10.0.61.1 udp dport 51820 counter name \"" +
+		xnft.HostInboundDenyCounterName("lan", "ip") + "\" drop"
+	dropAt := strings.Index(payload, lanDrop)
+	if dropAt < 0 {
+		t.Fatalf("selected WG port to lan-owned address lacks its counted guard %q:\n%s", lanDrop, payload)
+	}
+	broadLanAccept := "iifname " + nftIifnameSet(lanIngress) + " ip daddr "
+	acceptAt := strings.Index(payload, broadLanAccept)
+	replyAt := strings.Index(payload, "ct state established,related ct direction reply accept")
+	if acceptAt < 0 || dropAt > acceptAt || replyAt < 0 || dropAt > replyAt {
+		t.Fatalf("WG guard must precede stateful and any-service accepts (drop=%d reply=%d accept=%d):\n%s", dropAt, replyAt, acceptAt, payload)
+	}
+	if strings.Contains(payload, "iifname "+nftIifnameSet(lanIngress)+" ip daddr 10.0.61.1 udp dport 51820 accept") {
+		t.Fatalf("WG listener bound to wan's outer source must not admit from lan ingress:\n%s", payload)
 	}
 }
 

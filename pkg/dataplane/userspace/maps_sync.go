@@ -293,11 +293,11 @@ func (m *Manager) failClosedUserspaceCtrlLocked(ctrlMap ctrlMapUpdater, ctrl use
 }
 
 func (m *Manager) syncUserspaceClassifierMapsLocked(snapshot *ConfigSnapshot) error {
-	// #7468 test seam, mirroring clearHelperHAStateHook. Unprivileged the three
-	// map syncs below no-op (m.bpfShim.Map returns nil), so "the maps were
-	// rolled back to the retained snapshot" and "the rollback was never
-	// attempted" are indistinguishable without it — and telling those apart is
-	// the whole property. Production leaves it nil.
+	// #7468 test seam, mirroring clearHelperHAStateHook. Unprivileged classifier
+	// map syncs no-op (m.bpfShim.Map returns nil), so "the maps were rolled back
+	// to the retained snapshot" and "the rollback was never attempted" are
+	// indistinguishable without it — and telling those apart is the whole
+	// property. Production leaves it nil.
 	if m.syncClassifierMapsHook != nil {
 		return m.syncClassifierMapsHook(snapshot)
 	}
@@ -312,6 +312,9 @@ func (m *Manager) syncUserspaceClassifierMapsLocked(snapshot *ConfigSnapshot) er
 		return err
 	}
 	if err := m.syncLocalAddressMapsWithSetsLocked(desiredV4, desiredV6, enumComplete); err != nil {
+		return err
+	}
+	if err := m.syncUserspaceWGZoneMapsLocked(snapshot); err != nil {
 		return err
 	}
 	return m.syncInterfaceNATAddressMapsLocked(snapshot)

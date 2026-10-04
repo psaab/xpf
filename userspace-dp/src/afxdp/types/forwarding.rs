@@ -58,6 +58,11 @@ pub(in crate::afxdp) struct FabricNatScopeIdentity {
 pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) local_v4: FastSet<Ipv4Addr>,
     pub(in crate::afxdp) local_v6: FastSet<Ipv6Addr>,
+    /// #11574: the unique configured security zone owning each local interface
+    /// address. Zero is the fail-closed sentinel for absent or cross-zone
+    /// ambiguous owners; WG underlay admission compares this with arrival zone.
+    pub(in crate::afxdp) wg_local_address_zone_v4: FastMap<Ipv4Addr, u16>,
+    pub(in crate::afxdp) wg_local_address_zone_v6: FastMap<Ipv6Addr, u16>,
     /// #3769: table (VRF) attribution for the local-delivery DECISION.
     /// `local_v4`/`local_v6` are GLOBAL membership sets ("some subsystem
     /// answers for this IP somewhere"); before #3769 the local-delivery

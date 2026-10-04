@@ -884,6 +884,17 @@ pub(super) fn populate_interfaces(
                         state.interface_nat_v4.insert(v4.addr(), iface.ifindex);
                     } else {
                         state.local_v4.insert(v4.addr());
+                        let zone_id = state.zone_name_to_id.get(&iface.zone).copied().unwrap_or(0);
+                        match state.wg_local_address_zone_v4.entry(v4.addr()) {
+                            std::collections::hash_map::Entry::Vacant(entry) => {
+                                entry.insert(zone_id);
+                            }
+                            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                                if *entry.get() != zone_id {
+                                    entry.insert(0);
+                                }
+                            }
+                        }
                         registered_local = true;
                         // #3769: record the interface host address's owning
                         // table for the table-scoped local-delivery DECISION.
@@ -922,6 +933,17 @@ pub(super) fn populate_interfaces(
                         state.interface_nat_v6.insert(v6.addr(), iface.ifindex);
                     } else {
                         state.local_v6.insert(v6.addr());
+                        let zone_id = state.zone_name_to_id.get(&iface.zone).copied().unwrap_or(0);
+                        match state.wg_local_address_zone_v6.entry(v6.addr()) {
+                            std::collections::hash_map::Entry::Vacant(entry) => {
+                                entry.insert(zone_id);
+                            }
+                            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                                if *entry.get() != zone_id {
+                                    entry.insert(0);
+                                }
+                            }
+                        }
                         registered_local = true;
                         // #3769: record the interface host address's owning
                         // table (see the v4 arm).

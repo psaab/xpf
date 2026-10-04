@@ -42,12 +42,15 @@ const (
 	mapNameUserspaceCPUMap    = "userspace_cpumap"
 	mapNameUserspaceSessions  = "userspace_sessions"
 
-	// Per-interface address + NAT maps consumed at snapshot apply.
-	mapNameUserspaceIngressIfaces  = "userspace_ingress_ifaces"
-	mapNameUserspaceLocalV4        = "userspace_local_v4"
-	mapNameUserspaceLocalV6        = "userspace_local_v6"
-	mapNameUserspaceInterfaceNATv4 = "userspace_interface_nat_v4"
-	mapNameUserspaceInterfaceNATv6 = "userspace_interface_nat_v6"
+	// Per-interface address, ingress-zone, and NAT maps consumed at snapshot apply.
+	mapNameUserspaceIngressIfaces   = "userspace_ingress_ifaces"
+	mapNameUserspaceLocalV4         = "userspace_local_v4"
+	mapNameUserspaceLocalV6         = "userspace_local_v6"
+	mapNameUserspaceInterfaceNATv4  = "userspace_interface_nat_v4"
+	mapNameUserspaceInterfaceNATv6  = "userspace_interface_nat_v6"
+	mapNameUserspaceWgIngressZones  = "userspace_wg_ingress_zones"
+	mapNameUserspaceWgZoneAdmission = "userspace_wg_zone_admission"
+
 
 	// Pinned BPF map name retained as a documented mixed-version
 	// compatibility exception per PR #1514 (Refs #1509). Operator-

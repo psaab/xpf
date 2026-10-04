@@ -17,6 +17,14 @@
 //! dataplane to adjudicate in them — and stop steering transport-data records
 //! (type 4), which are the ones carrying inner IP packets.
 //!
+//! A type-4 worker claim is additionally gated on a validated ingress-interface
+//! plus VLAN-to-zone lookup and a unique local destination address owned by that
+//! same zone, with the destination UDP port selected for a configured WG
+//! endpoint in that zone. Missing or ambiguous zone evidence denies the worker
+//! claim and leaves the local packet on the kernel path, where nftables applies
+//! the matching host-inbound drop. The worker repeats this admission check
+//! before decapsulation rather than trusting XDP metadata alone.
+//!
 //! # Why this is a module and not four lines inside `wg_steer_to_kernel`
 //!
 //! The shim cannot be executed by a host test: it is `no_std`, built for
@@ -127,6 +135,12 @@ pub fn wg_steer_to_kernel_on_port_match(local_destination: bool, is_transport_da
 /// why they share one function: the WireGuard arm steers to the kernel when
 /// this is FALSE, and the local-destination arm declines to steer when it is
 /// TRUE. Spelling that twice is how the two drift apart.
+///
+/// XDP's caller requires a matching arrival-zone, unique destination-owner,
+/// and configured WG-port admission before claiming the record. The worker
+/// repeats its outer host-inbound/zone check as defense in depth; a denied
+/// candidate stays undecapsulated for kernel host-inbound adjudication.
+
 ///
 /// `local_destination` is still required. A transport-data record to a
 /// destination that is not ours is transit traffic that merely happens to use
