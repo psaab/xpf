@@ -658,6 +658,7 @@ fn nonexact_queue_lease_conserved_across_teardown_5156() {
     );
 
     let make_cfg = || CoSInterfaceConfig {
+        queue_id_bitmap: [0; 4],
         shaping_rate_bytes: 25_000_000_000 / 8,
         burst_bytes: 256 * 1024,
         default_queue: QUEUE_ID,
@@ -831,6 +832,7 @@ fn unleased_nonexact_burst_survives_lease_swap_6272() {
         codel_target_ns: 0,
     };
     let cfg = CoSInterfaceConfig {
+        queue_id_bitmap: [0; 4],
         shaping_rate_bytes: 25_000_000_000 / 8,
         burst_bytes: 256 * 1024,
         default_queue: UNLEASED_QID,

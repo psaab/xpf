@@ -102,6 +102,7 @@ pub(super) fn build_output_filter_state(
 /// Install a minimal shaped CoS interface for generated-reply queue tests.
 pub(super) fn test_reply_cos_interface(default_queue: u8) -> CoSInterfaceConfig {
     CoSInterfaceConfig {
+        queue_id_bitmap: [0; 4],
         shaping_rate_bytes: 1_000_000,
         burst_bytes: 64 * 1024,
         default_queue,

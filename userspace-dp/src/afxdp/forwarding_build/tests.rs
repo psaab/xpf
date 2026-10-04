@@ -1529,8 +1529,8 @@ fn build_cos_state_binds_dscp_classifier_to_usable_interface_queue_ids() {
         .dscp_classifier_tables
         .get(ingress_bindings.dscp.expect("missing DSCP classifier index"))
         .expect("missing compiled DSCP classifier");
-    assert_eq!(classifier.queue_by_dscp.get(&46), Some(&5));
-    assert_eq!(classifier.queue_by_dscp.get(&0), Some(&0));
+    assert_eq!(classifier.queue_by_dscp[46], Some(5));
+    assert_eq!(classifier.queue_by_dscp[0], Some(0));
     let pcp_classifier = state
         .ieee8021_classifier_tables
         .get(
@@ -1539,7 +1539,7 @@ fn build_cos_state_binds_dscp_classifier_to_usable_interface_queue_ids() {
                 .expect("missing 802.1p classifier index"),
         )
         .expect("missing compiled 802.1p classifier");
-    assert_eq!(pcp_classifier.queue_by_pcp.get(&5), Some(&5));
+    assert_eq!(pcp_classifier.queue_by_pcp[5], Some(5));
 }
 
 #[test]

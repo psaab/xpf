@@ -210,3 +210,83 @@ fn classifier_bindings_for_shared_unit_ifindex_must_match_11386() {
     };
     assert_duplicate_ifindex(&snapshot_with_cos(vec![dscp_bound, unbound], cos));
 }
+
+fn conflicting_classifier_cos() -> ClassOfServiceSnapshot {
+    ClassOfServiceSnapshot {
+        forwarding_classes: vec![
+            CoSForwardingClassSnapshot {
+                name: "best-effort".to_string(),
+                queue: 0,
+            },
+            CoSForwardingClassSnapshot {
+                name: "network-control".to_string(),
+                queue: 7,
+            },
+        ],
+        dscp_classifiers: vec![
+            CoSDSCPClassifierSnapshot {
+                name: "trusted".to_string(),
+                entries: vec![CoSDSCPClassifierEntrySnapshot {
+                    forwarding_class: "network-control".to_string(),
+                    loss_priority: "high".to_string(),
+                    dscp_values: vec![56],
+                }],
+            },
+            CoSDSCPClassifierSnapshot {
+                name: "local".to_string(),
+                entries: vec![CoSDSCPClassifierEntrySnapshot {
+                    forwarding_class: "best-effort".to_string(),
+                    loss_priority: "high".to_string(),
+                    dscp_values: vec![56],
+                }],
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn unknown_unit_rows_with_conflicting_classifier_bindings_are_rejected_11679() {
+    let mut first = InterfaceSnapshot {
+        name: "wg0.0".to_string(),
+        ifindex: 42,
+        ..Default::default()
+    };
+    first.cos_dscp_classifier = "trusted".to_string();
+    let mut second = InterfaceSnapshot {
+        name: "wg0.1".to_string(),
+        ifindex: 42,
+        ..Default::default()
+    };
+    second.cos_dscp_classifier = "local".to_string();
+
+    assert_duplicate_ifindex(&snapshot_with_cos(
+        vec![first, second],
+        conflicting_classifier_cos(),
+    ));
+}
+
+#[test]
+fn base_alias_classifier_does_not_conflict_with_unit_binding_11679() {
+    let mut base = InterfaceSnapshot {
+        name: "wg0".to_string(),
+        ifindex: 42,
+        is_unit: Some(false),
+        ..Default::default()
+    };
+    base.cos_dscp_classifier = "trusted".to_string();
+    let mut unit = unit("wg0.0", 42, 0);
+    unit.cos_dscp_classifier = "local".to_string();
+
+    let state = build_cos_state(&snapshot_with_cos(
+        vec![base, unit],
+        conflicting_classifier_cos(),
+    ))
+    .expect("base aliases are excluded from consumed unit classifier bindings");
+    let binding = state
+        .ingress_classifier_bindings
+        .get(&42)
+        .expect("unit classifier binding is retained");
+    let table = &state.dscp_classifier_tables[binding.dscp.expect("DSCP binding")];
+    assert_eq!(table.queue_by_dscp[56], Some(0));
+}

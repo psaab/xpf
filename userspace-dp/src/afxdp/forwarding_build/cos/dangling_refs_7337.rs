@@ -177,9 +177,13 @@ fn an_admitted_interface_still_reports_its_dangling_reference() {
         ..Default::default()
     };
     assert!(
-        build_cos_iface_config(&iface, &tables)
-            .expect("builds")
-            .is_some(),
+        build_cos_iface_config(
+            &iface,
+            &tables,
+            CoSIngressClassifierBindings::default(),
+        )
+        .expect("builds")
+        .is_some(),
         "precondition: the shaping rate must admit this interface, or this cell is \
          measuring the skip path instead of the admitted path"
     );

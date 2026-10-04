@@ -11,6 +11,7 @@ fn test_meta() -> ForwardPacketMeta {
 
 fn test_cos_interface(default_queue: u8) -> CoSInterfaceConfig {
     CoSInterfaceConfig {
+        queue_id_bitmap: [0; 4],
         shaping_rate_bytes: 1_250_000,
         burst_bytes: 64 * 1024,
         default_queue,

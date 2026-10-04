@@ -77,6 +77,9 @@ pub(in crate::afxdp) struct CoSInterfaceConfig {
     pub(in crate::afxdp) inet_precedence_queue_by_prec: [u8; 8],
     pub(in crate::afxdp) queue_by_forwarding_class: FastMap<String, u8>,
     pub(in crate::afxdp) queues: Vec<CoSQueueConfig>,
+    /// #11679: materialized queue IDs as a compact bitmap. Built from the
+    /// final queue list so ingress BA clamping is one bit test, not a scan.
+    pub(in crate::afxdp) queue_id_bitmap: [u64; 4],
     /// #1614 A1: operator-selectable oversubscription policy.
     /// Default `Proportional` preserves current behaviour bit-for-
     /// bit (when `priority_low_min_share_bytes == 0`).
@@ -98,37 +101,58 @@ pub(in crate::afxdp) struct CoSInterfaceConfig {
 /// rule keys on (forwarding-class, loss-priority).
 pub(in crate::afxdp) const COS_LOSS_PRIORITY_LEVELS: u8 = 4;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::afxdp) struct CoSDSCPClassifierConfig {
-    pub(in crate::afxdp) queue_by_dscp: FastMap<u8, u8>,
-    /// #3995: behavior-aggregate loss-priority assigned per DSCP code-point
-    /// (index 0=low .. 3=high). Parallel to `queue_by_dscp` — the same
-    /// classifier entry that maps a DSCP to a forwarding-class (→ queue) also
-    /// maps it to a loss-priority, which the egress rewrite-rule keys on.
-    pub(in crate::afxdp) lp_by_dscp: FastMap<u8, u8>,
+    /// DSCP code-point → queue. `Option` preserves valid queue id 255.
+    pub(in crate::afxdp) queue_by_dscp: [Option<u8>; 64],
+    /// DSCP code-point → loss-priority; `u8::MAX` means unclassified.
+    pub(in crate::afxdp) lp_by_dscp: [u8; 64],
+    /// First invalid DSCP retained so only a consumed classifier binding fails.
+    pub(in crate::afxdp) invalid_dscp: Option<u8>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+impl Default for CoSDSCPClassifierConfig {
+    fn default() -> Self {
+        Self {
+            queue_by_dscp: [None; 64],
+            lp_by_dscp: [u8::MAX; 64],
+            invalid_dscp: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::afxdp) struct CoSIEEE8021ClassifierConfig {
-    pub(in crate::afxdp) queue_by_pcp: FastMap<u8, u8>,
-    /// #3995: loss-priority assigned per 802.1p code-point (index 0=low ..
-    /// 3=high). Parallel to `queue_by_pcp`.
-    pub(in crate::afxdp) lp_by_pcp: FastMap<u8, u8>,
+    pub(in crate::afxdp) queue_by_pcp: [Option<u8>; 8],
+    pub(in crate::afxdp) lp_by_pcp: [u8; 8],
+    pub(in crate::afxdp) invalid_pcp: Option<u8>,
 }
 
-/// #6847: an IP-precedence behavior-aggregate classifier, resolved from
-/// `CoSINetPrecedenceClassifierSnapshot`. Mirrors `CoSIEEE8021ClassifierConfig`
-/// (same 3-bit code-point domain) but reads the DS field rather than the
-/// 802.1Q tag, so it applies to untagged frames too.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+impl Default for CoSIEEE8021ClassifierConfig {
+    fn default() -> Self {
+        Self {
+            queue_by_pcp: [None; 8],
+            lp_by_pcp: [u8::MAX; 8],
+            invalid_pcp: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::afxdp) struct CoSINetPrecedenceClassifierConfig {
-    pub(in crate::afxdp) queue_by_prec: FastMap<u8, u8>,
-    /// Loss-priority assigned per IP-precedence code-point (index 0=low ..
-    /// 3=high). Parallel to `queue_by_prec` — without it a classifier entry's
-    /// `loss-priority` would be accepted at commit and silently ignored on
-    /// egress rewrite, the same accepted-but-inert failure #6847 removes from
-    /// the queue side.
-    pub(in crate::afxdp) lp_by_prec: FastMap<u8, u8>,
+    pub(in crate::afxdp) queue_by_prec: [Option<u8>; 8],
+    pub(in crate::afxdp) lp_by_prec: [u8; 8],
+    pub(in crate::afxdp) invalid_precedence: Option<u8>,
+}
+
+impl Default for CoSINetPrecedenceClassifierConfig {
+    fn default() -> Self {
+        Self {
+            queue_by_prec: [None; 8],
+            lp_by_prec: [u8::MAX; 8],
+            invalid_precedence: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

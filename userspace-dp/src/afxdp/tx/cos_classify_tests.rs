@@ -6822,6 +6822,7 @@ fn ieee8021_classifier_fails_closed_on_out_of_range_pcp() {
     let mut pcp_table = [u8::MAX; 8];
     pcp_table[7] = 3;
     let iface = CoSInterfaceConfig {
+        queue_id_bitmap: [0; 4],
         shaping_rate_bytes: 1_000_000,
         burst_bytes: COS_MIN_BURST_BYTES,
         default_queue: 0,

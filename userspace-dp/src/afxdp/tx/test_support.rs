@@ -84,6 +84,7 @@ pub(in crate::afxdp) fn test_cos_fast_interfaces(
 pub(in crate::afxdp) fn test_cos_interface_runtime(now_ns: u64) -> CoSInterfaceRuntime {
     build_cos_interface_runtime(
         &CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 1_000_000,
             burst_bytes: COS_MIN_BURST_BYTES,
             default_queue: 0,
@@ -109,9 +110,9 @@ pub(in crate::afxdp) fn test_cos_interface_runtime(now_ns: u64) -> CoSInterfaceR
                 dscp_rewrite: None,
             codel_target_ns: 0,
             }],
-        oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
-        oversubscription_guarantee_fraction: 0.0,
-        priority_low_min_share_bytes: 0,
+                    oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
+                    oversubscription_guarantee_fraction: 0.0,
+                    priority_low_min_share_bytes: 0,
         },
         now_ns,
     )
@@ -144,6 +145,7 @@ pub(in crate::afxdp) fn test_cos_runtime_with_queues(
 ) -> CoSInterfaceRuntime {
     build_cos_interface_runtime(
         &CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes,
             burst_bytes: COS_MIN_BURST_BYTES,
             default_queue: 0,

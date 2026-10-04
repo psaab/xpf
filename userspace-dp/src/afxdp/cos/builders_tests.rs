@@ -15,6 +15,7 @@ use crate::afxdp::types::{CoSOversubscriptionPolicy, CoSQueueConfig, FastMap};
 fn build_cos_interface_runtime_propagates_surplus_sharing() {
     let runtime = build_cos_interface_runtime(
         &CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 10_000_000_000 / 8,
             burst_bytes: 256 * 1024,
             default_queue: 4,
@@ -55,11 +56,11 @@ fn build_cos_interface_runtime_propagates_surplus_sharing() {
                 codel_target_ns: 0,
                 },
             ],
-        oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
-        oversubscription_guarantee_fraction: 0.0,
-        priority_low_min_share_bytes: 0,
-        inet_precedence_classifier: String::new(),
-        inet_precedence_queue_by_prec: [u8::MAX; 8],
+            oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
+            oversubscription_guarantee_fraction: 0.0,
+            priority_low_min_share_bytes: 0,
+            inet_precedence_classifier: String::new(),
+            inet_precedence_queue_by_prec: [u8::MAX; 8],
         },
         1_000_000_000,
     );
@@ -89,6 +90,7 @@ fn build_cos_interface_runtime_propagates_surplus_sharing() {
 fn build_cos_interface_runtime_starts_exact_queue_with_zero_local_tokens() {
     let runtime = build_cos_interface_runtime(
         &CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 25_000_000,
             burst_bytes: 256 * 1024,
             default_queue: 5,
@@ -112,11 +114,11 @@ fn build_cos_interface_runtime_starts_exact_queue_with_zero_local_tokens() {
                 dscp_rewrite: None,
             codel_target_ns: 0,
             }],
-        oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
-        oversubscription_guarantee_fraction: 0.0,
-        priority_low_min_share_bytes: 0,
-        inet_precedence_classifier: String::new(),
-        inet_precedence_queue_by_prec: [u8::MAX; 8],
+            oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
+            oversubscription_guarantee_fraction: 0.0,
+            priority_low_min_share_bytes: 0,
+            inet_precedence_classifier: String::new(),
+            inet_precedence_queue_by_prec: [u8::MAX; 8],
         },
         1_000_000_000,
     );
@@ -184,6 +186,7 @@ fn build_cos_interface_runtime_zero_shaping_rate_starts_with_full_root_tokens() 
     // before the first top-up call.
     let runtime = build_cos_interface_runtime(
         &CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 0, // <- transparent root
             burst_bytes: 256 * 1024,
             default_queue: 0,
@@ -207,11 +210,11 @@ fn build_cos_interface_runtime_zero_shaping_rate_starts_with_full_root_tokens() 
                 dscp_rewrite: None,
             codel_target_ns: 0,
             }],
-        oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
-        oversubscription_guarantee_fraction: 0.0,
-        priority_low_min_share_bytes: 0,
-        inet_precedence_classifier: String::new(),
-        inet_precedence_queue_by_prec: [u8::MAX; 8],
+            oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
+            oversubscription_guarantee_fraction: 0.0,
+            priority_low_min_share_bytes: 0,
+            inet_precedence_classifier: String::new(),
+            inet_precedence_queue_by_prec: [u8::MAX; 8],
         },
         1_000_000_000,
     );
@@ -232,6 +235,7 @@ fn build_cos_interface_runtime_zero_queue_rate_starts_with_full_queue_tokens() {
     // starts at 0 and waits forever for a refill that never arrives.
     let runtime = build_cos_interface_runtime(
         &CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 0,
             burst_bytes: 256 * 1024,
             default_queue: 0,
@@ -255,11 +259,11 @@ fn build_cos_interface_runtime_zero_queue_rate_starts_with_full_queue_tokens() {
                 dscp_rewrite: None,
             codel_target_ns: 0,
             }],
-        oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
-        oversubscription_guarantee_fraction: 0.0,
-        priority_low_min_share_bytes: 0,
-        inet_precedence_classifier: String::new(),
-        inet_precedence_queue_by_prec: [u8::MAX; 8],
+            oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
+            oversubscription_guarantee_fraction: 0.0,
+            priority_low_min_share_bytes: 0,
+            inet_precedence_classifier: String::new(),
+            inet_precedence_queue_by_prec: [u8::MAX; 8],
         },
         1_000_000_000,
     );
