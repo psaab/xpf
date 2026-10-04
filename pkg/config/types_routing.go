@@ -66,9 +66,17 @@ type PolicyTerm struct {
 	// one term (e.g. `from { community c1; community c2; }`), which match
 	// with OR ("any") semantics. They are slices so every repeated match is
 	// kept; a single-string field silently dropped all but the last (#2642).
-	PrefixList      []string       // from prefix-list <name> (OR across entries)
-	FromCommunity   []string       // from community <name> (match community-list; OR)
-	FromASPath      []string       // from as-path <name> (match as-path access-list; OR)
+	PrefixList    []string // from prefix-list <name> (OR across entries)
+	FromCommunity []string // from community <name> (match community-list; OR)
+	FromASPath    []string // from as-path <name> (match as-path access-list; OR)
+	// invalidFromSyntax11779 preserves a malformed bracketed from-list boundary.
+	invalidFromSyntax11779 string
+	// UnknownFrom records `from` leaves the routing-policy compiler does not
+	// enforce (#11779). Preserving an unsupported match prevents it from
+	// disappearing and widening the term; strict compilation rejects it, while
+	// tolerant compilation warns and forces the term to reject. Mirrors
+	// FirewallFilterTerm.UnknownFrom (#3307).
+	UnknownFrom     []string
 	RouteFilters    []*RouteFilter // prefix matching
 	Action          string         // "accept", "reject"
 	NextHop         string         // then next-hop (e.g. "peer-address", "self", IP)

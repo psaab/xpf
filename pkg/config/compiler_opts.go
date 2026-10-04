@@ -1511,6 +1511,10 @@ type compileOpts struct {
 	// lenientPolicyNextAction11780 downgrades malformed or contradictory
 	// routing-policy `then next policy` actions to a warning on tolerant loads.
 	lenientPolicyNextAction11780 bool
+	// lenientPolicyFromUnknown11779 downgrades the routing-policy unsupported-
+	// `from`-leaf gate to a warning on tolerant loads; matching fails closed by
+	// changing any affected term to reject.
+	lenientPolicyFromUnknown11779 bool
 	// lenientRouteDispositionConflict (#5633) downgrades the static-route
 	// disposition-conflict gate (validateStaticRouteDispositionConflictStrict)
 	// from a hard compile error to a cfg.Warnings entry. Repeated same-prefix
@@ -3208,6 +3212,7 @@ func lenientCompileOpts() compileOpts {
 		lenientRoutingRuleWindows:              true,
 		lenientPolicyRouteMapSeq:               true,
 		lenientPolicyNextAction11780:           true,
+		lenientPolicyFromUnknown11779:          true,
 		lenientRouteDispositionConflict:        true,
 		lenientStaticNextHopFamily:             true,
 		lenientGenerateRoutePolicy:             true,
