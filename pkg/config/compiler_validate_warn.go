@@ -1746,6 +1746,12 @@ func ValidateConfig(cfg *Config) []string {
 	warnings = append(warnings, validateFilterLossPriorityWarnings(cfg)...)
 	// #9503: a three-color policer marking action applies meter-only; say so.
 	warnings = append(warnings, validateThreeColorPolicerMarkingWarnings(cfg)...)
+	// #11812: retain single-rate marking actions, but the userspace runtime
+	// meters without applying downstream remarking.
+	warnings = append(warnings, validateSingleRatePolicerMarkingWarnings(cfg)...)
+	// #11812: the logical-interface-policer flag is preserved but not consumed
+	// by the per-(family, filter, term) runtime policer instances.
+	warnings = append(warnings, validateLogicalInterfacePolicerWarnings(cfg)...)
 	// #10502: color-aware three-color policers are a genuine userspace
 	// semantic gap. The capability gate keeps the dataplane fail-closed by
 	// disarming forwarding; name the definition at commit so that a clean

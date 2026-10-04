@@ -382,7 +382,10 @@ const (
 	// v43 -> v44 (#11423; v43 is used by #11463): TunnelEndpointSnapshot.LinkUp
 	// carries keepalive-driven tunnel netdev liveness; an older helper keeps
 	// down GRE ECMP members live.
-	ProtocolVersion = 44
+	// v44 -> v45 (#11812): PolicerSnapshot adds optional single-rate marking and
+	// logical-interface-policer fields; the Go and Rust snapshot versions move
+	// with the shape even though the current Rust runtime does not consume them.
+	ProtocolVersion = 45
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural

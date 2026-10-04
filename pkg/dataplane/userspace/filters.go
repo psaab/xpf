@@ -789,7 +789,8 @@ func buildPolicerSnapshots(cfg *config.Config) []PolicerSnapshot {
 			continue
 		}
 		snap := PolicerSnapshot{
-			Name: name,
+			Name:                    name,
+			LogicalInterfacePolicer: pol.LogicalInterfacePolicer,
 			// #8429: pol.BandwidthLimit is BYTES per second —
 			// parseBandwidthLimit is literally `parseScaledDecimalUnit(s) / 8`.
 			// The wire field is bits per second and the helper divides by 8
@@ -816,6 +817,11 @@ func buildPolicerSnapshots(cfg *config.Config) []PolicerSnapshot {
 		}
 		if pol.ThenAction == "discard" {
 			snap.DiscardExcess = true
+		} else {
+			// DiscardExcess already carries the terminal action. Preserve only
+			// marking actions in this optional extension to keep existing
+			// discard-policer snapshots byte-compatible.
+			snap.ThenAction = pol.ThenAction
 		}
 		out = append(out, snap)
 	}
