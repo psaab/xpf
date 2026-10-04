@@ -467,6 +467,7 @@ impl SharedCoSQueueLease {
         self.v8.is_some()
     }
 
+
     pub(in crate::afxdp) fn lease_bytes(&self) -> u64 {
         self.config.lease_bytes
     }
@@ -1452,6 +1453,11 @@ impl SharedCoSRootLease {
                 last_refill_ns: AtomicU64::new(0),
             },
         }
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn active_shards(&self) -> usize {
+        self.config.active_shards
     }
 
     pub(in crate::afxdp) fn lease_bytes(&self) -> u64 {
