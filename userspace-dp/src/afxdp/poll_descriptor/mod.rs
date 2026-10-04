@@ -7638,6 +7638,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             recycle_now = true;
                         }
                         ForwardingDisposition::DiscardRoute => {
+                            telemetry.dbg.disposition_other += 1;
                             if let Some(flow) = flow.as_ref() {
                                 let ingress_logical = resolve_ingress_logical_ifindex(
                                     worker_ctx.forwarding,
@@ -8258,6 +8259,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             policy_app_id,
                                             now_ns,
                                         );
+                                        telemetry.dbg.policy_deny += 1;
                                         decision.resolution.disposition =
                                             ForwardingDisposition::PolicyDenied;
                                         stage_flow_cache_deny_seed(
