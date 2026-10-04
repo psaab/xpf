@@ -48,7 +48,8 @@ func duplicateBlockMergeWarning9023(what string) string {
 		return "duplicate unnamed `routing-options static` containers were merged in source order (#12043)"
 	}
 	for _, keyword := range []string{"routing-options", "protocols"} {
-		if strings.HasPrefix(what, "routing-instances ") && strings.HasSuffix(what, " "+keyword) {
+		if strings.Count(what, " ") == 2 &&
+			strings.HasPrefix(what, "routing-instances ") && strings.HasSuffix(what, " "+keyword) {
 			scope := strings.TrimSuffix(what, " "+keyword)
 			return "duplicate unnamed `" + keyword + "` containers under " + scope +
 				" were merged in source order (#12043)"

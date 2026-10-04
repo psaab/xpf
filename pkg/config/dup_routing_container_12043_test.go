@@ -5,11 +5,10 @@ import (
 	"testing"
 )
 
-// TestUnnamedRoutingContainerConservationCensus12043 is the unnamed-container
-// companion to the #8436 named-block census. Each duplicate hierarchy must
-// compile to the same typed state as Junos' merged form; otherwise a clean
-// strict commit can silently discard an authored route or protocol.
-func TestUnnamedRoutingContainerConservationCensus12043(t *testing.T) {
+// TestUnnamedRoutingContainersPreserveTypedStateAt12043Sites checks each of
+// the three unnamed-container sites addressed by #12043. Remaining unnamed
+// shapes are tracked in #12120; this is not a complete census.
+func TestUnnamedRoutingContainersPreserveTypedStateAt12043Sites(t *testing.T) {
 	cases := []struct {
 		name      string
 		site      string
@@ -105,13 +104,13 @@ func TestUnnamedRoutingContainerConservationCensus12043(t *testing.T) {
 	silent := 0
 	for _, tc := range cases {
 		if covered[tc.site] {
-			t.Fatalf("duplicate census fixture for site %q", tc.site)
+			t.Fatalf("duplicate site fixture for %q", tc.site)
 		}
 		covered[tc.site] = true
 		t.Run(tc.name, func(t *testing.T) {
 			want := compileText(t, tc.merged)
 			if want == nil {
-				t.Fatal("merged control did not compile; this census would compare against an empty result")
+				t.Fatal("merged control did not compile; this scoped site check would compare against an empty result")
 			}
 			got := compileText(t, tc.dup)
 			if got == nil {
@@ -130,11 +129,11 @@ func TestUnnamedRoutingContainerConservationCensus12043(t *testing.T) {
 	for _, site := range dupUnnamedRoutingMergeSites12043 {
 		key := site.scope + " " + site.parent + " " + site.keyword
 		if !covered[key] {
-			t.Errorf("unnamed routing merge site %q has no conservation census fixture", key)
+			t.Errorf("unnamed routing merge site %q has no #12043 conservation fixture", key)
 		}
 	}
 	if len(covered) != len(dupUnnamedRoutingMergeSites12043) {
-		t.Errorf("census has %d site fixtures for %d registered sites", len(covered), len(dupUnnamedRoutingMergeSites12043))
+		t.Errorf("#12043 site list has %d fixtures for %d listed sites", len(covered), len(dupUnnamedRoutingMergeSites12043))
 	}
-	t.Logf("unnamed routing containers: SILENT: %d (checked %d registered sites)", silent, len(covered))
+	t.Logf("unnamed routing containers at the three #12043 sites: SILENT: %d (checked %d sites; remaining shapes tracked in #12120)", silent, len(covered))
 }

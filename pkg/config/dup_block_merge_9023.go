@@ -77,9 +77,10 @@ var dupBlockMergeSites9023 = []struct{ parent, keyword string }{
 	{"ipsec", "policy"},
 	{"dhcp-local-server", "group"},
 }
-// dupUnnamedRoutingMergeSites12043 is the explicit census of repeated unnamed
-// routing containers whose siblings the compiler previously read first-only
-// or compiled into fresh per-container state. Junos merges these stanzas.
+
+// dupUnnamedRoutingMergeSites12043 lists the three unnamed-container sites
+// addressed by #12043. It is not a complete census of unnamed routing shapes;
+// remaining cases are tracked in #12120.
 var dupUnnamedRoutingMergeSites12043 = []struct {
 	scope, parent, keyword string
 }{
@@ -227,6 +228,7 @@ func mergeDuplicateNamedChildren9023(parent *Node) []string {
 	}
 	return merged
 }
+
 // mergeDuplicateUnnamedRoutingChildren12043 folds repeated unnamed routing
 // containers into the first sibling, preserving source order and recursively
 // merging identical child containers just as the existing named-block path

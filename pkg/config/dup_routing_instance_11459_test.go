@@ -107,3 +107,32 @@ routing-instances {
 		t.Fatalf("lenient merge was not announced as a deterministic RI merge: %v", cfg.Warnings)
 	}
 }
+func TestDuplicateRoutingInstanceNamedProtocolsGetsNamedWarning12043(t *testing.T) {
+	const text = `routing-instances {
+    protocols { instance-type virtual-router; }
+    protocols { instance-type virtual-router; }
+}`
+	tree, parseErrors := NewParser(text).Parse()
+	if len(parseErrors) != 0 {
+		t.Fatalf("parse duplicate routing instances: %v", parseErrors[0])
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	namedWarning, unnamedWarning := false, false
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "duplicate routing-instance definition `protocols`") {
+			namedWarning = true
+		}
+		if strings.Contains(warning, "duplicate unnamed") {
+			unnamedWarning = true
+		}
+	}
+	if !namedWarning {
+		t.Fatalf("duplicate VRF named protocols did not get the named-instance diagnostic: %v", cfg.Warnings)
+	}
+	if unnamedWarning {
+		t.Errorf("duplicate VRF named protocols was misclassified as an unnamed merge: %v", cfg.Warnings)
+	}
+}
