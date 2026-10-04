@@ -154,6 +154,17 @@ distinction).
   which the userspace snapshot builder marks `TCPFlagsUnparseable` to fail
   the term CLOSED (#3367) — a deny sentinel, never a match-all widening;
   the out-of-range code-point entry is dropped (the pre-#2447 fail-safe).
+
+  **CoS scheduler priority fails closed at the Go boundary (#11798/#11799):**
+  the schema accepts only the five Junos tokens; the compiled-config gate also
+  permits the empty/unset value that Rust interprets as `low`. Strict commits
+  reject an unknown non-empty priority. Tolerant loads clear it to the
+  empty low-default token and record a warning naming the scheduler and value;
+  the userspace snapshot emitter repeats that safe conversion as a boundary
+  guard. The Rust `CosUnknownSchedulerPriority` rejection remains closed as a
+  backstop, and `cos_scheduler_priority_11798_test.go` binds the Rust CoS
+  value-error variants to their Go gates and fail-on-revert tests.
+
   **Unknown firewall-filter `then` actions fail closed on tolerant loads
   (#11357):** `compileFilterThen` retains an unrecognized token in
   `FirewallFilterTerm.UnknownActions`. Strict commit rejects it; `Store.Load`

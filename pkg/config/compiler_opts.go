@@ -341,6 +341,12 @@ type compileOpts struct {
 	// clamps values above the safe millisecond-to-nanosecond ceiling.
 	lenientCodelTarget11825 bool
 
+	// lenientCoSSchedulerPriority (#11798/#11799) clears an unrecognized
+	// scheduler priority to the empty legacy-low default on tolerant loads,
+	// with a named warning. The Rust snapshot builder rejects non-empty
+	// unknown values; strict commits remain hard-rejected.
+	lenientCoSSchedulerPriority bool
+
 	// lenientCoSLossPriority (#3995) downgrades the class-of-service
 	// classifier / rewrite-rule loss-priority value check
 	// (validateClassOfServiceLossPriorityStrict) from a hard error to a
@@ -3107,6 +3113,7 @@ func lenientCompileOpts() compileOpts {
 		lenientCodelTarget11825:                true,
 		lenientCoSInterfaceRefs:                true,
 		lenientCoSLossPriority:                 true,
+		lenientCoSSchedulerPriority:            true,
 		lenientCoSUnitClassifierConflict:       true,
 		lenientCoSForwardingClassQueue:         true,
 		lenientCoSFairnessRSSExpectation:       true,

@@ -204,6 +204,19 @@ func buildClassOfServiceSnapshot(cfg *config.Config) *ClassOfServiceSnapshot {
 			if sched == nil {
 				continue
 			}
+			schedulerName := sched.Name
+			if schedulerName == "" {
+				schedulerName = name
+			}
+			priority := sched.Priority
+			if !config.CoSSchedulerPriorityValid(priority) {
+				slog.Warn("cos scheduler priority is unknown; emitting the unset low-priority default",
+					"scheduler", schedulerName,
+					"priority", priority,
+					"issue", "#11798",
+				)
+				priority = ""
+			}
 			snap.Schedulers = append(snap.Schedulers, CoSSchedulerSnapshot{
 				Name:                sched.Name,
 				TransmitRateBytes:   sched.TransmitRateBytes,
@@ -216,7 +229,7 @@ func buildClassOfServiceSnapshot(cfg *config.Config) *ClassOfServiceSnapshot {
 				// property of the (scheduler, interface) pair.
 				TransmitRateRemainder: sched.TransmitRateRemainder,
 				TransmitRateExact:     sched.TransmitRateExact,
-				Priority:              sched.Priority,
+				Priority:              priority,
 				BufferSizeBytes:       sched.BufferSizeBytes,
 				BufferSizePercent:     sched.BufferSizePercent,
 				BufferSizeTemporalUS:  sched.BufferSizeTemporalUS,
