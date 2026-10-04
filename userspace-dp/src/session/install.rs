@@ -593,6 +593,23 @@ impl SessionTable {
         {
             return false;
         }
+        // Sync sweeps re-send snapshots, not activity. Preserve the inactivity
+        // anchor only while the same TCP incarnation remains in the same
+        // handshake and close state; transitions start a fresh window.
+        let preserved_last_seen_ns = if wire_session_id != 0 && matches!(protocol, PROTO_TCP) {
+            self.entry_by_key(&key).and_then(|existing| {
+                (existing.session_id == wire_session_id
+                    && existing.tcp_handshake_state_wire(protocol)
+                        == wire_handshake
+                            .unwrap_or(TcpHandshakeState::Established)
+                            .to_wire()
+                    && existing.tcp_close_class_wire()
+                        == wire_close.map(TcpCloseClass::to_wire).unwrap_or(0))
+                .then_some(existing.last_seen_ns)
+            })
+        } else {
+            None
+        };
         // Same guard semantics as install_with_protocol_with_origin:
         // remove_entry has 3 debug_assert!s (stale-handle,
         // primary-key, no_index_points_at) that catch invariant
@@ -672,7 +689,7 @@ impl SessionTable {
                 metadata: metadata.clone(),
                 origin,
                 install_epoch: epoch,
-                last_seen_ns: now_ns,
+                last_seen_ns: preserved_last_seen_ns.unwrap_or(now_ns),
                 // #2465: a re-imported synced entry stamps its creation instant
                 // to the import time. The peer's original creation time is not
                 // carried on the HA session-sync delta, so this best-effort

@@ -27,6 +27,7 @@ fn synced_record(tcp_handshake_state: u8, tcp_close_class: u8) -> SessionSyncReq
         owner_rg_id: OWNER_RG,
         inactivity_timeout: APP_TIMEOUT_SECS,
         tcp_close_class,
+        session_id: 77,
         ..SessionSyncRequest::default()
     };
     let mut value = serde_json::to_value(base).expect("FIXTURE: serialize request");
@@ -75,6 +76,19 @@ fn synced_opening_uses_opening_window_and_reaps_lost_close_at_deadline_10888() {
         !entry.established && !entry.handshake_pending,
         "#10888: the imported OPENING state was erased"
     );
+    // A periodic sync reimport is not fresh activity and must not slide the
+    // opening deadline.
+    let reimported_at = installed_at + 15 * SEC;
+    import(&mut table, &synced_record(1, 0), reimported_at);
+    assert_eq!(
+        table
+            .entry_by_key(&key)
+            .expect("reimported session")
+            .last_seen_ns,
+        installed_at,
+        "#10888: same-incarnation opening reimport must preserve last_seen_ns"
+    );
+
 
     // Let the expiry wheel reach its first scan tick after the deadline. A
     // suppressed primary Close cannot turn the opening timeout into a second
@@ -85,6 +99,35 @@ fn synced_opening_uses_opening_window_and_reaps_lost_close_at_deadline_10888() {
     assert!(
         expired.iter().any(|entry| entry.key == key),
         "#10888: a lost-Close opening must reap at its first due wheel scan"
+    );
+}
+
+#[test]
+fn synced_reimport_transitions_refresh_last_seen_10888() {
+    let mut table = SessionTable::new();
+    let installed_at = 10 * SEC;
+    let key = import(&mut table, &synced_record(1, 0), installed_at);
+
+    let stage_transition_at = installed_at + 15 * SEC;
+    import(&mut table, &synced_record(2, 0), stage_transition_at);
+    assert_eq!(
+        table
+            .entry_by_key(&key)
+            .expect("stage transition")
+            .last_seen_ns,
+        stage_transition_at,
+        "#10888: a handshake-state transition must refresh last_seen_ns"
+    );
+
+    let close_transition_at = stage_transition_at + 1;
+    import(&mut table, &synced_record(2, 1), close_transition_at);
+    assert_eq!(
+        table
+            .entry_by_key(&key)
+            .expect("close transition")
+            .last_seen_ns,
+        close_transition_at,
+        "#10888: a close-class transition must refresh last_seen_ns"
     );
 }
 

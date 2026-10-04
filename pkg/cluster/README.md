@@ -3974,6 +3974,10 @@ outside the monitor loop:
   - **SessionID is identity equality only, never ordering.** As with close
     class, the generation cannot key this memo because every send draws a fresh
     one.
+- **Import lifetime.** Reimporting the same TCP `SessionID` at the same handshake
+  stage and close class preserves `last_seen_ns`, so periodic sync sweeps do not
+  slide an opening deadline. A stage or close-class transition starts a fresh
+  inactivity window.
 - **Lifetime and locking.** Close-class and handshake-state memos are evicted in
 `takeDeleteGenV4/V6`. Both are bounded by the effective sender cap
 (`sentCap()`), which starts at the default and grows only on full-of-live
