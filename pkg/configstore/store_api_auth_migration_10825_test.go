@@ -466,8 +466,8 @@ func TestLoadMigratesRescueWithoutActiveConfig10825(t *testing.T) {
 	if err := os.WriteFile(rescuePath, []byte(legacyAPIAuthConfig10826), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Load(); err != nil {
-		t.Fatalf("fresh-store Load: %v", err)
+	if err := store.Load(); !errors.Is(err, ErrConfigRescueFallback) {
+		t.Fatalf("fresh-store Load: %v, want valid rescue fallback", err)
 	}
 	rescue, err := os.ReadFile(rescuePath)
 	if err != nil {

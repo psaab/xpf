@@ -572,7 +572,7 @@ After an upgraded daemon loads its store, it migrates active, rollback, and
 pending-confirm credentials to tagged bcrypt verifiers; it also attempts a
 best-effort migration of the rescue config. If rescue migration cannot safely
 complete, it leaves the file in place and warns—rotate the affected credentials
-before restoring it.
+before using `load rescue` and committing the restored candidate.
 
 Credential migration hashes values but does not make ineligible credentials
 usable. Before relying on remote REST access, ensure each API-auth identity has

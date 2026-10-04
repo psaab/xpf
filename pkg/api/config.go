@@ -528,7 +528,7 @@ func (s *Server) configLoadHandler(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSONBody(w, r, &req) {
 		return
 	}
-	if req.Content == "" {
+	if req.Content == "" && req.Mode != "rescue" {
 		writeError(w, http.StatusBadRequest, "content required")
 		return
 	}
@@ -559,8 +559,13 @@ func (s *Server) configLoadHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		slog.Info("load set applied", "commands", count)
+	case "rescue":
+		if err := s.store.LoadRescueAsPlantClass(sessionID, plantClass); err != nil {
+			writeConfigMutationError(w, err)
+			return
+		}
 	default:
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown load mode: %s (use 'override', 'merge', or 'set')", req.Mode))
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown load mode: %s (use 'rescue', 'override', 'merge', or 'set')", req.Mode))
 		return
 	}
 	writeOK(w, map[string]string{"status": "ok"})

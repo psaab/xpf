@@ -1155,9 +1155,13 @@ literal secret for every secret leaf, so xpf rejects the placeholder both on
 strict commit-ingest and at tolerant `Store.Load` / `Store.SyncApply` ingress,
 before the value can be promoted as a live secret. For a restorable backup use
 the cleartext DR/compliance archive or `request system configuration rescue
-save`; to restore, load from that archive/rescue or re-enter the secret in
-cleartext. (The cleartext SSOT still backs HA config sync, the DR archive and
-on-disk persistence — only the display surfaces redact.)
+save`; `load rescue` stages the saved rescue text into the candidate and still
+requires normal validation and commit. Automatic boot fallback uses rescue
+only when `active.json` is absent with no recovery markers; a present unreadable
+or uncompilable active DB and surviving recovery markers remain fail-closed.
+Re-enter secrets in cleartext when restoring a redacted export. (The cleartext
+SSOT still backs HA config sync, the DR archive and on-disk persistence — only
+the display surfaces redact.)
 
 **xpf URL redaction (#6703):** a URL is secret-*bearing* without being a
 secret — the credential lives in the userinfo, query or fragment, while the

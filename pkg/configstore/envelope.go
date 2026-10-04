@@ -56,6 +56,15 @@ var ErrConfigCompile = errors.New("config DB present but does not compile")
 // would strand management, which this sentinel exists to avoid.
 var ErrConfigAbsentWithHistory = errors.New("config DB absent but rollback history survives")
 
+// ErrConfigRescueFallback identifies a valid saved rescue config selected
+// because active.json is absent and no recovery markers survive. It is
+// deliberately distinct from the existing fail-closed load errors.
+var ErrConfigRescueFallback = errors.New("config DB absent; rescue config selected")
+
+// ErrRescueNotFound reports that no non-empty saved rescue config is available
+// for an explicit candidate load.
+var ErrRescueNotFound = errors.New("no rescue configuration exists")
+
 // ErrConfigLocked tags an EnterConfigure/EnterConfigureSession failure caused
 // by the candidate already being held by another session (an interactive
 // `configure`, a REST/gRPC config session, or another non-interactive

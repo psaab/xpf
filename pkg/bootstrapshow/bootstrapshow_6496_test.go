@@ -13,9 +13,9 @@ func render(s Snapshot) string {
 	return b.String()
 }
 
-// The six recorded statuses each render their own status token AND their own
-// meaning. RED on revert: collapse two cases in explain() and the pair that
-// collapsed reports the same meaning line.
+// Every recorded status renders its own status token AND its own meaning. RED
+// on revert: collapse two cases in explain() and the pair that collapsed
+// reports the same meaning line.
 func TestEveryStatusRendersItsOwnMeaning(t *testing.T) {
 	cases := []struct{ status, wantToken string }{
 		{StatusOK, "ok"},
@@ -24,6 +24,7 @@ func TestEveryStatusRendersItsOwnMeaning(t *testing.T) {
 		{StatusPending, "credential-apply-pending"},
 		{StatusCredentialFailed, "credential-apply-failed"},
 		{StatusFailed, "import-failed"},
+		{StatusRescueFallback, "rescue-fallback"},
 	}
 	seen := map[string]string{}
 	for _, c := range cases {

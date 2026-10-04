@@ -1340,6 +1340,7 @@ var ConfigTopLevel = map[string]*Node{
 		"confirmed": {Desc: "Automatically rollback if not confirmed"},
 	}},
 	"load": {Desc: "Load configuration from ASCII file", Children: map[string]*Node{
+		"rescue":   {Desc: "Replace candidate with saved rescue config"},
 		"override": {Desc: "Override existing configuration"},
 		"merge":    {Desc: "Merge contents with existing configuration"},
 		"set":      {Desc: "Execute set commands from terminal"},

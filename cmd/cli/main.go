@@ -634,6 +634,17 @@ func readTerminalConfig(readLine func() (string, error)) (string, error) {
 }
 
 func (c *ctl) handleLoad(args []string) error {
+	if len(args) == 1 && args[0] == "rescue" {
+		_, err := c.client.Load(c.ctx(), &pb.LoadRequest{Mode: "rescue"})
+		if err != nil {
+			return fmt.Errorf("load rescue: %v", err)
+		}
+		fmt.Println("load rescue complete")
+		return nil
+	}
+	if len(args) > 0 && args[0] == "rescue" {
+		return fmt.Errorf("load rescue: no source or extra arguments are accepted")
+	}
 	if len(args) < 2 {
 		printConfigTreeHelp("load:", "load")
 		return nil
@@ -641,7 +652,7 @@ func (c *ctl) handleLoad(args []string) error {
 
 	mode := args[0]
 	if mode != "override" && mode != "merge" && mode != "set" {
-		return fmt.Errorf("load: unknown mode %q (use 'override', 'merge', or 'set')", mode)
+		return fmt.Errorf("load: unknown mode %q (use 'rescue', 'override', 'merge', or 'set')", mode)
 	}
 
 	source := args[1]

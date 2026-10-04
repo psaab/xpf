@@ -1,7 +1,9 @@
 package configstore
 
 import (
+	"bytes"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -483,6 +485,57 @@ func (s *Store) LoadOverrideAsPlantClass(sessionID, plantClass, content string) 
 	s.candidate = tree
 	s.touchConfigLockLocked()  // #4476: refresh the config-lock idle lease
 	s.bumpCandidateGenLocked() // #5848: complete candidate replacement retires rename lineage
+	s.dirty = true
+	return nil
+}
+
+// LoadRescue loads the saved rescue config into the candidate for the internal
+// caller.
+func (s *Store) LoadRescue() error { return s.LoadRescueAs("") }
+
+// LoadRescueAs is LoadRescue scoped to a config-lock holder session.
+func (s *Store) LoadRescueAs(sessionID string) error {
+	return s.LoadRescueAsPlantClass(sessionID, "")
+}
+
+// LoadRescueAsPlantClass replaces the candidate with the saved rescue config.
+// It never promotes or persists that candidate.
+func (s *Store) LoadRescueAsPlantClass(sessionID, plantClass string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.ensureWritableLocked(); err != nil {
+		return err
+	}
+	if err := s.ensureHolderLocked(sessionID); err != nil {
+		return err
+	}
+	if s.candidate == nil {
+		return fmt.Errorf("not in configuration mode")
+	}
+
+	data, err := ReadBoundedFile(s.rescuePath(), MaxConfigSize)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ErrRescueNotFound
+		}
+		return fmt.Errorf("read rescue config: %w", err)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return ErrRescueNotFound
+	}
+	tree, err := parseOverrideContent(string(data))
+	if err != nil {
+		return err
+	}
+	if tree == nil || len(tree.Children) == 0 {
+		return ErrRescueNotFound
+	}
+
+	config.StampChangedEventPlantClasses(s.candidate, tree, plantClass)
+	s.candidate = tree
+	s.touchConfigLockLocked()
+	s.bumpCandidateGenLocked()
 	s.dirty = true
 	return nil
 }

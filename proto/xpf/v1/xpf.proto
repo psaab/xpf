@@ -102,8 +102,8 @@ message DeleteRequest { string input = 1; }
 message DeleteResponse {}
 
 message LoadRequest {
-  string mode = 1;    // "override", "merge", or "set" (#2052: set replays flat set/delete/deactivate/activate lines)
-  string content = 2; // full config text (hierarchical or set format)
+  string mode = 1;    // "rescue", "override", "merge", or "set" (#2052: set replays flat set/delete/deactivate/activate lines)
+  string content = 2; // config text (hierarchical or set format); unused for "rescue"
 }
 message LoadResponse {}
 

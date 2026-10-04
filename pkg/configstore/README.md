@@ -89,8 +89,8 @@ the config store is intentionally **not** applied to the persisted text
 copies, and encrypting them with the on-box `master.key` would add **no
 real defense** against those two threats: this is an **unattended-boot
 appliance**, so the decryption key must live on the box (`rollback N` /
-`loadRollbackHistory` and a future rescue-load must restore secrets with
-no operator present). `master.key` is a plain random 0600 file
+`loadRollbackHistory` and Store.Load's bounded rescue fallback must restore
+secrets during unattended boot). `master.key` is a plain random 0600 file
 (`crypto.go readOrCreateMasterKey`) in the same 0700 `.configdb`
 directory as the ciphertext, with **no TPM/HSM substrate** in the tree
 to seal it. An attacker who can read `xpf.conf.N` can equally read
@@ -318,9 +318,10 @@ inline archive-site-password warning in #651).
   config is written. **Not gated:** the text renderings beside the DB — the
   `config.N` rollback files and the rescue config — are written from
   `Format()` without this check. Their readers also use `ReadBoundedFile`,
-  and an over-ceiling rendering fails only that read: the rollback slot loads
-  as a tombstone that `rollback N` rejects (#4810), and the rescue load
-  returns an error.
+  and an over-ceiling rendering fails only its read: the rollback slot loads
+  as a tombstone that `rollback N` rejects (#4810), and explicit `load rescue`
+  returns an error. Store.Load ignores an unusable rescue fallback and keeps
+  the ordinary fresh/day-0 boot path.
 - `DB` — `db.go`. Low-level durable file I/O (via `pkg/fsatomic`).
   `NewDB` sweeps crash-leaked `.*.tmp-*` temps from `.configdb`.
 - `History` — `history.go`. Bounded ring of recent commits.

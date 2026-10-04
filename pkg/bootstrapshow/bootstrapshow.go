@@ -50,6 +50,9 @@ const (
 	// StatusFailed: a text-config import failed (read/parse/commit/device-map
 	// preflight), or the day-0 loader rejected a medium before installing it.
 	StatusFailed = "import-failed"
+	// StatusRescueFallback: a valid saved rescue config was selected with no
+	// active DB or recovery markers; the daemon remains in bootstrap/lifeline.
+	StatusRescueFallback = "rescue-fallback"
 )
 
 // Snapshot is the recorded outcome. It mirrors daemon.BootstrapImport
@@ -78,6 +81,8 @@ func explain(status string) string {
 		return "the day-0 configuration was imported; initial host-credential application is still running"
 	case StatusCredentialFailed:
 		return "the day-0 configuration was imported, but host-credential application failed"
+	case StatusRescueFallback:
+		return "a valid saved rescue configuration was selected; the daemon remains in bootstrap/lifeline mode until it is explicitly committed"
 	case StatusFailed:
 		return "a configuration could NOT be applied — see Error below"
 	case "":

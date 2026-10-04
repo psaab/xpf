@@ -15,6 +15,13 @@ func contains(items []string, want string) bool {
 	return false
 }
 
+func TestConfigLoadRescueCompletion(t *testing.T) {
+	cands := CompleteFromTree(ConfigTopLevel, []string{"load"}, "", nil)
+	if !contains(cands, "rescue") {
+		t.Fatalf("config-mode load completions = %v, missing rescue", cands)
+	}
+}
+
 func TestCompleteFromTree_PlaceholderWithChildrenDescends(t *testing.T) {
 	cands := CompleteFromTree(OperationalTree, []string{"show", "route", "10.0.0.1"}, "", nil)
 	if !contains(cands, "exact") || !contains(cands, "longer") || !contains(cands, "orlonger") {

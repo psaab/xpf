@@ -52,6 +52,10 @@ const (
 	// claim-all; instead it enters the #1922 bootstrap/lifeline safe state
 	// with history loaded for explicit in-band recovery.
 	loadAbsentWithHistory
+	// loadRescueFallback — a valid saved rescue config was selected with no
+	// active DB or recovery markers. The daemon stays in bootstrap/lifeline
+	// mode until an operator loads the rescue candidate and commits it.
+	loadRescueFallback
 	// loadOtherError — any other Load error (logged as a warning; the daemon
 	// proceeds and the boot predicate decides bootstrap vs normal as usual).
 	loadOtherError
@@ -69,6 +73,8 @@ func classifyLoadError(err error) loadErrorClass {
 		return loadCompileFailed
 	case errors.Is(err, configstore.ErrConfigAbsentWithHistory):
 		return loadAbsentWithHistory
+	case errors.Is(err, configstore.ErrConfigRescueFallback):
+		return loadRescueFallback
 	default:
 		return loadOtherError
 	}
@@ -79,10 +85,10 @@ func classifyLoadError(err error) loadErrorClass {
 // empty config with EverCommitted=false; it is still eligible for import.
 // ActiveConfig alone would misread that Item-1b state as already configured.
 //
-// #1960/#10297: the failClosedLoad clause is load-bearing. On either
-// fail-closed load ActiveConfig() is nil, so without this guard the import
-// would fire — silently swapping a DIFFERENT config (whatever xpf.conf holds)
-// in over the broken/missing committed DB and then taking over interfaces.
+// #1960/#10297/#11802: the failClosedLoad clause is load-bearing. A
+// compile-failed present DB, absent DB with recovery markers, or valid rescue
+// fallback keeps ActiveConfig() nil; without this guard xpf.conf would be
+// imported over state that must remain in the bootstrap/lifeline path.
 func shouldBootstrapFromFile(hasActiveConfig, everCommitted, failClosedLoad bool) bool {
 	return (!hasActiveConfig || !everCommitted) && !failClosedLoad
 }

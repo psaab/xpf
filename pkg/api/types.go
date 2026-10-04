@@ -966,8 +966,8 @@ type HistoryEntry struct {
 
 // ConfigLoadRequest holds a config load request.
 type ConfigLoadRequest struct {
-	Mode    string `json:"mode"`    // "override", "merge"
-	Content string `json:"content"` // config text (hierarchical or set format)
+	Mode    string `json:"mode"`    // "rescue", "override", "merge", or "set"
+	Content string `json:"content"` // config text; unused for "rescue"
 }
 
 // CommitConfirmedRequest holds a commit confirmed request.

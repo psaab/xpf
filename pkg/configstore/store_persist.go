@@ -1,6 +1,7 @@
 package configstore
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -75,7 +76,9 @@ func (factoryResetPendingError) Is(target error) bool {
 // ErrFactoryResetPending marks a durable interrupted factory reset.
 var ErrFactoryResetPending error = factoryResetPendingError{}
 
-// Load builds the configuration from disk.
+// Load builds the configuration from disk. A valid saved rescue config may be
+// selected only when active.json is absent and no recovery markers survive;
+// that path returns ErrConfigRescueFallback and leaves compiled active nil.
 func (s *Store) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -139,13 +142,14 @@ func (s *Store) Load() error {
 			}
 			return ErrConfigAbsentWithHistory
 		}
-		// No persisted marker: this is a never-booted store. everCommitted
-		// stays false and the daemon may bootstrap from xpf.conf.
+		// No persisted marker: this is a never-booted store. A usable saved
+		// rescue config may be selected before the daemon considers day-0
+		// import; invalid rescue remains an ordinary fresh-store boot.
 		if err := s.migrateRescueAPIAuthSecrets(); err != nil {
 			return err
 		}
 		purgeAPIAuthArchives(s.apiAuthArchiveMigrationDir)
-		return nil
+		return s.loadRescueFallbackLocked()
 	}
 	// #1922 step-0 marker: record whether the on-disk DB represents a
 	// successfully-committed config. A legacy/older-build DB (no envelope
@@ -277,6 +281,41 @@ func (s *Store) Load() error {
 	// success in that state — see recoverPendingConfirmLocked.
 	s.loadUnsharedMarkLocked() // #9530
 	return s.recoverPendingConfirmLocked()
+}
+
+// loadRescueFallbackLocked selects a valid saved rescue config only for a
+// marker-free absent active DB. Callers hold s.mu; compilation is validation
+// only, and the compiled result is deliberately not promoted or persisted.
+func (s *Store) loadRescueFallbackLocked() error {
+	path := s.rescuePath()
+	data, err := ReadBoundedFile(path, MaxConfigSize)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("ignoring unreadable saved rescue config during fresh boot", "issue", "#11802")
+		}
+		return nil
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		slog.Warn("ignoring empty saved rescue config during fresh boot", "issue", "#11802")
+		return nil
+	}
+	tree, parseErr := parseOverrideContent(string(data))
+	if parseErr != nil || tree == nil || len(tree.Children) == 0 {
+		slog.Warn("ignoring invalid saved rescue config during fresh boot", "issue", "#11802")
+		return nil
+	}
+	if _, err := s.compileTreeLenient(tree); err != nil {
+		slog.Warn("ignoring uncompilable saved rescue config during fresh boot", "issue", "#11802")
+		return nil
+	}
+
+	s.active = tree
+	s.everCommitted = true
+	s.persistMarkerCommitted = true
+	s.compiled = nil
+	s.publishActiveLocked()
+	s.loadUnsharedMarkLocked()
+	return ErrConfigRescueFallback
 }
 
 // migrateActiveAPIAuthSecrets hashes active credentials while preserving a

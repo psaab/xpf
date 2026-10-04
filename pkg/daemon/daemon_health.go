@@ -26,6 +26,10 @@ const (
 	// bootstrapImportLoadedDB: an active config was already present in the DB;
 	// no file import was attempted (normal steady-state boot).
 	bootstrapImportLoadedDB = bootstrapshow.StatusLoadedDB
+	// bootstrapImportRescueFallback: a saved rescue config was selected with
+	// no active DB or recovery markers; day-0 import is suppressed and the
+	// daemon remains in bootstrap/lifeline mode.
+	bootstrapImportRescueFallback = bootstrapshow.StatusRescueFallback
 	// bootstrapImportNoConfig: no text config file present (factory/fresh
 	// boot). Expected — NOT a failure and NOT health-degrading.
 	bootstrapImportNoConfig = bootstrapshow.StatusNoConfig
