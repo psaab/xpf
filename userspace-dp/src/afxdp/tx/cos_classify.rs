@@ -241,6 +241,7 @@ pub(in crate::afxdp) fn resolve_cached_cos_tx_queue_id(
             .get(&egress_ifindex)
             .map(|iface| {
                 flowless_cos_ba_queue_id(
+                    forwarding,
                     iface,
                     meta,
                     ba_ingress_trust(
@@ -253,17 +254,20 @@ pub(in crate::afxdp) fn resolve_cached_cos_tx_queue_id(
     }
 }
 
-/// The behavior-aggregate (BA) queue for a FLOWLESS packet: DSCP classifier ->
-/// inet-precedence classifier -> 802.1p classifier -> the interface default
-/// queue (#hb166 T-6(m) / #6847). Each classifier arm is gated by the
-/// corresponding binding on the LOGICAL ingress unit (#11386).
+/// The behavior-aggregate (BA) queue for a FLOWLESS packet: DSCP ->
+/// inet-precedence -> 802.1p -> default. Wire packets use the logical ingress
+/// unit's classifier binding; locally generated packets use the egress
+/// interface's existing compiled tables.
 fn flowless_cos_ba_queue_id(
+    forwarding: &ForwardingState,
     iface: &CoSInterfaceConfig,
     meta: UserspaceDpMeta,
     trust: BaIngressTrust,
 ) -> u8 {
     resolve_trusted_ba_queue_id(
+        forwarding,
         iface,
+        meta.ingress_ifindex,
         meta.dscp,
         meta.ingress_pcp,
         meta.ingress_vlan_present != 0,
@@ -325,13 +329,15 @@ fn cached_cos_tx_selection_flowless(
     // an EF fragment lands in its trusted BA queue instead of straddling the
     // default queue. Filter forwarding-class / rewrite needs the flow
     // key, so those stay unset (as before).
-    let queue_id = iface.map(|iface| flowless_cos_ba_queue_id(iface, meta, ba_trust));
+    let queue_id =
+        iface.map(|iface| flowless_cos_ba_queue_id(forwarding, iface, meta, ba_trust));
     // #3995: flowless packets still resolve the loss-priority-aware CoS
     // rewrite from their own DSCP/PCP (default LOW when unclassified).
     let dscp_rewrite = queue_id.and_then(|queue_id| {
         resolve_cos_queue_lp_rewrite(
             forwarding,
             egress_ifindex,
+            meta.ingress_ifindex,
             queue_id,
             meta.dscp,
             meta.ingress_pcp,
@@ -581,7 +587,9 @@ fn resolve_cached_cos_tx_selection_impl(
     let queue_id = fc_queue.or_else(|| {
         iface.and_then(|iface| {
             resolve_trusted_ba_queue_id(
+                forwarding,
                 iface,
+                meta.ingress_ifindex,
                 meta.dscp,
                 meta.ingress_pcp,
                 meta.ingress_vlan_present != 0,
@@ -590,22 +598,20 @@ fn resolve_cached_cos_tx_selection_impl(
             .or(Some(iface.default_queue))
         })
     });
-    // Mark for per-packet BA re-classification on the flow-cache hit path only
-    // when the queue is NOT pinned by a filter forwarding-class AND a BA
-    // classifier is configured on the egress interface. A filter-FC-pinned or
-    // plain default-queue interface keeps the frozen queue (correct + free).
+    // Re-resolve BA queues on a flow-cache hit when classification is supplied
+    // by the ingress unit. The locally generated path retains its existing
+    // egress-classifier behavior; an explicit filter class remains pinned.
     let ba_reclassify = fc_queue.is_none()
-        && iface.is_some_and(|iface| {
-            // #6847: inet-precedence is a per-packet BA classifier like the
-            // other two. Leaving it out of this gate would freeze the SEED
-            // packet's queue for the flow's lifetime, so a flow whose
-            // precedence marking changes mid-flow would keep the first
-            // packet's class — classification that silently stops tracking
-            // the packets, which is the same defect class as not classifying
-            // at all.
-            !iface.dscp_classifier.is_empty()
-                || !iface.ieee8021_classifier.is_empty()
-                || !iface.inet_precedence_classifier.is_empty()
+        && (if meta.ingress_ifindex == 0 {
+            iface.is_some_and(|iface| {
+                !iface.dscp_classifier.is_empty()
+                    || !iface.ieee8021_classifier.is_empty()
+                    || !iface.inet_precedence_classifier.is_empty()
+            })
+        } else {
+            ba_trust.dscp.is_some()
+                || ba_trust.inet_precedence.is_some()
+                || ba_trust.ieee8021.is_some()
         });
 
     // #3995/#11430: include the seed packet's CoS rewrite for the resolved
@@ -616,6 +622,7 @@ fn resolve_cached_cos_tx_selection_impl(
         resolve_cos_queue_lp_rewrite(
             forwarding,
             egress_ifindex,
+            meta.ingress_ifindex,
             queue_id,
             meta.dscp,
             meta.ingress_pcp,
@@ -677,7 +684,9 @@ pub(in crate::afxdp) fn reclassify_cached_ba_queue_and_lp_rewrite(
         .and_then(|iface| {
             let trust = ba_ingress_trust(forwarding, ingress_ifindex, ingress_vlan_id);
             let queue_id = resolve_trusted_ba_queue_id(
+                forwarding,
                 iface,
+                ingress_ifindex,
                 dscp,
                 ingress_pcp,
                 ingress_vlan_present,
@@ -687,6 +696,7 @@ pub(in crate::afxdp) fn reclassify_cached_ba_queue_and_lp_rewrite(
             let dscp_rewrite = resolve_cos_queue_lp_rewrite(
                 forwarding,
                 egress_ifindex,
+                ingress_ifindex,
                 queue_id,
                 dscp,
                 ingress_pcp,
@@ -837,7 +847,9 @@ fn resolve_cos_tx_selection_internal(
         // default queue. Mirrors the cached-path None branch.
         let queue_id = iface.map(|iface| {
             resolve_trusted_ba_queue_id(
+                forwarding,
                 iface,
+                meta.ingress_ifindex,
                 meta.dscp,
                 meta.ingress_pcp,
                 meta.ingress_vlan_present != 0,
@@ -851,6 +863,7 @@ fn resolve_cos_tx_selection_internal(
             resolve_cos_queue_lp_rewrite(
                 forwarding,
                 egress_ifindex,
+                meta.ingress_ifindex,
                 queue_id,
                 meta.dscp,
                 meta.ingress_pcp,
@@ -1147,11 +1160,11 @@ fn resolve_cos_tx_selection_internal(
             filter_log,
         };
     };
-    // Queue selection precedence: the output-filter forwarding-class, then the
-    // ingress input-filter forwarding-class, then the DSCP behavior-aggregate
-    // classifier, then the IP-precedence classifier (#6847), then the 802.1p
-    // classifier, then the interface default queue. An explicit filter class
-    // with no materialized queue pins that default rather than falling through.
+    // Queue precedence: output-filter forwarding-class, ingress-filter
+    // forwarding-class, then the logical ingress unit's DSCP, IP-precedence
+    // (#6847), or 802.1p classifier for wire packets (the legacy egress
+    // classifiers for locally generated packets), then the egress default.
+    // An explicit filter class with no materialized queue pins that default.
     //
     // DSCP before inet-precedence is load-bearing, not incidental: the two read
     // the same DS field, so a unit binding both is rejected at commit
@@ -1171,7 +1184,9 @@ fn resolve_cos_tx_selection_internal(
     let queue_id = filter_fc_queue
         .or_else(|| {
             resolve_trusted_ba_queue_id(
+                forwarding,
                 iface,
+                meta.ingress_ifindex,
                 meta.dscp,
                 meta.ingress_pcp,
                 meta.ingress_vlan_present != 0,
@@ -1186,6 +1201,7 @@ fn resolve_cos_tx_selection_internal(
     let cos_rewrite = resolve_cos_queue_lp_rewrite(
         forwarding,
         egress_ifindex,
+        meta.ingress_ifindex,
         queue_id,
         meta.dscp,
         meta.ingress_pcp,
@@ -1202,51 +1218,70 @@ fn resolve_cos_tx_selection_internal(
     }
 }
 
-/// #3995/#11386: resolve THIS packet's trusted classifier-assigned loss
-/// priority on the egress interface (index 0=low .. 3=high). Mirrors the BA
-/// queue-selection order while allowing only classifier types bound on ingress.
+/// #3995/#11386/#11679: resolve the packet's classifier-assigned loss priority.
+/// Transit uses the classifier bound on the logical ingress unit; locally
+/// generated replies use their egress interface's existing compiled tables.
 fn resolve_cos_loss_priority(
     lp: &CoSLossPriorityRewrite,
+    forwarding: &ForwardingState,
+    ingress_ifindex: u32,
     dscp: u8,
     ingress_pcp: u8,
     vlan_present: bool,
     trust: BaIngressTrust,
 ) -> u8 {
-    let dscp_lp = if trust.dscp {
-        lp.dscp_lp_by_dscp[usize::from(dscp & 0x3f)]
+    let (dscp_lp, prec_lp, pcp_lp) = if ingress_ifindex == 0 {
+        (
+            lp.dscp_lp_by_dscp[usize::from(dscp & 0x3f)],
+            lp.inet_precedence_lp_by_prec[usize::from((dscp >> 3) & 0x7)],
+            lp.ieee8021_lp_by_pcp
+                .get(usize::from(ingress_pcp))
+                .copied()
+                .unwrap_or(u8::MAX),
+        )
     } else {
-        u8::MAX
+        let dscp_lp = trust
+            .dscp
+            .and_then(|index| forwarding.cos.dscp_classifier_tables.get(index))
+            .and_then(|classifier| classifier.lp_by_dscp.get(&(dscp & 0x3f)).copied())
+            .unwrap_or(u8::MAX);
+        let prec_lp = trust
+            .inet_precedence
+            .and_then(|index| forwarding.cos.inet_precedence_classifier_tables.get(index))
+            .and_then(|classifier| {
+                classifier
+                    .lp_by_prec
+                    .get(&((dscp >> 3) & 0x7))
+                    .copied()
+            })
+            .unwrap_or(u8::MAX);
+        let pcp_lp = trust
+            .ieee8021
+            .and_then(|index| forwarding.cos.ieee8021_classifier_tables.get(index))
+            .and_then(|classifier| classifier.lp_by_pcp.get(&ingress_pcp).copied())
+            .unwrap_or(u8::MAX);
+        (dscp_lp, prec_lp, pcp_lp)
     };
     if dscp_lp != u8::MAX {
         return dscp_lp;
     }
-    // #6847: the IP-precedence classifier's loss-priority occupies the same
-    // position in the chain as its queue arm.
-    if trust.inet_precedence {
-        let prec_lp = lp.inet_precedence_lp_by_prec[usize::from((dscp >> 3) & 0x7)];
-        if prec_lp != u8::MAX {
-            return prec_lp;
-        }
+    if prec_lp != u8::MAX {
+        return prec_lp;
     }
-    if trust.ieee8021 && vlan_present {
-        if let Some(&pcp_lp) = lp.ieee8021_lp_by_pcp.get(usize::from(ingress_pcp)) {
-            if pcp_lp != u8::MAX {
-                return pcp_lp;
-            }
-        }
+    if vlan_present && pcp_lp != u8::MAX {
+        return pcp_lp;
     }
     0
 }
 
-/// #3995/#11430: resolve the egress DSCP rewrite for this packet's egress
-/// queue and classifier loss-priority. Returns `None` when the interface has
-/// no loss-priority rewrite table or the current `(queue, loss-priority)` pair
-/// has no configured code-point. BA cache hits call this with the current
-/// packet's DSCP/PCP and re-resolved queue; a filter DSCP rewrite still takes
+/// #3995/#11430/#11679: resolve the egress DSCP rewrite for this packet's
+/// egress queue and ingress-classified loss-priority. Returns `None` when the
+/// egress interface has no matching rewrite pair; filter rewrites take
 /// precedence over this CoS result.
 fn resolve_cos_queue_lp_rewrite(
     forwarding: &ForwardingState,
     egress_ifindex: i32,
+    ingress_ifindex: u32,
     queue_id: u8,
     dscp: u8,
     ingress_pcp: u8,
@@ -1254,7 +1289,15 @@ fn resolve_cos_queue_lp_rewrite(
     trust: BaIngressTrust,
 ) -> Option<u8> {
     let lp = forwarding.cos.lp_rewrite.get(&egress_ifindex)?;
-    let plp = resolve_cos_loss_priority(lp, dscp, ingress_pcp, vlan_present, trust);
+    let plp = resolve_cos_loss_priority(
+        lp,
+        forwarding,
+        ingress_ifindex,
+        dscp,
+        ingress_pcp,
+        vlan_present,
+        trust,
+    );
     lp.dscp_rewrite_by_queue_lp.get(&(queue_id, plp)).copied()
 }
 

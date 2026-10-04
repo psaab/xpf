@@ -16,31 +16,31 @@ use super::*;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(in crate::afxdp) struct CoSState {
     pub(in crate::afxdp) interfaces: FastMap<i32, CoSInterfaceConfig>,
-    /// Classifier bindings are retained independently of `interfaces`: the
-    /// egress CoS admission gate can omit an ingress-only unit while its
-    /// bindings still decide whether wire markings are trusted.
+    /// Ingress classifier ids are retained independently of `interfaces`: the
+    /// egress CoS admission gate may omit an ingress-only unit, while those
+    /// ids still select transit packets' BA queue and loss-priority.
     pub(in crate::afxdp) ingress_classifier_bindings: FastMap<i32, CoSIngressClassifierBindings>,
-    pub(in crate::afxdp) dscp_classifiers: FastMap<String, CoSDSCPClassifierConfig>,
-    pub(in crate::afxdp) ieee8021_classifiers: FastMap<String, CoSIEEE8021ClassifierConfig>,
+    /// Globally compiled classifier tables. Ingress-unit bindings store
+    /// integer indexes into these vectors so TX classification does not hash
+    /// classifier names on the packet path.
+    pub(in crate::afxdp) dscp_classifier_tables: Vec<CoSDSCPClassifierConfig>,
+    pub(in crate::afxdp) ieee8021_classifier_tables: Vec<CoSIEEE8021ClassifierConfig>,
+    pub(in crate::afxdp) inet_precedence_classifier_tables: Vec<CoSINetPrecedenceClassifierConfig>,
     pub(in crate::afxdp) dscp_rewrite_rules: FastMap<String, CoSDSCPRewriteRuleConfig>,
-    /// #3995: per-egress-interface loss-priority classification + rewrite
-    /// tables, keyed by ifindex. `build_cos_state` inserts one entry for every
-    /// interface that passes the useful-CoS gate (`build_cos_iface_config`), so
-    /// it is present for the SAME interface set as `interfaces`; the tables are
-    /// empty (no loss-priority classification, no rewrite entries) when the
-    /// interface has no classifier / rewrite-rule. Resolved at TX
-    /// classification to key the DSCP rewrite on `(forwarding-class,
-    /// loss-priority)` instead of forwarding-class alone.
+    /// Per-egress-interface loss-priority/rewrite tables, keyed by ifindex.
+    /// The queue/rewrite matrix is egress-owned; classifier LP tables are
+    /// retained for locally generated packets that have no wire ingress.
     pub(in crate::afxdp) lp_rewrite: FastMap<i32, CoSLossPriorityRewrite>,
 }
 
-/// Classifier-type bindings on an ingress unit, independent of its egress
-/// shaping / scheduler state.
+/// Integer-indexed classifier bindings on a logical ingress unit, independent
+/// of its egress shaping / scheduler state. `None` means that classifier type
+/// is not bound on this ingress unit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::afxdp) struct CoSIngressClassifierBindings {
-    pub(in crate::afxdp) dscp: bool,
-    pub(in crate::afxdp) inet_precedence: bool,
-    pub(in crate::afxdp) ieee8021: bool,
+    pub(in crate::afxdp) dscp: Option<usize>,
+    pub(in crate::afxdp) inet_precedence: Option<usize>,
+    pub(in crate::afxdp) ieee8021: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -59,13 +59,13 @@ pub(in crate::afxdp) struct CoSInterfaceConfig {
     pub(in crate::afxdp) shaping_rate_bytes: u64,
     pub(in crate::afxdp) burst_bytes: u64,
     pub(in crate::afxdp) default_queue: u8,
+    /// Egress-unit classifier refs/tables are retained for locally generated
+    /// packets, which have no wire ingress. Transit TX resolves BA classifiers
+    /// from the logical ingress unit's indexed bindings in `CoSState`.
     pub(in crate::afxdp) dscp_classifier: String,
     pub(in crate::afxdp) ieee8021_classifier: String,
-    /// #6847: the unit's bound `inet-precedence` classifier name, or empty.
-    /// Read by the `ba_reclassify` gate in `tx/cos_classify.rs` — a flow whose
-    /// queue is chosen by a behavior-aggregate classifier must be re-resolved
-    /// per packet, and an interface bound ONLY to an inet-precedence
-    /// classifier is exactly that case.
+    /// #6847: the egress unit's bound `inet-precedence` classifier name, or
+    /// empty. Used for local-generated TX and egress CoS admission.
     pub(in crate::afxdp) inet_precedence_classifier: String,
     pub(in crate::afxdp) dscp_queue_by_dscp: [u8; 64],
     pub(in crate::afxdp) ieee8021_queue_by_pcp: [u8; 8],
@@ -143,22 +143,22 @@ pub(in crate::afxdp) struct CoSDSCPRewriteRuleConfig {
     pub(in crate::afxdp) dscp_by_fc_lp: FastMap<(String, u8), u8>,
 }
 
-/// #3995: per-egress-interface loss-priority classification + rewrite tables,
-/// stored on `CoSState::lp_rewrite` keyed by ifindex. Resolved at CoS TX
-/// classification time (`tx/cos_classify.rs`) to select the correct
-/// `(forwarding-class, loss-priority)` rewrite for THIS flow, then cached
-/// per-flow exactly like the pre-existing filter DSCP rewrite.
+/// #3995/#11679: per-egress loss-priority/rewrite tables, stored on
+/// `CoSState::lp_rewrite` keyed by egress ifindex. The `(queue_id,
+/// loss_priority)` rewrite matrix always belongs to egress. Transit LP is
+/// selected from the logical ingress unit's indexed classifier tables; the
+/// per-egress classifier tables below preserve the legacy behavior for locally
+/// generated packets, which have no wire ingress.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::afxdp) struct CoSLossPriorityRewrite {
-    /// Flattened DSCP → loss-priority (0..3) for the egress interface's DSCP
-    /// classifier. `u8::MAX` = the code-point is unclassified (resolves to the
-    /// Junos default loss-priority LOW).
+    /// Flattened DSCP → loss-priority (0..3) for local replies classified on
+    /// the egress interface. `u8::MAX` = unclassified (default LOW).
     pub(in crate::afxdp) dscp_lp_by_dscp: [u8; 64],
-    /// Flattened 802.1p PCP → loss-priority (0..3). `u8::MAX` = unclassified.
+    /// Flattened 802.1p PCP → loss-priority (0..3) for local replies.
+    /// `u8::MAX` = unclassified.
     pub(in crate::afxdp) ieee8021_lp_by_pcp: [u8; 8],
-    /// #6847: flattened IP-precedence → loss-priority (0..3). `u8::MAX` =
-    /// unclassified. Consulted after `dscp_lp_by_dscp` and before
-    /// `ieee8021_lp_by_pcp`, matching the queue-selection order.
+    /// #6847: IP-precedence LP for local replies, following DSCP and preceding
+    /// 802.1p. `u8::MAX` = unclassified.
     pub(in crate::afxdp) inet_precedence_lp_by_prec: [u8; 8],
     /// `(queue_id, loss_priority)` → egress DSCP code-point. Populated for the
     /// interface's materialized queues from the interface's rewrite-rule. The

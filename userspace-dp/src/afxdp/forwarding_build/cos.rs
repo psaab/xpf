@@ -1307,6 +1307,26 @@ pub(super) fn dangling_cos_interface_refs(
     .collect()
 }
 
+/// Assign stable, build-local integer indexes to the globally compiled
+/// classifier tables. Bindings carry these indexes into TX so classification
+/// uses integer lookups rather than hashing names on every packet.
+fn index_classifier_tables<T: Clone>(
+    classifiers: &FastMap<String, T>,
+) -> (FastMap<String, usize>, Vec<T>) {
+    let mut names = classifiers.keys().cloned().collect::<Vec<_>>();
+    names.sort_unstable();
+    let mut indexes = FastMap::default();
+    let mut tables = Vec::with_capacity(names.len());
+    for name in names {
+        let Some(table) = classifiers.get(&name) else {
+            continue;
+        };
+        indexes.insert(name, tables.len());
+        tables.push(table.clone());
+    }
+    (indexes, tables)
+}
+
 /// CoS state orchestrator. Pre-#1342 this was a single 312-LOC
 /// function; #1342 split it into [`build_cos_classifier_tables`]
 /// + [`build_cos_iface_config`] + this slim orchestrator.
@@ -1344,6 +1364,12 @@ pub(super) fn build_cos_state(
     // no best-effort / low-priority default, rather than installing partial or
     // expedited-as-default state.
     let tables = build_cos_classifier_tables(cos)?;
+    let (dscp_classifier_indexes, dscp_classifier_tables) =
+        index_classifier_tables(&tables.dscp_classifiers);
+    let (ieee8021_classifier_indexes, ieee8021_classifier_tables) =
+        index_classifier_tables(&tables.ieee8021_classifiers);
+    let (inet_precedence_classifier_indexes, inet_precedence_classifier_tables) =
+        index_classifier_tables(&tables.inet_precedence_classifiers);
     let mut state = CoSState::default();
     // CoS runtime state and ingress bindings are keyed by ifindex. Logical
     // units sharing a netdev must therefore produce identical state; the base
@@ -1357,16 +1383,13 @@ pub(super) fn build_cos_state(
             continue;
         }
         let ingress_bindings = CoSIngressClassifierBindings {
-            dscp: !iface.cos_dscp_classifier.is_empty()
-                && tables.dscp_classifiers.contains_key(&iface.cos_dscp_classifier),
-            inet_precedence: !iface.cos_inet_precedence_classifier.is_empty()
-                && tables
-                    .inet_precedence_classifiers
-                    .contains_key(&iface.cos_inet_precedence_classifier),
-            ieee8021: !iface.cos_ieee8021_classifier.is_empty()
-                && tables
-                    .ieee8021_classifiers
-                    .contains_key(&iface.cos_ieee8021_classifier),
+            dscp: dscp_classifier_indexes.get(&iface.cos_dscp_classifier).copied(),
+            inet_precedence: inet_precedence_classifier_indexes
+                .get(&iface.cos_inet_precedence_classifier)
+                .copied(),
+            ieee8021: ieee8021_classifier_indexes
+                .get(&iface.cos_ieee8021_classifier)
+                .copied(),
         };
         // #7337: report a dangling interface reference BEFORE the admission
         // decision, so the shape where the interface is admitted on another
@@ -1441,8 +1464,9 @@ pub(super) fn build_cos_state(
             }
         }
     }
-    state.dscp_classifiers = tables.dscp_classifiers;
-    state.ieee8021_classifiers = tables.ieee8021_classifiers;
+    state.dscp_classifier_tables = dscp_classifier_tables;
+    state.ieee8021_classifier_tables = ieee8021_classifier_tables;
+    state.inet_precedence_classifier_tables = inet_precedence_classifier_tables;
     state.dscp_rewrite_rules = tables.dscp_rewrite_rules;
     Ok(state)
 }
