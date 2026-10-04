@@ -40,9 +40,11 @@ pkg/dhcpserver #2450 Kea-memfile ownership handling.
 to the installed `vtysh -C` parser. It covers forwarding-instance IPv4/IPv6
 statics and preferred routes, virtual-router IPv4/IPv6 statics, and IPv4
 plus family-less IPv6 BGP peers. Each case also corrupts a routing keyword
-and requires FRR to reject it, independently of renderer string goldens.
-The existing apply tests retain table-ownership and main-table pollution
-checks; the redundant exact-output static-route goldens were removed.
+and requires a normal nonzero exit with a diagnostic naming that keyword;
+a crashed parser does not count as rejection. This is independent of
+renderer string goldens. The existing apply tests retain forwarding-table
+ownership (including discard routes), VRF-over-table precedence, and
+main-table pollution checks; redundant exact-output goldens were removed.
 
 ```sh
 FRR_VTYSH_BINARY=/usr/bin/vtysh go test ./pkg/frr \

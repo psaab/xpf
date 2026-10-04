@@ -1,7 +1,9 @@
 package frr
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,8 +31,11 @@ func TestRenderedRoutingConfigAcceptedByFRR11417(t *testing.T) {
 	if vtysh == "" {
 		var err error
 		vtysh, err = exec.LookPath("vtysh")
+		if errors.Is(err, exec.ErrNotFound) {
+			t.Skip("FRR vtysh is unavailable; real routing-config validation cannot run")
+		}
 		if err != nil {
-			t.Skip("FRR vtysh is not installed; real routing-config validation unavailable")
+			t.Fatalf("resolve FRR vtysh executable: %v", err)
 		}
 	}
 	tests := []struct {
@@ -88,7 +93,7 @@ func TestRenderedRoutingConfigAcceptedByFRR11417(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rendered := New().buildManagedSection(&tc.config)
 			if output, err := validateRenderedRouting11417(t, vtysh, rendered); err != nil {
-				t.Fatalf("FRR rejected rendered routing config: %v\n%s\nconfig:\n%s", err, output, rendered)
+				t.Fatalf("FRR validation failed: %v\n%s\nconfig:\n%s", err, output, rendered)
 			}
 			mutated := strings.Replace(rendered, tc.keyword, "xpf-invalid-routing-keyword ", 1)
 			if mutated == rendered {
@@ -98,8 +103,12 @@ func TestRenderedRoutingConfigAcceptedByFRR11417(t *testing.T) {
 			if err == nil {
 				t.Fatalf("FRR accepted an invalid routing keyword; validation cannot detect a malformed renderer:\n%s", mutated)
 			}
-			if _, ok := err.(*exec.ExitError); !ok {
-				t.Fatalf("invalid-keyword control failed to execute FRR: %v\n%s", err, output)
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok || exitErr.ExitCode() <= 0 {
+				t.Fatalf("invalid-keyword control did not return a normal parser error: %v\n%s", err, output)
+			}
+			if !bytes.Contains(output, []byte("xpf-invalid-routing-keyword")) {
+				t.Fatalf("FRR failure did not identify the invalid command: %v\n%s", err, output)
 			}
 			t.Logf("real FRR accepted rendered config and rejected its invalid-keyword mutation")
 		})
@@ -142,6 +151,7 @@ func TestApplyFullForwardingInstanceTable(t *testing.T) {
 				TableID: 100, // forwarding: no VRF device
 				StaticRoutes: []*config.StaticRoute{
 					{Destination: "0.0.0.0/0", NextHops: []config.NextHopEntry{{Address: "172.16.80.1"}}},
+					{Destination: "10.66.0.0/16", Discard: true},
 				},
 				Inet6StaticRoutes: []*config.StaticRoute{
 					{Destination: "::/0", NextHops: []config.NextHopEntry{{Address: "2001:db8:80::1"}}},
@@ -150,6 +160,7 @@ func TestApplyFullForwardingInstanceTable(t *testing.T) {
 			{
 				Name:    "BLUE",
 				VRFName: "vrf-BLUE",
+				TableID: 101, // an explicit VRF takes precedence over a table ID
 				StaticRoutes: []*config.StaticRoute{
 					{Destination: "10.9.0.0/16", NextHops: []config.NextHopEntry{{Address: "10.9.0.1"}}},
 				},
@@ -166,10 +177,11 @@ func TestApplyFullForwardingInstanceTable(t *testing.T) {
 	}
 	got := string(data)
 	wants := []string{
-		"ip route 0.0.0.0/0 172.16.50.1\n",           // master untouched
-		"ip route 0.0.0.0/0 172.16.80.1 table 100\n", // forwarding v4
-		"ipv6 route ::/0 2001:db8:80::1 table 100\n", // forwarding v6
-		"ip route 10.9.0.0/16 10.9.0.1 vrf vrf-BLUE", // virtual-router unchanged
+		"ip route 0.0.0.0/0 172.16.50.1\n",             // master untouched
+		"ip route 0.0.0.0/0 172.16.80.1 table 100\n",   // forwarding v4
+		"ip route 10.66.0.0/16 Null0 table 100\n",      // forwarding discard stays out of main
+		"ipv6 route ::/0 2001:db8:80::1 table 100\n",   // forwarding v6
+		"ip route 10.9.0.0/16 10.9.0.1 vrf vrf-BLUE\n", // VRF takes precedence
 	}
 	for _, want := range wants {
 		if !strings.Contains(got, want) {
