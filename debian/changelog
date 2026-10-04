@@ -16,8 +16,10 @@ xpf (0.0.0) unstable; urgency=medium
     hierarchical config, render FRR chain jumps with resolved destinations,
     and retain fail-closed narrowed-chain fallbacks (#11780).
   * Reject routing-policy `from` match leaves the compiler cannot represent,
-    including opaque tails exposed by compact normalization; tolerant loads
-    quarantine unknown dimensions and fail closed (#11779).
+    including trailers after unbracketed scalar values and opaque
+    compact-normalized tails; tolerant loads keep unknown dimensions and fail
+    closed. Malformed bracketed lists no longer swallow a `then` boundary
+    (#11779).
 
   * Limit each dynamic command value to one word in tab completion and `?`
     help, matching the command walker’s one-value grammar (#11835).

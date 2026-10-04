@@ -483,8 +483,10 @@ normalization (#11779):** strict compilation rejects an unsupported dimension
 even when compact normalization folds it into a supported match leaf; tolerant
 loads retain the unknown dimension and reject the affected term. Schema-known
 sibling matches remain separately typed. Balanced bracketed match lists may
-contain bare values that spell clause keywords (for example, `then`); an
-unclosed list still fails closed.
+contain bare values that spell clause keywords; only an unbracketed sibling
+`then` marks the term boundary, and an unclosed list fails closed. An
+unbracketed scalar match consumes only its schema-declared argument arity, so
+trailing unsupported tokens remain unknown rather than becoming match values.
 
 Distinct conflicting terminal actions on a lenient load retain the compiler's
 last-wins action only as an internal parse result; `LenientContentDropped`

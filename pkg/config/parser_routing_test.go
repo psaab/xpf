@@ -3752,12 +3752,12 @@ func TestPolicyTermMultiProtocolFlatSet(t *testing.T) {
 		"set policy-options policy-statement EXPORT-ALL term t1 then accept",
 	}
 	for _, cmd := range cmds {
-		path, err := ParseSetCommand(cmd)
+		path, quoted, grouped, err := ParseSetCommandGrouped(cmd)
 		if err != nil {
-			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
+			t.Fatalf("ParseSetCommandGrouped(%q): %v", cmd, err)
 		}
-		if err := tree.SetPath(path); err != nil {
-			t.Fatalf("SetPath(%q): %v", cmd, err)
+		if err := tree.SetPathQuotedGrouped(path, quoted, grouped); err != nil {
+			t.Fatalf("SetPathQuotedGrouped(%q): %v", cmd, err)
 		}
 	}
 	cfg, err := CompileConfig(tree)

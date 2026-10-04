@@ -1316,13 +1316,9 @@ func splitPolicyTermFromRun11779(
 		nodes = append(nodes, &part)
 	}
 
-	previousMultiValue, previousBracketedList := false, false
 	routeFilterSchema := resolveSchemaChild(fromSchema, "route-filter")
 	for i := 0; i < len(keys); {
 		if run.KeyQuoted(i) {
-			if previousMultiValue {
-				return []*Node{run}
-			}
 			if preserveUnknown {
 				appendSpan(i, len(keys))
 			}
@@ -1331,9 +1327,6 @@ func splitPolicyTermFromRun11779(
 		childSchema := resolveSchemaChild(fromSchema, keys[i])
 		if childSchema == nil {
 			if preserveUnknown {
-				if previousMultiValue && !previousBracketedList {
-					return []*Node{run}
-				}
 				appendSpan(i, len(keys))
 			}
 			break
@@ -1377,10 +1370,6 @@ func splitPolicyTermFromRun11779(
 				n++
 			}
 		}
-		previousMultiValue = childSchema.multi && childSchema.children == nil &&
-			childSchema.args == 1
-		previousBracketedList = previousMultiValue &&
-			n > 1 && run.KeyBracketed(i+n-1)
 		if i == 0 && n == len(keys) {
 			return []*Node{run}
 		}
@@ -1395,7 +1384,8 @@ func splitPolicyTermFromRun11779(
 func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 	hasTermThen := false
 	for _, child := range children {
-		if child != nil && child.Name() == "then" {
+		if child != nil && child.Name() == "then" &&
+			!child.KeyBracketed(0) && !child.KeyQuoted(0) {
 			hasTermThen = true
 			break
 		}
