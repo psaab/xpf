@@ -38,9 +38,50 @@ func TestWireGuardSourceLessInterfaces12119(t *testing.T) {
 	cfg := wgZoneTestConfig()
 	cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0].Tunnel.Source = "198.51.100.1"
 	got := cfg.WireGuardSourceLessInterfaces()
-	want := []string{"ge-0/0/0.1", "ge-0/0/1.0"}
+	want := []string{"ge-0/0/0.1", "ge-0/0/1.0", "ge-0/0/2.0"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("WireGuardSourceLessInterfaces() = %v, want %v", got, want)
+	}
+}
+
+func TestWireGuardUnzonedListenerWithOwnedSourceIsNotWarned11076(t *testing.T) {
+	cfg := wgZoneTestConfig()
+	cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0].Addresses = []string{"198.51.100.1/24"}
+	cfg.Interfaces.Interfaces["ge-0/0/2"].Units[0].Tunnel.Source = "198.51.100.1"
+	if got := cfg.WireGuardUnzonedInterfaces(); len(got) != 0 {
+		t.Fatalf("unique source owner must admit the unzoned tunnel listener; unzoned warnings = %v", got)
+	}
+}
+
+func TestWireGuardInvalidSourceInterfaces12119(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		source string
+		setup  func(*Config)
+	}{
+		{name: "malformed", source: "not-an-ip"},
+		{name: "unowned", source: "203.0.113.200"},
+		{
+			name:   "ambiguous",
+			source: "198.51.100.1",
+			setup: func(cfg *Config) {
+				cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0].Addresses = []string{"198.51.100.1/24"}
+				cfg.Interfaces.Interfaces["ge-0/0/1"].Units[0].Addresses = []string{"198.51.100.1/24"}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := wgZoneTestConfig()
+			cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0].Tunnel.Source = tc.source
+			if tc.setup != nil {
+				tc.setup(cfg)
+			}
+			got := cfg.WireGuardInvalidSourceInterfaces()
+			want := []string{"ge-0/0/0.0"}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("WireGuardInvalidSourceInterfaces() = %v, want %v", got, want)
+			}
+		})
 	}
 }
 

@@ -1099,12 +1099,14 @@ input chain admits a listener only when all of the following agree:
   outer source address is uniquely owned by that zone.
 
 All mismatched listener tuples are dropped before broad conntrack-reply and
-service accepts. Transit traffic is not admitted by a host-inbound port rule.
-The listen-port set remains dynamic; source-owner admission is separate from
-interface-NAT exclusion, so a primary WAN address used by interface-mode SNAT
-can still receive its configured WireGuard listener traffic without making the
-address a general local-delivery destination.
-
+service accepts, including packets arriving on the trusted `xpf-usp0` reinject
+device. That device proves a userspace host-inbound check ran, not that the
+packet belongs to the listener's source-owner zone. Transit traffic is not
+admitted by a host-inbound port rule. The listen-port set remains dynamic;
+source-owner admission is separate from interface-NAT exclusion, so a primary
+WAN address used by interface-mode SNAT can still receive its configured
+WireGuard listener traffic without making the address a general local-delivery
+destination.
 ### Configure a source address
 
 Each functional zoned listener needs an explicit outer source address that is
@@ -1115,26 +1117,27 @@ set interfaces <interface> tunnel source <local-address>
 ```
 
 For a per-unit tunnel, set the same `tunnel source` under that unit. The source
-must be a local address in the listener's intended transport zone; a missing,
-unowned, or cross-zone-ambiguous source fails closed. A source-less tunnel
-remains accepted by configuration for compatibility, but #12119 emits a
-compile warning and generates no zone admission for it. Configure a source
-before expecting inbound handshakes to succeed.
+must be a local address in exactly one listener transport zone; a missing,
+malformed, unowned, or cross-zone-ambiguous source fails closed and emits a
+compile warning. A source-less tunnel remains accepted by configuration for
+compatibility, but #12119 emits a warning and generates no zone admission for
+it. Configure a unique source before expecting inbound handshakes to succeed.
 
 ### Control packets, worker traffic, and reinjection
 
-Handshake and cookie records for a configured listener may be steered to the
-kernel control socket only when the WireGuard admission maps prove both the
-outer destination and ingress zone. This check is independent of the shim's
-ordinary local-destination and interface-NAT maps; a matching port alone never
-admits transit or wrong-zone traffic. Authenticated transport-data records use
-the same owner-zone proof before worker decapsulation.
+Handshake and cookie records for a configured listener are steered to the
+kernel when the destination is already in the ordinary local-address map. If
+interface SNAT excludes that address from local delivery, the owner map supplies
+the exact listener destination, ingress-zone, and port match needed for control
+steering. A live userspace session takes precedence over that owner-map steer so
+SNAT replies return to the worker for reverse NAT. In either case the later
+host-inbound mismatch guard remains authoritative; authenticated transport-data
+records use the same owner-zone proof before worker decapsulation.
 
-The trusted `xpf-usp0` reinject path is excluded narrowly from WireGuard
-mismatch guards only while the matching userspace snapshot is fresh. Its
-existing accept remains after any fine `junos-host` policy programs, so those
-operator denies still apply. A stale dataplane snapshot does not get the
-exception.
+The trusted `xpf-usp0` reinject path receives no WireGuard mismatch exemption.
+Its later accept remains after any fine `junos-host` policy programs, and the
+owner-zone mismatch drops precede it. A stale dataplane snapshot still omits the
+reinject accept.
 
 `WireGuardListenPorts()` remains the config SSOT for configured listener ports;
 the shim steers its bounded subset (see "Multi-tunnel status" above). Admission

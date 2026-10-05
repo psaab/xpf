@@ -139,6 +139,7 @@ key** — the pubkey IS the instance arg, there is no `public-key` child
 leaf:
 
 ```
+set groups node0 interfaces wg0 tunnel source 10.0.61.1
 set groups node0 interfaces wg0 tunnel wireguard private-key <64-hex>
 set groups node0 interfaces wg0 tunnel wireguard peer <64-hex-pubkey> allowed-ips 10.78.0.0/24
 set groups node0 interfaces wg0 tunnel wireguard peer <64-hex-pubkey> allowed-ips fd78::/64

@@ -2,43 +2,129 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"sort"
 )
 
-// WireGuardSourceLessInterfaces lists zoned WireGuard listeners with no
-// configured outer source address. Their serving zone cannot be derived for
-// scoped host-inbound admission, so the compiler warns before commit.
-func (c *Config) WireGuardSourceLessInterfaces() []string {
+type wireGuardListenerRef struct {
+	name   string
+	tunnel *TunnelConfig
+}
+
+func (c *Config) wireGuardListeners() []wireGuardListenerRef {
 	if c == nil {
 		return nil
 	}
-	zones := InterfaceZoneMap(c)
-	seen := make(map[string]bool)
-	var out []string
-	add := func(ifaceKey string, tc *TunnelConfig) {
-		if tc == nil || tc.Mode != "wireguard" || tc.WgListenPort == 0 || tc.Source != "" {
-			return
-		}
-		if zone, ok := zones[ifaceKey]; !ok || zone == "" {
-			return
-		}
-		if !seen[ifaceKey] {
-			seen[ifaceKey] = true
-			out = append(out, ifaceKey)
+	var out []wireGuardListenerRef
+	add := func(name string, tunnel *TunnelConfig) {
+		if tunnel != nil && tunnel.Mode == "wireguard" && tunnel.WgListenPort != 0 {
+			out = append(out, wireGuardListenerRef{name: name, tunnel: tunnel})
 		}
 	}
-	for ifName, ifc := range c.Interfaces.Interfaces {
-		if ifc == nil {
+	for ifName, iface := range c.Interfaces.Interfaces {
+		if iface == nil {
 			continue
 		}
-		add(ifName, ifc.Tunnel)
-		for unitNum, unit := range ifc.Units {
+		add(ifName, iface.Tunnel)
+		for unitNum, unit := range iface.Units {
 			if unit != nil {
 				add(fmt.Sprintf("%s.%d", ifName, unitNum), unit.Tunnel)
 			}
 		}
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
+}
+
+func (c *Config) wireGuardSourceOwners() (map[netip.Addr]string, map[netip.Addr]bool) {
+	owners := make(map[netip.Addr]string)
+	ambiguous := make(map[netip.Addr]bool)
+	if c == nil {
+		return owners, ambiguous
+	}
+	zones := InterfaceZoneMap(c)
+	add := func(zone, value string) {
+		if zone == "" {
+			return
+		}
+		address, ok := parseWireGuardLocalAddress(value)
+		if !ok {
+			return
+		}
+		if owner, exists := owners[address]; exists && owner != zone {
+			ambiguous[address] = true
+			return
+		}
+		owners[address] = zone
+	}
+	for ifName, iface := range c.Interfaces.Interfaces {
+		if iface == nil {
+			continue
+		}
+		for unitNum, unit := range iface.Units {
+			if unit == nil {
+				continue
+			}
+			zone := zones[fmt.Sprintf("%s.%d", ifName, unitNum)]
+			for _, address := range unit.Addresses {
+				add(zone, address)
+			}
+			for _, group := range unit.VRRPGroups {
+				if group == nil {
+					continue
+				}
+				for _, address := range group.VirtualAddresses {
+					add(zone, address)
+				}
+			}
+		}
+	}
+	return owners, ambiguous
+}
+
+func parseWireGuardLocalAddress(value string) (netip.Addr, bool) {
+	if prefix, err := netip.ParsePrefix(value); err == nil {
+		return prefix.Addr().Unmap(), true
+	}
+	address, err := netip.ParseAddr(value)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return address.Unmap(), true
+}
+
+// WireGuardSourceLessInterfaces lists configured listeners with no explicit
+// outer source address. Their serving zone cannot be derived for scoped
+// host-inbound admission, so the compiler warns before commit.
+func (c *Config) WireGuardSourceLessInterfaces() []string {
+	var out []string
+	for _, listener := range c.wireGuardListeners() {
+		if listener.tunnel.Source == "" {
+			out = append(out, listener.name)
+		}
+	}
+	return out
+}
+
+// WireGuardInvalidSourceInterfaces lists listeners whose configured source is
+// not a uniquely zone-owned local address. The listener remains fail-closed.
+func (c *Config) WireGuardInvalidSourceInterfaces() []string {
+	owners, ambiguous := c.wireGuardSourceOwners()
+	var out []string
+	for _, listener := range c.wireGuardListeners() {
+		if listener.tunnel.Source == "" {
+			continue
+		}
+		address, err := netip.ParseAddr(listener.tunnel.Source)
+		if err != nil {
+			out = append(out, listener.name)
+			continue
+		}
+		address = address.Unmap()
+		if _, ok := owners[address]; !ok || ambiguous[address] {
+			out = append(out, listener.name)
+		}
+	}
 	return out
 }
 
@@ -87,42 +173,26 @@ func (c *Config) WireGuardListenPorts() []uint16 {
 	return out
 }
 
-// WireGuardUnzonedInterfaces lists "interface-or-unit" refs carrying a
-// WireGuard tunnel that bind no security zone (#11076). Sorted, deduped, nil
-// when empty. The validator warns on these: without a zone the tunnel's
-// listen port gets no host-inbound accept.
+// WireGuardUnzonedInterfaces lists listeners without a zone-owned source
+// address that also have no zone on their tunnel interface (#11076). A tunnel
+// interface itself may be unzoned while its explicit source belongs to a
+// unique zone; that listener is still admitted on the source owner's ingress.
 func (c *Config) WireGuardUnzonedInterfaces() []string {
-	cfg := c
-	if cfg == nil {
-		return nil
-	}
-	zones := InterfaceZoneMap(cfg)
-	seen := make(map[string]bool)
+	zones := InterfaceZoneMap(c)
+	owners, ambiguous := c.wireGuardSourceOwners()
 	var out []string
-	add := func(ifaceKey string, tc *TunnelConfig) {
-		if tc == nil || tc.Mode != "wireguard" || tc.WgListenPort == 0 {
-			return
-		}
-		if zone, ok := zones[ifaceKey]; ok && zone != "" {
-			return
-		}
-		if !seen[ifaceKey] {
-			seen[ifaceKey] = true
-			out = append(out, ifaceKey)
-		}
-	}
-	for ifName, ifc := range cfg.Interfaces.Interfaces {
-		if ifc == nil {
+	for _, listener := range c.wireGuardListeners() {
+		if zone := zones[listener.name]; zone != "" {
 			continue
 		}
-		add(ifName, ifc.Tunnel)
-		for unitNum, unit := range ifc.Units {
-			if unit == nil {
+		source, err := netip.ParseAddr(listener.tunnel.Source)
+		if err == nil {
+			source = source.Unmap()
+			if _, ok := owners[source]; ok && !ambiguous[source] {
 				continue
 			}
-			add(fmt.Sprintf("%s.%d", ifName, unitNum), unit.Tunnel)
 		}
+		out = append(out, listener.name)
 	}
-	sort.Strings(out)
 	return out
 }

@@ -658,6 +658,7 @@ ${del_line}
 set groups node0 interfaces wg0 unit 0 family inet address ${WG_INNER4_XPF}/24
 set groups node0 interfaces wg0 unit 0 family inet6 address ${WG_INNER6_XPF}/64
 set groups node0 interfaces wg0 tunnel mode wireguard
+set groups node0 interfaces wg0 tunnel source ${WG_XPF_OUTER4}
 set groups node0 interfaces wg0 tunnel wireguard listen-port ${WG_LISTEN_PORT}
 set groups node0 interfaces wg0 tunnel wireguard private-key ${XPF_PRIV_HEX}
 set groups node0 interfaces wg0 tunnel wireguard peer ${PEER_PUB_HEX} allowed-ips ${WG_INNER4_CIDR}
@@ -693,6 +694,7 @@ ${del_line}
 set groups node0 interfaces wg1 unit 0 family inet address ${WG_INNER4_XPF2}/24
 set groups node0 interfaces wg1 unit 0 family inet6 address ${WG_INNER6_XPF2}/64
 set groups node0 interfaces wg1 tunnel mode wireguard
+set groups node0 interfaces wg1 tunnel source ${WG_XPF_OUTER4}
 set groups node0 interfaces wg1 tunnel wireguard listen-port ${WG_LISTEN_PORT2}
 set groups node0 interfaces wg1 tunnel wireguard private-key ${XPF_PRIV_HEX}
 set groups node0 interfaces wg1 tunnel wireguard peer ${PEER_PUB_HEX} allowed-ips ${WG_INNER4_CIDR2}
