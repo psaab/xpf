@@ -91,40 +91,73 @@ func isApplyStatementNode(n *Node) bool {
 // instances folding to one table passed the strict gate, and the runtime then
 // quarantined one with a warning). A bare `routing-instances { ri1; }` carries no properties,
 // compiles to nothing, and is still skipped.
+type routingInstanceASTTypeFlags struct {
+	hasForwarding bool
+	hasVRF        bool
+}
+
 func collectRoutingInstanceNamesAST(riNode *Node, out map[string]struct{}) {
+	collectRoutingInstanceAST(riNode, out, nil)
+}
+
+func collectRoutingInstanceAST(riNode *Node, names map[string]struct{}, types map[string]routingInstanceASTTypeFlags) {
 	if riNode == nil {
 		return
 	}
 	for _, child := range riNode.Children {
-		if len(child.Keys) == 0 || (child.IsLeaf && len(child.Keys) < 2) {
+		if len(child.Keys) == 0 || (child.IsLeaf && len(child.Keys) < 2) || isApplyStatementNode(child) {
 			continue
 		}
-		// An apply statement is not an instance. compileRoutingInstances skips
-		// it through the same predicate, so this scan counts exactly what the
-		// compiler builds (#9657).
-		if isApplyStatementNode(child) {
+		name := child.Keys[0]
+		if name == "" {
 			continue
 		}
-		if name := child.Keys[0]; name != "" {
-			out[name] = struct{}{}
+		if names != nil {
+			names[name] = struct{}{}
 		}
+		if types == nil {
+			continue
+		}
+		instanceType := ""
+		for _, prop := range expandResolvingRuns9792(child.Children, routingInstanceSchema9792()) {
+			if prop.Name() == "instance-type" {
+				instanceType = nodeVal(prop)
+			}
+		}
+		flags := types[name]
+		if instanceType == "forwarding" {
+			flags.hasForwarding = true
+		} else {
+			flags.hasVRF = true
+		}
+		types[name] = flags
 	}
 }
 
-// emitNodeExpandedRoutingInstanceNames returns the routing-instance names that
-// survive expanding the candidate tree for chassis-cluster node nodeID (View 2
-// for node0, View 3 for node1), used by validateRoutingInstanceTableIDCollisionAST.
-// It is the post-`${node}`/apply-groups view: a `${node}`-interpolated or
-// wildcard apply-group instance name is only concrete after expansion.
+func routingInstanceTypeFlagsAST(tree *ConfigTree, compiledNode *int) map[string]routingInstanceASTTypeFlags {
+	types := make(map[string]routingInstanceASTTypeFlags)
+	emitGenericExpandedRoutingInstancesAST(tree, nil, types)
+	emitNodeExpandedRoutingInstancesAST(tree, 0, nil, types)
+	emitNodeExpandedRoutingInstancesAST(tree, 1, nil, types)
+	// compileConfigForNodeWithOpts accepts any integer node ID, negative ones
+	// included, and expands that node's own groups (`node%d`), so a node compile
+	// for any other ID counts its own view too. A generic compile passes nil.
+	if compiledNode != nil && *compiledNode != 0 && *compiledNode != 1 {
+		emitNodeExpandedRoutingInstancesAST(tree, *compiledNode, nil, types)
+	}
+	return types
+}
+
+// emitNodeExpandedRoutingInstancesAST collects routing-instance names and types
+// after expanding the candidate tree for chassis-cluster node nodeID. This is
+// the post-${node}/apply-groups view: an interpolated or wildcard instance name
+// is only concrete after expansion.
 //
-// It mirrors emitNodeExpandedZoneNames (zoneid.go): RECURSION-FREE by
-// construction (clone + expand + read the names straight off the AST, never
-// calling CompileConfig*), and per-node expansion errors are NON-FATAL (the
-// view contributes the EMPTY set), so a config that defines only `groups node0`
-// and references `${node}` does not turn a legitimate node1-expansion miss into
-// a spurious commit failure. A failed expansion lands nothing: the node that
-// performs it refuses the config (#9657).
-func emitNodeExpandedRoutingInstanceNames(tree *ConfigTree, nodeID int, out map[string]struct{}) {
+// Like emitNodeExpandedZoneNames (zoneid.go), this is recursion-free (clone +
+// expand + read AST, never calling CompileConfig*) and per-node expansion errors
+// are non-fatal: a failed view contributes nothing because that node's compile
+// path refuses the config (#9657).
+func emitNodeExpandedRoutingInstancesAST(tree *ConfigTree, nodeID int, names map[string]struct{}, types map[string]routingInstanceASTTypeFlags) {
 	clone := tree.Clone()
 	vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
 	if err := clone.ExpandGroupsWithVars(vars); err != nil {
@@ -134,7 +167,7 @@ func emitNodeExpandedRoutingInstanceNames(tree *ConfigTree, nodeID int, out map[
 	// config can declare instances in a second stanza that compileSections still
 	// compiles.
 	for _, ri := range clone.FindChildren("routing-instances") {
-		collectRoutingInstanceNamesAST(ri, out)
+		collectRoutingInstanceAST(ri, names, types)
 	}
 }
 
@@ -154,13 +187,14 @@ func emitNodeExpandedRoutingInstanceNames(tree *ConfigTree, nodeID int, out map[
 //
 // Strict (commit / commit-check) returns an error so an operator can never
 // commit a config whose two routing-instance names fold to the same kernel
-// table — two VRFs sharing a table would MERGE their routes (a cross-VRF leak).
+// table and share route state.
 // Lenient (load / peer-sync of an already-active config) returns a warning so an
 // upgraded node still boots (#1960 no-brick); compileRoutingInstances then
 // QUARANTINES the later-sorting colliding instance (see QuarantinedRoutingInstanceNames)
 // so the two never actually share a kernel table.
 func validateRoutingInstanceTableIDCollisionAST(tree *ConfigTree, compiledNode *int, lenient bool) ([]string, error) {
 	names := routingInstanceNameUnionAST(tree, compiledNode)
+	var instanceTypes map[string]routingInstanceASTTypeFlags
 	sorted := make([]string, 0, len(names))
 	for name := range names {
 		// #9622: a reserved name never gets a table. compileRoutingInstances
@@ -171,12 +205,16 @@ func validateRoutingInstanceTableIDCollisionAST(tree *ConfigTree, compiledNode *
 		if IsReservedRoutingInstanceName(name) {
 			continue
 		}
-		// #11391: invalid derived VRF names are quarantined before the runtime
-		// table-id pass too, so they must not claim or displace a table here.
-		// The strict kernel-name gate reports them; tolerant compiles
-		// quarantine them before the runtime collision pass.
+		// #11391: an invalid VRF device name is quarantined before the runtime
+		// table-id pass and cannot claim a table. Forwarding instances do not get
+		// that device-name quarantine, so they still participate in table checks.
 		if _, reason := routingInstanceVRFDeviceNameIssue(name); reason != "" {
-			continue
+			if instanceTypes == nil {
+				instanceTypes = routingInstanceTypeFlagsAST(tree, compiledNode)
+			}
+			if !instanceTypes[name].hasForwarding {
+				continue
+			}
 		}
 		sorted = append(sorted, name)
 	}
@@ -222,14 +260,13 @@ func validateRoutingInstanceTableIDCollisionAST(tree *ConfigTree, compiledNode *
 // This is the RUNTIME enforcement of the promise the lenient collision warning
 // (validateRoutingInstanceTableIDCollisionAST) makes — the later-sorting
 // instance is dropped — so two routing-instances never share a kernel table.
-// Programming both would MERGE two VRFs: one instance's routes, next-table
-// leaks and PBR would stand in for the other (pkg/routing/vrf.go binds a
-// vrf-<name> device to the kernel table by number; two devices on one table is
-// a cross-VRF route leak). The STRICT commit path REJECTS a collision outright;
-// the LENIENT path (tolerant load / peer-sync / a config a pre-#3855 binary
-// persisted with positional ids and no stable-hash collision check) keeps
-// booting but quarantines the colliding instance here, preserving the #1960
-// no-brick intent.
+// Programming both would merge their routing-table state, including routes,
+// next-table leaks and PBR. VRF instances bind `vrf-<name>` devices to these
+// tables; forwarding instances also claim a table without creating a VRF.
+// The STRICT commit path REJECTS a collision outright. The LENIENT path
+// (tolerant load / peer-sync / a config a pre-#3855 binary persisted with
+// positional ids and no stable-hash collision check) keeps booting but
+// quarantines the colliding instance here, preserving the #1960 no-brick intent.
 //
 // The decision is a pure function of the instance-name SET
 // (StableRoutingInstanceTableID is a pure function of the name and the sorted
@@ -264,8 +301,8 @@ func QuarantinedRoutingInstanceNames(names []string) map[string]struct{} {
 	return quarantined
 }
 
-// routingInstanceNameUnionAST is the union of routing-instance names the name
-// gates judge (#3855, #9622, #11391): every name some compile path can land.
+// routingInstanceNameUnionAST is the union of routing-instance names the
+// name-based gates judge (#3855, #9622): every name some compile path can land.
 //
 //   - Every top-level "routing-instances" root, across all roots (#5691).
 //   - The names after the generic compile's own group expansion
@@ -291,24 +328,23 @@ func routingInstanceNameUnionAST(tree *ConfigTree, compiledNode *int) map[string
 	for _, ri := range tree.FindChildren("routing-instances") {
 		collectRoutingInstanceNamesAST(ri, names)
 	}
-	emitGenericExpandedRoutingInstanceNames(tree, names)
-	emitNodeExpandedRoutingInstanceNames(tree, 0, names)
-	emitNodeExpandedRoutingInstanceNames(tree, 1, names)
+	emitGenericExpandedRoutingInstancesAST(tree, names, nil)
+	emitNodeExpandedRoutingInstancesAST(tree, 0, names, nil)
+	emitNodeExpandedRoutingInstancesAST(tree, 1, names, nil)
 	// compileConfigForNodeWithOpts accepts any integer node ID, negative ones
 	// included, and expands that node's own groups (`node%d`), so a node compile
 	// for any other ID counts its own view too. A generic compile passes nil.
 	if compiledNode != nil && *compiledNode != 0 && *compiledNode != 1 {
-		emitNodeExpandedRoutingInstanceNames(tree, *compiledNode, names)
+		emitNodeExpandedRoutingInstancesAST(tree, *compiledNode, names, nil)
 	}
 	return names
 }
 
-// emitGenericExpandedRoutingInstanceNames adds the routing-instance names the
+// emitGenericExpandedRoutingInstancesAST collects the routing instances the
 // generic compile lands, expanding a clone exactly as compileConfigWithOpts
-// expands its tree: ExpandGroups, and on an undefined "${node}" group a retry
-// with node0 on the same clone. Any other failure means that compile refuses the
-// config, so the view contributes nothing (#9657).
-func emitGenericExpandedRoutingInstanceNames(tree *ConfigTree, out map[string]struct{}) {
+// does: ExpandGroups, and on an undefined "${node}" group a retry with node0 on
+// the same clone. Any other failure contributes nothing (#9657).
+func emitGenericExpandedRoutingInstancesAST(tree *ConfigTree, names map[string]struct{}, types map[string]routingInstanceASTTypeFlags) {
 	clone := tree.Clone()
 	if err := clone.ExpandGroups(); err != nil {
 		if !strings.Contains(err.Error(), `undefined group "${node}"`) {
@@ -319,6 +355,6 @@ func emitGenericExpandedRoutingInstanceNames(tree *ConfigTree, out map[string]st
 		}
 	}
 	for _, ri := range clone.FindChildren("routing-instances") {
-		collectRoutingInstanceNamesAST(ri, out)
+		collectRoutingInstanceAST(ri, names, types)
 	}
 }

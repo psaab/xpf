@@ -461,8 +461,9 @@ type Config struct {
 	RoutingInstances []*RoutingInstanceConfig
 	// QuarantinedRoutingInstances records the instances dropped from
 	// RoutingInstances by #9622 (reserved name), #11391 (invalid kernel VRF
-	// device name), and #3855 (stable table-id collision) quarantine passes in
-	// compileRoutingInstances, WITH their interface membership. The snapshot
+	// device name for a VRF-based instance), and #3855 (stable table-id
+	// collision) quarantine passes in compileRoutingInstances, WITH their
+	// interface membership. The snapshot
 	// builders need the membership to bind (not drop) a quarantined member's
 	// interfaces: without it the domain map misses and the interface inherits
 	// the default session domain 0 (#9956 F-032). Drop-time objects (later phases

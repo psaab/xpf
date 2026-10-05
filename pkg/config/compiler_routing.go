@@ -725,12 +725,18 @@ func compileRoutingInstances(node *Node, cfg *Config, opts compileOpts) error {
 		}
 		cfg.RoutingInstances = kept
 	}
-	// #11391: the runtime creates vrf-<name> without canonicalizing the
-	// routing-instance name. Keep an uncreatable device out of the active config
-	// before the #3855 table-id pass, so it cannot claim or displace a table.
+	// #11391: the runtime creates vrf-<name> without canonicalizing a VRF
+	// routing-instance name. Forwarding instances do not create that device and
+	// therefore remain active regardless of whether the derived name is valid.
+	// Quarantine an uncreatable VRF before the #3855 table-id pass so it cannot
+	// claim or displace a table.
 	if len(cfg.RoutingInstances) > 0 {
 		kept := cfg.RoutingInstances[:0]
 		for _, ri := range cfg.RoutingInstances {
+			if ri.InstanceType == "forwarding" {
+				kept = append(kept, ri)
+				continue
+			}
 			deviceName, reason := routingInstanceVRFDeviceNameIssue(ri.Name)
 			if reason != "" {
 				cfg.Warnings = append(cfg.Warnings, fmt.Sprintf(

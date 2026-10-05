@@ -31,15 +31,17 @@ func routingInstanceVRFDeviceNameIssue(name string) (deviceName, reason string) 
 	return "", ""
 }
 
-// validateRoutingInstanceKernelNameAST refuses routing instances that cannot
-// become the vrf-<name> Linux device the runtime creates. It uses the same
-// expanded name union as the #3855 and #9622 gates, so group and node-specific
-// instances cannot bypass strict commit validation.
+// validateRoutingInstanceKernelNameAST refuses VRF-based routing instances
+// whose name cannot become the vrf-<name> Linux device the runtime creates.
+// Forwarding instances get no VRF device, so only effective non-forwarding
+// instance-types pass through the device-name gate.
 func validateRoutingInstanceKernelNameAST(tree *ConfigTree, compiledNode *int) error {
-	names := routingInstanceNameUnionAST(tree, compiledNode)
-	ordered := make([]string, 0, len(names))
-	for name := range names {
-		ordered = append(ordered, name)
+	types := routingInstanceTypeFlagsAST(tree, compiledNode)
+	ordered := make([]string, 0, len(types))
+	for name, flags := range types {
+		if flags.hasVRF {
+			ordered = append(ordered, name)
+		}
 	}
 	sort.Strings(ordered)
 	for _, name := range ordered {
