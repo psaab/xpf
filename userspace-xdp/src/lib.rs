@@ -254,7 +254,6 @@ struct UserspaceWgAdmissionKey {
 const _: [(); 8] = [(); mem::size_of::<UserspaceWgIngressZoneKey>()];
 const _: [(); 24] = [(); mem::size_of::<UserspaceWgAdmissionKey>()];
 
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct DnatKeyV4 {
@@ -381,8 +380,6 @@ struct Ipv6OptHdr {
     hdrlen: u8,
 }
 
-
-
 #[repr(C)]
 struct ShimFacts {
     magic: u32,
@@ -438,7 +435,6 @@ static USERSPACE_WG_INGRESS_ZONES: HashMap<UserspaceWgIngressZoneKey, u16> =
 #[map(name = "userspace_wg_zone_admission")]
 static USERSPACE_WG_ZONE_ADMISSION: HashMap<UserspaceWgAdmissionKey, u8> =
     HashMap::with_max_entries(131_072, 0);
-
 
 #[map(name = "userspace_heartbeat")]
 static USERSPACE_HEARTBEAT: Array<u64> = Array::with_max_entries(BINDING_SLOT_MAP_MAX_ENTRIES, 0);
@@ -782,20 +778,31 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // #1432 S2a (#9587: set-valued): WireGuard. WG-to-firewall is
     // local-destination UDP on a steered listen port; steer it to the kernel
     // (the userspace control-thread UdpSocket reads it) via cpumap_or_pass —
-    // the same path ESP/IPsec rides above. `is_local_destination` is
-    // MANDATORY: a port-only match would shunt TRANSIT/DNAT UDP that happens
-    // to use a steered port to the kernel, bypassing the userspace policy
-    // engine.
+    // ordinary authority for local delivery. An interface-NAT excluded local
+    // address instead needs the exact listener owner-map tuple; a port-only
+    // match would shunt TRANSIT/DNAT UDP that happens to use a steered port to
+    // the kernel, bypassing the userspace policy engine.
     //
-    // The whole block is gated on the WG_RX flag bit (read from the same
-    // `ctrl.flags` word the GRE check just above already loaded), so when
-    // no WG tunnel is configured NOTHING here runs — not the `wg_ports`
-    // load, not the protocol/port/local-destination
-    // tests. This keeps the non-WG datapath byte-for-byte on its prior
-    // instruction path (the bare per-packet `wg_listen_port` load+compare
-    // measurably regressed v6 best-effort retransmits at line rate).
-    if (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0
-        && wg_steer_to_kernel(ctrl, &parsed, ingress_ifindex)
+    // The WG candidate is gated on the WG_RX flag bit (read from the same
+    // `ctrl.flags` word the GRE check just above already loaded). With no WG
+    // tunnel configured, the port-map load and early session lookup do not run;
+    // non-candidates retain the ordinary post-fallback lookup below.
+    // A live session owns the packet's disposition. In particular, interface
+    // SNAT replies on a WG listen port must reach the worker for reverse NAT
+    // rather than being stolen by the listener owner-map control steer.
+    let wg_steer_candidate = (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0
+        && wg_steer_to_kernel(ctrl, &parsed, ingress_ifindex);
+    // Only packets that would be stolen by the WG steer need an early session
+    // lookup. All other packets retain the existing later lookup and avoid extra
+    // map work on the early-fallback path.
+    let wg_steer_session_action = if !native_gre && wg_steer_candidate {
+        live_userspace_session_action(&parsed)
+    } else {
+        0
+    };
+    if wg_steer_candidate
+        && wg_steer_session_action != USERSPACE_SESSION_ACTION_REDIRECT
+        && wg_steer_session_action != USERSPACE_SESSION_ACTION_PASS_TO_KERNEL
     {
         return Ok(cpumap_or_pass(ctrl));
     }
@@ -826,7 +833,12 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // destination continues to the AF_XDP redirect and is adjudicated by
     // the worker.
     if !native_gre {
-        match live_userspace_session_action(&parsed) {
+        let session_action = if wg_steer_candidate {
+            wg_steer_session_action
+        } else {
+            live_userspace_session_action(&parsed)
+        };
+        match session_action {
             USERSPACE_SESSION_ACTION_REDIRECT => {
                 // Session exists and stays on the userspace dataplane.
             }
@@ -890,11 +902,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 // through interface_nat_v* instead of userspace_local_v*.
                 let wg_port_admitted = wg_rx_enabled
                     && parsed.protocol == PROTO_UDP
-                    && wg_port_is_steered(
-                        parsed.flow_dst_port,
-                        &ctrl.wg_ports,
-                        ctrl.wg_port_count,
-                    )
+                    && wg_port_is_steered(parsed.flow_dst_port, &ctrl.wg_ports, ctrl.wg_port_count)
                     && wg_zone_admits_packet(&parsed, ingress_ifindex);
                 let wg_worker_claim = wg_worker_claims_record(
                     wg_rx_enabled,
@@ -902,7 +910,6 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                     parsed.udp_wg_transport_data,
                 );
                 if local_destination && !wg_worker_claim {
-
                     record_trace(
                         ctrl.flags,
                         ingress_ifindex,
@@ -1685,7 +1692,14 @@ fn parse_l2(data: usize, data_end: usize) -> Option<(u16, u16, u8, bool, bool, u
         l3_offset += mem::size_of::<VlanHdr>() as u16;
     }
 
-    Some((eth_proto, vlan_id, vlan_pcp, vlan_present, outer_stag, l3_offset))
+    Some((
+        eth_proto,
+        vlan_id,
+        vlan_pcp,
+        vlan_present,
+        outer_stag,
+        l3_offset,
+    ))
 }
 
 #[inline(always)]
@@ -1940,11 +1954,7 @@ fn parse_ipv6(
 /// excluded local address, the exact configured WG listener owner-map tuple
 /// is the additional authority; a port-only match would shunt transit/DNAT UDP
 /// to the kernel and bypass the userspace policy engine.
-fn wg_steer_to_kernel(
-    ctrl: &UserspaceCtrl,
-    pkt: &ParsedPacket,
-    ingress_ifindex: u32,
-) -> bool {
+fn wg_steer_to_kernel(ctrl: &UserspaceCtrl, pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
     // Order is load-bearing (#1432, #9587): the UDP test first, then the
     // bounded set scan (register compares), and the destination checks last.
     // Nothing below runs for a packet that is not UDP to a steered port.

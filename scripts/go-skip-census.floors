@@ -27,10 +27,9 @@
 # suppression). All gate on execution-environment availability.
 # The current-tree recount supersedes the 400-site measurement above: 17
 # privilege-absent, 4 privilege-present, and 32 other concrete skip sites are
-# now present, for 453 total including the unchanged unparsed site. The census
-# output enumerates each gate and its concrete capability/root/tool/fixture
-# condition; these floors bank those measured subjects, not arbitrary headroom.
-total        = 453
+# now present, for 453 total including unchanged unparsed. #12119 adds one
+# memlock-gated BPF_PROG_TEST_RUN regression, raising other and total by one.
+total        = 454
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
@@ -39,7 +38,7 @@ priv-absent  = 66
 priv-present = 14
 
 # Everything else: environment-, tool- and fixture-gated skips.
-other        = 372
+other        = 373
 
 # Skips this census counted but could NOT classify: `t.SkipNow()` (no message
 # by construction) and non-literal messages. Deliberately a REPORTED bucket

@@ -244,3 +244,60 @@ func TestUserspaceXDPWireGuardSNATControlSteering12119(t *testing.T) {
 		})
 	}
 }
+
+// A live interface-SNAT session owns replies even when their source port is a
+// configured WireGuard listen port. This is the return path for LAN WireGuard
+// clients whose handshake response arrives at WAN:51820.
+func TestUserspaceXDPWireGuardSNATSessionRedirectsLANHandshakeReply12119(t *testing.T) {
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Skipf("RemoveMemlock: %v", err)
+	}
+	for _, tc := range []struct {
+		name       string
+		payloadLen int
+		wgType     byte
+	}{
+		{name: "WireGuard type-2 handshake response", payloadLen: 100, wgType: 2},
+		{name: "other UDP on live tuple", payloadLen: 9, wgType: 0xAA},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			coll := loadUserspaceXDPTestCollection(t)
+			ifindex := userspaceXDPTestRunIfindex(t)
+			bindingIndex := userspaceXDPTestRunBindingIndex(t, 0)
+			ctrl := userspaceCtrlValue{
+				Enabled: 1, MetadataVersion: userspaceMetadataVersion, Workers: 1, QueueCount: 1,
+				Flags: userspaceCtrlFlagWgRx, WgPortCount: 1, HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
+			}
+			ctrl.WgPorts[0] = 51820
+			updateUserspaceXDPTestCtrl(t, coll, ctrl)
+			updateUserspaceXDPTestIngress(t, coll, ifindex)
+			updateUserspaceXDPTestBinding(t, coll, bindingIndex, userspaceBindingValue{Slot: 0, Flags: userspaceBindingReady})
+			updateUserspaceXDPTestHeartbeat(t, coll, 0)
+			updateUserspaceXDPTestInterfaceNATV4(t, coll, wgAdmissionTestAddress)
+			updateUserspaceXDPTestMap(t, coll, "userspace_wg_ingress_zones", userspaceWGIngressZoneKey{
+				Ifindex: ifindex, VLANID: userspaceWGUnTaggedVLANID,
+			}, uint16(2))
+			updateUserspaceXDPTestMap(t, coll, "userspace_wg_zone_admission", wgAdmissionTestKey(2, wgAdmissionTestAddress), uint8(1))
+
+			// A LAN client's source port is preserved by interface SNAT. Its
+			// handshake response therefore arrives server:51820 -> WAN:51820.
+			session := xdpDispatchSessionKey10864{
+				AddrFamily: 2, Protocol: 17, SrcPort: 51820, DstPort: 51820,
+			}
+			copy(session.SrcAddr[:4], []byte{203, 0, 113, 9})
+			copy(session.DstAddr[:4], wgAdmissionTestAddress[:])
+			updateUserspaceXDPTestMap(t, coll, "userspace_sessions", session, xdpDispatchSessionRedirect10864)
+
+			packet := ipv4TestPacket([4]byte{203, 0, 113, 9}, wgAdmissionTestAddress, 17, tc.payloadLen)
+			binary.BigEndian.PutUint16(packet[34:36], 51820)
+			binary.BigEndian.PutUint16(packet[36:38], 51820)
+			packet[42] = tc.wgType
+			if got := runUserspaceXDPTestPacket(t, coll, packet); got != xdpActionDrop {
+				t.Fatalf("live SNAT session reply XDP action = %d, want failed worker redirect (XDP_DROP=%d), not kernel delivery",
+					got, xdpActionDrop)
+			}
+			assertUserspaceXDPDegradedPathStat(t, coll, "redirect_err")
+			assertUserspaceXDPDegradedPathStatAbsent(t, coll, "pass_to_kernel")
+		})
+	}
+}
