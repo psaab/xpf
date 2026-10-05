@@ -14,8 +14,8 @@ func TestWireGuardAcceptIsZoneScopedNetlink11076(t *testing.T) {
 			{Zone: "trust", SystemServices: []string{"ssh"}, V4Addrs: []string{"10.0.1.1"}, V6Addrs: []string{"2001:db8:1::1"}, IngressNetdevs: []string{"trust0"}},
 			{Zone: "untrust", SystemServices: []string{"ping"}, V4Addrs: []string{"10.0.2.1"}, IngressNetdevs: []string{"untrust0"}},
 		},
-		UnzonedV4:   []string{"10.0.99.1"},
-		UnzonedV6:   []string{"2001:db8:99::1"},
+		UnzonedV4:     []string{"10.0.99.1"},
+		UnzonedV6:     []string{"2001:db8:99::1"},
 		WGListenPorts: []uint16{51820},
 		WGZonePorts:   map[string][]uint16{"trust": {51820}},
 	})
