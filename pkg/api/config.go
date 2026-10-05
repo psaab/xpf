@@ -532,6 +532,10 @@ func (s *Server) configLoadHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "content required")
 		return
 	}
+	if req.Mode == "rescue" && req.Content != "" {
+		writeError(w, http.StatusBadRequest, "load rescue does not accept content")
+		return
+	}
 	sessionID, ok := restConfigSessionID(w, r)
 	if !ok {
 		return

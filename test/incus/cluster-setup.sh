@@ -918,6 +918,7 @@ deploy_vm() {
 		# Clear configstore DB so daemon bootstraps from the new text file.
 		# Without this, the daemon loads the OLD config from active.json.
 		incus exec "$rinst" -- rm -rf /etc/xpf/.configdb
+		incus exec "$rinst" -- rm -f /etc/xpf/rescue.conf
 		# #10297: also clear numbered rollback slots. A .configdb-absent state
 		# with surviving xpf.conf.N files is a deliberate fail-closed bootstrap
 		# refusal on current master, so leaving them behind strands the deploy

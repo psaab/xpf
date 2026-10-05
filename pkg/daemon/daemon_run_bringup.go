@@ -300,18 +300,17 @@ func configlessHANodeStartupDiagnostic() string {
 		"the clustered configuration and restart xpfd into that configuration."
 }
 
-// loadAndBootstrapConfig loads the persisted configuration, selects a bounded
-// rescue fallback on a marker-free absent active DB, and imports the text config
-// only when allowed. It enforces the #1917 fatal-on-parse floor and derives the
-// boot class + node-id state. Extracted verbatim from Run()'s PHASE 1 (#4662
-// Increment 5). Returns the combined #1960/#10297/#11802 fail-closed load flag
-// (threaded onward to initManagers) and a non-nil error only for the fatal 'DB
-// present but unreadable' floor, which Run propagates unchanged (fail closed,
-// never a blind bootstrap).
+// loadAndBootstrapConfig loads persisted configuration, validates a file-only
+// rescue source for never-committed empty state (including committed=0 recovery),
+// and imports the text config only when allowed.
+// It enforces the #1917 fatal-on-parse floor and derives the boot class +
+// node-id state. The body was extracted from Run()'s PHASE 1 (#4662 Increment 5).
+// It returns the combined #1960/#10297/#11802 fail-closed load flag (threaded
+// onward to initManagers) and a non-nil error only for the fatal 'DB present but
+// unreadable' floor, which Run propagates unchanged (fail closed, never blind).
 func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
-	// Store.Load may select a saved rescue config on a marker-free absent DB;
-	// day-0 text import remains a separate, guarded fallback.
-	//
+	// Store.Load validates rescue for explicit operator recovery before the
+	// daemon may import day-0 text config.
 	// Fatal-on-parse floor (#1917 increment B, plan §6.4 / D1): a PRESENT
 	// but unreadable active.json (JSON parse error, decrypt failure, or a
 	// config compatibility envelope this build cannot read because it was
@@ -330,9 +329,9 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 	// configCompileFailed records the #1960 fail-closed case: a PRESENT,
 	// previously-committed active.json read+parsed fine but no longer compiles.
 	// absentActiveWithHistory records #10297's parallel case: active.json is
-	// gone but rollback markers prove prior state. rescueFallback records
-	// #11802's valid saved-rescue selection on a genuinely marker-free absent
-	// DB; it also suppresses day-0 import and forces bootstrap/lifeline mode.
+	// absent while rollback markers prove previously-persisted state.
+	// rescueFallback records #11802's valid saved rescue, available only for
+	// explicit operator staging while the store remains never-committed.
 	configCompileFailed := false
 	absentActiveWithHistory := false
 	rescueFallback := false
@@ -374,11 +373,12 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 			"db_path", filepath.Join(filepath.Dir(d.opts.ConfigFile), ".configdb", "active.json"),
 			"config_file", d.opts.ConfigFile, "err", loadErr)
 	case loadRescueFallback:
-		// #11802: Store.Load selected a valid rescue config only because
-		// active.json and all recovery markers are absent. Keep the daemon in
-		// bootstrap/lifeline mode and do not import day-0 over the saved rescue.
+		// #11802: Store.Load validated the saved rescue config for operator
+		// recovery. It is not active state: keep the daemon in bootstrap/lifeline
+		// mode, suppress day-0 import, and require explicit `load rescue`.
 		rescueFallback = true
-		slog.Warn("using saved rescue config as the startup candidate; staying in BOOTSTRAP/lifeline safe state until an operator loads and commits it",
+		slog.Warn("valid saved rescue config is available for explicit recovery; "+
+			"staying in BOOTSTRAP/lifeline mode until an operator loads and commits it",
 			"config_file", d.opts.ConfigFile)
 	case loadOtherError:
 		slog.Warn("failed to load config from db", "err", loadErr)
@@ -458,8 +458,9 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 			slog.Warn("xpf daemon entering BOOTSTRAP mode: active configuration DB is absent but "+
 				"rollback history survives; explicit recovery is required", "detail", detail)
 		} else if rescueFallback {
-			slog.Warn("xpf daemon entering BOOTSTRAP mode: saved rescue config selected; "+
-				"explicit load and commit confirmed required before takeover", "detail", detail)
+			slog.Warn("xpf daemon entering BOOTSTRAP mode: valid saved rescue config is available "+
+				"but not installed; explicit load and commit confirmed required before takeover",
+				"detail", detail)
 		} else {
 			slog.Warn("xpf daemon entering BOOTSTRAP mode: no committed configuration found",
 				"detail", detail)

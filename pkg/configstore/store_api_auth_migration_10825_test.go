@@ -481,6 +481,41 @@ func TestLoadMigratesRescueWithoutActiveConfig10825(t *testing.T) {
 	verifyAPIAuthText10825(t, string(rescue))
 }
 
+func TestLoadMigratesFlatRescueAPIAuthSecrets10825(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	store := newTestStoreAt(t, path)
+	const flatRescue = `set system services web-management api-auth expires 2099-01-01
+set system services web-management api-auth user admin password correct-horse-battery
+set system services web-management api-auth api-key machine-generated-key-alpha
+set system services web-management api-auth key automation secret automation-key-secret-alpha
+`
+	rescuePath := filepath.Join(filepath.Dir(path), RescueConfigBase)
+	if err := os.WriteFile(rescuePath, []byte(flatRescue), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Load(); !errors.Is(err, ErrConfigRescueFallback) {
+		t.Fatalf("fresh-store Load: %v, want valid flat rescue fallback", err)
+	}
+	rescue, err := os.ReadFile(rescuePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(rescue)
+	for _, secret := range []string{
+		"correct-horse-battery",
+		"machine-generated-key-alpha",
+		"automation-key-secret-alpha",
+	} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("flat rescue retained cleartext api-auth secret %q:\n%s", secret, text)
+		}
+	}
+	if !strings.Contains(text, "$xpf-bcrypt$") {
+		t.Fatalf("flat rescue was not migrated to password verifiers:\n%s", text)
+	}
+	verifyAPIAuthText10825(t, text)
+}
+
 func TestLoadMigratesRescueWhenActiveIsAbsentButHistorySurvives10825(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config")
 	store := newTestStoreAt(t, path)

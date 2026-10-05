@@ -44,6 +44,16 @@ func TestEveryStatusRendersItsOwnMeaning(t *testing.T) {
 	}
 }
 
+func TestRescueFallbackExplainsExplicitCandidateStaging(t *testing.T) {
+	out := render(Snapshot{Status: StatusRescueFallback})
+	meaning := meaningLine(t, out)
+	if !strings.Contains(meaning, "not installed") ||
+		!strings.Contains(meaning, "load rescue") ||
+		!strings.Contains(meaning, "candidate") {
+		t.Fatalf("rescue fallback must say the file is not active and needs explicit staging:\n%s", out)
+	}
+}
+
 func TestCredentialApplyFailureExplainsPartialAccess(t *testing.T) {
 	out := render(Snapshot{
 		Status: StatusCredentialFailed,

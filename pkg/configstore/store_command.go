@@ -489,15 +489,6 @@ func (s *Store) LoadOverrideAsPlantClass(sessionID, plantClass, content string) 
 	return nil
 }
 
-// LoadRescue loads the saved rescue config into the candidate for the internal
-// caller.
-func (s *Store) LoadRescue() error { return s.LoadRescueAs("") }
-
-// LoadRescueAs is LoadRescue scoped to a config-lock holder session.
-func (s *Store) LoadRescueAs(sessionID string) error {
-	return s.LoadRescueAsPlantClass(sessionID, "")
-}
-
 // LoadRescueAsPlantClass replaces the candidate with the saved rescue config.
 // It never promotes or persists that candidate.
 func (s *Store) LoadRescueAsPlantClass(sessionID, plantClass string) error {
@@ -524,7 +515,7 @@ func (s *Store) LoadRescueAsPlantClass(sessionID, plantClass string) error {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return ErrRescueNotFound
 	}
-	tree, err := parseOverrideContent(string(data))
+	tree, err := parseRescueContent(string(data))
 	if err != nil {
 		return err
 	}
@@ -538,6 +529,44 @@ func (s *Store) LoadRescueAsPlantClass(sessionID, plantClass string) error {
 	s.bumpCandidateGenLocked()
 	s.dirty = true
 	return nil
+}
+
+// rescueParseError retains useful source coordinates while deliberately
+// dropping parser text that may include a file-owned secret.
+type rescueParseError struct {
+	line   int
+	column int
+}
+
+func (e rescueParseError) Error() string {
+	return fmt.Sprintf("rescue configuration parse failed at line %d, column %d", e.line, e.column)
+}
+
+func parseRescueContent(content string) (*config.ConfigTree, error) {
+	tree, err := parseOverrideContent(content)
+	if err == nil {
+		return tree, nil
+	}
+	line, column := rescueParseErrorPosition(err.Error())
+	return nil, rescueParseError{line: line, column: column}
+}
+
+func rescueParseErrorPosition(message string) (int, int) {
+	line, column := 1, 1
+	position := strings.LastIndex(message, "line ")
+	if position < 0 {
+		return line, column
+	}
+	message = message[position:]
+	var parsedLine, parsedColumn int
+	if _, err := fmt.Sscanf(message, "line %d, column %d", &parsedLine, &parsedColumn); err == nil &&
+		parsedLine > 0 && parsedColumn > 0 {
+		return parsedLine, parsedColumn
+	}
+	if _, err := fmt.Sscanf(message, "line %d:", &parsedLine); err == nil && parsedLine > 0 {
+		return parsedLine, column
+	}
+	return line, column
 }
 
 // parseOverrideContent turns `load override` input into the replacement tree,

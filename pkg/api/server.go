@@ -155,7 +155,7 @@ type HostInboundAppliedSnapshot struct {
 }
 
 type BootstrapImportSnapshot struct {
-	Status  string // "ok" | "loaded-from-db" | "no-config" | "credential-apply-pending" | "credential-apply-failed" | "import-failed" | ""
+	Status  string // "ok" | "loaded-from-db" | "rescue-fallback" | "no-config" | "credential-apply-pending" | "credential-apply-failed" | "import-failed" | ""
 	Error   string // detail when Status reports an apply failure
 	UnixSec int64
 	Failed  bool // true for an import or initial credential-apply failure

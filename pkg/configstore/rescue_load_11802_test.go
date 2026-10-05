@@ -29,14 +29,13 @@ func TestLoadRescueFallbackOnFreshStore11802(t *testing.T) {
 	if err := store.Load(); !errors.Is(err, ErrConfigRescueFallback) {
 		t.Fatalf("Load() = %v, want ErrConfigRescueFallback", err)
 	}
-	if !store.EverCommitted() {
-		t.Fatal("selected rescue config did not mark the store previously committed")
+	if store.EverCommitted() || store.persistMarkerCommitted {
+		t.Fatalf("selecting rescue changed never-committed provenance: everCommitted=%v persistMarkerCommitted=%v",
+			store.EverCommitted(), store.persistMarkerCommitted)
 	}
-	if store.ActiveConfig() != nil {
-		t.Fatal("rescue fallback must not install a compiled active config before explicit commit")
-	}
-	if got := store.ShowActiveSet(); !strings.Contains(got, "host-name rescue-11802") {
-		t.Fatalf("selected rescue tree is not visible as the active candidate source: %s", got)
+	if store.ActiveConfig() != nil || store.ShowActiveSet() != "" {
+		t.Fatalf("rescue fallback installed rescue as active: active=%v tree=%q",
+			store.ActiveConfig(), store.ShowActiveSet())
 	}
 	if len(store.ListHistory()) != 0 {
 		t.Fatalf("rescue fallback wrote rollback history: %v", store.ListHistory())
@@ -47,6 +46,27 @@ func TestLoadRescueFallbackOnFreshStore11802(t *testing.T) {
 	}
 	if got, err := os.ReadFile(rescuePath); err != nil || string(got) != validRescue11802 {
 		t.Fatalf("rescue file changed during fallback: data=%q err=%v", got, err)
+	}
+
+	if err := store.SaveRescueConfig(); !errors.Is(err, ErrRescueSaveNoCommittedConfig) {
+		t.Fatalf("SaveRescueConfig() = %v, want ErrRescueSaveNoCommittedConfig", err)
+	}
+	if got, err := os.ReadFile(rescuePath); err != nil || string(got) != validRescue11802 {
+		t.Fatalf("rejected rescue save changed existing rescue: data=%q err=%v", got, err)
+	}
+
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	if err := store.LoadRescueAsPlantClass("", "operator"); err != nil {
+		t.Fatalf("LoadRescueAsPlantClass: %v", err)
+	}
+	if got := store.ShowCandidateSet(); !strings.Contains(got, "host-name rescue-11802") {
+		t.Fatalf("explicit load rescue did not seed candidate: %s", got)
+	}
+	if got := store.ShowActiveSet(); got != "" || store.EverCommitted() {
+		t.Fatalf("candidate-only rescue load changed active provenance: active=%q everCommitted=%v",
+			got, store.EverCommitted())
 	}
 }
 
@@ -277,14 +297,21 @@ func TestFlatRescueFallbackCanCommitConfirmed11802(t *testing.T) {
 	if err := store.Load(); !errors.Is(err, ErrConfigRescueFallback) {
 		t.Fatalf("Load() = %v, want ErrConfigRescueFallback", err)
 	}
-	if got := store.ShowActiveSet(); !strings.Contains(got, "host-name flat-rescue-11802") {
-		t.Fatalf("flat rescue was not selected: %s", got)
+	if store.EverCommitted() || store.ActiveConfig() != nil || store.ShowActiveSet() != "" {
+		t.Fatalf("fallback installed flat rescue as active: everCommitted=%v active=%v tree=%q",
+			store.EverCommitted(), store.ActiveConfig(), store.ShowActiveSet())
 	}
 	if err := store.EnterConfigure(); err != nil {
 		t.Fatalf("EnterConfigure: %v", err)
 	}
+	if err := store.LoadRescueAsPlantClass("", ""); err != nil {
+		t.Fatalf("LoadRescueAsPlantClass: %v", err)
+	}
+	if got := store.ShowCandidateSet(); !strings.Contains(got, "host-name flat-rescue-11802") {
+		t.Fatalf("explicit load rescue did not stage flat rescue: %s", got)
+	}
 	if _, err := store.CommitCheck(); err != nil {
-		t.Fatalf("strict commit-check rejected the selected flat rescue: %v", err)
+		t.Fatalf("strict commit-check rejected explicitly loaded flat rescue: %v", err)
 	}
 	if _, err := store.CommitConfirmed(1); err != nil {
 		t.Fatalf("CommitConfirmed: %v", err)
@@ -295,7 +322,7 @@ func TestFlatRescueFallbackCanCommitConfirmed11802(t *testing.T) {
 		}
 	})
 	if !store.IsConfirmPending() || store.ActiveConfig() == nil {
-		t.Fatal("commit-confirmed did not promote the validated rescue candidate")
+		t.Fatal("commit-confirmed did not promote the validated flat rescue candidate")
 	}
 	if err := store.ConfirmCommit(); err != nil {
 		t.Fatalf("ConfirmCommit: %v", err)
@@ -306,6 +333,119 @@ func TestFlatRescueFallbackCanCommitConfirmed11802(t *testing.T) {
 	activePath := filepath.Join(filepath.Dir(path), ".configdb", "active.json")
 	if _, err := os.Stat(activePath); err != nil {
 		t.Fatalf("confirmed rescue commit did not persist active.json: %v", err)
+	}
+}
+
+func TestRescueFallbackTimeoutKeepsNeverCommittedStateAcrossRestart11802(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "xpf.conf")
+	day0 := "system { host-name day0-after-rescue-timeout; }\n"
+	if err := os.WriteFile(path, []byte(day0), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeRescue11802(t, filepath.Join(filepath.Dir(path), RescueConfigBase), validRescue11802)
+
+	store := newTestStoreAt(t, path)
+	if err := store.Load(); !errors.Is(err, ErrConfigRescueFallback) {
+		t.Fatalf("initial Load() = %v, want rescue fallback", err)
+	}
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadOverride("system { host-name operator-unconfirmed-11802; }\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CommitConfirmed(1); err != nil {
+		t.Fatalf("CommitConfirmed: %v", err)
+	}
+	if !store.confirmPrevFirst || store.confirmPrevTree == nil || len(store.confirmPrevTree.Children) != 0 {
+		t.Fatalf("first commit rollback target = first=%v tree=%v, want first=true and empty",
+			store.confirmPrevFirst, store.confirmPrevTree)
+	}
+	timer := store.confirmTimer
+	gen := store.confirmGen
+	if timer == nil || !timer.Stop() {
+		t.Fatal("PREMISE: test failed to stop the real timeout timer before dispatch")
+	}
+	if _, ok := store.PromoteRollback(gen); !ok {
+		t.Fatal("PromoteRollback rejected the timeout generation")
+	}
+	if store.EverCommitted() || store.persistMarkerCommitted {
+		t.Fatalf("timeout promoted selected rescue provenance: everCommitted=%v persistMarkerCommitted=%v",
+			store.EverCommitted(), store.persistMarkerCommitted)
+	}
+	rolledBack, committed, err := store.db.ReadActiveMeta()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed {
+		t.Fatal("timeout persisted a committed active config")
+	}
+	if rolledBack == nil {
+		t.Fatal("timeout did not persist its empty rollback target")
+	}
+	if len(rolledBack.Children) != 0 {
+		t.Fatalf("timeout rollback target = %q, want empty", rolledBack.FormatSet())
+	}
+
+	reboot := newTestStoreAt(t, path)
+	if err := reboot.Load(); !errors.Is(err, ErrConfigRescueFallback) {
+		t.Fatalf("restart Load() = %v, want rescue precedence over day-0 after committed=0 rollback", err)
+	}
+	if reboot.EverCommitted() || reboot.ActiveConfig() != nil || reboot.ShowActiveSet() != "" {
+		t.Fatalf("restart promoted selected rescue: everCommitted=%v active=%v tree=%q",
+			reboot.EverCommitted(), reboot.ActiveConfig(), reboot.ShowActiveSet())
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != day0 {
+		t.Fatalf("committed=0 rescue precedence modified day-0 source: data=%q err=%v", got, err)
+	}
+}
+
+func TestRescueFallbackExpiredConfirmRecoveryKeepsBootstrapProvenance11802(t *testing.T) {
+	previousNow := confirmWallNow
+	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	confirmWallNow = func() time.Time { return now }
+	t.Cleanup(func() { confirmWallNow = previousNow })
+
+	path := filepath.Join(t.TempDir(), "xpf.conf")
+	writeRescue11802(t, filepath.Join(filepath.Dir(path), RescueConfigBase), validRescue11802)
+	store := newTestStoreAt(t, path)
+	if err := store.Load(); !errors.Is(err, ErrConfigRescueFallback) {
+		t.Fatalf("initial Load() = %v, want rescue fallback", err)
+	}
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadOverride("system { host-name crash-unconfirmed-11802; }\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CommitConfirmed(1); err != nil {
+		t.Fatalf("CommitConfirmed: %v", err)
+	}
+	if store.confirmTimer == nil || !store.confirmTimer.Stop() {
+		t.Fatal("PREMISE: test failed to stop the real timeout timer before restart")
+	}
+
+	now = now.Add(2 * time.Minute)
+	reboot := newTestStoreAt(t, path)
+	if err := reboot.Load(); !errors.Is(err, ErrConfigRescueFallback) {
+		t.Fatalf("expired confirm recovery Load() = %v, want rescue fallback", err)
+	}
+	if reboot.EverCommitted() || reboot.persistMarkerCommitted || reboot.ActiveConfig() != nil {
+		t.Fatalf("expired recovery lost bootstrap provenance: everCommitted=%v marker=%v active=%v",
+			reboot.EverCommitted(), reboot.persistMarkerCommitted, reboot.ActiveConfig())
+	}
+	rolledBack, committed, err := reboot.db.ReadActiveMeta()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed {
+		t.Fatal("expired-confirm recovery persisted a committed active config")
+	}
+	if rolledBack == nil {
+		t.Fatal("expired-confirm recovery did not persist its empty rollback target")
+	}
+	if len(rolledBack.Children) != 0 {
+		t.Fatalf("crash-recovery rollback target = %q, want empty", rolledBack.FormatSet())
 	}
 }
 

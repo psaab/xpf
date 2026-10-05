@@ -52,9 +52,9 @@ const (
 	// claim-all; instead it enters the #1922 bootstrap/lifeline safe state
 	// with history loaded for explicit in-band recovery.
 	loadAbsentWithHistory
-	// loadRescueFallback — a valid saved rescue config was selected with no
-	// active DB or recovery markers. The daemon stays in bootstrap/lifeline
-	// mode until an operator loads the rescue candidate and commits it.
+	// loadRescueFallback — a valid saved rescue config is available in a
+	// never-committed empty state; it remains file-only until explicit
+	// candidate staging. The daemon stays in bootstrap/lifeline mode.
 	loadRescueFallback
 	// loadOtherError — any other Load error (logged as a warning; the daemon
 	// proceeds and the boot predicate decides bootstrap vs normal as usual).

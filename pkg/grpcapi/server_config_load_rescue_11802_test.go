@@ -86,3 +86,77 @@ system {
 		t.Fatalf("denied gRPC load rescue changed candidate: before=%q after=%q", before, got)
 	}
 }
+
+func TestGRPCLoadRescueRejectsContent11802(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "xpf.conf")
+	store := newConfigStore(t, path)
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadOverride("system { host-name candidate-before-rejected-rescue; }"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), configstore.RescueConfigBase),
+		[]byte("system { host-name saved-rescue; }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := store.ShowCandidateSet()
+	_, err := (&Server{store: store}).Load(ctxWithAuthorizedRoot(ctxWithPeerUID(0)),
+		&pb.LoadRequest{Mode: "rescue", Content: "system { host-name ignored; }"})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("gRPC rescue request with content error = %v, want InvalidArgument", err)
+	}
+	if got := store.ShowCandidateSet(); got != before {
+		t.Fatalf("rejected gRPC rescue request changed candidate: before=%q after=%q", before, got)
+	}
+}
+
+func TestGRPCLoadRescueMalformedFlatInputDoesNotLeakToRestrictedClass11802(t *testing.T) {
+	usePasswdFixture5278(t)
+	const restrictedConfig = `
+system {
+    login {
+        class limited {
+            permissions [ configure view ];
+        }
+        user opuser {
+            class limited;
+        }
+    }
+}
+`
+	store := authzStore5278(t, restrictedConfig)
+	path := store.ConfigPath()
+	const secret = "BENIGN-REVIEW-SECRET-12129"
+	malformed := `set security ike policy rescue pre-shared-key ascii-text "` + secret
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), configstore.RescueConfigBase),
+		[]byte(malformed), 0o600); err != nil {
+		t.Fatalf("write malformed flat rescue: %v", err)
+	}
+	client := runPrimaryListener(t, Config{
+		Store:        store,
+		PeerLookupFn: fixedPeerUID5278(authzUIDOperator),
+	})
+	ctx := callCtx(t)
+	if _, err := client.EnterConfigure(ctx, &pb.EnterConfigureRequest{}); err != nil {
+		t.Fatalf("restricted class EnterConfigure: %v", err)
+	}
+	before := store.ShowCandidateSet()
+	_, err := client.Load(ctx, &pb.LoadRequest{Mode: "rescue"})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("malformed flat rescue error = %v, want InvalidArgument", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("gRPC parse error leaked rescue secret %q: %v", secret, err)
+	}
+	if !strings.Contains(err.Error(), "line 1") {
+		t.Fatalf("gRPC parse error omitted source position: %v", err)
+	}
+	if got := store.ShowCandidateSet(); got != before {
+		t.Fatalf("malformed flat rescue changed candidate: before=%q after=%q", before, got)
+	}
+	if redacted, redErr := store.LoadRescueConfigRedacted(); redErr == nil ||
+		strings.Contains(redErr.Error(), secret) || strings.Contains(redacted, secret) {
+		t.Fatalf("malformed flat rescue redaction leaked secret: text=%q err=%v", redacted, redErr)
+	}
+}

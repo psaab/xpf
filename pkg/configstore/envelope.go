@@ -56,10 +56,10 @@ var ErrConfigCompile = errors.New("config DB present but does not compile")
 // would strand management, which this sentinel exists to avoid.
 var ErrConfigAbsentWithHistory = errors.New("config DB absent but rollback history survives")
 
-// ErrConfigRescueFallback identifies a valid saved rescue config selected
-// because active.json is absent and no recovery markers survive. It is
-// deliberately distinct from the existing fail-closed load errors.
-var ErrConfigRescueFallback = errors.New("config DB absent; rescue config selected")
+// ErrConfigRescueFallback identifies a valid saved rescue config available
+// for explicit recovery while the store is in a never-committed empty state.
+// It is deliberately distinct from existing fail-closed load errors.
+var ErrConfigRescueFallback = errors.New("never-committed config; saved rescue available for explicit recovery")
 
 // ErrRescueNotFound reports that no non-empty saved rescue config is available
 // for an explicit candidate load.

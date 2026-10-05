@@ -81,3 +81,27 @@ func TestLoadRescueConfigRedactedFailClosedOnParseError(t *testing.T) {
 		t.Errorf("error is not the generic fail-closed message:\n%s", got)
 	}
 }
+
+func TestLoadRescueConfigRedactedSupportsFlatConfig11802(t *testing.T) {
+	dir := t.TempDir()
+	store, err := New(filepath.Join(dir, "xpf.conf"))
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+	const secret = "FLAT-RESCUE-PSK-12129"
+	flat := `set security ike policy pol1 pre-shared-key ascii-text "` + secret + `"` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, RescueConfigBase), []byte(flat), 0o600); err != nil {
+		t.Fatalf("write flat rescue: %v", err)
+	}
+	got, err := store.LoadRescueConfigRedacted()
+	if err != nil {
+		t.Fatalf("LoadRescueConfigRedacted: %v", err)
+	}
+	if strings.Contains(got, secret) {
+		t.Fatalf("flat rescue display leaked secret %q: %s", secret, got)
+	}
+	if !strings.Contains(got, config.SecretDataPlaceholder) ||
+		!strings.Contains(got, "security") || !strings.Contains(got, "pre-shared-key") {
+		t.Fatalf("flat rescue was not parsed and redacted: %s", got)
+	}
+}

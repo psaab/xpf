@@ -270,6 +270,9 @@ func (s *Server) Load(ctx context.Context, req *pb.LoadRequest) (*pb.LoadRespons
 		}
 		slog.Info("load set applied", "commands", count)
 	case "rescue":
+		if req.Content != "" {
+			return nil, status.Error(codes.InvalidArgument, "load rescue does not accept content")
+		}
 		if err := s.store.LoadRescueAsPlantClass(sessionID, plantClass); err != nil {
 			return nil, configMutationStatus(err)
 		}
