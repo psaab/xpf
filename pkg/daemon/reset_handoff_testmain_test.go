@@ -10,23 +10,39 @@ import (
 )
 
 // TestMain points package-level external/stateful paths at disposable locations.
-// Every commit/apply path consults reset handoff and some run SSH reconciliation;
-// fixtures that do not install the SSH seam must never touch live /etc files.
-// An unreadable /etc/xpf/.reset-handoff fails closed, while the PAM policy also
-// needs an isolated marker and common-auth stack. The hostname seams are stubbed
-// for the same reason: tests drive the real apply pipeline with fixture
-// host-names (e.g. "rollback-target", "mtu-test"), and under a root `go test`
-// the real sethostname + /etc/hostname write RENAMED the test host. sethostname
-// fails with EPERM so root runs observe exactly the unprivileged behavior every
-// cell was written against; hostnamePath points at the temp dir so even a test
-// that overrides sethostname to succeed cannot reach live /etc/hostname.
-// Per-test overrides save/restore these values. Committing tests in this package
-// do not run in parallel, so the shared paths cannot race.
+// Apply fixtures drive the real tail, so its DNS writer, resolved/systemctl op,
+// sudoers sweep, and ownership inventory must not touch live host paths. The
+// reset handoff, PAM policy, and hostname are isolated for the same reason.
+// Host-name fixtures run through the real apply pipeline, so the real
+// sethostname + /etc/hostname write would rename the test host when run as root.
+// Per-test overrides save/restore these values. Tests touching package-global
+// apply seams do not run in parallel.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "daemon-reset-handoff")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "reset handoff test seam: %v\n", err)
 		os.Exit(1)
+	}
+	sudoersDir = filepath.Join(dir, "sudoers.d")
+	if err := os.MkdirAll(sudoersDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "daemon test sudoers seam: %v\n", err)
+		os.RemoveAll(dir)
+		os.Exit(1)
+	}
+	provisionedUsersDir = filepath.Join(dir, "provisioned-users")
+	dnsDir := filepath.Join(dir, "dns")
+	if err := os.MkdirAll(dnsDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "daemon test DNS seam: %v\n", err)
+		os.RemoveAll(dir)
+		os.Exit(1)
+	}
+	newDNSReconcilerFn = func() *dnsReconciler {
+		return &dnsReconciler{
+			resolvConfPath:       filepath.Join(dnsDir, "resolv.conf"),
+			legacyResolvedDropin: filepath.Join(dnsDir, "bpfrx.conf"),
+			xpfResolvedDropin:    filepath.Join(dnsDir, "xpf.conf"),
+			disableMaskResolved:  func() error { return nil },
+		}
 	}
 	configstore.ResetHandoffPath = filepath.Join(dir, ".reset-handoff")
 	resetPersistentNatGenerationStatePath = func() string {
