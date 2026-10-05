@@ -521,6 +521,51 @@ fn scheduled_rule_expires_only_after_heartbeat_lease_and_heartbeat_renews() {
 }
 
 #[test]
+fn expired_scheduler_lease_preserves_denying_rules_in_latched_snapshot() {
+    let first_receipt_ns = 1_000;
+    let expired_at = first_receipt_ns + SCHEDULER_HEARTBEAT_LEASE_NS + 1;
+
+    for (action, expected) in [
+        ("deny", PolicyAction::Deny),
+        ("reject", PolicyAction::Reject),
+    ] {
+        for inactive in [false, true] {
+            let snapshot = PolicyRuleSnapshot {
+                policy_id: 12052,
+                action: action.to_string(),
+                inactive,
+                ..scheduled_allow_snapshot("scheduled-deny", inactive)
+            };
+            let state = parse_policy_state("deny", &[snapshot], &test_zone_name_to_id());
+            assert!(state.scheduler_lease.apply(7, first_receipt_ns));
+
+            let result = evaluate_policy_result_l3_aware_at(
+                &state,
+                TEST_LAN_ZONE_ID,
+                TEST_WAN_ZONE_ID,
+                "10.0.61.100".parse().expect("src"),
+                "172.16.80.200".parse().expect("dst"),
+                PROTO_TCP,
+                12345,
+                5201,
+                None,
+                64,
+                true,
+                expired_at,
+            );
+            assert_eq!(
+                result.action, expected,
+                "expired scheduler lease must preserve scheduled {action} (inactive={inactive})"
+            );
+            assert_eq!(
+                result.policy_id, 12052,
+                "scheduled {action} must match, not fall through to default policy (inactive={inactive})"
+            );
+        }
+    }
+}
+
+#[test]
 fn scheduler_lease_ignores_version_zero_and_rejects_rollback() {
     let lease = SchedulerHeartbeatLease::default();
     assert!(!lease.apply(0, 1));

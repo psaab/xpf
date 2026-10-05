@@ -131,6 +131,70 @@ func TestScheduler_RepublishFailClosedAfterBoundedAge(t *testing.T) {
 	}
 }
 
+func TestScheduler_RepublishesNormalDispositionOnceAfterFailClosedRecovery(t *testing.T) {
+	schedCfg := map[string]*config.SchedulerConfig{
+		"workhours": {Name: "workhours", StartTime: "09:00:00", StopTime: "17:00:00"},
+	}
+	var (
+		s                  *Scheduler
+		failing            = true
+		published          []map[string]bool
+		latchAtPublication []bool
+	)
+	updateFn := func(_ context.Context, state map[string]bool) error {
+		published = append(published, state)
+		latchAtPublication = append(latchAtPublication, s.RepublishFailClosed())
+		if failing {
+			return errors.New("republish unavailable")
+		}
+		return nil
+	}
+	start := time.Date(2026, 2, 12, 10, 0, 0, 0, time.UTC)
+	s, _ = NewPrimed(schedCfg, updateFn, start)
+
+	closeAt := time.Date(2026, 2, 12, 17, 30, 0, 0, time.UTC)
+	s.evaluate(context.Background(), closeAt, true)
+	tick := closeAt
+	for tick.Sub(closeAt) < RepublishFailClosedAge {
+		tick = tick.Add(time.Minute)
+		s.evaluate(context.Background(), tick, true)
+	}
+	if !s.RepublishFailClosed() {
+		t.Fatal("republish failure streak did not latch fail-closed")
+	}
+
+	failing = false
+	latchPublishAt := tick.Add(time.Minute)
+	s.evaluate(context.Background(), latchPublishAt, true)
+	if s.RepublishFailClosed() || s.RepublishPending() {
+		t.Fatal("successful latch snapshot must clear the fail-closed and retry latches")
+	}
+	if got := len(published); got == 0 || !latchAtPublication[got-1] {
+		t.Fatal("recovery snapshot was not published with the fail-closed latch set")
+	}
+	if published[len(published)-1]["workhours"] {
+		t.Fatal("latched snapshot state = active, want inactive scheduler map")
+	}
+
+	normalPublishAt := latchPublishAt.Add(time.Minute)
+	publishedBeforeNormal := len(published)
+	s.evaluate(context.Background(), normalPublishAt, true)
+	if got := len(published); got != publishedBeforeNormal+1 {
+		t.Fatalf("normal disposition publications = %d, want exactly one after latch recovery", got-publishedBeforeNormal)
+	}
+	if latchAtPublication[len(latchAtPublication)-1] {
+		t.Fatal("follow-up snapshot still carried the fail-closed latch")
+	}
+	if published[len(published)-1]["workhours"] {
+		t.Fatal("follow-up normal snapshot state = active, want inactive schedule")
+	}
+
+	s.evaluate(context.Background(), normalPublishAt.Add(time.Minute), true)
+	if got := len(published); got != publishedBeforeNormal+1 {
+		t.Fatalf("normal disposition republished %d times, want exactly once", got-publishedBeforeNormal)
+	}
+}
+
 // Note on gauge coverage (#6137 finding 3, #10906): the honest
 // xpf_scheduler_republish_fail_open_stale gauge and its deprecated
 // xpf_scheduler_republish_fail_closed alias read the scheduler's own

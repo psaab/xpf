@@ -314,6 +314,10 @@ func (a *LegacyDataPlaneAdapter) Compile(cfg *config.Config) (*dataplane.Compile
 }
 
 func (a *LegacyDataPlaneAdapter) UpdatePolicyScheduleState(cfg *config.Config, activeState map[string]bool) error {
+	return a.UpdatePolicyScheduleStateWithLatch(cfg, activeState, false)
+}
+
+func (a *LegacyDataPlaneAdapter) UpdatePolicyScheduleStateWithLatch(cfg *config.Config, activeState map[string]bool, failClosed bool) error {
 	m, err := a.managerOrErr()
 	if err != nil {
 		// #3780: no manager attached — nothing is enforcing, so there
@@ -321,7 +325,7 @@ func (a *LegacyDataPlaneAdapter) UpdatePolicyScheduleState(cfg *config.Config, a
 		// scheduler self-heal does not spin.
 		return nil
 	}
-	return m.UpdatePolicyScheduleState(cfg, activeState)
+	return m.UpdatePolicyScheduleStateWithLatch(cfg, activeState, failClosed)
 }
 
 func (a *LegacyDataPlaneAdapter) HeartbeatPolicyScheduler(ctx context.Context) {

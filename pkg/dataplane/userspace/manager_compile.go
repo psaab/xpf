@@ -1063,6 +1063,10 @@ func (m *Manager) retainPreviousClassifierPlanLocked(publishSnap *ConfigSnapshot
 // wrapped; both callers retain the prior snapshot (fail-closed) and surface a
 // retry.
 func (m *Manager) rebuildScheduledPolicySectionsLocked(next *ConfigSnapshot, cfg *config.Config, activeState map[string]bool) error {
+	return m.rebuildScheduledPolicySectionsWithLatchLocked(next, cfg, activeState, false)
+}
+
+func (m *Manager) rebuildScheduledPolicySectionsWithLatchLocked(next *ConfigSnapshot, cfg *config.Config, activeState map[string]bool, failClosed bool) error {
 	// #6480 (config-skew fail-open guard): this helper rebuilds next.Policies
 	// from cfg and scrubs them against cfg's StableZoneID quarantine set, but
 	// next.Zones / next.Interfaces were inherited verbatim from m.lastSnapshot
@@ -1095,7 +1099,7 @@ func (m *Manager) rebuildScheduledPolicySectionsLocked(next *ConfigSnapshot, cfg
 	if err != nil {
 		return fmt.Errorf("policy snapshot rebuild for scheduler republish (address-book): %w", err)
 	}
-	policies, err := buildPolicySnapshotsWithAddressBook(cfg, activeState, feedOverlay, nameToID)
+	policies, err := buildPolicySnapshotsWithAddressBookAndFailClosed(cfg, activeState, feedOverlay, nameToID, failClosed)
 	if err != nil {
 		return fmt.Errorf("policy snapshot rebuild for scheduler republish: %w", err)
 	}
@@ -1127,6 +1131,12 @@ func (m *Manager) rebuildScheduledPolicySectionsLocked(next *ConfigSnapshot, cfg
 // coherent inactive-bit view. This shadows the embedded eBPF manager method;
 // scheduled userspace policies must not update the policy_rules BPF map.
 func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[string]bool) error {
+	return m.UpdatePolicyScheduleStateWithLatch(cfg, activeState, false)
+}
+
+// UpdatePolicyScheduleStateWithLatch republishes the scheduler's current map
+// and its stale-republish latch disposition in the policy snapshot.
+func (m *Manager) UpdatePolicyScheduleStateWithLatch(cfg *config.Config, activeState map[string]bool, failClosed bool) error {
 	activeCopy := copyPolicySchedulerActiveState(activeState)
 
 	m.mu.Lock()
@@ -1187,7 +1197,7 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 	// zone quarantine's policy scrub via the shared helper, so this scheduler-only
 	// republish and the route-overlay republish stay in lockstep and neither ships
 	// a policy referencing a quarantined zone absent from the inherited next.Zones.
-	if err := m.rebuildScheduledPolicySectionsLocked(&next, cfg, activeCopy); err != nil {
+	if err := m.rebuildScheduledPolicySectionsWithLatchLocked(&next, cfg, activeCopy, failClosed); err != nil {
 		slog.Warn("userspace: skipping policy-scheduler republish; retaining prior snapshot", "err", err)
 		// #3780: the prior snapshot is retained, which for a CLOSING window means
 		// the old permit stays live. Report failure so the transition is retried

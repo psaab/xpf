@@ -65,22 +65,24 @@ type Scheduler struct {
 	republishFirstFail time.Time
 	republishFailures  uint64
 	lastRepublishErr   error
+	// A successful latch snapshot uses action-aware disposition: permits stay
+	// inactive while denies remain eligible. Force one follow-up publication
+	// without the latch override so the actual window state replaces that view.
+	republishRecoveryPending bool
 
 	// #5669: bounded-age FAIL-OPEN-STALE escalation (#10906 honest naming:
 	// the latch alone cannot revoke an already-published schedule). The #3780
 	// self-heal retries a failed republish every tick, but a PERSISTENTLY
 	// failing republish (a wedged control socket or incompatible helper) can
 	// leave a scheduled permit live. Once the failure streak exceeds
-	// republishFailClosedAge, the scheduler latches republishFailClosed: it
-	// emits a one-time alarm, marks scheduled policies inactive in its
-	// authoritative map, and attempts to publish that snapshot.
-	//
-	// The snapshot still uses the same updateFn channel whose failures define
-	// the streak. On a current #11285 helper, the independent heartbeat lease
-	// expires scheduler-bound rules if no heartbeat arrives for 300 seconds;
-	// helpers predating that protocol retain the old stale-window limitation.
-	// The latch still provides authoritative inactive state and
-	// deny-first recovery. Guarded by mu.
+	// republishFailClosedAge, the scheduler latches republishFailClosed: it emits a
+	// one-time alarm, marks every scheduler inactive in its authoritative map, and
+	// attempts to publish that state. The userspace
+	// snapshot builder interprets this latch per action: scheduled permits
+	// remain inactive, while DENY/REJECT rules stay eligible. A current #11285
+	// helper applies the same deny-first interpretation when its independent
+	// heartbeat lease expires; older helpers retain the stale-window limitation.
+	// Guarded by mu.
 	republishFailClosed bool
 }
 
@@ -235,12 +237,11 @@ func (s *Scheduler) evaluate(ctx context.Context, now time.Time, notify bool) {
 
 	// #5669: while the republish has been failing past the bounded age
 	// (republishFailClosed, latched in recordRepublishResultLocked), force
-	// every scheduled policy to the INACTIVE disposition in the authoritative
-	// scheduler state and attempt to publish that snapshot. The #11285
-	// heartbeat lease independently makes scheduled rules ineligible on
-	// current helpers while updates remain wedged. Read the latch once so the
-	// whole map is coherent; it clears on the next successful republish, after
-	// which the true window state is republished and any open permit reopens.
+	// every scheduler inactive in the authoritative map and attempt to publish
+	// that state. The userspace builder keeps latch-inactive DENY/REJECT rules
+	// eligible while permits remain inactive. A successful latch publication
+	// clears the latch and schedules exactly one normal-disposition publication
+	// before heartbeats resume.
 	failClosed := s.republishFailClosed
 	for name, sched := range s.schedulers {
 		cur := false
@@ -283,7 +284,7 @@ func (s *Scheduler) evaluate(ctx context.Context, now time.Time, notify bool) {
 		s.mu.Unlock()
 		return
 	}
-	if !changed && !s.republishPending {
+	if !changed && !s.republishPending && !s.republishRecoveryPending {
 		heartbeatFn := s.heartbeatFn
 		s.mu.Unlock()
 		if heartbeatFn != nil {
@@ -314,16 +315,16 @@ func (s *Scheduler) recordRepublishResultLocked(err error, now time.Time) {
 		s.republishPending = true
 		s.republishFailures++
 		s.lastRepublishErr = err
-		// #5669: bounded-age FAIL-OPEN-STALE escalation (#10906). Once the
-		// failure streak passes the bound, alert once and keep the scheduler's
-		// authoritative state inactive while republish remains wedged. The
-		// snapshot still uses the failed update channel; heartbeat suppression
-		// lets #11285 helpers expire scheduled rules after 300 s, while a legacy
-		// helper may continue enforcing its last-known schedule.
+		// #5669: bounded-age FAIL-OPEN-STALE escalation. Once the failure streak
+		// passes the bound, alert once and keep the scheduler's authoritative map
+		// inactive while republish remains wedged. The snapshot builder preserves
+		// scheduled DENY/REJECT rules in the latch view while leaving permits
+		// inactive; current helpers also use the lease's deny-first fallback
+		// after five minutes without a heartbeat.
 		if !s.republishFailClosed && !s.republishFirstFail.IsZero() &&
 			now.Sub(s.republishFirstFail) >= RepublishFailClosedAge {
 			s.republishFailClosed = true
-			slog.Warn("scheduler: republish FAIL-OPEN-STALE — enforcement has been stale past the bounded age; forcing scheduled policies inactive in the control-plane state and refusing to reopen them until republish recovers (the heartbeat lease expires scheduled rules on current helpers; older helpers may still permit traffic — investigate the helper/control socket)",
+			slog.Warn("scheduler: republish FAIL-OPEN-STALE — enforcement has been stale past the bounded age; forcing scheduler state inactive while preserving scheduled denies/rejects and keeping permits inactive in the published policy view (investigate the helper/control socket)",
 				"stale_for", now.Sub(s.republishFirstFail),
 				"bound", RepublishFailClosedAge,
 				"failures", s.republishFailures,
@@ -331,14 +332,20 @@ func (s *Scheduler) recordRepublishResultLocked(err error, now time.Time) {
 		}
 		return
 	}
-	if s.republishFailClosed {
-		slog.Info("scheduler: republish recovered from fail-closed; republishing the true schedule window state",
+	recoveredFailClosed := s.republishFailClosed
+	if recoveredFailClosed {
+		slog.Info("scheduler: republish recovered from fail-closed; one normal-disposition snapshot will follow",
 			"failures", s.republishFailures)
 	}
 	s.republishPending = false
 	s.republishFirstFail = time.Time{}
 	s.republishFailClosed = false
 	s.lastRepublishErr = nil
+	if recoveredFailClosed {
+		s.republishRecoveryPending = true
+	} else if s.republishRecoveryPending {
+		s.republishRecoveryPending = false
+	}
 }
 
 // RepublishPending reports whether the most recent scheduler-driven
@@ -361,11 +368,12 @@ func (s *Scheduler) RepublishFailureStatus() (pending bool, failures uint64, sin
 }
 
 // RepublishFailClosed reports whether the scheduler's bounded-age republish
-// failure latch is set. The scheduler keeps its authoritative scheduled-policy
-// state inactive while republish remains failed. On current #11285 helpers,
-// heartbeat suppression expires scheduled rules after five minutes; a legacy
-// helper may still enforce its last-known schedule until the channel recovers.
-// The latch clears after a successful republish. The daemon exposes it as the
+// failure latch is set. The authoritative scheduler map stays inactive while
+// latched; the userspace snapshot preserves scheduled DENY/REJECT rules and
+// leaves permits inactive. The current helper also expires stale scheduled
+// permits while keeping denies/rejects eligible. A successful latch republish
+// clears the latch and schedules one normal-disposition republish before the
+// daemon resumes heartbeats. The daemon exposes the latch as the
 // xpf_scheduler_republish_fail_open_stale gauge (#5669, #10906).
 func (s *Scheduler) RepublishFailClosed() bool {
 	s.mu.RLock()
@@ -390,6 +398,7 @@ func (s *Scheduler) CarryRecoveryStateFrom(previous *Scheduler, now time.Time) {
 	republishFirstFail := previous.republishFirstFail
 	republishFailures := previous.republishFailures
 	lastRepublishErr := previous.lastRepublishErr
+	republishRecoveryPending := previous.republishRecoveryPending
 	republishFailClosed := previous.republishFailClosed
 	previous.mu.RUnlock()
 
@@ -401,6 +410,7 @@ func (s *Scheduler) CarryRecoveryStateFrom(previous *Scheduler, now time.Time) {
 	s.republishFirstFail = republishFirstFail
 	s.republishFailures = republishFailures
 	s.lastRepublishErr = lastRepublishErr
+	s.republishRecoveryPending = republishRecoveryPending
 	s.republishFailClosed = republishFailClosed
 	if republishFailClosed || (!unsafeUntil.IsZero() && now.Before(unsafeUntil)) {
 		for name := range s.active {

@@ -1,5 +1,7 @@
 package userspace
 
+import "github.com/psaab/xpf/pkg/config"
+
 // Scheduler-activation predicates shared by the snapshot builder and the
 // read-only show surfaces.
 // Split from policies.go (#4421) with no logic change.
@@ -13,6 +15,24 @@ func policyRuleInactive(schedulerName string, activeState map[string]bool) bool 
 	}
 	active, ok := activeState[schedulerName]
 	return !ok || !active
+}
+
+// policyRuleInactiveForAction applies the scheduler's fail-closed latch to
+// the policy action: deny/reject rules remain eligible while freshness is
+// latched unknown, but ordinary inactive and unavailable states stay inactive.
+func policyRuleInactiveForAction(
+	schedulerName string,
+	action config.PolicyAction,
+	activeState map[string]bool,
+	failClosed bool,
+) bool {
+	if failClosed && schedulerName != "" {
+		if active, ok := activeState[schedulerName]; ok && !active &&
+			(action == config.PolicyDeny || action == config.PolicyReject) {
+			return false
+		}
+	}
+	return policyRuleInactive(schedulerName, activeState)
 }
 
 // PolicyInactive reports whether a policy bound to schedulerName is

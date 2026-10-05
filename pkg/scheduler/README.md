@@ -154,11 +154,12 @@ without rebuilding a snapshot or advancing its generation. The scheduler
 does not heartbeat while a snapshot republish is pending, so a wedged
 publisher cannot keep stale scheduled permits alive.
 
-The Rust helper records heartbeat receipt with its monotonic clock. A
-scheduled rule remains eligible at exactly 300 s and is treated as inactive
-only when the lease is older than 300 s. Lease expiry evicts cache entries
-admitted by scheduled rules and causes established sessions to revalidate;
-it does not flush the whole flow cache or change snapshot generation.
+The Rust helper records heartbeat receipt with its monotonic clock. At exactly
+300 s the schedule disposition remains authoritative; only when the lease is
+older does the helper choose the deny-first interpretation: scheduled permits
+become ineligible, while scheduled denies/rejects remain eligible. Lease expiry
+evicts scheduled-permit cache entries and causes established sessions to
+revalidate; it does not flush the whole flow cache or change snapshot generation.
 Version zero (no heartbeat received) never expires, preserving compatibility
 with older Go publishers. An older helper rejects the new verb; Go ignores
 that best-effort refusal, so dataplane-side expiry requires a helper that
@@ -166,11 +167,12 @@ implements #11285.
 
 ## Bounded-age FAIL-OPEN-STALE escalation (#5669, #10906)
 
-The #3780 self-heal retries a failed republish every tick. Until it
-converges, the last snapshot remains stale. A helper implementing #11285
-stops honoring scheduled rules after five minutes without a heartbeat;
-helpers that predate #11285 cannot independently expire that stale state.
-The daemon still surfaces the retry failure through the stale-seconds gauge.
+The #3780 self-heal retries a failed republish every tick. Until it converges,
+the last snapshot remains stale. A helper implementing #11285 expires stale
+scheduled permits after five minutes without a heartbeat while preserving
+scheduled denies/rejects; helpers that predate #11285 cannot independently
+expire that stale state. The daemon still surfaces the retry failure through
+the stale-seconds gauge.
 
 Once the failure streak exceeds `RepublishFailClosedAge` (5 min ≈ five
 60 s ticks — long enough to absorb transient control-socket contention
@@ -180,22 +182,20 @@ promptly), the scheduler latches `republishFailClosed` and:
 - emits a **one-time** `slog.Warn` alarm that the last-known scheduled
   decision may remain enforced until its dataplane lease expires (or
   indefinitely on a helper predating #11285), and
-- forces **every scheduled policy to the `inactive` disposition** in the
-  authoritative active-state map on the next evaluation, and tries to republish
-  that all-inactive snapshot.
+- sets every scheduler inactive in the authoritative active-state map and tries to republish that state;
+- the userspace snapshot builder keeps latch-inactive scheduled `DENY`/`REJECT` rules eligible while scheduled permits remain inactive.
 
-**What this actually buys — and what it does NOT.** The forced-inactive
+**What this actually buys — and what it does NOT.** The latch-specific
 snapshot still uses the same `updateFn` channel whose failures define the
-streak, so it may not reach a persistently-wedged helper. The independent
-lease expires on a #11285 helper after the last successful heartbeat; it is
-not driven by the republish latch and does not depend on a snapshot update.
-This bounds stale scheduled-rule enforcement only on helpers that implement
-the lease protocol. A legacy helper that rejects the added verb retains the
-pre-#11285 limitation until its control channel recovers.
+streak, so it may not reach a persistently-wedged helper. On a #11285 helper,
+lease expiry uses an action-aware fallback: scheduled permits become
+ineligible, while scheduled denies/rejects remain eligible. A legacy helper
+that rejects the heartbeat verb cannot expire a stale permit if the latch
+snapshot also fails to reach it.
 
-Together, the republish latch and dataplane lease bound the silent
-fail-open window for scheduled permits on a current helper and convert it
-into a loud, observable inactive-state posture. Concretely it delivers:
+Together, the republish latch and dataplane lease bound stale scheduled
+permits while choosing the denying interpretation when freshness is unknown.
+Concretely they deliver:
 
 - **(a) a one-time loud alarm** (`slog.Warn`, "FAIL-OPEN-STALE") — the
   operator is told that scheduled permits may remain live until the lease
@@ -204,23 +204,19 @@ into a loud, observable inactive-state posture. Concretely it delivers:
   monitoring/alerting. `xpf_scheduler_republish_fail_closed` remains as a
   deprecated alias with the same value for existing alert expressions;
 - **(c) authoritative-state consistency** — `ActiveState()` / `IsActive()`
-  report scheduled policies **inactive**. The current helper independently
-  expires stale scheduled rules; a legacy helper may still enforce its
-  last-known permit until the channel recovers;
-- **(d) inactive-snapshot-first recovery** — when the republish recovers the
-  scheduler first publishes the all-inactive snapshot and clears the latch,
-  and only the **next** tick republishes the true (possibly reopened)
-  window. The helper receives the inactive scheduled-policy snapshot before
-  any reopened permit, so recovery cannot briefly reopen a stale permit.
+  report schedulers inactive, while the current userspace builder preserves
+  latch-inactive scheduled denies/rejects and leaves permits inactive;
+- **(d) ordered recovery** — after a latch snapshot succeeds, the scheduler
+  clears the latch and forces exactly one normal-disposition republish before
+  returning to heartbeats. That removes the latch's deny override when a
+  window is closed; a legitimately open window can then republish active
+  without reopening a stale permit first.
 
-The latch clears on the next **successful** republish, after which the true
-window state is republished and any legitimately-open permit reopens (no
-permanent false-deny). Because the latch engages **only** while a republish
-is failing — enforcement is already broken — it never marks a converged,
-genuinely-active window inactive (those have `republishPending == false`).
-`RepublishFailClosed()` exposes the latch; the daemon's
-`SchedulerRepublishFailClosed` reads **that same latch** (not a second
-daemon-side timer) and feeds it to the
+The latch clears on the next **successful** republish. Because it engages
+only while a republish is failing, it never marks a converged, genuinely
+active window inactive (`republishPending == false`). `RepublishFailClosed()`
+exposes the latch; the daemon's `SchedulerRepublishFailClosed` reads that
+same latch (not a second daemon-side timer) and feeds it to the
 `xpf_scheduler_republish_fail_open_stale` gauge (with the old gauge emitted
 as a deprecated alias), so the gauge reflects the scheduler's
 force-inactive/alarm decision exactly rather than approximately
@@ -236,13 +232,12 @@ streak — but operators editing schedulers during a control-socket outage
 should watch `xpf_scheduler_republish_failed`/`_stale_seconds`, which are not
 reset by the escalation logic itself.
 
-**Limitation (block-engage scope).** Lease expiry makes every
-`scheduler-name` rule ineligible in the policy walk; it cannot engage a
-scheduled deny whose activation snapshot never reached the helper. A deny
-that was active in the last snapshot is also made ineligible if its lease
-expires, because the helper cannot know the current schedule state without
-a heartbeat. A successful publish is therefore still required to engage a
-scheduled block or maintain its active state.
+**Limitation (block-engage scope).** Lease expiry cannot engage a scheduled
+deny/reject rule whose rule snapshot never reached the helper. For a
+scheduler-bound deny/reject already present in the snapshot, the helper keeps
+it eligible after expiry even if the last active-state bit was inactive;
+scheduled permits instead become ineligible. A fresh heartbeat or successful
+republish is required to restore the current time-window disposition.
 
 ## Callers
 

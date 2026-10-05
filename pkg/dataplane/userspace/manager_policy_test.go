@@ -268,7 +268,87 @@ func TestBuildPolicySnapshotsRoundTripsSchedulerInactiveAndRuleID(t *testing.T) 
 	}
 }
 
-func TestUpdatePolicyScheduleStatePublishesUserspaceSnapshot(t *testing.T) {
+func TestBuildPolicySnapshotsFailClosedLatchKeepsDenyingActionsEligible(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.Policies = []*config.ZonePairPolicies{{
+		FromZone: "trust",
+		ToZone:   "untrust",
+		Policies: []*config.Policy{
+			{
+				Name:          "scheduled-deny",
+				SchedulerName: "workhours",
+				Match: config.PolicyMatch{
+					SourceAddresses:      []string{"any"},
+					DestinationAddresses: []string{"any"},
+					Applications:         []string{"any"},
+				},
+				Action: config.PolicyDeny,
+			},
+			{
+				Name:          "scheduled-reject",
+				SchedulerName: "workhours",
+				Match: config.PolicyMatch{
+					SourceAddresses:      []string{"any"},
+					DestinationAddresses: []string{"any"},
+					Applications:         []string{"any"},
+				},
+				Action: config.PolicyReject,
+			},
+			{
+				Name:          "scheduled-permit",
+				SchedulerName: "workhours",
+				Match: config.PolicyMatch{
+					SourceAddresses:      []string{"any"},
+					DestinationAddresses: []string{"any"},
+					Applications:         []string{"any"},
+				},
+				Action: config.PolicyPermit,
+			},
+		},
+	}}
+	_, nameToID, err := buildAddressBookTableWithFeeds(cfg, nil)
+	if err != nil {
+		t.Fatalf("build address-book table: %v", err)
+	}
+
+	latchState := map[string]bool{"workhours": false}
+	latched, err := buildPolicySnapshotsWithAddressBookAndFailClosed(cfg, latchState, nil, nameToID, true)
+	if err != nil {
+		t.Fatalf("build latched policy snapshots: %v", err)
+	}
+	if len(latched) != 3 {
+		t.Fatalf("latched policy snapshot count = %d, want 3", len(latched))
+	}
+	if latched[0].Inactive {
+		t.Fatal("latch-inactive scheduled deny must remain eligible")
+	}
+	if latched[1].Inactive {
+		t.Fatal("latch-inactive scheduled reject must remain eligible")
+	}
+	if !latched[2].Inactive {
+		t.Fatal("latch-inactive scheduled permit must remain inactive")
+	}
+
+	normal, err := buildPolicySnapshotsWithAddressBookAndFailClosed(cfg, latchState, nil, nameToID, false)
+	if err != nil {
+		t.Fatalf("build normal inactive policy snapshots: %v", err)
+	}
+	if !normal[0].Inactive || !normal[1].Inactive || !normal[2].Inactive {
+		t.Fatalf("ordinary inactive scheduler must keep all actions inactive: deny=%t reject=%t permit=%t",
+			normal[0].Inactive, normal[1].Inactive, normal[2].Inactive)
+	}
+
+	unavailable, err := buildPolicySnapshotsWithAddressBookAndFailClosed(cfg, nil, nil, nameToID, true)
+	if err != nil {
+		t.Fatalf("build unavailable-state policy snapshots: %v", err)
+	}
+	if !unavailable[0].Inactive || !unavailable[1].Inactive || !unavailable[2].Inactive {
+		t.Fatalf("unavailable scheduler state must remain fail-closed: deny=%t reject=%t permit=%t",
+			unavailable[0].Inactive, unavailable[1].Inactive, unavailable[2].Inactive)
+	}
+}
+
+func TestUpdatePolicyScheduleStateWithLatchPublishesActionAwareSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	controlSock := filepath.Join(dir, "control.sock")
 	ln, err := net.Listen("unix", controlSock)
@@ -305,16 +385,38 @@ func TestUpdatePolicyScheduleStatePublishesUserspaceSnapshot(t *testing.T) {
 	cfg.Security.Policies = []*config.ZonePairPolicies{{
 		FromZone: "trust",
 		ToZone:   "untrust",
-		Policies: []*config.Policy{{
-			Name:          "scheduled-allow",
-			SchedulerName: "workhours",
-			Match: config.PolicyMatch{
-				SourceAddresses:      []string{"any"},
-				DestinationAddresses: []string{"any"},
-				Applications:         []string{"any"},
+		Policies: []*config.Policy{
+			{
+				Name:          "scheduled-deny",
+				SchedulerName: "workhours",
+				Match: config.PolicyMatch{
+					SourceAddresses:      []string{"any"},
+					DestinationAddresses: []string{"any"},
+					Applications:         []string{"any"},
+				},
+				Action: config.PolicyDeny,
 			},
-			Action: config.PolicyPermit,
-		}},
+			{
+				Name:          "scheduled-reject",
+				SchedulerName: "workhours",
+				Match: config.PolicyMatch{
+					SourceAddresses:      []string{"any"},
+					DestinationAddresses: []string{"any"},
+					Applications:         []string{"any"},
+				},
+				Action: config.PolicyReject,
+			},
+			{
+				Name:          "scheduled-permit",
+				SchedulerName: "workhours",
+				Match: config.PolicyMatch{
+					SourceAddresses:      []string{"any"},
+					DestinationAddresses: []string{"any"},
+					Applications:         []string{"any"},
+				},
+				Action: config.PolicyPermit,
+			},
+		},
 	}}
 	cfg.Schedulers = map[string]*config.SchedulerConfig{
 		"workhours": {Name: "workhours"},
@@ -327,7 +429,9 @@ func TestUpdatePolicyScheduleStatePublishesUserspaceSnapshot(t *testing.T) {
 	m.lastSnapshot = mustBuildSnapshot(t, cfg, config.UserspaceConfig{ControlSocket: controlSock}, 7, 0)
 	m.lastStatus.ConfigSnapshotProtocolVersion = ProtocolVersion
 
-	m.UpdatePolicyScheduleState(cfg, map[string]bool{"workhours": false})
+	if err := m.UpdatePolicyScheduleStateWithLatch(cfg, map[string]bool{"workhours": false}, true); err != nil {
+		t.Fatalf("publish fail-closed policy snapshot: %v", err)
+	}
 
 	select {
 	case <-done:
@@ -347,21 +451,30 @@ func TestUpdatePolicyScheduleStatePublishesUserspaceSnapshot(t *testing.T) {
 	if req.Snapshot.Generation <= 7 {
 		t.Fatalf("snapshot generation = %d, want > 7", req.Snapshot.Generation)
 	}
-	if len(req.Snapshot.Policies) != 1 {
-		t.Fatalf("policy count = %d, want 1", len(req.Snapshot.Policies))
+	if len(req.Snapshot.Policies) != 3 {
+		t.Fatalf("policy count = %d, want 3", len(req.Snapshot.Policies))
 	}
-	pol := req.Snapshot.Policies[0]
-	if pol.RuleID != "trust->untrust/scheduled-allow" {
-		t.Fatalf("policy rule_id = %q", pol.RuleID)
+	wantInactive := []bool{false, false, true}
+	for i, want := range wantInactive {
+		if got := req.Snapshot.Policies[i].Inactive; got != want {
+			t.Errorf("policy %q inactive = %t, want %t",
+				req.Snapshot.Policies[i].Name, got, want)
+		}
 	}
-	if pol.SchedulerName != "workhours" {
-		t.Fatalf("scheduler_name = %q", pol.SchedulerName)
+	if req.Snapshot.Policies[0].RuleID != "trust->untrust/scheduled-deny" {
+		t.Fatalf("policy rule_id = %q", req.Snapshot.Policies[0].RuleID)
 	}
-	if !pol.Inactive {
-		t.Fatalf("inactive = false, want true for inactive scheduler state")
+	if req.Snapshot.Policies[0].SchedulerName != "workhours" {
+		t.Fatalf("scheduler_name = %q", req.Snapshot.Policies[0].SchedulerName)
 	}
-	if m.lastSnapshot == nil || len(m.lastSnapshot.Policies) != 1 || !m.lastSnapshot.Policies[0].Inactive {
-		t.Fatalf("manager lastSnapshot did not keep inactive policy bit: %+v", m.lastSnapshot)
+	if m.lastSnapshot == nil || len(m.lastSnapshot.Policies) != 3 {
+		t.Fatalf("manager lastSnapshot did not retain three policies: %+v", m.lastSnapshot)
+	}
+	for i, want := range wantInactive {
+		if got := m.lastSnapshot.Policies[i].Inactive; got != want {
+			t.Errorf("manager lastSnapshot policy %q inactive = %t, want %t",
+				m.lastSnapshot.Policies[i].Name, got, want)
+		}
 	}
 }
 
