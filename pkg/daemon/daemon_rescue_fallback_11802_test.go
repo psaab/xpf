@@ -225,9 +225,9 @@ func TestClusteredRescueFallbackRequiresOfflinePromotion11802(t *testing.T) {
 		t.Fatalf("offline cluster restart: failClosed=%v err=%v", failClosed, err)
 	}
 	active := rebootStore.ActiveConfig()
-	if active == nil || active.Chassis.Cluster == nil {
-		t.Fatalf("offline restart did not import the clustered config required by startup cluster-manager construction: active=%v",
-			active)
+	if !reboot.constructClusterManager(active) || reboot.cluster == nil {
+		t.Fatalf("offline restart did not construct the HA manager from active config: active=%v manager=%v",
+			active, reboot.cluster)
 	}
 }
 

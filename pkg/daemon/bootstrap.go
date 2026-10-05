@@ -699,13 +699,13 @@ func (d *Daemon) runBootstrapTeardownSteps() []bootstrapTeardownStep {
 // clearFRRForFailClosedBoot is the #1993 fail-closed boot refinement: on a
 // boot where the previously-committed config is unavailable for takeover or a
 // valid never-committed rescue fallback is selected (#11802), the last-good
-// `! BEGIN/END BPFRX MANAGED CONFIG`
-// systemd service: if the node comes up with NO live dataplane attachments, it
-// starts from that persisted file, forms BGP/OSPF/IS-IS peerings, and
-// re-advertises last-good prefixes for routes this unarmed node cannot
-// forward — a silent transit blackhole. Clearing ONLY the managed section
-// drops those peerings so upstream/peers fail over to the HA partner instead
-// of routing transit into a blackhole.
+// `! BEGIN/END BPFRX MANAGED CONFIG` section is stored in persisted `frr.conf`
+// and read by the independent FRR systemd service. If the node has NO live
+// dataplane attachments, it starts from that file, forms BGP/OSPF/IS-IS
+// peerings, and re-advertises last-good prefixes for routes this unarmed
+// node cannot forward — a silent transit blackhole. Clearing ONLY the managed
+// section drops those peerings so upstream/peers fail over to the HA partner
+// instead of routing transit into a blackhole.
 //
 // This deliberately runs JUST the FRR-clear step of enterBootstrapMode()'s
 // teardown — NOT the .network/.link removal or the link-cycle. The cold-boot

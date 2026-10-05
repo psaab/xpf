@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/ddns"
@@ -25,6 +26,18 @@ import (
 	"github.com/psaab/xpf/pkg/rpm"
 	"github.com/psaab/xpf/pkg/vrrp"
 )
+
+// constructClusterManager is the boot-only gate for creating the HA manager.
+// Keep the config check and assignment together so startup and recovery tests
+// exercise the same construction path.
+func (d *Daemon) constructClusterManager(cfg *config.Config) bool {
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return false
+	}
+	cc := cfg.Chassis.Cluster
+	d.cluster = cluster.NewManager(cc.NodeID, cc.ClusterID)
+	return true
+}
 
 // initManagers eagerly constructs the daemon's subsystem managers (routing,
 // FRR, IPsec, RPM, ip-monitoring, event-options engine, DHCP, cluster, and
@@ -171,9 +184,8 @@ func (d *Daemon) initManagers(failClosed bool) error {
 	d.ipmon.Start()
 
 	// Initialize cluster manager if configured (heartbeat/sync started after applyConfig).
-	if cfg := d.store.ActiveConfig(); cfg != nil && cfg.Chassis.Cluster != nil {
+	if cfg := d.store.ActiveConfig(); d.constructClusterManager(cfg) {
 		cc := cfg.Chassis.Cluster
-		d.cluster = cluster.NewManager(cc.NodeID, cc.ClusterID)
 		d.cluster.SetSoftwareVersion(d.opts.Version)
 		// #9530: a commit made while the peer is unreachable is marked unshared.
 		d.store.SetPeerReachableFn(d.configPeerReachable)

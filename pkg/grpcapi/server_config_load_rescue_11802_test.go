@@ -128,11 +128,6 @@ system {
 	store := authzStore5278(t, restrictedConfig)
 	path := store.ConfigPath()
 	const secret = "BENIGN-REVIEW-SECRET-12129"
-	malformed := "set system host-name rescue-line-one\nbogus " + secret + " offline line 9, column 2"
-	if err := os.WriteFile(filepath.Join(filepath.Dir(path), configstore.RescueConfigBase),
-		[]byte(malformed), 0o600); err != nil {
-		t.Fatalf("write malformed flat rescue: %v", err)
-	}
 	client := runPrimaryListener(t, Config{
 		Store:        store,
 		PeerLookupFn: fixedPeerUID5278(authzUIDOperator),
@@ -142,22 +137,44 @@ system {
 		t.Fatalf("restricted class EnterConfigure: %v", err)
 	}
 	before := store.ShowCandidateSet()
-	_, err := client.Load(ctx, &pb.LoadRequest{Mode: "rescue"})
-	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("malformed flat rescue error = %v, want InvalidArgument", err)
-	}
-	if strings.Contains(err.Error(), secret) {
-		t.Fatalf("gRPC parse error leaked rescue secret %q: %v", secret, err)
-	}
-	if !strings.Contains(err.Error(), "line 2") || strings.Contains(err.Error(), "line 9") {
-		t.Fatalf("gRPC parse error reported the wrong flat-file source position: %v", err)
-	}
-	if got := store.ShowCandidateSet(); got != before {
-		t.Fatalf("malformed flat rescue changed candidate: before=%q after=%q", before, got)
-	}
-	if redacted, redErr := store.LoadRescueConfigRedacted(); redErr == nil ||
-		strings.Contains(redErr.Error(), secret) || strings.Contains(redacted, secret) ||
-		!strings.Contains(redErr.Error(), "line 2") || strings.Contains(redErr.Error(), "line 9") {
-		t.Fatalf("malformed flat rescue redaction leaked secret or reported the wrong position: text=%q err=%v", redacted, redErr)
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{
+			name:    "content line spoof",
+			content: "set system host-name rescue-line-one\nbogus " + secret + " offline line 9, column 2",
+		},
+		{
+			name: "nested parser position",
+			content: "set system host-name rescue-line-one\n" +
+				"set security ike policy rescue pre-shared-key ascii-text \"" + secret,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(filepath.Dir(path), configstore.RescueConfigBase),
+				[]byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write malformed flat rescue: %v", err)
+			}
+			_, err := client.Load(ctx, &pb.LoadRequest{Mode: "rescue"})
+			if status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("malformed flat rescue error = %v, want InvalidArgument", err)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("gRPC parse error leaked rescue secret %q: %v", secret, err)
+			}
+			if !strings.Contains(err.Error(), "line 2") || strings.Contains(err.Error(), "line 9") {
+				t.Fatalf("gRPC parse error reported the wrong flat-file source position: %v", err)
+			}
+			if got := store.ShowCandidateSet(); got != before {
+				t.Fatalf("malformed flat rescue changed candidate: before=%q after=%q", before, got)
+			}
+			if redacted, redErr := store.LoadRescueConfigRedacted(); redErr == nil ||
+				strings.Contains(redErr.Error(), secret) || strings.Contains(redacted, secret) ||
+				!strings.Contains(redErr.Error(), "line 2") || strings.Contains(redErr.Error(), "line 9") {
+				t.Fatalf("malformed flat rescue redaction leaked secret or reported the wrong position: text=%q err=%v",
+					redacted, redErr)
+			}
+		})
 	}
 }
