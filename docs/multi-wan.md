@@ -538,17 +538,32 @@ the loss userspace cluster baseline (`docs/ha-cluster-userspace.conf`),
 using the two WAN VLANs as distinguishable egress paths: ISP-A =
 `reth0.50` (gw 172.16.50.1, baseline master default), ISP-B =
 `reth0.80` (gw 172.16.80.1 / 2001:559:8585:80::1, FBF instance).
-`test/incus/test-fbf-steering.sh` applies it atomically (commit check
-→ commit → validate → rollback), then asserts: the ISP-B kernel table
-  (discovered via the PBR rule band 29000-29999) holds the instance default;
-the main table is not polluted; DSCP-af31 pings from the LAN host move
-the `fbf-steer`/`to-isp-b` hit counter while unmarked control pings do
-not; and `show services ip-monitoring status` lists `fbf-fallback`.
-Override `FBF_ISP_B_GW4` when 172.16.80.1 is not a live router in the
-target environment. Uplink-failure path divergence (blackhole the
-ISP-B gateway upstream, watch `fbf-fallback` repoint `ISP-B.inet.0`)
-remains a manual smoke step — the harness cannot mutate the provider
-side.
+`test/incus/test-fbf-steering.sh` is exposed as `make
+test-fbf-steering`. It retains the healthy IPv4/IPv6 steering checks, then
+tests IPv4 fallback by poisoning only the firewall's ISP-B neighbor entry.
+The gate requires `fbf-fallback` to report FAIL and its `ISP-B` route
+action for `0.0.0.0/0` via ISP-A to report APPLIED; `FormatStatus` renders
+the instance token as `ISP-B` (the kernel RIB is `ISP-B.inet.0`). The IPv4
+PBR table must then contain the exclusive ISP-A default. At the VLAN-80
+peer, fresh marked IDs must be captured with AF31 DSCP and the ISP-A
+interface-SNAT source; the independent unmarked control must have DSCP 0
+and ISP-B interface-SNAT source. The marked probes also require replies.
+The peer's actual return path to ISP-A's interface-SNAT address must use
+the VLAN-80 capture interface. Setup assigns the peer its VLAN-80 address
+but does not install a dedicated route back to ISP-A; the operator's
+topology must provide a usable path. The gate performs only a read-only
+`ip -4 route get` preflight (and VOIDs unless it selects the capture
+interface); it does not provision routes, and that lookup is not packet
+proof. A PASS still requires captured replies to the marked probes.
+The harness restores the exact pre-test config and neighbor predecessor.
+The make recipe records the run through the `smoke-cells` adapter and
+requires executable attestation. Missing prerequisites are VOID, while a
+measured transition or traffic witness that disagrees is FAIL. IPv6 remains
+a healthy-steering check only; this gate does not measure IPv6 failover.
+The loss lab has one provider, so the reversible IPv4 neighbor-cache test
+does not establish provider-independent failover or dual-path throughput.
+No live fallback result is recorded until an operator-authorized run writes
+its ledger row.
 
 ## NAT interplay (PR-3)
 

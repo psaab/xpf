@@ -15,6 +15,7 @@ test-active-active no rows in the tracked ledger; needs a recorded per-RG failov
 test-chained-crash no rows in the tracked ledger; needs a recorded chained-crash run (cluster + iperf3 server)
 test-connectivity no rows in the tracked ledger; needs a recorded run (read gate; F-158 lock-idle probe lands in #9922)
 test-double-failover no rows in the tracked ledger; needs a recorded double-failover run (cluster + iperf3 server)
+test-fbf-steering no rows in the tracked ledger; needs an operator-authorized live IPv4 fallback transition and correlated peer-capture run on the loss cluster
 test-private-rg no rows in the tracked ledger; needs a recorded private-RG election run on the loss cluster
 test-restart-connectivity no rows in the tracked ledger; needs a recorded daemon-restart run (cluster + iperf3 server)
 test-stress-failover no rows in the tracked ledger; needs a recorded stress-failover run (cluster + iperf3 server)

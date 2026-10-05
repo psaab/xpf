@@ -232,6 +232,242 @@ fbf_table_holds_default() {
 	_fbf_default_route_gateway_status "$gw" "$defaults" "$nexthops"
 }
 
+# fbf_ipmon_policy_state <policy-name> <show-services-ip-monitoring-status>
+#
+# Print the one unambiguous status for POLICY; return nonzero when the report
+# omitted it, duplicated it, or changed shape. UNKNOWN is a valid status value.
+fbf_ipmon_policy_state() {
+	local policy="${1:-}" output="${2:-}" state
+	[[ -n "${policy//[[:space:]]/}" && -n "${output//[[:space:]]/}" ]] || return 1
+	state="$(awk -v policy="$policy" '
+		$1 == "Policy" && $2 == "-" && $3 == policy {
+			count++
+			if ($0 ~ /\(Status: (PASS|FAIL|UNKNOWN)\)/) {
+				line = $0
+				sub(/^.*\(Status: /, "", line)
+				sub(/\).*$/, "", line)
+				state = line
+			}
+		}
+		END { if (count != 1 || state == "") exit 1; print state }
+	' <<<"$output")" || return 1
+	printf '%s\n' "$state"
+}
+
+# fbf_ipmon_route_action_present <instance> <prefix> <next-hop> <status> <text>
+#
+# Require exactly one row for the exact FBF route action. A neighboring
+# instance, prefix, gateway, PENDING state, or duplicate is not evidence.
+fbf_ipmon_route_action_present() {
+	local instance="${1:-}" prefix="${2:-}" next_hop="${3:-}" status="${4:-}" output="${5:-}"
+	[[ -n "${instance//[[:space:]]/}" && -n "${prefix//[[:space:]]/}" &&
+	    -n "${next_hop//[[:space:]]/}" && -n "${status//[[:space:]]/}" ]] || return 1
+	awk -v instance="$instance" -v prefix="$prefix" -v next_hop="$next_hop" -v status="$status" '
+		$1 == instance && $2 == prefix && $3 == next_hop && $4 == status { matches++ }
+		END { exit !(matches == 1) }
+	' <<<"$output"
+}
+
+# fbf_table_transition_verdict <old-gateway> <new-gateway> <routes> [nexthops]
+#
+# Print PASS only when readable, complete route evidence has the new default
+# and no longer has the old one. UNKNOWN means the observation is not
+# parseable/resolvable; FAIL is a measured incomplete or contradictory
+# transition (including ECMP containing both gateways).
+fbf_table_transition_verdict() {
+	local old_gateway="${1:-}" new_gateway="${2:-}" routes="${3:-}" nexthops="${4:-}"
+	local defaults old_status old_rc new_status new_rc
+	if [[ -z "${old_gateway//[[:space:]]/}" || -z "${new_gateway//[[:space:]]/}" ||
+	    "$old_gateway" == "$new_gateway" || -z "${routes//[[:space:]]/}" ]]; then
+		printf 'UNKNOWN %s\n' "route transition evidence is missing or ambiguous"
+		return 0
+	fi
+	defaults="$(_fbf_default_routes "$routes")"
+	if ! _fbf_default_route_text_valid "$defaults"; then
+		printf 'UNKNOWN %s\n' "route table has no parseable default route"
+		return 0
+	fi
+	if _fbf_default_route_gateway_status "$old_gateway" "$defaults" "$nexthops"; then
+		old_status=0
+	else
+		old_rc=$?
+		old_status=1
+		if (( old_rc == 2 )); then
+			printf 'UNKNOWN %s\n' "old gateway nexthop graph is unresolved"
+			return 0
+		fi
+	fi
+	if _fbf_default_route_gateway_status "$new_gateway" "$defaults" "$nexthops"; then
+		new_status=0
+	else
+		new_rc=$?
+		new_status=1
+		if (( new_rc == 2 )); then
+			printf 'UNKNOWN %s\n' "new gateway nexthop graph is unresolved"
+			return 0
+		fi
+	fi
+	if (( old_status == 1 && new_status == 0 )); then
+		printf 'PASS %s\n' "default moved from ${old_gateway} to ${new_gateway}"
+	elif (( old_status == 0 && new_status == 0 )); then
+		printf 'FAIL %s\n' "both old gateway ${old_gateway} and new gateway ${new_gateway} remain in the default route"
+	elif (( old_status == 0 )); then
+		printf 'FAIL %s\n' "old gateway ${old_gateway} remains; fallback ${new_gateway} is not exclusive"
+	else
+		printf 'FAIL %s\n' "fallback gateway ${new_gateway} is absent"
+	fi
+}
+
+# fbf_neighbor_snapshot <gateway> <device> <ip -j -details neigh output>
+#
+# Canonicalize one exact neighbor row for reversible mutation. A valid [] is
+# reported as ABSENT; malformed, duplicate, mismatched, or unknown state/flags
+# are rejected before the caller changes the kernel cache.
+fbf_neighbor_snapshot() {
+	local gateway="${1:-}" device="${2:-}" json="${3:-}"
+	[[ -n "${gateway//[[:space:]]/}" && -n "${device//[[:space:]]/}" ]] || return 1
+	python3 -c '
+import json, re, sys
+
+gateway, device = sys.argv[1:3]
+try:
+    rows = json.load(sys.stdin)
+except Exception as exc:
+    print("invalid neighbor JSON: " + str(exc), file=sys.stderr)
+    raise SystemExit(1)
+if not isinstance(rows, list):
+    raise SystemExit("neighbor JSON is not an array")
+if not rows:
+    print("ABSENT")
+    raise SystemExit(0)
+if any(not isinstance(row, dict) for row in rows):
+    raise SystemExit("neighbor query returned a non-object row")
+if any(row.get("dst") != gateway or row.get("dev") != device for row in rows):
+    raise SystemExit("neighbor row does not match requested gateway/device")
+if len(rows) != 1:
+    raise SystemExit("neighbor query did not return exactly one target row")
+row = rows[0]
+state = row.get("state")
+if isinstance(state, list):
+    if len(state) != 1:
+        raise SystemExit("neighbor row has ambiguous NUD state")
+    state = state[0]
+if not isinstance(state, str) or state not in {
+    "NONE", "PERMANENT", "NOARP", "REACHABLE", "STALE", "DELAY", "PROBE",
+    "INCOMPLETE", "FAILED",
+}:
+    raise SystemExit("neighbor row has unsupported NUD state")
+lladdr = row.get("lladdr", "")
+if lladdr is None:
+    lladdr = ""
+if lladdr and not re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", lladdr):
+    raise SystemExit("neighbor row has invalid link-layer address")
+if state in {"PERMANENT", "NOARP", "REACHABLE", "STALE", "DELAY", "PROBE"} and not lladdr:
+    raise SystemExit("stable neighbor row is missing its link-layer address")
+flags = row.get("flags", [])
+if not isinstance(flags, list) or any(not isinstance(flag, str) for flag in flags):
+    raise SystemExit("neighbor row has unsupported flags encoding")
+allowed = {"extern_learn", "extern_valid", "managed", "router", "use"}
+if any(flag not in allowed for flag in flags):
+    raise SystemExit("neighbor row has an unsupported flag")
+print("PRESENT|{}|{}|{}".format(lladdr.lower(), state, ",".join(sorted(set(flags)))))
+' "$gateway" "$device" <<<"$json"
+}
+
+# fbf_restore_neighbor <gateway> <device> <lladdr-or-empty> <NUD> <csv-flags> [command-prefix...]
+#
+# Restore the modifiable neighbor attributes through iproute2. The optional
+# command prefix lets the gate run the same argv remotely while the netns smoke
+# exercises it locally with real `ip`.
+fbf_restore_neighbor() {
+	(( $# >= 5 )) || return 1
+	local gateway="$1" device="$2" lladdr="$3" nud="$4" flags_csv="$5"
+	shift 5
+	local -a ip_args flags
+	nud="${nud,,}"
+	case "$nud" in
+		none|permanent|noarp|reachable|stale|delay|probe|incomplete|failed) ;;
+		*) printf 'unsupported neighbor NUD state: %s\n' "${nud:-missing}" >&2; return 1 ;;
+	esac
+	ip_args=("$@" ip -4 neigh replace "$gateway" dev "$device")
+	[[ -z "$lladdr" ]] || ip_args+=(lladdr "$lladdr")
+	ip_args+=(nud "$nud")
+	if [[ -n "$flags_csv" ]]; then
+		IFS=, read -r -a flags <<<"$flags_csv"
+		ip_args+=("${flags[@]}")
+	fi
+	"${ip_args[@]}"
+}
+
+# fbf_peer_fallback_verdict <destination> <minimum> <marked-id> <control-id>
+#   <expected-marked-source> <expected-control-source> <tcpdump-output>
+#
+# Correlate the two fresh IPv4 flows independently. Marked traffic must use
+# ISP-A's interface-mode SNAT after fallback; the unmarked control follows the
+# main table's connected ISP-B route and must use that interface's source.
+fbf_peer_fallback_verdict() {
+	local destination="${1:-}" minimum="${2:-}" marked_id="${3:-}" control_id="${4:-}"
+	local expected_marked_source="${5:-}" expected_control_source="${6:-}" output="${7:-}"
+	local minimum_num stats marked controls wrong_marked_dscp wrong_control_dscp
+	local wrong_marked_source wrong_control_source
+	local -r numeric_id_re='^[0-9]+$'
+	local -r ipv4_re='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+	if [[ ! "$destination" =~ $ipv4_re || ! "$expected_marked_source" =~ $ipv4_re ||
+	    ! "$expected_control_source" =~ $ipv4_re ||
+	    ! "$minimum" =~ $numeric_id_re || ! "$marked_id" =~ $numeric_id_re ||
+	    ! "$control_id" =~ $numeric_id_re || "$marked_id" == "$control_id" ]] ||
+	    (( 10#$minimum == 0 || 10#$marked_id == 0 || 10#$marked_id > 65535 ||
+	       10#$control_id == 0 || 10#$control_id > 65535 )); then
+		printf 'FAIL %s\n' "fallback peer capture: invalid destination, sources, minimum or ICMP identifier"
+		return 0
+	fi
+	minimum_num=$((10#$minimum))
+	stats="$(awk -v destination="$destination" -v marked_id="$marked_id" \
+	    -v control_id="$control_id" -v expected_marked_source="$expected_marked_source" \
+	    -v expected_control_source="$expected_control_source" '
+		/ICMP echo request/ && index($0, " > " destination ":") {
+			source = substr($0, 1, index($0, " > " destination ":") - 1)
+			sub(/^.*[[:space:]]/, "", source)
+			is_marked_dscp = /IP \(tos 0x6[89ab][,)]/
+			is_control_dscp = /IP \(tos 0x0[,)]/ || /IP \(tos 0x0[0-3][,)]/
+			if (index($0, "ICMP echo request, id " marked_id ",") > 0) {
+				marked++
+				if (!is_marked_dscp) wrong_marked_dscp = 1
+				if (source != expected_marked_source) wrong_marked_source = 1
+			}
+			if (index($0, "ICMP echo request, id " control_id ",") > 0) {
+				controls++
+				if (!is_control_dscp) wrong_control_dscp = 1
+				if (source != expected_control_source) wrong_control_source = 1
+			}
+		}
+		END {
+			print marked+0, controls+0, wrong_marked_dscp+0, wrong_control_dscp+0,
+			    wrong_marked_source+0, wrong_control_source+0
+		}
+	' <<<"$output")"
+	read -r marked controls wrong_marked_dscp wrong_control_dscp \
+	    wrong_marked_source wrong_control_source <<<"$stats"
+	if (( wrong_marked_dscp || wrong_control_dscp )); then
+		printf 'FAIL %s\n' "fallback peer capture saw a correlated request with the wrong DSCP class"
+		return 0
+	fi
+	if (( wrong_marked_source )); then
+		printf 'FAIL %s\n' "correlated marked requests did not use expected ISP-A interface-SNAT source ${expected_marked_source}"
+		return 0
+	fi
+	if (( wrong_control_source )); then
+		printf 'FAIL %s\n' "correlated unmarked controls did not use expected ISP-B interface-SNAT source ${expected_control_source}"
+		return 0
+	fi
+	if (( marked < minimum_num || controls < minimum_num )); then
+		printf 'FAIL %s\n' "fallback peer capture saw ${marked} marked and ${controls} unmarked correlated IPv4 requests; needs at least ${minimum_num} of each"
+		return 0
+	fi
+	printf 'PASS %s\n' "fallback peer capture correlated ${marked} marked requests from ISP-A and ${controls} unmarked controls from ISP-B"
+}
+
+
 # fbf_ping_reply_verdict <minimum-replies> <ping-output>
 #
 # A term hit proves only that a packet matched the rule. A reply from the
