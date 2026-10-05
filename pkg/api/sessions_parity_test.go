@@ -67,6 +67,14 @@ func (d *paritySessionDP) GetSessionV6(dataplane.SessionKeyV6) (dataplane.Sessio
 // name assertions.
 func TestRESTSessionParityWithGRPC(t *testing.T) {
 	base := monotonicSeconds()
+	created := uint64(1)
+	if base > 1000 {
+		created = base - 1000
+	}
+	lastSeen := uint64(1)
+	if base > 2 {
+		lastSeen = base - 2
+	}
 	dp := &paritySessionDP{
 		Manager: dataplane.New(),
 		apply: &dataplane.ApplyResult{
@@ -99,8 +107,8 @@ func TestRESTSessionParityWithGRPC(t *testing.T) {
 		RevPackets:  0,
 		RevBytes:    0,
 		SessionID:   0xABCD,
-		Created:     base - 1000, // created long ago
-		LastSeen:    base - 2,    // refreshed 2s ago (active)
+		Created:     created,  // as old as boot permits on a fresh runner
+		LastSeen:    lastSeen, // refreshed 2s ago when boot uptime permits
 		Flags:       dataplane.SessFlagSNAT | dataplane.SessFlagDNAT,
 		NATSrcIP:    natIPv4(192, 0, 2, 1),
 		NATSrcPort:  ntohs(50000),
@@ -139,9 +147,17 @@ func TestRESTSessionParityWithGRPC(t *testing.T) {
 	}
 	se := resp.Sessions[0]
 
-	// H1: age is wall age from Created (~1000s), idle is small.
-	if se.Age < 500 {
-		t.Errorf("H1: age_seconds = %d, want >=500 (computed from Created)", se.Age)
+	// H1: age is wall age from Created (~1000s, or as old as this host's
+	// monotonic clock permits on a fresh runner), while idle remains small.
+	minAge := uint64(500)
+	if base <= 500 {
+		minAge = 0
+		if base > 0 {
+			minAge = base - 1
+		}
+	}
+	if se.Age < int64(minAge) {
+		t.Errorf("H1: age_seconds = %d, want >=%d (computed from Created)", se.Age, minAge)
 	}
 	if se.Idle <= 0 || se.Idle > 60 {
 		t.Errorf("H1: idle_seconds = %d, want a small positive value (from LastSeen)", se.Idle)
