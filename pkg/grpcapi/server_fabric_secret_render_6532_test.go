@@ -76,6 +76,9 @@ const (
 )
 
 var fabricSecretConfig = []string{
+	// The staged BGP authentication secret must be part of a committable BGP
+	// config: global autonomous-system satisfies the current router-AS gate.
+	"set routing-options autonomous-system 65000",
 	"set security ike policy pol1 pre-shared-key ascii-text FAB6532-IKE-PSK",
 	"set security ipsec vpn site-a pre-shared-key FAB6532-IPSEC-VPN-PSK",
 	"set security ipsec vpn site-a bind-interface st0",
