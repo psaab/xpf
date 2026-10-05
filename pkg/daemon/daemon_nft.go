@@ -601,9 +601,9 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrsFromSnapshots(cfg, snaps1)
 	unzonedIngressNetdevs, unzonedIngressVRFSlaves := dpuserspace.BuildUnzonedHostInboundIngressNetdevsFromSnapshots(cfg, snaps1, views)
 	// #10751/#11577: preserve the unzoned no-lease guard and add persistent
-	// per-family guards for DHCP units in enforcing zones. The zoned guard
-	// remains installed while DHCP intent remains, until intent is removed or
-	// effective zone policy opens host-inbound traffic.
+	// per-family guards for DHCP units in enforcing zones. A zoned guard remains
+	// installed while DHCP intent remains, until intent is removed or effective
+	// host-inbound policy becomes the `any-service` full admit.
 	dhcpBackstops := dpuserspace.BuildDHCPHostInboundBackstopNetdevs(cfg, snaps1)
 	unleasedV4, unleasedV6 := dhcpBackstops.V4, dhcpBackstops.V6
 	// #3698: surface the transition in address-scoped policy publication. A
@@ -1269,11 +1269,11 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 // empty scope produces a zero-drop table shell. Split out as a pure function so
 // tests can parse-check the full payload without invoking nft. A syntax error
 // rejects the WHOLE payload and retains only the exact prior generation, if any.
-func buildHostInboundFencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6 []string, vrfBackstop dhcpBackstopVRFLists) string {
+func buildHostInboundFencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6 []string, vrfBackstop dhcpBackstopLists) string {
 	return buildHostInboundFencePayloadWithIngress(views, unzonedV4, unzonedV6, wgListenPorts, wgZonePorts, unleasedV4, unleasedV6, nil, nil, vrfBackstop)
 }
 
-func buildHostInboundFencePayloadWithIngress(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string, vrfBackstop dhcpBackstopVRFLists) string {
+func buildHostInboundFencePayloadWithIngress(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string, vrfBackstop dhcpBackstopLists) string {
 	return buildFenceTablePayload(xnft.HostInboundTableName, nftHostInboundPriority, views, unzonedV4, unzonedV6, wgListenPorts, wgZonePorts, unleasedV4, unleasedV6, true, unzonedIngressNetdevs, unzonedIngressVRFSlaves, vrfBackstop)
 }
 
@@ -1288,7 +1288,7 @@ func buildHostInboundFencePayloadWithIngress(views []dpuserspace.ZoneHostInbound
 // InstallLo0ColdBootFence is bit-equivalent. Empty address inputs intentionally
 // produce a zero-drop shell.
 func buildLo0FencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgZonePorts map[string][]uint16) string {
-	return buildFenceTablePayload(xnft.Lo0TableName, nftLo0FilterPriority, views, unzonedV4, unzonedV6, nil, wgZonePorts, nil, nil, false, nil, nil, dhcpBackstopVRFLists{})
+	return buildFenceTablePayload(xnft.Lo0TableName, nftLo0FilterPriority, views, unzonedV4, unzonedV6, nil, wgZonePorts, nil, nil, false, nil, nil, dhcpBackstopLists{})
 }
 
 // buildFenceTablePayload renders a fail-closed cold-boot fence into the named
@@ -1305,7 +1305,7 @@ func buildLo0FencePayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, un
 // only the host-inbound fence additionally drops catalog groups on represented
 // ingress before established accepts. Empty address inputs still permit those
 // ingress-scoped group drops; a truly empty scope emits no drops.
-func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6 []string, guardStaleReplies bool, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string, vrfBackstop dhcpBackstopVRFLists) string {
+func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6 []string, guardStaleReplies bool, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string, vrfBackstop dhcpBackstopLists) string {
 	var rules []string
 	rules = append(rules, "add table inet "+tableName)
 	rules = append(rules, "delete table inet "+tableName)
@@ -1588,7 +1588,7 @@ func intersectHostInboundAddresses(addrs, candidates []string) []string {
 // excludes shared, so pre-handoff refusal is unchanged). Callers must only invoke
 // this with a non-empty uncovered set (an all-empty payload would be a pointless
 // zero-drop shell); an empty set instead deletes the table.
-func buildHostInboundGapFencePayload(views []dpuserspace.ZoneHostInboundView, uncoveredV4, uncoveredV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6, sharedV4, sharedV6, lifelineNetdevs []string, vrfBackstop dhcpBackstopVRFLists, retainedV4, retainedV6 []string) string {
+func buildHostInboundGapFencePayload(views []dpuserspace.ZoneHostInboundView, uncoveredV4, uncoveredV6 []string, wgListenPorts []uint16, wgZonePorts map[string][]uint16, unleasedV4, unleasedV6, sharedV4, sharedV6, lifelineNetdevs []string, vrfBackstop dhcpBackstopLists, retainedV4, retainedV6 []string) string {
 	var rules []string
 	rules = append(rules, "add table inet xpf_hostinbound_gap")
 	rules = append(rules, "delete table inet xpf_hostinbound_gap")
@@ -1883,14 +1883,14 @@ func hostInboundHasIngressScope(views []dpuserspace.ZoneHostInboundView, unzoned
 //     removes an installed accept on the next render. The F3 window is closed by
 //     construction, not by probe.
 func buildHostInboundFilterPayload(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgZonePorts map[string][]uint16, dataplaneFresh bool) string {
-	return buildHostInboundFilterPayloadWithOverlay(views, unzonedV4, unzonedV6, programs, wgZonePorts, dataplaneFresh, nil, nil, nil, dhcpBackstopVRFLists{})
+	return buildHostInboundFilterPayloadWithOverlay(views, unzonedV4, unzonedV6, programs, wgZonePorts, dataplaneFresh, nil, nil, nil, dhcpBackstopLists{})
 }
 
-func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgZonePorts map[string][]uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay, unleasedV4, unleasedV6 []string, vrfBackstop dhcpBackstopVRFLists) string {
+func buildHostInboundFilterPayloadWithOverlay(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6 []string, programs []dpuserspace.JunosHostProgram, wgZonePorts map[string][]uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay, unleasedV4, unleasedV6 []string, vrfBackstop dhcpBackstopLists) string {
 	return buildHostInboundFilterPayloadWithUnzonedIngress(views, unzonedV4, unzonedV6, nil, nil, programs, wgZonePorts, dataplaneFresh, overlay, unleasedV4, unleasedV6, vrfBackstop)
 }
 
-func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string, programs []dpuserspace.JunosHostProgram, wgZonePorts map[string][]uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay, unleasedV4, unleasedV6 []string, vrfBackstop dhcpBackstopVRFLists) string {
+func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHostInboundView, unzonedV4, unzonedV6, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string, programs []dpuserspace.JunosHostProgram, wgZonePorts map[string][]uint16, dataplaneFresh bool, overlay *xnft.HostInputFenceOverlay, unleasedV4, unleasedV6 []string, vrfBackstop dhcpBackstopLists) string {
 	// #11076: the stale-reply guards are scope-independent (port set only);
 	// derive the flat set from the zone map. Nothing else in this builder
 	// may use flat ports — WireGuard admission is per-zone below.
@@ -2596,7 +2596,7 @@ func emitUnzonedHostInboundDeny(rules *[]string, family string, addrs []string) 
 	*rules = append(*rules, "    "+family+" daddr "+nftAddrSet(addrs)+" counter name \""+cn+"\" drop")
 }
 
-type dhcpBackstopVRFLists struct {
+type dhcpBackstopLists struct {
 	v4         []string
 	v6         []string
 	admitV6    []string
@@ -2606,33 +2606,34 @@ type dhcpBackstopVRFLists struct {
 // emitDHCPBackstopHostInboundDeny appends per-family LAST-placed DHCP
 // interface drops. Unzoned units are included only before their lease; DHCP
 // units in enforcing zones stay included after address appearance until DHCP
-// intent is removed or the effective zone policy allows all. Ordinary
+// intent is removed or effective policy is the `any-service` full admit.
 // interfaces use iifname; configured VRF slaves use sdifname because LOCAL_IN
-// exposes the VRF master as iifname. Classify firewall-local unicast from the
-// L3 destination through the FIB, not the sender-controlled Ethernet packet
-// type; genuine IP multicast/broadcast retains its fall-through behavior.
-func emitDHCPBackstopHostInboundDeny(rules *[]string, backstopV4, backstopV6 []string, vrfBackstop dhcpBackstopVRFLists) {
+// exposes the VRF master as iifname. Classify firewall-local unicast and
+// anycast destinations from the L3 FIB type rather than sender-controlled
+// Ethernet packet type; genuine IP multicast/broadcast retains its fall-through behavior.
+func emitDHCPBackstopHostInboundDeny(rules *[]string, backstopV4, backstopV6 []string, vrfBackstop dhcpBackstopLists) {
 	if len(backstopV4) > 0 {
-		*rules = append(*rules, "    iifname "+nftIifnameSet(backstopV4)+" meta nfproto ipv4 fib daddr type local drop")
+		*rules = append(*rules, "    iifname "+nftIifnameSet(backstopV4)+" meta nfproto ipv4 fib daddr type { local, anycast } drop")
 	}
 	if len(vrfBackstop.v4) > 0 {
-		*rules = append(*rules, "    meta sdifname "+nftIifnameSet(vrfBackstop.v4)+" meta nfproto ipv4 fib daddr type local drop")
+		*rules = append(*rules, "    meta sdifname "+nftIifnameSet(vrfBackstop.v4)+" meta nfproto ipv4 fib daddr type { local, anycast } drop")
 	}
 	if len(backstopV6) > 0 {
-		*rules = append(*rules, "    iifname "+nftIifnameSet(backstopV6)+" meta nfproto ipv6 fib daddr type local drop")
+		*rules = append(*rules, "    iifname "+nftIifnameSet(backstopV6)+" meta nfproto ipv6 fib daddr type { local, anycast } drop")
 	}
 	if len(vrfBackstop.v6) > 0 {
-		*rules = append(*rules, "    meta sdifname "+nftIifnameSet(vrfBackstop.v6)+" meta nfproto ipv6 fib daddr type local drop")
+		*rules = append(*rules, "    meta sdifname "+nftIifnameSet(vrfBackstop.v6)+" meta nfproto ipv6 fib daddr type { local, anycast } drop")
 	}
 }
 
 // emitDHCPBackstopGapHostInboundDeny excludes retained local-unicast coverage
-// from the later gap chain. Its L3 destination-type guard catches unicast IP
-// regardless of the Ethernet destination; genuine multicast/broadcast still
-// falls through so the retained main chain remains authoritative for grants.
-func emitDHCPBackstopGapHostInboundDeny(rules *[]string, backstopV4, backstopV6 []string, vrfBackstop dhcpBackstopVRFLists, retainedV4, retainedV6 []string) {
+// from the later gap chain. Its L3 destination-type guard catches unicast and
+// anycast IP destinations regardless of the Ethernet destination; genuine
+// multicast/broadcast still falls through so the retained main chain remains
+// authoritative for grants.
+func emitDHCPBackstopGapHostInboundDeny(rules *[]string, backstopV4, backstopV6 []string, vrfBackstop dhcpBackstopLists, retainedV4, retainedV6 []string) {
 	emitDrop := func(scope, family string, retained []string) {
-		scope += " fib daddr type local"
+		scope += " fib daddr type { local, anycast }"
 		if len(retained) > 0 {
 			scope += " " + family + " daddr != " + nftAddrSet(retained)
 		}
@@ -2656,7 +2657,7 @@ func emitDHCPBackstopGapHostInboundDeny(rules *[]string, backstopV4, backstopV6 
 // destinations on clients whose effective policy permits dhcpv6. The
 // ff02::1:2 destination is used by client Solicit traffic, not server replies
 // to UDP/546. DHCPv4 reception uses AF_PACKET and bypasses this input chain.
-func emitDHCPBackstopAdmits(rules *[]string, vrfBackstop dhcpBackstopVRFLists) {
+func emitDHCPBackstopAdmits(rules *[]string, vrfBackstop dhcpBackstopLists) {
 	emit := func(scope string) {
 		*rules = append(*rules, "    "+scope+" meta nfproto ipv6 ip6 daddr fe80::/10 udp sport 547 udp dport 546 accept")
 	}

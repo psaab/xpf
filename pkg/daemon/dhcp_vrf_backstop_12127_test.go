@@ -52,6 +52,42 @@ func TestHostInboundDHCPManagementVRFDelivery12127(t *testing.T) {
 	assertManagementVRFPacketOutcome12127(t, probes, false)
 }
 
+// TestHostInboundDHCPManagementVRFColdBootProductionFence12127 exercises the
+// daemon's cold-boot fallback end to end: the main install fails, config/snapshot
+// builders derive the VRF-slave backstop, and the production fence builder sends
+// it to a real netlink installer. Without a table the DHCP-local UDP probes are
+// reachable; after the cold-boot fallback they must be denied through sdifname.
+// This proves both daemon_nft.go's FenceSpec plumbing and BuildFenceAddrSets'
+// VRF-slave propagation, rather than constructing a FenceSpec in the test.
+func TestHostInboundDHCPManagementVRFColdBootProductionFence12127(t *testing.T) {
+	enterPrivateNetns9813(t)
+	peerNS := setupManagementVRFBackstopTopology12127(t)
+	probes := newManagementVRFPacketProbes12127(t, peerNS, "192.0.2.4/24", "2001:db8:1212::4/64")
+	mainFailure := errors.New("injected cold-boot retained-table failure")
+	realInstaller := xnft.NewNetlinkInstaller()
+	installDaemonDHCPBackstopTestHooks12127(t, &fakeNftInstaller{
+		hostInbound: func(xnft.HostInboundSpec) error { return mainFailure },
+		coldBootFence: func(spec xnft.FenceSpec) error {
+			return realInstaller.InstallColdBootFence(spec)
+		},
+	})
+
+	d := &Daemon{}
+	d.earlyInputHandoffDone.Store(true)
+	cfg := dhcpVRFConfig12127()
+	snapshot := dhcpVRFSnapshot12127("192.0.2.2/24", "2001:db8:1212::2/64")
+	sampleHostInboundSnapshots = func(*config.Config) []dpuserspace.InterfaceSnapshot { return snapshot }
+
+	// No table is initially installed, so this is an in-test positive control
+	// proving the VRF-bound listeners and peer can exchange the DHCP-shaped UDP
+	// probes before the production cold-boot fence takes ownership.
+	assertManagementVRFPacketOutcome12127(t, probes, true)
+	if err := d.applyHostInboundFilter(cfg); !errors.Is(err, mainFailure) {
+		t.Fatalf("cold-boot apply error = %v, want the retained-table failure", err)
+	}
+	assertManagementVRFPacketOutcome12127(t, probes, false)
+}
+
 // TestHostInboundDHCPManagementVRFGapDelivery12127 exercises the day-2 gap
 // path. The gap snapshot includes .3, while .4 is already live but absent from
 // that snapshot; only the DHCP backstop's delivered sdifname scope can deny .4.

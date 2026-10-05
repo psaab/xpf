@@ -239,11 +239,11 @@ groups belonging to its expanded protocols.
 
 4. **Failure paths.** A cold-boot host-inbound fence denies catalog multicast
    when the main table is unavailable. Persistent DHCP backstops classify the
-   L3 destination with `fib daddr type local`, so unicast IP in an L2 group
-   frame cannot bypass the guard, while genuine multicast/broadcast IP
-   destinations and MLD retain their fall-through behavior. The additive
-   coverage-gap fence likewise leaves retained-main-table multicast policy
-   authoritative; it adds no broad ACCEPT.
+   L3 destination with `fib daddr type { local, anycast }`, so unicast or
+   anycast IP in an L2 group frame cannot bypass the guard, while genuine
+   multicast/broadcast IP destinations and MLD retain their fall-through behavior.
+   The additive coverage-gap fence likewise leaves retained-main-table
+   multicast policy authoritative; it adds no broad ACCEPT.
 
 5. **Kernel/Rust lockstep.** The Go catalog
    (`pkg/config/host_inbound_multicast.go`), zone-view construction

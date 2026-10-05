@@ -422,8 +422,8 @@ func TestHostInboundStaleReplyGuardsPrecedeReplyAccept10752And10764(t *testing.T
 		t.Fatal("ident-reset TCP/113 reject must not admit its box-oriented reply through the broad reply accept")
 	}
 
-	fence := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, nil, nil, nil, nil, dhcpBackstopVRFLists{})
-	gap := buildHostInboundGapFencePayload(nil, []string{"172.16.50.8"}, nil, nil, nil, nil, nil, nil, nil, nil, dhcpBackstopVRFLists{}, nil, nil)
+	fence := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, nil, nil, nil, nil, dhcpBackstopLists{})
+	gap := buildHostInboundGapFencePayload(nil, []string{"172.16.50.8"}, nil, nil, nil, nil, nil, nil, nil, nil, dhcpBackstopLists{}, nil, nil)
 	for name, text := range map[string]string{"cold-boot": fence, "gap": gap} {
 		guardAt, acceptAt := -1, -1
 		for i, line := range strings.Split(text, "\n") {

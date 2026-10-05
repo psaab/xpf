@@ -2608,9 +2608,9 @@ func TestUnleasedOraclePlacement10751(t *testing.T) {
 	views := []dpuserspace.ZoneHostInboundView{{Zone: "trust", V4Addrs: []string{"10.0.0.1"}}}
 	unleasedV4 := []string{"ge-0-0-8", "ge-0-0-9"}
 	unleasedV6 := []string{"ge-0-0-9"}
-	backstop := dhcpBackstopVRFLists{admitV6: unleasedV6}
-	wantDropV4 := `iifname { "ge-0-0-8", "ge-0-0-9" } meta nfproto ipv4 fib daddr type local drop`
-	wantDropV6 := `iifname "ge-0-0-9" meta nfproto ipv6 fib daddr type local drop`
+	backstop := dhcpBackstopLists{admitV6: unleasedV6}
+	wantDropV4 := `iifname { "ge-0-0-8", "ge-0-0-9" } meta nfproto ipv4 fib daddr type { local, anycast } drop`
+	wantDropV6 := `iifname "ge-0-0-9" meta nfproto ipv6 fib daddr type { local, anycast } drop`
 	wantAdmitV6 := `iifname "ge-0-0-9" meta nfproto ipv6 ip6 daddr fe80::/10 udp sport 547 udp dport 546 accept`
 	for name, payload := range map[string]string{
 		"real":  buildHostInboundFilterPayloadWithOverlay(views, []string{"10.9.9.9"}, nil, nil, nil, true, nil, unleasedV4, unleasedV6, backstop),
@@ -2915,7 +2915,7 @@ func TestGapLifelineExceptionPlacement10751(t *testing.T) {
 	payload := buildHostInboundGapFencePayload(
 		nil, []string{"10.0.0.5", "10.0.0.9"}, nil, nil, nil,
 		nil, nil, []string{"10.0.0.5"}, nil, []string{"em0", "fxp0"},
-		dhcpBackstopVRFLists{}, nil, nil,
+		dhcpBackstopLists{}, nil, nil,
 	)
 	wantExcept := `iifname { "em0", "fxp0" } ip daddr 10.0.0.5 accept`
 	wantExceptSdif := `meta sdifname { "em0", "fxp0" } ip daddr 10.0.0.5 accept`
@@ -2936,7 +2936,7 @@ func TestGapLifelineExceptionPlacement10751(t *testing.T) {
 		strings.Index(payload, wantExceptSdif) > strings.Index(payload, wantDrop) {
 		t.Errorf("gap oracle places an exception after the bare DROP (lifeline management would be denied):\n%s", payload)
 	}
-	plain := buildHostInboundGapFencePayload(nil, []string{"10.0.0.9"}, nil, nil, nil, nil, nil, nil, nil, nil, dhcpBackstopVRFLists{}, nil, nil)
+	plain := buildHostInboundGapFencePayload(nil, []string{"10.0.0.9"}, nil, nil, nil, nil, nil, nil, nil, nil, dhcpBackstopLists{}, nil, nil)
 	if strings.Contains(plain, "iifname") || strings.Contains(plain, "sdifname") {
 		t.Errorf("gap oracle without shared must emit no iifname/sdifname rule:\n%s", plain)
 	}

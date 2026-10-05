@@ -1077,12 +1077,12 @@ func BuildUnzonedHostInboundAddrsFromSnapshots(cfg *config.Config, snaps []Inter
 // family (#10751 R7-B/F8-A). Such an interface has no destination for the
 // unzoned catch-all, but its first lease is reachable before the debounced
 // re-apply. The daemon renders a LAST-placed family-guarded `iifname <dev>
-// meta nfproto <fam> fib daddr type local drop`; genuine IP multicast and
-// broadcast destinations retain their fall-through behavior, while local
-// unicast IP is denied regardless of its Ethernet destination. DHCPv4
-// reception uses AF_PACKET; DHCPv6 server-reply admits are restricted to
-// explicit dhcpv6 policy (or unzoned pending clients), UDP source port 547,
-// destination port 546, and link-local destinations.
+// meta nfproto <fam> fib daddr type { local, anycast } drop`; genuine IP
+// multicast and broadcast destinations retain their fall-through behavior,
+// while firewall-local unicast and anycast IP are denied regardless of L2 dst.
+// DHCPv4 reception uses AF_PACKET; DHCPv6 server-reply admits are restricted to
+// effective policy permitting dhcpv6 (or unzoned pending clients), UDP source
+// port 547, destination port 546, and link-local destinations.
 // VRF-enslaved unzoned units remain excluded: at LOCAL_IN iifname shows the
 // shared master, so a catch-all there would shadow siblings and the slave-name
 // rule would never match. They retain lease-callback convergence instead; any
@@ -1281,8 +1281,11 @@ func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) HostInboundDHC
 				if config.HostInboundFullAdmitService(service) {
 					fullAdmit = true
 				}
-				if service == "dhcpv6" {
-					dhcpv6Admit = true
+				for _, expanded := range config.HostInboundServiceTokenExpansion(service) {
+					if expanded == "dhcpv6" {
+						dhcpv6Admit = true
+						break
+					}
 				}
 			}
 			if fullAdmit {
@@ -1542,8 +1545,8 @@ type FenceAddrSets struct {
 	// sdifname; config ownership keeps the guard present before enslavement.
 	UnleasedVRFSlavesV4 []string
 	UnleasedVRFSlavesV6 []string
-	// DHCPv6 reply admits are limited to interfaces whose effective policy
-	// explicitly permits the dhcpv6 service.
+	// DHCPv6 reply admits cover interfaces whose effective host-inbound policy
+	// permits the dhcpv6 service.
 	AdmitV6          []string
 	AdmitVRFSlavesV6 []string
 	// Unzoned input scopes for catalog-group default-deny during cold boot.

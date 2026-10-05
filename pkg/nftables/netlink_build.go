@@ -316,18 +316,31 @@ func (a *ruleAsm) sdifname(names []string) *ruleAsm {
 	return a.add(a.p.sdifnameMatch(names)...)
 }
 
-// fibLocalUnicast appends `fib daddr type local`, limiting an input backstop
-// to packets whose IP destination the FIB resolves as firewall-local (RTN_LOCAL,
-// UAPI value 2). Unlike `meta pkttype host`—an L2 classification the sender
-// controls via the Ethernet destination—this is an L3 destination-type
-// predicate: unicast IP in an L2 broadcast or multicast frame still matches
-// (the #12127 N1 bypass), while genuine IP multicast/broadcast falls through.
-// The daddr-only flags are deliberate: adding `. iif` makes the lookup miss on
-// VRF-slave ingress (the VRF local entry is keyed on the master), which would
-// fail the backstop open on VRF DHCP units. Interface scope remains in the
+// fibLocalOrAnycast appends `fib daddr type { local, anycast }`, limiting an
+// input backstop to destinations the FIB classifies as firewall-local or
+// anycast. Unlike `meta pkttype host`—an L2 classification the sender controls
+// via the Ethernet destination—this is an L3 destination-type predicate:
+// unicast IP in an L2 broadcast or multicast frame still matches (#12127 N1),
+// while genuine IP multicast/broadcast falls through. The daddr-only flags are
+// deliberate: adding `. iif` makes the lookup miss on VRF-slave ingress (the
+// VRF local entry is keyed on the master). Interface scope remains in the
 // iifname/sdifname match; fib only classifies the destination.
-func (a *ruleAsm) fibLocalUnicast() *ruleAsm {
-	return a.add(fibDaddrLocalMatch()...)
+// FIB results are host-order RTN values; hton converts them to the typed set
+// key order.
+func (a *ruleAsm) fibLocalOrAnycast() *ruleAsm {
+	elements := []nftables.SetElement{
+		{Key: binaryutil.BigEndian.PutUint32(uint32(unix.RTN_LOCAL))},
+		{Key: binaryutil.BigEndian.PutUint32(uint32(unix.RTN_ANYCAST))},
+	}
+	set := a.p.addAnonSet(nftables.TypeFIBAddr, false, elements)
+	if set == nil {
+		return a
+	}
+	return a.add(
+		&expr.Fib{Register: 1, ResultADDRTYPE: true, FlagDADDR: true},
+		&expr.Byteorder{SourceRegister: 1, DestRegister: 1, Op: expr.ByteorderHton, Len: 4, Size: 4},
+		&expr.Lookup{SourceRegister: 1, SetName: set.Name, SetID: set.ID},
+	)
 }
 
 // iifnameExcept appends `iifname != "<n>"` / `iifname != { .. }` — the
@@ -377,12 +390,6 @@ func nfprotoGuard(f nlFamily) []expr.Any {
 	return []expr.Any{
 		&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{f.nfproto}},
-	}
-}
-func fibDaddrLocalMatch() []expr.Any {
-	return []expr.Any{
-		&expr.Fib{Register: 1, ResultADDRTYPE: true, FlagDADDR: true},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.NativeEndian.PutUint32(uint32(unix.RTN_LOCAL))},
 	}
 }
 

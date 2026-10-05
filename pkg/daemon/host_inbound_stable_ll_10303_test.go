@@ -86,7 +86,7 @@ func TestHostInboundStableRethLLColdBootProbe10303(t *testing.T) {
 	stableLL := cluster.StableRethLinkLocal(7, 1).String()
 	views := buildAndCheckViews(t, cfg)
 	sets := dpuserspace.BuildFenceAddrSets(cfg, views)
-	payload := buildHostInboundFencePayload(sets.Views, sets.UnzonedV4, sets.UnzonedV6, nil, nil, nil, nil, dhcpBackstopVRFLists{})
+	payload := buildHostInboundFencePayload(sets.Views, sets.UnzonedV4, sets.UnzonedV6, nil, nil, nil, nil, dhcpBackstopLists{})
 
 	if !hostInboundDropProbe10303(payload, stableLL) {
 		t.Fatalf("hermetic cold-boot LL SSH probe to %s is not fenced by an IPv6 destination DROP (would fall through to policy accept):\n%s", stableLL, payload)

@@ -116,22 +116,37 @@ func TestZonedDHCPBackstopScopesOnlyEnforcingFamilies11577(t *testing.T) {
 // TestDHCPv6ReplyAdmitsFollowEffectivePolicy12127 ensures a no-address
 // DHCPv6 interface gets a server-reply exception only when its policy permits
 // dhcpv6. The unzoned lease-acquisition path remains admitted, while an
-// ssh-only zone retains its deny.
+// ssh-only zone retains its deny. `system-services all` permits dhcpv6
+// through token expansion (#3226), so an `all` zone — and an interface-level
+// `all` override on an ssh zone — must also get the admit while keeping the
+// persistent backstop (`all` is not the `any-service` full admit).
+// FAIL-ON-REVERT: comparing the authored token against the literal "dhcpv6"
+// instead of routing through HostInboundServiceTokenExpansion drops ge-0-0-4
+// and ge-0-0-5 from the admit lists while they stay in the backstop lists.
 func TestDHCPv6ReplyAdmitsFollowEffectivePolicy12127(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
 		"ge-0-0-1": {Name: "ge-0-0-1", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCPv6: true}}},
 		"ge-0-0-2": {Name: "ge-0-0-2", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCPv6: true}}},
 		"ge-0-0-3": {Name: "ge-0-0-3", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCPv6: true}}},
+		"ge-0-0-4": {Name: "ge-0-0-4", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCPv6: true}}},
+		"ge-0-0-5": {Name: "ge-0-0-5", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCPv6: true}}},
 	}
 	cfg.Security.Zones = map[string]*config.ZoneConfig{
 		"restricted": {
-			Name: "restricted", Interfaces: []string{"ge-0-0-1.0"},
+			Name: "restricted", Interfaces: []string{"ge-0-0-1.0", "ge-0-0-5.0"},
 			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}},
+			InterfaceHostInbound: map[string]*config.HostInboundTraffic{
+				"ge-0-0-5.0": {SystemServices: []string{"all"}},
+			},
 		},
 		"dhcp": {
 			Name: "dhcp", Interfaces: []string{"ge-0-0-2.0"},
 			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"dhcpv6"}},
+		},
+		"allzone": {
+			Name: "allzone", Interfaces: []string{"ge-0-0-4.0"},
+			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"all"}},
 		},
 	}
 	cfg.RoutingInstances = []*config.RoutingInstanceConfig{
@@ -139,11 +154,11 @@ func TestDHCPv6ReplyAdmitsFollowEffectivePolicy12127(t *testing.T) {
 	}
 
 	got := BuildDHCPHostInboundBackstopNetdevs(cfg, nil)
-	if !reflect.DeepEqual(got.V6, []string{"ge-0-0-1", "ge-0-0-2", "ge-0-0-3"}) {
+	if !reflect.DeepEqual(got.V6, []string{"ge-0-0-1", "ge-0-0-2", "ge-0-0-3", "ge-0-0-4", "ge-0-0-5"}) {
 		t.Fatalf("DHCPv6 backstops = %v, want all restricted and pending unzoned clients", got.V6)
 	}
-	if !reflect.DeepEqual(got.AdmitV6, []string{"ge-0-0-2", "ge-0-0-3"}) {
-		t.Errorf("DHCPv6 reply admits = %v, want permitted zone plus unzoned client only", got.AdmitV6)
+	if !reflect.DeepEqual(got.AdmitV6, []string{"ge-0-0-2", "ge-0-0-3", "ge-0-0-4", "ge-0-0-5"}) {
+		t.Errorf("DHCPv6 reply admits = %v, want explicit and all-expanded permits plus unzoned client", got.AdmitV6)
 	}
 	if !reflect.DeepEqual(got.VRFSlavesV6, []string{"ge-0-0-2"}) ||
 		!reflect.DeepEqual(got.AdmitVRFSlavesV6, []string{"ge-0-0-2"}) {

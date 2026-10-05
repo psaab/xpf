@@ -2,7 +2,7 @@ package daemon
 
 // daemon_nft_netlink_parity_test.go is the #6387 PR-2 T1 ruleset-parity CI — the
 // SECURITY MERGE GATE. It proves the additive pkg/nftables netlink installer is
-// bit-for-bit equivalent to the CURRENT exec-`nft` payload builders in
+// ruleset-equivalent to the CURRENT exec-`nft` payload builders in
 // daemon_nft.go (the ORACLE) for a construct-complete matrix (§9 / §12.1):
 //
 //   render the oracle `nft -f -` text, load it into a fresh netns, dump
@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -34,6 +35,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	xnft "github.com/psaab/xpf/pkg/nftables"
+	"golang.org/x/sys/unix"
 )
 
 const t1InnerEnv = "XPF_T1_PARITY_INNER"
@@ -52,7 +54,7 @@ func TestNftNetlinkParity(t *testing.T) {
 	if findNft() == "" {
 		t.Skip("T1 ruleset-parity gate SKIPPED: `nft` binary not found in PATH — " +
 			"this gate MUST run where nft exists (the parent runs it); it proves the " +
-			"netlink installer is bit-equivalent to the exec-nft oracle")
+			"normalized netlink output is ruleset-equivalent to the exec-nft oracle")
 	}
 	unshare, err := exec.LookPath("unshare")
 	if err != nil {
@@ -98,7 +100,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 		issueUnzonedVRFSlaves := []string{"vrf-unzoned"}
 		oracle := buildHostInboundFilterPayloadWithUnzonedIngress(
 			issueViews, issueUnzonedV4, nil, issueUnzonedIngress, issueUnzonedVRFSlaves,
-			nil, nil, true, nil, nil, nil, dhcpBackstopVRFLists{},
+			nil, nil, true, nil, nil, nil, dhcpBackstopLists{},
 		)
 		spec := toNftHostInboundSpecWithUnzonedIngress(
 			issueViews, issueUnzonedV4, nil, issueUnzonedIngress, issueUnzonedVRFSlaves, nil, nil, nil, true, nil,
@@ -135,7 +137,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 	})
 
 	t.Run("cold_boot_fence", func(t *testing.T) {
-		oracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, wgZones, nil, nil, dhcpBackstopVRFLists{})
+		oracle := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, wg, wgZones, nil, nil, dhcpBackstopLists{})
 		spec := xnft.FenceSpec{Views: toNftViews(views), UnzonedV4: unzonedV4, UnzonedV6: unzonedV6, WGListenPorts: wg, WGZonePorts: wgZones}
 		parityCheck(t, xnft.HostInboundTableName, oracle, func() error { return inst.InstallColdBootFence(spec) })
 	})
@@ -154,7 +156,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 	t.Run("gap_fence", func(t *testing.T) {
 		uncoveredV4 := []string{"10.0.1.1", "10.0.9.1"}
 		uncoveredV6 := []string{"2001:db8:1::1"}
-		oracle := buildHostInboundGapFencePayload(views, uncoveredV4, uncoveredV6, wg, wgZones, nil, nil, nil, nil, nil, dhcpBackstopVRFLists{}, nil, nil)
+		oracle := buildHostInboundGapFencePayload(views, uncoveredV4, uncoveredV6, wg, wgZones, nil, nil, nil, nil, nil, dhcpBackstopLists{}, nil, nil)
 		spec := xnft.GapFenceSpec{Views: toNftViews(views), UncoveredV4: uncoveredV4, UncoveredV6: uncoveredV6, WGListenPorts: wg, WGZonePorts: wgZones}
 		parityCheck(t, xnft.HostInboundGapTableName, oracle, func() error { return inst.InstallGapFence(spec) })
 	})
@@ -166,7 +168,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 		unleasedV4 := []string{"ge-0-0-8", "ge-0-0-9"}
 		unleasedV6 := []string{"ge-0-0-9"}
 		admitV6 := []string{"ge-0-0-9"}
-		backstop := dhcpBackstopVRFLists{admitV6: admitV6}
+		backstop := dhcpBackstopLists{admitV6: admitV6}
 		oracle := buildHostInboundFilterPayloadWithOverlay(views, unzonedV4, unzonedV6, programs, wgZones, true, nil, unleasedV4, unleasedV6, backstop)
 		if strings.Contains(oracle, "udp dport 68 accept") {
 			t.Fatal("persistent backstop must not emit an unnecessary DHCPv4 ACCEPT")
@@ -197,10 +199,8 @@ func runNftNetlinkParityInner(t *testing.T) {
 	})
 	t.Run("dhcp_vrf_backstop", func(t *testing.T) {
 		vrfDevices := []string{"ge-0-0-5"}
-		vrfBackstop := dhcpBackstopVRFLists{
-			v4: vrfDevices, v6: vrfDevices,
-			admitV6: vrfDevices, admitVRFV6: vrfDevices,
-		}
+		vrfBackstop := dhcpBackstopLists{v4: vrfDevices, v6: vrfDevices,
+			admitV6: vrfDevices, admitVRFV6: vrfDevices}
 		oracle := buildHostInboundFilterPayloadWithOverlay(nil, nil, nil, nil, nil, true, nil, vrfDevices, vrfDevices, vrfBackstop)
 		spec := xnft.HostInboundSpec{
 			UnleasedV4: vrfDevices, UnleasedV6: vrfDevices,
@@ -241,7 +241,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 		uncovered := []string{"10.0.0.5", "10.0.0.9"}
 		shared := []string{"10.0.0.5"}
 		lifelines := []string{"fxp0", "em0"}
-		oracle := buildHostInboundGapFencePayload(nil, uncovered, nil, wg, wgZones, nil, nil, shared, nil, lifelines, dhcpBackstopVRFLists{}, nil, nil)
+		oracle := buildHostInboundGapFencePayload(nil, uncovered, nil, wg, wgZones, nil, nil, shared, nil, lifelines, dhcpBackstopLists{}, nil, nil)
 		if !strings.Contains(oracle, "iifname") || !strings.Contains(oracle, "accept") {
 			t.Fatal("gap oracle emitted no exception rule; the diff below would be vacuous")
 		}
@@ -692,10 +692,24 @@ func normalizeNftDump(s string) string {
 		ln = sdifnameSetRe.ReplaceAllString(ln, "meta sdifname { IFSET }")
 		ln = screenFloodIPv4SourceLimitRe.ReplaceAllString(ln, "{ ip saddr $1 }")
 		ln = screenFloodIPv6SourceLimitRe.ReplaceAllString(ln, "{ ip6 saddr $1 }")
+		ln = normalizeFibAddrTypeSetDump(ln)
 		ln = braceSetRe.ReplaceAllStringFunc(ln, sortBraceSet)
 		out = append(out, ln)
 	}
 	return strings.Join(out, "\n")
+}
+
+// normalizeFibAddrTypeSetDump maps the exact numeric rendering produced by the
+// netlink byteorder/anonymous-set form back to the FIB names emitted by nft's
+// text parser. Packet tests independently prove that the route-type match works.
+func normalizeFibAddrTypeSetDump(line string) string {
+	types := []string{
+		strconv.Itoa(int(unix.RTN_LOCAL)),
+		strconv.Itoa(int(unix.RTN_ANYCAST)),
+	}
+	sort.Strings(types)
+	numericSet := "fib daddr type { " + strings.Join(types, ", ") + " }"
+	return strings.ReplaceAll(line, numericSet, "fib daddr type { anycast, local }")
 }
 
 func TestNormalizeNftDumpCanonicalizesFloodSourceKeys11087(t *testing.T) {

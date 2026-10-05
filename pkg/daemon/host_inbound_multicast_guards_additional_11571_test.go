@@ -38,7 +38,7 @@ func TestHostInboundMulticastIngressGuardOrdering11571(t *testing.T) {
 	}}
 	payload := buildHostInboundFilterPayloadWithUnzonedIngress(
 		views, nil, nil, []string{"ge-unzoned"}, []string{"ge-vrf-unzoned"},
-		programs, nil, true, nil, nil, nil, dhcpBackstopVRFLists{},
+		programs, nil, true, nil, nil, nil, dhcpBackstopLists{},
 	)
 	lines := strings.Split(payload, "\n")
 	lineIndex := func(parts ...string) int {
@@ -131,7 +131,7 @@ func TestHostInboundAddresslessIngressKeepsMulticastPolicy11571(t *testing.T) {
 
 	payload := buildHostInboundFilterPayloadWithUnzonedIngress(
 		views, nil, nil, []string{unzonedIngress}, nil,
-		nil, nil, true, nil, nil, nil, dhcpBackstopVRFLists{},
+		nil, nil, true, nil, nil, nil, dhcpBackstopLists{},
 	)
 	for _, rule := range []string{
 		`iifname "` + zonedIngress + `" ip daddr ` + nftAddrSet(config.HostInboundMulticastGroupsForFamily("ip")) + " drop",
@@ -144,7 +144,7 @@ func TestHostInboundAddresslessIngressKeepsMulticastPolicy11571(t *testing.T) {
 
 	fence := buildHostInboundFencePayloadWithIngress(
 		views, nil, nil, nil, nil, nil, nil, []string{unzonedIngress}, nil,
-		dhcpBackstopVRFLists{},
+		dhcpBackstopLists{},
 	)
 	for _, rule := range []string{
 		`iifname "` + zonedIngress + `" ip6 daddr ` + nftAddrSet(config.HostInboundMulticastGroupsForFamily("ip6")) + " drop",
@@ -158,7 +158,7 @@ func TestHostInboundAddresslessIngressKeepsMulticastPolicy11571(t *testing.T) {
 	uncoveredV4, uncoveredV6 := []string{"192.0.2.2"}, []string{"2001:db8::2"}
 	gap := buildHostInboundGapFencePayload(
 		nil, uncoveredV4, uncoveredV6, nil, nil, nil, nil, nil, nil, nil,
-		dhcpBackstopVRFLists{}, nil, nil,
+		dhcpBackstopLists{}, nil, nil,
 	)
 	for _, rule := range []string{
 		"ip daddr " + nftAddrSet(uncoveredV4) + " drop",

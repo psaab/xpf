@@ -4,8 +4,9 @@ package nftables
 // additive coverage-gap fence via netlink, mirroring the text oracles in
 // pkg/daemon/daemon_nft.go. The cold-boot fence removes per-service ACCEPTs and
 // drops catalog multicast groups on represented ingress before established
-// admits. Persistent DHCP backstops are separately limited to PACKET_HOST; the
-// additive gap fence likewise preserves retained multicast policy.
+// admits. Persistent DHCP backstops classify FIB-local and anycast destinations;
+// the additive gap fence applies the same destination predicate while preserving
+// retained multicast policy.
 
 // hostInboundFenceMandatoryAdmitsNetlink mirrors the text oracle's shared
 // mandatory admits: global ESP/AH, established/related, IPv6 ND, and v4/v6
@@ -90,22 +91,22 @@ func emitDHCPBackstopDropNetlink(p *nlPlan, f nlFamily, netdevs, vrfSlaves []str
 	if len(netdevs) > 0 {
 		r := p.rule().iifname(netdevs)
 		r.needNfproto(f)
-		r.fibLocalUnicast().emit(verdictDrop()...)
+		r.fibLocalOrAnycast().emit(verdictDrop()...)
 	}
 	if len(vrfSlaves) > 0 {
 		r := p.rule().sdifname(vrfSlaves)
 		r.needNfproto(f)
-		r.fibLocalUnicast().emit(verdictDrop()...)
+		r.fibLocalOrAnycast().emit(verdictDrop()...)
 	}
 }
 
 // emitDHCPBackstopGapDropNetlink keeps the interface-wide fallback from
 // overriding addresses already covered by the retained main table. Its L3
-// destination-type guard drops uncovered local unicast without letting an L2
-// group MAC bypass it or shadow genuine IP multicast/broadcast.
+// destination-type guard drops uncovered local or anycast destinations without
+// letting an L2 group MAC bypass it or shadow genuine IP multicast/broadcast.
 func emitDHCPBackstopGapDropNetlink(p *nlPlan, f nlFamily, netdevs, vrfSlaves, retained []string) {
 	emit := func(r *ruleAsm) {
-		r.fibLocalUnicast()
+		r.fibLocalOrAnycast()
 		if len(retained) > 0 {
 			r.daddr(f, retained, true)
 		}

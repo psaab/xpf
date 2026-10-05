@@ -1,8 +1,10 @@
 package nftables
 
 import (
+	"bytes"
 	"encoding/binary"
 	"net"
+	"os"
 	"runtime"
 	"testing"
 	"time"
@@ -19,6 +21,7 @@ const (
 	mixedFrameNewV6       = "2001:db8:1212::3"
 	mixedFrameRetainedV6  = "2001:db8:1212::2"
 	mixedFramePeerV6      = "2001:db8:1212::1"
+	mixedFrameAnycastV6   = "2001:db8:1212::"
 	mixedFrameV4Broadcast = "192.0.2.255"
 	mixedFrameV6Group     = "ff02::1234"
 	mixedFrameTestPort    = 4444
@@ -26,10 +29,10 @@ const (
 )
 
 // TestDHCPBackstopMixedL2L3Frames12127 sends real raw Ethernet/IP/UDP frames
-// through the main, cold-boot, and gap backstops. A firewall-local unicast IP
-// destination must be dropped even when the sender uses an Ethernet broadcast
-// or multicast destination. Genuine IP broadcast and multicast remain
-// deliverable, and the retained main-table SSH permit survives the gap.
+// through the main, cold-boot, and gap backstops. Firewall-local and subnet-router
+// anycast IP destinations must be dropped even when sent in mixed L2 frames;
+// genuine IP broadcast and multicast remain deliverable, and the retained
+// main-table SSH permit survives the gap.
 func TestDHCPBackstopMixedL2L3Frames12127(t *testing.T) {
 	enterPrivateNetns(t)
 	hostLink := mkNamedVeth10751(t, unleasedTestNetdev10751, "vhost0", "vpeer0")
@@ -86,6 +89,9 @@ func TestDHCPBackstopMixedL2L3Frames12127(t *testing.T) {
 		mustAddrAdd10751(t, hostLink, cidr)
 	}
 	waitAddrsValid10751(t, map[string][]string{unleasedTestNetdev10751: {mixedFrameRetainedV6, mixedFrameNewV6}})
+	if err := os.WriteFile("/proc/sys/net/ipv6/conf/all/forwarding", []byte("1"), 0o644); err != nil {
+		t.Fatalf("enable IPv6 forwarding for subnet-router anycast test: %v", err)
+	}
 	if err := netlink.LinkSetAllmulticastOn(hostLink); err != nil {
 		t.Fatalf("enable multicast-frame reception: %v", err)
 	}
@@ -127,10 +133,12 @@ func TestDHCPBackstopMixedL2L3Frames12127(t *testing.T) {
 		Views:      retainedView,
 		UnleasedV4: []string{unleasedTestNetdev10751}, UnleasedV6: []string{unleasedTestNetdev10751},
 	}
+	gapMainSpec := HostInboundSpec{Views: retainedView}
 	installer := NewNetlinkInstaller()
 	modes := []struct {
 		name           string
 		install        func() error
+		installGap     func() error
 		retainedPermit bool
 	}{
 		{
@@ -147,11 +155,9 @@ func TestDHCPBackstopMixedL2L3Frames12127(t *testing.T) {
 			},
 		},
 		{
-			name: "coverage-gap",
-			install: func() error {
-				if err := installer.InstallHostInbound(mainSpec); err != nil {
-					return err
-				}
+			name:    "coverage-gap",
+			install: func() error { return installer.InstallHostInbound(gapMainSpec) },
+			installGap: func() error {
 				return installer.InstallGapFence(GapFenceSpec{
 					UncoveredV4: []string{"192.0.2.4"}, UncoveredV6: []string{"2001:db8:1212::4"},
 					UnleasedV4: []string{unleasedTestNetdev10751}, UnleasedV6: []string{unleasedTestNetdev10751},
@@ -164,7 +170,42 @@ func TestDHCPBackstopMixedL2L3Frames12127(t *testing.T) {
 	var packetID uint16 = 1
 	for _, mode := range modes {
 		if err := mode.install(); err != nil {
-			t.Fatalf("install %s backstop: %v", mode.name, err)
+			t.Fatalf("install %s main rules: %v", mode.name, err)
+		}
+		if mode.installGap != nil {
+			// Prove the mixed L2/L3 frames reach the listener with only the
+			// retained-address main table installed. The gap leg below must be
+			// what changes this delivery into a DROP.
+			for _, family := range []struct {
+				name, source, destination string
+				ethType                   uint16
+				receiver                  *net.UDPConn
+			}{
+				{name: "IPv4", source: mixedFramePeerV4, destination: mixedFrameNewV4, ethType: unix.ETH_P_IP, receiver: v4Receiver},
+				{name: "IPv6", source: mixedFramePeerV6, destination: mixedFrameNewV6, ethType: unix.ETH_P_IPV6, receiver: v6Receiver},
+			} {
+				for _, layer2 := range []struct {
+					name string
+					mac  net.HardwareAddr
+				}{
+					{name: "broadcast", mac: net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}},
+					{name: "multicast", mac: mixedFrameMulticastMAC12127(family.ethType)},
+				} {
+					packetID++
+					payload := []byte{byte(packetID >> 8), byte(packetID)}
+					frame := mixedFrameUDP12127(family.ethType, peerMAC, layer2.mac,
+						net.ParseIP(family.source), net.ParseIP(family.destination),
+						40000+packetID, mixedFrameTestPort, packetID, payload)
+					if err := sendMixedFrame12127(peerNS, "vpeer0", frame); err != nil {
+						t.Fatalf("send pre-gap %s L2-%s frame: %v", family.name, layer2.name, err)
+					}
+					assertMixedFrameDelivery12127(t, family.receiver, true, payload,
+						"coverage-gap main-only "+family.name+" unicast IP in L2-"+layer2.name)
+				}
+			}
+			if err := mode.installGap(); err != nil {
+				t.Fatalf("install %s fence: %v", mode.name, err)
+			}
 		}
 		for _, family := range []struct {
 			name, source, destination string
@@ -182,36 +223,49 @@ func TestDHCPBackstopMixedL2L3Frames12127(t *testing.T) {
 				{name: "multicast", mac: mixedFrameMulticastMAC12127(family.ethType)},
 			} {
 				packetID++
+				payload := []byte{byte(packetID >> 8), byte(packetID)}
 				frame := mixedFrameUDP12127(family.ethType, peerMAC, layer2.mac,
 					net.ParseIP(family.source), net.ParseIP(family.destination),
-					40000+packetID, mixedFrameTestPort, packetID, []byte("unicast-ip"))
+					40000+packetID, mixedFrameTestPort, packetID, payload)
 				if err := sendMixedFrame12127(peerNS, "vpeer0", frame); err != nil {
 					t.Fatalf("send %s L2-%s frame: %v", family.name, layer2.name, err)
 				}
-				assertMixedFrameDelivery12127(t, family.receiver, false,
+				assertMixedFrameDelivery12127(t, family.receiver, false, payload,
 					mode.name+" "+family.name+" unicast IP in L2-"+layer2.name)
 			}
 		}
+		packetID++
+		anycastPayload := []byte{byte(packetID >> 8), byte(packetID)}
+		anycast := mixedFrameUDP12127(unix.ETH_P_IPV6, peerMAC, hostIface.HardwareAddr,
+			net.ParseIP(mixedFramePeerV6), net.ParseIP(mixedFrameAnycastV6),
+			40000+packetID, mixedFrameTestPort, packetID, anycastPayload)
+		if err := sendMixedFrame12127(peerNS, "vpeer0", anycast); err != nil {
+			t.Fatalf("send L2-unicast UDP to IPv6 subnet-router anycast: %v", err)
+		}
+		assertMixedFrameDelivery12127(t, v6Receiver, false, anycastPayload,
+			mode.name+" L2-unicast IPv6 subnet-router anycast")
 
 		packetID++
+		bcastPayload := []byte{byte(packetID >> 8), byte(packetID)}
 		bcast := mixedFrameUDP12127(unix.ETH_P_IP, peerMAC,
 			net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
 			net.ParseIP(mixedFramePeerV4), net.ParseIP(mixedFrameV4Broadcast),
-			40000+packetID, mixedFrameTestPort, packetID, []byte("real-broadcast"))
+			40000+packetID, mixedFrameTestPort, packetID, bcastPayload)
 		if err := sendMixedFrame12127(peerNS, "vpeer0", bcast); err != nil {
 			t.Fatalf("send real IPv4 broadcast control: %v", err)
 		}
-		assertMixedFrameDelivery12127(t, v4Receiver, true, mode.name+" genuine IPv4 broadcast")
+		assertMixedFrameDelivery12127(t, v4Receiver, true, bcastPayload, mode.name+" genuine IPv4 broadcast")
 
 		packetID++
+		mcastPayload := []byte{byte(packetID >> 8), byte(packetID)}
 		mcastIP := net.ParseIP(mixedFrameV6Group)
 		mcast := mixedFrameUDP12127(unix.ETH_P_IPV6, peerMAC,
 			mixedFrameIPv6MAC12127(mcastIP), net.ParseIP(mixedFramePeerV6), mcastIP,
-			40000+packetID, mixedFrameMcastPort, packetID, []byte("real-multicast"))
+			40000+packetID, mixedFrameMcastPort, packetID, mcastPayload)
 		if err := sendMixedFrame12127(peerNS, "vpeer0", mcast); err != nil {
 			t.Fatalf("send real IPv6 multicast control: %v", err)
 		}
-		assertMixedFrameDelivery12127(t, mcastReceiver, true, mode.name+" genuine IPv6 multicast")
+		assertMixedFrameDelivery12127(t, mcastReceiver, true, mcastPayload, mode.name+" genuine IPv6 multicast")
 
 		if mode.retainedPermit {
 			for _, probe := range []struct{ network, address string }{
@@ -239,16 +293,19 @@ func serveTCP12127(t *testing.T, listener *net.TCPListener) {
 	}()
 }
 
-func assertMixedFrameDelivery12127(t *testing.T, receiver *net.UDPConn, want bool, probe string) {
+func assertMixedFrameDelivery12127(t *testing.T, receiver *net.UDPConn, want bool, expected []byte, probe string) {
 	t.Helper()
 	if err := receiver.SetReadDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
 		t.Fatalf("set %s read deadline: %v", probe, err)
 	}
 	buf := make([]byte, 256)
-	_, _, err := receiver.ReadFromUDP(buf)
+	n, _, err := receiver.ReadFromUDP(buf)
 	if err == nil {
 		if !want {
 			t.Fatalf("%s reached the UDP listener; expected a backstop DROP", probe)
+		}
+		if !bytes.Equal(buf[:n], expected) {
+			t.Fatalf("%s reached the UDP listener with payload %x; want %x", probe, buf[:n], expected)
 		}
 		return
 	}

@@ -101,7 +101,7 @@ func TestColdBootFenceIsLifelineSafe(t *testing.T) {
 	cfg := hostInboundTestConfig()
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
 	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
-	fence := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, nil, nil, nil, nil, dhcpBackstopVRFLists{})
+	fence := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, nil, nil, nil, nil, dhcpBackstopLists{})
 
 	// em0's cluster-control address must never be fenced (lifeline).
 	if strings.Contains(fence, "10.99.0.1") {
@@ -120,7 +120,7 @@ func TestColdBootFenceAdmitsMandatoryL3(t *testing.T) {
 	cfg := hostInboundTestConfig()
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
 	unzonedV4, unzonedV6 := dpuserspace.BuildUnzonedHostInboundAddrs(cfg)
-	fence := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, nil, nil, nil, nil, dhcpBackstopVRFLists{})
+	fence := buildHostInboundFencePayload(views, unzonedV4, unzonedV6, nil, nil, nil, nil, dhcpBackstopLists{})
 
 	for _, want := range []string{
 		"ct state established,related accept",
@@ -140,7 +140,7 @@ func TestColdBootFenceAdmitsMandatoryL3(t *testing.T) {
 func TestColdBootFenceAdmitsWireGuardPort(t *testing.T) {
 	cfg := hostInboundWireGuardTestConfig()
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
-	fence := buildHostInboundFencePayload(views, nil, nil, cfg.WireGuardListenPorts(), cfg.WireGuardZonePorts(), nil, nil, dhcpBackstopVRFLists{})
+	fence := buildHostInboundFencePayload(views, nil, nil, cfg.WireGuardListenPorts(), cfg.WireGuardZonePorts(), nil, nil, dhcpBackstopLists{})
 	for _, want := range []string{
 		"ip daddr 172.16.50.8 udp dport 51820 accept",
 		"ip6 daddr 2001:db8:50::8 udp dport 51820 accept",
@@ -351,7 +351,7 @@ func TestColdBootCatalogFenceAddsAddressGap5759(t *testing.T) {
 	if len(fenceSpecs[0].Views) != 1 || !sliceContains(fenceSpecs[0].Views[0].IngressNetdevs, "xpf5759wan") {
 		t.Fatalf("addressless catalog fence lost the zone's ingress scope: %+v", fenceSpecs[0].Views)
 	}
-	payload := buildHostInboundFencePayload(dpuserspace.BuildZoneHostInboundViews(cfg), nil, nil, nil, nil, nil, nil, dhcpBackstopVRFLists{})
+	payload := buildHostInboundFencePayload(dpuserspace.BuildZoneHostInboundViews(cfg), nil, nil, nil, nil, nil, nil, dhcpBackstopLists{})
 	wantMulticastDrop := `iifname "xpf5759wan" ip daddr ` + nftAddrSet(config.HostInboundMulticastGroupsForFamily("ip")) + " drop"
 	if !strings.Contains(payload, wantMulticastDrop) {
 		t.Fatalf("addressless fallback must deny catalog multicast on its ingress:\n%s", payload)

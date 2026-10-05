@@ -1071,15 +1071,15 @@ installed deny keeps covering link-local destinations — the chain is
 enforceability for DHCP-intent scopes. Unzoned DHCP units with no lease
 yet are NOT pending (no hold — a never-leasing unit must not strand the
 global barrier); instead the first apply renders per-family LAST-placed
-`iifname <dev> meta nfproto <fam> fib daddr type local drop` rules for them
-(#10751 R7-B). This L3 predicate catches firewall-local unicast even when the
-Ethernet destination is broadcast or multicast; genuine IP multicast and
+`iifname <dev> meta nfproto <fam> fib daddr type { local, anycast } drop` rules
+(#10751 R7-B). This L3 predicate catches firewall-local unicast and anycast even
+when the Ethernet destination is broadcast or multicast; genuine IP multicast and
 broadcast destinations continue to fall through.
 
 The same persistent interface backstop covers DHCP families in enforcing
-zones (#11577), and remains after an address appears until DHCP intent is
-removed or the effective zone policy allows all. It closes the lease-address
-appearance-to-debounced-reapply window while the destination-scoped rules
+zones (#11577) and remains after an address appears until DHCP intent is removed
+or effective policy is `any-service`, the full-admit token. It closes the
+lease-address appearance-to-debounced-reapply window while destination rules
 catch up. Ordinary ingress uses `iifname`; configured VRF slaves also use
 `meta sdifname`, since LOCAL_IN reports the shared VRF master as `iifname`.
 The configured VRF set includes routing-instance members, tunnel-manager
@@ -1302,14 +1302,13 @@ snapshot produces a zero-drop table shell:
   successful real install (best effort — a lingering gap fences only,
   never opens) and on a successful teardown.
   The later-chain DHCP backstop is also destination-conditional and uses
-  `fib daddr type local`: it drops only local destinations outside the retained
-  generation's syntactically valid, family-matched coverage set (and remains
-  unconditional when that set is empty). This denies same-interface arrivals
-  absent from both the retained view and explicit gap snapshot, without
-  overriding retained service permits or denies. Genuine IP multicast,
-  broadcast, and other non-local destinations still reach the retained main
-  chain; a v6-only gap therefore keeps covered IPv4 decisions intact. The gap
-  adds no ACCEPT bypass.
+  `fib daddr type { local, anycast }`: it drops only local or anycast destinations
+  outside the retained generation's syntactically valid, family-matched coverage
+  set (and remains unconditional when that set is empty). This denies same-interface
+  arrivals absent from both the retained view and explicit gap snapshot, without
+  overriding retained service permits or denies. Genuine IP multicast, broadcast,
+  and other non-local/non-anycast destinations still reach the retained main
+  chain; a v6-only gap keeps covered IPv4 decisions intact. The gap adds no ACCEPT bypass.
 - `installHostInboundColdBootFence` / `buildHostInboundFencePayload`
   (`daemon_nft.go`) build the fence: the same atomic-replace `xpf_hostinbound`
   table reduced to the global mandatory admits (`ct established,related`, raw
