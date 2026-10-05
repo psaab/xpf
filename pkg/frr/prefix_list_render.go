@@ -204,9 +204,8 @@ func renderRouteFilterEntry(b *strings.Builder, plName string, idx int, rf *conf
 // (or nil list) emits NO definition: the undefined access-list then NOMATCHes
 // every route (fail-closed), matching an undefined prefix-list. The prefix is
 // sanitized as a #4482-style belt against a leniently-loaded stored value.
-// Mirrors renderRouteFilterEntry's inline-definition style: the unindented
-// `access-list` line is emitted into the route-map body builder and processed
-// by FRR at the config node, exactly like the route-filter prefix-lists.
+// These unindented definition lines are collected separately from route-map
+// bodies so the caller can emit them before the first route-map header.
 func renderFromPrefixListACL(b *strings.Builder, aclName, matchKW string, pl *config.PrefixList) {
 	if pl == nil {
 		return

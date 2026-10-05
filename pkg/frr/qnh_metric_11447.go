@@ -328,7 +328,7 @@ func (m *Manager) renderQNHMetricPolicyMap11447(po *config.PolicyOptionsConfig, 
 		return renderQuarantineDenyRouteMap(routeMap)
 	}
 	rules, next := renderQNHMetricTerms11447(scope, routeMap, 10)
-	body, seq := m.renderPolicyTermSequences(po, routeMap, routeMap, ps, next)
+	definitions, body, seq := m.renderPolicyTermSequencesWithDefinitions(po, routeMap, routeMap, ps, next)
 	hasNextPolicy := policyHasNextPolicyTerm(ps)
 	if hasNextPolicy {
 		nextPolicySequence := seq
@@ -338,6 +338,7 @@ func (m *Manager) renderQNHMetricPolicyMap11447(po *config.PolicyOptionsConfig, 
 		body = renderNextPolicyTarget(body, nextPolicySequence)
 	}
 	var b strings.Builder
+	b.WriteString(definitions)
 	b.WriteString(rules)
 	b.WriteString(body)
 	trailingAction := "deny"

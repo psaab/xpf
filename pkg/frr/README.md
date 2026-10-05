@@ -1156,11 +1156,12 @@ step. Both are required — neither sees the other's case:
      Junos BGP default-ACCEPT `permit` is emitted (#2998 — a composed chain is
      only ever a BGP `route-map in`/`out`). Per-policy inline prefix-lists are
      namespaced `<composedName>-<policyName>-<termName>` so a term name reused
-     across chained policies cannot fuse two prefix-lists. The composed
-     route-map DEFINITIONS are emitted beside `generatePolicyOptions` in
-     `buildManagedSection` (deduped + sorted; FRR resolves the neighbor
+     across chained policies cannot fuse two prefix-lists. Generated inline
+     `ip`/`ipv6 prefix-list` and same-family access-list definitions are emitted
+     before the first route-map header (also for composed chains), never inside
+     a route-map block. The composed route-map definitions are emitted beside
+     `generatePolicyOptions` in `buildManagedSection` (FRR resolves the neighbor
      reference regardless of definition order). **Collision guard:** FRR keys
-     route-maps by NAME in one global namespace and merges same-named objects,
      so `bgpComposedChainCollision` (called by `ApplyFull`, mirroring
      `redistAliasCollision`) fails the whole apply CLOSED if a composed name
      collides with an operator policy-statement or two distinct chains derive
