@@ -1181,15 +1181,20 @@ row misleads a human, a missing FIB entry misdirects a packet.
 ### Consumer-side rule
 
 The snapshot builder uses **preference-aware same-prefix arbitration**. For
-each canonical `(table, family, prefix)`, it finds the best configured route:
-if that preference is 200 or better, the imported route is omitted and the
-configured tiers remain. If the best configured route is worse (for example a
-floating static at preference 250), both are published with the imported route
-at preference 200. The Rust FIB selects the first live tier by preference: a
-live imported route normally wins at 200, while a live configured backup
-remains usable if an earlier tier is unresolved (#11316). If no tier is live,
-the preferred tier's existing drivable-member fallback preserves neighbor
-resolution. Thus a backup cannot shadow a better live learned route.
+each canonical `(table, family, prefix)`, it finds the best configured route.
+For learned BGP, OSPF, IS-IS, and RIP routes, it compares that preference with
+FRR's default distances: external BGP 20, OSPF 110, IS-IS 115, and RIP 120.
+RTPROT_BGP does not distinguish eBGP from iBGP.
+A configured route at or below that distance remains sole. If the configured
+route is worse, both rows remain: a fallback at preference 200 or better is
+ordered behind the learned route by stamping the learned row with its protocol
+distance; a fallback above 200 already follows the learned row at preference
+200. Static and other learned routes keep the existing rule: config at 200 or
+better remains sole, while a worse configured fallback stays beside the import
+at preference 200. The Rust FIB selects the first live tier by preference, and
+a later live configured backup remains usable if an earlier tier is unresolved
+(#11316). If no tier is live, the preferred tier's existing drivable-member
+fallback preserves neighbor resolution.
 
 ### Known limitation
 

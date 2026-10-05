@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -350,6 +351,139 @@ func TestLearnedRouteOutranksWorsePreferenceConfigRoute(t *testing.T) {
 	}
 	if !foundFallback {
 		t.Errorf("the preference-250 fallback must remain available: %+v", hits)
+	}
+}
+
+// Dynamic FRR routes use their protocol's default distance when a configured
+// static is a worse fallback. The helper must retain both rows and order the
+// learned route first, rather than comparing every protocol against DHCP's
+// fixed import preference of 200.
+func TestDynamicLearnedRouteGapFillUsesProtocolDistance12037(t *testing.T) {
+	tests := []struct {
+		name              string
+		protocol          string
+		staticPreference  int
+		learnedPreference int
+	}{
+		{"bgp-21", "bgp", 21, 20},
+		{"bgp-150", "bgp", 150, 20},
+		{"bgp-200", "bgp", 200, 20},
+		{"ospf-111", "ospf", 111, 110},
+		{"ospf-150", "ospf", 150, 110},
+		{"ospf-200", "ospf", 200, 110},
+		{"isis-116", "isis", 116, 115},
+		{"isis-150", "isis", 150, 115},
+		{"isis-200", "isis", 200, 115},
+		{"rip-121", "rip", 121, 120},
+		{"rip-150", "rip", 150, 120},
+		{"rip-200", "rip", 200, 120},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := cfgWithStaticDefault("192.0.2.1")
+			cfg.RoutingOptions.StaticRoutes[0].Preference = tc.staticPreference
+			learned := learnedV4("0.0.0.0/0", "198.51.100.254")
+			learned.Protocol = tc.protocol
+			withLearnedRoutes(t, fixedLearned(learned))
+
+			out, _, err := buildRouteSnapshots(cfg, nil, nil)
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			hits := snapshotFor(t, "inet.0", "inet", "0.0.0.0/0", out)
+			if len(hits) != 2 {
+				t.Fatalf("want learned route and static fallback, got %d: %+v", len(hits), hits)
+			}
+
+			foundLearned, foundStatic := false, false
+			for _, route := range hits {
+				switch {
+				case reflect.DeepEqual(route.NextHops, []string{"198.51.100.254"}):
+					if foundLearned {
+						t.Fatalf("duplicate learned route: %+v", hits)
+					}
+					foundLearned = true
+					if route.Preference != tc.learnedPreference {
+						t.Errorf("%s learned preference = %d, want protocol distance %d",
+							tc.protocol, route.Preference, tc.learnedPreference)
+					}
+				case reflect.DeepEqual(route.NextHops, []string{"192.0.2.1"}):
+					if foundStatic {
+						t.Fatalf("duplicate config static: %+v", hits)
+					}
+					foundStatic = true
+					if route.Preference != tc.staticPreference {
+						t.Errorf("static preference = %d, want %d",
+							route.Preference, tc.staticPreference)
+					}
+				default:
+					t.Fatalf("unexpected same-prefix route: %+v", route)
+				}
+			}
+			if !foundLearned || !foundStatic {
+				t.Fatalf("missing learned route or static fallback: %+v", hits)
+			}
+			if tc.learnedPreference >= tc.staticPreference {
+				t.Fatalf("test case does not put learned route first: %+v", tc)
+			}
+		})
+	}
+}
+
+// RTPROT_ZSTATIC is exposed by the importer as protocol "static". Its learned
+// copy is the configured static's own kernel echo and remains suppressed when
+// the configured route is at or below the fixed import preference.
+func TestStaticLearnedRouteEchoRemainsSuppressed12037(t *testing.T) {
+	for _, preference := range []int{5, 150, routing.LearnedRouteImportPreference} {
+		t.Run(strconv.Itoa(preference), func(t *testing.T) {
+			cfg := cfgWithStaticDefault("192.0.2.1")
+			cfg.RoutingOptions.StaticRoutes[0].Preference = preference
+			learned := learnedV4("0.0.0.0/0", "198.51.100.254")
+			learned.Protocol = "static"
+			withLearnedRoutes(t, fixedLearned(learned))
+
+			out, _, err := buildRouteSnapshots(cfg, nil, nil)
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			hits := snapshotFor(t, "inet.0", "inet", "0.0.0.0/0", out)
+			if len(hits) != 1 || hits[0].Preference != preference ||
+				!reflect.DeepEqual(hits[0].NextHops, []string{"192.0.2.1"}) {
+				t.Fatalf("configured static must remain the sole route at preference %d: %+v",
+					preference, hits)
+			}
+		})
+	}
+}
+
+func TestDynamicLearnedRouteDoesNotOverrideEqualDistanceConfigRoute12037(t *testing.T) {
+	tests := []struct {
+		protocol string
+		distance int
+	}{
+		{"bgp", 20},
+		{"ospf", 110},
+		{"isis", 115},
+		{"rip", 120},
+	}
+	for _, tc := range tests {
+		t.Run(tc.protocol, func(t *testing.T) {
+			cfg := cfgWithStaticDefault("192.0.2.1")
+			cfg.RoutingOptions.StaticRoutes[0].Preference = tc.distance
+			learned := learnedV4("0.0.0.0/0", "198.51.100.254")
+			learned.Protocol = tc.protocol
+			withLearnedRoutes(t, fixedLearned(learned))
+
+			out, _, err := buildRouteSnapshots(cfg, nil, nil)
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			hits := snapshotFor(t, "inet.0", "inet", "0.0.0.0/0", out)
+			if len(hits) != 1 || hits[0].Preference != tc.distance ||
+				!reflect.DeepEqual(hits[0].NextHops, []string{"192.0.2.1"}) {
+				t.Fatalf("static at the learned protocol distance must remain sole: %+v", hits)
+			}
+		})
 	}
 }
 
