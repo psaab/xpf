@@ -282,4 +282,11 @@ func TestHostInboundSourceLessWireGuardFailsClosed12119(t *testing.T) {
 	if strings.Contains(payload, "udp dport 51820 accept") {
 		t.Fatalf("source-less listener must not be admitted in any zone:\n%s", payload)
 	}
+	if strings.Contains(payload, `iifname != "xpf-usp0"`) {
+		t.Fatalf("source-less listener mismatch drops must cover trusted reinjection:\n%s", payload)
+	}
+	if !strings.Contains(payload, "ip daddr 172.16.50.8 udp dport 51820 counter name \""+
+		xnft.HostInboundDenyCounterName("wan", "ip")+"\" drop") {
+		t.Fatalf("source-less listener must be unconditionally dropped on the reinject path:\n%s", payload)
+	}
 }

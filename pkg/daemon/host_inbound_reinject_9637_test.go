@@ -167,10 +167,10 @@ func TestHostInboundReinjectStaleOmitsAccept9637(t *testing.T) {
 	}
 }
 
-// TestHostInboundWireGuardSNATReinjectGuardOrder12119 pins the narrow
-// xpf-usp0 exception around WG mismatch drops. The mismatch guards stay ahead
-// of broad reply/service rules, unzoned-address drops remain unconditional, and
-// the pre-existing trusted reinject accept stays after fine junos-host jumps.
+// TestHostInboundWireGuardSNATReinjectGuardOrder12119 pins that trusted
+// reinjection cannot bypass WG owner-zone mismatch drops. Guards stay ahead of
+// broad reply/service rules, while the existing later reinject accept remains
+// after fine junos-host jumps and is reached only after the specific drop rules.
 func TestHostInboundWireGuardSNATReinjectGuardOrder12119(t *testing.T) {
 	views, unzonedV4, unzonedV6 := reinjectViews9637()
 	_, _, _, programs, _, _ := parityHostInboundInputs()
@@ -198,11 +198,12 @@ func TestHostInboundWireGuardSNATReinjectGuardOrder12119(t *testing.T) {
 						unzonedDrop = i
 					} else if wgDrop < 0 {
 						wgDrop = i
-						hasReinjectException := strings.Contains(line, `iifname != "xpf-usp0"`)
-						if hasReinjectException != tc.fresh {
-							t.Errorf("fresh=%t WG mismatch drop has xpf-usp0 exclusion=%t: %s", tc.fresh, hasReinjectException, line)
-						}
 					}
+				}
+				if tc.fresh && strings.Contains(line, "udp dport 51820") &&
+					strings.HasSuffix(strings.TrimSpace(line), "drop") &&
+					strings.Contains(line, `iifname != "xpf-usp0"`) {
+					t.Errorf("trusted reinject must not bypass a WG mismatch drop: %s", line)
 				}
 			}
 			if wgDrop < 0 {

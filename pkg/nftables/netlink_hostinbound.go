@@ -33,8 +33,6 @@ const unzonedHostInboundZoneLabel = "junos-host"
 func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 	declareHostInboundCounters(p, spec)
 	reinjectV4, reinjectV6 := hostInboundReinjectDestinations(spec.Views)
-	trustedReinjectV4 := spec.DataplaneFresh && len(reinjectV4) > 0
-	trustedReinjectV6 := spec.DataplaneFresh && len(reinjectV6) > 0
 
 	// #9504: each program's first-match rules live in a regular chain the input
 	// chain jumps to. The chains are declared first, so every jump names a chain
@@ -58,8 +56,8 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
 			spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts, hostInboundTrustedReinject(spec),
 		))
-		emitHostInboundWireGuardMismatchDropsNetlink(p, spec.Views, spec.UnzonedV4, famV4, spec.WGListenPorts, spec.WGZonePorts, trustedReinjectV4)
-		emitHostInboundWireGuardMismatchDropsNetlink(p, spec.Views, spec.UnzonedV6, famV6, spec.WGListenPorts, spec.WGZonePorts, trustedReinjectV6)
+		emitHostInboundWireGuardMismatchDropsNetlink(p, spec.Views, spec.UnzonedV4, famV4, spec.WGListenPorts, spec.WGZonePorts)
+		emitHostInboundWireGuardMismatchDropsNetlink(p, spec.Views, spec.UnzonedV6, famV6, spec.WGListenPorts, spec.WGZonePorts)
 		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), true)
 		emitJunosHostMulticastProgramJumpsNetlink(p, spec.Programs)
 		emitHostInboundMulticastGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)
@@ -74,8 +72,8 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundStaleReplyGuards(p, HostInboundStaleReplyGuardRules(
 			spec.Views, spec.UnzonedV4, spec.UnzonedV6, spec.WGListenPorts, hostInboundTrustedReinject(spec),
 		))
-		emitHostInboundWireGuardMismatchDropsNetlink(p, spec.Views, spec.UnzonedV4, famV4, spec.WGListenPorts, spec.WGZonePorts, trustedReinjectV4)
-		emitHostInboundWireGuardMismatchDropsNetlink(p, spec.Views, spec.UnzonedV6, famV6, spec.WGListenPorts, spec.WGZonePorts, trustedReinjectV6)
+		emitHostInboundWireGuardMismatchDropsNetlink(p, spec.Views, spec.UnzonedV4, famV4, spec.WGListenPorts, spec.WGZonePorts)
+		emitHostInboundWireGuardMismatchDropsNetlink(p, spec.Views, spec.UnzonedV6, famV6, spec.WGListenPorts, spec.WGZonePorts)
 		emitHostInboundScreenFloodNetlink(p, HostInboundScreenFloodRules(spec.Views), true)
 		emitJunosHostMulticastProgramJumpsNetlink(p, spec.Programs)
 		emitHostInboundMulticastGuardsNetlink(p, spec.Views, spec.UnzonedIngressNetdevs, spec.UnzonedIngressVRFSlaves)

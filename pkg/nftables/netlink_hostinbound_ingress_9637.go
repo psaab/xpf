@@ -138,7 +138,7 @@ func hostInboundWGAmbiguousAddresses(views []HostInboundZoneView, f nlFamily) []
 	return ambiguous
 }
 
-func emitHostInboundWireGuardMismatchDropsNetlink(p *nlPlan, views []HostInboundZoneView, unzoned []string, f nlFamily, listenPorts []uint16, zonePorts map[string][]uint16, trustedReinject bool) {
+func emitHostInboundWireGuardMismatchDropsNetlink(p *nlPlan, views []HostInboundZoneView, unzoned []string, f nlFamily, listenPorts []uint16, zonePorts map[string][]uint16) {
 	if len(listenPorts) == 0 {
 		return
 	}
@@ -148,39 +148,23 @@ func emitHostInboundWireGuardMismatchDropsNetlink(p *nlPlan, views []HostInbound
 		allowed := hostInboundWGIntersectPorts(zonePorts[zone], listenPorts)
 		cn := HostInboundDenyCounterName(zone, familyToken(f))
 		if len(allowed) == 0 || len(ingress[zone]) == 0 {
-			rule := p.rule()
-			if trustedReinject {
-				rule.iifnameExcept([]string{HostInboundReinjectIfname})
-			}
-			rule.daddr(f, addresses[zone], false).
+			p.rule().daddr(f, addresses[zone], false).
 				l4Port(protoUDP, "dport", portsFromUint16(listenPorts), false).
 				counterRef(cn).emit(verdictDrop()...)
 			continue
 		}
 		if disallowed := hostInboundWGSubtractPorts(listenPorts, allowed); len(disallowed) > 0 {
-			rule := p.rule()
-			if trustedReinject {
-				rule.iifnameExcept([]string{HostInboundReinjectIfname})
-			}
-			rule.daddr(f, addresses[zone], false).
+			p.rule().daddr(f, addresses[zone], false).
 				l4Port(protoUDP, "dport", portsFromUint16(disallowed), false).
 				counterRef(cn).emit(verdictDrop()...)
 		}
-		rule := p.rule()
-		if trustedReinject {
-			rule.iifnameExcept([]string{HostInboundReinjectIfname})
-		}
-		rule.iifnameExcept(ingress[zone]).daddr(f, addresses[zone], false).
+		p.rule().iifnameExcept(ingress[zone]).daddr(f, addresses[zone], false).
 			l4Port(protoUDP, "dport", portsFromUint16(allowed), false).
 			counterRef(cn).emit(verdictDrop()...)
 	}
 	sentinel := HostInboundDenyCounterName(unzonedHostInboundZoneLabel, familyToken(f))
 	if len(ambiguous) > 0 {
-		rule := p.rule()
-		if trustedReinject {
-			rule.iifnameExcept([]string{HostInboundReinjectIfname})
-		}
-		rule.daddr(f, ambiguous, false).
+		p.rule().daddr(f, ambiguous, false).
 			l4Port(protoUDP, "dport", portsFromUint16(listenPorts), false).
 			counterRef(sentinel).emit(verdictDrop()...)
 	}

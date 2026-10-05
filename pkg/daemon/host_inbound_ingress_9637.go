@@ -195,18 +195,11 @@ func hostInboundWGAmbiguousAddresses(views []dpuserspace.ZoneHostInboundView, fa
 // emitHostInboundWireGuardMismatchDrops runs before broad conntrack replies and
 // service accepts. Only a selected port arriving on the outer-source owner
 // zone's ingress and targeting that unique same-zone address escapes these
-// counted guards. When a fresh dataplane has the trusted reinject exemption,
-// its TUN is excluded from view-address mismatch drops here; the existing later
-// reinject accept still follows junos-host policy programs.
-func emitHostInboundWireGuardMismatchDrops(rules *[]string, views []dpuserspace.ZoneHostInboundView, unzoned []string, family string, listenPorts []uint16, zonePorts map[string][]uint16, trustedReinject bool) {
+// counted guards. Trusted reinjection does not prove listener ownership, so it
+// is subject to the same mismatch drops as physical ingress.
+func emitHostInboundWireGuardMismatchDrops(rules *[]string, views []dpuserspace.ZoneHostInboundView, unzoned []string, family string, listenPorts []uint16, zonePorts map[string][]uint16) {
 	if len(listenPorts) == 0 {
 		return
-	}
-	excludeTrustedReinject := func(scope string) string {
-		if !trustedReinject {
-			return scope
-		}
-		return "iifname != \"" + xnft.HostInboundReinjectIfname + "\" " + scope
 	}
 	zones, addresses, ambiguous := hostInboundWireGuardZoneAddresses(views, family)
 	ingress := hostInboundWireGuardZoneIngress(views)
@@ -215,27 +208,25 @@ func emitHostInboundWireGuardMismatchDrops(rules *[]string, views []dpuserspace.
 		if len(addrs) == 0 {
 			continue
 		}
-		// zonePorts[""] is an inert sentinel for source-less/unknown owners:
-		// zones comes only from real views, so it can never become an admit key.
 		allowed := hostInboundWGIntersectPorts(zonePorts[zone], listenPorts)
 		cn := xnft.HostInboundDenyCounterName(zone, family)
 		if len(allowed) == 0 || len(ingress[zone]) == 0 {
 			scope := family + " daddr " + nftAddrSet(addrs) + " udp dport " + renderWireGuardPortSpec(listenPorts)
-			*rules = append(*rules, "    "+excludeTrustedReinject(scope)+" counter name \""+cn+"\" drop")
+			*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
 			continue
 		}
 		if disallowed := hostInboundWGSubtractPorts(listenPorts, allowed); len(disallowed) > 0 {
 			scope := family + " daddr " + nftAddrSet(addrs) + " udp dport " + renderWireGuardPortSpec(disallowed)
-			*rules = append(*rules, "    "+excludeTrustedReinject(scope)+" counter name \""+cn+"\" drop")
+			*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
 		}
 		scope := "iifname != " + nftIifnameSet(ingress[zone]) + " " + family + " daddr " + nftAddrSet(addrs) +
 			" udp dport " + renderWireGuardPortSpec(allowed)
-		*rules = append(*rules, "    "+excludeTrustedReinject(scope)+" counter name \""+cn+"\" drop")
+		*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
 	}
 	if len(ambiguous) > 0 {
 		cn := xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, family)
 		scope := family + " daddr " + nftAddrSet(ambiguous) + " udp dport " + renderWireGuardPortSpec(listenPorts)
-		*rules = append(*rules, "    "+excludeTrustedReinject(scope)+" counter name \""+cn+"\" drop")
+		*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
 	}
 	if len(unzoned) > 0 {
 		cn := xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, family)

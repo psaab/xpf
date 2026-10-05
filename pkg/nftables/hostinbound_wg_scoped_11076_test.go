@@ -1,8 +1,11 @@
 package nftables
 
 import (
+	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/google/nftables/expr"
 )
 
 // #11574 (netlink production renderer): WireGuard admission requires the
@@ -69,4 +72,82 @@ func TestWireGuardAcceptIsZoneScopedNetlink11076(t *testing.T) {
 	if acceptIdx < 0 || dropIdx < 0 || acceptIdx > dropIdx {
 		t.Fatalf("scoped accept must precede the zone drop (accept=%d drop=%d):\n%s", acceptIdx, dropIdx, plan)
 	}
+}
+
+// The fresh trusted reinject accept must not suppress WireGuard owner-zone
+// mismatch drops in the netlink renderer. This pins the mirrored production
+// path as well as the daemon text builder.
+func TestWireGuardMismatchDropCoversTrustedReinjectNetlink12119(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		zonePort map[string][]uint16
+	}{
+		{name: "owned source", zonePort: map[string][]uint16{"trust": {51820}}},
+		{name: "source-less", zonePort: map[string][]uint16{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newBuildPlan(t, "xpf_12119", hostInboundPriority)
+			buildHostInboundNetlink(p, HostInboundSpec{
+				Views: []HostInboundZoneView{
+					{Zone: "trust", SystemServices: []string{"ssh"}, V4Addrs: []string{"10.0.1.1"}, IngressNetdevs: []string{"trust0"}},
+					{Zone: "untrust", SystemServices: []string{"any-service"}, V4Addrs: []string{"10.0.2.1"}, IngressNetdevs: []string{"untrust0"}},
+				},
+				WGListenPorts:  []uint16{51820},
+				WGZonePorts:    tc.zonePort,
+				DataplaneFresh: true,
+			})
+			if p.err != nil {
+				t.Fatalf("build error: %v", p.err)
+			}
+			plan := canonRules(p)
+			sawDrop := false
+			lastDropIndex := -1
+			reinjectAcceptIndex := -1
+			for index, rule := range p.rules {
+				line := canonRule(p, rule)
+				if strings.Contains(line, "ca6c") && strings.Contains(line, "xpfhi_") &&
+					strings.HasSuffix(line, "verdict(0)") {
+					sawDrop = true
+					lastDropIndex = index
+					if hasIifnameRuleValue(rule, HostInboundReinjectIfname) {
+						t.Fatalf("WG mismatch drop includes trusted reinject: %s\nplan:\n%s", line, plan)
+					}
+				}
+				if hasIifnameRuleMatch(rule, HostInboundReinjectIfname) &&
+					strings.HasSuffix(line, "verdict(1)") {
+					reinjectAcceptIndex = index
+				}
+			}
+			if !sawDrop {
+				t.Fatalf("fresh dataplane must render a WG mismatch drop:\n%s", plan)
+			}
+			if reinjectAcceptIndex <= lastDropIndex {
+				t.Fatalf("fresh reinject accept must remain after WG mismatch drops: drop=%d accept=%d\n%s", lastDropIndex, reinjectAcceptIndex, plan)
+			}
+		})
+	}
+}
+
+func hasIifnameRuleValue(rule []expr.Any, name string) bool {
+	return iifnameRuleComparison(rule, name) != nil
+}
+
+func hasIifnameRuleMatch(rule []expr.Any, name string) bool {
+	cmp := iifnameRuleComparison(rule, name)
+	return cmp != nil && cmp.Op == expr.CmpOpEq
+}
+
+func iifnameRuleComparison(rule []expr.Any, name string) *expr.Cmp {
+	want := ifname16(name)
+	for i, e := range rule {
+		meta, ok := e.(*expr.Meta)
+		if !ok || meta.Key != expr.MetaKeyIIFNAME || i+1 >= len(rule) {
+			continue
+		}
+		cmp, ok := rule[i+1].(*expr.Cmp)
+		if ok && cmp.Register == meta.Register && bytes.Equal(cmp.Data, want) {
+			return cmp
+		}
+	}
+	return nil
 }
