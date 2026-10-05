@@ -2600,39 +2600,37 @@ func TestUnzonedDHCPFallbackKeepsInterfaceDrop10751(t *testing.T) {
 	}
 }
 
-// TestUnleasedOraclePlacement10751: the text oracles render the per-family
-// backstop LAST (after every destination rule, so addressed families and
-// explicit programs win), family-guarded (a v6-only backstop must not
-// shadow v4 fallthrough and vice versa), and the per-family DHCP admits
-// BEFORE every destination rule (so a first ADVERTISE is not shadowed by
-// the link-local DROP on an already-up link). Set form for several
-// netdevs; omitted when empty.
+// TestUnleasedOraclePlacement10751: the text oracles render persistent
+// backstop drops LAST, after destination rules, family-guarded, and restricted
+// to PACKET_HOST. DHCPv4 needs no input admit because its client reads via
+// AF_PACKET; DHCPv6 admits only server replies to the link-local client or the
+// All_DHCP_Relay_Agents_and_Servers discovery group.
 func TestUnleasedOraclePlacement10751(t *testing.T) {
 	views := []dpuserspace.ZoneHostInboundView{{Zone: "trust", V4Addrs: []string{"10.0.0.1"}}}
 	unleasedV4 := []string{"ge-0-0-8", "ge-0-0-9"}
 	unleasedV6 := []string{"ge-0-0-9"}
-	wantDropV4 := `iifname { "ge-0-0-8", "ge-0-0-9" } meta nfproto ipv4 drop`
-	wantDropV6 := `iifname "ge-0-0-9" meta nfproto ipv6 drop`
-	wantAdmitV4 := `iifname { "ge-0-0-8", "ge-0-0-9" } meta nfproto ipv4 udp dport 68 accept`
-	wantAdmitV6 := `iifname "ge-0-0-9" meta nfproto ipv6 udp dport 546 accept`
+	wantDropV4 := `iifname { "ge-0-0-8", "ge-0-0-9" } meta nfproto ipv4 meta pkttype host drop`
+	wantDropV6 := `iifname "ge-0-0-9" meta nfproto ipv6 meta pkttype host drop`
+	wantAdmitV6 := `iifname "ge-0-0-9" meta nfproto ipv6 ip6 daddr { fe80::/10, ff02::1:2 } udp sport 547 udp dport 546 accept`
 	for name, payload := range map[string]string{
 		"real":  buildHostInboundFilterPayloadWithOverlay(views, []string{"10.9.9.9"}, nil, nil, nil, true, nil, unleasedV4, unleasedV6, dhcpBackstopVRFLists{}),
 		"fence": buildHostInboundFencePayload(views, nil, nil, nil, nil, unleasedV4, unleasedV6, dhcpBackstopVRFLists{}),
 		"gap":   buildHostInboundGapFencePayload(views, []string{"10.0.0.2"}, nil, nil, nil, unleasedV4, unleasedV6, nil, nil, nil, dhcpBackstopVRFLists{}, nil, nil),
 	} {
-		for _, want := range []string{wantDropV4, wantDropV6, wantAdmitV4, wantAdmitV6} {
+		for _, want := range []string{wantDropV4, wantDropV6, wantAdmitV6} {
 			if !strings.Contains(payload, want) {
 				t.Errorf("%s oracle lacks %q:\n%s", name, want, payload)
 			}
 		}
+		if strings.Contains(payload, "udp dport 68 accept") {
+			t.Errorf("%s oracle emits an unnecessary persistent DHCPv4 ACCEPT:\n%s", name, payload)
+		}
 		if strings.LastIndex(payload, "daddr") > strings.Index(payload, wantDropV4) {
 			t.Errorf("%s oracle places the interface backstop before a destination rule:\n%s", name, payload)
 		}
-		// Admits precede every destination DROP: the last admit must
-		// sit before the first destination drop. (The #10752
-		// stale-reply guards also carry daddr but precede the admits
-		// by design — DHCP client ports are catalog-exempt — so
-		// guard lines, marked by "ct direction reply", are skipped.)
+		// The DHCPv6 admit precedes every destination DROP; the last admit
+		// must sit before the first destination drop. (The #10752
+		// stale-reply guards also carry daddr but precede it by design.)
 		lastAdmit := strings.LastIndex(payload, wantAdmitV6)
 		for _, line := range strings.Split(payload, "\n") {
 			if !strings.Contains(line, "daddr") || !strings.Contains(line, "drop") || strings.Contains(line, "ct direction reply") {

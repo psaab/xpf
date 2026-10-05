@@ -3,6 +3,7 @@ package nftables
 import (
 	"context"
 	"net"
+	"runtime"
 	"strconv"
 	"syscall"
 	"testing"
@@ -10,12 +11,14 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
+	"golang.org/x/sys/unix"
 )
 
 // TestHostInboundGapRetainedBackstop11577 proves the later-priority gap table
 // denies uncovered and previously-unobserved DHCP addresses without overriding
-// the retained table's service decisions. The v6-only gap leg also guards the
-// retained v4 addresses on the same ordinary and VRF-enslaved interfaces.
+// the retained table's service decisions, including retained RIP multicast.
+// The v6-only gap leg also guards the retained v4 addresses on the same ordinary
+// and VRF-enslaved interfaces.
 func TestHostInboundGapRetainedBackstop11577(t *testing.T) {
 	enterPrivateNetns(t)
 	regularHost := mkNamedVeth10751(t, "ge-0-0-1", "vhost0", "vpeer0")
@@ -146,6 +149,29 @@ func TestHostInboundGapRetainedBackstop11577(t *testing.T) {
 			_ = listener.Close()
 		}
 	})
+	regularIface, err := net.InterfaceByName("ge-0-0-1")
+	if err != nil {
+		t.Fatalf("find regular interface for RIP multicast: %v", err)
+	}
+	ripListener, err := net.ListenMulticastUDP("udp4", regularIface, &net.UDPAddr{
+		IP: net.ParseIP("224.0.0.9"), Port: 520,
+	})
+	if err != nil {
+		t.Fatalf("listen for RIP multicast: %v", err)
+	}
+	t.Cleanup(func() { _ = ripListener.Close() })
+	probeRIPMulticast := func(phase string) {
+		t.Helper()
+		if err := sendRIPMulticastFromPeer11577(peerNS); err != nil {
+			t.Fatalf("%s send RIP multicast: %v", phase, err)
+		}
+		if err := ripListener.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatalf("%s set RIP receive deadline: %v", phase, err)
+		}
+		if _, _, err := ripListener.ReadFromUDP(make([]byte, 64)); err != nil {
+			t.Fatalf("%s RIP multicast was not delivered: %v", phase, err)
+		}
+	}
 
 	probe := func(network, address string, port int, want bool, phase, surface string) {
 		t.Helper()
@@ -190,14 +216,16 @@ func TestHostInboundGapRetainedBackstop11577(t *testing.T) {
 	coveredV6 := []string{regularV6[0], vrfV6[0]}
 	retained := HostInboundSpec{
 		Views: []HostInboundZoneView{{
-			Zone: "wan", SystemServices: []string{"ssh"},
-			V4Addrs: coveredV4, V6Addrs: coveredV6,
+			Zone: "wan", SystemServices: []string{"ssh"}, Protocols: []string{"rip"},
+			IngressNetdevs: []string{"ge-0-0-1"},
+			V4Addrs:        coveredV4, V6Addrs: coveredV6,
 		}},
 	}
 	if err := installer.InstallHostInbound(retained); err != nil {
 		t.Fatalf("install retained host-inbound policy: %v", err)
 	}
 	checkSurface("retained-table control", true, false, true, true)
+	probeRIPMulticast("retained-table")
 
 	gap := GapFenceSpec{
 		UncoveredV4: []string{regularV4[1], vrfV4[1]},
@@ -210,6 +238,7 @@ func TestHostInboundGapRetainedBackstop11577(t *testing.T) {
 		t.Fatalf("install retained-address-scoped gap fence: %v", err)
 	}
 	checkSurface("dual-stack gap", true, false, false, false)
+	probeRIPMulticast("dual-stack gap")
 
 	// These lease addresses appear only after the gap table is active; the
 	// interface backstop must also catch destinations absent from its snapshot.
@@ -246,6 +275,7 @@ func TestHostInboundGapRetainedBackstop11577(t *testing.T) {
 		t.Fatalf("install IPv6-only gap fence: %v", err)
 	}
 	checkSurface("IPv6-only gap", true, false, false, false)
+	probeRIPMulticast("IPv6-only gap")
 }
 
 func listenTCPOnDevice11577(t *testing.T, network, address string, port int, device string) *net.TCPListener {
@@ -269,4 +299,51 @@ func listenTCPOnDevice11577(t *testing.T, network, address string, port int, dev
 		t.Fatalf("listener for %s %s:%d is %T, want *net.TCPListener", network, address, port, listener)
 	}
 	return tcpListener
+}
+
+func sendRIPMulticastFromPeer11577(ns netns.NsHandle) (result error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	original, err := netns.Get()
+	if err != nil {
+		return err
+	}
+	defer original.Close()
+	if err := netns.Set(ns); err != nil {
+		return err
+	}
+	defer func() {
+		if err := netns.Set(original); err != nil && result == nil {
+			result = err
+		}
+	}()
+
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("192.0.2.1")})
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	rawConn, err := conn.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var optionErr error
+	if err := rawConn.Control(func(fd uintptr) {
+		optionErr = unix.SetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_BINDTODEVICE, "vpeer0")
+		if optionErr != nil {
+			return
+		}
+		optionErr = unix.SetsockoptInet4Addr(int(fd), unix.IPPROTO_IP, unix.IP_MULTICAST_IF, [4]byte{192, 0, 2, 1})
+		if optionErr != nil {
+			return
+		}
+		optionErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_MULTICAST_TTL, 1)
+	}); err != nil {
+		return err
+	}
+	if optionErr != nil {
+		return optionErr
+	}
+	_, err = conn.WriteToUDP([]byte("rip"), &net.UDPAddr{IP: net.ParseIP("224.0.0.9"), Port: 520})
+	return err
 }

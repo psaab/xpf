@@ -145,6 +145,62 @@ func TestZonedDHCPBackstopFansDownBareMemberVLAN11577(t *testing.T) {
 	}
 }
 
+// TestZonedDHCPBackstopIncludesNonLifelineManagementVRF11577 covers the
+// management binder's fxp*/fab*/em* ownership without a routing-instance stanza.
+// Explicit cluster lifelines and fxp0 remain excluded from enforcement.
+func TestZonedDHCPBackstopIncludesNonLifelineManagementVRF11577(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Chassis.Cluster = &config.ClusterConfig{ControlInterface: "em0", FabricInterface: "fab0"}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"fxp0": {Name: "fxp0", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCP: true, DHCPv6: true}}},
+		"fxp1": {Name: "fxp1", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCP: true, DHCPv6: true}}},
+		"em0":  {Name: "em0", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCP: true, DHCPv6: true}}},
+		"fab0": {Name: "fab0", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCP: true, DHCPv6: true}}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"wan": {
+			Name: "wan", Interfaces: []string{"fxp0.0", "fxp1.0", "em0.0", "fab0.0"},
+			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}},
+		},
+	}
+
+	got := BuildDHCPHostInboundBackstopNetdevs(cfg, nil)
+	if !reflect.DeepEqual(got.V4, []string{"fxp1"}) ||
+		!reflect.DeepEqual(got.VRFSlavesV4, []string{"fxp1"}) {
+		t.Errorf("management DHCPv4 backstop = %+v, want only enforcing non-lifeline fxp1", got)
+	}
+	if !reflect.DeepEqual(got.V6, []string{"fxp1"}) ||
+		!reflect.DeepEqual(got.VRFSlavesV6, []string{"fxp1"}) {
+		t.Errorf("management DHCPv6 backstop = %+v, want only enforcing non-lifeline fxp1", got)
+	}
+}
+
+// TestZonedDHCPBackstopIncludesTunnelManagerVRF11577 covers a stanza-owned
+// tunnel: the tunnel manager binds it, independently of RI interface lists.
+func TestZonedDHCPBackstopIncludesTunnelManagerVRF11577(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"gr-0/0/1": {
+			Name:   "gr-0/0/1",
+			Tunnel: &config.TunnelConfig{Name: "gr-0-0-1", RoutingInstance: "blue"},
+			Units:  map[int]*config.InterfaceUnit{0: {Number: 0, DHCP: true}},
+		},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"wan": {
+			Name: "wan", Interfaces: []string{"gr-0/0/1.0"},
+			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}},
+		},
+	}
+	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{Name: "blue", InstanceType: "virtual-router"}}
+
+	got := BuildDHCPHostInboundBackstopNetdevs(cfg, nil)
+	if !reflect.DeepEqual(got.V4, []string{"gr-0-0-1"}) ||
+		!reflect.DeepEqual(got.VRFSlavesV4, []string{"gr-0-0-1"}) {
+		t.Fatalf("tunnel DHCPv4 backstop = %+v, want tunnel manager's VRF-bound device", got)
+	}
+}
+
 func containsString(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {

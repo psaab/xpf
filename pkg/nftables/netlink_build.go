@@ -316,6 +316,10 @@ func (a *ruleAsm) sdifname(names []string) *ruleAsm {
 	return a.add(a.p.sdifnameMatch(names)...)
 }
 
+// pkttypeHost appends `meta pkttype host`, limiting an input backstop to
+// unicast packets whose Ethernet destination is this host.
+func (a *ruleAsm) pkttypeHost() *ruleAsm { return a.add(packetTypeHostMatch()...) }
+
 // iifnameExcept appends `iifname != "<n>"` / `iifname != { .. }` — the
 // uncovered-ingress fallback scope for stale-reply guards. Single-name uses
 // CmpOpNeq; multi-name uses an anonymous-set Lookup with Invert, which is
@@ -366,6 +370,12 @@ func nfprotoGuard(f nlFamily) []expr.Any {
 	}
 }
 
+func packetTypeHostMatch() []expr.Any {
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyPKTTYPE, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.NativeEndian.PutUint32(uint32(unix.PACKET_HOST))},
+	}
+}
 func l4protoGuard(proto uint8) []expr.Any {
 	return []expr.Any{
 		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},

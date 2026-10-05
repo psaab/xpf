@@ -17,14 +17,13 @@ func HostInboundVRFEnslavedNetdevs(cfg *Config) map[string]bool {
 	}))
 }
 
-// HostInboundDHCPVRFEnslavedNetdevs returns configured VRF members eligible for
-// persistent DHCP host-inbound backstops. Unlike the coarse
-// HostInboundVRFEnslavedNetdevs set, this follows the production binder's full
-// member fan-down so a bare RI member covers configured VLAN children. It
-// excludes management-class, conflicted, and tunnel-owned devices, which the
-// list-member binder does not bind.
+// HostInboundDHCPVRFEnslavedNetdevs returns configured netdevs that production
+// binds below a VRF master and that may need sdifname host-inbound backstops.
+// It includes list-owned members, tunnel-manager-owned tunnel devices, and
+// management-class interfaces bound to vrf-mgmt. Lifeline exclusions remain at
+// the DHCP-backstop caller, where interface intent is available.
 func HostInboundDHCPVRFEnslavedNetdevs(cfg *Config) map[string]bool {
-	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 || len(cfg.RoutingInstances) == 0 {
+	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
 		return nil
 	}
 	tunnelNames := cfg.TunnelNameMap()
@@ -37,13 +36,21 @@ func HostInboundDHCPVRFEnslavedNetdevs(cfg *Config) map[string]bool {
 	for _, conflict := range RoutingInstanceMemberDeviceConflicts(cfg, tunnelNames) {
 		excluded[conflict.LinuxName] = true
 	}
+
+	out := make(map[string]bool)
+	for ifName := range cfg.Interfaces.Interfaces {
+		if IsManagementIfName(ifName) {
+			if linuxName := LinuxIfName(ifName); linuxName != "" {
+				out[linuxName] = true
+			}
+		}
+	}
 	for _, claim := range routingInstanceTunnelDeviceClaims(cfg) {
-		if claim.LinuxName != "" {
-			excluded[claim.LinuxName] = true
+		if claim.LinuxName != "" && claim.Instance != "" && !excluded[claim.LinuxName] {
+			out[claim.LinuxName] = true
 		}
 	}
 
-	out := make(map[string]bool)
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil || ri.Name == "" || ri.InstanceType == "forwarding" || IsReservedRoutingInstanceName(ri.Name) {
 			continue

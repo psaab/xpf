@@ -77,7 +77,8 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 		emitHostInboundICMPAcceptsNetlink(p)
 	}
 
-	// #10751/#11577: admit DHCP replies before destination and interface drops.
+	// #10751/#11577: scoped DHCPv6 server replies pass before the backstop
+	// drops; DHCPv4 uses AF_PACKET and bypasses the input chain.
 	emitDHCPBackstopAdmitsNetlink(p, spec.UnleasedV4, spec.UnleasedV6, spec.UnleasedVRFSlavesV4, spec.UnleasedVRFSlavesV6)
 
 	// #9637 residual: the userspace-adjudicated reinject exemption, immediately

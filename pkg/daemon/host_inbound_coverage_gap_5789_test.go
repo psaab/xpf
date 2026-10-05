@@ -440,10 +440,10 @@ func TestHostInboundGapBackstopExcludesRetainedAddresses11577(t *testing.T) {
 	}
 	payload := build(uncoveredV4, uncoveredV6)
 	for _, rule := range []string{
-		`iifname "ge-0-0-1" meta nfproto ipv4 ip daddr != 192.0.2.2 drop`,
-		`meta sdifname "ge-0-0-5" meta nfproto ipv4 ip daddr != 192.0.2.2 drop`,
-		`iifname "ge-0-0-1" meta nfproto ipv6 ip6 daddr != 2001:db8::2 drop`,
-		`meta sdifname "ge-0-0-5" meta nfproto ipv6 ip6 daddr != 2001:db8::2 drop`,
+		`iifname "ge-0-0-1" meta nfproto ipv4 meta pkttype host ip daddr != 192.0.2.2 drop`,
+		`meta sdifname "ge-0-0-5" meta nfproto ipv4 meta pkttype host ip daddr != 192.0.2.2 drop`,
+		`iifname "ge-0-0-1" meta nfproto ipv6 meta pkttype host ip6 daddr != 2001:db8::2 drop`,
+		`meta sdifname "ge-0-0-5" meta nfproto ipv6 meta pkttype host ip6 daddr != 2001:db8::2 drop`,
 	} {
 		if !strings.Contains(payload, rule) {
 			t.Errorf("gap fence lacks retained-address-scoped backstop %q:\n%s", rule, payload)
@@ -452,8 +452,8 @@ func TestHostInboundGapBackstopExcludesRetainedAddresses11577(t *testing.T) {
 	for _, family := range []struct {
 		drop, backstop string
 	}{
-		{drop: "ip daddr " + nftAddrSet(uncoveredV4) + " drop", backstop: `iifname "ge-0-0-1" meta nfproto ipv4 ip daddr !=`},
-		{drop: "ip6 daddr " + nftAddrSet(uncoveredV6) + " drop", backstop: `iifname "ge-0-0-1" meta nfproto ipv6 ip6 daddr !=`},
+		{drop: "ip daddr " + nftAddrSet(uncoveredV4) + " drop", backstop: `iifname "ge-0-0-1" meta nfproto ipv4 meta pkttype host ip daddr !=`},
+		{drop: "ip6 daddr " + nftAddrSet(uncoveredV6) + " drop", backstop: `iifname "ge-0-0-1" meta nfproto ipv6 meta pkttype host ip6 daddr !=`},
 	} {
 		dropAt, backstopAt := strings.Index(payload, family.drop), strings.Index(payload, family.backstop)
 		if dropAt < 0 || backstopAt <= dropAt {
@@ -462,7 +462,7 @@ func TestHostInboundGapBackstopExcludesRetainedAddresses11577(t *testing.T) {
 	}
 
 	v6Only := build(nil, uncoveredV6)
-	if !strings.Contains(v6Only, `iifname "ge-0-0-1" meta nfproto ipv4 ip daddr != 192.0.2.2 drop`) {
+	if !strings.Contains(v6Only, `iifname "ge-0-0-1" meta nfproto ipv4 meta pkttype host ip daddr != 192.0.2.2 drop`) {
 		t.Fatalf("IPv6-only gap omitted the IPv4 retained-address exclusion:\n%s", v6Only)
 	}
 	if strings.Contains(v6Only, "ip daddr "+nftAddrSet(uncoveredV4)+" drop") {

@@ -1070,27 +1070,36 @@ installed deny keeps covering link-local destinations — the chain is
 `policy accept`, so pending-intent is deliberately stricter than
 enforceability for DHCP-intent scopes. Unzoned DHCP units with no lease
 yet are NOT pending (no hold — a never-leasing unit must not strand the
-global barrier); instead the first apply renders per-family LAST-placed,
-family-guarded `iifname <dev> meta nfproto <fam> drop` rules for them
-(#10751 R7-B; the guard keeps a v6-only backstop from shadowing v4
-fallthrough such as broadcast/multicast, and vice versa), so a first
-lease lands already denied and the debounced re-apply replaces the
-interface rules with destination DROPs. Each still-unleased family also
-gets a TOP-placed
-`iifname <dev> udp dport <68|546> accept` ahead of the destination drops
-(#10751 F8-A): without it a first ADVERTISE/OFFER — not
-conntrack-established when multicast-originated — would hit the interface
-DROP (or the unzoned link-local DROP on an already-up link) and deadlock
-acquisition. The admits are scoped to the unleased netdevs of each
-family, so leased families stay under pure destination judgement; they
-sit after the #10752 stale-reply guards, whose catalog exempts DHCP
-client ports. Lifeline units are excluded (management must survive).
-VRF-enslaved units are excluded too — their LOCAL_IN identity is the
-shared master, where an interface DROP would shadow addressed siblings
-(and the slave name never matches) — and converge via the lease
-callback instead: any non-lifeline DHCP lease forces the full recompile
-that installs destination DROPs. Accepted window: lease-install to
-debounced re-apply (~2s plus apply time), the #3698 lag class.
+global barrier); instead the first apply renders per-family LAST-placed
+`iifname <dev> meta nfproto <fam> meta pkttype host drop` rules for them
+(#10751 R7-B). The PACKET_HOST guard preserves multicast, broadcast, and
+other non-unicast fall-through instead of changing the prior policy.
+
+The same persistent interface backstop covers DHCP families in enforcing
+zones (#11577), and remains after an address appears until DHCP intent is
+removed or the effective zone policy allows all. It closes the lease-address
+appearance-to-debounced-reapply window while the destination-scoped rules
+catch up. Ordinary ingress uses `iifname`; configured VRF slaves also use
+`meta sdifname`, since LOCAL_IN reports the shared VRF master as `iifname`.
+The configured VRF set includes routing-instance members, tunnel-manager
+claims, and non-lifeline management-class interfaces bound to `vrf-mgmt`;
+explicit management/cluster lifelines remain excluded.
+
+DHCPv4 needs no nft client-port ACCEPT: the in-tree client receives through
+AF_PACKET and bypasses the input chain. DHCPv6 server replies are admitted
+before the drops only when UDP source port is 547, destination port is 546,
+and IPv6 destination is `fe80::/10` (link-local renewal/rebind) or
+`ff02::1:2` (discovery). The same interface/VRF scope is used. This leaves
+the client's required acquisition and renewal path open, but does not
+authenticate a server: an on-link sender can still spoof UDP/547 to those
+destinations.
+
+Lifeline units are excluded (management must survive). Unzoned VRF-enslaved
+units remain excluded from the unleased iifname backstop because their
+LOCAL_IN identity is the shared master; they converge via the lease callback
+instead: any non-lifeline DHCP lease forces the full recompile that installs
+destination DROPs. Accepted window: lease-install to debounced re-apply
+(~2s plus apply time), the #3698 lag class.
 FAULT residual (distinct, Opus9 round-9 / Opus10 round-10 — accepted,
 see #11497): a failed REAL install still converges — the same apply
 installs the gap DROP for the lease (M5 proof:
@@ -1290,13 +1299,15 @@ snapshot produces a zero-drop table shell:
   JOINS the commit error (fail-closed); the gap is torn down by the next
   successful real install (best effort — a lingering gap fences only,
   never opens) and on a successful teardown.
-  The later-chain DHCP backstop is also destination-conditional: it drops only
-  addresses outside the retained generation's syntactically valid, family-matched
-  coverage set (and remains unconditional when that set is empty). This denies
-  same-interface arrivals that were absent from both the retained view and the
-  explicit gap snapshot, without overriding retained service permits or denies;
-  a v6-only gap therefore keeps covered IPv4 decisions intact. The gap adds no
-  ACCEPT bypass.
+  The later-chain DHCP backstop is also destination-conditional and restricted
+  to `meta pkttype host`: it drops only addresses outside the retained
+  generation's syntactically valid, family-matched coverage set (and remains
+  unconditional when that set is empty). This denies same-interface arrivals
+  absent from both the retained view and explicit gap snapshot, without
+  overriding retained service permits or denies. Multicast, broadcast, and
+  other non-unicast traffic still reaches the retained main chain; a v6-only
+  gap therefore keeps covered IPv4 decisions intact. The gap adds no ACCEPT
+  bypass.
 - `installHostInboundColdBootFence` / `buildHostInboundFencePayload`
   (`daemon_nft.go`) build the fence: the same atomic-replace `xpf_hostinbound`
   table reduced to the global mandatory admits (`ct established,related`, raw

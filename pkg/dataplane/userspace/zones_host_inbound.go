@@ -1072,35 +1072,25 @@ func BuildUnzonedHostInboundAddrsFromSnapshots(cfg *config.Config, snaps []Inter
 	return buildUnzonedHostInboundAddrsFromSnaps(cfg, snaps)
 }
 
-// BuildUnzonedDHCPUnleasedNetdevs returns the sorted LOCAL_IN netdev names of
-// unzoned non-lifeline units with DHCP intent and no resolved address, SPLIT
-// BY FAMILY (#10751 R7-B/F8-A): an unzoned DHCP unit with no lease has no
-// destination for the unzoned catch-all, yet its first lease would land
-// host-reachable before the debounced re-apply installs one. The daemon
-// renders these as LAST-placed, family-guarded per-family `iifname <dev>
-// meta nfproto <fam> drop` rules (after every destination rule, so
-// addressed families and explicit programs still win; the guard keeps a
-// v6-only backstop from shadowing v4 fallthrough and vice versa):
-// interface-scoped protection that needs no hold and vanishes on
-// lease (the unit leaves this set the moment it resolves). A family that is
-// STILL unleased also gets a TOP-placed `iifname <dev> udp dport <68|546>
-// accept` (F8-A) admitting the DHCP client's own replies ahead of the
-// destination drops — without it the backstop deadlocks acquisition (a
-// multicast-originated ADVERTISE is not conntrack-established, so only the
-// DHCP admit lets it through). The split keeps leased families under pure
-// destination judgement: a v4-leased/v6-pending unit gets NO v4 admit.
-// VRF-enslaved units are skipped: their LOCAL_IN identity is the shared
-// master, so an iifname DROP there would shadow addressed siblings sharing
-// the master, while the slave name never matches (dead rule, false
-// confidence) — and holding the barrier for VRF-pending units would strand
-// boot on a never-leasing unit (rejected for all unzoned, R7-B). They rely
-// on lease-callback convergence instead: any non-lifeline DHCP lease —
-// VRF-enslaved included — forces the full recompile that installs
-// destination DROPs (dhcpLeaseChangeRequiresRecompile, pinned by
+// BuildUnzonedDHCPUnleasedNetdevs returns sorted LOCAL_IN netdev names for
+// unzoned, non-lifeline DHCP families without a resolved address, split by
+// family (#10751 R7-B/F8-A). Such an interface has no destination for the
+// unzoned catch-all, but its first lease is reachable before the debounced
+// re-apply. The daemon renders a LAST-placed family-guarded `iifname <dev>
+// meta nfproto <fam> meta pkttype host drop`; address rules and non-unicast
+// fall-through remain authoritative. DHCPv4 reception uses AF_PACKET; the
+// persistent DHCPv6 admit is separately restricted to server source port 547,
+// client destination port 546, and link-local or All_DHCP_Relay_Agents_and_Servers
+// destinations. Thus acquisition is not shadowed by the pending-family drop.
+// VRF-enslaved unzoned units remain excluded: at LOCAL_IN iifname shows the
+// shared master, so a catch-all there would shadow siblings and the slave-name
+// rule would never match. They retain lease-callback convergence instead; any
+// non-lifeline DHCP lease forces a full recompile that installs destination
+// DROPs (dhcpLeaseChangeRequiresRecompile, pinned by
 // TestDHCPLeaseChangeRequiresRecompile_VRFEnslavedNonLifeline10751). The
-// accepted window is lease-install to debounced re-apply (~2s debounce
-// plus apply time), the same address-appearance-to-apply lag class as
-// #3698. Lifelines are skipped (management must survive).
+// accepted window is lease-install to debounced re-apply (~2s plus apply time),
+// the same address-appearance-to-apply lag class as #3698. Lifelines are
+// skipped (management must survive).
 func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapshot) (v4, v6 []string) {
 	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
 		return nil, nil

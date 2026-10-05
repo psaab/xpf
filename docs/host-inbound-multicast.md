@@ -238,9 +238,10 @@ groups belonging to its expanded protocols.
    cannot bypass a changed zone decision.
 
 4. **Failure paths.** A cold-boot host-inbound fence denies catalog multicast
-   when the main table is unavailable. The additive coverage-gap fence remains
-   limited to uncovered address scopes; it does not blanket-drop multicast
-   already admitted by the retained main table.
+   when the main table is unavailable. Persistent DHCP backstops are limited to
+   `meta pkttype host`, so they cannot shadow MLD, other multicast, broadcast,
+   or non-unicast fall-through. The additive coverage-gap fence likewise leaves
+   retained-main-table multicast policy authoritative; it adds no broad ACCEPT.
 
 5. **Kernel/Rust lockstep.** The Go catalog
    (`pkg/config/host_inbound_multicast.go`), zone-view construction

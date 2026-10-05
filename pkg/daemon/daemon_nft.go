@@ -2598,29 +2598,32 @@ type dhcpBackstopVRFLists struct {
 
 // emitDHCPBackstopHostInboundDeny appends per-family LAST-placed DHCP
 // interface drops. Unzoned units are included only before their lease; DHCP
-// units in enforcing zones stay included across address appearance until the
-// address-scoped policy is republished. Ordinary interfaces use iifname;
-// only configured VRF slaves use sdifname, including before enslavement. The
-// family guards prevent one backstop from shadowing the other family's traffic.
+// units in enforcing zones stay included after address appearance until DHCP
+// intent is removed or the effective zone policy allows all. Ordinary
+// interfaces use iifname; configured VRF slaves use sdifname because LOCAL_IN
+// exposes the VRF master as iifname. Restrict drops to PACKET_HOST so multicast,
+// broadcast, and other fall-through traffic retain prior behavior.
 func emitDHCPBackstopHostInboundDeny(rules *[]string, backstopV4, backstopV6 []string, vrfBackstop dhcpBackstopVRFLists) {
 	if len(backstopV4) > 0 {
-		*rules = append(*rules, "    iifname "+nftIifnameSet(backstopV4)+" meta nfproto ipv4 drop")
+		*rules = append(*rules, "    iifname "+nftIifnameSet(backstopV4)+" meta nfproto ipv4 meta pkttype host drop")
 	}
 	if len(vrfBackstop.v4) > 0 {
-		*rules = append(*rules, "    meta sdifname "+nftIifnameSet(vrfBackstop.v4)+" meta nfproto ipv4 drop")
+		*rules = append(*rules, "    meta sdifname "+nftIifnameSet(vrfBackstop.v4)+" meta nfproto ipv4 meta pkttype host drop")
 	}
 	if len(backstopV6) > 0 {
-		*rules = append(*rules, "    iifname "+nftIifnameSet(backstopV6)+" meta nfproto ipv6 drop")
+		*rules = append(*rules, "    iifname "+nftIifnameSet(backstopV6)+" meta nfproto ipv6 meta pkttype host drop")
 	}
 	if len(vrfBackstop.v6) > 0 {
-		*rules = append(*rules, "    meta sdifname "+nftIifnameSet(vrfBackstop.v6)+" meta nfproto ipv6 drop")
+		*rules = append(*rules, "    meta sdifname "+nftIifnameSet(vrfBackstop.v6)+" meta nfproto ipv6 meta pkttype host drop")
 	}
 }
 
-// emitDHCPBackstopGapHostInboundDeny excludes addresses covered by the retained
-// main table from the later gap base chain's interface-wide fallback drops.
+// emitDHCPBackstopGapHostInboundDeny excludes retained local-unicast coverage
+// from the later gap chain and applies the same host-only packet guard. Thus
+// the retained main chain remains authoritative for multicast grants.
 func emitDHCPBackstopGapHostInboundDeny(rules *[]string, backstopV4, backstopV6 []string, vrfBackstop dhcpBackstopVRFLists, retainedV4, retainedV6 []string) {
 	emitDrop := func(scope, family string, retained []string) {
+		scope += " meta pkttype host"
 		if len(retained) > 0 {
 			scope += " " + family + " daddr != " + nftAddrSet(retained)
 		}
@@ -2640,21 +2643,20 @@ func emitDHCPBackstopGapHostInboundDeny(rules *[]string, backstopV4, backstopV6 
 	}
 }
 
-// emitDHCPBackstopAdmits appends DHCP-client reply admits before any
-// destination or interface drop. The sdifname variants are limited to the
-// configured VRF-slave subset.
-func emitDHCPBackstopAdmits(rules *[]string, backstopV4, backstopV6 []string, vrfBackstop dhcpBackstopVRFLists) {
-	if len(backstopV4) > 0 {
-		*rules = append(*rules, "    iifname "+nftIifnameSet(backstopV4)+" meta nfproto ipv4 udp dport 68 accept")
-	}
-	if len(vrfBackstop.v4) > 0 {
-		*rules = append(*rules, "    meta sdifname "+nftIifnameSet(vrfBackstop.v4)+" meta nfproto ipv4 udp dport 68 accept")
+// emitDHCPBackstopAdmits admits only DHCPv6 server replies the client can
+// receive: server source port 547, client destination port 546, and either
+// unicast link-local renewal/rebind replies or the All_DHCP_Relay_Agents_and_Servers
+// multicast used for discovery. DHCPv4 reception uses AF_PACKET and bypasses
+// this input chain, so it needs no persistent ACCEPT here.
+func emitDHCPBackstopAdmits(rules *[]string, _ []string, backstopV6 []string, vrfBackstop dhcpBackstopVRFLists) {
+	emit := func(scope string) {
+		*rules = append(*rules, "    "+scope+" meta nfproto ipv6 ip6 daddr { fe80::/10, ff02::1:2 } udp sport 547 udp dport 546 accept")
 	}
 	if len(backstopV6) > 0 {
-		*rules = append(*rules, "    iifname "+nftIifnameSet(backstopV6)+" meta nfproto ipv6 udp dport 546 accept")
+		emit("iifname " + nftIifnameSet(backstopV6))
 	}
 	if len(vrfBackstop.v6) > 0 {
-		*rules = append(*rules, "    meta sdifname "+nftIifnameSet(vrfBackstop.v6)+" meta nfproto ipv6 udp dport 546 accept")
+		emit("meta sdifname " + nftIifnameSet(vrfBackstop.v6))
 	}
 }
 

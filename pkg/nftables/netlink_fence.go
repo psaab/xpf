@@ -4,8 +4,8 @@ package nftables
 // additive coverage-gap fence via netlink, mirroring the text oracles in
 // pkg/daemon/daemon_nft.go. The cold-boot fence removes per-service ACCEPTs and
 // drops catalog multicast groups on represented ingress before established
-// admits; the additive gap fence drops only its uncovered address set, leaving
-// the retained main table's multicast policy authoritative.
+// admits. Persistent DHCP backstops are separately limited to PACKET_HOST; the
+// additive gap fence likewise preserves retained multicast policy.
 
 // hostInboundFenceMandatoryAdmitsNetlink mirrors the text oracle's shared
 // mandatory admits: global ESP/AH, established/related, IPv6 ND, and v4/v6
@@ -63,54 +63,46 @@ func emitHostInboundGapFenceWGAdmitsNetlink(p *nlPlan, spec GapFenceSpec) {
 	}
 }
 
-// emitDHCPBackstopAdmitsNetlink mirrors emitDHCPBackstopAdmits: top-placed
-// per-family DHCP-client admits for backstop interfaces. The sdifname subset is
-// derived from configured VRF ownership, so ordinary links emit no inert rule
-// and VRF guards exist before kernel enslavement.
-func emitDHCPBackstopAdmitsNetlink(p *nlPlan, backstopV4, backstopV6, vrfSlavesV4, vrfSlavesV6 []string) {
-	if len(backstopV4) > 0 {
-		r := p.rule().iifname(backstopV4)
-		r.needNfproto(famV4)
-		r.l4Port(protoUDP, "dport", portsFromUint16([]uint16{earlyInputBarrierDHCPv4ClientPort}), false).emit(verdictAccept()...)
-	}
-	if len(vrfSlavesV4) > 0 {
-		r := p.rule().sdifname(vrfSlavesV4)
-		r.needNfproto(famV4)
-		r.l4Port(protoUDP, "dport", portsFromUint16([]uint16{earlyInputBarrierDHCPv4ClientPort}), false).emit(verdictAccept()...)
+// emitDHCPBackstopAdmitsNetlink admits only DHCPv6 server replies needed by
+// the client. DHCPv4 uses AF_PACKET and does not traverse this input chain.
+func emitDHCPBackstopAdmitsNetlink(p *nlPlan, _ []string, backstopV6 []string, _ []string, vrfSlavesV6 []string) {
+	emitV6 := func(r *ruleAsm) {
+		r.needNfproto(famV6)
+		r.daddr(famV6, []string{"fe80::/10", "ff02::1:2"}, false)
+		r.l4Port(protoUDP, "sport", portsFromUint16([]uint16{547}), false)
+		r.l4Port(protoUDP, "dport", portsFromUint16([]uint16{earlyInputBarrierDHCPv6ClientPort}), false).emit(verdictAccept()...)
 	}
 	if len(backstopV6) > 0 {
-		r := p.rule().iifname(backstopV6)
-		r.needNfproto(famV6)
-		r.l4Port(protoUDP, "dport", portsFromUint16([]uint16{earlyInputBarrierDHCPv6ClientPort}), false).emit(verdictAccept()...)
+		emitV6(p.rule().iifname(backstopV6))
 	}
 	if len(vrfSlavesV6) > 0 {
-		r := p.rule().sdifname(vrfSlavesV6)
-		r.needNfproto(famV6)
-		r.l4Port(protoUDP, "dport", portsFromUint16([]uint16{earlyInputBarrierDHCPv6ClientPort}), false).emit(verdictAccept()...)
+		emitV6(p.rule().sdifname(vrfSlavesV6))
 	}
 }
 
 // emitDHCPBackstopDropNetlink mirrors the final text-oracle drops. Ordinary
 // devices match iifname; only the configured VRF-slave subset uses sdifname.
-// nfproto prevents one family's backstop from shadowing the other family.
+// Restrict to PACKET_HOST so persistent guards cannot drop multicast,
+// broadcast, or other non-unicast fall-through traffic.
 func emitDHCPBackstopDropNetlink(p *nlPlan, f nlFamily, netdevs, vrfSlaves []string) {
 	if len(netdevs) > 0 {
 		r := p.rule().iifname(netdevs)
 		r.needNfproto(f)
-		r.emit(verdictDrop()...)
+		r.pkttypeHost().emit(verdictDrop()...)
 	}
 	if len(vrfSlaves) > 0 {
 		r := p.rule().sdifname(vrfSlaves)
 		r.needNfproto(f)
-		r.emit(verdictDrop()...)
+		r.pkttypeHost().emit(verdictDrop()...)
 	}
 }
 
 // emitDHCPBackstopGapDropNetlink keeps the interface-wide fallback from
-// overriding addresses already covered by the retained main table. Empty
-// retained sets preserve the unconditional backstop behavior.
+// overriding addresses already covered by the retained main table. The host
+// packet-type guard also leaves retained multicast grants authoritative.
 func emitDHCPBackstopGapDropNetlink(p *nlPlan, f nlFamily, netdevs, vrfSlaves, retained []string) {
 	emit := func(r *ruleAsm) {
+		r.pkttypeHost()
 		if len(retained) > 0 {
 			r.daddr(f, retained, true)
 		}
