@@ -1,9 +1,11 @@
 # Expected-red pairs for `ledger_compare.py --all` (#9922 F-086).
 #
-# One pair per line: `gate env reason...` — the reason is REQUIRED. A listed
-# pair may be red (REGRESSION or newest-FAIL) without failing the aggregate;
-# an UNLISTED red pair fails, and so does a listed pair that is no longer red
-# (shrink-only: remove the line when the gate is green again). Same contract
-# shape as test/incus/HARNESSES.unreached.
-wire_conntrack_lifecycle loss-userspace-cluster newest-FAIL 2026-09-19 historical c930de01 measurement predates the #10419 pre-poll expiry-flush fix; live re-attestation is deferred under #10716
-wire_zone_matrix loss-userspace-cluster newest-FAIL 2026-09-18, deliberate broad-permit negative control for #10028; remove when the PASS baseline is newest and green
+# One pair per line: `gate env expires=YYYY-MM-DD reason...`.
+# Expiry is the START of the named UTC date. Missing/invalid/expired dates,
+# undeclared reds and declarations that are no longer red fail the aggregate.
+# Remove a declaration when the gate is green; do not roll its date forward
+# without new reviewed evidence. #11056 ends the old open-ended waivers at the
+# 2026-10-04 campaign cutoff. Both remain red until live re-attestation; no
+# cluster run or new grace period is implied by this schema migration.
+wire_conntrack_lifecycle loss-userspace-cluster expires=2026-10-04 newest-FAIL 2026-09-19 historical c930de01 measurement predates the #10419 pre-poll expiry-flush fix; live re-attestation remains held under #10716
+wire_zone_matrix loss-userspace-cluster expires=2026-10-04 newest-FAIL 2026-09-18, deliberate broad-permit negative control for #10028; #11056 requires a new measured baseline, not an indefinite waiver

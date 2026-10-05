@@ -393,11 +393,31 @@ older live cluster FAIL. Hermetic-only pairs remain in the aggregate with
 newest row it compares.
 
 
-`--expected-red` tolerates known reds, one `gate env reason...` per line
-(the reason is REQUIRED — it is what makes a tolerated red reviewable).
-Exit 1 on an undeclared red pair OR a stale declaration: a tolerated red
-that went green must be un-declared, loudly, so the file can only shrink.
-`--all` is mutually exclusive with `--gate`/`--env`.
+`--expected-red` tolerates known reds using
+`gate env expires=YYYY-MM-DD reason...` per line. Both expiry and reason are
+required. A declaration expires at the **start of the named UTC date**; the
+runtime UTC date, not the newest ledger row's timestamp, controls expiry.
+Missing, malformed, or expired dates fail with exit 1 and do not authorize
+the red pair. A valid duplicate cannot hide an expired or malformed line,
+regardless of line order. Older three-field declarations are rejected, not
+grandfathered.
+An undeclared red pair or a stale declaration also exits 1: remove a waiver
+when its pair is no longer red. `--all` is mutually exclusive with
+`--gate`/`--env`.
+
+The two historical waivers were cut off at `2026-10-04` under #11056, without
+granting a new grace period. The tracked aggregate therefore remains red
+pending the held live re-attestation; expiry enforcement is not a measured
+PASS or permission to restore the loss cluster. Do not extend a date merely
+to make the aggregate green.
+
+The mutation runner uses isolated fixture ledgers and controlled instants to
+prove unexpired admission, expiry rejection, and removal of declarations.
+UTC/local-date disagreement is checked in both directions; a fully waived
+red fixture still fails when an expired duplicate appears in either order.
+It no longer pins the continued existence of a particular historical waiver
+or requires real measurements to look green. `scripts/run-selftests.sh` still
+runs the real tracked aggregate separately, where expired waivers fail.
 
 ### The census: every wrapped gate measured or declared (`--coverage`, #9922 F-087)
 
@@ -518,6 +538,10 @@ which removes one guard at a time and asserts the cell suite goes RED:
 | `aggregate-never-red` | the aggregate's red condition itself (F-086) |
 | `window-fails-dropped` | the FAILs-inside-the-window count (F-086) |
 | `expected-red-stale-check-dropped` | the shrink-only half of expected-red (F-086) |
+| `expected-red-expiry-check-dropped` | an expired waiver hides a measured failure forever (#11056) |
+| `expected-red-expiry-day-admitted` | a waiver survives the start of its UTC expiry date (#11056) |
+| `expected-red-local-date` | expiry follows local midnight instead of UTC (#11056) |
+| `expected-red-declaration-errors-ignored` | a valid waiver hides another invalid declaration (#11056) |
 | `coverage-void-counts-as-measured` | the VOID exclusion from coverage (F-087) |
 | `coverage-missing-check-dropped` | the missing half of the coverage census (F-087) |
 | `coverage-stale-check-dropped` | the shrink-only half of the coverage census (F-087) |
