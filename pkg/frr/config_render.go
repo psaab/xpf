@@ -189,7 +189,10 @@ func staticRouteRendersFIB(sr *config.StaticRoute) bool {
 	return sr.Discard || sr.Reject || len(sr.NextHops) > 0
 }
 
-const dhcpRoutePreference = 200
+const (
+	dhcpRoutePreference       = 200
+	frrStaticRouteDistanceMax = 254 // 255 is zebra's DISTANCE_INFINITY sentinel.
+)
 
 // staticRouteBeatsDHCP reports whether an emitted static route has an
 // effective distance no worse than the DHCP route. FRR's default distance is
@@ -219,15 +222,28 @@ func effectiveStaticRouteDistance(preference int) int {
 	if preference <= 0 {
 		return 1
 	}
+	if preference > frrStaticRouteDistanceMax {
+		return frrStaticRouteDistanceMax
+	}
+	return preference
+}
+
+func clampFRRStaticRouteDistance(preference int) int {
+	if preference > frrStaticRouteDistanceMax {
+		slog.Warn("static route preference exceeds FRR's installable distance; clamping (#12060)",
+			"preference", preference, "maximum", frrStaticRouteDistanceMax)
+		return frrStaticRouteDistanceMax
+	}
 	return preference
 }
 
 // dhcpClasslessCoveredByStatic reports the rendered static route that contains
 // a DHCP-learned classless prefix in the same FRR table. A static route only
-// suppresses a learned prefix when it is at least as broad: a less-specific
-// learned route does not override a more-specific static route, and suppressing
-// it would remove legitimate coverage outside the static prefix. Equal-prefix
-// routes are suppressed because the static route wins on its lower preference.
+// suppresses a learned prefix when it is at least as broad and its effective
+// distance is no worse than DHCP's distance 200: a less-specific learned route
+// does not override a more-specific static route, and suppressing it would
+// remove legitimate coverage outside the static prefix. Equal-prefix routes
+// are suppressed only when the static route wins on distance.
 //
 // Trust handling belongs to the caller so it can emit a visible warning when
 // an operator explicitly permits a covered route.
@@ -258,7 +274,7 @@ func dhcpClasslessCoveredByStatic(fc *FullConfig, dr DHCPRoute) string {
 		}
 	}
 	for _, sr := range staticRoutes {
-		if sr == nil || !staticRouteRendersFIB(sr) {
+		if sr == nil || !staticRouteBeatsDHCP(sr) {
 			continue
 		}
 		static, err := netip.ParsePrefix(sr.Destination)
@@ -419,8 +435,9 @@ func (m *Manager) generateStaticRouteInTable(sr *config.StaticRoute, vrfName str
 		if sr.Reject {
 			nexthop = "reject"
 		}
-		if sr.Preference > 0 {
-			return fmt.Sprintf("%s route %s %s %d%s\n", prefix, sr.Destination, nexthop, sr.Preference, vrfPart)
+		distance := clampFRRStaticRouteDistance(sr.Preference)
+		if distance > 0 {
+			return fmt.Sprintf("%s route %s %s %d%s\n", prefix, sr.Destination, nexthop, distance, vrfPart)
 		}
 		return fmt.Sprintf("%s route %s %s%s\n", prefix, sr.Destination, nexthop, vrfPart)
 	}
@@ -513,6 +530,7 @@ func (m *Manager) generateStaticRouteInTable(sr *config.StaticRoute, vrfName str
 		if nh.HasPreference {
 			dist = nh.Preference
 		}
+		dist = clampFRRStaticRouteDistance(dist)
 		if dist > 0 {
 			fmt.Fprintf(&b, "%s route %s %s %d%s\n", prefix, sr.Destination, nexthop, dist, vrfPart)
 		} else {

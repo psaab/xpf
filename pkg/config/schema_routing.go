@@ -114,12 +114,13 @@ func staticRouteNode() *schemaNode {
 					// renders as a FLOATING backup at its own admin distance — it is
 					// NO LONGER folded into the single route-level preference (that
 					// fold was the #3871 bug: it made every next-hop equal-cost).
-					// Use the same strictly-positive range as the route-level leaf:
-					// FRR defaults an omitted static distance to 1, while the Rust FIB
-					// preserves 0, so accepting 0 here would make the two diverge.
+					// FRR staticd accepts distances through 255, but zebra
+					// treats 255 as DISTANCE_INFINITY and never installs it.
+					// Use the effective range 1..254 at strict commit, as for
+					// the route-level leaf; 0 still diverges from FRR's default.
 					"preference": {desc: "Preference", args: 1, placeholder: "<value>",
-						valueType: ValueInteger, valueDesc: "Route preference / administrative distance (1..2147483647; lower = more preferred, default 5)",
-						valueExamples: []string{"5", "100"}, validator: ValidateInteger(1, maxWireI32), children: nil},
+						valueType: ValueInteger, valueDesc: "Route preference / administrative distance (1..254; lower = more preferred, default 5)",
+						valueExamples: []string{"5", "100"}, validator: ValidateInteger(1, 254), children: nil},
 					// In userspace installs, metric orders equal-preference
 					// next-hops into failover tiers; equal metrics remain ECMP.
 					// Management-VRF routes use Linux priorities for the tiers.
@@ -133,13 +134,14 @@ func staticRouteNode() *schemaNode {
 			"reject":     {desc: "Reject route (send ICMP unreachable)", children: nil},
 			"next-table": {desc: "Resolve in another routing table", args: 1, placeholder: "<table>", children: nil},
 			"rib-group":  {desc: "Static route RIB group (route export is not implemented)", args: 1, placeholder: "<group-name>", children: nil},
-			// #3771/#11454: validate route preference at the Go commit boundary
-			// as a positive i32 administrative distance. FRR defaults an omitted
-			// distance operand to 1, while the Rust FIB preserves 0; excluding 0
-			// prevents the render paths below from silently changing its meaning.
+			// #3771/#11454/#12060: FRR staticd accepts distances through
+			// 255, but zebra treats 255 as DISTANCE_INFINITY and never
+			// installs it. Limit preference to the effective range 1..254.
+			// FRR defaults an omitted distance to 1 while the Rust FIB
+			// preserves 0, so zero also remains invalid.
 			"preference": {desc: "Route preference (administrative distance)", args: 1, placeholder: "<value>",
-				valueType: ValueInteger, valueDesc: "Route preference / administrative distance (1..2147483647; lower = more preferred, default 5)",
-				valueExamples: []string{"5", "100"}, validator: ValidateInteger(1, maxWireI32), children: nil},
+				valueType: ValueInteger, valueDesc: "Route preference / administrative distance (1..254; lower = more preferred, default 5)",
+				valueExamples: []string{"5", "100"}, validator: ValidateInteger(1, 254), children: nil},
 		},
 	}
 }
