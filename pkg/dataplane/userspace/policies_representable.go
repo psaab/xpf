@@ -272,3 +272,66 @@ func addressValueRepresentable(value string) bool {
 	}
 	return net.ParseIP(value) != nil
 }
+
+// emptyDroppedFeedReferences reports declared fail-mode drop bindings that are
+// present-but-empty anywhere in the address-book expansion of addrs. The
+// snapshot builder publishes those rows as match-none, but an excluded side
+// treats a completely empty set as non-matching; the caller must reject that
+// snapshot instead of letting an excluded DENY fall through.
+func emptyDroppedFeedReferences(cfg *config.Config, feedOverlay map[string][]string, addrs []string) []string {
+	if cfg == nil || len(feedOverlay) == 0 || len(cfg.Security.DynamicAddress.AddressBindings) == 0 {
+		return nil
+	}
+	var refs []string
+	seenRefs := make(map[string]bool)
+	visited := make(map[string]bool)
+	var visit func(string)
+	visit = func(name string) {
+		if name == "" || visited[name] {
+			return
+		}
+		visited[name] = true
+		defer delete(visited, name)
+
+		if binding := cfg.Security.DynamicAddress.AddressBindings[name]; binding != nil && binding.FailMode == "drop" {
+			if prefixes, published := feedOverlay[name]; published && len(prefixes) == 0 && !seenRefs[name] {
+				seenRefs[name] = true
+				refs = append(refs, name)
+			}
+		}
+		if book := cfg.Security.AddressBook; book != nil {
+			if set := book.AddressSets[name]; set != nil {
+				for _, member := range set.Addresses {
+					visit(member)
+				}
+				for _, nested := range set.AddressSets {
+					visit(nested)
+				}
+			}
+		}
+	}
+	for _, name := range addrs {
+		visit(name)
+	}
+	return refs
+}
+
+// policyAddressSideHasConcretePrefix reports whether any token in an address
+// side contributes a concrete address in either family. It is used only when
+// an excluded side reaches a present-empty drop feed, so a populated sibling
+// literal or book keeps its existing exclusion semantics.
+func policyAddressSideHasConcretePrefix(cfg *config.Config, feedOverlay map[string][]string, addrs []string) bool {
+	for _, token := range addrs {
+		if token == "" {
+			continue
+		}
+		if token == "any" || config.IsPolicyAddressWildcardKeyword(token) || isUserspaceLiteralAddress(token) {
+			return true
+		}
+		v4, v6 := expandBookNameToCIDRs(cfg, feedOverlay, token)
+		if len(v4) > 0 || len(v6) > 0 {
+			return true
+		}
+	}
+	return false
+}

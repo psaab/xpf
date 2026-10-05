@@ -431,6 +431,12 @@ the type/code as `icmp_type`/`icmp_code` (REST query, gRPC `MatchPolicies`
 optional fields), `icmp-type`/`icmp-code` (CLI tokens), and
 `ictype=`/`iccode=` (gRPC `test policy` topic).
 
+For #12050, a present-empty `fail-mode drop` row keeps match-none behavior on
+ordinary address sides, but the shared content-rejection gate refuses the whole
+config if it leaves an excluded side empty. This prevents an empty-excluded
+DENY from falling through to a later permit; a populated sibling address remains
+representable.
+
 ## Address token precedence (#9523)
 
 `resolveToken` resolves a policy address token in the same order as the

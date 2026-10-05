@@ -110,7 +110,7 @@ func buildPolicySnapshotsWithAddressBookAndFailClosed(cfg *config.Config, active
 	// policy set's namespace.
 	if err := walkPolicyRuleSlots(cfg, func(slot policyRuleSlot) error {
 		policyID := slot.policyID()
-		snap := buildOneRuleSnapshot(cfg, nameToID, addrRepresentable, slot.Policy, slot.FromZone, slot.ToZone, policyID, activeState, failClosed)
+		snap := buildOneRuleSnapshot(cfg, nameToID, feedOverlay, addrRepresentable, slot.Policy, slot.FromZone, slot.ToZone, policyID, activeState, failClosed)
 		// #9570: a ZONE-PAIR stanza naming the reserved `junos-global` sentinel
 		// must fail closed rather than be enforced as a device-wide global rule.
 		// Only the builder can decide this, because only it knows which list the
@@ -129,6 +129,7 @@ func buildPolicySnapshotsWithAddressBookAndFailClosed(cfg *config.Config, active
 func buildOneRuleSnapshot(
 	cfg *config.Config,
 	nameToID map[string]uint32,
+	feedOverlay map[string][]string,
 	addrRepresentable func(tok string) bool,
 	pol *config.Policy,
 	fromZone, toZone string,
@@ -142,8 +143,21 @@ func buildOneRuleSnapshot(
 	// prevents older readers from observing snapshots that omit book payloads.
 	srcBookIDs, srcLiterals := classifyPolicyAddresses(cfg, nameToID, pol.Match.SourceAddresses)
 	dstBookIDs, dstLiterals := classifyPolicyAddresses(cfg, nameToID, pol.Match.DestinationAddresses)
-	srcUnrepresentable := !allAddressTokensRepresentable(addrRepresentable, pol.Match.SourceAddresses)
-	dstUnrepresentable := !allAddressTokensRepresentable(addrRepresentable, pol.Match.DestinationAddresses)
+	var srcDroppedFeedRefs, dstDroppedFeedRefs []string
+	if pol.Match.SourceAddressExcluded {
+		srcDroppedFeedRefs = emptyDroppedFeedReferences(cfg, feedOverlay, pol.Match.SourceAddresses)
+	}
+	if pol.Match.DestinationAddressExcluded {
+		dstDroppedFeedRefs = emptyDroppedFeedReferences(cfg, feedOverlay, pol.Match.DestinationAddresses)
+	}
+	srcDropExcludedEmpty := pol.Match.SourceAddressExcluded &&
+		len(srcDroppedFeedRefs) > 0 &&
+		!policyAddressSideHasConcretePrefix(cfg, feedOverlay, pol.Match.SourceAddresses)
+	dstDropExcludedEmpty := pol.Match.DestinationAddressExcluded &&
+		len(dstDroppedFeedRefs) > 0 &&
+		!policyAddressSideHasConcretePrefix(cfg, feedOverlay, pol.Match.DestinationAddresses)
+	srcUnrepresentable := !allAddressTokensRepresentable(addrRepresentable, pol.Match.SourceAddresses) || srcDropExcludedEmpty
+	dstUnrepresentable := !allAddressTokensRepresentable(addrRepresentable, pol.Match.DestinationAddresses) || dstDropExcludedEmpty
 	var sourceAddresses, destinationAddresses []string
 	if srcUnrepresentable {
 		sourceAddresses = []string{unsupportedAddressSentinel}
@@ -160,9 +174,15 @@ func buildOneRuleSnapshot(
 	var rejectedSrc, rejectedDst, rejectedApps []string
 	if srcUnrepresentable {
 		rejectedSrc = offendingAddressTokens(addrRepresentable, pol.Match.SourceAddresses)
+		if srcDropExcludedEmpty {
+			rejectedSrc = append(rejectedSrc, srcDroppedFeedRefs...)
+		}
 	}
 	if dstUnrepresentable {
 		rejectedDst = offendingAddressTokens(addrRepresentable, pol.Match.DestinationAddresses)
+		if dstDropExcludedEmpty {
+			rejectedDst = append(rejectedDst, dstDroppedFeedRefs...)
+		}
 	}
 	applicationTerms, ok := expandUserspacePolicyApplications(cfg, pol.Match.Applications)
 	if !ok {
