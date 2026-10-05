@@ -107,6 +107,16 @@ func TestRenderedRoutingConfigAcceptedByFRR11417(t *testing.T) {
 			if output, err := validateRenderedRouting11417(t, vtysh, rendered); err != nil {
 				t.Fatalf("FRR validation failed: %v\n%s\nconfig:\n%s", err, output, rendered)
 			}
+			// Appending an invalid top-level line verifies vtysh parsed the
+			// whole config, not just a prefix ending in an early exit.
+			const sentinel = "xpf-end-of-config-sentinel"
+			sentinelOutput, sentinelErr := validateRenderedRouting11417(t, vtysh, rendered+sentinel+"\n")
+			if sentinelErr == nil {
+				t.Fatalf("FRR accepted end-of-config sentinel; validation may have stopped at an early exit:\n%s", rendered)
+			}
+			if !bytes.Contains(sentinelOutput, []byte(sentinel)) {
+				t.Fatalf("FRR sentinel failure did not identify the end-of-config line: %v\n%s", sentinelErr, sentinelOutput)
+			}
 			mutated := strings.Replace(rendered, tc.keyword, "xpf-invalid-routing-keyword ", 1)
 			if mutated == rendered {
 				t.Fatalf("fixture did not render the routing command needed for its invalid-keyword control")

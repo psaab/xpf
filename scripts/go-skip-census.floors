@@ -25,7 +25,9 @@
 # binaries for factory root-login precedence), #11202 x1 (unconfigured host
 # interface for monitor-traffic scope), #11156 x1 (loopback for RA goodbye
 # suppression). All gate on execution-environment availability.
-total        = 400
+# #11417 adds one non-privilege skip for genuine FRR vtysh absence from PATH;
+# present but unusable candidates fail rather than skip.
+total        = 401
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
@@ -34,7 +36,7 @@ priv-absent  = 49
 priv-present = 10
 
 # Everything else: environment-, tool- and fixture-gated skips.
-other        = 340
+other        = 341
 
 # Skips this census counted but could NOT classify: `t.SkipNow()` (no message
 # by construction) and non-literal messages. Deliberately a REPORTED bucket

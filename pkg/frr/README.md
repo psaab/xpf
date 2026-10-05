@@ -39,10 +39,11 @@ pkg/dhcpserver #2450 Kea-memfile ownership handling.
 `TestRenderedRoutingConfigAcceptedByFRR11417` passes generated configuration
 to the installed `vtysh -C` parser. It covers forwarding-instance IPv4/IPv6
 statics and preferred routes, virtual-router IPv4/IPv6 statics, and IPv4
-plus family-less IPv6 BGP peers. Each case also corrupts a routing keyword
-and requires a normal nonzero exit with a diagnostic naming that keyword;
-a crashed parser does not count as rejection. This is independent of
-renderer string goldens. The existing apply tests retain forwarding-table
+plus family-less IPv6 BGP peers. Each case appends an end-of-config sentinel
+and corrupts a routing keyword; both must fail and name their bad line. The
+keyword control also requires a normal nonzero exit (ExitCode -1 from a signal
+does not count as rejection). This is independent of renderer string goldens.
+The existing apply tests retain forwarding-table
 ownership (including discard routes), VRF-over-table precedence, and
 main-table pollution checks; redundant exact-output goldens were removed.
 
