@@ -28,11 +28,10 @@ import (
 // rule are returned.
 type JunosHostProgram struct {
 	Zone string
-	// IngressIfnames is the sorted, de-duplicated set of kernel netdev names for
-	// the zone's non-lifeline interfaces (physical, VLAN-subunit, and — for a
-	// bondless-RETH VLAN whose frames arrive on the physical member — the parent
-	// member netdev). Never a lifeline; never a netdev shared with another zone.
-	IngressIfnames []string
+	// IngressIfnames are direct iifname scopes. VRF member rules use the paired
+	// IngressVRFScopes instead, so a shared master cannot broaden zone rights.
+	IngressIfnames   []string
+	IngressVRFScopes []config.HostInboundVRFIngressScope
 	// RulesV4 / RulesV6 are the projected rules (config SSOT), each family in
 	// first-match order.
 	RulesV4 []config.JunosHostDenyRule
@@ -44,13 +43,12 @@ type JunosHostProgram struct {
 	CoarseAdmitsIKE       bool
 	CoarseIdentResets     bool
 	HasApplicationAnyDeny bool
-	// IKEExemptNetdevs / IdentResetNetdevs are the SUBSET of IngressIfnames whose
-	// effective per-interface host-inbound set admits IKE / RSTs ident (#5565).
-	// The daemon uses IdentResetNetdevs for the retained ident RST scope;
-	// IKEExemptNetdevs is warning metadata and is not emitted as an IKE ACCEPT.
-	// Both subsets are sorted and scoped to IngressIfnames.
-	IKEExemptNetdevs  []string
-	IdentResetNetdevs []string
+	// These subsets record direct devices. Their VRF counterparts are restricted
+	// to the exact members covered by each sdifname scope.
+	IKEExemptNetdevs    []string
+	IdentResetNetdevs   []string
+	IKEExemptVRFScopes  []config.HostInboundVRFIngressScope
+	IdentResetVRFScopes []config.HostInboundVRFIngressScope
 }
 
 // BuildJunosHostPrograms returns the per-ingress-zone junos-host programs
@@ -81,12 +79,13 @@ func BuildJunosHostPrograms(cfg *config.Config) []JunosHostProgram {
 		// resolves to no netdev emits nothing; configured lifeline-only
 		// applicability is recorded so the validator retains a warning while
 		// ordinary-zone enforcement remains suppressible.
-		if len(p.IngressNetdevs) == 0 {
+		if len(p.IngressNetdevs) == 0 && len(p.IngressVRFScopes) == 0 {
 			continue
 		}
 		out = append(out, JunosHostProgram{
 			Zone:                  p.Zone,
 			IngressIfnames:        p.IngressNetdevs,
+			IngressVRFScopes:      p.IngressVRFScopes,
 			RulesV4:               p.RulesV4,
 			RulesV6:               p.RulesV6,
 			CoarseAdmitsIKE:       p.CoarseAdmitsIKE,
@@ -94,6 +93,8 @@ func BuildJunosHostPrograms(cfg *config.Config) []JunosHostProgram {
 			HasApplicationAnyDeny: p.HasApplicationAnyDeny,
 			IKEExemptNetdevs:      p.IKEExemptNetdevs,
 			IdentResetNetdevs:     p.IdentResetNetdevs,
+			IKEExemptVRFScopes:    p.IKEExemptVRFScopes,
+			IdentResetVRFScopes:   p.IdentResetVRFScopes,
 		})
 	}
 	return out

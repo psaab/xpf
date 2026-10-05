@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -525,8 +526,10 @@ func TestJunosHostVRFMemberScopeSuppressesWarning11573(t *testing.T) {
 		Policies: []*Policy{jhDeny("block-vrf", []string{"bad-net"}, []string{"any"})},
 	}}
 	coverage := junosHostZoneNetdevCoverageMap(cfg)["untrust"]
-	if len(coverage.Scoped) != 1 || coverage.Scoped[0] != "vrf-tenant" || len(coverage.Unscopable) != 0 {
-		t.Fatalf("VRF-member coverage = %+v, want the LOCAL_IN-visible master vrf-tenant with no gap", coverage)
+	if len(coverage.Scoped) != 0 || len(coverage.Unscopable) != 0 ||
+		len(coverage.VRFScopes) != 1 || coverage.VRFScopes[0].Master != "vrf-tenant" ||
+		!slices.Equal(coverage.VRFScopes[0].Slaves, []string{"ge-0-0-1"}) {
+		t.Fatalf("VRF-member coverage = %+v, want vrf-tenant plus ge-0-0-1 with no gap", coverage)
 	}
 	key := JunosHostZonePairPolicyKey("untrust", "block-vrf")
 	if !BuildJunosHostDenyProjection(cfg).RenderedPolicyKeys[key] {

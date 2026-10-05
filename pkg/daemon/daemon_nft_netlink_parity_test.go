@@ -660,6 +660,9 @@ var iifnameNeSetRe = regexp.MustCompile(`iifname != \{[^{}]*\}`)
 // ruleIifnameScope below. Single-name `meta sdifname "x"` lines byte
 // compare directly (inline Cmp data renders intact).
 var sdifnameSetRe = regexp.MustCompile(`meta sdifname \{[^{}]*\}`)
+// sdifnameNeSetRe is the negated counterpart. Preserve `!=` so the per-rule
+// scope assertion and text diff still catch an admission polarity change.
+var sdifnameNeSetRe = regexp.MustCompile(`meta sdifname != \{[^{}]*\}`)
 
 // nft's parser retains symbolic source-field names in nested meter expressions,
 // while a direct netlink payload key is dumped as bit length and network-header
@@ -689,6 +692,7 @@ func normalizeNftDump(s string) string {
 		}
 		ln = iifnameNeSetRe.ReplaceAllString(ln, "iifname != { IFSET }")
 		ln = iifnameSetRe.ReplaceAllString(ln, "iifname { IFSET }")
+		ln = sdifnameNeSetRe.ReplaceAllString(ln, "meta sdifname != { IFSET }")
 		ln = sdifnameSetRe.ReplaceAllString(ln, "meta sdifname { IFSET }")
 		ln = screenFloodIPv4SourceLimitRe.ReplaceAllString(ln, "{ ip saddr $1 }")
 		ln = screenFloodIPv6SourceLimitRe.ReplaceAllString(ln, "{ ip6 saddr $1 }")
@@ -719,6 +723,14 @@ func TestNormalizeNftDumpCanonicalizesFloodSourceKeys11087(t *testing.T) {
 		"update @v6 { ip6 saddr limit rate over 30/second burst 30 packets }"
 	if got := normalizeNftDump(input); got != want {
 		t.Fatalf("normalized flood source keys = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizeNftDumpPreservesNegatedSDIFNAMEset(t *testing.T) {
+	input := `meta sdifname != { "", "" }`
+	want := `meta sdifname != { IFSET }`
+	if got := normalizeNftDump(input); got != want {
+		t.Fatalf("normalized negated sdifname set = %q, want %q", got, want)
 	}
 }
 
@@ -891,7 +903,7 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 		// named-service union (mgmt), routing protocols (core), the ident-reset
 		// reject (edge), the empty-admit drop (quarantine), any-service (open),
 		// and the v6-only view.
-		// The shared VRF pair pins destination-owner admits plus counted v4/v6 drops.
+		// The shared VRF pair pins member-scoped ingress, destination-owner fallback, and counted v4/v6 drops.
 		{Zone: "trust", SystemServices: []string{"ssh", "https", "ping", "dns"}, V4Addrs: []string{"10.0.1.1", "10.0.1.2"}, V6Addrs: []string{"2001:db8:1::1"}, IngressNetdevs: []string{"ge-0-0-0", "ge-0-0-0.10"}, ICMPFloodThreshold: 30, UDPFloodThreshold: 20, SYNFloodThreshold: 100, SYNFloodSrcThreshold: 5},
 		{Zone: "mgmt", SystemServices: []string{"all"}, V4Addrs: []string{"10.0.9.1"}, IngressNetdevs: []string{"ge-0-0-9"}},
 		{Zone: "core", Protocols: []string{"all"}, V4Addrs: []string{"10.0.5.1"}, V6Addrs: []string{"2001:db8:5::1"}, IngressNetdevs: []string{"ge-0-0-5"}},
@@ -905,19 +917,22 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 		// addresses and cannot show that (mutation M7 of #9637 escaped without
 		// this row).
 		{Zone: "v6only", SystemServices: []string{"ping"}, V6Addrs: []string{"2001:db8:66::1"}, IngressNetdevs: []string{"ge-0-0-66"}},
-		{Zone: "shared-trust", SystemServices: []string{"ssh"}, V4Addrs: []string{"10.0.91.1"}, V6Addrs: []string{"fe80::91"}, IngressDenyNetdevs: []string{"shared-parent"}},
-		{Zone: "shared-untrust", SystemServices: []string{"ping"}, V4Addrs: []string{"10.0.92.1"}, V6Addrs: []string{"2001:db8:92::1"}},
+		{Zone: "shared-trust", SystemServices: []string{"ssh"}, V4Addrs: []string{"10.0.91.1"}, V6Addrs: []string{"fe80::91"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "shared-parent", Slaves: []string{"trust-slave"}}}, IngressDenyNetdevs: []string{"shared-parent"}},
+		{Zone: "shared-untrust", SystemServices: []string{"ping"}, V4Addrs: []string{"10.0.92.1"}, V6Addrs: []string{"2001:db8:92::1"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "shared-parent", Slaves: []string{"untrust-slave"}}}},
+		{Zone: "shared-trust", SystemServices: []string{"ping"}, V4Addrs: []string{"10.0.91.2"}, V6Addrs: []string{"fe80::92"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "shared-parent", Slaves: []string{"trust-slave-2"}}}},
 	}
 	unzonedV4 = []string{"10.0.99.1"}
 	unzonedV6 = []string{"2001:db8:99::1"}
-	wg = []uint16{51820, 51821}
-	// #11076: scoped admission fixture — trust (v4+v6) serves 51820,
-	// mgmt (v4-only) serves 51821; every other zone must deny both.
-	wgZones = map[string][]uint16{"trust": {51820}, "mgmt": {51821}}
+	wg = []uint16{51820, 51821, 51822}
+	// #11076/#12034: trust and shared-trust admit only owner-zone listener scopes.
+	wgZones = map[string][]uint16{"trust": {51820}, "mgmt": {51821}, "shared-trust": {51822}}
 	programs = []dpuserspace.JunosHostProgram{
 		{
-			Zone:                  "untrust",
-			IngressIfnames:        []string{"ge-0-0-2", "ge-0-0-2.50", "ge-0-0-2.80"},
+			Zone:           "untrust",
+			IngressIfnames: []string{"ge-0-0-2", "ge-0-0-2.50", "ge-0-0-2.80"},
+			IngressVRFScopes: []config.HostInboundVRFIngressScope{{
+				Master: "vrf-shared", Slaves: []string{"ge-0-0-2.50", "ge-0-0-2.80"},
+			}},
 			HasApplicationAnyDeny: true,
 			CoarseAdmitsIKE:       true,
 			CoarseIdentResets:     true,
@@ -925,7 +940,13 @@ func parityHostInboundInputs() (views []dpuserspace.ZoneHostInboundView, unzoned
 			// warning, but no IKE ACCEPT is rendered. IdentResetNetdevs is the
 			// retained per-interface terminal RST scope exercised by the netlink
 			// parity mutation above.
-			IKEExemptNetdevs:  []string{"ge-0-0-2", "ge-0-0-2.50"},
+			IKEExemptNetdevs: []string{"ge-0-0-2", "ge-0-0-2.50"},
+			IKEExemptVRFScopes: []config.HostInboundVRFIngressScope{{
+				Master: "vrf-shared", Slaves: []string{"ge-0-0-2.50"},
+			}},
+			IdentResetVRFScopes: []config.HostInboundVRFIngressScope{{
+				Master: "vrf-shared", Slaves: []string{"ge-0-0-2.80"},
+			}},
 			IdentResetNetdevs: []string{"ge-0-0-2"},
 			RulesV4: []config.JunosHostDenyRule{
 				{Family: "ip", Src: []string{"192.0.2.10"}, DstAny: true, Verdict: config.JunosHostReturn},

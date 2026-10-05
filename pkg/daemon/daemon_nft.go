@@ -1386,7 +1386,11 @@ func emitHostInboundGapFenceWGAdmits(rules *[]string, views []dpuserspace.ZoneHo
 }
 
 func emitHostInboundFenceWGFamilyAdmit(rules *[]string, views []dpuserspace.ZoneHostInboundView, view dpuserspace.ZoneHostInboundView, family string, candidates []string, ports []uint16) {
-	if len(view.IngressNetdevs) == 0 || len(candidates) == 0 || len(ports) == 0 {
+	if len(candidates) == 0 || len(ports) == 0 {
+		return
+	}
+	ingress := hostInboundWireGuardZoneIngress(views)[view.Zone]
+	if len(ingress.IIFNames()) == 0 {
 		return
 	}
 	owners := make(map[string]string)
@@ -1410,11 +1414,7 @@ func emitHostInboundFenceWGFamilyAdmit(rules *[]string, views []dpuserspace.Zone
 			unique = append(unique, addr)
 		}
 	}
-	if len(unique) == 0 {
-		return
-	}
-	scope := "iifname " + nftIifnameSet(view.IngressNetdevs) + " " + family + " daddr " + nftAddrSet(unique)
-	*rules = append(*rules, "    "+scope+" udp dport "+renderWireGuardPortSpec(ports)+" accept")
+	emitHostInboundWGIngressAccepts(rules, ingress, family, unique, ports)
 }
 
 // hostInboundStaleReplyGuardText renders the #10752/#10764 catalog drops before
@@ -1818,7 +1818,8 @@ func (d *Daemon) logHostInboundAmbiguousIngressTransitions(views []dpuserspace.Z
 // legacy/manual address-only views remain supported.
 func hostInboundHasEnforceableView(views []dpuserspace.ZoneHostInboundView) bool {
 	for _, v := range views {
-		if len(v.V4Addrs) > 0 || len(v.V6Addrs) > 0 || len(v.IngressNetdevs) > 0 || len(v.IngressDenyNetdevs) > 0 {
+		if len(v.V4Addrs) > 0 || len(v.V6Addrs) > 0 || len(v.IngressNetdevs) > 0 ||
+			len(v.IngressVRFScopes) > 0 || len(v.IngressDenyNetdevs) > 0 {
 			return true
 		}
 	}
@@ -2245,43 +2246,52 @@ func emitHostInboundMulticastIngressGuards(rules *[]string, views []dpuserspace.
 			scope := "meta sdifname " + nftIifnameSet(unzonedIngressVRFSlaves) + " " + family + " daddr "
 			*rules = append(*rules, "    "+scope+nftAddrSet(groups)+" drop")
 		}
-		if len(ambiguous) > 0 {
-			scope := "iifname " + nftIifnameSet(ambiguous) + " " + family + " daddr "
-			*rules = append(*rules, "    "+scope+nftAddrSet(groups)+" drop")
-		}
 		if len(unzonedIngressNetdevs) > 0 {
 			scope := "iifname " + nftIifnameSet(unzonedIngressNetdevs) + " " + family + " daddr "
 			*rules = append(*rules, "    "+scope+nftAddrSet(groups)+" drop")
 		}
 		for _, v := range views {
-			if len(v.IngressNetdevs) == 0 {
-				continue
+			direct := hostInboundDirectIngressNetdevs(v)
+			if len(direct) > 0 {
+				emitHostInboundMulticastScope(rules, v, "iifname "+nftIifnameSet(direct)+" ", family, groups)
 			}
-			scope := "iifname " + nftIifnameSet(v.IngressNetdevs) + " " + family + " daddr "
-			if hostInboundAllowsAll(v) {
-				*rules = append(*rules, "    "+scope+nftAddrSet(groups)+" accept")
-			} else {
-				multicastRules := v.MulticastRules
-				if len(multicastRules) == 0 {
-					multicastRules = config.HostInboundMulticastRules(v.Protocols)
-				}
-				for _, multicastRule := range multicastRules {
-					if multicastRule.Family != family {
-						continue
-					}
-					for _, match := range hostInboundProtocolMatches(multicastRule.Protocol, family) {
-						*rules = append(*rules, "    "+scope+multicastRule.Group+" "+match+" accept")
-					}
+			for _, vrf := range v.IngressVRFScopes {
+				if vrf.Master != "" && len(vrf.Slaves) > 0 {
+					emitHostInboundMulticastScope(rules, v, hostInboundVRFIngressPrefix(vrf.Master, vrf.Slaves), family, groups)
 				}
 			}
+		}
+		if len(ambiguous) > 0 {
+			scope := "iifname " + nftIifnameSet(ambiguous) + " " + family + " daddr "
 			*rules = append(*rules, "    "+scope+nftAddrSet(groups)+" drop")
 		}
 	}
 }
 
+func emitHostInboundMulticastScope(rules *[]string, v dpuserspace.ZoneHostInboundView, prefix, family string, groups []string) {
+	scope := prefix + family + " daddr "
+	if hostInboundAllowsAll(v) {
+		*rules = append(*rules, "    "+scope+nftAddrSet(groups)+" accept")
+	} else {
+		multicastRules := v.MulticastRules
+		if len(multicastRules) == 0 {
+			multicastRules = config.HostInboundMulticastRules(v.Protocols)
+		}
+		for _, multicastRule := range multicastRules {
+			if multicastRule.Family != family {
+				continue
+			}
+			for _, match := range hostInboundProtocolMatches(multicastRule.Protocol, family) {
+				*rules = append(*rules, "    "+scope+multicastRule.Group+" "+match+" accept")
+			}
+		}
+	}
+	*rules = append(*rules, "    "+scope+nftAddrSet(groups)+" drop")
+}
+
 // emitHostInboundMulticastFenceDrops keeps the cold-boot fence fail-closed for
-// catalog groups. Ingress scopes exclude lifelines; shared VRF slaves are denied
-// before a zoned VRF-master scope can match.
+// catalog groups. Ingress scopes exclude lifelines; every VRF view is scoped by
+// its exact local members.
 func emitHostInboundMulticastFenceDrops(rules *[]string, views []dpuserspace.ZoneHostInboundView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) {
 	ambiguous := hostInboundAmbiguousIngressNetdevs(views)
 	for _, family := range []string{"ip", "ip6"} {
@@ -2299,8 +2309,15 @@ func emitHostInboundMulticastFenceDrops(rules *[]string, views []dpuserspace.Zon
 			*rules = append(*rules, "    iifname "+nftIifnameSet(unzonedIngressNetdevs)+" "+family+" daddr "+nftAddrSet(groups)+" drop")
 		}
 		for _, v := range views {
-			if len(v.IngressNetdevs) > 0 {
-				*rules = append(*rules, "    iifname "+nftIifnameSet(v.IngressNetdevs)+" "+family+" daddr "+nftAddrSet(groups)+" drop")
+			direct := hostInboundDirectIngressNetdevs(v)
+			if len(direct) > 0 {
+				*rules = append(*rules, "    iifname "+nftIifnameSet(direct)+" "+family+" daddr "+nftAddrSet(groups)+" drop")
+			}
+			for _, vrf := range v.IngressVRFScopes {
+				if vrf.Master != "" && len(vrf.Slaves) > 0 {
+					scope := hostInboundVRFIngressPrefix(vrf.Master, vrf.Slaves)
+					*rules = append(*rules, "    "+scope+family+" daddr "+nftAddrSet(groups)+" drop")
+				}
 			}
 		}
 	}
@@ -2322,46 +2339,60 @@ func appendHostInboundScreenFloodSet(rules *[]string, name, keyType string, size
 // junos-host policy, matching the kernel renderer.
 func emitHostInboundScreenFloodText(rules *[]string, screens []xnft.HostInboundScreenFloodRule, repliesOnly bool) {
 	for _, screen := range screens {
-		base := hostInboundScreenFloodMatchesText(screen)
-		if base == "" {
-			continue
-		}
 		prefix := ""
 		if repliesOnly {
 			prefix = "ct state established,related ct direction reply "
 		}
-		if screen.SourceThreshold > 0 {
-			source := prefix + base + " update @" + xnft.HostInboundScreenFloodSetName(screen) +
-				" { " + screen.Family + " saddr limit rate over " + strconv.FormatUint(uint64(screen.SourceThreshold), 10) +
-				"/second burst " + strconv.FormatUint(uint64(screen.SourceThreshold), 10) + " packets } counter name \"" +
-				xnft.HostInboundScreenFloodCounterName(screen, true) + "\""
-			if screen.AlarmWithoutDrop {
-				source += " limit rate 1/second burst 1 packets log prefix " +
-					strconv.Quote(xnft.HostInboundScreenFloodAlarmPrefix(screen, true)) + " level warn"
-			} else {
-				source += " drop"
+		emit := func(base string) {
+			if base == "" {
+				return
 			}
-			*rules = append(*rules, "    "+source)
+			if screen.SourceThreshold > 0 {
+				source := prefix + base + " update @" + xnft.HostInboundScreenFloodSetName(screen) +
+					" { " + screen.Family + " saddr limit rate over " + strconv.FormatUint(uint64(screen.SourceThreshold), 10) +
+					"/second burst " + strconv.FormatUint(uint64(screen.SourceThreshold), 10) + " packets } counter name \"" +
+					xnft.HostInboundScreenFloodCounterName(screen, true) + "\""
+				if screen.AlarmWithoutDrop {
+					source += " limit rate 1/second burst 1 packets log prefix " +
+						strconv.Quote(xnft.HostInboundScreenFloodAlarmPrefix(screen, true)) + " level warn"
+				} else {
+					source += " drop"
+				}
+				*rules = append(*rules, "    "+source)
+			}
+			if screen.AggregateThreshold > 0 {
+				global := prefix + base + " update @" + xnft.HostInboundScreenFloodAggregateSetName(screen) +
+					" { 0 limit rate over " + strconv.FormatUint(uint64(screen.AggregateThreshold), 10) +
+					"/second burst " + strconv.FormatUint(uint64(screen.AggregateThreshold), 10) + " packets } counter name \"" +
+					xnft.HostInboundScreenFloodCounterName(screen, false) + "\""
+				if screen.AlarmWithoutDrop {
+					global += " limit rate 1/second burst 1 packets log prefix " +
+						strconv.Quote(xnft.HostInboundScreenFloodAlarmPrefix(screen, false)) + " level warn"
+				} else {
+					global += " drop"
+				}
+				*rules = append(*rules, "    "+global)
+			}
 		}
-		if screen.AggregateThreshold > 0 {
-			global := prefix + base + " update @" + xnft.HostInboundScreenFloodAggregateSetName(screen) +
-				" { 0 limit rate over " + strconv.FormatUint(uint64(screen.AggregateThreshold), 10) +
-				"/second burst " + strconv.FormatUint(uint64(screen.AggregateThreshold), 10) + " packets } counter name \"" +
-				xnft.HostInboundScreenFloodCounterName(screen, false) + "\""
-			if screen.AlarmWithoutDrop {
-				global += " limit rate 1/second burst 1 packets log prefix " +
-					strconv.Quote(xnft.HostInboundScreenFloodAlarmPrefix(screen, false)) + " level warn"
-			} else {
-				global += " drop"
+		if len(screen.IngressNetdevs) > 0 || len(screen.IngressVRFScopes) == 0 {
+			emit(hostInboundScreenFloodMatchesText(screen, nil))
+		}
+		for _, scope := range screen.IngressVRFScopes {
+			if scope.Master != "" && len(scope.Slaves) > 0 {
+				emit(hostInboundScreenFloodMatchesText(screen, &scope))
 			}
-			*rules = append(*rules, "    "+global)
 		}
 	}
 }
 
-func hostInboundScreenFloodMatchesText(screen xnft.HostInboundScreenFloodRule) string {
-	parts := make([]string, 0, 3)
-	if len(screen.IngressNetdevs) > 0 {
+func hostInboundScreenFloodMatchesText(screen xnft.HostInboundScreenFloodRule, vrfScope *config.HostInboundVRFIngressScope) string {
+	parts := make([]string, 0, 4)
+	if vrfScope != nil {
+		parts = append(parts,
+			"iifname "+nftIifnameSet([]string{vrfScope.Master}),
+			"meta sdifname "+nftIifnameSet(vrfScope.Slaves),
+			"meta nfproto "+junosHostNfproto(screen.Family))
+	} else if len(screen.IngressNetdevs) > 0 {
 		names := make([]string, 0, len(screen.IngressNetdevs))
 		for _, name := range screen.IngressNetdevs {
 			names = append(names, strconv.Quote(name))
@@ -2435,10 +2466,24 @@ func emitJunosHostProgramJump(rules *[]string, index int, p dpuserspace.JunosHos
 		// denied ident from RST to silent drop, a verdict-shape change outside
 		// the #10524 accept-bypass scope. #5565: scope to IdentResetNetdevs
 		// (the interfaces that configured ident-reset), never the whole zone.
-		identIif := nftIifnameSet(p.IdentResetNetdevs)
-		*rules = append(*rules, "    iifname "+identIif+" tcp dport 113 reject with tcp reset")
+		if len(p.IdentResetNetdevs) > 0 {
+			*rules = append(*rules, "    iifname "+nftIifnameSet(p.IdentResetNetdevs)+" tcp dport 113 reject with tcp reset")
+		}
+		for _, scope := range p.IdentResetVRFScopes {
+			if scope.Master != "" && len(scope.Slaves) > 0 {
+				*rules = append(*rules, "    "+hostInboundVRFIngressPrefix(scope.Master, scope.Slaves)+"tcp dport 113 reject with tcp reset")
+			}
+		}
 	}
-	*rules = append(*rules, "    iifname "+nftIifnameSet(p.IngressIfnames)+" jump "+xnft.HostInboundJunosHostChainName(index, p.Zone))
+	chain := xnft.HostInboundJunosHostChainName(index, p.Zone)
+	if len(p.IngressIfnames) > 0 {
+		*rules = append(*rules, "    iifname "+nftIifnameSet(p.IngressIfnames)+" jump "+chain)
+	}
+	for _, scope := range p.IngressVRFScopes {
+		if scope.Master != "" && len(scope.Slaves) > 0 {
+			*rules = append(*rules, "    "+hostInboundVRFIngressPrefix(scope.Master, scope.Slaves)+"jump "+chain)
+		}
+	}
 }
 
 // emitJunosHostMulticastProgramJumps applies explicit `to-zone junos-host`
@@ -2447,7 +2492,7 @@ func emitJunosHostProgramJump(rules *[]string, index int, p dpuserspace.JunosHos
 // host-inbound protocol policy as the sole admission authority.
 func emitJunosHostMulticastProgramJumps(rules *[]string, programs []dpuserspace.JunosHostProgram) {
 	for i, p := range programs {
-		if len(p.IngressIfnames) == 0 {
+		if len(p.IngressIfnames) == 0 && len(p.IngressVRFScopes) == 0 {
 			continue
 		}
 		chain := xnft.HostInboundJunosHostChainName(i, p.Zone)
@@ -2456,7 +2501,14 @@ func emitJunosHostMulticastProgramJumps(rules *[]string, programs []dpuserspace.
 			if len(groups) == 0 {
 				continue
 			}
-			*rules = append(*rules, "    iifname "+nftIifnameSet(p.IngressIfnames)+" "+family+" daddr "+nftAddrSet(groups)+" jump "+chain)
+			if len(p.IngressIfnames) > 0 {
+				*rules = append(*rules, "    iifname "+nftIifnameSet(p.IngressIfnames)+" "+family+" daddr "+nftAddrSet(groups)+" jump "+chain)
+			}
+			for _, scope := range p.IngressVRFScopes {
+				if scope.Master != "" && len(scope.Slaves) > 0 {
+					*rules = append(*rules, "    "+hostInboundVRFIngressPrefix(scope.Master, scope.Slaves)+family+" daddr "+nftAddrSet(groups)+" jump "+chain)
+				}
+			}
 		}
 	}
 }

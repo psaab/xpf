@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
@@ -111,5 +112,61 @@ func TestFenceWireGuardAdmitsStayZoneScoped11572(t *testing.T) {
 				t.Errorf("%s fence emitted a global WG port accept: %s", name, line)
 			}
 		}
+	}
+}
+
+func TestFenceWireGuardAdmissionUsesVRFMembers12034(t *testing.T) {
+	views := []dpuserspace.ZoneHostInboundView{
+		{
+			Zone: "wan", V4Addrs: []string{"192.0.2.1"}, V6Addrs: []string{"2001:db8:1::1"},
+			IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "vrf-shared", Slaves: []string{"ge-wan"}}},
+		},
+		{
+			Zone: "trust", V4Addrs: []string{"198.51.100.1"}, V6Addrs: []string{"2001:db8:2::1"},
+			IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "vrf-shared", Slaves: []string{"ge-trust"}}},
+		},
+	}
+	wgZones := map[string][]uint16{"wan": {51820}}
+	uncoveredV4 := []string{"192.0.2.1", "198.51.100.1"}
+	uncoveredV6 := []string{"2001:db8:1::1", "2001:db8:2::1"}
+	for name, payload := range map[string]string{
+		"cold-boot": buildHostInboundFencePayload(views, nil, nil, []uint16{51820}, wgZones, nil, nil, dhcpBackstopLists{}),
+		"gap":       buildHostInboundGapFencePayload(views, uncoveredV4, uncoveredV6, []uint16{51820}, wgZones, nil, nil, nil, nil, nil, dhcpBackstopLists{}, nil, nil),
+	} {
+		for _, want := range []string{
+			`iifname "vrf-shared" meta sdifname "ge-wan" ip daddr 192.0.2.1 udp dport 51820 accept`,
+			`iifname "vrf-shared" meta sdifname "ge-wan" ip6 daddr 2001:db8:1::1 udp dport 51820 accept`,
+		} {
+			if !strings.Contains(payload, want) {
+				t.Errorf("%s fence lacks owner-member WG accept %q:\n%s", name, want, payload)
+			}
+		}
+		for _, wrong := range []string{
+			`iifname "vrf-shared" meta sdifname "ge-trust" ip daddr 192.0.2.1 udp dport 51820 accept`,
+			`iifname "vrf-shared" meta sdifname "ge-trust" ip6 daddr 2001:db8:1::1 udp dport 51820 accept`,
+		} {
+			if strings.Contains(payload, wrong) {
+				t.Errorf("%s fence admits sibling VRF member WG tuple %q:\n%s", name, wrong, payload)
+			}
+		}
+	}
+}
+
+func TestWireGuardSharedVRFViewsMergeOwnerMembers12034(t *testing.T) {
+	views := []dpuserspace.ZoneHostInboundView{
+		{Zone: "wan", V4Addrs: []string{"192.0.2.1"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "vrf-shared", Slaves: []string{"ge-wan-1"}}}},
+		{Zone: "wan", V4Addrs: []string{"192.0.2.2"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "vrf-shared", Slaves: []string{"ge-wan-2"}}}},
+		{Zone: "trust", V4Addrs: []string{"198.51.100.1"}, IngressVRFScopes: []config.HostInboundVRFIngressScope{{Master: "vrf-shared", Slaves: []string{"ge-trust"}}}},
+	}
+	payload := buildHostInboundFilterPayload(views, nil, nil, nil, map[string][]uint16{"wan": {51820}}, true)
+	members := nftIifnameSet([]string{"ge-wan-1", "ge-wan-2"})
+	addrs := nftAddrSet([]string{"192.0.2.1", "192.0.2.2"})
+	wantAccept := `iifname "vrf-shared" meta sdifname ` + members + ` ip daddr ` + addrs + ` udp dport 51820 accept`
+	wantMismatch := `iifname "vrf-shared" meta sdifname != ` + members + ` ip daddr ` + addrs + ` udp dport 51820`
+	if !strings.Contains(payload, wantAccept) {
+		t.Fatalf("owner-zone WG admit did not merge same-zone VRF members %q:\n%s", wantAccept, payload)
+	}
+	if !strings.Contains(payload, wantMismatch) {
+		t.Fatalf("WG mismatch guard did not exclude sibling VRF members from merged owner scope %q:\n%s", wantMismatch, payload)
 	}
 }

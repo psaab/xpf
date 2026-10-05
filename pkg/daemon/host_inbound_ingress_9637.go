@@ -139,24 +139,8 @@ func hostInboundWireGuardZoneAddresses(views []dpuserspace.ZoneHostInboundView, 
 	return zones, addresses, ambiguous
 }
 
-func hostInboundWireGuardZoneIngress(views []dpuserspace.ZoneHostInboundView) map[string][]string {
-	ingress := make(map[string][]string)
-	seenDevice := make(map[string]map[string]bool)
-	for _, view := range views {
-		if len(view.IngressNetdevs) == 0 {
-			continue
-		}
-		if seenDevice[view.Zone] == nil {
-			seenDevice[view.Zone] = make(map[string]bool)
-		}
-		for _, device := range view.IngressNetdevs {
-			if !seenDevice[view.Zone][device] {
-				ingress[view.Zone] = append(ingress[view.Zone], device)
-				seenDevice[view.Zone][device] = true
-			}
-		}
-	}
-	return ingress
+func hostInboundWireGuardZoneIngress(views []dpuserspace.ZoneHostInboundView) map[string]xnft.HostInboundWGIngress {
+	return xnft.HostInboundWGIngressByZone(toNftViews(views))
 }
 
 func hostInboundWGIntersectPorts(ports, listenPorts []uint16) []uint16 {
@@ -210,7 +194,9 @@ func emitHostInboundWireGuardMismatchDrops(rules *[]string, views []dpuserspace.
 		}
 		allowed := hostInboundWGIntersectPorts(zonePorts[zone], listenPorts)
 		cn := xnft.HostInboundDenyCounterName(zone, family)
-		if len(allowed) == 0 || len(ingress[zone]) == 0 {
+		zoneIngress := ingress[zone]
+		devices := zoneIngress.IIFNames()
+		if len(allowed) == 0 || len(devices) == 0 {
 			scope := family + " daddr " + nftAddrSet(addrs) + " udp dport " + renderWireGuardPortSpec(listenPorts)
 			*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
 			continue
@@ -219,9 +205,15 @@ func emitHostInboundWireGuardMismatchDrops(rules *[]string, views []dpuserspace.
 			scope := family + " daddr " + nftAddrSet(addrs) + " udp dport " + renderWireGuardPortSpec(disallowed)
 			*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
 		}
-		scope := "iifname != " + nftIifnameSet(ingress[zone]) + " " + family + " daddr " + nftAddrSet(addrs) +
+		scope := "iifname != " + nftIifnameSet(devices) + " " + family + " daddr " + nftAddrSet(addrs) +
 			" udp dport " + renderWireGuardPortSpec(allowed)
 		*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
+		for _, vrf := range zoneIngress.VRF {
+			scope := "iifname " + nftIifnameSet([]string{vrf.Master}) + " meta sdifname != " +
+				nftIifnameSet(vrf.Slaves) + " " + family + " daddr " + nftAddrSet(addrs) +
+				" udp dport " + renderWireGuardPortSpec(allowed)
+			*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
+		}
 	}
 	if len(ambiguous) > 0 {
 		cn := xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, family)
@@ -243,12 +235,48 @@ func emitHostInboundWireGuardIngressAccepts(rules *[]string, views []dpuserspace
 	ingress := hostInboundWireGuardZoneIngress(views)
 	for _, zone := range zones {
 		allowed := hostInboundWGIntersectPorts(zonePorts[zone], listenPorts)
-		if len(allowed) == 0 || len(ingress[zone]) == 0 || len(addresses[zone]) == 0 {
+		if len(allowed) == 0 || len(addresses[zone]) == 0 {
 			continue
 		}
-		scope := "iifname " + nftIifnameSet(ingress[zone]) + " " + family + " daddr " + nftAddrSet(addresses[zone])
-		*rules = append(*rules, "    "+scope+" udp dport "+renderWireGuardPortSpec(allowed)+" accept")
+		emitHostInboundWGIngressAccepts(rules, ingress[zone], family, addresses[zone], allowed)
 	}
+}
+
+func emitHostInboundWGIngressAccepts(rules *[]string, ingress xnft.HostInboundWGIngress, family string, addresses []string, ports []uint16) {
+	if len(addresses) == 0 || len(ports) == 0 {
+		return
+	}
+	if len(ingress.Direct) > 0 {
+		scope := "iifname " + nftIifnameSet(ingress.Direct) + " " + family + " daddr " + nftAddrSet(addresses)
+		*rules = append(*rules, "    "+scope+" udp dport "+renderWireGuardPortSpec(ports)+" accept")
+	}
+	for _, vrf := range ingress.VRF {
+		scope := "iifname " + nftIifnameSet([]string{vrf.Master}) + " meta sdifname " +
+			nftIifnameSet(vrf.Slaves) + " " + family + " daddr " + nftAddrSet(addresses)
+		*rules = append(*rules, "    "+scope+" udp dport "+renderWireGuardPortSpec(ports)+" accept")
+	}
+}
+
+func hostInboundDirectIngressNetdevs(v dpuserspace.ZoneHostInboundView) []string {
+	if len(v.IngressVRFScopes) == 0 {
+		return v.IngressNetdevs
+	}
+	vrfMasters := make(map[string]bool, len(v.IngressVRFScopes))
+	for _, scope := range v.IngressVRFScopes {
+		vrfMasters[scope.Master] = true
+	}
+	direct := make([]string, 0, len(v.IngressNetdevs))
+	for _, netdev := range v.IngressNetdevs {
+		if !vrfMasters[netdev] {
+			direct = append(direct, netdev)
+		}
+	}
+	return direct
+}
+
+func hostInboundVRFIngressPrefix(master string, slaves []string) string {
+	return "iifname " + nftIifnameSet([]string{master}) +
+		" meta sdifname " + nftIifnameSet(slaves) + " "
 }
 
 // hostInboundIngressDestinations returns, per family, every firewall-local
@@ -283,7 +311,8 @@ func hostInboundZoneIngressDestinations(views []dpuserspace.ZoneHostInboundView)
 // catch-all drop for the view in a family. The counter pre-pass consults it, so
 // the chain never references a counter the table did not declare.
 func hostInboundEmitsIngressDrop(v dpuserspace.ZoneHostInboundView, dests []string) bool {
-	return len(v.IngressNetdevs) > 0 && hostInboundEmitsDrop(v, dests)
+	return (len(hostInboundDirectIngressNetdevs(v)) > 0 || len(v.IngressVRFScopes) > 0) &&
+		hostInboundEmitsDrop(v, dests)
 }
 
 // hostInboundAmbiguousIngressNetdevs returns the builder's single, sorted list
@@ -319,10 +348,23 @@ func hostInboundEmitsUnzonedIngressDrop(netdevs, dests []string) bool {
 // on another zone's address, and a zone that admits ssh was refused on another
 // zone's address. #9637 measured the refusal on the loss cluster.
 func emitHostInboundZoneIngress(rules *[]string, v dpuserspace.ZoneHostInboundView, family string, dests []string) {
-	if len(v.IngressNetdevs) == 0 || len(dests) == 0 {
+	if len(dests) == 0 {
 		return
 	}
-	scope := "iifname " + nftIifnameSet(v.IngressNetdevs) + " " + family + " daddr " + nftAddrSet(dests)
+	direct := hostInboundDirectIngressNetdevs(v)
+	if len(direct) > 0 {
+		emitHostInboundZoneIngressScope(rules, v, "iifname "+nftIifnameSet(direct)+" ", family, dests)
+	}
+	for _, scope := range v.IngressVRFScopes {
+		if scope.Master == "" || len(scope.Slaves) == 0 {
+			continue
+		}
+		emitHostInboundZoneIngressScope(rules, v, hostInboundVRFIngressPrefix(scope.Master, scope.Slaves), family, dests)
+	}
+}
+
+func emitHostInboundZoneIngressScope(rules *[]string, v dpuserspace.ZoneHostInboundView, prefix, family string, dests []string) {
+	scope := prefix + family + " daddr " + nftAddrSet(dests)
 	if hostInboundAllowsAll(v) {
 		*rules = append(*rules, "    "+scope+" accept")
 		return

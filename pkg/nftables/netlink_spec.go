@@ -49,6 +49,7 @@ type HostInboundZoneView struct {
 	SYNFloodSrcThreshold uint32
 	AlarmWithoutDrop     bool
 	IngressNetdevs       []string // #9637: see dpuserspace.ZoneHostInboundView
+	IngressVRFScopes     []config.HostInboundVRFIngressScope
 	// IngressDenyNetdevs lists effective ingress netdevs claimed by multiple
 	// zone views (#10431). The renderer applies destination-owner service rights
 	// before a counted fail-closed catch-all on those netdevs.
@@ -84,6 +85,7 @@ type JunosHostDenyRule struct {
 type JunosHostProgram struct {
 	Zone                  string
 	IngressIfnames        []string
+	IngressVRFScopes      []config.HostInboundVRFIngressScope
 	RulesV4               []JunosHostDenyRule
 	RulesV6               []JunosHostDenyRule
 	CoarseAdmitsIKE       bool
@@ -91,6 +93,8 @@ type JunosHostProgram struct {
 	HasApplicationAnyDeny bool
 	IKEExemptNetdevs      []string
 	IdentResetNetdevs     []string
+	IKEExemptVRFScopes    []config.HostInboundVRFIngressScope
+	IdentResetVRFScopes   []config.HostInboundVRFIngressScope
 }
 
 // Lo0FilterTerm mirrors one lowered config.FirewallFilterTerm for the kernel lo0

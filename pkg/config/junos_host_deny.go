@@ -133,6 +133,13 @@ type JunosHostDenyRule struct {
 	L4 []JunosHostDenyL4
 }
 
+// HostInboundVRFIngressScope pairs a LOCAL_IN-visible VRF master with the
+// enslaved devices whose packets belong to one zone.
+type HostInboundVRFIngressScope struct {
+	Master string
+	Slaves []string
+}
+
 // JunosHostDenyProgram is the effective ordered junos-host program for one
 // ingress zone.
 type JunosHostDenyProgram struct {
@@ -140,18 +147,11 @@ type JunosHostDenyProgram struct {
 	// InterfaceRefs are the zone's NON-lifeline interface refs (config names,
 	// e.g. "reth0.50"). Informational; the actual iifname scope is IngressNetdevs.
 	InterfaceRefs []string
-	// IngressNetdevs is the sorted set of kernel netdev names a host-bound packet
-	// on this zone arrives with — the iifname scope the daemon renders each DROP
-	// rule with (JunosHostZoneIngressNetdevs). EXCLUDES lifelines and any netdev
-	// shared with another zone (a cross-zone-ambiguous physical parent). Empty
-	// when the zone resolves to no unambiguous non-lifeline netdev: the program
-	// then emits NOTHING. A zone with a configured lifeline ref and no
-	// non-lifeline candidates is recorded in LifelineOnlyZones; a no-interface
-	// zone is not recorded, and an empty scope with Unscopable candidates remains
-	// an ordinary coverage gap. The validator retains the warning for configured
-	// lifeline applicability even when RenderedPolicyKeys contains another zone's
-	// enforced rule.
-	IngressNetdevs []string
+	// IngressNetdevs is the sorted set of direct iifname scopes. VRF members
+	// whose master is shared (or has an unzoned/lifeline co-member) use
+	// IngressVRFScopes instead, so LOCAL_IN identity is recovered with sdifname.
+	IngressNetdevs   []string
+	IngressVRFScopes []HostInboundVRFIngressScope
 	// Representable is false when any contributing term is un-representable; the
 	// program then carries NO rules and the daemon emits nothing for the zone.
 	Representable bool
@@ -162,18 +162,16 @@ type JunosHostDenyProgram struct {
 	RulesV6 []JunosHostDenyRule
 	// CoarseAdmitsIKE / CoarseIdentResets describe effective coarse metadata for
 	// fine-eligible L4. CoarseIdentResets drives the retained terminal ident RST;
-	// CoarseAdmitsIKE plus IKEExemptNetdevs identifies #10524 overlap eligibility.
-	// The former IKE ACCEPT shield was deleted.
+	// CoarseAdmitsIKE plus IKE exemption scopes identifies #10524 overlap eligibility.
 	CoarseAdmitsIKE   bool
 	CoarseIdentResets bool
-	// IKEExemptNetdevs / IdentResetNetdevs are the SUBSET of IngressNetdevs whose
-	// EFFECTIVE per-interface host-inbound set admits IKE (udp 500/4500) / answers
-	// TCP/113 with a RST (#5565). The daemon uses IdentResetNetdevs for the
-	// retained ident RST scope; IKEExemptNetdevs remains config-projection
-	// metadata for the #10524 commit advisory and is not rendered as an IKE ACCEPT.
-	// Sorted; each is a subset of IngressNetdevs.
-	IKEExemptNetdevs  []string
-	IdentResetNetdevs []string
+	// These subsets identify the VRF slaves whose coarse host-inbound set admits
+	// IKE or answers TCP/113 with a RST. IKE metadata is warning-only; ident scopes
+	// are rendered as the retained terminal RST shield.
+	IKEExemptVRFScopes  []HostInboundVRFIngressScope
+	IdentResetVRFScopes []HostInboundVRFIngressScope
+	IKEExemptNetdevs    []string
+	IdentResetNetdevs   []string
 	// HasApplicationAnyDeny is true when the program contains a rendered
 	// `application any` rule with a DENY-class verdict. The daemon uses this
 	// aggregate shape together with CoarseIdentResets to retain the ident RST;
@@ -330,19 +328,16 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 		}
 		cov := coverageByZone[zoneName]
 		netdevs := cov.Scoped
+		vrfScopes := cov.VRFScopes
 		// TWO decisions, deliberately not one boolean (#6564 member 8).
 		//
-		// emitsRules gates kernel emission: a DROP needs >=1 usable netdev to
-		// scope it by iifname. Unchanged.
+		// emitsRules gates kernel emission: a DROP needs at least one direct
+		// iifname or VRF master+sdifname scope.
 		//
-		// fullyScoped gates #4168 warning SUPPRESSION for ordinary ingress
-		// coverage. A zone that had candidates and could not use all of them is
-		// not enforcing the policy on every ingress path, whether it salvaged
-		// some or none. A zone with NO candidates at all has nothing to enforce.
-		// Only a configured lifeline-only zone records that applicability
-		// separately, so a shared policy still warns about the uncovered lifeline
-		// while ordinary-zone enforcement remains suppressible.
-		emitsRules := len(netdevs) > 0
+		// fullyScoped gates #4168 warning suppression for ordinary ingress
+		// coverage. A zone with any unresolved own ingress still warns, even if
+		// some direct or slave-scoped rules survive.
+		emitsRules := len(netdevs) > 0 || len(vrfScopes) > 0
 		fullyScoped := len(cov.Unscopable) == 0
 		representable := true
 		for _, t := range terms {
@@ -356,22 +351,14 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 		// >=1 rule; nil whenever no program was projected at all (#6705).
 		var emitted map[string]bool
 		if emitsRules && representable {
-			// #9504: a permit renders as a return in first-match order, so a
-			// narrow-application, source-excluded or destination-scoped permit
-			// ahead of a deny no longer makes the program un-representable.
 			prog, emitted = junosHostProjectProgram(zoneName, ifaceRefs, terms)
 			prog.IngressNetdevs = netdevs
-			// #5565: scope the fine-eligible metadata to the SPECIFIC netdevs whose
-			// effective per-interface host-inbound set admits it, NOT the whole
-			// zone. IdentResetNetdevs scopes the retained terminal RST; the
-			// IKEExemptNetdevs subset names the netdevs for the #10524 overlap
-			// advisory. A zone-level exception still covers every netdev (its
-			// subset equals netdevs). The CoarseAdmits* bits follow the subsets so
-			// projection metadata stays aligned with coarse admission.
-			prog.IKEExemptNetdevs, prog.IdentResetNetdevs =
-				junosHostZoneExemptNetdevs(cfg, zoneName, zone, netdevs)
-			prog.CoarseAdmitsIKE = len(prog.IKEExemptNetdevs) > 0
-			prog.CoarseIdentResets = len(prog.IdentResetNetdevs) > 0
+			prog.IngressVRFScopes = vrfScopes
+			prog.IKEExemptNetdevs, prog.IdentResetNetdevs,
+				prog.IKEExemptVRFScopes, prog.IdentResetVRFScopes =
+				junosHostZoneExemptNetdevs(cfg, zoneName, zone, netdevs, vrfScopes)
+			prog.CoarseAdmitsIKE = len(prog.IKEExemptNetdevs) > 0 || len(prog.IKEExemptVRFScopes) > 0
+			prog.CoarseIdentResets = len(prog.IdentResetNetdevs) > 0 || len(prog.IdentResetVRFScopes) > 0
 			for key, didEmit := range emitted {
 				if !didEmit {
 					continue
@@ -875,70 +862,72 @@ func junosHostSvcAdmitsIKE(svc []string) bool {
 // two agree on which ref feeds which netdev; results are filtered to `netdevs`
 // so a cross-zone-ambiguous parent excluded from the iifname scope is never
 // included in warning metadata or ident RST scope.
-func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, netdevs []string) (ikeNetdevs, identNetdevs []string) {
-	// #8862: hoisted. junosHostLinuxName rebuilds the tunnel-name map on every
-	// call and that map walks every interface and every unit, so resolving one
-	// name per interface AND per unit here was quadratic. Same shape as #8854.
+func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, netdevs []string, vrfScopes []HostInboundVRFIngressScope) (ikeNetdevs, identNetdevs []string, ikeVRFScopes, identVRFScopes []HostInboundVRFIngressScope) {
 	tunNames := tunnelNameMapFn(cfg)
-	if cfg == nil || zone == nil || len(netdevs) == 0 {
-		return nil, nil
+	if cfg == nil || zone == nil || (len(netdevs) == 0 && len(vrfScopes) == 0) {
+		return nil, nil, nil, nil
 	}
 	keep := make(map[string]bool, len(netdevs))
 	for _, nd := range netdevs {
 		keep[nd] = true
 	}
-	// Per-netdev accumulation of the effective coarse verdict across every
-	// interface ref whose host-bound traffic arrives on it.
-	//
-	// #7173: this UNIONS the verdicts of VLAN siblings that share one physical
-	// parent — addRow calls note(parent, ...) for every unit — so a parent's
-	// entry is the union of what each of its units admits, not any single
-	// unit's. That is deliberate and errs toward OVER-INCLUSIVE metadata: an
-	// exemption one unit needs is applied to the parent, so IKE warning metadata
-	// and retained ident-RST scope include a sibling where they did not strictly
-	// have to. The IKE metadata only broadens an advisory; only the retained
-	// ident-RST verdict is self-limiting and must refuse that sibling safely.
-	//
-	// Recorded here rather than only in the issue: the natural "fix" is to make
-	// the parent entry per-unit, which would narrow metadata and retained-RST
-	// scope; that is a separate #5565 hardening decision.
+	vrfScopeSlaves := make(map[string]map[string]bool, len(vrfScopes))
+	for _, scope := range vrfScopes {
+		if vrfScopeSlaves[scope.Master] == nil {
+			vrfScopeSlaves[scope.Master] = make(map[string]bool, len(scope.Slaves))
+		}
+		for _, slave := range scope.Slaves {
+			vrfScopeSlaves[scope.Master][slave] = true
+		}
+	}
 	type verdict struct{ ike, ident, fullAdmit bool }
 	byNetdev := make(map[string]*verdict, len(netdevs))
+	byVRFSlave := make(map[string]map[string]*verdict, len(vrfScopes))
 	vrfMasterByNetdev := junosHostVRFMasterNetdevs(cfg, tunNames)
 	note := func(nd, ref string) {
+		var v *verdict
 		if master, enslaved := vrfMasterByNetdev[nd]; enslaved {
 			if master == "" {
 				return
 			}
-			nd = master
-		}
-		if nd == "" || !keep[nd] {
-			return
+			if keep[master] {
+				nd = master
+				v = byNetdev[nd]
+				if v == nil {
+					v = &verdict{}
+					byNetdev[nd] = v
+				}
+			} else if vrfScopeSlaves[master][nd] {
+				if byVRFSlave[master] == nil {
+					byVRFSlave[master] = map[string]*verdict{}
+				}
+				v = byVRFSlave[master][nd]
+				if v == nil {
+					v = &verdict{}
+					byVRFSlave[master][nd] = v
+				}
+			} else {
+				return
+			}
+		} else {
+			if nd == "" || !keep[nd] {
+				return
+			}
+			v = byNetdev[nd]
+			if v == nil {
+				v = &verdict{}
+				byNetdev[nd] = v
+			}
 		}
 		svc, _, _ := zone.InterfaceHostInboundEffective(ref)
-		v := byNetdev[nd]
-		if v == nil {
-			v = &verdict{}
-			byNetdev[nd] = v
-		}
 		if junosHostSvcAdmitsIKE(svc) {
 			v.ike = true
 		}
 		for _, s := range svc {
-			// Case-fold to match enforcement (see junosHostSvcAdmitsIKE): a
-			// lenient-loaded upper-case `ALL`/`IDENT-RESET` must set the same
-			// coarse verdict here as the dataplane/Rust classifier reaches, or
-			// the warning metadata / retained ident RST scope diverges from
-			// what is actually admitted (#5557).
 			s = strings.ToLower(strings.TrimSpace(s))
 			if HostInboundFullAdmitService(s) {
 				v.fullAdmit = true
 			}
-			// #3226: walk the expansion so `all` — which now stands for the
-			// named-service union INCLUDING ident-reset — still marks the
-			// netdev as answering TCP/113 with a RST. Comparing the authored
-			// token alone would silently drop the ident-reset exception on
-			// every `all` zone the moment `all` stopped being a full admit.
 			for _, e := range HostInboundServiceTokenExpansion(s) {
 				if e == "ident-reset" {
 					v.ident = true
@@ -982,7 +971,6 @@ func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, 
 				junosHostLinuxNameWith(cfg, ifName, nil, tunNames), unit.VlanID)
 		}
 	}
-	// Emit subsets in the sorted netdevs order for a deterministic iifname set.
 	for _, nd := range netdevs {
 		v := byNetdev[nd]
 		if v == nil {
@@ -995,7 +983,31 @@ func junosHostZoneExemptNetdevs(cfg *Config, zoneName string, zone *ZoneConfig, 
 			identNetdevs = append(identNetdevs, nd)
 		}
 	}
-	return ikeNetdevs, identNetdevs
+	masters := make([]string, 0, len(byVRFSlave))
+	for master := range byVRFSlave {
+		masters = append(masters, master)
+	}
+	sort.Strings(masters)
+	for _, master := range masters {
+		var ikeSlaves, identSlaves []string
+		for slave, v := range byVRFSlave[master] {
+			if v.ike {
+				ikeSlaves = append(ikeSlaves, slave)
+			}
+			if v.ident && !v.fullAdmit {
+				identSlaves = append(identSlaves, slave)
+			}
+		}
+		sort.Strings(ikeSlaves)
+		sort.Strings(identSlaves)
+		if len(ikeSlaves) > 0 {
+			ikeVRFScopes = append(ikeVRFScopes, HostInboundVRFIngressScope{Master: master, Slaves: ikeSlaves})
+		}
+		if len(identSlaves) > 0 {
+			identVRFScopes = append(identVRFScopes, HostInboundVRFIngressScope{Master: master, Slaves: identSlaves})
+		}
+	}
+	return ikeNetdevs, identNetdevs, ikeVRFScopes, identVRFScopes
 }
 
 // Reasons a zone's candidate ingress netdev cannot be used as an iifname scope.
@@ -1048,25 +1060,20 @@ type junosHostUnscopableNetdev struct {
 // advisory must not fire on if operators are to keep reading it.
 type junosHostZoneNetdevCoverage struct {
 	Scoped     []string
+	VRFScopes  []HostInboundVRFIngressScope
 	Unscopable []junosHostUnscopableNetdev
 }
 
-// JunosHostZoneIngressNetdevs returns, per security zone, the sorted set of
-// LOCAL_IN-visible iifname scopes for the zone's #4146 junos-host DROP rules.
-// It excludes lifelines and any effective netdev claimed by MORE THAN ONE
-// zone (for example, a shared trunk parent or a VRF master shared by members
-// from different zones) so a deny can never over-fire on sibling-zone ingress.
-// A uniquely-owned VRF-member netdev is normalized to its `vrf-<instance>`
-// master, which is what LOCAL_IN reports.
+// JunosHostZoneIngressNetdevs returns the sorted LOCAL_IN iifname components
+// for each zone's #4146 junos-host scope. Direct devices are returned as-is;
+// VRF members contribute their master, which MUST be paired with that zone's
+// `meta sdifname` members from BuildJunosHostDenyProjection.IngressVRFScopes.
+// A master by itself is not a safe enforcement scope.
 //
-// It is the SSOT for the iifname scope: the dataplane BuildJunosHostPrograms
-// consumes JunosHostDenyProgram.IngressNetdevs (populated from this) for kernel
-// emission. Warning suppression is gated on the richer
-// junosHostZoneNetdevCoverage below, NOT on this result being non-empty: a zone
-// that resolved SOME of its candidates emits rules while still not enforcing the
-// policy on every ingress path, and a non-empty check cannot tell that from full
-// coverage (#6564 member 8). The netdev-name resolution mirrors the dataplane
-// interface-snapshot LinuxName (userspace.snapshotLinuxName) exactly.
+// Lifelines and unresolved ownership are excluded. The daemon consumes the full
+// projection, including both direct and member-paired scopes; warning
+// suppression uses the richer coverage result, not this component list being
+// non-empty (#6564 member 8).
 func JunosHostZoneIngressNetdevs(cfg *Config) map[string][]string {
 	cov := junosHostZoneNetdevCoverageMap(cfg)
 	if len(cov) == 0 {
@@ -1074,8 +1081,13 @@ func JunosHostZoneIngressNetdevs(cfg *Config) map[string][]string {
 	}
 	out := map[string][]string{}
 	for zone, c := range cov {
-		if len(c.Scoped) > 0 {
-			out[zone] = c.Scoped
+		names := append([]string(nil), c.Scoped...)
+		for _, scope := range c.VRFScopes {
+			names = append(names, scope.Master)
+		}
+		if len(names) > 0 {
+			sort.Strings(names)
+			out[zone] = names
 		}
 	}
 	if len(out) == 0 {
@@ -1258,6 +1270,39 @@ func junosHostZoneNetdevCoverageMap(cfg *Config) map[string]junosHostZoneNetdevC
 			unownedVRFMaster[master] = true
 		}
 	}
+	vrfScopeSlaves := map[string]map[string]map[string]bool{} // zone -> master -> own slave set
+	vrfSlaveOwners := map[string]int{}
+	for zone, nds := range cand {
+		for slave, own := range nds {
+			master, enslaved := vrfMasterByNetdev[slave]
+			if !own || !enslaved || master == "" {
+				continue
+			}
+			vrfSlaveOwners[slave]++
+			if vrfScopeSlaves[zone] == nil {
+				vrfScopeSlaves[zone] = map[string]map[string]bool{}
+			}
+			if vrfScopeSlaves[zone][master] == nil {
+				vrfScopeSlaves[zone][master] = map[string]bool{}
+			}
+			vrfScopeSlaves[zone][master][slave] = true
+		}
+	}
+	for zone, masters := range vrfScopeSlaves {
+		for master, slaves := range masters {
+			for slave := range slaves {
+				if vrfSlaveOwners[slave] != 1 {
+					delete(slaves, slave)
+				}
+			}
+			if len(slaves) == 0 {
+				delete(masters, master)
+			}
+		}
+		if len(masters) == 0 {
+			delete(vrfScopeSlaves, zone)
+		}
+	}
 	effectiveCand := map[string]map[string]bool{}   // zone -> LOCAL_IN netdev -> isOwn
 	effectiveClaims := map[string]map[string]bool{} // LOCAL_IN netdev -> zone set
 	unresolved := map[string]map[string]bool{}      // zone -> own netdev with conflicting VRF masters
@@ -1296,6 +1341,16 @@ func junosHostZoneNetdevCoverageMap(cfg *Config) map[string]junosHostZoneNetdevC
 		}
 		sort.Strings(names)
 		for _, nd := range names {
+			if slaves := vrfScopeSlaves[zone][nd]; nds[nd] && len(slaves) > 0 {
+				slaveNames := make([]string, 0, len(slaves))
+				for slave := range slaves {
+					slaveNames = append(slaveNames, slave)
+				}
+				sort.Strings(slaveNames)
+				c.VRFScopes = append(c.VRFScopes,
+					HostInboundVRFIngressScope{Master: nd, Slaves: slaveNames})
+				continue
+			}
 			if len(effectiveClaims[nd]) != 1 || unownedVRFMaster[nd] {
 				// As with raw candidates, a dropped parent superset is not a
 				// coverage gap: only an OWN ingress device must be covered.

@@ -316,6 +316,10 @@ func (a *ruleAsm) sdifname(names []string) *ruleAsm {
 	return a.add(a.p.sdifnameMatch(names)...)
 }
 
+func (a *ruleAsm) sdifnameExcept(names []string) *ruleAsm {
+	return a.add(a.p.sdifnameExceptMatch(names)...)
+}
+
 // fibLocalOrAnycast appends `fib daddr type { local, anycast }`, limiting an
 // input backstop to destinations the FIB classifies as firewall-local or
 // anycast. Unlike `meta pkttype host`—an L2 classification the sender controls
@@ -852,16 +856,24 @@ func (p *nlPlan) sdifnameMatch(names []string) []expr.Any {
 	return []expr.Any{load, &expr.Lookup{SourceRegister: 1, SetName: set.Name, SetID: set.ID}}
 }
 func (p *nlPlan) iifnameExceptMatch(names []string) []expr.Any {
+	return p.ifnameExceptMatch(expr.MetaKeyIIFNAME, "iifname", names)
+}
+
+func (p *nlPlan) sdifnameExceptMatch(names []string) []expr.Any {
+	return p.ifnameExceptMatch(expr.MetaKey(metaKeySDIFNAME), "sdifname", names)
+}
+
+func (p *nlPlan) ifnameExceptMatch(key expr.MetaKey, field string, names []string) []expr.Any {
 	if len(names) == 0 {
 		return nil
 	}
 	for _, n := range names {
 		if n == "" || len(n) > unix.IFNAMSIZ-1 || strings.IndexByte(n, 0) >= 0 {
-			p.fail(fmt.Errorf("iifname %q is not a representable interface name (empty, embedded NUL, or over the 15-byte limit) and would never match", n))
+			p.fail(fmt.Errorf("%s %q is not a representable interface name (empty, embedded NUL, or over the 15-byte limit) and would never match", field, n))
 			return nil
 		}
 	}
-	load := &expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1}
+	load := &expr.Meta{Key: key, Register: 1}
 	if len(names) == 1 {
 		return []expr.Any{load, &expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: ifname16(names[0])}}
 	}

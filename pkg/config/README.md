@@ -828,14 +828,12 @@ cannot steal `fxp0` from `vrf-mgmt` or fight the fabric-overlay rebind for
 (#11364):** strict commit rejects a role-derived cluster control/fabric
 lifeline listed as a tenant-VRF member. Tolerant load/peer-sync warns and
 removes only those lifeline device keys; ordinary co-members remain assigned
-to the operator VRF. Both coarse host-inbound and fine `junos-host` DENY scope
-use the LOCAL_IN-visible `vrf-<name>` master for those members. Fine DENY
-coverage keeps that master unscopable when members belong to multiple zones or
-any enslaved member is unzoned/lifeline, because LOCAL_IN cannot distinguish
-those ingress devices. The existing #10431 fail-closed master guard handles
-ambiguous coarse host-inbound claims. LOCAL_IN identifies the shared VRF master,
-so admitting a lifeline member would otherwise suppress ingress judgement for
-its data co-members.
+to the operator VRF. Coarse host-inbound and fine `junos-host` DENY rules
+identify each admitted member with the pair `iifname vrf-<name>` and
+`meta sdifname <member>`, so a shared master can enforce per-zone member
+ownership without granting one zone's services or source denies to its
+co-members. Unowned and ambiguous members remain outside those exact scopes and
+are handled by the existing fail-closed ingress guards.
 
 **System backup-router is reconciled in the management table (#11449):**
 `system backup-router <nh> [destination <prefix>]` is installed by

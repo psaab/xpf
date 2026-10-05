@@ -117,10 +117,12 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 		// wantConfigWarning is the expected tolerant-load warning for a legacy
 		// shape that strict commits now reject.
 		wantConfigWarning string
-		// wantScoped is the zone's resolved iifname set, asserted exactly: a
-		// count would pass for the right number of wrong netdevs, and the whole
-		// defect is that a rule names a netdev traffic never arrives on.
-		wantScoped []string
+		// wantScoped is config.JunosHostZoneIngressNetdevs: the kernel iifname
+		// component (direct device or VRF master). VRF masters must be paired with
+		// the exact member set below; IngressIfnames contains only direct devices.
+		wantScoped    []string
+		wantDirect    []string
+		wantVRFScopes []config.HostInboundVRFIngressScope
 		// wantRules is whether a kernel DROP rule is emitted at all.
 		wantRules bool
 		// wantWarn is the #4168 warning count for the zone's deny.
@@ -137,6 +139,7 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 				[]string{"set security zones security-zone zoneA interfaces ge-0/0/1.0"},
 				vrfScopeDeny("zoneA", "denyA")),
 			wantScoped: []string{"ge-0-0-1"},
+			wantDirect: []string{"ge-0-0-1"},
 			wantRules:  true,
 			wantWarn:   0,
 		},
@@ -154,9 +157,9 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 					"set routing-instances vrA interface ge-0/0/1.0",
 				},
 				vrfScopeDeny("zoneA", "denyA")),
-			wantScoped: []string{"vrf-vrA"},
-			wantRules:  true,
-			wantWarn:   0,
+			wantScoped:    []string{"vrf-vrA"},
+			wantVRFScopes: []config.HostInboundVRFIngressScope{{Master: "vrf-vrA", Slaves: []string{"ge-0-0-1"}}},
+			wantRules:     true,
 		},
 		{
 			// The VRF member is now covered by vrf-vrA and the ordinary
@@ -175,14 +178,15 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 				vrfScopeDeny("zoneA", "denyA")),
 			compileLenient: true,
 			wantScoped:     []string{"ge-0-0-2", "vrf-vrA"},
+			wantDirect:     []string{"ge-0-0-2"},
+			wantVRFScopes:  []config.HostInboundVRFIngressScope{{Master: "vrf-vrA", Slaves: []string{"ge-0-0-1"}}},
 			wantRules:      true,
-			wantWarn:       0,
 		},
 		{
-			// A bare RI member fans down to the configured tagged unit too.
-			// Since that sibling is unzoned, LOCAL_IN cannot distinguish it
-			// from the zoneA unit-0 member; the master must stay unscopable.
-			name:       "bare physical with unzoned VLAN sibling — master stays unscopable",
+			// A bare RI member fans down to the configured tagged unit too. The
+			// untagged member is admitted only by its paired sdifname scope; its
+			// unzoned VLAN sibling does not inherit that zone's host-inbound policy.
+			name:       "bare physical with unzoned VLAN sibling — member-scoped, warning suppressed",
 			zone:       "zoneA",
 			policyName: "denyA",
 			cmds: concat(vrfScopeBase,
@@ -192,9 +196,10 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 					"set routing-instances vrA interface ge-0/0/1",
 				},
 				vrfScopeDeny("zoneA", "denyA")),
-			wantScoped: nil,
-			wantRules:  false,
-			wantWarn:   1,
+			wantScoped:    []string{"vrf-vrA"},
+			wantVRFScopes: []config.HostInboundVRFIngressScope{{Master: "vrf-vrA", Slaves: []string{"ge-0-0-1"}}},
+			wantRules:     true,
+			wantWarn:      0,
 		},
 		{
 			// #11312 rejects forwarding-instance interface members on strict
@@ -216,6 +221,7 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 			compileLenient:    true,
 			wantConfigWarning: "forwarding-instance interface membership",
 			wantScoped:        []string{"ge-0-0-1"},
+			wantDirect:        []string{"ge-0-0-1"},
 			wantRules:         true,
 			wantWarn:          0,
 		},
@@ -236,6 +242,7 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 				},
 				vrfScopeDeny("zoneA", "denyA")),
 			wantScoped: []string{"ge-0-0-2"},
+			wantDirect: []string{"ge-0-0-2"},
 			wantRules:  true,
 			wantWarn:   1,
 		},
@@ -259,8 +266,8 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 				},
 				vrfScopeDeny("zoneB", "denyB")),
 			wantScoped: []string{"ge-0-0-1.50"},
+			wantDirect: []string{"ge-0-0-1.50"},
 			wantRules:  true,
-			wantWarn:   0,
 		},
 		{
 			// A VLAN subunit is a distinct kernel device with its own master,
@@ -276,9 +283,10 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 					"set routing-instances vrA interface ge-0/0/1.0",
 				},
 				vrfScopeDeny("zoneB", "denyB")),
-			wantScoped: []string{"ge-0-0-1.50", "vrf-vrA"},
-			wantRules:  true,
-			wantWarn:   0,
+			wantScoped:    []string{"ge-0-0-1.50", "vrf-vrA"},
+			wantDirect:    []string{"ge-0-0-1.50"},
+			wantVRFScopes: []config.HostInboundVRFIngressScope{{Master: "vrf-vrA", Slaves: []string{"ge-0-0-1"}}},
+			wantRules:     true,
 		},
 		{
 			// A bare routing-instance member fans down to every configured unit
@@ -294,9 +302,9 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 					"set routing-instances vrA interface ge-0/0/1",
 				},
 				vrfScopeDeny("zoneB", "denyB")),
-			wantScoped: []string{"vrf-vrA"},
-			wantRules:  true,
-			wantWarn:   0,
+			wantScoped:    []string{"vrf-vrA"},
+			wantVRFScopes: []config.HostInboundVRFIngressScope{{Master: "vrf-vrA", Slaves: []string{"ge-0-0-1", "ge-0-0-1.50"}}},
+			wantRules:     true,
 		},
 	}
 
@@ -338,8 +346,11 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 			if !row.wantRules && rules != 0 {
 				t.Errorf("%d kernel DROP rule(s) emitted for %s with nothing scopable", rules, zone)
 			}
-			if ok && !slices.Equal(prog.IngressIfnames, row.wantScoped) {
-				t.Errorf("program iifnames = %v, want %v", prog.IngressIfnames, row.wantScoped)
+			if ok && !slices.Equal(prog.IngressIfnames, row.wantDirect) {
+				t.Errorf("program direct iifnames = %v, want %v", prog.IngressIfnames, row.wantDirect)
+			}
+			if ok && !sameVRFIngressScopes(prog.IngressVRFScopes, row.wantVRFScopes) {
+				t.Errorf("program VRF ingress scopes = %v, want %v", prog.IngressVRFScopes, row.wantVRFScopes)
 			}
 			if got := residualWarnings(cfg, policyName); len(got) != row.wantWarn {
 				t.Errorf("#4168 warnings naming %q = %d, want %d — a deny that is not enforced on every ingress path of its zone must say so, and one that IS must stay quiet; got %v",
@@ -347,4 +358,16 @@ func TestJunosHostIngressScopeCoverage6619(t *testing.T) {
 			}
 		})
 	}
+}
+
+func sameVRFIngressScopes(got, want []config.HostInboundVRFIngressScope) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i].Master != want[i].Master || !slices.Equal(got[i].Slaves, want[i].Slaves) {
+			return false
+		}
+	}
+	return true
 }

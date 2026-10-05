@@ -36,15 +36,12 @@ func emitHostInboundFenceWGAdmitsNetlink(p *nlPlan, views []HostInboundZoneView,
 }
 
 func emitFenceWGIngressAcceptNetlink(p *nlPlan, views []HostInboundZoneView, view HostInboundZoneView, f nlFamily, candidates []string, ports []uint16) {
-	if len(view.IngressNetdevs) == 0 || len(candidates) == 0 || len(ports) == 0 {
+	ingress := HostInboundWGIngressByZone(views)[view.Zone]
+	if len(ingress.IIFNames()) == 0 || len(candidates) == 0 || len(ports) == 0 {
 		return
 	}
 	addrs := uniqueFenceWGAddresses(views, view.Zone, f, candidates)
-	if len(addrs) == 0 {
-		return
-	}
-	p.rule().iifname(view.IngressNetdevs).daddr(f, addrs, false).
-		l4Port(protoUDP, "dport", portsFromUint16(ports), false).emit(verdictAccept()...)
+	emitHostInboundWGIngressAcceptNetlink(p, ingress, f, addrs, ports)
 }
 
 func uniqueFenceWGAddresses(views []HostInboundZoneView, zone string, f nlFamily, candidates []string) []string {

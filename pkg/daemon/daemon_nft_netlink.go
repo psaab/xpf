@@ -111,6 +111,7 @@ func toNftViews(views []dpuserspace.ZoneHostInboundView) []xnft.HostInboundZoneV
 			AlarmWithoutDrop:     v.AlarmWithoutDrop,
 			V6Addrs:              v.V6Addrs,
 			IngressNetdevs:       v.IngressNetdevs,
+			IngressVRFScopes:     v.IngressVRFScopes,
 			IngressDenyNetdevs:   v.IngressDenyNetdevs,
 		})
 	}
@@ -147,6 +148,7 @@ func toNftProgram(p dpuserspace.JunosHostProgram) xnft.JunosHostProgram {
 	return xnft.JunosHostProgram{
 		Zone:                  p.Zone,
 		IngressIfnames:        p.IngressIfnames,
+		IngressVRFScopes:      p.IngressVRFScopes,
 		RulesV4:               toNftDenyRules(p.RulesV4),
 		RulesV6:               toNftDenyRules(p.RulesV6),
 		CoarseAdmitsIKE:       p.CoarseAdmitsIKE,
@@ -154,6 +156,8 @@ func toNftProgram(p dpuserspace.JunosHostProgram) xnft.JunosHostProgram {
 		HasApplicationAnyDeny: p.HasApplicationAnyDeny,
 		IKEExemptNetdevs:      p.IKEExemptNetdevs,
 		IdentResetNetdevs:     p.IdentResetNetdevs,
+		IKEExemptVRFScopes:    p.IKEExemptVRFScopes,
+		IdentResetVRFScopes:   p.IdentResetVRFScopes,
 	}
 }
 
