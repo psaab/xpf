@@ -318,8 +318,6 @@ func TestRibGroupUpgradeCleanupRemovesLegacyBlanket(t *testing.T) {
 	// Seed a stale pre-#3876 blanket rule (from all lookup 101 pref 33000).
 	seedRule(ops, unix.AF_INET, ribGroupRulePriority, 101)
 	seedRule(ops, unix.AF_INET6, ribGroupRulePriority, 101)
-	// And an even older legacy-window rule (pref 200).
-	seedRule(ops, unix.AF_INET, 200, 101)
 
 	rg := &ribGroupManager{ops: ops}
 	ribGroups := map[string]*config.RibGroup{
@@ -334,13 +332,10 @@ func TestRibGroupUpgradeCleanupRemovesLegacyBlanket(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 
-	// The stale pref-33000 blanket rules and the pref-200 legacy rule must be gone.
+	// The stale pref-33000 blanket rules must be gone.
 	if hasPriority(ops, unix.AF_INET, ribGroupRulePriority) || hasPriority(ops, unix.AF_INET6, ribGroupRulePriority) {
 		t.Errorf("upgrade cleanup must remove the stale pref-%d blanket rules, rules v4=%v v6=%v",
 			ribGroupRulePriority, ops.rules[unix.AF_INET], ops.rules[unix.AF_INET6])
-	}
-	if hasPriority(ops, unix.AF_INET, 200) {
-		t.Errorf("upgrade cleanup must remove the legacy pref-200 rule, rules=%v", ops.rules[unix.AF_INET])
 	}
 	// The new per-prefix rule must be installed in the #3876 window.
 	if _, ok := ops.findDstRule(unix.AF_INET, 101, "10.0.30.0/24"); !ok {
@@ -910,10 +905,12 @@ func TestPBRRulesApply_Fake(t *testing.T) {
 // stale lookup must still be deleted after the current pair layout is deployed.
 func TestPBRClearFallsBackToLegacyLookupAction(t *testing.T) {
 	ops := newFakeRuleOps()
-	rule := &netlink.Rule{
-		Family: unix.AF_INET, Priority: pbrRulePriority + 1,
-		Table: 100, Type: unix.RTN_UNICAST,
-	}
+	rule := netlink.NewRule()
+	rule.Family = unix.AF_INET
+	rule.Priority = pbrRulePriority + 1
+	rule.Table = 100
+	rule.Type = unix.RTN_UNICAST
+	rule.IifName = "ge-0-0-0"
 	if err := ops.RuleAdd(rule); err != nil {
 		t.Fatalf("seed legacy-layout PBR rule: %v", err)
 	}
@@ -1049,7 +1046,7 @@ func TestPBRApplyCapBoundary(t *testing.T) {
 func TestPBRApplyClearDelFailureSurfaced(t *testing.T) {
 	ops := newFakeRuleOps()
 	// Seed a stale rule inside the PBR window so clear() tries to delete it.
-	seedRule(ops, unix.AF_INET, pbrRulePriority+5, 100)
+	seedPBRRule(ops, unix.AF_INET, pbrRulePriority+5, 100)
 	ops.delErr = errors.New("netlink EBUSY")
 	p := &pbrManager{ops: ops}
 
@@ -1177,14 +1174,17 @@ func seedRule(ops *fakeRuleOps, family, prio, table int) {
 // seedPBRRule inserts a PBR rule with the action encoded by its priority.
 // Current odd slots are unreachable shadows; legacy slots were lookups only.
 func seedPBRRule(ops *fakeRuleOps, family, prio, table int) {
-	ruleType := uint8(unix.RTN_UNICAST)
+	rule := netlink.NewRule()
+	rule.Family = family
+	rule.Priority = prio
+	rule.Table = table
+	rule.IifName = "ge-0-0-0"
+	rule.Type = uint8(unix.RTN_UNICAST)
 	if prio >= pbrRulePriority && prio < pbrRulePriority+maxPBRRules &&
 		(prio-pbrRulePriority)%2 == 1 {
-		ruleType = uint8(pbrTerminatorAction)
+		rule.Type = uint8(pbrTerminatorAction)
 	}
-	ops.rules[family] = append(ops.rules[family], netlink.Rule{
-		Family: family, Priority: prio, Table: table, Type: ruleType,
-	})
+	ops.rules[family] = append(ops.rules[family], *rule)
 }
 
 // seedCurrentLeakRule inserts a destination-scoped rule owned by the

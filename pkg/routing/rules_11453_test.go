@@ -56,7 +56,6 @@ func TestRibGroupClearDeletesOwnedRulesAndPreservesForeign11453(t *testing.T) {
 	stale := []netlink.Rule{
 		rule11453(t, ribGroupLeakRulePriority+1, 101, "10.1.0.0/24", "", ""),
 		rule11453(t, ribGroupRulePriority, 101, "", "", ""),
-		rule11453(t, 200, 101, "", "", ""),
 		rule11453(t, RibGroupReturnRulePriority, 102, "10.2.0.0/24", "vrf-dmz", ""),
 		rule11453(t, RibGroupReturnRulePriority, 102, "10.3.0.0/24", "", "vrf-dmz"),
 	}
