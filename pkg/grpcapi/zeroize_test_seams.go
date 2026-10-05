@@ -31,6 +31,7 @@ func RedirectZeroizeWipePathsForTesting(root string) (restore func()) {
 	oldVarLog, oldSecurityDir, oldFlowDir, oldRsyslogDir := zeroizeVarLogDir, zeroizeSecurityLogDir, zeroizeFlowTraceDir, zeroizeRsyslogConfDir
 	oldPendingPath := configstore.FactoryResetPendingPath
 	oldHandoff := configstore.ResetHandoffPath
+	oldHistHomes := zeroizeCLIHistoryHomesOverride
 
 	zeroizeMachineIDPath = filepath.Join(root, "etc", "machine-id")
 	zeroizeSSHHostKeyDir = filepath.Join(root, "etc", "ssh")
@@ -99,6 +100,7 @@ func RedirectZeroizeWipePathsForTesting(root string) (restore func()) {
 	zeroizeSudoersDir = filepath.Join(login, "sudoers.d")
 	zeroizeHomeBase = filepath.Join(login, "home")
 	zeroizePasswdPath = filepath.Join(login, "passwd")
+	zeroizeCLIHistoryHomesOverride = []string{filepath.Join(root, "home-op")}
 	zeroizeUserdel = func(string) ([]byte, error) { return nil, nil }
 	zeroizeRootSSHDir = filepath.Join(login, "root-ssh")
 	zeroizeLockRootPassword = func() ([]byte, error) { return nil, nil }
@@ -126,6 +128,7 @@ func RedirectZeroizeWipePathsForTesting(root string) (restore func()) {
 		zeroizeRootSSHDir, zeroizeLockRootPassword = oldRootSSH, oldLockRoot
 		zeroizeVarLogDir, zeroizeSecurityLogDir, zeroizeFlowTraceDir, zeroizeRsyslogConfDir = oldVarLog, oldSecurityDir, oldFlowDir, oldRsyslogDir
 		configstore.FactoryResetPendingPath = oldPendingPath
+		zeroizeCLIHistoryHomesOverride = oldHistHomes
 		configstore.ResetHandoffPath = oldHandoff
 	}
 }
