@@ -84,9 +84,6 @@ fn logical_ingress_ifindex(forwarding: &ForwardingState, meta: UserspaceDpMeta) 
     .unwrap_or(meta.ingress_ifindex as i32)
 }
 
-
-
-
 /// The WG socket's outer source and packet destination must both be uniquely
 /// owned in the packet's actual ingress zone. TunnelEndpoint.zone is the
 /// separate inner-policy zone and is intentionally not consulted here.
@@ -230,8 +227,6 @@ pub(in crate::afxdp) fn is_wg_underlay_frame(
     wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip)
         && forwarding.owns_configured_ip(dst_ip)
 }
-
-
 
 /// Decapsulate an inbound WireGuard transport-data record, or `None`.
 ///
@@ -440,7 +435,7 @@ fn outer_source_ip(outer: &[u8], meta: UserspaceDpMeta) -> Option<std::net::IpAd
     }
 }
 
-/// The outer datagram's DESTINATION address for host-inbound port admission.
+/// The outer datagram's DESTINATION address for WireGuard owner-zone checks.
 fn outer_destination_ip(outer: &[u8], meta: UserspaceDpMeta) -> Option<std::net::IpAddr> {
     let l3 = crate::afxdp::frame::nibble_checked_l3(outer, meta.l3_offset, meta.addr_family)?.l3;
     match meta.addr_family as i32 {

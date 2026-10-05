@@ -231,6 +231,10 @@ test-shim-run:
 	# every `func Test...` in each covered file must appear as a `=== RUN` line.
 	# #9888: the QinQ disposition cells live in their own file and are covered
 	# too — same predicate extension, same by-name census over both files.
+# #10655: S-tag disposition cells execute the retained object and are included
+# in the by-name test census below.
+# #10864: dispatch wiring cells cover the retained object, not just predicate
+# models, and are included in the same census.
 # #11574/#12119: scoped WG admission and interface-NAT control steering run
 # against the retained object; census every test in the shared admission file.
 	@out=$$(go test ./pkg/dataplane/userspace/ -run 'TestV6|TestFragment|TestNonFirstFragment|TestUserspaceXDPQinQ|TestUserspaceXDPSTag|TestUserspaceXDPDispatch|TestBuildUserspaceWGZoneAdmission|TestSyncUserspaceWGZoneMaps|TestUserspaceXDPWireGuard' -v -count=1 2>&1); \

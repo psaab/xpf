@@ -18,7 +18,6 @@
 //! carries the TUNNEL's logical ifindex and the zone that ifindex maps to.
 
 use super::super::test_fixtures::wg_outer_mtu_snapshot;
-use crate::test_zone_ids::TEST_SFMIX_ZONE_ID;
 use super::super::tests_support::{
     txn_ha_state, txn_run_descriptor, txn_run_descriptor_checked, txn_run_descriptor_inner,
 };
@@ -29,6 +28,7 @@ use crate::afxdp::coordinator::{
     build_wg_tun_origin_entries, parse_wg_tun_origin_flow, publish_wg_tun_origin_entries,
     sweep_wg_tun_origin_idle, wg_tun_origin_packet_initiates,
 };
+use crate::test_zone_ids::TEST_SFMIX_ZONE_ID;
 
 const TUNNEL_LOGICAL_IFINDEX: i32 = 400;
 const WG_PORT: u16 = 51820;
@@ -154,11 +154,13 @@ fn forwarding_with_engine(resp: WgEngine) -> (ForwardingState, u16) {
 #[test]
 fn mapped_ipv6_wg_underlay_candidate_stays_outside_inner_ingress_gate_10686() {
     let mut snapshot = wg_outer_mtu_snapshot();
-    snapshot.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot {
-        family: "inet6".to_string(),
-        address: "2001:db8::1/64".to_string(),
-        scope: 0,
-    });
+    snapshot.interfaces[0]
+        .addresses
+        .push(crate::InterfaceAddressSnapshot {
+            family: "inet6".to_string(),
+            address: "2001:db8::1/64".to_string(),
+            scope: 0,
+        });
     let forwarding = build_forwarding_state(&snapshot);
     let local_v4: std::net::Ipv4Addr = "172.16.80.8".parse().unwrap();
     let local_v6: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
@@ -175,19 +177,29 @@ fn mapped_ipv6_wg_underlay_candidate_stays_outside_inner_ingress_gate_10686() {
         Some(&crate::test_zone_ids::TEST_WAN_ZONE_ID)
     );
     assert_eq!(
-        forwarding.ifindex_to_routing_instance.get(&12).map(String::as_str),
+        forwarding
+            .ifindex_to_routing_instance
+            .get(&12)
+            .map(String::as_str),
         Some("")
     );
     assert!(forwarding.owns_configured_ip(std::net::IpAddr::V6(local_v6)));
     assert_eq!(
-        forwarding.tunnel_endpoints.get(&1).expect("WG endpoint").source,
+        forwarding
+            .tunnel_endpoints
+            .get(&1)
+            .expect("WG endpoint")
+            .source,
         std::net::IpAddr::V4(local_v4)
     );
     assert_eq!(
         forwarding.wg_local_address_zone_v4.get(&local_v4),
         Some(&crate::test_zone_ids::TEST_WAN_ZONE_ID)
     );
-    assert!(forwarding.has_wg_tunnels, "fixture must configure WireGuard");
+    assert!(
+        forwarding.has_wg_tunnels,
+        "fixture must configure WireGuard"
+    );
     let mut frame = vec![0u8; 14 + 40 + 8];
     frame[..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]);
     frame[12..14].copy_from_slice(&0x86ddu16.to_be_bytes());
@@ -195,8 +207,18 @@ fn mapped_ipv6_wg_underlay_candidate_stays_outside_inner_ingress_gate_10686() {
     frame[18..20].copy_from_slice(&8u16.to_be_bytes());
     frame[20] = PROTO_UDP;
     frame[21] = 64;
-    frame[22..38].copy_from_slice(&"::ffff:203.0.113.7".parse::<std::net::Ipv6Addr>().unwrap().octets());
-    frame[38..54].copy_from_slice(&"2001:db8::1".parse::<std::net::Ipv6Addr>().unwrap().octets());
+    frame[22..38].copy_from_slice(
+        &"::ffff:203.0.113.7"
+            .parse::<std::net::Ipv6Addr>()
+            .unwrap()
+            .octets(),
+    );
+    frame[38..54].copy_from_slice(
+        &"2001:db8::1"
+            .parse::<std::net::Ipv6Addr>()
+            .unwrap()
+            .octets(),
+    );
     frame[54..56].copy_from_slice(&PEER_SPORT.to_be_bytes());
     frame[56..58].copy_from_slice(&WG_PORT.to_be_bytes());
     frame[58..60].copy_from_slice(&8u16.to_be_bytes());
@@ -227,20 +249,29 @@ fn mapped_ipv6_wg_underlay_candidate_stays_outside_inner_ingress_gate_10686() {
         !super::decap::is_wg_underlay_frame(&frame, wrong_vr_meta, &wrong_vr_forwarding),
         "a local address and WG listen port from the wrong transport VR must not bypass inner ingress classification"
     );
-    frame[38..54].copy_from_slice(&"2001:db8::2".parse::<std::net::Ipv6Addr>().unwrap().octets());
+    frame[38..54].copy_from_slice(
+        &"2001:db8::2"
+            .parse::<std::net::Ipv6Addr>()
+            .unwrap()
+            .octets(),
+    );
     assert!(
         !super::decap::is_wg_underlay_frame(&frame, meta, &forwarding),
         "transit traffic to a non-local destination is not WG underlay, even \
          when it shares a configured listen port"
     );
-    frame[38..54].copy_from_slice(&"2001:db8::1".parse::<std::net::Ipv6Addr>().unwrap().octets());
+    frame[38..54].copy_from_slice(
+        &"2001:db8::1"
+            .parse::<std::net::Ipv6Addr>()
+            .unwrap()
+            .octets(),
+    );
     frame[56..58].copy_from_slice(&12345u16.to_be_bytes());
     assert!(
         !super::decap::is_wg_underlay_frame(&frame, meta, &forwarding),
         "ordinary UDP must not be classified as WireGuard underlay"
     );
 }
-
 
 /// Sum the WG engine's non-success decap counters. A candidate declined by
 /// the listener/zone gates leaves them untouched; an outcome counted by
@@ -326,7 +357,6 @@ fn worker_decap_presents_inner_under_the_tunnel_zone_8274() {
         "the record must be attributed to the peer whose keys opened it"
     );
 
-
     // The roam report: the endpoint the worker observed is queued for the
     // control thread, which no longer sees these records on its socket.
     let engine = forwarding.wg_engines.get(&id).unwrap();
@@ -371,12 +401,18 @@ fn worker_decap_refuses_wrong_transport_vr_but_keeps_roaming_within_transport_vr
         .expect("the fixture configures a WireGuard tunnel");
     forwarding.wg_engines.insert(id, std::sync::Arc::new(resp));
     assert_eq!(
-        forwarding.ifindex_to_routing_instance.get(&12).map(String::as_str),
+        forwarding
+            .ifindex_to_routing_instance
+            .get(&12)
+            .map(String::as_str),
         Some("blue"),
         "fixture transport egress belongs to the endpoint's blue VR"
     );
     assert_eq!(
-        forwarding.ifindex_to_routing_instance.get(&24).map(String::as_str),
+        forwarding
+            .ifindex_to_routing_instance
+            .get(&24)
+            .map(String::as_str),
         Some("red"),
         "fixture alternate ingress belongs to a different red VR"
     );
@@ -391,13 +427,8 @@ fn worker_decap_refuses_wrong_transport_vr_but_keeps_roaming_within_transport_vr
     wrong_vr_meta.ingress_ifindex = 24;
     let scratch = WgWorkerScratch::new(4096);
     assert!(
-        super::decap::try_wg_decap_from_frame(
-            &frame,
-            wrong_vr_meta,
-            &forwarding,
-            &scratch
-        )
-        .is_none(),
+        super::decap::try_wg_decap_from_frame(&frame, wrong_vr_meta, &forwarding, &scratch)
+            .is_none(),
         "an authenticated record arriving under the wrong VR must not decap"
     );
 
@@ -406,13 +437,9 @@ fn worker_decap_refuses_wrong_transport_vr_but_keeps_roaming_within_transport_vr
     let mut transport_vr_meta = outer_meta(frame.len());
     transport_vr_meta.ingress_ifindex = 12;
     let engine = std::sync::Arc::clone(&forwarding.wg_engines[&id]);
-    let decapped = super::decap::try_wg_decap_from_frame(
-        &frame,
-        transport_vr_meta,
-        &forwarding,
-        &scratch,
-    )
-    .expect("the same authenticated record must decap on its transport VR");
+    let decapped =
+        super::decap::try_wg_decap_from_frame(&frame, transport_vr_meta, &forwarding, &scratch)
+            .expect("the same authenticated record must decap on its transport VR");
     assert_eq!(&decapped.frame[14..], &inner[..]);
     assert_eq!(
         engine.take_worker_observed_endpoint(&init_pub),
@@ -502,8 +529,7 @@ fn worker_decap_declines_a_foreign_port_8274() {
 fn worker_decap_refuses_an_allowed_ips_mismatch_8274() {
     // The responder permits 10.123.0.0/24; the initiator sends from outside it.
     let permitted: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
-    let (init, resp, _init_pub, resp_pub) =
-        established_pair(permitted.clone(), permitted.clone());
+    let (init, resp, _init_pub, resp_pub) = established_pair(permitted.clone(), permitted.clone());
     let (forwarding, _id) = forwarding_with_engine(resp);
 
     let inner = inner_v4([192, 0, 2, 77], [10, 0, 61, 102]);
@@ -913,7 +939,6 @@ fn worker_wg_decap_requires_unique_matching_underlay_zone_11574() {
     }
 }
 
-
 #[test]
 fn worker_wg_primary_wan_snat_preserves_owner_zone_12119() {
     let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
@@ -941,29 +966,36 @@ fn worker_wg_primary_wan_snat_preserves_owner_zone_12119() {
     );
     let id = *forwarding.wg_engines.keys().next().expect("WG tunnel");
     forwarding.wg_engines.insert(id, std::sync::Arc::new(resp));
+    let engine = forwarding.wg_engines.get(&id).expect("WG engine");
+    let decaps_before = decap_outcomes_observed(engine);
     let frame = wiring_record(&init, &rpub);
-    let mut meta = wiring_meta(frame.len());
+    let meta = wiring_meta(frame.len());
     let scratch = WgWorkerScratch::new(4096);
+
+    // Wrong-zone is tried first with this ciphertext. It must be rejected
+    // before AEAD/replay state is touched; otherwise the subsequent serving-
+    // zone success could pass only because the first attempt consumed it.
+    let mut wrong_zone = meta;
+    wrong_zone.ingress_ifindex = 24;
+    wrong_zone.ingress_vlan_id = 0;
+    assert!(
+        super::decap::try_wg_decap_from_frame(&frame, wrong_zone, &forwarding, &scratch).is_none(),
+        "a wrong-zone authenticated record must be rejected before decap even when interface SNAT is active"
+    );
+    assert_eq!(
+        decap_outcomes_observed(engine),
+        decaps_before,
+        "wrong-zone rejection must happen before AEAD/replay state is consumed"
+    );
     assert!(
         super::decap::try_wg_decap_from_frame(&frame, meta, &forwarding, &scratch).is_some(),
-        "an authenticated record arriving in the primary WAN owner zone must decapsulate with interface SNAT active"
-    );
-
-    // Control: the same authenticated WAN listener must still reject a packet
-    // received through LAN; preserving address ownership must not widen the
-    // listener's serving-zone boundary.
-    meta.ingress_ifindex = 24;
-    meta.ingress_vlan_id = 0;
-    assert!(
-        super::decap::try_wg_decap_from_frame(&frame, meta, &forwarding, &scratch).is_none(),
-        "a wrong-zone authenticated record must be rejected before decap even when interface SNAT is active"
+        "the same record must still authenticate and decapsulate on the primary WAN owner zone"
     );
 }
 
 #[test]
 fn worker_wg_listener_ignores_interface_host_inbound_override_for_listener_11574() {
-    let (mut forwarding, init, rpub) =
-        wiring_fixture_with_host_services(true, &["any-service"]);
+    let (mut forwarding, init, rpub) = wiring_fixture_with_host_services(true, &["any-service"]);
     let zone_id = forwarding.ifindex_to_zone_id[&12];
     let local_ip = std::net::IpAddr::V4(XPF_OUTER.into());
     assert!(
@@ -1014,8 +1046,7 @@ fn worker_wg_listener_admission_ignores_host_inbound_service_tokens_11574() {
         ("restricted services", &["ssh"][..]),
         ("all services", &["all"][..]),
     ] {
-        let (forwarding, init, rpub) =
-            wiring_fixture_with_host_services(true, services);
+        let (forwarding, init, rpub) = wiring_fixture_with_host_services(true, services);
         let zone_id = forwarding.ifindex_to_zone_id[&12];
         assert_eq!(
             forwarding
@@ -1091,7 +1122,9 @@ fn worker_wg_ipv6_listener_requires_matching_ingress_zone_11574() {
 
     let inner = inner_v4([10, 123, 0, 5], [203, 0, 113, 50]);
     let mut wire = vec![0u8; 2048];
-    let enc = init.try_encap(&rpub, &inner, &mut wire).expect("initiator encap");
+    let enc = init
+        .try_encap(&rpub, &inner, &mut wire)
+        .expect("initiator encap");
     let frame = outer_frame_v6(&wire[..enc.len], WG_PORT, peer_v6, local_v6);
     let meta = outer_meta_v6(frame.len());
     let zone_id = forwarding.ifindex_to_zone_id[&12];
@@ -1194,7 +1227,11 @@ fn unzoned_wiring_fixture_9251(zoned: bool) -> (ForwardingState, WgEngine, [u8; 
 
 /// Run one authenticated record through the poll loop; return the debug
 /// counters, the tunnel-ingress session count and the #6682 counter delta.
-fn run_unzoned_wiring_9251(forwarding: &ForwardingState, init: &WgEngine, rpub: &[u8; 32]) -> (DebugPollCounters, usize, u64) {
+fn run_unzoned_wiring_9251(
+    forwarding: &ForwardingState,
+    init: &WgEngine,
+    rpub: &[u8; 32],
+) -> (DebugPollCounters, usize, u64) {
     let frame = wiring_record(init, rpub);
     let meta = wiring_meta(frame.len());
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
@@ -1269,7 +1306,8 @@ fn poll_loop_denies_unzoned_wg_tunnel_transit_under_permit_all_9251() {
         None,
         "setup: the unzoned arm's tunnel must really be in no zone"
     );
-    let (dbg, unzoned_sessions, unzoned_denies) = run_unzoned_wiring_9251(&forwarding, &init, &rpub);
+    let (dbg, unzoned_sessions, unzoned_denies) =
+        run_unzoned_wiring_9251(&forwarding, &init, &rpub);
     // ORDER MATTERS. The security assertion comes first so a mutant that lets the
     // flow through is reported as what it is. With the non-vacuity check first,
     // a PERMITTED flow (zero policy denies) would be reported as "never reached
@@ -1468,10 +1506,13 @@ fn worker_decap_keepalive_clears_t7_and_roams_together_9018() {
 
     // ARM T7 first, or the assertion below is vacuous: an unarmed peer reads
     // 0 whether or not the keepalive cleared anything.
-    let peer = engine.peer_arc(&init_pub).expect("responder knows the peer");
+    let peer = engine
+        .peer_arc(&init_pub)
+        .expect("responder knows the peer");
     peer.note_data_send(1_000);
     assert_ne!(
-        peer.t7_armed_send_ns.load(std::sync::atomic::Ordering::Relaxed),
+        peer.t7_armed_send_ns
+            .load(std::sync::atomic::Ordering::Relaxed),
         0,
         "fixture precondition: T7 must be armed before the keepalive arrives, \
          or this cell cannot observe it being cleared"
@@ -1487,7 +1528,8 @@ fn worker_decap_keepalive_clears_t7_and_roams_together_9018() {
     assert!(super::decap::try_wg_decap_from_frame(&frame, meta, &forwarding, &scratch).is_none());
 
     assert_eq!(
-        peer.t7_armed_send_ns.load(std::sync::atomic::Ordering::Relaxed),
+        peer.t7_armed_send_ns
+            .load(std::sync::atomic::Ordering::Relaxed),
         0,
         "a received keepalive still clears the T7 no-reply arm (unchanged by \
          #9018 — see this cell's doc comment for why that is deliberate)"
@@ -1521,7 +1563,9 @@ fn worker_decap_is_not_gated_by_the_steered_port_9521() {
 
     let inner = inner_v4([10, 123, 0, 5], [10, 0, 61, 102]);
     let mut wire = vec![0u8; 2048];
-    let enc = init.try_encap(&resp_pub, &inner, &mut wire).expect("initiator encap");
+    let enc = init
+        .try_encap(&resp_pub, &inner, &mut wire)
+        .expect("initiator encap");
     let frame = outer_frame(&wire[..enc.len], WG_PORT);
     let meta = outer_meta(frame.len());
     let scratch = WgWorkerScratch::new(4096);
@@ -1750,7 +1794,15 @@ fn run_tun_origin_case_10038(permit_forward: bool) {
         let meta = wiring_meta(frame.len());
         let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
         binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
-        txn_run_descriptor_checked(&mut binding, sessions, &forwarding, &ha_state, &frame, meta, true)
+        txn_run_descriptor_checked(
+            &mut binding,
+            sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+            true,
+        )
     };
 
     // CONTROL (passes on base AND after fix): no session → MISS → the
@@ -2068,7 +2120,15 @@ fn drive_solicited_inner_10038(
     let meta = wiring_meta(frame.len());
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
-    txn_run_descriptor_checked(&mut binding, sessions, forwarding, &ha_state, &frame, meta, true)
+    txn_run_descriptor_checked(
+        &mut binding,
+        sessions,
+        forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    )
 }
 
 /// Drive `inner` (an echo reply 5-tuple) as a PLAIN frame arriving on the
@@ -2099,7 +2159,15 @@ fn drive_spoofed_plain_10038(
     meta.tcp_flags = 0;
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
-    txn_run_descriptor_checked(&mut binding, sessions, forwarding, &ha_state, &frame, meta, true)
+    txn_run_descriptor_checked(
+        &mut binding,
+        sessions,
+        forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    )
 }
 
 fn session_row_count_10038(sessions: &SessionTable) -> usize {
@@ -2520,10 +2588,7 @@ fn gre_tun_origin_pair_needs_no_permit_10038() {
     let mut sessions = SessionTable::new();
     let now_ns = 122_000_000_000u64;
     assert!(
-        sessions.upsert_synced_with_origin(
-            gre_forward.clone().into_session_install(now_ns),
-            true,
-        ),
+        sessions.upsert_synced_with_origin(gre_forward.clone().into_session_install(now_ns), true,),
         "GRE forward must install via the UpsertLocal path"
     );
     let gre_reverse = plan.reverse_session_entry.clone().expect("GRE reverse");
@@ -2643,10 +2708,7 @@ fn gre_tun_origin_vrf_reverse_resolves_local_10038() {
     let mut sessions = SessionTable::new();
     let now_ns = 122_000_000_000u64;
     assert!(
-        sessions.upsert_synced_with_origin(
-            gre_forward.clone().into_session_install(now_ns),
-            true,
-        ),
+        sessions.upsert_synced_with_origin(gre_forward.clone().into_session_install(now_ns), true,),
         "GRE forward must install via the UpsertLocal path"
     );
     assert!(
