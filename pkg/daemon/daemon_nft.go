@@ -602,8 +602,8 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	unzonedIngressNetdevs, unzonedIngressVRFSlaves := dpuserspace.BuildUnzonedHostInboundIngressNetdevsFromSnapshots(cfg, snaps1, views)
 	// #10751/#11577: preserve the unzoned no-lease guard and add persistent
 	// per-family guards for DHCP units in enforcing zones. The zoned guard
-	// remains installed after an address appears, until its address-scoped
-	// rules are published, so the 2s lease debounce cannot expose the host.
+	// remains installed while DHCP intent remains, until intent is removed or
+	// effective zone policy opens host-inbound traffic.
 	dhcpBackstops := dpuserspace.BuildDHCPHostInboundBackstopNetdevs(cfg, snaps1)
 	unleasedV4, unleasedV6 := dhcpBackstops.V4, dhcpBackstops.V6
 	// #3698: surface the transition in address-scoped policy publication. A
@@ -791,6 +791,7 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 	spec := toNftHostInboundSpecWithUnzonedIngress(views, unzonedV4, unzonedV6, unzonedIngressNetdevs, unzonedIngressVRFSlaves, programs, wgListenPorts, wgZonePorts, d.hostInboundDataplaneFresh.Load(), overlay)
 	spec.UnleasedV4, spec.UnleasedV6 = unleasedV4, unleasedV6
 	spec.UnleasedVRFSlavesV4, spec.UnleasedVRFSlavesV6 = dhcpBackstops.VRFSlavesV4, dhcpBackstops.VRFSlavesV6
+	spec.DHCPv6Admit, spec.DHCPv6AdmitVRFSlaves = dhcpBackstops.AdmitV6, dhcpBackstops.AdmitVRFSlavesV6
 	if err := nftInstaller.InstallHostInbound(spec); err != nil {
 		err = tagNftInstallErr(err)
 		slog.Warn("failed to apply host-inbound filter", "err", err)
@@ -865,20 +866,22 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 			}
 			if len(uncoveredV4) > 0 || len(uncoveredV6) > 0 {
 				spec := xnft.GapFenceSpec{
-					Views:               toNftViews(views),
-					UncoveredV4:         uncoveredV4,
-					UncoveredV6:         uncoveredV6,
-					WGListenPorts:       wgListenPorts,
-					WGZonePorts:         wgZonePorts,
-					UnleasedV4:          unleasedV4,
-					UnleasedV6:          unleasedV6,
-					UnleasedVRFSlavesV4: dhcpBackstops.VRFSlavesV4,
-					UnleasedVRFSlavesV6: dhcpBackstops.VRFSlavesV6,
-					SharedV4:            sharedV4,
-					SharedV6:            sharedV6,
-					LifelineNetdevs:     dpuserspace.HostInboundLifelineIngressNetdevs(cfg),
-					RetainedV4:          retainedV4,
-					RetainedV6:          retainedV6,
+					Views:                toNftViews(views),
+					UncoveredV4:          uncoveredV4,
+					UncoveredV6:          uncoveredV6,
+					WGListenPorts:        wgListenPorts,
+					WGZonePorts:          wgZonePorts,
+					UnleasedV4:           unleasedV4,
+					UnleasedV6:           unleasedV6,
+					UnleasedVRFSlavesV4:  dhcpBackstops.VRFSlavesV4,
+					UnleasedVRFSlavesV6:  dhcpBackstops.VRFSlavesV6,
+					DHCPv6Admit:          dhcpBackstops.AdmitV6,
+					DHCPv6AdmitVRFSlaves: dhcpBackstops.AdmitVRFSlavesV6,
+					SharedV4:             sharedV4,
+					SharedV6:             sharedV6,
+					LifelineNetdevs:      dpuserspace.HostInboundLifelineIngressNetdevs(cfg),
+					RetainedV4:           retainedV4,
+					RetainedV6:           retainedV6,
 				}
 				if gapErr := d.installHostInboundGapFence(spec); gapErr != nil {
 					// A day-2 double failure has no protecting fence for the
@@ -1226,6 +1229,8 @@ func (d *Daemon) installHostInboundColdBootFence(sets dpuserspace.FenceAddrSets,
 		UnleasedV6:              sets.UnleasedV6,
 		UnleasedVRFSlavesV4:     sets.UnleasedVRFSlavesV4,
 		UnleasedVRFSlavesV6:     sets.UnleasedVRFSlavesV6,
+		DHCPv6Admit:             sets.AdmitV6,
+		DHCPv6AdmitVRFSlaves:    sets.AdmitVRFSlavesV6,
 		UnzonedIngressNetdevs:   sets.UnzonedIngressNetdevs,
 		UnzonedIngressVRFSlaves: sets.UnzonedIngressVRFSlaves,
 	}
@@ -1321,7 +1326,7 @@ func buildFenceTablePayload(tableName string, priority int, views []dpuserspace.
 		rules = append(rules, mandatory...)
 	}
 	emitHostInboundFenceWGAdmits(&rules, views, wgZonePorts)
-	emitDHCPBackstopAdmits(&rules, unleasedV4, unleasedV6, vrfBackstop)
+	emitDHCPBackstopAdmits(&rules, vrfBackstop)
 	for _, v := range views {
 		if len(v.V4Addrs) > 0 {
 			rules = append(rules, "    ip daddr "+nftAddrSet(v.V4Addrs)+" drop")
@@ -1595,7 +1600,7 @@ func buildHostInboundGapFencePayload(views []dpuserspace.ZoneHostInboundView, un
 	)...)
 	rules = append(rules, hostInboundFenceMandatoryAdmits()...)
 	emitHostInboundGapFenceWGAdmits(&rules, views, uncoveredV4, uncoveredV6, wgZonePorts)
-	emitDHCPBackstopAdmits(&rules, unleasedV4, unleasedV6, vrfBackstop)
+	emitDHCPBackstopAdmits(&rules, vrfBackstop)
 	// #10751 M1/Opus9: admit shared values on lifeline ingress ahead of
 	// the bare DROP (mirrors the netlink builder; parity-pinned). Two
 	// rules per family: iifname for unenslaved lifelines, meta sdifname
@@ -2110,7 +2115,7 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 	// and DHCP families in enforcing zones; the VRF variant matches sdifname.
 	// stale-reply guards — DHCP client ports are catalog-exempt (#10752),
 	// so no guard can shadow an acquisition reply.
-	emitDHCPBackstopAdmits(&rules, unleasedV4, unleasedV6, vrfBackstop)
+	emitDHCPBackstopAdmits(&rules, vrfBackstop)
 	// #9637 residual: the userspace-adjudicated reinject exemption. After the
 	// global accepts and the junos-host program jumps (both chain shapes) and
 	// before the ingress-zone rules. Omitted unless the dataplane runs this
@@ -2592,8 +2597,10 @@ func emitUnzonedHostInboundDeny(rules *[]string, family string, addrs []string) 
 }
 
 type dhcpBackstopVRFLists struct {
-	v4 []string
-	v6 []string
+	v4         []string
+	v6         []string
+	admitV6    []string
+	admitVRFV6 []string
 }
 
 // emitDHCPBackstopHostInboundDeny appends per-family LAST-placed DHCP
@@ -2601,29 +2608,31 @@ type dhcpBackstopVRFLists struct {
 // units in enforcing zones stay included after address appearance until DHCP
 // intent is removed or the effective zone policy allows all. Ordinary
 // interfaces use iifname; configured VRF slaves use sdifname because LOCAL_IN
-// exposes the VRF master as iifname. Restrict drops to PACKET_HOST so multicast,
-// broadcast, and other fall-through traffic retain prior behavior.
+// exposes the VRF master as iifname. Classify firewall-local unicast from the
+// L3 destination through the FIB, not the sender-controlled Ethernet packet
+// type; genuine IP multicast/broadcast retains its fall-through behavior.
 func emitDHCPBackstopHostInboundDeny(rules *[]string, backstopV4, backstopV6 []string, vrfBackstop dhcpBackstopVRFLists) {
 	if len(backstopV4) > 0 {
-		*rules = append(*rules, "    iifname "+nftIifnameSet(backstopV4)+" meta nfproto ipv4 meta pkttype host drop")
+		*rules = append(*rules, "    iifname "+nftIifnameSet(backstopV4)+" meta nfproto ipv4 fib daddr type local drop")
 	}
 	if len(vrfBackstop.v4) > 0 {
-		*rules = append(*rules, "    meta sdifname "+nftIifnameSet(vrfBackstop.v4)+" meta nfproto ipv4 meta pkttype host drop")
+		*rules = append(*rules, "    meta sdifname "+nftIifnameSet(vrfBackstop.v4)+" meta nfproto ipv4 fib daddr type local drop")
 	}
 	if len(backstopV6) > 0 {
-		*rules = append(*rules, "    iifname "+nftIifnameSet(backstopV6)+" meta nfproto ipv6 meta pkttype host drop")
+		*rules = append(*rules, "    iifname "+nftIifnameSet(backstopV6)+" meta nfproto ipv6 fib daddr type local drop")
 	}
 	if len(vrfBackstop.v6) > 0 {
-		*rules = append(*rules, "    meta sdifname "+nftIifnameSet(vrfBackstop.v6)+" meta nfproto ipv6 meta pkttype host drop")
+		*rules = append(*rules, "    meta sdifname "+nftIifnameSet(vrfBackstop.v6)+" meta nfproto ipv6 fib daddr type local drop")
 	}
 }
 
 // emitDHCPBackstopGapHostInboundDeny excludes retained local-unicast coverage
-// from the later gap chain and applies the same host-only packet guard. Thus
-// the retained main chain remains authoritative for multicast grants.
+// from the later gap chain. Its L3 destination-type guard catches unicast IP
+// regardless of the Ethernet destination; genuine multicast/broadcast still
+// falls through so the retained main chain remains authoritative for grants.
 func emitDHCPBackstopGapHostInboundDeny(rules *[]string, backstopV4, backstopV6 []string, vrfBackstop dhcpBackstopVRFLists, retainedV4, retainedV6 []string) {
 	emitDrop := func(scope, family string, retained []string) {
-		scope += " meta pkttype host"
+		scope += " fib daddr type local"
 		if len(retained) > 0 {
 			scope += " " + family + " daddr != " + nftAddrSet(retained)
 		}
@@ -2643,20 +2652,19 @@ func emitDHCPBackstopGapHostInboundDeny(rules *[]string, backstopV4, backstopV6 
 	}
 }
 
-// emitDHCPBackstopAdmits admits only DHCPv6 server replies the client can
-// receive: server source port 547, client destination port 546, and either
-// unicast link-local renewal/rebind replies or the All_DHCP_Relay_Agents_and_Servers
-// multicast used for discovery. DHCPv4 reception uses AF_PACKET and bypasses
-// this input chain, so it needs no persistent ACCEPT here.
-func emitDHCPBackstopAdmits(rules *[]string, _ []string, backstopV6 []string, vrfBackstop dhcpBackstopVRFLists) {
+// emitDHCPBackstopAdmits admits server replies only to IPv6 link-local
+// destinations on clients whose effective policy permits dhcpv6. The
+// ff02::1:2 destination is used by client Solicit traffic, not server replies
+// to UDP/546. DHCPv4 reception uses AF_PACKET and bypasses this input chain.
+func emitDHCPBackstopAdmits(rules *[]string, vrfBackstop dhcpBackstopVRFLists) {
 	emit := func(scope string) {
-		*rules = append(*rules, "    "+scope+" meta nfproto ipv6 ip6 daddr { fe80::/10, ff02::1:2 } udp sport 547 udp dport 546 accept")
+		*rules = append(*rules, "    "+scope+" meta nfproto ipv6 ip6 daddr fe80::/10 udp sport 547 udp dport 546 accept")
 	}
-	if len(backstopV6) > 0 {
-		emit("iifname " + nftIifnameSet(backstopV6))
+	if len(vrfBackstop.admitV6) > 0 {
+		emit("iifname " + nftIifnameSet(vrfBackstop.admitV6))
 	}
-	if len(vrfBackstop.v6) > 0 {
-		emit("meta sdifname " + nftIifnameSet(vrfBackstop.v6))
+	if len(vrfBackstop.admitVRFV6) > 0 {
+		emit("meta sdifname " + nftIifnameSet(vrfBackstop.admitVRFV6))
 	}
 }
 

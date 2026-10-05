@@ -78,8 +78,9 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 	}
 
 	// #10751/#11577: scoped DHCPv6 server replies pass before the backstop
-	// drops; DHCPv4 uses AF_PACKET and bypasses the input chain.
-	emitDHCPBackstopAdmitsNetlink(p, spec.UnleasedV4, spec.UnleasedV6, spec.UnleasedVRFSlavesV4, spec.UnleasedVRFSlavesV6)
+	// drops only on interfaces whose effective zone policy permits dhcpv6;
+	// DHCPv4 uses AF_PACKET and bypasses the input chain.
+	emitDHCPBackstopAdmitsNetlink(p, spec.DHCPv6Admit, spec.DHCPv6AdmitVRFSlaves)
 
 	// #9637 residual: the userspace-adjudicated reinject exemption, immediately
 	// before the ingress-zone rules in both chain shapes. Omitted unless the

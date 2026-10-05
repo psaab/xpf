@@ -316,9 +316,19 @@ func (a *ruleAsm) sdifname(names []string) *ruleAsm {
 	return a.add(a.p.sdifnameMatch(names)...)
 }
 
-// pkttypeHost appends `meta pkttype host`, limiting an input backstop to
-// unicast packets whose Ethernet destination is this host.
-func (a *ruleAsm) pkttypeHost() *ruleAsm { return a.add(packetTypeHostMatch()...) }
+// fibLocalUnicast appends `fib daddr type local`, limiting an input backstop
+// to packets whose IP destination the FIB resolves as firewall-local (RTN_LOCAL,
+// UAPI value 2). Unlike `meta pkttype host`—an L2 classification the sender
+// controls via the Ethernet destination—this is an L3 destination-type
+// predicate: unicast IP in an L2 broadcast or multicast frame still matches
+// (the #12127 N1 bypass), while genuine IP multicast/broadcast falls through.
+// The daddr-only flags are deliberate: adding `. iif` makes the lookup miss on
+// VRF-slave ingress (the VRF local entry is keyed on the master), which would
+// fail the backstop open on VRF DHCP units. Interface scope remains in the
+// iifname/sdifname match; fib only classifies the destination.
+func (a *ruleAsm) fibLocalUnicast() *ruleAsm {
+	return a.add(fibDaddrLocalMatch()...)
+}
 
 // iifnameExcept appends `iifname != "<n>"` / `iifname != { .. }` — the
 // uncovered-ingress fallback scope for stale-reply guards. Single-name uses
@@ -369,13 +379,13 @@ func nfprotoGuard(f nlFamily) []expr.Any {
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{f.nfproto}},
 	}
 }
-
-func packetTypeHostMatch() []expr.Any {
+func fibDaddrLocalMatch() []expr.Any {
 	return []expr.Any{
-		&expr.Meta{Key: expr.MetaKeyPKTTYPE, Register: 1},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.NativeEndian.PutUint32(uint32(unix.PACKET_HOST))},
+		&expr.Fib{Register: 1, ResultADDRTYPE: true, FlagDADDR: true},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.NativeEndian.PutUint32(uint32(unix.RTN_LOCAL))},
 	}
 }
+
 func l4protoGuard(proto uint8) []expr.Any {
 	return []expr.Any{
 		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},

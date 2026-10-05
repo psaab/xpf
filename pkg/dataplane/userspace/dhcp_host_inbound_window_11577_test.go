@@ -113,6 +113,44 @@ func TestZonedDHCPBackstopScopesOnlyEnforcingFamilies11577(t *testing.T) {
 	}
 }
 
+// TestDHCPv6ReplyAdmitsFollowEffectivePolicy12127 ensures a no-address
+// DHCPv6 interface gets a server-reply exception only when its policy permits
+// dhcpv6. The unzoned lease-acquisition path remains admitted, while an
+// ssh-only zone retains its deny.
+func TestDHCPv6ReplyAdmitsFollowEffectivePolicy12127(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0-0-1": {Name: "ge-0-0-1", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCPv6: true}}},
+		"ge-0-0-2": {Name: "ge-0-0-2", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCPv6: true}}},
+		"ge-0-0-3": {Name: "ge-0-0-3", Units: map[int]*config.InterfaceUnit{0: {Number: 0, DHCPv6: true}}},
+	}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"restricted": {
+			Name: "restricted", Interfaces: []string{"ge-0-0-1.0"},
+			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"ssh"}},
+		},
+		"dhcp": {
+			Name: "dhcp", Interfaces: []string{"ge-0-0-2.0"},
+			HostInboundTraffic: &config.HostInboundTraffic{SystemServices: []string{"dhcpv6"}},
+		},
+	}
+	cfg.RoutingInstances = []*config.RoutingInstanceConfig{
+		{Name: "blue", InstanceType: "virtual-router", Interfaces: []string{"ge-0-0-2.0"}},
+	}
+
+	got := BuildDHCPHostInboundBackstopNetdevs(cfg, nil)
+	if !reflect.DeepEqual(got.V6, []string{"ge-0-0-1", "ge-0-0-2", "ge-0-0-3"}) {
+		t.Fatalf("DHCPv6 backstops = %v, want all restricted and pending unzoned clients", got.V6)
+	}
+	if !reflect.DeepEqual(got.AdmitV6, []string{"ge-0-0-2", "ge-0-0-3"}) {
+		t.Errorf("DHCPv6 reply admits = %v, want permitted zone plus unzoned client only", got.AdmitV6)
+	}
+	if !reflect.DeepEqual(got.VRFSlavesV6, []string{"ge-0-0-2"}) ||
+		!reflect.DeepEqual(got.AdmitVRFSlavesV6, []string{"ge-0-0-2"}) {
+		t.Errorf("VRF DHCPv6 backstop/admit = %v/%v, want ge-0-0-2 in both", got.VRFSlavesV6, got.AdmitVRFSlavesV6)
+	}
+}
+
 // TestZonedDHCPBackstopFansDownBareMemberVLAN11577 uses the complete RI
 // device-key fan-down that drives the production binder. The VLAN ID differs
 // from the logical unit number so a raw-key or unit-number lookup cannot pass.

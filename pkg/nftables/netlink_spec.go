@@ -295,15 +295,16 @@ type HostInboundSpec struct {
 	Overlay        *HostInputFenceOverlay
 	// UnleasedV4/V6 are DHCP backstop netdevs. Unzoned DHCP units are listed
 	// while their family has no resolved address; DHCP units in enforcing
-	// zones stay listed while DHCP intent remains, so a new lease remains
-	// dropped until its address-scoped rules are published. Top DHCP admits
-	// and final family-guarded iifname drops cover ordinary ingress.
+	// zones stay listed while DHCP intent remains. The scoped DHCPv6 reply
+	// admits only cover unzoned clients and zones explicitly permitting dhcpv6.
 	UnleasedV4 []string
 	UnleasedV6 []string
 	// UnleasedVRFSlavesV4/V6 are the configured VRF-slave subset for sdifname
 	// matches; they are present before kernel enslavement.
-	UnleasedVRFSlavesV4 []string
-	UnleasedVRFSlavesV6 []string
+	UnleasedVRFSlavesV4  []string
+	UnleasedVRFSlavesV6  []string
+	DHCPv6Admit          []string
+	DHCPv6AdmitVRFSlaves []string
 }
 
 // FenceSpec is the cold-boot fail-closed fence render request (#5644): address
@@ -315,10 +316,12 @@ type FenceSpec struct {
 	WGListenPorts []uint16            // stale-reply guard only; WG accepts use WGZonePorts.
 	WGZonePorts   map[string][]uint16 // per-zone daddr-scoped WG accepts.
 	// UnleasedV4/V6 and UnleasedVRFSlavesV4/V6, as in HostInboundSpec.
-	UnleasedV4          []string
-	UnleasedV6          []string
-	UnleasedVRFSlavesV4 []string
-	UnleasedVRFSlavesV6 []string
+	UnleasedV4           []string
+	UnleasedV6           []string
+	UnleasedVRFSlavesV4  []string
+	UnleasedVRFSlavesV6  []string
+	DHCPv6Admit          []string
+	DHCPv6AdmitVRFSlaves []string
 	// Unzoned ingress scopes for fail-closed catalog-group drops.
 	UnzonedIngressNetdevs   []string
 	UnzonedIngressVRFSlaves []string
@@ -338,10 +341,12 @@ type GapFenceSpec struct {
 	WGListenPorts []uint16            // stale-reply guard only; WG accepts use WGZonePorts.
 	WGZonePorts   map[string][]uint16 // per-zone daddr-scoped WG accepts.
 	// UnleasedV4/V6 and UnleasedVRFSlavesV4/V6, as in HostInboundSpec.
-	UnleasedV4          []string
-	UnleasedV6          []string
-	UnleasedVRFSlavesV4 []string
-	UnleasedVRFSlavesV6 []string
+	UnleasedV4           []string
+	UnleasedV6           []string
+	UnleasedVRFSlavesV4  []string
+	UnleasedVRFSlavesV6  []string
+	DHCPv6Admit          []string
+	DHCPv6AdmitVRFSlaves []string
 	// RetainedV4/V6 are destinations still covered by the installed main table.
 	// The gap table's DHCP backstop must exclude them so it cannot override a
 	// retained service permit in this later base chain.

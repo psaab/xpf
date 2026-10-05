@@ -1077,11 +1077,12 @@ func BuildUnzonedHostInboundAddrsFromSnapshots(cfg *config.Config, snaps []Inter
 // family (#10751 R7-B/F8-A). Such an interface has no destination for the
 // unzoned catch-all, but its first lease is reachable before the debounced
 // re-apply. The daemon renders a LAST-placed family-guarded `iifname <dev>
-// meta nfproto <fam> meta pkttype host drop`; address rules and non-unicast
-// fall-through remain authoritative. DHCPv4 reception uses AF_PACKET; the
-// persistent DHCPv6 admit is separately restricted to server source port 547,
-// client destination port 546, and link-local or All_DHCP_Relay_Agents_and_Servers
-// destinations. Thus acquisition is not shadowed by the pending-family drop.
+// meta nfproto <fam> fib daddr type local drop`; genuine IP multicast and
+// broadcast destinations retain their fall-through behavior, while local
+// unicast IP is denied regardless of its Ethernet destination. DHCPv4
+// reception uses AF_PACKET; DHCPv6 server-reply admits are restricted to
+// explicit dhcpv6 policy (or unzoned pending clients), UDP source port 547,
+// destination port 546, and link-local destinations.
 // VRF-enslaved unzoned units remain excluded: at LOCAL_IN iifname shows the
 // shared master, so a catch-all there would shadow siblings and the slave-name
 // rule would never match. They retain lease-callback convergence instead; any
@@ -1175,10 +1176,12 @@ func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapsh
 // HostInboundDHCPBackstops lists DHCP backstop netdevs by family and
 // separately identifies the configured VRF-slave subset needing sdifname.
 type HostInboundDHCPBackstops struct {
-	V4          []string
-	V6          []string
-	VRFSlavesV4 []string
-	VRFSlavesV6 []string
+	V4               []string
+	V6               []string
+	VRFSlavesV4      []string
+	VRFSlavesV6      []string
+	AdmitV6          []string
+	AdmitVRFSlavesV6 []string
 }
 
 // BuildDHCPHostInboundBackstopNetdevs combines unzoned pending-lease backstops
@@ -1194,13 +1197,18 @@ func BuildDHCPHostInboundBackstopNetdevs(cfg *config.Config, snaps []InterfaceSn
 	}
 	backstops := HostInboundDHCPBackstops{}
 	backstops.V4, backstops.V6 = BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps)
+	backstops.AdmitV6 = append(backstops.AdmitV6, backstops.V6...)
 	zoned := buildZonedDHCPHostInboundBackstopNetdevs(cfg)
 	seenV4, seenV6 := make(map[string]bool, len(backstops.V4)+len(zoned.V4)), make(map[string]bool, len(backstops.V6)+len(zoned.V6))
+	seenAdmitV6 := make(map[string]bool, len(backstops.AdmitV6)+len(zoned.AdmitV6))
 	for _, dev := range backstops.V4 {
 		seenV4[dev] = true
 	}
 	for _, dev := range backstops.V6 {
 		seenV6[dev] = true
+	}
+	for _, dev := range backstops.AdmitV6 {
+		seenAdmitV6[dev] = true
 	}
 	for _, dev := range zoned.V4 {
 		if !seenV4[dev] {
@@ -1214,10 +1222,18 @@ func BuildDHCPHostInboundBackstopNetdevs(cfg *config.Config, snaps []InterfaceSn
 			backstops.V6 = append(backstops.V6, dev)
 		}
 	}
+	for _, dev := range zoned.AdmitV6 {
+		if !seenAdmitV6[dev] {
+			seenAdmitV6[dev] = true
+			backstops.AdmitV6 = append(backstops.AdmitV6, dev)
+		}
+	}
 	sort.Strings(backstops.V4)
 	sort.Strings(backstops.V6)
+	sort.Strings(backstops.AdmitV6)
 	backstops.VRFSlavesV4 = zoned.VRFSlavesV4
 	backstops.VRFSlavesV6 = zoned.VRFSlavesV6
+	backstops.AdmitVRFSlavesV6 = zoned.AdmitVRFSlavesV6
 	return backstops
 }
 
@@ -1229,6 +1245,7 @@ func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) HostInboundDHC
 	overrides := buildInterfaceHostInboundMap(cfg)
 	quarantined := quarantinedZoneNames(cfg)
 	seenV4, seenV6, seenVRFV4, seenVRFV6 := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
+	seenAdmitV6, seenVRFAdmitV6 := map[string]bool{}, map[string]bool{}
 	ifNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
 	for name := range cfg.Interfaces.Interfaces {
 		ifNames = append(ifNames, name)
@@ -1259,11 +1276,13 @@ func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) HostInboundDHC
 				continue
 			}
 			services, _ := effectiveHostInboundTokens(zone, unitRef, overrides[unitRef])
-			fullAdmit := false
+			fullAdmit, dhcpv6Admit := false, false
 			for _, service := range services {
 				if config.HostInboundFullAdmitService(service) {
 					fullAdmit = true
-					break
+				}
+				if service == "dhcpv6" {
+					dhcpv6Admit = true
 				}
 			}
 			if fullAdmit {
@@ -1277,9 +1296,14 @@ func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) HostInboundDHC
 				seenV4[linuxName] = true
 				backstops.V4 = append(backstops.V4, linuxName)
 			}
-			if (unit.DHCPv6 || unit.DHCPv6Client != nil) && !seenV6[linuxName] {
+			dhcpv6 := unit.DHCPv6 || unit.DHCPv6Client != nil
+			if dhcpv6 && !seenV6[linuxName] {
 				seenV6[linuxName] = true
 				backstops.V6 = append(backstops.V6, linuxName)
+			}
+			if dhcpv6 && dhcpv6Admit && !seenAdmitV6[linuxName] {
+				seenAdmitV6[linuxName] = true
+				backstops.AdmitV6 = append(backstops.AdmitV6, linuxName)
 			}
 			if !vrfEnslaved[linuxName] {
 				continue
@@ -1288,9 +1312,13 @@ func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) HostInboundDHC
 				seenVRFV4[linuxName] = true
 				backstops.VRFSlavesV4 = append(backstops.VRFSlavesV4, linuxName)
 			}
-			if (unit.DHCPv6 || unit.DHCPv6Client != nil) && !seenVRFV6[linuxName] {
+			if dhcpv6 && !seenVRFV6[linuxName] {
 				seenVRFV6[linuxName] = true
 				backstops.VRFSlavesV6 = append(backstops.VRFSlavesV6, linuxName)
+			}
+			if dhcpv6 && dhcpv6Admit && !seenVRFAdmitV6[linuxName] {
+				seenVRFAdmitV6[linuxName] = true
+				backstops.AdmitVRFSlavesV6 = append(backstops.AdmitVRFSlavesV6, linuxName)
 			}
 		}
 	}
@@ -1298,6 +1326,8 @@ func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) HostInboundDHC
 	sort.Strings(backstops.V6)
 	sort.Strings(backstops.VRFSlavesV4)
 	sort.Strings(backstops.VRFSlavesV6)
+	sort.Strings(backstops.AdmitV6)
+	sort.Strings(backstops.AdmitVRFSlavesV6)
 	return backstops
 }
 
@@ -1512,6 +1542,10 @@ type FenceAddrSets struct {
 	// sdifname; config ownership keeps the guard present before enslavement.
 	UnleasedVRFSlavesV4 []string
 	UnleasedVRFSlavesV6 []string
+	// DHCPv6 reply admits are limited to interfaces whose effective policy
+	// explicitly permits the dhcpv6 service.
+	AdmitV6          []string
+	AdmitVRFSlavesV6 []string
 	// Unzoned input scopes for catalog-group default-deny during cold boot.
 	UnzonedIngressNetdevs   []string
 	UnzonedIngressVRFSlaves []string
@@ -1603,6 +1637,7 @@ func buildFenceAddrSetsFromSnaps(cfg *config.Config, snaps []InterfaceSnapshot, 
 	backstops := BuildDHCPHostInboundBackstopNetdevs(cfg, snaps)
 	out.UnleasedV4, out.UnleasedV6 = backstops.V4, backstops.V6
 	out.UnleasedVRFSlavesV4, out.UnleasedVRFSlavesV6 = backstops.VRFSlavesV4, backstops.VRFSlavesV6
+	out.AdmitV6, out.AdmitVRFSlavesV6 = backstops.AdmitV6, backstops.AdmitVRFSlavesV6
 	return out
 }
 

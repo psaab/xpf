@@ -329,6 +329,23 @@ func TestZonedDHCPBareMemberVLANVRFLeaseWindow11577(t *testing.T) {
 		t.Fatalf("install enslaved transport-control table: %v", err)
 	}
 	assertReachability(true)
+
+	// The cold-boot fence must retain the configured VRF-slave match as well
+	// as the ordinary-interface match. LOCAL_IN reports the VRF master as
+	// iifname after enslavement, so removing UnleasedVRFSlavesV4/V6 lets both
+	// new-family TCP probes complete.
+	coldBoot := FenceSpec{
+		UnleasedV4: child, UnleasedV6: child,
+		UnleasedVRFSlavesV4: child, UnleasedVRFSlavesV6: child,
+	}
+	if err := installer.InstallColdBootFence(coldBoot); err != nil {
+		t.Fatalf("install VRF-slave cold-boot fence: %v", err)
+	}
+	assertReachability(false)
+	if err := installer.InstallHostInbound(HostInboundSpec{}); err != nil {
+		t.Fatalf("restore enslaved transport-control table: %v", err)
+	}
+	assertReachability(true)
 	if err := installer.InstallHostInbound(preLease); err != nil {
 		t.Fatalf("reinstall pre-lease VRF backstop: %v", err)
 	}

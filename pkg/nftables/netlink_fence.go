@@ -63,17 +63,18 @@ func emitHostInboundGapFenceWGAdmitsNetlink(p *nlPlan, spec GapFenceSpec) {
 	}
 }
 
-// emitDHCPBackstopAdmitsNetlink admits only DHCPv6 server replies needed by
-// the client. DHCPv4 uses AF_PACKET and does not traverse this input chain.
-func emitDHCPBackstopAdmitsNetlink(p *nlPlan, _ []string, backstopV6 []string, _ []string, vrfSlavesV6 []string) {
+// emitDHCPBackstopAdmitsNetlink admits DHCPv6 server replies only on
+// interfaces whose effective policy allows the dhcpv6 service. DHCPv4 uses
+// AF_PACKET and does not traverse this input chain.
+func emitDHCPBackstopAdmitsNetlink(p *nlPlan, admitV6, vrfSlavesV6 []string) {
 	emitV6 := func(r *ruleAsm) {
 		r.needNfproto(famV6)
-		r.daddr(famV6, []string{"fe80::/10", "ff02::1:2"}, false)
+		r.daddr(famV6, []string{"fe80::/10"}, false)
 		r.l4Port(protoUDP, "sport", portsFromUint16([]uint16{547}), false)
 		r.l4Port(protoUDP, "dport", portsFromUint16([]uint16{earlyInputBarrierDHCPv6ClientPort}), false).emit(verdictAccept()...)
 	}
-	if len(backstopV6) > 0 {
-		emitV6(p.rule().iifname(backstopV6))
+	if len(admitV6) > 0 {
+		emitV6(p.rule().iifname(admitV6))
 	}
 	if len(vrfSlavesV6) > 0 {
 		emitV6(p.rule().sdifname(vrfSlavesV6))
@@ -82,27 +83,29 @@ func emitDHCPBackstopAdmitsNetlink(p *nlPlan, _ []string, backstopV6 []string, _
 
 // emitDHCPBackstopDropNetlink mirrors the final text-oracle drops. Ordinary
 // devices match iifname; only the configured VRF-slave subset uses sdifname.
-// Restrict to PACKET_HOST so persistent guards cannot drop multicast,
-// broadcast, or other non-unicast fall-through traffic.
+// Classify the L3 destination through the FIB rather than the sender-controlled
+// Ethernet packet type: a group MAC cannot exempt local unicast, while genuine
+// IP multicast/broadcast still falls through.
 func emitDHCPBackstopDropNetlink(p *nlPlan, f nlFamily, netdevs, vrfSlaves []string) {
 	if len(netdevs) > 0 {
 		r := p.rule().iifname(netdevs)
 		r.needNfproto(f)
-		r.pkttypeHost().emit(verdictDrop()...)
+		r.fibLocalUnicast().emit(verdictDrop()...)
 	}
 	if len(vrfSlaves) > 0 {
 		r := p.rule().sdifname(vrfSlaves)
 		r.needNfproto(f)
-		r.pkttypeHost().emit(verdictDrop()...)
+		r.fibLocalUnicast().emit(verdictDrop()...)
 	}
 }
 
 // emitDHCPBackstopGapDropNetlink keeps the interface-wide fallback from
-// overriding addresses already covered by the retained main table. The host
-// packet-type guard also leaves retained multicast grants authoritative.
+// overriding addresses already covered by the retained main table. Its L3
+// destination-type guard drops uncovered local unicast without letting an L2
+// group MAC bypass it or shadow genuine IP multicast/broadcast.
 func emitDHCPBackstopGapDropNetlink(p *nlPlan, f nlFamily, netdevs, vrfSlaves, retained []string) {
 	emit := func(r *ruleAsm) {
-		r.pkttypeHost()
+		r.fibLocalUnicast()
 		if len(retained) > 0 {
 			r.daddr(f, retained, true)
 		}
@@ -159,7 +162,7 @@ func buildFenceMandatoryDropsNetlink(p *nlPlan, spec FenceSpec) {
 
 func buildFenceDropsAfterMandatoryAdmitsNetlink(p *nlPlan, spec FenceSpec) {
 	emitHostInboundFenceWGAdmitsNetlink(p, spec.Views, spec.WGZonePorts)
-	emitDHCPBackstopAdmitsNetlink(p, spec.UnleasedV4, spec.UnleasedV6, spec.UnleasedVRFSlavesV4, spec.UnleasedVRFSlavesV6)
+	emitDHCPBackstopAdmitsNetlink(p, spec.DHCPv6Admit, spec.DHCPv6AdmitVRFSlaves)
 	for _, v := range spec.Views {
 		if len(v.V4Addrs) > 0 {
 			p.rule().daddr(famV4, v.V4Addrs, false).emit(verdictDrop()...)
@@ -190,7 +193,7 @@ func buildHostInboundGapFenceNetlink(p *nlPlan, spec GapFenceSpec) {
 	))
 	hostInboundFenceMandatoryAdmitsNetlink(p)
 	emitHostInboundGapFenceWGAdmitsNetlink(p, spec)
-	emitDHCPBackstopAdmitsNetlink(p, spec.UnleasedV4, spec.UnleasedV6, spec.UnleasedVRFSlavesV4, spec.UnleasedVRFSlavesV6)
+	emitDHCPBackstopAdmitsNetlink(p, spec.DHCPv6Admit, spec.DHCPv6AdmitVRFSlaves)
 	// #10751 M1/Opus9: lifeline-shared values stay reachable on
 	// lifeline ingress (exception ACCEPTs) while denied everywhere
 	// else (bare DROP below). TWO rules per family: iifname covers

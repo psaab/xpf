@@ -52,8 +52,11 @@ xpf (0.0.0) unstable; urgency=medium
     each dropped steer through degraded PBR health (#11589).
 
   * Keep DHCP families in enforcing zones behind persistent, family-scoped
-    interface drops from before lease appearance through the debounced policy
-    reapply, including VRF-slave ingress (#11577).
+    interface drops from before lease appearance through policy opening, with
+    L3-local destination matching across mixed Ethernet/IP destinations,
+    DHCPv6 reply admits scoped to effective dhcpv6 policy, and VRF-slave
+    ingress covered in the main, cold-boot, and coverage-gap paths (#11577,
+    #12127).
 
   * Reject malformed or zero interface bandwidth with a leaf-naming
     diagnostic instead of compiling it to the unset zero value (#11801).

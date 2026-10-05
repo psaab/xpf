@@ -283,14 +283,17 @@ func tableHasIIFNAME10751(t *testing.T, table string) bool {
 // TestUnleasedDHCPAcquisitionThroughBackstop10751: the no-LL-at-S1 shape
 // (spec carries NO destinations, only the v6 backstop — the link came up
 // after the snapshot). An ADVERTISE-shaped datagram to the unit's
-// link-local :546 must ARRIVE (the F8-A admit); anything else to the unit
-// (:9999 listener, proving the verdict is the DROP and not a closed port)
-// must NOT.
+// link-local :546 must ARRIVE on the explicitly admitted DHCPv6 interface;
+// anything else to the unit (:9999 listener, proving the verdict is the DROP
+// and not a closed port) must NOT.
 func TestUnleasedDHCPAcquisitionThroughBackstop10751(t *testing.T) {
 	enterPrivateNetns(t)
 	testLL := mkUnleasedVeth10751(t)
 	in := NewNetlinkInstaller()
-	if err := in.InstallHostInbound(HostInboundSpec{UnleasedV6: []string{unleasedTestNetdev10751}}); err != nil {
+	if err := in.InstallHostInbound(HostInboundSpec{
+		UnleasedV6:  []string{unleasedTestNetdev10751},
+		DHCPv6Admit: []string{unleasedTestNetdev10751},
+	}); err != nil {
 		t.Fatalf("backstop install: %v", err)
 	}
 
@@ -359,20 +362,36 @@ func TestUnleasedDHCPAcquisitionThroughBackstop10751(t *testing.T) {
 	if !udpExchangeRetryWant10751(t, multicast, func() error {
 		return sendToScope10751(t, multicastSender, []byte("mDNS"), net.ParseIP("ff02::fb"), 5353, oif)
 	}, []byte("mDNS"), 300*time.Millisecond, 5*time.Second) {
-		t.Fatal("IPv6 multicast was dropped by the host-only DHCP backstop")
+		t.Fatal("IPv6 multicast was dropped by the L3-local DHCP backstop")
 	}
 	if udpExchange10751(t, junk, func() error {
 		return sendToScope10751(t, server, []byte("junk"), testLL, 9999, oif)
 	}, time.Second) {
 		t.Fatal("datagram to [ll]:9999 arrived: the interface DROP is not denying non-DHCP traffic")
 	}
+	// A restricted zone must not inherit the acquisition exception merely
+	// because its interface remains in the persistent DHCP backstop.
+	restricted := HostInboundSpec{
+		Views: []HostInboundZoneView{{
+			Zone: "restricted", SystemServices: []string{"ssh"}, V6Addrs: []string{testLL.String()},
+		}},
+		UnleasedV6: []string{unleasedTestNetdev10751},
+	}
+	if err := in.InstallHostInbound(restricted); err != nil {
+		t.Fatalf("install ssh-only zone backstop: %v", err)
+	}
+	if udpExchange10751(t, client, func() error {
+		return sendToScope10751(t, server, []byte("unauthorized-zone"), testLL, 546, oif)
+	}, time.Second) {
+		t.Fatal("DHCPv6 reply reached the ssh-only zone; the DHCP admit was not policy-scoped")
+	}
 }
 
-// TestUnleasedDHCPv4BroadcastFallsThroughHostOnlyBackstop12127: persistent
-// interface drops are restricted to PACKET_HOST so broadcasts retain the
-// input chain's prior fall-through behavior. The in-tree DHCPv4 client reads
-// through AF_PACKET and therefore does not need an nft client-port ACCEPT.
-func TestUnleasedDHCPv4BroadcastFallsThroughHostOnlyBackstop12127(t *testing.T) {
+// TestUnleasedDHCPv4BroadcastFallsThroughL3Backstop12127: genuine broadcast
+// IP destinations retain the input chain's prior fall-through behavior even
+// though the backstop now classifies L3 local destinations. The in-tree DHCPv4
+// client reads through AF_PACKET and therefore needs no nft client-port ACCEPT.
+func TestUnleasedDHCPv4BroadcastFallsThroughL3Backstop12127(t *testing.T) {
 	enterPrivateNetns(t)
 	mkUnleasedVeth10751(t)
 	testLink, err := netlink.LinkByName(unleasedTestNetdev10751)
@@ -426,7 +445,7 @@ func TestUnleasedDHCPv4BroadcastFallsThroughHostOnlyBackstop12127(t *testing.T) 
 		_, err := sender.WriteToUDP([]byte("broadcast-fallthrough"), bcast80)
 		return err
 	}, 3*time.Second) {
-		t.Fatal("broadcast :80 was dropped; the DHCP backstop must only deny PACKET_HOST")
+		t.Fatal("broadcast :80 was dropped; genuine IP broadcasts must fall through")
 	}
 }
 
@@ -438,7 +457,10 @@ func TestUnleasedBackstopAtomicReplace10751(t *testing.T) {
 	enterPrivateNetns(t)
 	testLL := mkUnleasedVeth10751(t)
 	in := NewNetlinkInstaller()
-	if err := in.InstallHostInbound(HostInboundSpec{UnleasedV6: []string{unleasedTestNetdev10751}}); err != nil {
+	if err := in.InstallHostInbound(HostInboundSpec{
+		UnleasedV6:  []string{unleasedTestNetdev10751},
+		DHCPv6Admit: []string{unleasedTestNetdev10751},
+	}); err != nil {
 		t.Fatalf("backstop install: %v", err)
 	}
 	client, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 546})
