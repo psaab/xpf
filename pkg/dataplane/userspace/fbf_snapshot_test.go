@@ -145,6 +145,77 @@ func TestFBFForwardingInstanceRouteSnapshots(t *testing.T) {
 	}
 }
 
+// TestFBFInterfaceOnlyNextHopSnapshot12036 exercises both user-authored
+// interface-only spellings through the config parser and route snapshot
+// producer. The Rust forwarding-build regression consumes the same @st0.0
+// member format for either spelling.
+func TestFBFInterfaceOnlyNextHopSnapshot12036(t *testing.T) {
+	src := `routing-instances {
+		VPN {
+			instance-type forwarding;
+			routing-options {
+				static {
+					route 0.0.0.0/0 {
+						next-hop {
+							interface st0.0;
+						}
+					}
+					route 198.51.100.0/24 {
+						next-hop st0.0;
+					}
+				}
+			}
+		}
+	}`
+	tree, parseErrors := config.NewParser(src).Parse()
+	if len(parseErrors) != 0 {
+		t.Fatalf("parse static routes: %v", parseErrors)
+	}
+	cfg, err := config.CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("compile static routes: %v", err)
+	}
+	routes, _, err := buildRouteSnapshots(cfg, []InterfaceSnapshot{{Name: "st0.0"}}, nil)
+	if err != nil {
+		t.Fatalf("buildRouteSnapshots: %v", err)
+	}
+	snapshot := &ConfigSnapshot{
+		ForwardingTables: []string{"VPN.inet.0", "VPN.inet6.0"},
+		Routes:           routes,
+	}
+	wire, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	var got ConfigSnapshot
+	if err := json.Unmarshal(wire, &got); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	wantByDestination := map[string]bool{
+		"0.0.0.0/0":       false,
+		"198.51.100.0/24": false,
+	}
+	for _, route := range got.Routes {
+		if route.Table != "VPN.inet.0" {
+			continue
+		}
+		if _, expected := wantByDestination[route.Destination]; !expected {
+			continue
+		}
+		if len(route.NextHops) != 1 || route.NextHops[0] != "@st0.0" {
+			t.Errorf("interface-only route %s snapshot = %+v, want @st0.0",
+				route.Destination, route)
+			continue
+		}
+		wantByDestination[route.Destination] = true
+	}
+	for destination, found := range wantByDestination {
+		if !found {
+			t.Errorf("interface-only route %s missing from VPN.inet.0 snapshot", destination)
+		}
+	}
+}
+
 // TestFBFQualificationLeavesVirtualRouterBare guards the #4446 boundary:
 // only forwarding-instance snapshots get an explicit external interface.
 // A virtual-router route must retain table-scoped bare-gateway inference so

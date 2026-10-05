@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"slices"
 	"strconv"
 	"strings"
@@ -250,6 +251,18 @@ func isRouteInlineKeyword(tok string) bool {
 	return false
 }
 
+// staticNextHopEntry compiles a scalar `next-hop <value>`. A bare interface
+// name is a valid Junos next-hop and must be represented as an interface-only
+// entry so both FRR and the userspace snapshot install the same dev route
+// (#12036). IP and `ip@interface` values remain address-form next-hops.
+func staticNextHopEntry(raw, iface string) NextHopEntry {
+	if iface == "" && !isRouteInlineKeyword(raw) && !strings.Contains(raw, "@") &&
+		net.ParseIP(raw) == nil && plausibleInterfaceName(raw) {
+		return NextHopEntry{Interface: raw}
+	}
+	return NextHopEntry{Address: raw, Interface: iface}
+}
+
 // compileStaticRoutes parses static route entries from a "static" node,
 // appending to and returning the updated slice.
 func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRoute {
@@ -295,7 +308,7 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 						i += 2
 					}
 					for _, a := range addrs {
-						route.NextHops = append(route.NextHops, NextHopEntry{Address: a, Interface: iface})
+						route.NextHops = append(route.NextHops, staticNextHopEntry(a, iface))
 					}
 				case "next-table":
 					if i+1 < len(routeInst.node.Keys) {
@@ -421,7 +434,7 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 					route.NextHops = append(route.NextHops, NextHopEntry{Interface: iface})
 				}
 				for _, a := range addrs {
-					route.NextHops = append(route.NextHops, NextHopEntry{Address: a, Interface: iface})
+					route.NextHops = append(route.NextHops, staticNextHopEntry(a, iface))
 				}
 			case "no-install":
 				route.NoInstall = true

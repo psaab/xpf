@@ -5822,6 +5822,111 @@ fn forwarding_instance_global_gateway_uses_authorized_default_interface_11684() 
         "an ISP-B marker must not authorize its default interface in a VRF IPv6 table"
     );
 }
+/// #12036 (R1-03): a forwarding-instance route's braced `next-hop {
+/// interface st0.0; }` member reaches the wire as interface-only `@st0.0`
+/// (compiler_routing.go keeps one `NextHopEntry{Interface}`; routes.go emits
+/// `'@'+Interface`; `qualifyForwardingInstanceNextHops` skips `@` members).
+/// FRR installs the gateway-less dev route in the instance table, so the
+/// helper must authorize the same default-instance domain-0 egress the
+/// qualified-gateway exception (#11420, #11684) already allows — not leave
+/// it at ifindex 0 (NoRoute → dropped). An xfrmi has no neighbor or tunnel
+/// endpoint id, so a resolved route must take the slow-path MissingNeighbor
+/// branch. A foreign-VRF interface-only member must still be refused.
+#[test]
+fn forwarding_instance_interface_only_member_uses_authorized_default_interface_12036() {
+    let snapshot = |next_hop: &str,
+                    interface_instance: &str,
+                    routing_domain: u32,
+                    marked: bool| {
+        ConfigSnapshot {
+            forwarding_tables: if marked {
+                vec!["VPN.inet.0".into(), "VPN.inet6.0".into()]
+            } else {
+                vec![]
+            },
+            interfaces: vec![InterfaceSnapshot {
+                name: "st0.0".into(),
+                ifindex: 30,
+                routing_instance: interface_instance.into(),
+                routing_domain,
+                hardware_addr: "02:00:00:00:1e:01".into(),
+                secure_tunnel: true,
+                ..Default::default()
+            }],
+            routes: vec![
+                crate::RouteSnapshot {
+                    table: "VPN.inet.0".into(),
+                    family: "inet".into(),
+                    destination: "0.0.0.0/0".into(),
+                    next_hops: vec![next_hop.into()],
+                    ..Default::default()
+                },
+                crate::RouteSnapshot {
+                    table: "VPN.inet6.0".into(),
+                    family: "inet6".into(),
+                    destination: "::/0".into(),
+                    next_hops: vec![next_hop.into()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    };
+
+    let state = build_forwarding_state(&snapshot("@st0.0", "", 0, true));
+    assert_eq!(state.routes_v4["VPN.inet.0"][0].next_hops[0].ifindex, 30);
+    assert_eq!(state.routes_v6["VPN.inet6.0"][0].next_hops[0].ifindex, 30);
+
+    let resolved_v4 = lookup_forwarding_resolution_v4(
+        &state,
+        None,
+        "203.0.113.7".parse().unwrap(),
+        "VPN.inet.0",
+        0,
+        true,
+        None,
+    );
+    assert_eq!(
+        resolved_v4.disposition,
+        ForwardingDisposition::MissingNeighbor
+    );
+    assert_eq!(resolved_v4.egress_ifindex, 30);
+    assert_eq!(resolved_v4.tunnel_endpoint_id, 0);
+    assert!(resolved_v4.disposition.is_slow_path_eligible());
+
+    let resolved_v6 = lookup_forwarding_resolution_v6(
+        &state,
+        None,
+        "2001:db8::7".parse().unwrap(),
+        "VPN.inet6.0",
+        0,
+        true,
+        None,
+    );
+    assert_eq!(
+        resolved_v6.disposition,
+        ForwardingDisposition::MissingNeighbor
+    );
+    assert_eq!(resolved_v6.egress_ifindex, 30);
+    assert_eq!(resolved_v6.tunnel_endpoint_id, 0);
+    assert!(resolved_v6.disposition.is_slow_path_eligible());
+
+    let foreign = build_forwarding_state(&snapshot("@st0.0", "OTHER", 0, true));
+    assert_eq!(foreign.routes_v4["VPN.inet.0"][0].next_hops[0].ifindex, 0);
+    assert_eq!(foreign.routes_v6["VPN.inet6.0"][0].next_hops[0].ifindex, 0);
+
+    let unmarked = build_forwarding_state(&snapshot("@st0.0", "", 0, false));
+    assert_eq!(unmarked.routes_v4["VPN.inet.0"][0].next_hops[0].ifindex, 0);
+    assert_eq!(unmarked.routes_v6["VPN.inet6.0"][0].next_hops[0].ifindex, 0);
+
+    let non_default_domain = build_forwarding_state(&snapshot("@st0.0", "", 100_001, true));
+    assert_eq!(non_default_domain.routes_v4["VPN.inet.0"][0].next_hops[0].ifindex, 0);
+    assert_eq!(non_default_domain.routes_v6["VPN.inet6.0"][0].next_hops[0].ifindex, 0);
+
+    let malformed = build_forwarding_state(&snapshot("not-an-ip@st0.0", "", 0, true));
+    assert_eq!(malformed.routes_v4["VPN.inet.0"][0].next_hops[0].ifindex, 0);
+    assert_eq!(malformed.routes_v6["VPN.inet6.0"][0].next_hops[0].ifindex, 0);
+}
 
 /// #4446 anti-regression: the common single-table (default-instance) case is
 /// unaffected — a bare-gateway static route still resolves its gateway to the

@@ -721,8 +721,9 @@ func qualifyForwardingInstanceNextHops(cfg *config.Config, interfaces []Interfac
 }
 
 // forwardingInstanceRouteTables is the canonical table allow-list shared by
-// route qualification and the snapshot marker the Rust FIB uses to authorize
-// those explicit default-instance egresses (#11420).
+// route qualification and the snapshot marker Rust uses to authorize explicit
+// default-instance egresses for qualified gateways and interface-only members
+// (#11420, #11684, #12036).
 func forwardingInstanceRouteTables(cfg *config.Config) (map[string]string, []string) {
 	byTable := make(map[string]string)
 	if cfg == nil {

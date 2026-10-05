@@ -140,9 +140,10 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) routes_v4: FastMap<String, Vec<RouteEntryV4>>,
     pub(in crate::afxdp) routes_v6: FastMap<String, Vec<RouteEntryV6>>,
     /// Canonical tables explicitly typed by Go as forwarding instances. In
-    /// these tables, qualified gateways may bind to explicit default-instance
-    /// interfaces in routing domain zero; quarantined and ordinary foreign-VRF
-    /// cross-table scopes remain refused (#11074, #11420, #11684).
+    /// these tables, qualified gateways and interface-only members may bind
+    /// to explicit default-instance interfaces in routing domain zero;
+    /// quarantined and ordinary foreign-VRF cross-table scopes remain refused
+    /// (#11074, #11420, #11684, #12036).
     pub(in crate::afxdp) forwarding_tables: FastSet<String>,
     /// #9955: synthetic next-table entries are kernel ip rules, not peers
     /// in the destination table's FIB. Keep a priority-ordered per-source-
