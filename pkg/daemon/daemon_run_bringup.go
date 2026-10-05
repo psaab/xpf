@@ -32,7 +32,7 @@ import (
 // backend build that follow in Run(). Extracted verbatim from Run()'s PHASE 3
 // (#4662 Increment 4); the creation order is load-bearing (e.g. the
 // event-options engine registers an RPM callback and must exist before the
-// first applyConfig reconciles RPM). failClosed is the #1960/#10297
+// first applyConfig reconciles RPM). failClosed is the #1960/#10297/#11802
 // fail-closed flag threaded from PHASE 1 and used to clear stale FRR policy
 // and install live-address host-input fences before runtime managers start.
 // Returns a non-nil error only on a fatal DHCP
@@ -375,10 +375,14 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 	case loadRescueFallback:
 		// #11802: Store.Load validated the saved rescue config for operator
 		// recovery. It is not active state: keep the daemon in bootstrap/lifeline
-		// mode, suppress day-0 import, and require explicit `load rescue`.
+		// mode, suppress day-0 import, and require explicit `load rescue` plus
+		// `commit confirmed` for standalone recovery. HA topology needs offline
+		// promotion so restart cannot select rescue.conf again.
 		rescueFallback = true
-		slog.Warn("valid saved rescue config is available for explicit recovery; "+
-			"staying in BOOTSTRAP/lifeline mode until an operator loads and commits it",
+		slog.Warn("valid saved rescue config is available but not installed; daemon remains in "+
+			"BOOTSTRAP/lifeline mode. For standalone recovery, load rescue and commit confirmed; "+
+			"for HA topology, stop xpfd, copy the validated rescue to /etc/xpf/xpf.conf, "+
+			"remove /etc/xpf/rescue.conf, then restart for offline promotion",
 			"config_file", d.opts.ConfigFile)
 	case loadOtherError:
 		slog.Warn("failed to load config from db", "err", loadErr)
@@ -459,7 +463,9 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 				"rollback history survives; explicit recovery is required", "detail", detail)
 		} else if rescueFallback {
 			slog.Warn("xpf daemon entering BOOTSTRAP mode: valid saved rescue config is available "+
-				"but not installed; explicit load and commit confirmed required before takeover",
+				"but not installed; for HA topology, promote offline by copying it to "+
+				"/etc/xpf/xpf.conf, removing /etc/xpf/rescue.conf, and restarting; standalone "+
+				"recovery requires explicit load rescue and commit confirmed",
 				"detail", detail)
 		} else {
 			slog.Warn("xpf daemon entering BOOTSTRAP mode: no committed configuration found",

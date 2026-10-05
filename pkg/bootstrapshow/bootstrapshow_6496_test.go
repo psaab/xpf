@@ -44,13 +44,17 @@ func TestEveryStatusRendersItsOwnMeaning(t *testing.T) {
 	}
 }
 
-func TestRescueFallbackExplainsExplicitCandidateStaging(t *testing.T) {
+func TestRescueFallbackExplainsExplicitAndOfflinePromotion(t *testing.T) {
 	out := render(Snapshot{Status: StatusRescueFallback})
 	meaning := meaningLine(t, out)
-	if !strings.Contains(meaning, "not installed") ||
-		!strings.Contains(meaning, "load rescue") ||
-		!strings.Contains(meaning, "candidate") {
-		t.Fatalf("rescue fallback must say the file is not active and needs explicit staging:\n%s", out)
+	for _, guidance := range []string{
+		"not installed", "load rescue", "candidate", "commit confirmed",
+		"HA topology", "offline promotion", "/etc/xpf/xpf.conf",
+		"remove /etc/xpf/rescue.conf", "restart",
+	} {
+		if !strings.Contains(meaning, guidance) {
+			t.Errorf("rescue fallback meaning omitted %q:\n%s", guidance, out)
+		}
 	}
 }
 

@@ -378,7 +378,11 @@ was imported and the initial host-credential reconcile completed.
 expected factory/fresh-boot state. `rescue-fallback` means a saved rescue file
 validated in a never-committed empty state, but was NOT installed as active
 configuration; day-0 import is suppressed until an operator explicitly runs
-`load rescue`, validates the staged candidate, and commits it.
+`load rescue`, validates the staged candidate, and uses `commit confirmed`.
+To abandon the saved rescue and restore the day-0 import path, run
+`request system configuration rescue delete` (or remove `rescue.conf` offline).
+With rescue absent, the next never-committed boot can import `/etc/xpf/xpf.conf`
+if present. Loading rescue does not delete the saved file.
 `credential-apply-pending` means import succeeded but the initial
 account/key/sshd reconciliation has not finished; `credential-apply-failed`
 means import succeeded but that reconcile did not converge. `import-failed`

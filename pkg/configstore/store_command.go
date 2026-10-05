@@ -553,6 +553,13 @@ func parseRescueContent(content string) (*config.ConfigTree, error) {
 
 func rescueParseErrorPosition(message string) (int, int) {
 	line, column := 1, 1
+	// Flat replay wraps the parser error as `line N: <source>: <cause>`.
+	// Trust that outer physical-file coordinate before considering the inner
+	// parser text: source content can itself contain strings like "line 9".
+	var outerLine int
+	if _, err := fmt.Sscanf(message, "line %d:", &outerLine); err == nil && outerLine > 0 {
+		return outerLine, column
+	}
 	position := strings.LastIndex(message, "line ")
 	if position < 0 {
 		return line, column

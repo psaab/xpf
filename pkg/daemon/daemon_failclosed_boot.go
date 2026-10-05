@@ -16,7 +16,8 @@ var (
 
 // installFailClosedBootHostFences covers the live host addresses before the
 // daemon enters its steady-state bootstrap loop when the last committed config
-// cannot be loaded (#1960/#10297). networkd has already applied the retained
+// cannot be loaded (#1960/#10297) or a valid never-committed rescue fallback is
+// selected (#11802). networkd has already applied the retained
 // 10-xpf-*.network files, but bootstrap suppresses applyConfig — the only
 // ordinary caller of the host-input fence builders. Derive the fence scope from
 // live netlink addresses instead of the unavailable config. Preserve the known

@@ -1929,15 +1929,14 @@ never lock an operator out of a remote box it manages.
   - **FRR managed section is cleared on a fail-closed boot unless forwarding
     is genuinely live (#1993).** `frr` is an independent service that starts from
     its persisted `frr.conf` (the managed section from the last good
-    `applyConfig`), which freeze-in-last-known-good leaves intact. On a
-    compile-failed boot where the dataplane is unarmed (no transit), FRR would
-    otherwise still form peerings and advertise the last-good prefixes — peers
-    route transit to this node's physical IPs and it blackholes them rather than
-    failing over to the HA partner. To close that cross-daemon gap, the
-    fail-closed boot path calls
-    `clearFRRForFailClosedBoot(failClosedLoad)` immediately after the FRR
-    manager is constructed (`d.frr = frr.New()`), for both compile-failed and
-    absent-active-with-history boots.
+    `applyConfig`), which freeze-in-last-known-good leaves intact. On a fail-closed
+    boot where the dataplane is unarmed, FRR would otherwise still form peerings
+    and advertise last-good prefixes — peers route transit to this node's physical
+    IPs and it blackholes them rather than failing over to the HA partner. To close
+    that cross-daemon gap, the fail-closed boot path calls
+    `clearFRRForFailClosedBoot(failClosedLoad)` immediately after the FRR manager
+    is constructed (`d.frr = frr.New()`), for compile-failed,
+    absent-active-with-history, and valid rescue-fallback boots.
     - **The preserve decision requires LIVE FORWARDING, not just pins.** Pins on
       `/sys/fs/bpf/xpf/links` prove only that an XDP link is *attached*, not that
       forwarding is *live*: a graceful hitless shutdown (`dp.Close()` →

@@ -2256,12 +2256,9 @@ func (s *Store) LoadRescueConfigRedacted() (string, error) {
 	}
 	tree, parseErr := parseRescueContent(text)
 	if parseErr != nil {
-		if position, ok := parseErr.(rescueParseError); ok {
-			return "", fmt.Errorf("rescue configuration is malformed and cannot be safely displayed "+
-				"(parse failed at line %d, column %d)", position.line, position.column)
-		}
-		return "", fmt.Errorf("rescue configuration is malformed and cannot be safely displayed " +
-			"(parse failed at line 1, column 1)")
+		position := parseErr.(rescueParseError)
+		return "", fmt.Errorf("rescue configuration is malformed and cannot be safely displayed "+
+			"(parse failed at line %d, column %d)", position.line, position.column)
 	}
 	return tree.RedactedClone().Format(), nil
 }

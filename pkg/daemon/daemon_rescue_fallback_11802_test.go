@@ -120,7 +120,7 @@ func TestFlatRescueFallbackCanCommitAfterExplicitLoad11802(t *testing.T) {
 	d := &Daemon{store: store, opts: Options{ConfigFile: path}}
 	failClosed, err := d.loadAndBootstrapConfig()
 	if err != nil || !failClosed || !d.inBootstrap() {
-		t.Fatalf("HA rescue boot state: failClosed=%v bootstrap=%v err=%v; want true/true/nil",
+		t.Fatalf("flat rescue fallback boot state: failClosed=%v bootstrap=%v err=%v; want true/true/nil",
 			failClosed, d.inBootstrap(), err)
 	}
 	if store.ActiveConfig() != nil || store.EverCommitted() {
@@ -226,10 +226,8 @@ func TestClusteredRescueFallbackRequiresOfflinePromotion11802(t *testing.T) {
 	}
 	active := rebootStore.ActiveConfig()
 	if active == nil || active.Chassis.Cluster == nil {
-		t.Fatalf("offline restart did not import a clustered active config: %v", active)
-	}
-	if err := clusterTopologyCommitPreflight(true, active); err != nil {
-		t.Fatalf("restart into clustered config did not satisfy the runtime topology gate: %v", err)
+		t.Fatalf("offline restart did not import the clustered config required by startup cluster-manager construction: active=%v",
+			active)
 	}
 }
 

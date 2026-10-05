@@ -83,7 +83,11 @@ func explain(status string) string {
 	case StatusCredentialFailed:
 		return "the day-0 configuration was imported, but host-credential application failed"
 	case StatusRescueFallback:
-		return "a valid saved rescue configuration is available but not installed; explicitly load rescue into the candidate and commit it"
+		return "a valid saved rescue configuration is available but not installed; " +
+			"explicitly load rescue into the candidate and commit confirmed. " +
+			"For HA topology, stop xpfd, copy the validated rescue to " +
+			"/etc/xpf/xpf.conf, remove /etc/xpf/rescue.conf, then restart for " +
+			"offline promotion"
 	case StatusFailed:
 		return "a configuration could NOT be applied — see Error below"
 	case "":
