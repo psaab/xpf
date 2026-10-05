@@ -1235,8 +1235,8 @@ sync.
   IEEE 802.1p behavior-aggregate classifiers select each packet's egress queue
   and classifier-assigned loss priority; the flow-cache key excludes DSCP/PCP.
   `ba_reclassify` refreshes the queue and `(queue, loss-priority)` rewrite when
-  no output-filter forwarding class pinned the queue. A filter-pinned queue
-  stays fixed; the separate `cos_lp_reclassify` flag refreshes only the
+  no filter (input or output) forwarding class pins the queue. A filter-pinned
+  queue stays fixed; the separate `cos_lp_reclassify` flag refreshes only the
   packet-dependent ingress LP rewrite when that queue has a rewrite entry.
   Rewrite precedence is policer, filter, fresh CoS, then the seed CoS result;
   a fresh `None` also replaces a stale seed rewrite. Direct fixed-size
@@ -1257,10 +1257,14 @@ sync.
   arm; `txn_flow_cache_hit_reclassifies_ba_pcp_per_packet_4422` pins the PCP
   queue arm; `txn_flow_cache_hit_reclassifies_ba_queue_and_lp_rewrite_per_packet_11430`
   covers BE/EF transitions, all four queue/LP cells, and filter rewrite precedence.
-  `cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679` drives real
-  staged packets through `stage_flow_cache_hit`, covering both DSCP transition
-  orders, VLAN-specific bindings, snapshot binding add/remove, default-queue
-  filter fallback, and queue clamping with LP rewrite.
+  `cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679` exercises
+  `stage_flow_cache_hit` with an injected cached descriptor; it asserts the
+  staged `PreparedTxRequest` queue and DSCP rewrite plus frame presence, not wire
+  bytes. It covers both DSCP transition orders, VLAN-specific bindings,
+  default-queue filter fallback, and queue clamping with LP rewrite. Snapshot
+  binding add/remove is omitted: `pkg/dataplane/userspace/manager_compile.go:1176-1177`
+  bumps snapshot generations, and `userspace-dp/src/afxdp/flow_cache.rs:1171-1179`
+  evicts cached entries on generation mismatch.
   **TTL/hop-limit precedes egress accounting on cache hits (#3779):** the
   cache-hit path used to run the output `then count` replay, the policy hit
   counter, the three-color policers, the filter logs, and the terminal drop

@@ -4411,8 +4411,9 @@ fn cos_cache_fixture(
 /// #11679: output-filter forwarding-class pins queue 1, but ingress DSCP
 /// chooses loss priority on every TCP/443 cache hit. The flow-cache key omits
 /// DSCP, so both transitions must refresh only the CoS rewrite while retaining
-/// the queue. This drives the real `stage_flow_cache_hit` path and observes the
-/// staged wire frame, not just the classifier helper.
+/// the queue. This exercises `stage_flow_cache_hit` with an injected cached
+/// descriptor and asserts `PreparedTxRequest` fields plus staged-frame presence,
+/// not the emitted wire bytes.
 #[test]
 fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
     let scheduler = |name: &str, priority: &str| crate::CoSSchedulerSnapshot {
@@ -4646,56 +4647,6 @@ fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
     assert_eq!(prepared.cos_queue_id, Some(1));
     assert_eq!(prepared.dscp_rewrite, Some(42));
     assert!(vlan_run.tx_frame.is_some(), "VLAN-specific hit stages bytes");
-
-    // Rebuilt snapshots may add or remove an ingress binding while the cached
-    // selection descriptor survives. Cache hits consult the currently
-    // published forwarding tables instead of retaining a stale classifier id.
-    let mut removed_snapshot = snapshot.clone();
-    removed_snapshot
-        .interfaces
-        .iter_mut()
-        .find(|interface| interface.name == "ge-0-0-2.80")
-        .expect("VLAN 80 unit exists")
-        .cos_dscp_classifier
-        .clear();
-    let removed = crate::afxdp::forwarding_build::build_forwarding_state(&removed_snapshot);
-    let mut added_snapshot = removed_snapshot.clone();
-    added_snapshot
-        .interfaces
-        .iter_mut()
-        .find(|interface| interface.name == "ge-0-0-2.80")
-        .expect("VLAN 80 unit exists")
-        .cos_dscp_classifier = "vlan81".into();
-    let added = crate::afxdp::forwarding_build::build_forwarding_state(&added_snapshot);
-    let mut reload_seed_frame = vlan_tagged_tcp_v4_frame(0);
-    reload_seed_frame[19] = 46 << 2;
-    let mut reload_seed_meta = test_meta(&reload_seed_frame);
-    reload_seed_meta.dscp = 46;
-    let reload_seed_selection = crate::afxdp::tx::resolve_cached_cos_tx_selection(
-        &fixture.forwarding,
-        EGRESS_IFINDEX,
-        reload_seed_meta,
-        &test_key(),
-    );
-    for (current, expected_dscp) in [(&removed, 17_u8), (&added, 42), (&removed, 17)] {
-        let current_fixture = cos_cache_fixture(current);
-        let mut entry = cached_entry();
-        entry.descriptor.tx_selection = reload_seed_selection.clone();
-        let mut frame = vlan_tagged_tcp_v4_frame(0);
-        frame[19] = 10 << 2;
-        let mut meta = test_meta(&frame);
-        meta.dscp = 10;
-        let run = run_stage_with_entry(&current_fixture, &frame, meta, entry, 0);
-        assert_eq!(run.flow_cache_tallies, (1, 0, 0), "snapshot reload stays a hit");
-        let prepared = run
-            .tx_pipeline
-            .pending_tx_prepared
-            .front()
-            .expect("snapshot reload hit stages TX");
-        assert_eq!(prepared.cos_queue_id, Some(1));
-        assert_eq!(prepared.dscp_rewrite, Some(expected_dscp));
-        assert!(run.tx_frame.is_some());
-    }
 
     // A filter class that has no materialized scheduler queue is pinned to the
     // interface default. That fallback remains fixed while the selected

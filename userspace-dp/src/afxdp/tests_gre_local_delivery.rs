@@ -904,13 +904,20 @@ fn native_gre_decap_tagged_ingress_yields_self_consistent_frame_meta() {
 #[test]
 fn native_gre_decap_classifies_from_inner_dscp_11809() {
     let mut snapshot = gre_to_self_snapshot();
+    // Queues materialize on egress; bind the BA classifier to the GRE logical
+    // ingress so the decapped inner DSCP is trusted for classification.
+    let gre_ingress = snapshot
+        .interfaces
+        .iter_mut()
+        .find(|interface| interface.name == "gr-0/0/0.0")
+        .expect("GRE logical ingress unit exists");
+    gre_ingress.cos_dscp_classifier = "wan-classifier".to_string();
     snapshot.interfaces.push(crate::InterfaceSnapshot {
         name: "dscp-egress".to_string(),
         ifindex: 202,
         cos_shaping_rate_bytes_per_sec: 10_000_000,
         cos_shaping_burst_bytes: 256_000,
         cos_scheduler_map: "wan-map".to_string(),
-        cos_dscp_classifier: "wan-classifier".to_string(),
         ..Default::default()
     });
     snapshot.class_of_service = Some(ClassOfServiceSnapshot {

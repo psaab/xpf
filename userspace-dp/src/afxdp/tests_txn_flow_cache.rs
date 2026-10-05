@@ -1157,13 +1157,13 @@ fn txn_flow_cache_seed_charges_folded_input_count_once_10566() {
 #[test]
 fn txn_flow_cache_hit_reclassifies_ba_dscp_per_packet_3778() {
     let mut snapshot = nat_snapshot();
-    // CoS on the WAN egress (reth0.80, ifindex 12): a DSCP BA classifier maps
-    // DSCP 46 (EF) -> expedited-forwarding (queue 1); DSCP 0 is unmapped and
-    // falls to the default best-effort queue (0).
+    // CoS queues materialize on the WAN egress (reth0.80, ifindex 12); the
+    // DSCP BA classifier binds on the LAN ingress (reth1.0, ifindex 24).
+    // DSCP 46 (EF) maps to queue 1; DSCP 0 is unmapped and defaults to queue 0.
     snapshot.interfaces[1].cos_shaping_rate_bytes_per_sec = 10_000_000;
     snapshot.interfaces[1].cos_shaping_burst_bytes = 256_000;
     snapshot.interfaces[1].cos_scheduler_map = "wan-map".to_string();
-    snapshot.interfaces[1].cos_dscp_classifier = "cls".to_string();
+    snapshot.interfaces[0].cos_dscp_classifier = "cls".to_string();
     snapshot.class_of_service = Some(ClassOfServiceSnapshot {
         forwarding_classes: vec![
             CoSForwardingClassSnapshot {
@@ -1357,7 +1357,9 @@ fn txn_flow_cache_hit_reclassifies_ba_queue_and_lp_rewrite_per_packet_11430() {
         snapshot.interfaces[1].cos_shaping_rate_bytes_per_sec = 10_000_000;
         snapshot.interfaces[1].cos_shaping_burst_bytes = 256_000;
         snapshot.interfaces[1].cos_scheduler_map = "wan-map".into();
-        snapshot.interfaces[1].cos_dscp_classifier = "dscp-cls".into();
+        // #11679: classify at the ingress unit; materialize queues and the LP
+        // rewrite on egress.
+        snapshot.interfaces[0].cos_dscp_classifier = "dscp-cls".into();
         snapshot.interfaces[1].cos_dscp_rewrite_rule = "lp-rewrite".into();
         snapshot.class_of_service = Some(ClassOfServiceSnapshot {
             forwarding_classes: vec![
@@ -1792,14 +1794,14 @@ fn txn_flow_cache_hit_reclassifies_ba_pcp_per_packet_4422() {
     }
 
     let mut snapshot = nat_snapshot();
-    // CoS on the WAN egress (reth0.80, ifindex 12): an 802.1p (PCP) BA
-    // classifier maps PCP 5 -> expedited-forwarding (queue 1); PCP 0 is unmapped
-    // and falls to the default best-effort queue (0). Deliberately NO DSCP
-    // classifier, so its 802.1p branch is the only path to select the EF queue.
+    // CoS queues materialize on the WAN egress (reth0.80, ifindex 12); the
+    // 802.1p BA classifier binds on the LAN ingress (reth1.0, ifindex 24).
+    // PCP 5 maps to queue 1; PCP 0 is unmapped. Deliberately NO DSCP
+    // classifier, so 802.1p is the only path to select the EF queue.
     snapshot.interfaces[1].cos_shaping_rate_bytes_per_sec = 10_000_000;
     snapshot.interfaces[1].cos_shaping_burst_bytes = 256_000;
     snapshot.interfaces[1].cos_scheduler_map = "wan-map".to_string();
-    snapshot.interfaces[1].cos_ieee8021_classifier = "pcp-cls".to_string();
+    snapshot.interfaces[0].cos_ieee8021_classifier = "pcp-cls".to_string();
     snapshot.class_of_service = Some(ClassOfServiceSnapshot {
         forwarding_classes: vec![
             CoSForwardingClassSnapshot {
