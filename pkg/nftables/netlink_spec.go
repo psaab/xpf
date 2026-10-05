@@ -281,7 +281,7 @@ type HostInboundSpec struct {
 	UnzonedIngressNetdevs   []string // #11409: unzoned physical input scope, before destination fallback
 	UnzonedIngressVRFSlaves []string // #11409: LOCAL_IN slave scope before shared-master zone rules
 	Programs                []JunosHostProgram
-	WGListenPorts []uint16 // global WG ports denied on zone/destination/ingress mismatch, also used by stale-reply guards.
+	WGListenPorts           []uint16 // global WG ports denied on zone/destination/ingress mismatch, also used by stale-reply guards.
 	// WGZonePorts maps the unique owner zone of a WG tunnel's outer source
 	// address to its ports. Admission also requires that zone's ingress and a
 	// uniquely same-zone local destination.

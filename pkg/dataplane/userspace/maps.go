@@ -51,7 +51,6 @@ const (
 	mapNameUserspaceWgIngressZones  = "userspace_wg_ingress_zones"
 	mapNameUserspaceWgZoneAdmission = "userspace_wg_zone_admission"
 
-
 	// Pinned BPF map name retained as a documented mixed-version
 	// compatibility exception per PR #1514 (Refs #1509). Operator-
 	// facing terminology is "degraded path" but the pinned map name
