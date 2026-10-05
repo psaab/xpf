@@ -79,4 +79,6 @@ var Registry = []Site{
 	{File: "pkg/dataplane/userspace_shim_loader_test.go", Test: "TestReconcileDisposableCollectionPinNoOpOnRealEmbeddedSpec"},
 	{File: "pkg/dataplane/verify_userspace_shim_test.go", Test: "TestVerifyEmbeddedUserspaceShim"},
 	{File: "pkg/dataplane/verify_userspace_shim_test.go", Test: "TestVerifyUserspaceShimShrinkEquivalence"},
+	{File: "pkg/dataplane/userspace/wg_zone_admission_11574_test.go", Test: "TestSyncUserspaceWGZoneMapsRemovesStaleSnapshotAuthority11574"},
+	{File: "pkg/dataplane/userspace/wg_zone_admission_11574_test.go", Test: "TestUserspaceXDPWireGuardSNATControlSteering12119"},
 }

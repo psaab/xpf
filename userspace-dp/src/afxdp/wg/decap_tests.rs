@@ -915,6 +915,52 @@ fn worker_wg_decap_requires_unique_matching_underlay_zone_11574() {
 
 
 #[test]
+fn worker_wg_primary_wan_snat_preserves_owner_zone_12119() {
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, _ipub, rpub) = established_pair(allowed.clone(), allowed);
+    let mut snapshot = wg_outer_mtu_snapshot();
+    add_lan_ingress(&mut snapshot);
+    snapshot.source_nat_rules = vec![crate::SourceNATRuleSnapshot {
+        name: "primary-wan-interface-snat".to_string(),
+        from_zone: "sfmix".to_string(),
+        to_zone: "wan".to_string(),
+        interface_mode: true,
+        ..Default::default()
+    }];
+    let mut forwarding = build_forwarding_state(&snapshot);
+    let listener = std::net::Ipv4Addr::new(172, 16, 80, 8);
+    assert!(
+        !forwarding.local_v4.contains(&listener)
+            && forwarding.interface_nat_v4.contains_key(&listener),
+        "the primary WAN address must remain NAT-excluded from local delivery"
+    );
+    assert_eq!(
+        forwarding.wg_local_address_zone_v4.get(&listener),
+        Some(&crate::test_zone_ids::TEST_WAN_ZONE_ID),
+        "interface SNAT must not erase the configured address owner"
+    );
+    let id = *forwarding.wg_engines.keys().next().expect("WG tunnel");
+    forwarding.wg_engines.insert(id, std::sync::Arc::new(resp));
+    let frame = wiring_record(&init, &rpub);
+    let mut meta = wiring_meta(frame.len());
+    let scratch = WgWorkerScratch::new(4096);
+    assert!(
+        super::decap::try_wg_decap_from_frame(&frame, meta, &forwarding, &scratch).is_some(),
+        "an authenticated record arriving in the primary WAN owner zone must decapsulate with interface SNAT active"
+    );
+
+    // Control: the same authenticated WAN listener must still reject a packet
+    // received through LAN; preserving address ownership must not widen the
+    // listener's serving-zone boundary.
+    meta.ingress_ifindex = 24;
+    meta.ingress_vlan_id = 0;
+    assert!(
+        super::decap::try_wg_decap_from_frame(&frame, meta, &forwarding, &scratch).is_none(),
+        "a wrong-zone authenticated record must be rejected before decap even when interface SNAT is active"
+    );
+}
+
+#[test]
 fn worker_wg_listener_ignores_interface_host_inbound_override_for_listener_11574() {
     let (mut forwarding, init, rpub) =
         wiring_fixture_with_host_services(true, &["any-service"]);

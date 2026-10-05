@@ -880,21 +880,25 @@ pub(super) fn populate_interfaces(
                     // SNAT/WAN interface IP that the exclusion routes into
                     // `interface_nat_v4` (out of `local_v4`).
                     state.configured_iface_v4.insert(v4.addr());
+                    // #12119: WG listener ownership is configured-address
+                    // ownership, independent of the NAT local-delivery
+                    // exclusion. Interface SNAT moves the primary WAN IP out
+                    // of local_v4, but it remains the listener's owner zone.
+                    let zone_id = state.zone_name_to_id.get(&iface.zone).copied().unwrap_or(0);
+                    match state.wg_local_address_zone_v4.entry(v4.addr()) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(zone_id);
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            if *entry.get() != zone_id {
+                                entry.insert(0);
+                            }
+                        }
+                    }
                     if excluded_local_v4.contains(&v4.addr()) {
                         state.interface_nat_v4.insert(v4.addr(), iface.ifindex);
                     } else {
                         state.local_v4.insert(v4.addr());
-                        let zone_id = state.zone_name_to_id.get(&iface.zone).copied().unwrap_or(0);
-                        match state.wg_local_address_zone_v4.entry(v4.addr()) {
-                            std::collections::hash_map::Entry::Vacant(entry) => {
-                                entry.insert(zone_id);
-                            }
-                            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                                if *entry.get() != zone_id {
-                                    entry.insert(0);
-                                }
-                            }
-                        }
                         registered_local = true;
                         // #3769: record the interface host address's owning
                         // table for the table-scoped local-delivery DECISION.
@@ -929,21 +933,24 @@ pub(super) fn populate_interfaces(
                     // #3182: NAT-decoupled full interface-IP set (see the V4
                     // arm above) — protects the SNAT/WAN IPv6 interface IP too.
                     state.configured_iface_v6.insert(v6.addr());
+                    // #12119: WG listener ownership is configured-address
+                    // ownership, independent of the NAT local-delivery
+                    // exclusion (see the V4 arm).
+                    let zone_id = state.zone_name_to_id.get(&iface.zone).copied().unwrap_or(0);
+                    match state.wg_local_address_zone_v6.entry(v6.addr()) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(zone_id);
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            if *entry.get() != zone_id {
+                                entry.insert(0);
+                            }
+                        }
+                    }
                     if excluded_local_v6.contains(&v6.addr()) {
                         state.interface_nat_v6.insert(v6.addr(), iface.ifindex);
                     } else {
                         state.local_v6.insert(v6.addr());
-                        let zone_id = state.zone_name_to_id.get(&iface.zone).copied().unwrap_or(0);
-                        match state.wg_local_address_zone_v6.entry(v6.addr()) {
-                            std::collections::hash_map::Entry::Vacant(entry) => {
-                                entry.insert(zone_id);
-                            }
-                            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                                if *entry.get() != zone_id {
-                                    entry.insert(0);
-                                }
-                            }
-                        }
                         registered_local = true;
                         // #3769: record the interface host address's owning
                         // table (see the v4 arm).

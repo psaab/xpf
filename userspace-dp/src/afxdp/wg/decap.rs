@@ -73,17 +73,8 @@ pub(in crate::afxdp) struct WgDecapPacket {
     pub(in crate::afxdp) peer_pubkey: [u8; 32],
 }
 
-/// The WireGuard tunnel endpoint listening on `dst_port` in the ingress
-/// interface's transport routing instance, with its live engine.
-///
-/// Walks `wg_engines` rather than `tunnel_endpoints` deliberately: that map IS
-/// the WireGuard-only set, so the scan is over the number of WG tunnels (0, 1 or
-/// 2 in practice) instead of over every tunnel endpoint on the box. A GRE-mode
-/// row cannot appear in it, so no kind re-check is needed — but the mode is
-/// checked anyway, for the same defence-in-depth reason `match_tunnel_endpoint`
-/// re-checks `TunnelKind::Gre` against its own index. #11568 additionally
-/// requires the outer ingress to be in the endpoint's transport routing
-/// instance before either decap or underlay exemption can claim the datagram.
+/// Resolve packet ingress to its logical VLAN/bridge ifindex, falling back to
+/// the physical ingress index when no logical mapping exists.
 fn logical_ingress_ifindex(forwarding: &ForwardingState, meta: UserspaceDpMeta) -> i32 {
     resolve_ingress_logical_ifindex(
         forwarding,
@@ -94,16 +85,17 @@ fn logical_ingress_ifindex(forwarding: &ForwardingState, meta: UserspaceDpMeta) 
 }
 
 
+
+
 /// The WG socket's outer source and packet destination must both be uniquely
 /// owned in the packet's actual ingress zone. TunnelEndpoint.zone is the
 /// separate inner-policy zone and is intentionally not consulted here.
 fn wg_outer_zone_matches(
     forwarding: &ForwardingState,
     endpoint: &TunnelEndpoint,
-    meta: UserspaceDpMeta,
+    ingress_ifindex: i32,
     dst_ip: std::net::IpAddr,
 ) -> bool {
-    let ingress_ifindex = logical_ingress_ifindex(forwarding, meta);
     let ingress_zone_id = forwarding
         .ifindex_to_zone_id
         .get(&ingress_ifindex)
@@ -139,12 +131,22 @@ fn wg_outer_zone_matches(
     local_zone != 0 && local_zone == ingress_zone_id && source_zone == ingress_zone_id
 }
 
+/// The WireGuard tunnel endpoint listening on `dst_port` in the resolved
+/// ingress interface's transport routing instance, with its live engine.
+///
+/// Walks `wg_engines` rather than `tunnel_endpoints` deliberately: that map IS
+/// the WireGuard-only set, so the scan is over the number of WG tunnels (0, 1 or
+/// 2 in practice) instead of over every tunnel endpoint on the box. A GRE-mode
+/// row cannot appear in it, so no kind re-check is needed — but the mode is
+/// checked anyway, for the same defence-in-depth reason `match_tunnel_endpoint`
+/// re-checks `TunnelKind::Gre` against its own index. #11568 additionally
+/// requires the outer ingress to be in the endpoint's transport routing
+/// instance before either decap or underlay exemption can claim the datagram.
 fn wg_endpoint_for_listen_port(
     forwarding: &ForwardingState,
     dst_port: u16,
-    meta: UserspaceDpMeta,
+    ingress_ifindex: i32,
 ) -> Option<(&TunnelEndpoint, &std::sync::Arc<super::WgEngine>)> {
-    let ingress_ifindex = logical_ingress_ifindex(forwarding, meta);
     let ingress_instance = forwarding
         .ifindex_to_routing_instance
         .get(&ingress_ifindex)
@@ -198,7 +200,9 @@ pub(in crate::afxdp) fn is_wg_underlay_frame(
         return false;
     };
     let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
-    let Some((endpoint, _)) = wg_endpoint_for_listen_port(forwarding, dst_port, meta) else {
+    let ingress_ifindex = logical_ingress_ifindex(forwarding, meta);
+    let Some((endpoint, _)) = wg_endpoint_for_listen_port(forwarding, dst_port, ingress_ifindex)
+    else {
         return false;
     };
     // This helper is reached only for a mapped/compatible IPv6 packet. Mirror
@@ -223,7 +227,7 @@ pub(in crate::afxdp) fn is_wg_underlay_frame(
         return false;
     };
     let dst_ip = std::net::IpAddr::V6(std::net::Ipv6Addr::from(raw_dst));
-    wg_outer_zone_matches(forwarding, endpoint, meta, dst_ip)
+    wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip)
         && forwarding.owns_configured_ip(dst_ip)
 }
 
@@ -275,21 +279,18 @@ pub(in crate::afxdp) fn try_wg_decap_from_frame(
         return None;
     }
 
-    let (endpoint, engine) = wg_endpoint_for_listen_port(forwarding, dst_port, meta)?;
+    let ingress_ifindex = logical_ingress_ifindex(forwarding, meta);
+    let (endpoint, engine) = wg_endpoint_for_listen_port(forwarding, dst_port, ingress_ifindex)?;
 
     let dst_ip = outer_destination_ip(outer, meta)?;
     // The listener's local source address and the datagram destination must
     // both resolve uniquely to the actual ingress zone before AEAD work.
-    if !wg_outer_zone_matches(forwarding, endpoint, meta, dst_ip) {
+    if !wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip) {
         return None;
     }
-    // The configured endpoint lookup above already matched this UDP listen
-    // port in the ingress transport instance. This is a tunnel listener, not a
-    // host-inbound system service; unique source/destination ownership in this
-    // ingress zone is the admission boundary. A mismatch falls through to
-    // normal local delivery, where host-inbound tokens still govern other
-    // services.
-
+    // The listener and destination each have unique ownership in this
+    // ingress zone. A mismatch remains unclaimed for the existing host-inbound
+    // policy to deny; this owner check does not replace service-token policy.
     let mut decap_buf = scratch.decap_out.borrow_mut();
     // #9018: `.ok()?` used to collapse EVERY error arm here, and two of them
     // carry the proven peer public key on purpose: `Keepalive` (#7230) and

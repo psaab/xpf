@@ -283,6 +283,14 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 			"wireguard tunnel on unzoned interface "+iface+" has no host-inbound accept; add the interface to a security zone or inbound handshakes are dropped (#11076)")
 	}
 
+	// #12119: scoped WG admission needs an outer source address to derive the
+	// serving zone. Source-less listeners remain accepted for compatibility,
+	// but cannot be admitted safely until their tunnel source is configured.
+	for _, iface := range cfg.WireGuardSourceLessInterfaces() {
+		cfg.Warnings = append(cfg.Warnings,
+			"wireguard tunnel on "+iface+" has no outer source address; scoped listener admission cannot be derived and inbound packets are dropped until tunnel source is configured (#12119)")
+	}
+
 	// #5162: non-WireGuard tunnel outer-family cross-field gate. A GRE/IPIP
 	// tunnel whose OUTER source and destination are different address
 	// families (v4 source + v6 destination, or the reverse) passes per-leaf

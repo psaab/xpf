@@ -39,12 +39,16 @@ func TestWireGuardUnzonedTunnelWarns11076(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileConfig(zoned): %v", err)
 	}
+	sourceLessWarning := false
 	for _, w := range cfg2.Warnings {
 		if strings.Contains(w, "11076") {
-			t.Errorf("zoned tunnel must not warn; got %q", w)
+			t.Errorf("zoned tunnel must not warn as unzoned; got %q", w)
+		}
+		if strings.Contains(w, "12119") && strings.Contains(w, "no outer source address") && strings.Contains(w, "wg0") {
+			sourceLessWarning = true
 		}
 	}
-	if got := cfg2.WireGuardZonePorts(); len(got["trust"]) != 1 || got["trust"][0] != 51820 {
-		t.Errorf("WireGuardZonePorts() = %v, want map[trust:[51820]]", got)
+	if !sourceLessWarning {
+		t.Errorf("zoned source-less WireGuard must warn before commit; warnings=%v", cfg2.Warnings)
 	}
 }

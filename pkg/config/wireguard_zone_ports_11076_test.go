@@ -26,14 +26,21 @@ func wgZoneTestConfig() *Config {
 	return cfg
 }
 
-func TestWireGuardZonePorts11076(t *testing.T) {
-	got := wgZoneTestConfig().WireGuardZonePorts()
-	want := map[string][]uint16{
-		"trust":   {51820, 51821},
-		"untrust": {51820},
-	}
+func TestWireGuardListenPorts11076(t *testing.T) {
+	got := wgZoneTestConfig().WireGuardListenPorts()
+	want := []uint16{51820, 51821, 51822}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("WireGuardZonePorts() = %v, want %v", got, want)
+		t.Fatalf("WireGuardListenPorts() = %v, want %v", got, want)
+	}
+}
+
+func TestWireGuardSourceLessInterfaces12119(t *testing.T) {
+	cfg := wgZoneTestConfig()
+	cfg.Interfaces.Interfaces["ge-0/0/0"].Units[0].Tunnel.Source = "198.51.100.1"
+	got := cfg.WireGuardSourceLessInterfaces()
+	want := []string{"ge-0/0/0.1", "ge-0/0/1.0"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("WireGuardSourceLessInterfaces() = %v, want %v", got, want)
 	}
 }
 
@@ -43,7 +50,7 @@ func TestWireGuardUnzonedInterfaces11076(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("WireGuardUnzonedInterfaces() = %v, want %v", got, want)
 	}
-	if n := len((&Config{}).WireGuardZonePorts()); n != 0 {
-		t.Fatalf("empty config must yield no zone ports, got %d zones", n)
+	if got := (&Config{}).WireGuardListenPorts(); len(got) != 0 {
+		t.Fatalf("empty config must yield no listener ports, got %v", got)
 	}
 }

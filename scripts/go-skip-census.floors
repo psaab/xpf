@@ -25,16 +25,21 @@
 # binaries for factory root-login precedence), #11202 x1 (unconfigured host
 # interface for monitor-traffic scope), #11156 x1 (loopback for RA goodbye
 # suppression). All gate on execution-environment availability.
-total        = 400
+# The current-tree recount supersedes the 400-site measurement above: 17
+# privilege-absent, 4 privilege-present, and 32 other concrete skip sites are
+# now present, for 453 total including the unchanged unparsed site. The census
+# output enumerates each gate and its concrete capability/root/tool/fixture
+# condition; these floors bank those measured subjects, not arbitrary headroom.
+total        = 453
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
 # the gap, it swaps which subjects go unexamined.
-priv-absent  = 49
-priv-present = 10
+priv-absent  = 66
+priv-present = 14
 
 # Everything else: environment-, tool- and fixture-gated skips.
-other        = 340
+other        = 372
 
 # Skips this census counted but could NOT classify: `t.SkipNow()` (no message
 # by construction) and non-literal messages. Deliberately a REPORTED bucket

@@ -28,7 +28,7 @@ func hostInboundWireGuardTestConfig() *config.Config {
 			WgListenPort: 51820,
 			WgPeers: []config.WgPeerConfig{
 				// Responder-only: no Endpoint -> passive listener (the #5582 case).
-				{PublicKeyHex: "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+				{PublicKeyHex: strings.Repeat("b2", 32),
 					AllowedIPs: []string{"10.9.0.0/24"}},
 			},
 		},
@@ -91,6 +91,7 @@ func TestHostInboundFilterAdmitsWireGuardListenPort(t *testing.T) {
 		t.Errorf("WG admission must not widen the zone to other services (telnet leaked):\n%s", payload)
 	}
 }
+
 // TestHostInboundWireGuardPortGuardPrecedesAnyService verifies that a globally
 // selected WG port cannot use an any-service zone's broad host admission to
 // reach another zone's address or arrive on a non-owner ingress.
@@ -135,6 +136,71 @@ func TestHostInboundWireGuardPortGuardPrecedesAnyService(t *testing.T) {
 	}
 	if strings.Contains(payload, "iifname "+nftIifnameSet(lanIngress)+" ip daddr 10.0.61.1 udp dport 51820 accept") {
 		t.Fatalf("WG listener bound to wan's outer source must not admit from lan ingress:\n%s", payload)
+	}
+}
+
+// TestHostInboundWireGuardMultiPortAdmissionPins9016 restores the #9016
+// multi-listener pin through the current owner-zone derivation rather than a
+// caller-supplied global map: both configured ports belong to wan's source
+// address, while lan ingress, lan-owned destinations, and an unconfigured port
+// remain denied.
+func TestHostInboundWireGuardMultiPortAdmissionPins9016(t *testing.T) {
+	cfg := hostInboundWireGuardTestConfig()
+	cfg.Interfaces.Interfaces["wg1"] = &config.InterfaceConfig{
+		Name: "wg1",
+		Tunnel: &config.TunnelConfig{
+			Name:         "wg1",
+			Mode:         "wireguard",
+			Source:       "172.16.50.8",
+			WgListenPort: 51821,
+		},
+	}
+	cfg.Security.Zones["lan"].Interfaces = append(cfg.Security.Zones["lan"].Interfaces, "wg1")
+	ports := cfg.WireGuardListenPorts()
+	if len(ports) != 2 || ports[0] != 51820 || ports[1] != 51821 {
+		t.Fatalf("WireGuardListenPorts() = %v, want [51820 51821]", ports)
+	}
+	views := buildAndCheckViews(t, cfg)
+	zonePorts := hostInboundWireGuardZonePorts(cfg, views)
+	if len(zonePorts["wan"]) != 2 || zonePorts["wan"][0] != 51820 || zonePorts["wan"][1] != 51821 {
+		t.Fatalf("source-owner ports = %v, want wan:[51820 51821]", zonePorts)
+	}
+	payload := buildHostInboundFilterPayload(views, nil, nil, nil, zonePorts, true)
+
+	var wanIngress, lanIngress []string
+	for _, view := range views {
+		switch view.Zone {
+		case "wan":
+			wanIngress = view.IngressNetdevs
+		case "lan":
+			lanIngress = view.IngressNetdevs
+		}
+	}
+	if len(wanIngress) == 0 || len(lanIngress) == 0 {
+		t.Fatalf("fixture ingress scopes missing: wan=%v lan=%v", wanIngress, lanIngress)
+	}
+	portSet := "{ 51820, 51821 }"
+	allowed := "iifname " + nftIifnameSet(wanIngress) +
+		" ip daddr 172.16.50.8 udp dport " + portSet + " accept"
+	if !strings.Contains(payload, allowed) {
+		t.Fatalf("both source-owned listener ports must be admitted only on wan ingress; missing %q:\n%s", allowed, payload)
+	}
+	wrongIngressDrop := "iifname != " + nftIifnameSet(wanIngress) +
+		" ip daddr 172.16.50.8 udp dport " + portSet + " counter name \"" +
+		xnft.HostInboundDenyCounterName("wan", "ip") + "\" drop"
+	if !strings.Contains(payload, wrongIngressDrop) {
+		t.Fatalf("wrong-zone ingress lacks the counted two-port drop %q:\n%s", wrongIngressDrop, payload)
+	}
+	if strings.Contains(payload, "iifname "+nftIifnameSet(lanIngress)+
+		" ip daddr 172.16.50.8 udp dport "+portSet+" accept") {
+		t.Fatalf("lan ingress must not admit wan-owned listener ports:\n%s", payload)
+	}
+	if !strings.Contains(payload, "udp dport "+portSet+" counter name \""+
+		xnft.HostInboundDenyCounterName("lan", "ip")+"\" drop") {
+		t.Fatalf("lan-owned destinations lack a two-port mismatch drop:\n%s", payload)
+	}
+	if strings.Contains(payload, "udp dport 51822") {
+		t.Fatalf("unconfigured WG port leaked into host-inbound policy:\n%s", payload)
 	}
 }
 
@@ -188,8 +254,32 @@ func TestHostInboundFilterNoWireGuardNoAccept(t *testing.T) {
 		t.Fatalf("fixture unexpectedly has WG ports: %v", ports)
 	}
 	views := buildAndCheckViews(t, cfg)
-	payload := buildHostInboundFilterPayload(views, nil, nil, nil, cfg.WireGuardZonePorts(), true)
+	payload := buildHostInboundFilterPayload(views, nil, nil, nil, nil, true)
 	if strings.Contains(payload, "udp dport") && strings.Contains(payload, "51820") {
 		t.Errorf("no WG accept must be emitted when WireGuard is unconfigured:\n%s", payload)
+	}
+}
+
+// TestHostInboundSourceLessWireGuardFailsClosed12119 restores the original
+// #5582 source-less listener shape as an explicit regression: compile remains
+// compatible but emits no serving-zone admission, so the selected port is
+// visibly dropped until a tunnel source is configured.
+func TestHostInboundSourceLessWireGuardFailsClosed12119(t *testing.T) {
+	cfg := hostInboundWireGuardTestConfig()
+	cfg.Interfaces.Interfaces["wg0"].Tunnel.Source = ""
+	views := buildAndCheckViews(t, cfg)
+	ports := hostInboundWireGuardZonePorts(cfg, views)
+	if len(ports[""]) != 1 || ports[""][0] != 51820 {
+		t.Fatalf("source-less listener sentinel ports = %v, want empty-zone [51820]", ports)
+	}
+	if len(ports["wan"]) != 0 {
+		t.Fatalf("source-less listener must not be attributed to wan: %v", ports)
+	}
+	payload := buildHostInboundFilterPayload(views, nil, nil, nil, ports, true)
+	if !strings.Contains(payload, "udp dport 51820") {
+		t.Fatalf("source-less selected listener must have an explicit mismatch drop:\n%s", payload)
+	}
+	if strings.Contains(payload, "udp dport 51820 accept") {
+		t.Fatalf("source-less listener must not be admitted in any zone:\n%s", payload)
 	}
 }

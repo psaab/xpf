@@ -178,3 +178,69 @@ func TestUserspaceXDPWireGuardZoneGate11574(t *testing.T) {
 		})
 	}
 }
+func TestBuildUserspaceWGZoneAdmissionIncludesInterfaceSNATAddress11574(t *testing.T) {
+	snapshot := wgAdmissionTestSnapshot("wan", "lan")
+	snapshot.SourceNAT = []SourceNATRuleSnapshot{{
+		ToZone:        "wan",
+		InterfaceMode: true,
+	}}
+	plan, err := buildUserspaceWGZoneMaps(snapshot)
+	if err != nil {
+		t.Fatalf("build zone maps with interface SNAT: %v", err)
+	}
+	if got := plan.admission[wgAdmissionTestKey(2, wgAdmissionTestAddress)]; got != 1 {
+		t.Fatalf("primary WAN address with active interface SNAT admission = %d, want 1", got)
+	}
+	if _, ok := plan.admission[wgAdmissionTestKey(1, wgAdmissionTestAddress)]; ok {
+		t.Fatal("interface-SNAT destination owned by wan was admitted to the lan zone")
+	}
+}
+
+func TestUserspaceXDPWireGuardSNATControlSteering12119(t *testing.T) {
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Skipf("RemoveMemlock: %v", err)
+	}
+	for _, tc := range []struct {
+		name              string
+		arrivalZone       uint16
+		ownerZone         uint16
+		hasOwnerAdmission bool
+		interfaceSNAT     bool
+		wantAction        uint32
+	}{
+		{name: "same-zone SNAT listener handshake reaches kernel", arrivalZone: 2, ownerZone: 2, hasOwnerAdmission: true, interfaceSNAT: true, wantAction: xdpActionPass},
+		{name: "wrong-zone SNAT listener handshake does not reach kernel", arrivalZone: 1, ownerZone: 2, hasOwnerAdmission: true, interfaceSNAT: true, wantAction: xdpActionDrop},
+		{name: "transit handshake on listener port does not reach kernel", arrivalZone: 2, ownerZone: 2, wantAction: xdpActionDrop},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			coll := loadUserspaceXDPTestCollection(t)
+			ifindex := userspaceXDPTestRunIfindex(t)
+			bindingIndex := userspaceXDPTestRunBindingIndex(t, 0)
+			ctrl := userspaceCtrlValue{
+				Enabled: 1, MetadataVersion: userspaceMetadataVersion, Workers: 1, QueueCount: 1,
+				Flags: userspaceCtrlFlagWgRx, WgPortCount: 1, HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
+			}
+			ctrl.WgPorts[0] = 51820
+			updateUserspaceXDPTestCtrl(t, coll, ctrl)
+			updateUserspaceXDPTestIngress(t, coll, ifindex)
+			updateUserspaceXDPTestBinding(t, coll, bindingIndex, userspaceBindingValue{Slot: 0, Flags: userspaceBindingReady})
+			updateUserspaceXDPTestHeartbeat(t, coll, 0)
+			if tc.interfaceSNAT {
+				updateUserspaceXDPTestInterfaceNATV4(t, coll, wgAdmissionTestAddress)
+			}
+			updateUserspaceXDPTestMap(t, coll, "userspace_wg_ingress_zones", userspaceWGIngressZoneKey{
+				Ifindex: ifindex, VLANID: userspaceWGUnTaggedVLANID,
+			}, tc.arrivalZone)
+			if tc.hasOwnerAdmission {
+				updateUserspaceXDPTestMap(t, coll, "userspace_wg_zone_admission", wgAdmissionTestKey(tc.ownerZone, wgAdmissionTestAddress), uint8(1))
+			}
+
+			packet := ipv4TestPacket([4]byte{203, 0, 113, 9}, wgAdmissionTestAddress, 17, 24)
+			binary.BigEndian.PutUint16(packet[36:38], 51820)
+			packet[42] = 1 // WireGuard initiation: it belongs at the kernel socket.
+			if got := runUserspaceXDPTestPacket(t, coll, packet); got != tc.wantAction {
+				t.Fatalf("XDP action = %d, want %d", got, tc.wantAction)
+			}
+		})
+	}
+}

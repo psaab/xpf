@@ -24,18 +24,17 @@ type userspaceWGIngressZoneKey struct {
 }
 
 type userspaceWGAdmissionKey struct {
-	ZoneID    uint16
-	Port      uint16
+	ZoneID     uint16
+	Port       uint16
 	AddrFamily uint8
-	Pad       [3]byte
-	Addr      [16]byte
+	Pad        [3]byte
+	Addr       [16]byte
 }
 type userspaceWGAddressKey struct {
 	AddrFamily uint8
 	Pad        [3]byte
 	Addr       [16]byte
 }
-
 
 type userspaceWGZoneMaps struct {
 	ingress   map[userspaceWGIngressZoneKey]uint16
@@ -143,7 +142,9 @@ func buildUserspaceWGZoneMaps(snapshot *ConfigSnapshot) (userspaceWGZoneMaps, er
 		ambiguous bool
 	}
 	owners := make(map[userspaceWGAddressKey]addressOwner)
-	excludedV4, excludedV6 := buildNATTranslatedLocalAddressExclusions(snapshot)
+	// WG ownership follows configured address ownership, independently of
+	// NAT's local-delivery exclusion. A primary WAN address remains the
+	// listener's owner when interface SNAT routes it out of local_v*.
 	for _, iface := range snapshot.Interfaces {
 		if iface.AdminDisabled || unresolvedLo0LocalAddressOwner(iface) {
 			continue
@@ -158,15 +159,9 @@ func buildUserspaceWGZoneMaps(snapshot *ConfigSnapshot) (userspaceWGZoneMaps, er
 			if v4 := ip.To4(); v4 != nil {
 				key.AddrFamily = 2
 				copy(key.Addr[:4], v4)
-				if excludedV4[userspaceLocalAddressV4Key(v4)] {
-					continue
-				}
 			} else if v6 := ip.To16(); v6 != nil {
 				key.AddrFamily = 10
 				copy(key.Addr[:], v6)
-				if excludedV6[key.Addr] {
-					continue
-				}
 			} else {
 				continue
 			}

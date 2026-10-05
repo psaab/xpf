@@ -2967,20 +2967,23 @@ port numbers (only the token set is guarded by #3486) — the fail-on-revert
 assertions in `host_inbound_parity_test.go` plus this matrix are the contract
 that keeps the nft and Rust port numbers aligned.
 
-## WireGuard listen port: a dynamic exception, NOT a token (#5582)
+## WireGuard listen port: dynamic, zone-scoped admission (#11574)
 
-WireGuard is deliberately **not** a `system-services` token. Its UDP listen port
-is operator-configured (`interfaces <wg> tunnel wireguard listen-port <n>`), so
-it does not fit the static token→port SSOT above (a token like `ssh` maps to a
-fixed port on all three surfaces). Instead, the kernel host-inbound builder emits
-an **automatic, dynamic** `udp dport <configured-wg-port(s)> accept` on the input
-hook whenever a WG tunnel is configured (`emitHostInboundWireGuardAccept`,
-`pkg/daemon/daemon_nft.go`; port set from `config.WireGuardListenPorts()`). This
-mirrors the shim's steer-to-kernel of that exact port so a fresh passive handshake
-to a restricted zoned address is admitted rather than dropped. See
-`docs/wireguard-interop.md` → "Host-inbound admission of the WG listen port". Do
-NOT add a `wireguard` token to `KnownHostInboundSystemServices` — the port is
-dynamic and the automatic exception already covers it.
+WireGuard is deliberately **not** a `system-services` token. Its UDP listen
+port is operator-configured (`interfaces <wg> tunnel wireguard listen-port
+<n>`), so it does not fit the static token→port SSOT above. The host-inbound
+builder uses the dynamic port set from `config.WireGuardListenPorts()`, but it
+does not emit a global port accept: admission requires the listener's
+configured outer source address, the destination address, and the ingress
+interface to resolve uniquely to the same zone. Mismatched listener tuples
+are denied before broad service/conntrack accepts.
+
+Configure `tunnel source <local-address>` for each functional zoned WireGuard
+listener. A source-less listener remains configuration-compatible but emits a
+#12119 compile warning and receives no scoped host-inbound admission. See
+`docs/wireguard-interop.md` → "Host-inbound admission of WireGuard listeners".
+Do NOT add a `wireguard` token to `KnownHostInboundSystemServices`: the port is
+dynamic and admission is derived from current tunnel/source ownership.
 
 ## Junos references
 

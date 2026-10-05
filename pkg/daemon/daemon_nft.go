@@ -2042,8 +2042,8 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		rules = append(rules, hostInboundStaleReplyGuardText(
 			xnft.HostInboundStaleReplyGuardRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts, dataplaneFresh && (len(reinjectV4) > 0 || len(reinjectV6) > 0)),
 		)...)
-		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV4, "ip", wgListenPorts, wgZonePorts)
-		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV6, "ip6", wgListenPorts, wgZonePorts)
+		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV4, "ip", wgListenPorts, wgZonePorts, dataplaneFresh && len(reinjectV4) > 0)
+		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV6, "ip6", wgListenPorts, wgZonePorts, dataplaneFresh && len(reinjectV6) > 0)
 		emitHostInboundScreenFloodText(&rules, screenFloodRules, true)
 		emitJunosHostMulticastProgramJumps(&rules, programs)
 		emitHostInboundMulticastIngressGuards(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
@@ -2080,8 +2080,8 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		rules = append(rules, hostInboundStaleReplyGuardText(
 			xnft.HostInboundStaleReplyGuardRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts, dataplaneFresh && (len(reinjectV4) > 0 || len(reinjectV6) > 0)),
 		)...)
-		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV4, "ip", wgListenPorts, wgZonePorts)
-		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV6, "ip6", wgListenPorts, wgZonePorts)
+		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV4, "ip", wgListenPorts, wgZonePorts, dataplaneFresh && len(reinjectV4) > 0)
+		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV6, "ip6", wgListenPorts, wgZonePorts, dataplaneFresh && len(reinjectV6) > 0)
 		emitHostInboundScreenFloodText(&rules, screenFloodRules, true)
 		emitJunosHostMulticastProgramJumps(&rules, programs)
 		emitHostInboundMulticastIngressGuards(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
@@ -2690,7 +2690,6 @@ func emitHostInboundZone(rules *[]string, v dpuserspace.ZoneHostInboundView, fam
 	cn := xnft.HostInboundDenyCounterName(v.Zone, family)
 	*rules = append(*rules, "    "+daddr+" counter name \""+cn+"\" drop")
 }
-
 
 // flatWireGuardPorts unions a zone->ports map into the sorted flat port set
 // for scope-independent consumers (stale-reply guards).
