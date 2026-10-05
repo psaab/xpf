@@ -15,6 +15,9 @@
 
 use super::super::*;
 use crate::{ClassOfServiceSnapshot, CoSSchedulerMapSnapshot, CoSSchedulerSnapshot};
+#[path = "cos_ingress_validation_11679.rs"]
+mod ingress_validation;
+use ingress_validation::validate_consumed_ingress_classifier_domains;
 
 /// Borrow-only lookup tables built once per CoS snapshot. The
 /// orchestrator owns the value; per-interface helper borrows
@@ -73,23 +76,17 @@ fn build_cos_dscp_queue_table(
         return Ok(table);
     }
     if let Some(classifier) = classifiers.get(classifier_name) {
-        for (&dscp, &queue_id) in &classifier.queue_by_dscp {
-            // #2447: a code-point outside the 6-bit DSCP domain fails the
-            // snapshot CLOSED. The pre-fix `dscp & 0x3f` masked an
-            // out-of-range value into a valid index, silently installing the
-            // classifier for a DIFFERENT traffic class (110 → 46). The Go
-            // commit gate rejects these first; this guards version/snapshot
-            // drift. An in-range value indexes the table unchanged.
-            let idx = usize::from(dscp);
-            let Some(slot) = table.get_mut(idx) else {
-                return Err(
-                    crate::policy::SnapshotIntegrityError::CosDscpCodePointOutOfRange {
-                        classifier: classifier_name.to_string(),
-                        dscp,
-                    },
-                );
-            };
-            *slot = materialized_queue_or_default(queue_id, materialized_queues, default_queue);
+        if let Some(dscp) = classifier.invalid_dscp {
+            return Err(crate::policy::SnapshotIntegrityError::CosDscpCodePointOutOfRange {
+                classifier: classifier_name.to_string(),
+                dscp,
+            });
+        }
+        for (dscp, queue_id) in classifier.queue_by_dscp.iter().enumerate() {
+            if let Some(queue_id) = queue_id {
+                table[dscp] =
+                    materialized_queue_or_default(*queue_id, materialized_queues, default_queue);
+            }
         }
     }
     Ok(table)
@@ -106,21 +103,19 @@ fn build_cos_ieee8021_queue_table(
         return Ok(table);
     }
     if let Some(classifier) = classifiers.get(classifier_name) {
-        for (&pcp, &queue_id) in &classifier.queue_by_pcp {
-            // #2447: a code-point outside the 3-bit PCP domain fails the
-            // snapshot CLOSED. The pre-fix `pcp.min(7)` clamped an
-            // out-of-range value into a valid index, silently installing the
-            // classifier for a DIFFERENT traffic class (9 → 7).
-            let idx = usize::from(pcp);
-            let Some(slot) = table.get_mut(idx) else {
-                return Err(
-                    crate::policy::SnapshotIntegrityError::CosIeee8021CodePointOutOfRange {
-                        classifier: classifier_name.to_string(),
-                        pcp,
-                    },
-                );
-            };
-            *slot = materialized_queue_or_default(queue_id, materialized_queues, default_queue);
+        if let Some(pcp) = classifier.invalid_pcp {
+            return Err(
+                crate::policy::SnapshotIntegrityError::CosIeee8021CodePointOutOfRange {
+                    classifier: classifier_name.to_string(),
+                    pcp,
+                },
+            );
+        }
+        for (pcp, queue_id) in classifier.queue_by_pcp.iter().enumerate() {
+            if let Some(queue_id) = queue_id {
+                table[pcp] =
+                    materialized_queue_or_default(*queue_id, materialized_queues, default_queue);
+            }
         }
     }
     Ok(table)
@@ -140,11 +135,10 @@ pub(super) fn cos_loss_priority_index(value: &str) -> Option<u8> {
     }
 }
 
-/// #3995: flatten a DSCP classifier's `lp_by_dscp` into a fixed 64-entry table
-/// (index = DSCP code-point). `u8::MAX` marks an unclassified code-point
-/// (resolves to the default LOW loss-priority at classification time). Fails
-/// the snapshot CLOSED on an out-of-range code-point, mirroring
-/// `build_cos_dscp_queue_table` (#2447).
+/// #3995: flatten a DSCP classifier's `lp_by_dscp` into a fixed 64-entry table.
+/// `u8::MAX` marks an unclassified code-point (resolves to the default LOW
+/// loss-priority at classification time). Out-of-range values fail only when
+/// the classifier is consumed by an interface binding.
 fn build_cos_dscp_lp_table(
     classifier_name: &str,
     classifiers: &FastMap<String, CoSDSCPClassifierConfig>,
@@ -154,16 +148,16 @@ fn build_cos_dscp_lp_table(
         return Ok(table);
     }
     if let Some(classifier) = classifiers.get(classifier_name) {
-        for (&dscp, &lp) in &classifier.lp_by_dscp {
-            let Some(slot) = table.get_mut(usize::from(dscp)) else {
-                return Err(
-                    crate::policy::SnapshotIntegrityError::CosDscpCodePointOutOfRange {
-                        classifier: classifier_name.to_string(),
-                        dscp,
-                    },
-                );
-            };
-            *slot = lp;
+        if let Some(dscp) = classifier.invalid_dscp {
+            return Err(crate::policy::SnapshotIntegrityError::CosDscpCodePointOutOfRange {
+                classifier: classifier_name.to_string(),
+                dscp,
+            });
+        }
+        for (dscp, &lp) in classifier.lp_by_dscp.iter().enumerate() {
+            if lp != u8::MAX {
+                table[dscp] = lp;
+            }
         }
     }
     Ok(table)
@@ -185,28 +179,26 @@ fn build_cos_inet_precedence_queue_table(
         return Ok(table);
     }
     if let Some(classifier) = classifiers.get(classifier_name) {
-        for (&precedence, &queue_id) in &classifier.queue_by_prec {
-            // A code-point outside the 3-bit IP-precedence domain fails the
-            // snapshot CLOSED rather than being masked with `& 0x7`, which
-            // would install the classifier for a DIFFERENT traffic class.
-            let Some(slot) = table.get_mut(usize::from(precedence)) else {
-                return Err(
-                    crate::policy::SnapshotIntegrityError::CosInetPrecedenceCodePointOutOfRange {
-                        classifier: classifier_name.to_string(),
-                        precedence,
-                    },
-                );
-            };
-            *slot = materialized_queue_or_default(queue_id, materialized_queues, default_queue);
+        if let Some(precedence) = classifier.invalid_precedence {
+            return Err(
+                crate::policy::SnapshotIntegrityError::CosInetPrecedenceCodePointOutOfRange {
+                    classifier: classifier_name.to_string(),
+                    precedence,
+                },
+            );
+        }
+        for (precedence, queue_id) in classifier.queue_by_prec.iter().enumerate() {
+            if let Some(queue_id) = queue_id {
+                table[precedence] =
+                    materialized_queue_or_default(*queue_id, materialized_queues, default_queue);
+            }
         }
     }
     Ok(table)
 }
 
-/// #6847: flatten an IP-precedence classifier's `lp_by_prec` into a fixed
-/// 8-entry table. `u8::MAX` marks an unclassified code-point. Without this the
-/// entry's `loss-priority` would compile and be silently dropped before the
-/// egress rewrite keyed on it.
+/// #6847: flatten the IP-precedence loss priority into an 8-entry table.
+/// `u8::MAX` marks an unclassified code-point.
 fn build_cos_inet_precedence_lp_table(
     classifier_name: &str,
     classifiers: &FastMap<String, CoSINetPrecedenceClassifierConfig>,
@@ -216,23 +208,25 @@ fn build_cos_inet_precedence_lp_table(
         return Ok(table);
     }
     if let Some(classifier) = classifiers.get(classifier_name) {
-        for (&precedence, &lp) in &classifier.lp_by_prec {
-            let Some(slot) = table.get_mut(usize::from(precedence)) else {
-                return Err(
-                    crate::policy::SnapshotIntegrityError::CosInetPrecedenceCodePointOutOfRange {
-                        classifier: classifier_name.to_string(),
-                        precedence,
-                    },
-                );
-            };
-            *slot = lp;
+        if let Some(precedence) = classifier.invalid_precedence {
+            return Err(
+                crate::policy::SnapshotIntegrityError::CosInetPrecedenceCodePointOutOfRange {
+                    classifier: classifier_name.to_string(),
+                    precedence,
+                },
+            );
+        }
+        for (precedence, &lp) in classifier.lp_by_prec.iter().enumerate() {
+            if lp != u8::MAX {
+                table[precedence] = lp;
+            }
         }
     }
     Ok(table)
 }
 
-/// #3995: flatten an 802.1p classifier's `lp_by_pcp` into a fixed 8-entry
-/// table. `u8::MAX` marks an unclassified code-point.
+/// #3995: flatten an 802.1p classifier's loss-priority into an 8-entry table.
+/// `u8::MAX` marks an unclassified code-point.
 fn build_cos_ieee8021_lp_table(
     classifier_name: &str,
     classifiers: &FastMap<String, CoSIEEE8021ClassifierConfig>,
@@ -242,20 +236,23 @@ fn build_cos_ieee8021_lp_table(
         return Ok(table);
     }
     if let Some(classifier) = classifiers.get(classifier_name) {
-        for (&pcp, &lp) in &classifier.lp_by_pcp {
-            let Some(slot) = table.get_mut(usize::from(pcp)) else {
-                return Err(
-                    crate::policy::SnapshotIntegrityError::CosIeee8021CodePointOutOfRange {
-                        classifier: classifier_name.to_string(),
-                        pcp,
-                    },
-                );
-            };
-            *slot = lp;
+        if let Some(pcp) = classifier.invalid_pcp {
+            return Err(
+                crate::policy::SnapshotIntegrityError::CosIeee8021CodePointOutOfRange {
+                    classifier: classifier_name.to_string(),
+                    pcp,
+                },
+            );
+        }
+        for (pcp, &lp) in classifier.lp_by_pcp.iter().enumerate() {
+            if lp != u8::MAX {
+                table[pcp] = lp;
+            }
         }
     }
     Ok(table)
 }
+
 
 /// #3995: the loss-priority-INDEPENDENT rewrite for a forwarding-class, or
 /// `None`. `Some(v)` only when EVERY loss-priority maps to the same code-point
@@ -684,8 +681,7 @@ pub(super) fn build_cos_classifier_tables(
         .iter()
         .filter(|classifier| !classifier.name.is_empty())
         .map(|classifier| {
-            let mut queue_by_dscp = FastMap::default();
-            let mut lp_by_dscp = FastMap::default();
+            let mut compiled = CoSDSCPClassifierConfig::default();
             for entry in &classifier.entries {
                 if entry.forwarding_class.is_empty() {
                     continue;
@@ -693,21 +689,19 @@ pub(super) fn build_cos_classifier_tables(
                 let Some(queue_id) = class_to_queue.get(&entry.forwarding_class).copied() else {
                     continue;
                 };
-                // #3995: a classifier entry with no explicit loss-priority
-                // defaults to LOW (the Junos default drop-precedence).
+                // #3995: an omitted loss-priority defaults to LOW.
                 let lp = cos_loss_priority_index(&entry.loss_priority).unwrap_or(0);
-                for dscp in &entry.dscp_values {
-                    queue_by_dscp.insert(*dscp, queue_id);
-                    lp_by_dscp.insert(*dscp, lp);
+                for &dscp in &entry.dscp_values {
+                    let index = usize::from(dscp);
+                    if index < compiled.queue_by_dscp.len() {
+                        compiled.queue_by_dscp[index] = Some(queue_id);
+                        compiled.lp_by_dscp[index] = lp;
+                    } else {
+                        compiled.invalid_dscp.get_or_insert(dscp);
+                    }
                 }
             }
-            (
-                classifier.name.clone(),
-                CoSDSCPClassifierConfig {
-                    queue_by_dscp,
-                    lp_by_dscp,
-                },
-            )
+            (classifier.name.clone(), compiled)
         })
         .collect::<FastMap<_, _>>();
     let ieee8021_classifiers = cos
@@ -715,8 +709,7 @@ pub(super) fn build_cos_classifier_tables(
         .iter()
         .filter(|classifier| !classifier.name.is_empty())
         .map(|classifier| {
-            let mut queue_by_pcp = FastMap::default();
-            let mut lp_by_pcp = FastMap::default();
+            let mut compiled = CoSIEEE8021ClassifierConfig::default();
             for entry in &classifier.entries {
                 if entry.forwarding_class.is_empty() {
                     continue;
@@ -725,18 +718,17 @@ pub(super) fn build_cos_classifier_tables(
                     continue;
                 };
                 let lp = cos_loss_priority_index(&entry.loss_priority).unwrap_or(0);
-                for pcp in &entry.code_points {
-                    queue_by_pcp.insert(*pcp, queue_id);
-                    lp_by_pcp.insert(*pcp, lp);
+                for &pcp in &entry.code_points {
+                    let index = usize::from(pcp);
+                    if index < compiled.queue_by_pcp.len() {
+                        compiled.queue_by_pcp[index] = Some(queue_id);
+                        compiled.lp_by_pcp[index] = lp;
+                    } else {
+                        compiled.invalid_pcp.get_or_insert(pcp);
+                    }
                 }
             }
-            (
-                classifier.name.clone(),
-                CoSIEEE8021ClassifierConfig {
-                    queue_by_pcp,
-                    lp_by_pcp,
-                },
-            )
+            (classifier.name.clone(), compiled)
         })
         .collect::<FastMap<_, _>>();
     // #6847: the IP-precedence classifier table. Structurally identical to the
@@ -747,8 +739,7 @@ pub(super) fn build_cos_classifier_tables(
         .iter()
         .filter(|classifier| !classifier.name.is_empty())
         .map(|classifier| {
-            let mut queue_by_prec = FastMap::default();
-            let mut lp_by_prec = FastMap::default();
+            let mut compiled = CoSINetPrecedenceClassifierConfig::default();
             for entry in &classifier.entries {
                 if entry.forwarding_class.is_empty() {
                     continue;
@@ -757,18 +748,17 @@ pub(super) fn build_cos_classifier_tables(
                     continue;
                 };
                 let lp = cos_loss_priority_index(&entry.loss_priority).unwrap_or(0);
-                for precedence in &entry.precedences {
-                    queue_by_prec.insert(*precedence, queue_id);
-                    lp_by_prec.insert(*precedence, lp);
+                for &precedence in &entry.precedences {
+                    let index = usize::from(precedence);
+                    if index < compiled.queue_by_prec.len() {
+                        compiled.queue_by_prec[index] = Some(queue_id);
+                        compiled.lp_by_prec[index] = lp;
+                    } else {
+                        compiled.invalid_precedence.get_or_insert(precedence);
+                    }
                 }
             }
-            (
-                classifier.name.clone(),
-                CoSINetPrecedenceClassifierConfig {
-                    queue_by_prec,
-                    lp_by_prec,
-                },
-            )
+            (classifier.name.clone(), compiled)
         })
         .collect::<FastMap<_, _>>();
     let dscp_rewrite_rules = cos
@@ -873,6 +863,7 @@ pub(super) fn build_cos_classifier_tables(
 pub(super) fn build_cos_iface_config(
     iface: &InterfaceSnapshot,
     tables: &ClassifierTables<'_>,
+    ingress_bindings: CoSIngressClassifierBindings,
 ) -> Result<Option<CoSInterfaceConfig>, crate::policy::SnapshotIntegrityError> {
     let burst_bytes = if iface.cos_shaping_burst_bytes > 0 {
         iface.cos_shaping_burst_bytes
@@ -1074,14 +1065,20 @@ pub(super) fn build_cos_iface_config(
         .get(&iface.cos_dscp_classifier)
         .map(|c| {
             c.queue_by_dscp
-                .values()
+                .iter()
+                .flatten()
                 .any(|q| iface_queue_ids.contains(q))
         })
         .unwrap_or(false);
     let ieee8021_classifier_targets_iface_queue = tables
         .ieee8021_classifiers
         .get(&iface.cos_ieee8021_classifier)
-        .map(|c| c.queue_by_pcp.values().any(|q| iface_queue_ids.contains(q)))
+        .map(|c| {
+            c.queue_by_pcp
+                .iter()
+                .flatten()
+                .any(|q| iface_queue_ids.contains(q))
+        })
         .unwrap_or(false);
     // #6847: an inet-precedence classifier admits the interface on exactly the
     // same terms as the other two BA arms. Omitting it here would make the
@@ -1094,7 +1091,8 @@ pub(super) fn build_cos_iface_config(
         .get(&iface.cos_inet_precedence_classifier)
         .map(|c| {
             c.queue_by_prec
-                .values()
+                .iter()
+                .flatten()
                 .any(|q| iface_queue_ids.contains(q))
         })
         .unwrap_or(false);
@@ -1117,6 +1115,7 @@ pub(super) fn build_cos_iface_config(
         || inet_precedence_classifier_targets_iface_queue
         || dscp_rewrite_targets_iface_class;
     if !contributes_usable_cos_state {
+        validate_consumed_ingress_classifier_domains(iface, tables, ingress_bindings)?;
         return Ok(None);
     }
 
@@ -1183,6 +1182,10 @@ pub(super) fn build_cos_iface_config(
     // outside this set falls back to `default_queue` (forward on best-effort)
     // instead of writing an unmaterialized queue id that blackholes at enqueue.
     let materialized_queues: Vec<u8> = queues.iter().map(|queue| queue.queue_id).collect();
+    let mut queue_id_bitmap = [0_u64; 4];
+    for &queue_id in &materialized_queues {
+        queue_id_bitmap[usize::from(queue_id) >> 6] |= 1_u64 << (queue_id & 63);
+    }
     let dscp_queue_by_dscp = build_cos_dscp_queue_table(
         &iface.cos_dscp_classifier,
         &tables.dscp_classifiers,
@@ -1225,6 +1228,7 @@ pub(super) fn build_cos_iface_config(
         inet_precedence_queue_by_prec,
         queue_by_forwarding_class,
         queues,
+        queue_id_bitmap,
         oversubscription_policy,
         oversubscription_guarantee_fraction,
         priority_low_min_share_bytes: iface.cos_priority_low_min_share_bytes,
@@ -1307,6 +1311,26 @@ pub(super) fn dangling_cos_interface_refs(
     .collect()
 }
 
+/// Assign stable, build-local integer indexes to the globally compiled
+/// classifier tables. Bindings carry these indexes into TX so classification
+/// uses integer lookups rather than hashing names on every packet.
+fn index_classifier_tables<T: Clone>(
+    classifiers: &FastMap<String, T>,
+) -> (FastMap<String, usize>, Vec<T>) {
+    let mut names = classifiers.keys().cloned().collect::<Vec<_>>();
+    names.sort_unstable();
+    let mut indexes = FastMap::default();
+    let mut tables = Vec::with_capacity(names.len());
+    for name in names {
+        let Some(table) = classifiers.get(&name) else {
+            continue;
+        };
+        indexes.insert(name, tables.len());
+        tables.push(table.clone());
+    }
+    (indexes, tables)
+}
+
 /// CoS state orchestrator. Pre-#1342 this was a single 312-LOC
 /// function; #1342 split it into [`build_cos_classifier_tables`]
 /// + [`build_cos_iface_config`] + this slim orchestrator.
@@ -1344,10 +1368,18 @@ pub(super) fn build_cos_state(
     // no best-effort / low-priority default, rather than installing partial or
     // expedited-as-default state.
     let tables = build_cos_classifier_tables(cos)?;
+    let (dscp_classifier_indexes, dscp_classifier_tables) =
+        index_classifier_tables(&tables.dscp_classifiers);
+    let (ieee8021_classifier_indexes, ieee8021_classifier_tables) =
+        index_classifier_tables(&tables.ieee8021_classifiers);
+    let (inet_precedence_classifier_indexes, inet_precedence_classifier_tables) =
+        index_classifier_tables(&tables.inet_precedence_classifiers);
     let mut state = CoSState::default();
     // CoS runtime state and ingress bindings are keyed by ifindex. Logical
-    // units sharing a netdev must therefore produce identical state; the base
-    // row is not a CoS unit and is deliberately excluded from this alias check.
+    // rows in the consumed `is_unit != Some(false)` domain must therefore
+    // agree on classifier identities and runtime state; distinct bindings are
+    // rejected before they can overwrite one another. Known base-interface
+    // rows are deliberately excluded from this alias check.
     let mut first_unit_by_ifindex: FastMap<
         i32,
         (&InterfaceSnapshot, bool, CoSIngressClassifierBindings),
@@ -1357,23 +1389,20 @@ pub(super) fn build_cos_state(
             continue;
         }
         let ingress_bindings = CoSIngressClassifierBindings {
-            dscp: !iface.cos_dscp_classifier.is_empty()
-                && tables.dscp_classifiers.contains_key(&iface.cos_dscp_classifier),
-            inet_precedence: !iface.cos_inet_precedence_classifier.is_empty()
-                && tables
-                    .inet_precedence_classifiers
-                    .contains_key(&iface.cos_inet_precedence_classifier),
-            ieee8021: !iface.cos_ieee8021_classifier.is_empty()
-                && tables
-                    .ieee8021_classifiers
-                    .contains_key(&iface.cos_ieee8021_classifier),
+            dscp: dscp_classifier_indexes.get(&iface.cos_dscp_classifier).copied(),
+            inet_precedence: inet_precedence_classifier_indexes
+                .get(&iface.cos_inet_precedence_classifier)
+                .copied(),
+            ieee8021: ieee8021_classifier_indexes
+                .get(&iface.cos_ieee8021_classifier)
+                .copied(),
         };
         // #7337: report a dangling interface reference BEFORE the admission
         // decision, so the shape where the interface is admitted on another
         // input and the reference is silently inert is reported too — not only
         // the shape where the interface is dropped.
         let dangling = dangling_cos_interface_refs(iface, &tables);
-        let built = build_cos_iface_config(iface, &tables)?;
+        let built = build_cos_iface_config(iface, &tables, ingress_bindings)?;
         for (kind, name) in &dangling {
             eprintln!(
                 "xpf-userspace-dp: WARNING: interface ifindex {} names {} {:?}, which this \
@@ -1392,7 +1421,7 @@ pub(super) fn build_cos_state(
         let built = built
             .map(|cfg| build_cos_lp_rewrite(iface, &cfg, &tables).map(|lp| (cfg, lp)))
             .transpose()?;
-        let duplicate_unit = if iface.is_unit == Some(true) {
+        let duplicate_unit = if iface.is_unit != Some(false) {
             match first_unit_by_ifindex.get(&iface.ifindex).copied() {
                 Some((first_iface, first_had_cos, first_bindings)) => {
                     let same_cos = first_had_cos == built.is_some()
@@ -1441,8 +1470,9 @@ pub(super) fn build_cos_state(
             }
         }
     }
-    state.dscp_classifiers = tables.dscp_classifiers;
-    state.ieee8021_classifiers = tables.ieee8021_classifiers;
+    state.dscp_classifier_tables = dscp_classifier_tables;
+    state.ieee8021_classifier_tables = ieee8021_classifier_tables;
+    state.inet_precedence_classifier_tables = inet_precedence_classifier_tables;
     state.dscp_rewrite_rules = tables.dscp_rewrite_rules;
     Ok(state)
 }
@@ -1455,3 +1485,6 @@ mod remainder_temporal_tests_6846;
 mod cos_duplicate_ifindex_11429;
 #[cfg(test)]
 mod dangling_refs_7337;
+#[cfg(test)]
+#[path = "cos_ingress_domains_11679.rs"]
+mod cos_ingress_domains_11679;

@@ -1,5 +1,11 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Select transit CoS queues and loss priority from logical ingress-unit
+    classifier bindings. Keep output-filter-pinned queues fixed while
+    refreshing packet-dependent LP rewrites; validate consumed ingress
+    code-point domains and reject conflicting unit bindings on shared ifindices
+    (#11679).
+
   * Reject user applications and application-sets named `any` at commit
     because `match application any` resolves as match-all before name lookup;
     warn on tolerant loads while preserving the keyword semantics (#12048).

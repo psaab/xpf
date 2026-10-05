@@ -326,6 +326,7 @@ fn ingest_cos_pending_tx_step1_refusal_falls_through_to_step2_10310() {
     forwarding.cos.interfaces.insert(
         80,
         crate::afxdp::types::CoSInterfaceConfig {
+            queue_id_bitmap: [1, 0, 0, 0],
             shaping_rate_bytes: 1_000_000,
             burst_bytes: 64 * 1024,
             default_queue: 0,

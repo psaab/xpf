@@ -6822,6 +6822,7 @@ fn ieee8021_classifier_fails_closed_on_out_of_range_pcp() {
     let mut pcp_table = [u8::MAX; 8];
     pcp_table[7] = 3;
     let iface = CoSInterfaceConfig {
+        queue_id_bitmap: [0; 4],
         shaping_rate_bytes: 1_000_000,
         burst_bytes: COS_MIN_BURST_BYTES,
         default_queue: 0,
@@ -7369,5 +7370,232 @@ fn clone_prepared_request_for_cos_refuses_an_out_of_bounds_descriptor_8597_k41()
         "a descriptor outside the UMEM must make the clone refuse — the caller \
          turns that refusal into a counted drop instead of the worker panic it \
          used to be (#8597 K41)"
+    );
+}
+
+/// #11679 STEP-0: TX queue selection must classify on the INGRESS unit's BA
+/// tables, not the egress interface's. Ingress 5 binds classifier `voice`
+/// (EF(46) -> queue 5); egress 202 binds classifier `bulk` (EF(46) -> queue
+/// 1). Schema (`pkg/config/schema_cos.go`: classifiers apply to "traffic
+/// arriving on this unit") promises ingress-unit classification, so an EF
+/// packet from ingress 5 must land in queue 5 even though egress 202 never
+/// bound `voice`.
+///
+/// FAIL-ON-REVERT: the pre-fix table lookup is `iface` =
+/// `cos.interfaces.get(&egress_ifindex)`, so EF resolves on the egress `bulk`
+/// classifier (queue 1) and this cell goes red with Some(1) instead of Some(5).
+/// The distrust control below (ingress with no binding) keeps Some(0): the fix
+/// must move the locus, not trust everything.
+fn locus_split_snapshot_11679() -> ConfigSnapshot {
+    let interface = |ifindex: i32,
+                     cos_dscp_classifier: &str,
+                     usable_cos: bool|
+     -> InterfaceSnapshot {
+        InterfaceSnapshot {
+            ifindex,
+            cos_shaping_rate_bytes_per_sec: if usable_cos { 10_000_000 } else { 0 },
+            cos_scheduler_map: if usable_cos { "wan-map" } else { "" }.into(),
+            cos_dscp_classifier: cos_dscp_classifier.into(),
+            cos_dscp_rewrite_rule: if usable_cos { "wan-rw" } else { "" }.into(),
+            ..Default::default()
+        }
+    };
+    let scheduler = |name: &str| CoSSchedulerSnapshot {
+        name: name.into(),
+        priority: "low".into(),
+        transmit_rate_bytes: 4_000_000,
+        buffer_size_bytes: 128_000,
+        ..Default::default()
+    };
+    let entry = |forwarding_class: &str, loss_priority: &str, dscp_value| {
+        CoSDSCPClassifierEntrySnapshot {
+            forwarding_class: forwarding_class.into(),
+            loss_priority: loss_priority.into(),
+            dscp_values: vec![dscp_value],
+        }
+    };
+    let classifier = |name: &str, entries: Vec<CoSDSCPClassifierEntrySnapshot>| {
+        CoSDSCPClassifierSnapshot {
+            name: name.into(),
+            entries,
+        }
+    };
+    ConfigSnapshot {
+        interfaces: vec![
+            interface(202, "bulk", true),
+            interface(203, "", true),
+            interface(5, "voice", false),
+            interface(6, "", false),
+        ],
+        class_of_service: Some(ClassOfServiceSnapshot {
+            forwarding_classes: vec![
+                CoSForwardingClassSnapshot {
+                    name: "best-effort".into(),
+                    queue: 0,
+                },
+                CoSForwardingClassSnapshot {
+                    name: "bulk-data".into(),
+                    queue: 1,
+                },
+                CoSForwardingClassSnapshot {
+                    name: "voice".into(),
+                    queue: 5,
+                },
+            ],
+            dscp_classifiers: vec![
+                classifier("bulk", vec![entry("bulk-data", "low", 46)]),
+                classifier(
+                    "voice",
+                    vec![
+                        entry("voice", "high", 46),
+                        entry("bulk-data", "low", 10),
+                    ],
+                ),
+            ],
+            schedulers: vec![
+                scheduler("be-sched"),
+                scheduler("bulk-sched"),
+                scheduler("voice-sched"),
+            ],
+            scheduler_maps: vec![CoSSchedulerMapSnapshot {
+                name: "wan-map".into(),
+                entries: vec![
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "best-effort".into(),
+                        scheduler: "be-sched".into(),
+                    },
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "bulk-data".into(),
+                        scheduler: "bulk-sched".into(),
+                    },
+                    CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "voice".into(),
+                        scheduler: "voice-sched".into(),
+                    },
+                ],
+            }],
+            ieee8021_classifiers: vec![],
+            dscp_rewrite_rules: vec![CoSDSCPRewriteRuleSnapshot {
+                name: "wan-rw".into(),
+                entries: vec![
+                    CoSDSCPRewriteRuleEntrySnapshot {
+                        forwarding_class: "voice".into(),
+                        loss_priority: "high".into(),
+                        dscp_value: 42,
+                    },
+                    CoSDSCPRewriteRuleEntrySnapshot {
+                        forwarding_class: "bulk-data".into(),
+                        loss_priority: "low".into(),
+                        dscp_value: 17,
+                    },
+                ],
+            }],
+            inet_precedence_classifiers: vec![],
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn tx_queue_follows_ingress_unit_classifier_not_egress_11679() {
+    let forwarding = build_forwarding_state(&locus_split_snapshot_11679());
+    assert!(
+        forwarding.cos.interfaces.get(&5).is_none(),
+        "#11679 PREMISE: ingress 5 must bind a classifier WITHOUT becoming an egress shaper"
+    );
+    let key = inet_precedence_test_key();
+    let voice_meta = UserspaceDpMeta {
+        ingress_ifindex: 5,
+        addr_family: libc::AF_INET as u8,
+        dscp: 46,
+        ..Default::default()
+    };
+    let ingress_classified = resolve_cos_tx_selection(
+        &forwarding,
+        202,
+        voice_meta,
+        Some(&key),
+        TermMatchExtra::default(),
+    );
+    assert_eq!(
+        ingress_classified.queue_id,
+        Some(5),
+        "#11679 EF(46) from ingress classifier `voice` must select queue 5, not egress \
+         classifier `bulk` queue 1"
+    );
+    assert_eq!(
+        ingress_classified.dscp_rewrite,
+        Some(42),
+        "#11679 ingress loss-priority `high` selects the egress (queue 5, high) rewrite"
+    );
+
+    let unbound = resolve_cos_tx_selection(
+        &forwarding,
+        202,
+        UserspaceDpMeta {
+            ingress_ifindex: 6,
+            ..voice_meta
+        },
+        Some(&key),
+        TermMatchExtra::default(),
+    );
+    assert_eq!(
+        unbound.queue_id,
+        Some(0),
+        "#11679 an unbound ingress must not trust its self-marked EF"
+    );
+
+    // Egress 203 has the same materialized queues and rewrite rule but no BA
+    // classifier. Its flow-cache descriptor must still reclassify on ingress 5.
+    let cached = resolve_cached_cos_tx_selection(&forwarding, 203, voice_meta, &key);
+    assert_eq!(cached.queue_id, Some(5));
+    assert!(
+        cached.ba_reclassify,
+        "#11679 ingress-only BA bindings must keep per-packet cache-hit classification active"
+    );
+    assert_eq!(cached.dscp_rewrite, Some(42));
+    let (hit_queue, hit_rewrite) = reclassify_cached_ba_queue_and_lp_rewrite(
+        &forwarding,
+        203,
+        10,
+        voice_meta.ingress_pcp,
+        voice_meta.ingress_vlan_present != 0,
+        voice_meta.ingress_ifindex,
+        voice_meta.ingress_vlan_id,
+    )
+    .expect("#11679 a cached BA hit must re-resolve the ingress-only binding");
+    assert_eq!(hit_queue, 1, "#11679 the hit uses ingress classifier DSCP 10");
+    assert_eq!(
+        hit_rewrite,
+        Some(17),
+        "#11679 the hit uses ingress loss-priority and egress queue 1's rewrite"
+    );
+    let mut filtered_snapshot = locus_split_snapshot_11679();
+    filtered_snapshot.interfaces[0].filter_output_v4 = "egress-class".into();
+    filtered_snapshot.filters.push(FirewallFilterSnapshot {
+        name: "egress-class".into(),
+        family: "inet".into(),
+        terms: vec![FirewallTermSnapshot {
+            name: "bulk-class".into(),
+            protocols: vec!["tcp".into()],
+            destination_ports: vec!["443".into()],
+            action: "accept".into(),
+            forwarding_class: "bulk-data".into(),
+            ..Default::default()
+        }],
+    });
+    let filtered_forwarding = build_forwarding_state(&filtered_snapshot);
+    let filter_classified = resolve_cos_tx_selection(
+        &filtered_forwarding,
+        202,
+        voice_meta,
+        Some(&key),
+        TermMatchExtra::default(),
+    );
+    assert_eq!(
+        filter_classified.queue_id,
+        Some(1),
+        "#11679 an explicit egress filter forwarding-class must still outrank \
+         the ingress BA result (queue 5)"
     );
 }

@@ -1521,17 +1521,25 @@ fn build_cos_state_binds_dscp_classifier_to_usable_interface_queue_ids() {
     assert_eq!(lp_rewrite.dscp_rewrite_by_queue_lp.get(&(5, 0)), Some(&46));
     assert_eq!(lp_rewrite.dscp_lp_by_dscp[46], 0);
     assert_eq!(lp_rewrite.dscp_lp_by_dscp[0], 0);
+    let ingress_bindings = state
+        .ingress_classifier_bindings
+        .get(&42)
+        .expect("missing ingress classifier binding");
     let classifier = state
-        .dscp_classifiers
-        .get("wan-classifier")
-        .expect("missing classifier");
-    assert_eq!(classifier.queue_by_dscp.get(&46), Some(&5));
-    assert_eq!(classifier.queue_by_dscp.get(&0), Some(&0));
+        .dscp_classifier_tables
+        .get(ingress_bindings.dscp.expect("missing DSCP classifier index"))
+        .expect("missing compiled DSCP classifier");
+    assert_eq!(classifier.queue_by_dscp[46], Some(5));
+    assert_eq!(classifier.queue_by_dscp[0], Some(0));
     let pcp_classifier = state
-        .ieee8021_classifiers
-        .get("wan-pcp")
-        .expect("missing 802.1p classifier");
-    assert_eq!(pcp_classifier.queue_by_pcp.get(&5), Some(&5));
+        .ieee8021_classifier_tables
+        .get(
+            ingress_bindings
+                .ieee8021
+                .expect("missing 802.1p classifier index"),
+        )
+        .expect("missing compiled 802.1p classifier");
+    assert_eq!(pcp_classifier.queue_by_pcp[5], Some(5));
 }
 
 #[test]

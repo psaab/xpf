@@ -4394,3 +4394,392 @@ fn cached_no_route_reject_is_silent_and_logs_deny_not_reject_11073() {
         "NoRoute cannot synthesize a reply and must report DENY, not REJECT"
     );
 }
+
+fn cos_cache_fixture(
+    built: &crate::afxdp::types::ForwardingState,
+) -> LiveCallSiteFixture {
+    let mut fixture =
+        LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture.forwarding.cos = built.cos.clone();
+    fixture.forwarding.filter_state = built.filter_state.clone();
+    fixture.forwarding.tx_selection_enabled_v4 = built.tx_selection_enabled_v4;
+    fixture.forwarding.tx_selection_enabled_v6 = built.tx_selection_enabled_v6;
+    fixture.forwarding.ingress_logical_ifindex = built.ingress_logical_ifindex.clone();
+    fixture
+}
+
+/// #11679: output-filter forwarding-class pins queue 1, but ingress DSCP
+/// chooses loss priority on every TCP/443 cache hit. The flow-cache key omits
+/// DSCP, so both transitions must refresh only the CoS rewrite while retaining
+/// the queue. This exercises `stage_flow_cache_hit` with an injected cached
+/// descriptor and asserts `PreparedTxRequest` fields plus staged-frame presence,
+/// not the emitted wire bytes.
+#[test]
+fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
+    let scheduler = |name: &str, priority: &str| crate::CoSSchedulerSnapshot {
+        name: name.into(),
+        priority: priority.into(),
+        transmit_rate_bytes: 4_000_000,
+        buffer_size_bytes: 128_000,
+        ..Default::default()
+    };
+    let classifier_entry =
+        |forwarding_class: &str, loss_priority: &str, dscp_value| {
+            crate::CoSDSCPClassifierEntrySnapshot {
+                forwarding_class: forwarding_class.into(),
+                loss_priority: loss_priority.into(),
+                dscp_values: vec![dscp_value],
+            }
+        };
+    let classifier = |name: &str, entries| crate::CoSDSCPClassifierSnapshot {
+        name: name.into(),
+        entries,
+    };
+    let mut snapshot = crate::ConfigSnapshot {
+        interfaces: vec![
+            crate::InterfaceSnapshot {
+                name: "reth0.0".into(),
+                ifindex: EGRESS_IFINDEX,
+                filter_output_v4: "pin-bulk".into(),
+                cos_shaping_rate_bytes_per_sec: 10_000_000,
+                cos_scheduler_map: "wan-map".into(),
+                cos_dscp_classifier: "bulk".into(),
+                cos_dscp_rewrite_rule: "wan-rw".into(),
+                ..Default::default()
+            },
+            crate::InterfaceSnapshot {
+                name: "ge-0-0-2".into(),
+                ifindex: PHYS_INGRESS_IFINDEX,
+                is_unit: Some(false),
+                hardware_addr: "02:bf:72:00:01:01".into(),
+                ..Default::default()
+            },
+            crate::InterfaceSnapshot {
+                name: "ge-0-0-2.80".into(),
+                ifindex: LOGICAL_INGRESS_IFINDEX,
+                parent_ifindex: PHYS_INGRESS_IFINDEX,
+                vlan_id: i32::from(INGRESS_VLAN_ID),
+                is_unit: Some(true),
+                cos_dscp_classifier: "voice".into(),
+                ..Default::default()
+            },
+            crate::InterfaceSnapshot {
+                name: "ge-0-0-2.81".into(),
+                ifindex: LOGICAL_INGRESS_IFINDEX + 1,
+                parent_ifindex: PHYS_INGRESS_IFINDEX,
+                vlan_id: 81,
+                is_unit: Some(true),
+                cos_dscp_classifier: "vlan81".into(),
+                ..Default::default()
+            },
+        ],
+        filters: vec![crate::FirewallFilterSnapshot {
+            name: "pin-bulk".into(),
+            family: "inet".into(),
+            terms: vec![crate::FirewallTermSnapshot {
+                name: "bulk-class".into(),
+                protocols: vec!["tcp".into()],
+                destination_ports: vec!["443".into()],
+                action: "accept".into(),
+                forwarding_class: "bulk-data".into(),
+                ..Default::default()
+            }],
+        }],
+        class_of_service: Some(crate::ClassOfServiceSnapshot {
+            forwarding_classes: vec![
+                crate::CoSForwardingClassSnapshot {
+                    name: "best-effort".into(),
+                    queue: 0,
+                },
+                crate::CoSForwardingClassSnapshot {
+                    name: "bulk-data".into(),
+                    queue: 1,
+                },
+                crate::CoSForwardingClassSnapshot {
+                    name: "voice".into(),
+                    queue: 5,
+                },
+            ],
+            dscp_classifiers: vec![
+                classifier(
+                    "bulk",
+                    vec![
+                        classifier_entry("bulk-data", "low", 46),
+                        classifier_entry("bulk-data", "high", 10),
+                    ],
+                ),
+                classifier(
+                    "voice",
+                    vec![
+                        classifier_entry("voice", "high", 46),
+                        classifier_entry("bulk-data", "low", 10),
+                    ],
+                ),
+                classifier(
+                    "vlan81",
+                    vec![classifier_entry("bulk-data", "high", 10)],
+                ),
+            ],
+            dscp_rewrite_rules: vec![crate::CoSDSCPRewriteRuleSnapshot {
+                name: "wan-rw".into(),
+                entries: vec![
+                    crate::CoSDSCPRewriteRuleEntrySnapshot {
+                        forwarding_class: "bulk-data".into(),
+                        loss_priority: "low".into(),
+                        dscp_value: 17,
+                    },
+                    crate::CoSDSCPRewriteRuleEntrySnapshot {
+                        forwarding_class: "bulk-data".into(),
+                        loss_priority: "high".into(),
+                        dscp_value: 42,
+                    },
+                    crate::CoSDSCPRewriteRuleEntrySnapshot {
+                        forwarding_class: "voice".into(),
+                        loss_priority: "high".into(),
+                        dscp_value: 42,
+                    },
+                ],
+            }],
+            schedulers: vec![
+                scheduler("be-sched", "low"),
+                scheduler("bulk-sched", "low"),
+                scheduler("voice-sched", "high"),
+            ],
+            scheduler_maps: vec![crate::CoSSchedulerMapSnapshot {
+                name: "wan-map".into(),
+                entries: vec![
+                    crate::CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "best-effort".into(),
+                        scheduler: "be-sched".into(),
+                    },
+                    crate::CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "bulk-data".into(),
+                        scheduler: "bulk-sched".into(),
+                    },
+                    crate::CoSSchedulerMapEntrySnapshot {
+                        forwarding_class: "voice".into(),
+                        scheduler: "voice-sched".into(),
+                    },
+                ],
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let built = crate::afxdp::forwarding_build::build_forwarding_state(&snapshot);
+    for (seed_dscp, hit_dscp, expected_dscp) in [(46u8, 10u8, 17u8), (10, 46, 42)] {
+        let fixture = cos_cache_fixture(&built);
+
+        let mut seed_frame = vlan_tagged_tcp_v4_frame(0);
+        seed_frame[19] = seed_dscp << 2;
+        let mut seed_meta = test_meta(&seed_frame);
+        seed_meta.dscp = seed_dscp;
+        let seed_selection = crate::afxdp::tx::resolve_cached_cos_tx_selection(
+            &fixture.forwarding,
+            EGRESS_IFINDEX,
+            seed_meta,
+            &test_key(),
+        );
+        assert_eq!(seed_selection.queue_id, Some(1), "filter pins bulk queue 1");
+        assert!(!seed_selection.ba_reclassify, "the filter-pinned queue stays fixed");
+        assert!(seed_selection.cos_lp_reclassify);
+        assert_eq!(
+            seed_selection.dscp_rewrite,
+            if seed_dscp == 46 { Some(42) } else { Some(17) },
+            "the seed CoS rewrite must reflect its own ingress loss priority"
+        );
+
+        let mut entry = cached_entry();
+        entry.descriptor.tx_selection = seed_selection;
+        let mut hit_frame = vlan_tagged_tcp_v4_frame(0);
+        hit_frame[19] = hit_dscp << 2;
+        let mut hit_meta = test_meta(&hit_frame);
+        hit_meta.dscp = hit_dscp;
+        let run = run_stage_with_entry(&fixture, &hit_frame, hit_meta, entry, 0);
+
+        assert_eq!(run.flow_cache_tallies, (1, 0, 0), "must drive a real cache hit");
+        assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
+        let prepared = run
+            .tx_pipeline
+            .pending_tx_prepared
+            .front()
+            .expect("the cache hit must stage the packet for TX");
+        assert_eq!(prepared.cos_queue_id, Some(1), "the output filter keeps queue 1 pinned");
+        assert_eq!(prepared.dscp_rewrite, Some(expected_dscp));
+        assert!(run.tx_frame.is_some(), "the in-place production path stages bytes");
+    }
+    // A second VLAN on the same physical ingress resolves a different unit and
+    // therefore a different classifier, even though the packet tuple is equal.
+    let fixture = cos_cache_fixture(&built);
+    let mut vlan_seed_frame = vlan_tagged_tcp_v4_frame(0);
+    vlan_seed_frame[14..16].copy_from_slice(&81_u16.to_be_bytes());
+    vlan_seed_frame[19] = 46 << 2;
+    let mut vlan_seed_meta = test_meta(&vlan_seed_frame);
+    vlan_seed_meta.dscp = 46;
+    vlan_seed_meta.ingress_vlan_id = 81;
+    let vlan_seed_selection = crate::afxdp::tx::resolve_cached_cos_tx_selection(
+        &fixture.forwarding,
+        EGRESS_IFINDEX,
+        vlan_seed_meta,
+        &test_key(),
+    );
+    assert_eq!(vlan_seed_selection.queue_id, Some(1));
+    assert!(vlan_seed_selection.cos_lp_reclassify);
+
+    let mut vlan_entry = cached_entry();
+    vlan_entry.logical_ingress_ifindex = LOGICAL_INGRESS_IFINDEX + 1;
+    vlan_entry.metadata.ingress_vlan_id = 81;
+    vlan_entry.descriptor.tx_selection = vlan_seed_selection;
+    let mut vlan_hit_frame = vlan_tagged_tcp_v4_frame(0);
+    vlan_hit_frame[14..16].copy_from_slice(&81_u16.to_be_bytes());
+    vlan_hit_frame[19] = 10 << 2;
+    let mut vlan_hit_meta = test_meta(&vlan_hit_frame);
+    vlan_hit_meta.ingress_vlan_id = 81;
+    vlan_hit_meta.dscp = 10;
+    let vlan_run = run_stage_with_entry(&fixture, &vlan_hit_frame, vlan_hit_meta, vlan_entry, 0);
+    assert_eq!(vlan_run.flow_cache_tallies, (1, 0, 0));
+    let prepared = vlan_run
+        .tx_pipeline
+        .pending_tx_prepared
+        .front()
+        .expect("VLAN-specific cache hit stages TX");
+    assert_eq!(prepared.cos_queue_id, Some(1));
+    assert_eq!(prepared.dscp_rewrite, Some(42));
+    assert!(vlan_run.tx_frame.is_some(), "VLAN-specific hit stages bytes");
+
+    // A filter class that has no materialized scheduler queue is pinned to the
+    // interface default. That fallback remains fixed while the selected
+    // default queue's LP rewrite is refreshed from each ingress code point.
+    let mut fallback_snapshot = snapshot.clone();
+    fallback_snapshot.filters[0].terms[0].forwarding_class = "unmaterialized".into();
+    let fallback_cos = fallback_snapshot
+        .class_of_service
+        .as_mut()
+        .expect("CoS snapshot exists");
+    fallback_cos
+        .forwarding_classes
+        .push(crate::CoSForwardingClassSnapshot {
+            name: "unmaterialized".into(),
+            queue: 7,
+        });
+    fallback_cos.dscp_rewrite_rules[0].entries.extend([
+        crate::CoSDSCPRewriteRuleEntrySnapshot {
+            forwarding_class: "best-effort".into(),
+            loss_priority: "low".into(),
+            dscp_value: 17,
+        },
+        crate::CoSDSCPRewriteRuleEntrySnapshot {
+            forwarding_class: "best-effort".into(),
+            loss_priority: "high".into(),
+            dscp_value: 42,
+        },
+    ]);
+    let fallback_built =
+        crate::afxdp::forwarding_build::build_forwarding_state(&fallback_snapshot);
+    let fallback_fixture = cos_cache_fixture(&fallback_built);
+    for (seed_dscp, hit_dscp, expected_dscp) in [(46_u8, 10_u8, 17_u8), (10, 46, 42)] {
+        let mut seed_frame = vlan_tagged_tcp_v4_frame(0);
+        seed_frame[19] = seed_dscp << 2;
+        let mut seed_meta = test_meta(&seed_frame);
+        seed_meta.dscp = seed_dscp;
+        let selection = crate::afxdp::tx::resolve_cached_cos_tx_selection(
+            &fallback_fixture.forwarding,
+            EGRESS_IFINDEX,
+            seed_meta,
+            &test_key(),
+        );
+        assert_eq!(selection.queue_id, Some(0), "fallback pins the default queue");
+        assert!(selection.filter_forwarding_class_fallback_pinned);
+        assert!(selection.cos_lp_reclassify);
+        let mut entry = cached_entry();
+        entry.descriptor.tx_selection = selection;
+        let mut hit_frame = vlan_tagged_tcp_v4_frame(0);
+        hit_frame[19] = hit_dscp << 2;
+        let mut hit_meta = test_meta(&hit_frame);
+        hit_meta.dscp = hit_dscp;
+        let run = run_stage_with_entry(&fallback_fixture, &hit_frame, hit_meta, entry, 0);
+        assert_eq!(run.flow_cache_tallies, (1, 0, 0));
+        assert_eq!(
+            run.tx_pipeline
+                .pending_tx_prepared
+                .front()
+                .expect("fallback cache hit stages TX")
+                .cos_queue_id,
+            Some(0)
+        );
+        let prepared = run
+            .tx_pipeline
+            .pending_tx_prepared
+            .front()
+            .expect("fallback cache hit stages TX");
+        assert_eq!(prepared.dscp_rewrite, Some(expected_dscp));
+        assert!(run.tx_frame.is_some());
+    }
+
+    // The classifier's queue can be valid but absent from this egress's final
+    // queue set. Clamp it to default queue 0, then still apply that queue's
+    // current ingress LP rewrite on the cache hit.
+    let mut clamp_snapshot = snapshot.clone();
+    clamp_snapshot.filters[0].terms[0].forwarding_class.clear();
+    let clamp_cos = clamp_snapshot
+        .class_of_service
+        .as_mut()
+        .expect("CoS snapshot exists");
+    clamp_cos.scheduler_maps[0]
+        .entries
+        .retain(|entry| entry.forwarding_class == "best-effort");
+    clamp_cos.dscp_rewrite_rules[0]
+        .entries
+        .extend([
+            crate::CoSDSCPRewriteRuleEntrySnapshot {
+                forwarding_class: "best-effort".into(),
+                loss_priority: "low".into(),
+                dscp_value: 17,
+            },
+            crate::CoSDSCPRewriteRuleEntrySnapshot {
+                forwarding_class: "best-effort".into(),
+                loss_priority: "high".into(),
+                dscp_value: 42,
+            },
+        ]);
+    let clamp_built = crate::afxdp::forwarding_build::build_forwarding_state(&clamp_snapshot);
+    let clamp_fixture = cos_cache_fixture(&clamp_built);
+    for (seed_dscp, hit_dscp, expected_dscp) in [(46_u8, 10_u8, 17_u8), (10, 46, 42)] {
+        let mut seed_frame = vlan_tagged_tcp_v4_frame(0);
+        seed_frame[19] = seed_dscp << 2;
+        let mut seed_meta = test_meta(&seed_frame);
+        seed_meta.dscp = seed_dscp;
+        let selection = crate::afxdp::tx::resolve_cached_cos_tx_selection(
+            &clamp_fixture.forwarding,
+            EGRESS_IFINDEX,
+            seed_meta,
+            &test_key(),
+        );
+        assert_eq!(selection.queue_id, Some(0), "classifier queue clamps to q0");
+        assert!(selection.ba_reclassify);
+        let mut entry = cached_entry();
+        entry.descriptor.tx_selection = selection;
+        let mut hit_frame = vlan_tagged_tcp_v4_frame(0);
+        hit_frame[19] = hit_dscp << 2;
+        let mut hit_meta = test_meta(&hit_frame);
+        hit_meta.dscp = hit_dscp;
+        let run = run_stage_with_entry(&clamp_fixture, &hit_frame, hit_meta, entry, 0);
+        assert_eq!(run.flow_cache_tallies, (1, 0, 0));
+        assert_eq!(
+            run.tx_pipeline
+                .pending_tx_prepared
+                .front()
+                .expect("clamped cache hit stages TX")
+                .cos_queue_id,
+            Some(0)
+        );
+        let prepared = run
+            .tx_pipeline
+            .pending_tx_prepared
+            .front()
+            .expect("clamped cache hit stages TX");
+        assert_eq!(prepared.dscp_rewrite, Some(expected_dscp));
+        assert!(run.tx_frame.is_some());
+    }
+}

@@ -1231,27 +1231,40 @@ sync.
   control traffic, and flows with DSCP- or per-packet-L4-sensitive INPUT
   filters remain uncached.
 
-  **Per-packet CoS BA queue and LP rewrite on cache hits (#3778/#11430):** DSCP /
+  **Per-packet CoS BA queue and LP rewrite on cache hits (#3778/#11430/#11679):** DSCP /
   IEEE 802.1p behavior-aggregate classifiers select each packet's egress queue
   and classifier-assigned loss priority; the flow-cache key excludes DSCP/PCP.
-  When the seed sets `CachedTxSelectionDescriptor::ba_reclassify` (a BA
-  classifier is configured and no filter forwarding-class pinned the queue),
-  `flow_cache_hit.rs` re-resolves this packet's queue and `(queue,
-  loss-priority)` CoS rewrite. The cached filter rewrite is retained separately
-  and keeps precedence; absent a filter rewrite, the per-packet CoS result
-  replaces the seed's CoS rewrite. Default-queue, filter-FC-pinned, and no-CoS
-  flows keep their cached selection. The reclassification remains allocation-
-  free and gated by `ba_reclassify`.
-  #11787: an explicit filter forwarding-class with no materialized queue resolves
-  to the interface default and is pinned in the cached descriptor. It does not
-  fall through to a lower-precedence BA classifier; the miss increments the
-  internal `FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL` counter, which is not yet
-  exported through ProcessStatus or Prometheus.
+  `ba_reclassify` refreshes the queue and `(queue, loss-priority)` rewrite when
+  no filter (input or output) forwarding class pins the queue. A filter-pinned
+  queue stays fixed; the separate `cos_lp_reclassify` flag refreshes only the
+  packet-dependent ingress LP rewrite when that queue has a rewrite entry.
+  Rewrite precedence is policer, filter, fresh CoS, then the seed CoS result;
+  a fresh `None` also replaces a stale seed rewrite. Direct fixed-size
+  code-point tables and a bitmap of the final materialized queue set preserve
+  allocation-free, no-scan cache-hit selection, including default-queue
+  fallback and queue id 255. Dynamic classifier reads remain flag-gated.
+  #11787: an explicit filter forwarding-class with no materialized queue
+  resolves to the interface default and remains pinned, rather than falling
+  through to a lower-precedence BA classifier. The miss increments the internal
+  `FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL` counter, which is not yet exported
+  through ProcessStatus or Prometheus.
+  Consumed ingress classifier bindings validate DSCP, 802.1p, and inet-
+  precedence domains even when their logical unit is not admitted as egress
+  CoS; unbound classifier entries are not consumed. Logical-unit rows sharing
+  an ifindex must carry identical classifier bindings, while known base rows
+  (`is_unit == Some(false)`) are excluded from that conflict check.
   `txn_flow_cache_hit_reclassifies_ba_dscp_per_packet_3778` pins the DSCP queue
   arm; `txn_flow_cache_hit_reclassifies_ba_pcp_per_packet_4422` pins the PCP
   queue arm; `txn_flow_cache_hit_reclassifies_ba_queue_and_lp_rewrite_per_packet_11430`
-  covers BE/EF transitions in both seed orders, all four queue/LP cells, and
-  filter rewrite precedence.
+  covers BE/EF transitions, all four queue/LP cells, and filter rewrite precedence.
+  `cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679` exercises
+  `stage_flow_cache_hit` with an injected cached descriptor; it asserts the
+  staged `PreparedTxRequest` queue and DSCP rewrite plus frame presence, not wire
+  bytes. It covers both DSCP transition orders, VLAN-specific bindings,
+  default-queue filter fallback, and queue clamping with LP rewrite. Snapshot
+  binding add/remove is omitted: `pkg/dataplane/userspace/manager_compile.go:1176-1177`
+  bumps snapshot generations, and `userspace-dp/src/afxdp/flow_cache.rs:1171-1179`
+  evicts cached entries on generation mismatch.
   **TTL/hop-limit precedes egress accounting on cache hits (#3779):** the
   cache-hit path used to run the output `then count` replay, the policy hit
   counter, the three-color policers, the filter logs, and the terminal drop

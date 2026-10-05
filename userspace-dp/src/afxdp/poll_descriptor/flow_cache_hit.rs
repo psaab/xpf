@@ -522,10 +522,9 @@ pub(super) fn stage_flow_cache_hit(
             scratch.scratch_recycle.push(desc.addr);
             return FlowCacheOutcome::Consumed;
         }
-        // #3778/#11430: BA classifiers select both the queue and loss-priority
-        // rewrite from each packet's DSCP/PCP, which the flow-cache key excludes.
-        // When the seed marked this descriptor `ba_reclassify`, re-resolve this
-        // packet's queue + CoS rewrite; otherwise the cached selection is stable.
+        // #3778/#11430/#11679: BA queue and LP inputs are packet-dependent,
+        // but a filter-pinned queue must not be reclassified. The separate
+        // `cos_lp_reclassify` arm refreshes only that pinned queue's rewrite.
         let ba_selection = if cached_descriptor.tx_selection.ba_reclassify {
             reclassify_cached_ba_queue_and_lp_rewrite(
                 worker_ctx.forwarding,
@@ -542,19 +541,37 @@ pub(super) fn stage_flow_cache_hit(
         let cached_queue_id = ba_selection
             .map(|(queue_id, _)| queue_id)
             .or(cached_descriptor.tx_selection.queue_id);
-        // A per-packet policer rewrite remains highest priority. Preserve the
-        // cached filter rewrite, then use the current BA rewrite instead of the
-        // seed's CoS rewrite; non-BA flows retain the complete cached result.
-        let cached_dscp_rewrite = policer_action.dscp_rewrite.or_else(|| {
-            if cached_descriptor.tx_selection.ba_reclassify {
-                cached_descriptor
-                    .tx_selection
-                    .filter_dscp_rewrite
-                    .or_else(|| ba_selection.and_then(|(_, rewrite)| rewrite))
-            } else {
-                cached_descriptor.tx_selection.dscp_rewrite
-            }
-        });
+        let cos_lp_rewrite = if cached_descriptor.tx_selection.cos_lp_reclassify {
+            cached_queue_id.and_then(|queue_id| {
+                reclassify_cached_cos_lp_rewrite(
+                    worker_ctx.forwarding,
+                    cached_decision.resolution.egress_ifindex,
+                    queue_id,
+                    meta.dscp,
+                    meta.ingress_pcp,
+                    meta.ingress_vlan_present != 0,
+                    meta.ingress_ifindex,
+                    meta.ingress_vlan_id,
+                )
+            })
+        } else {
+            None
+        };
+        // Policer rewrite outranks the cached filter rewrite, which outranks
+        // the current CoS rewrite. An LP-only miss intentionally replaces the
+        // seed's rewrite with None rather than replaying stale packet state.
+        let cached_dscp_rewrite = policer_action
+            .dscp_rewrite
+            .or(cached_descriptor.tx_selection.filter_dscp_rewrite)
+            .or_else(|| {
+                if cached_descriptor.tx_selection.ba_reclassify {
+                    ba_selection.and_then(|(_, rewrite)| rewrite)
+                } else if cached_descriptor.tx_selection.cos_lp_reclassify {
+                    cos_lp_rewrite
+                } else {
+                    cached_descriptor.tx_selection.dscp_rewrite
+                }
+            });
         // #2501: account this forwarded packet against the session. The packet
         // is keyed by its OWN tuple (`flow.forward_key`); `account_packet`
         // derives the direction from the resolved entry and folds both

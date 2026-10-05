@@ -72,16 +72,18 @@ pub(super) struct CachedTxSelectionDescriptor {
     pub(super) filter_counters: crate::filter::CachedFilterCounters,
     pub(super) three_color_policers: crate::filter::CachedThreeColorPolicers,
     pub(super) filter_log: Option<crate::filter::FilterLogMatch>,
-    // #3778/#11430: DSCP/PCP-based BA classifiers select both queue and
-    // loss-priority rewrite per packet; both fields are excluded from the flow
-    // cache key. When this flag is set, hits re-resolve the current queue and
-    // CoS rewrite. The separate `filter_dscp_rewrite` preserves filter
-    // precedence; when false, queue and combined rewrite remain seed-cached.
-    // True iff a BA classifier is configured on egress AND neither a mapped
-    // 5-tuple-stable filter forwarding-class nor an unmaterialized-class
-    // fallback pinned the queue. This keeps default-queue, filter-FC, and no-CoS
-    // flows off the per-packet reclassification path.
+    // #3778/#11430: DSCP/PCP-based BA classifiers select the queue and loss
+    // priority per packet; both fields are excluded from the flow-cache key.
+    // When set, hits re-resolve queue + CoS rewrite. The separate
+    // `filter_dscp_rewrite` preserves filter precedence. This stays false when
+    // an explicit filter class or its default-queue fallback pins the queue.
     pub(super) ba_reclassify: bool,
+    /// #11679: an explicit filter class can pin the queue while ingress BA
+    /// classification still changes its CoS rewrite. This flag refreshes only
+    /// LP/rewrite for that cached queue; it is set only when a matching egress
+    /// rewrite exists and no filter rewrite overrides it. When both flags are
+    /// false, cache hits do no BA or LP lookup.
+    pub(super) cos_lp_reclassify: bool,
     /// #11787: a filter class missed the materialized class map, so this
     /// descriptor carries the default queue as a pinned fallback. Hits must not
     /// reclassify through a BA classifier.

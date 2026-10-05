@@ -1377,6 +1377,7 @@ fn build_cos_owner_worker_by_queue_prefers_lowest_worker_with_tx_binding() {
     forwarding.cos.interfaces.insert(
         80,
         CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 1_000_000,
             burst_bytes: 64 * 1024,
             default_queue: 0,
@@ -1400,11 +1401,11 @@ fn build_cos_owner_worker_by_queue_prefers_lowest_worker_with_tx_binding() {
                 dscp_rewrite: None,
             codel_target_ns: 0,
             }],
-        oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
-        oversubscription_guarantee_fraction: 0.0,
-        priority_low_min_share_bytes: 0,
-        inet_precedence_classifier: String::new(),
-        inet_precedence_queue_by_prec: [u8::MAX; 8],
+            oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
+            oversubscription_guarantee_fraction: 0.0,
+            priority_low_min_share_bytes: 0,
+            inet_precedence_classifier: String::new(),
+            inet_precedence_queue_by_prec: [u8::MAX; 8],
         },
     );
     forwarding.egress.insert(
@@ -1439,6 +1440,7 @@ fn build_cos_owner_worker_by_queue_spreads_queues_across_eligible_workers() {
     forwarding.cos.interfaces.insert(
         80,
         CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 1_000_000,
             burst_bytes: 64 * 1024,
             default_queue: 0,
@@ -1494,11 +1496,11 @@ fn build_cos_owner_worker_by_queue_spreads_queues_across_eligible_workers() {
                 codel_target_ns: 0,
                 },
             ],
-        oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
-        oversubscription_guarantee_fraction: 0.0,
-        priority_low_min_share_bytes: 0,
-        inet_precedence_classifier: String::new(),
-        inet_precedence_queue_by_prec: [u8::MAX; 8],
+            oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
+            oversubscription_guarantee_fraction: 0.0,
+            priority_low_min_share_bytes: 0,
+            inet_precedence_classifier: String::new(),
+            inet_precedence_queue_by_prec: [u8::MAX; 8],
         },
     );
     forwarding.egress.insert(
@@ -1535,6 +1537,7 @@ fn build_cos_owner_worker_by_queue_prefers_ready_workers_when_available() {
     forwarding.cos.interfaces.insert(
         80,
         CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 1_000_000,
             burst_bytes: 64 * 1024,
             default_queue: 0,
@@ -1575,11 +1578,11 @@ fn build_cos_owner_worker_by_queue_prefers_ready_workers_when_available() {
                 codel_target_ns: 0,
                 },
             ],
-        oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
-        oversubscription_guarantee_fraction: 0.0,
-        priority_low_min_share_bytes: 0,
-        inet_precedence_classifier: String::new(),
-        inet_precedence_queue_by_prec: [u8::MAX; 8],
+            oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
+            oversubscription_guarantee_fraction: 0.0,
+            priority_low_min_share_bytes: 0,
+            inet_precedence_classifier: String::new(),
+            inet_precedence_queue_by_prec: [u8::MAX; 8],
         },
     );
     forwarding.egress.insert(
@@ -1615,6 +1618,7 @@ fn build_cos_owner_worker_by_queue_falls_back_when_no_ready_workers_exist() {
     forwarding.cos.interfaces.insert(
         80,
         CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 1_000_000,
             burst_bytes: 64 * 1024,
             default_queue: 0,
@@ -1638,11 +1642,11 @@ fn build_cos_owner_worker_by_queue_falls_back_when_no_ready_workers_exist() {
                 dscp_rewrite: None,
             codel_target_ns: 0,
             }],
-        oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
-        oversubscription_guarantee_fraction: 0.0,
-        priority_low_min_share_bytes: 0,
-        inet_precedence_classifier: String::new(),
-        inet_precedence_queue_by_prec: [u8::MAX; 8],
+            oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
+            oversubscription_guarantee_fraction: 0.0,
+            priority_low_min_share_bytes: 0,
+            inet_precedence_classifier: String::new(),
+            inet_precedence_queue_by_prec: [u8::MAX; 8],
         },
     );
     forwarding.egress.insert(
@@ -2111,6 +2115,7 @@ fn build_shared_cos_root_leases_uses_active_workers_per_interface() {
     forwarding.cos.interfaces.insert(
         80,
         CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 100_000_000,
             burst_bytes: 256 * 1024,
             default_queue: 0,
@@ -2151,11 +2156,11 @@ fn build_shared_cos_root_leases_uses_active_workers_per_interface() {
                 codel_target_ns: 0,
                 },
             ],
-        oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
-        oversubscription_guarantee_fraction: 0.0,
-        priority_low_min_share_bytes: 0,
-        inet_precedence_classifier: String::new(),
-        inet_precedence_queue_by_prec: [u8::MAX; 8],
+            oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
+            oversubscription_guarantee_fraction: 0.0,
+            priority_low_min_share_bytes: 0,
+            inet_precedence_classifier: String::new(),
+            inet_precedence_queue_by_prec: [u8::MAX; 8],
         },
     );
     let active_shards_by_egress_ifindex = BTreeMap::from([(80, 2usize)]);
@@ -2203,6 +2208,7 @@ fn build_shared_cos_root_leases_reuses_existing_matching_lease_arc() {
     forwarding.cos.interfaces.insert(
         80,
         CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 100_000_000,
             burst_bytes: 256 * 1024,
             default_queue: 0,
@@ -2226,11 +2232,11 @@ fn build_shared_cos_root_leases_reuses_existing_matching_lease_arc() {
                 dscp_rewrite: None,
             codel_target_ns: 0,
             }],
-        oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
-        oversubscription_guarantee_fraction: 0.0,
-        priority_low_min_share_bytes: 0,
-        inet_precedence_classifier: String::new(),
-        inet_precedence_queue_by_prec: [u8::MAX; 8],
+            oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
+            oversubscription_guarantee_fraction: 0.0,
+            priority_low_min_share_bytes: 0,
+            inet_precedence_classifier: String::new(),
+            inet_precedence_queue_by_prec: [u8::MAX; 8],
         },
     );
     let active_shards_by_egress_ifindex = BTreeMap::from([(80, 1usize)]);
@@ -2254,6 +2260,7 @@ fn build_shared_cos_queue_leases_reuses_existing_matching_lease_arc() {
     forwarding.cos.interfaces.insert(
         80,
         CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 100_000_000,
             burst_bytes: 256 * 1024,
             default_queue: 0,
@@ -2277,11 +2284,11 @@ fn build_shared_cos_queue_leases_reuses_existing_matching_lease_arc() {
                 dscp_rewrite: None,
             codel_target_ns: 0,
             }],
-        oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
-        oversubscription_guarantee_fraction: 0.0,
-        priority_low_min_share_bytes: 0,
-        inet_precedence_classifier: String::new(),
-        inet_precedence_queue_by_prec: [u8::MAX; 8],
+            oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
+            oversubscription_guarantee_fraction: 0.0,
+            priority_low_min_share_bytes: 0,
+            inet_precedence_classifier: String::new(),
+            inet_precedence_queue_by_prec: [u8::MAX; 8],
         },
     );
     let active_shards_by_egress_ifindex = BTreeMap::from([(80, 2usize)]);
@@ -2311,6 +2318,7 @@ fn build_shared_cos_queue_leases_rebuilds_when_equal_flow_mode_toggles() {
     forwarding.cos.interfaces.insert(
         80,
         CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 100_000_000,
             burst_bytes: 256 * 1024,
             default_queue: 0,
@@ -2334,11 +2342,11 @@ fn build_shared_cos_queue_leases_rebuilds_when_equal_flow_mode_toggles() {
                 dscp_rewrite: None,
             codel_target_ns: 0,
             }],
-        oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
-        oversubscription_guarantee_fraction: 0.0,
-        priority_low_min_share_bytes: 0,
-        inet_precedence_classifier: String::new(),
-        inet_precedence_queue_by_prec: [u8::MAX; 8],
+            oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
+            oversubscription_guarantee_fraction: 0.0,
+            priority_low_min_share_bytes: 0,
+            inet_precedence_classifier: String::new(),
+            inet_precedence_queue_by_prec: [u8::MAX; 8],
         },
     );
     let active_shards_by_egress_ifindex = BTreeMap::from([(80, 2usize)]);
@@ -2382,6 +2390,7 @@ fn build_shared_cos_queue_leases_rebuilds_when_equal_flow_target_policy_changes(
     forwarding.cos.interfaces.insert(
         80,
         CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 100_000_000,
             burst_bytes: 256 * 1024,
             default_queue: 0,
@@ -2466,6 +2475,7 @@ fn exact_queue_forwarding_fixture() -> ForwardingState {
     forwarding.cos.interfaces.insert(
         80,
         CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 100_000_000,
             burst_bytes: 256 * 1024,
             default_queue: 0,
@@ -2616,6 +2626,7 @@ fn refresh_cos_owner_worker_map_from_binding_statuses_keeps_shared_arcs_when_unc
     coordinator.forwarding.cos.interfaces.insert(
         80,
         CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 100_000_000,
             burst_bytes: 256 * 1024,
             default_queue: 0,
@@ -2656,11 +2667,11 @@ fn refresh_cos_owner_worker_map_from_binding_statuses_keeps_shared_arcs_when_unc
                 codel_target_ns: 0,
                 },
             ],
-        oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
-        oversubscription_guarantee_fraction: 0.0,
-        priority_low_min_share_bytes: 0,
-        inet_precedence_classifier: String::new(),
-        inet_precedence_queue_by_prec: [u8::MAX; 8],
+            oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
+            oversubscription_guarantee_fraction: 0.0,
+            priority_low_min_share_bytes: 0,
+            inet_precedence_classifier: String::new(),
+            inet_precedence_queue_by_prec: [u8::MAX; 8],
         },
     );
     coordinator.forwarding.egress.insert(

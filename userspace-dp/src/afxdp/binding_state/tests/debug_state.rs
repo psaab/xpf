@@ -18,6 +18,7 @@ fn flush_v_min_scratches_sums_and_zeros_per_queue_counters() {
 
     // Two queues so we exercise the per-queue iteration.
     let cfg = CoSInterfaceConfig {
+        queue_id_bitmap: [0; 4],
         shaping_rate_bytes: 10_000_000,
         burst_bytes: 1024 * 1024,
         default_queue: 0,
@@ -58,11 +59,11 @@ fn flush_v_min_scratches_sums_and_zeros_per_queue_counters() {
             codel_target_ns: 0,
             },
         ],
-    oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
-    oversubscription_guarantee_fraction: 0.0,
-    priority_low_min_share_bytes: 0,
-    inet_precedence_classifier: String::new(),
-    inet_precedence_queue_by_prec: [u8::MAX; 8],
+        oversubscription_policy: CoSOversubscriptionPolicy::Proportional,
+        oversubscription_guarantee_fraction: 0.0,
+        priority_low_min_share_bytes: 0,
+        inet_precedence_classifier: String::new(),
+        inet_precedence_queue_by_prec: [u8::MAX; 8],
     };
     let mut runtime = build_cos_interface_runtime(&cfg, 0);
 
@@ -126,6 +127,7 @@ fn flush_v_min_scratches_no_op_when_all_zero() {
     use crate::afxdp::types::CoSInterfaceConfig;
 
     let cfg = CoSInterfaceConfig {
+        queue_id_bitmap: [0; 4],
         shaping_rate_bytes: 10_000_000,
         burst_bytes: 1024 * 1024,
         default_queue: 0,
@@ -290,6 +292,7 @@ fn active_flow_debug_test_entry(
                 three_color_policers: crate::filter::CachedThreeColorPolicers::default(),
                 filter_log: None,
                 ba_reclassify: false,
+                cos_lp_reclassify: false,
                 filter_forwarding_class_fallback_pinned: false,
             },
             nat64: false,

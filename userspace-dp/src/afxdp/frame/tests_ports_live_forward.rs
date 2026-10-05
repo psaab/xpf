@@ -637,6 +637,7 @@ fn build_live_forward_request_meters_non_l4_metadata_flow() {
     forwarding.cos.interfaces.insert(
         12,
         CoSInterfaceConfig {
+            queue_id_bitmap: [0; 4],
             shaping_rate_bytes: 1_000_000,
             burst_bytes: crate::afxdp::cos::COS_MIN_BURST_BYTES,
             default_queue: 0,
