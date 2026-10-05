@@ -454,7 +454,7 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		// #4899: wire a non-nil IPsec rebind-pending source so the
 		// xpf_ipsec_rebind_pending gauge emits and the canary covers its
 		// descriptor declaration.
-		ipsecRebindPendingFn: func() bool { return true },
+		ipsecRebindPendingFn:           func() bool { return true },
 		interfaceLinkSnapshotPendingFn: func() bool { return true },
 		// #9165: wire a non-nil syslog drop source so the
 		// xpf_syslog_messages_dropped_total family emits and the canary
@@ -586,7 +586,7 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_ipmon_policy_failed",                                          // #1827 ip-monitoring
 		"xpf_frr_reload_degraded",                                          // #1880 FRR degraded reload
 		"xpf_ipsec_rebind_pending",                                         // #4899 IPsec lease-change rebind health
-		"xpf_interface_link_snapshot_refresh_pending", // #11530 RTNL snapshot/FIB refresh debt
+		"xpf_interface_link_snapshot_refresh_pending",                      // #11530 RTNL snapshot/FIB refresh debt
 		"xpf_pbr_rules_installed",                                          // #4422 PBR/FBF build health
 		"xpf_pbr_degraded_terms",                                           // #4422 PBR/FBF degraded terms
 		"xpf_userspace_worker_dead",                                        // emitWorkerRuntime

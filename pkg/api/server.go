@@ -672,7 +672,7 @@ type Server struct {
 	natLenientTerminalActionRulesFn      func() []string
 	ipsecCaptureWitnessFn                func() IpsecCaptureWitness
 	ipsecRebindPendingFn                 func() bool
-	interfaceLinkSnapshotPendingFn    func() bool
+	interfaceLinkSnapshotPendingFn       func() bool
 	hostInboundConntrackRevocationOwedFn func() bool
 	hostInboundConntrackFlushFailuresFn  func() uint64
 	hostInboundTCPlooseDisabledFn        func() bool
@@ -805,7 +805,7 @@ func NewServer(cfg Config) *Server {
 		natLenientTerminalActionRulesFn:      cfg.NATLenientTerminalActionRulesFn,
 		ipsecCaptureWitnessFn:                cfg.IpsecCaptureWitnessFn,
 		ipsecRebindPendingFn:                 cfg.IPsecRebindPendingFn,
-		interfaceLinkSnapshotPendingFn:    cfg.InterfaceLinkSnapshotPendingFn,
+		interfaceLinkSnapshotPendingFn:       cfg.InterfaceLinkSnapshotPendingFn,
 		hostInboundConntrackRevocationOwedFn: cfg.HostInboundConntrackRevocationOwedFn,
 		hostInboundConntrackFlushFailuresFn:  cfg.HostInboundConntrackFlushFailuresFn,
 		hostInboundTCPlooseDisabledFn:        cfg.HostInboundTCPlooseDisabledFn,

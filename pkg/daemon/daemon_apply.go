@@ -111,6 +111,8 @@ func (d *Daemon) beginBackgroundApply(ctx context.Context, who string) bool {
 		return false
 	}
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
+		slog.Info("shutdown: background config apply acquire cancelled; the daemon is stopping",
+			"caller", who, "issue", "#11530")
 		return false
 	}
 	if ctx.Err() != nil {

@@ -39,7 +39,7 @@ func TestInterfaceLinkSnapshotDebounceCoalescesBurst11530(t *testing.T) {
 func TestInterfaceLinkSnapshotWorkerCancellationPreservesOwnerAndDebt11530(t *testing.T) {
 	d := &Daemon{
 		applySem: semaphore.NewWeighted(1),
-		store:    testStoreWithSetConfig(t, []string{
+		store: testStoreWithSetConfig(t, []string{
 			"set interfaces ge-0/0/0 unit 0 family inet address 192.0.2.1/24",
 		}),
 	}
