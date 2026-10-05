@@ -50,8 +50,21 @@ func TestRunShutdownSequenceRemovesHelperStateAfterReset(t *testing.T) {
 			name = "plain shutdown keeps helper state"
 		}
 		t.Run(name, func(t *testing.T) {
-			root := t.TempDir()
+			root, err := os.MkdirTemp("/tmp", "x")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := os.RemoveAll(root); err != nil {
+					t.Errorf("remove short socket fixture directory: %v", err)
+				}
+			})
 			stateFile := filepath.Join(root, "run", "xpf", "userspace-dp.json")
+			controlSocket := filepath.Join(root, "run", "xpf", "control.sock")
+			if len(controlSocket) > 107 {
+				t.Fatalf("control socket fixture is %d bytes, exceeds AF_UNIX sun_path limit 107: %q",
+					len(controlSocket), controlSocket)
+			}
 			store, err := configstore.New(filepath.Join(root, "xpf.conf"))
 			if err != nil {
 				t.Fatal(err)
@@ -60,7 +73,7 @@ func TestRunShutdownSequenceRemovesHelperStateAfterReset(t *testing.T) {
 				t.Fatal(err)
 			}
 			set := "set system dataplane-type userspace\n" +
-				"set system dataplane control-socket " + filepath.Join(root, "run", "xpf", "control.sock") + "\n" +
+				"set system dataplane control-socket " + controlSocket + "\n" +
 				"set system dataplane state-file " + stateFile + "\n"
 			if _, err := store.LoadSet(set); err != nil {
 				t.Fatalf("LoadSet: %v", err)
