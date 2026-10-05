@@ -3,10 +3,12 @@ package daemon
 
 import (
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/psaab/xpf/pkg/bootstrapshow"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/logging"
 )
 
@@ -26,6 +28,10 @@ const (
 	// bootstrapImportLoadedDB: an active config was already present in the DB;
 	// no file import was attempted (normal steady-state boot).
 	bootstrapImportLoadedDB = bootstrapshow.StatusLoadedDB
+	// bootstrapImportRescueFallback: a valid saved rescue is available in a
+	// never-committed empty state, but is not installed as active config.
+	// Day-0 import is suppressed and the daemon stays in bootstrap/lifeline.
+	bootstrapImportRescueFallback = bootstrapshow.StatusRescueFallback
 	// bootstrapImportNoConfig: no text config file present (factory/fresh
 	// boot). Expected — NOT a failure and NOT health-degrading.
 	bootstrapImportNoConfig = bootstrapshow.StatusNoConfig
@@ -125,6 +131,21 @@ func (d *Daemon) bootstrapShowSnapshot() bootstrapshow.Snapshot {
 		UnixSec: b.UnixSec,
 		Failed:  b.Failed,
 	}
+}
+
+// rescueOfflinePromotionPaths returns the exact file paths used by rescue
+// persistence: the configured text config and adjacent rescue.conf.
+func (d *Daemon) rescueOfflinePromotionPaths() (configFile, rescueFile string) {
+	if d.store != nil {
+		configFile = d.store.ConfigPath()
+	}
+	if configFile == "" {
+		configFile = d.opts.ConfigFile
+	}
+	if configFile == "" {
+		configFile = defaultConfigFile
+	}
+	return configFile, filepath.Join(filepath.Dir(configFile), configstore.RescueConfigBase)
 }
 
 // recordCompileFailure tracks a dataplane compile failure and emits an

@@ -410,13 +410,15 @@ Bootstrap configuration import:
   The box is in the lifeline-safe bootstrap state; ...
 ```
 
-The six status values are `ok` (the text config was imported and committed,
+The seven status values are `ok` (the text config was imported and committed,
 and the initial host-credential reconciliation succeeded),
 `credential-apply-pending` (import succeeded but initial host credentials are
 still being applied), `credential-apply-failed` (import committed but that
 reconciliation did not converge), `loaded-from-db` (an active config was already
 present, so no file import was attempted — the normal steady-state boot),
-`no-config` (nothing to import: the expected factory boot), and `import-failed`
+`no-config` (nothing to import: the expected factory boot), `rescue-fallback`
+(a saved rescue file validated in a never-committed empty state but was not
+installed; an operator must explicitly run `load rescue`), and `import-failed`
 (a file could not be read, parsed, committed, or survived the device-map strand
 preflight, or the loader rejected a medium at commit-check).
 

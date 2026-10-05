@@ -13,9 +13,9 @@ func render(s Snapshot) string {
 	return b.String()
 }
 
-// The six recorded statuses each render their own status token AND their own
-// meaning. RED on revert: collapse two cases in explain() and the pair that
-// collapsed reports the same meaning line.
+// Every recorded status renders its own status token AND its own meaning. RED
+// on revert: collapse two cases in explain() and the pair that collapsed
+// reports the same meaning line.
 func TestEveryStatusRendersItsOwnMeaning(t *testing.T) {
 	cases := []struct{ status, wantToken string }{
 		{StatusOK, "ok"},
@@ -24,6 +24,7 @@ func TestEveryStatusRendersItsOwnMeaning(t *testing.T) {
 		{StatusPending, "credential-apply-pending"},
 		{StatusCredentialFailed, "credential-apply-failed"},
 		{StatusFailed, "import-failed"},
+		{StatusRescueFallback, "rescue-fallback"},
 	}
 	seen := map[string]string{}
 	for _, c := range cases {
@@ -40,6 +41,23 @@ func TestEveryStatusRendersItsOwnMeaning(t *testing.T) {
 				"cannot tell them apart", prev, c.status, meaning)
 		}
 		seen[meaning] = c.status
+	}
+}
+
+func TestRescueFallbackExplainsExplicitAndOfflinePromotion(t *testing.T) {
+	out := render(Snapshot{Status: StatusRescueFallback})
+	meaning := meaningLine(t, out)
+	for _, guidance := range []string{
+		"not installed", "load rescue", "candidate", "commit confirmed",
+		"HA topology", "offline promotion", "configured config file",
+		"remove the adjacent rescue.conf", "restart",
+	} {
+		if !strings.Contains(meaning, guidance) {
+			t.Errorf("rescue fallback meaning omitted %q:\n%s", guidance, out)
+		}
+	}
+	if strings.Contains(meaning, "/etc/xpf/") {
+		t.Errorf("rescue fallback meaning must not prescribe the default config root:\n%s", meaning)
 	}
 }
 

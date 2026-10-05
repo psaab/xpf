@@ -182,12 +182,13 @@ func LoadMutationLines(content string) []string {
 }
 
 // AuthorizeConfigLoad adjudicates a `load` against the caller's configuration
-// regexes. mode is "override", "merge" or "set"; content is the body.
+// regexes. mode is "override", "merge", "set" or "rescue"; content is the body.
 //
-// `override` is REFUSED for a restricted class rather than adjudicated, and
-// that distinction is deliberate: it replaces the entire candidate, so the
-// paths it DELETES cannot be enumerated one by one. Refusal is the honest
-// answer, and the docs must say refusal rather than implying coverage.
+// `override` and `rescue` are REFUSED for a restricted class rather than
+// adjudicated, and that distinction is deliberate: they replace the entire
+// candidate, so the paths they DELETE cannot be enumerated one by one. Refusal
+// is the honest answer, and the docs must say refusal rather than implying
+// coverage.
 func AuthorizeConfigLoad(cfg *Config, class, mode, content string) error {
 	if class == "" {
 		return nil
@@ -199,10 +200,10 @@ func AuthorizeConfigLoad(cfg *Config, class, mode, content string) error {
 	if !restricted {
 		return nil
 	}
-	if mode == "override" {
+	if mode == "override" || mode == "rescue" {
 		return fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
-			"load override replaces the whole candidate, so the paths it deletes cannot be "+
-			"adjudicated one by one; use load merge or load set (#9892)", class)
+			"load %s replaces the whole candidate, so the paths it deletes cannot be "+
+			"adjudicated one by one; use load merge or load set (#9892)", class, mode)
 	}
 	for _, line := range LoadMutationLines(content) {
 		if err := AuthorizeConfigMutation(cfg, class, nil, line); err != nil {

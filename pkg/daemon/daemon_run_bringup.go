@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/ddns"
@@ -26,13 +27,25 @@ import (
 	"github.com/psaab/xpf/pkg/vrrp"
 )
 
+// constructClusterManager is the boot-only gate for creating the HA manager.
+// Keep the config check and assignment together so startup and recovery tests
+// exercise the same construction path.
+func (d *Daemon) constructClusterManager(cfg *config.Config) bool {
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return false
+	}
+	cc := cfg.Chassis.Cluster
+	d.cluster = cluster.NewManager(cc.NodeID, cc.ClusterID)
+	return true
+}
+
 // initManagers eagerly constructs the daemon's subsystem managers (routing,
 // FRR, IPsec, RPM, ip-monitoring, event-options engine, DHCP, cluster, and
 // VRRP), storing each on d.*, BEFORE the first applyConfig and the dataplane
 // backend build that follow in Run(). Extracted verbatim from Run()'s PHASE 3
 // (#4662 Increment 4); the creation order is load-bearing (e.g. the
 // event-options engine registers an RPM callback and must exist before the
-// first applyConfig reconciles RPM). failClosed is the #1960/#10297
+// first applyConfig reconciles RPM). failClosed is the #1960/#10297/#11802
 // fail-closed flag threaded from PHASE 1 and used to clear stale FRR policy
 // and install live-address host-input fences before runtime managers start.
 // Returns a non-nil error only on a fatal DHCP
@@ -171,9 +184,8 @@ func (d *Daemon) initManagers(failClosed bool) error {
 	d.ipmon.Start()
 
 	// Initialize cluster manager if configured (heartbeat/sync started after applyConfig).
-	if cfg := d.store.ActiveConfig(); cfg != nil && cfg.Chassis.Cluster != nil {
+	if cfg := d.store.ActiveConfig(); d.constructClusterManager(cfg) {
 		cc := cfg.Chassis.Cluster
-		d.cluster = cluster.NewManager(cc.NodeID, cc.ClusterID)
 		d.cluster.SetSoftwareVersion(d.opts.Version)
 		// #9530: a commit made while the peer is unreachable is marked unshared.
 		d.store.SetPeerReachableFn(d.configPeerReachable)
@@ -300,17 +312,17 @@ func configlessHANodeStartupDiagnostic() string {
 		"the clustered configuration and restart xpfd into that configuration."
 }
 
-// loadAndBootstrapConfig loads the persisted configuration (DB, falling back to
-// the text config file), enforces the #1917 fatal-on-parse floor, runs
-// bootstrapFromFile when required, and derives the boot class + node-id state.
-// Extracted verbatim from Run()'s PHASE 1 (#4662 Increment 5). Returns the
-// combined #1960/#10297 fail-closed load flag (threaded onward to
-// initManagers) and a non-nil error only for the fatal 'DB present but
-// unreadable' floor, which Run propagates unchanged (fail closed, never a
-// blind bootstrap).
+// loadAndBootstrapConfig loads persisted configuration, validates a file-only
+// rescue source for never-committed empty state (including committed=0 recovery),
+// and imports the text config only when allowed.
+// It enforces the #1917 fatal-on-parse floor and derives the boot class +
+// node-id state. The body was extracted from Run()'s PHASE 1 (#4662 Increment 5).
+// It returns the combined #1960/#10297/#11802 fail-closed load flag (threaded
+// onward to initManagers) and a non-nil error only for the fatal 'DB present but
+// unreadable' floor, which Run propagates unchanged (fail closed, never blind).
 func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
-	// Load persisted configuration from DB, falling back to text config file.
-	//
+	// Store.Load validates rescue for explicit operator recovery before the
+	// daemon may import day-0 text config.
 	// Fatal-on-parse floor (#1917 increment B, plan §6.4 / D1): a PRESENT
 	// but unreadable active.json (JSON parse error, decrypt failure, or a
 	// config compatibility envelope this build cannot read because it was
@@ -327,14 +339,14 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 	// the foreign/non-appliance host case (noted in the PR; not implemented
 	// here).
 	// configCompileFailed records the #1960 fail-closed case: a PRESENT,
-	// previously-committed active.json read+parsed fine but no longer
-	// compiles. absentActiveWithHistory records #10297's parallel fail-closed
-	// case: active.json is gone but rollback markers prove the box was
-	// previously committed. Neither case may fall back to bootstrapFromFile()
-	// (which would blind-import the stale day-0 text config over surviving
-	// state) and both force bootstrap mode below.
+	// previously-committed active.json read+parsed fine but no longer compiles.
+	// absentActiveWithHistory records #10297's parallel case: active.json is
+	// absent while rollback markers prove previously-persisted state.
+	// rescueFallback records #11802's valid saved rescue, available only for
+	// explicit operator staging while the store remains never-committed.
 	configCompileFailed := false
 	absentActiveWithHistory := false
+	rescueFallback := false
 	switch loadErr := d.store.Load(); classifyLoadError(loadErr) {
 	case loadFatalUnreadable:
 		// Point recovery at the actual unreadable artifact — the config
@@ -372,6 +384,19 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 			"blind text-config bootstrap and entering BOOTSTRAP/lifeline safe state",
 			"db_path", filepath.Join(filepath.Dir(d.opts.ConfigFile), ".configdb", "active.json"),
 			"config_file", d.opts.ConfigFile, "err", loadErr)
+	case loadRescueFallback:
+		// #11802: Store.Load validated the saved rescue config for operator
+		// recovery. It is not active state: keep the daemon in bootstrap/lifeline
+		// mode, suppress day-0 import, and require explicit `load rescue` plus
+		// `commit confirmed` for standalone recovery. HA topology needs offline
+		// promotion so restart cannot select rescue.conf again.
+		rescueFallback = true
+		rescueConfigFile, rescueFile := d.rescueOfflinePromotionPaths()
+		slog.Warn(fmt.Sprintf("valid saved rescue config is available but not installed; daemon remains in "+
+			"BOOTSTRAP/lifeline mode. For standalone recovery, load rescue and commit confirmed; "+
+			"for HA topology, stop xpfd, copy the validated rescue to %s, remove %s, "+
+			"then restart for offline promotion", rescueConfigFile, rescueFile),
+			"config_file", rescueConfigFile)
 	case loadOtherError:
 		slog.Warn("failed to load config from db", "err", loadErr)
 	case loadOK:
@@ -383,7 +408,7 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 	// EverCommitted is authoritative here: Item 1b's committed=0 active.json
 	// compiles to a non-nil empty config but still needs day-0 import/retry.
 	if shouldBootstrapFromFile(d.store.ActiveConfig() != nil,
-		d.store.EverCommitted(), configCompileFailed || absentActiveWithHistory) {
+		d.store.EverCommitted(), configCompileFailed || absentActiveWithHistory || rescueFallback) {
 		if err := d.bootstrapFromFile(); err != nil {
 			// #4186 (H-17): a missing text config file is the EXPECTED
 			// factory/fresh-boot state unless the loader left its commit-check
@@ -408,6 +433,8 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 		} else {
 			d.recordBootstrapImport(bootstrapImportPending, "")
 		}
+	} else if rescueFallback {
+		d.recordBootstrapImport(bootstrapImportRescueFallback, "")
 	} else if d.store.ActiveConfig() != nil {
 		slog.Info("configuration loaded from db")
 		d.recordBootstrapImport(bootstrapImportLoadedDB, "")
@@ -426,13 +453,12 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 	// construction — C1). Every existing deployment resolves NOT-bootstrap
 	// (case 2/3, or case 5 committed-empty) → zero behavior change.
 	//
-	// #1960: configCompileFailed forces bootstrap here — a previously-committed
-	// config that no longer compiles must fail closed (no positional claim-all)
-	// regardless of the other inputs, including the HA-node guard. #10297's
-	// absentActiveWithHistory condition has the same safe-boot requirement:
-	// active.json is gone, but surviving rollback markers prove prior state.
+	// #1960/#10297/#11802: a compile-failed DB, absent active DB with recovery
+	// markers, or selected rescue fallback forces bootstrap here — no positional
+	// claim-all — regardless of the other inputs, including the HA-node guard.
+	// The rescue case never replaces present or recovery-marked active state.
 	nodeIDPresent := hasNodeIDFile()
-	failClosedLoad := configCompileFailed || absentActiveWithHistory
+	failClosedLoad := configCompileFailed || absentActiveWithHistory || rescueFallback
 	bootClass := computeBootClass(d.store.ActiveConfig() != nil, d.store.EverCommitted(), nodeIDPresent, failClosedLoad)
 	if bootClass == bootClassBootstrap {
 		d.bootstrapMode.Store(true)
@@ -448,6 +474,13 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 		} else if absentActiveWithHistory {
 			slog.Warn("xpf daemon entering BOOTSTRAP mode: active configuration DB is absent but "+
 				"rollback history survives; explicit recovery is required", "detail", detail)
+		} else if rescueFallback {
+			rescueConfigFile, rescueFile := d.rescueOfflinePromotionPaths()
+			slog.Warn(fmt.Sprintf("xpf daemon entering BOOTSTRAP mode: valid saved rescue config is available "+
+				"but not installed; for HA topology, promote offline by copying it to %s, removing %s, "+
+				"and restarting; standalone recovery requires explicit load rescue and commit confirmed",
+				rescueConfigFile, rescueFile),
+				"detail", detail)
 		} else {
 			slog.Warn("xpf daemon entering BOOTSTRAP mode: no committed configuration found",
 				"detail", detail)

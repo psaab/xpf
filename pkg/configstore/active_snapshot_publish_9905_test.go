@@ -14,14 +14,15 @@ import (
 // Active-snapshot publication coverage (#9905, review GPT-1/SPARK-F5).
 //
 // ActiveSnapshot is the lock-free warm-path probe behind the daemon's cached
-// per-commit derivations: every compiled swap must publish exactly one
-// immutable {gen, cfg} pair, or a cached derivation goes permanently stale.
-// Coverage here is behavioral per promotion path — commit, SyncApply,
-// PromoteRollback (incl. the nil first-commit target), boot recovery
-// (incl. the nil first-commit outcome) — plus a structural test pinning
-// the swap↔publish pairing within store*.go production files (line and
-// block comments excluded on both sides of the check). Swaps outside
-// store*.go non-test files are out of this guard's sight by construction.
+// per-commit derivations: every compiled-pointer change, including a nil
+// safe-state publication, must publish exactly one immutable {gen, cfg} pair,
+// or a cached derivation goes permanently stale. Coverage here is behavioral
+// per promotion path — commit, SyncApply, PromoteRollback (incl. the nil
+// first-commit target), boot recovery (incl. the nil first-commit outcome) and
+// marker-free rescue fallback — plus a structural test pinning the
+// swap↔publish pairing within store*.go production files (line and block
+// comments excluded on both sides of the check). Swaps outside store*.go
+// non-test files are out of this guard's sight by construction.
 // The daemon rebuild test pins the commit path end to end, and the
 // daemon withhold cell pins the (gen, nil) snapshot shape the daemon
 // treats as transient.
@@ -334,12 +335,13 @@ func TestActiveSnapshotPublishCoversEverySwap9905(t *testing.T) {
 			}
 		}
 	}
-	// Tripwire on the inventory itself: today there are exactly 7 production
-	// swaps. An 8th swap WITH a publish still fails here until a human
-	// extends the count — adding a promotion path must be a conscious,
-	// reviewed act, not a silent drift.
-	if swaps != 7 {
-		t.Errorf("found %d compiled swaps, want exactly 7 (update the count + review when adding a promotion path)", swaps)
+	// Tripwire on the inventory itself: every assignment to s.compiled,
+	// including the nil safe-state publication for #11802 rescue fallback,
+	// must be followed by publication. An additional swap WITH a publish still
+	// fails here until a human extends the count — adding a promotion path must
+	// be a conscious, reviewed act, not a silent drift.
+	if swaps != 8 {
+		t.Errorf("found %d compiled swaps, want exactly 8 (update the count + review when adding a promotion path)", swaps)
 	}
 }
 

@@ -52,6 +52,10 @@ const (
 	// claim-all; instead it enters the #1922 bootstrap/lifeline safe state
 	// with history loaded for explicit in-band recovery.
 	loadAbsentWithHistory
+	// loadRescueFallback — a valid saved rescue config is available in a
+	// never-committed empty state; it remains file-only until explicit
+	// candidate staging. The daemon stays in bootstrap/lifeline mode.
+	loadRescueFallback
 	// loadOtherError — any other Load error (logged as a warning; the daemon
 	// proceeds and the boot predicate decides bootstrap vs normal as usual).
 	loadOtherError
@@ -69,6 +73,8 @@ func classifyLoadError(err error) loadErrorClass {
 		return loadCompileFailed
 	case errors.Is(err, configstore.ErrConfigAbsentWithHistory):
 		return loadAbsentWithHistory
+	case errors.Is(err, configstore.ErrConfigRescueFallback):
+		return loadRescueFallback
 	default:
 		return loadOtherError
 	}
@@ -79,10 +85,10 @@ func classifyLoadError(err error) loadErrorClass {
 // empty config with EverCommitted=false; it is still eligible for import.
 // ActiveConfig alone would misread that Item-1b state as already configured.
 //
-// #1960/#10297: the failClosedLoad clause is load-bearing. On either
-// fail-closed load ActiveConfig() is nil, so without this guard the import
-// would fire — silently swapping a DIFFERENT config (whatever xpf.conf holds)
-// in over the broken/missing committed DB and then taking over interfaces.
+// #1960/#10297/#11802: the failClosedLoad clause is load-bearing. A
+// compile-failed present DB, absent DB with recovery markers, or valid rescue
+// fallback keeps ActiveConfig() nil; without this guard xpf.conf would be
+// imported over state that must remain in the bootstrap/lifeline path.
 func shouldBootstrapFromFile(hasActiveConfig, everCommitted, failClosedLoad bool) bool {
 	return (!hasActiveConfig || !everCommitted) && !failClosedLoad
 }
@@ -305,25 +311,25 @@ func hasNodeIDFile() bool {
 //     loaded (case 2 import-clean or case 3 valid-active.json).
 //   - everCommitted: store.EverCommitted() — the #1922 step-0 marker.
 //   - nodeID: /etc/xpf/node-id presence (the HA-node guard, C2/C8).
-//   - failClosedLoad: Store.Load found a previously-committed state that must
-//     not drive takeover — either a PRESENT active.json that no longer
-//     compiles (#1960, ErrConfigCompile) or an ABSENT active.json with
-//     surviving rollback markers (#10297, ErrConfigAbsentWithHistory). This
-//     is the highest-priority signal — see below.
+//   - failClosedLoad: boot resolution found a state that must not drive takeover:
+//     either a PRESENT active.json that no longer compiles (#1960,
+//     ErrConfigCompile), an ABSENT active.json with surviving rollback markers
+//     (#10297, ErrConfigAbsentWithHistory), or a valid rescue fallback in a
+//     never-committed empty state (#11802). This is the highest-priority signal.
 //
 // Case 4 (corrupt/too-new) is handled by #1917 D1 fatal-on-parse in Run
 // BEFORE this is called, so it never reaches here.
 func computeBootClass(hasActiveConfig, everCommitted, nodeIDPresent, failClosedLoad bool) bootClass {
-	// #1960/#10297 fail-closed (checked FIRST, before the HA-node guard): a
-	// previously-committed state that is unavailable for safe takeover must
-	// NEVER drive a full takeover. With everCommitted=true and
+	// #1960/#10297/#11802 fail-closed (checked FIRST, before the HA-node guard):
+	// an unavailable previously-committed state OR a selected rescue fallback
+	// in a never-committed empty state must NEVER drive a full takeover.
+	// For a previously-committed state, with everCommitted=true and
 	// ActiveConfig()==nil (compiled stayed nil or active.json was absent),
 	// every other branch below resolves to bootClassNormal — positional
 	// claim-all interface naming on a box whose intended config is unknown.
 	// That can mis-bind interfaces and strand management. Refusing takeover
 	// (bootstrap mode + lifeline + protected set) keeps mgmt reachable and
-	// leaves the control plane up so the operator can fix or explicitly
-	// recover the config. This overrides EVEN the HA-node guard.
+	// leaves the control plane up so the operator can fix or explicitly recover.
 	if failClosedLoad {
 		return bootClassBootstrap
 	}
@@ -691,15 +697,15 @@ func (d *Daemon) runBootstrapTeardownSteps() []bootstrapTeardownStep {
 }
 
 // clearFRRForFailClosedBoot is the #1993 fail-closed boot refinement: on a
-// boot where the previously-committed config is unavailable for takeover
-// (#1960 compile failure or #10297 absent active DB with surviving history),
-// the last-good `! BEGIN/END BPFRX MANAGED CONFIG`
-// systemd service: if the node comes up with NO live dataplane attachments, it
-// starts from that persisted file, forms BGP/OSPF/IS-IS peerings, and
-// re-advertises last-good prefixes for routes this unarmed node cannot
-// forward — a silent transit blackhole. Clearing ONLY the managed section
-// drops those peerings so upstream/peers fail over to the HA partner instead
-// of routing transit into a blackhole.
+// boot where the previously-committed config is unavailable for takeover or a
+// valid never-committed rescue fallback is selected (#11802), the last-good
+// `! BEGIN/END BPFRX MANAGED CONFIG` section is stored in persisted `frr.conf`
+// and read by the independent FRR systemd service. If the node has NO live
+// dataplane attachments, it starts from that file, forms BGP/OSPF/IS-IS
+// peerings, and re-advertises last-good prefixes for routes this unarmed
+// node cannot forward — a silent transit blackhole. Clearing ONLY the managed
+// section drops those peerings so upstream/peers fail over to the HA partner
+// instead of routing transit into a blackhole.
 //
 // This deliberately runs JUST the FRR-clear step of enterBootstrapMode()'s
 // teardown — NOT the .network/.link removal or the link-cycle. The cold-boot
@@ -730,10 +736,12 @@ func (d *Daemon) runBootstrapTeardownSteps() []bootstrapTeardownStep {
 //     unarmed/unknown helper means no live forwarding, so peers must fail over
 //     (fail toward clearing).
 //
-// A fresh/no-config bootstrap (which has no last-good managed section) and every
-// NORMAL boot are byte-identical to before. The d.frr != nil guard tolerates
-// NoDataplane daemons (FRR is constructed only inside the !NoDataplane
-// manager-init block).
+// A fresh/no-config bootstrap with NO valid saved rescue (which has no
+// last-good managed section) and every NORMAL boot are byte-identical to before.
+// A selected valid rescue is failClosedLoad and intentionally runs these
+// fail-closed safeguards, although the rescue itself remains uninstalled.
+// The d.frr != nil guard tolerates NoDataplane daemons (FRR is constructed
+// only inside the !NoDataplane manager-init block).
 //
 // A degraded reload (ErrFRRReloadDegraded, e.g. frr-reload.py unavailable) is
 // LOGGED, not fatal: Clear() has already written the empty managed section to

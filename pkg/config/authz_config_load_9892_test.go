@@ -123,12 +123,22 @@ func TestLoadOverrideIsRefusedForARestrictedClass9892(t *testing.T) {
 	}
 }
 
+func TestLoadRescueIsRefusedForARestrictedClass9892(t *testing.T) {
+	err := AuthorizeConfigLoad(cfg9892(t), "limited", "rescue", "")
+	if err == nil || !strings.Contains(err.Error(), "rescue") {
+		t.Fatalf("load rescue error = %v, want restricted-class refusal naming rescue", err)
+	}
+}
+
 // NARROWNESS CONTROL. Over-refusing locks an UNRESTRICTED class out of a verb
 // it legitimately holds, which is its own outage.
 func TestOverrideAndRollbackStayAvailableToAnUnrestrictedClass9892(t *testing.T) {
 	cfg := cfg9892(t)
 	if err := AuthorizeConfigLoad(cfg, "unrestricted-class-with-no-regexes", "override", "x"); err != nil {
 		t.Errorf("load override was refused for a class with NO configuration regexes: %v", err)
+	}
+	if err := AuthorizeConfigLoad(cfg, "unrestricted-class-with-no-regexes", "rescue", ""); err != nil {
+		t.Errorf("load rescue was refused for a class with NO configuration regexes: %v", err)
 	}
 	if err := AuthorizeConfigRollback(cfg, "unrestricted-class-with-no-regexes", 3); err != nil {
 		t.Errorf("rollback 3 was refused for a class with NO configuration regexes: %v", err)

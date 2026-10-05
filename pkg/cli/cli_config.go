@@ -155,8 +155,26 @@ func (c *CLI) readLine() (string, error) {
 }
 
 func (c *CLI) handleLoad(args []string) error {
+	if len(args) == 1 && args[0] == "rescue" {
+		var loadCfg *config.Config
+		if c.store != nil {
+			loadCfg = c.store.ActiveConfig()
+		}
+		if err := config.AuthorizeConfigLoad(loadCfg, c.userClass, "rescue", ""); err != nil {
+			return err
+		}
+		if err := c.store.LoadRescueAsPlantClass("", config.EventPlantClassForMutation(c.userClass)); err != nil {
+			return fmt.Errorf("load rescue: %w", err)
+		}
+		fmt.Println("load rescue complete")
+		return nil
+	}
+	if len(args) > 0 && args[0] == "rescue" {
+		return fmt.Errorf("load rescue: no source or extra arguments are accepted")
+	}
 	if len(args) < 2 {
 		fmt.Println("load:")
+		fmt.Println("  rescue               Replace candidate with saved rescue config")
 		fmt.Println("  override terminal    Replace candidate with pasted config")
 		fmt.Println("  merge terminal       Merge pasted config into candidate")
 		fmt.Println("  set terminal         Load set commands from terminal")
@@ -167,7 +185,7 @@ func (c *CLI) handleLoad(args []string) error {
 
 	mode := args[0] // "override", "merge", or "set"
 	if mode != "override" && mode != "merge" && mode != "set" {
-		return fmt.Errorf("load: unknown mode %q (use 'override', 'merge', or 'set')", mode)
+		return fmt.Errorf("load: unknown mode %q (use 'rescue', 'override', 'merge', or 'set')", mode)
 	}
 
 	source := args[1]

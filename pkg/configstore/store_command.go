@@ -1,7 +1,9 @@
 package configstore
 
 import (
+	"bytes"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -485,6 +487,93 @@ func (s *Store) LoadOverrideAsPlantClass(sessionID, plantClass, content string) 
 	s.bumpCandidateGenLocked() // #5848: complete candidate replacement retires rename lineage
 	s.dirty = true
 	return nil
+}
+
+// LoadRescueAsPlantClass replaces the candidate with the saved rescue config.
+// It never promotes or persists that candidate.
+func (s *Store) LoadRescueAsPlantClass(sessionID, plantClass string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.ensureWritableLocked(); err != nil {
+		return err
+	}
+	if err := s.ensureHolderLocked(sessionID); err != nil {
+		return err
+	}
+	if s.candidate == nil {
+		return fmt.Errorf("not in configuration mode")
+	}
+
+	data, err := ReadBoundedFile(s.rescuePath(), MaxConfigSize)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ErrRescueNotFound
+		}
+		return fmt.Errorf("read rescue config: %w", err)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return ErrRescueNotFound
+	}
+	tree, err := parseRescueContent(string(data))
+	if err != nil {
+		return err
+	}
+	if tree == nil || len(tree.Children) == 0 {
+		return ErrRescueNotFound
+	}
+
+	config.StampChangedEventPlantClasses(s.candidate, tree, plantClass)
+	s.candidate = tree
+	s.touchConfigLockLocked()
+	s.bumpCandidateGenLocked()
+	s.dirty = true
+	return nil
+}
+
+// rescueParseError retains useful source coordinates while deliberately
+// dropping parser text that may include a file-owned secret.
+type rescueParseError struct {
+	line   int
+	column int
+}
+
+func (e rescueParseError) Error() string {
+	return fmt.Sprintf("rescue configuration parse failed at line %d, column %d", e.line, e.column)
+}
+
+func parseRescueContent(content string) (*config.ConfigTree, error) {
+	tree, err := parseOverrideContent(content)
+	if err == nil {
+		return tree, nil
+	}
+	line, column := rescueParseErrorPosition(err.Error())
+	return nil, rescueParseError{line: line, column: column}
+}
+
+func rescueParseErrorPosition(message string) (int, int) {
+	line, column := 1, 1
+	// Flat replay wraps the parser error as `line N: <source>: <cause>`.
+	// Trust that outer physical-file coordinate before considering the inner
+	// parser text: source content can itself contain strings like "line 9".
+	var outerLine int
+	if _, err := fmt.Sscanf(message, "line %d:", &outerLine); err == nil && outerLine > 0 {
+		return outerLine, column
+	}
+	position := strings.LastIndex(message, "line ")
+	if position < 0 {
+		return line, column
+	}
+	message = message[position:]
+	var parsedLine, parsedColumn int
+	if _, err := fmt.Sscanf(message, "line %d, column %d", &parsedLine, &parsedColumn); err == nil &&
+		parsedLine > 0 && parsedColumn > 0 {
+		return parsedLine, parsedColumn
+	}
+	if _, err := fmt.Sscanf(message, "line %d:", &parsedLine); err == nil && parsedLine > 0 {
+		return parsedLine, column
+	}
+	return line, column
 }
 
 // parseOverrideContent turns `load override` input into the replacement tree,

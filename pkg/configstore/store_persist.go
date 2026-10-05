@@ -1,6 +1,7 @@
 package configstore
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -75,7 +76,10 @@ func (factoryResetPendingError) Is(target error) bool {
 // ErrFactoryResetPending marks a durable interrupted factory reset.
 var ErrFactoryResetPending error = factoryResetPendingError{}
 
-// Load builds the configuration from disk.
+// Load validates a saved rescue config for operator-driven recovery only
+// before any config has been committed: on a marker-free absent active DB, or
+// after first-commit recovery leaves an empty committed=0 active state. It never
+// installs rescue as active and reports ErrConfigRescueFallback to the daemon.
 func (s *Store) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -139,13 +143,14 @@ func (s *Store) Load() error {
 			}
 			return ErrConfigAbsentWithHistory
 		}
-		// No persisted marker: this is a never-booted store. everCommitted
-		// stays false and the daemon may bootstrap from xpf.conf.
+		// No persisted marker: this is a never-booted store. A saved rescue
+		// may be validated as a file-only recovery source before the daemon
+		// considers day-0 import; invalid rescue remains an ordinary fresh boot.
 		if err := s.migrateRescueAPIAuthSecrets(); err != nil {
 			return err
 		}
 		purgeAPIAuthArchives(s.apiAuthArchiveMigrationDir)
-		return nil
+		return s.loadRescueFallbackLocked()
 	}
 	// #1922 step-0 marker: record whether the on-disk DB represents a
 	// successfully-committed config. A legacy/older-build DB (no envelope
@@ -276,7 +281,57 @@ func (s *Store) Load() error {
 	// rollback target failed even the lenient compile). Load MUST NOT report
 	// success in that state — see recoverPendingConfirmLocked.
 	s.loadUnsharedMarkLocked() // #9530
-	return s.recoverPendingConfirmLocked()
+	if err := s.recoverPendingConfirmLocked(); err != nil {
+		return err
+	}
+	// A first-commit timeout can leave a committed=0 empty active DB. A valid
+	// rescue takes precedence over day-0 import in that never-committed state,
+	// just as it does when active.json is absent. Recovery markers have already
+	// been resolved above; an active committed config never reaches this branch.
+	if !s.everCommitted && (s.active == nil || len(s.active.Children) == 0) {
+		return s.loadRescueFallbackLocked()
+	}
+	return nil
+
+}
+
+// loadRescueFallbackLocked validates a saved rescue config for operator-driven
+// recovery. It never installs the rescue tree as active or marks it committed:
+// `load rescue` is the explicit candidate-only promotion path. For a
+// committed=0 empty active DB, callers invoke this after confirm recovery and
+// before day-0 import, so the valid rescue has explicit precedence.
+func (s *Store) loadRescueFallbackLocked() error {
+	path := s.rescuePath()
+	data, err := ReadBoundedFile(path, MaxConfigSize)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("ignoring unreadable saved rescue config during never-committed boot", "issue", "#11802")
+		}
+		return nil
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		slog.Warn("ignoring empty saved rescue config in never-committed state", "issue", "#11802")
+		return nil
+	}
+	tree, parseErr := parseRescueContent(string(data))
+	if parseErr != nil || tree == nil || len(tree.Children) == 0 {
+		slog.Warn("ignoring invalid saved rescue config in never-committed state", "issue", "#11802")
+		return nil
+	}
+	if _, err := s.compileTreeLenient(tree); err != nil {
+		slog.Warn("ignoring uncompilable saved rescue config in never-committed state", "issue", "#11802")
+		return nil
+	}
+
+	// Selection is not promotion. Keep the durable/in-memory provenance as
+	// never-committed and leave the rescue bytes reachable only by `load rescue`.
+	s.active = &config.ConfigTree{}
+	s.everCommitted = false
+	s.persistMarkerCommitted = false
+	s.compiled = nil
+	s.publishActiveLocked()
+	s.loadUnsharedMarkLocked()
+	return ErrConfigRescueFallback
 }
 
 // migrateActiveAPIAuthSecrets hashes active credentials while preserving a
@@ -474,8 +529,8 @@ func (s *Store) migrateRescueAPIAuthSecrets() error {
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return nil
 	}
-	tree, parseErrs := config.NewParser(string(data)).Parse()
-	if len(parseErrs) != 0 || tree == nil || len(tree.Children) == 0 {
+	tree, parseErr := parseRescueContent(string(data))
+	if parseErr != nil || tree == nil || len(tree.Children) == 0 {
 		slog.Warn("leaving malformed rescue configuration unchanged during api-auth migration",
 			"path", path, "issue", "#10825")
 		return nil
@@ -2199,11 +2254,11 @@ func (s *Store) LoadRescueConfigRedacted() (string, error) {
 	if text == "" {
 		return "", nil
 	}
-	tree, perrs := config.NewParser(text).Parse()
-	if len(perrs) > 0 {
-		return "", fmt.Errorf("rescue configuration is malformed and cannot be "+
-			"safely displayed (parse failed at line %d, column %d)",
-			perrs[0].Line, perrs[0].Column)
+	tree, parseErr := parseRescueContent(text)
+	if parseErr != nil {
+		position := parseErr.(rescueParseError)
+		return "", fmt.Errorf("rescue configuration is malformed and cannot be safely displayed "+
+			"(parse failed at line %d, column %d)", position.line, position.column)
 	}
 	return tree.RedactedClone().Format(), nil
 }

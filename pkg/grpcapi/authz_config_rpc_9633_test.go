@@ -122,6 +122,7 @@ func TestLoadAndRollbackMeetTheConfigurationRegexes9633(t *testing.T) {
 		{"hierarchical merge writing the denied path", &pb.LoadRequest{Mode: "merge", Content: "system {\n    host-name x;\n}\n"}, true, "Load"},
 		{"merge that avoids the denied path", &pb.LoadRequest{Mode: "merge", Content: "interfaces {\n    ge-0/0/0 {\n        description y;\n    }\n}\n"}, false, "Load"},
 		{"override", &pb.LoadRequest{Mode: "override", Content: "interfaces {\n    ge-0/0/0 {\n        description y;\n    }\n}\n"}, true, "Load"},
+		{"rescue with empty content", &pb.LoadRequest{Mode: "rescue"}, true, "Load"},
 		{"rollback 1", &pb.RollbackRequest{N: 1}, true, "Rollback"},
 		{"rollback 0", &pb.RollbackRequest{N: 0}, false, "Rollback"},
 	} {
@@ -140,7 +141,11 @@ func TestLoadAndRollbackMeetTheConfigurationRegexes9633(t *testing.T) {
 	}
 	// Control: a class with no configuration regexes is not restricted by any of it.
 	open := loginCfg9633(&config.LoginClass{Name: "ops", Permissions: []string{"all"}})
-	for _, req := range []any{&pb.LoadRequest{Mode: "override", Content: "system { host-name x; }"}, &pb.RollbackRequest{N: 3}} {
+	for _, req := range []any{
+		&pb.LoadRequest{Mode: "override", Content: "system { host-name x; }"},
+		&pb.LoadRequest{Mode: "rescue"},
+		&pb.RollbackRequest{N: 3},
+	} {
 		label := "Load"
 		if _, ok := req.(*pb.RollbackRequest); ok {
 			label = "Rollback"

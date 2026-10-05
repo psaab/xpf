@@ -375,11 +375,27 @@ A day-0 / bootstrap status is recorded at boot and surfaced both in the CLI as
 has an in-band answer beyond a single journald line. `ok` means the text config
 was imported and the initial host-credential reconcile completed.
 `loaded-from-db` means an active config was already present; `no-config` is the
-expected factory/fresh-boot state. `credential-apply-pending` means import
-succeeded but the initial account/key/sshd reconciliation has not finished;
-`credential-apply-failed` means import succeeded but that reconcile did not
-converge. `import-failed` means the file could not be read/parsed/committed or
-was rejected by the device-map preflight.
+expected factory/fresh-boot state. `rescue-fallback` means a saved rescue file
+validated in a never-committed empty state, but was NOT installed as active
+configuration; day-0 import is suppressed until an operator explicitly runs
+`load rescue`, validates the staged candidate, and uses `commit confirmed`.
+To abandon the saved rescue and restore the day-0 import path, run
+`request system configuration rescue delete` (or remove `rescue.conf` offline).
+With rescue absent, the next never-committed boot can import `/etc/xpf/xpf.conf`
+if present. Loading rescue does not delete the saved file.
+`credential-apply-pending` means import succeeded but the initial
+account/key/sshd reconciliation has not finished; `credential-apply-failed`
+means import succeeded but that reconcile did not converge. `import-failed`
+means the file could not be read/parsed/committed or was rejected by the
+device-map preflight.
+
+On an HA node, a rescue that adds the clustered topology cannot be committed
+live from this fallback because xpfd has no boot-constructed cluster runtime.
+Use an offline promotion: stop xpfd, copy the validated rescue config to
+`/etc/xpf/xpf.conf`, remove `/etc/xpf/rescue.conf` so it cannot take precedence,
+then start xpfd. The restart imports the clustered config and constructs the
+HA runtime from it. Do not weaken the runtime topology gate to make rescue
+commit in place.
 
 `bootstrap_import_failed` is true for `import-failed` and
 `credential-apply-failed`. Neither state forces a 503: the box remains

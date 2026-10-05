@@ -872,12 +872,15 @@ delegate to that one evaluator:
 * on-box CLI `load`, after the file or terminal stream is read
   (`pkg/cli/cli_config.go:236`).
 
-For a class that carries configuration regexes, `load override` is REFUSED
-outright — it replaces the whole candidate, so the paths it deletes cannot be
-enumerated one by one — while `load merge` / `load set` have their content
-rendered to `set` lines with each line matched in turn. The single-evaluator
-shape is deliberate: two renderings of hierarchical content as `set` lines
-drift, and each looks right on its own.
+For a class that carries configuration regexes, `load override` and `load rescue`
+are REFUSED outright — both replace the whole candidate, so the paths they
+delete cannot be enumerated one by one. `load rescue` has no body to
+adjudicate: it stages the saved local file only for classes without those
+replacement restrictions, and that candidate still needs normal validation
+and commit. `load merge` / `load set` have their content rendered to `set` lines
+with each line matched in turn. The single-evaluator shape is deliberate: two
+renderings of hierarchical content as `set` lines drift, and each looks right
+on its own.
 
 ### Write the body as a block or as `set` — never packed on the line (#6662)
 

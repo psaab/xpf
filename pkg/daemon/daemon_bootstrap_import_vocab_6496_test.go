@@ -25,6 +25,7 @@ func TestEveryRecordableStatusIsRenderable(t *testing.T) {
 	recordable := []string{
 		bootstrapImportOK,
 		bootstrapImportLoadedDB,
+		bootstrapImportRescueFallback,
 		bootstrapImportNoConfig,
 		bootstrapImportPending,
 		bootstrapImportCredentialFailed,
@@ -49,7 +50,7 @@ func TestFailedFlagTracksTheFailedStatusOnly(t *testing.T) {
 	d := &Daemon{}
 	for _, st := range []string{
 		bootstrapImportOK, bootstrapImportLoadedDB, bootstrapImportNoConfig,
-		bootstrapImportPending,
+		bootstrapImportRescueFallback, bootstrapImportPending,
 	} {
 		d.recordBootstrapImport(st, "")
 		if got := d.BootstrapImportSnapshot(); got.Failed {

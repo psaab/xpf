@@ -29,6 +29,8 @@ func TestClassifyLoadError(t *testing.T) {
 		// #10297: active.json absent but rollback markers survive => fail
 		// closed bootstrap, not a fresh text-config import.
 		{"absent-active-with-history", fmt.Errorf("load config: %w", configstore.ErrConfigAbsentWithHistory), loadAbsentWithHistory},
+		// #11802: valid rescue fallback requires the safe bootstrap path too.
+		{"rescue-fallback", fmt.Errorf("load: %w", configstore.ErrConfigRescueFallback), loadRescueFallback},
 		{"other", fmt.Errorf("some unrelated failure"), loadOtherError},
 	}
 	for _, tt := range tests {
@@ -102,6 +104,7 @@ func TestShouldBootstrapFromFile(t *testing.T) {
 		{"first-commit-rollback-compiled-empty", true, false, false, true},
 		{"committed-active-config", true, true, false, false},
 		{"no-active-existing-behavior", false, true, false, true},
+		{"valid-rescue-fallback", false, true, true, false},
 		{"no-active-fail-closed", false, true, true, false},
 		{"active-fail-closed", true, false, true, false},
 	}

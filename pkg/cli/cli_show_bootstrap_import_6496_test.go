@@ -71,6 +71,23 @@ func TestConsoleBootstrapImportMatchesTheSharedRenderer(t *testing.T) {
 	}
 }
 
+func TestConsoleBootstrapImportExplainsRescueOfflinePromotion(t *testing.T) {
+	c := &CLI{}
+	c.SetBootstrapImportFn(func() bootstrapshow.Snapshot {
+		return bootstrapshow.Snapshot{Status: bootstrapshow.StatusRescueFallback}
+	})
+	out := captureStdout(t, func() { _ = c.handleShowSystem([]string{"bootstrap-import"}) })
+	for _, guidance := range []string{
+		"commit confirmed", "HA topology", "offline promotion",
+		"configured config file", "remove the adjacent rescue.conf", "restart",
+	} {
+		if !strings.Contains(out, guidance) {
+			t.Errorf("console bootstrap-import omitted rescue guidance %q:\n%s",
+				guidance, out)
+		}
+	}
+}
+
 // A `cli` spawned outside the daemon has no hook. It must still print an
 // explicit unrecorded state rather than nothing, which an operator would read
 // as "no problem here".

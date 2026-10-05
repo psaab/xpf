@@ -22,6 +22,9 @@ func configMutationStatus(err error) error {
 	if errors.Is(err, configstore.ErrConfigLockedByOther) {
 		return status.Errorf(codes.PermissionDenied, "%v", err)
 	}
+	if errors.Is(err, configstore.ErrRescueNotFound) {
+		return status.Errorf(codes.FailedPrecondition, "%v", err)
+	}
 	return status.Errorf(codes.InvalidArgument, "%v", err)
 }
 
@@ -266,8 +269,15 @@ func (s *Server) Load(ctx context.Context, req *pb.LoadRequest) (*pb.LoadRespons
 			return nil, configMutationStatus(err)
 		}
 		slog.Info("load set applied", "commands", count)
+	case "rescue":
+		if req.Content != "" {
+			return nil, status.Error(codes.InvalidArgument, "load rescue does not accept content")
+		}
+		if err := s.store.LoadRescueAsPlantClass(sessionID, plantClass); err != nil {
+			return nil, configMutationStatus(err)
+		}
 	default:
-		return nil, status.Errorf(codes.InvalidArgument, "unknown load mode: %s (use 'override', 'merge', or 'set')", req.Mode)
+		return nil, status.Errorf(codes.InvalidArgument, "unknown load mode: %s (use 'rescue', 'override', 'merge', or 'set')", req.Mode)
 	}
 	return &pb.LoadResponse{}, nil
 }

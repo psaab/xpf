@@ -660,6 +660,7 @@ cmd_deploy() {
 		incus file push "${SCRIPT_DIR}/xpf-test.conf" "$INSTANCE_NAME/etc/xpf/xpf.conf"
 		# Clear configstore DB so daemon bootstraps from the new text file.
 		incus exec "$INSTANCE_NAME" -- rm -rf /etc/xpf/.configdb
+		incus exec "$INSTANCE_NAME" -- rm -f /etc/xpf/rescue.conf
 	fi
 
 	# Install systemd units

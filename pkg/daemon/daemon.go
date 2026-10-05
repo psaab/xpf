@@ -69,6 +69,9 @@ type Options struct {
 	ColdPathSampleMask *uint64
 }
 
+// defaultConfigFile is the appliance config path used when -config is unset.
+const defaultConfigFile = "/etc/xpf/xpf.conf"
+
 // nodeIDFile is the path to the cluster node ID file.
 // If this file exists and contains a valid integer (0 or 1), the daemon
 // runs in cluster mode with ${node} variable expansion. If the file does
@@ -1967,7 +1970,7 @@ func (d *Daemon) signalFatal(err error) {
 
 func New(opts Options) (*Daemon, error) {
 	if opts.ConfigFile == "" {
-		opts.ConfigFile = "/etc/xpf/xpf.conf"
+		opts.ConfigFile = defaultConfigFile
 	}
 
 	store, err := configstore.New(opts.ConfigFile)
