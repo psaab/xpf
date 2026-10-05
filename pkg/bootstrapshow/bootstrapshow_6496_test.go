@@ -49,12 +49,15 @@ func TestRescueFallbackExplainsExplicitAndOfflinePromotion(t *testing.T) {
 	meaning := meaningLine(t, out)
 	for _, guidance := range []string{
 		"not installed", "load rescue", "candidate", "commit confirmed",
-		"HA topology", "offline promotion", "/etc/xpf/xpf.conf",
-		"remove /etc/xpf/rescue.conf", "restart",
+		"HA topology", "offline promotion", "configured config file",
+		"remove the adjacent rescue.conf", "restart",
 	} {
 		if !strings.Contains(meaning, guidance) {
 			t.Errorf("rescue fallback meaning omitted %q:\n%s", guidance, out)
 		}
+	}
+	if strings.Contains(meaning, "/etc/xpf/") {
+		t.Errorf("rescue fallback meaning must not prescribe the default config root:\n%s", meaning)
 	}
 }
 

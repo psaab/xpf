@@ -391,11 +391,12 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 		// `commit confirmed` for standalone recovery. HA topology needs offline
 		// promotion so restart cannot select rescue.conf again.
 		rescueFallback = true
-		slog.Warn("valid saved rescue config is available but not installed; daemon remains in "+
+		rescueConfigFile, rescueFile := d.rescueOfflinePromotionPaths()
+		slog.Warn(fmt.Sprintf("valid saved rescue config is available but not installed; daemon remains in "+
 			"BOOTSTRAP/lifeline mode. For standalone recovery, load rescue and commit confirmed; "+
-			"for HA topology, stop xpfd, copy the validated rescue to /etc/xpf/xpf.conf, "+
-			"remove /etc/xpf/rescue.conf, then restart for offline promotion",
-			"config_file", d.opts.ConfigFile)
+			"for HA topology, stop xpfd, copy the validated rescue to %s, remove %s, "+
+			"then restart for offline promotion", rescueConfigFile, rescueFile),
+			"config_file", rescueConfigFile)
 	case loadOtherError:
 		slog.Warn("failed to load config from db", "err", loadErr)
 	case loadOK:
@@ -474,10 +475,11 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 			slog.Warn("xpf daemon entering BOOTSTRAP mode: active configuration DB is absent but "+
 				"rollback history survives; explicit recovery is required", "detail", detail)
 		} else if rescueFallback {
-			slog.Warn("xpf daemon entering BOOTSTRAP mode: valid saved rescue config is available "+
-				"but not installed; for HA topology, promote offline by copying it to "+
-				"/etc/xpf/xpf.conf, removing /etc/xpf/rescue.conf, and restarting; standalone "+
-				"recovery requires explicit load rescue and commit confirmed",
+			rescueConfigFile, rescueFile := d.rescueOfflinePromotionPaths()
+			slog.Warn(fmt.Sprintf("xpf daemon entering BOOTSTRAP mode: valid saved rescue config is available "+
+				"but not installed; for HA topology, promote offline by copying it to %s, removing %s, "+
+				"and restarting; standalone recovery requires explicit load rescue and commit confirmed",
+				rescueConfigFile, rescueFile),
 				"detail", detail)
 		} else {
 			slog.Warn("xpf daemon entering BOOTSTRAP mode: no committed configuration found",

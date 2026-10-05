@@ -79,7 +79,7 @@ func TestConsoleBootstrapImportExplainsRescueOfflinePromotion(t *testing.T) {
 	out := captureStdout(t, func() { _ = c.handleShowSystem([]string{"bootstrap-import"}) })
 	for _, guidance := range []string{
 		"commit confirmed", "HA topology", "offline promotion",
-		"/etc/xpf/xpf.conf", "remove /etc/xpf/rescue.conf", "restart",
+		"configured config file", "remove the adjacent rescue.conf", "restart",
 	} {
 		if !strings.Contains(out, guidance) {
 			t.Errorf("console bootstrap-import omitted rescue guidance %q:\n%s",

@@ -3,10 +3,12 @@ package daemon
 
 import (
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/psaab/xpf/pkg/bootstrapshow"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/logging"
 )
 
@@ -129,6 +131,21 @@ func (d *Daemon) bootstrapShowSnapshot() bootstrapshow.Snapshot {
 		UnixSec: b.UnixSec,
 		Failed:  b.Failed,
 	}
+}
+
+// rescueOfflinePromotionPaths returns the exact file paths used by rescue
+// persistence: the configured text config and adjacent rescue.conf.
+func (d *Daemon) rescueOfflinePromotionPaths() (configFile, rescueFile string) {
+	if d.store != nil {
+		configFile = d.store.ConfigPath()
+	}
+	if configFile == "" {
+		configFile = d.opts.ConfigFile
+	}
+	if configFile == "" {
+		configFile = defaultConfigFile
+	}
+	return configFile, filepath.Join(filepath.Dir(configFile), configstore.RescueConfigBase)
 }
 
 // recordCompileFailure tracks a dataplane compile failure and emits an
