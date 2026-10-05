@@ -165,16 +165,56 @@ case "$command" in
 			fi
 		elif [[ $args == *'-4 neigh replace'* && $args == *'nud permanent'* ]]; then
 			dead=""
+			p_dst=""
+			p_dev=""
 			read -r -a parts <<<"$args"
 			for ((i = 0; i < ${#parts[@]} - 1; i++)); do
 				[[ ${parts[$i]} == lladdr ]] && dead="${parts[$((i + 1))]}"
+				[[ ${parts[$i]} == replace ]] && p_dst="${parts[$((i + 1))]}"
+				[[ ${parts[$i]} == dev ]] && p_dev="${parts[$((i + 1))]}"
 			done
-			printf '[{"dst":"172.16.80.1","dev":"wan80","lladdr":"%s","state":"PERMANENT","flags":[]}]\n' \
-				"$dead" >"${FBF_FAKE_STATE_DIR}/neighbor.json"
+			if [[ -z "$p_dst" || -z "$p_dev" || -z "$dead" ]]; then
+				echo "poison requires dst, dev, and lladdr argv" >&2
+				exit 2
+			fi
+			if [[ "$p_dst" != "172.16.80.1" || "$p_dev" != "wan80" ]]; then
+				echo "poison targeted $p_dst on $p_dev instead of 172.16.80.1 on wan80" >&2
+				exit 2
+			fi
+			printf '[{"dst":"%s","dev":"%s","lladdr":"%s","state":"PERMANENT","flags":[]}]\n' \
+				"$p_dst" "$p_dev" "$dead" >"${FBF_FAKE_STATE_DIR}/neighbor.json"
 			touch "${FBF_FAKE_STATE_DIR}/poisoned"
 		elif [[ $args == *'-4 neigh replace'* ]]; then
-			printf '[{"dst":"172.16.80.1","dev":"wan80","lladdr":"02:00:00:00:80:99","state":"STALE","flags":["router"]}]\n' \
-				>"${FBF_FAKE_STATE_DIR}/neighbor.json"
+			restore_dst=""
+			restore_dev=""
+			restore_lladdr=""
+			restore_nud=""
+			restore_flags=()
+			read -r -a parts <<<"$args"
+			for ((i = 0; i < ${#parts[@]}; i++)); do
+				[[ ${parts[$i]} == replace ]] && restore_dst="${parts[$((i + 1))]}"
+				[[ ${parts[$i]} == dev ]] && restore_dev="${parts[$((i + 1))]}"
+				[[ ${parts[$i]} == lladdr ]] && restore_lladdr="${parts[$((i + 1))]}"
+				[[ ${parts[$i]} == nud ]] && restore_nud="${parts[$((i + 1))]}"
+				case "${parts[$i]}" in
+					extern_learn|extern_valid|managed|router|use)
+						restore_flags+=("${parts[$i]}")
+						;;
+				esac
+			done
+			if [[ -z "$restore_dst" || -z "$restore_dev" || -z "$restore_nud" ]]; then
+				echo "restore requires dst, dev, and nud argv" >&2
+				exit 2
+			fi
+			restore_flags_json="["
+			for flag in "${restore_flags[@]}"; do
+				[[ "$restore_flags_json" == "[" ]] || restore_flags_json+=","
+				restore_flags_json+="\"$flag\""
+			done
+			restore_flags_json+="]"
+			printf '[{"dst":"%s","dev":"%s","lladdr":"%s","state":"%s","flags":%s}]\n' \
+				"$restore_dst" "$restore_dev" "$restore_lladdr" "${restore_nud^^}" \
+				"$restore_flags_json" >"${FBF_FAKE_STATE_DIR}/neighbor.json"
 			rm -f "${FBF_FAKE_STATE_DIR}/poisoned"
 		elif [[ $args == *'-4 neigh del'* ]]; then
 			rm -f "${FBF_FAKE_STATE_DIR}/neighbor.json" "${FBF_FAKE_STATE_DIR}/poisoned"
@@ -419,8 +459,8 @@ run_case() {
 		[[ ! -e "${state}/neighbor.json" ]] || {
 			fail=$((fail + 1)); printf 'FAIL %-26s -> absent neighbor predecessor was not restored\n' "$scenario"
 		}
-	elif ! grep -Fq '"lladdr":"02:00:00:00:80:99","state":"STALE","flags":["router"]' "${state}/neighbor.json"; then
-		fail=$((fail + 1)); printf 'FAIL %-26s -> exact prior neighbor MAC/NUD/flags were not restored\n' "$scenario"
+	elif ! grep -Fq '"dst":"172.16.80.1","dev":"wan80","lladdr":"02:00:00:00:80:99","state":"STALE","flags":["router"]' "${state}/neighbor.json"; then
+		fail=$((fail + 1)); printf 'FAIL %-26s -> exact prior neighbor target/device/MAC/NUD/flags were not restored\n' "$scenario"
 	fi
 }
 
