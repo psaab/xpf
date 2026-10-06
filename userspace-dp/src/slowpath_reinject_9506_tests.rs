@@ -57,6 +57,9 @@ fn frame(id: u64, flow_tag: u64, len: usize) -> SubmitFrame {
         fib_generation: 3,
         zone_id: 4,
         if_id: 5,
+        pmech_inventory_generation: 0,
+        pmech_inventory_fib_generation: 0,
+        pmech_policy_identity: [0; 32],
     }
 }
 
@@ -802,6 +805,9 @@ fn codec_submit_roundtrip_and_exact_bytes() {
             fib_generation: 19,
             zone_id: 23,
             if_id: 29,
+            pmech_inventory_generation: 31,
+            pmech_inventory_fib_generation: 32,
+            pmech_policy_identity: [0x41; 32],
         },
         SubmitFrame {
             lease: ReinjectLease {
@@ -819,6 +825,9 @@ fn codec_submit_roundtrip_and_exact_bytes() {
             fib_generation: 20,
             zone_id: 24,
             if_id: 30,
+            pmech_inventory_generation: 41,
+            pmech_inventory_fib_generation: 42,
+            pmech_policy_identity: [0x52; 32],
         },
     ];
     let payload = encode_submit_batch(&frames);
@@ -842,7 +851,9 @@ fn codec_submit_roundtrip_and_exact_bytes() {
     expected.extend_from_slice(&19u32.to_be_bytes());
     expected.extend_from_slice(&23u16.to_be_bytes());
     expected.extend_from_slice(&29u32.to_be_bytes());
-    expected.extend_from_slice(&2u64.to_be_bytes());
+    expected.extend_from_slice(&31u64.to_be_bytes());
+    expected.extend_from_slice(&32u32.to_be_bytes());
+    expected.extend_from_slice(&[0x41; 32]);
     expected.extend_from_slice(&8u64.to_be_bytes());
     expected.extend_from_slice(&12u64.to_be_bytes());
     expected.extend_from_slice(&10u16.to_be_bytes());
@@ -861,6 +872,9 @@ fn codec_submit_roundtrip_and_exact_bytes() {
     expected.extend_from_slice(&20u32.to_be_bytes());
     expected.extend_from_slice(&24u16.to_be_bytes());
     expected.extend_from_slice(&30u32.to_be_bytes());
+    expected.extend_from_slice(&41u64.to_be_bytes());
+    expected.extend_from_slice(&42u32.to_be_bytes());
+    expected.extend_from_slice(&[0x52; 32]);
     assert_eq!(payload, expected);
     assert_eq!(decode_submit_batch(&payload).unwrap(), frames);
     // Empty batch is a legal no-op.

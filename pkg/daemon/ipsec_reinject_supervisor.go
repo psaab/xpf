@@ -677,15 +677,55 @@ func (s *ipsecSupervisor) validateReinjectLease(lease ipsecReinjectLease, queueE
 	return nil
 }
 
+func ipsecQueueGateKind(key ipsecQueueKey) (uint8, bool) {
+	switch key.Family {
+	case ipsecFamilyInet:
+		switch key.Hook {
+		case ipsecHookForward:
+			return ipsecGateForward, true
+		case ipsecHookInput:
+			return ipsecGateInput, true
+		}
+	case ipsecFamilyBridge:
+		switch key.Hook {
+		case ipsecHookForward:
+			return ipsecGateBridgeForward, true
+		case ipsecHookInput:
+			return ipsecGateBridgeInput, true
+		}
+	}
+	return 0, false
+}
+
 func (s *ipsecSupervisor) allocateQueue(key ipsecQueueKey) (ipsecQueueHandle, error) {
 	if s == nil || s.allocator == nil {
 		return ipsecQueueHandle{}, errIpsecQueueExhausted
 	}
-	return s.allocator.allocate(key)
+	kind, ok := ipsecQueueGateKind(key)
+	if !ok {
+		return ipsecQueueHandle{}, errIpsecQueueStale
+	}
+	handle, err := s.allocator.allocate(key)
+	if err != nil {
+		return ipsecQueueHandle{}, err
+	}
+	if s.registerEmissionGateEpoch(handle.Number, kind, handle.Epoch) == nil {
+		_ = s.allocator.retire(handle, true, true)
+		return ipsecQueueHandle{}, errIpsecQueueStale
+	}
+	return handle, nil
 }
 
 func (s *ipsecSupervisor) retireQueue(handle ipsecQueueHandle, listenerExited, destroyConfirmed bool) error {
 	if s == nil || s.allocator == nil {
+		return errIpsecQueueStale
+	}
+	gate := s.gate(handle.Number)
+	if gate == nil || gate.epoch.Load() != handle.Epoch {
+		return errIpsecQueueStale
+	}
+	_ = s.closeEmissionGate(handle.Number)
+	if listenerExited && destroyConfirmed && !s.retireEmissionGate(handle.Number) {
 		return errIpsecQueueStale
 	}
 	return s.allocator.retire(handle, listenerExited, destroyConfirmed)

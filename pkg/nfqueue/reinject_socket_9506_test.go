@@ -128,11 +128,14 @@ func TestEncodeSubmitBatchPMechTailTwoFrames9506(t *testing.T) {
 	frames := []AdjudicatedFrame{
 		{
 			Frame: CaptureFrame{
-				Packet:             pipelineTestPacket(77, 2, 2, 7, 1),
-				FlowKey:            "flow-a",
-				SnapshotGeneration: 11,
-				ConfigGeneration:   12,
-				FIBGeneration:      13,
+				Packet:                        pipelineTestPacket(77, 2, 2, 7, 1),
+				FlowKey:                       "flow-a",
+				SnapshotGeneration:            11,
+				ConfigGeneration:              12,
+				FIBGeneration:                 13,
+				PMechInventoryGeneration:      14,
+				PMechInventoryFIBGeneration:  15,
+				PMechPolicyIdentity:           [32]byte{0: 0x41, 31: 0x4a},
 			},
 			Origin: origin,
 			Lease:  ReinjectLease{RequestID: 1, PermitEpoch: 2, QueueNumber: 77, QueueEpoch: 3},
@@ -141,11 +144,14 @@ func TestEncodeSubmitBatchPMechTailTwoFrames9506(t *testing.T) {
 		},
 		{
 			Frame: CaptureFrame{
-				Packet:             pipelineTestPacket(77, 2, 2, 7, 2),
-				FlowKey:            "flow-b",
-				SnapshotGeneration: 21,
-				ConfigGeneration:   22,
-				FIBGeneration:      23,
+				Packet:                        pipelineTestPacket(77, 2, 2, 7, 2),
+				FlowKey:                       "flow-b",
+				SnapshotGeneration:            21,
+				ConfigGeneration:              22,
+				FIBGeneration:                 23,
+				PMechInventoryGeneration:      24,
+				PMechInventoryFIBGeneration:  25,
+				PMechPolicyIdentity:           [32]byte{0: 0x51, 31: 0x5a},
 			},
 			Origin: origin,
 			Lease:  ReinjectLease{RequestID: 2, PermitEpoch: 3, QueueNumber: 77, QueueEpoch: 4},
@@ -178,6 +184,15 @@ func TestEncodeSubmitBatchPMechTailTwoFrames9506(t *testing.T) {
 	}
 	if got := binary.BigEndian.Uint32(payload[tail+22 : tail+26]); got != 7 {
 		t.Fatalf("first if ID=%d, want 7", got)
+	}
+	if got := binary.BigEndian.Uint64(payload[tail+26 : tail+34]); got != 14 {
+		t.Fatalf("first P-MECH inventory generation=%d, want 14", got)
+	}
+	if got := binary.BigEndian.Uint32(payload[tail+34 : tail+38]); got != 15 {
+		t.Fatalf("first P-MECH inventory FIB generation=%d, want 15", got)
+	}
+	if got := payload[tail+38 : tail+70]; !bytes.Equal(got, frames[0].Frame.PMechPolicyIdentity[:]) {
+		t.Fatalf("first P-MECH policy identity=%x, want %x", got, frames[0].Frame.PMechPolicyIdentity)
 	}
 	second := 2 + rowLen
 	if got := binary.BigEndian.Uint64(payload[second : second+8]); got != 2 {

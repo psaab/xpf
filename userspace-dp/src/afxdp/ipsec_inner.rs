@@ -18,7 +18,7 @@ use super::ipsec_inner_queue::{
     IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL, IPSEC_INNER_WORKER_RETIRED_TOTAL,
 };
 use super::{
-    ForwardingState, IpsecTunnelRow, IpsecTunnelRows, RuntimeView, UserspaceDpMeta,
+    ForwardingState, IpsecTunnelRows, PMechInventory, RuntimeView, UserspaceDpMeta,
     ValidationState,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -140,7 +140,7 @@ pub(crate) fn ipsec_inner_counters_snapshot() -> IpsecInnerCounterSnapshot {
 }
 
 
-/// Advisory/generation fields appended to each Go submit row (+26 bytes). Go
+/// Advisory/generation fields appended to each Go submit row (+70 bytes). Go
 /// remains the pre-gate authority; Rust treats every value as advisory and
 /// cross-checks it against the exact tunnel row and the one RuntimeView loaded
 /// by the worker tick.
@@ -151,6 +151,11 @@ pub(crate) struct IpsecInnerAdvisory {
     pub fib_generation: u32,
     pub zone_id: u16,
     pub if_id: u32,
+    pub pmech_inventory_generation: u64,
+    pub pmech_inventory_fib_generation: u32,
+    pub pmech_policy_identity: [u8; 32],
+    pub expected_routing_domain: u32,
+    pub expected_fib_table: u32,
 }
 
 /// Owned-frame input passed by the D11 worker. The bytes are a pool slot and
@@ -188,13 +193,14 @@ pub(crate) enum IpsecInnerDecision {
     },
     WouldPermit {
         request_id: u64,
+        runtime_view_publication_generation: u64,
     },
 }
 
 impl IpsecInnerDecision {
     pub(crate) fn request_id(&self) -> u64 {
         match self {
-            Self::Deny { request_id, .. } | Self::WouldPermit { request_id } => *request_id,
+            Self::Deny { request_id, .. } | Self::WouldPermit { request_id, .. } => *request_id,
         }
     }
 
@@ -202,6 +208,16 @@ impl IpsecInnerDecision {
         match self {
             Self::Deny { reason, .. } => Some(*reason),
             Self::WouldPermit { .. } => None,
+        }
+    }
+
+    pub(crate) fn runtime_view_publication_generation(&self) -> Option<u64> {
+        match self {
+            Self::WouldPermit {
+                runtime_view_publication_generation,
+                ..
+            } => Some(*runtime_view_publication_generation),
+            Self::Deny { .. } => None,
         }
     }
 
@@ -232,29 +248,43 @@ fn deny(input: &IpsecInnerInput<'_>, stage: &'static str, reason_byte: u8) -> Ip
 fn d14_zone_gate(
     forwarding: &ForwardingState,
     rows: &IpsecTunnelRows,
+    pmech_inventory: &PMechInventory,
     validation: ValidationState,
     snapshot_generation: u64,
+    runtime_view_publication_generation: u64,
     input: &IpsecInnerInput<'_>,
 ) -> Result<(Vec<u8>, UserspaceDpMeta, u32), IpsecInnerDecision> {
     let advisory = input.advisory;
-    if advisory.snapshot_generation == 0
-        || advisory.config_generation == 0
-        || advisory.fib_generation == 0
-    {
-        zone_gate_no_generation_total.fetch_add(1, Ordering::Relaxed);
-        return Err(deny(input, "d14_missing_generation", reason::MISSING_GENERATION));
-    }
     if snapshot_generation == 0 || !validation.snapshot_installed {
         // D9/D16: nil/stale worker authority is E28 enforcing, not a default
         // view or a guessed generation.
         return Err(deny(input, "d14_evaluator_unavailable", reason::EVALUATOR_UNAVAILABLE));
     }
+    if advisory.config_generation == 0 || advisory.fib_generation == 0 {
+        zone_gate_no_generation_total.fetch_add(1, Ordering::Relaxed);
+        return Err(deny(input, "d14_missing_generation", reason::MISSING_GENERATION));
+    }
+    if advisory.pmech_inventory_generation == 0
+        || advisory.pmech_inventory_fib_generation == 0
+        || runtime_view_publication_generation == 0
+        || !pmech_inventory.complete()
+        || !pmech_inventory.has_main_table_routes()
+    {
+        return Err(deny(input, "d22_inventory_unavailable", reason::EVALUATOR_UNAVAILABLE));
+    }
     if advisory.snapshot_generation != snapshot_generation
         || advisory.config_generation != validation.config_generation
         || advisory.fib_generation != validation.fib_generation
+        || advisory.pmech_inventory_generation != pmech_inventory.generation()
+        || advisory.pmech_inventory_fib_generation != pmech_inventory.fib_generation()
+        || pmech_inventory.fib_generation() != validation.fib_generation
+        || !pmech_inventory.matches_policy_identity(&advisory.pmech_policy_identity)
     {
         zone_gate_stale_total.fetch_add(1, Ordering::Relaxed);
         return Err(deny(input, "d14_stale_generation", reason::STALE_GENERATION));
+    }
+    if advisory.expected_routing_domain != 0 || advisory.expected_fib_table != 254 {
+        return Err(deny(input, "d22_route_domain_mismatch", reason::OTHER_DOMAIN));
     }
     let Some(row) = rows.exact(input.stn) else {
         zone_gate_ambiguous_total.fetch_add(1, Ordering::Relaxed);
@@ -299,13 +329,25 @@ fn d14_zone_gate(
         .get(&row.logical_ifindex)
         .copied()
         .unwrap_or(0);
-    if ingress_zone == 0 || meta.ingress_zone == 0 {
-        zone_gate_unzoned_total.fetch_add(1, Ordering::Relaxed);
-        return Err(deny(input, "d14_zone_unzoned", reason::ZONE_UNZONED));
-    }
     if ingress_zone != meta.ingress_zone || ingress_zone != advisory.zone_id || advisory.zone_id == 0 {
         zone_gate_ambiguous_total.fetch_add(1, Ordering::Relaxed);
         return Err(deny(input, "d14_zone_advisory_mismatch", reason::ZONE_ADVISORY_MISMATCH));
+    }
+    let Some(pmech_row) = pmech_inventory.exact_tunnel(input.stn, row.if_id, row.logical_ifindex) else {
+        return Err(deny(input, "d22_tunnel_inventory_invalid", reason::EVALUATOR_UNAVAILABLE));
+    };
+    let Some(destination) =
+        crate::afxdp::frame::parse_packet_destination_from_frame(&owned, meta)
+    else {
+        ipsec_inner_parse_drops_total.fetch_add(1, Ordering::Relaxed);
+        return Err(deny(input, "d22_destination_unresolved", reason::PARSE_ECN));
+    };
+    if !pmech_row.allows_destination(destination) {
+        return Err(deny(input, "d22_destination_outside_ingress", reason::NO_ROUTE));
+    }
+    let (selectors, effective_prefixes) = pmech_row.selector_projection();
+    if selectors.is_empty() || effective_prefixes.is_empty() {
+        return Err(deny(input, "d22_selector_inventory_invalid", reason::EVALUATOR_UNAVAILABLE));
     }
     Ok((owned, meta, row.if_id))
 }
@@ -324,15 +366,24 @@ pub(crate) fn adjudicate_ipsec_inner(
     let forwarding = view.forwarding().as_ref();
     let validation = view.validation();
     let rows = view.ipsec_tunnel_rows();
+    let pmech_inventory = view.pmech_inventory();
     if !validation.snapshot_installed {
         return deny(&input, "d13_snapshot_unavailable", reason::EVALUATOR_UNAVAILABLE);
     }
     let snapshot_generation = view.ipsec_snapshot_generation();
-    let (_owned, _meta, _if_id) =
-        match d14_zone_gate(forwarding, rows, validation, snapshot_generation, &input) {
-            Ok(value) => value,
-            Err(decision) => return decision,
-        };
+    let runtime_view_publication_generation = view.runtime_view_publication_generation();
+    let (_owned, _meta, _if_id) = match d14_zone_gate(
+        forwarding,
+        rows,
+        pmech_inventory,
+        validation,
+        snapshot_generation,
+        runtime_view_publication_generation,
+        &input,
+    ) {
+        Ok(value) => value,
+        Err(decision) => return decision,
+    };
 
     // S9.2-S9.4/S9.6 deny-only subset: later worker stages are represented by
     // the existing poll_descriptor order, but the final permit join is OUT in
@@ -348,6 +399,7 @@ pub(crate) fn adjudicate_ipsec_inner(
             .descriptor
             .map(|d| d.request_id)
             .unwrap_or_default(),
+        runtime_view_publication_generation,
     }
 }
 
@@ -364,7 +416,7 @@ pub(crate) fn verdict_from_decision(decision: &IpsecInnerDecision) -> IpsecInner
             reason: *reason,
             policy_id: *policy_id,
         },
-        IpsecInnerDecision::WouldPermit { request_id } => {
+        IpsecInnerDecision::WouldPermit { request_id, .. } => {
             IpsecInnerVerdict::WouldPermit {
                 request_id: *request_id,
             }
@@ -420,18 +472,52 @@ pub(crate) const IPSEC_INNER_INGRESS_FLAG: u8 = 1 << 6;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::afxdp::types::{ForwardingState, RuntimeView, ValidationState};
+    use crate::afxdp::types::{ForwardingState, PMechInventory, RuntimeView, ValidationState};
     use crate::afxdp::ipsec_inner_queue::reason;
+    use crate::protocol::{
+        IpsecMainRouteNextHopSnapshot, IpsecMainRouteSnapshot, IpsecPMechInventorySnapshot,
+        IpsecPMechTunnelRowSnapshot, IpsecTrafficSelectorSnapshot,
+    };
     use std::sync::Arc;
-    fn view(config_generation: u64, fib_generation: u32) -> RuntimeView {
-        RuntimeView::new( // runtime-view-canary: test-local
-            ValidationState {
-                snapshot_installed: true,
-                config_generation,
+
+    fn test_inventory(fib_generation: u32) -> Arc<PMechInventory> {
+        let snapshot = IpsecPMechInventorySnapshot {
+            policy_identity: "01".repeat(32),
+            generation: 77,
+            fib_generation,
+            complete: true,
+            main_routes: vec![IpsecMainRouteSnapshot {
+                table: 254,
+                family: "inet".into(),
+                destination: "10.0.0.0/24".into(),
+                next_hops: vec![IpsecMainRouteNextHopSnapshot {
+                    ifindex: 10,
+                    weight: 1,
+                }],
+                ..Default::default()
+            }],
+            tunnel_rows: vec![IpsecPMechTunnelRowSnapshot {
+                stn: "st0".into(),
+                if_id: 1,
+                logical_ifindex: 10,
+                explicit_selectors: vec![IpsecTrafficSelectorSnapshot {
+                    name: "selector".into(),
+                    local_ts: "192.0.2.0/24".into(),
+                    remote_ts: "10.0.0.0/24".into(),
+                    source: "named".into(),
+                }],
+                effective_prefixes: vec!["10.0.0.0/24".into()],
+                ingress_prefixes: vec!["10.0.0.0/24".into()],
+                inventory_generation: 77,
                 fib_generation,
-            },
-            Arc::new(ForwardingState::default()),
-        )
+                source_kind: "xfrmi".into(),
+                selector_provenance: "named".into(),
+                inventory_complete: true,
+                inventory_valid: true,
+                inventory_reason: String::new(),
+            }],
+        };
+        Arc::new(PMechInventory::from_snapshot(Some(&snapshot)))
     }
 
     fn view_with_rows(
@@ -440,7 +526,7 @@ mod tests {
         rows: IpsecTunnelRows,
         forwarding: ForwardingState,
     ) -> RuntimeView {
-        RuntimeView::new_with_ipsec_tunnel_rows( // runtime-view-canary: test-local
+        RuntimeView::new_with_ipsec_authority( // runtime-view-canary: test-local
             ValidationState {
                 snapshot_installed: true,
                 config_generation,
@@ -449,7 +535,41 @@ mod tests {
             Arc::new(forwarding),
             Arc::new(rows),
             config_generation,
+            test_inventory(fib_generation),
+            1,
         )
+    }
+
+    fn advisory(
+        snapshot_generation: u64,
+        config_generation: u64,
+        fib_generation: u32,
+        zone_id: u16,
+        if_id: u32,
+    ) -> IpsecInnerAdvisory {
+        IpsecInnerAdvisory {
+            snapshot_generation,
+            config_generation,
+            fib_generation,
+            zone_id,
+            if_id,
+            pmech_inventory_generation: 77,
+            pmech_inventory_fib_generation: fib_generation,
+            pmech_policy_identity: [1; 32],
+            expected_routing_domain: 0,
+            expected_fib_table: 254,
+        }
+    }
+
+    fn test_packet(destination: [u8; 4]) -> [u8; 20] {
+        let mut packet = [0; 20];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&20u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[192, 0, 2, 1]);
+        packet[16..20].copy_from_slice(&destination);
+        packet
     }
 
     fn input<'a>(bytes: &'a [u8], advisory: IpsecInnerAdvisory) -> IpsecInnerInput<'a> {
@@ -476,13 +596,7 @@ mod tests {
             &v,
             input(
                 &[0x45; 20],
-                IpsecInnerAdvisory {
-                    snapshot_generation: 1,
-                    config_generation: 1,
-                    fib_generation: 1,
-                    zone_id: 1,
-                    if_id: 1,
-                },
+                advisory(1, 1, 1, 1, 1),
             ),
         );
         assert_eq!(d.reason(), Some(reason::IFID_UNDERIVABLE));
@@ -528,13 +642,7 @@ mod tests {
             &v,
             input(
                 &[0x45; 20],
-                IpsecInnerAdvisory {
-                    snapshot_generation: 1,
-                    config_generation: 1,
-                    fib_generation: 1,
-                    zone_id: 1,
-                    if_id: 1,
-                },
+                advisory(1, 1, 1, 1, 1),
             ),
         );
         assert_eq!(d.reason(), Some(reason::STALE_GENERATION));
@@ -553,18 +661,22 @@ mod tests {
         let d = adjudicate_ipsec_inner(
             &v,
             input(
-                &[0x45; 20],
-                IpsecInnerAdvisory {
-                    snapshot_generation: 1,
-                    config_generation: 1,
-                    fib_generation: 1,
-                    zone_id: 1,
-                    if_id: 1,
-                },
+                &test_packet([10, 0, 0, 1]),
+                advisory(1, 1, 1, 1, 1),
             ),
         );
         assert!(d.is_would_permit());
         assert_eq!(d.reason(), None);
+        assert_eq!(d.runtime_view_publication_generation(), Some(1));
+
+        let outside = adjudicate_ipsec_inner(
+            &v,
+            input(
+                &test_packet([203, 0, 113, 9]),
+                advisory(1, 1, 1, 1, 1),
+            ),
+        );
+        assert_eq!(outside.reason(), Some(reason::NO_ROUTE));
     }
 
     #[test]
@@ -579,13 +691,7 @@ mod tests {
         let v = view_with_rows(1, 1, rows, forwarding);
         let mut claimed = input(
             &[0x45; 20],
-            IpsecInnerAdvisory {
-                snapshot_generation: 1,
-                config_generation: 1,
-                fib_generation: 1,
-                zone_id: 1,
-                if_id: 1,
-            },
+            advisory(1, 1, 1, 1, 1),
         );
         claimed.logical_ifindex = 11;
         assert_eq!(
@@ -604,13 +710,7 @@ mod tests {
             logical_ifindex: 10,
         }]);
         let v = view_with_rows(1, 1, rows, forwarding);
-        let mut a = IpsecInnerAdvisory {
-            snapshot_generation: 1,
-            config_generation: 1,
-            fib_generation: 1,
-            zone_id: 2,
-            if_id: 7,
-        };
+        let mut a = advisory(1, 1, 1, 2, 7);
         assert_eq!(
             adjudicate_ipsec_inner(&v, input(&[0x45; 20], a)).reason(),
             Some(reason::ZONE_ADVISORY_MISMATCH)

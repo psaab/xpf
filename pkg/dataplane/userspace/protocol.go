@@ -382,10 +382,11 @@ const (
 	// v43 -> v44 (#11423; v43 is used by #11463): TunnelEndpointSnapshot.LinkUp
 	// carries keepalive-driven tunnel netdev liveness; an older helper keeps
 	// down GRE ECMP members live.
-	// v44 -> v45 (#11812): PolicerSnapshot adds optional single-rate marking and
-	// logical-interface-policer fields; the Go and Rust snapshot versions move
-	// with the shape even though the current Rust runtime does not consume them.
-	ProtocolVersion = 45
+	// v45 -> v46 (#9506 P2): the snapshot carries complete table-254 route
+	// inventory, explicit selector intersections, and a dedicated zone/policy
+	// identity for the P-MECH worker/view commit guard. Older helpers cannot
+	// validate the required inventory and must refuse the snapshot.
+	ProtocolVersion = 46
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -402,6 +403,11 @@ const (
 	// first per-feature floor in the tree; #6648 tracks giving the local gates
 	// the same treatment. Never renumber it: it names a historical wire fact.
 	MinProtocolMultiZoneScopedPolicy = 4
+
+	// MinProtocolPMech is the FIRST snapshot version whose complete table-254
+	// inventory and per-tunnel explicit selector membership can support D22+
+	// P-MECH worker adjudication. This historical feature floor is immutable.
+	MinProtocolPMech = 46
 
 	// The remaining per-feature floors (#6648). Each names the FIRST snapshot
 	// protocol version whose wire representation carries that feature, and each
@@ -729,6 +735,53 @@ type IpsecTunnelRowSnapshot struct {
 	LogicalIfindex int32  `json:"logical_ifindex"`
 }
 
+type IpsecPMechTunnelRowSnapshot struct {
+	STN                 string                          `json:"stn"`
+	IfID                uint32                          `json:"if_id"`
+	LogicalIfindex      int32                           `json:"logical_ifindex"`
+	ExplicitSelectors   []IpsecTrafficSelectorSnapshot `json:"explicit_selectors,omitempty"`
+	EffectivePrefixes   []string                        `json:"effective_prefixes,omitempty"`
+	IngressPrefixes     []string                        `json:"ingress_prefixes,omitempty"`
+	InventoryGeneration uint64                          `json:"inventory_generation,omitempty"`
+	FIBGeneration       uint32                          `json:"fib_generation,omitempty"`
+	SourceKind          string                          `json:"source_kind,omitempty"`
+	SelectorProvenance  string                          `json:"selector_provenance,omitempty"`
+	InventoryComplete   bool                            `json:"inventory_complete,omitempty"`
+	InventoryValid      bool                            `json:"inventory_valid,omitempty"`
+	InventoryReason     string                          `json:"inventory_reason,omitempty"`
+}
+
+type IpsecPMechInventorySnapshot struct {
+	PolicyIdentity string                          `json:"policy_identity,omitempty"`
+	Generation     uint64                          `json:"generation,omitempty"`
+	FIBGeneration  uint32                          `json:"fib_generation,omitempty"`
+	Complete       bool                            `json:"complete,omitempty"`
+	MainRoutes     []IpsecMainRouteSnapshot        `json:"main_routes,omitempty"`
+	TunnelRows     []IpsecPMechTunnelRowSnapshot `json:"tunnel_rows,omitempty"`
+}
+
+type IpsecTrafficSelectorSnapshot struct {
+	Name      string `json:"name,omitempty"`
+	LocalTS   string `json:"local_ts,omitempty"`
+	RemoteTS  string `json:"remote_ts,omitempty"`
+	Source    string `json:"source"`
+}
+
+// IpsecMainRouteSnapshot retains every main-table route and every resolved
+// nexthop leg used to construct the per-tunnel effective-prefix inventory.
+type IpsecMainRouteSnapshot struct {
+	Table       uint32                       `json:"table"`
+	Family      string                       `json:"family"`
+	Destination string                       `json:"destination"`
+	Protocol    uint8                        `json:"protocol"`
+	Disposition uint8                        `json:"disposition"`
+	NextHops    []IpsecMainRouteNextHopSnapshot `json:"next_hops,omitempty"`
+}
+
+type IpsecMainRouteNextHopSnapshot struct {
+	Ifindex uint32 `json:"ifindex"`
+	Weight  uint32 `json:"weight"`
+}
 // IpsecBindlessSelectorSnapshot is one complete pair of IPsec traffic-selector
 // sides for a policy-based VPN with no bind-interface. Empty sides are not
 // published: they resolve to dynamic endpoints rather than a shape the helper
@@ -763,7 +816,8 @@ type ConfigSnapshot struct {
 	// the latter advances for ordinary config/FIB publishes, while the former
 	// advances only when admitted NFQUEUE handles rotate. Rust D14 compares its
 	// packet snapshot-generation advisory against this exact capture authority.
-	IpsecTunnelSnapshotGeneration uint64                `json:"ipsec_tunnel_snapshot_generation,omitempty"`
+	IpsecTunnelSnapshotGeneration uint64                       `json:"ipsec_tunnel_snapshot_generation,omitempty"`
+	PMechInventory                *IpsecPMechInventorySnapshot `json:"pmech_inventory,omitempty"`
 	Summary                       SnapshotSummary       `json:"summary"`
 	Capabilities                  UserspaceCapabilities `json:"capabilities"`
 	MapPins                       UserspaceMapPins      `json:"map_pins"`

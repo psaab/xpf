@@ -28,9 +28,10 @@ const (
 	reinjectOriginBridge   = 2
 	reinjectOriginForward  = 1
 	reinjectOriginInput    = 2
-	// P-MECH submit advisory tail: snapshot generation, config generation,
-	// FIB generation, zone ID, and authoritative interface ID.
-	reinjectSubmitPMechTailLen = 26
+	// P-MECH submit authority tail adds inventory generation, inventory FIB
+	// generation, and the dedicated SHA-256 policy identity after the original
+	// capture/config/FIB/zone/if_id identities.
+	reinjectSubmitPMechTailLen = 70
 
 	// Rust admission refusal reasons are closed-world values. Unknown bytes
 	// are version skew and must never be treated as ADMIT_OK.
@@ -381,12 +382,15 @@ func encodeSubmitBatch(frames []AdjudicatedFrame) ([]byte, error) {
 		putU32(&out, uint32(len(data)))
 		out = append(out, data...)
 		// Keep this tail after data: Rust's strict decoder uses the exact
-		// data length and 26-byte advisory suffix as the frame boundary.
+		// data length and fixed advisory suffix as the frame boundary.
 		putU64(&out, item.Frame.SnapshotGeneration)
 		putU64(&out, item.Frame.ConfigGeneration)
 		putU32(&out, item.Frame.FIBGeneration)
 		putU16(&out, item.ZoneID)
 		putU32(&out, item.IfID)
+		putU64(&out, item.Frame.PMechInventoryGeneration)
+		putU32(&out, item.Frame.PMechInventoryFIBGeneration)
+		out = append(out, item.Frame.PMechPolicyIdentity[:]...)
 	}
 	return out, nil
 }

@@ -1092,15 +1092,52 @@ mod slow_path_mtu_tests {
         assert_eq!(preserved.mtu(), 1500, "preserved reinjector starts at 1500");
 
         // A snapshot whose largest interface MTU is 9000 -> slow_path_mtu() == 9000.
+        let tunnel_rows = vec![IpsecTunnelRowSnapshot {
+            stn: "st0".to_string(),
+            if_id: 9,
+            logical_ifindex: 10,
+        }];
         let snapshot = ConfigSnapshot {
             generation: 7,
             fib_generation: 3,
             ipsec_tunnel_snapshot_generation: 42,
-            ipsec_tunnel_rows: vec![IpsecTunnelRowSnapshot {
-                stn: "st0".to_string(),
-                if_id: 9,
-                logical_ifindex: 10,
-            }],
+            ipsec_tunnel_rows: tunnel_rows,
+            pmech_inventory: Some(crate::protocol::snapshot::IpsecPMechInventorySnapshot {
+                policy_identity: "01".repeat(32),
+                generation: 7,
+                fib_generation: 3,
+                complete: true,
+                main_routes: vec![crate::protocol::snapshot::IpsecMainRouteSnapshot {
+                    table: 254,
+                    family: "inet".into(),
+                    destination: "10.0.0.1/32".into(),
+                    next_hops: vec![crate::protocol::snapshot::IpsecMainRouteNextHopSnapshot {
+                        ifindex: 10,
+                        weight: 1,
+                    }],
+                    ..Default::default()
+                }],
+                tunnel_rows: vec![crate::protocol::snapshot::IpsecPMechTunnelRowSnapshot {
+                    stn: "st0".into(),
+                    if_id: 9,
+                    logical_ifindex: 10,
+                    explicit_selectors: vec![crate::protocol::snapshot::IpsecTrafficSelectorSnapshot {
+                        name: "selector".into(),
+                        local_ts: "192.0.2.0/24".into(),
+                        remote_ts: "10.0.0.1/32".into(),
+                        source: "named".into(),
+                    }],
+                    effective_prefixes: vec!["10.0.0.1/32".into()],
+                    ingress_prefixes: vec!["10.0.0.1/32".into()],
+                    inventory_generation: 7,
+                    fib_generation: 3,
+                    source_kind: "xfrmi".into(),
+                    selector_provenance: "named".into(),
+                    inventory_complete: true,
+                    inventory_valid: true,
+                    inventory_reason: String::new(),
+                }],
+            }),
             interfaces: vec![InterfaceSnapshot {
                 mtu: 9000,
                 ..Default::default()
@@ -1151,7 +1188,16 @@ mod slow_path_mtu_tests {
                 .map(|row| (row.if_id, row.logical_ifindex)),
             Some((9, 10))
         );
-        let packet = [0x45; 20];
+        let packet = {
+            let mut packet = [0; 20];
+            packet[0] = 0x45;
+            packet[2..4].copy_from_slice(&20u16.to_be_bytes());
+            packet[8] = 64;
+            packet[9] = 6;
+            packet[12..16].copy_from_slice(&[192, 0, 2, 1]);
+            packet[16..20].copy_from_slice(&[10, 0, 0, 1]);
+            packet
+        };
         let decision = crate::afxdp::ipsec_inner::adjudicate_ipsec_inner(
             &view,
             crate::afxdp::ipsec_inner::IpsecInnerInput {
@@ -1171,6 +1217,11 @@ mod slow_path_mtu_tests {
                     fib_generation: 3,
                     zone_id: 1,
                     if_id: 9,
+                    pmech_inventory_generation: 7,
+                    pmech_inventory_fib_generation: 3,
+                    pmech_policy_identity: [1; 32],
+                    expected_routing_domain: 0,
+                    expected_fib_table: 254,
                 },
                 descriptor: None,
             },

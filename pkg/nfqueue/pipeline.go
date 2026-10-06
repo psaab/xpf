@@ -126,6 +126,13 @@ type PacketVerdictSink interface {
 	Verdict(*Packet, Verdict) error
 }
 
+// FramePacketVerdictSink receives the immutable capture identities required
+// by the terminal authority. Active daemon capture requires this interface;
+// PacketVerdictSink remains available to isolated pipeline callers.
+type FramePacketVerdictSink interface {
+	VerdictFrame(CaptureFrame, Verdict) error
+}
+
 type packetVerdictSinkFunc func(*Packet, Verdict) error
 
 func (f packetVerdictSinkFunc) Verdict(packet *Packet, verdict Verdict) error {
@@ -139,20 +146,24 @@ type CaptureFrame struct {
 	Fragment     *Fragment
 	InnerOverlap bool
 	// SnapshotGeneration is the immutable capture authority. ConfigGeneration
-	// and FIBGeneration are the accepted packet/config authority; they may
-	// advance independently after a same-key snapshot apply.
-	// All four identities must be authoritative before enforcement proceeds.
-	Generation         uint64 // legacy queue/capture generation alias
-	SnapshotGeneration uint64
-	ConfigGeneration   uint64
-	FIBGeneration      uint32
-	QueueNumber        uint16
-	QueueEpoch         uint64
+	// and FIBGeneration are the accepted packet/config authority; the separate
+	// P-MECH inventory identity is frozen from that same accepted snapshot.
+	Generation                    uint64 // legacy queue/capture generation alias
+	SnapshotGeneration            uint64
+	ConfigGeneration              uint64
+	FIBGeneration                 uint32
+	PMechInventoryGeneration      uint64
+	PMechInventoryFIBGeneration  uint32
+	PMechPolicyIdentity           [32]byte
+	QueueNumber                   uint16
+	QueueEpoch                    uint64
 
 	origin    CaptureOrigin
 	originSet bool
 	phase     PipelinePhase
 }
+
+
 
 // Origin returns the structural queue provenance attached by Enqueue.
 func (f CaptureFrame) Origin() CaptureOrigin { return f.origin }
@@ -182,6 +193,7 @@ type CapturePipelineConfig struct {
 	FragmentSlots    int
 	FragmentPieces   int
 	FragmentDeadline time.Duration
+	FragmentTombstoneCap int
 	OnUncertain      func(reason string)
 	ZoneEvaluator    ZoneEvaluator
 	ZoneSnapshot     ZoneSnapshotRef
@@ -211,6 +223,7 @@ type PipelineStats struct {
 	ClassificationErrors   uint64
 	FragmentMetadataErrors uint64
 	FragmentLate           uint64
+	DenyEventUnavailable  uint64
 	VersionSkews           uint64
 	EventDecodeErrors      uint64
 	InputAcceptErrors      uint64
@@ -264,6 +277,18 @@ type flowState struct {
 	retired bool
 }
 
+// fragmentDenyKey is deliberately narrower than the legacy FragPool key. It
+// follows the P-MECH deny tombstone identity and never carries reassembly data.
+type fragmentDenyKey struct {
+	Version    uint8
+	Src        [16]byte
+	Dst        [16]byte
+	Protocol   uint8
+	ID         uint32
+	IfID       uint32
+	Generation uint64
+}
+
 // CapturePipeline is a bounded capture-to-verdict actor. Enqueue never waits
 // for workers; it either hands off into the bounded channel or records a
 // fail-closed DROP. Flow queues are independent, so one unresolved completion
@@ -289,6 +314,8 @@ type CapturePipeline struct {
 	fragPool         *FragPool
 	fragHolds        map[FragmentKey][]CaptureFrame
 	fragTimes        map[FragmentKey]time.Time
+	fragmentTombstones     map[fragmentDenyKey]struct{}
+	fragmentTombstoneCap   int
 	flows            map[string]*flowState
 	pending          map[uint64]*pendingReinject
 	closed           bool
@@ -326,6 +353,9 @@ func NewCapturePipeline(cfg CapturePipelineConfig) (*CapturePipeline, error) {
 	if cfg.FragmentDeadline <= 0 {
 		cfg.FragmentDeadline = 2 * time.Second
 	}
+	if cfg.FragmentTombstoneCap <= 0 {
+		cfg.FragmentTombstoneCap = 4096
+	}
 	fragPool, err := NewFragPool(cfg.FragmentPieces, cfg.FragmentSlots)
 	if err != nil {
 		return nil, fmt.Errorf("nfqueue: fragment slots: %w", err)
@@ -347,6 +377,8 @@ func NewCapturePipeline(cfg CapturePipelineConfig) (*CapturePipeline, error) {
 		handoff:    make(chan CaptureFrame, cfg.HandoffCap), batchCap: cfg.BatchCap,
 		ackDeadline: cfg.AckDeadline, fragmentDeadline: cfg.FragmentDeadline, fragPool: fragPool,
 		fragHolds: make(map[FragmentKey][]CaptureFrame), fragTimes: make(map[FragmentKey]time.Time),
+		fragmentTombstones: make(map[fragmentDenyKey]struct{}),
+		fragmentTombstoneCap: cfg.FragmentTombstoneCap,
 		flows: make(map[string]*flowState), pending: make(map[uint64]*pendingReinject),
 	}, nil
 }
@@ -374,7 +406,7 @@ func (p *CapturePipeline) Enqueue(frame CaptureFrame) error {
 		p.mu.Lock()
 		p.stats.ProvenanceMismatches++
 		p.mu.Unlock()
-		p.terminal(frame.Packet, VerdictDrop)
+		p.terminalFrame(frame, VerdictDrop)
 		return err
 	}
 	origin, ok := p.registry.Lookup(frame.Packet.QueueID())
@@ -383,7 +415,7 @@ func (p *CapturePipeline) Enqueue(frame CaptureFrame) error {
 		p.mu.Lock()
 		p.stats.ProvenanceMismatches++
 		p.mu.Unlock()
-		p.terminal(frame.Packet, VerdictDrop)
+		p.terminalFrame(frame, VerdictDrop)
 		return err
 	}
 	if frame.originSet && frame.origin != origin {
@@ -391,16 +423,33 @@ func (p *CapturePipeline) Enqueue(frame CaptureFrame) error {
 		p.mu.Lock()
 		p.stats.ProvenanceMismatches++
 		p.mu.Unlock()
-		p.terminal(frame.Packet, VerdictDrop)
+		p.terminalFrame(frame, VerdictDrop)
 		return err
 	}
 	frame.origin = origin
 	frame.originSet = true
+	if authorityRef, ok := p.zoneSnapshot.(ZoneSnapshotPacketAuthorityRef); ok {
+		authority := authorityRef.PacketAuthority()
+		frame.ConfigGeneration = authority.ConfigGeneration
+		frame.FIBGeneration = authority.FIBGeneration
+		frame.PMechInventoryGeneration = authority.PMechInventoryGeneration
+		frame.PMechInventoryFIBGeneration = authority.PMechInventoryFIBGeneration
+		frame.PMechPolicyIdentity = authority.PMechPolicyIdentity
+	}
+	if frame.FragmentKey != nil {
+		key := *frame.FragmentKey
+		if p.zoneSnapshot != nil && p.zoneSnapshot.Current() {
+			if resolution := p.zoneSnapshot.ResolveSTN(origin.STN); resolution.Reason == ZoneReasonZoned {
+				key.IfID = resolution.IfID
+			}
+		}
+		frame.FragmentKey = &key
+	}
 	p.mu.Lock()
 	frame.phase = p.phase
 	if p.closed || p.revoked {
 		p.mu.Unlock()
-		p.terminal(frame.Packet, VerdictDrop)
+		p.terminalFrame(frame, VerdictDrop)
 		return ErrPipelineClosed
 	}
 	select {
@@ -410,9 +459,55 @@ func (p *CapturePipeline) Enqueue(frame CaptureFrame) error {
 	default:
 		p.stats.HandoffRefusals++
 		p.mu.Unlock()
-		p.terminal(frame.Packet, VerdictDrop)
+		p.terminalFrame(frame, VerdictDrop)
 		return ErrHandoffFull
 	}
+}
+
+type CapturePreFrameError uint8
+
+const (
+	CaptureClassificationError CapturePreFrameError = iota + 1
+	CaptureFragmentMetadataError
+)
+
+// RejectPreFrame records and terminal-DROPs a packet that failed before a
+// valid CaptureFrame could be constructed. It never invents origin data.
+func (p *CapturePipeline) RejectPreFrame(frame CaptureFrame, kind CapturePreFrameError) error {
+	if p == nil || frame.Packet == nil {
+		return errors.New("nfqueue: nil pre-frame packet")
+	}
+	if frame.QueueNumber == 0 {
+		frame.QueueNumber = frame.Packet.QueueID()
+	}
+	if err := ValidateProvenance(frame.Packet, p.registry); err == nil {
+		if origin, ok := p.registry.Lookup(frame.Packet.QueueID()); ok {
+			frame.origin = origin
+			frame.originSet = true
+		}
+	}
+	p.mu.Lock()
+	p.stats.Consumed++
+	frame.phase = p.phase
+	switch kind {
+	case CaptureClassificationError:
+		p.stats.ClassificationErrors++
+	default:
+		p.stats.FragmentMetadataErrors++
+		p.stats.FragmentDrops++
+	}
+	p.mu.Unlock()
+	reason := ReasonFragmentRefused
+	if kind == CaptureClassificationError {
+		reason = ReasonParseECN
+	}
+	if !p.emitDeny(frame, reason) {
+		p.mu.Lock()
+		p.stats.DenyEventUnavailable++
+		p.mu.Unlock()
+	}
+	p.finishFrame(frame, VerdictDrop)
+	return nil
 }
 
 // Drain transfers up to max rows from the bounded handoff through the
@@ -446,16 +541,71 @@ func (p *CapturePipeline) consumeFrames(frames []CaptureFrame) int {
 		return 0
 	}
 	p.mu.Lock()
-	var drops []CaptureFrame
+	var drops, malformedFragments, enforcingFragments, shadowFragments []CaptureFrame
 	for _, frame := range frames {
 		if frame.phase == PipelineQuarantine {
 			drops = append(drops, frame)
+			continue
+		}
+		if (frame.FragmentKey == nil) != (frame.Fragment == nil) {
+			p.stats.FragmentMetadataErrors++
+			p.stats.FragmentDrops++
+			malformedFragments = append(malformedFragments, frame)
+			continue
+		}
+		if frame.FragmentKey != nil {
+			p.stats.FragmentDrops++
+			switch frame.phase {
+			case PipelineShadow:
+				p.stats.ShadowDivergences++
+				shadowFragments = append(shadowFragments, frame)
+			case PipelineEnforcing:
+				key := *frame.FragmentKey
+				generation := frame.SnapshotGeneration
+				if generation == 0 {
+					generation = frame.Generation
+				}
+				if key.IfID != 0 && generation != 0 && key.Generation == generation {
+					tombstone := fragmentDenyKey{
+						Version: key.Version, Src: key.Src, Dst: key.Dst,
+						Protocol: key.Protocol, ID: key.ID, IfID: key.IfID,
+						Generation: generation,
+					}
+					if _, exists := p.fragmentTombstones[tombstone]; exists {
+						p.stats.FragmentLate++
+					} else if len(p.fragmentTombstones) < p.fragmentTombstoneCap {
+						p.fragmentTombstones[tombstone] = struct{}{}
+					}
+				}
+				enforcingFragments = append(enforcingFragments, frame)
+			default:
+				drops = append(drops, frame)
+			}
 			continue
 		}
 		drops = append(drops, p.enqueueFlowLocked(frame)...)
 	}
 	eligible := p.eligibleLocked()
 	p.mu.Unlock()
+	for _, frame := range malformedFragments {
+		if !p.emitDeny(frame, ReasonFragmentRefused) {
+			p.mu.Lock()
+			p.stats.DenyEventUnavailable++
+			p.mu.Unlock()
+		}
+		p.finishFrame(frame, VerdictDrop)
+	}
+	for _, frame := range enforcingFragments {
+		if !p.emitDeny(frame, ReasonFragmentRefused) {
+			p.mu.Lock()
+			p.stats.DenyEventUnavailable++
+			p.mu.Unlock()
+		}
+		p.finishFrame(frame, VerdictDrop)
+	}
+	for _, frame := range shadowFragments {
+		p.finishFrame(frame, VerdictAccept)
+	}
 	for _, frame := range drops {
 		if frame.phase == PipelineShadow {
 			p.mu.Lock()
@@ -830,7 +980,7 @@ func (p *CapturePipeline) finishFrame(frame CaptureFrame, verdict Verdict) {
 		}
 	}
 	p.mu.Unlock()
-	err := p.terminal(frame.Packet, verdict)
+	err := p.terminalFrame(frame, verdict)
 	if err != nil {
 		p.mu.Lock()
 		p.stats.Uncertain++
@@ -848,11 +998,14 @@ func (p *CapturePipeline) finishFrame(frame CaptureFrame, verdict Verdict) {
 	p.mu.Unlock()
 }
 
-func (p *CapturePipeline) terminal(packet *Packet, verdict Verdict) error {
-	if p == nil || p.sink == nil {
-		return errors.New("nfqueue: nil terminal sink")
+func (p *CapturePipeline) terminalFrame(frame CaptureFrame, verdict Verdict) error {
+	if p == nil || p.sink == nil || frame.Packet == nil {
+		return errors.New("nfqueue: nil terminal sink or packet")
 	}
-	return p.sink.Verdict(packet, verdict)
+	if sink, ok := p.sink.(FramePacketVerdictSink); ok {
+		return sink.VerdictFrame(frame, verdict)
+	}
+	return p.sink.Verdict(frame.Packet, verdict)
 }
 
 // Poll drains terminal completions and resolves expired requests. It should be
@@ -1361,6 +1514,7 @@ func (p *CapturePipeline) Close() error {
 	_ = p.Cancel(0, 0, 0)
 	p.mu.Lock()
 	p.closed = true
+	p.fragmentTombstones = nil
 	p.mu.Unlock()
 	return nil
 }
@@ -1434,6 +1588,18 @@ type ZoneSnapshotOriginValidator interface {
 // This mirrors Rust D14's two-authority triple check.
 type ZoneSnapshotAcceptedGenerationsRef interface {
 	AcceptedGenerations() (configGen uint64, fibGen uint32)
+}
+
+type ZoneSnapshotPacketAuthority struct {
+	ConfigGeneration             uint64
+	FIBGeneration                uint32
+	PMechInventoryGeneration     uint64
+	PMechInventoryFIBGeneration uint32
+	PMechPolicyIdentity          [32]byte
+}
+
+type ZoneSnapshotPacketAuthorityRef interface {
+	PacketAuthority() ZoneSnapshotPacketAuthority
 }
 
 type ZoneEvaluator interface {

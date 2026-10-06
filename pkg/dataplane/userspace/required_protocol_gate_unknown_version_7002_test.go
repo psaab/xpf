@@ -23,11 +23,9 @@ import (
 // the two that already did rather than re-litigating the question per lane.
 //
 // THE ISSUE'S ENUMERATION IS A FLOOR. It names FOUR gates; there are FIVE —
-// ensureEgressZoneProtocolLocked joined the set in #6722 and is in
-// requiredProtocolGateSentinels alongside the other four. Its measured table is
-// also stale: it lists secure-tunnel as arming, which stopped being true when
-// #6691 round 10 landed the deferral and cited this issue by number while
-// deliberately scoping the fix to itself.
+// ensureEgressZoneProtocolLocked joined the set in #6722 — and #9506 adds the
+// scoped P-MECH floor without changing the other gates' historical semantics.
+// Its measured table below records the original five-gate census.
 //
 // WHY helperStatusObserved AND NOT `version <= 0`. Three states share one
 // value: "never observed" and "a helper answered reporting 0" both leave
@@ -39,7 +37,7 @@ import (
 // this file's `observed-zero` column is asserted separately from
 // `never-observed` rather than folded into it.
 //
-// MEASURED BEFORE THE CHANGE, on origin/master, all five gates x four states:
+// MEASURED BEFORE #9506, on origin/master, all five original gates x four states:
 //
 //	gate                   never-observed  observed-v1  observed-0  observed-current
 //	policy-scheduler       ARM             ARM          ARM         DEFER
@@ -78,6 +76,11 @@ func requiredProtocolGateCases(t *testing.T) []gateCase {
 		t.Fatal("fixture invalid: the secure-tunnel snapshot carries no flagged row, " +
 			"so that gate's cells would pass without ever reaching its version check")
 	}
+	pmechSnap := &ConfigSnapshot{
+		IpsecTunnelRows: []IpsecTunnelRowSnapshot{{
+			STN: "st0", IfID: 1, LogicalIfindex: 42,
+		}},
+	}
 	return []gateCase{
 		{"policy-scheduler", func(m *Manager) error {
 			return m.ensurePolicySchedulerProtocolLocked(schedulerFloorCfg())
@@ -94,6 +97,9 @@ func requiredProtocolGateCases(t *testing.T) []gateCase {
 		{"egress-zone", func(m *Manager) error {
 			return m.ensureEgressZoneProtocolLocked()
 		}},
+		{"pmech", func(m *Manager) error {
+			return m.ensurePMechProtocolLocked(pmechSnap)
+		}},
 	}
 }
 
@@ -101,7 +107,7 @@ func requiredProtocolGateCases(t *testing.T) []gateCase {
 // executable.
 //
 // RED on revert: drop the `!m.helperStatusObserved` deferral from any one of
-// the five gates and that gate's row fails on the never-observed cell alone —
+// the six gates and that gate's row fails on the never-observed cell alone —
 // the other three cells are unchanged by the mutation, so the row localises
 // which gate regressed.
 func TestRequiredProtocolGateDefersOnNeverObserved7002(t *testing.T) {
@@ -138,7 +144,7 @@ func TestRequiredProtocolGateDefersOnNeverObserved7002(t *testing.T) {
 			// field ANSWERED — evidence of a mismatch, not silence — and a gate
 			// keying on the value alone cannot tell it from the first cell.
 			//
-			// Four gates arm here. `egress-zone` DEFERS, and that is recorded
+			// Five gates arm here. `egress-zone` DEFERS, and that is recorded
 			// rather than corrected: no shipping helper reports 0 (lifecycle.rs
 			// sets the field unconditionally to a non-zero constant), so the case
 			// is unreachable, while that gate alone has no shape predicate and
@@ -203,11 +209,11 @@ func TestRequiredProtocolGateFixturesArm7002(t *testing.T) {
 }
 
 // TestRequiredProtocolGateSentinelsCoverEveryGate7002 pins the census's
-// population. #7002 names FOUR gates; there are FIVE, and the abort/disarm
-// contract keys on this list — a gate added without an entry disarms the helper
-// while the commit reports success, which is exactly #2138.
+// population. The original #7002 list names FOUR gates; there are now SIX, and
+// the abort/disarm contract keys on this list — a gate added without an entry
+// disarms the helper while the commit reports success, which is exactly #2138.
 func TestRequiredProtocolGateSentinelsCoverEveryGate7002(t *testing.T) {
-	const wantGates = 5
+	const wantGates = 6
 	if got := len(requiredProtocolGateSentinels); got != wantGates {
 		t.Fatalf("requiredProtocolGateSentinels has %d entries, want %d. A gate was "+
 			"added or removed: add its cell to TestRequiredProtocolGateDefersOnNeverObserved7002 "+

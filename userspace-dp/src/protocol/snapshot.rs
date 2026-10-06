@@ -540,6 +540,88 @@ pub(crate) struct IpsecTunnelRowSnapshot {
     #[serde(rename = "logical_ifindex", default)]
     pub logical_ifindex: i32,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct IpsecPMechTunnelRowSnapshot {
+    #[serde(rename = "stn", default)]
+    pub stn: String,
+    #[serde(rename = "if_id", default)]
+    pub if_id: u32,
+    #[serde(rename = "logical_ifindex", default)]
+    pub logical_ifindex: i32,
+    #[serde(rename = "explicit_selectors", default)]
+    pub explicit_selectors: Vec<IpsecTrafficSelectorSnapshot>,
+    #[serde(rename = "effective_prefixes", default)]
+    pub effective_prefixes: Vec<String>,
+    #[serde(rename = "ingress_prefixes", default)]
+    pub ingress_prefixes: Vec<String>,
+    #[serde(rename = "inventory_generation", default)]
+    pub inventory_generation: u64,
+    #[serde(rename = "fib_generation", default)]
+    pub fib_generation: u32,
+    #[serde(rename = "source_kind", default)]
+    pub source_kind: String,
+    #[serde(rename = "selector_provenance", default)]
+    pub selector_provenance: String,
+    #[serde(rename = "inventory_complete", default)]
+    pub inventory_complete: bool,
+    #[serde(rename = "inventory_valid", default)]
+    pub inventory_valid: bool,
+    #[serde(rename = "inventory_reason", default)]
+    pub inventory_reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct IpsecTrafficSelectorSnapshot {
+    #[serde(rename = "name", default)]
+    pub name: String,
+    #[serde(rename = "local_ts", default)]
+    pub local_ts: String,
+    #[serde(rename = "remote_ts", default)]
+    pub remote_ts: String,
+    #[serde(rename = "source", default)]
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct IpsecMainRouteSnapshot {
+    #[serde(rename = "table", default)]
+    pub table: u32,
+    #[serde(rename = "family", default)]
+    pub family: String,
+    #[serde(rename = "destination", default)]
+    pub destination: String,
+    #[serde(rename = "protocol", default)]
+    pub protocol: u8,
+    #[serde(rename = "disposition", default)]
+    pub disposition: u8,
+    #[serde(rename = "next_hops", default)]
+    pub next_hops: Vec<IpsecMainRouteNextHopSnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct IpsecMainRouteNextHopSnapshot {
+    #[serde(rename = "ifindex", default)]
+    pub ifindex: u32,
+    #[serde(rename = "weight", default)]
+    pub weight: u32,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct IpsecPMechInventorySnapshot {
+    #[serde(rename = "policy_identity", default)]
+    pub policy_identity: String,
+    #[serde(rename = "generation", default)]
+    pub generation: u64,
+    #[serde(rename = "fib_generation", default)]
+    pub fib_generation: u32,
+    #[serde(rename = "complete", default)]
+    pub complete: bool,
+    #[serde(rename = "main_routes", default)]
+    pub main_routes: Vec<IpsecMainRouteSnapshot>,
+    #[serde(rename = "tunnel_rows", default)]
+    pub tunnel_rows: Vec<IpsecPMechTunnelRowSnapshot>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub(crate) struct IpsecBindlessSelectorSnapshot {
     #[serde(rename = "local_ts", default)]
@@ -573,6 +655,12 @@ pub(crate) struct ConfigSnapshot {
     pub ipsec_tunnel_snapshot_generation: u64,
     #[serde(rename = "ipsec_tunnel_rows", default, skip_serializing_if = "Vec::is_empty")]
     pub ipsec_tunnel_rows: Vec<IpsecTunnelRowSnapshot>,
+    #[serde(
+        rename = "pmech_inventory",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pmech_inventory: Option<IpsecPMechInventorySnapshot>,
     /// #10683: exact IP-shape pairs from bind-less policy-based IPsec VPNs.
     /// The marker and rows are one contract: a v31 helper cannot enforce
     /// them, so protocol v32 refuses a mixed-version producer/consumer.

@@ -45,6 +45,9 @@ fn frame(id: u64, flow_tag: u64) -> SubmitFrame {
         fib_generation: 1,
         zone_id: 1,
         if_id: 1,
+        pmech_inventory_generation: 0,
+        pmech_inventory_fib_generation: 0,
+        pmech_policy_identity: [0; 32],
     }
 }
 

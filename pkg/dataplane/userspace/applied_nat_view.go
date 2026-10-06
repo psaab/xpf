@@ -124,8 +124,7 @@ func (m *Manager) markAppliedSnapshotLocked() {
 		CaptureGeneration: m.lastSnapshot.IpsecTunnelSnapshotGeneration,
 	}
 	if committer := m.captureAuthorityCommitter; committer != nil {
-		committer(m.appliedSnapshot.Generation, m.lastSnapshot.FIBGeneration,
-			m.appliedSnapshot.CaptureGeneration)
+		committer(m.appliedSnapshot.Generation, m.lastSnapshot)
 	}
 }
 

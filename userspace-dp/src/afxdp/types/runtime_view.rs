@@ -59,6 +59,10 @@
 //! the CoS owner/live/lease/backlog/vtime maps and `ha.fabrics` are stored
 //! BEFORE it, and the worker reads them AFTER its view load.
 use super::*;
+use ipnet::IpNet;
+use std::net::IpAddr;
+use std::str::FromStr;
+
 
 /// The worker-visible `(validation, forwarding)` pair, published as ONE
 /// `Arc` so the two can never be observed from different generations.
@@ -157,6 +161,213 @@ impl IpsecTunnelRows {
     }
 }
 
+/// One strict, immutable inventory of the forwarding inputs used to bound
+/// P-MECH ingress. Raw selector projections and route rows remain attached to
+/// the same worker view as the compiled ingress prefixes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(in crate::afxdp) struct PMechInventory {
+    policy_identity: [u8; 32],
+    generation: u64,
+    fib_generation: u32,
+    complete: bool,
+    main_routes: Vec<crate::protocol::IpsecMainRouteSnapshot>,
+    tunnels: BTreeMap<String, PMechTunnelRow>,
+    duplicate_stns: BTreeSet<String>,
+    ambiguous_if_ids: BTreeSet<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) struct PMechTunnelRow {
+    stn: String,
+    if_id: u32,
+    logical_ifindex: i32,
+    explicit_selectors: Vec<crate::protocol::IpsecTrafficSelectorSnapshot>,
+    effective_prefixes: Vec<String>,
+    ingress_prefixes: Vec<IpNet>,
+    inventory_generation: u64,
+    fib_generation: u32,
+    source_kind: String,
+    selector_provenance: String,
+    inventory_complete: bool,
+    inventory_valid: bool,
+    inventory_reason: String,
+}
+
+impl PMechInventory {
+    pub(in crate::afxdp) fn from_snapshot(
+        snapshot: Option<&crate::protocol::IpsecPMechInventorySnapshot>,
+    ) -> Self {
+        let Some(snapshot) = snapshot else {
+            return Self::default();
+        };
+        let identity = decode_policy_identity(&snapshot.policy_identity);
+        let routes_valid = snapshot.main_routes.iter().all(|route| {
+            route.table == 254
+                && route.family
+                    == if route.destination.contains(':') {
+                        "inet6"
+                    } else {
+                        "inet"
+                    }
+                && IpNet::from_str(&route.destination)
+                    .map(|prefix| prefix.to_string() == route.destination.as_str())
+                    .unwrap_or(false)
+        });
+        let mut out = Self {
+            policy_identity: identity.unwrap_or_default(),
+            generation: snapshot.generation,
+            fib_generation: snapshot.fib_generation,
+            complete: snapshot.complete
+                && identity.is_some()
+                && snapshot.generation != 0
+                && snapshot.fib_generation != 0
+                && routes_valid,
+            main_routes: snapshot.main_routes.clone(),
+            ..Self::default()
+        };
+        let mut if_id_claims = BTreeMap::<u32, usize>::new();
+        for row in &snapshot.tunnel_rows {
+            let effective_prefixes = row.effective_prefixes.clone();
+            let (ingress_prefixes, prefixes_valid) = parse_canonical_prefixes(&row.ingress_prefixes);
+            let row_valid = out.complete
+                && row.inventory_complete
+                && row.inventory_valid
+                && row.if_id != 0
+                && row.logical_ifindex > 0
+                && row.inventory_generation == out.generation
+                && row.fib_generation == out.fib_generation
+                && !row.stn.is_empty()
+                && !row.explicit_selectors.is_empty()
+                && !effective_prefixes.is_empty()
+                && row.source_kind == "xfrmi"
+                && !row.selector_provenance.is_empty()
+                && row.inventory_reason.is_empty()
+                && prefixes_valid
+                && !ingress_prefixes.is_empty();
+            if row.if_id != 0 {
+                *if_id_claims.entry(row.if_id).or_default() += 1;
+            }
+            let tunnel = PMechTunnelRow {
+                stn: row.stn.clone(),
+                if_id: row.if_id,
+                logical_ifindex: row.logical_ifindex,
+                explicit_selectors: row.explicit_selectors.clone(),
+                effective_prefixes,
+                ingress_prefixes,
+                inventory_generation: row.inventory_generation,
+                fib_generation: row.fib_generation,
+                source_kind: row.source_kind.clone(),
+                selector_provenance: row.selector_provenance.clone(),
+                inventory_complete: row.inventory_complete,
+                inventory_valid: row_valid,
+                inventory_reason: row.inventory_reason.clone(),
+            };
+            if out.tunnels.insert(row.stn.clone(), tunnel).is_some() {
+                out.duplicate_stns.insert(row.stn.clone());
+            }
+        }
+        out.ambiguous_if_ids.extend(
+            if_id_claims
+                .into_iter()
+                .filter_map(|(if_id, claims)| (claims > 1).then_some(if_id)),
+        );
+        out
+    }
+
+    pub(in crate::afxdp) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(in crate::afxdp) fn fib_generation(&self) -> u32 {
+        self.fib_generation
+    }
+
+    pub(in crate::afxdp) fn complete(&self) -> bool {
+        self.complete
+    }
+
+    pub(in crate::afxdp) fn policy_identity(&self) -> [u8; 32] {
+        self.policy_identity
+    }
+
+    pub(in crate::afxdp) fn matches_policy_identity(&self, identity: &[u8; 32]) -> bool {
+        self.complete && &self.policy_identity == identity
+    }
+
+    pub(in crate::afxdp) fn exact_tunnel(
+        &self,
+        stn: &str,
+        if_id: u32,
+        logical_ifindex: i32,
+    ) -> Option<&PMechTunnelRow> {
+        if !self.complete
+            || self.duplicate_stns.contains(stn)
+            || self.ambiguous_if_ids.contains(&if_id)
+        {
+            return None;
+        }
+        let row = self.tunnels.get(stn)?;
+        (row.stn == stn
+            && row.inventory_valid
+            && row.inventory_complete
+            && row.if_id == if_id
+            && row.logical_ifindex == logical_ifindex
+            && row.inventory_generation == self.generation
+            && row.fib_generation == self.fib_generation)
+            .then_some(row)
+    }
+
+    pub(in crate::afxdp) fn has_main_table_routes(&self) -> bool {
+        self.complete && self.main_routes.iter().all(|route| route.table == 254)
+    }
+}
+
+impl PMechTunnelRow {
+    pub(in crate::afxdp) fn allows_destination(&self, destination: IpAddr) -> bool {
+        self.ingress_prefixes
+            .iter()
+            .any(|prefix| prefix.contains(&destination))
+    }
+
+    pub(in crate::afxdp) fn selector_projection(
+        &self,
+    ) -> (&[crate::protocol::IpsecTrafficSelectorSnapshot], &[String]) {
+        (&self.explicit_selectors, &self.effective_prefixes)
+    }
+}
+
+fn decode_policy_identity(value: &str) -> Option<[u8; 32]> {
+    fn nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = value.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut out = [0; 32];
+    for (index, pair) in bytes.chunks_exact(2).enumerate() {
+        out[index] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+    }
+    Some(out)
+}
+
+fn parse_canonical_prefixes(values: &[String]) -> (Vec<IpNet>, bool) {
+    let mut prefixes = Vec::with_capacity(values.len());
+    let mut valid = true;
+    for value in values {
+        match IpNet::from_str(value) {
+            Ok(prefix) if prefix.to_string() == value.as_str() => prefixes.push(prefix),
+            _ => valid = false,
+        }
+    }
+    (prefixes, valid)
+}
+
 /// Number of admitted P-MECH tunnels and exact rows are part of the same
 /// immutable runtime binding as `ForwardingState`.
 ///
@@ -170,6 +381,8 @@ pub(in crate::afxdp) struct IpsecRuntimeBinding {
     /// published with the same RuntimeView as forwarding + validation; zero is
     /// unavailable and therefore E28, never "current".
     snapshot_generation: u64,
+    pmech_inventory: Arc<PMechInventory>,
+    runtime_view_publication_generation: u64,
 }
 
 impl Default for IpsecRuntimeBinding {
@@ -177,15 +390,24 @@ impl Default for IpsecRuntimeBinding {
         Self {
             rows: Arc::new(IpsecTunnelRows::default()),
             snapshot_generation: 0,
+            pmech_inventory: Arc::new(PMechInventory::default()),
+            runtime_view_publication_generation: 0,
         }
     }
 }
 
 impl IpsecRuntimeBinding {
-    pub(in crate::afxdp) fn new(rows: Arc<IpsecTunnelRows>, snapshot_generation: u64) -> Self {
+    pub(in crate::afxdp) fn new(
+        rows: Arc<IpsecTunnelRows>,
+        snapshot_generation: u64,
+        pmech_inventory: Arc<PMechInventory>,
+        runtime_view_publication_generation: u64,
+    ) -> Self {
         Self {
             rows,
             snapshot_generation,
+            pmech_inventory,
+            runtime_view_publication_generation,
         }
     }
 
@@ -197,6 +419,16 @@ impl IpsecRuntimeBinding {
     #[inline]
     pub(in crate::afxdp) fn snapshot_generation(&self) -> u64 {
         self.snapshot_generation
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn pmech_inventory(&self) -> &PMechInventory {
+        &self.pmech_inventory
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn runtime_view_publication_generation(&self) -> u64 {
+        self.runtime_view_publication_generation
     }
 }
 
@@ -247,10 +479,33 @@ impl RuntimeView {
         rows: Arc<IpsecTunnelRows>,
         snapshot_generation: u64,
     ) -> Self {
+        Self::new_with_ipsec_authority(
+            validation,
+            forwarding,
+            rows,
+            snapshot_generation,
+            Arc::new(PMechInventory::default()),
+            0,
+        )
+    }
+
+    pub(in crate::afxdp) fn new_with_ipsec_authority(
+        validation: ValidationState,
+        forwarding: Arc<ForwardingState>,
+        rows: Arc<IpsecTunnelRows>,
+        snapshot_generation: u64,
+        pmech_inventory: Arc<PMechInventory>,
+        runtime_view_publication_generation: u64,
+    ) -> Self {
         Self {
             validation,
             forwarding,
-            ipsec: IpsecRuntimeBinding::new(rows, snapshot_generation),
+            ipsec: IpsecRuntimeBinding::new(
+                rows,
+                snapshot_generation,
+                pmech_inventory,
+                runtime_view_publication_generation,
+            ),
         }
     }
     /// The generation stamps half. `Copy`, so a caller gets a value it cannot
@@ -271,6 +526,16 @@ impl RuntimeView {
     #[inline]
     pub(in crate::afxdp) fn ipsec_tunnel_rows(&self) -> &IpsecTunnelRows {
         self.ipsec.rows()
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn pmech_inventory(&self) -> &PMechInventory {
+        self.ipsec.pmech_inventory()
+    }
+
+    #[inline]
+    pub(in crate::afxdp) fn runtime_view_publication_generation(&self) -> u64 {
+        self.ipsec.runtime_view_publication_generation()
     }
     /// Authoritative tunnel-row generation paired with this view.
     #[inline]

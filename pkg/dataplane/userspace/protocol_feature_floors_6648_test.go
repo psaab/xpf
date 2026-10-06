@@ -268,3 +268,37 @@ func TestFeatureFlooredHelperStillFailsClosed6648(t *testing.T) {
 		})
 	}
 }
+
+func TestPMechGateUsesItsImmutableFeatureFloor9506(t *testing.T) {
+	snap := &ConfigSnapshot{
+		PMechInventory: &IpsecPMechInventorySnapshot{
+			TunnelRows: []IpsecPMechTunnelRowSnapshot{{STN: "st0"}},
+		},
+	}
+	m := New()
+	m.setLastStatusLocked(ProcessStatus{
+		ConfigSnapshotProtocolVersion: MinProtocolPMech - 1,
+	})
+	err := m.ensureRequiredSnapshotProtocolLocked(snap)
+	if !errors.Is(err, ErrPMechProtocolIncompatible) {
+		t.Fatalf("helper at floor-1 (%d) got %v, want P-MECH incompatibility",
+			MinProtocolPMech-1, err)
+	}
+	if !IsRequiredProtocolGateError(err) {
+		t.Fatalf("P-MECH gate error %v is not classified as a required gate", err)
+	}
+
+	m = New()
+	m.setLastStatusLocked(ProcessStatus{
+		ConfigSnapshotProtocolVersion: MinProtocolPMech,
+	})
+	if err := m.ensurePMechProtocolLocked(snap); err != nil {
+		t.Fatalf("helper at the P-MECH feature floor (%d) was fenced: %v",
+			MinProtocolPMech, err)
+	}
+	m = New()
+	m.setLastStatusLocked(ProcessStatus{ConfigSnapshotProtocolVersion: 1})
+	if err := m.ensurePMechProtocolLocked(&ConfigSnapshot{}); err != nil {
+		t.Fatalf("an inactive P-MECH inventory was fenced: %v", err)
+	}
+}

@@ -463,11 +463,12 @@ pub struct Coordinator {
     pub(crate) recent_session_deltas: Arc<Mutex<VecDeque<SessionDeltaInfo>>>,
     pub(crate) last_resolution: Arc<Mutex<Option<ResolutionEvent>>>,
     pub(crate) validation: ValidationState,
-    /// #10485: immutable P-MECH row authority paired with the capture
-    /// generation below. These fields are coordinator-owned so every full
-    /// and partial runtime-view publish carries the same row set.
+    /// Immutable capture identities and their P-MECH route/policy inventory
+    /// are published together on every full or partial RuntimeView update.
     pub(crate) ipsec_tunnel_rows: Arc<IpsecTunnelRows>,
     pub(crate) ipsec_snapshot_generation: u64,
+    pub(crate) pmech_inventory: Arc<PMechInventory>,
+    pub(crate) runtime_view_publication_generation: u64,
     pub(crate) reconcile_calls: u64,
     /// #2522: count of teardowns that paid the 500ms mlx5 zero-copy
     /// EBUSY quiesce. Bumped only when live workers were torn down AND a
@@ -712,6 +713,8 @@ impl Coordinator {
             validation: ValidationState::default(),
             ipsec_tunnel_rows: Arc::new(IpsecTunnelRows::default()),
             ipsec_snapshot_generation: 0,
+            pmech_inventory: Arc::new(PMechInventory::default()),
+            runtime_view_publication_generation: 0,
             reconcile_calls: 0,
             reconcile_quiesce_count: 0,
             last_bind_failures: BTreeMap::new(),
@@ -1157,6 +1160,7 @@ impl Coordinator {
         self.validation = ValidationState::default();
         self.ipsec_tunnel_rows = Arc::new(IpsecTunnelRows::default());
         self.ipsec_snapshot_generation = 0;
+        self.pmech_inventory = Arc::new(PMechInventory::default());
         // Publishing through the choke point clones `self.forwarding`, which the
         // line above just defaulted — ~20 empty-collection clones rather than a
         // direct `RuntimeView::default()` construction. Semantically identical
@@ -1800,10 +1804,10 @@ impl Coordinator {
     /// `self.forwarding` before calling: this is the release store that
     /// publishes everything committed before it, so the #5166 CoS-map /
     /// `ha.fabrics` stores must also already have happened.
-    /// #10485: install the daemon-published per-admitted tunnel identities
-    /// before the next RuntimeView store. Invalid rows are filtered by the
-    /// closed-world row set; an absent capture-generation stamp remains
-    /// generation 0 and therefore E28-denied at D14.
+    /// Install daemon-published capture identities and route/policy inventory
+    /// before the next RuntimeView store. Missing or malformed authority stays
+    /// present but incomplete, so D14 rejects it rather than borrowing an old
+    /// inventory.
     pub(crate) fn set_ipsec_tunnel_rows_from_snapshot(
         &mut self,
         snapshot: &ConfigSnapshot,
@@ -1822,15 +1826,22 @@ impl Coordinator {
         };
         self.ipsec_tunnel_rows = Arc::new(rows);
         self.ipsec_snapshot_generation = generation;
+        self.pmech_inventory = Arc::new(PMechInventory::from_snapshot(
+            snapshot.pmech_inventory.as_ref(),
+        ));
     }
 
     fn store_runtime_view(&mut self, forwarding: Arc<ForwardingState>) {
         let previous = self.ha.runtime.load_full();
-        let view = Arc::new(RuntimeView::new_with_ipsec_tunnel_rows(
+        self.runtime_view_publication_generation =
+            self.runtime_view_publication_generation.saturating_add(1);
+        let view = Arc::new(RuntimeView::new_with_ipsec_authority(
             self.validation,
             forwarding,
             self.ipsec_tunnel_rows.clone(),
             self.ipsec_snapshot_generation,
+            self.pmech_inventory.clone(),
+            self.runtime_view_publication_generation,
         ));
         // #6592 test seam — records the INTENDED pair and the still-visible
         // PREVIOUS view, so the regression test can assert both that a worker
@@ -1968,6 +1979,21 @@ impl Coordinator {
         self.republish_runtime_validation();
         true
     }
+    /// Apply a route-only FIB bump and its P-MECH authority as one worker-view
+    /// publication. Rollbacks are checked before either authority is changed.
+    pub(crate) fn bump_fib_generation_with_snapshot(
+        &mut self,
+        snapshot: &ConfigSnapshot,
+    ) -> bool {
+        if snapshot.fib_generation < self.validation.fib_generation {
+            return false;
+        }
+        self.set_ipsec_tunnel_rows_from_snapshot(snapshot);
+        self.validation.fib_generation = snapshot.fib_generation;
+        self.republish_runtime_validation();
+        true
+    }
+
 }
 
 /// #2218: collect the nonzero per-rule NAT counter ids referenced by a

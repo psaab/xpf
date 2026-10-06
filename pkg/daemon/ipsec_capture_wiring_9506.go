@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -155,16 +156,23 @@ type pmechTunnelZone struct {
 
 // pmechZoneSnapshot freezes the live-ifindex map per capture generation.
 // Rotations publish a new value and mark the old one stale before any old
-// descriptor can be interpreted by a new generation. The accepted config/FIB
-// authority advances atomically at successful snapshot boundaries.
+// descriptor can be interpreted by a new generation. Accepted config/FIB and
+// P-MECH identities advance together at successful snapshot boundaries.
+type pmechAcceptedAuthority struct {
+	configGeneration             uint64
+	fibGeneration                uint32
+	inventoryGeneration          uint64
+	inventoryFIBGeneration       uint32
+	policyIdentity               [32]byte
+}
+
 type pmechZoneSnapshot struct {
-	generation               uint64
-	fibGeneration            uint32
-	acceptedConfigGeneration atomic.Uint64
-	acceptedFIBGeneration    atomic.Uint32
-	current                  atomic.Bool
-	tunnels                  map[string]pmechTunnelZone
-	queueEpochs              map[uint16]uint64
+	generation    uint64
+	fibGeneration uint32
+	accepted      atomic.Pointer[pmechAcceptedAuthority]
+	current       atomic.Bool
+	tunnels       map[string]pmechTunnelZone
+	queueEpochs   map[uint16]uint64
 }
 
 func (s *pmechZoneSnapshot) ResolveSTN(stn string) nfqueue.ZoneResolution {
@@ -189,10 +197,29 @@ func (s *pmechZoneSnapshot) Generations() (uint64, uint32) {
 }
 
 func (s *pmechZoneSnapshot) AcceptedGenerations() (uint64, uint32) {
-	if s == nil {
-		return 0, 0
+	authority := s.loadAcceptedAuthority()
+	return authority.configGeneration, authority.fibGeneration
+}
+
+func (s *pmechZoneSnapshot) PacketAuthority() nfqueue.ZoneSnapshotPacketAuthority {
+	authority := s.loadAcceptedAuthority()
+	return nfqueue.ZoneSnapshotPacketAuthority{
+		ConfigGeneration:             authority.configGeneration,
+		FIBGeneration:                authority.fibGeneration,
+		PMechInventoryGeneration:     authority.inventoryGeneration,
+		PMechInventoryFIBGeneration: authority.inventoryFIBGeneration,
+		PMechPolicyIdentity:          authority.policyIdentity,
 	}
-	return s.acceptedConfigGeneration.Load(), s.acceptedFIBGeneration.Load()
+}
+
+func (s *pmechZoneSnapshot) loadAcceptedAuthority() pmechAcceptedAuthority {
+	if s == nil {
+		return pmechAcceptedAuthority{}
+	}
+	if authority := s.accepted.Load(); authority != nil {
+		return *authority
+	}
+	return pmechAcceptedAuthority{}
 }
 
 func (s *pmechZoneSnapshot) QueueEpoch(queue uint16) uint64 {
@@ -233,8 +260,10 @@ func buildPMechZoneSnapshot(cfg *config.Config, handles []ipsecQueueHandle, gene
 		queueEpochs: make(map[uint16]uint64),
 	}
 	snapshot.current.Store(true)
-	snapshot.acceptedConfigGeneration.Store(generation)
-	snapshot.acceptedFIBGeneration.Store(fibGeneration)
+	snapshot.accepted.Store(&pmechAcceptedAuthority{
+		configGeneration: generation,
+		fibGeneration:    fibGeneration,
+	})
 	if cfg == nil {
 		return snapshot
 	}
@@ -481,13 +510,32 @@ func (r *ipsecCaptureRuntime) configSnapshotAuthority() (
 // publishSnapshotAuthority updates the shared config/FIB half of packet
 // advisories only after the corresponding ConfigSnapshot has been accepted.
 // The capture-generation half remains immutable per admitted handle.
-func (r *ipsecCaptureRuntime) publishSnapshotAuthority(configGeneration uint64, fibGeneration uint32) {
+func (r *ipsecCaptureRuntime) publishSnapshotAuthority(
+	configGeneration uint64,
+	fibGeneration uint32,
+	snapshot *dpuserspace.ConfigSnapshot,
+) {
 	if r == nil {
 		return
 	}
 	if r.zoneSnapshot != nil {
-		r.zoneSnapshot.acceptedConfigGeneration.Store(configGeneration)
-		r.zoneSnapshot.acceptedFIBGeneration.Store(fibGeneration)
+		authority := r.zoneSnapshot.loadAcceptedAuthority()
+		authority.configGeneration = configGeneration
+		authority.fibGeneration = fibGeneration
+		if snapshot != nil {
+			authority.inventoryGeneration = 0
+			authority.inventoryFIBGeneration = 0
+			authority.policyIdentity = [32]byte{}
+			if snapshot.PMechInventory != nil {
+				authority.inventoryGeneration = snapshot.PMechInventory.Generation
+				authority.inventoryFIBGeneration = snapshot.PMechInventory.FIBGeneration
+				if digest, err := hex.DecodeString(snapshot.PMechInventory.PolicyIdentity); err == nil &&
+					len(digest) == len(authority.policyIdentity) {
+					copy(authority.policyIdentity[:], digest)
+				}
+			}
+		}
+		r.zoneSnapshot.accepted.Store(&authority)
 	}
 	if r.actor != nil {
 		r.actor.publishSnapshotAuthority(configGeneration, fibGeneration)
@@ -538,6 +586,30 @@ func (d *Daemon) publishIpsecCaptureSnapshotAuthority(
 	fibGeneration uint32,
 	captureGeneration uint64,
 ) {
+	d.publishIpsecCaptureSnapshotAuthorityState(configGeneration, fibGeneration, captureGeneration, nil)
+}
+
+func (d *Daemon) publishIpsecCaptureSnapshotAuthorityForSnapshot(
+	configGeneration uint64,
+	snapshot *dpuserspace.ConfigSnapshot,
+) {
+	if snapshot == nil {
+		return
+	}
+	d.publishIpsecCaptureSnapshotAuthorityState(
+		configGeneration,
+		snapshot.FIBGeneration,
+		snapshot.IpsecTunnelSnapshotGeneration,
+		snapshot,
+	)
+}
+
+func (d *Daemon) publishIpsecCaptureSnapshotAuthorityState(
+	configGeneration uint64,
+	fibGeneration uint32,
+	captureGeneration uint64,
+	snapshot *dpuserspace.ConfigSnapshot,
+) {
 	if d == nil {
 		return
 	}
@@ -558,7 +630,7 @@ func (d *Daemon) publishIpsecCaptureSnapshotAuthority(
 		return
 	}
 	if capture != nil {
-		capture.publishSnapshotAuthority(configGeneration, fibGeneration)
+		capture.publishSnapshotAuthority(configGeneration, fibGeneration, snapshot)
 	}
 	if pending {
 		// This callback is invoked only from Manager's applied-snapshot
@@ -836,6 +908,11 @@ func (r *ipsecCaptureRuntime) close() error {
 		return nil
 	}
 	var firstErr error
+	if r.supervisor != nil {
+		for _, handle := range r.handles {
+			_ = r.supervisor.closeEmissionGate(handle.Number)
+		}
+	}
 	if err := r.rollbackD11(); err != nil {
 		firstErr = err
 	}

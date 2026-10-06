@@ -181,6 +181,9 @@ pub(crate) struct SubmitFrame {
     pub fib_generation: u32,
     pub zone_id: u16,
     pub if_id: u32,
+    pub pmech_inventory_generation: u64,
+    pub pmech_inventory_fib_generation: u32,
+    pub pmech_policy_identity: [u8; 32],
 }
 
 fn d11_frame_digest(frame: &SubmitFrame, run_id: &str) -> [u8; 32] {
@@ -1613,6 +1616,9 @@ pub(crate) fn encode_submit_batch(frames: &[SubmitFrame]) -> Vec<u8> {
         push_u32(&mut out, frame.fib_generation);
         push_u16(&mut out, frame.zone_id);
         push_u32(&mut out, frame.if_id);
+        push_u64(&mut out, frame.pmech_inventory_generation);
+        push_u32(&mut out, frame.pmech_inventory_fib_generation);
+        out.extend_from_slice(&frame.pmech_policy_identity);
     }
     out
 }
@@ -1700,6 +1706,10 @@ pub(crate) fn decode_submit_batch(payload: &[u8]) -> Result<Vec<SubmitFrame>, Co
         let fib_generation = c.u32()?;
         let zone_id = c.u16()?;
         let if_id = c.u32()?;
+        let pmech_inventory_generation = c.u64()?;
+        let pmech_inventory_fib_generation = c.u32()?;
+        let mut pmech_policy_identity = [0u8; 32];
+        pmech_policy_identity.copy_from_slice(c.take(32)?);
         out.push(SubmitFrame {
             lease: ReinjectLease {
                 permit_epoch,
@@ -1723,6 +1733,9 @@ pub(crate) fn decode_submit_batch(payload: &[u8]) -> Result<Vec<SubmitFrame>, Co
             fib_generation,
             zone_id,
             if_id,
+            pmech_inventory_generation,
+            pmech_inventory_fib_generation,
+            pmech_policy_identity,
         });
     }
     if !c.done() {
@@ -1745,6 +1758,9 @@ pub(crate) struct PooledSubmitFrame {
     pub fib_generation: u32,
     pub zone_id: u16,
     pub if_id: u32,
+    pub pmech_inventory_generation: u64,
+    pub pmech_inventory_fib_generation: u32,
+    pub pmech_policy_identity: [u8; 32],
 }
 
 /// Decode a P-MECH batch directly into preallocated D11 slabs. This is the
@@ -1788,6 +1804,10 @@ pub(crate) fn decode_submit_batch_into_pool(
             let fib_generation = c.u32()?;
             let zone_id = c.u16()?;
             let if_id = c.u32()?;
+            let pmech_inventory_generation = c.u64()?;
+            let pmech_inventory_fib_generation = c.u32()?;
+            let mut pmech_policy_identity = [0u8; 32];
+            pmech_policy_identity.copy_from_slice(c.take(32)?);
             let owner_valid_utf8 = std::str::from_utf8(owner_bytes).is_ok();
             let stn_valid_utf8 = std::str::from_utf8(stn_bytes).is_ok();
             let valid = owned_ifindex != 0
@@ -1832,6 +1852,9 @@ pub(crate) fn decode_submit_batch_into_pool(
                 fib_generation,
                 zone_id,
                 if_id,
+                pmech_inventory_generation,
+                pmech_inventory_fib_generation,
+                pmech_policy_identity,
             });
         }
         if !c.done() {

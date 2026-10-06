@@ -183,8 +183,8 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 				) {
 					return d.ipsecCaptureConfigSnapshot(configGeneration, fibGeneration)
 				})
-				mgr.SetCaptureAuthorityCommitter(func(configGeneration uint64, fibGeneration uint32, captureGeneration uint64) {
-					d.publishIpsecCaptureSnapshotAuthority(configGeneration, fibGeneration, captureGeneration)
+				mgr.SetCaptureAuthorityCommitter(func(configGeneration uint64, snapshot *dpuserspace.ConfigSnapshot) {
+					d.publishIpsecCaptureSnapshotAuthorityForSnapshot(configGeneration, snapshot)
 				})
 			}
 		}

@@ -83,6 +83,10 @@ var ErrEgressZoneProtocolIncompatible = errors.New("userspace egress-zone snapsh
 // only the reader is.
 var ErrSecureTunnelProtocolIncompatible = errors.New("userspace secure-tunnel snapshot protocol incompatible")
 
+// ErrPMechProtocolIncompatible marks a snapshot whose nested route/policy
+// inventory cannot be consumed by the running helper's P-MECH worker path.
+var ErrPMechProtocolIncompatible = errors.New("userspace P-MECH snapshot protocol incompatible")
+
 // requiredProtocolGateSentinels enumerates every "this config cannot be
 // committed against the helper's current ConfigSnapshotProtocolVersion"
 // sentinel produced by ensureRequiredSnapshotProtocolLocked. ApplyConfig
@@ -120,6 +124,7 @@ var requiredProtocolGateSentinels = []error{
 	ErrScopedGlobalZoneSetProtocolIncompatible,
 	ErrEgressZoneProtocolIncompatible,
 	ErrSecureTunnelProtocolIncompatible,
+	ErrPMechProtocolIncompatible,
 }
 
 // IsRequiredProtocolGateError reports whether err is (or wraps) any
@@ -1592,6 +1597,35 @@ func (m *Manager) ensureSecureTunnelProtocolLocked(snap *ConfigSnapshot) error {
 	)
 }
 
+func (m *Manager) ensurePMechProtocolLocked(snap *ConfigSnapshot) error {
+	if snap == nil ||
+		(len(snap.IpsecTunnelRows) == 0 &&
+			(snap.PMechInventory == nil || len(snap.PMechInventory.TunnelRows) == 0)) {
+		return nil
+	}
+	observed := m.lastStatus.ConfigSnapshotProtocolVersion
+	if observed >= MinProtocolPMech {
+		return nil
+	}
+	var status ProcessStatus
+	if err := m.requestLocked(ControlRequest{Type: "status"}, &status); err == nil {
+		m.recordHelperStatusLocked(&status)
+		observed = status.ConfigSnapshotProtocolVersion
+		if observed >= MinProtocolPMech {
+			return nil
+		}
+	}
+	if m.noHelperVersionObservedLocked() {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: helper config snapshot protocol version %d < required %d for an active P-MECH route/policy inventory",
+		ErrPMechProtocolIncompatible,
+		observed,
+		MinProtocolPMech,
+	)
+}
+
 func (m *Manager) ensurePolicySchedulerProtocolLocked(cfg *config.Config) error {
 	if !configHasScheduledPolicy(cfg) {
 		return nil
@@ -1675,18 +1709,17 @@ func (m *Manager) noHelperVersionObservedLocked() bool {
 
 // ensureRequiredSnapshotProtocolLocked takes the SNAPSHOT, not the config
 // (#6691 round 9).
+// Three of the six gates are pure config questions and read snap.Config
+// exactly as before. The secure-tunnel and P-MECH gates are not: they read
+// kernel- or inventory-derived authority stamped onto the snapshot by its
+// builder. The secure-tunnel flag is sampled from the KERNEL, and asking the
+// same question from a config a moment later is asking a different kernel.
+// With an xfrm device visible to the snapshot builder's dump and gone by the
+// gate's, the built snapshot carried SecureTunnel=true on `st10` while the
+// gate returned false, so an under-version helper stayed ARMED on its
+// previous-good image for exactly the snapshot the gate exists to refuse.
 //
-// Three of the four gates are pure config questions and read snap.Config
-// exactly as before. The fourth — the secure-tunnel gate — is not: the flag it
-// arms on is stamped by the snapshot builder from a sample of the KERNEL, and
-// asking the same question from a config a moment later is asking a different
-// kernel. Measured before this round, with an xfrm device visible to the
-// builder's dump and gone by the gate's: the built snapshot carried
-// SecureTunnel=true on `st10` while the gate returned false, so an under-version helper
-// stayed ARMED on its previous-good image for exactly the snapshot the gate
-// exists to refuse.
-//
-// Passing the snapshot makes "arms iff the snapshot carries a flagged row" true
+// Passing the snapshot makes each snapshot-derived gate use the exact authority
 // by construction rather than by two samples agreeing. Every call site already
 // had one in scope: the apply paths pass the snapshot they are about to
 // publish, and the poll/status/HA paths pass m.lastSnapshot, which is the
@@ -1706,17 +1739,20 @@ func (m *Manager) ensureRequiredSnapshotProtocolLocked(snap *ConfigSnapshot) err
 	if err := m.ensureScopedGlobalZoneSetProtocolLocked(cfg); err != nil {
 		return err
 	}
-	// Secure-tunnel gate FIRST, then egress-zone. Since #6648 they no longer
-	// fence the same number — the secure-tunnel gate asks "can this helper read
-	// the refusal contract?" (floor 7) and the egress-zone gate asks "will this
-	// helper accept our snapshot at all?" (exact equality with ProtocolVersion)
-	// — so both fire only for a helper below BOTH, and the order still decides
-	// which sentinel the caller sees there. The secure-tunnel gate is SCOPED
-	// (snapshotRequiresRefusalProtocol — it returns nil unless the snapshot
-	// actually carries a flagged row) while the egress-zone gate is
-	// UNCONDITIONAL, so asking the specific one first reports the narrower,
-	// more actionable reason when it applies and falls through to the general
-	// one otherwise. Fail-closed either way: both sentinels are in
+	if err := m.ensurePMechProtocolLocked(snap); err != nil {
+		return err
+	}
+	// Between the existing pair, secure-tunnel runs before egress-zone. Since
+	// #6648 they no longer fence the same number — the secure-tunnel gate asks
+	// "can this helper read the refusal contract?" (floor 7) and the egress-zone
+	// gate asks "will this helper accept our snapshot at all?" (exact equality
+	// with ProtocolVersion) — so both fire only for a helper below BOTH, and the
+	// order still decides which sentinel the caller sees there. The secure-tunnel
+	// gate is SCOPED (snapshotRequiresRefusalProtocol — it returns nil unless the
+	// snapshot actually carries a flagged row) while the egress-zone gate is
+	// UNCONDITIONAL, so asking the specific one first reports the narrower, more
+	// actionable reason when it applies and falls through to the general one
+	// otherwise. Fail-closed either way: both sentinels are in
 	// requiredProtocolGateSentinels, so the commit aborts and the helper is
 	// disarmed regardless of which one is returned.
 	if err := m.ensureSecureTunnelProtocolLocked(snap); err != nil {

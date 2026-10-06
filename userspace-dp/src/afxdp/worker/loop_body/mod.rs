@@ -1233,6 +1233,11 @@ pub(crate) fn worker_loop(
                                 fib_generation: descriptor.fib_generation,
                                 zone_id: descriptor.advisory_zone_id,
                                 if_id: descriptor.advisory_if_id,
+                                pmech_inventory_generation: descriptor.pmech_inventory_generation,
+                                pmech_inventory_fib_generation: descriptor.pmech_inventory_fib_generation,
+                                pmech_policy_identity: descriptor.pmech_policy_identity,
+                                expected_routing_domain: descriptor.expected_routing_domain,
+                                expected_fib_table: descriptor.expected_fib_table,
                             },
                             descriptor: Some(descriptor),
                         };

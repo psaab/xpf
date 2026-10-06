@@ -478,78 +478,85 @@ func TestCapturePipelineFragmentCompletionOneClass9506(t *testing.T) {
 		}
 	}
 }
-func TestCapturePipelineFragmentExpiryRemovesRefreshedPoolSet10862(t *testing.T) {
+func TestCapturePipelineFragmentsAreDeniedBeforeFragPool9506(t *testing.T) {
 	sink := new(pipelineTestSink)
+	var denyReasons []IpsecInnerReason
 	p, err := NewCapturePipeline(CapturePipelineConfig{
 		Registry: pipelineTestRegistry(t), Phase: PipelineEnforcing, Sink: sink,
-		HandoffCap: 8, BatchCap: 8, FragmentSlots: 2, FragmentDeadline: time.Minute,
+		HandoffCap: 8, BatchCap: 8, FragmentSlots: 2, FragmentTombstoneCap: 1,
+		DenyEvents: DenyEventSinkFunc(func(event IpsecInnerDeny) bool {
+			denyReasons = append(denyReasons, event.Reason)
+			return true
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := FragmentKey{Version: 4, Tunnel: 1, VRF: 1, Generation: 1, ID: 10862}
-	fragments := []Fragment{
-		{Offset: 0, More: true, Data: []byte("ab")},
-		{Offset: 2, More: true, Data: []byte("cd")},
+	key := FragmentKey{
+		Version: 4, Protocol: 17, Tunnel: 1, IfID: 7, VRF: 1,
+		Generation: 1, ID: 10862, Src: [16]byte{10, 0, 0, 1}, Dst: [16]byte{10, 0, 0, 2},
 	}
-	started := time.Now().Add(-2 * time.Minute)
-	for i := range fragments {
-		if i == 1 {
-			p.mu.Lock()
-			p.fragTimes[key] = started
-			p.fragPool.mu.Lock()
-			set := p.fragPool.flows[key]
-			if set == nil {
-				p.fragPool.mu.Unlock()
-				p.mu.Unlock()
-				t.Fatal("fragment set missing before late fragment")
-			}
-			set.createdAt = started
-			p.fragPool.mu.Unlock()
-			p.mu.Unlock()
-		}
-		frag := fragments[i]
+	otherKey := key
+	otherKey.ID++
+	frames := []struct {
+		key      FragmentKey
+		fragment Fragment
+	}{
+		{key, Fragment{Offset: 0, More: true, Data: []byte("ab")}},
+		{key, Fragment{Offset: 2, More: false, Data: []byte("cd")}},
+		{otherKey, Fragment{Offset: 0, More: true, Data: []byte("xy")}},
+		{key, Fragment{Offset: 4, More: false, Data: []byte("ef")}},
+	}
+	for i, tc := range frames {
+		frameKey, fragment := tc.key, tc.fragment
 		if err := p.Enqueue(CaptureFrame{
-			Packet: pipelineTestPacket(77, 2, 2, 7, uint32(i+1)), FlowKey: "frag-expiry",
-			FragmentKey: &key, Fragment: &frag,
+			Packet: pipelineTestPacket(77, 2, 2, 7, uint32(i+1)), FlowKey: "fragment-deny",
+			Generation: 1, SnapshotGeneration: 1,
+			FragmentKey: &frameKey, Fragment: &fragment,
 		}); err != nil {
 			t.Fatalf("Enqueue fragment %d: %v", i, err)
 		}
 		if n := p.Drain(1); n != 1 {
-			t.Fatalf("Drain fragment %d consumed %d, want 1", i, n)
+			t.Fatalf("Drain fragment %d = %d, want 1", i, n)
 		}
 	}
-	now := time.Now()
-	if expired := p.expireFragments(now); expired != len(fragments) {
-		t.Fatalf("expired holds = %d, want %d", expired, len(fragments))
-	}
-	if len(sink.verdicts) != len(fragments) {
-		t.Fatalf("expired verdicts = %d, want %d", len(sink.verdicts), len(fragments))
+	if len(sink.verdicts) != len(frames) {
+		t.Fatalf("fragment verdict count = %d, want %d", len(sink.verdicts), len(frames))
 	}
 	for _, verdict := range sink.verdicts {
 		if verdict.v != VerdictDrop {
-			t.Fatalf("expired fragment verdict = %v, want DROP", verdict.v)
+			t.Fatalf("fragment verdict = %v, want DROP", verdict.v)
 		}
 	}
-	if got := p.fragPool.Stats(); got.Flows != 0 || got.Fragments != 0 || got.Expired != 1 {
-		t.Fatalf("pool stats after hold expiry = %+v, want empty pool and one expired set", got)
+	if len(denyReasons) != len(frames) {
+		t.Fatalf("fragment deny events = %v, want one per dropped frame", denyReasons)
 	}
-
-	late := Fragment{Offset: 4, More: false, Data: []byte("ef")}
-	if err := p.Enqueue(CaptureFrame{
-		Packet: pipelineTestPacket(77, 2, 2, 7, 3), FlowKey: "frag-expiry",
-		FragmentKey: &key, Fragment: &late,
-	}); err != nil {
-		t.Fatalf("Enqueue late terminal fragment: %v", err)
+	for _, reason := range denyReasons {
+		if reason != ReasonFragmentRefused {
+			t.Fatalf("fragment deny reason = %v, want FRAGMENT_REFUSED", reason)
+		}
 	}
-	if n := p.Drain(1); n != 1 {
-		t.Fatalf("Drain late fragment = %d, want 1", n)
+	if got := p.fragPool.Stats(); got.Flows != 0 || got.Fragments != 0 || got.Completed != 0 {
+		t.Fatalf("D22 fragments reached FragPool: %+v", got)
 	}
-	if got := p.fragPool.Stats(); got.Flows != 1 || got.Fragments != 1 || got.Completed != 0 {
-		t.Fatalf("pool stats after late fragment = %+v, want a new incomplete one-piece set", got)
+	stats := p.Stats()
+	if stats.FragmentDrops != uint64(len(frames)) || stats.FragmentLate != 2 {
+		t.Fatalf("fragment stats = %+v, want 4 drops and two repeats of the retained tombstone", stats)
 	}
-	if len(sink.verdicts) != len(fragments) {
-		t.Fatalf("late fragment unexpectedly released expired holds: verdicts=%d", len(sink.verdicts))
+	p.mu.Lock()
+	tombstones := len(p.fragmentTombstones)
+	p.mu.Unlock()
+	if tombstones != 1 {
+		t.Fatalf("tombstones = %d, want the capped original tombstone retained without eviction", tombstones)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	p.mu.Lock()
+	cleared := p.fragmentTombstones == nil
+	p.mu.Unlock()
+	if !cleared {
+		t.Fatal("Close did not retire fragment tombstones")
 	}
 }
 

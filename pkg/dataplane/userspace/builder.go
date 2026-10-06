@@ -48,7 +48,7 @@ func (m *Manager) SetCaptureEpochProvider(provider CaptureEpochProvider) {
 // full and FIB-only applies. It is separate from CaptureEpochProvider because
 // preparing a snapshot must not mutate the currently active packet authority
 // before the helper acknowledges that snapshot.
-func (m *Manager) SetCaptureAuthorityCommitter(committer func(uint64, uint32, uint64)) {
+func (m *Manager) SetCaptureAuthorityCommitter(committer func(uint64, *ConfigSnapshot)) {
 	if m == nil {
 		return
 	}
@@ -57,10 +57,10 @@ func (m *Manager) SetCaptureAuthorityCommitter(committer func(uint64, uint32, ui
 	m.mu.Unlock()
 }
 
-// stampCaptureAuthority applies one provider result to a snapshot. Keeping
-// this copy operation shared prevents full Compile, retained-snapshot refresh,
-// and test-only builder paths from drifting on the four coupled authority
-// fields.
+// stampCaptureAuthority applies one provider result to a snapshot, then
+// freezes the matching P-MECH route inventory and policy identity. Keeping
+// this operation shared prevents full Compile and retained-snapshot refresh
+// from drifting on coupled authority fields.
 func stampCaptureAuthority(snap *ConfigSnapshot, provider CaptureEpochProvider) {
 	if snap == nil || provider == nil {
 		return
@@ -71,6 +71,7 @@ func stampCaptureAuthority(snap *ConfigSnapshot, provider CaptureEpochProvider) 
 	snap.QueueEpochs = append([]QueueEpochSnapshot(nil), queueEpochs...)
 	snap.IpsecTunnelSnapshotGeneration = tunnelSnapshotGeneration
 	snap.IpsecTunnelRows = append([]IpsecTunnelRowSnapshot(nil), tunnelRows...)
+	stampPMechInventory(snap)
 }
 
 // refreshCaptureAuthorityLocked refreshes retained snapshots immediately
