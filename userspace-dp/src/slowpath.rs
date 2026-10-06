@@ -1288,6 +1288,16 @@ impl SlowPathReinjector {
     /// the worker channel/TUN.
     pub(crate) fn validate_dry_run_frame(&self, frame: SubmitFrame) -> AdmitDecision {
         let mut decision = self.reinject_core.validate_dry_run(&frame);
+        if decision.admitted
+            && !crate::slowpath_reinject_9506::pmech_deadline_admissible_at(
+                frame.deadline_mono_ns,
+                frame.deadline_clock_id,
+                crate::afxdp::monotonic_nanos(),
+            )
+        {
+            decision.admitted = false;
+            decision.reason = ADMIT_BAD_LEASE;
+        }
         if decision.admitted {
             let packet_len = frame.bytes.len() as u64;
             let live_mtu = self.status_delegated.live_mtu.load(Ordering::Relaxed);

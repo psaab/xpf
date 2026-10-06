@@ -147,6 +147,53 @@ fn submit_conn_admits_enqueues_and_cancels_serially() {
 }
 
 #[test]
+fn dry_run_expired_or_wrong_clock_deadlines_refuse_without_side_effects() {
+    let core = open_core();
+    let target = live_target(&core);
+    let (mut client, server) = UnixStream::pair().unwrap();
+    let worker_core = core.clone();
+    let worker_target = target.clone();
+    let handle = std::thread::spawn(move || {
+        serve_submit_conn(server, &worker_core, &worker_target);
+    });
+
+    let mut expired = frame(11, 1);
+    expired.deadline_mono_ns = crate::afxdp::monotonic_nanos().saturating_sub(1);
+    let mut wrong_clock = frame(12, 2);
+    wrong_clock.deadline_clock_id = 2;
+    client
+        .write_all(&encode_message(
+            MSG_SUBMIT_BATCH,
+            &encode_submit_batch(&[expired, wrong_clock]),
+        ))
+        .unwrap();
+    let (ty, payload) = read_message(&mut client).unwrap();
+    assert_eq!(ty, MSG_ADMIT);
+    let decisions = crate::slowpath_reinject_9506::decode_admit(&payload).unwrap();
+    assert_eq!(decisions.len(), 2);
+    for decision in decisions {
+        assert!(!decision.admitted);
+        assert_eq!(decision.reason, ADMIT_BAD_LEASE);
+    }
+    let stats = core.stats_snapshot();
+    assert_eq!(stats.dry_run_refused, 2);
+    assert_eq!(stats.dry_run_admitted, 0);
+    assert_eq!(core.live_count(), 0);
+    assert_eq!(
+        target
+            .load_full()
+            .unwrap()
+            .delegated_status()
+            .queued_packets,
+        0,
+        "refused dry-run frames must not touch the worker queue"
+    );
+
+    drop(client);
+    handle.join().unwrap();
+}
+
+#[test]
 fn submit_conn_without_target_refuses_shutdown() {
     let core = open_core();
     let target: Arc<ArcSwapOption<SlowPathReinjector>> = Arc::new(ArcSwapOption::new(None));
