@@ -34,6 +34,31 @@ override is skipped and the file lands 0640 `root:root` (harmless:
 nothing reads `frr.conf` without a running FRR). This mirrors the
 pkg/dhcpserver #2450 Kea-memfile ownership handling.
 
+## Real FRR validation
+
+`TestRenderedRoutingConfigAcceptedByFRR11417` passes generated configuration
+to the installed `vtysh -C` parser. It covers forwarding-instance IPv4/IPv6
+statics and preferred routes, virtual-router IPv4/IPv6 statics, and IPv4
+plus family-less IPv6 BGP peers. Each case appends an end-of-config sentinel
+and corrupts a routing keyword; both must fail and name their bad line. The
+keyword control also requires a normal nonzero exit (ExitCode -1 from a signal
+does not count as rejection). This is independent of renderer string goldens.
+The existing apply tests retain forwarding-table
+ownership (including discard routes), VRF-over-table precedence, and
+main-table pollution checks; redundant exact-output goldens were removed.
+
+```sh
+FRR_VTYSH_BINARY=/usr/bin/vtysh go test ./pkg/frr \
+  -run '^TestRenderedRoutingConfigAcceptedByFRR11417$' -count=1 -v
+```
+
+Without `FRR_VTYSH_BINARY`, the test finds `vtysh` on `PATH`; an absent
+binary reports an explicit skip. The absence check rejects present but
+unusable or uninspectable candidates; an explicitly configured unusable
+binary also fails. Dry-run mode and private config/socket paths avoid
+live daemon connections or route changes. This gate proves FRR syntax/context
+acceptance, not kernel route installation or traffic forwarding.
+
 ## File layout
 
 The package is split across cohesive per-aspect sibling `.go` files (no
