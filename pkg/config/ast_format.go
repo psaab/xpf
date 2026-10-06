@@ -458,9 +458,10 @@ func joinKeysProvGroupedFrom(keys []string, forceQuote, group []bool, singleBrac
 
 // quoteKeyProvForLoadMerge preserves an authored quote on the final key when
 // that key is inside a replay-only bracket group. Public display-set output
-// intentionally suppresses final-key quote provenance (#6673); a bracketed
-// leaf needs it because #9881 distinguishes quoted bracket contents from an
-// unquoted bracket that was lexer list sugar.
+// suppresses final-key quotes for ordinary values but retains terminal
+// routing-policy inline keywords so they remain list values on replay. A
+// bracketed leaf also needs final quotes for #9881's distinction between
+// quoted bracket contents and an unquoted bracket that was lexer list sugar.
 func quoteKeyProvForLoadMerge(keys []string, forceQuote []bool, i int, preserveFinalQuote bool) string {
 	if (i < len(keys)-1 || preserveFinalQuote) && i < len(forceQuote) && forceQuote[i] {
 		return `"` + keyEscaper.Replace(keys[i]) + `"`
@@ -469,11 +470,12 @@ func quoteKeyProvForLoadMerge(keys []string, forceQuote []bool, i int, preserveF
 }
 
 // quoteKeyProv renders keys[i] with the same authored-quote rule
-// joinQuotedKeysProv applies, including its terminal-key suppression (#6673
-// r11 B1): the LAST token of a line decides no grouping, so its authored quote
-// is dropped, while every earlier token keeps the bit the next parse needs.
+// joinQuotedKeysProv applies, including terminal-key suppression for ordinary
+// values (#6673 r11 B1). A terminal routing-policy inline keyword keeps its
+// authored quote because it may be a `from` list value, not a clause boundary.
 func quoteKeyProv(keys []string, forceQuote []bool, i int) string {
-	if i < len(keys)-1 && i < len(forceQuote) && forceQuote[i] {
+	if i < len(forceQuote) && forceQuote[i] &&
+		(i < len(keys)-1 || policyTermInlineKeywords[keys[i]]) {
 		return `"` + keyEscaper.Replace(keys[i]) + `"`
 	}
 	return quoteKey(keys[i])

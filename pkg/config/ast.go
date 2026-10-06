@@ -247,8 +247,9 @@ func (n *Node) KeyPath() string {
 }
 
 // QuotedKeyPath returns the key path with keys quoted if they contain
-// characters that aren't valid bare identifiers (e.g. ${node}), plus the
-// NON-TERMINAL keys whose quoting the operator authored (keyNeedsAuthoredQuote).
+// characters that aren't valid bare identifiers (e.g. ${node}), plus
+// non-terminal authored quotes and terminal routing-policy inline keywords
+// whose quotes keep list values distinct from clause boundaries.
 func (n *Node) QuotedKeyPath() string {
 	parts := make([]string, len(n.Keys))
 	for i, k := range n.Keys {
@@ -275,12 +276,13 @@ func (n *Node) QuotedKeyPath() string {
 //
 // The rule is NOT "preserve every authored quote", which would rewrite
 // `description "foo"` as `description "foo"` instead of the Junos-normalized
-// `description foo` across every `show configuration` in the product. It is as
-// wide as the ambiguity: the grouping decision (eventMultiWordLeafValues) reads
-// the quoting of the FIRST token of a group, and within THIS renderer's output a
-// group of two or more begins at a non-terminal key of its node — a node's last
-// key is followed by `{`, so it stays a container key on re-parse and its
-// quoting decides nothing.
+// `description foo` across every `show configuration` in the product. Keep
+// non-terminal quotes that decide grouping, plus a terminal quote when its
+// value is a routing-policy inline keyword: in a multi-value `from` list that
+// quote distinguishes the value from a clause boundary such as `then`.
+// Within THIS renderer's output a group of two or more begins at a
+// non-terminal key of its node — a node's last key is followed by `{`, so it
+// stays a container key on re-parse and its quoting normally decides nothing.
 //
 // SCOPE: THIS FUNCTION IS FOR THE HIERARCHICAL RENDERER ONLY. An earlier
 // revision called the non-terminal rule "exactly sufficient" without that
@@ -294,7 +296,8 @@ func (n *Node) QuotedKeyPath() string {
 // pwned`. The flat path now owns its own terminal test against the finished
 // LINE (joinQuotedKeysProv in ast_format.go); do not re-point it here.
 func keyNeedsAuthoredQuote(n *Node, i int) bool {
-	return i < len(n.Keys)-1 && n.KeyQuoted(i)
+	return n != nil && i >= 0 && i < len(n.Keys) && n.KeyQuoted(i) &&
+		(i < len(n.Keys)-1 || policyTermInlineKeywords[n.Keys[i]])
 }
 
 // keyEscaper escapes exactly the characters that the lexer's readString

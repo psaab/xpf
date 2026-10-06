@@ -1394,7 +1394,12 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 					//    (Keys=["protocol","bgp"] -> child Keys=["ospf","static"]).
 					// Collect every protocol from both shapes, not just the
 					// first (#2008 H18).
-					term.FromProtocols = append(term.FromProtocols, collectProtocolList(fc)...)
+					if len(fc.Keys) > 1 && len(fc.Children) > 0 {
+						term.FromProtocols = append(term.FromProtocols, fc.Keys[1:]...)
+						term.UnknownFrom = append(term.UnknownFrom, policyFromOpaqueChildNames11779(fc)...)
+					} else {
+						term.FromProtocols = append(term.FromProtocols, collectProtocolList(fc)...)
+					}
 				case "prefix-list":
 					// Junos allows repeated `prefix-list` siblings in one
 					// term (match ANY). Accumulate so multiple statements are
@@ -1469,8 +1474,7 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 						term.FromASPath = append(term.FromASPath, firewallMatchValues(fc)...)
 					}
 				case "then":
-					parsePolicyTermInlineKeys(
-						term, fc.Keys, fc.KeysBracketed, fc.KeysQuoted, fc.BracketedClosed)
+					term.UnknownFrom = append(term.UnknownFrom, fc.Name())
 				default:
 					term.UnknownFrom = append(term.UnknownFrom, fc.Name())
 				}
@@ -1661,11 +1665,8 @@ func appendInlineBracketedMatchValues11779(
 			if !closed && policyTermClauseKeyword11779(keys[next]) {
 				return dst, next - 1, "list did not close before clause keyword"
 			}
-			dst = append(dst, keys[next])
-			i = next
-			continue
 		}
-		if !isQuoted && policyTermInlineKeywords[keys[next]] {
+		if !isQuoted && !isBracketed && policyTermInlineKeywords[keys[next]] {
 			break
 		}
 		dst = append(dst, keys[next])

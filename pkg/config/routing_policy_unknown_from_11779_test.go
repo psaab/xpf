@@ -517,6 +517,116 @@ func TestRoutingPolicyQuotedClauseKeywordInBracketedFromList11779(t *testing.T) 
 				lenient, term.PrefixList, term.UnknownFrom, term.Action)
 		}
 	}
+
+	t.Run("quoted terminal value survives canonical replay", func(t *testing.T) {
+		finalSrc := `policy-options {
+ prefix-list then 10.0.0.0/8;
+ prefix-list PL2 172.16.0.0/12;
+ policy-statement P {
+  term T {
+   from prefix-list [ PL2 "then" ];
+   then reject;
+  }
+ }
+}`
+		tree := parsePolicyTreeFromSource11779(t, finalSrc)
+		for _, replay := range []struct {
+			name string
+			text string
+		}{
+			{"Format", tree.Format()},
+			{"FormatSet", tree.FormatSet()},
+		} {
+			t.Run(replay.name, func(t *testing.T) {
+				if !strings.Contains(replay.text, `prefix-list PL2 "then"`) {
+					t.Fatalf("%s dropped the terminal quote: %s", replay.name, replay.text)
+				}
+				var replayed *ConfigTree
+				if replay.name == "FormatSet" {
+					replayed = &ConfigTree{}
+					for _, line := range strings.Split(strings.TrimSpace(replay.text), "\n") {
+						path, quoted, grouped, err := ParseSetCommandGrouped(line)
+						if err != nil {
+							t.Fatalf("ParseSetCommandGrouped(%q): %v", line, err)
+						}
+						if err := replayed.SetPathQuotedGrouped(path, quoted, grouped); err != nil {
+							t.Fatalf("SetPathQuotedGrouped(%q): %v", line, err)
+						}
+					}
+				} else {
+					replayed = parsePolicyTreeFromSource11779(t, replay.text)
+				}
+				cfg, err := CompileConfig(replayed)
+				if err != nil {
+					t.Fatalf("replay compile: %v", err)
+				}
+				term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+				if len(term.PrefixList) != 2 || term.PrefixList[0] != "PL2" ||
+					term.PrefixList[1] != "then" || len(term.UnknownFrom) != 0 ||
+					term.Action != "reject" {
+					t.Fatalf("%s changed the final member: PrefixList=%v UnknownFrom=%v Action=%q",
+						replay.name, term.PrefixList, term.UnknownFrom, term.Action)
+				}
+			})
+		}
+	})
+}
+
+func TestRoutingPolicyThenInsideFromIsQuarantined11779(t *testing.T) {
+	tree := parsePolicyTreeFromSource11779(t, `policy-options {
+ policy-statement P { term T { from { then accept; } } }
+}`)
+	if _, err := CompileConfig(tree.Clone()); err == nil ||
+		!strings.Contains(err.Error(), "`from then`") {
+		t.Fatalf("strict compile did not reject from-then: %v", err)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+	if len(term.UnknownFrom) != 1 || term.UnknownFrom[0] != "then" ||
+		term.Action != "reject" || term.NextPolicy {
+		t.Fatalf("from-then was not quarantined and forced to reject: %+v", term)
+	}
+}
+
+func TestRoutingPolicyNestedProtocolDirectNeighborFailsClosed11779(t *testing.T) {
+	tree := parsePolicyTreeFromSource11779(t, `policy-options {
+ policy-statement P {
+  term T { from { protocol direct { neighbor 192.0.2.1; } } then accept; }
+ }
+}`)
+	if _, err := CompileConfig(tree.Clone()); err == nil ||
+		!strings.Contains(err.Error(), "`from neighbor`") {
+		t.Fatalf("strict compile did not reject nested protocol neighbor: %v", err)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile hard-error: %v", err)
+	}
+	term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+	if len(term.FromProtocols) != 1 || term.FromProtocols[0] != "direct" ||
+		len(term.UnknownFrom) != 1 || term.UnknownFrom[0] != "neighbor" ||
+		term.Action != "reject" || term.NextPolicy {
+		t.Fatalf("nested protocol neighbor did not fail closed: %+v", term)
+	}
+}
+
+func TestRoutingPolicyUnbracketedMultiProtocolSetRemainsTyped11779(t *testing.T) {
+	tree := buildTreeFromSet(t, []string{
+		"set policy-options policy-statement P term T from protocol direct static",
+		"set policy-options policy-statement P term T then accept",
+	})
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("strict compile: %v", err)
+	}
+	term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+	if strings.Join(term.FromProtocols, ",") != "direct,static" ||
+		len(term.UnknownFrom) != 0 || term.Action != "accept" {
+		t.Fatalf("unbracketed protocol list changed semantics: %+v", term)
+	}
 }
 
 // FAIL-ON-REVERT: a bare `then` prefix-list name is a value in a balanced

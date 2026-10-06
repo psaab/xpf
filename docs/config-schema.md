@@ -35,17 +35,19 @@ discard (#6685), and a filter term whose `from` was dropped matches EVERYTHING
 **Use `packedBodyChildren` / `packedBody` (`compact_tail.go`) instead of reading
 `node.Children` directly** when compiling a stanza that accepts a packed body.
 
-**The packed reader resolves its tail THROUGH THE SCHEMA, so a leaf the compiler
-accepts but the schema does not declare is dropped — silently, and only in the
-packed spelling.** `packedBodyChildren` calls `resolveSchemaChild` for each tail
-token and returns the node's (empty) children when the lookup fails, on the
-deliberate principle of not guessing outside the modelled grammar. The cost is
-that the two spellings can disagree without anything saying so:
+**`packedBodyChildren` synthesizes only the packed tail its schema recognizes.**
+If a token cannot be resolved by the open schema levels, it returns the
+original `node.Children` unchanged (often empty); it does not guess a node from
+the unknown tail. The tokens remain on `node.Keys`, so this is not a universal
+rule that unknown packed leaves are dropped: a compiler that inspects raw keys
+can preserve or reject them, while one that consumes only reconstructed
+children may see less than the braced spelling's actual children.
 
 | | braced | packed |
 |---|---|---|
-| compiler reads it | from `node.Children` — no schema needed | via `resolveSchemaChild` — schema REQUIRED |
-| leaf missing from schema | accepted and applied | dropped, no warning |
+| reader input | existing `node.Children` | synthesized children for schema-resolved tail tokens |
+| unmodelled leaf | present in the parsed children | raw token remains in `node.Keys`; caller sees no synthesized child |
+
 
 #8773 is the worked example. `compileFilterFrom` handles `dscp` and
 `traffic-class` in one family-blind switch arm, but the schema declared `dscp`
@@ -8620,10 +8622,13 @@ which could turn a constrained `then accept` term into an unconditional accept.
 Strict compilation rejects unsupported `from` leaves in hierarchical, packed,
 flat-set, and compact-normalized forms, including tokens beyond a scalar leaf's
 schema arity, mixed packed keys plus child bodies, policy-level `from` clauses,
-nested opaque child bodies, and invalid route-filter trailers. Supported
-multi-value matches remain typed across `Format` and `FormatSet` replay;
-unbracketed serialized runs are split at recognized clause heads and preserve
-opaque unsupported tails instead of absorbing them into the preceding value.
+nested opaque child bodies (including `protocol direct { neighbor ... }`),
+`then` clauses inside `from`, and invalid route-filter trailers. Supported
+multi-value matches remain typed across `Format` and `FormatSet` replay,
+including a terminal quoted inline keyword such as `"then"`; both serializers
+retain its quote so replay keeps it as a list member. Unbracketed serialized runs
+are split at recognized clause heads and preserve opaque unsupported tails
+instead of absorbing them into the preceding value.
 Tolerant loads retain unsupported term predicates in `PolicyTerm.UnknownFrom`
 and policy-level predicates in `PolicyStatement.UnknownFrom`, force affected
 terms to `reject`, clear `NextPolicy`, and warn with every affected term named.
