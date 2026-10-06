@@ -82,12 +82,12 @@ func TestApplyRoutingRulesClearsRibGroupLeakOnZeroTransition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseCIDR: %v", err)
 	}
-	ops.rules[unix.AF_INET] = append(ops.rules[unix.AF_INET], netlink.Rule{
-		Family:   unix.AF_INET,
-		Priority: ribGroupLeakPrio,
-		Table:    101,
-		Dst:      dst,
-	})
+	staleLeak := netlink.NewRule()
+	staleLeak.Family = unix.AF_INET
+	staleLeak.Priority = ribGroupLeakPrio
+	staleLeak.Table = 101
+	staleLeak.Dst = dst
+	ops.rules[unix.AF_INET] = append(ops.rules[unix.AF_INET], *staleLeak)
 
 	d := &Daemon{routing: routing.NewManagerWithRuleOpsForTest(ops)}
 

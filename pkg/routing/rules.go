@@ -390,6 +390,18 @@ func hasNoAdditionalRuleSelectors(r netlink.Rule) bool {
 		r.Sport == nil && r.IPProto == 0 && r.UIDRange == nil && r.Protocol == 0
 }
 
+// hasPBRRuleShape matches the interface-scoped selectors emitted by the PBR
+// installer. Address, TOS (the pre-#7796 DSCP encoding), protocol, and port
+// selectors are valid; xpf never emits fwmark, output-interface, tunnel-id,
+// goto/flow, suppression, UID, inversion, or rule-protocol selectors here.
+func hasPBRRuleShape(r netlink.Rule) bool {
+	return r.IifName != "" && r.OifName == "" &&
+		r.Mark == 0 && r.Mask == nil && r.TunID == 0 &&
+		r.Goto == -1 && r.Flow == -1 && r.SuppressIfgroup == -1 &&
+		r.SuppressPrefixlen == -1 && !r.Invert && r.UIDRange == nil &&
+		r.Protocol == 0
+}
+
 // hasExactlyOneVRFRuleInterface matches the iif- or oif-scoped selector emitted
 // by the #9819 return-rule installer. A bare "vrf-" name and both selectors are
 // not an xpf return-rule shape.
@@ -772,7 +784,10 @@ func splitConnectedPrefixesByFamily(prefixes []string) (v4, v6 []string) {
 }
 
 // clear removes this manager's xpf-shaped rules from the shared leak range and
-// the legacy rib-group windows. Priority alone never grants ownership:
+// the retained pre-#3876 blanket window. The original 200-299 sweep was retired
+// in #12035: a selector-less foreign lookup there (charon's default rule) is
+// indistinguishable from the old positional-table xpf blanket rule.
+// Priority alone never grants ownership:
 //   - current leak rules require a destination-only lookup into a
 //     non-reserved routing table, leaving next-table rules (which have iif) intact;
 //   - old blanket rules require the emitted `from all lookup <table>` shape;
@@ -800,11 +815,10 @@ func (rg *ribGroupManager) clear() error {
 				isNonReservedRuleTable(r.Table) && hasNoAdditionalRuleSelectors(r)
 			inOldBlanket := r.Priority >= ribGroupRulePriority &&
 				r.Priority < ribGroupRulePriority+100 && legacyBlanketShape
-			inLegacy := r.Priority >= 200 && r.Priority < 300 && legacyBlanketShape
 			inReturn := r.Priority == RibGroupReturnRulePriority &&
 				r.Dst != nil && r.Src == nil && isNonReservedRuleTable(r.Table) &&
 				hasExactlyOneVRFRuleInterface(r) && hasNoAdditionalRuleSelectors(r)
-			if inCurrent || inOldBlanket || inLegacy || inReturn {
+			if inCurrent || inOldBlanket || inReturn {
 				if err := rg.ops.RuleDel(&r); err != nil {
 					if isRuleAlreadyGone(err) {
 						// Already absent — the desired end-state, not a
@@ -1064,8 +1078,9 @@ func (p *pbrManager) Apply(rules []PBRRule) error {
 	return errors.Join(errs...)
 }
 
-// clear removes current PBR ip rules and stale rules from the former
-// 31000-31999 band (#11319).
+// clear removes xpf-shaped current PBR rules and stale rules from the former
+// 31000-31999 band (#11319). Rules must match the interface-scoped PBR shape;
+// priority alone is not proof of ownership.
 //
 // Per-family RuleList dump failures are aggregated and returned rather
 // than swallowed; see the rationale on nextTableManager.clear (#2273).
@@ -1081,7 +1096,7 @@ func (p *pbrManager) clear() error {
 			inCurrent := r.Priority >= pbrRulePriority && r.Priority < pbrRulePriority+maxPBRRules
 			inLegacy := r.Priority >= config.LegacyPBRRulePriorityBase &&
 				r.Priority < config.LegacyPBRRulePriorityBase+maxPBRRules
-			if !inCurrent && !inLegacy {
+			if (!inCurrent && !inLegacy) || !hasPBRRuleShape(r) {
 				continue
 			}
 

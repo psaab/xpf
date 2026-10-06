@@ -330,9 +330,11 @@ func (d *Daemon) applyPolicyRoutingRules(cfg *config.Config) error {
 	// NextTable leak from the live ip-rule table, the stale userspace FIB
 	// entry) kept routing a deleted-VRF prefix into its table indefinitely — a
 	// route-leak that kernel-forwarded / local / route-based-IPsec plaintext
-	// could follow. A config that never had a rib-group finds no rule in the
-	// scanned bands, so clear() issues no RuleDel (no churn); a steady-state
-	// non-empty commit reconciles the exact same set as before.
+	// could follow. The scoped clear also runs when no rib-group is configured
+	// so stale xpf-shaped rules are removed; foreign rules outside those shapes
+	// (including charon's selector-less pref-220 rule) survive. A rule identical
+	// to an emitted xpf shape remains indistinguishable without a kernel owner
+	// marker. A steady-state non-empty commit reconciles the same desired set.
 	if d.routing != nil {
 		connectedPrefixes := config.RibGroupConnectedPrefixes(cfg)
 		if err := d.routing.ApplyRibGroupRules(cfg.RoutingOptions.RibGroups, cfg.RoutingInstances, connectedPrefixes); err != nil {
