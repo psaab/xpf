@@ -3,6 +3,7 @@ package nfqueue
 import (
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 )
@@ -95,8 +96,8 @@ func TestD11CancelDrainKeepsPendingUntilCompletion10484(t *testing.T) {
 		t.Fatalf("NewCapturePipeline: %v", err)
 	}
 	pending := &pendingReinject{
-		frame: frame, lease: lease, deadline: time.Now().Add(time.Second),
-		ledger: ledger, ledgerKey: key,
+		frame: frame, lease: lease, deadlineMonoNS: pipelineTestMonotonicDeadline(t, time.Second),
+		deadlineArmed: true, ledger: ledger, ledgerKey: key,
 	}
 	p.mu.Lock()
 	p.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}, pending: pending}
@@ -601,8 +602,8 @@ func TestD11AckTimeoutRecordsUncertainAndFinalizes10484(t *testing.T) {
 		t.Fatalf("NewCapturePipeline: %v", err)
 	}
 	pending := &pendingReinject{
-		frame: frame, lease: lease, deadline: time.Unix(1, 0),
-		ledger: ledger, ledgerKey: key,
+		frame: frame, lease: lease, deadlineMonoNS: pipelineTestMonotonicDeadline(t, -time.Second),
+		deadlineArmed: true, ledger: ledger, ledgerKey: key,
 	}
 	p.mu.Lock()
 	p.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}, pending: pending}
@@ -728,6 +729,185 @@ func d11IngressFrame11016(hook CaptureHook, flow string, id uint32) CaptureFrame
 		originSet: true,
 	}
 }
+type blockedAdmissionSubmitter9506 struct {
+	started         chan []AdjudicatedFrame
+	release         chan struct{}
+	mu              sync.Mutex
+	cancelled       []uint64
+	cancelPermits   []uint64
+	cancelScopes    [][]ReinjectQueueScope
+}
+
+func (s *blockedAdmissionSubmitter9506) SubmitAdjudicated(frames []AdjudicatedFrame) ([]ReinjectAdmission, error) {
+	copyFrames := append([]AdjudicatedFrame(nil), frames...)
+	s.started <- copyFrames
+	<-s.release
+	responses := make([]ReinjectAdmission, len(copyFrames))
+	for i, frame := range copyFrames {
+		family, hook := d11OriginWire(frame.Origin)
+		responses[i] = ReinjectAdmission{
+			RequestID: frame.Lease.RequestID, PermitEpoch: frame.Lease.PermitEpoch,
+			QueueNumber: frame.Lease.QueueNumber, QueueEpoch: frame.Lease.QueueEpoch,
+			Family: family, Hook: hook, OwnedIfindex: frame.Origin.OwnedIfindex, Admitted: true,
+		}
+	}
+	return responses, nil
+}
+
+func (*blockedAdmissionSubmitter9506) DrainReinjectCompletions(uint32) ([]ReinjectCompletion, error) {
+	return nil, nil
+}
+
+func (s *blockedAdmissionSubmitter9506) CancelReinject(ids []uint64, permit uint64, scopes []ReinjectQueueScope) ([]uint64, error) {
+	s.mu.Lock()
+	s.cancelled = append(s.cancelled, ids...)
+	s.cancelPermits = append(s.cancelPermits, permit)
+	s.cancelScopes = append(s.cancelScopes, scopes)
+	s.mu.Unlock()
+	return append([]uint64(nil), ids...), nil
+}
+
+func TestPollSkipsUnarmedAdmissionDeadline9506(t *testing.T) {
+	frame := CaptureFrame{
+		Packet: pipelineTestPacket(77, 2, 2, 7, 20), FlowKey: "unstamped",
+	}
+	pending := &pendingReinject{
+		frame: frame, lease: ReinjectLease{PermitEpoch: 9, QueueNumber: 77, QueueEpoch: 1, RequestID: 20},
+		admissionPending: true,
+	}
+	sink := new(pipelineTestSink)
+	p := &CapturePipeline{
+		sink: sink, flows: map[string]*flowState{
+			frame.FlowKey: &flowState{frames: []CaptureFrame{frame}, pending: pending},
+		},
+		pending: map[uint64]*pendingReinject{pending.lease.RequestID: pending},
+	}
+
+	if got := p.Poll(time.Now()); got != 0 {
+		t.Fatalf("Poll resolved %d unstamped admissions, want zero", got)
+	}
+	p.mu.Lock()
+	stillPending := p.pending[pending.lease.RequestID] == pending
+	p.mu.Unlock()
+	if !stillPending || p.Stats().Timeouts != 0 || sink.calls != 0 {
+		t.Fatalf("unstamped admission state pending=%v stats=%+v sink calls=%d",
+			stillPending, p.Stats(), sink.calls)
+	}
+}
+
+func TestD11AdmissionDeadlineExpiresDuringSubmitAndLateAdmissionCannotReopen9506(t *testing.T) {
+	ledger := NewD11AttestationLedger()
+	armer := NewD11AttestationArmer("node-a", ledger, func(string, uint64) error { return nil })
+	armer.SetEnvironmentGate(func() bool { return true })
+	if err := armer.Arm("attest-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 9,
+		"00112233445566778899aabbccddeeff"); err != nil {
+		t.Fatalf("arm: %v", err)
+	}
+
+	submitter := &blockedAdmissionSubmitter9506{
+		started: make(chan []AdjudicatedFrame, 1),
+		release: make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseSubmit := func() { releaseOnce.Do(func() { close(submitter.release) }) }
+	t.Cleanup(releaseSubmit)
+	p := &CapturePipeline{
+		leaseMinter: new(d11AttestLeaseMinter11016), submitter: submitter,
+		attestation: &D11AttestationConfig{
+			Armer: armer, Ledger: ledger,
+			OriginValid:      func(CaptureOrigin) bool { return true },
+			AuthorityCurrent: func() bool { return true },
+		},
+		zoneEvaluator: passZoneEvaluator9506{}, zoneSnapshot: passZoneSnapshot9506{},
+		sink: new(pipelineTestSink), ackDeadline: 5 * time.Millisecond,
+		flows: make(map[string]*flowState), pending: make(map[uint64]*pendingReinject),
+	}
+	frame := d11IngressFrame11016(CaptureHookForward, "admission-timeout", 21)
+	p.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}}
+	done := make(chan struct{})
+	go func() {
+		p.attestSubmit([]CaptureFrame{frame})
+		close(done)
+	}()
+
+	var submitted []AdjudicatedFrame
+	select {
+	case submitted = <-submitter.started:
+	case <-time.After(time.Second):
+		t.Fatal("adjudicated submit did not start")
+	}
+	if len(submitted) != 1 {
+		t.Fatalf("submitted %d frames, want one", len(submitted))
+	}
+	requestID := submitted[0].Lease.RequestID
+	expiredDeadline := pipelineTestMonotonicDeadline(t, -time.Second)
+	p.mu.Lock()
+	pending := p.pending[requestID]
+	if pending == nil || !pending.deadlineArmed ||
+		pending.deadlineMonoNS != submitted[0].DeadlineMonoNS {
+		p.mu.Unlock()
+		t.Fatalf("pending deadline was not armed with the submitted deadline: %+v", pending)
+	}
+	pending.deadlineMonoNS = expiredDeadline
+	p.mu.Unlock()
+
+	pollDone := make(chan int, 1)
+	go func() { pollDone <- p.Poll(time.Now()) }()
+	var resolved int
+	select {
+	case resolved = <-pollDone:
+	case <-time.After(time.Second):
+		t.Fatal("Poll blocked behind the in-flight submit")
+	}
+	if resolved != 1 {
+		t.Fatalf("Poll resolved %d requests, want one admission timeout", resolved)
+	}
+	stats := p.Stats()
+	if stats.Timeouts != 1 || stats.Uncertain != 1 {
+		t.Fatalf("timeout accounting = %+v, want one timeout and uncertain result", stats)
+	}
+	sink := p.sink.(*pipelineTestSink)
+	if sink.calls != 1 || len(sink.verdicts) != 1 || sink.verdicts[0].v != VerdictDrop {
+		t.Fatalf("timeout verdicts=%+v calls=%d, want one DROP", sink.verdicts, sink.calls)
+	}
+	p.mu.Lock()
+	_, pendingAgain := p.pending[requestID]
+	flow := p.flows[frame.FlowKey]
+	if flow != nil && (flow.pending != nil || len(flow.frames) != 0) {
+		p.mu.Unlock()
+		t.Fatalf("timed-out flow remained live: %+v", flow)
+	}
+	p.mu.Unlock()
+	if pendingAgain {
+		t.Fatal("timed-out admission remained pending")
+	}
+
+	releaseSubmit()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("late admission response did not finish")
+	}
+	p.mu.Lock()
+	_, pendingAgain = p.pending[requestID]
+	p.mu.Unlock()
+	if pendingAgain {
+		t.Fatal("late positive admission reopened the timed-out request")
+	}
+	if sink.calls != 1 || len(sink.verdicts) != 1 || sink.verdicts[0].v != VerdictDrop {
+		t.Fatalf("late admission changed terminal verdicts=%+v calls=%d", sink.verdicts, sink.calls)
+	}
+	submitter.mu.Lock()
+	cancelled := append([]uint64(nil), submitter.cancelled...)
+	cancelPermits := append([]uint64(nil), submitter.cancelPermits...)
+	cancelScopes := append([][]ReinjectQueueScope(nil), submitter.cancelScopes...)
+	submitter.mu.Unlock()
+	if len(cancelled) != 1 || cancelled[0] != requestID ||
+		len(cancelPermits) != 1 || cancelPermits[0] != 0 ||
+		len(cancelScopes) != 1 || cancelScopes[0] != nil {
+		t.Fatalf("timeout cancellation ids=%v permits=%v scopes=%v, want ID-only [%d]", cancelled, cancelPermits, cancelScopes, requestID)
+	}
+}
 
 func TestD11RejectsInputHookBeforeLeaseOrReserve11016(t *testing.T) {
 	ledger := NewD11AttestationLedger()
@@ -752,8 +932,8 @@ func TestD11RejectsInputHookBeforeLeaseOrReserve11016(t *testing.T) {
 			denies = append(denies, event)
 			return true
 		}),
-		sink: new(pipelineTestSink), flows: make(map[string]*flowState),
-		pending: make(map[uint64]*pendingReinject),
+		sink: new(pipelineTestSink), ackDeadline: 5 * time.Millisecond,
+		flows: make(map[string]*flowState), pending: make(map[uint64]*pendingReinject),
 	}
 	input := d11IngressFrame11016(CaptureHookInput, "input", 11)
 	if _, err := p.validateD11Frame(input); err == nil || err.Error() != "unsupported family or hook" {

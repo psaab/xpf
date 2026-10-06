@@ -60,6 +60,8 @@ fn frame(id: u64, flow_tag: u64, len: usize) -> SubmitFrame {
         pmech_inventory_generation: 0,
         pmech_inventory_fib_generation: 0,
         pmech_policy_identity: [0; 32],
+        deadline_mono_ns: crate::afxdp::monotonic_nanos() + 500_000_000,
+        deadline_clock_id: PMECH_DEADLINE_CLOCK_MONOTONIC,
     }
 }
 
@@ -808,6 +810,8 @@ fn codec_submit_roundtrip_and_exact_bytes() {
             pmech_inventory_generation: 31,
             pmech_inventory_fib_generation: 32,
             pmech_policy_identity: [0x41; 32],
+            deadline_mono_ns: 0x0102030405060708,
+            deadline_clock_id: PMECH_DEADLINE_CLOCK_MONOTONIC,
         },
         SubmitFrame {
             lease: ReinjectLease {
@@ -828,6 +832,8 @@ fn codec_submit_roundtrip_and_exact_bytes() {
             pmech_inventory_generation: 41,
             pmech_inventory_fib_generation: 42,
             pmech_policy_identity: [0x52; 32],
+            deadline_mono_ns: 0x1112131415161718,
+            deadline_clock_id: PMECH_DEADLINE_CLOCK_MONOTONIC,
         },
     ];
     let payload = encode_submit_batch(&frames);
@@ -854,6 +860,9 @@ fn codec_submit_roundtrip_and_exact_bytes() {
     expected.extend_from_slice(&31u64.to_be_bytes());
     expected.extend_from_slice(&32u32.to_be_bytes());
     expected.extend_from_slice(&[0x41; 32]);
+    expected.extend_from_slice(&0x0102030405060708u64.to_be_bytes());
+    expected.push(PMECH_DEADLINE_CLOCK_MONOTONIC);
+    expected.extend_from_slice(&2u64.to_be_bytes());
     expected.extend_from_slice(&8u64.to_be_bytes());
     expected.extend_from_slice(&12u64.to_be_bytes());
     expected.extend_from_slice(&10u16.to_be_bytes());
@@ -875,11 +884,174 @@ fn codec_submit_roundtrip_and_exact_bytes() {
     expected.extend_from_slice(&41u64.to_be_bytes());
     expected.extend_from_slice(&42u32.to_be_bytes());
     expected.extend_from_slice(&[0x52; 32]);
+    expected.extend_from_slice(&0x1112131415161718u64.to_be_bytes());
+    expected.push(PMECH_DEADLINE_CLOCK_MONOTONIC);
     assert_eq!(payload, expected);
     assert_eq!(decode_submit_batch(&payload).unwrap(), frames);
     // Empty batch is a legal no-op.
     let empty = encode_submit_batch(&[]);
     assert_eq!(decode_submit_batch(&empty).unwrap(), vec![]);
+}
+
+#[test]
+fn submit_wire_matches_pinned_go_vector_and_both_decoders() {
+    const GO_SUBMIT_VECTOR: &[u8] = &[
+         0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x00, 0x0b, 0x00, 0x09, 0x64, 0x1d, 0x37, 0x9c, 0xc2, 0x04, 0x83, 0xcb,
+         0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x2a, 0x05, 0x6f, 0x77, 0x6e, 0x65,
+         0x72, 0x03, 0x73, 0x74, 0x6e, 0x00, 0x00, 0x00, 0x02, 0x45, 0x00, 0x00,
+         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00,
+         0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x13, 0x00, 0x17, 0x00, 0x00, 0x00,
+         0x1d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00,
+         0x20, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
+         0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
+         0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x01, 0x02, 0x03,
+         0x04, 0x05, 0x06, 0x07, 0x08, 0x01,
+    ];
+    let expected_frame = SubmitFrame {
+        lease: ReinjectLease {
+            permit_epoch: 7,
+            queue_epoch: 11,
+            queue_number: 9,
+            request_id: 1,
+        },
+        flow_tag: 0x641d_379c_c204_83cb,
+        flags: 0,
+        origin: CaptureOrigin::inet_forward(42, "owner", "stn"),
+        bytes: vec![0x45, 0x00],
+        snapshot_generation: 13,
+        config_generation: 17,
+        fib_generation: 19,
+        zone_id: 23,
+        if_id: 29,
+        pmech_inventory_generation: 31,
+        pmech_inventory_fib_generation: 32,
+        pmech_policy_identity: [0x41; 32],
+        deadline_mono_ns: 0x0102_0304_0506_0708,
+        deadline_clock_id: PMECH_DEADLINE_CLOCK_MONOTONIC,
+    };
+    assert_eq!(GO_SUBMIT_VECTOR.len(), 138);
+    assert_eq!(
+        encode_submit_batch(std::slice::from_ref(&expected_frame)).as_slice(),
+        GO_SUBMIT_VECTOR
+    );
+    const TAIL_START: usize = 59;
+    assert_eq!(&GO_SUBMIT_VECTOR[TAIL_START..67], &13u64.to_be_bytes()[..]);
+    assert_eq!(&GO_SUBMIT_VECTOR[67..75], &17u64.to_be_bytes()[..]);
+    assert_eq!(&GO_SUBMIT_VECTOR[75..79], &19u32.to_be_bytes()[..]);
+    assert_eq!(&GO_SUBMIT_VECTOR[79..81], &23u16.to_be_bytes()[..]);
+    assert_eq!(&GO_SUBMIT_VECTOR[81..85], &29u32.to_be_bytes()[..]);
+    assert_eq!(&GO_SUBMIT_VECTOR[85..93], &31u64.to_be_bytes()[..]);
+    assert_eq!(&GO_SUBMIT_VECTOR[93..97], &32u32.to_be_bytes()[..]);
+    assert_eq!(&GO_SUBMIT_VECTOR[97..129], &[0x41; 32]);
+    assert_eq!(
+        &GO_SUBMIT_VECTOR[129..137],
+        &0x0102_0304_0506_0708u64.to_be_bytes()[..]
+    );
+    assert_eq!(GO_SUBMIT_VECTOR[137], 1);
+
+    let decoded = decode_submit_batch(GO_SUBMIT_VECTOR).expect("decode Go submit vector");
+    assert_eq!(decoded, vec![expected_frame.clone()]);
+    assert_eq!(decoded[0].lease, expected_frame.lease);
+    assert_eq!(decoded[0].origin, expected_frame.origin);
+    assert_eq!(decoded[0].bytes, expected_frame.bytes);
+    assert_eq!(decoded[0].snapshot_generation, 13);
+    assert_eq!(decoded[0].config_generation, 17);
+    assert_eq!(decoded[0].fib_generation, 19);
+    assert_eq!(decoded[0].zone_id, 23);
+    assert_eq!(decoded[0].if_id, 29);
+    assert_eq!(decoded[0].pmech_inventory_generation, 31);
+    assert_eq!(decoded[0].pmech_inventory_fib_generation, 32);
+    assert_eq!(decoded[0].pmech_policy_identity, [0x41; 32]);
+    assert_eq!(decoded[0].deadline_mono_ns, 0x0102_0304_0506_0708);
+    assert_eq!(decoded[0].deadline_clock_id, PMECH_DEADLINE_CLOCK_MONOTONIC);
+
+    let pool = crate::afxdp::ipsec_inner_queue::IpsecInnerSlabPool::new();
+    let pooled = decode_submit_batch_into_pool(GO_SUBMIT_VECTOR, &pool)
+        .expect("pooled decode Go submit vector");
+    assert_eq!(pooled.len(), 1);
+    let row = &pooled[0];
+    assert_eq!(row.lease, expected_frame.lease);
+    assert_eq!(row.flow_tag, expected_frame.flow_tag);
+    assert_eq!(row.flags, expected_frame.flags);
+    assert_eq!(row.origin, expected_frame.origin);
+    assert_eq!(row.bytes_len, 2);
+    assert_eq!(row.snapshot_generation, 13);
+    assert_eq!(row.config_generation, 17);
+    assert_eq!(row.fib_generation, 19);
+    assert_eq!(row.zone_id, 23);
+    assert_eq!(row.if_id, 29);
+    assert_eq!(row.pmech_inventory_generation, 31);
+    assert_eq!(row.pmech_inventory_fib_generation, 32);
+    assert_eq!(row.pmech_policy_identity, [0x41; 32]);
+    assert_eq!(row.deadline_mono_ns, 0x0102_0304_0506_0708);
+    assert_eq!(row.deadline_clock_id, PMECH_DEADLINE_CLOCK_MONOTONIC);
+    let slab = pool.buffer(row.slab_id).expect("pooled Go packet");
+    assert_eq!(slab.as_slice(), &[0x45, 0x00]);
+    drop(slab);
+    assert!(pool.force_release(row.slab_id));
+}
+
+#[test]
+fn pmech_deadline_admission_enforces_monotonic_window() {
+    let now = 10_000;
+    assert!(!pmech_deadline_admissible_at(now + 1, 0, now));
+    assert!(!pmech_deadline_admissible_at(now + 1, 2, now));
+    assert!(!pmech_deadline_admissible_at(now + 1, 1, 0));
+    assert!(!pmech_deadline_admissible_at(now, 1, now));
+    assert!(!pmech_deadline_admissible_at(now - 1, 1, now));
+    assert!(pmech_deadline_admissible_at(now + 1, 1, now));
+    assert!(pmech_deadline_admissible_at(
+        now + PMECH_DEADLINE_MAX_FUTURE_SKEW_NS,
+        1,
+        now,
+    ));
+    assert!(!pmech_deadline_admissible_at(
+        now + PMECH_DEADLINE_MAX_FUTURE_SKEW_NS + 1,
+        1,
+        now,
+    ));
+    let now_ns = crate::afxdp::monotonic_nanos();
+    let frame = SubmitFrame {
+        deadline_mono_ns: now_ns + PMECH_DEADLINE_MAX_FUTURE_SKEW_NS,
+        deadline_clock_id: PMECH_DEADLINE_CLOCK_MONOTONIC,
+        ..frame(1, 1, 64)
+    };
+    assert!(pmech_deadline_admissible_at(
+        frame.deadline_mono_ns,
+        frame.deadline_clock_id,
+        now_ns,
+    ));
+}
+
+#[test]
+fn expired_adjudicated_deadline_is_refused_before_entry_insert() {
+    let core = open_core();
+    let mut expired = frame(902, 17, 64);
+    expired.deadline_mono_ns = crate::afxdp::monotonic_nanos().saturating_sub(1);
+
+    let decision = core.admit_p2_with_class(&expired, AdmissionClass::Adjudicated);
+    assert!(!decision.admitted);
+    assert_eq!(decision.reason, ADMIT_BAD_LEASE);
+    assert_eq!(core.live_count(), 0);
+    assert_eq!(core.view(&expired.lease), EntryView::Unknown);
+    let stats = core.stats_snapshot();
+    assert_eq!(stats.adjudicated_refused, 1);
+    assert_eq!(stats.adjudicated_admitted, 0);
+}
+
+#[test]
+fn legacy_admission_does_not_require_p2_deadline() {
+    let core = open_core();
+    let mut legacy = frame(903, 18, 64);
+    legacy.deadline_mono_ns = 0;
+    legacy.deadline_clock_id = 0;
+
+    let decision = core.admit_with_class(&legacy, Some(AdmissionClass::Adjudicated));
+    assert!(decision.admitted);
+    assert_eq!(core.live_count(), 1);
+    assert_eq!(core.view(&legacy.lease), EntryView::Queued);
 }
 
 #[test]

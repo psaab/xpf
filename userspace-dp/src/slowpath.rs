@@ -798,6 +798,7 @@ fn ipsec_inner_descriptor(
         worker_set_generation,
         request_id: frame.lease.request_id,
         flags: frame.flags,
+        deadline_mono_ns: frame.deadline_mono_ns,
         enqueue_ns: 0,
     }
 }
@@ -1315,7 +1316,7 @@ impl SlowPathReinjector {
     fn submit_ipsec_inner_v1(&self, frame: SubmitFrame) -> AdmitDecision {
         let mut decision = self
             .reinject_core
-            .admit_with_class(&frame, Some(AdmissionClass::Adjudicated));
+            .admit_p2_with_class(&frame, AdmissionClass::Adjudicated);
         if !decision.admitted {
             return decision;
         }
@@ -1329,6 +1330,7 @@ impl SlowPathReinjector {
             decision.admitted = false;
             decision.reason = reason;
         };
+
 
         let pool = self.ipsec_inner_transport.pool();
         let Some(slab_id) = pool.acquire() else {

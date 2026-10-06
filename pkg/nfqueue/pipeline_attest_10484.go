@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 )
 
 // D11ManifestCap bounds independent attestation evidence retained by one daemon.
@@ -920,6 +919,7 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 			p.finishFrame(frame, VerdictDrop)
 		}
 		p.submitGate.RUnlock()
+		p.drainDeadlineCancelQueue()
 		return
 	}
 	for _, frame := range frames {
@@ -964,8 +964,30 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 	}
 	if len(admitted) == 0 {
 		p.submitGate.RUnlock()
+		p.drainDeadlineCancelQueue()
 		return
 	}
+	deadlineMonoNS, deadlineErr := stampReinjectDeadline(p.ackDeadline)
+	if deadlineErr != nil {
+		unexpectedCompletion := false
+		for _, item := range pending {
+			unexpectedCompletion = p.deadlineFailedState(item) || unexpectedCompletion
+		}
+		p.submitGate.RUnlock()
+		p.drainDeadlineCancelQueue()
+		if unexpectedCompletion {
+			p.uncertain("completion before D11 deadline failure")
+		}
+		return
+	}
+	p.mu.Lock()
+	for i := range admitted {
+		admitted[i].DeadlineMonoNS = deadlineMonoNS
+		admitted[i].DeadlineClockID = reinjectDeadlineClockMonotonic
+		pending[i].deadlineMonoNS = deadlineMonoNS
+		pending[i].deadlineArmed = true
+	}
+	p.mu.Unlock()
 	responses, submitErr := p.submitter.SubmitAdjudicated(admitted)
 	var cancelItems []*pendingReinject
 	if submitErr != nil {
@@ -988,12 +1010,54 @@ func (p *CapturePipeline) attestSubmit(frames []CaptureFrame) {
 		}
 	}
 	p.submitGate.RUnlock()
+	p.drainDeadlineCancelQueue()
 	if len(cancelItems) != 0 {
 		p.uncertain("D11 admission failure")
 	}
 	for _, item := range cancelItems {
 		p.cancelUncertainLease(item.lease)
 	}
+}
+
+func (p *CapturePipeline) deadlineFailedState(item *pendingReinject) bool {
+	if p == nil || item == nil {
+		return false
+	}
+	p.mu.Lock()
+	if p.pending[item.lease.RequestID] != item {
+		p.mu.Unlock()
+		return false
+	}
+	delete(p.pending, item.lease.RequestID)
+	if flow := p.flows[item.frame.FlowKey]; flow != nil && flow.pending == item {
+		flow.pending = nil
+	}
+	early := item.earlyCompletion
+	item.earlyCompletion = nil
+	item.admissionPending = false
+	p.stats.Refused++
+	if early != nil {
+		p.stats.Uncertain++
+	}
+	p.mu.Unlock()
+
+	if item.ledger != nil {
+		item.ledger.UpdateAdmission(item.ledgerKey, "DEADLINE", false)
+		if early != nil {
+			item.ledger.RecordCompletion(item.ledgerKey, ReinjectCompletion{
+				RequestID: early.RequestID, PermitEpoch: early.PermitEpoch,
+				QueueNumber: early.QueueNumber, QueueEpoch: early.QueueEpoch,
+				Family: early.Family, Hook: early.Hook, OwnedIfindex: early.OwnedIfindex,
+				Outcome: CompletionUncertain, Reason: "completion before deadline failure",
+			}, "Uncertain")
+		}
+	}
+	p.finishFrame(item.frame, VerdictDrop)
+	if early != nil {
+		p.retireFlow(item.frame.FlowKey)
+		return true
+	}
+	return false
 }
 
 func (p *CapturePipeline) admissionFailedState(item *pendingReinject, code string, cause error) bool {
@@ -1078,20 +1142,17 @@ func (p *CapturePipeline) applyAdmission(item *pendingReinject, admission Reinje
 		p.finishFrame(item.frame, VerdictDrop)
 		return nil
 	}
-	if item.ledger != nil {
-		item.ledger.UpdateAdmission(item.ledgerKey, "ADMIT_OK", false)
-	}
 	p.mu.Lock()
 	if p.pending[item.lease.RequestID] != item {
 		p.mu.Unlock()
 		return nil
 	}
+	if item.ledger != nil {
+		item.ledger.UpdateAdmission(item.ledgerKey, "ADMIT_OK", false)
+	}
 	item.admissionPending = false
 	early := item.earlyCompletion
 	item.earlyCompletion = nil
-	if early == nil {
-		item.deadline = time.Now().Add(p.ackDeadline)
-	}
 	p.mu.Unlock()
 	if early != nil {
 		p.resolveCompletion(*early)

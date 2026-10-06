@@ -170,11 +170,13 @@ func (f CaptureFrame) Origin() CaptureOrigin { return f.origin }
 
 // AdjudicatedFrame carries one held original and its structural origin.
 type AdjudicatedFrame struct {
-	Frame  CaptureFrame
-	Origin CaptureOrigin
-	Lease  ReinjectLease
-	ZoneID uint16
-	IfID   uint32
+	Frame           CaptureFrame
+	Origin          CaptureOrigin
+	Lease           ReinjectLease
+	ZoneID          uint16
+	IfID            uint32
+	DeadlineMonoNS  uint64
+	DeadlineClockID uint8
 }
 
 // CapturePipelineConfig controls all bounded resources and the P-MECH
@@ -263,7 +265,8 @@ type pipelineStats struct {
 type pendingReinject struct {
 	frame            CaptureFrame
 	lease            ReinjectLease
-	deadline         time.Time
+	deadlineMonoNS   uint64
+	deadlineArmed    bool
 	admissionPending bool
 	earlyCompletion  *ReinjectCompletion
 	duplicateEarly   bool
@@ -316,9 +319,10 @@ type CapturePipeline struct {
 	fragTimes        map[FragmentKey]time.Time
 	fragmentTombstones     map[fragmentDenyKey]struct{}
 	fragmentTombstoneCap   int
-	flows            map[string]*flowState
-	pending          map[uint64]*pendingReinject
-	closed           bool
+	flows                map[string]*flowState
+	pending              map[uint64]*pendingReinject
+	deadlineCancelQueue []uint64
+	closed               bool
 	revoked          bool
 	// d11RevokedPermitEpoch fences only the attestation selector after its
 	// scoped rollback cancellation; ordinary capture remains reusable.
@@ -341,8 +345,14 @@ func NewCapturePipeline(cfg CapturePipelineConfig) (*CapturePipeline, error) {
 			return nil, errors.New("nfqueue: batch cap must be in 1..64")
 		}
 	}
-	if cfg.AckDeadline <= 0 {
+	if cfg.AckDeadline < 0 {
+		return nil, errors.New("nfqueue: ack deadline must not be negative")
+	}
+	if cfg.AckDeadline == 0 {
 		cfg.AckDeadline = 5 * time.Millisecond
+	}
+	if cfg.AckDeadline > reinjectMaxAckDeadline {
+		return nil, fmt.Errorf("nfqueue: ack deadline exceeds %s", reinjectMaxAckDeadline)
 	}
 	if cfg.FragmentSlots <= 0 {
 		cfg.FragmentSlots = 128
@@ -938,6 +948,32 @@ func (p *CapturePipeline) cancelUncertainLease(lease ReinjectLease) {
 	if err != nil {
 		p.uncertain("uncertain admission cancellation")
 	}
+	p.drainDeadlineCancelQueue()
+}
+
+// drainDeadlineCancelQueue never waits behind an in-flight submit. The
+// submitter's read-gate holder drains queued cancellations after releasing it.
+func (p *CapturePipeline) drainDeadlineCancelQueue() {
+	if p == nil || p.submitter == nil {
+		return
+	}
+	for {
+		p.mu.Lock()
+		if len(p.deadlineCancelQueue) == 0 || !p.submitGate.TryLock() {
+			p.mu.Unlock()
+			return
+		}
+		requestIDs := p.deadlineCancelQueue
+		p.deadlineCancelQueue = nil
+		p.mu.Unlock()
+
+		// Queue-scope cancellation tombstones the epoch; timeout only needs its request ID.
+		_, err := p.submitter.CancelReinject(requestIDs, 0, nil)
+		p.submitGate.Unlock()
+		if err != nil {
+			p.uncertain("deadline lease cancellation")
+		}
+	}
 }
 func (p *CapturePipeline) resolveRefusal(frame CaptureFrame, reason error) {
 	p.mu.Lock()
@@ -1031,18 +1067,26 @@ func (p *CapturePipeline) Poll(now time.Time) int {
 			}
 		}
 	}
+	var nowMonoNS uint64
+	var clockErr error
 	var expired []*pendingReinject
 	p.mu.Lock()
+	nowMonoNS, clockErr = reinjectMonotonicNanos()
 	for id, pending := range p.pending {
-		if pending.admissionPending || pending.deadline.IsZero() {
+		if pending.admissionPending && !pending.deadlineArmed {
 			continue
 		}
-		if !now.Before(pending.deadline) {
+		if clockErr != nil || pending.deadlineMonoNS == 0 || nowMonoNS >= pending.deadlineMonoNS {
 			expired = append(expired, pending)
 			delete(p.pending, id)
+			if flow := p.flows[pending.frame.FlowKey]; flow != nil && flow.pending == pending {
+				flow.pending = nil
+			}
+			p.deadlineCancelQueue = append(p.deadlineCancelQueue, pending.lease.RequestID)
 		}
 	}
 	p.mu.Unlock()
+	p.drainDeadlineCancelQueue()
 	if len(expired) > 0 {
 		p.uncertain("ack timeout")
 	}
@@ -1304,6 +1348,7 @@ func (p *CapturePipeline) CancelForD11Drain(permitEpoch uint64) error {
 		_, err = p.submitter.CancelReinject(ids, permitEpoch, scopes)
 	}
 	p.submitGate.Unlock()
+	p.drainDeadlineCancelQueue()
 	return err
 }
 
@@ -1446,6 +1491,7 @@ func (p *CapturePipeline) Cancel(permitEpoch uint64, queueNumber uint16, queueEp
 		_, cancelErr = p.submitter.CancelReinject(ids, wirePermitEpoch, scopes)
 	}
 	p.submitGate.Unlock()
+	p.drainDeadlineCancelQueue()
 	for _, item := range ledgerItems {
 		p.mu.Lock()
 		current := p.pending[item.lease.RequestID] == item

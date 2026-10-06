@@ -11,7 +11,7 @@ use crate::slowpath_reinject_9506::{
     CancelScope, CaptureOrigin, ReinjectCompletion, ReinjectCore, ReinjectLease,
     ReinjectOutcome, SubmitFrame, ADMIT_BAD_LEASE, ADMIT_NON_DRY_RUN, ADMIT_OK,
     ADMIT_SHUTDOWN, ADMIT_STALE, MSG_ADMIT, MSG_ANNOUNCE, MSG_CANCEL, MSG_COMPLETE, MSG_SUBMIT_BATCH,
-    ORIGIN_FORWARD, ORIGIN_INET, SUBMIT_FLAG_DRY_RUN,
+    ORIGIN_FORWARD, ORIGIN_INET, PMECH_DEADLINE_CLOCK_MONOTONIC, SUBMIT_FLAG_DRY_RUN,
 };
 use arc_swap::ArcSwapOption;
 use std::os::unix::net::UnixStream;
@@ -48,6 +48,8 @@ fn frame(id: u64, flow_tag: u64) -> SubmitFrame {
         pmech_inventory_generation: 0,
         pmech_inventory_fib_generation: 0,
         pmech_policy_identity: [0; 32],
+        deadline_mono_ns: crate::afxdp::monotonic_nanos() + 500_000_000,
+        deadline_clock_id: PMECH_DEADLINE_CLOCK_MONOTONIC,
     }
 }
 

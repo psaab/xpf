@@ -35,7 +35,7 @@ use crate::afxdp::ipsec_inner::{
     IpsecInnerAdvisory, IpsecInnerInput, adjudicate_descriptor, verdict_from_decision,
 };
 use crate::afxdp::ipsec_inner_queue::{
-    IPSEC_INNER_DRAIN_BUDGET, IpsecInnerDoubleBatch, IpsecInnerVerdict,
+    reason as ipsec_reason, IPSEC_INNER_DRAIN_BUDGET, IpsecInnerDoubleBatch, IpsecInnerVerdict,
 };
 // #1776: the one-shot setup phase (thread pin, TSC calibration,
 // initial ArcSwap load_fulls, binding construction, BPF-map-FD
@@ -65,6 +65,28 @@ mod expiry_shared_retire_10419_tests;
 #[cfg(test)]
 #[path = "bpf_ok_teardown_10590_tests.rs"]
 mod bpf_ok_teardown_10590_tests;
+
+#[cfg(test)]
+#[path = "p2_deadline_9506_tests.rs"]
+mod p2_deadline_9506_tests;
+
+/// Run P2 descriptor work only while its Go-stamped absolute deadline is live.
+/// Generic closures inline into the worker loop; expiry posts a definitive
+/// refusal without entering D13/D14 or touching q0.
+#[inline(always)]
+fn run_before_pmech_deadline<T>(
+    deadline_mono_ns: u64,
+    now_ns: u64,
+    on_expired: impl FnOnce(),
+    adjudicate: impl FnOnce() -> T,
+) -> Option<T> {
+    if now_ns == 0 || deadline_mono_ns <= now_ns {
+        on_expired();
+        None
+    } else {
+        Some(adjudicate())
+    }
+}
 
 /// Decode the trailing #10509 discriminator without ever turning an absent
 /// value into a GRE `None` class. Go captures from the BPF conntrack mirror,
@@ -1212,41 +1234,69 @@ pub(crate) fn worker_loop(
                 let taken = transport.drain_worker(worker_id, &mut ipsec_inner_batch);
                 if taken != 0 {
                     for descriptor in ipsec_inner_batch.current().iter().take(taken) {
-                        let stn_len = usize::from(descriptor.stn_len).min(descriptor.stn.len());
-                        let stn = std::str::from_utf8(&descriptor.stn[..stn_len]).unwrap_or("");
-                        let input = IpsecInnerInput {
-                            slab_id: descriptor.slab_id,
-                            inner_packet: &[],
-                            stn,
-                            inner_family: descriptor.inner_family,
-                            inner_eth_proto: descriptor.inner_eth_proto,
-                            protocol: descriptor.protocol,
-                            rel_l4_offset: descriptor.rel_l4_offset,
-                            payload_offset: descriptor.payload_offset,
-                            // The Go owned_ifindex claim is untrusted; D14 compares
-                            // it against the authoritative tunnel-row identity.
-                            logical_ifindex: i32::try_from(descriptor.stn_ifindex).unwrap_or(0),
-                            rx_queue_index: descriptor.rx_queue_index,
-                            advisory: IpsecInnerAdvisory {
-                                snapshot_generation: descriptor.snapshot_generation,
-                                config_generation: descriptor.config_generation,
-                                fib_generation: descriptor.fib_generation,
-                                zone_id: descriptor.advisory_zone_id,
-                                if_id: descriptor.advisory_if_id,
-                                pmech_inventory_generation: descriptor.pmech_inventory_generation,
-                                pmech_inventory_fib_generation: descriptor.pmech_inventory_fib_generation,
-                                pmech_policy_identity: descriptor.pmech_policy_identity,
-                                expected_routing_domain: descriptor.expected_routing_domain,
-                                expected_fib_table: descriptor.expected_fib_table,
+                        let descriptor_now_ns = monotonic_nanos();
+                        let decision = run_before_pmech_deadline(
+                            descriptor.deadline_mono_ns,
+                            descriptor_now_ns,
+                            || {
+                                let verdict = IpsecInnerVerdict::Deny {
+                                    request_id: descriptor.request_id,
+                                    stage: "d11_deadline_expired",
+                                    reason: ipsec_reason::SUBMIT_UNAVAILABLE,
+                                    policy_id: 0,
+                                };
+                                if let Err(failed) =
+                                    transport.post_worker_verdict(worker_id, verdict)
+                                {
+                                    let _ = transport.requeue_worker_verdict(worker_id, failed);
+                                }
                             },
-                            descriptor: Some(descriptor),
-                        };
-                        let decision = adjudicate_descriptor(
-                            view,
-                            transport.pool().as_ref(),
-                            descriptor,
-                            input,
+                            || {
+                                let stn_len =
+                                    usize::from(descriptor.stn_len).min(descriptor.stn.len());
+                                let stn =
+                                    std::str::from_utf8(&descriptor.stn[..stn_len]).unwrap_or("");
+                                let input = IpsecInnerInput {
+                                    slab_id: descriptor.slab_id,
+                                    inner_packet: &[],
+                                    stn,
+                                    inner_family: descriptor.inner_family,
+                                    inner_eth_proto: descriptor.inner_eth_proto,
+                                    protocol: descriptor.protocol,
+                                    rel_l4_offset: descriptor.rel_l4_offset,
+                                    payload_offset: descriptor.payload_offset,
+                                    // The Go owned_ifindex claim is untrusted; D14 compares
+                                    // it against the authoritative tunnel-row identity.
+                                    logical_ifindex: i32::try_from(descriptor.stn_ifindex)
+                                        .unwrap_or(0),
+                                    rx_queue_index: descriptor.rx_queue_index,
+                                    advisory: IpsecInnerAdvisory {
+                                        snapshot_generation: descriptor.snapshot_generation,
+                                        config_generation: descriptor.config_generation,
+                                        fib_generation: descriptor.fib_generation,
+                                        zone_id: descriptor.advisory_zone_id,
+                                        if_id: descriptor.advisory_if_id,
+                                        pmech_inventory_generation: descriptor
+                                            .pmech_inventory_generation,
+                                        pmech_inventory_fib_generation: descriptor
+                                            .pmech_inventory_fib_generation,
+                                        pmech_policy_identity: descriptor.pmech_policy_identity,
+                                        expected_routing_domain: descriptor.expected_routing_domain,
+                                        expected_fib_table: descriptor.expected_fib_table,
+                                    },
+                                    descriptor: Some(descriptor),
+                                };
+                                adjudicate_descriptor(
+                                    view,
+                                    transport.pool().as_ref(),
+                                    descriptor,
+                                    input,
+                                )
+                            },
                         );
+                        let Some(decision) = decision else {
+                            continue;
+                        };
                         let verdict = verdict_from_decision(&decision);
                         if let Err(failed) = transport.post_worker_verdict(worker_id, verdict) {
                             let _ = transport.requeue_worker_verdict(worker_id, failed);

@@ -173,7 +173,9 @@ pub(crate) struct IpsecInnerDescriptor {
     pub worker_set_generation: u64,
     pub request_id: u64,
     pub flags: u8,
-    /// Enqueue instant (monotonic ns) for ack-deadline accounting.
+    /// Go-stamped absolute CLOCK_MONOTONIC acknowledgement deadline.
+    pub deadline_mono_ns: u64,
+    /// Enqueue instant (monotonic ns) retained for non-P2 relative accounting.
     pub enqueue_ns: u64,
 }
 
@@ -1472,8 +1474,7 @@ pub(crate) fn reap_provisional_record(record: &ProvisionalRecord) -> Provisional
     }
 }
 
-/// Drain descriptors whose ack deadline passed. Each terminalizes E24
-/// (uncertain, no retry) exactly once via its tombstone.
+/// Drain non-P2 descriptors whose relative acknowledgement interval elapsed.
 pub(crate) fn drain_timed_out(
     queue: &IpsecInnerIngressQueue,
     pool: &IpsecInnerSlabPool,
@@ -1481,6 +1482,33 @@ pub(crate) fn drain_timed_out(
     now_ns: u64,
     ack_deadline_ns: u64,
 ) -> Vec<u64> {
+    drain_expired(queue, pool, tombstones, |desc| {
+        now_ns.saturating_sub(desc.enqueue_ns) > ack_deadline_ns
+    })
+}
+
+/// Drain P2 descriptors by their Go-stamped absolute CLOCK_MONOTONIC point.
+/// Queue transit consumes the original budget; it is never restarted here.
+pub(crate) fn drain_p2_timed_out(
+    queue: &IpsecInnerIngressQueue,
+    pool: &IpsecInnerSlabPool,
+    tombstones: &BTreeMap<u64, RequestTombstone>,
+    now_ns: u64,
+) -> Vec<u64> {
+    drain_expired(queue, pool, tombstones, |desc| {
+        desc.deadline_mono_ns <= now_ns
+    })
+}
+
+fn drain_expired<F>(
+    queue: &IpsecInnerIngressQueue,
+    pool: &IpsecInnerSlabPool,
+    tombstones: &BTreeMap<u64, RequestTombstone>,
+    is_expired: F,
+) -> Vec<u64>
+where
+    F: Fn(&IpsecInnerDescriptor) -> bool,
+{
     // Timeout/reaper runs off the poll hot path. Keep the production worker
     // drain allocation-free; this helper's bounded cold-path result is small.
     let mut batch = Vec::with_capacity(IPSEC_INNER_DRAIN_BUDGET);
@@ -1488,8 +1516,7 @@ pub(crate) fn drain_timed_out(
     let mut timed_out = Vec::new();
     let mut keep = Vec::with_capacity(batch.len());
     for desc in batch {
-        let expired = now_ns.saturating_sub(desc.enqueue_ns) > ack_deadline_ns;
-        if !expired {
+        if !is_expired(&desc) {
             keep.push(desc);
             continue;
         }
@@ -1552,8 +1579,9 @@ mod tests {
             phase_epoch: 1,
             worker_set_generation: 1,
             request_id,
-            flags: 0,
+            deadline_mono_ns: 0,
             enqueue_ns: 0,
+            flags: 0,
         }
     }
 
@@ -1967,7 +1995,7 @@ mod tests {
         assert!(queue.is_empty());
         assert!(tombstones[&1].is_accounted());
         assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP);
-        // Fresh descriptor survives the timeout drain.
+        // Fresh descriptor survives the relative timeout drain.
         let id2 = pool.acquire().unwrap();
         let mut fresh = test_desc(2, id2);
         fresh.enqueue_ns = 9_999;
@@ -1975,6 +2003,29 @@ mod tests {
         let timed_out = drain_timed_out(&queue, &pool, &tombstones, 10_000, 5_000);
         assert!(timed_out.is_empty());
         assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn p2_timeout_uses_absolute_wire_deadline() {
+        let pool = IpsecInnerSlabPool::new();
+        let queue = IpsecInnerIngressQueue::new(0);
+        let expired_id = pool.acquire().unwrap();
+        let mut expired = test_desc(3, expired_id);
+        expired.enqueue_ns = 0;
+        expired.deadline_mono_ns = 9_999;
+        queue.try_enqueue(expired).unwrap();
+        let fresh_id = pool.acquire().unwrap();
+        let mut fresh = test_desc(4, fresh_id);
+        fresh.enqueue_ns = 0;
+        fresh.deadline_mono_ns = 10_001;
+        queue.try_enqueue(fresh).unwrap();
+        let mut tombstones = BTreeMap::new();
+        tombstones.insert(3, RequestTombstone::new(3, 1));
+        tombstones.insert(4, RequestTombstone::new(4, 1));
+        let timed_out = drain_p2_timed_out(&queue, &pool, &tombstones, 10_000);
+        assert_eq!(timed_out, vec![3]);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(pool.free_count(), IPSEC_INNER_SLAB_CAP - 1);
     }
 
     #[test]

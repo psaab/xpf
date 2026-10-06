@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -28,10 +30,11 @@ const (
 	reinjectOriginBridge   = 2
 	reinjectOriginForward  = 1
 	reinjectOriginInput    = 2
-	// P-MECH submit authority tail adds inventory generation, inventory FIB
-	// generation, and the dedicated SHA-256 policy identity after the original
-	// capture/config/FIB/zone/if_id identities.
-	reinjectSubmitPMechTailLen = 70
+	// The complete post-payload P-MECH suffix, including the absolute
+	// CLOCK_MONOTONIC acknowledgement deadline and its clock id.
+	reinjectDeadlineClockMonotonic = 1
+	reinjectMaxAckDeadline         = time.Second
+	reinjectSubmitPMechTailLen     = 79
 
 	// Rust admission refusal reasons are closed-world values. Unknown bytes
 	// are version skew and must never be treated as ADMIT_OK.
@@ -46,6 +49,46 @@ const (
 	reinjectAdmitNoGeneration     = 11
 	reinjectAdmitTunnelRowMissing = 12
 )
+
+func reinjectMonotonicNanos() (uint64, error) {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		return 0, fmt.Errorf("nfqueue: read CLOCK_MONOTONIC: %w", err)
+	}
+	now := ts.Nano()
+	if now <= 0 {
+		return 0, errors.New("nfqueue: CLOCK_MONOTONIC returned an invalid sample")
+	}
+	return uint64(now), nil
+}
+
+func stampReinjectDeadline(ackDeadline time.Duration) (uint64, error) {
+	return stampReinjectDeadlineWithClock(ackDeadline, unix.ClockGettime)
+}
+
+func stampReinjectDeadlineWithClock(
+	ackDeadline time.Duration,
+	clockGettime func(int32, *unix.Timespec) error,
+) (uint64, error) {
+	if ackDeadline <= 0 || ackDeadline > reinjectMaxAckDeadline {
+		return 0, fmt.Errorf("nfqueue: ack deadline %s outside (0,%s]", ackDeadline, reinjectMaxAckDeadline)
+	}
+	var ts unix.Timespec
+	if err := clockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		return 0, fmt.Errorf("nfqueue: read CLOCK_MONOTONIC: %w", err)
+	}
+	now := ts.Nano()
+	if now <= 0 {
+		return 0, errors.New("nfqueue: CLOCK_MONOTONIC returned an invalid sample")
+	}
+	deadline := uint64(now)
+	delta := uint64(ackDeadline)
+	if delta > ^uint64(0)-deadline {
+		return 0, errors.New("nfqueue: monotonic ack deadline overflow")
+	}
+	return deadline + delta, nil
+}
+
 
 // ReinjectQueueEpoch is the allocator identity the Rust authority accepts for
 // one NFQUEUE. It intentionally lives in nfqueue so the socket client does not
@@ -350,6 +393,9 @@ func encodeSubmitBatch(frames []AdjudicatedFrame) ([]byte, error) {
 	out := make([]byte, 2, 2+len(frames)*(128+reinjectSubmitPMechTailLen))
 	binary.BigEndian.PutUint16(out, uint16(len(frames)))
 	for _, item := range frames {
+		if item.DeadlineMonoNS == 0 || item.DeadlineClockID != reinjectDeadlineClockMonotonic {
+			return nil, errors.New("nfqueue: invalid reinject monotonic deadline")
+		}
 		if item.Frame.Packet == nil {
 			return nil, errors.New("nfqueue: nil packet in reinject batch")
 		}
@@ -391,6 +437,8 @@ func encodeSubmitBatch(frames []AdjudicatedFrame) ([]byte, error) {
 		putU64(&out, item.Frame.PMechInventoryGeneration)
 		putU32(&out, item.Frame.PMechInventoryFIBGeneration)
 		out = append(out, item.Frame.PMechPolicyIdentity[:]...)
+		putU64(&out, item.DeadlineMonoNS)
+		out = append(out, item.DeadlineClockID)
 	}
 	return out, nil
 }

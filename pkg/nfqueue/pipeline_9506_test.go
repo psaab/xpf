@@ -15,6 +15,18 @@ func pipelineTestPacket(queue uint16, family uint8, hook uint8, ifindex uint32, 
 	}
 }
 
+func pipelineTestMonotonicDeadline(t *testing.T, offset time.Duration) uint64 {
+	t.Helper()
+	now, err := reinjectMonotonicNanos()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offset < 0 {
+		return now - uint64(-offset)
+	}
+	return now + uint64(offset)
+}
+
 type pipelineTestSink struct {
 	verdicts []struct {
 		id uint32
@@ -640,7 +652,8 @@ func TestCapturePipelineExtendedCompletionOutcomes9506(t *testing.T) {
 			pending := &pendingReinject{
 				frame:    frame,
 				lease:    ReinjectLease{PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1, RequestID: 1},
-				deadline: time.Now().Add(time.Second),
+				deadlineMonoNS: pipelineTestMonotonicDeadline(t, time.Second),
+				deadlineArmed:  true,
 			}
 			p.mu.Lock()
 			p.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}, pending: pending}
@@ -704,7 +717,8 @@ func TestCapturePipelineDispositionCounters10478(t *testing.T) {
 			pending := &pendingReinject{
 				frame:    frame,
 				lease:    ReinjectLease{PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1, RequestID: 1},
-				deadline: time.Now().Add(time.Second),
+				deadlineMonoNS: pipelineTestMonotonicDeadline(t, time.Second),
+				deadlineArmed:  true,
 			}
 			p.mu.Lock()
 			p.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}, pending: pending}
@@ -761,7 +775,8 @@ func TestCapturePipelineDispositionCounters10478(t *testing.T) {
 		pending := &pendingReinject{
 			frame:    frame,
 			lease:    ReinjectLease{PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1, RequestID: 1},
-			deadline: time.Now().Add(-time.Second),
+			deadlineMonoNS: pipelineTestMonotonicDeadline(t, -time.Second),
+			deadlineArmed:  true,
 		}
 		p.mu.Lock()
 		p.flows[frame.FlowKey] = &flowState{frames: []CaptureFrame{frame}, pending: pending}
