@@ -50,14 +50,15 @@ type ZoneHostInboundView struct {
 	SYNFloodSrcThreshold uint32
 	AlarmWithoutDrop     bool
 
-	// IngressNetdevs (#9637) are the kernel netdevs whose arriving host-bound
-	// packets this view judges, whichever local address they name, plus routing
-	// multicast packets addressed to catalog groups. They come from the view's
-	// own interfaces, minus three kinds: a netdev another view also claims, a
-	// lifeline's netdev, and a netdev enslaved to an l3mdev VRF. VRF slaves are
-	// represented by their VRF master, visible at LOCAL_IN. See
-	// hostInboundViewIngressNetdevsWithMasters.
+	// IngressNetdevs (#9637) are the effective kernel netdevs whose arriving
+	// host-bound packets this view judges, plus routing multicast addressed to
+	// catalog groups. VRF masters remain here for the legacy flood-screen scope;
+	// host-inbound service rules use IngressVRFScopes to identify member devices.
 	IngressNetdevs []string
+	// IngressVRFScopes pairs a LOCAL_IN-visible VRF master with the exact member
+	// devices owned by this view. Using iifname+sdifname prevents one zone's
+	// ingress policy from applying to another zone or an unzoned co-member.
+	IngressVRFScopes []config.HostInboundVRFIngressScope
 	// IngressDenyNetdevs (#10431) are netdevs whose host-inbound claims could
 	// not be assigned to one unambiguous view (for example, a shared parent).
 	// The renderer applies destination-owner service rights first, then emits a
@@ -706,6 +707,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			V4Addrs:              v4,
 			V6Addrs:              v6,
 			IngressNetdevs:       hostInboundViewIngressNetdevsWithMasters(sig, netdevSigs, lifelineNetdevs, vrfEnslaved, vrfMasters),
+			IngressVRFScopes:     hostInboundViewVRFIngressScopes(sig, netdevSigs, lifelineNetdevs, vrfEnslaved, vrfMasters),
 			ICMPFloodThreshold:   screenProfilesByZone[g.zone].ICMPFloodThreshold,
 			UDPFloodThreshold:    screenProfilesByZone[g.zone].UDPFloodThreshold,
 			SYNFloodThreshold:    screenProfilesByZone[g.zone].SYNFloodThreshold,
@@ -821,6 +823,33 @@ func hostInboundViewIngressNetdevsWithMasters(sig string, netdevSigs map[string]
 		}
 	}
 	sort.Strings(out)
+	return out
+}
+
+// hostInboundViewVRFIngressScopes returns the VRF member set owned by one
+// effective-token view, sorted by master and slave. A member claimed by
+// multiple views is left to the destination-owner fallback.
+func hostInboundViewVRFIngressScopes(sig string, netdevSigs map[string]map[string]bool, lifelineNetdevs, vrfEnslaved map[string]bool, vrfMasters map[string]string) []config.HostInboundVRFIngressScope {
+	byMaster := map[string][]string{}
+	for slave, sigs := range netdevSigs {
+		master := vrfMasters[slave]
+		if !vrfEnslaved[slave] || lifelineNetdevs[slave] || master == "" ||
+			len(sigs) != 1 || !sigs[sig] {
+			continue
+		}
+		byMaster[master] = append(byMaster[master], slave)
+	}
+	masters := make([]string, 0, len(byMaster))
+	for master := range byMaster {
+		masters = append(masters, master)
+	}
+	sort.Strings(masters)
+	out := make([]config.HostInboundVRFIngressScope, 0, len(masters))
+	for _, master := range masters {
+		slaves := byMaster[master]
+		sort.Strings(slaves)
+		out = append(out, config.HostInboundVRFIngressScope{Master: master, Slaves: slaves})
+	}
 	return out
 }
 

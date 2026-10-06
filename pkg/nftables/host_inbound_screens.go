@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"sort"
 	"time"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // HostInboundScreenFloodMeterSize caps entries in each per-source meter.
@@ -27,6 +29,7 @@ type HostInboundScreenFloodRule struct {
 	AggregateThreshold uint32
 	SourceThreshold    uint32
 	IngressNetdevs     []string
+	IngressVRFScopes   []config.HostInboundVRFIngressScope
 	Addresses          []string
 	AlarmWithoutDrop   bool
 }
@@ -39,6 +42,7 @@ type HostInboundScreenFloodRule struct {
 func HostInboundScreenFloodRules(views []HostInboundZoneView) []HostInboundScreenFloodRule {
 	type zoneFlood struct {
 		v4, v6, ingress              map[string]struct{}
+		vrfIngress                   map[string]map[string]struct{}
 		icmp, udp, syn, synSource    uint32
 		profileSet, alarmWithoutDrop bool
 	}
@@ -47,9 +51,10 @@ func HostInboundScreenFloodRules(views []HostInboundZoneView) []HostInboundScree
 		z := zones[view.Zone]
 		if z == nil {
 			z = &zoneFlood{
-				v4:      make(map[string]struct{}),
-				v6:      make(map[string]struct{}),
-				ingress: make(map[string]struct{}),
+				v4:         make(map[string]struct{}),
+				v6:         make(map[string]struct{}),
+				ingress:    make(map[string]struct{}),
+				vrfIngress: make(map[string]map[string]struct{}),
 			}
 			zones[view.Zone] = z
 		}
@@ -59,8 +64,19 @@ func HostInboundScreenFloodRules(views []HostInboundZoneView) []HostInboundScree
 		for _, addr := range view.V6Addrs {
 			z.v6[addr] = struct{}{}
 		}
-		for _, name := range view.IngressNetdevs {
+		for _, name := range hostInboundDirectIngressNetdevs(view) {
 			z.ingress[name] = struct{}{}
+		}
+		for _, scope := range view.IngressVRFScopes {
+			if scope.Master == "" {
+				continue
+			}
+			if z.vrfIngress[scope.Master] == nil {
+				z.vrfIngress[scope.Master] = make(map[string]struct{}, len(scope.Slaves))
+			}
+			for _, slave := range scope.Slaves {
+				z.vrfIngress[scope.Master][slave] = struct{}{}
+			}
 		}
 
 		active := view.ICMPFloodThreshold > 0 || view.UDPFloodThreshold > 0 ||
@@ -94,7 +110,7 @@ func HostInboundScreenFloodRules(views []HostInboundZoneView) []HostInboundScree
 			if family == "ip6" {
 				addresses = sortedKeys(z.v6)
 			}
-			if len(ingress) == 0 && len(addresses) == 0 {
+			if len(ingress) == 0 && len(z.vrfIngress) == 0 && len(addresses) == 0 {
 				continue
 			}
 			appendRule := func(protocol string, aggregateThreshold, sourceThreshold uint32) {
@@ -108,6 +124,7 @@ func HostInboundScreenFloodRules(views []HostInboundZoneView) []HostInboundScree
 					AggregateThreshold: aggregateThreshold,
 					SourceThreshold:    sourceThreshold,
 					IngressNetdevs:     ingress,
+					IngressVRFScopes:   sortedScreenVRFScopes(z.vrfIngress),
 					Addresses:          addresses,
 					AlarmWithoutDrop:   z.alarmWithoutDrop,
 				})
@@ -119,6 +136,26 @@ func HostInboundScreenFloodRules(views []HostInboundZoneView) []HostInboundScree
 				appendRule("icmpv6", screenFloodSaturatingMultiply(z.icmp, hostInboundScreenFloodSecondaryCeilingMultiplier), z.icmp)
 			}
 			appendRule("tcp-syn", z.syn, z.synSource)
+		}
+	}
+	return out
+}
+
+func sortedScreenVRFScopes(scopes map[string]map[string]struct{}) []config.HostInboundVRFIngressScope {
+	masters := make([]string, 0, len(scopes))
+	for master := range scopes {
+		masters = append(masters, master)
+	}
+	sort.Strings(masters)
+	out := make([]config.HostInboundVRFIngressScope, 0, len(masters))
+	for _, master := range masters {
+		slaves := make([]string, 0, len(scopes[master]))
+		for slave := range scopes[master] {
+			slaves = append(slaves, slave)
+		}
+		sort.Strings(slaves)
+		if len(slaves) > 0 {
+			out = append(out, config.HostInboundVRFIngressScope{Master: master, Slaves: slaves})
 		}
 	}
 	return out

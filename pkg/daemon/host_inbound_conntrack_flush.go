@@ -580,7 +580,7 @@ func buildHostInboundConntrackFlushFilter(views []dpuserspace.ZoneHostInboundVie
 	var ingressTCP, ingressUDP []config.PortRange
 	ingressAllowsAll := false
 	for _, v := range views {
-		if len(v.IngressNetdevs) == 0 {
+		if len(v.IngressNetdevs) == 0 && len(v.IngressVRFScopes) == 0 {
 			continue
 		}
 		if hostInboundAllowsAll(v) {

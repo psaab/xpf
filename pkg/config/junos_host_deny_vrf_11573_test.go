@@ -6,14 +6,10 @@ import (
 	"testing"
 )
 
-// junos_host_deny_vrf_11573_test.go pins #11573: a VRF-member fine DENY must be
-// scoped by the LOCAL_IN-visible VRF master instead of dropped as Unscopable.
-// At LOCAL_IN iifname names the master, so a member-netdev-keyed rule matches
-// nothing (#6619) — but dropping the candidate emits NO rule while the coarse
-// service-only gate still admits the service. The fix rescopes uniquely-owned
-// masters into Scoped (preserving per-member zone/VRF identity via the
-// effective-target claim check); a master shared by multiple zones stays
-// Unscopable as cross-zone-ambiguous (operator-fixable by re-zoning).
+// junos_host_deny_vrf_11573_test.go pins #11573: a VRF-member fine DENY uses
+// the LOCAL_IN-visible master plus the member's sdifname rather than a broad
+// master rule or an unmatchable slave-only iifname rule. Shared masters remain
+// enforceable for uniquely-owned members without affecting sibling ingress.
 
 // vrf11573Config is one VRF-member ingress zone (untrust on ge-0/0/1.0,
 // enslaved to virtual-router tenant) with a source-scoped application-any
@@ -42,15 +38,29 @@ func vrf11573Program(t *testing.T, cfg *Config, zone string) JunosHostDenyProgra
 	return JunosHostDenyProgram{}
 }
 
-// vrf11573Verdict hermetically evaluates one v4 packet (LOCAL_IN iifname plus
-// source) against the program's first-match v4 rules. It mirrors the nft
-// rendering: the iifname scope gates entry to the zone subchain, then rules
-// apply in order. Reported verdicts are drop=true (a DROP rule matched),
-// allow (no rule matched — the packet falls through to the coarse gate).
-func vrf11573Verdict(t *testing.T, prog JunosHostDenyProgram, iifname, src string) (drop bool) {
+func requireSingleVRFScope11573(t *testing.T, scopes []HostInboundVRFIngressScope, master, slave string) {
 	t.Helper()
-	if !slices.Contains(prog.IngressNetdevs, iifname) {
-		t.Fatalf("packet iifname %q not in program scope %v — the rule cannot fire there", iifname, prog.IngressNetdevs)
+	if len(scopes) != 1 || scopes[0].Master != master || !slices.Equal(scopes[0].Slaves, []string{slave}) {
+		t.Fatalf("VRF scopes = %+v, want %s -> [%s]", scopes, master, slave)
+	}
+}
+
+// vrf11573Verdict hermetically evaluates one v4 packet (LOCAL_IN iifname,
+// sdifname, and source) against the program's first-match v4 rules. It mirrors
+// the nft rendering: the paired ingress scope gates entry to the zone subchain,
+// then rules apply in order.
+func vrf11573Verdict(t *testing.T, prog JunosHostDenyProgram, iifname, sdifname, src string) (drop bool) {
+	t.Helper()
+	scoped := slices.Contains(prog.IngressNetdevs, iifname)
+	for _, scope := range prog.IngressVRFScopes {
+		if scope.Master == iifname && slices.Contains(scope.Slaves, sdifname) {
+			scoped = true
+			break
+		}
+	}
+	if !scoped {
+		t.Fatalf("packet scope (iifname %q, sdifname %q) not in program scope: direct=%v vrf=%+v",
+			iifname, sdifname, prog.IngressNetdevs, prog.IngressVRFScopes)
 	}
 	addr, err := netip.ParseAddr(src)
 	if err != nil {
@@ -89,22 +99,24 @@ func vrf11573Verdict(t *testing.T, prog JunosHostDenyProgram, iifname, src strin
 	return false
 }
 
-// TestJunosHostVRFMemberDenyScopedByMaster11573 is the DROP half: the
-// VRF-member deny is scoped by vrf-tenant (the LOCAL_IN-visible master), the
-// denied source matches the emitted DROP, and the warning is suppressed.
-func TestJunosHostVRFMemberDenyScopedByMaster11573(t *testing.T) {
+// TestJunosHostVRFMemberDenyScopedBySdifname11573 proves the fine deny's
+// master+member scope and the warning is suppressed for complete coverage.
+func TestJunosHostVRFMemberDenyScopedBySdifname11573(t *testing.T) {
 	cfg := vrf11573Config()
 	cov := junosHostZoneNetdevCoverageMap(cfg)["untrust"]
-	if !slices.Equal(cov.Scoped, []string{"vrf-tenant"}) || len(cov.Unscopable) != 0 {
-		t.Fatalf("VRF-member coverage = %+v, want Scoped=[vrf-tenant] with no gap", cov)
+	if len(cov.Scoped) != 0 || len(cov.Unscopable) != 0 {
+		t.Fatalf("VRF-member coverage = %+v, want no direct scope or coverage gap", cov)
 	}
+	const slave = "ge-0-0-1"
+	requireSingleVRFScope11573(t, cov.VRFScopes, "vrf-tenant", slave)
 	prog := vrf11573Program(t, cfg, "untrust")
 	if !prog.Representable {
 		t.Fatalf("VRF-member program must be representable: %+v", prog)
 	}
-	if !slices.Equal(prog.IngressNetdevs, []string{"vrf-tenant"}) {
-		t.Fatalf("program scope = %v, want [vrf-tenant] — the iifname set is the mechanism", prog.IngressNetdevs)
+	if len(prog.IngressNetdevs) != 0 {
+		t.Fatalf("VRF master cannot be a broad direct scope: %v", prog.IngressNetdevs)
 	}
+	requireSingleVRFScope11573(t, prog.IngressVRFScopes, "vrf-tenant", slave)
 	drops := 0
 	for _, r := range prog.RulesV4 {
 		if r.Verdict == JunosHostDrop && slices.Contains(r.Src, "10.0.0.0/8") {
@@ -114,8 +126,8 @@ func TestJunosHostVRFMemberDenyScopedByMaster11573(t *testing.T) {
 	if drops == 0 {
 		t.Fatalf("no emitted v4 DROP covers denied source 10.0.0.0/8: %+v", prog.RulesV4)
 	}
-	if !vrf11573Verdict(t, prog, "vrf-tenant", "10.1.2.3") {
-		t.Fatalf("denied-source packet (iif vrf-tenant, src 10.1.2.3) must DROP")
+	if !vrf11573Verdict(t, prog, "vrf-tenant", "ge-0-0-1", "10.1.2.3") {
+		t.Fatalf("denied-source packet (iif vrf-tenant, sdif ge-0-0-1, src 10.1.2.3) must DROP")
 	}
 	key := JunosHostZonePairPolicyKey("untrust", "block-vrf")
 	if !BuildJunosHostDenyProjection(cfg).RenderedPolicyKeys[key] {
@@ -132,8 +144,8 @@ func TestJunosHostVRFMemberDenyScopedByMaster11573(t *testing.T) {
 func TestJunosHostVRFMemberPermitSourceAllowed11573(t *testing.T) {
 	cfg := vrf11573Config()
 	prog := vrf11573Program(t, cfg, "untrust")
-	if vrf11573Verdict(t, prog, "vrf-tenant", "192.0.2.7") {
-		t.Fatalf("permitted-source packet (iif vrf-tenant, src 192.0.2.7) must NOT drop")
+	if vrf11573Verdict(t, prog, "vrf-tenant", "ge-0-0-1", "192.0.2.7") {
+		t.Fatalf("permitted-source packet (iif vrf-tenant, sdif ge-0-0-1, src 192.0.2.7) must NOT drop")
 	}
 	svc, _, _ := cfg.Security.Zones["untrust"].InterfaceHostInboundEffective("ge-0/0/1.0")
 	if !slices.Contains(svc, "ssh") {
@@ -141,11 +153,11 @@ func TestJunosHostVRFMemberPermitSourceAllowed11573(t *testing.T) {
 	}
 }
 
-// TestJunosHostSharedVRFMasterStaysUnscopable11573 pins ownership boundaries:
-// a master claimed by multiple zones or by an unzoned co-member cannot scope a
-// zone's deny without over-firing. Distinct VRFs keep distinct master scopes.
-func TestJunosHostSharedVRFMasterStaysUnscopable11573(t *testing.T) {
-	t.Run("shared master is ambiguous for both zones", func(t *testing.T) {
+// TestJunosHostSharedVRFMasterScopedByMembers11573 pins ownership boundaries:
+// each zone scopes only its own member of a shared LOCAL_IN master. Unowned
+// co-members likewise remain outside the zoned member scope.
+func TestJunosHostSharedVRFMasterScopedByMembers11573(t *testing.T) {
+	t.Run("shared master scopes each zone to its own member", func(t *testing.T) {
 		cfg := jhTestConfig()
 		cfg.Interfaces.Interfaces["ge-0/0/2"] = &InterfaceConfig{
 			Name: "ge-0/0/2", Units: map[int]*InterfaceUnit{0: {Number: 0, Addresses: []string{"10.0.3.10/24"}}},
@@ -164,22 +176,20 @@ func TestJunosHostSharedVRFMasterStaysUnscopable11573(t *testing.T) {
 			{FromZone: "trust", ToZone: "junos-host",
 				Policies: []*Policy{jhDeny("block-vrf", []string{"bad-net"}, []string{"any"})}},
 		}
-		for _, zone := range []string{"untrust", "trust"} {
+		projection := BuildJunosHostDenyProjection(cfg)
+		for zone, slave := range map[string]string{"untrust": "ge-0-0-1", "trust": "ge-0-0-2"} {
 			cov := junosHostZoneNetdevCoverageMap(cfg)[zone]
-			if slices.Contains(cov.Scoped, "vrf-tenant") {
-				t.Fatalf("%s: shared master must not scope: %+v", zone, cov)
+			if len(cov.Scoped) != 0 || len(cov.Unscopable) != 0 {
+				t.Fatalf("%s: shared master must use member scope, got %+v", zone, cov)
 			}
-			if len(cov.Unscopable) != 1 || cov.Unscopable[0].Netdev != "vrf-tenant" ||
-				cov.Unscopable[0].Reason != junosHostNetdevAmbiguous {
-				t.Fatalf("%s: want one ambiguous gap on vrf-tenant, got %+v", zone, cov)
-			}
+			requireSingleVRFScope11573(t, cov.VRFScopes, "vrf-tenant", slave)
 			key := JunosHostZonePairPolicyKey(zone, "block-vrf")
-			if BuildJunosHostDenyProjection(cfg).RenderedPolicyKeys[key] {
-				t.Fatalf("%s: ambiguous-master deny must keep its warning", zone)
+			if !projection.RenderedPolicyKeys[key] {
+				t.Fatalf("%s: exact member scope must suppress its deny warning", zone)
 			}
 		}
 	})
-	t.Run("distinct VRFs keep distinct master scopes", func(t *testing.T) {
+	t.Run("distinct VRFs keep distinct member scopes", func(t *testing.T) {
 		cfg := jhTestConfig()
 		cfg.Interfaces.Interfaces["ge-0/0/2"] = &InterfaceConfig{
 			Name: "ge-0/0/2", Units: map[int]*InterfaceUnit{0: {Number: 0, Addresses: []string{"10.0.3.10/24"}}},
@@ -192,28 +202,32 @@ func TestJunosHostSharedVRFMasterStaysUnscopable11573(t *testing.T) {
 			{Name: "tenant-a", InstanceType: "virtual-router", Interfaces: []string{"ge-0/0/1.0"}},
 			{Name: "tenant-b", InstanceType: "virtual-router", Interfaces: []string{"ge-0/0/2.0"}},
 		}
-		for zone, want := range map[string]string{"untrust": "vrf-tenant-a", "trust": "vrf-tenant-b"} {
+		for zone, want := range map[string]HostInboundVRFIngressScope{
+			"untrust": {Master: "vrf-tenant-a", Slaves: []string{"ge-0-0-1"}},
+			"trust":   {Master: "vrf-tenant-b", Slaves: []string{"ge-0-0-2"}},
+		} {
 			cov := junosHostZoneNetdevCoverageMap(cfg)[zone]
-			if !slices.Equal(cov.Scoped, []string{want}) || len(cov.Unscopable) != 0 {
-				t.Fatalf("%s: coverage = %+v, want Scoped=[%s] with no gap", zone, cov, want)
+			if len(cov.Scoped) != 0 || len(cov.Unscopable) != 0 ||
+				len(cov.VRFScopes) != 1 || cov.VRFScopes[0].Master != want.Master ||
+				!slices.Equal(cov.VRFScopes[0].Slaves, want.Slaves) {
+				t.Fatalf("%s: coverage = %+v, want VRF scope %+v with no gap", zone, cov, want)
 			}
 		}
 	})
-	t.Run("unowned VRF co-member keeps master unscopable", func(t *testing.T) {
+	t.Run("unowned VRF co-member remains outside member scope", func(t *testing.T) {
 		cfg := vrf11573Config()
 		cfg.Interfaces.Interfaces["ge-0/0/2"] = &InterfaceConfig{
 			Name: "ge-0/0/2", Units: map[int]*InterfaceUnit{0: {Number: 0, Addresses: []string{"10.0.3.10/24"}}},
 		}
 		cfg.RoutingInstances[0].Interfaces = append(cfg.RoutingInstances[0].Interfaces, "ge-0/0/2.0")
 		cov := junosHostZoneNetdevCoverageMap(cfg)["untrust"]
-		if len(cov.Scoped) != 0 || len(cov.Unscopable) != 1 ||
-			cov.Unscopable[0].Netdev != "vrf-tenant" ||
-			cov.Unscopable[0].Reason != junosHostNetdevAmbiguous {
-			t.Fatalf("unowned VRF member shares LOCAL_IN master, so the zone's deny must remain unscopable: %+v", cov)
+		if len(cov.Scoped) != 0 || len(cov.Unscopable) != 0 {
+			t.Fatalf("unowned VRF member must not make the zone-owned slave unscopable: %+v", cov)
 		}
+		requireSingleVRFScope11573(t, cov.VRFScopes, "vrf-tenant", "ge-0-0-1")
 		key := JunosHostZonePairPolicyKey("untrust", "block-vrf")
-		if BuildJunosHostDenyProjection(cfg).RenderedPolicyKeys[key] {
-			t.Fatalf("deny on a master shared with unzoned ingress must keep its warning")
+		if !BuildJunosHostDenyProjection(cfg).RenderedPolicyKeys[key] {
+			t.Fatalf("deny scoped to the owned VRF member must suppress its warning")
 		}
 	})
 }
@@ -244,26 +258,25 @@ func stanza11573Config() *Config {
 	return cfg
 }
 
-// TestJunosHostStanzaOwnedTunnelDenyScopedByMaster11573 pins the #11310
-// overlap: a tunnel with an explicit routing-instance stanza is bound to that
-// VRF by the tunnel manager (BindInterfaceToVRF in pkg/routing/tunnel.go), not
-// by the RI interface-list walk, so LOCAL_IN reports the stanza VRF master.
-// The fine DENY must scope to it; leaving the tunnel raw-scoped would match
-// nothing at LOCAL_IN while suppressing the #4168 warning.
-func TestJunosHostStanzaOwnedTunnelDenyScopedByMaster11573(t *testing.T) {
-	t.Run("stanza-owned tunnel scoped by stanza master", func(t *testing.T) {
+// TestJunosHostStanzaOwnedTunnelDenyScopedBySdifname11573 pins the #11310
+// overlap: a stanza-owned VRF tunnel's deny uses the master/member pair.
+func TestJunosHostStanzaOwnedTunnelDenyScopedBySdifname11573(t *testing.T) {
+	t.Run("stanza-owned tunnel scoped by stanza master and member", func(t *testing.T) {
 		cfg := stanza11573Config()
 		cov := junosHostZoneNetdevCoverageMap(cfg)["untrust"]
-		if !slices.Equal(cov.Scoped, []string{"vrf-tenant"}) || len(cov.Unscopable) != 0 {
-			t.Fatalf("stanza-owned tunnel coverage = %+v, want Scoped=[vrf-tenant] with no gap", cov)
+		if len(cov.Scoped) != 0 || len(cov.Unscopable) != 0 {
+			t.Fatalf("stanza-owned tunnel coverage = %+v, want no direct scope or gap", cov)
 		}
+		const slave = "gr-0-0-0"
+		requireSingleVRFScope11573(t, cov.VRFScopes, "vrf-tenant", slave)
 		prog := vrf11573Program(t, cfg, "untrust")
 		if !prog.Representable {
 			t.Fatalf("stanza-owned tunnel program must be representable: %+v", prog)
 		}
-		if !slices.Equal(prog.IngressNetdevs, []string{"vrf-tenant"}) {
-			t.Fatalf("program scope = %v, want [vrf-tenant] — the iifname set is the mechanism", prog.IngressNetdevs)
+		if len(prog.IngressNetdevs) != 0 {
+			t.Fatalf("VRF tunnel master cannot be a broad direct scope: %v", prog.IngressNetdevs)
 		}
+		requireSingleVRFScope11573(t, prog.IngressVRFScopes, "vrf-tenant", slave)
 		drops := 0
 		for _, r := range prog.RulesV4 {
 			if r.Verdict == JunosHostDrop && slices.Contains(r.Src, "10.0.0.0/8") {
@@ -273,11 +286,11 @@ func TestJunosHostStanzaOwnedTunnelDenyScopedByMaster11573(t *testing.T) {
 		if drops == 0 {
 			t.Fatalf("no emitted v4 DROP covers denied source 10.0.0.0/8: %+v", prog.RulesV4)
 		}
-		if !vrf11573Verdict(t, prog, "vrf-tenant", "10.1.2.3") {
-			t.Fatalf("denied-source packet (iif vrf-tenant, src 10.1.2.3) must DROP")
+		if !vrf11573Verdict(t, prog, "vrf-tenant", slave, "10.1.2.3") {
+			t.Fatalf("denied-source packet (iif vrf-tenant, sdif %s, src 10.1.2.3) must DROP", slave)
 		}
-		if vrf11573Verdict(t, prog, "vrf-tenant", "192.0.2.7") {
-			t.Fatalf("permitted-source packet (iif vrf-tenant, src 192.0.2.7) must NOT drop")
+		if vrf11573Verdict(t, prog, "vrf-tenant", slave, "192.0.2.7") {
+			t.Fatalf("permitted-source packet (iif vrf-tenant, sdif %s, src 192.0.2.7) must NOT drop", slave)
 		}
 		key := JunosHostZonePairPolicyKey("untrust", "block-tunnel")
 		if !BuildJunosHostDenyProjection(cfg).RenderedPolicyKeys[key] {

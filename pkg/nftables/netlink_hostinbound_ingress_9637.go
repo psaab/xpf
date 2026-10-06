@@ -28,10 +28,28 @@ func hostInboundZoneIngressDestinations(views []HostInboundZoneView) (v4, v6 []s
 	return hostInboundIngressDestinations(views, nil, nil)
 }
 
+func hostInboundDirectIngressNetdevs(v HostInboundZoneView) []string {
+	if len(v.IngressVRFScopes) == 0 {
+		return v.IngressNetdevs
+	}
+	vrfMasters := make(map[string]bool, len(v.IngressVRFScopes))
+	for _, scope := range v.IngressVRFScopes {
+		vrfMasters[scope.Master] = true
+	}
+	direct := make([]string, 0, len(v.IngressNetdevs))
+	for _, netdev := range v.IngressNetdevs {
+		if !vrfMasters[netdev] {
+			direct = append(direct, netdev)
+		}
+	}
+	return direct
+}
+
 // hostInboundEmitsIngressDrop mirrors the oracle's predicate: the ingress-zone
 // rules for a family end in a catch-all drop.
 func hostInboundEmitsIngressDrop(v HostInboundZoneView, dests []string) bool {
-	return len(v.IngressNetdevs) > 0 && hostInboundEmitsDrop(v, dests)
+	return (len(hostInboundDirectIngressNetdevs(v)) > 0 || len(v.IngressVRFScopes) > 0) &&
+		hostInboundEmitsDrop(v, dests)
 }
 
 func hostInboundWGGuardEmits(addrs []string, listenPorts []uint16) bool {
@@ -88,21 +106,75 @@ func hostInboundWGZoneAddresses(views []HostInboundZoneView, f nlFamily) (zones 
 	return zones, addresses, ambiguous
 }
 
-func hostInboundWGZoneIngress(views []HostInboundZoneView) map[string][]string {
-	ingress := make(map[string][]string)
-	seen := make(map[string]map[string]bool)
+// HostInboundWGVRFIngressScope is one master and its admitted WG listener members.
+type HostInboundWGVRFIngressScope struct {
+	Master string
+	Slaves []string
+}
+
+// HostInboundWGIngress carries the direct and member-scoped ingress admitted
+// for a zone's owner-address WireGuard listener.
+type HostInboundWGIngress struct {
+	Direct []string
+	VRF    []HostInboundWGVRFIngressScope
+}
+
+// HostInboundWGIngressByZone coalesces ingress scopes across a zone's views.
+// LOCAL_IN's master-only name is paired with its exact member set for VRF input.
+func HostInboundWGIngressByZone(views []HostInboundZoneView) map[string]HostInboundWGIngress {
+	out := make(map[string]HostInboundWGIngress)
+	seenDirect := make(map[string]map[string]bool)
 	for _, view := range views {
-		if seen[view.Zone] == nil {
-			seen[view.Zone] = make(map[string]bool)
-		}
-		for _, device := range view.IngressNetdevs {
-			if !seen[view.Zone][device] {
-				ingress[view.Zone] = append(ingress[view.Zone], device)
-				seen[view.Zone][device] = true
+		scope := out[view.Zone]
+		for _, device := range hostInboundDirectIngressNetdevs(view) {
+			if seenDirect[view.Zone] == nil {
+				seenDirect[view.Zone] = make(map[string]bool)
+			}
+			if !seenDirect[view.Zone][device] {
+				scope.Direct = append(scope.Direct, device)
+				seenDirect[view.Zone][device] = true
 			}
 		}
+		for _, vrf := range view.IngressVRFScopes {
+			if vrf.Master == "" || len(vrf.Slaves) == 0 {
+				continue
+			}
+			index := -1
+			for i := range scope.VRF {
+				if scope.VRF[i].Master == vrf.Master {
+					index = i
+					break
+				}
+			}
+			if index < 0 {
+				scope.VRF = append(scope.VRF, HostInboundWGVRFIngressScope{Master: vrf.Master})
+				index = len(scope.VRF) - 1
+			}
+			for _, slave := range vrf.Slaves {
+				found := false
+				for _, existing := range scope.VRF[index].Slaves {
+					if existing == slave {
+						found = true
+						break
+					}
+				}
+				if !found {
+					scope.VRF[index].Slaves = append(scope.VRF[index].Slaves, slave)
+				}
+			}
+		}
+		out[view.Zone] = scope
 	}
-	return ingress
+	return out
+}
+
+// IIFNames returns every LOCAL_IN master/direct netdev in this ingress scope.
+func (ingress HostInboundWGIngress) IIFNames() []string {
+	names := append([]string(nil), ingress.Direct...)
+	for _, scope := range ingress.VRF {
+		names = append(names, scope.Master)
+	}
+	return names
 }
 
 func hostInboundWGIntersectPorts(ports, listenPorts []uint16) []uint16 {
@@ -143,11 +215,11 @@ func emitHostInboundWireGuardMismatchDropsNetlink(p *nlPlan, views []HostInbound
 		return
 	}
 	zones, addresses, ambiguous := hostInboundWGZoneAddresses(views, f)
-	ingress := hostInboundWGZoneIngress(views)
+	ingress := HostInboundWGIngressByZone(views)
 	for _, zone := range zones {
 		allowed := hostInboundWGIntersectPorts(zonePorts[zone], listenPorts)
 		cn := HostInboundDenyCounterName(zone, familyToken(f))
-		if len(allowed) == 0 || len(ingress[zone]) == 0 {
+		if len(allowed) == 0 || len(ingress[zone].IIFNames()) == 0 {
 			p.rule().daddr(f, addresses[zone], false).
 				l4Port(protoUDP, "dport", portsFromUint16(listenPorts), false).
 				counterRef(cn).emit(verdictDrop()...)
@@ -158,9 +230,14 @@ func emitHostInboundWireGuardMismatchDropsNetlink(p *nlPlan, views []HostInbound
 				l4Port(protoUDP, "dport", portsFromUint16(disallowed), false).
 				counterRef(cn).emit(verdictDrop()...)
 		}
-		p.rule().iifnameExcept(ingress[zone]).daddr(f, addresses[zone], false).
+		p.rule().iifnameExcept(ingress[zone].IIFNames()).daddr(f, addresses[zone], false).
 			l4Port(protoUDP, "dport", portsFromUint16(allowed), false).
 			counterRef(cn).emit(verdictDrop()...)
+		for _, vrf := range ingress[zone].VRF {
+			p.rule().iifname([]string{vrf.Master}).sdifnameExcept(vrf.Slaves).daddr(f, addresses[zone], false).
+				l4Port(protoUDP, "dport", portsFromUint16(allowed), false).
+				counterRef(cn).emit(verdictDrop()...)
+		}
 	}
 	sentinel := HostInboundDenyCounterName(unzonedHostInboundZoneLabel, familyToken(f))
 	if len(ambiguous) > 0 {
@@ -182,15 +259,27 @@ func emitHostInboundWireGuardIngressNetlink(p *nlPlan, views []HostInboundZoneVi
 		return
 	}
 	zones, addresses, _ := hostInboundWGZoneAddresses(views, f)
-	ingress := hostInboundWGZoneIngress(views)
+	ingress := HostInboundWGIngressByZone(views)
 	for _, zone := range zones {
 		ports := hostInboundWGIntersectPorts(zonePorts[zone], listenPorts)
-		if len(ports) == 0 || len(ingress[zone]) == 0 || len(addresses[zone]) == 0 {
+		if len(ports) == 0 || len(addresses[zone]) == 0 {
 			continue
 		}
-		p.rule().iifname(ingress[zone]).daddr(f, addresses[zone], false).
-			l4Port(protoUDP, "dport", portsFromUint16(ports), false).
-			emit(verdictAccept()...)
+		emitHostInboundWGIngressAcceptNetlink(p, ingress[zone], f, addresses[zone], ports)
+	}
+}
+
+func emitHostInboundWGIngressAcceptNetlink(p *nlPlan, ingress HostInboundWGIngress, f nlFamily, addresses []string, ports []uint16) {
+	if len(addresses) == 0 || len(ports) == 0 {
+		return
+	}
+	if len(ingress.Direct) > 0 {
+		p.rule().iifname(ingress.Direct).daddr(f, addresses, false).
+			l4Port(protoUDP, "dport", portsFromUint16(ports), false).emit(verdictAccept()...)
+	}
+	for _, vrf := range ingress.VRF {
+		p.rule().iifname([]string{vrf.Master}).sdifname(vrf.Slaves).daddr(f, addresses, false).
+			l4Port(protoUDP, "dport", portsFromUint16(ports), false).emit(verdictAccept()...)
 	}
 }
 
@@ -217,10 +306,26 @@ func hostInboundEmitsUnzonedIngressDrop(netdevs, dests []string) bool {
 // emitHostInboundZoneIngressNetlink mirrors the daemon oracle: normal view
 // matches are scoped to ingress netdevs and every zone-owned destination.
 func emitHostInboundZoneIngressNetlink(p *nlPlan, v HostInboundZoneView, f nlFamily, dests []string) {
-	if len(v.IngressNetdevs) == 0 || len(dests) == 0 {
+	if len(dests) == 0 {
 		return
 	}
-	scoped := func() *ruleAsm { return p.rule().iifname(v.IngressNetdevs).daddr(f, dests, false) }
+	direct := hostInboundDirectIngressNetdevs(v)
+	if len(direct) > 0 {
+		emitHostInboundZoneIngressScopeNetlink(p, v, f, func() *ruleAsm {
+			return p.rule().iifname(direct).daddr(f, dests, false)
+		})
+	}
+	for _, scope := range v.IngressVRFScopes {
+		if scope.Master == "" || len(scope.Slaves) == 0 {
+			continue
+		}
+		emitHostInboundZoneIngressScopeNetlink(p, v, f, func() *ruleAsm {
+			return p.rule().iifname([]string{scope.Master}).sdifname(scope.Slaves).daddr(f, dests, false)
+		})
+	}
+}
+
+func emitHostInboundZoneIngressScopeNetlink(p *nlPlan, v HostInboundZoneView, f nlFamily, scoped func() *ruleAsm) {
 	if hostInboundAllowsAll(v) {
 		scoped().emit(verdictAccept()...)
 		return

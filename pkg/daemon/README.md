@@ -3816,12 +3816,17 @@ never lock an operator out of a remote box it manages.
   marks that zero non-authoritative rather than publishing it (#5719). Adding a
   named counter to the fence would silently re-certify the zero.
 
-  **Ambiguous VRF ingress (#11331):** when one `vrf-<ri>` netdev is claimed by
-  multiple host-inbound views, the kernel applies each destination owner's
-  service rights on that netdev before a counted fail-closed catch-all. The
-  unmatched drop shares the reserved `junos-host` counter with unzoned drops
-  because neither has a uniquely attributable source zone. The daemon emits one
-  WARN on entry and one INFO on recovery; see `docs/log/10431.md`.
+  **VRF ingress ownership (#11331/#12034):** LOCAL_IN reports an enslaved
+  packet's `iifname` as its `vrf-<ri>` master; `meta sdifname` recovers the
+  member netdev. Coarse host-inbound service rights and fine `junos-host`
+  source denies therefore pair the master with each zone-owned member, so
+  sharing a VRF does not broaden one zone's policy to its co-members.
+  WireGuard outer-source owner-zone admits use the same member pairs in the
+  normal filter and cold-boot/gap fences; mismatches drop before broad replies.
+  Ambiguous non-VRF ingress still uses destination-owner service rights before a
+  fail-closed catch-all; its unmatched drop shares the reserved `junos-host`
+  counter with unzoned drops. The daemon emits one WARN on entry and one INFO
+  on recovery; see `docs/log/10431.md`.
 
 ## RPM + ip-monitoring wiring (#1827)
 

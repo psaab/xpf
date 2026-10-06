@@ -458,12 +458,29 @@ func validateJunosHostDirectDeliveryWarnings(cfg *Config) []string {
 		for _, nd := range prog.IngressNetdevs {
 			ingress[nd] = true
 		}
+		ingressVRF := make(map[string]map[string]bool, len(prog.IngressVRFScopes))
+		for _, scope := range prog.IngressVRFScopes {
+			if ingressVRF[scope.Master] == nil {
+				ingressVRF[scope.Master] = make(map[string]bool, len(scope.Slaves))
+			}
+			for _, slave := range scope.Slaves {
+				ingressVRF[scope.Master][slave] = true
+			}
+		}
 		ikeNetdevs := make([]string, 0, len(prog.IKEExemptNetdevs))
 		for _, nd := range prog.IKEExemptNetdevs {
 			if ingress[nd] {
 				ikeNetdevs = append(ikeNetdevs, nd)
 			}
 		}
+		for _, scope := range prog.IKEExemptVRFScopes {
+			for _, slave := range scope.Slaves {
+				if ingressVRF[scope.Master][slave] {
+					ikeNetdevs = append(ikeNetdevs, slave)
+				}
+			}
+		}
+		sort.Strings(ikeNetdevs)
 		if len(ikeNetdevs) == 0 {
 			continue
 		}

@@ -282,43 +282,56 @@ func emitHostInboundMulticastGuardsNetlink(p *nlPlan, views []HostInboundZoneVie
 		if len(unzonedIngressVRFSlaves) > 0 {
 			p.rule().sdifname(unzonedIngressVRFSlaves).daddr(f, groups, false).emit(verdictDrop()...)
 		}
-		if len(ambiguous) > 0 {
-			p.rule().iifname(ambiguous).daddr(f, groups, false).emit(verdictDrop()...)
-		}
 		if len(unzonedIngressNetdevs) > 0 {
 			p.rule().iifname(unzonedIngressNetdevs).daddr(f, groups, false).emit(verdictDrop()...)
 		}
 		for _, v := range views {
-			if len(v.IngressNetdevs) == 0 {
-				continue
+			direct := hostInboundDirectIngressNetdevs(v)
+			if len(direct) > 0 {
+				emitHostInboundMulticastScopeNetlink(p, v, f, groups, func(addrs []string) *ruleAsm {
+					return p.rule().iifname(direct).daddr(f, addrs, false)
+				})
 			}
-			if hostInboundAllowsAll(v) {
-				p.rule().iifname(v.IngressNetdevs).daddr(f, groups, false).emit(verdictAccept()...)
-			} else {
-				multicastRules := v.MulticastRules
-				if len(multicastRules) == 0 {
-					multicastRules = config.HostInboundMulticastRules(v.Protocols)
+			for _, scope := range v.IngressVRFScopes {
+				if scope.Master == "" || len(scope.Slaves) == 0 {
+					continue
 				}
-				for _, multicastRule := range multicastRules {
-					if multicastRule.Family != family {
-						continue
-					}
-					for _, frag := range renderHIMatchFragments(config.HostInboundProtocolMatch(multicastRule.Protocol, family), f) {
-						a := p.rule().iifname(v.IngressNetdevs).daddr(f, []string{multicastRule.Group}, false)
-						frag.build(a)
-						a.emit(verdictAccept()...)
-					}
-				}
+				emitHostInboundMulticastScopeNetlink(p, v, f, groups, func(addrs []string) *ruleAsm {
+					return p.rule().iifname([]string{scope.Master}).sdifname(scope.Slaves).daddr(f, addrs, false)
+				})
 			}
-			p.rule().iifname(v.IngressNetdevs).daddr(f, groups, false).emit(verdictDrop()...)
+		}
+		if len(ambiguous) > 0 {
+			p.rule().iifname(ambiguous).daddr(f, groups, false).emit(verdictDrop()...)
 		}
 	}
 }
 
+func emitHostInboundMulticastScopeNetlink(p *nlPlan, v HostInboundZoneView, f nlFamily, groups []string, scoped func([]string) *ruleAsm) {
+	if hostInboundAllowsAll(v) {
+		scoped(groups).emit(verdictAccept()...)
+	} else {
+		family := familyToken(f)
+		multicastRules := v.MulticastRules
+		if len(multicastRules) == 0 {
+			multicastRules = config.HostInboundMulticastRules(v.Protocols)
+		}
+		for _, multicastRule := range multicastRules {
+			if multicastRule.Family != family {
+				continue
+			}
+			for _, frag := range renderHIMatchFragments(config.HostInboundProtocolMatch(multicastRule.Protocol, family), f) {
+				a := scoped([]string{multicastRule.Group})
+				frag.build(a)
+				a.emit(verdictAccept()...)
+			}
+		}
+	}
+	scoped(groups).emit(verdictDrop()...)
+}
+
 // emitHostInboundMulticastFenceDropsNetlink keeps the host-inbound cold-boot
-// fence fail-closed for every catalog group. The additive gap fence deliberately
-// does not call this: its later base chain must not override valid grants in the
-// retained main table.
+// fence fail-closed for every catalog group.
 func emitHostInboundMulticastFenceDropsNetlink(p *nlPlan, views []HostInboundZoneView, unzonedIngressNetdevs, unzonedIngressVRFSlaves []string) {
 	ambiguous := hostInboundAmbiguousIngressNetdevs(views)
 	for _, f := range []nlFamily{famV4, famV6} {
@@ -336,8 +349,15 @@ func emitHostInboundMulticastFenceDropsNetlink(p *nlPlan, views []HostInboundZon
 			p.rule().iifname(unzonedIngressNetdevs).daddr(f, groups, false).emit(verdictDrop()...)
 		}
 		for _, v := range views {
-			if len(v.IngressNetdevs) > 0 {
-				p.rule().iifname(v.IngressNetdevs).daddr(f, groups, false).emit(verdictDrop()...)
+			direct := hostInboundDirectIngressNetdevs(v)
+			if len(direct) > 0 {
+				p.rule().iifname(direct).daddr(f, groups, false).emit(verdictDrop()...)
+			}
+			for _, scope := range v.IngressVRFScopes {
+				if scope.Master != "" && len(scope.Slaves) > 0 {
+					p.rule().iifname([]string{scope.Master}).sdifname(scope.Slaves).
+						daddr(f, groups, false).emit(verdictDrop()...)
+				}
 			}
 		}
 	}
@@ -348,7 +368,7 @@ func emitHostInboundMulticastFenceDropsNetlink(p *nlPlan, views []HostInboundZon
 // admission, while permits return to the zone protocol gate.
 func emitJunosHostMulticastProgramJumpsNetlink(p *nlPlan, programs []JunosHostProgram) {
 	for i, prog := range programs {
-		if len(prog.IngressIfnames) == 0 {
+		if len(prog.IngressIfnames) == 0 && len(prog.IngressVRFScopes) == 0 {
 			continue
 		}
 		for _, f := range []nlFamily{famV4, famV6} {
@@ -356,8 +376,16 @@ func emitJunosHostMulticastProgramJumpsNetlink(p *nlPlan, programs []JunosHostPr
 			if len(groups) == 0 {
 				continue
 			}
-			p.rule().iifname(prog.IngressIfnames).daddr(f, groups, false).
-				emit(verdictJump(HostInboundJunosHostChainName(i, prog.Zone))...)
+			if len(prog.IngressIfnames) > 0 {
+				p.rule().iifname(prog.IngressIfnames).daddr(f, groups, false).
+					emit(verdictJump(HostInboundJunosHostChainName(i, prog.Zone))...)
+			}
+			for _, scope := range prog.IngressVRFScopes {
+				if scope.Master != "" && len(scope.Slaves) > 0 {
+					p.rule().iifname([]string{scope.Master}).sdifname(scope.Slaves).daddr(f, groups, false).
+						emit(verdictJump(HostInboundJunosHostChainName(i, prog.Zone))...)
+				}
+			}
 		}
 	}
 }
@@ -406,11 +434,28 @@ func emitJunosHostProgramJumpNetlink(p *nlPlan, index int, prog JunosHostProgram
 	// Ident shield KEPT (mirroring the oracle disposition): a terminal TCP RST
 	// still refuses the connection and cannot re-admit traffic.
 	if prog.HasApplicationAnyDeny && prog.CoarseIdentResets {
-		p.rule().iifname(prog.IdentResetNetdevs).
-			l4Port(protoTCP, "dport", []nlPort{{113, 113}}, false).
-			emit(rejectTCPReset()...)
+		if len(prog.IdentResetNetdevs) > 0 {
+			p.rule().iifname(prog.IdentResetNetdevs).
+				l4Port(protoTCP, "dport", []nlPort{{113, 113}}, false).
+				emit(rejectTCPReset()...)
+		}
+		for _, scope := range prog.IdentResetVRFScopes {
+			if scope.Master != "" && len(scope.Slaves) > 0 {
+				p.rule().iifname([]string{scope.Master}).sdifname(scope.Slaves).
+					l4Port(protoTCP, "dport", []nlPort{{113, 113}}, false).
+					emit(rejectTCPReset()...)
+			}
+		}
 	}
-	p.rule().iifname(prog.IngressIfnames).emit(verdictJump(HostInboundJunosHostChainName(index, prog.Zone))...)
+	if len(prog.IngressIfnames) > 0 {
+		p.rule().iifname(prog.IngressIfnames).emit(verdictJump(HostInboundJunosHostChainName(index, prog.Zone))...)
+	}
+	for _, scope := range prog.IngressVRFScopes {
+		if scope.Master != "" && len(scope.Slaves) > 0 {
+			p.rule().iifname([]string{scope.Master}).sdifname(scope.Slaves).
+				emit(verdictJump(HostInboundJunosHostChainName(index, prog.Zone))...)
+		}
+	}
 }
 
 // emitJunosHostProgramChainNetlink mirrors emitJunosHostProgramChain: the zone's
@@ -717,72 +762,83 @@ func u8ToInts(vals []uint8) []int {
 // program has run.
 func emitHostInboundScreenFloodNetlink(p *nlPlan, rules []HostInboundScreenFloodRule, repliesOnly bool) {
 	for _, screen := range rules {
-		base := func() *ruleAsm {
-			a := p.rule()
-			if repliesOnly {
-				a.ctEstablishedRelated().ctDirectionReply()
-			}
-			if len(screen.IngressNetdevs) > 0 {
-				a.iifname(screen.IngressNetdevs)
-				// Ingress names can carry both IP families; scope every
-				// family-specific source key and protocol matcher explicitly.
-				a.needNfproto(screenFloodFamily(screen))
-			} else {
-				a.daddr(screenFloodFamily(screen), screen.Addresses, false)
-			}
-			switch screen.Protocol {
-			case "udp":
-				a.needL4proto(uint8(unix.IPPROTO_UDP))
-			case "icmp":
-				a.needL4proto(uint8(unix.IPPROTO_ICMP))
-			case "icmpv6":
-				a.needL4proto(uint8(unix.IPPROTO_ICMPV6))
-			case "tcp-syn":
-				a.tcpFlags(0x02, 0x10)
-			default:
-				return nil
-			}
-			return a
-		}
-
+		var sourceSet, aggregateSet *expr.Dynset
 		if screen.SourceThreshold > 0 {
-			sourceSet := addHostInboundScreenFloodSet(p, screen, true)
-			if sourceSet == nil {
-				continue
+			sourceSet = addHostInboundScreenFloodSet(p, screen, true)
+		}
+		if screen.AggregateThreshold > 0 && p.err == nil {
+			aggregateSet = addHostInboundScreenFloodSet(p, screen, false)
+		}
+		emit := func(base func() *ruleAsm) {
+			if sourceSet != nil {
+				perSource := base()
+				if perSource != nil {
+					perSource.add(hostInboundScreenSourceKey(screen)).
+						add(sourceSet).
+						counterRef(HostInboundScreenFloodCounterName(screen, true))
+					if screen.AlarmWithoutDrop {
+						perSource.add(hostInboundScreenFloodAlarm(screen, true)...)
+						perSource.emit()
+					} else {
+						perSource.emit(verdictDrop()...)
+					}
+				}
 			}
-			perSource := base()
-			if perSource == nil {
-				continue
-			}
-			perSource.add(hostInboundScreenSourceKey(screen)).
-				add(sourceSet).
-				counterRef(HostInboundScreenFloodCounterName(screen, true))
-			if screen.AlarmWithoutDrop {
-				perSource.add(hostInboundScreenFloodAlarm(screen, true)...)
-				perSource.emit()
-			} else {
-				perSource.emit(verdictDrop()...)
+			if aggregateSet != nil && p.err == nil {
+				aggregate := base()
+				if aggregate != nil {
+					aggregate.add(hostInboundScreenAggregateKey()).
+						add(aggregateSet).
+						counterRef(HostInboundScreenFloodCounterName(screen, false))
+					if screen.AlarmWithoutDrop {
+						aggregate.add(hostInboundScreenFloodAlarm(screen, false)...)
+						aggregate.emit()
+					} else {
+						aggregate.emit(verdictDrop()...)
+					}
+				}
 			}
 		}
-
-		if screen.AggregateThreshold > 0 && p.err == nil {
-			globalSet := addHostInboundScreenFloodSet(p, screen, false)
-			if globalSet == nil {
+		makeBase := func(scope func(*ruleAsm)) func() *ruleAsm {
+			return func() *ruleAsm {
+				a := p.rule()
+				if repliesOnly {
+					a.ctEstablishedRelated().ctDirectionReply()
+				}
+				scope(a)
+				switch screen.Protocol {
+				case "udp":
+					a.needL4proto(uint8(unix.IPPROTO_UDP))
+				case "icmp":
+					a.needL4proto(uint8(unix.IPPROTO_ICMP))
+				case "icmpv6":
+					a.needL4proto(uint8(unix.IPPROTO_ICMPV6))
+				case "tcp-syn":
+					a.tcpFlags(0x02, 0x10)
+				default:
+					return nil
+				}
+				return a
+			}
+		}
+		if len(screen.IngressNetdevs) > 0 || len(screen.IngressVRFScopes) == 0 {
+			emit(makeBase(func(a *ruleAsm) {
+				if len(screen.IngressNetdevs) > 0 {
+					a.iifname(screen.IngressNetdevs)
+					a.needNfproto(screenFloodFamily(screen))
+				} else {
+					a.daddr(screenFloodFamily(screen), screen.Addresses, false)
+				}
+			}))
+		}
+		for _, scope := range screen.IngressVRFScopes {
+			if scope.Master == "" || len(scope.Slaves) == 0 {
 				continue
 			}
-			aggregate := base()
-			if aggregate == nil {
-				continue
-			}
-			aggregate.add(hostInboundScreenAggregateKey()).
-				add(globalSet).
-				counterRef(HostInboundScreenFloodCounterName(screen, false))
-			if screen.AlarmWithoutDrop {
-				aggregate.add(hostInboundScreenFloodAlarm(screen, false)...)
-				aggregate.emit()
-			} else {
-				aggregate.emit(verdictDrop()...)
-			}
+			emit(makeBase(func(a *ruleAsm) {
+				a.iifname([]string{scope.Master}).sdifname(scope.Slaves)
+				a.needNfproto(screenFloodFamily(screen))
+			}))
 		}
 	}
 }
