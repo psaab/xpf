@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // validatePolicyFromUnknownStrict11779 rejects routing-policy `from` leaves
@@ -20,27 +21,35 @@ func validatePolicyFromUnknownStrict11779(cfg *Config) error {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	var problems []string
 	for _, stmtName := range names {
 		stmt := cfg.PolicyOptions.PolicyStatements[stmtName]
 		if stmt == nil {
 			continue
+		}
+		if len(stmt.UnknownFrom) > 0 {
+			problems = append(problems, fmt.Sprintf(
+				"policy-options policy-statement %q: policy-level `from %s` is not enforced by the routing-policy compiler (#11779)",
+				stmtName, strings.Join(stmt.UnknownFrom, ", ")))
 		}
 		for _, term := range stmt.Terms {
 			if term == nil {
 				continue
 			}
 			if term.invalidFromSyntax11779 != "" {
-				return fmt.Errorf(
+				problems = append(problems, fmt.Sprintf(
 					"policy-options policy-statement %q term %q: %s (#11779)",
-					stmtName, term.Name, term.invalidFromSyntax11779)
+					stmtName, term.Name, term.invalidFromSyntax11779))
 			}
-			if len(term.UnknownFrom) == 0 {
-				continue
+			if len(term.UnknownFrom) > 0 {
+				problems = append(problems, fmt.Sprintf(
+					"policy-options policy-statement %q term %q: `from %s` is not enforced by the routing-policy compiler (#11779); supported `from` types are protocol, prefix-list, route-filter, community, and as-path",
+					stmtName, term.Name, strings.Join(term.UnknownFrom, ", ")))
 			}
-			return fmt.Errorf(
-				"policy-options policy-statement %q term %q: `from %s` is not enforced by the routing-policy compiler (#11779); supported `from` types are protocol, prefix-list, route-filter, community, and as-path",
-				stmtName, term.Name, term.UnknownFrom[0])
 		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("%s", strings.Join(problems, "; "))
 	}
 	return nil
 }
@@ -57,8 +66,12 @@ func failClosedUnknownPolicyFrom11779(cfg *Config) {
 		if stmt == nil {
 			continue
 		}
+		if len(stmt.UnknownFrom) > 0 {
+			stmt.DefaultAction = "reject"
+		}
 		for _, term := range stmt.Terms {
-			if term != nil && (len(term.UnknownFrom) > 0 || term.invalidFromSyntax11779 != "") {
+			if term != nil && (len(stmt.UnknownFrom) > 0 ||
+				len(term.UnknownFrom) > 0 || term.invalidFromSyntax11779 != "") {
 				term.NextPolicy = false
 				term.Action = "reject"
 			}

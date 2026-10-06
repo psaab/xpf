@@ -303,12 +303,12 @@ func (t *ConfigTree) insertRelative(elementPath, refPath []string, after bool) e
 // The LATER command wins, which is what `set` means everywhere else here — the
 // single-value arm a few lines up replaces the node outright for the same
 // reason.
-func refreshDupKeysProvenance(n *Node, quoted, grouped []bool) {
+func refreshDupKeysProvenance(n *Node, quoted, grouped []bool, closed ...bool) {
 	if n == nil {
 		return
 	}
 	n.setKeysQuoted(quoted)
-	n.setKeysBracketed(grouped)
+	n.setKeysBracketed(grouped, closed...)
 }
 
 // widenKeyCountToGroupEnd extends a node's key slice path[from:end) so that no
@@ -422,7 +422,7 @@ func (t *ConfigTree) SetPathQuoted(path []string, quoted []bool) error {
 // is an error (#9899 F101), checked before any mutation. Nil is the pre-#6668
 // behaviour: every group is one node's arity and nothing is widened. It is
 // never a false "this was bare" claim — a nil mask asserts nothing.
-func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool) error {
+func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool, closed ...bool) error {
 	if len(path) == 0 {
 		return fmt.Errorf("empty path")
 	}
@@ -487,7 +487,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 				if !found {
 					newNode := &Node{Keys: append([]string(nil), nodeKeys...)}
 					newNode.setKeysQuoted(quotedRange(keyStart, i))
-					newNode.setKeysBracketed(groupedRange(keyStart, i))
+					newNode.setKeysBracketed(groupedRange(keyStart, i), closed...)
 					*current = append(*current, newNode)
 					current = &newNode.Children
 				}
@@ -499,7 +499,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 			remaining := path[i:]
 			for _, n := range *current {
 				if n.IsLeaf && keysEqual(n.Keys, remaining) {
-					refreshDupKeysProvenance(n, quotedRange(i, len(path)), groupedRange(i, len(path)))
+					refreshDupKeysProvenance(n, quotedRange(i, len(path)), groupedRange(i, len(path)), closed...)
 					return nil
 				}
 			}
@@ -508,7 +508,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 				IsLeaf: true,
 			}
 			leaf.setKeysQuoted(quotedRange(i, len(path)))
-			leaf.setKeysBracketed(groupedRange(i, len(path)))
+			leaf.setKeysBracketed(groupedRange(i, len(path)), closed...)
 			*current = append(*current, leaf)
 			return nil
 		}
@@ -526,7 +526,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 				IsLeaf: true,
 			}
 			leaf.setKeysQuoted(quotedRange(i, len(path)))
-			leaf.setKeysBracketed(groupedRange(i, len(path)))
+			leaf.setKeysBracketed(groupedRange(i, len(path)), closed...)
 			*current = append(*current, leaf)
 			return nil
 		}
@@ -580,7 +580,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 				for _, n := range *current {
 					if keysEqual(n.Keys, nodeKeys) {
 						if n.IsLeaf {
-							refreshDupKeysProvenance(n, quotedRange(keyStart, i), groupedRange(keyStart, i))
+							refreshDupKeysProvenance(n, quotedRange(keyStart, i), groupedRange(keyStart, i), closed...)
 						}
 						return nil
 					}
@@ -618,7 +618,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 					}
 					container := &Node{Keys: append([]string(nil), nodeKeys...)}
 					container.setKeysQuoted(quotedRange(keyStart, i))
-					container.setKeysBracketed(groupedRange(keyStart, i))
+					container.setKeysBracketed(groupedRange(keyStart, i), closed...)
 					*current = append(*current, container)
 					return nil
 				}
@@ -639,7 +639,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 								IsLeaf: true,
 							}
 							repl.setKeysQuoted(quotedRange(keyStart, i))
-							repl.setKeysBracketed(groupedRange(keyStart, i))
+							repl.setKeysBracketed(groupedRange(keyStart, i), closed...)
 							filtered = append(filtered, repl)
 							replaced = true
 						}
@@ -656,7 +656,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 				// Flag leaf (args == 0) or multi-value leaf: skip if exact duplicate.
 				for _, n := range *current {
 					if n.IsLeaf && keysEqual(n.Keys, nodeKeys) {
-						refreshDupKeysProvenance(n, quotedRange(keyStart, i), groupedRange(keyStart, i))
+						refreshDupKeysProvenance(n, quotedRange(keyStart, i), groupedRange(keyStart, i), closed...)
 						return nil
 					}
 				}
@@ -666,7 +666,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 				IsLeaf: true,
 			}
 			leaf.setKeysQuoted(quotedRange(keyStart, i))
-			leaf.setKeysBracketed(groupedRange(keyStart, i))
+			leaf.setKeysBracketed(groupedRange(keyStart, i), closed...)
 			*current = append(*current, leaf)
 			return nil
 		}
@@ -762,7 +762,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 				dup := false
 				for _, n := range *current {
 					if n.IsLeaf && keysEqual(n.Keys, nodeKeys) {
-						refreshDupKeysProvenance(n, quotedRange(keyStart, i), groupedRange(keyStart, i))
+						refreshDupKeysProvenance(n, quotedRange(keyStart, i), groupedRange(keyStart, i), closed...)
 						dup = true
 						break
 					}
@@ -773,7 +773,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 						IsLeaf: true,
 					}
 					listLeaf.setKeysQuoted(quotedRange(keyStart, i))
-					listLeaf.setKeysBracketed(groupedRange(keyStart, i))
+					listLeaf.setKeysBracketed(groupedRange(keyStart, i), closed...)
 					*current = append(*current, listLeaf)
 				}
 				if i >= len(path) {
@@ -840,7 +840,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 			dup := false
 			for _, n := range *current {
 				if n.IsLeaf && keysEqual(n.Keys, nodeKeys) {
-					refreshDupKeysProvenance(n, quotedRange(keyStart, i), groupedRange(keyStart, i))
+					refreshDupKeysProvenance(n, quotedRange(keyStart, i), groupedRange(keyStart, i), closed...)
 					dup = true
 					break
 				}
@@ -851,7 +851,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 					IsLeaf: true,
 				}
 				modLeaf.setKeysQuoted(quotedRange(keyStart, i))
-				modLeaf.setKeysBracketed(groupedRange(keyStart, i))
+				modLeaf.setKeysBracketed(groupedRange(keyStart, i), closed...)
 				*current = append(*current, modLeaf)
 			}
 			continue
@@ -872,7 +872,7 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool)
 				Keys: append([]string(nil), nodeKeys...),
 			}
 			newNode.setKeysQuoted(quotedRange(keyStart, i))
-			newNode.setKeysBracketed(groupedRange(keyStart, i))
+			newNode.setKeysBracketed(groupedRange(keyStart, i), closed...)
 			*current = append(*current, newNode)
 			current = &newNode.Children
 		}

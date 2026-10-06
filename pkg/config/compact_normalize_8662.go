@@ -182,6 +182,7 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 				// one statement, split by the pass whose job is to make them one.
 				quoted := keyMask8921(node.KeysQuoted, len(node.Keys))
 				bracketed := keyMask8921(node.KeysBracketed, len(node.Keys))
+				bracketedClosed := node.BracketedClosed
 				// #9635: built BEFORE the truncation below, and sliced to the
 				// same span as `tail`. Reading len(node.Keys) after the
 				// truncation would measure the container's identity instead of
@@ -212,7 +213,7 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 					node.Children = body
 				} else {
 					node.setKeysQuoted(maskSlice8921(quoted, 0, identity))
-					node.setKeysBracketed(maskSlice8921(bracketed, 0, identity))
+					node.setKeysBracketed(maskSlice8921(bracketed, 0, identity), bracketedClosed)
 					// splitPackedStatements8768 returns consecutive slices of
 					// tail, so each statement's mask starts where the previous
 					// statement's keys ended.
@@ -220,7 +221,7 @@ func normalizeCompactNodes(nodes []*Node, schema *schemaNode, inScope func(conta
 					for i, stmt := range stmts {
 						child := &Node{Keys: stmt, IsLeaf: true}
 						child.setKeysQuoted(maskSlice8921(quoted, off, off+len(stmt)))
-						child.setKeysBracketed(maskSlice8921(bracketed, off, off+len(stmt)))
+						child.setKeysBracketed(maskSlice8921(bracketed, off, off+len(stmt)), bracketedClosed)
 						off += len(stmt)
 						// The braced body belongs to the LAST packed statement --
 						// the deepest node the run names. Attaching it to the
@@ -494,7 +495,7 @@ func splitBracedPackedChildren8886(node *Node, container *schemaNode) int {
 		for _, st := range stmts {
 			stmt := &Node{Keys: append([]string(nil), st...), IsLeaf: true}
 			stmt.setKeysQuoted(maskSlice8921(quoted, off, off+len(st)))
-			stmt.setKeysBracketed(maskSlice8921(bracketed, off, off+len(st)))
+			stmt.setKeysBracketed(maskSlice8921(bracketed, off, off+len(st)), ch.BracketedClosed)
 			off += len(st)
 			out = append(out, stmt)
 		}

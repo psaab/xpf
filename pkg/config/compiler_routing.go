@@ -1045,11 +1045,13 @@ func compilePolicyOptions(node *Node, po *PolicyOptionsConfig) error {
 				// Handle both hierarchical children and flat inline keys.
 				// Flat: Keys=["term","t1","from","protocol","direct"] with no children
 				// Hierarchical: Keys=["term","t1"] with from/then children
+				// Handle hierarchical children and flat inline keys independently:
+				// Junos permits packed `term T from ... { then ...; }` nodes whose
+				// body and key tail both carry semantics.
 				if len(prop.Children) > 0 {
-					// Hierarchical form
 					parsePolicyTermChildren(term, prop.Children)
-				} else if len(prop.Keys) > 2 {
-					// Flat form: remaining keys after term name are key-value pairs.
+				}
+				if len(prop.Keys) > 2 {
 					var bracketed, quoted []bool
 					if len(prop.KeysBracketed) == len(prop.Keys) {
 						bracketed = prop.KeysBracketed[2:]
@@ -1057,8 +1059,10 @@ func compilePolicyOptions(node *Node, po *PolicyOptionsConfig) error {
 					if len(prop.KeysQuoted) == len(prop.Keys) {
 						quoted = prop.KeysQuoted[2:]
 					}
-					parsePolicyTermInlineKeys(term, prop.Keys[2:], bracketed, quoted)
+					parsePolicyTermInlineKeys(term, prop.Keys[2:], bracketed, quoted, prop.BracketedClosed)
 				}
+			case "from":
+				ps.UnknownFrom = append(ps.UnknownFrom, policyStatementUnknownFrom11779(prop)...)
 			case "then":
 				// Default action at the policy level. #8939: the only two
 				// leaves here are `accept` and `reject`, which are mutually
@@ -1086,6 +1090,15 @@ func compilePolicyOptions(node *Node, po *PolicyOptionsConfig) error {
 	}
 
 	return nil
+}
+func policyStatementUnknownFrom11779(node *Node) []string {
+	if node == nil {
+		return nil
+	}
+	if len(node.Keys) > 1 {
+		return []string{node.Keys[1]}
+	}
+	return policyFromOpaqueChildNames11779(node)
 }
 
 // collectProtocolList flattens a single "from protocol ..." node into the
@@ -1215,32 +1228,26 @@ func routeFilterTrailingToken(fc *Node) string {
 	return ""
 }
 
-func markMalformedPolicyFromList11779(term *PolicyTerm, leaf, keyword string) {
+func markMalformedPolicyFromList11779(term *PolicyTerm, leaf, reason string) {
 	if term == nil || term.invalidFromSyntax11779 != "" {
 		return
 	}
 	term.invalidFromSyntax11779 = fmt.Sprintf(
-		"malformed bracketed `from %s` list: unquoted clause keyword %q occurs before the closing bracket",
-		leaf, keyword,
+		"malformed bracketed `from %s` list: %s", leaf, reason,
 	)
 }
 
 // policyTermFromChildren11779 reads typed children from a policy `from` node.
-// The compact normalizer can fold a packed tail into a child before this reader
-// runs, so every returned child goes through the same schema-arity split.
-func policyTermFromChildren11779(term *PolicyTerm, fromNode *Node, fromSchema *schemaNode, hasTermThen bool) []*Node {
+// Compact `from leaf ...` keys and child-body statements are both semantic.
+func policyTermFromChildren11779(term *PolicyTerm, fromNode *Node, fromSchema *schemaNode) []*Node {
 	if fromNode == nil {
 		return nil
 	}
-	if fromNode.Name() != "from" {
-		return fromNode.Children
-	}
 
-	splitChildren := func(children []*Node, preserveUnknown bool) []*Node {
+	splitChildren := func(children []*Node) []*Node {
 		var split []*Node
 		for i, child := range children {
-			parts := splitPolicyTermFromRun11779(
-				term, child, fromSchema, hasTermThen, preserveUnknown)
+			parts := splitPolicyTermFromRun11779(term, child, fromSchema, true)
 			if len(parts) == 1 && parts[0] == child {
 				if split != nil {
 					split = append(split, child)
@@ -1259,35 +1266,28 @@ func policyTermFromChildren11779(term *PolicyTerm, fromNode *Node, fromSchema *s
 		return split
 	}
 
-	body := packedBody(fromNode, fromSchema)
-	if body != fromNode {
-		return splitChildren(body.Children, false)
+	children := splitChildren(fromNode.Children)
+	if len(fromNode.Keys) <= 1 {
+		return children
 	}
-	consumed, _ := consumeNodeKeys(fromNode.Keys, fromSchema)
-	if consumed >= len(fromNode.Keys) {
-		return splitChildren(fromNode.Children, true)
-	}
-	// With a raw packed tail, children may be value continuations of its first
-	// leaf (not independent statements). Preserve those children and split only
-	// the tail; the packed unknown scanner owns its opaque remainder.
-	nodes := append([]*Node(nil), fromNode.Children...)
-	tail := &Node{Keys: fromNode.Keys[consumed:]}
+	tail := *fromNode
+	tail.Keys = append([]string(nil), fromNode.Keys[1:]...)
+	tail.Children = nil
 	if len(fromNode.KeysQuoted) == len(fromNode.Keys) {
-		tail.setKeysQuoted(fromNode.KeysQuoted[consumed:])
+		tail.setKeysQuoted(fromNode.KeysQuoted[1:])
 	}
 	if len(fromNode.KeysBracketed) == len(fromNode.Keys) {
-		tail.setKeysBracketed(fromNode.KeysBracketed[consumed:])
+		tail.setKeysBracketed(fromNode.KeysBracketed[1:])
 	}
-	return append(nodes, splitPolicyTermFromRun11779(
-		term, tail, fromSchema, hasTermThen, false)...)
+	parts := splitPolicyTermFromRun11779(term, &tail, fromSchema, true)
+	return append(parts, children...)
 }
 
 // splitPolicyTermFromRun11779 separates schema-known match siblings in a
-// normalizer-folded child. Raw from-node tails leave opaque remainders to
-// packedUnknownFromLeaves; folded children have no raw tail left, so preserve
-// their opaque remainder as a synthetic child for the ordinary unknown gate.
+// packed `from` key run. Opaque tails are retained as synthetic leaves for the
+// ordinary UnknownFrom gate.
 func splitPolicyTermFromRun11779(
-	term *PolicyTerm, run *Node, fromSchema *schemaNode, hasTermThen, preserveUnknown bool,
+	term *PolicyTerm, run *Node, fromSchema *schemaNode, preserveUnknown bool,
 ) []*Node {
 	if run == nil || len(run.Keys) == 0 || len(run.Children) > 0 || fromSchema == nil {
 		return []*Node{run}
@@ -1334,37 +1334,32 @@ func splitPolicyTermFromRun11779(
 		n, _ := consumeNodeKeys(keys[i:], childSchema)
 		if childSchema == routeFilterSchema {
 			n = packedRouteFilterWidth(keys, i, n)
-			if n == 3 && i+n < len(keys) {
-				switch keys[i+2] {
-				case "upto", "prefix-length-range", "through":
-					if resolveSchemaChild(fromSchema, keys[i+n]) == nil {
-						n++
-					}
-				}
-			}
 		}
 		if n <= 0 {
 			break
 		}
-		if childSchema.multi && childSchema.children == nil && n > 1 &&
-			run.KeyBracketed(i+n-1) {
-			firstValue := i + n - 1
-			if !run.KeyQuoted(firstValue) &&
-				policyTermClauseKeyword11779(keys[firstValue]) &&
-				!hasTermThen &&
-				!policyTermHasUnbracketedClauseBoundary11779(
-					keys, run.KeysBracketed, run.KeysQuoted, firstValue+1) {
-				markMalformedPolicyFromList11779(
-					term, keys[i], keys[firstValue])
+		if childSchema.multi && childSchema.children == nil && n > 1 {
+			for j := i + n - 1; j < i+n; j++ {
+				if run.KeyBracketed(j) && !run.BracketedClosed {
+					markMalformedPolicyFromList11779(term, keys[i], "list did not close")
+					break
+				}
 			}
-			for n < len(keys)-i && run.KeyBracketed(i+n) {
+			for n < len(keys)-i {
 				next := i + n
-				if !run.KeyQuoted(next) &&
-					policyTermClauseKeyword11779(keys[next]) &&
-					!hasTermThen &&
-					!policyTermHasUnbracketedClauseBoundary11779(
-						keys, run.KeysBracketed, run.KeysQuoted, next+1) {
-					markMalformedPolicyFromList11779(term, keys[i], keys[next])
+				if run.KeyBracketed(next) {
+					if !run.BracketedClosed && policyTermClauseKeyword11779(keys[next]) {
+						break
+					}
+					n++
+					continue
+				}
+				if run.KeyQuoted(next) {
+					n++
+					continue
+				}
+				if resolveSchemaChild(fromSchema, keys[next]) != nil ||
+					policyTermInlineKeywords[keys[next]] {
 					break
 				}
 				n++
@@ -1382,22 +1377,11 @@ func splitPolicyTermFromRun11779(
 // parsePolicyTermChildren handles hierarchical form of policy term
 // where "from" and "then" are child nodes.
 func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
-	hasTermThen := false
-	for _, child := range children {
-		if child != nil && child.Name() == "then" &&
-			!child.KeyBracketed(0) && !child.KeyQuoted(0) {
-			hasTermThen = true
-			break
-		}
-	}
 	for _, tc := range children {
 		switch tc.Name() {
 		case "from":
 			fromSchema := schemaForPath("policy-options", "policy-statement", "term", "from")
-			for _, unknown := range packedUnknownFromLeaves(tc, fromSchema) {
-				term.UnknownFrom = append(term.UnknownFrom, unknown)
-			}
-			for _, fc := range policyTermFromChildren11779(term, tc, fromSchema, hasTermThen) {
+			for _, fc := range policyTermFromChildren11779(term, tc, fromSchema) {
 				switch fc.Name() {
 				case "protocol":
 					// Junos "from protocol [ bgp ospf static ]" matches any
@@ -1419,7 +1403,12 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 					// Keys[1:] / Children in BOTH AST shapes (#2419), so read
 					// every value via the firewallMatchValues SSOT — the prior
 					// nodeVal-only read kept just the first list entry (#2689).
-					term.PrefixList = append(term.PrefixList, firewallMatchValues(fc)...)
+					if !fc.IsLeaf && len(fc.Children) > 0 {
+						term.PrefixList = append(term.PrefixList, fc.Keys[1:]...)
+						term.UnknownFrom = append(term.UnknownFrom, policyFromOpaqueChildNames11779(fc)...)
+					} else {
+						term.PrefixList = append(term.PrefixList, firewallMatchValues(fc)...)
+					}
 				case "route-filter":
 					if len(fc.Keys) >= 3 {
 						rf := &RouteFilter{
@@ -1461,14 +1450,27 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 					// Keys[1:] / Children in BOTH AST shapes (#2419), so read
 					// every value via the firewallMatchValues SSOT — the prior
 					// nodeVal-only read kept just the first list entry (#2689).
-					term.FromCommunity = append(term.FromCommunity, firewallMatchValues(fc)...)
+					if !fc.IsLeaf && len(fc.Children) > 0 {
+						term.FromCommunity = append(term.FromCommunity, fc.Keys[1:]...)
+						term.UnknownFrom = append(term.UnknownFrom, policyFromOpaqueChildNames11779(fc)...)
+					} else {
+						term.FromCommunity = append(term.FromCommunity, firewallMatchValues(fc)...)
+					}
 				case "as-path":
 					// Repeated `as-path` siblings match ANY (#2642). A bracketed
 					// list `as-path [ a1 a2 ]` ALSO collapses onto one leaf's
 					// Keys[1:] / Children in BOTH AST shapes (#2419), so read
 					// every value via the firewallMatchValues SSOT — the prior
 					// nodeVal-only read kept just the first list entry (#2689).
-					term.FromASPath = append(term.FromASPath, firewallMatchValues(fc)...)
+					if !fc.IsLeaf && len(fc.Children) > 0 {
+						term.FromASPath = append(term.FromASPath, fc.Keys[1:]...)
+						term.UnknownFrom = append(term.UnknownFrom, policyFromOpaqueChildNames11779(fc)...)
+					} else {
+						term.FromASPath = append(term.FromASPath, firewallMatchValues(fc)...)
+					}
+				case "then":
+					parsePolicyTermInlineKeys(
+						term, fc.Keys, fc.KeysBracketed, fc.KeysQuoted, fc.BracketedClosed)
 				default:
 					term.UnknownFrom = append(term.UnknownFrom, fc.Name())
 				}
@@ -1531,11 +1533,24 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 				}
 			}
 			if len(tc.Keys) >= 2 {
-				parsePolicyTermInlineKeys(term, tc.Keys, tc.KeysBracketed, tc.KeysQuoted)
+				parsePolicyTermInlineKeys(term, tc.Keys, tc.KeysBracketed, tc.KeysQuoted, tc.BracketedClosed)
 			}
 		}
 	}
 }
+func policyFromOpaqueChildNames11779(node *Node) []string {
+	if node == nil {
+		return nil
+	}
+	var names []string
+	for _, child := range node.Children {
+		if child != nil && child.Name() != "" {
+			names = append(names, child.Name())
+		}
+	}
+	return names
+}
+
 func recordPolicyNextAction11780(term *PolicyTerm, value string) {
 	if value == "policy" {
 		term.NextPolicy = true
@@ -1608,6 +1623,8 @@ var policyTermInlineKeywords = map[string]bool{
 	"local-preference": true, "metric": true, "metric-type": true,
 	"community": true, "as-path": true, "as-path-prepend": true,
 	"origin": true, "accept": true, "reject": true, "next": true,
+	"neighbor": true, "rib": true, "instance": true, "interface": true,
+	"family": true, "tag": true, "area": true,
 }
 
 var policyTermFromUnsupportedThenKeywords11779 = map[string]bool{
@@ -1622,55 +1639,40 @@ func skipUnknownPolicyTermFromTail11779(keys []string, i int) int {
 	}
 	return i
 }
-
 func policyTermClauseKeyword11779(key string) bool {
 	return key == "from" || key == "then"
 }
 
-func policyTermHasUnbracketedClauseBoundary11779(
-	keys []string, bracketed, quoted []bool, start int,
-) bool {
-	for i := start; i < len(keys); i++ {
-		if (i >= len(bracketed) || !bracketed[i]) &&
-			(i >= len(quoted) || !quoted[i]) &&
-			policyTermClauseKeyword11779(keys[i]) {
-			return true
-		}
-	}
-	return false
-}
-
-// appendInlineBracketedMatchValues11779 reads values from a multi-value from
-// leaf without crossing into an unquoted `from`/`then` clause boundary. A
-// bracketed clause keyword is malformed only when no unbracketed boundary
-// follows to prove the list was closed.
+// appendInlineBracketedMatchValues11779 reads all values of a multi-value
+// `from` leaf until a known leaf/action boundary. Bracket metadata determines
+// whether a keyword belongs to a closed value list or an unclosed list.
 func appendInlineBracketedMatchValues11779(
-	dst, keys []string, bracketed, quoted []bool, i int,
+	dst, keys []string, bracketed, quoted []bool, i int, closed bool,
 ) ([]string, int, string) {
 	if i+1 >= len(keys) {
 		return dst, i, ""
 	}
-	next := i + 1
-	if next < len(bracketed) && bracketed[next] &&
-		(next >= len(quoted) || !quoted[next]) &&
-		policyTermClauseKeyword11779(keys[next]) &&
-		!policyTermHasUnbracketedClauseBoundary11779(
-			keys, bracketed, quoted, next+1) {
-		return dst, i, keys[next]
-	}
-	i = next
-	dst = append(dst, keys[i])
-	for i+1 < len(keys) && i < len(bracketed) && i+1 < len(bracketed) &&
-		bracketed[i] && bracketed[i+1] {
-		next = i + 1
-		if (next >= len(quoted) || !quoted[next]) &&
-			policyTermClauseKeyword11779(keys[next]) &&
-			!policyTermHasUnbracketedClauseBoundary11779(
-				keys, bracketed, quoted, next+1) {
-			return dst, i, keys[next]
+	sawBracketed := false
+	for next := i + 1; next < len(keys); next++ {
+		isBracketed := next < len(bracketed) && bracketed[next]
+		isQuoted := next < len(quoted) && quoted[next]
+		if isBracketed {
+			sawBracketed = true
+			if !closed && policyTermClauseKeyword11779(keys[next]) {
+				return dst, next - 1, "list did not close before clause keyword"
+			}
+			dst = append(dst, keys[next])
+			i = next
+			continue
 		}
+		if !isQuoted && policyTermInlineKeywords[keys[next]] {
+			break
+		}
+		dst = append(dst, keys[next])
 		i = next
-		dst = append(dst, keys[i])
+	}
+	if sawBracketed && !closed {
+		return dst, i, "list did not close"
 	}
 	return dst, i, ""
 }
@@ -1679,7 +1681,7 @@ func appendInlineBracketedMatchValues11779(
 // after the term name are inline key-value pairs like:
 // "from", "protocol", "direct" or "from", "route-filter", "10.0.0.0/8", "exact"
 // or "then", "accept"
-func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quoted []bool) {
+func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quoted []bool, bracketedClosed bool) {
 	inFrom := false
 	for i := 0; i < len(keys); i++ {
 		if inFrom && policyTermFromUnsupportedThenKeywords11779[keys[i]] {
@@ -1721,14 +1723,34 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 			// brackets, so every protocol arrives as a separate key. Consume
 			// all consecutive values until the next clause keyword, so a
 			// multi-protocol list keeps every protocol (not just the first).
-			for i+1 < len(keys) && !policyTermInlineKeywords[keys[i+1]] {
+			sawBracketed := false
+			for i+1 < len(keys) {
+				next := i + 1
+				isBracketed := next < len(bracketed) && bracketed[next]
+				isQuoted := next < len(quoted) && quoted[next]
+				if isBracketed {
+					sawBracketed = true
+					if !bracketedClosed && policyTermClauseKeyword11779(keys[next]) {
+						markMalformedPolicyFromList11779(term, "protocol", "list did not close before clause keyword")
+						break
+					}
+				} else if isQuoted || !policyTermInlineKeywords[keys[next]] {
+					i++
+					term.FromProtocols = append(term.FromProtocols, keys[i])
+					continue
+				} else {
+					break
+				}
 				i++
 				term.FromProtocols = append(term.FromProtocols, keys[i])
+			}
+			if sawBracketed && !bracketedClosed {
+				markMalformedPolicyFromList11779(term, "protocol", "list did not close")
 			}
 		case "prefix-list":
 			var badClause string
 			term.PrefixList, i, badClause = appendInlineBracketedMatchValues11779(
-				term.PrefixList, keys, bracketed, quoted, i)
+				term.PrefixList, keys, bracketed, quoted, i, bracketedClosed)
 			if badClause != "" {
 				markMalformedPolicyFromList11779(term, "prefix-list", badClause)
 			}
@@ -1805,7 +1827,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 			if inFrom {
 				var badClause string
 				term.FromCommunity, i, badClause = appendInlineBracketedMatchValues11779(
-					term.FromCommunity, keys, bracketed, quoted, i)
+					term.FromCommunity, keys, bracketed, quoted, i, bracketedClosed)
 				if badClause != "" {
 					markMalformedPolicyFromList11779(term, "community", badClause)
 				}
@@ -1839,7 +1861,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 		case "as-path":
 			var badClause string
 			term.FromASPath, i, badClause = appendInlineBracketedMatchValues11779(
-				term.FromASPath, keys, bracketed, quoted, i)
+				term.FromASPath, keys, bracketed, quoted, i, bracketedClosed)
 			if badClause != "" {
 				markMalformedPolicyFromList11779(term, "as-path", badClause)
 			}

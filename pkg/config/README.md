@@ -479,14 +479,15 @@ policy's `Action` to `PolicyDeny`, so a leniently-loaded bad config fails
 closed rather than open. See `docs/config-schema.md` "#3043".
 
 **Unsupported routing-policy `from` leaves fail closed through compact
-normalization (#11779):** strict compilation rejects an unsupported dimension
-even when compact normalization folds it into a supported match leaf; tolerant
-loads retain the unknown dimension and reject the affected term. Schema-known
-sibling matches remain separately typed. Balanced bracketed match lists may
-contain bare values that spell clause keywords; only an unbracketed sibling
-`then` marks the term boundary, and an unclosed list fails closed. An
-unbracketed scalar match consumes only its schema-declared argument arity, so
-trailing unsupported tokens remain unknown rather than becoming match values.
+normalization (#11779):** strict compilation rejects unsupported dimensions
+even when compact normalization folds them into a supported match. Mixed
+packed keys and child bodies are both consumed; policy-level `from`, nested
+opaque bodies, scalar trailers beyond schema arity, and malformed route-filter
+trailers are retained as unknown. Tolerant loads preserve those markers,
+force affected terms to `reject`, and warn with every affected term named.
+Multi-value matches survive `Format` / `FormatSet` replay. List closure is
+tracked structurally: bare or quoted clause words are values inside a balanced
+list, while an unclosed bracketed `from` list fails closed.
 
 Distinct conflicting terminal actions on a lenient load retain the compiler's
 last-wins action only as an internal parse result; `LenientContentDropped`

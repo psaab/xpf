@@ -610,3 +610,299 @@ func TestRoutingPolicyUnbracketedScalarUnknownTrailerFailsClosed11779(t *testing
 			term.PrefixList, term.UnknownFrom, term.Action)
 	}
 }
+
+// FAIL-ON-REVERT: canonical serializers remove bracket delimiters from leaf
+// lists. Replaying their text must preserve every supported routing-policy
+// value rather than turning later members into unknown leaves.
+func TestRoutingPolicyFromMultiValuesSurviveCanonicalReplay11779(t *testing.T) {
+	src := `policy-options {
+ prefix-list PL1 10.0.0.0/8;
+ prefix-list PL2 172.16.0.0/12;
+ community C1 members 65000:1;
+ community C2 members 65000:2;
+ as-path AP1 "^65000";
+ as-path AP2 "^65001";
+ policy-statement P {
+  term T {
+   from protocol [ direct static ];
+   from prefix-list [ PL1 PL2 ];
+   from community [ C1 C2 ];
+   from as-path [ AP1 AP2 ];
+   then accept;
+  }
+ }
+	}`
+	tree := parsePolicyTreeFromSource11779(t, src)
+	for _, replay := range []struct {
+		name string
+		text string
+	}{
+		{"Format", tree.Format()},
+		{"FormatSet", tree.FormatSet()},
+	} {
+		t.Run(replay.name, func(t *testing.T) {
+			var replayed *ConfigTree
+			if replay.name == "FormatSet" {
+				replayed = buildTreeFromSet(t, strings.Split(strings.TrimSpace(replay.text), "\n"))
+			} else {
+				replayed = parsePolicyTreeFromSource11779(t, replay.text)
+			}
+			for _, lenient := range []bool{false, true} {
+				var cfg *Config
+				var err error
+				if lenient {
+					cfg, err = CompileConfigLenient(replayed.Clone())
+				} else {
+					cfg, err = CompileConfig(replayed.Clone())
+				}
+				if err != nil {
+					t.Fatalf("lenient=%v replay compile: %v", lenient, err)
+				}
+				term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+				if strings.Join(term.FromProtocols, ",") != "direct,static" ||
+					strings.Join(term.PrefixList, ",") != "PL1,PL2" ||
+					strings.Join(term.FromCommunity, ",") != "C1,C2" ||
+					strings.Join(term.FromASPath, ",") != "AP1,AP2" ||
+					len(term.UnknownFrom) != 0 || term.Action != "accept" {
+					t.Fatalf("lenient=%v replay changed routing-policy semantics: %+v", lenient, term)
+				}
+			}
+		})
+	}
+}
+
+// FAIL-ON-REVERT: both packed keys and the child body of a compact term are
+// semantic input. The unsupported packed `from` predicate cannot disappear
+// just because the same node also has a `then` child.
+func TestRoutingPolicyMixedPackedTermAndBodyFailsClosed11779(t *testing.T) {
+	src := `policy-options {
+ policy-statement P {
+  term T from neighbor 10.0.0.1 { then accept; }
+ }
+}`
+	tree := parsePolicyTreeFromSource11779(t, src)
+	if _, err := CompileConfig(tree.Clone()); err == nil {
+		t.Fatal("strict compile ignored packed `from` keys because the term had children")
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+	if len(term.UnknownFrom) != 1 || term.UnknownFrom[0] != "neighbor" ||
+		term.Action != "reject" || term.NextPolicy {
+		t.Fatalf("mixed term did not retain and fail closed on packed from: %+v", term)
+	}
+}
+
+// FAIL-ON-REVERT: a policy-level `from` is not a term, but must not be silently
+// ignored while an accompanying default accept remains active.
+func TestRoutingPolicyPolicyLevelFromFailsClosed11779(t *testing.T) {
+	tree := parsePolicyTreeFromSource11779(t, `policy-options {
+ policy-statement P {
+  from neighbor 10.0.0.1;
+  then accept;
+  term T {
+   from { protocol bgp; }
+   then accept;
+  }
+ }
+}`)
+	if _, err := CompileConfig(tree.Clone()); err == nil {
+		t.Fatal("strict compile ignored unsupported policy-level from")
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	stmt := cfg.PolicyOptions.PolicyStatements["P"]
+	if stmt.DefaultAction != "reject" || len(stmt.UnknownFrom) != 1 ||
+		stmt.UnknownFrom[0] != "neighbor" {
+		t.Fatalf("policy-level from did not fail closed: %+v", stmt)
+	}
+	if len(stmt.Terms) != 1 || stmt.Terms[0].Action != "reject" ||
+		stmt.Terms[0].NextPolicy {
+		t.Fatalf("policy-level from did not fail closed for its terms: %+v", stmt.Terms)
+	}
+}
+
+// FAIL-ON-REVERT: a from leaf with an opaque child body must not promote those
+// child tokens into prefix-list names and lose the unsupported nested match.
+func TestRoutingPolicyNestedUnknownUnderMultiValueFromFailsClosed11779(t *testing.T) {
+	tree := parsePolicyTreeFromSource11779(t, `policy-options {
+ prefix-list PL1 10.0.0.0/8;
+ policy-statement P {
+  term T {
+   from { prefix-list PL1 { neighbor 10.0.0.1; } }
+   then accept;
+  }
+ }
+}`)
+	if _, err := CompileConfig(tree.Clone()); err == nil {
+		t.Fatal("strict compile accepted an opaque body beneath prefix-list")
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+	if len(term.UnknownFrom) != 1 || term.UnknownFrom[0] != "neighbor" ||
+		term.Action != "reject" || term.NextPolicy {
+		t.Fatalf("nested unknown from did not fail closed: %+v", term)
+	}
+}
+
+// FAIL-ON-REVERT: invalid route-filter operands are not typed trailer values.
+// In particular `upto rib` must not become an unset /32-wide filter.
+func TestRoutingPolicyInvalidRouteFilterTrailerFailsClosed11779(t *testing.T) {
+	tree := parsePolicyTreeFromSource11779(t, `policy-options {
+ policy-statement P {
+  term T {
+   from { route-filter 10.0.0.0/8 upto rib; }
+   then accept;
+  }
+ }
+}`)
+	if _, err := CompileConfig(tree.Clone()); err == nil {
+		t.Fatal("strict compile accepted nonnumeric route-filter upto operand")
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+	if len(term.UnknownFrom) == 0 || term.UnknownFrom[0] != "rib" ||
+		term.Action != "reject" || term.NextPolicy {
+		t.Fatalf("invalid trailer did not fail closed: %+v", term)
+	}
+}
+
+// FAIL-ON-REVERT: clause-like words inside a bracket list do not prove that the
+// list closed. A quoted "then" must not hide an absent closing bracket.
+func TestRoutingPolicyQuotedClauseInUnclosedListFailsClosed11779(t *testing.T) {
+	tree := parsePolicyTreeFromSource11779(t, `policy-options {
+ prefix-list PL1 10.0.0.0/8;
+ policy-statement P {
+  term T from prefix-list [ PL1 "then" reject;
+ }
+}`)
+	if _, err := CompileConfig(tree.Clone()); err == nil {
+		t.Fatal("strict compile accepted quoted clause token in an unclosed from list")
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+	if term.Action != "reject" || term.NextPolicy ||
+		strings.Contains(strings.Join(term.PrefixList, " "), "reject") {
+		t.Fatalf("quoted clause token masked malformed list: %+v", term)
+	}
+}
+
+// FAIL-ON-REVERT: every term changed by tolerant compilation must be named in
+// the warning; warning only for the first while rewriting all is misleading.
+func TestRoutingPolicyTolerantWarningNamesEveryChangedTerm11779(t *testing.T) {
+	tree := parsePolicyTreeFromSource11779(t, `policy-options {
+ policy-statement P {
+  term FIRST { from { rib inet.0; } then accept; }
+  term SECOND { from { neighbor 10.0.0.1; } then next policy; }
+ }
+}`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	warnings := strings.Join(cfg.Warnings, "\n")
+	for _, name := range []string{"FIRST", "SECOND"} {
+		if !strings.Contains(warnings, name) {
+			t.Errorf("tolerant warnings omit changed term %s: %v", name, cfg.Warnings)
+		}
+	}
+	for _, term := range cfg.PolicyOptions.PolicyStatements["P"].Terms {
+		if term.Action != "reject" || term.NextPolicy {
+			t.Errorf("term %s was not forced to reject: %+v", term.Name, term)
+		}
+	}
+}
+
+// FAIL-ON-REVERT: the packed-term protocol reader must stop at the same
+// unsupported match heads as the block reader and quarantine the unknown term.
+func TestRoutingPolicyPackedProtocolUnknownTailFailsClosed11779(t *testing.T) {
+	tree := parsePolicyTreeFromSource11779(t, `policy-options {
+ policy-statement P {
+  term T from protocol bgp neighbor 10.0.0.1 then accept;
+ }
+}`)
+	if _, err := CompileConfig(tree.Clone()); err == nil ||
+		!strings.Contains(err.Error(), "`from neighbor`") {
+		t.Fatalf("strict compile did not report the unknown from leaf: %v", err)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+	if strings.Join(term.FromProtocols, ",") != "bgp" ||
+		len(term.UnknownFrom) != 1 || term.UnknownFrom[0] != "neighbor" ||
+		term.Action != "reject" || term.NextPolicy {
+		t.Fatalf("packed protocol tail was not quarantined: %+v", term)
+	}
+}
+
+// FAIL-ON-REVERT: the bracketed term "then" is a value, and its balanced
+// closure is sufficient even when the term has no local action sibling.
+func TestRoutingPolicyActionlessClosedFromListRemainsBalanced11779(t *testing.T) {
+	for _, src := range []string{
+		`policy-options {
+ prefix-list then 10.0.0.0/8;
+ policy-statement P { term T { from { prefix-list [ then ]; } } }
+}`,
+		`policy-options {
+ prefix-list then 10.0.0.0/8;
+ policy-statement P {
+  term T { from { prefix-list [ then ]; } }
+  term T { then accept; }
+ }
+}`,
+	} {
+		cfg, err := CompileConfig(parsePolicyTreeFromSource11779(t, src))
+		if err != nil {
+			t.Fatalf("balanced actionless list was rejected: %v", err)
+		}
+		term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+		if len(term.PrefixList) != 1 || term.PrefixList[0] != "then" ||
+			term.invalidFromSyntax11779 != "" {
+			t.Fatalf("balanced clause-named list value changed: %+v", term)
+		}
+	}
+}
+
+// FAIL-ON-REVERT: provenance-less canonical text retains multi-values, while
+// known unsupported Junos from heads still split into UnknownFrom.
+func TestRoutingPolicyFromMultiValuesAndUnknownTailWithoutBrackets11779(t *testing.T) {
+	for _, tc := range []struct {
+		list string
+		tail string
+	}{
+		{"prefix-list PL1 PL2", "rib inet.0"},
+		{"community C1 C2", "neighbor 10.0.0.1"},
+		{"as-path AP1 AP2", "tag 100"},
+	} {
+		src := `policy-options {
+ prefix-list PL1 10.0.0.0/8; prefix-list PL2 172.16.0.0/12;
+ community C1 members 65000:1; community C2 members 65000:2;
+ as-path AP1 "^65000"; as-path AP2 "^65001";
+ policy-statement P { term T { from ` + tc.list + ` ` + tc.tail + `; then accept; } }
+}`
+		cfg, err := CompileConfigLenient(parsePolicyTreeFromSource11779(t, src))
+		if err != nil {
+			t.Fatalf("tolerant compile for %q: %v", tc.list, err)
+		}
+		term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+		if term.Action != "reject" || len(term.UnknownFrom) == 0 ||
+			!strings.Contains(strings.Join(term.UnknownFrom, " "), strings.Fields(tc.tail)[0]) {
+			t.Errorf("unsupported tail was not separated from %q: %+v", tc.list, term)
+		}
+	}
+}

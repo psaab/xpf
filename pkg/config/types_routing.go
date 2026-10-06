@@ -53,6 +53,7 @@ type PolicyStatement struct {
 	Name          string
 	Terms         []*PolicyTerm
 	DefaultAction string // "accept", "reject", or "" (implicit reject)
+	UnknownFrom   []string
 }
 
 // PolicyTerm is a single match+action clause within a policy-statement.
@@ -617,8 +618,8 @@ type BGPNeighbor struct {
 	Import               []string // import policies (route-map in): group default + per-neighbor override; last wins (most-specific); #2490
 	FamilyInet           bool     // activate under address-family ipv4 unicast
 	FamilyInet6          bool     // activate under address-family ipv6 unicast
-	UnsupportedInetSAFI  bool `json:"-"` // unsupported inet SAFI; prevents unicast fallback activation
-	UnsupportedInet6SAFI bool `json:"-"` // compiler-only SAFI evidence (#11815)
+	UnsupportedInetSAFI  bool     `json:"-"` // unsupported inet SAFI; prevents unicast fallback activation
+	UnsupportedInet6SAFI bool     `json:"-"` // compiler-only SAFI evidence (#11815)
 	GroupName            string   // BGP group name (for display)
 	AuthPassword         Secret   // TCP MD5 password for BGP session; redacted on marshal (#2053)
 	BFD                  bool     // enable BFD for this neighbor

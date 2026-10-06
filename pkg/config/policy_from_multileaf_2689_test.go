@@ -2,21 +2,6 @@ package config
 
 import "testing"
 
-func compileSetGroupedPolicy2689(t *testing.T, commands []string) (*Config, error) {
-	t.Helper()
-	tree := &ConfigTree{}
-	for _, command := range commands {
-		path, quoted, grouped, err := ParseSetCommandGrouped(command)
-		if err != nil {
-			t.Fatalf("ParseSetCommandGrouped(%q): %v", command, err)
-		}
-		if err := tree.SetPathQuotedGrouped(path, quoted, grouped); err != nil {
-			t.Fatalf("SetPathQuotedGrouped(%q): %v", command, err)
-		}
-	}
-	return CompileConfig(tree)
-}
-
 // #2689: the policy-statement `from community` and `from prefix-list` match
 // readers in parsePolicyTermChildren read a `multi: true` leaf via only
 // nodeVal(fc) = child.Keys[1] (no Keys[1:] slice, no child.Children
@@ -37,15 +22,15 @@ func compileSetGroupedPolicy2689(t *testing.T, commands []string) (*Config, erro
 // carrying BOTH a bracket list AND a repeated sibling must keep every value.
 //
 // These are fail-on-revert guards: each asserts ALL values survive on BOTH the
-// flat-set bracket-list shape (via grouped set-command ingress, so explicit
-// brackets survive flattening) and the hierarchical block shape. Reverting
-// either reader to the single-nodeVal form drops trailing values and fails the
-// len/element assertions.
+// flat-set bracket-list shape (via ParseSetCommand + SetPath, the
+// CLAUDE.md-mandated harness for flat-set) and the hierarchical block shape.
+// Reverting either reader to the single-nodeVal form drops the trailing values
+// and fails the len/element assertions.
 
 // --- from community ---
 
 func TestPolicyFromCommunityBracketFlatSet_2689(t *testing.T) {
-	cfg, err := compileSetGroupedPolicy2689(t, []string{
+	cfg, err := compileSet(t, []string{
 		// Communities must be defined (#2881) or the from-community
 		// cross-reference gate rejects the term before this assertion runs.
 		"set policy-options community c1 members 65000:1",
@@ -88,7 +73,7 @@ func TestPolicyFromCommunityBracketHierarchical_2689(t *testing.T) {
 // separate `from community c3` statement must yield [c1 c2 c3] — the bracket
 // values accumulate, then the sibling appends, neither overwriting the other.
 func TestPolicyFromCommunityBracketPlusSibling_2689(t *testing.T) {
-	cfg, err := compileSetGroupedPolicy2689(t, []string{
+	cfg, err := compileSet(t, []string{
 		"set policy-options community c1 members 65000:1",
 		"set policy-options community c2 members 65000:2",
 		"set policy-options community c3 members 65000:3",
@@ -109,7 +94,7 @@ func TestPolicyFromCommunityBracketPlusSibling_2689(t *testing.T) {
 // --- from prefix-list ---
 
 func TestPolicyFromPrefixListBracketFlatSet_2689(t *testing.T) {
-	cfg, err := compileSetGroupedPolicy2689(t, []string{
+	cfg, err := compileSet(t, []string{
 		"set policy-options policy-statement P term T from prefix-list [ p1 p2 ]",
 		"set policy-options policy-statement P term T then accept",
 	})
@@ -143,7 +128,7 @@ func TestPolicyFromPrefixListBracketHierarchical_2689(t *testing.T) {
 }
 
 func TestPolicyFromPrefixListBracketPlusSibling_2689(t *testing.T) {
-	cfg, err := compileSetGroupedPolicy2689(t, []string{
+	cfg, err := compileSet(t, []string{
 		"set policy-options policy-statement P term T from prefix-list [ p1 p2 ]",
 		"set policy-options policy-statement P term T from prefix-list p3",
 		"set policy-options policy-statement P term T then accept",
@@ -161,7 +146,7 @@ func TestPolicyFromPrefixListBracketPlusSibling_2689(t *testing.T) {
 // --- from as-path (review fold: sibling reader in the same function) ---
 
 func TestPolicyFromASPathBracketFlatSet_2689(t *testing.T) {
-	cfg, err := compileSetGroupedPolicy2689(t, []string{
+	cfg, err := compileSet(t, []string{
 		// #7471: `from as-path` is definedness-gated now. Define the members so
 		// this test keeps BRACKET-LIST RETENTION as its subject.
 		`set policy-options as-path a1 "^65000 "`,
@@ -203,7 +188,7 @@ func TestPolicyFromASPathBracketHierarchical_2689(t *testing.T) {
 }
 
 func TestPolicyFromASPathBracketPlusSibling_2689(t *testing.T) {
-	cfg, err := compileSetGroupedPolicy2689(t, []string{
+	cfg, err := compileSet(t, []string{
 		// #7471: definedness-gated; define all three members.
 		`set policy-options as-path a1 "^65000 "`,
 		`set policy-options as-path a2 "^65001 "`,

@@ -136,6 +136,13 @@ type Node struct {
 	// omitempty so those configs stay byte-identical on disk, exactly as for
 	// KeysQuoted above.
 	KeysBracketed []bool `json:",omitempty"`
+	// BracketedClosed is true when a bracket opened while reading this node's
+	// key span was closed before its statement terminator. KeysBracketed only
+	// says which tokens were inside a list; it cannot distinguish `[ x ]` from
+	// an unclosed `[ x` after the lexer strips the delimiters. Routing-policy
+	// parsing uses the close bit to keep clause-word values distinct from a
+	// malformed list. Older persisted trees and synthesized nodes remain false.
+	BracketedClosed bool `json:",omitempty"`
 
 	// Line/Column where this node starts (for error reporting).
 	Line   int
@@ -181,7 +188,18 @@ func (n *Node) KeyBracketed(i int) bool {
 // least one key is bracketed. Every Node construction path that has the
 // provenance available funnels through here so the "nil means all-false or
 // unknown" collapse is made in exactly one place.
-func (n *Node) setKeysBracketed(bracketed []bool) {
+func (n *Node) setKeysBracketed(bracketed []bool, closed ...bool) {
+	if len(closed) > 0 {
+		n.BracketedClosed = false
+		if closed[0] {
+			for _, b := range bracketed {
+				if b {
+					n.BracketedClosed = true
+					break
+				}
+			}
+		}
+	}
 	if len(bracketed) != len(n.Keys) {
 		n.KeysBracketed = nil
 		return
@@ -639,13 +657,14 @@ func cloneNodes(nodes []*Node) []*Node {
 	result := make([]*Node, len(nodes))
 	for i, n := range nodes {
 		result[i] = &Node{
-			Keys:          append([]string(nil), n.Keys...),
-			KeysQuoted:    append([]bool(nil), n.KeysQuoted...),
-			KeysBracketed: append([]bool(nil), n.KeysBracketed...),
-			Children:      cloneNodes(n.Children),
-			IsLeaf:        n.IsLeaf,
-			Annotation:    n.Annotation,
-			InheritedFrom: n.InheritedFrom,
+			Keys:            append([]string(nil), n.Keys...),
+			KeysQuoted:      append([]bool(nil), n.KeysQuoted...),
+			KeysBracketed:   append([]bool(nil), n.KeysBracketed...),
+			BracketedClosed: n.BracketedClosed,
+			Children:        cloneNodes(n.Children),
+			IsLeaf:          n.IsLeaf,
+			Annotation:      n.Annotation,
+			InheritedFrom:   n.InheritedFrom,
 			// #9862: leaf provenance flows through every clone, including the
 			// #4474 memo store/handout. Deep-copied: clones must never share the
 			// backing array (tag union-adds append). Nil-preserving, so untagged

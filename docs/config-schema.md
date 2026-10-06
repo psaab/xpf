@@ -8617,17 +8617,20 @@ Routing-policy terms compile only `protocol`, `prefix-list`, `route-filter`,
 `community`, and `as-path` matches. Previously, another `from` leaf such as
 `rib`, `instance`, `neighbor`, `next-hop`, `metric`, or `tag` was ignored,
 which could turn a constrained `then accept` term into an unconditional accept.
-Strict compilation now rejects unsupported `from` leaves in hierarchical, packed,
-flat-set, and compact-normalized forms, including unbracketed tokens beyond a
-scalar leaf's schema arity and opaque tokens following a bracketed match list.
-Compact-normalized supported siblings are split back into their typed matches
-rather than being absorbed as values of the first leaf. Tolerant loads preserve
-unsupported names in `PolicyTerm.UnknownFrom`, force the affected term to
-`reject`, clear `NextPolicy`, and emit a warning. A bare value that spells a
-clause keyword remains valid inside a balanced bracketed list; only an
-unbracketed sibling `then` marks the term boundary. An unclosed list still fails
-closed. Fail-on-revert coverage is in
-`pkg/config/routing_policy_unknown_from_11779_test.go`.
+Strict compilation rejects unsupported `from` leaves in hierarchical, packed,
+flat-set, and compact-normalized forms, including tokens beyond a scalar leaf's
+schema arity, mixed packed keys plus child bodies, policy-level `from` clauses,
+nested opaque child bodies, and invalid route-filter trailers. Supported
+multi-value matches remain typed across `Format` and `FormatSet` replay;
+unbracketed serialized runs are split at recognized clause heads and preserve
+opaque unsupported tails instead of absorbing them into the preceding value.
+Tolerant loads retain unsupported term predicates in `PolicyTerm.UnknownFrom`
+and policy-level predicates in `PolicyStatement.UnknownFrom`, force affected
+terms to `reject`, clear `NextPolicy`, and warn with every affected term named.
+Bracket closure is tracked structurally, separately from per-token bracket
+provenance: any observed unclosed bracketed `from` list fails closed, while a
+bare or quoted clause word inside a balanced list remains a value. Fail-on-revert
+coverage is in `pkg/config/routing_policy_unknown_from_11779_test.go`.
 
 The policy-statement ACTION `then as-path-prepend "<asn> <asn> ..."` (#2892) is
 the same class on the `then` side. The leaf is `multi:true`
