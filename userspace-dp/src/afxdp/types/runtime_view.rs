@@ -507,7 +507,9 @@ fn subtract_prefix(prefix: IpNet, excluded: IpNet, output: &mut Vec<IpNet>) {
         output.push(prefix);
         return;
     }
-    if excluded.contains(&prefix.network()) {
+    if excluded.prefix_len() <= prefix.prefix_len()
+        && excluded.contains(&prefix.network())
+    {
         return;
     }
     let Some((left, right)) = split_prefix(prefix) else {
@@ -1168,5 +1170,51 @@ mod tests {
         );
         let poisoned = PMechInventory::from_snapshot(Some(&ambiguous));
         assert!(!poisoned.complete(), "conflicting same-prefix legs must poison authority");
+    }
+
+    #[test]
+    fn subtract_prefix_preserves_siblings_for_edge_blockers() {
+        let base = "10.0.0.0/8".parse::<IpNet>().expect("base prefix");
+        for (excluded, expected) in [
+            (
+                "10.0.0.0/16",
+                vec![
+                    "10.1.0.0/16",
+                    "10.2.0.0/15",
+                    "10.4.0.0/14",
+                    "10.8.0.0/13",
+                    "10.16.0.0/12",
+                    "10.32.0.0/11",
+                    "10.64.0.0/10",
+                    "10.128.0.0/9",
+                ],
+            ),
+            (
+                "10.1.0.0/16",
+                vec![
+                    "10.0.0.0/16",
+                    "10.2.0.0/15",
+                    "10.4.0.0/14",
+                    "10.8.0.0/13",
+                    "10.16.0.0/12",
+                    "10.32.0.0/11",
+                    "10.64.0.0/10",
+                    "10.128.0.0/9",
+                ],
+            ),
+        ] {
+            let excluded = excluded.parse::<IpNet>().expect("excluded prefix");
+            let got = subtract_prefix_set(vec![base], excluded)
+                .into_iter()
+                .map(|prefix| prefix.to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(got, expected, "subtracting {excluded} from {base}");
+        }
+    }
+
+    #[test]
+    fn subtract_prefix_equal_length_blocker_removes_the_whole_prefix() {
+        let prefix = "10.0.0.0/16".parse::<IpNet>().expect("prefix");
+        assert!(subtract_prefix_set(vec![prefix], prefix).is_empty());
     }
 }
