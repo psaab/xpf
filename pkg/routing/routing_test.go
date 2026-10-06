@@ -1639,28 +1639,68 @@ func TestBuildPBRRules(t *testing.T) {
 		}
 	})
 
-	// #3730 apply leg: a rule carrying L4 selectors reaches the netlink rule with
-	// IPProto/Dport set. This pins the pbrManager.Apply wiring (RED if the Apply
-	// stops copying IPProto/Sport/Dport onto the netlink.Rule).
-	t.Run("3730 apply emits L4 selectors", func(t *testing.T) {
-		ops := newFakeRuleOps()
-		p := &pbrManager{ops: ops}
-		if err := p.Apply([]PBRRule{
-			{Family: unix.AF_INET, IPProto: 6, Dport: &PBRPortRange{Lo: 443, Hi: 443}, TableID: 100, Instance: "vr", IifName: "ge-0-0-0"},
-		}); err != nil {
-			t.Fatalf("Apply: %v", err)
-		}
-		got := ops.rules[unix.AF_INET]
-		if len(got) != 2 {
-			t.Fatalf("expected lookup and unreachable rules, got %d", len(got))
-		}
-		for _, rule := range got {
-			if rule.IPProto != 6 {
-				t.Errorf("netlink rule IPProto = %d, want 6", rule.IPProto)
-			}
-			if rule.Dport == nil || rule.Dport.Start != 443 || rule.Dport.End != 443 {
-				t.Errorf("netlink rule Dport = %+v, want [443,443]", rule.Dport)
-			}
+	// #3730 Apply leg: pin the address and L4 selectors on both the lookup rule
+	// and its unreachable shadow for IPv4 and IPv6. Checking each emitted rule
+	// independently catches a selector copy removed before the shadow is cloned.
+	t.Run("apply copies selectors to lookup and unreachable rules", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			family int
+			src    string
+			dst    string
+		}{
+			{"ipv4", unix.AF_INET, "192.0.2.0/24", "198.51.100.0/24"},
+			{"ipv6", unix.AF_INET6, "2001:db8:1::/64", "2001:db8:2::/64"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ops := newFakeRuleOps()
+				p := &pbrManager{ops: ops}
+				if err := p.Apply([]PBRRule{
+					{
+						Family: tc.family, Src: tc.src, Dst: tc.dst, IPProto: 6,
+						Sport: &PBRPortRange{Lo: 1024, Hi: 2048},
+						Dport: &PBRPortRange{Lo: 443, Hi: 443}, TableID: 100,
+						Instance: "vr", IifName: "ge-0-0-0",
+					},
+				}); err != nil {
+					t.Fatalf("Apply: %v", err)
+				}
+				got := ops.rules[tc.family]
+				if len(got) != 2 {
+					t.Fatalf("expected lookup and unreachable rules, got %d", len(got))
+				}
+				lookups, shadows := 0, 0
+				for _, rule := range got {
+					role := "lookup rule"
+					switch rule.Type {
+					case unix.RTN_UNICAST:
+						lookups++
+					case pbrTerminatorAction:
+						role = "unreachable terminator"
+						shadows++
+					default:
+						t.Errorf("unexpected rule type %d", rule.Type)
+					}
+					if rule.Src == nil || rule.Src.String() != tc.src {
+						t.Errorf("%s Src = %v, want %s", role, rule.Src, tc.src)
+					}
+					if rule.Dst == nil || rule.Dst.String() != tc.dst {
+						t.Errorf("%s Dst = %v, want %s", role, rule.Dst, tc.dst)
+					}
+					if rule.IPProto != 6 {
+						t.Errorf("%s IPProto = %d, want 6", role, rule.IPProto)
+					}
+					if rule.Sport == nil || rule.Sport.Start != 1024 || rule.Sport.End != 2048 {
+						t.Errorf("%s Sport = %+v, want [1024,2048]", role, rule.Sport)
+					}
+					if rule.Dport == nil || rule.Dport.Start != 443 || rule.Dport.End != 443 {
+						t.Errorf("%s Dport = %+v, want [443,443]", role, rule.Dport)
+					}
+				}
+				if lookups != 1 || shadows != 1 {
+					t.Errorf("got %d lookup rules and %d unreachable terminators, want one of each", lookups, shadows)
+				}
+			})
 		}
 	})
 }
