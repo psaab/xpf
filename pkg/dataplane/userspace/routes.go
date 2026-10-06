@@ -562,11 +562,13 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	// default's next-hop instead of the learned one. Import closes both.
 	//
 	// PREFERENCE-AWARE GAP-FILL. Keep a config-derived route when its
-	// preference is at least as good as the imported route's 200. When the
-	// config route is a worse-preference fallback (for example preference
-	// 250), publish both: the Rust FIB's ascending-preference tie-break then
-	// selects the kernel's already-selected learned route. This preserves
-	// ordinary config routes as winners while honoring floating fallbacks.
+	// preference is at least as good as the imported route's learned
+	// protocol distance (eBGP 20, OSPF 110, IS-IS 115, RIP 120; other
+	// protocols 200). When the config route is a worse-preference fallback
+	// (for example preference 250), publish both: the Rust FIB's
+	// ascending-preference tie-break then selects the kernel's
+	// already-selected learned route. This preserves ordinary config routes
+	// as winners while honoring floating fallbacks.
 	//
 	// THE OVERLAY ALWAYS WINS, and the gap-fill rule — not this call's
 	// position — is what guarantees it. Measured, because the obvious claim
@@ -1448,13 +1450,24 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 			lowestMetric = lr.Metric
 			haveMetricKey = true
 		}
-		if best, ok := configuredPreference[key]; ok &&
-			best <= routing.LearnedRouteImportPreference {
-			// The configured route is at least as preferred as the imported
-			// route, so keep it as the sole candidate. A worse-preference
-			// fallback remains beside the imported route for the Rust FIB's
-			// established preference ordering to select the better path.
-			continue
+		learnedPreference := routing.LearnedRouteImportPreference
+		if best, ok := configuredPreference[key]; ok {
+			comparisonPreference := routing.LearnedRouteImportPreference
+			if protocolDistance, ok := learnedRouteProtocolDistance(lr.Protocol); ok {
+				comparisonPreference = protocolDistance
+				// Preserve the legacy 200 tier for fallbacks already worse
+				// than 200; only nearer configured routes need a stamped
+				// protocol distance to order the learned route ahead.
+				if best <= routing.LearnedRouteImportPreference {
+					learnedPreference = protocolDistance
+				}
+			}
+			if best <= comparisonPreference {
+				// Keep a configured route that is at least as preferred as
+				// the learned protocol route. A worse configured fallback
+				// remains beside it for the Rust FIB's preference ordering.
+				continue
+			}
 		}
 		addSnapshot(RouteSnapshot{
 			Table:          table,
@@ -1463,11 +1476,31 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 			Discard:        lr.Discard,
 			NextHops:       lr.NextHops,
 			NextHopWeights: nonDefaultRouteWeights(lr.NextHopWeights),
-			Preference:     routing.LearnedRouteImportPreference,
+			Preference:     learnedPreference,
 			MTU:            lr.MTU,
 		})
 	}
 	return capped, nil
+}
+
+// learnedRouteProtocolDistance returns FRR's default distance for dynamic
+// routes whose kernel protocol identifies their routing daemon. RTPROT_BGP
+// does not distinguish eBGP from iBGP, so use the default external BGP
+// distance here; the kernel-selected row itself is the source of truth that
+// the route is active.
+func learnedRouteProtocolDistance(protocol string) (int, bool) {
+	switch protocol {
+	case "bgp":
+		return 20, true
+	case "ospf":
+		return 110, true
+	case "isis":
+		return 115, true
+	case "rip":
+		return 120, true
+	default:
+		return 0, false
+	}
 }
 
 // learnedRouteGapKey is the (table, family, destination) identity used to

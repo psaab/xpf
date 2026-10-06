@@ -74,15 +74,14 @@ import (
 // on a fresh boot for the width of the first push. #7437 shrinks the
 // exposure; it does not make #6664 safe by itself.
 
-// LearnedRouteImportPreference is the route preference assigned to imported
-// kernel-selected routes in the helper FIB.
+// LearnedRouteImportPreference is the fallback preference assigned to imported
+// kernel-selected routes when no same-prefix dynamic protocol distance applies.
 //
-// The snapshot builder uses it in same-prefix arbitration: a configured route
-// at this preference or better remains sole; a worse configured fallback
-// (for example a floating static at preference 250) is retained beside the
-// imported route. The Rust FIB selects the first live preference tier, so a
-// later live configured backup remains usable if the imported route is
-// unresolved (#11316). The value also mirrors FRR's DHCP default distance.
+// The snapshot builder compares BGP, OSPF, IS-IS and RIP routes with their
+// default FRR distances when deciding whether a configured route wins. Other
+// learned routes keep this preference: configured routes at this preference
+// or better remain sole, while a worse configured fallback stays beside the
+// imported route. This value also mirrors FRR's DHCP default distance.
 const LearnedRouteImportPreference = 200
 
 // haInactiveBlackholePriority is the sentinel priority used for kernel
@@ -156,9 +155,9 @@ type LearnedRoute struct {
 	// 1. The consumer must never sort or reorder the legs: the weight at
 	// index i selects the next hop at index i.
 	NextHopWeights []uint32
-	// Protocol is the rtnetlink protocol name (rtProtoName) that admitted
-	// the route — "bgp", "ospf", "isis", "rip", "static", "dhcp",
-	// "connected". Diagnostic only; it does not reach the helper.
+	// Protocol is the rtnetlink protocol name (rtProtoName) that admitted the
+	// route. The helper uses "bgp", "ospf", "isis", and "rip" for same-prefix
+	// distance arbitration; other names remain available for diagnostics.
 	Protocol string
 	// MTU is the kernel route-wide RTA_METRICS/RTAX_MTU constraint.
 	// Zero means absent or unknown.
