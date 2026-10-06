@@ -152,10 +152,10 @@ func buildOneRuleSnapshot(
 	}
 	srcDropExcludedEmpty := pol.Match.SourceAddressExcluded &&
 		len(srcDroppedFeedRefs) > 0 &&
-		!policyAddressSideHasConcretePrefix(cfg, feedOverlay, pol.Match.SourceAddresses)
+		!policyAddressSideHasConcretePrefix(cfg, feedOverlay, nameToID, pol.Match.SourceAddresses)
 	dstDropExcludedEmpty := pol.Match.DestinationAddressExcluded &&
 		len(dstDroppedFeedRefs) > 0 &&
-		!policyAddressSideHasConcretePrefix(cfg, feedOverlay, pol.Match.DestinationAddresses)
+		!policyAddressSideHasConcretePrefix(cfg, feedOverlay, nameToID, pol.Match.DestinationAddresses)
 	srcUnrepresentable := !allAddressTokensRepresentable(addrRepresentable, pol.Match.SourceAddresses) || srcDropExcludedEmpty
 	dstUnrepresentable := !allAddressTokensRepresentable(addrRepresentable, pol.Match.DestinationAddresses) || dstDropExcludedEmpty
 	var sourceAddresses, destinationAddresses []string

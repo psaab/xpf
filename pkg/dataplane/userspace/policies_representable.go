@@ -320,12 +320,27 @@ func emptyDroppedFeedReferences(cfg *config.Config, feedOverlay map[string][]str
 // side contributes a concrete address in either family. It is used only when
 // an excluded side reaches a present-empty drop feed, so a populated sibling
 // literal or book keeps its existing exclusion semantics.
-func policyAddressSideHasConcretePrefix(cfg *config.Config, feedOverlay map[string][]string, addrs []string) bool {
+func policyAddressSideHasConcretePrefix(cfg *config.Config, feedOverlay map[string][]string, nameToID map[string]uint32, addrs []string) bool {
 	for _, token := range addrs {
 		if token == "" {
 			continue
 		}
-		if token == "any" || config.IsPolicyAddressWildcardKeyword(token) || isUserspaceLiteralAddress(token) {
+		// Match classifyPolicyAddresses precedence: wildcard keywords are always
+		// literals; otherwise a known name resolves before literal parsing.
+		if config.IsPolicyAddressWildcardKeyword(token) {
+			return true
+		}
+		_, knownBook := nameToID[token]
+		_, feedBound := feedOverlay[token]
+		binding := cfg != nil && cfg.Security.DynamicAddress.AddressBindings[token] != nil
+		if knownBook || feedBound || binding {
+			v4, v6 := expandBookNameToCIDRs(cfg, feedOverlay, token)
+			if len(v4) > 0 || len(v6) > 0 {
+				return true
+			}
+			continue
+		}
+		if isUserspaceLiteralAddress(token) {
 			return true
 		}
 		v4, v6 := expandBookNameToCIDRs(cfg, feedOverlay, token)
