@@ -11612,20 +11612,22 @@ reserved for whole-dataplane selection where a rewrite shim
   ordering, packed-leaf collisions) and
   `pkg/configstore/check_reserved_ri_9622_test.go` (`CheckText`).
 - **#11391 (derived VRF device names):** routing-instance keys deliberately
-  have no schema key validator, but the runtime creates `vrf-<name>` directly.
-  `validateRoutingInstanceKernelNameAST` checks the full
-  `routingInstanceNameUnionAST` at strict commit and commit-check on both compiler
-  cores: the derived name must fit in 15 bytes (`IFNAMSIZ`, counted as bytes)
+  have no schema key validator, but VRF-based instances create `vrf-<name>`
+  directly. `validateRoutingInstanceKernelNameAST` checks expanded names and
+  effective instance-types at strict commit and commit-check on both compiler
+  cores: a VRF-derived name must fit in 15 bytes (`IFNAMSIZ`, counted as bytes)
   and pass Linux `dev_valid_name` (no slash, colon, ASCII whitespace, or NUL).
   An 11-byte RI name is the longest valid ASCII name because of the four-byte
-  `vrf-` prefix. Tolerant load skips this strict gate and
-  `compileRoutingInstances` quarantines invalid names with one warning before
-  the table-id collision pass, so they never reach VRF planning. The
-  `validateRoutingInstanceTableIDCollisionAST` excludes them from its preflight
-  collision set so tolerant warnings match the quarantine order.
-  Regression coverage: `pkg/config/routinginstance_kernel_name_11391_test.go` (byte
-  boundaries, invalid characters, AST union, strict rejection and tolerant
-  quarantine) and
+  `vrf-` prefix. Forwarding instances create no VRF device, so this gate neither
+  rejects nor quarantines them based on their name; they still claim a table
+  and remain part of #3855 table-id collision checks. Tolerant load skips the
+  strict gate and `compileRoutingInstances` quarantines invalid VRF-based names
+  with one warning before the table-id collision pass, so they never reach VRF
+  planning. `validateRoutingInstanceTableIDCollisionAST` excludes only those
+  quarantined VRF names from its preflight collision set. Regression coverage:
+  `pkg/config/routinginstance_kernel_name_11391_test.go` (byte boundaries,
+  invalid characters, strict rejection, tolerant quarantine, and #12038 direct
+  and apply-group forwarding instances) and
   `pkg/configstore/check_routinginstance_kernel_name_11391_test.go`
   (`CheckText` commit-check path).
 - **#9657 (the routing-instance collision gate counts only instances some

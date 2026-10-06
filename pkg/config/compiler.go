@@ -420,9 +420,9 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	// #3855: stable routing-instance table-id collision gate. Like the zone gate
 	// above it runs on the PRE-expansion tree and unions the instance names each
 	// compile path's own group expansion lands (#9657), so both cluster nodes
-	// accept/reject identically. Strict
-	// hard-rejects a colliding pair (two VRFs must never share a kernel table);
-	// lenient warns and compileRoutingInstances quarantines the later instance.
+	// accept/reject identically. Strict hard-rejects a colliding pair of routing
+	// instances; lenient warns and compileRoutingInstances quarantines the later
+	// instance.
 	riTableIDWarnings, riTableIDErr := validateRoutingInstanceTableIDCollisionAST(
 		tree, nil, opts.lenientRoutingInstanceTableIDCollision)
 	if riTableIDErr != nil {
@@ -436,9 +436,10 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 			return nil, err
 		}
 	}
-	// #11391: strict commit also verifies that each routing instance can become
-	// its derived vrf-<name> Linux device. Tolerant paths skip this gate and
-	// quarantine invalid names in compileRoutingInstances.
+	// #11391: strict commit verifies that every VRF-based routing instance can
+	// become its derived vrf-<name> Linux device. Forwarding instances do not
+	// create that device. Tolerant paths skip this gate and quarantine only
+	// invalid VRF-based names in compileRoutingInstances.
 	if !opts.lenientRoutingInstanceKernelName {
 		if err := validateRoutingInstanceKernelNameAST(tree, nil); err != nil {
 			return nil, err
@@ -793,8 +794,8 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 			return nil, err
 		}
 	}
-	// #11391: same expanded-name gate as the generic compiler above, including
-	// names from both cluster-node group expansions.
+	// #11391: same expanded instance-type-aware gate as the generic compiler,
+	// including group-supplied types and names from both cluster-node expansions.
 	if !opts.lenientRoutingInstanceKernelName {
 		if err := validateRoutingInstanceKernelNameAST(tree, &nodeID); err != nil {
 			return nil, err

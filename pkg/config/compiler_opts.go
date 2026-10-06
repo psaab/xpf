@@ -909,7 +909,7 @@ type compileOpts struct {
 	// retained for boot compatibility, but colliding references are recorded and
 	// refused during userspace expansion rather than matching an arbitrary winner.
 	lenientApplicationNameCollisions bool
-	applicationNameCollisions       *map[string]struct{}
+	applicationNameCollisions        *map[string]struct{}
 
 	// lenientReservedApplicationNames (#5821, #12048) downgrades the
 	// reserved-name gate (validateReservedApplicationNamesStrict) from a hard
@@ -1712,9 +1712,9 @@ type compileOpts struct {
 	// that reports it.
 	lenientReservedRoutingInstanceName bool
 	// lenientRoutingInstanceKernelName (#11391) skips the strict derived VRF
-	// device-name gate. Tolerant load and peer-sync quarantine an instance whose
-	// vrf-<name> device exceeds IFNAMSIZ or fails Linux dev_valid_name instead of
-	// rejecting an already-persisted config.
+	// device-name gate. Tolerant load and peer-sync quarantine an invalid name
+	// only for instances that would create a vrf-<name> device; forwarding
+	// instances create no VRF device and remain active.
 	lenientRoutingInstanceKernelName bool
 	// lenientAddressBookNames (#3061, narrowed in #4340) downgrades the
 	// address-book / zone name gate (validateAddressBookEntryNamesStrict) from a
@@ -3158,7 +3158,7 @@ func lenientCompileOpts() compileOpts {
 		lenientOSPFMD5KeyID11794:               true,
 		lenientISISMetric11823:                 true,
 		lenientBGPPrefixLimit11793:             true,
-		lenientBGPSAFI11815:                   true,
+		lenientBGPSAFI11815:                    true,
 		lenientRouteFilterMatchTypes:           true,
 		lenientApplicationSpecs:                true,
 		lenientApplicationNameCollisions:       true,
@@ -3269,7 +3269,7 @@ func lenientCompileOpts() compileOpts {
 		lenientTrailingTokens:                  true,
 		lenientAddressUnimplementedForms:       true,
 		lenientAddressBookMappedPrefixes:       true,
-		lenientAddressBookCIDRMaskSpelling: true,
+		lenientAddressBookCIDRMaskSpelling:     true,
 		lenientFlowAging:                       true,
 		lenientChassisRG:                       true,
 		lenientVRRPGroupID:                     true,
