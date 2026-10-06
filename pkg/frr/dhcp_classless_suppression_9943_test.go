@@ -124,6 +124,51 @@ func TestDHCPClasslessCoveringStaticStillInstalls_9943(t *testing.T) {
 	}
 }
 
+// #12060: a covered DHCP classless route is suppressed only when the effective
+// static distance wins over DHCP's distance 200. Route-level and qualified
+// next-hop preferences above 200 leave the learned route available.
+func TestDHCPClasslessHighPreferenceDoesNotSuppress12060(t *testing.T) {
+	cases := []struct {
+		name  string
+		route *config.StaticRoute
+	}{
+		{
+			name: "route preference",
+			route: &config.StaticRoute{
+				Destination: "10.0.0.0/8",
+				Preference:  250,
+				NextHops:    []config.NextHopEntry{{Address: "172.16.50.1"}},
+			},
+		},
+		{
+			name: "qualified-next-hop preference",
+			route: &config.StaticRoute{
+				Destination: "10.0.0.0/8",
+				Preference:  5,
+				NextHops: []config.NextHopEntry{{
+					Address: "172.16.50.1", Preference: 250, HasPreference: true,
+				}},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := &FullConfig{
+				StaticRoutes: []*config.StaticRoute{tc.route},
+				DHCPRoutes: []DHCPRoute{{
+					Destination: "10.0.0.0/9",
+					Gateway:     "192.0.2.1",
+					Interface:   "ge-0-0-3",
+				}},
+			}
+			got := renderDHCP9943(t, fc)
+			if !strings.Contains(got, "ip route 10.0.0.0/9 192.0.2.1 ge-0-0-3 200\n") {
+				t.Fatalf("DHCP distance 200 must remain installed beside static distance 250:\n%s", got)
+			}
+		})
+	}
+}
+
 // Suppression is per-VRF (#8963): a static default in one table says nothing
 // about a learned route in another.
 func TestDHCPClasslessSuppressionIsPerVRF_9943(t *testing.T) {

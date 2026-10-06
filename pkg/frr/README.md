@@ -782,6 +782,12 @@ step. Both are required — neither sees the other's case:
   the helper snapshot, while the shared static-route exclusion map gives the
   show surfaces the same `NOT INSTALLED` reason. The Rust snapshot builder also
   fails closed on a mismatched literal before its family-specific parser runs.
+- **FRR static-distance range (#12060).** Route-level and qualified-next-hop
+  `preference` leaves accept only 1..254. FRR's CLI grammar accepts 255, but
+  zebra treats it as `DISTANCE_INFINITY`, so it never installs that route.
+  Tolerant loads clamp larger effective distances to 254 with a warning before
+  rendering (including discard/reject routes); an omitted preference still
+  omits the operand and uses FRR's default distance 1.
 - **Floating static via `qualified-next-hop` (#3871).** A static route's
   `qualified-next-hop <gw> { preference N; metric M; }` is the Junos floating-
   static idiom — a primary next-hop plus a LESS-preferred backup that installs
@@ -878,16 +884,18 @@ step. Both are required — neither sees the other's case:
   high-distance discard/reject renders alongside DHCP and leaves FRR to select
   the preferred route. Empty non-discard routes still render nothing (#5519).
 
-- **DHCP classless-route precedence (#11426).** `renderDHCPDefaults` suppresses
-  a lease prefix when a renderable configured static or an installed route in
-  the same table contains it. `assembleFRRConfig` supplies live main/instance
-  RIB routes at each FRR apply; static protocol rows are excluded because
-  staticd also stamps installed DHCP classless routes, which would otherwise
-  self-suppress on the next apply. The active preferred-route overlay is checked
-  directly. A dynamic `/0` is not classless-prefix coverage. A failed/partial
-  RIB read refuses classless installs unless
-  `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1` is explicitly set; DHCP defaults remain
-  on their existing path.
+- **DHCP classless-route precedence (#11426/#12060).** `renderDHCPDefaults`
+  suppresses a lease prefix when a configured static route in the same table
+  contains it and its effective distance is no worse than DHCP's distance 200,
+  or when a live same-table RIB route contains it. A qualified-next-hop
+  preference overrides the route-level static distance. `assembleFRRConfig`
+  supplies live main/instance RIB routes at each FRR apply; static protocol
+  rows are excluded because staticd also stamps installed DHCP classless
+  routes, which would otherwise self-suppress on the next apply. The active
+  preferred-route overlay is checked directly. A dynamic `/0` is not
+  classless-prefix coverage. A failed/partial RIB read refuses classless
+  installs unless `XPF_DHCP_TRUST_CLASSLESS_OVERRIDE=1` is explicitly set;
+  DHCP defaults remain on their existing path.
 - **Export references are validated at commit (#2144).** A dynamic-protocol
   `export` (OSPF/OSPFv3/BGP/IS-IS), a RIP `redistribute`, a BGP
   group/neighbor `export`, and a `routing-options forwarding-table export`

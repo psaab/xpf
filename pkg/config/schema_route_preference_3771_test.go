@@ -5,15 +5,12 @@ import (
 	"testing"
 )
 
-// #3771/#11454: the route `preference` leaf is a typed integer bounded to
-// [1, 2147483647] at the Go commit boundary. FRR defaults an omitted static
-// distance to 1 while the Rust FIB preserves preference 0, so accepting 0
-// would silently change the route's meaning at render time. Reject it at
-// commit, uniformly with the qualified-next-hop preference leaf.
+// #12060: FRR staticd's distance operand accepts 1..255, but zebra treats 255
+// as DISTANCE_INFINITY and never installs the route. Strict commit therefore
+// limits route-level preference to the usable range 1..254.
 //
-// FAIL-ON-REVERT: dropping the `valueType: ValueInteger, validator:
-// ValidateInteger(1, maxWireI32)` on the schema `preference` leaf lets
-// preference 0 through, diverging from FRR's default distance 1.
+// FAIL-ON-REVERT: allowing preference 256 through makes FRR accept an unusable
+// route or reject a discard route during reload.
 func TestStaticRoutePreference_SchemaGate(t *testing.T) {
 	reject := func(val string) {
 		t.Helper()
@@ -31,12 +28,12 @@ func TestStaticRoutePreference_SchemaGate(t *testing.T) {
 			t.Fatalf("preference %q: expected SchemaValidate to accept, got %v", val, err)
 		}
 	}
-	// Zero, negative, non-numeric, and i32-overflow reject.
-	for _, val := range []string{"0", "-1", "-2147483648", "notanumber", "2147483648", "4294967295"} {
+	// Zero, negative, non-numeric, i32-overflow, and non-installable reject.
+	for _, val := range []string{"0", "-1", "-2147483648", "notanumber", "2147483648", "4294967295", "255", "256", "2147483647"} {
 		reject(val)
 	}
-	// Preference 1 is accepted explicitly and remains a Rust value of 1.
-	for _, val := range []string{"1", "5", "100", "2147483647"} {
+	// Preference 1 is accepted explicitly; 254 is the maximum installable.
+	for _, val := range []string{"1", "5", "100", "254"} {
 		accept(val)
 	}
 }
@@ -52,5 +49,17 @@ func TestStaticRoutePreference_NegativeErrorMentionsRange(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "-5") {
 		t.Fatalf("error %q must name the out-of-range value -5", err.Error())
+	}
+}
+
+func TestStaticRoutePreference_AboveFRRMaximumNamesLeaf12060(t *testing.T) {
+	tree := flatTreeFromSets(t,
+		"set routing-options static route 0.0.0.0/0 preference 256")
+	err := SchemaValidate(tree, nil)
+	if err == nil {
+		t.Fatal("expected route preference 256 to be rejected at commit")
+	}
+	if !strings.Contains(err.Error(), "preference") {
+		t.Fatalf("error %q must name the preference leaf", err.Error())
 	}
 }
