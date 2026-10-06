@@ -128,6 +128,29 @@ fn wg_outer_zone_matches(
     local_zone != 0 && local_zone == ingress_zone_id && source_zone == ingress_zone_id
 }
 
+/// Whether a UDP flow is addressed to a locally owned WireGuard listener in
+/// the packet's actual ingress zone. Unlike `is_wg_underlay_frame`, this
+/// tuple-only form is also used after the worker declines an authenticated
+/// keepalive, when the poll loop has already parsed the flow key.
+#[inline]
+pub(in crate::afxdp) fn is_wg_listener_tuple(
+    dst_port: u16,
+    dst_ip: std::net::IpAddr,
+    meta: UserspaceDpMeta,
+    forwarding: &ForwardingState,
+) -> bool {
+    if !forwarding.has_wg_tunnels || meta.protocol != PROTO_UDP {
+        return false;
+    }
+    let ingress_ifindex = logical_ingress_ifindex(forwarding, meta);
+    let Some((endpoint, _)) = wg_endpoint_for_listen_port(forwarding, dst_port, ingress_ifindex)
+    else {
+        return false;
+    };
+    wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip)
+        && forwarding.owns_configured_ip(dst_ip)
+}
+
 /// The WireGuard tunnel endpoint listening on `dst_port` in the resolved
 /// ingress interface's transport routing instance, with its live engine.
 ///

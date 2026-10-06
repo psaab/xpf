@@ -1134,6 +1134,14 @@ SNAT replies return to the worker for reverse NAT. In either case the later
 host-inbound mismatch guard remains authoritative; authenticated transport-data
 records use the same owner-zone proof before worker decapsulation.
 
+An authenticated keepalive that the worker declines has no inner flow to
+cache. The poll loop therefore suppresses `LocalMiss` publication for that
+exact same-zone listener tuple: otherwise the session-first XDP lookup would
+redirect the next handshake into the worker, and trusted reinjection would
+hit the physical-ingress owner-zone drop. With no outer-tuple session, a
+same-zone handshake reaches the kernel control socket; ordinary local UDP
+misses and decapsulated inner flows keep their existing session behavior.
+
 The trusted `xpf-usp0` reinject path receives no WireGuard mismatch exemption.
 Its later accept remains after any fine `junos-host` policy programs, and the
 owner-zone mismatch drops precede it. A stale dataplane snapshot still omits the

@@ -206,11 +206,13 @@ func TestUserspaceXDPWireGuardSNATControlSteering12119(t *testing.T) {
 		ownerZone         uint16
 		hasOwnerAdmission bool
 		interfaceSNAT     bool
+		wgType            byte
 		wantAction        uint32
 	}{
-		{name: "same-zone SNAT listener handshake reaches kernel", arrivalZone: 2, ownerZone: 2, hasOwnerAdmission: true, interfaceSNAT: true, wantAction: xdpActionPass},
-		{name: "wrong-zone SNAT listener handshake does not reach kernel", arrivalZone: 1, ownerZone: 2, hasOwnerAdmission: true, interfaceSNAT: true, wantAction: xdpActionDrop},
-		{name: "transit handshake on listener port does not reach kernel", arrivalZone: 2, ownerZone: 2, wantAction: xdpActionDrop},
+		{name: "same-zone SNAT listener initiation reaches kernel", arrivalZone: 2, ownerZone: 2, hasOwnerAdmission: true, interfaceSNAT: true, wgType: 1, wantAction: xdpActionPass},
+		{name: "same-zone SNAT listener response reaches kernel without a LocalMiss row", arrivalZone: 2, ownerZone: 2, hasOwnerAdmission: true, interfaceSNAT: true, wgType: 2, wantAction: xdpActionPass},
+		{name: "wrong-zone SNAT listener handshake does not reach kernel", arrivalZone: 1, ownerZone: 2, hasOwnerAdmission: true, interfaceSNAT: true, wgType: 1, wantAction: xdpActionDrop},
+		{name: "transit handshake on listener port does not reach kernel", arrivalZone: 2, ownerZone: 2, wgType: 1, wantAction: xdpActionDrop},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			coll := loadUserspaceXDPTestCollection(t)
@@ -237,7 +239,7 @@ func TestUserspaceXDPWireGuardSNATControlSteering12119(t *testing.T) {
 
 			packet := ipv4TestPacket([4]byte{203, 0, 113, 9}, wgAdmissionTestAddress, 17, 24)
 			binary.BigEndian.PutUint16(packet[36:38], 51820)
-			packet[42] = 1 // WireGuard initiation: it belongs at the kernel socket.
+			packet[42] = tc.wgType
 			if got := runUserspaceXDPTestPacket(t, coll, packet); got != tc.wantAction {
 				t.Fatalf("XDP action = %d, want %d", got, tc.wantAction)
 			}

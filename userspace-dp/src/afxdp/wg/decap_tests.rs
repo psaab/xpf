@@ -1402,6 +1402,96 @@ fn worker_decap_roams_endpoint_on_keepalive_9018() {
         "the keepalive counter is unchanged by #9018"
     );
 }
+/// A declined same-zone listener keepalive must not leave a LocalMiss row on
+/// the outer UDP tuple. XDP gives that row precedence over the WG control
+/// steer; the next handshake would return through the worker and trusted
+/// reinjection would fail the kernel's physical-ingress owner-zone guard.
+#[test]
+fn poll_loop_does_not_cache_declined_wg_keepalive_listener_tuple_12119() {
+    let (forwarding, init, rpub) = wiring_fixture_with_host_services(true, &["any-service"]);
+    let mut wire = vec![0u8; 2048];
+    let keepalive = init
+        .create_keepalive(&rpub, &mut wire)
+        .expect("authenticated keepalive");
+    let frame = outer_frame(&wire[..keepalive.len], WG_PORT);
+    let meta = wiring_meta(frame.len());
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    assert_eq!(dbg.rx, 1, "the keepalive must enter the poll loop");
+    assert_eq!(
+        batch.validated_packets, 1,
+        "the keepalive metadata must validate"
+    );
+    assert_eq!(
+        batch.host_inbound_denied_packets, 0,
+        "the zone admits host delivery"
+    );
+
+    let mut local_misses = Vec::new();
+    sessions.iter_with_origin(|key, _, _, origin| {
+        if origin == SessionOrigin::LocalMiss {
+            local_misses.push(key.clone());
+        }
+    });
+    assert!(
+        local_misses.is_empty(),
+        "a declined WG keepalive has no inner flow to cache; its outer listener tuple \
+         must not publish LocalMiss REDIRECT steering that steals the next handshake: \
+         {local_misses:?}"
+    );
+
+    // The suppression is exact to a configured listener flow: ordinary
+    // same-destination UDP still publishes its LocalMiss session.
+    let ordinary = outer_frame(&wire[..keepalive.len], WG_PORT + 1);
+    let (ordinary_batch, ordinary_dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &ordinary,
+        wiring_meta(ordinary.len()),
+        true,
+    );
+    assert_eq!(
+        ordinary_dbg.rx, 1,
+        "ordinary UDP must still enter the poll loop"
+    );
+    assert_eq!(ordinary_batch.host_inbound_denied_packets, 0);
+    let mut ordinary_misses = Vec::new();
+    sessions.iter_with_origin(|key, _, _, origin| {
+        if origin == SessionOrigin::LocalMiss {
+            ordinary_misses.push(key.clone());
+        }
+    });
+    assert_eq!(
+        ordinary_misses.len(),
+        1,
+        "ordinary non-listener UDP must retain one LocalMiss row"
+    );
+    assert_eq!(ordinary_misses[0].protocol, PROTO_UDP);
+    assert_eq!(
+        ordinary_misses[0].src_ip,
+        std::net::IpAddr::V4(PEER_OUTER.into())
+    );
+    assert_eq!(
+        ordinary_misses[0].dst_ip,
+        std::net::IpAddr::V4(XPF_OUTER.into())
+    );
+    assert_eq!(ordinary_misses[0].src_port, PEER_SPORT);
+    assert_eq!(ordinary_misses[0].dst_port, WG_PORT + 1);
+}
 
 /// The same for MALFORMED INNER: authenticated, undeliverable, still roams.
 ///

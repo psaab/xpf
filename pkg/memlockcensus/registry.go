@@ -81,4 +81,5 @@ var Registry = []Site{
 	{File: "pkg/dataplane/verify_userspace_shim_test.go", Test: "TestVerifyUserspaceShimShrinkEquivalence"},
 	{File: "pkg/dataplane/userspace/wg_zone_admission_11574_test.go", Test: "TestSyncUserspaceWGZoneMapsRemovesStaleSnapshotAuthority11574"},
 	{File: "pkg/dataplane/userspace/wg_zone_admission_11574_test.go", Test: "TestUserspaceXDPWireGuardSNATControlSteering12119"},
+	{File: "pkg/dataplane/userspace/wg_zone_admission_11574_test.go", Test: "TestUserspaceXDPWireGuardSNATSessionRedirectsLANHandshakeReply12119"},
 }
