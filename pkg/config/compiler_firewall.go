@@ -1449,14 +1449,39 @@ func firewallPrefixListRefs(child *Node) []PrefixListRef {
 	return refs
 }
 
-// firewallPackedUnknownFromLeaves returns schema-unknown leaves carried on a
-// packed `from` node. The generic packed-body expander cannot safely synthesize
-// an unknown leaf because its operand arity is not in the schema, but the
-// firewall compiler already has an explicit UnknownFrom contract for exactly
-// that case. Consume the unknown leaf's opaque tail until the next unquoted
+// packedRouteFilterWidth returns the consumed width of a packed routing-policy
+// route-filter leaf starting at keys[i]: the schema's three-token span plus
+// the match-type trailer when one follows and validates. The scanner and the
+// typed fallback must agree on this boundary.
+func packedRouteFilterWidth(keys []string, i, n int) int {
+	if n != 3 || i+n >= len(keys) {
+		return n
+	}
+	switch keys[i+2] {
+	case "upto":
+		if _, ok := parseRouteFilterLen(keys[i+n]); ok {
+			return n + 1
+		}
+	case "prefix-length-range":
+		if _, _, ok := parseRouteFilterRange(keys[i+n]); ok {
+			return n + 1
+		}
+	case "through":
+		if _, err := parseCIDRStrict(keys[i+n], "10.0.0.0/24"); err == nil {
+			return n + 1
+		}
+	}
+	return n
+}
+
+// packedUnknownFromLeaves returns schema-unknown leaves carried on a packed
+// `from` node. The generic packed-body expander cannot safely synthesize an
+// unknown leaf because its operand arity is not in the schema; firewall and
+// routing-policy callers preserve these leaves through their UnknownFrom
+// markers. Consume the unknown leaf's opaque tail until the next unquoted
 // schema-known `from` head; this preserves the first leaf name without
 // mistaking its value for another leaf.
-func firewallPackedUnknownFromLeaves(node *Node, schema *schemaNode) []string {
+func packedUnknownFromLeaves(node *Node, schema *schemaNode) []string {
 	if node == nil || schema == nil || len(node.Keys) == 0 {
 		return nil
 	}
@@ -1491,8 +1516,14 @@ func firewallPackedUnknownFromLeaves(node *Node, schema *schemaNode) []string {
 				}
 			}
 		}
+
 		if childSchema != nil {
 			n, refined := consumeNodeKeys(node.Keys[i:], childSchema)
+			if childSchema == resolveSchemaChild(schema, "route-filter") {
+				// Keep this scan in lockstep with the typed policy-term
+				// fallback; otherwise the trailer becomes a false unknown.
+				n = packedRouteFilterWidth(node.Keys, i, n)
+			}
 			if childSchema.multi && childSchema.children == nil && n > 1 &&
 				node.KeyBracketed(i+n-1) {
 				for n < len(node.Keys)-i && node.KeyBracketed(i+n) {
@@ -1599,7 +1630,7 @@ func compileFilterFrom(node *Node, term *FirewallFilterTerm, family string, rang
 		// Family-independent fallback for family-less / unknown AST shapes.
 		fromSchema = schemaForPath("firewall", "family", "inet", "filter", "term", "from")
 	}
-	for _, unknown := range firewallPackedUnknownFromLeaves(node, fromSchema) {
+	for _, unknown := range packedUnknownFromLeaves(node, fromSchema) {
 		// The packed scanner emits each opaque leaf once; retaining the
 		// existing append semantics for ordinary child nodes keeps duplicate
 		// authored leaves observable to the existing strict gate.

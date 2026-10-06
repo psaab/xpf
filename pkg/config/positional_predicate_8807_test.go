@@ -350,6 +350,12 @@ var posAdjudicated8807 = map[string]posVerdict8807{
 	// rows. #10327 models both direct VPN leaves alongside the nested `ike`
 	// form, so the positional predicate no longer reports them and the rows
 	// are retired from this live-hit adjudication map.
+	// `policy-statement / from` is a deliberate policy-level compiler read.
+	// Measured set and hierarchical spellings both fail strict compilation with
+	// the #11779 unsupported-from error; lenient compilation preserves the
+	// UnknownFrom marker, warns, and forces the affected terms to reject.
+	"policy-statement / from": {"benign", "MEASURED: set and hierarchical policy-level `from neighbor` spellings both fail strict compilation with the #11779 error; " +
+		"both lenient spellings retain UnknownFrom and force the term to reject."},
 }
 
 // posDefectFloor8807 is a RATCHET. It fails in BOTH directions: a rise means an

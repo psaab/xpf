@@ -89,14 +89,20 @@ type Lexer struct {
 	// so it describes THAT token and not the lexer's current position.
 	tokInBracket bool
 	// gapLoss records whether the gap most recently scanned by Next (or by
-	// Peek's internal Next) stripped tokenless brackets: an empty `[]` pair
-	// closed within the gap, or a stray `]` at depth zero. It is sampled
-	// into tokInBracket for the token the gap precedes, and ALSO persists
-	// after the return so a span-end check can ask about a TRAILING gap —
-	// brackets stripped after the span's last value token, which precede
-	// no recorded token at all (LastGapLoss). Reset at every Next entry;
-	// Peek deliberately does NOT restore it (see Peek).
+	// Peek's internal Next) stripped tokenless brackets: an empty `[]` pair,
+	// including the POSIX `[]...]` char-class head, or a stray `]` at depth
+	// zero. It is sampled into tokInBracket for the token the gap precedes,
+	// and ALSO persists after the return so a span-end check can ask about a
+	// TRAILING gap. Reset at every Next entry; Peek deliberately does NOT
+	// restore it (see Peek).
 	gapLoss bool
+	// gapClosed records a real closing `]` in the most recently scanned gap.
+	// Like gapLoss, it survives Peek so parsers can inspect the terminating
+	// semicolon's/EOF's gap without consuming the terminator.
+	gapClosed bool
+	// peekBracketDepth is the depth after the last token and its leading gap
+	// were scanned by Peek, before Peek restores the lexer's position.
+	peekBracketDepth int
 }
 
 // InBracket reports whether the token most recently returned by Next was
@@ -119,6 +125,16 @@ func (l *Lexer) InBracket() bool { return l.tokInBracket }
 // immediately after the Peek/Next that scanned the span-ending gap.
 func (l *Lexer) LastGapLoss() bool { return l.gapLoss }
 
+// LastGapClosed reports whether the most recently scanned gap consumed a real
+// closing `]`. Unlike LastGapLoss, this is positive structural evidence that
+// an opened list ended; a stray close never sets it.
+func (l *Lexer) LastGapClosed() bool { return l.gapClosed }
+
+// PeekBracketDepth reports bracket depth after the last token scanned by Peek.
+// Peek restores the live depth, so span parsers use this projected value to
+// distinguish balanced key spans from a list that remains open at `;` or EOF.
+func (l *Lexer) PeekBracketDepth() int { return l.peekBracketDepth }
+
 // NewLexer creates a new Lexer for the given input string.
 func NewLexer(input string) *Lexer {
 	return &Lexer{
@@ -134,6 +150,7 @@ func (l *Lexer) Next() Token {
 	// whatever a previous gap (or a Peek's internal scan) recorded is dead
 	// the moment a new scan starts.
 	l.gapLoss = false
+	l.gapClosed = false
 	// sawOpenAtZero remembers a `[` consumed at depth zero during THIS
 	// call's gap. If the gap later closes back to zero, the pair was
 	// tokenless — no Next returned between the delimiters, so no token
@@ -188,6 +205,7 @@ func (l *Lexer) Next() Token {
 				// underflow. The parser reports the malformed input; the
 				// grouping record simply stays off.
 				l.bracketDepth--
+				l.gapClosed = true
 				if l.bracketDepth == 0 && sawOpenAtZero {
 					// Tokenless pair: the gap opened at zero and closed
 					// within itself — `[]`, `[ ]`, or the POSIX `[]...]`
@@ -300,6 +318,7 @@ func (l *Lexer) Peek() Token {
 	savedDepth := l.bracketDepth
 	savedInBracket := l.tokInBracket
 	tok := l.Next()
+	l.peekBracketDepth = l.bracketDepth
 	l.pos = savedPos
 	l.line = savedLine
 	l.column = savedCol

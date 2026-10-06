@@ -3746,21 +3746,11 @@ func TestWireGuardTunnelSetSyntax(t *testing.T) {
 // protocols, not just the first. Regression for #2008 H18 — the old scalar
 // FromProtocol field silently discarded every protocol after the first.
 func TestPolicyTermMultiProtocolFlatSet(t *testing.T) {
-	tree := &ConfigTree{}
 	cmds := []string{
 		"set policy-options policy-statement EXPORT-ALL term t1 from protocol [ bgp ospf static ]",
 		"set policy-options policy-statement EXPORT-ALL term t1 then accept",
 	}
-	for _, cmd := range cmds {
-		path, err := ParseSetCommand(cmd)
-		if err != nil {
-			t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
-		}
-		if err := tree.SetPath(path); err != nil {
-			t.Fatalf("SetPath(%q): %v", cmd, err)
-		}
-	}
-	cfg, err := CompileConfig(tree)
+	cfg, err := compileSet(t, cmds)
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}

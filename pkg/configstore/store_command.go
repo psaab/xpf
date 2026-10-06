@@ -50,11 +50,11 @@ func (s *Store) SetAsQuotedGrouped(sessionID string, path []string, quoted, grou
 // event-options planting. The class is stamped while the same store lock is
 // held as the candidate edit, before the lock is released or another session
 // can commit the candidate.
-func (s *Store) SetAsQuotedGroupedPlantClass(sessionID, plantClass string, path []string, quoted, grouped []bool) error {
-	return s.setAsQuotedGroupedPlantClass(sessionID, plantClass, path, quoted, grouped)
+func (s *Store) SetAsQuotedGroupedPlantClass(sessionID, plantClass string, path []string, quoted, grouped []bool, closed ...bool) error {
+	return s.setAsQuotedGroupedPlantClass(sessionID, plantClass, path, quoted, grouped, closed...)
 }
 
-func (s *Store) setAsQuotedGroupedPlantClass(sessionID, plantClass string, path []string, quoted, grouped []bool) error {
+func (s *Store) setAsQuotedGroupedPlantClass(sessionID, plantClass string, path []string, quoted, grouped []bool, closed ...bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -68,7 +68,7 @@ func (s *Store) setAsQuotedGroupedPlantClass(sessionID, plantClass string, path 
 		return fmt.Errorf("not in configuration mode")
 	}
 	before := s.candidate.Clone()
-	if err := s.candidate.SetPathQuotedGrouped(path, quoted, grouped); err != nil {
+	if err := s.candidate.SetPathQuotedGrouped(path, quoted, grouped, closed...); err != nil {
 		return err
 	}
 	config.StampChangedEventPlantClasses(before, s.candidate, plantClass)
@@ -94,11 +94,11 @@ func (s *Store) SetFromInputAs(sessionID, input string) error {
 // SetFromInputAsPlantClass binds the authenticated planting class atomically
 // with the set mutation.
 func (s *Store) SetFromInputAsPlantClass(sessionID, plantClass, input string) error {
-	path, quoted, grouped, err := config.ParseSetCommandGrouped("set " + input)
+	_, path, quoted, grouped, closed, err := config.ParseSetVerbGroupedClosed("set " + input)
 	if err != nil {
 		return err
 	}
-	return s.SetAsQuotedGroupedPlantClass(sessionID, plantClass, path, quoted, grouped)
+	return s.SetAsQuotedGroupedPlantClass(sessionID, plantClass, path, quoted, grouped, closed)
 }
 
 // Delete removes a node at the given path from the candidate configuration. The
@@ -740,7 +740,7 @@ func hasFlatVerb(line string) bool {
 }
 
 func applyEditLine(tree *config.ConfigTree, line string) error {
-	verb, path, quoted, grouped, err := config.ParseSetVerbGrouped(line)
+	verb, path, quoted, grouped, closed, err := config.ParseSetVerbGroupedClosed(line)
 	if err != nil {
 		return err
 	}
@@ -752,19 +752,9 @@ func applyEditLine(tree *config.ConfigTree, line string) error {
 	case "activate":
 		return tree.ActivatePathGrouped(path, grouped)
 	default: // "set" (or a bare, unprefixed path)
-		// Quote provenance rides along so a `show | display set` dump replays
-		// into the same tree it was rendered from (#6673), and the bracket
-		// grouping rides along so a CONTAINER node's key list survives the
-		// round trip instead of being re-split at the schema's arity (#6668).
-		//
-		// The second one is not only an operator-facing display concern: the
-		// hierarchical branch of LoadMergeAs above renders the parsed file with
-		// FormatSet and replays it through THIS function, so before #6668 a
-		// `load merge <hierarchical-file>` rewrote the operator's config inside
-		// the daemon — a member demoted to a leaf keyword and its body
-		// re-parented under it — with every token still present and the merge
-		// reported as successful.
-		return tree.SetPathQuotedGrouped(path, quoted, grouped)
+		// Quote and bracket-close provenance preserve routing-policy semantics
+		// across the FormatSet replay performed for hierarchical load merges.
+		return tree.SetPathQuotedGrouped(path, quoted, grouped, closed)
 	}
 }
 

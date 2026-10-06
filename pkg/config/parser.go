@@ -245,52 +245,49 @@ func ParseSetVerbQuoted(input string) (verb string, path []string, quoted []bool
 // grouping keeps using ParseSetVerbQuoted / ParseSetVerb / ParseSetCommand,
 // which discard it — the pre-#6668 behaviour, unchanged.
 func ParseSetVerbGrouped(input string) (verb string, path []string, quoted, grouped []bool, err error) {
+	verb, path, quoted, grouped, _, err = ParseSetVerbGroupedClosed(input)
+	return verb, path, quoted, grouped, err
+}
+
+// ParseSetVerbGroupedClosed also reports whether a bracket list opened while
+// reading this command was structurally closed before its terminator.
+func ParseSetVerbGroupedClosed(input string) (verb string, path []string, quoted, grouped []bool, bracketedClosed bool, err error) {
 	lexer := NewLexer(input)
+	startDepth := lexer.bracketDepth
+	sawClose := false
 
 	tok := lexer.Next()
+	if lexer.LastGapClosed() {
+		sawClose = true
+	}
 	if tok.Type != TokenIdentifier {
-		return "", nil, nil, nil, fmt.Errorf("expected identifier, got %s", tok.Type)
+		return "", nil, nil, nil, false, fmt.Errorf("expected identifier, got %s", tok.Type)
 	}
 
 	switch tok.Value {
 	case verbSet, verbDelete, verbDeactivate, verbActivate:
 		verb = tok.Value
 	default:
-		// No recognized prefix -- the first token is part of the path and
-		// the verb defaults to set (a bare path). It reached here as a
-		// TokenIdentifier, so it is bare by construction.
 		verb = verbSet
 		path = append(path, tok.Value)
 		quoted = append(quoted, false)
 		grouped = append(grouped, lexer.InBracket())
 	}
 
-	// #9881 trailing gap: brackets stripped after the line's last value
-	// token precede no recorded token (EOF is not one). Capture the loss at
-	// each loop exit and taint the last path element after the loop so the
-	// span carries it.
 	trailingLoss := false
 	for {
 		tok = lexer.Next()
+		if lexer.LastGapClosed() {
+			sawClose = true
+		}
 		if tok.Type == TokenEOF {
 			trailingLoss = lexer.LastGapLoss()
 			break
 		}
 		if tok.Type == TokenSemicolon {
-			// #5194 A3-b3-F7: a single trailing semicolon terminates the flat
-			// command, but any token AFTER it is a second statement crammed onto
-			// one line (e.g. `set system host-name fw; delete security policies`).
-			// The pre-fix loop broke on the semicolon and SILENTLY discarded the
-			// remainder while the caller (LoadSet applyEditLine) reported the line
-			// applied — so the trailing `delete` never ran yet commit reported
-			// success. Permit at most one terminating semicolon, then require EOF;
-			// reject any subsequent token with its line/column.
-			// The span's trailing gap is the one BEFORE this semicolon —
-			// read it before the EOF check below scans (and reports) the
-			// post-terminator gap instead.
 			trailingLoss = lexer.LastGapLoss()
 			if next := lexer.Next(); next.Type != TokenEOF {
-				return "", nil, nil, nil, fmt.Errorf(
+				return "", nil, nil, nil, false, fmt.Errorf(
 					"unexpected token %s after ';' at line %d, column %d (only one statement per line)",
 					next.Type, next.Line, next.Column)
 			}
@@ -301,7 +298,7 @@ func ParseSetVerbGrouped(input string) (verb string, path []string, quoted, grou
 			quoted = append(quoted, tok.Type == TokenString)
 			grouped = append(grouped, lexer.InBracket())
 		} else {
-			return "", nil, nil, nil, fmt.Errorf("unexpected token %s at line %d, column %d",
+			return "", nil, nil, nil, false, fmt.Errorf("unexpected token %s at line %d, column %d",
 				tok.Type, tok.Line, tok.Column)
 		}
 	}
@@ -310,9 +307,14 @@ func ParseSetVerbGrouped(input string) (verb string, path []string, quoted, grou
 		grouped[len(grouped)-1] = true
 	}
 	if len(path) == 0 {
-		return "", nil, nil, nil, fmt.Errorf("empty path")
+		return "", nil, nil, nil, false, fmt.Errorf("empty path")
 	}
-	return verb, path, quoted, grouped, nil
+	hasBracketed := false
+	for _, b := range grouped {
+		hasBracketed = hasBracketed || b
+	}
+	bracketedClosed = startDepth == 0 && lexer.bracketDepth == 0 && sawClose && hasBracketed
+	return verb, path, quoted, grouped, bracketedClosed, nil
 }
 
 // parseStatements parses zero or more statements until EOF or '}'.
@@ -443,7 +445,7 @@ var parserMarkers = []string{inactiveMarker}
 // and key matching, schema walks, and group merge keep working unmodified.
 func (p *Parser) parseStatement() *Node {
 	statementStart := p.lexer.Peek()
-	keys, kinds, bracketed := p.parseKeys()
+	keys, kinds, bracketed, bracketedClosed := p.parseKeys()
 	if len(keys) == 0 {
 		// Recovery: skip unexpected token
 		tok := p.lexer.Next()
@@ -548,11 +550,12 @@ func (p *Parser) parseStatement() *Node {
 			p.addErrorf(closeTok.Line, closeTok.Column, "expected '}', got %s", closeTok)
 		}
 		n := &Node{
-			Keys:     keys,
-			Children: children,
-			Inactive: inactive,
-			Line:     line,
-			Column:   col,
+			Keys:            keys,
+			Children:        children,
+			Inactive:        inactive,
+			BracketedClosed: bracketedClosed,
+			Line:            line,
+			Column:          col,
 		}
 		n.setKeysQuoted(quoted)
 		n.setKeysBracketed(brackets)
@@ -562,11 +565,12 @@ func (p *Parser) parseStatement() *Node {
 		// Leaf: keys ;
 		p.lexer.Next() // consume ;
 		n := &Node{
-			Keys:     keys,
-			IsLeaf:   true,
-			Inactive: inactive,
-			Line:     line,
-			Column:   col,
+			Keys:            keys,
+			IsLeaf:          true,
+			Inactive:        inactive,
+			BracketedClosed: bracketedClosed,
+			Line:            line,
+			Column:          col,
 		}
 		n.setKeysQuoted(quoted)
 		n.setKeysBracketed(brackets)
@@ -582,11 +586,12 @@ func (p *Parser) parseStatement() *Node {
 			p.addErrorf(tok.Line, tok.Column, "expected ';', got %s", tok)
 		}
 		n := &Node{
-			Keys:     keys,
-			IsLeaf:   true,
-			Inactive: inactive,
-			Line:     line,
-			Column:   col,
+			Keys:            keys,
+			IsLeaf:          true,
+			Inactive:        inactive,
+			BracketedClosed: bracketedClosed,
+			Line:            line,
+			Column:          col,
 		}
 		n.setKeysQuoted(quoted)
 		n.setKeysBracketed(brackets)
@@ -611,38 +616,37 @@ func (p *Parser) skipStatementBody() {
 }
 
 // parseKeys reads one or more identifiers/strings until { or ; or } or EOF.
-// It returns the token VALUES and a parallel slice of the source token KINDS
-// (TokenIdentifier vs TokenString). The kinds let the caller distinguish a
-// bare identifier `inactive:` (a deactivation marker) from a quoted
-// `"inactive:"` value that happens to equal the marker text (#4348) — the
-// []string alone flattens the two into an indistinguishable string.
-func (p *Parser) parseKeys() ([]string, []TokenType, []bool) {
+// It returns token values, source token kinds, inside-bracket provenance, and
+// whether a bracket group opened in this key span was closed before its
+// terminator.
+func (p *Parser) parseKeys() ([]string, []TokenType, []bool, bool) {
+	startDepth := p.lexer.bracketDepth
 	var keys []string
 	var kinds []TokenType
 	var bracketed []bool
+	sawClose := false
 	for {
 		tok := p.lexer.Peek()
+		if p.lexer.LastGapClosed() {
+			sawClose = true
+		}
 		if tok.Type == TokenIdentifier || tok.Type == TokenString {
 			p.lexer.Next()
+			if p.lexer.LastGapClosed() {
+				sawClose = true
+			}
 			keys = append(keys, tok.Value)
 			kinds = append(kinds, tok.Type)
-			// #6668: sampled AFTER Next, so it describes the token just
-			// consumed. Peek restores the lexer's bracket state, so the
-			// lookahead above cannot leak a '[' it stepped over into this bit.
 			bracketed = append(bracketed, p.lexer.InBracket())
-		} else {
-			break
+			continue
 		}
+		break
 	}
-	// #9881 trailing gap: brackets stripped after the span's last value
-	// token (`as-path AP1 .* []`) precede no recorded token, so the
-	// per-token bit above never sees them. The breaking Peek just scanned
-	// that gap (Peek lets gapLoss leak for exactly this read) — taint the
-	// last key with it so the span carries the delimiter loss.
 	if p.lexer.LastGapLoss() && len(bracketed) > 0 {
 		bracketed[len(bracketed)-1] = true
 	}
-	return keys, kinds, bracketed
+	closed := startDepth == 0 && p.lexer.PeekBracketDepth() == 0 && sawClose
+	return keys, kinds, bracketed, closed && len(bracketed) > 0
 }
 
 func (p *Parser) addError(line, col int, msg string) {

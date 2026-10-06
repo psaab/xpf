@@ -136,6 +136,13 @@ type Node struct {
 	// omitempty so those configs stay byte-identical on disk, exactly as for
 	// KeysQuoted above.
 	KeysBracketed []bool `json:",omitempty"`
+	// BracketedClosed is true when a bracket opened while reading this node's
+	// key span was closed before its statement terminator. KeysBracketed only
+	// says which tokens were inside a list; it cannot distinguish `[ x ]` from
+	// an unclosed `[ x` after the lexer strips the delimiters. Routing-policy
+	// parsing uses the close bit to keep clause-word values distinct from a
+	// malformed list. Older persisted trees and synthesized nodes remain false.
+	BracketedClosed bool `json:",omitempty"`
 
 	// Line/Column where this node starts (for error reporting).
 	Line   int
@@ -181,7 +188,18 @@ func (n *Node) KeyBracketed(i int) bool {
 // least one key is bracketed. Every Node construction path that has the
 // provenance available funnels through here so the "nil means all-false or
 // unknown" collapse is made in exactly one place.
-func (n *Node) setKeysBracketed(bracketed []bool) {
+func (n *Node) setKeysBracketed(bracketed []bool, closed ...bool) {
+	if len(closed) > 0 {
+		n.BracketedClosed = false
+		if closed[0] {
+			for _, b := range bracketed {
+				if b {
+					n.BracketedClosed = true
+					break
+				}
+			}
+		}
+	}
 	if len(bracketed) != len(n.Keys) {
 		n.KeysBracketed = nil
 		return
@@ -229,8 +247,9 @@ func (n *Node) KeyPath() string {
 }
 
 // QuotedKeyPath returns the key path with keys quoted if they contain
-// characters that aren't valid bare identifiers (e.g. ${node}), plus the
-// NON-TERMINAL keys whose quoting the operator authored (keyNeedsAuthoredQuote).
+// characters that aren't valid bare identifiers (e.g. ${node}), plus
+// non-terminal authored quotes and terminal routing-policy inline keywords
+// whose quotes keep list values distinct from clause boundaries.
 func (n *Node) QuotedKeyPath() string {
 	parts := make([]string, len(n.Keys))
 	for i, k := range n.Keys {
@@ -257,12 +276,13 @@ func (n *Node) QuotedKeyPath() string {
 //
 // The rule is NOT "preserve every authored quote", which would rewrite
 // `description "foo"` as `description "foo"` instead of the Junos-normalized
-// `description foo` across every `show configuration` in the product. It is as
-// wide as the ambiguity: the grouping decision (eventMultiWordLeafValues) reads
-// the quoting of the FIRST token of a group, and within THIS renderer's output a
-// group of two or more begins at a non-terminal key of its node — a node's last
-// key is followed by `{`, so it stays a container key on re-parse and its
-// quoting decides nothing.
+// `description foo` across every `show configuration` in the product. Keep
+// non-terminal quotes that decide grouping, plus a terminal quote when its
+// value is a routing-policy inline keyword: in a multi-value `from` list that
+// quote distinguishes the value from a clause boundary such as `then`.
+// Within THIS renderer's output a group of two or more begins at a
+// non-terminal key of its node — a node's last key is followed by `{`, so it
+// stays a container key on re-parse and its quoting normally decides nothing.
 //
 // SCOPE: THIS FUNCTION IS FOR THE HIERARCHICAL RENDERER ONLY. An earlier
 // revision called the non-terminal rule "exactly sufficient" without that
@@ -276,7 +296,8 @@ func (n *Node) QuotedKeyPath() string {
 // pwned`. The flat path now owns its own terminal test against the finished
 // LINE (joinQuotedKeysProv in ast_format.go); do not re-point it here.
 func keyNeedsAuthoredQuote(n *Node, i int) bool {
-	return i < len(n.Keys)-1 && n.KeyQuoted(i)
+	return n != nil && i >= 0 && i < len(n.Keys) && n.KeyQuoted(i) &&
+		(i < len(n.Keys)-1 || policyTermInlineKeywords[n.Keys[i]])
 }
 
 // keyEscaper escapes exactly the characters that the lexer's readString
@@ -639,13 +660,14 @@ func cloneNodes(nodes []*Node) []*Node {
 	result := make([]*Node, len(nodes))
 	for i, n := range nodes {
 		result[i] = &Node{
-			Keys:          append([]string(nil), n.Keys...),
-			KeysQuoted:    append([]bool(nil), n.KeysQuoted...),
-			KeysBracketed: append([]bool(nil), n.KeysBracketed...),
-			Children:      cloneNodes(n.Children),
-			IsLeaf:        n.IsLeaf,
-			Annotation:    n.Annotation,
-			InheritedFrom: n.InheritedFrom,
+			Keys:            append([]string(nil), n.Keys...),
+			KeysQuoted:      append([]bool(nil), n.KeysQuoted...),
+			KeysBracketed:   append([]bool(nil), n.KeysBracketed...),
+			BracketedClosed: n.BracketedClosed,
+			Children:        cloneNodes(n.Children),
+			IsLeaf:          n.IsLeaf,
+			Annotation:      n.Annotation,
+			InheritedFrom:   n.InheritedFrom,
 			// #9862: leaf provenance flows through every clone, including the
 			// #4474 memo store/handout. Deep-copied: clones must never share the
 			// backing array (tag union-adds append). Nil-preserving, so untagged

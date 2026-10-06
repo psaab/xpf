@@ -173,6 +173,20 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
+	// #11779: an unsupported routing-policy `from` match was compiled away,
+	// turning a constrained term into a broader match. Strict commits reject
+	// it; tolerant loads warn and force the affected term to reject rather
+	// than publish the widened policy.
+	if err := validatePolicyFromUnknownStrict11779(cfg); err != nil {
+		if opts.lenientPolicyFromUnknown11779 {
+			failClosedUnknownPolicyFrom11779(cfg)
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("routing policy unknown from-match (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	// #5701: route-map sequence-number overflow gate. A policy-statement whose
 	// per-term Cartesian expansion (families x from-prefix-list x from-community
 	// x from-as-path) produces more sequences than the FRR route-map
