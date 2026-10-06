@@ -585,7 +585,9 @@ pub(crate) struct IpsecTrafficSelectorSnapshot {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub(crate) struct IpsecMainRouteSnapshot {
-    #[serde(rename = "table", default)]
+    #[serde(rename = "domain")]
+    pub domain: u32,
+    #[serde(rename = "table")]
     pub table: u32,
     #[serde(rename = "family", default)]
     pub family: String,
@@ -1489,5 +1491,33 @@ mod route_mtu_wire_tests {
             value.get("mtu").is_none(),
             "an unknown route MTU must keep the wire field absent"
         );
+    }
+}
+#[cfg(test)]
+mod ipsec_main_route_identity_tests {
+    use super::*;
+
+    #[test]
+    fn main_route_domain_and_table_are_required_during_deserialization() {
+        assert!(
+            serde_json::from_str::<IpsecMainRouteSnapshot>(r#"{"table":254}"#).is_err(),
+            "missing domain must fail closed"
+        );
+        assert!(
+            serde_json::from_str::<IpsecMainRouteSnapshot>(r#"{"domain":0}"#).is_err(),
+            "missing table must fail closed"
+        );
+    }
+
+    #[test]
+    fn main_route_serialization_emits_zero_domain_and_explicit_table() {
+        let route = IpsecMainRouteSnapshot {
+            domain: 0,
+            table: 254,
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(route).expect("serialize main route");
+        assert_eq!(wire["domain"], 0);
+        assert_eq!(wire["table"], 254);
     }
 }

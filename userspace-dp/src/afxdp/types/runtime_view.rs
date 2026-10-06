@@ -60,7 +60,7 @@
 //! BEFORE it, and the worker reads them AFTER its view load.
 use super::*;
 use ipnet::IpNet;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
 
@@ -201,23 +201,13 @@ impl PMechInventory {
             return Self::default();
         };
         let identity = decode_policy_identity(&snapshot.policy_identity);
-        let routes_valid = snapshot.main_routes.iter().all(|route| {
-            route.table == 254
-                && route.family
-                    == if route.destination.contains(':') {
-                        "inet6"
-                    } else {
-                        "inet"
-                    }
-                && IpNet::from_str(&route.destination)
-                    .map(|prefix| prefix.to_string() == route.destination.as_str())
-                    .unwrap_or(false)
-        });
+        let routes_valid = main_routes_valid(&snapshot.main_routes);
         let mut out = Self {
             policy_identity: identity.unwrap_or_default(),
             generation: snapshot.generation,
             fib_generation: snapshot.fib_generation,
             complete: snapshot.complete
+                && !snapshot.main_routes.is_empty()
                 && identity.is_some()
                 && snapshot.generation != 0
                 && snapshot.fib_generation != 0
@@ -228,7 +218,23 @@ impl PMechInventory {
         let mut if_id_claims = BTreeMap::<u32, usize>::new();
         for row in &snapshot.tunnel_rows {
             let effective_prefixes = row.effective_prefixes.clone();
+            let (effective_parsed, effective_valid) =
+                parse_canonical_prefixes(&row.effective_prefixes);
             let (ingress_prefixes, prefixes_valid) = parse_canonical_prefixes(&row.ingress_prefixes);
+            let recomputed_projection =
+                recompute_selector_projection(&snapshot.main_routes, row);
+            let projection_valid = routes_valid
+                && recomputed_projection.as_ref().is_some_and(|projection| {
+                    effective_valid
+                        && prefixes_valid
+                        && canonical_prefix_strings(&effective_parsed).eq(projection)
+                        && canonical_prefix_strings(&ingress_prefixes).eq(projection)
+                });
+            let inventory_reason = if routes_valid && !projection_valid {
+                "SELECTOR_PROJECTION_MISMATCH".to_string()
+            } else {
+                row.inventory_reason.clone()
+            };
             let row_valid = out.complete
                 && row.inventory_complete
                 && row.inventory_valid
@@ -242,6 +248,8 @@ impl PMechInventory {
                 && row.source_kind == "xfrmi"
                 && !row.selector_provenance.is_empty()
                 && row.inventory_reason.is_empty()
+                && effective_valid
+                && projection_valid
                 && prefixes_valid
                 && !ingress_prefixes.is_empty();
             if row.if_id != 0 {
@@ -260,7 +268,7 @@ impl PMechInventory {
                 selector_provenance: row.selector_provenance.clone(),
                 inventory_complete: row.inventory_complete,
                 inventory_valid: row_valid,
-                inventory_reason: row.inventory_reason.clone(),
+                inventory_reason,
             };
             if out.tunnels.insert(row.stn.clone(), tunnel).is_some() {
                 out.duplicate_stns.insert(row.stn.clone());
@@ -318,7 +326,12 @@ impl PMechInventory {
     }
 
     pub(in crate::afxdp) fn has_main_table_routes(&self) -> bool {
-        self.complete && self.main_routes.iter().all(|route| route.table == 254)
+        self.complete
+            && !self.main_routes.is_empty()
+            && self
+                .main_routes
+                .iter()
+                .all(|route| route.domain == 0 && route.table == 254)
     }
 }
 
@@ -334,6 +347,288 @@ impl PMechTunnelRow {
     ) -> (&[crate::protocol::IpsecTrafficSelectorSnapshot], &[String]) {
         (&self.explicit_selectors, &self.effective_prefixes)
     }
+}
+const RTN_UNICAST: u8 = 1;
+const RTN_LOCAL: u8 = 2;
+const RTN_BLACKHOLE: u8 = 6;
+const RTN_UNREACHABLE: u8 = 7;
+const RTN_PROHIBIT: u8 = 8;
+
+fn main_routes_valid(
+    routes: &[crate::protocol::IpsecMainRouteSnapshot],
+) -> bool {
+    let prefixes = routes
+        .iter()
+        .map(main_route_prefix)
+        .collect::<Option<Vec<_>>>();
+    let Some(prefixes) = prefixes else {
+        return false;
+    };
+    for (index, prefix) in prefixes.iter().enumerate() {
+        for other_index in index + 1..prefixes.len() {
+            if prefix == &prefixes[other_index]
+                && !same_route_projection(&routes[index], &routes[other_index])
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn main_route_prefix(route: &crate::protocol::IpsecMainRouteSnapshot) -> Option<IpNet> {
+    if route.domain != 0 || route.table != 254 {
+        return None;
+    }
+    let known_disposition = matches!(
+        route.disposition,
+        RTN_UNICAST | RTN_LOCAL | RTN_BLACKHOLE | RTN_UNREACHABLE | RTN_PROHIBIT
+    );
+    if !known_disposition
+        || route.next_hops.iter().any(|hop| hop.ifindex == 0 || hop.weight == 0)
+        || (route.disposition == RTN_UNICAST && route.next_hops.is_empty())
+    {
+        return None;
+    }
+    let prefix = IpNet::from_str(&route.destination).ok()?.trunc();
+    if prefix.to_string() != route.destination
+        || (route.family == "inet" && !matches!(prefix, IpNet::V4(_)))
+        || (route.family == "inet6" && !matches!(prefix, IpNet::V6(_)))
+        || !matches!(route.family.as_str(), "inet" | "inet6")
+    {
+        return None;
+    }
+    Some(prefix)
+}
+
+fn same_route_projection(
+    left: &crate::protocol::IpsecMainRouteSnapshot,
+    right: &crate::protocol::IpsecMainRouteSnapshot,
+) -> bool {
+    if left.domain != right.domain
+        || left.table != right.table
+        || left.family != right.family
+        || left.destination != right.destination
+        || left.protocol != right.protocol
+        || left.disposition != right.disposition
+    {
+        return false;
+    }
+    let mut left_legs = left
+        .next_hops
+        .iter()
+        .map(|hop| (hop.ifindex, hop.weight))
+        .collect::<Vec<_>>();
+    let mut right_legs = right
+        .next_hops
+        .iter()
+        .map(|hop| (hop.ifindex, hop.weight))
+        .collect::<Vec<_>>();
+    left_legs.sort_unstable();
+    right_legs.sort_unstable();
+    left_legs == right_legs
+}
+
+fn recompute_selector_projection(
+    routes: &[crate::protocol::IpsecMainRouteSnapshot],
+    tunnel: &crate::protocol::IpsecPMechTunnelRowSnapshot,
+) -> Option<BTreeSet<String>> {
+    let route_prefixes = routes
+        .iter()
+        .map(main_route_prefix)
+        .collect::<Option<Vec<_>>>()?;
+    let mut projection = BTreeSet::new();
+    for (route_index, route) in routes.iter().enumerate() {
+        if route.disposition != RTN_UNICAST {
+            continue;
+        }
+        for hop in &route.next_hops {
+            if hop.ifindex != tunnel.logical_ifindex as u32 {
+                continue;
+            }
+            let eligible = route_prefixes_for_leg(route_index, hop.ifindex, routes, &route_prefixes);
+            for selector in &tunnel.explicit_selectors {
+                if selector.remote_ts.is_empty() {
+                    continue;
+                }
+                let selectors = selector_prefixes(&selector.remote_ts)?;
+                for route_prefix in &eligible {
+                    for selector_prefix in &selectors {
+                        if let Some(intersection) = intersect_prefixes(route_prefix, selector_prefix)
+                        {
+                            projection.insert(intersection.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Some(projection)
+}
+
+fn route_prefixes_for_leg(
+    route_index: usize,
+    ifindex: u32,
+    routes: &[crate::protocol::IpsecMainRouteSnapshot],
+    route_prefixes: &[IpNet],
+) -> Vec<IpNet> {
+    let base = route_prefixes[route_index];
+    let mut prefixes = vec![base];
+    for (blocker_index, blocker) in routes.iter().enumerate() {
+        let blocker_prefix = route_prefixes[blocker_index];
+        if blocker_prefix.prefix_len() <= base.prefix_len()
+            || !base.contains(&blocker_prefix.network())
+        {
+            continue;
+        }
+        let keeps_leg = blocker.disposition == RTN_UNICAST
+            && blocker.next_hops.iter().any(|hop| hop.ifindex == ifindex);
+        if !keeps_leg {
+            prefixes = subtract_prefix_set(prefixes, blocker_prefix);
+            if prefixes.is_empty() {
+                break;
+            }
+        }
+    }
+    prefixes
+}
+
+fn subtract_prefix_set(prefixes: Vec<IpNet>, excluded: IpNet) -> Vec<IpNet> {
+    let mut result = Vec::with_capacity(prefixes.len());
+    for prefix in prefixes {
+        subtract_prefix(prefix, excluded, &mut result);
+    }
+    result
+}
+
+fn subtract_prefix(prefix: IpNet, excluded: IpNet, output: &mut Vec<IpNet>) {
+    let overlaps = prefix.contains(&excluded.network()) || excluded.contains(&prefix.network());
+    if !overlaps {
+        output.push(prefix);
+        return;
+    }
+    if excluded.contains(&prefix.network()) {
+        return;
+    }
+    let Some((left, right)) = split_prefix(prefix) else {
+        return;
+    };
+    subtract_prefix(left, excluded, output);
+    subtract_prefix(right, excluded, output);
+}
+
+fn split_prefix(prefix: IpNet) -> Option<(IpNet, IpNet)> {
+    let prefix_len = prefix.prefix_len();
+    let address = prefix.network();
+    let width = match address {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    if prefix_len >= width {
+        return None;
+    }
+    let left = IpNet::new(address, prefix_len + 1).ok()?;
+    let value = match address {
+        IpAddr::V4(address) => u32::from(address) as u128,
+        IpAddr::V6(address) => u128::from(address),
+    };
+    let right_value = value | (1u128 << (width - prefix_len - 1));
+    let right_address = address_from_value(right_value, width);
+    Some((left, IpNet::new(right_address, prefix_len + 1).ok()?))
+}
+
+fn intersect_prefixes(left: &IpNet, right: &IpNet) -> Option<IpNet> {
+    let left_v4 = matches!(left, IpNet::V4(_));
+    if left_v4 != matches!(right, IpNet::V4(_)) {
+        return None;
+    }
+    if !left.contains(&right.network()) && !right.contains(&left.network()) {
+        return None;
+    }
+    Some(if left.prefix_len() >= right.prefix_len() {
+        *left
+    } else {
+        *right
+    })
+}
+
+fn selector_prefixes(value: &str) -> Option<Vec<IpNet>> {
+    if let Ok(prefix) = IpNet::from_str(value) {
+        return Some(vec![prefix.trunc()]);
+    }
+    if let Ok(address) = value.parse::<IpAddr>() {
+        return Some(vec![IpNet::new(address, address_width(address)).ok()?]);
+    }
+    let (start, end) = value.split_once('-')?;
+    let start = start.parse::<IpAddr>().ok()?;
+    let end = end.parse::<IpAddr>().ok()?;
+    if !same_address_family(start, end) || start > end {
+        return None;
+    }
+    Some(address_range_prefixes(start, end))
+}
+
+fn address_width(address: IpAddr) -> u8 {
+    match address {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    }
+}
+
+fn same_address_family(left: IpAddr, right: IpAddr) -> bool {
+    matches!(
+        (left, right),
+        (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
+    )
+}
+
+fn address_to_value(address: IpAddr) -> u128 {
+    match address {
+        IpAddr::V4(address) => u32::from(address) as u128,
+        IpAddr::V6(address) => u128::from(address),
+    }
+}
+fn address_from_value(value: u128, width: u8) -> IpAddr {
+    if width == 32 {
+        IpAddr::V4(Ipv4Addr::from(value as u32))
+    } else {
+        IpAddr::V6(Ipv6Addr::from(value))
+    }
+}
+
+fn address_range_prefixes(start: IpAddr, end: IpAddr) -> Vec<IpNet> {
+    let width = address_width(start);
+    let start = address_to_value(start);
+    let end = address_to_value(end);
+    let mut current = start;
+    let mut prefixes = Vec::new();
+    while current <= end {
+        let alignment = current.trailing_zeros().min(u32::from(width)) as u8;
+        let difference = end - current;
+        let fit = if difference == u128::MAX {
+            width
+        } else {
+            let count = difference + 1;
+            (127 - count.leading_zeros()) as u8
+        };
+        let exponent = alignment.min(fit);
+        let prefix_len = width - exponent;
+        if let Some(prefix) = IpNet::new(address_from_value(current, width), prefix_len).ok() {
+            prefixes.push(prefix.trunc());
+        }
+        if exponent == width {
+            break;
+        }
+        let Some(next) = current.checked_add(1u128 << exponent) else {
+            break;
+        };
+        current = next;
+    }
+    prefixes
+}
+
+fn canonical_prefix_strings(prefixes: &[IpNet]) -> BTreeSet<String> {
+    prefixes.iter().map(ToString::to_string).collect()
 }
 
 fn decode_policy_identity(value: &str) -> Option<[u8; 32]> {
@@ -361,7 +656,9 @@ fn parse_canonical_prefixes(values: &[String]) -> (Vec<IpNet>, bool) {
     let mut valid = true;
     for value in values {
         match IpNet::from_str(value) {
-            Ok(prefix) if prefix.to_string() == value.as_str() => prefixes.push(prefix),
+            Ok(prefix) if prefix.trunc().to_string() == value.as_str() => {
+                prefixes.push(prefix.trunc())
+            }
             _ => valid = false,
         }
     }
@@ -699,5 +996,177 @@ mod tests {
         assert!(rows.exact("zero").is_none());
         assert_eq!(rows.exact("valid").map(|row| row.logical_ifindex), Some(10));
         assert_eq!(rows.len(), 1);
+    }
+    fn route(
+        domain: u32,
+        table: u32,
+        destination: &str,
+        disposition: u8,
+        next_hops: Vec<crate::protocol::IpsecMainRouteNextHopSnapshot>,
+    ) -> crate::protocol::IpsecMainRouteSnapshot {
+        crate::protocol::IpsecMainRouteSnapshot {
+            domain,
+            table,
+            family: if destination.contains(':') { "inet6" } else { "inet" }.into(),
+            destination: destination.into(),
+            protocol: 0,
+            disposition,
+            next_hops,
+        }
+    }
+
+    fn hop(ifindex: u32) -> crate::protocol::IpsecMainRouteNextHopSnapshot {
+        crate::protocol::IpsecMainRouteNextHopSnapshot { ifindex, weight: 1 }
+    }
+
+    fn inventory_snapshot(
+        routes: Vec<crate::protocol::IpsecMainRouteSnapshot>,
+        remote_ts: &str,
+        effective: &[&str],
+        ingress: &[&str],
+    ) -> crate::protocol::IpsecPMechInventorySnapshot {
+        crate::protocol::IpsecPMechInventorySnapshot {
+            policy_identity: "ab".repeat(32),
+            generation: 77,
+            fib_generation: 3,
+            complete: true,
+            main_routes: routes,
+            tunnel_rows: vec![crate::protocol::IpsecPMechTunnelRowSnapshot {
+                stn: "st0".into(),
+                if_id: 9,
+                logical_ifindex: 10,
+                explicit_selectors: vec![crate::protocol::IpsecTrafficSelectorSnapshot {
+                    name: "selector".into(),
+                    local_ts: "192.0.2.0/24".into(),
+                    remote_ts: remote_ts.into(),
+                    source: "named".into(),
+                }],
+                effective_prefixes: effective.iter().map(|value| (*value).into()).collect(),
+                ingress_prefixes: ingress.iter().map(|value| (*value).into()).collect(),
+                inventory_generation: 77,
+                fib_generation: 3,
+                source_kind: "xfrmi".into(),
+                selector_provenance: "named".into(),
+                inventory_complete: true,
+                inventory_valid: true,
+                inventory_reason: String::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn empty_main_routes_are_not_authority_even_when_complete_is_set() {
+        let snapshot = inventory_snapshot(Vec::new(), "10.0.0.0/24", &[], &[]);
+        let inventory = PMechInventory::from_snapshot(Some(&snapshot));
+        assert!(!inventory.complete());
+        assert!(!inventory.has_main_table_routes());
+    }
+
+    #[test]
+    fn nonzero_domain_and_zero_table_poison_main_route_authority() {
+        for route in [
+            route(1, 254, "10.0.0.0/24", RTN_UNICAST, vec![hop(10)]),
+            route(0, 0, "10.0.0.0/24", RTN_UNICAST, vec![hop(10)]),
+        ] {
+            let snapshot = inventory_snapshot(
+                vec![route],
+                "10.0.0.0/24",
+                &["10.0.0.0/24"],
+                &["10.0.0.0/24"],
+            );
+            let inventory = PMechInventory::from_snapshot(Some(&snapshot));
+            assert!(!inventory.complete());
+            assert!(!inventory.has_main_table_routes());
+        }
+    }
+
+    #[test]
+    fn mismatched_effective_or_ingress_projection_invalidates_tunnel_row() {
+        let routes = vec![route(0, 254, "10.0.0.0/24", RTN_UNICAST, vec![hop(10)])];
+        for (effective, ingress) in [
+            (&["10.0.1.0/24"][..], &["10.0.0.0/24"][..]),
+            (&["10.0.0.0/24"][..], &["10.0.1.0/24"][..]),
+            (&["10.0.0.1/24"][..], &["10.0.0.0/24"][..]),
+            (&["10.0.0.0/24"][..], &["10.0.0.1/24"][..]),
+        ] {
+            let snapshot = inventory_snapshot(
+                routes.clone(),
+                "10.0.0.0/24",
+                effective,
+                ingress,
+            );
+            let inventory = PMechInventory::from_snapshot(Some(&snapshot));
+            let row = inventory.tunnels.get("st0").expect("tunnel row retained");
+            assert!(!row.inventory_valid);
+            assert_eq!(row.inventory_reason, "SELECTOR_PROJECTION_MISMATCH");
+            assert!(inventory.exact_tunnel("st0", 9, 10).is_none());
+        }
+    }
+
+    #[test]
+    fn selector_ranges_recompute_to_the_same_canonical_cidr_cover() {
+        let snapshot = inventory_snapshot(
+            vec![route(0, 254, "10.0.0.0/24", RTN_UNICAST, vec![hop(10)])],
+            "10.0.0.1-10.0.0.4",
+            &["10.0.0.4/32", "10.0.0.2/31", "10.0.0.1/32"],
+            &["10.0.0.1/32", "10.0.0.2/31", "10.0.0.4/32"],
+        );
+        let inventory = PMechInventory::from_snapshot(Some(&snapshot));
+        let row = inventory.exact_tunnel("st0", 9, 10).expect("matching range projection");
+        assert!(row.allows_destination("10.0.0.3".parse().expect("IPv4 address")));
+        assert!(!row.allows_destination("10.0.0.5".parse().expect("IPv4 address")));
+    }
+
+    #[test]
+    fn blackhole_is_retained_without_poisoning_and_malformed_leg_poisons() {
+        let mut effective = vec![
+            "10.0.0.0/16",
+            "10.128.0.0/9",
+            "10.16.0.0/12",
+            "10.2.0.0/15",
+            "10.32.0.0/11",
+            "10.4.0.0/14",
+            "10.64.0.0/10",
+            "10.8.0.0/13",
+        ];
+        effective.sort_unstable();
+        let snapshot = inventory_snapshot(
+            vec![
+                route(0, 254, "10.0.0.0/8", RTN_UNICAST, vec![hop(10)]),
+                route(0, 254, "10.1.0.0/16", RTN_BLACKHOLE, vec![hop(10)]),
+            ],
+            "10.0.0.0/8",
+            &effective,
+            &effective,
+        );
+        let inventory = PMechInventory::from_snapshot(Some(&snapshot));
+        assert!(inventory.complete());
+        assert!(inventory.has_main_table_routes());
+        assert_eq!(inventory.main_routes.len(), 2, "discard audit row must remain attached");
+        let row = inventory.exact_tunnel("st0", 9, 10).expect("valid unshadowed projection");
+        assert!(row.allows_destination("10.0.1.1".parse().expect("IPv4 address")));
+        assert!(!row.allows_destination("10.1.1.1".parse().expect("IPv4 address")));
+        assert!(row.allows_destination("10.2.1.1".parse().expect("IPv4 address")));
+
+        let malformed = inventory_snapshot(
+            vec![route(0, 254, "10.0.0.0/24", RTN_UNICAST, vec![hop(0)])],
+            "10.0.0.0/24",
+            &["10.0.0.0/24"],
+            &["10.0.0.0/24"],
+        );
+        let poisoned = PMechInventory::from_snapshot(Some(&malformed));
+        assert!(!poisoned.complete(), "zero output ifindex must poison route inventory");
+        assert!(!poisoned.has_main_table_routes());
+        let ambiguous = inventory_snapshot(
+            vec![
+                route(0, 254, "10.0.0.0/24", RTN_UNICAST, vec![hop(10)]),
+                route(0, 254, "10.0.0.0/24", RTN_UNICAST, vec![hop(11)]),
+            ],
+            "10.0.0.0/24",
+            &["10.0.0.0/24"],
+            &["10.0.0.0/24"],
+        );
+        let poisoned = PMechInventory::from_snapshot(Some(&ambiguous));
+        assert!(!poisoned.complete(), "conflicting same-prefix legs must poison authority");
     }
 }

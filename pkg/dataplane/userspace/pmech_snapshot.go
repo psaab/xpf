@@ -72,7 +72,7 @@ func stampPMechInventoryFromRoutes(snap *ConfigSnapshot, routes []netlink.Route,
 	inventory := &IpsecPMechInventorySnapshot{
 		Generation:    snap.Generation,
 		FIBGeneration: snap.FIBGeneration,
-		Complete:      routeErr == nil,
+		Complete:      routeErr == nil && len(routes) != 0,
 	}
 	snap.PMechInventory = inventory
 	if routeErr != nil {
@@ -92,6 +92,14 @@ func stampPMechInventoryFromRoutes(snap *ConfigSnapshot, routes []netlink.Route,
 			prefix:   prefix,
 			nextHops: nextHops,
 		})
+	}
+	for i := range parsedRoutes {
+		for j := i + 1; j < len(parsedRoutes); j++ {
+			if parsedRoutes[i].prefix == parsedRoutes[j].prefix &&
+				!samePMechRouteDisposition(parsedRoutes[i].snapshot, parsedRoutes[j].snapshot) {
+				inventory.Complete = false
+			}
+		}
 	}
 	sort.Slice(inventory.MainRoutes, func(i, j int) bool {
 		return pmechRouteSnapshotKey(inventory.MainRoutes[i]) < pmechRouteSnapshotKey(inventory.MainRoutes[j])
@@ -144,7 +152,11 @@ func stampPMechInventoryFromRoutes(snap *ConfigSnapshot, routes []netlink.Route,
 	}
 
 	for _, route := range parsedRoutes {
+		if route.snapshot.Disposition != uint8(unix.RTN_UNICAST) {
+			continue
+		}
 		for _, nextHop := range route.nextHops {
+			eligiblePrefixes := pmechRoutePrefixesForLeg(route, nextHop.Ifindex, parsedRoutes)
 			for _, owner := range ownersByIfindex[int(nextHop.Ifindex)] {
 				row := &inventory.TunnelRows[owner]
 				for _, selector := range row.ExplicitSelectors {
@@ -157,12 +169,14 @@ func stampPMechInventoryFromRoutes(snap *ConfigSnapshot, routes []netlink.Route,
 						row.InventoryReason = "REMOTE_SELECTOR_UNRESOLVED"
 						continue
 					}
-					for _, selectorPrefix := range selectorPrefixes {
-						if selectorPrefix.Addr().Is4() != route.prefix.Addr().Is4() {
-							continue
-						}
-						if effective, ok := intersectPrefixes(route.prefix, selectorPrefix); ok {
-							row.EffectivePrefixes = append(row.EffectivePrefixes, effective.String())
+					for _, eligible := range eligiblePrefixes {
+						for _, selectorPrefix := range selectorPrefixes {
+							if selectorPrefix.Addr().Is4() != eligible.Addr().Is4() {
+								continue
+							}
+							if effective, ok := intersectPrefixes(eligible, selectorPrefix); ok {
+								row.EffectivePrefixes = append(row.EffectivePrefixes, effective.String())
+							}
 						}
 					}
 				}
@@ -205,49 +219,200 @@ type pmechParsedMainRoute struct {
 
 func snapshotPMechMainRoute(route netlink.Route) (IpsecMainRouteSnapshot, netip.Prefix,
 	[]IpsecMainRouteNextHopSnapshot, bool) {
-	row := IpsecMainRouteSnapshot{
-		Table:       uint32(route.Table),
-		Protocol:    uint8(route.Protocol),
-		Disposition: uint8(route.Type),
+	row := IpsecMainRouteSnapshot{}
+	protocolValid := route.Protocol >= 0 && uint64(route.Protocol) <= uint64(^uint8(0))
+	if protocolValid {
+		row.Protocol = uint8(route.Protocol)
 	}
-	valid := route.Table == int(pmechMainTable) && route.Type == unix.RTN_UNICAST &&
+	dispositionValid := route.Type >= 0 && uint64(route.Type) <= uint64(^uint8(0))
+	if dispositionValid {
+		row.Disposition = uint8(route.Type)
+	}
+	if route.Table >= 0 && uint64(route.Table) <= uint64(^uint32(0)) {
+		row.Table = uint32(route.Table)
+	}
+	tableValid := route.Table == int(pmechMainTable)
+	if tableValid {
+		row.Domain = 0
+	}
+	knownDisposition := route.Type == unix.RTN_UNICAST || route.Type == unix.RTN_LOCAL ||
+		route.Type == unix.RTN_BLACKHOLE || route.Type == unix.RTN_UNREACHABLE ||
+		route.Type == unix.RTN_PROHIBIT
+	valid := tableValid && protocolValid && dispositionValid && knownDisposition &&
 		route.Src == nil && route.Tos == 0 && route.Via == nil && route.Encap == nil &&
-		route.NewDst == nil && route.MPLSDst == nil
+		route.NewDst == nil && route.MPLSDst == nil && route.Flags == 0 && route.LinkIndex >= 0
 	prefix, family, prefixOK := pmechRoutePrefix(route)
 	row.Family = family
 	if prefixOK {
 		row.Destination = prefix.String()
 	}
-	valid = valid && prefixOK
+	valid = valid && prefixOK && pmechGatewayMatchesFamily(route.Gw, family)
 
-	nextHops := make([]IpsecMainRouteNextHopSnapshot, 0, len(route.MultiPath))
+	capturedHops := make([]IpsecMainRouteNextHopSnapshot, 0, len(route.MultiPath)+1)
+	forwardingHops := make([]IpsecMainRouteNextHopSnapshot, 0, len(route.MultiPath)+1)
 	if len(route.MultiPath) > 0 {
+		if route.LinkIndex != 0 || route.Gw != nil {
+			valid = false
+		}
 		for _, hop := range route.MultiPath {
-			if hop == nil || hop.LinkIndex <= 0 {
+			if hop == nil {
+				capturedHops = append(capturedHops, IpsecMainRouteNextHopSnapshot{})
 				valid = false
 				continue
 			}
-			nextHops = append(nextHops, IpsecMainRouteNextHopSnapshot{
-				Ifindex: uint32(hop.LinkIndex),
-				Weight:  uint32(hop.Hops) + 1,
-			})
+			ifindex := uint32(0)
+			if hop.LinkIndex > 0 && uint64(hop.LinkIndex) <= uint64(^uint32(0)) {
+				ifindex = uint32(hop.LinkIndex)
+			} else {
+				valid = false
+			}
+			weight := uint32(0)
+			if hop.Hops >= 0 && uint64(hop.Hops) < uint64(^uint32(0)) {
+				weight = uint32(hop.Hops) + 1
+			} else {
+				valid = false
+			}
+			if hop.NewDst != nil || hop.Encap != nil || hop.Via != nil || hop.Flags != 0 ||
+				!pmechGatewayMatchesFamily(hop.Gw, family) {
+				valid = false
+			}
+			snapshotHop := IpsecMainRouteNextHopSnapshot{Ifindex: ifindex, Weight: weight}
+			capturedHops = append(capturedHops, snapshotHop)
+			if route.Type == unix.RTN_UNICAST {
+				forwardingHops = append(forwardingHops, snapshotHop)
+			}
 		}
 	} else if route.LinkIndex > 0 {
-		nextHops = append(nextHops, IpsecMainRouteNextHopSnapshot{
-			Ifindex: uint32(route.LinkIndex),
-			Weight:  1,
-		})
-	} else {
+		snapshotHop := IpsecMainRouteNextHopSnapshot{Weight: 1}
+		if uint64(route.LinkIndex) <= uint64(^uint32(0)) {
+			snapshotHop.Ifindex = uint32(route.LinkIndex)
+		} else {
+			valid = false
+		}
+		capturedHops = append(capturedHops, snapshotHop)
+		if route.Type == unix.RTN_UNICAST {
+			forwardingHops = append(forwardingHops, snapshotHop)
+		}
+	} else if route.Type == unix.RTN_UNICAST {
+		capturedHops = append(capturedHops, IpsecMainRouteNextHopSnapshot{Weight: 1})
+		valid = false
+	} else if route.LinkIndex < 0 {
+		capturedHops = append(capturedHops, IpsecMainRouteNextHopSnapshot{})
 		valid = false
 	}
-	sort.Slice(nextHops, func(i, j int) bool {
-		if nextHops[i].Ifindex != nextHops[j].Ifindex {
-			return nextHops[i].Ifindex < nextHops[j].Ifindex
+	sort.Slice(capturedHops, func(i, j int) bool {
+		if capturedHops[i].Ifindex != capturedHops[j].Ifindex {
+			return capturedHops[i].Ifindex < capturedHops[j].Ifindex
 		}
-		return nextHops[i].Weight < nextHops[j].Weight
+		return capturedHops[i].Weight < capturedHops[j].Weight
 	})
-	row.NextHops = nextHops
-	return row, prefix, nextHops, valid
+	sort.Slice(forwardingHops, func(i, j int) bool {
+		if forwardingHops[i].Ifindex != forwardingHops[j].Ifindex {
+			return forwardingHops[i].Ifindex < forwardingHops[j].Ifindex
+		}
+		return forwardingHops[i].Weight < forwardingHops[j].Weight
+	})
+	row.NextHops = capturedHops
+	if route.Type == unix.RTN_UNICAST && len(forwardingHops) == 0 {
+		valid = false
+	}
+	if route.Type != unix.RTN_UNICAST {
+		forwardingHops = nil
+	}
+	return row, prefix, forwardingHops, valid
+}
+
+func pmechGatewayMatchesFamily(gateway []byte, family string) bool {
+	if gateway == nil {
+		return true
+	}
+	address, ok := netip.AddrFromSlice(gateway)
+	if !ok {
+		return false
+	}
+	address = address.Unmap()
+	return (family == "inet" && address.Is4()) || (family == "inet6" && address.Is6())
+}
+
+func samePMechRouteDisposition(left, right IpsecMainRouteSnapshot) bool {
+	if left.Domain != right.Domain || left.Table != right.Table || left.Family != right.Family ||
+		left.Destination != right.Destination || left.Protocol != right.Protocol ||
+		left.Disposition != right.Disposition || len(left.NextHops) != len(right.NextHops) {
+		return false
+	}
+	for i := range left.NextHops {
+		if left.NextHops[i] != right.NextHops[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func pmechRoutePrefixesForLeg(route pmechParsedMainRoute, ifindex uint32,
+	routes []pmechParsedMainRoute) []netip.Prefix {
+	prefixes := []netip.Prefix{route.prefix}
+	for _, moreSpecific := range routes {
+		if moreSpecific.prefix.Bits() <= route.prefix.Bits() ||
+			!route.prefix.Contains(moreSpecific.prefix.Addr()) {
+			continue
+		}
+		keepsLeg := moreSpecific.snapshot.Disposition == uint8(unix.RTN_UNICAST)
+		if keepsLeg {
+			keepsLeg = false
+			for _, nextHop := range moreSpecific.nextHops {
+				if nextHop.Ifindex == ifindex {
+					keepsLeg = true
+					break
+				}
+			}
+		}
+		if keepsLeg {
+			continue
+		}
+		prefixes = subtractPMechPrefixSet(prefixes, moreSpecific.prefix)
+		if len(prefixes) == 0 {
+			break
+		}
+	}
+	return prefixes
+}
+
+func subtractPMechPrefixSet(prefixes []netip.Prefix, excluded netip.Prefix) []netip.Prefix {
+	result := make([]netip.Prefix, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		result = append(result, subtractPMechPrefix(prefix, excluded)...)
+	}
+	return result
+}
+
+func subtractPMechPrefix(prefix, excluded netip.Prefix) []netip.Prefix {
+	if !prefix.Overlaps(excluded) {
+		return []netip.Prefix{prefix}
+	}
+	if excluded.Bits() <= prefix.Bits() {
+		return nil
+	}
+	left := netip.PrefixFrom(prefix.Masked().Addr(), prefix.Bits()+1).Masked()
+	right := pmechPrefixChild(prefix, true)
+	result := subtractPMechPrefix(left, excluded)
+	return append(result, subtractPMechPrefix(right, excluded)...)
+}
+
+func pmechPrefixChild(prefix netip.Prefix, right bool) netip.Prefix {
+	bits := prefix.Bits()
+	address := prefix.Masked().Addr()
+	if address.Is4() {
+		raw := address.As4()
+		if right {
+			raw[bits/8] |= 1 << uint(7-bits%8)
+		}
+		return netip.PrefixFrom(netip.AddrFrom4(raw), bits+1).Masked()
+	}
+	raw := address.As16()
+	if right {
+		raw[bits/8] |= 1 << uint(7-bits%8)
+	}
+	return netip.PrefixFrom(netip.AddrFrom16(raw), bits+1).Masked()
 }
 
 func pmechRoutePrefix(route netlink.Route) (netip.Prefix, string, bool) {
@@ -297,6 +462,10 @@ func pmechRoutePrefix(route netlink.Route) (netip.Prefix, string, bool) {
 
 func pmechRouteSnapshotKey(route IpsecMainRouteSnapshot) string {
 	var b strings.Builder
+	b.WriteString(strconv.FormatUint(uint64(route.Domain), 10))
+	b.WriteByte('|')
+	b.WriteString(strconv.FormatUint(uint64(route.Table), 10))
+	b.WriteByte('|')
 	b.WriteString(route.Family)
 	b.WriteByte('|')
 	b.WriteString(route.Destination)

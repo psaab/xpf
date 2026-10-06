@@ -1108,7 +1108,9 @@ mod slow_path_mtu_tests {
                 fib_generation: 3,
                 complete: true,
                 main_routes: vec![crate::protocol::snapshot::IpsecMainRouteSnapshot {
+                    domain: 0,
                     table: 254,
+                    disposition: 1, // RTN_UNICAST
                     family: "inet".into(),
                     destination: "10.0.0.1/32".into(),
                     next_hops: vec![crate::protocol::snapshot::IpsecMainRouteNextHopSnapshot {

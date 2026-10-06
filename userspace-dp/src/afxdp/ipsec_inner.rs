@@ -489,9 +489,11 @@ mod tests {
             fib_generation,
             complete: true,
             main_routes: vec![IpsecMainRouteSnapshot {
+                domain: 0,
                 table: 254,
                 family: "inet".into(),
                 destination: "10.0.0.0/24".into(),
+                disposition: 1, // RTN_UNICAST
                 next_hops: vec![IpsecMainRouteNextHopSnapshot {
                     ifindex: 10,
                     weight: 1,

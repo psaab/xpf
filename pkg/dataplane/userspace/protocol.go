@@ -770,6 +770,7 @@ type IpsecTrafficSelectorSnapshot struct {
 // IpsecMainRouteSnapshot retains every main-table route and every resolved
 // nexthop leg used to construct the per-tunnel effective-prefix inventory.
 type IpsecMainRouteSnapshot struct {
+	Domain      uint32                       `json:"domain"`
 	Table       uint32                       `json:"table"`
 	Family      string                       `json:"family"`
 	Destination string                       `json:"destination"`

@@ -20,7 +20,9 @@ fn pmech_inventory_for(
     for (index, row) in rows.iter().enumerate() {
         let prefix = format!("10.0.0.{}/32", index + 1);
         main_routes.push(IpsecMainRouteSnapshot {
+            domain: 0,
             table: 254,
+            disposition: 1, // RTN_UNICAST
             family: "inet".into(),
             destination: prefix.clone(),
             next_hops: vec![IpsecMainRouteNextHopSnapshot {
