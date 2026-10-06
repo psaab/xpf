@@ -436,7 +436,7 @@ func (d *Daemon) reconcileRouteLeakSnapshot(cfg *config.Config, overlay []config
 		// reconcile above is the only route-leak consumer and it already ran.
 		return nil
 	}
-	published, err := pub.PublishRouteOverlaySnapshot(cfg, overlay, nil)
+	published, err := pub.PublishRouteOverlaySnapshotWithLatch(cfg, overlay, nil, false)
 	if err != nil {
 		// #5696 (M19): surface the publish failure as a deferred commit error
 		// instead of swallowing it. This commit-tail reconcile has no dirty-retry

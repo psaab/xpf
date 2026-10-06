@@ -106,8 +106,8 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	}
 
 	policySchedulerApplyTime := time.Now()
-	policySchedulerActiveState := d.policySchedulerActiveStateForApplyLocked(cfg, policySchedulerApplyTime)
-	d.seedPolicySchedulerActiveStateLocked(policySchedulerActiveState)
+	policySchedulerActiveState, policySchedulerFailClosed := d.policySchedulerActiveStateAndFailClosedForApplyLocked(cfg, policySchedulerApplyTime)
+	d.seedPolicySchedulerActiveStateLocked(policySchedulerActiveState, policySchedulerFailClosed)
 
 	// 1.95. Refresh the dataplane's ip-monitoring overlay cache from
 	// the engine BEFORE the full snapshot build (#1827, AGY r2-2): an

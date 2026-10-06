@@ -204,17 +204,15 @@ func (m *Manager) policySchedulerActiveStateSnapshot() map[string]bool {
 	return copyPolicySchedulerActiveState(m.policySchedulerActive)
 }
 
-func (m *Manager) policySchedulerDesiredStateSnapshot() map[string]bool {
+func (m *Manager) policySchedulerDesiredStateAndFailClosedSnapshot() (map[string]bool, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.policySchedulerDesiredSet {
-		// Preserve the historical direct-Compile behavior for callers such as
-		// the CLI that do not have the daemon's pre-apply seeding step: an
-		// already-applied scheduler view remains the build baseline until a
-		// desired state is explicitly staged.
-		return copyPolicySchedulerActiveState(m.policySchedulerActive)
+		// Preserve direct-Compile behavior for callers without the daemon's
+		// pre-apply staging step.
+		return copyPolicySchedulerActiveState(m.policySchedulerActive), false
 	}
-	return copyPolicySchedulerActiveState(m.policySchedulerDesired)
+	return copyPolicySchedulerActiveState(m.policySchedulerDesired), m.policySchedulerDesiredFailClosed
 }
 
 // commitPolicySchedulerActiveStateLocked advances the applied/show scheduler
@@ -243,16 +241,21 @@ func (m *Manager) PolicySchedulerActiveState() map[string]bool {
 	return m.policySchedulerActiveStateSnapshot()
 }
 
-// SetPolicySchedulerActiveState stages the active-state map used by the next
-// full snapshot build or partial republish. The daemon calls this while
-// holding applySem so config commits and scheduler flips cannot publish hybrid
-// policy snapshots. It deliberately does not update the applied/show cache:
-// that cache advances only after the helper accepts the resulting snapshot.
+// SetPolicySchedulerActiveState stages the active-state map for the next
+// snapshot with the normal scheduler disposition.
 func (m *Manager) SetPolicySchedulerActiveState(activeState map[string]bool) {
+	m.SetPolicySchedulerActiveStateWithLatch(activeState, false)
+}
+
+// SetPolicySchedulerActiveStateWithLatch stages both scheduler inputs for the
+// next full snapshot build or partial republish. The latch is build input, not
+// an applied/show view, and advances only with the accepted snapshot.
+func (m *Manager) SetPolicySchedulerActiveStateWithLatch(activeState map[string]bool, failClosed bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.policySchedulerDesired = copyPolicySchedulerActiveState(activeState)
 	m.policySchedulerDesiredSet = true
+	m.policySchedulerDesiredFailClosed = failClosed
 }
 
 type publishedSnapshotTailError struct {
@@ -281,6 +284,7 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	m.bpfShim.SelectUserspaceXDPShimEntryProgram()
 
 	ucfg := deriveUserspaceConfig(cfg)
+	activeState, schedulerFailClosed := m.policySchedulerDesiredStateAndFailClosedSnapshot()
 	snapshotPreflightDone := false
 	preflightSnapshot := func(preflight *dataplane.CompileResult) error {
 		var natCounterIDs map[string]uint32
@@ -296,9 +300,9 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		// the helper here would change process/BPF state even if Phase 2 later
 		// fails, so the existing post-start gate remains authoritative for that
 		// otherwise-unknowable case.
-		preflightSnapshot, err := buildSnapshotWithSchedulerStateAndNATCounters(
-			cfg, ucfg, 0, 0, m.policySchedulerDesiredStateSnapshot(),
-			m.routeOverlaySnapshot(), m.feedSnapshotOverlay(), natCounterIDs,
+		preflightSnapshot, err := buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(
+			cfg, ucfg, 0, 0, activeState,
+			m.routeOverlaySnapshot(), m.feedSnapshotOverlay(), natCounterIDs, schedulerFailClosed,
 		)
 		if err != nil {
 			return fmt.Errorf("userspace: build config snapshot: %w", err)
@@ -341,7 +345,6 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 		return nil, fmt.Errorf("userspace: compiler did not run config snapshot preflight")
 	}
 
-	activeState := m.policySchedulerDesiredStateSnapshot()
 	// Capture the authority callback without invoking it under m.mu. The daemon
 	// owns the S4 snapshot and may need its own locks while producing wire epochs
 	// and P-MECH rows; the manager lock only protects callback replacement.
@@ -352,9 +355,9 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	// Rebuild from post-compile host state and the actual CompileResult. A new
 	// VLAN may have been absent during preflight, and its tunnel endpoint must
 	// not be lost just because the validation snapshot lacked a live ifindex.
-	snap, err := buildSnapshotWithSchedulerStateAndNATCounters(
+	snap, err := buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(
 		cfg, ucfg, m.bumpGeneration(), m.readFIBGeneration(), activeState,
-		m.routeOverlaySnapshot(), m.feedSnapshotOverlay(), result.NATCounterIDs,
+		m.routeOverlaySnapshot(), m.feedSnapshotOverlay(), result.NATCounterIDs, schedulerFailClosed,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("userspace: build config snapshot: %w", err)
@@ -1063,6 +1066,10 @@ func (m *Manager) retainPreviousClassifierPlanLocked(publishSnap *ConfigSnapshot
 // wrapped; both callers retain the prior snapshot (fail-closed) and surface a
 // retry.
 func (m *Manager) rebuildScheduledPolicySectionsLocked(next *ConfigSnapshot, cfg *config.Config, activeState map[string]bool) error {
+	return m.rebuildScheduledPolicySectionsWithLatchLocked(next, cfg, activeState, false)
+}
+
+func (m *Manager) rebuildScheduledPolicySectionsWithLatchLocked(next *ConfigSnapshot, cfg *config.Config, activeState map[string]bool, failClosed bool) error {
 	// #6480 (config-skew fail-open guard): this helper rebuilds next.Policies
 	// from cfg and scrubs them against cfg's StableZoneID quarantine set, but
 	// next.Zones / next.Interfaces were inherited verbatim from m.lastSnapshot
@@ -1095,7 +1102,7 @@ func (m *Manager) rebuildScheduledPolicySectionsLocked(next *ConfigSnapshot, cfg
 	if err != nil {
 		return fmt.Errorf("policy snapshot rebuild for scheduler republish (address-book): %w", err)
 	}
-	policies, err := buildPolicySnapshotsWithAddressBook(cfg, activeState, feedOverlay, nameToID)
+	policies, err := buildPolicySnapshotsWithAddressBookAndFailClosed(cfg, activeState, feedOverlay, nameToID, failClosed)
 	if err != nil {
 		return fmt.Errorf("policy snapshot rebuild for scheduler republish: %w", err)
 	}
@@ -1127,6 +1134,12 @@ func (m *Manager) rebuildScheduledPolicySectionsLocked(next *ConfigSnapshot, cfg
 // coherent inactive-bit view. This shadows the embedded eBPF manager method;
 // scheduled userspace policies must not update the policy_rules BPF map.
 func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[string]bool) error {
+	return m.UpdatePolicyScheduleStateWithLatch(cfg, activeState, false)
+}
+
+// UpdatePolicyScheduleStateWithLatch republishes the scheduler's current map
+// and its stale-republish latch disposition in the policy snapshot.
+func (m *Manager) UpdatePolicyScheduleStateWithLatch(cfg *config.Config, activeState map[string]bool, failClosed bool) error {
 	activeCopy := copyPolicySchedulerActiveState(activeState)
 
 	m.mu.Lock()
@@ -1187,7 +1200,7 @@ func (m *Manager) UpdatePolicyScheduleState(cfg *config.Config, activeState map[
 	// zone quarantine's policy scrub via the shared helper, so this scheduler-only
 	// republish and the route-overlay republish stay in lockstep and neither ships
 	// a policy referencing a quarantined zone absent from the inherited next.Zones.
-	if err := m.rebuildScheduledPolicySectionsLocked(&next, cfg, activeCopy); err != nil {
+	if err := m.rebuildScheduledPolicySectionsWithLatchLocked(&next, cfg, activeCopy, failClosed); err != nil {
 		slog.Warn("userspace: skipping policy-scheduler republish; retaining prior snapshot", "err", err)
 		// #3780: the prior snapshot is retained, which for a CLOSING window means
 		// the old permit stays live. Report failure so the transition is retried

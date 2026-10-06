@@ -266,8 +266,9 @@ func (d *Daemon) actuateLearnedRouteRefresh(ctx context.Context) bool {
 		return true
 	}
 	var schedulerState map[string]bool
+	var schedulerFailClosed bool
 	if sched := d.scheduler.Load(); sched != nil {
-		schedulerState = sched.ActiveState()
+		schedulerState, schedulerFailClosed = sched.ActiveStateWithFailClosed()
 	}
 	// Bounded by the coalescer's throttle (one per 3 s at worst), so this is
 	// a state-transition log rather than a per-event one — CLAUDE.md's rule is
@@ -275,7 +276,7 @@ func (d *Daemon) actuateLearnedRouteRefresh(ctx context.Context) bool {
 	// listener is doing anything: nothing else exposes the helper's
 	// learned-route set.
 	slog.Debug("route listener: republishing routes-only snapshot after kernel route change")
-	published, err := pub.PublishRouteOverlaySnapshot(cfg, d.ipmonActiveOverlay(), schedulerState)
+	published, err := pub.PublishRouteOverlaySnapshotWithLatch(cfg, d.ipmonActiveOverlay(), schedulerState, schedulerFailClosed)
 	if err != nil {
 		slog.Warn("route listener: routes-only republish failed — staying dirty for retry",
 			"err", err)

@@ -2668,16 +2668,19 @@ state into the userspace snapshot and Rust policy evaluator, and the 2026-05-19
 #1378 live artifact set validates hit-counter lifetime, strict missing-scheduler
 commit behavior, and integration/failover evidence with
 `test/incus/policy_scheduler_validate.py`. The **route-overlay** partial
-republish (`PublishRouteOverlaySnapshot`, the ip-monitoring actuator) co-honors
-this contract (#5328 A6-b2-F4): when the daemon hands it a live
-`scheduler.ActiveState()` it rebuilds the published snapshot's `policies` /
-`address_books` inactive bits from that map in the SAME publish — exactly as the
-dedicated policy-scheduler republish (`UpdatePolicyScheduleState`) does — so a
-route flap never ships a snapshot that reports success while the helper enforces
-a stale schedule window. Previously the overlay only cached the map and inherited
-the last-compiled policy sections, leaving the helper on stale bits until the next
-scheduler tick or full apply. Both republish paths share one core
-(`rebuildScheduledPolicySectionsLocked`), which re-applies the StableZoneID zone
+republish (`PublishRouteOverlaySnapshotWithLatch`, used by the ip-monitoring
+actuator and kernel-route listener) co-honors this contract: the daemon obtains
+`ActiveStateWithFailClosed()` as one scheduler view and passes both the active
+map and stale-republish latch into the same snapshot build. While latched,
+`ActiveState()` reports every scheduler inactive, and latch-aware lowering keeps
+scheduled DENY/REJECT rules eligible while scheduled permits remain inactive.
+This prevents a route flap from publishing stale schedule bits or renewing the
+helper lease around a fail-closed DENY disposition. Previously the overlay only
+cached the map and inherited the last-compiled policy sections, leaving the
+helper on stale bits until the next scheduler tick or full apply. The full
+`Compile` path stages the same map/latch pair before preflight and final lowering.
+The scheduler-only and route-overlay republish paths share
+`rebuildScheduledPolicySectionsWithLatchLocked`, which re-applies the StableZoneID
 quarantine's policy scrub after rebuilding `policies` from raw config (#6480): the
 raw builder has no knowledge of the quarantine and would reintroduce a policy
 referencing a quarantined zone, while the inherited `next.Zones` stays reduced —

@@ -57,11 +57,11 @@ type routeOverlaySetter interface {
 // routeOverlayPublisher is the routes-only partial republish surface
 // of the userspace dataplane manager (#1827 Codex r2-2).
 type routeOverlayPublisher interface {
-	// PublishRouteOverlaySnapshot returns whether a snapshot was
-	// actually published; duplicate-skips return false so the caller
-	// does not bump the FIB generation for a no-op (Codex PR #1843
-	// MED).
-	PublishRouteOverlaySnapshot(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool) (bool, error)
+	// PublishRouteOverlaySnapshotWithLatch returns whether a snapshot was
+	// actually published; duplicate-skips return false so the caller does not
+	// bump the FIB generation for a no-op. The latch bit preserves action-aware
+	// scheduled-rule eligibility when ActiveState is forced inactive.
+	PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool, failClosed bool) (bool, error)
 	// BumpFIBGeneration reports whether the helper-side invalidation
 	// was confirmed (#1844 plan §4.3, Codex r2-1): a non-nil error
 	// feeds the actuator's pendingFIBBump retry — without it, a
@@ -489,10 +489,11 @@ func (d *Daemon) actuateRouteOverlayLocked(cfg *config.Config) bool {
 		return true
 	}
 	var schedulerState map[string]bool
+	var schedulerFailClosed bool
 	if sched := d.scheduler.Load(); sched != nil {
-		schedulerState = sched.ActiveState()
+		schedulerState, schedulerFailClosed = sched.ActiveStateWithFailClosed()
 	}
-	published, err := pub.PublishRouteOverlaySnapshot(cfg, overlay, schedulerState)
+	published, err := pub.PublishRouteOverlaySnapshotWithLatch(cfg, overlay, schedulerState, schedulerFailClosed)
 	if err != nil {
 		// #3757 H2: a transient publish failure keeps the state dirty for
 		// an autonomous retry (report failure). pendingFIBBump is

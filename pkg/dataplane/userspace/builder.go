@@ -110,6 +110,14 @@ func buildSnapshotWithSchedulerState(cfg *config.Config, ucfg config.UserspaceCo
 // ("no counter"), reproducing pre-#2218 wire shape for callers that do not have
 // a compile result (tests, partial syncs).
 func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, activeState map[string]bool, routeOverlay []config.RouteOverlayEntry, feedOverlay map[string][]string, natCounterIDs map[string]uint32) (*ConfigSnapshot, error) {
+	return buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(
+		cfg, ucfg, generation, fibGeneration, activeState, routeOverlay, feedOverlay, natCounterIDs, false,
+	)
+}
+
+// buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed carries the
+// scheduler's action-aware stale-republish disposition through full lowering.
+func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Config, ucfg config.UserspaceConfig, generation uint64, fibGeneration uint32, activeState map[string]bool, routeOverlay []config.RouteOverlayEntry, feedOverlay map[string][]string, natCounterIDs map[string]uint32, failClosed bool) (*ConfigSnapshot, error) {
 	if cfg == nil {
 		return &ConfigSnapshot{
 			Version:                 ProtocolVersion,
@@ -137,7 +145,7 @@ func buildSnapshotWithSchedulerStateAndNATCounters(cfg *config.Config, ucfg conf
 	if err != nil {
 		return nil, err
 	}
-	policies, err := buildPolicySnapshotsWithAddressBook(cfg, activeState, feedOverlay, nameToID)
+	policies, err := buildPolicySnapshotsWithAddressBookAndFailClosed(cfg, activeState, feedOverlay, nameToID, failClosed)
 	if err != nil {
 		return nil, err
 	}

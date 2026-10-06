@@ -26,10 +26,11 @@ pub(crate) use snapshot_error::SnapshotIntegrityError;
 /// drops it to `MatchNone` and never matches real traffic.
 pub(crate) const UNREPRESENTABLE_ADDRESS_SENTINEL: &str = "__unsupported_address__";
 
-/// A scheduler publication remains authoritative for at most five minutes
-/// without a dataplane heartbeat. Version zero is reserved for helpers that
-/// have not yet received a heartbeat (including rolling upgrades from older
-/// control planes) and never expires.
+/// A scheduler publication remains authoritative for its window disposition
+/// for at most five minutes without a dataplane heartbeat. On expiry, scheduled
+/// permits become ineligible and scheduled denies/rejects remain eligible.
+/// Version zero is reserved for helpers that have not yet received a heartbeat
+/// (including rolling upgrades from older control planes) and never expires.
 pub(crate) const SCHEDULER_HEARTBEAT_LEASE_NS: u64 = 300_000_000_000;
 
 #[derive(Debug, Default)]
@@ -1815,6 +1816,18 @@ impl PolicyState {
             .checked_sub(1)
             .and_then(|idx| self.rules.get(idx as usize))
             .is_some_and(|rule| !rule.scheduler_name.is_empty())
+    }
+
+    /// Whether lease expiry can make a new scheduled deny/reject eligible.
+    /// Used by the worker-local flow cache to invalidate pre-expiry verdicts
+    /// once at that phase transition; subsequent unscheduled cache entries
+    /// retain the ordinary fast path.
+    #[inline]
+    pub(crate) fn has_scheduled_deny_or_reject(&self) -> bool {
+        self.rules.iter().any(|rule| {
+            !rule.scheduler_name.is_empty()
+                && matches!(rule.action, PolicyAction::Deny | PolicyAction::Reject)
+        })
     }
     /// #8618: may an ICMP-family zone-policy verdict for `protocol` depend on
     /// the PACKET's icmp type/code, rather than on the flow alone?
@@ -4319,7 +4332,13 @@ fn try_match_rule(
     hit_count: PolicyHitCount,
     track_frag_deny: bool,
 ) -> RuleMatchOutcome {
-    if rule.inactive || (scheduler_expired && !rule.scheduler_name.is_empty()) {
+    let scheduler_unknown = scheduler_expired && !rule.scheduler_name.is_empty();
+    // A stale schedule has no trustworthy active/inactive disposition: keep
+    // scheduled denies/rejects eligible and expire scheduled permits. Trust
+    // the snapshot's inactive bit only while its scheduler lease is fresh.
+    if (scheduler_unknown && rule.action == PolicyAction::Permit)
+        || (!scheduler_unknown && rule.inactive)
+    {
         return RuleMatchOutcome::Miss(RuleMissReason::Inactive);
     }
     // #3227: `matches` carries the matched term's optional inactivity timeout.

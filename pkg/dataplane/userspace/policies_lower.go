@@ -33,6 +33,10 @@ func buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg *config.Config, activeSt
 }
 
 func buildPolicySnapshotsWithAddressBook(cfg *config.Config, activeState map[string]bool, feedOverlay map[string][]string, nameToID map[string]uint32) ([]PolicyRuleSnapshot, error) {
+	return buildPolicySnapshotsWithAddressBookAndFailClosed(cfg, activeState, feedOverlay, nameToID, false)
+}
+
+func buildPolicySnapshotsWithAddressBookAndFailClosed(cfg *config.Config, activeState map[string]bool, feedOverlay map[string][]string, nameToID map[string]uint32, failClosed bool) ([]PolicyRuleSnapshot, error) {
 	if cfg == nil || (len(cfg.Security.Policies) == 0 && len(cfg.Security.GlobalPolicies) == 0) {
 		return nil, nil
 	}
@@ -106,7 +110,7 @@ func buildPolicySnapshotsWithAddressBook(cfg *config.Config, activeState map[str
 	// policy set's namespace.
 	if err := walkPolicyRuleSlots(cfg, func(slot policyRuleSlot) error {
 		policyID := slot.policyID()
-		snap := buildOneRuleSnapshot(cfg, nameToID, addrRepresentable, slot.Policy, slot.FromZone, slot.ToZone, policyID, activeState)
+		snap := buildOneRuleSnapshot(cfg, nameToID, addrRepresentable, slot.Policy, slot.FromZone, slot.ToZone, policyID, activeState, failClosed)
 		// #9570: a ZONE-PAIR stanza naming the reserved `junos-global` sentinel
 		// must fail closed rather than be enforced as a device-wide global rule.
 		// Only the builder can decide this, because only it knows which list the
@@ -130,6 +134,7 @@ func buildOneRuleSnapshot(
 	fromZone, toZone string,
 	policyID uint32,
 	activeState map[string]bool,
+	failClosed bool,
 ) PolicyRuleSnapshot {
 	// #1606 v3 fields reference address-book content once on the snapshot and
 	// carry only IDs on each rule. Legacy expanded lists remain for non-v3
@@ -227,7 +232,7 @@ func buildOneRuleSnapshot(
 		FromZone:             fromZone,
 		ToZone:               toZone,
 		SchedulerName:        schedulerName,
-		Inactive:             policyRuleInactive(schedulerName, activeState),
+		Inactive:             policyRuleInactiveForAction(schedulerName, pol.Action, activeState, failClosed),
 		SourceAddresses:      sourceAddresses,
 		DestinationAddresses: destinationAddresses,
 		SourceBookIDs:        srcBookIDs,

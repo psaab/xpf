@@ -253,3 +253,58 @@ func TestPublishPolicyScheduleStateWaitsWhenItsContextIsLive8660(t *testing.T) {
 		t.Fatal("publishPolicyScheduleState did not proceed after the permit was released")
 	}
 }
+
+// F2 repro: ApplyConfig stages policySchedulerActiveStateForApplyLocked before
+// reconcilePolicySchedulerLockedAt carries the stale-republish latch into a
+// replacement scheduler. A hash-changed, newly active scheduler must therefore
+// still be staged inactive for the full snapshot, rather than enabling a
+// scheduled permit while the carried latch is set.
+func TestPolicySchedulerApplyStateCarriesFailClosedLatch12273(t *testing.T) {
+	now := testPolicySchedulerApplyNow()
+	oldCfg := &config.Config{Schedulers: map[string]*config.SchedulerConfig{
+		"workhours": {Name: "workhours", StartTime: "09:00:00", StopTime: "17:00:00"},
+		"night":     {Name: "night", StartTime: "09:00:00", StopTime: "10:00:00"},
+	}}
+	newCfg := &config.Config{Schedulers: map[string]*config.SchedulerConfig{
+		"workhours": {Name: "workhours", AllDay: true},
+		"night":     {Name: "night", StartTime: "09:00:00", StopTime: "10:00:00"},
+	}}
+	old, oldState := scheduler.NewPrimed(oldCfg.Schedulers,
+		func(context.Context, map[string]bool) error { return nil }, now)
+	if !oldState["workhours"] || oldState["night"] {
+		t.Fatalf("precondition: old workhours should be active and night inactive at %s: %v", now, oldState)
+	}
+	failErr := errors.New("scheduler snapshot publish failed")
+	old.RecordRepublishResult(failErr, now.Add(-6*time.Minute))
+	old.RecordRepublishResult(failErr, now)
+	if !old.RepublishFailClosed() {
+		t.Fatal("precondition: old scheduler did not carry a fail-closed latch")
+	}
+	if old.ActiveState()["workhours"] {
+		t.Fatal("latched old scheduler exposed its formerly active permit as active")
+	}
+
+	oldHash, _ := policySchedulerConfigHash(oldCfg)
+	d := &Daemon{policySchedulerConfigHash: oldHash}
+	d.scheduler.Store(old)
+
+	// This map is staged before ApplyConfig, while the next call is the
+	// post-apply scheduler reconciliation. The new all-day workhours schedule
+	// would normally be active, but must remain inactive for the latched build.
+	staged, failClosed := d.policySchedulerActiveStateAndFailClosedForApplyLocked(newCfg, now)
+	if !failClosed {
+		t.Fatal("F2 BYPASS: full apply did not stage the carried fail-closed latch")
+	}
+	if staged["workhours"] || staged["night"] {
+		t.Fatalf("F2 BYPASS: full apply staged active scheduler state under carried latch: %v", staged)
+	}
+
+	reconciled := d.reconcilePolicySchedulerLockedAt(newCfg, now)
+	replacement := d.scheduler.Load()
+	if replacement == nil || replacement == old || !replacement.RepublishFailClosed() {
+		t.Fatal("post-apply scheduler did not inherit the fail-closed latch")
+	}
+	if reconciled["workhours"] || reconciled["night"] {
+		t.Fatalf("reconciled scheduler state escaped fail-closed posture: %v", reconciled)
+	}
+}

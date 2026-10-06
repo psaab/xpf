@@ -314,6 +314,10 @@ func (a *LegacyDataPlaneAdapter) Compile(cfg *config.Config) (*dataplane.Compile
 }
 
 func (a *LegacyDataPlaneAdapter) UpdatePolicyScheduleState(cfg *config.Config, activeState map[string]bool) error {
+	return a.UpdatePolicyScheduleStateWithLatch(cfg, activeState, false)
+}
+
+func (a *LegacyDataPlaneAdapter) UpdatePolicyScheduleStateWithLatch(cfg *config.Config, activeState map[string]bool, failClosed bool) error {
 	m, err := a.managerOrErr()
 	if err != nil {
 		// #3780: no manager attached — nothing is enforcing, so there
@@ -321,7 +325,7 @@ func (a *LegacyDataPlaneAdapter) UpdatePolicyScheduleState(cfg *config.Config, a
 		// scheduler self-heal does not spin.
 		return nil
 	}
-	return m.UpdatePolicyScheduleState(cfg, activeState)
+	return m.UpdatePolicyScheduleStateWithLatch(cfg, activeState, failClosed)
 }
 
 func (a *LegacyDataPlaneAdapter) HeartbeatPolicyScheduler(ctx context.Context) {
@@ -332,11 +336,15 @@ func (a *LegacyDataPlaneAdapter) HeartbeatPolicyScheduler(ctx context.Context) {
 }
 
 func (a *LegacyDataPlaneAdapter) SetPolicySchedulerActiveState(activeState map[string]bool) {
+	a.SetPolicySchedulerActiveStateWithLatch(activeState, false)
+}
+
+func (a *LegacyDataPlaneAdapter) SetPolicySchedulerActiveStateWithLatch(activeState map[string]bool, failClosed bool) {
 	m, err := a.managerOrErr()
 	if err != nil {
 		return
 	}
-	m.SetPolicySchedulerActiveState(activeState)
+	m.SetPolicySchedulerActiveStateWithLatch(activeState, failClosed)
 }
 
 // PolicySchedulerActiveState surfaces the manager's daemon-maintained
@@ -376,15 +384,21 @@ func (a *LegacyDataPlaneAdapter) SetFeedSnapshots(overlay map[string][]string) {
 	m.SetFeedSnapshots(overlay)
 }
 
-// PublishRouteOverlaySnapshot forwards the routes-only partial
-// republish (#1827). Returns whether a snapshot was actually
+// PublishRouteOverlaySnapshot forwards the routes-only partial republish
+// (#1827) with the normal scheduler disposition. Returns whether a snapshot was
 // published (duplicate-skips and helperless caching return false).
 func (a *LegacyDataPlaneAdapter) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool) (bool, error) {
+	return a.PublishRouteOverlaySnapshotWithLatch(cfg, overlay, schedulerState, false)
+}
+
+// PublishRouteOverlaySnapshotWithLatch preserves action-aware policy lowering
+// when a stale-republish latch forces the scheduler state inactive.
+func (a *LegacyDataPlaneAdapter) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool, failClosed bool) (bool, error) {
 	m, err := a.managerOrErr()
 	if err != nil {
 		return false, err
 	}
-	return m.PublishRouteOverlaySnapshot(cfg, overlay, schedulerState)
+	return m.PublishRouteOverlaySnapshotWithLatch(cfg, overlay, schedulerState, failClosed)
 }
 
 func (a *LegacyDataPlaneAdapter) BumpFIBGeneration() (uint32, error) {

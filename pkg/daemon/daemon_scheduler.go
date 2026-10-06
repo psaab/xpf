@@ -15,8 +15,16 @@ type policySchedulerActiveStateSetter interface {
 	SetPolicySchedulerActiveState(map[string]bool)
 }
 
+type policySchedulerActiveStateLatchSetter interface {
+	SetPolicySchedulerActiveStateWithLatch(map[string]bool, bool)
+}
+
 type policyScheduleStateUpdater interface {
 	UpdatePolicyScheduleState(*config.Config, map[string]bool) error
+}
+
+type policyScheduleFailClosedUpdater interface {
+	UpdatePolicyScheduleStateWithLatch(*config.Config, map[string]bool, bool) error
 }
 
 type policyScheduleHeartbeatUpdater interface {
@@ -52,13 +60,15 @@ func (d *Daemon) reconcilePolicySchedulerLockedAt(cfg *config.Config, now time.T
 		return nil
 	}
 
+	var sched *scheduler.Scheduler
 	sched, activeState := scheduler.NewPrimedInLocation(cfg.Schedulers, func(ctx context.Context, activeState map[string]bool) error {
 		// #8660: the SCHEDULER'S ctx, handed to us by the tick. Not
 		// `d.daemonCtx`, which is the raw production-uncancelled parent — a
 		// tick parked on the semaphore with that one is released by nothing,
 		// so `stopPolicySchedulerLoop`'s `schedulerWg.Wait()` blocked behind a
 		// wedged apply and shutdown never reached HA relinquish.
-		return d.publishPolicyScheduleState(ctx, epoch, activeState)
+		failClosed := sched != nil && sched.RepublishFailClosed()
+		return d.publishPolicyScheduleStateWithLatch(ctx, epoch, activeState, failClosed)
 	}, now, policySchedulerLocation(cfg, now))
 	sched.SetHeartbeatFn(func(ctx context.Context) {
 		d.heartbeatPolicySchedule(ctx, epoch)
@@ -72,15 +82,31 @@ func (d *Daemon) reconcilePolicySchedulerLockedAt(cfg *config.Config, now time.T
 }
 
 func (d *Daemon) policySchedulerActiveStateForApplyLocked(cfg *config.Config, now time.Time) map[string]bool {
+	activeState, _ := d.policySchedulerActiveStateAndFailClosedForApplyLocked(cfg, now)
+	return activeState
+}
+
+func (d *Daemon) policySchedulerActiveStateAndFailClosedForApplyLocked(cfg *config.Config, now time.Time) (map[string]bool, bool) {
 	hash, hasSchedulers := policySchedulerConfigHash(cfg)
 	if !hasSchedulers {
-		return nil
+		return nil, false
 	}
-	if sched := d.scheduler.Load(); sched != nil && hash == d.policySchedulerConfigHash {
-		return sched.ActiveState()
+	previous := d.scheduler.Load()
+	failClosed := false
+	if previous != nil {
+		var previousState map[string]bool
+		previousState, failClosed = previous.ActiveStateWithFailClosed()
+		if hash == d.policySchedulerConfigHash {
+			return previousState, failClosed
+		}
 	}
 	_, activeState := scheduler.NewPrimedInLocation(cfg.Schedulers, func(context.Context, map[string]bool) error { return nil }, now, policySchedulerLocation(cfg, now))
-	return activeState
+	if failClosed {
+		for name := range activeState {
+			activeState[name] = false
+		}
+	}
+	return activeState, failClosed
 }
 
 // policySchedulerLocation returns the committed system zone for scheduler
@@ -280,6 +306,10 @@ func (d *Daemon) stopPolicySchedulerLoop() {
 // bound would still be a stall, and would satisfy a wall-clock cell while
 // leaving the join blocked.
 func (d *Daemon) publishPolicyScheduleState(ctx context.Context, epoch uint64, activeState map[string]bool) error {
+	return d.publishPolicyScheduleStateWithLatch(ctx, epoch, activeState, false)
+}
+
+func (d *Daemon) publishPolicyScheduleStateWithLatch(ctx context.Context, epoch uint64, activeState map[string]bool, failClosed bool) error {
 	if ctx == nil {
 		// Only a caller that is not the scheduler tick can reach this, and it
 		// has no lifecycle to inherit. Kept total rather than panicking.
@@ -302,8 +332,8 @@ func (d *Daemon) publishPolicyScheduleState(ctx context.Context, epoch uint64, a
 	if cfg == nil || d.dataplane() == nil {
 		return nil
 	}
-	d.seedPolicySchedulerActiveStateLocked(activeState)
-	err := d.updatePolicyScheduleStateLocked(cfg, activeState)
+	d.seedPolicySchedulerActiveStateLocked(activeState, failClosed)
+	err := d.updatePolicyScheduleStateWithLatchLocked(cfg, activeState, failClosed)
 	d.recordSchedulerRepublishResult(err)
 	return err
 }
@@ -331,8 +361,13 @@ func (d *Daemon) heartbeatPolicySchedule(ctx context.Context, epoch uint64) {
 	}
 }
 
-func (d *Daemon) seedPolicySchedulerActiveStateLocked(activeState map[string]bool) {
-	if setter, ok := d.dataplane().(policySchedulerActiveStateSetter); ok {
+func (d *Daemon) seedPolicySchedulerActiveStateLocked(activeState map[string]bool, failClosed bool) {
+	rt := d.dataplane()
+	if setter, ok := rt.(policySchedulerActiveStateLatchSetter); ok {
+		setter.SetPolicySchedulerActiveStateWithLatch(activeState, failClosed)
+		return
+	}
+	if setter, ok := rt.(policySchedulerActiveStateSetter); ok {
 		setter.SetPolicySchedulerActiveState(activeState)
 	}
 }
@@ -352,6 +387,17 @@ func (d *Daemon) updatePolicyScheduleStateLocked(cfg *config.Config, activeState
 		return updater.UpdatePolicyScheduleState(cfg, activeState)
 	}
 	return nil
+}
+
+func (d *Daemon) updatePolicyScheduleStateWithLatchLocked(cfg *config.Config, activeState map[string]bool, failClosed bool) error {
+	rt := d.dataplane()
+	if rt == nil {
+		return nil
+	}
+	if updater, ok := rt.(policyScheduleFailClosedUpdater); ok {
+		return updater.UpdatePolicyScheduleStateWithLatch(cfg, activeState, failClosed)
+	}
+	return d.updatePolicyScheduleStateLocked(cfg, activeState)
 }
 
 // recordPolicySchedulerInitialPublishResult keeps apply-transaction publishes

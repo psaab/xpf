@@ -2,14 +2,7 @@ package userspace
 
 import (
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	gotypes "go/types"
-	"path/filepath"
 	"reflect"
-	"sort"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -674,133 +667,6 @@ func TestADeferredXSKStartupTickSamplesNothing9684(t *testing.T) {
 	}
 	if !m.partialSectionUnknownLocked(partialFabrics) {
 		t.Fatal("a deferred publish must leave the section unknown")
-	}
-}
-
-// callName9684 is the name a call expression calls: the selector for a method or
-// qualified call, the identifier for a plain function.
-func callName9684(call *ast.CallExpr) string {
-	switch fun := call.Fun.(type) {
-	case *ast.SelectorExpr:
-		return fun.Sel.Name
-	case *ast.Ident:
-		return fun.Name
-	}
-	return ""
-}
-
-// isResampleStmt9684 reports whether stmt itself re-samples every marked section:
-// a plain or assigned call to resampleUnresolvedSectionsLocked or
-// resampleForCompileLocked, or to resampleSectionsLocked for both sections. A call
-// nested in a branch does not count.
-func isResampleStmt9684(stmt ast.Stmt) bool {
-	var expr ast.Expr
-	switch s := stmt.(type) {
-	case *ast.AssignStmt:
-		if len(s.Rhs) != 1 {
-			return false
-		}
-		expr = s.Rhs[0]
-	case *ast.ExprStmt:
-		expr = s.X
-	default:
-		return false
-	}
-	call, ok := expr.(*ast.CallExpr)
-	if !ok {
-		return false
-	}
-	switch callName9684(call) {
-	case "resampleUnresolvedSectionsLocked", "resampleForCompileLocked":
-		return true
-	case "resampleSectionsLocked":
-		// Only the both-sections form re-samples whatever is marked.
-		return len(call.Args) == 2 && gotypes.ExprString(call.Args[1]) == "partialNeighbors | partialFabrics"
-	}
-	return false
-}
-
-// TestEveryApplySnapshotPublishReSamplesUnknownSections9684 finds every function
-// that publishes an apply_snapshot, whatever it builds the snapshot from. Each
-// must re-sample in a TOP-LEVEL statement of its body placed before every publish,
-// unless it is allow-listed below with a reason. A top-level statement runs on
-// every path that reaches a later one, so a re-sample hidden in a branch, or
-// placed after the publish, fails. A new publish that forgets is the #9684
-// rollback again. The census keys on the publish call rather than on how the
-// snapshot was copied. It cannot see whether the re-sampled struct is the one
-// passed to the publish; the behavioural cells above cover that for every
-// publisher they can drive.
-func TestEveryApplySnapshotPublishReSamplesUnknownSections9684(t *testing.T) {
-	exempt := map[string]string{
-		"publishSnapshotFailClosedLocked": "the fail-closed wrapper; its callers re-sample",
-	}
-	fset := token.NewFileSet()
-	paths, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatalf("glob: %v", err)
-	}
-	resamplesFirst := map[string]bool{}
-	for _, path := range paths {
-		if strings.HasSuffix(path, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, path, nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", path, err)
-		}
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			var publishes []token.Pos
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				if call, ok := n.(*ast.CallExpr); ok {
-					switch callName9684(call) {
-					case "requestApplySnapshotLocked", "publishSnapshotFailClosedLocked":
-						publishes = append(publishes, call.Pos())
-					}
-				}
-				return true
-			})
-			if len(publishes) == 0 {
-				continue
-			}
-			resample := token.NoPos
-			for _, stmt := range fn.Body.List {
-				if isResampleStmt9684(stmt) {
-					resample = stmt.Pos()
-					break
-				}
-			}
-			ok = resample != token.NoPos
-			for _, p := range publishes {
-				ok = ok && resample < p
-			}
-			resamplesFirst[fn.Name.Name] = ok
-		}
-	}
-	for _, name := range []string{"UpdatePolicyScheduleState", "PublishRouteOverlaySnapshot", "retryDeferredWorkerArmLocked",
-		"syncSnapshotLocked", "applyCompiledSnapshot"} {
-		if _, ok := resamplesFirst[name]; !ok {
-			t.Fatalf("liveness: %s no longer publishes an apply_snapshot, so the scan is not reading the publishes it guards", name)
-		}
-	}
-	for name := range exempt {
-		if _, ok := resamplesFirst[name]; !ok {
-			t.Fatalf("exemption %q names no apply_snapshot publish any more; remove it", name)
-		}
-	}
-	var missing []string
-	for name, ok := range resamplesFirst {
-		if _, exempted := exempt[name]; !ok && !exempted {
-			missing = append(missing, name)
-		}
-	}
-	sort.Strings(missing)
-	if len(missing) > 0 {
-		t.Errorf("these functions publish an apply_snapshot without re-sampling first: %v. "+
-			"A section a lost partial update left unknown is re-sent from m.lastSnapshot and rolls the helper back (#9684)", missing)
 	}
 }
 

@@ -841,6 +841,10 @@ pub(super) struct FlowCache {
     /// distinguish entries touched within the last `ACTIVE_WINDOW_EPOCHS`
     /// ticks (= 10 × ~65ms ≈ 650ms window).
     pub(super) current_epoch: u16,
+    /// Scheduler lease phase last observed by the lookup path. On transition
+    /// into expiry, entries from the prior phase cannot be trusted when a
+    /// scheduled DENY/REJECT may become eligible.
+    scheduler_expired: bool,
 }
 
 impl FlowCache {
@@ -853,6 +857,7 @@ impl FlowCache {
             evictions: 0,
             collision_evictions: 0,
             current_epoch: 1,
+            scheduler_expired: false,
         }
     }
 
@@ -1110,9 +1115,10 @@ impl FlowCache {
         )
     }
 
-    /// #11285: force an admitted scheduler-bound entry back through session
-    /// revalidation once its heartbeat lease expires. Other cached verdicts
-    /// keep the ordinary fast path.
+    /// #11285/#12273: an expired lease can change DENY/REJECT eligibility
+    /// independently of a cached verdict's admitting rule. Clear old-phase
+    /// entries once when scheduled DENY/REJECT rules may become eligible;
+    /// retain the existing targeted eviction otherwise.
     #[inline]
     pub(super) fn lookup_counted_with_scheduler_expiry(
         &mut self,
@@ -1124,6 +1130,22 @@ impl FlowCache {
         policy: &crate::policy::PolicyState,
         scheduler_expired: bool,
     ) -> Option<&FlowCacheEntry> {
+        if scheduler_expired != self.scheduler_expired {
+            if scheduler_expired && policy.has_scheduled_deny_or_reject() {
+                // Lease expiry changes DENY/REJECT eligibility independently
+                // of the entry's admitting rule: a cached unscheduled PERMIT
+                // can sit below one of those rules. Evict the old-phase cache
+                // once so the session-hit path revalidates each flow; doing
+                // this only at the transition preserves the fast path for
+                // subsequent entries and avoids repeated misses while stale.
+                for entry in &mut self.entries {
+                    if entry.take().is_some() {
+                        self.evictions += 1;
+                    }
+                }
+            }
+            self.scheduler_expired = scheduler_expired;
+        }
         self.lookup_with_observed_bytes(
             key,
             lookup,
@@ -1133,8 +1155,8 @@ impl FlowCache {
             Some(policy),
             scheduler_expired,
         )
-
     }
+
     #[inline]
     fn lookup_with_observed_bytes(
         &mut self,
