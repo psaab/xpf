@@ -503,17 +503,18 @@ func (m *Manager) generatePolicyOptionsWithQNH11447(po *config.PolicyOptionsConf
 }
 
 // renderPolicyTermSequences renders policy-statement ps's TERM sequences (NO
-// trailing default) into a fresh buffer under FRR route-map name routeMapName,
-// deriving inline route-filter prefix-list names from plPrefix, starting at
-// sequence startSeq. It returns the rendered text and the next unused sequence.
+// trailing default) under FRR route-map name routeMapName, deriving inline
+// route-filter prefix-list names from plPrefix, starting at sequence startSeq.
+// It joins the top-level definitions collected by the separated renderer with
+// the route-map body and returns the next unused sequence.
 //
 // Splitting the route-map NAME (route-map header) from the prefix-list PREFIX
 // lets renderComposedRouteMap emit several policies' term sequences into ONE
-// route-map (all sharing routeMapName) while keeping each policy's inline
-// prefix-lists in a distinct namespace (plPrefix carries the policy name), so a
-// term name reused across chained policies cannot fuse two prefix-lists (#5277).
-// renderRouteMapForPolicy passes routeMapName == plPrefix == emitName, keeping
-// the single-policy render byte-identical to master.
+// route-map while keeping each policy's inline prefix-lists in a distinct
+// namespace (plPrefix carries the policy name), so a term name reused across
+// chained policies cannot fuse two prefix-lists (#5277). The separated renderer
+// also lets composed callers put every generated definition before the first
+// route-map header.
 // asPathListMissingAtRender reports whether `match as-path <name>` would
 // dangle: no such definition, or one the access-list loop omits (not valid
 // POSIX, #6686; or joined from unquoted-bracketed tokens, #9881). The
@@ -575,6 +576,12 @@ func renderNextPolicyTarget(body string, sequence int) string {
 }
 
 func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, routeMapName, plPrefix string, ps *config.PolicyStatement, startSeq int) (string, int) {
+	definitions, body, next := m.renderPolicyTermSequencesWithDefinitions(po, routeMapName, plPrefix, ps, startSeq)
+	return definitions + body, next
+}
+
+func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOptionsConfig, routeMapName, plPrefix string, ps *config.PolicyStatement, startSeq int) (string, string, int) {
+	var definitions strings.Builder
 	var b strings.Builder
 	seq := startSeq
 	for _, term := range ps.Terms {
@@ -736,7 +743,7 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 			rfMatchEmitted := false
 			rfMatchV6 := false
 
-			// Inline prefix-list for this sequence's route-filters.
+			// Collect prefix-list definitions for this sequence's route-filters.
 			if len(term.RouteFilters) > 0 {
 				// matchV6 selects the address family of the
 				// "match ip/ipv6 address prefix-list" line. For a split
@@ -774,7 +781,7 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 							matchFamilyKnown = true
 						}
 					}
-					if renderRouteFilterEntry(&b, plName, irf.idx, irf.rf) {
+					if renderRouteFilterEntry(&definitions, plName, irf.idx, irf.rf) {
 						if emitted == 0 && seqFam == "" {
 							matchV6 = strings.Contains(irf.rf.Prefix, ":")
 							matchFamilyKnown = true
@@ -852,7 +859,7 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 					// they always agree; routeFilterACLNameCollision (wired into
 					// ApplyFull) fails the apply CLOSED on any residual collision.
 					aclName := routeFilterACLName(fromPL.name, matchKW)
-					renderFromPrefixListACL(&b, aclName, matchKW, plObj)
+					renderFromPrefixListACL(&definitions, aclName, matchKW, plObj)
 					fmt.Fprintf(&b, " match %s address %s\n", matchKW, aclName)
 				} else {
 					fmt.Fprintf(&b, " match %s address prefix-list %s\n", matchKW, frrName(fromPL.name))
@@ -1138,7 +1145,7 @@ func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, rout
 		}
 	}
 
-	return b.String(), seq
+	return definitions.String(), b.String(), seq
 }
 
 // renderRouteMapForPolicy renders ONE FRR route-map for policy-statement ps
@@ -1245,6 +1252,7 @@ func (m *Manager) renderComposedRouteMapWithDefault(po *config.PolicyOptionsConf
 		return renderQuarantineDenyRouteMap(composedName)
 	}
 	type policyPart struct {
+		definitions string
 		body        string
 		nextPolicy  bool
 		startSeq    int
@@ -1260,8 +1268,8 @@ func (m *Manager) renderComposedRouteMapWithDefault(po *config.PolicyOptionsConf
 			// Defensive: chain is pre-filtered to defined policy-statements.
 			continue
 		}
-		body, next := m.renderPolicyTermSequences(po, composedName, composedName+"-"+name, ps, seq)
-		part := policyPart{body: body, nextPolicy: policyHasNextPolicyTerm(ps), startSeq: seq}
+		definitions, body, next := m.renderPolicyTermSequencesWithDefinitions(po, composedName, composedName+"-"+name, ps, seq)
+		part := policyPart{definitions: definitions, body: body, nextPolicy: policyHasNextPolicyTerm(ps), startSeq: seq}
 		seq = next
 		switch ps.DefaultAction {
 		case "accept":
@@ -1282,6 +1290,10 @@ func (m *Manager) renderComposedRouteMapWithDefault(po *config.PolicyOptionsConf
 	}
 
 	var b strings.Builder
+	for _, part := range parts {
+		b.WriteString(part.definitions)
+	}
+
 	fallbackSeq := seq
 	for i, part := range parts {
 		target := fallbackSeq
