@@ -2,26 +2,137 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"sort"
 )
 
+type wireGuardListenerRef struct {
+	name   string
+	tunnel *TunnelConfig
+}
+
+func (c *Config) wireGuardListeners() []wireGuardListenerRef {
+	if c == nil {
+		return nil
+	}
+	var out []wireGuardListenerRef
+	add := func(name string, tunnel *TunnelConfig) {
+		if tunnel != nil && tunnel.Mode == "wireguard" && tunnel.WgListenPort != 0 {
+			out = append(out, wireGuardListenerRef{name: name, tunnel: tunnel})
+		}
+	}
+	for ifName, iface := range c.Interfaces.Interfaces {
+		if iface == nil {
+			continue
+		}
+		add(ifName, iface.Tunnel)
+		for unitNum, unit := range iface.Units {
+			if unit != nil {
+				add(fmt.Sprintf("%s.%d", ifName, unitNum), unit.Tunnel)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
+}
+
+func (c *Config) wireGuardSourceOwners() (map[netip.Addr]string, map[netip.Addr]bool) {
+	owners := make(map[netip.Addr]string)
+	ambiguous := make(map[netip.Addr]bool)
+	if c == nil {
+		return owners, ambiguous
+	}
+	zones := InterfaceZoneMap(c)
+	add := func(zone, value string) {
+		if zone == "" {
+			return
+		}
+		address, ok := parseWireGuardLocalAddress(value)
+		if !ok {
+			return
+		}
+		if owner, exists := owners[address]; exists && owner != zone {
+			ambiguous[address] = true
+			return
+		}
+		owners[address] = zone
+	}
+	for ifName, iface := range c.Interfaces.Interfaces {
+		if iface == nil {
+			continue
+		}
+		for unitNum, unit := range iface.Units {
+			if unit == nil {
+				continue
+			}
+			zone := zones[fmt.Sprintf("%s.%d", ifName, unitNum)]
+			for _, address := range unit.Addresses {
+				add(zone, address)
+			}
+			for _, group := range unit.VRRPGroups {
+				if group == nil {
+					continue
+				}
+				for _, address := range group.VirtualAddresses {
+					add(zone, address)
+				}
+			}
+		}
+	}
+	return owners, ambiguous
+}
+
+func parseWireGuardLocalAddress(value string) (netip.Addr, bool) {
+	if prefix, err := netip.ParsePrefix(value); err == nil {
+		return prefix.Addr().Unmap(), true
+	}
+	address, err := netip.ParseAddr(value)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return address.Unmap(), true
+}
+
+// WireGuardSourceLessInterfaces lists configured listeners with no explicit
+// outer source address. Their serving zone cannot be derived for scoped
+// host-inbound admission, so the compiler warns before commit.
+func (c *Config) WireGuardSourceLessInterfaces() []string {
+	var out []string
+	for _, listener := range c.wireGuardListeners() {
+		if listener.tunnel.Source == "" {
+			out = append(out, listener.name)
+		}
+	}
+	return out
+}
+
+// WireGuardInvalidSourceInterfaces lists listeners whose configured source is
+// not a uniquely zone-owned local address. The listener remains fail-closed.
+func (c *Config) WireGuardInvalidSourceInterfaces() []string {
+	owners, ambiguous := c.wireGuardSourceOwners()
+	var out []string
+	for _, listener := range c.wireGuardListeners() {
+		if listener.tunnel.Source == "" {
+			continue
+		}
+		address, err := netip.ParseAddr(listener.tunnel.Source)
+		if err != nil {
+			out = append(out, listener.name)
+			continue
+		}
+		address = address.Unmap()
+		if _, ok := owners[address]; !ok || ambiguous[address] {
+			out = append(out, listener.name)
+		}
+	}
+	return out
+}
+
 // WireGuardListenPorts returns the sorted, de-duplicated set of non-zero
 // WireGuard UDP listen ports configured across every interface-level and
-// per-unit tunnel whose Mode is "wireguard" (#5582). It is the compile-time
-// SSOT for the host-inbound kernel filter's DYNAMIC WireGuard admission.
-//
-// The XDP shim deliberately steers local-destination UDP on the configured WG
-// listen port to the kernel (userspace-xdp wg_steer_to_kernel), so the
-// userspace WireGuard control socket can receive the outer transport. Without a
-// matching host-inbound admission, a FRESH passive (responder-only) handshake to
-// a restricted zoned address is conntrack NEW, misses the per-zone service
-// accepts, and is dropped by the host-inbound catch-all — so a supported
-// responder-only WireGuard listener can never come up (#5582). The daemon
-// host-inbound builder consumes this set to emit exactly one coarse
-// `udp dport <ports> accept` on the input hook (buildHostInboundFilterPayload),
-// admitting the configured WG port(s) to every firewall-local address — the
-// same local-destination scope the shim steers — while leaving every other
-// host-bound service under the per-zone default-deny.
+// per-unit tunnel whose Mode is "wireguard" (#5582). The dataplane uses the
+// selected set for listener steering; host-inbound admission is separately
+// derived from each listener's configured outer source-address owner zone.
 //
 // A Mode=="wireguard" tunnel with WgListenPort==0 is skipped: the WireGuard
 // compiler hard-rejects a zero/out-of-range listen-port at commit
@@ -62,102 +173,26 @@ func (c *Config) WireGuardListenPorts() []uint16 {
 	return out
 }
 
-// WireGuardZonePorts maps each security zone to the sorted WireGuard UDP
-// listen ports of the tunnels bound to that zone's interfaces (#11076). It is
-// the compile-time SSOT for SCOPED host-inbound WG admission: each zone's
-// ports render as a `daddr <zone-addrs> udp dport <ports> accept` inside that
-// zone's host-inbound section — ordered with zone policy, never above it —
-// instead of the former global bare accept.
-//
-// Zone resolution reuses InterfaceZoneMap (same fan-up/fan-down +
-// quarantine rules the host-inbound views enforce). A tunnel whose interface
-// binds no zone contributes nothing: its handshake cannot arrive (fail
-// closed), and the compile tailgate warns. Ports within a zone are
-// sorted+deduped; zones with no WG tunnels are absent (not empty). Returns
-// nil when no zoned WG tunnel exists.
-func (c *Config) WireGuardZonePorts() map[string][]uint16 {
-	cfg := c
-	if cfg == nil {
-		return nil
-	}
-	zones := InterfaceZoneMap(cfg)
-	byZone := make(map[string]map[uint16]bool)
-	add := func(ifaceKey string, tc *TunnelConfig) {
-		if tc == nil || tc.Mode != "wireguard" || tc.WgListenPort == 0 {
-			return
-		}
-		zone, ok := zones[ifaceKey]
-		if !ok || zone == "" {
-			return
-		}
-		if byZone[zone] == nil {
-			byZone[zone] = make(map[uint16]bool)
-		}
-		byZone[zone][tc.WgListenPort] = true
-	}
-	for ifName, ifc := range cfg.Interfaces.Interfaces {
-		if ifc == nil {
-			continue
-		}
-		add(ifName, ifc.Tunnel)
-		for unitNum, unit := range ifc.Units {
-			if unit == nil {
-				continue
-			}
-			add(fmt.Sprintf("%s.%d", ifName, unitNum), unit.Tunnel)
-		}
-	}
-	if len(byZone) == 0 {
-		return nil
-	}
-	out := make(map[string][]uint16, len(byZone))
-	for zone, ports := range byZone {
-		list := make([]uint16, 0, len(ports))
-		for p := range ports {
-			list = append(list, p)
-		}
-		sort.Slice(list, func(i, j int) bool { return list[i] < list[j] })
-		out[zone] = list
-	}
-	return out
-}
-
-// WireGuardUnzonedInterfaces lists "interface-or-unit" refs carrying a
-// WireGuard tunnel that bind no security zone (#11076). Sorted, deduped, nil
-// when empty. The validator warns on these: without a zone the tunnel's
-// listen port gets no host-inbound accept.
+// WireGuardUnzonedInterfaces lists listeners without a zone-owned source
+// address that also have no zone on their tunnel interface (#11076). A tunnel
+// interface itself may be unzoned while its explicit source belongs to a
+// unique zone; that listener is still admitted on the source owner's ingress.
 func (c *Config) WireGuardUnzonedInterfaces() []string {
-	cfg := c
-	if cfg == nil {
-		return nil
-	}
-	zones := InterfaceZoneMap(cfg)
-	seen := make(map[string]bool)
+	zones := InterfaceZoneMap(c)
+	owners, ambiguous := c.wireGuardSourceOwners()
 	var out []string
-	add := func(ifaceKey string, tc *TunnelConfig) {
-		if tc == nil || tc.Mode != "wireguard" || tc.WgListenPort == 0 {
-			return
-		}
-		if zone, ok := zones[ifaceKey]; ok && zone != "" {
-			return
-		}
-		if !seen[ifaceKey] {
-			seen[ifaceKey] = true
-			out = append(out, ifaceKey)
-		}
-	}
-	for ifName, ifc := range cfg.Interfaces.Interfaces {
-		if ifc == nil {
+	for _, listener := range c.wireGuardListeners() {
+		if zone := zones[listener.name]; zone != "" {
 			continue
 		}
-		add(ifName, ifc.Tunnel)
-		for unitNum, unit := range ifc.Units {
-			if unit == nil {
+		source, err := netip.ParseAddr(listener.tunnel.Source)
+		if err == nil {
+			source = source.Unmap()
+			if _, ok := owners[source]; ok && !ambiguous[source] {
 				continue
 			}
-			add(fmt.Sprintf("%s.%d", ifName, unitNum), unit.Tunnel)
 		}
+		out = append(out, listener.name)
 	}
-	sort.Strings(out)
 	return out
 }

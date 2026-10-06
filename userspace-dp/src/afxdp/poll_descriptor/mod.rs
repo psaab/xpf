@@ -3976,6 +3976,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             binding.scratch.scratch_recycle.push(desc.addr);
                             continue;
                         }
+                        // A declined authenticated keepalive has no inner
+                        // flow to cache. A LocalMiss on its outer listener tuple
+                        // would make session-first XDP steering redirect the
+                        // next handshake into the worker, whose trusted
+                        // reinjection is rejected by the physical-ingress
+                        // WireGuard owner-zone guard. Leave listener tuples
+                        // sessionless so handshake traffic reaches its socket.
                         if resolution.disposition == ForwardingDisposition::LocalDelivery
                             && should_cache_local_delivery_session_on_miss(
                                 worker_ctx.forwarding,
@@ -3984,6 +3991,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 meta.protocol,
                                 meta.tcp_flags,
                             )
+                            && !(flow.forward_key.protocol == PROTO_UDP
+                                && crate::afxdp::wg::decap::is_wg_listener_tuple(
+                                    flow.forward_key.dst_port,
+                                    flow.forward_key.dst_ip,
+                                    meta,
+                                    worker_ctx.forwarding,
+                                ))
                         {
                             // #3706: a matching `to-zone junos-host then permit
                             // [log ...]` policy admitted this host-bound flow, so

@@ -25,14 +25,51 @@ func emitHostInboundFenceEstablishedAndL3AdmitsNetlink(p *nlPlan) {
 	p.rule().icmpType(famV4, []uint8{3, 11, 12}).emit(verdictAccept()...)
 }
 
-// emitHostInboundFenceWGAdmitsNetlink scopes each fence's WG exception to the
-// addresses of zones that serve the configured listen port(s).
+// emitHostInboundFenceWGAdmitsNetlink scopes the fence exception to a unique
+// destination owner and the matching transport-zone ingress.
 func emitHostInboundFenceWGAdmitsNetlink(p *nlPlan, views []HostInboundZoneView, wgZonePorts map[string][]uint16) {
 	for _, v := range views {
 		ports := wgZonePorts[v.Zone]
-		emitHostInboundZoneWireGuardAcceptNetlink(p, famV4, v.V4Addrs, ports)
-		emitHostInboundZoneWireGuardAcceptNetlink(p, famV6, v.V6Addrs, ports)
+		emitFenceWGIngressAcceptNetlink(p, views, v, famV4, v.V4Addrs, ports)
+		emitFenceWGIngressAcceptNetlink(p, views, v, famV6, v.V6Addrs, ports)
 	}
+}
+
+func emitFenceWGIngressAcceptNetlink(p *nlPlan, views []HostInboundZoneView, view HostInboundZoneView, f nlFamily, candidates []string, ports []uint16) {
+	if len(view.IngressNetdevs) == 0 || len(candidates) == 0 || len(ports) == 0 {
+		return
+	}
+	addrs := uniqueFenceWGAddresses(views, view.Zone, f, candidates)
+	if len(addrs) == 0 {
+		return
+	}
+	p.rule().iifname(view.IngressNetdevs).daddr(f, addrs, false).
+		l4Port(protoUDP, "dport", portsFromUint16(ports), false).emit(verdictAccept()...)
+}
+
+func uniqueFenceWGAddresses(views []HostInboundZoneView, zone string, f nlFamily, candidates []string) []string {
+	owners := make(map[string]string)
+	ambiguous := make(map[string]bool)
+	for _, v := range views {
+		addrs := v.V4Addrs
+		if f == famV6 {
+			addrs = v.V6Addrs
+		}
+		for _, addr := range addrs {
+			if owner, ok := owners[addr]; ok && owner != v.Zone {
+				ambiguous[addr] = true
+				continue
+			}
+			owners[addr] = v.Zone
+		}
+	}
+	var unique []string
+	for _, addr := range candidates {
+		if owners[addr] == zone && !ambiguous[addr] {
+			unique = append(unique, addr)
+		}
+	}
+	return unique
 }
 
 // intersectFenceWGAddresses returns the zone addresses also covered by a gap
@@ -56,11 +93,10 @@ func intersectFenceWGAddresses(zoneAddrs, uncovered []string) []string {
 func emitHostInboundGapFenceWGAdmitsNetlink(p *nlPlan, spec GapFenceSpec) {
 	for _, v := range spec.Views {
 		ports := spec.WGZonePorts[v.Zone]
-		if len(ports) == 0 {
-			continue
-		}
-		emitHostInboundZoneWireGuardAcceptNetlink(p, famV4, intersectFenceWGAddresses(v.V4Addrs, spec.UncoveredV4), ports)
-		emitHostInboundZoneWireGuardAcceptNetlink(p, famV6, intersectFenceWGAddresses(v.V6Addrs, spec.UncoveredV6), ports)
+		v4 := intersectFenceWGAddresses(v.V4Addrs, spec.UncoveredV4)
+		v6 := intersectFenceWGAddresses(v.V6Addrs, spec.UncoveredV6)
+		emitFenceWGIngressAcceptNetlink(p, spec.Views, v, famV4, v4, ports)
+		emitFenceWGIngressAcceptNetlink(p, spec.Views, v, famV6, v6, ports)
 	}
 }
 

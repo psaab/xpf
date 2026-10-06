@@ -157,7 +157,11 @@ var userspaceShimAllowedMapTypes = map[string]ebpf.MapType{
 	"userspace_local_v6":         ebpf.Hash,
 	"userspace_sessions":         ebpf.Hash,
 	"userspace_trace":            ebpf.Hash,
-	"userspace_xsk_map":          ebpf.XSKMap,
+	// #12119: separate ingress-zone identity from exact listener destination
+	// admission; both are pinned shared maps consumed by the XDP shim.
+	"userspace_wg_ingress_zones":  ebpf.Hash,
+	"userspace_wg_zone_admission": ebpf.Hash,
+	"userspace_xsk_map":           ebpf.XSKMap,
 }
 
 var userspaceShimAllowedProgramTypes = map[string]ebpf.ProgramType{

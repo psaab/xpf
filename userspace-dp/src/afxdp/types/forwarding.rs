@@ -58,6 +58,11 @@ pub(in crate::afxdp) struct FabricNatScopeIdentity {
 pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) local_v4: FastSet<Ipv4Addr>,
     pub(in crate::afxdp) local_v6: FastSet<Ipv6Addr>,
+    /// #11574: the unique configured security zone owning each local interface
+    /// address. Zero is the fail-closed sentinel for absent or cross-zone
+    /// ambiguous owners; WG underlay admission compares this with arrival zone.
+    pub(in crate::afxdp) wg_local_address_zone_v4: FastMap<Ipv4Addr, u16>,
+    pub(in crate::afxdp) wg_local_address_zone_v6: FastMap<Ipv6Addr, u16>,
     /// #3769: table (VRF) attribution for the local-delivery DECISION.
     /// `local_v4`/`local_v6` are GLOBAL membership sets ("some subsystem
     /// answers for this IP somewhere"); before #3769 the local-delivery
@@ -817,25 +822,18 @@ impl ZoneHostInbound {
                                 && matches!(icmp_type, 9 | 10))
                     }
                     [224, 0, 0, 2] => {
-                        self.mcast_router_discovery
-                            && protocol == 1
-                            && matches!(icmp_type, 9 | 10)
+                        self.mcast_router_discovery && protocol == 1 && matches!(icmp_type, 9 | 10)
                     }
                     [224, 0, 0, 4] => self.mcast_dvmrp && protocol == 2,
-                    [224, 0, 0, 5] | [224, 0, 0, 6] => {
-                        self.mcast_ospf && protocol == 89
-                    }
-                    [224, 0, 0, 9] => {
-                        self.mcast_rip && protocol == 17 && dst_port == 520
-                    }
+                    [224, 0, 0, 5] | [224, 0, 0, 6] => self.mcast_ospf && protocol == 89,
+                    [224, 0, 0, 9] => self.mcast_rip && protocol == 17 && dst_port == 520,
                     [224, 0, 0, 13] => self.mcast_pim && protocol == 103,
                     [224, 0, 0, 18] => self.mcast_vrrp && protocol == 112,
                     [224, 0, 0, 22] => self.mcast_igmp && protocol == 2,
                     _ => false,
                 },
                 IpAddr::V6(group) => match group.segments() {
-                    [0xff02, 0, 0, 0, 0, 0, 0, 5]
-                    | [0xff02, 0, 0, 0, 0, 0, 0, 6] => {
+                    [0xff02, 0, 0, 0, 0, 0, 0, 5] | [0xff02, 0, 0, 0, 0, 0, 0, 6] => {
                         self.mcast_ospf3 && protocol == 89
                     }
                     [0xff02, 0, 0, 0, 0, 0, 0, 9] => {

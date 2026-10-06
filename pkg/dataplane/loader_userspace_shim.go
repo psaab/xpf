@@ -623,6 +623,11 @@ func userspacePinnedShimMaps() []string {
 		"userspace_local_v6",
 		"userspace_interface_nat_v4",
 		"userspace_interface_nat_v6",
+		// #12119: WireGuard's ingress-zone resolver and address/port
+		// admission maps are persistent shim state, rebuilt from each
+		// validated config snapshot and preflighted as PinByName maps.
+		"userspace_wg_ingress_zones",
+		"userspace_wg_zone_admission",
 		"userspace_sessions",
 		"userspace_trace",
 		"userspace_fallback_stats",

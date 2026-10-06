@@ -284,6 +284,7 @@ func TestSamePlanClassifierMapRefreshFailsClosedOnNATSyncFailure(t *testing.T) {
 	}
 	m := New()
 	ctrlMap, _ := injectCtrlAndBindingMaps(t, m)
+	injectUserspaceWGZoneMaps(t, m)
 	injectShimMapSpec(t, m.bpfShim, "userspace_ingress_ifaces", &ebpf.MapSpec{
 		Type:       ebpf.Hash,
 		KeySize:    4,
@@ -320,6 +321,7 @@ func TestSamePlanClassifierMapRefreshFailsClosedOnNATSyncFailure(t *testing.T) {
 		MaxEntries: 16,
 	})
 
+	injectUserspaceWGZoneMaps(t, m)
 	zero := uint32(0)
 	if err := ctrlMap.Update(zero, userspaceCtrlValue{
 		Enabled:            1,
@@ -516,6 +518,7 @@ func injectClassifierRefreshMapsWithFullNATV4(t *testing.T, m *Manager) {
 		MaxEntries: 16,
 	})
 
+	injectUserspaceWGZoneMaps(t, m)
 	oldNAT := binary.BigEndian.Uint32([]byte{203, 0, 113, 1})
 	if err := natV4Map.Update(oldNAT, uint8(1), ebpf.UpdateAny); err != nil {
 		t.Fatalf("seed userspace_interface_nat_v4: %v", err)

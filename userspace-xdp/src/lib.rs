@@ -233,6 +233,26 @@ struct UserspaceBindingValue {
 struct UserspaceLocalV6Key {
     addr: [u8; 16],
 }
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UserspaceWgIngressZoneKey {
+    ifindex: u32,
+    vlan_id: u16,
+    reserved: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UserspaceWgAdmissionKey {
+    zone_id: u16,
+    port: u16,
+    addr_family: u8,
+    pad: [u8; 3],
+    addr: [u8; 16],
+}
+
+const _: [(); 8] = [(); mem::size_of::<UserspaceWgIngressZoneKey>()];
+const _: [(); 24] = [(); mem::size_of::<UserspaceWgAdmissionKey>()];
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -360,8 +380,6 @@ struct Ipv6OptHdr {
     hdrlen: u8,
 }
 
-
-
 #[repr(C)]
 struct ShimFacts {
     magic: u32,
@@ -405,6 +423,18 @@ static USERSPACE_BINDINGS: Array<UserspaceBindingValue> =
 // ifindex axis across every dataplane map (see issue #814).
 #[map(name = "userspace_ingress_ifaces")]
 static USERSPACE_INGRESS_IFACES: HashMap<u32, u8> = HashMap::with_max_entries(MAX_INTERFACES, 0);
+
+// XDP must resolve the physical arrival interface and VLAN to one validated
+// security zone before it claims an outer WireGuard transport record.
+#[map(name = "userspace_wg_ingress_zones")]
+static USERSPACE_WG_INGRESS_ZONES: HashMap<UserspaceWgIngressZoneKey, u16> =
+    HashMap::with_max_entries(65_536, 0);
+
+// Entries exist only for unique local-address owners and WG ports served by
+// that same zone. Zone 0 and missing keys both fail closed.
+#[map(name = "userspace_wg_zone_admission")]
+static USERSPACE_WG_ZONE_ADMISSION: HashMap<UserspaceWgAdmissionKey, u8> =
+    HashMap::with_max_entries(131_072, 0);
 
 #[map(name = "userspace_heartbeat")]
 static USERSPACE_HEARTBEAT: Array<u64> = Array::with_max_entries(BINDING_SLOT_MAP_MAX_ENTRIES, 0);
@@ -748,19 +778,32 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // #1432 S2a (#9587: set-valued): WireGuard. WG-to-firewall is
     // local-destination UDP on a steered listen port; steer it to the kernel
     // (the userspace control-thread UdpSocket reads it) via cpumap_or_pass —
-    // the same path ESP/IPsec rides above. `is_local_destination` is
-    // MANDATORY: a port-only match would shunt TRANSIT/DNAT UDP that happens
-    // to use a steered port to the kernel, bypassing the userspace policy
-    // engine.
+    // ordinary authority for local delivery. An interface-NAT excluded local
+    // address instead needs the exact listener owner-map tuple; a port-only
+    // match would shunt TRANSIT/DNAT UDP that happens to use a steered port to
+    // the kernel, bypassing the userspace policy engine.
     //
-    // The whole block is gated on the WG_RX flag bit (read from the same
-    // `ctrl.flags` word the GRE check just above already loaded), so when
-    // no WG tunnel is configured NOTHING here runs — not the `wg_ports`
-    // load, not the protocol/port/local-destination
-    // tests. This keeps the non-WG datapath byte-for-byte on its prior
-    // instruction path (the bare per-packet `wg_listen_port` load+compare
-    // measurably regressed v6 best-effort retransmits at line rate).
-    if (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0 && wg_steer_to_kernel(ctrl, &parsed) {
+    // The WG candidate is gated on the WG_RX flag bit (read from the same
+    // `ctrl.flags` word the GRE check just above already loaded). With no WG
+    // tunnel configured, the port-map load and early session lookup do not run;
+    // non-candidates retain the ordinary post-fallback lookup below.
+    // A live session owns the packet's disposition. In particular, interface
+    // SNAT replies on a WG listen port must reach the worker for reverse NAT
+    // rather than being stolen by the listener owner-map control steer.
+    let wg_steer_candidate = (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0
+        && wg_steer_to_kernel(ctrl, &parsed, ingress_ifindex);
+    // Only packets that would be stolen by the WG steer need an early session
+    // lookup. All other packets retain the existing later lookup and avoid extra
+    // map work on the early-fallback path.
+    let wg_steer_session_action = if !native_gre && wg_steer_candidate {
+        live_userspace_session_action(&parsed)
+    } else {
+        0
+    };
+    if wg_steer_candidate
+        && wg_steer_session_action != USERSPACE_SESSION_ACTION_REDIRECT
+        && wg_steer_session_action != USERSPACE_SESSION_ACTION_PASS_TO_KERNEL
+    {
         return Ok(cpumap_or_pass(ctrl));
     }
     if should_fallback_early(&parsed) {
@@ -790,7 +833,12 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // destination continues to the AF_XDP redirect and is adjudicated by
     // the worker.
     if !native_gre {
-        match live_userspace_session_action(&parsed) {
+        let session_action = if wg_steer_candidate {
+            wg_steer_session_action
+        } else {
+            live_userspace_session_action(&parsed)
+        };
+        match session_action {
             USERSPACE_SESSION_ACTION_REDIRECT => {
                 // Session exists and stays on the userspace dataplane.
             }
@@ -845,19 +893,23 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
                 // predicate caught them and returned the same
                 // `cpumap_or_pass`. Declining here is what actually moves them
                 // onto the AF_XDP redirect.
-                let wg_worker_claim = (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0
-                    && wg_worker_claims_record(
-                        true,
-                        parsed.protocol == PROTO_UDP
-                            && wg_port_is_steered(
-                                parsed.flow_dst_port,
-                                &ctrl.wg_ports,
-                                ctrl.wg_port_count,
-                            ),
-                        true,
-                        parsed.udp_wg_transport_data,
-                    );
-                if is_local_destination(&parsed) && !wg_worker_claim {
+                let local_destination = is_local_destination(&parsed);
+                let wg_rx_enabled = (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0;
+                // #12119: the WG owner map records configured interface
+                // addresses independently of local-delivery NAT exclusions.
+                // A validated exact listener tuple therefore authorizes its
+                // worker claim even when the primary WAN address is routed
+                // through interface_nat_v* instead of userspace_local_v*.
+                let wg_port_admitted = wg_rx_enabled
+                    && parsed.protocol == PROTO_UDP
+                    && wg_port_is_steered(parsed.flow_dst_port, &ctrl.wg_ports, ctrl.wg_port_count)
+                    && wg_zone_admits_packet(&parsed, ingress_ifindex);
+                let wg_worker_claim = wg_worker_claims_record(
+                    wg_rx_enabled,
+                    wg_port_admitted,
+                    parsed.udp_wg_transport_data,
+                );
+                if local_destination && !wg_worker_claim {
                     record_trace(
                         ctrl.flags,
                         ingress_ifindex,
@@ -1640,7 +1692,14 @@ fn parse_l2(data: usize, data_end: usize) -> Option<(u16, u16, u8, bool, bool, u
         l3_offset += mem::size_of::<VlanHdr>() as u16;
     }
 
-    Some((eth_proto, vlan_id, vlan_pcp, vlan_present, outer_stag, l3_offset))
+    Some((
+        eth_proto,
+        vlan_id,
+        vlan_pcp,
+        vlan_present,
+        outer_stag,
+        l3_offset,
+    ))
 }
 
 #[inline(always)]
@@ -1891,44 +1950,26 @@ fn parse_ipv6(
 
 /// #1432 S2a: decide whether an inbound packet is WireGuard-to-firewall
 /// that must be steered to the kernel (the control-thread `UdpSocket`).
-/// The single call site has already verified `ctrl.flags &
-/// USERSPACE_CTRL_FLAG_WG_RX != 0` (a bit-test on the flags word already
-/// loaded for the GRE/STRICT checks), so when no WG tunnel is configured
-/// the non-WG datapath skips this entirely — it pays ONLY the flag
-/// bit-test. The flag-gate, not the function boundary, is what makes the
-/// path zero-cost: an earlier `#[inline(never)] #[cold]` variant emitted
-/// this as a separate BPF program symbol (tripping the shim
-/// program-allowlist canary), so it is a normal inlinable fn behind the
-/// flag gate. `is_local_destination` is MANDATORY — a port-only match
-/// would shunt transit/DNAT UDP on the WG port to the kernel, bypassing
-/// the userspace policy engine.
-fn wg_steer_to_kernel(ctrl: &UserspaceCtrl, pkt: &ParsedPacket) -> bool {
+/// Local delivery remains the ordinary authority. For an interface-NAT
+/// excluded local address, the exact configured WG listener owner-map tuple
+/// is the additional authority; a port-only match would shunt transit/DNAT UDP
+/// to the kernel and bypass the userspace policy engine.
+fn wg_steer_to_kernel(ctrl: &UserspaceCtrl, pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
     // Order is load-bearing (#1432, #9587): the UDP test first, then the
-    // bounded set scan (register compares), and `is_local_destination` LAST
-    // (up to two BPF map lookups). Nothing below runs for a packet that is
-    // not UDP to a steered port.
+    // bounded set scan (register compares), and the destination checks last.
+    // Nothing below runs for a packet that is not UDP to a steered port.
     if pkt.protocol != PROTO_UDP
         || !wg_port_is_steered(pkt.flow_dst_port, &ctrl.wg_ports, ctrl.wg_port_count)
     {
         return false;
     }
-    // #8274 step 2: types 1/2/3 (handshake, cookie) keep going to the kernel —
-    // the control thread owns the handshake state machine and there is nothing
-    // in them for the dataplane to adjudicate. Type 4 (transport data) does
-    // not, because its plaintext is what the firewall has to adjudicate. The
-    // decision lives in `wg_classify` so a host test can EXECUTE it rather than
-    // model it from source text; see that module for why.
-    //
-    // INERT until step 3 lands the worker decap stage. A type-4 record that is
-    // no longer claimed here falls through to the session-miss path and is
-    // matched by the SAME `is_local_destination` predicate a few arms down,
-    // returning the SAME `cpumap_or_pass(ctrl)`. The only path on which the two
-    // differ is a live userspace session on the OUTER 5-tuple
-    // (`USERSPACE_SESSION_ACTION_REDIRECT`), and nothing installs one: the outer
-    // UDP header is synthesized at frame-build time by `wg_encap_frame` under
-    // the INNER flow's session, and the inbound direction reaches the kernel
-    // without the worker ever adjudicating it.
-    wg_steer_to_kernel_on_port_match(is_local_destination(pkt), pkt.udp_wg_transport_data)
+    // Handshake/cookie records go to the kernel control socket; transport
+    // data stays in the worker so its authenticated plaintext is policy
+    // checked. The owner-map fallback is restricted to the exact configured
+    // listener destination, ingress zone, and port.
+    let local_destination =
+        is_local_destination(pkt) || wg_zone_admits_packet(pkt, ingress_ifindex);
+    wg_steer_to_kernel_on_port_match(local_destination, pkt.udp_wg_transport_data)
 }
 
 fn should_fallback_early(pkt: &ParsedPacket) -> bool {
@@ -1946,6 +1987,35 @@ fn should_fallback_early(pkt: &ParsedPacket) -> bool {
         AF_INET6 => early_filter::ipv6_early_pass_to_kernel(pkt.dst_addr),
         _ => true,
     }
+}
+
+fn wg_zone_admits_packet(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
+    if pkt.protocol != PROTO_UDP || pkt.flow_dst_port == 0 {
+        return false;
+    }
+    let ingress_key = UserspaceWgIngressZoneKey {
+        ifindex: ingress_ifindex,
+        vlan_id: if pkt.vlan_present {
+            pkt.vlan_id
+        } else {
+            u16::MAX
+        },
+        reserved: 0,
+    };
+    let Some(zone_id) = (unsafe { USERSPACE_WG_INGRESS_ZONES.get(&ingress_key) }) else {
+        return false;
+    };
+    if *zone_id == 0 {
+        return false;
+    }
+    let admission_key = UserspaceWgAdmissionKey {
+        zone_id: *zone_id,
+        port: pkt.flow_dst_port,
+        addr_family: pkt.addr_family,
+        pad: [0; 3],
+        addr: pkt.dst_addr,
+    };
+    unsafe { USERSPACE_WG_ZONE_ADMISSION.get(&admission_key) }.is_some()
 }
 
 fn is_local_destination(pkt: &ParsedPacket) -> bool {

@@ -711,6 +711,17 @@ share the same per-zone token set; keep the Go nft token→match mapping
 (`hostInboundServiceMatches`/`hostInboundProtocolMatches`) in sync with the
 Rust classifier here.**
 
+**WireGuard transport-data decap (#11574).** The worker selects a configured
+listener by endpoint listen port and transport routing instance. Before AEAD,
+the ingress interface, packet destination, and endpoint's configured outer
+source must each resolve to the same unique, nonzero zone owner. This listener
+check is separate from host-inbound service/protocol tokens and interface
+overrides: a restricted zone needs no `any-service` grant for its configured WG
+port. A mismatch leaves the original outer frame for normal local delivery,
+where host-inbound tokens and interface overrides continue to govern ordinary
+services. XDP and the kernel input path retain their separate scoped listener
+checks; no generic WireGuard service token or `any-service` grant is added.
+
 **The gate judges the POST-translation tuple (#9529).** Most traffic that reaches
 this secondary path is host-bound only BECAUSE of a destination translation
 (DNAT-to-self, static NAT to a firewall service), so which tuple it is judged on

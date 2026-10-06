@@ -10,8 +10,8 @@ import (
 // admitted in both the cold-boot and coverage-gap tables.
 func TestFenceWGAdmissionIsNotGlobal11572(t *testing.T) {
 	views := []HostInboundZoneView{
-		{Zone: "serving", V4Addrs: []string{"10.0.1.1"}, V6Addrs: []string{"2001:db8:1::1"}},
-		{Zone: "unconfigured", V4Addrs: []string{"10.0.2.1"}, V6Addrs: []string{"2001:db8:2::1"}},
+		{Zone: "serving", V4Addrs: []string{"10.0.1.1"}, V6Addrs: []string{"2001:db8:1::1"}, IngressNetdevs: []string{"serving0"}},
+		{Zone: "unconfigured", V4Addrs: []string{"10.0.2.1"}, V6Addrs: []string{"2001:db8:2::1"}, IngressNetdevs: []string{"unconfigured0"}},
 	}
 	wgZonePorts := map[string][]uint16{"serving": {51820}}
 	unzonedV4, unzonedV6 := []string{"10.0.99.1"}, []string{"2001:db8:99::1"}
@@ -29,7 +29,7 @@ func TestFenceWGAdmissionIsNotGlobal11572(t *testing.T) {
 
 	t.Run("coverage-gap", func(t *testing.T) {
 		gapViews := []HostInboundZoneView{
-			{Zone: "serving", V4Addrs: []string{"10.0.1.1", "10.0.1.2"}, V6Addrs: []string{"2001:db8:1::1"}},
+			{Zone: "serving", V4Addrs: []string{"10.0.1.1", "10.0.1.2"}, V6Addrs: []string{"2001:db8:1::1"}, IngressNetdevs: []string{"serving0"}},
 			views[1],
 		}
 		p := newBuildPlan(t, HostInboundGapTableName, hostInboundGapPriority)

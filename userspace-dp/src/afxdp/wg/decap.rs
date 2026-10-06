@@ -73,8 +73,86 @@ pub(in crate::afxdp) struct WgDecapPacket {
     pub(in crate::afxdp) peer_pubkey: [u8; 32],
 }
 
-/// The WireGuard tunnel endpoint listening on `dst_port` in the ingress
-/// interface's transport routing instance, with its live engine.
+/// Resolve packet ingress to its logical VLAN/bridge ifindex, falling back to
+/// the physical ingress index when no logical mapping exists.
+fn logical_ingress_ifindex(forwarding: &ForwardingState, meta: UserspaceDpMeta) -> i32 {
+    resolve_ingress_logical_ifindex(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .unwrap_or(meta.ingress_ifindex as i32)
+}
+
+/// The WG socket's outer source and packet destination must both be uniquely
+/// owned in the packet's actual ingress zone. TunnelEndpoint.zone is the
+/// separate inner-policy zone and is intentionally not consulted here.
+fn wg_outer_zone_matches(
+    forwarding: &ForwardingState,
+    endpoint: &TunnelEndpoint,
+    ingress_ifindex: i32,
+    dst_ip: std::net::IpAddr,
+) -> bool {
+    let ingress_zone_id = forwarding
+        .ifindex_to_zone_id
+        .get(&ingress_ifindex)
+        .copied()
+        .unwrap_or(0);
+    if ingress_zone_id == 0 {
+        return false;
+    }
+    let local_zone = match dst_ip {
+        std::net::IpAddr::V4(ip) => forwarding
+            .wg_local_address_zone_v4
+            .get(&ip)
+            .copied()
+            .unwrap_or(0),
+        std::net::IpAddr::V6(ip) => forwarding
+            .wg_local_address_zone_v6
+            .get(&ip)
+            .copied()
+            .unwrap_or(0),
+    };
+    let source_zone = match endpoint.source {
+        std::net::IpAddr::V4(ip) => forwarding
+            .wg_local_address_zone_v4
+            .get(&ip)
+            .copied()
+            .unwrap_or(0),
+        std::net::IpAddr::V6(ip) => forwarding
+            .wg_local_address_zone_v6
+            .get(&ip)
+            .copied()
+            .unwrap_or(0),
+    };
+    local_zone != 0 && local_zone == ingress_zone_id && source_zone == ingress_zone_id
+}
+
+/// Whether a UDP flow is addressed to a locally owned WireGuard listener in
+/// the packet's actual ingress zone. Unlike `is_wg_underlay_frame`, this
+/// tuple-only form is also used after the worker declines an authenticated
+/// keepalive, when the poll loop has already parsed the flow key.
+#[inline]
+pub(in crate::afxdp) fn is_wg_listener_tuple(
+    dst_port: u16,
+    dst_ip: std::net::IpAddr,
+    meta: UserspaceDpMeta,
+    forwarding: &ForwardingState,
+) -> bool {
+    if !forwarding.has_wg_tunnels || meta.protocol != PROTO_UDP {
+        return false;
+    }
+    let ingress_ifindex = logical_ingress_ifindex(forwarding, meta);
+    let Some((endpoint, _)) = wg_endpoint_for_listen_port(forwarding, dst_port, ingress_ifindex)
+    else {
+        return false;
+    };
+    wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip)
+        && forwarding.owns_configured_ip(dst_ip)
+}
+
+/// The WireGuard tunnel endpoint listening on `dst_port` in the resolved
+/// ingress interface's transport routing instance, with its live engine.
 ///
 /// Walks `wg_engines` rather than `tunnel_endpoints` deliberately: that map IS
 /// the WireGuard-only set, so the scan is over the number of WG tunnels (0, 1 or
@@ -87,14 +165,8 @@ pub(in crate::afxdp) struct WgDecapPacket {
 fn wg_endpoint_for_listen_port(
     forwarding: &ForwardingState,
     dst_port: u16,
-    meta: UserspaceDpMeta,
+    ingress_ifindex: i32,
 ) -> Option<(&TunnelEndpoint, &std::sync::Arc<super::WgEngine>)> {
-    let ingress_ifindex = resolve_ingress_logical_ifindex(
-        forwarding,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-    )
-    .unwrap_or(meta.ingress_ifindex as i32);
     let ingress_instance = forwarding
         .ifindex_to_routing_instance
         .get(&ingress_ifindex)
@@ -148,9 +220,11 @@ pub(in crate::afxdp) fn is_wg_underlay_frame(
         return false;
     };
     let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
-    if wg_endpoint_for_listen_port(forwarding, dst_port, meta).is_none() {
+    let ingress_ifindex = logical_ingress_ifindex(forwarding, meta);
+    let Some((endpoint, _)) = wg_endpoint_for_listen_port(forwarding, dst_port, ingress_ifindex)
+    else {
         return false;
-    }
+    };
     // This helper is reached only for a mapped/compatible IPv6 packet. Mirror
     // the ingress gate's wire-L3 derivation and version check before trusting
     // the destination address.
@@ -172,12 +246,10 @@ pub(in crate::afxdp) fn is_wg_underlay_frame(
     let Ok(raw_dst) = <[u8; 16]>::try_from(&hdr[24..40]) else {
         return false;
     };
-    forwarding.owns_configured_ip(std::net::IpAddr::V6(
-        std::net::Ipv6Addr::from(raw_dst),
-    ))
+    let dst_ip = std::net::IpAddr::V6(std::net::Ipv6Addr::from(raw_dst));
+    wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip)
+        && forwarding.owns_configured_ip(dst_ip)
 }
-
-
 
 /// Decapsulate an inbound WireGuard transport-data record, or `None`.
 ///
@@ -225,8 +297,18 @@ pub(in crate::afxdp) fn try_wg_decap_from_frame(
         return None;
     }
 
-    let (endpoint, engine) = wg_endpoint_for_listen_port(forwarding, dst_port, meta)?;
+    let ingress_ifindex = logical_ingress_ifindex(forwarding, meta);
+    let (endpoint, engine) = wg_endpoint_for_listen_port(forwarding, dst_port, ingress_ifindex)?;
 
+    let dst_ip = outer_destination_ip(outer, meta)?;
+    // The listener's local source address and the datagram destination must
+    // both resolve uniquely to the actual ingress zone before AEAD work.
+    if !wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip) {
+        return None;
+    }
+    // The listener and destination each have unique ownership in this
+    // ingress zone. A mismatch remains unclaimed for the existing host-inbound
+    // policy to deny; this owner check does not replace service-token policy.
     let mut decap_buf = scratch.decap_out.borrow_mut();
     // #9018: `.ok()?` used to collapse EVERY error arm here, and two of them
     // carry the proven peer public key on purpose: `Keepalive` (#7230) and
@@ -368,6 +450,26 @@ fn outer_source_ip(outer: &[u8], meta: UserspaceDpMeta) -> Option<std::net::IpAd
         }
         libc::AF_INET6 => {
             let b = outer.get(l3.checked_add(8)?..l3.checked_add(24)?)?;
+            let mut a = [0u8; 16];
+            a.copy_from_slice(b);
+            Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(a)))
+        }
+        _ => None,
+    }
+}
+
+/// The outer datagram's DESTINATION address for WireGuard owner-zone checks.
+fn outer_destination_ip(outer: &[u8], meta: UserspaceDpMeta) -> Option<std::net::IpAddr> {
+    let l3 = crate::afxdp::frame::nibble_checked_l3(outer, meta.l3_offset, meta.addr_family)?.l3;
+    match meta.addr_family as i32 {
+        libc::AF_INET => {
+            let b = outer.get(l3.checked_add(16)?..l3.checked_add(20)?)?;
+            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                b[0], b[1], b[2], b[3],
+            )))
+        }
+        libc::AF_INET6 => {
+            let b = outer.get(l3.checked_add(24)?..l3.checked_add(40)?)?;
             let mut a = [0u8; 16];
             a.copy_from_slice(b);
             Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(a)))

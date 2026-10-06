@@ -93,49 +93,37 @@ enum UnitZoneClaim {
     Disagree,
 }
 
-const UNIT_REFUSED_TRANSIT_FULL_10520: &str =
-    "Transit arriving there is DENIED as unattributed before any policy is consulted \
+const UNIT_REFUSED_TRANSIT_FULL_10520: &str = "Transit arriving there is DENIED as unattributed before any policy is consulted \
      (#6682); default-policy permit-all does not admit it, and the deny logs as \
      unattributed (#9989, counter UNZONED_INGRESS_DENIED).";
-const UNIT_REFUSED_TRANSIT_RETAINED_10520: &str =
-    "Transit is evaluated under the retained zone's policy (zone-gated; the #6682 \
+const UNIT_REFUSED_TRANSIT_RETAINED_10520: &str = "Transit is evaluated under the retained zone's policy (zone-gated; the #6682 \
      unzoned-ingress deny does not apply), so its verdict follows that policy.";
-const UNIT_REFUSED_HOST_BOUND_SENTINEL_10520: &str =
-    "Host-bound traffic to the firewall itself is denied by the per-ifindex \
+const UNIT_REFUSED_HOST_BOUND_SENTINEL_10520: &str = "Host-bound traffic to the firewall itself is denied by the per-ifindex \
      empty host-inbound sentinel (#5659/#10556; ICMP errors/PMTUD/ND control \
      messages remain admitted; an explicit per-interface host-inbound stanza \
      still takes precedence).";
-const UNIT_REFUSED_HOST_BOUND_CONTESTED_10520: &str =
-    "Host-bound traffic to the firewall itself is denied by the contested-parent \
+const UNIT_REFUSED_HOST_BOUND_CONTESTED_10520: &str = "Host-bound traffic to the firewall itself is denied by the contested-parent \
      host-inbound sentinel (#10503; ICMP errors/PMTUD/ND control messages remain \
      admitted; an explicit per-interface host-inbound override still takes \
      precedence).";
-const UNIT_REFUSED_HOST_BOUND_RETAINED_10520: &str =
-    "Host-bound traffic follows the retained sibling zone policy (zone-gated unless \
+const UNIT_REFUSED_HOST_BOUND_RETAINED_10520: &str = "Host-bound traffic follows the retained sibling zone policy (zone-gated unless \
      an explicit per-interface host-inbound override takes precedence).";
-const UNIT_REFUSED_HOST_BOUND_LIFELINE_10520: &str =
-    "Host-bound traffic on this lifeline remains admitted; the #5659/#10556 \
+const UNIT_REFUSED_HOST_BOUND_LIFELINE_10520: &str = "Host-bound traffic on this lifeline remains admitted; the #5659/#10556 \
      guards deliberately do not arm an empty-zone host-inbound sentinel.";
-const UNIT_REFUSED_HOST_BOUND_GATED_10520: &str =
-    "Host-bound traffic on this AF_XDP bind-excluded interface remains zone-gated by \
+const UNIT_REFUSED_HOST_BOUND_GATED_10520: &str = "Host-bound traffic on this AF_XDP bind-excluded interface remains zone-gated by \
      applicable zone policy; this prefix-only/lo0 name follows the applicable \
      zone's host-inbound rules.";
-const UNIT_REFUSED_HOST_BOUND_CONTESTED_LIFELINE_10520: &str =
-    "Host-bound traffic on this lifeline remains admitted; #10503 deliberately \
+const UNIT_REFUSED_HOST_BOUND_CONTESTED_LIFELINE_10520: &str = "Host-bound traffic on this lifeline remains admitted; #10503 deliberately \
      does not arm a contested-parent sentinel.";
-const UNIT_REFUSED_HOST_BOUND_CONTESTED_GATED_10520: &str =
-    "Host-bound traffic on this AF_XDP bind-excluded interface remains zone-gated by \
+const UNIT_REFUSED_HOST_BOUND_CONTESTED_GATED_10520: &str = "Host-bound traffic on this AF_XDP bind-excluded interface remains zone-gated by \
      applicable zone policy; this prefix-only/lo0 name follows the applicable \
      zone's host-inbound rules.";
 
-const UNIT_REFUSED_HOST_BOUND_CONTESTED_OVERRIDE_10520: &str =
-    "Host-bound traffic follows the explicit per-interface host-inbound override; \
+const UNIT_REFUSED_HOST_BOUND_CONTESTED_OVERRIDE_10520: &str = "Host-bound traffic follows the explicit per-interface host-inbound override; \
      that stanza takes precedence over the contested-parent default.";
-const UNIT_REFUSED_HOST_BOUND_OVERRIDE_10520: &str =
-    "Host-bound traffic follows the explicit per-interface host-inbound override; \
+const UNIT_REFUSED_HOST_BOUND_OVERRIDE_10520: &str = "Host-bound traffic follows the explicit per-interface host-inbound override; \
      that stanza takes precedence over the empty-zone default.";
-const UNIT_REFUSED_HOST_BOUND_ADMIT_10520: &str =
-    "Host-bound traffic remains admitted: this ifindex has no per-ifindex empty \
+const UNIT_REFUSED_HOST_BOUND_ADMIT_10520: &str = "Host-bound traffic remains admitted: this ifindex has no per-ifindex empty \
      host-inbound sentinel, so the global None => true path applies; this \
      includes address-less non-tunnel refusals.";
 
@@ -234,12 +222,18 @@ mod warning_text_tests_10520 {
         assert!(!UNIT_REFUSED_HOST_BOUND_CONTESTED_GATED_10520.contains("denied"));
         assert!(UNIT_REFUSED_HOST_BOUND_CONTESTED_OVERRIDE_10520.contains("contested-parent"));
         for name in ["fxp0", "em0", "fab0", "fab10", "fab0.0"] {
-            assert!(is_narrow_host_inbound_lifeline(name), "{name} must be narrow");
+            assert!(
+                is_narrow_host_inbound_lifeline(name),
+                "{name} must be narrow"
+            );
             assert!(!is_zone_gated_host_inbound_name(name));
         }
         for name in ["fxp1", "em1", "fab-foo", "lo0", "lo0.0"] {
             assert!(is_host_inbound_lifeline(name), "{name} must remain broad");
-            assert!(is_zone_gated_host_inbound_name(name), "{name} must be gated");
+            assert!(
+                is_zone_gated_host_inbound_name(name),
+                "{name} must be gated"
+            );
             assert!(!is_narrow_host_inbound_lifeline(name));
         }
         let disagree = UnitZoneClaim::Disagree;
@@ -252,10 +246,7 @@ mod warning_text_tests_10520 {
             Some(&disagree),
             true
         ));
-        assert!(!unit_refused_rows_are_all_zoned_10520(
-            Some(&agreed),
-            false
-        ));
+        assert!(!unit_refused_rows_are_all_zoned_10520(Some(&agreed), false));
         assert_eq!(
             unit_refused_host_bound_warning_10520(true, true, true, Some("fab0.0")),
             UNIT_REFUSED_HOST_BOUND_RETAINED_10520
@@ -356,9 +347,7 @@ fn unit_zone_claims(snapshot: &ConfigSnapshot) -> BTreeMap<i32, UnitZoneClaim> {
 /// The ifindexes whose logical-unit rows include an explicitly UNZONED row.
 /// `UnitZoneClaim::Disagree` covers both `zone` versus `""` and two distinct
 /// nonempty zones; warning text must distinguish those operator actions.
-fn unit_rows_with_empty_zone_10520(
-    snapshot: &ConfigSnapshot,
-) -> std::collections::BTreeSet<i32> {
+fn unit_rows_with_empty_zone_10520(snapshot: &ConfigSnapshot) -> std::collections::BTreeSet<i32> {
     let mut out = std::collections::BTreeSet::new();
     for iface in &snapshot.interfaces {
         if iface.ifindex > 0
@@ -455,10 +444,8 @@ pub(super) fn populate_interfaces(
     // #7509: ifindexes whose zone a unit row REFUSED, with the zone ids that
     // were refused. Reported after the walk for the same reason the contest is
     // — a silent unzoning is a blackhole with no error anywhere on the box.
-    let mut unit_refused_zones: std::collections::BTreeMap<
-        i32,
-        std::collections::BTreeSet<u16>,
-    > = std::collections::BTreeMap::new();
+    let mut unit_refused_zones: std::collections::BTreeMap<i32, std::collections::BTreeSet<u16>> =
+        std::collections::BTreeMap::new();
     // #10556: only ifindexes with the same local-target/tunnel exposure that
     // makes #5659 meaningful may receive the refused-ifindex sentinel.
     let mut host_inbound_exposure_ifindexes: std::collections::BTreeSet<i32> =
@@ -880,6 +867,21 @@ pub(super) fn populate_interfaces(
                     // SNAT/WAN interface IP that the exclusion routes into
                     // `interface_nat_v4` (out of `local_v4`).
                     state.configured_iface_v4.insert(v4.addr());
+                    // #12119: WG listener ownership is configured-address
+                    // ownership, independent of the NAT local-delivery
+                    // exclusion. Interface SNAT moves the primary WAN IP out
+                    // of local_v4, but it remains the listener's owner zone.
+                    let zone_id = state.zone_name_to_id.get(&iface.zone).copied().unwrap_or(0);
+                    match state.wg_local_address_zone_v4.entry(v4.addr()) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(zone_id);
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            if *entry.get() != zone_id {
+                                entry.insert(0);
+                            }
+                        }
+                    }
                     if excluded_local_v4.contains(&v4.addr()) {
                         state.interface_nat_v4.insert(v4.addr(), iface.ifindex);
                     } else {
@@ -918,6 +920,20 @@ pub(super) fn populate_interfaces(
                     // #3182: NAT-decoupled full interface-IP set (see the V4
                     // arm above) — protects the SNAT/WAN IPv6 interface IP too.
                     state.configured_iface_v6.insert(v6.addr());
+                    // #12119: WG listener ownership is configured-address
+                    // ownership, independent of the NAT local-delivery
+                    // exclusion (see the V4 arm).
+                    let zone_id = state.zone_name_to_id.get(&iface.zone).copied().unwrap_or(0);
+                    match state.wg_local_address_zone_v6.entry(v6.addr()) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(zone_id);
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            if *entry.get() != zone_id {
+                                entry.insert(0);
+                            }
+                        }
+                    }
                     if excluded_local_v6.contains(&v6.addr()) {
                         state.interface_nat_v6.insert(v6.addr(), iface.ifindex);
                     } else {
@@ -1258,8 +1274,7 @@ pub(super) fn populate_interfaces(
         let ids: Vec<String> = zones.iter().map(|z| z.to_string()).collect();
         let retained_zone = state.ifindex_to_zone_id.contains_key(ifindex);
         let host_sentinel = empty_zone_host_inbound_sentinels.contains(ifindex);
-        let host_override =
-            state.ifindex_host_inbound.contains_key(ifindex) && !host_sentinel;
+        let host_override = state.ifindex_host_inbound.contains_key(ifindex) && !host_sentinel;
         let config_name = state
             .ifindex_to_config_name
             .get(ifindex)
@@ -1650,11 +1665,8 @@ pub(super) fn populate_fabric_nat_scope_ids(state: &mut ForwardingState) {
             .egress
             .get(ifindex)
             .map_or(0, |egress| egress.redundancy_group);
-        let id = super::super::forwarding::fabric_nat_scope_stamp_id(
-            *zone_id,
-            ifname,
-            routing_instance,
-        );
+        let id =
+            super::super::forwarding::fabric_nat_scope_stamp_id(*zone_id, ifname, routing_instance);
 
         match scope_by_id.get_mut(&id) {
             Some((old_zone, old_ifname, old_ri, old_ifindex, old_rg)) => {
@@ -1699,11 +1711,8 @@ pub(super) fn populate_fabric_nat_scope_ids(state: &mut ForwardingState) {
             .get(ifindex)
             .map(String::as_str)
             .unwrap_or("");
-        let id = super::super::forwarding::fabric_nat_scope_stamp_id(
-            *zone_id,
-            ifname,
-            routing_instance,
-        );
+        let id =
+            super::super::forwarding::fabric_nat_scope_stamp_id(*zone_id, ifname, routing_instance);
         if !ambiguous.contains(&id) {
             state.ifindex_to_fabric_nat_scope_id.insert(*ifindex, id);
         }
