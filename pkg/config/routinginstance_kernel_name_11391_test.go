@@ -411,3 +411,87 @@ func TestNodeSpecificForwardingRoutingInstanceSkipsVRFNameGate_12038(t *testing.
 		})
 	}
 }
+
+// TestNodeDivergentInvalidNameNoSpuriousTableCollision_12038 covers the
+// #12281 NEEDS-FOLD finding: a name that is forwarding on node0 but an invalid
+// VRF on node1 must not collide in preflight with a peer-only table owner.
+func TestNodeDivergentInvalidNameNoSpuriousTableCollision_12038(t *testing.T) {
+	const (
+		divergentName = "badname621558"
+		peerOnlyName  = "blue"
+	)
+	if got, want := StableRoutingInstanceTableID(divergentName), 525590; got != want {
+		t.Fatalf("fixture drifted: table id for %q = %d, want %d", divergentName, got, want)
+	}
+	if got := StableRoutingInstanceTableID(peerOnlyName); got != 525590 {
+		t.Fatalf("fixture drifted: table id for %q = %d, want 525590", peerOnlyName, got)
+	}
+	tree := setTree11391(t,
+		"set groups node0 routing-instances badname621558 instance-type forwarding",
+		"set groups node1 routing-instances badname621558 instance-type virtual-router",
+		"set groups node1 routing-instances blue instance-type virtual-router",
+		`set apply-groups "${node}"`,
+	)
+
+	for _, compiler := range []struct {
+		name string
+		run  func(*ConfigTree) error
+	}{
+		{"union", func(tr *ConfigTree) error { _, err := CompileConfig(tr); return err }},
+		{"node0", func(tr *ConfigTree) error { _, err := CompileConfigForNode(tr, 0); return err }},
+		{"node1", func(tr *ConfigTree) error { _, err := CompileConfigForNode(tr, 1); return err }},
+	} {
+		t.Run("strict/"+compiler.name, func(t *testing.T) {
+			err := compiler.run(tree.Clone())
+			if err == nil || !strings.Contains(err.Error(), "#11391") ||
+				!strings.Contains(err.Error(), divergentName) {
+				t.Fatalf("strict %s compile must reject the invalid VRF name: %v", compiler.name, err)
+			}
+			if strings.Contains(err.Error(), "#3855") {
+				t.Fatalf("strict %s compile reported a spurious #3855 table collision: %v", compiler.name, err)
+			}
+		})
+	}
+
+	for _, compiler := range []struct {
+		name string
+		run  func(*ConfigTree) (*Config, error)
+	}{
+		{"union", CompileConfigLenient},
+		{"node0", func(tr *ConfigTree) (*Config, error) { return CompileConfigForNodeLenient(tr, 0) }},
+	} {
+		t.Run("lenient/"+compiler.name, func(t *testing.T) {
+			cfg, err := compiler.run(tree.Clone())
+			if err != nil {
+				t.Fatalf("lenient %s compile: %v", compiler.name, err)
+			}
+			for _, warning := range cfg.Warnings {
+				if strings.Contains(warning, "#3855") {
+					t.Errorf("lenient %s compile reported a spurious table collision: %s", compiler.name, warning)
+				}
+			}
+			if compiler.name == "node0" {
+				assertRoutingInstance12038(t, cfg, divergentName, true, "forwarding")
+				if len(cfg.Warnings) != 0 {
+					t.Errorf("lenient node0 should be silent, got warnings: %v", cfg.Warnings)
+				}
+			}
+		})
+	}
+
+	t.Run("lenient/node1", func(t *testing.T) {
+		cfg, err := CompileConfigForNodeLenient(tree.Clone(), 1)
+		if err != nil {
+			t.Fatalf("lenient node1 compile: %v", err)
+		}
+		if len(cfg.RoutingInstances) != 1 || cfg.RoutingInstances[0].Name != peerOnlyName {
+			t.Fatalf("active routing instances = %+v, want only %q", cfg.RoutingInstances, peerOnlyName)
+		}
+		assertRoutingInstance12038(t, cfg, divergentName, false, "virtual-router")
+		if len(cfg.Warnings) != 1 || !strings.Contains(cfg.Warnings[0], "#11391") ||
+			!strings.Contains(cfg.Warnings[0], divergentName) ||
+			strings.Contains(cfg.Warnings[0], "#3855") {
+			t.Fatalf("lenient node1 must emit only the #11391 quarantine warning: %v", cfg.Warnings)
+		}
+	})
+}

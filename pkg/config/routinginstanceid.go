@@ -140,12 +140,32 @@ func routingInstanceTypeFlagsAST(tree *ConfigTree, compiledNode *int) map[string
 	emitNodeExpandedRoutingInstancesAST(tree, 0, nil, types)
 	emitNodeExpandedRoutingInstancesAST(tree, 1, nil, types)
 	// compileConfigForNodeWithOpts accepts any integer node ID, negative ones
-	// included, and expands that node's own groups (`node%d`), so a node compile
-	// for any other ID counts its own view too. A generic compile passes nil.
+	// included, and expands that node's own groups (`node%d`). A generic compile
+	// passes nil.
 	if compiledNode != nil && *compiledNode != 0 && *compiledNode != 1 {
 		emitNodeExpandedRoutingInstancesAST(tree, *compiledNode, nil, types)
 	}
 	return types
+}
+
+func routingInstanceTypeFlagsASTByView(tree *ConfigTree, compiledNode *int) []map[string]routingInstanceASTTypeFlags {
+	views := make([]map[string]routingInstanceASTTypeFlags, 0, 4)
+	generic := make(map[string]routingInstanceASTTypeFlags)
+	emitGenericExpandedRoutingInstancesAST(tree, nil, generic)
+	views = append(views, generic)
+	for _, nodeID := range []int{0, 1} {
+		types := make(map[string]routingInstanceASTTypeFlags)
+		emitNodeExpandedRoutingInstancesAST(tree, nodeID, nil, types)
+		views = append(views, types)
+	}
+	// compileConfigForNodeWithOpts accepts any integer node ID, negative ones
+	// included, and expands that node's own groups (`node%d`).
+	if compiledNode != nil && *compiledNode != 0 && *compiledNode != 1 {
+		types := make(map[string]routingInstanceASTTypeFlags)
+		emitNodeExpandedRoutingInstancesAST(tree, *compiledNode, nil, types)
+		views = append(views, types)
+	}
+	return views
 }
 
 // emitNodeExpandedRoutingInstancesAST collects routing-instance names and types
@@ -174,16 +194,10 @@ func emitNodeExpandedRoutingInstancesAST(tree *ConfigTree, nodeID int, names map
 // validateRoutingInstanceTableIDCollisionAST checks the UNION of routing-instance
 // names across three views of the candidate config for StableRoutingInstanceTableID
 // collisions (#3855), mirroring validateZoneIDCollisionAST (#3075) and
-// validateTunnelEndpointIDCollisionAST (#1873):
-//
-//	View 1 — every top-level "routing-instances" root, plus the names the
-//	  generic compile's own group expansion lands (#9657).
-//	View 2 — the instance names that survive expanding the candidate for node0.
-//	View 3 — the same for node1.
-//
-// All three views are pure functions of the SAME candidate config, so the union
-// stays a pure function of config (HA symmetry preserved) and is monotone over
-// View 1 (Views 2/3 only ADD rejects).
+// validateTunnelEndpointIDCollisionAST (#1873). For ordinary names, a collision
+// in any view pair is rejected as before. An invalid VRF name is a table claimant
+// only when it is forwarding-effective in a view where the other name also exists;
+// this avoids treating node-divergent, never-coexisting instances as colliding.
 //
 // Strict (commit / commit-check) returns an error so an operator can never
 // commit a config whose two routing-instance names fold to the same kernel
@@ -192,9 +206,30 @@ func emitNodeExpandedRoutingInstancesAST(tree *ConfigTree, nodeID int, names map
 // upgraded node still boots (#1960 no-brick); compileRoutingInstances then
 // QUARANTINES the later-sorting colliding instance (see QuarantinedRoutingInstanceNames)
 // so the two never actually share a kernel table.
+func routingInstanceTableIDNamesCollideInView(nameA, nameB string, invalidA, invalidB bool, views []map[string]routingInstanceASTTypeFlags) bool {
+	if !invalidA && !invalidB {
+		// Preserve the union collision gate for ordinary names, including pairs
+		// declared on different cluster nodes (#9657).
+		return true
+	}
+	for _, view := range views {
+		flagsA, presentA := view[nameA]
+		flagsB, presentB := view[nameB]
+		if !presentA || !presentB {
+			continue
+		}
+		if (invalidA && !flagsA.hasForwarding) || (invalidB && !flagsB.hasForwarding) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 func validateRoutingInstanceTableIDCollisionAST(tree *ConfigTree, compiledNode *int, lenient bool) ([]string, error) {
 	names := routingInstanceNameUnionAST(tree, compiledNode)
-	var instanceTypes map[string]routingInstanceASTTypeFlags
+	var instanceTypeViews []map[string]routingInstanceASTTypeFlags
+	var invalidVRFNames map[string]bool
 	sorted := make([]string, 0, len(names))
 	for name := range names {
 		// #9622: a reserved name never gets a table. compileRoutingInstances
@@ -209,10 +244,21 @@ func validateRoutingInstanceTableIDCollisionAST(tree *ConfigTree, compiledNode *
 		// table-id pass and cannot claim a table. Forwarding instances do not get
 		// that device-name quarantine, so they still participate in table checks.
 		if _, reason := routingInstanceVRFDeviceNameIssue(name); reason != "" {
-			if instanceTypes == nil {
-				instanceTypes = routingInstanceTypeFlagsAST(tree, compiledNode)
+			if instanceTypeViews == nil {
+				instanceTypeViews = routingInstanceTypeFlagsASTByView(tree, compiledNode)
 			}
-			if !instanceTypes[name].hasForwarding {
+			if invalidVRFNames == nil {
+				invalidVRFNames = make(map[string]bool)
+			}
+			invalidVRFNames[name] = true
+			hasForwarding := false
+			for _, view := range instanceTypeViews {
+				if view[name].hasForwarding {
+					hasForwarding = true
+					break
+				}
+			}
+			if !hasForwarding {
 				continue
 			}
 		}
@@ -223,12 +269,32 @@ func validateRoutingInstanceTableIDCollisionAST(tree *ConfigTree, compiledNode *
 	}
 	sort.Strings(sorted)
 	byID := make(map[int]string, len(sorted))
+	var additionalOwners map[int][]string
 	var warnings []string
 	for _, name := range sorted {
 		id := StableRoutingInstanceTableID(name)
-		owner, taken := byID[id]
+		first, taken := byID[id]
 		if !taken {
 			byID[id] = name
+			continue
+		}
+		owners := additionalOwners[id]
+		if len(owners) == 0 {
+			owners = []string{first}
+		}
+		owner := ""
+		for _, candidate := range owners {
+			if routingInstanceTableIDNamesCollideInView(
+				candidate, name, invalidVRFNames[candidate], invalidVRFNames[name], instanceTypeViews) {
+				owner = candidate
+				break
+			}
+		}
+		if owner == "" {
+			if additionalOwners == nil {
+				additionalOwners = make(map[int][]string)
+			}
+			additionalOwners[id] = append(owners, name)
 			continue
 		}
 		msg := fmt.Sprintf(
@@ -237,9 +303,12 @@ func validateRoutingInstanceTableIDCollisionAST(tree *ConfigTree, compiledNode *
 		if !lenient {
 			return nil, fmt.Errorf("routing-instances: %s", msg)
 		}
-		// Lenient: keep booting. This union spans both nodes' views, so it
-		// cannot say which instance THIS node drops, or whether it drops one at
-		// all: an instance may be in effect only on the peer. The runtime pass in
+		if additionalOwners == nil {
+			additionalOwners = make(map[int][]string)
+		}
+		additionalOwners[id] = append(owners, name)
+		// Lenient: keep booting. The union can include peer-only names, so it
+		// cannot say which instance THIS node drops. The runtime pass in
 		// compileRoutingInstances (QuarantinedRoutingInstanceNames) quarantines
 		// on the tree this node compiles and warns naming the instance it drops,
 		// with its VRF, routes and inter-VRF leaks; this warning names the
