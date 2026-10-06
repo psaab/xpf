@@ -240,15 +240,13 @@ fn outer_egress_returns_physical_for_dynamic_learned_underlay_neighbor() {
 
     // The real resolver value for this route, with the dynamic-neighbor map
     // elided: MissingNeighbor (no static neighbor) but the PHYSICAL egress.
-    let real = lookup_forwarding_resolution_v4(
-        &state,
-        None,
-        std::net::Ipv4Addr::new(203, 0, 113, 7),
-        &endpoint.transport_table,
-        1,
-        false,
-        None,
-    );
+    let real = lookup_forwarding_resolution_v4(&state,
+    None,
+    std::net::Ipv4Addr::new(203, 0, 113, 7),
+    &endpoint.transport_table,
+    1,
+    false,
+    None,).resolution;
     assert_eq!(
         real.disposition,
         ForwardingDisposition::MissingNeighbor,

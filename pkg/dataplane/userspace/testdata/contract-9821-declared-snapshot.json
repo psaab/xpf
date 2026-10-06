@@ -1,5 +1,5 @@
 {
-  "version": 45,
+  "version": 46,
   "generation": 0,
   "generated_at": "1970-01-01T00:00:00Z",
   "summary": {
@@ -153,6 +153,28 @@
       "family": "inet",
       "destination": "10.56.0.0/24",
       "discard": false
+    }
+  ],
+  "route_table_identities": [
+    {
+      "name": "RA.inet.0",
+      "domain": 274651,
+      "table": 274651
+    },
+    {
+      "name": "RA.inet6.0",
+      "domain": 274651,
+      "table": 274651
+    },
+    {
+      "name": "inet.0",
+      "domain": 0,
+      "table": 254
+    },
+    {
+      "name": "inet6.0",
+      "domain": 0,
+      "table": 254
     }
   ],
   "flow": {},

@@ -82,12 +82,10 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
             dst_ip: key.dst_ip,
             forward_key: key.clone(),
         };
-        let re_resolved = lookup_forwarding_resolution_for_session(
-            forwarding,
-            dynamic_neighbors,
-            &flow,
-            entry.decision,
-        );
+        let re_resolved = lookup_forwarding_resolution_for_session(forwarding,
+        dynamic_neighbors,
+        &flow,
+        entry.decision,).resolution;
         // On active node, enforce HA snapshot to filter out sessions
         // for inactive RGs. On standby, skip HA enforcement — store
         // the resolved ForwardCandidate so the session is ready when

@@ -50,7 +50,7 @@ fn forwarding_10689() -> ForwardingState {
 fn run_v4_source_10689(source: Ipv4Addr) {
     let forwarding = forwarding_10689();
     assert_eq!(
-        lookup_forwarding_resolution(&forwarding, IpAddr::V4(TRANSIT_V4_DST)).disposition,
+        lookup_forwarding_resolution(&forwarding, IpAddr::V4(TRANSIT_V4_DST)).resolution.disposition,
         ForwardingDisposition::ForwardCandidate,
         "fixture must have a live transit route independent of source class"
     );
@@ -98,7 +98,7 @@ fn run_v4_flowless_source_10689(source: Ipv4Addr, missing_neighbor: bool) {
         ForwardingDisposition::ForwardCandidate
     };
     assert_eq!(
-        lookup_forwarding_resolution(&forwarding, IpAddr::V4(TRANSIT_V4_DST)).disposition,
+        lookup_forwarding_resolution(&forwarding, IpAddr::V4(TRANSIT_V4_DST)).resolution.disposition,
         expected,
         "fragment fixture must reach the intended transit disposition"
     );
@@ -143,7 +143,7 @@ fn transit_drops_flowless_ipv4_unspecified_before_missing_neighbor_10689() {
 fn run_v6_source_10689(source: Ipv6Addr) {
     let forwarding = forwarding_10689();
     assert_eq!(
-        lookup_forwarding_resolution(&forwarding, IpAddr::V6(TRANSIT_V6_DST)).disposition,
+        lookup_forwarding_resolution(&forwarding, IpAddr::V6(TRANSIT_V6_DST)).resolution.disposition,
         ForwardingDisposition::ForwardCandidate,
         "fixture must have a live transit route independent of source class"
     );
@@ -271,7 +271,7 @@ fn transit_martian_source_gate_drops_preexisting_session_hit_10689() {
         discriminator: Default::default(),
         routing_domain: 0,
     };
-    let resolution = lookup_forwarding_resolution(&forwarding, IpAddr::V4(destination));
+    let resolution = lookup_forwarding_resolution(&forwarding, IpAddr::V4(destination)).resolution;
     assert_eq!(resolution.disposition, ForwardingDisposition::ForwardCandidate);
     let mut sessions = SessionTable::new();
     assert!(sessions.install_with_protocol_with_origin(
@@ -362,7 +362,7 @@ fn transit_martian_source_gate_covers_flowless_ipv6_fragment_10689() {
 
     let forwarding = forwarding_10689();
     assert_eq!(
-        lookup_forwarding_resolution(&forwarding, IpAddr::V6(destination)).disposition,
+        lookup_forwarding_resolution(&forwarding, IpAddr::V6(destination)).resolution.disposition,
         ForwardingDisposition::ForwardCandidate,
         "fixture must have a live transit route independent of source class"
     );
@@ -551,12 +551,10 @@ fn directed_broadcast_source_martian_is_routing_domain_scoped_11074() {
         "the blue-domain martian predicate must accept the /16 host source"
     );
     let blue_resolution =
-        crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
-            &forwarding,
-            &Arc::new(crate::afxdp::ShardedNeighborMap::new()),
-            IpAddr::V4(TRANSIT_V4_DST),
-            Some("blue.inet.0"),
-        );
+        crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(&forwarding,
+        &Arc::new(crate::afxdp::ShardedNeighborMap::new()),
+        IpAddr::V4(TRANSIT_V4_DST),
+        Some("blue.inet.0"),).resolution;
     assert_eq!(
         blue_resolution.disposition,
         ForwardingDisposition::ForwardCandidate,

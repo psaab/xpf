@@ -242,12 +242,10 @@ pub(super) fn flowless_base_resolution(
             forwarding,
             ha_state,
             now_secs,
-            lookup_forwarding_resolution_in_table_with_dynamic(
-                forwarding,
-                dynamic_neighbors,
-                dst,
-                route_override,
-            ),
+            lookup_forwarding_resolution_in_table_with_dynamic(forwarding,
+            dynamic_neighbors,
+            dst,
+            route_override,).resolution,
         )
     });
     if nat.rewrite_dst.is_some()

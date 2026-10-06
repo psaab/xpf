@@ -2254,12 +2254,10 @@ fn a_steady_state_tunneled_pbr_steer_stays_pinned_10630() {
     // Fixture liveness: the blue table really resolves this destination via
     // tunnel 824 as a ForwardCandidate — without this the None below could
     // pass on a dead-underlay NoRoute that merely carries the same id.
-    let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
-        &forwarding,
-        &neighbors,
-        flow.dst_ip,
-        Some("blue.inet.0"),
-    );
+    let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(&forwarding,
+    &neighbors,
+    flow.dst_ip,
+    Some("blue.inet.0"),).resolution;
     assert_eq!(
         fresh.tunnel_endpoint_id, 824,
         "fixture liveness: blue.inet.0 must resolve the flow via tunnel 824"
@@ -2308,12 +2306,10 @@ fn a_tunneled_pbr_steer_whose_table_lost_its_route_revokes_10630() {
     let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
     // Fixture liveness: blue.inet.0 really has no route to the destination —
     // without this the revoke below could pass on a misbuilt fixture.
-    let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
-        &forwarding,
-        &neighbors,
-        flow.dst_ip,
-        Some("blue.inet.0"),
-    );
+    let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(&forwarding,
+    &neighbors,
+    flow.dst_ip,
+    Some("blue.inet.0"),).resolution;
     assert_eq!(
         fresh.disposition,
         ForwardingDisposition::NoRoute,
@@ -2362,12 +2358,10 @@ fn a_tunneled_pbr_steer_retargeted_to_native_revokes_10630() {
     // Fixture liveness: green.inet.0 really resolves this destination
     // natively as a ForwardCandidate — without this the id-0 assert below
     // could pass on a dead fixture rather than a genuine retarget.
-    let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
-        &forwarding,
-        &neighbors,
-        flow.dst_ip,
-        Some("green.inet.0"),
-    );
+    let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(&forwarding,
+    &neighbors,
+    flow.dst_ip,
+    Some("green.inet.0"),).resolution;
     assert_eq!(
         fresh.tunnel_endpoint_id, 0,
         "fixture liveness: green.inet.0 must resolve the flow natively"
@@ -2423,12 +2417,10 @@ fn a_tunneled_pbr_steer_retargeted_to_a_different_tunnel_revokes_10630() {
     let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
     // Fixture liveness: green.inet.0 really resolves this destination via
     // tunnel 825 as a ForwardCandidate.
-    let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
-        &forwarding,
-        &neighbors,
-        flow.dst_ip,
-        Some("green.inet.0"),
-    );
+    let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(&forwarding,
+    &neighbors,
+    flow.dst_ip,
+    Some("green.inet.0"),).resolution;
     assert_eq!(
         fresh.tunnel_endpoint_id, 825,
         "fixture liveness: green.inet.0 must resolve the flow via tunnel 825"
@@ -2500,12 +2492,10 @@ fn a_tunneled_pbr_steer_whose_pbr_term_was_removed_revokes_10630() {
     // Fixture liveness: MAIN really resolves this destination natively (id
     // 0) — without this the revoke below could pass on a MAIN NoRoute that
     // merely differs from 824 for the wrong reason.
-    let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
-        &forwarding,
-        &neighbors,
-        flow.dst_ip,
-        None,
-    );
+    let fresh = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(&forwarding,
+    &neighbors,
+    flow.dst_ip,
+    None,).resolution;
     assert_eq!(
         fresh.tunnel_endpoint_id, 0,
         "fixture liveness: MAIN must resolve the flow natively, not via a tunnel"

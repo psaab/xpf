@@ -7,20 +7,19 @@ use super::*;
 /// Resolve a tunnel endpoint's OUTER transport destination.
 ///
 /// Shared SSOT for the outer-hop lookup: returns the OUTER
-/// `ForwardingResolution` (whose `egress_ifindex` is the OUTER L3 egress
-/// interface where the outer next-hop neighbor is keyed, NOT the tunnel
-/// logical ifindex), or `None` when the endpoint id is unknown OR the
-/// outer destination resolves to local delivery / a tunnel interface (the
-/// recursion guard). `resolve_tunnel_forwarding_resolution` re-maps the
-/// returned resolution onto the tunnel logical ifindex; the cold-path
-/// `outer_neighbor_ifindex` helper reads `egress_ifindex` straight off it
-/// to key the outer-hop ARP/NDP probe + neighbor map + neg-cache.
+/// `ForwardingLookupResult` (whose `.resolution.egress_ifindex` is the OUTER L3
+/// egress interface where the outer next-hop neighbor is keyed, NOT the tunnel
+/// logical ifindex), or `None` when the endpoint id is unknown OR the outer
+/// destination resolves to local delivery / a tunnel interface (the recursion
+/// guard). `resolve_tunnel_forwarding_resolution` re-maps the outer resolution
+/// onto the tunnel logical ifindex while the FIB caller preserves its selected
+/// inner route identity.
 pub(in crate::afxdp) fn resolve_tunnel_outer(
     state: &ForwardingState,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
     tunnel_endpoint_id: u16,
     depth: usize,
-) -> Option<ForwardingResolution> {
+) -> Option<ForwardingLookupResult> {
     let endpoint = state.tunnel_endpoints.get(&tunnel_endpoint_id)?;
     let outer = match endpoint.destination {
         // #2734: tunnel OUTER resolution is per-tunnel-endpoint, not
@@ -45,8 +44,10 @@ pub(in crate::afxdp) fn resolve_tunnel_outer(
             None,
         ),
     };
-    if outer.disposition == ForwardingDisposition::LocalDelivery
-        || state.tunnel_interfaces.contains(&outer.egress_ifindex)
+    if outer.resolution.disposition == ForwardingDisposition::LocalDelivery
+        || state
+            .tunnel_interfaces
+            .contains(&outer.resolution.egress_ifindex)
     {
         return None;
     }
@@ -74,6 +75,7 @@ pub(in crate::afxdp) fn resolve_tunnel_forwarding_resolution(
     else {
         return no_route_resolution(Some(destination));
     };
+    let outer = outer.resolution;
     ForwardingResolution {
         disposition: outer.disposition,
         local_ifindex: outer.local_ifindex,
@@ -120,7 +122,9 @@ pub(in crate::afxdp) fn outer_neighbor_ifindex(
         return resolution.egress_ifindex;
     }
     match resolve_tunnel_outer(state, dynamic_neighbors, resolution.tunnel_endpoint_id, 0) {
-        Some(outer) if outer.egress_ifindex > 0 => outer.egress_ifindex,
+        Some(outer) if outer.resolution.egress_ifindex > 0 => {
+            outer.resolution.egress_ifindex
+        }
         _ => resolution.egress_ifindex,
     }
 }

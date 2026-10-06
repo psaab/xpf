@@ -1216,12 +1216,10 @@ fn resolve_current_forward_companion(
         forward_key: fwd_key.clone(),
     };
     let resolution_target = resolution_target_for_session(&flow, fwd_decision);
-    let looked_up = lookup_forwarding_resolution_for_session_without_cache(
-        forwarding,
-        dynamic_neighbors,
-        &flow,
-        fwd_decision,
-    );
+    let looked_up = lookup_forwarding_resolution_for_session_without_cache(forwarding,
+    dynamic_neighbors,
+    &flow,
+    fwd_decision,).resolution;
     let looked_up = prefer_local_forward_candidate_for_fabric_ingress(
         forwarding,
         ha_state,

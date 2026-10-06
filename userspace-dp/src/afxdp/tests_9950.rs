@@ -298,7 +298,9 @@ fn f035_parked_fragment_overlap_is_rechecked_on_retry_10659() {
             crate::afxdp::forwarding::lookup_forwarding_for_ip(
                 &forwarding,
                 IpAddr::V4(dst),
-            ),
+            )
+            .resolution
+            .disposition,
             ForwardingDisposition::MissingNeighbor,
             "{label}: the destination's connected route must be cold before injection"
         );
@@ -486,7 +488,9 @@ fn f035_fabric_parked_fragment_uses_encoded_zone_overlap_domain_10917() {
         },
     )]);
     assert_eq!(
-        crate::afxdp::forwarding::lookup_forwarding_for_ip(&forwarding, IpAddr::V4(dst),),
+        crate::afxdp::forwarding::lookup_forwarding_for_ip(&forwarding, IpAddr::V4(dst),)
+            .resolution
+            .disposition,
         ForwardingDisposition::MissingNeighbor,
         "the fixture must leave the default-route gateway unresolved"
     );

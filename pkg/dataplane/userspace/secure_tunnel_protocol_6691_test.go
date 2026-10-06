@@ -154,9 +154,11 @@ const preSecureTunnelProtocolVersion = 4
 // #11463 moves it to v43 for disabled-member FIB filtering; #11423 moves it to
 // v44 for TunnelEndpointSnapshot.LinkUp keepalive-driven tunnel liveness;
 // #11812 moves it to v45 for PolicerSnapshot optional single-rate marking and
-// logical-interface-policer fields. Nothing about secure_tunnel changed, so
+// logical-interface-policer fields. #9506 moves it to v46 for the transmitted
+// RouteTableIdentities authority; the helper must not infer a terminal FIB
+// identity from egress data. Nothing about secure_tunnel changed, so
 // MinProtocolSecureTunnelRefusal (7) is untouched again.
-const secureTunnelSnapshotProtocolVersion = 45
+const secureTunnelSnapshotProtocolVersion = 46
 
 // preV5HelperAcceptsSnapshot models the exact-equality version gate a pre-v5
 // helper applies before touching any dataplane state

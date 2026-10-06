@@ -50,12 +50,10 @@ fn zero_disposition_route_falls_through_under_both_default_policies_11327() {
             "fixture must carry the {default_policy} default policy"
         );
 
-        let resolution = lookup_forwarding_resolution_in_table_with_dynamic(
-            &state,
-            &Arc::new(ShardedNeighborMap::new()),
-            IpAddr::V4(Ipv4Addr::new(10, 1, 0, 20)),
-            Some("inet.0"),
-        );
+        let resolution = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+        &Arc::new(ShardedNeighborMap::new()),
+        IpAddr::V4(Ipv4Addr::new(10, 1, 0, 20)),
+        Some("inet.0"),).resolution;
         assert_eq!(
             resolution.disposition,
             ForwardingDisposition::ForwardCandidate,

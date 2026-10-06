@@ -164,6 +164,11 @@ pub(in crate::afxdp) struct ForwardingState {
     /// keys + connected tables + local attributions); read on re-resolve
     /// paths only, never per packet.
     pub(in crate::afxdp) install_tables: FastMap<u32, InstallTables>,
+    /// Explicit canonical-table identity authority captured with this immutable
+    /// FIB generation. Missing keys are never interpreted as the default table.
+    pub(in crate::afxdp) route_table_identities: FastMap<String, RouteIdentity>,
+    /// False when any selectable FIB table lacks an authoritative identity.
+    pub(in crate::afxdp) route_table_identity_map_complete: bool,
     pub(in crate::afxdp) tunnel_endpoints: FastMap<u16, TunnelEndpoint>,
     pub(in crate::afxdp) tunnel_endpoint_by_ifindex: FastMap<i32, u16>,
     /// #11423: endpoint ids whose tunnel devices are explicitly down in the
@@ -1701,6 +1706,18 @@ impl ForwardingDisposition {
                 | ForwardingDisposition::MissingNeighbor
         )
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct RouteIdentity {
+    pub(crate) domain: u32,
+    pub(crate) table: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ForwardingLookupResult {
+    pub(crate) resolution: ForwardingResolution,
+    pub(crate) selected_route: Option<RouteIdentity>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

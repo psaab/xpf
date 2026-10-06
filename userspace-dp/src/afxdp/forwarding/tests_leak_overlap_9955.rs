@@ -148,6 +148,15 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
         })
         .collect();
 
+    let forwarding_tables: Vec<String> = leaks
+        .iter()
+        .flat_map(|leak| {
+            [
+                format!("{}.inet.0", leak.target),
+                format!("{}.inet6.0", leak.target),
+            ]
+        })
+        .collect();
     super::super::test_fixtures::v5(crate::ConfigSnapshot {
         zones: vec![ZoneSnapshot {
             name: "wan".to_string(),
@@ -155,6 +164,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
             ..Default::default()
         }],
         interfaces,
+        forwarding_tables,
         routes,
         neighbors,
         ..Default::default()
@@ -178,7 +188,7 @@ fn kernel_choice(leaks: &[Leak]) -> &'static str {
 /// with itself and prove nothing.
 fn helper_choice(leaks: &[Leak]) -> Option<&'static str> {
     let state = build_forwarding_state(&snapshot_for(leaks));
-    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(PROBE));
+    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(PROBE)).resolution;
     if resolved.disposition != ForwardingDisposition::ForwardCandidate {
         // Not a divergence — a fixture that never resolved. Reported distinctly
         // so "the helper chose differently" is never confused with "the helper
@@ -309,7 +319,7 @@ fn leak_versus_ordinary_route_in_the_same_table_9955() {
     });
 
     let state = build_forwarding_state(&snapshot);
-    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(PROBE));
+    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(PROBE)).resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -385,7 +395,7 @@ fn a_leak_into_a_table_that_misses_falls_through_9955() {
     });
 
     let state = build_forwarding_state(&snapshot);
-    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(PROBE));
+    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(PROBE)).resolution;
 
     assert_eq!(
         resolved.disposition,
@@ -492,6 +502,27 @@ fn snapshot_from_go_leak_corpus_9955(row: &LeakCorpusRow9955) -> crate::ConfigSn
         ..Default::default()
     };
 
+    let forwarding_tables: std::collections::BTreeSet<_> = row
+        .routes
+        .iter()
+        .flat_map(|route| {
+            let mut tables = Vec::with_capacity(2);
+            if route.table != "inet.0" && route.table != "inet6.0" {
+                tables.push(route.table.clone());
+            }
+            if !route.next_table.is_empty() {
+                let table = crate::afxdp::forwarding::canonical_next_table(
+                    &route.next_table,
+                    route.family == "inet6",
+                );
+                if table.as_ref() != "inet.0" && table.as_ref() != "inet6.0" {
+                    tables.push(table.into_owned());
+                }
+            }
+            tables
+        })
+        .collect();
+
     super::super::test_fixtures::v5(crate::ConfigSnapshot {
         zones: vec![ZoneSnapshot {
             name: "wan".to_string(),
@@ -504,6 +535,7 @@ fn snapshot_from_go_leak_corpus_9955(row: &LeakCorpusRow9955) -> crate::ConfigSn
             interface(14, "172.16.52.8/24", "2001:db8:52::8/64"),
         ],
         routes: row.routes.clone(),
+        forwarding_tables: forwarding_tables.into_iter().collect(),
         ..Default::default()
     })
 }
@@ -569,7 +601,7 @@ fn go_leak_corpus_agrees_with_rust_kernel_model_9955() {
             .parse()
             .unwrap_or_else(|err| panic!("{} has invalid destination: {err}", row.name));
         let state = build_forwarding_state(&snapshot_from_go_leak_corpus_9955(&row));
-        let resolved = lookup_forwarding_resolution(&state, destination);
+        let resolved = lookup_forwarding_resolution(&state, destination).resolution;
         assert_eq!(
             resolved.egress_ifindex, row.want_ifindex,
             "{}: Rust egress {} disagrees with Go kernel-stage oracle {}",
@@ -625,7 +657,7 @@ fn v4_leak_target_preserves_local_delivery_9955() {
         ..Default::default()
     });
     let state = build_forwarding_state(&snapshot);
-    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10, 1, 2, 1)));
+    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10, 1, 2, 1))).resolution;
     assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(resolved.local_ifindex, 12);
 }
@@ -673,7 +705,7 @@ fn v4_nat_only_leak_target_preserves_local_delivery_9955() {
             .all(|entry| entry.table != "red.inet.0")
     );
 
-    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(target));
+    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(target)).resolution;
     assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(resolved.local_ifindex, 0);
 }
@@ -704,10 +736,57 @@ fn v6_leak_target_preserves_local_delivery_9955() {
         ..Default::default()
     });
     let state = build_forwarding_state(&snapshot);
-    let resolved = lookup_forwarding_resolution(
-        &state,
-        IpAddr::V6("2001:db8:1::1".parse().expect("v6 local address")),
-    );
+    let resolved = lookup_forwarding_resolution(&state,
+    IpAddr::V6("2001:db8:1::1".parse().expect("v6 local address")),).resolution;
     assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(resolved.local_ifindex, 12);
+}
+
+#[test]
+fn leak_target_identity_and_miss_stay_distinct_v9506() {
+    let leak = Leak {
+        prefix_len: 24,
+        rule_priority: leak_priority(24, 32, LeakKind::NextTable),
+        target: "blue",
+        egress_ifindex: 12,
+        subnet: 50,
+    };
+    let mut snapshot = snapshot_for(&[leak]);
+    snapshot.route_table_identities = vec![
+        crate::protocol::RouteTableIdentitySnapshot {
+            name: "inet.0".into(),
+            domain: 0,
+            table: 254,
+        },
+        crate::protocol::RouteTableIdentitySnapshot {
+            name: "inet6.0".into(),
+            domain: 0,
+            table: 254,
+        },
+        crate::protocol::RouteTableIdentitySnapshot {
+            name: "blue.inet.0".into(),
+            domain: 501,
+            table: 501,
+        },
+        crate::protocol::RouteTableIdentitySnapshot {
+            name: "blue.inet6.0".into(),
+            domain: 501,
+            table: 501,
+        },
+    ];
+    let state = build_forwarding_state(&snapshot);
+    assert!(state.route_table_identity_map_complete);
+
+    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(PROBE));
+    assert_eq!(
+        resolved.selected_route.map(|route| (route.domain, route.table)),
+        Some((501, 501)),
+        "a terminal route reached through next-table must report the target identity"
+    );
+
+    let missed = lookup_forwarding_resolution(
+        &state,
+        IpAddr::V4("192.0.2.77".parse().expect("IPv4 address")),
+    );
+    assert_eq!(missed.selected_route, None, "a miss has no route identity");
 }

@@ -7318,6 +7318,7 @@ fn reverse_unresolvable_forward_fails_closed_10507() {
             &forwarding_nr,
             IpAddr::V4(DMZ_DST_10507)
         )
+        .resolution
         .disposition,
         ForwardingDisposition::NoRoute,
         "fixture: forward live must be NoRoute (unresolvable companion)"
@@ -7424,6 +7425,7 @@ fn recorded_nonlocal_noroute_retained_10507() {
             &forwarding_nr,
             IpAddr::V4(DMZ_DST_10507)
         )
+        .resolution
         .disposition,
         ForwardingDisposition::NoRoute,
         "fixture: live must be NoRoute (non-local retention)"

@@ -796,6 +796,13 @@ impl RuntimeView {
         pmech_inventory: Arc<PMechInventory>,
         runtime_view_publication_generation: u64,
     ) -> Self {
+        let pmech_inventory = if forwarding.route_table_identity_map_complete {
+            pmech_inventory
+        } else {
+            let mut unavailable = (*pmech_inventory).clone();
+            unavailable.complete = false;
+            Arc::new(unavailable)
+        };
         Self {
             validation,
             forwarding,
@@ -1216,5 +1223,39 @@ mod tests {
     fn subtract_prefix_equal_length_blocker_removes_the_whole_prefix() {
         let prefix = "10.0.0.0/16".parse::<IpNet>().expect("prefix");
         assert!(subtract_prefix_set(vec![prefix], prefix).is_empty());
+    }
+
+    #[test]
+    fn incomplete_route_identity_map_withholds_pmech_authority() {
+        let snapshot = inventory_snapshot(
+            vec![route(
+                0,
+                254,
+                "10.0.0.0/24",
+                RTN_UNICAST,
+                vec![hop(10)],
+            )],
+            "10.0.0.0/24",
+            &["10.0.0.0/24"],
+            &["10.0.0.0/24"],
+        );
+        let inventory = Arc::new(PMechInventory::from_snapshot(Some(&snapshot)));
+        assert!(inventory.complete(), "premise: P-MECH inventory is otherwise complete");
+
+        let mut forwarding = ForwardingState::default();
+        forwarding
+            .routes_v4
+            .insert("blue.inet.0".into(), Vec::new());
+        forwarding.route_table_identity_map_complete = false;
+        let view = RuntimeView::new_with_ipsec_authority(
+            ValidationState::default(),
+            Arc::new(forwarding),
+            Arc::new(IpsecTunnelRows::default()),
+            snapshot.generation,
+            inventory,
+            0,
+        );
+        assert!(!view.pmech_inventory().complete());
+        assert!(!view.pmech_inventory().has_main_table_routes());
     }
 }

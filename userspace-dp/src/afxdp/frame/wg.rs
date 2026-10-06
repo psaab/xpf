@@ -163,16 +163,15 @@ fn outer_physical_egress_ifindex(
     outer_egress_ifindex_or_fallback(decision, forwarding, &outer)
 }
 
-/// #5292: resolve the FULL outer underlay `ForwardingResolution` for a WG
+/// #5292: resolve the FULL outer underlay `ForwardingLookupResult` for a WG
 /// encap decision against its SELECTED peer endpoint. The WG endpoint-level
 /// `destination` is zeroed (`0.0.0.0`/`::`) at build time — the peer carries
 /// the real outer hop — so the outer egress, next-hop neighbor MAC, source,
 /// and VLAN MUST all follow the peer route, NOT the placeholder (which
-/// NoRoutes → blackhole, or matches the wrong default route). Returns the
-/// resolution verbatim; callers derive the egress ifindex via
-/// `outer_egress_ifindex_or_fallback` and read `neighbor_mac`/the egress row
-/// (`src_mac`/`vlan_id`) from the SAME snapshot, so the outer L2/VLAN, source,
-/// and MTU are all consistent with one physical egress.
+/// NoRoutes → blackhole, or matches the wrong default route's adjacency).
+/// The result preserves the selected outer transport route identity; callers
+/// derive the egress ifindex via `outer_egress_ifindex_or_fallback` and read
+/// neighbor/L2 attributes from the same immutable forwarding snapshot.
 ///
 /// Bumps `OUTER_ROUTE_RESOLVE_COUNT` exactly once — the #3992 single-FIB-LPM-
 /// per-packet invariant. `dynamic_neighbors` is `None`: the egress ifindex is
@@ -186,7 +185,7 @@ fn outer_physical_egress_resolution(
     forwarding: &ForwardingState,
     endpoint: &TunnelEndpoint,
     outer_dst: IpAddr,
-) -> ForwardingResolution {
+) -> ForwardingLookupResult {
     #[cfg(test)]
     outer_route_resolve_count_bump();
     // #2734: WG outer underlay resolution is per-tunnel-endpoint, not
@@ -211,8 +210,9 @@ fn outer_physical_egress_resolution(
 fn outer_egress_ifindex_or_fallback(
     decision: &SessionDecision,
     forwarding: &ForwardingState,
-    outer: &ForwardingResolution,
+    outer: &ForwardingLookupResult,
 ) -> i32 {
+    let outer = &outer.resolution;
     if outer.egress_ifindex > 0
         && outer.disposition != ForwardingDisposition::NoRoute
         && !forwarding.tunnel_interfaces.contains(&outer.egress_ifindex)
@@ -246,7 +246,7 @@ fn outer_physical_egress_mtu(
         .map(|e| e.mtu)
         .filter(|m| *m > 0)
         .unwrap_or(1500);
-    crate::afxdp::forwarding::min_nonzero_mtu(interface_mtu, outer.route_mtu as usize)
+    crate::afxdp::forwarding::min_nonzero_mtu(interface_mtu, outer.resolution.route_mtu as usize)
 
 }
 /// The peer-endpoint outer destination whose underlay MTU the PTB must
@@ -561,7 +561,7 @@ pub(super) fn wg_encap_frame(
     let interface_mtu = egress.map(|e| e.mtu).filter(|m| *m > 0).unwrap_or(1500);
     let outer_mtu = crate::afxdp::forwarding::min_nonzero_mtu(
         interface_mtu,
-        outer_resolution.route_mtu as usize,
+        outer_resolution.resolution.route_mtu as usize,
     );
 
     // #5292: the outer L2 header follows the resolved PHYSICAL egress —
@@ -582,6 +582,7 @@ pub(super) fn wg_encap_frame(
         None => decision.resolution.tx_vlan_id,
     };
     let dst_mac = outer_resolution
+        .resolution
         .neighbor_mac
         .or(decision.resolution.neighbor_mac)?;
     let outer_eth_len = if vlan_id > 0 { 18 } else { 14 };

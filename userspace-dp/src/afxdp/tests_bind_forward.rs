@@ -1479,10 +1479,8 @@ fn synced_replica_entry_keeps_peer_synced_entries_promotable() {
                     discriminator: Default::default(),
                     routing_domain: 0,
         },
-        decision: SessionDecision { resolution: lookup_forwarding_resolution(
-            &build_forwarding_state(&nat_snapshot()),
-            IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-        ), nat: NatDecision {
+        decision: SessionDecision { resolution: lookup_forwarding_resolution(&build_forwarding_state(&nat_snapshot()),
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),).resolution, nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
             ..NatDecision::default()
         }, install_table_domain: 0, install_table_check: 0 },
@@ -1535,10 +1533,8 @@ fn synced_replica_entry_marks_local_entries_worker_local() {
                     discriminator: Default::default(),
                     routing_domain: 0,
         },
-        decision: SessionDecision { resolution: lookup_forwarding_resolution(
-            &build_forwarding_state(&nat_snapshot()),
-            IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-        ), nat: NatDecision {
+        decision: SessionDecision { resolution: lookup_forwarding_resolution(&build_forwarding_state(&nat_snapshot()),
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),).resolution, nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
             ..NatDecision::default()
         }, install_table_domain: 0, install_table_check: 0 },
@@ -1593,10 +1589,8 @@ fn reconcile_stop_preserves_shared_synced_sessions() {
                     discriminator: Default::default(),
                     routing_domain: 0,
         },
-        decision: SessionDecision { resolution: lookup_forwarding_resolution(
-            &build_forwarding_state(&nat_snapshot()),
-            IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-        ), nat: NatDecision {
+        decision: SessionDecision { resolution: lookup_forwarding_resolution(&build_forwarding_state(&nat_snapshot()),
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),).resolution, nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
             ..NatDecision::default()
         }, install_table_domain: 0, install_table_check: 0 },
@@ -1662,10 +1656,8 @@ fn replay_synced_sessions_requeues_preserved_entries_for_new_workers() {
                     discriminator: Default::default(),
                     routing_domain: 0,
         },
-        decision: SessionDecision { resolution: lookup_forwarding_resolution(
-            &build_forwarding_state(&nat_snapshot()),
-            IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-        ), nat: NatDecision {
+        decision: SessionDecision { resolution: lookup_forwarding_resolution(&build_forwarding_state(&nat_snapshot()),
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),).resolution, nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
             ..NatDecision::default()
         }, install_table_domain: 0, install_table_check: 0 },
@@ -1796,12 +1788,10 @@ fn session_resolution_falls_back_to_cached_neighbor_on_miss() {
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
-    let resolved = lookup_forwarding_resolution_for_session(
-        &state,
-        &Arc::new(ShardedNeighborMap::new()),
-        &flow,
-        decision,
-    );
+    let resolved = lookup_forwarding_resolution_for_session(&state,
+    &Arc::new(ShardedNeighborMap::new()),
+    &flow,
+    decision,).resolution;
     let expected_src = state
         .egress
         .get(&12)
@@ -1822,7 +1812,7 @@ fn session_resolution_falls_back_to_cached_neighbor_on_miss() {
 #[test]
 fn build_forwarded_frame_rewrites_l2_and_decrements_ttl() {
     let state = build_forwarding_state(&forwarding_snapshot(true));
-    let resolution = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
+    let resolution = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution;
     assert_eq!(
         resolution.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -1883,7 +1873,7 @@ fn build_forwarded_frame_rewrites_l2_and_decrements_ttl() {
 #[test]
 fn rewrite_forwarded_frame_in_place_reuses_rx_frame() {
     let state = build_forwarding_state(&forwarding_snapshot(true));
-    let resolution = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
+    let resolution = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution;
     let mut frame = Vec::new();
     write_eth_header(
         &mut frame,
@@ -2042,7 +2032,7 @@ fn static_nat_dnat_routes_to_internal_ip() {
     // After DNAT translation, resolution target is internal IP
     let internal_ip: IpAddr = "192.168.1.10".parse().unwrap();
     let resolution =
-        lookup_forwarding_resolution_with_dynamic(&state, &Default::default(), internal_ip);
+        lookup_forwarding_resolution_with_dynamic(&state, &Default::default(), internal_ip).resolution;
     // Should resolve to trust interface (ifindex 5) via connected route
     assert_eq!(resolution.egress_ifindex, 5);
 }
@@ -2566,7 +2556,9 @@ fn subnet_directed_broadcast_is_never_locally_delivered_8061() {
 
     // Positive control — the fixture CAN resolve locally.
     assert_eq!(
-        crate::afxdp::forwarding::lookup_forwarding_for_ip(&state, iface_addr),
+        crate::afxdp::forwarding::lookup_forwarding_for_ip(&state, iface_addr)
+            .resolution
+            .disposition,
         ForwardingDisposition::LocalDelivery,
         "the interface's own address must resolve LocalDelivery; without this the \
          negative assertion below would pass vacuously on a state that resolves \
@@ -2585,7 +2577,9 @@ fn subnet_directed_broadcast_is_never_locally_delivered_8061() {
 
     // The disposition itself.
     assert_ne!(
-        crate::afxdp::forwarding::lookup_forwarding_for_ip(&state, directed_bcast),
+        crate::afxdp::forwarding::lookup_forwarding_for_ip(&state, directed_bcast)
+            .resolution
+            .disposition,
         ForwardingDisposition::LocalDelivery,
         "a subnet-directed broadcast must not resolve LocalDelivery — local delivery \
          writes a bare L3 packet to the xpf-usp0 TUN, which no AF_PACKET consumer on \
@@ -2650,10 +2644,8 @@ fn a_sibling_workers_replica_carries_zero_counters_for_a_live_session_7919() {
         discriminator: Default::default(),
         routing_domain: 0,
     };
-    let decision = SessionDecision { resolution: lookup_forwarding_resolution(
-        &build_forwarding_state(&nat_snapshot()),
-        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-    ), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision { resolution: lookup_forwarding_resolution(&build_forwarding_state(&nat_snapshot()),
+    IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),).resolution, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
     let metadata = SessionMetadata {
         ingress_zone: TEST_LAN_ZONE_ID,
         egress_zone: TEST_WAN_ZONE_ID,

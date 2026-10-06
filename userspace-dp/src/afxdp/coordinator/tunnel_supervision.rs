@@ -846,12 +846,10 @@ impl super::Coordinator {
         } else {
             Some(endpoint.transport_table.as_str())
         };
-        let resolution = lookup_forwarding_resolution_in_table_with_dynamic(
-            &self.forwarding,
-            self.dynamic_neighbors_ref(),
-            peer_ip,
-            table,
-        );
+        let resolution = lookup_forwarding_resolution_in_table_with_dynamic(&self.forwarding,
+        self.dynamic_neighbors_ref(),
+        peer_ip,
+        table,).resolution;
         self.forwarding
             .egress
             .get(&resolution.egress_ifindex)

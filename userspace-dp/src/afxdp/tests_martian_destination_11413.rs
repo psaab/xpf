@@ -65,7 +65,7 @@ fn assert_transit_destination_drop_11413(
 fn run_v4_destination_11413(destination: Ipv4Addr) {
     let forwarding = forwarding_11413();
     assert_eq!(
-        lookup_forwarding_resolution(&forwarding, IpAddr::V4(destination)).disposition,
+        lookup_forwarding_resolution(&forwarding, IpAddr::V4(destination)).resolution.disposition,
         ForwardingDisposition::ForwardCandidate,
         "fixture must provide a live default-route transit path for {destination}"
     );
@@ -100,7 +100,7 @@ fn run_v4_destination_11413(destination: Ipv4Addr) {
 fn run_v6_destination_11413(destination: Ipv6Addr) {
     let forwarding = forwarding_11413();
     assert_eq!(
-        lookup_forwarding_resolution(&forwarding, IpAddr::V6(destination)).disposition,
+        lookup_forwarding_resolution(&forwarding, IpAddr::V6(destination)).resolution.disposition,
         ForwardingDisposition::ForwardCandidate,
         "fixture must provide a live default-route transit path for {destination}"
     );
@@ -172,7 +172,7 @@ fn transit_martian_destination_gate_drops_preexisting_session_hit_11413() {
         routing_domain: 0,
     };
     let translated_destination = Ipv4Addr::LOCALHOST;
-    let resolution = lookup_forwarding_resolution(&forwarding, IpAddr::V4(translated_destination));
+    let resolution = lookup_forwarding_resolution(&forwarding, IpAddr::V4(translated_destination)).resolution;
     assert_eq!(
         resolution.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -251,7 +251,7 @@ fn transit_martian_destination_gate_covers_flowless_fragment_11413() {
     let forwarding = forwarding_11413();
     let destination = Ipv4Addr::new(224, 0, 0, 1);
     assert_eq!(
-        lookup_forwarding_resolution(&forwarding, IpAddr::V4(destination)).disposition,
+        lookup_forwarding_resolution(&forwarding, IpAddr::V4(destination)).resolution.disposition,
         ForwardingDisposition::ForwardCandidate,
         "fragment fixture must reach a live transit disposition"
     );
@@ -289,7 +289,7 @@ fn ordinary_unicast_destinations_still_transit_under_any_permit_11413() {
         ),
     ] {
         assert_eq!(
-            lookup_forwarding_resolution(&forwarding, destination).disposition,
+            lookup_forwarding_resolution(&forwarding, destination).resolution.disposition,
             ForwardingDisposition::ForwardCandidate,
             "unicast control destination must use the default transit route"
         );

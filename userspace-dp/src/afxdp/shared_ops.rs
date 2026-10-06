@@ -1965,12 +1965,10 @@ pub(super) fn reverse_resolution_for_session_in_table(
 ) -> ForwardingResolution {
     let resolved =
         super::interface_nat_local_resolution(forwarding, target_ip).unwrap_or_else(|| {
-            super::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
-                forwarding,
-                dynamic_neighbors,
-                target_ip,
-                table,
-            )
+            super::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(forwarding,
+            dynamic_neighbors,
+            target_ip,
+            table,).resolution
         });
     let owner_rg_id = owner_rg_for_resolution(forwarding, resolved);
     if fabric_ingress
@@ -2596,11 +2594,9 @@ fn reverse_prewarm_owner_rg_candidates(
     }
     let reverse_resolution = super::interface_nat_local_resolution(forwarding, entry.key.src_ip)
         .unwrap_or_else(|| {
-            lookup_forwarding_resolution_with_dynamic(
-                forwarding,
-                dynamic_neighbors,
-                entry.key.src_ip,
-            )
+            lookup_forwarding_resolution_with_dynamic(forwarding,
+            dynamic_neighbors,
+            entry.key.src_ip,).resolution
         });
     let reverse_owner_rg_id = owner_rg_for_resolution(forwarding, reverse_resolution);
     if reverse_owner_rg_id > 0 {

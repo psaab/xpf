@@ -417,14 +417,18 @@ fn forwarding_lookup_prefers_local_delivery() {
     snapshot.source_nat_rules.clear();
     let state = build_forwarding_state(&snapshot);
     assert_eq!(
-        lookup_forwarding_for_ip(&state, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 8))),
+        lookup_forwarding_for_ip(&state, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 8)))
+            .resolution
+            .disposition,
         ForwardingDisposition::LocalDelivery
     );
     assert_eq!(
         lookup_forwarding_for_ip(
             &state,
             IpAddr::V6("2001:559:8585:50::8".parse().expect("ipv6")),
-        ),
+        )
+        .resolution
+        .disposition,
         ForwardingDisposition::LocalDelivery
     );
 }
@@ -434,20 +438,26 @@ fn forwarding_lookup_prefers_local_delivery() {
 fn forwarding_lookup_requires_neighbor_for_forward_candidate() {
     let good = build_forwarding_state(&forwarding_snapshot(true));
     assert_eq!(
-        lookup_forwarding_for_ip(&good, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+        lookup_forwarding_for_ip(&good, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)))
+            .resolution
+            .disposition,
         ForwardingDisposition::ForwardCandidate
     );
     assert_eq!(
         lookup_forwarding_for_ip(
             &good,
             IpAddr::V6("2606:4700:4700::1111".parse().expect("ipv6")),
-        ),
+        )
+        .resolution
+        .disposition,
         ForwardingDisposition::ForwardCandidate
     );
 
     let missing_neighbor = build_forwarding_state(&forwarding_snapshot(false));
     assert_eq!(
-        lookup_forwarding_for_ip(&missing_neighbor, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),),
+        lookup_forwarding_for_ip(&missing_neighbor, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),)
+            .resolution
+            .disposition,
         ForwardingDisposition::MissingNeighbor
     );
 }
@@ -456,15 +466,13 @@ fn forwarding_lookup_requires_neighbor_for_forward_candidate() {
 #[test]
 fn tunnel_route_resolves_to_logical_tunnel_and_physical_tx() {
     let state = build_forwarding_state(&native_gre_snapshot(true));
-    let resolved = lookup_forwarding_resolution_v4(
-        &state,
-        None,
-        Ipv4Addr::new(8, 8, 8, 8),
-        "sfmix.inet.0",
-        0,
-        true,
-        None,
-    );
+    let resolved = lookup_forwarding_resolution_v4(&state,
+    None,
+    Ipv4Addr::new(8, 8, 8, 8),
+    "sfmix.inet.0",
+    0,
+    true,
+    None,).resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -488,15 +496,13 @@ fn tunnel_route_resolves_to_logical_tunnel_and_physical_tx() {
 #[test]
 fn tunnel_route_preserves_logical_egress_on_outer_neighbor_miss() {
     let state = build_forwarding_state(&native_gre_snapshot(false));
-    let resolved = lookup_forwarding_resolution_v4(
-        &state,
-        None,
-        Ipv4Addr::new(8, 8, 8, 8),
-        "sfmix.inet.0",
-        0,
-        true,
-        None,
-    );
+    let resolved = lookup_forwarding_resolution_v4(&state,
+    None,
+    Ipv4Addr::new(8, 8, 8, 8),
+    "sfmix.inet.0",
+    0,
+    true,
+    None,).resolution;
     assert_eq!(resolved.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(resolved.egress_ifindex, 362);
     assert_eq!(resolved.tx_ifindex, 6);
@@ -555,12 +561,10 @@ fn ingress_filter_routing_instance_steers_flow_into_native_gre_table() {
     assert_eq!(filter_event.reason, FilterLogSource::Pbr.wire_reason());
     assert_eq!(filter_event.ingress_zone_id, TEST_LAN_ZONE_ID);
     assert_eq!(filter_event.egress_zone_id, 0);
-    let resolved = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &Default::default(),
-        flow.dst_ip,
-        Some(override_table.as_str()),
-    );
+    let resolved = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &Default::default(),
+    flow.dst_ip,
+    Some(override_table.as_str()),).resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -945,12 +949,10 @@ fn pbr_override_survives_nat64_translation_no_vrf_leak() {
     //    override table — exactly what the poll loop threads. The v4 lookup
     //    re-canonicalizes `vrf1.inet6.0` -> `vrf1.inet.0`, so the override
     //    SURVIVES the cross-family NAT64 translation: the dst lands in vrf1.
-    let resolved = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        IpAddr::V4(dst_v4),
-        Some(override_table.as_str()),
-    );
+    let resolved = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    IpAddr::V4(dst_v4),
+    Some(override_table.as_str()),).resolution;
     assert_eq!(
         resolved.egress_ifindex, 20,
         "the translated IPv4 dst must resolve in vrf1 (the PBR override survives NAT64)"
@@ -959,12 +961,10 @@ fn pbr_override_survives_nat64_translation_no_vrf_leak() {
     // 4) No-leak control: the base `inet.0` table has NO route for the
     //    vrf1-only translated dst, so a lookup that IGNORED the PBR override
     //    (used the base table) could never reach vrf1's egress 20.
-    let leaked = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        IpAddr::V4(dst_v4),
-        Some("inet.0"),
-    );
+    let leaked = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    IpAddr::V4(dst_v4),
+    Some("inet.0"),).resolution;
     assert_ne!(
         leaked.egress_ifindex, 20,
         "the base table must NOT resolve the vrf1-only translated dst (no VRF leak)"
@@ -1001,12 +1001,10 @@ fn pbr_override_survives_nat64_translation_no_vrf_leak() {
         panic!("the v6 PBR term must steer the untranslated v6 flow too");
     };
     assert_eq!(plain_table, "vrf1.inet6.0");
-    let plain_resolved = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        IpAddr::V6(plain_dst_v6),
-        Some(plain_table.as_str()),
-    );
+    let plain_resolved = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    IpAddr::V6(plain_dst_v6),
+    Some(plain_table.as_str()),).resolution;
     assert_eq!(
         plain_resolved.egress_ifindex, 20,
         "the untranslated v6 dst lands in vrf1.inet6.0"
@@ -1062,18 +1060,14 @@ fn pbr_egress_output_filter_applied_not_base_egress_no_bypass() {
     // The PBR route lookup egresses vrf1's interface (20); the base table would
     // have egressed a DIFFERENT interface (30). The two egresses differ, so
     // WHICH egress filter is applied is load-bearing.
-    let pbr = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        IpAddr::V4(dst),
-        Some(table.as_str()),
-    );
-    let base = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        IpAddr::V4(dst),
-        Some("inet.0"),
-    );
+    let pbr = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    IpAddr::V4(dst),
+    Some(table.as_str()),).resolution;
+    let base = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    IpAddr::V4(dst),
+    Some("inet.0"),).resolution;
     assert_eq!(pbr.egress_ifindex, 20, "PBR selects the vrf1 egress");
     assert_eq!(base.egress_ifindex, 30, "the base egress is a DIFFERENT interface");
 

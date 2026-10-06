@@ -108,34 +108,28 @@ fn empty_neighbors() -> Arc<ShardedNeighborMap> {
 }
 
 fn resolve_v4(state: &ForwardingState, dst: Ipv4Addr) -> ForwardingResolution {
-    lookup_forwarding_resolution_in_table_with_dynamic(
-        state,
-        &empty_neighbors(),
-        IpAddr::V4(dst),
-        Some("inet.0"),
-    )
+    lookup_forwarding_resolution_in_table_with_dynamic(state,
+    &empty_neighbors(),
+    IpAddr::V4(dst),
+    Some("inet.0"),).resolution
 }
 
 fn resolve_v6(state: &ForwardingState, dst: Ipv6Addr) -> ForwardingResolution {
-    lookup_forwarding_resolution_in_table_with_dynamic(
-        state,
-        &empty_neighbors(),
-        IpAddr::V6(dst),
-        Some("inet6.0"),
-    )
+    lookup_forwarding_resolution_in_table_with_dynamic(state,
+    &empty_neighbors(),
+    IpAddr::V6(dst),
+    Some("inet6.0"),).resolution
 }
 
 /// Explicit-hash ECMP entry point (`inner_ecmp`, documented exception to the plain
 /// wrapper: the plain wrapper threads `ecmp_flow_hash = None`, i.e. destination
 /// hashing only). The hash is used VERBATIM as the spread value.
 fn resolve_ecmp_v4(state: &ForwardingState, dst: Ipv4Addr, hash: u64) -> ForwardingResolution {
-    lookup_forwarding_resolution_inner_ecmp(
-        state,
-        None,
-        IpAddr::V4(dst),
-        Some("inet.0"),
-        Some(hash),
-    )
+    lookup_forwarding_resolution_inner_ecmp(state,
+    None,
+    IpAddr::V4(dst),
+    Some("inet.0"),
+    Some(hash),).resolution
 }
 
 #[test]
@@ -473,18 +467,14 @@ fn connected_is_table_scoped_9522() {
     };
     let state = build_forwarding_state(&snapshot);
     let neighbors = empty_neighbors();
-    let red = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        IpAddr::V4(Ipv4Addr::new(10, 99, 1, 50)),
-        Some("red.inet.0"),
-    );
-    let blue = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        IpAddr::V4(Ipv4Addr::new(10, 99, 1, 50)),
-        Some("blue.inet.0"),
-    );
+    let red = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    IpAddr::V4(Ipv4Addr::new(10, 99, 1, 50)),
+    Some("red.inet.0"),).resolution;
+    let blue = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    IpAddr::V4(Ipv4Addr::new(10, 99, 1, 50)),
+    Some("blue.inet.0"),).resolution;
     assert_eq!(red.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(blue.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(red.egress_ifindex, 101, "red lookup must use red's interface");

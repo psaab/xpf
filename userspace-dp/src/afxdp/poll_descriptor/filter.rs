@@ -793,12 +793,10 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
             });
         }
         let fresh =
-            crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
-                forwarding,
-                dynamic_neighbors,
-                target,
-                table.as_deref(),
-            );
+            crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(forwarding,
+            dynamic_neighbors,
+            target,
+            table.as_deref(),).resolution;
         if tunneled_hit_stays_pinned(decision.resolution, fresh) {
             return None;
         }
@@ -826,12 +824,10 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
         return None;
     }
     let resolution =
-        crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
-            forwarding,
-            dynamic_neighbors,
-            target,
-            table.as_deref(),
-        );
+        crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(forwarding,
+        dynamic_neighbors,
+        target,
+        table.as_deref(),).resolution;
     Some(SessionHitPbrRouteRevalidation {
         revoked_key: (!no_local_entry && !is_reverse).then_some(canonical_key.clone()),
         canonical_key,

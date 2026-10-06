@@ -74,6 +74,7 @@ fn nat64_localdelivery_with_v4_junos_host_deny_does_not_reinject_or_mint_10685()
     let forwarding = build_forwarding_state(&snapshot);
     assert_eq!(
         lookup_forwarding_resolution(&forwarding, IpAddr::V4("10.0.61.1".parse().unwrap()))
+            .resolution
             .disposition,
         ForwardingDisposition::LocalDelivery,
         "fixture must resolve the embedded IPv4 destination to the firewall"

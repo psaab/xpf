@@ -85,7 +85,7 @@ fn ha_resolution_blocks_inactive_owner_rg() {
     let resolved = enforce_ha_resolution(
         &state,
         &ha_state,
-        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution,
     );
     assert_eq!(resolved.disposition, ForwardingDisposition::HAInactive);
 }
@@ -100,7 +100,7 @@ fn ha_resolution_allows_fresh_active_owner_rg() {
     let resolved = enforce_ha_resolution(
         &state,
         &ha_state,
-        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution,
     );
     assert_eq!(
         resolved.disposition,
@@ -113,7 +113,7 @@ fn cached_flow_decision_invalidates_when_owner_rg_is_demoted() {
     let state = build_forwarding_state(&nat_snapshot());
     let active = BTreeMap::from([(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
     let demoted = BTreeMap::from([(1, inactive_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
-    let resolution = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
+    let resolution = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution;
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
 
@@ -270,7 +270,7 @@ fn inactive_owner_rg_redirects_established_session_to_fabric() {
     let blocked = enforce_ha_resolution(
         &state,
         &ha_state,
-        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution,
     );
     assert_eq!(blocked.disposition, ForwardingDisposition::HAInactive);
     let redirected = redirect_via_fabric_if_needed(&state, blocked, 24, None);
@@ -308,7 +308,7 @@ fn inactive_owner_missing_neighbor_redirects_to_fabric() {
     let blocked = enforce_ha_resolution(
         &state,
         &ha_state,
-        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
+        lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution,
     );
     assert_eq!(blocked.disposition, ForwardingDisposition::HAInactive);
     let redirected = redirect_via_fabric_if_needed(&state, blocked, 24, None);
@@ -1320,7 +1320,7 @@ fn new_flow_to_inactive_owner_rg_uses_zone_encoded_fabric_redirect() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let ha_state = BTreeMap::from([(1, inactive_ha_runtime(now_secs))]);
-    let routed = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
+    let routed = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution;
     let (from_zone, _) = zone_pair_for_flow(&state, 24, routed.egress_ifindex);
     let redirected = finalize_new_flow_ha_resolution(
         &state,
@@ -1348,7 +1348,7 @@ fn new_flow_from_fabric_keeps_forward_candidate_when_owner_rg_inactive() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let ha_state = BTreeMap::from([(1, inactive_ha_runtime(now_secs))]);
-    let routed = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
+    let routed = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution;
     let resolved =
         finalize_new_flow_ha_resolution(&state, &ha_state, now_secs, routed, true, true, 21, 1, 0);
     assert_eq!(
@@ -1645,7 +1645,7 @@ fn session_hit_keeps_interface_snat_ipv4_local_delivery() {
         .expect("interface nat local delivery"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     let resolved =
-        lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision);
+        lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision).resolution;
 
     assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(resolved.local_ifindex, 12);
@@ -1677,7 +1677,7 @@ fn inactive_interface_snat_session_hit_redirects_to_fabric() {
         .expect("interface nat local delivery"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     let looked_up =
-        lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision);
+        lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision).resolution;
     let blocked = enforce_ha_resolution(&state, &ha_state, looked_up);
     let redirected = redirect_via_fabric_if_needed(&state, blocked, 12, None);
 
@@ -1711,7 +1711,7 @@ fn session_hit_keeps_interface_snat_ipv6_local_delivery() {
         .expect("interface nat local delivery"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
 
     let resolved =
-        lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision);
+        lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision).resolution;
 
     assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(resolved.local_ifindex, 12);
@@ -2133,13 +2133,13 @@ fn source_nat_allocator_exhausted_reports_rule_and_pool_identity() {
 #[test]
 fn interface_snat_addresses_are_not_treated_as_local_delivery() {
     let state = build_forwarding_state(&nat_snapshot());
-    let resolved_v4 = lookup_forwarding_resolution(&state, "172.16.80.8".parse().expect("v4"));
+    let resolved_v4 = lookup_forwarding_resolution(&state, "172.16.80.8".parse().expect("v4")).resolution;
     assert_ne!(
         resolved_v4.disposition,
         ForwardingDisposition::LocalDelivery
     );
     let resolved_v6 =
-        lookup_forwarding_resolution(&state, "2001:559:8585:80::8".parse().expect("v6"));
+        lookup_forwarding_resolution(&state, "2001:559:8585:80::8".parse().expect("v6")).resolution;
     assert_ne!(
         resolved_v6.disposition,
         ForwardingDisposition::LocalDelivery
@@ -2182,7 +2182,7 @@ fn interface_snat_addresses_are_local_delivered_on_session_miss() {
 #[test]
 fn local_delivery_resolves_real_ifindex_for_non_slash32_interface_address_10645() {
     let state = build_forwarding_state(&nat_snapshot());
-    let resolved_v4 = lookup_forwarding_resolution(&state, "10.0.61.1".parse().expect("v4"));
+    let resolved_v4 = lookup_forwarding_resolution(&state, "10.0.61.1".parse().expect("v4")).resolution;
     assert_eq!(
         resolved_v4.disposition,
         ForwardingDisposition::LocalDelivery,
@@ -2201,10 +2201,8 @@ fn local_delivery_resolves_real_ifindex_for_non_slash32_interface_address_10645(
         2,
         "non-/32 v4 local delivery must attribute owner RG 2 (reth1.0), not 0"
     );
-    let resolved_v6 = lookup_forwarding_resolution(
-        &state,
-        "2001:559:8585:ef00::1".parse().expect("v6"),
-    );
+    let resolved_v6 = lookup_forwarding_resolution(&state,
+    "2001:559:8585:ef00::1".parse().expect("v6"),).resolution;
     assert_eq!(
         resolved_v6.disposition,
         ForwardingDisposition::LocalDelivery,
@@ -2271,7 +2269,7 @@ fn duplicate_interface_host_uses_lowest_ifindex_owner_10867() {
     assert_eq!(owner_rg_for_flow(&state, 24), 2);
     assert_eq!(owner_rg_for_flow(&state, 12), 1);
 
-    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(host));
+    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(host)).resolution;
     assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(resolved.local_ifindex, 12);
     assert_eq!(
@@ -2280,7 +2278,7 @@ fn duplicate_interface_host_uses_lowest_ifindex_owner_10867() {
         "local-delivery zone attribution must follow the selected owner"
     );
     assert_eq!(owner_rg_for_resolution(&state, resolved), 1);
-    let resolved_v6 = lookup_forwarding_resolution(&state, IpAddr::V6(host_v6));
+    let resolved_v6 = lookup_forwarding_resolution(&state, IpAddr::V6(host_v6)).resolution;
     assert_eq!(
         resolved_v6.disposition,
         ForwardingDisposition::LocalDelivery
@@ -3105,7 +3103,7 @@ fn policy_selection_deny_emits_rt_flow_event() {
 #[test]
 fn forwarding_resolution_reports_egress_and_neighbor() {
     let state = build_forwarding_state(&forwarding_snapshot(true));
-    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
+    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -3128,7 +3126,7 @@ fn go_built_config_and_kernel_fib_snapshot_resolves_per_table_11419() {
     let snapshot = fib_import_golden_snapshot_11419();
     let state = build_forwarding_state(&snapshot);
     let resolve = |dst, table, hash| {
-        lookup_forwarding_resolution_inner_ecmp(&state, None, dst, Some(table), Some(hash))
+        lookup_forwarding_resolution_inner_ecmp(&state, None, dst, Some(table), Some(hash)).resolution
     };
 
     let main = resolve(
@@ -3171,7 +3169,7 @@ fn go_built_config_and_kernel_fib_snapshot_resolves_per_table_11419() {
 #[test]
 fn forwarding_resolution_supports_next_table_recursion() {
     let state = build_forwarding_state(&forwarding_snapshot_with_next_table(true));
-    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
+    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -3182,10 +3180,8 @@ fn forwarding_resolution_supports_next_table_recursion() {
         Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1)))
     );
 
-    let resolved_v6 = lookup_forwarding_resolution(
-        &state,
-        IpAddr::V6("2606:4700:4700::1111".parse().expect("ipv6")),
-    );
+    let resolved_v6 = lookup_forwarding_resolution(&state,
+    IpAddr::V6("2606:4700:4700::1111".parse().expect("ipv6")),).resolution;
     assert_eq!(
         resolved_v6.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -3208,10 +3204,8 @@ fn forwarding_state_normalizes_ipv6_routes_emitted_in_inet_table() {
     // fixture keeps its correct v6 family.
     snapshot.routes[1].table = "inet.0".to_string();
     let state = build_forwarding_state(&snapshot);
-    let resolved = lookup_forwarding_resolution(
-        &state,
-        IpAddr::V6("2606:4700:4700::1111".parse().expect("ipv6")),
-    );
+    let resolved = lookup_forwarding_resolution(&state,
+    IpAddr::V6("2606:4700:4700::1111".parse().expect("ipv6")),).resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -3280,11 +3274,9 @@ fn dynamic_neighbor_cache_enables_forward_candidate() {
             mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
         },
     );
-    let resolved = lookup_forwarding_resolution_with_dynamic(
-        &state,
-        &dynamic_neighbors,
-        IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
-    );
+    let resolved = lookup_forwarding_resolution_with_dynamic(&state,
+    &dynamic_neighbors,
+    IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),).resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -3362,11 +3354,9 @@ fn learned_ingress_neighbor_enables_reverse_lan_resolution() {
         IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
         [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
     );
-    let resolved = lookup_forwarding_resolution_with_dynamic(
-        &state,
-        &dynamic_neighbors,
-        IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
-    );
+    let resolved = lookup_forwarding_resolution_with_dynamic(&state,
+    &dynamic_neighbors,
+    IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),).resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -3403,7 +3393,7 @@ fn rx_learned_neighbor_expires_to_missing_without_host_traffic_11406() {
         &dynamic_neighbors,
     );
 
-    let before = lookup_forwarding_resolution_with_dynamic(&state, &dynamic_neighbors, ip);
+    let before = lookup_forwarding_resolution_with_dynamic(&state, &dynamic_neighbors, ip).resolution;
     assert_eq!(before.disposition, ForwardingDisposition::ForwardCandidate);
     assert_eq!(before.neighbor_mac, Some(mac_a));
 
@@ -3439,7 +3429,7 @@ fn rx_learned_neighbor_expires_to_missing_without_host_traffic_11406() {
         "aging must invalidate cached forwarding descriptors"
     );
 
-    let after = lookup_forwarding_resolution_with_dynamic(&state, &dynamic_neighbors, ip);
+    let after = lookup_forwarding_resolution_with_dynamic(&state, &dynamic_neighbors, ip).resolution;
     assert_eq!(
         after.disposition,
         ForwardingDisposition::MissingNeighbor,
@@ -3457,7 +3447,7 @@ fn rx_learned_neighbor_expires_to_missing_without_host_traffic_11406() {
         &state,
         &dynamic_neighbors,
     );
-    let relearned = lookup_forwarding_resolution_with_dynamic(&state, &dynamic_neighbors, ip);
+    let relearned = lookup_forwarding_resolution_with_dynamic(&state, &dynamic_neighbors, ip).resolution;
     assert_eq!(
         relearned.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -3633,11 +3623,9 @@ fn learned_vlan_ingress_neighbor_maps_to_logical_ifindex() {
         IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01],
     );
-    let resolved = lookup_forwarding_resolution_with_dynamic(
-        &state,
-        &dynamic_neighbors,
-        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-    );
+    let resolved = lookup_forwarding_resolution_with_dynamic(&state,
+    &dynamic_neighbors,
+    IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),).resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -3767,7 +3755,7 @@ fn learn_dynamic_neighbor_relearns_removed_key() {
 #[test]
 fn forwarding_resolution_treats_next_table_self_miss_as_noroute() {
     let state = build_forwarding_state(&forwarding_snapshot_with_next_table_loop());
-    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
+    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution;
     assert_eq!(resolved.disposition, ForwardingDisposition::NoRoute);
 }
 
@@ -3790,10 +3778,8 @@ fn forwarding_v6_next_table_canonicalizes_inet_form_on_recursion() {
     snapshot.routes[2].next_table = "blue.inet.0".to_string();
 
     let state = build_forwarding_state(&snapshot);
-    let resolved = lookup_forwarding_resolution(
-        &state,
-        IpAddr::V6("2606:4700:4700::1111".parse().expect("ipv6")),
-    );
+    let resolved = lookup_forwarding_resolution(&state,
+    IpAddr::V6("2606:4700:4700::1111".parse().expect("ipv6")),).resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -3839,7 +3825,7 @@ fn forwarding_resolution_falls_through_cross_table_rule_misses() {
         ..Default::default()
     };
     let state = build_forwarding_state(&snapshot);
-    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
+    let resolved = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution;
     assert_eq!(resolved.disposition, ForwardingDisposition::NoRoute);
 }
 
@@ -3862,15 +3848,13 @@ fn outer_neighbor_ifindex_non_tunnel_returns_egress_ifindex() {
     // For a non-tunnel resolution the helper must be byte-identical to
     // egress_ifindex (the off-tunnel path is unchanged).
     let state = build_forwarding_state(&nat_snapshot());
-    let resolution = lookup_forwarding_resolution_v4(
-        &state,
-        None,
-        Ipv4Addr::new(172, 16, 80, 200),
-        "inet.0",
-        0,
-        true,
-        None,
-    );
+    let resolution = lookup_forwarding_resolution_v4(&state,
+    None,
+    Ipv4Addr::new(172, 16, 80, 200),
+    "inet.0",
+    0,
+    true,
+    None,).resolution;
     assert_eq!(resolution.tunnel_endpoint_id, 0);
     assert_eq!(
         outer_neighbor_ifindex(&state, None, &resolution),
@@ -3885,11 +3869,62 @@ fn resolve_tunnel_outer_returns_outer_l3_egress() {
     // subif), NOT the tunnel logical ifindex (gr-0-0-0, 362).
     let state = build_forwarding_state(&native_gre_snapshot(true));
     let outer = resolve_tunnel_outer(&state, None, 1, 0).expect("outer resolves");
-    assert_eq!(outer.egress_ifindex, 12);
+    assert_eq!(outer.resolution.egress_ifindex, 12);
     // VLAN outer transport: tx_ifindex is the PARENT (bind_ifindex 6), so
     // the neighbor key (the subif) differs from tx_ifindex — keying by
     // tx_ifindex would be wrong.
-    assert_eq!(outer.tx_ifindex, 6);
+    assert_eq!(outer.resolution.tx_ifindex, 6);
+}
+
+#[test]
+fn tunnel_route_keeps_inner_identity_while_outer_helper_reports_transport_identity_v9506() {
+    let mut snapshot = native_gre_snapshot(true);
+    snapshot.route_table_identities = vec![
+        crate::protocol::RouteTableIdentitySnapshot {
+            name: "inet.0".into(),
+            domain: 0,
+            table: 254,
+        },
+        crate::protocol::RouteTableIdentitySnapshot {
+            name: "inet6.0".into(),
+            domain: 0,
+            table: 254,
+        },
+        crate::protocol::RouteTableIdentitySnapshot {
+            name: "sfmix.inet.0".into(),
+            domain: 501,
+            table: 501,
+        },
+        crate::protocol::RouteTableIdentitySnapshot {
+            name: "sfmix.inet6.0".into(),
+            domain: 501,
+            table: 501,
+        },
+    ];
+    let state = build_forwarding_state(&snapshot);
+    assert!(state.route_table_identity_map_complete);
+
+    let inner = lookup_forwarding_resolution_v4(
+        &state,
+        None,
+        Ipv4Addr::new(8, 8, 8, 8),
+        "sfmix.inet.0",
+        0,
+        true,
+        None,
+    );
+    assert_eq!(
+        inner.selected_route.map(|route| (route.domain, route.table)),
+        Some((501, 501)),
+        "tunnel remapping must preserve the selected inner FIB table"
+    );
+
+    let outer = resolve_tunnel_outer(&state, None, 1, 0).expect("outer transport resolves");
+    assert_eq!(
+        outer.selected_route.map(|route| (route.domain, route.table)),
+        Some((0, 254)),
+        "the standalone tunnel helper reports the outer transport table"
+    );
 }
 
 #[test]
@@ -4055,30 +4090,26 @@ fn connected_routes_are_table_scoped_no_cross_vrf_leak() {
 
     // A lookup directed into tenant-b's table for a host in the overlapping
     // prefix must egress tenant-b's interface (202), never tenant-a's (101).
-    let resolved = lookup_forwarding_resolution_v4(
-        &state,
-        None,
-        Ipv4Addr::new(10, 0, 0, 42),
-        "tenant-b.inet.0",
-        0,
-        true,
-        None,
-    );
+    let resolved = lookup_forwarding_resolution_v4(&state,
+    None,
+    Ipv4Addr::new(10, 0, 0, 42),
+    "tenant-b.inet.0",
+    0,
+    true,
+    None,).resolution;
     assert_eq!(
         resolved.egress_ifindex, 202,
         "tenant-b lookup must resolve tenant-b's connected interface, not tenant-a's (cross-VRF leak)",
     );
 
     // And the mirror: tenant-a's table resolves tenant-a's interface.
-    let resolved_a = lookup_forwarding_resolution_v4(
-        &state,
-        None,
-        Ipv4Addr::new(10, 0, 0, 42),
-        "tenant-a.inet.0",
-        0,
-        true,
-        None,
-    );
+    let resolved_a = lookup_forwarding_resolution_v4(&state,
+    None,
+    Ipv4Addr::new(10, 0, 0, 42),
+    "tenant-a.inet.0",
+    0,
+    true,
+    None,).resolution;
     assert_eq!(resolved_a.egress_ifindex, 101);
 }
 
@@ -4145,12 +4176,10 @@ fn local_delivery_is_table_scoped_no_cross_vrf_leak() {
     // The destination is one of our own local addresses (to-self): it is in
     // both VRFs' connected lists. Resolved in tenant-b's table → tenant-b's
     // interface (202).
-    let resolved_b = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-        Some("tenant-b.inet.0"),
-    );
+    let resolved_b = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+    Some("tenant-b.inet.0"),).resolution;
     assert_eq!(
         resolved_b.disposition,
         ForwardingDisposition::LocalDelivery,
@@ -4163,12 +4192,10 @@ fn local_delivery_is_table_scoped_no_cross_vrf_leak() {
     assert_eq!(resolved_b.egress_ifindex, 202);
 
     // Mirror: tenant-a's table resolves tenant-a's interface (101).
-    let resolved_a = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-        Some("tenant-a.inet.0"),
-    );
+    let resolved_a = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+    Some("tenant-a.inet.0"),).resolution;
     assert_eq!(resolved_a.local_ifindex, 101);
 }
 
@@ -4227,12 +4254,10 @@ fn local_delivery_v6_is_table_scoped_no_cross_vrf_leak() {
     let state = build_forwarding_state(&snapshot);
     let neighbors = Arc::new(ShardedNeighborMap::new());
 
-    let resolved_b = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        IpAddr::V6("2001:db8::1".parse().unwrap()),
-        Some("tenant-b.inet6.0"),
-    );
+    let resolved_b = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    IpAddr::V6("2001:db8::1".parse().unwrap()),
+    Some("tenant-b.inet6.0"),).resolution;
     assert_eq!(
         resolved_b.disposition,
         ForwardingDisposition::LocalDelivery,
@@ -4242,12 +4267,10 @@ fn local_delivery_v6_is_table_scoped_no_cross_vrf_leak() {
         "tenant-b to-self (v6) must attribute tenant-b's interface, not tenant-a's",
     );
 
-    let resolved_a = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        IpAddr::V6("2001:db8::1".parse().unwrap()),
-        Some("tenant-a.inet6.0"),
-    );
+    let resolved_a = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    IpAddr::V6("2001:db8::1".parse().unwrap()),
+    Some("tenant-a.inet6.0"),).resolution;
     assert_eq!(resolved_a.local_ifindex, 301);
 }
 
@@ -4286,12 +4309,10 @@ fn static_nat_local_delivery_is_table_scoped_no_cross_vrf_leak() {
     // Owning VRF (tenant-b): the NAT subsystem owns the external IP →
     // LocalDelivery, ifindex 0 (no interface owns a NAT external IP; #3769 L5
     // gates this ifindex-0 delivery on table ownership).
-    let owner = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        ext,
-        Some("tenant-b.inet.0"),
-    );
+    let owner = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    ext,
+    Some("tenant-b.inet.0"),).resolution;
     assert_eq!(
         owner.disposition,
         ForwardingDisposition::LocalDelivery,
@@ -4304,12 +4325,10 @@ fn static_nat_local_delivery_is_table_scoped_no_cross_vrf_leak() {
 
     // Cross-VRF (tenant-a): NOT owned here → must NOT leak to LocalDelivery;
     // it follows the tenant-a FIB (no route → NoRoute).
-    let cross = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        ext,
-        Some("tenant-a.inet.0"),
-    );
+    let cross = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    ext,
+    Some("tenant-a.inet.0"),).resolution;
     assert_ne!(
         cross.disposition,
         ForwardingDisposition::LocalDelivery,
@@ -4324,7 +4343,7 @@ fn static_nat_local_delivery_is_table_scoped_no_cross_vrf_leak() {
 
     // Default table (None → inet.0): also not the owner → no leak.
     let dflt =
-        lookup_forwarding_resolution_in_table_with_dynamic(&state, &neighbors, ext, None);
+        lookup_forwarding_resolution_in_table_with_dynamic(&state, &neighbors, ext, None).resolution;
     assert_ne!(
         dflt.disposition,
         ForwardingDisposition::LocalDelivery,
@@ -4354,24 +4373,20 @@ fn dnat_local_delivery_is_table_scoped_no_cross_vrf_leak() {
     let neighbors = Arc::new(ShardedNeighborMap::new());
     let dst = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20));
 
-    let owner = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        dst,
-        Some("tenant-b.inet.0"),
-    );
+    let owner = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    dst,
+    Some("tenant-b.inet.0"),).resolution;
     assert_eq!(
         owner.disposition,
         ForwardingDisposition::LocalDelivery,
         "DNAT destination IP must local-deliver in its owning VRF",
     );
 
-    let cross = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        dst,
-        Some("tenant-a.inet.0"),
-    );
+    let cross = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    dst,
+    Some("tenant-a.inet.0"),).resolution;
     assert_eq!(
         cross.disposition,
         ForwardingDisposition::NoRoute,
@@ -4398,21 +4413,17 @@ fn nat_local_delivery_v6_is_table_scoped_no_cross_vrf_leak() {
     let neighbors = Arc::new(ShardedNeighborMap::new());
     let ext: IpAddr = "2001:db8:ff::10".parse().unwrap();
 
-    let owner = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        ext,
-        Some("tenant-b.inet6.0"),
-    );
+    let owner = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    ext,
+    Some("tenant-b.inet6.0"),).resolution;
     assert_eq!(owner.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(owner.local_ifindex, 0);
 
-    let cross = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        ext,
-        Some("tenant-a.inet6.0"),
-    );
+    let cross = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    ext,
+    Some("tenant-a.inet6.0"),).resolution;
     assert_ne!(
         cross.disposition,
         ForwardingDisposition::LocalDelivery,
@@ -4443,9 +4454,7 @@ fn nat_local_delivery_default_vrf_unchanged_and_counts_ifindex0() {
     let before = LOCAL_DELIVERY_IFINDEX0.load(std::sync::atomic::Ordering::Relaxed);
     // Default table via explicit inet.0 and via None both deliver locally.
     for table in [Some("inet.0"), None] {
-        let r = lookup_forwarding_resolution_in_table_with_dynamic(
-            &state, &neighbors, ext, table,
-        );
+        let r = lookup_forwarding_resolution_in_table_with_dynamic(&state, &neighbors, ext, table,).resolution;
         assert_eq!(
             r.disposition,
             ForwardingDisposition::LocalDelivery,
@@ -4499,22 +4508,18 @@ fn interface_local_delivery_single_vrf_no_cross_vrf_leak() {
 
     // Owning VRF (tenant-b): interface owns it → LocalDelivery with the real
     // ifindex (unchanged #3151 attribution).
-    let owner = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        ip,
-        Some("tenant-b.inet.0"),
-    );
+    let owner = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    ip,
+    Some("tenant-b.inet.0"),).resolution;
     assert_eq!(owner.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(owner.local_ifindex, 202);
 
     // Cross-VRF (tenant-a): the interface IP is not owned here → no leak.
-    let cross = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        ip,
-        Some("tenant-a.inet.0"),
-    );
+    let cross = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    ip,
+    Some("tenant-a.inet.0"),).resolution;
     assert_ne!(
         cross.disposition,
         ForwardingDisposition::LocalDelivery,
@@ -4564,18 +4569,14 @@ fn unscoped_nat_local_delivery_is_wildcard_across_vrfs() {
     // Unscoped externals must local-deliver in EVERY table: the default table
     // AND a named non-default VRF (mirrors `scope_ok`'s wildcard).
     for table in [None, Some("inet.0"), Some("tenant-a.inet.0")] {
-        let r = lookup_forwarding_resolution_in_table_with_dynamic(
-            &state, &neighbors, ext, table,
-        );
+        let r = lookup_forwarding_resolution_in_table_with_dynamic(&state, &neighbors, ext, table,).resolution;
         assert_eq!(
             r.disposition,
             ForwardingDisposition::LocalDelivery,
             "unscoped static-NAT external must local-deliver in table {table:?} \
              (wildcard), not fall through to NoRoute (#3769 review MINOR)",
         );
-        let d = lookup_forwarding_resolution_in_table_with_dynamic(
-            &state, &neighbors, dnat, table,
-        );
+        let d = lookup_forwarding_resolution_in_table_with_dynamic(&state, &neighbors, dnat, table,).resolution;
         assert_eq!(
             d.disposition,
             ForwardingDisposition::LocalDelivery,
@@ -4665,15 +4666,13 @@ fn ecmp_static_route_retains_all_next_hops_and_skips_dead() {
     // Selection skips the dead first next-hop and forwards via the live
     // second (egress ge-0/0/2 = ifindex 22), producing a ForwardCandidate
     // rather than a MissingNeighbor blackhole on NH[0].
-    let resolved = lookup_forwarding_resolution_v4(
-        &state,
-        None,
-        Ipv4Addr::new(203, 0, 113, 5),
-        "inet.0",
-        0,
-        true,
-        None,
-    );
+    let resolved = lookup_forwarding_resolution_v4(&state,
+    None,
+    Ipv4Addr::new(203, 0, 113, 5),
+    "inet.0",
+    0,
+    true,
+    None,).resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -4802,15 +4801,13 @@ fn ecmp_interface_only_member_is_live_alongside_gateway() {
     let mut egress_seen: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
     let mut interface_only_disposition: Option<ForwardingDisposition> = None;
     for h in 0u64..64 {
-        let r = lookup_forwarding_resolution_v4(
-            &state,
-            None,
-            Ipv4Addr::new(203, 0, 113, 5),
-            "inet.0",
-            0,
-            true,
-            Some(h),
-        );
+        let r = lookup_forwarding_resolution_v4(&state,
+        None,
+        Ipv4Addr::new(203, 0, 113, 5),
+        "inet.0",
+        0,
+        true,
+        Some(h),).resolution;
         egress_seen.insert(r.egress_ifindex);
         if r.egress_ifindex == 22 {
             interface_only_disposition = Some(r.disposition);
@@ -4962,30 +4959,26 @@ fn ecmp_down_interface_only_member_does_not_share_gateway_hashes_11404() {
     );
 
     for hash in 0u64..64 {
-        let v4 = lookup_forwarding_resolution_v4(
-            &state,
-            None,
-            Ipv4Addr::new(203, 0, 113, 5),
-            "inet.0",
-            0,
-            true,
-            Some(hash),
-        );
+        let v4 = lookup_forwarding_resolution_v4(&state,
+        None,
+        Ipv4Addr::new(203, 0, 113, 5),
+        "inet.0",
+        0,
+        true,
+        Some(hash),).resolution;
         assert_eq!(
             (v4.disposition, v4.egress_ifindex),
             (ForwardingDisposition::ForwardCandidate, 11),
             "IPv4 hash {hash} must use the resolved gateway while the interface-only leg is down"
         );
 
-        let v6 = lookup_forwarding_resolution_v6(
-            &state,
-            None,
-            "2001:db8:3::5".parse().expect("valid destination"),
-            "inet6.0",
-            0,
-            true,
-            Some(hash),
-        );
+        let v6 = lookup_forwarding_resolution_v6(&state,
+        None,
+        "2001:db8:3::5".parse().expect("valid destination"),
+        "inet6.0",
+        0,
+        true,
+        Some(hash),).resolution;
         assert_eq!(
             (v6.disposition, v6.egress_ifindex),
             (ForwardingDisposition::ForwardCandidate, 11),
@@ -5081,15 +5074,13 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
     let mut egresses = std::collections::BTreeSet::new();
     let mut saw_tunnel_id = false;
     for h in 0u64..64 {
-        let resolved = lookup_forwarding_resolution_v4(
-            &state,
-            None,
-            Ipv4Addr::new(203, 0, 113, 5),
-            "sfmix.inet.0",
-            0,
-            true,
-            Some(h),
-        );
+        let resolved = lookup_forwarding_resolution_v4(&state,
+        None,
+        Ipv4Addr::new(203, 0, 113, 5),
+        "sfmix.inet.0",
+        0,
+        true,
+        Some(h),).resolution;
         assert_eq!(
             resolved.disposition,
             ForwardingDisposition::ForwardCandidate,
@@ -5138,30 +5129,26 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths() {
 
     let mut recovered_egresses = std::collections::BTreeSet::new();
     for hash in 0u64..64 {
-        let dead = lookup_forwarding_resolution_v4(
-            &down,
-            None,
-            Ipv4Addr::new(203, 0, 113, 5),
-            "sfmix.inet.0",
-            0,
-            true,
-            Some(hash),
-        );
+        let dead = lookup_forwarding_resolution_v4(&down,
+        None,
+        Ipv4Addr::new(203, 0, 113, 5),
+        "sfmix.inet.0",
+        0,
+        true,
+        Some(hash),).resolution;
         assert_eq!(dead.disposition, ForwardingDisposition::ForwardCandidate);
         assert_eq!(
             (dead.egress_ifindex, dead.tunnel_endpoint_id),
             (11, 0),
             "flow hash {hash} must converge to the direct member while GRE is down"
         );
-        let live = lookup_forwarding_resolution_v4(
-            &recovered,
-            None,
-            Ipv4Addr::new(203, 0, 113, 5),
-            "sfmix.inet.0",
-            0,
-            true,
-            Some(hash),
-        );
+        let live = lookup_forwarding_resolution_v4(&recovered,
+        None,
+        Ipv4Addr::new(203, 0, 113, 5),
+        "sfmix.inet.0",
+        0,
+        true,
+        Some(hash),).resolution;
         recovered_egresses.insert(live.egress_ifindex);
     }
     assert_eq!(
@@ -5179,29 +5166,25 @@ fn single_tunnel_route_withdraws_when_endpoint_down_and_recovers() {
     let mut snapshot = native_gre_snapshot(true);
     let destination = Ipv4Addr::new(203, 0, 113, 5);
     let live = build_forwarding_state(&snapshot);
-    let initial = lookup_forwarding_resolution_v4(
-        &live,
-        None,
-        destination,
-        "sfmix.inet.0",
-        0,
-        true,
-        Some(0),
-    );
+    let initial = lookup_forwarding_resolution_v4(&live,
+    None,
+    destination,
+    "sfmix.inet.0",
+    0,
+    true,
+    Some(0),).resolution;
     assert_eq!(initial.disposition, ForwardingDisposition::ForwardCandidate);
     assert_eq!(initial.tunnel_endpoint_id, 1);
 
     snapshot.tunnel_endpoints[0].link_up = Some(false);
     let down = build_forwarding_state(&snapshot);
-    let withdrawn = lookup_forwarding_resolution_v4(
-        &down,
-        None,
-        destination,
-        "sfmix.inet.0",
-        0,
-        true,
-        Some(0),
-    );
+    let withdrawn = lookup_forwarding_resolution_v4(&down,
+    None,
+    destination,
+    "sfmix.inet.0",
+    0,
+    true,
+    Some(0),).resolution;
     assert_eq!(
         withdrawn.disposition,
         ForwardingDisposition::NoRoute,
@@ -5211,15 +5194,13 @@ fn single_tunnel_route_withdraws_when_endpoint_down_and_recovers() {
 
     snapshot.tunnel_endpoints[0].link_up = Some(true);
     let recovered = build_forwarding_state(&snapshot);
-    let resumed = lookup_forwarding_resolution_v4(
-        &recovered,
-        None,
-        destination,
-        "sfmix.inet.0",
-        0,
-        true,
-        Some(0),
-    );
+    let resumed = lookup_forwarding_resolution_v4(&recovered,
+    None,
+    destination,
+    "sfmix.inet.0",
+    0,
+    true,
+    Some(0),).resolution;
     assert_eq!(resumed.disposition, ForwardingDisposition::ForwardCandidate);
     assert_eq!(resumed.tunnel_endpoint_id, 1);
     assert_eq!(resumed.egress_ifindex, 362);
@@ -5292,15 +5273,13 @@ fn ecmp_mixed_with_noroute_underlay_tunnel_uses_only_live_direct_hop() {
     // tunnel egress (362).
     let mut egresses = std::collections::BTreeSet::new();
     for h in 0u64..64 {
-        let resolved = lookup_forwarding_resolution_v4(
-            &state,
-            None,
-            Ipv4Addr::new(203, 0, 113, 5),
-            "inet.0",
-            0,
-            true,
-            Some(h),
-        );
+        let resolved = lookup_forwarding_resolution_v4(&state,
+        None,
+        Ipv4Addr::new(203, 0, 113, 5),
+        "inet.0",
+        0,
+        true,
+        Some(h),).resolution;
         assert_eq!(
             resolved.disposition,
             ForwardingDisposition::ForwardCandidate,
@@ -5395,15 +5374,13 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
     let mut egresses = std::collections::BTreeSet::new();
     let mut saw_tunnel_id = false;
     for h in 0u64..64 {
-        let resolved = lookup_forwarding_resolution_v6(
-            &state,
-            None,
-            "2001:db8:dead::5".parse::<Ipv6Addr>().unwrap(),
-            "sfmix.inet6.0",
-            0,
-            true,
-            Some(h),
-        );
+        let resolved = lookup_forwarding_resolution_v6(&state,
+        None,
+        "2001:db8:dead::5".parse::<Ipv6Addr>().unwrap(),
+        "sfmix.inet6.0",
+        0,
+        true,
+        Some(h),).resolution;
         assert_eq!(
             resolved.disposition,
             ForwardingDisposition::ForwardCandidate,
@@ -5451,30 +5428,26 @@ fn ecmp_mixed_direct_and_tunnel_selects_both_paths_v6() {
 
     let mut recovered_egresses = std::collections::BTreeSet::new();
     for hash in 0u64..64 {
-        let dead = lookup_forwarding_resolution_v6(
-            &down,
-            None,
-            "2001:db8:dead::5".parse::<Ipv6Addr>().unwrap(),
-            "sfmix.inet6.0",
-            0,
-            true,
-            Some(hash),
-        );
+        let dead = lookup_forwarding_resolution_v6(&down,
+        None,
+        "2001:db8:dead::5".parse::<Ipv6Addr>().unwrap(),
+        "sfmix.inet6.0",
+        0,
+        true,
+        Some(hash),).resolution;
         assert_eq!(dead.disposition, ForwardingDisposition::ForwardCandidate);
         assert_eq!(
             (dead.egress_ifindex, dead.tunnel_endpoint_id),
             (11, 0),
             "v6 flow hash {hash} must converge to the direct member while GRE is down"
         );
-        let live = lookup_forwarding_resolution_v6(
-            &recovered,
-            None,
-            "2001:db8:dead::5".parse::<Ipv6Addr>().unwrap(),
-            "sfmix.inet6.0",
-            0,
-            true,
-            Some(hash),
-        );
+        let live = lookup_forwarding_resolution_v6(&recovered,
+        None,
+        "2001:db8:dead::5".parse::<Ipv6Addr>().unwrap(),
+        "sfmix.inet6.0",
+        0,
+        true,
+        Some(hash),).resolution;
         recovered_egresses.insert(live.egress_ifindex);
     }
     assert_eq!(
@@ -5599,7 +5572,7 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
             install_table_domain: 0,
             install_table_check: 0,
         };
-        lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, flow, decision)
+        lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, flow, decision).resolution
     };
 
     // (a) Per-FLOW spread: distinct 5-tuples (varying source port) to the
@@ -5640,15 +5613,13 @@ fn ecmp_static_route_spreads_per_flow_not_per_destination() {
     for src_port in 1024u16..1124 {
         // The 5-tuple differs, but the per-dst path ignores it.
         let _ = src_port;
-        let resolved = lookup_forwarding_resolution_v4(
-            &state,
-            Some(&dynamic_neighbors),
-            Ipv4Addr::new(203, 0, 113, 5),
-            "inet.0",
-            0,
-            true,
-            None,
-        );
+        let resolved = lookup_forwarding_resolution_v4(&state,
+        Some(&dynamic_neighbors),
+        Ipv4Addr::new(203, 0, 113, 5),
+        "inet.0",
+        0,
+        true,
+        None,).resolution;
         dst_egresses.insert(resolved.egress_ifindex);
     }
     assert_eq!(
@@ -5959,7 +5930,7 @@ fn resolve_ecmp_session_flow_11686(
         install_table_domain: 0,
         install_table_check: 0,
     };
-    lookup_forwarding_resolution_for_session(state, dynamic_neighbors, flow, decision)
+    lookup_forwarding_resolution_for_session(state, dynamic_neighbors, flow, decision).resolution
 }
 
 /// #11686: candidate identity must be the stable logical interface name +
@@ -6202,15 +6173,13 @@ fn same_prefix_routes_tie_break_by_preference_not_insertion_order() {
     };
     let state = build_forwarding_state(&snapshot);
 
-    let resolved = lookup_forwarding_resolution_v4(
-        &state,
-        None,
-        Ipv4Addr::new(203, 0, 113, 5),
-        "inet.0",
-        0,
-        true,
-        None,
-    );
+    let resolved = lookup_forwarding_resolution_v4(&state,
+    None,
+    Ipv4Addr::new(203, 0, 113, 5),
+    "inet.0",
+    0,
+    true,
+    None,).resolution;
     assert_eq!(
         resolved.disposition,
         ForwardingDisposition::ForwardCandidate
@@ -6302,15 +6271,13 @@ fn same_preference_qnh_metric_rows_fail_over_without_cross_tier_ecmp_11792() {
     let primary_live = build_forwarding_state(&snapshot);
     let mut primary_egresses = std::collections::BTreeSet::new();
     for hash in 0u64..64 {
-        let resolved = lookup_forwarding_resolution_v4(
-            &primary_live,
-            None,
-            Ipv4Addr::new(203, 0, 113, 5),
-            "inet.0",
-            0,
-            true,
-            Some(hash),
-        );
+        let resolved = lookup_forwarding_resolution_v4(&primary_live,
+        None,
+        Ipv4Addr::new(203, 0, 113, 5),
+        "inet.0",
+        0,
+        true,
+        Some(hash),).resolution;
         assert_eq!(resolved.disposition, ForwardingDisposition::ForwardCandidate);
         primary_egresses.insert(resolved.egress_ifindex);
         assert!(
@@ -6332,15 +6299,13 @@ fn same_preference_qnh_metric_rows_fail_over_without_cross_tier_ecmp_11792() {
     let backup_only = build_forwarding_state(&backup_only_snapshot);
     let mut backup_egresses = std::collections::BTreeSet::new();
     for hash in 0u64..64 {
-        let resolved = lookup_forwarding_resolution_v4(
-            &backup_only,
-            None,
-            Ipv4Addr::new(203, 0, 113, 5),
-            "inet.0",
-            0,
-            true,
-            Some(hash),
-        );
+        let resolved = lookup_forwarding_resolution_v4(&backup_only,
+        None,
+        Ipv4Addr::new(203, 0, 113, 5),
+        "inet.0",
+        0,
+        true,
+        Some(hash),).resolution;
         assert_eq!(resolved.disposition, ForwardingDisposition::ForwardCandidate);
         backup_egresses.insert(resolved.egress_ifindex);
         assert!(
@@ -6796,15 +6761,13 @@ fn assert_secure_tunnel_preconditions_6713(state: &ForwardingState) -> Forwardin
         TEST_VPN_ZONE_ID_6713,
         "precondition: the tunnel IS correctly zoned in the authoritative map"
     );
-    let resolution = lookup_forwarding_resolution_v4(
-        state,
-        None,
-        "192.168.99.7".parse().expect("dst"),
-        "inet.0",
-        0,
-        true,
-        None,
-    );
+    let resolution = lookup_forwarding_resolution_v4(state,
+    None,
+    "192.168.99.7".parse().expect("dst"),
+    "inet.0",
+    0,
+    true,
+    None,).resolution;
     assert_eq!(
         resolution.egress_ifindex, TUNNEL_IFINDEX_6713,
         "precondition: the real FIB must hand the tunnel ifindex to the policy site \
@@ -7055,15 +7018,13 @@ fn adjudicate_lan_transit_6722(
     dst: &str,
     expect_ifindex: i32,
 ) -> (u16, crate::policy::PolicyEvaluationResult) {
-    let resolution = lookup_forwarding_resolution_v4(
-        state,
-        None,
-        dst.parse().expect("dst"),
-        "inet.0",
-        0,
-        true,
-        None,
-    );
+    let resolution = lookup_forwarding_resolution_v4(state,
+    None,
+    dst.parse().expect("dst"),
+    "inet.0",
+    0,
+    true,
+    None,).resolution;
     assert_eq!(
         resolution.egress_ifindex, expect_ifindex,
         "precondition: the real FIB must hand {dst} to ifindex {expect_ifindex} \
@@ -7644,15 +7605,13 @@ fn tunnel_noroute_with_unzoned_logical_egress_denies_11067() {
 
     // The inner FIB selects tunnel endpoint 1, but its outer destination has
     // no route. Tunnel resolution retains the logical ifindex in that shape.
-    let resolution = lookup_forwarding_resolution_v4(
-        &state,
-        None,
-        Ipv4Addr::new(8, 8, 8, 8),
-        "sfmix.inet.0",
-        0,
-        true,
-        None,
-    );
+    let resolution = lookup_forwarding_resolution_v4(&state,
+    None,
+    Ipv4Addr::new(8, 8, 8, 8),
+    "sfmix.inet.0",
+    0,
+    true,
+    None,).resolution;
     assert_eq!(resolution.disposition, ForwardingDisposition::NoRoute);
     assert_eq!(resolution.egress_ifindex, 362);
     assert_eq!(resolution.tunnel_endpoint_id, 1);
@@ -7852,15 +7811,13 @@ fn adjudicate_wan_to_lan_transit_6722(
     dst: &str,
     expect_ifindex: i32,
 ) -> (u16, u16, crate::policy::PolicyEvaluationResult) {
-    let resolution = lookup_forwarding_resolution_v4(
-        state,
-        None,
-        dst.parse().expect("dst"),
-        "inet.0",
-        0,
-        true,
-        None,
-    );
+    let resolution = lookup_forwarding_resolution_v4(state,
+    None,
+    dst.parse().expect("dst"),
+    "inet.0",
+    0,
+    true,
+    None,).resolution;
     assert_eq!(
         resolution.egress_ifindex, expect_ifindex,
         "precondition: the real FIB must hand {dst} to ifindex {expect_ifindex} \
@@ -8818,17 +8775,15 @@ fn ecmp_member_removal_preserves_survivors_v4_v6_11403() {
     let degraded = build_forwarding_state(&degraded_snapshot);
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let resolve = |state, flow: &SessionFlow| {
-        lookup_forwarding_resolution_for_session(
-            state,
-            &dynamic_neighbors,
-            flow,
-            SessionDecision {
-                resolution: no_route_resolution(None),
-                nat: NatDecision::default(),
-                install_table_domain: 0,
-                install_table_check: 0,
-            },
-        )
+        lookup_forwarding_resolution_for_session(state,
+        &dynamic_neighbors,
+        flow,
+        SessionDecision {
+            resolution: no_route_resolution(None),
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },).resolution
     };
     let assert_stability = |family: &str,
                             initial,
@@ -9077,21 +9032,17 @@ fn connected_prefix_v6_subnet_router_anycast_is_local_delivery_10692() {
     let anycast = "2001:559:8585:80::".parse::<Ipv6Addr>().unwrap();
 
     assert!(!state.local_v6.contains(&anycast));
-    let resolved = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        IpAddr::V6(anycast),
-        None,
-    );
+    let resolved = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    IpAddr::V6(anycast),
+    None,).resolution;
     assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(resolved.local_ifindex, 12);
 
-    let onlink = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        IpAddr::V6("2001:559:8585:80::9".parse().unwrap()),
-        None,
-    );
+    let onlink = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    IpAddr::V6("2001:559:8585:80::9".parse().unwrap()),
+    None,).resolution;
     assert_eq!(onlink.disposition, ForwardingDisposition::MissingNeighbor);
     assert_eq!(onlink.egress_ifindex, 12);
 }
@@ -9134,20 +9085,16 @@ fn connected_prefix_v6_subnet_router_anycast_is_table_scoped_10692() {
     let state = build_forwarding_state(&snapshot);
     let neighbors = Arc::new(ShardedNeighborMap::new());
 
-    let owner = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        IpAddr::V6("2001:db8:1::".parse().unwrap()),
-        Some("tenant-a.inet6.0"),
-    );
+    let owner = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    IpAddr::V6("2001:db8:1::".parse().unwrap()),
+    Some("tenant-a.inet6.0"),).resolution;
     assert_eq!(owner.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(owner.local_ifindex, 301);
-    let cross = lookup_forwarding_resolution_in_table_with_dynamic(
-        &state,
-        &neighbors,
-        IpAddr::V6("2001:db8:1::".parse().unwrap()),
-        Some("tenant-b.inet6.0"),
-    );
+    let cross = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+    &neighbors,
+    IpAddr::V6("2001:db8:1::".parse().unwrap()),
+    Some("tenant-b.inet6.0"),).resolution;
     assert_eq!(cross.disposition, ForwardingDisposition::NoRoute);
 }
 
@@ -9195,12 +9142,10 @@ fn subnet_router_anycast_v6_prefix_len_guards_10692() {
     assert!(!state.local_v6.contains(&host128));
 
     for (destination, ifindex) in [("2001:db8:9::7", 13), ("2001:db8:b::6", 14)] {
-        let resolved = lookup_forwarding_resolution_in_table_with_dynamic(
-            &state,
-            &neighbors,
-            IpAddr::V6(destination.parse().unwrap()),
-            None,
-        );
+        let resolved = lookup_forwarding_resolution_in_table_with_dynamic(&state,
+        &neighbors,
+        IpAddr::V6(destination.parse().unwrap()),
+        None,).resolution;
         assert_eq!(resolved.disposition, ForwardingDisposition::MissingNeighbor);
         assert_eq!(resolved.egress_ifindex, ifindex);
     }

@@ -87,15 +87,13 @@ fn daemon_unique_bare_link_local_ignores_kernel_link_scope_11650() {
         route.next_hops[0].ifindex, 101,
         "one Universe candidate plus a kernel LINK row must resolve to the configured egress"
     );
-    let resolution = lookup_forwarding_resolution_v6(
-        &state,
-        None,
-        "2001:db8:beef::5".parse().unwrap(),
-        "inet6.0",
-        0,
-        true,
-        None,
-    );
+    let resolution = lookup_forwarding_resolution_v6(&state,
+    None,
+    "2001:db8:beef::5".parse().unwrap(),
+    "inet6.0",
+    0,
+    true,
+    None,).resolution;
     assert_eq!(resolution.disposition, ForwardingDisposition::ForwardCandidate);
     assert_eq!(resolution.egress_ifindex, 101);
 }
@@ -188,15 +186,13 @@ fn genuinely_ambiguous_universe_link_local_stays_no_route_11650() {
         .find(|route| route.prefix.contains("2001:db8:beef::5".parse().unwrap()))
         .expect("ambiguous route");
     assert_eq!(ambiguous.next_hops[0].ifindex, 0);
-    let unresolved = lookup_forwarding_resolution_v6(
-        &state,
-        None,
-        "2001:db8:beef::5".parse().unwrap(),
-        "inet6.0",
-        0,
-        true,
-        None,
-    );
+    let unresolved = lookup_forwarding_resolution_v6(&state,
+    None,
+    "2001:db8:beef::5".parse().unwrap(),
+    "inet6.0",
+    0,
+    true,
+    None,).resolution;
     assert_eq!(unresolved.disposition, ForwardingDisposition::NoRoute);
     assert_eq!(unresolved.egress_ifindex, 0);
 
@@ -321,15 +317,13 @@ fn mixed_link_local_ecmp_keeps_resolvable_member_11650() {
         .expect("bare link-local member");
     assert_eq!(recursive.ifindex, 0, "genuinely ambiguous member remains unresolved");
 
-    let resolution = lookup_forwarding_resolution_v6(
-        &state,
-        None,
-        "2001:db8:beef::5".parse().unwrap(),
-        "inet6.0",
-        0,
-        true,
-        None,
-    );
+    let resolution = lookup_forwarding_resolution_v6(&state,
+    None,
+    "2001:db8:beef::5".parse().unwrap(),
+    "inet6.0",
+    0,
+    true,
+    None,).resolution;
     assert_eq!(resolution.disposition, ForwardingDisposition::ForwardCandidate);
     assert_eq!(resolution.egress_ifindex, 101);
     assert_eq!(resolution.next_hop, Some(IpAddr::V6(direct_gateway)));

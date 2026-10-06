@@ -1113,8 +1113,119 @@ fn build_fallible_forwarding_state(
     // Last derivation: every table-string writer (routes, connected, the
     // late-stage NAT append) has run, so the scan sees the final key sets.
     install_tables::build_install_table_registry(&mut state);
+    let (route_table_identities, route_table_identity_map_complete) =
+        build_route_table_identity_map(snapshot, &state);
+    state.route_table_identities = route_table_identities;
+    state.route_table_identity_map_complete = route_table_identity_map_complete;
 
     Ok(state)
+}
+
+fn build_route_table_identity_map(
+    snapshot: &ConfigSnapshot,
+    state: &ForwardingState,
+) -> (FastMap<String, RouteIdentity>, bool) {
+    let mut identities = FastMap::default();
+    let mut owners: FastMap<(u32, u32), String> = FastMap::default();
+    let mut complete = true;
+
+    for row in &snapshot.route_table_identities {
+        let name = row.name.as_str();
+        let identity = RouteIdentity {
+            domain: row.domain,
+            table: row.table,
+        };
+        let instance = if name == "inet.0" || name == "inet6.0" {
+            if identity.domain != 0 || identity.table != 254 {
+                complete = false;
+                continue;
+            }
+            ""
+        } else if let Some(instance) = name.strip_suffix(".inet.0").filter(|s| !s.is_empty()) {
+            instance
+        } else if let Some(instance) = name.strip_suffix(".inet6.0").filter(|s| !s.is_empty()) {
+            instance
+        } else {
+            complete = false;
+            continue;
+        };
+        if !instance.is_empty()
+            && (identity.domain == 0
+                || identity.table == 0
+                || identity.table == 254
+                || identity.domain != identity.table)
+        {
+            complete = false;
+            continue;
+        }
+        if let Some(owner) = owners.get(&(identity.domain, identity.table)) {
+            if owner != instance {
+                complete = false;
+            }
+        } else {
+            owners.insert((identity.domain, identity.table), instance.to_owned());
+        }
+        if identities.contains_key(name) {
+            complete = false;
+            continue;
+        }
+        identities.insert(name.to_owned(), identity);
+    }
+
+    for (name, identity) in &identities {
+        let counterpart = if name == "inet.0" {
+            "inet6.0".to_owned()
+        } else if name == "inet6.0" {
+            "inet.0".to_owned()
+        } else if let Some(instance) = name.strip_suffix(".inet.0") {
+            format!("{instance}.inet6.0")
+        } else if let Some(instance) = name.strip_suffix(".inet6.0") {
+            format!("{instance}.inet.0")
+        } else {
+            complete = false;
+            continue;
+        };
+        if identities.get(&counterpart) != Some(identity) {
+            complete = false;
+        }
+    }
+
+    let mut selectable = std::collections::HashSet::new();
+    selectable.extend(state.routes_v4.keys().cloned());
+    selectable.extend(state.routes_v6.keys().cloned());
+    selectable.extend(state.leak_rules_v4.keys().cloned());
+    selectable.extend(state.leak_rules_v6.keys().cloned());
+    for rules in state.leak_rules_v4.values() {
+        selectable.extend(rules.iter().map(|rule| rule.next_table.clone()));
+    }
+    for rules in state.leak_rules_v6.values() {
+        selectable.extend(rules.iter().map(|rule| rule.next_table.clone()));
+    }
+    selectable.extend(state.connected_v4.iter().map(|route| route.table.clone()));
+    selectable.extend(state.connected_v6.iter().map(|route| route.table.clone()));
+    for tables in state.local_tables_v4.values() {
+        selectable.extend(tables.iter().cloned());
+    }
+    for tables in state.local_tables_v6.values() {
+        selectable.extend(tables.iter().cloned());
+    }
+    selectable.extend(
+        state
+            .tunnel_endpoints
+            .values()
+            .map(|endpoint| endpoint.transport_table.clone()),
+    );
+    if !identities
+        .get("inet.0")
+        .is_some_and(|id| id.domain == 0 && id.table == 254)
+        || !identities
+            .get("inet6.0")
+            .is_some_and(|id| id.domain == 0 && id.table == 254)
+        || selectable.iter().any(|table| !identities.contains_key(table))
+    {
+        complete = false;
+    }
+    (identities, complete)
 }
 
 /// #1636 option D: PENDING_NEIGH_TIMEOUT value (ns) when the kernel

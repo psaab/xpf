@@ -175,6 +175,10 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 	synCookieKey, synCookieKeyRing := buildSYNCookieKeys(cfg, synCookieNow())
 	bindlessSelectorRows := buildBindlessSelectorRows(cfg)
 	_, forwardingTables := forwardingInstanceRouteTables(cfg)
+	routeTableIdentities, err := routeTableIdentitySnapshots(cfg)
+	if err != nil {
+		return nil, err
+	}
 	snap := &ConfigSnapshot{
 		Version:                      ProtocolVersion,
 		Generation:                   generation,
@@ -198,6 +202,7 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 		TunnelEndpoints:  buildTunnelEndpointSnapshots(cfg, interfaces),
 		Neighbors:        buildNeighborSnapshots(cfg),
 		ForwardingTables: forwardingTables,
+		RouteTableIdentities: routeTableIdentities,
 		Routes:           routes,
 		// #9054: the helper needs to know the FIB it just received is
 		// DELIBERATELY incomplete. See ConfigSnapshot.LearnedRouteImportCapped.

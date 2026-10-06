@@ -73,12 +73,10 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
                 forward_key: demoted_key.clone(),
             };
             let resolution_target = resolution_target_for_session(&flow, decision);
-            let looked_up_resolution = lookup_forwarding_resolution_for_session_without_cache(
-                forwarding,
-                dynamic_neighbors,
-                &flow,
-                decision,
-            );
+            let looked_up_resolution = lookup_forwarding_resolution_for_session_without_cache(forwarding,
+            dynamic_neighbors,
+            &flow,
+            decision,).resolution;
             let looked_up_resolution = super::super::prefer_local_forward_candidate_for_fabric_ingress(
                 forwarding,
                 ha_state,

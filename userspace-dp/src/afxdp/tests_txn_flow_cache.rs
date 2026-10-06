@@ -2325,10 +2325,8 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
         routing_domain: 0,
     };
     let forward_decision = SessionDecision {
-        resolution: lookup_forwarding_resolution(
-            &forwarding,
-            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
-        ),
+        resolution: lookup_forwarding_resolution(&forwarding,
+        IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),).resolution,
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
             ..NatDecision::default()

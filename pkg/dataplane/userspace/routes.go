@@ -743,6 +743,50 @@ func forwardingInstanceRouteTables(cfg *config.Config) (map[string]string, []str
 	return byTable, tables
 }
 
+// routeTableIdentitySnapshots publishes the explicit identity source used to
+// stamp terminal FIB selections. Defaults are fixed by the kernel main table;
+// named tables use the compiled RoutingInstanceConfig.TableID for both domain
+// and kernel table, never a packet or interface-derived value.
+func routeTableIdentitySnapshots(cfg *config.Config) ([]RouteTableIdentitySnapshot, error) {
+	rows := []RouteTableIdentitySnapshot{
+		{Name: "inet.0", Domain: 0, Table: 254},
+		{Name: "inet6.0", Domain: 0, Table: 254},
+	}
+	names := map[string]struct{}{"inet.0": {}, "inet6.0": {}}
+	owners := make(map[uint32]string)
+	if cfg == nil {
+		return rows, nil
+	}
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil {
+			continue
+		}
+		if ri.Name == "" || ri.TableID <= 0 || ri.TableID == 254 ||
+			uint64(ri.TableID) > uint64(^uint32(0)) {
+			return nil, fmt.Errorf("invalid route-table identity for routing instance %q: table id %d", ri.Name, ri.TableID)
+		}
+		tableID := uint32(ri.TableID)
+		if owner, ok := owners[tableID]; ok && owner != ri.Name {
+			return nil, fmt.Errorf("routing instances %q and %q share route-table identity %d", owner, ri.Name, tableID)
+		}
+		owners[tableID] = ri.Name
+		for _, family := range []string{"inet.0", "inet6.0"} {
+			name := ri.Name + "." + family
+			if _, exists := names[name]; exists {
+				return nil, fmt.Errorf("duplicate canonical route table %q", name)
+			}
+			names[name] = struct{}{}
+			rows = append(rows, RouteTableIdentitySnapshot{
+				Name:   name,
+				Domain: tableID,
+				Table:  tableID,
+			})
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+	return rows, nil
+}
+
 // forwardingGatewayInterface returns the deterministic interface to use for a
 // forwarding-instance bare gateway. Same-instance links win, then links in
 // the default instance. A gateway that only matches a different VRF remains

@@ -3329,12 +3329,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         worker_ctx.forwarding,
                                         worker_ctx.ha_state,
                                         now_secs,
-                                        lookup_forwarding_resolution_in_table_with_dynamic(
-                                            worker_ctx.forwarding,
-                                            worker_ctx.dynamic_neighbors,
-                                            effective_resolution_target,
-                                            route_table_override.as_deref(),
-                                        ),
+                                        lookup_forwarding_resolution_in_table_with_dynamic(worker_ctx.forwarding,
+                                        worker_ctx.dynamic_neighbors,
+                                        effective_resolution_target,
+                                        route_table_override.as_deref(),).resolution,
                                     ),
                                     true,
                                 )
@@ -6390,15 +6388,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 worker_ctx.forwarding,
                                 worker_ctx.ha_state,
                                 now_secs,
-                                resolve_forwarding(
-                                    // SAFETY: per the `area` contract in this
-                                    // function's header comment.
-                                    unsafe { &*area },
-                                    desc,
-                                    meta,
-                                    worker_ctx.forwarding,
-                                    worker_ctx.dynamic_neighbors,
-                                ),
+                                resolve_forwarding(// SAFETY: per the `area` contract in this
+                                // function's header comment.
+                                unsafe { &*area },
+                                desc,
+                                meta,
+                                worker_ctx.forwarding,
+                                worker_ctx.dynamic_neighbors,).resolution,
                             ),
                             NatDecision::default(),
                         ),

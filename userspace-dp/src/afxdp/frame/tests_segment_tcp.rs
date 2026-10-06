@@ -1039,7 +1039,7 @@ fn segment_forwarded_tcp_frames_keeps_ipv4_snat_inside_native_gre() {
         ..UserspaceDpMeta::default()
     };
     let state = build_forwarding_state(&native_gre_snapshot(true));
-    let decision = SessionDecision { resolution: lookup_forwarding_resolution_v4(&state, None, dst_ip, "sfmix.inet.0", 0, true, None), nat: NatDecision {
+    let decision = SessionDecision { resolution: lookup_forwarding_resolution_v4(&state, None, dst_ip, "sfmix.inet.0", 0, true, None).resolution, nat: NatDecision {
         rewrite_src: Some(IpAddr::V4(snat_ip)),
         ..NatDecision::default()
     }, install_table_domain: 0, install_table_check: 0 };

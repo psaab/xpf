@@ -500,12 +500,10 @@ mod flowless_local_delivery_tests {
         );
         // The override-table lookup alone does NOT deliver this host-bound
         // packet — the bug the ordering fixes.
-        let override_only = lookup_forwarding_resolution_in_table_with_dynamic(
-            &fw,
-            &dynamic_neighbors,
-            dst,
-            Some("vrf-x"),
-        );
+        let override_only = lookup_forwarding_resolution_in_table_with_dynamic(&fw,
+        &dynamic_neighbors,
+        dst,
+        Some("vrf-x"),).resolution;
         assert_ne!(
             override_only.disposition,
             ForwardingDisposition::LocalDelivery,

@@ -314,6 +314,16 @@ pub(crate) struct RouteSnapshot {
     pub mtu: i32,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct RouteTableIdentitySnapshot {
+    #[serde(rename = "name", default)]
+    pub name: String,
+    #[serde(rename = "domain", default)]
+    pub domain: u32,
+    #[serde(rename = "table", default)]
+    pub table: u32,
+}
+
 fn is_zero_i32(value: &i32) -> bool {
     *value == 0
 }
@@ -705,6 +715,12 @@ pub(crate) struct ConfigSnapshot {
     pub neighbors: Vec<NeighborSnapshot>,
     #[serde(default)]
     pub routes: Vec<RouteSnapshot>,
+    #[serde(
+        rename = "route_table_identities",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub route_table_identities: Vec<RouteTableIdentitySnapshot>,
     /// Canonical route tables backed by `instance-type forwarding`. In these
     /// tables, qualified IPv4/IPv6 gateways may use an explicit default-instance
     /// interface in routing domain zero; ordinary foreign-VRF interfaces remain

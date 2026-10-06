@@ -239,7 +239,7 @@ fn leak_removed_mid_session_reresolves_and_denies_9951() {
 
     // Miss-time resolution rides the leak into blue.
     let miss =
-        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision());
+        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision()).resolution;
     assert_eq!(
         miss.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -278,12 +278,10 @@ fn leak_removed_mid_session_reresolves_and_denies_9951() {
     let without_leak = rebuild_with_previous(&removed, &with_leak);
 
     // Fresh flows are denied without the leak ...
-    let fresh = lookup_forwarding_resolution_for_session(
-        &without_leak,
-        &neighbors,
-        &flow,
-        noroute_decision(),
-    );
+    let fresh = lookup_forwarding_resolution_for_session(&without_leak,
+    &neighbors,
+    &flow,
+    noroute_decision(),).resolution;
     assert_eq!(
         fresh.disposition,
         ForwardingDisposition::NoRoute,
@@ -312,7 +310,7 @@ fn next_hop_change_in_target_table_still_pins_9951() {
     let mut sessions = SessionTable::new();
 
     let miss =
-        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision());
+        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision()).resolution;
     assert_eq!(
         miss.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -335,12 +333,10 @@ fn next_hop_change_in_target_table_still_pins_9951() {
     );
     changed.routes[1].next_hops = vec!["172.16.50.2@ge-0/0/0.50".to_string()];
     let changed_state = rebuild_with_previous(&changed, &with_leak);
-    let fresh = lookup_forwarding_resolution_for_session(
-        &changed_state,
-        &neighbors,
-        &flow,
-        noroute_decision(),
-    );
+    let fresh = lookup_forwarding_resolution_for_session(&changed_state,
+    &neighbors,
+    &flow,
+    noroute_decision(),).resolution;
     assert_eq!(
         fresh.disposition,
         ForwardingDisposition::MissingNeighbor,
@@ -386,7 +382,7 @@ fn unrelated_leak_removal_leaves_session_pinned_9951() {
     let mut sessions = SessionTable::new();
 
     let miss =
-        lookup_forwarding_resolution_for_session(&with_both, &neighbors, &flow, noroute_decision());
+        lookup_forwarding_resolution_for_session(&with_both, &neighbors, &flow, noroute_decision()).resolution;
     assert_eq!(
         miss.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -408,12 +404,10 @@ fn unrelated_leak_removal_leaves_session_pinned_9951() {
         .routes
         .retain(|r| !(r.destination == "9.9.9.0/24" && !r.next_table.is_empty()));
     let without_unrelated = rebuild_with_previous(&snapshot, &with_both);
-    let fresh = lookup_forwarding_resolution_for_session(
-        &without_unrelated,
-        &neighbors,
-        &flow,
-        noroute_decision(),
-    );
+    let fresh = lookup_forwarding_resolution_for_session(&without_unrelated,
+    &neighbors,
+    &flow,
+    noroute_decision(),).resolution;
     assert_eq!(
         fresh.disposition,
         ForwardingDisposition::MissingNeighbor,
@@ -442,7 +436,7 @@ fn promoted_shared_hit_rechecks_removed_leak_9951() {
     let neighbors = Arc::new(ShardedNeighborMap::new());
     let flow = leak_flow();
     let miss =
-        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision());
+        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision()).resolution;
     assert_eq!(miss.disposition, ForwardingDisposition::ForwardCandidate);
     let decision = SessionDecision {
         resolution: miss,
@@ -542,7 +536,7 @@ fn removed_and_readded_leak_does_not_resurrect_old_session_9951() {
     let flow = leak_flow();
     let mut sessions = SessionTable::new();
     let miss =
-        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision());
+        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision()).resolution;
     assert_eq!(miss.disposition, ForwardingDisposition::ForwardCandidate);
     let decision = SessionDecision {
         resolution: miss,
@@ -557,7 +551,7 @@ fn removed_and_readded_leak_does_not_resurrect_old_session_9951() {
     let without_leak = rebuild_with_previous(&removed, &with_leak);
     let readded = rebuild_with_previous(&leak_snapshot(), &without_leak);
     let fresh =
-        lookup_forwarding_resolution_for_session(&readded, &neighbors, &flow, noroute_decision());
+        lookup_forwarding_resolution_for_session(&readded, &neighbors, &flow, noroute_decision()).resolution;
     assert_eq!(
         fresh.disposition,
         ForwardingDisposition::ForwardCandidate,
@@ -579,7 +573,7 @@ fn peer_shared_materialize_promote_rechecks_removed_leak_9951() {
     let neighbors = Arc::new(ShardedNeighborMap::new());
     let flow = leak_flow();
     let miss =
-        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision());
+        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision()).resolution;
     assert_eq!(miss.disposition, ForwardingDisposition::ForwardCandidate);
     let decision = SessionDecision {
         resolution: miss,
@@ -698,7 +692,7 @@ fn demoted_shared_leak_rematerialization_rechecks_removed_leak_9951() {
     let neighbors = Arc::new(ShardedNeighborMap::new());
     let flow = leak_flow();
     let miss =
-        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision());
+        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision()).resolution;
     assert_eq!(miss.disposition, ForwardingDisposition::ForwardCandidate);
     let decision = SessionDecision {
         resolution: miss,

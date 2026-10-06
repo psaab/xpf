@@ -814,15 +814,15 @@ fn gre_transport_egress_matches(
         return false;
     };
     if !matches!(
-        outer.disposition,
+        outer.resolution.disposition,
         ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
     ) {
         return false;
     }
-    if ingress_logical_ifindex == outer.egress_ifindex {
+    if ingress_logical_ifindex == outer.resolution.egress_ifindex {
         return true;
     }
-    let egress_zone_id = forwarding.egress_zone_id(outer.egress_ifindex);
+    let egress_zone_id = forwarding.egress_zone_id(outer.resolution.egress_ifindex);
     egress_zone_id != 0 && egress_zone_id == ingress_zone_id
 }
 

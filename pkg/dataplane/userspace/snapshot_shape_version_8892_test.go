@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "b579834b5dcb821f4817efd55241ce31c8c7f4cc378cea4497d5abfced3b8084"
+	snapshotShapeGolden8892 = "eee7d36b87e6c4bfa79005c147b96cc72baf381a3e2f89cc0130ab0f088b82d7"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -439,12 +439,14 @@ const (
 	// as opaque serde_json::Value and has no consumer for these retained values,
 	// so they move this Go digest without changing helper-consumed behavior.
 	// The clean base already had window drift: its digest was e138f7… rather
-	// than the old 5f4e… pin. Fold that pre-existing drift into this v45 golden.
+	// than the old 5f4e… pin. Fold that pre-existing drift into this v46 golden.
 	// v44 -> v45 BUMPED (#11812): single-rate PolicerSnapshot adds optional
 	// marking-action and logical-interface-policer JSON fields. The keys are
 	// omitted by default and the current Rust runtime ignores them; warnings
 	// identify the retention-only behavior, while this version pins the shape.
-	snapshotShapeVersion8892 = 45
+	// v45 -> v46 BUMPED (#9506): ConfigSnapshot.RouteTableIdentities transmits
+	// the explicit route table to (domain, table) authority used by D14.
+	snapshotShapeVersion8892 = 46
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

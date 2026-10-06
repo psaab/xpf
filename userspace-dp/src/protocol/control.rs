@@ -242,8 +242,9 @@ use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, Userspac
 // v44 -> v45 (#11812): PolicerSnapshot adds optional single-rate marking and
 // logical-interface-policer fields; the Go and Rust snapshot versions move
 // with the shape even though the current Rust runtime does not consume them.
-// v45 -> v46 (#9506 P2): complete main-table route inventory, explicit
-// selector intersections, and dedicated P-MECH identity/view guards.
+// v45 -> v46 (#9506 P2): complete main-table route inventory, the explicit
+// terminal FIB-table identity map for E19/E22, selector intersections, and the
+// dedicated P-MECH identity/view guards.
 pub(crate) const CONFIG_SNAPSHOT_PROTOCOL_VERSION: i32 = 46;
 
 /// #9520: the machine-readable prefix of the refusal `apply` sends when a

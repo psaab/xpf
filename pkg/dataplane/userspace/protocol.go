@@ -382,10 +382,10 @@ const (
 	// v43 -> v44 (#11423; v43 is used by #11463): TunnelEndpointSnapshot.LinkUp
 	// carries keepalive-driven tunnel netdev liveness; an older helper keeps
 	// down GRE ECMP members live.
-	// v45 -> v46 (#9506 P2): the snapshot carries complete table-254 route
-	// inventory, explicit selector intersections, and a dedicated zone/policy
-	// identity for the P-MECH worker/view commit guard. Older helpers cannot
-	// validate the required inventory and must refuse the snapshot.
+	// v45 -> v46 (#9506 P2): the snapshot carries complete main-table route
+	// inventory, terminal route-table identities for E19/E22, explicit selector
+	// intersections, and a dedicated zone/policy identity for the P-MECH
+	// worker/view commit guard. Older helpers cannot validate this authority.
 	ProtocolVersion = 46
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
@@ -676,6 +676,13 @@ type FibRouteWire struct {
 	Preference   int32            `json:"preference"`
 	MTU          uint32           `json:"mtu"`
 }
+// RouteTableIdentitySnapshot binds one canonical routing-table name to the
+// routing domain and kernel table number selected by configuration.
+type RouteTableIdentitySnapshot struct {
+	Name   string `json:"name"`
+	Domain uint32 `json:"domain"`
+	Table  uint32 `json:"table"`
+}
 
 // Rename operation. It is additive wire state; absent ancestry means the
 // helper retains the historical teardown behavior.
@@ -833,6 +840,7 @@ type ConfigSnapshot struct {
 	TunnelEndpoints  []TunnelEndpointSnapshot `json:"tunnel_endpoints,omitempty"`
 	Neighbors        []NeighborSnapshot       `json:"neighbors,omitempty"`
 	Routes           []RouteSnapshot          `json:"routes,omitempty"`
+	RouteTableIdentities []RouteTableIdentitySnapshot `json:"route_table_identities,omitempty"`
 	// ForwardingTables identifies the family-qualified tables backed by
 	// `instance-type forwarding`. The Rust FIB uses this explicit marker to
 	// allow qualified IPv4/IPv6 gateways in those tables to target a
