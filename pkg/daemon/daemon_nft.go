@@ -2623,14 +2623,18 @@ func emitDHCPBackstopHostInboundDeny(rules *[]string, backstopV4, backstopV6 []s
 	}
 	if len(vrfBackstop.v6) > 0 {
 		*rules = append(*rules, "    meta sdifname "+nftIifnameSet(vrfBackstop.v6)+" meta nfproto ipv6 fib daddr type { local, anycast } drop")
+		// VRF-strict link-local route lookup can be unreachable even when the
+		// destination is assigned to this slave; do not let that failed FIB
+		// classification open the DHCP backstop.
+		*rules = append(*rules, "    meta sdifname "+nftIifnameSet(vrfBackstop.v6)+" meta nfproto ipv6 ip6 daddr fe80::/10 drop")
 	}
 }
 
-// emitDHCPBackstopGapHostInboundDeny excludes retained local-unicast coverage
-// from the later gap chain. Its L3 destination-type guard catches unicast and
-// anycast IP destinations regardless of the Ethernet destination; genuine
-// multicast/broadcast still falls through so the retained main chain remains
-// authoritative for grants.
+// emitDHCPBackstopGapHostInboundDeny excludes retained local and anycast
+// coverage from the later gap chain. Its L3 destination-type guard catches
+// unicast and anycast IP destinations regardless of the Ethernet destination;
+// genuine multicast/broadcast still falls through. The direct VRF link-local
+// fallback preserves the same retained-address exclusion.
 func emitDHCPBackstopGapHostInboundDeny(rules *[]string, backstopV4, backstopV6 []string, vrfBackstop dhcpBackstopLists, retainedV4, retainedV6 []string) {
 	emitDrop := func(scope, family string, retained []string) {
 		scope += " fib daddr type { local, anycast }"
@@ -2650,6 +2654,14 @@ func emitDHCPBackstopGapHostInboundDeny(rules *[]string, backstopV4, backstopV6 
 	}
 	if len(vrfBackstop.v6) > 0 {
 		emitDrop("meta sdifname "+nftIifnameSet(vrfBackstop.v6)+" meta nfproto ipv6", "ip6", retainedV6)
+		// The VRF-strict link-local lookup can be unreachable, so apply this
+		// narrow fallback independently of the FIB predicate but preserve
+		// destinations already covered by the retained main table.
+		scope := "meta sdifname " + nftIifnameSet(vrfBackstop.v6) + " meta nfproto ipv6 ip6 daddr fe80::/10"
+		if len(retainedV6) > 0 {
+			scope += " ip6 daddr != " + nftAddrSet(retainedV6)
+		}
+		*rules = append(*rules, "    "+scope+" drop")
 	}
 }
 

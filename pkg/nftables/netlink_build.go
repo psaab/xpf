@@ -324,7 +324,9 @@ func (a *ruleAsm) sdifname(names []string) *ruleAsm {
 // while genuine IP multicast/broadcast falls through. The daddr-only flags are
 // deliberate: adding `. iif` makes the lookup miss on VRF-slave ingress (the
 // VRF local entry is keyed on the master). Interface scope remains in the
-// iifname/sdifname match; fib only classifies the destination.
+// iifname/sdifname match; fib only classifies the destination. A strict VRF
+// lookup can still return unreachable for fe80::/10, so backstop emitters
+// add an explicit VRF-slave link-local drop for IPv6.
 // FIB results are host-order RTN values; hton converts them to the typed set
 // key order.
 func (a *ruleAsm) fibLocalOrAnycast() *ruleAsm {

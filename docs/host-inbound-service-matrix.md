@@ -1304,11 +1304,14 @@ snapshot produces a zero-drop table shell:
   The later-chain DHCP backstop is also destination-conditional and uses
   `fib daddr type { local, anycast }`: it drops only local or anycast destinations
   outside the retained generation's syntactically valid, family-matched coverage
-  set (and remains unconditional when that set is empty). This denies same-interface
-  arrivals absent from both the retained view and explicit gap snapshot, without
-  overriding retained service permits or denies. Genuine IP multicast, broadcast,
-  and other non-local/non-anycast destinations still reach the retained main
-  chain; a v6-only gap keeps covered IPv4 decisions intact. The gap adds no ACCEPT bypass.
+  set (and remains unconditional when that set is empty). VRF-slave IPv6
+  backstops also match `fe80::/10` directly because strict VRF lookups can return
+  `unreachable`; the gap variant preserves the retained-address exclusion on
+  this explicit fallback. This denies same-interface arrivals absent from both
+  the retained view and explicit gap snapshot, without overriding retained
+  service permits or denies. Genuine IP multicast, broadcast, and other
+  non-local/non-anycast destinations still reach the retained main chain; a
+  v6-only gap keeps covered IPv4 decisions intact. The gap adds no ACCEPT bypass.
 - `installHostInboundColdBootFence` / `buildHostInboundFencePayload`
   (`daemon_nft.go`) build the fence: the same atomic-replace `xpf_hostinbound`
   table reduced to the global mandatory admits (`ct established,related`, raw

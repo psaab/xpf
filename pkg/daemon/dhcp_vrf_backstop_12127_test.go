@@ -22,12 +22,15 @@ import (
 const (
 	dhcpVRFInterface12127 = "fxp1"
 	dhcpVRFMaster12127    = "vrf-mgmt"
+	dhcpVRFHostLL12127    = "fe80::1212:2"
+	dhcpVRFPeerLL12127    = "fe80::1212:1"
 )
 
 // TestHostInboundDHCPManagementVRFDelivery12127 drives the production daemon
 // builder and netlink installer, then sends packets to addresses newer than the
-// sampled snapshot. The main-table path must carry both VRF-slave lists all the
-// way to sdifname rules; iifname alone sees only vrf-mgmt at LOCAL_IN.
+// sampled snapshot, including an omitted IPv6 link-local destination. The
+// main-table path carries the VRF-slave scopes through sdifname; iifname alone
+// sees only vrf-mgmt at LOCAL_IN.
 func TestHostInboundDHCPManagementVRFDelivery12127(t *testing.T) {
 	enterPrivateNetns9813(t)
 	peerNS := setupManagementVRFBackstopTopology12127(t)
@@ -89,8 +92,9 @@ func TestHostInboundDHCPManagementVRFColdBootProductionFence12127(t *testing.T) 
 }
 
 // TestHostInboundDHCPManagementVRFGapDelivery12127 exercises the day-2 gap
-// path. The gap snapshot includes .3, while .4 is already live but absent from
-// that snapshot; only the DHCP backstop's delivered sdifname scope can deny .4.
+// path. The gap snapshot includes .3, while .4 and the link-local destination
+// are live but absent from it. The explicit VRF link-local fallback must not
+// rely on FIB destination classification.
 func TestHostInboundDHCPManagementVRFGapDelivery12127(t *testing.T) {
 	enterPrivateNetns9813(t)
 	peerNS := setupManagementVRFBackstopTopology12127(t)
@@ -244,6 +248,7 @@ func setupManagementVRFBackstopTopology12127(t *testing.T) netns.NsHandle {
 	for _, cidr := range []string{
 		"192.0.2.2/24", "192.0.2.3/24", "192.0.2.4/24",
 		"2001:db8:1212::2/64", "2001:db8:1212::3/64", "2001:db8:1212::4/64",
+		dhcpVRFHostLL12127 + "/64",
 	} {
 		addDHCPVRFAddress12127(t, host, cidr)
 	}
@@ -255,7 +260,7 @@ func setupManagementVRFBackstopTopology12127(t *testing.T) netns.NsHandle {
 		if err := netlink.LinkSetUp(peer); err != nil {
 			return err
 		}
-		for _, cidr := range []string{"192.0.2.1/24", "2001:db8:1212::1/64"} {
+		for _, cidr := range []string{"192.0.2.1/24", "2001:db8:1212::1/64", dhcpVRFPeerLL12127 + "/64"} {
 			if err := addDHCPVRFAddressErr12127(peer, cidr); err != nil {
 				return err
 			}
@@ -322,20 +327,25 @@ func waitManagementVRFAddresses12127(t *testing.T, peerNS netns.NsHandle) {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		hostReady := true
-		for _, ip := range []string{"2001:db8:1212::2", "2001:db8:1212::3", "2001:db8:1212::4"} {
+		for _, ip := range []string{"2001:db8:1212::2", "2001:db8:1212::3", "2001:db8:1212::4", dhcpVRFHostLL12127} {
 			ready, err := managementVRFIPv6AddressReady12127(dhcpVRFInterface12127, ip)
 			if err != nil {
 				t.Fatalf("check host IPv6 address %s: %v", ip, err)
 			}
 			hostReady = hostReady && ready
 		}
-		peerReady := false
+		peerReady := true
 		if err := inDHCPVRFNamespace12127(peerNS, func() error {
-			var err error
-			peerReady, err = managementVRFIPv6AddressReady12127("vpeer0", "2001:db8:1212::1")
-			return err
+			for _, ip := range []string{"2001:db8:1212::1", dhcpVRFPeerLL12127} {
+				ready, err := managementVRFIPv6AddressReady12127("vpeer0", ip)
+				if err != nil {
+					return err
+				}
+				peerReady = peerReady && ready
+			}
+			return nil
 		}); err != nil {
-			t.Fatalf("check peer IPv6 address: %v", err)
+			t.Fatalf("check peer IPv6 addresses: %v", err)
 		}
 		if hostReady && peerReady {
 			return
@@ -367,6 +377,7 @@ type managementVRFPacketProbe12127 struct {
 	listener *net.UDPConn
 	sender   *net.UDPConn
 	dest     string
+	zone     string
 }
 
 func newManagementVRFPacketProbes12127(t *testing.T, peerNS netns.NsHandle, v4CIDR, v6CIDR string) []managementVRFPacketProbe12127 {
@@ -375,17 +386,22 @@ func newManagementVRFPacketProbes12127(t *testing.T, peerNS netns.NsHandle, v4CI
 	v6 := stringsBeforeSlash12127(v6CIDR)
 	v4Listener := listenManagementVRFUDP12127(t, "udp4", v4)
 	v6Listener := listenManagementVRFUDP12127(t, "udp6", v6)
+	v6LLListener := listenManagementVRFUDP12127(t, "udp6", dhcpVRFHostLL12127+"%"+dhcpVRFInterface12127)
 	v4Sender := newDHCPVRFPeerSender12127(t, peerNS, "udp4", "192.0.2.1")
 	v6Sender := newDHCPVRFPeerSender12127(t, peerNS, "udp6", "2001:db8:1212::1")
+	v6LLSender := newDHCPVRFPeerSender12127(t, peerNS, "udp6", dhcpVRFPeerLL12127)
 	t.Cleanup(func() {
 		_ = v4Listener.Close()
 		_ = v6Listener.Close()
+		_ = v6LLListener.Close()
 		_ = v4Sender.Close()
 		_ = v6Sender.Close()
+		_ = v6LLSender.Close()
 	})
 	return []managementVRFPacketProbe12127{
 		{name: "IPv4", listener: v4Listener, sender: v4Sender, dest: v4},
 		{name: "IPv6", listener: v6Listener, sender: v6Sender, dest: v6},
+		{name: "IPv6 link-local", listener: v6LLListener, sender: v6LLSender, dest: dhcpVRFHostLL12127, zone: "vpeer0"},
 	}
 }
 
@@ -408,7 +424,7 @@ func assertManagementVRFPacketOutcome12127(t *testing.T, probes []managementVRFP
 					case <-stop:
 						return
 					case <-ticker.C:
-						_, _ = probe.sender.WriteToUDP([]byte("vrf-probe"), &net.UDPAddr{IP: net.ParseIP(probe.dest), Port: 2222})
+						_, _ = probe.sender.WriteToUDP([]byte("vrf-probe"), &net.UDPAddr{IP: net.ParseIP(probe.dest), Port: 2222, Zone: probe.zone})
 					}
 				}
 			}()
@@ -459,9 +475,13 @@ func newDHCPVRFPeerSender12127(t *testing.T, peerNS netns.NsHandle, network, sou
 	t.Helper()
 	var conn *net.UDPConn
 	err := inDHCPVRFNamespace12127(peerNS, func() error {
-		var err error
-		conn, err = net.ListenUDP(network, &net.UDPAddr{IP: net.ParseIP(source)})
-		return err
+		local := &net.UDPAddr{IP: net.ParseIP(source)}
+		if local.IP.IsLinkLocalUnicast() {
+			local.Zone = "vpeer0"
+		}
+		var localErr error
+		conn, localErr = net.ListenUDP(network, local)
+		return localErr
 	})
 	if err != nil {
 		t.Fatalf("bind isolated %s sender: %v", network, err)

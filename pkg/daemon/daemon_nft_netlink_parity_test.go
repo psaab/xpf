@@ -220,7 +220,7 @@ func runNftNetlinkParityInner(t *testing.T) {
 		uncovered := []string{"198.51.100.5"}
 		uncoveredV6 := []string{"2001:db8:1::5"}
 		retainedV4 := []string{"198.51.100.2"}
-		retainedV6 := []string{"2001:db8:1::2"}
+		retainedV6 := []string{"2001:db8:1::2", "fe80::1212:2"}
 		gapOracle := buildHostInboundGapFencePayload(nil, uncovered, uncoveredV6, nil, nil, vrfDevices, vrfDevices, nil, nil, nil, vrfBackstop, retainedV4, retainedV6)
 		gapSpec := xnft.GapFenceSpec{
 			UncoveredV4: uncovered, UncoveredV6: uncoveredV6,

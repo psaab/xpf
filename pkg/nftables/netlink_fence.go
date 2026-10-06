@@ -4,9 +4,9 @@ package nftables
 // additive coverage-gap fence via netlink, mirroring the text oracles in
 // pkg/daemon/daemon_nft.go. The cold-boot fence removes per-service ACCEPTs and
 // drops catalog multicast groups on represented ingress before established
-// admits. Persistent DHCP backstops classify FIB-local and anycast destinations;
-// the additive gap fence applies the same destination predicate while preserving
-// retained multicast policy.
+// admits. Persistent DHCP backstops classify FIB-local and anycast destinations
+// plus the VRF-slave IPv6 link-local fallback; the additive gap fence applies
+// the same predicates while preserving retained main-table and multicast policy.
 
 // hostInboundFenceMandatoryAdmitsNetlink mirrors the text oracle's shared
 // mandatory admits: global ESP/AH, established/related, IPv6 ND, and v4/v6
@@ -84,9 +84,9 @@ func emitDHCPBackstopAdmitsNetlink(p *nlPlan, admitV6, vrfSlavesV6 []string) {
 
 // emitDHCPBackstopDropNetlink mirrors the final text-oracle drops. Ordinary
 // devices match iifname; only the configured VRF-slave subset uses sdifname.
-// Classify the L3 destination through the FIB rather than the sender-controlled
-// Ethernet packet type: a group MAC cannot exempt local unicast, while genuine
-// IP multicast/broadcast still falls through.
+// FIB type guards classify local and anycast destinations independently of
+// Ethernet packet type; the IPv6 VRF path also matches fe80::/10 directly
+// because strict route lookup can return unreachable for link-local addresses.
 func emitDHCPBackstopDropNetlink(p *nlPlan, f nlFamily, netdevs, vrfSlaves []string) {
 	if len(netdevs) > 0 {
 		r := p.rule().iifname(netdevs)
@@ -97,13 +97,20 @@ func emitDHCPBackstopDropNetlink(p *nlPlan, f nlFamily, netdevs, vrfSlaves []str
 		r := p.rule().sdifname(vrfSlaves)
 		r.needNfproto(f)
 		r.fibLocalOrAnycast().emit(verdictDrop()...)
+		if f == famV6 {
+			// VRF-strict lookup can return unreachable for link-local
+			// destinations despite a local address on the slave.
+			linkLocal := p.rule().sdifname(vrfSlaves)
+			linkLocal.needNfproto(famV6)
+			linkLocal.daddr(famV6, []string{"fe80::/10"}, false).emit(verdictDrop()...)
+		}
 	}
 }
 
 // emitDHCPBackstopGapDropNetlink keeps the interface-wide fallback from
-// overriding addresses already covered by the retained main table. Its L3
-// destination-type guard drops uncovered local or anycast destinations without
-// letting an L2 group MAC bypass it or shadow genuine IP multicast/broadcast.
+// overriding addresses already covered by the retained main table. FIB type
+// guards drop uncovered local or anycast destinations without letting an L2
+// group MAC bypass them; VRF link-local fallback preserves the same exclusion.
 func emitDHCPBackstopGapDropNetlink(p *nlPlan, f nlFamily, netdevs, vrfSlaves, retained []string) {
 	emit := func(r *ruleAsm) {
 		r.fibLocalOrAnycast()
@@ -121,6 +128,18 @@ func emitDHCPBackstopGapDropNetlink(p *nlPlan, f nlFamily, netdevs, vrfSlaves, r
 		r := p.rule().sdifname(vrfSlaves)
 		r.needNfproto(f)
 		emit(r)
+		if f == famV6 {
+			// The FIB lookup can be unreachable for VRF link-local
+			// destinations, so retain an explicit prefix-scoped drop. Keep
+			// the retained main-table coverage exclusion on this path too.
+			linkLocal := p.rule().sdifname(vrfSlaves)
+			linkLocal.needNfproto(famV6)
+			linkLocal.daddr(famV6, []string{"fe80::/10"}, false)
+			if len(retained) > 0 {
+				linkLocal.daddr(famV6, retained, true)
+			}
+			linkLocal.emit(verdictDrop()...)
+		}
 	}
 }
 

@@ -242,8 +242,10 @@ groups belonging to its expanded protocols.
    L3 destination with `fib daddr type { local, anycast }`, so unicast or
    anycast IP in an L2 group frame cannot bypass the guard, while genuine
    multicast/broadcast IP destinations and MLD retain their fall-through behavior.
-   The additive coverage-gap fence likewise leaves retained-main-table
-   multicast policy authoritative; it adds no broad ACCEPT.
+   VRF-slave IPv6 also drops `fe80::/10` directly because strict route lookup can
+   return `unreachable`; the coverage-gap variant excludes retained destinations
+   before applying that fallback. The additive coverage-gap fence leaves
+   retained-main-table multicast policy authoritative; it adds no broad ACCEPT.
 
 5. **Kernel/Rust lockstep.** The Go catalog
    (`pkg/config/host_inbound_multicast.go`), zone-view construction
