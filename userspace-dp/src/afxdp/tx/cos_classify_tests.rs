@@ -7599,3 +7599,96 @@ fn tx_queue_follows_ingress_unit_classifier_not_egress_11679() {
          the ingress BA result (queue 5)"
     );
 }
+
+#[test]
+fn compiled_cos_wire_fixture_drives_queue_and_loss_priority_11808() {
+    use serde_json::Value;
+
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/protocol_wire_cos_v1.json"
+    ))
+    .expect("CoS differential fixture is valid JSON");
+    let empty: ClassOfServiceSnapshot =
+        serde_json::from_value(fixture["empty_snapshot"].clone())
+            .expect("empty CoS wire sample decodes");
+    assert!(empty.forwarding_classes.is_empty());
+    assert!(empty.dscp_classifiers.is_empty());
+    assert!(empty.dscp_rewrite_rules.is_empty());
+    assert!(empty.ieee8021_classifiers.is_empty());
+    assert!(empty.inet_precedence_classifiers.is_empty());
+    assert!(empty.scheduler_maps.is_empty());
+    assert!(empty.schedulers.is_empty());
+    assert_eq!(
+        serde_json::to_value(&empty).expect("empty CoS sample serializes"),
+        fixture["empty_snapshot"],
+        "the empty-array control must stay pinned in both directions"
+    );
+
+    let cos: ClassOfServiceSnapshot =
+        serde_json::from_value(fixture["populated_snapshot"].clone())
+            .expect("populated Go CoS wire sample decodes");
+    assert!(
+        cos.ieee8021_classifiers.is_empty() && cos.inet_precedence_classifiers.is_empty(),
+        "omitted optional classifier arrays default to empty on the Go wire"
+    );
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![crate::afxdp::InterfaceSnapshot {
+            name: "ge-0/0/0".into(),
+            ifindex: 42,
+            is_unit: Some(false),
+            cos_shaping_rate_bytes_per_sec: 10_000_000,
+            cos_scheduler_map: "edge-map".into(),
+            cos_dscp_classifier: "edge-dscp".into(),
+            cos_dscp_rewrite_rule: "edge-rewrite".into(),
+            ..Default::default()
+        }],
+        class_of_service: Some(cos),
+        ..Default::default()
+    };
+    let forwarding = build_forwarding_state(&snapshot);
+
+    // Each pair observes the packet verdict after Rust has parsed the Go wire
+    // fixture: queue selection plus the differentiated rewrite that exposes
+    // the selected loss-priority.
+    for (dscp, want_queue, want_rewrite) in [
+        (10, 1, 11), // bulk-data / low
+        (46, 5, 55), // duplicate: last entry voice / high wins
+        (48, 5, 54), // voice / medium-high
+        (50, 0, 1), // undefined FC was skipped; unclassified default is BE / low
+    ] {
+        let (queue, rewrite) = reclassify_cached_ba_queue_and_lp_rewrite(
+            &forwarding,
+            42,
+            dscp,
+            0,
+            false,
+            0,
+            0,
+        )
+        .unwrap_or_else(|| panic!("DSCP {dscp} has no CoS queue verdict"));
+        assert_eq!(
+            (queue, rewrite),
+            (want_queue, Some(want_rewrite)),
+            "DSCP {dscp} Rust queue/loss-priority verdict"
+        );
+    }
+
+    let voice = forwarding
+        .cos
+        .interfaces
+        .get(&42)
+        .expect("CoS interface was built")
+        .queues
+        .iter()
+        .find(|queue| queue.queue_id == 5)
+        .expect("voice queue remains materialized with a dangling scheduler");
+    assert!(
+        !voice.guarantee_enabled,
+        "undefined scheduler must not fabricate a guarantee"
+    );
+    assert_eq!(voice.priority, 5, "undefined scheduler keeps safe low priority");
+    assert_eq!(
+        voice.surplus_weight, 1,
+        "undefined scheduler must use minimal safe surplus weight"
+    );
+}

@@ -1,0 +1,105 @@
+{
+  "empty_snapshot": {
+    "dscp_classifiers": [],
+    "dscp_rewrite_rules": [],
+    "forwarding_classes": [],
+    "ieee8021_classifiers": [],
+    "inet_precedence_classifiers": [],
+    "scheduler_maps": [],
+    "schedulers": []
+  },
+  "populated_snapshot": {
+    "dscp_classifiers": [
+      {
+        "entries": [
+          {
+            "dscp_values": [10, 46],
+            "forwarding_class": "bulk-data",
+            "loss_priority": "low"
+          },
+          {
+            "dscp_values": [46],
+            "forwarding_class": "voice",
+            "loss_priority": "high"
+          },
+          {
+            "dscp_values": [48],
+            "forwarding_class": "voice",
+            "loss_priority": "medium-high"
+          }
+        ],
+        "name": "edge-dscp"
+      }
+    ],
+    "dscp_rewrite_rules": [
+      {
+        "entries": [
+          {
+            "dscp_value": 1,
+            "forwarding_class": "best-effort",
+            "loss_priority": "low"
+          },
+          {
+            "dscp_value": 11,
+            "forwarding_class": "bulk-data",
+            "loss_priority": "low"
+          },
+          {
+            "dscp_value": 55,
+            "forwarding_class": "voice",
+            "loss_priority": "high"
+          },
+          {
+            "dscp_value": 54,
+            "forwarding_class": "voice",
+            "loss_priority": "medium-high"
+          }
+        ],
+        "name": "edge-rewrite"
+      }
+    ],
+    "forwarding_classes": [
+      {
+        "name": "best-effort",
+        "queue": 0
+      },
+      {
+        "name": "bulk-data",
+        "queue": 1
+      },
+      {
+        "name": "voice",
+        "queue": 5
+      }
+    ],
+    "scheduler_maps": [
+      {
+        "entries": [
+          {
+            "forwarding_class": "best-effort",
+            "scheduler": "be-scheduler"
+          },
+          {
+            "forwarding_class": "bulk-data",
+            "scheduler": "bulk-scheduler"
+          },
+          {
+            "forwarding_class": "voice",
+            "scheduler": "missing-scheduler"
+          }
+        ],
+        "name": "edge-map"
+      }
+    ],
+    "schedulers": [
+      {
+        "name": "be-scheduler",
+        "priority": "low"
+      },
+      {
+        "name": "bulk-scheduler",
+        "priority": "low"
+      }
+    ]
+  }
+}
