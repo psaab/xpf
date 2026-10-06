@@ -151,9 +151,23 @@ func stampPMechInventoryFromRoutes(snap *ConfigSnapshot, routes []netlink.Route,
 		ownersByIfindex[int(row.LogicalIfindex)] = append(ownersByIfindex[int(row.LogicalIfindex)], i)
 	}
 
+	mixedECMPPoisoned := false
 	for _, route := range parsedRoutes {
 		if route.snapshot.Disposition != uint8(unix.RTN_UNICAST) {
 			continue
+		}
+		if pmechRouteHasMixedEgress(route) {
+			hasTunnelOwner := false
+			for _, nextHop := range route.nextHops {
+				if len(ownersByIfindex[int(nextHop.Ifindex)]) > 0 {
+					hasTunnelOwner = true
+					break
+				}
+			}
+			if hasTunnelOwner {
+				mixedECMPPoisoned = true
+				continue
+			}
 		}
 		for _, nextHop := range route.nextHops {
 			eligiblePrefixes := pmechRoutePrefixesForLeg(route, nextHop.Ifindex, parsedRoutes)
@@ -207,6 +221,15 @@ func stampPMechInventoryFromRoutes(snap *ConfigSnapshot, routes []netlink.Route,
 				inventory.TunnelRows[j].InventoryValid = false
 				inventory.TunnelRows[j].InventoryReason = "DOMAIN_OVERLAP"
 			}
+		}
+	}
+	if mixedECMPPoisoned {
+		inventory.Complete = false
+		for i := range inventory.TunnelRows {
+			row := &inventory.TunnelRows[i]
+			row.InventoryComplete = false
+			row.InventoryValid = false
+			row.InventoryReason = "MAIN_ROUTE_ECMP_AMBIGUOUS"
 		}
 	}
 }
@@ -346,6 +369,19 @@ func samePMechRouteDisposition(left, right IpsecMainRouteSnapshot) bool {
 		}
 	}
 	return true
+}
+
+func pmechRouteHasMixedEgress(route pmechParsedMainRoute) bool {
+	if len(route.nextHops) < 2 {
+		return false
+	}
+	firstIfindex := route.nextHops[0].Ifindex
+	for _, nextHop := range route.nextHops[1:] {
+		if nextHop.Ifindex != firstIfindex {
+			return true
+		}
+	}
+	return false
 }
 
 func pmechRoutePrefixesForLeg(route pmechParsedMainRoute, ifindex uint32,

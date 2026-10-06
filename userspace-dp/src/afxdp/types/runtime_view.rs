@@ -202,6 +202,8 @@ impl PMechInventory {
         };
         let identity = decode_policy_identity(&snapshot.policy_identity);
         let routes_valid = main_routes_valid(&snapshot.main_routes);
+        let mixed_ecmp_ambiguous =
+            has_mixed_tunnel_egress(&snapshot.main_routes, &snapshot.tunnel_rows);
         let mut out = Self {
             policy_identity: identity.unwrap_or_default(),
             generation: snapshot.generation,
@@ -211,7 +213,8 @@ impl PMechInventory {
                 && identity.is_some()
                 && snapshot.generation != 0
                 && snapshot.fib_generation != 0
-                && routes_valid,
+                && routes_valid
+                && !mixed_ecmp_ambiguous,
             main_routes: snapshot.main_routes.clone(),
             ..Self::default()
         };
@@ -230,7 +233,9 @@ impl PMechInventory {
                         && canonical_prefix_strings(&effective_parsed).eq(projection)
                         && canonical_prefix_strings(&ingress_prefixes).eq(projection)
                 });
-            let inventory_reason = if routes_valid && !projection_valid {
+            let inventory_reason = if mixed_ecmp_ambiguous {
+                "MAIN_ROUTE_ECMP_AMBIGUOUS".to_string()
+            } else if routes_valid && !projection_valid {
                 "SELECTOR_PROJECTION_MISMATCH".to_string()
             } else {
                 row.inventory_reason.clone()
@@ -266,7 +271,7 @@ impl PMechInventory {
                 fib_generation: row.fib_generation,
                 source_kind: row.source_kind.clone(),
                 selector_provenance: row.selector_provenance.clone(),
-                inventory_complete: row.inventory_complete,
+                inventory_complete: row.inventory_complete && !mixed_ecmp_ambiguous,
                 inventory_valid: row_valid,
                 inventory_reason,
             };
@@ -374,6 +379,29 @@ fn main_routes_valid(
         }
     }
     true
+}
+
+fn has_mixed_tunnel_egress(
+    routes: &[crate::protocol::IpsecMainRouteSnapshot],
+    tunnels: &[crate::protocol::IpsecPMechTunnelRowSnapshot],
+) -> bool {
+    routes.iter().any(|route| {
+        if route.disposition != RTN_UNICAST || route.next_hops.len() < 2 {
+            return false;
+        }
+        let first_ifindex = route.next_hops[0].ifindex;
+        let mixed = route
+            .next_hops
+            .iter()
+            .skip(1)
+            .any(|hop| hop.ifindex != first_ifindex);
+        mixed
+            && route.next_hops.iter().any(|hop| {
+                tunnels.iter().any(|tunnel| {
+                    tunnel.logical_ifindex > 0 && hop.ifindex == tunnel.logical_ifindex as u32
+                })
+            })
+    })
 }
 
 fn main_route_prefix(route: &crate::protocol::IpsecMainRouteSnapshot) -> Option<IpNet> {
@@ -1177,6 +1205,38 @@ mod tests {
         );
         let poisoned = PMechInventory::from_snapshot(Some(&ambiguous));
         assert!(!poisoned.complete(), "conflicting same-prefix legs must poison authority");
+    }
+
+    #[test]
+    fn mixed_owned_foreign_ecmp_poisons_all_tunnel_authority() {
+        let mut snapshot = inventory_snapshot(
+            vec![route(
+                0,
+                254,
+                "10.0.0.0/24",
+                RTN_UNICAST,
+                vec![hop(10), hop(11)],
+            )],
+            "10.0.0.0/24",
+            &["10.0.0.0/24"],
+            &["10.0.0.0/24"],
+        );
+        let mut unrelated_tunnel = snapshot.tunnel_rows[0].clone();
+        unrelated_tunnel.stn = "st1".into();
+        unrelated_tunnel.if_id = 10;
+        unrelated_tunnel.logical_ifindex = 12;
+        snapshot.tunnel_rows.push(unrelated_tunnel);
+
+        let inventory = PMechInventory::from_snapshot(Some(&snapshot));
+        assert!(!inventory.complete());
+        assert!(!inventory.has_main_table_routes());
+        assert_eq!(inventory.tunnels.len(), 2);
+        for tunnel in inventory.tunnels.values() {
+            assert!(!tunnel.inventory_complete);
+            assert!(!tunnel.inventory_valid);
+            assert_eq!(tunnel.inventory_reason, "MAIN_ROUTE_ECMP_AMBIGUOUS");
+        }
+        assert!(inventory.exact_tunnel("st0", 9, 10).is_none());
     }
 
     #[test]

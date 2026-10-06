@@ -228,3 +228,43 @@ func TestPMechConflictingSamePrefixLegsPoisonInventory(t *testing.T) {
 		t.Fatalf("conflicting route audit rows were lost: %+v", snapshot.PMechInventory.MainRoutes)
 	}
 }
+func TestPMechMixedOwnedForeignECMPPoisonsInventory(t *testing.T) {
+	route := v96MainRoute(t, "10.0.0.0/24", unix.RTN_UNICAST, 0)
+	route.MultiPath = []*netlink.NexthopInfo{
+		{LinkIndex: 10},
+		{LinkIndex: 11},
+	}
+	snapshot := &ConfigSnapshot{
+		Generation:    11,
+		FIBGeneration: 7,
+		Config: &config.Config{Security: config.SecurityConfig{IPsec: config.IPsecConfig{VPNs: map[string]*config.IPsecVPN{
+			"vpn0": {
+				BindInterface: "st0",
+				LocalID:       "192.0.2.0/24",
+				RemoteID:      "10.0.0.0/24",
+			},
+			"vpn1": {
+				BindInterface: "st1",
+				LocalID:       "192.0.2.0/24",
+				RemoteID:      "10.1.0.0/24",
+			},
+		}}}},
+		IpsecTunnelRows: []IpsecTunnelRowSnapshot{
+			{STN: "st0", IfID: 9, LogicalIfindex: 10},
+			{STN: "st1", IfID: 10, LogicalIfindex: 12},
+		},
+	}
+
+	stampPMechInventoryFromRoutes(snapshot, []netlink.Route{route}, nil)
+	if snapshot.PMechInventory.Complete {
+		t.Fatal("mixed owned/foreign ECMP must poison main-route authority")
+	}
+	if len(snapshot.PMechInventory.TunnelRows) != 2 {
+		t.Fatalf("expected two tunnel rows, got %+v", snapshot.PMechInventory.TunnelRows)
+	}
+	for _, row := range snapshot.PMechInventory.TunnelRows {
+		if row.InventoryComplete || row.InventoryValid || row.InventoryReason != "MAIN_ROUTE_ECMP_AMBIGUOUS" {
+			t.Fatalf("mixed ECMP must invalidate every tunnel row: %+v", row)
+		}
+	}
+}
