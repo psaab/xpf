@@ -562,11 +562,13 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	// default's next-hop instead of the learned one. Import closes both.
 	//
 	// PREFERENCE-AWARE GAP-FILL. Keep a config-derived route when its
-	// preference is at least as good as the imported route's 200. When the
-	// config route is a worse-preference fallback (for example preference
-	// 250), publish both: the Rust FIB's ascending-preference tie-break then
-	// selects the kernel's already-selected learned route. This preserves
-	// ordinary config routes as winners while honoring floating fallbacks.
+	// preference is at least as good as the imported route's learned
+	// protocol distance (eBGP 20, OSPF 110, IS-IS 115, RIP 120; other
+	// protocols 200). When the config route is a worse-preference fallback
+	// (for example preference 250), publish both: the Rust FIB's
+	// ascending-preference tie-break then selects the kernel's
+	// already-selected learned route. This preserves ordinary config routes
+	// as winners while honoring floating fallbacks.
 	//
 	// THE OVERLAY ALWAYS WINS, and the gap-fill rule — not this call's
 	// position — is what guarantees it. Measured, because the obvious claim
