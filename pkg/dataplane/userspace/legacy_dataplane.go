@@ -336,11 +336,15 @@ func (a *LegacyDataPlaneAdapter) HeartbeatPolicyScheduler(ctx context.Context) {
 }
 
 func (a *LegacyDataPlaneAdapter) SetPolicySchedulerActiveState(activeState map[string]bool) {
+	a.SetPolicySchedulerActiveStateWithLatch(activeState, false)
+}
+
+func (a *LegacyDataPlaneAdapter) SetPolicySchedulerActiveStateWithLatch(activeState map[string]bool, failClosed bool) {
 	m, err := a.managerOrErr()
 	if err != nil {
 		return
 	}
-	m.SetPolicySchedulerActiveState(activeState)
+	m.SetPolicySchedulerActiveStateWithLatch(activeState, failClosed)
 }
 
 // PolicySchedulerActiveState surfaces the manager's daemon-maintained

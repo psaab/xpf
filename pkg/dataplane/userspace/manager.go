@@ -281,6 +281,9 @@ type Manager struct {
 	// view, so a failed publication may leave it ahead of policySchedulerActive.
 	policySchedulerDesired    map[string]bool
 	policySchedulerDesiredSet bool
+	// policySchedulerDesiredFailClosed carries the action-aware stale-republish
+	// disposition alongside the desired map into the next full snapshot build.
+	policySchedulerDesiredFailClosed bool
 	// routeOverlay is the ip-monitoring effective-route overlay
 	// (#1827 PR-1b). Cached so the FULL apply path
 	// (buildSnapshotWithSchedulerState in ApplyConfig) preserves the

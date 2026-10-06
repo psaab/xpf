@@ -15,6 +15,10 @@ type policySchedulerActiveStateSetter interface {
 	SetPolicySchedulerActiveState(map[string]bool)
 }
 
+type policySchedulerActiveStateLatchSetter interface {
+	SetPolicySchedulerActiveStateWithLatch(map[string]bool, bool)
+}
+
 type policyScheduleStateUpdater interface {
 	UpdatePolicyScheduleState(*config.Config, map[string]bool) error
 }
@@ -78,15 +82,31 @@ func (d *Daemon) reconcilePolicySchedulerLockedAt(cfg *config.Config, now time.T
 }
 
 func (d *Daemon) policySchedulerActiveStateForApplyLocked(cfg *config.Config, now time.Time) map[string]bool {
+	activeState, _ := d.policySchedulerActiveStateAndFailClosedForApplyLocked(cfg, now)
+	return activeState
+}
+
+func (d *Daemon) policySchedulerActiveStateAndFailClosedForApplyLocked(cfg *config.Config, now time.Time) (map[string]bool, bool) {
 	hash, hasSchedulers := policySchedulerConfigHash(cfg)
 	if !hasSchedulers {
-		return nil
+		return nil, false
 	}
-	if sched := d.scheduler.Load(); sched != nil && hash == d.policySchedulerConfigHash {
-		return sched.ActiveState()
+	previous := d.scheduler.Load()
+	failClosed := false
+	if previous != nil {
+		var previousState map[string]bool
+		previousState, failClosed = previous.ActiveStateWithFailClosed()
+		if hash == d.policySchedulerConfigHash {
+			return previousState, failClosed
+		}
 	}
 	_, activeState := scheduler.NewPrimedInLocation(cfg.Schedulers, func(context.Context, map[string]bool) error { return nil }, now, policySchedulerLocation(cfg, now))
-	return activeState
+	if failClosed {
+		for name := range activeState {
+			activeState[name] = false
+		}
+	}
+	return activeState, failClosed
 }
 
 // policySchedulerLocation returns the committed system zone for scheduler
@@ -312,7 +332,7 @@ func (d *Daemon) publishPolicyScheduleStateWithLatch(ctx context.Context, epoch 
 	if cfg == nil || d.dataplane() == nil {
 		return nil
 	}
-	d.seedPolicySchedulerActiveStateLocked(activeState)
+	d.seedPolicySchedulerActiveStateLocked(activeState, failClosed)
 	err := d.updatePolicyScheduleStateWithLatchLocked(cfg, activeState, failClosed)
 	d.recordSchedulerRepublishResult(err)
 	return err
@@ -341,8 +361,13 @@ func (d *Daemon) heartbeatPolicySchedule(ctx context.Context, epoch uint64) {
 	}
 }
 
-func (d *Daemon) seedPolicySchedulerActiveStateLocked(activeState map[string]bool) {
-	if setter, ok := d.dataplane().(policySchedulerActiveStateSetter); ok {
+func (d *Daemon) seedPolicySchedulerActiveStateLocked(activeState map[string]bool, failClosed bool) {
+	rt := d.dataplane()
+	if setter, ok := rt.(policySchedulerActiveStateLatchSetter); ok {
+		setter.SetPolicySchedulerActiveStateWithLatch(activeState, failClosed)
+		return
+	}
+	if setter, ok := rt.(policySchedulerActiveStateSetter); ok {
 		setter.SetPolicySchedulerActiveState(activeState)
 	}
 }

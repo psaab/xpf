@@ -610,3 +610,59 @@ func TestUpdatePolicyScheduleStateWithoutHelperDoesNotMutateSnapshot(t *testing.
 		t.Fatalf("policySchedulerActive[workhours] = %t, present=true; want absent because no helper applied the state", applied)
 	}
 }
+
+// F2 repro: a full snapshot built from the pre-reconcile scheduler map uses
+// ordinary lowering, so a hash-changed schedule can activate a scheduled
+// PERMIT while a different, inactive scheduled DENY is dropped. The carried
+// latch must lower this full-apply snapshot action-aware, just like a partial
+// scheduler republish.
+func TestFullApplySnapshotPreservesCarriedSchedulerLatch12273(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.Policies = []*config.ZonePairPolicies{{
+		FromZone: "trust",
+		ToZone:   "untrust",
+		Policies: []*config.Policy{
+			{
+				Name:          "scheduled-deny",
+				SchedulerName: "night",
+				Match: config.PolicyMatch{
+					SourceAddresses:      []string{"any"},
+					DestinationAddresses: []string{"any"},
+					Applications:         []string{"any"},
+				},
+				Action: config.PolicyDeny,
+			},
+			{
+				Name:          "scheduled-permit",
+				SchedulerName: "workhours",
+				Match: config.PolicyMatch{
+					SourceAddresses:      []string{"any"},
+					DestinationAddresses: []string{"any"},
+					Applications:         []string{"any"},
+				},
+				Action: config.PolicyPermit,
+			},
+		},
+	}}
+	cfg.Schedulers = map[string]*config.SchedulerConfig{
+		"night":     {Name: "night"},
+		"workhours": {Name: "workhours", AllDay: true},
+	}
+
+	// The replacement scheduler's pre-apply prime would ordinarily report
+	// workhours active and night inactive. While the old generation's latch is
+	// carried, the full snapshot must instead keep every scheduler inactive and
+	// interpret the map with deny-first lowering.
+	snap, err := buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(
+		cfg, config.UserspaceConfig{}, 1, 0,
+		map[string]bool{"night": false, "workhours": false}, nil, nil, nil, true)
+	if err != nil {
+		t.Fatalf("build full-apply snapshot: %v", err)
+	}
+	if schedPolicyInactive5328(t, snap.Policies, "scheduled-deny") {
+		t.Fatal("F2 BYPASS: full-apply lowering dropped the latch-inactive scheduled DENY")
+	}
+	if !schedPolicyInactive5328(t, snap.Policies, "scheduled-permit") {
+		t.Fatal("F2 BYPASS: full-apply lowering activated a scheduled PERMIT under carried latch")
+	}
+}

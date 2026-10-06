@@ -183,7 +183,7 @@ promptly), the scheduler latches `republishFailClosed` and:
   decision may remain enforced until its dataplane lease expires (or
   indefinitely on a helper predating #11285), and
 - sets every scheduler inactive in the authoritative active-state map and tries to republish that state;
-- the userspace snapshot builder keeps latch-inactive scheduled `DENY`/`REJECT` rules eligible while scheduled permits remain inactive.
+- full and partial snapshot builders preserve latch-inactive scheduled `DENY`/`REJECT` eligibility while keeping scheduled permits inactive.
 
 **What this actually buys — and what it does NOT.** The latch-specific
 snapshot still uses the same `updateFn` channel whose failures define the
