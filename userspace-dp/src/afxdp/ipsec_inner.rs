@@ -472,7 +472,9 @@ pub(crate) const IPSEC_INNER_INGRESS_FLAG: u8 = 1 << 6;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::afxdp::types::{ForwardingState, PMechInventory, RuntimeView, ValidationState};
+    use crate::afxdp::types::{
+        ForwardingState, IpsecTunnelRow, PMechInventory, RuntimeView, ValidationState,
+    };
     use crate::afxdp::ipsec_inner_queue::reason;
     use crate::protocol::{
         IpsecMainRouteNextHopSnapshot, IpsecMainRouteSnapshot, IpsecPMechInventorySnapshot,
