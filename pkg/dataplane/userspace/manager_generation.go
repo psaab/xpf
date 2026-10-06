@@ -164,11 +164,11 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 			// exactly like apply_snapshot. Stamp the protocol version so a
 			// legitimate route-only bump is accepted; an unversioned (0)
 			// message is rejected as a mixed-version / corrupt client.
-			Version:                         ProtocolVersion,
-			FIBGeneration:                   newGen,
-			IpsecTunnelSnapshotGeneration:  m.lastSnapshot.IpsecTunnelSnapshotGeneration,
-			IpsecTunnelRows:                 append([]IpsecTunnelRowSnapshot(nil), m.lastSnapshot.IpsecTunnelRows...),
-			PMechInventory:                  m.lastSnapshot.PMechInventory,
+			Version:                       ProtocolVersion,
+			FIBGeneration:                 newGen,
+			IpsecTunnelSnapshotGeneration: m.lastSnapshot.IpsecTunnelSnapshotGeneration,
+			IpsecTunnelRows:               append([]IpsecTunnelRowSnapshot(nil), m.lastSnapshot.IpsecTunnelRows...),
+			PMechInventory:                m.lastSnapshot.PMechInventory,
 		},
 	}, &status); err != nil {
 		// #10724: restore only when the helper's in-band refusal proves that
@@ -176,14 +176,14 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 		// have been sent. A timeout/EOF/decode error has unknown outcome: the
 		// helper may already have applied this bump, so retaining the proposed
 		// generation prevents a later full snapshot from rolling it back.
-			m.lastSnapshot.FIBGeneration = prevFIB
-			m.lastSnapshot.Generation = prevSnapGen
-			m.generation = prevAlloc
-			m.lastSnapshot.PermitEpoch = prevPermitEpoch
-			m.lastSnapshot.QueueEpochs = prevQueueEpochs
-			m.lastSnapshot.IpsecTunnelSnapshotGeneration = prevTunnelSnapshotGeneration
-			m.lastSnapshot.IpsecTunnelRows = prevTunnelRows
-			m.lastSnapshot.PMechInventory = prevPMechInventory
+		m.lastSnapshot.FIBGeneration = prevFIB
+		m.lastSnapshot.Generation = prevSnapGen
+		m.generation = prevAlloc
+		m.lastSnapshot.PermitEpoch = prevPermitEpoch
+		m.lastSnapshot.QueueEpochs = prevQueueEpochs
+		m.lastSnapshot.IpsecTunnelSnapshotGeneration = prevTunnelSnapshotGeneration
+		m.lastSnapshot.IpsecTunnelRows = prevTunnelRows
+		m.lastSnapshot.PMechInventory = prevPMechInventory
 		return newGen, fmt.Errorf("bump fib generation: %w", err)
 	}
 	if committer := m.captureAuthorityCommitter; committer != nil && m.appliedSnapshot.Generation != 0 {

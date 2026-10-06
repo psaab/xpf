@@ -650,8 +650,8 @@ func TestCapturePipelineExtendedCompletionOutcomes9506(t *testing.T) {
 				}, originSet: true,
 			}
 			pending := &pendingReinject{
-				frame:    frame,
-				lease:    ReinjectLease{PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1, RequestID: 1},
+				frame:          frame,
+				lease:          ReinjectLease{PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1, RequestID: 1},
 				deadlineMonoNS: pipelineTestMonotonicDeadline(t, time.Second),
 				deadlineArmed:  true,
 			}
@@ -715,8 +715,8 @@ func TestCapturePipelineDispositionCounters10478(t *testing.T) {
 				}, originSet: true,
 			}
 			pending := &pendingReinject{
-				frame:    frame,
-				lease:    ReinjectLease{PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1, RequestID: 1},
+				frame:          frame,
+				lease:          ReinjectLease{PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1, RequestID: 1},
 				deadlineMonoNS: pipelineTestMonotonicDeadline(t, time.Second),
 				deadlineArmed:  true,
 			}
@@ -773,8 +773,8 @@ func TestCapturePipelineDispositionCounters10478(t *testing.T) {
 			Packet: pipelineTestPacket(77, 2, 2, 7, 1), FlowKey: "timeout",
 		}
 		pending := &pendingReinject{
-			frame:    frame,
-			lease:    ReinjectLease{PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1, RequestID: 1},
+			frame:          frame,
+			lease:          ReinjectLease{PermitEpoch: 1, QueueNumber: 77, QueueEpoch: 1, RequestID: 1},
 			deadlineMonoNS: pipelineTestMonotonicDeadline(t, -time.Second),
 			deadlineArmed:  true,
 		}

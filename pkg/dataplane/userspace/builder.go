@@ -195,15 +195,15 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 		// worker's session-id namespace on the helper. Read from the compiled
 		// config's cluster stanza; absent/standalone leaves it 0, which is the
 		// pre-#6311 layout bit for bit.
-		NodeID:           clusterNodeID(cfg),
-		Zones:            buildZoneSnapshots(cfg),
-		Interfaces:       interfaces,
-		Fabrics:          buildFabricSnapshotsFrom(cfg, liveXfrm),
-		TunnelEndpoints:  buildTunnelEndpointSnapshots(cfg, interfaces),
-		Neighbors:        buildNeighborSnapshots(cfg),
-		ForwardingTables: forwardingTables,
+		NodeID:               clusterNodeID(cfg),
+		Zones:                buildZoneSnapshots(cfg),
+		Interfaces:           interfaces,
+		Fabrics:              buildFabricSnapshotsFrom(cfg, liveXfrm),
+		TunnelEndpoints:      buildTunnelEndpointSnapshots(cfg, interfaces),
+		Neighbors:            buildNeighborSnapshots(cfg),
+		ForwardingTables:     forwardingTables,
 		RouteTableIdentities: routeTableIdentities,
-		Routes:           routes,
+		Routes:               routes,
 		// #9054: the helper needs to know the FIB it just received is
 		// DELIBERATELY incomplete. See ConfigSnapshot.LearnedRouteImportCapped.
 		LearnedRouteImportCapped: learnedRoutesCapped,

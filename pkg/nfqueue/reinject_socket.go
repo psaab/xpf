@@ -89,7 +89,6 @@ func stampReinjectDeadlineWithClock(
 	return deadline + delta, nil
 }
 
-
 // ReinjectQueueEpoch is the allocator identity the Rust authority accepts for
 // one NFQUEUE. It intentionally lives in nfqueue so the socket client does not
 // create a package cycle with the userspace manager.

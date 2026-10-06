@@ -148,22 +148,20 @@ type CaptureFrame struct {
 	// SnapshotGeneration is the immutable capture authority. ConfigGeneration
 	// and FIBGeneration are the accepted packet/config authority; the separate
 	// P-MECH inventory identity is frozen from that same accepted snapshot.
-	Generation                    uint64 // legacy queue/capture generation alias
-	SnapshotGeneration            uint64
-	ConfigGeneration              uint64
-	FIBGeneration                 uint32
-	PMechInventoryGeneration      uint64
-	PMechInventoryFIBGeneration  uint32
-	PMechPolicyIdentity           [32]byte
-	QueueNumber                   uint16
-	QueueEpoch                    uint64
+	Generation                  uint64 // legacy queue/capture generation alias
+	SnapshotGeneration          uint64
+	ConfigGeneration            uint64
+	FIBGeneration               uint32
+	PMechInventoryGeneration    uint64
+	PMechInventoryFIBGeneration uint32
+	PMechPolicyIdentity         [32]byte
+	QueueNumber                 uint16
+	QueueEpoch                  uint64
 
 	origin    CaptureOrigin
 	originSet bool
 	phase     PipelinePhase
 }
-
-
 
 // Origin returns the structural queue provenance attached by Enqueue.
 func (f CaptureFrame) Origin() CaptureOrigin { return f.origin }
@@ -183,24 +181,24 @@ type AdjudicatedFrame struct {
 // pre-gate. The enforcing phase is fail-closed when the evaluator/snapshot
 // pair is absent; no frame can silently become a permit.
 type CapturePipelineConfig struct {
-	Queues           []*Queue
-	Registry         *OriginRegistry
-	LeaseMinter      LeaseMinter
-	Submitter        ReinjectSubmitter
-	Sink             PacketVerdictSink
-	Phase            PipelinePhase
-	HandoffCap       int
-	BatchCap         int
-	AckDeadline      time.Duration
-	FragmentSlots    int
-	FragmentPieces   int
-	FragmentDeadline time.Duration
+	Queues               []*Queue
+	Registry             *OriginRegistry
+	LeaseMinter          LeaseMinter
+	Submitter            ReinjectSubmitter
+	Sink                 PacketVerdictSink
+	Phase                PipelinePhase
+	HandoffCap           int
+	BatchCap             int
+	AckDeadline          time.Duration
+	FragmentSlots        int
+	FragmentPieces       int
+	FragmentDeadline     time.Duration
 	FragmentTombstoneCap int
-	OnUncertain      func(reason string)
-	ZoneEvaluator    ZoneEvaluator
-	ZoneSnapshot     ZoneSnapshotRef
-	Attestation      *D11AttestationConfig
-	DenyEvents       DenyEventSink
+	OnUncertain          func(reason string)
+	ZoneEvaluator        ZoneEvaluator
+	ZoneSnapshot         ZoneSnapshotRef
+	Attestation          *D11AttestationConfig
+	DenyEvents           DenyEventSink
 }
 
 var (
@@ -225,7 +223,7 @@ type PipelineStats struct {
 	ClassificationErrors   uint64
 	FragmentMetadataErrors uint64
 	FragmentLate           uint64
-	DenyEventUnavailable  uint64
+	DenyEventUnavailable   uint64
 	VersionSkews           uint64
 	EventDecodeErrors      uint64
 	InputAcceptErrors      uint64
@@ -297,33 +295,33 @@ type fragmentDenyKey struct {
 // fail-closed DROP. Flow queues are independent, so one unresolved completion
 // cannot block unrelated flows.
 type CapturePipeline struct {
-	mu               sync.Mutex
-	drainMu          sync.Mutex
-	submitGate       sync.RWMutex
-	phase            PipelinePhase
-	registry         *OriginRegistry
-	leaseMinter      LeaseMinter
-	submitter        ReinjectSubmitter
-	attestation      *D11AttestationConfig
-	sink             PacketVerdictSink
-	onUncertain      func(string)
-	zoneEvaluator    ZoneEvaluator
-	zoneSnapshot     ZoneSnapshotRef
-	denyEvents       DenyEventSink
-	handoff          chan CaptureFrame
-	batchCap         int
-	ackDeadline      time.Duration
-	fragmentDeadline time.Duration
-	fragPool         *FragPool
-	fragHolds        map[FragmentKey][]CaptureFrame
-	fragTimes        map[FragmentKey]time.Time
-	fragmentTombstones     map[fragmentDenyKey]struct{}
-	fragmentTombstoneCap   int
+	mu                   sync.Mutex
+	drainMu              sync.Mutex
+	submitGate           sync.RWMutex
+	phase                PipelinePhase
+	registry             *OriginRegistry
+	leaseMinter          LeaseMinter
+	submitter            ReinjectSubmitter
+	attestation          *D11AttestationConfig
+	sink                 PacketVerdictSink
+	onUncertain          func(string)
+	zoneEvaluator        ZoneEvaluator
+	zoneSnapshot         ZoneSnapshotRef
+	denyEvents           DenyEventSink
+	handoff              chan CaptureFrame
+	batchCap             int
+	ackDeadline          time.Duration
+	fragmentDeadline     time.Duration
+	fragPool             *FragPool
+	fragHolds            map[FragmentKey][]CaptureFrame
+	fragTimes            map[FragmentKey]time.Time
+	fragmentTombstones   map[fragmentDenyKey]struct{}
+	fragmentTombstoneCap int
 	flows                map[string]*flowState
 	pending              map[uint64]*pendingReinject
-	deadlineCancelQueue []uint64
+	deadlineCancelQueue  []uint64
 	closed               bool
-	revoked          bool
+	revoked              bool
 	// d11RevokedPermitEpoch fences only the attestation selector after its
 	// scoped rollback cancellation; ordinary capture remains reusable.
 	d11RevokedPermitEpoch uint64
@@ -387,9 +385,9 @@ func NewCapturePipeline(cfg CapturePipelineConfig) (*CapturePipeline, error) {
 		handoff:    make(chan CaptureFrame, cfg.HandoffCap), batchCap: cfg.BatchCap,
 		ackDeadline: cfg.AckDeadline, fragmentDeadline: cfg.FragmentDeadline, fragPool: fragPool,
 		fragHolds: make(map[FragmentKey][]CaptureFrame), fragTimes: make(map[FragmentKey]time.Time),
-		fragmentTombstones: make(map[fragmentDenyKey]struct{}),
+		fragmentTombstones:   make(map[fragmentDenyKey]struct{}),
 		fragmentTombstoneCap: cfg.FragmentTombstoneCap,
-		flows: make(map[string]*flowState), pending: make(map[uint64]*pendingReinject),
+		flows:                make(map[string]*flowState), pending: make(map[uint64]*pendingReinject),
 	}, nil
 }
 
@@ -1637,11 +1635,11 @@ type ZoneSnapshotAcceptedGenerationsRef interface {
 }
 
 type ZoneSnapshotPacketAuthority struct {
-	ConfigGeneration             uint64
-	FIBGeneration                uint32
-	PMechInventoryGeneration     uint64
+	ConfigGeneration            uint64
+	FIBGeneration               uint32
+	PMechInventoryGeneration    uint64
 	PMechInventoryFIBGeneration uint32
-	PMechPolicyIdentity          [32]byte
+	PMechPolicyIdentity         [32]byte
 }
 
 type ZoneSnapshotPacketAuthorityRef interface {

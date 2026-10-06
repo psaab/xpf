@@ -729,13 +729,14 @@ func d11IngressFrame11016(hook CaptureHook, flow string, id uint32) CaptureFrame
 		originSet: true,
 	}
 }
+
 type blockedAdmissionSubmitter9506 struct {
-	started         chan []AdjudicatedFrame
-	release         chan struct{}
-	mu              sync.Mutex
-	cancelled       []uint64
-	cancelPermits   []uint64
-	cancelScopes    [][]ReinjectQueueScope
+	started       chan []AdjudicatedFrame
+	release       chan struct{}
+	mu            sync.Mutex
+	cancelled     []uint64
+	cancelPermits []uint64
+	cancelScopes  [][]ReinjectQueueScope
 }
 
 func (s *blockedAdmissionSubmitter9506) SubmitAdjudicated(frames []AdjudicatedFrame) ([]ReinjectAdmission, error) {

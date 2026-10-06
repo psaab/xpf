@@ -24,35 +24,35 @@ var pmechMainRouteListFn = func() ([]netlink.Route, error) {
 }
 
 type pmechVPNSelectorPolicy struct {
-	Name           string                        `json:"name"`
-	BindInterface  string                        `json:"bind_interface"`
-	Selectors      []IpsecTrafficSelectorSnapshot `json:"selectors,omitempty"`
-	Invalid        bool                          `json:"invalid,omitempty"`
+	Name          string                         `json:"name"`
+	BindInterface string                         `json:"bind_interface"`
+	Selectors     []IpsecTrafficSelectorSnapshot `json:"selectors,omitempty"`
+	Invalid       bool                           `json:"invalid,omitempty"`
 }
 
 type pmechPolicyProjection struct {
-	Zones                  []ZoneSnapshot               `json:"zones,omitempty"`
-	Interfaces             []InterfaceSnapshot          `json:"interfaces,omitempty"`
-	DefaultPolicy          string                       `json:"default_policy"`
-	DefaultLogSessionInit  bool                         `json:"default_log_session_init"`
-	DefaultLogSessionClose bool                         `json:"default_log_session_close"`
-	Policies               []PolicyRuleSnapshot         `json:"policies,omitempty"`
-	PolicyRematchExtensive bool                         `json:"policy_rematch_extensive"`
-	SourceNAT              []SourceNATRuleSnapshot      `json:"source_nat,omitempty"`
-	StaticNAT              []StaticNATRuleSnapshot      `json:"static_nat,omitempty"`
-	DestinationNAT         []DestinationNATRuleSnapshot `json:"destination_nat,omitempty"`
-	NAT64                  []NAT64RuleSnapshot          `json:"nat64,omitempty"`
-	Nptv6                  []Nptv6RuleSnapshot          `json:"nptv6,omitempty"`
-	Screens                []ScreenProfileSnapshot      `json:"screens,omitempty"`
-	ScreenMissingProfiles  []ScreenMissingProfileRef    `json:"screen_missing_profiles,omitempty"`
-	ScreenInertProfiles    []ScreenMissingProfileRef    `json:"screen_inert_profiles,omitempty"`
-	Filters                []FirewallFilterSnapshot     `json:"filters,omitempty"`
-	Policers               []PolicerSnapshot            `json:"policers,omitempty"`
-	ThreeColorPolicers     []ThreeColorPolicerSnapshot  `json:"three_color_policers,omitempty"`
-	ClassOfService         *ClassOfServiceSnapshot      `json:"class_of_service,omitempty"`
-	AddressBooks           []AddressBookSnapshot        `json:"address_books,omitempty"`
-	AppCatalog             []AppCatalogEntrySnapshot    `json:"app_catalog,omitempty"`
-	VPNSelectors            []pmechVPNSelectorPolicy     `json:"vpn_selectors,omitempty"`
+	Zones                        []ZoneSnapshot                  `json:"zones,omitempty"`
+	Interfaces                   []InterfaceSnapshot             `json:"interfaces,omitempty"`
+	DefaultPolicy                string                          `json:"default_policy"`
+	DefaultLogSessionInit        bool                            `json:"default_log_session_init"`
+	DefaultLogSessionClose       bool                            `json:"default_log_session_close"`
+	Policies                     []PolicyRuleSnapshot            `json:"policies,omitempty"`
+	PolicyRematchExtensive       bool                            `json:"policy_rematch_extensive"`
+	SourceNAT                    []SourceNATRuleSnapshot         `json:"source_nat,omitempty"`
+	StaticNAT                    []StaticNATRuleSnapshot         `json:"static_nat,omitempty"`
+	DestinationNAT               []DestinationNATRuleSnapshot    `json:"destination_nat,omitempty"`
+	NAT64                        []NAT64RuleSnapshot             `json:"nat64,omitempty"`
+	Nptv6                        []Nptv6RuleSnapshot             `json:"nptv6,omitempty"`
+	Screens                      []ScreenProfileSnapshot         `json:"screens,omitempty"`
+	ScreenMissingProfiles        []ScreenMissingProfileRef       `json:"screen_missing_profiles,omitempty"`
+	ScreenInertProfiles          []ScreenMissingProfileRef       `json:"screen_inert_profiles,omitempty"`
+	Filters                      []FirewallFilterSnapshot        `json:"filters,omitempty"`
+	Policers                     []PolicerSnapshot               `json:"policers,omitempty"`
+	ThreeColorPolicers           []ThreeColorPolicerSnapshot     `json:"three_color_policers,omitempty"`
+	ClassOfService               *ClassOfServiceSnapshot         `json:"class_of_service,omitempty"`
+	AddressBooks                 []AddressBookSnapshot           `json:"address_books,omitempty"`
+	AppCatalog                   []AppCatalogEntrySnapshot       `json:"app_catalog,omitempty"`
+	VPNSelectors                 []pmechVPNSelectorPolicy        `json:"vpn_selectors,omitempty"`
 	BindlessSelectorFenceEnabled bool                            `json:"bindless_selector_fence_enabled"`
 	BindlessSelectorRows         []IpsecBindlessSelectorSnapshot `json:"bindless_selector_rows,omitempty"`
 }
@@ -657,26 +657,26 @@ func pmechPolicyIdentity(snap *ConfigSnapshot) string {
 		return ""
 	}
 	projection := pmechPolicyProjection{
-		Zones:                  snap.Zones,
-		Interfaces:             snap.Interfaces,
-		DefaultPolicy:          snap.DefaultPolicy,
-		DefaultLogSessionInit:  snap.DefaultLogSessionInit,
-		DefaultLogSessionClose: snap.DefaultLogSessionClose,
-		Policies:               snap.Policies,
-		PolicyRematchExtensive: snap.PolicyRematchExtensive,
-		SourceNAT:              snap.SourceNAT,
-		StaticNAT:              snap.StaticNAT,
-		DestinationNAT:         snap.DestinationNAT,
-		NAT64:                  snap.NAT64,
-		Nptv6:                  snap.Nptv6,
-		Screens:                snap.Screens,
-		ScreenMissingProfiles:  snap.ScreenMissingProfiles,
-		ScreenInertProfiles:    snap.ScreenInertProfiles,
-		Filters:                snap.Filters,
-		Policers:               snap.Policers,
-		ThreeColorPolicers:     snap.ThreeColorPolicers,
-		ClassOfService:         snap.ClassOfService,
-		AddressBooks:           snap.AddressBooks,
+		Zones:                        snap.Zones,
+		Interfaces:                   snap.Interfaces,
+		DefaultPolicy:                snap.DefaultPolicy,
+		DefaultLogSessionInit:        snap.DefaultLogSessionInit,
+		DefaultLogSessionClose:       snap.DefaultLogSessionClose,
+		Policies:                     snap.Policies,
+		PolicyRematchExtensive:       snap.PolicyRematchExtensive,
+		SourceNAT:                    snap.SourceNAT,
+		StaticNAT:                    snap.StaticNAT,
+		DestinationNAT:               snap.DestinationNAT,
+		NAT64:                        snap.NAT64,
+		Nptv6:                        snap.Nptv6,
+		Screens:                      snap.Screens,
+		ScreenMissingProfiles:        snap.ScreenMissingProfiles,
+		ScreenInertProfiles:          snap.ScreenInertProfiles,
+		Filters:                      snap.Filters,
+		Policers:                     snap.Policers,
+		ThreeColorPolicers:           snap.ThreeColorPolicers,
+		ClassOfService:               snap.ClassOfService,
+		AddressBooks:                 snap.AddressBooks,
 		AppCatalog:                   snap.AppCatalog,
 		BindlessSelectorFenceEnabled: snap.BindlessSelectorFenceEnabled,
 		BindlessSelectorRows:         snap.BindlessSelectorRows,
@@ -817,4 +817,3 @@ func tunnelPrefixSetsOverlap(left, right []string) bool {
 	}
 	return false
 }
-

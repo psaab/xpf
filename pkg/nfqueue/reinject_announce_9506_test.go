@@ -181,7 +181,7 @@ func TestAnnounceReinjectReplaysLatestAuthorityBeforeSubmitAfterReconnect9506(t 
 			Family: CaptureFamilyInet, Hook: CaptureHookForward,
 			Owner: "owner-a", STN: "st0", OwnedIfindex: 7,
 		},
-		Lease: ReinjectLease{RequestID: 41, PermitEpoch: 7, QueueNumber: 12, QueueEpoch: 31},
+		Lease:           ReinjectLease{RequestID: 41, PermitEpoch: 7, QueueNumber: 12, QueueEpoch: 31},
 		DeadlineMonoNS:  0x0102030405060708,
 		DeadlineClockID: reinjectDeadlineClockMonotonic,
 	}

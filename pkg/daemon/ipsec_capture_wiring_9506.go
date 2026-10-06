@@ -159,11 +159,11 @@ type pmechTunnelZone struct {
 // descriptor can be interpreted by a new generation. Accepted config/FIB and
 // P-MECH identities advance together at successful snapshot boundaries.
 type pmechAcceptedAuthority struct {
-	configGeneration             uint64
-	fibGeneration                uint32
-	inventoryGeneration          uint64
-	inventoryFIBGeneration       uint32
-	policyIdentity               [32]byte
+	configGeneration       uint64
+	fibGeneration          uint32
+	inventoryGeneration    uint64
+	inventoryFIBGeneration uint32
+	policyIdentity         [32]byte
 }
 
 type pmechZoneSnapshot struct {
@@ -204,11 +204,11 @@ func (s *pmechZoneSnapshot) AcceptedGenerations() (uint64, uint32) {
 func (s *pmechZoneSnapshot) PacketAuthority() nfqueue.ZoneSnapshotPacketAuthority {
 	authority := s.loadAcceptedAuthority()
 	return nfqueue.ZoneSnapshotPacketAuthority{
-		ConfigGeneration:             authority.configGeneration,
-		FIBGeneration:                authority.fibGeneration,
-		PMechInventoryGeneration:     authority.inventoryGeneration,
+		ConfigGeneration:            authority.configGeneration,
+		FIBGeneration:               authority.fibGeneration,
+		PMechInventoryGeneration:    authority.inventoryGeneration,
 		PMechInventoryFIBGeneration: authority.inventoryFIBGeneration,
-		PMechPolicyIdentity:          authority.policyIdentity,
+		PMechPolicyIdentity:         authority.policyIdentity,
 	}
 }
 

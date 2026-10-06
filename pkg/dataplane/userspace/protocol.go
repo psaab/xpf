@@ -676,6 +676,7 @@ type FibRouteWire struct {
 	Preference   int32            `json:"preference"`
 	MTU          uint32           `json:"mtu"`
 }
+
 // RouteTableIdentitySnapshot binds one canonical routing-table name to the
 // routing domain and kernel table number selected by configuration.
 type RouteTableIdentitySnapshot struct {
@@ -743,46 +744,46 @@ type IpsecTunnelRowSnapshot struct {
 }
 
 type IpsecPMechTunnelRowSnapshot struct {
-	STN                 string                          `json:"stn"`
-	IfID                uint32                          `json:"if_id"`
-	LogicalIfindex      int32                           `json:"logical_ifindex"`
+	STN                 string                         `json:"stn"`
+	IfID                uint32                         `json:"if_id"`
+	LogicalIfindex      int32                          `json:"logical_ifindex"`
 	ExplicitSelectors   []IpsecTrafficSelectorSnapshot `json:"explicit_selectors,omitempty"`
-	EffectivePrefixes   []string                        `json:"effective_prefixes,omitempty"`
-	IngressPrefixes     []string                        `json:"ingress_prefixes,omitempty"`
-	InventoryGeneration uint64                          `json:"inventory_generation,omitempty"`
-	FIBGeneration       uint32                          `json:"fib_generation,omitempty"`
-	SourceKind          string                          `json:"source_kind,omitempty"`
-	SelectorProvenance  string                          `json:"selector_provenance,omitempty"`
-	InventoryComplete   bool                            `json:"inventory_complete,omitempty"`
-	InventoryValid      bool                            `json:"inventory_valid,omitempty"`
-	InventoryReason     string                          `json:"inventory_reason,omitempty"`
+	EffectivePrefixes   []string                       `json:"effective_prefixes,omitempty"`
+	IngressPrefixes     []string                       `json:"ingress_prefixes,omitempty"`
+	InventoryGeneration uint64                         `json:"inventory_generation,omitempty"`
+	FIBGeneration       uint32                         `json:"fib_generation,omitempty"`
+	SourceKind          string                         `json:"source_kind,omitempty"`
+	SelectorProvenance  string                         `json:"selector_provenance,omitempty"`
+	InventoryComplete   bool                           `json:"inventory_complete,omitempty"`
+	InventoryValid      bool                           `json:"inventory_valid,omitempty"`
+	InventoryReason     string                         `json:"inventory_reason,omitempty"`
 }
 
 type IpsecPMechInventorySnapshot struct {
-	PolicyIdentity string                          `json:"policy_identity,omitempty"`
-	Generation     uint64                          `json:"generation,omitempty"`
-	FIBGeneration  uint32                          `json:"fib_generation,omitempty"`
-	Complete       bool                            `json:"complete,omitempty"`
-	MainRoutes     []IpsecMainRouteSnapshot        `json:"main_routes,omitempty"`
+	PolicyIdentity string                        `json:"policy_identity,omitempty"`
+	Generation     uint64                        `json:"generation,omitempty"`
+	FIBGeneration  uint32                        `json:"fib_generation,omitempty"`
+	Complete       bool                          `json:"complete,omitempty"`
+	MainRoutes     []IpsecMainRouteSnapshot      `json:"main_routes,omitempty"`
 	TunnelRows     []IpsecPMechTunnelRowSnapshot `json:"tunnel_rows,omitempty"`
 }
 
 type IpsecTrafficSelectorSnapshot struct {
-	Name      string `json:"name,omitempty"`
-	LocalTS   string `json:"local_ts,omitempty"`
-	RemoteTS  string `json:"remote_ts,omitempty"`
-	Source    string `json:"source"`
+	Name     string `json:"name,omitempty"`
+	LocalTS  string `json:"local_ts,omitempty"`
+	RemoteTS string `json:"remote_ts,omitempty"`
+	Source   string `json:"source"`
 }
 
 // IpsecMainRouteSnapshot retains every main-table route and every resolved
 // nexthop leg used to construct the per-tunnel effective-prefix inventory.
 type IpsecMainRouteSnapshot struct {
-	Domain      uint32                       `json:"domain"`
-	Table       uint32                       `json:"table"`
-	Family      string                       `json:"family"`
-	Destination string                       `json:"destination"`
-	Protocol    uint8                        `json:"protocol"`
-	Disposition uint8                        `json:"disposition"`
+	Domain      uint32                          `json:"domain"`
+	Table       uint32                          `json:"table"`
+	Family      string                          `json:"family"`
+	Destination string                          `json:"destination"`
+	Protocol    uint8                           `json:"protocol"`
+	Disposition uint8                           `json:"disposition"`
 	NextHops    []IpsecMainRouteNextHopSnapshot `json:"next_hops,omitempty"`
 }
 
@@ -790,6 +791,7 @@ type IpsecMainRouteNextHopSnapshot struct {
 	Ifindex uint32 `json:"ifindex"`
 	Weight  uint32 `json:"weight"`
 }
+
 // IpsecBindlessSelectorSnapshot is one complete pair of IPsec traffic-selector
 // sides for a policy-based VPN with no bind-interface. Empty sides are not
 // published: they resolve to dynamic endpoints rather than a shape the helper
@@ -826,20 +828,20 @@ type ConfigSnapshot struct {
 	// packet snapshot-generation advisory against this exact capture authority.
 	IpsecTunnelSnapshotGeneration uint64                       `json:"ipsec_tunnel_snapshot_generation,omitempty"`
 	PMechInventory                *IpsecPMechInventorySnapshot `json:"pmech_inventory,omitempty"`
-	Summary                       SnapshotSummary       `json:"summary"`
-	Capabilities                  UserspaceCapabilities `json:"capabilities"`
-	MapPins                       UserspaceMapPins      `json:"map_pins"`
-	Zones                         []ZoneSnapshot        `json:"zones,omitempty"`
+	Summary                       SnapshotSummary              `json:"summary"`
+	Capabilities                  UserspaceCapabilities        `json:"capabilities"`
+	MapPins                       UserspaceMapPins             `json:"map_pins"`
+	Zones                         []ZoneSnapshot               `json:"zones,omitempty"`
 	// ZoneSetValidated is true only when the producer supplied a populated
 	// zone set and completed duplicate/collision validation without
 	// quarantining a zone. Rust uses it to derive removed-zone ids; absent or
 	// false is a fail-closed no-op for old/ambiguous producers.
-	ZoneSetValidated bool                     `json:"zone_set_validated,omitempty"`
-	Interfaces       []InterfaceSnapshot      `json:"interfaces,omitempty"`
-	Fabrics          []FabricSnapshot         `json:"fabrics,omitempty"`
-	TunnelEndpoints  []TunnelEndpointSnapshot `json:"tunnel_endpoints,omitempty"`
-	Neighbors        []NeighborSnapshot       `json:"neighbors,omitempty"`
-	Routes           []RouteSnapshot          `json:"routes,omitempty"`
+	ZoneSetValidated     bool                         `json:"zone_set_validated,omitempty"`
+	Interfaces           []InterfaceSnapshot          `json:"interfaces,omitempty"`
+	Fabrics              []FabricSnapshot             `json:"fabrics,omitempty"`
+	TunnelEndpoints      []TunnelEndpointSnapshot     `json:"tunnel_endpoints,omitempty"`
+	Neighbors            []NeighborSnapshot           `json:"neighbors,omitempty"`
+	Routes               []RouteSnapshot              `json:"routes,omitempty"`
 	RouteTableIdentities []RouteTableIdentitySnapshot `json:"route_table_identities,omitempty"`
 	// ForwardingTables identifies the family-qualified tables backed by
 	// `instance-type forwarding`. The Rust FIB uses this explicit marker to
