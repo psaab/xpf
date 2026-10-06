@@ -386,6 +386,12 @@ type Config struct {
 	// Backs the xpf_ipsec_rebind_pending gauge (0/1, no labels). Optional;
 	// if nil, the gauge is not emitted.
 	IPsecRebindPendingFn func() bool
+	// InterfaceLinkSnapshotPendingFn reports whether the last link-triggered
+	// userspace snapshot refresh or its FIB-generation invalidation failed and
+	// has not yet converged (#11530). Backs
+	// xpf_interface_link_snapshot_refresh_pending (0/1, no labels). Optional;
+	// if nil, the gauge is not emitted.
+	InterfaceLinkSnapshotPendingFn func() bool
 	// HostInboundConntrackRevocationOwedFn reports whether a host-inbound
 	// kernel-conntrack revocation failed and has not yet been re-driven
 	// (#6802). While true, an established direct-kernel connection to a
@@ -666,6 +672,7 @@ type Server struct {
 	natLenientTerminalActionRulesFn      func() []string
 	ipsecCaptureWitnessFn                func() IpsecCaptureWitness
 	ipsecRebindPendingFn                 func() bool
+	interfaceLinkSnapshotPendingFn       func() bool
 	hostInboundConntrackRevocationOwedFn func() bool
 	hostInboundConntrackFlushFailuresFn  func() uint64
 	hostInboundTCPlooseDisabledFn        func() bool
@@ -798,6 +805,7 @@ func NewServer(cfg Config) *Server {
 		natLenientTerminalActionRulesFn:      cfg.NATLenientTerminalActionRulesFn,
 		ipsecCaptureWitnessFn:                cfg.IpsecCaptureWitnessFn,
 		ipsecRebindPendingFn:                 cfg.IPsecRebindPendingFn,
+		interfaceLinkSnapshotPendingFn:       cfg.InterfaceLinkSnapshotPendingFn,
 		hostInboundConntrackRevocationOwedFn: cfg.HostInboundConntrackRevocationOwedFn,
 		hostInboundConntrackFlushFailuresFn:  cfg.HostInboundConntrackFlushFailuresFn,
 		hostInboundTCPlooseDisabledFn:        cfg.HostInboundTCPlooseDisabledFn,

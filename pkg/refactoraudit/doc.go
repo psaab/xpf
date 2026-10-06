@@ -73,8 +73,8 @@
 // accumulated here because this is where a repo-WIDE structural check can
 // run inside the required aggregate without inventing a package for one
 // test: the `_Log.md` closure (#6874), conflict-marker residue, the
-// commit-check dataplane ban (#7297), the applied-marker registry (#7343),
-// the iperf3 port (#6897) and the duplicate `#[test]` scanner (#8393).
+// commit-check dataplane ban (#7297), the iperf3 port (#6897) and the
+// duplicate `#[test]` scanner (#8393).
 //
 // What they share is shape, not subject: each answers a question about the
 // TREE that no single package's own tests can see, and each fails to a

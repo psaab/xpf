@@ -741,6 +741,10 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 		// operator sees a tunnel that cannot re-establish instead of a
 		// silently-dropped reload error.
 		IPsecRebindPendingFn: d.IPsecRebindPending,
+		// #11530: failed RTNL interface-row refresh debt, including a
+		// snapshot publication that succeeded but whose FIB invalidation
+		// is still owed.
+		InterfaceLinkSnapshotPendingFn: d.InterfaceLinkSnapshotPending,
 		// #6802: surface a FAILED host-inbound conntrack revocation. The
 		// failure is fail-open — a now-denied host service stays reachable
 		// over its established kernel connection — and before #6802 it left

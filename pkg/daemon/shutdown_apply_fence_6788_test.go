@@ -258,7 +258,8 @@ func TestRunShutdownSequenceQuiescesDHCPClient6788(t *testing.T) {
 // "did an apply run" reports the pre-acquire check as redundant. It is not
 // redundant for LIVENESS.
 //
-// beginBackgroundApply acquires with context.Background(), which never cancels.
+// applyConfig passes context.Background() to beginBackgroundApply, so this
+// legacy caller's semaphore wait never cancels.
 // Without the pre-acquire test, a background applier that wakes while something
 // else holds applySem parks there indefinitely, on a daemon that is trying to
 // exit. Late callbacks are exactly the callers here — a DHCP lease-change
@@ -290,7 +291,7 @@ func TestFencedApplierDoesNotParkOnHeldSemaphore6788(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("a fenced background applier PARKED on a held applySem instead of returning. " +
-			"beginBackgroundApply acquires with context.Background(), which never cancels, so " +
+			"applyConfig passes context.Background() to beginBackgroundApply, so " +
 			"without the pre-acquire fence test a late DHCP/feed callback blocks forever on a " +
 			"daemon that is trying to exit (#6788)")
 	}

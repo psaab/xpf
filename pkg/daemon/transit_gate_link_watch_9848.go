@@ -12,15 +12,22 @@ import (
 
 // startTransitGateLinkWatch starts the always-on RTNL link subscription that
 // closes the transit gate when a kernel device carrying an XDP link disappears
-// outside an ApplyConfig. The goroutine is joined by Run's shutdown WaitGroup.
+// outside an ApplyConfig. Relevant configured-interface events also wake one
+// debounced snapshot refresher. Both goroutines are joined by Run's shutdown
+// WaitGroup.
 func (d *Daemon) startTransitGateLinkWatch(ctx context.Context, wg *sync.WaitGroup) {
 	if d == nil || ctx == nil || wg == nil {
 		return
 	}
-	wg.Add(1)
+	refreshWake := make(chan string, 1)
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		d.transitGateLinkWatch(ctx)
+		d.transitGateLinkWatch(ctx, refreshWake)
+	}()
+	go func() {
+		defer wg.Done()
+		d.interfaceLinkSnapshotRefreshLoop(ctx, refreshWake)
 	}()
 }
 
@@ -29,9 +36,9 @@ func (d *Daemon) startTransitGateLinkWatch(ctx context.Context, wg *sync.WaitGro
 // ENOBUFS), so back off and establish a fresh subscription. Every successful
 // or failed attempt reasserts the gate; DELLINK events wake the existing
 // coalescing gate path instead of doing one full census per event.
-func (d *Daemon) transitGateLinkWatch(ctx context.Context) {
+func (d *Daemon) transitGateLinkWatch(ctx context.Context, refreshWake chan string) {
 	for {
-		if !d.runTransitGateLinkSubscription(ctx) {
+		if !d.runTransitGateLinkSubscription(ctx, refreshWake) {
 			return
 		}
 		backoff := d.transitGateLinkResubBackoff
@@ -53,7 +60,7 @@ func (d *Daemon) transitGateLinkWatch(ctx context.Context) {
 // runTransitGateLinkSubscription owns one netlink link subscription. It
 // returns true when the subscription ended and the caller should retry, and
 // false only when the Run context was cancelled.
-func (d *Daemon) runTransitGateLinkSubscription(ctx context.Context) bool {
+func (d *Daemon) runTransitGateLinkSubscription(ctx context.Context, refreshWake chan string) bool {
 	updates := make(chan netlink.LinkUpdate, 64)
 	done := make(chan struct{})
 	onErr := func(err error) {
@@ -72,6 +79,7 @@ func (d *Daemon) runTransitGateLinkSubscription(ctx context.Context) bool {
 		// A failed subscribe provides no event stream and may have followed a
 		// dropped notification. Re-read kernel truth before retrying.
 		d.reassertTransitGate("link-subscribe-failed")
+		d.queueInterfaceLinkSnapshotResync(refreshWake)
 		return true
 	}
 	defer close(done)
@@ -79,6 +87,7 @@ func (d *Daemon) runTransitGateLinkSubscription(ctx context.Context) bool {
 	// Resync after every subscribe. In particular, an ENOBUFS close means
 	// notifications were dropped before the replacement socket was created.
 	d.reassertTransitGate("link-subscribe")
+	d.queueInterfaceLinkSnapshotResync(refreshWake)
 	for {
 		select {
 		case <-ctx.Done():
@@ -86,6 +95,19 @@ func (d *Daemon) runTransitGateLinkSubscription(ctx context.Context) bool {
 		case update, ok := <-updates:
 			if !ok {
 				return true
+			}
+			if update.Header.Type == unix.RTM_NEWLINK || update.Header.Type == unix.RTM_DELLINK {
+				linuxName := ""
+				if update.Link != nil {
+					if attrs := update.Link.Attrs(); attrs != nil {
+						linuxName = attrs.Name
+					}
+				}
+				if linuxName == "" {
+					d.queueInterfaceLinkSnapshotResync(refreshWake)
+				} else {
+					d.queueInterfaceLinkSnapshotRefresh(refreshWake, linuxName)
+				}
 			}
 			if update.Header.Type == unix.RTM_DELLINK {
 				// Coalesce a burst of unregisters through the existing
