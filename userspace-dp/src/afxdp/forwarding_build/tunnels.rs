@@ -60,16 +60,27 @@ pub(super) fn populate_tunnel_endpoints(
         // tunnel).
         let ttl = super::validated::TunnelTtl::try_from_snapshot(endpoint.ttl, endpoint.id)?.get();
         let is_wireguard = endpoint.mode == "wireguard";
-        // GRE/IPIP require concrete outer source/destination. WireGuard
-        // carries the peer in `wg_endpoint` and may have neither
-        // (responder-only), so skip the parse-or-drop gate for WG and
-        // default the unused outer source/destination to an unspecified
-        // address (#1432 S2a).
         let (source, destination) = if is_wireguard {
-            (
-                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            )
+            // #11574: the configured outer source address is the worker's
+            // listener owner-zone identity. Parse it when present and fall
+            // back to unspecified (fail-closed downstream) when the tunnel
+            // carries no authorable local source. Peer endpoints, not this
+            // snapshot row's Destination, name the remote hop, so only the
+            // local source is parsed; the destination stays unspecified
+            // (#1432 S2a) exactly as before.
+            let source = match endpoint.source.parse::<IpAddr>() {
+                Ok(source) => source,
+                Err(_) => {
+                    if !endpoint.source.is_empty() {
+                        eprintln!(
+                            "xpf-userspace-dp: wireguard endpoint {} has an unparseable outer source {:?}; using unspecified source so listener admission fails closed (#11574)",
+                            endpoint.id, endpoint.source
+                        );
+                    }
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+                }
+            };
+            (source, IpAddr::V4(Ipv4Addr::UNSPECIFIED))
         } else {
             let Ok(source) = endpoint.source.parse::<IpAddr>() else {
                 continue;

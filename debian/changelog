@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Keep declined WireGuard listener keepalives from publishing outer-tuple
+    LocalMiss sessions that would steer subsequent same-zone handshakes away
+    from the kernel control socket (#11574).
+
   * Select transit CoS queues and loss priority from logical ingress-unit
     classifier bindings. Keep output-filter-pinned queues fixed while
     refreshing packet-dependent LP rewrites; validate consumed ingress

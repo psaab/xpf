@@ -271,8 +271,8 @@ func TestHostInboundEmptyStanzaFailsClosed(t *testing.T) {
 		// No SystemServices, no Protocols → zero matches.
 	}
 	var rules []string
-	emitHostInboundZone(&rules, v, "ip", v.V4Addrs, nil)
-	emitHostInboundZone(&rules, v, "ip6", v.V6Addrs, nil)
+	emitHostInboundZone(&rules, v, "ip", v.V4Addrs)
+	emitHostInboundZone(&rules, v, "ip6", v.V6Addrs)
 
 	joined := strings.Join(rules, "\n")
 	if !strings.Contains(joined, hiDrop("ip", "203.0.113.1", "untrust")) {

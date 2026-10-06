@@ -1086,66 +1086,75 @@ control threads, IPv4 and IPv6),
 `wg_steered_endpoint_refuses_degraded_transit_end_to_end_9594` (real spawned
 control thread, production posture view).
 
-## Host-inbound admission of the WG listen port (#5582)
+## Host-inbound admission of WireGuard listeners (#11574, #12119)
 
-The shim steers local-destination UDP on the steered WG listen ports to
-the kernel (`wg_steer_to_kernel`, `userspace-xdp/src/lib.rs`) so each
-userspace WireGuard control socket receives the outer transport. But the
-kernel input path is also guarded by the host-inbound nftables chain
-(`inet xpf_hostinbound`, `pkg/daemon/daemon_nft.go`): on a **restricted**
-security zone (a zone with a `host-inbound-traffic` set that does not open
-the WG port, or no stanza at all — Junos default-deny) the per-zone
-catch-all silently DROPs everything not explicitly admitted.
+The userspace shim still steers configured WireGuard listener traffic, but
+host-inbound admission is no longer a global UDP-port exception. The nftables
+input chain admits a listener only when all of the following agree:
 
-A returning packet for an xpf-**initiated** handshake is `ct state
-established` and passes, which is why interop where xpf dials out first
-succeeded. But a **fresh passive (responder-only) handshake** — the
-supported "external peer initiates, xpf listens" config — is conntrack
-`NEW`: it misses the service accepts and hits the catch-all drop, so a
-responder-only listener on a restricted zoned address could never come up
-after boot / conntrack expiry.
+- the destination is a local address uniquely owned by a security zone;
+- the datagram arrives through an unambiguous ingress belonging to that same
+  zone; and
+- the UDP destination port belongs to a WireGuard listener whose configured
+  outer source address is uniquely owned by that zone.
 
-**Fix (#5582): a dynamic, automatic host-inbound admission tied to the
-configured listen port(s) — not a static `system-services` token.** When
-any WG tunnel is configured, `buildHostInboundFilterPayload` emits a
-single coarse `udp dport <configured-wg-port(s)> accept` on the input
-hook (`emitHostInboundWireGuardAccept`). Rationale:
+All mismatched listener tuples are dropped before broad conntrack-reply and
+service accepts, including packets arriving on the trusted `xpf-usp0` reinject
+device. That device proves a userspace host-inbound check ran, not that the
+packet belongs to the listener's source-owner zone. Transit traffic is not
+admitted by a host-inbound port rule. The listen-port set remains dynamic;
+source-owner admission is separate from interface-NAT exclusion, so a primary
+WAN address used by interface-mode SNAT can still receive its configured
+WireGuard listener traffic without making the address a general local-delivery
+destination.
+### Configure a source address
 
-- **Automatic, not a manual token.** The shim *already* steers the configured
-  ports unconditionally; requiring the operator to separately open them would
-  let the shim steer a packet the kernel then drops. Configured WireGuard
-  listeners therefore *imply* host admission of exactly the configured set.
-- **Dynamic port, so no static SSOT token.** WireGuard's port is
-  operator-configured, so it does not fit the static token→port SSOT
-  (`config.HostInboundServiceMatch`, e.g. `ssh`→22) that the nft mirror
-  and the Rust classifier render from; a `system-services wireguard`
-  token would need a fake fixed port and would break the token-parity
-  tests. The port set is the compile-time SSOT
-  `config.WireGuardListenPorts()` (all configured WG tunnels).
-- **Scoped to the shim's steering, not widened.** The rule is a single
-  global accept, but the nft `input` hook only ever sees host-destined
-  packets, so a bare `udp dport <port>` admits the WG port to **every
-  firewall-local address** — exactly the shim's `is_local_destination`
-  scope — while transit/forward UDP (which traverses the `forward` hook,
-  never this chain) is untouched, so transit/DNAT UDP on the WG ports is
-  never shunted around policy. Only the WG port set is opened; every other
-  host-bound service stays under the per-zone default-deny.
-- **Composes with the #5565 per-interface host-inbound scoping.** With a
-  `to-zone junos-host` DENY program present, the WG accept is placed
-  AFTER the fine iifname-scoped DROP subchain, so an explicit operator
-  junos-host deny of a WG source still wins; it is a coarse admit like
-  the ND/PMTUD accepts.
+Each functional zoned listener needs an explicit outer source address that is
+owned by exactly one zone. Configure it under the WireGuard tunnel:
 
-**Runtime-vs-config nuance:** the admission uses the CONFIGURED listen
-ports (the compile-time SSOT). The shim steers a bounded set of them
-(see "Multi-tunnel status" above) and the filter admits ALL of them. For the
-ports outside the steered set, that admit is not a no-op, and it is not where
-they are refused: it is what lets an unsteered tunnel's handshakes reach its
-control thread, and the helper — not this filter — drops that tunnel's
-kernel-path transport (#9521), because an input-hook admit list cannot
-refuse `ct established` traffic, a zone that admits all services, or
-anything when no table is installed.
+```text
+set interfaces <interface> tunnel source <local-address>
+```
 
-Fail-on-revert guards: `TestHostInboundFilterAdmitsWireGuardListenPort`
-and `TestHostInboundFilterWireGuardPayloadParses` (`pkg/daemon`),
-`TestWireGuardListenPorts_5582` (`pkg/config`).
+For a per-unit tunnel, set the same `tunnel source` under that unit. The source
+must be a local address in exactly one listener transport zone; a missing,
+malformed, unowned, or cross-zone-ambiguous source fails closed and emits a
+compile warning. A source-less tunnel remains accepted by configuration for
+compatibility, but #12119 emits a warning and generates no zone admission for
+it. Configure a unique source before expecting inbound handshakes to succeed.
+
+### Control packets, worker traffic, and reinjection
+
+Handshake and cookie records for a configured listener are steered to the
+kernel when the destination is already in the ordinary local-address map. If
+interface SNAT excludes that address from local delivery, the owner map supplies
+the exact listener destination, ingress-zone, and port match needed for control
+steering. A live userspace session takes precedence over that owner-map steer so
+SNAT replies return to the worker for reverse NAT. In either case the later
+host-inbound mismatch guard remains authoritative; authenticated transport-data
+records use the same owner-zone proof before worker decapsulation.
+
+An authenticated keepalive that the worker declines has no inner flow to
+cache. The poll loop therefore suppresses `LocalMiss` publication for that
+exact same-zone listener tuple: otherwise the session-first XDP lookup would
+redirect the next handshake into the worker, and trusted reinjection would
+hit the physical-ingress owner-zone drop. With no outer-tuple session, a
+same-zone handshake reaches the kernel control socket; ordinary local UDP
+misses and decapsulated inner flows keep their existing session behavior.
+
+The trusted `xpf-usp0` reinject path receives no WireGuard mismatch exemption.
+Its later accept remains after any fine `junos-host` policy programs, and the
+owner-zone mismatch drops precede it. A stale dataplane snapshot still omits the
+reinject accept.
+
+`WireGuardListenPorts()` remains the config SSOT for configured listener ports;
+the shim steers its bounded subset (see "Multi-tunnel status" above). Admission
+is still source-owner/ingress/destination scoped for every configured port, so
+ports outside the steered subset can reach the control socket only on the
+listener's exact owner-zone path; the helper retains responsibility for
+refusing unsteered transport-data records.
+
+Fail-on-revert guards include `TestHostInboundSourceLessWireGuardFailsClosed12119`,
+the scoped listener and reinject order tests in `pkg/daemon`,
+`TestBuildUserspaceWGZoneAdmissionIncludesInterfaceSNATAddress11574`, and the
+privileged XDP zone/control steering tests in `pkg/dataplane/userspace`.

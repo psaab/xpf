@@ -25,18 +25,25 @@
 # binaries for factory root-login precedence), #11202 x1 (unconfigured host
 # interface for monitor-traffic scope), #11156 x1 (loopback for RA goodbye
 # suppression). All gate on execution-environment availability.
-# #11417 adds one non-privilege skip for genuine FRR vtysh absence from PATH;
-# present but unusable candidates fail rather than skip.
-total        = 401
+# The current-tree recount supersedes the 400-site measurement above: 17
+# privilege-absent, 4 privilege-present, and 32 other concrete skip sites are
+# now present, for 453 total including unchanged unparsed. #12119 adds one
+# memlock-gated BPF_PROG_TEST_RUN regression, raising other and total by one.
+# Merge composition with #12125/#12126/#12127 (measured, not banked drift):
+# +2 priv-absent from #12127 dhcp_vrf_backstop netns guards, +3 priv-absent
+# from #12125 manager_link_refresh netns guards, +1 other from #12126 FRR
+# vtysh-absence skip. #11417's own +1/+1 floor lines are subsumed by this
+# recount (same FRR-absence site).
+total        = 460
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
 # the gap, it swaps which subjects go unexamined.
-priv-absent  = 49
-priv-present = 10
+priv-absent  = 71
+priv-present = 14
 
 # Everything else: environment-, tool- and fixture-gated skips.
-other        = 341
+other        = 374
 
 # Skips this census counted but could NOT classify: `t.SkipNow()` (no message
 # by construction) and non-literal messages. Deliberately a REPORTED bucket

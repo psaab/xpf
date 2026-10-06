@@ -571,9 +571,9 @@ type Manager struct {
 	// nil and the fail-closed write silently no-ops, which is exactly the state
 	// in which a guard cannot tell fail-closed from never-tried.
 	failClosedCtrlMapHook ctrlMapUpdater
-	// syncClassifierMapsHook, when non-nil, replaces the ingress/local/
-	// interface-NAT classifier map writes in unit tests (#7468). Nil in
-	// production.
+	// syncClassifierMapsHook, when non-nil, replaces the ingress, local-address,
+	// WG-zone/admission, and interface-NAT classifier map writes in unit tests
+	// (#7468). Nil in production.
 	syncClassifierMapsHook func(*ConfigSnapshot) error
 
 	// controlRequestHook replaces requestLocked in unit tests that exercise

@@ -61,6 +61,7 @@ func injectClassifierMaps5488(t *testing.T, m *Manager) {
 		t.Cleanup(func() { bpfMap.Close() })
 		injectShimMap(t, m.bpfShim, spec.name, bpfMap)
 	}
+	injectUserspaceWGZoneMaps(t, m)
 }
 
 // newProtocolGateFailClosedManager5488 builds a Manager wired to a control

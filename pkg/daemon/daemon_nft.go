@@ -206,8 +206,9 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 			"v4_defined", lo0FilterDefined(cfg, filterV4, false),
 			"v6_defined", lo0FilterDefined(cfg, filterV6, true))
 		if !d.lo0Enforced.Load() {
-			sets := dpuserspace.BuildFenceAddrSets(cfg, dpuserspace.BuildZoneHostInboundViews(cfg))
-			wgZonePorts := cfg.WireGuardZonePorts()
+			views := dpuserspace.BuildZoneHostInboundViews(cfg)
+			sets := dpuserspace.BuildFenceAddrSets(cfg, views)
+			wgZonePorts := hostInboundWireGuardZonePorts(cfg, views)
 			if fenceErr := d.installLo0ColdBootFence(sets, wgZonePorts); fenceErr != nil {
 				return errors.Join(err, fenceErr)
 			}
@@ -230,8 +231,9 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 			"v4_defined", lo0FilterDefined(cfg, filterV4, false),
 			"v6_defined", lo0FilterDefined(cfg, filterV6, true))
 		if !d.lo0Enforced.Load() {
-			sets := dpuserspace.BuildFenceAddrSets(cfg, dpuserspace.BuildZoneHostInboundViews(cfg))
-			wgZonePorts := cfg.WireGuardZonePorts()
+			views := dpuserspace.BuildZoneHostInboundViews(cfg)
+			sets := dpuserspace.BuildFenceAddrSets(cfg, views)
+			wgZonePorts := hostInboundWireGuardZonePorts(cfg, views)
 			if fenceErr := d.installLo0ColdBootFence(sets, wgZonePorts); fenceErr != nil {
 				return errors.Join(err, fenceErr)
 			}
@@ -265,8 +267,9 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 			// firewall-local address, including on a router that declares no
 			// security zone at all — where the zone-model builders return nothing
 			// and the fence would otherwise be an empty `policy accept` shell.
-			sets := dpuserspace.BuildFenceAddrSets(cfg, dpuserspace.BuildZoneHostInboundViews(cfg))
-			wgZonePorts := cfg.WireGuardZonePorts()
+			views := dpuserspace.BuildZoneHostInboundViews(cfg)
+			sets := dpuserspace.BuildFenceAddrSets(cfg, views)
+			wgZonePorts := hostInboundWireGuardZonePorts(cfg, views)
 			if fenceErr := d.installLo0ColdBootFence(sets, wgZonePorts); fenceErr != nil {
 				return errors.Join(fmt.Errorf("apply lo0 nftables filter: %w", err), fenceErr)
 			}
@@ -285,8 +288,9 @@ func (d *Daemon) applyLo0Filter(cfg *config.Config) (retErr error) {
 		d.lo0Enforced.Store(false)
 		slog.Error("lo0 installer rendered no rules after daemon preflight; renderer parity is broken and the live table may be an empty policy-accept shell",
 			"v4", filterV4, "v6", filterV6)
-		sets := dpuserspace.BuildFenceAddrSets(cfg, dpuserspace.BuildZoneHostInboundViews(cfg))
-		wgZonePorts := cfg.WireGuardZonePorts()
+		views := dpuserspace.BuildZoneHostInboundViews(cfg)
+		sets := dpuserspace.BuildFenceAddrSets(cfg, views)
+		wgZonePorts := hostInboundWireGuardZonePorts(cfg, views)
 		if fenceErr := d.installLo0ColdBootFence(sets, wgZonePorts); fenceErr != nil {
 			return errors.Join(err, fenceErr)
 		}
@@ -739,11 +743,10 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		}
 		return nil
 	}
-	// #5582/#11076: configured WireGuard listen ports. The flat set remains
-	// scope-independent input to stale-reply and conntrack bookkeeping; actual
-	// admits use the per-zone map so unserved addresses keep default-deny.
+	// #11574: the flat listen-port set bounds every host-local WG daddr, while
+	// admission is keyed to the outer source address's unique owner zone.
 	wgListenPorts := cfg.WireGuardListenPorts()
-	wgZonePorts := cfg.WireGuardZonePorts()
+	wgZonePorts := hostInboundWireGuardZonePorts(cfg, views)
 	// #5789: the exact firewall-local destination set this generation wants a
 	// catch-all DROP for. Compared on failure against the retained generation's
 	// covered set to detect addresses that appeared after that generation loaded.
@@ -1367,31 +1370,51 @@ func hostInboundFenceMandatoryAdmits() []string {
 func emitHostInboundFenceWGAdmits(rules *[]string, views []dpuserspace.ZoneHostInboundView, wgZonePorts map[string][]uint16) {
 	for _, v := range views {
 		ports := wgZonePorts[v.Zone]
-		if len(ports) == 0 {
-			continue
-		}
-		if len(v.V4Addrs) > 0 {
-			emitHostInboundZoneWireGuardAccept(rules, "ip daddr "+nftAddrSet(v.V4Addrs), ports)
-		}
-		if len(v.V6Addrs) > 0 {
-			emitHostInboundZoneWireGuardAccept(rules, "ip6 daddr "+nftAddrSet(v.V6Addrs), ports)
-		}
+		emitHostInboundFenceWGFamilyAdmit(rules, views, v, "ip", v.V4Addrs, ports)
+		emitHostInboundFenceWGFamilyAdmit(rules, views, v, "ip6", v.V6Addrs, ports)
 	}
 }
 
 func emitHostInboundGapFenceWGAdmits(rules *[]string, views []dpuserspace.ZoneHostInboundView, uncoveredV4, uncoveredV6 []string, wgZonePorts map[string][]uint16) {
 	for _, v := range views {
 		ports := wgZonePorts[v.Zone]
-		if len(ports) == 0 {
-			continue
+		v4 := intersectHostInboundAddresses(v.V4Addrs, uncoveredV4)
+		v6 := intersectHostInboundAddresses(v.V6Addrs, uncoveredV6)
+		emitHostInboundFenceWGFamilyAdmit(rules, views, v, "ip", v4, ports)
+		emitHostInboundFenceWGFamilyAdmit(rules, views, v, "ip6", v6, ports)
+	}
+}
+
+func emitHostInboundFenceWGFamilyAdmit(rules *[]string, views []dpuserspace.ZoneHostInboundView, view dpuserspace.ZoneHostInboundView, family string, candidates []string, ports []uint16) {
+	if len(view.IngressNetdevs) == 0 || len(candidates) == 0 || len(ports) == 0 {
+		return
+	}
+	owners := make(map[string]string)
+	ambiguous := make(map[string]bool)
+	for _, v := range views {
+		addrs := v.V4Addrs
+		if family == "ip6" {
+			addrs = v.V6Addrs
 		}
-		if scoped := intersectHostInboundAddresses(v.V4Addrs, uncoveredV4); len(scoped) > 0 {
-			emitHostInboundZoneWireGuardAccept(rules, "ip daddr "+nftAddrSet(scoped), ports)
-		}
-		if scoped := intersectHostInboundAddresses(v.V6Addrs, uncoveredV6); len(scoped) > 0 {
-			emitHostInboundZoneWireGuardAccept(rules, "ip6 daddr "+nftAddrSet(scoped), ports)
+		for _, addr := range addrs {
+			if owner, ok := owners[addr]; ok && owner != v.Zone {
+				ambiguous[addr] = true
+				continue
+			}
+			owners[addr] = v.Zone
 		}
 	}
+	var unique []string
+	for _, addr := range candidates {
+		if owners[addr] == view.Zone && !ambiguous[addr] {
+			unique = append(unique, addr)
+		}
+	}
+	if len(unique) == 0 {
+		return
+	}
+	scope := "iifname " + nftIifnameSet(view.IngressNetdevs) + " " + family + " daddr " + nftAddrSet(unique)
+	*rules = append(*rules, "    "+scope+" udp dport "+renderWireGuardPortSpec(ports)+" accept")
 }
 
 // hostInboundStaleReplyGuardText renders the #10752/#10764 catalog drops before
@@ -1949,12 +1972,20 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 	ingressV4, ingressV6 := hostInboundIngressDestinations(views, unzonedV4, unzonedV6)
 	zoneIngressV4, zoneIngressV6 := hostInboundZoneIngressDestinations(views)
 	for _, v := range views {
-		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV4) {
+		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV4) || hostInboundEmitsWireGuardGuard(v.V4Addrs, wgListenPorts) {
 			addCounter(xnft.HostInboundDenyCounterName(v.Zone, "ip"))
 		}
-		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV6) {
+		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV6) || hostInboundEmitsWireGuardGuard(v.V6Addrs, wgListenPorts) {
 			addCounter(xnft.HostInboundDenyCounterName(v.Zone, "ip6"))
 		}
+	}
+	if hostInboundEmitsWireGuardGuard(unzonedV4, wgListenPorts) ||
+		hostInboundEmitsWireGuardGuard(hostInboundWGAmbiguousAddresses(views, "ip"), wgListenPorts) {
+		addCounter(xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, "ip"))
+	}
+	if hostInboundEmitsWireGuardGuard(unzonedV6, wgListenPorts) ||
+		hostInboundEmitsWireGuardGuard(hostInboundWGAmbiguousAddresses(views, "ip6"), wgListenPorts) {
+		addCounter(xnft.HostInboundDenyCounterName(dpuserspace.UnzonedHostInboundZoneLabel, "ip6"))
 	}
 	// Ambiguous ingress drops share the reserved junos-host counter with
 	// addressed-but-unzoned drops; both lack a unique zone attribution.
@@ -2060,6 +2091,8 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		rules = append(rules, hostInboundStaleReplyGuardText(
 			xnft.HostInboundStaleReplyGuardRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts, dataplaneFresh && (len(reinjectV4) > 0 || len(reinjectV6) > 0)),
 		)...)
+		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV4, "ip", wgListenPorts, wgZonePorts)
+		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV6, "ip6", wgListenPorts, wgZonePorts)
 		emitHostInboundScreenFloodText(&rules, screenFloodRules, true)
 		emitJunosHostMulticastProgramJumps(&rules, programs)
 		emitHostInboundMulticastIngressGuards(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
@@ -2077,10 +2110,9 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		emitHostInboundScreenFloodText(&rules, screenFloodRules, false)
 		// (4) ND/PMTUD/ICMP-error accepts for NON-denied sources.
 		emitHostInboundICMPAccepts(&rules)
-		// #11076: no WireGuard accept here anymore. The former (4b) coarse
-		// global admit is now per-zone daddr-scoped inside each zone's own
-		// section (emitHostInboundZone), ordered with zone policy — so an
-		// explicit `to-zone junos-host` deny still wins by position.
+		// #11574: selected-port mismatch guards ran before the reply-direction
+		// accept; exact same-owner ingress/destination admits follow the fine
+		// junos-host jumps below.
 	} else {
 		// Raw ESP (50) / AH (51) are exempt from host-inbound enforcement so the
 		// kernel XFRM stack can decrypt host-terminated IPsec — mirroring the
@@ -2097,6 +2129,8 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		rules = append(rules, hostInboundStaleReplyGuardText(
 			xnft.HostInboundStaleReplyGuardRules(toNftViews(views), unzonedV4, unzonedV6, wgListenPorts, dataplaneFresh && (len(reinjectV4) > 0 || len(reinjectV6) > 0)),
 		)...)
+		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV4, "ip", wgListenPorts, wgZonePorts)
+		emitHostInboundWireGuardMismatchDrops(&rules, views, unzonedV6, "ip6", wgListenPorts, wgZonePorts)
 		emitHostInboundScreenFloodText(&rules, screenFloodRules, true)
 		emitJunosHostMulticastProgramJumps(&rules, programs)
 		emitHostInboundMulticastIngressGuards(&rules, views, unzonedIngressNetdevs, unzonedIngressVRFSlaves)
@@ -2106,9 +2140,9 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 		rules = append(rules, "    ct state established,related ct direction reply accept")
 		emitHostInboundScreenFloodText(&rules, screenFloodRules, false)
 		emitHostInboundICMPAccepts(&rules)
-		// #11076: WireGuard admission is per-zone daddr-scoped in each
-		// zone's section below — the shim-steered outer transport reaches
-		// the socket only at the tunnel zone's addresses.
+		// #11574: selected-port mismatch guards ran before the reply-direction
+		// accept; exact same-owner ingress/destination admits follow the fine
+		// junos-host jumps below.
 	}
 	// #10751 F8-A: admit the DHCP client's own replies before the
 	// destination drops. Backstop members include unzoned pending-lease units
@@ -2128,16 +2162,21 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 	// LOCAL_IN master, so a zoned sibling cannot admit the unzoned member.
 	emitHostInboundUnzonedVRFIngressDrop(&rules, unzonedIngressVRFSlaves, "ip", ingressV4)
 	emitHostInboundUnzonedVRFIngressDrop(&rules, unzonedIngressVRFSlaves, "ip6", ingressV6)
+	// #11574: exact accepts follow the counted mismatch drops emitted before
+	// stateful and service admits; only the unique same-zone ingress/daddr tuple
+	// reaches these accepts.
+	emitHostInboundWireGuardIngressAccepts(&rules, views, "ip", wgListenPorts, wgZonePorts)
+	emitHostInboundWireGuardIngressAccepts(&rules, views, "ip6", wgListenPorts, wgZonePorts)
 	// #9637: unambiguous ingress scopes take their zone's service rights first,
 	// but only for zone-owned destinations. Ambiguous scopes retain the
-	// destination-owner admits and their counted catch-all.
+	// destination-owner service admits and their counted catch-all.
 	for _, v := range views {
 		emitHostInboundZoneIngress(&rules, v, "ip", zoneIngressV4)
 		emitHostInboundZoneIngress(&rules, v, "ip6", zoneIngressV6)
 	}
-	emitHostInboundAmbiguousIngressAccepts(&rules, views, "ip", wgZonePorts)
+	emitHostInboundAmbiguousIngressAccepts(&rules, views, "ip")
 	emitHostInboundAmbiguousIngressDrop(&rules, views, "ip", ingressV4)
-	emitHostInboundAmbiguousIngressAccepts(&rules, views, "ip6", wgZonePorts)
+	emitHostInboundAmbiguousIngressAccepts(&rules, views, "ip6")
 	emitHostInboundAmbiguousIngressDrop(&rules, views, "ip6", ingressV6)
 	// #11409: unzoned ingress cannot reach a zoned destination's service
 	// fallback or the residual established accept. Non-physical reinjection
@@ -2148,8 +2187,8 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 	// adjudicated; both source guards above run first.
 	rules = append(rules, "    ct state established,related accept")
 	for _, v := range views {
-		emitHostInboundZone(&rules, v, "ip", v.V4Addrs, wgZonePorts[v.Zone])
-		emitHostInboundZone(&rules, v, "ip6", v.V6Addrs, wgZonePorts[v.Zone])
+		emitHostInboundZone(&rules, v, "ip", v.V4Addrs)
+		emitHostInboundZone(&rules, v, "ip6", v.V6Addrs)
 	}
 	// #4420 HI-2: catch-all DROP for firewall-local addresses on interfaces in NO
 	// security zone. Zone-ingress rules omit these addresses, and they are
@@ -2353,8 +2392,7 @@ func hostInboundScreenFloodMatchesText(screen xnft.HostInboundScreenFloodRule) s
 
 // renderWireGuardPortSpec renders the WireGuard listen-port set as an nft
 // destination-port value: a single port ("51820") or an anonymous set
-// ("{ 51820, 51821 }"). Ports arrive sorted+deduped from
-// config.WireGuardZonePorts().
+// ("{ 51820, 51821 }"). Ports arrive sorted+deduped from the zone-map builder.
 func renderWireGuardPortSpec(ports []uint16) string {
 	if len(ports) == 1 {
 		return strconv.Itoa(int(ports[0]))
@@ -2691,10 +2729,13 @@ func emitDHCPBackstopAdmits(rules *[]string, vrfBackstop dhcpBackstopLists) {
 func hostInboundEmitsDrop(v dpuserspace.ZoneHostInboundView, addrs []string) bool {
 	return len(addrs) > 0 && !hostInboundAllowsAll(v)
 }
+func hostInboundEmitsWireGuardGuard(addrs []string, wgListenPorts []uint16) bool {
+	return len(addrs) > 0 && len(wgListenPorts) > 0
+}
 
 // emitHostInboundZone appends the accept(+drop) rules for one zone/family to
 // rules. No-op when the zone has no address in this family.
-func emitHostInboundZone(rules *[]string, v dpuserspace.ZoneHostInboundView, family string, addrs []string, wgPorts []uint16) {
+func emitHostInboundZone(rules *[]string, v dpuserspace.ZoneHostInboundView, family string, addrs []string) {
 	if len(addrs) == 0 {
 		return
 	}
@@ -2741,22 +2782,8 @@ func emitHostInboundZone(rules *[]string, v dpuserspace.ZoneHostInboundView, fam
 	// (Junos default-deny to the host is a silent drop). Attach a named counter
 	// (declared at the top of the table body by buildHostInboundFilterPayload) so
 	// the kernel host-inbound drops are scrapeable per zone/family (#3361) — the
-	// drop was previously uncounted and invisible to operators.
-	emitHostInboundZoneWireGuardAccept(rules, daddr, wgPorts)
 	cn := xnft.HostInboundDenyCounterName(v.Zone, family)
 	*rules = append(*rules, "    "+daddr+" counter name \""+cn+"\" drop")
-}
-
-// emitHostInboundZoneWireGuardAccept admits a zone's WireGuard tunnels (#11076):
-// `daddr <zone-addrs> udp dport <zone-ports> accept`, inside the zone's own
-// section after its service accepts and before its catch-all deny. No-op when
-// the zone serves no WG tunnels. Unzoned addresses match no zone section and
-// keep falling to the unzoned deny.
-func emitHostInboundZoneWireGuardAccept(rules *[]string, daddr string, wgPorts []uint16) {
-	if len(wgPorts) == 0 {
-		return
-	}
-	*rules = append(*rules, "    "+daddr+" udp dport "+renderWireGuardPortSpec(wgPorts)+" accept")
 }
 
 // flatWireGuardPorts unions a zone->ports map into the sorted flat port set

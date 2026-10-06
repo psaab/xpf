@@ -173,7 +173,8 @@ type staleReplyAdmit struct {
 // guards, matching the chain's address-level union semantics. A view admitting
 // any-service emits no per-ingress guard. Unzoned addresses have an empty owner
 // admit set and are included in every per-ingress destination set. WG listen
-// ports remain globally admitted.
+// ports are excluded from catalog denial because a separate host-inbound
+// mismatch guard evaluates their transport-zone ingress and local destination.
 func HostInboundStaleReplyGuardRules(views []HostInboundZoneView, unzonedV4, unzonedV6 []string, wgListenPorts []uint16, trustedReinject bool) []StaleReplyGuardRule {
 	wg := make(map[uint16]bool, len(wgListenPorts))
 	for _, port := range wgListenPorts {

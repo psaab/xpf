@@ -274,13 +274,24 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 	// refused ports; it does not remove the bound.
 	cfg.Warnings = append(cfg.Warnings, validateWireguardSteeredPortSet(cfg)...)
 
-	// #11076: WireGuard host-inbound admission is scoped to the tunnel's
-	// ingress zone. A tunnel whose interface binds no zone gets NO accept —
-	// its handshake cannot arrive. Warn (never reject): the tunnel is
-	// otherwise valid, and zoning the interface is the remedy.
+	// #11076: an unzoned listener needs a unique zone-owned tunnel source for
+	// host-inbound admission. A tunnel whose source is owned by a zone can be
+	// admitted on that zone's ingress even when its tunnel interface is unzoned.
 	for _, iface := range cfg.WireGuardUnzonedInterfaces() {
 		cfg.Warnings = append(cfg.Warnings,
-			"wireguard tunnel on unzoned interface "+iface+" has no host-inbound accept; add the interface to a security zone or inbound handshakes are dropped (#11076)")
+			"wireguard tunnel on unzoned interface "+iface+" has no unique zone-owned source address for host-inbound admission; configure a tunnel source owned by one zone or inbound handshakes are dropped (#11076)")
+	}
+
+	// #12119: source-less and unowned/ambiguous sources are accepted for
+	// compatibility, but they cannot be admitted safely until a unique local
+	// source owner is configured.
+	for _, iface := range cfg.WireGuardSourceLessInterfaces() {
+		cfg.Warnings = append(cfg.Warnings,
+			"wireguard tunnel on "+iface+" has no outer source address; scoped listener admission cannot be derived and inbound packets are dropped until tunnel source is configured (#12119)")
+	}
+	for _, iface := range cfg.WireGuardInvalidSourceInterfaces() {
+		cfg.Warnings = append(cfg.Warnings,
+			"wireguard tunnel on "+iface+" has an outer source that is malformed, unowned, or ambiguous; scoped listener admission is fail-closed until tunnel source is a unique local address (#12119)")
 	}
 
 	// #5162: non-WireGuard tunnel outer-family cross-field gate. A GRE/IPIP

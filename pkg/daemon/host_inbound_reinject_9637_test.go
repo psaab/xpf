@@ -167,6 +167,102 @@ func TestHostInboundReinjectStaleOmitsAccept9637(t *testing.T) {
 	}
 }
 
+// TestHostInboundWireGuardSNATReinjectGuardOrder12119 pins that trusted
+// reinjection cannot bypass WG owner-zone mismatch drops. Guards stay ahead of
+// broad reply/service rules, while the existing later reinject accept remains
+// after fine junos-host jumps and is reached only after the specific drop rules.
+func TestHostInboundWireGuardSNATReinjectGuardOrder12119(t *testing.T) {
+	views, unzonedV4, unzonedV6 := reinjectViews9637()
+	_, _, _, programs, _, _ := parityHostInboundInputs()
+	for _, tc := range []struct {
+		name     string
+		programs []dpuserspace.JunosHostProgram
+		fresh    bool
+	}{
+		{name: "no-programs-fresh", fresh: true},
+		{name: "with-programs-fresh", programs: programs, fresh: true},
+		{name: "no-programs-stale"},
+		{name: "with-programs-stale", programs: programs},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := buildHostInboundFilterPayload(
+				views, unzonedV4, unzonedV6, tc.programs,
+				map[string][]uint16{"wan": {51820}}, tc.fresh,
+			)
+			lines := strings.Split(payload, "\n")
+			wgDrop := -1
+			unzonedDrop := -1
+			for i, line := range lines {
+				if strings.Contains(line, "udp dport 51820") && strings.HasSuffix(strings.TrimSpace(line), "drop") {
+					if strings.Contains(line, "10.0.99.1") {
+						unzonedDrop = i
+					} else if wgDrop < 0 {
+						wgDrop = i
+					}
+				}
+				if tc.fresh && strings.Contains(line, "udp dport 51820") &&
+					strings.HasSuffix(strings.TrimSpace(line), "drop") &&
+					strings.Contains(line, `iifname != "xpf-usp0"`) {
+					t.Errorf("trusted reinject must not bypass a WG mismatch drop: %s", line)
+				}
+			}
+			if wgDrop < 0 {
+				t.Fatalf("missing zoned WG mismatch drop:\n%s", payload)
+			}
+			if unzonedDrop < 0 {
+				t.Fatalf("missing unzoned WG drop:\n%s", payload)
+			}
+			if strings.Contains(lines[unzonedDrop], "xpf-usp0") {
+				t.Fatalf("trusted reinject must not bypass the unzoned destination drop: %s", lines[unzonedDrop])
+			}
+			replyIdx := -1
+			for i, line := range lines {
+				if strings.TrimSpace(line) == "ct state established,related ct direction reply accept" {
+					replyIdx = i
+					break
+				}
+			}
+			if replyIdx < 0 || wgDrop >= replyIdx {
+				t.Fatalf("WG mismatch drop must stay ahead of broad reply accept (drop=%d reply=%d):\n%s", wgDrop, replyIdx, payload)
+			}
+
+			reinjectAccepts := reinjectAcceptLines(t, payload)
+			if !tc.fresh {
+				if len(reinjectAccepts) != 0 {
+					t.Fatalf("stale dataplane rendered trusted reinject accepts: %v", reinjectAccepts)
+				}
+				return
+			}
+			if len(reinjectAccepts) != 2 {
+				t.Fatalf("fresh dataplane should retain v4/v6 trusted reinject accepts, got %v", reinjectAccepts)
+			}
+			firstAccept := -1
+			for i, line := range lines {
+				if strings.Contains(line, `"xpf-usp0"`) && strings.HasSuffix(strings.TrimSpace(line), "accept") {
+					firstAccept = i
+					break
+				}
+			}
+			if firstAccept < 0 || wgDrop >= firstAccept {
+				t.Fatalf("WG mismatch drop must precede the existing later reinject accept (drop=%d accept=%d):\n%s", wgDrop, firstAccept, payload)
+			}
+			for i, program := range tc.programs {
+				jump := `jump ` + xnft.HostInboundJunosHostChainName(i, program.Zone)
+				jumpIdx := -1
+				for lineIdx, line := range lines {
+					if strings.Contains(line, jump) {
+						jumpIdx = lineIdx
+						break
+					}
+				}
+				if jumpIdx < 0 || jumpIdx >= firstAccept {
+					t.Fatalf("fine program jump %q must precede trusted reinject accept (jump=%d accept=%d):\n%s", jump, jumpIdx, firstAccept, payload)
+				}
+			}
+		})
+	}
+}
+
 // TestHostInboundReinjectViewsScoped9637 pins why the accept is views-scoped,
 // not blanket: the unzoned address is judged by the unchanged #4420 catch-all
 // in BOTH designs, and the accept set carries no unzoned value. It also pins

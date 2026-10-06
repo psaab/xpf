@@ -135,18 +135,44 @@ func TestColdBootFenceAdmitsMandatoryL3(t *testing.T) {
 }
 
 // TestColdBootFenceAdmitsWireGuardPort proves that a responder-only tunnel's
-// configured listen port remains available only on the address scope of its
-// serving zone while the cold-boot fence is active.
+// configured listen port is admitted only on the unique owner zone of its
+// configured outer source address, not its logical tunnel zone.
 func TestColdBootFenceAdmitsWireGuardPort(t *testing.T) {
 	cfg := hostInboundWireGuardTestConfig()
 	views := dpuserspace.BuildZoneHostInboundViews(cfg)
-	fence := buildHostInboundFencePayload(views, nil, nil, cfg.WireGuardListenPorts(), cfg.WireGuardZonePorts(), nil, nil, dhcpBackstopLists{})
+	wgZonePorts := hostInboundWireGuardZonePorts(cfg, views)
+	if len(wgZonePorts) != 1 || len(wgZonePorts["wan"]) != 1 || wgZonePorts["wan"][0] != 51820 {
+		t.Fatalf("host-inbound fence WG zones = %v, want only wan:[51820]", wgZonePorts)
+	}
+
+	var wanIngress, lanIngress []string
+	for _, view := range views {
+		switch view.Zone {
+		case "wan":
+			wanIngress = view.IngressNetdevs
+		case "lan":
+			lanIngress = view.IngressNetdevs
+		}
+	}
+	if len(wanIngress) == 0 || len(lanIngress) == 0 {
+		t.Fatalf("fixture ingress scopes missing: wan=%v lan=%v", wanIngress, lanIngress)
+	}
+
+	fence := buildHostInboundFencePayload(views, nil, nil, cfg.WireGuardListenPorts(), wgZonePorts, nil, nil, dhcpBackstopLists{})
 	for _, want := range []string{
-		"ip daddr 172.16.50.8 udp dport 51820 accept",
-		"ip6 daddr 2001:db8:50::8 udp dport 51820 accept",
+		"iifname " + nftIifnameSet(wanIngress) + " ip daddr 172.16.50.8 udp dport 51820 accept",
+		"iifname " + nftIifnameSet(wanIngress) + " ip6 daddr 2001:db8:50::8 udp dport 51820 accept",
 	} {
 		if !strings.Contains(fence, want) {
-			t.Errorf("fence must emit scoped WG accept %q:\n%s", want, fence)
+			t.Errorf("fence must admit WG only on the outer-source owner ingress %q:\n%s", want, fence)
+		}
+	}
+	for _, wrong := range []string{
+		"iifname " + nftIifnameSet(lanIngress) + " ip daddr 172.16.50.8 udp dport 51820 accept",
+		"ip daddr 10.0.61.1 udp dport 51820 accept",
+	} {
+		if strings.Contains(fence, wrong) {
+			t.Errorf("fence admitted a non-owner WireGuard tuple %q:\n%s", wrong, fence)
 		}
 	}
 	for _, line := range strings.Split(fence, "\n") {

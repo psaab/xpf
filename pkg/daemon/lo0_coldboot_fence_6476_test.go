@@ -57,6 +57,9 @@ func lo0FenceTestConfig() *config.Config {
 // Reverting the fence makes the fence-installed assertion RED.
 func TestColdBootLo0InstallFailureInstallsFence(t *testing.T) {
 	cfg := lo0FenceTestConfig()
+	wgCfg := hostInboundWireGuardTestConfig()
+	cfg.Interfaces.Interfaces["wg0"] = wgCfg.Interfaces.Interfaces["wg0"]
+	cfg.Security.Zones["lan"].Interfaces = append(cfg.Security.Zones["lan"].Interfaces, "wg0")
 
 	injected := errors.New("nftables: lo0 rule load failed")
 	var lo0Calls, fenceCalls int
@@ -118,6 +121,10 @@ func TestColdBootLo0InstallFailureInstallsFence(t *testing.T) {
 	}
 	if !sliceContains(fenceViewAddrs(fenceSpec, true), "2001:db8:50::8") {
 		t.Errorf("lo0 fence must fence the enforced wan v6 address 2001:db8:50::8:\n%+v", fenceSpec)
+	}
+	if len(fenceSpec.WGZonePorts) != 1 || len(fenceSpec.WGZonePorts["wan"]) != 1 ||
+		fenceSpec.WGZonePorts["wan"][0] != 51820 || len(fenceSpec.WGZonePorts["lan"]) != 0 {
+		t.Errorf("lo0 cold-boot fence WG zones = %v, want only outer-source owner wan:[51820]", fenceSpec.WGZonePorts)
 	}
 }
 

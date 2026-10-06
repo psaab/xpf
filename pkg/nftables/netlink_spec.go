@@ -281,12 +281,10 @@ type HostInboundSpec struct {
 	UnzonedIngressNetdevs   []string // #11409: unzoned physical input scope, before destination fallback
 	UnzonedIngressVRFSlaves []string // #11409: LOCAL_IN slave scope before shared-master zone rules
 	Programs                []JunosHostProgram
-	WGListenPorts           []uint16
-	// WGZonePorts (#11076) scopes WireGuard admission per zone: zone name ->
-	// sorted listen ports of that zone's tunnels. Rendered as daddr-scoped
-	// accepts inside each zone's section (ordered with zone policy). Zones
-	// absent from the map get no WG accept; WGListenPorts remains for the
-	// stale-reply guards, which are scope-independent.
+	WGListenPorts           []uint16 // global WG ports denied on zone/destination/ingress mismatch, also used by stale-reply guards.
+	// WGZonePorts maps the unique owner zone of a WG tunnel's outer source
+	// address to its ports. Admission also requires that zone's ingress and a
+	// uniquely same-zone local destination.
 	WGZonePorts map[string][]uint16
 	// DataplaneFresh is the #9637-D1 pre-landing fail-closed gate: true iff
 	// the userspace dataplane runs this generation's snapshot. When false the
