@@ -94,7 +94,7 @@ pub(super) use inspect::{
     live_frame_ports_bytes, live_frame_ports_from_meta_bytes, metadata_tuple_complete,
     nibble_checked_l3, nibble_trusted_stamp, packet_rel_l4_offset,
     packet_rel_l4_offset_and_protocol, parse_flow_ports, parse_ipv4_session_flow_from_frame,
-    parse_packet_destination_from_frame, parse_session_flow_from_bytes,
+    parse_packet_destination_from_frame, parse_packet_source_from_frame, parse_session_flow_from_bytes,
     parse_session_flow_from_frame, parse_session_flow_from_meta, parse_zone_encoded_fabric_ingress,
     parse_zone_encoded_fabric_ingress_from_frame, verified_l3_or_stamp,
     ZoneEncodedFabricStamp,

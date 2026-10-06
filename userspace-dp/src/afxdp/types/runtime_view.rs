@@ -336,10 +336,10 @@ impl PMechInventory {
 }
 
 impl PMechTunnelRow {
-    pub(in crate::afxdp) fn allows_destination(&self, destination: IpAddr) -> bool {
+    pub(in crate::afxdp) fn allows_source(&self, source: IpAddr) -> bool {
         self.ingress_prefixes
             .iter()
-            .any(|prefix| prefix.contains(&destination))
+            .any(|prefix| prefix.contains(&source))
     }
 
     pub(in crate::afxdp) fn selector_projection(
@@ -1122,8 +1122,8 @@ mod tests {
         );
         let inventory = PMechInventory::from_snapshot(Some(&snapshot));
         let row = inventory.exact_tunnel("st0", 9, 10).expect("matching range projection");
-        assert!(row.allows_destination("10.0.0.3".parse().expect("IPv4 address")));
-        assert!(!row.allows_destination("10.0.0.5".parse().expect("IPv4 address")));
+        assert!(row.allows_source("10.0.0.3".parse().expect("IPv4 address")));
+        assert!(!row.allows_source("10.0.0.5".parse().expect("IPv4 address")));
     }
 
     #[test]
@@ -1153,9 +1153,9 @@ mod tests {
         assert!(inventory.has_main_table_routes());
         assert_eq!(inventory.main_routes.len(), 2, "discard audit row must remain attached");
         let row = inventory.exact_tunnel("st0", 9, 10).expect("valid unshadowed projection");
-        assert!(row.allows_destination("10.0.1.1".parse().expect("IPv4 address")));
-        assert!(!row.allows_destination("10.1.1.1".parse().expect("IPv4 address")));
-        assert!(row.allows_destination("10.2.1.1".parse().expect("IPv4 address")));
+        assert!(row.allows_source("10.0.1.1".parse().expect("IPv4 address")));
+        assert!(!row.allows_source("10.1.1.1".parse().expect("IPv4 address")));
+        assert!(row.allows_source("10.2.1.1".parse().expect("IPv4 address")));
 
         let malformed = inventory_snapshot(
             vec![route(0, 254, "10.0.0.0/24", RTN_UNICAST, vec![hop(0)])],

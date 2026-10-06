@@ -1504,6 +1504,41 @@ fn parse_packet_destination_from_frame_falls_back_on_wrong_stamp_9900() {
     );
 }
 
+#[test]
+fn parse_packet_source_from_frame_reads_original_l3_source() {
+    let v4 = v4_frame(PROTO_TCP, 40, &[0u8; 20]);
+    let expected_v4 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    for offset in [0, 14, 18] {
+        let mut meta = v4_meta(PROTO_TCP);
+        meta.l3_offset = offset;
+        assert_eq!(
+            parse_packet_source_from_frame(&v4, meta),
+            Some(expected_v4),
+            "IPv4 source with L3 stamp {offset}"
+        );
+    }
+
+    let v6 = v6_frame(PROTO_TCP, 20, &[0u8; 20]);
+    let expected_v6 = IpAddr::V6(Ipv6Addr::from([0x20; 16]));
+    for offset in [0, 14, 18] {
+        let mut meta = v6_meta(PROTO_TCP);
+        meta.l3_offset = offset;
+        assert_eq!(
+            parse_packet_source_from_frame(&v6, meta),
+            Some(expected_v6),
+            "IPv6 source with L3 stamp {offset}"
+        );
+    }
+
+    let mut truncated = v4.clone();
+    truncated.truncate(14 + 19);
+    assert_eq!(
+        parse_packet_source_from_frame(&truncated, v4_meta(PROTO_TCP)),
+        None,
+        "truncated IPv4 header has no source proof"
+    );
+}
+
 /// #9900 F-095 (SPARK-M5): the meta fast arm fires only on a verified L3.
 /// The fixture's stamp pair (18/38) is wrong-but-plausible AND self-covering
 /// (byte 18 yields IHL 20 with no v4 nibble; the misread "total" covers 38),

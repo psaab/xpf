@@ -18,8 +18,8 @@ use super::ipsec_inner_queue::{
     IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL, IPSEC_INNER_WORKER_RETIRED_TOTAL,
 };
 use super::{
-    ForwardingState, IpsecTunnelRows, PMechInventory, RuntimeView, UserspaceDpMeta,
-    ValidationState,
+    ForwardingDisposition, ForwardingState, IpsecTunnelRows, PMechInventory, RouteIdentity,
+    RuntimeView, UserspaceDpMeta, ValidationState,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 /// New per-protocol ECN refusal counter required by D13. The outer ESP header
@@ -336,14 +336,36 @@ fn d14_zone_gate(
     let Some(pmech_row) = pmech_inventory.exact_tunnel(input.stn, row.if_id, row.logical_ifindex) else {
         return Err(deny(input, "d22_tunnel_inventory_invalid", reason::EVALUATOR_UNAVAILABLE));
     };
+    let Some(source) = crate::afxdp::frame::parse_packet_source_from_frame(&owned, meta) else {
+        ipsec_inner_parse_drops_total.fetch_add(1, Ordering::Relaxed);
+        return Err(deny(input, "d21_source_unresolved", reason::PARSE_ECN));
+    };
+    if !pmech_row.allows_source(source) {
+        return Err(deny(
+            input,
+            "d21_source_outside_ingress",
+            reason::DOMAIN_OVERLAP,
+        ));
+    }
     let Some(destination) =
         crate::afxdp::frame::parse_packet_destination_from_frame(&owned, meta)
     else {
         ipsec_inner_parse_drops_total.fetch_add(1, Ordering::Relaxed);
         return Err(deny(input, "d22_destination_unresolved", reason::PARSE_ECN));
     };
-    if !pmech_row.allows_destination(destination) {
-        return Err(deny(input, "d22_destination_outside_ingress", reason::NO_ROUTE));
+    let lookup = super::forwarding::lookup_forwarding_resolution(forwarding, destination);
+    let Some(actual_route) = lookup.selected_route else {
+        return Err(deny(input, "d19_actual_route_missing", reason::NO_ROUTE));
+    };
+    if actual_route != (RouteIdentity { domain: 0, table: 254 }) {
+        return Err(deny(
+            input,
+            "d22_route_domain_mismatch",
+            reason::OTHER_DOMAIN,
+        ));
+    }
+    if lookup.resolution.disposition != ForwardingDisposition::ForwardCandidate {
+        return Err(deny(input, "d19_route_not_forwardable", reason::NO_ROUTE));
     }
     let (selectors, effective_prefixes) = pmech_row.selector_projection();
     if selectors.is_empty() || effective_prefixes.is_empty() {
@@ -473,9 +495,10 @@ pub(crate) const IPSEC_INNER_INGRESS_FLAG: u8 = 1 << 6;
 mod tests {
     use super::*;
     use crate::afxdp::types::{
-        ForwardingState, IpsecTunnelRow, PMechInventory, RuntimeView, ValidationState,
+        ForwardingState, IpsecTunnelRow, LeakRuleV4, PMechInventory, RouteEntryV4, RouteIdentity,
+        RuntimeView, ValidationState,
     };
-    use crate::afxdp::ipsec_inner_queue::reason;
+    use crate::prefix::PrefixV4;
     use crate::protocol::{
         IpsecMainRouteNextHopSnapshot, IpsecMainRouteSnapshot, IpsecPMechInventorySnapshot,
         IpsecPMechTunnelRowSnapshot, IpsecTrafficSelectorSnapshot,
@@ -488,18 +511,32 @@ mod tests {
             generation: 77,
             fib_generation,
             complete: true,
-            main_routes: vec![IpsecMainRouteSnapshot {
-                domain: 0,
-                table: 254,
-                family: "inet".into(),
-                destination: "10.0.0.0/24".into(),
-                disposition: 1, // RTN_UNICAST
-                next_hops: vec![IpsecMainRouteNextHopSnapshot {
-                    ifindex: 10,
-                    weight: 1,
-                }],
-                ..Default::default()
-            }],
+            main_routes: vec![
+                IpsecMainRouteSnapshot {
+                    domain: 0,
+                    table: 254,
+                    family: "inet".into(),
+                    destination: "0.0.0.0/0".into(),
+                    disposition: 1, // RTN_UNICAST
+                    next_hops: vec![IpsecMainRouteNextHopSnapshot {
+                        ifindex: 20,
+                        weight: 1,
+                    }],
+                    ..Default::default()
+                },
+                IpsecMainRouteSnapshot {
+                    domain: 0,
+                    table: 254,
+                    family: "inet".into(),
+                    destination: "10.0.0.0/24".into(),
+                    disposition: 1, // RTN_UNICAST
+                    next_hops: vec![IpsecMainRouteNextHopSnapshot {
+                        ifindex: 10,
+                        weight: 1,
+                    }],
+                    ..Default::default()
+                },
+            ],
             tunnel_rows: vec![IpsecPMechTunnelRowSnapshot {
                 stn: "st0".into(),
                 if_id: 1,
@@ -565,16 +602,102 @@ mod tests {
         }
     }
 
-    fn test_packet(destination: [u8; 4]) -> [u8; 20] {
+    fn test_forwarding_authority() -> ForwardingState {
+        let mut forwarding = ForwardingState::default();
+        forwarding.ifindex_to_zone_id.insert(10, 1);
+        forwarding.route_table_identities.insert(
+            "inet.0".into(),
+            RouteIdentity {
+                domain: 0,
+                table: 254,
+            },
+        );
+        forwarding.route_table_identities.insert(
+            "inet6.0".into(),
+            RouteIdentity {
+                domain: 0,
+                table: 254,
+            },
+        );
+        forwarding.route_table_identity_map_complete = true;
+        forwarding
+    }
+
+    fn test_route(prefix: &str, ifindex: i32) -> RouteEntryV4 {
+        let prefix = PrefixV4::from_net(prefix.parse().expect("IPv4 route prefix"));
+        let next_hop = if ifindex == 20 {
+            "192.0.2.1".parse().expect("default-route next hop")
+        } else {
+            "10.0.0.2".parse().expect("tunnel-network next hop")
+        };
+        RouteEntryV4::single(
+            prefix,
+            ifindex,
+            0,
+            Some(next_hop),
+            false,
+            String::new(),
+            0,
+        )
+    }
+
+    fn test_forwarding_with_route(prefix: &str, ifindex: i32) -> ForwardingState {
+        let mut forwarding = test_forwarding_authority();
+        forwarding.routes_v4.insert(
+            "inet.0".into(),
+            vec![test_route(prefix, ifindex)],
+        );
+        forwarding
+    }
+
+    fn test_packet_with_source(source: [u8; 4], destination: [u8; 4]) -> [u8; 20] {
         let mut packet = [0; 20];
         packet[0] = 0x45;
         packet[2..4].copy_from_slice(&20u16.to_be_bytes());
         packet[8] = 64;
         packet[9] = 6;
-        packet[12..16].copy_from_slice(&[192, 0, 2, 1]);
+        packet[12..16].copy_from_slice(&source);
         packet[16..20].copy_from_slice(&destination);
         packet
     }
+
+    fn test_forwarding_with_leaked_route() -> ForwardingState {
+        let mut forwarding = test_forwarding_authority();
+        forwarding.route_table_identities.insert(
+            "tenant.inet.0".into(),
+            RouteIdentity {
+                domain: 501,
+                table: 501,
+            },
+        );
+        forwarding.route_table_identities.insert(
+            "tenant.inet6.0".into(),
+            RouteIdentity {
+                domain: 501,
+                table: 501,
+            },
+        );
+        let prefix = PrefixV4::from_net("10.0.0.0/24".parse().expect("leak prefix"));
+        forwarding.leak_rules_v4.insert(
+            "inet.0".into(),
+            vec![LeakRuleV4 {
+                prefix,
+                next_table: "tenant.inet.0".into(),
+                rule_priority: 1,
+                incarnation: 1,
+            }],
+        );
+        forwarding.routes_v4.insert(
+            "tenant.inet.0".into(),
+            vec![test_route("10.0.0.0/24", 10)],
+        );
+        forwarding
+    }
+
+    fn test_packet(destination: [u8; 4]) -> [u8; 20] {
+        test_packet_with_source([192, 0, 2, 1], destination)
+    }
+
 
     fn input<'a>(bytes: &'a [u8], advisory: IpsecInnerAdvisory) -> IpsecInnerInput<'a> {
         IpsecInnerInput {
@@ -595,7 +718,7 @@ mod tests {
 
     #[test]
     fn unknown_stn_is_ifid_underivable_not_default_zone() {
-        let v = view_with_rows(1, 1, IpsecTunnelRows::default(), ForwardingState::default());
+        let v = view_with_rows(1, 1, IpsecTunnelRows::default(), test_forwarding_authority());
         let d = adjudicate_ipsec_inner(
             &v,
             input(
@@ -640,7 +763,7 @@ mod tests {
                 if_id: 1,
                 logical_ifindex: 10,
             }]),
-            ForwardingState::default(),
+            test_forwarding_authority(),
         );
         let d = adjudicate_ipsec_inner(
             &v,
@@ -653,39 +776,153 @@ mod tests {
     }
 
     #[test]
+    fn d14_source_proof_rejects_outside_source_even_with_allowed_destination_9506() {
+        let forwarding = test_forwarding_with_route("10.0.0.0/24", 10);
+        let rows = IpsecTunnelRows::new([IpsecTunnelRow {
+            stn: "st0".into(),
+            if_id: 1,
+            logical_ifindex: 10,
+        }]);
+        let view = view_with_rows(1, 1, rows, forwarding);
+        let packet = test_packet([10, 0, 0, 1]); // source 192.0.2.1 is outside ingress proof
+        assert_eq!(
+            adjudicate_ipsec_inner(&view, input(&packet, advisory(1, 1, 1, 1, 1))).reason(),
+            Some(reason::DOMAIN_OVERLAP)
+        );
+    }
+
+    #[test]
+    fn d14_actual_route_miss_is_e19_9506() {
+        let forwarding = test_forwarding_authority(); // no FIB route for 10.0.0.1
+        let rows = IpsecTunnelRows::new([IpsecTunnelRow {
+            stn: "st0".into(),
+            if_id: 1,
+            logical_ifindex: 10,
+        }]);
+        let view = view_with_rows(1, 1, rows, forwarding);
+        let packet = test_packet_with_source([10, 0, 0, 1], [10, 0, 0, 1]);
+        assert_eq!(
+            adjudicate_ipsec_inner(&view, input(&packet, advisory(1, 1, 1, 1, 1))).reason(),
+            Some(reason::NO_ROUTE)
+        );
+    }
+
+    #[test]
+    fn d14_actual_route_table_mismatch_is_e22_9506() {
+        let forwarding = test_forwarding_with_leaked_route();
+        let rows = IpsecTunnelRows::new([IpsecTunnelRow {
+            stn: "st0".into(),
+            if_id: 1,
+            logical_ifindex: 10,
+        }]);
+        let view = view_with_rows(1, 1, rows, forwarding);
+        let packet = test_packet_with_source([10, 0, 0, 1], [10, 0, 0, 1]);
+        assert_eq!(
+            adjudicate_ipsec_inner(&view, input(&packet, advisory(1, 1, 1, 1, 1))).reason(),
+            Some(reason::OTHER_DOMAIN)
+        );
+    }
+
+    #[test]
+    fn d14_missing_neighbor_route_is_e19_style_denial_9506() {
+        let forwarding = test_forwarding_with_route("10.0.0.0/24", 10);
+        let rows = IpsecTunnelRows::new([IpsecTunnelRow {
+            stn: "st0".into(),
+            if_id: 1,
+            logical_ifindex: 10,
+        }]);
+        let view = view_with_rows(1, 1, rows, forwarding.clone());
+        let destination = "10.0.0.1".parse().expect("IPv4 destination");
+        let route = crate::afxdp::forwarding::lookup_forwarding_resolution(
+            &forwarding,
+            destination,
+        );
+        assert_eq!(
+            route.selected_route,
+            Some(RouteIdentity {
+                domain: 0,
+                table: 254,
+            })
+        );
+        assert_eq!(
+            route.resolution.disposition,
+            ForwardingDisposition::MissingNeighbor
+        );
+
+        let packet = test_packet_with_source([10, 0, 0, 1], [10, 0, 0, 1]);
+        let decision =
+            adjudicate_ipsec_inner(&view, input(&packet, advisory(1, 1, 1, 1, 1)));
+        assert_eq!(decision.reason(), Some(reason::NO_ROUTE));
+    }
+
+    #[test]
+    fn d14_source_proof_replaces_destination_prefix_gate_9506() {
+        let mut forwarding = test_forwarding_authority();
+        forwarding.routes_v4.insert(
+            "inet.0".into(),
+            vec![test_route("0.0.0.0/0", 20)],
+        );
+        let next_hop: std::net::IpAddr = "192.0.2.1".parse().expect("IPv4 next hop");
+        forwarding.neighbors.insert(
+            (20, next_hop),
+            crate::afxdp::NeighborEntry {
+                mac: [0x02, 0, 0, 0, 0, 20],
+            },
+        );
+        let route = crate::afxdp::forwarding::lookup_forwarding_resolution(
+            &forwarding,
+            "203.0.113.9".parse().expect("IPv4 destination"),
+        );
+        assert_eq!(
+            route.resolution.disposition,
+            ForwardingDisposition::ForwardCandidate
+        );
+        let rows = IpsecTunnelRows::new([IpsecTunnelRow {
+            stn: "st0".into(),
+            if_id: 1,
+            logical_ifindex: 10,
+        }]);
+        let view = view_with_rows(1, 1, rows, forwarding);
+        let packet = test_packet_with_source([10, 0, 0, 1], [203, 0, 113, 9]);
+        let decision =
+            adjudicate_ipsec_inner(&view, input(&packet, advisory(1, 1, 1, 1, 1)));
+        assert!(decision.is_would_permit());
+        assert_eq!(decision.reason(), None);
+    }
+
+    #[test]
     fn would_permit_is_a_verdict_and_never_a_rust_permit() {
-        let mut forwarding = ForwardingState::default();
-        forwarding.ifindex_to_zone_id.insert(10, 1);
+        let mut forwarding = test_forwarding_with_route("10.0.0.0/24", 10);
+        let next_hop: std::net::IpAddr = "10.0.0.2".parse().expect("IPv4 next hop");
+        forwarding.neighbors.insert(
+            (10, next_hop),
+            crate::afxdp::NeighborEntry {
+                mac: [0x02, 0, 0, 0, 0, 10],
+            },
+        );
         let rows = IpsecTunnelRows::new([IpsecTunnelRow {
             stn: "st0".into(),
             if_id: 1,
             logical_ifindex: 10,
         }]);
         let v = view_with_rows(1, 1, rows, forwarding);
-        let d = adjudicate_ipsec_inner(
-            &v,
-            input(
-                &test_packet([10, 0, 0, 1]),
-                advisory(1, 1, 1, 1, 1),
-            ),
-        );
+        let packet = test_packet_with_source([10, 0, 0, 1], [10, 0, 0, 1]);
+        let d = adjudicate_ipsec_inner(&v, input(&packet, advisory(1, 1, 1, 1, 1)));
         assert!(d.is_would_permit());
         assert_eq!(d.reason(), None);
         assert_eq!(d.runtime_view_publication_generation(), Some(1));
 
+        let outside_packet = test_packet_with_source([10, 0, 0, 1], [203, 0, 113, 9]);
         let outside = adjudicate_ipsec_inner(
             &v,
-            input(
-                &test_packet([203, 0, 113, 9]),
-                advisory(1, 1, 1, 1, 1),
-            ),
+            input(&outside_packet, advisory(1, 1, 1, 1, 1)),
         );
         assert_eq!(outside.reason(), Some(reason::NO_ROUTE));
     }
 
     #[test]
     fn d14_input_logical_ifindex_mismatch_is_ifid_underivable() {
-        let mut forwarding = ForwardingState::default();
+        let mut forwarding = test_forwarding_authority();
         forwarding.ifindex_to_zone_id.insert(10, 1);
         let rows = IpsecTunnelRows::new([IpsecTunnelRow {
             stn: "st0".into(),
@@ -706,7 +943,7 @@ mod tests {
 
     #[test]
     fn d14_advisory_zone_and_ifid_mismatch_drop() {
-        let mut forwarding = ForwardingState::default();
+        let mut forwarding = test_forwarding_authority();
         forwarding.ifindex_to_zone_id.insert(10, 1);
         let rows = IpsecTunnelRows::new([IpsecTunnelRow {
             stn: "st0".into(),

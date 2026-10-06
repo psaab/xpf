@@ -2643,6 +2643,39 @@ pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress_from_frame(
     }
 }
 
+/// Parse the original IPv4/IPv6 source address from a frame using the
+/// verified L3 offset or its trusted metadata stamp.
+pub(in crate::afxdp) fn parse_packet_source_from_frame(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+) -> Option<IpAddr> {
+    let l3 = verified_l3_or_stamp(frame, meta.l3_offset, meta.addr_family);
+    match meta.addr_family as i32 {
+        libc::AF_INET => {
+            let end = l3.checked_add(20)?;
+            if end > frame.len() {
+                return None;
+            }
+            Some(IpAddr::V4(Ipv4Addr::new(
+                frame[l3 + 12],
+                frame[l3 + 13],
+                frame[l3 + 14],
+                frame[l3 + 15],
+            )))
+        }
+        libc::AF_INET6 => {
+            let end = l3.checked_add(40)?;
+            if end > frame.len() {
+                return None;
+            }
+            Some(IpAddr::V6(Ipv6Addr::from(
+                <[u8; 16]>::try_from(&frame[l3 + 8..l3 + 24]).ok()?,
+            )))
+        }
+        _ => None,
+    }
+}
+
 pub(in crate::afxdp) fn parse_packet_destination_from_frame(
     frame: &[u8],
     meta: UserspaceDpMeta,
