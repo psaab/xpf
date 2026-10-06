@@ -5,7 +5,10 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/scheduler"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -42,6 +45,32 @@ func TestRouteListenerBumpsAfterLearnedRoutePublish11565(t *testing.T) {
 	requireRouteListenerCalls11565(t, dp.calls, "publish", "bump")
 	if d.pendingFIBBump {
 		t.Fatal("pendingFIBBump remains set after a confirmed FIB bump")
+	}
+}
+
+func TestRouteListenerCarriesSchedulerFailClosedLatch12273(t *testing.T) {
+	now := time.Date(2026, time.October, 6, 12, 0, 0, 0, time.UTC)
+	sched, _ := scheduler.NewPrimed(
+		map[string]*config.SchedulerConfig{"workhours": {Name: "workhours", AllDay: true}},
+		func(context.Context, map[string]bool) error { return nil },
+		now,
+	)
+	failErr := errors.New("stale scheduler republish")
+	sched.RecordRepublishResult(failErr, now.Add(-6*time.Minute))
+	sched.RecordRepublishResult(failErr, now)
+	if !sched.RepublishFailClosed() {
+		t.Fatal("test precondition: scheduler latch was not set")
+	}
+
+	dp := &fakeOverlayDP{}
+	d := routeListenerBumpDaemon11565(t, dp)
+	d.scheduler.Store(sched)
+	if !d.actuateLearnedRouteRefresh(context.Background()) {
+		t.Fatal("latched route-listener actuation did not converge")
+	}
+	if !dp.lastFailClosed || dp.lastSchedulerState["workhours"] {
+		t.Fatalf("route-listener publish lost latch disposition: failClosed=%v activeState=%v",
+			dp.lastFailClosed, dp.lastSchedulerState)
 	}
 }
 

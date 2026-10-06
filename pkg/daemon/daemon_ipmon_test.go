@@ -15,6 +15,7 @@ import (
 	"github.com/psaab/xpf/pkg/frr"
 	"github.com/psaab/xpf/pkg/ipmon"
 	"github.com/psaab/xpf/pkg/rpm"
+	"github.com/psaab/xpf/pkg/scheduler"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -27,11 +28,22 @@ type fakeOverlayDP struct {
 	publishSkipped             bool // simulate the duplicate-skip (published=false)
 	bumpErr                    error
 	lastOverlay                []config.RouteOverlayEntry
+	lastSchedulerState         map[string]bool
+	lastFailClosed             bool
 }
 
 func (f *fakeOverlayDP) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool) (bool, error) {
+	return f.PublishRouteOverlaySnapshotWithLatch(cfg, overlay, schedulerState, false)
+}
+
+func (f *fakeOverlayDP) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool, failClosed bool) (bool, error) {
 	f.calls = append(f.calls, "publish")
 	f.lastOverlay = overlay
+	f.lastSchedulerState = make(map[string]bool, len(schedulerState))
+	for name, active := range schedulerState {
+		f.lastSchedulerState[name] = active
+	}
+	f.lastFailClosed = failClosed
 	if f.publishErr != nil {
 		return false, f.publishErr
 	}
@@ -84,6 +96,42 @@ func TestActuatorPublishesBeforeFIBBump(t *testing.T) {
 	}
 	if len(dp.lastOverlay) != 1 || dp.lastOverlay[0].NextHop != "172.16.80.1" {
 		t.Fatalf("published overlay = %+v", dp.lastOverlay)
+	}
+}
+
+func TestActuatorCarriesSchedulerFailClosedLatch12273(t *testing.T) {
+	now := time.Date(2026, time.October, 6, 12, 0, 0, 0, time.UTC)
+	sched, _ := scheduler.NewPrimed(
+		map[string]*config.SchedulerConfig{"workhours": {Name: "workhours", AllDay: true}},
+		func(context.Context, map[string]bool) error { return nil },
+		now,
+	)
+	if !sched.ActiveState()["workhours"] {
+		t.Fatal("test precondition: open schedule was not active before stale republish")
+	}
+	failErr := errors.New("stale scheduler republish")
+	sched.RecordRepublishResult(failErr, now.Add(-6*time.Minute))
+	sched.RecordRepublishResult(failErr, now)
+	if !sched.RepublishFailClosed() {
+		t.Fatal("test precondition: scheduler latch was not set")
+	}
+	if sched.ActiveState()["workhours"] {
+		t.Fatal("latched scheduler state must report inactive before route-overlay publish")
+	}
+
+	dp := &fakeOverlayDP{}
+	d := &Daemon{
+		applySem: semaphore.NewWeighted(1),
+		ipmon:    failedIPMonEngine(t),
+	}
+	d.scheduler.Store(sched)
+	d.setDataplane(dp)
+	if !d.actuateRouteOverlayLocked(&config.Config{}) {
+		t.Fatal("latched route-overlay actuation did not converge")
+	}
+	if !dp.lastFailClosed || dp.lastSchedulerState["workhours"] {
+		t.Fatalf("route-overlay publish lost latch disposition: failClosed=%v activeState=%v",
+			dp.lastFailClosed, dp.lastSchedulerState)
 	}
 }
 

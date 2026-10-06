@@ -380,15 +380,21 @@ func (a *LegacyDataPlaneAdapter) SetFeedSnapshots(overlay map[string][]string) {
 	m.SetFeedSnapshots(overlay)
 }
 
-// PublishRouteOverlaySnapshot forwards the routes-only partial
-// republish (#1827). Returns whether a snapshot was actually
+// PublishRouteOverlaySnapshot forwards the routes-only partial republish
+// (#1827) with the normal scheduler disposition. Returns whether a snapshot was
 // published (duplicate-skips and helperless caching return false).
 func (a *LegacyDataPlaneAdapter) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool) (bool, error) {
+	return a.PublishRouteOverlaySnapshotWithLatch(cfg, overlay, schedulerState, false)
+}
+
+// PublishRouteOverlaySnapshotWithLatch preserves action-aware policy lowering
+// when a stale-republish latch forces the scheduler state inactive.
+func (a *LegacyDataPlaneAdapter) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool, failClosed bool) (bool, error) {
 	m, err := a.managerOrErr()
 	if err != nil {
 		return false, err
 	}
-	return m.PublishRouteOverlaySnapshot(cfg, overlay, schedulerState)
+	return m.PublishRouteOverlaySnapshotWithLatch(cfg, overlay, schedulerState, failClosed)
 }
 
 func (a *LegacyDataPlaneAdapter) BumpFIBGeneration() (uint32, error) {

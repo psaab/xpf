@@ -179,22 +179,31 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
-// IsActive reports whether the named scheduler is currently active.
+// IsActive reports whether the named scheduler is currently active. The
+// stale-republish latch makes every scheduler inactive in this public view.
 func (s *Scheduler) IsActive(name string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.active[name]
+	return s.active[name] && !s.republishFailClosed
 }
 
-// ActiveState returns a copy of the current active state for all schedulers.
+// ActiveState returns a copy of the current effective state for all schedulers.
 func (s *Scheduler) ActiveState() map[string]bool {
+	activeState, _ := s.ActiveStateWithFailClosed()
+	return activeState
+}
+
+// ActiveStateWithFailClosed returns one consistent snapshot of the effective
+// scheduler map and the stale-republish latch disposition.
+func (s *Scheduler) ActiveStateWithFailClosed() (map[string]bool, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	failClosed := s.republishFailClosed
 	out := make(map[string]bool, len(s.active))
-	for k, v := range s.active {
-		out[k] = v
+	for name, active := range s.active {
+		out[name] = active && !failClosed
 	}
-	return out
+	return out, failClosed
 }
 
 // Update replaces the scheduler configurations and re-evaluates immediately.

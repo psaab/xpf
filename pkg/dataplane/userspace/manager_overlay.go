@@ -100,7 +100,15 @@ func (m *Manager) SetFeedSnapshots(overlay map[string][]string) {
 // overlay publishes. The applied/show cache advances only after that snapshot
 // is accepted; nil keeps the current desired state and the inherited
 // (last-compiled) policy sections.
-func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool) (published bool, err error) {
+func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool) (bool, error) {
+	return m.PublishRouteOverlaySnapshotWithLatch(cfg, overlay, schedulerState, false)
+}
+
+// PublishRouteOverlaySnapshotWithLatch also carries the scheduler's
+// fail-closed disposition into the policy rebuild. ActiveState is deliberately
+// false while latched; without this bit a route-only republish would mark
+// scheduled DENY/REJECT rules inactive and renew the helper lease around them.
+func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool, failClosed bool) (published bool, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	wasDebt := m.snapshotRetryDebtLocked()
@@ -250,7 +258,7 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 	// leaves the inherited policy sections untouched (the route-apply caller that
 	// never carries scheduler state).
 	if schedulerState != nil {
-		if err := m.rebuildScheduledPolicySectionsLocked(&next, cfg, schedulerCopy); err != nil {
+		if err := m.rebuildScheduledPolicySectionsWithLatchLocked(&next, cfg, schedulerCopy, failClosed); err != nil {
 			return false, fmt.Errorf("build policy overlay snapshot for scheduler state: %w", err)
 		}
 		next.schedulerActiveState = copyPolicySchedulerActiveState(schedulerCopy)
