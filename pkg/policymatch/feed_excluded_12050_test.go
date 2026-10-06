@@ -98,3 +98,46 @@ func TestExcludedDenyOverEmptyDropFeedFailsClosed12050(t *testing.T) {
 		})
 	}
 }
+
+// Both strict-accepted literal-shaped feed names must reach the shared
+// content-rejection gate; otherwise Match fabricates the explicit later permit.
+func TestLiteralNamedDropFeedExcludedDenyFailsClosed12277(t *testing.T) {
+	for _, binding := range []string{"10.0.1.0/24", "192.0.2.7"} {
+		t.Run(binding, func(t *testing.T) {
+			lines := []string{
+				"set security zones security-zone trust",
+				"set security zones security-zone untrust",
+				"set security policies default-policy permit-all",
+				"set security dynamic-address feed-server partners url https://feeds.example/partners",
+				"set security dynamic-address address-name " + binding + " profile feed-name partners",
+				"set security dynamic-address address-name " + binding + " profile fail-mode drop",
+			}
+			lines = append(lines, policy9523("deny-except-feed", binding, "any", "deny")...)
+			lines = append(lines,
+				"set security policies from-zone trust to-zone untrust policy deny-except-feed match source-address-excluded")
+			lines = append(lines, policy9523("later-permit", "any", "any", "permit")...)
+			cfg, err := compileSet9523(t, lines, false)
+			if err != nil {
+				t.Fatalf("strict compile: %v", err)
+			}
+			if feed := cfg.Security.DynamicAddress.AddressBindings[binding]; feed == nil || feed.FailMode != "drop" {
+				t.Fatalf("strict-accepted fixture lost fail-mode drop binding %q: %+v", binding, feed)
+			}
+
+			res := Match(cfg, Query{
+				FromZone:    "trust",
+				ToZone:      "untrust",
+				SrcIP:       net.ParseIP("203.0.113.7"),
+				DstIP:       net.ParseIP("192.0.2.80"),
+				Protocol:    "tcp",
+				DstPort:     80,
+				FeedOverlay: map[string][]string{binding: {}},
+			})
+			assertContentRejected(t, res, "trust->untrust/deny-except-feed")
+			if !strings.Contains(strings.Join(res.ContentRejectionReasons, " | "), binding) {
+				t.Fatalf("content-rejection reason does not name the feed binding %q: %v",
+					binding, res.ContentRejectionReasons)
+			}
+		})
+	}
+}

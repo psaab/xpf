@@ -15,10 +15,14 @@ import (
 )
 
 func excludedDropFeedConfig12050(addresses []string, nested, destinationExcluded bool) *config.Config {
+	return excludedDropFeedConfigNamed12050("partners", addresses, nested, destinationExcluded)
+}
+
+func excludedDropFeedConfigNamed12050(binding string, addresses []string, nested, destinationExcluded bool) *config.Config {
 	ab := &config.AddressBook{}
 	if nested {
 		ab.AddressSets = map[string]*config.AddressSet{
-			"partners-set": {Name: "partners-set", Addresses: []string{"partners"}},
+			"partners-set": {Name: "partners-set", Addresses: []string{binding}},
 		}
 		addresses = []string{"partners-set"}
 	}
@@ -44,7 +48,7 @@ func excludedDropFeedConfig12050(addresses []string, nested, destinationExcluded
 			AddressBook: ab,
 			DynamicAddress: config.DynamicAddressConfig{
 				AddressBindings: map[string]*config.AddressBinding{
-					"partners": {Name: "partners", FeedNames: []string{"partner-feed"}, FailMode: "drop"},
+					binding: {Name: binding, FeedNames: []string{"partner-feed"}, FailMode: "drop"},
 				},
 			},
 			Policies: []*config.ZonePairPolicies{{
@@ -68,6 +72,59 @@ func excludedDropFeedConfig12050(addresses []string, nested, destinationExcluded
 				},
 			}},
 		},
+	}
+}
+
+// A feed binding whose name parses as an IP address must still resolve by name
+// before literal parsing. An empty fail-mode drop feed on an excluded DENY must
+// refuse publication, for both CIDR and bare-IP spellings.
+func TestExcludedDenyOverLiteralNamedDropFeedRefusesSnapshot12050(t *testing.T) {
+	for _, binding := range []string{"10.0.1.0/24", "192.0.2.7"} {
+		t.Run(binding, func(t *testing.T) {
+			cfg := excludedDropFeedConfigNamed12050(binding, []string{binding}, false, false)
+			overlay := map[string][]string{binding: {}}
+			snaps, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, overlay)
+			if err != nil {
+				t.Fatalf("buildPolicySnapshots error: %v", err)
+			}
+			if len(snaps) != 2 {
+				t.Fatalf("expected the deny and later permit rules, got %d", len(snaps))
+			}
+			first := snaps[0]
+			if !addressListHasSentinel(first.SourceLiterals) || len(first.SourceBookIDs) != 0 {
+				t.Fatalf("empty drop feed named like a literal must poison the excluded side; got literals=%v bookIDs=%v",
+					first.SourceLiterals, first.SourceBookIDs)
+			}
+			if reasons := PolicyContentRejectionReasons(cfg, overlay); len(reasons) == 0 {
+				t.Fatal("poisoned excluded-deny snapshot produced no whole-snapshot rejection reason")
+			}
+		})
+	}
+}
+
+// A genuine literal sibling remains concrete even when another token is a
+// literal-shaped feed name, preserving populated-sibling exclusion behavior.
+func TestExcludedDenyLiteralNamedDropFeedWithLiteralSiblingPublishes12050(t *testing.T) {
+	for _, binding := range []string{"10.0.1.0/24", "192.0.2.7"} {
+		t.Run(binding, func(t *testing.T) {
+			cfg := excludedDropFeedConfigNamed12050(binding,
+				[]string{binding, "198.51.100.0/24"}, false, false)
+			overlay := map[string][]string{binding: {}}
+			snaps, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, overlay)
+			if err != nil {
+				t.Fatalf("buildPolicySnapshots error: %v", err)
+			}
+			if len(snaps) != 2 {
+				t.Fatalf("expected the deny and later permit rules, got %d", len(snaps))
+			}
+			if addressListHasSentinel(snaps[0].SourceLiterals) || len(snaps[0].SourceBookIDs) == 0 {
+				t.Fatalf("a genuine literal sibling must preserve normal exclusion behavior; got literals=%v bookIDs=%v",
+					snaps[0].SourceLiterals, snaps[0].SourceBookIDs)
+			}
+			if reasons := PolicyContentRejectionReasons(cfg, overlay); len(reasons) != 0 {
+				t.Fatalf("a genuine literal sibling must not reject the snapshot: %v", reasons)
+			}
+		})
 	}
 }
 
