@@ -157,9 +157,11 @@ publisher cannot keep stale scheduled permits alive.
 The Rust helper records heartbeat receipt with its monotonic clock. At exactly
 300 s the schedule disposition remains authoritative; only when the lease is
 older does the helper choose the deny-first interpretation: scheduled permits
-become ineligible, while scheduled denies/rejects remain eligible. Lease expiry
-evicts scheduled-permit cache entries and causes established sessions to
-revalidate; it does not flush the whole flow cache or change snapshot generation.
+become ineligible, while scheduled denies/rejects remain eligible. On the
+first expired-lease lookup, workers with scheduled DENY/REJECT rules clear
+old-phase flow-cache entries once so a cached unscheduled PERMIT below a newly
+eligible deny returns through policy revalidation; later cache hits use the
+ordinary fast path. Expiry does not change snapshot generation.
 Version zero (no heartbeat received) never expires, preserving compatibility
 with older Go publishers. An older helper rejects the new verb; Go ignores
 that best-effort refusal, so dataplane-side expiry requires a helper that

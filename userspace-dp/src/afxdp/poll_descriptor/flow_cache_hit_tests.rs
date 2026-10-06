@@ -4783,3 +4783,100 @@ fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
         assert!(run.tx_frame.is_some());
     }
 }
+// F3 repro: a cached flow admitted by an unscheduled PERMIT below an inactive
+// scheduled DENY currently survives lease expiry because cache lookup evicts
+// only entries whose admitting counter belongs to a scheduled rule. The cold
+// policy walk sees the newly eligible DENY, but the live cache-hit stage skips
+// that revalidation and consumes the stale forwarding descriptor.
+#[test]
+fn expired_scheduler_lease_revalidates_cached_unscheduled_permit12273() {
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let mut zones = rustc_hash::FxHashMap::default();
+    zones.insert("trust".to_string(), TEST_TRUST_ZONE_ID);
+    zones.insert("untrust".to_string(), TEST_UNTRUST_ZONE_ID);
+    fixture.forwarding.policy = crate::policy::parse_policy_state(
+        "deny",
+        &[
+            crate::PolicyRuleSnapshot {
+                name: "scheduled-deny".to_string(),
+                from_zone: "trust".to_string(),
+                to_zone: "untrust".to_string(),
+                scheduler_name: "workhours".to_string(),
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                action: "deny".to_string(),
+                inactive: true,
+                policy_id: 12052,
+                ..Default::default()
+            },
+            crate::PolicyRuleSnapshot {
+                name: "unscheduled-permit".to_string(),
+                from_zone: "trust".to_string(),
+                to_zone: "untrust".to_string(),
+                source_addresses: vec!["any".to_string()],
+                destination_addresses: vec!["any".to_string()],
+                applications: vec!["any".to_string()],
+                action: "permit".to_string(),
+                policy_id: 12053,
+                ..Default::default()
+            },
+        ],
+        &zones,
+    );
+    const RECEIVED_AT_NS: u64 = 100;
+    assert!(
+        fixture
+            .forwarding
+            .policy
+            .scheduler_lease
+            .apply(1, RECEIVED_AT_NS),
+        "fixture must install the scheduler lease"
+    );
+    let expired_at = RECEIVED_AT_NS + crate::policy::SCHEDULER_HEARTBEAT_LEASE_NS + 1;
+    assert!(
+        fixture
+            .forwarding
+            .policy
+            .scheduler_rules_expired_at(expired_at),
+        "fixture must exercise the expired lease phase"
+    );
+    let cold = crate::policy::evaluate_policy_result_l3_aware_at(
+        &fixture.forwarding.policy,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        test_key().src_ip,
+        test_key().dst_ip,
+        PROTO_TCP,
+        test_key().src_port,
+        test_key().dst_port,
+        None,
+        64,
+        true,
+        expired_at,
+    );
+    assert_eq!(cold.action, crate::policy::PolicyAction::Deny);
+    assert_eq!(cold.policy_id, 12052);
+
+    // The cache entry records the lower, unscheduled PERMIT as its admitting
+    // rule (one-based counter index 2), so the old expiry eviction filter skips
+    // it even though the newly eligible deny now wins the current cold walk.
+    let mut entry = cached_entry();
+    entry.metadata.policy_id = 12053;
+    entry.metadata.policy_counter_idx = 2;
+    let frame = tcp_v4_ack_frame();
+    let mut seed = StageSeed {
+        now_ns: expired_at,
+        ..StageSeed::default()
+    };
+    seed.session = Some((1_000_000, PROTO_TCP, 0x10));
+    let run = run_stage_seeded(&fixture, &frame, test_meta(&frame), entry, 1, seed);
+    let cache_consumed = matches!(&run.outcome, FlowCacheOutcome::Consumed);
+    assert!(
+        !cache_consumed,
+        "F3 BYPASS: flow-cache hit consumed a forwarding descriptor despite the \
+         expired-lease cold policy walk selecting scheduled DENY; cache_consumed={}, \
+         flow-cache (hits, misses, evictions)={:?}",
+        cache_consumed, run.flow_cache_tallies
+    );
+}

@@ -1817,6 +1817,18 @@ impl PolicyState {
             .and_then(|idx| self.rules.get(idx as usize))
             .is_some_and(|rule| !rule.scheduler_name.is_empty())
     }
+
+    /// Whether lease expiry can make a new scheduled deny/reject eligible.
+    /// Used by the worker-local flow cache to invalidate pre-expiry verdicts
+    /// once at that phase transition; subsequent unscheduled cache entries
+    /// retain the ordinary fast path.
+    #[inline]
+    pub(crate) fn has_scheduled_deny_or_reject(&self) -> bool {
+        self.rules.iter().any(|rule| {
+            !rule.scheduler_name.is_empty()
+                && matches!(rule.action, PolicyAction::Deny | PolicyAction::Reject)
+        })
+    }
     /// #8618: may an ICMP-family zone-policy verdict for `protocol` depend on
     /// the PACKET's icmp type/code, rather than on the flow alone?
     ///
