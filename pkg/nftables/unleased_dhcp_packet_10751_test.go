@@ -12,14 +12,13 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// unleased_dhcp_packet_10751_test.go proves #10751 F8-A over REAL packets in
-// a private netns: a first DHCPv6 ADVERTISE-shaped datagram (unicast UDP to
-// the unleased unit's link-local :546) is admitted through the installed
-// backstop table while anything else to the unit is dropped; the DHCPv4
-// broadcast twin (directed broadcast :68) likewise arrives; and a failed
-// atomic replacement retains the working acquisition ruleset. The daemon
-// unit tests pin WHICH netdevs land in the spec; these tests pin what the
-// installed rules DO to packets.
+// unleased_dhcp_packet_10751_test.go proves the persistent DHCP backstop over
+// REAL packets in a private netns: DHCPv6 server replies to the client's
+// link-local port pass, unrelated UDP/546 traffic does not, and ordinary
+// unicast UDP/68 traffic is dropped. IPv4 broadcast :68, unrelated broadcast
+// traffic, and IPv6 multicast traffic retain non-unicast fall-through. A
+// failed atomic replacement retains the working acquisition ruleset. Daemon
+// tests pin WHICH netdevs land in the spec; these tests pin packet behavior.
 
 const unleasedTestNetdev10751 = "ge-0-0-9"
 
@@ -284,14 +283,17 @@ func tableHasIIFNAME10751(t *testing.T, table string) bool {
 // TestUnleasedDHCPAcquisitionThroughBackstop10751: the no-LL-at-S1 shape
 // (spec carries NO destinations, only the v6 backstop — the link came up
 // after the snapshot). An ADVERTISE-shaped datagram to the unit's
-// link-local :546 must ARRIVE (the F8-A admit); anything else to the unit
-// (:9999 listener, proving the verdict is the DROP and not a closed port)
-// must NOT.
+// link-local :546 must ARRIVE on the explicitly admitted DHCPv6 interface;
+// anything else to the unit (:9999 listener, proving the verdict is the DROP
+// and not a closed port) must NOT.
 func TestUnleasedDHCPAcquisitionThroughBackstop10751(t *testing.T) {
 	enterPrivateNetns(t)
 	testLL := mkUnleasedVeth10751(t)
 	in := NewNetlinkInstaller()
-	if err := in.InstallHostInbound(HostInboundSpec{UnleasedV6: []string{unleasedTestNetdev10751}}); err != nil {
+	if err := in.InstallHostInbound(HostInboundSpec{
+		UnleasedV6:  []string{unleasedTestNetdev10751},
+		DHCPv6Admit: []string{unleasedTestNetdev10751},
+	}); err != nil {
 		t.Fatalf("backstop install: %v", err)
 	}
 
@@ -309,26 +311,87 @@ func TestUnleasedDHCPAcquisitionThroughBackstop10751(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen [::]:547: %v", err)
 	}
-	defer server.Close()
-
+	testLink, err := netlink.LinkByName(unleasedTestNetdev10751)
+	if err != nil {
+		t.Fatalf("LinkByName test interface: %v", err)
+	}
+	peerLink, err := netlink.LinkByName("vpeer0")
+	if err != nil {
+		t.Fatalf("LinkByName peer: %v", err)
+	}
+	mustAddrAdd10751(t, testLink, "2001:db8:1071::2/64")
+	mustAddrAdd10751(t, peerLink, "2001:db8:1071::1/64")
+	waitAddrsValid10751(t, map[string][]string{unleasedTestNetdev10751: {"2001:db8:1071::2"}, "vpeer0": {"2001:db8:1071::1"}})
 	oif := linkIndex10751(t, "vpeer0")
+	testIface, err := net.InterfaceByName(unleasedTestNetdev10751)
+	if err != nil {
+		t.Fatalf("InterfaceByName test interface: %v", err)
+	}
+	multicast, err := net.ListenMulticastUDP("udp6", testIface, &net.UDPAddr{
+		IP: net.ParseIP("ff02::fb"), Port: 5353,
+	})
+	if err != nil {
+		t.Fatalf("listen for IPv6 multicast: %v", err)
+	}
+	defer multicast.Close()
+	multicastSender, err := net.ListenUDP("udp6", &net.UDPAddr{})
+	if err != nil {
+		t.Fatalf("listen multicast sender: %v", err)
+	}
+	defer multicastSender.Close()
+	if udpExchange10751(t, client, func() error {
+		rogue, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 0})
+		if err != nil {
+			return err
+		}
+		defer rogue.Close()
+		return sendToScope10751(t, rogue, []byte("rogue-source"), testLL, 546, oif)
+	}, time.Second) {
+		t.Fatal("unrelated source port reached DHCPv6 client port 546")
+	}
+	if udpExchange10751(t, client, func() error {
+		return sendToScope10751(t, server, []byte("wrong-destination"), net.ParseIP("2001:db8:1071::2"), 546, oif)
+	}, time.Second) {
+		t.Fatal("server-port datagram to a global client address reached port 546")
+	}
 	if !udpExchangeRetry10751(t, client, func() error {
 		return sendToScope10751(t, server, []byte("advertise"), testLL, 546, oif)
 	}, 300*time.Millisecond, 10*time.Second) {
-		t.Fatal("ADVERTISE-shaped datagram to [ll]:546 was dropped: the backstop deadlocks DHCPv6 acquisition (F8-A admit missing or shadowed)")
+		t.Fatal("ADVERTISE-shaped server datagram to [ll]:546 was dropped")
+	}
+	if !udpExchangeRetryWant10751(t, multicast, func() error {
+		return sendToScope10751(t, multicastSender, []byte("mDNS"), net.ParseIP("ff02::fb"), 5353, oif)
+	}, []byte("mDNS"), 300*time.Millisecond, 5*time.Second) {
+		t.Fatal("IPv6 multicast was dropped by the L3-local DHCP backstop")
 	}
 	if udpExchange10751(t, junk, func() error {
 		return sendToScope10751(t, server, []byte("junk"), testLL, 9999, oif)
 	}, time.Second) {
 		t.Fatal("datagram to [ll]:9999 arrived: the interface DROP is not denying non-DHCP traffic")
 	}
+	// A restricted zone must not inherit the acquisition exception merely
+	// because its interface remains in the persistent DHCP backstop.
+	restricted := HostInboundSpec{
+		Views: []HostInboundZoneView{{
+			Zone: "restricted", SystemServices: []string{"ssh"}, V6Addrs: []string{testLL.String()},
+		}},
+		UnleasedV6: []string{unleasedTestNetdev10751},
+	}
+	if err := in.InstallHostInbound(restricted); err != nil {
+		t.Fatalf("install ssh-only zone backstop: %v", err)
+	}
+	if udpExchange10751(t, client, func() error {
+		return sendToScope10751(t, server, []byte("unauthorized-zone"), testLL, 546, oif)
+	}, time.Second) {
+		t.Fatal("DHCPv6 reply reached the ssh-only zone; the DHCP admit was not policy-scoped")
+	}
 }
 
-// TestUnleasedDHCPv4BroadcastThroughBackstop10751: the dual-unleased shape.
-// A directed-broadcast :68 datagram (OFFER-shaped — its destination is in
-// NO set, proving the admit is daddr-independent) must ARRIVE; broadcast
-// :80 to a bound listener must NOT (the v4 interface DROP).
-func TestUnleasedDHCPv4BroadcastThroughBackstop10751(t *testing.T) {
+// TestUnleasedDHCPv4BroadcastFallsThroughL3Backstop12127: genuine broadcast
+// IP destinations retain the input chain's prior fall-through behavior even
+// though the backstop now classifies L3 local destinations. The in-tree DHCPv4
+// client reads through AF_PACKET and therefore needs no nft client-port ACCEPT.
+func TestUnleasedDHCPv4BroadcastFallsThroughL3Backstop12127(t *testing.T) {
 	enterPrivateNetns(t)
 	mkUnleasedVeth10751(t)
 	testLink, err := netlink.LinkByName(unleasedTestNetdev10751)
@@ -343,11 +406,10 @@ func TestUnleasedDHCPv4BroadcastThroughBackstop10751(t *testing.T) {
 	mustAddrAdd10751(t, peerLink, "192.0.2.1/24")
 
 	in := NewNetlinkInstaller()
-	spec := HostInboundSpec{UnleasedV4: []string{unleasedTestNetdev10751}, UnleasedV6: []string{unleasedTestNetdev10751}}
+	spec := HostInboundSpec{UnleasedV4: []string{unleasedTestNetdev10751}}
 	if err := in.InstallHostInbound(spec); err != nil {
 		t.Fatalf("backstop install: %v", err)
 	}
-
 	offer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 68})
 	if err != nil {
 		t.Fatalf("listen :68: %v", err)
@@ -364,20 +426,26 @@ func TestUnleasedDHCPv4BroadcastThroughBackstop10751(t *testing.T) {
 	}
 	defer sender.Close()
 	enableBroadcast10751(t, sender)
+	if udpExchange10751(t, offer, func() error {
+		_, err := sender.WriteToUDP([]byte("unicast-client-port"), &net.UDPAddr{IP: net.ParseIP("192.0.2.2"), Port: 68})
+		return err
+	}, time.Second) {
+		t.Fatal("unrelated unicast UDP/68 reached the socket; DHCPv4 must not be a persistent nft ACCEPT")
+	}
 
 	bcast68 := &net.UDPAddr{IP: net.ParseIP("192.0.2.255"), Port: 68}
 	if !udpExchange10751(t, offer, func() error {
 		_, err := sender.WriteToUDP([]byte("offer"), bcast68)
 		return err
 	}, 3*time.Second) {
-		t.Fatal("broadcast :68 was dropped: the v4 DHCP admit is missing or shadowed")
+		t.Fatal("broadcast :68 did not preserve non-unicast fall-through")
 	}
 	bcast80 := &net.UDPAddr{IP: net.ParseIP("192.0.2.255"), Port: 80}
-	if udpExchange10751(t, web, func() error {
-		_, err := sender.WriteToUDP([]byte("junk"), bcast80)
+	if !udpExchange10751(t, web, func() error {
+		_, err := sender.WriteToUDP([]byte("broadcast-fallthrough"), bcast80)
 		return err
-	}, time.Second) {
-		t.Fatal("broadcast :80 arrived: the v4 interface DROP is not denying non-DHCP traffic")
+	}, 3*time.Second) {
+		t.Fatal("broadcast :80 was dropped; genuine IP broadcasts must fall through")
 	}
 }
 
@@ -389,7 +457,10 @@ func TestUnleasedBackstopAtomicReplace10751(t *testing.T) {
 	enterPrivateNetns(t)
 	testLL := mkUnleasedVeth10751(t)
 	in := NewNetlinkInstaller()
-	if err := in.InstallHostInbound(HostInboundSpec{UnleasedV6: []string{unleasedTestNetdev10751}}); err != nil {
+	if err := in.InstallHostInbound(HostInboundSpec{
+		UnleasedV6:  []string{unleasedTestNetdev10751},
+		DHCPv6Admit: []string{unleasedTestNetdev10751},
+	}); err != nil {
 		t.Fatalf("backstop install: %v", err)
 	}
 	client, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 546})
@@ -398,31 +469,24 @@ func TestUnleasedBackstopAtomicReplace10751(t *testing.T) {
 	}
 	defer client.Close()
 
-	dialServer := func(t *testing.T) *net.UDPConn {
-		t.Helper()
-		s, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 0})
-		if err != nil {
-			t.Fatalf("server bind: %v", err)
-		}
-		t.Cleanup(func() { s.Close() })
-		return s
+	server, err := net.ListenUDP("udp6", &net.UDPAddr{Port: 547})
+	if err != nil {
+		t.Fatalf("server bind :547: %v", err)
 	}
+	defer server.Close()
 	// Baseline acquisition retries (DAD); later probes are single-shot on
-	// the proven path, each from a fresh tuple so no conntrack entry can
-	// color the verdict. Every phase uses a distinct payload so retried
-	// strays can never fake a later verdict.
-	s := dialServer(t)
+	// the proven path. Every phase uses a distinct payload so retried strays
+	// cannot fake a later verdict. Keep the source port at DHCPv6 server :547.
 	oif := linkIndex10751(t, "vpeer0")
 	if !udpExchangeRetryWant10751(t, client, func() error {
-		return sendToScope10751(t, s, []byte("base"), testLL, 546, oif)
+		return sendToScope10751(t, server, []byte("base"), testLL, 546, oif)
 	}, []byte("base"), 300*time.Millisecond, 10*time.Second) {
 		t.Fatal("baseline acquisition: nothing received")
 	}
 	probe := func(t *testing.T, payload string, want bool, what string) {
 		t.Helper()
-		s := dialServer(t)
 		if got := udpExchangeWant10751(t, client, func() error {
-			return sendToScope10751(t, s, []byte(payload), testLL, 546, oif)
+			return sendToScope10751(t, server, []byte(payload), testLL, 546, oif)
 		}, []byte(payload), 3*time.Second); got != want {
 			t.Fatalf("%s: received=%v, want %v", what, got, want)
 		}
@@ -564,7 +628,7 @@ func TestUnleasedBackstopFamilyGuard10751(t *testing.T) {
 	}
 
 	// Phase B (v4-only backstop): v6 unicast survives (retried: DAD);
-	// v4 broadcast non-DHCP is denied (backstop active).
+	// v4 unicast non-DHCP is denied while broadcast still falls through.
 	if err := in.InstallHostInbound(HostInboundSpec{UnleasedV4: []string{unleasedTestNetdev10751}}); err != nil {
 		t.Fatalf("v4-only install: %v", err)
 	}
@@ -573,11 +637,18 @@ func TestUnleasedBackstopFamilyGuard10751(t *testing.T) {
 	}, 300*time.Millisecond, 10*time.Second) {
 		t.Fatal("v6 unicast was dropped under a v4-only backstop: the DROP is not family-guarded (cross-family shadow)")
 	}
-	bcast80 := &net.UDPAddr{IP: net.ParseIP("192.0.2.255"), Port: 80}
+	unicast80 := &net.UDPAddr{IP: net.ParseIP("192.0.2.2"), Port: 80}
 	if udpExchange10751(t, v4drop, func() error {
-		_, err := bcast.WriteToUDP([]byte("junk"), bcast80)
+		_, err := bcast.WriteToUDP([]byte("unicast-junk"), unicast80)
 		return err
 	}, time.Second) {
-		t.Fatal("v4 broadcast non-DHCP arrived under a v4-only backstop: the DROP is missing")
+		t.Fatal("v4 unicast non-DHCP arrived under a v4-only backstop: the DROP is missing")
+	}
+	bcast80 := &net.UDPAddr{IP: net.ParseIP("192.0.2.255"), Port: 80}
+	if !udpExchange10751(t, v4drop, func() error {
+		_, err := bcast.WriteToUDP([]byte("broadcast-fallthrough"), bcast80)
+		return err
+	}, 3*time.Second) {
+		t.Fatal("v4 broadcast was dropped under a v4-only backstop: non-unicast fall-through must remain")
 	}
 }

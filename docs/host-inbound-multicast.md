@@ -238,9 +238,14 @@ groups belonging to its expanded protocols.
    cannot bypass a changed zone decision.
 
 4. **Failure paths.** A cold-boot host-inbound fence denies catalog multicast
-   when the main table is unavailable. The additive coverage-gap fence remains
-   limited to uncovered address scopes; it does not blanket-drop multicast
-   already admitted by the retained main table.
+   when the main table is unavailable. Persistent DHCP backstops classify the
+   L3 destination with `fib daddr type { local, anycast }`, so unicast or
+   anycast IP in an L2 group frame cannot bypass the guard, while genuine
+   multicast/broadcast IP destinations and MLD retain their fall-through behavior.
+   VRF-slave IPv6 also drops `fe80::/10` directly because strict route lookup can
+   return `unreachable`; the coverage-gap variant excludes retained destinations
+   before applying that fallback. The additive coverage-gap fence leaves
+   retained-main-table multicast policy authoritative; it adds no broad ACCEPT.
 
 5. **Kernel/Rust lockstep.** The Go catalog
    (`pkg/config/host_inbound_multicast.go`), zone-view construction

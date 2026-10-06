@@ -316,6 +316,35 @@ func (a *ruleAsm) sdifname(names []string) *ruleAsm {
 	return a.add(a.p.sdifnameMatch(names)...)
 }
 
+// fibLocalOrAnycast appends `fib daddr type { local, anycast }`, limiting an
+// input backstop to destinations the FIB classifies as firewall-local or
+// anycast. Unlike `meta pkttype host`—an L2 classification the sender controls
+// via the Ethernet destination—this is an L3 destination-type predicate:
+// unicast IP in an L2 broadcast or multicast frame still matches (#12127 N1),
+// while genuine IP multicast/broadcast falls through. The daddr-only flags are
+// deliberate: adding `. iif` makes the lookup miss on VRF-slave ingress (the
+// VRF local entry is keyed on the master). Interface scope remains in the
+// iifname/sdifname match; fib only classifies the destination. A strict VRF
+// lookup can still return unreachable for fe80::/10, so backstop emitters
+// add an explicit VRF-slave link-local drop for IPv6.
+// FIB results are host-order RTN values; hton converts them to the typed set
+// key order.
+func (a *ruleAsm) fibLocalOrAnycast() *ruleAsm {
+	elements := []nftables.SetElement{
+		{Key: binaryutil.BigEndian.PutUint32(uint32(unix.RTN_LOCAL))},
+		{Key: binaryutil.BigEndian.PutUint32(uint32(unix.RTN_ANYCAST))},
+	}
+	set := a.p.addAnonSet(nftables.TypeFIBAddr, false, elements)
+	if set == nil {
+		return a
+	}
+	return a.add(
+		&expr.Fib{Register: 1, ResultADDRTYPE: true, FlagDADDR: true},
+		&expr.Byteorder{SourceRegister: 1, DestRegister: 1, Op: expr.ByteorderHton, Len: 4, Size: 4},
+		&expr.Lookup{SourceRegister: 1, SetName: set.Name, SetID: set.ID},
+	)
+}
+
 // iifnameExcept appends `iifname != "<n>"` / `iifname != { .. }` — the
 // uncovered-ingress fallback scope for stale-reply guards. Single-name uses
 // CmpOpNeq; multi-name uses an anonymous-set Lookup with Invert, which is

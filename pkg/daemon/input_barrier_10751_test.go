@@ -2600,39 +2600,44 @@ func TestUnzonedDHCPFallbackKeepsInterfaceDrop10751(t *testing.T) {
 	}
 }
 
-// TestUnleasedOraclePlacement10751: the text oracles render the per-family
-// backstop LAST (after every destination rule, so addressed families and
-// explicit programs win), family-guarded (a v6-only backstop must not
-// shadow v4 fallthrough and vice versa), and the per-family DHCP admits
-// BEFORE every destination rule (so a first ADVERTISE is not shadowed by
-// the link-local DROP on an already-up link). Set form for several
-// netdevs; omitted when empty.
+// TestUnleasedOraclePlacement10751: the text oracles render persistent
+// backstop drops LAST, after destination rules, family-guarded, and restricted
+// to firewall-local L3 destinations. DHCPv4 needs no input admit because its
+// client reads via AF_PACKET; DHCPv6 admits only authorized link-local replies.
 func TestUnleasedOraclePlacement10751(t *testing.T) {
 	views := []dpuserspace.ZoneHostInboundView{{Zone: "trust", V4Addrs: []string{"10.0.0.1"}}}
 	unleasedV4 := []string{"ge-0-0-8", "ge-0-0-9"}
 	unleasedV6 := []string{"ge-0-0-9"}
-	wantDropV4 := `iifname { "ge-0-0-8", "ge-0-0-9" } meta nfproto ipv4 drop`
-	wantDropV6 := `iifname "ge-0-0-9" meta nfproto ipv6 drop`
-	wantAdmitV4 := `iifname { "ge-0-0-8", "ge-0-0-9" } meta nfproto ipv4 udp dport 68 accept`
-	wantAdmitV6 := `iifname "ge-0-0-9" meta nfproto ipv6 udp dport 546 accept`
+	backstop := dhcpBackstopLists{admitV6: unleasedV6}
+	wantDropV4 := `iifname { "ge-0-0-8", "ge-0-0-9" } meta nfproto ipv4 fib daddr type { local, anycast } drop`
+	wantDropV6 := `iifname "ge-0-0-9" meta nfproto ipv6 fib daddr type { local, anycast } drop`
+	wantAdmitV6 := `iifname "ge-0-0-9" meta nfproto ipv6 ip6 daddr fe80::/10 udp sport 547 udp dport 546 accept`
 	for name, payload := range map[string]string{
-		"real":  buildHostInboundFilterPayloadWithOverlay(views, []string{"10.9.9.9"}, nil, nil, nil, true, nil, unleasedV4, unleasedV6),
-		"fence": buildHostInboundFencePayload(views, nil, nil, nil, nil, unleasedV4, unleasedV6),
-		"gap":   buildHostInboundGapFencePayload(views, []string{"10.0.0.2"}, nil, nil, nil, unleasedV4, unleasedV6, nil, nil, nil),
+		"real":  buildHostInboundFilterPayloadWithOverlay(views, []string{"10.9.9.9"}, nil, nil, nil, true, nil, unleasedV4, unleasedV6, backstop),
+		"fence": buildHostInboundFencePayload(views, nil, nil, nil, nil, unleasedV4, unleasedV6, backstop),
+		"gap":   buildHostInboundGapFencePayload(views, []string{"10.0.0.2"}, nil, nil, nil, unleasedV4, unleasedV6, nil, nil, nil, backstop, nil, nil),
 	} {
-		for _, want := range []string{wantDropV4, wantDropV6, wantAdmitV4, wantAdmitV6} {
+		for _, want := range []string{wantDropV4, wantDropV6, wantAdmitV6} {
 			if !strings.Contains(payload, want) {
 				t.Errorf("%s oracle lacks %q:\n%s", name, want, payload)
 			}
 		}
-		if strings.LastIndex(payload, "daddr") > strings.Index(payload, wantDropV4) {
+		if strings.Contains(payload, "udp dport 68 accept") {
+			t.Errorf("%s oracle emits an unnecessary persistent DHCPv4 ACCEPT:\n%s", name, payload)
+		}
+		destinationDrops := map[string]string{
+			"real":  `ip daddr 10.0.0.1`,
+			"fence": `ip daddr 10.0.0.1`,
+			"gap":   `ip daddr 10.0.0.2`,
+		}
+		destinationDropAt := strings.Index(payload, destinationDrops[name])
+		backstopAt := strings.Index(payload, wantDropV4)
+		if destinationDropAt < 0 || backstopAt < destinationDropAt {
 			t.Errorf("%s oracle places the interface backstop before a destination rule:\n%s", name, payload)
 		}
-		// Admits precede every destination DROP: the last admit must
-		// sit before the first destination drop. (The #10752
-		// stale-reply guards also carry daddr but precede the admits
-		// by design — DHCP client ports are catalog-exempt — so
-		// guard lines, marked by "ct direction reply", are skipped.)
+		// The DHCPv6 admit precedes every destination DROP; the last admit
+		// must sit before the first destination drop. (The #10752
+		// stale-reply guards also carry daddr but precede it by design.)
 		lastAdmit := strings.LastIndex(payload, wantAdmitV6)
 		for _, line := range strings.Split(payload, "\n") {
 			if !strings.Contains(line, "daddr") || !strings.Contains(line, "drop") || strings.Contains(line, "ct direction reply") {
@@ -2909,7 +2914,9 @@ func TestGapExceptLifelineSharedDayTwo10751(t *testing.T) {
 func TestGapLifelineExceptionPlacement10751(t *testing.T) {
 	payload := buildHostInboundGapFencePayload(
 		nil, []string{"10.0.0.5", "10.0.0.9"}, nil, nil, nil,
-		nil, nil, []string{"10.0.0.5"}, nil, []string{"em0", "fxp0"})
+		nil, nil, []string{"10.0.0.5"}, nil, []string{"em0", "fxp0"},
+		dhcpBackstopLists{}, nil, nil,
+	)
 	wantExcept := `iifname { "em0", "fxp0" } ip daddr 10.0.0.5 accept`
 	wantExceptSdif := `meta sdifname { "em0", "fxp0" } ip daddr 10.0.0.5 accept`
 	wantDrop := `ip daddr { 10.0.0.5, 10.0.0.9 } drop`
@@ -2929,7 +2936,7 @@ func TestGapLifelineExceptionPlacement10751(t *testing.T) {
 		strings.Index(payload, wantExceptSdif) > strings.Index(payload, wantDrop) {
 		t.Errorf("gap oracle places an exception after the bare DROP (lifeline management would be denied):\n%s", payload)
 	}
-	plain := buildHostInboundGapFencePayload(nil, []string{"10.0.0.9"}, nil, nil, nil, nil, nil, nil, nil, nil)
+	plain := buildHostInboundGapFencePayload(nil, []string{"10.0.0.9"}, nil, nil, nil, nil, nil, nil, nil, nil, dhcpBackstopLists{}, nil, nil)
 	if strings.Contains(plain, "iifname") || strings.Contains(plain, "sdifname") {
 		t.Errorf("gap oracle without shared must emit no iifname/sdifname rule:\n%s", plain)
 	}

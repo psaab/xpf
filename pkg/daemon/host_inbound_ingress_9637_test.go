@@ -98,7 +98,8 @@ func TestHostInboundUnzonedIngressOrdering11409(t *testing.T) {
 	}}
 	unzonedVRFSlaves := []string{"ge-vrf-unzoned"}
 	payload := buildHostInboundFilterPayloadWithUnzonedIngress(
-		views, unzoned, nil, unzonedIngress, unzonedVRFSlaves, programs, nil, true, nil, nil, nil,
+		views, unzoned, nil, unzonedIngress, unzonedVRFSlaves,
+		programs, nil, true, nil, nil, nil, dhcpBackstopLists{},
 	)
 	allDests := nftAddrSet([]string{"10.0.61.1", "172.16.80.8", "192.0.2.1"})
 	guard := `    iifname "fw-unzoned" ip daddr ` + allDests +
@@ -554,10 +555,14 @@ func hostInboundUnzonedIngressNetnsChild11409(t *testing.T) {
 			}(c)
 		}
 	}()
-	payload := buildHostInboundFilterPayloadWithUnzonedIngress([]dpuserspace.ZoneHostInboundView{{
-		Zone: "lan", SystemServices: []string{"ssh"},
-		V4Addrs: []string{"10.0.61.1"}, IngressNetdevs: []string{"fwzone"},
-	}}, []string{"198.51.100.1"}, nil, []string{"fwunzone"}, nil, nil, nil, true, nil, nil, nil)
+	payload := buildHostInboundFilterPayloadWithUnzonedIngress(
+		[]dpuserspace.ZoneHostInboundView{{
+			Zone: "lan", SystemServices: []string{"ssh"},
+			V4Addrs: []string{"10.0.61.1"}, IngressNetdevs: []string{"fwzone"},
+		}},
+		[]string{"198.51.100.1"}, nil, []string{"fwunzone"}, nil,
+		nil, nil, true, nil, nil, nil, dhcpBackstopLists{},
+	)
 	cmd := exec.Command(findNft(), "-f", "-")
 	cmd.Stdin = strings.NewReader(payload)
 	if out, err := cmd.CombinedOutput(); err != nil {

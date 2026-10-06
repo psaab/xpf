@@ -17,6 +17,54 @@ func HostInboundVRFEnslavedNetdevs(cfg *Config) map[string]bool {
 	}))
 }
 
+// HostInboundDHCPVRFEnslavedNetdevs returns configured netdevs that production
+// binds below a VRF master and that may need sdifname host-inbound backstops.
+// It includes list-owned members, tunnel-manager-owned tunnel devices, and
+// management-class interfaces bound to vrf-mgmt. Lifeline exclusions remain at
+// the DHCP-backstop caller, where interface intent is available.
+func HostInboundDHCPVRFEnslavedNetdevs(cfg *Config) map[string]bool {
+	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
+		return nil
+	}
+	tunnelNames := cfg.TunnelNameMap()
+	excluded := make(map[string]bool)
+	for _, conflict := range cfg.QuarantinedRIMemberDeviceConflicts {
+		if conflict.LinuxName != "" {
+			excluded[conflict.LinuxName] = true
+		}
+	}
+	for _, conflict := range RoutingInstanceMemberDeviceConflicts(cfg, tunnelNames) {
+		excluded[conflict.LinuxName] = true
+	}
+
+	out := make(map[string]bool)
+	for ifName := range cfg.Interfaces.Interfaces {
+		if IsManagementIfName(ifName) {
+			if linuxName := LinuxIfName(ifName); linuxName != "" {
+				out[linuxName] = true
+			}
+		}
+	}
+	for _, claim := range routingInstanceTunnelDeviceClaims(cfg) {
+		if claim.LinuxName != "" && claim.Instance != "" && !excluded[claim.LinuxName] {
+			out[claim.LinuxName] = true
+		}
+	}
+
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.Name == "" || ri.InstanceType == "forwarding" || IsReservedRoutingInstanceName(ri.Name) {
+			continue
+		}
+		for _, key := range RoutingInstanceMemberDeviceKeysForInstance(cfg, tunnelNames, ri) {
+			if key.LinuxName == "" || IsManagementIfName(key.LinuxName) || excluded[key.LinuxName] {
+				continue
+			}
+			out[key.LinuxName] = true
+		}
+	}
+	return out
+}
+
 // junosHostNetdevByRef maps every physical interface ref and every unit ref
 // ("<if>.<unit>") to its kernel netdev through name.
 func junosHostNetdevByRef(cfg *Config, name func(ifName string, unit *InterfaceUnit) string) map[string]string {

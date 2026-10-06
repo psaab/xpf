@@ -51,6 +51,16 @@ xpf (0.0.0) unstable; urgency=medium
     filter clone, preserve valid non-member uses of shared filters, and report
     each dropped steer through degraded PBR health (#11589).
 
+  * Keep DHCP families in enforcing zones behind persistent family-scoped
+    interface drops from before lease appearance until DHCP intent is removed
+    or the `any-service` full-admit policy takes over. Match FIB-local and
+    anycast destinations across mixed Ethernet/IP frames; admit DHCPv6 replies
+    only where effective policy permits dhcpv6 (including `all` expansion), and
+    cover VRF-slave ingress in main, cold-boot, and coverage-gap paths. Add an
+    explicit IPv6 fe80::/10 drop for VRF DHCP slaves where strict FIB lookup
+    may be unreachable; preserve retained coverage in the gap path (#11577,
+    #12127).
+
   * Reject malformed or zero interface bandwidth with a leaf-naming
     diagnostic instead of compiling it to the unset zero value (#11801).
   * Refuse rescue saves without a non-empty committed config, preserving the

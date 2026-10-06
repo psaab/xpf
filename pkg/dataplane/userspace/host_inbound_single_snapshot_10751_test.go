@@ -61,7 +61,8 @@ func TestHostInboundPendingIntentFromSnapshots10751(t *testing.T) {
 // input: unzoned non-lifeline DHCP units with no resolved address in an
 // intended family are listed by LOCAL_IN netdev name, SPLIT BY FAMILY (a
 // leased family gets neither DROP nor DHCP admit — pure destination
-// judgement). Zoned, lifeline, static, resolved, and VRF-enslaved units
+// judgement). Zoned units use the persistent #11577 backstop from the combined
+// builder, not this unzoned-only helper; lifeline, static, and resolved units
 // are excluded.
 func TestBuildUnzonedDHCPUnleasedNetdevs10751(t *testing.T) {
 	link := int(netlink.SCOPE_LINK)
@@ -87,7 +88,7 @@ func TestBuildUnzonedDHCPUnleasedNetdevs10751(t *testing.T) {
 			"wan": {Name: "wan", Interfaces: []string{"ge-0-0-9.0"}},
 		}
 		if v4, v6 := BuildUnzonedDHCPUnleasedNetdevs(cfg, nil); len(v4) != 0 || len(v6) != 0 {
-			t.Fatalf("unleased v4/v6 = %v/%v, want empty/empty (zoned units use pending retention)", v4, v6)
+			t.Fatalf("unleased v4/v6 = %v/%v, want empty/empty (zoned units are handled by the combined DHCP backstop)", v4, v6)
 		}
 	})
 	t.Run("static excluded", func(t *testing.T) {

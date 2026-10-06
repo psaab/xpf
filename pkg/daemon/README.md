@@ -2642,9 +2642,9 @@ never lock an operator out of a remote box it manages.
   not wait past the outer deadline for those calls to return.
   **Netlink installer migration (#6387, COMPLETE).** PR-2 added an ADDITIVE
   `pkg/nftables` netlink `Installer` (no `nft` binary) that renders the
-  host-inbound / lo0 / fence rulesets bit-for-bit equivalent to the
-  `build*Payload` text, plus a non-skippable kernel ruleset-parity CI
-  (`daemon_nft_netlink_parity_test.go`) that diffs the oracle `nft -f -` dump
+  host-inbound / lo0 / fence rulesets to match the `build*Payload` text after
+  representation-only normalization. A non-skippable kernel ruleset-parity CI
+  (`daemon_nft_netlink_parity_test.go`) diffs the oracle `nft -f -` dump
   vs the netlink dump in a private netns. **PR-3 (the CUTOVER) is done:**
   production now installs and tears down every host-inbound / lo0 /
   cold-boot-fence / gap-fence table through the netlink `nftInstaller` seam

@@ -293,14 +293,22 @@ type HostInboundSpec struct {
 	// reinject accept is omitted (byte-identical to the pre-#9637 ruleset).
 	DataplaneFresh bool
 	Overlay        *HostInputFenceOverlay
-	// UnleasedV4/V6 are LOCAL_IN netdevs of unzoned DHCP units with no
-	// resolved address in that family (#10751 R7-B/F8-A): per-family
-	// LAST `iifname <dev> drop` rules so a first lease lands already
-	// denied, plus per-family TOP DHCP-client admits (udp dport 68/546
-	// scoped to the same netdevs) so the lease can still arrive. Empty
-	// omits the rules.
+	// UnleasedV4/V6 are DHCP backstop netdevs. Unzoned DHCP units are listed
+	// while their family has no resolved address; DHCP units in enforcing
+	// zones stay listed while DHCP intent remains. DHCPv6 reply admits cover
+	// clients whose effective host-inbound policy permits dhcpv6.
 	UnleasedV4 []string
 	UnleasedV6 []string
+	// UnleasedVRFSlavesV4/V6 are the configured VRF-slave subset for sdifname
+	// matches; they are present before kernel enslavement.
+	UnleasedVRFSlavesV4 []string
+	UnleasedVRFSlavesV6 []string
+	// DHCPv6Admit are ordinary ingress devices whose effective policy permits
+	// dhcpv6; matching link-local server replies may pass the backstop.
+	DHCPv6Admit []string
+	// DHCPv6AdmitVRFSlaves are the corresponding configured VRF members, matched
+	// through sdifname at LOCAL_IN.
+	DHCPv6AdmitVRFSlaves []string
 }
 
 // FenceSpec is the cold-boot fail-closed fence render request (#5644): address
@@ -311,9 +319,15 @@ type FenceSpec struct {
 	UnzonedV6     []string
 	WGListenPorts []uint16            // stale-reply guard only; WG accepts use WGZonePorts.
 	WGZonePorts   map[string][]uint16 // per-zone daddr-scoped WG accepts.
-	// UnleasedV4/V6, as in HostInboundSpec (fence stands pre-handoff).
-	UnleasedV4 []string
-	UnleasedV6 []string
+	// UnleasedV4/V6 and UnleasedVRFSlavesV4/V6, as in HostInboundSpec.
+	UnleasedV4          []string
+	UnleasedV6          []string
+	UnleasedVRFSlavesV4 []string
+	UnleasedVRFSlavesV6 []string
+	// DHCPv6Admit and DHCPv6AdmitVRFSlaves, as in HostInboundSpec.
+	DHCPv6Admit []string
+	// DHCPv6AdmitVRFSlaves are the configured members matched through sdifname.
+	DHCPv6AdmitVRFSlaves []string
 	// Unzoned ingress scopes for fail-closed catalog-group drops.
 	UnzonedIngressNetdevs   []string
 	UnzonedIngressVRFSlaves []string
@@ -332,9 +346,20 @@ type GapFenceSpec struct {
 	UncoveredV6   []string
 	WGListenPorts []uint16            // stale-reply guard only; WG accepts use WGZonePorts.
 	WGZonePorts   map[string][]uint16 // per-zone daddr-scoped WG accepts.
-	// UnleasedV4/V6, as in HostInboundSpec (uniform backstop).
-	UnleasedV4 []string
-	UnleasedV6 []string
+	// UnleasedV4/V6 and UnleasedVRFSlavesV4/V6, as in HostInboundSpec.
+	UnleasedV4          []string
+	UnleasedV6          []string
+	UnleasedVRFSlavesV4 []string
+	UnleasedVRFSlavesV6 []string
+	// DHCPv6Admit and DHCPv6AdmitVRFSlaves, as in HostInboundSpec.
+	DHCPv6Admit []string
+	// DHCPv6AdmitVRFSlaves are the configured members matched through sdifname.
+	DHCPv6AdmitVRFSlaves []string
+	// RetainedV4/V6 are destinations still covered by the installed main table.
+	// The gap table's DHCP backstop must exclude them so it cannot override a
+	// retained service permit in this later base chain.
+	RetainedV4 []string
+	RetainedV6 []string
 	// SharedV4/V6 are the Uncovered subset shared with a lifeline,
 	// admitted on lifeline ingress ahead of the bare DROP. Empty
 	// omits the exception.

@@ -79,8 +79,8 @@ func TestFenceWireGuardAdmitsStayZoneScoped11572(t *testing.T) {
 	uncoveredV6 := []string{"2001:db8:1::1", "2001:db8:99::1"}
 
 	for name, payload := range map[string]string{
-		"cold-boot": buildHostInboundFencePayload(views, unzonedV4, unzonedV6, []uint16{51820}, wgZonePorts, nil, nil),
-		"gap":       buildHostInboundGapFencePayload(views, uncoveredV4, uncoveredV6, []uint16{51820}, wgZonePorts, nil, nil, nil, nil, nil),
+		"cold-boot": buildHostInboundFencePayload(views, unzonedV4, unzonedV6, []uint16{51820}, wgZonePorts, nil, nil, dhcpBackstopLists{}),
+		"gap":       buildHostInboundGapFencePayload(views, uncoveredV4, uncoveredV6, []uint16{51820}, wgZonePorts, nil, nil, nil, nil, nil, dhcpBackstopLists{}, nil, nil),
 	} {
 		for _, want := range []string{
 			"ip daddr 10.0.1.1 udp dport 51820 accept",

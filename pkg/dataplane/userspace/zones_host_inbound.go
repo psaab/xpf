@@ -1072,35 +1072,26 @@ func BuildUnzonedHostInboundAddrsFromSnapshots(cfg *config.Config, snaps []Inter
 	return buildUnzonedHostInboundAddrsFromSnaps(cfg, snaps)
 }
 
-// BuildUnzonedDHCPUnleasedNetdevs returns the sorted LOCAL_IN netdev names of
-// unzoned non-lifeline units with DHCP intent and no resolved address, SPLIT
-// BY FAMILY (#10751 R7-B/F8-A): an unzoned DHCP unit with no lease has no
-// destination for the unzoned catch-all, yet its first lease would land
-// host-reachable before the debounced re-apply installs one. The daemon
-// renders these as LAST-placed, family-guarded per-family `iifname <dev>
-// meta nfproto <fam> drop` rules (after every destination rule, so
-// addressed families and explicit programs still win; the guard keeps a
-// v6-only backstop from shadowing v4 fallthrough and vice versa):
-// interface-scoped protection that needs no hold and vanishes on
-// lease (the unit leaves this set the moment it resolves). A family that is
-// STILL unleased also gets a TOP-placed `iifname <dev> udp dport <68|546>
-// accept` (F8-A) admitting the DHCP client's own replies ahead of the
-// destination drops — without it the backstop deadlocks acquisition (a
-// multicast-originated ADVERTISE is not conntrack-established, so only the
-// DHCP admit lets it through). The split keeps leased families under pure
-// destination judgement: a v4-leased/v6-pending unit gets NO v4 admit.
-// VRF-enslaved units are skipped: their LOCAL_IN identity is the shared
-// master, so an iifname DROP there would shadow addressed siblings sharing
-// the master, while the slave name never matches (dead rule, false
-// confidence) — and holding the barrier for VRF-pending units would strand
-// boot on a never-leasing unit (rejected for all unzoned, R7-B). They rely
-// on lease-callback convergence instead: any non-lifeline DHCP lease —
-// VRF-enslaved included — forces the full recompile that installs
-// destination DROPs (dhcpLeaseChangeRequiresRecompile, pinned by
+// BuildUnzonedDHCPUnleasedNetdevs returns sorted LOCAL_IN netdev names for
+// unzoned, non-lifeline DHCP families without a resolved address, split by
+// family (#10751 R7-B/F8-A). Such an interface has no destination for the
+// unzoned catch-all, but its first lease is reachable before the debounced
+// re-apply. The daemon renders a LAST-placed family-guarded `iifname <dev>
+// meta nfproto <fam> fib daddr type { local, anycast } drop`; genuine IP
+// multicast and broadcast destinations retain their fall-through behavior,
+// while firewall-local unicast and anycast IP are denied regardless of L2 dst.
+// DHCPv4 reception uses AF_PACKET; DHCPv6 server-reply admits are restricted to
+// effective policy permitting dhcpv6 (or unzoned pending clients), UDP source
+// port 547, destination port 546, and link-local destinations.
+// VRF-enslaved unzoned units remain excluded: at LOCAL_IN iifname shows the
+// shared master, so a catch-all there would shadow siblings and the slave-name
+// rule would never match. They retain lease-callback convergence instead; any
+// non-lifeline DHCP lease forces a full recompile that installs destination
+// DROPs (dhcpLeaseChangeRequiresRecompile, pinned by
 // TestDHCPLeaseChangeRequiresRecompile_VRFEnslavedNonLifeline10751). The
-// accepted window is lease-install to debounced re-apply (~2s debounce
-// plus apply time), the same address-appearance-to-apply lag class as
-// #3698. Lifelines are skipped (management must survive).
+// accepted window is lease-install to debounced re-apply (~2s plus apply time),
+// the same address-appearance-to-apply lag class as #3698. Lifelines are
+// skipped (management must survive).
 func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapshot) (v4, v6 []string) {
 	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
 		return nil, nil
@@ -1180,6 +1171,167 @@ func BuildUnzonedDHCPUnleasedNetdevs(cfg *config.Config, snaps []InterfaceSnapsh
 	sort.Strings(v4)
 	sort.Strings(v6)
 	return v4, v6
+}
+
+// HostInboundDHCPBackstops lists DHCP backstop netdevs by family and
+// separately identifies the configured VRF-slave subset needing sdifname.
+type HostInboundDHCPBackstops struct {
+	V4               []string
+	V6               []string
+	VRFSlavesV4      []string
+	VRFSlavesV6      []string
+	AdmitV6          []string
+	AdmitVRFSlavesV6 []string
+}
+
+// BuildDHCPHostInboundBackstopNetdevs combines unzoned pending-lease backstops
+// with persistent interface backstops for DHCP families in enforcing zones.
+// The latter stay installed after an address appears until configuration
+// removes DHCP intent or makes the effective zone policy full-admit; this
+// closes the address-appearance-to-debounced-reapply window (#11577). VRF
+// membership is derived from configured virtual-router ownership, not the
+// current link state, so the sdifname guard is present before enslavement.
+func BuildDHCPHostInboundBackstopNetdevs(cfg *config.Config, snaps []InterfaceSnapshot) HostInboundDHCPBackstops {
+	if cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
+		return HostInboundDHCPBackstops{}
+	}
+	backstops := HostInboundDHCPBackstops{}
+	backstops.V4, backstops.V6 = BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps)
+	backstops.AdmitV6 = append(backstops.AdmitV6, backstops.V6...)
+	zoned := buildZonedDHCPHostInboundBackstopNetdevs(cfg)
+	seenV4, seenV6 := make(map[string]bool, len(backstops.V4)+len(zoned.V4)), make(map[string]bool, len(backstops.V6)+len(zoned.V6))
+	seenAdmitV6 := make(map[string]bool, len(backstops.AdmitV6)+len(zoned.AdmitV6))
+	for _, dev := range backstops.V4 {
+		seenV4[dev] = true
+	}
+	for _, dev := range backstops.V6 {
+		seenV6[dev] = true
+	}
+	for _, dev := range backstops.AdmitV6 {
+		seenAdmitV6[dev] = true
+	}
+	for _, dev := range zoned.V4 {
+		if !seenV4[dev] {
+			seenV4[dev] = true
+			backstops.V4 = append(backstops.V4, dev)
+		}
+	}
+	for _, dev := range zoned.V6 {
+		if !seenV6[dev] {
+			seenV6[dev] = true
+			backstops.V6 = append(backstops.V6, dev)
+		}
+	}
+	for _, dev := range zoned.AdmitV6 {
+		if !seenAdmitV6[dev] {
+			seenAdmitV6[dev] = true
+			backstops.AdmitV6 = append(backstops.AdmitV6, dev)
+		}
+	}
+	sort.Strings(backstops.V4)
+	sort.Strings(backstops.V6)
+	sort.Strings(backstops.AdmitV6)
+	backstops.VRFSlavesV4 = zoned.VRFSlavesV4
+	backstops.VRFSlavesV6 = zoned.VRFSlavesV6
+	backstops.AdmitVRFSlavesV6 = zoned.AdmitVRFSlavesV6
+	return backstops
+}
+
+func buildZonedDHCPHostInboundBackstopNetdevs(cfg *config.Config) HostInboundDHCPBackstops {
+	backstops := HostInboundDHCPBackstops{}
+	vrfEnslaved := config.HostInboundDHCPVRFEnslavedNetdevs(cfg)
+	lifelines := hostInboundLifelineSet(cfg)
+	zoneByIface := buildInterfaceZoneMap(cfg)
+	overrides := buildInterfaceHostInboundMap(cfg)
+	quarantined := quarantinedZoneNames(cfg)
+	seenV4, seenV6, seenVRFV4, seenVRFV6 := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
+	seenAdmitV6, seenVRFAdmitV6 := map[string]bool{}, map[string]bool{}
+	ifNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
+	for name := range cfg.Interfaces.Interfaces {
+		ifNames = append(ifNames, name)
+	}
+	sort.Strings(ifNames)
+	for _, ifName := range ifNames {
+		iface := cfg.Interfaces.Interfaces[ifName]
+		if iface == nil {
+			continue
+		}
+		unitNums := make([]int, 0, len(iface.Units))
+		for number := range iface.Units {
+			unitNums = append(unitNums, number)
+		}
+		sort.Ints(unitNums)
+		for _, number := range unitNums {
+			unit := iface.Units[number]
+			if unit == nil {
+				continue
+			}
+			unitRef := fmt.Sprintf("%s.%d", ifName, number)
+			zoneName := zoneByIface[unitRef]
+			zone := cfg.Security.Zones[zoneName]
+			if zoneName == "" || zone == nil || hostInboundLifelineInterface(unitRef, lifelines) {
+				continue
+			}
+			if _, excluded := quarantined[zoneName]; excluded {
+				continue
+			}
+			services, _ := effectiveHostInboundTokens(zone, unitRef, overrides[unitRef])
+			fullAdmit, dhcpv6Admit := false, false
+			for _, service := range services {
+				if config.HostInboundFullAdmitService(service) {
+					fullAdmit = true
+				}
+				for _, expanded := range config.HostInboundServiceTokenExpansion(service) {
+					if expanded == "dhcpv6" {
+						dhcpv6Admit = true
+						break
+					}
+				}
+			}
+			if fullAdmit {
+				continue
+			}
+			linuxName := snapshotLinuxName(cfg, ifName, iface, unit)
+			if linuxName == "" {
+				continue
+			}
+			if unit.DHCP && !seenV4[linuxName] {
+				seenV4[linuxName] = true
+				backstops.V4 = append(backstops.V4, linuxName)
+			}
+			dhcpv6 := unit.DHCPv6 || unit.DHCPv6Client != nil
+			if dhcpv6 && !seenV6[linuxName] {
+				seenV6[linuxName] = true
+				backstops.V6 = append(backstops.V6, linuxName)
+			}
+			if dhcpv6 && dhcpv6Admit && !seenAdmitV6[linuxName] {
+				seenAdmitV6[linuxName] = true
+				backstops.AdmitV6 = append(backstops.AdmitV6, linuxName)
+			}
+			if !vrfEnslaved[linuxName] {
+				continue
+			}
+			if unit.DHCP && !seenVRFV4[linuxName] {
+				seenVRFV4[linuxName] = true
+				backstops.VRFSlavesV4 = append(backstops.VRFSlavesV4, linuxName)
+			}
+			if dhcpv6 && !seenVRFV6[linuxName] {
+				seenVRFV6[linuxName] = true
+				backstops.VRFSlavesV6 = append(backstops.VRFSlavesV6, linuxName)
+			}
+			if dhcpv6 && dhcpv6Admit && !seenVRFAdmitV6[linuxName] {
+				seenVRFAdmitV6[linuxName] = true
+				backstops.AdmitVRFSlavesV6 = append(backstops.AdmitVRFSlavesV6, linuxName)
+			}
+		}
+	}
+	sort.Strings(backstops.V4)
+	sort.Strings(backstops.V6)
+	sort.Strings(backstops.VRFSlavesV4)
+	sort.Strings(backstops.VRFSlavesV6)
+	sort.Strings(backstops.AdmitV6)
+	sort.Strings(backstops.AdmitVRFSlavesV6)
+	return backstops
 }
 
 // HostInboundLifelineIngressNetdevs returns the sorted linux netdev names
@@ -1382,13 +1534,21 @@ type FenceAddrSets struct {
 	UnzonedV6  []string
 	WithheldV4 []string
 	WithheldV6 []string
-	// UnleasedV4/V6 are LOCAL_IN netdevs of unzoned DHCP units with no
-	// lease yet in that family (#10751 R7-B/F8-A): per-family interface
-	// DROPs (LAST) so a first lease lands already denied, plus
-	// per-family DHCP-client admits (TOP) so it can still arrive. Empty
-	// omits the rules.
+	// UnleasedV4/V6 are LOCAL_IN netdevs protected by a family-guarded DHCP
+	// backstop: unzoned units are included while that family has no address,
+	// and enforcing-zone units remain included for as long as DHCP intent is
+	// configured. DHCP-client admits are placed before destination rules and
+	// interface DROPs after them.
 	UnleasedV4 []string
 	UnleasedV6 []string
+	// UnleasedVRFSlavesV4/V6 are the configured VRF-slave subset, matched by
+	// sdifname; config ownership keeps the guard present before enslavement.
+	UnleasedVRFSlavesV4 []string
+	UnleasedVRFSlavesV6 []string
+	// DHCPv6 reply admits cover interfaces whose effective host-inbound policy
+	// permits the dhcpv6 service.
+	AdmitV6          []string
+	AdmitVRFSlavesV6 []string
 	// Unzoned input scopes for catalog-group default-deny during cold boot.
 	UnzonedIngressNetdevs   []string
 	UnzonedIngressVRFSlaves []string
@@ -1477,7 +1637,10 @@ func buildFenceAddrSetsFromSnaps(cfg *config.Config, snaps []InterfaceSnapshot, 
 	sort.Strings(withheld)
 	out.UnzonedV4, out.UnzonedV6 = splitFams(rest)
 	out.WithheldV4, out.WithheldV6 = splitFams(withheld)
-	out.UnleasedV4, out.UnleasedV6 = BuildUnzonedDHCPUnleasedNetdevs(cfg, snaps)
+	backstops := BuildDHCPHostInboundBackstopNetdevs(cfg, snaps)
+	out.UnleasedV4, out.UnleasedV6 = backstops.V4, backstops.V6
+	out.UnleasedVRFSlavesV4, out.UnleasedVRFSlavesV6 = backstops.VRFSlavesV4, backstops.VRFSlavesV6
+	out.AdmitV6, out.AdmitVRFSlavesV6 = backstops.AdmitV6, backstops.AdmitVRFSlavesV6
 	return out
 }
 
