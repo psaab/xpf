@@ -964,7 +964,7 @@ fn worker_queue_7201_did_work_consumes_the_backlog_signal() {
         "expected exactly one `did_work` seed to reason about; found {seeds:?}"
     );
     assert_eq!(
-        seeds[0], "let mut did_work = commands_backlogged;",
+        seeds[0], "let mut did_work = commands_backlogged || !session_import_repairs.is_empty();",
         "the worker loop no longer seeds `did_work` from the command backlog. A \
          `let mut did_work = false;` here reverts #7201 to a pure regression: the \
          budget still splits the batch, but the loop classifies the split passes \
