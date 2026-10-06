@@ -256,9 +256,14 @@ operator choose the other direction for a binding:
   above;
 - `drop`: once **every** unready constituent was dropped by its hold-interval,
   `SnapshotForBindings` publishes the binding with the remaining feeds'
-  prefixes, possibly none. Policy lowering already treats a present empty row as
-  match-none (#2049), so an allowlist becomes permit-none and a denylist
-  deny-none, and the rest of the snapshot is enforced.
+  prefixes, possibly none. Policy lowering treats a present empty row as
+  match-none (#2049), so an ordinary allowlist becomes permit-none and an
+  ordinary denylist deny-none, and the rest of the snapshot is enforced. If
+  that empty row is the entire effective set of a `*-address-excluded` policy
+  side, the whole snapshot is refused: the excluded-side empty-set guard
+  deliberately makes the rule nonmatching regardless of action (#2008), so
+  publishing it could let a later permit bypass an excluded DENY. A populated
+  literal or book contribution on the same side preserves normal drop behavior.
 
 `drop` never covers a feed with **no first snapshot**, or an unknown feed name.
 Those keep #5645's fail-closed omission, because nothing was ever enforced for
