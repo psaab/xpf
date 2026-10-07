@@ -62,6 +62,55 @@ fn pmech_inventory_for(
     }
 }
 
+fn main_route_table_identities() -> Vec<crate::protocol::RouteTableIdentitySnapshot> {
+    ["inet.0", "inet6.0"]
+        .into_iter()
+        .map(|name| crate::protocol::RouteTableIdentitySnapshot {
+            name: name.into(),
+            domain: 0,
+            table: 254,
+        })
+        .collect()
+}
+
+fn install_main_route_table_authority(forwarding: &mut crate::afxdp::types::ForwardingState) {
+    let identity = crate::afxdp::types::RouteIdentity {
+        domain: 0,
+        table: 254,
+    };
+    forwarding.route_table_identities.insert("inet.0".into(), identity);
+    forwarding.route_table_identities.insert("inet6.0".into(), identity);
+    forwarding.route_table_identity_map_complete = true;
+    forwarding
+        .routes_v4
+        .insert("inet.0".into(), vec![test_main_route()]);
+    forwarding.neighbors.insert(
+        (
+            20,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 2)),
+        ),
+        crate::afxdp::types::NeighborEntry { mac: [2, 0, 0, 0, 0, 20] },
+    );
+}
+
+fn test_ipv4_packet_from(source: [u8; 4], destination: [u8; 4]) -> [u8; 20] {
+    let mut packet = test_ipv4_packet(destination);
+    packet[12..16].copy_from_slice(&source);
+    packet
+}
+
+fn test_main_route() -> crate::afxdp::types::RouteEntryV4 {
+    crate::afxdp::types::RouteEntryV4::single(
+        crate::prefix::PrefixV4::from_net("10.0.0.0/24".parse().expect("test prefix")),
+        20,
+        0,
+        Some("192.0.2.2".parse().expect("test next hop")),
+        false,
+        String::new(),
+        1,
+    )
+}
+
 fn pmech_advisory(
     view: &RuntimeView,
     zone_id: u16,
@@ -259,6 +308,7 @@ fn snapshot_published_tunnel_rows_join_d11_10485() {
     use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
 
     let mut coordinator = Coordinator::new();
+    install_main_route_table_authority(&mut coordinator.forwarding);
     coordinator.validation = ValidationState {
         snapshot_installed: true,
         config_generation: 7,
@@ -275,6 +325,7 @@ fn snapshot_published_tunnel_rows_join_d11_10485() {
         fib_generation: 3,
         ipsec_tunnel_snapshot_generation: 42,
         ipsec_tunnel_rows: rows.clone(),
+        route_table_identities: main_route_table_identities(),
         pmech_inventory: Some(pmech_inventory_for(&rows, 7, 3)),
         ..Default::default()
     };
@@ -290,7 +341,7 @@ fn snapshot_published_tunnel_rows_join_d11_10485() {
         Some((9, 10))
     );
 
-    let packet = test_ipv4_packet([10, 0, 0, 1]);
+    let packet = test_ipv4_packet_from([10, 0, 0, 1], [10, 0, 0, 1]);
     let decision = adjudicate_ipsec_inner(
         &view,
         IpsecInnerInput {
@@ -436,6 +487,7 @@ fn snapshot_published_rows_deny_stale_advisory_generation_10485() {
     use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
 
     let mut coordinator = Coordinator::new();
+    install_main_route_table_authority(&mut coordinator.forwarding);
     coordinator.validation = ValidationState {
         snapshot_installed: true,
         config_generation: 7,
@@ -452,6 +504,7 @@ fn snapshot_published_rows_deny_stale_advisory_generation_10485() {
         fib_generation: 3,
         ipsec_tunnel_snapshot_generation: 42,
         ipsec_tunnel_rows: rows.clone(),
+        route_table_identities: main_route_table_identities(),
         pmech_inventory: Some(pmech_inventory_for(&rows, 7, 3)),
         ..Default::default()
     };
@@ -626,6 +679,7 @@ fn snapshot_duplicate_if_id_claimants_deny_through_adjudication_10540() {
     use crate::protocol::snapshot::{ConfigSnapshot, IpsecTunnelRowSnapshot};
 
     let mut coordinator = Coordinator::new();
+    install_main_route_table_authority(&mut coordinator.forwarding);
     coordinator.validation = ValidationState {
         snapshot_installed: true,
         config_generation: 7,
@@ -657,6 +711,7 @@ fn snapshot_duplicate_if_id_claimants_deny_through_adjudication_10540() {
         fib_generation: 3,
         ipsec_tunnel_snapshot_generation: 42,
         ipsec_tunnel_rows: rows.clone(),
+        route_table_identities: main_route_table_identities(),
         pmech_inventory: Some(pmech_inventory_for(&rows, 7, 3)),
         ..Default::default()
     };
@@ -679,7 +734,7 @@ fn snapshot_duplicate_if_id_claimants_deny_through_adjudication_10540() {
         Some((8, 12))
     );
 
-    let packet = test_ipv4_packet([10, 0, 0, 3]);
+    let packet = test_ipv4_packet_from([10, 0, 0, 3], [10, 0, 0, 3]);
     for (stn, ifindex, if_id) in [("st0", 10i32, 7u32), ("st1", 11i32, 7u32)] {
         let decision = adjudicate_ipsec_inner(
             &view,
@@ -756,6 +811,7 @@ fn snapshot_generation_rotation_denies_prior_view_advisory_10540() {
         ("fib-only", 42u64, 7u64, 4u32),
     ] {
         let mut coordinator = Coordinator::new();
+        install_main_route_table_authority(&mut coordinator.forwarding);
         coordinator.validation = ValidationState {
             snapshot_installed: true,
             config_generation: 7,
@@ -774,6 +830,7 @@ fn snapshot_generation_rotation_denies_prior_view_advisory_10540() {
             fib_generation: 3,
             ipsec_tunnel_snapshot_generation: 42,
             ipsec_tunnel_rows: first_rows.clone(),
+            route_table_identities: main_route_table_identities(),
             pmech_inventory: Some(pmech_inventory_for(&first_rows, 7, 3)),
             ..Default::default()
         };
@@ -796,6 +853,7 @@ fn snapshot_generation_rotation_denies_prior_view_advisory_10540() {
             fib_generation: fib_gen,
             ipsec_tunnel_snapshot_generation: tunnel_gen,
             ipsec_tunnel_rows: second_rows.clone(),
+            route_table_identities: main_route_table_identities(),
             pmech_inventory: Some(pmech_inventory_for(&second_rows, config_gen, fib_gen)),
             ..Default::default()
         };
@@ -1995,8 +2053,25 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
             zone: "zone1".to_string(),
             ..Default::default()
         }],
+        neighbors: vec![crate::protocol::snapshot::NeighborSnapshot {
+            interface: "st0.0".into(),
+            ifindex: 10,
+            family: "inet".into(),
+            ip: "192.0.2.2".into(),
+            mac: "02:00:00:00:00:20".into(),
+            state: "reachable".into(),
+            ..Default::default()
+        }],
+        routes: vec![crate::protocol::RouteSnapshot {
+            table: "inet.0".into(),
+            family: "inet".into(),
+            destination: "10.0.0.0/24".into(),
+            next_hops: vec!["192.0.2.2@st0.0".into()],
+            ..Default::default()
+        }],
         ipsec_tunnel_snapshot_generation: 42,
         ipsec_tunnel_rows: rows.clone(),
+        route_table_identities: main_route_table_identities(),
         pmech_inventory: Some(pmech_inventory_for(&rows, NEW_GEN, NEW_FIB_GEN)),
         ..Default::default()
     };
@@ -2018,7 +2093,7 @@ fn refresh_runtime_snapshot_publishes_a_coherent_view_pair() {
             .map(|row| (row.if_id, row.logical_ifindex)),
         Some((9, 10))
     );
-    let packet = test_ipv4_packet([10, 0, 0, 1]);
+    let packet = test_ipv4_packet_from([10, 0, 0, 1], [10, 0, 0, 1]);
     let decision = crate::afxdp::ipsec_inner::adjudicate_ipsec_inner(
         &published,
         crate::afxdp::ipsec_inner::IpsecInnerInput {
