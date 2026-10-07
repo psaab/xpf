@@ -247,10 +247,11 @@ type junosHostTerm struct {
 	l4            []JunosHostDenyL4
 	appAny        bool
 	representable bool
-	// lenientDropped marks a permit whose tolerant compile accepted only by
-	// dropping enforcement content (#5575/#11013/#11014 LenientContentDropped).
-	// The kernel projection must not turn that incomplete permit into an allow.
-	lenientDropped bool
+	// skipPermit marks an incomplete permit whose match intent is absent from
+	// the compiled policy, either because policy content was dropped or a
+	// referenced application carries dropped match constraints. Such a permit
+	// must not carve later denies in the kernel projection.
+	skipPermit bool
 }
 
 // BuildJunosHostDenyProjection projects every configured ingress zone's
@@ -544,22 +545,41 @@ func containsZone(zs []string, z string) bool {
 // junosHostProjectTerm resolves one policy's match into a representable term. A
 // scheduler-gated policy, a feed-tainted / non-static source or destination, an
 // un-reducible application, or an application scoped to an IPsec/ident exempt
-// tuple marks the term un-representable. Every action is representable (#9504):
-// deny, reject and permit each keep their verdict in first-match order.
+// tuple marks the term un-representable. A permit with dropped application
+// matches is skipped so it cannot carve a later deny. Otherwise each
+// representable action keeps its verdict in first-match order (#9504).
 func junosHostProjectTerm(cfg *Config, key string, p *Policy, feedBound map[string]bool) junosHostTerm {
 	t := junosHostTerm{key: key, action: p.Action, representable: true}
-	// A LenientContentDropped permit has enforcement intent absent from the
-	// compiled policy: a match constraint may be missing, an unsupported then
-	// sibling may have been ignored, or a nested enforcement subtree may have
-	// been discarded. The userspace snapshot builder refuses the same policy,
-	// but this kernel projection is also active for host-bound traffic. Since
-	// the operator's intended permit scope is unknowable, skip the permit before
-	// resolution; any later deny rules remain authored and can only drop more
-	// traffic, never admit traffic that a configured deny names. A poisoned
-	// DENY is left intact because widening a DROP is the fail-closed direction.
-	if p.LenientContentDropped && p.Action == PolicyPermit {
-		t.lenientDropped = true
-		return t
+	// A LenientContentDropped permit has policy enforcement intent absent from
+	// the compiled policy. A referenced application with match drops has the
+	// same problem for this projection: userspace refuses that reference too
+	// (ApplicationReferenceMatchDrops, #9525), but the kernel host-bound path
+	// must independently avoid turning it into an unconstrained permit. Skip the
+	// permit before resolution; any later deny rules remain authored and can
+	// only drop more traffic. A poisoned DENY is left intact because widening a
+	// DROP is the fail-closed direction.
+	if p.Action == PolicyPermit {
+		if p.LenientContentDropped {
+			t.skipPermit = true
+			return t
+		}
+		// `any` subsumes every named application in a policy match, so a bad
+		// sibling reference cannot widen this all-protocol match.
+		containsAny := false
+		for _, name := range p.Match.Applications {
+			if name == "" || name == "any" {
+				containsAny = true
+				break
+			}
+		}
+		if !containsAny {
+			for _, name := range p.Match.Applications {
+				if len(ApplicationReferenceMatchDrops(name, &cfg.Applications)) > 0 {
+					t.skipPermit = true
+					return t
+				}
+			}
+		}
 	}
 	// Scheduler-gated policies are time-windowed and cannot be an always-on
 	// static rule (§6.2). A permit is no exception: rendered as an always-on
@@ -632,8 +652,8 @@ func junosHostProjectProgram(zone string, ifaceRefs []string, terms []junosHostT
 	emitted := map[string]bool{}
 	var doneV4, doneV6, hasPermitV4, hasPermitV6 bool
 	for _, t := range terms {
-		if t.action == PolicyPermit && t.lenientDropped {
-			continue // #9572: a #5575-poisoned permit carves nothing.
+		if t.action == PolicyPermit && t.skipPermit {
+			continue // An incomplete permit carves nothing.
 		}
 		verdict := junosHostTermVerdict(t.action)
 		add := func(family string, rules *[]JunosHostDenyRule, done, hasPermit *bool) {
