@@ -371,10 +371,11 @@ const (
 	// egress. A v39 helper ignores it and keeps the old liveness behavior, so
 	// exact equality fences that mixed pairing.
 	// v40 -> v41 (#11420): ConfigSnapshot.ForwardingTables carries the
-	// table-scoped authority for qualified forwarding-instance gateways.
-	// #11684 extends the default-domain interface exception to global v4/v6
-	// gateways. A v40 helper cannot apply that authority, so exact equality
-	// fences the mixed route contract.
+	// table-scoped authority for forwarding-instance interfaces.
+	// #11684 extends qualified-gateway use to global v4/v6 gateways;
+	// #12036 also permits interface-only `@interface` members in those tables.
+	// A v40 helper cannot apply that authority, so exact equality fences the
+	// mixed route contract.
 	// v41 -> v42 (#11503): ProcessStatus carries distinct ingress and egress
 	// unzoned-policy-denial counters for status and metrics consumers.
 	// v42 -> v43 (#11463): InterfaceSnapshot.AdminDisabled carries disabled
@@ -780,11 +781,11 @@ type ConfigSnapshot struct {
 	Routes           []RouteSnapshot          `json:"routes,omitempty"`
 	// ForwardingTables identifies the family-qualified tables backed by
 	// `instance-type forwarding`. The Rust FIB uses this explicit marker to
-	// allow qualified IPv4/IPv6 gateways in those tables to target a
-	// default-instance interface in routing domain zero without relaxing the
-	// #11074 foreign-VRF check.
-	// Additive and omitted when empty. Protocol v41 fences older helpers,
-	// which refuse rather than silently ignore this route authority.
+	// allow qualified IPv4/IPv6 gateways and interface-only members in those
+	// tables to target a default-instance interface in routing domain zero
+	// without relaxing the #11074 foreign-VRF check. Additive and omitted
+	// when empty. Protocol v41 fences older helpers, which refuse rather than
+	// silently ignore this route authority.
 	ForwardingTables []string     `json:"forwarding_tables,omitempty"`
 	Flow             FlowSnapshot `json:"flow,omitempty"`
 	DefaultPolicy    string       `json:"default_policy,omitempty"`

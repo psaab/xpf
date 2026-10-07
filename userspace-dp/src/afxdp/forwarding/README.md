@@ -76,18 +76,21 @@ Route metadata crosses the Go→Rust snapshot boundary as `RouteSnapshot`
   carries no forwarding next-hop (it is a `NextTable` snapshot), so it
   never reaches this inference and is re-resolved in the target table's
   own scope by the recursion.
-  - **Forwarding-instance gateway exception (#11420/#11684).** Bare gateway
-    inference remains own-table-only. Go marks the canonical
+  - **Forwarding-instance default-interface exception (#11420/#11684/#12036).**
+    Bare-gateway inference remains own-table-only. Go marks the canonical
     `<instance>.inet.0` and `<instance>.inet6.0` tables for
     `instance-type forwarding` in the additive `forwarding_tables` snapshot
     field. In one of those exact tables, Rust may resolve a qualified gateway
-    through an explicit default-instance interface in routing domain zero.
-    For global gateways Go selects the best scope (same instance before
-    default), with interface name as a deterministic tie-breaker; for IPv6
-    link-local gateways it requires a unique IPv6-capable candidate at that
-    best scope. This does not authorize quarantined default-domain sentinels
-    or ordinary foreign-VRF interfaces.
-    An empty marker is omitted for wire compatibility.
+    or an interface-only `@interface` member through an explicit
+    default-instance interface in routing domain zero. Go normalizes both
+    scalar `next-hop <ifname>` and braced `next-hop { interface <ifname>; }`
+    to that same interface-only member. For global gateways Go selects the
+    best scope (same instance before default), with interface name as a
+    deterministic tie-breaker; for IPv6 link-local gateways it requires a
+    unique IPv6-capable candidate at that best scope. The interface-only
+    member must name a known interface; other explicit cross-instance
+    interfaces stay unresolved. An empty marker is omitted for wire
+    compatibility.
   - **Local-delivery (to-self) attribution is table-scoped too (#3151).**
     The `lookup_forwarding_resolution_inner_ecmp` shortcut for a
     destination in `local_v[46]` resolves `local_ifindex` /

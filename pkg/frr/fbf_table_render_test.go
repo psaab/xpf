@@ -154,6 +154,72 @@ func validateRenderedRouting11417(t *testing.T, vtysh, rendered string) ([]byte,
 	return output, err
 }
 
+// #12036: the braced interface-only FBF member must match FRR's table-N
+// device route. Preserve the declared secure-tunnel unit spelling.
+func TestGenerateInterfaceOnlyTunnelRouteInTable12036(t *testing.T) {
+	sr := &config.StaticRoute{
+		Destination: "0.0.0.0/0",
+		NextHops:    []config.NextHopEntry{{Interface: "st0.0"}},
+	}
+	got := New().generateStaticRouteInTable(
+		sr, "", 100, nil, nil, map[string]string{"st0.0": "st0.0"})
+	if want := "ip route 0.0.0.0/0 st0.0 table 100\n"; got != want {
+		t.Fatalf("interface-only forwarding-instance route = %q, want %q", got, want)
+	}
+}
+
+// The scalar `next-hop <ifname>` and braced `next-hop { interface <ifname>; }`
+// forms must compile to the same gateway-less FRR route.
+func TestGenerateInlineAndBracedInterfaceOnlyRouteInTable12036(t *testing.T) {
+	src := `routing-instances {
+		VPN {
+			instance-type forwarding;
+			routing-options {
+				static {
+					route 0.0.0.0/0 {
+						next-hop {
+							interface st0.0;
+						}
+					}
+					route 198.51.100.0/24 {
+						next-hop st0.0;
+					}
+				}
+			}
+		}
+	}`
+	tree, parseErrors := config.NewParser(src).Parse()
+	if len(parseErrors) != 0 {
+		t.Fatalf("parse static routes: %v", parseErrors)
+	}
+	cfg, err := config.CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("compile static routes: %v", err)
+	}
+	if len(cfg.RoutingInstances) != 1 {
+		t.Fatalf("routing instances = %d, want 1", len(cfg.RoutingInstances))
+	}
+	routes := cfg.RoutingInstances[0].StaticRoutes
+	for _, destination := range []string{"0.0.0.0/0", "198.51.100.0/24"} {
+		var route *config.StaticRoute
+		for _, candidate := range routes {
+			if candidate.Destination == destination {
+				route = candidate
+				break
+			}
+		}
+		if route == nil {
+			t.Fatalf("compiled route %s missing", destination)
+		}
+		got := New().generateStaticRouteInTable(
+			route, "", 100, nil, nil, map[string]string{"st0.0": "st0.0"})
+		want := "ip route " + destination + " st0.0 5 table 100\n"
+		if got != want {
+			t.Errorf("route %s = %q, want %q", destination, got, want)
+		}
+	}
+}
+
 // TestApplyFullForwardingInstanceTable: ApplyFull renders forwarding
 // instances (VRFName == "", TableID > 0) into their kernel table and
 // keeps virtual-router instances on `vrf <name>`.

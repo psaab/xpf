@@ -419,8 +419,9 @@ const (
 	// admin/oper liveness for interface-only ECMP egress. A v39 helper ignores
 	// it, keeping the known-down path this field closes.
 	// v40 -> v41 BUMPED (#11420): ConfigSnapshot.ForwardingTables identifies
-	// FI tables so Rust can authorize a qualified IPv6 link-local gateway's
-	// default-domain egress without permitting ordinary foreign-VRF scope.
+	// FI tables so Rust can authorize qualified gateways and, after #12036,
+	// interface-only members to use default-domain egress without permitting
+	// ordinary foreign-VRF scope.
 	// v41 -> v42 BUMPED (#11503): ProcessStatus adds two status-wire cause
 	// counters; this golden digest stays unchanged because ProcessStatus is
 	// outside the ConfigSnapshot shape walk.
