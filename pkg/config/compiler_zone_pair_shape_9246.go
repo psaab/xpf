@@ -3,7 +3,7 @@ package config
 import "strings"
 
 // malformedZonePairShape9246 reports zone-pair key shapes whose tail the
-// policy compiler would ignore, or "" when the shape is valid.
+// policy compiler cannot represent, or "" when the shape is valid.
 //
 // There are two malformed AST forms:
 //
@@ -41,8 +41,8 @@ func malformedZonePairShape9246(n *Node) string {
 		if bracketed {
 			return "from-zone " + n.Keys[1] + " to-zone [ " + strings.Join(n.Keys[3:], " ") + " ]" +
 				": a bracketed [ ... ] zone list is not valid on to-zone — a policy context is ONE " +
-				"zone pair, and the compiler would ignore every listed zone after `" + n.Keys[3] +
-				"`. Write one `from-zone <zone> to-zone <zone>` context per pair"
+				"zone pair. The malformed context is not enforced on tolerant loads; write one " +
+				"`from-zone <zone> to-zone <zone>` context per pair"
 		}
 		return "from-zone " + n.Keys[1] + " to-zone " + n.Keys[3] +
 			": extra key tokens `" + strings.Join(n.Keys[4:], " ") + "` follow the single to-zone name " +
@@ -72,7 +72,7 @@ func malformedZonePairShape9246(n *Node) string {
 			": a bracketed [ ... ] zone list is not valid on to-zone — a policy context is ONE " +
 			"zone pair, so `" + c.Keys[0] + "` and everything after it (" +
 			strings.Join(c.Keys[1:], " ") + ") were absorbed as tokens and the policy was NOT " +
-			"attached to any context. Write one `from-zone <zone> to-zone <zone>` context per pair"
+			"attached to any context on tolerant loads. Write one `from-zone <zone> to-zone <zone>` context per pair"
 	}
 	return ""
 }

@@ -677,9 +677,10 @@ func applyCollapsedDenyModifiers(pol *Policy, denyNode *Node) {
 	}
 }
 
-// LenientDroppedPolicyLocator names the first policy in cfg whose compile
-// silently dropped enforcement or audit content on the tolerant path
-// (#5575/#11013/#11014/#11023 LenientContentDropped), or "" when none did.
+// LenientDroppedPolicyLocator names the first policy in cfg flagged for
+// dropped enforcement/audit content (#5575/#11013/#11014/#11023) or as the
+// #12039 synthetic global carrier for a skipped malformed zone-pair context,
+// or "" when none is flagged.
 //
 // The flag is the compiler's fail-closed poison: policies_lower.go stamps such
 // a rule with the __unsupported__ application sentinel so the Rust integrity
@@ -690,12 +691,11 @@ func applyCollapsedDenyModifiers(pol *Policy, denyNode *Node) {
 // helper.
 //
 // It walks BOTH policy shapes. A zone-pair rule and a global rule reach the
-// poison through the same compilePolicy path, so a walker that checked only
-// `Security.Policies` would report a clean config for a poisoned global policy
-// — the exact miss that would let an unappliable rollback target through the
-// #6707 gate. Returning the locator rather than a bare bool lets the caller
-// name the offending rule to the operator; a rule with no zone context is a
-// global policy and is labelled as such.
+// poison through the same lowerer, so a walker that checked only
+// `Security.Policies` would miss poisoned global policies — the exact miss that
+// would let an unappliable rollback target through the #6707 gate. Returning
+// the locator rather than a bare bool lets the caller name the offending rule
+// to the operator; a rule with no zone context is labelled global.
 func LenientDroppedPolicyLocator(cfg *Config) string {
 	if cfg == nil {
 		return ""
