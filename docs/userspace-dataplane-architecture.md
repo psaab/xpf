@@ -1451,6 +1451,17 @@ Scope of the fallback:
   or resolvable native mapping. Ordinary untagged ports without the knob retain
   their physical fallback; other contested parent identities remain fail-closed.
 
+  **#12055 shim local-delivery guard.** The AF_XDP worker's tagged-only VID-0
+  check runs too late for packets the XDP shim already returns to the kernel as
+  firewall-local. The daemon therefore publishes two bits in the existing
+  `userspace_ingress_ifaces` byte: adjudicated ingress (bit 0) and tagged-only
+  VID-0 scope (bit 1), derived from tagged child, explicit unit-0, and native
+  VLAN ownership. Before either the healthy or degraded shim can take a local
+  PASS, an IP packet with VID 0 to an `is_local_destination` address on a
+  tagged-only ingress is dropped and counted as `tagged_only_local_drop`.
+  Tagged traffic and ordinary untagged ingress retain their prior local-delivery
+  behavior.
+
 
   Junos zones logical UNITS, so a gap still runs the other way: `st0.0` and
   `st0.1` cannot be given DIFFERENT zones and both forward. Closing that needs

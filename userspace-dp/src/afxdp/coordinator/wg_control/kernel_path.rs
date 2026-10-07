@@ -29,8 +29,9 @@
 //! #10527 was graded against that open-hook wording — #10642.)
 //!
 //! Both questions are answered from the shim's own pinned maps rather than a
-//! second derivation in the helper: `userspace_ingress_ifaces` (the set
-//! `try_xdp_userspace` adjudicates) and `userspace_local_v4/v6` minus
+//! second derivation in the helper: `userspace_ingress_ifaces` (bit 0 marks the
+//! set `try_xdp_userspace` adjudicates; bit 1 carries tagged-only VID-0 scope)
+//! and `userspace_local_v4/v6` minus
 //! `userspace_interface_nat_v4/v6` (`is_local_destination`, which Go fills
 //! including the VRRP VIPs it reads from the kernel — addresses the helper's
 //! snapshot-derived `local_v4` does not carry).
@@ -137,6 +138,7 @@ pub(crate) fn shim_is_local_destination(in_interface_nat: bool, in_local: bool) 
 }
 
 const INGRESS_IFACES_PIN: &str = "/sys/fs/bpf/xpf/userspace_ingress_ifaces";
+const INGRESS_IFACE_FLAG_ADJUDICATED: u8 = 1;
 const LOCAL_V4_PIN: &str = "/sys/fs/bpf/xpf/userspace_local_v4";
 const LOCAL_V6_PIN: &str = "/sys/fs/bpf/xpf/userspace_local_v6";
 const INTERFACE_NAT_V4_PIN: &str = "/sys/fs/bpf/xpf/userspace_interface_nat_v4";
@@ -287,7 +289,9 @@ impl WgKernelPathView for ShimMapsKernelPathView {
         let in_set = self
             .with_maps(|maps| lookup_u8(maps.ingress.fd, &idx))
             .map(|res| match res {
-                Ok(value) => Some(value.is_some_and(|v| v != 0)),
+                Ok(value) => {
+                    Some(value.is_some_and(|flags| flags & INGRESS_IFACE_FLAG_ADJUDICATED != 0))
+                }
                 // A read error on an open map is not "not covered": fail closed.
                 Err(_) => Some(true),
             })

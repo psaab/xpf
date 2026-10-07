@@ -4078,6 +4078,11 @@ fn shim_index_path_has_one_construction_and_one_lookup() {
         //  shorthand. Three code mentions, no prose ones — the comment there
         //  describes the coordinate rather than spelling it, exactly so this
         //  row tracks code and not wording.
+        // #12055 routes both armed and control-disabled paths through one
+        // shared helper for the interface-coordinate and map-byte read. Its
+        // two call sites and helper add source mentions, but preserve a single
+        // raw field access and keep the helper below the active path's non-IP
+        // return.
         //
         //  What it is NOT: a pack/unpack of the coordinate. An earlier revision
         //  folded it and the queue index into one u64 to fit BPF's five-argument
@@ -4085,7 +4090,7 @@ fn shim_index_path_has_one_construction_and_one_lookup() {
         //  this test exists to make expensive. `pkt_len` is stored at the call
         //  site instead, so both coordinates still travel as bare u32s.
         ("binding_index.rs",     3,               4,               3),
-        ("lib.rs",               25,              3,               17),
+        ("lib.rs",               33,              3,               20),
     ];
 
     // ---- …and `ctx` may not be rebound AT ALL. ---------------------------
