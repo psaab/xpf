@@ -11,11 +11,12 @@ use super::*;
 use crate::afxdp::flow_cache::{FlowCacheEntry, FlowCacheLookup, FlowCacheStamp};
 use crate::ip_proto::PROTO_TCP;
 use crate::nat::NatDecision;
-use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin};
+use crate::session::{SessionDecision, SessionKey, SessionMetadata};
 use crate::test_zone_ids::*;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::AtomicU32;
 
+const TUNNEL_LOGICAL_IF: i32 = 400;
 const IF_A: i32 = 24;
 const IF_B: i32 = 25;
 const IF_C: i32 = 26;
@@ -76,10 +77,18 @@ fn decision() -> SessionDecision {
 
 fn seed(binding: &mut BindingWorker, key: &SessionKey) {
     let ingress_ifindex = binding.ifindex;
+    seed_with_logical_ingress(binding, key, ingress_ifindex);
+}
+
+fn seed_with_logical_ingress(
+    binding: &mut BindingWorker,
+    key: &SessionKey,
+    logical_ingress_ifindex: i32,
+) {
     binding.flow.flow_cache.insert(FlowCacheEntry {
         key: key.clone(),
-        ingress_ifindex,
-        logical_ingress_ifindex: ingress_ifindex,
+        ingress_ifindex: logical_ingress_ifindex,
+        logical_ingress_ifindex,
         descriptor: RewriteDescriptor {
             dst_mac: [0; 6],
             src_mac: [0; 6],
@@ -122,14 +131,23 @@ fn seed(binding: &mut BindingWorker, key: &SessionKey) {
 
 fn hits(binding: &mut BindingWorker, key: &SessionKey, epochs: &[AtomicU32; MAX_RG_EPOCHS]) -> bool {
     let ingress_ifindex = binding.ifindex;
+    hits_on_logical_ingress(binding, key, epochs, ingress_ifindex)
+}
+
+fn hits_on_logical_ingress(
+    binding: &mut BindingWorker,
+    key: &SessionKey,
+    epochs: &[AtomicU32; MAX_RG_EPOCHS],
+    logical_ingress_ifindex: i32,
+) -> bool {
     binding
         .flow
         .flow_cache
         .lookup(
             key,
             FlowCacheLookup {
-                ingress_ifindex,
-                logical_ingress_ifindex: ingress_ifindex,
+                ingress_ifindex: logical_ingress_ifindex,
+                logical_ingress_ifindex,
                 config_generation: 1,
                 fib_generation: 1,
             },
@@ -139,7 +157,32 @@ fn hits(binding: &mut BindingWorker, key: &SessionKey, epochs: &[AtomicU32; MAX_
         .is_some()
 }
 
+
+/// A tunnel-decapsulated RST still carries the tunnel logical ifindex in its
+/// packet metadata, while the RST teardown invalidates by the physical binding
+/// ifindex. The cache must retain the physical binding identity so the
+/// production RST eviction reaches the entry.
+#[test]
+fn rst_teardown_invalidates_tunnel_flow_cache_slot_12042() {
+    let epochs = epochs();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, IF_A, 0);
+    let flow = key(12345, 5201);
+    seed_with_logical_ingress(&mut binding, &flow, TUNNEL_LOGICAL_IF);
+    assert!(
+        hits_on_logical_ingress(&mut binding, &flow, &epochs, TUNNEL_LOGICAL_IF),
+        "precondition: the tunnel flow's descriptor is cached and hits"
+    );
+
+    invalidate_rst_flow_cache_slot(&mut binding, &flow);
+
+    assert!(
+        !hits_on_logical_ingress(&mut binding, &flow, &epochs, TUNNEL_LOGICAL_IF),
+        "#12042: a tunnel-ingress flow's RST teardown must evict the stale \
+         descriptor so a reopened flow's first ACK misses"
+    );
+}
 /// A revoked session's descriptor is evicted from EVERY binding of the worker,
+
 /// not just the one the revoking packet arrived on.
 ///
 /// The three-binding shape is the point: the forward and reverse halves of one

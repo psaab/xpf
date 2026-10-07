@@ -625,7 +625,7 @@ impl BindingWorker {
                 pending_direct_tx_disallowed_fallback_packets: 0,
             },
             flow: WorkerFlowCacheState {
-                flow_cache: FlowCache::new(),
+                flow_cache: FlowCache::new_for_binding(binding.ifindex),
             },
             // #1620: cold-path histogram worker-local state; default
             // zero-initialized. ns_per_tsc_q32 / wrapper_ns_baseline /
@@ -765,7 +765,7 @@ impl BindingWorker {
                 pending_direct_tx_disallowed_fallback_packets: 0,
             },
             flow: WorkerFlowCacheState {
-                flow_cache: FlowCache::new(),
+                flow_cache: FlowCache::new_for_binding(root_ifindex),
             },
             // #1620: cold-path histogram worker-local state; default
             // zero-initialized. ns_per_tsc_q32 / wrapper_ns_baseline /
@@ -884,7 +884,7 @@ impl BindingWorker {
                 pending_direct_tx_disallowed_fallback_packets: 0,
             },
             flow: WorkerFlowCacheState {
-                flow_cache: FlowCache::new(),
+                flow_cache: FlowCache::new_for_binding(ifindex),
             },
             // #1620: cold-path histogram worker-local state; default
             // zero-initialized. ns_per_tsc_q32 / wrapper_ns_baseline /

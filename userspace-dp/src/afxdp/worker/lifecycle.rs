@@ -244,10 +244,7 @@ pub(super) fn poll_binding(
             // Evict from flow cache so stale entries aren't used after RST.
             // #918: 4-way set-associative cache requires walking the set
             // for the matching key — `invalidate_slot` does that.
-            binding
-                .flow
-                .flow_cache
-                .invalidate_slot(&forward_key, binding.ifindex);
+            invalidate_rst_flow_cache_slot(binding, &forward_key);
             teardown_tcp_rst_flow(
                 left,
                 binding,
@@ -485,6 +482,18 @@ pub(super) fn invalidate_flow_cache_key_on_binding(
     key: &SessionKey,
 ) {
     binding.flow.flow_cache.invalidate_slot(key, binding.ifindex);
+}
+/// The per-binding flow-cache eviction in the TCP RST teardown path.
+///
+/// This is the exact helper called by `poll_binding`, and gives its targeted
+/// invalidation a direct behavioral test without constructing the full poll
+/// loop.
+#[inline]
+fn invalidate_rst_flow_cache_slot(binding: &mut BindingWorker, key: &SessionKey) {
+    binding
+        .flow
+        .flow_cache
+        .invalidate_slot(key, binding.ifindex);
 }
 
 /// #8586: the FLAT sibling of `invalidate_flow_cache_slots_for_revoked_sessions`.
