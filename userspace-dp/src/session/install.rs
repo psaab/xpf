@@ -828,11 +828,6 @@ impl SessionTable {
         {
             return false;
         }
-        if !self.key_to_handle.contains_key(&key)
-            && self.len().saturating_add(self.reserved_session_slots) >= self.max_sessions
-        {
-            return false;
-        }
         if PMechSessionDirectory::global().conflicts_with_install(
             &key,
             decision.nat,
