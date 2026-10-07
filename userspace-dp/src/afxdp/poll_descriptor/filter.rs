@@ -781,19 +781,25 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
     // that fallback here so an unrelated generation bump does not tear down an
     // unchanged native-RI session. An unresolvable native RI is terminal, not
     // MAIN: it must fail closed on this hit just as it does on a miss.
-    // #11324: a reverse companion's routing-domain key is the original
-    // forward ingress identity. Its reply arrival must not become the native
-    // fallback, especially when a MAIN reply arrives over an RI-member or
-    // vice versa. A shared/sessionless reverse hit has no canonical local key,
-    // so its stamped identity is the only trustworthy native identity.
+    // #11324: `reverse_session_key` preserves the original forward ingress
+    // domain, but poll-path repair can key a local reverse row by reply arrival.
+    // Recover the forward session's native identity for route revalidation so
+    // arrival never replaces the client's domain. The decision stamp may reflect
+    // directional PBR, so it is reserved for shared/sessionless reverse hits
+    // without a canonical local forward row. If a local reverse row has lost its
+    // forward row too, fail closed instead of trusting its arrival-domain key.
     let native_flow_domain = if is_reverse {
         if no_local_entry {
-            decision.install_table_domain
+            Some(decision.install_table_domain)
         } else {
-            canonical_key.routing_domain
+            sessions
+                .find_forward_nat_match(&canonical_key, |egress_ifindex| {
+                    crate::afxdp::forwarding::egress_routing_domain(forwarding, egress_ifindex)
+                })
+                .map(|matched| matched.key.routing_domain)
         }
     } else {
-        flow.forward_key.routing_domain
+        Some(flow.forward_key.routing_domain)
     };
     let native_ingress = if is_reverse {
         (0, 0, None)
@@ -805,6 +811,11 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
         )
     };
     let native_route_table = || {
+        let Some(native_flow_domain) = native_flow_domain else {
+            return crate::afxdp::forwarding::NativeRouteTable::Unresolvable {
+                domain: decision.install_table_domain,
+            };
+        };
         crate::afxdp::forwarding::native_route_table_for_flow_target(
             forwarding,
             native_flow_domain,
