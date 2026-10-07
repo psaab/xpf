@@ -2614,3 +2614,186 @@ fn gre_outer_input_filter_permit_still_decaps_12041() {
     );
 }
 
+/// #12289 Finding 1 (fold into #12041): an outer-CE over Not-ECT inner is the
+/// illegal RFC 6040 §4.2 combination. The GRE gate accepts the outer underlay
+/// filter, counts and logs its PBR term, and charges its ingress policer before
+/// `build_logical_ingress_packet` returns None. The still-outer GRE frame then
+/// falls through to the ordinary flowless session-miss path; re-evaluating the
+/// filter there double-counts/logs the PBR term and charges the policer twice.
+///
+/// Pin the single gate-side count, log, and policer charge, plus the existing
+/// native-fallback outcome (no inner delivery or session install, and the
+/// ECN-illegal drop accounted) without changing that outcome.
+#[test]
+fn gre_outer_ce_over_not_ect_counts_underlay_once_12289() {
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "underlay-in".to_string(),
+        family: "inet".to_string(),
+        terms: vec![
+            FirewallTermSnapshot {
+                name: "permit-gre".to_string(),
+                protocols: vec!["gre".to_string()],
+                routing_instance: "default".to_string(),
+                count: "c-gre".to_string(),
+                log: true,
+                policer: "p-gre".to_string(),
+                action: "accept".to_string(),
+                ..Default::default()
+            },
+            FirewallTermSnapshot {
+                name: "default-accept".to_string(),
+                action: "accept".to_string(),
+                ..Default::default()
+            },
+        ],
+    }];
+    snapshot.three_color_policers = vec![ThreeColorPolicerSnapshot {
+        name: "p-gre".to_string(),
+        mode: "single-rate".to_string(),
+        color_blind: true,
+        committed_rate_bytes_per_sec: 1,
+        committed_burst_bytes: 10_000,
+        peak_or_excess_burst_bytes: 5_000,
+        then_action: "discard".to_string(),
+        ..Default::default()
+    }];
+    snapshot
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.ifindex == 12)
+        .expect("GRE underlay ingress VLAN must exist")
+        .filter_input_v4 = "underlay-in".to_string();
+    let forwarding = build_forwarding_state(&snapshot);
+    let outer_counter = forwarding
+        .filter_state
+        .iface_filter_v4_fast
+        .get(&12)
+        .expect("underlay input filter must be attached")
+        .terms[0]
+        .counter
+        .clone();
+    assert_eq!(
+        outer_counter.packets.load(Ordering::Relaxed),
+        0,
+        "precondition: the outer counter starts at zero"
+    );
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+    binding.interface = Arc::<str>::from("ge-0-0-0");
+    let mut sessions = SessionTable::new();
+    // Inner ICMP is Not-ECT (TOS 0x00) as built; the outer below carries CE.
+    let inner = build_gre_inner_icmp_packet_v4();
+    assert_eq!(
+        inner[1] & 0x03,
+        0,
+        "precondition: the inner packet is Not-ECT"
+    );
+    let mut frame = build_gre_to_self_outer_frame_v4(80, &inner);
+    // Tagged underlay: outer L3 at 18, TOS at 19. Stamp outer CE (0b11),
+    // preserving DSCP (0), and repair the outer IPv4 header checksum.
+    let l3 = 18usize;
+    frame[l3 + 1] = (frame[l3 + 1] & 0xfc) | 0x03;
+    frame[l3 + 10] = 0;
+    frame[l3 + 11] = 0;
+    let ip_sum = checksum16(&frame[l3..l3 + 20]);
+    frame[l3 + 10] = (ip_sum >> 8) as u8;
+    frame[l3 + 11] = ip_sum as u8;
+    assert_eq!(
+        checksum16(&frame[l3..l3 + 20]),
+        0,
+        "outer checksum must be valid"
+    );
+    let meta = gre_to_self_outer_meta(80, frame.len());
+    let ecn_before = crate::afxdp::gre::GRE_DECAP_ECN_ILLEGAL_DROPS.load(Ordering::Relaxed);
+    let (tx, rx) = mpsc::sync_channel(8);
+    let wake = Arc::new(TunnelWake::new().expect("eventfd"));
+    let mut deliveries = BTreeMap::new();
+    deliveries.insert(77, LocalTunnelDelivery { tx, wake });
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(deliveries));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        8,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let (batch, dbg) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    let event_frames = event_rx.try_iter().collect::<Vec<_>>();
+    assert_eq!(
+        outer_counter.packets.load(Ordering::Relaxed),
+        1,
+        "#12289: the gate-accepted outer must be counted exactly once, not re-counted by the fallback replay"
+    );
+    let policer_status = forwarding
+        .filter_state
+        .three_color_policer_statuses()
+        .into_iter()
+        .find(|status| status.name == "p-gre")
+        .expect("the underlay policer must expose runtime status");
+    assert_eq!(
+        policer_status.green_packets, 1,
+        "#12289: the accepted underlay packet must charge its policer once"
+    );
+    assert_eq!(
+        event_frames.len(),
+        1,
+        "#12289: the PBR `then log` must emit exactly once"
+    );
+    let event = event_frames
+        .into_iter()
+        .next()
+        .expect("one PBR filter-log event")
+        .decode_dataplane_event()
+        .expect("filter-log event payload");
+    assert_eq!(
+        event.kind,
+        crate::event_stream::codec::DataplaneEventKind::FilterLog
+    );
+    assert!(
+        crate::afxdp::gre::GRE_DECAP_ECN_ILLEGAL_DROPS.load(Ordering::Relaxed) >= ecn_before + 1,
+        "the illegal outer-CE/Not-ECT combination must advance the GRE ECN-illegal counter"
+    );
+    let mut rows = 0usize;
+    sessions.iter_with_origin(|_, _, _, _| rows += 1);
+    assert_eq!(
+        rows, 0,
+        "#12289: construction failure must install no session (neither inner nor outer)"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "#12289: a construction-failed outer must not deliver any packet to the gr- channel"
+    );
+    // Fallback-outcome pin: the still-outer flowless GRE frame is refused
+    // forwarding (no session, no forward, no local delivery) and recycled.
+    assert_eq!(
+        dbg.forward, 0,
+        "fallback pin: the outer frame must not forward"
+    );
+    assert_eq!(
+        dbg.local, 0,
+        "fallback pin: the outer frame must not take LocalDelivery"
+    );
+    assert_eq!(dbg.no_route, 0, "fallback pin: no route miss is reported");
+    assert_eq!(
+        dbg.missing_neigh, 0,
+        "fallback pin: no neighbor miss is reported"
+    );
+    assert_eq!(
+        dbg.policy_deny, 0,
+        "fallback pin: no policy denial is reported"
+    );
+    assert_eq!(
+        batch.validated_packets, 1,
+        "fallback pin: the descriptor must still validate exactly once"
+    );
+}

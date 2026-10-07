@@ -177,6 +177,15 @@ pub(super) fn filter_log_egress_zone_id(forwarding: &ForwardingState, egress_ifi
     forwarding.egress_zone_id(egress_ifindex)
 }
 
+/// Result of checking a tunnel's physical underlay filter. Accepted state
+/// carries the gate's PBR outcome so a construction-failure fallback can skip
+/// replaying the filter and its side effects.
+pub(super) enum TunnelOuterInputFilterOutcome {
+    NotEvaluated,
+    Rejected,
+    Accepted(crate::afxdp::forwarding::RouteTableOverrideOutcome),
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct NonPbrInputFilterEval {
     pub(super) action: crate::filter::FilterAction,
@@ -271,7 +280,7 @@ pub(super) fn enforce_tunnel_outer_input_filter(
     meta: UserspaceDpMeta,
     counters: &mut BatchCounters,
     now_ns: u64,
-) -> bool {
+) -> TunnelOuterInputFilterOutcome {
     let ingress_logical_ifindex = resolve_ingress_logical_ifindex(
         forwarding,
         meta.ingress_ifindex as i32,
@@ -284,12 +293,12 @@ pub(super) fn enforce_tunnel_outer_input_filter(
         ingress_logical_ifindex,
         is_v6,
     ) else {
-        return false;
+        return TunnelOuterInputFilterOutcome::NotEvaluated;
     };
     let Some(flow) = crate::afxdp::frame::parse_session_flow_from_bytes(packet_frame, meta)
         .or_else(|| crate::afxdp::frame::l3_enforcement_flow_from_frame(packet_frame, meta))
     else {
-        return false;
+        return TunnelOuterInputFilterOutcome::NotEvaluated;
     };
     let mut extra = term_match_extra_from_frame(packet_frame, meta);
     if flow.forward_key.protocol == crate::afxdp::PROTO_GRE {
@@ -325,7 +334,7 @@ pub(super) fn enforce_tunnel_outer_input_filter(
         );
     }
     if input_eval.action != crate::filter::FilterAction::Accept {
-        return true;
+        return TunnelOuterInputFilterOutcome::Rejected;
     }
     let tx_selection = crate::filter::evaluate_filter_ref_tx_selection_runtime_uncounted(
         filter,
@@ -340,25 +349,30 @@ pub(super) fn enforce_tunnel_outer_input_filter(
         now_ns,
     );
     if tx_selection.policer_drop {
-        return true;
+        return TunnelOuterInputFilterOutcome::Rejected;
     }
-    matches!(
-        crate::afxdp::forwarding::ingress_route_table_override(
-            forwarding,
-            packet_frame,
-            meta,
-            &flow,
-            None,
-            event_stream,
-            now_ns,
-            Some(crate::afxdp::forwarding::PbrRejectSink {
-                tx_pipeline,
-                ingress_ifindex,
-                counters,
-            }),
-        ),
+    let route_outcome = crate::afxdp::forwarding::ingress_route_table_override_with_result(
+        forwarding,
+        packet_frame,
+        meta,
+        &flow,
+        None,
+        event_stream,
+        now_ns,
+        Some(crate::afxdp::forwarding::PbrRejectSink {
+            tx_pipeline,
+            ingress_ifindex,
+            counters,
+        }),
+    );
+    if matches!(
+        &route_outcome.route_override,
         crate::afxdp::forwarding::RouteOverride::Drop
-    )
+    ) {
+        TunnelOuterInputFilterOutcome::Rejected
+    } else {
+        TunnelOuterInputFilterOutcome::Accepted(route_outcome)
+    }
 }
 
 /// Side-effect-free input-filter precheck for the screen stage.
