@@ -728,7 +728,8 @@ done
 rewind_failures=()
 PRE_FIRST_REWIND_SHAPE_ONE=(50 110 150 200 250 300 350 450 500 600)
 PRE_FIRST_REWIND_SHAPE_TWO=(50 600 600 600 600 600 600 600 600 600)
-for rewind_case in shape-one shape-two; do
+PRE_FIRST_REWIND_SHAPE_THREE=(110 500 50 150 160 170 180 190 195 600)
+for rewind_case in shape-one shape-two shape-three; do
 	case "$rewind_case" in
 	shape-one)
 		rewind_baseline=100
@@ -739,6 +740,11 @@ for rewind_case in shape-one shape-two; do
 		rewind_baseline=500
 		rewind_expected='rewound from 500 to 50 at sample-01'
 		rewind_values=("${PRE_FIRST_REWIND_SHAPE_TWO[@]}")
+		;;
+	shape-three)
+		rewind_baseline=100
+		rewind_expected='rewound from 500 to 50 at sample-03'
+		rewind_values=("${PRE_FIRST_REWIND_SHAPE_THREE[@]}")
 		;;
 	esac
 	rewind_pre_stats="${RG1_DIR}/${rewind_case}-phase-pre.stats"
@@ -854,9 +860,9 @@ report_output=$(
 	)
 )
 assert_contains "$report_output" 'VOID RG1 Group 8 report-only Pending TX local max unavailable (node0):' \
-	'report-only sampled maximum rejects phase-pre rewind'
-assert_contains "$report_output" 'rewound from 500 to 50 at sample-01' \
-	'report-only sampled maximum identifies phase-pre rewind'
+	'report-only sampled maximum rejects sample-window rewind'
+assert_contains "$report_output" 'rewound from 500 to 50 at sample-03' \
+	'report-only sampled maximum identifies intermediate rewind'
 SAMPLE_STATS[9]="${RG1_DIR}/missing-sample.stats"
 assert_helper_status 2 ha_sample_window_max manual-rg1-failback 1 node0 'Kernel RX dropped' "${SAMPLE_STATS[@]}" 100
 SAMPLE_STATS[9]="${RG1_DIR}/sample-09-node0.stats"
