@@ -18,9 +18,21 @@ func captureStdout(t *testing.T, fn func()) string {
 	if err != nil {
 		t.Fatalf("os.Pipe() error = %v", err)
 	}
-	os.Stdout = w
 	defer func() {
 		os.Stdout = oldStdout
+		_ = w.Close()
+		_ = r.Close()
+	}()
+	os.Stdout = w
+
+	type readResult struct {
+		out []byte
+		err error
+	}
+	readDone := make(chan readResult, 1)
+	go func() {
+		out, err := io.ReadAll(r)
+		readDone <- readResult{out: out, err: err}
 	}()
 
 	fn()
@@ -28,11 +40,11 @@ func captureStdout(t *testing.T, fn func()) string {
 	if err := w.Close(); err != nil {
 		t.Fatalf("stdout close error = %v", err)
 	}
-	out, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("io.ReadAll() error = %v", err)
+	result := <-readDone
+	if result.err != nil {
+		t.Fatalf("io.ReadAll() error = %v", result.err)
 	}
-	return string(out)
+	return string(result.out)
 }
 
 func TestHandleRequestChassisClusterFailoverProxiesPeerTarget(t *testing.T) {

@@ -561,9 +561,10 @@ func TestApplySSHConfig_ValidationPassesThenReloads(t *testing.T) {
 	}
 }
 
-// TestSSHDFactoryRootLoginPrecedence10755 proves the generated xpf drop-in
-// overrides the image's earlier-loaded factory policy for both root-login
-// directions. It also checks migration removes the old, later-sorting file.
+// TestSSHDFactoryRootLoginPrecedence10755 verifies the generated xpf drop-in
+// takes effect before the image's factory policy by checking the root
+// authentication methods sshd actually permits. It also checks migration
+// removes the old, later-sorting file.
 func TestSSHDFactoryRootLoginPrecedence10755(t *testing.T) {
 	sshdBin, err := exec.LookPath("/usr/sbin/sshd")
 	if err != nil {
@@ -581,10 +582,10 @@ func TestSSHDFactoryRootLoginPrecedence10755(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
 		rootLogin string
-		want      string
+		want      rootAuthMethods10755
 	}{
-		{name: "deny", rootLogin: "deny", want: "no"},
-		{name: "allow", rootLogin: "allow", want: "yes"},
+		{name: "deny", rootLogin: "deny", want: rootAuthMethods10755{}},
+		{name: "allow", rootLogin: "allow", want: rootAuthMethods10755{password: true, publicKey: true}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -605,7 +606,8 @@ func TestSSHDFactoryRootLoginPrecedence10755(t *testing.T) {
 			mainConfig := filepath.Join(dir, "sshd_config")
 			mainBody := "Include " + filepath.Join(dropInDir, "*.conf") + "\n" +
 				"HostKey " + hostKey + "\n" +
-				"PidFile " + filepath.Join(dir, "sshd.pid") + "\n"
+				"PidFile " + filepath.Join(dir, "sshd.pid") + "\n" +
+				"PasswordAuthentication yes\nPubkeyAuthentication yes\nKbdInteractiveAuthentication no\n"
 			if err := os.WriteFile(mainConfig, []byte(mainBody), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -628,8 +630,8 @@ func TestSSHDFactoryRootLoginPrecedence10755(t *testing.T) {
 				sshdConfPath, sshdValidateCmd, sshdReloadCmd = origPath, origValidate, origReload
 			})
 
-			if got := effectiveRootLogin10755(t, sshdBin, mainConfig); got != "prohibit-password" {
-				t.Fatalf("control effective PermitRootLogin = %q, want factory value prohibit-password", got)
+			if got := effectiveRootAuth10755(t, sshdBin, mainConfig); got != (rootAuthMethods10755{publicKey: true}) {
+				t.Fatalf("factory policy permits root authentication methods %+v, want public-key only", got)
 			}
 			if err := (&Daemon{}).applySSHConfig(sshConfig(&config.SSHServiceConfig{RootLogin: tt.rootLogin})); err != nil {
 				t.Fatalf("applySSHConfig(%q): %v", tt.rootLogin, err)
@@ -637,24 +639,55 @@ func TestSSHDFactoryRootLoginPrecedence10755(t *testing.T) {
 			if _, err := os.Stat(legacyPath); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("legacy drop-in still exists after migration: %v", err)
 			}
-			if got := effectiveRootLogin10755(t, sshdBin, mainConfig); got != tt.want {
-				t.Fatalf("effective PermitRootLogin = %q, want %q", got, tt.want)
+			if got := effectiveRootAuth10755(t, sshdBin, mainConfig); got != tt.want {
+				t.Fatalf("root authentication methods = %+v, want %+v", got, tt.want)
 			}
 		})
 	}
 }
 
-func effectiveRootLogin10755(t *testing.T, sshdBin, configPath string) string {
+type rootAuthMethods10755 struct {
+	password  bool
+	publicKey bool
+}
+
+func effectiveRootAuth10755(t *testing.T, sshdBin, configPath string) rootAuthMethods10755 {
 	t.Helper()
-	out, err := exec.Command(sshdBin, "-T", "-f", configPath).CombinedOutput()
+	out, err := exec.Command(sshdBin, "-T", "-f", configPath, "-C",
+		"user=root,host=localhost,addr=127.0.0.1").CombinedOutput()
 	if err != nil {
-		t.Fatalf("sshd -T: %v: %s", err, out)
+		t.Fatalf("sshd effective configuration: %v: %s", err, out)
 	}
+	var rootPolicy string
+	var passwordAuthentication, publicKeyAuthentication bool
+	foundPolicy, foundPassword, foundPublicKey := false, false, false
 	for _, line := range strings.Split(string(out), "\n") {
-		if value, ok := strings.CutPrefix(line, "permitrootlogin "); ok {
-			return value
+		key, value, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		key = strings.ToLower(key)
+		switch key {
+		case "permitrootlogin":
+			rootPolicy, foundPolicy = value, true
+		case "passwordauthentication":
+			passwordAuthentication, foundPassword = value == "yes", true
+		case "pubkeyauthentication":
+			publicKeyAuthentication, foundPublicKey = value == "yes", true
 		}
 	}
-	t.Fatalf("sshd -T output lacks permitrootlogin: %s", out)
-	return ""
+	if !foundPolicy || !foundPassword || !foundPublicKey {
+		t.Fatalf("sshd effective configuration lacks root authentication policy: %s", out)
+	}
+	switch rootPolicy {
+	case "no":
+		return rootAuthMethods10755{}
+	case "yes":
+		return rootAuthMethods10755{password: passwordAuthentication, publicKey: publicKeyAuthentication}
+	case "prohibit-password", "without-password", "forced-commands-only":
+		return rootAuthMethods10755{publicKey: publicKeyAuthentication}
+	default:
+		t.Fatalf("sshd effective configuration contains unsupported root-auth behavior %q", rootPolicy)
+		return rootAuthMethods10755{}
+	}
 }

@@ -197,8 +197,8 @@ func TestBothPassesBindTheSameNameSet6805(t *testing.T) {
 		for _, n := range []string{"gr-0-0-0", "ge-0-0-5", "ge-0-0-6"} {
 			addLink6805(ops, n)
 		}
-		addLink6805(ops, "vrf-blue")
-		addLink6805(ops, "vrf-fwd")
+		ops.links["vrf-blue"] = &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "vrf-blue"}, Table: 100}
+		ops.links["vrf-fwd"] = &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "vrf-fwd"}, Table: 101}
 		if late {
 			d.rebindRoutingInstanceMembers(cfg)
 		} else {

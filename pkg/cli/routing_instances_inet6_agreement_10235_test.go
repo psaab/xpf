@@ -32,7 +32,7 @@ func TestRoutingInstancesDetailInet6SurfacesAgree_10235(t *testing.T) {
                     next-hop 10.0.0.1;
                 }
             }
-            rib inet6.0 {
+            rib holder.inet6.0 {
                 static {
                     route 2001:db8:100::/48 {
                         next-table target.inet6.0;

@@ -26,6 +26,12 @@ interfaces {
     ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } }
     ge-0/0/1 { unit 0 { family inet { address 10.0.1.1/24; } } }
 }
+chassis {
+    cluster {
+        control-interface em0;
+        authentication-key "xpf-test-cluster-authentication-key-1234567890";
+    }
+}
 security {
     zones {
         security-zone mgmt {
