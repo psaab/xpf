@@ -21,11 +21,11 @@ import (
 // survive in a pinned map.
 //
 // Nothing bad happens today, and the reason is entirely accidental: the shim
-// consults `USERSPACE_INGRESS_IFACES` and returns early BEFORE it ever reaches
-// the binding lookup, so a stale row for a de-configured interface is never
-// read. Reorder those two statements, or add a path that reaches
-// USERSPACE_BINDINGS without passing the ingress test, and the stale rows
-// become live routing state — with no test anywhere going red.
+// fetches the ingress flags (`userspace_ingress_metadata`) and returns early
+// from the ADJUDICATED-bit test BEFORE the binding lookup, so a stale row for a
+// de-configured interface is never read. Reorder those statements, or add a
+// path that reaches USERSPACE_BINDINGS without passing the ingress test, and
+// the stale rows become live routing state — with no test anywhere going red.
 //
 // ── WHY THIS IS THE FIX AND NOT THE OTHER OPTION ─────────────────────────
 //
@@ -50,20 +50,26 @@ import (
 // ── WHY IT CHECKS CONTROL FLOW AND NOT LINE ORDER ────────────────────────
 //
 // "the gate's line number is lower than the lookup's" is NOT the property.
-// A second function that reads USERSPACE_BINDINGS with no gate at all would
-// satisfy it, and that is precisely the "adds a path that reaches
-// USERSPACE_BINDINGS without passing the ingress test" case #7588 names. So
-// this locates EVERY read, resolves each to its enclosing function, and
-// requires the gate earlier IN THAT SAME FUNCTION.
+// A second function that reads USERSPACE_BINDINGS with no helper call and
+// ADJUDICATED-bit early return would satisfy a file-wide line-order check, and
+// that is precisely the "adds a path that reaches USERSPACE_BINDINGS without
+// passing the ingress test" case #7588 names. So this locates EVERY read,
+// resolves each to its enclosing function, and requires both steps earlier
+// IN THAT SAME FUNCTION.
 const shimSourcePath7588 = "../../../userspace-xdp/src/lib.rs"
 
-// The two statements whose ORDER is the invariant. Matched on the map name plus
-// the early return rather than on the whole line, so reformatting does not red
-// this while a reorder still does.
+// The statements whose ORDER is the invariant. The gate is matched as the
+// helper CALL plus the ADJUDICATED-bit test on the flags it returns: #12055
+// moved the lookup into `userspace_ingress_metadata`, so the call marks the
+// consultation and the bit test marks the early return, and either one
+// drifting past a binding read is the reorder this guards against. Matched on
+// names rather than whole lines, so reformatting does not red this while a
+// reorder still does.
 var (
-	bindingReadRe7588 = regexp.MustCompile(`USERSPACE_BINDINGS\s*\.\s*get\s*\(`)
-	ingressGateRe7588 = regexp.MustCompile(`USERSPACE_INGRESS_IFACES\s*\.\s*get\s*\(`)
-	rustFnRe7588      = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?(?:unsafe\s+)?fn\s+([A-Za-z0-9_]+)`)
+	bindingReadRe7588        = regexp.MustCompile(`USERSPACE_BINDINGS\s*\.\s*get\s*\(`)
+	ingressGateRe7588        = regexp.MustCompile(`userspace_ingress_metadata\s*\(\s*ctx\s*\)`)
+	ingressAdjudicatedRe7588 = regexp.MustCompile(`if\s+ingress_iface_flags\s*&\s*USERSPACE_INGRESS_IFACE_FLAG_ADJUDICATED\s*==\s*0`)
+	rustFnRe7588             = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?(?:unsafe\s+)?fn\s+([A-Za-z0-9_]+)`)
 )
 
 func TestEveryBindingReadIsGatedByTheIngressMap_7588(t *testing.T) {
@@ -96,16 +102,19 @@ func TestEveryBindingReadIsGatedByTheIngressMap_7588(t *testing.T) {
 			continue
 		}
 		body := src[start:read[0]]
-		if !ingressGateRe7588.MatchString(body) {
-			t.Errorf("fn %s reads USERSPACE_BINDINGS without consulting "+
-				"USERSPACE_INGRESS_IFACES first.\n\n"+
+		call := ingressGateRe7588.FindStringIndex(body)
+		adjudicated := ingressAdjudicatedRe7588.FindStringIndex(body)
+		if call == nil || adjudicated == nil || call[0] >= adjudicated[0] {
+			t.Errorf("fn %s reads USERSPACE_BINDINGS without calling "+
+				"userspace_ingress_metadata(ctx) and testing its ADJUDICATED bit "+
+				"first.\n\n"+
 				"The bootstrap clear does NOT zero stale binding rows on a fresh "+
 				"Manager (m.lastBindingIndices is nil), and the array is PinByName-"+
 				"pinned, so rows from a previous xpfd survive a restart. They are "+
-				"harmless ONLY because the ingress gate returns early before this "+
-				"lookup is reached. A read that skips that gate turns inherited rows "+
-				"into live routing state for interfaces the config no longer has "+
-				"(#7588).", name)
+				"harmless ONLY because the helper call is followed by the ingress "+
+				"gate's early return before this lookup is reached. A read that "+
+				"skips that gate turns inherited rows into live routing state for "+
+				"interfaces the config no longer has (#7588).", name)
 		}
 	}
 }
@@ -123,33 +132,37 @@ func TestIngressGateReturnsEarly_7588(t *testing.T) {
 	if loc == nil {
 		t.Fatal("the ingress gate is gone from the shim entirely (#7588)")
 	}
-	// Scoped to the gate's OWN `if` block, brace-matched — not to a window
-	// after it.
-	//
+	// The call only FETCHES the flags; the gate is the `if` testing the
+	// ADJUDICATED bit on them. Scope to the first such test at/after the call —
+	// the `const` definition precedes every call site, so it cannot match it —
+	// Then brace-match that `if`'s own block rather than a window after it.
 	// The first draft scanned 160 characters past the match for the word
 	// `return`. The mutation that earns the change is NOT "delete the early
 	// return" — a window catches that one too, because the block then holds
 	// nothing and the next `return` is far enough away. It is:
 	//
-	//	if unsafe { USERSPACE_INGRESS_IFACES.get(..) }.map_or(..) {
+	//	if ingress_iface_flags & USERSPACE_INGRESS_IFACE_FLAG_ADJUDICATED == 0 {
 	//	    let _gated = 1;
 	//	}
 	//	return Ok(cpumap_or_pass(ctrl));   // moved OUT of the branch
 	//
-	// The gate now consults the map and decides nothing, and every packet
-	// returns unconditionally. A proximity check reads the `return` sitting
-	// just outside the block and passes; brace-matching the gate's own block
-	// fails. Verified both ways rather than assumed — the window version does
-	// escape this, which is what makes the containment check load-bearing
-	// rather than merely tidier.
-	block, ok := ifBlockAfter7588(src, loc[1])
+	// The mutation leaves the helper call in place but makes the gate's branch
+	// decide nothing, then moves the return outside it. A proximity check sees
+	// that return and passes; brace-matching the gate's own block fails. Verified
+	// both ways rather than assumed — the window version escapes this, which
+	// makes the containment check load-bearing rather than merely tidier.
+	rel := ingressAdjudicatedRe7588.FindStringIndex(src[loc[1]:])
+	if rel == nil {
+		t.Fatal("the ADJUDICATED-bit ingress test is gone from the shim (#7588)")
+	}
+	block, ok := ifBlockAfter7588(src, loc[1]+rel[1])
 	if !ok {
 		t.Fatalf("could not brace-match the ingress gate's block; the scan cannot vouch "+
 			"for it, which is the same as no guard:\n%.200s", src[loc[0]:])
 	}
 	if !strings.Contains(block, "return") {
-		t.Errorf("the USERSPACE_INGRESS_IFACES test no longer returns from its own "+
-			"branch. Consulting the map without leaving the function gates NOTHING, "+
+		t.Errorf("the ADJUDICATED-bit ingress test no longer returns from its own "+
+			"branch. Fetching the flags without leaving the function gates NOTHING, "+
 			"and the stale-row hazard #7588 describes becomes reachable while the "+
 			"ordering test above still passes:\n%s", block)
 	}

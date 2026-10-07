@@ -53,7 +53,10 @@ const USERSPACE_FALLBACK_REASON_PASS_TO_KERNEL: u32 = 14;
 const USERSPACE_FALLBACK_REASON_TRANSIT_DROP: u32 = 15;
 const USERSPACE_FALLBACK_REASON_QINQ_DROP: u32 = 16;
 const USERSPACE_FALLBACK_REASON_STAG_DROP: u32 = 17;
-const USERSPACE_FALLBACK_REASON_MAX: u32 = 18;
+const USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP: u32 = 18;
+const USERSPACE_FALLBACK_REASON_MAX: u32 = 19;
+const USERSPACE_INGRESS_IFACE_FLAG_ADJUDICATED: u8 = 1;
+const USERSPACE_INGRESS_IFACE_FLAG_TAGGED_ONLY: u8 = 2;
 const USERSPACE_CTRL_FLAG_CPUMAP: u32 = 1;
 const USERSPACE_CTRL_FLAG_TRACE: u32 = 2;
 const USERSPACE_CTRL_FLAG_NATIVE_GRE: u32 = 4;
@@ -420,7 +423,10 @@ static USERSPACE_BINDINGS: Array<UserspaceBindingValue> =
 // VMs (incus/k8s ifindex grows monotonically). HashMap tolerates sparse
 // keys so updates never hit E2BIG regardless of ifindex magnitude. The
 // max_entries is bumped to MAX_INTERFACES to keep a single knob on the
-// ifindex axis across every dataplane map (see issue #814).
+// ifindex axis across every dataplane map (see issue #814). Go sets the
+// ADJUDICATED bit on every live ingress row and the TAGGED_ONLY bit when VID 0
+// has no configured VLAN identity, so the shim can reject local delivery before
+// the kernel host-inbound path.
 #[map(name = "userspace_ingress_ifaces")]
 static USERSPACE_INGRESS_IFACES: HashMap<u32, u8> = HashMap::with_max_entries(MAX_INTERFACES, 0);
 
@@ -581,7 +587,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // u32 all the way into `binding_slot`, so unlike the queue coordinate
     // NOTHING rejects a reduction of it by type — pinning where it comes from,
     // bounding the name, and pinning how it is passed is the whole defence.
-    let ingress_ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    let (ingress_ifindex, ingress_iface_flags) = userspace_ingress_metadata(ctx);
     // #8279: this test USED to sit below the L3 parse, and the parse's failure
     // arm is a DROP (`drop_degraded_transit`), so an ifindex this shim does not
     // adjudicate could still have its traffic dropped here. That is reachable:
@@ -610,7 +616,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // through `cpumap_or_pass` would send them to a remote CPU, which does not
     // drive that state machine. Placing the test here changes the fate of no
     // packet except the one this fixes.
-    if unsafe { USERSPACE_INGRESS_IFACES.get(&ingress_ifindex) }.map_or(true, |v| *v == 0) {
+    if ingress_iface_flags & USERSPACE_INGRESS_IFACE_FLAG_ADJUDICATED == 0 {
         return Ok(cpumap_or_pass(ctrl));
     }
 
@@ -652,6 +658,15 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     let Some(parsed) = parsed else {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_PARSE_FAIL);
     };
+
+    // #12055: the worker's VID-0 guard runs after this shim has already
+    // returned firewall-local traffic to the kernel. Carry the tagged-only
+    // ingress classification in the existing userspace_ingress_ifaces value
+    // and reject local-destination VID-0 frames here, before any local PASS
+    // path (including session hits and degraded/control fallbacks).
+    if is_tagged_only_vid0_local_destination(ingress_iface_flags, &parsed) {
+        return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP);
+    }
     let native_gre =
         parsed.protocol == PROTO_GRE && (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0;
 
@@ -1444,10 +1459,30 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
     let Some(parsed) = parsed else {
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED);
     };
+    let (_, ingress_iface_flags) = userspace_ingress_metadata(ctx);
+    if is_tagged_only_vid0_local_destination(ingress_iface_flags, &parsed) {
+        return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_TAGGED_ONLY_LOCAL_DROP);
+    }
     if is_degraded_local_or_control(ctrl, data, data_end, &parsed) {
         return pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED);
     }
     drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED)
+}
+
+#[inline(always)]
+fn userspace_ingress_metadata(ctx: &XdpContext) -> (u32, u8) {
+    let ingress_ifindex = unsafe { (*ctx.ctx).ingress_ifindex };
+    let ingress_iface_flags = unsafe { USERSPACE_INGRESS_IFACES.get(&ingress_ifindex) }
+        .copied()
+        .unwrap_or(0);
+    (ingress_ifindex, ingress_iface_flags)
+}
+
+#[inline(always)]
+fn is_tagged_only_vid0_local_destination(ingress_iface_flags: u8, pkt: &ParsedPacket) -> bool {
+    ingress_iface_flags & USERSPACE_INGRESS_IFACE_FLAG_TAGGED_ONLY != 0
+        && pkt.vlan_id == 0
+        && is_local_destination(pkt)
 }
 
 fn pass_non_ip_l2_control_direct(reason: u32) -> Result<u32, i64> {

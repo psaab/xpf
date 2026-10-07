@@ -25,7 +25,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 CRATE_DIR="${REPO_ROOT}/userspace-xdp"
 OUT_FILE="${SCRIPT_DIR}/userspace_xdp_bpfel.o"
-CANDIDATE="${CRATE_DIR}/target/bpfel-unknown-none/release/libxpf_userspace_xdp.so"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${CRATE_DIR}/target}"
+if [[ "${CARGO_TARGET_DIR}" != /* ]]; then
+	CARGO_TARGET_DIR="${CRATE_DIR}/${CARGO_TARGET_DIR}"
+fi
+export CARGO_TARGET_DIR
+CANDIDATE="${CARGO_TARGET_DIR}/bpfel-unknown-none/release/libxpf_userspace_xdp.so"
 CARGO_BIN="${CARGO:-${HOME}/.cargo/bin/cargo}"
 RUSTUP_BIN="${RUSTUP:-${HOME}/.cargo/bin/rustup}"
 GO_BIN="${GO:-go}"

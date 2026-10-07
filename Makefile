@@ -237,11 +237,13 @@ test-shim-run:
 # models, and are included in the same census.
 # #11574/#12119: scoped WG admission and interface-NAT control steering run
 # against the retained object; census every test in the shared admission file.
-	@out=$$(go test ./pkg/dataplane/userspace/ -run 'TestV6|TestFragment|TestNonFirstFragment|TestUserspaceXDPQinQ|TestUserspaceXDPSTag|TestUserspaceXDPDispatch|TestBuildUserspaceWGZoneAdmission|TestSyncUserspaceWGZoneMaps|TestUserspaceXDPWireGuard' -v -count=1 2>&1); \
+# #12055: tagged-only VID-0 local destinations must be dropped by the shim
+# before its kernel-local delivery arms; census the whole focused test file.
+	@out=$$(go test ./pkg/dataplane/userspace/ -run 'TestV6|TestFragment|TestNonFirstFragment|TestUserspaceXDPQinQ|TestUserspaceXDPSTag|TestUserspaceXDPTaggedOnly|TestUserspaceXDPDispatch|TestBuildUserspaceWGZoneAdmission|TestSyncUserspaceWGZoneMaps|TestUserspaceXDPWireGuard' -v -count=1 2>&1); \
 	status=$$?; \
 	echo "$$out"; \
 	missing=''; \
-	for n in $$(grep -hoE '^func Test[A-Za-z0-9_]+' pkg/dataplane/userspace/fragment_disposition_7494_test.go pkg/dataplane/userspace/qinq_disposition_9888_test.go pkg/dataplane/userspace/stag_disposition_10655_test.go pkg/dataplane/userspace/xdp_shim_dispatch_10864_test.go pkg/dataplane/userspace/wg_zone_admission_11574_test.go | sed 's/^func //'); do \
+	for n in $$(grep -hoE '^func Test[A-Za-z0-9_]+' pkg/dataplane/userspace/fragment_disposition_7494_test.go pkg/dataplane/userspace/qinq_disposition_9888_test.go pkg/dataplane/userspace/stag_disposition_10655_test.go pkg/dataplane/userspace/tagged_only_local_drop_12055_test.go pkg/dataplane/userspace/xdp_shim_dispatch_10864_test.go pkg/dataplane/userspace/wg_zone_admission_11574_test.go | sed 's/^func //'); do \
 		echo "$$out" | grep -q "^=== RUN   $$n$$" || missing="$$missing $$n"; \
 	done; \
 	if [ -n "$$missing" ]; then \

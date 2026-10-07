@@ -25,17 +25,17 @@ import (
 //
 // WHY THE EXISTING GUARD CANNOT SEE A DIVERGENCE.
 // `TestDegradedPathReasonNamesCoverRetainedShimActions` pins the GO side to a
-// hand-written list of twelve names and a length of 17. It never reads the
+// hand-written list of required names and a length of 19. It never reads the
 // shim. So it is green through both failures that actually happen:
 //
-//   1. a reason ADDED in Rust (index 17, MAX -> 18) leaves the Go array at 17,
-//      the length check still passes against its own literal 17, and
+//   1. a reason ADDED in Rust (next index 19, MAX -> 20) leaves the Go array at
+//      19, the length check still passes against its own literal 19, and
 //      `readDegradedPathStatsLocked` — which loops to `len(...)` — never reads
 //      the new counter at all. The disposition exists, is counted in the
 //      kernel, and is invisible;
 //   2. a reason INSERTED in the middle renumbers every constant above it. The
-//      Go array keeps the old order, all twelve names are still present, the
-//      length is still 17, no slot is empty — and every reason above the
+//      Go array keeps the old order, all required names are still present, the
+//      length is still 19, no slot is empty — and every reason above the
 //      insertion point is now rendered under the WRONG NAME. An operator
 //      reading `transit_drop` is shown `strict_drop`'s count.
 //

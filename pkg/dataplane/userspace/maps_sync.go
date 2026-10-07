@@ -707,7 +707,7 @@ func (m *Manager) clearAllBindingRowsLocked() {
 
 // degradedPathReasonNames maps BPF array index to a human-readable name.
 // Must stay in sync with USERSPACE_FALLBACK_REASON_* in userspace-xdp/src/lib.rs.
-var degradedPathReasonNames = [18]string{
+var degradedPathReasonNames = [19]string{
 	0:  "ctrl_disabled",
 	1:  "parse_fail",
 	2:  "binding_missing",
@@ -726,6 +726,7 @@ var degradedPathReasonNames = [18]string{
 	15: "transit_drop",
 	16: "qinq_drop",
 	17: "stag_drop",
+	18: "tagged_only_local_drop",
 }
 
 // readDegradedPathStatsLocked reads retained-shim degraded-path counters and
@@ -839,6 +840,7 @@ func (m *Manager) syncIngressIfaceMapLocked(snapshot *ConfigSnapshot) error {
 	}
 
 	newIngress := buildUserspaceIngressIfindexes(snapshot)
+	taggedOnly := buildUserspaceTaggedOnlyIngressIfindexes(snapshot)
 	prior := m.lastIngressIfaces
 	// installed accumulates the rows THIS pass created, so an early return can
 	// hand them to the retry inventory rather than stranding them.
@@ -850,7 +852,11 @@ func (m *Manager) syncIngressIfaceMapLocked(snapshot *ConfigSnapshot) error {
 	newIngressSet := make(map[uint32]struct{}, len(newIngress))
 	for _, ifindex := range newIngress {
 		newIngressSet[ifindex] = struct{}{}
-		if err := ifaceMap.Update(ifindex, uint8(1), ebpf.UpdateAny); err != nil {
+		flags := userspaceIngressIfaceFlagAdjudicated
+		if _, ok := taggedOnly[ifindex]; ok {
+			flags |= userspaceIngressIfaceFlagTaggedOnly
+		}
+		if err := ifaceMap.Update(ifindex, flags, ebpf.UpdateAny); err != nil {
 			retainDebt()
 			return fmt.Errorf("update userspace_ingress_ifaces %d: %w", ifindex, err)
 		}
@@ -889,11 +895,11 @@ func (m *Manager) syncIngressIfaceMapLocked(snapshot *ConfigSnapshot) error {
 //
 // That matters because the row is not inert. The XDP shim reads this map on
 // EVERY packet (userspace-xdp/src/lib.rs: `USERSPACE_INGRESS_IFACES.get(
-// &ingress_ifindex)`) and a present non-zero row is what diverts the packet
-// away from `cpumap_or_pass` into the AF_XDP redirect path. A stale row for an
-// interface that dropped out of the config therefore does not merely leak — it
-// keeps steering that interface's traffic, and this map is the gate every
-// later binding/XSK stage sits behind.
+// &ingress_ifindex)`) and a present row with the adjudicated bit set is what
+// diverts the packet away from `cpumap_or_pass` into the AF_XDP redirect path.
+// A stale row for an interface that dropped out of the config therefore does
+// not merely leak — it keeps steering that interface's traffic, and this map
+// is the gate every later binding/XSK stage sits behind.
 //
 // UNION, not replace. The adopted set is merged with whatever the inventory
 // already holds rather than overwriting it, so adoption can never DROP a #6537
@@ -901,14 +907,12 @@ func (m *Manager) syncIngressIfaceMapLocked(snapshot *ConfigSnapshot) error {
 // only after a successful enumeration, so a failed scan retries on the next
 // pass instead of latching a partial view.
 //
-// Only rows the SHIM ACTS ON are adopted — those with a non-zero value. The
-// shim's test is `USERSPACE_INGRESS_IFACES.get(&ifindex).map_or(true, |v| *v
-// == 0)`, so a 0-valued row means "not ingress" and takes the same
-// cpumap_or_pass path as an absent one. A 0-valued row therefore diverts no
-// traffic and is not a stale classifier row in the sense this repairs; the Go
-// sync is the map's sole producer (the Rust helper never touches it, the shim
-// only reads it) and only ever writes 1, so in production the filter excludes
-// nothing that exists.
+// Only rows the SHIM ACTS ON are adopted — those with the adjudicated bit set.
+// An absent row or a value without that bit takes cpumap_or_pass, exactly as
+// before #12055. The Go sync writes bit 1 for ordinary ingress and bits 1|2
+// when VID 0 has no configured VLAN identity; bit 2 carries tagged-only scope
+// to the shim without changing the map's one-byte ABI. The Rust helper never
+// touches this map; the shim only reads it.
 //
 // The filter also makes adoption correct independent of the map's DENSITY
 // rather than by assuming a HashMap. Enumerating a dense map — an Array, where
@@ -935,7 +939,7 @@ func (m *Manager) adoptIngressInventoryLocked(ifaceMap *ebpf.Map) error {
 	present := make([]uint32, 0, len(m.lastIngressIfaces))
 	iter := ifaceMap.Iterate()
 	for iter.Next(&key, &val) {
-		if val == 0 {
+		if val&userspaceIngressIfaceFlagAdjudicated == 0 {
 			// Inert: the shim reads this exactly as it reads an absent row.
 			continue
 		}
@@ -1576,6 +1580,86 @@ func buildUserspaceIngressIfindexes(snapshot *ConfigSnapshot) []uint32 {
 	return out
 }
 
+// buildUserspaceTaggedOnlyIngressIfindexes mirrors
+// forwarding_build::interfaces::populate_egress's VID-0 ownership decision
+// (#11297/#11434) for the XDP shim. Each set member is an ifindex whose VID-0
+// ingress has no configured VLAN identity: tagged VLAN units nominate both
+// their AF_XDP bind parent and their own child ifindex; explicit unit 0 removes
+// its bind target; a configured native VLAN removes the parent only when one
+// unambiguous unit carries that VID, while an unresolved/ambiguous native
+// selection keeps the parent tagged-only. The returned set is published in
+// the tagged-only bit of userspace_ingress_ifaces, whose existing adjudicated
+// bit remains set for every emitted ingress row.
+func buildUserspaceTaggedOnlyIngressIfindexes(snapshot *ConfigSnapshot) map[uint32]struct{} {
+	if snapshot == nil {
+		return nil
+	}
+	taggedOnly := make(map[uint32]struct{})
+	untaggedUnitIfindexes := make(map[uint32]struct{})
+	nativeVLANByParent := make(map[int]int)
+	ambiguousNativeParents := make(map[int]struct{})
+	for _, iface := range snapshot.Interfaces {
+		if iface.Ifindex <= 0 || iface.IsUnit || iface.NativeVLANID <= 0 || iface.NativeVLANID > 4094 {
+			continue
+		}
+		if previous, exists := nativeVLANByParent[iface.Ifindex]; exists && previous != iface.NativeVLANID {
+			ambiguousNativeParents[iface.Ifindex] = struct{}{}
+		}
+		nativeVLANByParent[iface.Ifindex] = iface.NativeVLANID
+	}
+	for _, iface := range snapshot.Interfaces {
+		if iface.Ifindex <= 0 {
+			continue
+		}
+		bindIfindex := iface.Ifindex
+		if iface.ParentIfindex > 0 {
+			bindIfindex = iface.ParentIfindex
+		}
+		if iface.ParentIfindex > 0 && iface.VLANID > 0 && iface.VLANID <= 4094 {
+			taggedOnly[uint32(bindIfindex)] = struct{}{}
+			taggedOnly[uint32(iface.Ifindex)] = struct{}{}
+		}
+		if iface.IsUnit && strings.HasSuffix(iface.Name, ".0") && iface.VLANID == 0 {
+			untaggedUnitIfindexes[uint32(bindIfindex)] = struct{}{}
+		}
+	}
+	nativeUnitByParent := make(map[int]int)
+	for _, iface := range snapshot.Interfaces {
+		if iface.Ifindex <= 0 || iface.ParentIfindex <= 0 || !iface.IsUnit {
+			continue
+		}
+		nativeVLANID := nativeVLANByParent[iface.ParentIfindex]
+		if nativeVLANID <= 0 || iface.VLANID != nativeVLANID {
+			continue
+		}
+		if previous, exists := nativeUnitByParent[iface.ParentIfindex]; exists && previous != iface.Ifindex {
+			ambiguousNativeParents[iface.ParentIfindex] = struct{}{}
+		}
+		nativeUnitByParent[iface.ParentIfindex] = iface.Ifindex
+	}
+	nativeVLANWithoutUnit := make(map[int]struct{})
+	for parentIfindex := range nativeVLANByParent {
+		if _, ambiguous := ambiguousNativeParents[parentIfindex]; ambiguous {
+			nativeVLANWithoutUnit[parentIfindex] = struct{}{}
+			continue
+		}
+		if _, exists := nativeUnitByParent[parentIfindex]; exists {
+			delete(taggedOnly, uint32(parentIfindex))
+			continue
+		}
+		nativeVLANWithoutUnit[parentIfindex] = struct{}{}
+	}
+	for ifindex := range untaggedUnitIfindexes {
+		delete(taggedOnly, ifindex)
+	}
+	for parentIfindex := range nativeVLANWithoutUnit {
+		taggedOnly[uint32(parentIfindex)] = struct{}{}
+	}
+	if len(taggedOnly) == 0 {
+		return nil
+	}
+	return taggedOnly
+}
 func snapshotBindingPlanKey(snapshot *ConfigSnapshot) string {
 	if snapshot == nil {
 		return ""

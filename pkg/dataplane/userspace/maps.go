@@ -50,7 +50,10 @@ const (
 	mapNameUserspaceInterfaceNATv6  = "userspace_interface_nat_v6"
 	mapNameUserspaceWgIngressZones  = "userspace_wg_ingress_zones"
 	mapNameUserspaceWgZoneAdmission = "userspace_wg_zone_admission"
-
+	// userspace_ingress_ifaces is a one-byte bitset: bit 0 marks a live
+	// adjudicated ingress, bit 1 marks VID 0 as unowned on a tagged-only bind.
+	userspaceIngressIfaceFlagAdjudicated uint8 = 1
+	userspaceIngressIfaceFlagTaggedOnly  uint8 = 2
 	// Pinned BPF map name retained as a documented mixed-version
 	// compatibility exception per PR #1514 (Refs #1509). Operator-
 	// facing terminology is "degraded path" but the pinned map name
