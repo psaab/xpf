@@ -81,9 +81,9 @@ func TestISISRedistributePolicyUsesTheIsisdGrammar9666(t *testing.T) {
 	}}
 	got := isisBlock9666(t, &config.ISISConfig{NET: "49.0001.1921.6800.1001.00", Level: "level-2", Export: []string{"to-isis"}}, po)
 	want := []string{
-		" redistribute ipv4 ospf level-2 route-map to-isis",
-		" redistribute ipv4 static level-2 route-map to-isis",
-		" redistribute ipv6 static level-2 route-map to-isis",
+		" redistribute ipv4 ospf level-2 route-map to-isis-ospf-xpf-redist",
+		" redistribute ipv4 static level-2 route-map to-isis-static-xpf-redist",
+		" redistribute ipv6 static level-2 route-map to-isis-static-xpf-redist",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("redistribute lines =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))

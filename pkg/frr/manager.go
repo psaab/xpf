@@ -7,9 +7,8 @@
 //     static routes, generate-routes, DHCP defaults,
 //     backup-router, cluster-mode defaults, ECMP).
 //   - policy_render.go:  Policy-statement -> route-map rendering
-//     (generatePolicyOptions), community classification,
-//     renderComposedRouteMap, and the -xpf-redist
-//     fail-closed alias guard (redistAliasCollision).
+//     (generatePolicyOptions), per-protocol redistribute map compilation,
+//     community classification, and renderComposedRouteMap.
 //     #6424 split the protocol/redistribute/BFD/
 //     prefix-list/chain/validation aspects into the
 //     sibling files below.
@@ -600,15 +599,9 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 		}
 	}
 
-	// #5116 render-side belt: refuse to render a managed section in which a
-	// generated fail-closed redistribute alias (redistFailClosedRouteMap)
-	// collides with an operator-defined policy-statement of the same name. The
-	// strict commit gate (validatePolicyReservedRedistNameStrict, pkg/config)
-	// rejects such a name outright, so this only fires on the tolerant load /
-	// peer-sync / rollback path where that gate is downgraded to a warning
-	// (#1960). Fail the whole apply CLOSED — FRR keeps its last-good config,
-	// no new BGP/IGP redistribution leak — rather than emitting a colliding
-	// route-map FRR would merge.
+	// #12065 render-side belt: each source protocol gets a derived route-map
+	// name ending in the reserved suffix. Refuse tolerant-load collisions with
+	// an operator policy-statement before FRR can merge their sequences.
 	if fc.PolicyOptions != nil {
 		// #10129: run the narrowed-alias collision belt on every render path.
 		// Tolerant load, peer-sync, and rollback must fail closed rather than
@@ -616,7 +609,7 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 		if err := narrowedAliasCollision10129(fc); err != nil {
 			return err
 		}
-		if err := redistAliasCollision(fc.PolicyOptions, collectAllBGPAcceptDefault(fc)); err != nil {
+		if err := redistProtocolMapCollision(fc.PolicyOptions); err != nil {
 			return err
 		}
 		if err := qualifiedNextHopMetricCollision11447(fc.PolicyOptions, buildQNHMetricSet11447(fc, fc.PolicyOptions)); err != nil {
@@ -626,7 +619,7 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 		// policy-chain route-map name collides with an operator policy-statement
 		// or another chain (FRR merges same-named route-maps → silent filter
 		// change). Fail the whole apply CLOSED on the tolerant load / peer-sync
-		// / rollback path, matching the redistAliasCollision posture above.
+		// / rollback path, matching the redistProtocolMapCollision posture above.
 		if err := bgpComposedChainCollision(fc); err != nil {
 			return err
 		}
@@ -654,10 +647,7 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 
 // collectAllBGPAcceptDefault builds the GLOBAL union (default instance + every
 // VRF) of policy-statement names applied as a BGP `route-map in`/`out`. It
-// drives the #2998 trailing-permit default, the #4481 per-use-site fail-closed
-// redistribute alias, and the #5116 render-side collision guard. Both
-// buildManagedSection (render) and ApplyFull (the collision precheck) call it so
-// the two never compute the set differently.
+// drives the #2998 trailing-permit default in base BGP policy route-maps.
 func collectAllBGPAcceptDefault(fc *FullConfig) map[string]bool {
 	bgpAcceptDefault := make(map[string]bool)
 	if fc == nil || fc.PolicyOptions == nil {
@@ -733,11 +723,6 @@ func (m *Manager) buildManagedSection(fc *FullConfig) string {
 	// + every VRF) so a BGP policy with no explicit default action renders a
 	// terminating `permit` (Junos BGP default-accept) rather than FRR's
 	// implicit deny — preventing a non-matching-route blackhole (#2998).
-	// bgpAcceptDefault is the GLOBAL union (default instance + every VRF) of
-	// policy-statements applied as a BGP route-map in/out. It drives both the
-	// #2998 trailing-permit default AND the #4481 per-use-site fail-closed
-	// redistribute alias, so it is computed once here and threaded into
-	// generatePolicyOptions AND generateProtocols (resolveRedistribute) below.
 	bgpAcceptDefault := collectAllBGPAcceptDefault(fc)
 	qnhMetrics := buildQNHMetricSet11447(fc, fc.PolicyOptions)
 	policyOptions := fc.PolicyOptions

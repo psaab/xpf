@@ -226,7 +226,7 @@ func (m *Manager) renderEmptiedChainDeny(fc *FullConfig) string {
 
 // emptiedChainDenyCollision is the render-side fail-closed guard for the
 // reserved deny name, mirroring bgpComposedChainCollision (#5277) and
-// redistAliasCollision (#5116). FRR MERGES two same-named route-map
+// redistProtocolMapCollision. FRR MERGES two same-named route-map
 // definitions, so an operator policy-statement of this exact name would fuse its
 // (possibly permit) sequences into this deny and reopen the very hole the deny
 // closes. The strict commit path already forbids the ReservedChainSuffix

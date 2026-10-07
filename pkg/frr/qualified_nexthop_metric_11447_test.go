@@ -107,6 +107,9 @@ func TestQualifiedNextHopMetricDoesNotOverrideAuthoredPolicyMetric11447(t *testi
 		"set policy-options policy-statement EXPORT-STATIC term SET-METRIC from protocol static",
 		"set policy-options policy-statement EXPORT-STATIC term SET-METRIC then metric 100",
 		"set policy-options policy-statement EXPORT-STATIC term SET-METRIC then accept",
+		"set policy-options policy-statement EXPORT-STATIC term SET-CONNECTED from protocol connected",
+		"set policy-options policy-statement EXPORT-STATIC term SET-CONNECTED then metric 200",
+		"set policy-options policy-statement EXPORT-STATIC term SET-CONNECTED then accept",
 	)
 	var mapName string
 	for _, line := range strings.Split(rendered, "\n") {
@@ -120,6 +123,12 @@ func TestQualifiedNextHopMetricDoesNotOverrideAuthoredPolicyMetric11447(t *testi
 		t.Fatalf("static policy export lacks a route-map:\n%s", rendered)
 	}
 	block := routeMapBlock11447(rendered, mapName)
+	if strings.Contains(block, "match source-protocol ") {
+		t.Fatalf("QNH static redistribute map must use its attachment instead of a source-protocol clause:\n%s", block)
+	}
+	if strings.Contains(block, "set metric 200\n") {
+		t.Fatalf("QNH static redistribute map included a connected-only policy term:\n%s", block)
+	}
 	qnhMetric := strings.Index(block, "set metric 10\n")
 	authoredMetric := strings.Index(block, "set metric 100\n")
 	if qnhMetric < 0 || authoredMetric < 0 {

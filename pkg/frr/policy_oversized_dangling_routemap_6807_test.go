@@ -219,29 +219,13 @@ func TestOversizedComposedChainLeavesNoDanglingAttachment6807(t *testing.T) {
 	}
 }
 
-// TestOversizedRedistributePolicyLeavesNoDanglingAlias6807 covers the SECOND
-// attachment site and the second quarantined name.
-//
-// `resolveRedistribute` emits `redistribute <proto> route-map <NAME>` where
-// NAME is the policy itself, OR its fail-closed `-xpf-redist` alias when
-// policyNeedsRedistAlias holds. An oversized policy makes the alias oversized
-// too, so the quarantine has to cover whichever name is referenced.
-//
-// The fixture is the #4481 DUAL-USE shape, and it has to be: policyNeedsRedistAlias
-// requires the policy to ALSO be a BGP route-map in/out with no explicit
-// default (bgpAcceptDefault), so a redistribute-only fixture never reaches the
-// alias branch at all. An earlier version of this cell was OSPF-export-only and
-// was consequently mutation-BLIND — deleting the alias quarantine left the
-// whole suite green, because the branch it guards never executed.
-//
-// The precondition below is what keeps that from happening again silently.
-func TestOversizedRedistributePolicyLeavesNoDanglingAlias6807(t *testing.T) {
+// TestOversizedRedistributeProtocolMapLeavesNoDangling6807 covers the per-
+// protocol redistribute attachment and its bounded deny map. The fixture is
+// dual-use so the base BGP policy and its static-specific redistribute map are
+// both attached and must resolve to explicit deny definitions when oversized.
+func TestOversizedRedistributeProtocolMapLeavesNoDangling6807(t *testing.T) {
 	big := oversizedPolicy6807("BIG")
-	// `from protocol static` gives resolveRedistribute a source protocol, so a
-	// redistribute line is actually emitted.
 	big.Terms[0].FromProtocols = []string{"static"}
-	// No explicit DefaultAction: with a BGP in/out use site that is what makes
-	// policyNeedsRedistAlias true.
 	big.DefaultAction = ""
 
 	po := &config.PolicyOptionsConfig{
@@ -252,48 +236,30 @@ func TestOversizedRedistributePolicyLeavesNoDanglingAlias6807(t *testing.T) {
 	}
 	fc := &FullConfig{
 		PolicyOptions: po,
-		// BGP applies BIG inbound -> BIG lands in bgpAcceptDefault.
 		BGP: &config.BGPConfig{
 			LocalAS: 65001, RouterID: "1.1.1.1",
 			Neighbors: []*config.BGPNeighbor{
 				{Address: "10.0.2.1", PeerAS: 65002, FamilyInet: true, Import: []string{"BIG"}},
 			},
 		},
-		// OSPF exports the SAME policy -> redistribute route-map, via the alias.
 		OSPF: &config.OSPFConfig{Areas: []*config.OSPFArea{{ID: "0.0.0.0"}}, Export: []string{"BIG"}},
 	}
 
-	// PRECONDITION, not decoration: unless the alias branch is actually taken,
-	// this cell cannot observe the line it exists to guard.
-	if !policyNeedsRedistAlias("BIG", big, collectAllBGPAcceptDefault(fc)) {
-		t.Fatal("fixture does not reach the redistribute-ALIAS branch " +
-			"(policyNeedsRedistAlias is false), so this cell is blind to the " +
-			"alias quarantine it claims to test")
-	}
-
 	got := New().buildManagedSection(fc)
-
-	alias := redistFailClosedRouteMap("BIG")
-	if n := countRouteMapRefs6807(got, alias); n == 0 {
-		t.Fatalf("fixture emitted no `redistribute ... route-map %s` attachment, "+
-			"so this cell no longer covers the alias site:\n%s", alias, got)
+	protocolMap := redistProtocolRouteMapName("BIG", "static")
+	if n := countRouteMapRefs6807(got, protocolMap); n == 0 {
+		t.Fatalf("fixture emitted no redistribute attachment for %s:\\n%s", protocolMap, got)
 	}
 	if d := danglingRouteMapRefs6807(got); len(d) != 0 {
-		t.Fatalf("the managed section references undefined route-map(s) %v — with "+
-			"an oversized policy BOTH the base name and its -xpf-redist alias "+
-			"need a definition, or FRR denies what they are attached to "+
-			"(#6807):\n%s", d, got)
+		t.Fatalf("the managed section references undefined route-map(s) %v — FRR denies every route on the attached policy:\\n%s", d, got)
 	}
-	// Both names resolve, and both to the bounded explicit deny.
-	for _, name := range []string{"BIG", alias} {
+	for _, name := range []string{"BIG", protocolMap} {
 		headers := routeMapHeaders6807(got, name)
 		if len(headers) != 1 {
-			t.Fatalf("route-map %q must be defined by exactly one bounded header, "+
-				"got %d: %v", name, len(headers), headers)
+			t.Fatalf("route-map %q must be defined by exactly one bounded header, got %d: %v", name, len(headers), headers)
 		}
 		if want := fmt.Sprintf("route-map %s deny %d", name, quarantineDenySeq); headers[0] != want {
-			t.Fatalf("route-map %q must resolve to the bounded explicit deny %q, got %q",
-				name, want, headers[0])
+			t.Fatalf("route-map %q must resolve to the bounded explicit deny %q, got %q", name, want, headers[0])
 		}
 	}
 }
@@ -380,10 +346,9 @@ func TestQuarantinedRouteMapsIsReportedAndReset6807(t *testing.T) {
 	m.buildManagedSection(oversized)
 
 	got := m.QuarantinedRouteMaps()
-	// BOTH names: the policy and its -xpf-redist alias, since the oversized
-	// policy makes the alias oversized too. A gauge that counted only the
-	// policy would under-report every dual-use incident.
-	want := []string{"BIG", redistFailClosedRouteMap("BIG")}
+	// Both the BGP policy and its source-specific redistribute map are
+	// quarantined, so the gauge reports each attached name.
+	want := []string{"BIG", redistProtocolRouteMapName("BIG", "static")}
 	if len(got) != len(want) {
 		t.Fatalf("QuarantinedRouteMaps() = %v, want %v — the render did not record "+
 			"what it quarantined, so the xpf_frr_route_maps_quarantined gauge "+

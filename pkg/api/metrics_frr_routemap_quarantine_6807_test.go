@@ -30,9 +30,8 @@ import (
 // when healthy is the same blindness the metric exists to remove.
 //
 // The two-quarantined leg rejects a gauge hardwired to 1 — which would look
-// correct against a single-policy fixture and under-report every real incident,
-// since one oversized policy can quarantine BOTH its own name and its
-// `-xpf-redist` alias.
+// correct against a single-policy fixture and under-report incidents when an
+// oversized policy quarantines both its base BGP map and a per-protocol map.
 func TestFRRRouteMapsQuarantinedGauge6807(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -41,7 +40,7 @@ func TestFRRRouteMapsQuarantinedGauge6807(t *testing.T) {
 	}{
 		{"healthy", nil, 0},
 		{"one-policy", []string{"BIG"}, 1},
-		{"policy-and-its-redist-alias", []string{"BIG", "BIG-xpf-redist"}, 2},
+		{"policy-and-protocol-map", []string{"BIG", "BIG-static-xpf-redist"}, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &Server{ // dp intentionally nil — FRR renders in config-only mode too

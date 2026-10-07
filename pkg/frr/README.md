@@ -68,10 +68,10 @@ layer: `generateProtocols` now lives in `protocols_render.go`,
 resolution in `bgp_policy_chain.go`, the #2550 BFD accumulator in
 `bfd.go`, route-filter/from-prefix-list rendering in
 `prefix_list_render.go`, and `sanitizeFRRValue` + the value-validation
-belt in `render_validate.go`. `policy_render.go` retains
-policy-statement -> route-map rendering (`generatePolicyOptions`),
-community classification, `renderComposedRouteMap`, and the `-xpf-redist`
-alias guard. The detailed rendering semantics documented in the
+`policy_render.go` retains
+policy-statement -> route-map rendering (`generatePolicyOptions`), per-source
+protocol redistribute maps, community classification, and
+`renderComposedRouteMap`. The detailed rendering semantics documented in the
 `policy_render.go` row below apply wherever each function now lives:
 
 ### Non-protocol route operands have a final validity belt (#6795)
@@ -570,9 +570,9 @@ exit
 ```
 
 One sequence, so it can never approach the ceiling the skip exists to respect.
-The redistribute alias (`<name>-xpf-redist`) is quarantined under the same
-rule when `policyNeedsRedistAlias` holds, because `resolveRedistribute`
-references whichever of the two names applies.
+Each source-protocol-specific redistribute map is quarantined under the same
+rule when its filtered expansion exceeds the sequence limit; the corresponding
+`redistribute <proto>` attachment always names that bounded deny map.
 
 ### Why deny and not "drop the attachment too"
 
@@ -618,8 +618,9 @@ Two properties the metric depends on, both bound by tests:
   only when the FRR hook is actually wired, so a daemon that never consulted
   FRR reports nothing rather than a confident zero.
 
-One oversized policy can quarantine **two** names — itself and its
-`-xpf-redist` alias — so the gauge is a count, not a boolean.
+An oversized policy can quarantine its base BGP map, one filtered map per
+redistribute source protocol, and its QNH-integrated static map, so the gauge
+counts each affected route-map.
 
 ### The undefined-policy asymmetry (#7625) — emptied half resolved
 
@@ -1174,7 +1175,7 @@ step. Both are required — neither sees the other's case:
      reference regardless of definition order). **Collision guard:** FRR keys
      route-maps by NAME in one global namespace and merges same-named objects,
      so `bgpComposedChainCollision` (called by `ApplyFull`, mirroring
-     `redistAliasCollision`) fails the whole apply CLOSED if a composed name
+     `redistProtocolMapCollision`) fails the whole apply CLOSED if a composed name
      collides with an operator policy-statement or two distinct chains derive
      the same name. **Commit-time reservation (#5442):** the `-xpf-chain`
      suffix (`config.ReservedChainSuffix`, which `frr.ReservedChainSuffix`

@@ -3,8 +3,8 @@
 // resolve to a source protocol so one bad line never poisons the whole
 // managed frr-reload (#1880/#2223).
 //
-// Split out of policy_render.go (#6424) as a pure code-motion refactor;
-// the emitted frr.conf is byte-identical.
+// Split out of policy_render.go (#6424); #12065 derives filtered route-maps per
+// source protocol and avoids daemon-unsupported `match source-protocol` clauses.
 //
 // Symbols:
 //   - knownRedistProtocols
@@ -34,9 +34,10 @@ func knownRedistProtocol(name string) bool {
 }
 
 // resolveRedistribute converts a Junos export value into FRR redistribute commands.
-// If the value is a known protocol name, it emits a bare "redistribute <proto>".
-// If it matches a policy-statement, it extracts protocols from the terms and emits
-// "redistribute <proto> route-map <name>" for each.
+// A known protocol emits a bare `redistribute <proto>` line.
+// If it matches a policy-statement, it emits one `redistribute <proto>
+// route-map <policy>-<proto>-xpf-redist` line per source protocol. Each
+// referenced map contains only terms applicable to that source.
 //
 // Invariant: this never emits a syntactically-invalid `redistribute
 // <name>` line. FRR's `redistribute` requires a source protocol token
@@ -83,13 +84,115 @@ type redistEntry struct {
 	routeMap string
 }
 
+func normalizedRedistProtocol(proto string) string {
+	if proto == "direct" {
+		return "connected"
+	}
+	return proto
+}
+
+func redistProtocolRouteMapName(policy, proto string) string {
+	return policy + "-" + normalizedRedistProtocol(proto) + config.ReservedRedistSuffix
+}
+
+func redistProtocols(ps *config.PolicyStatement) []string {
+	if ps == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	for _, term := range ps.Terms {
+		if term == nil {
+			continue
+		}
+		for _, proto := range term.FromProtocols {
+			seen[normalizedRedistProtocol(proto)] = true
+		}
+	}
+	protocols := make([]string, 0, len(seen))
+	for proto := range seen {
+		protocols = append(protocols, proto)
+	}
+	sort.Strings(protocols)
+	return protocols
+}
+
+func redistPolicyForProtocol(ps *config.PolicyStatement, proto string) *config.PolicyStatement {
+	if ps == nil {
+		return nil
+	}
+	proto = normalizedRedistProtocol(proto)
+	filtered := *ps
+	filtered.Terms = nil
+	for _, term := range ps.Terms {
+		if term == nil {
+			continue
+		}
+		applies := len(term.FromProtocols) == 0
+		for _, source := range term.FromProtocols {
+			if normalizedRedistProtocol(source) == proto {
+				applies = true
+				break
+			}
+		}
+		if applies {
+			copy := *term
+			copy.FromProtocols = nil
+			filtered.Terms = append(filtered.Terms, &copy)
+		}
+	}
+	return &filtered
+}
+
+func redistProtocolMapCollision(po *config.PolicyOptionsConfig) error {
+	if po == nil || po.PolicyStatements == nil {
+		return nil
+	}
+	names := make([]string, 0, len(po.PolicyStatements))
+	for name := range po.PolicyStatements {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	operatorNames := make(map[string]string, len(names))
+	for _, name := range names {
+		normalized := frrName(name)
+		if _, exists := operatorNames[normalized]; !exists {
+			operatorNames[normalized] = name
+		}
+	}
+	for _, policy := range names {
+		for _, proto := range redistProtocols(po.PolicyStatements[policy]) {
+			routeMap := redistProtocolRouteMapName(policy, proto)
+			if operator, ok := operatorNames[frrName(routeMap)]; ok {
+				return fmt.Errorf(
+					"policy-statement %q generates redistribute route-map %q, which collides with operator policy-statement %q; FRR merges same-named route-maps — refusing to render",
+					policy, routeMap, operator)
+			}
+		}
+	}
+	return nil
+}
+
+func renderRedistributePolicyMap(m *Manager, po *config.PolicyOptionsConfig, policy string, ps *config.PolicyStatement, proto string) string {
+	routeMap := redistProtocolRouteMapName(policy, proto)
+	filtered := redistPolicyForProtocol(ps, proto)
+	if n := config.RouteMapSequenceCount(po, filtered); n > config.MaxRouteMapSequences {
+		slog.Warn("oversized redistribute route-map policy: expansion would overflow FRR sequence numbers; rendering an explicit deny instead",
+			"policy", policy, "protocol", proto, "sequences", n, "max", config.MaxRouteMapSequences)
+		m.noteQuarantined(routeMap)
+		return renderQuarantineDenyRouteMap(routeMap) + "!\n"
+	}
+	body := m.renderRouteMapForPolicyWithFallback(
+		po, routeMap, filtered, policyTrailingAction(policy, filtered, nil), "deny")
+	return body + "!\n"
+}
+
 // resolveRedistribute renders an export as OSPF/RIP/BGP-shaped
 // `redistribute <proto> [route-map X]` lines. IS-IS has a different grammar
 // and uses resolveISISRedistribute instead (#9666).
 // The optional qualified-next-hop metric scope is passed by IGP call sites
 // only; BGP MED is distinct and must not consume the IGP export cost.
-func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsConfig, self string, bgpAcceptDefault map[string]bool, metrics ...*qnhMetricScope11447) string {
-	return formatRedistEntries(m.redistributeEntries(export, po, self, bgpAcceptDefault, metrics...))
+func (m *Manager) resolveRedistribute(export string, po *config.PolicyOptionsConfig, self string, _ map[string]bool, metrics ...*qnhMetricScope11447) string {
+	return formatRedistEntries(m.redistributeEntries(export, po, self, metrics...))
 }
 
 func applyQNHMetricRouteMap11447(export string, metrics *qnhMetricScope11447, entries []redistEntry) {
@@ -142,8 +245,8 @@ func formatRedistEntries(entries []redistEntry) string {
 // the is-type line uses (#8446): level-1 -> level-1; level-1-2 -> one line per
 // level, since a router in both levels redistributes into both and each FRR
 // line names one; everything else -> the narrow level-2 default.
-func (m *Manager) resolveISISRedistribute(export string, po *config.PolicyOptionsConfig, isisLevel string, bgpAcceptDefault map[string]bool, metrics ...*qnhMetricScope11447) string {
-	return isisRedistributeLines(m.redistributeEntries(export, po, "isis", bgpAcceptDefault, metrics...), isisLevel)
+func (m *Manager) resolveISISRedistribute(export string, po *config.PolicyOptionsConfig, isisLevel string, _ map[string]bool, metrics ...*qnhMetricScope11447) string {
+	return isisRedistributeLines(m.redistributeEntries(export, po, "isis", metrics...), isisLevel)
 }
 
 func isisRedistributeLines(entries []redistEntry, isisLevel string) string {
@@ -185,8 +288,8 @@ func isisRedistributeLines(entries []redistEntry, isisLevel string) string {
 	return sb.String()
 }
 
-func (m *Manager) redistributeEntries(export string, po *config.PolicyOptionsConfig, self string, bgpAcceptDefault map[string]bool, metrics ...*qnhMetricScope11447) []redistEntry {
-	entries := m.redistributeEntriesAt(export, po, self, self, bgpAcceptDefault)
+func (m *Manager) redistributeEntries(export string, po *config.PolicyOptionsConfig, self string, metrics ...*qnhMetricScope11447) []redistEntry {
+	entries := m.redistributeEntriesAt(export, po, self, self)
 	if len(metrics) > 0 {
 		applyQNHMetricRouteMap11447(export, metrics[0], entries)
 	}
@@ -198,8 +301,8 @@ func (m *Manager) redistributeEntries(export string, po *config.PolicyOptionsCon
 // rules as resolveRedistribute under router bgp, but filters sources by the
 // grammar installed in that address family ("bgp-ipv6"), and indents the lines
 // one level deeper to sit inside the block.
-func (m *Manager) resolveBGPIPv6Redistribute(export string, po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool) string {
-	entries := m.redistributeEntriesAt(export, po, "bgp", "bgp-ipv6", bgpAcceptDefault)
+func (m *Manager) resolveBGPIPv6Redistribute(export string, po *config.PolicyOptionsConfig, _ map[string]bool) string {
+	entries := m.redistributeEntriesAt(export, po, "bgp", "bgp-ipv6")
 	return indentFRRLines(formatRedistEntries(entries), " ")
 }
 
@@ -222,7 +325,7 @@ func indentFRRLines(s, prefix string) string {
 // redistributeEntriesAt is redistributeEntries with the render node separate
 // from the router identity: self decides the self-redistribute drop, node
 // selects the redistribute grammar a source must fit (#9667, #9510).
-func (m *Manager) redistributeEntriesAt(export string, po *config.PolicyOptionsConfig, self, node string, bgpAcceptDefault map[string]bool) []redistEntry {
+func (m *Manager) redistributeEntriesAt(export string, po *config.PolicyOptionsConfig, self, node string) []redistEntry {
 	// Junos spells directly-connected routes "direct"; FRR's redistribute
 	// keyword is "connected". A bare `export direct` must render
 	// `redistribute connected`, not the FRR-invalid `redistribute direct`
@@ -272,9 +375,7 @@ func (m *Manager) redistributeEntriesAt(export string, po *config.PolicyOptionsC
 			skipped := false
 			for _, term := range ps.Terms {
 				for _, proto := range term.FromProtocols {
-					if proto == "direct" {
-						proto = "connected"
-					}
+					proto = normalizedRedistProtocol(proto)
 					// Skip a policy term that matches the enclosing
 					// protocol's own routes — `redistribute ospf
 					// route-map X` under `router ospf` is self-
@@ -302,45 +403,15 @@ func (m *Manager) redistributeEntriesAt(export string, po *config.PolicyOptionsC
 					sorted = append(sorted, p)
 				}
 				sort.Strings(sorted)
-				// #4481: if this policy is ALSO applied as a BGP route-map
-				// in/out with no explicit default, its shared route-map carries
-				// a trailing PERMIT (Junos BGP default-accept, #2998). That
-				// permit must NOT govern the redistribute default (Junos
-				// redistribute defaults to REJECT), so reference the fail-closed
-				// per-use-site alias generatePolicyOptions emits for it.
-				rmName := export
-				if policyNeedsRedistAlias(export, ps, bgpAcceptDefault) {
-					rmName = redistFailClosedRouteMap(export)
-				}
 				entries := make([]redistEntry, 0, len(sorted))
 				for _, proto := range sorted {
-					// #8597 (muse-004 K87): both operands are RAW CONFIG
-					// STRINGS — `proto` comes from term.FromProtocols and
-					// `rmName` from the policy name — and both reached frr.conf
-					// with no belt and no allowlist. Measured before the fix:
-					//
-					//	proto  "static\n line two"
-					//	  -> " redistribute static\n line two route-map exp\n"
-					//	rmName "exp\nrouter bgp 65000"
-					//	  -> " redistribute static route-map exp\nrouter bgp 65000\n"
-					//
-					// Each injects a second frr.conf statement. Every other operand interpolation in this
-					// package goes through sanitizeFRRValue (bfd.go,
-					// config_render.go, prefix_list_render.go); these two were
-					// missed, so an audit using the #4482 inventory to ask "are
-					// all FRR interpolations belted" would answer yes and stop.
-					//
-					// sanitizeFRRValue maps control bytes to a space, which is
-					// the sink's own separator — the weaker belt this package's
-					// README describes under #6796. It is applied here for
-					// PARITY, not because it is the strongest available check:
-					// a protocol allowlist would be stronger, and is a separate
-					// change with its own over-rejection question. What this
-					// closes is a newline or NUL splitting one statement into
-					// two.
-					// The belts are applied where the line is written
-					// (formatRedistEntries, isisRedistributeLines).
-					entries = append(entries, redistEntry{proto: proto, routeMap: rmName})
+					// #8597: the protocol and route-map are both belted at
+					// their output sites below. The map name is derived from
+					// the selected source protocol so each daemon receives
+					// only the terms it can evaluate.
+					entries = append(entries, redistEntry{
+						proto: proto, routeMap: redistProtocolRouteMapName(export, proto),
+					})
 				}
 				return entries
 			}
