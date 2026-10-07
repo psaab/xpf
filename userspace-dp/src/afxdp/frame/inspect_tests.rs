@@ -13,46 +13,57 @@ use super::*;
 const ETH_DST: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
 const ETH_SRC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x02];
 
-/// Build an untagged IPv4 frame: eth(14) + IPv4 header(20) + `l4` bytes.
-/// `declared_total_len` is written into the IPv4 total_len field (bytes
-/// [2..4]) INDEPENDENTLY of how many L4 bytes are actually appended, so a
-/// caller can declare a short datagram but still carry trailing slack.
+/// Build a bare IPv4 datagram, without an Ethernet header.
+fn v4_l3(protocol: u8, declared_total_len: u16, l4: &[u8]) -> Vec<u8> {
+    let mut packet = Vec::new();
+    packet.push(0x45);
+    packet.push(0x00); // ToS
+    packet.extend_from_slice(&declared_total_len.to_be_bytes());
+    packet.extend_from_slice(&[0x00, 0x00]); // id
+    packet.extend_from_slice(&[0x40, 0x00]); // flags/frag-off (DF, offset 0)
+    packet.extend_from_slice(&[64, protocol]); // ttl, proto
+    packet.extend_from_slice(&[0x00, 0x00]); // checksum (unused by parser)
+    packet.extend_from_slice(&Ipv4Addr::new(192, 0, 2, 1).octets());
+    packet.extend_from_slice(&Ipv4Addr::new(192, 0, 2, 2).octets());
+    packet.extend_from_slice(l4);
+    packet
+}
+
+/// Build an untagged Ethernet frame around a bare IPv4 datagram.
+/// `declared_total_len` is independent of appended L4 bytes, allowing a
+/// caller to declare a short datagram while carrying trailing slack.
 fn v4_frame(protocol: u8, declared_total_len: u16, l4: &[u8]) -> Vec<u8> {
-    let mut frame = Vec::new();
+    let mut frame = Vec::with_capacity(14 + 20 + l4.len());
     frame.extend_from_slice(&ETH_DST);
     frame.extend_from_slice(&ETH_SRC);
     frame.extend_from_slice(&0x0800u16.to_be_bytes());
-    // IPv4 header (IHL=5 => 20 bytes).
-    frame.push(0x45);
-    frame.push(0x00); // ToS
-    frame.extend_from_slice(&declared_total_len.to_be_bytes());
-    frame.extend_from_slice(&[0x00, 0x00]); // id
-    frame.extend_from_slice(&[0x40, 0x00]); // flags/frag-off (DF, offset 0)
-    frame.extend_from_slice(&[64, protocol]); // ttl, proto
-    frame.extend_from_slice(&[0x00, 0x00]); // checksum (unused by parser)
-    frame.extend_from_slice(&Ipv4Addr::new(192, 0, 2, 1).octets());
-    frame.extend_from_slice(&Ipv4Addr::new(192, 0, 2, 2).octets());
-    frame.extend_from_slice(l4);
+    frame.extend_from_slice(&v4_l3(protocol, declared_total_len, l4));
     frame
 }
 
-/// Build an untagged IPv6 frame: eth(14) + IPv6 header(40) + `l4` bytes.
-/// `declared_payload_len` is written into the payload_len field (bytes
-/// [4..6]) INDEPENDENTLY of the appended L4, so a short datagram can carry
-/// trailing slack.
+/// Build a bare IPv6 datagram, without an Ethernet header.
+fn v6_l3(next_header: u8, declared_payload_len: u16, l4: &[u8]) -> Vec<u8> {
+    let mut packet = Vec::new();
+    packet.push(0x60); // version 6
+    packet.extend_from_slice(&[0x00, 0x00, 0x00]); // tc + flow label
+    packet.extend_from_slice(&declared_payload_len.to_be_bytes());
+    packet.push(next_header);
+    packet.push(64); // hop limit
+    packet.extend_from_slice(&[0x20; 16]); // src
+    packet.extend_from_slice(&[0x30; 16]); // dst
+    packet.extend_from_slice(l4);
+    packet
+}
+
+/// Build an untagged Ethernet frame around a bare IPv6 datagram.
+/// `declared_payload_len` is independent of appended L4 bytes, allowing a
+/// caller to declare a short datagram while carrying trailing slack.
 fn v6_frame(next_header: u8, declared_payload_len: u16, l4: &[u8]) -> Vec<u8> {
-    let mut frame = Vec::new();
+    let mut frame = Vec::with_capacity(14 + 40 + l4.len());
     frame.extend_from_slice(&ETH_DST);
     frame.extend_from_slice(&ETH_SRC);
     frame.extend_from_slice(&0x86ddu16.to_be_bytes());
-    frame.push(0x60); // version 6
-    frame.extend_from_slice(&[0x00, 0x00, 0x00]); // tc + flow label
-    frame.extend_from_slice(&declared_payload_len.to_be_bytes());
-    frame.push(next_header);
-    frame.push(64); // hop limit
-    frame.extend_from_slice(&[0x20; 16]); // src
-    frame.extend_from_slice(&[0x30; 16]); // dst
-    frame.extend_from_slice(l4);
+    frame.extend_from_slice(&v6_l3(next_header, declared_payload_len, l4));
     frame
 }
 
@@ -1506,37 +1517,61 @@ fn parse_packet_destination_from_frame_falls_back_on_wrong_stamp_9900() {
 
 #[test]
 fn parse_packet_source_from_frame_reads_original_l3_source() {
-    let v4 = v4_frame(PROTO_TCP, 40, &[0u8; 20]);
+    let v4 = v4_l3(PROTO_TCP, 40, &[0u8; 20]);
     let expected_v4 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
-    for offset in [0, 14, 18] {
-        let mut meta = v4_meta(PROTO_TCP);
-        meta.l3_offset = offset;
-        assert_eq!(
-            parse_packet_source_from_frame(&v4, meta),
-            Some(expected_v4),
-            "IPv4 source with L3 stamp {offset}"
-        );
-    }
+    let mut v4_meta = v4_meta(PROTO_TCP);
+    v4_meta.l3_offset = 0;
+    assert_eq!(
+        parse_packet_source_from_frame(&v4, v4_meta),
+        Some(expected_v4),
+        "bare IPv4 L3 source at offset zero"
+    );
+    assert_eq!(
+        parse_packet_destination_from_frame(&v4, v4_meta),
+        Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2))),
+        "bare IPv4 L3 destination at offset zero"
+    );
 
-    let v6 = v6_frame(PROTO_TCP, 20, &[0u8; 20]);
+    let v6 = v6_l3(PROTO_TCP, 20, &[0u8; 20]);
     let expected_v6 = IpAddr::V6(Ipv6Addr::from([0x20; 16]));
-    for offset in [0, 14, 18] {
-        let mut meta = v6_meta(PROTO_TCP);
-        meta.l3_offset = offset;
-        assert_eq!(
-            parse_packet_source_from_frame(&v6, meta),
-            Some(expected_v6),
-            "IPv6 source with L3 stamp {offset}"
-        );
-    }
+    let mut v6_meta = v6_meta(PROTO_TCP);
+    v6_meta.l3_offset = 0;
+    assert_eq!(
+        parse_packet_source_from_frame(&v6, v6_meta),
+        Some(expected_v6),
+        "bare IPv6 L3 source at offset zero"
+    );
+    assert_eq!(
+        parse_packet_destination_from_frame(&v6, v6_meta),
+        Some(IpAddr::V6(Ipv6Addr::from([0x30; 16]))),
+        "bare IPv6 L3 destination at offset zero"
+    );
 
     let mut truncated = v4.clone();
-    truncated.truncate(14 + 19);
+    truncated.truncate(19);
     assert_eq!(
-        parse_packet_source_from_frame(&truncated, v4_meta(PROTO_TCP)),
+        parse_packet_source_from_frame(&truncated, v4_meta),
         None,
-        "truncated IPv4 header has no source proof"
+        "truncated bare IPv4 header has no source proof"
     );
+}
+
+#[test]
+fn parse_packet_source_from_frame_reads_stamped_ethernet_source() {
+    let v4 = v4_frame(PROTO_TCP, 40, &[0u8; 20]);
+    let expected_v4 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    for offset in [14, 18] {
+        let mut meta = v4_meta(PROTO_TCP);
+        meta.l3_offset = offset;
+        assert_eq!(parse_packet_source_from_frame(&v4, meta), Some(expected_v4));
+    }
+    let v6 = v6_frame(PROTO_TCP, 20, &[0u8; 20]);
+    let expected_v6 = IpAddr::V6(Ipv6Addr::from([0x20; 16]));
+    for offset in [14, 18] {
+        let mut meta = v6_meta(PROTO_TCP);
+        meta.l3_offset = offset;
+        assert_eq!(parse_packet_source_from_frame(&v6, meta), Some(expected_v6));
+    }
 }
 
 /// #9900 F-095 (SPARK-M5): the meta fast arm fires only on a verified L3.

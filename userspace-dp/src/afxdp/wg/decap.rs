@@ -376,35 +376,36 @@ pub(in crate::afxdp) fn try_wg_decap_from_frame(
     let (protocol, rel_l4_offset, payload_offset) =
         parse_inner_protocol_and_offsets(inner, inner_family)?;
 
-    let (synthetic, inner_meta) = crate::afxdp::logical_ingress::build_logical_ingress_packet(
-        forwarding,
-        &crate::afxdp::logical_ingress::LogicalIngressParams {
-            inner_packet: inner,
-            inner_family,
-            inner_eth_proto,
-            protocol,
-            rel_l4_offset,
-            payload_offset,
-            // The TUNNEL's logical ifindex, never the underlay's. This is what
-            // makes the inner packet adjudicate under the tunnel's zone
-            // (#7167 invariant 2) instead of the WAN's.
-            logical_ifindex: endpoint.logical_ifindex,
-            // Strictly better than the control thread has it: the outer IP
-            // header is still in the frame.
-            outer_ecn: outer_ecn_bits(frame, meta),
-            ecn_illegal_drops: &crate::afxdp::gre::WG_DECAP_ECN_ILLEGAL_DROPS,
-            // NOT `GRE_DECAP_INGRESS_FLAG`. The GRE flag selects the
-            // `tcp-mss gre-in` clamp value (#2486), which is the wrong number
-            // for a WireGuard tunnel — its clamp is computed from the endpoint
-            // by `wg_tcp_mss` on the EGRESS side. "Whatever GRE passes" is
-            // explicitly not an answer for another protocol.
-            meta_flags: 0,
-            rx_queue_index: meta.rx_queue_index,
-            // Inherited from the triggering RX meta, which is the whole reason
-            // this decap belongs in the worker. See the module comment.
-            config_generation: meta.config_generation,
-            fib_generation: meta.fib_generation,
-        },
+    let (synthetic, inner_meta) =
+        crate::afxdp::logical_ingress::build_logical_ingress_ethernet_packet(
+            forwarding,
+            &crate::afxdp::logical_ingress::LogicalIngressParams {
+                inner_packet: inner,
+                inner_family,
+                inner_eth_proto,
+                protocol,
+                rel_l4_offset,
+                payload_offset,
+                // The TUNNEL's logical ifindex, never the underlay's. This is what
+                // makes the inner packet adjudicate under the tunnel's zone
+                // (#7167 invariant 2) instead of the WAN's.
+                logical_ifindex: endpoint.logical_ifindex,
+                // Strictly better than the control thread has it: the outer IP
+                // header is still in the frame.
+                outer_ecn: outer_ecn_bits(frame, meta),
+                ecn_illegal_drops: &crate::afxdp::gre::WG_DECAP_ECN_ILLEGAL_DROPS,
+                // NOT `GRE_DECAP_INGRESS_FLAG`. The GRE flag selects the
+                // `tcp-mss gre-in` clamp value (#2486), which is the wrong number
+                // for a WireGuard tunnel — its clamp is computed from the endpoint
+                // by `wg_tcp_mss` on the EGRESS side. "Whatever GRE passes" is
+                // explicitly not an answer for another protocol.
+                meta_flags: 0,
+                rx_queue_index: meta.rx_queue_index,
+                // Inherited from the triggering RX meta, which is the whole reason
+                // this decap belongs in the worker. See the module comment.
+                config_generation: meta.config_generation,
+                fib_generation: meta.fib_generation,
+            },
     )?;
 
     // #8274 step 3: the roam report, made HERE because this is where the

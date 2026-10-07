@@ -336,7 +336,7 @@ pub(in crate::afxdp) fn build_injected_packet(
         WG_UNCOVERED_MALFORMED_TOTAL.fetch_add(1, Ordering::Relaxed);
         return None;
     };
-    crate::afxdp::logical_ingress::build_logical_ingress_packet(
+    crate::afxdp::logical_ingress::build_logical_ingress_ethernet_packet(
         forwarding,
         &crate::afxdp::logical_ingress::LogicalIngressParams {
             inner_packet: inner,

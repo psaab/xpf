@@ -1182,34 +1182,34 @@ pub(super) fn try_native_gre_decap_from_frame(
         parse_inner_protocol_and_offsets(inner_packet, inner_family)?;
 
     // #7167: the synthesize / ECN-combine / reparse / logical-rebind tail now
-    // lives in `logical_ingress::build_logical_ingress_packet` so WireGuard and
-    // IPsec plaintext can be adjudicated by the SAME code rather than a second
-    // copy of it. Everything above stays GRE-specific (outer parse, GRE key,
-    // `match_tunnel_endpoint` filtered to TunnelKind::Gre).
-    let (synthetic, inner_meta) = crate::afxdp::logical_ingress::build_logical_ingress_packet(
-        forwarding,
-        &crate::afxdp::logical_ingress::LogicalIngressParams {
-            inner_packet,
-            inner_family,
-            inner_eth_proto,
-            protocol,
-            rel_l4_offset,
-            payload_offset,
-            logical_ifindex: endpoint.logical_ifindex,
-            // GRE still has its outer IP header in `frame`, so it reads the
-            // outer ECN bits here and hands them in.
-            outer_ecn: outer_ecn_bits(frame, meta),
-            ecn_illegal_drops: &GRE_DECAP_ECN_ILLEGAL_DROPS,
-            // #2486: mark the inner packet GRE-decapped so the forward builder
-            // selects the `tcp-mss gre-in` clamp value.
-            meta_flags: GRE_DECAP_INGRESS_FLAG,
-            rx_queue_index: meta.rx_queue_index,
-            // GRE runs inside a worker on a received packet, so the attachment
-            // generations are inherited from the triggering RX meta (#7167
-            // invariant 5). A caller with no ingress meta has no such value.
-            config_generation: meta.config_generation,
-            fib_generation: meta.fib_generation,
-        },
+    // lives in `logical_ingress`'s shared builder so WireGuard and IPsec
+    // plaintext use the same ECN/flow/meta logic rather than a second copy.
+    // GRE keeps its Ethernet-framed contract; D11 uses the bare-L3 variant.
+    let (synthetic, inner_meta) =
+        crate::afxdp::logical_ingress::build_logical_ingress_ethernet_packet(
+            forwarding,
+            &crate::afxdp::logical_ingress::LogicalIngressParams {
+                inner_packet,
+                inner_family,
+                inner_eth_proto,
+                protocol,
+                rel_l4_offset,
+                payload_offset,
+                logical_ifindex: endpoint.logical_ifindex,
+                // GRE still has its outer IP header in `frame`, so it reads the
+                // outer ECN bits here and hands them in.
+                outer_ecn: outer_ecn_bits(frame, meta),
+                ecn_illegal_drops: &GRE_DECAP_ECN_ILLEGAL_DROPS,
+                // #2486: mark the inner packet GRE-decapped so the forward builder
+                // selects the `tcp-mss gre-in` clamp value.
+                meta_flags: GRE_DECAP_INGRESS_FLAG,
+                rx_queue_index: meta.rx_queue_index,
+                // GRE runs inside a worker on a received packet, so the attachment
+                // generations are inherited from the triggering RX meta (#7167
+                // invariant 5). A caller with no ingress meta has no such value.
+                config_generation: meta.config_generation,
+                fib_generation: meta.fib_generation,
+            },
     )?;
 
     Some(NativeGrePacket {
