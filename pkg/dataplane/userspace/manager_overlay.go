@@ -214,9 +214,22 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	next.FIBGeneration = m.readFIBGeneration()
 	next.GeneratedAt = time.Now().UTC()
 	next.Config = cfg
-	// Keepalive link transitions trigger this routes-only publish. Resample the
-	// endpoint link state so the Rust FIB withdraws and restores tunnel ECMP
-	// members even when no operator config commit occurs.
+	// Keepalive and interface link transitions trigger this routes-only publish.
+	// Resample link state before hashing so a flap with unchanged route content
+	// still reaches the helper and updates interface-only ECMP liveness.
+	next.Interfaces = append([]InterfaceSnapshot(nil), next.Interfaces...)
+	for i := range next.Interfaces {
+		row := &next.Interfaces[i]
+		if row.LinuxName == "" {
+			continue
+		}
+		resolveLinuxName := row.LinuxName
+		if row.LogicalOnly && row.ParentLinuxName != "" {
+			resolveLinuxName = row.ParentLinuxName
+		}
+		row.LinkUp = snapshotLinkUp(resolveLinuxName)
+	}
+	// Tunnel endpoint link state also controls route-only ECMP liveness.
 	next.TunnelEndpoints = append([]TunnelEndpointSnapshot(nil), next.TunnelEndpoints...)
 	for i := range next.TunnelEndpoints {
 		next.TunnelEndpoints[i].LinkUp = snapshotLinkUp(next.TunnelEndpoints[i].LinuxName)

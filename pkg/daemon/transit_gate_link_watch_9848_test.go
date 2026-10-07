@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/psaab/xpf/pkg/coalesce"
 	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -261,4 +262,33 @@ func TestTransitGateLinkWatchUnarmedResyncKeepsClosed9848(t *testing.T) {
 	// The watcher path must preserve the two-conjunct predicate: an attached
 	// link cannot reopen transit while dataplaneArmed is false.
 	waitTransitKnobs9725(t, v4, v6, "0")
+}
+
+func TestTransitGateLinkEventMarksRouteListener12064(t *testing.T) {
+	d := &Daemon{}
+	var actuations int
+	loop := coalesce.New(func(context.Context) bool {
+		actuations++
+		return true
+	})
+	loop.SetTimings(0, 0)
+	d.setRouteListenerLoop(loop)
+	d.transitGateLinkSubscribe = func(ch chan<- netlink.LinkUpdate, _ <-chan struct{}, _ func(error)) error {
+		go func() {
+			ch <- netlink.LinkUpdate{
+				Header: unix.NlMsghdr{Type: unix.RTM_NEWLINK},
+				Link:   &netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: "eth0", Index: 17}},
+			}
+			close(ch)
+		}()
+		return nil
+	}
+
+	if retry := d.runTransitGateLinkSubscription(context.Background(), make(chan string, 1)); !retry {
+		t.Fatal("link subscription did not report its closed update stream")
+	}
+	loop.Tick(context.Background())
+	if actuations != 1 {
+		t.Fatalf("route listener actuations after RTM_NEWLINK = %d, want one", actuations)
+	}
 }
