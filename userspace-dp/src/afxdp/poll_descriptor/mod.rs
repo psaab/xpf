@@ -7033,9 +7033,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     }
                     // The flowless base resolver checks ingress-local and
                     // interface-NAT local delivery before consulting the
-                    // override table. Preserve the table identity only for
-                    // dispositions that came from the transit lookup; a
-                    // local/redirect arm is table-free.
+                    // override table. Transit outcomes carry the explicit
+                    // table stamp; non-tunneled LocalDelivery also preserves a
+                    // live PBR identity so a hit can detect a term retarget.
+                    // Local outcomes without an override and redirects remain
+                    // table-free.
                     let resolved_in_table = !matches!(
                         final_resolution.disposition,
                         ForwardingDisposition::LocalDelivery

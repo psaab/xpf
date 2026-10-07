@@ -931,6 +931,35 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
         });
     }
     let target = crate::afxdp::session_glue::resolution_target_for_session(flow, decision);
+    // Local miss arms run before route-table lookup. Preserve the fast path only
+    // when both that exact arm and its installing-table identity remain live;
+    // otherwise a changed or removed PBR target must re-resolve.
+    let stored_non_tunneled_local = !is_reverse
+        && decision.resolution.disposition == crate::afxdp::ForwardingDisposition::LocalDelivery
+        && decision.resolution.tunnel_endpoint_id == 0;
+    let local_arm_unchanged = stored_non_tunneled_local
+        && crate::afxdp::forwarding::ingress_interface_local_resolution_on_session_miss(
+            forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            target,
+            flow.forward_key.protocol,
+        )
+        .or_else(|| {
+            crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
+                forwarding,
+                target,
+                flow.forward_key.protocol,
+            )
+        })
+        .as_ref()
+            == Some(&decision.resolution);
+    if local_arm_unchanged
+        && desired_identity
+            == (decision.install_table_domain, decision.install_table_check)
+    {
+        return None;
+    }
     if native_unresolvable {
         return Some(SessionHitPbrRouteRevalidation {
             revoked_key: (!no_local_entry && !is_reverse).then_some(canonical_key.clone()),
@@ -941,7 +970,9 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
             install_table_check: desired_identity.1,
         });
     }
-    if desired_identity == (decision.install_table_domain, decision.install_table_check) {
+    if desired_identity == (decision.install_table_domain, decision.install_table_check)
+        && !stored_non_tunneled_local
+    {
         return None;
     }
     let resolution =
