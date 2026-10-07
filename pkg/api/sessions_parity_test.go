@@ -148,7 +148,9 @@ func TestRESTSessionParityWithGRPC(t *testing.T) {
 	se := resp.Sessions[0]
 
 	// H1: age is wall age from Created (~1000s, or as old as this host's
-	// monotonic clock permits on a fresh runner), while idle remains small.
+	// monotonic clock permits on runners with uptime>3s), while idle remains
+	// small. Hosts at monotonic base<=3s cannot separate age from idle (both
+	// collapse to <=3s / 0) — the minAge floor below degrades honestly there.
 	minAge := uint64(500)
 	if base <= 500 {
 		minAge = 0
