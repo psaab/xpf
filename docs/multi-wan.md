@@ -494,36 +494,47 @@ counter per FBF policy. (A `then count` on a filter attached to the
 `xpf_lo0_counter_hits_total{counter}`, #4422 — see
 `docs/feature-coverage.md` Observability.)
 
-### FBF is flow-based — the steer is decided once, on the first packet
+### FBF is decided on the first packet, then re-validated on established hits
 
-The FBF (`then routing-instance`) decision is made on the **first
+The FBF (`then routing-instance`) decision is first made on the **first
 packet of a flow** (the session miss), when the ingress filter runs and
-`ingress_route_table_override` selects the routing-instance. That
-egress/VRF resolution is cached in the session; every subsequent packet
-of the same flow takes the established fast path
-(`resolve_flow_session_decision`), which returns the cached decision
-**without re-running the filter**. Consequences the operator should
-expect:
+`ingress_route_table_override` selects the routing-instance. The
+egress/VRF resolution is cached in the session. On an established hit,
+the dataplane starts with that session decision, then re-validates the
+FBF route identity: on a forward hit, a static filter is re-evaluated
+when its `(generation, ingress)` stamp is stale, while per-packet
+predicates are re-evaluated on every hit, even when the stamp is fresh
+(#10467). On a reverse hit, a matching `then routing-instance` term on
+the reply's ingress steers that reply in its table and updates only the
+reverse decision; the pair remains alive (#11324).
 
-- **Editing the FBF filter (or the steered instance's routes) does NOT
-  retroactively re-steer live flows.** An established session keeps the
-  routing-instance it was assigned at flow start until it ages out at
-  the inactivity timeout or is cleared. Only NEW flows pick up the new
-  steering. This is deliberate flow-based behavior, identical in
-  substance to the ip-monitoring case in *Session behavior on uplink
-  transition* below — SRX behaves the same way.
-- **A firewall-filter commit does not clear sessions.** `policy-rematch`
-  re-evaluates security POLICIES, not FBF filters, so there is no
-  session invalidation on a filter change. `clear security flow
+- **A changed FBF route identity on a forward hit discards that hit and
+  revokes the session pair.** If revalidation derives a different
+  install-table identity, a removed steer, or an unresolvable
+  routing-instance, the dataplane fail-closes that packet with a
+  route-transition discard, tears down the canonical forward/reverse
+  session pair, and evicts the flow-cache keys. The next packet takes
+  the ordinary session-miss path and derives both halves under the
+  current snapshot. If the identity is unchanged, the session is
+  preserved (#8114). Thus a config change that alters a forward flow's
+  matched FBF route can move that flow on its next packet; an unrelated
+  change does not by itself revoke it (`docs/log/10467.md`).
+- **A firewall-filter commit does not eagerly clear sessions.**
+  `policy-rematch` re-evaluates security POLICIES, not FBF filters.
+  Instead, an established hit revalidates a stale FBF stamp and applies
+  the current route identity as described above. `clear security flow
   session` (e.g. `... zone <ingress>` or a NAT-pool / 5-tuple filter)
-  is THE mechanism to force live flows onto a changed FBF steer.
-- **Exception — per-packet-L4 FBF terms are cache-sensitive.** A steer
-  whose `from` carries `tcp-flags` / `is-fragment` / `icmp-type` /
-  `icmp-code` declines the flow cache and is re-evaluated per packet
-  (`docs/feature-gaps.md`, path (b) of the #1431 runbook); a config
-  rotation purges those affected sessions, so they DO pick up a changed
-  steer. A steer matching only on the 5-tuple / DSCP is the cached case
-  above.
+  remains available when an operator wants to force the cutover
+  immediately, without waiting for each flow's next packet.
+- **Per-packet FBF terms include DSCP as well as per-packet L4 fields.**
+  A steer whose `from` carries `dscp`, `tcp-flags`, `is-fragment`,
+  `icmp-type`, or `icmp-code` declines the flow cache and is evaluated
+  against the current packet on every hit; a fresh static stamp does
+  not skip this check. If a mid-flow field change (for example, a DSCP
+  change) changes the desired route identity on a forward hit, that hit
+  is discarded and the session pair is revoked as above. A 5-tuple-only
+  match has no per-packet-varying fields, but is still re-evaluated when
+  its static stamp becomes stale.
 - **After HA failover the FBF decision is preserved.** A peer-synced
   session carries the primary's FBF-derived egress, so the new primary
   keeps steering the flow to the same routing-instance (the synced
