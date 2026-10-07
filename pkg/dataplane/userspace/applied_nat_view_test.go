@@ -164,6 +164,58 @@ func TestAppliedNATViewDeferredApplyHolds(t *testing.T) {
 	}
 }
 
+func TestPolicySnapshotCommitterWaitsForReconciledSnapshot(t *testing.T) {
+	m := New()
+	var committed []uint64
+	m.SetPolicySnapshotCommitter(func(generation uint64) {
+		committed = append(committed, generation)
+	})
+	m.lastSnapshot = &ConfigSnapshot{Generation: 7}
+	m.deferWorkers = true
+	m.markAppliedSnapshotLocked()
+	if len(committed) != 0 {
+		t.Fatalf("deferred snapshot committed policy generations %v", committed)
+	}
+
+	m.deferWorkers = false
+	m.markAppliedSnapshotLocked()
+	if len(committed) != 1 || committed[0] != 7 {
+		t.Fatalf("reconciled snapshot commit notifications = %v, want [7]", committed)
+	}
+}
+
+func TestDeferredPolicySnapshotPrePublisherRunsUnlockedAndFencesTarget(t *testing.T) {
+	m := New()
+	m.pendingFullSnapshotMetadata = true
+	m.lastSnapshot = &ConfigSnapshot{Generation: 7}
+	callbackSawUnlocked := false
+	m.SetPolicySnapshotPrePublisher(func(generation uint64) error {
+		if generation != 7 {
+			t.Errorf("pre-publish generation = %d, want 7", generation)
+		}
+		if !m.mu.TryLock() {
+			return nil
+		}
+		callbackSawUnlocked = true
+		m.mu.Unlock()
+
+		m.mu.Lock()
+		m.lastSnapshot.Generation = 8
+		m.mu.Unlock()
+		return nil
+	})
+
+	m.mu.Lock()
+	publish := m.prepareDeferredPolicySnapshotLocked()
+	m.mu.Unlock()
+	if !callbackSawUnlocked {
+		t.Fatal("deferred snapshot pre-publisher ran while Manager.mu was held")
+	}
+	if publish {
+		t.Fatal("status tick must not publish a snapshot replaced while candidate capture ran")
+	}
+}
+
 // TestAppliedNATViewGenZeroUnavailableNotClear is r11 #3: a helper restart
 // (appliedSnapshot cleared to gen 0) before the first reconciled apply must
 // surface as Available:false (HOLD), NOT a coherent view that the monitor would

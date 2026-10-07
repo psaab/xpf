@@ -57,6 +57,32 @@ func (m *Manager) SetCaptureAuthorityCommitter(committer func(uint64, uint32, ui
 	m.mu.Unlock()
 }
 
+// SetPolicySnapshotCommitter wires the callback that runs after a full policy
+// snapshot has been acknowledged. Unlike capture-authority commits, this
+// excludes FIB-only generation bumps.
+func (m *Manager) SetPolicySnapshotCommitter(committer func(configGeneration uint64)) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.policySnapshotCommitter = committer
+	m.mu.Unlock()
+}
+
+// SetPolicySnapshotPrePublisher wires a callback run by the status loop just
+// before it publishes a deferred full snapshot. The callback runs without
+// Manager.mu held because daemon-side candidate capture may issue a helper
+// session READ through this Manager. A generation check after the callback
+// ensures the status loop does not publish a snapshot that changed meanwhile.
+func (m *Manager) SetPolicySnapshotPrePublisher(callback func(uint64) error) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.policySnapshotPrePublisher = callback
+	m.mu.Unlock()
+}
+
 // stampCaptureAuthority applies one provider result to a snapshot. Keeping
 // this copy operation shared prevents full Compile, retained-snapshot refresh,
 // and test-only builder paths from drifting on the four coupled authority

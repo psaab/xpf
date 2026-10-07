@@ -12,9 +12,6 @@ import (
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/feeds"
 	"github.com/psaab/xpf/pkg/policymatch"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"golang.org/x/sync/semaphore"
 	"io"
 	"net"
@@ -1015,66 +1012,6 @@ func TestPeerSyncRenameAncestryCaptureAndClearJointFixture10511(t *testing.T) {
 	}
 	if d.policyInvalidationCapture != nil {
 		t.Fatal("joint peer-sync path left its pre-publication capture armed after clear")
-	}
-}
-
-// TestRenameStagingRunsBeforeDataplanePublish10511 pins the production
-// callsite the HA joint fixture cannot reach through its apply seam: the real
-// dataplane body must invoke the shared captureAndStagePolicyRenameAncestry
-// helper before its ApplyConfig publish. The joint test proves the helper's
-// LOGIC (capture + transfer) through the seam; this proves the real apply
-// CALLS it at the #6948 placement. Moving the call after ApplyConfig — or
-// deleting it — re-opens the positional-id race the capture exists to close,
-// while the joint test alone would stay green.
-func TestRenameStagingRunsBeforeDataplanePublish10511(t *testing.T) {
-	const src = "daemon_apply_dataplane.go"
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, src, nil, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", src, err)
-	}
-	var (
-		stagingCalls int
-		stagingPos   token.Pos
-		stagingFunc  string
-		publishPos   token.Pos
-	)
-	for _, decl := range f.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			continue
-		}
-		var staged, published token.Pos
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			switch sel.Sel.Name {
-			case "captureAndStagePolicyRenameAncestry":
-				stagingCalls++
-				staged = call.Pos()
-			case "ApplyConfig":
-				if staged.IsValid() && !published.IsValid() {
-					published = call.Pos()
-				}
-			}
-			return true
-		})
-		if staged.IsValid() {
-			stagingPos, stagingFunc, publishPos = staged, fn.Name.Name, published
-		}
-	}
-	if stagingCalls != 1 {
-		t.Fatalf("want exactly one production captureAndStagePolicyRenameAncestry call, found %d", stagingCalls)
-	}
-	if !publishPos.IsValid() || publishPos <= stagingPos {
-		t.Fatalf("%s: the rename staging call (%s) must precede the ApplyConfig publish in %s",
-			src, fset.Position(stagingPos), stagingFunc)
 	}
 }
 

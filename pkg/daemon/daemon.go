@@ -727,6 +727,23 @@ type Daemon struct {
 	// Mutated under applySem. Rationale: daemon_policy_invalidate_capture.go.
 	policyInvalidationPlan    *policyInvalidationPlan
 	policyInvalidationCapture *policyInvalidationCapture
+	// policyInvalidationDebt retains the config pair and pre-publication
+	// candidate capture until the corresponding snapshot has actually landed.
+	// A deferred userspace publish records its helper generation here so the
+	// status-loop publication callback can discharge only the matching debt.
+	// Mutated under applySem.
+	policyInvalidationDebt *policyInvalidationDebt
+	// Coalesces repeated manager completion callbacks while the serialized
+	// invalidation worker is queued or running.
+	policyInvalidationDischargeWorker atomic.Bool
+	// policyInvalidationPublishLanded is reset for each apply and set only when
+	// its full snapshot is known published (or there is no dataplane). It gates
+	// the three commit-time invalidation call sites.
+	policyInvalidationPublishLanded bool
+	// policyInvalidationDebtAdopted is true when a bare retry apply re-captures
+	// a previously failed/deferred pair; applyConfigLocked discharges that debt
+	// on a synchronous successful publish.
+	policyInvalidationDebtAdopted bool
 	// scheduler is the live policy-window scheduler. It is an atomic.Pointer so
 	// the metrics collector can read it lock-free for the
 	// xpf_scheduler_republish_fail_closed SSOT gauge

@@ -186,23 +186,28 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 				mgr.SetCaptureAuthorityCommitter(func(configGeneration uint64, fibGeneration uint32, captureGeneration uint64) {
 					d.publishIpsecCaptureSnapshotAuthority(configGeneration, fibGeneration, captureGeneration)
 				})
+				mgr.SetPolicySnapshotCommitter(d.policyInvalidationSnapshotPublished)
+				mgr.SetPolicySnapshotPrePublisher(d.capturePolicyInvalidationBeforeDeferredPublish)
 			}
 		}
 	}
 
 	var applyResult *dataplane.ApplyResult
 	var networkdApplyResult *dataplane.ApplyResult
+	d.policyInvalidationPublishLanded = true
 	if rt := d.dataplane(); rt != nil {
 		var err error
 		applyResult, err = rt.ApplyConfig(context.Background(), cfg)
-		d.retainRxVlanAppliedParents(cfg, err == nil &&
+		var publishedTailErr *dpuserspace.PublishedSnapshotTailError
+		publishedTail := errors.As(err, &publishedTailErr)
+		d.retainRxVlanAppliedParents(cfg, (err == nil || publishedTail) &&
 			(applyResult == nil || !applyResult.SnapshotPublishDeferred))
 		networkdApplyResult = applyResult
 		// #9725: an apply may attach and then fail, or detach its last link
 		// while reconciling. Re-read kernel truth on both outcomes; the tick
 		// remains the completeness guarantee outside this path.
 		d.reassertTransitGate("apply")
-		if err != nil {
+		if err != nil && !publishedTail {
 			// A partial result still contains this config's networkd models,
 			// but it is not an accepted dataplane snapshot. Keep it scoped to
 			// networkd so zone ownership and other live dataplane consumers
@@ -215,6 +220,7 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			// included: the tail never runs there, but the staleness persists
 			// until a later apply succeeds).
 			d.hostInboundDataplaneFresh.Store(false)
+			d.policyInvalidationPublishLanded = false
 			if compileErrorMustAbortApply(err) {
 				return commitOverlay, networkdErr, nil, nil, err
 			}
@@ -240,9 +246,18 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			// previous snapshot until the status loop lands it) leaves the
 			// gate clear — the tail renders accept-less, exactly like a
 			// #5679 failure, until a later apply publishes (nil result from
-			// a backend without the bit keeps the previous behavior).
+			// a backend without the bit keeps the previous behavior). A
+			// PublishedSnapshotTailError is the exception to the ordinary
+			// failure arm: its non-nil result says the snapshot already landed.
 			fresh := applyResult == nil || !applyResult.SnapshotPublishDeferred
 			d.hostInboundDataplaneFresh.Store(fresh)
+			d.policyInvalidationPublishLanded = fresh
+			if applyResult != nil {
+				d.notePolicyInvalidationPublish(cfg, applyResult.Generation)
+			}
+			if publishedTail {
+				applyErr = err
+			}
 		}
 	}
 	policySchedulerActiveState = d.reconcilePolicySchedulerLockedAt(cfg, policySchedulerApplyTime)
@@ -1281,6 +1296,20 @@ func (d *Daemon) reapplyAfterDeferredMAC(cfg *config.Config) {
 			mgr.RestagePolicyRenameAncestryForReplay()
 		}
 	}
+	// A deferred or failed first publish leaves the old snapshot active. If
+	// this mandatory replay is the first publish to land, refresh the debt's
+	// candidates now so sessions admitted under that still-live snapshot during
+	// the defer window are not missed.
+	if !d.policyInvalidationPublishLanded {
+		if debt := d.policyInvalidationDebt; debt != nil && debt.newCfg == cfg {
+			d.policyInvalidationPlan = &policyInvalidationPlan{
+				oldCfg: debt.oldCfg, newCfg: debt.newCfg, renameApply: debt.renameApply,
+			}
+		}
+		if plan := d.policyInvalidationPlan; plan != nil && plan.newCfg == cfg {
+			d.captureAndStagePolicyRenameAncestry(cfg)
+		}
+	}
 	res, err := rt.ApplyConfig(context.Background(), cfg)
 	d.retainRxVlanAppliedParents(cfg, err == nil && (res == nil || !res.SnapshotPublishDeferred))
 	// #9725: this re-apply can remove the last link even when it reports an
@@ -1301,6 +1330,12 @@ func (d *Daemon) reapplyAfterDeferredMAC(cfg *config.Config) {
 	// accept-less against an N+1 dataplane. F1-B: a deferred re-apply
 	// publish leaves the gate clear, like the primary site.
 	d.hostInboundDataplaneFresh.Store(res == nil || !res.SnapshotPublishDeferred)
+	if res != nil {
+		d.notePolicyInvalidationPublish(cfg, res.Generation)
+	}
+	if res == nil || !res.SnapshotPublishDeferred {
+		d.policyInvalidationPublishLanded = true
+	}
 }
 
 // recordDataplaneWorkerArmDebt records the #5134 deferred-MAC worker-arm debt on
