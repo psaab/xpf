@@ -1142,9 +1142,9 @@ fn pbr_egress_output_filter_applied_not_base_egress_no_bypass() {
 }
 
 
-/// #9752 stamp matrix: arm provenance, not disposition. Only the table arm
-/// with a live override stamps nonzero; tunnel-egress and precedence arms
-/// stamp (0,0) (table-free by rule).
+/// #9752/#12056 stamp matrix: local delivery on a non-tunneled miss arm keeps
+/// a live PBR override; table-free local, blocked, and tunnel outcomes remain
+/// (0,0).
 #[test]
 fn install_table_stamp_matrix_9752() {
     use crate::afxdp::forwarding::install_table_stamp_for_miss;
@@ -1175,7 +1175,20 @@ fn install_table_stamp_matrix_9752() {
         (0, 0),
         "a non-PBR table-arm outcome must stamp default, not garbage"
     );
-    // Precedence/blocked arms never saw a table, even with an override.
+    // A non-tunneled local miss precedes lookup but still carries a matching
+    // static-PBR identity so a later hit can detect term retargets.
+    let mut local = plain;
+    local.disposition = ForwardingDisposition::LocalDelivery;
+    assert_eq!(
+        install_table_stamp_for_miss(Some((blue, blue_h2)), false, local),
+        (blue, blue_h2)
+    );
+    assert_eq!(
+        install_table_stamp_for_miss(None, false, local),
+        (0, 0),
+        "a local miss without a PBR override remains table-free"
+    );
+    // Precedence/blocked arms never saw a table and have no local delivery.
     assert_eq!(
         install_table_stamp_for_miss(Some((blue, blue_h2)), false, plain),
         (0, 0)

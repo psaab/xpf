@@ -2732,3 +2732,307 @@ fn a_tunneled_pbr_drop_still_denies_via_the_ordinary_evaluator_10605() {
     );
     assert_eq!(hit.revoked_key.as_ref(), Some(&flow.forward_key));
 }
+// #12056: local miss arms precede table lookup, so unchanged local sessions
+// must remain live while static-PBR identity changes and address removal must
+// still trigger route revalidation.
+const PROTO_UDP_12056: u8 = crate::ip_proto::PROTO_UDP;
+
+fn forwarding_with_ri_local_12056(
+    v6: bool,
+    interface_nat: bool,
+    pbr_target: Option<&str>,
+    has_local_address: bool,
+) -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    let (blue_domain, _) = crate::session::install_table_identity("blue");
+    let family = if v6 { "inet6" } else { "inet" };
+    let local_address = if has_local_address {
+        vec![InterfaceAddressSnapshot {
+            family: family.into(),
+            address: if v6 {
+                "2001:db8:0:61::1/64".into()
+            } else {
+                "10.0.61.1/24".into()
+            },
+            ..Default::default()
+        }]
+    } else {
+        Vec::new()
+    };
+    let nat_address = if has_local_address {
+        vec![InterfaceAddressSnapshot {
+            family: family.into(),
+            address: if v6 {
+                "2001:db8:0:80::8/64".into()
+            } else {
+                "172.16.80.8/24".into()
+            },
+            ..Default::default()
+        }]
+    } else {
+        Vec::new()
+    };
+    for iface in snapshot.interfaces.iter_mut() {
+        if iface.ifindex == LAN_IFINDEX {
+            iface.routing_instance = "blue".into();
+            iface.routing_domain = blue_domain;
+            iface.addresses = local_address.clone();
+            if pbr_target.is_some() {
+                if v6 {
+                    iface.filter_input_v6 = "edge-in".into();
+                } else {
+                    iface.filter_input_v4 = "edge-in".into();
+                }
+            }
+        } else if interface_nat && iface.ifindex == 12 {
+            iface.addresses = nat_address.clone();
+        }
+    }
+    for (name, routing_instance, ifindex) in [("blue0", "blue", 101), ("green0", "green", 102)] {
+        let (domain, _) = crate::session::install_table_identity(routing_instance);
+        snapshot.interfaces.push(InterfaceSnapshot {
+            name: name.into(),
+            zone: "lan".into(),
+            routing_instance: routing_instance.into(),
+            routing_domain: domain,
+            linux_name: name.into(),
+            ifindex,
+            addresses: vec![InterfaceAddressSnapshot {
+                family: family.into(),
+                address: if v6 {
+                    format!("2001:db8:{}::1/64", if routing_instance == "blue" { "250" } else { "251" })
+                } else {
+                    format!("10.{}.0.1/24", if routing_instance == "blue" { "250" } else { "251" })
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+    }
+    if interface_nat {
+        snapshot.source_nat_rules = vec![crate::SourceNATRuleSnapshot {
+            name: "snat".into(),
+            from_zone: "lan".into(),
+            to_zone: "wan".into(),
+            source_addresses: vec!["0.0.0.0/0".into(), "::/0".into()],
+            interface_mode: true,
+            ..Default::default()
+        }];
+    }
+    if let Some(routing_instance) = pbr_target {
+        let mut term = pbr_term("pbr-route", "5201", "accept");
+        term.protocols = vec!["tcp".into(), "udp".into()];
+        term.routing_instance = routing_instance.into();
+        snapshot.filters = vec![FirewallFilterSnapshot {
+            name: "edge-in".into(),
+            family: family.into(),
+            terms: vec![term],
+        }];
+    }
+    build_forwarding_state(&snapshot)
+}
+
+fn local_flow_12056(v6: bool, proto: u8, interface_nat: bool) -> SessionFlow {
+    let addr_family = if v6 {
+        libc::AF_INET6 as u8
+    } else {
+        libc::AF_INET as u8
+    };
+    let src = if v6 {
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0x61, 0, 0, 0, 0x102))
+    } else {
+        IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))
+    };
+    let dst = match (v6, interface_nat) {
+        (true, true) => IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0x80, 0, 0, 0, 8)),
+        (true, false) => IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0x61, 0, 0, 0, 1)),
+        (false, true) => IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
+        (false, false) => IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
+    };
+    SessionFlow {
+        src_ip: src,
+        dst_ip: dst,
+        forward_key: SessionKey {
+            addr_family,
+            protocol: proto,
+            src_ip: src,
+            dst_ip: dst,
+            src_port: 12345,
+            dst_port: 5201,
+            discriminator: Default::default(),
+            routing_domain: crate::session::install_table_identity("blue").0,
+        },
+    }
+}
+
+fn local_decision_12056(
+    local: crate::afxdp::ForwardingResolution,
+    stamp: (u32, u32),
+) -> SessionDecision {
+    SessionDecision {
+        resolution: local,
+        nat: NatDecision::default(),
+        install_table_domain: stamp.0,
+        install_table_check: stamp.1,
+    }
+}
+
+#[test]
+fn unchanged_ri_local_miss_arms_keep_sessions_for_v4_v6_tcp_udp_12056() {
+    for v6 in [false, true] {
+        for proto in [PROTO_TCP, PROTO_UDP_12056] {
+            for interface_nat in [false, true] {
+                let forwarding =
+                    forwarding_with_ri_local_12056(v6, interface_nat, None, true);
+                let flow = local_flow_12056(v6, proto, interface_nat);
+                let local = if interface_nat {
+                    crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
+                        &forwarding,
+                        flow.dst_ip,
+                        proto,
+                    )
+                } else {
+                    crate::afxdp::forwarding::ingress_interface_local_resolution_on_session_miss(
+                        &forwarding,
+                        LAN_IFINDEX,
+                        0,
+                        flow.dst_ip,
+                        proto,
+                    )
+                }
+                .unwrap_or_else(|| {
+                    panic!("selected local miss arm must match: v6={v6}, proto={proto}, interface_nat={interface_nat}")
+                });
+                assert_eq!(local.disposition, crate::afxdp::ForwardingDisposition::LocalDelivery);
+                let stamp =
+                    crate::afxdp::forwarding::install_table_stamp_for_miss(None, false, local);
+                assert_eq!(stamp, (0, 0));
+                let stored = local_decision_12056(local, stamp);
+                let mut sessions = SessionTable::new();
+                sessions.set_filter_revalidation_gen(7);
+                assert!(sessions.install_with_protocol_with_origin(
+                    flow.forward_key.clone(),
+                    stored,
+                    metadata(),
+                    SessionOrigin::ForwardFlow,
+                    1_000,
+                    proto,
+                    0,
+                ));
+                let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+                let route = revalidate_static_pbr_route_on_session_hit(
+                    &forwarding,
+                    &neighbors,
+                    &sessions,
+                    &flow.forward_key,
+                    &flow,
+                    &frame(),
+                    meta(LAN_IFINDEX as u32, 0, v6),
+                    Some(TEST_LAN_ZONE_ID),
+                    stored,
+                    false,
+                );
+                assert!(
+                    route.is_none(),
+                    "unchanged RI local arm revoked v6={v6}, proto={proto}, interface_nat={interface_nat}: {route:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn static_pbr_local_session_tracks_retarget_and_address_removal_12056() {
+    for v6 in [false, true] {
+        for proto in [PROTO_TCP, PROTO_UDP_12056] {
+            for interface_nat in [false, true] {
+                let blue_identity = crate::session::install_table_identity("blue");
+                let forwarding =
+                    forwarding_with_ri_local_12056(v6, interface_nat, Some("blue"), true);
+                let flow = local_flow_12056(v6, proto, interface_nat);
+                let local = if interface_nat {
+                    crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
+                        &forwarding,
+                        flow.dst_ip,
+                        proto,
+                    )
+                } else {
+                    crate::afxdp::forwarding::ingress_interface_local_resolution_on_session_miss(
+                        &forwarding,
+                        LAN_IFINDEX,
+                        0,
+                        flow.dst_ip,
+                        proto,
+                    )
+                }
+                .unwrap_or_else(|| {
+                    panic!("local miss arm must match: v6={v6}, proto={proto}, interface_nat={interface_nat}")
+                });
+                let stamp =
+                    crate::afxdp::forwarding::install_table_stamp_for_miss(Some(blue_identity), false, local);
+                assert_eq!(stamp, blue_identity);
+                let stored = local_decision_12056(local, stamp);
+                let mut sessions = SessionTable::new();
+                sessions.set_filter_revalidation_gen(7);
+                assert!(sessions.install_with_protocol_with_origin(
+                    flow.forward_key.clone(),
+                    stored,
+                    metadata(),
+                    SessionOrigin::ForwardFlow,
+                    1_000,
+                    proto,
+                    0,
+                ));
+                let neighbors = std::sync::Arc::new(ShardedNeighborMap::new());
+                let unchanged = revalidate_static_pbr_route_on_session_hit(
+                    &forwarding,
+                    &neighbors,
+                    &sessions,
+                    &flow.forward_key,
+                    &flow,
+                    &frame(),
+                    meta(LAN_IFINDEX as u32, 0, v6),
+                    Some(TEST_LAN_ZONE_ID),
+                    stored,
+                    false,
+                );
+                assert!(
+                    unchanged.is_none(),
+                    "unchanged static PBR local arm revoked v6={v6}, proto={proto}, interface_nat={interface_nat}: {unchanged:?}"
+                );
+
+                for (target, has_local_address) in [("green", true), ("blue", false)] {
+                    let changed = forwarding_with_ri_local_12056(
+                        v6,
+                        interface_nat,
+                        Some(target),
+                        has_local_address,
+                    );
+                    let route = revalidate_static_pbr_route_on_session_hit(
+                        &changed,
+                        &neighbors,
+                        &sessions,
+                        &flow.forward_key,
+                        &flow,
+                        &frame(),
+                        meta(LAN_IFINDEX as u32, 0, v6),
+                        Some(TEST_LAN_ZONE_ID),
+                        stored,
+                        false,
+                    )
+                    .expect("retarget or address removal must trigger route revalidation");
+                    assert_eq!(route.revoked_key.as_ref(), Some(&flow.forward_key));
+                    assert_eq!(
+                        (route.install_table_domain, route.install_table_check),
+                        crate::session::install_table_identity(target)
+                    );
+                    assert_eq!(
+                        route.resolution.disposition,
+                        crate::afxdp::ForwardingDisposition::NoRoute,
+                        "the local destination must not remain reachable in the retargeted/updated table"
+                    );
+                }
+            }
+        }
+    }
+}

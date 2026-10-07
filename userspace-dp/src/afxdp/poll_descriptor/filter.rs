@@ -814,16 +814,18 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
             flow.dst_ip,
         )
     };
-    let (desired_identity, table, native_unresolvable) = match route_filter {
+    let (desired_identity, table, native_unresolvable, pbr_matched) = match route_filter {
             None => match native_route_table() {
-                crate::afxdp::forwarding::NativeRouteTable::Default => ((0, 0), None, false),
+                crate::afxdp::forwarding::NativeRouteTable::Default => {
+                    ((0, 0), None, false, false)
+                }
                 crate::afxdp::forwarding::NativeRouteTable::Table {
                     table,
                     domain,
                     check,
-                } => ((domain, check), Some(table), false),
+                } => ((domain, check), Some(table), false, false),
                 crate::afxdp::forwarding::NativeRouteTable::Unresolvable { .. } => {
-                    ((0, 0), None, true)
+                    ((0, 0), None, true, false)
                 }
             },
             Some(filter) => {
@@ -859,7 +861,7 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
                                 pbr.routing_instance,
                                 is_v6,
                             );
-                        (identity, Some(table), false)
+                        (identity, Some(table), false, true)
                     }
                     Some(_) => {
                         // Drop/reject terms remain owned by the composed static
@@ -869,15 +871,15 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
                     }
                     None => match native_route_table() {
                         crate::afxdp::forwarding::NativeRouteTable::Default => {
-                            ((0, 0), None, false)
+                            ((0, 0), None, false, false)
                         }
                         crate::afxdp::forwarding::NativeRouteTable::Table {
                             table,
                             domain,
                             check,
-                        } => ((domain, check), Some(table), false),
+                        } => ((domain, check), Some(table), false, false),
                         crate::afxdp::forwarding::NativeRouteTable::Unresolvable { .. } => {
-                            ((0, 0), None, true)
+                            ((0, 0), None, true, false)
                         }
                     },
                 }
@@ -931,6 +933,36 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
         });
     }
     let target = crate::afxdp::session_glue::resolution_target_for_session(flow, decision);
+    // Local miss arms run before route-table lookup. Recheck that exact arm
+    // before comparing table identity: native RI identity can differ from the
+    // arm's (0,0) stamp even though the live local destination is unchanged.
+    let stored_non_tunneled_local = !is_reverse
+        && decision.resolution.disposition == crate::afxdp::ForwardingDisposition::LocalDelivery
+        && decision.resolution.tunnel_endpoint_id == 0;
+    let local_arm_unchanged = stored_non_tunneled_local
+        && crate::afxdp::forwarding::ingress_interface_local_resolution_on_session_miss(
+            forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            target,
+            flow.forward_key.protocol,
+        )
+        .or_else(|| {
+            crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
+                forwarding,
+                target,
+                flow.forward_key.protocol,
+            )
+        })
+        .as_ref()
+            == Some(&decision.resolution);
+    if local_arm_unchanged
+        && (!pbr_matched
+            || desired_identity
+                == (decision.install_table_domain, decision.install_table_check))
+    {
+        return None;
+    }
     if native_unresolvable {
         return Some(SessionHitPbrRouteRevalidation {
             revoked_key: (!no_local_entry && !is_reverse).then_some(canonical_key.clone()),
@@ -941,7 +973,9 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
             install_table_check: desired_identity.1,
         });
     }
-    if desired_identity == (decision.install_table_domain, decision.install_table_check) {
+    if desired_identity == (decision.install_table_domain, decision.install_table_check)
+        && !stored_non_tunneled_local
+    {
         return None;
     }
     let resolution =

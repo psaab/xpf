@@ -360,19 +360,19 @@ fn ingress_route_table_override_with_mode(
     }
 }
 
-/// #9752: the installing-table stamp for a miss outcome: arm provenance, not
-/// disposition. A named-instance PBR override stamps its nonzero identity;
-/// Juniper's `default` alias resolves to the main table with identity `(0,0)`,
-/// as do tunnel-egress outcomes (endpoint-pinned, table-free) and precedence /
-/// blocked outcomes (no table consulted). Pure so the matrix is unit-testable;
-/// the poll-level wiring (override → stamp → install) is pinned by a C2
-/// acceptance cell.
+/// #9752/#12056: the installing-table stamp follows the miss arm. A named
+/// PBR override stamps its identity for table lookups and non-tunneled local
+/// delivery; local outcomes without an override, blocked outcomes, and tunnel
+/// outcomes remain `(0,0)`. Tunnel egress remains endpoint-pinned and table-free.
 pub(in crate::afxdp) fn install_table_stamp_for_miss(
     pbr_install_table: Option<(u32, u32)>,
     resolved_in_table: bool,
     resolution: ForwardingResolution,
 ) -> (u32, u32) {
-    if resolved_in_table && resolution.tunnel_endpoint_id == 0 {
+    if resolution.tunnel_endpoint_id != 0 {
+        return (0, 0);
+    }
+    if resolved_in_table || resolution.disposition == ForwardingDisposition::LocalDelivery {
         pbr_install_table.unwrap_or((0, 0))
     } else {
         (0, 0)
