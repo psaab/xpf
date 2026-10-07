@@ -148,6 +148,13 @@ func (c *Config) RethToPhysical() map[string]string {
 					}
 				}
 			}
+			// A known cluster node cannot use a member scored as remote.
+			// Omitting score-0 candidates leaves a remote-only RETH unresolved,
+			// while unknown-slot candidates (score 1) and all single-node
+			// candidates (localNodeID == -1) retain their existing behavior.
+			if localNodeID >= 0 && score == 0 {
+				continue
+			}
 			prev, ok := m[ifc.RedundantParent]
 			if !ok || score > bestScore[ifc.RedundantParent] ||
 				(score == bestScore[ifc.RedundantParent] && ifc.Name < prev) {

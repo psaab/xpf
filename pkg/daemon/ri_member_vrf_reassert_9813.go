@@ -216,6 +216,9 @@ func (d *Daemon) riMembersOutsideTheirVRF(cfg *config.Config) []riMember {
 			continue
 		}
 		instanceNames = append(instanceNames, ri.Name)
+		// Keep the stale-slave desired set on the same resolved device
+		// identities as the apply bind loop. RETH names map to the local
+		// physical netdev here, so its existing VRF membership is preserved.
 		keys := config.RoutingInstanceMemberDeviceKeysForInstance(cfg, tunMap, ri)
 		for _, key := range keys {
 			desiredDevices[key.LinuxName] = struct{}{}
