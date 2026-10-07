@@ -50,6 +50,15 @@ pub(in crate::afxdp) enum RouteOverride {
     Drop,
 }
 
+/// Route result plus whether a routing-instance term supplied it. The tunnel
+/// outer-filter gate retains the PBR result across an ECN construction failure;
+/// a non-PBR native route must instead be resolved again with the ordinary
+/// ingress-zone override.
+pub(in crate::afxdp) struct RouteTableOverrideOutcome {
+    pub(in crate::afxdp) route_override: RouteOverride,
+    pub(in crate::afxdp) pbr_matched: bool,
+}
+
 const FBF_DEFAULT_ROUTING_INSTANCE: &str = "default";
 
 /// Resolve a matched FBF target to its route table and session identity.
@@ -76,6 +85,7 @@ pub(in crate::afxdp) fn pbr_table_target(
     (table, identity)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn ingress_route_table_override(
     forwarding: &ForwardingState,
     frame: &[u8],
@@ -86,6 +96,83 @@ pub(in crate::afxdp) fn ingress_route_table_override(
     now_ns: u64,
     reject_sink: Option<PbrRejectSink<'_>>,
 ) -> RouteOverride {
+    ingress_route_table_override_with_mode(
+        forwarding,
+        frame,
+        meta,
+        flow,
+        ingress_zone_override,
+        event_stream,
+        now_ns,
+        reject_sink,
+        true,
+    )
+    .route_override
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn ingress_route_table_override_with_result(
+    forwarding: &ForwardingState,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    flow: &SessionFlow,
+    ingress_zone_override: Option<u16>,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    now_ns: u64,
+    reject_sink: Option<PbrRejectSink<'_>>,
+) -> RouteTableOverrideOutcome {
+    ingress_route_table_override_with_mode(
+        forwarding,
+        frame,
+        meta,
+        flow,
+        ingress_zone_override,
+        event_stream,
+        now_ns,
+        reject_sink,
+        true,
+    )
+}
+
+/// Re-resolve the route for a previously accepted tunnel outer when the gate
+/// found no matching PBR term. Suppresses routing-filter counts and logs; a
+/// matched PBR override should instead be reused from the gate result.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn ingress_route_table_override_uncounted(
+    forwarding: &ForwardingState,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    flow: &SessionFlow,
+    ingress_zone_override: Option<u16>,
+    now_ns: u64,
+    reject_sink: Option<PbrRejectSink<'_>>,
+) -> RouteOverride {
+    ingress_route_table_override_with_mode(
+        forwarding,
+        frame,
+        meta,
+        flow,
+        ingress_zone_override,
+        None,
+        now_ns,
+        reject_sink,
+        false,
+    )
+    .route_override
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ingress_route_table_override_with_mode(
+    forwarding: &ForwardingState,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    flow: &SessionFlow,
+    ingress_zone_override: Option<u16>,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    now_ns: u64,
+    reject_sink: Option<PbrRejectSink<'_>>,
+    count: bool,
+) -> RouteTableOverrideOutcome {
     let ingress_ifindex = resolve_ingress_logical_ifindex(
         forwarding,
         meta.ingress_ifindex as i32,
@@ -129,7 +216,10 @@ pub(in crate::afxdp) fn ingress_route_table_override(
         ingress_ifindex,
         is_v6,
     ) else {
-        return native_route_table();
+        return RouteTableOverrideOutcome {
+            route_override: native_route_table(),
+            pbr_matched: false,
+        };
     };
     // #2362: PBR terms may carry per-packet L4 match conditions (tcp-flags /
     // is-fragment / icmp-type / icmp-code); build the extra inputs so a
@@ -151,21 +241,37 @@ pub(in crate::afxdp) fn ingress_route_table_override(
     // #10729 X2-F6: a v6 chain sighting AH steers as proto 51 (identity for
     // flow-backed callers: they never sight AH, since AH packets are flowless).
     let eval_protocol = crate::afxdp::frame::flowless_effective_protocol(frame, meta);
-    let routing_result = match crate::filter::evaluate_filter_ref_routing_instance_event_counted(
-        filter,
-        flow.src_ip,
-        flow.dst_ip,
-        eval_protocol,
-        flow.forward_key.src_port,
-        flow.forward_key.dst_port,
-        meta.dscp,
-        extra,
-        meta.pkt_len as u64,
-    ) {
-        Some(result) => result,
+    let routing_result = if count {
+        crate::filter::evaluate_filter_ref_routing_instance_event_counted(
+            filter,
+            flow.src_ip,
+            flow.dst_ip,
+            eval_protocol,
+            flow.forward_key.src_port,
+            flow.forward_key.dst_port,
+            meta.dscp,
+            extra,
+            meta.pkt_len as u64,
+        )
+    } else {
+        crate::filter::evaluate_filter_ref_routing_instance_uncounted(
+            filter,
+            flow.src_ip,
+            flow.dst_ip,
+            eval_protocol,
+            flow.forward_key.src_port,
+            flow.forward_key.dst_port,
+            meta.dscp,
+            extra,
+        )
+    };
+    let Some(routing_result) = routing_result else {
         // #10312: a route-lookup-affecting filter can still have no matching
         // routing-instance term. Native RI membership remains the table scope.
-        None => return native_route_table(),
+        return RouteTableOverrideOutcome {
+            route_override: native_route_table(),
+            pbr_matched: false,
+        };
     };
     // #4392: a matched PBR routing-instance term may ALSO carry a drop action
     // (`then { routing-instance X; reject | discard; }`). Such a term is a DENY,
@@ -234,17 +340,23 @@ pub(in crate::afxdp) fn ingress_route_table_override(
     if is_drop {
         // #4392: reject/discard PBR term — the caller must drop; do NOT apply
         // the routing-instance override or route-lookup/forward.
-        return RouteOverride::Drop;
+        return RouteTableOverrideOutcome {
+            route_override: RouteOverride::Drop,
+            pbr_matched: true,
+        };
     }
     let routing_instance = routing_result.routing_instance;
     // #9752: the identity travels with the string (no reverse-parsing at the
     // stamp site). The shared target builder also maps Juniper's `default`
     // alias to the global table and zero identity.
     let (table, (domain, check)) = pbr_table_target(routing_instance, is_v6);
-    RouteOverride::Table {
-        table,
-        domain,
-        check,
+    RouteTableOverrideOutcome {
+        route_override: RouteOverride::Table {
+            table,
+            domain,
+            check,
+        },
+        pbr_matched: true,
     }
 }
 

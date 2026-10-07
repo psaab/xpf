@@ -657,11 +657,55 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // stage-12+ code at lines below calls `.take()`.
                 // #10597: injected WG plaintext arrives decapped; the
                 // synthetic frame becomes the owned packet directly.
-                let (mut meta, mut owned_packet_frame) = if is_injected {
-                    (meta, Some(raw_frame.to_vec()))
+                // A passing underlay gate already owns this outer packet's
+                // filter side effects. Preserve its acceptance and PBR result
+                // only if decap construction falls back to the raw outer frame.
+                let mut tunnel_outer_filter_accepted = false;
+                let mut tunnel_outer_pbr_route_override = None;
+                let (mut meta, mut owned_packet_frame, outer_input_filter_drop) = if is_injected {
+                    (meta, Some(raw_frame.to_vec()), false)
                 } else {
-                    stage_native_gre_decap(raw_frame, meta, worker_ctx.forwarding)
+                    let (new_meta, owned_frame, filtered) = {
+                        let mut input_filter_allows =
+                            |outer_frame: &[u8], outer_meta: UserspaceDpMeta| {
+                                match filter::enforce_tunnel_outer_input_filter(
+                                    &mut binding.tx_pipeline,
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    binding.ifindex,
+                                    outer_frame,
+                                    outer_meta,
+                                    telemetry.counters,
+                                    now_ns,
+                                ) {
+                                    filter::TunnelOuterInputFilterOutcome::NotEvaluated => true,
+                                    filter::TunnelOuterInputFilterOutcome::Rejected => false,
+                                    filter::TunnelOuterInputFilterOutcome::Accepted(
+                                        route_outcome,
+                                    ) => {
+                                        tunnel_outer_filter_accepted = true;
+                                        if route_outcome.pbr_matched {
+                                            tunnel_outer_pbr_route_override =
+                                                Some(route_outcome.route_override);
+                                        }
+                                        true
+                                    }
+                                }
+                            };
+                        stage_native_gre_decap(
+                            raw_frame,
+                            meta,
+                            worker_ctx.forwarding,
+                            &mut input_filter_allows,
+                        )
+                    };
+                    (new_meta, owned_frame, filtered)
                 };
+                if outer_input_filter_drop {
+                    telemetry.counters.touched = true;
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
                 // #8274 step 3 — stage 6b: WireGuard transport-data decap.
                 //
                 // Runs only when GRE did not already claim the frame: a packet
@@ -676,12 +720,57 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // zone instead of being written to the wgN TUN for the kernel
                 // to forward with no zone policy at all.
                 if !is_injected && owned_packet_frame.is_none() {
-                    let (wg_meta, wg_frame) =
-                        stage_wg_decap(raw_frame, meta, worker_ctx.forwarding, &binding.wg_scratch);
+                    let (wg_meta, wg_frame, wg_filter_drop) = {
+                        let mut input_filter_allows =
+                            |outer_frame: &[u8], outer_meta: UserspaceDpMeta| {
+                                match filter::enforce_tunnel_outer_input_filter(
+                                    &mut binding.tx_pipeline,
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    binding.ifindex,
+                                    outer_frame,
+                                    outer_meta,
+                                    telemetry.counters,
+                                    now_ns,
+                                ) {
+                                    filter::TunnelOuterInputFilterOutcome::NotEvaluated => true,
+                                    filter::TunnelOuterInputFilterOutcome::Rejected => false,
+                                    filter::TunnelOuterInputFilterOutcome::Accepted(
+                                        route_outcome,
+                                    ) => {
+                                        tunnel_outer_filter_accepted = true;
+                                        if route_outcome.pbr_matched {
+                                            tunnel_outer_pbr_route_override =
+                                                Some(route_outcome.route_override);
+                                        }
+                                        true
+                                    }
+                                }
+                            };
+                        stage_wg_decap(
+                            raw_frame,
+                            meta,
+                            worker_ctx.forwarding,
+                            &binding.wg_scratch,
+                            &mut input_filter_allows,
+                        )
+                    };
+                    if wg_filter_drop {
+                        telemetry.counters.touched = true;
+                        binding.scratch.scratch_recycle.push(desc.addr);
+                        continue;
+                    }
                     if wg_frame.is_some() {
                         meta = wg_meta;
                         owned_packet_frame = wg_frame;
                     }
+                }
+                if owned_packet_frame.is_some() {
+                    // The underlay gate applies to the outer packet only; a
+                    // successful decap continues with the inner packet's own
+                    // filter and route decision.
+                    tunnel_outer_filter_accepted = false;
+                    tunnel_outer_pbr_route_override = None;
                 }
                 let packet_frame = owned_packet_frame.as_deref().unwrap_or(raw_frame);
                 // #10686: mapped/compatible native frames were checked before
@@ -3163,14 +3252,24 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // precheck then counts only on the terminal
                         // discard/reject exit (the routing evaluator owns the
                         // Accept/defer exit count).
-                        let input_filter_eval = evaluate_non_pbr_input_filter(
-                            worker_ctx.forwarding,
-                            crate::afxdp::frame::term_match_extra_from_frame(packet_frame, meta),
-                            Some(flow),
-                            meta,
-                            ingress_zone_override,
-                            true,
-                        );
+                        let input_filter_eval = if tunnel_outer_filter_accepted {
+                            NonPbrInputFilterEval {
+                                action: crate::filter::FilterAction::Accept,
+                                cached_log: None,
+                            }
+                        } else {
+                            evaluate_non_pbr_input_filter(
+                                worker_ctx.forwarding,
+                                crate::afxdp::frame::term_match_extra_from_frame(
+                                    packet_frame,
+                                    meta,
+                                ),
+                                Some(flow),
+                                meta,
+                                ingress_zone_override,
+                                true,
+                            )
+                        };
                         // #2617: emit the matched input-filter `then log` event
                         // on THIS (session-miss / first) packet, regardless of
                         // the term's terminal action. Previously the emit fired
@@ -3247,20 +3346,38 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // RST/ICMP reply (byte-identical to a non-PBR
                         // `then reject`); on `RouteOverride::Drop` recycle the
                         // frame and skip the route-lookup/forward entirely.
-                        let route_override = ingress_route_table_override(
-                            worker_ctx.forwarding,
-                            packet_frame,
-                            meta,
-                            flow,
-                            ingress_zone_override,
-                            worker_ctx.event_stream,
-                            now_ns,
-                            Some(PbrRejectSink {
-                                tx_pipeline: &mut binding.tx_pipeline,
-                                ingress_ifindex: binding.ifindex,
-                                counters: &mut *telemetry.counters,
-                            }),
-                        );
+                        let route_override = match tunnel_outer_pbr_route_override.take() {
+                            Some(route_override) => route_override,
+                            None if tunnel_outer_filter_accepted => {
+                                crate::afxdp::forwarding::ingress_route_table_override_uncounted(
+                                    worker_ctx.forwarding,
+                                    packet_frame,
+                                    meta,
+                                    flow,
+                                    ingress_zone_override,
+                                    now_ns,
+                                    Some(PbrRejectSink {
+                                        tx_pipeline: &mut binding.tx_pipeline,
+                                        ingress_ifindex: binding.ifindex,
+                                        counters: &mut *telemetry.counters,
+                                    }),
+                                )
+                            }
+                            None => ingress_route_table_override(
+                                worker_ctx.forwarding,
+                                packet_frame,
+                                meta,
+                                flow,
+                                ingress_zone_override,
+                                worker_ctx.event_stream,
+                                now_ns,
+                                Some(PbrRejectSink {
+                                    tx_pipeline: &mut binding.tx_pipeline,
+                                    ingress_ifindex: binding.ifindex,
+                                    counters: &mut *telemetry.counters,
+                                }),
+                            ),
+                        };
                         let (route_table_override, pbr_install_table) = match route_override {
                             RouteOverride::Drop => {
                                 // #11061: count ambiguous-quarantine drops (Unresolvable-sourced
@@ -5835,29 +5952,30 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // construction (#3291) — mark them unknown so
                         // port-constrained terms fail closed instead of
                         // matching the synthetic value.
-                        let mut extra =
-                            crate::afxdp::frame::term_match_extra_from_frame(packet_frame, meta);
-                        extra.ports_unknown = true;
-                        let input_eval = evaluate_non_pbr_input_filter(
-                            worker_ctx.forwarding,
-                            extra,
-                            Some(l3_flow),
-                            meta,
-                            ingress_zone_override,
-                            // #2620 counter ownership. #6835: `true`, because a
-                            // routing evaluator DOES follow on this arm now —
-                            // `ingress_route_table_override` runs below. Before
-                            // #6835 nothing followed, so `false` (`Always`) was
-                            // correct and `true` would have deferred this
-                            // fragment's `then count` terms to an evaluator that
-                            // never ran. Now the reverse is true: `false` would
-                            // count every matched term TWICE (once here under
-                            // `Always`, once in the routing walk, which counts
-                            // every matched term unconditionally). This is the
-                            // same value, for the same reason, as the miss arm
-                            // below.
-                            true,
-                        );
+                        let input_eval = if tunnel_outer_filter_accepted {
+                            // The gate already performed the counted and logged
+                            // underlay evaluation; do not replay its effects.
+                            NonPbrInputFilterEval {
+                                action: crate::filter::FilterAction::Accept,
+                                cached_log: None,
+                            }
+                        } else {
+                            let mut extra = crate::afxdp::frame::term_match_extra_from_frame(
+                                packet_frame,
+                                meta,
+                            );
+                            extra.ports_unknown = true;
+                            evaluate_non_pbr_input_filter(
+                                worker_ctx.forwarding,
+                                extra,
+                                Some(l3_flow),
+                                meta,
+                                ingress_zone_override,
+                                // #2620 counter ownership: the routing evaluator
+                                // below owns the Accept/defer exit count.
+                                true,
+                            )
+                        };
                         if let Some(cached_log) = input_eval.cached_log {
                             emit_input_filter_log_match(
                                 worker_ctx.forwarding,
@@ -5896,16 +6014,31 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // sink-less flowless contract: a non-first fragment has
                         // no L4 header to reflect, so `reject` degrades to the
                         // same silent drop as `discard`.
-                        match ingress_route_table_override(
-                            worker_ctx.forwarding,
-                            packet_frame,
-                            meta,
-                            l3_flow,
-                            ingress_zone_override,
-                            worker_ctx.event_stream,
-                            now_ns,
-                            None,
-                        ) {
+                        let route_override = match tunnel_outer_pbr_route_override.take() {
+                            Some(route_override) => route_override,
+                            None if tunnel_outer_filter_accepted => {
+                                crate::afxdp::forwarding::ingress_route_table_override_uncounted(
+                                    worker_ctx.forwarding,
+                                    packet_frame,
+                                    meta,
+                                    l3_flow,
+                                    ingress_zone_override,
+                                    now_ns,
+                                    None,
+                                )
+                            }
+                            None => ingress_route_table_override(
+                                worker_ctx.forwarding,
+                                packet_frame,
+                                meta,
+                                l3_flow,
+                                ingress_zone_override,
+                                worker_ctx.event_stream,
+                                now_ns,
+                                None,
+                            ),
+                        };
+                        match route_override {
                             RouteOverride::Drop => {
                                 // #11061: count ambiguous-quarantine drops.
                                 // The flowless l3_flow is never 9b-stamped
@@ -6009,17 +6142,26 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // construction (#3291) — mark them unknown so
                         // port-constrained terms fail closed instead of
                         // matching the synthetic value.
-                        let mut extra =
-                            crate::afxdp::frame::term_match_extra_from_frame(packet_frame, meta);
-                        extra.ports_unknown = true;
-                        let input_eval = evaluate_non_pbr_input_filter(
-                            worker_ctx.forwarding,
-                            extra,
-                            Some(l3_flow),
-                            meta,
-                            ingress_zone_override,
-                            true,
-                        );
+                        let input_eval = if tunnel_outer_filter_accepted {
+                            NonPbrInputFilterEval {
+                                action: crate::filter::FilterAction::Accept,
+                                cached_log: None,
+                            }
+                        } else {
+                            let mut extra = crate::afxdp::frame::term_match_extra_from_frame(
+                                packet_frame,
+                                meta,
+                            );
+                            extra.ports_unknown = true;
+                            evaluate_non_pbr_input_filter(
+                                worker_ctx.forwarding,
+                                extra,
+                                Some(l3_flow),
+                                meta,
+                                ingress_zone_override,
+                                true,
+                            )
+                        };
                         if let Some(cached_log) = input_eval.cached_log {
                             emit_input_filter_log_match(
                                 worker_ctx.forwarding,
@@ -6072,10 +6214,22 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         .as_ref()
                         .map(|l3_flow| l3_flow.forward_key.routing_domain)
                         .unwrap_or(0);
-                    let (route_table_override, pbr_install_table) = match l3_ctx
+                    let miss_route_override = l3_ctx
                         .as_ref()
-                        .map(|l3_flow| {
-                            ingress_route_table_override(
+                        .map(|l3_flow| match tunnel_outer_pbr_route_override.take() {
+                            Some(route_override) => route_override,
+                            None if tunnel_outer_filter_accepted => {
+                                crate::afxdp::forwarding::ingress_route_table_override_uncounted(
+                                    worker_ctx.forwarding,
+                                    packet_frame,
+                                    meta,
+                                    l3_flow,
+                                    ingress_zone_override,
+                                    now_ns,
+                                    None,
+                                )
+                            }
+                            None => ingress_route_table_override(
                                 worker_ctx.forwarding,
                                 packet_frame,
                                 meta,
@@ -6084,10 +6238,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 worker_ctx.event_stream,
                                 now_ns,
                                 None,
-                            )
+                            ),
                         })
-                        .unwrap_or(RouteOverride::None)
-                    {
+                        .unwrap_or(RouteOverride::None);
+                    let (route_table_override, pbr_install_table) = match miss_route_override {
                         RouteOverride::Drop => {
                             // #11061: count ambiguous-quarantine drops (same
                             // effective-domain rule as the sibling arms).

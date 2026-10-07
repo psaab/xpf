@@ -1655,6 +1655,46 @@ pub(super) fn txn_run_descriptor_inner_with_slow_path(
             fib_generation: 9,
         },
         None,
+        None,
+    )
+}
+
+/// Descriptor driver with a caller-provided event stream, for poll-loop
+/// regressions that pin one emission of an input-filter `then log`.
+pub(super) fn txn_run_descriptor_with_event_stream(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    local_tunnel_deliveries: &Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
+    event_stream: &crate::event_stream::EventStreamWorkerHandle,
+) -> (BatchCounters, DebugPollCounters) {
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    txn_run_descriptor_inner_with_slow_path_impl(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        local_tunnel_deliveries,
+        &shared_sessions,
+        None,
+        None,
+        None,
+        None,
+        None,
+        123_000_000_000,
+        123,
+        ValidationState {
+            snapshot_installed: true,
+            config_generation: 7,
+            fib_generation: 9,
+        },
+        None,
+        Some(event_stream),
     )
 }
 
@@ -1691,6 +1731,7 @@ pub(super) fn txn_run_descriptor_with_shared_nat(
             config_generation: 7,
             fib_generation: 9,
         },
+        None,
         None,
     )
 }
@@ -1736,6 +1777,7 @@ pub(super) fn txn_run_descriptor_at(
             fib_generation: 9,
         },
         None,
+        None,
     )
 }
 
@@ -1770,6 +1812,7 @@ pub(super) fn txn_run_descriptor_with_validation(
         123_000_000_000,
         123,
         validation,
+        None,
         None,
     )
 }
@@ -1809,6 +1852,7 @@ pub(super) fn txn_run_descriptor_with_screen_state(
             fib_generation: 9,
         },
         Some(screen),
+        None,
     )
 }
 
@@ -1847,6 +1891,7 @@ pub(super) fn txn_run_descriptor_inner_with_slow_path_and_ike(
             fib_generation: 9,
         },
         None,
+        None,
     )
 }
 
@@ -1868,6 +1913,7 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
     now_secs: u64,
     validation: ValidationState,
     screen_state: Option<&mut ScreenState>,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
 ) -> (BatchCounters, DebugPollCounters) {
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
@@ -1928,7 +1974,7 @@ fn txn_run_descriptor_inner_with_slow_path_impl(
         shared_owner_rg_indexes,
         ike_exchanges: &ike_exchanges,
         slow_path,
-        event_stream: None,
+        event_stream,
         local_tunnel_deliveries,
         recent_exceptions: &recent_exceptions,
         last_resolution: &last_resolution,

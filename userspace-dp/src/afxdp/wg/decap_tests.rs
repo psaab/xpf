@@ -20,6 +20,7 @@
 use super::super::test_fixtures::wg_outer_mtu_snapshot;
 use super::super::tests_support::{
     txn_ha_state, txn_run_descriptor, txn_run_descriptor_checked, txn_run_descriptor_inner,
+    txn_run_descriptor_with_event_stream,
 };
 use super::super::*;
 use super::tests::established_pair;
@@ -791,6 +792,324 @@ fn poll_loop_denies_wg_inner_plaintext_with_no_permitting_policy_8274() {
          session. A session here means the decap stage is presenting plaintext \
          that policy never adjudicated — the pre-#8274 posture wearing the new \
          code path's shape"
+    );
+}
+
+/// Build a live WireGuard fixture with an input filter on its physical
+/// underlay. The same authenticated type-4 record exercises the actual poll
+/// loop for both the deny and permit outcomes.
+fn wiring_fixture_with_outer_input_filter(action: &str) -> (ForwardingState, WgEngine, [u8; 32]) {
+    wiring_fixture_with_outer_input_filter_and_log(action, false, false, false)
+}
+
+fn wiring_fixture_with_outer_input_filter_and_log(
+    action: &str,
+    log: bool,
+    policer: bool,
+    pbr: bool,
+) -> (ForwardingState, WgEngine, [u8; 32]) {
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, _ipub, rpub) = established_pair(allowed.clone(), allowed);
+    let mut snapshot = wg_outer_mtu_snapshot();
+    snapshot.policies = vec![crate::PolicyRuleSnapshot {
+        name: "permit-inner".to_string(),
+        from_zone: "sfmix".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        application_terms: Vec::new(),
+        action: "permit".to_string(),
+        ..Default::default()
+    }];
+    snapshot.filters = vec![crate::FirewallFilterSnapshot {
+        name: "underlay-in".to_string(),
+        family: "inet".to_string(),
+        terms: vec![
+            crate::FirewallTermSnapshot {
+                name: "wg-listener".to_string(),
+                protocols: vec!["udp".to_string()],
+                destination_ports: vec![WG_PORT.to_string()],
+                count: "c-wg".to_string(),
+                log,
+                routing_instance: if pbr {
+                    "default".to_string()
+                } else {
+                    String::new()
+                },
+                policer: if policer {
+                    "p-wg".to_string()
+                } else {
+                    String::new()
+                },
+                action: action.to_string(),
+                ..Default::default()
+            },
+            crate::FirewallTermSnapshot {
+                name: "default-accept".to_string(),
+                action: "accept".to_string(),
+                ..Default::default()
+            },
+        ],
+    }];
+    snapshot.three_color_policers = if policer {
+        vec![crate::ThreeColorPolicerSnapshot {
+            name: "p-wg".to_string(),
+            mode: "single-rate".to_string(),
+            color_blind: true,
+            committed_rate_bytes_per_sec: 1,
+            committed_burst_bytes: 10_000,
+            peak_or_excess_burst_bytes: 5_000,
+            then_action: "discard".to_string(),
+            ..Default::default()
+        }]
+    } else {
+        Vec::new()
+    };
+    snapshot
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.ifindex == 12)
+        .expect("WireGuard underlay ingress must exist")
+        .filter_input_v4 = "underlay-in".to_string();
+    let mut forwarding = build_forwarding_state(&snapshot);
+    let id = *forwarding.wg_engines.keys().next().expect("WG tunnel");
+    forwarding.wg_engines.insert(id, std::sync::Arc::new(resp));
+    (forwarding, init, rpub)
+}
+
+/// #12041 RED-before: an underlay `protocol udp destination-port 51820`
+/// discard must count/drop the authenticated WG outer before decap, installing
+/// no inner-flow session.
+#[test]
+fn poll_loop_wg_outer_input_filter_discard_counts_and_drops_pre_decap_12041() {
+    let (forwarding, init, rpub) = wiring_fixture_with_outer_input_filter("discard");
+    let frame = wiring_record(&init, &rpub);
+    let meta = wiring_meta(frame.len());
+    let counter = forwarding
+        .filter_state
+        .iface_filter_v4_fast
+        .get(&12)
+        .expect("underlay input filter must be attached")
+        .terms[0]
+        .counter
+        .clone();
+    assert_eq!(
+        counter.packets.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "precondition: the outer counter starts at zero"
+    );
+
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+
+    assert_eq!(
+        counter.packets.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "#12041: the underlay input filter's count term must see the WG outer"
+    );
+    let mut tunnel_sessions = 0usize;
+    sessions.iter_with_origin(|_, _, metadata, _| {
+        if metadata.ingress_ifindex == TUNNEL_LOGICAL_IFINDEX as u32 {
+            tunnel_sessions += 1;
+        }
+    });
+    assert_eq!(
+        tunnel_sessions, 0,
+        "#12041: a filter-discarded WG outer must install no inner session"
+    );
+}
+
+/// #12041 permit guard: accepting a WG outer at the underlay filter must still
+/// authenticate, decapsulate and install the inner session.
+#[test]
+fn poll_loop_wg_outer_input_filter_permit_still_decaps_12041() {
+    let (forwarding, init, rpub) = wiring_fixture_with_outer_input_filter("accept");
+    let frame = wiring_record(&init, &rpub);
+    let meta = wiring_meta(frame.len());
+    let counter = forwarding
+        .filter_state
+        .iface_filter_v4_fast
+        .get(&12)
+        .expect("underlay input filter must be attached")
+        .terms[0]
+        .counter
+        .clone();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+
+    assert_eq!(
+        counter.packets.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "#12041: permitted WG outers must still be evaluated and counted"
+    );
+    let mut tunnel_sessions = 0usize;
+    sessions.iter_with_origin(|_, _, metadata, _| {
+        if metadata.ingress_ifindex == TUNNEL_LOGICAL_IFINDEX as u32 {
+            tunnel_sessions += 1;
+        }
+    });
+    assert!(
+        tunnel_sessions > 0,
+        "#12041: a filter-permitted WG outer must still decap and install its inner flow"
+    );
+}
+
+/// #12289 Finding 1: RFC 6040 rejects an outer-CE over Not-ECT inner after the
+/// WG gate accepts the underlay filter. The filter's PBR term and policer run
+/// at the gate; the still-outer UDP frame then falls through to the ordinary
+/// session-miss path. Pin one count/log/policer charge and the existing local
+/// fallback outcome without changing it.
+#[test]
+fn poll_loop_wg_outer_ce_over_not_ect_counts_underlay_once_12289() {
+    let (forwarding, init, rpub) =
+        wiring_fixture_with_outer_input_filter_and_log("accept", true, true, true);
+    let mut frame = wiring_record(&init, &rpub);
+    let meta = wiring_meta(frame.len());
+    // `wiring_record` seals `inner_v4`, whose TOS starts at Not-ECT.
+    assert_eq!(
+        inner_v4([10, 123, 0, 5], [203, 0, 113, 50])[1] & 0x03,
+        0,
+        "precondition: the WG inner packet is Not-ECT"
+    );
+    // The outer IPv4 TOS byte is at Ethernet offset 14 + 1. Repair the IPv4
+    // header checksum after stamping outer CE.
+    let l3 = meta.l3_offset as usize;
+    frame[l3 + 1] = (frame[l3 + 1] & 0xfc) | 0x03;
+    frame[l3 + 10] = 0;
+    frame[l3 + 11] = 0;
+    let ip_sum = crate::afxdp::frame::checksum::checksum16(&frame[l3..l3 + 20]);
+    frame[l3 + 10..l3 + 12].copy_from_slice(&ip_sum.to_be_bytes());
+    assert_eq!(
+        crate::afxdp::frame::checksum::checksum16(&frame[l3..l3 + 20]),
+        0,
+        "outer checksum must be valid"
+    );
+    let counter = forwarding
+        .filter_state
+        .iface_filter_v4_fast
+        .get(&12)
+        .expect("underlay input filter must be attached")
+        .terms[0]
+        .counter
+        .clone();
+    assert_eq!(
+        counter.packets.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "precondition: the outer counter starts at zero"
+    );
+    let ecn_before =
+        crate::afxdp::gre::WG_DECAP_ECN_ILLEGAL_DROPS.load(std::sync::atomic::Ordering::Relaxed);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
+        8,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+        },
+    );
+    let (batch, dbg) = txn_run_descriptor_with_event_stream(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+        &event_handle,
+    );
+    let events = event_rx
+        .try_iter()
+        .map(|frame| {
+            frame
+                .decode_dataplane_event()
+                .expect("filter-log event payload")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        counter.packets.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "#12289: the gate-accepted outer must be counted exactly once, not re-counted by the fallback replay"
+    );
+    let policer_status = forwarding
+        .filter_state
+        .three_color_policer_statuses()
+        .into_iter()
+        .find(|status| status.name == "p-wg")
+        .expect("the underlay policer must expose runtime status");
+    assert_eq!(
+        policer_status.green_packets, 1,
+        "#12289: the accepted underlay packet must charge its policer once"
+    );
+    assert!(
+        crate::afxdp::gre::WG_DECAP_ECN_ILLEGAL_DROPS.load(std::sync::atomic::Ordering::Relaxed)
+            >= ecn_before + 1,
+        "the illegal outer-CE/Not-ECT combination must advance the WG ECN-illegal counter"
+    );
+    let mut tunnel_sessions = 0usize;
+    sessions.iter_with_origin(|_, _, metadata, _| {
+        if metadata.ingress_ifindex == TUNNEL_LOGICAL_IFINDEX as u32 {
+            tunnel_sessions += 1;
+        }
+    });
+    assert_eq!(
+        tunnel_sessions, 0,
+        "#12289: a construction-failed inner must not install a tunnel session"
+    );
+    let filter_log_events = events
+        .iter()
+        .filter(|event| event.kind == crate::event_stream::codec::DataplaneEventKind::FilterLog)
+        .count();
+    assert_eq!(
+        filter_log_events, 1,
+        "#12289: the underlay `then log` must emit exactly once"
+    );
+    assert_eq!(
+        dbg.forward, 0,
+        "fallback pin: the outer frame must not forward"
+    );
+    assert_eq!(
+        dbg.local, 1,
+        "fallback pin: the outer frame takes LocalDelivery"
+    );
+    assert_eq!(dbg.no_route, 0, "fallback pin: no route miss is reported");
+    assert_eq!(
+        dbg.missing_neigh, 0,
+        "fallback pin: no neighbor miss is reported"
+    );
+    assert_eq!(
+        dbg.policy_deny, 0,
+        "fallback pin: no policy denial is reported"
+    );
+    assert_eq!(
+        batch.validated_packets, 1,
+        "fallback pin: the descriptor must still validate exactly once"
     );
 }
 
