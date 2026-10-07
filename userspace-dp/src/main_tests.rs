@@ -5615,11 +5615,11 @@ fn shim_ingress_test_precedes_the_l3_parse_8279() {
     let src = std::fs::read_to_string(&lib).expect("read shim lib.rs");
 
     // Scope to `try_xdp_userspace`'s body. `degraded_ctrl_disabled_action` has
-    // a BYTE-IDENTICAL parse arm, and it deliberately never consults the
-    // ingress map: with `ctrl.enabled == 0` the shim must fail closed on EVERY
-    // attached interface, adjudicated or not (#5485 relies on exactly that).
-    // Applying this ordering rule there would invert that posture, so the slice
-    // is the point, not an implementation convenience.
+    // a BYTE-IDENTICAL parse arm, then reads ingress metadata only for the
+    // #12055 tagged-only local-delivery guard; it does not use the adjudicated
+    // bit as the active path's ingress gate. Transit still fails closed for
+    // every attached interface in that path (#5485). Keep this ordering rule
+    // scoped to the active gate, not the implementation convenience.
     let start = src
         .find("\nfn try_xdp_userspace(")
         .expect("#8279: `fn try_xdp_userspace(` not found -- the slice below would be empty");
@@ -5658,10 +5658,14 @@ fn shim_ingress_test_precedes_the_l3_parse_8279() {
         hits[0]
     }
 
+    // #12055: the gate's lookup moved into the shared `userspace_ingress_metadata`
+    // helper, so the needle follows the CALL the armed path makes rather than the
+    // inline `USERSPACE_INGRESS_IFACES.get` that now lives only in the helper's
+    // body (outside this slice). The ordering assertions below are unchanged.
     let gate = only_index(
         &toks,
-        &["USERSPACE_INGRESS_IFACES", ".", "get", "(", "&", "ingress_ifindex", ")"],
-        "userspace-ingress map lookup",
+        &["userspace_ingress_metadata", "(", "ctx", ")"],
+        "userspace-ingress metadata lookup",
     );
     let parse_v4 = only_index(
         &toks,
