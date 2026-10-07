@@ -105,11 +105,18 @@ func (c *Config) ClusterStableIfaceName(local string, vlan uint16) string {
 	// would silently degrade to the zone approximation — the exact outcome this
 	// change exists to remove, with no error anywhere.
 	stable := owner
+	matches := 0
 	for reth, member := range c.RethToPhysical() {
 		if LinuxIfName(member) == LinuxIfName(owner) {
+			matches++
 			stable = reth
-			break
 		}
+	}
+	if matches > 1 {
+		// Distinct RETH owners matching one Linux device are ambiguous. A
+		// zero fold lets cluster sync use its zone approximation rather than
+		// selecting an arbitrary map entry and naming the wrong peer device.
+		return ""
 	}
 	switch kind {
 	case stableIfaceChildDevice:
