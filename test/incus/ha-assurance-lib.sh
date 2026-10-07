@@ -704,12 +704,18 @@ ha_rg_standby_status_verdict() {
 }
 
 ha_sample_window_max() {
-	if (( $# < 14 )); then
-		printf 'sample maximum: expected <slice> <rg> <node> <label> and ten statistics files\n' >&2
+	if (( $# < 15 )); then
+		printf 'sample maximum: expected <slice> <rg> <node> <label>, ten statistics files, and <phase-pre baseline>\n' >&2
 		return 2
 	fi
-	local slice="$1" rg="$2" node="$3" label="$4" index phase path value maximum="" previous=""
+	local slice="$1" rg="$2" node="$3" label="$4" index phase path value maximum="" baseline previous
 	local -a args=("$@")
+	baseline="${args[14]}"
+	if [[ ! "$baseline" =~ ^[0-9]+$ ]]; then
+		printf 'sample maximum: baseline is not an unsigned counter\n' >&2
+		return 2
+	fi
+	previous="$baseline"
 	for ((index = 0; index < 10; index++)); do
 		phase=$(printf 'sample-%02d' "$((index + 1))")
 		path="${args[index + 4]}"
@@ -719,7 +725,7 @@ ha_sample_window_max() {
 			printf 'sample maximum: %s is not an unsigned counter in %s\n' "$label" "$path" >&2
 			return 2
 		fi
-		if [[ -n "$previous" ]] && (( value < previous )); then
+		if (( value < previous )); then
 			printf 'sample maximum: %s counter rewound from %s to %s at %s\n' "$label" "$previous" "$value" "$phase" >&2
 			return 2
 		fi
@@ -730,13 +736,19 @@ ha_sample_window_max() {
 }
 
 ha_sample_window_interface_max() {
-	if (( $# < 15 )); then
-		printf 'sample interface maximum: expected <slice> <rg> <node> <regex> <direction> and ten interface files\n' >&2
+	if (( $# < 16 )); then
+		printf 'sample interface maximum: expected <slice> <rg> <node> <regex> <direction>, ten interface files, and <phase-pre baseline>\n' >&2
 		return 2
 	fi
 	local slice="$1" rg="$2" node="$3" regex="$4" direction="$5"
-	local index phase path value maximum="" previous=""
+	local index phase path value maximum="" baseline previous
 	local -a args=("$@")
+	baseline="${args[15]}"
+	if [[ ! "$baseline" =~ ^[0-9]+$ ]]; then
+		printf 'sample interface maximum: baseline is not an unsigned counter\n' >&2
+		return 2
+	fi
+	previous="$baseline"
 	for ((index = 0; index < 10; index++)); do
 		phase=$(printf 'sample-%02d' "$((index + 1))")
 		path="${args[index + 5]}"
@@ -746,7 +758,7 @@ ha_sample_window_interface_max() {
 			printf 'sample interface maximum: malformed counter in %s\n' "$path" >&2
 			return 2
 		fi
-		if [[ -n "$previous" ]] && (( value < previous )); then
+		if (( value < previous )); then
 			printf 'sample interface maximum: counter rewound from %s to %s at %s\n' "$previous" "$value" "$phase" >&2
 			return 2
 		fi
@@ -755,6 +767,7 @@ ha_sample_window_interface_max() {
 	done
 	printf '%s\n' "$maximum"
 }
+
 
 ha_standby_status_verdict() {
 	if [[ $# -ne 2 ]]; then

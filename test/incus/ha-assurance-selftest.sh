@@ -19,6 +19,29 @@ export ARTIFACT_DIR BPFRX_CLUSTER_ENV HA_ASSURANCE_SOURCE_ONLY
 # shellcheck disable=SC1091
 source "${ROOT}/scripts/userspace-ha-failover-validation.sh"
 unset HA_ASSURANCE_SOURCE_ONLY
+SAMPLED_WRAPPERS="${TMP_DIR}/sampled-wrappers.sh"
+python3 - "${ROOT}/test/incus/test-failover.sh" "$SAMPLED_WRAPPERS" <<'PY'
+import pathlib
+import re
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+blocks = []
+for name in (
+    "ha_rg1_sampled_counter_delta",
+    "ha_rg1_sampled_interface_delta",
+    "ha_rg1_report_sample_max",
+):
+    match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", text, re.M | re.S)
+    if not match:
+        raise SystemExit(f"cannot extract {name} for phase-pre rewind coverage")
+    blocks.append(match.group(0))
+pathlib.Path(sys.argv[2]).write_text("".join(blocks), encoding="utf-8")
+PY
+# Execute the actual consumers without sourcing test-failover.sh's destructive
+# cluster runtime.
+source "$SAMPLED_WRAPPERS"
+
 LOCAL_IPERF_METRICS="${TMP_DIR}/metrics.json"
 
 IPERF_DURATION=60
@@ -702,6 +725,68 @@ for path_case in '1000 0 32 32' '1000 1 31 32' '1000 1 32 31'; do
 	assert_helper_status 1 ha_transition_path_verdict "$lan" "$fabric" "$rx" "$tx" 1000 1 32 32
 done
 
+rewind_failures=()
+PRE_FIRST_REWIND_SHAPE_ONE=(50 110 150 200 250 300 350 450 500 600)
+PRE_FIRST_REWIND_SHAPE_TWO=(50 600 600 600 600 600 600 600 600 600)
+for rewind_case in shape-one shape-two; do
+	case "$rewind_case" in
+	shape-one)
+		rewind_baseline=100
+		rewind_expected='rewound from 100 to 50 at sample-01'
+		rewind_values=("${PRE_FIRST_REWIND_SHAPE_ONE[@]}")
+		;;
+	shape-two)
+		rewind_baseline=500
+		rewind_expected='rewound from 500 to 50 at sample-01'
+		rewind_values=("${PRE_FIRST_REWIND_SHAPE_TWO[@]}")
+		;;
+	esac
+	rewind_pre_stats="${RG1_DIR}/${rewind_case}-phase-pre.stats"
+	rewind_pre_interfaces="${RG1_DIR}/${rewind_case}-phase-pre.interfaces"
+	write_ha_status_snapshot "$rewind_pre_stats" phase-pre node0 1 0 0 0 0 \
+		"$rewind_baseline" "$rewind_baseline" "$rewind_baseline" "$rewind_baseline"
+	write_ha_interface_snapshot "$rewind_pre_interfaces" phase-pre node0 1 ge-0-0-1 \
+		"$rewind_baseline" "$rewind_baseline"
+	rewind_stats=()
+	rewind_interfaces=()
+	for rewind_index in "${!rewind_values[@]}"; do
+		rewind_sample=$(printf 'sample-%02d' "$((rewind_index + 1))")
+		rewind_stats_path="${RG1_DIR}/${rewind_case}-${rewind_sample}-node0.stats"
+		rewind_interfaces_path="${RG1_DIR}/${rewind_case}-${rewind_sample}-node0.interfaces"
+		rewind_value="${rewind_values[$rewind_index]}"
+		write_ha_status_snapshot "$rewind_stats_path" "$rewind_sample" node0 1 0 0 0 0 \
+			"$rewind_value" "$rewind_value" "$rewind_value" "$rewind_value"
+		write_ha_interface_snapshot "$rewind_interfaces_path" "$rewind_sample" node0 1 ge-0-0-1 \
+			"$rewind_value" "$rewind_value"
+		rewind_stats+=("$rewind_stats_path")
+		rewind_interfaces+=("$rewind_interfaces_path")
+	done
+	if ha_rg1_sampled_counter_delta node0 'Kernel RX dropped' "$rewind_pre_stats" \
+		"${rewind_stats[@]}" >"${OUT}" 2>"${ERR}"; then
+		rewind_status=0
+	else
+		rewind_status=$?
+	fi
+	if [[ "$rewind_status" != 2 ]]; then
+		rewind_failures+=("${rewind_case} counter expected rc=2, got rc=${rewind_status}, delta=$(<"${OUT}")")
+	elif [[ "$(<"${ERR}")" != *"$rewind_expected"* ]]; then
+		rewind_failures+=("${rewind_case} counter rc=2 without expected rewind evidence: $(<"${ERR}")")
+	fi
+	if ha_rg1_sampled_interface_delta node0 'ge-[0-9]+-0-1' rx "$rewind_pre_interfaces" \
+		"${rewind_interfaces[@]}" >"${OUT}" 2>"${ERR}"; then
+		rewind_status=0
+	else
+		rewind_status=$?
+	fi
+	if [[ "$rewind_status" != 2 ]]; then
+		rewind_failures+=("${rewind_case} interface expected rc=2, got rc=${rewind_status}, delta=$(<"${OUT}")")
+	elif [[ "$(<"${ERR}")" != *"$rewind_expected"* ]]; then
+		rewind_failures+=("${rewind_case} interface rc=2 without expected rewind evidence: $(<"${ERR}")")
+	fi
+done
+if (( ${#rewind_failures[@]} != 0 )); then
+	fail_test "${rewind_failures[*]}"
+fi
 printf 'Groups 7-8 RG readiness and exact ten-sample maxima\n'
 STANDBY_ID="${RG1_DIR}/standby.status"
 write_ha_status_snapshot "$STANDBY_ID" phase-post node1 1 0 0 0 0
@@ -732,12 +817,50 @@ for sample in $(seq -w 1 10); do
 	SAMPLE_STATS+=("$stats")
 	SAMPLE_INTERFACES+=("$ifaces")
 done
-assert_helper_value 110 ha_sample_window_max manual-rg1-failback 1 node0 'Kernel RX dropped' "${SAMPLE_STATS[@]}"
-assert_helper_value 110 ha_sample_window_interface_max manual-rg1-failback 1 node0 'ge-[0-9]+-0-1' rx "${SAMPLE_INTERFACES[@]}"
+assert_helper_value 110 ha_sample_window_max manual-rg1-failback 1 node0 'Kernel RX dropped' "${SAMPLE_STATS[@]}" 100
+assert_helper_value 110 ha_sample_window_interface_max manual-rg1-failback 1 node0 'ge-[0-9]+-0-1' rx "${SAMPLE_INTERFACES[@]}" 100
+MONOTONIC_PRE_STATS="${RG1_DIR}/monotonic-phase-pre-node0.stats"
+MONOTONIC_PRE_INTERFACES="${RG1_DIR}/monotonic-phase-pre-node0.interfaces"
+write_ha_status_snapshot "$MONOTONIC_PRE_STATS" phase-pre node0 1 0 0 0 0 100
+write_ha_interface_snapshot "$MONOTONIC_PRE_INTERFACES" phase-pre node0 1 ge-0-0-1 100 100
+assert_helper_value 10 ha_rg1_sampled_counter_delta node0 'Kernel RX dropped' \
+	"$MONOTONIC_PRE_STATS" "${SAMPLE_STATS[@]}"
+assert_helper_value 10 ha_rg1_sampled_interface_delta node0 'ge-[0-9]+-0-1' rx \
+	"$MONOTONIC_PRE_INTERFACES" "${SAMPLE_INTERFACES[@]}"
+EQUAL_PRE_STATS="${RG1_DIR}/equal-phase-pre-node0.stats"
+EQUAL_PRE_INTERFACES="${RG1_DIR}/equal-phase-pre-node0.interfaces"
+write_ha_status_snapshot "$EQUAL_PRE_STATS" phase-pre node0 1 0 0 0 0 101
+write_ha_interface_snapshot "$EQUAL_PRE_INTERFACES" phase-pre node0 1 ge-0-0-1 101 101
+assert_helper_value 9 ha_rg1_sampled_counter_delta node0 'Kernel RX dropped' \
+	"$EQUAL_PRE_STATS" "${SAMPLE_STATS[@]}"
+assert_helper_value 9 ha_rg1_sampled_interface_delta node0 'ge-[0-9]+-0-1' rx \
+	"$EQUAL_PRE_INTERFACES" "${SAMPLE_INTERFACES[@]}"
+report_output=$(
+	(
+		info() { printf 'INFO %s\n' "$*"; }
+		void() { printf 'VOID %s\n' "$*"; }
+		ha_rg1_report_sample_max "Pending TX local" node0 "Kernel RX dropped" \
+			"$MONOTONIC_PRE_STATS" "${SAMPLE_STATS[@]}"
+	)
+)
+assert_contains "$report_output" 'INFO RG1 Group 8 report-only Pending TX local max (node0): 110' \
+	'report-only sampled maximum uses phase-pre baseline'
+report_output=$(
+	(
+		info() { printf 'INFO %s\n' "$*"; }
+		void() { printf 'VOID %s\n' "$*"; }
+		ha_rg1_report_sample_max "Pending TX local" node0 "Kernel RX dropped" \
+			"$rewind_pre_stats" "${rewind_stats[@]}"
+	)
+)
+assert_contains "$report_output" 'VOID RG1 Group 8 report-only Pending TX local max unavailable (node0):' \
+	'report-only sampled maximum rejects phase-pre rewind'
+assert_contains "$report_output" 'rewound from 500 to 50 at sample-01' \
+	'report-only sampled maximum identifies phase-pre rewind'
 SAMPLE_STATS[9]="${RG1_DIR}/missing-sample.stats"
-assert_helper_status 2 ha_sample_window_max manual-rg1-failback 1 node0 'Kernel RX dropped' "${SAMPLE_STATS[@]}"
+assert_helper_status 2 ha_sample_window_max manual-rg1-failback 1 node0 'Kernel RX dropped' "${SAMPLE_STATS[@]}" 100
 SAMPLE_STATS[9]="${RG1_DIR}/sample-09-node0.stats"
-assert_helper_status 2 ha_sample_window_max manual-rg1-failback 1 node0 'Kernel RX dropped' "${SAMPLE_STATS[@]}"
+assert_helper_status 2 ha_sample_window_max manual-rg1-failback 1 node0 'Kernel RX dropped' "${SAMPLE_STATS[@]}" 100
 REWIND_COUNTERS=(110 500 50 150 160 170 180 190 195 600)
 REWIND_STATS=()
 REWIND_INTERFACES=()
@@ -751,9 +874,9 @@ for rewind_index in "${!REWIND_COUNTERS[@]}"; do
 	REWIND_STATS+=("$rewind_stats")
 	REWIND_INTERFACES+=("$rewind_ifaces")
 done
-assert_helper_status 2 ha_sample_window_max manual-rg1-failback 1 node0 'Kernel RX dropped' "${REWIND_STATS[@]}"
+assert_helper_status 2 ha_sample_window_max manual-rg1-failback 1 node0 'Kernel RX dropped' "${REWIND_STATS[@]}" 100
 assert_contains "$(<"${ERR}")" 'rewound from 500 to 50' 'counter window rewind evidence'
-assert_helper_status 2 ha_sample_window_interface_max manual-rg1-failback 1 node0 'ge-[0-9]+-0-1' rx "${REWIND_INTERFACES[@]}"
+assert_helper_status 2 ha_sample_window_interface_max manual-rg1-failback 1 node0 'ge-[0-9]+-0-1' rx "${REWIND_INTERFACES[@]}" 100
 assert_contains "$(<"${ERR}")" 'rewound from 500 to 50' 'interface window rewind evidence'
 assert_helper_value 500 ha_nondecreasing_delta 100 600
 assert_helper_status 0 ha_nondecreasing_delta 100 612

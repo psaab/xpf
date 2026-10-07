@@ -683,7 +683,8 @@ ha_rg1_sampled_counter_delta() {
 		return 2
 	fi
 	if ! baseline=$(ha_status_summary_value "$pre_file" "$label"); then return 2; fi
-	if ! maximum=$(ha_sample_window_max manual-rg1-failback 1 "$node" "$label" "${samples[@]}"); then
+	if ! maximum=$(ha_sample_window_max manual-rg1-failback 1 "$node" "$label" \
+		"${samples[@]}" "$baseline"); then
 		return 2
 	fi
 	ha_nondecreasing_delta "$baseline" "$maximum"
@@ -701,16 +702,28 @@ ha_rg1_sampled_interface_delta() {
 	fi
 	if ! baseline=$(ha_interface_packets_value "$pre_file" "$regex" "$direction"); then return 2; fi
 	if ! maximum=$(ha_sample_window_interface_max manual-rg1-failback 1 "$node" \
-		"$regex" "$direction" "${samples[@]}"); then
+		"$regex" "$direction" "${samples[@]}" "$baseline"); then
 		return 2
 	fi
 	ha_nondecreasing_delta "$baseline" "$maximum"
 }
 
 ha_rg1_report_sample_max() {
-	local label="$1" node="$2" metric="$3" result reason
-	shift 3
-	if result=$(ha_sample_window_max manual-rg1-failback 1 "$node" "$metric" "$@" 2>&1); then
+	local label="$1" node="$2" metric="$3" pre_file="$4" result reason baseline
+	shift 4
+	if [[ $# -ne 10 ]]; then
+		void "RG1 Group 8 report-only ${label} max unavailable (${node}): expected ten sample files"
+		return
+	fi
+	if ! reason=$(ha_snapshot_identity_verdict "$pre_file" manual-rg1-failback phase-pre "$node" 1 2>&1); then
+		void "RG1 Group 8 report-only ${label} max unavailable (${node}): ${reason:-phase-pre snapshot invalid}"
+		return
+	fi
+	if ! baseline=$(ha_status_summary_value "$pre_file" "$metric" 2>&1); then
+		void "RG1 Group 8 report-only ${label} max unavailable (${node}): ${baseline:-phase-pre baseline unavailable}"
+		return
+	fi
+	if result=$(ha_sample_window_max manual-rg1-failback 1 "$node" "$metric" "$@" "$baseline" 2>&1); then
 		info "RG1 Group 8 report-only ${label} max (${node}): ${result}"
 	else
 		reason="$result"
@@ -840,10 +853,14 @@ ha_rg1_evaluate() {
 		reason=$(<"$sample_error")
 		void "RG1 Group 8c transition path: ${reason:-old-owner LAN RX evidence unavailable}"
 	fi
-	ha_rg1_report_sample_max "Pending TX local" node0 "Pending TX local" "${node0_stats[@]}"
-	ha_rg1_report_sample_max "Pending TX local" node1 "Pending TX local" "${node1_stats[@]}"
-	ha_rg1_report_sample_max "Outstanding TX" node0 "Outstanding TX" "${node0_stats[@]}"
-	ha_rg1_report_sample_max "Outstanding TX" node1 "Outstanding TX" "${node1_stats[@]}"
+	ha_rg1_report_sample_max "Pending TX local" node0 "Pending TX local" \
+		"${RG1_STATS[phase-pre:node0]}" "${node0_stats[@]}"
+	ha_rg1_report_sample_max "Pending TX local" node1 "Pending TX local" \
+		"${RG1_STATS[phase-pre:node1]}" "${node1_stats[@]}"
+	ha_rg1_report_sample_max "Outstanding TX" node0 "Outstanding TX" \
+		"${RG1_STATS[phase-pre:node0]}" "${node0_stats[@]}"
+	ha_rg1_report_sample_max "Outstanding TX" node1 "Outstanding TX" \
+		"${RG1_STATS[phase-pre:node1]}" "${node1_stats[@]}"
 }
 
 ha_run_rg1_failback_slice() {
