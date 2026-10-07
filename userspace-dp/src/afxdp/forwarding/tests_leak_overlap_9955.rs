@@ -788,5 +788,10 @@ fn leak_target_identity_and_miss_stay_distinct_v9506() {
         &state,
         IpAddr::V4("192.0.2.77".parse().expect("IPv4 address")),
     );
+    assert_ne!(
+        missed.selected_route.map(|route| (route.domain, route.table)),
+        Some((0, 254)),
+        "a miss must not claim the default main-table identity"
+    );
     assert_eq!(missed.selected_route, None, "a miss has no route identity");
 }
