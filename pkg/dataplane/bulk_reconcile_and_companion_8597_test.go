@@ -123,7 +123,7 @@ func TestAV6EnumerateFailureKeepsTheV4Result_8597(t *testing.T) {
 // the store actually calls it — the distinction that let this row exist at all,
 // since the reset has been correct and callerless since #8015.
 
-func TestPutClusterSyncedV4CompanionDropsTheForwardIngressFold_8597(t *testing.T) {
+func TestPutClusterSyncedV4CompanionDropsTheForwardDirectionFolds_8597(t *testing.T) {
 	fwdKey := SessionKey{Protocol: 6, SrcPort: 1000}
 	revKey := SessionKey{Protocol: 6, SrcPort: 2000}
 	dp := &sessionStoreTestDP{v4: map[SessionKey]SessionValue{}}
@@ -132,6 +132,7 @@ func TestPutClusterSyncedV4CompanionDropsTheForwardIngressFold_8597(t *testing.T
 		EgressZone:       2,
 		ReverseKey:       revKey,
 		IngressIfaceFold: 0xABCD,
+		EgressIfaceFold:  0xEF01,
 		FibIfindex:       99,
 	}
 	if err := (dataPlaneSessionStore{dp: dp}).PutClusterSyncedV4(fwdKey, val); err != nil {
@@ -145,26 +146,22 @@ func TestPutClusterSyncedV4CompanionDropsTheForwardIngressFold_8597(t *testing.T
 	if !ok {
 		t.Fatal("the reverse companion was not installed — this cell measures nothing")
 	}
-	// The contrast is the point: ScrubNodeLocal PRESERVES the fold (it is the
-	// #7095 cluster-stable identity), so the forward row keeps it and only the
-	// companion reset can be why the companion does not.
-	if fwd.IngressIfaceFold != 0xABCD {
-		t.Fatalf("the forward row lost its cluster-stable fold (%#x) — something "+
-			"other than the companion reset is clearing folds, and the assertion "+
-			"below would then pass for the wrong reason (#7095)", fwd.IngressIfaceFold)
+	// Both folds are stable and scrubbed as peer values, but the companion reset
+	// clears them because neither is an observation of the reply direction.
+	if fwd.IngressIfaceFold != 0xABCD || fwd.EgressIfaceFold != 0xEF01 {
+		t.Fatalf("the forward row did not preserve its cluster-stable folds: ingress=%#x egress=%#x",
+			fwd.IngressIfaceFold, fwd.EgressIfaceFold)
 	}
-	if rev.IngressIfaceFold != 0 {
-		t.Errorf("the reverse companion carries the FORWARD direction's ingress "+
-			"fold %#x. The helper wire request derives ingress identity from the "+
-			"fold, so this stamps the forward binding on a reply that has observed "+
-			"nothing (#8597 K74)", rev.IngressIfaceFold)
+	if rev.IngressIfaceFold != 0 || rev.EgressIfaceFold != 0 {
+		t.Errorf("the reverse companion carries forward-direction identity: ingress=%#x egress=%#x",
+			rev.IngressIfaceFold, rev.EgressIfaceFold)
 	}
 	if rev.IsReverse != 1 || rev.IngressZone != 2 || rev.EgressZone != 1 {
 		t.Errorf("the companion is not the swapped reverse: %+v", rev)
 	}
 }
 
-func TestPutClusterSyncedV6CompanionDropsTheForwardIngressFold_8597(t *testing.T) {
+func TestPutClusterSyncedV6CompanionDropsTheForwardDirectionFolds_8597(t *testing.T) {
 	fwdKey := SessionKeyV6{Protocol: 6, SrcPort: 1000}
 	revKey := SessionKeyV6{Protocol: 6, SrcPort: 2000}
 	dp := &sessionStoreTestDP{v6: map[SessionKeyV6]SessionValueV6{}}
@@ -173,6 +170,7 @@ func TestPutClusterSyncedV6CompanionDropsTheForwardIngressFold_8597(t *testing.T
 		EgressZone:       2,
 		ReverseKey:       revKey,
 		IngressIfaceFold: 0xABCD,
+		EgressIfaceFold:  0xEF01,
 	}
 	if err := (dataPlaneSessionStore{dp: dp}).PutClusterSyncedV6(fwdKey, val); err != nil {
 		t.Fatalf("PutClusterSyncedV6: %v", err)
@@ -182,13 +180,13 @@ func TestPutClusterSyncedV6CompanionDropsTheForwardIngressFold_8597(t *testing.T
 	if !ok {
 		t.Fatal("the v6 reverse companion was not installed")
 	}
-	if fwd.IngressIfaceFold != 0xABCD {
-		t.Fatalf("the v6 forward row lost its cluster-stable fold (%#x)",
-			fwd.IngressIfaceFold)
+	if fwd.IngressIfaceFold != 0xABCD || fwd.EgressIfaceFold != 0xEF01 {
+		t.Fatalf("the v6 forward row did not preserve its cluster-stable folds: ingress=%#x egress=%#x",
+			fwd.IngressIfaceFold, fwd.EgressIfaceFold)
 	}
-	if rev.IngressIfaceFold != 0 {
-		t.Errorf("the v6 reverse companion carries the forward ingress fold %#x "+
-			"(#8597 K74)", rev.IngressIfaceFold)
+	if rev.IngressIfaceFold != 0 || rev.EgressIfaceFold != 0 {
+		t.Errorf("the v6 reverse companion carries forward-direction folds: ingress=%#x egress=%#x",
+			rev.IngressIfaceFold, rev.EgressIfaceFold)
 	}
 }
 

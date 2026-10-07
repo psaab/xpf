@@ -43,13 +43,17 @@ import (
 // node-local for the same reason (node 0's `ge-0-0-1` and node 1's `ge-7-0-1`
 // are different numbers for one logical RETH member).
 //
-// IngressIfaceFold (#7095) is deliberately NOT here, and the distinction is the
-// whole reason that field exists. It is a fold of the RETH-RELATIVE name
-// (`reth0.50`), which both chassis agree on by construction — it is the one
-// ingress-identity field that is MEANT to survive the wire, and the receiving
-// node resolves it back to its own {ifindex, vlan}. Scrubbing it would delete
-// the peer's answer and put every synced session back on the #4792 zone
-// approximation, which is exactly what #7095 removed.
+// IngressIfaceFold (#7095) is deliberately NOT here. It is a fold of the
+// RETH-RELATIVE name (`reth0.50`), which both chassis agree on by construction;
+// the receiving node resolves it back to its own {ifindex, vlan}. Scrubbing it
+// would delete the peer's answer and put every synced session back on the #4792
+// zone approximation, which is exactly what #7095 removed.
+//
+// EgressIfaceFold (#12075) is also NOT node-local: it carries the RETH-relative
+// name of the sender's FIB egress so the receiver can resolve its own local
+// egress instead of interpreting the sender's ifindex. It is distinct from the
+// ingress fold by direction, and reverse-companion construction clears it as
+// an unobserved prediction even though peer scrubbing preserves it.
 //
 // TunnelDiscriminator (#7188) is NOT here either, and for a stronger reason
 // than #7095's. It is not merely cluster-agreeable, it is SYMMETRIC BY
@@ -428,12 +432,10 @@ func TestSessionValueFieldCountIsPinned7097(t *testing.T) {
 		typ  reflect.Type
 		want int
 	}{
-		// 38/39 since #7239 added RoutingDomain (37/38 after #7188's
-		// TunnelDiscriminator, 36/37 after #7095's IngressIfaceFold). All three
-		// are classified NOT node-local and are therefore absent from
-		// ScrubNodeLocal / nodeLocalSessionFields — see the note on
-		// nodeLocalSessionFields.
-		//
+		// 47/48 total: #7095 IngressIfaceFold and #12075 EgressIfaceFold
+		// are cluster-stable name folds, not node-local indexes. They are
+		// preserved by ScrubNodeLocal and each has a distinct consumer
+		// direction.
 		// The #7239 classification, stated rather than assumed, because this is
 		// the step #6928 skipped: RoutingDomain is
 		// `StableRoutingInstanceTableID(name)`, a pure function of the
@@ -467,11 +469,12 @@ func TestSessionValueFieldCountIsPinned7097(t *testing.T) {
 		// source-NAT selection across HA reconstruction. They are cluster-
 		// stable packet identity, not node-local resources, and must remain on
 		// the synced value.
-		// 46/47 since #10888 added TCPHandshakeState, classified as sync-only
-		// metadata, not a BPF field or a node-local resource.
+		// 46/47 immediately before #12075; the new egress fold brings the
+		// current totals to 47/48 and remains sync-only, not a BPF field or a
+		// node-local resource.
 
-		{"SessionValue", reflect.TypeOf(SessionValue{}), 46},
-		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 47},
+		{"SessionValue", reflect.TypeOf(SessionValue{}), 47},
+		{"SessionValueV6", reflect.TypeOf(SessionValueV6{}), 48},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.typ.NumField(); got != tc.want {

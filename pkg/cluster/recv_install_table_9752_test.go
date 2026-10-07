@@ -38,6 +38,7 @@ func dropSyncOnly9752(v *dataplane.SessionValue) {
 	v.ConfigEpoch = 0
 	v.RTFlowSessionID = 0
 	v.IngressIfaceFold = 0
+	v.EgressIfaceFold = 0
 	v.TunnelDiscriminator = 0
 	v.TCPCloseClass = 0
 	v.InstallTableDomain = 0
@@ -51,6 +52,7 @@ func dropSyncOnlyV69752(v *dataplane.SessionValueV6) {
 	v.ConfigEpoch = 0
 	v.RTFlowSessionID = 0
 	v.IngressIfaceFold = 0
+	v.EgressIfaceFold = 0
 	v.TunnelDiscriminator = 0
 	v.TCPCloseClass = 0
 	v.InstallTableDomain = 0
@@ -217,14 +219,14 @@ func TestLossyMirrorMatchesProductionLossExactly9752(t *testing.T) {
 		FibDmac: [6]byte{1, 2, 3, 4, 5, 6}, FibSmac: [6]byte{6, 5, 4, 3, 2, 1},
 		FibGen: 25, IngressIfindex: 26, IngressVlanID: 27, RoutingDomain: 28,
 		Generation: 29, PolicyCounterIdx: 30, ConfigEpoch: 31,
-		RTFlowSessionID: 32, IngressIfaceFold: 33, TunnelDiscriminator: 34,
+		RTFlowSessionID: 32, IngressIfaceFold: 33, EgressIfaceFold: 38, TunnelDiscriminator: 34,
 		TCPCloseClass: 35, InstallTableDomain: 36, InstallTableCheck: 37,
 	}
 	got := full
 	dropSyncOnly9752(&got)
 	want := full
 	want.Generation, want.PolicyCounterIdx, want.ConfigEpoch = 0, 0, 0
-	want.RTFlowSessionID, want.IngressIfaceFold, want.TunnelDiscriminator = 0, 0, 0
+	want.RTFlowSessionID, want.IngressIfaceFold, want.EgressIfaceFold, want.TunnelDiscriminator = 0, 0, 0, 0
 	want.TCPCloseClass, want.InstallTableDomain, want.InstallTableCheck = 0, 0, 0
 	if got != want {
 		t.Fatalf("lossy fixture diverges from production loss:\n got %+v\nwant %+v", got, want)

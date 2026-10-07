@@ -49,7 +49,9 @@ func (m *Manager) buildSessionSyncRequestV4(op string, key dataplane.SessionKey,
 		// which is what a peer predating the field sends.
 		req.RoutingDomain = val.RoutingDomain
 		req.EgressZoneID = val.EgressZone
-		req.EgressIfindex, req.TXIfindex, req.OwnerRGID = m.sessionSyncEgressLocked(int(val.FibIfindex), val.FibVlanID, req.EgressZone)
+		var peerEgress bool
+		req.EgressIfindex, req.TXIfindex, req.OwnerRGID, req.TXVLANID, peerEgress =
+			m.sessionSyncEgressIdentityLocked(val.FibIfindex, val.FibVlanID, val.EgressIfaceFold, req.EgressZone)
 		req.TunnelEndpointID = m.sessionSyncTunnelEndpointIDLocked(req.EgressIfindex)
 		if val.LogFlags&dataplane.LogFlagUserspaceTunnelEndpoint != 0 && val.FibGen != 0 {
 			req.TunnelEndpointID = val.FibGen
@@ -66,8 +68,10 @@ func (m *Manager) buildSessionSyncRequestV4(op string, key dataplane.SessionKey,
 			req.TXVLANID = 0
 			req.NeighborMAC = ""
 			req.SrcMAC = ""
-		} else {
-			req.TXVLANID = val.FibVlanID
+		} else if !peerEgress {
+			// A nonzero egress fold identifies a peer row. Its cached MACs
+			// belong to the sender and MUST NOT become a cached local result;
+			// the helper performs a fresh FIB/neighbor lookup on import.
 			req.NeighborMAC = macString(val.FibDmac[:])
 			req.SrcMAC = macString(val.FibSmac[:])
 		}
@@ -180,7 +184,9 @@ func (m *Manager) buildSessionSyncRequestV6(op string, key dataplane.SessionKeyV
 		// which is what a peer predating the field sends.
 		req.RoutingDomain = val.RoutingDomain
 		req.EgressZoneID = val.EgressZone
-		req.EgressIfindex, req.TXIfindex, req.OwnerRGID = m.sessionSyncEgressLocked(int(val.FibIfindex), val.FibVlanID, req.EgressZone)
+		var peerEgress bool
+		req.EgressIfindex, req.TXIfindex, req.OwnerRGID, req.TXVLANID, peerEgress =
+			m.sessionSyncEgressIdentityLocked(val.FibIfindex, val.FibVlanID, val.EgressIfaceFold, req.EgressZone)
 		req.TunnelEndpointID = m.sessionSyncTunnelEndpointIDLocked(req.EgressIfindex)
 		if val.LogFlags&dataplane.LogFlagUserspaceTunnelEndpoint != 0 && val.FibGen != 0 {
 			req.TunnelEndpointID = val.FibGen
@@ -197,8 +203,8 @@ func (m *Manager) buildSessionSyncRequestV6(op string, key dataplane.SessionKeyV
 			req.TXVLANID = 0
 			req.NeighborMAC = ""
 			req.SrcMAC = ""
-		} else {
-			req.TXVLANID = val.FibVlanID
+		} else if !peerEgress {
+			// Do not seed the helper's cached fast path from peer-local MACs.
 			req.NeighborMAC = macString(val.FibDmac[:])
 			req.SrcMAC = macString(val.FibSmac[:])
 		}
@@ -447,8 +453,40 @@ func (m *Manager) resolveIngressFoldLocked(fold uint32) (uint32, uint16, bool) {
 	return fn(fold)
 }
 
-// SetIngressFoldResolver wires the #7095 fold -> local {ifindex, vlan} lookup.
-// Passing nil restores the pre-#7095 behaviour of importing no ingress identity.
+// resolveEgressFoldLocked maps the #12075 cluster-stable egress fold to this
+// node's local {ifindex, vlan}. Ingress and egress use the same reth-relative
+// name fold and injected resolver; the distinction is the session direction,
+// not the mapping.
+func (m *Manager) resolveEgressFoldLocked(fold uint32) (uint32, uint16, bool) {
+	return m.resolveIngressFoldLocked(fold)
+}
+
+// sessionSyncEgressIdentityLocked resolves a session's egress identity. A
+// nonzero fold marks a peer value: the raw FibIfindex is then sender-local and
+// MUST NOT be resolved on this node. Unknown or ambiguous folds fail closed to
+// the egress-zone approximation. Fold-zero rows retain the legacy/local path,
+// where FibIfindex is this node's number (or has already been scrubbed to zero).
+func (m *Manager) sessionSyncEgressIdentityLocked(
+	fibIfindex uint32,
+	fibVlanID uint16,
+	egressFold uint32,
+	egressZone string,
+) (egressIfindex, txIfindex, ownerRGID int, txVlanID uint16, peerEgress bool) {
+	peerEgress = egressFold != 0
+	if peerEgress {
+		if localIfindex, localVLAN, ok := m.resolveEgressFoldLocked(egressFold); ok {
+			fibIfindex, fibVlanID = localIfindex, localVLAN
+		} else {
+			fibIfindex, fibVlanID = 0, 0
+		}
+	}
+	egressIfindex, txIfindex, ownerRGID = m.sessionSyncEgressLocked(int(fibIfindex), fibVlanID, egressZone)
+	return egressIfindex, txIfindex, ownerRGID, fibVlanID, peerEgress
+}
+
+// SetIngressFoldResolver wires the shared cluster-stable fold -> local
+// {ifindex, vlan} lookup used for both ingress and egress peer identities.
+// Passing nil leaves either fold unresolved and preserves the zone fallback.
 func (m *Manager) SetIngressFoldResolver(fn func(uint32) (uint32, uint16, bool)) {
 	if m == nil {
 		return
