@@ -443,9 +443,9 @@ func (s dataPlaneSessionStore) PutClusterSyncedV4(key SessionKey, val SessionVal
 		// four went quietly incomplete in one change.
 		//
 		// The fallback below applies only ScrubNodeLocal, which deliberately
-		// PRESERVES IngressIfaceFold (it is cluster-stable by design), so
-		// without this the companion carried the forward direction's ingress
-		// binding — a confident value on a binding the reply has not made.
+		// PRESERVES both cluster-stable folds. Without this reset the companion
+		// would carry the forward ingress observation and egress prediction onto
+		// a reply whose route may be asymmetric.
 		revVal.ResetUnobservedForReverseCompanion()
 		if err := s.putClusterSyncedV4Raw(val.ReverseKey, revVal); err != nil {
 			return errors.Join(err, s.rollbackV4(written))
@@ -514,9 +514,9 @@ func (s dataPlaneSessionStore) PutClusterSyncedV6(key SessionKeyV6, val SessionV
 		// four went quietly incomplete in one change.
 		//
 		// The fallback below applies only ScrubNodeLocal, which deliberately
-		// PRESERVES IngressIfaceFold (it is cluster-stable by design), so
-		// without this the companion carried the forward direction's ingress
-		// binding — a confident value on a binding the reply has not made.
+		// PRESERVES both cluster-stable folds. Without this reset the companion
+		// would carry the forward ingress observation and egress prediction onto
+		// a reply whose route may be asymmetric.
 		revVal.ResetUnobservedForReverseCompanion()
 		if err := s.putClusterSyncedV6Raw(val.ReverseKey, revVal); err != nil {
 			return errors.Join(err, s.rollbackV6(written))

@@ -32,10 +32,11 @@ import (
 // companionResetFields are the fields a reverse companion must not inherit.
 var companionResetFields = map[string]bool{
 	// Forward egress — the reply's egress is a separate lookup.
-	"FibIfindex": true,
-	"FibVlanID":  true,
-	"FibDmac":    true,
-	"FibSmac":    true,
+	"FibIfindex":      true,
+	"FibVlanID":       true,
+	"FibDmac":         true,
+	"FibSmac":         true,
+	"EgressIfaceFold": true,
 	// Forward ingress — unobserved for the reply, in all three spellings.
 	"IngressIfindex":   true,
 	"IngressVlanID":    true,
@@ -137,11 +138,12 @@ func TestReverseCompanionResetCoversExactlyTheUnobservedFields7917(t *testing.T)
 //	ScrubNodeLocal                    "does this value belong to another NODE?"
 //	ResetUnobservedForReverseCompanion "has this DIRECTION observed this yet?"
 //
-// `IngressIfaceFold` is where they visibly part company, and it is not a
-// hypothetical: #7095 added it as a CLUSTER-STABLE fold whose whole purpose is
-// to cross the wire, so the node-local scrub must leave it alone — while the
-// companion must clear it, because the wire request derives its ingress identity
-// from the fold and would otherwise stamp the forward binding on the reply.
+// `IngressIfaceFold` and `EgressIfaceFold` are where the rules visibly part
+// company. Both are CLUSTER-STABLE folds that must cross the wire, so
+// `ScrubNodeLocal` must leave them alone. The companion reset clears ingress
+// because the forward arrival is unobserved by the reply, and clears egress
+// because the forward lookup is only a prediction for the reply's potentially
+// asymmetric route.
 func TestCompanionResetAndNodeLocalScrubAreDifferentRules7917(t *testing.T) {
 	if !companionResetFields["IngressIfaceFold"] {
 		t.Fatal("the companion reset must clear IngressIfaceFold: the helper wire " +
@@ -152,6 +154,14 @@ func TestCompanionResetAndNodeLocalScrubAreDifferentRules7917(t *testing.T) {
 		t.Fatal("ScrubNodeLocal must NOT clear IngressIfaceFold: it is the #7095 " +
 			"CLUSTER-STABLE fold, and zeroing it on a peer install is what it exists " +
 			"to prevent — the #4983 identity would stop surviving a failover (#7917)")
+	}
+	if !companionResetFields["EgressIfaceFold"] {
+		t.Fatal("the companion reset must clear EgressIfaceFold: the forward route " +
+			"is only a prediction for the reverse direction (#12075)")
+	}
+	if nodeLocalSessionFields["EgressIfaceFold"] {
+		t.Fatal("ScrubNodeLocal must preserve EgressIfaceFold: it is cluster-stable " +
+			"name metadata, not a sender-local ifindex (#12075)")
 	}
 	if reflect.DeepEqual(companionResetFields, nodeLocalSessionFields) {
 		t.Fatal("the reverse-companion reset and the node-local scrub now cover the " +

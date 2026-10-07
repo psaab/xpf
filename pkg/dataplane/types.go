@@ -370,6 +370,36 @@ type SessionValue struct {
 	// ABI.
 	IngressIfaceFold uint32
 
+	// EgressIfaceFold is the #12075 CLUSTER-STABLE fold of the session's
+	// egress interface name, carried on the HA session-sync wire so the
+	// FIB egress identity survives a failover without trusting a number.
+	//
+	// It exists because FibIfindex cannot cross the wire: an ifindex is
+	// NODE-LOCAL, so the originating node's value names a different NIC on
+	// the importing node — and resolving it there yields a confidently
+	// wrong interface AND owner RG (W08-04). This is instead a fold of the
+	// RETH-RELATIVE name (config.StableIfaceID over
+	// config.ClusterStableIfaceName), which both chassis agree on by
+	// construction and each resolves to its own member — the same
+	// machinery as IngressIfaceFold (#7095), whose resolver and fold
+	// function are direction-agnostic and shared.
+	//
+	// ZERO MEANS THE FOLD IS UNKNOWN: a legacy peer that omits the field, a
+	// session whose egress interface has no cluster-stable name, or a sender
+	// that could not fold it. For peer installs the sender-local FibIfindex and
+	// FibVlanID are scrubbed before this value reaches the builder, so an
+	// unresolved fold uses the #4792 egress-zone approximation. Fold-zero LOCAL
+	// rows retain their existing local FibIfindex path.
+	//
+	// A NONZERO fold also marks the row as fresh off the cluster wire (folds
+	// never persist in the BPF mirror — sync-only — and the helper never echoes
+	// one back), so the session-sync builder treats raw FibIfindex as the
+	// SENDER's and resolves the fold — or nothing — instead of the number.
+	//
+	// It is HA-wire metadata only and is not part of the on-map C conntrack
+	// ABI.
+	EgressIfaceFold uint32
+
 	// TunnelDiscriminator is the #7188 tunnel session-identity discriminator,
 	// as encoded by the Rust helper's TunnelDiscriminator::to_wire
 	// (userspace-dp session/discriminator.rs). It is OPAQUE on this side: Go
@@ -776,6 +806,19 @@ type SessionValueV6 struct {
 	// every IPv6 session degraded after a failover.
 	IngressIfaceFold uint32
 
+	// EgressIfaceFold is the #12075 cluster-stable egress-interface fold,
+	// the v6 twin of the field on SessionValue. Same contract: it is
+	// computed from the sender's local {FibIfindex, FibVlanID}, carried
+	// as length-gated HA metadata, and resolved to this node's own
+	// {ifindex, vlan}. A nonzero fold marks this as a peer value, so import
+	// never resolves the sender's raw ifindex by number.
+	//
+	// Zero means the fold is unknown; peer-install rows fall back to the
+	// egress-zone approximation after sender-local FIB fields are scrubbed.
+	// Fold-zero local rows retain their local FibIfindex path.
+	// This is sync-only and MUST NOT enter the BPF/C conntrack ABI.
+	EgressIfaceFold uint32
+
 	// TunnelDiscriminator is the #7188 tunnel session-identity discriminator,
 	// as encoded by the Rust helper's TunnelDiscriminator::to_wire
 	// (userspace-dp session/discriminator.rs). It is OPAQUE on this side: Go
@@ -1107,10 +1150,10 @@ const (
 // separate from both TCPState and TCPCloseClass.
 const (
 	TCPHandshakeStateAbsent             uint8 = 0
-	TCPHandshakeStateOpening             uint8 = 1
-	TCPHandshakeStateHandshakePending    uint8 = 2
-	TCPHandshakeStateSynAckFirstPending  uint8 = 3
-	TCPHandshakeStateEstablished         uint8 = 4
+	TCPHandshakeStateOpening            uint8 = 1
+	TCPHandshakeStateHandshakePending   uint8 = 2
+	TCPHandshakeStateSynAckFirstPending uint8 = 3
+	TCPHandshakeStateEstablished        uint8 = 4
 )
 
 // NormalizeTCPHandshakeState maps unknown wire values to Established, preserving

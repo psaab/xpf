@@ -8,11 +8,14 @@ package dataplane
 // are direction-dependent — the zone pair is swapped, `IsReverse` is set, and
 // `ReverseKey` points back.
 //
-// Some fields must additionally be CLEARED, because they record an OBSERVATION
-// the reverse direction has not made yet:
+// Some fields must additionally be CLEARED because they either record an
+// observation the reverse direction has not made or encode its own route:
 //
 //   - the cached FIB result. It is the forward direction's resolved egress; the
 //     reply's egress is a different lookup and must be re-resolved locally.
+//   - the #12075 EgressIfaceFold. It is a stable name, but still the forward
+//     direction's predicted egress; routing may be asymmetric, so it cannot
+//     name the reply's egress.
 //   - the #4983 ingress identity. `pkg/dataplane/types.go` names the reverse
 //     companion as the first legitimate-`0` population and gives the reason:
 //     "its own ingress has not been OBSERVED yet ... the forward flow's egress
@@ -25,14 +28,14 @@ package dataplane
 // cover the same fields:
 //
 //   - `ScrubNodeLocal` strips values that BELONG TO ANOTHER NODE. It must NOT
-//     touch `IngressIfaceFold`, whose entire purpose is to be cluster-stable and
-//     cross the wire so the #4983 identity survives a failover.
+//     touch `IngressIfaceFold` or `EgressIfaceFold`, whose RETH-relative names
+//     are cluster-stable and cross the wire (#7095, #12075).
 //   - this reset strips values the reverse direction HAS NOT OBSERVED. It MUST
-//     clear `IngressIfaceFold`, because "where the first packet arrived" is
-//     exactly as unobserved for the reply as the node-local ifindex is — and the
-//     helper wire request derives its ingress identity FROM the fold
-//     (`buildSessionSyncRequestV4` -> `resolveIngressFold`), so leaving it set
-//     stamps the FORWARD direction's ingress binding onto the companion.
+//     clear `IngressIfaceFold`, because the forward arrival is not an observation
+//     of where the reply arrived, and it MUST clear `EgressIfaceFold`, because
+//     the forward route is only a prediction for the reply's potentially
+//     asymmetric route. Leaving either set stamps forward identity on the
+//     companion.
 //
 // Folding the two would make every future node-local field automatically a
 // reverse-companion reset, and every future companion reset automatically a
@@ -94,6 +97,9 @@ func (v *SessionValue) ResetUnobservedForReverseCompanion() {
 	v.FibVlanID = 0
 	v.FibDmac = [6]byte{}
 	v.FibSmac = [6]byte{}
+	// #12075: the forward egress fold is a stable name, but still a prediction
+	// for the reverse direction and must not be inherited.
+	v.EgressIfaceFold = 0
 	// #8612: NOT unconditionally — see the note above this function.
 	if v.LogFlags&LogFlagUserspaceTunnelEndpoint == 0 {
 		v.FibGen = 0
@@ -121,6 +127,8 @@ func (v *SessionValueV6) ResetUnobservedForReverseCompanion() {
 	v.FibVlanID = 0
 	v.FibDmac = [6]byte{}
 	v.FibSmac = [6]byte{}
+	// #12075: see the v4 twin.
+	v.EgressIfaceFold = 0
 	// #8612: see the v4 twin and the note above it.
 	if v.LogFlags&LogFlagUserspaceTunnelEndpoint == 0 {
 		v.FibGen = 0

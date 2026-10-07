@@ -574,18 +574,18 @@ type SyncStats struct {
 type SyncStatsSnapshot struct {
 	SessionsSent uint64
 	// SweepSessionsSent is the mirror-sweep SUB-TOTAL of SessionsSent (#7842).
-	SweepSessionsSent   uint64
-	SessionsReceived    uint64
-	SessionsInstalled   uint64
-	DeletesSent         uint64
-	DeletesReceived     uint64
-	BulkSyncs           uint64
-	ConfigsSent                  uint64
-	ConfigsReceived              uint64
-	ConfigsSentCleartext         uint64
-	ConfigsReceivedCleartext     uint64
-	CleartextSyncAlarmLatched    bool
-	ConfigsStaleIgnored          uint64
+	SweepSessionsSent         uint64
+	SessionsReceived          uint64
+	SessionsInstalled         uint64
+	DeletesSent               uint64
+	DeletesReceived           uint64
+	BulkSyncs                 uint64
+	ConfigsSent               uint64
+	ConfigsReceived           uint64
+	ConfigsSentCleartext      uint64
+	ConfigsReceivedCleartext  uint64
+	CleartextSyncAlarmLatched bool
+	ConfigsStaleIgnored       uint64
 	// #5084 observability. A fail-open fence is silent by construction, so
 	// both halves are counted: primes that arrived without an incarnation
 	// (the peer is old, or half-upgraded and hiding), and payloads dropped
@@ -1293,16 +1293,17 @@ type SessionSync struct {
 	// detect stale ownership or resolver snapshots. Guarded by zoneRGMu.
 	zoneRGMapGen uint64
 
-	// ingressFoldFn resolves a session's LOCAL ingress identity to the
-	// #7095 cluster-stable fold that rides the sync wire. Injected by the
-	// daemon, which owns the config; pkg/cluster deliberately holds no
-	// config of its own.
+	// ingressFoldFn resolves a LOCAL interface identity (in either session
+	// direction) to its cluster-stable RETH-relative fold on the sync wire.
+	// #7095 introduced it for ingress; #12075 reuses it for egress because
+	// both fold the same local {ifindex, vlan} through the same name resolver.
+	// Injected by the daemon, which owns config; pkg/cluster deliberately holds
+	// no config of its own.
 	//
-	// NIL IS THE UNKNOWN CASE, not an error: an unset resolver stamps 0,
-	// which is the same value a legacy peer sends and a fabric-redirected
-	// session records, and the consumer falls back to the zone
-	// approximation for all three. So a node that has not wired it yet
-	// syncs exactly what it synced before #7095.
+	// NIL IS THE UNKNOWN CASE: an unset resolver stamps 0, which is the same
+	// value a legacy peer sends and a fabric-redirected session records. The
+	// consumer falls back to the zone approximation, so an unwired node retains
+	// the pre-#7095 behavior.
 	ingressFoldFn    func(ifindex uint32, vlan uint16) uint32
 	deleteJournalMu  sync.Mutex
 	deleteJournal    [][]byte
@@ -2107,11 +2108,13 @@ func (s *SessionSync) SetZoneRGMap(m map[uint16]int) {
 	s.zoneRGMu.Unlock()
 }
 
-// SetZoneOwnership atomically installs the zone-to-RG set, stable-ingress-fold
-// to RG lookup, and local fold resolver. A nil zone map preserves the prior
-// zone map (used when an apply result has no zone-ID snapshot); a non-nil empty
-// map installs an authoritative empty map. Each apply advances the generation
-// because the fold resolver closes over an apply-time interface snapshot.
+// SetZoneOwnership atomically installs the zone-to-RG set, stable-interface-
+// fold to RG lookup, and local fold resolver. The resolver stamps both
+// #7095 ingress and #12075 egress identity against this apply-time config.
+// A nil zone map preserves the prior zone map (used when an apply result has
+// no zone-ID snapshot); a non-nil empty map installs an authoritative empty
+// map. Each apply advances the generation because the fold resolver closes
+// over an apply-time interface snapshot.
 func (s *SessionSync) SetZoneOwnership(zoneRG ZoneRGMap, foldRG map[uint32]int, foldFn func(uint32, uint16) uint32) {
 	var zones ZoneRGMap
 	if zoneRG != nil {
@@ -2143,9 +2146,10 @@ func (s *SessionSync) ZoneOwnershipInstalled() bool {
 	return installed
 }
 
-// SetIngressFoldFn wires the #7095 cluster-stable ingress-interface resolver.
-// It advances the ownership generation as well: a bulk snapshot that captured
-// the previous resolver must not reconcile against it after this changes.
+// SetIngressFoldFn wires the shared direction-agnostic RETH-relative name
+// resolver used by the #7095 ingress and #12075 egress folds. It advances the
+// ownership generation as well: a bulk snapshot that captured the previous
+// resolver must not reconcile against it after this changes.
 func (s *SessionSync) SetIngressFoldFn(fn func(ifindex uint32, vlan uint16) uint32) {
 	s.zoneRGMu.Lock()
 	s.ingressFoldFn = fn
@@ -2169,6 +2173,13 @@ func (s *SessionSync) stampIngressIfaceFold(ifindex uint32, vlan uint16) uint32 
 		return 0
 	}
 	return fn(ifindex, vlan)
+}
+
+// stampEgressIfaceFold fills the #12075 wire field from the sender's
+// node-local FIB egress identity. The same injected resolver used by ingress
+// is direction-agnostic: both folds identify a reth-relative name.
+func (s *SessionSync) stampEgressIfaceFold(ifindex uint32, vlan uint16) uint32 {
+	return s.stampIngressIfaceFold(ifindex, vlan)
 }
 
 // SetRuntime wires the backend-neutral runtime used by SessionSync.
@@ -2227,46 +2238,46 @@ func (s *SessionSync) Stats() SyncStatsSnapshot {
 		SessionsSent: s.stats.SessionsSent.Load(), SweepSessionsSent: s.stats.SweepSessionsSent.Load(),
 		SessionsReceived: s.stats.SessionsReceived.Load(), SessionsInstalled: s.stats.SessionsInstalled.Load(),
 		DeletesSent: s.stats.DeletesSent.Load(), DeletesReceived: s.stats.DeletesReceived.Load(),
-		BulkSyncs: s.stats.BulkSyncs.Load(),
+		BulkSyncs:   s.stats.BulkSyncs.Load(),
 		ConfigsSent: s.stats.ConfigsSent.Load(), ConfigsReceived: s.stats.ConfigsReceived.Load(),
-		ConfigsSentCleartext: s.stats.ConfigsSentCleartext.Load(),
-		ConfigsReceivedCleartext: s.stats.ConfigsReceivedCleartext.Load(),
-		CleartextSyncAlarmLatched: s.stats.CleartextSyncAlarmLatched.Load(),
-		ConfigsStaleIgnored: s.stats.ConfigsStaleIgnored.Load(),
-		BulkPrimesWithoutIncarnation: s.stats.BulkPrimesWithoutIncarnation.Load(),
-		PeerBootIncarnation: s.PeerBootIncarnation().String(),
-		ConfigsDeadIncarnationDropped: s.stats.ConfigsDeadIncarnationDropped.Load(),
+		ConfigsSentCleartext:           s.stats.ConfigsSentCleartext.Load(),
+		ConfigsReceivedCleartext:       s.stats.ConfigsReceivedCleartext.Load(),
+		CleartextSyncAlarmLatched:      s.stats.CleartextSyncAlarmLatched.Load(),
+		ConfigsStaleIgnored:            s.stats.ConfigsStaleIgnored.Load(),
+		BulkPrimesWithoutIncarnation:   s.stats.BulkPrimesWithoutIncarnation.Load(),
+		PeerBootIncarnation:            s.PeerBootIncarnation().String(),
+		ConfigsDeadIncarnationDropped:  s.stats.ConfigsDeadIncarnationDropped.Load(),
 		BulkEndsDeadIncarnationDropped: s.stats.BulkEndsDeadIncarnationDropped.Load(),
-		ClockSyncsRefused: s.stats.ClockSyncsRefused.Load(),
-		BulkEndsForeignConnDropped: s.stats.BulkEndsForeignConnDropped.Load(),
-		BulkEndsEpochOnlyMatched: s.stats.BulkEndsEpochOnlyMatched.Load(),
-		ConfigsApplyFailed: s.stats.ConfigsApplyFailed.Load(),
-		ImportsRefusedByHelper: s.stats.ImportsRefusedByHelper.Load(),
-		ConfigsQueueFullDropped: s.stats.ConfigsQueueFullDropped.Load(),
-		ConfigApplyNacksReceived: s.stats.ConfigApplyNacksReceived.Load(),
-		IPsecSASent: s.stats.IPsecSASent.Load(), IPsecSAReceived: s.stats.IPsecSAReceived.Load(),
+		ClockSyncsRefused:              s.stats.ClockSyncsRefused.Load(),
+		BulkEndsForeignConnDropped:     s.stats.BulkEndsForeignConnDropped.Load(),
+		BulkEndsEpochOnlyMatched:       s.stats.BulkEndsEpochOnlyMatched.Load(),
+		ConfigsApplyFailed:             s.stats.ConfigsApplyFailed.Load(),
+		ImportsRefusedByHelper:         s.stats.ImportsRefusedByHelper.Load(),
+		ConfigsQueueFullDropped:        s.stats.ConfigsQueueFullDropped.Load(),
+		ConfigApplyNacksReceived:       s.stats.ConfigApplyNacksReceived.Load(),
+		IPsecSASent:                    s.stats.IPsecSASent.Load(), IPsecSAReceived: s.stats.IPsecSAReceived.Load(),
 		IPsecSAStaleIgnored: s.stats.IPsecSAStaleIgnored.Load(),
-		DHCPLeasesSent: s.stats.DHCPLeasesSent.Load(), DHCPLeasesReceived: s.stats.DHCPLeasesReceived.Load(),
+		DHCPLeasesSent:      s.stats.DHCPLeasesSent.Load(), DHCPLeasesReceived: s.stats.DHCPLeasesReceived.Load(),
 		DHCPLeasesStaleIgnored: s.stats.DHCPLeasesStaleIgnored.Load(),
-		DHCPLeasesSeeded: s.stats.DHCPLeasesSeeded.Load(),
-		FencesSent: s.stats.FencesSent.Load(), FencesReceived: s.stats.FencesReceived.Load(),
+		DHCPLeasesSeeded:       s.stats.DHCPLeasesSeeded.Load(),
+		FencesSent:             s.stats.FencesSent.Load(), FencesReceived: s.stats.FencesReceived.Load(),
 		FenceAcksSent: s.stats.FenceAcksSent.Load(), FenceAcksReceived: s.stats.FenceAcksReceived.Load(),
 		FenceAcksTimedOut: s.stats.FenceAcksTimedOut.Load(), Errors: s.stats.Errors.Load(),
 		DeletesDropped: s.stats.DeletesDropped.Load(), DeletesStaleIgnored: s.stats.DeletesStaleIgnored.Load(),
-		InstallsStaleIgnored: s.stats.InstallsStaleIgnored.Load(),
+		InstallsStaleIgnored:       s.stats.InstallsStaleIgnored.Load(),
 		SessionsStaleConfigIgnored: s.stats.SessionsStaleConfigIgnored.Load(),
-		GenMapOverflow: s.stats.GenMapOverflow.Load(), GenTombstonesEvicted: s.stats.GenTombstonesEvicted.Load(),
+		GenMapOverflow:             s.stats.GenMapOverflow.Load(), GenTombstonesEvicted: s.stats.GenTombstonesEvicted.Load(),
 		PreAuthRejected: s.stats.PreAuthRejected.Load(), Connected: s.stats.Connected.Load(),
-		ActiveFabric: activeFabric,
+		ActiveFabric:      activeFabric,
 		BulkSyncStartTime: s.stats.BulkSyncStartTime.Load(), BulkSyncEndTime: s.stats.BulkSyncEndTime.Load(),
-		BulkSyncSessions: s.stats.BulkSyncSessions.Load(),
+		BulkSyncSessions:   s.stats.BulkSyncSessions.Load(),
 		LastConfigSyncTime: s.stats.LastConfigSyncTime.Load(), LastConfigSyncSize: s.stats.LastConfigSyncSize.Load(),
 		LastFenceSeq: s.stats.LastFenceSeq.Load(), LastFenceAckAt: s.stats.LastFenceAckAt.Load(),
 		GenCapGrown: s.stats.GenCapGrown.Load(), GenCapShrunk: s.stats.GenCapShrunk.Load(),
-		RebaseSaturations: s.stats.RebaseSaturations.Load(),
-		AuthUpgradeIdentityErrors: s.stats.AuthUpgradeIdentityErrors.Load(),
+		RebaseSaturations:           s.stats.RebaseSaturations.Load(),
+		AuthUpgradeIdentityErrors:   s.stats.AuthUpgradeIdentityErrors.Load(),
 		DHCPLeasesDroppedNoIdentity: s.stats.DHCPLeasesDroppedNoIdentity.Load(),
-		GenGuardSessionCap: s.genGuardSessionCap.Load(),
+		GenGuardSessionCap:          s.genGuardSessionCap.Load(),
 	}
 }
 

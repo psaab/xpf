@@ -449,11 +449,13 @@ func (s *SessionSync) stampConfigEpoch() uint64 {
 func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane.SessionValue) {
 	g := s.nextInstallGen()
 	val.Generation = g
-	// #7095: stamp the cluster-stable ingress fold on the same pass that
-	// stamps the generation. Incremental sends stamp immediately before
-	// encoding; table-truth bulk sends stamp at their source decision
-	// boundary, before BulkStart and any row serialization.
+	// #7095: stamp the cluster-stable ingress fold, and #12075: stamp the
+	// cluster-stable egress fold, on the same pass as the generation.
+	// Incremental sends stamp immediately before encoding; table-truth bulk
+	// sends stamp at their source decision boundary, before BulkStart and any
+	// row serialization.
 	val.IngressIfaceFold = s.stampIngressIfaceFold(val.IngressIfindex, val.IngressVlanID)
+	val.EgressIfaceFold = s.stampEgressIfaceFold(val.FibIfindex, val.FibVlanID)
 	// #5274/#11055: preserve the RG0 config-authority namespace and mark its
 	// source so a receiver can compare only when both nodes agree on the role.
 	val.ConfigEpoch = s.stampConfigEpoch()
@@ -536,11 +538,13 @@ func (s *SessionSync) stampInstallGenV4(key dataplane.SessionKey, val *dataplane
 func (s *SessionSync) stampInstallGenV6(key dataplane.SessionKeyV6, val *dataplane.SessionValueV6) {
 	g := s.nextInstallGen()
 	val.Generation = g
-	// #7095: stamp the cluster-stable ingress fold on the same pass that
-	// stamps the generation. Incremental sends stamp immediately before
-	// encoding; table-truth bulk sends stamp at their source decision
-	// boundary, before BulkStart and any row serialization.
+	// #7095: stamp the cluster-stable ingress fold, and #12075: stamp the
+	// cluster-stable egress fold, on the same pass as the generation.
+	// Incremental sends stamp immediately before encoding; table-truth bulk
+	// sends stamp at their source decision boundary, before BulkStart and any
+	// row serialization.
 	val.IngressIfaceFold = s.stampIngressIfaceFold(val.IngressIfindex, val.IngressVlanID)
+	val.EgressIfaceFold = s.stampEgressIfaceFold(val.FibIfindex, val.FibVlanID)
 	// #5274/#11055: v6 twin of the authority-relative v4 stamp.
 	val.ConfigEpoch = s.stampConfigEpoch()
 	s.genSentMu.Lock()
@@ -697,7 +701,6 @@ func (s *SessionSync) stampTCPHandshakeStateSentV6(
 	}
 	stampTCPHandshakeStateLocked(s.tcpHandshakeSentV6, key, sessionID, state, s.sentCap())
 }
-
 
 // takeDeleteGenV4 returns the generation a delete for this wire key should
 // carry and evicts the sender-side stamp.
