@@ -276,8 +276,8 @@ func TestTestRoutingPartialFamilyWarning4832(t *testing.T) {
 	}
 }
 
-// TestTestRoutingUsageAndNilManager4832 covers the two guard paths: no
-// routing Manager, and a missing destination argument.
+// TestTestRoutingUsageAndNilManager4832 covers a nil routing Manager and empty args.
+// Both guard paths return without attempting a lookup.
 func TestTestRoutingUsageAndNilManager4832(t *testing.T) {
 	// Nil routing Manager: report unavailable, no error.
 	out := captureStdout(t, func() {
@@ -289,10 +289,10 @@ func TestTestRoutingUsageAndNilManager4832(t *testing.T) {
 		t.Errorf("expected unavailable message\n%s", out)
 	}
 
-	// Missing destination: usage line.
+	// Empty args: usage line.
 	c := cliWithRoutes(fakeRouteLister{v4: stdV4Routes()})
 	out = captureStdout(t, func() {
-		if err := c.testRouting([]string{"instance", "red"}); err != nil {
+		if err := c.testRouting(nil); err != nil {
 			t.Fatalf("usage path should not error; got %v", err)
 		}
 	})

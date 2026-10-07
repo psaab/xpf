@@ -312,6 +312,9 @@ func (c *CLI) testRouting(args []string) error {
 			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
 				return fmt.Errorf("selector %q requires a value", args[i])
 			}
+			if args[i+1] == "destination" || args[i+1] == "instance" {
+				return fmt.Errorf("selector %q requires a non-selector value", args[i])
+			}
 			i++
 			dest = args[i]
 		case "instance":
@@ -321,6 +324,9 @@ func (c *CLI) testRouting(args []string) error {
 			seenInstance = true
 			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
 				return fmt.Errorf("selector %q requires a value", args[i])
+			}
+			if args[i+1] == "destination" || args[i+1] == "instance" {
+				return fmt.Errorf("selector %q requires a non-selector value", args[i])
 			}
 			i++
 			instance = args[i]
@@ -335,6 +341,9 @@ func (c *CLI) testRouting(args []string) error {
 	}
 
 	if dest == "" {
+		if seenDestination || seenInstance {
+			return fmt.Errorf("test routing requires a destination selector")
+		}
 		fmt.Println("usage: test routing destination <ip-or-prefix> [instance <name>]")
 		return nil
 	}

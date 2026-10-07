@@ -37,6 +37,10 @@ func TestRemoteTestRoutingRejectsMalformedSelectors12077(t *testing.T) {
 		{"whitespace-only instance value", []string{"destination", "10.1.2.3", "instance", "  "}, "selector \"instance\" requires a value"},
 		{"repeated destination", []string{"destination", "10.1.2.3", "destination", "10.9.9.9"}, "duplicate selector \"destination\""},
 		{"repeated instance", []string{"destination", "10.1.2.3", "instance", "a", "instance", "b"}, "duplicate selector \"instance\""},
+		{"destination word as destination value", []string{"destination", "destination"}, "selector \"destination\" requires a non-selector value"},
+		{"instance word as destination value", []string{"destination", "instance"}, "selector \"destination\" requires a non-selector value"},
+		{"destination word as instance value", []string{"instance", "destination"}, "selector \"instance\" requires a non-selector value"},
+		{"instance without destination", []string{"instance", "blue"}, "test routing requires a destination selector"},
 	}
 
 	for _, tc := range cases {
@@ -62,5 +66,23 @@ func TestRemoteTestRoutingBuildsValidTopic12077(t *testing.T) {
 	}
 	if len(fake.topics) != 1 || fake.topics[0] != "test-routing:dest=10.1.2.3,instance=dmz" {
 		t.Fatalf("topics = %v, want [test-routing:dest=10.1.2.3,instance=dmz]", fake.topics)
+	}
+}
+
+func TestRemoteTestRoutingEmptyArgsPrintsUsage12077(t *testing.T) {
+	fake := &testRoutingRecorder12077{}
+	c := &ctl{client: fake}
+	var err error
+	out := captureStdout(t, func() {
+		err = c.testRouting(nil)
+	})
+	if err != nil {
+		t.Fatalf("testRouting(nil) error = %v, want nil", err)
+	}
+	if !strings.Contains(out, "usage: test routing") {
+		t.Fatalf("testRouting(nil) output = %q, want usage", out)
+	}
+	if len(fake.topics) != 0 {
+		t.Fatalf("testRouting(nil) issued lookup RPCs: %v", fake.topics)
 	}
 }
