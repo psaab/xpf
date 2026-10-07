@@ -60,23 +60,21 @@ func TestBracketedToZoneIsRefused9246(t *testing.T) {
 
 // from-zone was NOT measured on the issue, so it was measured here. It
 // collapses the OTHER way -- the keys shift so Keys[3] becomes the literal
-// string "to-zone" -- and it is ALREADY refused today, as an undefined zone
-// named "to-zone".
+// string "to-zone". Before #12039, strict compilation refused this only as an
+// undefined zone; tolerant compilation merely warned, and the rule's dropped
+// restriction could fall through to a global permit.
 //
-// That message blames the wrong thing (it tells the operator to define a zone
-// rather than remove a bracket), but it is LOUD, and the silent to-zone case is
-// the defect this change fixes. Widening the detector to the from-zone shape
-// also flags the #2419 census's synthetic `from-zone xpfarg xpfarg xpfarg`
-// placeholder paths -- a real cost for a message improvement -- so the scope is
-// deliberately the silent case.
+// #12039 now records the malformed shape before pair construction and uses the
+// existing synthetic-global poison to refuse the tolerant snapshot. The
+// detector explicitly exempts #2419's synthetic `from-zone xpfarg xpfarg
+// xpfarg` census placeholders; the real grouped record/poison/no-phantom cells
+// are in zone_pair_malformed_poison_12039_test.go.
 //
-// This cell pins the OUTCOME rather than the wording: from-zone bracketing must
-// not commit. If someone later improves that message, this stays green.
+// This cell pins the strict OUTCOME rather than the wording: from-zone
+// bracketing must not commit.
 func TestBracketedFromZoneIsStillRefused9246(t *testing.T) {
 	if _, err := compile9246(t, policyLines9246("[ trust dmz ]", "untrust")); err == nil {
-		t.Error("#9246: a bracketed from-zone list committed clean. It is refused today only " +
-			"as a side effect (the collapse makes Keys[3] the literal \"to-zone\", which fails " +
-			"the undefined-zone gate), so a change to that gate could silence it.")
+		t.Error("#9246: a bracketed from-zone list committed clean")
 	}
 }
 

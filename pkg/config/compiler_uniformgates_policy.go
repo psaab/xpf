@@ -48,10 +48,9 @@ func runUniformGatesPolicy(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	// structural CoS/policer/device-map error and a bad match-address still
 	// win the first-error slot before a zone-reference error.
 	// #9246: a bracketed zone list on from-zone/to-zone. Runs BEFORE the
-	// undefined-zone gate, because the from-zone form otherwise surfaces there
-	// as an undefined zone literally named "to-zone" — loud, but blaming the
-	// wrong thing and telling the operator to define a zone rather than fix the
-	// bracket. The tolerant compiler records the malformed source context but,
+	// undefined-zone gate so a grouped from-zone list is recorded as malformed
+	// instead of being reduced to a warning about the shifted literal
+	// "to-zone". The tolerant compiler records the malformed source context but,
 	// as #11366 did, does not expand it into guessed zone-pair rules. Instead,
 	// a poison carrier uses the existing LenientContentDropped lowering: the
 	// userspace snapshot builder emits the __unsupported__ application sentinel

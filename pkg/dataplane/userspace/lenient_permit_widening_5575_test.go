@@ -159,3 +159,45 @@ func TestLenientCompleteAnyPermitStaysMatchAny5575(t *testing.T) {
 		t.Fatalf("PolicyContentRejected = %v, want empty for a legitimate match-any permit", snap.Capabilities.PolicyContentRejected)
 	}
 }
+func TestMalformedFromListZonePairRefusesSnapshot12039(t *testing.T) {
+	tree := &config.ConfigTree{}
+	for _, command := range []string{
+		"set security zones security-zone A",
+		"set security zones security-zone B",
+		"set security zones security-zone C",
+		"set security policies from-zone [ A C ] to-zone B policy p1 match source-address any",
+		"set security policies from-zone [ A C ] to-zone B policy p1 match destination-address any",
+		"set security policies from-zone [ A C ] to-zone B policy p1 match application any",
+		"set security policies from-zone [ A C ] to-zone B policy p1 then deny",
+		"set security policies global policy g-permit match source-address any",
+		"set security policies global policy g-permit match destination-address any",
+		"set security policies global policy g-permit match application any",
+		"set security policies global policy g-permit then permit",
+		"set security policies default-policy permit-all",
+	} {
+		path, quoted, grouped, err := config.ParseSetCommandGrouped(command)
+		if err != nil {
+			t.Fatalf("ParseSetCommandGrouped(%q): %v", command, err)
+		}
+		if err := tree.SetPathQuotedGrouped(path, quoted, grouped); err != nil {
+			t.Fatalf("SetPathQuotedGrouped(%q): %v", command, err)
+		}
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	if got := config.LenientDroppedPolicyLocator(cfg); got == "" {
+		t.Error("grouped from-zone list left NO poisoned global carrier — the dropped deny is not represented by the existing synthetic-global-poison path (#12039)")
+	}
+	snap, err := buildSnapshot(cfg, config.UserspaceConfig{}, 1, 0)
+	if err != nil {
+		t.Fatalf("buildSnapshot: %v", err)
+	}
+	if !snapshotHasAppSentinel5575(snap) {
+		t.Error("snapshot has no __unsupported__ sentinel for the grouped from-zone list — the Rust integrity preflight would not refuse it and A->B/C->B can fall through to the global permit (#12039)")
+	}
+	if len(snap.Capabilities.PolicyContentRejected) == 0 {
+		t.Error("snapshot PolicyContentRejected is empty — the helper would not refuse this grouped from-zone list (#12039)")
+	}
+}

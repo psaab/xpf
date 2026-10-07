@@ -117,8 +117,11 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 				//	[from-zone trust dmz to-zone]
 				//	  [untrust policy p1 then permit]
 				//
-				// making Keys[3] the literal string "to-zone", which today is
-				// caught only as an undefined zone named "to-zone".
+				// Keys[3] is the literal "to-zone". malformedZonePairShape9246
+				// records and skips this context before pair construction, so
+				// tolerant loads reach the existing synthetic-global poison
+				// path rather than building a phantom trust->to-zone pair with
+				// zero policies.
 				//
 				// Junos accepts no bracketed list on from-zone/to-zone -- a
 				// policy context is ONE zone pair -- so this is refused rather

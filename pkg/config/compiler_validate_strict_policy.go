@@ -605,11 +605,21 @@ func validatePolicyZoneReferencesStrict(cfg *Config) error {
 				zpp.FromZone, zpp.ToZone, JunosGlobalZoneName, side)
 		}
 		if !defined(zpp.FromZone) {
+			if len(zpp.Policies) == 0 {
+				return fmt.Errorf(
+					"security policy from-zone %q to-zone %q references undefined from-zone %q; define `set security zones security-zone %s` in the same commit; this zone-pair has no compiled policies, so no rule reaches the userspace helper and this reference does not itself refuse the snapshot",
+					zpp.FromZone, zpp.ToZone, zpp.FromZone, zpp.FromZone)
+			}
 			return fmt.Errorf(
 				"security policy from-zone %q to-zone %q references undefined from-zone %q; define `set security zones security-zone %s` in the same commit; on a tolerant load the userspace helper refuses the WHOLE policy snapshot for an unresolvable zone (#3402), so none of the config's policies is enforced",
 				zpp.FromZone, zpp.ToZone, zpp.FromZone, zpp.FromZone)
 		}
 		if !defined(zpp.ToZone) {
+			if len(zpp.Policies) == 0 {
+				return fmt.Errorf(
+					"security policy from-zone %q to-zone %q references undefined to-zone %q; define `set security zones security-zone %s` in the same commit; this zone-pair has no compiled policies, so no rule reaches the userspace helper and this reference does not itself refuse the snapshot",
+					zpp.FromZone, zpp.ToZone, zpp.ToZone, zpp.ToZone)
+			}
 			return fmt.Errorf(
 				"security policy from-zone %q to-zone %q references undefined to-zone %q; define `set security zones security-zone %s` in the same commit; on a tolerant load the userspace helper refuses the WHOLE policy snapshot for an unresolvable zone (#3402), so none of the config's policies is enforced",
 				zpp.FromZone, zpp.ToZone, zpp.ToZone, zpp.ToZone)
