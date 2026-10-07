@@ -2865,6 +2865,31 @@ fn local_flow_12056(v6: bool, proto: u8, interface_nat: bool) -> SessionFlow {
     }
 }
 
+fn miss_install_table_12056(
+    forwarding: &ForwardingState,
+    flow: &SessionFlow,
+    v6: bool,
+) -> Option<(u32, u32)> {
+    match crate::afxdp::forwarding::ingress_route_table_override(
+        forwarding,
+        &frame(),
+        meta(LAN_IFINDEX as u32, 0, v6),
+        flow,
+        Some(TEST_LAN_ZONE_ID),
+        None,
+        0,
+        None,
+    ) {
+        crate::afxdp::forwarding::RouteOverride::Table { domain, check, .. } => {
+            Some((domain, check))
+        }
+        crate::afxdp::forwarding::RouteOverride::None => None,
+        crate::afxdp::forwarding::RouteOverride::Drop => {
+            panic!("permit-only local test fixture must not return RouteOverride::Drop")
+        }
+    }
+}
+
 fn local_decision_12056(
     local: crate::afxdp::ForwardingResolution,
     stamp: (u32, u32),
@@ -2904,9 +2929,17 @@ fn unchanged_ri_local_miss_arms_keep_sessions_for_v4_v6_tcp_udp_12056() {
                     panic!("selected local miss arm must match: v6={v6}, proto={proto}, interface_nat={interface_nat}")
                 });
                 assert_eq!(local.disposition, crate::afxdp::ForwardingDisposition::LocalDelivery);
-                let stamp =
-                    crate::afxdp::forwarding::install_table_stamp_for_miss(None, false, local);
-                assert_eq!(stamp, (0, 0));
+                let native_identity = crate::session::install_table_identity("blue");
+                let pbr_install_table =
+                    miss_install_table_12056(&forwarding, &flow, v6)
+                        .expect("native RI miss must select its route table");
+                assert_eq!(pbr_install_table, native_identity);
+                let stamp = crate::afxdp::forwarding::install_table_stamp_for_miss(
+                    Some(pbr_install_table),
+                    false,
+                    local,
+                );
+                assert_eq!(stamp, native_identity);
                 let stored = local_decision_12056(local, stamp);
                 let mut sessions = SessionTable::new();
                 sessions.set_filter_revalidation_gen(7);
@@ -2968,8 +3001,15 @@ fn static_pbr_local_session_tracks_retarget_and_address_removal_12056() {
                 .unwrap_or_else(|| {
                     panic!("local miss arm must match: v6={v6}, proto={proto}, interface_nat={interface_nat}")
                 });
-                let stamp =
-                    crate::afxdp::forwarding::install_table_stamp_for_miss(Some(blue_identity), false, local);
+                let pbr_install_table =
+                    miss_install_table_12056(&forwarding, &flow, v6)
+                        .expect("static PBR miss must select its route table");
+                assert_eq!(pbr_install_table, blue_identity);
+                let stamp = crate::afxdp::forwarding::install_table_stamp_for_miss(
+                    Some(pbr_install_table),
+                    false,
+                    local,
+                );
                 assert_eq!(stamp, blue_identity);
                 let stored = local_decision_12056(local, stamp);
                 let mut sessions = SessionTable::new();
@@ -3035,4 +3075,66 @@ fn static_pbr_local_session_tracks_retarget_and_address_removal_12056() {
             }
         }
     }
+}
+
+#[test]
+fn removing_static_pbr_revalidates_local_session_under_native_ri_12056() {
+    let forwarding = forwarding_with_ri_local_12056(false, true, Some("green"), true);
+    let flow = local_flow_12056(false, PROTO_TCP, true);
+    let local = crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
+        &forwarding,
+        flow.dst_ip,
+        PROTO_TCP,
+    )
+    .expect("WAN SNAT destination must use the interface-NAT local arm");
+    assert_eq!(local.local_ifindex, 12);
+    let pbr_install_table =
+        miss_install_table_12056(&forwarding, &flow, false)
+            .expect("matching green PBR term must select its table");
+    assert_eq!(
+        pbr_install_table,
+        crate::session::install_table_identity("green")
+    );
+    let stamp = crate::afxdp::forwarding::install_table_stamp_for_miss(
+        Some(pbr_install_table),
+        false,
+        local,
+    );
+    assert_eq!(stamp, crate::session::install_table_identity("green"));
+    let stored = local_decision_12056(local, stamp);
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    assert!(sessions.install_with_protocol_with_origin(
+        flow.forward_key.clone(),
+        stored,
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+        PROTO_TCP,
+        0,
+    ));
+
+    let native = forwarding_with_ri_local_12056(false, true, None, true);
+    let native_identity =
+        miss_install_table_12056(&native, &flow, false).expect("native RI must select blue");
+    assert_eq!(native_identity, crate::session::install_table_identity("blue"));
+    let route = revalidate_static_pbr_route_on_session_hit(
+        &native,
+        &std::sync::Arc::new(ShardedNeighborMap::new()),
+        &sessions,
+        &flow.forward_key,
+        &flow,
+        &frame(),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+        stored,
+        false,
+    )
+    .expect("removing green PBR must revalidate against the native blue identity");
+    assert_eq!(route.revoked_key.as_ref(), Some(&flow.forward_key));
+    assert_eq!(
+        (route.install_table_domain, route.install_table_check),
+        crate::session::install_table_identity("blue")
+    );
+    assert_eq!(route.resolution.disposition, crate::afxdp::ForwardingDisposition::NoRoute);
 }
