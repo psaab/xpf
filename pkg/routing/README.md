@@ -402,7 +402,9 @@ delegate to the owning domain. Exported types:
   the leaked prefix and says nothing about one inside it.
 
   The scoping set is `DefaultInstanceIngressIfaces(cfg)`: every
-  configured interface unit **not** claimed by a routing instance.
+  configured interface unit **not** claimed by a routing instance and
+  **not** in the management class (`fxp*`, `em*`, `fab*`), which the
+  daemon binds to the implicit management VRF.
   `next-table` statics are read from the default instance's
   routing-options (`daemon_apply_routing.go` passes
   `cfg.RoutingOptions.StaticRoutes` + `Inet6StaticRoutes`), so the

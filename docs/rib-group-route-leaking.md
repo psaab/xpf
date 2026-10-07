@@ -368,9 +368,11 @@ grounds that the rule is destination-scoped — an argument that holds for every
 packet *outside* the leaked prefix and says nothing about one inside it.
 
 The scoping set is `routing.DefaultInstanceIngressIfaces(cfg)`: every configured
-interface unit **not** claimed by a routing instance. That is exactly the
-default instance's ingress, and the default instance is always the authoring
-instance — per-instance `next-table` is hard-rejected at commit (#5830, below),
+interface unit **not** claimed by a routing instance and **not** in the
+management class (`fxp*`, `em*`, `fab*`), which the daemon binds to the implicit
+management VRF. That is exactly the default instance's ingress, and the default
+instance is always the authoring instance — per-instance `next-table` is
+hard-rejected at commit (#5830, below),
 and the applier is fed only `cfg.RoutingOptions.StaticRoutes` +
 `Inet6StaticRoutes`.
 

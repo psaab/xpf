@@ -7,7 +7,8 @@ import (
 
 // DefaultInstanceIngressIfaces returns the sorted, de-duplicated kernel ifnames
 // of every configured interface unit that is NOT assigned to a routing
-// instance — i.e. the ingress interfaces of the DEFAULT routing instance.
+// instance and is not in the management class — the default routing instance's
+// ingress interfaces.
 //
 // This is the single shared (#9810) implementation of the #9420 scoping set.
 // It lives in pkg/config rather than pkg/routing so the strict commit gate
@@ -24,6 +25,9 @@ import (
 // locally generated traffic including sockets bound to ANOTHER VRF (the
 // #9420 cross-VRF hijack), and the configured `lo0` idiom resolves to the
 // nonexistent `lo0`, whose rules install detached and only inflate N.
+//
+// Management-class interfaces are EXCLUDED (#12061): the daemon binds them to
+// the implicit management VRF, not the default instance.
 func DefaultInstanceIngressIfaces(cfg *Config) []string {
 	if cfg == nil {
 		return nil
@@ -68,6 +72,11 @@ func DefaultInstanceIngressIfaces(cfg *Config) []string {
 		if IsLoopbackIngress(ifc.Name) {
 			continue
 		}
+		// #12061: management-class interfaces are bound to the implicit
+		// management VRF, so they are not default-instance ingress.
+		if IsManagementIfName(ifc.Name) {
+			continue
+		}
 		// #9815: claimedBare is the bare-origin partition layered on
 		// #9810's resolved claim set. Unit claims stay per-device below.
 		if _, taken := claimed[ifc.Name]; taken {
@@ -92,6 +101,11 @@ func DefaultInstanceIngressIfaces(cfg *Config) []string {
 			// loopback ingress (`lo`, `lo0`, `lo0.5`) never becomes an `iif`
 			// scope — `iif lo` is the live #9420 hijack, `iif lo0*` detached.
 			if IsLoopbackIngress(iif) {
+				continue
+			}
+			// Check the resolved kernel name too, since tunnel/interface
+			// resolution can change the name from the configured spelling.
+			if IsManagementIfName(iif) {
 				continue
 			}
 			if _, taken := claimed[iif]; taken {
