@@ -184,3 +184,85 @@ func TestInvalidationDebtAsyncDischargeStampsAppliedMarker12301(t *testing.T) {
 		t.Fatal("successful async debt discharge did not stamp the active config as applied")
 	}
 }
+
+// A sync-landed publish that retains debt through a partial delete failure
+// must stamp the landed generation, so the settled status callback can retry
+// the surviving row exactly like the deferred path.
+func TestInvalidationDebtSyncLandedPartialRetryViaSettledCallback12301(t *testing.T) {
+	h := newInvalDebtHarness12073(t, nil) // every publish lands synchronously
+	sshSession := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 9}, DstIP: [4]byte{10, 0, 0, 2},
+		SrcPort: 40009, DstPort: 22, Protocol: 6,
+	}
+	h.dp.v4[sshSession] = dataplane.SessionValue{State: dataplane.SessStateEstablished, PolicyID: h.webID}
+	deleteErr := errors.New("partial v4 batch delete")
+	h.d.setDataplane(&partialDeleteDP12301{
+		invalDebtTestDP12073: h.dp,
+		failV4Once:           true,
+		deleteErr:            deleteErr,
+	})
+
+	if err := h.commit(h.oldCfg, h.newCfg); !errors.Is(err, deleteErr) {
+		t.Fatalf("commit error = %v, want partial delete error", err)
+	}
+	if h.d.policyInvalidationDebt == nil {
+		t.Fatal("partial delete failure dropped the invalidation debt")
+	}
+	landed := h.dp.lastApply.Generation
+	if got := h.d.policyInvalidationDebt.publishGeneration; got != landed {
+		t.Errorf("sync-landed debt publishGeneration = %d, want the landed generation %d; "+
+			"the settled callback rejects unstamped (gen-0) debt and the surviving row is never retried",
+			got, landed)
+	}
+
+	h.d.dischargePolicyInvalidationAfterPublish(landed)
+	if h.d.policyInvalidationDebt != nil {
+		t.Fatal("settled status callback did not retry sync-retained debt; " +
+			"the surviving p-web row keeps forwarding under stale authorization")
+	}
+	if got := len(h.dp.v4); got != 0 {
+		t.Fatalf("target sessions after settled retry = %d, want 0", got)
+	}
+}
+
+// A superseding apply recaptures against the post-publish table, where the
+// failed row no longer carries its target policy id. The recapture must
+// merge the retained failed row forward — overwriting the capture strands
+// it while the debt discharges around it.
+func TestInvalidationDebtSupersedingRecapturePreservesFailedRow12301(t *testing.T) {
+	h := newInvalDebtHarness12073(t, nil) // every publish lands synchronously
+	sshSession := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 0, 9}, DstIP: [4]byte{10, 0, 0, 2},
+		SrcPort: 40009, DstPort: 22, Protocol: 6,
+	}
+	h.dp.v4[sshSession] = dataplane.SessionValue{State: dataplane.SessStateEstablished, PolicyID: h.webID}
+	deleteErr := errors.New("partial v4 batch delete")
+	h.d.setDataplane(&partialDeleteDP12301{
+		invalDebtTestDP12073: h.dp,
+		failV4Once:           true,
+		deleteErr:            deleteErr,
+	})
+
+	if err := h.commit(h.oldCfg, h.newCfg); !errors.Is(err, deleteErr) {
+		t.Fatalf("commit error = %v, want partial delete error", err)
+	}
+	if h.d.policyInvalidationDebt == nil {
+		t.Fatal("partial delete failure dropped the invalidation debt")
+	}
+	if got := len(h.dp.v4); got != 1 {
+		t.Fatalf("remaining target sessions after injected partial delete = %d, want 1", got)
+	}
+
+	// An unrelated superseding commit lands. Its recapture must not lose
+	// the failed p-web row the previous commit retained.
+	c3 := twoPolicyConfig([]string{"p-first", "p-ssh", "p-extra"}, nil)
+	if err := h.commit(h.newCfg, c3); err != nil {
+		t.Fatalf("superseding commit: %v", err)
+	}
+	if h.d.policyInvalidationDebt != nil {
+		t.Fatal("superseding landing publish did not discharge the merged debt")
+	}
+	if got := len(h.dp.v4); got != 0 {
+		t.Fatalf("superseding recapture lost the retained failed row: %d p-web session(s) still installed, want 0", got)
+	}
+}

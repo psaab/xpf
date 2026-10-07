@@ -236,11 +236,16 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 		return
 	}
 	previousGeneration := uint64(0)
-	if debt := d.policyInvalidationDebt; debt != nil && debt.newCfg == plan.newCfg {
-		// Preserve a generation only when retrying the same target. A
-		// superseding target needs its own publication before it can discharge
-		// the merged candidate set.
-		previousGeneration = debt.publishGeneration
+	var previousCapture *policyInvalidationCapture
+	if debt := d.policyInvalidationDebt; debt != nil {
+		// A retained candidate may no longer appear in the fresh scan after
+		// publication has restamped its policy id. Carry those candidates
+		// forward, but only carry generation eligibility across a same-target
+		// retry; a superseding target must publish its own generation.
+		previousCapture = debt.capture
+		if debt.newCfg == plan.newCfg {
+			previousGeneration = debt.publishGeneration
+		}
 	}
 	d.policyInvalidationDebt = &policyInvalidationDebt{
 		oldCfg: plan.oldCfg, newCfg: plan.newCfg, renameApply: plan.renameApply,
@@ -282,7 +287,7 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	if len(deleted)+len(modified)+len(deflt) == 0 && len(renameBindings) == 0 {
 		// Nothing to invalidate on this commit — record the empty capture so the
 		// clears know one was taken and skip the session-table scan entirely.
-		d.retainPolicyInvalidationCaptureLocked(capture)
+		d.retainPolicyInvalidationCaptureLocked(mergePolicyInvalidationCaptures(previousCapture, capture))
 		return
 	}
 
@@ -316,7 +321,7 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 			capture.deleted.enumFailed = true
 			capture.modified.enumFailed = true
 			capture.deflt.enumFailed = true
-			d.retainPolicyInvalidationCaptureLocked(capture)
+			d.retainPolicyInvalidationCaptureLocked(mergePolicyInvalidationCaptures(previousCapture, capture))
 			return
 		}
 		if !resp.SessionPolicyComplete {
@@ -385,7 +390,7 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 			capture.modified.enumFailed = true
 			capture.deflt.enumFailed = true
 		}
-		d.retainPolicyInvalidationCaptureLocked(capture)
+		d.retainPolicyInvalidationCaptureLocked(mergePolicyInvalidationCaptures(previousCapture, capture))
 		return
 	}
 
@@ -462,7 +467,7 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 		capture.deflt.enumFailed = true
 	}
 
-	d.retainPolicyInvalidationCaptureLocked(capture)
+	d.retainPolicyInvalidationCaptureLocked(mergePolicyInvalidationCaptures(previousCapture, capture))
 }
 
 func (d *Daemon) retainPolicyInvalidationCaptureLocked(capture *policyInvalidationCapture) {
@@ -472,10 +477,106 @@ func (d *Daemon) retainPolicyInvalidationCaptureLocked(capture *policyInvalidati
 	}
 }
 
-func (d *Daemon) notePolicyInvalidationDeferredPublish(cfg *config.Config, generation uint64) {
+func (d *Daemon) notePolicyInvalidationPublish(cfg *config.Config, generation uint64) {
+	// Generation zero is the callback's "not stamped" sentinel; never let an
+	// unknown result erase a previously useful same-target generation.
+	if generation == 0 {
+		return
+	}
 	if debt := d.policyInvalidationDebt; debt != nil && debt.newCfg == cfg {
 		debt.publishGeneration = generation
 	}
+}
+
+type policyInvalidationMatchIdentity struct {
+	family             uint8
+	routingDomain      uint32
+	tuple              dpuserspace.SessionPolicyTuple
+	sessionID          uint64
+	companionSessionID uint64
+}
+
+func policyInvalidationMatchID(match dpuserspace.SessionPolicyMatch) policyInvalidationMatchIdentity {
+	family := match.AddrFamily
+	if family == 0 {
+		family = match.Tuple.AddrFamily
+	}
+	return policyInvalidationMatchIdentity{
+		family:             family,
+		routingDomain:      match.RoutingDomain,
+		tuple:              match.Tuple,
+		sessionID:          match.ExpectedRTFlowSessionID,
+		companionSessionID: match.ExpectedCompanionRTFlowSessionID,
+	}
+}
+
+// mergePolicyInvalidationCaptures keeps fresh observations first and carries
+// forward only prior candidates that the fresh scan did not rediscover. The
+// row keys are stable even when publication has restamped the row's policy id.
+// Pair-specific rename metadata and read errors remain those of the fresh
+// capture; only delete candidates are owed across applies.
+func mergePolicyInvalidationCaptures(previous, current *policyInvalidationCapture) *policyInvalidationCapture {
+	if previous == nil {
+		return current
+	}
+	if current == nil {
+		return previous
+	}
+	if previous.deleted.empty() && previous.modified.empty() && previous.deflt.empty() {
+		return current
+	}
+
+	v4Capacity := len(previous.deleted.v4) + len(previous.modified.v4) + len(previous.deflt.v4) +
+		len(current.deleted.v4) + len(current.modified.v4) + len(current.deflt.v4)
+	v6Capacity := len(previous.deleted.v6) + len(previous.modified.v6) + len(previous.deflt.v6) +
+		len(current.deleted.v6) + len(current.modified.v6) + len(current.deflt.v6)
+	policyCapacity := len(previous.deleted.policy) + len(previous.modified.policy) + len(previous.deflt.policy) +
+		len(current.deleted.policy) + len(current.modified.policy) + len(current.deflt.policy)
+	seenV4 := make(map[dataplane.SessionKey]struct{}, v4Capacity)
+	seenV6 := make(map[dataplane.SessionKeyV6]struct{}, v6Capacity)
+	seenPolicy := make(map[policyInvalidationMatchIdentity]struct{}, policyCapacity)
+
+	mark := func(bucket capturedSessions) {
+		for _, entry := range bucket.v4 {
+			seenV4[entry.Key] = struct{}{}
+		}
+		for _, entry := range bucket.v6 {
+			seenV6[entry.Key] = struct{}{}
+		}
+		for _, match := range bucket.policy {
+			seenPolicy[policyInvalidationMatchID(match)] = struct{}{}
+		}
+	}
+	mark(current.deleted)
+	mark(current.modified)
+	mark(current.deflt)
+
+	merge := func(previous, current capturedSessions) capturedSessions {
+		for _, entry := range previous.v4 {
+			if _, ok := seenV4[entry.Key]; !ok {
+				seenV4[entry.Key] = struct{}{}
+				current.v4 = append(current.v4, entry)
+			}
+		}
+		for _, entry := range previous.v6 {
+			if _, ok := seenV6[entry.Key]; !ok {
+				seenV6[entry.Key] = struct{}{}
+				current.v6 = append(current.v6, entry)
+			}
+		}
+		for _, match := range previous.policy {
+			key := policyInvalidationMatchID(match)
+			if _, ok := seenPolicy[key]; !ok {
+				seenPolicy[key] = struct{}{}
+				current.policy = append(current.policy, match)
+			}
+		}
+		return current
+	}
+	current.deleted = merge(previous.deleted, current.deleted)
+	current.modified = merge(previous.modified, current.modified)
+	current.deflt = merge(previous.deflt, current.deflt)
+	return current
 }
 
 // capturePolicyInvalidationBeforeDeferredPublish runs outside Manager.mu from

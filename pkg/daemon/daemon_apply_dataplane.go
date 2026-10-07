@@ -252,8 +252,8 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			fresh := applyResult == nil || !applyResult.SnapshotPublishDeferred
 			d.hostInboundDataplaneFresh.Store(fresh)
 			d.policyInvalidationPublishLanded = fresh
-			if applyResult != nil && applyResult.SnapshotPublishDeferred {
-				d.notePolicyInvalidationDeferredPublish(cfg, applyResult.Generation)
+			if applyResult != nil {
+				d.notePolicyInvalidationPublish(cfg, applyResult.Generation)
 			}
 			if publishedTail {
 				applyErr = err
@@ -1330,10 +1330,11 @@ func (d *Daemon) reapplyAfterDeferredMAC(cfg *config.Config) {
 	// accept-less against an N+1 dataplane. F1-B: a deferred re-apply
 	// publish leaves the gate clear, like the primary site.
 	d.hostInboundDataplaneFresh.Store(res == nil || !res.SnapshotPublishDeferred)
+	if res != nil {
+		d.notePolicyInvalidationPublish(cfg, res.Generation)
+	}
 	if res == nil || !res.SnapshotPublishDeferred {
 		d.policyInvalidationPublishLanded = true
-	} else {
-		d.notePolicyInvalidationDeferredPublish(cfg, res.Generation)
 	}
 }
 
