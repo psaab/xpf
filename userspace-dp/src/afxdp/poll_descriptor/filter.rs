@@ -783,11 +783,10 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
     // MAIN: it must fail closed on this hit just as it does on a miss.
     // #11324: `reverse_session_key` preserves the original forward ingress
     // domain, but poll-path repair can key a local reverse row by reply arrival.
-    // Recover the forward session's native identity for route revalidation so
-    // arrival never replaces the client's domain. The decision stamp may reflect
-    // directional PBR, so it is reserved for shared/sessionless reverse hits
-    // without a canonical local forward row. If a local reverse row has lost its
-    // forward row too, fail closed instead of trusting its arrival-domain key.
+    // Prefer recovering the forward session's native identity so arrival never
+    // replaces the client's domain. If the forward row is unavailable, preserve
+    // the stored decision stamp as the reverse companion's native identity;
+    // explicit reply-ingress PBR below remains authoritative over this fallback.
     let native_flow_domain = if is_reverse {
         if no_local_entry {
             Some(decision.install_table_domain)
@@ -797,6 +796,7 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
                     crate::afxdp::forwarding::egress_routing_domain(forwarding, egress_ifindex)
                 })
                 .map(|matched| matched.key.routing_domain)
+                .or(Some(decision.install_table_domain))
         }
     } else {
         Some(flow.forward_key.routing_domain)
