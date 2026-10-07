@@ -407,6 +407,10 @@ run_bash test/incus/cluster-env-selftest.sh
 run_bash test/incus/cos-apply-lib-selftest.sh
 run_bash test/incus/host-inbound-selftest.sh
 run_bash test/incus/iperf-throughput-selftest.sh
+# #11581: fail-closed HA metrics and shared pure assurance predicates.
+run_bash test/incus/ha-assurance-selftest.sh
+# #11581: same-load failover client JSON-stream lifecycle; hermetic fixtures.
+run_bash test/incus/failover-client-selftest.sh
 # #11872: host-clock resync after crash reboot; mocked incus/date, no cluster.
 run_bash test/incus/failover-clock-selftest.sh
 run_bash test/incus/screen-probe-selftest.sh

@@ -1,26 +1,18 @@
-"""Parser and failover oracle for `iperf3 -i 1 --forceflush -P N` text output.
+"""Parser and failover oracle for iperf3 JSON-stream or legacy text output.
 
-Per-second rows look like:
-    [SUM]   3.00-4.00   sec  118 MBytes  990 Mbits/sec   ...
+The reached failover client uses ``--json-stream --forceflush``. The text
+``[SUM]`` parser remains available for the sibling harnesses that still use
+human-readable interval output.
 
-Final summary lines look like:
-    [SUM]   0.00-60.00  sec  6.96 GBytes  996 Mbits/sec   ...      receiver
-    [SUM]   0.00-60.00  sec  6.96 GBytes  996 Mbits/sec   ...      sender
-
-`parse_sum_line` accepts only `[SUM]` aggregate rows. `parse_interval_line`
-also recognizes `[N]` per-stream rows for failover survival checks.
-
-CAUTION (hb166 V-12): the regex is NOT anchored at end-of-line, so BOTH
-the final-summary rows above AND warmup `(omitted)` rows —
-    [SUM]   0.00-1.00   sec  1.00 GBytes  8.59 Gbits/sec  ...  (omitted)
-— match `parse_sum_line`. Current callers pass runs without `-O`, so no
-omitted rows exist, and they explicitly drop the trailing final-summary
-rows. A future caller that scrapes a run started with `-O` (omit N
-warmup seconds) MUST filter the leading omitted rows itself; this parser
-returns them as ordinary per-second rows.
+The text regexes intentionally retain their historical behavior: the
+``[SUM]`` matcher also recognizes the final sender/receiver summary and
+warmup ``(omitted)`` rows. Existing text callers run without ``-O`` and the
+oracle filters summaries by the full-interval duration bound.
 """
 
 import argparse
+import json
+import math
 import re
 import sys
 from typing import Optional, Tuple
@@ -86,28 +78,117 @@ def parse_interval_line(line: str) -> Optional[Tuple[Optional[int], float, float
         return None
     return (None if stream == "SUM" else int(stream), start, end, bps)
 
+def _json_number(value, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} is not numeric")
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{field} is out of range") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{field} is not finite")
+    return number
+
+
+def _reject_json_constant(value: str):
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _json_stream_interval_rows(text: str):
+    rows = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line, parse_constant=_reject_json_constant)
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ValueError(f"invalid JSON-stream line {lineno}: {exc}") from exc
+        if not isinstance(event, dict):
+            raise ValueError(f"JSON-stream line {lineno} is not an event object")
+        event_name = event.get("event")
+        if not isinstance(event_name, str):
+            raise ValueError(f"JSON-stream line {lineno} has no event name")
+        if event_name != "interval":
+            continue
+
+        data = event.get("data")
+        if not isinstance(data, dict):
+            raise ValueError(f"JSON interval line {lineno} has no data object")
+        streams = data.get("streams", [])
+        if not isinstance(streams, list):
+            raise ValueError(f"JSON interval line {lineno} has malformed streams")
+
+        stream_rows = []
+        for index, stream in enumerate(streams, start=1):
+            if not isinstance(stream, dict):
+                raise ValueError(f"JSON interval line {lineno} has malformed stream")
+            start = _json_number(stream.get("start"), "stream start")
+            end = _json_number(stream.get("end"), "stream end")
+            bps = _json_number(stream.get("bits_per_second"), "stream bits_per_second")
+            stream_id = stream.get("socket", stream.get("id", index))
+            if isinstance(stream_id, bool) or not isinstance(stream_id, int):
+                raise ValueError(f"JSON interval line {lineno} has malformed stream id")
+            if end < start:
+                raise ValueError(f"JSON interval line {lineno} has reversed stream interval")
+            stream_rows.append((stream_id, start, end, int(bps)))
+
+        summary = data.get("sum")
+        if "sum" in data and not isinstance(summary, dict):
+            raise ValueError(f"JSON interval line {lineno} has malformed sum")
+        if summary is not None:
+            start = _json_number(summary.get("start"), "sum start")
+            end = _json_number(summary.get("end"), "sum end")
+            bps = _json_number(summary.get("bits_per_second"), "sum bits_per_second")
+            if end < start:
+                raise ValueError(f"JSON interval line {lineno} has reversed sum interval")
+            rows.append((None, start, end, int(bps)))
+        elif stream_rows:
+            start = min(row[1] for row in stream_rows)
+            end = max(row[2] for row in stream_rows)
+            rows.append((None, start, end, sum(row[3] for row in stream_rows)))
+        rows.extend(stream_rows)
+    return rows
+
+
+def _oracle_interval_rows(text: str, json_stream: bool):
+    first = next((char for char in text if not char.isspace()), "")
+    use_json = json_stream or first == "{"
+    if use_json:
+        return _json_stream_interval_rows(text), True
+    return [
+        row for line in text.splitlines()
+        if (row := parse_interval_line(line)) is not None
+    ], False
+
 
 def failover_interval_verdict(
     text: str,
     min_bps: int = 1_000_000_000,
     max_consecutive_low: int = 2,
+    *,
+    json_stream: bool = False,
 ) -> Tuple[bool, str]:
     """Bound low-rate one-second runs (two intervals maximum); fail closed on gaps."""
-    intervals = []
-    for line in text.splitlines():
-        row = parse_interval_line(line)
-        if row is not None and row[0] is None and 0.5 <= row[2] - row[1] <= 1.5:
-            intervals.append(row)
+    try:
+        rows, is_json = _oracle_interval_rows(text, json_stream)
+    except ValueError as exc:
+        return False, f"invalid JSON-stream interval telemetry: {exc}"
+    intervals = [
+        row for row in rows
+        if row[0] is None and 0.5 <= row[2] - row[1] <= 1.5
+    ]
     intervals.sort(key=lambda row: row[1])
     if not intervals:
-        return False, "no per-second [SUM] interval measurements"
+        source = "JSON interval" if is_json else "[SUM] interval"
+        return False, f"no per-second {source} measurements"
 
     longest = 0
     streak = 0
     previous_end = None
     for _, start, end, bps in intervals:
         if previous_end is not None and start - previous_end > 0.25:
-            return False, f"missing [SUM] interval telemetry after {previous_end:.2f}s"
+            source = "JSON interval" if is_json else "[SUM] interval telemetry"
+            return False, f"missing {source} after {previous_end:.2f}s"
         if bps < min_bps:
             streak += 1
             longest = max(longest, streak)
@@ -132,13 +213,18 @@ def failover_stream_verdict(
     expected_streams: int,
     pre_window_seconds: float = 5,
     recovery_deadline_seconds: float = 3,
+    *,
+    json_stream: bool = False,
 ) -> Tuple[bool, str]:
     """Require all expected streams to resume within three seconds of failover."""
-    intervals = []
-    for line in text.splitlines():
-        row = parse_interval_line(line)
-        if row is not None and row[0] is not None and 0.5 <= row[2] - row[1] <= 1.5:
-            intervals.append(row)
+    try:
+        rows, _ = _oracle_interval_rows(text, json_stream)
+    except ValueError as exc:
+        return False, f"invalid JSON-stream interval telemetry: {exc}"
+    intervals = [
+        row for row in rows
+        if row[0] is not None and 0.5 <= row[2] - row[1] <= 1.5
+    ]
 
     before = {
         stream for stream, start, _, bps in intervals
@@ -168,6 +254,7 @@ def failover_stream_verdict(
 
 
 
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Check failover iperf3 interval and stream telemetry."
@@ -176,14 +263,23 @@ def main() -> int:
     parser.add_argument("--streams", type=int, required=True)
     parser.add_argument("--min-throughput-gbps", type=float, required=True)
     parser.add_argument("--crash-at", type=float, required=True)
+    parser.add_argument(
+        "--json-stream",
+        action="store_true",
+        help="parse iperf3 JSON Lines instead of legacy text output",
+    )
     args = parser.parse_args()
 
     text = sys.stdin.read()
     checks = [
         failover_interval_verdict(
-            text, min_bps=int(args.min_throughput_gbps * 1_000_000_000)
+            text,
+            min_bps=int(args.min_throughput_gbps * 1_000_000_000),
+            json_stream=args.json_stream,
         ),
-        failover_stream_verdict(text, args.crash_at, args.streams),
+        failover_stream_verdict(
+            text, args.crash_at, args.streams, json_stream=args.json_stream
+        ),
     ]
     for ok, message in checks:
         print(f"{'PASS' if ok else 'FAIL'} {message}")

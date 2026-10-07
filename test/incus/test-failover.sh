@@ -6,7 +6,7 @@
 # Requires: iperf3 server reachable at IPERF_TARGET (default from IPERF_TARGET4).
 #
 # Tests:
-#   1. Start iperf3 -P8 -i1 through the firewall (LAN host → WAN target)
+#   1. Start iperf3 --json-stream -P8 through the firewall (LAN host → WAN target)
 #   2. Verify sessions sync from primary (fw0) to secondary (fw1)
 #   3. Reboot fw0 (unclean — no priority-0 burst)
 #   4. Verify every established stream resumes within 3s and no more than two
@@ -40,6 +40,8 @@ source "${SCRIPT_DIR}/cluster-env.sh"
 source "${SCRIPT_DIR}/deploy-lib.sh"
 # shellcheck source=test/incus/iperf-throughput-lib.sh
 source "${SCRIPT_DIR}/iperf-throughput-lib.sh"
+# shellcheck source=test/incus/ha-assurance-lib.sh
+source "${SCRIPT_DIR}/ha-assurance-lib.sh"
 # shellcheck source=test/incus/failover-client-lib.sh
 source "${SCRIPT_DIR}/failover-client-lib.sh"
 # shellcheck source=test/incus/failover-clock-lib.sh
@@ -72,12 +74,40 @@ V6_RECHECK_DELAY=30     # #6934: seconds between the two post-failover samples
 # indistinguishable from a tolerance nobody thought about — the next reader
 # cannot tell "3 of 5 because a known defect costs exactly one packet" from
 # "3 of 5 because the author was not sure", and only the first has an expiry.
-IPERF_DURATION=120      # seconds — long enough to span retries + reboot + failback
+IPERF_DURATION_INPUT="${IPERF_DURATION:-}"
 IPERF_STREAMS=8
 MIN_SESSIONS=4          # minimum observed session entries (control + some data streams)
 SYNC_WAIT=5             # seconds to wait for session sync sweep
+SESSION_SYNC_IDLE_TIMEOUT="${SESSION_SYNC_IDLE_TIMEOUT:-30}"
+SESSION_SYNC_IDLE_STABLE_SAMPLES="${SESSION_SYNC_IDLE_STABLE_SAMPLES:-3}"
+PRE_FAILOVER_OBSERVE="${PRE_FAILOVER_OBSERVE:-10}"
 REBOOT_WAIT=60          # max WALL-CLOCK seconds to wait for fw0 to come back (#1880)
+MANUAL_FAILOVER_DEADLINE="${MANUAL_FAILOVER_DEADLINE:-10}"
+EXTERNAL_PING_COUNT="${EXTERNAL_PING_COUNT:-4}"
+EXTERNAL_V4_TARGET="${EXTERNAL_V4_TARGET:-1.1.1.1}"
+EXTERNAL_V6_TARGET="${EXTERNAL_V6_TARGET:-2606:4700:4700::1111}"
+STANDBY_WAN_IFACE_REGEX="${STANDBY_WAN_IFACE_REGEX:-ge-[0-9]+-0-2}"
+MAX_STANDBY_WAN_TX_DELTA="${MAX_STANDBY_WAN_TX_DELTA:-0}"
+REQUIRE_FABRIC_ACTIVITY="${REQUIRE_FABRIC_ACTIVITY:-1}"
+MIN_FABRIC_TX_DELTA="${MIN_FABRIC_TX_DELTA:-1}"
+FABRIC_ACTIVITY_TRIGGER_DELTA="${FABRIC_ACTIVITY_TRIGGER_DELTA:-8}"
+MAX_FAILOVER_SESSION_MISS_DELTA="${MAX_FAILOVER_SESSION_MISS_DELTA:-64}"
+MAX_FAILOVER_NEIGHBOR_MISS_DELTA="${MAX_FAILOVER_NEIGHBOR_MISS_DELTA:-60}"
+MAX_FAILOVER_ROUTE_MISS_DELTA="${MAX_FAILOVER_ROUTE_MISS_DELTA:-32}"
+MAX_FAILOVER_POLICY_DENIED_DELTA="${MAX_FAILOVER_POLICY_DENIED_DELTA:-0}"
+MAX_ZERO_INTERVALS="${MAX_ZERO_INTERVALS:-2}"
+MAX_STREAM_ZERO_INTERVALS="${MAX_STREAM_ZERO_INTERVALS:-0}"
+MAX_PREFLIGHT_ZERO_INTERVALS="${MAX_PREFLIGHT_ZERO_INTERVALS:-0}"
+MAX_PREFLIGHT_STREAM_ZERO_INTERVALS="${MAX_PREFLIGHT_STREAM_ZERO_INTERVALS:-0}"
+MAX_RETRANSMITS="${MAX_RETRANSMITS:-}"
+MAX_RETRANSMITS_PER_GBPS="${MAX_RETRANSMITS_PER_GBPS:-}"
+MAX_TRANSITION_KERNEL_RX_DROPPED_DELTA="${MAX_TRANSITION_KERNEL_RX_DROPPED_DELTA:-512}"
+MAX_TRANSITION_DIRECT_TX_NOFRAME_DELTA="${MAX_TRANSITION_DIRECT_TX_NOFRAME_DELTA:-512}"
+TRANSITION_PATH_TRIGGER_PKTS="${TRANSITION_PATH_TRIGGER_PKTS:-1000}"
+MIN_TRANSITION_FABRIC_RX_DELTA="${MIN_TRANSITION_FABRIC_RX_DELTA:-32}"
+MIN_TRANSITION_WAN_TX_DELTA="${MIN_TRANSITION_WAN_TX_DELTA:-32}"
 MIN_THROUGHPUT=1.0      # Gbps — iperf3 must report at least this
+IPERF_DURATION_MIN=$(( 8 + SYNC_WAIT + SESSION_SYNC_IDLE_TIMEOUT + PRE_FAILOVER_OBSERVE + 3 + REBOOT_WAIT + 20 + SESSION_SYNC_IDLE_TIMEOUT + 3 * MANUAL_FAILOVER_DEADLINE + 10 + V6_RECHECK_DELAY + 2 * V6_PROBE_COUNT + 5 * 2 * EXTERNAL_PING_COUNT + 4 * (3 * 1 + 3) + 15 ))
 # #7673: the CoS output filter classifies by DESTINATION PORT, and iperf3
 # defaults to 5201 -- which cos-iperf-config.set maps to `iperf-100m`, a
 # `transmit-rate 100m exact` class. Measuring a deliberately-100Mbit-shaped
@@ -97,6 +127,7 @@ IPERF_PORT="${IPERF_PORT:-5211}"
 
 PASS=0
 FAIL=0
+VOID=0
 ERRORS=()
 
 info()  { echo "==> $*"; }
@@ -104,10 +135,854 @@ pass()  { echo "  PASS  $*"; PASS=$((PASS + 1)); }
 fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
 
 die() { echo "FATAL: $*" >&2; exit 2; }
+failover_duration_value() {
+	local requested="$1" minimum="$2"
+	if [[ ! "$minimum" =~ ^[0-9]+$ ]]; then
+		printf 'required duration is malformed: %s\n' "$minimum" >&2
+		return 1
+	fi
+	if [[ -z "$requested" ]]; then
+		printf '%s\n' "$minimum"
+		return 0
+	fi
+	if [[ ! "$requested" =~ ^[0-9]+$ ]]; then
+		printf 'IPERF_DURATION must be a positive integer number of seconds\n' >&2
+		return 1
+	fi
+	if (( requested < minimum )); then
+		printf 'IPERF_DURATION=%ss is shorter than the required %ss for the bounded HA windows\n' "$requested" "$minimum" >&2
+		return 1
+	fi
+	printf '%s\n' "$requested"
+}
+
+if ! IPERF_DURATION="$(failover_duration_value "$IPERF_DURATION_INPUT" "$IPERF_DURATION_MIN")"; then
+	die "refusing an IPERF_DURATION shorter than the required bounded HA window"
+fi
+unset IPERF_DURATION_INPUT
+
+void() { echo "  VOID  $*"; VOID=$((VOID + 1)); }
 
 # Match only the main client process, not the separate pool-mode iperf3 client.
 main_iperf_running() {
 	failover_main_iperf_running /tmp/iperf3-failover.pid "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS"
+}
+
+HA_CAPTURE_DIR="${TMPDIR:-/tmp}/test-failover-ha-$$"
+declare -A RG1_STATS=()
+declare -A RG1_INTERFACES=()
+declare -A RG1_STATUS=()
+declare -A RG1_SAMPLE_STATS=()
+declare -A RG1_SAMPLE_INTERFACES=()
+RG1_FAILBACK_SETTLED=false
+RG1_FAILBACK_ELAPSED=0
+
+ha_ensure_capture_dir() {
+	mkdir -p "$HA_CAPTURE_DIR"
+}
+
+# Capture the actual CLI output with an identity line the shared pure
+# predicate verifies before any summary/interface parser consumes it.
+ha_capture_cli() {
+	local node="$1" command="$2" slice="$3" phase="$4" node_id="$5" rg="$6" path="$7"
+	ha_ensure_capture_dir || return 2
+	printf 'HA capture identity: slice=%s phase=%s node=%s rg=%s\n' \
+		"$slice" "$phase" "$node_id" "$rg" >"$path" || return 2
+	if ! incus exec "$node" -- cli -c "$command" >>"$path" 2>&1; then
+		printf 'CLI capture failed: %s phase=%s node=%s rg=%s\n' "$command" "$phase" "$node_id" "$rg" >&2
+		return 2
+	fi
+	if ! ha_snapshot_identity_verdict "$path" "$slice" "$phase" "$node_id" "$rg"; then
+		return 2
+	fi
+}
+
+ha_capture_rg1_node() {
+	local phase="$1" node_id="$2" node="$3" base
+	base="${HA_CAPTURE_DIR}/manual-rg1-failback-${phase}-${node_id}-rg1"
+	RG1_STATS["${phase}:${node_id}"]="${base}.stats"
+	RG1_INTERFACES["${phase}:${node_id}"]="${base}.interfaces"
+	RG1_STATUS["${phase}:${node_id}"]="${base}.status"
+	local result=0
+	if ! ha_capture_cli "$node" 'show chassis cluster data-plane statistics' \
+		manual-rg1-failback "$phase" "$node_id" 1 "${RG1_STATS["${phase}:${node_id}"]}"; then
+		result=2
+	fi
+	if ! ha_capture_cli "$node" 'show chassis cluster data-plane interfaces' \
+		manual-rg1-failback "$phase" "$node_id" 1 "${RG1_INTERFACES["${phase}:${node_id}"]}"; then
+		result=2
+	fi
+	if ! ha_capture_cli "$node" 'show chassis cluster status' \
+		manual-rg1-failback "$phase" "$node_id" 1 "${RG1_STATUS["${phase}:${node_id}"]}"; then
+		result=2
+	fi
+	return "$result"
+}
+
+ha_capture_rg1_pair() {
+	local phase="$1" result=0
+	if ! ha_capture_rg1_node "$phase" node0 "$FW0"; then result=2; fi
+	if ! ha_capture_rg1_node "$phase" node1 "$FW1"; then result=2; fi
+	return "$result"
+}
+
+ha_capture_rg1_status_pair() {
+	local phase="$1" result=0
+	RG1_STATUS["${phase}:node0"]="${HA_CAPTURE_DIR}/manual-rg1-failback-${phase}-node0-rg1.status"
+	RG1_STATUS["${phase}:node1"]="${HA_CAPTURE_DIR}/manual-rg1-failback-${phase}-node1-rg1.status"
+	if ! ha_capture_cli "$FW0" 'show chassis cluster status' \
+		manual-rg1-failback "$phase" node0 1 "${RG1_STATUS["${phase}:node0"]}"; then
+		result=2
+	fi
+	if ! ha_capture_cli "$FW1" 'show chassis cluster status' \
+		manual-rg1-failback "$phase" node1 1 "${RG1_STATUS["${phase}:node1"]}"; then
+		result=2
+	fi
+	return "$result"
+}
+
+ha_capture_rg1_sample_node() {
+	local phase="$1" node_id="$2" node="$3" base
+	base="${HA_CAPTURE_DIR}/manual-rg1-failback-${phase}-${node_id}-rg1"
+	RG1_SAMPLE_STATS["${phase}:${node_id}"]="${base}.stats"
+	RG1_SAMPLE_INTERFACES["${phase}:${node_id}"]="${base}.interfaces"
+	local result=0
+	if ! ha_capture_cli "$node" 'show chassis cluster data-plane statistics' \
+		manual-rg1-failback "$phase" "$node_id" 1 "${RG1_SAMPLE_STATS["${phase}:${node_id}"]}"; then
+		result=2
+	fi
+	if ! ha_capture_cli "$node" 'show chassis cluster data-plane interfaces' \
+		manual-rg1-failback "$phase" "$node_id" 1 "${RG1_SAMPLE_INTERFACES["${phase}:${node_id}"]}"; then
+		result=2
+	fi
+	return "$result"
+}
+
+ha_capture_rg1_sample_pair() {
+	local phase="$1" result=0
+	if ! ha_capture_rg1_sample_node "$phase" node0 "$FW0"; then result=2; fi
+	if ! ha_capture_rg1_sample_node "$phase" node1 "$FW1"; then result=2; fi
+	return "$result"
+}
+
+ha_rg1_owner_verdict() {
+	local expected_node="$1" phase="$2"
+	ha_rg_owner_verdict "$expected_node" 1 "$phase" \
+		"${RG1_STATUS["${phase}:node0"]}" "${RG1_STATUS["${phase}:node1"]}"
+}
+
+ha_capture_sync_stats() {
+	local label="$1" node_id="$2" node="$3" path
+	path="${HA_CAPTURE_DIR}/sync-${label}-${node_id}.stats"
+	if ! ha_capture_cli "$node" 'show chassis cluster data-plane statistics' \
+		session-sync-idle "$label" "$node_id" all "$path"; then
+		return 2
+	fi
+	printf '%s\n' "$path"
+}
+
+ha_sync_idle_streak_step() {
+	local stable="$1" sample_status="$2" required="$3" next
+	if [[ ! "$stable" =~ ^[0-9]+$ || ! "$required" =~ ^[1-9][0-9]*$ ]]; then
+		printf 'invalid session-sync stable-streak arguments\n' >&2
+		return 2
+	fi
+	case "$sample_status" in
+	0) next=$((stable + 1)) ;;
+	1) next=0 ;;
+	2) printf '%s\n' "$stable"; return 2 ;;
+	*) printf 'invalid session-sync sample verdict: %s\n' "$sample_status" >&2; return 2 ;;
+	esac
+	printf '%s\n' "$next"
+	(( next >= required ))
+}
+
+ha_sync_idle_timeout_verdict() {
+	local stable="$1" required="$2"
+	if [[ ! "$stable" =~ ^[0-9]+$ || ! "$required" =~ ^[1-9][0-9]*$ ]]; then
+		printf 'invalid session-sync timeout arguments\n' >&2
+		return 2
+	fi
+	if (( stable >= required )); then
+		return 0
+	fi
+	printf 'session sync failed to reach %s consecutive idle samples (observed %s)\n' "$required" "$stable" >&2
+	return 1
+}
+
+ha_wait_for_session_sync_idle() {
+	local label="$1" source_id="$2" source_node="$3" target_id="$4" target_node="$5"
+	local attempt stable=0 source_path target_path rc
+	for ((attempt = 1; attempt <= SESSION_SYNC_IDLE_TIMEOUT; attempt++)); do
+		if ! source_path="$(ha_capture_sync_stats "${label}-${attempt}" "$source_id" "$source_node")"; then
+			void "${label}: session sync CLI capture unavailable (${source_id}->${target_id})"
+			return 2
+		fi
+		if ! target_path="$(ha_capture_sync_stats "${label}-${attempt}" "$target_id" "$target_node")"; then
+			void "${label}: session sync CLI capture unavailable (${source_id}->${target_id})"
+			return 2
+		fi
+		if ha_session_sync_idle_sample "$source_id" "$target_id" "$source_path" "$target_path"; then
+			stable=$((stable + 1))
+			if (( stable >= SESSION_SYNC_IDLE_STABLE_SAMPLES )); then
+				pass "${label}: session sync idle (${source_id}->${target_id}, ${stable} consecutive samples)"
+				return 0
+			fi
+		else
+			rc=$?
+			case "$rc" in
+			1) stable=0 ;;
+			2)
+				void "${label}: session sync statistics malformed (${source_id}->${target_id})"
+				return 2
+				;;
+			esac
+		fi
+		sleep 1
+	done
+	fail "${label}: session sync did not become idle within ${SESSION_SYNC_IDLE_TIMEOUT}s (${source_id}->${target_id})"
+	return 1
+}
+
+ha_emit_verdict() {
+	local label="$1" result reason
+	shift
+	if result=$("$@" 2>&1); then
+		pass "$label"
+	else
+		local status=$?
+		case "$status" in
+		1) fail "$label${result:+: ${result}}" ;;
+		2) void "$label${result:+: ${result}}" ;;
+		*) void "$label: helper returned unexpected status ${status}${result:+: ${result}}" ;;
+		esac
+	fi
+}
+
+ha_target_reachability_cell() {
+	local label="$1" ping_output ping_rc tcp_output="" tcp_rc=125 rc
+	if ping_output=$(incus exec "$CLUSTER_LAN_HOST" -- ping -c 3 -W 1 "$IPERF_TARGET" 2>&1); then
+		ping_rc=0
+	else
+		ping_rc=$?
+	fi
+	if ha_ping_reply_verdict "$ping_rc" "$ping_output"; then
+		pass "${label}: iperf target reachable by ping (${IPERF_TARGET})"
+		return 0
+	else
+		rc=$?
+	fi
+	if (( rc == 2 )); then
+		void "${label}: iperf target ping capture unavailable (${IPERF_TARGET})"
+		return 2
+	fi
+	if tcp_output=$(incus exec "$CLUSTER_LAN_HOST" -- \
+		timeout 3 bash -lc "echo > /dev/tcp/${IPERF_TARGET}/5201" 2>&1); then
+		tcp_rc=0
+	else
+		tcp_rc=$?
+	fi
+	if ha_target_reachability_verdict "$ping_rc" "$ping_output" "$tcp_rc" "$tcp_output"; then
+		pass "${label}: iperf target reachable by TCP fallback at ${IPERF_TARGET}:5201"
+	else
+		rc=$?
+		if (( rc == 1 )); then
+			fail "${label}: iperf target ping and TCP fallback failed (${IPERF_TARGET}:5201)"
+		else
+			void "${label}: iperf target ping/TCP capture unavailable (${IPERF_TARGET}:5201)"
+		fi
+		return "$rc"
+	fi
+}
+
+ha_external_ping_capture() {
+	local family="$1" target="$2"
+	if [[ "$family" == 6 ]]; then
+		if HA_EXTERNAL_OUTPUT=$(incus exec "$CLUSTER_LAN_HOST" -- \
+			ping -6 -c "$EXTERNAL_PING_COUNT" -W 1 "$target" 2>&1); then
+			HA_EXTERNAL_RC=0
+		else
+			HA_EXTERNAL_RC=$?
+		fi
+	else
+		if HA_EXTERNAL_OUTPUT=$(incus exec "$CLUSTER_LAN_HOST" -- \
+			ping -c "$EXTERNAL_PING_COUNT" -W 1 "$target" 2>&1); then
+			HA_EXTERNAL_RC=0
+		else
+			HA_EXTERNAL_RC=$?
+		fi
+	fi
+}
+
+ha_external_sweep() {
+	local label="$1" v4_rc v4_output v6_rc v6_output
+	if ! main_iperf_running; then
+		void "${label}: external reachability window lacked the main iperf load (IPv4)"
+		void "${label}: external reachability window lacked the main iperf load (IPv6)"
+		return
+	fi
+	ha_external_ping_capture 4 "$EXTERNAL_V4_TARGET"
+	v4_rc="$HA_EXTERNAL_RC"
+	v4_output="$HA_EXTERNAL_OUTPUT"
+	if ! main_iperf_running; then
+		void "${label}: external reachability window lost the main iperf load (IPv4)"
+		void "${label}: external reachability window lost the main iperf load (IPv6)"
+		return
+	fi
+	ha_external_ping_capture 6 "$EXTERNAL_V6_TARGET"
+	v6_rc="$HA_EXTERNAL_RC"
+	v6_output="$HA_EXTERNAL_OUTPUT"
+	if ! main_iperf_running; then
+		void "${label}: external reachability window lost the main iperf load (IPv4)"
+		void "${label}: external reachability window lost the main iperf load (IPv6)"
+		return
+	fi
+	ha_emit_verdict "${label}: external IPv4 ${EXTERNAL_V4_TARGET}" \
+		ha_external_ping_verdict "$v4_rc" "$v4_output"
+	ha_emit_verdict "${label}: external IPv6 ${EXTERNAL_V6_TARGET}" \
+		ha_external_ping_verdict "$v6_rc" "$v6_output"
+}
+
+ha_preflight_json_metrics() {
+	local log="${HA_CAPTURE_DIR}/pre-failover.jsonl"
+	local metrics="${HA_CAPTURE_DIR}/pre-failover.metrics.json"
+	local gate_error="${HA_CAPTURE_DIR}/pre-failover.gate.err"
+	local producer_error="${HA_CAPTURE_DIR}/pre-failover.producer.err"
+	local recent_error="${HA_CAPTURE_DIR}/pre-failover.recent.err"
+	local gate_output reason recent_value result=0
+	local avg_gbps zero_intervals_total stream_zero_intervals_total zero_streams_total
+	local retransmits collapse_detected collapse_reason completed observed_end_sec full_interval_count
+	if ! incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-failover.log >"$log" 2>/dev/null; then
+		void "pre-failover observation: aggregate zero-interval evidence unavailable"
+		void "pre-failover observation: per-stream zero-interval evidence unavailable"
+		void "pre-failover observation: recent dead-stream evidence unavailable"
+		return 2
+	fi
+	if ! python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" \
+		"$log" >"$metrics" 2>"$producer_error"; then
+		printf '{"ok":false,"error":"metrics_parse_failed"}\n' >"$metrics"
+	fi
+	if gate_output=$(ha_metrics_gate "$metrics" 2>"$gate_error"); then
+		eval "$gate_output"
+	else
+		reason=$(<"$gate_error")
+		void "pre-failover observation: aggregate zero-interval evidence unavailable: ${reason:-ha_metrics_gate rejected metrics}"
+		void "pre-failover observation: per-stream zero-interval evidence unavailable: ${reason:-ha_metrics_gate rejected metrics}"
+		void "pre-failover observation: recent dead-stream evidence unavailable: ${reason:-ha_metrics_gate rejected metrics}"
+		return 2
+	fi
+	if recent_value=$(ha_recent_interval_metric "$log" "$PRE_FAILOVER_OBSERVE" zero_intervals "$IPERF_STREAMS" 2>"$recent_error"); then
+		ha_emit_verdict "pre-failover aggregate zero intervals (${recent_value}, limit ${MAX_PREFLIGHT_ZERO_INTERVALS})" \
+			ha_counter_at_most_verdict "$recent_value" "$MAX_PREFLIGHT_ZERO_INTERVALS" "aggregate zero intervals"
+	else
+		reason=$(<"$recent_error")
+		void "pre-failover observation: aggregate zero-interval evidence unavailable: ${reason:-recent JSON window rejected}"
+		result=2
+	fi
+	if recent_value=$(ha_recent_interval_metric "$log" "$PRE_FAILOVER_OBSERVE" stream_zero_intervals "$IPERF_STREAMS" 2>"$recent_error"); then
+		ha_emit_verdict "pre-failover per-stream zero intervals (${recent_value}, limit ${MAX_PREFLIGHT_STREAM_ZERO_INTERVALS})" \
+			ha_counter_at_most_verdict "$recent_value" "$MAX_PREFLIGHT_STREAM_ZERO_INTERVALS" "per-stream zero intervals"
+	else
+		reason=$(<"$recent_error")
+		void "pre-failover observation: per-stream zero-interval evidence unavailable: ${reason:-recent JSON window rejected}"
+		result=2
+	fi
+	if recent_value=$(ha_recent_interval_metric "$log" 1 dead_streams "$IPERF_STREAMS" 2>"$recent_error"); then
+		ha_emit_verdict "pre-failover recent dead streams (${recent_value}, limit 0)" \
+			ha_counter_at_most_verdict "$recent_value" 0 "recent dead streams"
+	else
+		reason=$(<"$recent_error")
+		void "pre-failover observation: recent dead-stream evidence unavailable: ${reason:-recent JSON window rejected}"
+		result=2
+	fi
+	return "$result"
+}
+
+ha_pre_failover_observation() {
+	local second alive=true preflight_rc
+	info "observing same-load traffic for ${PRE_FAILOVER_OBSERVE}s before crash"
+	for ((second = 1; second <= PRE_FAILOVER_OBSERVE; second++)); do
+		sleep 1
+		if ! main_iperf_running; then
+			alive=false
+		fi
+	done
+	if $alive; then
+		if ha_preflight_json_metrics; then
+			:
+		else
+			preflight_rc=$?
+			if (( preflight_rc != 2 )); then
+				void "pre-failover observation: metrics helper returned unexpected status ${preflight_rc}"
+			fi
+		fi
+		ha_external_sweep "pre-failure steady"
+	else
+		void "pre-failover observation: main iperf client did not remain alive for ${PRE_FAILOVER_OBSERVE}s"
+		void "pre-failover observation: aggregate zero-interval evidence unavailable"
+		void "pre-failover observation: per-stream zero-interval evidence unavailable"
+		void "pre-failover observation: recent dead-stream evidence unavailable"
+		ha_external_sweep "pre-failure steady"
+	fi
+}
+
+ha_recent_dead_streams_cell() {
+	local label="$1"
+	local log="${HA_CAPTURE_DIR}/recent-${label//[^[:alnum:]]/-}.jsonl"
+	local metrics="${HA_CAPTURE_DIR}/recent-${label//[^[:alnum:]]/-}.metrics.json"
+	local gate_error="${HA_CAPTURE_DIR}/recent-${label//[^[:alnum:]]/-}.gate.err"
+	local parser_error="${HA_CAPTURE_DIR}/recent-${label//[^[:alnum:]]/-}.parser.err"
+	local gate_output reason dead_streams
+	local avg_gbps zero_intervals_total stream_zero_intervals_total zero_streams_total
+	local retransmits collapse_detected collapse_reason completed observed_end_sec full_interval_count
+	if ! main_iperf_running; then
+		void "${label}: recent dead-stream window lacked the main iperf load"
+		return
+	fi
+	if ! incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-failover.log >"$log" 2>/dev/null; then
+		void "${label}: recent dead-stream evidence unavailable (JSON log capture failed)"
+		return
+	fi
+	if ! python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" \
+		"$log" >"$metrics" 2>"$parser_error"; then
+		printf '{"ok":false,"error":"metrics_parse_failed"}\n' >"$metrics"
+	fi
+	if gate_output=$(ha_metrics_gate "$metrics" 2>"$gate_error"); then
+		eval "$gate_output"
+	else
+		reason=$(<"$gate_error")
+		void "${label}: recent dead-stream evidence unavailable: ${reason:-ha_metrics_gate rejected metrics}"
+		return
+	fi
+	if ! main_iperf_running; then
+		void "${label}: recent dead-stream window did not remain under the main iperf load"
+		return
+	fi
+	if dead_streams=$(ha_recent_interval_metric "$log" 1 dead_streams "$IPERF_STREAMS" 2>"$parser_error"); then
+		if main_iperf_running; then
+			ha_emit_verdict "${label}: recent dead streams (${dead_streams}, limit 0)" \
+				ha_counter_at_most_verdict "$dead_streams" 0 "recent dead streams"
+		else
+			void "${label}: recent dead-stream window did not remain under the main iperf load"
+		fi
+	else
+		reason=$(<"$parser_error")
+		void "${label}: recent dead-stream evidence unavailable: ${reason:-recent JSON window rejected}"
+	fi
+}
+
+ha_rg1_owner_status_cell() {
+	local expected_node="$1" phase="$2" label="$3" result status
+	if result=$(ha_rg1_owner_verdict "$expected_node" "$phase" 2>&1); then
+		pass "$label"
+		return 0
+	else
+		status=$?
+	fi
+	case "$status" in
+	1) fail "$label${result:+: ${result}}" ;;
+	2) void "$label${result:+: ${result}}" ;;
+	*) void "$label: owner helper returned unexpected status ${status}${result:+: ${result}}" ;;
+	esac
+	return "$status"
+}
+
+ha_wait_rg1_owner() {
+	local expected_node="$1" deadline="$2" start attempt=1 phase reason status
+	local saw_valid=false
+	start=$(date +%s)
+	while :; do
+		phase=$(printf 'owner-poll-%02d' "$attempt")
+		if ha_capture_rg1_status_pair "$phase"; then
+			if reason=$(ha_rg1_owner_verdict "$expected_node" "$phase" 2>&1); then
+				pass "manual RG1 failback settled on ${expected_node} (both node status queries, ${phase})"
+				RG1_FAILBACK_SETTLED=true
+				RG1_FAILBACK_ELAPSED=$(($(date +%s) - start))
+				return 0
+			else
+				status=$?
+				if (( status == 1 )); then
+					saw_valid=true
+					info "RG1 owner not settled at ${phase}: ${reason}"
+				else
+					info "RG1 owner poll is blind at ${phase}: ${reason}"
+				fi
+			fi
+		else
+			info "RG1 owner poll status capture unavailable at ${phase}"
+		fi
+		if (( $(date +%s) - start >= deadline )); then
+			break
+		fi
+		sleep 1
+		attempt=$((attempt + 1))
+	done
+	if $saw_valid; then
+		fail "manual RG1 failback did not settle on ${expected_node} within ${deadline}s"
+		return 1
+	fi
+	void "manual RG1 failback owner evidence unavailable for the full ${deadline}s deadline"
+	return 2
+}
+
+ha_emit_diagnostic_verdict() {
+	local label="$1" result status
+	shift
+	if result=$("$@" 2>&1); then
+		pass "$label${result:+: ${result}}"
+	else
+		status=$?
+		case "$status" in
+		1) fail "$label${result:+: ${result}}" ;;
+		2) void "$label${result:+: ${result}}" ;;
+		*) void "$label: helper returned unexpected status ${status}${result:+: ${result}}" ;;
+		esac
+	fi
+}
+
+ha_rg1_mark_groups_void() {
+	local reason="$1"
+	void "RG1 Group 1 session-miss budget: ${reason}"
+	void "RG1 Group 2 neighbor-miss budget: ${reason}"
+	void "RG1 Group 3 route-miss budget: ${reason}"
+	void "RG1 Group 4 policy-denied budget: ${reason}"
+	void "RG1 Group 5 former-owner WAN TX: ${reason}"
+	void "RG1 Group 6 fabric TX vs old-owner churn: ${reason}"
+	void "RG1 Group 7 former-owner readiness: ${reason}"
+	void "RG1 Group 8a new-owner Kernel RX dropped: ${reason}"
+	void "RG1 Group 8b former-owner Direct TX no-frame fb: ${reason}"
+	void "RG1 Group 8c transition path: ${reason}"
+	void "RG1 Group 8 report-only sampled maxima: ${reason}"
+}
+
+ha_rg1_validate_samples() {
+	local index phase node
+	for ((index = 1; index <= 10; index++)); do
+		phase=$(printf 'sample-%02d' "$index")
+		for node in node0 node1; do
+			if ! ha_snapshot_identity_verdict "${RG1_SAMPLE_STATS["${phase}:${node}"]:-}" \
+				manual-rg1-failback "$phase" "$node" 1; then
+				return 2
+			fi
+			if ! ha_snapshot_identity_verdict "${RG1_SAMPLE_INTERFACES["${phase}:${node}"]:-}" \
+				manual-rg1-failback "$phase" "$node" 1; then
+				return 2
+			fi
+		done
+	done
+}
+
+ha_rg1_sampled_counter_delta() {
+	if [[ $# -ne 13 ]]; then
+		printf 'RG1 sampled counter delta: expected <node> <label> <phase-pre-file> and ten sample files\n' >&2
+		return 2
+	fi
+	local node="$1" label="$2" pre_file="$3" baseline maximum
+	local -a args=("$@") samples=("${args[@]:3}")
+	if ! ha_snapshot_identity_verdict "$pre_file" manual-rg1-failback phase-pre "$node" 1; then
+		return 2
+	fi
+	if ! baseline=$(ha_status_summary_value "$pre_file" "$label"); then return 2; fi
+	if ! maximum=$(ha_sample_window_max manual-rg1-failback 1 "$node" "$label" \
+		"${samples[@]}" "$baseline"); then
+		return 2
+	fi
+	ha_nondecreasing_delta "$baseline" "$maximum"
+}
+
+ha_rg1_sampled_interface_delta() {
+	if [[ $# -ne 14 ]]; then
+		printf 'RG1 sampled interface delta: expected <node> <regex> <direction> <phase-pre-file> and ten sample files\n' >&2
+		return 2
+	fi
+	local node="$1" regex="$2" direction="$3" pre_file="$4" baseline maximum
+	local -a args=("$@") samples=("${args[@]:4}")
+	if ! ha_snapshot_identity_verdict "$pre_file" manual-rg1-failback phase-pre "$node" 1; then
+		return 2
+	fi
+	if ! baseline=$(ha_interface_packets_value "$pre_file" "$regex" "$direction"); then return 2; fi
+	if ! maximum=$(ha_sample_window_interface_max manual-rg1-failback 1 "$node" \
+		"$regex" "$direction" "${samples[@]}" "$baseline"); then
+		return 2
+	fi
+	ha_nondecreasing_delta "$baseline" "$maximum"
+}
+
+ha_rg1_report_sample_max() {
+	local label="$1" node="$2" metric="$3" pre_file="$4" result reason baseline
+	shift 4
+	if [[ $# -ne 10 ]]; then
+		void "RG1 Group 8 report-only ${label} max unavailable (${node}): expected ten sample files"
+		return
+	fi
+	if ! reason=$(ha_snapshot_identity_verdict "$pre_file" manual-rg1-failback phase-pre "$node" 1 2>&1); then
+		void "RG1 Group 8 report-only ${label} max unavailable (${node}): ${reason:-phase-pre snapshot invalid}"
+		return
+	fi
+	if ! baseline=$(ha_status_summary_value "$pre_file" "$metric" 2>&1); then
+		void "RG1 Group 8 report-only ${label} max unavailable (${node}): ${baseline:-phase-pre baseline unavailable}"
+		return
+	fi
+	if result=$(ha_sample_window_max manual-rg1-failback 1 "$node" "$metric" "$@" "$baseline" 2>&1); then
+		info "RG1 Group 8 report-only ${label} max (${node}): ${result}"
+	else
+		reason="$result"
+		void "RG1 Group 8 report-only ${label} max unavailable (${node}): ${reason}"
+	fi
+}
+
+ha_rg1_evaluate() {
+	local can_measure="$1" reason="$2"
+	if [[ "$can_measure" != true ]]; then
+		ha_rg1_mark_groups_void "$reason"
+		return
+	fi
+
+	ha_emit_verdict "RG1 Group 1 session misses (phase-pre→phase-post, both nodes, limit ${MAX_FAILOVER_SESSION_MISS_DELTA})" \
+		ha_pair_counter_budget_verdict "$MAX_FAILOVER_SESSION_MISS_DELTA" "Session misses" \
+		manual-rg1-failback 1 phase-pre phase-post \
+		"${RG1_STATS[phase-pre:node0]}" "${RG1_STATS[phase-pre:node1]}" \
+		"${RG1_STATS[phase-post:node0]}" "${RG1_STATS[phase-post:node1]}"
+	ha_emit_verdict "RG1 Group 2 neighbor misses (phase-pre→phase-post, both nodes, limit ${MAX_FAILOVER_NEIGHBOR_MISS_DELTA})" \
+		ha_pair_counter_budget_verdict "$MAX_FAILOVER_NEIGHBOR_MISS_DELTA" "Neighbor misses" \
+		manual-rg1-failback 1 phase-pre phase-post \
+		"${RG1_STATS[phase-pre:node0]}" "${RG1_STATS[phase-pre:node1]}" \
+		"${RG1_STATS[phase-post:node0]}" "${RG1_STATS[phase-post:node1]}"
+	ha_emit_verdict "RG1 Group 3 route misses (phase-pre→phase-post, both nodes, limit ${MAX_FAILOVER_ROUTE_MISS_DELTA})" \
+		ha_pair_counter_budget_verdict "$MAX_FAILOVER_ROUTE_MISS_DELTA" "Route misses" \
+		manual-rg1-failback 1 phase-pre phase-post \
+		"${RG1_STATS[phase-pre:node0]}" "${RG1_STATS[phase-pre:node1]}" \
+		"${RG1_STATS[phase-post:node0]}" "${RG1_STATS[phase-post:node1]}"
+	ha_emit_verdict "RG1 Group 4 policy denied packets (phase-pre→phase-post, both nodes, limit ${MAX_FAILOVER_POLICY_DENIED_DELTA})" \
+		ha_pair_counter_budget_verdict "$MAX_FAILOVER_POLICY_DENIED_DELTA" "Policy denied packets" \
+		manual-rg1-failback 1 phase-pre phase-post \
+		"${RG1_STATS[phase-pre:node0]}" "${RG1_STATS[phase-pre:node1]}" \
+		"${RG1_STATS[phase-post:node0]}" "${RG1_STATS[phase-post:node1]}"
+	ha_emit_verdict "RG1 Group 5 former-owner WAN TX (mid→post, limit ${MAX_STANDBY_WAN_TX_DELTA})" \
+		ha_snapshot_interface_budget_verdict "$MAX_STANDBY_WAN_TX_DELTA" \
+		"$STANDBY_WAN_IFACE_REGEX" tx "former-owner WAN TX" \
+		manual-rg1-failback 1 node1 mid "${RG1_INTERFACES[mid:node1]}" \
+		phase-post "${RG1_INTERFACES[phase-post:node1]}"
+
+	local session_delta neighbor_delta route_delta policy_delta old_churn fabric_delta
+	local churn_error="${HA_CAPTURE_DIR}/rg1-churn.err" group6_ok=true
+	if session_delta=$(ha_snapshot_counter_delta manual-rg1-failback 1 node1 "Session misses" \
+		phase-pre "${RG1_STATS[phase-pre:node1]}" phase-post "${RG1_STATS[phase-post:node1]}" 2>"$churn_error") \
+		&& neighbor_delta=$(ha_snapshot_counter_delta manual-rg1-failback 1 node1 "Neighbor misses" \
+		phase-pre "${RG1_STATS[phase-pre:node1]}" phase-post "${RG1_STATS[phase-post:node1]}" 2>"$churn_error") \
+		&& route_delta=$(ha_snapshot_counter_delta manual-rg1-failback 1 node1 "Route misses" \
+		phase-pre "${RG1_STATS[phase-pre:node1]}" phase-post "${RG1_STATS[phase-post:node1]}" 2>"$churn_error") \
+		&& policy_delta=$(ha_snapshot_counter_delta manual-rg1-failback 1 node1 "Policy denied packets" \
+		phase-pre "${RG1_STATS[phase-pre:node1]}" phase-post "${RG1_STATS[phase-post:node1]}" 2>"$churn_error"); then
+		old_churn=$((session_delta + neighbor_delta + route_delta + policy_delta))
+	else
+		reason=$(<"$churn_error")
+		void "RG1 Group 6 fabric activity unavailable: old-owner churn evidence is blind: ${reason:-counter delta unavailable}"
+		group6_ok=false
+	fi
+	if [[ "$group6_ok" == true ]]; then
+		if fabric_delta=$(ha_snapshot_fabric_tx_delta manual-rg1-failback 1 node1 \
+			mid "${RG1_INTERFACES[mid:node1]}" phase-post "${RG1_INTERFACES[phase-post:node1]}" 2>"$churn_error"); then
+			ha_emit_diagnostic_verdict "RG1 Group 6 dynamic fabric TX vs old-owner churn (${fabric_delta} packets, churn ${old_churn})" \
+				ha_fabric_activity_verdict "$fabric_delta" "$old_churn" "$MIN_FABRIC_TX_DELTA" \
+				"$FABRIC_ACTIVITY_TRIGGER_DELTA" "$REQUIRE_FABRIC_ACTIVITY"
+		else
+			reason=$(<"$churn_error")
+			void "RG1 Group 6 dynamic fabric TX unavailable: ${reason:-counter delta unavailable}"
+		fi
+	fi
+	ha_emit_verdict "RG1 Group 7 former-owner readiness on RG1" \
+		ha_rg_standby_status_verdict "${RG1_STATUS[mid:node1]}" \
+		manual-rg1-failback mid node1 1
+
+	local sample_error="${HA_CAPTURE_DIR}/rg1-samples.err"
+	local -a node0_stats=() node1_stats=() node0_interfaces=() node1_interfaces=()
+	local index phase delta lan_rx old_fabric_tx new_fabric_rx new_wan_tx
+	for ((index = 1; index <= 10; index++)); do
+		phase=$(printf 'sample-%02d' "$index")
+		node0_stats+=("${RG1_SAMPLE_STATS["${phase}:node0"]:-}")
+		node1_stats+=("${RG1_SAMPLE_STATS["${phase}:node1"]:-}")
+		node0_interfaces+=("${RG1_SAMPLE_INTERFACES["${phase}:node0"]:-}")
+		node1_interfaces+=("${RG1_SAMPLE_INTERFACES["${phase}:node1"]:-}")
+	done
+	if ! ha_rg1_validate_samples 2>"$sample_error"; then
+		reason=$(<"$sample_error")
+		void "RG1 Group 8a new-owner Kernel RX dropped: required ten-sample evidence unavailable: ${reason}"
+		void "RG1 Group 8b former-owner Direct TX no-frame fb: required ten-sample evidence unavailable: ${reason}"
+		void "RG1 Group 8c transition path: required ten-sample evidence unavailable: ${reason}"
+		void "RG1 Group 8 report-only sampled maxima unavailable: ${reason}"
+		return
+	fi
+	if delta=$(ha_rg1_sampled_counter_delta node0 "Kernel RX dropped" \
+		"${RG1_STATS[phase-pre:node0]}" "${node0_stats[@]}" 2>"$sample_error"); then
+		ha_emit_verdict "RG1 Group 8a new-owner Kernel RX dropped delta ${delta} (limit ${MAX_TRANSITION_KERNEL_RX_DROPPED_DELTA})" \
+			ha_counter_at_most_verdict "$delta" "$MAX_TRANSITION_KERNEL_RX_DROPPED_DELTA" "Kernel RX dropped"
+	else
+		reason=$(<"$sample_error")
+		void "RG1 Group 8a new-owner Kernel RX dropped: ${reason:-counter delta unavailable}"
+	fi
+	if delta=$(ha_rg1_sampled_counter_delta node1 "Direct TX no-frame fb" \
+		"${RG1_STATS[phase-pre:node1]}" "${node1_stats[@]}" 2>"$sample_error"); then
+		ha_emit_verdict "RG1 Group 8b former-owner Direct TX no-frame fb delta ${delta} (limit ${MAX_TRANSITION_DIRECT_TX_NOFRAME_DELTA})" \
+			ha_counter_at_most_verdict "$delta" "$MAX_TRANSITION_DIRECT_TX_NOFRAME_DELTA" "Direct TX no-frame fb"
+	else
+		reason=$(<"$sample_error")
+		void "RG1 Group 8b former-owner Direct TX no-frame fb: ${reason:-counter delta unavailable}"
+	fi
+	if lan_rx=$(ha_rg1_sampled_interface_delta node1 'ge-[0-9]+-0-1' rx \
+		"${RG1_INTERFACES[phase-pre:node1]}" "${node1_interfaces[@]}" 2>"$sample_error"); then
+		if (( lan_rx < TRANSITION_PATH_TRIGGER_PKTS )); then
+			ha_emit_diagnostic_verdict "RG1 Group 8c transition path below-trigger observation (old-owner LAN RX ${lan_rx}, trigger ${TRANSITION_PATH_TRIGGER_PKTS})" \
+				ha_transition_path_verdict "$lan_rx" 0 0 0 "$TRANSITION_PATH_TRIGGER_PKTS" \
+				"$MIN_FABRIC_TX_DELTA" "$MIN_TRANSITION_FABRIC_RX_DELTA" "$MIN_TRANSITION_WAN_TX_DELTA"
+		elif old_fabric_tx=$(ha_rg1_sampled_interface_delta node1 'ge-[0-9]+-0-0' tx \
+			"${RG1_INTERFACES[phase-pre:node1]}" "${node1_interfaces[@]}" 2>"$sample_error") \
+			&& new_fabric_rx=$(ha_rg1_sampled_interface_delta node0 'ge-[0-9]+-0-0' rx \
+			"${RG1_INTERFACES[phase-pre:node0]}" "${node0_interfaces[@]}" 2>"$sample_error") \
+			&& new_wan_tx=$(ha_rg1_sampled_interface_delta node0 "$STANDBY_WAN_IFACE_REGEX" tx \
+			"${RG1_INTERFACES[phase-pre:node0]}" "${node0_interfaces[@]}" 2>"$sample_error"); then
+			ha_emit_diagnostic_verdict "RG1 Group 8c transition path at/above trigger (old LAN RX ${lan_rx}, fabric TX ${old_fabric_tx}, new fabric RX ${new_fabric_rx}, new WAN TX ${new_wan_tx})" \
+				ha_transition_path_verdict "$lan_rx" "$old_fabric_tx" "$new_fabric_rx" "$new_wan_tx" \
+				"$TRANSITION_PATH_TRIGGER_PKTS" "$MIN_FABRIC_TX_DELTA" \
+				"$MIN_TRANSITION_FABRIC_RX_DELTA" "$MIN_TRANSITION_WAN_TX_DELTA"
+		else
+			reason=$(<"$sample_error")
+			void "RG1 Group 8c transition path: ${reason:-sampled path counters unavailable}"
+		fi
+	else
+		reason=$(<"$sample_error")
+		void "RG1 Group 8c transition path: ${reason:-old-owner LAN RX evidence unavailable}"
+	fi
+	ha_rg1_report_sample_max "Pending TX local" node0 "Pending TX local" \
+		"${RG1_STATS[phase-pre:node0]}" "${node0_stats[@]}"
+	ha_rg1_report_sample_max "Pending TX local" node1 "Pending TX local" \
+		"${RG1_STATS[phase-pre:node1]}" "${node1_stats[@]}"
+	ha_rg1_report_sample_max "Outstanding TX" node0 "Outstanding TX" \
+		"${RG1_STATS[phase-pre:node0]}" "${node0_stats[@]}"
+	ha_rg1_report_sample_max "Outstanding TX" node1 "Outstanding TX" \
+		"${RG1_STATS[phase-pre:node1]}" "${node1_stats[@]}"
+}
+
+ha_run_rg1_failback_slice() {
+	RG1_FAILBACK_SETTLED=false
+	local sync_ok=true pre_ok=true pre_capture_ok=true owner_moved=false mid_capture_ok=true
+	local mid_owner_ok=true post_capture_ok=true post_owner_ok=true load_ok=true can_measure=true
+	local failure_reason="" request_output request_rc index phase sample_error
+	info "Manual RG1 failback: isolating fw1/node1→fw0/node0 before RG0/RG2"
+	if ! main_iperf_running; then
+		load_ok=false
+		failure_reason="main iperf process was not alive before phase-pre"
+	fi
+	if ! ha_wait_for_session_sync_idle "before RG1 failback" node1 "$FW1" node0 "$FW0"; then
+		sync_ok=false
+		failure_reason="${failure_reason:+${failure_reason}; }RG1 precondition session sync did not pass"
+	fi
+	if ! main_iperf_running; then
+		load_ok=false
+		failure_reason="${failure_reason:+${failure_reason}; }main iperf process was not alive at phase-pre"
+	fi
+	if ! ha_capture_rg1_pair phase-pre; then
+		pre_capture_ok=false
+		failure_reason="${failure_reason:+${failure_reason}; }phase-pre capture was blind"
+	else
+		if ha_rg1_owner_status_cell node1 phase-pre "RG1 phase-pre owner is fw1/node1"; then
+			:
+		else
+			pre_ok=false
+			failure_reason="${failure_reason:+${failure_reason}; }phase-pre RG1 owner was not proven as fw1/node1"
+		fi
+	fi
+	if request_output=$(incus exec "$FW1" -- cli -c \
+		'request chassis cluster failover redundancy-group 1' 2>&1); then
+		request_rc=0
+	else
+		request_rc=$?
+	fi
+	info "RG1 failover request returned status ${request_rc}; request text is not ownership proof${request_output:+: ${request_output}}"
+	if ha_wait_rg1_owner node0 "$MANUAL_FAILOVER_DEADLINE"; then
+		owner_moved=true
+	else
+		local owner_rc=$?
+		if (( owner_rc == 1 )); then
+			failure_reason="${failure_reason:+${failure_reason}; }RG1 did not move to fw0/node0"
+		else
+			failure_reason="${failure_reason:+${failure_reason}; }RG1 owner polling was blind"
+		fi
+	fi
+	if [[ "$owner_moved" == true ]]; then
+		if ! main_iperf_running; then
+			load_ok=false
+			failure_reason="${failure_reason:+${failure_reason}; }main iperf process was not alive at phase-mid"
+		fi
+		if ! ha_capture_rg1_pair mid; then
+			mid_capture_ok=false
+			RG1_FAILBACK_SETTLED=false
+			failure_reason="${failure_reason:+${failure_reason}; }phase-mid capture was blind"
+		else
+			if ha_rg1_owner_status_cell node0 mid "RG1 phase-mid owner is fw0/node0"; then
+				:
+			else
+				mid_owner_ok=false
+				RG1_FAILBACK_SETTLED=false
+				failure_reason="${failure_reason:+${failure_reason}; }phase-mid RG1 owner was not proven as fw0/node0"
+			fi
+		fi
+		if ha_target_reachability_cell "after RG1 failback"; then :; else :; fi
+		ha_external_sweep "RG1 failback immediate"
+		for ((index = 1; index <= 10; index++)); do
+			phase=$(printf 'sample-%02d' "$index")
+			sleep 1
+			if ! main_iperf_running; then
+				load_ok=false
+				failure_reason="${failure_reason:+${failure_reason}; }main iperf process not alive before ${phase}"
+			fi
+			if ! ha_capture_rg1_sample_pair "$phase"; then
+				failure_reason="${failure_reason:+${failure_reason}; }${phase} statistics/interfaces capture was blind"
+			fi
+			if ! main_iperf_running; then
+				load_ok=false
+				failure_reason="${failure_reason:+${failure_reason}; }main iperf process not alive after ${phase}"
+			fi
+		done
+		if ! main_iperf_running; then
+			load_ok=false
+			failure_reason="${failure_reason:+${failure_reason}; }main iperf process was not alive at phase-post"
+		fi
+		if ! ha_capture_rg1_pair phase-post; then
+			post_capture_ok=false
+			post_owner_ok=false
+			RG1_FAILBACK_SETTLED=false
+			failure_reason="${failure_reason:+${failure_reason}; }phase-post capture was blind"
+		else
+			if ha_rg1_owner_status_cell node0 phase-post "RG1 phase-post owner remains fw0/node0"; then
+				:
+			else
+				post_owner_ok=false
+				RG1_FAILBACK_SETTLED=false
+				failure_reason="${failure_reason:+${failure_reason}; }phase-post RG1 owner was not proven as fw0/node0"
+			fi
+		fi
+		if ! main_iperf_running; then
+			load_ok=false
+			failure_reason="${failure_reason:+${failure_reason}; }main iperf process did not remain alive through phase-post"
+		fi
+		if ha_target_reachability_cell "after RG1 failback post-sampler"; then :; else :; fi
+		ha_external_sweep "RG1 failback post-sampler"
+		ha_recent_dead_streams_cell "RG1 failback post-sampler"
+	else
+		if ha_target_reachability_cell "after RG1 failback attempt"; then :; else :; fi
+		ha_external_sweep "RG1 failback immediate"
+		ha_recent_dead_streams_cell "RG1 failback immediate"
+		void "RG1 failback post-sampler: target and external sweeps unavailable because RG1 did not settle on fw0"
+		void "RG1 failback post-sampler: external IPv4 reachability not measured"
+		void "RG1 failback post-sampler: external IPv6 reachability not measured"
+	fi
+	if [[ "$sync_ok" != true || "$pre_ok" != true || "$pre_capture_ok" != true \
+		|| "$owner_moved" != true || "$mid_capture_ok" != true || "$mid_owner_ok" != true \
+		|| "$post_capture_ok" != true || "$post_owner_ok" != true || "$load_ok" != true ]]; then
+		can_measure=false
+	fi
+	ha_rg1_evaluate "$can_measure" "${failure_reason:-RG1 slice prerequisites were not satisfied}"
 }
 
 # check_v6_transit asserts IPv6 traffic still crosses the firewall (#6934).
@@ -313,12 +1188,17 @@ else
 	die_precondition "fw0 is not primary for every redundancy group — cannot run the failover test. This is a PRECONDITION failure, NOT a failover regression: the cluster was not in a testable state before the change under test ran. Check the post-deploy reassert (#6591) and re-read the state directly:
 $fw0_status"
 fi
+if ha_wait_for_session_sync_idle "before traffic" node0 "$FW0" node1 "$FW1"; then :; else :; fi
+
+# Keep the existing two-packet check; this three-packet + TCP fallback cell
+# exercises the legacy target-reachability path before the load starts.
+if ha_target_reachability_cell "before traffic"; then :; else :; fi
 
 # Verify iperf target reachable
 if incus exec "$CLUSTER_LAN_HOST" -- ping -c 2 -W 2 "$IPERF_TARGET" &>/dev/null; then
 	pass "iperf3 target reachable ($IPERF_TARGET)"
 else
-	die "Cannot reach iperf3 target $IPERF_TARGET from ${CLUSTER_LAN_HOST}"
+	fail "Cannot reach iperf3 target $IPERF_TARGET from ${CLUSTER_LAN_HOST} with the existing two-packet ping check"
 fi
 
 # #6934: the IPv6 baseline. Asserted BEFORE any failover so a later v6 failure
@@ -424,7 +1304,7 @@ sleep 1
 
 # ── Phase 1: Start iperf3 ───────────────────────────────────────────
 
-info "Starting iperf3 -P${IPERF_STREAMS} -i 1 -t${IPERF_DURATION} -p${IPERF_PORT} → ${IPERF_TARGET}"
+info "Starting iperf3 --json-stream -P${IPERF_STREAMS} -t${IPERF_DURATION} -p${IPERF_PORT} → ${IPERF_TARGET}"
 
 # iperf3 server handles one client at a time. After a previous test
 # disrupts connections (session clear / failover), the server may hold
@@ -453,8 +1333,10 @@ for attempt in 1 2 3; do
 		break
 	fi
 
-	# iperf3 is running but not enough sessions — streams may have timed out
-	if incus exec "$CLUSTER_LAN_HOST" -- grep -q "unable to connect" /tmp/iperf3-failover.log 2>/dev/null; then
+	# The iperf3 3.20 refused-connect capture is an `event:error` JSON line on
+	# stdout (fixture: failover-client-connect-error.jsonl); stderr was empty.
+	# Retry only on the captured JSON connection-failure event.
+	if failover_main_iperf_connect_failed /tmp/iperf3-failover.log; then
 		info "iperf3 stream connect failed on attempt $attempt — server busy, retrying"
 		failover_stop_main_iperf /tmp/iperf3-failover.pid "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
 		sleep $((attempt * 10))
@@ -593,6 +1475,9 @@ else
 	fi
 fi
 
+if ha_wait_for_session_sync_idle "before fw0 crash" node0 "$FW0" node1 "$FW1"; then :; else :; fi
+ha_pre_failover_observation
+
 # ── Phase 3: Crash fw0 (sysrq reboot) ───────────────────────────────
 #
 # sysrq-b is the repo's proven unclean primitive (same as
@@ -625,6 +1510,9 @@ failover_at_seconds=$((SECONDS - iperf_start_seconds))
 
 # Wait for fw1 to detect failure and become primary
 sleep 3
+if ha_target_reachability_cell "after crash takeover"; then :; else :; fi
+ha_external_sweep "crash takeover immediate"
+ha_recent_dead_streams_cell "crash takeover immediate"
 
 # Verify iperf3 survived the failover
 if main_iperf_running; then
@@ -644,13 +1532,27 @@ info "Waiting for fw0 to reboot and rejoin as secondary (max ${REBOOT_WAIT}s)"
 # cluster: ~22s clean (sysrq), so 60s wall keeps ~2.7x headroom.
 fw0_back=false
 wait_start=$SECONDS
+crash_post_external_done=false
 while (( SECONDS - wait_start < REBOOT_WAIT )); do
+	if [[ "$crash_post_external_done" != true ]] && (( SECONDS - wait_start >= 10 )); then
+		ha_external_sweep "crash post-10s"
+		ha_recent_dead_streams_cell "crash post-10s"
+		crash_post_external_done=true
+	fi
 	if wait_for_instance "$FW0" 1; then
 		fw0_back=true
 		info "fw0 xpfd active after $((SECONDS - wait_start))s"
 		break
 	fi
 done
+if [[ "$crash_post_external_done" != true ]]; then
+	crash_elapsed=$((SECONDS - wait_start))
+	if (( crash_elapsed < 10 )); then
+		sleep $((10 - crash_elapsed))
+	fi
+	ha_external_sweep "crash post-10s"
+	ha_recent_dead_streams_cell "crash post-10s"
+fi
 
 if $fw0_back; then
 	pass "fw0 xpfd restarted after reboot"
@@ -705,22 +1607,21 @@ fi
 # Verify iperf3 still running
 if main_iperf_running; then
 	pass "iperf3 survived fw0 rejoin"
+elif failover_main_iperf_result_complete /tmp/iperf3-failover.log; then
+	pass "iperf3 completed successfully (finished before rejoin check)"
 else
-	if incus exec "$CLUSTER_LAN_HOST" -- grep -q "iperf Done" /tmp/iperf3-failover.log 2>/dev/null; then
-		pass "iperf3 completed successfully (finished before rejoin check)"
-	else
-		fail "iperf3 DIED during fw0 rejoin"
-	fi
+	fail "iperf3 DIED during fw0 rejoin"
 fi
 
 # ── Phase 4b: Manual failover — fw0 becomes primary again ───────────
 
-info "Manual failover: requesting fw1 to failover all RGs to fw0"
+info "Manual failback: measuring isolated RG1 from fw1/node1 to fw0/node0"
+ha_run_rg1_failback_slice
 
-# Execute manual failover on fw1 for all RGs (current primary).
-# Each RG must be explicitly failed over — RG0 alone doesn't move RG1/RG2
-# because per-RG election is independent with non-preempt.
-for rg in 0 1 2; do
+# After the measured RG1 slice, preserve the existing unmeasured RG0/RG2 moves.
+# Each RG must be explicitly failed over — per-RG election is independent.
+info "Manual failover: requesting fw1 to failover RG0 and RG2 to fw0"
+for rg in 0 2; do
 	# stderr is CAPTURED, not discarded. `2>/dev/null` here hid every refusal
 	# this command can return, so a run that printed "Manual failover triggered"
 	# and a run that printed nothing at all were the same transcript (#9452).
@@ -728,24 +1629,26 @@ for rg in 0 1 2; do
 		sed 's/^/    /' || true
 done
 
-# Verify fw0 is now primary for ALL RGs.
+# Verify fw0 is now primary for RG0 and RG2. RG1 was checked from both node
+# status queries at phase-mid and phase-post above.
 #
 # A BOUNDED POLL, not a fixed `sleep 5`. The fixed sleep could not tell "the
-# transfer was refused" from "the transfer is still in flight", and #9452 was the
-# second: all three RGs DID move, 19-30s later, when the rejoining node's bounded
+# transfer was refused" from "the transfer is still in flight", and #9452 was
+# the second: an RG moved 19-30s later, when the rejoining node's bounded
 # #7162 startup promotion hold expired. So the cell was reading a real outage —
-# fw1 has already demoted, so for that whole window the RG is owned by NEITHER
-# node — and reporting it as a refusal, while simply lengthening the sleep would
-# have reported a 30s blackhole as a pass.
+# fw1 had already demoted, leaving the RG owned by NEITHER node — and reporting
+# it as a refusal, while simply lengthening the sleep would report a 30s
+# blackhole as a pass.
 #
-# Polling gives the cell the ELAPSED time, which is the number that separates the
-# two, and the bound stays tight enough that the blackhole #9452 fixed still
-# reds. Each RG is polled in turn, so the later RGs are not charged the earlier
-# ones' wait.
-MANUAL_FAILOVER_DEADLINE="${MANUAL_FAILOVER_DEADLINE:-10}"
+# Polling gives the cell the ELAPSED time, which separates the two; the bound
+# stays tight enough that the blackhole #9452 fixed still reds. Each RG is
+# polled in turn, so later RGs are not charged the earlier ones' wait.
 all_primary=true
-slowest=0
-for rg in 0 1 2; do
+if [[ "$RG1_FAILBACK_SETTLED" != true ]]; then
+	all_primary=false
+fi
+slowest="$RG1_FAILBACK_ELAPSED"
+for rg in 0 2; do
 	fo_start=$(date +%s)
 	moved=0
 	while :; do
@@ -772,18 +1675,16 @@ $(rg_ownership_diagnosis "$rg")"
 	fi
 done
 if $all_primary; then
-	pass "fw0 became primary for all RGs after manual failover (slowest ${slowest}s of ${MANUAL_FAILOVER_DEADLINE}s budget)"
+	pass "fw0 became primary for all RGs after manual failback (slowest ${slowest}s of ${MANUAL_FAILOVER_DEADLINE}s budget)"
 fi
 
 # Verify iperf3 survived manual failover
 if main_iperf_running; then
 	pass "iperf3 survived manual failover"
+elif failover_main_iperf_result_complete /tmp/iperf3-failover.log; then
+	pass "iperf3 completed successfully (finished before manual failover check)"
 else
-	if incus exec "$CLUSTER_LAN_HOST" -- grep -q "iperf Done" /tmp/iperf3-failover.log 2>/dev/null; then
-		pass "iperf3 completed successfully (finished before manual failover check)"
-	else
-		fail "iperf3 DIED during manual failover"
-	fi
+	fail "iperf3 DIED during manual failover"
 fi
 
 # #9087: re-read ownership AFTER the full crash-failover + manual-failback
@@ -869,57 +1770,125 @@ info "Waiting for iperf3 final result (up to ${IPERF_DURATION}s)"
 
 failover_wait_main_iperf_result /tmp/iperf3-failover.log "$IPERF_DURATION" || true
 
-# Check iperf3 completed successfully.
-# iperf3's control socket may close during failover even though all data
-# streams survived — this produces "control socket has closed unexpectedly"
-# instead of "iperf Done". Accept either outcome as long as the sender
-# [SUM] line shows adequate throughput.
-# #6897: capture the whole [SUM] sender line and let the lib parse it. The
-# previous inline parse matched only "Gbits", so a sub-Gbit run yielded the
-# literal "0" and then matched NEITHER the pass branch nor the fail branch —
-# there was no else, and the run emitted no throughput cell at all while still
-# summarising as "0 failed". Sub-Gbit is exactly what a throughput regression
-# or a CoS-shaped class looks like, so the gate went silent in the case it
-# exists to catch.
-iperf_log=$(incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-failover.log 2>/dev/null || true)
-sum_line=$(printf '%s\n' "$iperf_log" | grep '\[SUM\].*sender' | tail -1 || true)
-throughput=$(iperf_sum_rate_gbps "$sum_line")
+# Derive the throughput headline only from gate-validated JSON-stream metrics.
+# Missing, malformed, or incomplete metrics are VOID evidence, never a
+# zero-valued throughput FAIL; valid averages go through the anchored cell.
+# M1 JSON capture/gate fixture begin
+LOCAL_IPERF_LOG="${TMPDIR:-/tmp}/iperf3-failover.$$.json-stream.log"
+LOCAL_IPERF_METRICS="${TMPDIR:-/tmp}/iperf3-failover.$$.metrics.json"
+LOCAL_IPERF_GATE_ERR="${LOCAL_IPERF_METRICS}.gate.err"
+LOCAL_IPERF_PRODUCER_ERR="${LOCAL_IPERF_METRICS}.producer.err"
+iperf_gate_ok=false
+iperf_gate_reason=""
 
-if incus exec "$CLUSTER_LAN_HOST" -- grep -q "iperf Done" /tmp/iperf3-failover.log 2>/dev/null; then
-	pass "iperf3 completed successfully"
-elif [[ -n "$throughput" ]] && awk "BEGIN{exit !($throughput >= $MIN_THROUGHPUT)}"; then
-	pass "iperf3 data transfer completed (${throughput} Gbps) — control socket disrupted during failover"
-else
-	iperf_log_tail=$(incus exec "$CLUSTER_LAN_HOST" -- tail -5 /tmp/iperf3-failover.log 2>/dev/null || echo "(no log)")
-	fail "iperf3 did not complete: $iperf_log_tail"
+if ! incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-failover.log \
+	>"$LOCAL_IPERF_LOG" 2>/dev/null; then
+	printf '{"ok":false,"error":"metrics_capture_failed"}\n' >"$LOCAL_IPERF_METRICS"
+elif ! python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" \
+	"$LOCAL_IPERF_LOG" >"$LOCAL_IPERF_METRICS" 2>"$LOCAL_IPERF_PRODUCER_ERR"; then
+	printf '{"ok":false,"error":"metrics_parse_failed"}\n' >"$LOCAL_IPERF_METRICS"
 fi
 
-# The verdict is total: absent, unparseable, too-low and healthy each yield
-# exactly one cell. The catch-all default keeps that true even if the lib ever
-# grows a status this caller does not know about — a missing cell is the
-# defect, so no path may end without emitting one.
-throughput_verdict=$(iperf_throughput_verdict "$MIN_THROUGHPUT" "$sum_line")
-case "$throughput_verdict" in
-PASS\ *) pass "${throughput_verdict#PASS }" ;;
-FAIL\ *) fail "${throughput_verdict#FAIL }" ;;
-*)       fail "iperf3 throughput: unrecognised verdict from iperf_throughput_verdict: ${throughput_verdict}" ;;
-esac
+if gate_output=$(ha_metrics_gate "$LOCAL_IPERF_METRICS" 2>"$LOCAL_IPERF_GATE_ERR"); then
+	eval "$gate_output"
+	iperf_gate_ok=true
+else
+	iperf_gate_reason=$(<"$LOCAL_IPERF_GATE_ERR")
+	[[ -n "$iperf_gate_reason" ]] || iperf_gate_reason="ha_metrics_gate rejected metrics"
+fi
+# M1 JSON capture/gate fixture end
 
-# The interval and per-stream oracles observe the crash failover directly.
-# The aggregate headline alone can hide a long outage or four dead streams.
-failover_oracles=$(printf '%s\n' "$iperf_log" | python3 "${SCRIPT_DIR}/iperf3_sum_parse.py" \
-	--failover-check --streams "$IPERF_STREAMS" \
-	--min-throughput-gbps "$MIN_THROUGHPUT" --crash-at "$failover_at_seconds")
-while IFS= read -r oracle; do
-	case "$oracle" in
-	PASS\ *) pass "${oracle#PASS }" ;;
-	FAIL\ *) fail "${oracle#FAIL }" ;;
-	*)       fail "iperf3 failover oracle returned an unrecognised verdict: ${oracle}" ;;
+if [[ "$iperf_gate_ok" == true ]]; then
+	ha_emit_verdict "iperf3 whole-run zero-throughput intervals (${zero_intervals_total}, limit ${MAX_ZERO_INTERVALS})" \
+		ha_counter_at_most_verdict "$zero_intervals_total" "$MAX_ZERO_INTERVALS" "whole-run zero intervals"
+	ha_emit_verdict "iperf3 whole-run per-stream zero intervals (${stream_zero_intervals_total}, limit ${MAX_STREAM_ZERO_INTERVALS}; ${zero_streams_total} affected stream(s))" \
+		ha_counter_at_most_verdict "$stream_zero_intervals_total" "$MAX_STREAM_ZERO_INTERVALS" "whole-run per-stream zero intervals"
+	info "iperf3 whole-run zero-throughput streams: ${zero_streams_total}"
+	pass "iperf3 sender retransmits ${retransmits}"
+	if [[ -n "$MAX_RETRANSMITS" ]]; then
+		ha_emit_verdict "iperf3 retransmits ${retransmits} (limit ${MAX_RETRANSMITS})" \
+			ha_counter_at_most_verdict "$retransmits" "$MAX_RETRANSMITS" "retransmits"
+	fi
+	if [[ -n "$MAX_RETRANSMITS_PER_GBPS" ]]; then
+		if [[ ! "$MAX_RETRANSMITS_PER_GBPS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+			void "iperf3 retransmits-per-Gbps limit is malformed: ${MAX_RETRANSMITS_PER_GBPS}"
+		else
+			retrans_per_gb="$(awk -v retransmits="$retransmits" -v throughput="$avg_gbps" \
+				'BEGIN { if (throughput <= 0) print 0; else printf "%.3f", retransmits / throughput }')"
+			if awk "BEGIN{exit !(${retrans_per_gb} <= ${MAX_RETRANSMITS_PER_GBPS})}"; then
+				pass "iperf3 retransmits per Gbps ${retrans_per_gb} within limit ${MAX_RETRANSMITS_PER_GBPS}"
+			else
+				fail "iperf3 retransmits per Gbps ${retrans_per_gb} exceed limit ${MAX_RETRANSMITS_PER_GBPS}"
+			fi
+		fi
+	fi
+	if [[ "$collapse_detected" == true ]]; then
+		fail "iperf3 interval collapse detected: ${collapse_reason}"
+	else
+		pass "iperf3 interval collapse not detected"
+	fi
+	completion_grace="${IPERF_COMPLETION_GRACE_SEC:-2}"
+	if [[ "$completed" == true ]]; then
+		pass "iperf3 completed successfully"
+	elif awk "BEGIN{exit !(${observed_end_sec} >= (${IPERF_DURATION} - ${completion_grace}))}"; then
+		if awk "BEGIN{exit !(${avg_gbps} >= ${MIN_THROUGHPUT})}"; then
+			pass "iperf3 data transfer completed (${avg_gbps} Gbps) — observed JSON duration with adequate throughput"
+		else
+			fail "iperf3 reached the expected JSON duration but throughput was below ${MIN_THROUGHPUT} Gbps"
+		fi
+	else
+		VOID=$((VOID + 1))
+		echo "  VOID iperf3 completion: JSON stream has no end event and observed ${observed_end_sec}s is short of the effective duration"
+	fi
+else
+	void "iperf3 whole-run JSON metrics unavailable: ${iperf_gate_reason}"
+fi
+
+# M1 JSON verdict fixture begin
+# Only gate-validated JSON metrics may produce the anchored throughput cell.
+# A rejected document is ordinary VOID evidence, not a zero-throughput FAIL.
+if [[ "$iperf_gate_ok" == true ]]; then
+	evidence_note="json-stream avg_gbps from ${LOCAL_IPERF_METRICS}; ${full_interval_count} full intervals"
+	throughput_verdict=$(iperf_throughput_json_verdict "$MIN_THROUGHPUT" "$avg_gbps" "$evidence_note")
+	case "$throughput_verdict" in
+	PASS\ *) pass "${throughput_verdict#PASS }" ;;
+	FAIL\ *) fail "${throughput_verdict#FAIL }" ;;
+	*)       fail "iperf3 throughput: unrecognised verdict from iperf_throughput_json_verdict: ${throughput_verdict}" ;;
 	esac
-done <<< "$failover_oracles"
+else
+	VOID=$((VOID + 1))
+	echo "  VOID iperf3 throughput: ${iperf_gate_reason}"
+fi
+# M1 JSON verdict fixture end
 
-# The summary is the one line the harness ledger parses. Every measured cell
-# is now an ordinary pass/fail assertion; there is no known-gap tally.
+if [[ "$iperf_gate_ok" == true ]]; then
+	oracle_error="${LOCAL_IPERF_METRICS}.oracle.err"
+	if failover_oracles=$(python3 "${SCRIPT_DIR}/iperf3_sum_parse.py" \
+		--failover-check --json-stream --streams "$IPERF_STREAMS" \
+		--min-throughput-gbps "$MIN_THROUGHPUT" --crash-at "$failover_at_seconds" \
+		<"$LOCAL_IPERF_LOG" 2>"$oracle_error"); then
+		while IFS= read -r oracle; do
+			case "$oracle" in
+			PASS\ *) pass "${oracle#PASS }" ;;
+			FAIL\ *) fail "${oracle#FAIL }" ;;
+			*)       fail "iperf3 failover oracle returned an unrecognised verdict: ${oracle}" ;;
+			esac
+		done <<< "$failover_oracles"
+	else
+		oracle_reason=$(<"$oracle_error")
+		void "iperf3 failover crash oracle evidence unavailable: ${oracle_reason:-JSON interval parser failed}"
+	fi
+else
+	info "Skipping JSON crash oracle because the whole-run metrics gate rejected its input"
+fi
+
+# M1 JSON summary precedence fixture begin
+if (( FAIL == 0 && VOID > 0 )); then
+	exit 77
+fi
+
+# The summary is the one line the harness ledger parses. Keep its grammar
+# unchanged; measured FAIL outranks ordinary capture VOID.
 echo "  Failover test: $PASS passed, $FAIL failed"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
@@ -931,3 +1900,4 @@ if [[ $FAIL -gt 0 ]]; then
 	done
 	exit 1
 fi
+# M1 JSON summary precedence fixture end

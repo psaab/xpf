@@ -146,6 +146,7 @@ test/incus/screen-probe-lib.sh
 test/incus/wire-gate-lib.sh
 test/incus/wire-config-snapshot-lib.sh
 test/incus/target-services.sh
+test/incus/ha-assurance-lib.sh
 "
 fi
 

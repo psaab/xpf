@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${PROJECT_ROOT}/test/incus/ha-assurance-lib.sh"
 ENV_FILE="${BPFRX_CLUSTER_ENV:-${PROJECT_ROOT}/test/incus/loss-userspace-cluster.env}"
 RUNS="${RUNS-3}"
 DURATION="${DURATION-5}"
@@ -75,6 +76,7 @@ ACTIVE_FW="${FW0}"
 
 info() { printf '==> %s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+void() { printf 'VOID: %s\n' "$*" >&2; exit 77; }
 
 validate_port() {
 	local name="$1" value="$2"
@@ -366,17 +368,37 @@ run_ttl_probe() {
 	else
 		cmd="rm -f ${outfile}; if ping -c 1 -W 2 -t 1 ${target} > ${outfile} 2>&1; then :; else rc=\$?; if [[ \$rc -gt 1 ]]; then echo \"ping exited with status \$rc\" >> ${outfile}; exit \$rc; fi; fi"
 	fi
-	run_host "$cmd"
+	if run_host "$cmd"; then
+		TTL_PROBE_COMMAND_STATUS=0
+	else
+		# The remote wrapper normalizes an expected ping rc=1 to zero, so
+		# any command failure here means the captured ping evidence is blind.
+		TTL_PROBE_COMMAND_STATUS=2
+	fi
 }
 
 validate_ttl_probe() {
 	local label="$1" path="$2"
-	local output
-	output="$(run_host "cat ${path}")"
-	if ! grep -Eq 'Time to live exceeded|Time exceeded: Hop limit|Time exceeded' <<<"$output"; then
-		die "${label} TTL=1 probe did not return time-exceeded: ${output}"
+	local output capture_status=0 command_status verdict_status verdict_output
+	if output="$(run_host "cat ${path}")"; then
+		:
+	else
+		capture_status=2
 	fi
-	printf '%s ttl probe: ok\n' "$label" | tee -a "$summary_file"
+	command_status="${TTL_PROBE_COMMAND_STATUS:-2}"
+	if (( capture_status != 0 )); then
+		command_status=2
+	fi
+	if verdict_output="$(ha_ttl_output_verdict "$command_status" "$output" 2>&1)"; then
+		printf '%s ttl probe: ok\n' "$label" | tee -a "$summary_file"
+		return 0
+	else
+		verdict_status=$?
+	fi
+	if (( verdict_status == 2 )); then
+		void "${label} TTL=1 probe evidence unavailable: ${verdict_output}"
+	fi
+	die "${label} TTL=1 probe did not return time-exceeded: ${output}"
 }
 
 run_mtr_report() {
@@ -408,22 +430,50 @@ validate_mtr_report() {
 	printf '%s\n' "$result" | tee -a "$summary_file"
 }
 
-# Assert the LAN host actually received ICMP echo replies from the target,
-# so a broken dataplane that lets `ping` exit 0 without delivery (or that
-# the `|| true` capture would otherwise hide) still hard-fails the smoke.
+# Assert the LAN host actually received ICMP echo replies from the target.
+# Preserve ping's exit status so a valid zero-reply result remains a measured
+# failure while an unavailable/malformed capture is VOID.
 # This is the controlled forwarding-correctness gate: the LAN host reaches
 # the WAN-side target only by transiting the userspace dataplane.
+run_controlled_ping() {
+	local family="$1" target="$2" path="$3" cmd
+	if ! run_host "rm -f ${path}"; then
+		CONTROLLED_PING_STATUS=2
+		return 0
+	fi
+	if [[ "$family" == "6" ]]; then
+		cmd="LC_ALL=C ping -6 -c 2 -W 1 ${target} > ${path} 2>&1"
+	else
+		cmd="LC_ALL=C ping -c 2 -W 1 ${target} > ${path} 2>&1"
+	fi
+	if run_host "$cmd"; then
+		CONTROLLED_PING_STATUS=0
+	else
+		CONTROLLED_PING_STATUS=$?
+	fi
+}
+
 validate_reachability() {
-	local label="$1" path="$2"
-	local out
-	out="$(run_host "cat ${path}")"
-	if grep -Eq '(^| )0( packets)? received' <<<"$out"; then
-		die "${label} reachability: target not reached (no replies): ${out}"
+	local label="$1" path="$2" command_status="$3"
+	local out capture_status=0 verdict_status verdict_output
+	if out="$(run_host "cat ${path}")"; then
+		:
+	else
+		capture_status=2
 	fi
-	if ! grep -Eq '[1-9][0-9]* (packets )?received' <<<"$out"; then
-		die "${label} reachability: could not confirm replies: ${out}"
+	if (( capture_status != 0 )); then
+		command_status=2
 	fi
-	printf '%s reachability: ok\n' "$label" | tee -a "$summary_file"
+	if verdict_output="$(ha_ping_reply_verdict "$command_status" "$out" 2>&1)"; then
+		printf '%s reachability: ok\n' "$label" | tee -a "$summary_file"
+		return 0
+	else
+		verdict_status=$?
+	fi
+	if (( verdict_status == 2 )); then
+		void "${label} reachability evidence unavailable: ${verdict_output}"
+	fi
+	die "${label} reachability: target not reached (no replies): ${out}"
 }
 
 # Guard against topology drift: the controlled reachability ping only
@@ -432,16 +482,30 @@ validate_reachability() {
 # ping never transits the dataplane and the gate would be meaningless.
 assert_forwarding_route() {
 	local family="$1" label="$2" target="$3"
-	local route
+	local route route_status=0 verdict_status verdict_output
 	if [[ "$family" == "6" ]]; then
-		route="$(run_host "ip -6 route get ${target} 2>&1 || true")"
+		if route="$(run_host "ip -6 route get ${target} 2>&1")"; then
+			route_status=0
+		else
+			route_status=$?
+		fi
 	else
-		route="$(run_host "ip route get ${target} 2>&1 || true")"
+		if route="$(run_host "ip route get ${target} 2>&1")"; then
+			route_status=0
+		else
+			route_status=$?
+		fi
 	fi
-	if grep -Eq '(^|[[:space:]])local([[:space:]]|$)|dev lo([[:space:]]|$)' <<<"$route"; then
-		die "${label} forwarding-route: ${target} resolves on-box (no transit): ${route}"
+	if verdict_output="$(ha_route_lookup_verdict "$route_status" "$route" 2>&1)"; then
+		printf '%s forwarding-route: %s\n' "$label" "$route" | tee -a "$summary_file"
+		return 0
+	else
+		verdict_status=$?
 	fi
-	printf '%s forwarding-route: %s\n' "$label" "$route" | tee -a "$summary_file"
+	if (( verdict_status == 2 )); then
+		void "${label} forwarding-route evidence unavailable for ${target}: ${verdict_output}"
+	fi
+	die "${label} forwarding-route: ${target} resolves on-box (no transit): ${route}"
 }
 
 validate_traceroute_visibility() {
@@ -880,16 +944,17 @@ wait_for_ipv6_default_route || die "cluster userspace host still has no IPv6 def
 ensure_dualstack_wan_neighbors "$ACTIVE_FW"
 
 info "basic reachability checks"
-# LC_ALL=C pins the ping summary wording so the reply-count parse below is
-# locale-independent. `2>&1 || true` captures stderr and prevents a 100%-
-# loss ping (exit 1 under `set -e`) from crashing the validator before
-# validate_reachability can emit its descriptive failure.
+# LC_ALL=C pins ping's summary wording so the shared reply-count predicate
+# is locale-independent; command status and output are both preserved for
+# the evidence-aware PASS/FAIL/VOID decision.
 assert_forwarding_route 4 "ipv4 forwarding" "${V4_TEST_TARGET}"
 assert_forwarding_route 6 "ipv6 forwarding" "${V6_TEST_TARGET}"
-run_host "LC_ALL=C ping -c 2 -W 1 ${V4_TEST_TARGET} >/tmp/userspace-ping-v4.out 2>&1 || true"
-run_host "LC_ALL=C ping -6 -c 2 -W 1 ${V6_TEST_TARGET} >/tmp/userspace-ping-v6.out 2>&1 || true"
-validate_reachability "ipv4 forwarding" "/tmp/userspace-ping-v4.out"
-validate_reachability "ipv6 forwarding" "/tmp/userspace-ping-v6.out"
+run_controlled_ping 4 "${V4_TEST_TARGET}" "/tmp/userspace-ping-v4.out"
+PING_V4_STATUS="$CONTROLLED_PING_STATUS"
+run_controlled_ping 6 "${V6_TEST_TARGET}" "/tmp/userspace-ping-v6.out"
+PING_V6_STATUS="$CONTROLLED_PING_STATUS"
+validate_reachability "ipv4 forwarding" "/tmp/userspace-ping-v4.out" "$PING_V4_STATUS"
+validate_reachability "ipv6 forwarding" "/tmp/userspace-ping-v6.out" "$PING_V6_STATUS"
 
 validate_traceroute_visibility
 

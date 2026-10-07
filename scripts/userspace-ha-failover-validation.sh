@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${PROJECT_ROOT}/test/incus/ha-assurance-lib.sh"
 IPERF_METRICS="${PROJECT_ROOT}/scripts/iperf-json-metrics.py"
 ENV_FILE="${BPFRX_CLUSTER_ENV:-${PROJECT_ROOT}/test/incus/loss-userspace-cluster.env}"
 RG="${RG:-1}"
@@ -96,11 +97,18 @@ REMOTE_IPERF_UNIT="userspace-ha-rg${RG}-iperf3.service"
 LOCAL_IPERF_LOG="${ARTIFACT_DIR}/iperf3.log"
 LOCAL_IPERF_METRICS="${ARTIFACT_DIR}/iperf3.metrics.json"
 FAILED=0
+VOIDS=0
 IPERF_WAIT_TIMEOUT_HIT=0
 
 info() { printf '==> %s\n' "$*"; }
 pass() { printf 'PASS  %s\n' "$*"; }
 fail() { printf 'FAIL  %s\n' "$*" >&2; FAILED=1; }
+void() { printf 'VOID %s\n' "$*" >&2; VOIDS=$((VOIDS + 1)); }
+legacy_verdict_status() {
+	if (( FAILED != 0 )); then return 1; fi
+	if (( VOIDS != 0 )); then return 77; fi
+	return 0
+}
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 required_iperf_duration() {
@@ -334,37 +342,13 @@ transition_interfaces_path() {
 	printf '%s/cycle%s-%s-watch%02d-%s-dp-interfaces.txt\n' "${ARTIFACT_DIR}" "${cycle}" "${phase}" "${sample}" "$(vm_artifact_suffix "$vm")"
 }
 
-status_summary_value() {
-	local path="$1"
-	local label="$2"
-	python3 - "$path" "$label" <<'PY'
-import pathlib
-import re
-import sys
 
-path = pathlib.Path(sys.argv[1])
-label = sys.argv[2]
-if not path.exists():
-    print(f"status summary snapshot missing: {path}", file=sys.stderr)
-    raise SystemExit(2)
-
-pattern = f"  {label}:"
-for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-    if not line.startswith(pattern):
-        continue
-    match = re.search(r"(-?\d+)", line.split(":", 1)[1])
-    if match:
-        print(match.group(1))
-    else:
-        print(f"unparseable status summary value for {label!r} in {path}", file=sys.stderr)
-        raise SystemExit(2)
-    break
-else:
-    print(f"status summary label {label!r} not found in {path}", file=sys.stderr)
-    raise SystemExit(2)
-PY
-}
-
+# Pure delta of a status-summary counter. Prints the delta on stdout and
+# returns 0, or prints a VOID reason on stderr and returns 2. Never touches
+# FAILED/VOIDS: every caller runs this inside $(...) where flag updates would
+# be lost in the subshell, so callers must map status 2 to void() themselves.
+# Counter rewind is VOID per plan §2/§4, not FAIL, so both helper failures
+# (unreadable label, rewind, malformed) share status 2.
 status_summary_delta() {
 	local post_path="$1"
 	local pre_path="$2"
@@ -372,66 +356,21 @@ status_summary_delta() {
 	local context="$4"
 	local pre post delta
 
-	if ! pre="$(status_summary_value "$pre_path" "$label")"; then
-		fail "${context}: unable to read pre ${label}"
-		return 1
+	if ! pre="$(ha_status_summary_value "$pre_path" "$label")"; then
+		printf '%s: unable to read pre %s\n' "$context" "$label" >&2
+		return 2
 	fi
-	if ! post="$(status_summary_value "$post_path" "$label")"; then
-		fail "${context}: unable to read post ${label}"
-		return 1
+	if ! post="$(ha_status_summary_value "$post_path" "$label")"; then
+		printf '%s: unable to read post %s\n' "$context" "$label" >&2
+		return 2
 	fi
-	if ! delta="$(nondecreasing_counter_delta "$pre" "$post")"; then
-		fail "${context}: ${label} counter decreased from ${pre} to ${post}"
-		return 1
+	if ! delta="$(ha_nondecreasing_delta "$pre" "$post")"; then
+		printf '%s: %s counter evidence blind (rewind or malformed pre=%s post=%s)\n' "$context" "$label" "$pre" "$post" >&2
+		return 2
 	fi
 	printf '%s\n' "$delta"
 }
 
-sync_stats_value() {
-	local path="$1"
-	local service="$2"
-	local column="$3"
-	python3 - "$path" "$service" "$column" <<'PY'
-import pathlib
-import re
-import sys
-
-path = pathlib.Path(sys.argv[1])
-service = sys.argv[2]
-column = sys.argv[3]
-if not path.exists():
-    print("__ERR__")
-    raise SystemExit(0)
-
-lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-capture = False
-found_section = False
-for line in lines:
-    if line.strip() == "Services Synchronized:":
-        capture = True
-        found_section = True
-        continue
-    if capture and not line.strip():
-        break
-    if not capture:
-        continue
-    if service not in line:
-        continue
-    nums = re.findall(r"\d+", line)
-    if column == "sent":
-        print(nums[0] if len(nums) >= 1 else "__ERR__")
-    elif column == "received":
-        print(nums[1] if len(nums) >= 2 else "__ERR__")
-    else:
-        raise SystemExit(f"unsupported sync stats column: {column}")
-    break
-else:
-    if not found_section:
-        print("__ERR__")
-    else:
-        print("__ERR__")
-PY
-}
 
 capture_sync_snapshot() {
 	local vm="$1"
@@ -444,6 +383,9 @@ wait_for_session_sync_idle() {
 	local stable_needed="$SESSION_SYNC_IDLE_STABLE_SAMPLES"
 	local stable=0
 	local tries="$SESSION_SYNC_IDLE_TIMEOUT"
+	local source_node target_node
+	source_node="$(node_name "$SOURCE_NODE")"
+	target_node="$(node_name "$TARGET_NODE")"
 	local prev_source_sent="" prev_target_recv="" prev_target_pending="" prev_target_drained=""
 	while (( tries > 0 )); do
 		capture_sync_snapshot "$SOURCE_VM" "${label}-source"
@@ -451,16 +393,22 @@ wait_for_session_sync_idle() {
 		local source_path target_path
 		source_path="$(sync_snapshot_path "${label}-source" "$SOURCE_VM")"
 		target_path="$(sync_snapshot_path "${label}-target" "$TARGET_VM")"
+		local sample_status sample_diagnostic
+		if sample_diagnostic="$(ha_session_sync_idle_sample "$source_node" "$target_node" "$source_path" "$target_path" 2>&1)"; then
+			sample_status=0
+		else
+			sample_status=$?
+		fi
+		if (( sample_status == 2 )); then
+			void "${label}: session sync evidence blind: ${sample_diagnostic}"
+			return 0
+		fi
 		local source_sent target_recv target_pending target_drained
-		source_sent="$(sync_stats_value "$source_path" "Session create" sent)"
-		target_recv="$(sync_stats_value "$target_path" "Session create" received)"
-		if ! target_pending="$(status_summary_value "$target_path" "Session delta pending")"; then
-			target_pending="__ERR__"
-		fi
-		if ! target_drained="$(status_summary_value "$target_path" "Session delta drained")"; then
-			target_drained="__ERR__"
-		fi
-		if [[ "$source_sent" != "__ERR__" && "$target_recv" != "__ERR__" && "$target_pending" != "__ERR__" && "$target_drained" != "__ERR__" && "$source_sent" == "$target_recv" && "$target_pending" == "0" ]]; then
+		source_sent="$(ha_sync_stats_value "$source_path" "Session create" sent)"
+		target_recv="$(ha_sync_stats_value "$target_path" "Session create" received)"
+		target_pending="$(ha_status_summary_value "$target_path" "Session delta pending")"
+		target_drained="$(ha_status_summary_value "$target_path" "Session delta drained")"
+		if (( sample_status == 0 )); then
 			stable=$((stable + 1))
 			if (( stable >= stable_needed )); then
 				pass "${label}: session sync idle (source_sent=${source_sent} target_recv=${target_recv} target_delta_pending=${target_pending} target_delta_drained=${target_drained})"
@@ -480,159 +428,8 @@ wait_for_session_sync_idle() {
 	return 1
 }
 
-status_fabric_tx_packets() {
-	local path="$1"
-	python3 - "$path" <<'PY'
-import pathlib
-import sys
 
-path = pathlib.Path(sys.argv[1])
-if not path.exists():
-    print("0")
-    raise SystemExit(0)
 
-parents = set()
-total = 0
-section = None
-skip_header = False
-
-for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-    line = raw_line.rstrip("\n")
-    stripped = line.strip()
-    if line.strip() == "Userspace fabric links:":
-        section = "fabric"
-        skip_header = True
-        continue
-    if line.strip() == "Userspace bindings:":
-        section = "bindings"
-        skip_header = True
-        continue
-    if section and not stripped:
-        section = None
-        skip_header = False
-        continue
-    if skip_header:
-        skip_header = False
-        continue
-    if section == "fabric":
-        parts = stripped.split()
-        if len(parts) >= 2:
-            parents.add(parts[1])
-        continue
-    if section == "bindings":
-        # Column layout from 'show chassis cluster data-plane interfaces':
-        #   [0]=slot [1]=queue ... [11]=TX_pkts ... [19]=interface
-        # If the CLI format changes, these indices must be updated.
-        parts = stripped.split()
-        if len(parts) < 20:
-            continue
-        interface = parts[19]
-        if interface in parents:
-            try:
-                total += int(parts[11])
-            except ValueError:
-                pass
-
-print(total)
-PY
-}
-
-interface_packets_value() {
-	local path="$1"
-	local iface_regex="$2"
-	local direction="$3"
-	python3 - "$path" "$iface_regex" "$direction" <<'PY'
-import pathlib
-import re
-import sys
-
-path = pathlib.Path(sys.argv[1])
-iface_regex = re.compile(sys.argv[2])
-direction = sys.argv[3]
-idx = 10 if direction == "rx" else 11
-if not path.exists():
-    print(f"missing interface snapshot: {path}", file=sys.stderr)
-    raise SystemExit(2)
-
-in_bindings = False
-skip_header = False
-total = 0
-matched = False
-bindings_rows = 0
-malformed_rows = 0
-for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-    stripped = raw_line.strip()
-    if stripped == "Userspace bindings:":
-        in_bindings = True
-        skip_header = True
-        continue
-    if in_bindings and not stripped:
-        break
-    if not in_bindings:
-        continue
-    if skip_header:
-        skip_header = False
-        continue
-    parts = stripped.split()
-    if len(parts) < 20:
-        malformed_rows += 1
-        continue
-    bindings_rows += 1
-    iface = parts[19]
-    if not iface_regex.fullmatch(iface):
-        continue
-    matched = True
-    try:
-        total += int(parts[idx])
-    except ValueError:
-        print(f"invalid {direction} counter for {iface} in {path}", file=sys.stderr)
-        raise SystemExit(2)
-
-if not in_bindings:
-    print(f"userspace bindings section not found in {path}", file=sys.stderr)
-    raise SystemExit(2)
-elif not matched:
-    if bindings_rows == 0:
-        if malformed_rows > 0:
-            print(
-                f"userspace bindings rows malformed in {path} "
-                f"({malformed_rows} short rows)",
-                file=sys.stderr,
-            )
-        else:
-            print(f"userspace bindings section empty in {path}", file=sys.stderr)
-    else:
-        detail = ""
-        if malformed_rows > 0:
-            detail = f" ({malformed_rows} malformed rows ignored)"
-        print(
-            f"no interfaces matching /{iface_regex.pattern}/ in {path}{detail}",
-            file=sys.stderr,
-        )
-    raise SystemExit(2)
-
-print(total)
-PY
-}
-
-nondecreasing_counter_delta() {
-	local baseline="$1"
-	local post="$2"
-	python3 - "$baseline" "$post" <<'PY'
-import sys
-
-try:
-    baseline = int(sys.argv[1])
-    post = int(sys.argv[2])
-except ValueError:
-    print(f"invalid counter values: {sys.argv[1]!r} {sys.argv[2]!r}", file=sys.stderr)
-    raise SystemExit(2)
-if post < baseline:
-    print(f"{baseline} {post}", file=sys.stderr)
-    raise SystemExit(2)
-print(post - baseline)
-PY
-}
 
 standby_userspace_ready_vm() {
 	local vm="$1"
@@ -678,18 +475,18 @@ validate_phase_fabric_path() {
 	from_if_baseline="$(cycle_interfaces_path "$cycle" "$phase" "$from_vm")"
 	from_if_post="$(cycle_interfaces_path "$cycle" "${phase}-post" "$from_vm")"
 
-	from_fabric_pre="$(status_fabric_tx_packets "$from_if_baseline")"
-	from_fabric_post="$(status_fabric_tx_packets "$from_if_post")"
+	from_fabric_pre="$(ha_status_fabric_tx_packets "$from_if_baseline")"
+	from_fabric_post="$(ha_status_fabric_tx_packets "$from_if_post")"
 	from_fabric_delta=$(( from_fabric_post - from_fabric_pre ))
-	if ! from_wan_tx_base="$(interface_packets_value "$from_if_baseline" "$STANDBY_WAN_IFACE_REGEX" tx)"; then
+	if ! from_wan_tx_base="$(ha_interface_packets_value "$from_if_baseline" "$STANDBY_WAN_IFACE_REGEX" tx)"; then
 		fail "cycle ${cycle} ${phase}: unable to read standby ${from_name} WAN TX post-failover baseline counters"
 		return
 	fi
-	if ! from_wan_tx_post="$(interface_packets_value "$from_if_post" "$STANDBY_WAN_IFACE_REGEX" tx)"; then
+	if ! from_wan_tx_post="$(ha_interface_packets_value "$from_if_post" "$STANDBY_WAN_IFACE_REGEX" tx)"; then
 		fail "cycle ${cycle} ${phase}: unable to read standby ${from_name} WAN TX post-validation counters"
 		return
 	fi
-	if ! from_wan_tx_delta="$(nondecreasing_counter_delta "$from_wan_tx_base" "$from_wan_tx_post")"; then
+	if ! from_wan_tx_delta="$(ha_nondecreasing_delta "$from_wan_tx_base" "$from_wan_tx_post")"; then
 		fail "cycle ${cycle} ${phase}: standby ${from_name} WAN TX counter decreased" \
 			"from ${from_wan_tx_base} to ${from_wan_tx_post}; failing closed"
 		return
@@ -1032,60 +829,60 @@ validate_transition_window() {
 		return
 	}
 
-	to_kernel_rx_dropped_pre="$(status_summary_value "$to_pre" "Kernel RX dropped")" || {
+	to_kernel_rx_dropped_pre="$(ha_status_summary_value "$to_pre" "Kernel RX dropped")" || {
 		fail "cycle ${cycle} ${phase}: unable to read ${to_name} pre-transition kernel RX drop baseline"
 		return
 	}
-	from_no_frame_pre="$(status_summary_value "$from_pre" "Direct TX no-frame fb")" || {
+	from_no_frame_pre="$(ha_status_summary_value "$from_pre" "Direct TX no-frame fb")" || {
 		fail "cycle ${cycle} ${phase}: unable to read ${from_name} pre-transition direct no-frame baseline"
 		return
 	}
-	from_lan_rx_pre="$(interface_packets_value "$from_if_pre" 'ge-[0-9]+-0-1' rx)" || {
+	from_lan_rx_pre="$(ha_interface_packets_value "$from_if_pre" 'ge-[0-9]+-0-1' rx)" || {
 		fail "cycle ${cycle} ${phase}: unable to read ${from_name} pre-transition LAN RX baseline"
 		return
 	}
-	from_fabric_tx_pre="$(interface_packets_value "$from_if_pre" 'ge-[0-9]+-0-0' tx)" || {
+	from_fabric_tx_pre="$(ha_interface_packets_value "$from_if_pre" 'ge-[0-9]+-0-0' tx)" || {
 		fail "cycle ${cycle} ${phase}: unable to read ${from_name} pre-transition fabric TX baseline"
 		return
 	}
-	to_fabric_rx_pre="$(interface_packets_value "$to_if_pre" 'ge-[0-9]+-0-0' rx)" || {
+	to_fabric_rx_pre="$(ha_interface_packets_value "$to_if_pre" 'ge-[0-9]+-0-0' rx)" || {
 		fail "cycle ${cycle} ${phase}: unable to read ${to_name} pre-transition fabric RX baseline"
 		return
 	}
-	to_wan_tx_pre="$(interface_packets_value "$to_if_pre" 'ge-[0-9]+-0-2' tx)" || {
+	to_wan_tx_pre="$(ha_interface_packets_value "$to_if_pre" 'ge-[0-9]+-0-2' tx)" || {
 		fail "cycle ${cycle} ${phase}: unable to read ${to_name} pre-transition WAN TX baseline"
 		return
 	}
 
 	to_kernel_rx_dropped_delta="$(
-		nondecreasing_counter_delta "$to_kernel_rx_dropped_pre" \
+		ha_nondecreasing_delta "$to_kernel_rx_dropped_pre" \
 			"$to_kernel_rx_dropped_max"
 	)" || {
 		fail "cycle ${cycle} ${phase}: ${to_name} transition kernel RX dropped counter decreased" \
 			"from ${to_kernel_rx_dropped_pre} to ${to_kernel_rx_dropped_max}; failing closed"
 		return
 	}
-	from_no_frame_delta="$(nondecreasing_counter_delta "$from_no_frame_pre" "$from_no_frame_max")" || {
+	from_no_frame_delta="$(ha_nondecreasing_delta "$from_no_frame_pre" "$from_no_frame_max")" || {
 		fail "cycle ${cycle} ${phase}: ${from_name} transition direct no-frame counter decreased" \
 			"from ${from_no_frame_pre} to ${from_no_frame_max}; failing closed"
 		return
 	}
-	from_lan_rx_delta="$(nondecreasing_counter_delta "$from_lan_rx_pre" "$from_lan_rx_max")" || {
+	from_lan_rx_delta="$(ha_nondecreasing_delta "$from_lan_rx_pre" "$from_lan_rx_max")" || {
 		fail "cycle ${cycle} ${phase}: ${from_name} transition LAN RX counter decreased" \
 			"from ${from_lan_rx_pre} to ${from_lan_rx_max}; failing closed"
 		return
 	}
-	from_fabric_tx_delta="$(nondecreasing_counter_delta "$from_fabric_tx_pre" "$from_fabric_tx_max")" || {
+	from_fabric_tx_delta="$(ha_nondecreasing_delta "$from_fabric_tx_pre" "$from_fabric_tx_max")" || {
 		fail "cycle ${cycle} ${phase}: ${from_name} transition fabric TX counter decreased" \
 			"from ${from_fabric_tx_pre} to ${from_fabric_tx_max}; failing closed"
 		return
 	}
-	to_fabric_rx_delta="$(nondecreasing_counter_delta "$to_fabric_rx_pre" "$to_fabric_rx_max")" || {
+	to_fabric_rx_delta="$(ha_nondecreasing_delta "$to_fabric_rx_pre" "$to_fabric_rx_max")" || {
 		fail "cycle ${cycle} ${phase}: ${to_name} transition fabric RX counter decreased" \
 			"from ${to_fabric_rx_pre} to ${to_fabric_rx_max}; failing closed"
 		return
 	}
-	to_wan_tx_delta="$(nondecreasing_counter_delta "$to_wan_tx_pre" "$to_wan_tx_max")" || {
+	to_wan_tx_delta="$(ha_nondecreasing_delta "$to_wan_tx_pre" "$to_wan_tx_max")" || {
 		fail "cycle ${cycle} ${phase}: ${to_name} transition WAN TX counter decreased" \
 			"from ${to_wan_tx_pre} to ${to_wan_tx_max}; failing closed"
 		return
@@ -1235,59 +1032,26 @@ recent_interval_metric() {
 	local intervals="$1"
 	local metric="$2"
 	local tail_lines=$(( intervals + 8 ))
-	local recent_lines
-	recent_lines="$(run_host "tail -n ${tail_lines} ${REMOTE_IPERF_LOG} 2>/dev/null || true")"
-	python3 - "$metric" "$recent_lines" <<'PY'
-import json
-import sys
-
-metric = sys.argv[1]
-raw_lines = sys.argv[2]
-intervals = []
-for raw in raw_lines.splitlines():
-    raw = raw.strip()
-    if not raw:
-        continue
-    try:
-        event = json.loads(raw)
-    except Exception:
-        continue
-    if event.get("event") == "interval":
-        intervals.append(event.get("data") or {})
-
-if not intervals:
-    print("0")
-    raise SystemExit(0)
-
-last = intervals[-1]
-stream_zero_total = 0
-zero_streams = set()
-aggregate_zero_total = 0
-for interval in intervals:
-    if float((interval.get("sum") or {}).get("bits_per_second") or 0.0) <= 0.0:
-        aggregate_zero_total += 1
-    for stream in interval.get("streams", []):
-        if float(stream.get("bits_per_second") or 0.0) <= 0.0:
-            stream_zero_total += 1
-            zero_streams.add(str(stream.get("socket") or stream.get("id") or "?"))
-
-if metric == "dead_streams":
-    print(
-        sum(
-            1
-            for stream in last.get("streams", [])
-            if float(stream.get("bits_per_second") or 0.0) <= 0.0
-        )
-    )
-elif metric == "zero_intervals":
-    print(aggregate_zero_total + stream_zero_total)
-elif metric == "stream_zero_intervals":
-    print(stream_zero_total)
-elif metric == "zero_streams":
-    print(len(zero_streams))
-else:
-    raise SystemExit(f"unsupported recent interval metric: {metric}")
-PY
+	local recent_lines recent_file
+	if ! recent_lines="$(run_host "tail -n ${tail_lines} ${REMOTE_IPERF_LOG} 2>/dev/null || true")"; then
+		printf 'recent iperf3 event stream: capture unavailable\n' >&2
+		return 2
+	fi
+	if ! recent_file=$(mktemp "${TMPDIR:-/tmp}/ha-recent-iperf.XXXXXX"); then
+		printf 'recent iperf3 event stream: local capture unavailable\n' >&2
+		return 2
+	fi
+	if ! printf '%s\n' "$recent_lines" >"$recent_file"; then
+		rm -f "$recent_file" 2>/dev/null || true
+		printf 'recent iperf3 event stream: local capture write failed\n' >&2
+		return 2
+	fi
+	if ha_recent_interval_metric "$recent_file" "$intervals" "$metric" "$IPERF_STREAMS"; then
+		rm -f "$recent_file" 2>/dev/null || true
+		return 0
+	fi
+	rm -f "$recent_file" 2>/dev/null || true
+	return 2
 }
 
 recent_dead_streams() {
@@ -1376,75 +1140,75 @@ copy_artifacts() {
 	if ! python3 "${IPERF_METRICS}" "${LOCAL_IPERF_LOG}" >"${LOCAL_IPERF_METRICS}" 2>"${ARTIFACT_DIR}/iperf3.metrics.err"; then
 		printf '{"ok":false,"error":"metrics_parse_failed"}\n' >"${LOCAL_IPERF_METRICS}"
 	fi
+	# Validate immediately after producing the metrics document.
+	if ! legacy_metrics_gate; then
+		:
+	fi
 }
 
-iperf_metrics_field() {
-	python3 - "${LOCAL_IPERF_METRICS}" "$1" <<'PY'
-import json
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-field = sys.argv[2]
-if not path.exists():
-    print("")
-    raise SystemExit(0)
-
-data = json.loads(path.read_text(encoding="utf-8"))
-value = data.get(field, "")
-if isinstance(value, bool):
-    print("true" if value else "false")
-elif isinstance(value, (int, float)):
-    print(value)
-else:
-    print(value)
-PY
+legacy_metrics_gate() {
+	local gate_output
+	if gate_output="$(ha_metrics_gate "${LOCAL_IPERF_METRICS}" 2>&1)"; then
+		eval "$gate_output"
+		IPERF_METRICS_GATE_REASON=""
+		return 0
+	fi
+	IPERF_METRICS_GATE_REASON="$gate_output"
+	return 2
 }
 
 count_zero_intervals() {
-	iperf_metrics_field zero_intervals_total
+	if ! legacy_metrics_gate; then return 2; fi
+	METRIC_RESULT="$zero_intervals_total"
+	printf '%s\n' "$METRIC_RESULT"
 }
 
 count_stream_zero_intervals() {
-	iperf_metrics_field stream_zero_intervals_total
+	if ! legacy_metrics_gate; then return 2; fi
+	METRIC_RESULT="$stream_zero_intervals_total"
+	printf '%s\n' "$METRIC_RESULT"
 }
 
 count_zero_streams() {
-	iperf_metrics_field zero_streams_total
+	if ! legacy_metrics_gate; then return 2; fi
+	METRIC_RESULT="$zero_streams_total"
+	printf '%s\n' "$METRIC_RESULT"
 }
 
 extract_sender_throughput() {
-	local value
-	value="$(iperf_metrics_field avg_gbps)"
-	printf '%.3f\n' "${value:-0}"
+	if ! legacy_metrics_gate; then return 2; fi
+	printf -v METRIC_RESULT '%.3f' "$avg_gbps"
+	printf '%s\n' "$METRIC_RESULT"
 }
 
 extract_retransmits() {
-	local value
-	value="$(iperf_metrics_field retransmits)"
-	printf '%s\n' "${value:-0}"
+	if ! legacy_metrics_gate; then return 2; fi
+	METRIC_RESULT="$retransmits"
+	printf '%s\n' "$METRIC_RESULT"
 }
 
 iperf_collapse_detected() {
-	[[ "$(iperf_metrics_field collapse_detected)" == "true" ]]
+	if ! legacy_metrics_gate; then return 2; fi
+	[[ "$collapse_detected" == "true" ]]
 }
 
 iperf_collapse_reason() {
-	iperf_metrics_field collapse_reason
+	if ! legacy_metrics_gate; then return 2; fi
+	METRIC_RESULT="$collapse_reason"
+	printf '%s\n' "$METRIC_RESULT"
 }
 
 iperf_completed_local() {
-	[[ "$(iperf_metrics_field completed)" == "true" ]]
+	if ! legacy_metrics_gate; then return 2; fi
+	[[ "$completed" == "true" ]]
 }
 
 iperf_effectively_completed_local() {
-	local completed observed_end
-	completed="$(iperf_metrics_field completed)"
+	if ! legacy_metrics_gate; then return 2; fi
 	if [[ "$completed" == "true" ]]; then
 		return 0
 	fi
-	observed_end="$(iperf_metrics_field observed_end_sec)"
-	awk "BEGIN{exit !(${observed_end:-0} >= (${IPERF_DURATION} - ${IPERF_COMPLETION_GRACE_SEC}))}"
+	awk "BEGIN{exit !(${observed_end_sec} >= (${IPERF_DURATION} - ${IPERF_COMPLETION_GRACE_SEC}))}"
 }
 
 cycle_sleep() {
@@ -1466,6 +1230,48 @@ cycle_sleep() {
 	done
 	return 0
 }
+validate_recent_dead_streams() {
+	local label="$1"
+	local dead_streams
+	if ! dead_streams="$(recent_dead_streams)"; then
+		void "${label}: recent iperf3 interval evidence is blind"
+		return 0
+	fi
+	if [[ "$dead_streams" -gt 0 ]]; then
+		fail "${label}: ${dead_streams}/${IPERF_STREAMS} streams at 0.00 bits/sec"
+	else
+		pass "${label}: all ${IPERF_STREAMS} streams carrying traffic"
+	fi
+}
+
+validate_recent_preflight_metrics() {
+	local intervals="$1"
+	local zero_intervals stream_zero_intervals zero_streams
+	if ! zero_intervals="$(count_recent_zero_intervals "$intervals")"; then
+		void "steady-state preflight: recent iperf3 interval evidence is blind"
+		return 0
+	fi
+	if ! stream_zero_intervals="$(count_recent_stream_zero_intervals "$intervals")"; then
+		void "steady-state preflight: recent iperf3 interval evidence is blind"
+		return 0
+	fi
+	if ! zero_streams="$(count_recent_zero_streams "$intervals")"; then
+		void "steady-state preflight: recent iperf3 interval evidence is blind"
+		return 0
+	fi
+
+	if [[ "$zero_intervals" -le "$MAX_PREFLIGHT_ZERO_INTERVALS" ]]; then
+		pass "steady-state preflight: ${zero_intervals} zero-throughput intervals (<= ${MAX_PREFLIGHT_ZERO_INTERVALS})"
+	else
+		fail "steady-state preflight: ${zero_intervals} zero-throughput intervals (> ${MAX_PREFLIGHT_ZERO_INTERVALS})"
+	fi
+
+	if [[ "$stream_zero_intervals" -le "$MAX_PREFLIGHT_STREAM_ZERO_INTERVALS" ]]; then
+		pass "steady-state preflight: ${stream_zero_intervals} per-stream zero-throughput intervals (<= ${MAX_PREFLIGHT_STREAM_ZERO_INTERVALS})"
+	else
+		fail "steady-state preflight: ${stream_zero_intervals} per-stream zero-throughput intervals across ${zero_streams} stream(s) (> ${MAX_PREFLIGHT_STREAM_ZERO_INTERVALS})"
+	fi
+}
 
 validate_cycle_health() {
 	local cycle="$1"
@@ -1473,7 +1279,6 @@ validate_cycle_health() {
 	local owner_vm="$3"
 	local owner_name="$4"
 	local final_phase="$5"
-	local dead_streams
 	if iperf_alive; then
 		pass "cycle ${cycle} ${label}: iperf3 alive on ${owner_name}"
 	elif iperf_effectively_completed_remote; then
@@ -1485,12 +1290,7 @@ validate_cycle_health() {
 	else
 		fail "cycle ${cycle} ${label}: iperf3 died"
 	fi
-	dead_streams="$(recent_dead_streams)"
-	if [[ "$dead_streams" -gt 0 ]]; then
-		fail "cycle ${cycle} ${label}: ${dead_streams}/${IPERF_STREAMS} streams at 0.00 bits/sec"
-	else
-		pass "cycle ${cycle} ${label}: all ${IPERF_STREAMS} streams carrying traffic"
-	fi
+	validate_recent_dead_streams "cycle ${cycle} ${label}"
 	if [[ "${CHECK_KERNEL_SESSION_TABLE}" == "1" ]]; then
 		local count zero_source zero_target
 		count="$(session_count "$owner_vm")"
@@ -1512,7 +1312,6 @@ validate_cycle_health() {
 validate_pre_failover_health() {
 	local owner_vm="$1"
 	local owner_name="$2"
-	local zero_intervals stream_zero_intervals zero_streams
 
 	info "observing steady-state traffic for ${PRE_FAILOVER_OBSERVE}s before failover"
 	if ! cycle_sleep "$PRE_FAILOVER_OBSERVE"; then
@@ -1522,21 +1321,7 @@ validate_pre_failover_health() {
 	capture_vm_state "$TARGET_VM" "pre-failover-target"
 	validate_cycle_health 0 "steady-state" "$owner_vm" "$owner_name" 0
 	validate_external_connectivity "steady-state"
-
-	zero_intervals="$(count_recent_zero_intervals "$PRE_FAILOVER_OBSERVE")"
-	if [[ "$zero_intervals" -le "$MAX_PREFLIGHT_ZERO_INTERVALS" ]]; then
-		pass "steady-state preflight: ${zero_intervals} zero-throughput intervals (<= ${MAX_PREFLIGHT_ZERO_INTERVALS})"
-	else
-		fail "steady-state preflight: ${zero_intervals} zero-throughput intervals (> ${MAX_PREFLIGHT_ZERO_INTERVALS})"
-	fi
-
-	stream_zero_intervals="$(count_recent_stream_zero_intervals "$PRE_FAILOVER_OBSERVE")"
-	zero_streams="$(count_recent_zero_streams "$PRE_FAILOVER_OBSERVE")"
-	if [[ "$stream_zero_intervals" -le "$MAX_PREFLIGHT_STREAM_ZERO_INTERVALS" ]]; then
-		pass "steady-state preflight: ${stream_zero_intervals} per-stream zero-throughput intervals (<= ${MAX_PREFLIGHT_STREAM_ZERO_INTERVALS})"
-	else
-		fail "steady-state preflight: ${stream_zero_intervals} per-stream zero-throughput intervals across ${zero_streams} stream(s) (> ${MAX_PREFLIGHT_STREAM_ZERO_INTERVALS})"
-	fi
+	validate_recent_preflight_metrics "$PRE_FAILOVER_OBSERVE"
 }
 
 run_failover_phase() {
@@ -1599,12 +1384,113 @@ restore_cluster() {
 	wait_for_rg_owner "$RG" "$SOURCE_NODE" 45 || true
 }
 
+validate_whole_run_metrics() {
+	local zero_intervals stream_zero_intervals zero_streams throughput retransmits retrans_per_gb
+	local collapse_status collapse_reason completion_status effective_status
+
+	if ! legacy_metrics_gate; then
+		void "iperf3 metrics: ${IPERF_METRICS_GATE_REASON}"
+		return 0
+	fi
+
+	# Collect every gated value before comparing any metric. If any gate rejects,
+	# no partial metric PASS can escape from this verdict block.
+	if ! count_zero_intervals >/dev/null; then void "iperf3 metrics: ${IPERF_METRICS_GATE_REASON}"; return 0; fi
+	zero_intervals="$METRIC_RESULT"
+	if ! count_stream_zero_intervals >/dev/null; then void "iperf3 metrics: ${IPERF_METRICS_GATE_REASON}"; return 0; fi
+	stream_zero_intervals="$METRIC_RESULT"
+	if ! count_zero_streams >/dev/null; then void "iperf3 metrics: ${IPERF_METRICS_GATE_REASON}"; return 0; fi
+	zero_streams="$METRIC_RESULT"
+	if ! extract_sender_throughput >/dev/null; then void "iperf3 metrics: ${IPERF_METRICS_GATE_REASON}"; return 0; fi
+	throughput="$METRIC_RESULT"
+	if ! extract_retransmits >/dev/null; then void "iperf3 metrics: ${IPERF_METRICS_GATE_REASON}"; return 0; fi
+	retransmits="$METRIC_RESULT"
+	if iperf_collapse_detected; then
+		collapse_status=1
+	else
+		local gate_status=$?
+		if (( gate_status == 2 )); then void "iperf3 metrics: ${IPERF_METRICS_GATE_REASON}"; return 0; fi
+		collapse_status=0
+	fi
+	if ! iperf_collapse_reason >/dev/null; then void "iperf3 metrics: ${IPERF_METRICS_GATE_REASON}"; return 0; fi
+	collapse_reason="$METRIC_RESULT"
+	if iperf_completed_local; then
+		completion_status=1
+	else
+		local gate_status=$?
+		if (( gate_status == 2 )); then void "iperf3 metrics: ${IPERF_METRICS_GATE_REASON}"; return 0; fi
+		completion_status=0
+	fi
+	if iperf_effectively_completed_local; then
+		effective_status=1
+	else
+		local gate_status=$?
+		if (( gate_status == 2 )); then void "iperf3 metrics: ${IPERF_METRICS_GATE_REASON}"; return 0; fi
+		effective_status=0
+	fi
+
+	if [[ "$zero_intervals" -le "$MAX_ZERO_INTERVALS" ]]; then
+		pass "${zero_intervals} zero-throughput intervals (<= ${MAX_ZERO_INTERVALS})"
+	else
+		fail "${zero_intervals} zero-throughput intervals (> ${MAX_ZERO_INTERVALS})"
+	fi
+
+	if [[ "$stream_zero_intervals" -le "$MAX_STREAM_ZERO_INTERVALS" ]]; then
+		pass "${stream_zero_intervals} per-stream zero-throughput intervals (<= ${MAX_STREAM_ZERO_INTERVALS})"
+	else
+		fail "${stream_zero_intervals} per-stream zero-throughput intervals across ${zero_streams} stream(s) (> ${MAX_STREAM_ZERO_INTERVALS})"
+	fi
+
+	if awk "BEGIN{exit !(${throughput} >= ${MIN_THROUGHPUT})}"; then
+		pass "sender throughput ${throughput} Gbps"
+	else
+		fail "sender throughput too low: ${throughput} Gbps"
+	fi
+
+	pass "sender retransmits ${retransmits}"
+	if [[ -n "${MAX_RETRANSMITS}" ]]; then
+		if [[ "${retransmits}" -le "${MAX_RETRANSMITS}" ]]; then
+			pass "retransmits ${retransmits} within limit ${MAX_RETRANSMITS}"
+		else
+			fail "retransmits ${retransmits} exceed limit ${MAX_RETRANSMITS}"
+		fi
+	fi
+
+	if [[ -n "${MAX_RETRANSMITS_PER_GBPS}" ]]; then
+		retrans_per_gb="$(awk "BEGIN{if (${throughput} <= 0) {print 0} else {printf \"%.3f\", ${retransmits} / ${throughput}}}")"
+		if awk "BEGIN{exit !(${retrans_per_gb} <= ${MAX_RETRANSMITS_PER_GBPS})}"; then
+			pass "retransmits per Gbps ${retrans_per_gb} within limit ${MAX_RETRANSMITS_PER_GBPS}"
+		else
+			fail "retransmits per Gbps ${retrans_per_gb} exceed limit ${MAX_RETRANSMITS_PER_GBPS}"
+		fi
+	fi
+
+	if (( collapse_status == 1 )); then
+		fail "iperf3 interval collapse detected: ${collapse_reason}"
+	else
+		pass "iperf3 interval collapse not detected"
+	fi
+
+	if (( completion_status == 1 )); then
+		pass "iperf3 completed successfully"
+	elif (( effective_status == 1 )) && awk "BEGIN{exit !(${throughput} >= ${MIN_THROUGHPUT})}"; then
+		pass "iperf3 data transfer completed with adequate throughput despite control socket disruption"
+	elif awk "BEGIN{exit !(${throughput} >= ${MIN_THROUGHPUT})}"; then
+		pass "iperf3 data transfer completed with adequate throughput despite control socket disruption"
+	else
+		fail "iperf3 did not complete successfully"
+	fi
+}
+
 cleanup() {
 	copy_artifacts
 	run_host "systemctl stop ${REMOTE_IPERF_UNIT} >/dev/null 2>&1 || true; systemctl reset-failed ${REMOTE_IPERF_UNIT} >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
 	restore_cluster
 	printf 'Artifacts: %s\n' "${ARTIFACT_DIR}"
 }
+if [[ "${HA_ASSURANCE_SOURCE_ONLY:-0}" == "1" && "${BASH_SOURCE[0]}" != "$0" ]]; then
+	return 0
+fi
 trap cleanup EXIT
 
 mkdir -p "${ARTIFACT_DIR}"
@@ -1719,63 +1605,11 @@ if (( IPERF_WAIT_TIMEOUT_HIT == 1 )); then
 	fail "iperf3 did not exit within ${IPERF_DURATION}s + 20s grace; terminated remote client"
 fi
 
-zero_intervals="$(count_zero_intervals)"
-if [[ "$zero_intervals" -le "$MAX_ZERO_INTERVALS" ]]; then
-	pass "${zero_intervals} zero-throughput intervals (<= ${MAX_ZERO_INTERVALS})"
+validate_whole_run_metrics
+
+if legacy_verdict_status; then
+	exit 0
 else
-	fail "${zero_intervals} zero-throughput intervals (> ${MAX_ZERO_INTERVALS})"
-fi
-
-stream_zero_intervals="$(count_stream_zero_intervals)"
-zero_streams="$(count_zero_streams)"
-if [[ "$stream_zero_intervals" -le "$MAX_STREAM_ZERO_INTERVALS" ]]; then
-	pass "${stream_zero_intervals} per-stream zero-throughput intervals (<= ${MAX_STREAM_ZERO_INTERVALS})"
-else
-	fail "${stream_zero_intervals} per-stream zero-throughput intervals across ${zero_streams} stream(s) (> ${MAX_STREAM_ZERO_INTERVALS})"
-fi
-
-throughput="$(extract_sender_throughput)"
-if awk "BEGIN{exit !(${throughput} >= ${MIN_THROUGHPUT})}"; then
-	pass "sender throughput ${throughput} Gbps"
-else
-	fail "sender throughput too low: ${throughput} Gbps"
-fi
-
-retransmits="$(extract_retransmits)"
-pass "sender retransmits ${retransmits}"
-if [[ -n "${MAX_RETRANSMITS}" ]]; then
-	if [[ "${retransmits}" -le "${MAX_RETRANSMITS}" ]]; then
-		pass "retransmits ${retransmits} within limit ${MAX_RETRANSMITS}"
-	else
-		fail "retransmits ${retransmits} exceed limit ${MAX_RETRANSMITS}"
-	fi
-fi
-
-if [[ -n "${MAX_RETRANSMITS_PER_GBPS}" ]]; then
-	retrans_per_gb="$(awk "BEGIN{if (${throughput} <= 0) {print 0} else {printf \"%.3f\", ${retransmits} / ${throughput}}}")"
-	if awk "BEGIN{exit !(${retrans_per_gb} <= ${MAX_RETRANSMITS_PER_GBPS})}"; then
-		pass "retransmits per Gbps ${retrans_per_gb} within limit ${MAX_RETRANSMITS_PER_GBPS}"
-	else
-		fail "retransmits per Gbps ${retrans_per_gb} exceed limit ${MAX_RETRANSMITS_PER_GBPS}"
-	fi
-fi
-
-if iperf_collapse_detected; then
-	fail "iperf3 interval collapse detected: $(iperf_collapse_reason)"
-else
-	pass "iperf3 interval collapse not detected"
-fi
-
-if iperf_completed_local; then
-	pass "iperf3 completed successfully"
-elif iperf_effectively_completed_local && awk "BEGIN{exit !(${throughput} >= ${MIN_THROUGHPUT})}"; then
-	pass "iperf3 data transfer completed with adequate throughput despite control socket disruption"
-elif awk "BEGIN{exit !(${throughput} >= ${MIN_THROUGHPUT})}"; then
-	pass "iperf3 data transfer completed with adequate throughput despite control socket disruption"
-else
-	fail "iperf3 did not complete successfully"
-fi
-
-if (( FAILED != 0 )); then
-	exit 1
+	verdict_status=$?
+	exit "$verdict_status"
 fi

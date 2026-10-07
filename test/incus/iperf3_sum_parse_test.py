@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -123,6 +124,39 @@ class FailoverTelemetryTests(unittest.TestCase):
         )
         return "\n".join(lines)
 
+    @staticmethod
+    def json_stream(text):
+        intervals = {}
+        for line in text.splitlines():
+            row = parse_interval_line(line)
+            if row is None:
+                continue
+            stream, start, end, bps = row
+            key = (start, end)
+            data = intervals.setdefault(key, {"streams": []})
+            entry = {"start": start, "end": end, "bits_per_second": bps}
+            if stream is None:
+                data["sum"] = entry
+            else:
+                data["streams"].append({"socket": stream, **entry})
+        events = [
+            {"event": "interval", "data": intervals[key]}
+            for key in sorted(intervals)
+        ]
+        events.append({"event": "end", "data": {}})
+        return "\n".join(json.dumps(event, separators=(",", ":")) for event in events)
+
+    def assert_json_twins(self, text):
+        json_text = self.json_stream(text)
+        self.assertEqual(
+            failover_interval_verdict(json_text, json_stream=True)[0],
+            failover_interval_verdict(text)[0],
+        )
+        self.assertEqual(
+            failover_stream_verdict(json_text, 10, 8, json_stream=True)[0],
+            failover_stream_verdict(text, 10, 8)[0],
+        )
+
     def test_interval_parser_reads_aggregate_and_stream_id(self):
         self.assertEqual(
             parse_interval_line("[SUM] 3.00-4.00 sec 118 MBytes 990 Mbits/sec"),
@@ -134,15 +168,17 @@ class FailoverTelemetryTests(unittest.TestCase):
         )
 
     def test_short_failover_interval_dips_are_allowed(self):
-        ok, _ = failover_interval_verdict(self.log(outage=(10, 11, 20, 21)))
+        text = self.log(outage=(10, 11, 20, 21))
+        ok, _ = failover_interval_verdict(text)
         self.assertTrue(ok)
+        self.assert_json_twins(text)
 
     def test_final_aggregate_without_interval_rows_fails_closed(self):
-        ok, reason = failover_interval_verdict(
-            "[SUM] 0.00-120.00 sec 350 GBytes 23.4 Gbits/sec sender"
-        )
+        text = "[SUM] 0.00-120.00 sec 350 GBytes 23.4 Gbits/sec sender"
+        ok, reason = failover_interval_verdict(text)
         self.assertFalse(ok)
         self.assertIn("no per-second", reason)
+        self.assert_json_twins(text)
 
     def test_interval_telemetry_gap_fails_closed(self):
         text = (
@@ -152,6 +188,7 @@ class FailoverTelemetryTests(unittest.TestCase):
         ok, reason = failover_interval_verdict(text)
         self.assertFalse(ok)
         self.assertIn("missing [SUM] interval telemetry", reason)
+        self.assert_json_twins(text)
 
     def test_sixty_second_blackhole_fails_despite_good_run_average(self):
         text = self.log(outage=range(10, 70), duration=120)
@@ -159,42 +196,61 @@ class FailoverTelemetryTests(unittest.TestCase):
         ok, reason = failover_interval_verdict(text)
         self.assertFalse(ok)
         self.assertIn("60 consecutive", reason)
+        self.assert_json_twins(text)
 
     def test_each_established_stream_must_resume_after_failover(self):
-        self.assertTrue(failover_stream_verdict(self.log(), 10, 8)[0])
+        text = self.log()
+        self.assertTrue(failover_stream_verdict(text, 10, 8)[0])
+        self.assert_json_twins(text)
 
     def test_stream_recovery_after_three_seconds_fails(self):
-        ok, reason = failover_stream_verdict(self.log(delayed_streams=(5,)), 10, 8)
+        text = self.log(delayed_streams=(5,))
+        ok, reason = failover_stream_verdict(text, 10, 8)
         self.assertFalse(ok)
         self.assertIn("streams 5", reason)
+        self.assert_json_twins(text)
 
     def test_lost_streams_fail_even_when_other_streams_survive(self):
-        ok, reason = failover_stream_verdict(
-            self.log(dead_after_crash=(9, 10, 11, 12)), 10, 8
-        )
+        text = self.log(dead_after_crash=(9, 10, 11, 12))
+        ok, reason = failover_stream_verdict(text, 10, 8)
         self.assertFalse(ok)
         self.assertIn("9, 10, 11, 12", reason)
+        self.assert_json_twins(text)
 
     def test_insufficient_pre_failover_stream_baseline_fails_closed(self):
-        ok, reason = failover_stream_verdict(self.log(streams=range(5, 9)), 10, 8)
+        text = self.log(streams=range(5, 9))
+        ok, reason = failover_stream_verdict(text, 10, 8)
         self.assertFalse(ok)
         self.assertIn("expected 8 active streams", reason)
+        self.assert_json_twins(text)
 
     def test_failover_cli_emits_interval_and_stream_verdicts(self):
         parser = os.path.join(os.path.dirname(__file__), "iperf3_sum_parse.py")
+        text = self.log(dead_after_crash=(9, 10, 11, 12))
+        command = [
+            sys.executable,
+            parser,
+            "--failover-check",
+            "--streams",
+            "8",
+            "--min-throughput-gbps",
+            "1.0",
+            "--crash-at",
+            "10",
+        ]
         result = subprocess.run(
-            [
-                sys.executable,
-                parser,
-                "--failover-check",
-                "--streams",
-                "8",
-                "--min-throughput-gbps",
-                "1.0",
-                "--crash-at",
-                "10",
-            ],
-            input=self.log(dead_after_crash=(9, 10, 11, 12)),
+            command, input=text, capture_output=True, text=True, check=True
+        )
+        json_result = subprocess.run(
+            command + ["--json-stream"],
+            input=self.json_stream(text),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        auto_json_result = subprocess.run(
+            command,
+            input=self.json_stream(text),
             capture_output=True,
             text=True,
             check=True,
@@ -202,6 +258,133 @@ class FailoverTelemetryTests(unittest.TestCase):
         self.assertEqual(len(result.stdout.splitlines()), 2)
         self.assertTrue(result.stdout.splitlines()[0].startswith("PASS "))
         self.assertIn("FAIL streams 9, 10, 11, 12", result.stdout)
+        expected_statuses = [
+            line.split(" ", 1)[0] for line in result.stdout.splitlines()
+        ]
+        self.assertEqual(
+            [line.split(" ", 1)[0] for line in json_result.stdout.splitlines()],
+            expected_statuses,
+        )
+        self.assertEqual(
+            [line.split(" ", 1)[0] for line in auto_json_result.stdout.splitlines()],
+            expected_statuses,
+        )
+
+    def test_json_stream_auto_detection_and_gap_boundary(self):
+        contiguous = (
+            "[SUM] 0.00-1.00 sec 2.93 GBytes 23.4 Gbits/sec\n"
+            "[SUM] 1.25-2.25 sec 2.93 GBytes 23.4 Gbits/sec"
+        )
+        gap = contiguous.replace("1.25-2.25", "1.251-2.251")
+        for text, expected in ((contiguous, True), (gap, False)):
+            with self.subTest(text=text):
+                json_text = "\n " + self.json_stream(text)
+                self.assertEqual(failover_interval_verdict(text)[0], expected)
+                self.assertEqual(
+                    failover_interval_verdict(json_text)[0],
+                    failover_interval_verdict(text)[0],
+                )
+
+    def test_json_interval_duration_filter_keeps_half_to_one_and_half_seconds(self):
+        events = []
+        for start, end in ((0, 0.5), (0.5, 2.0), (2.0, 3.51)):
+            events.append({
+                "event": "interval",
+                "data": {
+                    "sum": {
+                        "start": start,
+                        "end": end,
+                        "bits_per_second": 2_000_000_000,
+                    },
+                },
+            })
+        text = "\n".join(json.dumps(event) for event in events)
+        self.assertTrue(failover_interval_verdict(text)[0])
+    def test_json_oracle_uses_per_stream_times_without_aggregate_sum(self):
+        events = []
+        for second in range(15):
+            streams = [
+                {
+                    "socket": stream,
+                    "start": second,
+                    "end": second + 1,
+                    "bits_per_second": 1_000_000_000,
+                }
+                for stream in range(1, 9)
+            ]
+            events.append({"event": "interval", "data": {"streams": streams}})
+        text = "\n".join(json.dumps(event) for event in events)
+        self.assertTrue(failover_interval_verdict(text, json_stream=True)[0])
+        self.assertTrue(failover_stream_verdict(text, 10, 8, json_stream=True)[0])
+
+    def test_json_interval_malformed_evidence_fails_closed(self):
+        valid = (
+            '{"event":"interval","data":{"sum":{"start":0,"end":1,'
+            '"bits_per_second":8000000000}}}'
+        )
+        valid_stream = (
+            '{"start":0,"end":1,"bits_per_second":8000000000,"socket":1}'
+        )
+        bad_events = {
+            "malformed JSON line": '{"event":"interval",',
+            "non-object event": "[]",
+            "missing event name": "{}",
+            "missing interval data": '{"event":"interval"}',
+            "non-list streams": (
+                '{"event":"interval","data":{"sum":{"start":0,"end":1,'
+                '"bits_per_second":8000000000},"streams":{}}}'
+            ),
+            "non-object stream": (
+                '{"event":"interval","data":{"streams":["bad"]}}'
+            ),
+            "malformed stream fields": (
+                '{"event":"interval","data":{"streams":[{"start":0}]}}'
+            ),
+            "malformed stream id": (
+                '{"event":"interval","data":{"streams":[{"start":0,"end":1,'
+                '"bits_per_second":8000000000,"socket":"1"}]}}'
+            ),
+            "boolean rate": (
+                '{"event":"interval","data":{"sum":{"start":0,"end":1,'
+                '"bits_per_second":true}}}'
+            ),
+            "string rate": (
+                '{"event":"interval","data":{"sum":{"start":0,"end":1,'
+                '"bits_per_second":"8000000000"}}}'
+            ),
+            "non-standard NaN": (
+                '{"event":"interval","data":{"sum":{"start":0,"end":1,'
+                '"bits_per_second":NaN}}}'
+            ),
+            "overflowed float": (
+                '{"event":"interval","data":{"sum":{"start":0,"end":1,'
+                '"bits_per_second":1e999}}}'
+            ),
+            "overflowed integer": (
+                '{"event":"interval","data":{"sum":{"start":0,"end":1,'
+                '"bits_per_second":' + "9" * 400 + "}}}"
+            ),
+            "malformed sum despite stream rows": (
+                '{"event":"interval","data":{"sum":null,"streams":['
+                + valid_stream
+                + "]}}"
+            ),
+            "reversed sum interval": (
+                '{"event":"interval","data":{"sum":{"start":2,"end":1,'
+                '"bits_per_second":8000000000}}}'
+            ),
+            "reversed stream interval": (
+                '{"event":"interval","data":{"streams":[{"socket":1,'
+                '"start":2,"end":1,"bits_per_second":8000000000}]}}'
+            ),
+        }
+        for label, malformed in bad_events.items():
+            with self.subTest(label=label):
+                ok, reason = failover_interval_verdict(
+                    malformed + "\n" + valid, json_stream=True
+                )
+                self.assertFalse(ok)
+                self.assertIn("invalid JSON-stream interval telemetry", reason)
 
 
 
@@ -222,6 +405,7 @@ class FailoverClientProcessTests(unittest.TestCase):
             with open(iperf, "w", encoding="utf-8") as f:
                 f.write(
                     "#!/usr/bin/env bash\n"
+                    '[[ " $* " == *" --json-stream "* && " $* " == *" --forceflush "* && " $* " != *" -i "* ]] || exit 55\n'
                     "sleep 60 &\n"
                     "child=$!\n"
                     "trap 'kill \"$child\" 2>/dev/null || true' EXIT TERM\n"
@@ -292,11 +476,12 @@ kill -0 "$pool_pid" 2>/dev/null || exit 16
                     "#!/usr/bin/env python3\n"
                     "import os, signal, sys, time\n"
                     "args = sys.argv[1:]\n"
+                    "if '--json-stream' not in args or '--forceflush' not in args or '-i' in args: sys.exit(55)\n"
                     "port = args[args.index('-p') + 1]\n"
                     "duration = args[args.index('-t') + 1]\n"
                     "with open(os.path.join(os.environ['TEST_CHILD_PID_DIR'], port), 'w') as out:\n"
                     "    out.write(str(os.getpid()))\n"
-                    "print('[  8] 118.00-119.00 sec 1.00 GBytes 8.00 Gbits/sec', flush=True)\n"
+                    "print('{\"event\":\"interval\",\"data\":{\"sum\":{\"start\":118.0,\"end\":119.0,\"bits_per_second\":8000000000}}}', flush=True)\n"
                     "if port == '5210' or duration != '1':\n"
                     "    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
                     "else:\n"
@@ -337,8 +522,8 @@ for _ in {1..100}; do
     sleep 0.1
 done
 if failover_main_iperf_running "$main_pidfile" 192.0.2.1 5211 8; then exit 33; fi
-grep -q '118.00-119.00' "$2/hung.log" || exit 34
-if grep -Eq 'sender|iperf Done' "$2/hung.log"; then exit 35; fi
+grep -q '"start":118.0' "$2/hung.log" || exit 34
+if grep -q '"event":"end"' "$2/hung.log"; then exit 35; fi
 hung_child=$(cat "$TEST_CHILD_PID_DIR/5211")
 if kill -0 "$hung_child" 2>/dev/null; then exit 36; fi
 
@@ -395,45 +580,47 @@ class FailoverClientCompletionTests(unittest.TestCase):
         env["PATH"] = bin_dir + os.pathsep + env["PATH"]
         return env
 
-    def test_process_exit_before_summary_reproduces_old_false_failures(self):
+    def test_stream_without_end_event_does_not_claim_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
             log_path = os.path.join(tmp, "iperf.log")
             with open(log_path, "w", encoding="utf-8") as f:
-                f.write("[  5] 118.00-119.00 sec 1.00 GBytes 8.00 Gbits/sec\n")
-
-            # The old phase-5 sequence stopped as soon as the tracked client
-            # exited and sampled once. The final control result arrives after
-            # that sample, reproducing both false FAILs without a cluster.
-            with open(log_path, encoding="utf-8") as f:
-                old_sample = f.read()
-            self.assertNotIn("iperf Done", old_sample)
-            self.assertFalse(
-                any(
-                    line.startswith("[SUM]") and "sender" in line
-                    for line in old_sample.splitlines()
-                )
-            )
-
-            with open(log_path, "a", encoding="utf-8") as f:
                 f.write(
-                    "[SUM] 0.00-120.00 sec 259 GBytes 18.5 Gbits/sec 0 sender\n"
+                    '{"event":"interval","data":{"sum":{"start":0,"end":1,'
+                    '"bits_per_second":8000000000}}}\n'
                 )
-            with open(log_path, encoding="utf-8") as f:
-                completed = f.read()
-            self.assertRegex(completed, r"\[SUM\].*sender")
-            self.assertNotIn("iperf Done", completed)
+            script = r'''
+source "$1"
+if failover_json_stream_completed "$2"; then exit 11; fi
+'''
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    script,
+                    "test",
+                    os.path.join(os.path.dirname(__file__), "failover-client-lib.sh"),
+                    log_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_wait_polls_for_done_or_sender_summary_before_sampling(self):
+    def test_wait_polls_for_json_completion_before_sampling(self):
         markers = (
-            "iperf Done.",
-            "[SUM] 0.00-120.00 sec 259 GBytes 18.5 Gbits/sec 0 sender",
+            '{"event":"end","data":{}}',
+            '{"completed":true,"observed_end_sec":120}',
         )
         for marker in markers:
             with self.subTest(marker=marker), tempfile.TemporaryDirectory() as tmp:
                 env = self.install_mock_incus(tmp)
                 log_path = os.path.join(tmp, "iperf.log")
                 with open(log_path, "w", encoding="utf-8") as f:
-                    f.write("[  5] 118.00-119.00 sec 1.00 GBytes 8.00 Gbits/sec\n")
+                    f.write(
+                        '{"event":"interval","data":{"sum":{"start":118,'
+                        '"end":119,"bits_per_second":8000000000}}}\n'
+                    )
                 writer = subprocess.Popen(
                     [
                         "bash",
@@ -446,17 +633,9 @@ class FailoverClientCompletionTests(unittest.TestCase):
                 )
                 script = r'''
 source "$1"
-source "$2"
 CLUSTER_LAN_HOST=mock-lan
-failover_wait_main_iperf_result "$3" 3 || exit 31
-sampled=$(cat "$3")
-[[ "$sampled" == *"$4"* ]] || exit 32
-if [[ "$4" == *sender ]]; then
-    [[ "$sampled" != *"iperf Done"* ]] || exit 33
-    sum_line=$(grep '\[SUM\].*sender' <<<"$sampled" | tail -1)
-    verdict=$(iperf_throughput_verdict 5 "$sum_line")
-    [[ "$verdict" == PASS* ]] || { echo "$verdict" >&2; exit 34; }
-fi
+failover_wait_main_iperf_result "$2" 3 || exit 31
+grep -Fq "$3" "$2" || exit 32
 '''
                 try:
                     result = subprocess.run(
@@ -467,9 +646,6 @@ fi
                             "test",
                             os.path.join(
                                 os.path.dirname(__file__), "failover-client-lib.sh"
-                            ),
-                            os.path.join(
-                                os.path.dirname(__file__), "iperf-throughput-lib.sh"
                             ),
                             log_path,
                             marker,
@@ -482,6 +658,33 @@ fi
                 finally:
                     writer.wait(timeout=5)
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_wait_rejects_malformed_line_even_with_end_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.install_mock_incus(tmp)
+            log_path = os.path.join(tmp, "iperf.log")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write('{"event":"end" broken}\n')
+            script = r'''
+source "$1"
+CLUSTER_LAN_HOST=mock-lan
+if failover_wait_main_iperf_result "$2" 0; then exit 41; fi
+'''
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    script,
+                    "test",
+                    os.path.join(os.path.dirname(__file__), "failover-client-lib.sh"),
+                    log_path,
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=5,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

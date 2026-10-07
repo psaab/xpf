@@ -32,10 +32,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/cluster-env.sh"
 # shellcheck source=test/incus/cluster-lock.sh
 source "${SCRIPT_DIR}/cluster-lock.sh"
+# shellcheck source=test/incus/ha-assurance-lib.sh
+source "${SCRIPT_DIR}/ha-assurance-lib.sh"
 
 PASS=0
 FAIL=0
 SKIP=0
+VOID=0
 ERRORS=()
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -44,6 +47,44 @@ info()  { echo "==> $*"; }
 pass()  { echo "  PASS  $*"; PASS=$((PASS + 1)); }
 fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
 skip()  { echo "  SKIP  $*"; SKIP=$((SKIP + 1)); }
+void()  { echo "  VOID  $*"; VOID=$((VOID + 1)); }
+assurance_verdict() {
+	local status="$1" description="$2"
+	case "$status" in
+	0) pass "$description" ;;
+	1) fail "$description" ;;
+	2) void "$description" ;;
+	*) void "$description (unrecognized helper status=${status})" ;;
+	esac
+}
+# #11581 M3.1/M3.2 precedence contract (documentation only; no probe behavior change).
+#
+# Ordinary capture VOID means a specific cell's evidence is blind: missing,
+# failed, malformed, incomplete, or wrong-identity evidence, including a
+# metrics-gate rejection. It does not contaminate other measurements.
+# Global invalidation means the F-158 END probe attests that a destructive
+# lane held the shared-cluster lock at an endpoint or changed the owner/epoch
+# witness during the sampling window: the window's uncontended precondition
+# failed, so every cluster sample is suspect.
+# These causes are disjoint: ordinary VOID blinds this evidence; global
+# invalidation makes all evidence from the cluster window suspect.
+#
+# Precedence rule 1: measured FAIL is sticky over ordinary VOID in either
+# order. Later blind evidence must not erase a measured failure.
+# Precedence rule 2: F-158 END invalidation aborts without a summary, making the
+# whole invocation VOID even after measured cluster FAILs. F-158 START refusal
+# occurs before cluster samples; in MODE=all its exit 77 suppresses the common
+# summary, so prior standalone FAIL detail is also recorded as invocation VOID.
+# These are the two specified F-158 no-summary run-abort exceptions; ordinary
+# VOID after FAIL still retains the summary and FAIL verdict.
+# Precedence rule 3: neither global invalidation nor ordinary blind evidence
+# may produce PASS.
+# Precedence rule 4: retain earlier cell details in the transcript; exit 77,
+# no summary, and the probe's VOID cause line provide the existing evidence.
+#
+# #11581 N4: the §11 registry summary must cite invalidation cases (b)/(c)/(d).
+# Keep this contract next to the real probe so prose and behavior stay aligned.
+
 # xpf_assert_cluster_lock_idle <phase> — #9922 F-158 lock-IDLENESS probe.
 #
 # Tree policy forbids read-only gates from HOLDING the shared-cluster lock
@@ -285,6 +326,7 @@ test_cluster() {
 	# F-158 START probe (guarded 77): the running-check above passed, so the
 	# cluster is up and an exit 77 here means contention, not absence.
 	xpf_assert_cluster_lock_idle "start"
+	# #11581 N9: all new Group 10/11/12 cells go between the START probe above and the END probe below — never after END.
 
 	# Service health
 	service_check "$FW0" "cluster: xpfd service active on fw0"
@@ -355,8 +397,207 @@ test_cluster() {
 		# mtr to internet IPv6: verify full IPv6 path through RETH VIP
 		mtr_test "$CLUSTER_LAN_HOST" "2607:f8b0:4005:80e::200e" "$LAN_VIP6" \
 			"cluster: mtr LAN→internet IPv6 (path through RETH VIP)"
+
+		# #11581 Group 10: legacy TTL=1 probes require router-generated
+		# time-exceeded evidence, not merely a successful ping exit status.
+		local ttl4_output ttl4_rc ttl4_status ttl4_evidence
+		if ttl4_output=$(incus exec "$CLUSTER_LAN_HOST" -- sh -c \
+			'LC_ALL=C ping -c 1 -W 2 -t 1 1.1.1.1' 2>&1); then
+			ttl4_rc=0
+		else
+			ttl4_rc=$?
+		fi
+		ttl4_evidence=${ttl4_output//$'\n'/'; '}
+		if ha_ttl_output_verdict "$ttl4_rc" "$ttl4_output"; then
+			ttl4_status=0
+		else
+			ttl4_status=$?
+		fi
+		assurance_verdict "$ttl4_status" \
+			"cluster: Group10 IPv4 TTL=1 (LC_ALL=C ping -c 1 -W 2 -t 1 1.1.1.1; rc=${ttl4_rc}; output=${ttl4_evidence:-<empty>})"
+
+		local ttl6_output ttl6_rc ttl6_status ttl6_evidence
+		if ttl6_output=$(incus exec "$CLUSTER_LAN_HOST" -- sh -c \
+			'LC_ALL=C ping -6 -c 1 -W 2 -t 1 2607:f8b0:4005:814::200e' 2>&1); then
+			ttl6_rc=0
+		else
+			ttl6_rc=$?
+		fi
+		ttl6_evidence=${ttl6_output//$'\n'/'; '}
+		if ha_ttl_output_verdict "$ttl6_rc" "$ttl6_output"; then
+			ttl6_status=0
+		else
+			ttl6_status=$?
+		fi
+		assurance_verdict "$ttl6_status" \
+			"cluster: Group10 IPv6 TTL=1 (LC_ALL=C ping -6 -c 1 -W 2 -t 1 2607:f8b0:4005:814::200e; rc=${ttl6_rc}; output=${ttl6_evidence:-<empty>})"
+
+		# #11581 Group 11: reuse the shared MTR classifier. IPv6 unresolved
+		# destination/no-hop results are warnings, not reachability proof.
+		local mtr4_report mtr4_result mtr4_rc
+		mtr4_report=$(incus exec "$CLUSTER_LAN_HOST" -- sh -c \
+			'LC_ALL=C mtr 1.1.1.1 --report --report-cycles=1' 2>&1) || true
+		if mtr4_result=$(python3 "${SCRIPT_DIR}/../../scripts/mtr_report_check.py" \
+			"cluster IPv4 public path" "$mtr4_report" 0 2>&1); then
+			pass "cluster: Group11 IPv4 MTR (LC_ALL=C mtr 1.1.1.1 --report --report-cycles=1): ${mtr4_result}"
+		else
+			mtr4_rc=$?
+			if (( mtr4_rc == 1 )); then
+				fail "cluster: Group11 IPv4 MTR (LC_ALL=C mtr 1.1.1.1 --report --report-cycles=1): ${mtr4_result}"
+			else
+				void "cluster: Group11 IPv4 MTR classifier unavailable (status=${mtr4_rc}): ${mtr4_result}"
+			fi
+		fi
+
+		local mtr6_report mtr6_result mtr6_rc
+		mtr6_report=$(incus exec "$CLUSTER_LAN_HOST" -- sh -c \
+			'LC_ALL=C mtr -6 2607:f8b0:4005:814::200e --report --report-cycles=1' 2>&1) || true
+		if mtr6_result=$(python3 "${SCRIPT_DIR}/../../scripts/mtr_report_check.py" \
+			"cluster IPv6 public path" "$mtr6_report" 1 2>&1); then
+			pass "cluster: Group11 IPv6 MTR (LC_ALL=C mtr -6 2607:f8b0:4005:814::200e --report --report-cycles=1): ${mtr6_result}"
+		else
+			mtr6_rc=$?
+			if (( mtr6_rc == 1 )); then
+				fail "cluster: Group11 IPv6 MTR (LC_ALL=C mtr -6 2607:f8b0:4005:814::200e --report --report-cycles=1): ${mtr6_result}"
+			else
+				void "cluster: Group11 IPv6 MTR classifier unavailable (status=${mtr6_rc}): ${mtr6_result}"
+			fi
+		fi
+
+		# #11581 Group 12: route evidence precedes the controlled reachability
+		# pings; the same route devices scope the read-only neighbor queries.
+		local route4_output route4_rc route4_status route4_device route4_evidence
+		if route4_output=$(incus exec "$CLUSTER_LAN_HOST" -- \
+			ip route get 172.16.80.200 2>&1); then
+			route4_rc=0
+		else
+			route4_rc=$?
+		fi
+		route4_evidence=${route4_output//$'\n'/'; '}
+		if ha_route_lookup_verdict "$route4_rc" "$route4_output"; then
+			route4_status=0
+		else
+			route4_status=$?
+		fi
+		assurance_verdict "$route4_status" \
+			"cluster: Group12 IPv4 route (ip route get 172.16.80.200; rc=${route4_rc}; output=${route4_evidence:-<empty>})"
+		route4_device=""
+		if (( route4_status == 0 )); then
+			route4_device=$(ha_route_device "$route4_output") || route4_device=""
+		fi
+
+		local route6_output route6_rc route6_status route6_device route6_evidence
+		if route6_output=$(incus exec "$CLUSTER_LAN_HOST" -- \
+			ip -6 route get 2001:559:8585:80::200 2>&1); then
+			route6_rc=0
+		else
+			route6_rc=$?
+		fi
+		route6_evidence=${route6_output//$'\n'/'; '}
+		if ha_route_lookup_verdict "$route6_rc" "$route6_output"; then
+			route6_status=0
+		else
+			route6_status=$?
+		fi
+		assurance_verdict "$route6_status" \
+			"cluster: Group12 IPv6 route (ip -6 route get 2001:559:8585:80::200; rc=${route6_rc}; output=${route6_evidence:-<empty>})"
+		route6_device=""
+		if (( route6_status == 0 )); then
+			route6_device=$(ha_route_device "$route6_output") || route6_device=""
+		fi
+
+		local reach4_output reach4_rc reach4_status reach4_evidence
+		if reach4_output=$(incus exec "$CLUSTER_LAN_HOST" -- sh -c \
+			'LC_ALL=C ping -c 2 -W 1 172.16.80.200' 2>&1); then
+			reach4_rc=0
+		else
+			reach4_rc=$?
+		fi
+		reach4_evidence=${reach4_output//$'\n'/'; '}
+		if ha_ping_reply_verdict "$reach4_rc" "$reach4_output"; then
+			reach4_status=0
+		else
+			reach4_status=$?
+		fi
+		assurance_verdict "$reach4_status" \
+			"cluster: Group12 IPv4 controlled reachability (LC_ALL=C ping -c 2 -W 1 172.16.80.200; rc=${reach4_rc}; output=${reach4_evidence:-<empty>})"
+
+		local reach6_output reach6_rc reach6_status reach6_evidence
+		if reach6_output=$(incus exec "$CLUSTER_LAN_HOST" -- sh -c \
+			'LC_ALL=C ping -6 -c 2 -W 1 2001:559:8585:80::200' 2>&1); then
+			reach6_rc=0
+		else
+			reach6_rc=$?
+		fi
+		reach6_evidence=${reach6_output//$'\n'/'; '}
+		if ha_ping_reply_verdict "$reach6_rc" "$reach6_output"; then
+			reach6_status=0
+		else
+			reach6_status=$?
+		fi
+		assurance_verdict "$reach6_status" \
+			"cluster: Group12 IPv6 controlled reachability (LC_ALL=C ping -6 -c 2 -W 1 2001:559:8585:80::200; rc=${reach6_rc}; output=${reach6_evidence:-<empty>})"
+
+		local neigh4_output="" neigh4_rc=not_run neigh4_input=""
+		if [[ -n "$route4_device" ]]; then
+			if neigh4_output=$(incus exec "$CLUSTER_LAN_HOST" -- \
+				ip neigh show 172.16.80.200 dev "$route4_device" 2>&1); then
+				neigh4_rc=0
+				neigh4_input="$neigh4_output"
+			else
+				neigh4_rc=$?
+			fi
+		fi
+		local neigh6_output="" neigh6_rc=not_run neigh6_input=""
+		if [[ -n "$route6_device" ]]; then
+			if neigh6_output=$(incus exec "$CLUSTER_LAN_HOST" -- \
+				ip -6 neigh show 2001:559:8585:80::200 dev "$route6_device" 2>&1); then
+				neigh6_rc=0
+				neigh6_input="$neigh6_output"
+			else
+				neigh6_rc=$?
+			fi
+		fi
+		local neighbor_status neigh4_status neigh6_status neigh4_evidence neigh6_evidence
+		neigh4_evidence=${neigh4_output//$'\n'/'; '}
+		neigh6_evidence=${neigh6_output//$'\n'/'; '}
+		if [[ "$neigh4_rc" != 0 || "$neigh6_rc" != 0 ]] \
+			|| [[ -z "${neigh4_input//[[:space:]]/}" || -z "${neigh6_input//[[:space:]]/}" ]]; then
+			neighbor_status=2
+		else
+			if ha_neighbor_identity_verdict "$route4_device" "$neigh4_input" \
+				"$route4_device" "$neigh4_input"; then
+				neigh4_status=0
+			else
+				neigh4_status=$?
+			fi
+			if ha_neighbor_identity_verdict "$route6_device" "$neigh6_input" \
+				"$route6_device" "$neigh6_input"; then
+				neigh6_status=0
+			else
+				neigh6_status=$?
+			fi
+			if (( neigh4_status == 1 || neigh6_status == 1 )); then
+				neighbor_status=1
+			elif (( neigh4_status == 2 || neigh6_status == 2 )); then
+				neighbor_status=2
+			elif ha_neighbor_identity_verdict "$route4_device" "$neigh4_input" \
+				"$route6_device" "$neigh6_input"; then
+				neighbor_status=0
+			else
+				neighbor_status=$?
+			fi
+		fi
+		assurance_verdict "$neighbor_status" \
+			"cluster: Group12 read-only neighbor identity (v4 ip neigh show 172.16.80.200 dev ${route4_device:-<no-route-device>} rc=${neigh4_rc} output=${neigh4_evidence:-<empty>}; v6 ip -6 neigh show 2001:559:8585:80::200 dev ${route6_device:-<no-route-device>} rc=${neigh6_rc} output=${neigh6_evidence:-<empty>})"
 	else
 		skip "cluster: LAN host tests (${CLUSTER_LAN_HOST} not running)"
+		void "cluster: Group10 IPv4 TTL=1 (LAN host ${CLUSTER_LAN_HOST} unavailable)"
+		void "cluster: Group10 IPv6 TTL=1 (LAN host ${CLUSTER_LAN_HOST} unavailable)"
+		void "cluster: Group11 IPv4 MTR (LAN host ${CLUSTER_LAN_HOST} unavailable)"
+		void "cluster: Group11 IPv6 MTR (LAN host ${CLUSTER_LAN_HOST} unavailable)"
+		void "cluster: Group12 IPv4 route/ping/neighbor evidence (LAN host ${CLUSTER_LAN_HOST} unavailable)"
+		void "cluster: Group12 IPv6 route/ping/neighbor evidence (LAN host ${CLUSTER_LAN_HOST} unavailable)"
 	fi
 
 	# Internet from firewall directly
@@ -396,6 +637,11 @@ main() {
 			echo "  - $err"
 		done
 		exit 1
+	fi
+
+	# Keep the summary; the smoke-cells adapter maps zero failures plus nonzero rc to VOID.
+	if (( VOID > 0 )); then
+		return 2
 	fi
 }
 

@@ -1,0 +1,142 @@
+# #11581 full-renderer fixture: Server.showChassisClusterDataPlaneStatistics
+# transcript: show chassis cluster data-plane statistics
+# consumer: test/incus/ha-assurance-selftest.sh (assertion-groups slice)
+Services Synchronized:
+    Service name                     Sent         Received
+    Session create                   321          321
+      of which mirror sweep          0            
+    Session close                    8            8
+    Config                           12           12
+    IPsec SA                         0            0
+    DHCP leases                      0            0
+    Bulk syncs (sent)                0            
+    Sessions installed                            321
+    Errors                           0            
+
+Userspace dataplane helper:
+  PID:                       4242
+  Helper mode:               rust-native
+  io_uring active:           false
+  Enabled:                   true
+  Forwarding armed:          true
+  Forwarding supported:      true
+  Workers:                   2
+  Ring entries:              4096
+  Last snapshot generation:  0
+  Last FIB generation:       0
+  Interface addresses:       0
+  Neighbor entries:          0
+  Session table entries:     321/1000
+  Neighbor generation:       0
+  Route entries:             0
+  Local HA forwarding role:  active
+  HA groups:                 rg0 active=true watchdog=100; rg1 active=false watchdog=0
+  Fabric links:              fab0 parent=ge-0-0-0 peer=10.99.1.2
+  Bound bindings:            3/3
+  XSK-registered bindings:   3/3
+  Zerocopy bindings:         3/3
+  Hugepage-backed bindings:  3/3
+  Shared UMEM bindings:      3/3
+  Armed queues:              1/2
+  Ready queues:              1/2
+  Armed bindings:            3/3
+  Ready bindings:            3/3
+  RX packets:                14300
+  Validated packets:         0
+  Forward candidates:        0
+  Flowless forwards:         0 pkts / 0 bytes
+  Route misses:              2
+  UMEM slice drops:          0
+  Unknown VLAN drops:        0
+  Destination MAC drops:     0
+  Martian drops:             0
+  IPv6 ext-header drops:     0
+  V4-mapped IPv6 drops:    0
+  Invalid fabric-stamp drops: 0
+  Unstamped fabric-ingress drops: 0
+  Ambiguous fabric-zone drops: 0
+  Ambiguous fabric zones:     0
+  Neighbor misses:           1
+  Exception packets:         3
+  Flow cache hits:           0
+  Flow cache misses:         0
+  Flow cache evictions:      0
+  Session hits:              100
+  Session misses:            18
+  Session creates:           8
+  Session expires:           4
+  Session delta pending:     0
+  Session delta generated:   6
+  Session delta dropped:     0
+  Session delta drained:     5
+  Policy denied packets:     7
+  Screen drops:              0
+  SNAT packets:              0
+  DNAT packets:              0
+  NAT64 translations:        0
+  NAT64 no-source-pool drops:0
+  NAT64 pool-exhausted drops:0
+  NAT64 fragment drops:      0
+  NAT64 ineligible-source drops:0
+  NAT64 ineligible-destination drops:0
+  NAT64 ext-header ineligible drops:0
+  NAT64 tunnel encap unsupported drops:0
+  NAT64 ineligible-protocol drops:0
+  NAT frag untranslated drops:0
+  NAT flowless untranslated drops:0
+  NAT flow-backed NoRoute untranslated drops:0
+  Fragment overlap drops:    0
+  Fragment overlap overflow drops:0
+  Fragment overlap shard-full drops:0
+  Fragment overlap post-NAT drops:0
+  Fragment overlap max-lifetime evictions:0
+  TX packets:                7520
+  TX bytes:                  0
+  TX errors:                 0
+  TX shared recycle unk:     0
+  TX completions:            0
+  Mirrored packets:          0
+  Mirrored bytes:            0
+  Mirror drops:              no-frame=0 tx-frame-reserve=0 no-binding=0 queue-full=0 same-worker=0 cross-worker=0
+  Kernel RX dropped:         9
+  Kernel RX invalid descs:   0
+  Direct TX packets:         7300
+  Copy-path TX packets:      165
+  In-place TX packets:       55
+  In-place VLAN push desc:   0
+  In-place VLAN pop desc:    0
+  In-place VLAN no-headroom: 0
+  In-place L2 memmove fb:    0
+  Direct TX no-frame fb:     3
+  Direct TX build-none fb:   0
+  Direct TX disallowed fb:   0
+  Pending fill frames:       10
+  Spare fill frames:         11
+  Free TX frames:            12
+  Pending TX prepared:       13
+  Pending TX local:          14
+  Outstanding TX:            15
+  In-flight recycles:        16
+  Slow path local-delivery:  0
+  Slow path missing-neigh:   0
+  Slow path no-route:        0
+  Slow path next-table:      0
+  Slow path forward-build:   0
+  Slow path active:          false
+  Slow path queued:          0
+  Slow path injected:        0 pkts / 0 bytes
+  Slow path dropped:         0 pkts / 0 bytes
+  Slow path rate-limited:    0
+  Slow path queue-full:      0
+  Slow path MTU-exceeded:    0
+  Slow path write errors:    0
+  Slow path per-binding:     6 pkts / 0 drops
+  Slow path delegated active: false
+  Slow path delegated queued: 0
+  Slow path delegated injected: 0 pkts / 0 bytes
+  Slow path delegated dropped: 0 pkts / 0 bytes
+  Slow path delegated rate-limited: 0
+  Slow path delegated queue-full: 0
+  Slow path delegated MTU-exceeded: 0
+  Slow path delegated write errors: 0
+  Recent exceptions:         0

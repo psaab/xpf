@@ -70,3 +70,15 @@ iperf_throughput_verdict() {
 		printf 'FAIL %s\n' "iperf3 throughput too low: ${gbps} Gbps (expected >= ${min} Gbps) — [SUM] line: ${line}"
 	fi
 }
+# iperf_throughput_json_verdict <min_gbps> <avg_gbps> <evidence_note>
+#   Verdict a validated JSON-stream average without parsing the source file.
+#   Compare the raw scalar against the existing floor; round only its display.
+iperf_throughput_json_verdict() {
+	local min="$1" avg="$2" note="$3" display
+	printf -v display '%.3f' "$avg"
+	if awk "BEGIN{exit !($avg >= $min)}"; then
+		printf 'PASS iperf3 throughput: %s Gbps (>= %s Gbps) — %s\n' "$display" "$min" "$note"
+	else
+		printf 'FAIL iperf3 throughput too low: %s Gbps (expected >= %s Gbps) — %s\n' "$display" "$min" "$note"
+	fi
+}

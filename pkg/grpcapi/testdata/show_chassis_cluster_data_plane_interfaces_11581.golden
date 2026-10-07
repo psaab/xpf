@@ -1,0 +1,21 @@
+# #11581 full-renderer fixture: Server.showChassisClusterDataPlaneInterfaces
+# transcript: show chassis cluster data-plane interfaces
+# consumer: test/incus/ha-assurance-selftest.sh (assertion-groups slice)
+Fabric link:
+  Status: Up
+  Errors: 0
+
+Userspace queues:
+  Queue   Worker   Registered Armed   Ready   Interfaces
+  0       0        true       true    true    ge-0-0-0,ge-0-0-1,ge-0-0-2
+  1       1        true       false   false   
+
+Userspace fabric links:
+  Name     Parent           PIfidx   Overlay          OIfidx   Queues  Peer
+  fab0     ge-0-0-0         7        fab0             17       4       10.99.1.2
+
+Userspace bindings:
+  Slot   Queue   Worker   Registered Armed   Ready   Bound   XSK   Mode     Ifindex  RXPkts    TXPkts    DirTx    CopyTx   InPlTx   SessHit   SlowPkts  ExcPkts   RtMiss    Interface
+  0      0       0        true       true    true    true    true  zerocopy 7        5000      4800      4700     80       20       50        6         3         2         ge-0-0-0 shared=cross-nic role=owner
+  1      0       0        true       true    true    true    true  zerocopy 8        9000      120       100      15       5        30        0         0         0         ge-0-0-1 shared=cross-nic role=member
+  2      0       0        true       true    true    true    true  zerocopy 9        300       2600      2500     70       30       20        0         0         0         ge-0-0-2 shared=cross-nic role=member
