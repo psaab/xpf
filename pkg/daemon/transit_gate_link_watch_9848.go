@@ -97,6 +97,10 @@ func (d *Daemon) runTransitGateLinkSubscription(ctx context.Context, refreshWake
 				return true
 			}
 			if update.Header.Type == unix.RTM_NEWLINK || update.Header.Type == unix.RTM_DELLINK {
+				// Link state feeds interface-only and tunnel ECMP liveness. Mark
+				// the route coalescer so the overlay builder re-samples the
+				// snapshot before its duplicate-content skip.
+				d.markRouteListenerImmediately()
 				linuxName := ""
 				if update.Link != nil {
 					if attrs := update.Link.Attrs(); attrs != nil {

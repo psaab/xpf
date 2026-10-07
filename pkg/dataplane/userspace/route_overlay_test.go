@@ -773,3 +773,64 @@ func TestRouteOverlayRepublishRefreshesTunnelLiveness11423(t *testing.T) {
 			upReq.Snapshot.TunnelEndpoints[0].LinkUp)
 	}
 }
+func TestRouteOverlayRepublishRefreshesInterfaceLiveness12064(t *testing.T) {
+	previousLookup := linkByNameFn
+	t.Cleanup(func() { linkByNameFn = previousLookup })
+	previousBuild := buildLinkSnapshot
+	t.Cleanup(func() { buildLinkSnapshot = previousBuild })
+	buildLinkSnapshot = func(string) (int, int, string, []InterfaceAddressSnapshot) {
+		return 17, 0, "", nil
+	}
+	linkUp := true
+	linkByNameFn = func(name string) (netlink.Link, error) {
+		operState := netlink.LinkOperState(netlink.OperDown)
+		flags := net.Flags(0)
+		if linkUp {
+			operState = netlink.OperUp
+			flags = net.FlagUp
+		}
+		return &netlink.Device{LinkAttrs: netlink.LinkAttrs{
+			Index: 17, Name: name, Flags: flags, OperState: operState,
+		}}, nil
+	}
+
+	dir := t.TempDir()
+	controlSock, reqCh := overlayControlServer(t, dir)
+	cfg := &config.Config{}
+	m := New()
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	m.cfg.ControlSocket = controlSock
+	m.generation = 7
+	initiallyUp := true
+	m.lastSnapshot = &ConfigSnapshot{
+		Config:     cfg,
+		Generation: 7,
+		Interfaces: []InterfaceSnapshot{{
+			Name: "eth0", LinuxName: "eth0", Ifindex: 17, LinkUp: &initiallyUp,
+		}},
+	}
+	if h, ok := snapshotContentHash(m.lastSnapshot); ok {
+		m.lastSnapshotHash = h
+	}
+	m.lastStatus.ConfigSnapshotProtocolVersion = ProtocolVersion
+
+	for _, wantUp := range []bool{false, true} {
+		linkUp = wantUp
+		published, err := m.PublishRouteOverlaySnapshot(cfg, nil, nil)
+		if err != nil || !published {
+			t.Fatalf("link_up=%t publish = (%v, %v), want a published snapshot", wantUp, published, err)
+		}
+		select {
+		case req := <-reqCh:
+			if req.Snapshot == nil || len(req.Snapshot.Interfaces) != 1 {
+				t.Fatalf("link_up=%t request snapshot interfaces = %+v, want one interface", wantUp, req.Snapshot)
+			}
+			got := req.Snapshot.Interfaces[0].LinkUp
+			if got == nil || *got != wantUp {
+				t.Fatalf("published interface link_up = %v, want %t", got, wantUp)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("no snapshot published for interface link_up=%t", wantUp)
+		}
+	}
+}
