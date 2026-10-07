@@ -302,7 +302,8 @@ func (d *Daemon) applyPolicyRoutingRules(cfg *config.Config) error {
 		// #9420: scope the leak rules to the ingress interfaces of the instance
 		// that authored them. allRoutes above is the DEFAULT instance's
 		// routing-options statics, so the scoping set is every configured
-		// interface unit not claimed by a routing instance. Without it the
+		// interface unit not claimed by a routing instance and not
+		// management-class (fxp/em/fab, #12061). Without it the
 		// pref-100 rule sits ahead of the kernel l3mdev rule (1000) and steers a
 		// packet ingressing ANY other VRF into the target instance's table.
 		ingressIfaces := routing.DefaultInstanceIngressIfaces(cfg)

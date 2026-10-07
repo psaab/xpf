@@ -104,7 +104,8 @@ type nextTableManager struct {
 // routing-options (daemon_apply_routing.go passes
 // cfg.RoutingOptions.StaticRoutes + Inet6StaticRoutes), so `ingressIfaces` is
 // the resolved kernel ifname set of the interfaces that are NOT assigned to
-// any routing instance — see DefaultInstanceIngressIfaces.
+// any routing instance and are NOT management-class (fxp/em/fab, #12061)
+// — see DefaultInstanceIngressIfaces.
 //
 // Before #9420 the rule carried Dst + Table + Priority + Family and nothing
 // else, at priority 100-199 — AHEAD of the kernel's l3mdev rule at 1000. A
@@ -310,7 +311,8 @@ func hasEligibleNextTableRoute(routes []*config.StaticRoute, tableIDs map[string
 
 // DefaultInstanceIngressIfaces returns the sorted, de-duplicated kernel ifnames
 // of every configured interface unit that is NOT assigned to a routing
-// instance — i.e. the ingress interfaces of the DEFAULT routing instance.
+// instance and is NOT management-class (fxp/em/fab, #12061) — i.e. the
+// ingress interfaces of the DEFAULT routing instance.
 //
 // This is the #9420 scoping set for next-table leak rules. next-table statics
 // are authored in the default instance's routing-options
