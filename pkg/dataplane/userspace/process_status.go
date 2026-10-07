@@ -288,6 +288,29 @@ func (m *Manager) ensureStatusLoopLocked() {
 // linkCycleRebindSleep seam in process_linkcycle.go.
 var statusLoopInterval = time.Second
 
+// prepareDeferredPolicySnapshotLocked runs the daemon's candidate capture
+// outside Manager.mu immediately before a deferred full snapshot publish.
+// It returns false if capture fails or the target changed while the callback
+// ran, so this tick leaves the snapshot for the next status pass rather than
+// publishing stale rename or session-invalidation metadata. Caller holds m.mu.
+func (m *Manager) prepareDeferredPolicySnapshotLocked() bool {
+	if !m.pendingFullSnapshotMetadata || m.lastSnapshot == nil || m.policySnapshotPrePublisher == nil {
+		return true
+	}
+	generation := m.lastSnapshot.Generation
+	callback := m.policySnapshotPrePublisher
+	m.mu.Unlock()
+	err := callback(generation)
+	m.mu.Lock()
+	if err != nil {
+		slog.Warn("userspace deferred snapshot pre-publish capture failed; will retry",
+			"generation", generation, "err", err)
+		return false
+	}
+	return m.pendingFullSnapshotMetadata && m.publishedSnapshot < generation &&
+		m.lastSnapshot != nil && m.lastSnapshot.Generation == generation
+}
+
 func (m *Manager) statusLoop(ctx context.Context) {
 	ticker := time.NewTicker(statusLoopInterval)
 	defer ticker.Stop()
@@ -355,7 +378,7 @@ func (m *Manager) statusLoop(ctx context.Context) {
 					// repairs.
 					repaired := m.verifyBindingsMapLocked()
 					m.maybeAutoRebindBusyBindingsLocked(time.Now(), repaired)
-					if m.lastSnapshot != nil && m.publishedSnapshot < m.lastSnapshot.Generation {
+					if m.lastSnapshot != nil && m.prepareDeferredPolicySnapshotLocked() {
 						haReplayAttemptedThisTick = m.clusterHA && m.snapshotRetryDebtLocked()
 						if err := m.syncSnapshotLocked(); err != nil {
 							// #9642: an indebted failure retries next tick. Warn

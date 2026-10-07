@@ -339,6 +339,14 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 			d.store.InvalidateAppliedDigest()
 		}
 	}()
+	defer func() {
+		if d.policyInvalidationDebtAdopted && d.policyInvalidationPublishLanded {
+			if err := d.dischargePolicyInvalidationDebtLocked(nil, nil); err != nil {
+				slog.Error("retry policy session invalidation was PARTIAL; some sessions may keep forwarding under stale authorization",
+					"err", err)
+			}
+		}
+	}()
 
 	// Reset VIP warning suppression so the new config gets fresh warnings.
 	//
@@ -354,6 +362,8 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// suppresses are emitted by directAddVIPs on the VRRP reconcile path, which
 	// is not driven from inside this function.
 	d.resetVIPWarnings()
+	d.policyInvalidationPublishLanded = false
+	d.policyInvalidationDebtAdopted = false
 
 	// #6948: drop any capture left by a previous apply. The capture is normally
 	// consumed by the invalidation this apply's caller runs, but an apply that
@@ -365,6 +375,7 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 
 	if d.applyBodyForTest != nil {
 		d.applyBodyForTest(cfg)
+		d.policyInvalidationPublishLanded = !applyErrSkipsPeerSync(d.applyErrForTest)
 		return d.applyErrForTest
 	}
 

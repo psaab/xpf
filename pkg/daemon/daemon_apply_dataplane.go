@@ -186,12 +186,15 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 				mgr.SetCaptureAuthorityCommitter(func(configGeneration uint64, fibGeneration uint32, captureGeneration uint64) {
 					d.publishIpsecCaptureSnapshotAuthority(configGeneration, fibGeneration, captureGeneration)
 				})
+				mgr.SetPolicySnapshotCommitter(d.policyInvalidationSnapshotPublished)
+				mgr.SetPolicySnapshotPrePublisher(d.capturePolicyInvalidationBeforeDeferredPublish)
 			}
 		}
 	}
 
 	var applyResult *dataplane.ApplyResult
 	var networkdApplyResult *dataplane.ApplyResult
+	d.policyInvalidationPublishLanded = true
 	if rt := d.dataplane(); rt != nil {
 		var err error
 		applyResult, err = rt.ApplyConfig(context.Background(), cfg)
@@ -215,6 +218,7 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			// included: the tail never runs there, but the staleness persists
 			// until a later apply succeeds).
 			d.hostInboundDataplaneFresh.Store(false)
+			d.policyInvalidationPublishLanded = false
 			if compileErrorMustAbortApply(err) {
 				return commitOverlay, networkdErr, nil, nil, err
 			}
@@ -243,6 +247,10 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			// a backend without the bit keeps the previous behavior).
 			fresh := applyResult == nil || !applyResult.SnapshotPublishDeferred
 			d.hostInboundDataplaneFresh.Store(fresh)
+			d.policyInvalidationPublishLanded = fresh
+			if applyResult != nil && applyResult.SnapshotPublishDeferred {
+				d.notePolicyInvalidationDeferredPublish(cfg, applyResult.Generation)
+			}
 		}
 	}
 	policySchedulerActiveState = d.reconcilePolicySchedulerLockedAt(cfg, policySchedulerApplyTime)
@@ -1281,6 +1289,20 @@ func (d *Daemon) reapplyAfterDeferredMAC(cfg *config.Config) {
 			mgr.RestagePolicyRenameAncestryForReplay()
 		}
 	}
+	// A deferred or failed first publish leaves the old snapshot active. If
+	// this mandatory replay is the first publish to land, refresh the debt's
+	// candidates now so sessions admitted under that still-live snapshot during
+	// the defer window are not missed.
+	if !d.policyInvalidationPublishLanded {
+		if debt := d.policyInvalidationDebt; debt != nil && debt.newCfg == cfg {
+			d.policyInvalidationPlan = &policyInvalidationPlan{
+				oldCfg: debt.oldCfg, newCfg: debt.newCfg, renameApply: debt.renameApply,
+			}
+		}
+		if plan := d.policyInvalidationPlan; plan != nil && plan.newCfg == cfg {
+			d.captureAndStagePolicyRenameAncestry(cfg)
+		}
+	}
 	res, err := rt.ApplyConfig(context.Background(), cfg)
 	d.retainRxVlanAppliedParents(cfg, err == nil && (res == nil || !res.SnapshotPublishDeferred))
 	// #9725: this re-apply can remove the last link even when it reports an
@@ -1301,6 +1323,11 @@ func (d *Daemon) reapplyAfterDeferredMAC(cfg *config.Config) {
 	// accept-less against an N+1 dataplane. F1-B: a deferred re-apply
 	// publish leaves the gate clear, like the primary site.
 	d.hostInboundDataplaneFresh.Store(res == nil || !res.SnapshotPublishDeferred)
+	if res == nil || !res.SnapshotPublishDeferred {
+		d.policyInvalidationPublishLanded = true
+	} else {
+		d.notePolicyInvalidationDeferredPublish(cfg, res.Generation)
+	}
 }
 
 // recordDataplaneWorkerArmDebt records the #5134 deferred-MAC worker-arm debt on

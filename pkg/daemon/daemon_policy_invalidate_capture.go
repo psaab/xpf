@@ -95,6 +95,18 @@ type policyInvalidationPlan struct {
 	renameApply *pendingRenameApply
 }
 
+// policyInvalidationDebt owns an armed (old,new) pair and its pre-publication
+// candidates until that config's snapshot has actually landed. A deferred
+// userspace snapshot records the manager generation that the status-loop
+// publication callback must observe before discharging this debt.
+type policyInvalidationDebt struct {
+	oldCfg            *config.Config
+	newCfg            *config.Config
+	renameApply       *pendingRenameApply
+	capture           *policyInvalidationCapture
+	publishGeneration uint64
+}
+
 // capturedSessions is one change class's pre-publication candidate set: the
 // forward session entries that carried a target policy id when the capture ran.
 // targets is the number of policy ids the class was looking for, kept for the
@@ -155,6 +167,16 @@ func (d *Daemon) armPolicyInvalidationPlanWithRename(
 	oldCfg, newCfg *config.Config,
 	renameApply *pendingRenameApply,
 ) {
+	// If an earlier publish did not land, the dataplane still enforces the
+	// oldest owed config. Diff that live config directly against the newest
+	// target, so intermediate configs that never published contribute neither
+	// admissions nor invalidation. Rename ancestry is intentionally dropped
+	// across a merged debt: it describes only the immediate pair and cannot be
+	// safely composed without re-resolving every intermediate binding.
+	if debt := d.policyInvalidationDebt; debt != nil {
+		oldCfg = debt.oldCfg
+		renameApply = nil
+	}
 	d.policyInvalidationPlan = &policyInvalidationPlan{
 		oldCfg:      oldCfg,
 		newCfg:      newCfg,
@@ -187,17 +209,36 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	plan := d.policyInvalidationPlan
 	d.policyInvalidationPlan = nil
 	d.policyInvalidationCapture = nil
+	d.policyInvalidationDebtAdopted = false
 	if plan == nil {
-		return
+		// A bare retry (the #9811 owner, feed refresh, or another background
+		// apply) has no caller to arm a fresh plan. Adopt the retained pair only
+		// for its exact target config; identity preserves #6948's guarantee
+		// that the old-numbering diff describes this publication.
+		if debt := d.policyInvalidationDebt; debt != nil && debt.newCfg == cfg {
+			plan = &policyInvalidationPlan{
+				oldCfg: debt.oldCfg, newCfg: debt.newCfg, renameApply: debt.renameApply,
+			}
+			d.policyInvalidationDebtAdopted = true
+		} else {
+			return
+		}
 	}
 	if plan.newCfg != cfg {
 		// A plan left behind by an apply that never reached its own capture.
-		// Dropped above; take no capture, so this apply's invalidation (if any)
-		// falls back to the legacy scan rather than deleting a candidate set
-		// gathered for a different commit.
+		// Take no capture against a different config; an existing debt remains
+		// intact and can be adopted by its matching retry.
 		slog.Warn("policy session invalidation: dropping a stale pre-publication plan; " +
 			"it was armed for a different config than this apply is publishing")
 		return
+	}
+	previousGeneration := uint64(0)
+	if debt := d.policyInvalidationDebt; debt != nil {
+		previousGeneration = debt.publishGeneration
+	}
+	d.policyInvalidationDebt = &policyInvalidationDebt{
+		oldCfg: plan.oldCfg, newCfg: plan.newCfg, renameApply: plan.renameApply,
+		publishGeneration: previousGeneration,
 	}
 
 	// The three target sets are computed HERE, once, and the clears consume the
@@ -235,7 +276,7 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	if len(deleted)+len(modified)+len(deflt) == 0 && len(renameBindings) == 0 {
 		// Nothing to invalidate on this commit — record the empty capture so the
 		// clears know one was taken and skip the session-table scan entirely.
-		d.policyInvalidationCapture = capture
+		d.retainPolicyInvalidationCaptureLocked(capture)
 		return
 	}
 
@@ -269,7 +310,7 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 			capture.deleted.enumFailed = true
 			capture.modified.enumFailed = true
 			capture.deflt.enumFailed = true
-			d.policyInvalidationCapture = capture
+			d.retainPolicyInvalidationCaptureLocked(capture)
 			return
 		}
 		if !resp.SessionPolicyComplete {
@@ -338,7 +379,7 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 			capture.modified.enumFailed = true
 			capture.deflt.enumFailed = true
 		}
-		d.policyInvalidationCapture = capture
+		d.retainPolicyInvalidationCaptureLocked(capture)
 		return
 	}
 
@@ -415,7 +456,121 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 		capture.deflt.enumFailed = true
 	}
 
+	d.retainPolicyInvalidationCaptureLocked(capture)
+}
+
+func (d *Daemon) retainPolicyInvalidationCaptureLocked(capture *policyInvalidationCapture) {
 	d.policyInvalidationCapture = capture
+	if d.policyInvalidationDebt != nil {
+		d.policyInvalidationDebt.capture = capture
+	}
+}
+
+func (d *Daemon) notePolicyInvalidationDeferredPublish(cfg *config.Config, generation uint64) {
+	if debt := d.policyInvalidationDebt; debt != nil && debt.newCfg == cfg {
+		debt.publishGeneration = generation
+	}
+}
+
+// capturePolicyInvalidationBeforeDeferredPublish runs outside Manager.mu from
+// the userspace status loop. It refreshes the retained candidate set at the
+// actual deferred-publish boundary, after sessions admitted while XSK startup
+// was pending have joined the old snapshot's table.
+func (d *Daemon) capturePolicyInvalidationBeforeDeferredPublish(generation uint64) error {
+	if d == nil || d.applySem == nil {
+		return nil
+	}
+	if err := d.applySem.Acquire(d.applyCancelCtx(), 1); err != nil {
+		return err
+	}
+	defer d.applySem.Release(1)
+
+	debt := d.policyInvalidationDebt
+	if debt == nil || debt.publishGeneration == 0 || generation < debt.publishGeneration {
+		return nil
+	}
+	if d.store != nil {
+		active := d.store.ActiveConfig()
+		if active != nil && active != debt.newCfg {
+			return nil
+		}
+	}
+	d.policyInvalidationPlan = &policyInvalidationPlan{
+		oldCfg: debt.oldCfg, newCfg: debt.newCfg, renameApply: debt.renameApply,
+	}
+	d.capturePolicyInvalidationLocked(debt.newCfg)
+	d.policyInvalidationDebtAdopted = false
+
+	// The retained full snapshot already contains the first attempt's rename
+	// metadata. Refresh it with the candidates captured at this actual publish
+	// boundary so sessions admitted during the deferral window can be rebound
+	// or deleted under the same one-shot decision.
+	if rt := d.dataplane(); rt != nil {
+		if adapter, ok := rt.(interface{ Manager() *dpuserspace.Manager }); ok {
+			if mgr := adapter.Manager(); mgr != nil {
+				capture := d.policyInvalidationCapture
+				if capture != nil {
+					mgr.SetDeferredPolicyRenameMetadata(
+						generation, capture.renameAncestry, capture.renamed)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// policyInvalidationSnapshotPublished is called by the userspace manager only
+// after a full snapshot has been acknowledged. It must not clear inline:
+// Manager invokes its capture-authority committer with Manager.mu held, while
+// the clear's helper READ acquires that same mutex. The worker waits for
+// applySem and therefore runs after both the manager callback and any
+// synchronous commit-site discharge have completed.
+func (d *Daemon) policyInvalidationSnapshotPublished(generation uint64) {
+	if d == nil {
+		return
+	}
+	go d.dischargePolicyInvalidationAfterPublish(generation)
+}
+
+func (d *Daemon) dischargePolicyInvalidationAfterPublish(generation uint64) {
+	if d == nil || d.applySem == nil {
+		return
+	}
+	if err := d.applySem.Acquire(d.applyCancelCtx(), 1); err != nil {
+		return
+	}
+	defer d.applySem.Release(1)
+
+	debt := d.policyInvalidationDebt
+	if debt == nil || debt.publishGeneration == 0 || generation < debt.publishGeneration {
+		return
+	}
+	if d.store != nil {
+		active := d.store.ActiveConfig()
+		if active != nil && active != debt.newCfg {
+			return
+		}
+	}
+	if err := d.dischargePolicyInvalidationDebtLocked(debt.oldCfg, debt.newCfg); err != nil {
+		slog.Error("deferred policy session invalidation was PARTIAL; some sessions may keep forwarding under stale authorization",
+			"err", err, "generation", generation)
+		return
+	}
+}
+
+// dischargePolicyInvalidationDebtLocked consumes the captured debt exactly
+// once. The fallback pair preserves the legacy behavior for test seams and
+// dataplanes that do not produce a pre-publication capture.
+func (d *Daemon) dischargePolicyInvalidationDebtLocked(oldCfg, newCfg *config.Config) error {
+	if debt := d.policyInvalidationDebt; debt != nil {
+		if debt.capture != nil {
+			d.policyInvalidationCapture = debt.capture
+		}
+		err := d.reportSessionAuthorizationChanges(debt.oldCfg, debt.newCfg)
+		d.policyInvalidationDebt = nil
+		return err
+	}
+	return d.reportSessionAuthorizationChanges(oldCfg, newCfg)
 }
 
 // captureAndStagePolicyRenameAncestry is the ONE production handoff from the

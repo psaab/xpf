@@ -127,6 +127,9 @@ func (m *Manager) markAppliedSnapshotLocked() {
 		committer(m.appliedSnapshot.Generation, m.lastSnapshot.FIBGeneration,
 			m.appliedSnapshot.CaptureGeneration)
 	}
+	if committer := m.policySnapshotCommitter; committer != nil {
+		committer(m.appliedSnapshot.Generation)
+	}
 }
 
 // AppliedConfig returns the config from the helper's last reconciled full

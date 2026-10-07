@@ -401,7 +401,10 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	// policy clear alone since #7212 moved the interface-input-filter half into
 	// the dataplane (lazy per-tuple revalidation on the session-hit path); the
 	// commit-time advisory that stood in for it is deleted.
-	clearErr := d.reportSessionAuthorizationChanges(oldActive, compiled)
+	var clearErr error
+	if d.policyInvalidationPublishLanded {
+		clearErr = d.dischargePolicyInvalidationDebtLocked(oldActive, compiled)
+	}
 	// Committed + active locally with the dataplane armed. A non-fatal
 	// best-effort subsystem error must NOT skip the peer sync (#4034): the
 	// standby has to receive the committed config or the nodes diverge.
@@ -428,7 +431,7 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	// config has converged on the dataplane. A peer push failure is independent:
 	// it must not erase the local applied proof, though it remains in the return
 	// error for reconnect/reconciliation.
-	if localErr == nil && d.store != nil {
+	if localErr == nil && d.policyInvalidationDebt == nil && d.store != nil {
 		d.store.MarkActiveApplied()
 	}
 	resp := compiled
@@ -757,7 +760,10 @@ func (d *Daemon) syncAndApplyWithAncestry(
 		// #5858/#7212: the ONE commit-time entry point (see the commit path
 		// above). Policy clear only since #7212 moved the interface-input-filter
 		// half into the dataplane.
-		clearErr := d.reportSessionAuthorizationChanges(oldActive, compiled)
+		var clearErr error
+		if d.policyInvalidationPublishLanded {
+			clearErr = d.dischargePolicyInvalidationDebtLocked(oldActive, compiled)
+		}
 		// #1956 V-1 passive-node device-map admission gate (OQ-15.1 option
 		// (a): passive gate + loud health alarm). The active node's strict
 		// commit can only validate ITS OWN hardware (R-8), so a synced
@@ -781,7 +787,7 @@ func (d *Daemon) syncAndApplyWithAncestry(
 		// on empty digest (nil-active defensive path) or a non-nil retErr leaves
 		// the prior digest, so a config whose apply did not fully converge is never
 		// marked applied — the #4957 invariant handleConfigSync's shortcut relies on.
-		if retErr == nil {
+		if retErr == nil && d.policyInvalidationDebt == nil && d.policyInvalidationPublishLanded {
 			d.store.MarkAppliedDigest(appliedDigest)
 		}
 	}()
@@ -1133,9 +1139,11 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// being lost. The helper now RETURNS the error so the two returning call
 	// sites (commit + peer-sync) join it into their result; here the log is the
 	// only available surface.
-	if err := d.reportSessionAuthorizationChanges(oldActive, prevCfg); err != nil {
-		slog.Error("commit confirmed auto-rollback: policy session invalidation was PARTIAL; "+
-			"some rolled-back-policy sessions may keep forwarding under stale authorization", "err", err)
+	if d.policyInvalidationPublishLanded {
+		if err := d.dischargePolicyInvalidationDebtLocked(oldActive, prevCfg); err != nil {
+			slog.Error("commit confirmed auto-rollback: policy session invalidation was PARTIAL; "+
+				"some rolled-back-policy sessions may keep forwarding under stale authorization", "err", err)
+		}
 	}
 	// #3868: RE-SYNC the rolled-back config (C1) to the cluster peer. The
 	// standby already received the unconfirmed config (C2) via config-sync

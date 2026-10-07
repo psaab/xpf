@@ -20,6 +20,33 @@ func (m *Manager) SetPolicyRenameAncestry(
 	m.mu.Unlock()
 }
 
+// SetDeferredPolicyRenameMetadata refreshes the one-shot rename decision on a
+// retained full snapshot immediately before the status loop publishes it.
+// The manager generation check rejects a callback whose target was replaced
+// while daemon-side session capture ran outside Manager.mu.
+func (m *Manager) SetDeferredPolicyRenameMetadata(
+	generation uint64,
+	ancestry []PolicyRenameAncestry,
+	rebinds []PolicySessionRebind,
+) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.pendingFullSnapshotMetadata || m.lastSnapshot == nil ||
+		m.lastSnapshot.Generation != generation {
+		return false
+	}
+	m.lastSnapshot.PolicyRenameAncestry = append([]PolicyRenameAncestry(nil), ancestry...)
+	m.lastSnapshot.PolicySessionRebinds = append([]PolicySessionRebind(nil), rebinds...)
+	if m.deferredReplayReady {
+		m.deferredReplayAncestry = append([]PolicyRenameAncestry(nil), ancestry...)
+		m.deferredReplayRebinds = append([]PolicySessionRebind(nil), rebinds...)
+	}
+	return true
+}
+
 // takeStagedRenameMetadataLocked moves the staged single-use commit metadata
 // onto the caller and clears staged, so a later full build that is not
 // preceded by its own staging cannot re-ship this commit's ancestry and
