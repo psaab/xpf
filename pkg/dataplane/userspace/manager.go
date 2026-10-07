@@ -758,7 +758,7 @@ func (m *Manager) ApplyConfig(ctx context.Context, cfg *config.Config) (*datapla
 	}
 	compiled, err := m.Compile(cfg)
 	if err != nil {
-		var tailErr *publishedSnapshotTailError
+		var tailErr *PublishedSnapshotTailError
 		if errors.As(err, &tailErr) {
 			return m.LastApplyResult(), err
 		}

@@ -733,6 +733,9 @@ type Daemon struct {
 	// status-loop publication callback can discharge only the matching debt.
 	// Mutated under applySem.
 	policyInvalidationDebt *policyInvalidationDebt
+	// Coalesces repeated manager completion callbacks while the serialized
+	// invalidation worker is queued or running.
+	policyInvalidationDischargeWorker atomic.Bool
 	// policyInvalidationPublishLanded is reset for each apply and set only when
 	// its full snapshot is known published (or there is no dataplane). It gates
 	// the three commit-time invalidation call sites.

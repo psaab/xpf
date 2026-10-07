@@ -19,6 +19,10 @@ func (m *Manager) syncSnapshotLocked() error {
 
 	planKey := snapshotBindingPlanKey(m.lastSnapshot)
 	if m.publishedSnapshot >= m.lastSnapshot.Generation {
+		if m.publishedSnapshot != 0 && m.publishedSnapshot == m.lastSnapshot.Generation &&
+			!m.applySnapshotOutcomeUnknown && m.partialOutcomeUnknown == 0 {
+			m.notifyPolicySnapshotCommitterLocked(m.lastSnapshot.Generation)
+		}
 		return nil
 	}
 	// #8597 K82: the catch-up below presupposes the helper is holding a snapshot
@@ -154,6 +158,7 @@ func (m *Manager) syncSnapshotLocked() error {
 		// published state, so this is a successful convergence boundary for its
 		// scheduler metadata even though no control request is needed.
 		m.commitPolicySchedulerActiveStateFromSnapshotLocked(m.lastSnapshot)
+		m.notifyPolicySnapshotCommitterLocked(m.lastSnapshot.Generation)
 		return nil
 	}
 	// #1197 v5 (Codex code-review v4 #2): publishable-only filter
@@ -260,6 +265,21 @@ func (m *Manager) syncSnapshotLocked() error {
 	}
 
 	return nil
+}
+
+// notifyPolicySnapshotCommitterLocked repeats the completion notification for
+// a reconciled full snapshot, allowing consumers with retained completion debt
+// to retry on the existing status loop. Caller holds m.mu. Do not use this to
+// advance appliedSnapshot: content-equivalent dedup can settle a newer
+// published generation that the helper has not echoed. Deferred workers have
+// accepted but not reconciled the snapshot yet.
+func (m *Manager) notifyPolicySnapshotCommitterLocked(generation uint64) {
+	if m.deferWorkers {
+		return
+	}
+	if committer := m.policySnapshotCommitter; committer != nil {
+		committer(generation)
+	}
 }
 
 func (m *Manager) ensureStatusLoopLocked() {

@@ -348,6 +348,18 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 		}
 	}()
 
+	// A deferred userspace publish returns successfully while its debt remains
+	// outstanding. Preserve the active digest from this apply, under applySem,
+	// so the later publication callback can stamp only this successfully
+	// applied config after invalidation finishes.
+	defer func() {
+		if retErr == nil && d.store != nil {
+			if debt := d.policyInvalidationDebt; debt != nil {
+				debt.appliedDigest = d.store.ActiveDigest()
+			}
+		}
+	}()
+
 	// Reset VIP warning suppression so the new config gets fresh warnings.
 	//
 	// #7532: through the accessor. This runs under applySem while the VRRP

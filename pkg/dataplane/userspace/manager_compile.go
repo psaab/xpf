@@ -258,18 +258,20 @@ func (m *Manager) SetPolicySchedulerActiveStateWithLatch(activeState map[string]
 	m.policySchedulerDesiredFailClosed = failClosed
 }
 
-type publishedSnapshotTailError struct {
+// PublishedSnapshotTailError reports a post-publish reconciliation failure.
+// The snapshot named by the error is already enforced by the helper.
+type PublishedSnapshotTailError struct {
 	generation uint64
 	stage      string
 	err        error
 }
 
-func (e *publishedSnapshotTailError) Error() string {
+func (e *PublishedSnapshotTailError) Error() string {
 	return fmt.Sprintf("userspace: snapshot generation %d is already enforced; post-publish %s reconciliation failed: %v",
 		e.generation, e.stage, e.err)
 }
 
-func (e *publishedSnapshotTailError) Unwrap() error { return e.err }
+func (e *PublishedSnapshotTailError) Unwrap() error { return e.err }
 
 func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) {
 	// #7079: XDP link-pin removal belongs inside CompileUserspaceShim, after
@@ -736,7 +738,7 @@ func (m *Manager) applyCompiledSnapshot(
 	m.recordApplyResultLocked(dataplane.ApplyResultFromCompileResult(result), caps, snap.Generation)
 	m.ensureStatusLoopLocked()
 	if err := m.applyHelperStatusLocked(&status); err != nil {
-		return result, &publishedSnapshotTailError{
+		return result, &PublishedSnapshotTailError{
 			generation: snap.Generation,
 			stage:      "helper status sync",
 			err:        fmt.Errorf("sync helper status: %w", err),
@@ -755,14 +757,14 @@ func (m *Manager) applyCompiledSnapshot(
 	// process.go); the startup path must match.
 	if m.clusterHA {
 		if err := m.refreshHAStateFromMapsLocked(); err != nil {
-			return result, &publishedSnapshotTailError{
+			return result, &PublishedSnapshotTailError{
 				generation: snap.Generation,
 				stage:      "HA map refresh",
 				err:        fmt.Errorf("replay userspace HA state from maps: %w", err),
 			}
 		}
 		if err := m.syncHAStateLocked(); err != nil {
-			return result, &publishedSnapshotTailError{
+			return result, &PublishedSnapshotTailError{
 				generation: snap.Generation,
 				stage:      "HA state publish",
 				err:        fmt.Errorf("publish userspace HA state: %w", err),
@@ -777,14 +779,14 @@ func (m *Manager) applyCompiledSnapshot(
 		// On failure a retry debt is recorded (#5487); the status loop was
 		// started immediately after this snapshot was accepted, so it can
 		// reconcile the helper's HA state.
-		return result, &publishedSnapshotTailError{
+		return result, &PublishedSnapshotTailError{
 			generation: snap.Generation,
 			stage:      "standalone HA clear",
 			err:        fmt.Errorf("clear userspace HA state: %w", err),
 		}
 	}
 	if err := m.syncDesiredForwardingStateLocked(); err != nil {
-		return result, &publishedSnapshotTailError{
+		return result, &PublishedSnapshotTailError{
 			generation: snap.Generation,
 			stage:      "desired forwarding sync",
 			err:        fmt.Errorf("sync userspace forwarding state: %w", err),

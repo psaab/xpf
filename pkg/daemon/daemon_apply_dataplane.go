@@ -198,14 +198,16 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	if rt := d.dataplane(); rt != nil {
 		var err error
 		applyResult, err = rt.ApplyConfig(context.Background(), cfg)
-		d.retainRxVlanAppliedParents(cfg, err == nil &&
+		var publishedTailErr *dpuserspace.PublishedSnapshotTailError
+		publishedTail := errors.As(err, &publishedTailErr)
+		d.retainRxVlanAppliedParents(cfg, (err == nil || publishedTail) &&
 			(applyResult == nil || !applyResult.SnapshotPublishDeferred))
 		networkdApplyResult = applyResult
 		// #9725: an apply may attach and then fail, or detach its last link
 		// while reconciling. Re-read kernel truth on both outcomes; the tick
 		// remains the completeness guarantee outside this path.
 		d.reassertTransitGate("apply")
-		if err != nil {
+		if err != nil && !publishedTail {
 			// A partial result still contains this config's networkd models,
 			// but it is not an accepted dataplane snapshot. Keep it scoped to
 			// networkd so zone ownership and other live dataplane consumers
@@ -244,12 +246,17 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			// previous snapshot until the status loop lands it) leaves the
 			// gate clear — the tail renders accept-less, exactly like a
 			// #5679 failure, until a later apply publishes (nil result from
-			// a backend without the bit keeps the previous behavior).
+			// a backend without the bit keeps the previous behavior). A
+			// PublishedSnapshotTailError is the exception to the ordinary
+			// failure arm: its non-nil result says the snapshot already landed.
 			fresh := applyResult == nil || !applyResult.SnapshotPublishDeferred
 			d.hostInboundDataplaneFresh.Store(fresh)
 			d.policyInvalidationPublishLanded = fresh
 			if applyResult != nil && applyResult.SnapshotPublishDeferred {
 				d.notePolicyInvalidationDeferredPublish(cfg, applyResult.Generation)
+			}
+			if publishedTail {
+				applyErr = err
 			}
 		}
 	}

@@ -105,6 +105,9 @@ type policyInvalidationDebt struct {
 	renameApply       *pendingRenameApply
 	capture           *policyInvalidationCapture
 	publishGeneration uint64
+	// appliedDigest is captured only after this target's full local apply
+	// succeeds and is stamped after the debt's candidates clear.
+	appliedDigest string
 }
 
 // capturedSessions is one change class's pre-publication candidate set: the
@@ -233,7 +236,10 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 		return
 	}
 	previousGeneration := uint64(0)
-	if debt := d.policyInvalidationDebt; debt != nil {
+	if debt := d.policyInvalidationDebt; debt != nil && debt.newCfg == plan.newCfg {
+		// Preserve a generation only when retrying the same target. A
+		// superseding target needs its own publication before it can discharge
+		// the merged candidate set.
 		previousGeneration = debt.publishGeneration
 	}
 	d.policyInvalidationDebt = &policyInvalidationDebt{
@@ -495,10 +501,17 @@ func (d *Daemon) capturePolicyInvalidationBeforeDeferredPublish(generation uint6
 			return nil
 		}
 	}
+	appliedDigest := debt.appliedDigest
 	d.policyInvalidationPlan = &policyInvalidationPlan{
 		oldCfg: debt.oldCfg, newCfg: debt.newCfg, renameApply: debt.renameApply,
 	}
 	d.capturePolicyInvalidationLocked(debt.newCfg)
+	if current := d.policyInvalidationDebt; current != nil && current.newCfg == debt.newCfg {
+		// This is the same successful apply, now at its actual publication
+		// boundary. Preserve its eligibility for the applied marker across the
+		// refreshed candidate capture.
+		current.appliedDigest = appliedDigest
+	}
 	d.policyInvalidationDebtAdopted = false
 
 	// The retained full snapshot already contains the first attempt's rename
@@ -519,17 +532,30 @@ func (d *Daemon) capturePolicyInvalidationBeforeDeferredPublish(generation uint6
 	return nil
 }
 
-// policyInvalidationSnapshotPublished is called by the userspace manager only
-// after a full snapshot has been acknowledged. It must not clear inline:
-// Manager invokes its capture-authority committer with Manager.mu held, while
-// the clear's helper READ acquires that same mutex. The worker waits for
-// applySem and therefore runs after both the manager callback and any
-// synchronous commit-site discharge have completed.
+// policyInvalidationSnapshotPublished is called when a full policy snapshot
+// reaches a successful completion boundary (acknowledged publish or
+// content-equivalent status settle). It must not clear inline: Manager invokes
+// its committer with Manager.mu held, while the clear's helper READ acquires
+// that same mutex. The worker waits for applySem and therefore runs after any
+// synchronous commit-site discharge has completed.
 func (d *Daemon) policyInvalidationSnapshotPublished(generation uint64) {
-	if d == nil {
+	if d == nil || d.applySem == nil {
 		return
 	}
-	go d.dischargePolicyInvalidationAfterPublish(generation)
+	if d.applySem.TryAcquire(1) {
+		owed := d.policyInvalidationDebt != nil
+		d.applySem.Release(1)
+		if !owed {
+			return
+		}
+	}
+	if !d.policyInvalidationDischargeWorker.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer d.policyInvalidationDischargeWorker.Store(false)
+		d.dischargePolicyInvalidationAfterPublish(generation)
+	}()
 }
 
 func (d *Daemon) dischargePolicyInvalidationAfterPublish(generation uint64) {
@@ -558,17 +584,24 @@ func (d *Daemon) dischargePolicyInvalidationAfterPublish(generation uint64) {
 	}
 }
 
-// dischargePolicyInvalidationDebtLocked consumes the captured debt exactly
-// once. The fallback pair preserves the legacy behavior for test seams and
-// dataplanes that do not produce a pre-publication capture.
+// dischargePolicyInvalidationDebtLocked consumes the captured debt only after
+// every requested authorization change succeeds. The fallback pair preserves
+// legacy behavior for test seams and dataplanes without a pre-publication
+// capture.
 func (d *Daemon) dischargePolicyInvalidationDebtLocked(oldCfg, newCfg *config.Config) error {
 	if debt := d.policyInvalidationDebt; debt != nil {
 		if debt.capture != nil {
 			d.policyInvalidationCapture = debt.capture
 		}
 		err := d.reportSessionAuthorizationChanges(debt.oldCfg, debt.newCfg)
+		if err != nil {
+			return err
+		}
 		d.policyInvalidationDebt = nil
-		return err
+		if d.store != nil {
+			d.store.MarkAppliedDigest(debt.appliedDigest)
+		}
+		return nil
 	}
 	return d.reportSessionAuthorizationChanges(oldCfg, newCfg)
 }
