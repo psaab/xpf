@@ -300,25 +300,29 @@ func printPolicyMatchIdentity(res policymatch.Result) {
 
 // testRouting looks up a destination in the routing table.
 func (c *CLI) testRouting(args []string) error {
-	if c.routing == nil {
-		fmt.Println("Routing manager not available")
-		return nil
-	}
-
 	var dest, instance string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "destination":
-			if i+1 < len(args) {
-				i++
-				dest = args[i]
+			if i+1 >= len(args) || args[i+1] == "" {
+				return fmt.Errorf("selector %q requires a value", args[i])
 			}
+			i++
+			dest = args[i]
 		case "instance":
-			if i+1 < len(args) {
-				i++
-				instance = args[i]
+			if i+1 >= len(args) || args[i+1] == "" {
+				return fmt.Errorf("selector %q requires a value", args[i])
 			}
+			i++
+			instance = args[i]
+		default:
+			return fmt.Errorf("unknown selector %q", args[i])
 		}
+	}
+
+	if c.routing == nil {
+		fmt.Println("Routing manager not available")
+		return nil
 	}
 
 	if dest == "" {

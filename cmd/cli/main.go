@@ -793,15 +793,19 @@ func (c *ctl) testRouting(args []string) error {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "destination":
-			if i+1 < len(args) {
-				i++
-				dest = args[i]
+			if i+1 >= len(args) || args[i+1] == "" {
+				return fmt.Errorf("selector %q requires a value", args[i])
 			}
+			i++
+			dest = args[i]
 		case "instance":
-			if i+1 < len(args) {
-				i++
-				instance = args[i]
+			if i+1 >= len(args) || args[i+1] == "" {
+				return fmt.Errorf("selector %q requires a value", args[i])
 			}
+			i++
+			instance = args[i]
+		default:
+			return fmt.Errorf("unknown selector %q", args[i])
 		}
 	}
 
