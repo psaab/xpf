@@ -317,7 +317,8 @@ func (d *Daemon) rebindManagementVRFIfaces() error {
 // second loop that drifted from this one would make that veto guard a different
 // set than the one being bound. Name resolution goes through the shared
 // config.RoutingInstanceMemberDeviceKeys helper and cfg.TunnelNameMap(), so
-// aliases, VLAN units, and tunnels have the same device identity everywhere.
+// aliases, RETH local-member mapping, VLAN units, and tunnels have the same
+// device identity everywhere.
 //
 // Best-effort at WARN in both passes. A routing-instance `interface` list can
 // legitimately name an interface that is genuinely absent on this chassis, so

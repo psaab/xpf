@@ -115,18 +115,35 @@ func LogicalUnitDeviceKey(base string, unitNum int, unit *InterfaceUnit) string 
 	return base
 }
 
+// logicalUnitKernelBase maps the logical RETH name to its local physical
+// member, without paying for a RETH map lookup for ordinary interfaces. A
+// declared dotted interface remains a whole-device identity, not a RETH unit
+// suffix (#8994).
+func logicalUnitKernelBase(cfg *Config, base string) string {
+	if cfg != nil && strings.HasPrefix(base, "reth") {
+		if strings.Contains(base, ".") && cfg.Interfaces.Interfaces[base] != nil {
+			return LinuxIfName(base)
+		}
+		return LinuxIfName(cfg.ResolveReth(base))
+	}
+	return LinuxIfName(base)
+}
+
 // LogicalUnitDeviceKeyForRef resolves a reference to the Linux key produced by
-// LogicalUnitDeviceKey. It intentionally does not resolve reth members or
+// LogicalUnitDeviceKey. RETH bases resolve to their local physical member
+// (#12059), because RETH bonds are no longer created. The logical unit is
+// still read from the RETH declaration: its physical member is a bare L2 port
+// and owns no units of its own (#6722). It intentionally does not resolve
 // tunnels; RI tunnel resolution is handled by RoutingInstanceMemberDeviceKeys.
 func LogicalUnitDeviceKeyForRef(cfg *Config, ref string) string {
 	s := cfg.SplitInterfaceUnitRef(ref)
-	base := LinuxIfName(s.Base)
+	base := logicalUnitKernelBase(cfg, s.Base)
 	if !s.HasUnit {
 		return base
 	}
 	unitNum, _, err := CanonicalLogicalUnit(s.UnitTok)
 	if err != nil {
-		return LinuxIfName(s.Literal)
+		return logicalUnitKernelBase(cfg, s.Literal)
 	}
 	var unit *InterfaceUnit
 	if _, ifc, ok := LookupInterfaceByLinuxName(cfg, s.Base); ok {
@@ -514,5 +531,5 @@ func memberUnitLinuxName(cfg *Config, tunnelNames map[string]string, base, key s
 			unit = ifc.Units[unitNum]
 		}
 	}
-	return LogicalUnitDeviceKey(LinuxIfName(base), unitNum, unit)
+	return LogicalUnitDeviceKey(logicalUnitKernelBase(cfg, base), unitNum, unit)
 }

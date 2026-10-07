@@ -2148,26 +2148,29 @@ never lock an operator out of a remote box it manages.
     has no unit-number fallback. Its own doc calls unit number and VLAN ID
     "distinct concepts, bridged only here", which is precisely the invariant
     these consumers were violating.
-  - **`config.ResolveKernelIfName` is not a drop-in either**: it additionally
-    resolves reth to the local physical member and maps tunnel devices, neither
-    of which the producer does, so routing a consumer through it trades one
-    miss for a different one (`reth0.50`).
-  A fixture only sees this when **unit number != vlan-id**; the pre-existing
-  cells used units 50/80 with no `vlan-id` and passed against both
+  - **`config.ResolveKernelIfName` is not a drop-in**: it also resolves tunnel
+    devices and applies their own name precedence. The RI-member key resolver
+    shares the RETH-to-local-physical mapping with `LogicalUnitDeviceKey`, while
+    keeping tunnel resolution on the RI-specific `TunnelNameMap` path. A RETH
+    unit such as `reth0.50` maps to the local physical unit.
+  The #8597 VLAN-ID mismatch appears only when unit number != vlan-id; earlier
+  cells used units 50/80 without `vlan-id` and passed against both
   implementations, which is how the producer-side defect survived to #8321 and
   the consumer-side to #8597.
 
 - **RI membership conflicts use Linux-device identity (#11060).**
   `config.RoutingInstanceMemberDeviceKeys` feeds strict validation, the daemon
-  bind/reassert passes, and userspace membership maps. Slash/dash aliases and
-  multiple unit refs sharing one tunnel netdevice are conflicts; distinct VLAN
-  IDs remain separate devices. Forwarding instances participate in the
-  device-owner gate — a forwarding+VRF same-device overlap is strict-rejected
-  and tolerant-quarantined in either declaration order — even though they own
-  no VRF device and bind nothing to Linux VRFs. Tolerant loads remove
-  ambiguous memberships, retain safe generated sibling units, and leave the
-  contested device in the default routing context. Apply emits an ERROR alarm and
-  `xpf_routing_instance_member_device_conflicts` remains alertable.
+  bind/reassert passes, and userspace membership maps. RETH member refs resolve
+  to the local physical netdev for binding and stale-slave reconciliation.
+  Slash/dash aliases and multiple unit refs sharing one tunnel netdevice are
+  conflicts; distinct VLAN IDs remain separate devices. Forwarding instances
+  participate in the device-owner gate — a forwarding+VRF same-device overlap
+  is strict-rejected and tolerant-quarantined in either declaration order —
+  even though they own no VRF device and bind nothing to Linux VRFs. Tolerant
+  loads remove ambiguous memberships, retain safe generated sibling units, and
+  leave the contested device in the default routing context. Apply emits an
+  ERROR alarm and `xpf_routing_instance_member_device_conflicts` remains
+  alertable.
 
 - **Every shutdown-path `applySem` acquire is BOUNDED (#8597).**
   `daemon_run_shutdown.go` states the rule at its own drain — *"bound it

@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"log/slog"
 	"net"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -85,6 +86,70 @@ func TestRIMemberIsReBoundInTheKernel_9813(t *testing.T) {
 	}
 }
 
+// #12059: the real bind and reassert paths must target the local physical
+// member of a bondless RETH, which is the only corresponding kernel device.
+func TestRethRIMemberBindsLocalPhysicalInKernel12059(t *testing.T) {
+	enterPrivateNetns9813(t)
+	vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "vrf-blue"}, Table: 100}
+	if err := netlink.LinkAdd(vrf); err != nil {
+		t.Skipf("cannot create a VRF device in this netns (is the vrf module loaded?): %v", err)
+	}
+	if err := netlink.LinkSetUp(vrf); err != nil {
+		t.Fatalf("vrf up: %v", err)
+	}
+	member := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "ge-0-0-2"}}
+	if err := netlink.LinkAdd(member); err != nil {
+		t.Skipf("cannot create a dummy RETH member in this netns: %v", err)
+	}
+	if err := netlink.LinkSetUp(member); err != nil {
+		t.Fatalf("member up: %v", err)
+	}
+	rt, err := routing.New()
+	if err != nil {
+		t.Fatalf("routing.New: %v", err)
+	}
+	t.Cleanup(func() { _ = rt.Close() })
+	d := &Daemon{routing: rt, linkByNameFn: netlink.LinkByName}
+	cfg := &config.Config{}
+	cfg.Chassis.Cluster = &config.ClusterConfig{NodeID: 0}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/2": {Name: "ge-0/0/2", RedundantParent: "reth0"},
+		"ge-7/0/2": {Name: "ge-7/0/2", RedundantParent: "reth0"},
+		"reth0":    {Name: "reth0"},
+	}
+	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{
+		Name: "blue", InstanceType: "vrf", TableID: 100, Interfaces: []string{"reth0"},
+	}}
+
+	checkMaster := func(action string) {
+		t.Helper()
+		link, err := netlink.LinkByName("ge-0-0-2")
+		if err != nil {
+			t.Fatalf("%s: local RETH member absent: %v", action, err)
+		}
+		liveVRF, err := netlink.LinkByName("vrf-blue")
+		if err != nil {
+			t.Fatalf("%s: vrf-blue absent: %v", action, err)
+		}
+		if got, want := link.Attrs().MasterIndex, liveVRF.Attrs().Index; got != want {
+			t.Fatalf("%s: local RETH member master = %d, want vrf-blue (%d)",
+				action, got, want)
+		}
+	}
+
+	d.bindRoutingInstanceMembers(cfg)
+	checkMaster("after apply bind")
+	live, err := netlink.LinkByName("ge-0-0-2")
+	if err != nil {
+		t.Fatalf("local RETH member: %v", err)
+	}
+	if err := netlink.LinkSetNoMaster(live); err != nil {
+		t.Fatalf("strip member master: %v", err)
+	}
+	d.rebindRIMembersOutsideTheirVRF(cfg)
+	checkMaster("after reassert")
+}
+
 // #9813 tenant half: a routing-instance list member re-created or unbound
 // outside an apply is bound back into its VRF without waiting for the next
 // apply. The cells drive the pure pass, as the #6805 cells drive the apply's
@@ -116,6 +181,77 @@ func blueCfg9813() *config.Config {
 		Name: "blue", InstanceType: "vrf", TableID: 100, Interfaces: []string{"ge-0/0/5"},
 	}}
 	return cfg
+}
+
+func rethRIMemberConfig12059() *config.Config {
+	cfg := &config.Config{}
+	cfg.Chassis.Cluster = &config.ClusterConfig{NodeID: 0}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/2": {Name: "ge-0/0/2", RedundantParent: "reth0"},
+		"ge-7/0/2": {Name: "ge-7/0/2", RedundantParent: "reth0"},
+		"reth0": {
+			Name: "reth0",
+			Units: map[int]*config.InterfaceUnit{
+				50: {Number: 50, VlanID: 50},
+				80: {Number: 80, VlanID: 180},
+			},
+		},
+	}
+	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{
+		Name: "blue", InstanceType: "vrf", TableID: 100, Interfaces: []string{"reth0"},
+	}}
+	return cfg
+}
+
+// The bind loop and reassert desired set must use the same RETH-to-local
+// physical mapping. Otherwise bind names an absent reth* netdev, then stale
+// cleanup considers the actually enslaved physical RETH member unclaimed.
+func TestRethRIMemberBindAndStaleDesiredSetUsePhysicalDevice12059(t *testing.T) {
+	cfg := rethRIMemberConfig12059()
+	wantBinds := []string{
+		"ge-0-0-2->vrf-blue",
+		"ge-0-0-2.50->vrf-blue",
+		"ge-0-0-2.180->vrf-blue",
+	}
+
+	ops := &bindRecorderOps{reconcileFakeLinkOps: newReconcileFakeLinkOps()}
+	linkWithMaster9813(ops, "vrf-blue", 77, 0)
+	for i, name := range []string{"ge-0-0-2", "ge-0-0-2.50", "ge-0-0-2.180"} {
+		linkWithMaster9813(ops, name, 10+i, 0)
+	}
+	d := riVRFDaemon9813(ops)
+	d.bindRoutingInstanceMembers(cfg)
+	if got := ops.recorded(); !reflect.DeepEqual(got, wantBinds) {
+		t.Fatalf("apply binds = %v, want local RETH member binds %v", got, wantBinds)
+	}
+
+	// A drifted physical unit is re-bound through exactly the same desired key.
+	reassertOps := &bindRecorderOps{reconcileFakeLinkOps: newReconcileFakeLinkOps()}
+	linkWithMaster9813(reassertOps, "vrf-blue", 77, 0)
+	linkWithMaster9813(reassertOps, "ge-0-0-2", 10, 0)
+	linkWithMaster9813(reassertOps, "ge-0-0-2.50", 11, 0)
+	linkWithMaster9813(reassertOps, "ge-0-0-2.180", 12, 0)
+	reassertDaemon := riVRFDaemon9813(reassertOps)
+	drift := reassertDaemon.riMembersOutsideTheirVRF(cfg)
+	if len(drift) != 3 {
+		t.Fatalf("reassert candidates = %+v, want three local physical devices", drift)
+	}
+	reassertDaemon.rebindRIMembersOutsideTheirVRF(cfg)
+	if got := reassertOps.recorded(); !reflect.DeepEqual(got, wantBinds) {
+		t.Fatalf("reassert binds = %v, want local RETH member binds %v", got, wantBinds)
+	}
+
+	// Physical devices already enslaved to the RETH's VRF are desired members,
+	// not stale slaves to detach.
+	enslavedOps := &bindRecorderOps{reconcileFakeLinkOps: newReconcileFakeLinkOps()}
+	linkWithMaster9813(enslavedOps, "vrf-blue", 77, 0)
+	linkWithMaster9813(enslavedOps, "ge-0-0-2", 10, 77)
+	linkWithMaster9813(enslavedOps, "ge-0-0-2.50", 11, 77)
+	linkWithMaster9813(enslavedOps, "ge-0-0-2.180", 12, 77)
+	enslavedDaemon := riVRFDaemon9813(enslavedOps)
+	if got := enslavedDaemon.riMembersOutsideTheirVRF(cfg); len(got) != 0 {
+		t.Fatalf("already-enslaved physical RETH members were marked stale: %+v", got)
+	}
 }
 
 func TestRIMemberOutsideItsVRFIsReBound_9813(t *testing.T) {

@@ -92,6 +92,71 @@ func TestRIDualClaimDistinctUnitsRemainValid11060(t *testing.T) {
 		t.Fatalf("distinct VLAN units did not resolve to distinct Linux devices: blue=%+v red=%+v", blue, red)
 	}
 }
+
+// TestRethRoutingInstanceMemberUsesLocalPhysical12059 pins the Linux netdev
+// identity used by the daemon bind, reassert, and stale-member desired set.
+// RETH bonds are absent; each configured RETH unit is carried by the local
+// physical member, whose slot is selected by the compiled node ID.
+func TestRethRoutingInstanceMemberUsesLocalPhysical12059(t *testing.T) {
+	for _, tc := range []struct {
+		node int
+		base string
+	}{
+		{node: 0, base: "ge-0-0-2"},
+		{node: 1, base: "ge-7-0-2"},
+	} {
+		t.Run(tc.base, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.Chassis.Cluster = &ClusterConfig{NodeID: tc.node}
+			cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{
+				"ge-0/0/2": {Name: "ge-0/0/2", RedundantParent: "reth0"},
+				"ge-7/0/2": {Name: "ge-7/0/2", RedundantParent: "reth0"},
+				"reth0": {
+					Name: "reth0",
+					Units: map[int]*InterfaceUnit{
+						50: {Number: 50, VlanID: 50},
+						80: {Number: 80, VlanID: 180},
+					},
+				},
+			}
+			ri := &RoutingInstanceConfig{
+				Name: "blue", InstanceType: "vrf", Interfaces: []string{"reth0"},
+			}
+			keys := RoutingInstanceMemberDeviceKeysForInstance(cfg, cfg.TunnelNameMap(), ri)
+			want := map[string]string{
+				"reth0":    tc.base,
+				"reth0.50": tc.base + ".50",
+				"reth0.80": tc.base + ".180",
+			}
+			if len(keys) != len(want) {
+				t.Fatalf("RETH member keys = %+v, want %d logical keys", keys, len(want))
+			}
+			for _, key := range keys {
+				if want[key.InterfaceKey] != key.LinuxName {
+					t.Errorf("member %q LinuxName = %q, want %q",
+						key.InterfaceKey, key.LinuxName, want[key.InterfaceKey])
+				}
+				delete(want, key.InterfaceKey)
+			}
+			if len(want) != 0 {
+				t.Errorf("missing member keys: %v", want)
+			}
+
+			explicit := RoutingInstanceMemberDeviceKeys(cfg, cfg.TunnelNameMap(), "reth0.80")
+			if len(explicit) != 1 || explicit[0].LinuxName != tc.base+".180" {
+				t.Fatalf("explicit RETH unit key = %+v, want %s.180", explicit, tc.base)
+			}
+
+			// Exact declared dotted names outrank parsing as a RETH unit.
+			cfg.Interfaces.Interfaces["reth0.50"] = &InterfaceConfig{Name: "reth0.50"}
+			dotted := RoutingInstanceMemberDeviceKeys(cfg, cfg.TunnelNameMap(), "reth0.50")
+			if len(dotted) != 1 || dotted[0].LinuxName != "reth0.50" {
+				t.Fatalf("declared dotted device = %+v, want exact identity reth0.50", dotted)
+			}
+		})
+	}
+}
+
 func TestRIDualClaimResolvesLinuxAliasesIndependentOfInstanceOrder11060(t *testing.T) {
 	for _, tc := range []struct {
 		name string
