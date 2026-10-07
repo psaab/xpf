@@ -46,6 +46,13 @@ func snapshotByName9132(t *testing.T, snaps []InterfaceSnapshot, name string) In
 func routeTableOf9132(t *testing.T, cfg *config.Config, dest string) string {
 	t.Helper()
 	snaps := buildInterfaceSnapshots(cfg)
+	// These table-binding cases model addressed interfaces with live netdevs.
+	// Give each row an ifindex so the connected route represents a real link.
+	for i := range snaps {
+		if snaps[i].Ifindex <= 0 {
+			snaps[i].Ifindex = i + 1
+		}
+	}
 	routes, _, err := buildRouteSnapshots(cfg, snaps, nil)
 	if err != nil {
 		t.Fatalf("buildRouteSnapshots: %v", err)

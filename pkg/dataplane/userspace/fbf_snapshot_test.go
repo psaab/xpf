@@ -61,13 +61,15 @@ func fbfTestConfig() *config.Config {
 func fbfTestInterfaces() []InterfaceSnapshot {
 	return []InterfaceSnapshot{
 		{
-			Name: "reth0.50",
+			Name:    "reth0.50",
+			Ifindex: 50,
 			Addresses: []InterfaceAddressSnapshot{
 				{Family: "inet", Address: "172.16.50.8/24"},
 			},
 		},
 		{
-			Name: "reth0.80",
+			Name:    "reth0.80",
+			Ifindex: 80,
 			Addresses: []InterfaceAddressSnapshot{
 				{Family: "inet", Address: "172.16.80.8/24"},
 				{Family: "inet6", Address: "2001:db8:80::8/64"},

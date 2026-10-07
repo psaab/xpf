@@ -44,7 +44,8 @@ func TestBuildRouteSnapshotsNormalizesFamilyFromDestination(t *testing.T) {
 func TestBuildRouteSnapshotsIncludesConnectedPrefixes(t *testing.T) {
 	routes, _, err := buildRouteSnapshots(&config.Config{}, []InterfaceSnapshot{
 		{
-			Name: "reth1.0",
+			Name:    "reth1.0",
+			Ifindex: 11,
 			Addresses: []InterfaceAddressSnapshot{
 				{Family: "inet", Address: "10.0.61.1/24", Scope: int(netlink.SCOPE_UNIVERSE)},
 				{Family: "inet6", Address: "2001:559:8585:ef00::1/64", Scope: int(netlink.SCOPE_UNIVERSE)},
@@ -69,7 +70,8 @@ func TestBuildRouteSnapshotsIncludesConnectedPrefixes(t *testing.T) {
 func TestBuildRouteSnapshotsCompactsDuplicateConnectedAddresses11452(t *testing.T) {
 	routes, _, err := buildRouteSnapshots(&config.Config{}, []InterfaceSnapshot{
 		{
-			Name: "reth1.0",
+			Name:    "reth1.0",
+			Ifindex: 12,
 			Addresses: []InterfaceAddressSnapshot{
 				{Family: "inet", Address: "10.0.30.3/24", Scope: int(netlink.SCOPE_UNIVERSE)},
 				{Family: "inet", Address: "10.0.30.2/24", Scope: int(netlink.SCOPE_UNIVERSE)},

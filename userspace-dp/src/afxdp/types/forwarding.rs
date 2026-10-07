@@ -1214,12 +1214,13 @@ pub(in crate::afxdp) struct LeakRuleV6 {
 #[derive(Clone, Debug)]
 pub(in crate::afxdp) struct RouteEntryV4 {
     pub(in crate::afxdp) prefix: PrefixV4,
-    /// #2389: all resolved equal-cost next-hops. Always non-empty for a
-    /// forwarding (non-discard, non-next-table) route; built from the full
-    /// `RouteSnapshot.next_hops` vector. The legacy single `next_hop` /
-    /// `ifindex` / `tunnel_endpoint_id` accessors below select the FIRST
-    /// candidate so existing call sites are unchanged; the multipath
-    /// selector reads the whole slice.
+    /// #2389: all resolved equal-cost next-hops from `RouteSnapshot.next_hops`.
+    /// A connected-prefix marker may be empty only when an exactly matching
+    /// `ConnectedRouteV4` backs it; lookup selects that connected entry instead.
+    /// `populate_routes` rejects unbacked empty ordinary routes (#12063). The
+    /// legacy single `next_hop` / `ifindex` / `tunnel_endpoint_id` accessors
+    /// below select the FIRST candidate; the multipath selector reads the whole
+    /// slice.
     pub(in crate::afxdp) next_hops: Vec<RouteNextHopV4>,
     pub(in crate::afxdp) discard: bool,
     pub(in crate::afxdp) next_table: String,
@@ -1250,7 +1251,7 @@ pub(in crate::afxdp) struct RouteEntryV6 {
 
 impl RouteEntryV4 {
     /// First (primary) next-hop ifindex, or 0 if the route has no resolved
-    /// next-hop (discard / next-table). Preserves the pre-#2389 single
+    /// next-hop (discard / next-table / connected marker). Preserves the pre-#2389 single
     /// next-hop accessor for call sites that do not multipath-select.
     pub(in crate::afxdp) fn ifindex(&self) -> i32 {
         self.next_hops.first().map(|nh| nh.ifindex).unwrap_or(0)
