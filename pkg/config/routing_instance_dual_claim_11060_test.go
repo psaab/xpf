@@ -312,3 +312,134 @@ func TestRIDualClaimSameInstanceRepeatIsHarmless11060(t *testing.T) {
 		t.Fatalf("repeated member within one instance must not conflict: %v", err)
 	}
 }
+
+// rethRemoteOnlyCfg12295 builds the #12295 B1 probe: node 0 whose reth0
+// carries ONLY the peer (node 1) member. A config in exactly this shape
+// compiles clean on the strict path (no gate rejects a lone remote member),
+// so the resolver is the only line of defense.
+func rethRemoteOnlyCfg12295() *Config {
+	cfg := &Config{}
+	cfg.Chassis.Cluster = &ClusterConfig{NodeID: 0}
+	cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"ge-7/0/2": {Name: "ge-7/0/2", RedundantParent: "reth0"},
+		"reth0": {
+			Name: "reth0",
+			Units: map[int]*InterfaceUnit{
+				50: {Number: 50, VlanID: 50},
+			},
+		},
+	}
+	return cfg
+}
+
+// rethLocalPairCfg12295 builds the B2 probe: node 0 with both members, so
+// the base resolution is unambiguous and the suffix arms are isolated.
+func rethLocalPairCfg12295() *Config {
+	cfg := &Config{}
+	cfg.Chassis.Cluster = &ClusterConfig{NodeID: 0}
+	cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"ge-0/0/2": {Name: "ge-0/0/2", RedundantParent: "reth0"},
+		"ge-7/0/2": {Name: "ge-7/0/2", RedundantParent: "reth0"},
+		"reth0": {
+			Name: "reth0",
+			Units: map[int]*InterfaceUnit{
+				50: {Number: 50, VlanID: 50},
+			},
+		},
+	}
+	return cfg
+}
+
+// TestRethRemoteOnlyMemberStaysUnresolved12295 pins B1: when the cluster
+// node ID is known and the ONLY candidate member is the peer's, the RETH
+// must stay UNRESOLVED (the RETH ref itself, matching the no-candidate
+// path) — never bind the local node to a port it does not own. Pre-fix the
+// single score-0 candidate won the !ok arm and node 0 programmed ge-7/0/2.
+func TestRethRemoteOnlyMemberStaysUnresolved12295(t *testing.T) {
+	cfg := rethRemoteOnlyCfg12295()
+	if phys, ok := cfg.RethToPhysical()["reth0"]; ok {
+		t.Fatalf("remote-only reth0 resolved to %q, want no map entry (unresolved)", phys)
+	}
+	if got := cfg.ResolveReth("reth0.50"); got != "reth0.50" {
+		t.Fatalf("ResolveReth(reth0.50) = %q, want unresolved reth0.50", got)
+	}
+	if got := LogicalUnitDeviceKeyForRef(cfg, "reth0.50"); got != "reth0.50" {
+		t.Fatalf("LogicalUnitDeviceKeyForRef(reth0.50) = %q, want unresolved reth0.50", got)
+	}
+	// Positive control: the same lone member on ITS OWN node resolves.
+	cfg.Chassis.Cluster.NodeID = 1
+	if got := cfg.RethToPhysical()["reth0"]; got != "ge-7/0/2" {
+		t.Fatalf("node 1: remote-only reth0 → %q, want ge-7/0/2 (local member must resolve)", got)
+	}
+	if got := LogicalUnitDeviceKeyForRef(cfg, "reth0.50"); got != "ge-7-0-2.50" {
+		t.Fatalf("node 1: LogicalUnitDeviceKeyForRef(reth0.50) = %q, want ge-7-0-2.50", got)
+	}
+}
+
+// TestRethSingleNodeLoneMemberStillResolves12295 pins the B1 boundary:
+// with NO cluster config (localNodeID -1) there is no locality to judge,
+// so a lone member keeps resolving exactly as before.
+func TestRethSingleNodeLoneMemberStillResolves12295(t *testing.T) {
+	cfg := &Config{}
+	cfg.Interfaces.Interfaces = map[string]*InterfaceConfig{
+		"ge-7/0/2": {Name: "ge-7/0/2", RedundantParent: "reth0"},
+		"reth0": {
+			Name: "reth0",
+			Units: map[int]*InterfaceUnit{
+				50: {Number: 50, VlanID: 50},
+			},
+		},
+	}
+	if got := cfg.RethToPhysical()["reth0"]; got != "ge-7/0/2" {
+		t.Fatalf("single-node: reth0 → %q, want ge-7/0/2", got)
+	}
+	if got := LogicalUnitDeviceKeyForRef(cfg, "reth0.50"); got != "ge-7-0-2.50" {
+		t.Fatalf("single-node: LogicalUnitDeviceKeyForRef(reth0.50) = %q, want ge-7-0-2.50", got)
+	}
+}
+
+// TestRethTrailingDotResolvesToBareBase12295 pins B2a: a trailing-dot RETH
+// ref carries no unit slot (compiler_validate_strict_unitref.go), so it
+// resolves the BASE only and drops the dot. Pre-fix the Literal fell
+// through ResolveReth with the dot intact, naming a device with a trailing
+// dot that no link carries.
+func TestRethTrailingDotResolvesToBareBase12295(t *testing.T) {
+	cfg := rethLocalPairCfg12295()
+	if got := LogicalUnitDeviceKeyForRef(cfg, "reth0."); got != "ge-0-0-2" {
+		t.Fatalf("LogicalUnitDeviceKeyForRef(reth0.) = %q, want bare base ge-0-0-2", got)
+	}
+	keys := RoutingInstanceMemberDeviceKeys(cfg, cfg.TunnelNameMap(), "reth0.")
+	if len(keys) != 1 || keys[0].LinuxName != "ge-0-0-2" {
+		t.Fatalf("RI member reth0. keys = %+v, want one LinuxName ge-0-0-2", keys)
+	}
+	// Non-RETH control: trailing-dot syntax is also a bare reference, while
+	// malformed non-RETH suffixes remain inert.
+	cfg.Interfaces.Interfaces["ge-0/0/9"] = &InterfaceConfig{Name: "ge-0/0/9"}
+	if got := LogicalUnitDeviceKeyForRef(cfg, "ge-0/0/9."); got != "ge-0-0-9" {
+		t.Fatalf("LogicalUnitDeviceKeyForRef(ge-0/0/9.) = %q, want bare base ge-0-0-9", got)
+	}
+	if got := LogicalUnitDeviceKeyForRef(cfg, "ge-0/0/9.foo"); got != "ge-0-0-9.foo" {
+		t.Fatalf("LogicalUnitDeviceKeyForRef(ge-0/0/9.foo) = %q, want inert ge-0-0-9.foo", got)
+	}
+}
+
+// TestRethMalformedUnitStaysInert12295 pins B2b: a RETH ref whose suffix is
+// not a valid logical unit stays INERT (the ref itself, unresolved) per the
+// tolerant-load policy — it must not be fed through ResolveReth. Pre-fix
+// reth0.50.1 resolved to ge-0-0-2.50.1, a device that matches nothing.
+func TestRethMalformedUnitStaysInert12295(t *testing.T) {
+	cfg := rethLocalPairCfg12295()
+	for _, ref := range []string{"reth0.50.1", "reth0.foo"} {
+		if got := LogicalUnitDeviceKeyForRef(cfg, ref); got != ref {
+			t.Fatalf("LogicalUnitDeviceKeyForRef(%q) = %q, want inert %q", ref, got, ref)
+		}
+		keys := RoutingInstanceMemberDeviceKeys(cfg, cfg.TunnelNameMap(), ref)
+		if len(keys) != 1 || keys[0].LinuxName != LinuxIfName(ref) {
+			t.Fatalf("RI member %q keys = %+v, want one inert LinuxName %q", ref, keys, LinuxIfName(ref))
+		}
+	}
+	// Valid-unit control: genuine refs keep resolving.
+	if got := LogicalUnitDeviceKeyForRef(cfg, "reth0.50"); got != "ge-0-0-2.50" {
+		t.Fatalf("LogicalUnitDeviceKeyForRef(reth0.50) = %q, want ge-0-0-2.50", got)
+	}
+}

@@ -143,7 +143,12 @@ func LogicalUnitDeviceKeyForRef(cfg *Config, ref string) string {
 	}
 	unitNum, _, err := CanonicalLogicalUnit(s.UnitTok)
 	if err != nil {
-		return logicalUnitKernelBase(cfg, s.Literal)
+		if s.UnitTok == "" {
+			return base
+		}
+		// Invalid suffixes stay inert on tolerant load; do not resolve the
+		// literal through a RETH mapping.
+		return LinuxIfName(s.Literal)
 	}
 	var unit *InterfaceUnit
 	if _, ifc, ok := LookupInterfaceByLinuxName(cfg, s.Base); ok {
