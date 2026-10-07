@@ -177,13 +177,15 @@ sync.
         `meta.ingress_ifindex`, so two VLAN units co-parented on one interface
         with the same 5-tuple aliased to one entry and VLAN B replayed VLAN A's
         decision/NAT/egress BEFORE the slow-path zone-pair policy ran
-        (cross-zone fail-OPEN). Set placement (`set_index`) and invalidation stay
-        keyed on the physical ifindex — the GC / RST-teardown invalidate paths
-        drive `invalidate_slot` with `binding.ifindex` and cannot recover the
-        logical unit from a bare session key, so keeping those physical keeps
-        eviction coherent; invalidate matches physical-only and thus over-evicts
-        a co-5-tuple VLAN sibling (safe — a re-miss re-evaluates from policy),
-        never stranding a stale entry.
+        (cross-zone fail-OPEN). Set placement and invalidation use the owning
+        binding's physical ifindex. `FlowCache::insert` and lookup retain that
+        bound physical identity even when tunnel decapsulation rewrites
+        `meta.ingress_ifindex` to the tunnel's logical ifindex; the logical
+        discriminator remains separate for zone-safe hits. Removal paths drive
+        `invalidate_slot` with `binding.ifindex`, so they still reach decapped
+        entries without scanning the full cache. Invalidation remains
+        physical-only and may over-evict a co-5-tuple VLAN sibling (safe — a
+        re-miss re-evaluates from policy), never stranding a stale entry.
       - **#6227 item 6 / #7198 — NPTv6 embedded-ICMP reverse lookup:**
         `icmp_embed/nat_match_v6.rs::match_outer_v6` resolves the LOGICAL
         ingress unit ifindex before the `ifindex_to_zone_id` lookup that

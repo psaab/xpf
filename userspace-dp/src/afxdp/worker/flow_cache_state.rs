@@ -27,9 +27,9 @@ use super::*;
 /// binding.
 ///
 /// **Intentionally NOT `Default`** — for consistency with the other
-/// #959 sub-structs. `FlowCache::new()` is the canonical
-/// construction; the explicit literal in `BindingWorker::create`
-/// uses it.
+/// #959 sub-structs. Production construction uses `FlowCache::new_for_binding`
+/// to retain the physical ifindex needed by session-removal invalidation;
+/// standalone `FlowCache::new()` is reserved for tests without a binding.
 pub(crate) struct WorkerFlowCacheState {
     pub(crate) flow_cache: FlowCache,
 }

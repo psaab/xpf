@@ -3656,6 +3656,93 @@ mod flow_cache_invalidation_tests {
              different flow (no collateral invalidation)"
         );
     }
+    // #12042 RED-before: the decap path replaces `meta.ingress_ifindex` with
+    // the tunnel LOGICAL ifindex, while removal paths pass the PHYSICAL
+    // `binding.ifindex`. Before the fix, insert and lookup used the logical
+    // value for set placement, so invalidation by the physical binding could
+    // not reach the tunnel entry; it survived reap and the reopened flow's
+    // first ACK HIT the stale descriptor.
+    const TUNNEL_LOGICAL_IF: i32 = 400;
+
+    #[test]
+    fn reaped_tunnel_flow_cache_slot_is_invalidated_12042() {
+        let rg_epochs = reap_rg_epochs();
+        let forwarding = ForwardingState::default();
+        // The physical underlay binding that received the outer packet: its
+        // `binding.ifindex` is what every removal path passes to
+        // `invalidate_slot` today.
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);
+        let key = reap_key(61001);
+        insert_cache_entry_on_if(&mut binding, &key, None, TUNNEL_LOGICAL_IF);
+        let cached = binding
+            .flow
+            .flow_cache
+            .entries
+            .iter()
+            .flatten()
+            .next()
+            .expect("precondition: tunnel flow's descriptor is cached");
+        assert_eq!(cached.ingress_ifindex, REAP_INGRESS_IF);
+        assert_eq!(cached.logical_ingress_ifindex, TUNNEL_LOGICAL_IF);
+        // `FlowCache::insert` receives the tunnel logical identity from the
+        // decap-rebound packet metadata, but must retain the owning binding's
+        // physical identity for set placement and removal-path invalidation.
+        assert!(
+            cache_hits_on_if(&mut binding, &key, &rg_epochs, TUNNEL_LOGICAL_IF),
+            "precondition: the tunnel flow's descriptor is cached and hits"
+        );
+
+        reap_expired_sessions(
+            std::slice::from_mut(&mut binding),
+            &[expired(key.clone(), None)],
+            &forwarding,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            1_000_000_000,
+            0,
+        );
+
+        assert!(
+            !cache_hits_on_if(&mut binding, &key, &rg_epochs, TUNNEL_LOGICAL_IF),
+            "#12042: a re-opened tunnel flow's first ACK must MISS the cache so \
+             it re-runs full session lookup + policy (no stale-descriptor HIT)"
+        );
+        assert_eq!(
+            binding.flow.flow_cache.entries.iter().flatten().count(),
+            0,
+            "#12042: the reaped tunnel flow's cache slot must be evicted \
+             (entries_after_reap == 0)"
+        );
+    }
+
+    #[test]
+    fn delete_synced_tunnel_flow_cache_slot_is_invalidated_12042() {
+        let rg_epochs = reap_rg_epochs();
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);
+        let key = reap_key(61002);
+        insert_cache_entry_on_if(&mut binding, &key, None, TUNNEL_LOGICAL_IF);
+        assert!(
+            cache_hits_on_if(&mut binding, &key, &rg_epochs, TUNNEL_LOGICAL_IF),
+            "precondition: the tunnel flow's descriptor is cached and hits"
+        );
+
+        invalidate_flow_cache_slots_for_deleted_sessions(
+            std::slice::from_mut(&mut binding),
+            &[key.clone()],
+        );
+
+        assert!(
+            !cache_hits_on_if(&mut binding, &key, &rg_epochs, TUNNEL_LOGICAL_IF),
+            "#12042: a revoked tunnel flow's next ACK must MISS the cache so \
+             it re-runs full session lookup + policy (no stale-descriptor HIT)"
+        );
+        assert_eq!(
+            binding.flow.flow_cache.entries.iter().flatten().count(),
+            0,
+            "#12042: the revoked tunnel flow's cache slot must be evicted"
+        );
+    }
 }
 
 #[cfg(test)]

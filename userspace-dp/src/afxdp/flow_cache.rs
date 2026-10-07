@@ -174,9 +174,10 @@ impl FlowCacheStamp {
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct FlowCacheLookup {
-    /// PHYSICAL parent ingress ifindex (`meta.ingress_ifindex`). Used for set
-    /// placement (`set_index`) and invalidation — the value the GC / RST
-    /// teardown paths pass (`binding.ifindex`), so those stay coherent.
+    /// Ingress ifindex stamped on packet metadata: physical for native
+    /// ingress, tunnel logical after decapsulation. A bound per-binding cache
+    /// substitutes its physical `binding_ifindex` for set placement and
+    /// invalidation; standalone caches use this value directly.
     pub(super) ingress_ifindex: i32,
     /// #5139: LOGICAL ingress ifindex — the VLAN-unit ifindex that selects the
     /// security zone. On a non-VLAN interface this equals `ingress_ifindex`.
@@ -196,16 +197,18 @@ impl FlowCacheLookup {
         forwarding: &ForwardingState,
     ) -> Self {
         // #5139: resolve the LOGICAL (VLAN-selecting) ingress ifindex the same
-        // way the cache-insert path does (`from_forward_decision`), so the
-        // lookup identity matches the stamped entry identity for the same
-        // packet. Non-VLAN ingress (no mapping) falls back to the physical
-        // ifindex, so co-parented VLANs differ but bare interfaces are
-        // unchanged.
-        let physical = meta.ingress_ifindex as i32;
-        let logical = resolve_ingress_logical_ifindex(forwarding, physical, meta.ingress_vlan_id)
-            .unwrap_or(physical);
+        // way the cache-insert path does. This remains the zone-selecting
+        // discriminator even when tunnel decapsulation has rebound the packet
+        // metadata's ingress ifindex to the tunnel logical device.
+        let meta_ingress = meta.ingress_ifindex as i32;
+        let logical = resolve_ingress_logical_ifindex(
+            forwarding,
+            meta_ingress,
+            meta.ingress_vlan_id,
+        )
+        .unwrap_or(meta_ingress);
         Self {
-            ingress_ifindex: physical,
+            ingress_ifindex: meta_ingress,
             logical_ingress_ifindex: logical,
             config_generation: validation.config_generation,
             fib_generation: validation.fib_generation,
@@ -607,7 +610,10 @@ impl FlowCacheEntry {
         };
         Some(Self {
             key: flow.forward_key.clone(),
-            // Physical parent for set placement / invalidation coherence.
+            // `FlowCache::insert` replaces the packet metadata ifindex with
+            // the owning physical binding on production caches. Keep this
+            // metadata value for standalone caches and the initial entry
+            // construction; the logical identity is stored separately below.
             ingress_ifindex: meta.ingress_ifindex as i32,
             // #5139: the LOGICAL (VLAN-selecting) ingress ifindex resolved above
             // (`ingress_ifindex` local) is the zone-selecting identity; stamp it
@@ -821,6 +827,13 @@ impl FlowCacheEntry {
 /// permutation of `[0, 1, 2, 3]` where index 0 is MRU and
 /// index 3 is LRU.
 pub(super) struct FlowCache {
+    /// Physical ifindex of the binding that owns this per-binding cache.
+    ///
+    /// `0` is reserved for standalone test caches. Entries admitted after
+    /// tunnel decapsulation still use this physical identity for set
+    /// placement/invalidation; their distinct tunnel logical identity remains
+    /// in `FlowCacheEntry::logical_ingress_ifindex`.
+    binding_ifindex: i32,
     pub(super) entries: Vec<Option<FlowCacheEntry>>,
     /// Per-set LRU permutation. `lru[s][0]` = MRU way, `lru[s][3]` = LRU way.
     /// Initialized to `[0, 1, 2, 3]` for every set so eviction order on a
@@ -849,7 +862,12 @@ pub(super) struct FlowCache {
 
 impl FlowCache {
     pub(super) fn new() -> Self {
+        Self::new_for_binding(0)
+    }
+
+    pub(super) fn new_for_binding(binding_ifindex: i32) -> Self {
         Self {
+            binding_ifindex,
             entries: (0..FLOW_CACHE_SIZE).map(|_| None).collect(),
             lru: vec![[0u8, 1, 2, 3]; FLOW_CACHE_SETS],
             hits: 0,
@@ -1168,7 +1186,12 @@ impl FlowCache {
         policy: Option<&crate::policy::PolicyState>,
         scheduler_expired: bool,
     ) -> Option<&FlowCacheEntry> {
-        let set = Self::set_index(key, lookup.ingress_ifindex);
+        let ingress_ifindex = if self.binding_ifindex != 0 {
+            self.binding_ifindex
+        } else {
+            lookup.ingress_ifindex
+        };
+        let set = Self::set_index(key, ingress_ifindex);
         let base = set * FLOW_CACHE_WAYS;
         // Key-first, generation-second: scan the set for a key match.
         // A key-match with stale generation is a guaranteed-bad cache
@@ -1184,7 +1207,7 @@ impl FlowCache {
                 // and VLAN B replays VLAN A's decision/NAT/egress before the
                 // slow-path zone-pair policy runs (cross-zone fail-open).
                 if entry.key != *key
-                    || entry.ingress_ifindex != lookup.ingress_ifindex
+                    || entry.ingress_ifindex != ingress_ifindex
                     || entry.logical_ingress_ifindex != lookup.logical_ingress_ifindex
                 {
                     continue;
@@ -1264,7 +1287,15 @@ impl FlowCache {
         None
     }
 
-    pub(super) fn insert(&mut self, entry: FlowCacheEntry) {
+    pub(super) fn insert(&mut self, mut entry: FlowCacheEntry) {
+        // This cache belongs to one physical binding. Decapsulation changes
+        // packet metadata's ingress ifindex to the tunnel logical ifindex,
+        // while removal uses the binding's physical ifindex. Keep the physical
+        // identity for set placement/invalidation; the logical discriminator
+        // still prevents cross-zone cache hits.
+        if self.binding_ifindex != 0 {
+            entry.ingress_ifindex = self.binding_ifindex;
+        }
         let set = Self::set_index(&entry.key, entry.ingress_ifindex);
         let base = set * FLOW_CACHE_WAYS;
         // Dedup-on-insert: if this set already holds the same key
@@ -1358,6 +1389,11 @@ impl FlowCache {
         key: &crate::session::SessionKey,
         ingress_ifindex: i32,
     ) {
+        let ingress_ifindex = if self.binding_ifindex != 0 {
+            self.binding_ifindex
+        } else {
+            ingress_ifindex
+        };
         let set = Self::set_index(key, ingress_ifindex);
         let base = set * FLOW_CACHE_WAYS;
         for way in 0..FLOW_CACHE_WAYS {
