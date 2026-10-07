@@ -805,3 +805,360 @@ fn a_static_accept_filter_revokes_nothing_end_to_end_7212() {
     assert_eq!(out.revoked_count, 0);
     assert!(out.revoked_scratch.is_empty());
 }
+/// #12058 RED/GREEN: synthesize a reverse row on the reply-arrival key, but
+/// preserve the forward client's native routing identity across later hits.
+#[cfg(test)]
+mod reverse_native_identity_12058_tests {
+    use super::*;
+    use crate::session::{install_table_identity, SessionKey, SessionOrigin};
+    use crate::{InterfaceAddressSnapshot, InterfaceSnapshot, NeighborSnapshot};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    const BLUE_CLIENT_IFINDEX: i32 = 101;
+    const BLUE_EGRESS_IFINDEX: i32 = 102;
+    const BLUE_CLIENT_MAC: &str = "02:00:00:00:00:65";
+    const BLUE_EGRESS_MAC: &str = "02:00:00:00:00:66";
+    const BLUE_EGRESS_MAC_BYTES: [u8; 6] = [0x02, 0, 0, 0, 0, 0x66];
+
+    fn forwarding_with_blue_members() -> (ForwardingState, u32, u32) {
+        let mut snapshot = revocation_snapshot(Vec::new());
+        snapshot.default_policy = "permit".into();
+        let (blue_domain, blue_check) = install_table_identity("blue");
+        snapshot
+            .interfaces
+            .iter_mut()
+            .find(|interface| interface.ifindex == LAN_IFINDEX)
+            .expect("base LAN interface")
+            .addresses
+            .extend([
+                InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "10.0.61.1/24".into(),
+                    ..Default::default()
+                },
+                InterfaceAddressSnapshot {
+                    family: "inet6".into(),
+                    address: "2001:559:8585:ef00::1/64".into(),
+                    ..Default::default()
+                },
+            ]);
+        snapshot.interfaces.extend([
+            InterfaceSnapshot {
+                name: "blue-client".into(),
+                zone: "lan".into(),
+                routing_instance: "blue".into(),
+                routing_domain: blue_domain,
+                linux_name: "blue-client".into(),
+                ifindex: BLUE_CLIENT_IFINDEX,
+                hardware_addr: BLUE_CLIENT_MAC.into(),
+                addresses: vec![
+                    InterfaceAddressSnapshot {
+                        family: "inet".into(),
+                        address: "10.250.0.1/24".into(),
+                        ..Default::default()
+                    },
+                    InterfaceAddressSnapshot {
+                        family: "inet6".into(),
+                        address: "2001:db8:250::1/64".into(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "blue-egress".into(),
+                zone: "wan".into(),
+                routing_instance: "blue".into(),
+                routing_domain: blue_domain,
+                linux_name: "blue-egress".into(),
+                ifindex: BLUE_EGRESS_IFINDEX,
+                hardware_addr: BLUE_EGRESS_MAC.into(),
+                addresses: vec![
+                    InterfaceAddressSnapshot {
+                        family: "inet".into(),
+                        address: "10.251.0.1/24".into(),
+                        ..Default::default()
+                    },
+                    InterfaceAddressSnapshot {
+                        family: "inet6".into(),
+                        address: "2001:db8:251::1/64".into(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        ]);
+        snapshot.neighbors.extend([
+            NeighborSnapshot {
+                interface: "blue-client".into(),
+                ifindex: BLUE_CLIENT_IFINDEX,
+                family: "inet".into(),
+                ip: "10.250.0.2".into(),
+                mac: "02:00:00:00:01:02".into(),
+                state: "reachable".into(),
+                ..Default::default()
+            },
+            NeighborSnapshot {
+                interface: "blue-client".into(),
+                ifindex: BLUE_CLIENT_IFINDEX,
+                family: "inet6".into(),
+                ip: "2001:db8:250::2".into(),
+                mac: "02:00:00:00:01:02".into(),
+                state: "reachable".into(),
+                ..Default::default()
+            },
+            NeighborSnapshot {
+                interface: "reth1.0".into(),
+                ifindex: LAN_IFINDEX,
+                family: "inet".into(),
+                ip: "10.0.61.102".into(),
+                mac: "02:00:00:00:01:03".into(),
+                state: "reachable".into(),
+                ..Default::default()
+            },
+            NeighborSnapshot {
+                interface: "reth1.0".into(),
+                ifindex: LAN_IFINDEX,
+                family: "inet6".into(),
+                ip: "2001:559:8585:ef00::102".into(),
+                mac: "02:00:00:00:01:03".into(),
+                state: "reachable".into(),
+                ..Default::default()
+            },
+        ]);
+        (build_forwarding_state(&snapshot), blue_domain, blue_check)
+    }
+
+    fn check_reply_path(v6: bool, forward_is_blue: bool) {
+        let (forwarding, blue_domain, blue_check) = forwarding_with_blue_members();
+        let forward_domain = if forward_is_blue { blue_domain } else { 0 };
+        let forward_check = if forward_is_blue { blue_check } else { 0 };
+        let arrival_domain = if forward_is_blue { 0 } else { blue_domain };
+        let arrival_ifindex = if forward_is_blue {
+            12
+        } else {
+            BLUE_EGRESS_IFINDEX
+        };
+        let expected_egress_ifindex = if forward_is_blue {
+            BLUE_CLIENT_IFINDEX
+        } else {
+            LAN_IFINDEX
+        };
+        let (client, server) = match (v6, forward_is_blue) {
+            (false, true) => (
+                IpAddr::V4(Ipv4Addr::new(10, 250, 0, 2)),
+                IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+            ),
+            (false, false) => (
+                IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+                IpAddr::V4(Ipv4Addr::new(10, 251, 0, 200)),
+            ),
+            (true, true) => (
+                "2001:db8:250::2".parse().unwrap(),
+                "2001:559:8585:80::200".parse().unwrap(),
+            ),
+            (true, false) => (
+                "2001:559:8585:ef00::102".parse().unwrap(),
+                "2001:db8:251::200".parse().unwrap(),
+            ),
+        };
+        let forward_key = SessionKey {
+            addr_family: if v6 {
+                libc::AF_INET6 as u8
+            } else {
+                libc::AF_INET as u8
+            },
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: client,
+            dst_ip: server,
+            src_port: 12345,
+            dst_port: 5201,
+            discriminator: Default::default(),
+            routing_domain: forward_domain,
+        };
+        let mut forward_decision = revocation_decision(None);
+        let forward_egress_ifindex = if forward_is_blue {
+            12
+        } else {
+            BLUE_EGRESS_IFINDEX
+        };
+        forward_decision.resolution.egress_ifindex = forward_egress_ifindex;
+        forward_decision.resolution.tx_ifindex = forward_egress_ifindex;
+        let mut forward_metadata = revocation_metadata();
+        forward_metadata.ingress_ifindex = if forward_is_blue {
+            BLUE_CLIENT_IFINDEX as u32
+        } else {
+            LAN_IFINDEX as u32
+        };
+        forward_metadata.ingress_zone = TEST_LAN_ZONE_ID;
+        forward_metadata.egress_zone = TEST_WAN_ZONE_ID;
+
+        let mut sessions = SessionTable::new();
+        sessions.set_filter_revalidation_gen(STAMPED_GENERATION);
+        assert!(sessions.install_with_protocol_with_origin(
+            forward_key.clone(),
+            forward_decision,
+            forward_metadata,
+            SessionOrigin::ForwardFlow,
+            122_000_000_000,
+            crate::ip_proto::PROTO_TCP,
+            0,
+        ));
+        let mut reply_key = crate::session::reverse_session_key(
+            &forward_key,
+            crate::nat::NatDecision::default(),
+        );
+        reply_key.routing_domain = arrival_domain;
+        let ha_state = std::collections::BTreeMap::new();
+        let mut binding =
+            BindingWorker::new_for_mirror_test(0, 0, arrival_ifindex, 0);
+        binding.interface = if forward_is_blue {
+            std::sync::Arc::<str>::from("reth0.80")
+        } else {
+            std::sync::Arc::<str>::from("blue-egress")
+        };
+        let reply_dst_mac = if forward_is_blue {
+            crate::afxdp::tests_support::TEST_WAN_MAC
+        } else {
+            BLUE_EGRESS_MAC_BYTES
+        };
+
+        let make_reply = |tcp_flags| match (client, server) {
+            (IpAddr::V4(client), IpAddr::V4(server)) => build_txn_tcp_syn_frame_v4(
+                server,
+                client,
+                5201,
+                12345,
+                tcp_flags,
+                reply_dst_mac,
+            ),
+            (IpAddr::V6(client), IpAddr::V6(server)) => build_txn_tcp_frame_v6(
+                server,
+                client,
+                5201,
+                12345,
+                tcp_flags,
+                reply_dst_mac,
+            ),
+            _ => unreachable!("client and server families are selected together"),
+        };
+        let run_reply = |binding: &mut BindingWorker, sessions: &mut SessionTable, flags| {
+            let frame = make_reply(flags);
+            let mut meta = if v6 {
+                txn_meta_v6(arrival_ifindex as u32, frame.len())
+            } else {
+                txn_meta_v4(arrival_ifindex as u32, flags, frame.len() as u16)
+            };
+            // `reth0.80` is VLAN 80; the synthetic RX metadata must resolve
+            // that logical ingress to its default routing domain.
+            if arrival_ifindex == 12 {
+                meta.ingress_vlan_id = 80;
+            }
+            meta.tcp_flags = flags;
+            txn_run_descriptor(
+                binding,
+                sessions,
+                &forwarding,
+                &ha_state,
+                &frame,
+                meta,
+            )
+        };
+
+        let (_, first_dbg) = run_reply(&mut binding, &mut sessions, 0x12);
+        assert_eq!(first_dbg.rx, 1, "first reply must reach poll path");
+        assert_eq!(
+            first_dbg.tx, 1,
+            "repair must transmit (v6={v6}, forward_is_blue={forward_is_blue}, hit={}, miss={}, create={}, forward={}, no_route={}, missing_neigh={}, policy_deny={})",
+            first_dbg.session_hit,
+            first_dbg.session_miss,
+            first_dbg.session_create,
+            first_dbg.forward,
+            first_dbg.no_route,
+            first_dbg.missing_neigh,
+            first_dbg.policy_deny
+        );
+        let repaired = sessions
+            .lookup(&reply_key, 123_000_000_000, 0)
+            .expect("reply repair must install under its arrival-domain key");
+        assert_eq!(
+            repaired.decision.resolution.disposition,
+            ForwardingDisposition::ForwardCandidate,
+            "reverse repair must store a resolved route (ifindex={})",
+            repaired.decision.resolution.egress_ifindex
+        );
+        let first_forward = binding
+            .scratch
+            .scratch_forwards
+            .first()
+            .expect("repair must queue one reply transmission");
+        assert_eq!(
+            first_forward.decision.resolution.egress_ifindex,
+            expected_egress_ifindex,
+            "repair must resolve to the forward ingress interface"
+        );
+        assert_eq!(
+            (
+                repaired.decision.install_table_domain,
+                repaired.decision.install_table_check
+            ),
+            (forward_domain, forward_check),
+            "repair must stamp the forward client's native route identity"
+        );
+        // Model the reverse row left after reply-ingress PBR is removed: its
+        // stamp is the arrival table and its cached NoRoute must be replaced
+        // from the forward session's native identity on the next hit.
+        let arrival_check = if arrival_domain == 0 { 0 } else { blue_check };
+        sessions.set_filter_revalidation_gen(LIVE_GENERATION + 1);
+        assert!(sessions.update_reverse_route_on_filter_hit(
+            &reply_key,
+            arrival_ifindex,
+            crate::afxdp::forwarding::no_route_resolution(Some(client)),
+            arrival_domain,
+            arrival_check,
+        ));
+        sessions.set_filter_revalidation_gen(LIVE_GENERATION);
+
+        let (_, hit_dbg) = run_reply(&mut binding, &mut sessions, 0x10);
+        assert_eq!(hit_dbg.rx, 1, "second reply must reach poll path");
+        assert_eq!(hit_dbg.session_hit, 1, "second reply must hit the repaired row");
+        assert_eq!(
+            hit_dbg.tx, 1,
+            "revalidation must keep the reply routed to the forward ingress"
+        );
+        let hit_forward = binding
+            .scratch
+            .scratch_forwards
+            .first()
+            .expect("revalidated reply must queue one transmission");
+        assert_eq!(
+            hit_forward.decision.resolution.egress_ifindex,
+            expected_egress_ifindex,
+            "revalidation must not steer the reply into the arrival-domain table"
+        );
+        let repaired = sessions
+            .lookup(&reply_key, 123_000_000_000, 0)
+            .expect("reply row must remain installed after revalidation");
+        assert_eq!(
+            (
+                repaired.decision.install_table_domain,
+                repaired.decision.install_table_check
+            ),
+            (forward_domain, forward_check),
+            "arrival-domain key must not retain a route stamp for another table"
+        );
+        assert_eq!(
+            repaired.decision.resolution.egress_ifindex,
+            expected_egress_ifindex
+        );
+    }
+
+    #[test]
+    fn repaired_reverse_hits_keep_forward_native_identity_v4_v6_both_domain_directions_12058() {
+        for v6 in [false, true] {
+            for forward_is_blue in [false, true] {
+                check_reply_path(v6, forward_is_blue);
+            }
+        }
+    }
+}
