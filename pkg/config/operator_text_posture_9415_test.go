@@ -85,3 +85,36 @@ func TestUndefinedPolicyZoneErrorDescribesWholeSnapshotRefusal_9415(t *testing.T
 		})
 	}
 }
+
+func TestEmptyUndefinedZonePairWarningDoesNotClaimSnapshotRefusal9415(t *testing.T) {
+	for _, tc := range []struct {
+		side   string
+		prefix string
+	}{
+		{"from", "set security policies from-zone typo-zone to-zone trust"},
+		{"to", "set security policies from-zone trust to-zone typo-zone"},
+	} {
+		t.Run(tc.side, func(t *testing.T) {
+			cfg, err := CompileConfigLenient(buildTree(t, []string{
+				"set security zones security-zone trust",
+				tc.prefix,
+			}))
+			if err != nil {
+				t.Fatalf("tolerant compile must remain bootable: %v", err)
+			}
+			for _, warning := range cfg.Warnings {
+				if !strings.Contains(warning, "references undefined "+tc.side+"-zone") {
+					continue
+				}
+				if strings.Contains(warning, "refuses the WHOLE policy snapshot") {
+					t.Fatalf("the warning claims the helper refuses the snapshot, but the malformed empty pair compiles no rule for the helper to inspect: %s", warning)
+				}
+				if !strings.Contains(warning, "no compiled policies") {
+					t.Fatalf("the warning must explain that the undefined empty pair sends no rule to the helper: %s", warning)
+				}
+				return
+			}
+			t.Fatalf("tolerant compile emitted no undefined-%s-zone warning: %v", tc.side, cfg.Warnings)
+		})
+	}
+}

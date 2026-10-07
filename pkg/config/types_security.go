@@ -146,16 +146,17 @@ type AddressBinding struct {
 type SecurityConfig struct {
 	Zones    map[string]*ZoneConfig // keyed by zone name
 	Policies []*ZonePairPolicies    // ordered list of zone-pair policy sets
-	// MalformedZonePairs records zone-pair statements whose SHAPE shows a
-	// bracketed-list collapse (#9246), so validatePolicyZonePairShapeStrict can
-	// reject the commit and the tolerant path can warn instead (#1960). Same
-	// record-at-compile / reject-in-a-strict-gate shape as
-	// ScreenProfile.UnknownLeaves: by the time the config is compiled the
-	// residue is gone -- the pair looks like an ordinary context that happens to
-	// carry no policies -- so the defect has to be captured where the AST is
-	// still visible.
+	// MalformedZonePairs records diagnostics for zone-pair statements whose
+	// shape shows a bracketed-list collapse (#9246). The strict uniform gate
+	// rejects the commit. On tolerant loads it warns and skips the malformed
+	// context, while the gate adds a synthetic global LenientContentDropped
+	// carrier so the userspace snapshot builder emits its existing
+	// __unsupported__ sentinel and the helper refuses the whole snapshot
+	// (#12039). Keeping the source diagnostic here is necessary because the
+	// malformed residue is no longer distinguishable from an ordinary empty
+	// pair after AST compilation.
 	// json:"-" deliberately: this is a COMPILE-TIME DIAGNOSTIC, not part of the
-	// config's semantic content. Serialising it perturbs every fixture and
+	// config's semantic content. Serialising it would perturb every fixture and
 	// fingerprint that compares compiled configs -- the #4406 goldens, and the
 	// ConfigFingerprint comparisons the elision censuses run -- for a field
 	// that is nil in every valid config.
@@ -599,14 +600,16 @@ type Policy struct {
 	// rejects unknown policy subtrees, so this flag is set only on tolerant
 	// load / peer-sync paths.
 	//
-	// compilePolicy derives it (never the raw AST / wire), so it is recomputed
-	// identically on both HA peers and needs no serialization. The userspace
-	// snapshot builder (buildOneRuleSnapshot) poisons such a policy with the
-	// __unsupported__ application sentinel so the Rust integrity preflight
-	// rejects the WHOLE snapshot (previous-good retained; fresh-boot
-	// default-deny) — an action-agnostic fail-CLOSED that turns the widened
-	// permit (and a symmetric over-broad deny) into never-match instead of
-	// match-any.
+	// For authored policy content, compilePolicy derives this (never from raw
+	// AST / wire), so both HA peers recompute it identically. The #12039 uniform
+	// gate also sets it on a synthetic global carrier when a malformed
+	// zone-pair context was skipped before any authored Policy could compile;
+	// the same lowerer then refuses the snapshot without inventing a pair.
+	// The userspace snapshot builder (buildOneRuleSnapshot) poisons a flagged
+	// policy with the __unsupported__ application sentinel so the Rust integrity
+	// preflight rejects the WHOLE snapshot (previous-good retained; fresh-boot
+	// default-deny) — an action-agnostic fail-CLOSED that prevents incomplete
+	// enforcement from being installed.
 	//
 	// #9571 adds one cause that is not a dropped leaf: the tolerant #8752 fold
 	// merged repeated same-named statements into a policy that PERMITS although

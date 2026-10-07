@@ -48,19 +48,31 @@ func runUniformGatesPolicy(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	// structural CoS/policer/device-map error and a bad match-address still
 	// win the first-error slot before a zone-reference error.
 	// #9246: a bracketed zone list on from-zone/to-zone. Runs BEFORE the
-	// undefined-zone gate, because the from-zone form otherwise surfaces there
-	// as an undefined zone literally named "to-zone" -- loud, but blaming the
-	// wrong thing, and telling the operator to define a zone rather than to fix
-	// the bracket. Same lenient downgrade as its neighbour (#1960): an
-	// already-persisted or peer-synced config an older binary accepted must
-	// still boot, and on that path the operator is told rather than locked out.
+	// undefined-zone gate so a grouped from-zone list is recorded as malformed
+	// instead of being reduced to a warning about the shifted literal
+	// "to-zone". The tolerant compiler records the malformed source context but,
+	// as #11366 did, does not expand it into guessed zone-pair rules. Instead,
+	// a poison carrier uses the existing LenientContentDropped lowering: the
+	// userspace snapshot builder emits the __unsupported__ application sentinel
+	// and the helper rejects the whole snapshot rather than letting traffic from
+	// any listed pair fall through to a global/default permit.
 	if len(cfg.Security.MalformedZonePairs) > 0 {
 		err := fmt.Errorf("security policies %s", cfg.Security.MalformedZonePairs[0])
 		if opts.lenientPolicyZoneRefs {
 			for _, m := range cfg.Security.MalformedZonePairs {
 				cfg.Warnings = append(cfg.Warnings,
-					fmt.Sprintf("security policies %s (downgraded to warning on tolerant path)", m))
+					fmt.Sprintf("security policies %s (downgraded to warning on tolerant path; this context is not enforced and the userspace policy snapshot is refused)", m))
 			}
+			// The malformed source was skipped before compilePolicy could
+			// produce an object to flag. Keep this carrier after authored global
+			// rules: it exists only to enter the established snapshot-sentinel
+			// path, which rejects the whole snapshot before rule evaluation.
+			cfg.Security.GlobalPolicies = append(cfg.Security.GlobalPolicies, &Policy{
+				Name:                  "xpf-malformed-zone-pair-poison",
+				Action:                PolicyDeny,
+				terminalActions:       []PolicyAction{PolicyDeny},
+				LenientContentDropped: true,
+			})
 		} else {
 			return err
 		}
