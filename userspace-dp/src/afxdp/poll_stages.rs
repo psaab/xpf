@@ -339,10 +339,12 @@ fn outline_ndp_na_learn_and_program(
 ///
 /// Returns the (possibly-updated) `meta` and the optional owned
 /// decap frame. Caller binds the active slice locally:
+/// The third value signals that the outer ingress filter rejected a valid
+/// decap candidate; the caller recycles it instead of trying another tunnel.
 ///
 /// ```text
-/// let (meta, owned) = stage_native_gre_decap(raw_frame, meta, ...);
-/// let packet_frame = owned.as_deref().unwrap_or(raw_frame);
+/// let (meta, owned, filter_dropped) = stage_native_gre_decap(raw_frame, meta, ...);
+/// if filter_dropped { /* recycle the outer descriptor */ }
 /// ```
 ///
 /// `owned_packet_frame: Option<Vec<u8>>` MUST be a `mut` binding at
@@ -363,14 +365,22 @@ pub(super) fn stage_native_gre_decap(
     raw_frame: &[u8],
     meta: UserspaceDpMeta,
     forwarding: &ForwardingState,
-) -> (UserspaceDpMeta, Option<Vec<u8>>) {
-    let native_gre_packet = try_native_gre_decap_from_frame(raw_frame, meta, forwarding);
+    outer_input_filter_allows: &mut impl FnMut(&[u8], UserspaceDpMeta) -> bool,
+) -> (UserspaceDpMeta, Option<Vec<u8>>, bool) {
+    let mut filtered = false;
+    let native_gre_packet = crate::afxdp::gre::try_native_gre_decap_from_frame_with_input_filter(
+        raw_frame,
+        meta,
+        forwarding,
+        outer_input_filter_allows,
+        &mut filtered,
+    );
     let new_meta = native_gre_packet
         .as_ref()
         .map(|packet| packet.meta)
         .unwrap_or(meta);
     let owned_packet_frame = native_gre_packet.map(|packet| packet.frame);
-    (new_meta, owned_packet_frame)
+    (new_meta, owned_packet_frame, filtered)
 }
 
 /// Stage 6b — WireGuard transport-data decap (#8274 step 3).
@@ -386,6 +396,9 @@ pub(super) fn stage_native_gre_decap(
 /// almost all of them; see `wg::decap::try_wg_decap_from_frame` for the gates
 /// and for why a rejection here is not a drop.
 ///
+/// A `None` frame with the third return value set is instead a terminal outer
+/// input-filter denial; the caller recycles the descriptor.
+///
 /// The peer identity travels with the decapsulated packet rather than being
 /// discarded: the control thread learns a peer's endpoint from authenticated
 /// datagrams, and moving transport-data records off its socket takes its
@@ -396,20 +409,20 @@ pub(super) fn stage_wg_decap(
     meta: UserspaceDpMeta,
     forwarding: &ForwardingState,
     wg_scratch: &crate::afxdp::wg::WgWorkerScratch,
-) -> (UserspaceDpMeta, Option<Vec<u8>>) {
-    // Shape mirrors `stage_native_gre_decap` deliberately: meta + optional
-    // owned frame, nothing else. The decapped peer's roaming endpoint is
-    // reported to the engine INSIDE `try_wg_decap_from_frame` (the control
-    // thread drains it on its timer pass), so handing the pubkey back up to
-    // the poll loop would only create a value with no consumer — and a
-    // returned-but-unused identity is how a "the caller will handle it"
-    // comment outlives the caller that did.
-    let decapped = crate::afxdp::wg::decap::try_wg_decap_from_frame(
-        raw_frame, meta, forwarding, wg_scratch,
+    outer_input_filter_allows: &mut impl FnMut(&[u8], UserspaceDpMeta) -> bool,
+) -> (UserspaceDpMeta, Option<Vec<u8>>, bool) {
+    let mut filtered = false;
+    let decapped = crate::afxdp::wg::decap::try_wg_decap_from_frame_with_input_filter(
+        raw_frame,
+        meta,
+        forwarding,
+        wg_scratch,
+        outer_input_filter_allows,
+        &mut filtered,
     );
     let new_meta = decapped.as_ref().map(|p| p.meta).unwrap_or(meta);
     let owned_packet_frame = decapped.map(|p| p.frame);
-    (new_meta, owned_packet_frame)
+    (new_meta, owned_packet_frame, filtered)
 }
 
 /// Stage 7+8 — parse session flow and learn the source-side

@@ -1065,6 +1065,23 @@ pub(super) fn try_native_gre_decap_from_frame(
     meta: UserspaceDpMeta,
     forwarding: &ForwardingState,
 ) -> Option<NativeGrePacket> {
+    let mut filter_rejected = false;
+    try_native_gre_decap_from_frame_with_input_filter(
+        frame,
+        meta,
+        forwarding,
+        &mut |_, _| true,
+        &mut filter_rejected,
+    )
+}
+
+pub(super) fn try_native_gre_decap_from_frame_with_input_filter(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    forwarding: &ForwardingState,
+    outer_input_filter_allows: &mut impl FnMut(&[u8], UserspaceDpMeta) -> bool,
+    input_filter_rejected: &mut bool,
+) -> Option<NativeGrePacket> {
     if meta.protocol != PROTO_GRE {
         return None;
     }
@@ -1180,6 +1197,10 @@ pub(super) fn try_native_gre_decap_from_frame(
     let endpoint = match_tunnel_endpoint(forwarding, outer_src, outer_dst, key, key_present, meta)?;
     let (protocol, rel_l4_offset, payload_offset) =
         parse_inner_protocol_and_offsets(inner_packet, inner_family)?;
+    if !outer_input_filter_allows(frame, meta) {
+        *input_filter_rejected = true;
+        return None;
+    }
 
     // #7167: the synthesize / ECN-combine / reparse / logical-rebind tail now
     // lives in `logical_ingress::build_logical_ingress_packet` so WireGuard and

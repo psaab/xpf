@@ -271,6 +271,25 @@ pub(in crate::afxdp) fn try_wg_decap_from_frame(
     forwarding: &ForwardingState,
     scratch: &super::WgWorkerScratch,
 ) -> Option<WgDecapPacket> {
+    let mut filter_rejected = false;
+    try_wg_decap_from_frame_with_input_filter(
+        frame,
+        meta,
+        forwarding,
+        scratch,
+        &mut |_, _| true,
+        &mut filter_rejected,
+    )
+}
+
+pub(in crate::afxdp) fn try_wg_decap_from_frame_with_input_filter(
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    forwarding: &ForwardingState,
+    scratch: &super::WgWorkerScratch,
+    outer_input_filter_allows: &mut impl FnMut(&[u8], UserspaceDpMeta) -> bool,
+    input_filter_rejected: &mut bool,
+) -> Option<WgDecapPacket> {
     // #1432 §4.5's cheap gate first: a box with no WireGuard tunnel never
     // probes the engine map, and a non-UDP packet never reads a byte.
     if !forwarding.has_wg_tunnels || meta.protocol != PROTO_UDP {
@@ -375,6 +394,10 @@ pub(in crate::afxdp) fn try_wg_decap_from_frame(
     let inner = inner.get(..inner_len)?;
     let (protocol, rel_l4_offset, payload_offset) =
         parse_inner_protocol_and_offsets(inner, inner_family)?;
+    if !outer_input_filter_allows(frame, meta) {
+        *input_filter_rejected = true;
+        return None;
+    }
 
     let (synthetic, inner_meta) = crate::afxdp::logical_ingress::build_logical_ingress_packet(
         forwarding,

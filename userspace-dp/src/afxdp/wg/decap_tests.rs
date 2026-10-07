@@ -794,6 +794,154 @@ fn poll_loop_denies_wg_inner_plaintext_with_no_permitting_policy_8274() {
     );
 }
 
+/// Build a live WireGuard fixture with an input filter on its physical
+/// underlay. The same authenticated type-4 record exercises the actual poll
+/// loop for both the deny and permit outcomes.
+fn wiring_fixture_with_outer_input_filter(action: &str) -> (ForwardingState, WgEngine, [u8; 32]) {
+    let allowed: Vec<ipnet::IpNet> = vec!["10.123.0.0/24".parse().unwrap()];
+    let (init, resp, _ipub, rpub) = established_pair(allowed.clone(), allowed);
+    let mut snapshot = wg_outer_mtu_snapshot();
+    snapshot.policies = vec![crate::PolicyRuleSnapshot {
+        name: "permit-inner".to_string(),
+        from_zone: "sfmix".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        application_terms: Vec::new(),
+        action: "permit".to_string(),
+        ..Default::default()
+    }];
+    snapshot.filters = vec![crate::FirewallFilterSnapshot {
+        name: "underlay-in".to_string(),
+        family: "inet".to_string(),
+        terms: vec![
+            crate::FirewallTermSnapshot {
+                name: "wg-listener".to_string(),
+                protocols: vec!["udp".to_string()],
+                destination_ports: vec![WG_PORT.to_string()],
+                count: "c-wg".to_string(),
+                action: action.to_string(),
+                ..Default::default()
+            },
+            crate::FirewallTermSnapshot {
+                name: "default-accept".to_string(),
+                action: "accept".to_string(),
+                ..Default::default()
+            },
+        ],
+    }];
+    snapshot
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.ifindex == 12)
+        .expect("WireGuard underlay ingress must exist")
+        .filter_input_v4 = "underlay-in".to_string();
+    let mut forwarding = build_forwarding_state(&snapshot);
+    let id = *forwarding.wg_engines.keys().next().expect("WG tunnel");
+    forwarding.wg_engines.insert(id, std::sync::Arc::new(resp));
+    (forwarding, init, rpub)
+}
+
+/// #12041 RED-before: an underlay `protocol udp destination-port 51820`
+/// discard must count/drop the authenticated WG outer before decap, installing
+/// no inner-flow session.
+#[test]
+fn poll_loop_wg_outer_input_filter_discard_counts_and_drops_pre_decap_12041() {
+    let (forwarding, init, rpub) = wiring_fixture_with_outer_input_filter("discard");
+    let frame = wiring_record(&init, &rpub);
+    let meta = wiring_meta(frame.len());
+    let counter = forwarding
+        .filter_state
+        .iface_filter_v4_fast
+        .get(&12)
+        .expect("underlay input filter must be attached")
+        .terms[0]
+        .counter
+        .clone();
+    assert_eq!(
+        counter.packets.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "precondition: the outer counter starts at zero"
+    );
+
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+
+    assert_eq!(
+        counter.packets.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "#12041: the underlay input filter's count term must see the WG outer"
+    );
+    let mut tunnel_sessions = 0usize;
+    sessions.iter_with_origin(|_, _, metadata, _| {
+        if metadata.ingress_ifindex == TUNNEL_LOGICAL_IFINDEX as u32 {
+            tunnel_sessions += 1;
+        }
+    });
+    assert_eq!(
+        tunnel_sessions, 0,
+        "#12041: a filter-discarded WG outer must install no inner session"
+    );
+}
+
+/// #12041 permit guard: accepting a WG outer at the underlay filter must still
+/// authenticate, decapsulate and install the inner session.
+#[test]
+fn poll_loop_wg_outer_input_filter_permit_still_decaps_12041() {
+    let (forwarding, init, rpub) = wiring_fixture_with_outer_input_filter("accept");
+    let frame = wiring_record(&init, &rpub);
+    let meta = wiring_meta(frame.len());
+    let counter = forwarding
+        .filter_state
+        .iface_filter_v4_fast
+        .get(&12)
+        .expect("underlay input filter must be attached")
+        .terms[0]
+        .counter
+        .clone();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
+    let ha_state = txn_ha_state();
+    let mut sessions = SessionTable::new();
+    txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+
+    assert_eq!(
+        counter.packets.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "#12041: permitted WG outers must still be evaluated and counted"
+    );
+    let mut tunnel_sessions = 0usize;
+    sessions.iter_with_origin(|_, _, metadata, _| {
+        if metadata.ingress_ifindex == TUNNEL_LOGICAL_IFINDEX as u32 {
+            tunnel_sessions += 1;
+        }
+    });
+    assert!(
+        tunnel_sessions > 0,
+        "#12041: a filter-permitted WG outer must still decap and install its inner flow"
+    );
+}
+
 /// A correctly configured listener reached through another zone is declined
 /// before AEAD even when both zones use `any-service` and the destination is
 /// local. The check is the real ingress-zone/owner match, not host-inbound.

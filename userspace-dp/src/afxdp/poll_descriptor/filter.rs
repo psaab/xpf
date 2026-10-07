@@ -256,6 +256,111 @@ pub(super) fn evaluate_non_pbr_input_filter(
     }
 }
 
+/// Evaluate the physical ingress filter for a tunnel packet that is about to
+/// be claimed by decapsulation. The packet is still in its outer representation
+/// here, so this preserves the underlay interface's input-filter contract.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn enforce_tunnel_outer_input_filter(
+    tx_pipeline: &mut WorkerTxPipeline,
+    forwarding: &ForwardingState,
+    event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
+    ingress_ifindex: i32,
+    packet_frame: &[u8],
+    meta: UserspaceDpMeta,
+    counters: &mut BatchCounters,
+    now_ns: u64,
+) -> bool {
+    let ingress_logical_ifindex = resolve_ingress_logical_ifindex(
+        forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .unwrap_or(meta.ingress_ifindex as i32);
+    let is_v6 = matches!(meta.addr_family as i32, libc::AF_INET6);
+    let Some(filter) = crate::filter::interface_input_filter(
+        &forwarding.filter_state,
+        ingress_logical_ifindex,
+        is_v6,
+    ) else {
+        return false;
+    };
+    let Some(flow) = crate::afxdp::frame::parse_session_flow_from_bytes(packet_frame, meta)
+        .or_else(|| crate::afxdp::frame::l3_enforcement_flow_from_frame(packet_frame, meta))
+    else {
+        return false;
+    };
+    let mut extra = term_match_extra_from_frame(packet_frame, meta);
+    if flow.forward_key.protocol == crate::afxdp::PROTO_GRE {
+        extra.ports_unknown = true;
+    }
+    let input_eval =
+        evaluate_non_pbr_input_filter(forwarding, extra, Some(&flow), meta, None, true);
+    let reject_reply_enqueued =
+        if let crate::filter::FilterAction::Reject(reject_msg) = input_eval.action {
+            enqueue_filter_reject_reply(
+                tx_pipeline,
+                forwarding,
+                ingress_ifindex,
+                packet_frame,
+                meta,
+                &flow,
+                counters,
+                reject_msg,
+            )
+        } else {
+            false
+        };
+    if let Some(cached_log) = input_eval.cached_log {
+        emit_input_filter_log_match(
+            forwarding,
+            event_stream,
+            &flow,
+            meta,
+            cached_log,
+            FilterLogSource::Input,
+            reject_reply_enqueued,
+            now_ns,
+        );
+    }
+    if input_eval.action != crate::filter::FilterAction::Accept {
+        return true;
+    }
+    let tx_selection = crate::filter::evaluate_filter_ref_tx_selection_runtime_uncounted(
+        filter,
+        flow.src_ip,
+        flow.dst_ip,
+        flow.forward_key.protocol,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+        meta.dscp,
+        extra,
+        meta.pkt_len as u64,
+        now_ns,
+    );
+    if tx_selection.policer_drop {
+        return true;
+    }
+    matches!(
+        crate::afxdp::forwarding::ingress_route_table_override(
+            forwarding,
+            packet_frame,
+            meta,
+            &flow,
+            None,
+            event_stream,
+            now_ns,
+            Some(crate::afxdp::forwarding::PbrRejectSink {
+                tx_pipeline,
+                ingress_ifindex,
+                counters,
+            }),
+        ),
+        crate::afxdp::forwarding::RouteOverride::Drop
+    )
+}
+
 /// Side-effect-free input-filter precheck for the screen stage.
 ///
 /// The poll loop keeps the normal counted/logged filter evaluation at its

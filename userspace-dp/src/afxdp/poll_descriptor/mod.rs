@@ -657,11 +657,37 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // stage-12+ code at lines below calls `.take()`.
                 // #10597: injected WG plaintext arrives decapped; the
                 // synthetic frame becomes the owned packet directly.
-                let (mut meta, mut owned_packet_frame) = if is_injected {
-                    (meta, Some(raw_frame.to_vec()))
+                let (mut meta, mut owned_packet_frame, outer_input_filter_drop) = if is_injected {
+                    (meta, Some(raw_frame.to_vec()), false)
                 } else {
-                    stage_native_gre_decap(raw_frame, meta, worker_ctx.forwarding)
+                    let (new_meta, owned_frame, filtered) = {
+                        let mut input_filter_allows =
+                            |outer_frame: &[u8], outer_meta: UserspaceDpMeta| {
+                                !filter::enforce_tunnel_outer_input_filter(
+                                    &mut binding.tx_pipeline,
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    binding.ifindex,
+                                    outer_frame,
+                                    outer_meta,
+                                    telemetry.counters,
+                                    now_ns,
+                                )
+                            };
+                        stage_native_gre_decap(
+                            raw_frame,
+                            meta,
+                            worker_ctx.forwarding,
+                            &mut input_filter_allows,
+                        )
+                    };
+                    (new_meta, owned_frame, filtered)
                 };
+                if outer_input_filter_drop {
+                    telemetry.counters.touched = true;
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
                 // #8274 step 3 — stage 6b: WireGuard transport-data decap.
                 //
                 // Runs only when GRE did not already claim the frame: a packet
@@ -676,8 +702,33 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // zone instead of being written to the wgN TUN for the kernel
                 // to forward with no zone policy at all.
                 if !is_injected && owned_packet_frame.is_none() {
-                    let (wg_meta, wg_frame) =
-                        stage_wg_decap(raw_frame, meta, worker_ctx.forwarding, &binding.wg_scratch);
+                    let (wg_meta, wg_frame, wg_filter_drop) = {
+                        let mut input_filter_allows =
+                            |outer_frame: &[u8], outer_meta: UserspaceDpMeta| {
+                                !filter::enforce_tunnel_outer_input_filter(
+                                    &mut binding.tx_pipeline,
+                                    worker_ctx.forwarding,
+                                    worker_ctx.event_stream,
+                                    binding.ifindex,
+                                    outer_frame,
+                                    outer_meta,
+                                    telemetry.counters,
+                                    now_ns,
+                                )
+                            };
+                        stage_wg_decap(
+                            raw_frame,
+                            meta,
+                            worker_ctx.forwarding,
+                            &binding.wg_scratch,
+                            &mut input_filter_allows,
+                        )
+                    };
+                    if wg_filter_drop {
+                        telemetry.counters.touched = true;
+                        binding.scratch.scratch_recycle.push(desc.addr);
+                        continue;
+                    }
                     if wg_frame.is_some() {
                         meta = wg_meta;
                         owned_packet_frame = wg_frame;

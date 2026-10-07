@@ -2467,3 +2467,150 @@ fn gre_decap_attributes_shared_identity_to_first_sibling_row_10816() {
     );
 }
 
+/// #12041: the underlay unit's `filter input` must see a GRE outer BEFORE the
+/// worker decapsulates it. A `from protocol gre then { count; discard; }` term
+/// on the arrival unit must count the peer's outer and drop it pre-decap —
+/// no inner adjudication, no session install, no delivery.
+///
+/// RED-before: decap precedes every input-filter evaluation and the filter
+/// resolves from the rebound tunnel-unit meta, so the counter stays 0 and the
+/// inner packet delivers.
+#[test]
+fn gre_outer_input_filter_discard_counts_and_drops_pre_decap_12041() {
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "underlay-in".to_string(),
+        family: "inet".to_string(),
+        terms: vec![
+            FirewallTermSnapshot {
+                name: "drop-gre".to_string(),
+                protocols: vec!["gre".to_string()],
+                count: "c-gre".to_string(),
+                action: "discard".to_string(),
+                ..Default::default()
+            },
+            FirewallTermSnapshot {
+                name: "default-accept".to_string(),
+                action: "accept".to_string(),
+                ..Default::default()
+            },
+        ],
+    }];
+    snapshot
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.ifindex == 12)
+        .expect("GRE underlay ingress VLAN must exist")
+        .filter_input_v4 = "underlay-in".to_string();
+    let forwarding = build_forwarding_state(&snapshot);
+    let outer_counter = forwarding
+        .filter_state
+        .iface_filter_v4_fast
+        .get(&12)
+        .expect("underlay input filter must be attached")
+        .terms[0]
+        .counter
+        .clone();
+    assert_eq!(
+        outer_counter.packets.load(Ordering::Relaxed),
+        0,
+        "precondition: the outer counter starts at zero"
+    );
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+    binding.interface = Arc::<str>::from("ge-0-0-0");
+    let mut sessions = SessionTable::new();
+    let inner = build_gre_inner_icmp_packet_v4();
+    let frame = build_gre_to_self_outer_frame_v4(80, &inner);
+    let meta = gre_to_self_outer_meta(80, frame.len());
+    let (tx, rx) = mpsc::sync_channel(8);
+    let wake = Arc::new(TunnelWake::new().expect("eventfd"));
+    let mut deliveries = BTreeMap::new();
+    deliveries.insert(77, LocalTunnelDelivery { tx, wake });
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(deliveries));
+    txn_run_descriptor_with_deliveries(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+    );
+    assert_eq!(
+        outer_counter.packets.load(Ordering::Relaxed),
+        1,
+        "#12041: the underlay input filter's count term must see the GRE outer"
+    );
+    let mut rows = 0usize;
+    sessions.iter_with_origin(|_, _, _, _| rows += 1);
+    assert_eq!(
+        rows, 0,
+        "#12041: a filter-discarded outer must install no session"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "#12041: a filter-discarded outer must not deliver its inner packet"
+    );
+}
+
+/// #12041 permit guard: an underlay `filter input` that ACCEPTS the GRE outer
+/// must let decap proceed — the inner packet still delivers exactly once.
+#[test]
+fn gre_outer_input_filter_permit_still_decaps_12041() {
+    let mut snapshot = gre_to_self_snapshot();
+    snapshot.filters = vec![FirewallFilterSnapshot {
+        name: "underlay-in".to_string(),
+        family: "inet".to_string(),
+        terms: vec![
+            FirewallTermSnapshot {
+                name: "permit-gre".to_string(),
+                protocols: vec!["gre".to_string()],
+                count: "c-gre".to_string(),
+                action: "accept".to_string(),
+                ..Default::default()
+            },
+            FirewallTermSnapshot {
+                name: "default-accept".to_string(),
+                action: "accept".to_string(),
+                ..Default::default()
+            },
+        ],
+    }];
+    snapshot
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.ifindex == 12)
+        .expect("GRE underlay ingress VLAN must exist")
+        .filter_input_v4 = "underlay-in".to_string();
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+    binding.interface = Arc::<str>::from("ge-0-0-0");
+    let mut sessions = SessionTable::new();
+    let inner = build_gre_inner_icmp_packet_v4();
+    let frame = build_gre_to_self_outer_frame_v4(80, &inner);
+    let meta = gre_to_self_outer_meta(80, frame.len());
+    let (tx, rx) = mpsc::sync_channel(8);
+    let wake = Arc::new(TunnelWake::new().expect("eventfd"));
+    let mut deliveries = BTreeMap::new();
+    deliveries.insert(77, LocalTunnelDelivery { tx, wake });
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(deliveries));
+    txn_run_descriptor_with_deliveries(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        &local_tunnel_deliveries,
+    );
+    let delivered = rx
+        .try_recv()
+        .expect("#12041: a filter-permitted GRE outer must still decap and deliver");
+    assert_eq!(
+        delivered, inner,
+        "delivery must be the decapped inner packet"
+    );
+}
+
