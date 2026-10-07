@@ -728,13 +728,214 @@ impl RequestTombstone {
     }
 }
 
-/// Provisional-handle phases (D11 journal).
+/// Provisional-handle phases (D11 journal). `Committing`/`RollingBack` are
+/// nonterminal recovery tracks: the record carries a stored writer result plus
+/// idempotent progress bits so a reaper resumes exactly the missing effects
+/// after owner death. `UncertainDenied` is the fail-closed terminal for
+/// unknown/possible emission; it is neither `Committed` nor `RolledBack`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProvisionalPhase {
     Prepared,
     WriteStarted,
+    Committing,
+    RollingBack,
     Committed,
     RolledBack,
+    UncertainDenied,
+}
+
+impl ProvisionalPhase {
+    pub(crate) fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            ProvisionalPhase::Committed
+                | ProvisionalPhase::RolledBack
+                | ProvisionalPhase::UncertainDenied
+        )
+    }
+}
+
+/// Typed writer result stored durably in the journal (F.1). `None` on the
+/// record means no result was observed yet. Written is authoritative only when
+/// `output_bytes` matches the stored proof's expected length
+/// (`ProvisionalRecord::written_proof_valid`); anything else is fail-closed
+/// uncertain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProvisionalWriteResult {
+    /// All `output_bytes` reached the device; commit track only.
+    Written { output_bytes: u32 },
+    /// Definitive pre- or post-write no-emission; rollback track only.
+    NothingWritten,
+    /// Bytes are (or may be) on the device; never commit, never roll back.
+    Transferred,
+    /// Writer outcome unknown (partial/timeout/lost); never commit or roll back.
+    Uncertain,
+}
+
+/// Token-adjacent commit proof: output slab handle, expected transformed
+/// length, and the bound request. Types mirror the D11 descriptor
+/// (`IpsecInnerDescriptor::{slab_id, len, request_id}`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProvisionalOutputProof {
+    pub slab_id: u32,
+    pub expected_output_bytes: u32,
+    pub request_id: u64,
+}
+
+/// Why a record entered the rollback track. Distinguishes the pre-write
+/// cancel (fence refused before q0) from a definitive post-write no-emission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProvisionalRollbackCause {
+    PreWriteCancel,
+    DefinitiveNoWrite,
+}
+
+/// Idempotent commit/rollback progress bits (F.1). A bit is set only after
+/// its effect is visible; every effect is idempotent by transaction
+/// token/session id, so a reaper replays exactly the missing bits after death.
+/// Commit bits live in the low half, rollback bits in the high half; the sets
+/// are disjoint by construction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProvisionalProgress(u64);
+
+impl ProvisionalProgress {
+    /// Writer result persisted in the journal (shared by both tracks).
+    pub(crate) const WRITE_RESULT_STORED: u64 = 1 << 0;
+    /// Commit track: local pair rows committed.
+    pub(crate) const LOCAL_PAIR_COMMITTED: u64 = 1 << 1;
+    /// Commit track: NAT holder rows committed.
+    pub(crate) const NAT_HOLDER_COMMITTED: u64 = 1 << 2;
+    /// Commit track: shared forward-row committed.
+    pub(crate) const SHARED_FORWARD_COMMITTED: u64 = 1 << 3;
+    /// Commit track: shared reverse-row committed.
+    pub(crate) const SHARED_REVERSE_COMMITTED: u64 = 1 << 4;
+    /// Commit track: shared NAT-row committed.
+    pub(crate) const SHARED_NAT_COMMITTED: u64 = 1 << 5;
+    /// Commit track: shared forward-wire row committed.
+    pub(crate) const SHARED_FORWARD_WIRE_COMMITTED: u64 = 1 << 6;
+    /// Commit track: shared index row committed.
+    pub(crate) const SHARED_INDEX_COMMITTED: u64 = 1 << 7;
+    /// Commit track: directory published Live (last primary effect).
+    pub(crate) const DIRECTORY_LIVE: u64 = 1 << 8;
+    /// Commit track: reverse waiters woken.
+    pub(crate) const REVERSE_WAKE_COMPLETE: u64 = 1 << 9;
+    /// Commit track: Written completion queued (after primary effects).
+    pub(crate) const GO_COMPLETION_QUEUED: u64 = 1 << 10;
+    /// Commit track: D11 ACK observed and slab released.
+    pub(crate) const D11_ACKED_AND_SLAB_RELEASED: u64 = 1 << 11;
+    /// Rollback track: local capacity released.
+    pub(crate) const LOCAL_CAPACITY_RELEASED: u64 = 1 << 32;
+    /// Rollback track: local key released.
+    pub(crate) const LOCAL_KEY_RELEASED: u64 = 1 << 33;
+    /// Rollback track: local alias released.
+    pub(crate) const LOCAL_ALIAS_RELEASED: u64 = 1 << 34;
+    /// Rollback track: NAT reservation released.
+    pub(crate) const NAT_RESERVATION_RELEASED: u64 = 1 << 35;
+    /// Rollback track: NAT retained pin released.
+    pub(crate) const NAT_PIN_RELEASED: u64 = 1 << 36;
+    /// Rollback track: shared forward reservation released.
+    pub(crate) const SHARED_FORWARD_RELEASED: u64 = 1 << 37;
+    /// Rollback track: shared reverse reservation released.
+    pub(crate) const SHARED_REVERSE_RELEASED: u64 = 1 << 38;
+    /// Rollback track: shared NAT reservation released.
+    pub(crate) const SHARED_NAT_RELEASED: u64 = 1 << 39;
+    /// Rollback track: shared forward-wire reservation released.
+    pub(crate) const SHARED_FORWARD_WIRE_RELEASED: u64 = 1 << 40;
+    /// Rollback track: shared index reservation released.
+    pub(crate) const SHARED_INDEX_RELEASED: u64 = 1 << 41;
+    /// Rollback track: directory Pending claim removed.
+    pub(crate) const DIRECTORY_PENDING_REMOVED: u64 = 1 << 42;
+    /// Rollback track: waiters refused/recycled.
+    pub(crate) const WAITERS_REFUSED: u64 = 1 << 43;
+    /// Rollback track: denial/refusal completion queued (exactly once).
+    pub(crate) const ROLLBACK_GO_COMPLETION_QUEUED: u64 = 1 << 44;
+    /// Rollback track: D11 ACK observed and slab released.
+    pub(crate) const ROLLBACK_D11_ACKED_AND_SLAB_RELEASED: u64 = 1 << 45;
+    /// Uncertain track: possible-use claims marked denied.
+    pub(crate) const UNCERTAIN_DIRECTORY_DENIED: u64 = 1 << 46;
+    /// Uncertain track: reverse waiters refused/recycled.
+    pub(crate) const UNCERTAIN_WAITERS_REFUSED: u64 = 1 << 47;
+    /// Uncertain track: one uncertain completion queued.
+    pub(crate) const UNCERTAIN_GO_COMPLETION_QUEUED: u64 = 1 << 48;
+    /// Uncertain track: D11 ACK observed and slab released.
+    pub(crate) const UNCERTAIN_D11_ACKED_AND_SLAB_RELEASED: u64 = 1 << 49;
+
+
+    fn set(&mut self, bit: u64) {
+        self.0 |= bit;
+    }
+
+
+    pub(crate) fn has(self, bit: u64) -> bool {
+        self.0 & bit != 0
+    }
+
+    pub(crate) fn bits(self) -> u64 {
+        self.0
+    }
+    fn commit_effects_complete(self) -> bool {
+        [
+            Self::WRITE_RESULT_STORED,
+            Self::LOCAL_PAIR_COMMITTED,
+            Self::NAT_HOLDER_COMMITTED,
+            Self::SHARED_FORWARD_COMMITTED,
+            Self::SHARED_REVERSE_COMMITTED,
+            Self::SHARED_NAT_COMMITTED,
+            Self::SHARED_FORWARD_WIRE_COMMITTED,
+            Self::SHARED_INDEX_COMMITTED,
+            Self::DIRECTORY_LIVE,
+            Self::REVERSE_WAKE_COMPLETE,
+            Self::GO_COMPLETION_QUEUED,
+            Self::D11_ACKED_AND_SLAB_RELEASED,
+        ]
+        .into_iter()
+        .all(|bit| self.has(bit))
+    }
+
+    fn rollback_effects_complete(self) -> bool {
+        [
+            Self::WRITE_RESULT_STORED,
+            Self::LOCAL_CAPACITY_RELEASED,
+            Self::LOCAL_KEY_RELEASED,
+            Self::LOCAL_ALIAS_RELEASED,
+            Self::NAT_RESERVATION_RELEASED,
+            Self::NAT_PIN_RELEASED,
+            Self::SHARED_FORWARD_RELEASED,
+            Self::SHARED_REVERSE_RELEASED,
+            Self::SHARED_NAT_RELEASED,
+            Self::SHARED_FORWARD_WIRE_RELEASED,
+            Self::SHARED_INDEX_RELEASED,
+            Self::DIRECTORY_PENDING_REMOVED,
+            Self::WAITERS_REFUSED,
+            Self::ROLLBACK_GO_COMPLETION_QUEUED,
+            Self::ROLLBACK_D11_ACKED_AND_SLAB_RELEASED,
+        ]
+        .into_iter()
+        .all(|bit| self.has(bit))
+    }
+
+    fn uncertain_effects_complete(self) -> bool {
+        [
+            Self::UNCERTAIN_DIRECTORY_DENIED,
+            Self::UNCERTAIN_WAITERS_REFUSED,
+            Self::UNCERTAIN_GO_COMPLETION_QUEUED,
+            Self::UNCERTAIN_D11_ACKED_AND_SLAB_RELEASED,
+        ]
+        .into_iter()
+        .all(|bit| self.has(bit))
+    }
+
+    fn record_can_close(record: &ProvisionalRecord) -> bool {
+        match record.phase {
+            ProvisionalPhase::Committed => record.progress.commit_effects_complete(),
+            ProvisionalPhase::RolledBack => record.progress.rollback_effects_complete(),
+            ProvisionalPhase::UncertainDenied => record.progress.uncertain_effects_complete(),
+            ProvisionalPhase::Prepared
+            | ProvisionalPhase::WriteStarted
+            | ProvisionalPhase::Committing
+            | ProvisionalPhase::RollingBack => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -744,6 +945,184 @@ pub(crate) struct ProvisionalRecord {
     pub phase: ProvisionalPhase,
     pub request_ids: Vec<u64>,
     pub generation: u64,
+    /// Commit proof (slab handle, expected length, bound request).
+    pub proof: Option<ProvisionalOutputProof>,
+    /// Durably stored writer result; `None` means unobserved.
+    pub result: Option<ProvisionalWriteResult>,
+    /// Why rollback started; `None` outside the rollback track.
+    pub rollback_cause: Option<ProvisionalRollbackCause>,
+    /// Idempotent commit/rollback progress; reaper replays missing bits.
+    pub progress: ProvisionalProgress,
+    /// Normal plan expiry (monotonic ns, protocol/session-timeout derived);
+    /// retained claims/pins live until this point.
+    pub plan_expiry_ns: Option<u64>,
+}
+
+impl ProvisionalRecord {
+    /// Stored `Written` result whose byte count matches the stored proof.
+    /// This is the ONLY evidence that authorizes the commit track; a missing
+    /// proof, a byte mismatch, or any other result fails closed.
+    fn proof_is_bound(&self) -> bool {
+        self.proof.is_some_and(|proof| {
+            proof.slab_id < IPSEC_INNER_SLAB_CAP as u32
+                && proof.expected_output_bytes > 0
+                && proof.expected_output_bytes <= IPSEC_INNER_SLAB_BYTES as u32
+                && self.request_ids.contains(&proof.request_id)
+        })
+    }
+
+    /// Stored `Written` result whose byte count matches the stored, request-
+    /// bound D11 slab proof. This is the ONLY evidence that authorizes the
+    /// commit track; a missing proof, invalid slab/request, byte mismatch, or
+    /// any other result fails closed.
+    pub(crate) fn written_proof_valid(&self) -> bool {
+        self.proof_is_bound()
+            && matches!(
+                (self.result, self.proof),
+                (
+                    Some(ProvisionalWriteResult::Written { output_bytes }),
+                    Some(proof)
+                ) if output_bytes == proof.expected_output_bytes
+            )
+    }
+
+    /// Definitive no-emission: a stored `NothingWritten` result, or no result
+    /// at all in Prepared / RollingBack with a pre-write-cancel cause. A
+    /// pre-write cause is not authority once WriteStarted was reached. Any
+    /// observed Written/Transferred/Uncertain result defeats this.
+    pub(crate) fn definitive_no_write(&self) -> bool {
+        match self.result {
+            Some(ProvisionalWriteResult::NothingWritten) => true,
+            None => match self.phase {
+                ProvisionalPhase::Prepared => {
+                    self.rollback_cause != Some(ProvisionalRollbackCause::DefinitiveNoWrite)
+                }
+                ProvisionalPhase::RollingBack => {
+                    self.rollback_cause == Some(ProvisionalRollbackCause::PreWriteCancel)
+                }
+                _ => false,
+            },
+            Some(_) => false,
+        }
+    }
+
+    fn can_transition_to(&self, next: ProvisionalPhase) -> bool {
+        if self.phase == next {
+            return true;
+        }
+        if self.phase.is_terminal() {
+            return false;
+        }
+        match (self.phase, next) {
+            (ProvisionalPhase::Prepared, ProvisionalPhase::WriteStarted) => {
+                self.proof_is_bound()
+                    && self.plan_expiry_ns.is_some_and(|expiry| expiry > 0)
+                    && self.result.is_none()
+                    && self.rollback_cause.is_none()
+            }
+            (ProvisionalPhase::WriteStarted, ProvisionalPhase::Committing) => {
+                self.written_proof_valid()
+                    && self.progress.has(ProvisionalProgress::WRITE_RESULT_STORED)
+            }
+            (ProvisionalPhase::Prepared, ProvisionalPhase::RollingBack) => {
+                self.definitive_no_write()
+            }
+            (ProvisionalPhase::WriteStarted, ProvisionalPhase::RollingBack) => {
+                self.result == Some(ProvisionalWriteResult::NothingWritten)
+                    && self.progress.has(ProvisionalProgress::WRITE_RESULT_STORED)
+            }
+            (ProvisionalPhase::Committing, ProvisionalPhase::Committed) => {
+                self.progress.commit_effects_complete()
+            }
+            (ProvisionalPhase::RollingBack, ProvisionalPhase::RolledBack) => {
+                self.progress.rollback_effects_complete()
+            }
+            (_, ProvisionalPhase::UncertainDenied) => true,
+            _ => false,
+        }
+    }
+
+    fn can_mark_progress(&self, bit: u64) -> bool {
+        use ProvisionalProgress as P;
+        let has = |required| self.progress.has(required);
+        let prerequisite_present = match bit {
+            P::WRITE_RESULT_STORED => self.result.is_some(),
+            P::LOCAL_PAIR_COMMITTED => true,
+            P::NAT_HOLDER_COMMITTED => has(P::LOCAL_PAIR_COMMITTED),
+            P::SHARED_FORWARD_COMMITTED => has(P::NAT_HOLDER_COMMITTED),
+            P::SHARED_REVERSE_COMMITTED => has(P::SHARED_FORWARD_COMMITTED),
+            P::SHARED_NAT_COMMITTED => has(P::SHARED_REVERSE_COMMITTED),
+            P::SHARED_FORWARD_WIRE_COMMITTED => has(P::SHARED_NAT_COMMITTED),
+            P::SHARED_INDEX_COMMITTED => has(P::SHARED_FORWARD_WIRE_COMMITTED),
+            P::DIRECTORY_LIVE => has(P::SHARED_INDEX_COMMITTED),
+            P::REVERSE_WAKE_COMPLETE => has(P::DIRECTORY_LIVE),
+            P::GO_COMPLETION_QUEUED => has(P::REVERSE_WAKE_COMPLETE),
+            P::D11_ACKED_AND_SLAB_RELEASED => has(P::GO_COMPLETION_QUEUED),
+            P::LOCAL_CAPACITY_RELEASED => true,
+            P::LOCAL_KEY_RELEASED => has(P::LOCAL_CAPACITY_RELEASED),
+            P::LOCAL_ALIAS_RELEASED => has(P::LOCAL_KEY_RELEASED),
+            P::NAT_RESERVATION_RELEASED => has(P::LOCAL_ALIAS_RELEASED),
+            P::NAT_PIN_RELEASED => has(P::NAT_RESERVATION_RELEASED),
+            P::SHARED_FORWARD_RELEASED => has(P::NAT_PIN_RELEASED),
+            P::SHARED_REVERSE_RELEASED => has(P::SHARED_FORWARD_RELEASED),
+            P::SHARED_NAT_RELEASED => has(P::SHARED_REVERSE_RELEASED),
+            P::SHARED_FORWARD_WIRE_RELEASED => has(P::SHARED_NAT_RELEASED),
+            P::SHARED_INDEX_RELEASED => has(P::SHARED_FORWARD_WIRE_RELEASED),
+            P::DIRECTORY_PENDING_REMOVED => has(P::SHARED_INDEX_RELEASED),
+            P::WAITERS_REFUSED => has(P::DIRECTORY_PENDING_REMOVED),
+            P::ROLLBACK_GO_COMPLETION_QUEUED => has(P::WAITERS_REFUSED),
+            P::ROLLBACK_D11_ACKED_AND_SLAB_RELEASED => {
+                has(P::ROLLBACK_GO_COMPLETION_QUEUED)
+            }
+            P::UNCERTAIN_DIRECTORY_DENIED => true,
+            P::UNCERTAIN_WAITERS_REFUSED => has(P::UNCERTAIN_DIRECTORY_DENIED),
+            P::UNCERTAIN_GO_COMPLETION_QUEUED => has(P::UNCERTAIN_WAITERS_REFUSED),
+            P::UNCERTAIN_D11_ACKED_AND_SLAB_RELEASED => {
+                has(P::UNCERTAIN_GO_COMPLETION_QUEUED)
+            }
+            _ => return false,
+        };
+        let phase_and_proof_valid = match bit {
+            P::WRITE_RESULT_STORED => true,
+            P::LOCAL_PAIR_COMMITTED
+            | P::NAT_HOLDER_COMMITTED
+            | P::SHARED_FORWARD_COMMITTED
+            | P::SHARED_REVERSE_COMMITTED
+            | P::SHARED_NAT_COMMITTED
+            | P::SHARED_FORWARD_WIRE_COMMITTED
+            | P::SHARED_INDEX_COMMITTED
+            | P::DIRECTORY_LIVE
+            | P::REVERSE_WAKE_COMPLETE
+            | P::GO_COMPLETION_QUEUED
+            | P::D11_ACKED_AND_SLAB_RELEASED => {
+                self.phase == ProvisionalPhase::Committing && self.written_proof_valid()
+            }
+            P::LOCAL_CAPACITY_RELEASED
+            | P::LOCAL_KEY_RELEASED
+            | P::LOCAL_ALIAS_RELEASED
+            | P::NAT_RESERVATION_RELEASED
+            | P::NAT_PIN_RELEASED
+            | P::SHARED_FORWARD_RELEASED
+            | P::SHARED_REVERSE_RELEASED
+            | P::SHARED_NAT_RELEASED
+            | P::SHARED_FORWARD_WIRE_RELEASED
+            | P::SHARED_INDEX_RELEASED
+            | P::DIRECTORY_PENDING_REMOVED
+            | P::WAITERS_REFUSED
+            | P::ROLLBACK_GO_COMPLETION_QUEUED
+            | P::ROLLBACK_D11_ACKED_AND_SLAB_RELEASED => {
+                self.phase == ProvisionalPhase::RollingBack && self.definitive_no_write()
+            }
+            P::UNCERTAIN_DIRECTORY_DENIED
+            | P::UNCERTAIN_WAITERS_REFUSED
+            | P::UNCERTAIN_GO_COMPLETION_QUEUED
+            | P::UNCERTAIN_D11_ACKED_AND_SLAB_RELEASED => {
+                self.phase == ProvisionalPhase::UncertainDenied
+            }
+            _ => false,
+        };
+        prerequisite_present && phase_and_proof_valid
+    }
 }
 
 /// Bounded shared journal for verdict-issued handles. Bounded by the
@@ -774,8 +1153,9 @@ impl ProvisionalJournal {
         Some(token)
     }
 
-    /// Owner-only transition; `false` on wrong owner/generation or unknown
-    /// token.
+    /// Owner-only, proof-checked phase transition; `false` on wrong
+    /// owner/generation, unknown token, illegal skip, or insufficient proof.
+    /// Terminal state is immutable; repeating the current phase is idempotent.
     pub(crate) fn transition(
         &self,
         token: u64,
@@ -783,21 +1163,208 @@ impl ProvisionalJournal {
         owner_generation: u64,
         phase: ProvisionalPhase,
     ) -> bool {
+        self.update_owned(token, owner_worker, owner_generation, |rec| {
+            if !rec.can_transition_to(phase) {
+                return false;
+            }
+            if rec.phase == phase {
+                return true;
+            }
+            if phase == ProvisionalPhase::RollingBack {
+                let cause = rec.rollback_cause.unwrap_or_else(|| {
+                    if rec.result == Some(ProvisionalWriteResult::NothingWritten) {
+                        ProvisionalRollbackCause::DefinitiveNoWrite
+                    } else {
+                        ProvisionalRollbackCause::PreWriteCancel
+                    }
+                });
+                if rec.rollback_cause.is_some_and(|existing| existing != cause) {
+                    return false;
+                }
+                if rec.result.is_none() {
+                    rec.result = Some(ProvisionalWriteResult::NothingWritten);
+                    rec.progress.set(ProvisionalProgress::WRITE_RESULT_STORED);
+                }
+                rec.rollback_cause = Some(cause);
+            }
+            rec.phase = phase;
+            true
+        })
+    }
+
+    fn update_owned(
+        &self,
+        token: u64,
+        owner_worker: u32,
+        owner_generation: u64,
+        update: impl FnOnce(&mut ProvisionalRecord) -> bool,
+    ) -> bool {
         let mut records = self.records.lock().unwrap_or_else(|e| e.into_inner());
         match records.get_mut(&token) {
             Some(rec)
                 if rec.owner_worker == owner_worker && rec.owner_generation == owner_generation =>
             {
-                rec.phase = phase;
-                true
+                update(rec)
             }
             _ => false,
         }
     }
 
-    /// Close through the journal CAS (owner or reaper with matching identity).
+    /// Store the exact D11 output slab proof once. Repeating the same proof is
+    /// idempotent; a conflicting proof or wrong owner/generation is refused.
+    pub(crate) fn store_proof(
+        &self,
+        token: u64,
+        owner_worker: u32,
+        owner_generation: u64,
+        proof: ProvisionalOutputProof,
+    ) -> bool {
+        self.update_owned(token, owner_worker, owner_generation, |rec| {
+            if rec.proof == Some(proof) {
+                return true;
+            }
+            if rec.phase != ProvisionalPhase::Prepared || rec.proof.is_some() {
+                return false;
+            }
+            rec.proof = Some(proof);
+            if rec.proof_is_bound() {
+                true
+            } else {
+                rec.proof = None;
+                false
+            }
+        })
+    }
+
+    /// Store the writer disposition once; a conflicting second result is
+    /// rejected. The progress bit follows the visible result write.
+    pub(crate) fn store_write_result(
+        &self,
+        token: u64,
+        owner_worker: u32,
+        owner_generation: u64,
+        result: ProvisionalWriteResult,
+    ) -> bool {
+        self.update_owned(token, owner_worker, owner_generation, |rec| {
+            if rec.result == Some(result) {
+                rec.progress.set(ProvisionalProgress::WRITE_RESULT_STORED);
+                return true;
+            }
+            if rec.result.is_some()
+                || rec.phase != ProvisionalPhase::WriteStarted
+                || rec.phase.is_terminal()
+            {
+                return false;
+            }
+            rec.result = Some(result);
+            rec.progress.set(ProvisionalProgress::WRITE_RESULT_STORED);
+            true
+        })
+    }
+
+    /// Record a pre-write cancellation or definitive writer no-write result.
+    /// Pre-write cancellation persists a typed NothingWritten disposition so
+    /// the rollback progress record is independently recoverable.
+    pub(crate) fn store_rollback_cause(
+        &self,
+        token: u64,
+        owner_worker: u32,
+        owner_generation: u64,
+        cause: ProvisionalRollbackCause,
+    ) -> bool {
+        self.update_owned(token, owner_worker, owner_generation, |rec| {
+            if rec.rollback_cause == Some(cause) {
+                return true;
+            }
+            if rec.rollback_cause.is_some() {
+                return false;
+            }
+            match (rec.phase, cause, rec.result) {
+                (
+                    ProvisionalPhase::Prepared,
+                    ProvisionalRollbackCause::PreWriteCancel,
+                    None | Some(ProvisionalWriteResult::NothingWritten),
+                ) => {
+                    rec.result = Some(ProvisionalWriteResult::NothingWritten);
+                    rec.progress.set(ProvisionalProgress::WRITE_RESULT_STORED);
+                    rec.rollback_cause = Some(cause);
+                    true
+                }
+                (
+                    ProvisionalPhase::WriteStarted,
+                    ProvisionalRollbackCause::DefinitiveNoWrite,
+                    Some(ProvisionalWriteResult::NothingWritten),
+                )
+                | (
+                    ProvisionalPhase::RollingBack,
+                    ProvisionalRollbackCause::DefinitiveNoWrite,
+                    Some(ProvisionalWriteResult::NothingWritten),
+                ) => {
+                    rec.rollback_cause = Some(cause);
+                    true
+                }
+                _ => false,
+            }
+        })
+    }
+
+    /// Set one effect bit after that effect is externally visible. The phase,
+    /// proof/result, and predecessor bit are checked; repeating an already-set
+    /// bit is idempotent.
+    pub(crate) fn mark_progress(
+        &self,
+        token: u64,
+        owner_worker: u32,
+        owner_generation: u64,
+        bit: u64,
+    ) -> bool {
+        self.update_owned(token, owner_worker, owner_generation, |rec| {
+            if rec.progress.has(bit) {
+                return true;
+            }
+            if !rec.can_mark_progress(bit) {
+                return false;
+            }
+            rec.progress.set(bit);
+            true
+        })
+    }
+
+    /// Save the normal plan-expiry instant before q0. Zero is rejected rather
+    /// than being an ambiguous sentinel; only the same value may be replayed.
+    pub(crate) fn set_plan_expiry(
+        &self,
+        token: u64,
+        owner_worker: u32,
+        owner_generation: u64,
+        expiry_ns: u64,
+    ) -> bool {
+        self.update_owned(token, owner_worker, owner_generation, |rec| {
+            if rec.plan_expiry_ns == Some(expiry_ns) {
+                return true;
+            }
+            if rec.phase != ProvisionalPhase::Prepared
+                || rec.plan_expiry_ns.is_some()
+                || expiry_ns == 0
+            {
+                return false;
+            }
+            rec.plan_expiry_ns = Some(expiry_ns);
+            true
+        })
+    }
+
+    /// Close only after terminal effects and D11 slab ownership are accounted.
+    /// Nonterminal recovery tracks remain available to their owner/reaper.
     pub(crate) fn close(&self, token: u64) -> Option<ProvisionalRecord> {
-        self.records.lock().unwrap_or_else(|e| e.into_inner()).remove(&token)
+        let mut records = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        if !records
+            .get(&token)
+            .is_some_and(ProvisionalProgress::record_can_close)
+        {
+            return None;
+        }
+        records.remove(&token)
     }
 
     pub(crate) fn get(&self, token: u64, owner_worker: u32, owner_generation: u64) -> Option<ProvisionalRecord> {
@@ -1460,17 +2027,52 @@ impl IpsecInnerWorkerTransport {
     }
 }
 
-/// Reaper handling of one journal record left by a dead worker: Prepared rolls
-/// back exactly once; WriteStarted/Committed is conservatively finalized as
-/// committed (q0 may have emitted) and NEVER blindly rolled back.
+/// Reaper classification of one journal record left by a dead worker.
+/// `WriteStarted` without a stored definitive result is possible emission and
+/// MUST fail closed as `UncertainDenied`, never be guessed committed or safe
+/// to roll back. Commit requires byte-matched `Written` proof; rollback
+/// requires definitive no-write/pre-write-cancel evidence.
 pub(crate) fn reap_provisional_record(record: &ProvisionalRecord) -> ProvisionalPhase {
     IPSEC_INNER_ORPHAN_PROVISIONAL_TOTAL.fetch_add(1, Ordering::Relaxed);
+    if record.phase.is_terminal() {
+        return record.phase;
+    }
     match record.phase {
-        ProvisionalPhase::Prepared => ProvisionalPhase::RolledBack,
-        ProvisionalPhase::WriteStarted | ProvisionalPhase::Committed => {
-            ProvisionalPhase::Committed
+        ProvisionalPhase::Prepared => match record.result {
+            None | Some(ProvisionalWriteResult::NothingWritten)
+                if record.definitive_no_write() =>
+            {
+                ProvisionalPhase::RollingBack
+            }
+            _ => ProvisionalPhase::UncertainDenied,
+        },
+        ProvisionalPhase::WriteStarted => match record.result {
+            Some(ProvisionalWriteResult::Written { .. }) if record.written_proof_valid() => {
+                ProvisionalPhase::Committing
+            }
+            Some(ProvisionalWriteResult::NothingWritten) => ProvisionalPhase::RollingBack,
+            Some(ProvisionalWriteResult::Written { .. })
+            | Some(ProvisionalWriteResult::Transferred)
+            | Some(ProvisionalWriteResult::Uncertain)
+            | None => ProvisionalPhase::UncertainDenied,
+        },
+        ProvisionalPhase::Committing => {
+            if record.written_proof_valid() {
+                ProvisionalPhase::Committing
+            } else {
+                ProvisionalPhase::UncertainDenied
+            }
         }
-        ProvisionalPhase::RolledBack => ProvisionalPhase::RolledBack,
+        ProvisionalPhase::RollingBack => {
+            if record.definitive_no_write() {
+                ProvisionalPhase::RollingBack
+            } else {
+                ProvisionalPhase::UncertainDenied
+            }
+        }
+        ProvisionalPhase::Committed
+        | ProvisionalPhase::RolledBack
+        | ProvisionalPhase::UncertainDenied => record.phase,
     }
 }
 
@@ -2039,6 +2641,11 @@ mod tests {
                 phase: ProvisionalPhase::Prepared,
                 request_ids: vec![1],
                 generation: 1,
+                proof: None,
+                result: None,
+                rollback_cause: None,
+                progress: ProvisionalProgress::default(),
+                plan_expiry_ns: None,
             })
             .expect("bounded");
         let started = journal
@@ -2048,22 +2655,69 @@ mod tests {
                 phase: ProvisionalPhase::WriteStarted,
                 request_ids: vec![2],
                 generation: 1,
+                proof: None,
+                result: None,
+                rollback_cause: None,
+                progress: ProvisionalProgress::default(),
+                plan_expiry_ns: None,
             })
             .expect("bounded");
         // Wrong owner cannot transition.
         assert!(!journal.transition(prepared, 1, 1, ProvisionalPhase::Committed));
         assert!(journal.transition(prepared, 0, 1, ProvisionalPhase::Prepared));
-        // Reaper: Prepared rolls back; WriteStarted conservatively commits.
-        let rec = journal.close(prepared).unwrap();
-        assert_eq!(reap_provisional_record(&rec), ProvisionalPhase::RolledBack);
-        let rec = journal.close(started).unwrap();
-        assert_eq!(reap_provisional_record(&rec), ProvisionalPhase::Committed);
+        // Prepared enters rollback; WriteStarted without a result stays denied.
+        let rec = journal.get(prepared, 0, 1).unwrap();
+        assert_eq!(reap_provisional_record(&rec), ProvisionalPhase::RollingBack);
+        assert!(journal.transition(prepared, 0, 1, ProvisionalPhase::RollingBack));
+        assert!(
+            journal.close(prepared).is_none(),
+            "nonterminal rollback work must remain journaled"
+        );
+        let rec = journal.get(started, 0, 1).unwrap();
+        assert_eq!(reap_provisional_record(&rec), ProvisionalPhase::UncertainDenied);
+        assert!(journal.transition(started, 0, 1, ProvisionalPhase::UncertainDenied));
+        for bit in [
+            ProvisionalProgress::UNCERTAIN_DIRECTORY_DENIED,
+            ProvisionalProgress::UNCERTAIN_WAITERS_REFUSED,
+            ProvisionalProgress::UNCERTAIN_GO_COMPLETION_QUEUED,
+            ProvisionalProgress::UNCERTAIN_D11_ACKED_AND_SLAB_RELEASED,
+        ] {
+            assert!(journal.mark_progress(started, 0, 1, bit));
+        }
+        assert!(journal.close(started).is_some());
         assert_eq!(
             IPSEC_INNER_ORPHAN_PROVISIONAL_TOTAL.load(Ordering::Relaxed) - before,
             2
         );
-        assert_eq!(journal.len(), 0);
+        assert_eq!(journal.len(), 1);
     }
+    #[test]
+    fn write_started_with_written_result_reaps_to_committing() {
+        let mut progress = ProvisionalProgress::default();
+        progress.set(ProvisionalProgress::WRITE_RESULT_STORED);
+        let record = ProvisionalRecord {
+            owner_worker: 0,
+            owner_generation: 1,
+            phase: ProvisionalPhase::WriteStarted,
+            request_ids: vec![2],
+            generation: 1,
+            proof: Some(ProvisionalOutputProof {
+                slab_id: 3,
+                expected_output_bytes: 96,
+                request_id: 2,
+            }),
+            result: Some(ProvisionalWriteResult::Written { output_bytes: 96 }),
+            rollback_cause: None,
+            progress,
+            plan_expiry_ns: Some(100),
+        };
+        assert_eq!(
+            reap_provisional_record(&record),
+            ProvisionalPhase::Committing,
+            "a reaper must resume commit effects, not declare them complete"
+        );
+    }
+
 
     #[test]
     fn owner_routing_is_stable_per_flow() {

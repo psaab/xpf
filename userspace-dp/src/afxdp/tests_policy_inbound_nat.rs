@@ -1256,3 +1256,73 @@ fn injected_mapped_ipv6_packet_hits_ingress_identity_gate_10686() {
     assert_eq!(dbg.tx, 0);
     assert_eq!(sessions.len(), 0);
 }
+
+#[test]
+fn pending_pmech_reverse_holds_and_replays_on_arrival_binding() {
+    let forwarding = build_forwarding_state(&v4_source_deny_then_any_snapshot_10686());
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    let mut sessions = SessionTable::new();
+    let src: Ipv6Addr = "2001:559:8585:ef00::100".parse().unwrap();
+    let dst: Ipv6Addr = "2001:559:8585:ef00::102".parse().unwrap();
+    let (frame, meta) = udp_v6_ingress_frame_10686(src, dst, TEST_WAN_MAC);
+    let packet_key = SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_UDP,
+        src_ip: IpAddr::V6(src),
+        dst_ip: IpAddr::V6(dst),
+        src_port: 49_152,
+        dst_port: 53,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    let directory = crate::session::PMechSessionDirectory::global();
+    let owner_generation = 95_006_106;
+    let token = directory
+        .reserve_claims(
+            owner_generation,
+            u64::MAX,
+            &[crate::session::PMechClaimSpec::new(
+                crate::session::normalized_reply_alias_key(&packet_key),
+                crate::session::PMechClaimKind::PendingPlainAlias,
+                crate::session::PMechDirection::Reverse,
+            )],
+        )
+        .expect("plain reply alias reserved");
+    let deliveries: Arc<
+        arc_swap::ArcSwap<
+            std::collections::BTreeMap<i32, crate::afxdp::tunnel::LocalTunnelDelivery>,
+        >,
+    > = Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::BTreeMap::new()));
+
+    let (batch, dbg) = txn_run_descriptor_with_injected(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        (frame.clone(), meta),
+        &deliveries,
+    );
+    assert_eq!(batch.validated_packets, 1);
+    assert_eq!(dbg.tx, 0);
+    assert_eq!(sessions.len(), 0);
+    assert_eq!(binding.pending_pmech_reverse.len(), 1);
+    assert_eq!(binding.pending_pmech_reverse[0].token, token);
+    let held_addr = binding.pending_pmech_reverse[0].desc.addr;
+
+    assert!(directory.mark_live(token, owner_generation, 101, 102));
+    assert_eq!(binding.pending_pmech_reverse[0].desc.addr, held_addr);
+    let waiters = directory.take_waiters(token, owner_generation);
+    assert_eq!(waiters.len(), 1);
+    assert_eq!(waiters[0], binding.pending_pmech_reverse[0].waiter);
+    let _ = txn_run_descriptor_with_injected(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        (frame, meta),
+        &deliveries,
+    );
+    assert!(binding.pending_pmech_reverse.is_empty());
+    assert!(directory.remove_token(token, owner_generation));
+}

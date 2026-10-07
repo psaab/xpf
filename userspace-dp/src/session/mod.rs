@@ -55,7 +55,7 @@ pub(crate) const IPSEC_INNER_ALIAS_BUCKET_BOUND: usize = 8;
 /// candidates already live in `nat_reverse_index` and are merged at lookup.
 type SeededReplyAliasIndex = HashMap<SessionKey, NatIndexBucket, FxSeededState>;
 
-fn normalized_reply_alias_key(key: &SessionKey) -> SessionKey {
+pub(crate) fn normalized_reply_alias_key(key: &SessionKey) -> SessionKey {
     SessionKey {
         discriminator: TunnelDiscriminator::None,
         routing_domain: 0,
@@ -63,7 +63,7 @@ fn normalized_reply_alias_key(key: &SessionKey) -> SessionKey {
     }
 }
 
-fn ipsec_reply_alias_keys(key: &SessionKey, nat: NatDecision) -> SmallVec<[SessionKey; 2]> {
+pub(crate) fn ipsec_reply_alias_keys(key: &SessionKey, nat: NatDecision) -> SmallVec<[SessionKey; 2]> {
     let mut aliases = SmallVec::new();
     aliases.push(normalized_reply_alias_key(&reverse_wire_key(key, nat)));
     let canonical = normalized_reply_alias_key(&reverse_canonical_key(key, nat));
@@ -144,6 +144,7 @@ type SeededBareTupleIndex = HashMap<BareSessionTuple, BareTupleHandleBucket, FxS
 // at pub(crate) keeps the existing crate::session::* surface intact.
 mod discriminator;
 mod key;
+mod pmech_directory;
 pub(crate) mod pptp;
 pub(crate) mod pptp_control;
 // #7188: `WireDiscriminator` is exported alongside the class enum because the
@@ -155,6 +156,7 @@ pub(crate) use discriminator::{TunnelDiscriminator, WireDiscriminator};
 // decode — #7188's shape, for #7188's reason.
 mod routing_domain_wire;
 pub(crate) use key::*;
+pub(crate) use pmech_directory::*;
 pub(crate) use routing_domain_wire::{
     AMBIGUOUS_FABRIC_DOMAIN_BASE, QUARANTINED_ROUTING_DOMAIN,
     // #9546: named at the crate level so the conntrack mirror states absence
@@ -700,6 +702,7 @@ macro_rules! debug_log {
 mod expire;
 mod install;
 mod lookup;
+pub(crate) use install::PMechInstallPlan;
 // #7342: the read path's close/promotion signal bundle, applied to the
 // forward<->reverse companion by `propagate_tcp_state_to_companion` below.
 pub(crate) use lookup::{ExportWalkOutcome, IpsecReplyAliasLookup};
@@ -1323,6 +1326,22 @@ pub(crate) struct PressureShedSession {
 
 pub(crate) type PressureShedSessions = SmallVec<[PressureShedSession; 2]>;
 
+#[derive(Clone)]
+struct PMechReservationRecord {
+    owner_worker: u32,
+    owner_generation: u64,
+    plan_expiry_ns: u64,
+    forward_key: SessionKey,
+    reverse_key: SessionKey,
+    reserved_slots: usize,
+    session_ids: [u64; 2],
+    install_epochs: [u64; 2],
+    counted_limit: bool,
+    ingress_zone: u16,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+}
+
 pub(crate) struct SessionTable {
     /// #7699: the PPTP call associations THIS worker can resolve.
     ///
@@ -1417,6 +1436,8 @@ pub(crate) struct SessionTable {
     deltas: VecDeque<SessionDelta>,
     last_gc_ns: u64,
     max_sessions: usize,
+    /// Raw session slots reserved by an outstanding IPsec install plan.
+    reserved_session_slots: usize,
     timeouts: SessionTimeouts,
     /// #3527: per-screened-zone override of the global half-open
     /// (`tcp_opening_ns`) TCP timeout window, keyed by ingress zone id. Built
@@ -1623,6 +1644,14 @@ pub(crate) struct SessionTable {
     /// replicas and transient local seeds do not.
     /// Evicted at zero so the map is bounded by distinct live (zone, IP) pairs.
     session_limit_src_counts: SeededZoneIpMap<u32>,
+    /// PMech reservations participate in the same per-source limits as live
+    /// forward sessions, so a pending install cannot overbook a configured cap.
+    session_limit_src_reserved_counts: SeededZoneIpMap<u32>,
+    /// Destination-side reservation mirror, maintained only when enabled.
+    session_limit_dst_reserved_counts: SeededZoneIpMap<u32>,
+    /// Token-indexed local half of the PMech reservation. The shared directory
+    /// owns packet-path claims; this per-worker map owns table capacity.
+    pmech_reservations: FxHashMap<u64, PMechReservationRecord>,
     /// #2134/#10985/#11057: optional per-(ingress-zone, destination-IP)
     /// mirror, maintained only when destination-session limits are configured.
     session_limit_dst_counts: SeededZoneIpMap<u32>,
@@ -1736,6 +1765,7 @@ impl SessionTable {
             deltas: VecDeque::with_capacity(MAX_SESSION_DELTAS.min(256)),
             last_gc_ns: 0,
             max_sessions: DEFAULT_MAX_SESSIONS,
+            reserved_session_slots: 0,
             timeouts: SessionTimeouts::default(),
             // #3527: empty until a forwarding snapshot with a per-zone
             // syn-flood timeout is applied via `set_opening_overrides`.
@@ -1766,6 +1796,9 @@ impl SessionTable {
             // ingress-zone ID, so use the seeded hasher.
             session_limit_src_counts: HashMap::with_hasher(state.clone()),
             session_limit_dst_counts: HashMap::with_hasher(state.clone()),
+            session_limit_src_reserved_counts: HashMap::with_hasher(state.clone()),
+            session_limit_dst_reserved_counts: HashMap::with_hasher(state.clone()),
+            pmech_reservations: FxHashMap::default(),
             // #9901 (F-077): the error-budget side table is keyed by the
             // attacker-influenced matched key — seed it too.
             icmp_error_side_tats: HashMap::with_hasher(state),
@@ -2487,6 +2520,7 @@ impl SessionTable {
     pub fn set_session_limit_active(&mut self, active: bool) {
         if !active {
             self.session_limit_dst_counts.clear();
+            self.session_limit_dst_reserved_counts.clear();
         } else if !self.session_limit_active {
             for (key, handle) in &self.key_to_handle {
                 if let Some(record) = self.entries.get(*handle as usize) {
@@ -2502,6 +2536,15 @@ impl SessionTable {
                     }
                 }
             }
+            for reservation in self.pmech_reservations.values() {
+                if reservation.counted_limit {
+                    let c = self
+                        .session_limit_dst_reserved_counts
+                        .entry((reservation.ingress_zone, reservation.dst_ip))
+                        .or_insert(0);
+                    *c = c.saturating_add(1);
+                }
+            }
         }
         self.session_limit_active = active;
     }
@@ -2515,6 +2558,12 @@ impl SessionTable {
             .get(&(ingress_zone, ip))
             .copied()
             .unwrap_or(0)
+            .saturating_add(
+                self.session_limit_src_reserved_counts
+                    .get(&(ingress_zone, ip))
+                    .copied()
+                    .unwrap_or(0),
+            )
     }
 
     /// #2134/#10985: non-mutating read of the live count for one destination
@@ -2525,8 +2574,13 @@ impl SessionTable {
             .get(&(ingress_zone, ip))
             .copied()
             .unwrap_or(0)
+            .saturating_add(
+                self.session_limit_dst_reserved_counts
+                    .get(&(ingress_zone, ip))
+                    .copied()
+                    .unwrap_or(0),
+            )
     }
-
     /// #2134/#3122/#10310/#10985/#11057: increment the always-on source count
     /// and, when enabled, the optional destination count for a freshly
     /// counted session. Caller MUST have evaluated the shared counted-class

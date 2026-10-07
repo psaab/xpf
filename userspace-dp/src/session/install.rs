@@ -1,3 +1,15 @@
+fn decrement_reserved_count(
+    counts: &mut SeededZoneIpMap<u32>,
+    key: (u16, IpAddr),
+) {
+    let Some(count) = counts.get_mut(&key) else {
+        return;
+    };
+    *count = count.saturating_sub(1);
+    if *count == 0 {
+        counts.remove(&key);
+    }
+}
 // Install flow + capacity limits (#2005 pure code-motion split of
 // session/mod.rs). The session-creation paths and their pre-flight
 // admission live here: the #1861 capacity preflight/counter accessors
@@ -44,6 +56,18 @@ pub(crate) fn session_limit_origin_counted(origin: SessionOrigin) -> bool {
     )
 }
 
+/// Inputs needed to reserve an IPsec install's exact and normalized reply
+/// keys before any external write begins.
+pub(crate) struct PMechInstallPlan {
+    pub(crate) forward_key: SessionKey,
+    pub(crate) decision: SessionDecision,
+    pub(crate) metadata: SessionMetadata,
+    pub(crate) owner_worker: u32,
+    pub(crate) owner_generation: u64,
+    pub(crate) plan_expiry_ns: u64,
+}
+
+
 impl SessionTable {
     /// #1861 §5.1: pre-flight admission for an install group of `needed`
     /// new entries within ONE descriptor iteration. The table is
@@ -59,8 +83,206 @@ impl SessionTable {
     /// itself fails, violating the post-preflight infallibility contract.
     #[inline]
     pub fn can_admit(&self, needed: usize) -> bool {
-        self.len().saturating_add(needed) <= self.max_sessions
+        self.len()
+            .saturating_add(self.reserved_session_slots)
+            .saturating_add(needed)
+            <= self.max_sessions
     }
+    /// Reserve both local session slots and every key that can identify an
+    /// IPsec forward/reverse/NAT half before an external install write starts.
+    pub(crate) fn reserve_ipsec_install(
+        &mut self,
+        plan: PMechInstallPlan,
+    ) -> Result<u64, PMechReserveError> {
+        let PMechInstallPlan {
+            forward_key,
+            decision,
+            metadata,
+            owner_worker,
+            owner_generation,
+            plan_expiry_ns,
+        } = plan;
+        if metadata.is_reverse
+            || plan_expiry_ns == 0
+            || !matches!(forward_key.discriminator, TunnelDiscriminator::Ipsec(if_id) if if_id != 0)
+        {
+            return Err(PMechReserveError::InvalidPlan);
+        }
+
+        let nat = decision.nat;
+        let reverse_key = reverse_session_key(&forward_key, nat);
+        if self.key_to_handle.contains_key(&forward_key)
+            || self.key_to_handle.contains_key(&reverse_key)
+        {
+            return Err(PMechReserveError::Conflict { key: forward_key });
+        }
+        if !self.can_admit(2) || !self.can_index_reply_alias(&forward_key, nat, false, None) {
+            return Err(PMechReserveError::CapacityExceeded);
+        }
+
+        let mut specs: SmallVec<[PMechClaimSpec; 8]> = SmallVec::new();
+        let mut add_spec = |key: SessionKey, kind, direction| {
+            if specs.iter().any(|spec: &PMechClaimSpec| {
+                spec.key == key && spec.kind == kind && spec.direction == direction
+            }) {
+                return Ok(());
+            }
+            if specs.iter().any(|spec| spec.key == key) {
+                return Err(PMechReserveError::Conflict { key });
+            }
+            specs.push(PMechClaimSpec::new(key, kind, direction));
+            Ok(())
+        };
+        add_spec(
+            forward_key.clone(),
+            PMechClaimKind::Pending,
+            PMechDirection::Forward,
+        )?;
+        add_spec(
+            forward_wire_key(&forward_key, nat),
+            PMechClaimKind::Pending,
+            PMechDirection::Forward,
+        )?;
+        add_spec(
+            translated_session_key(&forward_key, nat),
+            PMechClaimKind::Pending,
+            PMechDirection::Forward,
+        )?;
+        add_spec(
+            reverse_key.clone(),
+            PMechClaimKind::Pending,
+            PMechDirection::Reverse,
+        )?;
+        add_spec(
+            reverse_wire_key(&forward_key, nat),
+            PMechClaimKind::Pending,
+            PMechDirection::Reverse,
+        )?;
+        add_spec(
+            reverse_canonical_key(&forward_key, nat),
+            PMechClaimKind::Pending,
+            PMechDirection::Reverse,
+        )?;
+        for alias in ipsec_reply_alias_keys(&forward_key, nat) {
+            add_spec(alias, PMechClaimKind::PendingPlainAlias, PMechDirection::Reverse)?;
+        }
+
+        let token = PMechSessionDirectory::global().reserve_claims(
+            owner_generation,
+            plan_expiry_ns,
+            &specs,
+        )?;
+        let session_ids = [self.alloc_session_id(), self.alloc_session_id()];
+        let install_epochs = [self.next_epoch(), self.next_epoch()];
+        self.reserved_session_slots = self.reserved_session_slots.saturating_add(2);
+        let counted_limit = session_limit_origin_counted(SessionOrigin::ForwardFlow);
+        let ingress_zone = metadata.ingress_zone;
+        let src_ip = forward_key.src_ip;
+        let dst_ip = forward_key.dst_ip;
+        if counted_limit {
+            let src = self
+                .session_limit_src_reserved_counts
+                .entry((ingress_zone, src_ip))
+                .or_insert(0);
+            *src = src.saturating_add(1);
+            if self.session_limit_active {
+                let dst = self
+                    .session_limit_dst_reserved_counts
+                    .entry((ingress_zone, dst_ip))
+                    .or_insert(0);
+                *dst = dst.saturating_add(1);
+            }
+        }
+        self.pmech_reservations.insert(
+            token,
+            PMechReservationRecord {
+                owner_worker,
+                owner_generation,
+                plan_expiry_ns,
+                forward_key,
+                reverse_key,
+                reserved_slots: 2,
+                session_ids,
+                install_epochs,
+                counted_limit,
+                ingress_zone,
+                src_ip,
+                dst_ip,
+            },
+        );
+        Ok(token)
+    }
+
+    /// Verify a reservation is still owned by this worker generation and
+    /// Pending before the transaction's first externally visible write.
+    pub(crate) fn pre_write_check_pmech(
+        &self,
+        token: u64,
+        owner_worker: u32,
+        owner_generation: u64,
+        now_ns: u64,
+    ) -> bool {
+        let Some(reservation) = self.pmech_reservations.get(&token) else {
+            return false;
+        };
+        reservation.owner_worker == owner_worker
+            && reservation.owner_generation == owner_generation
+            && now_ns < reservation.plan_expiry_ns
+            && reservation.reserved_slots == 2
+            && reservation.session_ids[0] != 0
+            && reservation.session_ids[1] != 0
+            && reservation.session_ids[0] != reservation.session_ids[1]
+            && reservation.install_epochs[0] != reservation.install_epochs[1]
+            && !reservation.forward_key.eq(&reservation.reverse_key)
+            && matches!(
+                PMechSessionDirectory::global().probe_token(token),
+                PMechTokenProbe::Pending { owner_generation: generation }
+                    if generation == owner_generation
+            )
+    }
+
+    /// Release local capacity and shared packet-key claims for a plan proven
+    /// not to have started any external write.
+    pub(crate) fn cancel_ipsec_install(
+        &mut self,
+        token: u64,
+        owner_worker: u32,
+        owner_generation: u64,
+    ) -> bool {
+        let Some(reservation) = self.pmech_reservations.get(&token) else {
+            return false;
+        };
+        if reservation.owner_worker != owner_worker
+            || reservation.owner_generation != owner_generation
+            || !matches!(
+                PMechSessionDirectory::global().probe_token(token),
+                PMechTokenProbe::Pending { owner_generation: generation }
+                    if generation == owner_generation
+            )
+            || !PMechSessionDirectory::global().remove_token(token, owner_generation)
+        {
+            return false;
+        }
+        let reservation = self
+            .pmech_reservations
+            .remove(&token)
+            .expect("reservation was checked above");
+        self.reserved_session_slots = self
+            .reserved_session_slots
+            .saturating_sub(reservation.reserved_slots);
+        if reservation.counted_limit {
+            decrement_reserved_count(
+                &mut self.session_limit_src_reserved_counts,
+                (reservation.ingress_zone, reservation.src_ip),
+            );
+            decrement_reserved_count(
+                &mut self.session_limit_dst_reserved_counts,
+                (reservation.ingress_zone, reservation.dst_ip),
+            );
+        }
+        true
+    }
+
     /// #10890: preflight an already-validated TCP initial SYN. At 90% of this
     /// worker's cap, reclaim handshake-incomplete local TCP sessions first;
     /// established and peer-owned sessions are never pressure victims. The
@@ -264,7 +486,20 @@ impl SessionTable {
         protocol: u8,
         tcp_flags: u8,
     ) -> bool {
-        if self.len() >= self.max_sessions {
+        if self
+            .len()
+            .saturating_add(self.reserved_session_slots)
+            >= self.max_sessions
+        {
+            self.create_drops = self.create_drops.saturating_add(1);
+            return false;
+        }
+        if PMechSessionDirectory::global().conflicts_with_install(
+            &key,
+            decision.nat,
+            metadata.is_reverse,
+            None,
+        ) {
             self.create_drops = self.create_drops.saturating_add(1);
             return false;
         }
@@ -591,6 +826,19 @@ impl SessionTable {
         if matches!(self.entry_by_key(&key), Some(existing) if !existing.origin.is_peer_synced())
             && !allow_replace_local
         {
+            return false;
+        }
+        if !self.key_to_handle.contains_key(&key)
+            && self.len().saturating_add(self.reserved_session_slots) >= self.max_sessions
+        {
+            return false;
+        }
+        if PMechSessionDirectory::global().conflicts_with_install(
+            &key,
+            decision.nat,
+            metadata.is_reverse,
+            None,
+        ) {
             return false;
         }
         // Sync sweeps re-send snapshots, not activity. Preserve the inactivity

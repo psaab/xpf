@@ -1,6 +1,6 @@
 use super::*;
 use std::collections::{HashMap, HashSet};
-use crate::session::{BareSessionTuple, SessionScope};
+use crate::session::{BareSessionTuple, PMechWaiterRef, SessionScope};
 use rustc_hash::FxSeededState;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -288,6 +288,17 @@ pub(super) struct PendingNeighPacket {
     /// fragment-overlap key, which must use the same routing domain as inline
     /// fabric-ingress siblings.
     pub(super) fabric_ingress_zone: Option<u16>,
+}
+
+/// Reverse packet held by its arrival binding until the owning IPsec install
+/// becomes Live. The XDP descriptor remains in this worker's UMEM.
+pub(super) struct PendingPMechReversePacket {
+    pub(super) desc: XdpDesc,
+    pub(super) meta: UserspaceDpMeta,
+    pub(super) waiter: PMechWaiterRef,
+    pub(super) token: u64,
+    pub(super) owner_generation: u64,
+    pub(super) is_injected: bool,
 }
 
 // Compile-time size guard: pending-neighbor retry carries the session key so

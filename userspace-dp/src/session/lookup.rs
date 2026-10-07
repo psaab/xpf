@@ -72,6 +72,7 @@ pub(crate) enum IpsecReplyAliasLookup {
     NativeMiss,
     Unique(ForwardSessionMatch),
     Ambiguous,
+    PMechBlocked(PMechDirectoryProbe),
 }
 
 impl SessionTable {
@@ -610,6 +611,11 @@ impl SessionTable {
     {
         if !matches!(reply_key.discriminator, TunnelDiscriminator::None) {
             return IpsecReplyAliasLookup::NativeMiss;
+        }
+        let pmech_probe =
+            PMechSessionDirectory::global().probe_packet_key(reply_key);
+        if !pmech_probe.is_fallthrough() {
+            return IpsecReplyAliasLookup::PMechBlocked(pmech_probe);
         }
         let probe = normalized_reply_alias_key(reply_key);
         let native_bucket = self.nat_reverse_index.get(&probe);

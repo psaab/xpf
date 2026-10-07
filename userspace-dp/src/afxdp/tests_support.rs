@@ -1435,6 +1435,19 @@ pub(super) fn txn_run_descriptor_with_injected(
     injected: (Vec<u8>, UserspaceDpMeta),
     local_tunnel_deliveries: &Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
 ) -> (BatchCounters, DebugPollCounters) {
+    let expected_live_replays = binding
+        .pending_pmech_reverse
+        .iter()
+        .filter(|held| {
+            matches!(
+                crate::session::PMechSessionDirectory::global().probe_token(held.token),
+                crate::session::PMechTokenProbe::Live {
+                    owner_generation,
+                    ..
+                } if owner_generation == held.owner_generation
+            )
+        })
+        .count();
     let ident = binding.identity();
     let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(binding));
     let mirror_targets = MirrorTargetMap::default();
@@ -1507,7 +1520,13 @@ pub(super) fn txn_run_descriptor_with_injected(
         &worker_ctx,
         &mut telemetry,
     );
-    assert_packet_validated_10646(&batch);
+    if expected_live_replays == 0 {
+        assert_packet_validated_10646(&batch);
+    } else {
+        let expected_packets = expected_live_replays + 1;
+        assert_eq!(batch.metadata_packets as usize, expected_packets);
+        assert_eq!(batch.validated_packets as usize, expected_packets);
+    }
     (batch, dbg)
 }
 

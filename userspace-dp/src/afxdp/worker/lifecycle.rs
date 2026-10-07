@@ -144,7 +144,10 @@ pub(super) fn poll_binding(
             binding.telemetry.dbg_fill_pending = binding.xsk.device.pending();
             binding.telemetry.dbg_device_avail = binding.xsk.device.available();
         }
-        if available == 0 && injected_packet.is_none() {
+        if available == 0
+            && injected_packet.is_none()
+            && binding.pending_pmech_reverse.is_empty()
+        {
             binding.telemetry.dbg_rx_empty += 1;
             maybe_wake_rx(binding, false, now_ns);
             // Check pending neighbor buffer even when RX is empty.
@@ -183,7 +186,9 @@ pub(super) fn poll_binding(
         }
         let ident = ident
             .as_ref()
-            .expect("identity initialized when RX has work");
+            .expect("identity initialized for RX work or PMech replay");
+        let had_injected_packet = injected_packet.is_some();
+        let pending_pmech_before = binding.pending_pmech_reverse.len();
 
         // #945: WorkerContext groups the shared/passed-through references
         // (interior mutability via locks is preserved). TelemetryContext
@@ -238,6 +243,9 @@ pub(super) fn poll_binding(
             &worker_ctx,
             &mut telemetry,
         );
+        if available == 0 {
+            did_work |= binding.pending_pmech_reverse.len() < pending_pmech_before;
+        }
         let mut pending_forwards = core::mem::take(&mut binding.scratch.scratch_forwards);
         let mut rst_teardowns = core::mem::take(&mut binding.scratch.scratch_rst_teardowns);
         for (forward_key, nat) in rst_teardowns.drain(..) {
@@ -345,7 +353,12 @@ pub(super) fn poll_binding(
         }
         let _ = drain_pending_fill(binding, now_ns);
         counters.rx_batches += 1;
-        did_work = true;
+        did_work |= available > 0
+            || had_injected_packet
+            || binding.pending_pmech_reverse.len() < pending_pmech_before;
+        if available == 0 {
+            break;
+        }
     }
     retry_pending_neigh(
         binding,

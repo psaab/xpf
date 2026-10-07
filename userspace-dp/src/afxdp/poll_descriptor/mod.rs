@@ -523,15 +523,59 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
     binding.scratch.scratch_forwards.clear();
     binding.scratch.scratch_rst_teardowns.clear();
     let injected_addr = injected_desc.as_ref().map(|(desc, _)| desc.addr);
-    loop {
-        let (desc, injected_meta) = if let Some((desc, meta)) = injected_desc.take() {
-            (desc, Some(meta))
-        } else if let Some(desc) = received.read() {
-            (desc, None)
-        } else {
+    binding.pending_pmech_replay.clear();
+    binding.scratch.pmech_injected_replay_addrs.clear();
+    let pmech_directory = crate::session::PMechSessionDirectory::global();
+    let pmech_scan_len = binding.pending_pmech_reverse.len();
+    for _ in 0..pmech_scan_len {
+        let Some(held) = binding.pending_pmech_reverse.pop_front() else {
             break;
         };
-        let is_injected = injected_meta.is_some();
+        match pmech_directory.probe_token(held.token) {
+            crate::session::PMechTokenProbe::Pending { owner_generation }
+                if owner_generation == held.owner_generation =>
+            {
+                binding.pending_pmech_reverse.push_back(held);
+            }
+            crate::session::PMechTokenProbe::Live {
+                owner_generation, ..
+            } if owner_generation == held.owner_generation => {
+                let _ = pmech_directory.remove_waiter(
+                    held.token,
+                    held.owner_generation,
+                    held.waiter.arrival_worker_id,
+                    held.waiter.defer_id,
+                );
+                binding.pending_pmech_replay.push_back(held);
+            }
+            _ => {
+                let _ = pmech_directory.remove_waiter(
+                    held.token,
+                    held.owner_generation,
+                    held.waiter.arrival_worker_id,
+                    held.waiter.defer_id,
+                );
+                binding.scratch.scratch_recycle.push(held.desc.addr);
+            }
+        }
+    }
+    loop {
+        let (desc, injected_meta, is_injected) =
+            if let Some(held) = binding.pending_pmech_replay.pop_front() {
+                if held.is_injected {
+                    binding
+                        .scratch
+                        .pmech_injected_replay_addrs
+                        .push(held.desc.addr);
+                }
+                (held.desc, Some(held.meta), held.is_injected)
+            } else if let Some((desc, meta)) = injected_desc.take() {
+                (desc, Some(meta), true)
+            } else if let Some(desc) = received.read() {
+                (desc, None, false)
+            } else {
+                break;
+            };
         if !is_injected {
             record_rx_descriptor_telemetry(desc, area, telemetry, worker_ctx);
         }
@@ -1400,6 +1444,73 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         telemetry.counters.host_inbound_denied_packets += 1;
                         binding.scratch.scratch_recycle.push(desc.addr);
                         continue;
+                    }
+                }
+                // PMech fence is after routing-domain finalization and before
+                // either cache or session lookup. Reverse Pending packets keep
+                // their XDP descriptor on this arrival binding; no UMEM frame
+                // crosses worker ownership.
+                if let Some(flow) = flow.as_ref() {
+                    match pmech_directory.probe_packet_key(&flow.forward_key) {
+                        crate::session::PMechDirectoryProbe::Pending {
+                            token,
+                            owner_generation,
+                            direction: crate::session::PMechDirection::Reverse,
+                        }
+                        | crate::session::PMechDirectoryProbe::PendingPlainAlias {
+                            token,
+                            owner_generation,
+                            direction: crate::session::PMechDirection::Reverse,
+                        } => {
+                            if binding.pending_pmech_reverse.len()
+                                < crate::session::PMECH_MAX_HELD_WAITERS_TOTAL
+                            {
+                                let mut defer_id = binding.next_pmech_defer_id;
+                                loop {
+                                    defer_id = defer_id.wrapping_add(1);
+                                    if defer_id != 0
+                                        && !binding
+                                            .pending_pmech_reverse
+                                            .iter()
+                                            .any(|held| held.waiter.defer_id == defer_id)
+                                    {
+                                        break;
+                                    }
+                                }
+                                binding.next_pmech_defer_id = defer_id;
+                                if pmech_directory.register_waiter(
+                                    token,
+                                    owner_generation,
+                                    worker_id,
+                                    defer_id,
+                                ) {
+                                    binding.pending_pmech_reverse.push_back(
+                                        PendingPMechReversePacket {
+                                            desc,
+                                            meta,
+                                            waiter: crate::session::PMechWaiterRef {
+                                                arrival_worker_id: worker_id,
+                                                defer_id,
+                                            },
+                                            token,
+                                            owner_generation,
+                                            is_injected,
+                                        },
+                                    );
+                                    continue;
+                                }
+                            }
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
+                        crate::session::PMechDirectoryProbe::Pending { .. }
+                        | crate::session::PMechDirectoryProbe::PendingPlainAlias { .. }
+                        | crate::session::PMechDirectoryProbe::UncertainDenied { .. } => {
+                            binding.scratch.scratch_recycle.push(desc.addr);
+                            continue;
+                        }
+                        crate::session::PMechDirectoryProbe::Live { .. }
+                        | crate::session::PMechDirectoryProbe::Absent => {}
                     }
                 }
                 // ── Flow cache fast path (#1327 Step 1) ────────────────
@@ -9569,6 +9680,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
             .scratch_recycle
             .iter()
             .position(|a| *a == addr)
+        {
+            binding.scratch.scratch_recycle.swap_remove(pos);
+            binding.tx_pipeline.free_tx_frames.push_back(addr);
+        }
+    }
+    while let Some(addr) = binding
+        .scratch
+        .pmech_injected_replay_addrs
+        .pop()
+    {
+        if let Some(pos) = binding
+            .scratch
+            .scratch_recycle
+            .iter()
+            .position(|recycled| *recycled == addr)
         {
             binding.scratch.scratch_recycle.swap_remove(pos);
             binding.tx_pipeline.free_tx_frames.push_back(addr);

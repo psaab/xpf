@@ -1150,6 +1150,12 @@ pub(super) fn lookup_session_across_scopes_with_shared(
     now_ns: u64,
     tcp_flags: u8,
 ) -> Option<ResolvedSessionLookup> {
+    if !crate::session::PMechSessionDirectory::global()
+        .probe_packet_key(key)
+        .is_fallthrough()
+    {
+        return None;
+    }
     // #10886: lookup never evicts a closing pair for a SYN. The poll path
     // probes it read-only, checks authority, and only retires it after an
     // owner's new-flow policy permit.
@@ -1397,6 +1403,12 @@ pub(super) fn lookup_forward_nat_for_icmp_quote_at(
     reply_key: &SessionKey,
     now_ns: u64,
 ) -> Option<ForwardSessionMatch> {
+    if !crate::session::PMechSessionDirectory::global()
+        .probe_packet_key(reply_key)
+        .is_fallthrough()
+    {
+        return None;
+    }
     let local_match = match sessions.find_forward_nat_quote_match_at(reply_key, now_ns) {
         crate::session::ForwardNatQuoteLookup::NoMatch => None,
         crate::session::ForwardNatQuoteLookup::Unique(local) => Some(local),
@@ -1477,6 +1489,12 @@ fn lookup_forward_nat_across_scopes_inner(
     now_ns: Option<u64>,
     domain_admission: ReverseDomainAdmission,
 ) -> Option<ForwardSessionMatch> {
+    if !crate::session::PMechSessionDirectory::global()
+        .probe_packet_key(reply_key)
+        .is_fallthrough()
+    {
+        return None;
+    }
     let egress_domain = |ifindex| match domain_admission {
         ReverseDomainAdmission::ForwardEgress => {
             crate::afxdp::forwarding::egress_routing_domain(forwarding, ifindex)

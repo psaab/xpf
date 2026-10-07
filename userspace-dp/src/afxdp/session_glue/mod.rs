@@ -3068,6 +3068,12 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
     // a release must drop THIS worker's bit rather than free the port outright.
     worker_id: u32,
 ) -> Option<ResolvedFlowSessionDecision> {
+    if !crate::session::PMechSessionDirectory::global()
+        .probe_packet_key(&flow.forward_key)
+        .is_fallthrough()
+    {
+        return None;
+    }
     // Bundle the four shared-session refs once per call. `SharedSessionRefs`
     // is `#[derive(Copy)]`, so the three downstream uses below
     // (purge_translated_synced_hit + 2× maybe_promote_synced_session) each
