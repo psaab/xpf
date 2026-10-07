@@ -1864,6 +1864,10 @@ expansion does. `expandUserspacePolicyApplications` then refuses the reference,
 so the policy lowers to the #3261 `__unsupported__` sentinel. The helper refuses
 the whole snapshot (a running node keeps its previous one), and the mirror names
 the application.
+The kernel host-bound projection applies the same boundary (#12040): a permit
+referencing an application or application-set with match drops is skipped
+rather than rendered with the widened match, while deny/reject terms remain
+fail-closed.
 
 **Tolerant name-collision quarantine (#12049):** strict application namespace
 gates (#3339/#3472) and the strict same-name `address`/`address-set` gate
