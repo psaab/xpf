@@ -790,22 +790,31 @@ func (c *ctl) testPolicy(args []string) error {
 
 func (c *ctl) testRouting(args []string) error {
 	var dest, instance string
+	var seenDestination, seenInstance bool
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "destination":
-			if i+1 >= len(args) || args[i+1] == "" {
+			if seenDestination {
+				return fmt.Errorf("duplicate selector %q", args[i])
+			}
+			seenDestination = true
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
 				return fmt.Errorf("selector %q requires a value", args[i])
 			}
 			i++
 			dest = args[i]
 		case "instance":
-			if i+1 >= len(args) || args[i+1] == "" {
+			if seenInstance {
+				return fmt.Errorf("duplicate selector %q", args[i])
+			}
+			seenInstance = true
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
 				return fmt.Errorf("selector %q requires a value", args[i])
 			}
 			i++
 			instance = args[i]
 		default:
-			return fmt.Errorf("unknown selector %q", args[i])
+			return fmt.Errorf("unknown selector %q (want \"destination <ip-or-prefix> [instance <name>]\")", args[i])
 		}
 	}
 

@@ -45,11 +45,15 @@ func TestTestRoutingRejectsMalformedSelectors12077(t *testing.T) {
 		want string
 	}{
 		{"misspelled instance", []string{"destination", "10.1.2.3", "instnace", "dmz"}, "unknown selector \"instnace\""},
-		{"unknown selector", []string{"destination", "10.1.2.3", "bogus"}, "unknown selector \"bogus\""},
+		{"unknown selector", []string{"destination", "10.1.2.3", "bogus"}, "unknown selector \"bogus\" (want \"destination <ip-or-prefix> [instance <name>]\")"},
 		{"missing instance value", []string{"destination", "10.1.2.3", "instance"}, "selector \"instance\" requires a value"},
 		{"missing destination value", []string{"destination"}, "selector \"destination\" requires a value"},
 		{"empty instance value", []string{"destination", "10.1.2.3", "instance", ""}, "selector \"instance\" requires a value"},
 		{"empty destination value", []string{"destination", ""}, "selector \"destination\" requires a value"},
+		{"whitespace-only destination value", []string{"destination", " \t "}, "selector \"destination\" requires a value"},
+		{"whitespace-only instance value", []string{"destination", "10.1.2.3", "instance", "  "}, "selector \"instance\" requires a value"},
+		{"repeated destination", []string{"destination", "10.1.2.3", "destination", "10.9.9.9"}, "duplicate selector \"destination\""},
+		{"repeated instance", []string{"destination", "10.1.2.3", "instance", "a", "instance", "b"}, "duplicate selector \"instance\""},
 	}
 
 	for _, tc := range cases {
