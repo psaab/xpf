@@ -193,6 +193,18 @@ pub(super) fn populate_routes(
                 &table,
             );
             let prefix = PrefixV4::from_net(prefix);
+            if !route.discard
+                && route.next_table.is_empty()
+                && next_hops.is_empty()
+                && !state.connected_v4.iter().any(|connected| {
+                    connected.table == table && connected.prefix == prefix
+                })
+            {
+                return Err(SnapshotIntegrityError::RouteEmptyNextHops {
+                    table: route.table.clone(),
+                    destination: route.destination.clone(),
+                });
+            }
             if !route.next_table.is_empty() {
                 state
                     .leak_rules_v4
@@ -244,6 +256,18 @@ pub(super) fn populate_routes(
                 &table,
             );
             let prefix = PrefixV6::from_net(prefix);
+            if !route.discard
+                && route.next_table.is_empty()
+                && next_hops.is_empty()
+                && !state.connected_v6.iter().any(|connected| {
+                    connected.table == table && connected.prefix == prefix
+                })
+            {
+                return Err(SnapshotIntegrityError::RouteEmptyNextHops {
+                    table: route.table.clone(),
+                    destination: route.destination.clone(),
+                });
+            }
             if !route.next_table.is_empty() {
                 state
                     .leak_rules_v6

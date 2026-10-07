@@ -43,6 +43,8 @@ mod zones;
 mod tests;
 #[cfg(test)]
 mod link_local_scope_11650;
+#[cfg(test)]
+mod connected_ifindex_12063;
 
 // Re-exports for cross-afxdp-sibling consumers reached via
 // `use self::forwarding_build::*;` in `afxdp/mod.rs`.

@@ -24,7 +24,8 @@ func TestRouteSnapshotDedupeKeepsDiscardAndConnected(t *testing.T) {
 	}
 	ifaces := []InterfaceSnapshot{
 		{
-			Name: "ge-0-0-1",
+			Name:    "ge-0-0-1",
+			Ifindex: 10,
 			Addresses: []InterfaceAddressSnapshot{
 				{Family: "inet", Address: "10.0.1.5/24", Scope: int(netlink.SCOPE_UNIVERSE)},
 			},

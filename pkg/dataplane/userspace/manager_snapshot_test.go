@@ -86,6 +86,19 @@ func TestBuildSnapshotSummary(t *testing.T) {
 		},
 	}
 
+	oldLinkSnapshot := buildLinkSnapshot
+	t.Cleanup(func() { buildLinkSnapshot = oldLinkSnapshot })
+	buildLinkSnapshot = func(name string) (int, int, string, []InterfaceAddressSnapshot) {
+		switch name {
+		case "ge-0-0-0":
+			return 10, 1500, "02:00:00:00:00:10", nil
+		case "ge-0-0-1":
+			return 11, 1500, "02:00:00:00:00:11", nil
+		default:
+			return 0, 0, "", nil
+		}
+	}
+
 	snap := mustBuildSnapshot(t, cfg, config.UserspaceConfig{Workers: 2, RingEntries: 2048}, 11, 5)
 	if snap.Generation != 11 {
 		t.Fatalf("Generation = %d, want 11", snap.Generation)

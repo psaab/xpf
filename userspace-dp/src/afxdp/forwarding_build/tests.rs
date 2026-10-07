@@ -4947,12 +4947,14 @@ fn route_destination_valid_prefixes_still_build() {
             crate::RouteSnapshot {
                 table: "inet.0".into(),
                 destination: "10.9.0.0/16".into(),
+                next_hops: vec!["192.0.2.1".into()],
                 mtu: 0,
                 ..Default::default()
             },
             crate::RouteSnapshot {
                 table: "inet.0".into(),
                 destination: "0.0.0.0/0".into(),
+                next_hops: vec!["192.0.2.1".into()],
                 mtu: 0,
                 ..Default::default()
             },
@@ -4968,6 +4970,7 @@ fn route_destination_valid_prefixes_still_build() {
             crate::RouteSnapshot {
                 table: "inet6.0".into(),
                 destination: "2001:db8::/64".into(),
+                next_hops: vec!["2001:db8::1".into()],
                 mtu: 0,
                 ..Default::default()
             },

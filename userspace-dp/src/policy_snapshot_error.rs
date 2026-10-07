@@ -831,6 +831,13 @@ pub(crate) enum SnapshotIntegrityError {
     /// clean snapshot never trips this. It is the helper-boundary backstop for
     /// a corrupt / hand-built / version-drifted snapshot, consistent with the
     /// #2410/#2409 fail-closed family.
+    /// #12063: an ordinary route has no forwarding next-hops and no
+    /// connected interface backing its prefix. Installing it would let the
+    /// empty-member route shadow less-specific routes and resolve NoRoute.
+    RouteEmptyNextHops {
+        table: String,
+        destination: String,
+    },
     RouteDestinationUnparseable {
         table: String,
         destination: String,
@@ -1251,6 +1258,11 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 f,
                 "route {:?} in table {:?} has next-hop {:?} from the other address family — refusing to drop its gateway silently and install a route that cannot forward as the kernel does",
                 destination, table, next_hop
+            ),
+            Self::RouteEmptyNextHops { table, destination } => write!(
+                f,
+                "ordinary route {:?} in table {:?} has no next-hops and no matching connected interface — refusing to install a forwarding entry that shadows less-specific routes as NoRoute",
+                destination, table
             ),
             Self::RouteDestinationUnparseable { table, destination } => write!(
                 f,

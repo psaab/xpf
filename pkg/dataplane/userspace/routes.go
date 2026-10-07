@@ -301,6 +301,11 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 		if iface.Name == "" {
 			continue
 		}
+		// Configured interface identities can survive without their kernel netdev.
+		// Their addresses must not publish connected rows or cover learned-route gaps.
+		if iface.Ifindex <= 0 {
+			continue
+		}
 		v4Table := interfaceTablesV4[iface.Name]
 		if v4Table == "" {
 			v4Table = "inet.0"
