@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -176,14 +177,16 @@ func (m *Manager) BumpFIBGeneration() (uint32, error) {
 		// have been sent. A timeout/EOF/decode error has unknown outcome: the
 		// helper may already have applied this bump, so retaining the proposed
 		// generation prevents a later full snapshot from rolling it back.
-		m.lastSnapshot.FIBGeneration = prevFIB
-		m.lastSnapshot.Generation = prevSnapGen
-		m.generation = prevAlloc
-		m.lastSnapshot.PermitEpoch = prevPermitEpoch
-		m.lastSnapshot.QueueEpochs = prevQueueEpochs
-		m.lastSnapshot.IpsecTunnelSnapshotGeneration = prevTunnelSnapshotGeneration
-		m.lastSnapshot.IpsecTunnelRows = prevTunnelRows
-		m.lastSnapshot.PMechInventory = prevPMechInventory
+		if errors.Is(err, errHelperRejected) || isKnownUnsentFailure(err) {
+			m.lastSnapshot.FIBGeneration = prevFIB
+			m.lastSnapshot.Generation = prevSnapGen
+			m.generation = prevAlloc
+			m.lastSnapshot.PermitEpoch = prevPermitEpoch
+			m.lastSnapshot.QueueEpochs = prevQueueEpochs
+			m.lastSnapshot.IpsecTunnelSnapshotGeneration = prevTunnelSnapshotGeneration
+			m.lastSnapshot.IpsecTunnelRows = prevTunnelRows
+			m.lastSnapshot.PMechInventory = prevPMechInventory
+		}
 		return newGen, fmt.Errorf("bump fib generation: %w", err)
 	}
 	if committer := m.captureAuthorityCommitter; committer != nil && m.appliedSnapshot.Generation != 0 {
