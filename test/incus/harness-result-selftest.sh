@@ -415,8 +415,8 @@ else
 	bad "adapter census: HA smokes not declared:$missing8"
 fi
 
-# 1f. The Makefile mapping must match the scripts: a gate calls
-#     iperf_throughput_verdict IFF it is wrapped with ha-smoke. A cells gate
+# 1f. The Makefile mapping must match the scripts: a gate calls either
+#     iperf_throughput_verdict or iperf_throughput_json_verdict IFF ha-smoke.
 map_bad=""
 for g in "${DECLARED_IPERF_SMOKES[@]}" "${DECLARED_CELLS_SMOKES[@]}"; do
 	# The unprefixed scripts run under test- gates (Makefile wraps
@@ -429,7 +429,7 @@ for g in "${DECLARED_IPERF_SMOKES[@]}" "${DECLARED_CELLS_SMOKES[@]}"; do
 	*"--adapter smoke-cells"*) mk_adapter="smoke-cells" ;;
 	*) map_bad="$map_bad $g(no-makefile-wrap)"; continue ;;
 	esac
-	if grep -q "iperf_throughput_verdict" "$SCRIPT_DIR/$g.sh"; then
+	if grep -qE 'iperf_throughput_(json_)?verdict' "$SCRIPT_DIR/$g.sh"; then
 		[[ "$mk_adapter" == "ha-smoke" ]] || map_bad="$map_bad $g(emits-iperf-but-wrapped-$mk_adapter)"
 	else
 		[[ "$mk_adapter" == "smoke-cells" ]] || map_bad="$map_bad $g(no-iperf-but-wrapped-$mk_adapter)"
@@ -440,6 +440,23 @@ if [[ -z "$map_bad" ]]; then
 else
 	bad "adapter census: Makefile/script adapter mismatch:$map_bad"
 fi
+# Pin the JSON call shape only on test-failover; its four human-log siblings
+# retain the original text verdict call shape.
+if grep -q 'iperf_throughput_json_verdict "$MIN_THROUGHPUT" "$avg_gbps"' "$SCRIPT_DIR/test-failover.sh"; then
+	json_call_shape_ok=1
+else
+	json_call_shape_ok=0
+fi
+for sibling in test-double-failover test-chained-crash test-active-active test-stress-failover; do
+	grep -q 'iperf_throughput_verdict "$MIN_THROUGHPUT" "$sum_line"' "$SCRIPT_DIR/$sibling.sh" \
+		|| json_call_shape_ok=0
+done
+if (( json_call_shape_ok )); then
+	ok "adapter census: failover uses JSON verdict and four siblings retain text verdict"
+else
+	bad "adapter census: JSON/text throughput verdict call shapes changed"
+fi
+
 
 # #10122: the destructive DHCP gate and its post-run executable attestation
 # must share one outer lock cell. The gate script's cluster-cell is reentrant,
