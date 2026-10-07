@@ -708,7 +708,7 @@ ha_sample_window_max() {
 		printf 'sample maximum: expected <slice> <rg> <node> <label> and ten statistics files\n' >&2
 		return 2
 	fi
-	local slice="$1" rg="$2" node="$3" label="$4" index phase path value maximum=""
+	local slice="$1" rg="$2" node="$3" label="$4" index phase path value maximum="" previous=""
 	local -a args=("$@")
 	for ((index = 0; index < 10; index++)); do
 		phase=$(printf 'sample-%02d' "$((index + 1))")
@@ -719,6 +719,11 @@ ha_sample_window_max() {
 			printf 'sample maximum: %s is not an unsigned counter in %s\n' "$label" "$path" >&2
 			return 2
 		fi
+		if [[ -n "$previous" ]] && (( value < previous )); then
+			printf 'sample maximum: %s counter rewound from %s to %s at %s\n' "$label" "$previous" "$value" "$phase" >&2
+			return 2
+		fi
+		previous="$value"
 		if [[ -z "$maximum" ]] || (( value > maximum )); then maximum="$value"; fi
 	done
 	printf '%s\n' "$maximum"
@@ -730,7 +735,7 @@ ha_sample_window_interface_max() {
 		return 2
 	fi
 	local slice="$1" rg="$2" node="$3" regex="$4" direction="$5"
-	local index phase path value maximum=""
+	local index phase path value maximum="" previous=""
 	local -a args=("$@")
 	for ((index = 0; index < 10; index++)); do
 		phase=$(printf 'sample-%02d' "$((index + 1))")
@@ -741,6 +746,11 @@ ha_sample_window_interface_max() {
 			printf 'sample interface maximum: malformed counter in %s\n' "$path" >&2
 			return 2
 		fi
+		if [[ -n "$previous" ]] && (( value < previous )); then
+			printf 'sample interface maximum: counter rewound from %s to %s at %s\n' "$previous" "$value" "$phase" >&2
+			return 2
+		fi
+		previous="$value"
 		if [[ -z "$maximum" ]] || (( value > maximum )); then maximum="$value"; fi
 	done
 	printf '%s\n' "$maximum"

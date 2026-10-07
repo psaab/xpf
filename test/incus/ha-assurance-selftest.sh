@@ -738,6 +738,24 @@ SAMPLE_STATS[9]="${RG1_DIR}/missing-sample.stats"
 assert_helper_status 2 ha_sample_window_max manual-rg1-failback 1 node0 'Kernel RX dropped' "${SAMPLE_STATS[@]}"
 SAMPLE_STATS[9]="${RG1_DIR}/sample-09-node0.stats"
 assert_helper_status 2 ha_sample_window_max manual-rg1-failback 1 node0 'Kernel RX dropped' "${SAMPLE_STATS[@]}"
+REWIND_COUNTERS=(110 500 50 150 160 170 180 190 195 600)
+REWIND_STATS=()
+REWIND_INTERFACES=()
+for rewind_index in "${!REWIND_COUNTERS[@]}"; do
+	rewind_sample=$(printf 'sample-%02d' "$((rewind_index + 1))")
+	rewind_stats="${RG1_DIR}/rewind-${rewind_sample}-node0.stats"
+	rewind_ifaces="${RG1_DIR}/rewind-${rewind_sample}-node0.interfaces"
+	rewind_value="${REWIND_COUNTERS[$rewind_index]}"
+	write_ha_status_snapshot "$rewind_stats" "$rewind_sample" node0 1 0 0 0 0 "$rewind_value" "$rewind_value" "$rewind_value" "$rewind_value"
+	write_ha_interface_snapshot "$rewind_ifaces" "$rewind_sample" node0 1 ge-0-0-1 "$rewind_value" "$rewind_value"
+	REWIND_STATS+=("$rewind_stats")
+	REWIND_INTERFACES+=("$rewind_ifaces")
+done
+assert_helper_status 2 ha_sample_window_max manual-rg1-failback 1 node0 'Kernel RX dropped' "${REWIND_STATS[@]}"
+assert_contains "$(<"${ERR}")" 'rewound from 500 to 50' 'counter window rewind evidence'
+assert_helper_status 2 ha_sample_window_interface_max manual-rg1-failback 1 node0 'ge-[0-9]+-0-1' rx "${REWIND_INTERFACES[@]}"
+assert_contains "$(<"${ERR}")" 'rewound from 500 to 50' 'interface window rewind evidence'
+assert_helper_value 500 ha_nondecreasing_delta 100 600
 assert_helper_status 0 ha_nondecreasing_delta 100 612
 assert_helper_status 1 ha_counter_at_most_verdict 513 512 'new-owner kernel RX dropped'
 
