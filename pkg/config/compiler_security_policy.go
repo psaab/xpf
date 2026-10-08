@@ -138,6 +138,17 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 				for _, fzSub := range child.Children {
 					tzNode := fzSub.FindChild("to-zone")
 					if tzNode == nil {
+						// A keyed from-zone node's direct `to-zone` child is the
+						// separately diagnosed #7523/#11346 nested spelling. Other
+						// source-zone children with policy statements but no
+						// destination would otherwise disappear without any
+						// enforcement diagnostic.
+						nestedToZone := len(child.Keys) >= 2 && fzSub.Name() == "to-zone"
+						if !nestedToZone && len(fzSub.FindChildren("policy")) > 0 {
+							sec.MalformedZonePairs = append(sec.MalformedZonePairs,
+								fmt.Sprintf("from-zone %q has no to-zone context; the policy context is skipped and not enforced (#12231)",
+									fzSub.Name()))
+						}
 						continue
 					}
 					for _, tzSub := range tzNode.Children {
