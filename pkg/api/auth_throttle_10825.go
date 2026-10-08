@@ -70,10 +70,10 @@ const (
 	// lockouts double up to authThrottleMaxLockout.
 	authThrottleBaseLockout = 5 * time.Minute
 	authThrottleMaxLockout  = time.Hour
-	// authThrottleMaxEntries bounds the combined tracker tables. Past it, an
-	// insert sweeps expired buckets and then evicts arbitrarily — eviction only
-	// forgives failures early (fail-open on memory pressure, never fail-closed
-	// into a permanent lockout).
+	// authThrottleMaxEntries bounds the combined tracker tables. Insertions sweep
+	// expired buckets and evict unlocked failures; active lockouts are never
+	// evicted. Admission is refused if no unlocked bucket can make room, keeping
+	// the table bounded without erasing a live Retry-After.
 	authThrottleMaxEntries = 4096
 	// Identity namespaces keep Basic usernames, Bearer presentations, malformed
 	// Basic headers, unsupported Authorization schemes, and API keys from
@@ -343,7 +343,8 @@ func clearAuthThrottleBucket(bucket *authFailureBucket, now time.Time) {
 }
 
 // makeRoomLocked keeps the combined tracker bounded without evicting buckets
-// with admitted verifier work or buckets participating in this admission.
+// with admitted verifier work, active lockouts, or buckets participating in
+// this admission.
 func (t *authFailureTracker) makeRoomLocked(needed int, now time.Time, protected ...*authFailureBucket) bool {
 	if t.entryCountLocked()+needed <= authThrottleMaxEntries {
 		return true
@@ -356,7 +357,7 @@ func (t *authFailureTracker) makeRoomLocked(needed int, now time.Time, protected
 			if t.entryCountLocked()+needed <= authThrottleMaxEntries {
 				return true
 			}
-			if authThrottleBucketEvictable(bucket, protected...) {
+			if authThrottleBucketEvictable(bucket, now, protected...) {
 				delete(buckets, key)
 			}
 		}
@@ -370,7 +371,7 @@ func (t *authFailureTracker) entryCountLocked() int {
 
 func sweepAuthThrottleBuckets(buckets map[string]*authFailureBucket, now time.Time, protected ...*authFailureBucket) {
 	for key, bucket := range buckets {
-		if authThrottleBucketEvictable(bucket, protected...) &&
+		if authThrottleBucketEvictable(bucket, now, protected...) &&
 			now.After(bucket.lockedUntil) &&
 			now.Sub(authThrottleQuietSince(bucket)) > authThrottleWindow {
 			delete(buckets, key)
@@ -378,8 +379,8 @@ func sweepAuthThrottleBuckets(buckets map[string]*authFailureBucket, now time.Ti
 	}
 }
 
-func authThrottleBucketEvictable(bucket *authFailureBucket, protected ...*authFailureBucket) bool {
-	if bucket.inFlight != 0 {
+func authThrottleBucketEvictable(bucket *authFailureBucket, now time.Time, protected ...*authFailureBucket) bool {
+	if bucket.inFlight != 0 || bucket.lockedUntil.After(now) {
 		return false
 	}
 	for _, active := range protected {
@@ -488,8 +489,7 @@ func (t *authFailureTracker) sourceBucketLocked(source string) *authFailureBucke
 }
 
 // sweepIfFullLocked keeps all tracker tables within the shared entry budget.
-// Expired buckets go first; the remainder is evicted arbitrarily, which only
-// forgives failures early.
+// Expired buckets go first; only unlocked failures may be evicted to make room.
 func (t *authFailureTracker) sweepIfFullLocked() {
 	if t.entryCountLocked() < authThrottleMaxEntries {
 		return
@@ -503,7 +503,7 @@ func (t *authFailureTracker) sweepIfFullLocked() {
 			if t.entryCountLocked() < authThrottleMaxEntries {
 				return
 			}
-			if authThrottleBucketEvictable(bucket) {
+			if authThrottleBucketEvictable(bucket, now) {
 				delete(buckets, key)
 			}
 		}
