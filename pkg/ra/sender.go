@@ -890,30 +890,37 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 			continue
 		}
 
-		validLife := pfx.ValidLifetime
+		validLife := int64(pfx.ValidLifetime)
 		if validLife <= 0 {
 			validLife = defaultValidLifetime
 		}
-		prefLife := pfx.PreferredLife
+		prefLife := int64(pfx.PreferredLife)
 		if prefLife <= 0 {
 			prefLife = defaultPreferredLifetime
 		}
 
-		// RFC 4861 §4.6.2: the Preferred Lifetime MUST NOT exceed the Valid
-		// Lifetime. A PrefixInformation that violates this is malformed; per
-		// RFC 4862 §5.5.3 a conforming host treats prefLife>validLife as an
-		// error and ignores the prefix, so a misconfigured pair (operator types
-		// preferred-lifetime larger than valid-lifetime, or a 0-defaulted valid
-		// life paired with a large explicit preferred life) could silently drop
-		// the prefix on every host. Clamp prefLife DOWN to validLife — never the
-		// reverse, since extending the valid lifetime would advertise a
-		// longer-lived prefix than the operator configured. Both values are plain
-		// non-negative seconds (the schema gate rejects negatives, and a 0 has
-		// already been replaced by its SLAAC default above), so the comparison is
-		// a straight integer ordering check. "Infinite" is simply the largest
-		// value the operator can express; the same clamp keeps it ordered (a
-		// finite valid life still pulls an over-large preferred life down to it,
-		// and an infinite valid life leaves any preferred life unchanged).
+		// Tolerant Load and peer-sync ingress can bypass the strict typed-leaf
+		// bound, so saturate each PIO lifetime at its 32-bit wire maximum
+		// before converting seconds to time.Duration. Without this sink clamp,
+		// 2^32 seconds wraps to 0 in ndp's uint32 marshal (expiring the on-link
+		// prefix immediately), while larger values can overflow Duration
+		// itself. Keep the <=0 default substitution above unchanged, and clamp
+		// preferred only after valid so the RFC 4861 pref<=valid ordering is
+		// evaluated on the final advertised values.
+		validLife = clampPIOSeconds12193(validLife)
+		prefLife = clampPIOSeconds12193(prefLife)
+
+		// RFC 4861 §4.6.2: Preferred Lifetime MUST NOT exceed Valid Lifetime.
+		// A PIO that violates this is malformed; per RFC 4862 §5.5.3 a
+		// conforming host treats prefLife>validLife as an error and ignores
+		// the prefix. Clamp preferred DOWN, never valid upward: extending the
+		// valid lifetime would advertise a longer-lived prefix than configured.
+		// The <=0 defaults and sink saturations above leave both values in
+		// [0, 0xffffffff], so the comparison is a straight integer ordering
+		// check on the final advertised values. The infinite value is simply
+		// the largest expressible lifetime: finite valid life pulls a larger
+		// preferred life down to it, while infinite valid life preserves any
+		// preferred lifetime that is itself in range.
 		if prefLife > validLife {
 			prefLife = validLife
 		}
@@ -1213,6 +1220,20 @@ func clampLinkMTU9914(v int) int {
 	}
 	if int64(v) > config.RALinkMTUMax {
 		return config.RALinkMTUMax
+	}
+	return v
+}
+
+// clampPIOSeconds12193 saturates a PIO lifetime at the uint32 seconds field's
+// maximum. buildRA calls it after the existing <=0 default substitution and
+// before converting to time.Duration, so tolerant config cannot wrap either
+// ndp's uint32 marshal or the nanosecond Duration representation.
+func clampPIOSeconds12193(v int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	if v > int64(^uint32(0)) {
+		return int64(^uint32(0))
 	}
 	return v
 }
