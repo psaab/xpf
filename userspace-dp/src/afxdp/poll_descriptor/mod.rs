@@ -126,6 +126,7 @@ pub(in crate::afxdp) fn forget_pptp_control_channel(
     );
     let forgotten = sessions.pptp_mut().forget_control_channel(control);
     inbox.forget_channel(control);
+    inbox.forget_call_installs_for_channel(control, closed_ns);
     let mut queued = 0;
     let mut unsent = Vec::new();
     for queue in peer_worker_commands {

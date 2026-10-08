@@ -13179,6 +13179,120 @@ fn a_cdn_forgets_both_aliases_everywhere_and_allows_reuse_11601() {
     }
 }
 
+/// #12133: a worker whose full queue refused a call install learns the
+/// association after the periodic retry, without another control reply.
+///
+/// This distinguishes the local learned count, the worker-specific queue
+/// shortfall, and the GRE discriminator: the local association and
+/// worker_one's copy exist after the first drain, worker_two resolves neither
+/// direction until the refused install is retried and applied.
+///
+/// FAIL-ON-REVERT: discard `broadcast_pptp_install`'s shortfall and remove the
+/// retry path; worker_two remains unassociated after the queue clears.
+#[test]
+fn a_refused_pptp_install_reaches_the_worker_on_retry_12133() {
+    use crate::session::pptp::PptpCall;
+    use crate::session::pptp_control::{
+        PendingControlSegment, PptpControlInbox,
+        fixtures_7699::outgoing_call_reply,
+    };
+
+    let (pac, pns): (IpAddr, IpAddr) = (
+        "198.51.100.7".parse().unwrap(),
+        "203.0.113.9".parse().unwrap(),
+    );
+    let queues: Vec<_> = (0..2)
+        .map(|_| Arc::new(Mutex::new(VecDeque::new())))
+        .collect();
+    let inbox = PptpControlInbox::default();
+    let mut local = SessionTable::new();
+    let mut worker_one = SessionTable::new();
+    let mut worker_two = SessionTable::new();
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let apply = |commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+                 sessions: &mut SessionTable| {
+        let _ = apply_worker_commands(
+            commands,
+            sessions,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            0,
+            &mut VecDeque::new(),
+        );
+    };
+
+    {
+        let mut pending = queues[1].lock().expect("worker queue");
+        for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+            pending.push_back(WorkerCommand::ForgetPptpCall(0xDEAD_BEEF));
+        }
+    }
+    assert!(inbox.push(PendingControlSegment {
+        src: pac,
+        dst: pns,
+        src_port: 1723,
+        dst_port: 49152,
+        captured_ns: 10,
+        payload: outgoing_call_reply(0xAAAA, 0xBBBB, 1),
+    }));
+    assert_eq!(
+        crate::afxdp::worker_queue::drain_pptp_control_inbox(
+            &inbox,
+            &mut local,
+            &queues,
+            1_000_000_000,
+        ),
+        1,
+        "learned counts local associations, not global broadcast reach"
+    );
+
+    let handle = PptpCall::new(pac, 0xAAAA, pns, 0xBBBB).handle();
+    assert_eq!(local.pptp().resolve(pac, 0xAAAA), Some(handle));
+    apply(&queues[0], &mut worker_one);
+    assert_eq!(worker_one.pptp().resolve(pac, 0xAAAA), Some(handle));
+    assert_eq!(worker_one.pptp().resolve(pns, 0xBBBB), Some(handle));
+    assert!(
+        !queues[1]
+            .lock()
+            .expect("worker queue")
+            .iter()
+            .any(|command| matches!(command, WorkerCommand::InstallPptpCall { .. })),
+        "fixture: the full queue must have refused the install"
+    );
+    assert_eq!(
+        worker_two.pptp().resolve(pac, 0xAAAA),
+        None,
+        "the full-queue worker is still unassociated after the first drain"
+    );
+    assert_eq!(worker_two.pptp().resolve(pns, 0xBBBB), None);
+
+    queues[1].lock().expect("worker queue").clear();
+    assert_eq!(
+        crate::afxdp::worker_queue::drain_pptp_control_inbox(
+            &inbox,
+            &mut local,
+            &queues,
+            2_000_000_000,
+        ),
+        0,
+        "retry must not count a second local association"
+    );
+    apply(&queues[1], &mut worker_two);
+    assert_eq!(
+        worker_two.pptp().resolve(pac, 0xAAAA),
+        Some(handle),
+        "#12133: the missed worker never learned the call — its GRE packets \
+         resolve unassociated until this retry reaches its session table"
+    );
+    assert_eq!(worker_two.pptp().resolve(pns, 0xBBBB), Some(handle));
+}
+
 /// #7699 stage 2 END-TO-END: control-channel BYTES through to an association a
 /// data packet resolves against.
 ///
@@ -13241,7 +13355,8 @@ fn a_control_segment_becomes_a_resolvable_association_7699() {
             call,
             crate::session::pptp::ControlChannelId::new(pac, 49152, pns, 1723),
             0,
-        ),
+        )
+        .0,
         2,
         "the association must reach every worker; the control channel and the \
          GRE data channel are not co-located"

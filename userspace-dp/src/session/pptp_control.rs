@@ -108,6 +108,9 @@ struct InboxInner {
     /// Per-call CDN commands refused by full peer queues.
     pending_call_forgets: Vec<PendingCallForget>,
     last_call_forget_retry_ns: u64,
+    /// PPTP installs refused by a full peer queue.
+    pending_call_installs: Vec<PendingCallInstall>,
+    last_call_install_retry_ns: u64,
 }
 
 /// A control close still waiting for bounded peer-worker queues to accept it.
@@ -122,6 +125,15 @@ pub(crate) struct PendingChannelForget {
 #[derive(Clone, Debug)]
 pub(crate) struct PendingCallForget {
     pub(crate) disconnect: crate::session::pptp::PptpCallDisconnect,
+    pub(crate) unsent_queue_ids: Vec<usize>,
+}
+
+/// A PPTP install still waiting for bounded peer-worker queues to accept it.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingCallInstall {
+    pub(crate) call: crate::session::pptp::PptpCall,
+    pub(crate) control: crate::session::pptp::ControlChannelId,
+    pub(crate) learned_ns: u64,
     pub(crate) unsent_queue_ids: Vec<usize>,
 }
 
@@ -281,6 +293,94 @@ impl PptpControlInbox {
         }
     }
 
+    /// Track the recipients still missing the latest install for this call.
+    ///
+    /// A later reply supersedes an older retry: the new broadcast attempted
+    /// every peer, so its refused-recipient list is the authoritative set.
+    pub(crate) fn record_call_install(
+        &self,
+        call: crate::session::pptp::PptpCall,
+        control: crate::session::pptp::ControlChannelId,
+        learned_ns: u64,
+        unsent_queue_ids: Vec<usize>,
+    ) {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(index) = inner
+            .pending_call_installs
+            .iter()
+            .position(|pending| pending.call == call && pending.control == control)
+        {
+            if inner.pending_call_installs[index].learned_ns > learned_ns {
+                return;
+            }
+            if unsent_queue_ids.is_empty() {
+                inner.pending_call_installs.remove(index);
+            } else {
+                let pending = &mut inner.pending_call_installs[index];
+                pending.learned_ns = learned_ns;
+                pending.unsent_queue_ids = unsent_queue_ids;
+            }
+        } else if !unsent_queue_ids.is_empty() {
+            inner.pending_call_installs.push(PendingCallInstall {
+                call,
+                control,
+                learned_ns,
+                unsent_queue_ids,
+            });
+        }
+    }
+
+    /// Forget install retries superseded by a complete broadcast.
+    pub(crate) fn complete_call_install_broadcast(
+        &self,
+        call: crate::session::pptp::PptpCall,
+        control: crate::session::pptp::ControlChannelId,
+        learned_ns: u64,
+    ) {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner.pending_call_installs.retain(|pending| {
+            pending.call != call || pending.control != control || pending.learned_ns > learned_ns
+        });
+    }
+
+    /// A call disconnect cancels retries for that call learned no later than
+    /// the notice, so a delayed install cannot resurrect torn-down state.
+    pub(crate) fn forget_call_installs_for_disconnect(
+        &self,
+        disconnect: crate::session::pptp::PptpCallDisconnect,
+    ) {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner.pending_call_installs.retain(|pending| {
+            pending.control != disconnect.control
+                || pending.learned_ns > disconnect.disconnected_ns
+                || !pending.call.has_alias(disconnect.allocator, disconnect.call_id)
+        });
+    }
+
+    /// A control-channel close cancels retries learned no later than the close.
+    pub(crate) fn forget_call_installs_for_channel(
+        &self,
+        control: crate::session::pptp::ControlChannelId,
+        closed_ns: u64,
+    ) {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner.pending_call_installs.retain(|pending| {
+            pending.control != control || pending.learned_ns > closed_ns
+        });
+    }
+
     /// Take a snapshot of due close retries. Queue locks are acquired only
     /// after this inbox lock has been released.
     pub(crate) fn take_channel_forget_retries(&self, now_ns: u64) -> Vec<PendingChannelForget> {
@@ -311,6 +411,22 @@ impl PptpControlInbox {
         }
         inner.last_call_forget_retry_ns = now_ns;
         inner.pending_call_forgets.clone()
+    }
+
+    /// Take due install retries without holding the inbox lock while workers
+    /// are queued.
+    pub(crate) fn take_call_install_retries(&self, now_ns: u64) -> Vec<PendingCallInstall> {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if inner.last_call_install_retry_ns != 0
+            && now_ns.saturating_sub(inner.last_call_install_retry_ns) < CONTROL_DRAIN_INTERVAL_NS
+        {
+            return Vec::new();
+        }
+        inner.last_call_install_retry_ns = now_ns;
+        inner.pending_call_installs.clone()
     }
 
     /// Acknowledge a close accepted by one peer queue.
@@ -344,6 +460,29 @@ impl PptpControlInbox {
         };
         inner.pending_call_forgets.retain_mut(|pending| {
             if pending.disconnect == disconnect {
+                pending.unsent_queue_ids.retain(|id| *id != queue_id);
+            }
+            !pending.unsent_queue_ids.is_empty()
+        });
+    }
+
+    /// Acknowledge an install accepted by one peer queue.
+    pub(crate) fn mark_call_install_sent(
+        &self,
+        call: crate::session::pptp::PptpCall,
+        control: crate::session::pptp::ControlChannelId,
+        learned_ns: u64,
+        queue_id: usize,
+    ) {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner.pending_call_installs.retain_mut(|pending| {
+            if pending.call == call
+                && pending.control == control
+                && pending.learned_ns == learned_ns
+            {
                 pending.unsent_queue_ids.retain(|id| *id != queue_id);
             }
             !pending.unsent_queue_ids.is_empty()
