@@ -6,6 +6,10 @@ import "github.com/psaab/xpf/pkg/config"
 // read-only show surfaces.
 // Split from policies.go (#4421) with no logic change.
 
+// Unknown names remain inactive here; tolerant compilation separately poisons
+// undefined-scheduler DENY/REJECT rules so they cannot silently fall through
+// to a later permit (#12244). A defined scheduler outside its window remains
+// an ordinary inactive rule.
 func policyRuleInactive(schedulerName string, activeState map[string]bool) bool {
 	if schedulerName == "" {
 		return false

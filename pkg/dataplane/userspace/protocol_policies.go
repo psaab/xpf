@@ -407,7 +407,11 @@ type PolicyRuleSnapshot struct {
 	rejectedSourceAddresses []string
 	rejectedDestAddresses   []string
 	rejectedApplications    []string
-	// #9570: build-time-only, like the three above (no JSON tag, never on the
+	// #12244: build-time-only scheduler detail for the tolerant unknown-
+	// scheduler DENY/REJECT poison. It is included in the mirror reason but
+	// never serialized; the scheduler name itself is already on the wire.
+	rejectedScheduler string
+	// #9570: build-time-only, like the rejection details above (never on the
 	// wire). poisonZonePairGlobalSentinel sets it when a ZONE-PAIR stanza names
 	// the reserved `junos-global` sentinel on one or both structural sides, to
 	// config.ZonePairGlobalSentinelSide's answer. It exists because the

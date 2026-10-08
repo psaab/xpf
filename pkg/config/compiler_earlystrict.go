@@ -219,8 +219,9 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 	}
 	if err := validatePolicySchedulerReferencesStrict(cfg); err != nil {
 		if opts.lenientPolicySchedulerRef {
+			poisonUndefinedSchedulerDenyPolicies12244(cfg)
 			cfg.Warnings = append(cfg.Warnings,
-				fmt.Sprintf("policy scheduler reference (downgraded to warning on tolerant path; the policy loads inactive): %v", err))
+				fmt.Sprintf("policy scheduler reference (downgraded to warning on tolerant path; undefined-scheduler deny/reject policies poison the userspace snapshot; other policies load inactive): %v", err))
 		} else {
 			strictErrs = append(strictErrs, err)
 		}
@@ -247,4 +248,35 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 		return err
 	}
 	return nil
+}
+
+// poisonUndefinedSchedulerDenyPolicies12244 keeps tolerant loads available
+// while preventing an unknown scheduler from disabling a DENY/REJECT rule.
+// Strict compilation still rejects the reference above.
+func poisonUndefinedSchedulerDenyPolicies12244(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	mark := func(pol *Policy) {
+		if pol == nil || pol.SchedulerName == "" {
+			return
+		}
+		if _, ok := cfg.Schedulers[pol.SchedulerName]; ok {
+			return
+		}
+		if pol.Action == PolicyDeny || pol.Action == PolicyReject {
+			pol.LenientContentDropped = true
+		}
+	}
+	for _, zpp := range cfg.Security.Policies {
+		if zpp == nil {
+			continue
+		}
+		for _, pol := range zpp.Policies {
+			mark(pol)
+		}
+	}
+	for _, pol := range cfg.Security.GlobalPolicies {
+		mark(pol)
+	}
 }
