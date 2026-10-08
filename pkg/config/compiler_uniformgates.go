@@ -216,5 +216,8 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
+	if err := runUniformGatesUnknownSecurityPoliciesChild12217(cfg, opts); err != nil {
+		return err
+	}
 	return nil
 }

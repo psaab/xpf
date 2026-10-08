@@ -857,6 +857,9 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 		case config.IsUnknownSecurityZoneChildSchemaError(schemaErr):
 			slog.Warn("unknown security-zone child in tolerated config; continuing (a strict commit would reject this)",
 				"err", schemaErr, "issue", "#11575")
+		case config.IsUnknownSecurityPoliciesChildSchemaError12217(schemaErr):
+			slog.Warn("unknown security-policies child in tolerated config; continuing (a strict commit would reject this)",
+				"err", schemaErr, "issue", "#12217")
 		case config.IsUnknownTopLevelStanzaSchemaError(schemaErr):
 			slog.Warn("unknown top-level stanza in tolerated config; continuing (a strict commit would reject this)",
 				"err", schemaErr, "issue", "#11576")
@@ -902,6 +905,21 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 		// zone+keyword warnings here (deduping the uniform compiler gate's
 		// identical warning) for Store.Load and Store.SyncApply.
 		for _, warning := range config.ToleratedUnknownSecurityZoneChildWarnings(compiled) {
+			found := false
+			for _, existing := range compiled.Warnings {
+				if existing == warning {
+					found = true
+					break
+				}
+			}
+			if !found {
+				compiled.Warnings = append(compiled.Warnings, warning)
+			}
+		}
+		// As with unknown zone children, the schema walk reports only its first
+		// closed-world violation. Recover every recorded policy-container child
+		// for Store.Load and Store.SyncApply.
+		for _, warning := range config.ToleratedUnknownSecurityPoliciesChildWarnings12217(compiled) {
 			found := false
 			for _, existing := range compiled.Warnings {
 				if existing == warning {

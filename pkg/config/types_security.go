@@ -160,8 +160,15 @@ type SecurityConfig struct {
 	// fingerprint that compares compiled configs -- the #4406 goldens, and the
 	// ConfigFingerprint comparisons the elision censuses run -- for a field
 	// that is nil in every valid config.
-	MalformedZonePairs []string     `json:"-"`
-	GlobalPolicies     []*Policy    // global policies (apply to all zone pairs)
+	MalformedZonePairs []string `json:"-"`
+	// UnknownPoliciesChildren records unrecognized direct children of the
+	// `security policies` container. The compiler skips their contents, so
+	// tolerant ingestion records the loss and poisons the policy snapshot.
+	// json:"-" keeps this compile-time diagnostic out of semantic config
+	// fingerprints; the persisted AST reconstructs it on each Load/SyncApply.
+	UnknownPoliciesChildren []string `json:"-"`
+	// GlobalPolicies are global rules applied to all zone pairs.
+	GlobalPolicies     []*Policy
 	DefaultPolicy      PolicyAction // global fallback policy (permit-all or deny-all)
 	NAT                NATConfig
 	Screen             map[string]*ScreenProfile // keyed by profile name

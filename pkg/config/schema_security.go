@@ -244,6 +244,8 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 	// validated at the walk (spark-F1), flat keys and hierarchical peel.
 	// Same three-way verification as zones above. A typo OF a subtree
 	// root (`policie`) needs the security-level arm: #10078.
+	// #12217's tolerant compiler records unknown direct children here and
+	// poisons the policy snapshot; this arm remains the strict-commit reject.
 	"policies": {desc: "Security policies", closedWorld: true, children: map[string]*schemaNode{
 		// #3065: explicit no-match default override. Unset = deny-all
 		// (fail-closed, matching the Junos default-security-policy);
