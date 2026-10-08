@@ -5788,7 +5788,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 flow.forward_key.src_port,
                                 flow.forward_key.dst_port,
                                 policy_packet_icmp(packet_frame, meta),
-                                desc.len as u64,
                                 now_ns,
                             ) {
                                 // `fabric_punt_seed_metadata` has already

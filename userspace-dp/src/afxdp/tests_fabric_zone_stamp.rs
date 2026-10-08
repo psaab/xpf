@@ -3383,3 +3383,173 @@ fn stamped_fabric_session_miss_tcp_rst_is_suppressed_on_real_poll_12051() {
         "a V1-stamped session miss must not queue a stamp-addressed RST"
     );
 }
+
+/// #12212: the punt seed's adjudication must NOT record a policy hit.
+///
+/// `fabric_punt_seed_metadata` evaluates the flow's REAL zone pair to decide
+/// whether the seed is authorised — and the peer counts the hit when it
+/// adjudicates the punted packet on the owner leg. The seed leg's own
+/// evaluation must therefore be side-effect-free (the function's own
+/// no-double-count contract): a counting call here stamps +1 onto the
+/// admitting rule for the first packet of every punted flow, and dropping the
+/// returned counter handle cannot undo the atomic increment inside
+/// `try_match_rule`.
+///
+/// The cell drives leg 1 of `fabric_punt_seed_admits_the_peers_return_7770`
+/// verbatim (LAN-ingress SYN, LAN RG local / WAN RG peer-owned) and asserts
+/// the `lan->wan/allow-all` rule's packet counter did not move. The seed-shape
+/// assertion is LOAD-BEARING, not boilerplate: without it a fixture that had
+/// stopped matching the rule (deny path, zero by construction) would satisfy
+/// the zero-delta assertion, which proves nothing. The owner-leg control below
+/// exercises the real stamped fabric-ingress path and asserts exactly one hit.
+#[test]
+fn fabric_punt_seed_adjudication_records_no_policy_hit_12212() {
+    let forwarding = build_forwarding_state(&fabric_snapshot_with_lan_neighbor_7770());
+    let rule_before = forwarding
+        .policy
+        .rules
+        .iter()
+        .find(|r| r.rule_id.contains("allow-all"))
+        .map(|r| r.hit_counter.test_packet_count())
+        .unwrap_or(u64::MAX);
+    assert_ne!(
+        rule_before,
+        u64::MAX,
+        "the `lan->wan/allow-all` rule must exist in the built snapshot, or the \
+         delta below is read off nothing (#12212)"
+    );
+    let default_before = forwarding.policy.default_counter.test_packet_count();
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let lan_host = Ipv4Addr::new(10, 0, 61, 102);
+    let wan_peer = Ipv4Addr::new(8, 8, 8, 8);
+    // The #7770 split: LAN RG 2 is LOCAL, WAN RG 1 is the peer's.
+    let ha_state = BTreeMap::from([(2, active_rg(now_secs))]);
+    let mut sessions = SessionTable::new();
+    let mut lan_binding = lan_binding_7770();
+    let out_frame = build_txn_tcp_syn_frame_v4(
+        lan_host,
+        wan_peer,
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let out_meta = txn_meta_v4(24, TCP_FLAG_SYN, out_frame.len() as u16);
+    let (_batch, punt_dbg) = txn_run_descriptor_checked(
+        &mut lan_binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &out_frame,
+        out_meta,
+        true,
+    );
+    assert_eq!(
+        punt_dbg.policy_deny, 0,
+        "the punt must not be denied — the seed is an ADDITION to the punt \
+         path, not a new drop site (#12212)"
+    );
+    assert_eq!(
+        session_shapes_7770(&sessions),
+        vec![(
+            SessionOrigin::FabricPuntSeed,
+            ForwardingDisposition::FabricRedirect,
+            TEST_LAN_ZONE_ID,
+            TEST_WAN_ZONE_ID,
+            false,
+        )],
+        "the punt must leave EXACTLY one FabricPuntSeed session: without the \
+         seed the zero-delta assertion below proves nothing, because a punt \
+         that never matched the rule counts nothing by construction (#12212)"
+    );
+    let rule_after = forwarding
+        .policy
+        .rules
+        .iter()
+        .find(|r| r.rule_id.contains("allow-all"))
+        .map(|r| r.hit_counter.test_packet_count())
+        .unwrap_or(u64::MAX);
+    assert_eq!(
+        rule_after, rule_before,
+        "the punt-seed adjudication matched `lan->wan/allow-all` and must NOT \
+         have bumped its hit counter — the PEER counts this packet when it \
+         adjudicates the punt. A +1 here is the double-count: the first packet \
+         of every punted flow lands on both legs (#12212)"
+    );
+    // This fixture matches `allow-all` and returns before the default counter's
+    // `add_if`, so this assertion passes even with a counting evaluator. The
+    // default-exit no-hit path is covered by
+    // `the_re_derivation_records_no_hit_on_the_implicit_default_9385`.
+    assert_eq!(
+        forwarding.policy.default_counter.test_packet_count(),
+        default_before,
+        "the implicit-default counter must not move either — the walk matched \
+         a rule and never reached the default (#12212)"
+    );
+    // Positive owner-side control: the same authorized LAN -> WAN tuple
+    // reaches the node that owns WAN RG over its fabric ingress. Unlike the
+    // seed-only adjudication above, this leg owns the policy hit and must bump
+    // `lan->wan/allow-all` exactly once.
+    let owner_forwarding = build_forwarding_state(&fabric_snapshot_with_lan_neighbor_7770());
+    let owner_rule_before = owner_forwarding
+        .policy
+        .rules
+        .iter()
+        .find(|r| r.rule_id.contains("allow-all"))
+        .map(|r| r.hit_counter.test_packet_count())
+        .unwrap_or(u64::MAX);
+    assert_ne!(
+        owner_rule_before,
+        u64::MAX,
+        "the owner-side `lan->wan/allow-all` rule must exist (#12212)"
+    );
+    let owner_ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
+    let mut owner_frame = build_txn_tcp_syn_frame_v4(
+        lan_host,
+        wan_peer,
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_FABRIC_MAC,
+    );
+    stamp_fabric_zone_7770(&mut owner_frame, TEST_LAN_ZONE_ID);
+    let owner_meta = txn_meta_v4(21, TCP_FLAG_SYN, owner_frame.len() as u16);
+    let mut owner_binding = fabric_binding();
+    let mut owner_sessions = SessionTable::new();
+    let (_batch, owner_dbg) = txn_run_descriptor_checked(
+        &mut owner_binding,
+        &mut owner_sessions,
+        &owner_forwarding,
+        &owner_ha_state,
+        &owner_frame,
+        owner_meta,
+        true,
+    );
+    assert_eq!(
+        owner_dbg.policy_deny, 0,
+        "the owner-side punt must be permitted by the same rule (#12212)"
+    );
+    assert_eq!(
+        owner_sessions.len(),
+        2,
+        "the owner leg must install its forward/reverse session pair (#12212)"
+    );
+    assert_eq!(
+        owner_binding.scratch.scratch_forwards.len(),
+        1,
+        "the owner leg must forward the punted packet (#12212)"
+    );
+    let owner_rule_after = owner_forwarding
+        .policy
+        .rules
+        .iter()
+        .find(|r| r.rule_id.contains("allow-all"))
+        .map(|r| r.hit_counter.test_packet_count())
+        .unwrap_or(u64::MAX);
+    assert_eq!(
+        owner_rule_after,
+        owner_rule_before + 1,
+        "the owner's counted policy evaluation must record exactly one hit \
+         for the punted packet (#12212)"
+    );
+}

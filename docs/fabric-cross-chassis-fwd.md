@@ -1192,8 +1192,9 @@ RED-on-revert coverage for the remedy:
 `fabric_punt_seed_admits_the_peers_return_7770` (punt seeds; return admitted;
 plus a no-seed control and a denied-punt control, either of which alone would
 let a blanket relaxation pass),
-`fabric_ingress_never_mints_a_punt_seed_7770`, and
-`should_seed_fabric_punt_binds_each_condition_7770`.
+`fabric_ingress_never_mints_a_punt_seed_7770`,
+`should_seed_fabric_punt_binds_each_condition_7770`, and
+`fabric_punt_seed_adjudication_records_no_policy_hit_12212`.
 `fabric_ingress_return_traffic_is_denied_on_the_lan_node_7770` is UNCHANGED and
 still green: an unsolicited fabric-ingress return, with no seed behind it, is
 still denied.
