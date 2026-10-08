@@ -53,6 +53,20 @@ pub(super) fn enqueue_policy_reject_reply(
         PROTO_UDP => crate::filter::RejectMessage::PORT_UNREACHABLE,
         _ => return false,
     };
+    // #12051: a fabric-punted TCP packet's source MAC is a synthetic zone
+    // stamp, not the client's Ethernet address. The RST builder reflects that
+    // MAC, so on the fabric ingress it cannot reach the client. Suppress only
+    // this policy TCP leg; `deny_reply_and_emit` then reports the truthful DENY,
+    // while native ingress and non-TCP reject legs retain their existing behavior.
+    if meta.protocol == PROTO_TCP
+        && crate::afxdp::forwarding::ingress_is_fabric(forwarding, ingress_ifindex)
+        && packet_frame
+            .get(6..12)
+            .is_some_and(|source_mac| source_mac.starts_with(&[0x02, 0xbf, 0x72, 0xfe]))
+    {
+        return false;
+    }
+
     enqueue_reject_reply(
         tx_pipeline,
         forwarding,

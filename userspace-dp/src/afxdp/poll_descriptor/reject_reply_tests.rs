@@ -1908,6 +1908,67 @@ fn deny_reply_and_emit_success_logs_reject() {
         "an enqueued reject must log the truthful REJECT"
     );
 }
+/// #12051: a TCP `then reject` on a stamped fabric arrival is a truthful
+/// silent drop. The incoming source MAC is the synthetic zone stamp, not the
+/// client's L2 address; reflecting it in a RST would only queue on the fabric.
+#[test]
+fn stamped_fabric_policy_reject_suppresses_tcp_rst_and_logs_deny_12051() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (mut frame, mut meta, flow) = tcp_v4_syn();
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, 0xfe, 0x00, 0x02]);
+    meta.ingress_ifindex = 21;
+    let (handle, rx) = unlimited_event_handle();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut forwarding = ForwardingState::default();
+    forwarding.fabrics.push(FabricLink {
+        parent_ifindex: 21,
+        overlay_ifindex: 22,
+        peer_addr: "192.0.2.1".parse().unwrap(),
+        peer_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x02],
+        local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
+        up: true,
+    });
+    let mut counters = BatchCounters::default();
+    deny_reply_and_emit(
+        &mut pipeline,
+        &forwarding,
+        Some(&handle),
+        21,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+        &NatDecision::default(),
+        7,
+        9,
+        0,
+        101,
+        PolicyAction::Reject,
+        0,
+        123,
+    );
+
+    assert!(
+        pipeline.pending_tx_local.is_empty(),
+        "a stamped fabric arrival must not queue its synthetic source MAC as RST destination"
+    );
+    assert_eq!(counters.policy_reject_sent, 0);
+    let event = rx
+        .try_recv()
+        .expect("policy-deny event frame")
+        .decode_dataplane_event()
+        .expect("policy-deny payload");
+    assert_eq!(event.action, RT_FLOW_ACTION_DENY);
+}
+
 
 /// #4499 E2 (reject half): a policy `then reject` deny path emits a single
 /// RT_FLOW record whose KIND is `PolicyDeny` — NOT a `SessionCreate`
