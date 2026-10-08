@@ -967,8 +967,8 @@ row = {
     "build_exe_sha256": os.environ.get("HR_BUILD_EXE", ""),
     "build_exe_sha256_peer": opt("HR_BUILD_EXE_PEER"),
     "exe_check": os.environ["HR_EXE_CHECK"],
-    # Optional userspace-helper provenance, required by the wire-routing
-    # separation gate and additive for older rows.
+    # Optional userspace-helper provenance, required by helper-attested cluster
+    # gates and additive for older rows.
     "build_helper_exe_sha256": opt("HR_BUILD_HELPER_EXE"),
     "build_helper_exe_sha256_peer": opt("HR_BUILD_HELPER_EXE_PEER"),
     "running_helper_exe_sha256": opt("HR_RUN_HELPER_EXE"),
@@ -1279,13 +1279,20 @@ harness_result_run() {
 			harness_exe_scope "$mode" "${peer_node:-}" \
 				"${peer_running_helper_exe_sha:-}"
 		)
-		# Helper-dependent gates require a live peer and that peer's own slot.
+		# A forced-down peer is partial only for the hard-crash gates; its
+		# deploy-time helper slot is still required to name the expected image.
 		if [[ "$helper_exe_check" == "MATCH" && -n "$peer_node" &&
 			"$peer_node" != "$node" ]]; then
-			if [[ -z "$peer_running_helper_exe_sha" || -z "$build_helper_exe_peer_sha" ]]; then
+			if [[ -z "$build_helper_exe_peer_sha" ]]; then
 				helper_exe_check="UNAVAILABLE"
-			elif [[ "$peer_running_helper_exe_sha" != "$build_helper_exe_peer_sha" ]]; then
+			elif [[ -n "$peer_running_helper_exe_sha" &&
+				"$peer_running_helper_exe_sha" != "$build_helper_exe_peer_sha" ]]; then
 				helper_exe_check="MISMATCH"
+			elif [[ -z "$peer_running_helper_exe_sha" &&
+				"$gate" != "test-ha-crash" &&
+				"$gate" != "test-chained-crash" &&
+				"$gate" != "test-double-failover" ]]; then
+				helper_exe_check="UNAVAILABLE"
 			fi
 		fi
 	fi

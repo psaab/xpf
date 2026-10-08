@@ -1478,16 +1478,36 @@ else
 	bad "#11343: fixture rc=$fixture_rc scope=$(last_row_field measurement_scope) exe_check=$(last_row_field exe_check) exe_scope=$(last_row_field exe_scope) node=$(last_row_field node)"
 fi
 
-wire_target=$(sed -n '/^test-wire-routing-separation:/,/^$/p' \
-	"$SCRIPT_DIR/../../Makefile")
-if [[ "$wire_target" == *"--require-helper-attestation"* ]]; then
-	ok "#10467: test-wire-routing-separation requires helper provenance"
+makefile="$SCRIPT_DIR/../../Makefile"
+helper_gate_inventory=$(python3 - "$makefile" <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+pattern = re.compile(
+    r"(?m)^[ \t]*--gate ([a-z0-9_-]+)[^\n]*--cluster[ \t]*\\\n"
+    r"((?:[ \t]+--[^\n]*\\\n)*)"
+)
+for gate, options in pattern.findall(text):
+    print(f"{gate}\t{int('--require-helper-attestation' in options)}")
+PY
+)
+helper_gate_count=0
+missing_helper_gates=()
+while IFS=$'\t' read -r gate has_helper; do
+	[[ -n "$gate" ]] || continue
+	helper_gate_count=$((helper_gate_count + 1))
+	[[ "$has_helper" == "1" ]] || missing_helper_gates+=("$gate")
+done <<<"$helper_gate_inventory"
+hermetic_target=$(sed -n '/^test-wire-properties:/,/^$/p' "$makefile")
+if [[ "$helper_gate_count" == "23" && "${#missing_helper_gates[@]}" == "0" &&
+	"$hermetic_target" != *"--require-helper-attestation"* ]]; then
+	ok "#12140: all $helper_gate_count cluster gate invocations require helper provenance; hermetic gate is excluded"
 else
-	bad "#10467: test-wire-routing-separation is missing --require-helper-attestation"
+	bad "#12140: cluster gate census found $helper_gate_count invocations, missing flags on ${missing_helper_gates[*]:-none}, hermetic flag=$([[ "$hermetic_target" == *"--require-helper-attestation"* ]] && echo present || echo absent)"
 fi
-# 10g. The routing-instance wire gate opts into helper provenance. A helper
-# readback is distinct from xpfd's readback: both node images must match the
-# local helper build before a PASS is attributable.
+# The helper readback is distinct from xpfd's readback: both node images must
+# match the helper build before a PASS is attributable.
 printf 'pretend userspace helper\n' >"$WORK/xpf-userspace-dp"
 helper_sha=$(sha256sum "$WORK/xpf-userspace-dp" | awk '{print $1}')
 incus() {
@@ -1514,23 +1534,67 @@ else
 	bad "#10467: helper SHA fields were not recorded for both nodes"
 fi
 
-helper_stale_sha=$(printf 's%.0s' {1..64})
+helper_stale_sha=$(printf 'f%.0s' {1..64})
+# shellcheck disable=SC2329  # The harness calls this mock indirectly.
 incus() {
 	case "$*" in
 	*'pidof xpf-userspace-dp'*) echo "$helper_stale_sha  /proc/9876/exe" ;;
 	*) echo "$fake_sha  /proc/1234/exe" ;;
 	esac
 }
+while IFS=$'\t' read -r gate has_helper; do
+	[[ -n "$gate" ]] || continue
+	(harness_result_run --ledger "$LEDGER" --cluster --require-helper-attestation \
+		--env testenv --gate "$gate" --adapter smoke-cells \
+		--node fake:fw0 --node-peer fake:fw1 --build-exe "$WORK/xpfd" \
+		--build-helper-exe "$WORK/xpf-userspace-dp" -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+	if [[ "$(last_row_field gate)" == "$gate" &&
+		"$(last_row_field verdict)" == "VOID" &&
+		"$(last_row_field helper_exe_check)" == "MISMATCH" &&
+		"$(last_row_field void_reason)" == *"helper_exe_check=MISMATCH"* ]]; then
+		ok "#12140: $gate records helper MISMATCH as VOID"
+	else
+		bad "#12140: $gate gave verdict=$(last_row_field verdict) helper_exe_check=$(last_row_field helper_exe_check)"
+	fi
+done <<<"$helper_gate_inventory"
+
+# shellcheck disable=SC2329  # The harness calls this mock indirectly.
+incus() {
+	local arg
+	for arg in "$@"; do
+		case "$arg" in
+			*fw1*) return 1 ;;
+		esac
+	done
+	case "$*" in
+	*'pidof xpf-userspace-dp'*) echo "$helper_sha  /proc/9876/exe" ;;
+	*) echo "$fake_sha  /proc/1234/exe" ;;
+	esac
+}
+for gate in test-ha-crash test-chained-crash test-double-failover; do
+	(harness_result_run --ledger "$LEDGER" --cluster --require-helper-attestation \
+		--env testenv --gate "$gate" --adapter smoke-cells \
+		--node fake:fw0 --node-peer fake:fw1 --build-exe "$WORK/xpfd" \
+		--build-helper-exe "$WORK/xpf-userspace-dp" -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+	if [[ "$(last_row_field gate)" == "$gate" &&
+		"$(last_row_field verdict)" == "PASS" &&
+		"$(last_row_field helper_exe_check)" == "MATCH" &&
+		"$(last_row_field helper_exe_scope)" == "local-only" ]]; then
+		ok "#12140: $gate preserves PASS with a down peer and records local-only helper scope"
+	else
+		bad "#12140: $gate down-peer gave verdict=$(last_row_field verdict) helper_exe_check=$(last_row_field helper_exe_check) helper_exe_scope=$(last_row_field helper_exe_scope)"
+	fi
+done
+
 (harness_result_run --ledger "$LEDGER" --cluster --require-helper-attestation \
-	--env testenv --gate fake-helper-stale --adapter smoke-cells \
+	--env testenv --gate test-failover --adapter ha-smoke \
 	--node fake:fw0 --node-peer fake:fw1 --build-exe "$WORK/xpfd" \
 	--build-helper-exe "$WORK/xpf-userspace-dp" -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
 if [[ "$(last_row_field verdict)" == "VOID" &&
-	"$(last_row_field helper_exe_check)" == "MISMATCH" &&
-	"$(last_row_field void_reason)" == *"helper_exe_check=MISMATCH"* ]]; then
-	ok "#10467: stale helper readback records MISMATCH and VOID, never a PASS"
+	"$(last_row_field helper_exe_check)" == "UNAVAILABLE" ]]; then
+	ok "#12140: a down peer on a non-crash gate remains VOID"
 else
-	bad "#10467: stale helper gave verdict=$(last_row_field verdict) helper_exe_check=$(last_row_field helper_exe_check)"
+	bad "#12140: non-crash down-peer gave verdict=$(last_row_field verdict) helper_exe_check=$(last_row_field helper_exe_check)"
 fi
 rm -f "$WORK/xpf-userspace-dp"
 unset -f incus _peer_incus_mock
