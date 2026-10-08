@@ -1073,11 +1073,17 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 	// be compared with the unshared-commit mark.
 	divergence := s.classifySyncLocked(tree)
 
-	// Push current active to history.
-	s.history.Push(&HistoryEntry{
-		Config:    s.active.Clone(),
-		Timestamp: time.Now(),
-	})
+	// #12163: a repeated peer sync of the text already active carries no new
+	// rollback target. In particular, SyncApply promotes before dataplane
+	// apply, so a persistent apply NACK causes the daemon's reconcile loop to
+	// retry this same config every 30 seconds. Do not let those retries evict
+	// distinct rollback history.
+	if configTextDigest(tree.Format()) != configTextDigest(s.active.Format()) {
+		s.history.Push(&HistoryEntry{
+			Config:    s.active.Clone(),
+			Timestamp: time.Now(),
+		})
+	}
 
 	s.active = tree
 	s.compiled = compiled
