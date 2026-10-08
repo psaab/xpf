@@ -192,16 +192,16 @@ func deviceMapOriginalNameFor(currentNIC, logical string) (string, bool) {
 	return currentNIC, true
 }
 
-// deviceMapOriginalUnknown marks, inside originalByCurrent, a bound NIC whose
-// true pre-rename kernel name could not be derived (#6678).
+// originalNameUnknown marks, inside originalByCurrent, a NIC whose true
+// pre-rename kernel name could not be established (#6678/#12156).
 //
 // It is carried as a VALUE rather than in a separate set because
 // breakNameCollisions re-keys originalByCurrent across the temp rename and
 // only rewrites KEYS — a sentinel value survives that untouched, so this needs
-// no signature change to a helper the positional rename path shares. The NUL
+// no signature change to the shared positional/device-map helper. The NUL
 // prefix makes it unrepresentable as an interface name, so it can never be
 // confused with one or silently written into a .link.
-const deviceMapOriginalUnknown = "\x00xpf-original-unknown"
+const originalNameUnknown = "\x00xpf-original-unknown"
 
 // enumerateAndRenameMapped is the device-map-mode replacement for
 // enumerateAndRenameInterfaces. It renames ONLY mapped NICs to their bound
@@ -285,7 +285,7 @@ func enumerateAndRenameMapped(dm *config.DeviceMapConfig, cfg *config.Config, pr
 			if orig, ok := deviceMapOriginalNameFor(b.CurrentNIC, b.Logical); ok {
 				originalByCurrent[b.CurrentNIC] = orig
 			} else {
-				originalByCurrent[b.CurrentNIC] = deviceMapOriginalUnknown
+				originalByCurrent[b.CurrentNIC] = originalNameUnknown
 			}
 			desiredNames[b.Logical] = true
 			slog.Info("device-map: resolved binding",
@@ -371,7 +371,7 @@ func enumerateAndRenameMapped(dm *config.DeviceMapConfig, cfg *config.Config, pr
 		if original == "" {
 			original = recoverOriginalName(current)
 		}
-		if original == deviceMapOriginalUnknown {
+		if original == originalNameUnknown {
 			// #6678: no udev-matchable pre-rename name exists for this NIC.
 			// Writing a .link anyway would record an OriginalName= udev never
 			// presents, so the file would silently never match and this NIC

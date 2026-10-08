@@ -1235,9 +1235,17 @@ func (d *Daemon) setupBootstrapLifeline() {
 		return
 	}
 
-	// Rename just this one NIC to fxp0 (writes the .link + renames).
-	original := recoverOriginalName(lifeline)
-	if _, err := writeLinkFile(defaultMgmtInterface, original); err != nil {
+	// Rename just this one NIC to fxp0 (writes the .link + renames). When the
+	// NIC already wears fxp0 but no existing .link records its kernel name,
+	// retain any MAC-form .link rather than replacing it with the unmatchable
+	// OriginalName=fxp0 (#12156).
+	original, originalOK := positionalOriginalNameFor(lifeline, defaultMgmtInterface)
+	if !originalOK {
+		slog.Error("bootstrap: cannot determine the pre-rename kernel name for the "+
+			"management NIC; refusing to write a .link whose OriginalName= could "+
+			"never match. Any existing MAC-form .link is retained.",
+			"interface", lifeline, "logical", defaultMgmtInterface)
+	} else if _, err := writeLinkFile(defaultMgmtInterface, original); err != nil {
 		// #5842: the bootstrap lifeline .link is the file that keeps the
 		// management NIC named fxp0 across the next boot. Log it loudly rather
 		// than discarding — this path has no error channel to return on, so

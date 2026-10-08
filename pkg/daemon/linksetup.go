@@ -255,20 +255,20 @@ func assignName(idx, fpc int, clusterMode bool) string {
 }
 
 // renamePositional performs the collision-safe two-pass positional rename
-// (#4178). It captures every NIC's OriginalName from the EXISTING .link set
-// BEFORE writing any file (so a mid-pass overwrite can never feed a corrupted
-// OriginalName into a later NIC's recovery), breaks target-name collisions via
-// temp names (so an enumeration shift does not EEXIST-strand a rename), then
-// writes each .link with the pre-captured OriginalName and renames to the
+// (#4178). It captures each verified OriginalName (or an unknown sentinel)
+// from the EXISTING .link set BEFORE writing any file (so a mid-pass overwrite
+// can never feed a corrupted OriginalName into a later NIC's recovery), breaks
+// target-name collisions via temp names (so an enumeration shift does not
+// EEXIST-strand a rename), then writes eligible .link files and renames to the
 // final name. renameFn is injected so production passes renameInterface and
 // tests can model EEXIST semantics. Returns true if any .link changed or any
 // rename ran.
 func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(from, to string) error) (bool, []error) {
-	// Phase 0: snapshot targets and capture EVERY OriginalName up-front, from
-	// the .link set as it exists BEFORE this pass writes anything. This is the
-	// core of the #4178 fix: the previous single-pass loop wrote .link file idx
-	// then let idx+1's recoverOriginalName read that just-overwritten file, so
-	// an enumeration shift corrupted the OriginalName chain.
+	// Phase 0: snapshot targets and capture each verified OriginalName or
+	// unknown sentinel up-front, from the .link set as it exists BEFORE this
+	// pass writes anything. This is the core of the #4178 fix: the previous
+	// single-pass loop wrote .link file idx then let idx+1's recovery read that
+	// just-overwritten file, so an enumeration shift corrupted the chain.
 	desiredByCurrent := make(map[string]string, len(nics))
 	originalByCurrent := make(map[string]string, len(nics))
 	desiredNames := make(map[string]bool, len(nics))
@@ -276,7 +276,15 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 	for idx, nic := range nics {
 		target := assignName(idx, fpc, clusterMode)
 		desiredByCurrent[nic.name] = target
-		originalByCurrent[nic.name] = recoverOriginalName(nic.name)
+		if original, ok := positionalOriginalNameFor(nic.name, target); ok {
+			originalByCurrent[nic.name] = original
+		} else {
+			// #12156: the NIC already wears its final logical name, but no
+			// .link records a kernel original. Carry "unknown" through the
+			// shared collision-break re-keying without manufacturing
+			// OriginalName=<logical name>.
+			originalByCurrent[nic.name] = originalNameUnknown
+		}
 		desiredNames[target] = true
 		currentNames[idx] = nic.name
 	}
@@ -299,7 +307,22 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 	for current, final := range desiredByCurrent {
 		original := originalByCurrent[current]
 		if original == "" {
-			original = recoverOriginalName(current)
+			var ok bool
+			original, ok = positionalOriginalNameFor(current, final)
+			if !ok {
+				original = originalNameUnknown
+			}
+		}
+		if original == originalNameUnknown {
+			// #12156: no udev-matchable kernel original is known. Keep any
+			// existing MAC-form .link intact rather than replacing it with
+			// OriginalName=<logical name>, which udev never presents. Positional
+			// naming still claims every NIC, so this skip is not a rename refusal.
+			slog.Warn("linksetup: cannot determine the pre-rename kernel name for "+
+				"this NIC; skipping the .link write instead of persisting an "+
+				"unmatchable OriginalName=. Any existing MAC-form .link is retained.",
+				"current", current, "logical", final)
+			continue
 		}
 		wrote, err := writeLinkFile(final, original)
 		if err != nil {
@@ -329,6 +352,24 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 		}
 	}
 	return changed, errs
+}
+
+// positionalOriginalNameFor determines whether positional naming has a
+// udev-matchable OriginalName for this NIC. A previously recorded name is
+// verified by the existing .link chain. With no recorded original, a NIC
+// whose current name differs from its assigned final name is still under its
+// kernel name (first rename); when current == final, the name alone cannot
+// prove a kernel original, so callers must retain any existing MAC-form link
+// instead of persisting an unmatchable OriginalName=<logical name> (#12156).
+func positionalOriginalNameFor(current, final string) (string, bool) {
+	original := recoverOriginalName(current)
+	if original != current {
+		return original, true
+	}
+	if current != final {
+		return current, true
+	}
+	return "", false
 }
 
 // breakNameCollisions is the shared phase-1 collision break used by BOTH the
@@ -492,7 +533,9 @@ func verifyPositionalNames(fpc int, clusterMode bool) []error {
 }
 
 // recoverOriginalName returns the OriginalName from an existing .link file
-// if the interface was previously renamed, otherwise returns the current name.
+// if one is recorded for this name, otherwise returns currentName. The
+// fallback is not itself proof that currentName is a pre-rename kernel name;
+// callers persisting it must check their target-name context first (#12156).
 func recoverOriginalName(currentName string) string {
 	// Search existing .link files for one that renames TO this name.
 	entries, err := os.ReadDir(linkDir)
