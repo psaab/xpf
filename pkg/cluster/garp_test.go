@@ -228,7 +228,7 @@ func TestBuildUnsolicitedNA(t *testing.T) {
 	mac, _ := net.ParseMAC("de:ad:be:ef:00:01")
 	ip := net.ParseIP("2001:db8::1")
 
-	pkt := buildUnsolicitedNA(mac, ip)
+	pkt := buildUnsolicitedNA(mac, ip, ip)
 
 	if len(pkt) != 86 {
 		t.Fatalf("packet length = %d, want 86", len(pkt))
@@ -331,6 +331,31 @@ func TestBuildUnsolicitedNA(t *testing.T) {
 		t.Error("ICMPv6 checksum should be non-zero")
 	}
 }
+func TestBuildUnsolicitedProxyNASeparatesSourceFromTarget(t *testing.T) {
+	mac, _ := net.ParseMAC("de:ad:be:ef:00:01")
+	source := net.ParseIP("fe80::1234")
+	target := net.ParseIP("2001:db8::7")
+
+	pkt := buildUnsolicitedNA(mac, source, target)
+	if got := net.IP(pkt[22:38]); !got.Equal(source) {
+		t.Errorf("IPv6 source = %s, want assigned interface source %s", got, source)
+	}
+	if got := net.IP(pkt[62:78]); !got.Equal(target) {
+		t.Errorf("NA target = %s, want proxy target %s", got, target)
+	}
+	// This daemon is a forwarding router; R=1 describes the sender, not the
+	// proxied target. Override=1 replaces the stale neighbor binding and
+	// Solicited=0 is required for this multicast announcement.
+	if pkt[58] != 0xA0 {
+		t.Errorf("NA flags = 0x%02x, want Router+Override and no Solicited flag (0xA0)", pkt[58])
+	}
+
+	original := binary.BigEndian.Uint16(pkt[56:58])
+	pkt[56], pkt[57] = 0, 0
+	if got := icmpv6Checksum(pkt[22:38], pkt[38:54], pkt[54:86]); got != original {
+		t.Errorf("checksum = 0x%04x, recomputed with distinct source/target = 0x%04x", original, got)
+	}
+}
 
 func TestProbeIPv6SourcePrefersGlobal(t *testing.T) {
 	addrs := []net.Addr{
@@ -368,7 +393,7 @@ func TestICMPv6Checksum(t *testing.T) {
 	// Build a known packet and verify checksum validates.
 	mac, _ := net.ParseMAC("de:ad:be:ef:00:01")
 	ip := net.ParseIP("2001:db8::1")
-	pkt := buildUnsolicitedNA(mac, ip)
+	pkt := buildUnsolicitedNA(mac, ip, ip)
 
 	// Extract the checksum that was written.
 	originalCsum := binary.BigEndian.Uint16(pkt[56:58])

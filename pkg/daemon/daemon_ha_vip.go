@@ -484,12 +484,12 @@ func (d *Daemon) scheduleDirectAnnounce(rgID int, reason string) {
 
 // directGARPBurstFn and directNABurstFn are seams over the cluster gated burst
 // senders so directSendGARPs' #2898 abdication gate is unit-testable without
-// raw-socket I/O. Production wires them to the cluster gated senders, which send
-// the first (immediate) frame unconditionally and gate only the 50ms follow-up
-// loop on the supplied BurstStillValid predicate.
+// raw-socket I/O. directProxyNABurstFn uses the same gate but selects a valid
+// interface source address distinct from the proxy target.
 var (
-	directGARPBurstFn = cluster.SendGratuitousARPBurstGated
-	directNABurstFn   = cluster.SendGratuitousIPv6BurstGated
+	directGARPBurstFn    = cluster.SendGratuitousARPBurstGated
+	directNABurstFn      = cluster.SendGratuitousIPv6BurstGated
+	directProxyNABurstFn = cluster.SendProxyGratuitousIPv6BurstGated
 )
 
 // directARPProbeFn is the supplementary gateway ARP-probe sender used by
@@ -820,7 +820,7 @@ func (d *Daemon) announceProxyARPPoolAddresses(cfg *config.Config, rgID int, sti
 					continue
 				}
 			} else {
-				if err := directNABurstFn(ifName, ip, 1, stillValid); err != nil {
+				if err := directProxyNABurstFn(ifName, ip, 1, stillValid); err != nil {
 					slog.Warn("directSendGARPs: pool proxy-NDP announce failed",
 						"iface", ifName, "ip", ip, "rg", rgID, "err", err)
 					continue

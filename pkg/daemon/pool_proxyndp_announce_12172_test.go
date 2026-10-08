@@ -99,14 +99,14 @@ func captureNA12172(t *testing.T) *[]naCall12172 {
 	t.Helper()
 	var mu sync.Mutex
 	calls := []naCall12172{}
-	prev := directNABurstFn
-	directNABurstFn = func(iface string, ip net.IP, count int, stillValid cluster.BurstStillValid) error {
+	prev := directProxyNABurstFn
+	directProxyNABurstFn = func(iface string, ip net.IP, count int, stillValid cluster.BurstStillValid) error {
 		mu.Lock()
 		defer mu.Unlock()
 		calls = append(calls, naCall12172{iface: iface, ip: ip.String(), count: count})
 		return nil
 	}
-	t.Cleanup(func() { directNABurstFn = prev })
+	t.Cleanup(func() { directProxyNABurstFn = prev })
 	return &calls
 }
 
@@ -258,17 +258,17 @@ func TestPoolAnnounceAttemptBoundCoversSendFailures12172(t *testing.T) {
 	// A raw-socket failure still consumed one attempt. It must not let later
 	// addresses expand the per-failover fan-out beyond the same shared bound.
 	var garpAttempts, naAttempts int
-	prevARP, prevNA := directGARPBurstFn, directNABurstFn
+	prevARP, prevNA := directGARPBurstFn, directProxyNABurstFn
 	directGARPBurstFn = func(iface string, ip net.IP, count int, stillValid cluster.BurstStillValid) error {
 		garpAttempts++
 		return errors.New("synthetic send failure")
 	}
-	directNABurstFn = func(iface string, ip net.IP, count int, stillValid cluster.BurstStillValid) error {
+	directProxyNABurstFn = func(iface string, ip net.IP, count int, stillValid cluster.BurstStillValid) error {
 		naAttempts++
 		return errors.New("synthetic send failure")
 	}
 	t.Cleanup(func() {
-		directGARPBurstFn, directNABurstFn = prevARP, prevNA
+		directGARPBurstFn, directProxyNABurstFn = prevARP, prevNA
 	})
 
 	var addrs []string
