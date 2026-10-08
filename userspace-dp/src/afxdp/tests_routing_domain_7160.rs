@@ -125,7 +125,15 @@ fn drive_lan_segment(
     binding.interface = Arc::<str>::from("reth1.0");
 
     let mut sessions = SessionTable::new();
+    // #11600: these synthetic established sessions stand in for records
+    // installed by the packet path. Seed the same validation stamps that the
+    // real admission path writes, so hit-time SNAT revalidation does not
+    // mistake their hand-built decisions for sessions with unknown provenance.
+    sessions.set_forwarding_revalidation_gen(7, 9);
     install(&mut sessions);
+    for domain in [0, lan_routing_domain] {
+        sessions.mark_source_nat_revalidated(&session_key(domain), Some(false));
+    }
 
     // An established segment (ACK, no SYN): on a session MISS the #4400/#4539
     // guard declines to seed a session for a non-SYN first packet, so "which
