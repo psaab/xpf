@@ -31,6 +31,11 @@ if ! command -v unshare >/dev/null 2>&1; then
 	exit 77
 fi
 
+if ! command -v ip >/dev/null 2>&1; then
+	echo "SKIP: iproute2 not found — the readback cells verify the kernel's stored selector through ip"
+	exit 77
+fi
+
 # Probe the capability rather than assuming it: unprivileged user namespaces are
 # disabled on some hosts, and running as a non-root user without them cannot
 # create a netns. A probe that cannot distinguish "denied" from "works" would
@@ -41,4 +46,32 @@ if ! unshare -rn true 2>/dev/null; then
 fi
 
 # -count=1 so a cached PASS can never stand in for a run that did not happen.
-unshare -rn "$GO" test -count=1 -run 7796 ./pkg/routing/
+# -v plus the named scan below so a skipped cell can never read as a pass: the
+# two readback cells SKIP when `ip` is absent, and without -v go test prints
+# only `ok` and the leg exits 0. The scan pins the four kernel cells BY NAME,
+# because a `-run` predicate that rots matches nothing and reports a clean pass
+# over an empty set. The two hermetic 7796 cells still run; they cannot skip.
+out=$(unshare -rn "$GO" test -count=1 -v -run 7796 ./pkg/routing/ 2>&1)
+rc=$?
+
+fail=0
+for cell in TestRuleAddDSCPAcceptedByKernel7796 TestRuleDSCPRoundTripsThroughKernel7796 TestRuleAddDSCPRejectsLegacyTOS7796 TestDSCPZeroIsDistinctFromNoDSCP7796; do
+	if ! printf '%s\n' "$out" | grep -q "^=== RUN   $cell\$"; then
+		echo "FAIL: $cell did not run — the -run predicate has rotted"
+		fail=1
+	fi
+	if printf '%s\n' "$out" | grep -q "^--- SKIP: $cell "; then
+		echo "FAIL: $cell SKIPPED — a skipped apply-leg cell reads as a pass"
+		fail=1
+	fi
+done
+if [ "$rc" -ne 0 ]; then
+	echo "FAIL: go test exited $rc"
+	fail=1
+fi
+if [ "$fail" -ne 0 ]; then
+	printf '%s\n' "$out" | sed 's/^/      /'
+	exit 1
+fi
+echo "PASS: all four 7796 kernel cells ran and passed"
+exit 0
