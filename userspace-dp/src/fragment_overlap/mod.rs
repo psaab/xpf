@@ -92,6 +92,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+use crate::hot_hash_seed::hot_path_hash_seed;
 use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6};
 use crate::nat::NatDecision;
 
@@ -171,6 +172,7 @@ pub(crate) enum OverlapParse {
 pub(crate) struct OverlapTracker {
     shards: Arc<Vec<Mutex<Vec<OverlapEntry>>>>,
     next_revision: Arc<AtomicU64>,
+    seed: u64,
 }
 
 impl std::fmt::Debug for OverlapTracker {
@@ -198,11 +200,12 @@ fn ip_octets(ip: IpAddr, out: &mut [u8; 16]) -> usize {
     }
 }
 
-/// FNV-1a over the coarse `(family, src, dst, ident)` digest. Protocol and routing
-/// domain are deliberately excluded so same-datagram candidates (hostile proto-varying
-/// v4, cross-domain floods) co-locate in one shard; membership is by full-key equality.
-pub(crate) fn overlap_shard_index(key: &OverlapKey) -> usize {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+/// Seeded FNV-1a plus the assoc-compatible multiply-shift finalizer over the coarse
+/// `(family, src, dst, ident)` digest. Protocol and routing domain are deliberately
+/// excluded so same-datagram candidates (hostile proto-varying v4, cross-domain floods)
+/// co-locate in one shard; membership is by full-key equality.
+pub(crate) fn overlap_shard_index_seeded(key: &OverlapKey, seed: u64) -> usize {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ seed;
     let mut mix = |b: u8| {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
@@ -220,7 +223,13 @@ pub(crate) fn overlap_shard_index(key: &OverlapKey) -> usize {
     for b in key.ident.to_be_bytes() {
         mix(b);
     }
-    (h as usize) & (OVERLAP_SHARDS - 1)
+    (h.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        >> (u64::BITS - OVERLAP_SHARDS.trailing_zeros())) as usize
+}
+
+#[cfg(test)]
+pub(crate) fn overlap_shard_index(key: &OverlapKey) -> usize {
+    overlap_shard_index_seeded(key, hot_path_hash_seed())
 }
 /// Fairness identity (#10658): the admitted sender. `dst`/`ident`/`protocol` are
 /// excluded — keying them would let one sender mint fresh quota by varying the
@@ -443,6 +452,10 @@ impl Drop for OverlapCheckResult {
 
 impl OverlapTracker {
     pub(crate) fn new() -> Self {
+        Self::with_seed(hot_path_hash_seed())
+    }
+
+    fn with_seed(seed: u64) -> Self {
         let mut shards = Vec::with_capacity(OVERLAP_SHARDS);
         for _ in 0..OVERLAP_SHARDS {
             shards.push(Mutex::new(Vec::with_capacity(OVERLAP_CAP_PER_SHARD)));
@@ -450,7 +463,13 @@ impl OverlapTracker {
         Self {
             shards: Arc::new(shards),
             next_revision: Arc::new(AtomicU64::new(1)),
+            seed,
         }
+    }
+
+    #[inline]
+    fn shard_index(&self, key: &OverlapKey) -> usize {
+        overlap_shard_index_seeded(key, self.seed)
     }
 
     /// Pure overlap CHECK: same verdict [`Self::check_and_record`] would return, but
@@ -517,7 +536,7 @@ impl OverlapTracker {
                 tracker: None,
             };
         }
-        let idx = overlap_shard_index(&key);
+        let idx = self.shard_index(&key);
         let mut shard = self.shards[idx]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -642,7 +661,7 @@ impl OverlapTracker {
                 tracker: None,
             };
         }
-        let idx = overlap_shard_index(&key);
+        let idx = self.shard_index(&key);
         let mut shard = self.shards[idx]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -764,7 +783,7 @@ impl OverlapTracker {
     /// Reclaim happens only when every recorded fragment has settled, the
     /// datagram has a terminal range, and no admission failed.
     pub(crate) fn commit_admission(&self, token: OverlapAdmissionToken) -> bool {
-        let idx = overlap_shard_index(&token.key);
+        let idx = self.shard_index(&token.key);
         let mut shard = self.shards[idx]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -791,7 +810,7 @@ impl OverlapTracker {
     /// Failed datagrams retain their ranges as overlap protection but can
     /// never be reclaimed by later completion coverage.
     pub(crate) fn fail_admission(&self, token: OverlapAdmissionToken) -> bool {
-        let idx = overlap_shard_index(&token.key);
+        let idx = self.shard_index(&token.key);
         let mut shard = self.shards[idx]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -811,7 +830,7 @@ impl OverlapTracker {
     /// uses [`Self::commit_admission`] so queued fragments cannot reclaim early.
     #[cfg(test)]
     pub(crate) fn release_completed(&self, token: OverlapCompletionToken) -> bool {
-        let idx = overlap_shard_index(&token.key);
+        let idx = self.shard_index(&token.key);
         let mut shard = self.shards[idx]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2094,6 +2113,99 @@ mod tests {
             t.len(),
             OVERLAP_CAP_PER_SENDER_PER_SHARD * OVERLAP_SHARDS + 8,
             "attacker residue must stay sender-quota-bounded alongside victims"
+        );
+    }
+    #[test]
+    fn seeded_index_defeats_targeted_single_shard_fill_12189() {
+        // DSM-027: four permitted sources can each hold eight incomplete
+        // datagram anchors. These fixed vectors were precomputed against the
+        // unseeded index and also collide when the assoc-compatible finalizer
+        // has a zero seed, exhausting one domain shard and fail-closing a
+        // legitimate key there.
+        const ATTACK_SOURCES: [u8; 4] = [101, 102, 103, 104];
+        const DOMAIN: u32 = 7;
+        const TARGET_SHARD: usize = 5;
+        let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+        let attack_idents: [[u32; 8]; 4] = [
+            [128, 224, 275, 538, 762, 1343, 1542, 1638],
+            [163, 195, 605, 765, 842, 1689, 1785, 1814],
+            [194, 341, 600, 760, 1262, 1732, 2349, 2509],
+            [498, 808, 968, 1089, 1486, 1908, 2004, 2109],
+        ];
+        let t = OverlapTracker::with_seed(1);
+        let now_ns = 1_000u64;
+        let mut admitted = 0usize;
+        for (s, idents) in ATTACK_SOURCES.iter().zip(attack_idents.iter()) {
+            for ident in idents {
+                let key = OverlapKey {
+                    addr_family: libc::AF_INET as u8,
+                    src: IpAddr::V4(Ipv4Addr::new(10, 0, 61, *s)),
+                    dst,
+                    ident: *ident,
+                    protocol: 6,
+                    routing_domain: DOMAIN,
+                };
+                if !t.check_and_record(key, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED) {
+                    admitted += 1;
+                }
+            }
+        }
+        assert_eq!(
+            admitted,
+            OVERLAP_CAP_PER_DOMAIN_PER_SHARD,
+            "crafted attack set must fully admit"
+        );
+
+        let mut seen = [false; OVERLAP_SHARDS];
+        for (s, idents) in ATTACK_SOURCES.iter().zip(attack_idents.iter()) {
+            for ident in idents {
+                let key = OverlapKey {
+                    addr_family: libc::AF_INET as u8,
+                    src: IpAddr::V4(Ipv4Addr::new(10, 0, 61, *s)),
+                    dst,
+                    ident: *ident,
+                    protocol: 6,
+                    routing_domain: DOMAIN,
+                };
+                assert_eq!(
+                    overlap_shard_index_seeded(&key, 0),
+                    TARGET_SHARD,
+                    "without the secret seed the precomputed key remains in the target shard"
+                );
+                seen[t.shard_index(&key)] = true;
+            }
+        }
+        let spread = seen.iter().filter(|&&shard_has_keys| shard_has_keys).count();
+        assert!(
+            spread >= 2,
+            "seeded index must scatter the offline-computed set (spread={spread})"
+        );
+
+        let mut victim = OverlapKey {
+            addr_family: libc::AF_INET as u8,
+            src: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 200)),
+            dst,
+            ident: 0,
+            protocol: 6,
+            routing_domain: DOMAIN,
+        };
+        while t.shard_index(&victim) != TARGET_SHARD {
+            victim.ident += 1;
+        }
+        let mut same_datagram = victim;
+        same_datagram.protocol = 17;
+        same_datagram.routing_domain = DOMAIN + 1;
+        assert_eq!(
+            t.shard_index(&same_datagram),
+            t.shard_index(&victim),
+            "protocol and routing domain must not split same-datagram shard placement"
+        );
+
+        let result = t.check_and_record_detailed(victim, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED);
+        assert!(
+            !result.dropped,
+            "legitimate same-domain key in shard {TARGET_SHARD} must forward, reason={:?}",
+            result.reason
         );
     }
 
