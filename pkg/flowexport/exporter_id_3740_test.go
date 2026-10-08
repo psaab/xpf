@@ -182,10 +182,10 @@ func TestIPFIXObservationDomainDistinctPerGroup(t *testing.T) {
 // singular Build* helpers and the pre-#3740 unnamed single-default deployment
 // are on the pre-existing wire.
 func TestStableExporterIDDegenerateDefault(t *testing.T) {
-	if got := stableExporterID("netflow9", "", ""); got != 1 {
+	if got := stableExporterID("netflow9", "", "", false); got != 1 {
 		t.Fatalf("degenerate default (netflow9) = %d, want 1", got)
 	}
-	if got := stableExporterID("ipfix", "", ""); got != 1 {
+	if got := stableExporterID("ipfix", "", "", false); got != 1 {
 		t.Fatalf("degenerate default (ipfix) = %d, want 1", got)
 	}
 
@@ -215,33 +215,71 @@ func TestStableExporterIDDegenerateDefault(t *testing.T) {
 	}
 }
 
+// TestStableExporterIDFamilyMigration pins the #12148 migration contract:
+// inet hashes retain their established values while inet6 gets a separate id.
+func TestStableExporterIDFamilyMigration(t *testing.T) {
+	cases := []struct {
+		proto  string
+		wantV4 uint32
+	}{
+		{"netflow9", 3503984933},
+		{"ipfix", 2107433690},
+	}
+	for _, c := range cases {
+		v4 := stableExporterID(c.proto, "inst0", "tmplA", false)
+		v6 := stableExporterID(c.proto, "inst0", "tmplA", true)
+		if v4 != c.wantV4 {
+			t.Errorf("%s inet id = %d, want pre-#12148 value %d", c.proto, v4, c.wantV4)
+		}
+		if v4 == v6 {
+			t.Errorf("%s inet and inet6 ids collide: %d", c.proto, v4)
+		}
+		if again := stableExporterID(c.proto, "inst0", "tmplA", true); again != v6 {
+			t.Errorf("%s inet6 id is not deterministic: first=%d second=%d", c.proto, v6, again)
+		}
+	}
+
+	// Preserve the historical unnamed inet default, but never let an unnamed
+	// inet6 group share that id.
+	if got := stableExporterID("netflow9", "", "", false); got != 1 {
+		t.Errorf("unnamed inet id = %d, want historical 1", got)
+	}
+	if got := stableExporterID("netflow9", "", "", true); got == 1 {
+		t.Error("unnamed inet6 id collides with historical inet default 1")
+	}
+}
+
 // TestStableExporterIDHASymmetry: the id is a pure function of config-synced
 // inputs and of NOTHING node-specific, so both cluster nodes ("node0"/"node1"
 // builds) compute the SAME id for a given group -- a failover never presents
 // the collector a new observation domain. Determinism across repeated
 // evaluation stands in for the two builds (there is no node input to vary).
 func TestStableExporterIDHASymmetry(t *testing.T) {
-	cases := []struct{ proto, inst, tmpl string }{
-		{"netflow9", "inst0", "tmplA"},
-		{"netflow9", "instX", ""},
-		{"ipfix", "inst0", "tmplB"},
-		{"ipfix", "", "onlytmpl"},
+	cases := []struct {
+		proto, inst, tmpl string
+		isV6              bool
+	}{
+		{"netflow9", "inst0", "tmplA", false},
+		{"netflow9", "instX", "", false},
+		{"ipfix", "inst0", "tmplB", false},
+		{"ipfix", "", "onlytmpl", false},
+		{"netflow9", "inst0", "tmplA", true},
 	}
 	for _, c := range cases {
-		node0 := stableExporterID(c.proto, c.inst, c.tmpl)
-		node1 := stableExporterID(c.proto, c.inst, c.tmpl)
+		node0 := stableExporterID(c.proto, c.inst, c.tmpl, c.isV6)
+		node1 := stableExporterID(c.proto, c.inst, c.tmpl, c.isV6)
 		if node0 != node1 {
-			t.Fatalf("HA asymmetry for (%s,%s,%s): node0=%d node1=%d",
-				c.proto, c.inst, c.tmpl, node0, node1)
+			t.Fatalf("HA asymmetry for (%s,%s,%s,v6=%v): node0=%d node1=%d",
+				c.proto, c.inst, c.tmpl, c.isV6, node0, node1)
 		}
 		if node0 == 0 {
-			t.Fatalf("id must be nonzero for (%s,%s,%s)", c.proto, c.inst, c.tmpl)
+			t.Fatalf("id must be nonzero for (%s,%s,%s,v6=%v)", c.proto, c.inst, c.tmpl, c.isV6)
 		}
 	}
 
 	// The protocol tag disambiguates a v9 and an IPFIX group with an identical
 	// instance/template (belt-and-braces; #2136 keeps them from co-pointing).
-	if stableExporterID("netflow9", "inst0", "tmplA") == stableExporterID("ipfix", "inst0", "tmplA") {
+	if stableExporterID("netflow9", "inst0", "tmplA", false) == stableExporterID("ipfix", "inst0", "tmplA", false) {
 		t.Fatal("netflow9 and ipfix groups with identical instance/template share an id")
 	}
 }

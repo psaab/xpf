@@ -786,12 +786,11 @@ type IPFIXExporter struct {
 // embeds the live 1-in-N sampleCounter (atomic.Uint64) and copying it
 // would fork the counter, re-seeding the sampling cadence (#2224).
 func NewIPFIXExporter(cfg *ExportConfig) (*IPFIXExporter, error) {
-	// #3740: stable per-group Observation Domain ID (RFC 7011 §3.1) derived
-	// from the config identity so two same-collector groups no longer collide
-	// on ODID=1 (template redefinitions + interleaved sequence streams).
-	// HA-symmetric (pure function of config-synced fields — both cluster nodes
-	// compute the same ODID). Also the scope value of the #3748 sampler record.
-	sourceID := stableExporterID("ipfix", cfg.InstanceName, cfg.TemplateName)
+	// #3740/#12148: stable per-group Observation Domain ID (RFC 7011 §3.1)
+	// derived from protocol/instance/template/family, so groups sharing a
+	// collector have separate domains. HA-symmetric because every input is
+	// config-synced. Also the scope value of the #3748 sampler record.
+	sourceID := stableExporterID("ipfix", cfg.InstanceName, cfg.TemplateName, cfg.GroupIsV6)
 	e := &IPFIXExporter{
 		cfg:          cfg,
 		sourceID:     sourceID,

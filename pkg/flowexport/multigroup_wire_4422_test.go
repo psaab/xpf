@@ -12,22 +12,24 @@ import (
 // #4422 — multi-group wire-collision coverage (end-to-end, config-resolver
 // driven).
 //
-// VERIFY-FIRST outcome: CORRECT, not a bug. #3740 already made every exporter
-// stamp a unique per-group SourceID (NetFlow v9, RFC 3954 §5.1) / Observation
-// Domain ID (IPFIX, RFC 7011 §3.1) via stableExporterID(protocol, instance,
-// template), so two flow-monitoring groups pointed at the SAME collector do NOT
-// collide on the RFC decode key. The template IDs 256/257 are intentionally
-// shared across groups — that is RFC-correct because a template ID is scoped
-// PER observation domain, so template 256 under SourceID-A is a different
-// template from template 256 under SourceID-B.
+// VERIFY-FIRST outcome: CORRECT for groups with different instance/template
+// identities. #3740 gave those groups distinct SourceIDs / Observation Domain
+// IDs via stableExporterID. #12148 also folds family into the identity, so a
+// same-instance, same-template inet/inet6 pair gets separate domains. Two
+// flow-monitoring groups pointed at the SAME collector therefore do NOT
+// collide on the RFC decode key.
+// The template IDs 256/257 are intentionally shared across groups — that is
+// RFC-correct because a template ID is scoped PER observation domain, so
+// template 256 under SourceID-A is a different template from template 256
+// under SourceID-B.
 //
 // The existing #3740 guards (exporter_id_3740_test.go) prove distinctness for
 // HAND-BUILT ExportConfig{} structs with explicit TemplateName/InstanceName.
 // What no test covered is the REAL path: a two-group `services flow-monitoring`
 // config -> ResolveV9TemplateGroups / ResolveIPFIXTemplateGroups -> one
 // NewExporter per group -> the SourceID/ODID actually written on the wire. This
-// file pins that: the resolver-assigned (instance, template) identity must
-// reach the wire as DISTINCT SourceIDs even when both groups target one
+// file pins that: the resolver-assigned (instance, template, family) identity
+// must reach the wire as DISTINCT SourceIDs even when both groups target one
 // collector, while the (correctly) shared data template ID stays 256.
 //
 // Fail-on-regression: revert stableExporterID to a constant (or drop
