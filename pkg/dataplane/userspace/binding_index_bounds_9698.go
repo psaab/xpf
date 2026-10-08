@@ -6,8 +6,8 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
-// #9698: the helper-status binding-index bounds. They live in their own file
-// so maps_sync.go stays under the 2000-LOC [REFACTOR] floor
+// #9698 and #12307: user-space bindings index-bound decisions live in this
+// file so maps_sync.go stays under the 2000-LOC [REFACTOR] floor
 // (docs/engineering-style.md, "Modularity discipline").
 
 // bindingIfindexInRange reports whether a helper-reported ifindex can be used
@@ -68,6 +68,40 @@ func watchdogBindingIndex(binding BindingStatus, deadWorkers map[uint32]bool) (u
 	if idx >= dataplane.BindingArrayMaxEntries {
 		slog.Warn("userspace: bindings watchdog: ifindex exceeds BindingArrayMaxEntries cap, skipping",
 			"ifindex", binding.Ifindex, "queue", binding.QueueID,
+			"idx", idx, "cap", dataplane.BindingArrayMaxEntries)
+		return 0, false
+	}
+	return idx, true
+}
+
+// watchdogAliasBindingIndex is the #12307 alias-repair decision for a child
+// ifindex. Like watchdogBindingIndex it is repair-only: invalid coordinates
+// are logged and skipped rather than unwinding the watchdog.
+func watchdogAliasBindingIndex(childIfindex, parentIfindex uint32, binding BindingStatus, deadWorkers map[uint32]bool) (uint32, bool) {
+	if !bindingForwardingLive(binding, deadWorkers) {
+		return 0, false
+	}
+	if binding.QueueID >= bindingQueuesPerIface {
+		slog.Warn("userspace: bindings watchdog alias: queue-id at/above stride would alias adjacent ifindex queue-0 slot, skipping (#4894)",
+			"child", childIfindex, "parent", parentIfindex,
+			"queue", binding.QueueID, "stride", uint32(bindingQueuesPerIface))
+		return 0, false
+	}
+	// #12307: bound the uint32 child ifindex before multiplying. Otherwise a
+	// wrapped stride can land inside the dense cap and alias a different row.
+	if childIfindex >= dataplane.MaxInterfaces {
+		slog.Warn("userspace: bindings watchdog alias: child ifindex at/above MaxInterfaces would wrap the composed index onto another row, skipping (#12307)",
+			"child", childIfindex, "parent", parentIfindex,
+			"queue", binding.QueueID, "max_interfaces", dataplane.MaxInterfaces)
+		return 0, false
+	}
+	idx := childIfindex*bindingQueuesPerIface + binding.QueueID
+	// Call-site cap guard (#814): keep the watchdog repair-only and log-and-skip
+	// if the composed index is outside the dense binding array.
+	if idx >= dataplane.BindingArrayMaxEntries {
+		slog.Warn("userspace: bindings watchdog alias: ifindex exceeds BindingArrayMaxEntries cap, skipping",
+			"child", childIfindex, "parent", parentIfindex,
+			"queue", binding.QueueID,
 			"idx", idx, "cap", dataplane.BindingArrayMaxEntries)
 		return 0, false
 	}
