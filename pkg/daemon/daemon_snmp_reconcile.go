@@ -389,9 +389,6 @@ func buildSNMPIfData() []snmp.IfData {
 	var result []snmp.IfData
 	for _, link := range links {
 		attrs := link.Attrs()
-		if attrs.Name == "lo" {
-			continue
-		}
 		ifType := 6 // ethernetCsmacd
 		switch link.Type() {
 		case "vrf":
@@ -400,6 +397,9 @@ func buildSNMPIfData() []snmp.IfData {
 			ifType = 131 // tunnel
 		case "veth":
 			ifType = 53
+		}
+		if attrs.Name == "lo" {
+			ifType = 24 // softwareLoopback
 		}
 		admin := 2 // down
 		if attrs.Flags&net.FlagUp != 0 {
