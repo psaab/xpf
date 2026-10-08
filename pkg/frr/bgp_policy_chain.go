@@ -240,8 +240,8 @@ func collectBGPComposedChains(bgp *config.BGPConfig, po *config.PolicyOptionsCon
 }
 
 // bgpComposedChainCollision is the render-side fail-closed guard for the
-// composed BGP policy-chain route-maps (#5277), mirroring redistAliasCollision
-// (#5116). FRR keys route-maps by NAME in one global namespace and MERGES two
+// composed BGP policy-chain route-maps (#5277), mirroring
+// redistProtocolMapCollision. FRR keys route-maps by name globally and merges
 // same-named `route-map` definitions, so a composed name that collides with an
 // operator policy-statement — or two DISTINCT chains that derive the same
 // composed name — would fuse objects and could silently change the operator's

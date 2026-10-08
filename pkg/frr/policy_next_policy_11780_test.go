@@ -74,28 +74,25 @@ func TestSinglePolicyNextPolicyBypassesExplicitDefault11780(t *testing.T) {
 	}
 }
 
-func TestNextPolicyRedistributeAliasKeepsExplicitDefaultFailClosed11780(t *testing.T) {
+func TestNextPolicyRedistributeMapKeepsExplicitDefaultFailClosed11780(t *testing.T) {
 	po := &config.PolicyOptionsConfig{
 		PolicyStatements: map[string]*config.PolicyStatement{
 			"ONLY": {
 				Name:          "ONLY",
 				DefaultAction: "reject",
-				Terms:         []*config.PolicyTerm{{Name: "next", NextPolicy: true}},
+				Terms:         []*config.PolicyTerm{{Name: "next", FromProtocols: []string{"static"}, NextPolicy: true}},
 			},
 		},
 	}
 	got := New().generatePolicyOptions(po, map[string]bool{"ONLY": true})
-	alias := redistFailClosedRouteMap("ONLY")
+	routeMap := "ONLY-static-xpf-redist"
 	for _, want := range []string{
-		"route-map ONLY permit 10\n on-match goto 30\n",
-		"route-map ONLY deny 20\n",
-		"route-map ONLY permit 30\n",
-		"route-map " + alias + " permit 10\n on-match goto 30\n",
-		"route-map " + alias + " deny 20\n",
-		"route-map " + alias + " deny 30\n",
+		"route-map " + routeMap + " permit 10\n on-match goto 30\n",
+		"route-map " + routeMap + " deny 20\n",
+		"route-map " + routeMap + " deny 30\n",
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("next-policy context-specific fallback missing %q:\n%s", want, got)
+			t.Errorf("next-policy redistribute map fallback missing %q:\n%s", want, got)
 		}
 	}
 }

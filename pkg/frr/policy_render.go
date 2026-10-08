@@ -1,10 +1,10 @@
 // policy_render.go renders Junos policy-options into FRR route-maps.
 //
 // After the #6424 split this file owns policy-statement -> route-map
-// rendering (per-policy route-maps and composed chains), community-list
-// regex classification, and the redistribute-alias collision guard. The
-// other render aspects that used to share this file were moved, whole and
-// unchanged, into cohesive sibling files:
+// rendering (per-policy maps, per-protocol redistribute maps, and composed
+// chains) and community-list regex classification. The other render aspects
+// that used to share this file were moved, whole and unchanged, into cohesive
+// sibling files:
 //   - render_validate.go     value sanitization / validation belt
 //   - redistribute.go        Junos export -> FRR redistribute resolution
 //   - bgp_policy_chain.go    ordered BGP import/export chain resolution (#5277)
@@ -14,10 +14,8 @@
 //
 // Symbols:
 //   - communityRegexChars, communityMemberIsRegex
-//   - redistFailClosedRouteMap, redistAliasCollision
-//   - policyNeedsRedistAlias, policyTrailingAction
-//   - generatePolicyOptions, renderPolicyTermSequences
-//   - renderRouteMapForPolicy, renderComposedRouteMap
+//   - policyTrailingAction, generatePolicyOptions
+//   - renderPolicyTermSequences, renderRouteMapForPolicy, renderComposedRouteMap
 package frr
 
 import (
@@ -58,25 +56,6 @@ func communityMemberIsRegex(member string) bool {
 	// decision and the commit gate cannot disagree about which members FRR
 	// will run through regcomp.
 	return config.CommunityMemberIsRegex(member)
-}
-
-// redistFailClosedRouteMap derives the per-use-site route-map name that IGP
-// redistribute references for a policy that is ALSO applied as a BGP route-map
-// in/out with no explicit default action. The base route-map keeps the Junos
-// BGP default-accept trailing permit (#2998); this alias carries the fail-closed
-// trailing deny the redistribute / forwarding-table context requires, so the
-// BGP permit default never leaks into the IGP through FRR's single name-keyed
-// route-map object (#4481). The config.ReservedRedistSuffix ("-xpf-redist") is
-// RESERVED: the strict commit gate (validatePolicyReservedRedistNameStrict,
-// pkg/config) rejects an operator policy-statement whose name ends in it, so the
-// generated-alias namespace is injective by construction (#5116). The alias
-// derivation here and that validator share the one constant so they cannot
-// drift. redistAliasCollision below is the render-side belt: on the tolerant
-// load / peer-sync path (where the strict gate only warns) it fails the apply
-// CLOSED if an alias still collides with an operator policy-statement, so a
-// leniently-loaded collision cannot silently leak.
-func redistFailClosedRouteMap(name string) string {
-	return name + config.ReservedRedistSuffix
 }
 
 // quarantineDenySeq is the single sequence number the #6807 quarantine
@@ -131,66 +110,6 @@ func renderQuarantineDenyRouteMap(name string) string {
 	fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(name), quarantineDenySeq)
 	b.WriteString("exit\n")
 	return b.String()
-}
-
-// redistAliasCollision is the render-side defense-in-depth for #5116. For every
-// policy-statement that generates a fail-closed redistribute alias
-// (policyNeedsRedistAlias), it checks whether that derived alias name
-// (redistFailClosedRouteMap) also exists as an operator-defined
-// policy-statement. FRR keys route-maps by NAME in one global namespace and
-// MERGES two same-named `route-map` definitions into a single object, so a
-// colliding operator policy's (possibly permit-default) sequences would fuse
-// with the generated fail-closed deny alias and could reintroduce the #4481
-// BGP/IGP redistribution leak the alias exists to prevent.
-//
-// The strict commit gate (validatePolicyReservedRedistNameStrict, pkg/config)
-// rejects a reserved-suffix operator name outright, so a committed config never
-// reaches here with a collision. This belt covers the tolerant load / peer-sync
-// / rollback path where that gate only warns (#1960): ApplyFull calls it before
-// building the managed section and returns the error, failing the whole apply
-// CLOSED (FRR keeps its last-good config, no new leak) instead of emitting a
-// colliding route-map. Returns nil for the common non-colliding case, leaving
-// render output byte-identical.
-func redistAliasCollision(po *config.PolicyOptionsConfig, bgpAcceptDefault map[string]bool) error {
-	if po == nil || po.PolicyStatements == nil {
-		return nil
-	}
-	// Deterministic first-error: iterate policy-statement names in sorted order.
-	names := make([]string, 0, len(po.PolicyStatements))
-	for name := range po.PolicyStatements {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		ps := po.PolicyStatements[name]
-		if !policyNeedsRedistAlias(name, ps, bgpAcceptDefault) {
-			continue
-		}
-		alias := redistFailClosedRouteMap(name)
-		if _, ok := po.PolicyStatements[alias]; ok {
-			return fmt.Errorf(
-				"policy-statement %q generates the fail-closed redistribute "+
-					"route-map alias %q (reserved %q suffix), which collides with "+
-					"an operator-defined policy-statement of that exact name; FRR "+
-					"merges same-named route-maps, so the collision could "+
-					"reintroduce the #4481 BGP/IGP redistribution leak — refusing "+
-					"to render (rename the operator policy off the reserved suffix)",
-				name, alias, config.ReservedRedistSuffix)
-		}
-	}
-	return nil
-}
-
-// policyNeedsRedistAlias reports whether policy-statement name's BGP-only
-// permit semantics must NOT be shared with an IGP redistribute use (#4481).
-// That divergence exists when the BGP attachment falls off a no-default policy,
-// or when a `next policy` term bypasses an explicit default. The latter needs a
-// context-specific landing sequence: BGP permits after the chain, while
-// redistribute remains fail-closed.
-func policyNeedsRedistAlias(name string, ps *config.PolicyStatement, bgpAcceptDefault map[string]bool) bool {
-	return ps != nil && bgpAcceptDefault[name] &&
-		((ps.DefaultAction != "accept" && ps.DefaultAction != "reject") ||
-			policyHasNextPolicyTerm(ps))
 }
 
 // policyTrailingAction resolves the trailing default-sequence action
@@ -450,49 +369,21 @@ func (m *Manager) generatePolicyOptionsWithQNH11447(po *config.PolicyOptionsConf
 				"policy", name, "sequences", n, "max", config.MaxRouteMapSequences)
 			m.noteQuarantined(name)
 			b.WriteString(renderQuarantineDenyRouteMap(name))
-			b.WriteString("!\n")
-			// The redistribute alias is derived from the SAME policy, so it is
-			// oversized too and resolveRedistribute may still reference it.
-			// Quarantine it under the same rule; its normal trailing action is
-			// already `deny`, so this is its fail-closed intent unchanged.
-			if policyNeedsRedistAlias(name, ps, bgpAcceptDefault) {
-				m.noteQuarantined(redistFailClosedRouteMap(name))
-				b.WriteString(renderQuarantineDenyRouteMap(redistFailClosedRouteMap(name)))
-				b.WriteString("!\n")
+		} else {
+			fallbackAction := "deny"
+			if bgpAcceptDefault[name] {
+				fallbackAction = "permit"
 			}
-			for _, scope := range qnhMetrics.scopes() {
-				if alias := scope.policyMaps[name]; alias != "" {
-					m.noteQuarantined(alias)
-					b.WriteString(renderQuarantineDenyRouteMap(alias))
-					b.WriteString("!\n")
-				}
-			}
-			continue
-		}
-		// Base route-map: Junos BGP default-accept (#2998) vs the fail-closed
-		// redistribute/forwarding-table default, resolved per use context.
-		fallbackAction := "deny"
-		if bgpAcceptDefault[name] {
-			fallbackAction = "permit"
-		}
-		b.WriteString(m.renderRouteMapForPolicyWithFallback(
-			po, name, ps, policyTrailingAction(name, ps, bgpAcceptDefault), fallbackAction))
-		b.WriteString("!\n")
-		// #4481: FRR route-maps are keyed by NAME — one object shared by every
-		// use site. BGP default-accept needs a permit landing sequence both
-		// when a policy has no explicit default and when `next policy` bypasses
-		// an explicit default. If the same policy is used by IGP redistribution,
-		// its landing sequence must instead fail closed; emit a per-use-site
-		// alias and have resolveRedistribute reference that map.
-		if policyNeedsRedistAlias(name, ps, bgpAcceptDefault) {
-			aliasAction := policyTrailingAction(name, ps, nil)
 			b.WriteString(m.renderRouteMapForPolicyWithFallback(
-				po, redistFailClosedRouteMap(name), ps, aliasAction, "deny"))
-			b.WriteString("!\n")
+				po, name, ps, policyTrailingAction(name, ps, bgpAcceptDefault), fallbackAction))
+		}
+		b.WriteString("!\n")
+		for _, proto := range redistProtocols(ps) {
+			b.WriteString(renderRedistributePolicyMap(m, po, name, ps, proto))
 		}
 		for _, scope := range qnhMetrics.scopes() {
-			if alias := scope.policyMaps[name]; alias != "" {
-				b.WriteString(m.renderQNHMetricPolicyMap11447(po, alias, ps, scope))
+			if routeMap := scope.policyMaps[name]; routeMap != "" {
+				b.WriteString(m.renderQNHMetricPolicyMap11447(po, routeMap, ps, scope))
 				b.WriteString("!\n")
 			}
 		}

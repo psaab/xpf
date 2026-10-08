@@ -967,10 +967,10 @@ func TestGenerateProtocols_OSPFExportPolicyStatement(t *testing.T) {
 	}
 	got := m.generateProtocols(ospf, nil, nil, nil, nil, "", 0, po, nil)
 	// "direct" maps to FRR "connected"; both protocols carry the route-map.
-	if !strings.Contains(got, "redistribute connected route-map EXPORT-DIRECT-STATIC\n") {
+	if !strings.Contains(got, "redistribute connected route-map EXPORT-DIRECT-STATIC-connected-xpf-redist\n") {
 		t.Errorf("missing redistribute connected route-map line, got:\n%s", got)
 	}
-	if !strings.Contains(got, "redistribute static route-map EXPORT-DIRECT-STATIC\n") {
+	if !strings.Contains(got, "redistribute static route-map EXPORT-DIRECT-STATIC-static-xpf-redist\n") {
 		t.Errorf("missing redistribute static route-map line, got:\n%s", got)
 	}
 }
@@ -2965,7 +2965,7 @@ func TestResolveRedistribute_PolicyStatement(t *testing.T) {
 		},
 	}
 	got := m.resolveRedistribute("export-connected", po, "", nil)
-	want := " redistribute connected route-map export-connected\n"
+	want := " redistribute connected route-map export-connected-connected-xpf-redist\n"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -2986,10 +2986,10 @@ func TestResolveRedistribute_MultiProtocol(t *testing.T) {
 	}
 	got := m.resolveRedistribute("export-all", po, "", nil)
 	// Should have both protocols, sorted alphabetically
-	if !strings.Contains(got, "redistribute connected route-map export-all\n") {
+	if !strings.Contains(got, "redistribute connected route-map export-all-connected-xpf-redist\n") {
 		t.Errorf("missing connected route-map in:\n%s", got)
 	}
-	if !strings.Contains(got, "redistribute static route-map export-all\n") {
+	if !strings.Contains(got, "redistribute static route-map export-all-static-xpf-redist\n") {
 		t.Errorf("missing static route-map in:\n%s", got)
 	}
 }
@@ -3018,7 +3018,7 @@ func TestGenerateProtocols_OSPFExportRouteMap(t *testing.T) {
 		},
 	}
 	got := m.generateProtocols(ospf, nil, nil, nil, nil, "", 0, po, nil)
-	if !strings.Contains(got, "redistribute connected route-map export-direct\n") {
+	if !strings.Contains(got, "redistribute connected route-map export-direct-connected-xpf-redist\n") {
 		t.Errorf("missing route-map redistribute, got:\n%s", got)
 	}
 	// Should NOT have bare "redistribute export-direct"
@@ -3279,8 +3279,8 @@ func TestGenerateProtocols_ProtocolLessPolicyExport(t *testing.T) {
 		t.Errorf("rendered FRR-invalid `redistribute export-comm`, got:\n%s", got)
 	}
 	// The well-formed export must still render correctly.
-	if !strings.Contains(got, "redistribute static route-map export-static\n") {
-		t.Errorf("missing valid `redistribute static route-map export-static`, got:\n%s", got)
+	if !strings.Contains(got, "redistribute static route-map export-static-static-xpf-redist\n") {
+		t.Errorf("missing valid `redistribute static route-map export-static-static-xpf-redist`, got:\n%s", got)
 	}
 
 	// Belt: no redistribute line in the managed output may name a policy
@@ -5912,10 +5912,10 @@ func TestResolveRedistribute_SelfExclusion(t *testing.T) {
 		},
 	}
 	got := m.resolveRedistribute("leak", po, "ospf", nil)
-	if strings.Contains(got, "redistribute ospf route-map leak") {
+	if strings.Contains(got, "redistribute ospf route-map leak-ospf-xpf-redist") {
 		t.Errorf("self-redistribute via policy term must be excluded (#2943); got %q", got)
 	}
-	if !strings.Contains(got, "redistribute static route-map leak") {
+	if !strings.Contains(got, "redistribute static route-map leak-static-xpf-redist") {
 		t.Errorf("non-self policy term must still render; got %q", got)
 	}
 }

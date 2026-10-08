@@ -123,8 +123,8 @@ func TestRedistEntriesAtNodesAreCovered_9667(t *testing.T) {
 		t.Fatal(err)
 	}
 	callRE := regexp.MustCompile(`\.redistributeEntriesAt\(`)
-	passRE := regexp.MustCompile(`\.redistributeEntriesAt\(export, po, self, self, bgpAcceptDefault\)`)
-	litRE := regexp.MustCompile(`\.redistributeEntriesAt\([^,()]+,\s*[^,()]+,\s*"([a-z0-9-]+)",\s*"([a-z0-9-]+)",`)
+	passRE := regexp.MustCompile(`\.redistributeEntriesAt\(export, po, self, self\)`)
+	litRE := regexp.MustCompile(`\.redistributeEntriesAt\([^,()]+,\s*[^,()]+,\s*"([a-z0-9-]+)",\s*"([a-z0-9-]+)"\)`)
 	calls, pass := 0, 0
 	nodes := map[string]int{}
 	for _, f := range files {

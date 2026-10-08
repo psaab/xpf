@@ -54,7 +54,7 @@ const (
 	// silently collide with — a raw operator-supplied prefix-list name. Operator
 	// prefix-list names that intrude on this namespace are rejected at commit by
 	// routeFilterACLNameCollision, exactly as config.ReservedRedistSuffix is
-	// reserved for the #4481 redistribute alias.
+	// reserved for protocol-specific redistribute route-maps.
 	routeFilterACLNamespace = "xpf-rf-"
 
 	// routeFilterACLHashHexLen is the length (in hex chars) of the deterministic
@@ -169,7 +169,7 @@ func routeFilterACLName(prefixList, matchKW string) string {
 //
 // FRR merges same-named access-lists, so either case could silently widen or
 // narrow a routing policy. Refuse to render — FRR keeps its last-good config —
-// mirroring the redistAliasCollision / bgpComposedChainCollision posture. The
+// mirroring redistProtocolMapCollision / bgpComposedChainCollision. The
 // order is deterministic (sorted names) so the FIRST offending pair is reported
 // stably. Access-lists are per-family in FRR ("access-list" vs "ipv6
 // access-list" are separate namespaces), so collisions are only compared within

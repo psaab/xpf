@@ -43,6 +43,9 @@ func GlobalFallbackFRR11455() *config.Config {
 
 // ExpectedGlobalFallbackFRR11455 is the byte-exact daemon and legacy-CLI
 // managed FRR output for GlobalFallbackFRR11455.
+// #12065: GLOBAL-EXPORT carries no FromProtocols/static source, so no
+// per-protocol redistribute map is emitted (previously an unconditional
+// shared GLOBAL-EXPORT-xpf-redist alias rendered here).
 const ExpectedGlobalFallbackFRR11455 = `log syslog informational
 ! BEGIN BPFRX MANAGED CONFIG - do not edit this section
 ! xpf managed config - do not edit
@@ -55,11 +58,6 @@ ipv6 route 2001:db8:1::/48 2001:db8::1 vrf vrf-tenant
 route-map GLOBAL-EXPORT permit 10
 exit
 route-map GLOBAL-EXPORT permit 20
-exit
-!
-route-map GLOBAL-EXPORT-xpf-redist permit 10
-exit
-route-map GLOBAL-EXPORT-xpf-redist deny 20
 exit
 !
 router bgp 65001

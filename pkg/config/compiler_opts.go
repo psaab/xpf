@@ -2647,20 +2647,17 @@ type compileOpts struct {
 	// authoring order. Same doctrine as lenientPolicyCommunityRef.
 	lenientPolicyASPathRegex    bool
 	lenientPolicyCommunityRegex bool // #8449: sibling of the as-path gate; see lenientPolicyASPathRegex
-	// lenientPolicyReservedRedistName (#5116) downgrades the reserved
+	// lenientPolicyReservedRedistName (#5116/#12065) downgrades the reserved
 	// route-map-suffix gate (validatePolicyReservedRedistNameStrict) from a
-	// hard compile error to a cfg.Warnings entry. An operator policy-statement
-	// whose name ends in the reserved ReservedRedistSuffix ("-xpf-redist")
-	// collides in FRR's global name-keyed route-map namespace with the
-	// per-use-site fail-closed redistribute alias the renderer derives (#4481),
-	// which can silently reintroduce BGP/IGP redistribution leakage. The strict
-	// commit / commit-check path hard-rejects such a name so it is
-	// operator-visible; an already-persisted or peer-synced config an older
-	// binary accepted must still BOOT (warn) per the #1960 fail-closed-on-load
-	// doctrine — the render path carries a defense-in-depth collision guard
-	// (redistAliasCollision, pkg/frr) that fails the managed-section apply CLOSED
-	// on the tolerant path, so a leniently-loaded collision cannot leak. Same
-	// doctrine as lenientRoutingExportRef.
+	// hard compile error to a cfg.Warnings entry. Generated source-protocol
+	// redistribute maps use ReservedRedistSuffix ("-xpf-redist") in FRR's
+	// global name-keyed route-map namespace; an operator policy-statement
+	// ending in that suffix can collide and silently alter routing policy.
+	// Strict commit / commit-check hard-rejects the name; an already-persisted
+	// or peer-synced config an older binary accepted must still BOOT (warn)
+	// per the #1960 fail-closed-on-load doctrine — the render path carries
+	// redistProtocolMapCollision (pkg/frr) as a defense-in-depth collision
+	// guard. Same doctrine as lenientRoutingExportRef.
 	lenientPolicyReservedRedistName bool
 	// lenientPolicyReservedChainName (#5442) downgrades the reserved
 	// composed-chain route-map-suffix gate (validatePolicyReservedChainNameStrict)

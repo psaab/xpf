@@ -12,17 +12,13 @@ import (
 // route-map in (its trailing default must be PERMIT — Junos BGP default-accept,
 // #2998) AND as an OSPF export (redistribute, whose Junos default is REJECT).
 //
-// FRR route-maps are keyed by NAME — one object shared across use sites — so the
-// BGP-context trailing permit would otherwise govern the OSPF redistribute too,
-// leaking every static route that the policy's terms do NOT explicitly match
-// into OSPF. The fix renders a per-use-site fail-closed alias
-// (SHARED-xpf-redist, trailing deny) and points the redistribute at it while the
-// BGP neighbor keeps referencing the permit-default base map.
+// FRR route-maps are keyed by NAME — one object shared across use sites. The
+// fix renders an OSPF map scoped to each source protocol, selecting only terms
+// applicable to that source and using the redistribute fail-closed default;
+// the BGP neighbor keeps referencing the permit-default base map.
 //
-// Revert (resolveRedistribute referencing the bare NAME + no alias emitted)
-// turns this RED: the redistribute line becomes
-// `redistribute static route-map SHARED` (the permit-default map) and the
-// fail-closed `route-map SHARED-xpf-redist deny` sequence disappears.
+// Revert (redistribute referencing the bare NAME) turns the attachment into
+// `redistribute static route-map SHARED`, leaking the BGP permit-default map.
 func TestBuildManagedSection_CrossContextRouteMapNoLeak_4481(t *testing.T) {
 	m := New()
 	po := &config.PolicyOptionsConfig{
@@ -78,19 +74,18 @@ func TestBuildManagedSection_CrossContextRouteMapNoLeak_4481(t *testing.T) {
 		t.Errorf("base BGP route-map SHARED must keep its #2998 trailing permit, got:\n%s", got)
 	}
 
-	// #4481 fix: the OSPF redistribute references the fail-closed per-use-site
-	// alias, and that alias carries a trailing deny.
-	if !strings.Contains(got, "redistribute static route-map SHARED-xpf-redist\n") {
-		t.Errorf("OSPF redistribute must reference the fail-closed alias SHARED-xpf-redist, got:\n%s", got)
+	// #12065 fix: the OSPF redistribute references the static-specific map,
+	// whose term set excludes other source protocols and whose default denies.
+	redistMap := "SHARED-static-xpf-redist"
+	if !strings.Contains(got, "redistribute static route-map "+redistMap+"\n") {
+		t.Errorf("OSPF redistribute must reference the static-specific map %s, got:\n%s", redistMap, got)
 	}
-	if !strings.Contains(got, "route-map SHARED-xpf-redist deny ") {
-		t.Errorf("the redistribute alias must end fail-closed (trailing deny), got:\n%s", got)
+	if !strings.Contains(got, "route-map "+redistMap+" deny ") {
+		t.Errorf("the redistribute map must end fail-closed (trailing deny), got:\n%s", got)
 	}
 
 	// The leak itself: the redistribute must NOT point at the bare permit-default
-	// map SHARED (this exact line appears only when the trailing accept-all
-	// leaks into the IGP). Note the alias line above ends "-xpf-redist\n", so it
-	// does not match this bare-name form.
+	// map SHARED.
 	if strings.Contains(got, "redistribute static route-map SHARED\n") {
 		t.Errorf("cross-context leak: OSPF redistribute references the BGP permit-default map SHARED, got:\n%s", got)
 	}

@@ -74,19 +74,19 @@ func TestResolveRedistributePolicyTermAddressFamily_9510(t *testing.T) {
 	for _, tc := range []struct {
 		policy, self, want string
 	}{
-		{"mixed", "ospf", " redistribute rip route-map mixed\n redistribute static route-map mixed\n"},
-		{"mixed", "ospf6", " redistribute ripng route-map mixed\n redistribute static route-map mixed\n"},
-		{"mixed", "rip", " redistribute static route-map mixed\n"},
+		{"mixed", "ospf", " redistribute rip route-map mixed-rip-xpf-redist\n redistribute static route-map mixed-static-xpf-redist\n"},
+		{"mixed", "ospf6", " redistribute ripng route-map mixed-ripng-xpf-redist\n redistribute static route-map mixed-static-xpf-redist\n"},
+		{"mixed", "rip", " redistribute static route-map mixed-static-xpf-redist\n"},
 		// Control: no enclosing router, so nothing is filtered.
-		{"mixed", "", " redistribute ospf6 route-map mixed\n redistribute rip route-map mixed\n" +
-			" redistribute ripng route-map mixed\n redistribute static route-map mixed\n"},
+		{"mixed", "", " redistribute ospf6 route-map mixed-ospf6-xpf-redist\n redistribute rip route-map mixed-rip-xpf-redist\n" +
+			" redistribute ripng route-map mixed-ripng-xpf-redist\n redistribute static route-map mixed-static-xpf-redist\n"},
 		// Every term filtered: nothing renders.
 		{"v6only", "ospf", ""},
 		{"v6only", "rip", ""},
 		// Control for the rows above: the same policy under a router whose
 		// grammar lists the source. (No row pins a `router isis` literal: the
 		// plain form is not IS-IS grammar at all: #9666.)
-		{"v6only", "ospf6", " redistribute ripng route-map v6only\n"},
+		{"v6only", "ospf6", " redistribute ripng route-map v6only-ripng-xpf-redist\n"},
 	} {
 		if got := m.resolveRedistribute(tc.policy, po, tc.self, nil); got != tc.want {
 			t.Errorf("policy %q under router %q: got %q, want %q", tc.policy, tc.self, got, tc.want)

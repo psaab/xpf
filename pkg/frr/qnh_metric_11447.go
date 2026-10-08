@@ -255,12 +255,14 @@ func renderQNHMetricTerms11447(scope *qnhMetricScope11447, routeMap string, star
 	var b strings.Builder
 	seq := start
 	for _, route := range scope.routes {
+		fmt.Fprintf(&b, "route-map %s permit %d\n", frrName(routeMap), seq)
 		family := "ip"
 		if route.ipv6 {
 			family = "ipv6"
 		}
-		fmt.Fprintf(&b, "route-map %s permit %d\n", frrName(routeMap), seq)
-		b.WriteString(" match source-protocol static\n")
+		// This route-map is attached only to `redistribute static`, so the
+		// source protocol is selected by the attachment, not a daemon-specific
+		// match clause.
 		fmt.Fprintf(&b, " match %s address prefix-list %s\n", family, frrName(route.destinationList))
 		if route.nextHop != "" {
 			fmt.Fprintf(&b, " match %s next-hop prefix-list %s\n", family, frrName(route.nextHopList))
@@ -321,18 +323,19 @@ func qualifiedNextHopMetricCollision11447(po *config.PolicyOptionsConfig, set *q
 	return nil
 }
 func (m *Manager) renderQNHMetricPolicyMap11447(po *config.PolicyOptionsConfig, routeMap string, ps *config.PolicyStatement, scope *qnhMetricScope11447) string {
-	if uint64(len(scope.routes))+config.RouteMapSequenceCount(po, ps) > config.MaxRouteMapSequences {
+	policy := redistPolicyForProtocol(ps, "static")
+	if uint64(len(scope.routes))+config.RouteMapSequenceCount(po, policy) > config.MaxRouteMapSequences {
 		slog.Warn("frr: qualified-next-hop metric and policy route-map exceed FRR sequence limit; rendering a deny map",
 			"route_map", routeMap, "metric_rules", len(scope.routes), "policy", ps.Name)
 		m.noteQuarantined(routeMap)
 		return renderQuarantineDenyRouteMap(routeMap)
 	}
 	rules, next := renderQNHMetricTerms11447(scope, routeMap, 10)
-	definitions, body, seq := m.renderPolicyTermSequencesWithDefinitions(po, routeMap, routeMap, ps, next)
-	hasNextPolicy := policyHasNextPolicyTerm(ps)
+	definitions, body, seq := m.renderPolicyTermSequencesWithDefinitions(po, routeMap, routeMap, policy, next)
+	hasNextPolicy := policyHasNextPolicyTerm(policy)
 	if hasNextPolicy {
 		nextPolicySequence := seq
-		if ps.DefaultAction == "accept" || ps.DefaultAction == "reject" {
+		if policy.DefaultAction == "accept" || policy.DefaultAction == "reject" {
 			nextPolicySequence += 10
 		}
 		body = renderNextPolicyTarget(body, nextPolicySequence)
@@ -342,14 +345,14 @@ func (m *Manager) renderQNHMetricPolicyMap11447(po *config.PolicyOptionsConfig, 
 	b.WriteString(rules)
 	b.WriteString(body)
 	trailingAction := "deny"
-	switch ps.DefaultAction {
+	switch policy.DefaultAction {
 	case "accept":
 		trailingAction = "permit"
 	case "reject":
 		trailingAction = "deny"
 	}
 	fmt.Fprintf(&b, "route-map %s %s %d\nexit\n", frrName(routeMap), trailingAction, seq)
-	if hasNextPolicy && (ps.DefaultAction == "accept" || ps.DefaultAction == "reject") {
+	if hasNextPolicy && (policy.DefaultAction == "accept" || policy.DefaultAction == "reject") {
 		fmt.Fprintf(&b, "route-map %s deny %d\nexit\n", frrName(routeMap), seq+10)
 	}
 	return b.String()
