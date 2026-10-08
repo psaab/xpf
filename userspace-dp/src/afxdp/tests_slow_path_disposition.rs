@@ -2831,6 +2831,12 @@ fn stage11_declared_end_rejects_v4_spi_slack_10516() {
     assert_eq!(counters.sa_miss_truncated, 1);
     assert_eq!(recycled, 1);
 }
+fn stage11_static_nat_to_self_snapshot_10516() -> ConfigSnapshot {
+    let mut snapshot = static_nat_snapshot();
+    snapshot.static_nat_rules[0].internal_ip = "192.168.1.1".to_string();
+    snapshot
+}
+
 #[test]
 fn stage11_static_dnat_external_sa_miss_and_hit_10516() {
     let src = Ipv4Addr::new(198, 51, 100, 10);
@@ -2850,12 +2856,22 @@ fn stage11_static_dnat_external_sa_miss_and_hit_10516() {
         crate::afxdp::tests_support::TEST_LAN_MAC,
     );
     let meta = stage11_ipv4_udp_meta_10516(&frame, src, dst, 6, 40_000, 4500);
-    let ownership = build_forwarding_state(&static_nat_snapshot());
+    let transit_ownership = build_forwarding_state(&static_nat_snapshot());
+    assert!(
+        !transit_ownership.owns_ipsec_local_destination(IpAddr::V4(dst)),
+        "a static NAT to a transit host is not an XFRM-local destination"
+    );
+    let snapshot = stage11_static_nat_to_self_snapshot_10516();
+    let ownership = build_forwarding_state(&snapshot);
     assert!(ownership.owns_configured_ip(IpAddr::V4(dst)));
+    assert!(
+        ownership.owns_ipsec_local_destination(IpAddr::V4(dst)),
+        "static NAT to the firewall interface is an XFRM-local destination"
+    );
     assert!(parse_session_flow_from_bytes(&frame, meta).is_some());
     let (_, miss_delegated, miss_counters, miss_recycled, miss_queues, _forwarded) =
         run_stage11_frame_poll_on_snapshot_with_options_10516(
-            &static_nat_snapshot(),
+            &snapshot,
             &frame,
             meta,
             None,
@@ -2872,7 +2888,7 @@ fn stage11_static_dnat_external_sa_miss_and_hit_10516() {
         .expect("same-family external SA fixture");
     let (_, hit_delegated, hit_counters, hit_recycled, hit_queues, _forwarded) =
         run_stage11_frame_poll_on_snapshot_with_options_10516(
-            &static_nat_snapshot(),
+            &snapshot,
             &frame,
             meta,
             Some(key),
@@ -2945,12 +2961,19 @@ fn stage11_positive_cells_never_mint_adjudicated_q0_10516() {
     );
     let external_meta =
         stage11_ipv4_udp_meta_10516(&external_frame, external_src, external_dst, 6, 40_000, 4500);
+    let external_snapshot = stage11_static_nat_to_self_snapshot_10516();
+    let external_ownership = build_forwarding_state(&external_snapshot);
+    assert!(
+        external_ownership
+            .owns_ipsec_local_destination(IpAddr::V4(external_dst)),
+        "the external static-NAT target must resolve to a firewall interface"
+    );
     let external_key =
         ipsec_sa_key(IpAddr::V4(external_dst), external_spi, IpAddr::V4(external_src))
             .expect("same-family external SA fixture");
     let (external_trusted, external_delegated, _, _, external_queues, _forwarded) =
         run_stage11_frame_poll_on_snapshot_with_options_10516(
-            &static_nat_snapshot(),
+            &external_snapshot,
             &external_frame,
             external_meta,
             Some(external_key),
@@ -3177,19 +3200,35 @@ fn drive_neigh_miss_10311(case: NeighMissNat10311) {
     let (frame, meta) = if v6 {
         let client: std::net::Ipv6Addr = "2001:559:8585:ef00::102".parse().unwrap();
         let server: std::net::Ipv6Addr = "2606:4700:4700::1111".parse().unwrap();
-        let frame = build_txn_tcp_syn_frame_v6(client, server, 12345, 80, crate::afxdp::tests_support::TEST_LAN_MAC);
-        let meta = txn_meta_v6(24, frame.len());
+        let frame = build_txn_tcp_syn_frame_v6(
+            client,
+            server,
+            12345,
+            80,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
+        let mut meta = txn_meta_v6(24, frame.len());
+        meta.flow_src_addr = client.octets();
+        meta.flow_dst_addr = server.octets();
+        meta.flow_src_port = 12345;
+        meta.flow_dst_port = 80;
         (frame, meta)
     } else {
+        let client = Ipv4Addr::new(10, 0, 61, 102);
+        let server = Ipv4Addr::new(8, 8, 8, 8);
         let frame = build_txn_tcp_syn_frame_v4(
-            Ipv4Addr::new(10, 0, 61, 102),
-            Ipv4Addr::new(8, 8, 8, 8),
+            client,
+            server,
             12345,
             443,
             TCP_FLAG_SYN,
             crate::afxdp::tests_support::TEST_LAN_MAC,
         );
-        let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+        let mut meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+        meta.flow_src_addr[..4].copy_from_slice(&client.octets());
+        meta.flow_dst_addr[..4].copy_from_slice(&server.octets());
+        meta.flow_src_port = 12345;
+        meta.flow_dst_port = 443;
         (frame, meta)
     };
     let (_batch, dbg, published) = txn_run_descriptor_capturing_shared(
@@ -3513,6 +3552,11 @@ fn lo0_ike_discard_snapshot_10525() -> ConfigSnapshot {
     snapshot
 }
 
+fn tag_ike_frame_vlan80_10525(mut frame: Vec<u8>) -> Vec<u8> {
+    frame.splice(12..14, [0x81, 0x00, 0x00, 0x50, 0x08, 0x00]);
+    frame
+}
+
 fn new_ike_frame_10525() -> Vec<u8> {
     let mut frame = build_stage11_ike_v4_frame_10516(
         IKE_10525_SRC,
@@ -3523,7 +3567,7 @@ fn new_ike_frame_10525() -> Vec<u8> {
         0,
     );
     frame[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_WAN_MAC);
-    frame
+    tag_ike_frame_vlan80_10525(frame)
 }
 
 fn followup_ike_frame_10525() -> Vec<u8> {
@@ -3536,18 +3580,23 @@ fn followup_ike_frame_10525() -> Vec<u8> {
         IKE_10525_RESPONDER_SPI,
     );
     frame[..6].copy_from_slice(&crate::afxdp::tests_support::TEST_WAN_MAC);
-    frame
+    tag_ike_frame_vlan80_10525(frame)
 }
 
 fn ike_meta_10525(frame: &[u8]) -> UserspaceDpMeta {
-    stage11_ipv4_udp_meta_10516(
+    let mut meta = stage11_ipv4_udp_meta_10516(
         frame,
         IKE_10525_SRC,
         IKE_10525_VIP,
         IKE_10525_IFINDEX,
         40_000,
         500,
-    )
+    );
+    meta.ingress_vlan_id = 80;
+    meta.l3_offset += 4;
+    meta.l4_offset += 4;
+    meta.payload_offset += 4;
+    meta
 }
 
 fn ike_key_10525() -> crate::afxdp::forwarding::IkeExchangeKey {
