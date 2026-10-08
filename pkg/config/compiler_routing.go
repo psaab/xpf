@@ -263,13 +263,37 @@ func staticNextHopEntry(raw, iface string) NextHopEntry {
 	return NextHopEntry{Address: raw, Interface: iface}
 }
 
+// staticRouteMergeKey identifies routes by their masked destination prefix,
+// not by the exact CIDR spelling authored in the config. Keep the raw value as
+// a fallback for malformed input; strict validation reports those before the
+// compiled routes are used.
+func staticRouteMergeKey(destination string) string {
+	_, prefix, err := net.ParseCIDR(destination)
+	if err != nil {
+		return destination
+	}
+	return prefix.String()
+}
+
+func appendStaticRouteDestinationAlias(route *StaticRoute, destination string) {
+	if route == nil || destination == route.Destination {
+		return
+	}
+	for _, alias := range route.destinationAliases {
+		if alias == destination {
+			return
+		}
+	}
+	route.destinationAliases = append(route.destinationAliases, destination)
+}
+
 // compileStaticRoutes parses static route entries from a "static" node,
 // appending to and returning the updated slice.
 func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRoute {
 	// Track destination→index so flat "set" duplicates merge into one route.
 	destIdx := make(map[string]int)
 	for i, sr := range existing {
-		destIdx[sr.Destination] = i
+		destIdx[staticRouteMergeKey(sr.Destination)] = i
 	}
 
 	for _, routeInst := range namedInstances(staticNode.FindChildren("route")) {
@@ -510,8 +534,9 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 		}
 
 		// Merge routes with the same destination (flat "set" syntax creates duplicates).
-		if idx, exists := destIdx[route.Destination]; exists {
+		if idx, exists := destIdx[staticRouteMergeKey(route.Destination)]; exists {
 			existingRoute := existing[idx]
+			appendStaticRouteDestinationAlias(existingRoute, route.Destination)
 			existingRoute.NextHops = append(existingRoute.NextHops, route.NextHops...)
 			if route.Discard {
 				existingRoute.Discard = true
@@ -536,7 +561,7 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 				existingRoute.NextTableRaw = route.NextTableRaw
 			}
 		} else {
-			destIdx[route.Destination] = len(existing)
+			destIdx[staticRouteMergeKey(route.Destination)] = len(existing)
 			existing = append(existing, route)
 		}
 	}

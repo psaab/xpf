@@ -1335,15 +1335,19 @@ func validateStaticRouteDispositionConflictStrict(cfg *Config) error {
 			if conflict == "" {
 				continue
 			}
+			destinationNames := fmt.Sprintf("%q", sr.Destination)
+			for _, alias := range sr.destinationAliases {
+				destinationNames += fmt.Sprintf(" (also authored as %q)", alias)
+			}
 			return fmt.Errorf(
-				"%s %q defines contradictory dispositions (%s) for one "+
+				"%s %s defines contradictory dispositions (%s) for one "+
 					"destination prefix; a static route may carry only ONE of "+
 					"next-hop, next-table, discard, or reject (repeated "+
 					"same-prefix `set` lines merge into a single route). Split "+
 					"the destinations or keep one disposition — otherwise the "+
 					"dataplane silently resolves the terminal/leak action and "+
 					"ignores the forwarding next-hop",
-				scope, sr.Destination, conflict)
+				scope, destinationNames, conflict)
 		}
 		return nil
 	}

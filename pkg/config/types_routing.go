@@ -345,9 +345,13 @@ type NextHopEntry struct {
 
 // StaticRoute defines a single static route.
 type StaticRoute struct {
-	Destination string         // CIDR: "10.0.0.0/8" or "::/0"
-	NextHops    []NextHopEntry // preference/metric tiers; equal tiers form ECMP
-	Discard     bool           // null route (blackhole): silently drop matching traffic
+	Destination string // CIDR: "10.0.0.0/8" or "::/0"
+	// destinationAliases retains alternate authored CIDR spellings for
+	// commit-time diagnostics after compileStaticRoutes folds them by masked
+	// prefix. It is compiler-only and deliberately omitted from the helper wire.
+	destinationAliases []string       `json:"-"`
+	NextHops           []NextHopEntry // preference/metric tiers; equal tiers form ECMP
+	Discard            bool           // null route (blackhole): silently drop matching traffic
 	// Reject installs an unreachable route: matching traffic is dropped AND an
 	// ICMP unreachable is returned to the source (Junos `route <p> reject` →
 	// FRR `ip route <p> reject`). Distinct from Discard (Junos `discard` → FRR
