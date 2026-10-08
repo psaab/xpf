@@ -10,6 +10,7 @@ package grpcapi
 
 import (
 	"container/heap"
+	"context"
 	"fmt"
 	"net"
 	"sort"
@@ -267,7 +268,7 @@ func (h *topCandHeap) Pop() any {
 // survivors. A backend iterator error (e.g. helper restart mid-scan) is
 // surfaced as codes.Internal instead of returning a partial ranking as
 // success (the errors were previously assigned to `_`).
-func (s *Server) showSessionsTop(cfg *config.Config, topic string, buf *strings.Builder) error {
+func (s *Server) showSessionsTop(ctx context.Context, cfg *config.Config, topic string, buf *strings.Builder) error {
 	if s.dp == nil || !s.dp.IsLoaded() {
 		buf.WriteString("Dataplane not loaded\n")
 		return nil
@@ -288,6 +289,9 @@ func (s *Server) showSessionsTop(cfg *config.Config, topic string, buf *strings.
 			"session scan concurrency limit reached; retry shortly")
 	}
 	defer release()
+	if err := ctx.Err(); err != nil {
+		return sessionWalkContextStatusError(err)
+	}
 
 	sortByBytes := topic == "sessions-top:bytes"
 	sortLabel := "bytes"
@@ -305,23 +309,31 @@ func (s *Server) showSessionsTop(cfg *config.Config, topic string, buf *strings.
 
 	h := &topCandHeap{}
 	total := 0
-	// consider offers a candidate to the bounded top-K. It fills the heap
-	// to K, then only displaces the current minimum when the candidate is
-	// strictly larger — so at most K entries are ever retained and no
-	// enrichment happens here.
-	consider := func(c topCand) {
+	// consider offers a candidate to the bounded top-K and copies its table
+	// addresses only if the candidate enters the heap.
+	copyCandidateIPs := func(c topCand, srcIP, dstIP []byte) topCand {
+		c.srcIP = append(net.IP(nil), srcIP...)
+		c.dstIP = append(net.IP(nil), dstIP...)
+		return c
+	}
+	consider := func(c topCand, srcIP, dstIP []byte) {
 		total++
 		if h.Len() < topSessionsK {
-			heap.Push(h, c)
+			heap.Push(h, copyCandidateIPs(c, srcIP, dstIP))
 			return
 		}
 		if c.metric > (*h)[0].metric {
-			(*h)[0] = c
+			(*h)[0] = copyCandidateIPs(c, srcIP, dstIP)
 			heap.Fix(h, 0)
 		}
 	}
 
+	cancelled := newSessionWalkCancelSampler(ctx, sessionWalkCancelInterval9060)
+
 	if err := s.dp.IterateSessions(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
+		if cancelled() {
+			return false
+		}
 		if val.IsReverse != 0 {
 			return true
 		}
@@ -329,14 +341,8 @@ func (s *Server) showSessionsTop(cfg *config.Config, topic string, buf *strings.
 		if !sortByBytes {
 			metric = val.FwdPackets + val.RevPackets
 		}
-		srcIP := make(net.IP, len(key.SrcIP))
-		copy(srcIP, key.SrcIP[:])
-		dstIP := make(net.IP, len(key.DstIP))
-		copy(dstIP, key.DstIP[:])
 		consider(topCand{
 			metric:   metric,
-			srcIP:    srcIP,
-			dstIP:    dstIP,
 			srcPort:  key.SrcPort,
 			dstPort:  key.DstPort,
 			proto:    key.Protocol,
@@ -348,13 +354,22 @@ func (s *Server) showSessionsTop(cfg *config.Config, topic string, buf *strings.
 			fwdBytes: val.FwdBytes,
 			revBytes: val.RevBytes,
 			created:  val.Created,
-		})
+		}, key.SrcIP[:], key.DstIP[:])
 		return true
 	}); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return sessionWalkContextStatusError(ctxErr)
+		}
 		return status.Errorf(codes.Internal, "v4 session iteration: %v", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return sessionWalkContextStatusError(err)
 	}
 
 	if err := s.dp.IterateSessionsV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
+		if cancelled() {
+			return false
+		}
 		if val.IsReverse != 0 {
 			return true
 		}
@@ -362,15 +377,9 @@ func (s *Server) showSessionsTop(cfg *config.Config, topic string, buf *strings.
 		if !sortByBytes {
 			metric = val.FwdPackets + val.RevPackets
 		}
-		srcIP := make(net.IP, len(key.SrcIP))
-		copy(srcIP, key.SrcIP[:])
-		dstIP := make(net.IP, len(key.DstIP))
-		copy(dstIP, key.DstIP[:])
 		consider(topCand{
 			metric:   metric,
 			isV6:     true,
-			srcIP:    srcIP,
-			dstIP:    dstIP,
 			srcPort:  key.SrcPort,
 			dstPort:  key.DstPort,
 			proto:    key.Protocol,
@@ -382,10 +391,16 @@ func (s *Server) showSessionsTop(cfg *config.Config, topic string, buf *strings.
 			fwdBytes: val.FwdBytes,
 			revBytes: val.RevBytes,
 			created:  val.Created,
-		})
+		}, key.SrcIP[:], key.DstIP[:])
 		return true
 	}); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return sessionWalkContextStatusError(ctxErr)
+		}
 		return status.Errorf(codes.Internal, "v6 session iteration: %v", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return sessionWalkContextStatusError(err)
 	}
 
 	// Order the <=K survivors with the SAME descending comparator the
