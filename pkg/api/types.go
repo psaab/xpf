@@ -612,6 +612,10 @@ type RouteInfo struct {
 	Interface   string `json:"interface,omitempty"`
 	Preference  int    `json:"preference,omitempty"`
 	NextTable   string `json:"next_table,omitempty"`
+	// NotInstalledReason is the shared config verdict used by the snapshot
+	// builder and CLI/gRPC show-route text for a configured static that is not
+	// installed. Additive and omitempty, so installable route rows are unchanged.
+	NotInstalledReason string `json:"not_installed_reason,omitempty"`
 	// Disposition labels a route that has no forwarding next-hop with the
 	// action it takes: "reject" (return ICMP unreachable, FRR
 	// RTN_UNREACHABLE), "discard" (silent blackhole, FRR Null0), or
