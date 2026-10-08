@@ -3670,13 +3670,13 @@ outside the monitor loop:
 
 `config`, `dataplane`.
 
-## Failover timing (CLAUDE.md authoritative)
+## Failover timing by mode and event (CLAUDE.md authoritative)
 
-- ~60 ms with default 30 ms VRRP advertisements (masterDownInterval ~97 ms).
-- Planned shutdown: burst of 3× priority-0 advertisements; peer takes over
-  in ~1 ms.
-- Failback: ~130 ms (daemon startup + BPF load + sync hold release).
-- Heartbeat: 200 ms interval, threshold 5 (1 s detection).
+- Default compiler mode is private-RG election over the control link, with RETH VRRP suppressed (`pkg/config/compiler_system.go:3134-3137`; `pkg/vrrp/README.md:912-923`).
+- In that mode, steady-state peer-loss staleness is interval × threshold: 100ms × 5 = 500ms at runtime defaults, or 200ms × 5 ≈ 1s in the deployed lab config; startup/restart grace can defer handling. This is a detection timer, not end-to-end restoration latency (`pkg/cluster/heartbeat.go:62-65,1916-1960`; `docs/ha-cluster-userspace.conf:71-72`).
+- Interface/IP monitoring is separate: monitors poll each second and require 3 consecutive failed polls before marking down (`pkg/cluster/monitor.go:30-31,386-397`).
+- Only legacy VRRP-backed mode (`no-private-rg-election`, unless `no-reth-vrrp` is also set) uses RETH VRRP's 30ms default advertisement. For a 30ms learned/current advertisement, its master-down timer is 3×advertisement + priority skew (>90ms and <120ms for priorities 1–255); this is not a measured end-to-end failover time (`pkg/vrrp/vrrp.go:155-166`; `pkg/vrrp/instance_timing.go:110-128`; `pkg/vrrp/README.md:912-923`).
+- Planned legacy VRRP shutdown sends three priority-0 advertisements; the backup arms a 1ms timer, and the run-loop test requires takeover within 50ms (test constraint, not SLA). Planned private-RG operator failover uses an explicit peer-transfer/resignation path, not the peer-loss heartbeat detector (`pkg/vrrp/instance.go:804-806`; `pkg/vrrp/instance_rx.go:155-174`; `pkg/vrrp/instance_prio0_run_test.go:143-149`; `pkg/cluster/failover.go:447-450`; `pkg/cluster/election.go:1022-1042`).
 - Event debounce 500 ms before priority updates fire.
 
 ## Gotchas
