@@ -122,6 +122,128 @@ func ValidateRouteFilterArgPositional(argIdx int, raw string, _ *Config) error {
 	return fmt.Errorf("not a valid route-filter match-type %q (expected one of: exact, longer, orlonger, upto, prefix-length-range, through)", tok)
 }
 
+// validateRouteFilterTailStrict12067 checks the portion of a route-filter
+// node beyond its declared prefix and match-type. The compiler reads one
+// trailer only for `upto`, `prefix-length-range`, and `through`; all other
+// trailing tokens and any second trailer are otherwise silently discarded.
+// This node-level check runs in SchemaValidate, before compilation, and sees
+// both packed Keys and the hierarchical child form used for a trailer.
+func validateRouteFilterTailStrict12067(node *Node, _ *schemaNode) error {
+	if node == nil {
+		return nil
+	}
+	if len(node.Keys) < 3 {
+		if len(node.Children) > 0 {
+			return unconsumedRouteFilterChild12067(node.Children[0])
+		}
+		return nil
+	}
+	matchType := node.Keys[2]
+	if !routeFilterMatchTypes[matchType] {
+		// Let ValidateRouteFilterArgPositional report an unsupported match
+		// type in its established slot-specific error.
+		return nil
+	}
+
+	trailerLimit := 0
+	switch matchType {
+	case "upto", "prefix-length-range", "through":
+		trailerLimit = 1
+	}
+
+	consumedTrailer := 0
+	if len(node.Keys) > 3 && trailerLimit == 1 {
+		consumedTrailer = 1
+		if matchType == "upto" {
+			if _, ok := parseRouteFilterLen(node.Keys[3]); !ok {
+				return fmt.Errorf("unconsumed route-filter token %q after `upto` (expected a prefix length such as /24)", node.Keys[3])
+			}
+		}
+	} else if len(node.Keys) == 3 && trailerLimit == 1 && len(node.Children) > 0 {
+		// The hierarchical block spelling parks a consumed trailer as a
+		// single child token: `upto { /24; }`.
+		if len(node.Children) != 1 || node.Children[0] == nil ||
+			len(node.Children[0].Keys) != 1 || len(node.Children[0].Children) != 0 {
+			return unconsumedRouteFilterChild12067(node.Children[0])
+		}
+		consumedTrailer = 1
+		if matchType == "upto" {
+			if _, ok := parseRouteFilterLen(node.Children[0].Keys[0]); !ok {
+				return fmt.Errorf("unconsumed route-filter token %q after `upto` (expected a prefix length such as /24)", node.Children[0].Keys[0])
+			}
+		}
+	}
+
+	if extra := 3 + consumedTrailer; len(node.Keys) > extra {
+		return fmt.Errorf("unconsumed route-filter token %q after match-type %q", node.Keys[extra], matchType)
+	}
+	if len(node.Children) > 0 && consumedTrailer == 0 {
+		return unconsumedRouteFilterChild12067(node.Children[0])
+	}
+	if consumedTrailer == 1 && len(node.Keys) > 3 && len(node.Children) > 0 {
+		return unconsumedRouteFilterChild12067(node.Children[0])
+	}
+	return nil
+}
+
+func unconsumedRouteFilterChild12067(node *Node) error {
+	if node == nil || len(node.Keys) == 0 {
+		return fmt.Errorf("unconsumed child after route-filter match-type")
+	}
+	return fmt.Errorf("unconsumed route-filter token %q after match-type", node.Keys[0])
+}
+
+// validatePackedPolicyRouteFilterTailStrict12067 handles the compiler's
+// compact `from route-filter ...` spelling, where route-filter tokens remain
+// packed on the `from` node instead of becoming a route-filter child node.
+func validatePackedPolicyRouteFilterTailStrict12067(node *Node, _ *schemaNode) error {
+	if node == nil || len(node.Keys) < 2 {
+		return nil
+	}
+	for i := 1; i < len(node.Keys); i++ {
+		if node.Keys[i] != "route-filter" || node.KeyQuoted(i) || node.KeyBracketed(i) {
+			continue
+		}
+		if i+2 >= len(node.Keys) {
+			return fmt.Errorf("route-filter in packed `from` is missing its prefix or match-type")
+		}
+		matchType := node.Keys[i+2]
+		if !routeFilterMatchTypes[matchType] {
+			continue
+		}
+
+		next := i + 3
+		switch matchType {
+		case "upto", "prefix-length-range", "through":
+			if next < len(node.Keys) && !policyFromLeafKeyword12067(node, next) {
+				if matchType == "upto" {
+					if _, ok := parseRouteFilterLen(node.Keys[next]); !ok {
+						return fmt.Errorf("unconsumed route-filter token %q after `upto` (expected a prefix length such as /24)", node.Keys[next])
+					}
+				}
+				next++
+			}
+		}
+		if next < len(node.Keys) && !policyFromLeafKeyword12067(node, next) {
+			return fmt.Errorf("unconsumed route-filter token %q after match-type %q", node.Keys[next], matchType)
+		}
+		i = next - 1
+	}
+	return nil
+}
+
+func policyFromLeafKeyword12067(node *Node, idx int) bool {
+	if node.KeyQuoted(idx) || node.KeyBracketed(idx) {
+		return false
+	}
+	switch node.Keys[idx] {
+	case "protocol", "prefix-list", "route-filter", "community", "as-path":
+		return true
+	default:
+		return false
+	}
+}
+
 // ValidateRouteDestination accepts a static-route destination prefix: a
 // family-agnostic CIDR (v4 or v6) with an explicit /prefix-length. Used for
 // the `routing-options static route <destination>` identity arg (#2448):

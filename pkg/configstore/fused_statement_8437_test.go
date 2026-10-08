@@ -95,3 +95,20 @@ func TestFusedStatementGateDoesNotCondemnValidTrailingTokens_8437(t *testing.T) 
 			strings.SplitN(err.Error(), "\n", 2)[0])
 	}
 }
+
+// #12067. A non-keyword route-filter tail is silently ignored by the compiler
+// and is not covered by #11779's unsupported-from gate. Reject it during the
+// operator commit-check, before the term can be installed as an unconstrained
+// orlonger match.
+func TestRouteFilterUnconsumedTailRejectedBeforeCompile_12067(t *testing.T) {
+	_, err := CheckText(psTerm8437("route-filter 10.0.0.0/8 orlonger foo;"), 0)
+	if err == nil {
+		t.Fatal("commit-check accepted an unconsumed route-filter tail")
+	}
+	if !strings.Contains(err.Error(), "route-filter") {
+		t.Fatalf("commit-check error must name the route-filter leaf: %v", err)
+	}
+	if !strings.Contains(err.Error(), "foo") {
+		t.Fatalf("commit-check error must identify the unconsumed token: %v", err)
+	}
+}
