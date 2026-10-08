@@ -2,11 +2,12 @@ package config
 
 // parseHostInboundNode parses a `host-inbound-traffic { system-services ...;
 // protocols ...; }` subtree into a HostInboundTraffic. It is the SSOT for both
-// the zone-level stanza and the per-interface override (#3362) so the two parse
-// identically. A present-but-empty stanza returns a non-nil empty struct
-// (preserving the historical zone-level behaviour where an empty stanza means
-// "the operator opened nothing" → host-inbound enforcing, deny-all). A nil node
-// (no stanza) returns nil.
+// the zone-level stanza and the per-interface override (#3362).
+// A present stanza always returns a non-nil struct, even if it has no recognized
+// tokens. Unknown children remain attached for diagnostics. This preserves the
+// historical zone-level behaviour where an empty stanza means "the operator
+// opened nothing" → host-inbound enforcing, deny-all. A nil node (no stanza)
+// returns nil.
 func parseHostInboundNode(n *Node) *HostInboundTraffic {
 	if n == nil {
 		return nil
@@ -29,12 +30,17 @@ func parseHostInboundNode(n *Node) *HostInboundTraffic {
 			values, excluded := hostInboundExceptParts(hit)
 			protocols = append(protocols, values...)
 			protocolsExcept = append(protocolsExcept, excluded...)
+		default:
+			if keyword := hit.Name(); keyword != "" && !zoneInterfaceApplyMetaKeyword(keyword) {
+				hib.UnknownChildren = append(hib.UnknownChildren, keyword)
+			}
 		}
 	}
 	hib.SystemServices = hostInboundFilterExcept(services, servicesExcept, false)
 	hib.Protocols = hostInboundFilterExcept(protocols, protocolsExcept, true)
 	hib.systemServicesExcept = servicesExcept
 	hib.protocolsExcept = protocolsExcept
+	hib.UnknownChildren = dedupHostInboundTokens(hib.UnknownChildren)
 	return hib
 }
 
@@ -248,6 +254,7 @@ func mergeHostInbound(dst, src *HostInboundTraffic) *HostInboundTraffic {
 	dst.Protocols = dedupHostInboundTokens(append(dst.Protocols, src.Protocols...))
 	dst.systemServicesExcept = append(dst.systemServicesExcept, src.systemServicesExcept...)
 	dst.protocolsExcept = append(dst.protocolsExcept, src.protocolsExcept...)
+	dst.UnknownChildren = dedupHostInboundTokens(append(dst.UnknownChildren, src.UnknownChildren...))
 	dst.SystemServices = hostInboundFilterExcept(dst.SystemServices, dst.systemServicesExcept, false)
 	dst.Protocols = hostInboundFilterExcept(dst.Protocols, dst.protocolsExcept, true)
 	return dst
@@ -280,6 +287,7 @@ func cloneHostInbound(src *HostInboundTraffic) *HostInboundTraffic {
 	return &HostInboundTraffic{
 		SystemServices:       append([]string(nil), src.SystemServices...),
 		Protocols:            append([]string(nil), src.Protocols...),
+		UnknownChildren:      append([]string(nil), src.UnknownChildren...),
 		systemServicesExcept: append([]string(nil), src.systemServicesExcept...),
 		protocolsExcept:      append([]string(nil), src.protocolsExcept...),
 	}
