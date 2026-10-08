@@ -230,16 +230,19 @@ func wiringServer9952(t *testing.T) *Server {
 func TestTheREADPathConsultsTheCommandGate9952(t *testing.T) {
 	s := wiringServer9952(t)
 
-	denied := runGuardedConfigRead9324(t, s, "/api/v1/security/sessions")
-	if denied.Code != 403 {
-		t.Fatalf("GET /api/v1/security/sessions -> %d, want 403: the READ path does not consult "+
-			"the command gate, so `deny-commands` is computed and ignored (#9952). body=%s",
-			denied.Code, denied.Body.String())
+	for _, path := range []string{
+		"/api/v1/security/sessions",
+		"/api/v1/security/sessions/summary/zone-pairs",
+	} {
+		denied := runGuardedConfigRead9324(t, s, path)
+		if denied.Code != 403 {
+			t.Errorf("GET %s -> %d, want 403: class `limited` denies `show security flow session`; "+
+				"body=%s", path, denied.Code, denied.Body.String())
+		}
 	}
 
 	// REFERENCE ARM, in the same run and through the same middleware: a read the
-	// class's regex does NOT cover must still be served. Without it a 403 above
-	// is equally consistent with a guard that refuses this principal everything.
+	// class's regex does NOT cover must still be served.
 	allowed := runGuardedConfigRead9324(t, s, "/api/v1/security/zones")
 	if allowed.Code != 200 {
 		t.Fatalf("GET /api/v1/security/zones -> %d, want 200: a command the regex does not "+

@@ -6,6 +6,8 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // #7172 cut 5b — the command tables are now READ and `deny-commands` is
@@ -292,7 +294,7 @@ system {
     login {
         class limited {
             permissions all;
-            deny-commands "request system reboot";
+            deny-commands "request system reboot|show security flow session";
         }
         user opsuser {
             class limited;
@@ -325,10 +327,23 @@ func TestAuthorizeRPCEnforcesDenyCommandsEndToEnd7172(t *testing.T) {
 		t.Error("SystemAction{reboot} maps to `request system reboot`, which this class " +
 			"denies — authorizeRPC admitted it, so the command gate is not reached")
 	}
+	// The same class denies the live session summary RPC but retains access to
+	// zone inventory. These are the #12096 acceptance rows: the zone-pair scan
+	// is charged to the canonical session-summary command, not policy simulation.
+	zoneSummaryMethod := "/" + pb.BpfrxService_ServiceDesc.ServiceName + "/GetZonePairSummary"
+	if err := s.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly), zoneSummaryMethod,
+		&pb.GetZonePairSummaryRequest{}); status.Code(err) != codes.PermissionDenied {
+		t.Errorf("GetZonePairSummary denial code = %s, want PermissionDenied (err=%v)",
+			status.Code(err), err)
+	}
+	zonesMethod := "/" + pb.BpfrxService_ServiceDesc.ServiceName + "/GetZones"
+	if err := s.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly), zonesMethod,
+		&pb.GetZonesRequest{}); err != nil {
+		t.Errorf("GetZones is not covered by the session deny and must remain admitted: %v", err)
+	}
 
-	// ADMITTED: same class, same coarse permission, a command the pattern does
-	// not match. Without this arm the cell would also pass if the gate denied
-	// everything, which is not the property under test.
+	// ADMITTED: existing non-session control retained as well: same class, same
+	// coarse permission, command regex does not cover `show version`.
 	if err := s.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly),
 		"/"+pb.BpfrxService_ServiceDesc.ServiceName+"/GetStatus",
 		&pb.GetStatusRequest{}); err != nil {
