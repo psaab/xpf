@@ -393,12 +393,14 @@ func validateForwardingTableExportSingleStrict(cfg *Config) error {
 // CMD_WARNING_CONFIG_FAILED, the WHOLE reload fails — leaving dynamic routing
 // stale, a commit-accepted config the routing daemon cannot load.
 //
-// Only NAME references are checked. `then community (set|add) <value>` and the
-// bare `then community <value>` carry a community VALUE (e.g. 65000:100 /
-// no-export), not a community-list reference, so they are not validated here;
-// `then community none` carries no argument. Multiple `from community` siblings
-// (FromCommunity slice) and a multi-list `then community delete [ a b ]`
-// (CommunityDelete slice) are each fully walked.
+// `then community (set|add) <value>` and bare `then community <value>` accept
+// either an FRR community literal (e.g. `65000:100` / `no-export`) or a defined
+// community name whose members are all literals; names are resolved to those
+// members before rendering. Undefined names, empty definitions, and definitions
+// with non-literal members are rejected. `then community none` carries no
+// argument. Multiple `from community` siblings (FromCommunity slice) and a
+// multi-list `then community delete [ a b ]` (CommunityDelete slice) are each
+// fully walked.
 //
 // On the tolerant load / peer-sync paths the call site downgrades this to a
 // warning (opts.lenientPolicyCommunityRef) so an already-persisted or
@@ -456,6 +458,34 @@ func validatePolicyCommunityReferencesStrict(cfg *Config) error {
 					"would fail frr-reload (failing the entire FRR config load); "+
 					"define `policy-options community %s` or fix the name",
 					psName, term.Name, c, c, c, c, c)
+			}
+
+			// #12069: add/set/bare operands are values at FRR emission time.
+			// The compile-time post-pass expands defined names, leaving this
+			// strict gate to reject values that are neither FRR literals nor
+			// names with all-literal definitions.
+			verb, value := "", ""
+			switch term.CommunityOp {
+			case "add":
+				verb, value = "add", term.CommunityAdd
+			case "set":
+				verb, value = "set", term.Community
+			case "":
+				value = term.Community
+			}
+			if value != "" {
+				if _, ok := ResolveCommunityValue(&cfg.PolicyOptions, value); !ok {
+					clause := fmt.Sprintf("`then community %s`", value)
+					if verb != "" {
+						clause = fmt.Sprintf("`then community %s %s`", verb, value)
+					}
+					return fmt.Errorf("policy-statement %s term %s %s uses %q, "+
+						"which is neither an FRR community literal nor a defined "+
+						"community whose members are all literals; the rendered "+
+						"`set community` line would be invalid — use a valid literal "+
+						"or define `policy-options community %s` with literal members",
+						psName, term.Name, clause, value, value)
+				}
 			}
 		}
 	}

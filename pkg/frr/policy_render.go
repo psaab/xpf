@@ -891,7 +891,10 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			// append/delete/strip in addition to whole-attribute replace;
 			// emitting only the replace clause wiped upstream-set
 			// communities. Map each Junos operation to its FRR route-map
-			// set clause. #4482: every free-text value below (set community,
+			// set clause. #12069 resolves defined names to literal members
+			// and rejects invalid add/set values before this renderer; this
+			// belt also omits invalid tolerant-load or peer-synced values.
+			// #4482: every free-text value below (set community,
 			// set comm-list delete name, set as-path prepend, and the match
 			// community / as-path names) is routed through sanitizeFRRValue —
 			// the same #4097 render-side belt the community-list / as-path-list
@@ -910,7 +913,13 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				b.WriteString(" set community none\n")
 			case "add":
 				if term.CommunityAdd != "" {
-					fmt.Fprintf(&b, " set community %s additive\n", sanitizeFRRValue(term.CommunityAdd))
+					value, ok := config.ResolveCommunityValue(po, term.CommunityAdd)
+					if ok {
+						fmt.Fprintf(&b, " set community %s additive\n", sanitizeFRRValue(value))
+					} else {
+						slog.Warn("frr: omitting an unresolvable then community add value",
+							"route_map", routeMapName, "term", term.Name, "value", sanitizeFRRValue(term.CommunityAdd))
+					}
 				}
 			case "delete":
 				// FRR's `set comm-list <name> delete` strips ONE
@@ -924,7 +933,13 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				}
 			default: // "" or "set" — whole-attribute replace
 				if term.Community != "" {
-					fmt.Fprintf(&b, " set community %s\n", sanitizeFRRValue(term.Community))
+					value, ok := config.ResolveCommunityValue(po, term.Community)
+					if ok {
+						fmt.Fprintf(&b, " set community %s\n", sanitizeFRRValue(value))
+					} else {
+						slog.Warn("frr: omitting an unresolvable then community replacement value",
+							"route_map", routeMapName, "term", term.Name, "value", sanitizeFRRValue(term.Community))
+					}
 				}
 			}
 			// AS-path prepend (#2892). Junos `then as-path-prepend

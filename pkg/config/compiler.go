@@ -1074,6 +1074,12 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	// sub-steps.
 	resolveDerivedConfig(cfg, opts)
 
+	// #12069: resolve community names used as `then community add|set`
+	// values only after every policy-options root has populated both the
+	// community and policy maps. This preserves use-before-definition and
+	// cross-root behavior while letting strict validation see literal values.
+	resolvePolicyCommunityOperands(cfg)
+
 	// P6a (#4406 step 6, FINAL): early-strict validation + the two folds.
 	// Extracted into runEarlyStrictAndFolds (compiler_earlystrict.go) — the
 	// RISKY entangled phase that interleaves validation with two cfg-mutations

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // CommunityRegexChars are the characters whose presence in a community member
@@ -185,22 +186,58 @@ var frrWellKnownCommunities = []string{
 // count as separators, which is what sanitizeFRRValue turns them into at
 // render.
 func frrStandardCommunityLiteral(member string) bool {
-	mapped := strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return ' '
+	start := -1
+	hasWord := false
+	for i, r := range member {
+		if r < 0x20 || r == 0x7f || unicode.IsSpace(r) {
+			if start >= 0 {
+				if !frrCommunityWord(member[start:i]) {
+					return false
+				}
+				start = -1
+				hasWord = true
+			}
+		} else if start < 0 {
+			start = i
 		}
-		return r
-	}, member)
-	words := strings.Fields(mapped)
-	if len(words) == 0 {
-		return false
 	}
-	for _, w := range words {
-		if !frrCommunityWord(w) {
+	if start >= 0 {
+		if !frrCommunityWord(member[start:]) {
 			return false
 		}
+		hasWord = true
 	}
-	return true
+	return hasWord
+}
+
+// ResolveCommunityValue prefers a single defined community name, expanding it
+// to literal members; otherwise it accepts a valid FRR standard literal.
+// It returns false for undefined names, empty definitions, and definitions
+// containing regex or otherwise non-literal members. Community-list
+// definitions can contain several members; FRR's `set community` accepts them
+// as a space-separated value list.
+func ResolveCommunityValue(po *PolicyOptionsConfig, value string) (string, bool) {
+	if value == "" {
+		return "", false
+	}
+	if po != nil && po.Communities != nil &&
+		strings.IndexAny(value, " \t\n\r\v\f") < 0 {
+		if cd, exists := po.Communities[value]; exists {
+			if cd == nil || len(cd.Members) == 0 {
+				return "", false
+			}
+			for _, member := range cd.Members {
+				if !frrStandardCommunityLiteral(member) {
+					return "", false
+				}
+			}
+			return strings.Join(cd.Members, " "), true
+		}
+	}
+	if frrStandardCommunityLiteral(value) {
+		return value, true
+	}
+	return "", false
 }
 
 func frrCommunityWord(w string) bool {

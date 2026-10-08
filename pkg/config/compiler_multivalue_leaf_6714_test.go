@@ -154,11 +154,12 @@ security { flow { traceoptions { flag { basic-datapath totally-bogus; } } } }`))
 // ACTION. `then { community { add cA; } }` puts the operation keyword and its
 // argument on one child; reading Keys[0] returned ["add"] alone, and
 // applyCommunityAction requires len(vals) >= 2 — so the term compiled with NO
-// community action at all and FRR rendered nothing.
+// community action at all. The now-strict #12069 gate requires cA to be
+// defined, and the compiled value must expand to its literal member.
 func TestPolicyCommunityAction6714BlockFormIsNotLost(t *testing.T) {
 	for _, tc := range []struct{ name, cfg, wantOp, wantAdd string }{
-		{"block form", `policy-options { policy-statement PS { term T { then { community { add cA; } } } } }`, "add", "cA"},
-		{"leaf form (control)", `policy-options { policy-statement PS { term T { then { community add cA; } } } }`, "add", "cA"},
+		{"block form", `policy-options { community cA { members 65000:100; } policy-statement PS { term T { then { community { add cA; } } } } }`, "add", "65000:100"},
+		{"leaf form (control)", `policy-options { community cA { members 65000:100; } policy-statement PS { term T { then { community add cA; } } } }`, "add", "65000:100"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := CompileConfig(hierTree6659(t, tc.cfg))

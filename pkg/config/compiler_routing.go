@@ -1110,6 +1110,42 @@ func compilePolicyOptions(node *Node, po *PolicyOptionsConfig) error {
 
 	return nil
 }
+
+// resolvePolicyCommunityOperands resolves defined community names used by
+// `then community add|set` and the legacy bare replacement form. It runs
+// after all policy-options roots compile, so forward definitions resolve too.
+// Invalid or undefined operands stay untouched for the strict validator to
+// reject and the tolerant renderer to omit.
+func resolvePolicyCommunityOperands(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	po := &cfg.PolicyOptions
+	for _, ps := range po.PolicyStatements {
+		if ps == nil {
+			continue
+		}
+		for _, term := range ps.Terms {
+			if term == nil {
+				continue
+			}
+			switch term.CommunityOp {
+			case "add":
+				if term.CommunityAdd != "" {
+					if value, ok := ResolveCommunityValue(po, term.CommunityAdd); ok {
+						term.CommunityAdd = value
+					}
+				}
+			case "", "set":
+				if term.Community != "" {
+					if value, ok := ResolveCommunityValue(po, term.Community); ok {
+						term.Community = value
+					}
+				}
+			}
+		}
+	}
+}
 func policyStatementUnknownFrom11779(node *Node) []string {
 	if node == nil {
 		return nil
