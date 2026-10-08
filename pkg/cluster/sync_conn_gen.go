@@ -50,6 +50,42 @@ func (s *SessionSync) noteHelperMirrorResult(af string, warned *atomic.Bool, err
 	slog.Debug("cluster sync: repeated synced-session helper mirror failure", "af", af, "err", err)
 }
 
+// noteBulkInstallOutcomeV4 records whether key needs a transport retry during
+// the active authoritative receive bulk. Definitive outcomes clear old debt.
+// It does not affect incremental sync accounting.
+func (s *SessionSync) noteBulkInstallOutcomeV4(key dataplane.SessionKey, retry bool) {
+	s.bulkMu.Lock()
+	defer s.bulkMu.Unlock()
+	if !s.bulkInProgress {
+		return
+	}
+	if !retry {
+		delete(s.bulkInstallFailedV4, key)
+		return
+	}
+	if s.bulkInstallFailedV4 == nil {
+		s.bulkInstallFailedV4 = make(map[dataplane.SessionKey]struct{})
+	}
+	s.bulkInstallFailedV4[key] = struct{}{}
+}
+
+// noteBulkInstallOutcomeV6 is the IPv6 twin of noteBulkInstallOutcomeV4.
+func (s *SessionSync) noteBulkInstallOutcomeV6(key dataplane.SessionKeyV6, retry bool) {
+	s.bulkMu.Lock()
+	defer s.bulkMu.Unlock()
+	if !s.bulkInProgress {
+		return
+	}
+	if !retry {
+		delete(s.bulkInstallFailedV6, key)
+		return
+	}
+	if s.bulkInstallFailedV6 == nil {
+		s.bulkInstallFailedV6 = make(map[dataplane.SessionKeyV6]struct{})
+	}
+	s.bulkInstallFailedV6[key] = struct{}{}
+}
+
 // genGuardMapCap is the ABSOLUTE CEILING for the per-side EFFECTIVE guard
 // caps: half of conntrack.MaxSessions, which counts forward+reverse entries
 // while guard keys are forward sessions (#9915 F-044). Nothing reads it
@@ -1572,6 +1608,7 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 		s.recordInstalledGenV4(key, record)
 		s.recordInstalledGenScopedV4(scopedLogicalDomain(val.RoutingDomain), key, scopedRecord)
 		s.stats.SessionsInstalled.Add(1)
+		s.noteBulkInstallOutcomeV4(key, false)
 		s.noteHelperMirrorResult("v4", &s.sessionMirrorWarnedV4, nil)
 		if val.IsReverse == 0 && s.OnForwardSessionInstalled != nil {
 			s.OnForwardSessionInstalled()
@@ -1588,8 +1625,10 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 		slog.Debug("cluster sync: helper refused a synced-session import; the "+
 			"local mirror was rolled back and the peer holds a session this node does not",
 			"af", "v4", "err", err)
+		s.noteBulkInstallOutcomeV4(key, false)
 	} else {
 		s.noteHelperMirrorResult("v4", &s.sessionMirrorWarnedV4, err)
+		s.noteBulkInstallOutcomeV4(key, true)
 	}
 	return false
 }
@@ -1646,6 +1685,7 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 		s.recordInstalledGenV6(key, record)
 		s.recordInstalledGenScopedV6(scopedLogicalDomain(val.RoutingDomain), key, scopedRecord)
 		s.stats.SessionsInstalled.Add(1)
+		s.noteBulkInstallOutcomeV6(key, false)
 		s.noteHelperMirrorResult("v6", &s.sessionMirrorWarnedV6, nil)
 		if val.IsReverse == 0 && s.OnForwardSessionInstalled != nil {
 			s.OnForwardSessionInstalled()
@@ -1662,8 +1702,10 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 		slog.Debug("cluster sync: helper refused a synced-session import; the "+
 			"local mirror was rolled back and the peer holds a session this node does not",
 			"af", "v6", "err", err)
+		s.noteBulkInstallOutcomeV6(key, false)
 	} else {
 		s.noteHelperMirrorResult("v6", &s.sessionMirrorWarnedV6, err)
+		s.noteBulkInstallOutcomeV6(key, true)
 	}
 	return false
 }

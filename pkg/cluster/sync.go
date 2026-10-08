@@ -1442,9 +1442,15 @@ type SessionSync struct {
 	// BulkEnd is accepted only on this connection. Guarded by bulkMu, compared
 	// by identity, and cleared with the epoch and incarnation on a full
 	// disconnect.
-	bulkRecvConn               net.Conn
-	bulkRecvV4                 map[dataplane.SessionKey]struct{}
-	bulkRecvV6                 map[dataplane.SessionKeyV6]struct{}
+	bulkRecvConn net.Conn
+	bulkRecvV4   map[dataplane.SessionKey]struct{}
+	bulkRecvV6   map[dataplane.SessionKeyV6]struct{}
+	// bulkInstallFailedV4/V6 retain only transient helper-install failures for
+	// the active authoritative bulk. They are separate from the received-key
+	// set because a failed transport write must not make that snapshot complete;
+	// semantic helper refusals deliberately do not enter these sets.
+	bulkInstallFailedV4        map[dataplane.SessionKey]struct{}
+	bulkInstallFailedV6        map[dataplane.SessionKeyV6]struct{}
 	bulkZoneSnapshot           *zoneOwnershipSnapshot
 	barrierSeq                 atomic.Uint64
 	barrierAckSeq              atomic.Uint64
@@ -2530,6 +2536,8 @@ func (s *SessionSync) reconcileStaleSessions(bulkSerial uint64) (bool, uint64, b
 	s.inventoryActiveGeneration = 0
 	s.bulkRecvV4 = nil
 	s.bulkRecvV6 = nil
+	s.bulkInstallFailedV4 = nil
+	s.bulkInstallFailedV6 = nil
 	s.bulkZoneSnapshot = nil
 	s.bulkMu.Unlock()
 	start := time.Now()

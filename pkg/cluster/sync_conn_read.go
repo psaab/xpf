@@ -354,6 +354,8 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		s.bulkRecvConn = conn
 		s.bulkRecvV4 = make(map[dataplane.SessionKey]struct{})
 		s.bulkRecvV6 = make(map[dataplane.SessionKeyV6]struct{})
+		s.bulkInstallFailedV4 = make(map[dataplane.SessionKey]struct{})
+		s.bulkInstallFailedV6 = make(map[dataplane.SessionKeyV6]struct{})
 		s.bulkZoneSnapshot = zoneSnap
 		s.bulkMu.Unlock()
 		// The generation reset moves to the ACCEPTED path only. It is the
@@ -538,7 +540,18 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			s.stats.BulkEndsEpochOnlyMatched.Add(1)
 		}
 		bulkSerial := s.bulkRecvSerial
+		failedV4, failedV6 := len(s.bulkInstallFailedV4), len(s.bulkInstallFailedV6)
 		s.bulkMu.Unlock()
+		if failedV4+failedV6 > 0 {
+			// Do not reconcile this incomplete authoritative snapshot: absent
+			// rows would be deleted. Keeping the receive window open also keeps
+			// transfer readiness blocked until the sender's bounded bulk retry
+			// re-requests the table. Semantic refusals are excluded from these
+			// sets and retain their intentional-ACK behavior.
+			slog.Warn("cluster sync: bulk contains transient helper install failures; withholding BulkAck and failover release",
+				"epoch", epoch, "failed_v4", failedV4, "failed_v6", failedV6)
+			break
+		}
 		reconciled, inventoryGen, inventoryRequested := s.reconcileStaleSessions(bulkSerial)
 		if !reconciled {
 			slog.Warn("cluster sync: bulk reconcile did not complete; withholding BulkAck and failover release",
