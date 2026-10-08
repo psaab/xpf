@@ -33,10 +33,16 @@ fn enqueue_pending_forwards_mirrors_live_frame_and_records_counter() {
     );
     let lookup = WorkerBindingLookup::from_bindings(&bindings);
     let mirror_targets = MirrorTargetMap::default();
-    let mut pending = vec![test_live_forward_request_for_frame(
+    let mut forward_req = test_live_forward_request_for_frame(
         original_frame.len(),
         test_forwarding_decision_to_bound_ifindex(22),
-    )];
+    );
+    // #12268: stamp the wire L3 addrs into meta — the XDP shim does this in
+    // production; zeroed meta reads as 0.0.0.0 and trips the #11074
+    // source-martian backstop. Same pattern as ptb.rs / nat64_fragment_11353.rs.
+    forward_req.meta.flow_src_addr[..4].copy_from_slice(&original_frame[26..30]);
+    forward_req.meta.flow_dst_addr[..4].copy_from_slice(&original_frame[30..34]);
+    let mut pending = vec![forward_req];
     let mut post_recycles = Vec::new();
     let ingress_ident = bindings[0].identity();
     let ingress_live = &*bindings[0].live as *const BindingLiveState;
@@ -237,10 +243,14 @@ fn enqueue_failure_recycles_ingress_descriptor_and_reinjects_slow_path() {
     let forwarding = test_forwarding_with_egress_mtu(1500);
     let lookup = WorkerBindingLookup::from_bindings(&bindings);
     let mirror_targets = MirrorTargetMap::default();
-    let mut pending = vec![test_live_forward_request_for_frame(
+    let mut forward_req = test_live_forward_request_for_frame(
         original_frame.len(),
         test_forwarding_decision_to_bound_ifindex(22),
-    )];
+    );
+    // #12268: stamp wire addrs into meta (see above).
+    forward_req.meta.flow_src_addr[..4].copy_from_slice(&original_frame[26..30]);
+    forward_req.meta.flow_dst_addr[..4].copy_from_slice(&original_frame[30..34]);
+    let mut pending = vec![forward_req];
     let mut post_recycles = Vec::new();
     let ingress_ident = bindings[0].identity();
     let ingress_live = &*bindings[0].live as *const BindingLiveState;
@@ -318,10 +328,14 @@ fn oversized_forward_frame_recycles_ingress_descriptor_without_reinject() {
     let forwarding = test_forwarding_with_egress_mtu(1500);
     let lookup = WorkerBindingLookup::from_bindings(&bindings);
     let mirror_targets = MirrorTargetMap::default();
-    let mut pending = vec![test_live_forward_request_for_frame(
+    let mut forward_req = test_live_forward_request_for_frame(
         original_frame.len(),
         test_forwarding_decision_to_bound_ifindex(22),
-    )];
+    );
+    // #12268: stamp wire addrs into meta (see above).
+    forward_req.meta.flow_src_addr[..4].copy_from_slice(&original_frame[26..30]);
+    forward_req.meta.flow_dst_addr[..4].copy_from_slice(&original_frame[30..34]);
+    let mut pending = vec![forward_req];
     let mut post_recycles = Vec::new();
     let ingress_ident = bindings[0].identity();
     let ingress_live = &*bindings[0].live as *const BindingLiveState;
@@ -419,6 +433,9 @@ fn enqueue_failure_conserves_free_frames_across_many_forwards() {
             test_forwarding_decision_to_bound_ifindex(22),
         );
         req.desc.addr = offset;
+        // #12268: stamp wire addrs into meta (see above).
+        req.meta.flow_src_addr[..4].copy_from_slice(&original_frame[26..30]);
+        req.meta.flow_dst_addr[..4].copy_from_slice(&original_frame[30..34]);
         pending.push(req);
     }
     bindings[1].tx_pipeline.free_tx_frames.clear();
@@ -526,10 +543,14 @@ fn direct_tx_tuple_mismatch_recycles_frame_exactly_once() {
     let forwarding = test_forwarding_with_egress_mtu(1500);
     let lookup = WorkerBindingLookup::from_bindings(&bindings);
     let mirror_targets = MirrorTargetMap::default();
-    let mut pending = vec![test_live_forward_request_for_frame(
+    let mut forward_req = test_live_forward_request_for_frame(
         original_frame.len(),
         test_forwarding_decision_to_bound_ifindex(22),
-    )];
+    );
+    // #12268: stamp wire addrs into meta (see above).
+    forward_req.meta.flow_src_addr[..4].copy_from_slice(&original_frame[26..30]);
+    forward_req.meta.flow_dst_addr[..4].copy_from_slice(&original_frame[30..34]);
+    let mut pending = vec![forward_req];
     let mut post_recycles = Vec::new();
     let ingress_ident = bindings[0].identity();
     let ingress_live = &*bindings[0].live as *const BindingLiveState;
@@ -665,6 +686,9 @@ fn direct_tx_pat_translation_is_not_a_tuple_mismatch_9782() {
     };
     let mut req = test_live_forward_request_for_frame(frame.len(), decision);
     req.expected_ports = Some((45678, 5201));
+    // #12268: stamp the hand-rolled frame's wire addrs into meta (see above).
+    req.meta.flow_src_addr[..4].copy_from_slice(&frame[26..30]);
+    req.meta.flow_dst_addr[..4].copy_from_slice(&frame[30..34]);
     let mut pending = vec![req];
     let mut post_recycles = Vec::new();
     let ingress_ident = bindings[0].identity();
