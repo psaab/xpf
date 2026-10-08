@@ -207,10 +207,10 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 	}
 
 	// A non-empty but unknown/out-of-range protocol token ("tcpp", "999") must
-	// not pass through to the shared matcher, whose matchApp short-circuits to
-	// match-any for an unresolvable protocol, yielding a misleading verdict for
-	// a policy using `application any` (#3108). An empty value stays the
-	// unspecified wildcard (match any protocol).
+	// be rejected: protocol-constrained applications fail closed on it, while
+	// `application any` would still match and hide the invalid input (#3108).
+	// An empty value leaves the query protocol unspecified; constrained apps fail
+	// closed on the missing value, while unconstrained terms may still match.
 	if err := policymatch.ValidateProtocol(req.Protocol); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}

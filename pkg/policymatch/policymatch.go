@@ -256,26 +256,26 @@ func ParseICMPValue(s string) (*uint8, error) {
 }
 
 // ValidateProtocol checks an explicitly-supplied simulator protocol token. An
-// empty/whitespace token means "unspecified" — the protocol dimension is not
-// constrained (the established match-any wildcard) — and is accepted. A
-// non-empty token must resolve to an IANA protocol number via
+// empty/whitespace token means "unspecified" and is accepted. It leaves the
+// query protocol unpinned, but does not make every application term match: a
+// protocol-constrained term fails closed without a query protocol, while a
+// genuinely unconstrained term (including `application any`) may match.
+// A non-empty token must resolve to an IANA protocol number via
 // appid.ProtocolNumber: a known name/alias ("tcp", "udp", "icmp", "ospf", ...)
 // or a numeric value in 0-255. An unknown name ("notaproto") or an
 // out-of-range / non-numeric value ("999", "tcpp") is REJECTED with an error
 // rather than silently treated as "any protocol" (#3108).
 //
-// This is the protocol analogue of ValidatePort/ParsePort (#3116). The shared
-// matcher (matchApp) short-circuits to match-any when the query protocol is the
-// empty string, so an invalid token that slips through unvalidated silently
-// becomes "no protocol constraint" and yields a permit/deny verdict for traffic
-// that cannot exist — masking an operator typo. There is no "any" protocol
-// keyword: omit the token (empty) for the protocol wildcard, matching the
-// runtime evaluator which constrains the protocol dimension only when a
-// resolvable protocol is supplied.
+// This is the protocol analogue of ValidatePort/ParsePort (#3116). Validation
+// keeps invalid tokens from becoming a misleading verdict for an
+// `application any` policy. There is no "any" protocol keyword: omit the token
+// to leave the query protocol unpinned; each application term's own constraints
+// determine whether the incomplete query can match.
 //
 // A single string validator covers every simulator surface (REST query, gRPC
 // field, CLI/remote-cli token, gRPC test-policy), since each accepts the
 // protocol as a string that matchApp resolves identically by name or number.
+
 func ValidateProtocol(proto string) error {
 	if strings.TrimSpace(proto) == "" {
 		return nil
@@ -313,7 +313,9 @@ const matchPoliciesUsageTail = ` from-zone <zone> to-zone <zone>
        [ingress-interface <if>]   scope host-inbound (to-zone junos-host) to one
                                   interface's effective host-inbound view
        [non-first-fragment]       simulate a non-first IP fragment (no L4 header)
-       from-zone and to-zone are required; an omitted selector matches any.
+       from-zone and to-zone are required; omitted source/destination IP matches
+       any address. An omitted protocol, port, or icmp-type/code fails closed for
+       an application term constrained on that dimension; unconstrained terms may match.
        an unknown selector, or a selector given without a value, is an error
        (the query is not silently widened to match traffic you did not type).
        non-first-fragment is the only valueless selector; it makes the simulator
@@ -336,10 +338,9 @@ const MatchPoliciesUsage = "usage: show security match-policies" + matchPolicies
 const TestPolicyUsage = "usage: test policy" + matchPoliciesUsageTail
 
 // Query is a 5-tuple policy-simulation request. A nil SrcIP/DstIP or an empty
-// Protocol means "unspecified" — the corresponding match dimension is not
-// constrained (the established diagnostic behavior). A zero SrcPort/DstPort
-// means "unspecified port" and likewise does not constrain a port-bearing
-// application term.
+// Protocol means that query dimension is unspecified. Omitted address selectors
+// match any address; an application term constrained on protocol, port, or ICMP
+// type/code fails closed when that query value is absent.
 type Query struct {
 	FromZone string
 	ToZone   string
@@ -493,12 +494,13 @@ type Query struct {
 // and `test policy` (pkg/cli), and the remote CLI equivalents (cmd/cli).
 //
 // A "" SrcIP/DstIP/Protocol or a 0 SrcPort/DstPort means the operator OMITTED
-// that selector, the established wildcard — the corresponding match dimension
-// is unconstrained. A nil ICMPType/ICMPCode is likewise unspecified. These are
-// the ONLY wildcard signals: a selector that is PRESENT always carries a
-// validated value (ParseSelectorArgs rejects a present-but-valueless selector),
-// so a field left at its zero value here unambiguously means "omitted", never
-// "present but silently dropped".
+// that selector and left the corresponding query dimension unspecified. An
+// omitted address acts as a wildcard; an application term constrained on an
+// omitted protocol, port, or ICMP type/code fails closed. A nil ICMPType/ICMPCode
+// is likewise unspecified. These are the ONLY signals for omission: a selector
+// that is PRESENT always carries a validated value (ParseSelectorArgs rejects a
+// present-but-valueless selector), so a zero field never means silently dropped
+// input.
 type SelectorArgs struct {
 	FromZone string
 	ToZone   string

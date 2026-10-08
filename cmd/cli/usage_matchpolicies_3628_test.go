@@ -16,7 +16,12 @@ import (
 // the call site (bypassing the shared policymatch constant) drops these tokens
 // and fails the assertions.
 func TestMatchPoliciesUsageAdvertisesSelectors(t *testing.T) {
-	wantTokens := []string{"source-port", "destination-port", "icmp-type", "icmp-code", "icmp6"}
+	wantTokens := []string{
+		"source-port", "destination-port", "icmp-type", "icmp-code", "icmp6",
+		"omitted source/destination IP matches", "any address.",
+		"An omitted protocol, port, or icmp-type/code fails closed",
+		"application term constrained on that dimension",
+	}
 
 	// No zones -> usage is printed, no RPC issued, so an empty client suffices.
 	fake := &fakeBpfrxClient{}

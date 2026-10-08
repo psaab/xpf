@@ -103,15 +103,18 @@ protocol-constrained term, masking the typo as a default-policy verdict instead
 of surfacing the error. One shared validator closes this:
 
 - `ValidateProtocol(string) error` — an empty/whitespace token is "unspecified"
-  (no protocol constraint — the wildcard, unchanged); a non-empty token must
-  resolve via `appid.ProtocolNumber` (a known name/alias `tcp`/`udp`/`icmp`/
+  and is accepted; it leaves the query protocol unpinned, but does NOT make
+  every application term match. A protocol-constrained term fails closed when
+  the query protocol is omitted (#3323); only genuinely unconstrained cases
+  (an empty application list or `application any`) may match. A non-empty token
+  must resolve via `appid.ProtocolNumber` (a known name/alias `tcp`/`udp`/`icmp`/
   `ospf`/... or a numeric `0..255`); an unknown name or out-of-range/non-numeric
-  value is rejected. There is no `any` protocol keyword — omit the token for the
-  wildcard (the runtime constrains the protocol dimension only when a resolvable
-  protocol is supplied). A single string validator suffices for every surface,
-  since each accepts the protocol as a string `matchApp` resolves identically by
-  name or number (unlike ports, which arrive both as a numeric gRPC field and as
-  operator strings).
+  value is rejected. There is no `any` protocol keyword — omit the token to leave
+  the query protocol unpinned; the application term's own constraints determine
+  whether the incomplete query can match. A single string validator suffices for
+  every surface, since each accepts the protocol as a string `matchApp` resolves
+  identically by name or number (unlike ports, which arrive both as a numeric
+  gRPC field and as operator strings).
 
 This is applied at ALL FOUR simulator surfaces (mirroring the #3116 port wiring):
 
