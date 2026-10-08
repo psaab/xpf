@@ -28,8 +28,8 @@ use crate::session::{
 use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN};
 use crate::test_zone_ids::*;
 use crate::{
-    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, NeighborSnapshot,
-    PolicyApplicationSnapshot, PolicyRuleSnapshot, ZoneSnapshot,
+    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceAddressSnapshot, InterfaceSnapshot,
+    NeighborSnapshot, PolicyApplicationSnapshot, PolicyRuleSnapshot, ZoneSnapshot,
 };
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -164,6 +164,20 @@ pub(super) fn binding(ifindex: i32) -> BindingWorker {
     b
 }
 
+fn tag_wan_ingress_vlan(arrival: i32, frame: &mut Vec<u8>, meta: &mut UserspaceDpMeta) {
+    if arrival != WAN_IFINDEX {
+        return;
+    }
+    // reth0.80 is a tagged logical interface. Its packets must carry VID 80
+    // in both the descriptor metadata and the Ethernet frame.
+    frame.splice(12..12, [0x81, 0x00, 0x00, 80]);
+    meta.ingress_vlan_id = 80;
+    meta.l3_offset += 4;
+    meta.l4_offset += 4;
+    meta.payload_offset += 4;
+    meta.pkt_len = frame.len() as u16;
+}
+
 fn tcp(
     src: Ipv4Addr,
     dst: Ipv4Addr,
@@ -178,8 +192,9 @@ fn tcp(
         DMZ_IFINDEX => AUTHORITY_DMZ_MAC,
         other => panic!("9519 fixture has no destination MAC for ingress ifindex {other}"),
     };
-    let frame = build_txn_tcp_syn_frame_v4(src, dst, sport, dport, flags, dst_mac);
-    let meta = txn_meta_v4(arrival as u32, flags, frame.len() as u16);
+    let mut frame = build_txn_tcp_syn_frame_v4(src, dst, sport, dport, flags, dst_mac);
+    let mut meta = txn_meta_v4(arrival as u32, flags, frame.len() as u16);
+    tag_wan_ingress_vlan(arrival, &mut frame, &mut meta);
     (frame, meta)
 }
 
@@ -614,6 +629,21 @@ fn icmp_type8_rule(name: &str, from_zone: &str, to_zone: &str, action: &str) -> 
 
 fn icmp_hit_forwarding() -> ForwardingState {
     let mut snapshot = policy_deny_snapshot();
+
+    for interface in &mut snapshot.interfaces {
+        match interface.ifindex {
+            WAN_IFINDEX => interface.redundancy_group = 1,
+            LAN_IFINDEX => {
+                interface.redundancy_group = 2;
+                interface.addresses.push(InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "10.0.61.1/24".into(),
+                    scope: 0,
+                });
+            }
+            _ => {}
+        }
+    }
     snapshot.policies = vec![
         icmp_type8_rule("lan-icmp-permit", "lan", "wan", "permit"),
         icmp_type8_rule("dmz-icmp-deny", "dmz", "wan", "deny"),
@@ -625,6 +655,28 @@ fn icmp_hit_forwarding() -> ForwardingState {
         linux_name: "ge-0-0-2".into(),
         ifindex: DMZ_IFINDEX,
         hardware_addr: "02:bf:72:02:00:01".into(),
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".into(),
+        ifindex: WAN_IFINDEX,
+        family: "inet".into(),
+        ip: "172.16.80.200".into(),
+        mac: "02:bf:72:00:80:08".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-1".into(),
+        ifindex: LAN_IFINDEX,
+        family: "inet".into(),
+        ip: REAL.to_string(),
+        mac: "02:bf:72:01:00:01".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
         ..Default::default()
     });
     build_forwarding_state(&snapshot)
@@ -671,7 +723,12 @@ fn established_icmp_hit(is_reverse: bool) -> (SessionKey, SessionTable) {
             disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
             local_ifindex: 0,
             egress_ifindex,
-            tx_ifindex: egress_ifindex,
+            // reth0.80 transmits through its physical parent.
+            tx_ifindex: if egress_ifindex == WAN_IFINDEX {
+                11
+            } else {
+                egress_ifindex
+            },
             tunnel_endpoint_id: 0,
             next_hop: Some(key.dst_ip),
             neighbor_mac: Some(mac),
@@ -739,6 +796,7 @@ fn drive_icmp_hit_with_events(
     let mut meta = txn_meta_v4(ingress_ifindex as u32, 0, frame.len() as u16);
     meta.protocol = crate::ip_proto::PROTO_ICMP;
     meta.payload_offset = 42;
+    tag_wan_ingress_vlan(ingress_ifindex, &mut frame, &mut meta);
     let mut b = binding(ingress_ifindex);
     let (batch, dbg, event_handle, event_rx) = txn_run_descriptor_capturing_events(
         &mut b,
