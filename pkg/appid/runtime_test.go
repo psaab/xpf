@@ -634,3 +634,81 @@ func catalogConfigWithNApps(n int) *config.Config {
 		},
 	}
 }
+
+// TestUDP4500FallbackMatchesEnabledCatalog_12222 guards the AppID mode flip:
+// UDP/4500 must resolve to the same policy-referenceable application whether
+// the name comes from the enabled catalog or the disabled tuple fallback.
+func TestUDP4500FallbackMatchesEnabledCatalog_12222(t *testing.T) {
+	disabled := &config.Config{}
+	disabled.Services.ApplicationIdentification = false
+	disabledName := ResolveSessionName(nil, disabled, 17, 40000, 4500, 0)
+
+	enabled := &config.Config{}
+	enabled.Services.ApplicationIdentification = true
+	catalog, err := BuildCatalog(enabled)
+	if err != nil {
+		t.Fatalf("BuildCatalog: %v", err)
+	}
+	var appID uint16
+	for id, name := range catalog.AppNames {
+		if name == "junos-ike-nat" {
+			appID = id
+			break
+		}
+	}
+	if appID == 0 {
+		t.Fatal("enabled catalog does not contain junos-ike-nat")
+	}
+	enabledName := ResolveSessionName(catalog.AppNames, enabled, 17, 40000, 4500, appID)
+	if disabledName != enabledName {
+		t.Fatalf("UDP/4500 resolves differently by AppID mode: disabled=%q enabled=%q", disabledName, enabledName)
+	}
+	if _, ok := config.ResolveApplication(disabledName, nil); !ok {
+		t.Fatalf("UDP/4500 label %q is not a referenceable application", disabledName)
+	}
+
+	var catalogMatchesTuple bool
+	for _, entry := range catalog.Entries {
+		if entry.Name == enabledName && entry.Protocol == 17 &&
+			entry.DstPortLow <= 4500 && entry.DstPortHigh >= 4500 {
+			catalogMatchesTuple = true
+			break
+		}
+	}
+	if !catalogMatchesTuple {
+		t.Fatalf("enabled catalog has no UDP/4500 entry for %q", enabledName)
+	}
+
+	// Exercise the real strict commit gate: the fallback label must be accepted
+	// in a policy's `match application`, not merely exist in the predefined map.
+	tree := &config.ConfigTree{}
+	for _, command := range []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
+		"set security policies from-zone trust to-zone untrust policy p match source-address any",
+		"set security policies from-zone trust to-zone untrust policy p match destination-address any",
+		"set security policies from-zone trust to-zone untrust policy p match application " + disabledName,
+		"set security policies from-zone trust to-zone untrust policy p then permit",
+	} {
+		path, err := config.ParseSetCommand(command)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", command, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", command, err)
+		}
+	}
+	if _, err := config.CompileConfig(tree); err != nil {
+		t.Fatalf("policy commit rejects UDP/4500 fallback label %q: %v", disabledName, err)
+	}
+}
+
+// TestBuiltinFallbackLabelsAreReferenceable_12222 covers the whole live
+// fallback table: every heuristic label must resolve as an application.
+func TestBuiltinFallbackLabelsAreReferenceable_12222(t *testing.T) {
+	for name := range builtinFallbacks {
+		if app, ok := config.ResolveApplication(name, nil); !ok || app == nil {
+			t.Errorf("builtin fallback label %q is not a referenceable application", name)
+		}
+	}
+}

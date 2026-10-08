@@ -32,7 +32,7 @@ var builtinFallbacks = map[string]builtinApp{
 	"junos-syslog":      {proto: 17, port: 514},
 	"junos-dhcp-client": {proto: 17, port: 68},
 	"junos-ike":         {proto: 17, port: 500},
-	"junos-ipsec-nat-t": {proto: 17, port: 4500},
+	"junos-ike-nat":     {proto: 17, port: 4500},
 }
 
 // CatalogNames returns the set of application names that should be compiled.
