@@ -1342,6 +1342,8 @@ impl SessionDomain {
         if wanted.is_empty() {
             return (Vec::new(), true, Vec::new(), String::new());
         }
+        let current_view = self.runtime.load();
+        let current_forwarding = current_view.forwarding();
         let family_allowed = |family: u8| {
             request.families.is_empty()
                 || request.families.iter().any(|candidate| *candidate == family)
@@ -1432,7 +1434,13 @@ impl SessionDomain {
         let shared_uncovered = {
             let shared = crate::afxdp::shared_ops::lock_shared_recover(&self.sessions.synced);
             shared.values().any(|entry| {
-                wanted.contains(&entry.metadata.policy_id)
+                crate::afxdp::session_glue::policy_id_for_list_request(
+                    current_forwarding,
+                    &entry.metadata,
+                    entry.origin,
+                    &request.mode,
+                )
+                .is_some_and(|policy_id| wanted.contains(&policy_id))
                     && family_allowed(policy_wire_family(entry.key.addr_family))
                     && class_allowed(entry.metadata.is_reverse)
                     && !collector.contains_identity(&entry.key, entry.session_id)

@@ -11,11 +11,10 @@ import (
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
-// deletedPolicyRuntimeIDs returns the set of numeric runtime policy IDs (the
-// value stamped on an admitted session's policy_id, #3056) belonging to
-// policies present in oldCfg but ABSENT from newCfg. Identity is the stable
-// string key (userspace.StablePolicyRuleID: "<from>-><to>/<name>"), so a
-// sibling policy's deletion never shifts a survivor's key.
+// deletedPolicyRuntimeIDs returns the positional runtime policy IDs assigned
+// by oldCfg for policies absent from newCfg. Identity is the stable string key
+// (userspace.StablePolicyRuleID: "<from>-><to>/<name>"), so a sibling policy's
+// deletion never shifts a survivor's key.
 //
 // Only DELETED policies are reported. A policy whose match/action CHANGED but
 // whose zones+name are unchanged keeps the same stable key, is present in both
@@ -65,28 +64,15 @@ import (
 // afxdp/session_glue). So excluding 0 from this set stays correct, and every
 // OTHER deleted policy (id >= 1) still clears here.
 //
-// This set is only meaningful against rows that still carry the OLD numbering,
-// which is why the invalidation READS the session table before the dataplane
-// publishes the new snapshot and deletes from that capture afterwards (#6948,
-// daemon_policy_invalidate_capture.go). Two writers move a live row's policy_id
-// the moment the snapshot goes live: new admissions use the NEW ids, and the
-// helper's #3395 live-row refresh (reresolve_session_policy_id, driven from
-// refresh_bpf_conntrack_last_seen into the same pinned conntrack map Go
-// enumerates) re-resolves every forward row from its bound rule handle against
-// the CURRENT rule table. A deleted policy's rows become
-// DEFAULT_POLICY_SENTINEL_ID (u32::MAX — its rule_id no longer resolves) and a
-// surviving policy's rows become that policy's NEW id, which may be the id this
-// set targets.
-//
-// An earlier revision of this comment said the clear "runs synchronously in the
-// apply path (right after the dataplane ApplyConfig), before the next refresh
-// tick". It did not: the sweep ran after the WHOLE of applyConfigLocked,
-// including applyTailReconciles (DNS, sudoers, sshd, IPsec, VRRP, FRR), while
-// the refresh runs a 2048-slot slice every 100ms with a 10s full-table target
-// — so on a real box a large fraction of the table had already been re-stamped
-// by the time the sweep read it. The claim mattered because it is the stated
-// reason the numeric-id diff is sound, and it is recorded here rather than
-// deleted so the next reader can see which premise moved.
+// These are positional IDs from oldCfg. A session's policy_id is frozen at
+// admission and may reflect an earlier policy ordering, even before this apply
+// publishes. The helper-backed prepublish READ resolves each bound session's
+// stable rule handle against the active policy snapshot before comparing IDs.
+// This is distinct from #3395's conntrack-row refresh, which updates the BPF
+// mirror but does not rewrite SessionTable metadata. The read must still precede
+// publication so it uses the same policy snapshot as oldCfg and excludes
+// sessions admitted under the new snapshot. Rows without a stable binding
+// (including old peer-sync rows) are excluded from prepublish ID matching.
 //
 // Returns nil when oldCfg is nil (boot / first commit — nothing to invalidate)
 // or nothing was deleted.
@@ -126,11 +112,11 @@ func deletedPolicyRuntimeIDs(oldCfg, newCfg *config.Config) map[uint32]struct{} 
 //   - It runs ONLY when at least one policy was deleted (deletedPolicyRuntimeIDs
 //     returns a non-empty set); a commit with no policy deletion pays no
 //     session-table scan.
-//   - It clears ONLY sessions whose stored policy_id matches a deleted policy;
+//   - It clears only sessions the helper resolves to a deleted policy's ID;
 //     a MODIFIED policy (same zones+name) keeps its key and is never touched
 //     HERE — clearSessionsForModifiedPolicies covers it under `policy-rematch`.
-//     (This said "the deferred policy-rematch half"; it is not deferred, it
-//     ships in this file.)
+//     Unbound prepublish rows are excluded because their positional scalar has
+//     no stable identity for safe matching.
 //
 // The clear reuses the same companion-aware delete the GC and cluster-stale
 // reconcile use (SessionStore.DeleteBatchKnownV4/V6 removes the forward entry,
@@ -153,10 +139,9 @@ func deletedPolicyRuntimeIDs(oldCfg, newCfg *config.Config) map[uint32]struct{} 
 // line (#5578).
 func (d *Daemon) clearSessionsForDeletedPolicies(oldCfg, newCfg *config.Config) error {
 	// #6948: when the apply took a pre-publication capture, delete exactly what
-	// it observed. The capture read the session table while the rows still
-	// carried the OLD numbering this id set was derived from, which neither a
-	// post-activation admission nor the helper's #3395 live-row re-stamp can
-	// contaminate. See daemon_policy_invalidate_capture.go.
+	// the helper matched by resolving each bound stable rule handle against the
+	// active policy snapshot. The captured rows are deleted after publish; see
+	// daemon_policy_invalidate_capture.go.
 	if c := d.policyInvalidationCapture; c != nil {
 		return d.deleteInvalidatedSessions(c.deleted, dataplane.DeleteReasonPolicyDeleted, "deleted")
 	}
@@ -172,9 +157,9 @@ func (d *Daemon) clearSessionsForDeletedPolicies(oldCfg, newCfg *config.Config) 
 // whose MATCH or ACTION changed — the Junos `security policies policy-rematch`
 // behavior of re-evaluating in-progress sessions against the changed policy set
 // (#4234 modified-policy half). It is gated on `policy-rematch` being set in the
-// committed config (changedPolicyRuntimeIDs returns nil otherwise) and, like the
-// deletion-clear, is bounded to sessions whose stored policy_id matches a
-// changed policy; an unchanged policy's sessions are never touched.
+// committed config (changedPolicyRuntimeIDs returns nil otherwise); the helper
+// resolves bound session handles before matching, so unchanged policies are
+// never touched.
 //
 // A cleared session's next packet re-enters policy evaluation and is admitted or
 // dropped by the NEW policy — so a tightened (permit→deny, narrowed-match)
@@ -379,12 +364,13 @@ func (d *Daemon) clearSessionsForPolicyChanges(oldCfg, newCfg *config.Config) er
 	)
 }
 
-// clearSessionsForPolicyIDs is the shared core behind the deletion-clear
-// (#4234) and the modified-policy re-eval: it drops every live session whose
-// stored policy_id is in ids, using the same companion-aware delete + HA
-// delete-sync propagation the GC and cluster-stale reconcile use. ids is the
-// set of OLD numeric policy IDs the target sessions carry; an empty set is a
-// no-op (a commit with no matching policy change pays no session-table scan).
+// (#4234) and the modified-policy re-eval: it deletes captured helper matches
+// (or fallback candidates) using the same companion-aware delete + HA delete-sync
+// propagation the GC and cluster-stale reconcile use. ids is the set of
+// positional IDs assigned by the preceding config; prepublish helper reads
+// resolve stable bound handles into that namespace before matching. An empty
+// set is a no-op (a commit with no matching policy change pays no session-table
+// scan).
 // reason is the documentary delete label; what labels the change class in the
 // summary log line.
 //
@@ -735,9 +721,9 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 //
 // Only MODIFIED survivors are reported: a DELETED policy (absent from newCfg) is
 // the deletion-clear's job (deletedPolicyRuntimeIDs) and is skipped here; an
-// UNCHANGED policy keeps forwarding. The OLD numeric ID is used because live
-// sessions were stamped under the old config and carry it (identical rationale
-// to deletedPolicyRuntimeIDs). policy_id 0 is excluded for the same overloaded-
+// UNCHANGED policy keeps forwarding. The OLD numeric ID is the target set's
+// positional namespace; helper-backed prepublish reads resolve each bound
+// session's stable identity into that namespace before matching.
 // wire-value reason documented there (host-inbound / fabric / tunnel / synced
 // sessions and old HA peers all carry 0). Unlike a deletion, a MODIFIED first
 // policy is not covered by the helper's #9526 purge, which keys on the rule

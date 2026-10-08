@@ -10080,10 +10080,10 @@ fn coord_list_fans_out_merges_and_dedups_10512() {
     assert_eq!(policies, vec![5, 6]);
 }
 
-/// A matching row in shared HA authority but absent from every worker-local
-/// table must not become an authoritative empty READ (#11339).
+/// A shared peer row without a stable rule binding is excluded from
+/// prepublish ID-keyed reads; legacy reads retain the scalar coverage fence.
 #[test]
-fn coord_list_shared_only_policy_row_reports_incomplete_11339() {
+fn coord_list_unbound_peer_row_excluded_from_prepublish_12072() {
     let now_ns = 1_000_000_000u64;
     let mut coordinator = Coordinator::new();
     let q0 = Arc::new(Mutex::new(VecDeque::new()));
@@ -10131,9 +10131,18 @@ fn coord_list_shared_only_policy_row_reports_incomplete_11339() {
         std::slice::from_mut(&mut coverage_table),
     );
     assert!(rows.is_empty(), "the worker has no policy-5 row");
-    assert!(complete, "an out-of-scope shared row does not break coverage");
-    assert!(errors.is_empty(), "out-of-scope rows are not READ errors: {errors:?}");
-    assert!(continuation.is_empty(), "an empty response has no page token");
+    assert!(
+        complete,
+        "an out-of-scope shared row does not break coverage"
+    );
+    assert!(
+        errors.is_empty(),
+        "out-of-scope rows are not READ errors: {errors:?}"
+    );
+    assert!(
+        continuation.is_empty(),
+        "an empty response has no page token"
+    );
 
     let mut covered_table = SessionTable::new();
     let mut key = test_key();
@@ -10152,15 +10161,22 @@ fn coord_list_shared_only_policy_row_reports_incomplete_11339() {
         std::slice::from_ref(&q0),
         std::slice::from_mut(&mut empty_table),
     );
-    assert!(rows.is_empty(), "the matching row is absent from workers");
-    assert!(!complete, "shared-only coverage must not report complete");
     assert!(
-        errors
-            .iter()
-            .any(|error| error == "shared-synced-map-uncovered"),
-        "the response must name the coverage gap, got {errors:?}"
+        rows.is_empty(),
+        "the unbound shared row has no stable rule identity"
     );
-    assert!(continuation.is_empty(), "an empty response has no page token");
+    assert!(
+        complete,
+        "prepublish matching must exclude the ambiguous peer-synced policy_id"
+    );
+    assert!(
+        errors.is_empty(),
+        "an excluded unbound row is not an incomplete READ: {errors:?}"
+    );
+    assert!(
+        continuation.is_empty(),
+        "an empty response has no page token"
+    );
 
     let mut legacy_request = request.clone();
     legacy_request.mode = "legacy".to_string();
@@ -10171,8 +10187,14 @@ fn coord_list_shared_only_policy_row_reports_incomplete_11339() {
         std::slice::from_ref(&q0),
         std::slice::from_mut(&mut empty_table),
     );
-    assert!(rows.is_empty(), "the matching legacy row is absent from workers");
-    assert!(!complete, "an unbounded legacy scan must expose shared-only coverage");
+    assert!(
+        rows.is_empty(),
+        "the matching legacy row is absent from workers"
+    );
+    assert!(
+        !complete,
+        "an unbounded legacy scan must expose shared-only coverage"
+    );
     assert!(
         errors
             .iter()
@@ -10186,8 +10208,14 @@ fn coord_list_shared_only_policy_row_reports_incomplete_11339() {
         std::slice::from_ref(&q0),
         std::slice::from_mut(&mut covered_table),
     );
-    assert!(errors.is_empty(), "worker-local coverage is complete: {errors:?}");
-    assert!(complete, "a shared row captured by a worker remains complete");
+    assert!(
+        errors.is_empty(),
+        "worker-local coverage is complete: {errors:?}"
+    );
+    assert!(
+        complete,
+        "a shared row captured by a worker remains complete"
+    );
     assert_eq!(rows.len(), 1, "the worker returns the covered matching row");
     assert_eq!(rows[0].expected_rt_flow_session_id, session_id);
 }

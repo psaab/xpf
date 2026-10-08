@@ -14,65 +14,35 @@ import (
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
-// #6948 — the commit-time session invalidation reads the session table BEFORE
-// the dataplane publishes the new policy set, not after.
+// #6948 — commit-time session invalidation reads the session table BEFORE the
+// dataplane publishes the new policy set, then deletes the captured rows after
+// publication. The prepublish boundary still matters: it excludes sessions
+// admitted under the new snapshot while allowing a cleared flow to re-evaluate
+// against that snapshot.
 //
-// Runtime policy ids are POSITIONAL (policySetID*MaxRulesPerPolicy + ruleIndex,
-// pkg/dataplane/userspace/policies.go), so deleting a policy renumbers every
-// later one:
+// Runtime policy IDs are POSITIONAL (policySetID*MaxRulesPerPolicy + ruleIndex,
+// pkg/dataplane/userspace/policies.go). The target IDs come from oldCfg, but a
+// session's stored policy_id is frozen at admission and may reflect an ordering
+// older than oldCfg after an earlier insert or removal. The helper's prepublish
+// READ therefore resolves each bound policy_counter's stable rule_id against
+// the currently published policy snapshot before applying the requested-ID
+// predicate. At this capture boundary that snapshot is oldCfg, so Go receives
+// the same positional ID namespace used to compute the target set.
 //
-//	C1 = [A, B, C]  ->  A=0, B=1, C=2
-//	delete B
-//	C2 = [A, C]     ->  A=0, C=1        <- C INHERITED B's id
+// This read-time resolution is separate from #3395's BPF conntrack-row refresh:
+// that refresh updates the mirror, not SessionTable metadata. A row without a
+// stable rule binding (for example, from an older HA peer that omitted
+// policy_rule_id) is excluded from prepublish ID matching rather than risking
+// deletion of an unrelated session by its stale scalar.
 //
-// The invalidation computes its target set from the OLD numbering
-// (deletedPolicyRuntimeIDs / changedPolicyRuntimeIDs read oldCfg), but it runs
-// after applyConfigLocked returns — the whole apply tail included. In that
-// window the value it matches on, the live row's policy_id, moves under it in
-// TWO independent ways:
-//
-//  1. ADMISSION. The dataplane admits under the NEW numbering from the instant
-//     the apply publishes the snapshot, so a session admitted afterwards by
-//     surviving policy C carries policy_id 1 and matches the deletion set.
-//
-//  2. RE-STAMPING (the larger half, and invisible to a creation-time guard).
-//     The helper's #3395 live-row refresh re-resolves every forward row's
-//     policy_id from its bound rule handle against the CURRENT rule table and
-//     writes it back into the same pinned conntrack map the Go sweep
-//     enumerates (refresh_bpf_conntrack_last_seen, userspace-dp
-//     afxdp/bpf_map/mod.rs). It runs in the worker loop on a rolling cycle —
-//     CT_SLICE_INTERVAL_NS 100ms per slice, CT_REFRESH_SLICE_BUDGET 2048 slab
-//     slots, CT_REFRESH_WINDOW_NS 10s full-table target
-//     (afxdp/worker/loop_body/mod.rs) — so within the seconds the apply tail
-//     takes it re-stamps established rows to the NEW numbering. C's
-//     LONG-ESTABLISHED sessions are re-stamped 2 -> 1 and swept by the
-//     deletion set, and B's own sessions are re-stamped to
-//     DEFAULT_POLICY_SENTINEL_ID (their rule no longer resolves) and are
-//     MISSED. Their creation time is ancient, so no "admitted after
-//     activation" test can see either.
-//
-// The fix is to stop reading a value that is being rewritten. The candidate
-// sessions are captured in ONE enumeration taken immediately before
-// rt.ApplyConfig publishes the snapshot, while the numbering the target set was
-// derived from is still the numbering the rows carry, and the deletes are
-// issued from that capture after the apply. Placement is the design: the
-// capture is a READ, so it cannot re-admit anything (an unconditional sweep
-// moved before the publish would delete sessions of a policy that is still
-// live, and an active flow would immediately re-establish under it — the
-// inverse defect); and the deletes still land after the new policy set is live,
-// so a cleared flow re-evaluates against the NEW config exactly as before.
-//
-// PROPERTY: every session the commit-time invalidation deletes was OBSERVED
-// carrying its target policy id under the OLD policy numbering. No session
-// admitted under, or re-stamped to, the new numbering can enter the candidate
-// set.
+// PROPERTY: every session captured for a policy-ID invalidation was matched by
+// its stable admitting-rule identity as resolved in the active prepublish
+// snapshot. The captured row identity is then used for the post-publish delete.
 //
 // RESIDUAL: a session admitted by a to-be-deleted policy between the capture
-// and the publish is not in the capture and keeps forwarding until idle
-// timeout. That is the stale-authorization direction, so it is deliberately
-// held to the smallest window the control plane can reach — the ApplyConfig
-// call itself — by capturing at the last statement before it. It is strictly
-// narrower than the pre-#6948 window (the whole post-activation apply tail).
+// and publish is not in the capture and keeps forwarding until idle timeout.
+// Capturing at the last statement before ApplyConfig holds this stale-
+// authorization window to the apply call itself.
 
 // pendingRenameApply binds config ancestry to the exact promoted active
 // generation, which is the transaction key. Ownership transferred from the
