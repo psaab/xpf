@@ -769,6 +769,23 @@ func validateHostInboundStanzaStrict(zone, ifName string, hib *HostInboundTraffi
 	if ifName != "" {
 		scope = fmt.Sprintf("interfaces %q host-inbound-traffic", ifName)
 	}
+	// Unlike `all`, `any-service` is a packet-wide full-admit token, not a
+	// subtractable set of services. The compiler preserves except provenance
+	// while leaving that token intact, so reject the unsupported subtraction
+	// instead of silently treating it as an empty exclusion. The tolerant
+	// compile path downgrades this diagnostic to a warning and still keeps the
+	// authored `any-service` token for runtime compatibility.
+	if len(hib.systemServicesExcept) > 0 {
+		for _, svc := range hib.SystemServices {
+			if !HostInboundFullAdmitService(svc) {
+				continue
+			}
+			return fmt.Errorf(
+				"security zone %q %s system-services %q cannot apply except exclusion(s) %q: "+
+					"any-service is a packet-wide full-admit, not a subtractable service set",
+				zone, scope, svc, strings.Join(hib.systemServicesExcept, ", "))
+		}
+	}
 	for _, svc := range hib.SystemServices {
 		if !KnownHostInboundSystemServices[svc] {
 			return fmt.Errorf(
