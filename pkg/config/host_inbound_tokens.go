@@ -836,6 +836,30 @@ func HostInboundServiceMatch(token, family string) []L4Match {
 	}
 }
 
+// hostInboundL4MatchesIntersect reports whether two L4 tuples admit any common
+// packet. A missing port or ICMP type is a protocol-wide match for that
+// dimension; family scoping is applied by HostInboundServiceMatch before this
+// helper is called.
+func hostInboundL4MatchesIntersect(a, b L4Match) bool {
+	if a.Proto != b.Proto {
+		return false
+	}
+	if a.ICMPType != nil || b.ICMPType != nil {
+		return a.ICMPType == nil || b.ICMPType == nil || *a.ICMPType == *b.ICMPType
+	}
+	if len(a.Ports) == 0 || len(b.Ports) == 0 {
+		return true
+	}
+	for _, ap := range a.Ports {
+		for _, bp := range b.Ports {
+			if ap.Lo <= bp.Hi && bp.Lo <= ap.Hi {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // HostInboundProtocolMatch returns the structured admission tuples for a Junos
 // `protocols` (routing-protocol) token in the given family, the protocol half of
 // the #3627 B1a SSOT. `all` expands to every routing protocol via

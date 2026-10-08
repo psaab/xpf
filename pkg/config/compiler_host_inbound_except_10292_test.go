@@ -1,6 +1,9 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -59,19 +62,19 @@ func TestHostInboundExcept10292ShapesAgree(t *testing.T) {
 		{
 			name: "hierarchical-subblock",
 			tree: parse10292(t, prefix+`system-services { all; ssh { except; } }`+suffix),
-			want: without10292(HostInboundAllExpansionServices(), "ssh"),
+			want: without10292(HostInboundAllExpansionServices(), "ssh", "ssh-netconf", "netconf-ssh"),
 		},
 		{
 			name: "hierarchical-flat-tail",
 			tree: parse10292(t, prefix+`system-services { all; ssh except; }`+suffix),
-			want: without10292(HostInboundAllExpansionServices(), "ssh"),
+			want: without10292(HostInboundAllExpansionServices(), "ssh", "ssh-netconf", "netconf-ssh"),
 		},
 		{
 			name: "flat-set-tail",
 			tree: flat10292(t,
 				"set security zones security-zone trust host-inbound-traffic system-services all",
 				"set security zones security-zone trust host-inbound-traffic system-services ssh except"),
-			want: without10292(HostInboundAllExpansionServices(), "ssh"),
+			want: without10292(HostInboundAllExpansionServices(), "ssh", "ssh-netconf", "netconf-ssh"),
 		},
 		{
 			name: "repeated-host-inbound-blocks",
@@ -79,7 +82,7 @@ func TestHostInboundExcept10292ShapesAgree(t *testing.T) {
 				host-inbound-traffic { system-services { all; } }
 				host-inbound-traffic { system-services { ssh { except; } } }
 			} } }`),
-			want: without10292(HostInboundAllExpansionServices(), "ssh"),
+			want: without10292(HostInboundAllExpansionServices(), "ssh", "ssh-netconf", "netconf-ssh"),
 		},
 		{
 			name: "plain-control",
@@ -94,6 +97,111 @@ func TestHostInboundExcept10292ShapesAgree(t *testing.T) {
 				t.Fatalf("effective system-services = %v, want %v", got.SystemServices, tc.want)
 			}
 		})
+	}
+}
+
+// TestHostInboundAllExceptSubtractsAdmissionTuples12053 guards every
+// system-service token in `all`, including aliases, on both address families.
+// Excluding a service must not leave an expansion token that still admits any
+// of its L4 tuples.
+func TestHostInboundAllExceptSubtractsAdmissionTuples12053(t *testing.T) {
+	for _, excluded := range HostInboundAllExpansionServices() {
+		t.Run(excluded, func(t *testing.T) {
+			got := hostInboundFilterExcept([]string{"all"}, []string{excluded}, false)
+			for _, family := range []string{"ip", "ip6"} {
+				excludedMatches := HostInboundServiceMatch(excluded, family)
+				for _, surviving := range got {
+					for _, survivingMatch := range HostInboundServiceMatch(surviving, family) {
+						for _, excludedMatch := range excludedMatches {
+							if hostInboundTupleOverlap12053(survivingMatch, excludedMatch) {
+								t.Errorf("excluded %q leaves %q admitting an overlapping tuple on %s: %+v intersects %+v",
+									excluded, surviving, family, survivingMatch, excludedMatch)
+							}
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func hostInboundTupleOverlap12053(a, b L4Match) bool {
+	if a.Proto != b.Proto {
+		return false
+	}
+	if a.ICMPType != nil || b.ICMPType != nil {
+		return a.ICMPType == nil || b.ICMPType == nil || *a.ICMPType == *b.ICMPType
+	}
+	if len(a.Ports) == 0 || len(b.Ports) == 0 {
+		return true
+	}
+	for _, ap := range a.Ports {
+		for _, bp := range b.Ports {
+			if ap.Lo <= bp.Hi && bp.Lo <= ap.Hi {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestHostInboundAllExceptSSHCompilesWithoutSSHAliases12053(t *testing.T) {
+	got := hostInbound10292(t, parse10292(t,
+		`security { zones { security-zone trust { host-inbound-traffic { system-services { all; ssh { except; } } } } } }`))
+	for _, token := range got.SystemServices {
+		for _, family := range []string{"ip", "ip6"} {
+			for _, match := range HostInboundServiceMatch(token, family) {
+				for _, excluded := range HostInboundServiceMatch("ssh", family) {
+					if hostInboundTupleOverlap12053(match, excluded) {
+						t.Fatalf("compiled service %q still admits excluded SSH tuple on %s: %+v intersects %+v",
+							token, family, match, excluded)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestHostInboundAllExceptSSHEmissionMatchesRustFixture12053(t *testing.T) {
+	got := hostInbound10292(t, parse10292(t,
+		`security { zones { security-zone trust { host-inbound-traffic { system-services { all; ssh { except; } } } } } }`))
+	emitted, err := json.MarshalIndent(got.SystemServices, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal compiled system-services: %v", err)
+	}
+	emitted = append(emitted, '\n')
+	fixture, err := os.ReadFile("../../userspace-dp/src/afxdp/forwarding/host_inbound_all_except_ssh_12053.json")
+	if err != nil {
+		t.Fatalf("read shared Rust fixture: %v", err)
+	}
+	if !bytes.Equal(fixture, emitted) {
+		t.Fatalf("Rust fixture does not match Go compiler emission byte-for-byte\nfixture:\n%s\ncompiler:\n%s", fixture, emitted)
+	}
+}
+
+func TestHostInboundExceptTupleFiltersAliasAcrossMergedStanzas12053(t *testing.T) {
+	got := hostInbound10292(t, parse10292(t, `security { zones { security-zone trust {
+		host-inbound-traffic { system-services { all; ssh { except; } } }
+		host-inbound-traffic { system-services { netconf-ssh; } }
+	} } }`))
+	for _, token := range got.SystemServices {
+		for _, family := range []string{"ip", "ip6"} {
+			for _, match := range HostInboundServiceMatch(token, family) {
+				for _, excluded := range HostInboundServiceMatch("ssh", family) {
+					if hostInboundTupleOverlap12053(match, excluded) {
+						t.Fatalf("merged service %q re-admits excluded SSH tuple on %s: %+v intersects %+v",
+							token, family, match, excluded)
+					}
+				}
+			}
+		}
+	}
+	hasNetconf := false
+	for _, token := range got.SystemServices {
+		hasNetconf = hasNetconf || token == "netconf"
+	}
+	if !hasNetconf {
+		t.Fatalf("merged exclusion removed independent netconf service: %v", got.SystemServices)
 	}
 }
 
@@ -300,10 +408,14 @@ func TestHostInboundExcept10292PerInterfaceShapes(t *testing.T) {
 	}
 }
 
-func without10292(tokens []string, excluded string) []string {
+func without10292(tokens []string, excluded ...string) []string {
+	set := make(map[string]bool, len(excluded))
+	for _, token := range excluded {
+		set[token] = true
+	}
 	out := make([]string, 0, len(tokens))
 	for _, token := range tokens {
-		if token != excluded {
+		if !set[token] {
 			out = append(out, token)
 		}
 	}
