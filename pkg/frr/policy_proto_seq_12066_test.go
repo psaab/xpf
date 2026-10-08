@@ -79,6 +79,12 @@ func TestPolicyProtoSeqOneSequencePerProtocol_12066(t *testing.T) {
 	if len(blocks) != len(wantHeaders) {
 		t.Fatalf("got %d EXPORT-ALL sequences, want %d:\n%s", len(blocks), len(wantHeaders), got)
 	}
+	for i, want := range wantHeaders {
+		if blocks[i].header != want {
+			t.Errorf("sequence %d header = %q, want %q:\n%s", i, blocks[i].header, want, got)
+		}
+	}
+
 	for i, want := range []string{"bgp", "ospf", "connected"} {
 		b := blocks[i]
 		if b.protos != 1 || !strings.Contains(b.body, "match source-protocol "+want+"\n") {

@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestRouteMapSequenceCount_ProtoDimension_12066 pins the #12066 admission
 // count: FromProtocols is an OR dimension in the pkg/frr renderer's Cartesian
@@ -56,5 +59,42 @@ func TestRouteMapSequenceCount_ProtoDimension_12066(t *testing.T) {
 		if got := RouteMapSequenceCount(nil, c.ps); got != c.want {
 			t.Errorf("%s: RouteMapSequenceCount = %d, want %d", c.name, got, c.want)
 		}
+	}
+}
+
+// TestPolicyProtoSeqAdmissionRejectsNearCeiling_12066 proves protocol
+// expansion reaches the strict admission gate: 3,277 communities fit below
+// the limit before the protocol factor, while two protocols expand to 6,554
+// sequences and are rejected with protocol-specific guidance.
+func TestPolicyProtoSeqAdmissionRejectsNearCeiling_12066(t *testing.T) {
+	communityCount := MaxRouteMapSequences/2 + 1
+	termWithoutProtocol := &PolicyTerm{
+		Name:          "t",
+		FromCommunity: makeNames("c", communityCount),
+	}
+	oldPolicy := &PolicyStatement{Name: "PROTO-BIG", Terms: []*PolicyTerm{termWithoutProtocol}}
+	oldCount := RouteMapSequenceCount(nil, oldPolicy)
+	if oldCount != uint64(communityCount) || oldCount > MaxRouteMapSequences {
+		t.Fatalf("count without protocol factor = %d, want %d at/below %d",
+			oldCount, communityCount, MaxRouteMapSequences)
+	}
+
+	term := *termWithoutProtocol
+	term.FromProtocols = []string{"bgp", "ospf"}
+	policy := &PolicyStatement{Name: "PROTO-BIG", Terms: []*PolicyTerm{&term}}
+	cfg := &Config{}
+	cfg.PolicyOptions.PolicyStatements = map[string]*PolicyStatement{"PROTO-BIG": policy}
+
+	newCount := RouteMapSequenceCount(&cfg.PolicyOptions, policy)
+	if want := uint64(communityCount * 2); newCount != want || newCount <= MaxRouteMapSequences {
+		t.Fatalf("count with protocol factor = %d, want %d over ceiling %d",
+			newCount, want, MaxRouteMapSequences)
+	}
+	err := validatePolicyRouteMapSequenceBoundStrict(cfg)
+	if err == nil {
+		t.Fatalf("strict sequence bound accepted a two-protocol policy with %d communities", communityCount)
+	}
+	if !strings.Contains(err.Error(), "from protocol") {
+		t.Fatalf("overflow error must identify the protocol dimension, got %q", err)
 	}
 }

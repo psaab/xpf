@@ -209,9 +209,9 @@ func validatePolicyRouteMapSequenceBoundStrict(cfg *Config) error {
 					"of %d, one reserved for the trailing default) — rendering it would "+
 					"emit a `route-map` line past sequence %d, which FRR rejects and "+
 					"which poisons the ENTIRE frr-reload; reduce the number of `from "+
-					"prefix-list` / `from community` / `from as-path` values (their "+
-					"Cartesian product per term drives the count) or split the policy "+
-					"across multiple policy-statements",
+					"protocol` / `from prefix-list` / `from community` / `from as-path` "+
+					"values (their Cartesian product per term drives the count) or split "+
+					"the policy across multiple policy-statements",
 				name, n, MaxRouteMapSequences, frrMaxRouteMapSeq, routeMapSeqStep, frrMaxRouteMapSeq)
 		}
 	}
