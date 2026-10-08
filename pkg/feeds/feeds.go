@@ -2109,6 +2109,7 @@ type feedFailureTransition struct {
 	current      bool
 	enteredStale bool
 	dropped      bool
+	retryDropped bool
 	lastError    string
 	holdInterval time.Duration
 }
@@ -2136,6 +2137,12 @@ func (m *Manager) recordFailureLocked(fs *feedState, ferr error) feedFailureTran
 			dropSnapshotToEmptyLocked(fs)
 			transition.dropped = true
 		}
+	}
+	// A rejected hold-drop leaves the desired state empty but the dataplane's
+	// published hash unchanged. Retry that debt on the next failed fetch, just
+	// as installSnapshot retries rejected good content on an identical refetch.
+	if !transition.dropped && fs.holdDropped && feedPublicationDebt(fs) {
+		transition.retryDropped = true
 	}
 	return transition
 }
@@ -2209,9 +2216,11 @@ func (m *Manager) expireStaleHold(fs *feedState) {
 }
 
 func (m *Manager) finishFailure(fs *feedState, transition feedFailureTransition, logRetained bool) {
-	if transition.dropped {
-		slog.Warn("dynamic-address: hold interval elapsed, dropping stale feed to empty",
-			"name", fs.name, "err", transition.lastError, "hold", transition.holdInterval)
+	if transition.dropped || transition.retryDropped {
+		if transition.dropped {
+			slog.Warn("dynamic-address: hold interval elapsed, dropping stale feed to empty",
+				"name", fs.name, "err", transition.lastError, "hold", transition.holdInterval)
+		}
 		if m.onUpdate != nil {
 			// An empty set has no fixed safety direction: a denylist stops
 			// denying while an allowlist stops permitting. The existing binding
