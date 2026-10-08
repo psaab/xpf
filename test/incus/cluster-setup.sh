@@ -702,6 +702,16 @@ cmd_deploy() {
 	xpf_cluster_rebaseline_build
 }
 
+# When requested by the rolling-upgrade gate, record wall-clock cut bounds
+# around the controlled drain. The trace is observational only; with the
+# variable unset this helper is a no-op and deploy behavior is unchanged.
+rolling_upgrade_trace() {
+	local event="$1" idx="$2" trace="${XPF_ROLLING_UPGRADE_TRACE:-}"
+	[[ -n "$trace" ]] || return 0
+	printf '%s event=%s node=%s\n' "$(date +%s.%N)" "$event" "$idx" >>"$trace" ||
+		die "cannot append rolling-upgrade trace to $trace"
+}
+
 # deploy_vm_deb installs the .deb on a clustered node (STAGE-ONLY per the
 # postinst HA-mode contract — node-id present => no local cut) and then
 # drives the verified single-node cut via `xpfd upgrade --rolling`, which
@@ -732,8 +742,9 @@ deploy_vm_deb() {
 	# Drive the verified controlled-drain cut on THIS node (peer keeps
 	# forwarding). Run on the node directly so the rolling driver sees the
 	# local cluster state.
-	info "Cutting over node${idx} via 'xpfd upgrade --rolling'..."
+	rolling_upgrade_trace cut_start "$idx"
 	incus exec "$rinst" -- /usr/local/share/xpf/staged/xpfd upgrade --rolling
+	rolling_upgrade_trace cut_end "$idx"
 	info "Cut-over complete for $vm."
 }
 

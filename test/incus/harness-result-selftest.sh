@@ -6,7 +6,7 @@
 # Usage: ./test/incus/harness-result-selftest.sh   (rc 0 = all pass)
 #
 # The load-bearing cell is the ADAPTER CENSUS. It does not invent a summary
-# line; it EXTRACTS the real `echo` from each of the thirteen gates that carry the
+# line; it EXTRACTS the real `echo` from each of the fourteen gates that carry the
 # shape. Two consequences:
 #
 #   * an adapter anchored on a label prefix ("Failover test:") covers six of
@@ -15,7 +15,7 @@
 #   * an adapter anchored at end of line drops test-connectivity.sh, whose
 #     summary continues ", <n> skipped" after the pair;
 #
-# and if any of those thirteen gates changes its summary format, this reds instead
+# and if any of those fourteen gates changes its summary format, this reds instead
 # of the ledger quietly filling with VOIDs.
 #
 # Falsifiability of this file: if the adapter table is wrong, the cell naming
@@ -282,9 +282,9 @@ expect_field() {
 	fi
 }
 
-# ── 1. The adapter census: 5 iperf smokes + 8 cells smokes ──────────
+# ── 1. The adapter census: 6 iperf smokes + 8 cells smokes ──────────
 #
-# #9922 F-155: ONE adapter can no longer cover both classes. The five smokes
+# #9922 F-155: ONE adapter can no longer cover both classes. The six smokes
 # that emit an iperf3 throughput cell keep ha-smoke (PASS headline FIXED to
 # throughput_gbps, figure required); the eight smokes that emit cells only take
 # smoke-cells (PASS/FAIL headline FIXED to cells_passed). The declared sets
@@ -296,6 +296,7 @@ DECLARED_IPERF_SMOKES=(
 	test-stress-failover
 	test-chained-crash
 	test-active-active
+	test-rolling-upgrade
 )
 DECLARED_CELLS_SMOKES=(
 	test-ha-crash
@@ -372,7 +373,7 @@ score_gate() {
 for g in "${DECLARED_IPERF_SMOKES[@]}"; do score_gate "$g" ha-smoke; done
 for g in "${DECLARED_CELLS_SMOKES[@]}"; do score_gate "$g" smoke-cells; done
 if ((census_covered == census_total)); then
-	ok "adapter census: own adapter covers all $census_total declared gates (5 ha-smoke + 8 smoke-cells)"
+	ok "adapter census: own adapter covers all $census_total declared gates (6 ha-smoke + 8 smoke-cells)"
 else
 	bad "adapter census: covered $census_covered of $census_total declared gates"
 fi
@@ -436,7 +437,7 @@ for g in "${DECLARED_IPERF_SMOKES[@]}" "${DECLARED_CELLS_SMOKES[@]}"; do
 	fi
 done
 if [[ -z "$map_bad" ]]; then
-	ok "adapter census: Makefile --adapter matches iperf emission for all 13 smoke gates"
+	ok "adapter census: Makefile --adapter matches iperf emission for all 14 smoke gates"
 else
 	bad "adapter census: Makefile/script adapter mismatch:$map_bad"
 fi

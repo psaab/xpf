@@ -10,11 +10,10 @@
 #   FAILOVER_IPERF_TIMEOUT_MARGIN (default 30s). --connect-timeout covers the
 #   connect only, and a flaky far end can hang the final control exchange
 #   forever (#11861). The pidfile records the timeout supervisor, whose cmdline
-#   still carries the iperf3 match keys for failover_main_iperf_running.
 failover_start_main_iperf() {
 	local duration="$1" target="$2" port="$3" streams="$4" log="$5" pidfile="$6"
-	local margin="${FAILOVER_IPERF_TIMEOUT_MARGIN:-30}"
 	local interval="${7:-}"
+	local margin="${FAILOVER_IPERF_TIMEOUT_MARGIN:-30}"
 	case "$margin" in ''|*[!0-9]*) margin=30 ;; esac
 	local wall=$(( duration + margin ))
 	incus exec "$CLUSTER_LAN_HOST" -- bash -c '

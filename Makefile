@@ -11,7 +11,7 @@ BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)
 
 # eBPF compilation flags
-.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log check-userspace-dt-needed proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib test-failover-clock-lib test-ha-assurance-lib test-failover-client-lib
+.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log check-userspace-dt-needed proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-rolling-upgrade test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib test-failover-clock-lib test-ha-assurance-lib test-failover-client-lib
 
 all: generate build build-ctl
 
@@ -1307,6 +1307,14 @@ test-failover:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-failover --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
 		-- ./test/incus/test-failover.sh
+
+# #12200: a tracked 100-ms multi-stream client and two per-stream rolling-cut
+# verdicts; the candidate .deb is built before the gate acquires the cluster lock.
+test-rolling-upgrade: deb
+	./test/incus/with-cluster.sh "test-rolling-upgrade #12200" -- \
+		env BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate test-rolling-upgrade --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		-- ./test/incus/test-rolling-upgrade.sh
 
 # Double failover test (crash fw0 → fw1 takes over → fw0 rejoins → crash fw1 → fw0 takes over)
 test-double-failover:
