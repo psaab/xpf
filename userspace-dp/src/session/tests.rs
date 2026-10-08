@@ -299,21 +299,38 @@ fn session_lookup_hits_after_install() {
 }
 
 #[test]
-fn missing_neighbor_seed_install_stays_out_of_delta_stream() {
+fn transient_seed_installs_stay_out_of_delta_stream() {
     let mut table = SessionTable::new();
+    let now = 1_000_000_000u64;
     let key = key_v4();
     assert!(table.install_with_protocol_with_origin(
         key,
         decision(),
         metadata(),
         SessionOrigin::MissingNeighborSeed,
-        1_000_000_000,
+        now,
+        PROTO_TCP,
+        0x10,
+    ));
+
+    let punt_key = SessionKey {
+        src_port: 12346,
+        ..key_v4()
+    };
+    let mut punt_decision = decision();
+    punt_decision.resolution.disposition = ForwardingDisposition::FabricRedirect;
+    assert!(table.install_with_protocol_with_origin(
+        punt_key,
+        punt_decision,
+        metadata(),
+        SessionOrigin::FabricPuntSeed,
+        now,
         PROTO_TCP,
         0x10,
     ));
     assert!(
         table.drain_deltas(8).is_empty(),
-        "transient missing-neighbor seeds must stay local"
+        "transient missing-neighbor and fabric-punt seeds must stay local"
     );
 }
 
@@ -7345,10 +7362,10 @@ fn session_limit_synced_reverse_import_excluded() {
     );
 }
 
-/// §5.7 reverse + seed exclusion: reverse-flow and MissingNeighborSeed
-/// installs must NOT increment (counted-class predicate).
+/// §5.7 reverse-direction entries stay excluded while forward transient
+/// seeds count toward the quota.
 #[test]
-fn session_limit_excludes_reverse_and_seed_installs() {
+fn session_limit_counts_seed_installs_but_excludes_reverse() {
     let mut table = SessionTable::new();
     table.set_session_limit_active(true);
     let now = 1_000_000_000u64;
@@ -7391,8 +7408,30 @@ fn session_limit_excludes_reverse_and_seed_installs() {
     ));
     assert_eq!(
         table.session_limit_src_count(TEST_LAN_ZONE_ID, seed_src),
-        0,
-        "missing-neighbor seed install must not count"
+        1,
+        "missing-neighbor seed install must count"
+    );
+
+    let punt_src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 22));
+    let punt_key = SessionKey {
+        src_ip: punt_src,
+        ..limit_key(22, 10, 47000)
+    };
+    let mut punt_decision = decision();
+    punt_decision.resolution.disposition = ForwardingDisposition::FabricRedirect;
+    assert!(table.install_with_protocol_with_origin(
+        punt_key,
+        punt_decision,
+        metadata(),
+        SessionOrigin::FabricPuntSeed,
+        now,
+        PROTO_TCP,
+        0x10,
+    ));
+    assert_eq!(
+        table.session_limit_src_count(TEST_LAN_ZONE_ID, punt_src),
+        1,
+        "fabric-punt seed install must count"
     );
 }
 
@@ -7431,9 +7470,9 @@ fn session_limit_idempotent_reinstall_nets_to_one() {
 /// §5.9 differential / invariant (the strongest guard): after an
 /// arbitrary sequence of install / expire / delete / promote / demote /
 /// refresh, the sum of per-IP src counts EQUALS the number of live
-/// counted entries. As of #3122 the counted-class is PRESENCE-based and
-/// ORIGIN-AGNOSTIC (`!is_reverse && !is_seed` — peer-synced included).
-/// Same for dst. Catches ANY missed transition site.
+/// counted entries. The counted class is forward-direction and origin-aware:
+/// peer-synced sessions and transient seeds count, WorkerLocalImport replicas
+/// do not. Same for dst. Catches ANY missed transition site.
 #[test]
 fn session_limit_counts_match_live_counted_entries_invariant() {
     let mut table = SessionTable::new();
@@ -7463,8 +7502,8 @@ fn session_limit_counts_match_live_counted_entries_invariant() {
         ));
         counted_keys.push(key);
     }
-    // A reverse + a seed (both uncounted) + a synced import (#3122:
-    // now COUNTED — origin-agnostic presence-based counting).
+    // A reverse entry (excluded), a transient seed (counted), and a synced
+    // import (#3122: counted regardless of origin).
     let mut rev_meta = metadata();
     rev_meta.is_reverse = true;
     let _ = table.install_with_protocol_with_origin(
@@ -7537,8 +7576,8 @@ fn session_limit_counts_match_live_counted_entries_invariant() {
             std::collections::HashMap::new();
         table.iter_with_origin(|key, _decision, md, origin| {
             // #3122/#10310: use the production counted-class predicate:
-            // peer-synced imports count, WorkerLocalImport replicas do not,
-            // and reverse/transient-seed entries are excluded.
+            // peer-synced imports and transient seeds count, WorkerLocalImport
+            // replicas and reverse entries do not.
             if !md.is_reverse && super::install::session_limit_origin_counted(origin) {
                 *src_live.entry((md.ingress_zone, key.src_ip)).or_insert(0) += 1;
                 *dst_live.entry((md.ingress_zone, key.dst_ip)).or_insert(0) += 1;

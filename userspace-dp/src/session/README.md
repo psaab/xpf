@@ -2151,24 +2151,28 @@ per-IP counts (`session_limit_src_counts` / `session_limit_dst_counts`),
 keyed by `(ingress_zone_id, IP)`, NOT by IP alone or by `ScreenState`. This
 prevents sessions from other zones from consuming this zone's allowance.
 
-**Counted-class predicate (#3122 / #10310).** A session counts iff it is
-forward-direction and real, and is not a worker-local replica:
+**Counted-class predicate (#3122 / #10310 / #12179).** A session counts iff
+it is forward-direction and is not a worker-local replica:
 `!is_reverse && session_limit_origin_counted(origin)`. The predicate excludes
-the two transient local seeds and `WorkerLocalImport` while that origin means
-"a replica of a session authored by this node's other RSS worker." Charging
-that replica again would make the effective cap depend on replica fanout rather
-than logical sessions. A demoted worker replica is deliberately re-tagged
-`SyncImport` by `demote_owner_rg`, after which it is a true HA peer origin and
-must count. True HA peer origins (`SyncImport` / `SharedMaterialize`) remain
-counted so a standby cannot bypass the cap after failover — the #3122
-limit-bypass fix is preserved.
+`WorkerLocalImport` while that origin means "a replica of a session authored
+by this node's other RSS worker." Charging that replica again would make the
+effective cap depend on replica fanout rather than logical sessions. The two
+transient local seeds count toward the quota while they occupy worker-table
+slots; their node-local HA provenance remains independent from quota
+accounting. A demoted worker replica is deliberately re-tagged `SyncImport`
+by `demote_owner_rg`, after which it is a true HA peer origin and must count.
+True HA peer origins (`SyncImport` / `SharedMaterialize`) remain counted so a
+standby cannot bypass the cap after failover — the #3122 limit-bypass fix is
+preserved.
 
-**Count vs. HA Open delta are now SEPARATE conditions (#3122).** The
-fresh-install path increments the count for any counted-class session but
-only emits an HA Open delta for the `!is_peer_synced()` subset — a
-peer-synced session must NOT re-emit a delta (that would echo the peer's
-own session back to it, a sync loop). Before #3122 the two shared one
-condition; they diverged when the count became origin-agnostic.
+**Count vs. HA Open delta are now SEPARATE conditions (#3122 / #12179).**
+The fresh-install path increments the count for any counted-class session,
+but an Open delta additionally requires a local, transferable origin: it
+excludes peer-synced sessions, TUN-origin entries (#10038), and transient
+seeds (#12179). A peer-synced session must NOT re-emit a delta (that would
+echo the peer's own session back to it, a sync loop), and a transient seed
+must remain node-local. Before #3122 the two shared one condition; they
+diverged when true HA peer imports became counted without being echo-exported.
 
 **Maintenance sites.** The source-IP count is always incremented at the two
 CREATE sinks and decremented at the sole REMOVE sink to enforce the default

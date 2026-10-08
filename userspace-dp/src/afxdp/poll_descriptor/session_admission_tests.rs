@@ -274,6 +274,72 @@ mod new_flow_session_limit_tests {
             Some("session-limit-src")
         );
     }
+    #[test]
+    fn transient_seeds_consume_per_source_session_quota_12179() {
+        let fw = forwarding_with_limit("untrust", 10, 0);
+        let now = 1_000_000_000u64;
+
+        for origin in [
+            SessionOrigin::MissingNeighborSeed,
+            SessionOrigin::FabricPuntSeed,
+        ] {
+            let mut table = SessionTable::new();
+            let src = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 121));
+            let mut pending_decision = decision();
+            pending_decision.resolution.neighbor_mac = None;
+            if origin == SessionOrigin::FabricPuntSeed {
+                pending_decision.resolution.disposition = ForwardingDisposition::FabricRedirect;
+            }
+
+            // Every distinct destination tuple resolves through the same
+            // unresolved next hop. The first ten seeds fit; the eleventh
+            // new-flow check must see those live entries and reject.
+            for attempt in 0..=10u16 {
+                let dst = IpAddr::V4(Ipv4Addr::new(
+                    198,
+                    51,
+                    100,
+                    u8::try_from(attempt + 1).expect("test destination octet"),
+                ));
+                let verdict = new_flow_session_limit_drop(
+                    &fw,
+                    &table,
+                    "untrust",
+                    TEST_LAN_ZONE_ID,
+                    src,
+                    dst,
+                );
+                if attempt == 10 {
+                    assert_eq!(
+                        verdict,
+                        Some("session-limit-src"),
+                        "{origin:?}: the eleventh pending seed must be rejected"
+                    );
+                    break;
+                }
+                assert_eq!(
+                    verdict, None,
+                    "{origin:?}: pending seed {attempt} should fit below the quota"
+                );
+                assert!(table.install_with_protocol_with_origin(
+                    counted_key(src, dst, 40_000 + attempt),
+                    pending_decision.clone(),
+                    meta(TEST_LAN_ZONE_ID),
+                    origin,
+                    now,
+                    crate::ip_proto::PROTO_TCP,
+                    0x10,
+                ));
+                assert_eq!(
+                    table.session_limit_src_count(TEST_LAN_ZONE_ID, src),
+                    u32::from(attempt + 1),
+                    "{origin:?}: each live seed must consume one source-quota slot"
+                );
+            }
+            assert_eq!(table.len(), 10);
+        }
+    }
+
 }
 
 /// #4400/#10270/#10703: TCP SYN-selector behavior on the session-MISS install
