@@ -341,6 +341,20 @@ func ValidateConfig(cfg *Config) []string {
 				"static-nat ruleset %q: from-zone %q not defined", rs.Name, rs.FromZone))
 		}
 	}
+	// Destination NAT also scopes its inbound rule-sets by the exact ingress
+	// zone name. An undefined from-zone therefore leaves the rule-set unable
+	// to match, so surface the typo like static NAT (#12245).
+	if dnat := cfg.Security.NAT.Destination; dnat != nil {
+		for _, rs := range dnat.RuleSets {
+			if rs == nil {
+				continue
+			}
+			if rs.FromZone != "" && !zones[rs.FromZone] {
+				warnings = append(warnings, fmt.Sprintf(
+					"destination-nat ruleset %q: from-zone %q not defined", rs.Name, rs.FromZone))
+			}
+		}
+	}
 
 	// Validate screen references in zones
 	for name, zone := range cfg.Security.Zones {
