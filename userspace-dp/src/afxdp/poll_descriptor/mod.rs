@@ -2339,29 +2339,33 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         }
                         if session_hit_revocation.is_none() {
                             session_hit_revocation = match foreign_arrival_zone {
-                                None => revalidate_zone_policy_on_session_hit(
-                                    worker_ctx.forwarding,
-                                    sessions,
-                                    &resolved.key,
-                                    &resolved.metadata,
-                                    resolved.decision,
-                                    Some(flow),
-                                    meta,
-                                    // #9384: THIS packet's fabric ingress. The from-zone
-                                    // is resolved live from the arrival interface, and a
-                                    // fabric-punted packet arrives on the fabric link —
-                                    // not in the flow's zone — so it keeps the entry's
-                                    // recorded zone instead.
-                                    packet_fabric_ingress,
-                                    fabric_link_ingress,
-                                    worker_ctx.ha_state,
-                                    worker_ctx.dynamic_neighbors,
-                                    now_ns,
-                                    now_secs,
-                                    meta.ingress_ifindex as i32,
-                                    ha_startup_grace_until_secs,
-                                    resolved.origin,
-                                ),
+                                None => {
+                                    revalidate_zone_policy_on_session_hit(
+                                        worker_ctx.forwarding,
+                                        conntrack_v4_fd,
+                                        conntrack_v6_fd,
+                                        sessions,
+                                        &resolved.key,
+                                        &resolved.metadata,
+                                        resolved.decision,
+                                        Some(flow),
+                                        meta,
+                                        // #9384: THIS packet's fabric ingress. The from-zone
+                                        // is resolved live from the arrival interface, and a
+                                        // fabric-punted packet arrives on the fabric link —
+                                        // not in the flow's zone — so it keeps the entry's
+                                        // recorded zone instead.
+                                        packet_fabric_ingress,
+                                        fabric_link_ingress,
+                                        worker_ctx.ha_state,
+                                        worker_ctx.dynamic_neighbors,
+                                        now_ns,
+                                        now_secs,
+                                        meta.ingress_ifindex as i32,
+                                        ha_startup_grace_until_secs,
+                                        resolved.origin,
+                                    )
+                                }
                                 Some(arrival_zone) => match foreign_hit_verdict(
                                     worker_ctx.forwarding,
                                     sessions,

@@ -9924,23 +9924,21 @@ fn worker_loop_routes_expiry_overflow_to_close_flush_10309() {
     );
 }
 
-/// #3416 FAIL-ON-REVERT (call-site WIRING pin): the permit-side RT_FLOW
-/// SESSION_CREATE / SESSION_CLOSE application id is resolved INSIDE
-/// `flush_session_deltas` via `AppCatalog::lookup_admitted`, which substitutes
-/// the post-NAT (DNAT-rewritten) destination port for the forward service slot.
-/// The helper-level test (`app_catalog_lookup_admitted_uses_post_nat_dst_port`)
-/// proves `lookup_admitted` in isolation; this drives the PRODUCTION drain loop
-/// end to end against a port-forwarded session and decodes the emitted RT_FLOW
-/// frames, so reverting EITHER session_delta.rs call site back to
-/// `lookup_directional` (dropping the `rewrite_dst_port` argument) makes the
-/// stamped `application_id` resolve UNKNOWN(0) from the pre-NAT public port and
-/// the assertions below go red.
+/// #12191 / #3416 end-to-end: create and close RT_FLOW records resolve AppID
+/// from the live catalog using the post-NAT destination port. The fixture
+/// emits SESSION_CREATE while A owns the post-NAT TCP/22 tuple, then redefines
+/// the catalog so A moves to 8443 and B owns TCP/22 before SESSION_CLOSE. The
+/// emitted labels must therefore be A then B while retaining the same stable
+/// session ID. Driving the production drain loop also makes reverting either
+/// call site to pre-NAT `lookup_directional` resolve UNKNOWN(0).
 #[test]
-fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
+fn flush_session_deltas_rt_flow_app_id_tracks_redefinition_by_session_id_12191() {
     // junos-ssh stand-in: app_id 22 on TCP/22 (the INTERNAL/post-NAT port).
     // Nothing is registered on the PUBLIC :2222, so a pre-NAT resolution yields
     // UNKNOWN(0) — exactly the #3416 mislabel the wiring must avoid.
     const JUNOS_SSH: u16 = 22;
+    const OTHER_APP: u16 = 23;
+    const SESSION_ID: u64 = 0x0001_0000_0000_0001;
     let mut forwarding = ForwardingState::default();
     forwarding.app_catalog = crate::policy::AppCatalog::from_snapshot(&[crate::AppCatalogEntry {
         app_id: JUNOS_SSH,
@@ -9985,7 +9983,7 @@ fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
     counters: crate::session::SessionCounters::default(),
     observed_tos: 0,
     observed_tcp_flags: 0,
-    session_id: 0,
+    session_id: SESSION_ID,
     bulk_resync: false,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
@@ -10001,7 +9999,7 @@ fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
     // deny/screen/filter kinds (`from_rt_flow_event_type` rejects the session
     // event types), so app_id is read from the payload [132:134] slot directly,
     // exactly as the codec/Go side reads it.
-    let stamped_app = |delta: SessionDelta, want_event_type: u8| -> u16 {
+    let stamped_app = |forwarding: &ForwardingState, delta: SessionDelta, want_event_type: u8| -> (u16, u64) {
         let want_policy_generation = delta.policy_generation;
         let (handle, rx) = crate::event_stream::test_worker_handle(
             8,
@@ -10045,7 +10043,7 @@ fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
             &peer_worker_commands,
             crate::afxdp::empty_worker_commands_by_id(),
             &Some(handle),
-            &forwarding,
+            forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
             None,
@@ -10064,21 +10062,47 @@ fn flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port() {
             want_policy_generation,
             "RT_FLOW session frame must keep the generation paired with its policy ID"
         );
-        u16::from_le_bytes([payload[132], payload[133]])
+        (
+            u16::from_le_bytes([payload[132], payload[133]]),
+            u64::from_le_bytes(payload[152..160].try_into().unwrap()),
+        )
     };
 
+    let (create_app_id, create_session_id) =
+        stamped_app(&forwarding, make_delta(SessionDeltaKind::Open), 1);
     assert_eq!(
-        stamped_app(make_delta(SessionDeltaKind::Open), 1),
-        JUNOS_SSH,
-        "SESSION_CREATE RT_FLOW must stamp the post-NAT app (junos-ssh/22), \
-         not UNKNOWN(0) resolved from the pre-NAT public :2222"
+        create_app_id, JUNOS_SSH,
+        "SESSION_CREATE must resolve A from the post-NAT destination port"
     );
+    assert_eq!(create_session_id, SESSION_ID);
+
+    // AppID redefinition is live while the admitted session survives: A moves
+    // off the post-NAT TCP/22 tuple and B takes its place.
+    forwarding.app_catalog = crate::policy::AppCatalog::from_snapshot(&[
+        crate::AppCatalogEntry {
+            app_id: JUNOS_SSH,
+            protocol: PROTO_TCP,
+            dst_port_low: 8443,
+            dst_port_high: 8443,
+            src_port_low: 0,
+            src_port_high: 0,
+        },
+        crate::AppCatalogEntry {
+            app_id: OTHER_APP,
+            protocol: PROTO_TCP,
+            dst_port_low: 22,
+            dst_port_high: 22,
+            src_port_low: 0,
+            src_port_high: 0,
+        },
+    ]);
+    let (close_app_id, close_session_id) =
+        stamped_app(&forwarding, make_delta(SessionDeltaKind::Close), 2);
     assert_eq!(
-        stamped_app(make_delta(SessionDeltaKind::Close), 2),
-        JUNOS_SSH,
-        "SESSION_CLOSE RT_FLOW must stamp the post-NAT app (junos-ssh/22), \
-         not UNKNOWN(0) resolved from the pre-NAT public :2222"
+        close_app_id, OTHER_APP,
+        "SESSION_CLOSE must resolve B from the live catalog and post-NAT port"
     );
+    assert_eq!(close_session_id, create_session_id);
 }
 
 #[test]

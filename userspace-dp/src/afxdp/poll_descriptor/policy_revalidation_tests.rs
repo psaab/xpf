@@ -643,3 +643,188 @@ fn ha_imported_transient_dynamic_snat_uses_wire_provenance_12187() {
         "transient dynamic provenance must still reject a later static collision"
     );
 }
+
+/// #12191: the real stale-zone-policy PERMIT edge must refresh the stored
+/// conntrack AppID, not merely the RT_FLOW label resolved from the live catalog.
+#[test]
+fn permitted_stale_hit_restamps_conntrack_app_id_12191() {
+    use crate::policy::AppCatalog;
+    use crate::AppCatalogEntry;
+
+    const PROTO_TCP: u8 = 6;
+    const APP_A: u16 = 11;
+    const APP_B: u16 = 22;
+    let key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 2, 3)),
+        dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 7)),
+        src_port: 40000,
+        dst_port: 443,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    };
+    let decision = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: 12,
+            tx_ifindex: 12,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                172, 16, 80, 1,
+            ))),
+            neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let metadata = SessionMetadata {
+        ingress_zone: crate::test_zone_ids::TEST_LAN_ZONE_ID,
+        egress_zone: crate::test_zone_ids::TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 24,
+        ingress_vlan_id: 0,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    };
+
+    let mut snapshot = crate::afxdp::test_fixtures::policy_deny_snapshot();
+    snapshot.policies[0].from_zone = "lan".to_string();
+    let mut forwarding = crate::afxdp::forwarding_build::build_forwarding_state(&snapshot);
+    let catalog_gen1 = AppCatalog::from_snapshot(&[AppCatalogEntry {
+        app_id: APP_A,
+        protocol: PROTO_TCP,
+        dst_port_low: 443,
+        dst_port_high: 443,
+        src_port_low: 0,
+        src_port_high: 0,
+    }]);
+    let catalog_gen2 = AppCatalog::from_snapshot(&[
+        AppCatalogEntry {
+            app_id: APP_A,
+            protocol: PROTO_TCP,
+            dst_port_low: 8443,
+            dst_port_high: 8443,
+            src_port_low: 0,
+            src_port_high: 0,
+        },
+        AppCatalogEntry {
+            app_id: APP_B,
+            protocol: PROTO_TCP,
+            dst_port_low: 443,
+            dst_port_high: 443,
+            src_port_low: 0,
+            src_port_high: 0,
+        },
+    ]);
+    forwarding.app_catalog = catalog_gen2;
+
+    let mut sessions = SessionTable::new();
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        metadata.clone(),
+        SessionOrigin::ForwardFlow,
+        1_000_000_000,
+        PROTO_TCP,
+        0x02,
+    ));
+    sessions.set_policy_revalidation_gen(2);
+    let session_id = sessions.session_id_for(&key);
+    assert_ne!(session_id, 0);
+    let timeout_secs = sessions.timeout_secs_for(&key);
+
+    let _publish_guard = crate::afxdp::bpf_map::take_conntrack_publish_guard();
+    crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    assert_eq!(
+        crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            &key,
+            decision,
+            &metadata,
+            &FastMap::default(),
+            0,
+            catalog_gen1.lookup_admitted(
+                key.protocol,
+                key.src_port,
+                key.dst_port,
+                metadata.is_reverse,
+                decision.nat.rewrite_dst_port,
+            ),
+            session_id,
+            timeout_secs,
+            SessionOrigin::ForwardFlow,
+        ),
+        crate::afxdp::bpf_map::ConntrackPublishResult::Written
+    );
+    let before = crate::afxdp::bpf_map::conntrack_row_for_test(&key)
+        .expect("create must publish the initial AppID row");
+    assert_eq!(before.app_id, APP_A);
+    assert_eq!(before.session_id, session_id);
+    assert!(matches!(
+        sessions.policy_revalidation_target(&key),
+        PolicyRevalidationTarget::Stale(_)
+    ));
+
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let meta = crate::afxdp::tests_support::txn_meta_v4(24, 0x10, 54);
+    let revocation = revalidate_zone_policy_on_session_hit(
+        &forwarding,
+        crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+        crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+        &mut sessions,
+        &key,
+        &metadata,
+        decision,
+        Some(&flow),
+        meta,
+        false,
+        false,
+        &BTreeMap::new(),
+        &Arc::new(ShardedNeighborMap::new()),
+        1_100_000_000,
+        1,
+        24,
+        0,
+        SessionOrigin::ForwardFlow,
+    );
+    assert!(
+        revocation.is_none(),
+        "the configured lan -> wan permit must keep the live session"
+    );
+    assert_eq!(
+        sessions.policy_revalidation_target(&key),
+        PolicyRevalidationTarget::Fresh,
+        "the permit must stamp the stale session current"
+    );
+    let after = crate::afxdp::bpf_map::conntrack_row_for_test(&key)
+        .expect("permitted revalidation must leave the row present");
+    assert_eq!(
+        after.app_id, APP_B,
+        "the stale-hit permit must re-stamp the stored label from the live catalog"
+    );
+    assert_eq!(
+        after.session_id, session_id,
+        "label refresh must preserve the stable session identity"
+    );
+}

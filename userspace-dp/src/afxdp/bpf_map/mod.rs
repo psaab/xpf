@@ -1628,6 +1628,113 @@ pub(super) fn restamp_bpf_conntrack_policy(
     }
     false
 }
+
+/// Update only the AppID label in an existing conntrack row. Read/modify/write
+/// preserves the live row's counters, timestamps, NAT state, and session id.
+#[cold]
+pub(super) fn restamp_bpf_conntrack_app_id(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+    app_id: u16,
+) -> bool {
+    if key.addr_family as i32 == libc::AF_INET {
+        let (IpAddr::V4(src), IpAddr::V4(dst)) = (key.src_ip, key.dst_ip) else {
+            return false;
+        };
+        #[cfg(test)]
+        if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD {
+            return CONNTRACK_TEST_ROWS.with(|rows| {
+                rows.borrow_mut()
+                    .get_mut(&bare_conntrack_test_key(key))
+                    .is_some_and(|row| {
+                        row.app_id = app_id;
+                        true
+                    })
+            });
+        }
+        if conntrack_v4_fd < 0 {
+            return true;
+        }
+        let bpf_key = bpf_session_key_v4(
+            src.octets(),
+            dst.octets(),
+            key.src_port,
+            key.dst_port,
+            key.protocol,
+        );
+        let mut value: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
+        let found = unsafe {
+            libbpf_sys::bpf_map_lookup_elem(
+                conntrack_v4_fd,
+                (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
+                (&mut value as *mut BpfSessionValueV4).cast::<c_void>(),
+            )
+        };
+        if found != 0 {
+            return false;
+        }
+        value.app_id = app_id;
+        let updated = unsafe {
+            libbpf_sys::bpf_map_update_elem(
+                conntrack_v4_fd,
+                (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
+                (&value as *const BpfSessionValueV4).cast::<c_void>(),
+                libbpf_sys::BPF_EXIST as u64,
+            )
+        };
+        return updated == 0;
+    }
+    if key.addr_family as i32 == libc::AF_INET6 {
+        let (IpAddr::V6(src), IpAddr::V6(dst)) = (key.src_ip, key.dst_ip) else {
+            return false;
+        };
+        #[cfg(test)]
+        if conntrack_v6_fd == CONNTRACK_TEST_MAP_FD {
+            return CONNTRACK_TEST_ROWS.with(|rows| {
+                rows.borrow_mut()
+                    .get_mut(&bare_conntrack_test_key(key))
+                    .is_some_and(|row| {
+                        row.app_id = app_id;
+                        true
+                    })
+            });
+        }
+        if conntrack_v6_fd < 0 {
+            return true;
+        }
+        let bpf_key = bpf_session_key_v6(
+            src.octets(),
+            dst.octets(),
+            key.src_port,
+            key.dst_port,
+            key.protocol,
+        );
+        let mut value: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
+        let found = unsafe {
+            libbpf_sys::bpf_map_lookup_elem(
+                conntrack_v6_fd,
+                (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
+                (&mut value as *mut BpfSessionValueV6).cast::<c_void>(),
+            )
+        };
+        if found != 0 {
+            return false;
+        }
+        value.app_id = app_id;
+        let updated = unsafe {
+            libbpf_sys::bpf_map_update_elem(
+                conntrack_v6_fd,
+                (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
+                (&value as *const BpfSessionValueV6).cast::<c_void>(),
+                libbpf_sys::BPF_EXIST as u64,
+            )
+        };
+        return updated == 0;
+    }
+    false
+}
+
 /// Update `last_seen` in BPF conntrack entries for active userspace sessions.
 ///
 /// The userspace helper owns session lifetime in its own SessionTable, but
