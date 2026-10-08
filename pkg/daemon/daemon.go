@@ -1742,6 +1742,11 @@ type Daemon struct {
 	// every subsystem.
 	bootstrapMode atomic.Bool
 
+	// bootstrapLifelineNetwork is the exact validated lifeline .network captured
+	// before first-config networkd takeover. The first-confirmed rollback restores
+	// it if networkd replaced the same filename. Access is serialized by applySem.
+	bootstrapLifelineNetwork []byte
+
 	// emptyHANamingPending is the #4179 one-shot flag for the HA-guard
 	// EMPTY-config takeover. A node with /etc/xpf/node-id but no committed
 	// config resolves NOT-bootstrap (computeBootClass HA-node guard) and names

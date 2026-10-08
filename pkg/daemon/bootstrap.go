@@ -8,6 +8,7 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -122,6 +123,8 @@ const lifelineRecordFile = "/etc/xpf/lifeline-interface"
 // `system management-interface` leaf narrows it off (Item 4 / OQ-D escape
 // valve).
 const defaultMgmtInterface = "fxp0"
+
+const bootstrapLifelineNetworkMarker = "# Managed by xpfd — #1922 bootstrap lifeline"
 
 // applianceMarkerFile marks a host that was PROVISIONED FROM THE XPF APPLIANCE
 // IMAGE. `scripts/image/bake.py` writes it into the baked root filesystem; the
@@ -400,16 +403,17 @@ func (d *Daemon) exitBootstrapMode(reason string) {
 // the helper exists, i.e. it would resurrect the dataplane bootstrap promises
 // not to run. Instead this performs explicit cleanup, in order:
 //
-//  1. set bootstrap mode (re-suppress takeover for the daemon's lifetime),
-//  2. remove xpf-written takeover .network/.link files EXCEPT the lifeline
-//     fxp0 .network and the .link files, then networkctl reload,
+//  2. retire xpf-written takeover .network files, preserving a validated
+//     bootstrap lifeline or restoring its exact pre-takeover content, then
+//     networkctl reload,
 //  3. clear the FRR managed section,
 //  4. detach the dataplane (inverse of Start; the helper object is kept so a
 //     later confirmed commit can re-arm it).
 //
 // Renames persist deliberately — reverting them would link-cycle a degraded
-// box for cosmetic benefit. Post-rollback state = renamed NICs + lifeline
-// fxp0 .network + zero config-driven claims. The caller holds d.applySem.
+// box for cosmetic benefit. Post-rollback state = renamed NICs + no abandoned
+// networkd addresses + the validated bootstrap lifeline when available + zero
+// config-driven claims. The caller holds d.applySem.
 //
 // #5868: the teardown is best-effort — every step is ATTEMPTED regardless of
 // earlier failures — but failures are NO LONGER discarded. Each failing step
@@ -492,7 +496,7 @@ func (d *Daemon) enterBootstrapMode() error {
 			}
 		}
 		slog.Error("bootstrap rollback DEGRADED: one or more teardown steps failed; the "+
-			"management lifeline is preserved but config-driven takeover state "+
+			"config-driven takeover state "+
 			"(networkd/FRR/dataplane) may remain PARTIALLY LIVE — the config rolled back "+
 			"FROM is not fully retired. 'commit confirmed' a corrected config and verify "+
 			"interfaces/routes/dataplane are clean",
@@ -500,7 +504,7 @@ func (d *Daemon) enterBootstrapMode() error {
 		return aggErr
 	}
 
-	slog.Warn("bootstrap rollback complete: takeover removed, management lifeline preserved; " +
+	slog.Warn("bootstrap rollback complete: config-driven takeover removed; " +
 		"system is back in bootstrap mode — 'commit confirmed' a corrected config")
 	return nil
 }
@@ -621,40 +625,95 @@ func (d *Daemon) relinquishClusterForBootstrap() []bootstrapTeardownStep {
 	return steps
 }
 
+// isBootstrapLifelineNetwork recognizes only the file written by the bootstrap
+// lifeline path. A filename alone cannot distinguish that snapshot from
+// networkd.Apply's later config-driven winner.
+func isBootstrapLifelineNetwork(content []byte) bool {
+	return bytes.HasPrefix(content, []byte(bootstrapLifelineNetworkMarker))
+}
+
+// captureBootstrapLifelineNetwork records the exact pre-takeover file content.
+// It runs after startup takeover and before the first config's networkd
+// reconciliation can overwrite the lifeline.
+func (d *Daemon) captureBootstrapLifelineNetwork() {
+	if len(d.bootstrapLifelineNetwork) != 0 {
+		return
+	}
+	path := filepath.Join(linkDir, linkPrefix+"fxp0.network")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		slog.Warn("bootstrap exit: could not snapshot the management lifeline network; "+
+			"first-commit rollback may be degraded", "path", path, "err", err)
+		return
+	}
+	if !isBootstrapLifelineNetwork(content) {
+		slog.Warn("bootstrap exit: fxp0 network lacks the bootstrap lifeline marker; "+
+			"not retaining it as rollback content", "path", path)
+		return
+	}
+	d.bootstrapLifelineNetwork = content
+	slog.Debug("bootstrap exit: captured pre-takeover management lifeline network",
+		"path", path)
+}
+
+// restoreBootstrapLifelineNetwork retains an already-valid bootstrap file or
+// restores the exact pre-takeover content. It does not delete an unknown fxp0
+// file without a validated snapshot, because that could strand management.
+func (d *Daemon) restoreBootstrapLifelineNetwork() (bool, error) {
+	name := linkPrefix + "fxp0.network"
+	path := filepath.Join(linkDir, name)
+	content, err := os.ReadFile(path)
+	if err == nil && isBootstrapLifelineNetwork(content) &&
+		(len(d.bootstrapLifelineNetwork) == 0 || bytes.Equal(content, d.bootstrapLifelineNetwork)) {
+		return false, nil
+	}
+	if errors.Is(err, os.ErrNotExist) && len(d.bootstrapLifelineNetwork) == 0 {
+		return false, nil
+	}
+	if len(d.bootstrapLifelineNetwork) == 0 {
+		if err != nil {
+			return false, fmt.Errorf("%s: read management lifeline: %w", name, err)
+		}
+		return false, fmt.Errorf(
+			"%s no longer contains a bootstrap lifeline and no pre-takeover snapshot is available",
+			name)
+	}
+	if err := fsatomic.WriteFileAtomic(path, d.bootstrapLifelineNetwork, 0644); err != nil {
+		return false, fmt.Errorf("%s: restore management lifeline: %w", name, err)
+	}
+	return true, nil
+}
+
 func (d *Daemon) runBootstrapTeardownSteps() []bootstrapTeardownStep {
 	steps := make([]bootstrapTeardownStep, 0, 3)
 
-	// (2) Remove xpf-written takeover .network files (NOT the lifeline fxp0
-	// .network and NOT the .link rename files — those keep mgmt reachable and
-	// the rename stable). The lifeline .network is the bootstrap fxp0 file.
+	// (2) Retire xpf-written takeover .network files. Keep .link files so names
+	// remain stable; the fxp0 file is handled separately by content, not name.
 	lifelineNetwork := linkPrefix + "fxp0.network"
 	entries, err := os.ReadDir(linkDir)
+	networkChanged := false
 	if err != nil {
 		// The directory could not be enumerated — the takeover .network files
-		// (if any) are NOT removed. Surface it; still attempt FRR + dataplane
-		// teardown below.
+		// (if any) are NOT removed. Surface it, but still attempt to restore the
+		// management lifeline below.
 		steps = append(steps, bootstrapTeardownStep{name: "read link dir", err: err})
 	} else {
-		removed := false
 		var rmErrs []error
 		for _, e := range entries {
 			name := e.Name()
-			if !strings.HasPrefix(name, linkPrefix) {
+			if !strings.HasPrefix(name, linkPrefix) ||
+				strings.HasSuffix(name, ".link") ||
+				name == lifelineNetwork ||
+				!strings.HasSuffix(name, ".network") {
 				continue
 			}
-			// Keep .link files (rename persistence) and the lifeline .network.
-			if strings.HasSuffix(name, ".link") || name == lifelineNetwork {
+			if err := os.Remove(filepath.Join(linkDir, name)); err != nil {
+				// Best-effort: record the failure and keep removing the rest.
+				rmErrs = append(rmErrs, fmt.Errorf("%s: %w", name, err))
 				continue
 			}
-			if strings.HasSuffix(name, ".network") {
-				if err := os.Remove(filepath.Join(linkDir, name)); err != nil {
-					// Best-effort: record the failure and keep removing the rest.
-					rmErrs = append(rmErrs, fmt.Errorf("%s: %w", name, err))
-					continue
-				}
-				removed = true
-				slog.Info("bootstrap rollback: removed takeover .network file", "file", name)
-			}
+			networkChanged = true
+			slog.Info("bootstrap rollback: removed takeover .network file", "file", name)
 		}
 		if len(rmErrs) > 0 {
 			steps = append(steps, bootstrapTeardownStep{
@@ -662,12 +721,23 @@ func (d *Daemon) runBootstrapTeardownSteps() []bootstrapTeardownStep {
 				err:  errors.Join(rmErrs...),
 			})
 		}
-		// Reload if we removed at least one file — a partial removal still
-		// changes the desired networkd state.
-		if removed {
-			if err := networkctlReload(); err != nil {
-				steps = append(steps, bootstrapTeardownStep{name: "networkctl reload", err: err})
-			}
+	}
+
+	if changed, err := d.restoreBootstrapLifelineNetwork(); err != nil {
+		steps = append(steps, bootstrapTeardownStep{
+			name: "restore management lifeline network",
+			err:  err,
+		})
+	} else if changed {
+		networkChanged = true
+		slog.Info("bootstrap rollback: restored management lifeline network",
+			"file", lifelineNetwork)
+	}
+	// Reload after removing or restoring any networkd file; a lifeline-only
+	// restoration also changes networkd's desired state.
+	if networkChanged {
+		if err := networkctlReload(); err != nil {
+			steps = append(steps, bootstrapTeardownStep{name: "networkctl reload", err: err})
 		}
 	}
 
@@ -1297,11 +1367,11 @@ func writeBootstrapLifelineNetwork(lifeline string, hasRouteEvidence bool) (bool
 	v4, v6, gw4, gw6 := snap.v4, snap.v6, snap.gw4, snap.gw6
 	var content string
 	if snap.dhcpManaged || (len(v4) == 0 && len(v6) == 0) {
-		content = "# Managed by xpfd — #1922 bootstrap lifeline (DHCP)\n" +
+		content = bootstrapLifelineNetworkMarker + " (DHCP)\n" +
 			"[Match]\nName=fxp0\n\n[Network]\nDHCP=yes\n\n[DHCPv4]\nUseDNS=yes\nUseRoutes=yes\n"
 	} else {
 		var b strings.Builder
-		b.WriteString("# Managed by xpfd — #1922 bootstrap lifeline (static snapshot)\n")
+		b.WriteString(bootstrapLifelineNetworkMarker + " (static snapshot)\n")
 		b.WriteString("[Match]\nName=fxp0\n\n[Network]\n")
 		for _, a := range v4 {
 			fmt.Fprintf(&b, "Address=%s\n", a)
