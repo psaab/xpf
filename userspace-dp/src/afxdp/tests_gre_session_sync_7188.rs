@@ -27,22 +27,20 @@ use crate::SessionSyncRequest;
 /// constant on purpose: the whole point is that two calls differing ONLY in the
 /// discriminator must not collapse.
 fn gre_sync_req(protocol: u8, discriminator: u64) -> SessionSyncRequest {
-    SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol,
-        src_ip: "198.51.100.7".to_string(),
-        dst_ip: "203.0.113.9".to_string(),
-        // Protocol 47 has no L4 ports. These zeros are exactly what the shim's
-        // `parse_l4` catch-all stamps, and they are why the 5-tuple cannot tell
-        // two tunnels apart on its own.
-        src_port: 0,
-        dst_port: 0,
-        ingress_zone_id: TEST_TRUST_ZONE_ID,
-        egress_zone_id: TEST_UNTRUST_ZONE_ID,
-        tunnel_discriminator: discriminator,
-        ..SessionSyncRequest::default()
-    }
+    SessionSyncRequest { operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol,
+    src_ip: "198.51.100.7".to_string(),
+    dst_ip: "203.0.113.9".to_string(),
+    // Protocol 47 has no L4 ports. These zeros are exactly what the shim's
+    // `parse_l4` catch-all stamps, and they are why the 5-tuple cannot tell
+    // two tunnels apart on its own.
+    src_port: 0,
+    dst_port: 0,
+    ingress_zone_id: TEST_TRUST_ZONE_ID,
+    egress_zone_id: TEST_UNTRUST_ZONE_ID,
+    tunnel_discriminator: discriminator,
+    ..SessionSyncRequest::default() }
 }
 
 /// THE fixture. Two keyed tunnels, keys 100 and 200, identical outer endpoints.

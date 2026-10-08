@@ -368,19 +368,17 @@ fn unique_established_ri_snat_reply_is_admitted_without_stamp_11061() {
         TCP_FLAG_ACK,
     ));
 
-    let shared_entry = SyncedSessionEntry {
-        key: forward_key,
-        decision,
-        metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: TCP_FLAG_ACK,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let shared_entry = SyncedSessionEntry { key: forward_key,
+    decision,
+    metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: TCP_FLAG_ACK,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));

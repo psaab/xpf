@@ -14,6 +14,8 @@ pub(crate) struct SyncedSessionEntry {
     pub(crate) key: SessionKey,
     pub(crate) decision: SessionDecision,
     pub(crate) metadata: SessionMetadata,
+    /// Ordinary source-NAT origin carried across the HA session-sync wire.
+    pub(crate) source_nat_static: Option<bool>,
     /// #9951: exact inter-VRF leak incarnation used by the cached resolution.
     /// This is an in-process worker/shared-map stamp, not HA wire data; a peer
     /// import re-resolves locally before forwarding.
@@ -64,6 +66,7 @@ impl SyncedSessionEntry {
             key: self.key,
             decision: self.decision,
             metadata: self.metadata,
+            source_nat_static: self.source_nat_static,
             origin: self.origin,
             now_ns,
             protocol: self.protocol,

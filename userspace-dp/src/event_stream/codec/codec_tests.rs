@@ -1243,43 +1243,41 @@ fn test_encode_full_resync() {
 
 #[test]
 fn test_close_flags() {
-    let delta = SessionDelta {
-        provenance: crate::session::ExportProvenance::Incremental,
-        kind: crate::session::SessionDeltaKind::Close,
-        key: test_key_v4(),
-        decision: test_decision(),
-        metadata: SessionMetadata {
-            ingress_zone: TEST_TRUST_ZONE_ID,
-            egress_zone: TEST_UNTRUST_ZONE_ID,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            owner_rg_id: 0,
-            fabric_ingress: true,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-        },
-        policy_generation: 0,
-        origin: crate::session::SessionOrigin::ForwardFlow,
-        fabric_redirect_sync: true,
-        created_ns: 0,
-        last_seen_ns: 0,
-        counters: crate::session::SessionCounters::default(),
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        session_id: 0,
-        bulk_resync: false,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-        purge_retirement: false,
-    };
+    let delta = SessionDelta { provenance: crate::session::ExportProvenance::Incremental,
+    kind: crate::session::SessionDeltaKind::Close,
+    key: test_key_v4(),
+    decision: test_decision(),
+    metadata: SessionMetadata {
+        ingress_zone: TEST_TRUST_ZONE_ID,
+        egress_zone: TEST_UNTRUST_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 0,
+        fabric_ingress: true,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    },
+    policy_generation: 0,
+    origin: crate::session::SessionOrigin::ForwardFlow,
+    fabric_redirect_sync: true,
+    created_ns: 0,
+    last_seen_ns: 0,
+    counters: crate::session::SessionCounters::default(),
+    observed_tos: 0,
+    observed_tcp_flags: 0,
+    session_id: 0,
+    bulk_resync: false,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0,
+    purge_retirement: false, source_nat_static: None };
     let flags = close_flags(&delta);
     assert_eq!(flags & FLAG_FABRIC_REDIRECT, FLAG_FABRIC_REDIRECT);
     assert_eq!(flags & FLAG_FABRIC_INGRESS, FLAG_FABRIC_INGRESS);
@@ -1599,15 +1597,53 @@ fn session_update_carries_tcp_handshake_state_10888() {
         0,
         0,
         3,
+        None,
     );
     let bytes = &frame.data[..frame.len as usize];
     assert_eq!(bytes[4], MSG_SESSION_UPDATE);
     assert_eq!(
-        &bytes[bytes.len() - 3..],
-        &[0, 0, 3],
-        "#10888: a SYN-ACK-first pending Update has an empty rule ID prefix and its handshake stage"
+        &bytes[bytes.len() - 4..],
+        &[0, 0, 3, 0],
+        "#10888 handshake state precedes #12187's unknown provenance byte"
     );
 }
+
+#[test]
+fn session_open_and_update_carry_source_nat_provenance_12187() {
+    let zones = test_zone_map();
+    for (source_nat_static, expected) in [(None, 0), (Some(false), 1), (Some(true), 2)] {
+        let open = EventFrame::encode_session_open_with_handshake_state(
+            9,
+            &test_key_v4(),
+            &test_decision(),
+            &test_metadata(),
+            &zones,
+            false,
+            0,
+            0,
+            3,
+            source_nat_static,
+        );
+        let update = EventFrame::encode_session_update_with_handshake_state(
+            10,
+            &test_key_v4(),
+            &test_decision(),
+            &test_metadata(),
+            &zones,
+            false,
+            0,
+            0,
+            3,
+            source_nat_static,
+        );
+        for frame in [&open, &update] {
+            let bytes = &frame.data[..frame.len as usize];
+            assert_eq!(bytes[bytes.len() - 2], 3);
+            assert_eq!(bytes[bytes.len() - 1], expected);
+        }
+    }
+}
+
 
 /// #9752: open AND update frames carry the installing-table identity as the
 /// trailing pair (domain u32 LE + check u32 LE) after the close class, so a

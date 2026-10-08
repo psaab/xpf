@@ -143,26 +143,24 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
             crate::afxdp::bpf_map::SESSION_PUBLISH_ERRORS_SHARED
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let promoted_entry = SyncedSessionEntry {
-            key: key.clone(),
-            decision,
-            metadata: promoted.clone(),
-            leak_incarnation: sessions.leak_incarnation(key).unwrap_or(0),
-            origin: SessionOrigin::SharedPromote,
-            protocol,
-            tcp_flags,
-            // Local shared-promote: no peer install generation (#2170).
-            generation: 0,
-            // #9582: carry the promoted session's stable id (preserved on the live
-            // entry, #5212), so replicas and shared-map materializations ADOPT it.
-            // With 0 each re-import minted its own id, and a replica could not
-            // announce a close under the id the peer and the #9412 memo know.
-            session_id: sessions.session_id_for(key),
-            // #9412: republish the promoted session with its LIVE close class, so
-            // a worker materializing it from the shared maps keeps the close state.
-            tcp_close_class: sessions.close_class_wire_for(key),
-            tcp_handshake_state: sessions.handshake_state_wire_for(key),
-        };
+        let promoted_entry = SyncedSessionEntry { key: key.clone(),
+        decision,
+        metadata: promoted.clone(),
+        leak_incarnation: sessions.leak_incarnation(key).unwrap_or(0),
+        origin: SessionOrigin::SharedPromote,
+        protocol,
+        tcp_flags,
+        // Local shared-promote: no peer install generation (#2170).
+        generation: 0,
+        // #9582: carry the promoted session's stable id (preserved on the live
+        // entry, #5212), so replicas and shared-map materializations ADOPT it.
+        // With 0 each re-import minted its own id, and a replica could not
+        // announce a close under the id the peer and the #9412 memo know.
+        session_id: sessions.session_id_for(key),
+        // #9412: republish the promoted session with its LIVE close class, so
+        // a worker materializing it from the shared maps keeps the close state.
+        tcp_close_class: sessions.close_class_wire_for(key),
+        tcp_handshake_state: sessions.handshake_state_wire_for(key), source_nat_static: sessions.source_nat_static_for(key) };
         publish_shared_session(
             shared.sessions,
             shared.nat_sessions,

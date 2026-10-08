@@ -214,6 +214,12 @@ struct icmp6hdr {
  * receiver stamps it at install and bulk reconcile deletes a stale row only
  * when it is set, so a genuinely local row is never reconciled away. */
 #define SESS_FLAG_CLUSTER_SYNCED (1 << 9)
+/* #12187: known-provenance marker for the source-NAT origin carried in
+ * `flags`. With the marker set, SESS_FLAG_STATIC_NAT (bit 6) says static
+ * SNAT when set and dynamic SNAT when clear; with the marker clear the
+ * provenance is unknown/legacy and bit 6 is ignored. Mirror any new bit
+ * into the Rust (BpfSessionValue*) and Go (bpfSessionValue*) structs. */
+#define SESS_FLAG_SNAT_PROVENANCE_KNOWN (1 << 10)
 
 /* pkt_meta.meta_flags bits */
 #define META_FLAG_EMBEDDED_ICMP      (1 << 0)

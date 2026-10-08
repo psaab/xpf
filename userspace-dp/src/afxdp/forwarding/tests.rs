@@ -2981,20 +2981,18 @@ fn helper_local_session_on_miss_clears_stale_shared_aliases() {
         policy_counter_idx: 0,
         policy_counter: None,
     };
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: metadata.clone(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: metadata.clone(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
 
     // Install with SyncImport origin so take_synced_local recognizes
     // this as a peer-synced session.

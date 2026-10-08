@@ -2905,24 +2905,22 @@ fn materialize_shared_session_hit(
                 leak_incarnation_for_session(forwarding, replica.decision, target).unwrap_or(0);
         }
         let materialized = sessions.upsert_synced_with_origin(
-            SessionInstall {
-                key: replica.key.clone(),
-                decision: replica.decision,
-                metadata: replica.metadata.clone(),
-                origin: shared.origin.materialized_shared_hit_origin(),
-                now_ns,
-                protocol: replica.protocol,
-                tcp_flags,
-                // #5212: a reactive materialize of a shared-map hit inherits the
-                // shared entry's id — the peer's id for a synced session (so the
-                // eventual close correlates), 0 for a local entry (fresh alloc).
-                session_id: replica.session_id,
-                // #9412: a materialized shared hit keeps the synced close class, so
-                // a closing peer copy is not reset to the established window by the
-                // worker that happens to see its next packet.
-                tcp_close_class: replica.tcp_close_class,
-                tcp_handshake_state: replica.tcp_handshake_state,
-            },
+            SessionInstall { key: replica.key.clone(),
+            decision: replica.decision,
+            metadata: replica.metadata.clone(),
+            origin: shared.origin.materialized_shared_hit_origin(),
+            now_ns,
+            protocol: replica.protocol,
+            tcp_flags,
+            // #5212: a reactive materialize of a shared-map hit inherits the
+            // shared entry's id — the peer's id for a synced session (so the
+            // eventual close correlates), 0 for a local entry (fresh alloc).
+            session_id: replica.session_id,
+            // #9412: a materialized shared hit keeps the synced close class, so
+            // a closing peer copy is not reset to the established window by the
+            // worker that happens to see its next packet.
+            tcp_close_class: replica.tcp_close_class,
+            tcp_handshake_state: replica.tcp_handshake_state, source_nat_static: replica.source_nat_static },
             false,
         );
         // A refused shared repair must not mutate the incumbent local row's
@@ -3073,6 +3071,10 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         // Preserve the shared session incarnation before materialization takes
         // its entry out of `hit`; local-only hits read it from the table below.
         let shared_session_id = hit.shared_entry.as_ref().map(|entry| entry.session_id);
+        let source_nat_static = match hit.shared_entry.as_ref() {
+            Some(entry) => entry.source_nat_static,
+            None => sessions.source_nat_static_for(hit.key.as_ref(&flow.forward_key)),
+        };
         let keep_transient = poison_key.is_some_and(|(key, decision, metadata, origin)| {
             should_keep_synced_hit_transient(ha_state, now_secs, key, decision, metadata, origin)
         });
@@ -3214,6 +3216,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
             key: resolved_key.clone(),
             session_id,
             decision,
+            source_nat_static,
             metadata,
             origin: hit_origin,
             created: false,
@@ -3361,6 +3364,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         key: flow.forward_key.clone(),
         session_id: sessions.session_id_for(&flow.forward_key),
         decision,
+        source_nat_static: None,
         metadata,
         origin: SessionOrigin::ReverseFlow,
         // #1861 §5.4 + AGY r1 F1: `created` reports the ACTUAL install

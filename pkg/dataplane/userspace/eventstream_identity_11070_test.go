@@ -72,6 +72,56 @@ func TestDecodeSessionEventCarriesIngressRuleAndHandshakeState10888(t *testing.T
 	}
 }
 
+func TestDecodeSessionEventSourceNatProvenance12187(t *testing.T) {
+	for _, family := range []struct {
+		name     string
+		wireAF   byte
+		addrSize int
+	}{
+		{name: "v4", wireAF: 4, addrSize: 4},
+		{name: "v6", wireAF: 6, addrSize: 16},
+	} {
+		t.Run(family.name, func(t *testing.T) {
+			baseLen := 32 + 5*family.addrSize + 12
+			handshakeOffset := baseLen + 56
+			for _, tc := range []struct {
+				name          string
+				provenance    byte
+				hasProvenance bool
+				want          uint8
+			}{
+				{name: "legacy missing byte", want: 0},
+				{name: "unknown", provenance: 0, hasProvenance: true, want: 0},
+				{name: "dynamic", provenance: 1, hasProvenance: true, want: 1},
+				{name: "static", provenance: 2, hasProvenance: true, want: 2},
+				{name: "unknown future value", provenance: 255, hasProvenance: true, want: 0},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					payload := make([]byte, baseLen+57)
+					payload[0], payload[1] = family.wireAF, 6
+					// The fixed-width fields before this tail are zero-filled;
+					// a zero-length policy-rule ID still has its two-byte prefix.
+					payload[handshakeOffset] = 4
+					if tc.hasProvenance {
+						payload = append(payload, tc.provenance)
+					}
+
+					delta, ok := decodeSessionEvent(payload)
+					if !ok {
+						t.Fatal("decodeSessionEvent rejected a valid open/update payload")
+					}
+					if delta.TCPHandshakeState != 4 {
+						t.Fatalf("TCPHandshakeState=%d, want 4", delta.TCPHandshakeState)
+					}
+					if delta.SourceNatProvenance != tc.want {
+						t.Fatalf("SourceNatProvenance=%d, want %d", delta.SourceNatProvenance, tc.want)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestDecodeSessionCloseCarriesIngressIdentity11070(t *testing.T) {
 	payload := make([]byte, 42)
 	payload[0] = 4

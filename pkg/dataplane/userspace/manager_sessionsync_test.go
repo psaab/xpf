@@ -322,6 +322,91 @@ func TestBuildSessionSyncRequestCarriesRTFlowSessionID5212(t *testing.T) {
 	}
 }
 
+func TestBuildSessionSyncRequestSourceNatProvenance12187(t *testing.T) {
+	m := &Manager{bpfShim: dataplane.New()}
+	cases := []struct {
+		name       string
+		flags      uint16
+		want       uint8
+		wantInJSON bool
+	}{
+		{
+			name:  "marker clear stays unknown despite static bit",
+			flags: dataplane.SessFlagSNAT | dataplane.SessFlagStaticNAT,
+			want:  dataplane.SourceNatProvenanceUnknown,
+		},
+		{
+			name:       "marker only is dynamic",
+			flags:      dataplane.SessFlagSNAT | dataplane.SessFlagSNATProvenanceKnown,
+			want:       dataplane.SourceNatProvenanceDynamic,
+			wantInJSON: true,
+		},
+		{
+			name:       "marker plus static bit is static",
+			flags:      dataplane.SessFlagSNAT | dataplane.SessFlagSNATProvenanceKnown | dataplane.SessFlagStaticNAT,
+			want:       dataplane.SourceNatProvenanceStatic,
+			wantInJSON: true,
+		},
+	}
+	for _, family := range []string{"v4", "v6"} {
+		t.Run(family, func(t *testing.T) {
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					var req SessionSyncRequest
+					if family == "v4" {
+						req = m.buildSessionSyncRequestV4("upsert", dataplane.SessionKey{Protocol: 6}, &dataplane.SessionValue{
+							Flags: tc.flags, IngressZone: 1, EgressZone: 2,
+						})
+					} else {
+						req = m.buildSessionSyncRequestV6("upsert", dataplane.SessionKeyV6{Protocol: 6}, &dataplane.SessionValueV6{
+							Flags: tc.flags, IngressZone: 1, EgressZone: 2,
+						})
+					}
+					if req.SourceNatProvenance != tc.want {
+						t.Fatalf("request provenance=%d, want %d", req.SourceNatProvenance, tc.want)
+					}
+					wire, err := json.Marshal(req)
+					if err != nil {
+						t.Fatalf("marshal request: %v", err)
+					}
+					var fields map[string]json.RawMessage
+					if err := json.Unmarshal(wire, &fields); err != nil {
+						t.Fatalf("decode request JSON fields: %v", err)
+					}
+					raw, present := fields["source_nat_provenance"]
+					if present != tc.wantInJSON {
+						t.Fatalf("source_nat_provenance presence=%v in %s, want %v", present, wire, tc.wantInJSON)
+					}
+					if present {
+						var got uint8
+						if err := json.Unmarshal(raw, &got); err != nil {
+							t.Fatalf("decode source_nat_provenance %s: %v", raw, err)
+						}
+						if got != tc.want {
+							t.Fatalf("JSON source_nat_provenance=%d, want %d", got, tc.want)
+						}
+					}
+					var roundTrip SessionSyncRequest
+					if err := json.Unmarshal(wire, &roundTrip); err != nil {
+						t.Fatalf("unmarshal session-sync request: %v", err)
+					}
+					if roundTrip.SourceNatProvenance != tc.want {
+						t.Fatalf("round-trip provenance=%d, want %d", roundTrip.SourceNatProvenance, tc.want)
+					}
+				})
+			}
+		})
+	}
+
+	var legacy SessionSyncRequest
+	if err := json.Unmarshal([]byte(`{"operation":"upsert"}`), &legacy); err != nil {
+		t.Fatalf("unmarshal legacy request: %v", err)
+	}
+	if legacy.SourceNatProvenance != dataplane.SourceNatProvenanceUnknown {
+		t.Fatalf("legacy request provenance=%d, want unknown (0)", legacy.SourceNatProvenance)
+	}
+}
+
 func TestBuildSessionSyncRequestV4PreservesBothNatLegs(t *testing.T) {
 	m := &Manager{bpfShim: dataplane.New()}
 	key := dataplane.SessionKey{
