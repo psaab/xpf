@@ -98,7 +98,7 @@ func XFRMIfNameAndID(bindIface string) (string, uint32) {
 //	:73   resolveInterfaceRef          physName = config.LinuxIfName(ref)
 //	:805  buildInterfaceNetworkdModels XFRMIfNameAndID("<ifName>.<unit>")
 //
-// That file calls SecureTunnelUnitNetdev zero times. The migration is 3 of 5
+// That file calls SecureTunnelUnitNetdev zero times. The migration is 4 of 6
 // resolvers, tracked as #6728-#6731, and userspace-dp/src/server/README.md
 // scopes it correctly — this comment is the one that overstated it. Do not
 // restore the absolute here without re-counting the call sites; an unqualified
@@ -145,15 +145,17 @@ func IsSecureTunnelIfName(base string) bool {
 // signal for the caller to fall through to its ordinary resolution. It never
 // returns ok=true with an empty name.
 //
-// Callers: ResolveKernelIfName (types.go), snapshotLinuxName
+// Callers: ResolveKernelIfName (types.go), routingInstanceMemberLinuxName
+// (routing_instance_member_devices.go), snapshotLinuxName
 // (pkg/dataplane/userspace/interfaces.go) and junosHostLinuxName
 // (junos_host_deny.go).
 //
-// #6691: junosHostLinuxName is why this exists as a function rather than three
-// copies. It resolves the iifname scope for the `to-zone junos-host ... deny`
-// nft rules, and it did NOT have the rule. Before #5619 that was harmless —
-// both sides collapsed `st0.0` to `st0` and agreed on a wrong name. Adding the
-// rule to the snapshot alone made them disagree on a RIGHT one: the snapshot
+// #6691: junosHostLinuxName is why this exists as one shared function rather
+// than hand-copied name resolution. It resolves the iifname scope for the
+// `to-zone junos-host ... deny` nft rules, and it did NOT have the rule.
+// Before #5619 that was harmless — both sides collapsed `st0.0` to `st0`
+// and agreed on a wrong name. Adding the rule to the snapshot alone made them
+// disagree on a RIGHT one: the snapshot
 // said `st0.0` (the device the xfrmi reconciler actually creates) while the nft
 // renderer still emitted `iifname st0`, so with `bind-interface st0.0` a
 // junos-host deny was scoped to a netdev that does not exist and the decrypted
