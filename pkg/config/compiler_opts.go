@@ -399,6 +399,13 @@ type compileOpts struct {
 	// tunnel) is rejected. Same doctrine as lenientDeviceMap /
 	// lenientPolicyMatchAddress.
 	lenientIPsecGatewayRefs bool
+	// lenientIPsecGatewayVRF12089 downgrades unsupported IPsec gateway
+	// external-interface routing-instance scope from a strict commit
+	// error to a warning on tolerant load / peer-sync paths. strongSwan's IKE
+	// socket and the parentless xfrmi are not scoped to that instance, so
+	// their outer traffic can use the wrong routing table. Existing configs
+	// still boot with a warning per the #1960 fail-closed-on-load doctrine.
+	lenientIPsecGatewayVRF12089 bool
 
 	// lenientIKEPolicyChainRef (#2270, #10879) downgrades IKE policy
 	// reference and multi-proposal connection-setting consistency checks from
@@ -3118,6 +3125,7 @@ func lenientCompileOpts() compileOpts {
 		lenientCoSForwardingClassQueue:         true,
 		lenientCoSFairnessRSSExpectation:       true,
 		lenientIPsecGatewayRefs:                true,
+		lenientIPsecGatewayVRF12089:            true,
 		lenientIKEPolicyChainRef:               true,
 		lenientIPsecEndpoints:                  true,
 		lenientIPsecSANameCollision:            true,
