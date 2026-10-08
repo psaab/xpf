@@ -3343,11 +3343,9 @@ fn apply_snapshot_rejects_oversize_collector_port_1977() {
 // (serde default). Wire parity with the Go SessionSyncRequest.Generation field.
 #[test]
 fn session_sync_request_generation_roundtrip_2170() {
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        generation: 0x1122_3344_5566_7788,
-        ..Default::default()
-    };
+    let req = SessionSyncRequest { operation: "upsert".to_string(),
+    generation: 0x1122_3344_5566_7788,
+    ..Default::default() };
     let json = serde_json::to_string(&req).expect("serialize SessionSyncRequest");
     let back: SessionSyncRequest =
         serde_json::from_str(&json).expect("deserialize SessionSyncRequest");
@@ -3366,12 +3364,10 @@ fn session_sync_request_generation_roundtrip_2170() {
 // so an old peer falls back to no per-policy log (pre-#2785 behavior).
 #[test]
 fn session_sync_request_log_flags_roundtrip_2785() {
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        log_session_init: true,
-        log_session_close: true,
-        ..Default::default()
-    };
+    let req = SessionSyncRequest { operation: "upsert".to_string(),
+    log_session_init: true,
+    log_session_close: true,
+    ..Default::default() };
     let json = serde_json::to_string(&req).expect("serialize SessionSyncRequest");
     let back: SessionSyncRequest =
         serde_json::from_str(&json).expect("deserialize SessionSyncRequest");
@@ -3394,13 +3390,11 @@ fn session_sync_request_log_flags_roundtrip_2785() {
 // global timeout (pre-#3301 behavior, rolling-upgrade safe).
 #[test]
 fn session_sync_request_policy_fields_roundtrip_3301() {
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        policy_id: 42,
-        policy_counter_idx: 7,
-        inactivity_timeout: 30,
-        ..Default::default()
-    };
+    let req = SessionSyncRequest { operation: "upsert".to_string(),
+    policy_id: 42,
+    policy_counter_idx: 7,
+    inactivity_timeout: 30,
+    ..Default::default() };
     let json = serde_json::to_string(&req).expect("serialize SessionSyncRequest");
     // Wire keys must match the Go SessionSyncRequest json tags exactly.
     assert!(json.contains("\"policy_id\":42"), "policy_id wire key/value");

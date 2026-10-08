@@ -81,3 +81,50 @@ func TestPartialInstallTableTailDoesNotBecomeOriginFlags10227(t *testing.T) {
 		t.Fatalf("partial v6 decoded flags=%#x, want origin clear", got6.Flags)
 	}
 }
+
+func TestSourceNatProvenanceFlagsCrossSessionWire12187(t *testing.T) {
+	cases := []struct {
+		name  string
+		flags uint16
+		want  uint8
+	}{
+		{
+			name:  "legacy static bit without marker is unknown",
+			flags: dataplane.SessFlagSNAT | dataplane.SessFlagStaticNAT,
+			want:  dataplane.SourceNatProvenanceUnknown,
+		},
+		{
+			name:  "known dynamic marker",
+			flags: dataplane.SessFlagSNAT | dataplane.SessFlagSNATProvenanceKnown,
+			want:  dataplane.SourceNatProvenanceDynamic,
+		},
+		{
+			name: "known static marker",
+			flags: dataplane.SessFlagSNAT |
+				dataplane.SessFlagSNATProvenanceKnown |
+				dataplane.SessFlagStaticNAT,
+			want: dataplane.SourceNatProvenanceStatic,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			key4 := dataplane.SessionKey{Protocol: 6, SrcPort: 1000, DstPort: 80}
+			_, val4, ok := decodeSessionV4Payload(encodeSessionV4Payload(key4, dataplane.SessionValue{Flags: tc.flags}))
+			if !ok {
+				t.Fatal("v4 session wire did not decode")
+			}
+			if got := dataplane.SourceNatProvenanceFromFlags(val4.Flags); got != tc.want {
+				t.Fatalf("v4 decoded provenance=%d, want %d (flags=%#x)", got, tc.want, val4.Flags)
+			}
+
+			key6 := dataplane.SessionKeyV6{Protocol: 6, SrcPort: 1000, DstPort: 80}
+			_, val6, ok := decodeSessionV6Payload(encodeSessionV6Payload(key6, dataplane.SessionValueV6{Flags: tc.flags}))
+			if !ok {
+				t.Fatal("v6 session wire did not decode")
+			}
+			if got := dataplane.SourceNatProvenanceFromFlags(val6.Flags); got != tc.want {
+				t.Fatalf("v6 decoded provenance=%d, want %d (flags=%#x)", got, tc.want, val6.Flags)
+			}
+		})
+	}
+}

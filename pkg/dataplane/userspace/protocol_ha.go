@@ -129,6 +129,9 @@ type SessionSyncRequest struct {
 	SourceNatICMPValid bool  `json:"source_nat_icmp_valid,omitempty"`
 	SourceNatICMPType  uint8 `json:"source_nat_icmp_type,omitempty"`
 	SourceNatICMPCode  uint8 `json:"source_nat_icmp_code,omitempty"`
+	// SourceNatProvenance carries the source-NAT allocation provenance (#12187):
+	// 0 unknown/legacy (omitted), 1 dynamic SNAT, 2 static SNAT.
+	SourceNatProvenance uint8 `json:"source_nat_provenance,omitempty"`
 	FabricIngress      bool  `json:"fabric_ingress,omitempty"`
 	IsReverse          bool  `json:"is_reverse,omitempty"`
 	// #2785: the admitting policy's per-policy `then log` selection, carried
@@ -345,6 +348,10 @@ type SessionDeltaInfo struct {
 	SourceNatICMPValid bool  `json:"source_nat_icmp_valid,omitempty"`
 	SourceNatICMPType  uint8 `json:"source_nat_icmp_type,omitempty"`
 	SourceNatICMPCode  uint8 `json:"source_nat_icmp_code,omitempty"`
+	// SourceNatProvenance is the Rust numeric source-NAT provenance
+	// (0 unknown/legacy, 1 dynamic SNAT, 2 static SNAT), mirrored on both
+	// delta transports. Missing/zero from an older helper remains unknown.
+	SourceNatProvenance uint8 `json:"source_nat_provenance,omitempty"`
 	FabricRedirect     bool  `json:"fabric_redirect,omitempty"`
 	FabricIngress      bool  `json:"fabric_ingress,omitempty"`
 	// #2785: the admitting policy's per-policy `then log` selection. Decoded

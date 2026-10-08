@@ -7,7 +7,7 @@
 use crate::afxdp::ForwardingDisposition;
 use crate::session::{
     SessionDecision, SessionDelta, SessionKey, SessionMetadata, SessionSyncAttribution,
-    nat64_snat_v4_octets,
+    nat64_snat_v4_octets, source_nat_provenance_to_wire,
 };
 use rustc_hash::FxHashMap;
 
@@ -36,6 +36,7 @@ impl EventFrame {
             session_id,
             tcp_close_class,
             0,
+            None,
         )
     }
 
@@ -50,6 +51,7 @@ impl EventFrame {
         session_id: u64,
         tcp_close_class: u8,
         tcp_handshake_state: u8,
+        source_nat_static: Option<bool>,
     ) -> Self {
         Self::encode_session_record(
             MSG_SESSION_OPEN,
@@ -62,6 +64,7 @@ impl EventFrame {
             session_id,
             tcp_close_class,
             tcp_handshake_state,
+            source_nat_static,
         )
     }
 
@@ -87,6 +90,7 @@ impl EventFrame {
             session_id,
             tcp_close_class,
             0,
+            None,
         )
     }
 
@@ -101,6 +105,7 @@ impl EventFrame {
         session_id: u64,
         tcp_close_class: u8,
         tcp_handshake_state: u8,
+        source_nat_static: Option<bool>,
     ) -> Self {
         Self::encode_session_record(
             MSG_SESSION_UPDATE,
@@ -113,6 +118,7 @@ impl EventFrame {
             session_id,
             tcp_close_class,
             tcp_handshake_state,
+            source_nat_static,
         )
     }
 
@@ -129,6 +135,7 @@ impl EventFrame {
         session_id: u64,
         tcp_close_class: u8,
         tcp_handshake_state: u8,
+        source_nat_static: Option<bool>,
     ) -> Self {
         let mut buf = [0u8; EVENT_FRAME_CAPACITY];
         let mut pos = FRAME_HEADER_SIZE; // skip header, fill later
@@ -399,7 +406,7 @@ impl EventFrame {
         // stable position even when no rule identity is carried.
         let rule_id = policy_rule_id.as_bytes();
         let rule_id_len = if rule_id.len() <= u16::MAX as usize
-            && pos + 2 + rule_id.len() + 1 <= buf.len()
+            && pos + 2 + rule_id.len() + 2 <= buf.len()
         {
             rule_id.len()
         } else {
@@ -411,9 +418,11 @@ impl EventFrame {
             buf[pos..pos + rule_id_len].copy_from_slice(&rule_id[..rule_id_len]);
             pos += rule_id_len;
         }
-        // #10888: current TCP handshake state follows the variable rule id;
-        // zero retains legacy import semantics for old producers.
         buf[pos] = tcp_handshake_state;
+        pos += 1;
+        // #12187: a final byte carries ordinary SNAT provenance: 0 unknown,
+        // 1 dynamic, 2 static. The absent-byte legacy default is unknown.
+        buf[pos] = source_nat_provenance_to_wire(source_nat_static);
         pos += 1;
 
         // Write header

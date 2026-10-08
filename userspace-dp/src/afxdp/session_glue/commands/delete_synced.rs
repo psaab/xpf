@@ -171,19 +171,17 @@ pub(in crate::afxdp::session_glue) fn handle_probe_policy_tuples(
         }
         hits.push((
             index,
-            SyncedSessionEntry {
-                key: key.clone(),
-                decision,
-                metadata: metadata.clone(),
-                leak_incarnation: 0,
-                origin,
-                protocol: key.protocol,
-                tcp_flags: 0,
-                generation: 0,
-                session_id: sessions.session_id_for(key),
-                tcp_close_class: 0,
-                tcp_handshake_state: 0,
-            },
+            SyncedSessionEntry { key: key.clone(),
+            decision,
+            metadata: metadata.clone(),
+            leak_incarnation: 0,
+            origin,
+            protocol: key.protocol,
+            tcp_flags: 0,
+            generation: 0,
+            session_id: sessions.session_id_for(key),
+            tcp_close_class: 0,
+            tcp_handshake_state: 0, source_nat_static: None },
         ));
     });
     if !hits.is_empty() {

@@ -284,6 +284,8 @@ pub(crate) fn build_synced_session_entry(
     zone_name_to_id: &rustc_hash::FxHashMap<String, u16>,
     routing_domain: u32,
 ) -> Result<SyncedSessionEntry, String> {
+    let source_nat_static =
+        crate::session::source_nat_static_from_provenance(req.source_nat_provenance)?;
     let key = build_synced_session_key(req, routing_domain, SyncedKeyIntent::Install)?;
     let next_hop = if req.next_hop.is_empty() {
         None
@@ -364,200 +366,198 @@ pub(crate) fn build_synced_session_entry(
         ),
         None => (false, nat_src, nat_dst, None),
     };
-    Ok(SyncedSessionEntry {
-        protocol: req.protocol,
-        tcp_flags: 0,
-        // #9412: the owning node's close class. Applied on install, where the
-        // copy gets its close bits and its close window.
-        tcp_close_class: req.tcp_close_class,
-        tcp_handshake_state: req.tcp_handshake_state,
-        key,
-        decision: crate::session::SessionDecision {
-            resolution: afxdp::ForwardingResolution {
-                disposition: if req.egress_ifindex > 0
-                    || req.tx_ifindex > 0
-                    || req.tunnel_endpoint_id != 0
-                {
-                    afxdp::ForwardingDisposition::ForwardCandidate
-                } else {
-                    afxdp::ForwardingDisposition::NoRoute
-                },
-                local_ifindex: 0,
-                egress_ifindex: req.egress_ifindex,
-                tx_ifindex,
-                tunnel_endpoint_id: req.tunnel_endpoint_id,
-                next_hop,
-                neighbor_mac,
-                src_mac,
-                tx_vlan_id: req.tx_vlan_id,
-                route_mtu: 0,
-                transport_route_mtu: 0,
-            },
-            nat: crate::nat::NatDecision {
-                rewrite_src,
-                rewrite_dst,
-                rewrite_src_port: nat_src_port,
-                rewrite_dst_port: nat_dst_port,
-                source_nat_icmp: (!req.is_reverse && req.source_nat_icmp_valid)
-                    .then_some((req.source_nat_icmp_type, req.source_nat_icmp_code)),
-                // #4565: set the NAT64 cross-family bit for a promoted NAT64
-                // session so tx dispatch reverse-translates and the reverse key
-                // derives its v4 address family. `nptv6` stays default (false).
-                nat64: nat64_flag,
-                ..crate::nat::NatDecision::default()
-            },
-            // #9752: adopt the origin's installing-table identity verbatim so
-            // re-resolve runs where the flow was installed. An old peer omits
-            // both fields (`serde(default)` 0 = default table), the pre-#9752
-            // behavior (rolling-upgrade safe).
-            // Round 5 item 10: reverse imports normalize to (0,0) at the
-            // trust boundary (companions resolve unstamped, R1).
-            // Defense-in-depth: unreachable today since Go never sends
-            // stamped reverses — but a stamped reverse would re-resolve a
-            // reply in a table chosen for the forward direction.
-            install_table_domain: if req.is_reverse {
-                0
+    Ok(SyncedSessionEntry { protocol: req.protocol,
+    tcp_flags: 0,
+    // #9412: the owning node's close class. Applied on install, where the
+    // copy gets its close bits and its close window.
+    tcp_close_class: req.tcp_close_class,
+    tcp_handshake_state: req.tcp_handshake_state,
+    key,
+    decision: crate::session::SessionDecision {
+        resolution: afxdp::ForwardingResolution {
+            disposition: if req.egress_ifindex > 0
+                || req.tx_ifindex > 0
+                || req.tunnel_endpoint_id != 0
+            {
+                afxdp::ForwardingDisposition::ForwardCandidate
             } else {
-                req.install_table_domain
+                afxdp::ForwardingDisposition::NoRoute
             },
-            install_table_check: if req.is_reverse {
-                0
-            } else {
-                req.install_table_check
-            },
+            local_ifindex: 0,
+            egress_ifindex: req.egress_ifindex,
+            tx_ifindex,
+            tunnel_endpoint_id: req.tunnel_endpoint_id,
+            next_hop,
+            neighbor_mac,
+            src_mac,
+            tx_vlan_id: req.tx_vlan_id,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
-        metadata: crate::session::SessionMetadata {
-            // #4983/#7095: a peer-imported session now carries an ingress
-            // identity again -- but a LOCALLY RESOLVED one.
-            //
-            // #6928 imported 0 here on purpose: an ifindex is NODE-LOCAL, so
-            // node 0's `ge-0-0-1` and node 1's `ge-7-0-1` are different numbers
-            // for one logical RETH member, and shipping the originating node's
-            // value would name a different NIC here -- confidently wrong, which
-            // is worse than the zone approximation.
-            //
-            // #7095 does not ship the ifindex. The sender ships a FOLD of the
-            // reth-relative name (`reth0.50`), which both chassis agree on by
-            // construction, and the Go side resolves that fold against THIS
-            // node's config and ifindex table before building this request. So
-            // these are this node's own numbers for the interface the peer
-            // named, and storing them is safe.
-            //
-            // Zero still arrives and still means unknown: a legacy peer sends
-            // no wire field, a session whose interface has no cluster-stable
-            // name folds to 0, and a fabric-redirected session records no
-            // identity at all (#7096, because the fabric stamp carries a u16
-            // zone id and nothing else). All three keep the pre-#7095
-            // behaviour -- the Go consumer falls back to the zone
-            // approximation.
-            //
-            // Note this install is `is_reverse: req.is_reverse`, so a FORWARD
-            // peer session lands here too -- see the scope note in
-            // pkg/dataplane/types.go.
-            ingress_ifindex: if req.ingress_ifindex > 0 {
-                req.ingress_ifindex as u32
+        nat: crate::nat::NatDecision {
+            rewrite_src,
+            rewrite_dst,
+            rewrite_src_port: nat_src_port,
+            rewrite_dst_port: nat_dst_port,
+            source_nat_icmp: (!req.is_reverse && req.source_nat_icmp_valid)
+                .then_some((req.source_nat_icmp_type, req.source_nat_icmp_code)),
+            // #4565: set the NAT64 cross-family bit for a promoted NAT64
+            // session so tx dispatch reverse-translates and the reverse key
+            // derives its v4 address family. `nptv6` stays default (false).
+            nat64: nat64_flag,
+            ..crate::nat::NatDecision::default()
+        },
+        // #9752: adopt the origin's installing-table identity verbatim so
+        // re-resolve runs where the flow was installed. An old peer omits
+        // both fields (`serde(default)` 0 = default table), the pre-#9752
+        // behavior (rolling-upgrade safe).
+        // Round 5 item 10: reverse imports normalize to (0,0) at the
+        // trust boundary (companions resolve unstamped, R1).
+        // Defense-in-depth: unreachable today since Go never sends
+        // stamped reverses — but a stamped reverse would re-resolve a
+        // reply in a table chosen for the forward direction.
+        install_table_domain: if req.is_reverse {
+            0
+        } else {
+            req.install_table_domain
+        },
+        install_table_check: if req.is_reverse {
+            0
+        } else {
+            req.install_table_check
+        },
+    },
+    metadata: crate::session::SessionMetadata {
+        // #4983/#7095: a peer-imported session now carries an ingress
+        // identity again -- but a LOCALLY RESOLVED one.
+        //
+        // #6928 imported 0 here on purpose: an ifindex is NODE-LOCAL, so
+        // node 0's `ge-0-0-1` and node 1's `ge-7-0-1` are different numbers
+        // for one logical RETH member, and shipping the originating node's
+        // value would name a different NIC here -- confidently wrong, which
+        // is worse than the zone approximation.
+        //
+        // #7095 does not ship the ifindex. The sender ships a FOLD of the
+        // reth-relative name (`reth0.50`), which both chassis agree on by
+        // construction, and the Go side resolves that fold against THIS
+        // node's config and ifindex table before building this request. So
+        // these are this node's own numbers for the interface the peer
+        // named, and storing them is safe.
+        //
+        // Zero still arrives and still means unknown: a legacy peer sends
+        // no wire field, a session whose interface has no cluster-stable
+        // name folds to 0, and a fabric-redirected session records no
+        // identity at all (#7096, because the fabric stamp carries a u16
+        // zone id and nothing else). All three keep the pre-#7095
+        // behaviour -- the Go consumer falls back to the zone
+        // approximation.
+        //
+        // Note this install is `is_reverse: req.is_reverse`, so a FORWARD
+        // peer session lands here too -- see the scope note in
+        // pkg/dataplane/types.go.
+        ingress_ifindex: if req.ingress_ifindex > 0 {
+            req.ingress_ifindex as u32
+        } else {
+            0
+        },
+        ingress_vlan_id: req.ingress_vlan_id,
+        // #919: prefer the wire u16 IDs when populated; fall back
+        // to name lookup for older peers that only sent strings.
+        ingress_zone: if req.ingress_zone_id != 0 {
+            req.ingress_zone_id
+        } else {
+            zone_name_to_id
+                .get(req.ingress_zone.as_str())
+                .copied()
+                .unwrap_or(0)
+        },
+        egress_zone: if req.egress_zone_id != 0 {
+            req.egress_zone_id
+        } else {
+            zone_name_to_id
+                .get(req.egress_zone.as_str())
+                .copied()
+                .unwrap_or(0)
+        },
+        // #10620: stamp the vintage from the WIRE names (the origin's
+        // generation), not the local map: stamping from the local map
+        // would launder a stale peer row with the current generation.
+        // Empty name (id-only peer) stamps 0 = unknown, failing open
+        // to the #10612 stateless arms on that leg.
+        ingress_zone_check: if req.ingress_zone.is_empty() {
+            0
+        } else {
+            crate::session::zone_identity_check(&req.ingress_zone)
+        },
+        egress_zone_check: if req.egress_zone.is_empty() {
+            0
+        } else {
+            crate::session::zone_identity_check(&req.egress_zone)
+        },
+        owner_rg_id: req.owner_rg_id,
+        fabric_ingress: req.fabric_ingress,
+        is_reverse: req.is_reverse,
+        // #4565: the original v6 src/dst for the reverse (v4->v6) translation
+        // of a peer-PROMOTED NAT64 session (Some only when nat64_snat_v4 was
+        // carried). The synthesized reverse companion inherits this via
+        // build_reverse_session_from_forward_match.
+        nat64_reverse,
+        // #2785: the per-policy `then log` selection is now carried on
+        // the HA session-sync wire (open-frame flags bits 1<<3/1<<4 ->
+        // SessionSyncRequest.log_session_{init,close}). A synced session
+        // therefore emits the same RT_FLOW SESSION_CREATE/CLOSE records
+        // after failover as the node that locally admitted it. An old
+        // peer that omits the fields decodes to false (no per-policy
+        // log), bit-identical to pre-#2785 behavior.
+        log_session_init: req.log_session_init,
+        log_session_close: req.log_session_close,
+        // #3301: the admitting policy ID now rides the cross-node HA
+        // session-sync wire (SessionSyncRequest.policy_id). A peer-PROMOTED
+        // session's live-session row / RT_FLOW records resolve the
+        // admitting policy that #3056 stamps in-process, instead of the `0`
+        // sentinel (which the Go side renders as the FIRST configured
+        // policy — a wrong attribution). An old peer omits the field =>
+        // serde(default) 0, the legitimate "unattributed" value,
+        // bit-identical to pre-#3301 (rolling-upgrade safe).
+        policy_id: req.policy_id,
+        // #3301: the per-application idle timeout now rides the wire in
+        // SECONDS (SessionSyncRequest.inactivity_timeout). Convert to ns via
+        // the shared helper (0 => None => use the global per-protocol
+        // timeout, the pre-#3301 behavior). A short-timeout app session
+        // therefore ages out on the app's value after failover without a
+        // real-traffic refresh (#3227).
+        inactivity_timeout_ns: crate::session::app_inactivity_timeout_ns(
+            if req.inactivity_timeout != 0 {
+                Some(req.inactivity_timeout)
             } else {
-                0
-            },
-            ingress_vlan_id: req.ingress_vlan_id,
-            // #919: prefer the wire u16 IDs when populated; fall back
-            // to name lookup for older peers that only sent strings.
-            ingress_zone: if req.ingress_zone_id != 0 {
-                req.ingress_zone_id
-            } else {
-                zone_name_to_id
-                    .get(req.ingress_zone.as_str())
-                    .copied()
-                    .unwrap_or(0)
-            },
-            egress_zone: if req.egress_zone_id != 0 {
-                req.egress_zone_id
-            } else {
-                zone_name_to_id
-                    .get(req.egress_zone.as_str())
-                    .copied()
-                    .unwrap_or(0)
-            },
-            // #10620: stamp the vintage from the WIRE names (the origin's
-            // generation), not the local map: stamping from the local map
-            // would launder a stale peer row with the current generation.
-            // Empty name (id-only peer) stamps 0 = unknown, failing open
-            // to the #10612 stateless arms on that leg.
-            ingress_zone_check: if req.ingress_zone.is_empty() {
-                0
-            } else {
-                crate::session::zone_identity_check(&req.ingress_zone)
-            },
-            egress_zone_check: if req.egress_zone.is_empty() {
-                0
-            } else {
-                crate::session::zone_identity_check(&req.egress_zone)
-            },
-            owner_rg_id: req.owner_rg_id,
-            fabric_ingress: req.fabric_ingress,
-            is_reverse: req.is_reverse,
-            // #4565: the original v6 src/dst for the reverse (v4->v6) translation
-            // of a peer-PROMOTED NAT64 session (Some only when nat64_snat_v4 was
-            // carried). The synthesized reverse companion inherits this via
-            // build_reverse_session_from_forward_match.
-            nat64_reverse,
-            // #2785: the per-policy `then log` selection is now carried on
-            // the HA session-sync wire (open-frame flags bits 1<<3/1<<4 ->
-            // SessionSyncRequest.log_session_{init,close}). A synced session
-            // therefore emits the same RT_FLOW SESSION_CREATE/CLOSE records
-            // after failover as the node that locally admitted it. An old
-            // peer that omits the fields decodes to false (no per-policy
-            // log), bit-identical to pre-#2785 behavior.
-            log_session_init: req.log_session_init,
-            log_session_close: req.log_session_close,
-            // #3301: the admitting policy ID now rides the cross-node HA
-            // session-sync wire (SessionSyncRequest.policy_id). A peer-PROMOTED
-            // session's live-session row / RT_FLOW records resolve the
-            // admitting policy that #3056 stamps in-process, instead of the `0`
-            // sentinel (which the Go side renders as the FIRST configured
-            // policy — a wrong attribution). An old peer omits the field =>
-            // serde(default) 0, the legitimate "unattributed" value,
-            // bit-identical to pre-#3301 (rolling-upgrade safe).
-            policy_id: req.policy_id,
-            // #3301: the per-application idle timeout now rides the wire in
-            // SECONDS (SessionSyncRequest.inactivity_timeout). Convert to ns via
-            // the shared helper (0 => None => use the global per-protocol
-            // timeout, the pre-#3301 behavior). A short-timeout app session
-            // therefore ages out on the app's value after failover without a
-            // real-traffic refresh (#3227).
-            inactivity_timeout_ns: crate::session::app_inactivity_timeout_ns(
-                if req.inactivity_timeout != 0 {
-                    Some(req.inactivity_timeout)
-                } else {
-                    None
-                },
-            ),
-            // #11070: preserve the sender's stable rule identity in a
-            // placeholder counter; import binds it to the CURRENT snapshot.
-            // A missing ID is deliberately not allowed to fall back to the
-            // sender's positional counter index.
-            policy_counter_idx: req.policy_counter_idx,
-            policy_counter: if req.policy_rule_id.is_empty() {
                 None
-            } else {
-                Some(std::sync::Arc::new(
-                    crate::policy::PolicyRuleCounter::with_rule_id(&req.policy_rule_id),
-                ))
             },
+        ),
+        // #11070: preserve the sender's stable rule identity in a
+        // placeholder counter; import binds it to the CURRENT snapshot.
+        // A missing ID is deliberately not allowed to fall back to the
+        // sender's positional counter index.
+        policy_counter_idx: req.policy_counter_idx,
+        policy_counter: if req.policy_rule_id.is_empty() {
+            None
+        } else {
+            Some(std::sync::Arc::new(
+                crate::policy::PolicyRuleCounter::with_rule_id(&req.policy_rule_id),
+            ))
         },
-        leak_incarnation: 0,
-        origin: crate::session::SessionOrigin::SyncImport,
-        // #2170: carry the peer's install generation onto the helper entry.
-        generation: req.generation,
-        // #5212: carry the ORIGINATING node's stable RT_FLOW session id off the
-        // wire so this peer-synced session ADOPTS the peer's id instead of
-        // minting a fresh node-local one on import (`upsert_synced_with_origin`).
-        // A session that opens on the primary and closes here after a failover
-        // therefore emits SESSION_CREATE/CLOSE RT_FLOW records under ONE id
-        // across both nodes. An old peer omits the field => serde(default) 0,
-        // which falls back to `alloc_session_id()` (rolling-upgrade safe).
-        session_id: req.session_id,
-    })
+    },
+    leak_incarnation: 0,
+    origin: crate::session::SessionOrigin::SyncImport,
+    // #2170: carry the peer's install generation onto the helper entry.
+    generation: req.generation,
+    // #5212: carry the ORIGINATING node's stable RT_FLOW session id off the
+    // wire so this peer-synced session ADOPTS the peer's id instead of
+    // minting a fresh node-local one on import (`upsert_synced_with_origin`).
+    // A session that opens on the primary and closes here after a failover
+    // therefore emits SESSION_CREATE/CLOSE RT_FLOW records under ONE id
+    // across both nodes. An old peer omits the field => serde(default) 0,
+    // which falls back to `alloc_session_id()` (rolling-upgrade safe).
+    session_id: req.session_id, source_nat_static })
 }
 
 pub(crate) fn parse_session_sync_mac(value: &str) -> Result<Option<[u8; 6]>, String> {

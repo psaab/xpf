@@ -490,58 +490,56 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
 
-    let entry = SyncedSessionEntry {
-        key: SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol: PROTO_TCP,
-            src_ip: IpAddr::V4(client_ip),
-            dst_ip: IpAddr::V4(server_ip),
-            src_port: client_port,
-            dst_port: 80,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
-        },
-        decision: SessionDecision { resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 12,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
-            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-            tx_vlan_id: 80,
-            route_mtu: 0,
-            transport_route_mtu: 0,
-        }, nat: NatDecision { rewrite_src: Some(IpAddr::V4(snat_ip)), rewrite_dst: None, rewrite_src_port: Some(snat_port), rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: false }, install_table_domain: 0, install_table_check: 0 },
-        metadata: SessionMetadata {
-            ingress_zone: TEST_LAN_ZONE_ID,
-            egress_zone: TEST_WAN_ZONE_ID,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            owner_rg_id: 0,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-        },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
+    let entry = SyncedSessionEntry { key: SessionKey {
+        addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+        src_ip: IpAddr::V4(client_ip),
+        dst_ip: IpAddr::V4(server_ip),
+        src_port: client_port,
+        dst_port: 80,
+                discriminator: Default::default(),
+                routing_domain: 0,
+    },
+    decision: SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 12,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+        neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+        tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    }, nat: NatDecision { rewrite_src: Some(IpAddr::V4(snat_ip)), rewrite_dst: None, rewrite_src_port: Some(snat_port), rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: false }, install_table_domain: 0, install_table_check: 0 },
+    metadata: SessionMetadata {
+        ingress_zone: TEST_LAN_ZONE_ID,
+        egress_zone: TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     publish_shared_session(
@@ -5094,20 +5092,18 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
         PROTO_TCP,
         TCP_FLAG_SYN,
     ));
-    let shared_entry = SyncedSessionEntry {
-        key: flow_key.clone(),
-        decision: local_decision,
-        metadata: local_metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::LocalMiss,
-        protocol: PROTO_TCP,
-        tcp_flags: TCP_FLAG_SYN,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let shared_entry = SyncedSessionEntry { key: flow_key.clone(),
+    decision: local_decision,
+    metadata: local_metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::LocalMiss,
+    protocol: PROTO_TCP,
+    tcp_flags: TCP_FLAG_SYN,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     publish_shared_session(
         &shared_sessions,
         &shared_nat_sessions,
@@ -6630,72 +6626,70 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
 
-    let entry = SyncedSessionEntry {
-        key: SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol: PROTO_GRE,
-            src_ip: IpAddr::V4(client_ip),
-            dst_ip: IpAddr::V4(server_ip),
-            src_port: 0,
-            dst_port: 0,
-            // The live session carries the tunnel's real identity. Before
-            // #9031 the embedded lookup key hard-coded None, and SessionKey's
-            // Eq includes this field, so the probe could never equal this.
-            discriminator: TunnelDiscriminator::Keyed(gre_key as u32),
-            routing_domain: 0,
-        },
-        decision: SessionDecision { resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 12,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
-            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-            tx_vlan_id: 80,
-            route_mtu: 0,
-            transport_route_mtu: 0,
-        }, nat: NatDecision {
-            // ADDRESS-ONLY source NAT: `match_rules.rs` routes a protocol
-            // with no L4 ports to `reserve_address_only`, which is how GRE
-            // genuinely reaches same-family SNAT and is what makes this
-            // reachable at all.
-            rewrite_src: Some(IpAddr::V4(snat_ip)),
-            rewrite_dst: None,
-            rewrite_src_port: None,
-            rewrite_dst_port: None,
-            source_nat_icmp: None,
-            nat64: false,
-            nptv6: false,
-        }, install_table_domain: 0, install_table_check: 0 },
-        metadata: SessionMetadata {
-            ingress_zone: TEST_LAN_ZONE_ID,
-            egress_zone: TEST_WAN_ZONE_ID,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            owner_rg_id: 0,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-        },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
+    let entry = SyncedSessionEntry { key: SessionKey {
+        addr_family: libc::AF_INET as u8,
         protocol: PROTO_GRE,
-        tcp_flags: 0,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+        src_ip: IpAddr::V4(client_ip),
+        dst_ip: IpAddr::V4(server_ip),
+        src_port: 0,
+        dst_port: 0,
+        // The live session carries the tunnel's real identity. Before
+        // #9031 the embedded lookup key hard-coded None, and SessionKey's
+        // Eq includes this field, so the probe could never equal this.
+        discriminator: TunnelDiscriminator::Keyed(gre_key as u32),
+        routing_domain: 0,
+    },
+    decision: SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 12,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+        neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+        tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    }, nat: NatDecision {
+        // ADDRESS-ONLY source NAT: `match_rules.rs` routes a protocol
+        // with no L4 ports to `reserve_address_only`, which is how GRE
+        // genuinely reaches same-family SNAT and is what makes this
+        // reachable at all.
+        rewrite_src: Some(IpAddr::V4(snat_ip)),
+        rewrite_dst: None,
+        rewrite_src_port: None,
+        rewrite_dst_port: None,
+        source_nat_icmp: None,
+        nat64: false,
+        nptv6: false,
+    }, install_table_domain: 0, install_table_check: 0 },
+    metadata: SessionMetadata {
+        ingress_zone: TEST_LAN_ZONE_ID,
+        egress_zone: TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_GRE,
+    tcp_flags: 0,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     publish_shared_session(
@@ -6783,57 +6777,55 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
 
-    let mut entry = SyncedSessionEntry {
-        key: SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol: PROTO_GRE,
-            src_ip: IpAddr::V4(client_ip),
-            dst_ip: IpAddr::V4(server_ip),
-            src_port: 0,
-            dst_port: 0,
-            discriminator: TunnelDiscriminator::Keyed(session_key_value as u32),
-            routing_domain: 0,
-        },
-        decision: SessionDecision { resolution: ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 12,
-            tunnel_endpoint_id: 0,
-            next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
-            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-            tx_vlan_id: 80,
-            route_mtu: 0,
-            transport_route_mtu: 0,
-        }, nat: NatDecision { rewrite_src: Some(IpAddr::V4(snat_ip)), rewrite_dst: None, rewrite_src_port: None, rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: false }, install_table_domain: 0, install_table_check: 0 },
-        metadata: SessionMetadata {
-            ingress_zone: TEST_LAN_ZONE_ID,
-            egress_zone: TEST_WAN_ZONE_ID,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            owner_rg_id: 0,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-        },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
+    let mut entry = SyncedSessionEntry { key: SessionKey {
+        addr_family: libc::AF_INET as u8,
         protocol: PROTO_GRE,
-        tcp_flags: 0,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+        src_ip: IpAddr::V4(client_ip),
+        dst_ip: IpAddr::V4(server_ip),
+        src_port: 0,
+        dst_port: 0,
+        discriminator: TunnelDiscriminator::Keyed(session_key_value as u32),
+        routing_domain: 0,
+    },
+    decision: SessionDecision { resolution: ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 12,
+        tx_ifindex: 12,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+        neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+        tx_vlan_id: 80,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    }, nat: NatDecision { rewrite_src: Some(IpAddr::V4(snat_ip)), rewrite_dst: None, rewrite_src_port: None, rewrite_dst_port: None, source_nat_icmp: None, nat64: false, nptv6: false }, install_table_domain: 0, install_table_check: 0 },
+    metadata: SessionMetadata {
+        ingress_zone: TEST_LAN_ZONE_ID,
+        egress_zone: TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_GRE,
+    tcp_flags: 0,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     entry.key.discriminator = TunnelDiscriminator::Keyed(session_key_value as u32);
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
@@ -7142,80 +7134,78 @@ fn publish_pptp_gre_session_9298(
     handle: u32,
     egress_ifindex: i32,
 ) -> SharedSessionOwnerRgIndexes {
-    let entry = SyncedSessionEntry {
-        key: SessionKey {
-            addr_family: if client.is_ipv4() {
-                libc::AF_INET as u8
-            } else {
-                libc::AF_INET6 as u8
-            },
-            protocol: PROTO_GRE,
-            src_ip: client,
-            dst_ip: server,
-            src_port: 0,
-            dst_port: 0,
-            // The live PPTP session carries the LOCALLY DERIVED handle
-            // (#7188 decision 6 / #7699), never a wire call id — the two
-            // directions of one call carry different wire values.
-            discriminator: TunnelDiscriminator::Pptp(handle),
-            routing_domain: 0,
+    let entry = SyncedSessionEntry { key: SessionKey {
+        addr_family: if client.is_ipv4() {
+            libc::AF_INET as u8
+        } else {
+            libc::AF_INET6 as u8
         },
-        decision: SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::ForwardCandidate,
-                local_ifindex: 0,
-                egress_ifindex,
-                tx_ifindex: egress_ifindex,
-                tunnel_endpoint_id: 0,
-                next_hop: None,
-                neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
-                src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
-                tx_vlan_id: 80,
-                route_mtu: 0,
-                transport_route_mtu: 0,
-            },
-            nat: NatDecision {
-                // ADDRESS-ONLY source NAT: `match_rules.rs` routes a protocol
-                // with no L4 ports to `reserve_address_only`, which is how GRE
-                // genuinely reaches same-family SNAT.
-                rewrite_src: Some(snat),
-                rewrite_dst: None,
-                rewrite_src_port: None,
-                rewrite_dst_port: None,
-                source_nat_icmp: None,
-                nat64: false,
-                nptv6: false,
-            },
-            install_table_domain: 0,
-            install_table_check: 0,
-        },
-        metadata: SessionMetadata {
-            ingress_zone: TEST_LAN_ZONE_ID,
-            egress_zone: TEST_WAN_ZONE_ID,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            owner_rg_id: 0,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-        },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
         protocol: PROTO_GRE,
-        tcp_flags: 0,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+        src_ip: client,
+        dst_ip: server,
+        src_port: 0,
+        dst_port: 0,
+        // The live PPTP session carries the LOCALLY DERIVED handle
+        // (#7188 decision 6 / #7699), never a wire call id — the two
+        // directions of one call carry different wire values.
+        discriminator: TunnelDiscriminator::Pptp(handle),
+        routing_domain: 0,
+    },
+    decision: SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex,
+            tx_ifindex: egress_ifindex,
+            tunnel_endpoint_id: 0,
+            next_hop: None,
+            neighbor_mac: Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]),
+            tx_vlan_id: 80,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        nat: NatDecision {
+            // ADDRESS-ONLY source NAT: `match_rules.rs` routes a protocol
+            // with no L4 ports to `reserve_address_only`, which is how GRE
+            // genuinely reaches same-family SNAT.
+            rewrite_src: Some(snat),
+            rewrite_dst: None,
+            rewrite_src_port: None,
+            rewrite_dst_port: None,
+            source_nat_icmp: None,
+            nat64: false,
+            nptv6: false,
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    },
+    metadata: SessionMetadata {
+        ingress_zone: TEST_LAN_ZONE_ID,
+        egress_zone: TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_GRE,
+    tcp_flags: 0,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     publish_shared_session(
         shared_sessions,
