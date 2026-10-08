@@ -58,8 +58,10 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -950,6 +952,13 @@ def make_latest(dist, channel, version):
     if not seckeys:
         die("XPF_SIGN_SECKEY or XPF_SIGN_SECKEYS (path(s) to minisign "
             "secret key(s)) is required to sign latest.json.")
+    missing_seckeys = [path for path in seckeys if not os.path.isfile(path)]
+    if missing_seckeys:
+        die("signing secret key(s) not found: " + ", ".join(missing_seckeys))
+    try:
+        sign.require_minisign()
+    except sign.SignError as e:
+        die(str(e))
     cdir = os.path.join(dist, channel)
     os.makedirs(cdir, exist_ok=True)
     latest = os.path.join(cdir, "latest.json")
@@ -994,14 +1003,42 @@ def make_latest(dist, channel, version):
         "manifest": f"xpf-{version}.SHA256SUMS",
         "date": date,
     }
-    with open(latest, "w") as f:
-        json.dump(data, f, indent=2, sort_keys=True)
-        f.write("\n")
+    tmp_latest = None
+    tmp_sigs = []
     try:
-        sign.sign_manifest(
-            latest, seckeys, comment=f"xpf {channel} latest {version}")
-    except sign.SignError as e:
-        die(f"could not sign {channel}/latest.json: {e}")
+        fd, tmp_latest = tempfile.mkstemp(
+            prefix="." + os.path.basename(latest) + ".", suffix=".tmp",
+            dir=os.path.dirname(os.path.abspath(latest)))
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.write("\n")
+        if os.path.exists(latest):
+            shutil.copymode(latest, tmp_latest)
+        tmp_sig = tmp_latest + ".minisig"
+        try:
+            generated = sign.sign_manifest(
+                tmp_latest, seckeys, comment=f"xpf {channel} latest {version}")
+        except sign.SignError as e:
+            die(f"could not sign {channel}/latest.json: {e}")
+        tmp_sigs = generated if isinstance(generated, list) else [generated]
+        final_sigs = []
+        for source in tmp_sigs:
+            target = latest + ".minisig" + source[len(tmp_sig):]
+            if os.path.exists(target):
+                shutil.copymode(target, source)
+            final_sigs.append(target)
+        os.replace(tmp_latest, latest)
+        tmp_latest = None
+        for source, target in zip(tmp_sigs, final_sigs):
+            os.replace(source, target)
+        tmp_sigs = []
+        sign._remove_stale_signatures(latest + ".minisig", final_sigs)
+    finally:
+        for path in ([tmp_latest] if tmp_latest else []) + tmp_sigs:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
     info(f"wrote + signed {latest} -> {version} ({len(seckeys)} key(s))")
 
 

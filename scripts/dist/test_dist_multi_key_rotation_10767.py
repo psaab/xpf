@@ -163,6 +163,66 @@ class MultiKeyRotation10767(unittest.TestCase):
                                 [str(self.old_pub), str(self.new_pub)])
         self.assertIn("new.pub", str(caught.exception))
 
+    def test_make_latest_signing_failure_preserves_and_recovers_pointer(self):
+        next_version = "1.2.4-1-gccccccc"
+        (self.dist / f"xpf-{next_version}.SHA256SUMS").touch()
+        publish.make_latest(str(self.dist), "stable", self.VER)
+        latest = self.dist / "stable" / "latest.json"
+        original = latest.read_bytes()
+        signatures = [path for path in sign.signature_paths(
+            str(latest), [str(self.old_pub), str(self.new_pub)])
+                      if Path(path).is_file()]
+        original_signatures = {path: Path(path).read_bytes()
+                               for path in signatures}
+        old_date = sign.parse_latest_date(json.loads(original)["date"])
+
+        with mock.patch.dict(os.environ, {
+                "XPF_SIGN_SECKEY": str(self.tmp / "missing.sec"),
+                "XPF_SIGN_SECKEYS": ""}), \
+                mock.patch.object(publish.time, "time",
+                                  return_value=old_date + 1):
+            with self.assertRaises(SystemExit):
+                publish.make_latest(str(self.dist), "stable", next_version)
+
+        self.assertEqual(latest.read_bytes(), original)
+        self.assertEqual({path: Path(path).read_bytes()
+                          for path in signatures}, original_signatures)
+        self.assertEqual(sign.verify_and_read(
+            str(latest), str(latest) + ".minisig",
+            [str(self.old_pub), str(self.new_pub)]), original)
+        self.assertEqual(list(latest.parent.glob(".latest.json.*.tmp")), [])
+
+        with mock.patch.object(publish.time, "time",
+                               return_value=old_date + 2):
+            publish.make_latest(str(self.dist), "stable", next_version)
+        self.assertEqual(json.loads(latest.read_text())["version"], next_version)
+        self.assertEqual(sign.verify_and_read(
+            str(latest), str(latest) + ".minisig",
+            [str(self.old_pub), str(self.new_pub)]),
+            latest.read_bytes())
+
+    def test_make_latest_signing_error_preserves_pointer(self):
+        next_version = "1.2.4-1-gccccccc"
+        (self.dist / f"xpf-{next_version}.SHA256SUMS").touch()
+        publish.make_latest(str(self.dist), "stable", self.VER)
+        latest = self.dist / "stable" / "latest.json"
+        original = latest.read_bytes()
+        old_date = sign.parse_latest_date(json.loads(original)["date"])
+
+        with mock.patch.object(publish.time, "time",
+                               return_value=old_date + 1), \
+                mock.patch.object(publish.sign, "sign_manifest",
+                                  side_effect=sign.SignError("injected failure")):
+            with self.assertRaises(SystemExit) as caught:
+                publish.make_latest(str(self.dist), "stable", next_version)
+        self.assertIn("injected failure", str(caught.exception))
+        self.assertEqual(latest.read_bytes(), original)
+        self.assertEqual(sign.verify_and_read(
+            str(latest), str(latest) + ".minisig",
+            [str(self.old_pub), str(self.new_pub)]), original)
+        self.assertEqual(list(latest.parent.glob(".latest.json.*.tmp")), [])
+
+
     def test_make_latest_rejects_channel_version_rollback(self):
         publish.make_latest(str(self.dist), "stable", self.VER)
         latest = self.dist / "stable" / "latest.json"
