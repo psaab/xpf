@@ -1284,9 +1284,15 @@ func (d *Daemon) setupBootstrapLifeline() {
 
 // writeBootstrapLifelineNetwork writes the bootstrap fxp0 .network, snapshotting
 // the lifeline NIC's CURRENT addressing so the rename's link cycle restores
-// reachability. DHCP-managed lifelines get a plain DHCP .network (matching the
-// historical writeBootstrapFxp0Network); a statically-addressed lifeline gets
-// Address=/Gateway= lines. Returns true if the file changed.
+// reachability. A lifeline with no static address in either family — the
+// address-less appliance factory boot, or DHCP-managed in every present family
+// — gets the historical plain-DHCP .network (matching writeBootstrapFxp0Network)
+// so a factory-box restart re-derives byte-identical content and the
+// existing==content gate below skips the rewrite (and the networkctl reload
+// reconfigure). A lifeline with a static address in some family gets that
+// family's Address=/Gateway= lines plus a DHCP= directive for any other family
+// classified as DHCP-managed by the finite-lifetime heuristic.
+// Returns true if the file changed.
 func writeBootstrapLifelineNetwork(lifeline string, hasRouteEvidence bool) (bool, error) {
 	path := filepath.Join(linkDir, linkPrefix+"fxp0.network")
 
@@ -1319,24 +1325,41 @@ func writeBootstrapLifelineNetwork(lifeline string, hasRouteEvidence bool) (bool
 	}
 	v4, v6, gw4, gw6 := snap.v4, snap.v6, snap.gw4, snap.gw6
 	var content string
-	if snap.dhcpManaged || (len(v4) == 0 && len(v6) == 0) {
+	static4 := len(v4) > 0 && !snap.dhcpV4
+	static6 := len(v6) > 0 && !snap.dhcpV6
+	if !static4 && !static6 {
 		content = "# Managed by xpfd — #1922 bootstrap lifeline (DHCP)\n" +
 			"[Match]\nName=fxp0\n\n[Network]\nDHCP=yes\n\n[DHCPv4]\nUseDNS=yes\nUseRoutes=yes\n"
 	} else {
 		var b strings.Builder
-		b.WriteString("# Managed by xpfd — #1922 bootstrap lifeline (static snapshot)\n")
+		b.WriteString("# Managed by xpfd — #1922 bootstrap lifeline (address snapshot)\n")
 		b.WriteString("[Match]\nName=fxp0\n\n[Network]\n")
-		for _, a := range v4 {
-			fmt.Fprintf(&b, "Address=%s\n", a)
+		switch {
+		case snap.dhcpV4 && snap.dhcpV6:
+			b.WriteString("DHCP=yes\n")
+		case snap.dhcpV4:
+			b.WriteString("DHCP=ipv4\n")
+		case snap.dhcpV6:
+			b.WriteString("DHCP=ipv6\n")
 		}
-		for _, a := range v6 {
-			fmt.Fprintf(&b, "Address=%s\n", a)
+		if !snap.dhcpV4 {
+			for _, a := range v4 {
+				fmt.Fprintf(&b, "Address=%s\n", a)
+			}
+			if gw4 != "" {
+				fmt.Fprintf(&b, "Gateway=%s\n", gw4)
+			}
 		}
-		if gw4 != "" {
-			fmt.Fprintf(&b, "Gateway=%s\n", gw4)
+		if !snap.dhcpV6 {
+			for _, a := range v6 {
+				fmt.Fprintf(&b, "Address=%s\n", a)
+			}
+			if gw6 != "" {
+				fmt.Fprintf(&b, "Gateway=%s\n", gw6)
+			}
 		}
-		if gw6 != "" {
-			fmt.Fprintf(&b, "Gateway=%s\n", gw6)
+		if snap.dhcpV4 {
+			b.WriteString("\n[DHCPv4]\nUseDNS=yes\nUseRoutes=yes\n")
 		}
 		content = b.String()
 	}
@@ -1390,13 +1413,12 @@ var (
 type lifelineAddrSnapshot struct {
 	v4, v6   []string
 	gw4, gw6 string
-	// dhcpManaged reports a global address with a FINITE valid lifetime, the
-	// heuristic for "this address came from DHCP". Folded into the snapshot so
-	// the DHCP-vs-static decision and the address list come from ONE netlink
-	// walk: they used to be two walks over the same state (interfaceAddrSnapshot
-	// and isDHCPManaged) that FAILED IN OPPOSITE DIRECTIONS, which is what made
-	// the defect below possible.
-	dhcpManaged bool
+	// dhcpV4 / dhcpV6 report a global address with a FINITE valid lifetime in
+	// that family, the existing heuristic for a DHCP-managed address. Keeping
+	// the decision per-family prevents a finite IPv6 SLAAC lifetime from
+	// suppressing a static IPv4 address and gateway in the generated networkd
+	// configuration.
+	dhcpV4, dhcpV6 bool
 }
 
 // snapshotLifelineAddrs observes name's global addresses, default gateways and
@@ -1440,14 +1462,20 @@ func snapshotLifelineAddrs(name string) (lifelineAddrSnapshot, error) {
 			continue
 		}
 		// A DHCP lease carries a finite ValidLft; a static address is
-		// typically permanent (ValidLft == 0xffffffff / forever).
-		if addrs[i].ValidLft > 0 && addrs[i].ValidLft != 0xffffffff {
-			snap.dhcpManaged = true
-		}
+		// typically permanent (ValidLft == 0xffffffff / forever). Record the
+		// heuristic for the matching family only: IPv6 SLAAC addresses also
+		// have finite lifetimes, but must not turn static IPv4 into DHCP.
+		dhcpManaged := addrs[i].ValidLft > 0 && addrs[i].ValidLft != 0xffffffff
 		if ip.IP.To4() != nil {
 			snap.v4 = append(snap.v4, ip.String())
+			if dhcpManaged {
+				snap.dhcpV4 = true
+			}
 		} else {
 			snap.v6 = append(snap.v6, ip.String())
+			if dhcpManaged {
+				snap.dhcpV6 = true
+			}
 		}
 	}
 	// Default-route gateways for this link.
