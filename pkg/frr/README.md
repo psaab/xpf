@@ -465,13 +465,13 @@ also carries operator content:
   two begin markers and a corrupt block that FRR reload rejects. Anchoring
   keeps `end >= start`, so the slice can never duplicate.
 
-## The sequence bound and the renderer share ONE expansion (#7526)
+## The sequence bound and the renderer share ONE expansion (#7526, #12066)
 
 `config.MaxRouteMapSequences` is admission's ceiling on how many route-map
 sequences a policy may expand to; rendering past FRR's maximum sequence number
 "poisons the ENTIRE frr-reload", which is why the bound exists at all.
 
-**The bound and the renderer disagreed on the cardinality.** `fromPrefixListRefs`
+**The bound and renderer disagreed on the cardinality.** `fromPrefixListRefs`
 expands one referenced prefix-list NAME into one match line **per family it
 holds** — a mixed v4+v6 list yields an `ip` ref and an `ipv6` ref so both
 families bind a family-correct match (#2607). `RouteMapSequenceCount` counted
@@ -479,11 +479,20 @@ families bind a family-correct match (#2607). `RouteMapSequenceCount` counted
 mixed-family lists rendered up to **twice** the sequences admission approved,
 and a config sitting just under the ceiling rendered past it.
 
-The fix is not to teach the bound the renderer's rule; it is to have one rule.
-`config.PrefixListFamilies` decides WHICH families a list holds and is read by
-both. `prefixListFamilies` here keeps only the mapping to FRR's `ip`/`ipv6`
-match keywords, which are FRR spellings; the counts are now equal **by
-construction** rather than by two implementations agreeing.
+A second OR dimension is `from protocol [...]` (#12066). FRR stores only one
+same-type `match source-protocol` rule per route-map sequence, replacing an
+earlier rule; the renderer must therefore emit one sequence per source protocol.
+`emitVariants` crosses that dimension with route-filter families, prefix-list
+refs, communities, and AS paths, and `RouteMapSequenceCount` multiplies by the
+protocol-set size too. Otherwise the renderer could exceed the sequence ceiling
+without the commit-time bound noticing.
+
+The fix is not to duplicate family resolution in the bound; it is to share the
+family mapping. `config.PrefixListFamilies` decides WHICH families a list holds
+and is read by both. `prefixListFamilies` here keeps only the mapping to FRR's
+`ip`/`ipv6` match keywords, which are FRR spellings; the count includes each
+dimension of the renderer's Cartesian expansion, with every multiplication
+overflow-checked.
 
 `RouteMapSequenceCount` and `ComposedChainSequenceCount` therefore take the
 `*PolicyOptionsConfig`. It is **required, not optional**, so the compiler

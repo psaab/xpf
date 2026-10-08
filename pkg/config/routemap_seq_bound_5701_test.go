@@ -9,7 +9,7 @@ import (
 // TestRouteMapSequenceCount_5701 pins the projected-count arithmetic that the
 // #5701 bound relies on: it must mirror the pkg/frr renderer's per-term
 // Cartesian expansion (family split x from-prefix-list x from-community x
-// from-as-path), each OR-set clamped to a minimum of 1.
+// from-as-path x from-protocol), each OR-set clamped to a minimum of 1.
 func TestRouteMapSequenceCount_5701(t *testing.T) {
 	cases := []struct {
 		name string

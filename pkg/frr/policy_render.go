@@ -622,7 +622,14 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		// body) is the only structure where each family's routes hit a
 		// sequence they can satisfy (#2607; the same AND finding that
 		// drove #2071's single-matcher decision).
-		emitTermBody := func(seqFam string, seqNum int, rfs []indexedRouteFilter, plName string, fromPL fromPrefixListRef, fromCommunity, fromASPath string) {
+		emitTermBody := func(
+			seqFam string,
+			seqNum int,
+			rfs []indexedRouteFilter,
+			plName string,
+			fromPL fromPrefixListRef,
+			fromCommunity, fromASPath, fromProtocol string,
+		) {
 			fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(routeMapName), action, seqNum)
 
 			// rfMatchEmitted / rfMatchV6 record whether THIS sequence emitted a
@@ -758,20 +765,19 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			}
 
 			// Junos "from protocol [ bgp ospf static ]" matches ANY listed
-			// protocol. FRR's "match source-protocol" only accepts a single
-			// protocol per line, but repeated lines within one route-map entry
-			// are OR'd, so render one line per protocol.
-			for _, proto := range term.FromProtocols {
-				if proto == "direct" {
-					proto = "connected"
+			// protocol. FRR stores only one source-protocol match per
+			// route-map sequence, so emitVariants dispatches one sequence per
+			// protocol value and this body emits at most one match line.
+			if fromProtocol != "" {
+				if fromProtocol == "direct" {
+					fromProtocol = "connected"
 				}
 				// #4498: sanitize the protocol token — the same #4097/#4482
 				// render-side belt the other route-map free-text slots use.
 				// A tolerant-load / peer-synced / rolled-back FromProtocols
 				// value with an embedded newline must not inject an extra
-				// frr.conf line (the strict #1798 commit gate rejects it, but
-				// the lenient load path only warns, #1960).
-				fmt.Fprintf(&b, " match source-protocol %s\n", sanitizeFRRValue(proto))
+				// frr.conf line regardless of the load path (#1960).
+				fmt.Fprintf(&b, " match source-protocol %s\n", sanitizeFRRValue(fromProtocol))
 			}
 
 			// fromCommunity / fromASPath are ONE entry of a possibly
@@ -944,23 +950,25 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		// homogeneous or empty route-filter set renders as today — ONE
 		// sequence, ONE plName, byte-identical output (no churn for the
 		// common case).
-		// Two independent OR-dimensions can each multiply the number of
-		// emitted sequences:
+		// Independent expansion dimensions multiply the number of emitted
+		// sequences:
 		//   (a) route-filters that genuinely mix families (#2607) - one
-		//       sequence per family; and
+		//       sequence per family;
 		//   (b) repeated same-type `from prefix-list` / `from community`
-		//       / `from as-path` matches (#2642) - Junos OR's them, but
-		//       FRR holds only one rule of each match TYPE per route-map
-		//       index (route_map_add_match replaces same-type), so OR is
-		//       expressed as one sequence per value.
+		//       / `from as-path` matches (#2642); and
+		//   (c) `from protocol` values (#12066) - FRR keeps one source-
+		//       protocol match per route-map sequence.
+		// FRR holds only one rule of each match TYPE per route-map index
+		// (route_map_add_match replaces same-type), so OR is expressed as
+		// one sequence per value.
 		// Different match types must AND, the same type must OR. The
 		// correct structure is the CARTESIAN PRODUCT of the OR-sets: each
 		// emitted sequence carries exactly one prefix-list, one community,
-		// one as-path (plus its family's route-filter match, all
-		// source-protocol lines, and all set actions). A route that
-		// satisfies (any prefix-list) AND (any community) AND (any as-path)
-		// reaches at least one sequence it fully matches - the Junos
-		// "(p1|p2) AND (c1|c2) AND ..." semantics.
+		// one as-path, and at most one source-protocol (plus its family's
+		// route-filter match and all set actions). A route that satisfies
+		// (any prefix-list) AND (any community) AND (any as-path) AND
+		// (any source-protocol) reaches at least one sequence it fully
+		// matches — the Junos semantics.
 		//
 		// The common single-valued / no-match case collapses to ONE
 		// sequence with the historical plName, byte-identical to master:
@@ -981,8 +989,8 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 
 		// emitVariants emits the cross-product of the from-* OR sets for one
 		// route-filter family group (seqFam/rfs/famPL), advancing seq by 10 per
-		// sequence. The iteration order (prefix-list, then its per-family refs,
-		// then community, then as-path) is fixed, so output is deterministic.
+		// sequence. Iteration order is fixed (prefix-list, per-family refs,
+		// community, as-path, protocol) so output is deterministic.
 		// Each referenced prefix-list expands into one ref per family it holds
 		// (fromPrefixListRefs): a single-family list yields one ref (unchanged
 		// output), a mixed v4+v6 list yields an ip ref and an ipv6 ref so BOTH
@@ -1006,8 +1014,15 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 							if danglingAsp[asp] {
 								continue
 							}
-							emitTermBody(seqFam, seq, rfs, famPL, plRef, comm, asp)
-							seq += 10
+							if len(term.FromProtocols) == 0 {
+								emitTermBody(seqFam, seq, rfs, famPL, plRef, comm, asp, "")
+								seq += 10
+							} else {
+								for _, proto := range term.FromProtocols {
+									emitTermBody(seqFam, seq, rfs, famPL, plRef, comm, asp, proto)
+									seq += 10
+								}
+							}
 						}
 					}
 				}

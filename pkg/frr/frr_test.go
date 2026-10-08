@@ -1501,11 +1501,10 @@ func TestGeneratePolicyOptions(t *testing.T) {
 	}
 }
 
-// TestGeneratePolicyOptionsMultiProtocol verifies that a term matching
-// multiple protocols ("from protocol [ bgp ospf static ]") renders a
-// "match source-protocol" line for EVERY protocol. Regression for #2008
-// H18 — the old single-FromProtocol render emitted only one match line, so
-// a multi-protocol policy silently matched only the first protocol.
+// TestGeneratePolicyOptionsMultiProtocol verifies that all configured source
+// protocol values survive rendering (with "direct" normalized to "connected").
+// The #12066 structural regression test also requires one protocol match per
+// route-map sequence.
 func TestGeneratePolicyOptionsMultiProtocol(t *testing.T) {
 	m := &Manager{frrConf: "/dev/null"}
 	po := &config.PolicyOptionsConfig{
