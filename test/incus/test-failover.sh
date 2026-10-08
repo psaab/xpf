@@ -1608,7 +1608,7 @@ fi
 if main_iperf_running; then
 	pass "iperf3 survived fw0 rejoin"
 elif failover_main_iperf_result_complete /tmp/iperf3-failover.log; then
-	pass "iperf3 completed successfully (finished before rejoin check)"
+	void "iperf3 completed before manual failback; no client remained to witness the failback event"
 else
 	fail "iperf3 DIED during fw0 rejoin"
 fi
@@ -1617,6 +1617,7 @@ fi
 
 info "Manual failback: measuring isolated RG1 from fw1/node1 to fw0/node0"
 ha_run_rg1_failback_slice
+failback_at_seconds=0
 
 # After the measured RG1 slice, preserve the existing unmeasured RG0/RG2 moves.
 # Each RG must be explicitly failed over — per-RG election is independent.
@@ -1664,6 +1665,7 @@ for rg in 0 2; do
 	done
 	fo_elapsed=$(($(date +%s) - fo_start))
 	if ((moved)); then
+		failback_at_seconds=$((SECONDS - iperf_start_seconds))
 		if ((fo_elapsed > slowest)); then
 			slowest=$fo_elapsed
 		fi
@@ -1677,6 +1679,7 @@ done
 if $all_primary; then
 	pass "fw0 became primary for all RGs after manual failback (slowest ${slowest}s of ${MANUAL_FAILOVER_DEADLINE}s budget)"
 fi
+info "Recorded per-stream failback event at ${failback_at_seconds}s after iperf start (last RG moved)"
 
 # Verify iperf3 survived manual failover
 if main_iperf_running; then
@@ -1866,20 +1869,22 @@ if [[ "$iperf_gate_ok" == true ]]; then
 	if failover_oracles=$(python3 "${SCRIPT_DIR}/iperf3_sum_parse.py" \
 		--failover-check --json-stream --streams "$IPERF_STREAMS" \
 		--min-throughput-gbps "$MIN_THROUGHPUT" --crash-at "$failover_at_seconds" \
+		--failback-at "$failback_at_seconds" \
 		<"$LOCAL_IPERF_LOG" 2>"$oracle_error"); then
 		while IFS= read -r oracle; do
 			case "$oracle" in
 			PASS\ *) pass "${oracle#PASS }" ;;
 			FAIL\ *) fail "${oracle#FAIL }" ;;
+			VOID\ *) void "${oracle#VOID }" ;;
 			*)       fail "iperf3 failover oracle returned an unrecognised verdict: ${oracle}" ;;
 			esac
 		done <<< "$failover_oracles"
 	else
 		oracle_reason=$(<"$oracle_error")
-		void "iperf3 failover crash oracle evidence unavailable: ${oracle_reason:-JSON interval parser failed}"
+		void "iperf3 failover/failback oracle evidence unavailable: ${oracle_reason:-JSON interval parser failed}"
 	fi
 else
-	info "Skipping JSON crash oracle because the whole-run metrics gate rejected its input"
+	info "Skipping JSON crash/failback oracle because the whole-run metrics gate rejected its input"
 fi
 
 # M1 JSON summary precedence fixture begin

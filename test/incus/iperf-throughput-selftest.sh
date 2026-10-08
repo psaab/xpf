@@ -124,6 +124,15 @@ gate_line="$(grep -n 'gate_output=$(ha_metrics_gate "\$LOCAL_IPERF_METRICS"' "$F
 verdict_line="$(grep -n 'iperf_throughput_json_verdict "\$MIN_THROUGHPUT" "\$avg_gbps"' "$FAILOVER" | cut -d: -f1)"
 (( gate_line < verdict_line )) || bad "test-failover.sh must gate metrics before calling the JSON verdict"
 ok "test-failover call shape gates before the JSON verdict"
+grep -q -- '--crash-at "$failover_at_seconds"' "$FAILOVER" \
+	|| bad "test-failover.sh does not pass the measured crash instant to the stream oracle"
+grep -q -- '--failback-at "$failback_at_seconds"' "$FAILOVER" \
+	|| bad "test-failover.sh does not pass the measured last-RG-moved instant to the second stream oracle"
+grep -q 'failback_at_seconds=$((SECONDS - iperf_start_seconds))' "$FAILOVER" \
+	|| bad "test-failover.sh does not record failback against the iperf start clock"
+grep -q 'void "iperf3 completed before manual failback' "$FAILOVER" \
+	|| bad "test-failover.sh accepts an iperf client that ended before failback"
+ok "test-failover wires crash and last-RG-moved timestamps and rejects early client completion"
 
 # Execute the production capture/gate/verdict blocks with an absent remote
 # artifact and the REAL metrics gate. The verdict symbol is observed only as a
