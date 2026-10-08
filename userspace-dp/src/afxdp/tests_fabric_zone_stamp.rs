@@ -367,6 +367,20 @@ fn unique_established_ri_snat_reply_is_admitted_without_stamp_11061() {
         PROTO_TCP,
         TCP_FLAG_ACK,
     ));
+    // This manually injected session stands in for a locally admitted,
+    // interface-SNAT forward flow. Seed its receiver-local verdict and NAT
+    // provenance so this cell exercises reply admission, not the independent
+    // fail-closed stale-policy/stale-NAT gates.
+    sessions.set_policy_revalidation_phase(
+        7,
+        forwarding.policy.scheduler_rules_expired_at(123_000_000_000),
+    );
+    sessions.mark_policy_revalidated(
+        &forward_key,
+        crate::session::PolicyRevalidationKind::LiveEgress,
+    );
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    sessions.mark_source_nat_revalidated(&forward_key, Some(false));
 
     let shared_entry = SyncedSessionEntry {
         key: forward_key,
