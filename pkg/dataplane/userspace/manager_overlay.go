@@ -154,25 +154,23 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 		return false, nil
 	}
 
-	// #5680: fail-closed hybrid-ACK guard. A route-only publish rebuilds ONLY
-	// next.Routes (below) and inherits EVERY compiled policy section
-	// (Zones/Policies/NAT/Screens/AddressBooks/...) verbatim from m.lastSnapshot
-	// via `next := *m.lastSnapshot`. Those sections were built by the last full,
-	// Compile-based apply_snapshot from m.lastSnapshot.Config — this path never
-	// re-compiles. If the caller passes a cfg whose POLICY half was never
-	// compiled into that snapshot, stamping next.Config = cfg and calling
-	// markAppliedSnapshotLocked would advance the applied identity
-	// (appliedSnapshot.Config) to a cfg the helper's live policy does NOT match:
-	// an OLD-policy/NEW-route HYBRID ACK'd as the newly applied config.
+	// #5680: fail-closed partial-publish guard. A route-only publish rebuilds
+	// Routes and inherits the rest of m.lastSnapshot, including compiled policy
+	// and secret-derived sections such as the SYN-cookie ring. Stamping
+	// next.Config = cfg and calling markAppliedSnapshotLocked would advance the
+	// applied identity to content the helper does NOT enforce if cfg contains a
+	// helper-visible change that was not included in the retained snapshot (for
+	// example, a new policy or auth key whose full apply failed). That would ACK
+	// a hybrid as the newly applied config.
 	//
 	// This is the #5679 residual: an ordinary d.dp.ApplyConfig failure captures
 	// applyErr and continues (fail-closed but complete) WITHOUT advancing
 	// m.lastSnapshot, while store.Commit has already promoted the NEW cfg. The
 	// tail route-leak republish (reconcileRouteLeakSnapshot) and the
 	// ip-monitoring actuator then call this with the NEW cfg. Refuse the publish
-	// (fail-closed) so the applied identity never advances past the policy the
+	// (fail-closed) so the applied identity never advances past the snapshot the
 	// dataplane actually enforces; the OLD, fully-consistent snapshot stays live
-	// and the caller reconverges once a full apply republishes the policy
+	// and the caller reconverges once a full apply republishes the config
 	// (reconcileRouteLeakSnapshot warns; the ipmon actuator stays dirty and
 	// retries). The deferred m.routeOverlay commit above is gated on err == nil,
 	// so a refused publish also leaves the desired-overlay cache at its
@@ -186,9 +184,8 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	// content fallback only rejects a genuinely divergent config, never a
 	// distinct-but-equal one.
 	if routeOnlyPublishHybrid(cfg, m.lastSnapshot.Config) {
-		return false, fmt.Errorf("refusing route-only publish: cfg carries an unpublished " +
-			"policy delta the dataplane snapshot does not reflect; publishing would ACK an " +
-			"old-policy/new-route hybrid as the applied config (#5680)")
+		return false, fmt.Errorf("refusing route-only publish: cfg content differs from the applied " +
+			"snapshot; publishing would ACK a config whose snapshot sections were not rebuilt (#5680)")
 	}
 
 	if err := m.ensureRequiredSnapshotProtocolLocked(m.lastSnapshot); err != nil {
@@ -410,19 +407,20 @@ func (m *Manager) RepublishCurrentCaptureAuthority() (bool, error) {
 	return true, nil
 }
 
-// routeOnlyPublishHybrid reports whether a route-only publish for cfg would ship
-// an OLD-policy/NEW-route hybrid (#5680). applied is the config whose compiled
-// policy sections the current lastSnapshot carries (m.lastSnapshot.Config, set
-// together at each full Compile-based apply). The publish is a hybrid iff cfg is
-// NOT that config: it re-derives routes from cfg but keeps applied's compiled
-// policy, so ACK'ing cfg as applied would misreport the enforced policy.
+// routeOnlyPublishHybrid reports whether a route-only publish for cfg would
+// stamp an identity whose helper-visible content is not in the retained
+// snapshot (#5680, #12236). applied is the config the snapshot's compiled and
+// secret-derived sections carry (m.lastSnapshot.Config, set together at each
+// full Compile-based apply). The partial publish re-derives routes from cfg but
+// keeps those sections from applied, so ACK'ing cfg after any helper-visible
+// config change would misreport what the helper enforces.
 //
-// Nil applied (no established policy identity — e.g. the config-less bootstrap
-// snapshot) is not a hybrid: there is no policy identity to violate. Pointer
-// identity is the common legitimate case and the cheap fast path; the
-// content-equality fallback (configsContentEqual) ensures a distinct-but-
-// content-equal config is accepted (never a false refusal) while a genuinely
-// divergent config is refused.
+// Nil applied (no established snapshot identity — e.g. the config-less
+// bootstrap snapshot) cannot violate an identity contract. Pointer identity is
+// the common legitimate case and the cheap fast path; the content-equality
+// fallback (configsContentEqual) ensures a distinct-but-content-equal config is
+// accepted (never a false refusal) while a genuinely divergent config is
+// refused.
 func routeOnlyPublishHybrid(cfg, applied *config.Config) bool {
 	if applied == nil {
 		return false
@@ -467,12 +465,14 @@ func routeOnlyPublishHybrid(cfg, applied *config.Config) bool {
 // `protocol_tunnels.go` declares `WgLocalPrivkeyHex` and `WgPresharedKeyHex` as
 // PLAIN strings with json tags, and `tunnels.go` fills them with `.Reveal()` —
 // so the helper receives raw WireGuard key material in the very snapshot this
-// guard governs.
+// guard governs. It also receives SYN-cookie ring bases derived from the
+// cluster auth keys when cookie protection is active (#12236), so those bases
+// are digested as well.
 //
-// The consequence was that an operator's key ROTATION compared EQUAL here: the
-// #5680 refusal did not fire, the snapshot was marked applied carrying the OLD
-// keys, and the operator was told the rotation had landed while the tunnel ran
-// on the previous material.
+// The consequence of omitting either secret was that its rotation compared
+// EQUAL here: the #5680 refusal did not fire, the snapshot was marked applied
+// carrying the OLD material, and the operator was told the rotation had landed
+// while the dataplane still enforced the previous material.
 //
 // The rest of the original reasoning stands and is deliberately preserved: the
 // former DeepEqual was over-strict, and a secret-only change the helper cannot
@@ -509,20 +509,25 @@ func configsContentEqual(a, b *config.Config) bool {
 // helperVisibleSecretDigest9161 digests exactly the secret material that reaches
 // the helper, so a rotation of it is visible to configsContentEqual.
 //
-// Scoped to WireGuard on purpose: those are the only secrets `tunnels.go`
-// `.Reveal()`s into the snapshot the helper receives. Secrets belonging to
-// strongSwan, FRR, vrrp and cluster apply on separate paths and stay invisible
-// here, which is the coarsening this guard was designed around.
+// Scoped to WireGuard plus the SYN-cookie ring bases (#12236): those are the
+// secrets the snapshot builder reveals into the snapshot the helper receives.
+// Secrets belonging to strongSwan, FRR and vrrp apply on separate paths and stay
+// invisible here, which is the coarsening this guard was designed around.
 //
-// It enumerates through `config.EmitTunnelEndpointNames` — the SAME enumerator
-// the snapshot builder uses — rather than walking the interface map itself, so
-// the set it digests cannot drift from the set the helper is sent. A second
-// traversal would be a second definition of "which tunnels exist".
-//
+// WireGuard keys are enumerated through `config.EmitTunnelEndpointNames` — the
+// SAME enumerator the snapshot builder uses — rather than walking the interface
+// map itself, so the set it digests cannot drift from the set the helper is sent.
 // Peers are sorted by public key before hashing, matching the snapshot builder's
 // own sort, so two configs that differ only in authoring order digest equal.
-// Without that this guard would report a difference for a reordering the helper
-// cannot observe — the over-strictness the redacted marshal exists to avoid.
+//
+// The SYN-cookie bases are the second secret this guard's original
+// "separate paths" list missed. `synCookieKeyMaterial` reads
+// `ControlLinkAuthKey` (+`ControlLinkAuthKeyAlt` in a #6630 window) and the
+// full build installs the derived ring (`builder.go`), while partial publishers
+// inherit the old ring. Digest the same bases through the same derivation
+// helpers, but not the wall-clock epoch key, which is intentionally not stable
+// across comparisons. When protection is inactive no ring is installed, so
+// neither auth key contributes and unrelated secret changes remain coarsened.
 func helperVisibleSecretDigest9161(cfg *config.Config) [sha256.Size]byte {
 	h := sha256.New()
 	for _, ep := range config.EmitTunnelEndpointNames(cfg) {
@@ -537,6 +542,18 @@ func helperVisibleSecretDigest9161(cfg *config.Config) [sha256.Size]byte {
 		})
 		for _, p := range peers {
 			fmt.Fprintf(h, "p:%s:%s\n", p.PublicKeyHex, p.PresharedKeyHex.Reveal())
+		}
+	}
+	// Hash the exact primary and optional accept-only bases installed by the
+	// full builder. Fixed-length bases follow distinct domain markers, avoiding
+	// ambiguity with each other or with the tunnel rows above.
+	if userspaceSynCookieProtectionActive(cfg) {
+		primary, additional, identity := synCookieKeyMaterial(cfg)
+		h.Write([]byte("syncookie-primary\x00"))
+		h.Write(deriveSYNCookieBase(primary, identity))
+		if len(additional) > 0 {
+			h.Write([]byte("syncookie-additional\x00"))
+			h.Write(deriveSYNCookieBase(additional, identity))
 		}
 	}
 	var out [sha256.Size]byte
