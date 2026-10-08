@@ -10,7 +10,7 @@ import (
 )
 
 // #7073: step 20 decides whether to restart cluster comms with a WHOLE-struct
-// comparison of clusterTransportKey (six fields), but the line that reported
+// comparison of clusterTransportKey, but the line that reported
 // the decision was written out by hand and printed only four pairs. A commit
 // that changed only fab1 therefore restarted comms correctly and then logged
 //

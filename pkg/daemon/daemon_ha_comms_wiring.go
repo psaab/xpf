@@ -24,6 +24,17 @@ import (
 // an unrelated management interface must not determine a transport's routing
 // table. Non-members stay unbound so their routes resolve in the main table.
 func (d *Daemon) resolveClusterVRFDevice(transportIfaces ...string) string {
+	return d.clusterVRFDeviceForTransports(true, transportIfaces...)
+}
+
+// clusterVRFDeviceForTransportKey resolves the same membership decision without
+// logging. Step 20 calls it on every apply to detect membership changes, so a
+// non-member transport must not emit the startup warning on every commit.
+func (d *Daemon) clusterVRFDeviceForTransportKey(transportIfaces ...string) string {
+	return d.clusterVRFDeviceForTransports(false, transportIfaces...)
+}
+
+func (d *Daemon) clusterVRFDeviceForTransports(warn bool, transportIfaces ...string) string {
 	members := d.mgmtVRFIfaceSet()
 	hasTransport := false
 	for _, iface := range transportIfaces {
@@ -35,7 +46,7 @@ func (d *Daemon) resolveClusterVRFDevice(transportIfaces ...string) string {
 		if members[linuxName] {
 			continue
 		}
-		if len(members) > 0 || config.IsManagementIfName(iface) {
+		if warn && (len(members) > 0 || config.IsManagementIfName(iface)) {
 			slog.Warn("cluster transport interface is not a management VRF member; leaving sockets unbound to VRF",
 				"interface", linuxName, "vrf", config.ManagementVRFDeviceName)
 		}
@@ -51,18 +62,35 @@ func (d *Daemon) resolveClusterVRFDevice(transportIfaces ...string) string {
 // transport selected for session sync, including a configured secondary
 // fabric when fabric transport is active.
 func (d *Daemon) resolveClusterSyncVRFDevice(cc *config.ClusterConfig) string {
-	if cc == nil {
+	iface, iface1 := clusterSyncVRFTransportIfaces(cc)
+	if iface == "" {
 		return ""
+	}
+	return d.resolveClusterVRFDevice(iface, iface1)
+}
+
+// clusterSyncVRFDeviceForTransportKey is the quiet counterpart used by the
+// per-apply transport key comparison.
+func (d *Daemon) clusterSyncVRFDeviceForTransportKey(cc *config.ClusterConfig) string {
+	iface, iface1 := clusterSyncVRFTransportIfaces(cc)
+	if iface == "" {
+		return ""
+	}
+	return d.clusterVRFDeviceForTransportKey(iface, iface1)
+}
+
+func clusterSyncVRFTransportIfaces(cc *config.ClusterConfig) (string, string) {
+	if cc == nil {
+		return "", ""
 	}
 	syncIface, syncPeerAddr, syncTransport := clusterSyncTransport(cc)
 	if syncIface == "" || syncPeerAddr == "" {
-		return ""
+		return "", ""
 	}
-	transportIfaces := []string{syncIface}
 	if syncTransport == "fabric" && cc.Fabric1Interface != "" && cc.Fabric1PeerAddress != "" {
-		transportIfaces = append(transportIfaces, cc.Fabric1Interface)
+		return syncIface, cc.Fabric1Interface
 	}
-	return d.resolveClusterVRFDevice(transportIfaces...)
+	return syncIface, ""
 }
 
 // startHAWatchdogHeartbeat starts the HA watchdog heartbeat goroutine for the

@@ -1153,7 +1153,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 	// without it leaks the context itself (nothing else holds that cancel), and
 	// cancelling here is safe precisely because we have launched nothing on it
 	// yet — this is the first statement after the epoch opens.
-	if !d.setActiveTransportIfCurrent(commsGen, clusterTransportFromConfig(cfg)) {
+	if !d.setActiveTransportIfCurrent(commsGen, d.clusterTransportForConfig(cfg)) {
 		commsCancel()
 		return
 	}
@@ -1168,11 +1168,10 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 	d.syncRGStrictVIPOwnershipMode(cc)
 
 	// Start heartbeat if control-interface and peer-address are configured.
-	// Retry on bind failure: the control interface address and VRF device
-	// may not be ready during daemon startup (networkd race).
+	// The retry loop resolves VRF membership on each attempt; a failed boot
+	// apply can publish management-VRF membership after comms start.
 	if cc.ControlInterface != "" && cc.PeerAddress != "" {
-		heartbeatVRFDevice := d.resolveClusterVRFDevice(cc.ControlInterface)
-		go d.startHeartbeatWithRetry(commsCtx, cc.ControlInterface, cc.PeerAddress, heartbeatVRFDevice)
+		go d.startHeartbeatWithRetry(commsCtx, cc.ControlInterface, cc.PeerAddress)
 	}
 
 	syncIface, syncPeerAddr, syncTransport := clusterSyncTransport(cc)
@@ -1505,10 +1504,10 @@ func (d *Daemon) fenceAllRedundancyGroups(ctx context.Context) cluster.FenceResu
 	return res
 }
 
-// startHeartbeatWithRetry resolves the control-link local address and starts
-// the cluster heartbeat, retrying on a not-ready bind (the control interface
-// address and VRF device may not be ready during daemon startup — a networkd
-// race). It runs in its own goroutine, owned by the comms sub-context.
+// startHeartbeatWithRetry resolves the control-link local address and VRF device
+// on every attempt, then starts the cluster heartbeat. Both the address and
+// management-VRF membership may become ready during the startup retry window.
+// It runs in its own goroutine, owned by the comms sub-context.
 //
 // It exits immediately when ctx is cancelled (#4033): stopClusterComms cancels
 // the comms context before installing new comms, so without this the old retry
@@ -1517,7 +1516,7 @@ func (d *Daemon) fenceAllRedundancyGroups(ctx context.Context) cluster.FenceResu
 // heartbeat into a torn-down comms lifecycle and racing the replacement
 // goroutine. Every iteration (and every retry sleep) observes ctx so a comms
 // restart leaves exactly one retry goroutine and one heartbeat.
-func (d *Daemon) startHeartbeatWithRetry(ctx context.Context, controlIface, peerAddr, vrfDevice string) {
+func (d *Daemon) startHeartbeatWithRetry(ctx context.Context, controlIface, peerAddr string) {
 	for i := 0; i < 30; i++ {
 		if ctx.Err() != nil {
 			slog.Info("cluster: heartbeat start aborted, comms context cancelled")
@@ -1534,6 +1533,7 @@ func (d *Daemon) startHeartbeatWithRetry(ctx context.Context, controlIface, peer
 			}
 			continue
 		}
+		vrfDevice := d.resolveClusterVRFDevice(controlIface)
 		if err := d.cluster.StartHeartbeat(localIP, peerAddr, vrfDevice, controlIface); err != nil {
 			// #7257: a start the teardown superseded is terminal, not a bind
 			// failure. Retrying would race the same teardown again and, on
@@ -1666,10 +1666,10 @@ func (d *Daemon) stopClusterComms() {
 	}
 }
 
-// clusterTransportKey extracts the cluster transport fields that determine
-// heartbeat and session sync endpoints. Used to detect config changes that
-// require restarting cluster comms: step 20 compares the WHOLE struct, so every
-// field here participates in the restart decision.
+// clusterTransportKey extracts the cluster endpoints and resolved VRF device
+// that determine heartbeat and session sync sockets. Used to detect config and
+// management-membership changes that require restarting cluster comms: step 20
+// compares the WHOLE struct, so every field here participates in the decision.
 //
 // The `log` tag is the key suffix step 20 uses when it reports that decision.
 // It exists so transportChangeLogArgs can derive the line from the struct
@@ -1682,6 +1682,7 @@ type clusterTransportKey struct {
 	FabricPeerAddress  string `log:"fabric_peer"`
 	Fabric1Interface   string `log:"fabric1"`
 	Fabric1PeerAddress string `log:"fabric1_peer"`
+	VRFDevice          string `log:"vrf"`
 }
 
 // transportChangeLogArgs builds the key/value pairs for step 20's
@@ -1690,11 +1691,12 @@ type clusterTransportKey struct {
 //
 // Derived from the struct by reflection rather than written out by hand,
 // because the two had already drifted: the comparison that decides the restart
-// used all six fields while the line that reported it printed four, so a commit
-// changing only fab1 correctly restarted comms and then logged four identical
-// old/new pairs — a line asserting a change and showing none, which reads as a
-// spurious restart (#7073). Deriving it makes that drift unrepresentable: a
-// field added to the struct joins the comparison and the line together.
+// used every field while the line that reported it printed only four, so a
+// commit changing only fab1 correctly restarted comms and then logged four
+// identical old/new pairs — a line asserting a change and showing none, which
+// reads as a spurious restart (#7073). Deriving it makes that drift
+// unrepresentable: a field added to the struct joins the comparison and the
+// line together.
 //
 // A field with no `log` tag still gets logged, under its Go name; the tag is
 // for a readable key, not for inclusion. Omission is not a reachable state.
@@ -1735,6 +1737,20 @@ func clusterTransportFromConfig(cfg *config.Config) clusterTransportKey {
 		Fabric1Interface:   cc.Fabric1Interface,
 		Fabric1PeerAddress: cc.Fabric1PeerAddress,
 	}
+}
+
+// clusterTransportForConfig adds the currently selected socket VRF binding to
+// the configured endpoints. clusterSyncTransport uses the control pair when
+// configured (the same pair heartbeat uses), and otherwise selects fabric.
+// Management-VRF membership is published by apply, not represented in
+// ClusterConfig, so step 20 resolves it from the current membership snapshot.
+func (d *Daemon) clusterTransportForConfig(cfg *config.Config) clusterTransportKey {
+	key := clusterTransportFromConfig(cfg)
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return key
+	}
+	key.VRFDevice = d.clusterSyncVRFDeviceForTransportKey(cfg.Chassis.Cluster)
+	return key
 }
 
 // setActiveTransportIfCurrent publishes the transport key of the comms epoch
