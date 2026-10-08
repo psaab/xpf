@@ -43,7 +43,10 @@ type fakeSystem struct {
 	stopHook func()
 	// readerVersion/readerErr model the target binary's pure envelope probe.
 	readerVersion int
-	readerErr     error
+	// readerVersionsByDir optionally overrides the reader by the binary's
+	// parent-directory basename (staged generation or installed version tag).
+	readerVersionsByDir map[string]int
+	readerErr           error
 	// healthErr is returned by HelperHealthy (nil = healthy).
 	healthErr error
 	// healthFailVersions: versions for which health fails (overrides
@@ -134,7 +137,12 @@ func (f *fakeSystem) VerifyDataplane(string, []string) (bool, error) {
 	return f.verifyPass, f.verifyErr
 }
 func (f *fakeSystem) BinaryVersion(string) (string, error) { return f.stagedVersion, nil }
-func (f *fakeSystem) EnvelopeReaderVersion(string) (int, error) {
+func (f *fakeSystem) EnvelopeReaderVersion(bin string) (int, error) {
+	if f.readerVersionsByDir != nil {
+		if v, ok := f.readerVersionsByDir[filepath.Base(filepath.Dir(bin))]; ok {
+			return v, nil
+		}
+	}
 	if f.readerErr != nil {
 		return 0, f.readerErr
 	}

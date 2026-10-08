@@ -72,6 +72,27 @@ func (r *Runner) stampCommittedVersion(j *Journal) error {
 	})
 }
 
+// committedPredecessorStamp returns target's committed stamp only when the
+// current version's commit record names it as its predecessor. A same-tag
+// downgrade may recopy that target before the pre-STOP envelope recheck; keep
+// its history until the recheck passes so a refusal does not erase the known-
+// good rollback target.
+func (r *Runner) committedPredecessorStamp(j *Journal, target string) *committedStamp {
+	if j == nil || j.PreviousVersion == "" || target == "" || target == j.PreviousVersion {
+		return nil
+	}
+	currentStamp, present := r.readCommittedStamp(j.PreviousVersion)
+	if !present || currentStamp == nil || !currentStamp.Committed ||
+		currentStamp.Predecessor != target {
+		return nil
+	}
+	targetStamp, present := r.readCommittedStamp(target)
+	if !present || targetStamp == nil || !targetStamp.Committed {
+		return nil
+	}
+	return targetStamp
+}
+
 // stampInFlightVersion marks a copied target as non-committed until the cut
 // reaches COMMIT. The durable marker survives an auto-rollback, excluding a
 // complete but just-failed runtime from default rollback selection.

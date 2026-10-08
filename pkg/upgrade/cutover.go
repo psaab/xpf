@@ -505,6 +505,15 @@ func (r *Runner) Run(opts Options) (err error) {
 					"realign the generation", r.versionDir(stagedVer), existingGen, srcGen)
 			}
 		}
+		// REFUSE-AT-INIT: prove the staged binary can read the live config DB
+		// before persisting STAGED. Otherwise a clean envelope refusal would
+		// leave an in-flight journal that blocks operator rollback.
+		if err := r.validateForwardEnvelopeCompatibility(stagedVer, stagedXpfd); err != nil {
+			if cerr := r.clearJournal(); cerr != nil {
+				r.logf("upgrade: WARN clear stale journal on envelope refuse: %v", cerr)
+			}
+			return fmt.Errorf("refuse-before-PREFLIGHT: %w", err)
+		}
 		j.TargetVersion = stagedVer
 		// Record the RESTORABLE current, not the raw basename: a dangling /
 		// pathful / incomplete `current` must be recorded as "" (no rollback
@@ -554,6 +563,11 @@ func (r *Runner) Run(opts Options) (err error) {
 	// ---- PREFLIGHT (pure) ----
 	if !j.State.atLeast(StatePreflight) {
 		if err := r.preflight(j); err != nil {
+			if _, ok := err.(*forwardEnvelopeGateRefusal); ok {
+				if cerr := r.clearJournal(); cerr != nil {
+					r.logf("upgrade: WARN clear journal on resumed envelope refuse: %v", cerr)
+				}
+			}
 			return fmt.Errorf("preflight: %w", err)
 		}
 		if err := r.transition(j, StatePreflight); err != nil {
@@ -713,6 +727,14 @@ func (r *Runner) Run(opts Options) (err error) {
 		if err := r.validateForwardEnvelopeCompatibility(j.TargetVersion,
 			filepath.Join(r.versionDir(j.TargetVersion), "xpfd")); err != nil {
 			return fmt.Errorf("refuse-before-STOP: %w", err)
+		}
+		// A committed predecessor reused as the staged target remains a
+		// rollback candidate until the final live-DB gate passes.
+		if r.committedPredecessorStamp(j, j.TargetVersion) != nil {
+			if err := r.stampInFlightVersion(j.TargetVersion); err != nil {
+				return fmt.Errorf("mark version %s non-committed after pre-STOP check: %w",
+					j.TargetVersion, err)
+			}
 		}
 	}
 	// ---- STOP + CUT-BOUNDARY DB SNAPSHOT (live mutation #1) ----
@@ -910,13 +932,23 @@ func firstNonNil(errs ...error) error {
 // uses this seam; the flip.go rollback-restore stats are unaffected.
 var statConfigDBDir = os.Stat
 
+type forwardEnvelopeGateRefusal struct {
+	err error
+}
+
+func (e *forwardEnvelopeGateRefusal) Error() string {
+	return "refuse-before-PREFLIGHT: " + e.err.Error()
+}
+
+func (e *forwardEnvelopeGateRefusal) Unwrap() error { return e.err }
+
 // preflight checks disk space (incl. the rollback DB snapshot), GCs
 // eligible versions if short, and takes the pre-upgrade DB snapshot. Pure:
 // no live mutation.
 func (r *Runner) preflight(j *Journal) error {
 	if err := r.validateForwardEnvelopeCompatibility(j.TargetVersion,
 		filepath.Join(r.sourceDir(j), "xpfd")); err != nil {
-		return fmt.Errorf("refuse-before-PREFLIGHT: %w", err)
+		return &forwardEnvelopeGateRefusal{err: err}
 	}
 	if err := fsatomic.MkdirAllDurable(r.cfg.VersionsDir, 0755); err != nil {
 		return fmt.Errorf("create versions dir: %w", err)
@@ -1105,12 +1137,13 @@ func (r *Runner) copyStaged(j *Journal) error {
 				j.SourceGeneration, srcDir)
 		}
 	}
+	preservedPredecessorStamp := r.committedPredecessorStamp(j, ver)
 
-	// An existing non-live target is no longer a committed rollback candidate
-	// once a new cut starts using its version tag. Persist this before either
-	// accepting an identical-source resume or replacing the tree, so a failed
-	// cut cannot inherit the old commit stamp.
-	if _, err := os.Stat(dst); err == nil && ver != j.PreviousVersion {
+	// Other existing non-live targets are no longer committed candidates once
+	// a cut uses their version tag. A committed predecessor of the live version
+	// is the exception: retain its stamp until the pre-STOP envelope recheck.
+	if _, err := os.Stat(dst); err == nil && ver != j.PreviousVersion &&
+		preservedPredecessorStamp == nil {
 		if err := r.stampInFlightVersion(ver); err != nil {
 			return fmt.Errorf("mark version %s non-committed before copy: %w", ver, err)
 		}
@@ -1185,13 +1218,18 @@ func (r *Runner) copyStaged(j *Journal) error {
 		_ = os.RemoveAll(partial)
 		return fmt.Errorf("partial checksum mismatch (copy corrupted)")
 	}
-	// Include a non-committed marker in the atomic directory rename. A crash
-	// after COPY but before COMMIT must never make this target eligible for a
-	// later default rollback.
+	// Include an in-flight marker in the atomic directory rename so a crash
+	// after COPY but before COMMIT cannot make an attempted target eligible
+	// for default rollback. Preserve a committed predecessor's stamp until the
+	// pre-STOP envelope recheck has passed.
 	if ver != j.PreviousVersion {
-		if werr := r.writeCommitStampTo(partial, committedStamp{Version: ver}); werr != nil {
+		stamp := committedStamp{Version: ver}
+		if preservedPredecessorStamp != nil {
+			stamp = *preservedPredecessorStamp
+		}
+		if werr := r.writeCommitStampTo(partial, stamp); werr != nil {
 			_ = os.RemoveAll(partial)
-			return fmt.Errorf("mark copied version %s non-committed: %w", ver, werr)
+			return fmt.Errorf("stamp copied version %s before commit: %w", ver, werr)
 		}
 	}
 	// Stamp the source generation INSIDE the partial (B-P3b OPT1) so it lands
