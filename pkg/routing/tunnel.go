@@ -667,7 +667,7 @@ func (t *tunnelManager) applyAnchorLocked(tc *config.TunnelConfig, adopting bool
 			// startKeepalive stops+drains any predecessor itself; runs
 			// AFTER a recreate so the fresh runner probes the new device.
 			// tc.Source is the probe bind endpoint (#1918 §5c).
-			t.startKeepalive(tc.Name, tc.Source, tc.Destination, tc.Keepalive, tc.KeepaliveRetry)
+			t.startKeepalive(tc.Name, tc.RoutingInstance, tc.Source, tc.Destination, tc.Keepalive, tc.KeepaliveRetry)
 		}
 	} else if hasRunner {
 		t.stopKeepaliveLocked(tc.Name)
@@ -875,7 +875,7 @@ func (t *tunnelManager) applyKernelTunnelLocked(tc *config.TunnelConfig) error {
 				// recreated — the restarted runner captures the just-bumped
 				// generation and probes the same device.
 				if tc.Keepalive > 0 {
-					t.startKeepalive(tc.Name, tc.Source, tc.Destination, tc.Keepalive, tc.KeepaliveRetry)
+					t.startKeepalive(tc.Name, tc.RoutingInstance, tc.Source, tc.Destination, tc.Keepalive, tc.KeepaliveRetry)
 				}
 				return fmt.Errorf("replace tunnel %s: %w", tc.Name, delErr)
 			}
@@ -955,7 +955,7 @@ func (t *tunnelManager) applyKernelTunnelLocked(tc *config.TunnelConfig) error {
 			// startKeepalive stops+drains any predecessor itself;
 			// runs AFTER a recreate so the fresh runner probes the
 			// new device. tc.Source is the bind endpoint (#1918 §5c).
-			t.startKeepalive(tc.Name, tc.Source, tc.Destination, tc.Keepalive, tc.KeepaliveRetry)
+			t.startKeepalive(tc.Name, tc.RoutingInstance, tc.Source, tc.Destination, tc.Keepalive, tc.KeepaliveRetry)
 		}
 	} else if hasRunner {
 		t.stopKeepaliveLocked(tc.Name)

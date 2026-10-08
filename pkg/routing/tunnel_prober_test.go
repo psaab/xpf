@@ -85,7 +85,7 @@ func buildEchoReply(seq int, data []byte) []byte {
 
 func withListenICMP(conn probeConn, err error, fn func()) {
 	orig := listenICMP
-	listenICMP = func(network, source string) (probeConn, error) {
+	listenICMP = func(network, source, bindDevice string) (probeConn, error) {
 		if err != nil {
 			return nil, err
 		}
@@ -100,7 +100,7 @@ func TestProberMatchingReplyAlive(t *testing.T) {
 		return [][]byte{buildEchoReply(seq, data)}
 	}}
 	withListenICMP(conn, nil, func() {
-		res, _, _ := icmpProber{}.Probe("198.51.100.1", "203.0.113.1", 7, []byte("nonce123"), 200*time.Millisecond)
+		res, _, _ := icmpProber{}.Probe("", "198.51.100.1", "203.0.113.1", 7, []byte("nonce123"), 200*time.Millisecond)
 		if res != ProbeAlive {
 			t.Fatalf("matching reply must be Alive, got %v", res)
 		}
@@ -131,7 +131,7 @@ func TestProberIPv6MatchingReplyAlive(t *testing.T) {
 		},
 	}
 	withListenICMP(conn, nil, func() {
-		res, _, _ := icmpProber{}.Probe("2001:db8::1", "2001:db8::2", 11, []byte("v6nonce0"), 200*time.Millisecond)
+		res, _, _ := icmpProber{}.Probe("", "2001:db8::1", "2001:db8::2", 11, []byte("v6nonce0"), 200*time.Millisecond)
 		if res != ProbeAlive {
 			t.Fatalf("v6 matching reply must be Alive, got %v", res)
 		}
@@ -146,7 +146,7 @@ func TestProberIPv6WrongNonceIsDead(t *testing.T) {
 		},
 	}
 	withListenICMP(conn, nil, func() {
-		res, _, _ := icmpProber{}.Probe("2001:db8::1", "2001:db8::2", 11, []byte("v6nonce0"), 200*time.Millisecond)
+		res, _, _ := icmpProber{}.Probe("", "2001:db8::1", "2001:db8::2", 11, []byte("v6nonce0"), 200*time.Millisecond)
 		if res != ProbeDead {
 			t.Fatalf("v6 wrong-nonce reply must be Dead, got %v", res)
 		}
@@ -158,7 +158,7 @@ func TestProberWrongSeqIsDead(t *testing.T) {
 		return [][]byte{buildEchoReply(seq+1, data)} // wrong seq
 	}}
 	withListenICMP(conn, nil, func() {
-		res, _, _ := icmpProber{}.Probe("198.51.100.1", "203.0.113.1", 7, []byte("nonce123"), 200*time.Millisecond)
+		res, _, _ := icmpProber{}.Probe("", "198.51.100.1", "203.0.113.1", 7, []byte("nonce123"), 200*time.Millisecond)
 		if res != ProbeDead {
 			t.Fatalf("wrong-seq reply must be Dead, got %v", res)
 		}
@@ -170,7 +170,7 @@ func TestProberWrongNonceIsDead(t *testing.T) {
 		return [][]byte{buildEchoReply(seq, []byte("different"))} // wrong nonce
 	}}
 	withListenICMP(conn, nil, func() {
-		res, _, _ := icmpProber{}.Probe("198.51.100.1", "203.0.113.1", 7, []byte("nonce123"), 200*time.Millisecond)
+		res, _, _ := icmpProber{}.Probe("", "198.51.100.1", "203.0.113.1", 7, []byte("nonce123"), 200*time.Millisecond)
 		if res != ProbeDead {
 			t.Fatalf("wrong-nonce reply must be Dead, got %v", res)
 		}
@@ -187,7 +187,7 @@ func TestProberForeignReplySkippedThenMatch(t *testing.T) {
 		}
 	}}
 	withListenICMP(conn, nil, func() {
-		res, _, _ := icmpProber{}.Probe("198.51.100.1", "203.0.113.1", 7, []byte("nonce123"), 500*time.Millisecond)
+		res, _, _ := icmpProber{}.Probe("", "198.51.100.1", "203.0.113.1", 7, []byte("nonce123"), 500*time.Millisecond)
 		if res != ProbeAlive {
 			t.Fatalf("foreign-then-matching must be Alive, got %v", res)
 		}
@@ -197,7 +197,7 @@ func TestProberForeignReplySkippedThenMatch(t *testing.T) {
 func TestProberNoReplyIsDead(t *testing.T) {
 	conn := &fakeProbeConn{} // no replyFn → read times out
 	withListenICMP(conn, nil, func() {
-		res, _, _ := icmpProber{}.Probe("198.51.100.1", "203.0.113.1", 7, []byte("nonce123"), 50*time.Millisecond)
+		res, _, _ := icmpProber{}.Probe("", "198.51.100.1", "203.0.113.1", 7, []byte("nonce123"), 50*time.Millisecond)
 		if res != ProbeDead {
 			t.Fatalf("no reply must be Dead, got %v", res)
 		}
@@ -206,7 +206,7 @@ func TestProberNoReplyIsDead(t *testing.T) {
 
 func TestProberListenErrorStructural(t *testing.T) {
 	withListenICMP(nil, &os.SyscallError{Syscall: "socket", Err: syscall.EPERM}, func() {
-		res, kind, _ := icmpProber{}.Probe("198.51.100.1", "203.0.113.1", 7, []byte("n"), 50*time.Millisecond)
+		res, kind, _ := icmpProber{}.Probe("", "198.51.100.1", "203.0.113.1", 7, []byte("n"), 50*time.Millisecond)
 		if res != ProbeUnsupported || kind != UnsupportedStructural {
 			t.Fatalf("EPERM must be Unsupported/Structural, got %v/%v", res, kind)
 		}
@@ -215,7 +215,7 @@ func TestProberListenErrorStructural(t *testing.T) {
 
 func TestProberListenErrorTransient(t *testing.T) {
 	withListenICMP(nil, &os.SyscallError{Syscall: "socket", Err: syscall.EMFILE}, func() {
-		res, kind, _ := icmpProber{}.Probe("198.51.100.1", "203.0.113.1", 7, []byte("n"), 50*time.Millisecond)
+		res, kind, _ := icmpProber{}.Probe("", "198.51.100.1", "203.0.113.1", 7, []byte("n"), 50*time.Millisecond)
 		if res != ProbeUnsupported || kind != UnsupportedTransient {
 			t.Fatalf("EMFILE must be Unsupported/Transient, got %v/%v", res, kind)
 		}
@@ -224,7 +224,7 @@ func TestProberListenErrorTransient(t *testing.T) {
 
 func TestProberUnknownErrnoIsTransient(t *testing.T) {
 	withListenICMP(nil, &os.SyscallError{Syscall: "socket", Err: syscall.ENOMEM}, func() {
-		_, kind, _ := icmpProber{}.Probe("198.51.100.1", "203.0.113.1", 7, []byte("n"), 50*time.Millisecond)
+		_, kind, _ := icmpProber{}.Probe("", "198.51.100.1", "203.0.113.1", 7, []byte("n"), 50*time.Millisecond)
 		if kind != UnsupportedTransient {
 			t.Fatalf("ENOMEM must be Transient, got %v", kind)
 		}
@@ -237,7 +237,7 @@ func TestProberUnknownErrnoIsTransient(t *testing.T) {
 func TestProberWriteResourceErrorIsTransient(t *testing.T) {
 	conn := &fakeProbeConn{writeErr: &os.SyscallError{Syscall: "sendto", Err: syscall.ENOBUFS}}
 	withListenICMP(conn, nil, func() {
-		res, kind, _ := icmpProber{}.Probe("198.51.100.1", "203.0.113.1", 7, []byte("n"), 50*time.Millisecond)
+		res, kind, _ := icmpProber{}.Probe("", "198.51.100.1", "203.0.113.1", 7, []byte("n"), 50*time.Millisecond)
 		if res != ProbeUnsupported || kind != UnsupportedTransient {
 			t.Fatalf("ENOBUFS on WriteTo must be Unsupported/Transient, got %v/%v", res, kind)
 		}
@@ -248,7 +248,7 @@ func TestProberWriteResourceErrorIsTransient(t *testing.T) {
 func TestProberWritePathUnreachableIsDead(t *testing.T) {
 	conn := &fakeProbeConn{writeErr: &os.SyscallError{Syscall: "sendto", Err: syscall.EHOSTUNREACH}}
 	withListenICMP(conn, nil, func() {
-		res, _, _ := icmpProber{}.Probe("198.51.100.1", "203.0.113.1", 7, []byte("n"), 50*time.Millisecond)
+		res, _, _ := icmpProber{}.Probe("", "198.51.100.1", "203.0.113.1", 7, []byte("n"), 50*time.Millisecond)
 		if res != ProbeDead {
 			t.Fatalf("EHOSTUNREACH on WriteTo must be Dead, got %v", res)
 		}
@@ -256,7 +256,7 @@ func TestProberWritePathUnreachableIsDead(t *testing.T) {
 }
 
 func TestProberBadDestStructural(t *testing.T) {
-	res, kind, _ := icmpProber{}.Probe("198.51.100.1", "not-an-ip", 7, []byte("n"), 50*time.Millisecond)
+	res, kind, _ := icmpProber{}.Probe("", "198.51.100.1", "not-an-ip", 7, []byte("n"), 50*time.Millisecond)
 	if res != ProbeUnsupported || kind != UnsupportedStructural {
 		t.Fatalf("unparseable dst must be Unsupported/Structural, got %v/%v", res, kind)
 	}
