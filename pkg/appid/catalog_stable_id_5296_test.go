@@ -153,3 +153,61 @@ func TestResolveTupleFallbackUsesDisplacedAssignedID_10722(t *testing.T) {
 			got, displaced, displacedID, middle)
 	}
 }
+
+// TestUnreferencedCollisionsAgreeAcrossAppIDModes_12225 covers overlapping
+// apps behind an `application any` permit. The AppID-off catalog omits every
+// unreferenced app, so fallback ordering must still use the full catalog's
+// assigned IDs and remain deterministic.
+func TestUnreferencedCollisionsAgreeAcrossAppIDModes_12225(t *testing.T) {
+	for _, names := range [][]string{
+		{"svc-217", "svc-396"},
+		{"svc-217", "svc-396", "mmm-middle"},
+	} {
+		makeConfig := func(appID bool) *config.Config {
+			apps := make(map[string]*config.Application, len(names))
+			for _, name := range names {
+				apps[name] = &config.Application{Name: name, Protocol: "tcp", DestinationPort: "8080"}
+			}
+			cfg := &config.Config{Applications: config.ApplicationsConfig{Applications: apps}}
+			cfg.Services.ApplicationIdentification = appID
+			cfg.Security.GlobalPolicies = []*config.Policy{
+				{Name: "permit-any", Match: config.PolicyMatch{Applications: []string{"any"}}},
+			}
+			return cfg
+		}
+
+		onCfg := makeConfig(true)
+		onCatalog, err := BuildCatalog(onCfg)
+		if err != nil {
+			t.Fatalf("BuildCatalog with AppID on: %v", err)
+		}
+		offCfg := makeConfig(false)
+		offCatalog, err := BuildCatalog(offCfg)
+		if err != nil {
+			t.Fatalf("BuildCatalog with AppID off: %v", err)
+		}
+		if len(offCatalog.AppNames) != 0 {
+			t.Fatalf("application any must not reference the configured apps, got AppNames %v", offCatalog.AppNames)
+		}
+
+		wantName := names[0]
+		wantID := idOfName(onCatalog, wantName)
+		for _, name := range names[1:] {
+			if id := idOfName(onCatalog, name); id < wantID {
+				wantName, wantID = name, id
+			}
+		}
+		if wantName != "svc-396" || wantID != 1 {
+			t.Fatalf("fixture drift: full-catalog winner = %q (id %d), want svc-396 (id 1)", wantName, wantID)
+		}
+		onLabel := ResolveSessionName(onCatalog.AppNames, onCfg, 6, 40000, 8080, wantID)
+		if onLabel != wantName {
+			t.Fatalf("AppID-on label = %q, want %q", onLabel, wantName)
+		}
+		for range 100 {
+			if got := ResolveSessionName(offCatalog.AppNames, offCfg, 6, 40000, 8080, 0); got != onLabel {
+				t.Fatalf("AppID-off label = %q, want %q to match AppID on (apps %v)", got, onLabel, names)
+			}
+		}
+	}
+}

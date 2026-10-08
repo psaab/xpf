@@ -254,6 +254,36 @@ func assignedIDForName(appNames map[uint16]string, name string) uint16 {
 	return naturalID
 }
 
+// assignedIDsForAllApplications mirrors the include-all catalog name universe:
+// predefined applications plus every configured user application.
+func assignedIDsForAllApplications(cfg *config.Config) (map[string]uint16, error) {
+	names := make([]string, 0, len(config.PredefinedApplications)+len(cfg.Applications.Applications))
+	for name := range config.PredefinedApplications {
+		names = append(names, name)
+	}
+	for name := range cfg.Applications.Applications {
+		names = append(names, name)
+	}
+	return config.AssignStableAppIDsQuiet(names)
+}
+
+// stableIDCollides reports whether another full-catalog name shares this
+// application's natural StableAppID slot.
+func stableIDCollides(cfg *config.Config, name string) bool {
+	id := config.StableAppID(name)
+	for other := range config.PredefinedApplications {
+		if other != name && config.StableAppID(other) == id {
+			return true
+		}
+	}
+	for other := range cfg.Applications.Applications {
+		if other != name && config.StableAppID(other) == id {
+			return true
+		}
+	}
+	return false
+}
+
 func resolveTupleFallback(proto uint8, srcPort, dstPort uint16, cfg *config.Config, appNames map[uint16]string) string {
 	if cfg != nil {
 		// #2578: cfg.Applications.Applications is a Go map; iterating it and
@@ -264,19 +294,17 @@ func resolveTupleFallback(proto uint8, srcPort, dstPort uint16, cfg *config.Conf
 		// (a source-port and/or destination-port constraint) over a
 		// protocol-only one, and break same-tier ties by LOWEST assigned app_id.
 		//
-		// #10722: use the assigned app_id carried by the catalog, not the natural
-		// StableAppID hash. AssignStableAppIDs displaces a user app that collides
-		// with an already-placed id, so its assigned id can differ from its hash.
-		// Rust resolves same-tier overlaps by the lowest assigned app_id; using
-		// this map keeps the AppID-disabled Go label path in parity, including
-		// collision-displaced apps (#5296/#5988/#3612).
-		//
-		// Names absent from this catalog map (for example, a tolerated config
-		// entry not referenced by policy) retain the natural hash fallback so
-		// the disabled label path keeps its existing configured-app coverage.
+		// #10722: use assigned IDs, not natural StableAppID hashes, for same-tier
+		// ties. The AppID-on Rust catalog selects the lowest assigned ID, but an
+		// AppID-off catalog contains only referenced names and cannot reveal
+		// displacement caused by overlapping unreferenced apps. Reassign the
+		// full configured universe (predefined + user apps) only for a
+		// hash-colliding tie; otherwise the natural IDs are already assigned IDs.
 		best := ""
 		bestPortBased := false
 		var bestID uint16
+		hasTie := false
+		needsAssignedIDs := false
 		for name, app := range cfg.Applications.Applications {
 			// #4865: skip a tolerated nil user-application value (a JSON null
 			// decoding to a nil pointer on a lenient/HA-synced load, #3494).
@@ -302,11 +330,43 @@ func resolveTupleFallback(proto uint8, srcPort, dstPort uint16, cfg *config.Conf
 			}
 			portBased := app.DestinationPort != "" || app.SourcePort != ""
 			id := assignedIDForName(appNames, name)
-			if best == "" || (portBased && !bestPortBased) ||
-				(portBased == bestPortBased && id < bestID) {
+			if best == "" || (portBased && !bestPortBased) {
 				best = name
 				bestPortBased = portBased
 				bestID = id
+				hasTie = false
+				needsAssignedIDs = false
+			} else if portBased == bestPortBased {
+				if !hasTie {
+					hasTie = true
+					needsAssignedIDs = stableIDCollides(cfg, best) || stableIDCollides(cfg, name)
+				} else if !needsAssignedIDs && stableIDCollides(cfg, name) {
+					needsAssignedIDs = true
+				}
+				if id < bestID || (id == bestID && name < best) {
+					best = name
+					bestID = id
+				}
+			}
+		}
+		if hasTie && needsAssignedIDs {
+			if ids, err := assignedIDsForAllApplications(cfg); err == nil {
+				best = ""
+				for name, app := range cfg.Applications.Applications {
+					if app == nil || icmpTypeConstrained(app) ||
+						!matchTuple(proto, srcPort, dstPort, app.Protocol, app.SourcePort, app.DestinationPort) {
+						continue
+					}
+					portBased := app.DestinationPort != "" || app.SourcePort != ""
+					if portBased != bestPortBased {
+						continue
+					}
+					id := ids[name]
+					if best == "" || id < bestID || (id == bestID && name < best) {
+						best = name
+						bestID = id
+					}
+				}
 			}
 		}
 		if best != "" {
