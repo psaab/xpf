@@ -3,6 +3,9 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +13,8 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/routing"
 	"github.com/psaab/xpf/pkg/rpm"
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 func rpmTestConfig(target string) *config.Config {
@@ -306,4 +311,286 @@ func TestProbePinPeriodicRetryRecoversWithoutCommit(t *testing.T) {
 	if active {
 		t.Fatal("rpmPinRetryActive still set after recovery")
 	}
+}
+
+// TestReconcileRPMDetectsMissingKernelPinWithoutHashChange12088 pins the
+// reported kernel drift: a successful initial install followed by route loss
+// must be held on an unchanged config hash, before the periodic reinstall.
+func TestReconcileRPMDetectsMissingKernelPinWithoutHashChange12088(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := &Daemon{
+		rpm:                rpm.New(),
+		daemonCtx:          ctx,
+		probePinRetryEvery: time.Hour,
+	}
+	defer d.rpm.StopAll()
+	defer d.stopPinRetryLoop()
+
+	var mu sync.Mutex
+	routePresent := false
+	var applyCalls int
+	d.probePinApply = func([]routing.ProbePin) map[string]error {
+		mu.Lock()
+		defer mu.Unlock()
+		applyCalls++
+		routePresent = true
+		return nil
+	}
+	d.probePinVerify = func(pins []routing.ProbePin) map[string]error {
+		if len(pins) != 1 || pins[0].TestKey != "WAN/t" {
+			t.Fatalf("unexpected pins: %+v", pins)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if routePresent {
+			return nil
+		}
+		return map[string]error{"WAN/t": fmt.Errorf("pinned route missing")}
+	}
+
+	cfg := rpmPinnedTestConfig()
+	if !d.reconcileRPM(cfg) {
+		t.Fatal("first reconcile must apply")
+	}
+	if got := d.rpm.PinInstallFailureCount(); got != 0 {
+		t.Fatalf("initially installed pin is held: failures=%d", got)
+	}
+	mu.Lock()
+	routePresent = false // emulate the kernel deleting the table route
+	mu.Unlock()
+	if d.reconcileRPM(cfg) {
+		t.Fatal("unchanged RPM hash must not restart probes")
+	}
+	if got := d.rpm.PinInstallFailureCount(); got != 1 {
+		t.Fatalf("missing route was not held after unchanged-hash reconcile: failures=%d", got)
+	}
+	mu.Lock()
+	gotApplyCalls := applyCalls
+	mu.Unlock()
+	if gotApplyCalls != 1 {
+		t.Fatalf("drift detection reinstalled before retry interval: apply calls=%d, want 1", gotApplyCalls)
+	}
+}
+
+const probePin12088InnerEnv = "XPF_12088_PROBE_PIN_INNER"
+
+// TestProbePinKernelDriftReconcilesInPrivateNetns12088 exercises the real
+// netlink manager and the daemon's unchanged-hash path against kernel link and
+// address cleanup. The outer invocation isolates the whole test process so no
+// host routes, addresses, or links are touched.
+func TestProbePinKernelDriftReconcilesInPrivateNetns12088(t *testing.T) {
+	if os.Getenv(probePin12088InnerEnv) == "1" {
+		runProbePinKernelDriftInPrivateNetns12088(t)
+		return
+	}
+	unshare, err := exec.LookPath("unshare")
+	if err != nil {
+		t.Skip("netns acceptance skipped: unshare is not available")
+	}
+	cmd := exec.Command(unshare, "-rn", os.Args[0], "-test.run",
+		"^TestProbePinKernelDriftReconcilesInPrivateNetns12088$", "-test.v")
+	cmd.Env = append(os.Environ(), probePin12088InnerEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	t.Logf("private-netns acceptance output:\n%s", out)
+	if err != nil {
+		if strings.Contains(string(out), "Operation not permitted") ||
+			strings.Contains(string(out), "unshare:") {
+			t.Skipf("netns acceptance skipped: cannot create private namespace: %v", err)
+		}
+		t.Fatalf("private-netns probe pin acceptance failed: %v", err)
+	}
+}
+
+func runProbePinKernelDriftInPrivateNetns12088(t *testing.T) {
+	const (
+		iface = "xpf12088"
+		next  = "198.51.100.1"
+	)
+	loopback, err := netlink.LinkByName("lo")
+	if err != nil {
+		t.Fatalf("loopback lookup: %v", err)
+	}
+	if err := netlink.LinkSetUp(loopback); err != nil {
+		t.Fatalf("loopback up: %v", err)
+	}
+	dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: iface}}
+	if err := netlink.LinkAdd(dummy); err != nil {
+		t.Skipf("netns acceptance skipped: cannot create dummy interface: %v", err)
+	}
+	link, err := netlink.LinkByName(iface)
+	if err != nil {
+		t.Fatalf("created probe interface lookup: %v", err)
+	}
+	addr, err := netlink.ParseAddr("198.51.100.2/24")
+	if err != nil {
+		t.Fatalf("parse probe interface address: %v", err)
+	}
+	if err := netlink.AddrAdd(link, addr); err != nil {
+		t.Fatalf("probe interface address add: %v", err)
+	}
+	if err := netlink.LinkSetUp(link); err != nil {
+		t.Fatalf("probe interface up: %v", err)
+	}
+
+	rt, err := routing.New()
+	if err != nil {
+		t.Fatalf("routing.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d := &Daemon{
+		rpm:                rpm.New(),
+		daemonCtx:          ctx,
+		routing:            rt,
+		probePinRetryEvery: 1500 * time.Millisecond,
+	}
+	defer func() {
+		cancel()
+		d.stopPinRetryLoop()
+		d.rpm.StopAll()
+		_ = rt.Close()
+	}()
+
+	cfg := rpmPinnedTestConfig()
+	test := cfg.Services.RPM.Probes["WAN"].Tests["t"]
+	test.Target = "127.0.0.1"
+	test.NextHop = next
+	test.DestinationInterface = iface
+	test.TestInterval = 3600
+	if !d.reconcileRPM(cfg) {
+		t.Fatal("initial pin reconcile did not apply")
+	}
+	pins := routing.BuildProbePins(cfg.Services.RPM, nil)
+	if len(pins) != 1 {
+		t.Fatalf("configured pins = %d, want 1", len(pins))
+	}
+	if failed := rt.VerifyProbePins(pins); len(failed) != 0 {
+		t.Fatalf("initial kernel pin did not verify: %v", failed)
+	}
+	rulePresent := func() bool {
+		rules, err := netlink.RuleList(unix.AF_INET)
+		if err != nil {
+			t.Fatalf("read kernel rules: %v", err)
+		}
+		for _, rule := range rules {
+			if rule.Priority == pins[0].Priority && rule.Mark == pins[0].Mark &&
+				rule.Table == pins[0].Table {
+				return true
+			}
+		}
+		return false
+	}
+	routePresent := func() bool {
+		routes, err := netlink.RouteListFiltered(unix.AF_INET,
+			&netlink.Route{Table: pins[0].Table}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			t.Fatalf("read pinned table: %v", err)
+		}
+		return len(routes) > 0
+	}
+	sent := func() int64 {
+		for _, result := range d.rpm.Results() {
+			if result.ProbeName == "WAN" && result.TestName == "t" {
+				return result.TotalSent
+			}
+		}
+		return 0
+	}
+	waitForProbe := func() {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) && sent() == 0 {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if sent() == 0 {
+			t.Fatal("initial pinned loopback probe did not complete")
+		}
+	}
+
+	waitForEventHold := func(what string) {
+		t.Helper()
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) && d.rpm.PinInstallFailureCount() == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if got := d.rpm.PinInstallFailureCount(); got != 1 {
+			t.Fatalf("%s event did not hold the drifted pin: failures=%d", what, got)
+		}
+	}
+	waitForProbe()
+	// Let a healthy monitor tick pass so each following kernel event has a
+	// full retry interval in which the held state can be observed.
+	time.Sleep(1600 * time.Millisecond)
+
+	assertHeldWithoutProbe := func(what string) int64 {
+		t.Helper()
+		before := sent()
+		if got := d.rpm.PinInstallFailureCount(); got != 1 {
+			t.Fatalf("%s: missing kernel route was not held: pin failures=%d", what, got)
+		}
+		// Restart one immediate RPM cycle while the route is absent. Apply
+		// retains SetPinInstallResults; ErrProbeSetup must prevent a send.
+		d.rpm.Apply(ctx, cfg.Services.RPM)
+		time.Sleep(100 * time.Millisecond)
+		if got := sent(); got != before {
+			t.Fatalf("%s: probe sent while table-7000 route was absent: %d -> %d",
+				what, before, got)
+		}
+		if routePresent() {
+			t.Fatalf("%s: route reinstalled before the retry interval", what)
+		}
+		return before
+	}
+	waitForRepair := func(what string) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if routePresent() && d.rpm.PinInstallFailureCount() == 0 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if !routePresent() {
+			t.Fatalf("%s: table-%d route was not restored by one retry interval",
+				what, pins[0].Table)
+		}
+		if got := d.rpm.PinInstallFailureCount(); got != 0 {
+			t.Fatalf("%s: pin remained held after route restoration: failures=%d", what, got)
+		}
+		if failed := rt.VerifyProbePins(pins); len(failed) != 0 {
+			t.Fatalf("%s: repaired pin failed readback: %v", what, failed)
+		}
+	}
+
+	if err := netlink.LinkSetDown(link); err != nil {
+		t.Fatalf("egress link down: %v", err)
+	}
+	if err := netlink.LinkSetUp(link); err != nil {
+		t.Fatalf("egress link up: %v", err)
+	}
+	if !rulePresent() || routePresent() {
+		t.Fatal("link bounce did not reproduce rule-survives / table-route-disappears")
+	}
+	waitForEventHold("link down/up")
+	if d.reconcileRPM(cfg) {
+		t.Fatal("unchanged-hash link-flap reconcile restarted the probe set")
+	}
+	assertHeldWithoutProbe("link down/up")
+	waitForRepair("link down/up")
+
+	if err := netlink.AddrDel(link, addr); err != nil {
+		t.Fatalf("last address removal: %v", err)
+	}
+	if !rulePresent() || routePresent() {
+		t.Fatal("last-address removal did not reproduce rule-survives / table-route-disappears")
+	}
+	waitForEventHold("address removal")
+	if d.reconcileRPM(cfg) {
+		t.Fatal("unchanged-hash address-loss reconcile restarted the probe set")
+	}
+	assertHeldWithoutProbe("last-address removal")
+	if err := netlink.AddrAdd(link, addr); err != nil {
+		t.Fatalf("last address re-add: %v", err)
+	}
+	waitForRepair("last-address removal and re-add")
 }

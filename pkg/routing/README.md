@@ -357,6 +357,9 @@ delegate to the owning domain. Exported types:
   `pkg/config` commit validation, this package, and `pkg/rpm` all
   consume them. `ClearProbePins` sweeps the range at startup only when xpf owns
   host routing posture; uncommitted foreign-host installs preserve it.
+  `VerifyProbePins` reads back each configured mark rule and pinned host route;
+  the daemon uses this to detect kernel cleanup that removes a route while
+  leaving its fwmark rule intact.
 - `30000–30999`: the shared destination-leak priority range for next-table
   inter-VRF leaks and rib-group per-prefix interface-route leaks.
   `config.RouteLeakRulePriority` maps destination prefix length into this

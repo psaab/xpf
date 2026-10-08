@@ -20,6 +20,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/routing"
+	"github.com/vishvananda/netlink"
 )
 
 // rpmConfigHash computes a stable hash of the effective RPM stanza plus
@@ -201,6 +202,18 @@ func (d *Daemon) probePinApplyFn() func([]routing.ProbePin) map[string]error {
 	return nil
 }
 
+// probePinVerifyFn returns the probe-pin kernel readback function: the test
+// seam when set, otherwise routing.Manager.VerifyProbePins, otherwise nil.
+func (d *Daemon) probePinVerifyFn() func([]routing.ProbePin) map[string]error {
+	if d.probePinVerify != nil {
+		return d.probePinVerify
+	}
+	if d.routing != nil {
+		return d.routing.VerifyProbePins
+	}
+	return nil
+}
+
 // errProbePinReprogram pre-marks every pin while the kernel band is
 // being cleared-and-reprogrammed: a pinned probe that ticks inside the
 // reprogram window holds state (ErrProbeSetup) instead of sending an
@@ -253,24 +266,78 @@ func (d *Daemon) applyProbePinsHeld(applyPins func([]routing.ProbePin) map[strin
 	return applyPins(pins)
 }
 
-// probePinRetryInterval is the slow periodic retry cadence for failed
-// probe-pin installs (#1895 AGY fold). Control-plane cost only (a
-// handful of netlink calls), and it runs ONLY while at least one pin
-// is failed.
+// probePinRetryInterval is the slow periodic probe-pin health-check and retry
+// cadence (#12088). The check uses a handful of netlink dumps only while probe
+// pins are configured; link/address notifications make drift detection prompt.
 const probePinRetryInterval = 30 * time.Second
 
-// retryFailedProbePinsLocked re-runs the pin install against the
-// last-applied effective probe set while any pin is failed, publishing
-// the results immediately (the probe set and deterministic mark
-// assignment are unchanged, so the union pre-hold covers exactly the
-// live goroutines). No probe restart. Caller holds rpmMu.
-func (d *Daemon) retryFailedProbePinsLocked() {
-	applyPins := d.probePinApplyFn()
-	if !d.rpmPinsFailed || applyPins == nil {
+// retainProbePinInstallFailures preserves only installer errors that the
+// authoritative readback still confirms. These alone keep the legacy
+// unchanged-hash immediate retry behavior; readback-only drift waits for the
+// periodic monitor retry.
+func retainProbePinInstallFailures(installed, verified map[string]error) map[string]error {
+	if len(installed) == 0 || len(verified) == 0 {
+		return nil
+	}
+	retained := make(map[string]error)
+	for key, err := range installed {
+		if _, stillFailed := verified[key]; stillFailed {
+			retained[key] = err
+		}
+	}
+	if len(retained) == 0 {
+		return nil
+	}
+	return retained
+}
+
+// verifyProbePinsLocked publishes per-pin readback failures immediately, so
+// the RPM gate returns ErrProbeSetup instead of sending with an unbacked mark.
+// Callers hold rpmMu. nil means this daemon has no readback implementation.
+func (d *Daemon) verifyProbePinsLocked(pins []routing.ProbePin) {
+	verify := d.probePinVerifyFn()
+	if verify == nil || len(pins) == 0 {
 		return
 	}
+	failed := verify(pins)
+	d.rpmPinInstallFailures = retainProbePinInstallFailures(d.rpmPinInstallFailures, failed)
+	if len(failed) > 0 && !d.rpmPinsFailed {
+		slog.Warn("kernel probe pin drift detected — affected tests held until retry",
+			"failed", len(failed))
+	}
+	d.rpm.SetPinInstallResults(failed)
+	d.rpmPinsFailed = len(failed) > 0
+}
+
+// retryFailedProbePinsLocked re-runs the pin install against the last-applied
+// effective probe set while any pin is failed, publishing installer and
+// readback results without restarting probes. A first readback-detected drift
+// is held by the caller and left for the next retry interval. Caller holds
+// rpmMu.
+func (d *Daemon) retryFailedProbePinsLocked() {
 	pins := routing.BuildProbePins(d.rpmEffective, d.rpmRethMap)
-	failed := d.applyProbePinsHeld(applyPins, pins)
+	if len(pins) == 0 {
+		d.rpmPinsFailed = false
+		d.rpmPinInstallFailures = nil
+		d.rpm.SetPinInstallResults(nil)
+		return
+	}
+	if !d.rpmPinsFailed {
+		d.verifyProbePinsLocked(pins)
+		return
+	}
+	applyPins := d.probePinApplyFn()
+	if applyPins == nil {
+		return
+	}
+	installFailed := d.applyProbePinsHeld(applyPins, pins)
+	d.rpmPinInstallFailures = installFailed
+	failed := installFailed
+	if verify := d.probePinVerifyFn(); verify != nil {
+		verified := verify(pins)
+		d.rpmPinInstallFailures = retainProbePinInstallFailures(installFailed, verified)
+		failed = verified
+	}
 	d.rpm.SetPinInstallResults(failed)
 	d.rpmPinsFailed = len(failed) > 0
 	if !d.rpmPinsFailed {
@@ -278,18 +345,15 @@ func (d *Daemon) retryFailedProbePinsLocked() {
 	}
 }
 
-// maybeStartPinRetryLoopLocked starts the periodic retry loop when
-// pins are failed and no loop is running. Without it, a pin that
-// failed during boot (egress link not yet up — the #1880-class
-// window) would hold its test until the NEXT commit or RG transition:
-// on a quiet box that means ip-monitoring failover protection silently
-// stays off after a reboot (AGY review on PR #1899). The loop stops
-// itself once every pin is installed. Caller holds rpmMu.
+// maybeStartPinRetryLoopLocked starts the pin health monitor when pins are
+// configured and a readback path exists, or when failed installs need retry.
+// Caller holds rpmMu.
 func (d *Daemon) maybeStartPinRetryLoopLocked() {
-	// pinRetryStopped latches at shutdown (stopPinRetryLoop): once the loop is
-	// cancelled + joined, a late reconcileRPM must NOT start a new one — that
-	// Add would race the shutdown's pinRetryWg.Wait (#5308).
-	if d.pinRetryStopped || !d.rpmPinsFailed || d.rpmPinRetryActive || d.daemonCtx == nil {
+	if d.pinRetryStopped || d.rpmPinRetryActive || d.daemonCtx == nil {
+		return
+	}
+	pins := routing.BuildProbePins(d.rpmEffective, d.rpmRethMap)
+	if len(pins) == 0 || (!d.rpmPinsFailed && d.probePinVerifyFn() == nil) {
 		return
 	}
 	d.rpmPinRetryActive = true
@@ -326,9 +390,10 @@ func (d *Daemon) stopPinRetryLoop() {
 	d.pinRetryWg.Wait()
 }
 
-// probePinRetryLoop is the slow autonomous retry of failed probe-pin
-// installs (#1895 AGY fold). It exits when no failed pins remain or
-// the daemon shuts down; reconcileRPM restarts it if pins fail again.
+// probePinRetryLoop verifies pins on link/address notifications and on the
+// periodic fallback. A missing pin is held on notification/reconcile and
+// restored on the next retry tick; once healthy, the loop remains active as
+// long as pins are configured so later kernel deletions are detected.
 func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 	interval := d.probePinRetryEvery
 	if interval <= 0 {
@@ -336,6 +401,48 @@ func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	var linkUpdates <-chan netlink.LinkUpdate
+	var addrUpdates <-chan netlink.AddrUpdate
+	var linkDone, addrDone chan struct{}
+	subscriptionErrors := make(chan struct{}, 1)
+	if d.probePinVerifyFn() != nil {
+		onError := func(error) {
+			select {
+			case subscriptionErrors <- struct{}{}:
+			default:
+			}
+		}
+		linkCh := make(chan netlink.LinkUpdate, 32)
+		linkDone = make(chan struct{})
+		if err := netlink.LinkSubscribeWithOptions(linkCh, linkDone,
+			netlink.LinkSubscribeOptions{ErrorCallback: onError}); err != nil {
+			slog.Warn("probe pin link subscription unavailable; periodic readback remains active",
+				"err", err)
+			close(linkDone)
+			linkDone = nil
+		} else {
+			linkUpdates = linkCh
+		}
+		addrCh := make(chan netlink.AddrUpdate, 32)
+		addrDone = make(chan struct{})
+		if err := netlink.AddrSubscribeWithOptions(addrCh, addrDone,
+			netlink.AddrSubscribeOptions{ErrorCallback: onError}); err != nil {
+			slog.Warn("probe pin address subscription unavailable; periodic readback remains active",
+				"err", err)
+			close(addrDone)
+			addrDone = nil
+		} else {
+			addrUpdates = addrCh
+		}
+	}
+	if linkDone != nil {
+		defer close(linkDone)
+	}
+	if addrDone != nil {
+		defer close(addrDone)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -343,10 +450,28 @@ func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 			d.rpmPinRetryActive = false
 			d.rpmMu.Unlock()
 			return
+		case update := <-linkUpdates:
+			if update.Attrs() != nil {
+				d.verifyProbePinsForLink(update.Attrs().Name)
+			}
+		case update := <-addrUpdates:
+			d.verifyProbePinsForAddress(update.LinkIndex)
+		case <-subscriptionErrors:
+			slog.Warn("probe pin netlink subscription reported a gap; checking all pins")
+			d.verifyProbePinsForAll()
 		case <-ticker.C:
 			d.rpmMu.Lock()
-			d.retryFailedProbePinsLocked()
-			done := !d.rpmPinsFailed
+			pins := routing.BuildProbePins(d.rpmEffective, d.rpmRethMap)
+			if len(pins) == 0 {
+				d.rpmPinRetryActive = false
+				d.rpmMu.Unlock()
+				return
+			}
+			d.verifyProbePinsLocked(pins)
+			if d.rpmPinsFailed {
+				d.retryFailedProbePinsLocked()
+			}
+			done := !d.rpmPinsFailed && d.probePinVerifyFn() == nil
 			if done {
 				d.rpmPinRetryActive = false
 			}
@@ -358,21 +483,41 @@ func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 	}
 }
 
-// reconcileRPM applies the RPM probe set when (and only when) the
-// rendered stanza changed, returning whether a re-apply happened (the
-// return value exists for the gating tests). Probe pin rules (fwmark +
-// reserved probe tables) follow the prober lifecycle: they are
-// reprogrammed on the same gate, and their per-test install results
-// are threaded into the RPM manager so a test whose pin failed to
-// program holds state (ErrProbeSetup) instead of probing the default
-// path and false-PASSing a dead pinned uplink (#1895). While any pin
-// is failed, the install is retried with no probe restart (the
-// deterministic mark assignment cannot change under an unchanged
-// hash) on every hash-gated call AND on a slow periodic ticker
-// (probePinRetryLoop), so transient failures (boot ordering, RETH
-// churn) recover autonomously — not just on the next commit or RG
-// transition. Safe to call from applyConfigLocked AND from other
-// reconcile paths; rpmMu serializes callers.
+func (d *Daemon) verifyProbePinsForLink(name string) {
+	d.rpmMu.Lock()
+	defer d.rpmMu.Unlock()
+	pins := routing.BuildProbePins(d.rpmEffective, d.rpmRethMap)
+	for _, pin := range pins {
+		if pin.Interface == name {
+			d.verifyProbePinsLocked(pins)
+			return
+		}
+	}
+}
+
+func (d *Daemon) verifyProbePinsForAddress(linkIndex int) {
+	link, err := netlink.LinkByIndex(linkIndex)
+	if err != nil || link.Attrs() == nil {
+		return
+	}
+	d.verifyProbePinsForLink(link.Attrs().Name)
+}
+
+func (d *Daemon) verifyProbePinsForAll() {
+	d.rpmMu.Lock()
+	defer d.rpmMu.Unlock()
+	d.verifyProbePinsLocked(routing.BuildProbePins(d.rpmEffective, d.rpmRethMap))
+}
+
+// reconcileRPM applies the RPM probe set when (and only when) the rendered
+// stanza changed, returning whether a re-apply happened. Pin rules are
+// reprogrammed on that same gate; unchanged-hash reconciles instead read back
+// the live rule and route so kernel link/address cleanup cannot leave an
+// unbacked SO_MARK. A detected drift holds the affected probe until the
+// periodic retry restores the pin. The periodic loop also subscribes to
+// link/address events, with a slow ticker as a gap-recovery fallback.
+// Safe to call from applyConfigLocked and other reconcile paths; rpmMu
+// serializes callers.
 func (d *Daemon) reconcileRPM(cfg *config.Config) bool {
 	return d.reconcileRPMMode(cfg, false)
 }
@@ -401,7 +546,13 @@ func (d *Daemon) reconcileRPMMode(cfg *config.Config, haTransition bool) bool {
 	pins := routing.BuildProbePins(effective, rethMap)
 	d.rpmEffective, d.rpmRethMap = effective, rethMap
 	if h == d.activeRPMHash {
-		d.retryFailedProbePinsLocked()
+		d.verifyProbePinsLocked(pins)
+		// Retain immediate hash-gated retries only for installer failures that
+		// readback still confirms. Readback-only drift is held until the monitor
+		// retry tick.
+		if len(d.rpmPinInstallFailures) > 0 && d.rpmPinsFailed {
+			d.retryFailedProbePinsLocked()
+		}
 		d.maybeStartPinRetryLoopLocked()
 		return false
 	}
@@ -420,12 +571,20 @@ func (d *Daemon) reconcileRPMMode(cfg *config.Config, haTransition bool) bool {
 	d.rpm.HoldPinsForReprogram(probePinKeys(pins), errProbePinReprogram)
 	var failed map[string]error
 	if applyPins != nil {
-		failed = applyPins(pins)
+		installFailed := applyPins(pins)
+		d.rpmPinInstallFailures = installFailed
+		failed = installFailed
+		if verify := d.probePinVerifyFn(); verify != nil {
+			verified := verify(pins)
+			d.rpmPinInstallFailures = retainProbePinInstallFailures(installFailed, verified)
+			failed = verified
+		}
 		if len(failed) > 0 {
-			slog.Warn("probe pin install failures — affected tests hold state until a retry succeeds",
+			slog.Warn("probe pin install or readback failures — affected tests hold state until a retry succeeds",
 				"failed", len(failed))
 		}
 	} else {
+		d.rpmPinInstallFailures = nil
 		failed = probePinsAllFailed(pins, errNoProbePinInstaller)
 		if len(failed) > 0 {
 			slog.Warn("next-hop probe pins configured but no routing manager — pinned tests hold state",

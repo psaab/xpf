@@ -444,27 +444,34 @@ type Daemon struct {
 	rpm             *rpm.Manager
 	rpmMu           sync.Mutex // serializes reconcileRPM callers (#1827)
 	activeRPMHash   [32]byte   // config-hash gate for RPM re-apply (#1827)
-	// rpmPinsFailed records that the last probe-pin install left at
-	// least one pin unprogrammed (#1895): the install is retried
-	// (without restarting probes) on hash-gated reconcileRPM calls AND
-	// by the slow periodic probePinRetryLoop until it succeeds.
+	// rpmPinsFailed records that readback or the last probe-pin install found
+	// at least one unbacked pin (#12088). Affected tests are held and failed
+	// installs retry through reconcileRPM and the periodic pin monitor.
 	// Guarded by rpmMu.
 	rpmPinsFailed bool
-	// rpmPinRetryActive is true while a probePinRetryLoop goroutine is
-	// running (#1895 AGY fold — autonomous recovery of boot-time pin
-	// failures on a quiet box, no commit required). Guarded by rpmMu.
+	// rpmPinInstallFailures are installer-reported failures that readback has
+	// not yet disproved. Only these preserve immediate hash-gated retries;
+	// readback-only drift waits for the periodic monitor retry. Guarded by rpmMu.
+	rpmPinInstallFailures map[string]error
+	// rpmPinRetryActive is true while the pin monitor/retry goroutine is
+	// running (#1895/#12088). With a readback implementation it stays active
+	// while pins are configured, watching kernel link/address events and
+	// periodically checking for silent kernel route deletion. Guarded by rpmMu.
 	rpmPinRetryActive bool
 	// rpmEffective/rpmRethMap are the last-applied effective RPM
-	// config + RETH map, kept for the periodic pin retry (which has no
+	// config + RETH map, kept for the periodic pin health check (which has no
 	// fresh cfg in hand). Guarded by rpmMu.
 	rpmEffective *config.RPMConfig
 	rpmRethMap   map[string]string
-	// probePinRetryEvery overrides the periodic pin-retry cadence
+	// probePinRetryEvery overrides the periodic pin-health cadence
 	// (tests); 0 = probePinRetryInterval.
 	probePinRetryEvery time.Duration
 	// probePinApply is the test seam for probe-pin programming; nil =
 	// d.routing.ApplyProbePins (#1895).
 	probePinApply func([]routing.ProbePin) map[string]error
+	// probePinVerify is the test seam for kernel readback of per-test
+	// rules and routes; nil = d.routing.VerifyProbePins (#12088).
+	probePinVerify func([]routing.ProbePin) map[string]error
 	// pinRetryCancel/pinRetryWg/pinRetryStopped scope the probePinRetryLoop
 	// lifecycle so daemon shutdown can cancel + join it BEFORE FRR/routing
 	// teardown (#5308). The loop used to bind to d.daemonCtx (never cancelled

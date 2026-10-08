@@ -3834,11 +3834,12 @@ never lock an operator out of a remote box it manages.
 ## RPM + ip-monitoring wiring (#1827)
 
 - `daemon_rpm.go` — config-hash-gated RPM probe lifecycle
-  (`reconcileRPM`, applyConfigLocked step 17b): probes + probe-pin
-  rules re-apply only when the rendered RPM stanza (or RETH map, or
-  the HA gating filter result) changed, so unrelated commits never
-  wipe probe state. Also owns the §4.4 HA gating scope
-  (`filterRPMForHAGating`).
+  (`reconcileRPM`, applyConfigLocked step 17b): probe-set restarts remain
+  hash-gated, while every unchanged-hash reconcile reads back each configured
+  pin's fwmark rule and pinned host route. A link/address notification holds a
+  drifted test immediately; the managed pin loop restores it on the next retry
+  tick and periodically checks for lost notifications (30 s fallback). Also
+  owns the §4.4 HA gating scope (`filterRPMForHAGating`).
 - `daemon_ipmon.go` — `assembleFRRConfig` (the SOLE `frr.FullConfig`
   constructor, shared by the full apply path and the routes-only
   actuator) + `actuateRouteOverlay` (FRR re-render → snapshot publish

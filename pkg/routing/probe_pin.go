@@ -301,3 +301,255 @@ func (p *probePinManager) clear() error {
 	}
 	return errors.Join(errs...)
 }
+
+// wantPin is a validated pin plus its resolved readback expectations.
+type wantPin struct {
+	pin      ProbePin
+	family   int // unix.AF_INET / unix.AF_INET6, from the target literal
+	hostBits int // 32 / 128
+	target   net.IP
+	nextHop  net.IP
+	linkIdx  int
+}
+
+func resolveProbePin(ops probePinOps, pin ProbePin) (wantPin, error) {
+	if pin.Index < 0 || pin.Index >= config.ProbeTableCount ||
+		pin.Table != config.ProbeTableBase+pin.Index ||
+		pin.Priority != config.ProbeRulePriorityBase+pin.Index ||
+		pin.Mark != uint32(config.ProbeFwmarkBase+pin.Index) {
+		return wantPin{}, fmt.Errorf("invalid probe pin assignment (index %d, mark %#x, table %d, priority %d)",
+			pin.Index, pin.Mark, pin.Table, pin.Priority)
+	}
+	target := net.ParseIP(pin.Target)
+	nextHop := net.ParseIP(pin.NextHop)
+	if target == nil || nextHop == nil {
+		return wantPin{}, fmt.Errorf("invalid target %q / next-hop %q", pin.Target, pin.NextHop)
+	}
+	targetV4, nextHopV4 := target.To4(), nextHop.To4()
+	family := unix.AF_INET
+	hostBits := 32
+	if targetV4 != nil {
+		if nextHopV4 == nil {
+			return wantPin{}, fmt.Errorf("target %q and next-hop %q use different address families", pin.Target, pin.NextHop)
+		}
+		target, nextHop = targetV4, nextHopV4
+	} else {
+		if nextHopV4 != nil {
+			return wantPin{}, fmt.Errorf("target %q and next-hop %q use different address families", pin.Target, pin.NextHop)
+		}
+		target, nextHop = target.To16(), nextHop.To16()
+		if target == nil || nextHop == nil {
+			return wantPin{}, fmt.Errorf("invalid target %q / next-hop %q", pin.Target, pin.NextHop)
+		}
+		family = unix.AF_INET6
+		hostBits = 128
+	}
+	link, err := ops.LinkByName(pin.Interface)
+	if err != nil {
+		return wantPin{}, fmt.Errorf("egress interface %q: %w", pin.Interface, err)
+	}
+	var linkIndex int
+	if link != nil {
+		if attrs := link.Attrs(); attrs != nil {
+			linkIndex = attrs.Index
+		}
+	}
+	if linkIndex <= 0 {
+		return wantPin{}, fmt.Errorf("egress interface %q: link has no valid ifindex", pin.Interface)
+	}
+	return wantPin{
+		pin: pin, family: family, hostBits: hostBits,
+		target: target, nextHop: nextHop, linkIdx: linkIndex,
+	}, nil
+}
+
+// Verify reads back the kernel's probe-pin rules and routes and reports the
+// pins whose install is missing or no longer matches, keyed by
+// ProbePin.TestKey; a nil map means every pin is healthy. Read-only: it
+// issues RuleList/RouteListFiltered/LinkByName only and never adds, deletes,
+// or otherwise mutates kernel state.
+//
+// Verify exists because the kernel can delete a pin's table-7000+ routes
+// behind the daemon's back — administratively downing/upping the egress
+// interface, or removing its last IPv4 address, flushes the per-test table
+// while the fwmark rule survives. A rule-only pin then looks installed but
+// steers the probe nowhere (#12088): Verify requires BOTH the exact fwmark
+// rule Apply installs (family, mark, full mask, priority, table, no
+// narrowing selectors) AND the exact pinned host route (host destination,
+// next-hop, egress ifindex, ONLINK, usable unicast, single-path) before it
+// accepts a pin. The daemon holds ErrProbeSetup for failed pins and
+// reinstalls them via Apply on reconcile, so a false healthy here is a
+// false-passing probe and every ambiguous case fails closed:
+//
+//   - an inconsistent probe-band assignment, malformed or mixed-family
+//     target/next-hop, missing egress link, or rule/route dump error is
+//     reported for the affected pin(s) rather than skipped;
+//   - a rule with a partial fwmark mask, or any Src/Dst/interface/Tos/
+//     port/proto/UID/invert/goto/flow/suppression selector Apply never
+//     emits, does not satisfy the pin even when mark/table/priority match;
+//   - a route with the wrong gateway, egress, host prefix, table, metric,
+//     flags, type, or scope fails; an equal-or-better-metric competing
+//     route to the same host destination also fails as ambiguous.
+//
+// Dumps are bounded: one RuleList per address family that has at least one
+// valid pin, and one RouteListFiltered per (family, configured table); a
+// zero-pin call performs no kernel reads at all.
+func (p *probePinManager) Verify(pins []ProbePin) map[string]error {
+	if len(pins) == 0 {
+		return nil
+	}
+	var failed map[string]error
+	fail := func(pin ProbePin, err error) {
+		if failed == nil {
+			failed = make(map[string]error)
+		}
+		failed[pin.TestKey] = err
+	}
+	var want []wantPin
+	families := make(map[int]bool, 2)
+	for _, pin := range pins {
+		w, err := resolveProbePin(p.ops, pin)
+		if err != nil {
+			fail(pin, err)
+			continue
+		}
+		want = append(want, w)
+		families[w.family] = true
+	}
+	if len(want) == 0 {
+		return failed
+	}
+	rulesByFamily := make(map[int][]netlink.Rule, 2)
+	ruleErrByFamily := make(map[int]error, 2)
+	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
+		if !families[family] {
+			continue
+		}
+		rules, err := p.ops.RuleList(family)
+		if err != nil {
+			ruleErrByFamily[family] = err
+			continue
+		}
+		rulesByFamily[family] = rules
+	}
+	type tableKey struct {
+		family int
+		table  int
+	}
+	routesByTable := make(map[tableKey][]netlink.Route)
+	routeErrByTable := make(map[tableKey]error)
+	dumped := make(map[tableKey]bool)
+	for _, w := range want {
+		if _, failed := ruleErrByFamily[w.family]; failed {
+			continue
+		}
+		k := tableKey{family: w.family, table: w.pin.Table}
+		if dumped[k] {
+			continue
+		}
+		dumped[k] = true
+		routes, err := p.ops.RouteListFiltered(w.family,
+			&netlink.Route{Table: w.pin.Table}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			routeErrByTable[k] = err
+			continue
+		}
+		routesByTable[k] = routes
+	}
+	for _, w := range want {
+		if err, ok := ruleErrByFamily[w.family]; ok {
+			fail(w.pin, fmt.Errorf("probe pin rule list (family %d): %w", w.family, err))
+			continue
+		}
+		if !probePinRuleInstalled(rulesByFamily[w.family], w.pin, w.family) {
+			fail(w.pin, fmt.Errorf("probe pin rule missing or mismatched (mark %#x, table %d, priority %d)",
+				w.pin.Mark, w.pin.Table, w.pin.Priority))
+			continue
+		}
+		k := tableKey{family: w.family, table: w.pin.Table}
+		if err, ok := routeErrByTable[k]; ok {
+			fail(w.pin, fmt.Errorf("probe pin route list (family %d, table %d): %w",
+				w.family, w.pin.Table, err))
+			continue
+		}
+		if !probePinRouteInstalled(routesByTable[k], w) {
+			fail(w.pin, fmt.Errorf("probe pin route missing or mismatched (target %s via %s dev %s, table %d)",
+				w.pin.Target, w.pin.NextHop, w.pin.Interface, w.pin.Table))
+			continue
+		}
+	}
+	return failed
+}
+
+// probePinRuleInstalled reports whether the dumped rules contain the exact
+// fwmark lookup rule Apply installs for the pin: same family, mark, table,
+// and priority, a full fwmark mask, and no other selector that could exclude
+// marked probe packets. An omitted mask (nil, as Apply sends it) and an
+// explicit 0xffffffff (as the kernel echoes it back) both mean a full match;
+// any other mask value narrows the match and fails the pin.
+//
+// hasNoAdditionalRuleSelectors (rules.go) is deliberately NOT reused: it
+// asserts Mark == 0 for leak/return rules, while a probe-pin rule carries a
+// nonzero fwmark by design.
+func probePinRuleInstalled(rules []netlink.Rule, pin ProbePin, family int) bool {
+	for _, r := range rules {
+		if r.Family != family || r.Priority != pin.Priority ||
+			r.Table != pin.Table || r.Mark != pin.Mark {
+			continue
+		}
+		if r.Mask != nil && *r.Mask != 0xffffffff {
+			continue
+		}
+		if r.Src != nil || r.Dst != nil || r.IifName != "" || r.OifName != "" {
+			continue
+		}
+		if r.Tos != 0 || r.TunID != 0 || r.Goto != -1 || r.Flow != -1 ||
+			r.SuppressIfgroup != -1 || r.SuppressPrefixlen != -1 || r.Invert ||
+			r.Dport != nil || r.Sport != nil || r.IPProto != 0 ||
+			r.UIDRange != nil || r.Protocol != 0 || r.Type != 0 {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// probePinRouteInstalled reports whether the route selected by the kernel for
+// the pin's host destination is the exact route Apply installs. Apply leaves
+// metric/priority at its zero default, so any same-prefix route with an equal
+// or better metric but a different shape makes readback ambiguous and fails
+// closed. Higher-metric routes cannot override the default-metric pin.
+func probePinRouteInstalled(routes []netlink.Route, w wantPin) bool {
+	matched := false
+	for _, r := range routes {
+		if r.Table != w.pin.Table || r.Family != w.family || r.Dst == nil {
+			continue
+		}
+		ones, bits := r.Dst.Mask.Size()
+		if ones != bits || bits != w.hostBits || !r.Dst.IP.Equal(w.target) {
+			continue
+		}
+		if r.Priority > 0 {
+			continue
+		}
+		if r.Priority != 0 || matched {
+			return false
+		}
+		if r.Gw == nil || !r.Gw.Equal(w.nextHop) || r.LinkIndex != w.linkIdx {
+			return false
+		}
+		const unusableFlags = unix.RTNH_F_DEAD | unix.RTNH_F_LINKDOWN | unix.RTNH_F_UNRESOLVED
+		if r.Flags&int(netlink.FLAG_ONLINK) == 0 ||
+			r.Flags&int(unusableFlags) != 0 ||
+			r.Type != unix.RTN_UNICAST || r.Scope != unix.RT_SCOPE_UNIVERSE ||
+			len(r.MultiPath) != 0 {
+			return false
+		}
+		if r.Tos != 0 || r.Src != nil || r.Via != nil || r.ILinkIndex != 0 ||
+			r.MPLSDst != nil || r.NewDst != nil || r.Encap != nil {
+			return false
+		}
+		matched = true
+	}
+	return matched
+}
