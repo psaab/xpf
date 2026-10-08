@@ -105,6 +105,10 @@ func (s *Store) Load() error {
 		}
 	}
 
+	// A durable FIRST-rollback teardown marker survives process exit between
+	// this store recovery and the daemon's later teardown phase.
+	s.loadFirstCommitTeardownLocked()
+
 	tree, committed, err := s.db.ReadActiveMeta()
 	if err != nil {
 		// A read/parse/decrypt/envelope failure on a PRESENT active.json is
@@ -705,7 +709,8 @@ func (s *Store) absentActiveHasRecoveryMarkers() bool {
 		name := entry.Name()
 		switch {
 		case (strings.HasPrefix(name, "rollback.") && strings.HasSuffix(name, ".json")) ||
-			name == "confirm.json" || name == apiAuthMigrationStagingFilename:
+			name == "confirm.json" || name == firstCommitTeardownMarkerBase ||
+			name == apiAuthMigrationStagingFilename:
 			return true
 		}
 	}
@@ -873,14 +878,19 @@ func (s *Store) recoverPendingConfirmLocked() error {
 		// this branch so the rollback's persistence/journal/record-removal all
 		// still run first.
 		var recoverErr error
+		var teardownMarkerErr error
 		if rec.FirstCommit {
 			// #1922 Item 1b: the rollback target is the empty bootstrap tree;
 			// persist committed=0 and clear everCommitted so a later restart
 			// re-classifies into bootstrap, not operator-committed-empty.
+			// #12155: keep this boot fail-closed even if the active rollback
+			// write fails; confirm.json remains the retry source, and the
+			// durable marker is published only after the active write lands.
 			s.compiled = nil
 			s.publishActiveLocked() // #9905: publish the new active snapshot
 			s.persistMarkerCommitted = false
 			s.everCommitted = false
+			s.firstCommitTeardownOwed = true
 			perr = s.writeActiveMarker(prevTree, false)
 		} else {
 			compiled, cerr := s.compileTreeLenient(prevTree)
@@ -921,16 +931,24 @@ func (s *Store) recoverPendingConfirmLocked() error {
 		} else {
 			s.persistDegraded = false
 			s.confirmResolvePendingPersist = false
+			if rec.FirstCommit {
+				// #12155: confirm.json is the retry source until teardown debt
+				// is durable. Do not remove it if the marker write fails.
+				if err := s.noteFirstCommitTeardownLocked(); err != nil {
+					teardownMarkerErr = err
+					s.deferFirstCommitTeardownMarkerLocked(err)
+				}
+			}
 		}
 		if s.candidate != nil {
 			s.candidate = s.active.Clone()
 			s.bumpCandidateGenLocked() // #5848: candidate reset by confirm-recovery rollback
 		}
-		if perr == nil {
-			// #5835: durable-or-retry removal — a failed DeleteConfirm retains
-			// retry debt + degraded health so a crash before the retry heals
-			// re-reads the record (deadline still past) and re-reverts, rather
-			// than silently swallowing the failure.
+		if perr == nil && teardownMarkerErr == nil {
+			// #5835: remove confirm.json only after the active rollback is
+			// durable, retaining normal removal debt if unlink does not converge.
+			// On FIRST rollback the teardown marker is durable before removal,
+			// so either debt survives a crash before daemon teardown.
 			s.resolveConfirmRemovalLocked("confirm_recovery_remove")
 		}
 		detail := "commit-confirmed window expired during daemon downtime; reverted on boot (#4577)"

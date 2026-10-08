@@ -90,7 +90,12 @@ func (d *Daemon) initManagers(failClosed bool) error {
 		// proof of live forwarding (a graceful stop leaves the pins but disarms
 		// forwarding). Freeze-in-last-known-good for management (#1960) is
 		// preserved: no .network/.link removal, no link-cycle.
-		d.clearFRRForFailClosedBoot(failClosed)
+		// #12155 is different: its durable FIRST rollback runs the full
+		// bootstrap teardown immediately after manager-init. Skip this early
+		// clear there so the full phase handles FRR exactly once.
+		if !d.store.FirstCommitTeardownOwed() {
+			d.clearFRRForFailClosedBoot(failClosed)
+		}
 		// #10732: bootstrap suppresses applyConfig, so its cold-boot nft
 		// fences never see the retained addresses that networkd brought up.
 		// Fence their live destinations now, preserving the management
@@ -317,9 +322,10 @@ func configlessHANodeStartupDiagnostic() string {
 // and imports the text config only when allowed.
 // It enforces the #1917 fatal-on-parse floor and derives the boot class +
 // node-id state. The body was extracted from Run()'s PHASE 1 (#4662 Increment 5).
-// It returns the combined #1960/#10297/#11802 fail-closed load flag (threaded
-// onward to initManagers) and a non-nil error only for the fatal 'DB present but
-// unreadable' floor, which Run propagates unchanged (fail closed, never blind).
+// It returns the combined #1960/#10297/#11802/#12155 fail-closed load flag
+// (threaded onward to initManagers) and a non-nil error only for the fatal
+// 'DB present but unreadable' floor, which Run propagates unchanged (fail closed,
+// never blind).
 func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 	// Store.Load validates rescue for explicit operator recovery before the
 	// daemon may import day-0 text config.
@@ -347,6 +353,7 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 	configCompileFailed := false
 	absentActiveWithHistory := false
 	rescueFallback := false
+	firstCommitTeardownOwed := false
 	switch loadErr := d.store.Load(); classifyLoadError(loadErr) {
 	case loadFatalUnreadable:
 		// Point recovery at the actual unreadable artifact — the config
@@ -402,13 +409,14 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 	case loadOK:
 		// nil error: absent DB (start-fresh) or a valid loaded config.
 	}
+	firstCommitTeardownOwed = d.store.FirstCommitTeardownOwed()
 
 	// #10297: an absent active.json with surviving rollback markers is
 	// another fail-closed case; importing xpf.conf would clobber history.
 	// EverCommitted is authoritative here: Item 1b's committed=0 active.json
 	// compiles to a non-nil empty config but still needs day-0 import/retry.
 	if shouldBootstrapFromFile(d.store.ActiveConfig() != nil,
-		d.store.EverCommitted(), configCompileFailed || absentActiveWithHistory || rescueFallback) {
+		d.store.EverCommitted(), configCompileFailed || absentActiveWithHistory || rescueFallback || firstCommitTeardownOwed) {
 		if err := d.bootstrapFromFile(); err != nil {
 			// #4186 (H-17): a missing text config file is the EXPECTED
 			// factory/fresh-boot state unless the loader left its commit-check
@@ -456,9 +464,11 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 	// #1960/#10297/#11802: a compile-failed DB, absent active DB with recovery
 	// markers, or selected rescue fallback forces bootstrap here — no positional
 	// claim-all — regardless of the other inputs, including the HA-node guard.
+	// #12155 also forces bootstrap while durable FIRST rollback teardown is owed,
+	// suppressing day-0 import/takeover until cleanup completes.
 	// The rescue case never replaces present or recovery-marked active state.
 	nodeIDPresent := hasNodeIDFile()
-	failClosedLoad := configCompileFailed || absentActiveWithHistory || rescueFallback
+	failClosedLoad := configCompileFailed || absentActiveWithHistory || rescueFallback || firstCommitTeardownOwed
 	bootClass := computeBootClass(d.store.ActiveConfig() != nil, d.store.EverCommitted(), nodeIDPresent, failClosedLoad)
 	if bootClass == bootClassBootstrap {
 		d.bootstrapMode.Store(true)
@@ -481,6 +491,9 @@ func (d *Daemon) loadAndBootstrapConfig() (bool, error) {
 				"and restarting; standalone recovery requires explicit load rescue and commit confirmed",
 				rescueConfigFile, rescueFile),
 				"detail", detail)
+		} else if firstCommitTeardownOwed {
+			slog.Warn("xpf daemon entering BOOTSTRAP mode: durable FIRST rollback teardown is owed; "+
+				"day-0 import and takeover remain suppressed until cleanup converges", "detail", detail)
 		} else {
 			slog.Warn("xpf daemon entering BOOTSTRAP mode: no committed configuration found",
 				"detail", detail)
