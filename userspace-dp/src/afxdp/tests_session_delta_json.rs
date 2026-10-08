@@ -234,6 +234,9 @@ struct BinaryAttribution {
     /// #7188: session-identity discriminator, carried before routing domain
     /// and the close-class/install-table/ICMP/ingress identity trailers.
     tunnel_discriminator: u64,
+    routing_domain: u32,
+    install_table_domain: u32,
+    install_table_check: u32,
 }
 
 fn binary_attribution(delta: &SessionDelta) -> BinaryAttribution {
@@ -249,37 +252,36 @@ fn binary_attribution(delta: &SessionDelta) -> BinaryAttribution {
         0, // #9412: tcp_close_class
     );
     let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
-    // The length-prefixed policy rule ID follows the fixed close/install/ICMP/
-    // ingress tail. The fixture supplies the expected length so the parser can
-    // locate and independently check the encoded prefix and bytes.
+    // The fixed close/install/ICMP/ingress tail precedes the length-prefixed
+    // rule ID. #10888 appends the handshake-state byte after the rule ID, so
+    // locate the prefix from the rule bytes immediately before that final byte.
     let expected_rule_id = delta
         .metadata
         .policy_counter
         .as_ref()
         .map_or("", |counter| counter.rule_id());
-    let (rule_id_prefix, policy_rule_id) = if expected_rule_id.is_empty() {
-        (payload.len(), String::new())
-    } else {
-        let id_start = payload.len() - expected_rule_id.len();
-        let len_start = id_start - 2;
-        let encoded_len = u16::from_le_bytes(
-            payload[len_start..id_start]
-                .try_into()
-                .expect("2 policy-rule-id length bytes"),
-        ) as usize;
-        assert_eq!(
-            encoded_len,
-            expected_rule_id.len(),
-            "binary trailer must carry the policy rule ID length"
-        );
-        let policy_rule_id = std::str::from_utf8(&payload[id_start..])
-            .expect("policy rule ID is UTF-8")
-            .to_string();
-        (len_start, policy_rule_id)
-    };
+    let rule_id_end = payload.len() - 1; // trailing #10888 handshake-state byte
+    let id_start = rule_id_end - expected_rule_id.len();
+    let rule_id_prefix = id_start - 2;
+    let encoded_len = u16::from_le_bytes(
+        payload[rule_id_prefix..id_start]
+            .try_into()
+            .expect("2 policy-rule-id length bytes"),
+    ) as usize;
+    assert_eq!(
+        encoded_len,
+        expected_rule_id.len(),
+        "binary trailer must carry the policy rule ID length"
+    );
+    let policy_rule_id = std::str::from_utf8(&payload[id_start..rule_id_end])
+        .expect("policy rule ID is UTF-8")
+        .to_string();
+    assert_eq!(
+        policy_rule_id, expected_rule_id,
+        "binary trailer must carry the expected policy rule ID"
+    );
     // `n` points immediately after the routing-domain field; the close class,
-    // install-table stamp, ICMP identity, ingress identity and rule-ID trailer
-    // follow it.
+    // install-table stamp, ICMP identity and ingress identity follow it.
     let n = rule_id_prefix - 18; // fixed close/install/ICMP/ingress tail
     let u32_at = |off: usize| -> u32 {
         u32::from_le_bytes(payload[off..off + 4].try_into().expect("4 bytes"))
@@ -315,6 +317,9 @@ fn binary_attribution(delta: &SessionDelta) -> BinaryAttribution {
         tunnel_discriminator: u64::from_le_bytes(
             payload[n - 12..n - 4].try_into().expect("8 bytes"),
         ),
+        routing_domain: u32_at(n - 4),
+        install_table_domain: u32_at(n + 1),
+        install_table_check: u32_at(n + 5),
     }
 }
 
@@ -326,8 +331,8 @@ fn binary_attribution(delta: &SessionDelta) -> BinaryAttribution {
 /// THE SAME SESSION, which is the actual contract — the Go control plane reads
 /// whichever leg delivered the delta and cannot tell them apart afterwards.
 ///
-/// RED AT MASTER: the JSON producer omits these keys, so its values diverge
-/// from a binary side carrying policy, rule, timeout, NAT64, ICMP and ingress identity.
+/// The binary side is decoded from its encoded frame bytes below, including
+/// the variable rule-ID trailer and the trailing #10888 handshake-state byte.
 ///
 /// NOTE on what an agreement assertion can and cannot see. A mutation INSIDE
 /// the shared derivation (return `policy_id: 0` from
@@ -702,21 +707,7 @@ fn session_delta_info_states_none_explicitly_for_non_tunnel_protocols_7188() {
 #[test]
 fn session_delta_json_and_binary_agree_on_the_routing_domain_7239() {
     let delta = delta_with_attribution();
-    let frame = EventFrame::encode_session_open(
-        1,
-        &delta.key,
-        &delta.decision,
-        &delta.metadata,
-        &FxHashMap::default(),
-        delta.fabric_redirect_sync,
-        delta.session_id,
-        0, // #9412: tcp_close_class
-    );
-    let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
-    // `n` points immediately after the routing-domain field; the close class,
-    // install-table stamp, ICMP identity and #11070 ingress identity follow it.
-    let n = payload.len() - 18; // 1 + 8 + 3 + 6 trailing bytes
-    let binary = u32::from_le_bytes(payload[n - 4..n].try_into().expect("4 bytes"));
+    let binary = binary_attribution(&delta).routing_domain;
 
     let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
     let json = serde_json::to_value(info).expect("delta serializes");
@@ -785,23 +776,7 @@ fn session_delta_json_and_binary_agree_on_the_install_table_9752() {
     // equal (both legs would emit (0,0)).
     delta.decision.install_table_domain = 525_590;
     delta.decision.install_table_check = 3_318_534_811;
-    let frame = EventFrame::encode_session_open(
-        1,
-        &delta.key,
-        &delta.decision,
-        &delta.metadata,
-        &FxHashMap::default(),
-        delta.fabric_redirect_sync,
-        delta.session_id,
-        0, // #9412: tcp_close_class
-    );
-    let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
-    let n = payload.len();
-    // #11070's six-byte ingress identity follows the #11064 ICMP identity.
-    let binary_domain =
-        u32::from_le_bytes(payload[n - 17..n - 13].try_into().expect("4 bytes"));
-    let binary_check =
-        u32::from_le_bytes(payload[n - 13..n - 9].try_into().expect("4 bytes"));
+    let binary = binary_attribution(&delta);
 
     let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
     let json = serde_json::to_value(info).expect("delta serializes");
@@ -826,10 +801,13 @@ fn session_delta_json_and_binary_agree_on_the_install_table_9752() {
 
     assert_eq!(
         (json_domain, json_check),
-        (binary_domain, binary_check),
+        (binary.install_table_domain, binary.install_table_check),
         "the two session-delta legs disagree on the installing table"
     );
-    assert_eq!((binary_domain, binary_check), (525_590, 3_318_534_811));
+    assert_eq!(
+        (binary.install_table_domain, binary.install_table_check),
+        (525_590, 3_318_534_811)
+    );
 }
 
 /// #9752: the JSON leg carries the purge-retirement marker exactly as the
