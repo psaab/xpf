@@ -46,8 +46,10 @@ func ospfAreaIdentity11400(id string) string {
 }
 
 type ospfRenderArea11400 struct {
-	key string
-	id  string
+	key      string
+	id       string
+	passive  bool
+	rendered bool
 }
 
 // validFRROSPFArea reports whether id is renderable as an FRR area operand
@@ -115,16 +117,20 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		if ospf.PassiveDefault {
 			b.WriteString(" passive-interface default\n")
 		}
-		passiveAreaByInterface := make(map[string]string)
+		type passiveAreaState11400 struct {
+			key              string
+			directiveEmitted bool
+		}
+		passiveAreaByInterface := make(map[string]passiveAreaState11400)
 		for _, area := range ospf.Areas {
 			areaKey := ospfAreaIdentity11400(area.ID)
 			for _, iface := range area.Interfaces {
-				firstAreaKey, seen := passiveAreaByInterface[iface.Name]
-				if seen && firstAreaKey != areaKey {
+				firstArea, seen := passiveAreaByInterface[iface.Name]
+				if seen && firstArea.key != areaKey {
 					continue
 				}
 				if !seen {
-					passiveAreaByInterface[iface.Name] = areaKey
+					firstArea.key = areaKey
 				}
 				// OSPFv2 area membership is activated per-interface in the
 				// "interface <name>" block below via "ip ospf area <id>", NOT
@@ -136,12 +142,15 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 				// instance (#1712). passive-interface directives are
 				// independent of activation and remain under "router ospf".
 				if ospf.PassiveDefault {
-					if iface.NoPassive {
+					if iface.NoPassive && !firstArea.directiveEmitted {
 						fmt.Fprintf(&b, " no passive-interface %s\n", iface.Name)
+						firstArea.directiveEmitted = true
 					}
-				} else if iface.Passive {
+				} else if iface.Passive && !firstArea.directiveEmitted {
 					fmt.Fprintf(&b, " passive-interface %s\n", iface.Name)
+					firstArea.directiveEmitted = true
 				}
+				passiveAreaByInterface[iface.Name] = firstArea
 			}
 			if area.AreaType != "" {
 				if !validFRROSPFArea(area.ID) {
@@ -173,25 +182,29 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		}
 		b.WriteString("exit\n!\n")
 		// OSPF interface settings + per-interface area activation. The
-		// "interface <name>" block is emitted UNCONDITIONALLY for every
+		// "interface <name>" block is emitted UNCONDITIONALLY for each unique
 		// configured OSPF interface because "ip ospf area <id>" is now the
 		// sole activation mechanism (the global "network 0.0.0.0/0 area"
 		// line was removed above, #1712). Cost / network-type / auth / BFD
 		// lines remain optional within the block.
+		// Equivalent area-ID spellings can remain separate model objects;
+		// emit one interface block instead of relying on FRR's merge of
+		// repeated, order-sensitive interface contexts.
 		renderedAreaByInterface := make(map[string]ospfRenderArea11400)
 		for _, area := range ospf.Areas {
 			areaKey := ospfAreaIdentity11400(area.ID)
 			for _, iface := range area.Interfaces {
 				firstArea, seen := renderedAreaByInterface[iface.Name]
-				if seen && firstArea.key != areaKey {
-					slog.Warn("frr: dropping an OSPF interface assigned to multiple areas; keeping the first area (#11400)",
-						"interface", sanitizeFRRValue(iface.Name),
-						"first_area", sanitizeFRRValue(firstArea.id),
-						"dropped_area", sanitizeFRRValue(area.ID))
+				if seen {
+					if firstArea.key != areaKey {
+						slog.Warn("frr: dropping an OSPF interface assigned to multiple areas; keeping the first area (#11400)",
+							"interface", sanitizeFRRValue(iface.Name),
+							"first_area", sanitizeFRRValue(firstArea.id),
+							"dropped_area", sanitizeFRRValue(area.ID))
+					}
 					continue
-				} else if !seen {
-					renderedAreaByInterface[iface.Name] = ospfRenderArea11400{key: areaKey, id: area.ID}
 				}
+				renderedAreaByInterface[iface.Name] = ospfRenderArea11400{key: areaKey, id: area.ID}
 				fmt.Fprintf(&b, "interface %s\n", iface.Name)
 				if iface.Cost > 0 {
 					fmt.Fprintf(&b, " ip ospf cost %d\n", frrClampInt("ospf cost", iface.Cost, 65535))
@@ -297,20 +310,42 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		// `interface <name> area <id>` command to the INTERFACE_NODE form
 		// `ipv6 ospf6 area <id>`. Emit the interface block unconditionally so
 		// an interface with no optional settings still gets activated.
+		// Equivalent area-ID spellings can remain separate model objects;
+		// emit one interface block instead of relying on FRR's merge of
+		// repeated, order-sensitive interface contexts.
 		renderedAreaByInterface := make(map[string]ospfRenderArea11400)
+		// Passive is a union across same-area fragments, so gather it before
+		// emitting the single OSPFv3 interface block.
 		for _, area := range ospfv3.Areas {
 			areaKey := ospfAreaIdentity11400(area.ID)
 			for _, iface := range area.Interfaces {
 				firstArea, seen := renderedAreaByInterface[iface.Name]
-				if seen && firstArea.key != areaKey {
+				if !seen {
+					renderedAreaByInterface[iface.Name] = ospfRenderArea11400{
+						key: areaKey, id: area.ID, passive: iface.Passive,
+					}
+				} else if firstArea.key == areaKey && iface.Passive && !firstArea.passive {
+					firstArea.passive = true
+					renderedAreaByInterface[iface.Name] = firstArea
+				}
+			}
+		}
+		for _, area := range ospfv3.Areas {
+			areaKey := ospfAreaIdentity11400(area.ID)
+			for _, iface := range area.Interfaces {
+				firstArea := renderedAreaByInterface[iface.Name]
+				if firstArea.key != areaKey {
 					slog.Warn("frr: dropping an OSPFv3 interface assigned to multiple areas; keeping the first area (#11400)",
 						"interface", sanitizeFRRValue(iface.Name),
 						"first_area", sanitizeFRRValue(firstArea.id),
 						"dropped_area", sanitizeFRRValue(area.ID))
 					continue
-				} else if !seen {
-					renderedAreaByInterface[iface.Name] = ospfRenderArea11400{key: areaKey, id: area.ID}
 				}
+				if firstArea.rendered {
+					continue
+				}
+				firstArea.rendered = true
+				renderedAreaByInterface[iface.Name] = firstArea
 				fmt.Fprintf(&b, "interface %s\n", iface.Name)
 				if validFRROSPFArea(area.ID) {
 					fmt.Fprintf(&b, " ipv6 ospf6 area %s\n", area.ID)
@@ -318,7 +353,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 					slog.Warn("frr: omitting an OSPFv3 interface area activation with an invalid area id (#9820)",
 						"area", sanitizeFRRValue(area.ID), "interface", sanitizeFRRValue(iface.Name))
 				}
-				if iface.Passive {
+				if firstArea.passive {
 					b.WriteString(" ipv6 ospf6 passive\n")
 				}
 				if iface.Cost > 0 {
