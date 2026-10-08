@@ -71,4 +71,13 @@ func TestHeartbeatRecoveryRearmsSuppressionCap12165(t *testing.T) {
 	if age := time.Duration(cluster.MonotonicNanos() - second); age < 0 || age > 5*time.Second {
 		t.Fatalf("interval #2: re-armed stamp age = %v, want within [0, 5s]", age)
 	}
+
+	// Once the second continuous suppression interval exceeds 5s, its own
+	// cap must stop suppressing and allow takeover.
+	d.hbSuppressStart.Store(cluster.MonotonicNanos() - (6 * time.Second).Nanoseconds())
+	ss.SetPeerReceiveAgeForTesting(100*time.Millisecond, true)
+	d.cluster.HandlePeerTimeoutForTesting()
+	if d.cluster.PeerAlive() || !d.cluster.IsLocalPrimary(0) {
+		t.Fatal("interval #2: suppression did not expire after its own 5s cap")
+	}
 }
