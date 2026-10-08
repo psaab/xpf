@@ -123,7 +123,7 @@ func newStreamSummary() *streamSummary {
 //     guarantee). This is what makes a LATE heavy hitter rankable.
 func (s *streamSummary) add(key string, bytesWeight uint64, k int) {
 	if c, ok := s.monitored[key]; ok {
-		c.bytes += bytesWeight
+		c.bytes = addBytesSaturating(c.bytes, bytesWeight)
 		c.sessions++
 		heap.Fix(&s.minHeap, c.idx) // bytes only grows -> sift down
 		return
@@ -139,7 +139,7 @@ func (s *streamSummary) add(key string, bytesWeight uint64, k int) {
 	delete(s.monitored, min.ip)
 	min.ip = key
 	min.bytesErr = min.bytes
-	min.bytes += bytesWeight
+	min.bytes = addBytesSaturating(min.bytes, bytesWeight)
 	min.sessErr = min.sessions
 	min.sessions++
 	s.monitored[key] = min
@@ -197,6 +197,20 @@ func (sa *SessionAggregator) SetLogFunc(fn func(severity int, msg string)) {
 	sa.mu.Unlock()
 }
 
+// addBytesSaturating adds byte counts without allowing uint64 wraparound.
+func addBytesSaturating(a, b uint64) uint64 {
+	const maxUint64 = ^uint64(0)
+	if a > maxUint64-b {
+		return maxUint64
+	}
+	return a + b
+}
+
+// totalSessionBytes returns both directions without allowing uint64 wraparound.
+func totalSessionBytes(forward, reverse uint64) uint64 {
+	return addBytesSaturating(forward, reverse)
+}
+
 // Add records a session event. Only SESSION_CLOSE events update counters.
 func (sa *SessionAggregator) Add(rec EventRecord) {
 	if rec.Type != "SESSION_CLOSE" {
@@ -213,11 +227,13 @@ func (sa *SessionAggregator) Add(rec EventRecord) {
 	// new key is admitted while the set is below K, otherwise it evicts the
 	// current minimum counter (instead of being dropped). Memory stays bounded
 	// by K and the top-K is arrival-order independent (#3099).
-	sa.srcs.add(srcIP, rec.SessionBytes, sa.maxKeys)
-	sa.dsts.add(dstIP, rec.SessionBytes, sa.maxKeys)
+	bytes := totalSessionBytes(rec.SessionBytes, rec.RevSessionBytes)
+	sa.srcs.add(srcIP, bytes, sa.maxKeys)
+	sa.dsts.add(dstIP, bytes, sa.maxKeys)
 }
 
-// Flush returns top-N sources and destinations by bytes, then resets counters.
+// Flush returns top-N sources and destinations by total (forward+reverse) bytes,
+// then resets counters.
 func (sa *SessionAggregator) Flush() (topSrc, topDst []AggregateEntry) {
 	topSrc, topDst, _, _ = sa.flushWithDropped()
 	return
