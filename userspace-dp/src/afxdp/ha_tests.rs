@@ -8007,7 +8007,24 @@ fn queued_forward_upsert_demoted_by_positioned_demote_9720() {
     // #9720 review B4: surveyed-free worker id (see demote cell).
     const W: u32 = 107;
     let mut coordinator = Coordinator::new();
-    coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
+    // #12252: this transition must start from a live forward candidate. Without
+    // the route and neighbor, re-resolution correctly remains NoRoute and this
+    // cell cannot exercise the FabricRedirect rewrite.
+    let mut forwarding = test_forwarding_state_with_fabric();
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 8),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.neighbors.insert(
+        (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        NeighborEntry {
+            mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x77],
+        },
+    );
+    coordinator.set_forwarding_for_test(forwarding);
     let commands = Arc::new(Mutex::new(VecDeque::new()));
     coordinator.workers.register(
         W,
@@ -8017,7 +8034,43 @@ fn queued_forward_upsert_demoted_by_positioned_demote_9720() {
     crate::afxdp::worker_queue::clear_transition_debt(W);
 
     let key = test_key();
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let live_resolution =
+        crate::afxdp::session_glue::lookup_forwarding_resolution_for_session_without_cache(
+            &coordinator.forwarding,
+            &Arc::new(ShardedNeighborMap::new()),
+            &flow,
+            test_decision(),
+        );
+    assert_eq!(
+        live_resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "fixture: the destination must resolve through the seeded live route and neighbor",
+    );
     let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let inactive_ha_state = BTreeMap::from([(1, inactive_ha_runtime(now_secs))]);
+    let inactive_resolution = crate::afxdp::forwarding::enforce_ha_resolution_snapshot(
+        &coordinator.forwarding,
+        &inactive_ha_state,
+        now_secs,
+        live_resolution,
+    );
+    let pre_demote_redirect = crate::afxdp::session_glue::redirect_session_via_fabric_if_needed(
+        &coordinator.forwarding,
+        inactive_resolution,
+        false,
+        test_metadata().ingress_zone,
+    );
+    assert_eq!(
+        pre_demote_redirect.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "fixture: inactive HA enforcement must turn the live candidate into a FabricRedirect",
+    );
     let forward_upsert = SyncedSessionEntry {
         key: key.clone(),
         decision: test_decision(),
