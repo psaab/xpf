@@ -211,7 +211,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	// has a compiler/dataplane consumer. Reject new strict commits; tolerant
 	// loads warn so older persisted or peer-synced configurations still boot.
 	forwardingFilterWarnings, err := validateUnsupportedForwardingOptionsFiltersAST(
-		tree.Children, opts.lenientUnsupportedForwardingOptionsFilters)
+		tree.Children, opts.lenientForwardingFilters)
 	if err != nil {
 		return nil, err
 	}
