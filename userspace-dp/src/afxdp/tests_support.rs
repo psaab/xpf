@@ -2735,7 +2735,17 @@ pub(super) fn build_gre_inner_tcp_syn_packet_v4(dst: Ipv4Addr) -> Vec<u8> {
 /// held: recovery after this first-packet drop requires neighbor resolution and
 /// a retransmitted packet.
 pub(super) fn assert_decapped_missing_neighbor_never_buffered_or_retried(vlan_id: u16) {
-    let mut forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    let mut snapshot = gre_to_self_snapshot();
+    if vlan_id == 0 {
+        // Model untagged ingress as the configured native VLAN on this trunk.
+        snapshot
+            .interfaces
+            .iter_mut()
+            .find(|iface| iface.ifindex == 11)
+            .expect("GRE underlay parent")
+            .native_vlan_id = 80;
+    }
+    let mut forwarding = build_forwarding_state(&snapshot);
     let ha_state = txn_ha_state();
     // bindings[0] = WAN parent ingress (ifindex 11); bindings[1] = the
     // inner-egress LAN binding (ifindex 24) so a defective retry TX has
