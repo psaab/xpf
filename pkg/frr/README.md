@@ -1179,10 +1179,15 @@ step. Both are required — neither sees the other's case:
      unreachable); a policy with no explicit default falls through to the next
      policy. If the route falls off the end of EVERY policy, the trailing
      Junos BGP default-ACCEPT `permit` is emitted (#2998 — a composed chain is
-     only ever a BGP `route-map in`/`out`). Per-policy inline prefix-lists are
-     namespaced `<composedName>-<policyName>-<termName>` so a term name reused
-     across chained policies cannot fuse two prefix-lists. Generated inline
-     `ip`/`ipv6 prefix-list` and same-family access-list definitions are emitted
+     only ever a BGP `route-map in`/`out`). Per-policy inline route-filter
+     prefix-lists use bounded deterministic names derived from route-map name,
+     policy prefix, term name, and family suffix. The readable `<policy>-<term>`
+     prefix is followed by a reserved `-xpf-inline-` marker and a 64-bit hash of
+     that structured identity, avoiding the old lossy hyphen-join alias.
+     `routeFilterACLNameCollision` rejects operator prefix-lists intruding on the
+     reserved marker and checks known generated-name collisions before apply.
+     Generated inline `ip`/`ipv6 prefix-list` and same-family access-list
+     definitions are emitted
      before the route-map body that uses them (each policy's definitions join
      immediately before its own map; composed chains collect every part's
      definitions before emitting composed bodies), never inside a route-map

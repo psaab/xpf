@@ -119,6 +119,7 @@ func TestFromPrefixListMixed_Deny_2607(t *testing.T) {
 func TestFromPrefixListMixed_CoResidentV4RouteFilter_2607(t *testing.T) {
 	m := New()
 	got := m.generatePolicyOptions(mixedFromPrefixListPO("accept", "v4"))
+	routeFilterName := inlinePrefixListName("p", "p", "t1", "")
 
 	ipACL := routeFilterACLName("mixed", "ip")
 	// v4 half ANDs via an access-list (#5730), NOT a colliding prefix-list match.
@@ -129,7 +130,7 @@ func TestFromPrefixListMixed_CoResidentV4RouteFilter_2607(t *testing.T) {
 	if seqV4 == "" {
 		t.Fatalf("co-resident v4 rf: missing the access-list match for the mixed v4 half:\n%s", got)
 	}
-	if !strings.Contains(seqV4, " match ip address prefix-list p-t1\n") {
+	if !strings.Contains(seqV4, " match ip address prefix-list "+routeFilterName+"\n") {
 		t.Errorf("co-resident v4 rf: the v4 route-filter and the mixed v4 half must AND in ONE sequence (#5730):\n%s", seqV4)
 	}
 	// v6 half: off-family unsatisfiable AND — the v4 route-filter match must
@@ -138,7 +139,7 @@ func TestFromPrefixListMixed_CoResidentV4RouteFilter_2607(t *testing.T) {
 	if seqV6 == "" {
 		t.Fatalf("co-resident v4 rf: the mixed list v6 half must still be emitted:\n%s", got)
 	}
-	if !strings.Contains(seqV6, " match ip address prefix-list p-t1\n") {
+	if !strings.Contains(seqV6, " match ip address prefix-list "+routeFilterName+"\n") {
 		t.Errorf("co-resident v4 rf: the off-family v6 sequence must still AND the v4 route-filter (unsatisfiable, not dropped — #5702):\n%s", seqV6)
 	}
 }
@@ -149,6 +150,7 @@ func TestFromPrefixListMixed_CoResidentV4RouteFilter_2607(t *testing.T) {
 func TestFromPrefixListMixed_CoResidentV6RouteFilter_2607(t *testing.T) {
 	m := New()
 	got := m.generatePolicyOptions(mixedFromPrefixListPO("accept", "v6"))
+	routeFilterName := inlinePrefixListName("p", "p", "t1", "")
 
 	v6ACL := routeFilterACLName("mixed", "ipv6")
 	if !strings.Contains(got, "ipv6 access-list "+v6ACL+" seq 5 permit 2001:db8::/32 exact-match\n") {
@@ -158,7 +160,7 @@ func TestFromPrefixListMixed_CoResidentV6RouteFilter_2607(t *testing.T) {
 	if seqV6 == "" {
 		t.Fatalf("co-resident v6 rf: missing the ipv6 access-list match for the mixed v6 half:\n%s", got)
 	}
-	if !strings.Contains(seqV6, " match ipv6 address prefix-list p-t1\n") {
+	if !strings.Contains(seqV6, " match ipv6 address prefix-list "+routeFilterName+"\n") {
 		t.Errorf("co-resident v6 rf: the v6 route-filter and the mixed v6 half must AND in ONE sequence (#5730):\n%s", seqV6)
 	}
 	// v4 half off-family unsatisfiable, still emitted (#5702).
@@ -166,7 +168,7 @@ func TestFromPrefixListMixed_CoResidentV6RouteFilter_2607(t *testing.T) {
 	if seqV4 == "" {
 		t.Fatalf("co-resident v6 rf: the mixed list v4 half must still be emitted:\n%s", got)
 	}
-	if !strings.Contains(seqV4, " match ipv6 address prefix-list p-t1\n") {
+	if !strings.Contains(seqV4, " match ipv6 address prefix-list "+routeFilterName+"\n") {
 		t.Errorf("co-resident v6 rf: the off-family v4 sequence must still AND the v6 route-filter (unsatisfiable, not dropped — #5702):\n%s", seqV4)
 	}
 }

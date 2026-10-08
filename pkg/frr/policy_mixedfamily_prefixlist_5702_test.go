@@ -79,9 +79,11 @@ func TestMixedFamilyRouteFilterFromPrefixList_OffFamilyNonMatching_5702(t *testi
 		},
 	}
 	got := New().generatePolicyOptions(po)
+	v4Name := inlinePrefixListName("MIX", "MIX", "t1", "_v4")
+	v6Name := inlinePrefixListName("MIX", "MIX", "t1", "_v6")
 
 	// The v4 sequence is the one carrying the v4 route-filter match.
-	v4seq := routeMapSequenceContaining(got, "MIX", "match ip address prefix-list MIX-t1_v4")
+	v4seq := routeMapSequenceContaining(got, "MIX", "match ip address prefix-list "+v4Name)
 	if v4seq == "" {
 		t.Fatalf("expected a v4 route-filter sequence in render:\n%s", got)
 	}
@@ -108,9 +110,9 @@ func TestMixedFamilyRouteFilterFromPrefixList_OffFamilyNonMatching_5702(t *testi
 			"#5730), got %d occurrences:\n%s", n, got)
 	}
 	// The v6 route-filter sequence ANDs V6ONLY as an access-list (#5730),
-	// coexisting with `match ipv6 address prefix-list MIX-t1_v6` as a distinct
+	// coexisting with the derived _v6 inline prefix-list name as a distinct
 	// FRR rule type instead of colliding with it.
-	v6seq := routeMapSequenceContaining(got, "MIX", "match ipv6 address prefix-list MIX-t1_v6")
+	v6seq := routeMapSequenceContaining(got, "MIX", "match ipv6 address prefix-list "+v6Name)
 	if v6seq == "" {
 		t.Fatalf("expected a v6 route-filter sequence in render:\n%s", got)
 	}
@@ -152,8 +154,9 @@ func TestMixedFamilyRouteFilterFromPrefixList_V4List_OffFamilyNonMatching_5702(t
 		},
 	}
 	got := New().generatePolicyOptions(po)
+	v6Name := inlinePrefixListName("MIX", "MIX", "t1", "_v6")
 
-	v6seq := routeMapSequenceContaining(got, "MIX", "match ipv6 address prefix-list MIX-t1_v6")
+	v6seq := routeMapSequenceContaining(got, "MIX", "match ipv6 address prefix-list "+v6Name)
 	if v6seq == "" {
 		t.Fatalf("expected a v6 route-filter sequence in render:\n%s", got)
 	}
@@ -187,13 +190,15 @@ func TestMixedFamilyRouteFilterNoPrefixList_Unchanged_5702(t *testing.T) {
 		},
 	}
 	got := New().generatePolicyOptions(po)
+	v4Name := inlinePrefixListName("MIX", "MIX", "t1", "_v4")
+	v6Name := inlinePrefixListName("MIX", "MIX", "t1", "_v6")
 	// No stray prefix-list AND predicate leaks into either sequence.
 	if strings.Contains(got, "prefix-list V6ONLY") || strings.Contains(got, "prefix-list V4ONLY") {
 		t.Fatalf("no from-prefix-list configured; render must not emit one:\n%s", got)
 	}
 	// Exactly the two per-family route-filter matches, nothing else.
-	if !strings.Contains(got, "match ip address prefix-list MIX-t1_v4\n") ||
-		!strings.Contains(got, "match ipv6 address prefix-list MIX-t1_v6\n") {
+	if !strings.Contains(got, "match ip address prefix-list "+v4Name+"\n") ||
+		!strings.Contains(got, "match ipv6 address prefix-list "+v6Name+"\n") {
 		t.Fatalf("mixed-family split must keep both per-family route-filter matches:\n%s", got)
 	}
 }
