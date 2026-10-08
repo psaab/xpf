@@ -625,6 +625,16 @@ NAT expansion refuse the set rather than retaining its valid-looking subset.
 Zone-local address-set folds carry the unknown-member taint too. A recognized
 `description` remains accepted metadata and is not a member.
 
+**Policy wildcards are not address-set members (#12243):**
+`any`/`any-ipv4`/`any-ipv6`/`any4`/`any6` match everything only as policy
+address tokens; no set resolver has a wildcard branch (apply pre-pass
+`compileAddressBook` misses them in AddrIDs and aborts the whole apply;
+userspace expansion drops them). `validateAddressSetMembersDefinedStrict`
+rejects a wildcard `address` or nested `address-set` member at commit,
+including unreferenced and zone-local sets, naming set and member; the
+tolerant path warns (#1960). Persisted configs carrying one are not
+migrated and still fail apply until edited.
+
 **IPv4-mapped IPv6 address-book prefixes are rejected before commit (#10688):**
 Go's `net.IP.To4()` files `::ffff:a.b.c.d/nn` into `prefixes_v4`, but the
 userspace helper parses the colon-bearing prefix as IPv6 and rejects the entire

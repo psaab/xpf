@@ -277,6 +277,31 @@ func slotEscapeHistoricalRows() []slotEscapeRow {
 
 func slotEscapeRows() []slotEscapeRow {
 	return []slotEscapeRow{
+		// #12243: unreferenced address-set members now reject policy wildcards.
+		// Use concrete address-book controls because the synthetic parent sweep
+		// has no defined book entry and cannot distinguish a clean token.
+		{"global address-set address member", "security address-book global address-set <*> address",
+			[]string{"set security address-book global address a1 10.5.0.0/24"},
+			"set security address-book global address-set S address", "a1", "any"},
+		{"global address-set nested member", "security address-book global address-set <*> address-set",
+			[]string{
+				"set security address-book global address a1 10.5.0.0/24",
+				"set security address-book global address-set inner address a1",
+			},
+			"set security address-book global address-set S address-set", "inner", "any"},
+		{"zone-local address-set address member", "security zones security-zone <*> address-book address-set <*> address",
+			[]string{
+				"set security zones security-zone trust",
+				"set security zones security-zone trust address-book address a1 10.5.0.0/24",
+			},
+			"set security zones security-zone trust address-book address-set S address", "a1", "any"},
+		{"zone-local address-set nested member", "security zones security-zone <*> address-book address-set <*> address-set",
+			[]string{
+				"set security zones security-zone trust",
+				"set security zones security-zone trust address-book address a1 10.5.0.0/24",
+				"set security zones security-zone trust address-book address-set inner address a1",
+			},
+			"set security zones security-zone trust address-book address-set S address-set", "inner", "any"},
 		{"bridge-domain interface member", "bridge-domains <*> interface",
 			[]string{
 				"set interfaces ge-0/0/0 vlan-tagging",
