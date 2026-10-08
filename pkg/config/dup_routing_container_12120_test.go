@@ -12,21 +12,23 @@ import (
 // require a behavioral fixture.
 func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 	cases := []struct {
-		name            string
-		site            string
-		diagnostic      string
-		warningFragment string
-		strictReject    []string
-		dup             string
-		merged          string
-		read            func(*Config) any
-		populated       func(any) bool
+		name              string
+		site              string
+		diagnosticParent  string
+		diagnosticKeyword string
+		warningFragment   string
+		strictReject      []string
+		dup               string
+		merged            string
+		read              func(*Config) any
+		populated         func(any) bool
 	}{
 		{
-			name:            "routing-options generate",
-			site:            "any routing-options generate",
-			diagnostic:      "routing-options generate",
-			warningFragment: "routing-options generate",
+			name:              "routing-options generate",
+			site:              "any routing-options generate",
+			diagnosticParent:  "routing-options",
+			diagnosticKeyword: "generate",
+			warningFragment:   "routing-options generate",
 			dup: `routing-options {
 				generate { route 10.30.0.0/16 { discard; } }
 				generate { route 192.0.2.0/24 { discard; } }
@@ -44,11 +46,12 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			},
 		},
 		{
-			name:            "global routing-options interface-routes",
-			site:            "any routing-options interface-routes",
-			diagnostic:      "routing-options interface-routes",
-			warningFragment: "routing-options interface-routes",
-			strictReject:    []string{"not implemented", `inet "RG4"`, `inet6 "RG6"`},
+			name:              "global routing-options interface-routes",
+			site:              "any routing-options interface-routes",
+			diagnosticParent:  "routing-options",
+			diagnosticKeyword: "interface-routes",
+			warningFragment:   "routing-options interface-routes",
+			strictReject:      []string{"not implemented", `inet "RG4"`, `inet6 "RG6"`},
 			dup: `routing-options {
 				interface-routes { rib-group { inet RG4; } }
 				interface-routes { rib-group { inet6 RG6; } }
@@ -71,10 +74,11 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			},
 		},
 		{
-			name:            "routing-instance interface-routes",
-			site:            "any routing-options interface-routes",
-			diagnostic:      "routing-options interface-routes",
-			warningFragment: "routing-options interface-routes",
+			name:              "routing-instance interface-routes",
+			site:              "any routing-options interface-routes",
+			diagnosticParent:  "routing-options",
+			diagnosticKeyword: "interface-routes",
+			warningFragment:   "routing-options interface-routes",
 			dup: `routing-options { rib-groups { leak { import-rib inet.0; import-rib blue.inet.0; } } }
 			routing-instances { blue {
 				instance-type virtual-router;
@@ -108,10 +112,11 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			},
 		},
 		{
-			name:            "routing-options rib inet.0 static",
-			site:            "any rib static",
-			diagnostic:      "rib static",
-			warningFragment: "`static` containers under `rib`",
+			name:              "routing-options rib inet.0 static",
+			site:              "any rib static",
+			diagnosticParent:  "rib",
+			diagnosticKeyword: "static",
+			warningFragment:   "`static` containers under `rib`",
 			dup: `routing-options {
 				rib inet.0 {
 					static { route 10.40.0.0/16 { next-hop 192.0.2.1; } }
@@ -131,10 +136,11 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			},
 		},
 		{
-			name:            "protocols ospf",
-			site:            "any protocols ospf",
-			diagnostic:      "protocols ospf",
-			warningFragment: "`ospf` containers under `protocols`",
+			name:              "protocols ospf",
+			site:              "any protocols ospf",
+			diagnosticParent:  "protocols",
+			diagnosticKeyword: "ospf",
+			warningFragment:   "`ospf` containers under `protocols`",
 			dup: `protocols {
 				ospf { area 0.0.0.0 { interface ge-0/0/0.0; } }
 				ospf { area 0.0.0.1 { interface ge-0/0/1.0; } }
@@ -152,10 +158,11 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			},
 		},
 		{
-			name:            "protocols bgp",
-			site:            "any protocols bgp",
-			diagnostic:      "protocols bgp",
-			warningFragment: "`bgp` containers under `protocols`",
+			name:              "protocols bgp",
+			site:              "any protocols bgp",
+			diagnosticParent:  "protocols",
+			diagnosticKeyword: "bgp",
+			warningFragment:   "`bgp` containers under `protocols`",
 			dup: `protocols {
 				bgp { local-as 65001; group one { peer-as 65002; neighbor 192.0.2.1; } }
 				bgp { group two { peer-as 65003; neighbor 192.0.2.2; } }
@@ -173,10 +180,11 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			},
 		},
 		{
-			name:            "routing-instance static (global registration subsumes #12043)",
-			site:            "any routing-options static",
-			diagnostic:      "routing-options static",
-			warningFragment: "routing-options static",
+			name:              "routing-instance static (global registration subsumes #12043)",
+			site:              "any routing-options static",
+			diagnosticParent:  "routing-options",
+			diagnosticKeyword: "static",
+			warningFragment:   "routing-options static",
 			dup: `routing-instances { blue {
 				instance-type virtual-router;
 				routing-options {
@@ -205,10 +213,11 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			},
 		},
 		{
-			name:            "protocols ospf3",
-			site:            "any protocols ospf3",
-			diagnostic:      "protocols ospf3",
-			warningFragment: "`ospf3` containers under `protocols`",
+			name:              "protocols ospf3",
+			site:              "any protocols ospf3",
+			diagnosticParent:  "protocols",
+			diagnosticKeyword: "ospf3",
+			warningFragment:   "`ospf3` containers under `protocols`",
 			dup: `protocols {
 				ospf3 { area 0.0.0.0 { interface ge-0/0/0.0; } }
 				ospf3 { area 0.0.0.1 { interface ge-0/0/1.0; } }
@@ -224,10 +233,11 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			},
 		},
 		{
-			name:            "routing-instance protocols ospf3",
-			site:            "any protocols ospf3",
-			diagnostic:      "protocols ospf3",
-			warningFragment: "routing-instances blue protocols",
+			name:              "routing-instance protocols ospf3",
+			site:              "any protocols ospf3",
+			diagnosticParent:  "protocols",
+			diagnosticKeyword: "ospf3",
+			warningFragment:   "routing-instances blue protocols",
 			dup: `routing-instances { blue {
 				instance-type virtual-router;
 				protocols {
@@ -256,10 +266,11 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			},
 		},
 		{
-			name:            "protocols rip",
-			site:            "any protocols rip",
-			diagnostic:      "protocols rip",
-			warningFragment: "`rip` containers under `protocols`",
+			name:              "protocols rip",
+			site:              "any protocols rip",
+			diagnosticParent:  "protocols",
+			diagnosticKeyword: "rip",
+			warningFragment:   "`rip` containers under `protocols`",
 			dup: `protocols {
 				rip { group g1 { neighbor ge-0/0/1.0; } }
 				rip { group g2 { neighbor ge-0/0/2.0; } }
@@ -275,10 +286,11 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			},
 		},
 		{
-			name:            "protocols isis",
-			site:            "any protocols isis",
-			diagnostic:      "protocols isis",
-			warningFragment: "`isis` containers under `protocols`",
+			name:              "protocols isis",
+			site:              "any protocols isis",
+			diagnosticParent:  "protocols",
+			diagnosticKeyword: "isis",
+			warningFragment:   "`isis` containers under `protocols`",
 			dup: `protocols {
 				isis { interface ge-0/0/1.0; }
 				isis { interface ge-0/0/2.0; }
@@ -294,10 +306,11 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			},
 		},
 		{
-			name:            "protocols lldp",
-			site:            "any protocols lldp",
-			diagnostic:      "protocols lldp",
-			warningFragment: "`lldp` containers under `protocols`",
+			name:              "protocols lldp",
+			site:              "any protocols lldp",
+			diagnosticParent:  "protocols",
+			diagnosticKeyword: "lldp",
+			warningFragment:   "`lldp` containers under `protocols`",
 			dup: `protocols {
 				lldp { interface ge-0/0/1; }
 				lldp { interface ge-0/0/2; }
@@ -313,10 +326,11 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			},
 		},
 		{
-			name:            "protocols router-advertisement",
-			site:            "any protocols router-advertisement",
-			diagnostic:      "protocols router-advertisement",
-			warningFragment: "`router-advertisement` containers under `protocols`",
+			name:              "protocols router-advertisement",
+			site:              "any protocols router-advertisement",
+			diagnosticParent:  "protocols",
+			diagnosticKeyword: "router-advertisement",
+			warningFragment:   "`router-advertisement` containers under `protocols`",
 			dup: `protocols {
 				router-advertisement { interface ge-0/0/1.0 { prefix 2001:db8:1::/64; } }
 				router-advertisement { interface ge-0/0/2.0 { prefix 2001:db8:2::/64; } }
@@ -332,9 +346,10 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			},
 		},
 		{
-			name:            "isis md5 authentication split across containers",
-			diagnostic:      "protocols isis",
-			warningFragment: "`isis` containers under `protocols`",
+			name:              "isis md5 authentication split across containers",
+			diagnosticParent:  "protocols",
+			diagnosticKeyword: "isis",
+			warningFragment:   "`isis` containers under `protocols`",
 			dup: `protocols {
 				isis { interface ge-0/0/1.0; }
 				isis { authentication-key "k123"; authentication-type md5; }
@@ -362,9 +377,10 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			},
 		},
 		{
-			name:            "rip md5 authentication split across containers",
-			diagnostic:      "protocols rip",
-			warningFragment: "`rip` containers under `protocols`",
+			name:              "rip md5 authentication split across containers",
+			diagnosticParent:  "protocols",
+			diagnosticKeyword: "rip",
+			warningFragment:   "`rip` containers under `protocols`",
 			dup: `protocols {
 				rip { group g1 { neighbor ge-0/0/1.0; } }
 				rip { authentication-key "k123"; authentication-type md5; }
@@ -392,10 +408,11 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			},
 		},
 		{
-			name:            "protocols roots",
-			site:            "root root protocols",
-			diagnostic:      "protocols",
-			warningFragment: "top-level `protocols`",
+			name:              "protocols roots",
+			site:              "root root protocols",
+			diagnosticParent:  "",
+			diagnosticKeyword: "protocols",
+			warningFragment:   "top-level `protocols`",
 			dup: `protocols {
 				ospf { area 0.0.0.0 { interface ge-0/0/0.0; } }
 			}
@@ -415,11 +432,12 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 			},
 		},
 		{
-			name:            "nested interface-routes rib-group",
-			site:            "any interface-routes rib-group",
-			diagnostic:      "interface-routes rib-group",
-			warningFragment: "routing-options interface-routes",
-			strictReject:    []string{"not implemented", `inet "RG4"`, `inet6 "RG6"`},
+			name:              "nested interface-routes rib-group",
+			site:              "any interface-routes rib-group",
+			diagnosticParent:  "interface-routes",
+			diagnosticKeyword: "rib-group",
+			warningFragment:   "routing-options interface-routes",
+			strictReject:      []string{"not implemented", `inet "RG4"`, `inet6 "RG6"`},
 			dup: `routing-options { interface-routes {
 				rib-group { inet RG4; }
 				rib-group { inet6 RG6; }
@@ -494,17 +512,13 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 						}
 						var warning string
 						for _, merge := range mergeDuplicateBlocks9023(tree) {
-							what := strings.TrimSpace(merge.parent + " " + merge.keyword)
-							if merge.parent == "" {
-								what = merge.keyword
+							if merge.kind != duplicateBlockMergeUnnamed9023 ||
+								merge.parent != tc.diagnosticParent ||
+								merge.keyword != tc.diagnosticKeyword {
+								continue
 							}
-							if merge.parent == "routing-instances" {
-								what = strings.TrimSpace(merge.parent + " " + merge.name + " " + merge.keyword)
-							}
-							if what == tc.diagnostic {
-								warning = duplicateBlockMergeWarning9023(merge)
-								break
-							}
+							warning = duplicateBlockMergeWarning9023(merge)
+							break
 						}
 						if !strings.Contains(warning, "#12120") {
 							t.Errorf("strict merge fold warning = %q, want #12120", warning)
