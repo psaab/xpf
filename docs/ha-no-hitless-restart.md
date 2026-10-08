@@ -171,8 +171,8 @@ reconciled. See "Live control-link moves" below.
 
 So a day-2 commit that changes the node-id or cluster-id used to be
 accepted and promoted, while the running manager kept its **old**
-identity — heartbeat `NodeID`/`ClusterID`, the RETH virtual MAC
-(`02:bf:72:CC:RR:NN`, cluster-id + node-id derived), the election
+identity — heartbeat `NodeID`/`ClusterID`, the per-RETH virtual MAC
+(`02:bf:72:CC:RR:(2*reth-index+node-id)`), the election
 tie-break, and FPC/slot naming. The new identity took effect **only on
 restart**: a silent partial no-op, the same false-success the #5840
 topology gate closes for the mode flip.

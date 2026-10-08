@@ -3,6 +3,7 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -241,75 +242,101 @@ var rethLinkOpsFn = rethLinkOps{
 	setHardwareAddr: netlink.LinkSetHardwareAddr,
 }
 
-// renameRethMember finds an interface by its RETH virtual MAC and renames it
-// to the expected config name. Returns the old kernel name if renamed, or "".
+// renameRethMember finds a RETH member by its indexed virtual MAC, with the
+// original shared-MAC value as a migration fallback, then renames it to the
+// expected config name. Interfaces already wearing any configured RETH member
+// name are excluded so an old shared MAC cannot select a healthy sibling.
+// Ambiguous matches are refused rather than depending on interface order.
 //
-// The interface must be DOWN for the rename to succeed, so renameRethMember
-// brings it down for the rename and then back UP — the function that downs a
-// link owns bringing it back up. It does NOT rely on the caller's subsequent
-// programRethMAC for the UP: programRethMAC early-returns (no UP) when the
-// virtual MAC already matches, and that is exactly the case here — the
-// interface was found by matching that same virtual MAC, so programRethMAC
-// always no-ops on the just-renamed member. Without this UP the RETH data link
-// would be left administratively DOWN → the interface track detects link-down
-// → the redundancy group demotes → traffic blackhole (#3920).
-func renameRethMember(targetName string, expectedMAC net.HardwareAddr, beforeCycle func() error) string {
+// Returns the old kernel name, whether the link was cycled, and any operation
+// error. The caller owns dataplane recovery after a successful/partial cycle.
+func renameRethMember(targetName string, expectedMAC, legacyMAC net.HardwareAddr,
+	configuredMemberNames map[string]struct{}, beforeCycle func() error) (string, bool, error) {
 	ops := rethLinkOpsFn
 	ifaces, err := ops.interfaces()
 	if err != nil {
-		return ""
+		return "", false, fmt.Errorf("list interfaces for RETH member recovery: %w", err)
 	}
-	for _, iface := range ifaces {
-		if !bytes.Equal(iface.HardwareAddr, expectedMAC) || iface.Name == targetName {
+
+	candidateIndex := -1
+	matches := 0
+	for i := range ifaces {
+		if ifaces[i].Name == targetName {
 			continue
 		}
-		link, err := ops.byIndex(iface.Index)
-		if err != nil {
-			return ""
+		if _, configured := configuredMemberNames[ifaces[i].Name]; configured {
+			continue
 		}
-		// #6911: the worker join belongs HERE — after a rename candidate is
-		// confirmed (so the hook cannot fire on a scan that cycles nothing) and
-		// strictly BEFORE setDown, the first mutation of the link. This mirrors
-		// programRethMAC's #5103 contract: worker threads live across the link
-		// DOWN, touching UMEM pages the NIC unmaps as it tears down its queues.
-		//
-		// The hazard is LATENT today, not live: renameRethMember runs only when
-		// LinkByName(targetName) already failed, it matches by the VIRTUAL MAC,
-		// and the dataplane cannot have resolved a binding to a name that did
-		// not exist — so there are no live bindings to tear down. That chain
-		// rests on three properties of unrelated code, none of them asserted.
-		// The hook makes the two cycle sites symmetric so a future change to
-		// any of them fails loudly here instead of silently reopening #5103.
-		if beforeCycle != nil {
-			if err := beforeCycle(); err != nil {
-				slog.Warn("skipping RETH member rename: worker join failed",
-					"from", iface.Name, "to", targetName, "err", err)
-				// Abort WITHOUT touching the link — the caller's workers are in
-				// an unknown state and a cycle now is exactly the #5103 hazard.
-				return ""
+		if bytes.Equal(ifaces[i].HardwareAddr, expectedMAC) {
+			candidateIndex = i
+			matches++
+		}
+	}
+	if matches > 1 {
+		slog.Warn("skipping ambiguous RETH member recovery",
+			"to", targetName, "mac", expectedMAC, "matches", matches)
+		return "", false, nil
+	}
+	if matches == 0 && !bytes.Equal(expectedMAC, legacyMAC) {
+		for i := range ifaces {
+			if ifaces[i].Name == targetName {
+				continue
+			}
+			if _, configured := configuredMemberNames[ifaces[i].Name]; configured {
+				continue
+			}
+			if bytes.Equal(ifaces[i].HardwareAddr, legacyMAC) {
+				candidateIndex = i
+				matches++
 			}
 		}
-		// Ensure interface is DOWN for rename.
-		ops.setDown(link)
-		if err := ops.setName(link, targetName); err != nil {
-			slog.Warn("failed to rename RETH member",
-				"from", iface.Name, "to", targetName, "err", err)
-			// We downed the link above; a failed rename must not strand
-			// the member DOWN. Best-effort restore admin UP.
-			ops.setUp(link)
-			return ""
+		if matches > 1 {
+			slog.Warn("skipping ambiguous legacy-MAC RETH member recovery",
+				"to", targetName, "mac", legacyMAC, "matches", matches)
+			return "", false, nil
 		}
-		// Bring the member back UP after the rename. renameRethMember downed
-		// it, so renameRethMember owns the UP — do not depend on
-		// programRethMAC, which no-ops (no UP) when the MAC already matches
-		// (#3920).
-		if err := ops.setUp(link); err != nil {
-			slog.Warn("failed to bring RETH member up after rename",
-				"iface", targetName, "err", err)
-		}
-		return iface.Name
 	}
-	return ""
+	if candidateIndex < 0 {
+		return "", false, nil
+	}
+	iface := ifaces[candidateIndex]
+	link, err := ops.byIndex(iface.Index)
+	if err != nil {
+		return "", false, fmt.Errorf("find RETH recovery candidate %s: %w", iface.Name, err)
+	}
+	// #6911: the worker join belongs HERE — after a rename candidate is
+	// confirmed (so the hook cannot fire on a scan that cycles nothing) and
+	// strictly BEFORE setDown, the first mutation of the link. This mirrors
+	// programRethMAC's #5103 contract.
+	if beforeCycle != nil {
+		if err := beforeCycle(); err != nil {
+			slog.Warn("skipping RETH member rename: worker join failed",
+				"from", iface.Name, "to", targetName, "err", err)
+			return "", false, fmt.Errorf("prepare RETH member rename %s: %w", iface.Name, err)
+		}
+	}
+	if err := ops.setDown(link); err != nil {
+		return "", false, fmt.Errorf("bring RETH recovery candidate %s down: %w", iface.Name, err)
+	}
+	if err := ops.setName(link, targetName); err != nil {
+		slog.Warn("failed to rename RETH member",
+			"from", iface.Name, "to", targetName, "err", err)
+		// We downed the link above; a failed rename must not strand it DOWN.
+		if upErr := ops.setUp(link); upErr != nil {
+			err = errors.Join(err, fmt.Errorf("restore link up: %w", upErr))
+		}
+		return "", true, fmt.Errorf("rename RETH member %s to %s: %w", iface.Name, targetName, err)
+	}
+	// Bring the member back UP after the rename. renameRethMember downed
+	// it, so renameRethMember owns the UP — do not depend on
+	// programRethMAC, which no-ops (no UP) when the MAC already matches
+	// (#3920).
+	if err := ops.setUp(link); err != nil {
+		slog.Warn("failed to bring RETH member up after rename",
+			"iface", targetName, "err", err)
+		return iface.Name, true, fmt.Errorf("bring renamed RETH member %s up: %w", targetName, err)
+	}
+	return iface.Name, true, nil
 }
 
 // programRethMAC sets a deterministic virtual MAC on a RETH member interface.

@@ -91,9 +91,10 @@ func TestRenameRethMemberBringsLinkUpWhenMACMatches(t *testing.T) {
 	var ops []string
 	installFakeRethLinkOps(t, link, &adminUp, &ops, false)
 
-	old := renameRethMember("ge-0-0-1", mac, nil)
-	if old != "enp8s0" {
-		t.Fatalf("renameRethMember returned old name %q, want enp8s0", old)
+	old, cycled, err := renameRethMember("ge-0-0-1", mac, mac, nil, nil)
+	if err != nil || !cycled || old != "enp8s0" {
+		t.Fatalf("renameRethMember returned (%q, %v, %v), want (enp8s0, true, nil)",
+			old, cycled, err)
 	}
 	if link.attrs.Name != "ge-0-0-1" {
 		t.Fatalf("link not renamed: %q", link.attrs.Name)
@@ -110,7 +111,7 @@ func TestRenameRethMemberBringsLinkUpWhenMACMatches(t *testing.T) {
 
 	// programRethMAC on the just-renamed member no-ops (MAC already matches)
 	// and must NOT disturb the UP state that renameRethMember established.
-	cycled, err := programRethMAC("ge-0-0-1", mac, nil)
+	cycled, err = programRethMAC("ge-0-0-1", mac, nil)
 	if err != nil {
 		t.Fatalf("programRethMAC: %v", err)
 	}
@@ -148,8 +149,10 @@ func TestRenameRethMemberUpOnFailedRename(t *testing.T) {
 		},
 	}
 
-	if old := renameRethMember("ge-0-0-1", mac, nil); old != "" {
-		t.Fatalf("expected empty old name on failed rename, got %q", old)
+	old, cycled, err := renameRethMember("ge-0-0-1", mac, mac, nil, nil)
+	if old != "" || !cycled || err == nil {
+		t.Fatalf("expected empty old name, completed cycle and error on failed rename; got (%q, %v, %v)",
+			old, cycled, err)
 	}
 	if !adminUp {
 		t.Fatal("member left DOWN after a failed rename — must be restored UP (#3920)")

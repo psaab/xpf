@@ -20,8 +20,8 @@ import "fmt"
 //     implementation is a net-new dataplane subsystem.
 //   - H10: `interfaces <if> [unit <n>] mac <addr>` — a static MAC
 //     override. xpf computes the RETH virtual MAC deterministically per
-//     node (programRethMAC, 02:bf:72:CC:RR:NN) and Junos treats the
-//     interface MAC as read-only, so a static override is both
+//     node and RETH (02:bf:72:CC:RR:(2*reth-index+node-id)) and Junos
+//     treats the interface MAC as read-only, so a static override is both
 //     unimplemented and divergent.
 //   - #2354 / #5879: a QinQ / stacked-VLAN (802.1ad S-tag + 802.1Q C-tag)
 //     inner tag. The AF_XDP shim's parse_l2 unwinds exactly ONE VLAN tag,

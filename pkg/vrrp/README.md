@@ -1248,8 +1248,8 @@ dataplane reuses this Go walker, and do NOT try to consolidate them.
   plus the dataplane taking over ARP/ND and dropping VIP-addressed
   host-inbound traffic. That is a dataplane + control-plane redesign,
   not a wired gate; see #4080.
-- RETH virtual MAC per node: `02:bf:72:CC:RR:NN`. Programmed via link
-  DOWN → set MAC → link UP. This bounces all kernel addresses; VIPs are
+- RETH virtual MAC per node and per RETH: `02:bf:72:CC:RR:(2*index+node)`.
+  Programmed via link DOWN → set MAC → link UP. This bounces all kernel addresses; VIPs are
   re-added by `ReconcileVIPs()` immediately afterwards, and the advert
   **source** (`localIP`/`localIPv6`) is re-resolved by the #2528
   address-watcher (`addrwatch.go`) as the flushed base/link-local

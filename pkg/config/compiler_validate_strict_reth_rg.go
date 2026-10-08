@@ -11,6 +11,8 @@ import (
 // is neither structurally nor nominally a redundant-ethernet interface:
 // nothing names it as their `gigether-options redundant-parent`, AND it is not
 // spelled `reth*` (#6781).
+// It also bounds structurally owned active RETHs to MaxRethCount so the
+// per-RETH virtual-MAC index remains unique and representable.
 //
 // Junos scopes `redundant-ether-options` to a reth; xpf's schema attaches it to
 // any interface node (schema_interfaces.go), so `ge-0/0/5
@@ -54,6 +56,10 @@ func validateRethRedundancyGroupStrict(cfg *Config) error {
 		return nil
 	}
 	rethToPhys := cfg.RethToPhysical()
+	if count := len(cfg.rethMACOwners()); count > MaxRethCount {
+		return fmt.Errorf("configuration has %d RETH interfaces, exceeding the supported limit of %d",
+			count, MaxRethCount)
+	}
 
 	names := make([]string, 0, len(cfg.Interfaces.Interfaces))
 	for name := range cfg.Interfaces.Interfaces {

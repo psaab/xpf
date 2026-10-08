@@ -130,10 +130,11 @@ var errClusterIdentityRequiresRestart = errors.New(
 // redundancy groups (pkg/cluster/group_state.go); it never re-reads m.nodeID or
 // m.clusterID. So a day-2 commit that CHANGES `chassis cluster node-id` or
 // `cluster-id` is accepted and promoted, but the running manager keeps its OLD
-// identity — heartbeat NodeID/ClusterID, RETH virtual MAC (02:bf:72:CC:RR:NN),
-// election tie-break, FPC/slot naming — and the new identity takes effect only
-// on restart. That is a silent partial no-op: the same false-success class #5840
-// fixed for the standalone<->cluster topology flip.
+// identity — heartbeat NodeID/ClusterID, the per-RETH virtual MAC
+// (02:bf:72:CC:RR:(2*reth-index+node-id)), election tie-break, FPC/slot naming
+// — and the new identity takes effect only on restart. That is a silent
+// partial no-op: the same false-success class #5840 fixed for the
+// standalone<->cluster topology flip.
 //
 // A live re-key of the write-once-at-boot manager is UNSAFE for the same reason
 // #5840 declined to (de)construct it live: d.cluster is read bare, without a

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,19 +13,9 @@ import (
 // asserted as an AGREEMENT with the commit gates rather than restated as a
 // comment, plus a census that the construction exists exactly once.
 //
-// K18 reports that `RethMAC` narrows cluster id, redundancy-group id and node
-// id with bare `byte()` casts, so ids >= 256 alias onto an in-use MAC. The
-// mechanism is real. What decides its severity is that all three inputs are
-// bounded to one byte AT COMMIT, so the cast is EXACT for every configuration
-// an operator can commit — the aliasing needs a tolerantly-loaded config that
-// never passed those gates.
-//
-// That makes the fix an agreement rather than a clamp. A saturating clamp would
-// collapse two out-of-range ids onto 255 AND onto a legitimate id 255 — three
-// groups sharing a MAC instead of two. It would make the aliasing deterministic,
-// not absent. What actually protects the invariant is the commit bound, so the
-// bound is what gets asserted here: widen it without widening the MAC and this
-// test says so, which is the only way the two can come apart.
+// Cluster ID and RG occupy one octet each. RETH index and node ID are packed
+// into the last octet as `2*rethIndex+nodeID`, using the configured 0..127
+// RETH-index range and the two-node 0..1 node-ID range.
 
 // TestRethVirtualMACWidthAgreesWithCommitBounds_8340 is the agreement.
 func TestRethVirtualMACWidthAgreesWithCommitBounds_8340(t *testing.T) {
@@ -126,14 +117,89 @@ func TestRethVirtualMACIsConstructedOnce_8340(t *testing.T) {
 // TestRethVirtualMACBytes_8340 pins the format itself, so the census above
 // cannot be satisfied by a single construction that builds the WRONG MAC.
 func TestRethVirtualMACBytes_8340(t *testing.T) {
-	mac := RethVirtualMAC(7, 3, 1)
+	mac := RethVirtualMAC(7, 3, 0, 1)
 	want := []byte{0x02, 0xbf, 0x72, 7, 3, 1}
 	if len(mac) != len(want) {
 		t.Fatalf("RethVirtualMAC length = %d, want %d", len(mac), len(want))
 	}
 	for i := range want {
 		if mac[i] != want[i] {
-			t.Fatalf("RethVirtualMAC(7,3,1) = %v, want %v", mac, want)
+			t.Fatalf("RethVirtualMAC(7,3,0,1) = %v, want %v", mac, want)
 		}
+	}
+}
+
+func TestRethVirtualMACIndexUniqueness_12157(t *testing.T) {
+	seen := make(map[string]struct{}, MaxRethCount*2)
+	for rethIndex := range MaxRethCount {
+		for nodeID := range 2 {
+			mac := RethVirtualMAC(7, 3, rethIndex, nodeID).String()
+			if _, exists := seen[mac]; exists {
+				t.Fatalf("duplicate RETH virtual MAC at index %d, node %d: %s", rethIndex, nodeID, mac)
+			}
+			seen[mac] = struct{}{}
+		}
+	}
+}
+
+func TestRethIndex_12157(t *testing.T) {
+	for name, want := range map[string]int{"reth0": 0, "reth1": 1, "reth127": 127} {
+		got, ok := RethIndex(name)
+		if !ok || got != want {
+			t.Errorf("RethIndex(%q) = (%d, %v), want (%d, true)", name, got, ok, want)
+		}
+	}
+	for _, name := range []string{"", "reth", "reth-1", "reth128", "reth01", "reth1.0", "ge-0/0/1"} {
+		if got, ok := RethIndex(name); ok {
+			t.Errorf("RethIndex(%q) = (%d, true), want invalid", name, got)
+		}
+	}
+}
+
+func TestRethMACIndexesCoverStructuralOwnerNames_12157(t *testing.T) {
+	build := func(ownerOrder []string) *Config {
+		interfaces := map[string]*InterfaceConfig{
+			"ge-0/0/1": {Name: "ge-0/0/1", RedundantParent: "reth0"},
+			"ge-0/0/2": {Name: "ge-0/0/2", RedundantParent: "bond0"},
+			"reth0":    {Name: "reth0", RedundancyGroup: 1},
+			"bond0":    {Name: "bond0", RedundancyGroup: 1},
+		}
+		ordered := make(map[string]*InterfaceConfig, len(interfaces))
+		for _, name := range ownerOrder {
+			ordered[name] = interfaces[name]
+		}
+		for name, ifc := range interfaces {
+			if _, exists := ordered[name]; !exists {
+				ordered[name] = ifc
+			}
+		}
+		return &Config{Interfaces: InterfacesConfig{Interfaces: ordered}}
+	}
+
+	want := map[string]int{"reth0": 0, "bond0": 1}
+	for _, order := range [][]string{{"reth0", "bond0"}, {"bond0", "reth0"}} {
+		got := build(order).RethMACIndexes()
+		if len(got) != len(want) {
+			t.Fatalf("RethMACIndexes = %v, want %v", got, want)
+		}
+		for name, index := range want {
+			if got[name] != index {
+				t.Errorf("RethMACIndexes[%q] = %d, want %d (all: %v)", name, got[name], index, got)
+			}
+		}
+	}
+}
+
+func TestStrictRethOwnerLimitMatchesVirtualMACCapacity_12157(t *testing.T) {
+	interfaces := make(map[string]*InterfaceConfig, (MaxRethCount+1)*2)
+	for i := range MaxRethCount + 1 {
+		owner := fmt.Sprintf("owner%d", i)
+		member := fmt.Sprintf("ge-0/0/%d", i)
+		interfaces[owner] = &InterfaceConfig{Name: owner, RedundancyGroup: 1}
+		interfaces[member] = &InterfaceConfig{Name: member, RedundantParent: owner}
+	}
+	cfg := &Config{Interfaces: InterfacesConfig{Interfaces: interfaces}}
+	if err := validateRethRedundancyGroupStrict(cfg); err == nil {
+		t.Fatal("strict validation accepted more RETH owners than the virtual-MAC index can represent")
 	}
 }

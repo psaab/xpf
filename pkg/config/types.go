@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -11,6 +12,76 @@ import (
 // forbids "/" so we replace with "-".
 func LinuxIfName(name string) string {
 	return strings.ReplaceAll(name, "/", "-")
+}
+
+// RethIndex returns the numeric index of a canonical RETH interface name.
+// The supported range follows the chassis cluster reth-count bound.
+func RethIndex(name string) (int, bool) {
+	const prefix = "reth"
+	if !strings.HasPrefix(name, prefix) {
+		return 0, false
+	}
+	suffix := strings.TrimPrefix(name, prefix)
+	index, err := strconv.Atoi(suffix)
+	if err != nil || index < 0 || index >= MaxRethCount || strconv.Itoa(index) != suffix {
+		return 0, false
+	}
+	return index, true
+}
+
+// RethMACIndexes assigns each structurally owned RETH with a positive
+// redundancy-group ID a unique index for its virtual MAC. Canonical rethN names
+// retain N; other accepted owner names receive the lowest unused indexes in
+// sorted-name order.
+func (c *Config) RethMACIndexes() map[string]int {
+	owners := c.rethMACOwners()
+	indexes := make(map[string]int, len(owners))
+	var used [MaxRethCount]bool
+	for _, name := range owners {
+		if index, ok := RethIndex(name); ok {
+			indexes[name] = index
+			used[index] = true
+		}
+	}
+	next := 0
+	for _, name := range owners {
+		if _, ok := indexes[name]; ok {
+			continue
+		}
+		for next < MaxRethCount && used[next] {
+			next++
+		}
+		if next == MaxRethCount {
+			break
+		}
+		indexes[name] = next
+		used[next] = true
+	}
+	return indexes
+}
+
+// rethMACOwners returns the active structural RETH owner names in stable order.
+func (c *Config) rethMACOwners() []string {
+	if c == nil || c.Interfaces.Interfaces == nil {
+		return nil
+	}
+	owners := make(map[string]struct{})
+	for _, member := range c.Interfaces.Interfaces {
+		if member == nil || member.RedundantParent == "" {
+			continue
+		}
+		parent := c.Interfaces.Interfaces[member.RedundantParent]
+		if parent == nil || parent.RedundancyGroup <= 0 {
+			continue
+		}
+		owners[member.RedundantParent] = struct{}{}
+	}
+	names := make([]string, 0, len(owners))
+	for name := range owners {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // DHCPLeaseIfName returns the Linux interface name under which the

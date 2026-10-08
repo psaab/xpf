@@ -47,8 +47,9 @@ func TestRenameRethMemberJoinsWorkersBeforeLinkDown(t *testing.T) {
 		return nil
 	}
 
-	if old := renameRethMember("ge-0-0-1", mac, join); old != "enp8s0" {
-		t.Fatalf("renameRethMember returned %q, want enp8s0", old)
+	oldName, cycled, err := renameRethMember("ge-0-0-1", mac, mac, nil, join)
+	if err != nil || !cycled || oldName != "enp8s0" {
+		t.Fatalf("renameRethMember returned (%q, %v, %v), want (enp8s0, true, nil)", oldName, cycled, err)
 	}
 	if !joinRan {
 		t.Fatal("the beforeCycle worker join never ran on the rename path (#6911)")
@@ -87,8 +88,10 @@ func TestRenameRethMemberAbortsWithoutTouchingLinkWhenJoinFails(t *testing.T) {
 
 	join := func() error { return errors.New("worker join refused") }
 
-	if old := renameRethMember("ge-0-0-1", mac, join); old != "" {
-		t.Fatalf("renameRethMember returned %q on a failed join, want \"\"", old)
+	oldName, cycled, err := renameRethMember("ge-0-0-1", mac, mac, nil, join)
+	if oldName != "" || cycled || err == nil {
+		t.Fatalf("renameRethMember returned (%q, %v, %v) on a failed join, want empty name, no cycle, error",
+			oldName, cycled, err)
 	}
 	if len(ops) != 0 {
 		t.Fatalf("link was mutated after the worker join failed: ops = %v.\n"+
@@ -117,8 +120,10 @@ func TestRenameRethMemberNilHookStillRenames(t *testing.T) {
 	var ops []string
 	installFakeRethLinkOps(t, link, &adminUp, &ops, false)
 
-	if old := renameRethMember("ge-0-0-1", mac, nil); old != "enp8s0" {
-		t.Fatalf("renameRethMember with a nil hook returned %q, want enp8s0", old)
+	oldName, cycled, err := renameRethMember("ge-0-0-1", mac, mac, nil, nil)
+	if err != nil || !cycled || oldName != "enp8s0" {
+		t.Fatalf("renameRethMember with a nil hook returned (%q, %v, %v), want (enp8s0, true, nil)",
+			oldName, cycled, err)
 	}
 	if link.attrs.Name != "ge-0-0-1" {
 		t.Fatalf("link not renamed with a nil hook: %q", link.attrs.Name)
@@ -158,13 +163,13 @@ func TestDaemonPassesRenameRethMemberBeforeCycleHook_6911(t *testing.T) {
 				return true
 			}
 			calls++
-			if len(call.Args) != 3 {
-				t.Errorf("%s:%d: renameRethMember called with %d args, want 3 — the third "+
+			if len(call.Args) != 5 {
+				t.Errorf("%s:%d: renameRethMember called with %d args, want 5 — the fifth "+
 					"is the beforeCycle worker-join hook (#6911)",
 					file, fset.Position(call.Pos()).Line, len(call.Args))
 				return true
 			}
-			if arg, ok := call.Args[2].(*ast.Ident); ok && arg.Name == "nil" {
+			if arg, ok := call.Args[4].(*ast.Ident); ok && arg.Name == "nil" {
 				t.Errorf("%s:%d: the daemon passes a nil beforeCycle hook to renameRethMember, "+
 					"so AF_XDP workers are never joined before the rename link cycle — the "+
 					"#6911 defect, restored with every producer-side test still green",
@@ -212,14 +217,14 @@ func TestRenameRethMemberHookRunsOnTheCallersGoroutine_6911(t *testing.T) {
 
 	ran := false
 	var hookGoID uint64
-	old := renameRethMember("ge-0-0-1", mac, func() error {
+	oldName, cycled, err := renameRethMember("ge-0-0-1", mac, mac, nil, func() error {
 		ran = true
 		hookGoID = goIDFromStack()
 		return nil
 	})
-	if old != "enp8s0" {
-		t.Fatalf("renameRethMember returned %q; on any other path the hook is not "+
-			"invoked at all and this test would assert nothing", old)
+	if err != nil || !cycled || oldName != "enp8s0" {
+		t.Fatalf("renameRethMember returned (%q, %v, %v); on any other path the hook is not "+
+			"invoked at all and this test would assert nothing", oldName, cycled, err)
 	}
 	if !ran {
 		t.Fatal("the beforeCycle hook never ran on the rename path")

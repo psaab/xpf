@@ -105,11 +105,13 @@ func (rc *RethController) RethIPs(rethName string) ([]net.IP, error) {
 }
 
 // RethMAC returns the deterministic virtual MAC for a RETH interface.
-// Format: 02:bf:72:CC:RR:NN (locally-administered, cluster_id, rg_id, node_id).
-// Each node gets a unique MAC per RETH to avoid FDB conflicts when both
-// nodes' member interfaces are on the same L2 domain (e.g. SR-IOV VFs
-// from the same PF, or same physical switch). VRRP + gratuitous NA handle
-// failover; RA goodbye packets handle IPv6 default gateway transitions.
+// Format: 02:bf:72:CC:RR:(2*reth-index+node-id), with RETH index 0..127.
+// Config.RethMACIndexes preserves that suffix for canonical rethN owners and
+// assigns stable free indexes to other structurally valid owner names.
+// Each node gets a per-RETH MAC to avoid FDB conflicts when both nodes' members
+// are on the same L2 domain (e.g. SR-IOV VFs from the same PF, or same physical
+// switch). VRRP + gratuitous NA handle failover; RA goodbye packets handle IPv6
+// default gateway transitions.
 //
 // This is a DELIBERATE deviation from RFC 5798 §7.3, which specifies a SHARED
 // virtual-router MAC (00-00-5E-00-01-{VRID} v4 / 00-00-5E-00-02-{VRID} v6) that
@@ -129,12 +131,10 @@ func (rc *RethController) RethIPs(rethName string) ([]net.IP, error) {
 // Do not "fix" this to the RFC MAC without solving the FDB problem first: a
 // shared MAC on two member interfaces in one L2 domain makes the switch see one
 // address on two ports. Operator-facing statement: docs/feature-coverage.md.
-func RethMAC(clusterID, rgID, nodeID int) net.HardwareAddr {
+func RethMAC(clusterID, rgID, rethIndex, nodeID int) net.HardwareAddr {
 	// #8340 (K18/K105): one construction, in the leaf package the dataplane's
-	// recovery search can also reach. `pkg/cluster` imports `pkg/dataplane`, so
-	// the dependency could only go this way round — which is why the search key
-	// and the thing it searches for had been written twice.
-	return config.RethVirtualMAC(clusterID, rgID, nodeID)
+	// recovery search can also reach.
+	return config.RethVirtualMAC(clusterID, rgID, rethIndex, nodeID)
 }
 
 // StableRethLinkLocal returns a deterministic link-local IPv6 address shared

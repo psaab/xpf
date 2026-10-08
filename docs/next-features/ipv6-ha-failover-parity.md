@@ -42,12 +42,12 @@ This means IPv6 failover has two convergence problems while IPv4 mostly has one:
 
 ### RETH identity
 
-Current code uses per-node virtual MACs:
+- `pkg/cluster/reth.go`: `RethMAC(clusterID, rgID, rethIndex, nodeID)`
+- `pkg/daemon/daemon.go`: programs per-node/per-RETH MACs and re-adds link-local addresses
 
-- `pkg/cluster/reth.go`: `RethMAC(clusterID, rgID, nodeID)`
-- `pkg/daemon/daemon.go`: programs per-node RETH MACs and re-adds link-local addresses
-
-Because the MAC differs per node, the derived link-local address also differs per node.
+The RETH index and node ID share the final MAC octet, so siblings in one RG
+have distinct MACs; each node's MAC also differs, so the derived EUI-64
+link-local address differs across nodes.
 
 ### IPv4 takeover path
 
