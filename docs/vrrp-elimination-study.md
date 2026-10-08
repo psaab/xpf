@@ -1,4 +1,5 @@
 # Private RG Election: Replacing VRRP on Data-Plane Interfaces
+> Historical design proposal: the election excerpts below predate later fixes, including the #12164 dataplane-arm debt exception; their code snippets and line references are not a current behavior contract.
 
 ## Problem Statement
 
