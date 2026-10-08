@@ -70,11 +70,11 @@ real upgrade/cleanup side effects (`dispatch_test.go`,
   replies, and established flows; all host services remain blocked until
   host-inbound handoff. Bootstrap swaps in a lifeline-admitting variant
   (whole lifeline NICs, including their link-locals — em0/fab0/fab1/
-  fxp0/vrf-mgmt by name assumption plus record/leaf identity, with a
-  default-route fallback NIC admitted whole only when no verified
-  identity exists; narrow a repurposed fxp0 OUT with the
-  management-interface leaf); the first commit converges to configured
-  policy.
+  fxp0/vrf-mgmt by name assumption plus the persisted record; the internal
+  `system management-interface` field can also contribute when populated, but
+  its config-mode grammar is deferred, so operators cannot use it to narrow
+  fxp0 out); a default-route fallback NIC is admitted whole only when no
+  verified identity exists. The first commit converges to configured policy.
 - `xpfd input-barrier ensure` — the boot unit's ExecStart AND ExecReload:
   installs pre-handoff when nothing is present (fail closed), and is a
   verified no-op success post-handoff, when host-inbound DROPS (input
