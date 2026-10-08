@@ -41,6 +41,17 @@ var ErrEBPFDataplaneRetired = errors.New(
 // duplicateBlockMergeWarning9023 gives named and explicitly registered
 // unnamed-block folds truthful diagnostics.
 func duplicateBlockMergeWarning9023(what string) string {
+	switch what {
+	case "routing-options generate", "routing-options interface-routes":
+		return "duplicate unnamed `" + what + "` containers were merged in source order (#12120)"
+	case "rib static":
+		return "duplicate unnamed `static` containers under `rib` were merged in source order (#12120)"
+	case "protocols":
+		return "duplicate top-level `protocols` containers were merged in source order (#12120)"
+	case "protocols ospf", "protocols bgp":
+		keyword := strings.TrimPrefix(what, "protocols ")
+		return "duplicate unnamed `" + keyword + "` containers under `protocols` were merged in source order (#12120)"
+	}
 	if what == "routing-instances" {
 		return "duplicate `routing-instances` containers were merged in source order (#9023)"
 	}

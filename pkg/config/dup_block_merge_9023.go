@@ -79,14 +79,29 @@ var dupBlockMergeSites9023 = []struct{ parent, keyword string }{
 }
 
 // dupUnnamedRoutingMergeSites12043 lists the three unnamed-container sites
-// addressed by #12043. It is not a complete census of unnamed routing shapes;
-// remaining cases are tracked in #12120.
+// addressed by #12043. Later census entries remain separate so each review can
+// state exactly which added shapes it verifies.
 var dupUnnamedRoutingMergeSites12043 = []struct {
 	scope, parent, keyword string
 }{
 	{"global", "routing-options", "static"},
 	{"instance", "routing-instances", "routing-options"},
 	{"instance", "routing-instances", "protocols"},
+}
+
+// dupUnnamedRoutingMergeSites12120 lists the additional repeated unnamed
+// routing containers found by #12120. "any" means every matching parent node;
+// "root" is the top-level protocols container, whose separate roots otherwise
+// dispatch independently and overwrite the same typed protocol.
+var dupUnnamedRoutingMergeSites12120 = []struct {
+	scope, parent, keyword string
+}{
+	{"any", "routing-options", "generate"},
+	{"any", "routing-options", "interface-routes"},
+	{"any", "rib", "static"},
+	{"any", "protocols", "ospf"},
+	{"any", "protocols", "bgp"},
+	{"root", "root", "protocols"},
 }
 
 // mergeDuplicateBlocks9023 folds the explicitly enumerated repeated named
@@ -135,9 +150,21 @@ func mergeDuplicateBlocks9023(tree *ConfigTree) []string {
 					if site.scope != "instance" || site.parent != n.Name() {
 						continue
 					}
-					if mergeDuplicateUnnamedRoutingChildren12043(instance, site.keyword) {
+					children, didMerge := mergeDuplicateUnnamedRoutingChildren(instance.Children, site.keyword)
+					instance.Children = children
+					if didMerge {
 						merged = append(merged, "routing-instances "+instance.Name()+" "+site.keyword)
 					}
+				}
+			}
+		}
+
+		for _, site := range dupUnnamedRoutingMergeSites12120 {
+			if site.scope == "any" && n.Name() == site.parent {
+				children, didMerge := mergeDuplicateUnnamedRoutingChildren(n.Children, site.keyword)
+				n.Children = children
+				if didMerge {
+					merged = append(merged, site.parent+" "+site.keyword)
 				}
 			}
 		}
@@ -146,12 +173,23 @@ func mergeDuplicateBlocks9023(tree *ConfigTree) []string {
 			walk(ch, depth+1)
 		}
 	}
+	for _, site := range dupUnnamedRoutingMergeSites12120 {
+		if site.scope == "root" {
+			var didMerge bool
+			tree.Children, didMerge = mergeDuplicateUnnamedRoutingChildren(tree.Children, site.keyword)
+			if didMerge {
+				merged = append(merged, site.keyword)
+			}
+		}
+	}
 	for _, root := range tree.Children {
 		for _, site := range dupUnnamedRoutingMergeSites12043 {
 			if site.scope != "global" || root.Name() != site.parent {
 				continue
 			}
-			if mergeDuplicateUnnamedRoutingChildren12043(root, site.keyword) {
+			children, didMerge := mergeDuplicateUnnamedRoutingChildren(root.Children, site.keyword)
+			root.Children = children
+			if didMerge {
 				merged = append(merged, site.parent+" "+site.keyword)
 			}
 		}
@@ -229,27 +267,33 @@ func mergeDuplicateNamedChildren9023(parent *Node) []string {
 	return merged
 }
 
-// mergeDuplicateUnnamedRoutingChildren12043 folds repeated unnamed routing
-// containers into the first sibling, preserving source order and recursively
-// merging identical child containers just as the existing named-block path
-// does. The sites are explicitly enumerated above; this is not a global AST
-// normalization.
-func mergeDuplicateUnnamedRoutingChildren12043(parent *Node, keyword string) bool {
-	if parent == nil {
-		return false
+// mergeDuplicateUnnamedRoutingChildren folds a repeated unnamed routing
+// container at one explicitly registered site into its first sibling,
+// preserving source order and recursively merging identical child containers.
+func mergeDuplicateUnnamedRoutingChildren(children []*Node, keyword string) ([]*Node, bool) {
+	if len(children) == 0 {
+		return children, false
 	}
 	var first *Node
-	kept := make([]*Node, 0, len(parent.Children))
+	var kept []*Node
 	merged := false
-	for _, child := range parent.Children {
+	for i, child := range children {
 		if child == nil || child.Name() != keyword || child.IsLeaf {
-			kept = append(kept, child)
+			if merged {
+				kept = append(kept, child)
+			}
 			continue
 		}
 		if first == nil {
 			first = child
-			kept = append(kept, child)
+			if merged {
+				kept = append(kept, child)
+			}
 			continue
+		}
+		if !merged {
+			kept = make([]*Node, 0, len(children)-1)
+			kept = append(kept, children[:i]...)
 		}
 		if tail := child.Keys[1:]; len(tail) > 0 {
 			first.Children = append(first.Children, &Node{
@@ -263,7 +307,7 @@ func mergeDuplicateUnnamedRoutingChildren12043(parent *Node, keyword string) boo
 		merged = true
 	}
 	if merged {
-		parent.Children = kept
+		return kept, true
 	}
-	return merged
+	return children, false
 }
