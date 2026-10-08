@@ -963,8 +963,16 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
                 flow.forward_key.protocol,
             )
         })
-        .as_ref()
-            == Some(&decision.resolution);
+        .is_some_and(|mut fresh| {
+            // LocalDelivery has no tunnel egress. A tunnel ingress can tag its
+            // local resolution with an endpoint id that the installed local
+            // session correctly leaves unset; compare the remaining identity.
+            if fresh.disposition != crate::afxdp::ForwardingDisposition::LocalDelivery {
+                return false;
+            }
+            fresh.tunnel_endpoint_id = decision.resolution.tunnel_endpoint_id;
+            fresh == decision.resolution
+        });
     if local_arm_unchanged
         && desired_identity
             == (decision.install_table_domain, decision.install_table_check)
