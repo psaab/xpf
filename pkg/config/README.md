@@ -1182,7 +1182,7 @@ rejected. VPN-object validation, such as the separate missing-bind-interface
 gate (#10638), is independent.
 
 
-**Tolerant policy enforcement poison (#5575, #11013, #11014, #11023):** the #1960
+**Tolerant policy enforcement poison (#5575, #11013, #11014, #11023, #12234):** the #1960
 lenient downgrade keeps the daemon booting, but the compiler may silently drop
 authored enforcement or audit content. Missing required match dimensions
 (#3044) and unsupported `match` leaves / `then permit` modifiers (#3113/#3114)
@@ -1190,20 +1190,22 @@ can widen a rule; an unsupported `then` sibling such as `next term` (#11013)
 can leave an earlier direct permit active; an unknown `then log` mode (#11023)
 silently drops configured session logging; and an unknown policy-level `term`
 or `session-options` subtree can carry enforcement constraints discarded by the
-compiler (#11014). `compilePolicy` sets `Policy.LenientContentDropped` for these
-cases: shared AST predicates cover the existing match/permit gates,
-`policyUnsupportedThenSiblings` checks child and compact `then` tails,
-`policyUnsupportedThenLogTokens` checks log-leaf values and compact `then`
-tails. `policyDroppedEnforcementSubtrees` distinguishes enforcement-bearing
-direct children from harmless metadata typos. The
-userspace snapshot builder (`buildOneRuleSnapshot`) poisons such a rule with
+compiler (#11014). An unknown nested direct child or a one-edit typo of an
+enforcement keyword such as `scheduler-nam` can also drop an authored match,
+action, or schedule binding (#12234). `compilePolicy` sets
+`Policy.LenientContentDropped` for these cases: shared AST predicates cover the
+existing match/permit gates, `policyUnsupportedThenSiblings` checks child and
+compact `then` tails, `policyUnsupportedThenLogTokens` checks log-leaf values
+and compact `then` tails, and `policyUnknownEnforcementChildren` distinguishes
+enforcement-bearing unknown children from unrelated unknown scalar metadata.
+The userspace snapshot builder (`buildOneRuleSnapshot`) poisons such a rule with
 the `__unsupported__` application sentinel, so the Rust integrity preflight
 rejects the WHOLE snapshot (previous-good retained; fresh-boot default-deny) —
 an action-agnostic fail-CLOSED. The unsupported `then` sibling / log mode is
 named in a strict commit-time rejection or tolerant warning; firewall-filter
-`next term` remains supported. Harmless unknown policy metadata stays
-advisory-only. The flag is derived at compile time (never serialized), so it is
-recomputed identically on both HA peers. An explicit wildcard (`match
+`next term` remains supported. Harmless unknown scalar policy metadata stays
+advisory-only (#4232). The flag is derived at compile time (never serialized),
+so it is recomputed identically on both HA peers. An explicit wildcard (`match
 application any`) remains distinct from a missing or dropped constraint and is
 not poisoned.
 

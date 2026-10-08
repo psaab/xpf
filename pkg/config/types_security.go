@@ -576,14 +576,11 @@ type Policy struct {
 	// unexported field carries no persistence / back-compat obligation.
 	terminalActions []PolicyAction
 	// UnknownChildren records DIRECT children of a `policy <name>` node whose
-	// keyword is not one the compiler reads (match / then / description /
-	// scheduler-name) — e.g. a typo'd `descripton` or `scheduler-nam`, which
-	// Junos rejects at commit but xpf silently dropped (#4232, fable-167 P-4b).
-	// The #3113/#3114/#3115 gates cover known match/then subtrees, while
-	// #11013 diagnoses an unsupported then sibling. At the policy level,
-	// compilePolicy records unrecognized keywords so validateSecurityAcceptedOnly
-	// (compiler_validate_warn.go) can emit an accepted-but-inert / probable-typo
-	// advisory. Recorded in config order so the warning is deterministic.
+	// keyword the compiler does not read (match / then / description /
+	// scheduler-name). They feed the #4232 probable-typo advisory; unknown
+	// nested children and one-edit typos of enforcement keywords also poison
+	// the tolerant policy snapshot (#12234). Unrelated unknown scalar metadata
+	// remains advisory-only. Recorded in config order for deterministic warnings.
 	UnknownChildren []string
 	// LenientContentDropped marks a policy the TOLERANT compile path
 	// (CompileConfigLenient / CompileConfigForNodeLenient) accepted only by
@@ -591,14 +588,13 @@ type Policy struct {
 	// enforcement constraint: a MISSING required match dimension (#3044), an
 	// UNSUPPORTED `match` leaf (#3113, incl. #3142/#3673), an unsupported
 	// `then permit` modifier (#3114), an unrecognized `then` sibling (#11013),
-	// or an enforcement-bearing unknown policy subtree such as `term` or
-	// `session-options` (#11014). Missing or dropped match content can widen a
-	// policy because the userspace matcher reads empty dimensions as match-ANY;
-	// dropped policy actions or subtrees can also leave a direct permit active
-	// when the authored enforcement intent was different. The strict commit
-	// path rejects unsupported then siblings and strict schema validation
-	// rejects unknown policy subtrees, so this flag is set only on tolerant
-	// load / peer-sync paths.
+	// an enforcement-bearing unknown policy subtree (#11014), or an unknown
+	// nested child / one-edit typo of an enforcement keyword (#12234). Missing
+	// or dropped match content can widen a policy because the userspace matcher
+	// reads empty dimensions as match-ANY; dropped policy actions or subtrees
+	// can also leave a direct permit active when the authored enforcement intent
+	// was different. Strict gates reject unsupported content and strict schema
+	// validation rejects unknown policy children.
 	//
 	// For authored policy content, compilePolicy derives this (never from raw
 	// AST / wire), so both HA peers recompute it identically. The #12039 uniform
