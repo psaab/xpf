@@ -508,6 +508,36 @@ else
 	printf '%s\n' "$out" | sed 's/^/         /' >&2
 fi
 
+# ── cell M — the CI-invoked census rejects a fresh undeclared harness ────
+# Keep the workflow command and the behavior it gates together: this is the
+# exact command in test.yml, pointed at an isolated fixture via the census's
+# supported environment overrides.
+CI_WORKFLOW="${REPO_ROOT}/.github/workflows/test.yml"
+if grep -Fq 'run: sh scripts/harness-census.sh' "$CI_WORKFLOW"; then
+	FX_CI="$(new_fixture ci-undeclared)"
+	add_harness "$FX_CI" ctl.sh 'echo control'
+	add_harness "$FX_CI" fresh-undeclared-harness.sh 'echo gate'
+	cat >"$FX_CI/Makefile" <<'MK'
+control:
+	./test/incus/ctl.sh
+MK
+	out="$(cd "$REPO_ROOT" && CENSUS_ROOT="$FX_CI" \
+		CENSUS_HARNESS_GLOBS='test/incus/*.sh' \
+		CENSUS_SCAN_GLOBS='test/incus/*.sh' CENSUS_LIBRARIES='' \
+		CENSUS_POSITIVE_CONTROL='test/incus/ctl.sh' \
+		sh scripts/harness-census.sh 2>&1)" && rc=0 || rc=$?
+	if [[ $rc -ne 0 &&
+		"$out" == *"UNREACHED and undeclared"* &&
+		"$out" == *"test/incus/fresh-undeclared-harness.sh"* ]]; then
+		ok "the CI-invoked census rejects a fresh undeclared harness"
+	else
+		bad "the CI-invoked census passed a fresh undeclared harness (rc=$rc)"
+		printf '%s\n' "$out" | sed 's/^/         /' >&2
+	fi
+else
+	bad "test.yml does not invoke the expected fail-closed census command"
+fi
+
 # ── cell L — the real tree must be GREEN ──────────────────────────────────
 # This is what `make harness-census` runs. Kept here so the self-test and the
 # gate cannot drift into testing different things.
