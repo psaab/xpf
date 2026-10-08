@@ -853,6 +853,9 @@ type compileOpts struct {
 	// lenientBGPSAFI11815 warns and preserves only explicitly supported
 	// unicast when loading older/peer-synced configs carrying another SAFI.
 	lenientBGPSAFI11815 bool
+	// lenientBGPCrossFamily12185 warns and leaves explicit IPv4-unicast on
+	// IPv6-addressed peers inert during tolerant load / peer-sync.
+	lenientBGPCrossFamily12185 bool
 	// lenientRouteFilterMatchTypes (#2525) downgrades the route-filter
 	// match-type gate (validateRouteFilterMatchTypesStrict) from a hard
 	// compile error to a cfg.Warnings entry. The strict commit / commit-check
@@ -3157,6 +3160,7 @@ func lenientCompileOpts() compileOpts {
 		lenientISISMetric11823:                 true,
 		lenientBGPPrefixLimit11793:             true,
 		lenientBGPSAFI11815:                    true,
+		lenientBGPCrossFamily12185:             true,
 		lenientRouteFilterMatchTypes:           true,
 		lenientApplicationSpecs:                true,
 		lenientApplicationNameCollisions:       true,
