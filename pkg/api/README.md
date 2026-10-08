@@ -75,6 +75,12 @@ liveness/readiness. Prometheus metrics endpoint. SSE event streams.
   separates a retry owner that is running and failing from one that is
   not running at all.
 
+  `BinaryUpgradeStatusFn` (#12143) adds a non-fatal `binary_upgrade_pending`
+  field plus staged/running version, stable failure-reason, and recorded-time
+  fields when postinst has durably recorded a successful-dpkg/failed-cut skew.
+  It does not change readiness: the previous binary generation is still
+  forwarding, while `xpfd upgrade status` provides the operator recovery verb.
+
 **Authorization on this surface enforces all four `system login class` regex
 statements as of #9952.** The coarse permission bits come first
 (`pkg/authz`), then the `*-configuration` pair on the config-mutating routes

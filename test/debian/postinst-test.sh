@@ -28,7 +28,10 @@ patched_postinst() {
       -e "s#^STAGED=.*#STAGED=$ROOT/usr/local/share/xpf/staged#" \
       -e "s#^SBIN=.*#SBIN=$ROOT/usr/local/sbin#" \
       -e "s#^XPF_RUN_DIR=.*#XPF_RUN_DIR=$ROOT/run/xpf#" \
+      -e "s#^XPF_VERSIONS_DIR=.*#XPF_VERSIONS_DIR=$ROOT/var/lib/xpf/versions#" \
+      -e "s#^XPF_UPGRADE_STATUS=.*#XPF_UPGRADE_STATUS=$ROOT/var/lib/xpf/upgrade-deferred#" \
       -e "s#^\([[:space:]]*\)CURRENT_DIR=.*#\1CURRENT_DIR=$ROOT/var/lib/xpf/versions/current#" \
+      -e "s#/run/xpf/upgrade.lock#$ROOT/run/xpf/upgrade.lock#g" \
       -e "s#/etc/xpf/node-id#$ROOT/etc/xpf/node-id#g" \
       -e "s#\\[ -d /run/systemd/system \\]#false#g" \
       "$POSTINST" > "$ROOT/postinst"
@@ -39,6 +42,10 @@ patched_postinst() {
         echo "FAIL: patched postinst missing rewritten SBIN assignment"; exit 1; }
     [ "$(grep -E '^XPF_RUN_DIR=' "$ROOT/postinst" || true)" = "XPF_RUN_DIR=$ROOT/run/xpf" ] || {
         echo "FAIL: patched postinst missing rewritten XPF_RUN_DIR assignment"; exit 1; }
+    [ "$(grep -E '^XPF_UPGRADE_STATUS=' "$ROOT/postinst" || true)" = "XPF_UPGRADE_STATUS=$ROOT/var/lib/xpf/upgrade-deferred" ] || {
+        echo "FAIL: patched postinst missing rewritten durable upgrade-status path"; exit 1; }
+    [ "$(grep -E '^XPF_VERSIONS_DIR=' "$ROOT/postinst" || true)" = "XPF_VERSIONS_DIR=$ROOT/var/lib/xpf/versions" ] || {
+        echo "FAIL: patched postinst missing rewritten versions path"; exit 1; }
     current_line=$(grep -E '^[[:space:]]*CURRENT_DIR=' "$ROOT/postinst" || true)
     case "$current_line" in
         *"CURRENT_DIR=$ROOT/var/lib/xpf/versions/current") ;;
@@ -671,6 +678,133 @@ scenario_upgrade_never_starts_barrier() {
     if [ -e "$SYSTEMCTL_LOG" ] && grep -Fq 'systemctl enable --now xpf-input-closed.service' "$SYSTEMCTL_LOG"; then
         echo "FAIL: upgrade injected the barrier into a possibly armed daemon"; exit 1
     fi
+    [ ! -e "$ROOT/var/lib/xpf/upgrade-deferred" ] || {
+        echo "FAIL: intentional clustered stage-only recorded a failed cut"; exit 1; }
+}
+
+run_failure_case() {
+    expected_reason=$1
+    publish_rc=$2
+    cut_rc=$3
+    lock_mode=$4
+    stage_only=$5
+    mkdir -p "$STAGED" "$SBIN" "$VERSIONS/v1" "$ROOT/etc/xpf" "$ROOT/run/xpf" "$ROOT/bin"
+    : > "$ROOT/run/xpf/upgrade.lock"
+    cat > "$VERSIONS/v1/xpfd" <<'EOF'
+#!/bin/sh
+[ "$1" = version ] && { echo "xpfd v1 (running)"; exit 0; }
+exit 0
+EOF
+    chmod +x "$VERSIONS/v1/xpfd"
+    for b in cli xpf-userspace-dp xpf-day0-config; do
+        : > "$VERSIONS/v1/$b"
+        ln -sf "$CURRENT/$b" "$SBIN/$b"
+    done
+    ln -sf v1 "$CURRENT"
+    ln -sf "$CURRENT/xpfd" "$SBIN/xpfd"
+    cat > "$STAGED/xpfd" <<'EOF'
+#!/bin/sh
+case "$1" in
+    version) echo "xpfd v2 (staged)" ;;
+    publish-generation) exit "${POSTINST_PUBLISH_RC:-0}" ;;
+    upgrade) exit "${POSTINST_CUT_RC:-0}" ;;
+    *) exit 9 ;;
+esac
+EOF
+    chmod +x "$STAGED/xpfd"
+    cat > "$ROOT/bin/flock" <<'EOF'
+#!/bin/sh
+case "${POSTINST_LOCK_MODE:-free}" in
+    early) exit 1 ;;
+    late)
+        count=0
+        [ ! -f "$POSTINST_LOCK_COUNT" ] || count=$(cat "$POSTINST_LOCK_COUNT")
+        count=$((count + 1))
+        printf '%s\n' "$count" > "$POSTINST_LOCK_COUNT"
+        [ "$count" -lt 2 ] && exit 0
+        exit 1
+        ;;
+esac
+exit 0
+EOF
+    chmod +x "$ROOT/bin/flock"
+
+    saved_path=$PATH
+    PATH="$ROOT/bin:$PATH"
+    POSTINST_PUBLISH_RC=$publish_rc
+    POSTINST_CUT_RC=$cut_rc
+    POSTINST_LOCK_MODE=$lock_mode
+    POSTINST_LOCK_COUNT="$ROOT/flock-count"
+    export PATH POSTINST_PUBLISH_RC POSTINST_CUT_RC POSTINST_LOCK_MODE POSTINST_LOCK_COUNT
+    if [ "$stage_only" = manual ]; then
+        XPF_NO_POSTINST_CUT=1
+        export XPF_NO_POSTINST_CUT
+    fi
+    status_file="$ROOT/var/lib/xpf/upgrade-deferred"
+    if [ "$stage_only" = clear ]; then
+        printf 'previous failure\n' > "$status_file"
+    fi
+    "$ROOT/postinst" configure v1
+    if [ -z "$expected_reason" ]; then
+        [ ! -e "$status_file" ] || {
+            if [ "$stage_only" = manual ]; then
+                echo "FAIL: intentional manual stage-only recorded a failure"
+            else
+                echo "FAIL: successful cut did not clear the previous status"
+            fi
+            exit 1
+        }
+        PATH=$saved_path
+        unset POSTINST_PUBLISH_RC POSTINST_CUT_RC POSTINST_LOCK_MODE POSTINST_LOCK_COUNT XPF_NO_POSTINST_CUT
+        return
+    fi
+    [ -f "$status_file" ] || {
+        echo "FAIL: $expected_reason failure did not leave a durable status file"; exit 1; }
+    mode=$(stat -c %a "$status_file")
+    [ "$mode" = 600 ] || {
+        echo "FAIL: durable status mode is $mode, want 600"; exit 1; }
+    grep -Fqx 'format=1' "$status_file" || {
+        echo "FAIL: durable status has no supported format"; exit 1; }
+    grep -Fqx 'staged_version=v2' "$status_file" || {
+        echo "FAIL: durable status did not record staged version v2"; exit 1; }
+    grep -Fqx 'running_version=unknown' "$status_file" || {
+        echo "FAIL: durable status did not avoid guessing a non-live version"; exit 1; }
+    grep -Fqx "reason=$expected_reason" "$status_file" || {
+        echo "FAIL: durable status reason is not $expected_reason"; exit 1; }
+    grep -Eq '^recorded_at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$status_file" || {
+        echo "FAIL: durable status has no UTC recording time"; exit 1; }
+    [ ! -e "$ROOT/run/xpf/upgrade-deferred" ] || {
+        echo "FAIL: deferred status was written only to volatile /run"; exit 1; }
+    PATH=$saved_path
+    unset POSTINST_PUBLISH_RC POSTINST_CUT_RC POSTINST_LOCK_MODE POSTINST_LOCK_COUNT
+}
+
+scenario_publish_failure_records_durable_status() {
+    run_failure_case publish-failed 1 0 free
+}
+
+scenario_publish_lock_busy_records_durable_status() {
+    run_failure_case publish-deferred 2 0 free
+}
+
+scenario_cut_failure_records_durable_status() {
+    run_failure_case cut-failed 0 1 free
+}
+
+scenario_cut_precheck_busy_records_durable_status() {
+    run_failure_case cut-deferred 0 0 early
+}
+
+scenario_cut_inner_busy_records_durable_status() {
+    run_failure_case cut-deferred 0 1 late
+}
+
+scenario_manual_stage_only_does_not_record_failure() {
+    run_failure_case "" 0 0 free manual
+}
+
+scenario_successful_cut_clears_durable_status() {
+    run_failure_case "" 0 0 free clear
 }
 
 run_scenario first_install_configure_empty_seeds_layout
@@ -692,4 +826,11 @@ run_scenario leaves_existing_and_dangling_links
 run_scenario new_managed_binary_stays_absent
 run_scenario legacy_no_current_leaves_absent
 run_scenario oldbug_repairs_to_staged_proves_nontautology
+run_scenario publish_failure_records_durable_status
+run_scenario publish_lock_busy_records_durable_status
+run_scenario cut_failure_records_durable_status
+run_scenario cut_precheck_busy_records_durable_status
+run_scenario cut_inner_busy_records_durable_status
+run_scenario manual_stage_only_does_not_record_failure
+run_scenario successful_cut_clears_durable_status
 echo "ALL POSTINST SCENARIOS PASSED"

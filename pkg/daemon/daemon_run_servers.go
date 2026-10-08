@@ -17,6 +17,7 @@ import (
 	"github.com/psaab/xpf/pkg/nfqueue"
 	"github.com/psaab/xpf/pkg/rpm"
 	"github.com/psaab/xpf/pkg/sysservices"
+	"github.com/psaab/xpf/pkg/upgrade"
 	"github.com/psaab/xpf/pkg/webmgmt"
 	"log/slog"
 	"net"
@@ -662,6 +663,20 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 				UnixSec: b.UnixSec,
 				Failed:  b.Failed,
 			}
+		},
+		BinaryUpgradeStatusFn: func() api.BinaryUpgradeStatusSnapshot {
+			st := binaryUpgradeStatusSnapshot(upgrade.DefaultBinaryUpgradeStatusPath, d.opts.Version)
+			snap := api.BinaryUpgradeStatusSnapshot{
+				Readable:       st.ReadErr == nil,
+				Pending:        st.Recorded,
+				StagedVersion:  st.StagedVersion,
+				RunningVersion: st.RunningVersion,
+				Reason:         st.Reason,
+			}
+			if !st.RecordedAt.IsZero() {
+				snap.RecordedAtUnix = st.RecordedAt.Unix()
+			}
+			return snap
 		},
 		// #1780 Path A: expose the per-phase age of the Go periodic
 		// neighbor-maintenance loop so a wedged guarded goroutine

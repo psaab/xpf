@@ -943,17 +943,23 @@ window for ALL FOUR managed binaries:
   valid; a re-publish is idempotent). An aborted/failed unpack publishes
   NO new generation, so the prior generation stays the cut source — there
   is NO permanent-wedge class.
-- **Deferred-publish recovery.** If the publish defers because the
-  host-wide upgrade lock is busy (another upgrade in progress), the
-  postinst drops `/run/xpf/upgrade-deferred`, skips the cut, and the
-  operator recovers with `xpfd publish-generation && xpfd upgrade`
-  (`dpkg-reconfigure xpf` is equivalent). A bare `xpfd upgrade` alone
-  would re-read the OLD `current-gen` and no-op, so the recovery MUST
-  publish first. **On a CLUSTERED node** (`/etc/xpf/node-id` present) the
-  cut verb is `xpfd upgrade --rolling`, NOT the bare `xpfd upgrade` — the
-  standalone cut is refused there (#5284). The postinst deferred-publish
-  hint is node-id-aware and prints the correct verb; the runtime gate in
-  `Runner.Run` refuses the bare cut regardless of what the operator types.
+- **Deferred publish/cut recovery.** A failed publish or standalone cut keeps
+  postinst's deliberate exit-0 contract but atomically records
+  `/var/lib/xpf/upgrade-deferred`, outside `/run`'s reboot-cleared tmpfs. The
+  mode-0600 record captures the staged version, the running daemon version,
+  a stable failure reason, the recovery command, and UTC time; all publish
+  errors and cut errors (including both lock-contention windows) are recorded.
+  `xpfd upgrade status` renders the record, and `/health` reports
+  `binary_upgrade_pending` with staged/running versions and a reason code. A
+  successful binary cut or rollback clears the record. Clustered stage-only
+  upgrades and `XPF_NO_POSTINST_CUT=1` remain intentional and do not create a
+  failure record. For deferred publish, recover with
+  `xpfd publish-generation && xpfd upgrade` (`dpkg-reconfigure xpf` is
+  equivalent). A bare `xpfd upgrade` alone would re-read the OLD `current-gen`
+  and no-op, so publish first. **On a CLUSTERED node**
+  (`/etc/xpf/node-id` present), use `xpfd upgrade --rolling`, never the bare
+  standalone verb; the postinst recovery hint is node-id-aware and the runtime
+  gate in `Runner.Run` refuses an uncoordinated cut (#5284).
 - **Disk budget.** Each binary set is ~50-70 MB (dominated by `xpfd`
   embedding the kernel-verified shim + `xpf-userspace-dp`). Steady-state
   copies: `staged/` (1) + `staged-gen/` current+1 (2) + `versions/`

@@ -10,6 +10,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/logging"
+	"github.com/psaab/xpf/pkg/upgrade"
 )
 
 // Bootstrap-import outcome constants (#4184). Recorded once at boot by
@@ -131,6 +132,18 @@ func (d *Daemon) bootstrapShowSnapshot() bootstrapshow.Snapshot {
 		UnixSec: b.UnixSec,
 		Failed:  b.Failed,
 	}
+}
+
+// binaryUpgradeStatusSnapshot reads the postinst's durable failure record and
+// replaces its captured running version with this daemon process's build
+// identity. The in-memory version is authoritative; versions/current can move
+// independently of an already-running process.
+func binaryUpgradeStatusSnapshot(path, runningVersion string) upgrade.BinaryUpgradeStatus {
+	status := upgrade.ReadBinaryUpgradeStatus(path)
+	if status.Recorded && runningVersion != "" {
+		status.RunningVersion = runningVersion
+	}
+	return status
 }
 
 // rescueOfflinePromotionPaths returns the exact file paths used by rescue
