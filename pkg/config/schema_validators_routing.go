@@ -240,3 +240,54 @@ func plausibleInterfaceName(s string) bool {
 	}
 	return hasLetter
 }
+
+// ValidPolicyThenNextHop reports whether a routing-policy `then next-hop`
+// operand is in this renderer's supported subset: an IPv4/IPv6 literal,
+// `peer-address`, or `self`. Junos also admits discard/reject/next-table, but
+// those actions have no faithful FRR lowering here and must not reach
+// `set ip next-hop <operand>`.
+func ValidPolicyThenNextHop(raw string) bool {
+	switch raw {
+	case "peer-address", "self":
+		return true
+	default:
+		return net.ParseIP(raw) != nil
+	}
+}
+
+// ValidatePolicyThenNextHop is the commit-check validator for
+// `policy-options policy-statement ... then next-hop`. It deliberately rejects
+// Junos-only actions and malformed address literals because the FRR renderer
+// supports only IP addresses, `peer-address`, and the existing `self` lowering.
+func ValidatePolicyThenNextHop(raw string, _ *Config) error {
+	if !ValidPolicyThenNextHop(raw) {
+		return fmt.Errorf("unsupported next-hop %q (expected an IPv4/IPv6 address, peer-address, or self; discard, reject, and next-table have no FRR route-map lowering)", raw)
+	}
+	return nil
+}
+
+// ValidPolicyASPathPrependASN reports whether raw is one FRR AS number in
+// the non-reserved 1..2^32-1 range. Only decimal digits are accepted: signs,
+// asdot notation, whitespace, and non-numeric tokens are outside this leaf's
+// FRR `set as-path prepend ASNUM...` grammar.
+func ValidPolicyASPathPrependASN(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	for i := range raw {
+		if raw[i] < '0' || raw[i] > '9' {
+			return false
+		}
+	}
+	n, err := strconv.ParseUint(raw, 10, 32)
+	return err == nil && n != 0
+}
+
+// ValidatePolicyASPathPrependASN is the commit-check validator for one
+// member of a multi-valued `then as-path-prepend` leaf.
+func ValidatePolicyASPathPrependASN(raw string, _ *Config) error {
+	if !ValidPolicyASPathPrependASN(raw) {
+		return fmt.Errorf("AS path prepend value %q is not an ASN in 1..4294967295 (decimal digits only)", raw)
+	}
+	return nil
+}

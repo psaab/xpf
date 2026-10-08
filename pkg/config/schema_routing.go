@@ -226,9 +226,14 @@ var schemaPolicyOptions = &schemaNode{desc: "Policy options", children: map[stri
 					valueType: ValueEnumOf, valueDesc: "Policy continuation (policy)",
 					valueExamples: []string{"policy"}, validator: ValidateEnum([]string{"policy"}),
 					placeholder: "<policy>", children: nil},
-				"accept":       {desc: "Accept route", children: nil},
-				"reject":       {desc: "Reject route", children: nil},
-				"next-hop":     {desc: "Next hop", args: 1, placeholder: "<address>", children: nil},
+				"accept": {desc: "Accept route", children: nil},
+				"reject": {desc: "Reject route", children: nil},
+				"next-hop": {
+					desc: "Next hop (IPv4/IPv6 address | peer-address | self; Junos discard/reject/next-table are unsupported by FRR)",
+					args: 1, valueType: ValueIPAddress, valueDesc: "IPv4/IPv6 address, peer-address, or self",
+					valueExamples: []string{"192.0.2.1", "2001:db8::1", "peer-address", "self"},
+					validator:     ValidatePolicyThenNextHop, placeholder: "<address>", children: nil,
+				},
 				"load-balance": {desc: "Load balance", args: 1, placeholder: "<policy>", children: nil},
 				// #4688: type these three `then` leaves. Without a validator a
 				// non-numeric value (`then local-preference abc`) committed
@@ -266,7 +271,12 @@ var schemaPolicyOptions = &schemaNode{desc: "Policy options", children: map[stri
 				// [ 65001 65001 ] list keeps EVERY ASN (order + repetition
 				// matter — repeating the ASN is the whole mechanism); a
 				// single-value leaf would drop all but the first (#2892).
-				"as-path-prepend": {desc: "AS path prepend", args: 1, multi: true, groupReplace: true, placeholder: "<asn>", children: nil},
+				"as-path-prepend": {
+					desc: "AS path prepend", args: 1, multi: true, groupReplace: true,
+					valueType: ValueInteger, valueDesc: "ASN (1..4294967295; decimal digits)",
+					valueExamples: []string{"65001", "4294967295"},
+					validator:     ValidatePolicyASPathPrependASN, placeholder: "<asn>", children: nil,
+				},
 				// #4919: type `then origin` as an enum. Without a validator a
 				// non-control invalid token (e.g. `igpp`) passed the #4498
 				// sanitize belt and reached FRR verbatim, failing the route-map

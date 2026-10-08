@@ -1,0 +1,109 @@
+package config
+
+import (
+	"strings"
+	"testing"
+)
+
+// #12070 RED-before: `then next-hop` accepts FRR-invalid operands at
+// commit-check. Junos `next-hop (address | discard | next-table table-name |
+// peer-address | reject | self)` values `discard`, `reject`, and
+// `next-table` are valid Junos that this tree renders as
+// `set ip next-hop <tok>` — a line FRR's `set ip next-hop A.B.C.D$addr`
+// grammar rejects at the vtysh MARK pass, failing the whole frr-reload. A
+// malformed IPv4 literal (`10.0.0.300`) fails the same way. Base has no
+// valueType/validator on the leaf (schema_routing.go), so every bad token
+// below commits green → RED until the gate lands.
+func TestPolicyThenNextHop_SchemaGate_12070(t *testing.T) {
+	base := "set policy-options policy-statement P term t1 "
+	bad := []string{"discard", "reject", "next-table", "10.0.0.300", "not-an-ip", "1.2.3", "2001:db8::garbage"}
+	good := []string{"192.0.2.1", "10.0.0.1", "2001:db8::1", "peer-address", "self"}
+
+	for _, v := range bad {
+		tree := flatTreeFromSets(t, base+"then next-hop "+v)
+		if err := SchemaValidate(tree, nil); err == nil {
+			t.Fatalf("then next-hop %q: expected SchemaValidate to reject, got nil", v)
+		}
+	}
+	for _, v := range good {
+		tree := flatTreeFromSets(t, base+"then next-hop "+v)
+		if err := SchemaValidate(tree, nil); err != nil {
+			t.Fatalf("then next-hop %q: expected SchemaValidate to accept, got %v", v, err)
+		}
+	}
+}
+
+// #12070 RED-before: `then as-path-prepend` accepts non-ASN tokens at
+// commit-check. FRR's `set as-path prepend ASNUM...` grammar takes AS
+// numbers only; `65001 abc` renders verbatim and fails the reload. The
+// leaf is multi:true so EVERY token is validated (bracketed and repeated
+// spellings included). Base has no validator → RED until the gate lands.
+func TestPolicyThenASPathPrepend_SchemaGate_12070(t *testing.T) {
+	base := "set policy-options policy-statement P term t1 "
+	bad := []string{
+		"then as-path-prepend abc",
+		"then as-path-prepend 0",
+		"then as-path-prepend 4294967296",
+		"then as-path-prepend 65001.5",
+		"then as-path-prepend [ 65001 abc ]",
+		"then as-path-prepend [ 65001 0 ]",
+	}
+	good := []string{
+		"then as-path-prepend 1",
+		"then as-path-prepend 65001",
+		"then as-path-prepend 4294967295",
+		"then as-path-prepend [ 65001 65001 ]",
+	}
+
+	for _, c := range bad {
+		tree := flatTreeFromSets(t, base+c)
+		if err := SchemaValidate(tree, nil); err == nil {
+			t.Fatalf("%q: expected SchemaValidate to reject, got nil", c)
+		}
+	}
+	for _, c := range good {
+		tree := flatTreeFromSets(t, base+c)
+		if err := SchemaValidate(tree, nil); err != nil {
+			t.Fatalf("%q: expected SchemaValidate to accept, got %v", c, err)
+		}
+	}
+}
+
+// #12070: SchemaValidate is the strict commit-check gate; rejection must
+// identify the path and offending value rather than defer failure to FRR.
+func TestPolicyThenNextHopPrepend_RejectionNamesValue_12070(t *testing.T) {
+	base := "set policy-options policy-statement P term t1 "
+	for _, tc := range []struct{ set, leaf, value string }{
+		{base + "then next-hop discard", "next-hop", "discard"},
+		{base + "then next-hop 10.0.0.300", "next-hop", "10.0.0.300"},
+		{base + "then as-path-prepend 65001 abc", "as-path-prepend", "abc"},
+	} {
+		err := SchemaValidate(buildTreeFromSet(t, []string{tc.set}), nil)
+		if err == nil {
+			t.Fatalf("%q: expected SchemaValidate to reject, got nil", tc.set)
+		}
+		for _, want := range []string{"P", "t1", tc.leaf, tc.value} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("%q: schema error %q must name %q", tc.set, err.Error(), want)
+			}
+		}
+	}
+}
+
+// #12070: valid operands keep compiling strict — the gate must not
+// over-reject working configs.
+func TestPolicyThenNextHopPrepend_ValidCompiles_12070(t *testing.T) {
+	base := "set policy-options policy-statement P term t1 "
+	tree := buildTreeFromSet(t, []string{
+		base + "then next-hop 192.0.2.1",
+		"set policy-options policy-statement P term t2 then next-hop 2001:db8::1",
+		"set policy-options policy-statement P term t3 then next-hop peer-address",
+		"set policy-options policy-statement P term t4 then next-hop self",
+		"set policy-options policy-statement P term t5 then as-path-prepend 65001",
+		"set policy-options policy-statement P term t6 then as-path-prepend [ 65001 65001 ]",
+		"set policy-options policy-statement P term t7 then accept",
+	})
+	if _, err := CompileConfig(tree); err != nil {
+		t.Fatalf("CompileConfig rejected valid operands: %v", err)
+	}
+}

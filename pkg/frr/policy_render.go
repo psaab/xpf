@@ -814,7 +814,10 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 
 			// then actions
 			if term.NextHop != "" {
-				if term.NextHop == "peer-address" {
+				if !config.ValidPolicyThenNextHop(term.NextHop) {
+					slog.Warn("frr: omitting invalid then next-hop value",
+						"route_map", routeMapName, "term", term.Name, "value", sanitizeFRRValue(term.NextHop))
+				} else if term.NextHop == "peer-address" {
 					// Junos "next-hop peer-address" → FRR. The session AF is not
 					// known here, so emit both forms; FRR applies each only to
 					// the matching address family of the carrying BGP session.
@@ -951,7 +954,20 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			// order (repetition is the mechanism) on a single clause; skip
 			// entirely when no ASNs were configured.
 			if len(term.ASPathPrepend) > 0 {
-				fmt.Fprintf(&b, " set as-path prepend %s\n", sanitizeFRRValue(strings.Join(term.ASPathPrepend, " ")))
+				valid := true
+				for _, asn := range term.ASPathPrepend {
+					if !config.ValidPolicyASPathPrependASN(asn) {
+						valid = false
+						break
+					}
+				}
+				if valid {
+					fmt.Fprintf(&b, " set as-path prepend %s\n", sanitizeFRRValue(strings.Join(term.ASPathPrepend, " ")))
+				} else {
+					slog.Warn("frr: omitting invalid then as-path-prepend value",
+						"route_map", routeMapName, "term", term.Name,
+						"value", sanitizeFRRValue(strings.Join(term.ASPathPrepend, " ")))
+				}
 			}
 			if term.Origin != "" && validBGPOrigin(term.Origin) {
 				// #4919: skip an invalid origin (fail-closed) — a non-control
