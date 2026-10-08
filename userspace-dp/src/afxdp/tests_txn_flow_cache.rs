@@ -3483,6 +3483,7 @@ fn flowless_gre_static_dnat_vip_forwards_translated_11435() {
         internal_ip: internal.to_string(),
         match_destination_port: 0,
         mapped_port: 0,
+        ..Default::default()
     }];
 
     let (batch, dbg, sessions, flow_backed, forwarded, _, _) =
