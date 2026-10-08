@@ -1815,18 +1815,10 @@ func zoneKnown(cfg *config.Config, zone string) bool {
 	return true
 }
 
-// quarantinedZoneNames computes the full runtime-exclusion set for cfg's
-// configured zone names — collision losers plus reserved dataplane/Junos
-// context names. This is a cold config-tool path, not per-packet work.
+// quarantinedZoneNames returns the runtime-exclusion set for the compiler's
+// full three-view zone-name union, including peer-only node groups.
 func quarantinedZoneNames(cfg *config.Config) map[string]struct{} {
-	if cfg == nil || len(cfg.Security.Zones) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(cfg.Security.Zones))
-	for name := range cfg.Security.Zones {
-		names = append(names, name)
-	}
-	return config.ZoneQuarantineExclusions(names)
+	return config.ZoneQuarantineExclusionsForConfig(cfg)
 }
 
 // matchedResult builds the verdict for a concrete policy hit, stamping its zone

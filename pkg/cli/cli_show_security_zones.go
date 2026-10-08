@@ -21,7 +21,8 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 	}
 	sort.Strings(zoneNames)
 	cr := c.applyResult()
-	quarantined := config.ZoneQuarantineExclusions(zoneNames)
+	quarantineNames := config.ZoneQuarantineNamesForConfig(cfg)
+	quarantined := config.ZoneQuarantineExclusions(quarantineNames)
 	if cr != nil && config.ZoneInventoryDiffers(zoneNames, cr.ZoneIDs) {
 		fmt.Println(config.ZoneQuarantineDriftNote)
 	}
@@ -52,7 +53,7 @@ func (c *CLI) showZonesDisplay(cfg *config.Config, detail bool, filterZone strin
 		}
 		survivor := ""
 		if reason != "" {
-			survivor = config.ZoneQuarantineSurvivorName(name, zoneNames)
+			survivor = config.ZoneQuarantineSurvivorName(name, quarantineNames)
 		}
 
 		// Junos format: "Security zone: <name>"

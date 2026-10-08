@@ -446,6 +446,7 @@ func (c *CLI) testSecurityZone(args []string) error {
 	}
 
 	sort.Strings(allZoneNames)
+	quarantineNames := config.ZoneQuarantineNamesForConfig(cfg)
 	for _, zoneName := range allZoneNames {
 		zone := cfg.Security.Zones[zoneName]
 		if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
@@ -456,7 +457,7 @@ func (c *CLI) testSecurityZone(args []string) error {
 				fmt.Printf("Interface %s belongs to zone: %s\n", ifName, zoneName)
 				if reason := config.ZoneQuarantineExcludedReason(zoneName, cfg); reason != "" {
 					id := config.StableZoneID(zoneName)
-					survivor := config.ZoneQuarantineSurvivorName(zoneName, allZoneNames)
+					survivor := config.ZoneQuarantineSurvivorName(zoneName, quarantineNames)
 					fmt.Printf("  %s\n", config.ZoneQuarantineTestZoneQualifierFor(id, survivor))
 				}
 				if zone.Description != "" {

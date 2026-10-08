@@ -495,17 +495,22 @@ type Config struct {
 	// claims are consumed by the same kernel/userspace membership helpers but
 	// never re-expand through the original bare-member string.
 	QuarantinedRIMemberPrimaryClaims []RoutingInstanceMemberPrimaryClaim `json:"-"`
-	Firewall                         FirewallConfig
-	ClassOfService                   *ClassOfServiceConfig
-	Services                         ServicesConfig
-	ForwardingOptions                ForwardingOptionsConfig
-	System                           SystemConfig
-	PolicyOptions                    PolicyOptionsConfig
-	Schedulers                       map[string]*SchedulerConfig
-	Chassis                          ChassisConfig
-	EventOptions                     []*EventPolicy
-	BridgeDomains                    []*BridgeDomainConfig
-	Warnings                         []string // non-fatal validation warnings
+	// ZoneQuarantineNames is the sorted union of the main, node0, and node1
+	// security-zone views collected before group expansion. Runtime quarantine
+	// consumes it so a node cannot retain a peer-only colliding zone. It is
+	// compile-time metadata only and is never sent over the dataplane wire.
+	ZoneQuarantineNames []string `json:"-"`
+	Firewall            FirewallConfig
+	ClassOfService      *ClassOfServiceConfig
+	Services            ServicesConfig
+	ForwardingOptions   ForwardingOptionsConfig
+	System              SystemConfig
+	PolicyOptions       PolicyOptionsConfig
+	Schedulers          map[string]*SchedulerConfig
+	Chassis             ChassisConfig
+	EventOptions        []*EventPolicy
+	BridgeDomains       []*BridgeDomainConfig
+	Warnings            []string // non-fatal validation warnings
 
 	// LenientNATTerminalActionRules records every NAT rule the TOLERANT path
 	// admitted despite validateNATTerminalActionCardinalityStrict rejecting it

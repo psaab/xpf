@@ -123,7 +123,9 @@ func emitNodeExpandedZoneNames(tree *ConfigTree, nodeID int, out map[string]stru
 // the fold guarantees no reserved-sentinel id and the dataplane independently
 // fails closed on an unresolvable zone, so a leniently-loaded colliding config
 // is inert on the later-folding zone rather than mis-attributed.
-func validateZoneIDCollisionAST(tree *ConfigTree, lenient bool) ([]string, error) {
+// It also returns the sorted three-view union so tolerant compiles can carry
+// the same names into runtime quarantine after node-specific group expansion.
+func validateZoneIDCollisionAST(tree *ConfigTree, lenient bool) ([]string, []string, error) {
 	names := make(map[string]struct{})
 	// View 1 — pre-expansion presence union (main + every groups block). Union
 	// across EVERY top-level `security` root (#5691): a split config can declare
@@ -156,14 +158,14 @@ func validateZoneIDCollisionAST(tree *ConfigTree, lenient bool) ([]string, error
 	// per-node expansion errors contribute the empty set (non-fatal).
 	emitNodeExpandedZoneNames(tree, 0, names)
 	emitNodeExpandedZoneNames(tree, 1, names)
-	if len(names) < 2 {
-		return nil, nil
-	}
 	sorted := make([]string, 0, len(names))
 	for name := range names {
 		sorted = append(sorted, name)
 	}
 	sort.Strings(sorted)
+	if len(sorted) < 2 {
+		return nil, sorted, nil
+	}
 	byID := make(map[uint16]string, len(sorted))
 	var warnings []string
 	for _, name := range sorted {
@@ -177,7 +179,7 @@ func validateZoneIDCollisionAST(tree *ConfigTree, lenient bool) ([]string, error
 			"zone id collision between %q and %q (both fold to %d) — rename one zone (#3075)",
 			owner, name, id)
 		if !lenient {
-			return nil, fmt.Errorf("security zones: %s", msg)
+			return nil, sorted, fmt.Errorf("security zones: %s", msg)
 		}
 		// #3719: the lenient path keeps booting but QUARANTINES the
 		// later-sorting zone (QuarantinedZoneNames) so the dataplane never
@@ -189,7 +191,46 @@ func validateZoneIDCollisionAST(tree *ConfigTree, lenient bool) ([]string, error
 			" (dropped from the dataplane, its interfaces unzoned and its traffic denied) —"+
 			" zone isolation is DEGRADED until one zone is renamed", msg, name))
 	}
-	return warnings, nil
+	return warnings, sorted, nil
+}
+
+// ZoneQuarantineNamesForConfig returns the sorted three-view zone-name union
+// recorded by the compiler, including any effective zone keys added later.
+// Manually constructed Config values fall back to their effective zone keys.
+func ZoneQuarantineNamesForConfig(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	if len(cfg.ZoneQuarantineNames) > 0 {
+		var merged []string
+		for name := range cfg.Security.Zones {
+			i := sort.SearchStrings(cfg.ZoneQuarantineNames, name)
+			if i < len(cfg.ZoneQuarantineNames) && cfg.ZoneQuarantineNames[i] == name {
+				continue
+			}
+			if merged == nil {
+				merged = append([]string(nil), cfg.ZoneQuarantineNames...)
+			}
+			merged = append(merged, name)
+		}
+		if merged == nil {
+			return cfg.ZoneQuarantineNames
+		}
+		sort.Strings(merged)
+		return merged
+	}
+	names := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ZoneQuarantineExclusionsForConfig returns the collision losers and reserved
+// names excluded for the compiler's full HA name union.
+func ZoneQuarantineExclusionsForConfig(cfg *Config) map[string]struct{} {
+	return ZoneQuarantineExclusions(ZoneQuarantineNamesForConfig(cfg))
 }
 
 // QuarantinedZoneNames returns the set of security-zone names that MUST NOT be
@@ -267,16 +308,12 @@ func ZoneQuarantineExclusions(names []string) map[string]struct{} {
 
 // ZoneQuarantineExcludedReason returns the operator-facing reason for a
 // quarantined zone in cfg. It returns an empty string for an ordinary or
-// survivor zone, and is deliberately derived from the same cfg.Security.Zones
-// key set consumed by the snapshot builders.
+// survivor zone, and uses the same three-view name union as snapshot builders.
 func ZoneQuarantineExcludedReason(name string, cfg *Config) string {
 	if cfg == nil || name == "" {
 		return ""
 	}
-	names := make([]string, 0, len(cfg.Security.Zones))
-	for zoneName := range cfg.Security.Zones {
-		names = append(names, zoneName)
-	}
+	names := ZoneQuarantineNamesForConfig(cfg)
 	quarantined := ZoneQuarantineExclusions(names)
 	if _, excluded := quarantined[name]; !excluded {
 		return ""

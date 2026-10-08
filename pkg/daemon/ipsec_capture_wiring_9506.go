@@ -243,7 +243,7 @@ func buildPMechZoneSnapshot(cfg *config.Config, handles []ipsecQueueHandle, gene
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
-	quarantined := config.ZoneQuarantineExclusions(zoneNames)
+	quarantined := config.ZoneQuarantineExclusionsForConfig(cfg)
 	seenBind := make(map[uint32]map[string]struct{})
 	vpnNames := make([]string, 0, len(cfg.Security.IPsec.VPNs))
 	for name := range cfg.Security.IPsec.VPNs {
