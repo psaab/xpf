@@ -153,6 +153,26 @@ func (a *LegacyDataPlaneAdapter) AttachedXDPLinkCount() int {
 	return m.AttachedXDPLinkCount()
 }
 
+// HelperSupervisorState exposes whether the supervised helper is running and
+// whether its consecutive restart backoff has reached the crash-loop cap.
+func (a *LegacyDataPlaneAdapter) HelperSupervisorState() (bool, bool) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return false, false
+	}
+	return m.HelperSupervisorState()
+}
+
+// SetHelperSupervisorObserver forwards the daemon's wake-only supervisor
+// state observer to the retained userspace Manager.
+func (a *LegacyDataPlaneAdapter) SetHelperSupervisorObserver(fn func()) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return
+	}
+	m.SetHelperSupervisorObserver(fn)
+}
+
 // AttachedXDPIfindexes forwards the provenance-bearing kernel-truth census
 // through the runtime adapter published to the daemon. The daemon uses this
 // set to scope armed forward-fence pinholes; a missing manager yields no

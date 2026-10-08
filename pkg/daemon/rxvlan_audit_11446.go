@@ -351,7 +351,8 @@ func (d *Daemon) quarantineRxVlanBinding(ctx context.Context, parent string, sta
 		// the unconditional barrier is installed; isolate the physical parent
 		// and keep the daemon unarmed if that closeout cannot be established.
 		d.dataplaneArmed.Store(false)
-		d.applyDataplaneReadyTrack(false)
+		_, crashLooping := d.helperSupervisorState()
+		d.applyTransitElectionDebt(false, crashLooping)
 		state.transitSuppressed = true
 		downErr := rxVlanAuditLinkSetDown(link)
 		if downErr == nil {
@@ -361,13 +362,15 @@ func (d *Daemon) quarantineRxVlanBinding(ctx context.Context, parent string, sta
 		return false, errors.Join(fmt.Errorf("rxvlan quarantine: barrier install failed: %w", barrierErr),
 			fmt.Errorf("rxvlan quarantine: LinkSetDown(%s): %w", parent, downErr))
 	}
-	d.applyDataplaneReadyTrack(false)
+	_, crashLooping := d.helperSupervisorState()
+	d.applyTransitElectionDebt(false, crashLooping)
 
 	backend := dataplane.Unwrap(d.dataplane())
 	detacher, ok := backend.(interface{ DetachXDP(int) error })
 	if !ok {
 		d.dataplaneArmed.Store(false)
-		d.applyDataplaneReadyTrack(false)
+		_, crashLooping := d.helperSupervisorState()
+		d.applyTransitElectionDebt(false, crashLooping)
 		state.transitSuppressed = true
 		return true, errors.New("rxvlan quarantine: dataplane has no XDP detach capability; transit remains closed")
 	}
@@ -375,25 +378,28 @@ func (d *Daemon) quarantineRxVlanBinding(ctx context.Context, parent string, sta
 	attached, known := rxVlanXDPAttached(backend, attrs.Index)
 	if detachErr != nil && (!known || attached) {
 		d.dataplaneArmed.Store(false)
-		d.applyDataplaneReadyTrack(false)
+		_, crashLooping := d.helperSupervisorState()
+		d.applyTransitElectionDebt(false, crashLooping)
 		state.transitSuppressed = true
 		return true, fmt.Errorf("rxvlan quarantine: detach %s failed and transit remains closed: %w", parent, detachErr)
 	}
 	if detachErr == nil && known && attached {
 		d.dataplaneArmed.Store(false)
-		d.applyDataplaneReadyTrack(false)
+		_, crashLooping := d.helperSupervisorState()
+		d.applyTransitElectionDebt(false, crashLooping)
 		state.transitSuppressed = true
 		return true, fmt.Errorf("rxvlan quarantine: detach %s returned success but the XDP census still includes ifindex %d; transit remains closed",
 			parent, attrs.Index)
 	}
 
-	ready := d.dataplaneArmed.Load() && d.attachedXDPLinks() > 0
-	opened := d.writeTransitGateLocked("rxvlan-audit", ready)
-	d.applyDataplaneReadyTrack(opened)
+	kernelReady := d.dataplaneArmed.Load() && d.attachedXDPLinks() > 0
+	helperRunning, crashLooping := d.helperSupervisorState()
+	opened := d.writeTransitGateLocked("rxvlan-audit", kernelReady && helperRunning)
+	d.applyTransitElectionDebt(kernelReady && (!helperRunning || opened), crashLooping)
 	if detachErr != nil {
 		return true, fmt.Errorf("rxvlan quarantine: %s removed from XDP census despite detach error: %w", parent, detachErr)
 	}
-	if ready && !opened {
+	if kernelReady && helperRunning && !opened {
 		return true, fmt.Errorf("rxvlan quarantine: %s detached; transit remains closed while the remaining fence is retried", parent)
 	}
 	return true, nil

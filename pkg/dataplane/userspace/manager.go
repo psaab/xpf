@@ -157,6 +157,11 @@ type Manager struct {
 	// helperCrash records the last UNEXPECTED helper exit for the operator and
 	// drives the restart backoff. Zero value means "no crash on record".
 	helperCrash HelperCrashRecord
+	// helperSupervisorObserver is a wake-only callback notified when the
+	// supervised helper changes between running and stopped. It is called
+	// under m.mu and MUST NOT call back into Manager; the daemon observer only
+	// signals its transit-gate loop.
+	helperSupervisorObserver func()
 	// restartTimerFn overrides how a crash restart is armed. Production leaves
 	// it nil (time.AfterFunc); a test injects a synchronous or recording timer.
 	// Per-Manager, not a package var — see scheduleRestartTimer.
