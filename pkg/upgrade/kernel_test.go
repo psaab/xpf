@@ -33,19 +33,23 @@ type fakeKernelSystem struct {
 
 	entriesErr error
 
-	bootCurrent       string
-	bootCurrentErr    error
-	getBootNextErr    error  // #5847: force a readback error (stay ARMING)
-	clearBootNextErr  error  // #6758: force the un-undoable case (NVRAM stays armed)
-	getBootNextRet    string // #5847: override readback (firmware "lied"); "" => mirror bootNext
-	runningErr        error
-	armWatchdogErr    error
-	disarmWatchdogErr error
-	bootOrderFrontErr bool
-	verifyPass        bool
-	verifyErr         error
-	beaconPass        bool
-	beaconErr         error
+	bootCurrent         string
+	bootCurrentErr      error
+	getBootNextErr      error  // #5847: force a readback error (stay ARMING)
+	clearBootNextErr    error  // #6758: force the un-undoable case (NVRAM stays armed)
+	getBootNextRet      string // #5847: override readback (firmware "lied"); "" => mirror bootNext
+	runningErr          error
+	armWatchdogErr      error
+	disarmWatchdogErr   error
+	setBootNextErr      error
+	rebootErr           error
+	armWatchdogCalls    int
+	disarmWatchdogCalls int
+	bootOrderFrontErr   bool
+	verifyPass          bool
+	verifyErr           error
+	beaconPass          bool
+	beaconErr           error
 
 	rebooted        bool
 	promotionMarker string
@@ -131,6 +135,9 @@ func (f *fakeKernelSystem) ReadSlotSelector(slot string) (string, error) {
 }
 func (f *fakeKernelSystem) SetBootNext(id string) error {
 	f.log("bootnext:" + id)
+	if f.setBootNextErr != nil {
+		return f.setBootNextErr
+	}
 	f.bootNext = id
 	return nil
 }
@@ -162,13 +169,21 @@ func (f *fakeKernelSystem) GetBootNext() (string, error) {
 	return f.bootNext, nil
 }
 func (f *fakeKernelSystem) ArmWatchdog() error {
+	f.armWatchdogCalls++
 	if f.armWatchdogErr != nil {
 		return f.armWatchdogErr
 	}
 	f.wdArmed = true
 	return nil
 }
-func (f *fakeKernelSystem) Reboot() error { f.log("reboot"); f.rebooted = true; return nil }
+func (f *fakeKernelSystem) Reboot() error {
+	f.log("reboot")
+	if f.rebootErr != nil {
+		return f.rebootErr
+	}
+	f.rebooted = true
+	return nil
+}
 func (f *fakeKernelSystem) WritePromotionMarker(u string) error {
 	f.promotionMarker = u
 	return nil
@@ -220,6 +235,7 @@ func (f *fakeKernelSystem) SetBootOrderFront(id string) error {
 	return nil
 }
 func (f *fakeKernelSystem) DisarmWatchdog() error {
+	f.disarmWatchdogCalls++
 	if f.disarmWatchdogErr != nil {
 		return f.disarmWatchdogErr
 	}

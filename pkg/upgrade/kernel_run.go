@@ -166,7 +166,10 @@ func (r *KernelRunner) Arm(candidateVersion string) error {
 	// ---- REBOOT into the candidate (one-shot, firmware-cleared) ----
 	r.logf("kernel-upgrade: armed candidate %s in slot %s; rebooting (one-shot)",
 		j.CandidateVersion, j.InactiveSlot)
-	return r.cfg.Sys.Reboot()
+	if err := r.cfg.Sys.Reboot(); err != nil {
+		return disarmWatchdogAfterArmFailure(r.cfg.Sys, err)
+	}
+	return nil
 }
 
 func (r *KernelRunner) preflight(j *KernelJournal, candidateVersion string) error {
@@ -373,7 +376,7 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) error {
 	j.ArmNonce = r.newArmNonce(j)
 	j.BootID = ""
 	if err := r.ktransition(j, KernelStateArming); err != nil {
-		return err
+		return disarmWatchdogAfterArmFailure(sys, err)
 	}
 
 	if err := sys.SetBootNext(inactiveID); err != nil {
@@ -382,7 +385,8 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) error {
 		// cleanly. Leave the journal at ARMING (do NOT drop back to INSTALLED):
 		// re-entry resumes the arm, and self-recovery already treats ARMING as
 		// no-trial.
-		return fmt.Errorf("kernel-upgrade arm: efibootmgr --bootnext %s: %w", inactiveID, err)
+		return disarmWatchdogAfterArmFailure(sys,
+			fmt.Errorf("kernel-upgrade arm: efibootmgr --bootnext %s: %w", inactiveID, err))
 	}
 
 	// Positively confirm the firmware accepted the one-shot BEFORE recording the
@@ -418,9 +422,19 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) error {
 	return nil
 }
 
-// disarmAfterArmFailure clears the one-shot BootNext for a failure that happens
-// AFTER SetBootNext has already succeeded, and returns the original cause
-// (#6758).
+// disarmWatchdogAfterArmFailure disarms the watchdog on a failed arm and
+// preserves both the original cause and any disarm error.
+func disarmWatchdogAfterArmFailure(sys KernelSystem, cause error) error {
+	if err := sys.DisarmWatchdog(); err != nil {
+		return fmt.Errorf("%w; AND the hardware watchdog could not be disarmed (%w) — "+
+			"it may still reset the host", cause, err)
+	}
+	return cause
+}
+
+// disarmAfterArmFailure disarms the watchdog and clears the one-shot BootNext
+// for a failure that happens AFTER SetBootNext has already succeeded, then
+// returns the original cause (#6758, #12162).
 //
 // THE DIVERGENCE IT CLOSES. The two-phase arm records ARMING before touching
 // NVRAM and only advances to ARMED after a positive BootNext readback. Every
@@ -450,7 +464,9 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) error {
 // one-shot WITH a recorded promote binary, which is precisely what may be
 // missing on the recordPromoteBinary path, so claiming it would substitute a
 // different false record for this one.
+
 func disarmAfterArmFailure(sys KernelSystem, cause error) error {
+	cause = disarmWatchdogAfterArmFailure(sys, cause)
 	if cerr := sys.ClearBootNext(); cerr != nil {
 		return fmt.Errorf("%w; AND the one-shot BootNext could not be cleared (%v) — "+
 			"the firmware may still boot the candidate on the next reboot while the "+
