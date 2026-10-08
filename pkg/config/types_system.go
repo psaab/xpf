@@ -1484,7 +1484,10 @@ type FirewallFilterTerm struct {
 	// `then` (and compact tail keywords after the term name). The compiler
 	// records them so strict commit cannot silently widen a term by dropping
 	// an unmodeled sibling.
-	unknownChildren   []string
+	unknownChildren []string
+	// nameless marks a `term` container that had no term-name token. Its
+	// children otherwise look like named term instances to namedInstances.
+	nameless          bool
 	SourceAddresses   []string        // CIDRs
 	DestAddresses     []string        // CIDRs
 	SourcePrefixLists []PrefixListRef // source-prefix-list references

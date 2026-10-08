@@ -385,7 +385,7 @@ func validateFilterNoCatchAllWarnings(cfg *Config) []string {
 					"interface %s unit %d: filter %s %q has no terminal "+
 						"catch-all term; xpf accepts traffic matching no term "+
 						"(Junos stateless filters imply a final discard) — append "+
-						"an explicit final `term { then discard; }` for "+
+						"an explicit final `term <name> { then discard; }` for "+
 						"Junos-style deny-by-default, or `then accept` to make "+
 						"permit-by-default explicit",
 					ifName, unitNum, h.dir, h.name))
