@@ -83,7 +83,7 @@ func findBGPNeighbor9192(neighbors []*BGPNeighbor, group, addr string) *BGPNeigh
 // the caller's per-NEIGHBOR state instead of locals — the #5277
 // most-specific-LEVEL-wins flags have to survive from one node to the next or
 // the second node's first `export` wipes the first node's own list.
-func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ownImport *bool, opts compileOpts, warnings *[]string) error {
+func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ownImport *bool, opts compileOpts, warnings *[]string, warningRecords *[]bgpSAFIWarning11815) error {
 	for _, prop := range expandResolvingRuns9792(child.Children, bgpNeighborSchema9792()) { // #9792: expand a lenient-path packed run (#9235).
 		switch prop.Name() {
 		case "description":
@@ -199,7 +199,7 @@ func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ow
 		case "family":
 			applyNeighborFamily := func(familyNode *Node, afi string) error {
 				scope := fmt.Sprintf("BGP neighbor %q family %s", neighbor.Address, afi)
-				unicast, unsupported, err := applyBGPFamilySAFI11815(familyNode, scope, opts, warnings)
+				unicast, unsupported, err := applyBGPFamilySAFI11815(familyNode, afi, scope, opts, warnings, warningRecords)
 				if err != nil {
 					return err
 				}
