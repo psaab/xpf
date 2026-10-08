@@ -17,7 +17,6 @@ func (m *Manager) syncSnapshotLocked() error {
 	// ordering and consumers.
 	retryDebtConvergence := m.snapshotRetryDebtLocked()
 
-	planKey := snapshotBindingPlanKey(m.lastSnapshot)
 	if m.publishedSnapshot >= m.lastSnapshot.Generation {
 		if m.publishedSnapshot != 0 && m.publishedSnapshot == m.lastSnapshot.Generation &&
 			!m.applySnapshotOutcomeUnknown && m.partialOutcomeUnknown == 0 {
@@ -55,7 +54,7 @@ func (m *Manager) syncSnapshotLocked() error {
 		hash, hashOK := snapshotContentHash(m.lastSnapshot)
 		m.publishedSnapshot = m.lastSnapshot.Generation
 		m.pendingFullSnapshotMetadata = false
-		m.publishedPlanKey = planKey
+		m.publishedPlanKey = snapshotBindingPlanKey(m.lastSnapshot)
 		// #2079: the helper already reports this generation as applied
 		// (status.LastSnapshotGeneration >= m.lastSnapshot.Generation
 		// gated this branch), so it IS the applied snapshot.
@@ -68,6 +67,14 @@ func (m *Manager) syncSnapshotLocked() error {
 		m.rebuildMonitoredIfindexes()
 		return nil
 	}
+	// Plan gating and the eventual send must use the same interface sample.
+	// Keep the retained authority detached until the publish is acknowledged.
+	retained := *m.lastSnapshot
+	if !m.pendingFullSnapshotMetadata {
+		stripSingleUseCommitMetadata(&retained)
+	}
+	prepareSnapshotForApply(&retained)
+	planKey := snapshotBindingPlanKey(&retained)
 	// Publish the initial snapshot immediately so the helper can plan its
 	// bindings. After that, defer newer snapshots until the first XSK
 	// liveness outcome is known. HA startup can emit several snapshots in
@@ -89,21 +96,9 @@ func (m *Manager) syncSnapshotLocked() error {
 	if xskStartup && !m.snapshotRetryDebtLocked() && (m.publishedPlanKey == "" || m.publishedPlanKey != planKey) {
 		return nil
 	}
-	// #9684: re-sample any section a lost partial update left unknown, only once
-	// the gate above lets this publish proceed. A deferred tick then costs no
-	// kernel sample, which matters because the probe extends while a link is idle
-	// and that window has no bound. A re-sample never moves the binding plan
-	// (resampleUnresolvedSectionsLocked keeps the fabric rows' plan half), so the
-	// gate's decision holds for the copy that will be sent.
-	retained := *m.lastSnapshot
-	// A FIB bump can advance lastSnapshot.Generation without publishing a
-	// full snapshot. If a later status retry is the first accepted publication
-	// of a deferred or unknown-outcome full snapshot, preserve its one-shot
-	// rename metadata; otherwise strip metadata consumed by the prior full
-	// publication just like every other partial republish path.
-	if !m.pendingFullSnapshotMetadata {
-		stripSingleUseCommitMetadata(&retained)
-	}
+	// #9684: re-sample unresolved sections only after the plan gate admits this
+	// publish. Fabric resampling keeps its plan half, and interface rows were
+	// already detached and revalidated for the same-plan decision.
 	resampled := m.resampleUnresolvedSectionsLocked(&retained)
 	m.refreshCaptureAuthorityLocked(&retained)
 	if xskStartup {
@@ -204,9 +199,10 @@ func (m *Manager) syncSnapshotLocked() error {
 	// the shim against classifier maps a generation ahead of the applied Rust
 	// snapshot (fail OPEN). publishSnapshotFailClosedLocked disables ctrl on a
 	// rejection so transit drops to the kernel-only fail-closed posture.
-	if err := m.publishSnapshotFailClosedLocked(&publishSnap, &status, true); err != nil {
+	if err := m.publishPreparedSnapshotFailClosedLocked(&publishSnap, &status, true); err != nil {
 		return err
 	}
+	m.lastSnapshot.Interfaces = publishSnap.Interfaces
 	// The deferred snapshot has now landed in the helper. Commit its scheduler
 	// state only after the successful request; all failure returns above retain
 	// the prior applied/show cache.
@@ -229,7 +225,8 @@ func (m *Manager) syncSnapshotLocked() error {
 	m.pendingFullSnapshotMetadata = false
 	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = m.lastSnapshot.Generation
-	m.publishedPlanKey = planKey
+	m.publishedPlanKey = snapshotBindingPlanKey(&publishSnap)
+	hash, hashOK = snapshotContentHash(&publishSnap)
 	// #2079: deferred full apply_snapshot succeeded — record applied.
 	m.markAppliedSnapshotLocked()
 	if hashOK {

@@ -1419,14 +1419,39 @@ func snapshotLinkUp(linuxName string) *bool {
 // (and parent ifindex) against the kernel just before publish (#11086), and
 // refreshes its link state (#11404). Link churn between snapshot build and
 // apply otherwise ships a row whose stale ifindex stamps the WRONG netdev's
-// zone on the helper (which keys rows purely by ifindex). A row whose name
-// resolves to a different ifindex is refreshed in place; a row whose name is
-// gone is dropped (a vanished link carries no traffic, so dropping cannot fail
-// open — and the warn names it). Returns refreshed/dropped counts for the
-// apply log.
+// zone on the helper (which keys rows purely by ifindex). Revalidation
+// compacts a detached interface slice, refreshing a row whose name resolves
+// to a different ifindex or dropping one whose name is gone (a vanished link
+// carries no traffic, so dropping cannot fail open — and the warn names it).
+// Returns refreshed/dropped counts for the apply log.
 // Kernel observations use the buildLinkSnapshot and linkByNameFn package-var
 // seams, so tests drive it without real kernel interfaces.
 func revalidateSnapshotIfindexes(snap *ConfigSnapshot) (refreshed, dropped int) {
+	if snap == nil {
+		return 0, 0
+	}
+	snap.Interfaces = cloneInterfaceSnapshots(snap.Interfaces)
+	return revalidateSnapshotIfindexesInPlace(snap)
+}
+
+func cloneInterfaceSnapshots(rows []InterfaceSnapshot) []InterfaceSnapshot {
+	if rows == nil {
+		return nil
+	}
+	out := make([]InterfaceSnapshot, len(rows))
+	copy(out, rows)
+	for i := range out {
+		if rows[i].LinkUp != nil {
+			linkUp := *rows[i].LinkUp
+			out[i].LinkUp = &linkUp
+		}
+	}
+	return out
+}
+
+// revalidateSnapshotIfindexesInPlace is reserved for snapshots whose interface
+// rows were freshly built and are not shared with retained state.
+func revalidateSnapshotIfindexesInPlace(snap *ConfigSnapshot) (refreshed, dropped int) {
 	if snap == nil {
 		return 0, 0
 	}

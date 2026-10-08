@@ -126,6 +126,9 @@ type userspaceLocalAddressEntry struct {
 }
 
 func (m *Manager) programBootstrapMapsLocked(snapshot *ConfigSnapshot, cfg config.UserspaceConfig) error {
+	if m.programBootstrapMapsHook != nil {
+		return m.programBootstrapMapsHook(snapshot, cfg)
+	}
 	ctrlMap := m.bpfShim.Map(mapNameUserspaceCtrl)
 	if ctrlMap == nil {
 		return errors.New("userspace_ctrl map not loaded")

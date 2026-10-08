@@ -101,10 +101,13 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 	// make a row removed by #11086 unrecoverable when its netdev is recreated.
 	liveXfrm := sampleLiveXfrmNetdevs()
 	next.Interfaces = buildInterfaceSnapshotsFrom(cfg, liveXfrm)
-	// First drop rows already absent at this sample. requestApplySnapshotLocked
-	// repeats this immediately before hashing/sending to catch churn during the
-	// rest of the rebuild.
-	revalidateSnapshotIfindexes(&next)
+	// Rows are freshly built here, so revalidate their owned backing once before
+	// deriving routes and other interface-dependent sections. The prepared send
+	// below must not take a second kernel sample.
+	if refreshed, dropped := revalidateSnapshotIfindexesInPlace(&next); refreshed+dropped > 0 {
+		slog.Info("userspace: snapshot interface rows revalidated at apply",
+			"refreshed", refreshed, "dropped", dropped)
+	}
 	var err error
 	next.Routes, next.LearnedRouteImportCapped, err = buildRouteSnapshots(cfg, next.Interfaces, m.routeOverlay)
 	if err != nil {
@@ -144,12 +147,10 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 	publishSnap := next
 	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
 	var status ProcessStatus
-	if err := m.requestApplySnapshotLocked(&publishSnap, &status); err != nil {
+	if err := m.requestApplySnapshotPreparedLocked(&publishSnap, &status); err != nil {
 		return false, fmt.Errorf("publish interface-link refresh: %w", err)
 	}
-	// requestApplySnapshotLocked may have refreshed or dropped rows at the
-	// send boundary. Retain exactly those rows rather than resurrecting the
-	// pre-boundary copy on the next partial publish.
+	// Retain exactly the interface rows sampled and sent above.
 	next.Interfaces = publishSnap.Interfaces
 	m.commitPolicySchedulerActiveStateFromSnapshotLocked(&next)
 	m.logWgEndpointSetTransitionLocked(&publishSnap, "interface-link")
@@ -159,9 +160,9 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = next.Generation
 	m.pendingFullSnapshotMetadata = false
-	m.publishedPlanKey = snapshotBindingPlanKey(&next)
+	m.publishedPlanKey = snapshotBindingPlanKey(&publishSnap)
 	m.markAppliedSnapshotLocked()
-	if h, ok := snapshotContentHash(&next); ok {
+	if h, ok := snapshotContentHash(&publishSnap); ok {
 		m.lastSnapshotHash = h
 	}
 	m.resolvePartialOutcomesLocked(resampled)

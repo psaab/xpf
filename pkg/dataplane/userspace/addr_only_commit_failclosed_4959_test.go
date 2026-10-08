@@ -215,18 +215,18 @@ func TestAddressOnlyCommitRejectedPublishFailsClosed4959(t *testing.T) {
 // a revert cannot re-inline a bare requestLocked(apply_snapshot) at the Compile
 // publish site and slip past the behavioral test above (which drives the
 // extracted helper directly). Compile's classifier-map publish MUST route
-// through publishSnapshotFailClosedLocked with the samePlanRefresh flag.
+// through publishPreparedSnapshotFailClosedLocked with the samePlanRefresh flag.
 //
 // #5485 split Compile at the m.mu boundary: the publish now lives in
 // applyCompiledSnapshot, which is everything Compile does once the shim is
-// attached and the snapshot is built. Retargeted, not relaxed — the asserted
-// substring is unchanged.
+// attached and the snapshot is built. The prepared helper preserves the same
+// fail-closed transaction after interface rows have been sampled for planning.
 func TestCompileRoutesPublishThroughFailClosedHelper4959(t *testing.T) {
 	t.Parallel()
 	src := goFunctionSource(t, "manager_compile.go", "applyCompiledSnapshot")
-	if !strings.Contains(src, "publishSnapshotFailClosedLocked(&publishSnap, &status, samePlanRefresh)") {
+	if !strings.Contains(src, "publishPreparedSnapshotFailClosedLocked(&publishSnap, &status, samePlanRefresh)") {
 		t.Fatalf("applyCompiledSnapshot must publish the classifier-map snapshot via "+
-			"publishSnapshotFailClosedLocked(..., samePlanRefresh) so a rejected "+
+			"publishPreparedSnapshotFailClosedLocked(..., samePlanRefresh) so a rejected "+
 			"same-plan apply_snapshot fails closed (#4959); got:\n%s", src)
 	}
 }
@@ -353,14 +353,14 @@ func TestDeferredPublishRejectedFailsClosed4959(t *testing.T) {
 // requestLocked(apply_snapshot) at the syncSnapshotLocked deferred-publish site
 // and slip past the behavioral test above. The deferred-publish path only ever
 // publishes a snapshot whose classifier maps the pendingXSKStartup branch already
-// mutated in place, so it MUST route through publishSnapshotFailClosedLocked with
-// mapsMutatedInPlace hard-coded true.
+// mutated in place, so it MUST route through publishPreparedSnapshotFailClosedLocked
+// with mapsMutatedInPlace hard-coded true.
 func TestSyncSnapshotRoutesPublishThroughFailClosedHelper4959(t *testing.T) {
 	t.Parallel()
 	src := goFunctionSource(t, "process_status.go", "syncSnapshotLocked")
-	if !strings.Contains(src, "publishSnapshotFailClosedLocked(&publishSnap, &status, true)") {
+	if !strings.Contains(src, "publishPreparedSnapshotFailClosedLocked(&publishSnap, &status, true)") {
 		t.Fatalf("syncSnapshotLocked must publish the deferred snapshot via "+
-			"publishSnapshotFailClosedLocked(..., true) so a rejected deferred "+
+			"publishPreparedSnapshotFailClosedLocked(..., true) so a rejected deferred "+
 			"apply_snapshot fails closed (#4959 residual); got:\n%s", src)
 	}
 }

@@ -89,6 +89,7 @@ func (m *Manager) retryDeferredWorkerArmLocked() error {
 		// Debt stays set — the status loop retries on the next tick.
 		return fmt.Errorf("re-arm deferred workers: %w", err)
 	}
+	next.Interfaces = publishSnap.Interfaces
 	// The helper accepted the re-arm snapshot, so commit any scheduler state
 	// it carries to the applied/show cache (mirrors the overlay publish).
 	m.commitPolicySchedulerActiveStateFromSnapshotLocked(&next)
@@ -101,9 +102,9 @@ func (m *Manager) retryDeferredWorkerArmLocked() error {
 	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = next.Generation
 	m.pendingFullSnapshotMetadata = false
-	m.publishedPlanKey = snapshotBindingPlanKey(&next)
+	m.publishedPlanKey = snapshotBindingPlanKey(&publishSnap)
 	m.markAppliedSnapshotLocked()
-	if h, ok := snapshotContentHash(&next); ok {
+	if h, ok := snapshotContentHash(&publishSnap); ok {
 		m.lastSnapshotHash = h
 	}
 	m.pendingWorkerArm = false
