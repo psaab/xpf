@@ -403,17 +403,9 @@ fi
 
 # ── 7. install.sh publish-time bake (H-2 / H-14) ───────────────────────────
 info "7. install.sh stamp (bake key + apt URL) + baked-default render"
-# A fabricated non-placeholder armored block is enough: stamp checks BEGIN/END
-# + not-placeholder, and gate_images verifies install.sh's MINISIGN signature
-# (independent of the OpenPGP archive key baked here).
-AKEY="$WORK/archive.asc"
-cat > "$AKEY" <<'EOF'
------BEGIN PGP PUBLIC KEY BLOCK-----
-
-mDMEZmFakeArchiveKeyForSelftestOnlyNotARealKeyAAAAAAAAAAAAAAAAAAAA
-=SelF
------END PGP PUBLIC KEY BLOCK-----
-EOF
+# Reuse the throwaway public key generated for this selftest's signed repo.
+# It is a real parseable OpenPGP key, but never a production or host key.
+AKEY="$ARCHASC"
 BAKED="$WORK/install.baked.sh"
 if $PY "$DIST/publish.py" stamp-installer --out "$BAKED" \
      --archive-key "$AKEY" --apt-base-url "https://dl.selftest.invalid/apt" \

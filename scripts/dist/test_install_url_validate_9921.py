@@ -34,11 +34,19 @@ publish = importlib.util.module_from_spec(_SPEC)
 assert _SPEC.loader is not None
 _SPEC.loader.exec_module(publish)
 
-_FAKE_ARCHIVE_KEY = """\
+_TEST_ARCHIVE_KEY = """\
 -----BEGIN PGP PUBLIC KEY BLOCK-----
 
-mDMEZmFakeArchiveKeyForInstallValidateTestNotARealKeyAAAAAAAAAAAAAAA
-=AbC1
+mI0Easb4LwEEAJfu0qec/Uj0dYd38DXCiX5yyjwyg3CZKECGYXfuOaISl3dpXPo0
+axmC2QZaWqhSYDdRwIY1Q+2m5ngOVFKMtFoiN+N+Bbyop4Jhblw2QYWxprs6SOXw
+1rC2xR3Z4jaRxQM6fshEGxrBWdUFAqS4pAD2ACnw1LdiM/loogqrpQzNABEBAAG0
+KnhwZi0xMjE0Mi10ZXN0IDx4cGYtMTIxNDJAZXhhbXBsZS5pbnZhbGlkPojOBBMB
+CgA4FiEEBd8aE1E5PYfbpgSYYNXKakgxYGoFAmrG+C8CGwMFCwkIBwIGFQoJCAsC
+BBYCAwECHgECF4AACgkQYNXKakgxYGoT0AP+LPOEyYfcpuPsIH4tbwOHSr0q58Ef
+quhamsXqmfj21i+8bDFLj+1AKd1UBwq5MzdhQYku+qJqvhjJjeeY5dCNfqlTdJtU
+4wbF8tDlzJLYFWV7d9yBQnyg+yXKIg5rGyNRSVKzQEIe9P4Th58DrcCck3BwYiPJ
+aJTIYCsebxNwqHM=
+=QeaD
 -----END PGP PUBLIC KEY BLOCK-----
 """
 
@@ -263,7 +271,7 @@ class PrecedenceTests(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="xpf-install9921-")
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         self.key = os.path.join(self.dir, "archive.asc")
-        Path(self.key).write_text(_FAKE_ARCHIVE_KEY)
+        Path(self.key).write_text(_TEST_ARCHIVE_KEY)
 
     def _stamped(self, apt_url, channel):
         out = os.path.join(self.dir, "install.baked.sh")
@@ -297,6 +305,7 @@ class PrecedenceTests(unittest.TestCase):
             }),
             "https://env.example.invalid/o|stable")
 
+    @unittest.skipUnless(shutil.which("gpg"), "gpg is required to parse the embedded key")
     def test_stamped_baked_url_validates(self):
         stamped = self._stamped("https://baked.example.invalid/apt", "edge")
         env = dict(os.environ)

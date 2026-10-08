@@ -68,6 +68,9 @@ INSTALL_OK=0
 PIN_WRITTEN=0
 PIN_BACKUP=''
 PIN_TEMP=''
+KEYRING_WRITTEN=0
+KEYRING_BACKUP=''
+KEYRING_TEMP=''
 # /usr/share/keyrings (NOT /etc/apt/keyrings): the xpf package ships the same
 # keyring here as a package-owned (non-conffile) file, so this bootstrap write
 # and the later `apt install` agree without a dpkg conffile prompt, and key
@@ -77,9 +80,9 @@ SRC=/etc/apt/sources.list.d/xpf.sources
 PIN=/etc/apt/preferences.d/xpf-channel.pref
 PIN_MARKER="# xpf appliance channel pin; Managed by install.sh (#11133)"
 
-# cleanup_on_fail removes files written by a failed install. A new channel pin
-# is rolled back to the previous marked file byte-for-byte (or removed if this
-# was the first install); an unmarked preference is never changed.
+# cleanup_on_fail removes the apt source written by this run and restores the
+# prior managed channel pin and archive keyring if installation does not finish.
+# An unmarked preference is never changed.
 cleanup_on_fail() {
     _rc=$?
     if [ "$INSTALL_OK" != "1" ] && [ "$DRY" != "1" ]; then
@@ -106,9 +109,30 @@ cleanup_on_fail() {
         elif [ -n "$PIN_BACKUP" ]; then
             rm -f "$PIN_BACKUP" || _rc=1
         fi
+        if [ -n "$KEYRING_TEMP" ]; then
+            rm -f "$KEYRING_TEMP" || _rc=1
+        fi
+        if [ "$KEYRING_WRITTEN" = "1" ]; then
+            if [ -n "$KEYRING_BACKUP" ]; then
+                info "install failed (rc=$_rc) — restoring previous $KEYRING"
+                if mv -f "$KEYRING_BACKUP" "$KEYRING"; then
+                    KEYRING_BACKUP=''
+                else
+                    echo "xpf-install ERROR: could not restore previous $KEYRING" >&2
+                    _rc=1
+                fi
+            else
+                info "install failed (rc=$_rc) — removing new $KEYRING"
+                rm -f "$KEYRING" || _rc=1
+            fi
+        elif [ -n "$KEYRING_BACKUP" ]; then
+            rm -f "$KEYRING_BACKUP" || _rc=1
+        fi
     else
         [ -z "$PIN_TEMP" ] || rm -f "$PIN_TEMP" || _rc=1
         [ -z "$PIN_BACKUP" ] || rm -f "$PIN_BACKUP" || _rc=1
+        [ -z "$KEYRING_TEMP" ] || rm -f "$KEYRING_TEMP" || _rc=1
+        [ -z "$KEYRING_BACKUP" ] || rm -f "$KEYRING_BACKUP" || _rc=1
     fi
     exit "$_rc"
 }
@@ -137,6 +161,25 @@ KEYEOF
 
 is_placeholder_key() {
     printf '%s' "$ARCHIVE_KEY" | grep -q "PLACEHOLDER-xpf-archive-keyring"
+}
+
+# Parse the embedded public key with an isolated GnuPG home. Never import it
+# into the operator's keyring; malformed-but-armored keys must fail preflight.
+validate_archive_key() {
+    command -v gpg >/dev/null 2>&1 \
+        || die "gpg is required to validate the embedded archive public key."
+    _key_home=$(mktemp -d "${TMPDIR:-/tmp}/xpf-archive-key-check.XXXXXX") \
+        || die "cannot create temporary home to validate archive key."
+    _key_info=$(printf '%s\n' "$ARCHIVE_KEY" |
+        GNUPGHOME="$_key_home" gpg --batch --quiet --with-colons --show-keys - 2>/dev/null) || {
+        rm -rf "$_key_home"
+        die "archive key is not a parseable OpenPGP public key."
+    }
+    if ! printf '%s\n' "$_key_info" | grep -q '^pub:'; then
+        rm -rf "$_key_home"
+        die "archive key contains no OpenPGP public key."
+    fi
+    rm -rf "$_key_home" || die "cannot clean temporary archive-key validation home."
 }
 
 # ── apt base URL validation (F-065 / #9921) ─────────────────────────────────
@@ -173,6 +216,7 @@ it is interpolated into a root-owned apt source; refusing (#9921)." ;;
     #    subtleties): shell metacharacters, quoting characters, and %/=+, plus
     #    space (a %% pair would also defeat the unsubstituted-marker guard).
     #    ?/#/@ dying here enforces no-query/no-fragment/no-userinfo.
+    # shellcheck disable=SC1003  # Single quote is a literal denied character.
     case "$_url" in
         *'$'*|*'"'*|*"'"*|*'\\'*|*'`'*|*';'*|*'&'*|*'|'*|*'<'*|*'>'*|*'('*|*')'*|*'*'*|*'?'*|*'!'*|*'#'*|*'@'*|*'%'*|*'='*|*'+'*|*','*|*' '*)
             die "XPF_APT_BASE_URL '$_safe_url' contains a forbidden character (shell \
@@ -277,19 +321,37 @@ real install would fail at apt update until the release key is issued (OQ-2)."
             die "archive key is the #1924 PLACEHOLDER — refusing to install a \
 keyring that cannot verify the repo. A release build substitutes the real key."
         fi
+    else
+        validate_archive_key
     fi
 }
 
 # ── 2. keyring ─────────────────────────────────────────────────────────────
 install_keyring() {
-    info "installing archive keyring -> $KEYRING"
-    run "install -d -m 0755 /usr/share/keyrings"
+    if [ "$DRY" != "1" ]; then
+        [ ! -L "$KEYRING" ] || die "refusing to replace symlink at $KEYRING"
+        if [ -e "$KEYRING" ]; then
+            [ -f "$KEYRING" ] \
+                || die "refusing to replace non-regular keyring path at $KEYRING"
+        fi
+    fi
+    _keyring_dir=$(dirname "$KEYRING")
+    run "install -d -m 0755 \"$_keyring_dir\""
     if [ "$DRY" = "1" ]; then
         echo "  (dry-run) write $KEYRING (mode 0644) from embedded key"
     else
         umask 022
-        printf '%s\n' "$ARCHIVE_KEY" > "$KEYRING"
-        chmod 0644 "$KEYRING"
+        KEYRING_TEMP=$(mktemp "$_keyring_dir/.xpf-archive-keyring.asc.tmp.XXXXXX")
+        printf '%s\n' "$ARCHIVE_KEY" > "$KEYRING_TEMP"
+        chmod 0644 "$KEYRING_TEMP"
+        if [ -e "$KEYRING" ]; then
+            KEYRING_BACKUP=$(mktemp "$_keyring_dir/.xpf-archive-keyring.asc.backup.XXXXXX")
+            cp -p "$KEYRING" "$KEYRING_BACKUP"
+        fi
+        # Arm rollback before the rename so an unsuccessful move is reversible.
+        KEYRING_WRITTEN=1
+        mv -f "$KEYRING_TEMP" "$KEYRING"
+        KEYRING_TEMP=''
     fi
 }
 
