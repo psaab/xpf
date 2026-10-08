@@ -351,7 +351,13 @@ func (c *CLI) testRouting(args []string) error {
 	var entries []routing.RouteEntry
 	var err error
 	if instance != "" {
-		entries, err = c.routing.GetVRFRoutes(instance)
+		var instances []*config.RoutingInstanceConfig
+		if c.store != nil {
+			if cfg := c.store.ActiveConfig(); cfg != nil {
+				instances = cfg.RoutingInstances
+			}
+		}
+		entries, err = c.routing.GetInstanceRoutes(instance, instances)
 	} else {
 		entries, err = c.routing.GetRoutes()
 	}

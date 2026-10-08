@@ -122,7 +122,11 @@ func (s *Server) showRouteTable(req *pb.ShowTextRequest, cfg *config.Config, buf
 	if s.routing == nil {
 		buf.WriteString("Routing manager not available\n")
 	} else {
-		entries, err := s.routing.GetTableRoutes(tableName)
+		var instances []*config.RoutingInstanceConfig
+		if cfg != nil {
+			instances = cfg.RoutingInstances
+		}
+		entries, err := s.routing.GetTableRoutes(tableName, instances)
 		if err != nil {
 			return nil, frrStatusErr("get table routes", err)
 		}
@@ -189,7 +193,7 @@ func (s *Server) showRoutePrefix(req *pb.ShowTextRequest, cfg *config.Config, bu
 	return &pb.ShowTextResponse{Output: buf.String()}, nil
 }
 
-func (s *Server) showTestRouting(req *pb.ShowTextRequest, buf *strings.Builder) (*pb.ShowTextResponse, error) {
+func (s *Server) showTestRouting(req *pb.ShowTextRequest, cfg *config.Config, buf *strings.Builder) (*pb.ShowTextResponse, error) {
 	params := strings.TrimPrefix(req.Topic, "test-routing:")
 	var dest, instance string
 	var parseErr error
@@ -257,7 +261,11 @@ func (s *Server) showTestRouting(req *pb.ShowTextRequest, buf *strings.Builder) 
 		var entries []routing.RouteEntry
 		var err error
 		if instance != "" {
-			entries, err = s.routing.GetVRFRoutes(instance)
+			var instances []*config.RoutingInstanceConfig
+			if cfg != nil {
+				instances = cfg.RoutingInstances
+			}
+			entries, err = s.routing.GetInstanceRoutes(instance, instances)
 		} else {
 			entries, err = s.routing.GetRoutes()
 		}

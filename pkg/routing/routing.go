@@ -193,9 +193,15 @@ func (m *Manager) GetVRFRoutes(vrfName string) ([]RouteEntry, error) {
 	return m.routes.GetVRFRoutes(vrfName)
 }
 
-// GetTableRoutes returns routes for a Junos-style table name.
-func (m *Manager) GetTableRoutes(tableName string) ([]RouteEntry, error) {
-	return m.routes.GetTableRoutes(tableName)
+// GetInstanceRoutes reads a configured routing-instance table by name.
+func (m *Manager) GetInstanceRoutes(instanceName string, instances []*config.RoutingInstanceConfig) ([]RouteEntry, error) {
+	return m.routes.GetInstanceRoutes(instanceName, instances)
+}
+
+// GetTableRoutes returns routes for a Junos-style table name, resolving
+// configured routing instances through their table IDs before VRF lookup.
+func (m *Manager) GetTableRoutes(tableName string, instances []*config.RoutingInstanceConfig) ([]RouteEntry, error) {
+	return m.routes.GetTableRoutes(tableName, instances)
 }
 
 // GetAllTableRoutes returns routes from the main table and all configured VRFs.
