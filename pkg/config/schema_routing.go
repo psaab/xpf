@@ -302,7 +302,8 @@ const (
 	// on the wire, so the maximum representable lifetime is 8191*8 = 65528s.
 	// A larger value makes ndp.PREF64.marshal return "scaled lifetime is too
 	// large" and aborts the whole RA (the #3895 blackhole).
-	raPREF64MaxLifetimeSeconds = 65528
+	// RAPREF64MaxLifetimeSeconds is shared by the strict gate and sender clamp.
+	RAPREF64MaxLifetimeSeconds = 65528
 	// RFC 4861 §4.2: the RA header Router Lifetime is a 16-bit seconds field.
 	// A larger value silently wraps in ndp's uint16(lifetime) (65536 -> 0 =
 	// "not a default router"), so hosts drop their default route.
@@ -750,7 +751,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 					// ndp.PREF64.marshal fail, aborting the entire RA.
 					"lifetime": {desc: "Lifetime", args: 1, placeholder: "<seconds>",
 						valueType: ValueInteger, valueDesc: "PREF64 lifetime in seconds (0 = router lifetime; RFC 8781 max 65528)",
-						valueExamples: []string{"0", "1800"}, validator: ValidateInteger(0, raPREF64MaxLifetimeSeconds), children: nil},
+						valueExamples: []string{"0", "1800"}, validator: ValidateInteger(0, RAPREF64MaxLifetimeSeconds), children: nil},
 				}},
 			"nat64prefix": {desc: "NAT64 prefix", args: 1, placeholder: "<prefix>",
 				keyValueType: ValueCIDR, keyValueDesc: "NAT64 prefix (RFC 8781 length /32 /40 /48 /56 /64 /96)",
@@ -761,7 +762,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 					// ndp.PREF64.marshal fail, aborting the entire RA.
 					"lifetime": {desc: "Lifetime", args: 1, placeholder: "<seconds>",
 						valueType: ValueInteger, valueDesc: "PREF64 lifetime in seconds (0 = router lifetime; RFC 8781 max 65528)",
-						valueExamples: []string{"0", "1800"}, validator: ValidateInteger(0, raPREF64MaxLifetimeSeconds), children: nil},
+						valueExamples: []string{"0", "1800"}, validator: ValidateInteger(0, RAPREF64MaxLifetimeSeconds), children: nil},
 				}},
 		}},
 	}},

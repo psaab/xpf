@@ -171,6 +171,9 @@ type sender struct {
 	// resurrected). This makes "exactly one goodbye per withdrawn interface" a
 	// post-mortem fact, not a timing gamble (#2033 MAJOR 2 / restart window).
 	goodbyeEmitted atomic.Bool
+	// pref64LifetimeWarned limits the fallback-lifetime saturation warning to
+	// one per sender.
+	pref64LifetimeWarned atomic.Bool
 
 	lastRAMu sync.Mutex
 	lastRA   time.Time // rate-limit RS responses; owner writes, Status reads
@@ -810,6 +813,10 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 	if s.cfg.DefaultLifetimeSet {
 		lifetime = s.cfg.DefaultLifetime
 	}
+	// Clamp once at the source: the Router Lifetime and dependent options that
+	// inherit it must derive from the same value, not independently narrow the
+	// original config value.
+	lifetime = clampRAHeaderSeconds(lifetime)
 
 	// Dependent options (RDNSS, PREF64) that inherit a lifetime default MUST
 	// NOT collapse to 0 just because the ROUTER lifetime is an explicit 0:
@@ -829,34 +836,10 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 		CurrentHopLimit:      64,
 		ManagedConfiguration: s.cfg.ManagedConfig,
 		OtherConfiguration:   s.cfg.OtherStateful,
-		// #8597 (muse-004 K72): bound the three RA header timers before they
-		// reach ndp's unsigned marshal. The typed-leaf schema bounds all three
-		// to [0, max] at strict commit, and that gate is STRICT-only: the
-		// tolerant Load / peer-sync ingress downgrades it to a warning, so a
-		// negative or oversized value reaches here intact.
-		//
-		// Measured on the wire before the fix (ndp.MarshalMessage of buildRA):
-		//
-		//	DefaultLifetime = -1  ->  Router Lifetime 65535  (~18 hours)
-		//	ReachableTime   = -1  ->  4294967295 ms          (~49 days)
-		//	RetransTimer    = -1  ->  4294967295 ms
-		//
-		// A NEGATIVE router lifetime therefore advertises this box as a default
-		// router for the MAXIMUM the field can express — the opposite of what a
-		// nonsensical value should mean, and the field's own neutral (0 = "not
-		// a default router") was one clamp away.
-		//
-		// pruneUnmarshalableOptions probes only the OPTIONS for a marshal
-		// abort; the header fields marshal without complaint precisely because
-		// they wrap silently.
-		//
-		// Flooring at 0 does not invent an intent: 0 is the documented neutral
-		// for all three fields — "not a default router" for the lifetime,
-		// "unspecified, use your own defaults" for the other two — and is what
-		// the RA already carried before these leaves existed. Saturating at the
-		// top is the honest encoding of "as long as the field allows" and is
-		// monotone, where wrapping is not.
-		RouterLifetime: time.Duration(clampRAHeaderSeconds(lifetime)) * time.Second,
+		// Router Lifetime and inherited option lifetimes share the bounded
+		// source resolved above. The other header timers use their own RFC
+		// fields and are clamped independently.
+		RouterLifetime: time.Duration(lifetime) * time.Second,
 		// RFC 4861 §4.2 Reachable Time / Retrans Timer (#4307). ndp
 		// marshals these as ms (Duration/time.Millisecond -> uint32); a
 		// configured 0 keeps the "unspecified" default the RA carried
@@ -980,6 +963,15 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 			pref64Life := s.cfg.NAT64PrefixLife
 			if pref64Life <= 0 {
 				pref64Life = optLifetime
+				if pref64Life > config.RAPREF64MaxLifetimeSeconds {
+					pref64Life = config.RAPREF64MaxLifetimeSeconds
+					if s.pref64LifetimeWarned.CompareAndSwap(false, true) {
+						slog.Warn("ra: clamped inherited PREF64 lifetime",
+							"interface", s.cfg.Interface,
+							"lifetime", optLifetime,
+							"max", config.RAPREF64MaxLifetimeSeconds)
+					}
+				}
 			}
 			ra.Options = append(ra.Options, &ndp.PREF64{
 				Lifetime: time.Duration(pref64Life) * time.Second,
