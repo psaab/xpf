@@ -71,6 +71,63 @@ class SignError(Exception):
 
 
 
+ARCHIVE_KEYRING_GUEST_PATH = "/usr/share/keyrings/xpf-archive-keyring.asc"
+PLACEHOLDER_ARCHIVE_KEY_MARKER = "PLACEHOLDER-xpf-archive-keyring"
+
+
+def openpgp_fingerprints(key_data, source):
+    """Return primary OpenPGP fingerprints from armored key bytes.
+
+    Import into a private temporary keyring so key inspection never trusts or
+    mutates the publisher's global GnuPG home. Invalid, empty, or unparseable
+    key data fails closed with a useful source label.
+    """
+    if isinstance(key_data, str):
+        key_data = key_data.encode("utf-8")
+    with tempfile.TemporaryDirectory(prefix="xpf-keyring-") as gnupghome:
+        os.chmod(gnupghome, 0o700)
+        env = dict(os.environ, GNUPGHOME=gnupghome)
+        try:
+            r = subprocess.run(["gpg", "--batch", "--import"],
+                               input=key_data, env=env, capture_output=True)
+        except OSError as e:
+            raise SignError(
+                f"cannot inspect OpenPGP keyring {source}: {e} "
+                "(install gnupg to verify image keyrings)") from e
+        if r.returncode != 0:
+            stderr = r.stderr.decode("utf-8", "replace").strip()
+            raise SignError(
+                f"cannot import OpenPGP keyring {source}: "
+                f"{stderr or f'gpg rc={r.returncode}'}")
+        try:
+            r = subprocess.run(
+                ["gpg", "--batch", "--with-colons", "--fingerprint",
+                 "--list-keys"], env=env, capture_output=True, text=True)
+        except OSError as e:
+            raise SignError(
+                f"cannot list OpenPGP fingerprints for {source}: {e} "
+                "(install gnupg to verify image keyrings)") from e
+        if r.returncode != 0:
+            raise SignError(
+                f"cannot list OpenPGP fingerprints for {source}: "
+                f"{r.stderr.strip() or f'gpg rc={r.returncode}'}")
+    fingerprints = set()
+    want_primary = False
+    for line in r.stdout.splitlines():
+        fields = line.split(":")
+        if fields[0] == "pub":
+            want_primary = True
+        elif fields[0] == "sub":
+            want_primary = False
+        elif fields[0] == "fpr" and want_primary:
+            if len(fields) > 9 and fields[9]:
+                fingerprints.add(fields[9])
+            want_primary = False
+    if not fingerprints:
+        raise SignError(f"OpenPGP keyring {source} contains no importable public keys")
+    return fingerprints
+
+
 # ── Bounded remote fetch (#10853) ─────────────────────────────────────
 #
 # Every image fetch was an unbounded `curl -fsSL`: no scheme restriction, no

@@ -266,6 +266,18 @@ format lives in `scripts/dist/image_inventory.py`, single-sourced because
 bake.py writes it and publish.py reads it and a divergence between those
 is always a bug.
 
+The archive keyring is part of the image's trust state too. `debian/rules`
+refuses to build the package with the `.placeholder` key unless
+`XPF_ALLOW_PLACEHOLDER_KEYRING=1` is explicitly set for a dev-only package
+build; `bake.py` reads the installed `/usr/share/keyrings/xpf-archive-keyring.asc`
+back out with `virt-cat` and refuses a missing, non-armored, or placeholder
+keyring before sealing/signing. `publish.py` independently opens every qcow
+with `virt-filesystems`/`virt-cat`, parses the installed OpenPGP key in a
+temporary GnuPG home, and rejects missing, unparseable, or placeholder keys.
+When `install.sh` is present, its signed embedded key must be covered by the
+image keyring. This closes the image-only publish path as well as protecting
+new bakes; a dev package built with the override is not publishable.
+
 Full first-boot matrix (run after a bake, or standalone):
 
 ```bash

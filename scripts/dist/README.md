@@ -15,6 +15,12 @@ Mechanism for a signed, hosted appliance distribution. Spec:
 | `xpf-image.pub.placeholder` | PLACEHOLDER minisign public key (see below) |
 | `xpf-archive-keyring.asc.placeholder` | PLACEHOLDER OpenPGP apt archive key (see below) |
 
+Image publication reads `/usr/share/keyrings/xpf-archive-keyring.asc` from
+each qcow offline and rejects missing, placeholder, or unparseable guest keys
+(#12188). `debian/rules` also refuses a placeholder by default; the explicit
+`XPF_ALLOW_PLACEHOLDER_KEYRING=1` override is for dev-only package builds, and
+such images remain unpublishable.
+
 ## The two operator inputs (OPEN QUESTIONS — not wired to real values here)
 
 This tooling is complete as a MECHANISM. Going live needs two operator

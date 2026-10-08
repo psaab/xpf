@@ -3,12 +3,14 @@
 #
 # Proves, end to end, with a THROWAWAY keypair (generated in a temp dir,
 # never committed) and NO hosting:
-#   1. sign a per-version manifest over fake qcow2 + metadata;
+#   1. sign a per-version manifest over a synthetic qcow2 + metadata;
 #   2. verify each artifact against the signed manifest (PASS);
 #   3. tamper-detection: a modified artifact, a tampered manifest, a
 #      tampered signature, and a wrong pubkey each MUST FAIL verify;
 #   4. build a flat signed apt repo over a fake .deb and verify InRelease;
 #   5. install.sh --dry-run preflight/source rendering.
+#   6. image-only publish refuses a signed qcow with a placeholder
+#      keyring (#12188).
 #
 # Exit 0 only if every positive check passes AND every tamper check fails.
 set -eu
@@ -27,6 +29,9 @@ info() { echo "==> $*"; }
 command -v minisign >/dev/null 2>&1 || { echo "SKIP: minisign not installed (apt-get install minisign)"; exit 77; }
 command -v gpg >/dev/null 2>&1 || { echo "SKIP: gpg not installed"; exit 77; }
 command -v apt-ftparchive >/dev/null 2>&1 || { echo "SKIP: apt-ftparchive not installed (apt-utils)"; exit 77; }
+command -v virt-make-fs >/dev/null 2>&1 || { echo "SKIP: virt-make-fs not installed (libguestfs-tools)"; exit 77; }
+command -v virt-filesystems >/dev/null 2>&1 || { echo "SKIP: virt-filesystems not installed (libguestfs-tools)"; exit 77; }
+command -v virt-cat >/dev/null 2>&1 || { echo "SKIP: virt-cat not installed (libguestfs-tools)"; exit 77; }
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/xpf-dist-selftest.XXXXXX")
 GNUPGHOME="$WORK/gnupg"; export GNUPGHOME
@@ -44,11 +49,34 @@ minisign -G -W -p "$WORK/img.pub" -s "$WORK/img.sec" >/dev/null 2>&1
 WRONGPUB="$WORK/wrong.pub"
 minisign -G -W -p "$WRONGPUB" -s "$WORK/wrong.sec" >/dev/null 2>&1
 
-# ── fake artifacts + signed manifest ──────────────────────────────────────
-info "2. create fake artifacts + signed per-version manifest"
+# The same throwaway archive key is embedded in the synthetic guest image and
+# signs the apt repo below, so publish can verify the in-image keyring.
+cat > "$WORK/gpg-batch" <<EOF
+%no-protection
+Key-Type: eddsa
+Key-Curve: ed25519
+Key-Usage: sign
+Name-Real: xpf selftest archive
+Name-Email: selftest@xpf.invalid
+Expire-Date: 0
+%commit
+EOF
+gpg --batch --gen-key "$WORK/gpg-batch" >/dev/null 2>&1
+GPGKEY=$(gpg --batch --list-keys --with-colons selftest@xpf.invalid | awk -F: '/^fpr:/{print $10; exit}')
+[ -n "$GPGKEY" ] && ok "archive key generated ($GPGKEY)" || { bad "archive key gen failed"; }
+ARCHASC="$WORK/archive.asc"
+gpg --batch --armor --export selftest@xpf.invalid > "$ARCHASC"
+
+# ── image fixture + signed manifest ──────────────────────────────────────
+info "2. create a guest image with an installed archive keyring"
 QCOW="$OUT/xpf-$VER.qcow2"
 META="$OUT/xpf-$VER.incus-metadata.tar.gz"
-head -c 4096 /dev/urandom > "$QCOW"
+GUEST="$WORK/guest"
+mkdir -p "$GUEST/usr/share/keyrings"
+cp "$ARCHASC" "$GUEST/usr/share/keyrings/xpf-archive-keyring.asc"
+virt-make-fs --format=qcow2 --type=ext4 --partition=mbr \
+    "$GUEST" "$QCOW" >/dev/null 2>&1
+ok "guest qcow2 carries the real archive keyring for virt-cat inspection"
 head -c 1024 /dev/urandom > "$META"
 MANIFEST="$OUT/xpf-$VER.SHA256SUMS"
 # #4904 A: the signed provenance sidecar (xpf-<ver>.manifest). Real bakes bind
@@ -164,22 +192,6 @@ fi
 
 # ── 5. flat signed apt repo + InRelease verify ─────────────────────────────
 info "5. flat signed apt repo build + InRelease verify"
-# Throwaway gpg archive key (unattended, no passphrase).
-cat > "$WORK/gpg-batch" <<EOF
-%no-protection
-Key-Type: eddsa
-Key-Curve: ed25519
-Key-Usage: sign
-Name-Real: xpf selftest archive
-Name-Email: selftest@xpf.invalid
-Expire-Date: 0
-%commit
-EOF
-gpg --batch --gen-key "$WORK/gpg-batch" >/dev/null 2>&1
-GPGKEY=$(gpg --batch --list-keys --with-colons selftest@xpf.invalid | awk -F: '/^fpr:/{print $10; exit}')
-[ -n "$GPGKEY" ] && ok "archive key generated ($GPGKEY)" || { bad "archive key gen failed"; }
-ARCHASC="$WORK/archive.asc"
-gpg --batch --armor --export selftest@xpf.invalid > "$ARCHASC"
 
 # Fake .deb carries the keyring payload checked by publish.py; apt-ftparchive
 # only needs control metadata.
@@ -403,17 +415,9 @@ fi
 
 # ── 7. install.sh publish-time bake (H-2 / H-14) ───────────────────────────
 info "7. install.sh stamp (bake key + apt URL) + baked-default render"
-# A fabricated non-placeholder armored block is enough: stamp checks BEGIN/END
-# + not-placeholder, and gate_images verifies install.sh's MINISIGN signature
-# (independent of the OpenPGP archive key baked here).
-AKEY="$WORK/archive.asc"
-cat > "$AKEY" <<'EOF'
------BEGIN PGP PUBLIC KEY BLOCK-----
-
-mDMEZmFakeArchiveKeyForSelftestOnlyNotARealKeyAAAAAAAAAAAAAAAAAAAA
-=SelF
------END PGP PUBLIC KEY BLOCK-----
-EOF
+# Use the real throwaway archive key embedded in the guest qcow, so the
+# publish keyring gate can verify the image-only installer/key agreement.
+AKEY="$ARCHASC"
 BAKED="$WORK/install.baked.sh"
 if $PY "$DIST/publish.py" stamp-installer --out "$BAKED" \
      --archive-key "$AKEY" --apt-base-url "https://dl.selftest.invalid/apt" \
@@ -754,6 +758,28 @@ if inv_publish; then
     ok "publish passes a complete inventory set (#6500 control)"
 else
     bad "publish MUST pass a complete inventory set but FAILED (#6500 control)"
+fi
+
+# 8j-6: #12188 — a signed, validated image with a placeholder installed
+# keyring must fail image-only publish when the gate opens the qcow payload.
+inv_reset
+GUEST_BAD="$WORK/guest-placeholder"
+mkdir -p "$GUEST_BAD/usr/share/keyrings"
+cp "$DIST/xpf-archive-keyring.asc.placeholder" \
+   "$GUEST_BAD/usr/share/keyrings/xpf-archive-keyring.asc"
+virt-make-fs --format=qcow2 --type=ext4 --partition=mbr \
+    "$GUEST_BAD" "$INV/xpf-$VER.qcow2" >/dev/null 2>&1
+direct_sign "$INV" "$VER" "$INV/xpf-$VER.qcow2" \
+    "$INV/xpf-$VER.incus-metadata.tar.gz" "$INV/xpf-$VER.manifest" \
+    "$INV/xpf-$VER.pkgs"
+if XPF_IMAGE_PUBKEY="$WORK/img.pub" $PY "$DIST/publish.py" \
+     --dist "$INV" --channel stable --no-apt >"$WORK/keyring-placeholder.out" 2>&1; then
+    bad "publish MUST refuse a placeholder image keyring but PASSED (#12188)"
+elif grep -q "PLACEHOLDER archive keyring" "$WORK/keyring-placeholder.out"; then
+    ok "image-only publish opens the qcow and refuses its placeholder keyring (#12188)"
+else
+    bad "publish refused placeholder image for the wrong reason (#12188)"
+    cat "$WORK/keyring-placeholder.out" >&2
 fi
 
 # ── 8k. #6504: the signed channel pointer has a CONSUMER ───────────────────

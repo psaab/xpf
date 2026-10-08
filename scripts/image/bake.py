@@ -183,6 +183,18 @@ def validate_version(value, field):
     return value
 
 
+def validate_image_keyring_text(keyring, source):
+    """Refuse an absent, placeholder, or non-armored in-image archive key."""
+    if sign.PLACEHOLDER_ARCHIVE_KEY_MARKER in keyring:
+        die(f"{source} carries the PLACEHOLDER archive keyring (#12188); "
+            "refusing to produce a signed image. Drop in the real "
+            "scripts/dist/xpf-archive-keyring.asc and rebuild.")
+    if ("-----BEGIN PGP PUBLIC KEY BLOCK-----" not in keyring
+            or "-----END PGP PUBLIC KEY BLOCK-----" not in keyring):
+        die(f"{source} has no ASCII-armored archive keyring (#12188); "
+            "refusing to produce a signed image.")
+
+
 def require(tool, hint):
     if not shutil.which(tool):
         die(f"{tool} not found — {hint}")
@@ -1319,6 +1331,19 @@ def main():
             die(f"the baked image carries no usable inventory at "
                 f"{image_inventory.INVENTORY_GUEST_PATH}: {e}")
         info(f"guest kernel {guest_kernel}, {len(inventory_pkgs)} packages recorded")
+        info("reading the archive keyring from the image with virt-cat...")
+        try:
+            image_keyring = out_text([
+                "virt-cat", "-a", work_qcow,
+                sign.ARCHIVE_KEYRING_GUEST_PATH])
+        except (OSError, subprocess.CalledProcessError) as e:
+            detail = getattr(e, "stderr", None)
+            die(f"cannot read the baked image archive keyring at "
+                f"{sign.ARCHIVE_KEYRING_GUEST_PATH}: "
+                f"{detail.strip() if detail else e} (#12188)")
+        validate_image_keyring_text(
+            image_keyring, f"baked image at {sign.ARCHIVE_KEYRING_GUEST_PATH}")
+        info("image archive keyring is present and not a placeholder (#12188)")
 
         # 5. seal
         info("sealing image (virt-sysprep)...")

@@ -35,12 +35,64 @@ import image_inventory  # noqa: E402  (#6500 sidecar name)
 import sign  # noqa: E402
 
 _HAVE_MINISIGN = shutil.which("minisign") is not None
+_HAVE_GPG = shutil.which("gpg") is not None
+_IMAGE_TOOLS = ("virt-make-fs", "virt-filesystems", "virt-cat")
+_HAVE_IMAGE_TOOLS = all(shutil.which(tool) for tool in _IMAGE_TOOLS)
 VER = "0.0.0-provtest"
 KVER = "7.0.0-15-generic"
 
 
-@unittest.skipUnless(_HAVE_MINISIGN, "minisign not installed")
+@unittest.skipUnless(_HAVE_MINISIGN and _HAVE_GPG and _HAVE_IMAGE_TOOLS,
+                     "minisign, gpg, and libguestfs image tools required")
 class GateProvenanceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._fixture = tempfile.TemporaryDirectory(prefix="xpf-provtest-image-")
+        cls.addClassCleanup(cls._fixture.cleanup)
+        home = Path(cls._fixture.name) / "gnupg"
+        home.mkdir(mode=0o700)
+        env = dict(os.environ, GNUPGHOME=str(home))
+        batch = Path(cls._fixture.name) / "key.batch"
+        batch.write_text(
+            "%no-protection\nKey-Type: eddsa\nKey-Curve: ed25519\n"
+            "Key-Usage: sign\nName-Real: provenance test archive\n"
+            "Name-Email: provtest@xpf.invalid\nExpire-Date: 0\n%commit\n")
+        subprocess.run(["gpg", "--batch", "--gen-key", str(batch)],
+                       env=env, check=True, capture_output=True)
+        cls._archive_key = Path(cls._fixture.name) / "archive.asc"
+        with cls._archive_key.open("wb") as out:
+            subprocess.run(
+                ["gpg", "--batch", "--armor", "--export",
+                 "provtest@xpf.invalid"], env=env, check=True, stdout=out)
+        stale_batch = Path(cls._fixture.name) / "stale-key.batch"
+        stale_batch.write_text(
+            "%no-protection\nKey-Type: eddsa\nKey-Curve: ed25519\n"
+            "Key-Usage: sign\nName-Real: stale provenance test archive\n"
+            "Name-Email: stale-provtest@xpf.invalid\n"
+            "Expire-Date: 0\n%commit\n")
+        subprocess.run(["gpg", "--batch", "--gen-key", str(stale_batch)],
+                       env=env, check=True, capture_output=True)
+        cls._stale_archive_key = Path(cls._fixture.name) / "stale-archive.asc"
+        with cls._stale_archive_key.open("wb") as out:
+            subprocess.run(
+                ["gpg", "--batch", "--armor", "--export",
+                 "stale-provtest@xpf.invalid"], env=env, check=True,
+                stdout=out)
+        cls._qcow_template = Path(cls._fixture.name) / "keyring.qcow2"
+        cls._make_keyring_image(cls._archive_key.read_bytes(),
+                                cls._qcow_template)
+
+    @classmethod
+    def _make_keyring_image(cls, key_data, output):
+        root = Path(cls._fixture.name) / f"guest-{output.stem}"
+        key = root / sign.ARCHIVE_KEYRING_GUEST_PATH.lstrip("/")
+        key.parent.mkdir(parents=True, exist_ok=True)
+        key.write_bytes(key_data)
+        subprocess.run(
+            ["virt-make-fs", "--format=qcow2", "--type=ext4",
+             "--partition=mbr", str(root), str(output)],
+            check=True, capture_output=True, timeout=60)
+
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="xpf-provtest-")
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
@@ -48,10 +100,9 @@ class GateProvenanceTests(unittest.TestCase):
         self.sec = os.path.join(self.dir, "img.sec")
         subprocess.run(["minisign", "-G", "-W", "-p", self.pub, "-s", self.sec],
                        check=True, capture_output=True)
-        # Fake image artifacts.
         self.qcow = os.path.join(self.dir, f"xpf-{VER}.qcow2")
         self.meta = os.path.join(self.dir, f"xpf-{VER}.incus-metadata.tar.gz")
-        Path(self.qcow).write_bytes(b"\x00fake-qcow2\x00")
+        shutil.copyfile(self._qcow_template, self.qcow)
         Path(self.meta).write_bytes(b"\x00fake-meta\x00")
         self.sidecar = os.path.join(self.dir, f"xpf-{VER}.manifest")
         self.sums = os.path.join(self.dir, f"xpf-{VER}.SHA256SUMS")
@@ -207,6 +258,34 @@ class GateProvenanceTests(unittest.TestCase):
         # good bake.
         self._sign_set(validated=True)
         publish.gate_provenance(self.dir, {VER: self.sums}, self.pub)
+
+    def test_placeholder_keyring_inside_signed_image_is_refused(self):
+        placeholder = (
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\n"
+            "PLACEHOLDER-xpf-archive-keyring-not-yet-issued\n"
+            "-----END PGP PUBLIC KEY BLOCK-----\n").encode()
+        bad_image = Path(self.dir) / "placeholder.qcow2"
+        self._make_keyring_image(placeholder, bad_image)
+        shutil.copyfile(bad_image, self.qcow)
+        self._sign_set(validated=True)
+        self._refused("PLACEHOLDER archive keyring")
+
+    def test_unparseable_keyring_inside_signed_image_is_refused(self):
+        bad_image = Path(self.dir) / "unparseable.qcow2"
+        self._make_keyring_image(b"not an OpenPGP public key\n", bad_image)
+        shutil.copyfile(bad_image, self.qcow)
+        self._sign_set(validated=True)
+        self._refused("no valid installed archive keyring")
+
+    def test_image_keyring_must_cover_installer_key(self):
+        self._sign_set(validated=True)
+        installer = Path(self.dir) / "install.sh"
+        installer.write_text(
+            "#!/bin/sh\ncat <<'KEY'\n"
+            + self._stale_archive_key.read_text()
+            + "KEY\n")
+        self._refused("does not cover install.sh key")
+
 
 
 class ParseManifestFieldsTests(unittest.TestCase):
