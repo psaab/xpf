@@ -99,8 +99,8 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 
 // PolicyContentRejectionReasons is the config-level SSOT for whether a built
 // userspace policy snapshot may be published. It mirrors the runtime
-// fail-closed policy-content set and applies the canonical CIDR-mask spelling
-// guard, shared with the `request security match-policies` simulator
+// fail-closed policy-content set and applies the helper-compatible CIDR-mask
+// spelling guard, shared with the `request security match-policies` simulator
 // (pkg/policymatch) so it reports snapshot retention instead of a fabricated
 // permit/deny/default verdict (#4394) — the same SSOT-reuse pattern as
 // RuntimePolicyIDs and ClassifyHostInbound (#4352).
@@ -141,9 +141,9 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 //     address-book row's prefixes_v4 / prefixes_v6 array agrees with Rust's
 //     literal-family parser. Go's To4 folding can file an IPv4-mapped IPv6
 //     prefix into prefixes_v4; the helper rejects the whole snapshot.
-//   - REDUNDANT LEADING-ZERO CIDR MASKS (#12047): strict commit rejects these
-//     spellings, and the mirror prevents a tolerant load from publishing the
-//     raw tokens retained by the address-book and policy builders.
+//   - HELPER-REFUSED PADDED CIDR MASKS (#12047/#12178): strict commit rejects
+//     only leading-zero spellings the pinned parser cannot accept; the mirror
+//     prevents a tolerant load from publishing those raw tokens.
 
 // A non-empty result means publication is refused before the helper receives
 // this snapshot; helper-rejection arms mirror its fail-closed checks. An empty
@@ -192,10 +192,10 @@ func PolicyContentRejectionReasons(cfg *config.Config, feedOverlay map[string][]
 	// rejects the entire snapshot. Inspect the built rows so this arm follows
 	// the same feed-aware expansion and family split as publication.
 	reasons = append(reasons, collectAddressBookFamilyRejections(books)...)
-	// #12047: refuse publication if a built policy literal or address-book row
-	// retains a redundant leading-zero CIDR mask. The Go builders preserve that
-	// spelling on the wire; strict commits reject it, and this arm keeps tolerant
-	// loads from handing it to the helper.
+	// #12047/#12178: refuse publication if a built policy literal or address-book
+	// row retains a leading-zero mask spelling the helper cannot parse. The Go
+	// builders preserve that spelling on the wire; strict commits reject it and
+	// this arm keeps tolerant loads from handing it to the helper.
 	reasons = append(reasons, collectAddressBookCIDRMaskRejections(books)...)
 	reasons = append(reasons, collectPolicyCIDRMaskRejections(policies)...)
 	if len(reasons) == 0 {
