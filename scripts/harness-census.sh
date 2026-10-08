@@ -147,6 +147,7 @@ test/incus/wire-gate-lib.sh
 test/incus/wire-config-snapshot-lib.sh
 test/incus/target-services.sh
 test/incus/ha-assurance-lib.sh
+test/incus/stress-failover-lib.sh
 "
 fi
 

@@ -69,35 +69,17 @@ fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
 
 die() { echo "FATAL: $*" >&2; exit 2; }
 
+# #12199: the lib carries fail-closed stream reads and bounded RG1 ownership
+# polling; functions call the gate's PASS/FAIL/info recorders at runtime.
+# shellcheck source=test/incus/stress-failover-lib.sh
+source "${SCRIPT_DIR}/stress-failover-lib.sh"
+
 instance_running() {
 	local status
 	status=$(incus info "$1" 2>/dev/null | grep -o "RUNNING" || true)
 	[[ "$status" == "RUNNING" ]]
 }
 
-check_streams() {
-	local label="$1"
-	local tail_lines=$(( IPERF_STREAMS * 2 + 5 ))
-	local per_stream
-	per_stream=$(incus exec "$CLUSTER_LAN_HOST" -- \
-		tail -${tail_lines} "$LOG" 2>/dev/null \
-		| grep -E '^\[  [0-9]|^\[ [0-9][0-9]' | tail -"$IPERF_STREAMS")
-	local dead
-	dead=$(echo "$per_stream" | grep -c "0.00 bits/sec" || true)
-	local sum
-	sum=$(incus exec "$CLUSTER_LAN_HOST" -- \
-		tail -${tail_lines} "$LOG" 2>/dev/null \
-		| grep 'SUM' | tail -1 || true)
-	local bps
-	bps=$(echo "$sum" | grep -oiE "[0-9.]+ [MG]bits/sec" | head -1)
-	if [[ "$dead" -gt 0 ]]; then
-		fail "$label: $dead/$IPERF_STREAMS streams dead ($bps)"
-		return 1
-	else
-		pass "$label: all streams alive ($bps)"
-		return 0
-	fi
-}
 
 cleanup() {
 	info "Cleanup: killing iperf3, resetting failover flags"
@@ -216,10 +198,13 @@ cycle_failed=false
 for cycle in $(seq 1 "$TOTAL_CYCLES"); do
 	info "Cycle ${cycle}/${TOTAL_CYCLES}: failover RG1 fw0→fw1"
 
-	# Failover RG1 to fw1
-	incus exec "$FW0" -- cli -c 'request chassis cluster failover redundancy-group 1' 2>/dev/null || true
-
+	# The request channel is diagnostic only; both node status queries are the
+	# ownership oracle. Keep the existing half-cycle interval before polling.
+	stress_request "$FW0" 'request chassis cluster failover redundancy-group 1'
 	sleep "$half_interval"
+	if ! wait_rg1_owner node1 "cycle ${cycle} failover"; then
+		cycle_failed=true
+	fi
 
 	# Check streams after failover
 	if ! check_streams "cycle ${cycle} failover"; then
@@ -235,12 +220,13 @@ for cycle in $(seq 1 "$TOTAL_CYCLES"); do
 
 	info "Cycle ${cycle}/${TOTAL_CYCLES}: failback RG1 fw1→fw0"
 
-	# Failback RG1 to fw0
-	incus exec "$FW0" -- cli -c 'request chassis cluster failover reset redundancy-group 1' 2>/dev/null || true
-	incus exec "$FW1" -- cli -c 'request chassis cluster failover reset redundancy-group 1' 2>/dev/null || true
-	incus exec "$FW0" -- cli -c 'request chassis cluster failover redundancy-group 1 node 0' 2>/dev/null || true
-
+	stress_request "$FW0" 'request chassis cluster failover reset redundancy-group 1'
+	stress_request "$FW1" 'request chassis cluster failover reset redundancy-group 1'
+	stress_request "$FW0" 'request chassis cluster failover redundancy-group 1 node 0'
 	sleep "$half_interval"
+	if ! wait_rg1_owner node0 "cycle ${cycle} failback"; then
+		cycle_failed=true
+	fi
 
 	# Check streams after failback
 	if ! check_streams "cycle ${cycle} failback"; then
@@ -254,6 +240,19 @@ for cycle in $(seq 1 "$TOTAL_CYCLES"); do
 		break
 	fi
 done
+
+# The last per-cycle observation is not a substitute for checking the final
+# state: even an early break or a failed last failback must not report clean
+# completion while RG1 remains on fw1.
+final_fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+final_fw1_status=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+if final_owner_reason=$(stress_rg1_owner_verdict node0 "$final_fw0_status" "$final_fw1_status"); then
+	pass "final RG1 owner is fw0 (both node queries)"
+else
+	fail "final RG1 owner is not proven on fw0 (both node queries): $final_owner_reason"
+	cycle_failed=true
+fi
+
 
 if ! $cycle_failed; then
 	pass "all ${TOTAL_CYCLES} failover cycles completed with 0 dead streams"
