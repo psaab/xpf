@@ -418,6 +418,9 @@ run_bash test/incus/target-services-selftest.sh
 run_bash test/incus/with-cluster-selftest.sh
 # #11873: keep failover failure-journal evidence inside the test window.
 run_bash test/incus/failover-journal-selftest.sh
+# #12211: invocation-scoped VRRP journal cells, conf restoration, and RETH
+# capture-member selection; fake Incus only, no cluster or network.
+run_bash test/incus/private-rg-selftest.sh
 # #9531: the wire deny-gate verdict matrices. Hermetic — each --selftest
 # drives its script's shared verdict core (counts in, WIRE_GATE line out)
 # with no cluster, no lock; the live probe→capture→verdict path is proven
