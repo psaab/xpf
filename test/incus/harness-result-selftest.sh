@@ -1461,7 +1461,7 @@ fi
 # #11343. The child selects a hermetic fixture despite a cluster wrapper:
 # this verdict must not claim that either cluster node produced it.
 wire_fixture="$WORK/wire-routing-fixture.tsv"
-printf 'probe_offered=1000 probe_leaked=0 control_offered=1500 control_observed=1500 cksum_bad=0\n' >"$wire_fixture"
+printf 'probe_offered=1000 probe_leaked=0 precommit_control_offered=1500 precommit_control_observed=1500 near_miss_offered=1500 near_miss_observed=1500 cksum_bad=0\n' >"$wire_fixture"
 incus() { echo "$fake_sha  /proc/1234/exe"; }
 (harness_result_run --ledger "$LEDGER" --cluster --env testenv --gate wire_routing_separation \
 	--adapter wire-gate --node fake:fw0 --node-peer fake:fw1 --build-exe "$WORK/xpfd" \
@@ -1634,10 +1634,11 @@ wire_log 'WIRE_GATE wire_conntrack_lifecycle VOID reason=under-sampled created=1
 wire_field_is "conntrack under-sample VOID transcribes" 0 1 "VOID"
 wire_field_is "conntrack VOID keeps under-sampled" 0 2 "under-sampled"
 wire_field_has "conntrack keeps lifecycle metric" 0 5 "lifecycle_bad=0"
-wire_log 'WIRE_GATE wire_routing_separation PASS reason=-- probe_offered=1000 probe_leaked=0 control_offered=1500 control_observed=1500 cksum_bad=0\n'
+wire_log 'WIRE_GATE wire_routing_separation PASS reason=-- probe_offered=1000 probe_leaked=0 control_offered=1500 control_observed=1500 cksum_bad=0 precommit_control_offered=1500 precommit_control_observed=1500\n'
 wire_field_is "routing separation PASS transcribes" 0 1 "PASS"
 wire_field_is "routing separation headline is probe_leaked" 0 3 "probe_leaked"
-wire_field_has "routing separation keeps control offered" 0 5 "control_offered=1500"
+wire_field_has "routing separation near-miss control is the scored control" 0 5 "control_offered=1500"
+wire_field_has "routing separation retains precommit control as diagnostic" 0 5 "precommit_control_observed=1500"
 wire_log 'WIRE_GATE wire_routing_separation VOID reason=env-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0\n'
 wire_field_is "routing separation early VOID transcribes" 0 1 "VOID"
 wire_field_is "routing separation early VOID keeps env-void" 0 2 "env-void"

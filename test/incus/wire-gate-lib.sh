@@ -98,16 +98,21 @@ wire_deny_verdict() {
 	return 0
 }
 # wire_routing_separation_verdict <probe_offered> <probe_leaked>
-#   <control_offered> <control_observed> <cksum_bad>
+#   <precommit_control_offered> <precommit_control_observed> <cksum_bad>
+#   <near_miss_offered> <near_miss_observed>
 #
-# #10136 uses the same deny oracle and floors as wire_policy_deny, but the
-# adapter/ledger identity is a distinct §3 row. Keep the policy core as the
-# single source of scoring truth and rewrite only its gate token.
+# #10136 uses the same deny oracle and floors as wire_policy_deny, but only
+# the near-miss control offered after the FBF commit may establish capture
+# liveness. Keep the precommit burst diagnostic; never score it as control
+# evidence. The adapter/ledger identity remains a distinct §3 row.
 wire_routing_separation_verdict() {
-	local out rc
-	out="$(wire_deny_verdict "$@")"
+	local po="${1:-}" pl="${2:-}" pco="${3:-}" pcb="${4:-}" ck="${5:-}"
+	local nmo="${6:-}" nmb="${7:-}" out rc
+	out="$(wire_deny_verdict "$po" "$pl" "$nmo" "$nmb" "$ck")"
 	rc=$?
-	printf '%s\n' "${out/wire_policy_deny/wire_routing_separation}"
+	out="${out/wire_policy_deny/wire_routing_separation}"
+	printf '%s precommit_control_offered=%s precommit_control_observed=%s\n' \
+		"$out" "$pco" "$pcb"
 	return "$rc"
 }
 #

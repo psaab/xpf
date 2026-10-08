@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Counted, tagged UDP bursts for the wire_routing_separation gate (#10136).
 
-The harness sender on the LAN host offers both bursts toward the product-owned
-LAN ingress, using the same source address and port and destination and port.
-It first sends a near-miss control (tag C) over the existing main-table route,
-clears the matching sessions, then installs an exact-match input-filter term
-steering the probe (tag P) into an owned, manager-created empty routing
-instance. The peer-side capture spans both bursts; a clean run expects the
-control to be observed and the probe not to emerge.
+The harness sender offers an exact-tuple reference burst (tag C) before the
+steering term is committed. After commit it offers a near-miss control (tag N)
+through the existing main-table route, with only the destination port changed
+so the exact-match FBF term does not apply. It then sends the probe (tag P)
+with the original tuple into an owned, manager-created empty routing
+instance. The peer-side capture spans all three bursts; the post-commit
+near-miss control must be observed and the probe must not emerge.
 
 With WIRE_BROKEN_FIXTURE=1, the harness inserts a temporary explicit accept
 before the routing-instance term. That intentionally bypasses steering to the
@@ -34,7 +34,7 @@ def main() -> int:
     ap.add_argument("--dst", required=True)
     ap.add_argument("--port", required=True, type=int)
     ap.add_argument("--count", required=True, type=int)
-    ap.add_argument("--tag", required=True, choices=("C", "P"))
+    ap.add_argument("--tag", required=True, choices=("C", "N", "P"))
     ap.add_argument("--rate", type=float, default=500.0)
     args = ap.parse_args()
     if (
