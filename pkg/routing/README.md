@@ -158,10 +158,12 @@ remains — see the bond bullet). So a same-name foreign link (or, for xfrm/VRF,
 right-type link with the wrong discriminator) substituted by a concurrent
 external actor in the add→readback window — or, for the bond adopt/KEEP paths, a
 foreign link already wearing a fabric/RETH bond's name at steady state — is
-rejected: it is not brought up or adopted, the name is reclaimed via
-delete+recreate (or the commit fails closed on a create-path substitute), and no
-foreign device is tracked as a satisfied device. This invariant now holds across
-all three netlink-device managers:
+rejected: it is never adopted as the desired device, and no foreign device is
+tracked as satisfied. On the xfrm and bond adopt paths, wrong-type links are
+reclaimed via delete+recreate. VRF instead rejects a same-name non-VRF with an
+error and no deletion, while a typed VRF with a stale table is recreated.
+Create-path substitutes fail closed. This invariant now holds across all three
+netlink-device managers:
 
 - **xfrm** (`xfrm.go`) — the readback must be an `*netlink.Xfrmi` whose
   `Ifid` matches. Enforced on BOTH the adopt path (a kernel link outliving
@@ -169,8 +171,9 @@ all three netlink-device managers:
   #5523 C179-104) and the post-create readback (#6396).
 - **VRF** (`vrf.go` `createLinkedVRF`) — the readback must be an
   `*netlink.Vrf` whose `Table` matches (#6396). `added` stays true so the
-  caller records ownership; the reconcile adopt path (`vrfTable` →
-  recreate on table mismatch) reclaims a substitute on the next cycle.
+  caller records ownership after create. On a later desired-name lookup, a
+  non-VRF occupant is rejected without deletion and reconcile returns an error;
+  a VRF with a stale table is still deleted and recreated.
 - **bond** (`bond.go`) — ALL THREE readbacks that can bring a link up and track
   it as a satisfied bond must first re-assert `*netlink.Bond` — the **create
   path** (`createLocked` post-`LinkAdd`), the **adopt path** (`createLocked`
@@ -189,11 +192,11 @@ all three netlink-device managers:
       == nil`): a same-name foreign link already wearing a fabric/RETH bond's
       name — an external actor's device, or a leftover of a different type after
       a name collision — is reclaimed via `deleteLocked` + fall-through to the
-      create path (mirroring the xfrm #5523 adopt gate and the
-      `vrfTable`→recreate adopt path) rather than adopted. A `deleteLocked`
-      failure leaves the foreign link present, so the recreate is skipped this
-      cycle and the delete error is surfaced (commit fails closed, next reconcile
-      retries the delete) — the #5119 / xfrm #5310 recreate discipline.
+      create path rather than adopted (mirroring the xfrm #5523 adopt gate; VRF
+      instead fails closed when a desired name is occupied by a non-VRF).
+      A `deleteLocked` failure leaves the foreign link present, so recreate is
+      skipped this cycle and the delete error is surfaced (commit fails closed,
+      next reconcile retries the delete) — the #5119 / xfrm #5310 discipline.
     - **KEEP-path** gate (#6402) re-asserts the type in `Apply`'s
       tracked-and-unchanged fast path (`if trackedSig == sig` → `LinkByName` →
       `LinkSetUp`). A tracked bond can be replaced by a same-name foreign link,
@@ -222,9 +225,11 @@ all three netlink-device managers:
        only, then track the DESIRED `bondSig` (`sigWithMembers(sig, …)`), not the
        readback's observed mode/MTU. An `*netlink.Bond` with the wrong bond mode
        (802.3ad vs active-backup) or MTU passes and is tracked as satisfied.
-  (xfrm and VRF adopt paths ARE fully gated — xfrm.go asserts type + `Ifid` +
-  `ParentIndex==0`, and `vrfTable`→recreate asserts type + table. Bond now gates
-  TYPE on create + adopt + KEEP; only the mode/MTU residual above remains.)
+  (xfrm and VRF adopt paths assert the complete identity relevant to each
+  manager: xfrm checks type + `Ifid` + `ParentIndex==0`, and VRF rejects
+  non-VRF desired-name occupants while recreating typed VRFs with stale tables.
+  Bond now gates TYPE on create + adopt + KEEP; only the mode/MTU residual above
+  remains.)
 
 Without the check the name is tracked as satisfied while **no** device
 carries the desired identity, silently blackholing the VPN / leaked routes

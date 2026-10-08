@@ -119,22 +119,22 @@ func (v *vrfManager) IsManaged(name string) bool {
 
 // Reconcile brings the manager's owned-VRF set to match desired.
 //
-// Ownership rules — xpfd is authoritative for the ENTIRE "vrf-*"
-// kernel namespace. Any VRF whose name starts with "vrf-" is
-// considered ours; operators MUST NOT pre-create vrf-<name> devices
-// outside xpfd config.
+// Ownership rules — xpfd manages VRFs in the "vrf-*" kernel namespace.
+// The link type is still authoritative: a desired name occupied by a
+// non-VRF device is foreign and causes reconcile to fail closed without
+// deleting it. Operators MUST NOT pre-create VRF devices outside xpfd config.
 //   - Desired VRF, present in kernel with matching table: no-op
 //     (preserve ifindex). Adopted into v.vrfs if not already there.
 //   - Desired VRF, present in kernel with mismatching table:
 //     LinkDel + LinkAdd (recreate). Adopted into v.vrfs.
+//   - Desired VRF name occupied by a non-VRF device: return an error,
+//     leave the link untouched, and do not adopt it.
 //   - Desired VRF, absent from kernel: LinkAdd, adopted into v.vrfs.
 //   - Managed VRF in v.vrfs not in desired: LinkDel, removed from v.vrfs.
 //   - #847 orphan: vrf-<X> in kernel but NOT in desired AND NOT in
 //     v.vrfs (e.g. left over from a routing-instance rename across
 //     a daemon restart, where v.vrfs was empty after the restart):
-//     LinkDel via the namespace-claim sweep. xpfd reaps the entire
-//     vrf-* namespace; if an operator created a vrf-<X> for their
-//     own purposes, it WILL be deleted on next apply.
+//     LinkDel only if the link is a VRF; non-VRF links are left alone.
 //
 // Holds mu for the full body including netlink operations. VRF
 // reconcile is low-frequency; lock contention is not a concern and
@@ -428,8 +428,15 @@ func reconcileVRFs(ops vrfOps, tracked []string, desired []VRFSpec) ([]string, e
 			continue
 		}
 
-		// Present in kernel. Adopt it — the vrf-<desired-name>
-		// namespace is ours, regardless of who created the device.
+		// A same-name non-VRF is foreign, not a stale VRF. Fail closed
+		// rather than deleting an operator-created device.
+		if _, ok := link.(*netlink.Vrf); !ok {
+			recordErr(fmt.Errorf("refusing to reconcile VRF %s: existing link is %s, not a VRF",
+				vrfName, link.Type()))
+			continue
+		}
+
+		// Present in kernel. The name is our namespace only for VRFs.
 		currentTable := vrfTable(link)
 		if currentTable == uint32(spec.TableID) {
 			if err := ops.LinkSetUp(link); err != nil {
@@ -553,9 +560,9 @@ func createLinkedVRF(ops vrfOps, vrfName string, tableID int) (bool, error) {
 	// different table) in that window would otherwise be brought up and the
 	// name recorded as satisfied while no VRF with the desired table exists —
 	// the routes leaked into it silently blackhole. LinkAdd succeeded, so
-	// added=true (the caller records ownership so a later reconcile can clean
-	// up), but surface the error so the commit fails closed; the reconcile
-	// adopt path (vrfTable → recreate on table mismatch) reclaims it next cycle.
+	// added=true (the caller records the partial create for reconcile), but
+	// surface the error so the commit fails closed. A non-VRF occupant will be
+	// rejected by reconcile until it is removed by its owner.
 	if vrf, ok := link.(*netlink.Vrf); !ok || vrf.Table != uint32(tableID) {
 		have := "non-VRF type " + link.Type()
 		if ok {
