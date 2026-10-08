@@ -117,6 +117,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
         .iter()
         .map(|leak| InterfaceSnapshot {
             name: format!("ge-0/0/{}.50", leak.egress_ifindex),
+            routing_instance: leak.target.to_string(),
             zone: "wan".to_string(),
             linux_name: format!("ge-0-0-{}.50", leak.egress_ifindex),
             ifindex: leak.egress_ifindex,
@@ -471,25 +472,51 @@ struct LeakCorpusRow9955 {
 }
 
 fn snapshot_from_go_leak_corpus_9955(row: &LeakCorpusRow9955) -> crate::ConfigSnapshot {
-    let interface = |ifindex: i32, v4: &str, v6: &str| InterfaceSnapshot {
-        name: format!("ge-0/0/{ifindex}.50"),
-        linux_name: format!("ge-0-0-{ifindex}.50"),
-        ifindex,
-        zone: "wan".to_string(),
-        hardware_addr: "02:bf:72:00:50:08".to_string(),
-        addresses: vec![
-            InterfaceAddressSnapshot {
-                family: "inet".to_string(),
-                address: v4.to_string(),
-                ..Default::default()
-            },
-            InterfaceAddressSnapshot {
-                family: "inet6".to_string(),
-                address: v6.to_string(),
-                ..Default::default()
-            },
-        ],
-        ..Default::default()
+    // The Go route oracle checks table choice and egress interface, but not
+    // interface ownership. Reflect each synthetic egress interface's owning
+    // route table so the Rust fixture obeys its same-routing-instance check.
+    let interface = |ifindex: i32, v4: &str, v6: &str| {
+        let interface_name = format!("ge-0/0/{ifindex}.50");
+        let routing_instance = row
+            .routes
+            .iter()
+            .find_map(|route| {
+                let instance = route
+                    .table
+                    .strip_suffix(".inet.0")
+                    .or_else(|| route.table.strip_suffix(".inet6.0"))?;
+                route
+                    .next_hops
+                    .iter()
+                    .any(|next_hop| {
+                        next_hop
+                            .rsplit_once('@')
+                            .is_some_and(|(_, name)| name == interface_name.as_str())
+                    })
+                    .then(|| instance.to_string())
+            })
+            .unwrap_or_default();
+        InterfaceSnapshot {
+            name: interface_name,
+            routing_instance,
+            linux_name: format!("ge-0-0-{ifindex}.50"),
+            ifindex,
+            zone: "wan".to_string(),
+            hardware_addr: "02:bf:72:00:50:08".to_string(),
+            addresses: vec![
+                InterfaceAddressSnapshot {
+                    family: "inet".to_string(),
+                    address: v4.to_string(),
+                    ..Default::default()
+                },
+                InterfaceAddressSnapshot {
+                    family: "inet6".to_string(),
+                    address: v6.to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
     };
 
     super::super::test_fixtures::v5(crate::ConfigSnapshot {
