@@ -27,7 +27,7 @@ security {
 }
 
 func TestUnknownEnforcementZoneChildUnbindsOnTolerantCompile11575(t *testing.T) {
-	for _, keyword := range []string{"screeen", "ids-profile"} {
+	for _, keyword := range []string{"screeen", "ids-profile", "adress-book", "SCREEN", "scr", "host-inbound"} {
 		t.Run(keyword, func(t *testing.T) {
 			tree := unknownZoneChildConfig11575(t, keyword)
 			cfg, err := CompileConfigLenient(tree)

@@ -436,9 +436,10 @@ type ZoneConfig struct {
 	// The #11575 gate below rejects (strict) or warns (tolerant).
 	UnknownZoneChildren []string `json:"-"`
 	// DroppedEnforcementChild marks an unrecognized child whose spelling could
-	// denote screen/IDS, interface membership, host-inbound, or TCP-RST
-	// enforcement. Tolerant compilation leaves the zone unbound rather than
-	// applying an incomplete enforcement stanza.
+	// denote screen/IDS, interface membership, host-inbound, TCP-RST, or zone-local
+	// address-book behavior. Tolerant compilation leaves the zone unbound rather
+	// than applying an incomplete enforcement stanza or resolving incomplete
+	// zone-local policy objects as global entries.
 	DroppedEnforcementChild bool `json:"-"`
 	HostInboundTraffic      *HostInboundTraffic
 	// InterfaceHostInbound holds per-interface host-inbound-traffic overrides

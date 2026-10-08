@@ -39,19 +39,37 @@ func recordUnknownSecurityZoneChild11575(zone *ZoneConfig, keyword string) {
 }
 
 // The zone child grammar's enforcement-bearing names are screen (IDS),
-// interface membership, host-inbound policy, and TCP-RST. A two-edit bound
-// catches short operator typos without treating arbitrary unknown metadata as
-// an enforcement request.
+// interface membership, host-inbound policy, TCP-RST, and address-book. A
+// two-edit bound catches short operator typos; matching case-insensitively and
+// recognizing three-or-more-character prefixes also catches common Junos
+// keyword truncations without treating arbitrary metadata as enforcement.
 func enforcementBearingUnknownZoneChild11575(keyword string) bool {
 	if containsZoneKeyword11575(keyword, "screen") || containsZoneKeyword11575(keyword, "ids") {
 		return true
 	}
-	for _, supported := range [...]string{"screen", "interfaces", "host-inbound-traffic", "tcp-rst"} {
-		if zoneKeywordDistanceAtMostTwo11575(keyword, supported) {
+	for _, supported := range [...]string{"screen", "interfaces", "host-inbound-traffic", "tcp-rst", "address-book"} {
+		if zoneKeywordDistanceAtMostTwo11575(keyword, supported) ||
+			zoneKeywordPrefixAtLeastThree11575(keyword, supported) {
 			return true
 		}
 	}
 	return false
+}
+
+// zoneKeywordPrefixAtLeastThree11575 recognizes a plausible truncated
+// enforcement keyword, including "scr" for "screen" and "host-inbound" for
+// "host-inbound-traffic". Requiring a three-byte prefix avoids poisoning a
+// zone for generic one- or two-character unknown metadata.
+func zoneKeywordPrefixAtLeastThree11575(prefix, supported string) bool {
+	if len(prefix) < 3 || len(prefix) >= len(supported) {
+		return false
+	}
+	for i := range len(prefix) {
+		if zoneKeywordByteFold11575(prefix[i]) != zoneKeywordByteFold11575(supported[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func containsZoneKeyword11575(value, part string) bool {
@@ -59,11 +77,25 @@ func containsZoneKeyword11575(value, part string) bool {
 		return false
 	}
 	for i := range len(value) - len(part) + 1 {
-		if value[i:i+len(part)] == part {
+		matches := true
+		for j := range len(part) {
+			if zoneKeywordByteFold11575(value[i+j]) != zoneKeywordByteFold11575(part[j]) {
+				matches = false
+				break
+			}
+		}
+		if matches {
 			return true
 		}
 	}
 	return false
+}
+
+func zoneKeywordByteFold11575(value byte) byte {
+	if value >= 'A' && value <= 'Z' {
+		return value + ('a' - 'A')
+	}
+	return value
 }
 
 func zoneKeywordDistanceAtMostTwo11575(a, b string) bool {
@@ -81,7 +113,7 @@ func zoneKeywordDistanceAtMostTwo11575(a, b string) bool {
 		for j := range len(b) {
 			above := row[j+1]
 			cost := uint8(1)
-			if a[i] == b[j] {
+			if zoneKeywordByteFold11575(a[i]) == zoneKeywordByteFold11575(b[j]) {
 				cost = 0
 			}
 			deletion := row[j+1] + 1
