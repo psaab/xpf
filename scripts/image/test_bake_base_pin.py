@@ -230,9 +230,9 @@ class ManifestProvenanceBindingTests(_EnvGuard):
     `base_image_pinned` provenance. build_manifest_text is the pure assembler
     main() writes, so we assert the fields without a full bake."""
 
-    def _text(self, *, base_pinned, validated):
+    def _text(self, *, base_pinned, validated, version="9.9.9-test"):
         return bake.build_manifest_text(
-            ver="9.9.9-test", commit="deadbeef",
+            ver=version, commit="deadbeef",
             base_url="https://mirror.invalid/rel", base_img="ubuntu.img",
             rel="26.04", base_sha=FAKE, base_pinned=base_pinned,
             validated=validated, bake_date="2026-01-01T00:00:00Z",
@@ -270,6 +270,26 @@ class ManifestProvenanceBindingTests(_EnvGuard):
                       self._text(base_pinned=True, validated=False))
         self.assertIn("base_image_pinned: false\n",
                       self._text(base_pinned=False, validated=True))
+
+    def test_dirty_provenance_is_bound_into_signed_manifest(self):
+        clean = self._text(base_pinned=True, validated=True)
+        dirty = self._text(
+            base_pinned=True, validated=True, version="9.9.9-test.dirty")
+        self.assertIn("source_dirty: false\n", clean)
+        self.assertIn("source_dirty: true\n", dirty)
+
+    def test_dirty_field_is_in_the_checksum_payload(self):
+        text = self._text(
+            base_pinned=True, validated=True, version="9.9.9-test.dirty")
+        with tempfile.TemporaryDirectory() as tmp:
+            sidecar = Path(tmp) / "xpf-9.9.9-test.dirty.manifest"
+            sums = Path(tmp) / "xpf-9.9.9-test.dirty.SHA256SUMS"
+            sidecar.write_text(text)
+            bake.sign.write_manifest(str(sums), [str(sidecar)])
+            signed_hashes = bake.sign.parse_manifest(str(sums))
+            self.assertEqual(
+                signed_hashes[sidecar.name],
+                hashlib.sha256(sidecar.read_bytes()).hexdigest())
 
 
 class InventoryWiringTests(unittest.TestCase):
