@@ -634,3 +634,38 @@ func catalogConfigWithNApps(n int) *config.Config {
 		},
 	}
 }
+
+func TestCatalogAndStrictGateCoverEveryNATApplicationListValue12224(t *testing.T) {
+	cfg := &config.Config{
+		Applications: config.ApplicationsConfig{
+			Applications: map[string]*config.Application{
+				"first":  {Name: "first", Protocol: "tcp", DestinationPort: "80"},
+				"second": {Name: "second", Protocol: "udp", DestinationPort: "53"},
+			},
+		},
+		Security: config.SecurityConfig{
+			NAT: config.NATConfig{
+				Source: []*config.NATRuleSet{{Rules: []*config.NATRule{{
+					Match: config.NATMatch{
+						Application:  "first",
+						Applications: []string{"first", "second"},
+					},
+				}}}},
+			},
+		},
+	}
+
+	catalog, err := CatalogNames(cfg, false)
+	if err != nil {
+		t.Fatalf("CatalogNames() error = %v", err)
+	}
+	want := []string{"first", "second"}
+	if !reflect.DeepEqual(catalog, want) {
+		t.Fatalf("CatalogNames() = %v, want %v", catalog, want)
+	}
+
+	strict := config.ApplicationsToValidateStrict(cfg)
+	if got := sortedKeys(strict); !reflect.DeepEqual(got, want) {
+		t.Fatalf("strict app-spec set = %v, want %v", got, want)
+	}
+}

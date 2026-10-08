@@ -190,3 +190,22 @@ func TestNATAppRef_SourceBad_LenientWarns(t *testing.T) {
 		t.Fatalf("expected lenient path to record an application-spec downgrade warning, got %v", cfg.Warnings)
 	}
 }
+
+func TestNATAppRef_DestSecondBadSpec_RejectsAtCommit12224(t *testing.T) {
+	tree := flatTreeFromSets(t,
+		"set applications application GOOD protocol tcp",
+		"set applications application GOOD destination-port 443",
+		"set applications application BAD protocol tcp",
+		"set applications application BAD destination-port nope",
+		"set security nat destination pool web1 address 10.0.30.100",
+		"set security nat destination rule-set rs1 from zone untrust",
+		"set security nat destination rule-set rs1 rule r1 match destination-address 50.0.0.1/32",
+		"set security nat destination rule-set rs1 rule r1 match application [ GOOD BAD ]",
+		"set security nat destination rule-set rs1 rule r1 then destination-nat pool web1",
+	)
+	if _, err := CompileConfig(tree); err == nil {
+		t.Fatal("expected commit with AppID disabled to reject malformed second app BAD")
+	} else if !strings.Contains(err.Error(), "BAD") || !strings.Contains(err.Error(), "destination-port") {
+		t.Fatalf("error %q must name second application BAD and its malformed destination-port", err.Error())
+	}
+}

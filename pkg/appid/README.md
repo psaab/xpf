@@ -16,9 +16,9 @@ and resolves session display names from the dataplane's assigned `app_id`.
   naming for that flow falls back to tuple/numeric); `true` returns every
   defined app. The NAT walk mirrors the commit-time strict validator
   (`config.applicationsToValidateStrict`) exactly — Source +
-  Destination.RuleSets, the scalar `rule.Match.Application`, static NAT
-  excluded (it carries no application match) — so the runtime catalog and
-  the strict gate agree on the referenced-app set. Returns an error if
+  Destination.RuleSets, every `rule.Match.ApplicationList()` value, with
+  static NAT excluded (it carries no application match) — so the runtime
+  catalog and strict gate agree on the referenced-app set. Returns an error if
   application-set expansion fails — callers must handle it.
 - `BuildCatalog(cfg *config.Config) (Catalog, error)` — `catalog.go`.
   Returns the ordered application catalog: `Entries` (each carrying
