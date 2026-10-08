@@ -14871,10 +14871,14 @@ hierarchical parse can emit several sibling blocks and `compileExpanded` compile
 all of them), so a collision SPLIT across two `applications {}` blocks is caught
 just like one inside a single block — the walk must not stop at the first node.
 The predefined `junos-*` table lives outside the AST, so a user
-`application junos-http` that merely SHADOWS a predefined application is not a
-collision (one AST stanza, no peer) and is left untouched; a multi-term
-application minting an implicit set under its own name is likewise not a
-self-collision.
+`application junos-http` that merely SHADOWS a predefined application remains
+allowed — that is the legitimate shadow/extend case. A user
+`application-set junos-http`, however, shadows the predefined application name
+with a different resolution path: direct references resolve application-first,
+while nested members resolve user-set-first. This cross-kind ambiguity is
+rejected under strict commit and warned on the lenient load path (#12220). A
+multi-term application minting an implicit set under its own name is likewise
+not a self-collision.
 
 **Strict (`commit` / `commit check`):** the first collision is a HARD commit
 error naming the offending name. **Lenient (`Store.Load` / HA peer-sync —
@@ -14883,12 +14887,15 @@ error naming the offending name. **Lenient (`Store.Load` / HA peer-sync —
 `cfg.Warnings` entry so a node that committed a colliding config BEFORE this gate
 existed (or a peer-synced config) still BOOTS after upgrade instead of failing
 closed (#1960 / #3261 fail-closed-on-load doctrine); `compileApplications` keeps
-producing the same (arbitrary but stable) last-write-wins maps on that path.
+producing the same (arbitrary but stable) last-write-wins maps on that path. The
+colliding name is also recorded as compiler metadata, so userspace refuses
+affected policy references rather than publishing an arbitrary winner.
 
 Regression coverage: `pkg/config/compiler_applications_collision_3339_test.go`
 (app-vs-set collision, implicit-set-overwrite, duplicate application / set
 definition, duplicate term-generated name, distinct-names-commit incl. a
-predefined shadow, lenient-warns). Compiler-side only — not a typed `setSchema`
+predefined shadow, and #12220's direct/nested predefined shadow, strict reject,
+and lenient warning/quarantine). Compiler-side only — not a typed `setSchema`
 leaf (applications stay opaque to `SchemaValidate`).
 
 ### #3472 — generated per-term application names join the collision namespace

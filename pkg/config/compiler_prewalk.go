@@ -208,22 +208,19 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
-	// #3339 (Codex review 080 M07/M08) application / application-set name
-	// collision gate. compileApplications collects applications and
-	// application-sets into name-keyed maps with last-write-wins semantics — a
-	// duplicate definition, an application and application-set sharing a name (an
-	// explicit set overwriting the implicit set minted for a multi-term
-	// application), or two terms generating the same per-term application name all
-	// silently keep the last definition with no commit error, and policy
-	// expansion vs the AppID catalog can then resolve the name to different
-	// definitions. Strict (commit / commit-check): the first collision hard-
-	// rejects. Lenient (load / peer-sync): warn so an already-persisted or
-	// peer-synced config an older binary silently accepted still BOOTS (#1960 /
-	// #3261), and record ambiguous names so userspace refuses references rather
-	// than publishing a winner. Runs on the group-expanded, inactive-pruned AST
-	// because the colliding definitions are merged away by last-write-wins by
-	// the time the typed maps exist — only the raw AST still carries every
-	// definition.
+	// #3339/#12220 application / application-set name-collision gate.
+	// compileApplications collects applications and application-sets into
+	// name-keyed maps with last-write-wins semantics, so duplicate definitions,
+	// an authored application and application-set sharing a name, or two terms
+	// generating the same per-term application name can silently overwrite a
+	// prior definition. A user application-set shadowing a predefined application
+	// is a separate ambiguity: direct references resolve application-first, while
+	// nested members resolve user-set-first. Strict commit / commit-check rejects
+	// the first collision. Lenient load / peer-sync warns so already-persisted
+	// configs still BOOT (#1960 / #3261), and records ambiguous names so userspace
+	// refuses references rather than publishing a winner. Runs on the
+	// group-expanded, inactive-pruned AST because some colliding definitions are
+	// merged away by last-write-wins and the raw AST preserves all authored names.
 	appCollisionWarnings, appCollisionNames, err := validateApplicationNameCollisionsAST(
 		tree.Children, opts.lenientApplicationNameCollisions)
 	if err != nil {
