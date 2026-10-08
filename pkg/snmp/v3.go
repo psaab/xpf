@@ -515,7 +515,11 @@ func (a *Agent) handleV3Packet(msgBody []byte) []byte {
 		if len(oids) > 0 {
 			errIdx = 1
 		}
-		return a.buildV3Response(msgID, msgFlags, user, echoContext, requestID, errNotWritable, errIdx, respVarbinds)
+		resp := a.buildV3Response(msgID, msgFlags, user, echoContext, requestID, errNotWritable, errIdx, respVarbinds)
+		if len(resp) > effectiveMaxSize(msgMaxSize) {
+			return a.buildV3Response(msgID, msgFlags, user, echoContext, requestID, errTooBig, 0, nil)
+		}
+		return resp
 
 	default:
 		slog.Debug("SNMPv3: unsupported PDU type", "type", pduTag)
