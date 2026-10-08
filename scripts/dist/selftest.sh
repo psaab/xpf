@@ -194,7 +194,7 @@ EOF
 mkdir -p "$DEBDIR/usr/share/keyrings"
 cp "$ARCHASC" "$DEBDIR/usr/share/keyrings/xpf-archive-keyring.asc"
 mkdir -p "$ROOT/dist-deb"
-FAKEDEB="$ROOT/dist-deb/xpf-appliance_${VER}_amd64.selftest.deb"
+FAKEDEB="$ROOT/dist-deb/xpf-appliance_${VER}_amd64.deb"
 dpkg-deb --build "$DEBDIR" "$FAKEDEB" >/dev/null 2>&1
 cleanup_deb() { rm -f "$FAKEDEB"; }
 trap 'cleanup; cleanup_deb' EXIT INT TERM
@@ -264,7 +264,7 @@ fi
 
 # ── 5c. apt channel isolation (#4201, HB165 H-4) ──────────────────────────
 info "5c. apt channel isolation: a stable rebuild after edge must not list edge"
-EDGEDEB="$ROOT/dist-deb/xpf-appliance_0.0.0-edge.selftest.deb"
+EDGEDEB="$ROOT/dist-deb/xpf-appliance_0.0.0-edge_amd64.deb"
 EDGEDIR="$WORK/pkg-edge"; mkdir -p "$EDGEDIR/DEBIAN"
 cat > "$EDGEDIR/DEBIAN/control" <<EOF
 Package: xpf-appliance
@@ -336,7 +336,7 @@ fi
 # but a real, stale keyring in the pooled .deb would brick upgraded hosts. The
 # failure must identify the packaged payload, not reject an unrelated gate.
 cp "$WORK/stale.asc" "$DEBDIR/usr/share/keyrings/xpf-archive-keyring.asc"
-STALEDEB="$WORK/xpf-appliance-stale.deb"
+STALEDEB="$WORK/xpf-appliance_0.0.0-selftest_amd64.deb"
 dpkg-deb --build "$DEBDIR" "$STALEDEB" >/dev/null 2>&1
 KAPAYLOAD="$WORK/kagree-stale-payload"; mkdir -p "$KAPAYLOAD"
 if XPF_GPG_KEY="$GPGKEY" XPF_APT_VALID_DAYS=365 \

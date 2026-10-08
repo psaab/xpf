@@ -10,8 +10,11 @@ artifact in the publish set is properly signed:
       sidecar says `validated: true` (#4904 A — a --skip-validate bake binds
       validated:false and is REFUSED: an unvalidated dev/emergency image must
       never carry a release signature past this fail-closed boundary);
-  (b) the apt InRelease verifies against the archive pubkey (when an apt tree
-      is being published);
+  (b) each apt InRelease verifies against the archive pubkey; for flat repos,
+      the signed Packages index matches the suite pool and every Filename,
+      Package, Version, and Architecture agrees with dpkg metadata. In a normal
+      image+apt publish, its package version must equal the signed target
+      latest.json version. Reprepro's separate retention policy is preserved;
   (c) install.sh is PRESENT (required by default — the Tier-A one-liner URL
       404s without it; opt out with --no-installer), carries NO placeholder
       key and NO unsubstituted %%…%% marker (it must be stamped first), and
@@ -788,6 +791,7 @@ def _gate_one_latest(dist, channel, pub, require_present):
             f"publish set {sorted(require_present)} — refusing to advertise a "
             "missing version.")
     info(f"latest.json OK (channel {channel} -> {ver})")
+    return ver
 
 
 def gate_latest(dist, channel, versions, pub):
@@ -797,7 +801,8 @@ def gate_latest(dist, channel, versions, pub):
     uploaded, so a stale/tampered/unsigned pointer for a non-target channel
     must not ship unverified."""
     # Target channel: mandatory + must name a version present in this publish.
-    _gate_one_latest(dist, channel, pub, require_present=versions)
+    target_version = _gate_one_latest(dist, channel, pub,
+                                     require_present=versions)
     # Every other channel pointer present in the tree: signature + date only.
     for entry in sorted(os.listdir(dist)):
         cdir = os.path.join(dist, entry)
@@ -805,14 +810,190 @@ def gate_latest(dist, channel, versions, pub):
             continue
         if os.path.isfile(os.path.join(cdir, "latest.json")):
             _gate_one_latest(dist, entry, pub, require_present=None)
+    return target_version
 
 
 
-def gate_apt(dist, channel):
-    """(b): the apt InRelease verifies against the archive key. The whole
-    apt/ tree is uploaded (rsync/s3 sync), so EVERY suite present under
-    dists/ — not just the target `channel` — must carry a verifying
-    InRelease (AGY-r3-F2). The target channel must exist."""
+def _gate_apt_package_set(dist, suite, release_text, expected_versions=None):
+    """Bind a signed suite index to its exact pool and dpkg identities.
+
+    When image manifests were verified, `expected_versions` also ties apt to
+    that release set. Apt-only gates still reject duplicate package identities,
+    mismatched filenames/control fields, and unindexed or extra pool entries.
+    """
+    import gzip
+    import hashlib
+
+    apt_root = os.path.join(dist, "apt")
+    suite_root = os.path.join(apt_root, "dists", suite)
+    pool_root = os.path.join(apt_root, "pool", suite)
+    pool = {}
+    package_ids = set()
+    versions = set()
+    if os.path.isdir(pool_root):
+        for root, _dirs, files in os.walk(pool_root):
+            for filename in files:
+                if not filename.endswith(".deb"):
+                    continue
+                deb = os.path.join(root, filename)
+                if filename.startswith("xpf-appliance_"):
+                    package_from_name = "xpf-appliance"
+                    rest = filename[len("xpf-appliance_"):]
+                elif filename.startswith("xpf_"):
+                    package_from_name = "xpf"
+                    rest = filename[len("xpf_"):]
+                else:
+                    die(f"unsupported pooled apt package filename {filename} "
+                        f"in suite {suite}")
+                if not rest.endswith(".deb"):
+                    die(f"malformed pooled apt package filename {filename}")
+                identity_name = rest[:-4]
+                if "_" not in identity_name:
+                    die(f"malformed pooled apt package filename {filename}")
+                filename_version, filename_arch = identity_name.rsplit("_", 1)
+                r = subprocess.run(
+                    ["dpkg-deb", "-f", deb, "Package", "Version",
+                     "Architecture"], capture_output=True, text=True)
+                if r.returncode != 0:
+                    die(f"cannot inspect pooled package {filename}: "
+                        f"{r.stderr.strip()}")
+                fields = {}
+                for line in r.stdout.splitlines():
+                    key, sep, value = line.partition(":")
+                    if sep:
+                        fields[key] = value.strip()
+                package = fields.get("Package")
+                version = fields.get("Version")
+                arch = fields.get("Architecture")
+                if (package != package_from_name or version != filename_version
+                        or arch != filename_arch):
+                    die(f"apt package identity mismatch for {filename}: "
+                        f"filename={package_from_name}/{filename_version}/"
+                        f"{filename_arch}, dpkg-deb={package}/{version}/{arch}")
+                if package not in ("xpf", "xpf-appliance"):
+                    die(f"unsupported apt Package {package!r} in {filename}")
+                package_id = (package, arch)
+                if package_id in package_ids:
+                    die(f"multiple apt versions for {package}/{arch} in suite "
+                        f"{suite}; refusing ambiguous release set")
+                package_ids.add(package_id)
+                versions.add(version)
+                if expected_versions is not None and version not in expected_versions:
+                    die(f"apt package {filename} has Version {version!r}, "
+                        f"outside the verified target image version "
+                        f"{sorted(expected_versions)}")
+                digest = hashlib.sha256()
+                try:
+                    with open(deb, "rb") as f:
+                        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                            digest.update(chunk)
+                    size = os.path.getsize(deb)
+                except OSError as e:
+                    die(f"cannot hash pooled package {filename}: {e}")
+                rel = os.path.relpath(deb, apt_root).replace(os.sep, "/")
+                pool[rel] = (package, version, arch, size, digest.hexdigest())
+    if not pool:
+        die(f"apt suite {suite} has no pooled .deb packages")
+    if len(versions) != 1:
+        die(f"apt suite {suite} contains inconsistent package versions "
+            f"{sorted(versions)}")
+
+    indexes = []
+    for root, _dirs, files in os.walk(suite_root):
+        for filename in files:
+            if filename == "Packages":
+                indexes.append(os.path.join(root, filename))
+    if not indexes:
+        die(f"apt suite {suite} has no Packages index")
+
+    release_hashes = {}
+    in_sha256 = False
+    for line in release_text.splitlines():
+        if line == "SHA256:":
+            in_sha256 = True
+            continue
+        if not in_sha256:
+            continue
+        if not line.startswith(" "):
+            in_sha256 = False
+            continue
+        parts = line.split()
+        if len(parts) == 3:
+            digest, size, name = parts
+            release_hashes[name] = (digest, size)
+
+    indexed = {}
+    for index in indexes:
+        rel_to_suite = os.path.relpath(index, suite_root).replace(os.sep, "/")
+        try:
+            with open(index, "rb") as f:
+                raw = f.read()
+        except OSError as e:
+            die(f"cannot read apt index {index}: {e}")
+        expected_hash = release_hashes.get(rel_to_suite)
+        actual_hash = hashlib.sha256(raw).hexdigest()
+        if expected_hash != (actual_hash, str(len(raw))):
+            die(f"apt Packages index {rel_to_suite} does not match the "
+                f"signed Release SHA256/size")
+        gz_index = index + ".gz"
+        if os.path.isfile(gz_index):
+            gz_rel = rel_to_suite + ".gz"
+            try:
+                with open(gz_index, "rb") as f:
+                    gz_raw = f.read()
+                decompressed = gzip.decompress(gz_raw)
+            except (OSError, gzip.BadGzipFile, EOFError) as e:
+                die(f"cannot read compressed apt index {gz_rel}: {e}")
+            gz_hash = hashlib.sha256(gz_raw).hexdigest()
+            if release_hashes.get(gz_rel) != (gz_hash, str(len(gz_raw))):
+                die(f"apt Packages index {gz_rel} does not match the signed "
+                    "Release SHA256/size")
+            if decompressed != raw:
+                die(f"apt Packages and Packages.gz disagree in suite {suite}")
+
+        text = raw.decode("utf-8", errors="replace")
+        for stanza in re.split(r"\n\s*\n", text.strip()):
+            fields = {}
+            for line in stanza.splitlines():
+                if line[:1].isspace():
+                    continue
+                key, sep, value = line.partition(":")
+                if sep:
+                    fields[key] = value.strip()
+            filename = fields.get("Filename")
+            package = fields.get("Package")
+            version = fields.get("Version")
+            arch = fields.get("Architecture")
+            if not all((filename, package, version, arch)):
+                die(f"malformed apt Packages stanza in {rel_to_suite}")
+            relpath = os.path.normpath(filename).replace(os.sep, "/")
+            if relpath.startswith("../") or relpath.startswith("/"):
+                die(f"unsafe apt Filename {filename!r} in suite {suite}")
+            actual = pool.get(relpath)
+            if actual is None:
+                die(f"apt Packages lists {filename}, which is absent from the "
+                    f"suite {suite} pool")
+            if actual[:3] != (package, version, arch):
+                die(f"apt Packages identity for {filename} is "
+                    f"{package}/{version}/{arch}, but dpkg-deb reports "
+                    f"{actual[0]}/{actual[1]}/{actual[2]}")
+            if (fields.get("Size") != str(actual[3])
+                    or fields.get("SHA256") != actual[4]):
+                die(f"apt pool package {filename} does not match the signed "
+                    "Packages Size/SHA256 fields")
+            if relpath in indexed:
+                die(f"duplicate apt Packages entry for {filename}")
+            indexed[relpath] = actual
+    if set(indexed) != set(pool):
+        unindexed = sorted(set(pool) - set(indexed))
+        die(f"apt suite {suite} pool does not match its Packages index; "
+            f"unindexed={unindexed or 'none'}")
+
+
+def gate_apt(dist, channel, expected_versions=None):
+    """Verify signed apt metadata and, for flat suites, bind the Packages
+    index to the exact pool and dpkg identities. `expected_versions` is the
+    already-verified target image version. Every suite in apt/ must be signed."""
     apt_root = os.path.join(dist, "apt")
     # Reject symlinks anywhere under apt/ (Codex-r5): the apt tree is uploaded
     # as part of the dist root, and a dereferencing backend could follow a
@@ -865,6 +1046,26 @@ def gate_apt(dist, channel):
                 parts = line.split()
                 if len(parts) >= 3 and parts[1] == "VALIDSIG":
                     signer_fprs.add(parts[-1])
+            # The signed cleartext Release binds the Packages bytes; verify the
+            # index checksum before treating its package identities as trusted.
+            clear = subprocess.run(["gpg", "--batch", "--decrypt", inrel],
+                                   env=env, capture_output=True, text=True)
+            if clear.returncode != 0:
+                die(f"cannot extract signed Release ({suite}): "
+                    f"{clear.stderr.strip()}")
+            # Flat repositories have a suite-scoped pool and exact-set
+            # semantics. Reprepro keeps its own package history in a shared
+            # component pool; preserve that opt-in backend's retention policy.
+            if os.path.isdir(os.path.join(apt_root, "pool", suite)):
+                suite_versions = expected_versions if suite == channel else None
+                _gate_apt_package_set(dist, suite, clear.stdout,
+                                      suite_versions)
+            elif os.path.isfile(os.path.join(apt_root, "conf",
+                                             "distributions")):
+                info(f"apt InRelease ({suite}) uses reprepro's retained pool")
+            else:
+                die(f"apt suite {suite} has no recognizable flat or reprepro "
+                    "pool layout")
             info(f"apt InRelease ({suite}) signature OK")
     # The pooled .deb must not carry the PLACEHOLDER archive keyring
     # (Codex-r2-2): a package built before the real key existed would, once
@@ -1138,14 +1339,16 @@ def main(argv):
         if will_dispatch:
             staging, gate_dir = _snapshot_dist(dist)
 
+        apt_expected_versions = None
         # ── fail-closed gate (against the immutable snapshot when dispatching) ──
         if not a.no_image:
             versions, pub = gate_images(gate_dir,
                                         require_installer=not a.no_installer)
             gate_provenance(gate_dir, versions, pub)
-            gate_latest(gate_dir, a.channel, versions, pub)
+            latest_version = gate_latest(gate_dir, a.channel, versions, pub)
+            apt_expected_versions = {latest_version}
         if not a.no_apt:
-            gate_apt(gate_dir, a.channel)
+            gate_apt(gate_dir, a.channel, apt_expected_versions)
 
         if not pubcmd:
             info("gate PASSED. XPF_PUBLISH_CMD unset — nothing uploaded. Set it "
