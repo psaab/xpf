@@ -1724,6 +1724,35 @@ func ipFamilyStrict(ip net.IP, fam string) string {
 	return "ip6"
 }
 
+// ZonePairPolicyAppliesToFilterPair reports whether a zone-pair policy stanza
+// participates in a filtered view for the requested zone pair. Unlike a
+// global-policy scope, a zone-pair wildcard is only the explicit "any" token;
+// an empty configured zone is not a meaningful zone-pair wildcard. An empty
+// filter axis selects all stanzas on that axis.
+func ZonePairPolicyAppliesToFilterPair(fromZone, toZone, filterFrom, filterTo string) bool {
+	axisApplies := func(zone, filter string) bool {
+		return filter == "" || zone == "any" || zone == filter
+	}
+	return axisApplies(fromZone, filterFrom) && axisApplies(toZone, filterTo)
+}
+
+// ZonePairPolicyFilterTier returns the precedence tier used to order applicable
+// zone-pair stanzas in a filtered policy view: exact, one wildcard, both
+// wildcards. The runtime and display treat only the explicit "any" zone-pair
+// token as a wildcard.
+func ZonePairPolicyFilterTier(fromZone, toZone string) int {
+	fromAny := fromZone == "any"
+	toAny := toZone == "any"
+	switch {
+	case fromAny && toAny:
+		return 2
+	case fromAny || toAny:
+		return 1
+	default:
+		return 0
+	}
+}
+
 // GlobalPolicyAppliesToZonePair reports whether a global policy (#3148) with the
 // given match-scope zones is selected by a `from-zone X to-zone Y` display
 // filter (#3357). It governs which scoped/unscoped globals a FILTERED policy

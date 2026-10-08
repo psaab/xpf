@@ -461,50 +461,59 @@ func (c *ctl) showPoliciesFiltered(fromZone, toZone string, globalOnly bool) err
 			fmt.Printf("    Hit count: %d packets, %d bytes\n", rule.HitPackets, rule.HitBytes)
 		}
 	}
-	for _, pi := range resp.Policies {
-		// #3357: the global group is exposed by GetPolicies with the group-level
-		// zones "*"/"*"; the per-rule scope of a scoped global (#3148) is carried
-		// in rule.MatchFromZone/MatchToZone. Filtering the whole group on its
-		// "*"/"*" zones dropped every scoped global from the filtered view — the
-		// exact command an operator uses to prove which rules govern a zone pair.
-		// Detect the global group and filter per-rule, rendering each rule under a
-		// header that shows its effective scope (an unscoped/explicit-any axis is
-		// normalized to "any" via matchScopeZone — #3683 M02).
-		if pi.FromZone == "*" && pi.ToZone == "*" {
-			for _, rule := range pi.Rules {
-				if !policymatch.GlobalPolicyAppliesToZonePair(effectiveMatchFromZones(rule), effectiveMatchToZones(rule), fromZone, toZone) {
-					continue
-				}
-				// #3683 (M02) / #4626: render the effective zone SET through
-				// config.ZoneScopeSetLabel (empty -> "any") so an unscoped global
-				// prints "From zone: any, To zone: any" — the canonical Junos /
-				// local-CLI / gRPC model — instead of a hand-rolled "*" that reads
-				// like an internal wildcard rather than the explicit policy model.
-				fmt.Printf("From zone: %s, To zone: %s\n",
-					config.ZoneScopeSetLabel(effectiveMatchFromZones(rule)), config.ZoneScopeSetLabel(effectiveMatchToZones(rule)))
-				renderRule(rule)
-				fmt.Println()
+	renderGlobalGroup := func(pi *pb.PolicyInfo) {
+		for _, rule := range pi.Rules {
+			if !policymatch.GlobalPolicyAppliesToZonePair(effectiveMatchFromZones(rule), effectiveMatchToZones(rule), fromZone, toZone) {
+				continue
 			}
-			continue
+			// #3683 (M02) / #4626: render the effective zone SET through
+			// config.ZoneScopeSetLabel (empty -> "any") so an unscoped global
+			// prints "From zone: any, To zone: any".
+			fmt.Printf("From zone: %s, To zone: %s\n",
+				config.ZoneScopeSetLabel(effectiveMatchFromZones(rule)), config.ZoneScopeSetLabel(effectiveMatchToZones(rule)))
+			renderRule(rule)
+			fmt.Println()
 		}
-		// #8321 finding 10: past this point the group is a ZONE PAIR, which
-		// `global` asks to exclude. Placed after the global branch rather than
-		// at the top of the loop so a scoped global (#3148) — which lives in
-		// the "*"/"*" group but carries per-rule zones — is still rendered.
-		if globalOnly {
-			continue
-		}
-		if fromZone != "" && pi.FromZone != fromZone {
-			continue
-		}
-		if toZone != "" && pi.ToZone != toZone {
-			continue
-		}
+	}
+	renderZonePairGroup := func(pi *pb.PolicyInfo) {
 		fmt.Printf("From zone: %s, To zone: %s\n", pi.FromZone, pi.ToZone)
 		for _, rule := range pi.Rules {
 			renderRule(rule)
 		}
 		fmt.Println()
+	}
+	filtered := fromZone != "" || toZone != ""
+	if filtered && !globalOnly {
+		// Zone-pair rule inventory follows runtime precedence, not config-group
+		// placement: exact, single-wildcard, then both-wildcard. Globals render
+		// after this loop below.
+		for tier := range 3 {
+			for _, pi := range resp.Policies {
+				if pi.FromZone == "*" && pi.ToZone == "*" {
+					continue
+				}
+				if !policymatch.ZonePairPolicyAppliesToFilterPair(pi.FromZone, pi.ToZone, fromZone, toZone) ||
+					policymatch.ZonePairPolicyFilterTier(pi.FromZone, pi.ToZone) != tier {
+					continue
+				}
+				renderZonePairGroup(pi)
+			}
+		}
+	}
+	for _, pi := range resp.Policies {
+		// #3357: the global group is exposed by GetPolicies with the group-level
+		// zones "*"/"*"; its per-rule scope is carried in MatchFromZone/ToZone.
+		// Process it after filtered zone-pair groups so it remains the final tier.
+		if pi.FromZone == "*" && pi.ToZone == "*" {
+			renderGlobalGroup(pi)
+			continue
+		}
+		// #8321 finding 10: `global` excludes zone-pair groups. A filtered
+		// request already rendered those groups in runtime tier order above.
+		if globalOnly || filtered {
+			continue
+		}
+		renderZonePairGroup(pi)
 	}
 	return nil
 }
