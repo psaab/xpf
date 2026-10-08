@@ -829,7 +829,7 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 	// interface belongs to an RG this node owns — so the two do not overlap and
 	// neither initiates the other's tunnels.
 	if ev.GroupID == 0 {
-		d.applyRG0OwnershipTransition(ev.NewState)
+		d.applyRG0OwnershipTransition(ev.NewState, ev.OldState == cluster.StatePrimary)
 	}
 	if clusterOwnershipEdge && isPrimary {
 		// A promotion may need to install RETH addresses before FRR can
@@ -843,43 +843,22 @@ func (d *Daemon) handleClusterEvent(ctx context.Context, ev cluster.ClusterEvent
 // RG0's authoritative state, correcting a divergence a dropped event left
 // behind (#6889).
 //
-// THE PROBLEM IT SOLVES. SetClusterReadOnly is the authority boundary for who
-// may write config in a cluster, and its only production driver was the RG0
-// TRANSITION handler, reached from the event consumer. Manager.sendEvent is
-// non-blocking and drops on a full channel, so the boundary's state could
-// diverge from the state that decides it:
+// Transition events are non-blocking and may be dropped. Reconciliation
+// therefore drives the same transition handler when the store gate disagrees
+// with RG0 state, preserving the handler's promotion side effects as well as
+// arming the gate on a secondary that never crossed an event edge. It also
+// handles a peer takeover that becomes visible after the gate was already
+// armed, but only while a pending confirmation exists.
 //
-//   - drop a PROMOTION and the node reports RG0 primary (IsLocalPrimary(0)
-//     passes, gRPC admits the operator) while the store still refuses writes
-//     with ErrClusterReadOnly. The operator sees a node that claims to own
-//     config and will not be configured, and the only trace is a slog.Warn
-//     about a full channel that never mentions config ownership;
-//   - drop a DEMOTION and it diverges the other way, which fails OPEN.
+// Confirmation on the secondary path is narrower than gate reconciliation:
+// `applyRG0OwnershipTransition` confirms only when this daemon observed RG0
+// primary, the event says the old state was primary, or the peer currently owns
+// RG0. Initial-secondary seating with no peer still arms the gate but must not
+// confirm a recovered commit-confirmed window (#12171).
 //
-// Neither self-heals: nothing re-drove the gate until the NEXT RG0 transition,
-// so a single burst of events could strand a node indefinitely. The
-// dropped-event fallback (triggerReconcile -> reconcileRGState) did generic RG
-// work and never touched this gate.
-//
-// WHY IT RE-DRIVES THE TRANSITION HANDLER instead of calling SetClusterReadOnly
-// directly. The gate is not the handler's only consequence: promotion also
-// reconciles config-sync to the peer, re-initiates synced IPsec SAs and nudges
-// DHCP lease-sync, and demotion CONFIRMS a pending commit-confirmed before
-// going read-only (#4378) so its rollback timer cannot fire on the demoted
-// standby and diverge from the peer. A dropped event skipped all of those, not
-// just the gate. Setting the bit alone would paper over the symptom this issue
-// names while leaving the rest of the transition unapplied — so the correction
-// runs the SAME code path the event would have, and there is exactly one
-// implementation of what an RG0 ownership change means.
-//
-// IT IS SILENT WHEREVER THE EVENT HANDLER IS SILENT. Only StatePrimary,
-// StateSecondary and StateSecondaryHold drive the gate, because those are the
-// only cases applyRG0OwnershipTransition acts on. StateLost and StateDisabled
-// are left exactly as they are: inventing a gate decision for a state the
-// transition path never decided would be new behaviour arriving through a
-// recovery mechanism, which is the wrong place to introduce it.
-//
-// A no-op when the gate already agrees, so the 2s loop costs one comparison.
+// Only StatePrimary, StateSecondary and StateSecondaryHold drive the gate.
+// StateLost and StateDisabled remain untouched: inventing a gate decision for
+// a state the transition path never decided would be new behaviour.
 func (d *Daemon) reconcileRG0ConfigOwnership() {
 	if d.cluster == nil || d.store == nil {
 		return
@@ -888,6 +867,7 @@ func (d *Daemon) reconcileRG0ConfigOwnership() {
 	if rg0 == nil {
 		// No RG0 in this config — nothing owns the gate, so nothing to
 		// reconcile. Not the same as "RG0 exists and is secondary".
+		d.rg0WasPrimary.Store(false)
 		return
 	}
 
@@ -900,7 +880,13 @@ func (d *Daemon) reconcileRG0ConfigOwnership() {
 	default:
 		return
 	}
+	if rg0.State == cluster.StatePrimary {
+		d.rg0WasPrimary.Store(true)
+	}
 	if d.store.ClusterReadOnly() == wantReadOnly {
+		if wantReadOnly && d.store.IsConfirmPending() && d.cluster.IsPeerPrimary(0) {
+			d.applyRG0OwnershipTransition(rg0.State, true)
+		}
 		return
 	}
 
@@ -910,28 +896,28 @@ func (d *Daemon) reconcileRG0ConfigOwnership() {
 		"this split state until the next transition.",
 		"rg0_state", rg0.State.String(), "store_read_only_was", !wantReadOnly,
 		"issue", "#6889")
-	d.applyRG0OwnershipTransition(rg0.State)
+	d.applyRG0OwnershipTransition(rg0.State, false)
 }
 
-// applyRG0OwnershipTransition reacts to a RG0 ownership change: it toggles the
-// store's cluster read-only gate (whose INTENT is that only the RG0 primary
-// writes config -- this function is the only thing that arms it, so a node that
-// never transitions is not gated at all; see pkg/cluster/README.md "Recovery"
-// and #6890) and, on promotion, re-initiates synced IPsec SAs and nudges DHCP
-// lease-sync.
+// applyRG0OwnershipTransition reacts to an RG0 ownership change: it toggles
+// the store's cluster read-only gate (whose INTENT is that only the RG0 primary
+// writes config), and, on promotion, re-initiates synced IPsec SAs and nudges
+// DHCP lease-sync.
 //
-// #4378: on DEMOTION it also confirms any in-flight `commit confirmed` window
-// BEFORE going read-only. The committing node had already pushed the committed
-// config to the peer (now RG0 primary) via config-sync
-// (commitConfirmedAndApply -> applyAndSyncCommitted -> pushCommittedConfigToPeer),
-// so the primary is running that config. Confirming keeps both nodes on it.
-// Without this, the armed rollback timer would still fire on the demoted
-// standby (PromoteRollback carries no read-only guard), reverting its
-// store+dataplane to the pre-confirm tree while the primary keeps the commit —
-// config divergence that surfaces at the next failover.
-func (d *Daemon) applyRG0OwnershipTransition(newState cluster.NodeState) {
+// #4378: on a genuine demotion — this node was RG0 primary or the peer is now
+// RG0 primary — it confirms any in-flight `commit confirmed` window BEFORE
+// going read-only. The committing node had already pushed the committed config
+// to the peer via config-sync, so confirming keeps both nodes on it and avoids
+// the demoted standby's rollback timer reverting its store+dataplane.
+//
+// Reconciliation also calls this function when the gate disagrees with RG0
+// state. A recovered RG0 secondary with no peer and no observed local-primary
+// state is not a demotion: it must arm the read-only gate without confirming a
+// recovered commit-confirmed window (#12171).
+func (d *Daemon) applyRG0OwnershipTransition(newState cluster.NodeState, demotionProven bool) {
 	switch newState {
 	case cluster.StatePrimary:
+		d.rg0WasPrimary.Store(true)
 		slog.Info("cluster: became primary for RG0, enabling config writes")
 		d.store.SetClusterReadOnly(false)
 		if d.eventEngine != nil {
@@ -961,15 +947,22 @@ func (d *Daemon) applyRG0OwnershipTransition(newState cluster.NodeState) {
 		}
 
 	case cluster.StateSecondary, cluster.StateSecondaryHold:
+		primaryInThisIncarnation := d.rg0WasPrimary.Swap(false)
+		genuineDemotion := demotionProven || primaryInThisIncarnation
+		if !genuineDemotion && d.cluster != nil {
+			genuineDemotion = d.cluster.IsPeerPrimary(0)
+		}
 		if d.eventEngine != nil {
 			d.eventEngine.SetPublishEnabled(false)
 		}
 		slog.Info("cluster: became secondary for RG0, disabling config writes")
-		// #4378: confirm any pending commit-confirmed before going read-only
-		// so its rollback timer does not fire on the demoted standby and
-		// diverge from the peer that holds the synced committed config.
-		if d.store.ConfirmPendingOnDemotion() {
-			slog.Info("cluster: confirmed pending commit-confirmed on RG0 demotion")
+		if genuineDemotion {
+			// #4378: confirm before going read-only so the rollback timer does
+			// not revert a demoted standby while the peer holds the synced
+			// committed config.
+			if d.store.ConfirmPendingOnDemotion() {
+				slog.Info("cluster: confirmed pending commit-confirmed on RG0 demotion")
+			}
 		}
 		d.store.SetClusterReadOnly(true)
 	}

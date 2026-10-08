@@ -67,7 +67,7 @@ func TestRG0DemotionConfirmsPendingCommitConfirmed_4378(t *testing.T) {
 	d := &Daemon{store: s}
 
 	// Node is demoted from RG0 primary (StateSecondary) mid-window.
-	d.applyRG0OwnershipTransition(cluster.StateSecondary)
+	d.applyRG0OwnershipTransition(cluster.StateSecondary, true)
 
 	if s.IsConfirmPending() {
 		t.Error("RG0 demotion must clear the pending commit-confirmed timer")
@@ -96,8 +96,7 @@ func TestRG0DemotionSecondaryHoldConfirms_4378(t *testing.T) {
 	s, armGen := newDemoteTestStore(t)
 	d := &Daemon{store: s}
 
-	d.applyRG0OwnershipTransition(cluster.StateSecondaryHold)
-
+	d.applyRG0OwnershipTransition(cluster.StateSecondaryHold, true)
 	if s.IsConfirmPending() {
 		t.Error("RG0 demotion (SecondaryHold) must clear the pending commit-confirmed timer")
 	}
@@ -117,8 +116,7 @@ func TestRG0PromotionLeavesPendingWindow_4378(t *testing.T) {
 	s.SetClusterReadOnly(true)
 	d := &Daemon{store: s}
 
-	d.applyRG0OwnershipTransition(cluster.StatePrimary)
-
+	d.applyRG0OwnershipTransition(cluster.StatePrimary, false)
 	if !s.IsConfirmPending() {
 		t.Error("RG0 promotion must not clear a pending commit-confirmed window")
 	}

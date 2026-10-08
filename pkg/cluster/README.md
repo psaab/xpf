@@ -856,8 +856,11 @@ point unconditionally. The mechanism, stated with its precondition:
 
 - `applyRG0OwnershipTransition` calls `store.SetClusterReadOnly(true)` on
   `StateSecondary` / `StateSecondaryHold` (`pkg/daemon/daemon_ha.go`). It is
-  driven by an RG0 **transition event** and by nothing else — there is no
-  startup arming and no reconcile that re-derives the flag.
+  driven by RG0 transition events and by `reconcileRGState`, which re-derives
+  the gate from authoritative RG0 state when the event was dropped (#6889).
+  On a secondary reconcile it confirms a pending window only after this node
+  was primary or the peer is primary; initial-secondary seating without a
+  takeover arms the gate but does not confirm a recovered window (#12171).
 - Once armed, `EnterConfigureSession` returns `ErrClusterReadOnly` before doing
   anything else (`pkg/configstore/store_lock.go`), whichever entry point the
   operator used.
@@ -867,16 +870,15 @@ this is not "the local commit gets overwritten by sync", and **config-sync is
 that node's only writer** (`TestClusterReadOnly_SyncApplyBypassesGate` pins that
 the HA-sync ingress path bypasses the gate).
 
-**But arming is not universal, so do not read the heading as unconditional.** A
-node that cold-starts, seats as RG0 secondary and never transitions never
-reaches that call, and `Store.clusterReadOnly` starts false — so its store is
-writable. REST enters a configure session with no RG0 check of its own
-(`pkg/api/config.go`), where gRPC guards on `IsLocalPrimary(0)` and the
-interactive CLI has its own check. That gap is **#6890**; the dropped-event
-variant is **#6889**. Both are OPEN and neither is scheduled — do not read a
-fix date into this sentence. The design intent is what this
-section describes; treat the gap as a bug to avoid, never as a rollout
-procedure.
+**Arming is initially delayed; do not read the heading as immediate.**
+`Store.clusterReadOnly` is a plain `bool` with no constructor initialisation, so
+it starts `false` (pinned by
+`TestClusterReadOnly_ZeroValueStoreIsWritable_6896`). On a clustered boot,
+`reconcileRGState` derives the gate from RG0's state on its first pass and on
+subsequent passes. A node that cold-starts as RG0 secondary is read-only after
+that reconcile even when no ownership transition event fires; the gate is not
+armed until then. The never-transitioned case (#6890) and dropped-event case
+(#6889) are closed by that re-derivation.
 
 **Performable procedures:**
 
@@ -890,9 +892,8 @@ procedure.
    `TestAuthKeyChangeDoesNotRestartClusterComms_5078`. Do not add it there; see
    that test for why it would deadlock with no self-recovery. ("Deadlock", not
    "permanent deadlock" — an operator can still break it out of band, by the
-   controlled promotion in row 3 or, on a node whose gate was never armed, by
-   the #6890 hole. What the hypothetical destroys is the cluster's ability to
-   converge on its own.) The step-20 decision
+   controlled promotion in row 3. What the hypothetical destroys is the cluster's
+   ability to converge on its own.) The step-20 decision
    that must not fire on a key change is pinned separately by
    `TestKeyCommitDoesNotRestartCommsAtTheCallSite_5078` — the struct test alone
    does not cover the call site.
@@ -928,26 +929,20 @@ than summarised into a verdict:
    console, remote CLI, gRPC or REST.
 
    **This row used to be conditional on the gate being ARMED, and it no longer
-   is (#6889/#6890).** `SetClusterReadOnly` was reached only from the RG0
-   **transition** handler, so a node that cold-started, seated as secondary and
-   never transitioned kept a **writable** store — and `pkg/api/config.go` enters
-   a configure session with no RG0 check of its own, where the interactive CLI
-   and gRPC each have one, so REST was a way in on a node that did not own
-   config. The gate is now **re-derived from RG0's authoritative state** on every
-   `reconcileRGState` pass (2 s, plus the event-drop nudge), so arming no longer
-   depends on an edge ever being crossed. Both the never-transitioned case
-   (**#6890**) and the dropped-event case (**#6889**) are closed by that one
-   change: a gate derived from state cannot preserve a hole that existed only
-   because the transition edge was never taken.
+   is (#6889/#6890).** `SetClusterReadOnly` is reached through the RG0 ownership
+   transition handler, which is called from transition events and re-driven by
+   `reconcileRGState` when its gate disagrees with authoritative RG0 state.
+   The cold-start secondary and dropped-event cases are both closed: a node
+   that never crossed an edge gets gated on the first reconcile, and a dropped
+   transition is corrected on the next reconcile (or event-drop nudge).
 
    What is still true: the gate reflects RG0 state within one reconcile pass,
    not instantaneously. A check made in the ~2 s after a state change may still
    observe the previous value.
-3. **Controlled RG0 promotion — the only path you can PLAN for, and it is
-   CONDITIONAL.** ("Plan for", not "that works": row 2 is open on an unarmed
-   node, so a path exists there too — it is just a bug you must not build a
-   procedure on.) Stop `xpfd` on the keyed primary; *if* the secondary wins the
-   election, `applyRG0OwnershipTransition(StatePrimary)` calls
+3. **Controlled RG0 promotion — a deliberate recovery path, and CONDITIONAL.**
+   The secondary must be eligible to win; stopping the primary alone does not
+   guarantee promotion. Stop `xpfd` on the keyed primary; *if* the secondary
+   wins the election, `applyRG0OwnershipTransition(StatePrimary)` calls
    `d.store.SetClusterReadOnly(false)` and the now-primary node accepts a local
    commit of the same key. Restart the old primary and the pair converges keyed.
    Same stop-one-node shape documented above for `configuration-synchronize`.

@@ -1491,29 +1491,22 @@ entrant; that is tracked separately.
 On an HA chassis cluster the RG0 primary is the INTENDED sole config
 authority: on a secondary **whose gate is armed** the store is read-only
 and receives config only via `SyncApply` (peer sync from the primary).
-The daemon arms and disarms that mode from the RG0
-primary↔secondary TRANSITION handler — `applyRG0OwnershipTransition`
-(`pkg/daemon/daemon_ha.go`) — and from nowhere else:
-`SetClusterReadOnly(true)` when this node becomes secondary,
-`SetClusterReadOnly(false)` when it is promoted to primary.
+The daemon arms and disarms that mode through the RG0 ownership transition
+handler — `applyRG0OwnershipTransition` (`pkg/daemon/daemon_ha.go`) — and
+`reconcileRGState` re-drives the same handler when the store gate disagrees
+with RG0's authoritative state (#6889):
+`SetClusterReadOnly(true)` on `StateSecondary` / `StateSecondaryHold`, and
+`SetClusterReadOnly(false)` on `StatePrimary`.
 
-**Arming is not universal — do not read the heading as unconditional
-(#6896).** That transition handler is the only production caller of
-`SetClusterReadOnly` (`git grep -n SetClusterReadOnly -- '*.go'` returns
-the setter plus its two lines in `daemon_ha.go`); there is no startup
-arming and no reconcile that re-derives the flag, and
-`Store.clusterReadOnly` is a plain `bool` with no constructor
+**The gate is initially unarmed — do not read the heading as unconditional
+(#6896).** `Store.clusterReadOnly` is a plain `bool` with no constructor
 initialisation, so it starts `false` (pinned by
-`TestClusterReadOnly_ZeroValueStoreIsWritable_6896`). A node that
-cold-starts, seats as RG0 secondary and never transitions therefore has
-a **writable** store — and `pkg/api/config.go` enters a configure
-session with no RG0 check of its own, where gRPC guards on
-`IsLocalPrimary(0)` (`pkg/grpcapi/server_config.go`) and the interactive
-CLI has its own check (`pkg/cli/cli_dispatch.go`). That gap is
-**#6890**; the dropped-transition-event variant — the manager reaches
-primary while the store stays read-only — is **#6889**. Both are OPEN.
-Everything below describes what the gate does ONCE ARMED; it is the
-design intent, not a property every secondary has.
+`TestClusterReadOnly_ZeroValueStoreIsWritable_6896`). On a clustered boot,
+`reconcileRGState` derives the gate from RG0's state on its first pass and on
+subsequent passes; a node that cold-starts as RG0 secondary is therefore
+read-only after reconciliation, even if no ownership transition event fires
+(#6890). The gate is not armed until that reconcile pass, and the design
+intent is not a property of a secondary before it runs.
 
 `clusterReadOnly` was originally checked ONLY at the `EnterConfigure*`
 gate. That left two holes: a config session **opened before** the node

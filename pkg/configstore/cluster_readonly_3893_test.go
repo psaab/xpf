@@ -153,28 +153,19 @@ func TestClusterReadOnly_PromotedNodeCanCommit(t *testing.T) {
 	}
 }
 
-// TestClusterReadOnly_ZeroValueStoreIsWritable_6896 pins the PRECONDITION the
-// three docs corrected in #6896 now state: the gate is not a property a
-// secondary has, it is a property a secondary is GIVEN by an RG0 transition.
+// TestClusterReadOnly_ZeroValueStoreIsWritable_6896 pins the Store's default,
+// not the daemon's post-reconcile behavior. `clusterReadOnly` is a plain bool
+// with no constructor initialisation, so a newly constructed store is
+// writable. The daemon derives the gate from RG0 state during reconciliation;
+// the daemon-layer tests bind that startup/recovery path.
 //
-// `clusterReadOnly` is a plain bool with no constructor initialisation and
-// `SetClusterReadOnly` is reached only from applyRG0OwnershipTransition
-// (pkg/daemon/daemon_ha.go), so a node that cold-starts, seats as RG0
-// secondary and never transitions has a WRITABLE store. Three docs asserted
-// the conclusion ("the secondary is read-only", "rejecting all config
-// mutations", "blocked on secondary cluster nodes") without the precondition;
-// a reader who trusted them would stop looking for #6890.
-//
-// This asserts the default, not the gate: an unarmed store enters config mode
-// and commits. It is deliberately NOT an assertion that the hole is
-// acceptable — when #6890 closes by arming the gate at startup (or by adding
-// the missing RG0 check on the REST path), this test is the place the change
-// becomes visible, and the docs above must move with it.
+// This isolated Store test asserts the default only. It does not claim that an
+// RG0 secondary remains writable after the daemon's first reconcile.
 func TestClusterReadOnly_ZeroValueStoreIsWritable_6896(t *testing.T) {
 	s := newTestStore(t)
 
-	// No SetClusterReadOnly call anywhere in this test — this is exactly the
-	// cold-start standby that never saw an RG0 transition event.
+	// No SetClusterReadOnly call anywhere in this isolated Store test; it does
+	// not construct the daemon or run RG0 reconciliation.
 	if s.ClusterReadOnly() {
 		t.Fatalf("a freshly constructed Store reports ClusterReadOnly()=true; " +
 			"the docs' arming precondition (#6896) assumes the zero value is " +

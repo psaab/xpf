@@ -23,19 +23,19 @@ import (
 // be configured locally: `applyRG0OwnershipTransition` calls
 // `store.SetClusterReadOnly(true)` on StateSecondary/StateSecondaryHold, and
 // `EnterConfigureSession` then returns ErrClusterReadOnly before doing anything
-// else. Config-sync is that node's only writer. Arming comes from an RG0
-// TRANSITION event alone, so a cold-started standby that never transitioned is
-// writable and REST has no RG0 check — #6890, with #6889 the dropped-event
-// variant. Those are open bugs, not routes. So the supported way to key
-// a live cluster is to commit on the
-// primary while sync is connected and let the existing connection carry the key
-// across. If a key change restarted comms, the primary would drop the
-// connection at the moment it became keyed, the secondary would still be
-// unkeyed, and — since #5078 makes a keyed node reject an unkeyed peer, with no
-// migration window — the cluster could never converge. The cluster cannot get
-// itself out of that state; whether an OPERATOR can, and under which
-// preconditions, is in pkg/cluster/README.md — deliberately not summarized
-// here (see the note on the sibling test below).
+// else. Config-sync is that node's only writer. Transition events drive the
+// handler, and `reconcileRGState` re-derives the gate from RG0 state after a
+// dropped event or initial-secondary seating (#6889/#6890). A secondary store
+// starts writable and remains so only until reconciliation arms the gate, not
+// indefinitely because an event never fired. So the supported way to key a
+// live cluster is to commit on the primary while sync is connected and let the
+// existing connection carry the key across. If a key change restarted comms,
+// the primary would drop the connection when it became keyed; the secondary
+// would still be unkeyed, and — because #5078 makes a keyed node reject an
+// unkeyed peer with no migration window — the cluster could never converge.
+// The cluster cannot get itself out of that state; whether an OPERATOR can,
+// and under which preconditions, is in pkg/cluster/README.md — deliberately
+// not summarized here (see the note on the sibling test below).
 //
 // Adding `ControlLinkAuthKey` to clusterTransportKey looks obviously correct
 // ("restart comms when the key changes") and would silently create that
@@ -111,10 +111,10 @@ func TestAuthKeyChangeDoesNotRestartClusterComms_5078(t *testing.T) {
 // becomes keyed and that connection drops while the peer is still unkeyed; the
 // now-keyed primary then rejects its handshake forever.
 //
-// "Armed" is load-bearing and is NOT restated anywhere else in this file: the
-// gate is armed only by an RG0 transition, so a cold-started standby is
-// writable. pkg/cluster/README.md "Recovery" is the single authoritative
-// statement of that, with #6890 and #6889. Do not re-derive it here.
+// "Armed" is load-bearing and is NOT restated anywhere else in this file:
+// the gate starts false and is armed by transition handling or RG0
+// reconciliation. pkg/cluster/README.md "Recovery" is the authoritative
+// explanation of that timing and of the conditional recovery paths.
 //
 // Recovery is CONDITIONAL and is NOT described here. Four revisions of this
 // comment tried to summarize it and all four were refuted — "console access
