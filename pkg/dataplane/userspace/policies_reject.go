@@ -62,13 +62,14 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 				break
 			}
 		}
-		// #9570: the reserved-sentinel poison uses the application sentinel only
-		// as its wire carrier. Its reason is reported by the zone arm
-		// (collectPolicyZoneRejections), which names the real cause; reporting it
-		// here as well would tell the operator that `application any` is
-		// unrepresentable. An application that is independently bad still
-		// records its own offending tokens, so it is still reported.
-		if appBad && rule.zonePairGlobalSentinelSide != "" && len(rule.rejectedApplications) == 0 {
+		// #9570 / #12249: reserved-zone poison uses the application sentinel
+		// only as its wire carrier. Its cause is reported by the zone arm
+		// (collectPolicyZoneRejections); reporting it here as well would tell
+		// the operator that `application any` is unrepresentable. An
+		// application that is independently bad still records its own offending
+		// tokens, so it is still reported.
+		if appBad && (rule.zonePairGlobalSentinelSide != "" || rule.zonePairDefinedAnySide != "") &&
+			len(rule.rejectedApplications) == 0 {
 			appBad = false
 		}
 		srcBad := addressListHasSentinel(rule.SourceLiterals) || addressListHasSentinel(rule.SourceAddresses)
