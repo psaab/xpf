@@ -241,6 +241,7 @@ func TestRecoveredRollbackDispatchSurvivesPreManagerWindow6739(t *testing.T) {
 // actually does there today rather than leaving it to be re-derived.
 func TestRecoveredFirstCommitClusterRollbackDispatchSurvives6739(t *testing.T) {
 	d, s := daemonInPreManagerWindow6739(t)
+	isolateFirstCommitRollbackHostAuth12169(t)
 
 	// FIRST commit on a fresh store, and it declares a cluster.
 	if err := s.EnterConfigure(); err != nil {

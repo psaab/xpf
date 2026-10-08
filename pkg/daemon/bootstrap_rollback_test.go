@@ -16,6 +16,7 @@ import (
 // prevCfg==nil branch, which calls enterBootstrapMode — re-arming bootstrap
 // suppression — WITHOUT applying an empty config to the dataplane.
 func TestFirstCommitRollbackEntersBootstrap(t *testing.T) {
+	isolateFirstCommitRollbackHostAuth12169(t)
 	dir := t.TempDir()
 	s, err := configstore.New(filepath.Join(dir, "xpf.conf"))
 	if err != nil {

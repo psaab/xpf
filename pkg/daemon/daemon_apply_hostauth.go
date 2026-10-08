@@ -163,6 +163,31 @@ func (d *Daemon) applyHostAuthorizationCloseout(cfg *config.Config) error {
 	return summarizeHostAuthCloseout(outcomes, hostAuthCloseoutBudget)
 }
 
+// applyBootstrapHostAuthorizationCloseout retires the abandoned config's
+// host-auth state while the daemon returns to bootstrap. The early input guard
+// is a bootstrap invariant, not an abandoned-config artifact: re-arm it before
+// any nft owner runs. If that guard cannot be installed, retain both existing
+// nft tables (rather than weakening protection) but still run every credential
+// owner, whose revocation is provenance-scoped.
+func (d *Daemon) applyBootstrapHostAuthorizationCloseout(cfg *config.Config) error {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	guardErr := d.rearmEarlyInputBootstrapGuard()
+	owners := d.hostAuthCloseoutOwners()
+	if guardErr != nil {
+		credentialOwners := make([]hostAuthOwner, 0, len(owners))
+		for _, owner := range owners {
+			if owner.name != "lo0-filter" && owner.name != "host-inbound-filter" {
+				credentialOwners = append(credentialOwners, owner)
+			}
+		}
+		owners = credentialOwners
+	}
+	outcomes := runHostAuthCloseoutOwners(cfg, hostAuthCloseoutBudget, owners)
+	return errors.Join(guardErr, summarizeHostAuthCloseout(outcomes, hostAuthCloseoutBudget))
+}
+
 // closeoutHostAuthOnCancel wraps a post-promotion apply-abort error so a #2926
 // ctx-cancellation still runs the bounded, non-cancellable host-authorization
 // closeout before the error propagates (#5643 / M35). Store.Commit promotes the

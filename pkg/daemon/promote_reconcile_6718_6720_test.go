@@ -58,6 +58,15 @@ func newPromoteReconcileEnv(t *testing.T) *promoteReconcileEnv {
 	if err := m.start(ctx); err != nil {
 		t.Fatalf("mgmt start: %v", err)
 	}
+	m.mu.Lock()
+	srv := m.srv
+	m.mu.Unlock()
+	if srv == nil {
+		t.Fatal("management server was not constructed")
+	}
+	// The later first-commit rollback enables HTTPS; keep generated TLS state
+	// in the test tree even when the suite runs with privileges.
+	srv.SetTLSCertDirForTest(t.TempDir())
 	return &promoteReconcileEnv{d: d, store: s, m: m}
 }
 
@@ -108,6 +117,7 @@ func (e *promoteReconcileEnv) liveSecretMatches(t *testing.T, expected string) b
 // test below stays GREEN.
 func TestFirstCommitRollbackDropsTheAbandonedCredential6718(t *testing.T) {
 	const abandoned = "ABANDONED-first-commit-secret"
+	isolateFirstCommitRollbackHostAuth12169(t)
 	e := newPromoteReconcileEnv(t)
 
 	// A fresh store starts with no credential at all.

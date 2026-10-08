@@ -651,6 +651,17 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		// error here is a REAL teardown failure that left a stale deny in the kernel:
 		// surface it so the commit fails closed rather than reporting that
 		// host-inbound was relaxed when it was not (#6387 PR-3: via netlink).
+		// A first-confirm rollback restores bootstrap mode after the first
+		// apply already handed off the early input barrier. Re-arm its
+		// lifeline-admitting form BEFORE deleting the abandoned ruleset, and
+		// keep the bootstrap handoff pending: removing this guard here would
+		// leave a bootstrap daemon without its management/data ingress fence.
+		if d.inBootstrap() && d.earlyInputHandoffDone.Load() {
+			if err := d.rearmEarlyInputBootstrapGuard(); err != nil {
+				d.noteHostInboundApplyFailed(time.Now())
+				return fmt.Errorf("%w; preserving host-inbound tables", err)
+			}
+		}
 		if err := nftInstaller.DeleteTable(xnft.HostInboundTableName); err != nil {
 			// Teardown FAILED: a stale xpf_hostinbound table may still be installed
 			// in the kernel. Surface the failure (fail closed) and — critically — do
@@ -691,6 +702,12 @@ func (d *Daemon) applyHostInboundFilterWithOverlay(cfg *config.Config, overlay *
 		d.hostInboundLastApplyFailed.Store(false)
 		d.hostInboundLastFailureUnixNano.Store(0)
 		d.hostInboundCoveredAddrs = nil
+		if d.inBootstrap() {
+			// The xpf host-inbound tables are retired, but bootstrap remains
+			// pre-handoff. Keep the lifeline-admitting guard installed until a
+			// later successful configured apply proves enforcement is ready.
+			return nil
+		}
 		// Enforcement is intentionally absent; only now may the pre-networkd
 		// barrier hand off to the configured no-enforcement posture — unless
 		// another intended protection is still outstanding. Both gates below
