@@ -580,13 +580,12 @@ func (r *Runner) Run(opts Options) (err error) {
 		// A resumed cut is the same argument with a crash in place of a verify
 		// failure.
 		//
-		// The STOPPED floor is load-bearing, not caution. From STOPPED onward
-		// the daemon is DOWN, so no commit can land and there is nothing to
-		// re-capture; and re-snapshotting at FLIPPED would be actively WRONG --
-		// versions/current already points at the new binary, which may have
-		// started and migrated the DB envelope, so the "pre-upgrade" snapshot
-		// would capture POST-upgrade state and defeat rollback entirely. The
-		// exposure is exactly State in {PREFLIGHT, COPIED, VERIFIED}.
+		// This preflight-resume snapshot is intentionally limited to
+		// PREFLIGHT/COPY/VERIFY: STOPPED is the cut boundary, and once FLIP
+		// repoints versions/current the new daemon may already have migrated
+		// the DB. The STOPPED-resume path below separately verifies whether
+		// FLIP began; it re-stops and re-snapshots only while current still
+		// names PreviousVersion.
 		if err := r.snapshotConfigDB(j); err != nil {
 			return fmt.Errorf("resume: re-snapshot config DB: %w", err)
 		}
@@ -715,6 +714,7 @@ func (r *Runner) Run(opts Options) (err error) {
 			return fmt.Errorf("refuse-before-STOP: %w", err)
 		}
 	}
+	resumingStopped := j.State == StateStopped
 	// ---- STOP + CUT-BOUNDARY DB SNAPSHOT (live mutation #1) ----
 	//
 	// PREFLIGHT, COPY and VERIFY all run while the old daemon is live, so a
@@ -750,6 +750,56 @@ func (r *Runner) Run(opts Options) (err error) {
 		r.logf("upgrade: captured cut-boundary config-DB snapshot after STOP")
 		if err := r.transition(j, StateStopped); err != nil {
 			return err
+		}
+	}
+	// STOPPED is durable before FLIP, but it is not proof that the daemon
+	// stayed down across an interruption: an enabled old unit may start again
+	// on reboot or by an external restart. On a same-target resume where
+	// current still names PreviousVersion, STOP again before FLIP and take a
+	// fresh rollback snapshot so commits made by that restarted daemon survive
+	// an auto-rollback. If current already names TargetVersion, FLIP began
+	// before the interruption; never replace the pre-upgrade snapshot with
+	// potentially migrated post-FLIP DB state.
+	if resumingStopped {
+		currentVersion, err := r.readCurrentVersion()
+		if err != nil {
+			return fmt.Errorf("resume STOPPED: read current version: %w", err)
+		}
+		switch currentVersion {
+		case j.PreviousVersion:
+			r.logf("upgrade: re-stopping %s on STOPPED resume before refreshing the cut-boundary snapshot",
+				r.cfg.Unit)
+			if err := r.cfg.Sys.StopUnit(r.cfg.Unit); err != nil {
+				return fmt.Errorf("resume STOPPED: stop unit before flip: %w", err)
+			}
+			restartOldAfterSnapshotFailure := func(cause error) error {
+				if err := r.cfg.Sys.StartUnit(r.cfg.Unit); err != nil {
+					return fmt.Errorf("%w; restart old daemon after STOPPED-resume snapshot failure: %v",
+						cause, err)
+				}
+				r.logf("upgrade: restarted old daemon after STOPPED-resume snapshot failure")
+				return cause
+			}
+			if err := r.snapshotConfigDB(j); err != nil {
+				return restartOldAfterSnapshotFailure(
+					fmt.Errorf("resume STOPPED: fresh cut-boundary snapshot config DB: %w", err))
+			}
+			if err := r.saveJournal(j); err != nil {
+				return restartOldAfterSnapshotFailure(
+					fmt.Errorf("resume STOPPED: persist fresh cut-boundary snapshot: %w", err))
+			}
+			r.logf("upgrade: refreshed the cut-boundary config-DB snapshot after re-stopping the unit")
+		case j.TargetVersion:
+			// FLIP may have completed substeps before the interruption. The
+			// target may have started and migrated the DB, so preserve the
+			// original rollback snapshot; still enforce STOP-before-replaying
+			// the idempotent flip in case the old unit is active.
+			if err := r.cfg.Sys.StopUnit(r.cfg.Unit); err != nil {
+				return fmt.Errorf("resume STOPPED after FLIP began: stop unit before flip: %w", err)
+			}
+		default:
+			return fmt.Errorf("resume STOPPED: current version %q is neither recorded previous version %q nor target version %q; refusing to flip",
+				currentVersion, j.PreviousVersion, j.TargetVersion)
 		}
 	}
 
