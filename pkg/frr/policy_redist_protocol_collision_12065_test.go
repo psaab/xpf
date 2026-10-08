@@ -60,3 +60,22 @@ func TestRedistProtocolMapNoCollisionRenders12065(t *testing.T) {
 		}
 	}
 }
+
+func TestRedistProtocolMapGeneratedVsGeneratedRefused12065(t *testing.T) {
+	po := &config.PolicyOptionsConfig{
+		PolicyStatements: map[string]*config.PolicyStatement{
+			"A": {
+				Name:  "A",
+				Terms: []*config.PolicyTerm{{Name: "t", FromProtocols: []string{"b-static"}, Action: "accept"}},
+			},
+			"A-b": {
+				Name:  "A-b",
+				Terms: []*config.PolicyTerm{{Name: "t", FromProtocols: []string{"static"}, Action: "accept"}},
+			},
+		},
+	}
+	err := redistProtocolMapCollision(po)
+	if err == nil || !strings.Contains(err.Error(), "same redistribute route-map") {
+		t.Fatalf("expected generated-vs-generated refusal, got %v", err)
+	}
+}

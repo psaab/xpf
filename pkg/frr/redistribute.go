@@ -159,14 +159,22 @@ func redistProtocolMapCollision(po *config.PolicyOptionsConfig) error {
 			operatorNames[normalized] = name
 		}
 	}
+	generated := make(map[string]string)
 	for _, policy := range names {
 		for _, proto := range redistProtocols(po.PolicyStatements[policy]) {
 			routeMap := redistProtocolRouteMapName(policy, proto)
-			if operator, ok := operatorNames[frrName(routeMap)]; ok {
+			final := frrName(routeMap)
+			if operator, ok := operatorNames[final]; ok {
 				return fmt.Errorf(
 					"policy-statement %q generates redistribute route-map %q, which collides with operator policy-statement %q; FRR merges same-named route-maps — refusing to render",
 					policy, routeMap, operator)
 			}
+			if previous, ok := generated[final]; ok && previous != policy+"\x00"+proto {
+				return fmt.Errorf(
+					"policy-statements generate the same redistribute route-map %q (%q vs %q); FRR merges same-named route-maps — refusing to render",
+					final, previous, policy+" / "+proto)
+			}
+			generated[final] = policy + "\x00" + proto
 		}
 	}
 	return nil
