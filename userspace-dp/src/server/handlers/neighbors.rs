@@ -10,6 +10,7 @@ pub(super) fn update(
     neighbors: Option<&Vec<NeighborSnapshot>>,
     generation: u64,
     replace: bool,
+    persist_state: &mut bool,
 ) {
     // #5864: an authoritative replace with zero entries must CLEAR the
     // manager-neighbor table. When the Go publishable set transitions to
@@ -59,11 +60,23 @@ pub(super) fn update(
             guard.afxdp.last_applied_manager_neighbor_generation()
         );
     } else if let Some(snapshot) = guard.snapshot.as_mut() {
-        // #9520: the helper now enforces neighbours the installed full apply
-        // did not carry, so that apply's content digest no longer describes
-        // what is enforced and must not vouch for a same-generation retry of it
-        // (handlers/snapshot.rs refuses one against an empty installed digest).
-        snapshot.content_digest.clear();
+        if replace {
+            // #12195: replace is the authoritative manager-neighbor set. Keep
+            // the persisted observability snapshot in sync and request a state
+            // write only when the set changes, just like update_fabrics (#3773).
+            if snapshot.neighbors.as_slice() != neighbors {
+                snapshot.neighbors = neighbors.to_vec();
+                // #9520: the stored snapshot is no longer the full apply its
+                // content digest describes, so it must not vouch for a
+                // same-generation retry of that apply.
+                snapshot.content_digest.clear();
+                *persist_state = true;
+            }
+        } else {
+            // Additive updates still change enforced content even though they
+            // cannot replace the stored neighbor set.
+            snapshot.content_digest.clear();
+        }
     }
     refresh_status(guard);
 }

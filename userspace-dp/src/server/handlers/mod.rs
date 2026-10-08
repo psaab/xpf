@@ -453,6 +453,7 @@ pub(crate) fn handle_stream(
                 request.neighbors.as_ref(),
                 request.neighbor_generation,
                 neighbor_replace,
+                &mut persist_state,
             ),
             "bump_fib_generation" => snapshot::bump_fib(
                 &mut guard,
