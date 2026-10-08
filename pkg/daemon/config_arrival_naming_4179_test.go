@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -51,12 +52,19 @@ func withNamingStub(t *testing.T) *namingStub {
 
 func newStoreDaemon(t *testing.T) *Daemon {
 	t.Helper()
-	// Pin the #1922 lifeline record to a non-existent temp path so
-	// resolveProtectedInterfaces (reached via applyStartupNamingForConfig)
-	// does not read the host's /etc/xpf lifeline record — keeps the test
-	// hermetic regardless of host state.
+	// Pin the #1922 lifeline record and networkd directory to scratch paths so
+	// naming/bootstrap-exit tests never read or mutate the host's management state.
 	lifelineRecordFileForTest = filepath.Join(t.TempDir(), "no-lifeline")
 	t.Cleanup(func() { lifelineRecordFileForTest = "" })
+	oldLinkDir := linkDir
+	linkDir = t.TempDir()
+	t.Cleanup(func() { linkDir = oldLinkDir })
+
+	if err := os.WriteFile(filepath.Join(linkDir, linkPrefix+"fxp0.network"),
+		[]byte(bootstrapLifelineNetworkMarker+" (DHCP)\n[Match]\nName=fxp0\n\n[Network]\nDHCP=yes\n"),
+		0o644); err != nil {
+		t.Fatalf("seed bootstrap lifeline network: %v", err)
+	}
 
 	store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
 	if err != nil {
