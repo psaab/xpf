@@ -1013,6 +1013,16 @@ func validateScalarValueLeaf(node *Node, leafSchema *schemaNode, parentPath []st
 		return fmt.Errorf("%s: unexpected trailing token %q (this leaf takes %d value token(s); the extra token would be silently dropped)",
 			strings.Join(redactSecretPath(leafPath), " "), node.Keys[allowed], leafSchema.args)
 	}
+	// Junos permits the single-child block form for interface filter scalar
+	// bindings (`input { f1; }`) as an alternate spelling of one value. Keep
+	// the exception explicit so other scalar leaves and multi-value blocks
+	// retain the fixed-arity rejection.
+	if leafSchema.allowSingleChildValueBlock && len(node.Keys) == 1 && len(node.Children) == 1 {
+		child := node.Children[0]
+		if child != nil && len(child.Keys) == 1 && child.Keys[0] != "" && len(child.Children) == 0 {
+			return nil
+		}
+	}
 	for _, c := range node.Children {
 		if c == nil || len(c.Keys) == 0 {
 			continue

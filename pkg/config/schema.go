@@ -176,7 +176,11 @@ type schemaNode struct {
 	// test's synthetic port-range leaf sets it today.
 	rangeSeparator bool
 
-	scalar bool // true = fixed-arity scalar value leaf (keyword + exactly `args` value tokens, NO body); rejects trailing tokens at commit (#3332). Opt-in; see isScalarValueLeaf.
+	scalar bool // true = fixed-arity scalar value leaf; rejects trailing tokens at commit (#3332). By default, no body.
+	// allowSingleChildValueBlock accepts the legacy Junos block spelling of
+	// one scalar value (e.g. filter input { f1; }) without accepting arbitrary
+	// sub-statements or multiple values. Scoped to interface filter bindings.
+	allowSingleChildValueBlock bool
 	// allowEmptyValue permits a presence-only spelling for an otherwise
 	// value-taking leaf. It is deliberately separate from args: args remains
 	// the maximum flat-token consumption, while this flag models Junos leaves
