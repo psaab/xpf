@@ -3409,14 +3409,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // #9752: report which arm produced the resolution — only
                         // the table arm consults a route table (the override or
                         // the default); the blocked-tunnel arm synthesizes
-                        // NoRoute and the precedence arms resolve
-                        // table-free interface identities. The stamp below
-                        // follows the arm, not the disposition.
+                        // NoRoute, ingress-interface precedence is table-free,
+                        // and interface-NAT local delivery is gated by this
+                        // selected table. The stamp below follows the arm.
                         let (resolution, resolved_in_table) =
                             if should_block_tunnel_interface_nat_session_miss(
                                 worker_ctx.forwarding,
                                 effective_resolution_target,
                                 meta.protocol,
+                                route_table_override.as_deref(),
                             ) {
                                 (
                                     no_route_resolution(Some(effective_resolution_target)),
@@ -3437,6 +3438,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     worker_ctx.forwarding,
                                     effective_resolution_target,
                                     meta.protocol,
+                                    route_table_override.as_deref(),
                                 )
                             {
                                 (local, false)
@@ -6492,14 +6494,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     //     steered to the override table; otherwise fall back to
                     //     the existing default-table resolve.
                     //
-                    //     #3292 / #3600 review Note 2: try INGRESS-interface and
-                    //     interface-NAT LOCAL-delivery resolution BEFORE applying
-                    //     the PBR override, mirroring the flow-backed session-miss
-                    //     arm. A host-bound flowless packet (dst = a firewall
-                    //     interface IP) that also matches a PBR `routing-instance`
-                    //     term must reach LocalDelivery, NOT be steered into an
-                    //     override table that has no local route (→ NoRoute →
-                    //     drop). The override governs only the transit fallback.
+                    //     #3292 / #3600 review Note 2: ingress-interface
+                    //     LocalDelivery remains ahead of the PBR override.
+                    //     Interface-NAT local resolution also precedes lookup,
+                    //     but is gated by the selected table (#12086), so only
+                    //     a claim owned by that table can take LocalDelivery;
+                    //     otherwise the override governs the transit fallback.
                     let (base_resolution, flowless_nat) = match l3_ctx.as_ref() {
                         Some(l3_flow) => {
                             let nat_wire_info = if !worker_ctx.forwarding.static_nat.is_empty()

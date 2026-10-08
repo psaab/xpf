@@ -433,12 +433,12 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_v4(
 
 #[inline]
 fn local_v4_owned_by_table(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> bool {
-    state.local_v4.contains(&ip)
+    (state.local_v4.contains(&ip)
         && (state.local_nat_any_table_v4.contains(&ip)
             || state
                 .local_tables_v4
                 .get(&ip)
-                .is_some_and(|tables| tables.contains(table)))
+                .is_some_and(|tables| tables.contains(table))))
 }
 
 #[inline]
@@ -459,8 +459,14 @@ fn local_delivery_resolution_v4(
     state: &ForwardingState,
     ip: Ipv4Addr,
     table: &str,
+    include_interface_nat_owner: bool,
 ) -> Option<ForwardingResolution> {
-    if !local_v4_owned_by_table(state, ip, table) {
+    let interface_nat_owner = include_interface_nat_owner
+        && state
+            .interface_nat_tables_v4
+            .get(&ip)
+            .is_some_and(|tables| tables.contains(table));
+    if !local_v4_owned_by_table(state, ip, table) && !interface_nat_owner {
         return None;
     }
     // #10645: match the row's unmasked HOST address, not the masked
@@ -500,8 +506,14 @@ fn local_delivery_resolution_v6(
     state: &ForwardingState,
     ip: Ipv6Addr,
     table: &str,
+    include_interface_nat_owner: bool,
 ) -> Option<ForwardingResolution> {
-    let local_ifindex = if local_v6_owned_by_table(state, ip, table) {
+    let interface_nat_owner = include_interface_nat_owner
+        && state
+            .interface_nat_tables_v6
+            .get(&ip)
+            .is_some_and(|tables| tables.contains(table));
+    let local_ifindex = if local_v6_owned_by_table(state, ip, table) || interface_nat_owner {
         // #10645: match the row's unmasked HOST address (see the v4 arm).
         // As with v4, make duplicate-host ownership deterministic rather than
         // depending on interface snapshot order.
@@ -560,10 +572,13 @@ fn lookup_forwarding_resolution_v4_inner(
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
 ) -> ForwardingResolution {
-    // Target-table lookups must retain the local/NAT decision that the outer
-    // entry point makes for the source table. This is also before the depth
-    // guard, matching the existing outer local-delivery precedence.
-    if let Some(resolution) = local_delivery_resolution_v4(state, ip, table) {
+    // Per-table local entries retain their existing priority. Interface-NAT
+    // ownership is admitted only for leak-target walks (`!evaluate_leaks`);
+    // the ordinary source-table lookup leaves it to the session-miss gate.
+    // Both outcomes precede the depth guard.
+    if let Some(resolution) =
+        local_delivery_resolution_v4(state, ip, table, !evaluate_leaks)
+    {
         return resolution;
     }
     if depth >= MAX_NEXT_TABLE_DEPTH {
@@ -738,12 +753,12 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_v6(
 
 #[inline]
 fn local_v6_owned_by_table(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> bool {
-    state.local_v6.contains(&ip)
+    (state.local_v6.contains(&ip)
         && (state.local_nat_any_table_v6.contains(&ip)
             || state
                 .local_tables_v6
                 .get(&ip)
-                .is_some_and(|tables| tables.contains(table)))
+                .is_some_and(|tables| tables.contains(table))))
 }
 
 #[inline]
@@ -769,7 +784,9 @@ fn lookup_forwarding_resolution_v6_inner(
     allow_tunnels: bool,
     ecmp_flow_hash: Option<u64>,
 ) -> ForwardingResolution {
-    if let Some(resolution) = local_delivery_resolution_v6(state, ip, table) {
+    if let Some(resolution) =
+        local_delivery_resolution_v6(state, ip, table, !evaluate_leaks)
+    {
         return resolution;
     }
     if depth >= MAX_NEXT_TABLE_DEPTH {

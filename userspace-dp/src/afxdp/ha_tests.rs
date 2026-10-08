@@ -10548,3 +10548,113 @@ fn purge_stale_replay_counts_removals_not_declines_10612() {
         "a Declined live replacement must survive the purge"
     );
 }
+
+/// #12086 R1-F2: the forward session is PBR-stamped with `blue`, which has
+/// no route to the reply target. Reverse-prewarm must still derive the native
+/// reply table and file the session under both owner RGs; otherwise activation
+/// of the LAN-side RG never reaches the reverse companion synthesized by the
+/// activation consumer.
+#[test]
+fn pbr_stamped_split_rg_reverse_prewarm_uses_native_table_12086() {
+    let mut coordinator = Coordinator::new();
+    let mut forwarding = test_forwarding_state_split_rgs();
+    let (domain, check) = crate::session::install_table_identity("blue");
+    forwarding.install_tables.insert(
+        domain,
+        crate::afxdp::types::InstallTables {
+            v4: Some("blue.inet.0".to_string()),
+            v6: None,
+            h2: check,
+        },
+    );
+    coordinator.set_forwarding_for_test(forwarding);
+    let worker_commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(worker_commands.clone())),
+        None,
+    );
+
+    let mut decision = test_decision();
+    decision.install_table_domain = domain;
+    decision.install_table_check = check;
+    let mut metadata = test_metadata();
+    metadata.fabric_ingress = false;
+    let entry = SyncedSessionEntry {
+        key: test_key(),
+        decision,
+        metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+    };
+
+    assert_eq!(
+        coordinator.upsert_synced_session(entry.clone()),
+        SyncedImportOutcome::Applied
+    );
+    assert_eq!(
+        filed_under_7209(&coordinator, &entry.key),
+        vec![1, 2],
+        "PBR target `blue` cannot resolve the reply target; reverse-prewarm \
+         must use the native table and file the reply owner RG 2 as well as \
+         forward owner RG 1",
+    );
+
+    coordinator
+        .update_ha_state(&[
+            HAGroupStatus {
+                rg_id: 1,
+                active: true,
+                ..HAGroupStatus::default()
+            },
+            HAGroupStatus {
+                rg_id: 2,
+                active: false,
+                ..HAGroupStatus::default()
+            },
+        ])
+        .expect("seed HA state with the LAN-side owner inactive");
+    worker_commands.lock().expect("commands").clear();
+    coordinator
+        .update_ha_state(&[
+            HAGroupStatus {
+                rg_id: 1,
+                active: true,
+                ..HAGroupStatus::default()
+            },
+            HAGroupStatus {
+                rg_id: 2,
+                active: true,
+                ..HAGroupStatus::default()
+            },
+        ])
+        .expect("activate LAN-side RG 2");
+
+    let reverse_key = reverse_session_key(&entry.key, entry.decision.nat);
+    let reverse = coordinator
+        .sessions
+        .synced
+        .lock()
+        .expect("shared sessions")
+        .get(&reverse_key)
+        .cloned()
+        .expect("activation must synthesize the reverse companion");
+    assert!(reverse.metadata.is_reverse);
+    assert_eq!(reverse.metadata.owner_rg_id, 2);
+    assert!(
+        worker_commands.lock().expect("commands").iter().any(|command| {
+            matches!(
+                command,
+                WorkerCommand::UpsertSynced(session)
+                    if session.metadata.is_reverse && session.metadata.owner_rg_id == 2
+            )
+        }),
+        "activation of RG 2 must enqueue its reverse companion for prewarm",
+    );
+}

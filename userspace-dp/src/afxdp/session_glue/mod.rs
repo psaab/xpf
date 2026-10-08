@@ -64,20 +64,18 @@ pub(super) fn resolution_target_for_session(
     decision.nat.rewrite_dst.unwrap_or(flow.dst_ip)
 }
 
-/// #9752: the table-independent local outcomes for a target whose installing
-/// table is unresolvable — the ONE classifier shared by D4 re-resolve and the
-/// D8 purge walk (Codex-r4-F4): interface-NAT (global maps) or the any-table
-/// wildcard (mirroring `fib.rs:274-284` with ifindex 0 — no connected scan is
-/// possible without a table, exactly the NAT-only shape). Deliberately NOT
-/// bumping `LOCAL_DELIVERY_IFINDEX0`, which counts table-OWNED-no-ifindex, a
-/// different cause (asserted in cell 10).
+/// #9752: the table-independent local outcome for an unresolvable installing
+/// table is the any-table NAT wildcard (mirroring `fib.rs:274-284` with
+/// ifindex 0 — no connected scan is possible without a table). Interface-NAT
+/// addresses are table-owned (#12086), so they cannot be admitted here without
+/// knowing which routing table owns the packet.
+///
+/// Deliberately NOT bumping `LOCAL_DELIVERY_IFINDEX0`, which counts
+/// table-OWNED-no-ifindex, a different cause (asserted in cell 10).
 pub(in crate::afxdp) fn local_resolution_without_install_table(
     forwarding: &ForwardingState,
     target: IpAddr,
 ) -> Option<ForwardingResolution> {
-    if let Some(local) = super::interface_nat_local_resolution(forwarding, target) {
-        return Some(local);
-    }
     let wildcard_owned = match target {
         IpAddr::V4(ip) => {
             forwarding.local_v4.contains(&ip) && forwarding.local_nat_any_table_v4.contains(&ip)
@@ -385,7 +383,7 @@ fn lookup_forwarding_resolution_for_session_with_cache(
         }
     }
     let target = resolution_target_for_session(flow, decision);
-    if let Some(local) = super::interface_nat_local_resolution(forwarding, target) {
+    if let Some(local) = super::interface_nat_local_resolution(forwarding, target, table) {
         return local;
     }
     // #2734: spread ECMP equal-cost members by the per-FLOW 5-tuple hash
