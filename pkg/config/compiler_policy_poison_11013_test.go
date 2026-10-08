@@ -252,6 +252,18 @@ func TestUnknownEnforcementSecurityPolicyChildrenPoisonLenientCompile12234(t *te
 			schedulerRef: true,
 		},
 		{
+			name:         "scheduler-name repeated letter",
+			unknownChild: "scheduler-namme permit-window;",
+			keyword:      "scheduler-namme",
+			schedulerRef: true,
+		},
+		{
+			name:         "scheduler-name multiple edits",
+			unknownChild: "schedulr-namme permit-window;",
+			keyword:      "schedulr-namme",
+			schedulerRef: true,
+		},
+		{
 			name:         "match subtree typo",
 			unknownChild: "mach { source-address 192.0.2.0/24; }",
 			keyword:      "mach",

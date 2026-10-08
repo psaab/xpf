@@ -759,8 +759,9 @@ func validatePolicyUnsupportedThenSiblings(nodes []*Node, lenient bool) ([]strin
 }
 
 // validatePolicyEnforcementSubtrees rejects direct policy `term` and
-// `session-options` children, plus unknown children that can carry dropped
-// enforcement content. Harmless unknown scalar metadata remains advisory-only.
+// `session-options` children, plus unknown children that may carry dropped
+// enforcement content. Only scalar one-edit typos of metadata-only
+// `description` remain advisory-only.
 func validatePolicyEnforcementSubtrees(nodes []*Node, lenient bool) ([]string, error) {
 	var warnings []string
 	checkPolicy := func(scope, policyName string, polNode *Node) error {

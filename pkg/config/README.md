@@ -1190,24 +1190,25 @@ can widen a rule; an unsupported `then` sibling such as `next term` (#11013)
 can leave an earlier direct permit active; an unknown `then log` mode (#11023)
 silently drops configured session logging; and an unknown policy-level `term`
 or `session-options` subtree can carry enforcement constraints discarded by the
-compiler (#11014). An unknown nested direct child or a one-edit typo of an
-enforcement keyword such as `scheduler-nam` can also drop an authored match,
-action, or schedule binding (#12234). `compilePolicy` sets
+compiler (#11014). Any unknown direct child other than a scalar one-edit typo
+of metadata-only `description` can also drop an authored match, action, or
+schedule binding (#12234). `compilePolicy` sets
 `Policy.LenientContentDropped` for these cases: shared AST predicates cover the
 existing match/permit gates, `policyUnsupportedThenSiblings` checks child and
 compact `then` tails, `policyUnsupportedThenLogTokens` checks log-leaf values
-and compact `then` tails, and `policyUnknownEnforcementChildren` distinguishes
-enforcement-bearing unknown children from unrelated unknown scalar metadata.
+and compact `then` tails; `policyUnknownEnforcementChildren` quarantines every
+unknown direct child except scalar one-edit `description` typos, plus every
+unknown nested child.
 The userspace snapshot builder (`buildOneRuleSnapshot`) poisons such a rule with
 the `__unsupported__` application sentinel, so the Rust integrity preflight
 rejects the WHOLE snapshot (previous-good retained; fresh-boot default-deny) —
 an action-agnostic fail-CLOSED. The unsupported `then` sibling / log mode is
 named in a strict commit-time rejection or tolerant warning; firewall-filter
-`next term` remains supported. Harmless unknown scalar policy metadata stays
-advisory-only (#4232). The flag is derived at compile time (never serialized),
-so it is recomputed identically on both HA peers. An explicit wildcard (`match
-application any`) remains distinct from a missing or dropped constraint and is
-not poisoned.
+`next term` remains supported. A scalar one-edit typo of `description` remains
+advisory-only (#4232); other unknown scalar policy metadata is quarantined. The
+flag is derived at compile time (never serialized), so it is recomputed
+identically on both HA peers. An explicit wildcard (`match application any`)
+remains distinct from a missing or dropped constraint and is not poisoned.
 
 **Unsupported security-policy `then reject` children are rejected at commit
 (#3115, interim — codex-review-066 finding 066-03):** the sibling of #3114 for the

@@ -577,10 +577,10 @@ type Policy struct {
 	terminalActions []PolicyAction
 	// UnknownChildren records DIRECT children of a `policy <name>` node whose
 	// keyword the compiler does not read (match / then / description /
-	// scheduler-name). They feed the #4232 probable-typo advisory; unknown
-	// nested children and one-edit typos of enforcement keywords also poison
-	// the tolerant policy snapshot (#12234). Unrelated unknown scalar metadata
-	// remains advisory-only. Recorded in config order for deterministic warnings.
+	// scheduler-name). They feed the #4232 probable-typo advisory; all unknown
+	// direct children except scalar one-edit typos of metadata-only
+	// `description`, as well as unknown nested children, poison tolerant loads
+	// (#12234). Recorded in config order for deterministic warnings.
 	UnknownChildren []string
 	// LenientContentDropped marks a policy the TOLERANT compile path
 	// (CompileConfigLenient / CompileConfigForNodeLenient) accepted only by
@@ -589,7 +589,7 @@ type Policy struct {
 	// UNSUPPORTED `match` leaf (#3113, incl. #3142/#3673), an unsupported
 	// `then permit` modifier (#3114), an unrecognized `then` sibling (#11013),
 	// an enforcement-bearing unknown policy subtree (#11014), or an unknown
-	// nested child / one-edit typo of an enforcement keyword (#12234). Missing
+	// direct child except a scalar one-edit typo of `description` (#12234). Missing
 	// or dropped match content can widen a policy because the userspace matcher
 	// reads empty dimensions as match-ANY; dropped policy actions or subtrees
 	// can also leave a direct permit active when the authored enforcement intent

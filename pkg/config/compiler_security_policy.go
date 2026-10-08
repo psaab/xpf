@@ -604,10 +604,9 @@ func policyDroppedEnforcementSubtrees(polNode *Node) []string {
 }
 
 // policyUnknownEnforcementChildren identifies unknown direct policy children
-// that could carry enforcement content the policy compiler drops. Nested
-// children may contain arbitrary match/action constraints; scalar keywords
-// one edit away from known enforcement children are likely misspellings such
-// as `scheduler-nam`. Other unknown scalar metadata remains advisory-only.
+// the compiler drops, except for scalar one-edit typos of metadata-only
+// `description`. Every other unknown child may carry enforcement or scheduler
+// intent; nested unknown subtrees are quarantined regardless of their name.
 func policyUnknownEnforcementChildren(polNode *Node) []string {
 	var unknown []string
 	if polNode == nil {
@@ -618,26 +617,16 @@ func policyUnknownEnforcementChildren(polNode *Node) []string {
 		case "match", "then", "description", "scheduler-name", "term", "session-options":
 			continue
 		}
-		if len(child.Children) > 0 || policyEnforcementKeywordTypo(child.Name()) {
+		if len(child.Children) > 0 ||
+			!policyKeywordDiffersByOneEdit(child.Name(), "description") {
 			unknown = append(unknown, child.Name())
 		}
 	}
 	return unknown
 }
 
-// policyEnforcementKeywordTypo recognizes one insertion, deletion,
-// substitution, or adjacent transposition from a policy enforcement keyword.
-// It is deliberately limited to enforcement-bearing children, leaving
-// unrelated unknown metadata on the #4232 advisory path.
-func policyEnforcementKeywordTypo(keyword string) bool {
-	for _, known := range [...]string{"match", "then", "scheduler-name", "term", "session-options"} {
-		if policyKeywordDiffersByOneEdit(keyword, known) {
-			return true
-		}
-	}
-	return false
-}
-
+// policyKeywordDiffersByOneEdit recognizes a single insertion, deletion,
+// substitution, or adjacent transposition between two policy child keywords.
 func policyKeywordDiffersByOneEdit(candidate, known string) bool {
 	if candidate == known || len(candidate) > len(known)+1 || len(known) > len(candidate)+1 {
 		return false
@@ -674,6 +663,7 @@ func policyKeywordDiffersByOneEdit(candidate, known string) bool {
 	}
 	return edits == 1
 }
+
 
 // recognizedCollapsedDenyToken reports whether tok is a token that
 // applyCollapsedDenyModifiers acts on inside a FLAT-collapsed `then deny`
