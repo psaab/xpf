@@ -93,6 +93,15 @@ func (m *Manager) SetPeerNeverSeenSyncFreshFunc(fn func() bool) {
 	m.peerNeverSeenSyncFreshFn = fn
 }
 
+// SetPeerHeartbeatRecoveredFunc installs a notification called for every
+// admitted peer heartbeat. It runs under m.mu and must therefore be a fast,
+// lock-free action that does not call back into Manager.
+func (m *Manager) SetPeerHeartbeatRecoveredFunc(fn func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.peerHeartbeatRecoveredFn = fn
+}
+
 // SetHeartbeatRestartNotifyFunc sets the callback invoked around the
 // RestartHeartbeat socket teardown/rebind window. The daemon wires it to
 // SessionSync.SendLivenessKeepalive so the peer's heartbeat-timeout

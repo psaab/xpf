@@ -62,6 +62,19 @@ func (m *Manager) PeerNeverSeenSyncFreshForTesting() bool {
 	return fn != nil && fn()
 }
 
+// HandlePeerTimeoutForTesting runs the real peer-timeout path without a
+// heartbeat receiver or timer.
+func (m *Manager) HandlePeerTimeoutForTesting() {
+	m.handlePeerTimeout()
+}
+
+// HandlePeerHeartbeatForTesting runs a heartbeat through the real admission
+// handler without a UDP socket. It lets external-package tests exercise
+// heartbeat-driven hooks and state transitions.
+func (m *Manager) HandlePeerHeartbeatForTesting(pkt *HeartbeatPacket) {
+	m.handlePeerHeartbeat(pkt)
+}
+
 // SetPeerSnapshotProtocolVersionForTesting injects the peer's advertised
 // config-snapshot version without a capability-frame exchange.
 func (s *SessionSync) SetPeerSnapshotProtocolVersionForTesting(v uint16) {

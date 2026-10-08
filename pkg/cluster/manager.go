@@ -522,6 +522,12 @@ type Manager struct {
 	// re-enter Manager.
 	peerNeverSeenSyncFreshFn func() bool
 
+	// peerHeartbeatRecoveredFn runs for each admitted peer heartbeat so an
+	// external liveness guard can end its continuous-suppression window.
+	// handlePeerHeartbeat calls it under m.mu; it must be a fast, lock-free
+	// action and must not re-enter Manager.
+	peerHeartbeatRecoveredFn func()
+
 	// peerHeartbeatFreshFn reports whether a peer heartbeat is currently
 	// within the timeout window (i.e. NOT stale). handlePeerTimeout consults
 	// it AFTER the (possibly slow) guard window so a heartbeat that arrived

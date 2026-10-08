@@ -205,6 +205,12 @@ func (d *Daemon) shouldSuppressPeerHeartbeatTimeout() (bool, string) {
 	return true, fmt.Sprintf("session sync connected with recent peer traffic age=%s", age.Truncate(10*time.Millisecond))
 }
 
+// notePeerHeartbeatRecovered ends the current continuous suppression window:
+// a later heartbeat-only gap must receive its own 5s cap (#12165).
+func (d *Daemon) notePeerHeartbeatRecovered() {
+	d.hbSuppressStart.Store(0)
+}
+
 // hbSuppressCapExceeded reports whether continuous heartbeat-timeout
 // suppression that began at startMono has lasted longer than cap by nowMono.
 // Both timestamps are CLOCK_MONOTONIC nanos (cluster.MonotonicNanos), so the

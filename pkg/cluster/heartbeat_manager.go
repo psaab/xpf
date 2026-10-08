@@ -388,9 +388,9 @@ var heartbeatRestartRetryDelay = time.Second
 //     LastPeerReceiveAge — the signal its heartbeat-timeout suppression
 //     guard (shouldSuppressPeerHeartbeatTimeout, 2s recency window) checks
 //     before fencing/electing. Suppression on the peer is bounded by its
-//     existing 5s continuous-suppression cap and self-clearing (it derives
-//     purely from message recency — no sticky state), so a node that dies
-//     mid-restart still fails over.
+//     existing 5s continuous-suppression cap. Each admitted heartbeat clears
+//     that stamp so a later distinct gap re-arms; if the peer dies mid-restart
+//     while no heartbeat returns, the cap lets failover proceed.
 //
 //   - Local side: lastSeen carries over to the replacement receiver (same
 //     CLOCK_MONOTONIC domain, same process) so a peer that dies while our
@@ -683,6 +683,9 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 	m.peerAlive = true
 	m.peerEverSeen = true
 	m.peerConfirmedAbsent = false
+	if m.peerHeartbeatRecoveredFn != nil {
+		m.peerHeartbeatRecoveredFn()
+	}
 	// A returning peer ends the reported peer-loss degradation; this marker
 	// describes the last takeover only while the partition remains unresolved.
 	m.clearFenceUnconfirmedLocked()
