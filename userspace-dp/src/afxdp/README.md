@@ -253,9 +253,10 @@ sync.
         `(ingress_ifindex, flow.src_ip) -> src_mac` from a transit packet
         whose source IP is spoofed to one of our own IPs.
     **`owns_configured_ip` reads the NAT-DECOUPLED `configured_iface_v*`
-    set, NOT `local_v*` (`#3182`).** `local_v4`/`local_v6` exclude the IP of
-    any interface whose zone is an interface-mode-SNAT `to_zone`
-    (`nat_translated_local_exclusions` routes it into `interface_nat_v*`),
+    set, NOT `local_v*` (`#3182`).** `local_v4`/`local_v6` exclude egress
+    addresses selected by interface-mode SNAT's to-side matrix
+    (`to-zone`, `to-interface`, `to-routing-instance`, or unscoped;
+    `nat_translated_local_exclusions` routes them into `interface_nat_v*`),
     so under #2851 the router's own WAN/SNAT interface IP (e.g.
     `reth0.80`'s `172.16.80.8`) was NOT protected and an unsolicited
     ARP/NDP/RX-learn claiming it WAS cached. `configured_iface_v4`/

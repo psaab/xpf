@@ -1856,33 +1856,31 @@ func encodeSteeredPortSet(selected []uint16) (uint32, [config.MaxSteeredWireGuar
 	return uint32(n), ports
 }
 
+// buildNATTranslatedLocalAddressExclusions collects the addresses live
+// interface-mode source-NAT rules can translate onto. The set is removed from
+// local delivery and registered for the interface-NAT reverse-translation path.
 func buildNATTranslatedLocalAddressExclusions(snapshot *ConfigSnapshot) (map[uint32]bool, map[[16]byte]bool) {
 	excludedV4 := make(map[uint32]bool)
 	excludedV6 := make(map[[16]byte]bool)
 	if snapshot == nil || len(snapshot.SourceNAT) == 0 || len(snapshot.Interfaces) == 0 {
 		return excludedV4, excludedV6
 	}
-	toZones := make(map[string]bool)
 	for _, nat := range snapshot.SourceNAT {
-		if !nat.InterfaceMode || nat.Off || nat.ToZone == "" {
+		if !nat.InterfaceMode || nat.Off {
 			continue
 		}
-		toZones[nat.ToZone] = true
-	}
-	if len(toZones) == 0 {
-		return excludedV4, excludedV6
-	}
-	for _, iface := range snapshot.Interfaces {
-		if iface.Zone == "" || !toZones[iface.Zone] {
-			continue
-		}
-		if ip := pickInterfaceSnapshotV4(iface); ip != nil {
-			excludedV4[binary.BigEndian.Uint32(ip.To4())] = true
-		}
-		if ip := pickInterfaceSnapshotV6(iface); ip != nil {
-			var key [16]byte
-			copy(key[:], ip.To16())
-			excludedV6[key] = true
+		for _, iface := range snapshot.Interfaces {
+			if !interfaceInSnapshotEgressScope(nat, iface) {
+				continue
+			}
+			if ip := pickInterfaceSnapshotV4(iface); ip != nil {
+				excludedV4[binary.BigEndian.Uint32(ip.To4())] = true
+			}
+			if ip := pickInterfaceSnapshotV6(iface); ip != nil {
+				var key [16]byte
+				copy(key[:], ip.To16())
+				excludedV6[key] = true
+			}
 		}
 	}
 	return excludedV4, excludedV6

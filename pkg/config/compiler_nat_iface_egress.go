@@ -20,12 +20,12 @@ import (
 //	to-zone set               -> that zone's interfaces' addresses
 //	no to-side scope at all   -> EVERY dataplane interface's addresses
 //
-// The last row is the one that matters and the one the previous Go precedent got
-// wrong: `maps_sync.go` collected only non-empty `ToZone` and returned NOTHING
-// for an unscoped rule-set. An unscoped interface-mode rule can egress anywhere,
-// so returning nothing understates the candidate set precisely where it is
-// widest — and an understated set means an overlap goes unreported, which is a
-// silent admission of the collision the validator exists to foreclose.
+// This matrix is also the runtime registration contract: the Go snapshot
+// builder and Rust twin must exclude every candidate address from local
+// delivery and register it for the interface-NAT redirect. Their to-side
+// checks AND every configured scope and treat each empty scope as a wildcard;
+// omitting a matrix row can send an ICMP error for that egress address to the
+// kernel before the helper's embedded-ICMP reverse-NAT path.
 //
 // The result maps address -> a human label naming why it is a candidate, so a
 // diagnostic can say which rule-set and which interface put it there. Addresses

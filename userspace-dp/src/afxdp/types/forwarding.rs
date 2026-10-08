@@ -114,9 +114,10 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) local_nat_to_self_v4: FastMap<Ipv4Addr, bool>,
     pub(in crate::afxdp) local_nat_to_self_v6: FastMap<Ipv6Addr, bool>,
     /// #3182: EVERY configured interface address, decoupled from the
-    /// NAT-aware `local_v*` exclusion. `local_v4`/`local_v6` drop the IP of
-    /// any interface whose zone is an interface-mode-SNAT `to_zone`
-    /// (`nat_translated_local_exclusions`), so they are NOT a complete
+    /// NAT-aware `local_v*` exclusion. `local_v4`/`local_v6` drop egress
+    /// addresses selected by interface-mode SNAT's to-side matrix
+    /// (`to-zone`, `to-interface`, `to-routing-instance`, or unscoped;
+    /// `nat_translated_local_exclusions`), so they are NOT a complete
     /// "addresses this router owns" set — the SNAT/WAN interface IP is
     /// missing. The anti-poison `owns_configured_ip` predicate is driven
     /// from this full set instead so an unsolicited ARP/NDP (or RX-learn)
@@ -1076,10 +1077,10 @@ impl ForwardingState {
     /// addresses via the to-self path, never via a dynamic neighbor entry.
     ///
     /// #3182: the gate is driven from the NAT-DECOUPLED `configured_iface_v*`
-    /// set, NOT `local_v*`. `local_v*` excludes the IP of an interface whose
-    /// zone is an interface-mode-SNAT `to_zone`
-    /// (`nat_translated_local_exclusions` — e.g. the WAN `reth0.80` IP), so
-    /// reusing it left the router's own SNAT/WAN interface IP poisonable. The
+    /// set, NOT `local_v*`. `local_v*` excludes egress addresses selected by
+    /// interface-mode SNAT's to-side matrix (`to-zone`, `to-interface`,
+    /// `to-routing-instance`, or unscoped; `nat_translated_local_exclusions`),
+    /// e.g. the WAN `reth0.80` IP, so reusing it left the router's own
     /// `local_v*` membership is still OR-ed in so the static-NAT-external and
     /// DNAT-destination addresses appended to `local_v*` (late-stage
     /// local-delivery targets the router also answers for) keep their #2851
