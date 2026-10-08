@@ -1076,6 +1076,28 @@ impl SessionTable {
             .map(|entry| (entry.decision, entry.metadata.clone(), entry.origin))
     }
 
+    /// The reverse policy path needs the forward companion's route provenance
+    /// as well as its verdict and origin: a fresh reply stamp cannot make a
+    /// FIB-stale forward decision current.
+    pub(crate) fn entry_with_origin_and_forwarding_generation(
+        &self,
+        key: &SessionKey,
+    ) -> Option<(
+        SessionDecision,
+        SessionMetadata,
+        SessionOrigin,
+        ForwardingGenerationStamp,
+    )> {
+        self.entry_by_key(key).map(|entry| {
+            (
+                entry.decision,
+                entry.metadata.clone(),
+                entry.origin,
+                entry.forwarding_generation,
+            )
+        })
+    }
+
     /// #7919: read this key's live per-direction counters and whether the
     /// entry is a replica, without touching the table.
     ///

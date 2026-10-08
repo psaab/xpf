@@ -1262,11 +1262,10 @@ pub(crate) fn worker_loop(
                     ipsec_inner_completions.clear();
                 }
             });
-        // #11075: FIB generation advanced — established sessions were NOT
-        // re-judged against the new routes (#2620 forbids hit-path routing
-        // eval). Count the live sessions and rate-limit one alarm line so
-        // the residual is observable instead of silent. Bounded: fires at
-        // most once per generation step per worker.
+        // #11075/#12074: FIB generation advanced. #11373 re-resolves stale
+        // sessions on their next hit; #12074 re-judges zone policy if that
+        // resolution changes the egress zone. Count sessions awaiting that
+        // lazy work and rate-limit the alarm; this tick does no route lookup.
         if crate::afxdp::poll_descriptor::should_alarm_route_change(
             validation.fib_generation,
             live_validation.fib_generation,
@@ -1277,7 +1276,7 @@ pub(crate) fn worker_loop(
             crate::afxdp::poll_descriptor::ROUTE_CHANGE_UNREJUDGED_SESSIONS_TOTAL
                 .fetch_add(sessions.len() as u64, std::sync::atomic::Ordering::Relaxed);
             eprintln!(
-                "xpf-userspace-dp: WARNING: FIB generation {} -> {} with {} established sessions:                  sessions were NOT re-judged against new routes (#11075 residual; #2620)",
+                "xpf-userspace-dp: WARNING: FIB generation {} -> {} with {} established sessions: stale sessions re-resolve on next hit; zone policy is re-judged if the egress zone changes (#11373/#12074)",
                 validation.fib_generation,
                 live_validation.fib_generation,
                 sessions.len(),

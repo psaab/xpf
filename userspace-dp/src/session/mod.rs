@@ -1992,25 +1992,22 @@ impl SessionTable {
     }
 
     /// #11373: persist a fresh route resolution after a generation-triggered
-    /// re-resolve. Terminal lookups retain their previous owner attribution so
-    /// HA transition scans can still find the withdrawn session.
+    /// re-resolve. Accepts either the stored key or a guarded NAT alias, so a
+    /// query-key hit updates the matched row. Terminal lookups retain their
+    /// previous owner attribution so HA transition scans can find the withdrawn session.
     pub(crate) fn revalidate_forwarding_resolution(
         &mut self,
         key: &SessionKey,
         resolution: ForwardingResolution,
         owner_rg_id: Option<i32>,
     ) -> bool {
-        let Some(record) = self.record_by_key(key) else {
+        let Some(handle) = self.revalidation_handle(key) else {
             return false;
         };
-        let handle = self.key_to_handle.get(key).copied();
+        let Some(record) = self.entries.get(handle as usize) else {
+            return false;
+        };
         let old_owner_rg_id = record.entry.metadata.owner_rg_id;
-        let Some(handle) = handle else {
-            return false;
-        };
-        if record.key != *key {
-            return false;
-        }
         if let Some(new_owner_rg_id) = owner_rg_id
             && new_owner_rg_id != old_owner_rg_id
         {
@@ -2098,25 +2095,24 @@ impl SessionTable {
     /// index, where a live alias entry for the same tuple would resolve a
     /// DIFFERENT session that the caller would then revoke), then the
     /// reverse-translated index.
-    fn revalidation_record(&self, key: &SessionKey) -> Option<&SessionRecord> {
+    fn revalidation_handle(&self, key: &SessionKey) -> Option<u32> {
         match self.key_to_handle.get(key).copied() {
             Some(handle) => {
                 let record = self.entries.get(handle as usize)?;
                 if record.key != *key {
-                    // #8114 item 2: a reused slab slot is `None`, not a hit. The
-                    // caller can still DERIVE a verdict — that needs the flow and
-                    // the interface, not the entry — it simply has no entry it
-                    // may safely stamp or tear down. Reporting it as resolved
-                    // would be the fail-open this guard exists for.
+                    // #8114 item 2: a reused slab slot is `None`, not a hit.
+                    // Do not fall through to a different session's alias.
                     return None;
                 }
-                Some(record)
+                Some(handle)
             }
-            None => {
-                let handle = self.resolve_reverse_translated_handle(key)?;
-                self.entries.get(handle as usize)
-            }
+            None => self.resolve_reverse_translated_handle(key),
         }
+    }
+
+    fn revalidation_record(&self, key: &SessionKey) -> Option<&SessionRecord> {
+        self.revalidation_handle(key)
+            .and_then(|handle| self.entries.get(handle as usize))
     }
 
     /// #9519: the CANONICAL key a WIRE tuple resolves to, through the same
@@ -2414,6 +2410,19 @@ impl SessionTable {
             PolicyRevalidationKind::Unvalidated
         ) && record.entry.policy_revalidated_gen == self.policy_revalidation_gen
             && record.entry.policy_scheduler_expired == self.policy_scheduler_expired)
+    }
+
+    /// #12074: make a zone-policy verdict stale after a FIB-only route move
+    /// changes the resolved egress zone. Resolves query keys through the same
+    /// guarded NAT-alias lookup as policy revalidation so reverse-translated
+    /// hits invalidate their canonical entry too.
+    pub(crate) fn invalidate_policy_revalidation(&mut self, key: &SessionKey) {
+        let stale_gen = self.policy_revalidation_gen.wrapping_sub(1);
+        if let Some(handle) = self.revalidation_handle(key)
+            && let Some(record) = self.entries.get_mut(handle as usize)
+        {
+            record.entry.policy_revalidated_gen = stale_gen;
+        }
     }
 
     /// #8356/#10507: record that this entry's zone-policy verdict has been

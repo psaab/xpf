@@ -188,7 +188,7 @@
 //! DNAT, static-DNAT, NPTv6 and NAT64 alike. The SOURCE stays pre-translation
 //! in both places: Junos evaluates after destination NAT and before source NAT.
 //!
-//! # What it does NOT cover, stated so this does not read as more than it is
+//! # FIB-stale routing and policy re-judgment
 //!
 //! #9384: BOTH zones are now read through the LIVE ledger — `to_id` from the
 //! egress interface resolved at install/import time, `from_id` from the
@@ -199,18 +199,25 @@
 //! moving an interface OUT of a permitted zone did not tear down its live
 //! sessions.
 //!
-//! What is still NOT covered: a commit that changes a ROUTE so the flow would
-//! now leave a DIFFERENT interface. Catching that needs a fresh routing
-//! evaluation on the established-hit path, which is exactly what #2620 forbids
-//! (that path is the sole counter for its packet precisely because it never
-//! calls the routing evaluator). #8356 does not re-open #2620.
+//! #11373: a FIB-stale established hit performs a fresh routing lookup and
+//! persists the new resolution. #12074: if that lookup changes the policy
+//! egress zone, only that entry's policy stamp is made stale so the ordinary
+//! hit path re-derives its (from-zone, to-zone) verdict. A reply-only hit also
+//! checks the forward companion's FIB generation: even a Fresh reverse stamp
+//! and `LiveEgress` provenance cannot judge the old forward route. It resolves
+//! and judges the current forward pair; on permit it persists that route while
+//! leaving forward policy stamping unchanged. A same-zone route move retains
+//! its policy verdict, session and NAT. Dormant sessions are not walked
+//! eagerly; route refresh and any required policy re-judgment happen on hit.
 //!
-//! #11075: the residual is DOCUMENTED (here) and ALARMED instead of silently
-//! open. Every worker watches its validation's fib_generation each tick: on
-//! advance with live sessions, it bumps ROUTE_CHANGE_UNREJUDGED_SESSIONS_TOTAL
-//! and rate-limits one journal line naming the session count that was NOT
-//! re-judged. The trigger is bounded (fires once per generation step per
-//! worker) and performs no routing evaluation, so #2620 holds.
+//! #11075's generation-advance alarm therefore reports live sessions awaiting
+//! lazy re-resolution at that observation, not a residual of established
+//! sessions staying pinned to old routes or bypassing zone policy. Every worker
+//! watches its validation's fib_generation each tick: on advance with live
+//! sessions, it bumps ROUTE_CHANGE_UNREJUDGED_SESSIONS_TOTAL and rate-limits one
+//! journal line reporting the count. The trigger is bounded (fires once per
+//! generation step per worker) and performs no routing evaluation itself, so
+//! #2620 holds.
 
 use super::*;
 use crate::afxdp::FastMap;
@@ -241,10 +248,12 @@ use std::sync::{Arc, Mutex};
 /// teardown or flow-cache eviction: there is no entry, and the teardown would
 /// emit a close delta and release NAT state for a flow this node never owned.
 /// Mirrors #8114's `revoked_key: None`.
-/// #11075: cumulative count of established sessions alive on workers that
-/// observed a FIB-generation advance WITHOUT re-judging them (the route-move
-/// residual #2620 leaves open). Bumped once per worker per generation step
-/// with the worker's live session count at the moment of advance.
+/// #11075: cumulative count of established sessions present when workers
+/// observe a FIB-generation advance, before each stale entry is lazily
+/// re-resolved on its next hit. #11373 performs that route lookup, and #12074
+/// re-judges zone policy when the resulting egress zone changes; this metric
+/// counts deferred work, not sessions that remain pinned or bypass policy.
+/// Bumped once per worker per generation step with its live session count.
 pub(crate) static ROUTE_CHANGE_UNREJUDGED_SESSIONS_TOTAL: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
@@ -1193,10 +1202,10 @@ fn reverse_companion_from_source(
 /// not its protocol, not its arrival interface (authority already established
 /// the packet is the session's owner before this runs).
 ///
-/// Stamping is HIT-ONLY: on PERMIT only the hit (reverse) entry is marked. The
-/// forward half is never written from this path, so no cross-direction
-/// equivalence is claimed; the forward half re-derives (cold-only) on its next
-/// packet of the generation.
+/// Policy stamping is HIT-ONLY: on PERMIT only the hit (reverse) entry is
+/// marked. When a stale forward FIB route is resolved and permitted, that
+/// route resolution is persisted without stamping the forward policy verdict;
+/// the forward half retains its existing policy freshness semantics.
 fn resolve_current_forward_companion(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -1285,8 +1294,8 @@ fn reverse_hit_zone_policy(
                 debug_assert!(false, "9604: reverse_session_key inversion is degenerate");
                 return None;
             }
-            let Some((fwd_decision, fwd_metadata, fwd_origin)) =
-                sessions.entry_with_origin(&fwd_key)
+            let Some((mut fwd_decision, fwd_metadata, fwd_origin, fwd_generation)) =
+                sessions.entry_with_origin_and_forwarding_generation(&fwd_key)
             else {
                 // Lone reverse: no forward egress/NAT/zone context exists.
                 // Keep this legitimate #9604 population alive; this accepted
@@ -1307,6 +1316,42 @@ fn reverse_hit_zone_policy(
             {
                 return None;
             }
+            let forward_route_stale = sessions.forwarding_resolution_is_stale(fwd_generation);
+            if forward_route_stale {
+                let current_fwd_resolution = resolve_current_forward_companion(
+                    forwarding,
+                    ha_state,
+                    dynamic_neighbors,
+                    &fwd_key,
+                    fwd_decision,
+                    &fwd_metadata,
+                    fwd_metadata.fabric_ingress,
+                    false,
+                    now_secs,
+                    fwd_metadata.ingress_ifindex as i32,
+                    ha_startup_grace_until_secs,
+                );
+                if resolution_is_locally_forwarding(current_fwd_resolution) {
+                    fwd_decision.resolution = current_fwd_resolution;
+                } else if current_fwd_resolution.disposition
+                    == ForwardingDisposition::LocalDelivery
+                {
+                    return None;
+                } else if current_fwd_resolution.disposition == ForwardingDisposition::FabricRedirect
+                {
+                    // Continue to judge the recorded policy egress below; the
+                    // transport route is not the forward flow's policy zone.
+                    fwd_decision.resolution = current_fwd_resolution;
+                } else {
+                    return Some(PolicyRevocation {
+                        canonical_key: Some(fwd_key),
+                        decision: fwd_decision,
+                        metadata: fwd_metadata,
+                        origin: fwd_origin,
+                        reason: PolicyRevocationReason::ZonePolicy,
+                    });
+                }
+            }
             let from_source = reverse_companion_from_source(sessions, fwd_origin, &fwd_metadata)?;
             let fwd_flow = SessionFlow {
                 src_ip: fwd_key.src_ip,
@@ -1315,20 +1360,59 @@ fn reverse_hit_zone_policy(
             };
             let mut fwd_meta = meta;
             fwd_meta.protocol = fwd_key.protocol;
-            let mut revocation = sessionless_zone_policy_verdict(
-                forwarding,
-                fwd_decision,
-                &fwd_metadata,
-                &fwd_flow,
-                fwd_meta,
+            if !forward_route_stale {
+                let mut revocation = sessionless_zone_policy_verdict(
+                    forwarding,
+                    fwd_decision,
+                    &fwd_metadata,
+                    &fwd_flow,
+                    fwd_meta,
+                    from_source,
+                    fwd_origin,
+                    now_ns,
+                )?;
+                // The local forward companion is authoritative, so this uses
+                // the ordinary pair-revocation shape rather than drop-only.
+                revocation.canonical_key = Some(fwd_key);
+                return Some(revocation);
+            }
+            let input = PolicyJudgmentInput {
+                decision: fwd_decision,
+                metadata: fwd_metadata.clone(),
+                protocol: fwd_key.protocol,
+                src_ip: fwd_key.src_ip,
+                dst_ip: fwd_key.dst_ip,
+                src_port: fwd_key.src_port,
+                dst_port: fwd_key.dst_port,
                 from_source,
-                fwd_origin,
                 now_ns,
-            )?;
-            // The local forward companion is authoritative, so this uses the
-            // ordinary pair-revocation shape rather than drop-only.
-            revocation.canonical_key = Some(fwd_key);
-            return Some(revocation);
+            };
+            return match zone_policy_deny_on_session_hit(forwarding, &input) {
+                ZonePolicyJudgment::Permit => {
+                    if input.decision.resolution.disposition
+                        != ForwardingDisposition::FabricRedirect
+                    {
+                        let owner_rg_id = crate::afxdp::forwarding::owner_rg_for_resolution(
+                            forwarding,
+                            input.decision.resolution,
+                        );
+                        sessions.revalidate_forwarding_resolution(
+                            &fwd_key,
+                            input.decision.resolution,
+                            Some(owner_rg_id),
+                        );
+                    }
+                    None
+                }
+                ZonePolicyJudgment::Decline => None,
+                ZonePolicyJudgment::Revoke => Some(PolicyRevocation {
+                    canonical_key: Some(fwd_key),
+                    decision: input.decision,
+                    metadata: input.metadata,
+                    origin: fwd_origin,
+                    reason: PolicyRevocationReason::ZonePolicy,
+                }),
+            };
         }
         PolicyRevalidationTarget::Stale(k) => k.clone(),
     };
@@ -1352,30 +1436,25 @@ fn reverse_hit_zone_policy(
             None
         };
     }
-    // The companion itself is part of the reverse freshness decision: a
-    // reverse row must still cold-judge when its forward companion is
-    // FabricRedirect or carries fenced provenance — and without a
-    // companion, when the reverse row itself is fenced or Live.
-    // #10635: `companion_needs_live` keys on FENCED provenance, not bare
-    // !LiveEgress. A never-validated (stale `Unvalidated`) forward carries
-    // no recorded authorization — fencing it manufactures a DENY for a row
-    // that never earned one (#8618): with any type-constrained ICMP permit
-    // configured, GATE 1b returns before stamping, so every locally
-    // admitted forward stays Unvalidated and the first reply of every ICMP
-    // session revoked itself (b03-F1). `RecordedEgress` and fresh
-    // `Unvalidated` (A1/A2 reset-distrust) keep fencing exactly as before.
+    // A fresh reverse entry is not enough when its forward companion's FIB
+    // stamp is stale: the reply must judge the current forward pair.
+    // Preserve #10635's provenance fence: stale `Unvalidated` has no recorded
+    // Permit and must not manufacture a DENY (#8618).
+    let fwd_companion = sessions.entry_with_origin_and_forwarding_generation(&fwd_key);
+    let companion_forwarding_stale = reverse_has_intent
+        && fwd_companion
+            .as_ref()
+            .is_some_and(|(_, _, _, generation)| sessions.forwarding_resolution_is_stale(*generation));
+    // The companion's forwarding generation is checked independently of its
+    // policy provenance, including for `LiveEgress`.
     let companion_needs_live = if reverse_has_intent {
-        match sessions.entry_with_origin(&fwd_key) {
-            Some((fwd_decision, _, _)) => {
+        match &fwd_companion {
+            Some((fwd_decision, _, _, _)) => {
                 fwd_decision.resolution.disposition == ForwardingDisposition::FabricRedirect
                     || sessions.policy_revalidation_fenced(&fwd_key)
             }
             // No forward companion: fence a FENCED or Live reverse row. A
-            // never-validated reverse (e.g. shared-materialized, gen-0
-            // Unvalidated) has no recorded Permit to protect — revoking it
-            // kills legitimate lone-reverse replies (r02-F3). Recorded and
-            // Live reverses (Cell 6 shape) still fail closed below: a Live
-            // row retains a recorded Permit and must never coast (stale or fresh: the forward ledger is orphaned).
+            // never-validated reverse has no recorded Permit to protect.
             None => {
                 sessions.policy_revalidation_fenced(&rev_canonical)
                     || matches!(rev_kind, PolicyRevalidationKind::LiveEgress)
@@ -1384,25 +1463,23 @@ fn reverse_hit_zone_policy(
     } else {
         false
     };
-    let force_reverse_cold = rev_force_cold || companion_needs_live;
+    let force_reverse_cold =
+        rev_force_cold || companion_needs_live || companion_forwarding_stale;
     // Inconsistent-companion arms fail closed when the reverse packet would
     // locally forward and its own row needs cold, or the companion itself
-    // demands live. A Fresh Live row with a good companion coasts.
+    // demands live. FIB staleness triggers a fresh forward-pair judgment but
+    // does not change the existing Decline semantics for unjudgeable policy.
     let reverse_inconsistent_fail_closed =
         (reverse_has_intent && reverse_row_needs_cold) || companion_needs_live;
     if matches!(rev_target, PolicyRevalidationTarget::Fresh) && !force_reverse_cold {
         return None;
     }
-    let Some((mut fwd_decision, fwd_metadata, fwd_origin)) = sessions.entry_with_origin(&fwd_key)
+    let Some((mut fwd_decision, fwd_metadata, fwd_origin, _)) = fwd_companion
     else {
         // A locally-forwarding reverse hit with no companion is not allowed
         // to retain a recorded Permit or take the old reverse Decline arm.
         // #9604: no tuple synthesis — zones would degrade to recorded-swapped with no live ledger.
-        // #10635: ...unless the reverse row itself never earned one. A
-        // never-validated (stale `Unvalidated`) reverse carries no recorded
-        // authorization to fence — revoking it kills legitimate
-        // lone-reverse replies (materialized/shared shapes, r02-F3). Coast;
-        // Recorded and Live reverses (Cell 6 shape) still fail closed.
+        // #10635: ...unless the reverse row itself never earned one.
         let reverse_fenced = sessions.policy_revalidation_fenced(&rev_canonical)
             || matches!(rev_kind, PolicyRevalidationKind::LiveEgress);
         return if reverse_fenced && reverse_inconsistent_fail_closed {
@@ -1427,15 +1504,19 @@ fn reverse_hit_zone_policy(
             None
         };
     }
-    // #10507 reverse-first fence: when this packet would locally forward and
-    // the stored forward companion is recorded or otherwise non-live, resolve
-    // that companion from the current local FIB plus HA/lease snapshot. A
-    // reverse Permit stamps only the reverse row; the forward row remains cold.
-    // Deliberate bare !LiveEgress (not fenced): re-resolution must re-derive any non-live companion.
+    if tun_origin_forward(&fwd_decision, &fwd_metadata, fwd_origin) {
+        return None;
+    }
+    // #10507 reverse-first fence: resolve the current forward companion from
+    // the local FIB plus HA/lease snapshot when its policy provenance is
+    // recorded/non-live OR its cached route generation is stale. This applies
+    // to LiveEgress too: reverse-only traffic must not judge an old route and
+    // refresh the reverse row while leaving the forward row on the old FIB.
     let stored_fwd_kind = sessions.policy_revalidation_kind(&fwd_key);
     if reverse_has_intent
         && (fwd_decision.resolution.disposition == ForwardingDisposition::FabricRedirect
-            || !matches!(stored_fwd_kind, PolicyRevalidationKind::LiveEgress))
+            || !matches!(stored_fwd_kind, PolicyRevalidationKind::LiveEgress)
+            || companion_forwarding_stale)
     {
         let current_fwd_resolution = resolve_current_forward_companion(
             forwarding,
@@ -1456,9 +1537,7 @@ fn reverse_hit_zone_policy(
             // Redirect retention (plan §4.2.4/§4.3, any origin): the companion
             // is still peer-owned *for the forward's own recorded context*.
             // Admit without revoking, stamp nothing, authorize no local TX
-            // here. Cell 1 phase 1 pins SyncImport retention (recorded Permit
-            // + punt, no revoke); #7770 pins seed retention. No per-origin
-            // distinction — all FabricRedirect companions retain identically.
+            // here. Cell 1 phase 1 pins SyncImport retention (#7770).
             return None;
         } else {
             // No valid current egress and not a redirect (NoRoute,
@@ -1466,9 +1545,6 @@ fn reverse_hit_zone_policy(
             // must not locally forward on its stored Permit — fail closed.
             return revocation_for_hit(sessions, session_key);
         }
-    }
-    if tun_origin_forward(&fwd_decision, &fwd_metadata, fwd_origin) {
-        return None;
     }
     let from_source = match reverse_companion_from_source(sessions, fwd_origin, &fwd_metadata) {
         Some(from_source) => from_source,
@@ -1506,8 +1582,30 @@ fn reverse_hit_zone_policy(
     }
     match zone_policy_deny_on_session_hit(forwarding, &input) {
         ZonePolicyJudgment::Permit => {
-            // #10507: reverse evidence only proves the reverse row's policy
-            // walk. Never stamp or update the forward companion here.
+            // #10507: reverse evidence does not stamp the forward policy
+            // provenance. It does, however, persist a FIB-stale companion's
+            // newly resolved route so reply-only streams do not repeat a full
+            // route lookup and judgment on every packet.
+            if companion_forwarding_stale {
+                let owner_rg_id = matches!(
+                    input.decision.resolution.disposition,
+                    ForwardingDisposition::ForwardCandidate
+                        | ForwardingDisposition::FabricRedirect
+                        | ForwardingDisposition::HAInactive
+                        | ForwardingDisposition::LocalDelivery
+                )
+                .then(|| {
+                    crate::afxdp::forwarding::owner_rg_for_resolution(
+                        forwarding,
+                        input.decision.resolution,
+                    )
+                });
+                sessions.revalidate_forwarding_resolution(
+                    &fwd_key,
+                    input.decision.resolution,
+                    owner_rg_id,
+                );
+            }
             sessions.mark_policy_revalidated(
                 &rev_canonical,
                 policy_kind_for_resolution(input.decision.resolution),
