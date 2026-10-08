@@ -42,13 +42,29 @@ jobs:
   rust:
     name: Rust workspace compile check
     runs-on: ubuntu-latest
+    # Use distro libraries that meet userspace-dp's validated version floors.
+    container:
+      image: debian:forky
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Install native dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential libelf-dev libxdp-dev pkg-config zlib1g-dev libzstd-dev
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            bash \
+            build-essential \
+            ca-certificates \
+            clang \
+            cmake \
+            curl \
+            git \
+            libelf-dev \
+            libxdp-dev \
+            nodejs \
+            pkg-config \
+            zlib1g-dev \
+            libzstd-dev
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.1
@@ -56,4 +72,6 @@ jobs:
         with:
           workspaces: userspace-dp
       - name: Check Rust workspace and all targets
-        run: cargo check --manifest-path userspace-dp/Cargo.toml --workspace --all-targets
+        run: >-
+          cargo check --manifest-path userspace-dp/Cargo.toml
+          --workspace --all-targets
