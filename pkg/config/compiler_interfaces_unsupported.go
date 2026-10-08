@@ -2,14 +2,13 @@ package config
 
 import "fmt"
 
-// compiler_interfaces_unsupported.go carries the #2008 H9/H10 parity
-// reject-at-commit gate for interface stanzas that xpf parses but cannot
-// honour. Both stanzas are silent-drops on master: the parser accepts
-// them, the compiler never reads them, and the userspace AF_XDP
-// dataplane has no mechanism to enforce them. Admitting them on a commit
-// is a silent functional lie, so the gate hard-rejects them at commit /
-// commit-check and warns (does not fail) on the tolerant load / peer-
-// sync paths per the #1960 fail-closed-on-load doctrine.
+// compiler_interfaces_unsupported.go carries reject-at-commit gates for
+// interface spellings that xpf parses but cannot honour. These unsupported
+// stanzas are silent-drops on master: the parser accepts them, the compiler
+// never reads them, and the userspace AF_XDP dataplane has no mechanism to
+// enforce them. Admitting them on commit is a silent functional lie, so the
+// strict path hard-rejects and the tolerant load / peer-sync path warns
+// instead of failing closed (#1960).
 //
 //   - H9: `interfaces <if> unit <n> family inet|inet6 policer arp <name>`
 //     — a per-logical-interface ARP policer. The dataplane has NO
@@ -23,6 +22,11 @@ import "fmt"
 //     node (programRethMAC, 02:bf:72:CC:RR:NN) and Junos treats the
 //     interface MAC as read-only, so a static override is both
 //     unimplemented and divergent.
+
+//   - #10293 / #12090: interface filter LISTS, uRPF, policer binds, unit-level
+//     `filter`, and `simple-filter` are not consumed by an InterfaceUnit hook.
+//     Only one-name `filter input|output` under family inet|inet6 is wired;
+//     every other spelling would silently leave the interface unfiltered.
 //   - #2354 / #5879: a QinQ / stacked-VLAN (802.1ad S-tag + 802.1Q C-tag)
 //     inner tag. The AF_XDP shim's parse_l2 unwinds exactly ONE VLAN tag,
 //     so a double-tagged frame keeps eth_proto=0x8100 → the dispatch `_`
@@ -47,6 +51,9 @@ import "fmt"
 // dataplane enforcement / interface identity — a committed `policer arp`
 // claims ARP is rate-limited and a committed `mac` claims a specific
 // hardware address, neither of which the running firewall delivers.
+// The #10293/#12090 filter aliases are the same false promise: the configured
+// security hook is silently absent unless the binding lands on the one typed
+// InterfaceUnit field.
 // Blocking the new operator edit at commit stops an operator deploying a
 // config they believe enforces security/identity when it does not; the
 // lenient load/peer-sync downgrade still lets an already-imported or
@@ -65,8 +72,8 @@ import "fmt"
 // and an `inactive:` stanza is ignored (#2008 H1 doctrine) for free.
 
 // validateUnsupportedInterfaceStanzasAST walks the `interfaces` subtree
-// of the group-expanded AST and rejects the H9/H10/#2354 silent-drop
-// stanzas.
+// of the group-expanded AST and rejects the H9/H10/#2354/#10293/#12090
+// silent-drop stanzas.
 //
 // Strict path (commit / commit-check, lenient=false): the first offending
 // stanza is a hard compile error, naming the exact interface/unit path.
@@ -80,9 +87,11 @@ import "fmt"
 // there is nothing to pick.
 //
 // Detection is scoped to the `interfaces` stanza so the firewall
-// `policer <name>` definition and the chassis `device-map interface ...
-// mac` identity key (both legitimate uses of these keywords elsewhere)
-// are never touched.
+// `policer <name>` definition and chassis `device-map interface ... mac`
+// identity key (both legitimate uses of these keywords elsewhere) are
+// never touched. The #12090 scan below also rejects every interface-tree
+// `filter` / `simple-filter` spelling outside the supported family hook.
+
 func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]string, error) {
 	// #5744: union across EVERY top-level `interfaces` root, not just the first.
 	// A hierarchical config can split its interfaces across two sibling
@@ -112,6 +121,39 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 		}
 		warnings = append(warnings, msg)
 		return nil
+	}
+	// #12090: the only supported filter keyword under interfaces is
+	// `unit <n> family inet|inet6 filter input|output <name>`, which has a
+	// typed InterfaceUnit hook. Anything else named `filter` or
+	// `simple-filter` is accepted by an open-world subtree but has no reader.
+	// Walk every interface subtree so another placement cannot silently
+	// expand the accepted population.
+	for _, iface := range ifaceChildren {
+		var walk func(*Node, []*Node) error
+		walk = func(n *Node, ancestors []*Node) error {
+			if n == nil {
+				return nil
+			}
+			if keyword := n.Name(); keyword == "simple-filter" ||
+				(keyword == "filter" && !isInterfaceFilterConsumerPath12090(ancestors)) {
+				if err := emit(
+					"interfaces %s: `%s` is not supported (xpf has no consumer "+
+						"for this interface binding; remove it) (#12090)",
+					iface.Name(), filterKeywordLabel12090(n)); err != nil {
+					return err
+				}
+			}
+			next := append(ancestors, n)
+			for _, child := range n.Children {
+				if err := walk(child, next); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if err := walk(iface, nil); err != nil {
+			return nil, err
+		}
 	}
 
 	// Each direct child of `interfaces` is a physical/aggregate interface
@@ -200,6 +242,40 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 		}
 	}
 	return warnings, nil
+}
+
+// isInterfaceFilterConsumerPath12090 reports whether a `filter` keyword is
+// directly below the only interface path with a typed hook. The family node
+// carries its AF in Keys[1] in both flat-set and hierarchical parser shapes.
+func isInterfaceFilterConsumerPath12090(ancestors []*Node) bool {
+	return len(ancestors) == 3 &&
+		ancestors[1].Name() == "unit" &&
+		ancestors[2].Name() == "family" &&
+		isInetFamily(ancestors[2])
+}
+
+// filterKeywordLabel12090 names a filter keyword and direction without
+// including authored filter names, which are operator-controlled values.
+func filterKeywordLabel12090(n *Node) string {
+	keyword := n.Name()
+	if len(n.Keys) >= 2 && isFilterDirection12090(n.Keys[1]) {
+		return keyword + " " + n.Keys[1]
+	}
+	for _, child := range n.Children {
+		if isFilterDirection12090(child.Name()) {
+			return keyword + " " + child.Name()
+		}
+	}
+	return keyword
+}
+
+func isFilterDirection12090(token string) bool {
+	switch token {
+	case "input", "output", "input-list", "output-list":
+		return true
+	default:
+		return false
+	}
 }
 
 // unsupportedInterfaceFilterKnobs returns the exact interface family-level
