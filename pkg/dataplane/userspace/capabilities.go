@@ -387,8 +387,19 @@ func expandUserspacePolicyApplications(cfg *config.Config, apps []string) ([]Pol
 	}
 	expanded := make([]PolicyApplicationSnapshot, 0, len(apps))
 	seen := make(map[string]struct{}, len(apps))
-	for _, appName := range apps {
+	for i, appName := range apps {
 		if appName == "" || appName == "any" {
+			// #12223: a wildcard must not hide a later defined application
+			// whose tolerant compile dropped part of its match. Unknown names
+			// remain the legacy compileApplications prepass's responsibility.
+			for _, laterAppName := range apps[i+1:] {
+				if laterAppName == "" || laterAppName == "any" || cfg == nil {
+					continue
+				}
+				if len(config.ApplicationReferenceMatchDrops(laterAppName, &cfg.Applications)) > 0 {
+					return nil, false
+				}
+			}
 			return nil, true
 		}
 		resolved, ok := resolveUserspaceApplicationNames(cfg, appName)
