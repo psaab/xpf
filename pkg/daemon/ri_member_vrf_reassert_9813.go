@@ -21,9 +21,9 @@ import (
 // Three properties keep this loop from fighting the code that owns these binds:
 //
 //   - It binds only a member whose master is NOT its VRF. BindInterfaceToVRF
-//     logs at Info on every call, so re-running the apply's bind loop on every
-//     tick would log on every tick of a healthy node (CLAUDE.md forbids that)
-//     and re-drive netlink for nothing.
+//     checks the live master before issuing LinkSetMaster, but still performs
+//     netlink lookups; checking drift first keeps healthy ticks free of those
+//     unnecessary calls.
 //   - It skips a tunnel that carries its own `routing-instance` stanza. Those
 //     are the tunnel manager's claim: it binds them in reconcileVRFClaimLocked
 //     case 1 and records the claim in appliedRI ONLY from its own successful

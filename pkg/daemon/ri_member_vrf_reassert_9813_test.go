@@ -283,8 +283,8 @@ func TestRIMemberAlreadyInItsVRFIsLeftAlone_9813(t *testing.T) {
 	}
 
 	if got := ops.recorded(); len(got) != 0 {
-		t.Errorf("a member already in its VRF drew %v binds; BindInterfaceToVRF logs at Info on every "+
-			"call, so a loop that re-binds unconditionally logs on every tick of a healthy node", got)
+		t.Errorf("a member already in its VRF drew %v binds; a healthy reassert tick must not "+
+			"issue LinkSetMaster calls", got)
 	}
 }
 

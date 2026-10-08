@@ -530,9 +530,9 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// device-map-teardown joins above) instead of swallowing at WARN, so a
 	// genuine bind failure fails the commit closed rather than reporting the
 	// management VRF configured while the interface carries no VRF membership.
-	// The management interfaces (fxp*/fab*/em*) exist by this phase, so the bind
-	// is transient-free (unlike the pre-networkd best-effort bind and the
-	// routing-instance tunnel-member binds in applyVRFReconcile).
+	// The management interfaces and configured VLAN children exist by this phase,
+	// so the bind is transient-free (unlike the pre-networkd best-effort bind and
+	// the routing-instance tunnel-member binds in applyVRFReconcile).
 	// #6805: the routing-instance member re-bind belongs at the SAME point and
 	// for the same reason — the devices exist by this phase. Step 0a runs before
 	// applyInterfaceReconcile creates tunnel/xfrmi devices, so a list-only

@@ -406,11 +406,12 @@ func logRIMemberDeviceConflict(conflict config.RoutingInstanceMemberDeviceConfli
 // second pass at the point where the devices are real, not a bind moved into the
 // tunnel manager.
 //
-// Idempotent: BindInterfaceToVRF is LinkByName + LinkSetMaster with no manager
-// state, so re-driving it on an already-bound member is a cheap no-op. That is
-// why the whole loop is re-run rather than narrowed to "only the tunnels" —
-// narrowing would need a second notion of which members are late-created, and
-// that is exactly the kind of second list that drifts from the first.
+// Idempotent: BindInterfaceToVRF checks the current master and calls
+// LinkSetMaster only when it differs from the target. Re-driving an already
+// bound member therefore avoids another master change. That is why the whole
+// loop is re-run rather than narrowed to "only the tunnels" — narrowing would
+// need a second notion of which members are late-created, and that is exactly
+// the kind of second list that drifts from the first.
 func (d *Daemon) rebindRoutingInstanceMembers(cfg *config.Config) {
 	d.bindRoutingInstanceMembers(cfg)
 }
@@ -488,9 +489,9 @@ func (d *Daemon) applyInterfaceReconcile(cfg *config.Config) error {
 }
 
 // managementVRFIfaceSet is the set of Linux interface names the daemon binds to
-// vrf-mgmt, keyed the way the DHCP-callback readers look them up
-// (config.LinuxIfName). Extracted from the apply path so the class rule has a
-// callable, testable entry point rather than living inline in a long reconcile.
+// vrf-mgmt, keyed as the DHCP-callback readers expect: config.LinuxIfName for
+// base devices and config.LogicalUnitDeviceKey for tagged VLAN units. Extracted
+// from the apply path so the class rule has a callable, testable entry point.
 //
 // #7515 / #10308: the class comes from config.IsManagementIfName, the SSOT
 // shared with the networkd `VRF=` emitter and the ip-monitoring next-hop
@@ -502,9 +503,20 @@ func managementVRFIfaceSet(cfg *config.Config) map[string]bool {
 	if cfg == nil {
 		return out
 	}
-	for name := range cfg.Interfaces.Interfaces {
-		if config.IsManagementIfName(name) {
-			out[config.LinuxIfName(name)] = true
+	for name, ifc := range cfg.Interfaces.Interfaces {
+		if !config.IsManagementIfName(name) {
+			continue
+		}
+		linuxName := config.LinuxIfName(name)
+		out[linuxName] = true
+		if ifc == nil || !ifc.VlanTagging {
+			continue
+		}
+		for unitNum, unit := range ifc.Units {
+			if unit == nil || unit.VlanID <= 0 {
+				continue
+			}
+			out[config.LogicalUnitDeviceKey(linuxName, unitNum, unit)] = true
 		}
 	}
 	return out
