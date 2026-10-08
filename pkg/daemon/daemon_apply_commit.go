@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
-
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
+	"log/slog"
 )
 
 // bootstrapFromFile reads the text Junos config file and imports it as the
@@ -431,7 +431,8 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	// config has converged on the dataplane. A peer push failure is independent:
 	// it must not erase the local applied proof, though it remains in the return
 	// error for reconnect/reconciliation.
-	if localErr == nil && d.policyInvalidationDebt == nil && d.store != nil {
+	if localErr == nil && d.policyInvalidationDebt == nil &&
+		d.policyInvalidationPublishLanded && d.store != nil {
 		d.store.MarkActiveApplied()
 	}
 	resp := compiled
@@ -822,6 +823,13 @@ func (d *Daemon) syncAndApplyWithAncestry(
 		return nil, applyErr
 	}
 	armedActive = true
+	if applyErr == nil && !d.policyInvalidationPublishLanded {
+		completion := d.deferredSnapshotCompletionForConfig(compiled)
+		if completion == nil {
+			return compiled, errors.New("deferred config snapshot has no publication completion")
+		}
+		return compiled, &cluster.ConfigApplyPendingError{Completion: completion}
+	}
 	return compiled, applyErr
 }
 

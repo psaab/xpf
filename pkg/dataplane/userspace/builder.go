@@ -69,6 +69,18 @@ func (m *Manager) SetPolicySnapshotCommitter(committer func(configGeneration uin
 	m.mu.Unlock()
 }
 
+// SetPolicySnapshotPublishFailure wires notification of an in-band rejection
+// while the status loop is trying to land a deferred full snapshot. The callback
+// may run with Manager.mu held and must be non-blocking.
+func (m *Manager) SetPolicySnapshotPublishFailure(callback func(uint64, error)) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.policySnapshotPublishFailure = callback
+	m.mu.Unlock()
+}
+
 // SetPolicySnapshotPrePublisher wires a callback run by the status loop just
 // before it publishes a deferred full snapshot. The callback runs without
 // Manager.mu held because daemon-side candidate capture may issue a helper

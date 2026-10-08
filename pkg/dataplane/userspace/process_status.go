@@ -2,6 +2,7 @@ package userspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -205,6 +206,9 @@ func (m *Manager) syncSnapshotLocked() error {
 	// snapshot (fail OPEN). publishSnapshotFailClosedLocked disables ctrl on a
 	// rejection so transit drops to the kernel-only fail-closed posture.
 	if err := m.publishSnapshotFailClosedLocked(&publishSnap, &status, true); err != nil {
+		if errors.Is(err, errHelperRejected) && m.policySnapshotPublishFailure != nil {
+			m.policySnapshotPublishFailure(m.lastSnapshot.Generation, err)
+		}
 		return err
 	}
 	// The deferred snapshot has now landed in the helper. Commit its scheduler

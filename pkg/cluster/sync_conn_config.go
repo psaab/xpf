@@ -11,6 +11,17 @@ import (
 	"github.com/psaab/xpf/pkg/configstore"
 )
 
+// ConfigApplyPendingError reports that the apply has not converged yet. The
+// config-apply loop keeps the received generation fenced and waits for the
+// completion channel before advancing high-water or sending an ACK.
+type ConfigApplyPendingError struct {
+	Completion <-chan error
+}
+
+func (e *ConfigApplyPendingError) Error() string {
+	return "config apply pending publication"
+}
+
 // DefaultConfigApplyFailGrace is how long a received config-sync generation may
 // stay un-applied — apply hard-failing, standby config stale, high-water pinned
 // per M-2/#4151 — before the node raises the CF config-sync monitor-failure /
@@ -27,10 +38,9 @@ import (
 // RG0-primary config rejection — which clears within a few seconds as the local
 // node settles ownership — so a genuine persistent apply failure surfaces to
 // the operator promptly while a momentary rejection never flaps the flag (the
-// timer is cancelled by the intervening successful apply). It clears on the
-// first successful apply. Sized off the peer-loss / transfer-lease timescale
-// (DefaultRemoteTransferOutLease is 30s); tests override via
-// SessionSync.configApplyFailGrace and SessionSync.afterFuncFn.
+// timer is cancelled by the intervening successful apply). Sized off the peer-
+// loss / transfer-lease timescale (DefaultRemoteTransferOutLease is 30s); tests
+// override via SessionSync.configApplyFailGrace and afterFuncFn.
 const DefaultConfigApplyFailGrace = 30 * time.Second
 
 // nowMono returns CLOCK_MONOTONIC nanos, honoring the test injection seam
@@ -747,6 +757,23 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 				applyErr = s.OnConfigReceivedWithAncestry(item.text, item.ancestry)
 			} else {
 				applyErr = s.OnConfigReceived(item.text)
+			}
+			// A deferred userspace publish owns this generation until its status
+			// tick reports that the helper accepted it. Keep the apply fence up
+			// and do not ACK/high-water it early; a refusal resolves the channel
+			// with an error and follows the ordinary NACK path below.
+			var pending *ConfigApplyPendingError
+			if errors.As(applyErr, &pending) {
+				if pending.Completion == nil {
+					applyErr = errors.New("config apply returned an empty publication completion")
+				} else {
+					select {
+					case <-ctx.Done():
+						s.endConfigApply()
+						return
+					case applyErr = <-pending.Completion:
+					}
+				}
 			}
 			if applyErr != nil {
 				// transient RG0-primary rejection). Do NOT advance the

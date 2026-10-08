@@ -169,9 +169,10 @@ type Manager struct {
 	cfg                                config.UserspaceConfig
 	clusterHA                          bool
 	captureEpochProvider               CaptureEpochProvider
-	captureAuthorityCommitter          func(configGeneration uint64, fibGeneration uint32, captureGeneration uint64)
 	policySnapshotCommitter            func(configGeneration uint64)
 	policySnapshotPrePublisher         func(generation uint64) error
+	policySnapshotPublishFailure       func(generation uint64, err error)
+	captureAuthorityCommitter          func(configGeneration uint64, fibGeneration uint32, captureGeneration uint64)
 	// helperHAStatePublished records whether THIS helper process has been sent a
 	// clustered HA inventory at least once (a successful update_ha_state with a
 	// non-empty group set). It is NOT derivable from len(m.haGroups): that is the

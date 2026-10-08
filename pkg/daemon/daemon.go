@@ -736,9 +736,14 @@ type Daemon struct {
 	// Coalesces repeated manager completion callbacks while the serialized
 	// invalidation worker is queued or running.
 	policyInvalidationDischargeWorker atomic.Bool
+	// deferredSnapshotApply retains a not-yet-published full snapshot's digest
+	// and HA completion until the status loop reports publication or refusal.
+	deferredSnapshotApplyMu sync.Mutex
+	deferredSnapshotApply   *deferredSnapshotApply
 	// policyInvalidationPublishLanded is reset for each apply and set only when
 	// its full snapshot is known published (or there is no dataplane). It gates
-	// the three commit-time invalidation call sites.
+	// policy invalidations and applied markers. Deferred configs remain pending
+	// until a status-loop publication callback settles their captured digest.
 	policyInvalidationPublishLanded bool
 	// policyInvalidationDebtAdopted is true when a bare retry apply re-captures
 	// a previously failed/deferred pair; applyConfigLocked discharges that debt
