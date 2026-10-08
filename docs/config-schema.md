@@ -15792,8 +15792,9 @@ packed the whole line onto one leaf node and the compiler dropped it.
   produces. The `start-time`/`stop-time` slots are `ValueTimeOfDay` +
   `ValidateTimeOfDay`, and `start-date`/`stop-date` are `ValueDate` +
   `ValidateDate`, so a malformed window is rejected at commit (the
-  fail-closed-at-commit half). Unknown keywords stay lenient
-  (`schema_walk.go`), so no valid scheduler config is newly rejected.
+  fail-closed-at-commit half). The `scheduler <name>` node is
+  closed-world (#12239): strict validation rejects unknown weekday names and
+  unknown children inside a day window, reporting the scheduler path.
 - **fail-closed runtime** — `isWithinWindow` no longer returns
   always-true on an empty window. A scheduler that resolves to NO window
   for a given instant (no daily window, no applicable per-day override,
@@ -15808,6 +15809,14 @@ packed the whole line onto one leaf node and the compiler dropped it.
   per-day evaluation: `pkg/scheduler/scheduler_3849_test.go` and the
   updated `pkg/scheduler/scheduler_test.go`
   (`TestIsWithinWindow_NoWindowFailsClosed`).
+
+The #12239 regression in
+`pkg/config/schema_closedworld_time_range_scheduler_12239_test.go` pins a
+misspelled `modnay` on a scheduled deny and an unknown day-window leaf; the
+error names the scheduler. The empty-scheduler control remains valid, and
+`TestIsWithinWindow_NoWindowFailsClosed` continues to pin its inactive runtime
+behavior. The instance-name schema ratchet records `/schedulers/scheduler` as
+closed-world.
 
 ### #11305 — Junos-native scheduler time and date-time forms
 

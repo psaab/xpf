@@ -46,6 +46,7 @@ var schemaSchedulers = &schemaNode{
 			args:        1,
 			multi:       true,
 			placeholder: "<scheduler-name>",
+			closedWorld: true,
 			children: map[string]*schemaNode{
 				// Legacy simplified shape: start-time/stop-time as direct
 				// children of the scheduler (the daily window).
