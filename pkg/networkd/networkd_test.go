@@ -131,13 +131,13 @@ func TestFindExternallyManaged(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "99-custom.link"), []byte("[Match]\nName=foo\n"), 0644)
 
 	result := FindExternallyManaged(dir)
-	if !result["eth0"] {
+	if !result.Matches("eth0", "") {
 		t.Error("eth0 should be externally managed")
 	}
-	if result["trust0"] {
+	if result.Matches("trust0", "") {
 		t.Error("trust0 should not be externally managed (has xpf prefix)")
 	}
-	if result["foo"] {
+	if result.Matches("foo", "") {
 		t.Error("foo should not match (was .link, not .network)")
 	}
 }

@@ -20,8 +20,8 @@ Triggers `networkctl reload` only when files actually changed.
 - `Apply(...)` — `networkd.go`. Also the TEARDOWN entry point: `Apply(nil)`
   sweeps every managed file and reloads (#2988). There is no separate `Clear`;
   see the retirement note below (#6852).
-- `FindExternallyManaged(dir string) map[string]bool` — `networkd.go`. Detects networkd files
-  the daemon doesn't own.
+- `FindExternallyManaged(dir string) ExternalMatchSet` — `networkd.go`. Detects non-xpf
+  network files whose supported `Name=` / `MACAddress=` match rules are safe to evaluate.
 
 ## Callers
 

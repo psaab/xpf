@@ -567,7 +567,8 @@ func compileZones(dp DataPlane, cfg *config.Config, result *CompileResult) error
 	buildInterfaceNetworkdModels(cfg, result, seen)
 	buildFabricBondModels(cfg, result, seen)
 	buildBridgeDomainModels(cfg, result, seen)
-	stripUnmanagedInterfaces(cfg, result, seen)
+	externalNetwork := networkd.FindExternallyManaged(networkd.DefaultNetworkDir)
+	stripUnmanagedInterfaces(cfg, result, seen, externalNetwork)
 
 	// Delete stale zone/VLAN map entries no longer in the config.
 	dp.DeleteStaleIfaceZone(st.writtenIfaceZone)
@@ -1710,12 +1711,17 @@ func buildBridgeDomainModels(cfg *config.Config, result *CompileResult, seen map
 
 }
 
-// stripUnmanagedInterfaces discovers every system interface and marks the
-// unconfigured ones unmanaged: bring them down and remove non-link-local
-// addresses so traffic cannot leak through an unconfigured path. Daemon-owned
-// devices, the #1922 protected set, and (#1956) leave-alone unmapped NICs are
-// skipped.
-func stripUnmanagedInterfaces(cfg *config.Config, result *CompileResult, seen map[string]bool) {
+// stripUnmanagedInterfaces discovers all system interfaces and marks unconfigured
+// ones unmanaged: bring them down and remove non-link-local addresses so traffic
+// cannot leak through an unconfigured path. Daemon-owned devices, the #1922
+// protected set, (#1956) leave-alone unmapped NICs, and interfaces owned by a
+// matching external networkd file are skipped (#12135).
+func stripUnmanagedInterfaces(
+	cfg *config.Config,
+	result *CompileResult,
+	seen map[string]bool,
+	externalNetwork networkd.ExternalMatchSet,
+) {
 	// Discover all system interfaces and mark unconfigured ones as unmanaged.
 	// Unmanaged interfaces are brought down and have addresses removed to
 	// prevent traffic leaking through unconfigured paths.
@@ -1787,7 +1793,6 @@ func stripUnmanagedInterfaces(cfg *config.Config, result *CompileResult, seen ma
 			mappedLinuxNames[config.LinuxIfName(e.LogicalName)] = true
 		}
 	}
-
 	allIfaces, _ := net.Interfaces()
 	for _, iface := range allIfaces {
 		name := iface.Name
@@ -1810,6 +1815,10 @@ func stripUnmanagedInterfaces(cfg *config.Config, result *CompileResult, seen ma
 		}
 		mac := iface.HardwareAddr.String()
 		if mac == "" {
+			continue
+		}
+		if externalNetwork.Matches(name, mac) {
+			slog.Debug("leaving externally managed interface untouched", "name", name)
 			continue
 		}
 
