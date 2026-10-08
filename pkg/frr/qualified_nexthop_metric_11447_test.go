@@ -175,13 +175,67 @@ func TestQualifiedNextHopMetricSupportsHostAndIPv6Routes11447(t *testing.T) {
 			StaticRoutes:  compiled.RoutingOptions.StaticRoutes,
 			PolicyOptions: &compiled.PolicyOptions,
 		})
-		if !strings.Contains(rendered, "redistribute static route-map ") ||
-			!strings.Contains(rendered, "match ipv6 address prefix-list ") ||
-			!strings.Contains(rendered, "match ipv6 next-hop prefix-list ") ||
-			!strings.Contains(rendered, "set metric 10\n") {
-			t.Fatalf("IPv6 QNH metric was not rendered in the OSPFv3 redistribution route-map:\n%s", rendered)
+		if !strings.Contains(rendered, "router ospf6\n redistribute static\n") ||
+			strings.Contains(rendered, "redistribute static route-map ") ||
+			strings.Contains(rendered, "match ipv6 address prefix-list ") ||
+			strings.Contains(rendered, "match ipv6 next-hop prefix-list ") ||
+			strings.Contains(rendered, "set metric 10\n") {
+			t.Fatalf("OSPFv3 cannot evaluate the IPv6 next-hop discriminator, so its redistribution must not attach a QNH metric map:\n%s", rendered)
 		}
 	})
+}
+
+func TestQualifiedNextHopMetricGatesIGPsByMatchCapability12071(t *testing.T) {
+	compiled := compileQNHMetricConfig11447(t,
+		"set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10",
+		"set routing-options static route 2001:db8:10::/64 qualified-next-hop 2001:db8::10 metric 20",
+		"set protocols ospf export static",
+		"set protocols ospf3 area 0.0.0.0 interface ge-0/0/0.0",
+		"set protocols ospf3 export static",
+		"set protocols rip group g neighbor ge-0/0/0.0",
+		"set protocols rip redistribute static",
+		"set protocols isis interface ge-0/0/0.0",
+		"set protocols isis export static",
+	)
+	rendered := New().buildManagedSection(&FullConfig{
+		OSPF:          compiled.Protocols.OSPF,
+		OSPFv3:        compiled.Protocols.OSPFv3,
+		RIP:           compiled.Protocols.RIP,
+		ISIS:          compiled.Protocols.ISIS,
+		StaticRoutes:  compiled.RoutingOptions.StaticRoutes,
+		PolicyOptions: &compiled.PolicyOptions,
+	})
+
+	var qnhMap string
+	for _, line := range strings.Split(rendered, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "redistribute static route-map ") {
+			qnhMap = strings.TrimPrefix(line, "redistribute static route-map ")
+			break
+		}
+	}
+	if qnhMap == "" {
+		t.Fatalf("OSPF static export must attach the QNH metric map:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "router ospf\n redistribute static route-map "+qnhMap+"\n") ||
+		!strings.Contains(rendered, "router rip\n network ge-0/0/0.0\n redistribute static route-map "+qnhMap+"\n") {
+		t.Fatalf("the fully capable IPv4 daemons must attach the shared QNH metric map:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "router ospf6\n redistribute static\n") ||
+		strings.Contains(rendered, "router ospf6\n redistribute static route-map "+qnhMap) ||
+		!strings.Contains(rendered, "redistribute ipv4 static level-2\n") ||
+		strings.Contains(rendered, "redistribute ipv4 static level-2 route-map "+qnhMap) ||
+		strings.Contains(rendered, "redistribute ipv6 static level-2 route-map "+qnhMap) {
+		t.Fatalf("OSPFv3 and IS-IS must not attach the QNH map without next-hop match support:\n%s", rendered)
+	}
+	mapBlock := routeMapBlock11447(rendered, qnhMap)
+	if !strings.Contains(mapBlock, "match ip address prefix-list ") ||
+		!strings.Contains(mapBlock, "match ip next-hop prefix-list ") ||
+		!strings.Contains(mapBlock, "set metric 10\n") ||
+		strings.Contains(mapBlock, "match ipv6 ") ||
+		strings.Contains(mapBlock, "set metric 20\n") {
+		t.Fatalf("shared QNH map must contain only fully discriminated IPv4 metric rules:\n%s", mapBlock)
+	}
 }
 
 func TestFRRLoadQualifiedNextHopMetric11447(t *testing.T) {

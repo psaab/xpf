@@ -39,6 +39,62 @@ type qnhMetricSet11447 struct {
 	instances []*qnhMetricScope11447
 }
 
+// qnhMetricMatchCaps11447 records the match commands installed by each
+// protocol daemon. A generated metric sequence is useful only when its
+// destination and configured next-hop discriminators both survive evaluation.
+type qnhMetricMatchCaps11447 struct {
+	ipv4Destination bool
+	ipv6Destination bool
+	ipv4NextHop     bool
+	ipv6NextHop     bool
+	interfaceMatch  bool
+}
+
+var qnhMetricMatchCapabilities11447 = map[string]qnhMetricMatchCaps11447{
+	"ospf":  {ipv4Destination: true, ipv4NextHop: true, interfaceMatch: true},
+	"rip":   {ipv4Destination: true, ipv4NextHop: true, interfaceMatch: true},
+	"ospf6": {ipv6Destination: true, interfaceMatch: true},
+	"isis":  {ipv4Destination: true, ipv6Destination: true},
+}
+
+func qnhMetricRouteMatchesWithCaps11447(route qnhMetricRoute11447, caps qnhMetricMatchCaps11447) bool {
+	if route.ipv6 {
+		if !caps.ipv6Destination || (route.nextHop != "" && !caps.ipv6NextHop) {
+			return false
+		}
+	} else if !caps.ipv4Destination || (route.nextHop != "" && !caps.ipv4NextHop) {
+		return false
+	}
+	if route.interfaceName != "" && !caps.interfaceMatch {
+		return false
+	}
+	return route.nextHop != "" || route.interfaceName != ""
+}
+
+// The static QNH map is shared by ospfd and ripd. Keep only rules both
+// daemons can evaluate so either attachment sees the same fully-qualified
+// IPv4 match sequence; neither FRR 10.6 daemon supports IPv6 redistribution.
+func qnhMetricRouteSafeForSharedMap11447(route qnhMetricRoute11447) bool {
+	return qnhMetricRouteMatchesWithCaps11447(route, qnhMetricMatchCapabilities11447["ospf"]) &&
+		qnhMetricRouteMatchesWithCaps11447(route, qnhMetricMatchCapabilities11447["rip"])
+}
+
+func qnhMetricScopeForDaemon11447(scope *qnhMetricScope11447, daemon string) *qnhMetricScope11447 {
+	if scope == nil || len(scope.routes) == 0 {
+		return nil
+	}
+	caps, ok := qnhMetricMatchCapabilities11447[daemon]
+	if !ok {
+		return nil
+	}
+	for _, route := range scope.routes {
+		if !qnhMetricRouteMatchesWithCaps11447(route, caps) {
+			return nil
+		}
+	}
+	return scope
+}
+
 func qnhMetricName11447(kind, identity string) string {
 	sum := sha256.Sum256([]byte(kind + "\x00" + identity))
 	return "xpf-qnh-" + kind + "-" + hex.EncodeToString(sum[:])[:16] + config.ReservedRedistSuffix
@@ -121,6 +177,9 @@ func buildQNHMetricScope11447(key string, resolveIfName func(string) string, rou
 					}
 				}
 				if entry.nextHop == "" && entry.interfaceName == "" {
+					continue
+				}
+				if !qnhMetricRouteSafeForSharedMap11447(entry) {
 					continue
 				}
 				entry.destinationList = qnhMetricPrefixListName11447("dst", key+"\x00"+route.Destination+"\x00"+entry.nextHop+"\x00"+entry.interfaceName)

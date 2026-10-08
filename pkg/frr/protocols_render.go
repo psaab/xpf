@@ -169,7 +169,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			fmt.Fprintf(&b, " maximum-paths %d\n", ecmpMaxPaths)
 		}
 		for _, export := range ospf.Export {
-			b.WriteString(m.resolveRedistribute(export, policyOptions, "ospf", bgpAcceptDefault, qnhMetrics))
+			b.WriteString(m.resolveRedistribute(export, policyOptions, "ospf", bgpAcceptDefault, qnhMetricScopeForDaemon11447(qnhMetrics, "ospf")))
 		}
 		b.WriteString("exit\n!\n")
 		// OSPF interface settings + per-interface area activation. The
@@ -289,7 +289,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			}
 		}
 		for _, export := range ospfv3.Export {
-			b.WriteString(m.resolveRedistribute(export, policyOptions, "ospf6", bgpAcceptDefault, qnhMetrics))
+			b.WriteString(m.resolveRedistribute(export, policyOptions, "ospf6", bgpAcceptDefault, qnhMetricScopeForDaemon11447(qnhMetrics, "ospf6")))
 		}
 		b.WriteString("exit\n!\n")
 		// OSPFv3 interface settings + per-interface area activation. FRR
@@ -795,7 +795,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 			fmt.Fprintf(&b, " passive-interface %s\n", iface)
 		}
 		for _, r := range rip.Redistribute {
-			b.WriteString(m.resolveRedistribute(r, policyOptions, "rip", bgpAcceptDefault, qnhMetrics))
+			b.WriteString(m.resolveRedistribute(r, policyOptions, "rip", bgpAcceptDefault, qnhMetricScopeForDaemon11447(qnhMetrics, "rip")))
 		}
 		b.WriteString("exit\n!\n")
 		// RIP per-interface authentication
@@ -876,7 +876,7 @@ func (m *Manager) generateProtocolsWithQNH11447(ospf *config.OSPFConfig, ospfv3 
 		}
 		for _, export := range isis.Export {
 			// #9666: isisd's grammar, not the OSPF-shaped line.
-			b.WriteString(m.resolveISISRedistribute(export, policyOptions, isis.Level, bgpAcceptDefault, qnhMetrics))
+			b.WriteString(m.resolveISISRedistribute(export, policyOptions, isis.Level, bgpAcceptDefault, qnhMetricScopeForDaemon11447(qnhMetrics, "isis")))
 		}
 		if isis.WideMetricsOnly {
 			b.WriteString(" metric-style wide\n")
