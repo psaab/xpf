@@ -49,6 +49,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 const LAN_IFINDEX: i32 = 24;
 const WAN_IFINDEX: i32 = 12;
+/// Configured VID for the `reth0.80` WAN fixture.
+const WAN_VLAN_ID: u16 = 80;
 const DMZ_IFINDEX: i32 = 26;
 const REVOCATION_DMZ_MAC: [u8; 6] = [0x02, 0xbf, 0x72, 0x02, 0x00, 0x01];
 /// A MAC-less egress: routable, but absent from the unambiguous zone ledger.
@@ -57,6 +59,21 @@ const SRC: Ipv4Addr = Ipv4Addr::new(10, 0, 61, 102);
 const DST: Ipv4Addr = Ipv4Addr::new(172, 16, 80, 200);
 const SPORT: u16 = 12345;
 const DPORT: u16 = 443;
+
+/// Packet metadata for the tagged `reth0.80` fixture; the generic constructors
+/// default to VID 0, which the common ingress guard correctly rejects here.
+fn txn_wan_meta_v4(tcp_flags: u8, pkt_len: u16) -> UserspaceDpMeta {
+    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, tcp_flags, pkt_len);
+    meta.ingress_vlan_id = WAN_VLAN_ID;
+    meta
+}
+
+fn txn_wan_meta_v6(tcp_flags: u8, frame_len: usize) -> UserspaceDpMeta {
+    let mut meta = txn_meta_v6(WAN_IFINDEX as u32, frame_len);
+    meta.tcp_flags = tcp_flags;
+    meta.ingress_vlan_id = WAN_VLAN_ID;
+    meta
+}
 
 /// `policy_deny_snapshot` permits `dmz -> wan` only, with `default_policy:
 /// deny`. Adding a `lan -> wan` permit is the "policy admits this flow" state;
@@ -71,6 +88,10 @@ const DPORT: u16 = 443;
 /// third point, and it is the one the collapsed arm got wrong: a non-forwarding
 /// verdict that was re-stamped as revalidated and kept forwarding.
 fn forwarding_with_lan_rule(lan_action: Option<&str>) -> ForwardingState {
+    build_forwarding_state(&snapshot_with_lan_rule(lan_action))
+}
+
+fn snapshot_with_lan_rule(lan_action: Option<&str>) -> crate::ConfigSnapshot {
     let mut snapshot = policy_deny_snapshot();
     snapshot.generation = 7;
     snapshot.fib_generation = 9;
@@ -93,7 +114,8 @@ fn forwarding_with_lan_rule(lan_action: Option<&str>) -> ForwardingState {
         table: "inet.0".into(),
         family: "inet".into(),
         destination: "198.51.100.0/24".into(),
-        next_hops: vec!["st0.0".into()],
+        // #12036: interface-only next hops use `@interface`; a bare name is unresolved.
+        next_hops: vec!["@st0.0".into()],
         next_hop_weights: vec![],
         discard: false,
         next_table: String::new(),
@@ -109,11 +131,46 @@ fn forwarding_with_lan_rule(lan_action: Option<&str>) -> ForwardingState {
             source_addresses: vec!["any".into()],
             destination_addresses: vec!["any".into()],
             applications: vec!["any".into()],
-            application_terms: Vec::new(),
             action: action.into(),
             ..Default::default()
         });
     }
+    snapshot
+}
+
+/// #9604: the reverse reply needs an actual LAN return path, not just a
+/// session hit. The address and neighbor resolve 10.0.61.102 on reth1.0;
+/// RG1/RG2 match the active `txn_ha_state` so HA enforcement keeps it local.
+fn forwarding_with_lan_return_route_9604() -> ForwardingState {
+    let mut snapshot = snapshot_with_lan_rule(Some("permit"));
+    let wan = snapshot
+        .interfaces
+        .iter_mut()
+        .find(|interface| interface.name == "reth0.80")
+        .expect("policy fixture must have the WAN interface");
+    wan.redundancy_group = 2;
+    let lan = snapshot
+        .interfaces
+        .iter_mut()
+        .find(|interface| interface.name == "reth1.0")
+        .expect("policy fixture must have the LAN interface");
+    lan.redundancy_group = 1;
+    lan.addresses.push(crate::InterfaceAddressSnapshot {
+        family: "inet".into(),
+        address: "10.0.61.1/24".into(),
+        scope: 0,
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-1".into(),
+        ifindex: LAN_IFINDEX,
+        family: "inet".into(),
+        ip: SRC.to_string(),
+        mac: "02:00:00:61:00:02".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
     build_forwarding_state(&snapshot)
 }
 fn forwarding_with_scheduled_lan_rule_11285() -> ForwardingState {
@@ -1626,8 +1683,8 @@ fn forwarding_with_reverse_icmp_split_10637() -> ForwardingState {
 }
 
 /// A wan-side frame of the live `lan -> wan` query session: swapped tuple,
-/// arriving on the wan unit untagged exactly as the #9519 authority cells
-/// drive it (zone resolution keys off the ingress ifindex, not the tag).
+/// arriving on the configured `reth0.80` VLAN child with VID 80. The metadata
+/// must carry that VID so the common ingress guard admits the reply.
 fn icmp_reverse_frame_10637(icmp_type: u8) -> Vec<u8> {
     let mut frame = build_icmp_echo_frame_v4(DST, SRC, 64, TEST_WAN_MAC);
     frame[34] = icmp_type;
@@ -1646,7 +1703,7 @@ fn drive_reverse_icmp_type_10637(
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, WAN_IFINDEX, 0);
     binding.interface = Arc::<str>::from("reth0.80");
     let frame = icmp_reverse_frame_10637(icmp_type);
-    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, 0, frame.len() as u16);
+    let mut meta = txn_wan_meta_v4(0, frame.len() as u16);
     meta.protocol = PROTO_ICMP;
     meta.payload_offset = 42;
     let (_batch, dbg) = txn_run_descriptor_checked(
@@ -2279,7 +2336,7 @@ fn dnat_frames() -> (Vec<u8>, UserspaceDpMeta, Vec<u8>, UserspaceDpMeta) {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let meta_syn = txn_meta_v4(WAN_INGRESS_IFINDEX as u32, TCP_FLAG_SYN, syn.len() as u16);
+    let meta_syn = txn_wan_meta_v4(TCP_FLAG_SYN, syn.len() as u16);
     let ack = build_txn_tcp_syn_frame_v4(
         DNAT_CLIENT,
         DNAT_VIP,
@@ -2288,7 +2345,7 @@ fn dnat_frames() -> (Vec<u8>, UserspaceDpMeta, Vec<u8>, UserspaceDpMeta) {
         TCP_ACK,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let meta_ack = txn_meta_v4(WAN_INGRESS_IFINDEX as u32, TCP_ACK, ack.len() as u16);
+    let meta_ack = txn_wan_meta_v4(TCP_ACK, ack.len() as u16);
     (syn, meta_syn, ack, meta_ack)
 }
 
@@ -2463,8 +2520,7 @@ fn an_unchanged_nptv6_policy_does_not_revoke_the_established_session_9382() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let mut meta_syn = txn_meta_v6(WAN_INGRESS_IFINDEX as u32, syn.len());
-    meta_syn.tcp_flags = TCP_FLAG_SYN;
+    let meta_syn = txn_wan_meta_v6(TCP_FLAG_SYN, syn.len());
     let ack = build_txn_tcp_frame_v6(
         src,
         dst,
@@ -2473,8 +2529,7 @@ fn an_unchanged_nptv6_policy_does_not_revoke_the_established_session_9382() {
         TCP_ACK,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let mut meta_ack = txn_meta_v6(WAN_INGRESS_IFINDEX as u32, ack.len());
-    meta_ack.tcp_flags = TCP_ACK;
+    let meta_ack = txn_wan_meta_v6(TCP_ACK, ack.len());
 
     let out = admit_then_one_more_packet(
         inbound_nptv6_snapshot(wan_to_lan_permit(
@@ -3475,7 +3530,7 @@ fn the_ordinary_admission_path_does_record_a_hit_9385() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    let meta = txn_wan_meta_v4(TCP_FLAG_SYN, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -3590,7 +3645,7 @@ fn the_ordinary_admission_path_does_record_a_default_hit_9385() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    let meta = txn_wan_meta_v4(TCP_FLAG_SYN, frame.len() as u16);
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -3756,7 +3811,11 @@ fn reverse_tcp_frame_v4_9604(
         TCP_ACK,
         dst_mac,
     );
-    let meta = txn_meta_v4(arrival_ifindex as u32, TCP_ACK, frame.len() as u16);
+    let meta = if arrival_ifindex == WAN_IFINDEX {
+        txn_wan_meta_v4(TCP_ACK, frame.len() as u16)
+    } else {
+        txn_meta_v4(arrival_ifindex as u32, TCP_ACK, frame.len() as u16)
+    };
     (frame, meta)
 }
 
@@ -3782,8 +3841,13 @@ fn reverse_tcp_frame_v6_9604(
         TCP_ACK,
         dst_mac,
     );
-    let mut meta = txn_meta_v6(arrival_ifindex as u32, frame.len());
-    meta.tcp_flags = TCP_ACK;
+    let meta = if arrival_ifindex == WAN_IFINDEX {
+        txn_wan_meta_v6(TCP_ACK, frame.len())
+    } else {
+        let mut meta = txn_meta_v6(arrival_ifindex as u32, frame.len());
+        meta.tcp_flags = TCP_ACK;
+        meta
+    };
     (frame, meta)
 }
 
@@ -4417,7 +4481,7 @@ fn drive_nat64_icmp_reply_9604(
         ICMP_ID,
         TEST_WAN_MAC,
     );
-    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, 0, frame.len() as u16);
+    let mut meta = txn_wan_meta_v4(0, frame.len() as u16);
     meta.protocol = PROTO_ICMP;
     meta.payload_offset = 42;
     let mut binding = binding_for_9604(WAN_IFINDEX, "reth0.80");
@@ -5357,7 +5421,7 @@ fn same_generation_reverse_then_forward_kept_9604() {
 /// meaningless without proof the instrument can move.
 #[test]
 fn reverse_re_derivation_records_no_hit_9604() {
-    let forwarding = forwarding_with_lan_rule(Some("permit"));
+    let forwarding = forwarding_with_lan_return_route_9604();
     let (rule_before, default_before) = policy_hit_counts_9385(&forwarding);
     assert_ne!(rule_before, u64::MAX, "the `lan-out` rule must exist");
     let mut sessions = SessionTable::new();
@@ -5377,6 +5441,7 @@ fn reverse_re_derivation_records_no_hit_9604() {
         (1, 0),
         "the reverse packet must hit and keep"
     );
+    assert_eq!(out.tx, 1, "the reply must forward over its LAN return path");
     let (rule_after, default_after) = policy_hit_counts_9385(&forwarding);
     assert_eq!(
         rule_after, rule_before,
@@ -6119,6 +6184,77 @@ fn forwarding_with_fabric_dmz_10507() -> ForwardingState {
         router: false,
         link_local: false,
     });
+    build_forwarding_state(&snapshot)
+}
+
+/// A no-fabric HA snapshot whose DMZ FIB still resolves to the inactive RG.
+/// Without the DMZ route this refresh sees NoRoute, not HAInactive, and the
+/// RecordedEgress preservation guard is never exercised.
+fn forwarding_without_fabric_dmz_10507() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.generation = 7;
+    snapshot.fib_generation = 9;
+    snapshot.policies.push(PolicyRuleSnapshot {
+        name: "lan-out".into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["any".into()],
+        application_terms: Vec::new(),
+        action: "permit".into(),
+        ..Default::default()
+    });
+    snapshot.zones.push(crate::ZoneSnapshot {
+        name: "dmz".to_string(),
+        id: TEST_DMZ_ZONE_ID,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["any-service".to_string()],
+        ..Default::default()
+    });
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".to_string(),
+        zone: "dmz".to_string(),
+        linux_name: "ge-0-0-2".to_string(),
+        ifindex: DMZ_IFINDEX,
+        redundancy_group: 1,
+        hardware_addr: "02:bf:72:02:00:01".to_string(),
+        addresses: vec![crate::InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "203.0.113.1/24".to_string(),
+            scope: 0,
+        }],
+        ..Default::default()
+    });
+    snapshot.routes.push(RouteSnapshot {
+        table: "inet.0".to_string(),
+        family: "inet".to_string(),
+        destination: "203.0.113.0/24".to_string(),
+        next_hops: vec!["203.0.113.2@reth2.0".to_string()],
+        ..Default::default()
+    });
+    snapshot.neighbors.extend([
+        NeighborSnapshot {
+            interface: "ge-0-0-2".to_string(),
+            ifindex: DMZ_IFINDEX,
+            family: "inet".to_string(),
+            ip: "203.0.113.2".to_string(),
+            mac: "00:aa:bb:cc:dd:ee".to_string(),
+            state: "reachable".to_string(),
+            router: true,
+            link_local: false,
+        },
+        NeighborSnapshot {
+            interface: "ge-0-0-2".to_string(),
+            ifindex: DMZ_IFINDEX,
+            family: "inet".to_string(),
+            ip: "203.0.113.5".to_string(),
+            mac: "00:aa:bb:cc:dd:05".to_string(),
+            state: "reachable".to_string(),
+            router: false,
+            link_local: false,
+        },
+    ]);
     build_forwarding_state(&snapshot)
 }
 
@@ -8009,7 +8145,7 @@ fn refresh_skips_hainactive_preserving_recorded_10507() {
     );
     // No-fabric Refresh funnel with the owner still inactive: re-resolves
     // HAInactive (not FabricRedirect) → must SKIP (preserve Recorded).
-    let forwarding_nofab = forwarding_with_lan_rule(Some("permit"));
+    let forwarding_nofab = forwarding_without_fabric_dmz_10507();
     let neighbors = Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::new());
     crate::afxdp::session_glue::handle_refresh_owner_rgs_for_test(
         &mut sessions,
@@ -8031,76 +8167,7 @@ fn refresh_skips_hainactive_preserving_recorded_10507() {
     // FabricRedirect without fabric to convert to). Fresh Recorded +
     // non-local coasts: no revocation, session survives, HAInactive drops
     // (no local forward, no punt without fabric).
-    let forwarding_nofab_dmz = {
-        let mut snapshot = policy_deny_snapshot();
-        snapshot.generation = 7;
-        snapshot.fib_generation = 9;
-        snapshot.policies.push(PolicyRuleSnapshot {
-            name: "lan-out".into(),
-            from_zone: "lan".into(),
-            to_zone: "wan".into(),
-            source_addresses: vec!["any".into()],
-            destination_addresses: vec!["any".into()],
-            applications: vec!["any".into()],
-            application_terms: Vec::new(),
-            action: "permit".into(),
-            ..Default::default()
-        });
-        snapshot.zones.push(crate::ZoneSnapshot {
-            name: "dmz".to_string(),
-            id: TEST_DMZ_ZONE_ID,
-            host_inbound_configured: true,
-            host_inbound_system_services: vec!["any-service".to_string()],
-            ..Default::default()
-        });
-        snapshot.interfaces.push(InterfaceSnapshot {
-            name: "reth2.0".to_string(),
-            zone: "dmz".to_string(),
-            linux_name: "ge-0-0-2".to_string(),
-            ifindex: DMZ_IFINDEX,
-            redundancy_group: 1,
-            hardware_addr: "02:bf:72:02:00:01".to_string(),
-            addresses: vec![crate::InterfaceAddressSnapshot {
-                family: "inet".to_string(),
-                address: "203.0.113.1/24".to_string(),
-                scope: 0,
-            }],
-            ..Default::default()
-        });
-        snapshot.routes.push(RouteSnapshot {
-            table: "inet.0".to_string(),
-            family: "inet".to_string(),
-            destination: "203.0.113.0/24".to_string(),
-            next_hops: vec!["203.0.113.2@reth2.0".to_string()],
-            next_hop_weights: vec![],
-            discard: false,
-            next_table: String::new(),
-            preference: 0,
-            rule_priority: 0,
-            mtu: 0,
-        });
-        snapshot.neighbors.push(NeighborSnapshot {
-            interface: "ge-0-0-2".to_string(),
-            ifindex: DMZ_IFINDEX,
-            family: "inet".to_string(),
-            ip: "203.0.113.2".to_string(),
-            mac: "00:aa:bb:cc:dd:ee".to_string(),
-            state: "reachable".to_string(),
-            router: true,
-            link_local: false,
-        });
-        snapshot.neighbors.push(NeighborSnapshot {
-            interface: "ge-0-0-2".to_string(),
-            ifindex: DMZ_IFINDEX,
-            family: "inet".to_string(),
-            ip: "203.0.113.5".to_string(),
-            mac: "00:aa:bb:cc:dd:05".to_string(),
-            state: "reachable".to_string(),
-            router: false,
-            link_local: false,
-        });
-        build_forwarding_state(&snapshot)
-    };
+    let forwarding_nofab_dmz = forwarding_without_fabric_dmz_10507();
     let mut binding3 = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
     binding3.interface = Arc::<str>::from("reth1.0");
     let frame3 = build_txn_tcp_syn_frame_v4(
@@ -8622,7 +8689,7 @@ fn typed_permit_local_icmp_first_reply_coasts_10635() {
         ICMP_ID,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, 0, frame.len() as u16);
+    let mut meta = txn_wan_meta_v4(0, frame.len() as u16);
     meta.protocol = PROTO_ICMP;
     meta.payload_offset = 42;
     let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
@@ -8706,7 +8773,7 @@ fn lone_reverse_unvalidated_coasts_without_revoke_10635() {
         ICMP_ID,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, 0, frame.len() as u16);
+    let mut meta = txn_wan_meta_v4(0, frame.len() as u16);
     meta.protocol = PROTO_ICMP;
     meta.payload_offset = 42;
     let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
@@ -8800,7 +8867,7 @@ fn lone_reverse_recorded_revokes_without_companion_10635() {
         ICMP_ID,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, 0, frame.len() as u16);
+    let mut meta = txn_wan_meta_v4(0, frame.len() as u16);
     meta.protocol = PROTO_ICMP;
     meta.payload_offset = 42;
     let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
@@ -8884,7 +8951,7 @@ fn lone_reverse_stale_live_revokes_without_companion_10635() {
         ICMP_ID,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, 0, frame.len() as u16);
+    let mut meta = txn_wan_meta_v4(0, frame.len() as u16);
     meta.protocol = PROTO_ICMP;
     meta.payload_offset = 42;
     let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
@@ -8961,7 +9028,7 @@ fn lone_reverse_fresh_live_revokes_without_companion_10635() {
         ICMP_ID,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, 0, frame.len() as u16);
+    let mut meta = txn_wan_meta_v4(0, frame.len() as u16);
     meta.protocol = PROTO_ICMP;
     meta.payload_offset = 42;
     let out = drive_packet_9604(&mut sessions, &forwarding, &mut binding, &frame, meta);
