@@ -178,6 +178,41 @@ func TestResolveMACFirstStillRefusesSlotSwap(t *testing.T) {
 	}
 }
 
+func TestResolveMovedOriginalCardStillRefusesSlotSwap(t *testing.T) {
+	const (
+		pinnedPCI = "0000:09:00.0"
+		movedPCI  = "0000:0a:00.0"
+		pinnedMAC = "00:11:22:33:44:55"
+		newMAC    = "de:ad:be:ef:00:01"
+	)
+	nics := []PresentNIC{
+		nic("enp9s0", pinnedPCI, newMAC),
+		nic("enp10s0", movedPCI, pinnedMAC),
+	}
+
+	for _, tc := range []struct {
+		name     string
+		keyOrder string
+	}{
+		{name: "mac-first", keyOrder: config.DeviceMapKeyMACThenPCI},
+		{name: "pci-first", keyOrder: config.DeviceMapKeyPCIThenMAC},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := []config.DeviceMapEntry{
+				{LogicalName: "ge-0/0/3", PCIAddr: pinnedPCI, MAC: pinnedMAC,
+					KeyOrder: tc.keyOrder},
+			}
+			got := Resolve(entries, nics, nil)
+			if got[0].Status != BindRefusedAmbig {
+				t.Fatalf("%s moved-card slot swap must REFUSE, got %v", tc.name, got[0].Status)
+			}
+			if got[0].CurrentNIC != "" || got[0].Logical != "" {
+				t.Fatalf("refused slot swap must not bind a NIC: %+v", got[0])
+			}
+		})
+	}
+}
+
 func TestResolveKeyOrderMACThenPCI(t *testing.T) {
 	// mac-then-pci tries MAC first; a MAC hit binds as primary (not flagged
 	// as "via MAC fallback" — MAC IS the primary key here).
