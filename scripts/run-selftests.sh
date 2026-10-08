@@ -388,6 +388,9 @@ fi
 # no network. Guards a negative cell that used to fail to a HEALTHY value:
 # "no leak" and "the probe returned nothing" both scored PASS. Needs bash.
 run_bash test/incus/fbf-steering-selftest.sh
+# #12139: the FBF steering harness end-to-end. Hermetic — drives the real
+# harness against a deterministic fake Incus surface. Needs bash.
+run_bash test/incus/fbf-steering-harness-selftest.sh
 # #6962: the new-flow ceiling harness's node selection. Hermetic — no incus, no
 # cluster. Guards a grep that matched the PEER's row in `show chassis cluster
 # status` and therefore always selected $FW0: it failed to a PLAUSIBLE VALUE
