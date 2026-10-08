@@ -609,6 +609,9 @@ func (c *CLI) showMatchPolicies(cfg *config.Config, args []string) error {
 		// simulator falls through to the next active rule / default-policy.
 		PolicyInactiveFn: c.policyInactiveFn(),
 	})
+	if res.PostNATInputNote != "" {
+		fmt.Printf("NOTE: %s\n", res.PostNATInputNote)
+	}
 	if res.FeedPublicationDebt {
 		fmt.Println(res.FeedPublicationDebtNote())
 		return nil

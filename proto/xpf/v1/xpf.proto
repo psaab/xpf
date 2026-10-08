@@ -1151,6 +1151,11 @@ message MatchPoliciesResponse {
   bool feed_publication_debt = 28;
   repeated string feed_publication_debt_feeds = 29;
   string feed_publication_debt_note = 30;
+  // #12246: the simulator does not perform inbound destination NAT. When this
+  // note is present, destination-ip/port inputs must already describe the
+  // post-translation tuple; it is repeated on matched and unmatched responses
+  // so clients do not read a pre-NAT VIP verdict as the dataplane decision.
+  string post_nat_input_note = 31;
 }
 
 // HostInboundAdmissionStatus classifies how the ingress zone's

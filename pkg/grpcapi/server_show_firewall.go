@@ -411,6 +411,9 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 			// / default-policy, agreeing with the dataplane.
 			PolicyInactiveFn: s.policyInactiveFn(),
 		})
+		if res.PostNATInputNote != "" {
+			fmt.Fprintf(buf, "NOTE: %s\n", res.PostNATInputNote)
+		}
 		switch {
 		case res.FeedPublicationDebt:
 			fmt.Fprintf(buf, "%s\n", res.FeedPublicationDebtNote())

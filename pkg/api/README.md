@@ -3150,6 +3150,13 @@ the drop fails loudly instead of going quietly vacuous.
   are omitted for a non-scheduled (always-on) policy. The gRPC
   `MatchPoliciesResponse.description` (field 18), `scheduler_name` (field 19),
   and `scheduler_active` (field 20) mirror these.
+
+- #12246: when inbound destination NAT is configured, the policy-only simulator
+  expects `destination-ip` and `destination-port` to already describe the
+  post-translation (real-server) tuple. The response includes
+  `post_nat_input_note` on matched and unmatched verdicts so a VIP-only query is
+  not mistaken for the dataplane's post-DNAT decision.
+
 - #3627 B1a: a `to-zone junos-host` query also carries the structured
   `host_inbound` object — WHICH host-inbound-traffic system-service / protocol
   token admits the host-bound tuple, or that the box denies / globally accepts /
