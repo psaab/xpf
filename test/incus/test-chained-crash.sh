@@ -135,20 +135,46 @@ test_new_tcp() {
 check_no_dual_active() {
 	local label="$1"
 	local fw0_status fw1_status
-	fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
-	fw1_status=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	if ! fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null); then
+		fail "$label: fw0 cluster status unreadable"
+		return
+	fi
+	if [[ -z "$fw0_status" ]]; then
+		fail "$label: fw0 cluster status empty"
+		return
+	fi
+	if ! fw1_status=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null); then
+		fail "$label: fw1 cluster status unreadable"
+		return
+	fi
+	if [[ -z "$fw1_status" ]]; then
+		fail "$label: fw1 cluster status empty"
+		return
+	fi
 
-	local dual_active=false
+	local invalid_state=false
 	for rg in 0 1 2; do
 		local fw0_pri fw1_pri
 		fw0_pri=$(echo "$fw0_status" | grep -A2 "Redundancy group: $rg" | grep "node0" | grep -c "primary" || true)
 		fw1_pri=$(echo "$fw1_status" | grep -A2 "Redundancy group: $rg" | grep "node1" | grep -c "primary" || true)
-		if [[ "$fw0_pri" -eq 1 && "$fw1_pri" -eq 1 ]]; then
+		case "$fw0_pri/$fw1_pri" in
+		1/1)
 			fail "$label: dual-active detected on RG$rg"
-			dual_active=true
-		fi
+			invalid_state=true
+			;;
+		0/0)
+			fail "$label: no primary detected on RG$rg"
+			invalid_state=true
+			;;
+		1/0|0/1)
+			;;
+		*)
+			fail "$label: primary status unclear on RG$rg (fw0=$fw0_pri fw1=$fw1_pri)"
+			invalid_state=true
+			;;
+		esac
 	done
-	if ! $dual_active; then
+	if ! $invalid_state; then
 		pass "$label: no dual-active"
 	fi
 }
