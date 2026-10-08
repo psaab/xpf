@@ -318,7 +318,9 @@ func (d *Daemon) reconcileProxyARP(cfg *config.Config) {
 	for _, a := range added {
 		// SendGratuitousARP is IPv4-only; a v6 (AF_INET6) proxy-NDP entry
 		// needs no unsolicited NA to start answering, so skip the GARP for
-		// v6 added entries (#2197 item 1).
+		// v6 added entries (#2197 item 1). Failover invalidation is separate:
+		// announceProxyARPPoolAddresses sends a pool-target NA on RG ownership
+		// change (#12172), refreshing upstream neighbor bindings.
 		if a.Iface != "" && a.Family != unix.AF_INET6 {
 			if err := cluster.SendGratuitousARP(a.Iface, a.IP, 1); err != nil {
 				slog.Warn("proxy-arp: GARP failed", "ip", a.IP, "iface", a.Iface, "err", err)
