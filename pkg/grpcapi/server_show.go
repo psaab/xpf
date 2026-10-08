@@ -138,7 +138,7 @@ func (s *Server) showText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 
 	// test routing: "test-routing:dest=10.0.0.0/24" or "test-routing:dest=10.0.0.0/24,instance=dmz-vr"
 	if strings.HasPrefix(req.Topic, "test-routing:") {
-		return s.showTestRouting(req, &buf)
+		return s.showTestRouting(req, cfg, &buf)
 	}
 
 	// test security-zone: "test-zone:interface=trust0"

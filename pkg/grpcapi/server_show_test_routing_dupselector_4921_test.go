@@ -43,7 +43,7 @@ func TestShowTestRoutingRejectsDuplicateSelector(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf strings.Builder
-			if _, err := s.showTestRouting(&pb.ShowTextRequest{Topic: tc.topic}, &buf); err != nil {
+			if _, err := s.showTestRouting(&pb.ShowTextRequest{Topic: tc.topic}, nil, &buf); err != nil {
 				t.Fatalf("showTestRouting(%q) error = %v", tc.topic, err)
 			}
 			out := buf.String()
@@ -65,7 +65,7 @@ func TestShowTestRoutingRejectsDuplicateSelector(t *testing.T) {
 func TestShowTestRoutingDistinctSelectorsNotFlagged(t *testing.T) {
 	s := &Server{}
 	var buf strings.Builder
-	if _, err := s.showTestRouting(&pb.ShowTextRequest{Topic: "test-routing:dest=10.0.0.0/24,instance=dmz"}, &buf); err != nil {
+	if _, err := s.showTestRouting(&pb.ShowTextRequest{Topic: "test-routing:dest=10.0.0.0/24,instance=dmz"}, nil, &buf); err != nil {
 		t.Fatalf("showTestRouting error = %v", err)
 	}
 	out := buf.String()

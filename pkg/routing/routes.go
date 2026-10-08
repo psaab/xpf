@@ -180,6 +180,15 @@ func (rr *routeReader) StreamRoutes(fn func(RouteEntry) bool) (stopped bool, err
 	return false, errs
 }
 
+func configuredRoutingInstanceTableID(name string, instances []*config.RoutingInstanceConfig) int {
+	for _, instance := range instances {
+		if instance != nil && instance.Name == name && instance.TableID > 0 {
+			return instance.TableID
+		}
+	}
+	return 0
+}
+
 // GetVRFRoutes reads routes from a VRF's routing table by VRF device name.
 func (rr *routeReader) GetVRFRoutes(vrfName string) ([]RouteEntry, error) {
 	// VRF devices are created with "vrf-" prefix.
@@ -198,10 +207,19 @@ func (rr *routeReader) GetVRFRoutes(vrfName string) ([]RouteEntry, error) {
 	return rr.GetRoutesForTable(int(vrf.Table))
 }
 
+// GetInstanceRoutes reads a configured routing-instance table by name.
+// Instances with no configured table ID retain the legacy VRF-device lookup.
+func (rr *routeReader) GetInstanceRoutes(instanceName string, instances []*config.RoutingInstanceConfig) ([]RouteEntry, error) {
+	if tableID := configuredRoutingInstanceTableID(instanceName, instances); tableID > 0 {
+		return rr.GetRoutesForTable(tableID)
+	}
+	return rr.GetVRFRoutes(instanceName)
+}
+
 // GetTableRoutes returns routes for a Junos-style table name (e.g. "inet.0",
-// "inet6.0", "dmz-vr.inet.0", "dmz-vr.inet6.0"). It resolves the VRF and
-// filters by address family.
-func (rr *routeReader) GetTableRoutes(tableName string) ([]RouteEntry, error) {
+// "inet6.0", "dmz-vr.inet.0", "dmz-vr.inet6.0"). Configured routing-instance
+// names resolve to their table ID before falling back to a VRF device lookup.
+func (rr *routeReader) GetTableRoutes(tableName string, instances []*config.RoutingInstanceConfig) ([]RouteEntry, error) {
 	// Determine VRF name and address family from Junos table name.
 	vrfName := ""
 	isV6 := false
@@ -225,7 +243,7 @@ func (rr *routeReader) GetTableRoutes(tableName string) ([]RouteEntry, error) {
 	if vrfName == "" {
 		entries, err = rr.GetRoutes()
 	} else {
-		entries, err = rr.GetVRFRoutes(vrfName)
+		entries, err = rr.GetInstanceRoutes(vrfName, instances)
 	}
 	if err != nil {
 		return nil, err

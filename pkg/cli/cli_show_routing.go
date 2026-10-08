@@ -172,7 +172,13 @@ func (c *CLI) showRoutesForVRF(tableName string) error {
 		return nil
 	}
 
-	entries, err := c.routing.GetTableRoutes(tableName)
+	var instances []*config.RoutingInstanceConfig
+	if c.store != nil {
+		if cfg := c.store.ActiveConfig(); cfg != nil {
+			instances = cfg.RoutingInstances
+		}
+	}
+	entries, err := c.routing.GetTableRoutes(tableName, instances)
 	if err != nil {
 		return fmt.Errorf("get table routes: %w", err)
 	}
