@@ -175,20 +175,20 @@ pub(super) fn cached_session_resolution(
         return None;
     }
     // #11315: recheck the live neighbor binding before serving a stored
-    // session resolution. The decision caches neighbor_mac at install; a
-    // gateway failover can replace it, and FAILED/INCOMPLETE can remove it.
-    // Either a contradictory or missing live binding makes the cached MAC
-    // stale. The subsequent first learn after removal does not advance the
-    // #3048 shard epoch, so accepting the cached MAC while absent could leave
-    // it in the flow cache through recovery.
+    // session resolution. A contradictory binding, or an absent binding after
+    // its shard epoch advanced, makes the cached MAC stale. An absent neighbor
+    // with an unchanged epoch can be a never-observed miss (#12255); permit
+    // that fallback, while a removal's epoch bump prevents serving the stale
+    // MAC through recovery.
     if let (Some(next_hop), Some(stored_mac)) = (cached.next_hop, cached.neighbor_mac) {
         let ifindex = super::outer_neighbor_ifindex(forwarding, Some(dynamic_neighbors), &cached);
-        let Some(live) =
+        if let Some(live) =
             super::lookup_neighbor_entry(forwarding, Some(dynamic_neighbors), ifindex, next_hop)
-        else {
-            return None;
-        };
-        if live.mac != stored_mac {
+        {
+            if live.mac != stored_mac {
+                return None;
+            }
+        } else if dynamic_neighbors.mac_change_epoch_for(&(ifindex, next_hop)) != 0 {
             return None;
         }
     }
