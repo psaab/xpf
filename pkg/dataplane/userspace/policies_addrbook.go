@@ -448,46 +448,76 @@ func (r *addressBookExpansionResolver) appendCIDR(out *addressBookParsedExpansio
 
 // expandBookNameRecursive resolves static and feed-backed names while treating
 // only path-local revisits as cycles. NAT lowering shares this traversal. The
-// second result is true when an address-set statement was dropped anywhere in
-// the expanded closure, so callers reject the whole set rather than use a
-// narrowed prefix subset.
-func expandBookNameRecursive(ab *config.AddressBook, feedOverlay map[string][]string, name string, visited map[string]bool, _depth int) ([]string, bool) {
+// second result is true when any name in the expanded closure is unresolvable,
+// so callers refuse the whole set instead of publishing a narrowed subset.
+//
+// #12216: this mirrors policy-path quarantine for colliding names, declared but
+// unready feeds, unusable address values, and dangling members. A ready feed
+// still contributes its live prefixes; a present-empty fail-mode-drop overlay
+// remains an intentional match-none value (#10014).
+func expandBookNameRecursive(ab *config.AddressBook, feedOverlay map[string][]string, bindings map[string]*config.AddressBinding, name string, visited map[string]bool, _depth int) ([]string, bool) {
+	if ab != nil {
+		if _, collision := ab.CollidingNames[name]; collision {
+			return nil, true
+		}
+	}
 	if visited[name] {
 		return nil, false
 	}
 	visited[name] = true
 	defer func() { delete(visited, name) }()
-	var out []string
-	out = append(out, feedOverlay[name]...)
+
+	feeds, feedBound := feedOverlay[name]
+	out := append([]string(nil), feeds...)
+	if !feedBound && bindings[name] != nil {
+		return nil, true
+	}
 	if ab == nil {
-		return out, false
+		if feedBound {
+			return out, false
+		}
+		return nil, true
 	}
 	if addr, ok := ab.Addresses[name]; ok {
 		if value := addr.UsableValue(); value != "" {
 			out = append(out, value)
+			return out, false
 		}
-		return out, false
+		if feedBound {
+			return out, false
+		}
+		return nil, true
 	}
 	if set, ok := ab.AddressSets[name]; ok {
 		if set == nil || len(set.UnknownMembers) > 0 {
 			return nil, true
 		}
+		if len(set.Addresses) == 0 && len(set.AddressSets) == 0 {
+			if feedBound {
+				return out, false
+			}
+			return nil, true
+		}
 		for _, member := range set.Addresses {
-			values, unknownMember := expandBookNameRecursive(ab, feedOverlay, member, visited, 0)
+			values, unknownMember := expandBookNameRecursive(ab, feedOverlay, bindings, member, visited, 0)
 			if unknownMember {
 				return nil, true
 			}
 			out = append(out, values...)
 		}
 		for _, nested := range set.AddressSets {
-			values, unknownMember := expandBookNameRecursive(ab, feedOverlay, nested, visited, 0)
+			values, unknownMember := expandBookNameRecursive(ab, feedOverlay, bindings, nested, visited, 0)
 			if unknownMember {
 				return nil, true
 			}
 			out = append(out, values...)
 		}
+		return out, false
 	}
-	return out, false
+	if feedBound {
+		return out, false
+	}
+	return nil, true
 }
 
 type parsedAddressBookCIDR struct {
