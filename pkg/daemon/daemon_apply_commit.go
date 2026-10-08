@@ -1066,8 +1066,8 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 		// bootstrap. The log below therefore names both cases.
 		slog.Warn("commit confirmed timed out with no compiled rollback target (first commit " +
 			"on a fresh store, or a recovered rollback target that no longer compiles); " +
-			"rolling back to BOOTSTRAP mode (removing interface/FRR/dataplane takeover, " +
-			"keeping the management lifeline)")
+			"rolling back to BOOTSTRAP mode (retiring interface/FRR/dataplane takeover; " +
+			"validating fxp0 content and restoring its pre-takeover snapshot when needed)")
 		// #5868: enterBootstrapMode now attempts every teardown step best-effort
 		// but returns an aggregated error (and has already logged each failed
 		// step + the DEGRADED summary at ERROR) if any step did not converge.
