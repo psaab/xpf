@@ -31,11 +31,13 @@ func staticLifelineSeams(t *testing.T) lifelineSeamState {
 
 	oldLinkDir, oldDetect := linkDir, detectLifelineInterfaceFn
 	oldEnum, oldRename, oldReload := enumeratePCINICsFn, renameInterfaceFn, networkctlReloadFn
+	oldNetworkd := networkdActiveFn
 	oldRecord := lifelineRecordFileForTest
 	oldLink, oldAddr, oldRoute := lifelineLinkByName, lifelineAddrList, lifelineRouteList
 	t.Cleanup(func() {
 		linkDir, detectLifelineInterfaceFn = oldLinkDir, oldDetect
 		enumeratePCINICsFn, renameInterfaceFn, networkctlReloadFn = oldEnum, oldRename, oldReload
+		networkdActiveFn = oldNetworkd
 		lifelineRecordFileForTest = oldRecord
 		lifelineLinkByName, lifelineAddrList, lifelineRouteList = oldLink, oldAddr, oldRoute
 	})
@@ -44,6 +46,7 @@ func staticLifelineSeams(t *testing.T) lifelineSeamState {
 	lifelineRecordFileForTest = filepath.Join(dir, "lifeline.json")
 	// A DEFAULT ROUTE names the management NIC: this is the evidence-bearing
 	// selection path, the one where a failed addressing read is a real loss.
+	networkdActiveFn = func() error { return nil }
 	detectLifelineInterfaceFn = func() (string, bool, error) { return defaultMgmtInterface, true, nil }
 	enumeratePCINICsFn = func() ([]pciNIC, error) {
 		return []pciNIC{{sortKey: 0, busAddr: "0000:05:00.0", name: defaultMgmtInterface}}, nil

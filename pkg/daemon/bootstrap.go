@@ -910,10 +910,27 @@ func readLifelineRecordAt(path string) (lifelineRecord, bool) {
 // world-reading half of setupBootstrapLifeline, so the #7114 selection wiring
 // is testable without a live netlink/sysfs stack. Production leaves them
 // pointing at the real detectors.
+//
+// networkdActiveFn is injectable so the bootstrap lifeline refuses to mutate
+// an interface unless systemd-networkd is active.
 var (
 	detectLifelineInterfaceFn = detectLifelineInterface
 	enumeratePCINICsFn        = enumeratePCINICs
+	networkdActiveFn          = systemdNetworkdActive
 )
+
+// systemdNetworkdActive reports whether systemd-networkd is running.
+func systemdNetworkdActive() error {
+	output, err := execCommand("systemctl", "is-active", "systemd-networkd.service")
+	state := strings.TrimSpace(output)
+	if err != nil {
+		return fmt.Errorf("systemd-networkd is not active (state %q): %w", state, err)
+	}
+	if state != "active" {
+		return fmt.Errorf("systemd-networkd is not active (state %q)", state)
+	}
+	return nil
+}
 
 // applianceFactoryBoot reports whether this bootstrap boot is a FACTORY boot of
 // an xpf appliance image: the bake-written marker is present AND nothing has
@@ -1085,7 +1102,8 @@ func protectedInterfacesWith(mgmtLeaf, lifeline string) map[string]bool {
 }
 
 // setupBootstrapLifeline runs the Item-3 lifeline-gated path in place of the
-// full rename loop when the daemon boots into bootstrap mode. It:
+// full rename loop when the daemon boots into bootstrap mode. It first refuses
+// all interface changes unless systemd-networkd is active, then:
 //
 //  1. detects the management lifeline NIC (default-route interface),
 //  2. records its PCI identity to /etc/xpf/lifeline-interface so the
@@ -1105,7 +1123,12 @@ func protectedInterfacesWith(mgmtLeaf, lifeline string) map[string]bool {
 // enumerated NIC is selected instead of refusing. Steps 2-4 are unchanged and
 // run identically for either provenance.
 func (d *Daemon) setupBootstrapLifeline() {
-	// #10751/B4: attest (and best-effort reinstall) the early input barrier,
+	if err := networkdActiveFn(); err != nil {
+		slog.Warn("bootstrap lifeline: systemd-networkd is not active; refusing all management "+
+			"interface changes and staying in bootstrap",
+			"err", err)
+		return
+	}
 	// but proceed regardless — bootstrap is explicit recovery and the
 	// management lifeline takes precedence over the barrier (the #1960 order).
 	// A failed reinstall is already loud inside the ensure call.

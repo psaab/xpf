@@ -14,10 +14,9 @@
 # then read this script and run it.
 #
 # What it does:
-#   1. PREFLIGHT: amd64 + Debian-family + kernel >= 6.18 + systemd-networkd.
-#      xpf's verifier floor is kernel >= 6.18 with a native-XDP NIC; this
-#      installer does NOT install a kernel. A host below the floor is refused
-#      with a clear message (use the appliance image instead).
+#   1. PREFLIGHT: amd64 + Debian-family + kernel >= 6.18 + active systemd-networkd.
+#      xpf does NOT install or enable systemd-networkd; enable and start it
+#      before installing xpf. xpf also does NOT install a kernel.
 #   2. Install the pinned apt archive keyring to /usr/share/keyrings (inline).
 #   3. Write /etc/apt/sources.list.d/xpf.sources (deb822, Signed-By).
 #   4. apt-get update, bind the signed Release Suite/Codename to CHANNEL, write
@@ -304,14 +303,14 @@ which ships its own >= 6.18 kernel."
     fi
 
     if ! command -v systemctl >/dev/null 2>&1; then
-        die "systemd not found — xpf requires systemd + systemd-networkd."
+        die "systemd not found — xpf requires systemd + active systemd-networkd."
     fi
-    # networkd need not be ACTIVE yet (the package enables it), but the unit
-    # must EXIST — a host without systemd-networkd cannot run xpf's interface
-    # management.
-    if ! systemctl list-unit-files systemd-networkd.service >/dev/null 2>&1; then
-        info "WARNING: systemd-networkd unit not found; the xpf package pulls it \
-in, but verify the host can run networkd (xpfd owns all interfaces)."
+    # xpfd renames and cycles the management NIC during bootstrap; networkd
+    # must already be running because the xpf package does not install or
+    # enable it.
+    if ! systemctl is-active --quiet systemd-networkd.service; then
+        die "systemd-networkd.service must be installed and active before installing xpf. \
+The xpf package does not install or enable it; enable/start networkd and retry."
     fi
     info "preflight OK (arch=$arch kernel=$kver)"
 }
