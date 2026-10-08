@@ -810,6 +810,12 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// shrink-guard exception below validates only the three newly consumed
 	// leaves, without widening the legacy tail contract.
 	walkChildren := node.Children
+	// #12184: the compiler expands this SetPath flat-run chain before
+	// reading per-next-hop modifiers. Validate the same view so a metric
+	// nested under `interface` or `preference` cannot bypass its leaf gate.
+	if keyword == "qualified-next-hop" {
+		walkChildren = expandRunChildren9235(walkChildren, childSchema)
+	}
 	if childSchema.packedTail && len(node.Keys) > consumed {
 		// The packed body is authored on the container line.
 		walkChildren = packedBodyChildren(node, childSchema)

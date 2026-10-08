@@ -127,7 +127,11 @@ func staticRouteNode() *schemaNode {
 					// FRR 10.6 has no static-route metric operand, so equal-
 					// preference paths remain ECMP there. #11447 also uses the
 					// metric for IGP export through synthesized route-maps.
-					"metric": {desc: "IGP export and userspace failover metric", args: 1, placeholder: "<value>", children: nil},
+					// #12184: consumers accept 0..u32max; invalid values were
+					// otherwise ignored, silently merging a backup into tier 0.
+					"metric": {desc: "IGP export and userspace failover metric", args: 1, placeholder: "<value>",
+						valueType: ValueInteger, valueDesc: "Metric (0..4294967295)",
+						valueExamples: []string{"0", "100"}, validator: ValidateInteger(0, maxWireU32), children: nil},
 				}},
 			"no-install": {desc: "Do not install this static route", children: nil},
 			"discard":    {desc: "Discard (blackhole) route", children: nil},
