@@ -111,6 +111,8 @@ func buildHostInboundNetlink(p *nlPlan, spec HostInboundSpec) {
 	for _, v := range spec.Views {
 		emitHostInboundZoneIngressNetlink(p, v, famV4, zoneIngressV4)
 		emitHostInboundZoneIngressNetlink(p, v, famV6, zoneIngressV6)
+		emitHostInboundLifelineIngressDrop(p, v, famV4)
+		emitHostInboundLifelineIngressDrop(p, v, famV6)
 	}
 	emitHostInboundAmbiguousIngressAcceptsNetlink(p, spec.Views, famV4)
 	emitHostInboundAmbiguousIngressDropNetlink(p, spec.Views, famV4, ingressV4)
@@ -200,10 +202,12 @@ func declareHostInboundCounters(p *nlPlan, spec HostInboundSpec) {
 	zoneIngressV4, zoneIngressV6 := hostInboundZoneIngressDestinations(spec.Views)
 	for _, v := range spec.Views {
 		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV4) ||
+			hostInboundEmitsLifelineIngressDrop(v, famV4) ||
 			hostInboundWGGuardEmits(v.V4Addrs, spec.WGListenPorts) {
 			decl(HostInboundDenyCounterName(v.Zone, "ip"))
 		}
 		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV6) ||
+			hostInboundEmitsLifelineIngressDrop(v, famV6) ||
 			hostInboundWGGuardEmits(v.V6Addrs, spec.WGListenPorts) {
 			decl(HostInboundDenyCounterName(v.Zone, "ip6"))
 		}

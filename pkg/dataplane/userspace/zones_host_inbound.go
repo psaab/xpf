@@ -42,6 +42,12 @@ type ZoneHostInboundView struct {
 	MulticastRules []config.HostInboundMulticastRule
 	V4Addrs        []string // bare host IPv4 addresses (no prefix)
 	V6Addrs        []string // bare host IPv6 addresses (no prefix)
+	// IngressDenyV4/V6 are lifeline-shared addresses withheld from a deny-all
+	// view's destination-only set (#7284) but still denied on this view's data
+	// ingress scopes (#12229). Their iifname qualification preserves the
+	// lifeline's management path.
+	IngressDenyV4 []string
+	IngressDenyV6 []string
 	// Screen flood limits are mirrored into the kernel input backstop because
 	// PASS_TO_KERNEL rows bypass the userspace worker's screen stage.
 	ICMPFloodThreshold   uint32
@@ -676,27 +682,25 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		// payload ordering. Order is deterministic: snapshots come from
 		// sorted-name iteration and VIPs from sorted interface/unit/group walks.
 		v4, v6 := g.v4, g.v6
-		// #7284: a view with NO admit tokens emits a pure catch-all DROP for its
-		// addresses — the #3405 default-deny. Withhold from it any address VALUE
-		// that also lives on a lifeline interface.
+		// #7284: the destination-only catch-all DROP carries no iifname, so an
+		// address also present on a lifeline must be withheld from that set or
+		// the lifeline's NEW management connection and ESTABLISHED conntrack are
+		// lost. For an empty-admit data-zone view, retain the withheld value in
+		// IngressDenyV4/V6 instead: #12229's iifname-scoped drop denies traffic
+		// arriving on that zone without matching the lifeline ingress.
 		//
-		// Scoped to the empty-admit case ON PURPOSE, and this is the whole
-		// reason the subtraction is not simply the fence's. A view that DOES
-		// admit something (the #6492 Finding A topology: the management address
-		// shared onto a zone that permits ssh) emits `accept ssh` before the
-		// catch-all drop, so management already survives there and the drop
-		// still expresses a real policy for every OTHER service on that address.
-		// Withholding the address from that view would delete the accept and the
-		// deny together, leaving every host service reachable on it — a far
-		// wider hole than the lockout being fixed.
-		//
-		// An empty-admit view has no such policy to preserve: its only possible
-		// outcome for the address is a drop with no accept, which for a
-		// management address is a lockout of NEW connections and, through the
-		// shared #5566 set, a teardown of the ESTABLISHED one.
+		// Scoped to the empty-admit case ON PURPOSE. A view that DOES admit
+		// something (the #6492 Finding A topology: a management address shared
+		// onto a zone that permits ssh) emits `accept ssh` before the catch-all
+		// drop, so management already survives there and the drop still
+		// expresses a real policy for every OTHER service on that address.
+		// Withholding it from that view would delete the accept and the deny
+		// together, leaving every host service reachable on it — a far wider
+		// hole than the lockout being fixed.
+		var ingressDenyV4, ingressDenyV6 []string
 		if len(g.svc) == 0 && len(g.proto) == 0 {
-			v4 = withoutLifelineShared(v4, lifelineShared)
-			v6 = withoutLifelineShared(v6, lifelineShared)
+			v4, ingressDenyV4 = splitLifelineShared(v4, lifelineShared)
+			v6, ingressDenyV6 = splitLifelineShared(v6, lifelineShared)
 		}
 		view := ZoneHostInboundView{
 			Zone:                 g.zone,
@@ -706,6 +710,8 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 			MulticastRules:       config.HostInboundMulticastRules(g.proto),
 			V4Addrs:              v4,
 			V6Addrs:              v6,
+			IngressDenyV4:        ingressDenyV4,
+			IngressDenyV6:        ingressDenyV6,
 			IngressNetdevs:       hostInboundViewIngressNetdevsWithMasters(sig, netdevSigs, lifelineNetdevs, vrfEnslaved, vrfMasters),
 			IngressVRFScopes:     hostInboundViewVRFIngressScopes(sig, netdevSigs, lifelineNetdevs, vrfEnslaved, vrfMasters),
 			ICMPFloodThreshold:   screenProfilesByZone[g.zone].ICMPFloodThreshold,
@@ -875,30 +881,33 @@ func hostInboundViewIngressNetdevs(sig string, netdevSigs map[string]map[string]
 	return hostInboundViewIngressNetdevsWithMasters(sig, netdevSigs, lifelineNetdevs, vrfEnslaved, nil)
 }
 
-// withoutLifelineShared returns addrs with every address that also lives on a
-// lifeline interface removed, preserving order. Returns the input untouched
-// when nothing is withheld so the common path allocates nothing.
-func withoutLifelineShared(addrs []string, shared map[string]bool) []string {
+// splitLifelineShared returns the destination-only addresses that remain and
+// the shared lifeline values withheld from this deny-all view. Both slices
+// preserve address order; the common no-match path returns the input unchanged
+// and allocates nothing.
+func splitLifelineShared(addrs []string, shared map[string]bool) (kept, withheld []string) {
 	if len(addrs) == 0 || len(shared) == 0 {
-		return addrs
+		return addrs, nil
 	}
-	drop := false
-	for _, a := range addrs {
-		if shared[a] {
-			drop = true
-			break
+	withheldCount := 0
+	for _, addr := range addrs {
+		if shared[addr] {
+			withheldCount++
 		}
 	}
-	if !drop {
-		return addrs
+	if withheldCount == 0 {
+		return addrs, nil
 	}
-	kept := make([]string, 0, len(addrs))
-	for _, a := range addrs {
-		if !shared[a] {
-			kept = append(kept, a)
+	kept = make([]string, 0, len(addrs)-withheldCount)
+	withheld = make([]string, 0, withheldCount)
+	for _, addr := range addrs {
+		if shared[addr] {
+			withheld = append(withheld, addr)
+		} else {
+			kept = append(kept, addr)
 		}
 	}
-	return kept
+	return kept, withheld
 }
 
 // UnzonedHostInboundZoneLabel is the reserved sentinel label for host-inbound
@@ -1640,6 +1649,11 @@ func buildFenceAddrSetsFromSnaps(cfg *config.Config, snaps []InterfaceSnapshot, 
 	for _, v := range views {
 		fv := v
 		fv.V4Addrs = keep(v.V4Addrs)
+		// The cold-boot fence withholds every destination shared with a lifeline;
+		// carrying the real-table ingress exception here would contradict that
+		// coverage boundary and drop management traffic arriving on the data link.
+		fv.IngressDenyV4 = nil
+		fv.IngressDenyV6 = nil
 		fv.V6Addrs = keep(v.V6Addrs)
 		for _, a := range fv.V4Addrs {
 			covered[a] = true

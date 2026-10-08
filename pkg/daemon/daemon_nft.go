@@ -1973,10 +1973,14 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 	ingressV4, ingressV6 := hostInboundIngressDestinations(views, unzonedV4, unzonedV6)
 	zoneIngressV4, zoneIngressV6 := hostInboundZoneIngressDestinations(views)
 	for _, v := range views {
-		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV4) || hostInboundEmitsWireGuardGuard(v.V4Addrs, wgListenPorts) {
+		if hostInboundEmitsDrop(v, v.V4Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV4) ||
+			hostInboundEmitsLifelineIngressDrop(v, "ip") ||
+			hostInboundEmitsWireGuardGuard(v.V4Addrs, wgListenPorts) {
 			addCounter(xnft.HostInboundDenyCounterName(v.Zone, "ip"))
 		}
-		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV6) || hostInboundEmitsWireGuardGuard(v.V6Addrs, wgListenPorts) {
+		if hostInboundEmitsDrop(v, v.V6Addrs) || hostInboundEmitsIngressDrop(v, zoneIngressV6) ||
+			hostInboundEmitsLifelineIngressDrop(v, "ip6") ||
+			hostInboundEmitsWireGuardGuard(v.V6Addrs, wgListenPorts) {
 			addCounter(xnft.HostInboundDenyCounterName(v.Zone, "ip6"))
 		}
 	}
@@ -2174,6 +2178,8 @@ func buildHostInboundFilterPayloadWithUnzonedIngress(views []dpuserspace.ZoneHos
 	for _, v := range views {
 		emitHostInboundZoneIngress(&rules, v, "ip", zoneIngressV4)
 		emitHostInboundZoneIngress(&rules, v, "ip6", zoneIngressV6)
+		emitHostInboundLifelineIngressDrop(&rules, v, "ip")
+		emitHostInboundLifelineIngressDrop(&rules, v, "ip6")
 	}
 	emitHostInboundAmbiguousIngressAccepts(&rules, views, "ip")
 	emitHostInboundAmbiguousIngressDrop(&rules, views, "ip", ingressV4)
