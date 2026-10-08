@@ -2349,16 +2349,15 @@ fn gre_decap_session_hit_ttl_expiry_reads_inner_ttl_5615() {
 /// ~158 `packet_ttl_would_expire` + ~167 `build_local_time_exceeded_request`).
 /// A GRE-tunnelled inner UDP flow (flow-cache eligible) seeds the flow cache on
 /// pass 1 (inner TTL 64); pass 2 (inner TTL 1) HITS the flow cache, where the
-/// TTL-expiry check + the generated Time Exceeded must read the decapped inner
-/// `packet_frame` TTL (1), not the outer `raw_frame` TTL (64).
+/// `packet_frame` TTL (1), not the byte at that inner-relative offset in
+/// `raw_frame` (the tagged outer IPv4 ID high byte, set above 1 below).
 ///
 /// - FIXED (`packet_frame`): pass 2 sees inner TTL 1 → one prebuilt TE queued.
-/// - REVERTED at the `packet_ttl_would_expire` arg (`raw_frame`): sees outer TTL
-///   64 → not expiring → forwarded, no TE.
-/// - REVERTED at the `build_local_time_exceeded_request` arg (`raw_frame`): the
-///   would-expire branch is entered (inner TTL 1) but the builder's own internal
-///   TTL check sees the outer 64 → returns None → the packet is dropped with no
-///   TE queued.
+/// - REVERTED at the `packet_ttl_would_expire` arg (`raw_frame`): the
+///   inner-relative TTL offset lands on the tagged outer IPv4 ID high byte
+///   (frame[22] = 2), which is above the expiry threshold, so no TE is queued.
+/// - REVERTED at the builder arg (`raw_frame`): the expiry check enters on the
+///   inner TTL, but the builder reads outer ID high byte 2 and returns None.
 ///
 /// Either revert drops the prebuilt-TE count to 0, so this single test binds to
 /// both flow-cache-hit inner reads.
@@ -2396,7 +2395,20 @@ fn gre_decap_flow_cache_hit_ttl_expiry_reads_inner_ttl_5615() {
     );
 
     // Pass 2: same 5-tuple, inner UDP TTL 1 — flow-cache HIT TTL check.
-    let frame_hit = gre_frame_inner_udp_v4(Ipv4Addr::new(8, 8, 8, 8), 1, 12345, 53);
+    let mut frame_hit = gre_frame_inner_udp_v4(Ipv4Addr::new(8, 8, 8, 8), 1, 12345, 53);
+    // The tagged outer IPv4 header starts at byte 18. Its ID high byte is read
+    // as the TTL by a raw_frame revert at the inner-relative L3 offset.
+    let outer_l3 = 18;
+    frame_hit[outer_l3 + 4] = 2; // > inner TTL 1, so raw_frame is non-expiring.
+    frame_hit[outer_l3 + 10] = 0;
+    frame_hit[outer_l3 + 11] = 0;
+    let outer_checksum = checksum16(&frame_hit[outer_l3..outer_l3 + 20]);
+    frame_hit[outer_l3 + 10] = (outer_checksum >> 8) as u8;
+    frame_hit[outer_l3 + 11] = outer_checksum as u8;
+    assert!(
+        frame_hit[outer_l3 + 4] > 1,
+        "outer IPv4 ID high byte must exceed inner TTL 1 so a raw_frame revert is non-expiring"
+    );
     assert_eq!(frame_hit[26], 64, "outer IPv4 TTL byte must be 64 (differs from inner 1)");
     let meta_hit = gre_to_self_outer_meta_wan(frame_hit.len());
     let (batch_hit, dbg_hit) = txn_run_descriptor_checked(
