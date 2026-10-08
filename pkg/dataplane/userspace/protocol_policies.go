@@ -424,4 +424,9 @@ type PolicyRuleSnapshot struct {
 	// rejection mirror needs this provenance to distinguish this legacy bad
 	// definition from an ordinary accepted wildcard rule.
 	zonePairDefinedAnySide string
+	// #12288: build-time-only diagnostics carried from the synthetic malformed
+	// zone-pair poison carrier. The wire sentinel cannot encode source-shape
+	// provenance, so the Go mirror keeps these strings to identify the context
+	// that caused whole-snapshot refusal. A decoded snapshot leaves them nil.
+	malformedZonePairShapes []string
 }

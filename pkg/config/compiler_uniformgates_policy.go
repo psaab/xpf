@@ -68,10 +68,11 @@ func runUniformGatesPolicy(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 			// rules: it exists only to enter the established snapshot-sentinel
 			// path, which rejects the whole snapshot before rule evaluation.
 			cfg.Security.GlobalPolicies = append(cfg.Security.GlobalPolicies, &Policy{
-				Name:                  "xpf-malformed-zone-pair-poison",
-				Action:                PolicyDeny,
-				terminalActions:       []PolicyAction{PolicyDeny},
-				LenientContentDropped: true,
+				Name:                    "xpf-malformed-zone-pair-poison",
+				Action:                  PolicyDeny,
+				terminalActions:         []PolicyAction{PolicyDeny},
+				LenientContentDropped:   true,
+				MalformedZonePairShapes: cfg.Security.MalformedZonePairs,
 			})
 		} else {
 			return err

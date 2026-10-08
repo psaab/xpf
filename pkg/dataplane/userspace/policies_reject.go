@@ -74,6 +74,17 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 		}
 		srcBad := addressListHasSentinel(rule.SourceLiterals) || addressListHasSentinel(rule.SourceAddresses)
 		dstBad := addressListHasSentinel(rule.DestinationLiterals) || addressListHasSentinel(rule.DestinationAddresses)
+		// #12288: the synthetic malformed-zone-pair carrier has no compiled
+		// authored policy, so its generic application token is only the wire
+		// poison. Render the compile-time shape metadata as the actual cause.
+		if appBad && len(rule.malformedZonePairShapes) > 0 &&
+			len(rule.rejectedApplications) == 1 &&
+			rule.rejectedApplications[0] == lenientDroppedConstraintToken &&
+			!srcBad && !dstBad {
+			reasons = append(reasons, fmt.Sprintf("names content the userspace matcher cannot represent: %s was skipped; the userspace helper rejects the whole policy snapshot (synthetic carrier %s)",
+				rejectionCause("malformed zone-pair context", rule.malformedZonePairShapes), policyRejectionScope(rule)))
+			continue
+		}
 		if !appBad && !srcBad && !dstBad {
 			continue
 		}
