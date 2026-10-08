@@ -16,6 +16,7 @@ import (
 func RedirectZeroizeWipePathsForTesting(root string) (restore func()) {
 	oldMachine, oldSSH, oldRootSSHUser, oldHistory := zeroizeMachineIDPath, zeroizeSSHHostKeyDir, zeroizeRootSSHUserDir, zeroizeRootBashHistory
 	oldEngineID, oldBoots, oldSeed := zeroizeSNMPEngineIDPath, zeroizeSNMPEngineBootsPath, zeroizeSystemdRandomSeed
+	oldFeedShrinkHistoryPath := zeroizeFeedShrinkHistoryPath
 	oldAptLists, oldAptArchive, oldUtmp := zeroizeAptListsDir, zeroizeAptArchiveDir, zeroizeRunUtmpPath
 	oldDay0Reject, oldRootGrown := zeroizeDay0RejectedPath, zeroizeRootGrownPath
 	oldDDNSLease, oldDDNSSurface := zeroizeDDNSLeaseStatePath, zeroizeDDNSSurfaceAPath
@@ -39,6 +40,7 @@ func RedirectZeroizeWipePathsForTesting(root string) (restore func()) {
 	zeroizeRootBashHistory = filepath.Join(root, "root", ".bash_history")
 	zeroizeSNMPEngineIDPath = filepath.Join(root, "var", "lib", "xpf", "snmp-engine-id")
 	zeroizeSNMPEngineBootsPath = filepath.Join(root, "var", "lib", "xpf", "snmp-engineboots")
+	zeroizeFeedShrinkHistoryPath = filepath.Join(root, "var", "lib", "xpf", "feed-shrink-history.json")
 	zeroizeSystemdRandomSeed = filepath.Join(root, "var", "lib", "systemd", "random-seed")
 	zeroizeAptListsDir = filepath.Join(root, "var", "lib", "apt", "lists")
 	zeroizeAptArchiveDir = filepath.Join(root, "var", "cache", "apt", "archives")
@@ -114,6 +116,7 @@ func RedirectZeroizeWipePathsForTesting(root string) (restore func()) {
 	return func() {
 		zeroizeMachineIDPath, zeroizeSSHHostKeyDir, zeroizeRootSSHUserDir, zeroizeRootBashHistory = oldMachine, oldSSH, oldRootSSHUser, oldHistory
 		zeroizeSNMPEngineIDPath, zeroizeSNMPEngineBootsPath, zeroizeSystemdRandomSeed = oldEngineID, oldBoots, oldSeed
+		zeroizeFeedShrinkHistoryPath = oldFeedShrinkHistoryPath
 		zeroizeAptListsDir, zeroizeAptArchiveDir, zeroizeRunUtmpPath = oldAptLists, oldAptArchive, oldUtmp
 		zeroizeDay0RejectedPath, zeroizeRootGrownPath = oldDay0Reject, oldRootGrown
 		zeroizeDDNSLeaseStatePath, zeroizeDDNSSurfaceAPath = oldDDNSLease, oldDDNSSurface

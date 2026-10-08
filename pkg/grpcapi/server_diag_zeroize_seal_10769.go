@@ -27,23 +27,24 @@ import (
 // SYSPREP_PURGE_PATHS. Tests point them at a disposable tree; production values
 // remain the image paths whose previous-tenant state must not survive reset.
 var (
-	zeroizeMachineIDPath       = "/etc/machine-id"
-	zeroizeSSHHostKeyDir       = "/etc/ssh"
-	zeroizeRootSSHUserDir      = "/root/.ssh"
-	zeroizeRootBashHistory     = "/root/.bash_history"
-	zeroizeSNMPEngineIDPath    = "/var/lib/xpf/snmp-engine-id"
-	zeroizeSNMPEngineBootsPath = "/var/lib/xpf/snmp-engineboots"
-	zeroizeSystemdRandomSeed   = "/var/lib/systemd/random-seed"
-	zeroizeAptListsDir         = "/var/lib/apt/lists"
-	zeroizeAptArchiveDir       = "/var/cache/apt/archives"
-	zeroizeRunUtmpPath         = "/run/utmp"
-	zeroizeDay0RejectedPath    = "/etc/xpf/.day0-config-rejected"
-	zeroizeRootGrownPath       = "/etc/xpf/.root-grown"
-	zeroizeDDNSLeaseStatePath  = ddns.DefaultLeaseStatePath()
-	zeroizeDDNSSurfaceAPath    = ddns.DefaultSurfaceAStatePath()
-	zeroizePasswdBackupPaths   = []string{"/etc/passwd-", "/etc/shadow-", "/etc/group-", "/etc/gshadow-"}
-	zeroizeManagedHostKeysPath = "/etc/ssh/ssh_known_hosts"
-	zeroizeManagedDropins      = []string{
+	zeroizeMachineIDPath         = "/etc/machine-id"
+	zeroizeSSHHostKeyDir         = "/etc/ssh"
+	zeroizeRootSSHUserDir        = "/root/.ssh"
+	zeroizeRootBashHistory       = "/root/.bash_history"
+	zeroizeSNMPEngineIDPath      = "/var/lib/xpf/snmp-engine-id"
+	zeroizeSNMPEngineBootsPath   = "/var/lib/xpf/snmp-engineboots"
+	zeroizeFeedShrinkHistoryPath = configstore.FeedShrinkHistoryPath
+	zeroizeSystemdRandomSeed     = "/var/lib/systemd/random-seed"
+	zeroizeAptListsDir           = "/var/lib/apt/lists"
+	zeroizeAptArchiveDir         = "/var/cache/apt/archives"
+	zeroizeRunUtmpPath           = "/run/utmp"
+	zeroizeDay0RejectedPath      = "/etc/xpf/.day0-config-rejected"
+	zeroizeRootGrownPath         = "/etc/xpf/.root-grown"
+	zeroizeDDNSLeaseStatePath    = ddns.DefaultLeaseStatePath()
+	zeroizeDDNSSurfaceAPath      = ddns.DefaultSurfaceAStatePath()
+	zeroizePasswdBackupPaths     = []string{"/etc/passwd-", "/etc/shadow-", "/etc/group-", "/etc/gshadow-"}
+	zeroizeManagedHostKeysPath   = "/etc/ssh/ssh_known_hosts"
+	zeroizeManagedDropins        = []string{
 		"/etc/ssh/sshd_config.d/00-xpf.conf",
 		"/etc/ssh/sshd_config.d/xpf.conf",
 		"/etc/chrony/sources.d/xpf.sources",
@@ -142,10 +143,12 @@ func zeroizeImageSealResidue() error {
 	// seed all regenerate on the next boot. Losing SNMP engineBoots alongside
 	// its EngineID is safe because the engine ID itself is replaced.
 	// Remove image-sealed caches plus the day-0 rejection and root-grow
-	// markers. They are either disposable cache or first-boot state.
+	// markers. They are disposable cache or first-boot state. The daemon's
+	// feed-shrink history is name-keyed tenant state and must not cross a reset.
 	for _, path := range []string{
 		zeroizeSNMPEngineIDPath,
 		zeroizeSNMPEngineBootsPath,
+		zeroizeFeedShrinkHistoryPath,
 		zeroizeSystemdRandomSeed,
 		zeroizeRunUtmpPath,
 		zeroizeDay0RejectedPath,
@@ -398,12 +401,12 @@ func zeroizeEraseHelperState(path string) error {
 }
 
 // zeroizeFinalEraseVerification re-proves the race-prone erase sets
-// immediately before the pending markers clear: Kea lease files and the
-// DDNS/IPsec state files plus crash temps. Earlier legs erase and verify
-// each of these, but later legs run in between; a fence-escaper write
-// landing after an early check must fail the wipe here rather than slip
-// under a clean receipt. Canonicals are checked as well as temps: a
-// writer that completed a full save leaves a canonical with no temp
+// immediately before the pending markers clear: Kea lease files, the daemon's
+// feed-shrink history, and DDNS/IPsec state files plus crash temps. Earlier
+// legs erase and verify each of these, but later legs run in between; a
+// fence-escaper write landing after an early check must fail this wipe
+// rather than slip under a clean receipt. Canonicals are checked as well as
+// temps: a writer that completed a full save leaves a canonical with no temp
 // behind. The helper class is covered only for ungated completions with
 // a known path: gated wipes skip it (the helper is live until the daemon
 // stops it post-wipe, and the daemon sweep owns the path), legacy
@@ -428,6 +431,11 @@ func zeroizeFinalEraseVerification(completion zeroizeCompletion) error {
 		} else if !os.IsNotExist(err) {
 			errs = append(errs, fmt.Errorf("zeroize: inspect state file %s: %w", path, err))
 		}
+	}
+	if _, err := os.Lstat(zeroizeFeedShrinkHistoryPath); err == nil {
+		errs = append(errs, fmt.Errorf("zeroize: feed shrink history %s present at final verification", zeroizeFeedShrinkHistoryPath))
+	} else if !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("zeroize: inspect feed shrink history %s: %w", zeroizeFeedShrinkHistoryPath, err))
 	}
 	ddnsPaths := []string{zeroizeDDNSLeaseStatePath, zeroizeDDNSSurfaceAPath}
 	for _, path := range ddnsPaths {

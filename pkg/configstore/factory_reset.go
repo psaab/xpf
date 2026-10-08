@@ -29,6 +29,12 @@ import (
 // Production code must never mutate it.
 var DefaultArchiveDir = "/var/lib/xpf/archive"
 
+// FeedShrinkHistoryPath is the exact daemon-owned file that preserves
+// per-feed shrink-guard epochs across restarts. It is outside configDir and
+// must be erased by the coordinated zeroize path, not by the config-root
+// top-level name sweep below.
+const FeedShrinkHistoryPath = "/var/lib/xpf/feed-shrink-history.json"
+
 // RescueConfigBase is the fixed base name of the xpf rescue configuration file
 // the daemon writes alongside the live config (Store.rescuePath ->
 // "<configDir>/rescue.conf"). It is the full active-config TEXT with cleartext
@@ -753,7 +759,10 @@ func canonicalForbiddenAlias(resolved string) string {
 // accounts are handled separately by the daemon's RPC factory-reset path; the
 // local config archive (/var/lib/xpf/archive) — another OUTSIDE-configDir
 // generation of config secrets — is erased by the sibling FactoryResetArchiveDir
-// (#5186), which both the CLI and the gRPC wipe also call.
+// (#5186), which both the CLI and the gRPC wipe also call. The daemon-owned
+// feed-shrink epoch history (FeedShrinkHistoryPath) is also outside configDir;
+// grpcapi erases it after fencing the daemon's persistence callback. Neither
+// artifact belongs in the exact-name top-level configDir census below.
 func FactoryResetConfigDir(configDir, configBase string) error {
 	// #5684: refuse to wipe a shared/parent/system directory. configDir is
 	// filepath.Dir(store.ConfigPath()); a custom -config placed in (or resolving

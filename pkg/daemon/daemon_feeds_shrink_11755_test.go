@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -93,4 +94,65 @@ func feedShrinkBody11755(count int) string {
 		_, _ = fmt.Fprintf(&body, "198.18.%d.%d/32\n", i/256, i%256)
 	}
 	return body.String()
+}
+func TestFeedShrinkHistoryFencePreventsWipeRecreation12170(t *testing.T) {
+	oldPath := feedShrinkHistoryPath
+	feedShrinkHistoryPath = filepath.Join(t.TempDir(), "state", "feed-shrink-history.json")
+	t.Cleanup(func() { feedShrinkHistoryPath = oldPath })
+
+	var bodyMu sync.RWMutex
+	body := feedShrinkBody11755(40)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		bodyMu.RLock()
+		defer bodyMu.RUnlock()
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+
+	d := &Daemon{daemonCtx: context.Background()}
+	d.ensureFeedManager()
+	d.feeds.SetPrivateFeedAllowlist([]netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")})
+	t.Cleanup(d.feeds.StopAll)
+	d.reconcileFeeds(feedCfgWith(map[string]*config.FeedServer{
+		"server": {Name: "server", URL: server.URL, FeedName: "stable-feed", UpdateInterval: 1},
+	}, nil))
+
+	waitFor := func(prefixes int, historyPresent bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			info, ok := d.feeds.AllFeeds()["stable-feed"]
+			_, err := os.Stat(feedShrinkHistoryPath)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatalf("inspect feed history: %v", err)
+			}
+			if ok && info.Prefixes == prefixes && (err == nil) == historyPresent {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatalf("feed/history did not reach prefixes=%d historyPresent=%t: feed=%+v",
+			prefixes, historyPresent, d.feeds.AllFeeds()["stable-feed"])
+	}
+	waitFor(40, true)
+
+	resume := d.fenceFeedShrinkHistoryPersistence()
+	if err := os.Remove(feedShrinkHistoryPath); err != nil {
+		t.Fatalf("remove history as zeroize does: %v", err)
+	}
+	bodyMu.Lock()
+	body = feedShrinkBody11755(50)
+	bodyMu.Unlock()
+	waitFor(50, false)
+
+	// A failed wipe reopens persistence, while callbacks completed during the
+	// fence cannot recreate the removed prior-tenant file.
+	resume()
+	bodyMu.Lock()
+	body = feedShrinkBody11755(60)
+	bodyMu.Unlock()
+	waitFor(60, true)
+	if records := readFeedShrinkHistory(); len(records) != 1 || records[0].Count != 60 {
+		t.Fatalf("resumed persistence did not store the fresh baseline: %+v", records)
+	}
 }
