@@ -12,6 +12,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::mpsc::Receiver;
 
 const WAN_IFINDEX: i32 = 12;
+const WAN_VLAN_ID: u16 = 80;
 const LAN_IFINDEX: i32 = 24;
 const CLIENT: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 10);
 const VIP: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 9);
@@ -75,7 +76,13 @@ fn tcp_syn(
     dst_mac: [u8; 6],
 ) -> (Vec<u8>, UserspaceDpMeta) {
     let frame = build_txn_tcp_syn_frame_v4(src, dst, CLIENT_PORT, dst_port, TCP_FLAG_SYN, dst_mac);
-    let meta = txn_meta_v4(ingress_ifindex, TCP_FLAG_SYN, frame.len() as u16);
+    let mut meta = txn_meta_v4(ingress_ifindex, TCP_FLAG_SYN, frame.len() as u16);
+    // nat_snapshot's WAN interface is the tagged-only reth0.80 unit. Model
+    // the VLAN identity explicitly so the descriptor reaches NAT/policy
+    // instead of being rejected as an untagged frame on a tagged-only bind.
+    if ingress_ifindex == WAN_IFINDEX as u32 {
+        meta.ingress_vlan_id = WAN_VLAN_ID;
+    }
     (frame, meta)
 }
 
