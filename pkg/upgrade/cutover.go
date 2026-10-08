@@ -14,6 +14,17 @@ import (
 	"github.com/psaab/xpf/pkg/upgrade/stagedgen"
 )
 
+// cutBeforeStopError marks a Run failure that occurred before StopUnit was
+// attempted. The rolling driver may safely release its ForceSecondary hold
+// only for this class; failures at or after STOP must leave the node passive
+// for operator inspection.
+type cutBeforeStopError struct {
+	err error
+}
+
+func (e *cutBeforeStopError) Error() string { return e.err.Error() }
+func (e *cutBeforeStopError) Unwrap() error { return e.err }
+
 // Options modify a single Run.
 type Options struct {
 	// SkipStartHealthRollback disables the post-start auto-rollback (used
@@ -150,6 +161,13 @@ func (r *Runner) resolveSource(j *Journal) (genid, dir string, err error) {
 // The standalone single-node flow. The HA rolling driver wraps this with
 // a controlled drain (rolling.go).
 func (r *Runner) Run(opts Options) (err error) {
+	stopAttempted := opts.UnitAlreadyStopped
+	defer func() {
+		if err != nil && !stopAttempted {
+			err = &cutBeforeStopError{err: err}
+		}
+	}()
+
 	// ---- CLUSTER GATE (#5284): refuse an UNCOORDINATED standalone cut on a
 	// clustered node. This is the FINAL privileged boundary — evaluated
 	// BEFORE the host-wide upgrade lock and BEFORE any journal read or live
@@ -221,6 +239,7 @@ func (r *Runner) Run(opts Options) (err error) {
 	if err != nil {
 		return err
 	}
+	stopAttempted = j.State.atLeast(StateStopped)
 
 	// A loaded journal's version fields key versions/<ver>, the .dbsnap
 	// dotfile, the `current` symlink, and the unit drop-in (#1964 C1). A
@@ -726,6 +745,7 @@ func (r *Runner) Run(opts Options) (err error) {
 		stoppedByRun := false
 		if !opts.UnitAlreadyStopped {
 			r.logf("upgrade: stopping %s before cut-boundary snapshot and flip", r.cfg.Unit)
+			stopAttempted = true
 			if err := r.cfg.Sys.StopUnit(r.cfg.Unit); err != nil {
 				return fmt.Errorf("stop unit: %w", err)
 			}

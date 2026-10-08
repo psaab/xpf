@@ -233,6 +233,31 @@ func runRollingRollbackWith(r *Runner, cl RollingCluster, rc RollingConfig, targ
 	return nil
 }
 
+// failbackAfterPreStopRefusal releases the rolling drain when Runner.Run
+// rejects a cut before attempting STOP. ResetFailover is only an
+// acknowledgement; read the per-RG rejoin predicate back before reporting
+// the node recovered. Errors after STOP deliberately do not use this path:
+// those leave the node secondary for operator inspection.
+func failbackAfterPreStopRefusal(cl RollingCluster, cause error) error {
+	if resetErr := cl.ResetFailover(); resetErr != nil {
+		return fmt.Errorf("rolling: single-node cut refused before STOP AND "+
+			"failback (ResetFailover) FAILED — node may remain held secondary: %w",
+			errors.Join(cause, resetErr))
+	}
+	rejoined, readbackErr := cl.LocalRejoinComplete()
+	if readbackErr != nil || !rejoined {
+		joined := cause
+		if readbackErr != nil {
+			joined = errors.Join(cause, readbackErr)
+		}
+		return fmt.Errorf("rolling: single-node cut refused before STOP; failback "+
+			"acknowledged but local rejoin is not confirmed (local-rejoined=%v "+
+			"readback-error=%v): %w", rejoined, readbackErr, joined)
+	}
+	return fmt.Errorf("rolling: single-node cut refused before STOP; failback "+
+		"confirmed by per-RG readback: %w", cause)
+}
+
 // runRollingWith is the testable core (cluster + timing injected). It does
 // NOT acquire the upgrade lock — its only caller, RunRolling, holds it for
 // the whole rolling window, and the inner r.Run() it invokes runs with
@@ -371,9 +396,14 @@ func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) error {
 	//    3-4 above), so the per-node cut is sanctioned even on a clustered
 	//    node — it bypasses the #5284 pre-STOP cluster gate that refuses a
 	//    BARE standalone cut on a member with /etc/xpf/node-id present.
-	if err := r.Run(Options{SkipStartHealthRollback: true, LockAlreadyHeld: true, ClusterCoordinated: true}); err != nil {
+	if cutErr := r.Run(Options{SkipStartHealthRollback: true, LockAlreadyHeld: true, ClusterCoordinated: true}); cutErr != nil {
+		var beforeStop *cutBeforeStopError
+		if errors.As(cutErr, &beforeStop) {
+			logf("rolling: single-node cut refused before STOP; resetting failover and aborting")
+			return failbackAfterPreStopRefusal(cl, cutErr)
+		}
 		return fmt.Errorf("rolling: single-node cut failed (HA rollback is "+
-			"operator-driven — inspect the node): %w", err)
+			"operator-driven — inspect the node): %w", cutErr)
 	}
 
 	// 6. Wait for sync to re-establish on the upgraded node. The cut just
