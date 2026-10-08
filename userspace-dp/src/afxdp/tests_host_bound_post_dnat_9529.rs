@@ -128,7 +128,9 @@ fn from_wan(
     flags: u8,
 ) -> DebugPollCounters {
     let frame = build_txn_tcp_syn_frame_v4(CLIENT, dst, CLIENT_PORT, dport, flags, crate::afxdp::tests_support::TEST_WAN_MAC);
-    let meta = txn_meta_v4(WAN_IFINDEX as u32, flags, frame.len() as u16);
+    // This fixture enters on the tagged-only reth0.80 unit; preserve its VLAN identity.
+    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, flags, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
     let mut b = BindingWorker::new_for_mirror_test(0, 0, WAN_IFINDEX, 0);
     b.interface = Arc::<str>::from("reth0.80");
     let ha_state = txn_ha_state();
