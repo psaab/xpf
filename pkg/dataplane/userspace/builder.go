@@ -175,13 +175,16 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 	if err != nil {
 		return nil, err
 	}
-	// #3261 / #10688: compute the fail-closed content diagnostic from the
-	// actual built policy rules and address-book rows (feed-aware), then stamp
-	// it onto capabilities below. The cfg-only deriveUserspaceCapabilities
-	// cannot see the feed overlay.
+	// #3261 / #10688 / #12047: stamp refusal reasons from the built policy rules
+	// and address-book rows. The cfg-only capability derivation cannot see feeds.
 	caps := deriveUserspaceCapabilities(cfg)
-	caps.PolicyContentRejected = append(collectPolicyContentRejections(policies),
+	caps.PolicyContentRejected = collectPolicyContentRejections(policies)
+	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
 		collectAddressBookFamilyRejections(addressBooks)...)
+	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
+		collectAddressBookCIDRMaskRejections(addressBooks)...)
+	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
+		collectPolicyCIDRMaskRejections(policies)...)
 	// #3438: a BuildCatalog fault (overflow / malformed application-set) fails
 	// the snapshot closed rather than shipping an empty catalog that would
 	// silently degrade all session naming to UNKNOWN.

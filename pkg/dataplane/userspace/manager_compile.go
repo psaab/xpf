@@ -1119,16 +1119,20 @@ func (m *Manager) rebuildScheduledPolicySectionsWithLatchLocked(next *ConfigSnap
 	// userspace keeps the old FIB with retries that cannot converge.
 	policies = scrubPoliciesForQuarantinedZones(policies, quarantinedZoneNamesForConfig(cfg))
 	next.Policies = policies
-	// #3261: recompute the policy sentinel reasons from the scrubbed rules;
-	// #10688 also checks the refreshed address-book rows for the family's
-	// Rust/Go mismatch before publishing.
+	// #3261 / #10688 / #12047: recompute refusal reasons from the scrubbed
+	// policies and refreshed address-book rows before the scheduler republish.
 	// Keep the operator-facing count equal to what is actually published, exactly
 	// as the full build does after quarantine (builder.go): Summary.PolicyCount
 	// must equal len(next.Policies).
 	next.Summary.PolicyCount = len(policies)
 	next.AddressBooks = books
-	next.Capabilities.PolicyContentRejected = append(collectPolicyContentRejections(policies),
+	next.Capabilities.PolicyContentRejected = collectPolicyContentRejections(policies)
+	next.Capabilities.PolicyContentRejected = append(next.Capabilities.PolicyContentRejected,
 		collectAddressBookFamilyRejections(books)...)
+	next.Capabilities.PolicyContentRejected = append(next.Capabilities.PolicyContentRejected,
+		collectAddressBookCIDRMaskRejections(books)...)
+	next.Capabilities.PolicyContentRejected = append(next.Capabilities.PolicyContentRejected,
+		collectPolicyCIDRMaskRejections(policies)...)
 	return nil
 }
 
