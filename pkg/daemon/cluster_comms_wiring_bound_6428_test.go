@@ -78,6 +78,10 @@ func TestWireSessionSyncPeerCallbacksInstallsHandles_6428(t *testing.T) {
 	if ss.OnBulkSyncAckReceived == nil {
 		t.Error("wireSessionSyncPeerCallbacks did not install ss.OnBulkSyncAckReceived")
 	}
+	if ss.OnSessionInventoryBulkReceived == nil {
+		t.Error("wireSessionSyncPeerCallbacks did not install ss.OnSessionInventoryBulkReceived")
+	}
+
 	if ss.OnForwardSessionInstalled == nil {
 		t.Error("wireSessionSyncPeerCallbacks did not install ss.OnForwardSessionInstalled")
 	}
