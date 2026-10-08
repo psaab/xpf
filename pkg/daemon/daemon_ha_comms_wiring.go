@@ -323,6 +323,31 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 		slog.Info("cluster: session sync complete, releasing VRRP hold")
 		d.onSessionSyncBulkReceived()
 	}
+	ss.OnSessionInventoryBulkReceived = func(generation uint64) {
+		if d.getSessionSync() != ss {
+			return
+		}
+		if rt := d.dataplane(); rt != nil {
+			if reconciler, ok := rt.(interface {
+				MarkSessionInventoryReconciled(uint64) bool
+			}); ok {
+				reconciler.MarkSessionInventoryReconciled(generation)
+			}
+		}
+	}
+
+	if rt := d.dataplane(); rt != nil {
+		if requester, ok := rt.(interface {
+			SetSessionInventoryRequester(func(uint64) bool)
+		}); ok {
+			requester.SetSessionInventoryRequester(func(generation uint64) bool {
+				if d.getSessionSync() != ss {
+					return false
+				}
+				return ss.RequestPeerSessionInventory(generation)
+			})
+		}
+	}
 
 	ss.OnBulkSyncAckReceived = func() {
 		d.cluster.RecordEvent(cluster.EventColdSync, -1, "Bulk sync acknowledged by peer")
