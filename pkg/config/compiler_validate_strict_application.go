@@ -647,8 +647,9 @@ func validateApplicationStructureStrict(cfg *Config) error {
 // applicationsToValidateStrict returns the set of user-defined application
 // names whose port/protocol spec is validated as a hard COMMIT error rather
 // than a warning. That is every user application referenced (directly, or as a
-// member of a referenced application-set) by a zone-pair or global security
-// policy, OR by a source/destination-NAT rule's `match application` (#2187 — a
+// member of a referenced user-defined or predefined application-set) by a
+// zone-pair or global security policy,
+// or by a source/destination-NAT rule's `match application` (#2187 — a
 // NAT term consumes the app's port/proto the same way a policy does, so a
 // malformed app referenced only by a NAT rule must reject too), plus — when
 // `services application-identification` is enabled — every user application
@@ -673,41 +674,56 @@ func applicationsToValidateStrict(cfg *Config) map[string]struct{} {
 		}
 		return out
 	}
+	addSetRef := func(setName string, set *ApplicationSet) {
+		expanded, err := ExpandApplicationSet(setName, &cfg.Applications)
+		if err == nil {
+			for _, member := range expanded {
+				if _, isUser := userApps[member]; isUser {
+					out[member] = struct{}{}
+				}
+			}
+			return
+		}
+		// ExpandApplicationSet bails on the FIRST dangling/undefined or
+		// over-nested member, which would otherwise let a MALFORMED user app
+		// that is ALSO a direct member of the same set escape the strict gate
+		// (commit silently succeeds — the #2142 fail-closed-on-permit
+		// pathology, scoped to a set carrying a dangling member). A dangling
+		// member is a separate existing concern; it must not mask a malformed
+		// spec on a sibling member. Fall back to the set's DIRECT user-app
+		// members so each one that resolves is still hard-rejected at commit.
+		if set != nil {
+			for _, member := range set.Applications {
+				if _, isUser := userApps[member]; isUser {
+					out[member] = struct{}{}
+				}
+			}
+		}
+	}
 	addRef := func(appName string) {
 		if appName == "" || appName == "any" {
 			return
 		}
 		if set, isSet := cfg.Applications.ApplicationSets[appName]; isSet {
-			expanded, err := ExpandApplicationSet(appName, &cfg.Applications)
-			if err == nil {
-				for _, member := range expanded {
-					if _, isUser := userApps[member]; isUser {
-						out[member] = struct{}{}
-					}
-				}
-				return
-			}
-			// ExpandApplicationSet bails on the FIRST dangling/undefined or
-			// over-nested member, which would otherwise let a MALFORMED user app
-			// that is ALSO a direct member of the same set escape the strict gate
-			// (commit silently succeeds — the #2142 fail-closed-on-permit
-			// pathology, scoped to a set carrying a dangling member). A dangling
-			// member is a separate existing concern; it must not mask a malformed
-			// spec on a sibling member. Fall back to the set's DIRECT user-app
-			// members so each one that resolves is still hard-rejected at commit.
-			if set != nil {
-				for _, member := range set.Applications {
-					if _, isUser := userApps[member]; isUser {
-						out[member] = struct{}{}
-					}
-				}
-			}
+			addSetRef(appName, set)
 			return
 		}
+		// Runtime resolution checks applications before predefined sets, so a
+		// user application shadows a predefined bundle with the same name.
 		if _, isUser := userApps[appName]; isUser {
 			out[appName] = struct{}{}
+			return
+		}
+		// Built-in applications likewise win over built-in bundles, but are
+		// not operator-owned specs for this gate.
+		if _, isPredefinedApp := PredefinedApplications[appName]; isPredefinedApp {
+			return
+		}
+		if set, isSet := PredefinedApplicationSets[appName]; isSet {
+			addSetRef(appName, set)
 		}
 	}
+
 	walk := func(policies []*Policy) {
 		for _, pol := range policies {
 			if pol == nil {

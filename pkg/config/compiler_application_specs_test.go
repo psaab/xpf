@@ -627,3 +627,47 @@ func TestApplicationSpec_PortOnNonPortProtocol_LenientWarns(t *testing.T) {
 		})
 	}
 }
+
+// shadowedPredefinedBundleBadMember references the built-in junos-sip bundle
+// with a malformed user-defined junos-sip-tcp member.
+func shadowedPredefinedBundleBadMember() []string {
+	return []string{
+		"set applications application junos-sip-tcp protocol tcp",
+		"set applications application junos-sip-tcp destination-port nope",
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
+		"set security policies from-zone trust to-zone untrust policy p match source-address any",
+		"set security policies from-zone trust to-zone untrust policy p match destination-address any",
+		"set security policies from-zone trust to-zone untrust policy p match application junos-sip",
+		"set security policies from-zone trust to-zone untrust policy p then deny",
+	}
+}
+
+// AppID is deliberately left disabled here: only the policy's reference to
+// the predefined bundle should make the malformed shadowed member strict.
+// This regression ensures a shadowed member is rejected by the spec gate, not
+// merely by the all-applications AppID path.
+func TestApplicationSpec_ShadowedPredefinedBundleMember_AppIDOffRejectsAtCommit(t *testing.T) {
+	tree := flatTreeFromSets(t, shadowedPredefinedBundleBadMember()...)
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("expected commit to reject malformed user application junos-sip-tcp referenced through predefined bundle junos-sip")
+	}
+	if !strings.Contains(err.Error(), "junos-sip-tcp") ||
+		!strings.Contains(err.Error(), "destination-port") {
+		t.Fatalf("error %q must name malformed bundle member junos-sip-tcp and destination-port", err.Error())
+	}
+}
+
+func TestApplicationSpec_ShadowedPredefinedBundleMember_AppIDOnControl(t *testing.T) {
+	lines := append(shadowedPredefinedBundleBadMember(), "set services application-identification")
+	tree := flatTreeFromSets(t, lines...)
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("expected AppID-on commit to continue rejecting malformed user application junos-sip-tcp")
+	}
+	if !strings.Contains(err.Error(), "junos-sip-tcp") ||
+		!strings.Contains(err.Error(), "destination-port") {
+		t.Fatalf("error %q must name malformed application junos-sip-tcp and destination-port", err.Error())
+	}
+}
