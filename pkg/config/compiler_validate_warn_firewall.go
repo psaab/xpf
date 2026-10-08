@@ -297,6 +297,51 @@ func validateLo0FilterKernelMirrorWarnings(cfg *Config) []string {
 	return warnings
 }
 
+// validateLo0UnsupportedFilterBindingsWarnings reports lo0 filter bindings the
+// host planes accept in the interface model but do not consume (#12091). The
+// host-filter contract is limited to unit 0 input in inet and inet6; preserve
+// that supported binding and name every other non-empty lo0 hook.
+func validateLo0UnsupportedFilterBindingsWarnings(cfg *Config) []string {
+	if cfg == nil || cfg.Interfaces.Interfaces == nil {
+		return nil
+	}
+	lo0 := cfg.Interfaces.Interfaces["lo0"]
+	if lo0 == nil {
+		return nil
+	}
+	unitNumbers := make([]int, 0, len(lo0.Units))
+	for number := range lo0.Units {
+		unitNumbers = append(unitNumbers, number)
+	}
+	sort.Ints(unitNumbers)
+
+	var warnings []string
+	for _, number := range unitNumbers {
+		unit := lo0.Units[number]
+		if unit == nil {
+			continue
+		}
+		for _, family := range []struct {
+			name, input, output string
+		}{
+			{"inet", unit.FilterInputV4, unit.FilterOutputV4},
+			{"inet6", unit.FilterInputV6, unit.FilterOutputV6},
+		} {
+			if number != 0 && family.input != "" {
+				warnings = append(warnings, fmt.Sprintf(
+					"interfaces lo0 unit %d family %s filter input %q is accepted but NOT enforced by either host plane; only lo0 unit 0 family inet/inet6 filter input is enforced (#12091)",
+					number, family.name, family.input))
+			}
+			if family.output != "" {
+				warnings = append(warnings, fmt.Sprintf(
+					"interfaces lo0 unit %d family %s filter output %q is accepted but NOT enforced by either host plane; only lo0 unit 0 family inet/inet6 filter input is enforced (#12091)",
+					number, family.name, family.output))
+			}
+		}
+	}
+	return warnings
+}
+
 // validateFilterNoCatchAllWarnings emits a WARN-only commit-time message when a
 // firewall filter ATTACHED to an interface (or lo0) input/output hook has no
 // terminal catch-all term — i.e. it relies on xpf's implicit-accept of any

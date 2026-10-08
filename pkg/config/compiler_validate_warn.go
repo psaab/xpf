@@ -1780,6 +1780,11 @@ func ValidateConfig(cfg *Config) []string {
 	// is already covered by validateFilterLossPriorityWarnings above.
 	warnings = append(warnings, validateLo0FilterKernelMirrorWarnings(cfg)...)
 
+	// #12091: only lo0 unit 0 input filters are consumed by the host planes.
+	// Surface other lo0 unit inputs and every lo0 output hook as accepted but
+	// unenforced so a clean commit cannot imply those bindings are active.
+	warnings = append(warnings, validateLo0UnsupportedFilterBindingsWarnings(cfg)...)
+
 	// #3295: a firewall filter attached to an interface/lo0 input/output hook
 	// with no terminal catch-all term relies on xpf's implicit-accept of
 	// unmatched traffic — the deliberate divergence from Junos's implicit final
