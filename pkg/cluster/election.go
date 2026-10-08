@@ -763,6 +763,17 @@ const DataplaneArmMonitorIface = "__dataplane-arm__"
 // the range, never out of it.
 const DataplaneArmMonitorCost = maxRedundancyGroupWeight - 1
 
+// HelperCrashLoopMonitorIface is the election-debt key for a userspace helper
+// that has exhausted its restart backoff. Unlike ordinary dataplane-arm debt,
+// a persistent helper crash loop resigns the RG so a non-preempt incumbent
+// cannot retain ownership while its attached shim drops transit.
+const HelperCrashLoopMonitorIface = "__userspace-helper-crash-loop__"
+
+// HelperCrashLoopMonitorCost drives the effective weight to zero. A zero
+// weight is required to demote a non-preempt incumbent; the dataplane-arm debt
+// intentionally bottoms out at 1 to keep standalone nodes eligible.
+const HelperCrashLoopMonitorCost = maxRedundancyGroupWeight
+
 // rgWeightFromDebt converts a redundancy group's accumulated monitor debt into
 // its effective weight, bounded to [0, maxRedundancyGroupWeight].
 //
@@ -882,15 +893,14 @@ func (m *Manager) reconcileMonitorDebtsLocked(cfg *config.ClusterConfig) {
 		// #8338: skip every key this reconciler does not OWN, not just the IP
 		// class. The previous shape exempted only `isIPMonitorName`, so the
 		// reserved `__dataplane-arm__` debt — which is never in `desired`,
-		// because `desired` is built solely from `InterfaceMonitors` — was
-		// deleted by every commit that reached here. `applyDataplaneReadyTrack`
-		// is edge-triggered from the three ready-transition helpers, so a commit
-		// taken while the node was ALREADY unready reinstalled nothing: the
-		// node kept forwarding nothing and lost the penalty that expressed it,
-		// and could then win an election and hold the RG as a blackhole.
+		// because `desired` is built solely from InterfaceMonitors — was
+		// deleted by every commit that reached here. The daemon's
+		// `applyTransitElectionDebt` is edge-triggered from readiness and
+		// supervisor transitions, so a commit taken while unready could lose
+		// the penalty and let a blackholed node win the RG.
 		//
-		// Ownership is now POSITIVE. A future reserved debt is safe by default
-		// rather than requiring someone to remember a third exemption here.
+		// Ownership is now POSITIVE. Reserved debts are safe by default rather
+		// than requiring someone to remember each exemption here.
 		if isReservedMonitorName(key.iface) {
 			continue
 		}

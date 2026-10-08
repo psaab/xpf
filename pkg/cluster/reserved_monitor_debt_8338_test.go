@@ -9,12 +9,11 @@ import (
 // #8338: a reserved monitor debt must SURVIVE an unrelated config commit.
 //
 // THE DEFECT. `reconcileMonitorDebtsLocked` builds its desired set solely from
-// `rg.InterfaceMonitors`, so a reserved key is never in it, and the delete loop
-// exempted only `isIPMonitorName`. Every commit therefore deleted the
-// `__dataplane-arm__` debt. `applyDataplaneReadyTrack` is edge-triggered from
-// the three ready-transition helpers, so a commit taken while the node was
-// ALREADY unready reinstalled nothing — the node forwarded nothing and carried
-// no penalty saying so, and could win an election and hold the RG as a blackhole.
+// `rg.InterfaceMonitors`, so a reserved key is never in it. Because the delete
+// loop exempted only `isIPMonitorName`, every commit deleted the
+// `__dataplane-arm__` debt. `applyTransitElectionDebt` is transition-driven, so
+// a commit taken while already unready reinstalled nothing: the RG stayed at
+// full weight despite forwarding nothing and could still win as a blackhole.
 //
 // THE FIXTURE MUST ENTER THE UNREADY STATE BEFORE COMMITTING. A cell that
 // commits while READY passes against the broken code, because in that state the
@@ -23,9 +22,9 @@ import (
 // presence asserted before the commit.
 //
 // Driven over the reserved list rather than one name: `reservedMonitorNames` is
-// the same slice `isReservedMonitorName` consumes, so a third reserved debt
-// added to the category is covered here automatically and one added WITHOUT
-// being registered fails the ownership it needs.
+// the same slice `isReservedMonitorName` consumes, so any reserved debt added
+// to the category is covered automatically and one added WITHOUT registration
+// fails the ownership it needs.
 func TestReservedMonitorDebtSurvivesConfigCommit8338(t *testing.T) {
 	for _, iface := range reservedMonitorNames {
 		t.Run(iface, func(t *testing.T) {
@@ -35,8 +34,13 @@ func TestReservedMonitorDebtSurvivesConfigCommit8338(t *testing.T) {
 			drainEvents(m, 8)
 
 			// Enter the state the debt represents — for the arm debt this is
-			// exactly what `applyDataplaneReadyTrack(false)` does.
-			m.SetMonitorWeight(0, iface, true, DataplaneArmMonitorCost)
+			// exactly what `applyTransitElectionDebt(false, false)` does. The helper
+			// crash-loop debt uses its full resignation cost.
+			cost := DataplaneArmMonitorCost
+			if iface == HelperCrashLoopMonitorIface {
+				cost = HelperCrashLoopMonitorCost
+			}
+			m.SetMonitorWeight(0, iface, true, cost)
 			before := m.GroupStates()
 			if len(before) == 0 || before[0].Weight == 255 {
 				t.Fatalf("precondition: the debt must be INSTALLED before the commit "+
@@ -78,12 +82,35 @@ func TestReservedMonitorDebtIsStillClearedByItsOwner8338(t *testing.T) {
 		t.Fatalf("precondition: the debt must be installed, weight = %d", w)
 	}
 
-	// The ready-to-serve transition — `applyDataplaneReadyTrack(true)`.
+	// The ready-to-serve transition clears the arm debt through
+	// `applyTransitElectionDebt(true, false)`.
 	m.SetMonitorWeight(0, DataplaneArmMonitorIface, false, DataplaneArmMonitorCost)
 	if w := m.GroupStates()[0].Weight; w != 255 {
 		t.Fatalf("the arm-recovered transition must clear the debt: weight = %d, want 255. "+
 			"An exemption that also blocks the legitimate clear leaves a node penalised "+
 			"forever after one arm failure (#8338)", w)
+	}
+}
+
+func TestHelperCrashLoopDebtClearsAfterRecovery12159(t *testing.T) {
+	m := NewManager(0, 1)
+	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200, 1: 100}))
+	m.UpdateConfig(cfg)
+	drainEvents(m, 8)
+
+	m.SetMonitorWeight(0, HelperCrashLoopMonitorIface, true, HelperCrashLoopMonitorCost)
+	if w := m.GroupStates()[0].Weight; w != 0 {
+		t.Fatalf("persistent crash-loop weight = %d, want 0", w)
+	}
+	m.UpdateConfig(cfg)
+	drainEvents(m, 8)
+	if w := m.GroupStates()[0].Weight; w != 0 {
+		t.Fatalf("crash-loop election debt was wiped by config apply: weight = %d, want 0", w)
+	}
+
+	m.SetMonitorWeight(0, HelperCrashLoopMonitorIface, false, HelperCrashLoopMonitorCost)
+	if w := m.GroupStates()[0].Weight; w != 255 {
+		t.Fatalf("successful recovery did not clear helper crash-loop debt: weight = %d, want 255", w)
 	}
 }
 
