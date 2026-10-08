@@ -578,13 +578,13 @@ pub(crate) fn cfg_test_modules(root: &std::path::Path) -> std::collections::Hash
             .to_string()
     }
 
-    // Pass 1 collects every module declaration in the tree, remembering for each
-    // OWNING FILE which files it brings in and whether the bringing-in carried
-    // #[cfg(test)]. Pass 2 takes the transitive closure, because `#[cfg(test)]`
-    // is INHERITED: a plain `mod control_frames;` inside a file that is itself
-    // only compiled under test is equally test-only. Without the closure, 36
-    // files under directories like `event_stream/tests/` were still classified
-    // as production — the third defect this control caught.
+    // Pass 1 collects every module declaration and literal include! in the
+    // tree, remembering each source file's incoming test gate and included
+    // files. Pass 2 takes the transitive closure, because #[cfg(test)] is
+    // INHERITED: a plain mod or include! inside a file that is itself only
+    // compiled under test is equally test-only. Without the closure, 36 files
+    // under directories like event_stream/tests/ were still classified as
+    // production — the third defect this control caught.
     let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut edges: Vec<(String, String)> = Vec::new();
     let mut files = Vec::new();
@@ -617,6 +617,26 @@ pub(crate) fn cfg_test_modules(root: &std::path::Path) -> std::collections::Hash
                     path_attr = Some(rest[..end].to_string());
                 }
                 continue;
+            }
+            // include! source belongs to the file containing the macro,
+            // unlike a module resolved from the owning module directory.
+            // Record an edge so test-only parents classify included files too.
+            if !t.starts_with("//") {
+                if let Some((_, rest)) = t.split_once("include!(") {
+                    let rest = rest.trim_start();
+                    if let Some(rest) = rest.strip_prefix('"') {
+                        if let Some(end) = rest.find('"') {
+                            if let Some(dir) = path.parent() {
+                                let from = normalise(&path, root);
+                                let target = normalise(&dir.join(&rest[..end]), root);
+                                if cfg_test {
+                                    out.insert(target.clone());
+                                }
+                                edges.push((from, target));
+                            }
+                        }
+                    }
+                }
             }
             // Visibility is stripped generically rather than by listing forms.
             // The first version matched only `mod ` and `pub mod `, and missed
