@@ -478,7 +478,7 @@ forward-direction collision.
   - the entry key, never the row key: `reverse_canonical_key` zeroes
     `routing_domain` (#7160), so two domains derive the identical `SessionKey`
     for their shared reverse row;
-  - held by a worker, because every session is replicated to every worker
+  - held by a worker, because every session is replicated to every live worker
     (`replicate_session_upsert`) and each replica is reaped on its own schedule
     (#6211). Owned by the key alone, the first idle replica's reap deleted the
     row under the worker still forwarding.

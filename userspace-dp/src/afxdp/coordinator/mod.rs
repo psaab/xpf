@@ -1353,7 +1353,7 @@ impl Coordinator {
     pub(crate) fn replay_synced_sessions(
         &self,
         entries: &[SyncedSessionEntry],
-        worker_command_queues: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+        worker_command_queues: &WorkerCommandQueues,
         session_map: SteeringMap<'_>,
     ) -> usize {
         if entries.is_empty() {
@@ -1392,7 +1392,7 @@ impl Coordinator {
             {
                 SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
             }
-            replicate_session_upsert(&worker_queues, entry);
+            replicate_session_upsert(&worker_queues, worker_command_queues, entry);
         }
         entries.len()
     }

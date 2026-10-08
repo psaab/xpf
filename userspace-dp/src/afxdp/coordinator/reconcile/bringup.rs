@@ -585,14 +585,14 @@ pub(in crate::afxdp) fn replay_preserved_sessions(
     workers: &BTreeMap<u32, Vec<BindingPlan>>,
     tunnel_purge_ids: &[u16],
     session_map: SteeringMap<'_>,
-) -> Arc<BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>> {
-    let worker_command_queues: Arc<BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>> = Arc::new(
+) -> Arc<WorkerCommandQueues> {
+    let worker_command_queues = Arc::new(WorkerCommandQueues::new(
         workers
             .keys()
             .copied()
             .map(|worker_id| (worker_id, Arc::new(Mutex::new(VecDeque::new()))))
             .collect(),
-    );
+    ));
     let mut replay_entries = coord.snapshot_shared_session_entries();
     crate::afxdp::coordinator::purge_stale_replayed_synced_sessions(coord, &replay_entries);
     crate::afxdp::coordinator::filter_replayed_synced_sessions(
@@ -785,7 +785,7 @@ fn spawn_workers(
     coord: &mut Coordinator,
     workers: BTreeMap<u32, Vec<BindingPlan>>,
     node_id: u8,
-    worker_command_queues: Arc<BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>>,
+    worker_command_queues: Arc<WorkerCommandQueues>,
     tunnel_purge_ids: &[u16],
     dnat_fds: DnatTableFds,
     startup_report_tx: &mpsc::Sender<WorkerStartupReport>,
@@ -869,8 +869,10 @@ fn spawn_workers(
         let worker_poll_mode = coord.poll_mode;
         let event_stream_handle = coord.event_stream_worker_handle();
         let cos_status_clone = cos_status.clone();
-        let runtime_atomics =
-            std::sync::Arc::new(crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new());
+        let runtime_atomics = worker_command_queues
+            .runtime_atomics_for_queue(&commands)
+            .cloned()
+            .expect("worker command queue has generation-matched runtime atomics");
         let runtime_atomics_clone = runtime_atomics.clone();
         // #1621: sibling per-worker WorkerColdPathAtomics, allocated
         // alongside the runtime_atomics so the publish + snapshot

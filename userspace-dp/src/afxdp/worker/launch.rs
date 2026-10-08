@@ -171,9 +171,9 @@ impl WorkerSharedDataplane {
 }
 
 /// Bidirectional control channels: the per-worker command queue, the
-/// peer/by-id command projections, the stop/heartbeat/export-ack
-/// atomics, the event-stream handle, and the one-shot startup-readiness
-/// sender.
+/// generation-scoped worker command/liveness projection, peer queue handles,
+/// stop/heartbeat/export-ack atomics, event-stream handle, and one-shot
+/// startup-readiness sender.
 ///
 /// `heartbeat` and `session_export_ack` are both `Arc<AtomicU64>` — the
 /// second silent-swap hazard. They are per-worker fresh allocations, so
@@ -183,7 +183,7 @@ impl WorkerSharedDataplane {
 pub(crate) struct WorkerControlChannels {
     pub(in crate::afxdp) commands: Arc<Mutex<VecDeque<WorkerCommand>>>,
     pub(in crate::afxdp) peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>>,
-    pub(in crate::afxdp) worker_commands_by_id: Arc<BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>>,
+    pub(in crate::afxdp) worker_commands_by_id: Arc<WorkerCommandQueues>,
     pub(in crate::afxdp) stop: Arc<AtomicBool>,
     pub(in crate::afxdp) heartbeat: Arc<AtomicU64>,
     pub(in crate::afxdp) session_export_ack: Arc<AtomicU64>,
@@ -194,15 +194,15 @@ pub(crate) struct WorkerControlChannels {
 
 impl WorkerControlChannels {
     /// Assemble the control-channel bundle from its per-worker inputs
-    /// (the command-queue projections + the fresh stop/heartbeat/ack
-    /// atomics + the export buffer + the event-stream handle + the
-    /// readiness sender). This is the single wiring site the production
-    /// caller and the `Arc::ptr_eq` heartbeat/export-ack wiring test share.
+    /// (the queue projections + the fresh stop/heartbeat/ack atomics +
+    /// the export buffer + the event-stream handle + the readiness sender).
+    /// This is the single wiring site the production caller and the
+    /// `Arc::ptr_eq` heartbeat/export-ack wiring test share.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::afxdp) fn new(
         commands: Arc<Mutex<VecDeque<WorkerCommand>>>,
         peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>>,
-        worker_commands_by_id: Arc<BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>>,
+        worker_commands_by_id: Arc<WorkerCommandQueues>,
         stop: Arc<AtomicBool>,
         heartbeat: Arc<AtomicU64>,
         session_export_ack: Arc<AtomicU64>,
@@ -416,7 +416,8 @@ mod tests {
         let heartbeat = Arc::new(AtomicU64::new(0xA));
         let session_export_ack = Arc::new(AtomicU64::new(0xB));
         let commands = Arc::new(Mutex::new(VecDeque::new()));
-        let worker_commands_by_id = Arc::new(BTreeMap::new());
+        let worker_commands_by_id =
+            Arc::new(WorkerCommandQueues::new(BTreeMap::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, _rx) = std::sync::mpsc::channel::<WorkerStartupReport>();
 

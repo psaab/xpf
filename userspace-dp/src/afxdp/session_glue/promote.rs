@@ -75,6 +75,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
     conntrack_v6_fd: c_int,
     shared: SharedSessionRefs<'_>,
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &WorkerCommandQueues,
     forwarding: &ForwardingState,
     key: &SessionKey,
     decision: SessionDecision,
@@ -170,7 +171,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
             shared.owner_rg_indexes,
             &promoted_entry,
         );
-        replicate_session_upsert(peer_worker_commands, &promoted_entry);
+        replicate_session_upsert(peer_worker_commands, worker_commands_by_id, &promoted_entry);
     }
     promoted
 }
@@ -197,6 +198,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
         -1,
         shared,
         peer_worker_commands,
+        empty_worker_commands_by_id(),
         forwarding,
         key,
         decision,

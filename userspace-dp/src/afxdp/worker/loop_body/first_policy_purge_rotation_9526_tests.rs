@@ -354,7 +354,7 @@ impl RotationHarness {
         let control = WorkerControlChannels::new(
             commands.clone(),
             Vec::new(),
-            Arc::new(BTreeMap::new()),
+            Arc::new(WorkerCommandQueues::new(BTreeMap::new())),
             stop.clone(),
             heartbeat.clone(),
             Arc::new(AtomicU64::new(0)),

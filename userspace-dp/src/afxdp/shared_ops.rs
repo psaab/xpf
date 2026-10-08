@@ -2002,6 +2002,7 @@ pub(super) fn install_reverse_session_from_forward_match(
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &WorkerCommandQueues,
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
@@ -2073,7 +2074,7 @@ pub(super) fn install_reverse_session_from_forward_match(
             shared_owner_rg_indexes,
             &reverse_entry,
         );
-        replicate_session_upsert(peer_worker_commands, &reverse_entry);
+        replicate_session_upsert(peer_worker_commands, worker_commands_by_id, &reverse_entry);
     }
     (reverse, installed)
 }

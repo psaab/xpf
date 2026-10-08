@@ -369,7 +369,7 @@ fn replicate_session_upsert_counts_fanout_and_queue_depth() {
         .collect();
 
     let before = replication_counters();
-    replicate_session_upsert(&queues, &entry(40003));
+    replicate_session_upsert(&queues, empty_worker_commands_by_id(), &entry(40003));
     let after = replication_counters();
 
     assert_eq!(
@@ -429,7 +429,7 @@ fn replicate_session_upsert_counts_a_blocked_enqueue() {
             // `replicate_session_upsert` blocks and the `join()` hangs.
             let _exempt = CounterExempt::new();
             entered.store(true, Ordering::SeqCst);
-            replicate_session_upsert(&queues, &entry(40004));
+            replicate_session_upsert(&queues, empty_worker_commands_by_id(), &entry(40004));
         })
     };
     while !entered.load(Ordering::SeqCst) {
@@ -488,7 +488,7 @@ fn replicate_session_upsert_depth_sum_accumulates_per_call_backlog() {
     }
 
     let before = replication_counters();
-    replicate_session_upsert(&queues, &entry(40007));
+    replicate_session_upsert(&queues, empty_worker_commands_by_id(), &entry(40007));
     let after = replication_counters();
 
     // Post-push depths are 4 / 12 / 8; the worst is 12.
@@ -543,12 +543,12 @@ fn depth_sum_accumulates_while_depth_max_stays_a_high_water() {
             q.push_back(WorkerCommand::UpsertSynced(entry(61_000 + n as u16)));
         }
     }
-    replicate_session_upsert(&queues, &entry(40008));
+    replicate_session_upsert(&queues, empty_worker_commands_by_id(), &entry(40008));
     let after_deep = replication_counters();
 
     // Now drain to empty and replicate again — a SHALLOW call.
     queues[0].lock().expect("drain queue").clear();
-    replicate_session_upsert(&queues, &entry(40009));
+    replicate_session_upsert(&queues, empty_worker_commands_by_id(), &entry(40009));
     let after_shallow = replication_counters();
 
     assert!(
@@ -592,7 +592,7 @@ fn replicate_session_upsert_depth_high_water_tracks_backlog() {
         }
     }
 
-    replicate_session_upsert(&queues, &entry(40005));
+    replicate_session_upsert(&queues, empty_worker_commands_by_id(), &entry(40005));
 
     let after = replication_counters();
     assert!(
@@ -772,7 +772,7 @@ fn replication_contention_denominator_counts_only_attempted_acquisitions() {
         let queues: Vec<_> = queues.iter().map(Arc::clone).collect();
         std::thread::spawn(move || {
             let _exempt = CounterExempt::new();
-            replicate_session_upsert(&queues, &entry(40011));
+            replicate_session_upsert(&queues, empty_worker_commands_by_id(), &entry(40011));
         })
     };
 

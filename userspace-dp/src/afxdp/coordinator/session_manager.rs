@@ -178,7 +178,7 @@ pub(in crate::afxdp) struct SessionManager {
     /// aggregate admission bound (`upsert_synced_session`). Locally-created
     /// sessions are capped per worker at `DEFAULT_MAX_SESSIONS`
     /// (`install_with_protocol_with_origin`), but peer-synced sessions were
-    /// imported with NO cap and fanned out to EVERY worker command queue +
+    /// imported with NO cap and fanned out to every live worker command queue +
     /// table, so a peer under session-table pressure — or a
     /// malicious/compromised peer — could drive this node past its own
     /// aggregate session ceiling and multiply that state across all workers
