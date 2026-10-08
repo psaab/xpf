@@ -422,18 +422,26 @@ func memberIsNestedSet(memberName string, apps *ApplicationsConfig) bool {
 	return isPredefSet
 }
 
+const maxAddressSetDepth = 5
+
 // ExpandAddressSet recursively expands an address-set to individual
 // address names. Handles nested address-sets with cycle detection. A set carrying
 // an unknown member statement is rejected rather than expanded to its surviving
-// subset (#11822).
-// Max depth 5.
+// subset (#11822). Max depth is five nested edges.
 func ExpandAddressSet(name string, ab *AddressBook) ([]string, error) {
 	return expandAddrSet(name, ab, make(map[string]bool), 0)
 }
 
-func expandAddrSet(name string, ab *AddressBook, visited map[string]bool, depth int) ([]string, error) {
-	if depth > 5 {
-		return nil, fmt.Errorf("address-set nesting too deep (max 5): %s", name)
+func addressSetForExpansion(
+	name string,
+	ab *AddressBook,
+	visited map[string]bool,
+	depth int,
+) (*AddressSet, error) {
+	if depth > maxAddressSetDepth {
+		return nil, fmt.Errorf(
+			"address-set nesting too deep (max %d): %s",
+			maxAddressSetDepth, name)
 	}
 	if visited[name] {
 		return nil, fmt.Errorf("cycle detected in address-set %q", name)
@@ -450,6 +458,40 @@ func expandAddrSet(name string, ab *AddressBook, visited map[string]bool, depth 
 		return nil, fmt.Errorf("address-set %q has unknown member statement %q; "+
 			"the member was silently dropped and the set is under-populated",
 			name, as.UnknownMembers[0])
+	}
+	return as, nil
+}
+
+// validateAddressSetDepthAndCycles checks the same path-local depth and cycle
+// bounds as ExpandAddressSet without allocating its flattened member result.
+func validateAddressSetDepthAndCycles(name string, ab *AddressBook) error {
+	return validateAddrSetDepthAndCycles(name, ab, make(map[string]bool), 0)
+}
+
+func validateAddrSetDepthAndCycles(
+	name string,
+	ab *AddressBook,
+	visited map[string]bool,
+	depth int,
+) error {
+	as, err := addressSetForExpansion(name, ab, visited, depth)
+	if err != nil {
+		return err
+	}
+	visited[name] = true
+	defer delete(visited, name)
+	for _, nested := range as.AddressSets {
+		if err := validateAddrSetDepthAndCycles(nested, ab, visited, depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func expandAddrSet(name string, ab *AddressBook, visited map[string]bool, depth int) ([]string, error) {
+	as, err := addressSetForExpansion(name, ab, visited, depth)
+	if err != nil {
+		return nil, err
 	}
 
 	visited[name] = true

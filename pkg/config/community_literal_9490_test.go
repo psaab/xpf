@@ -78,3 +78,82 @@ func TestAddressSetMemberGateIsLenientOnLoad9490(t *testing.T) {
 		t.Errorf("lenient compile did not warn about the dangling member; warnings: %v", cfg.Warnings)
 	}
 }
+
+// #12214: the shared compiler expands every address-set, even unreferenced
+// ones, and aborts apply when expansion exceeds depth five or revisits a set.
+// Strict commit validation must reject those books first.
+func TestAddressSetDepthAndCycleRejectedAtCommit12214(t *testing.T) {
+	cases := []struct {
+		name       string
+		sets       []string
+		wantSet    string
+		wantDetail string
+	}{
+		{
+			name: "six-deep chain",
+			sets: []string{
+				"set security address-book global address a0 10.0.0.0/24",
+				"set security address-book global address-set s0 address a0",
+				"set security address-book global address-set s1 address-set s0",
+				"set security address-book global address-set s2 address-set s1",
+				"set security address-book global address-set s3 address-set s2",
+				"set security address-book global address-set s4 address-set s3",
+				"set security address-book global address-set s5 address-set s4",
+				"set security address-book global address-set s6 address-set s5",
+			},
+			wantSet:    "s6",
+			wantDetail: "nesting too deep",
+		},
+		{
+			name: "mutual cycle",
+			sets: []string{
+				"set security address-book global address a0 10.0.0.0/24",
+				"set security address-book global address-set cycA address a0",
+				"set security address-book global address-set cycA address-set cycB",
+				"set security address-book global address-set cycB address a0",
+				"set security address-book global address-set cycB address-set cycA",
+			},
+			wantSet:    "cycA",
+			wantDetail: "cycle detected",
+		},
+		{
+			name: "five-deep boundary",
+			sets: []string{
+				"set security address-book global address a0 10.0.0.0/24",
+				"set security address-book global address-set s0 address a0",
+				"set security address-book global address-set s1 address-set s0",
+				"set security address-book global address-set s2 address-set s1",
+				"set security address-book global address-set s3 address-set s2",
+				"set security address-book global address-set s4 address-set s3",
+				"set security address-book global address-set s5 address-set s4",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := &ConfigTree{}
+			for _, command := range tc.sets {
+				path, err := ParseSetCommand(command)
+				if err != nil {
+					t.Fatalf("ParseSetCommand(%q): %v", command, err)
+				}
+				if err := tree.SetPath(path); err != nil {
+					t.Fatalf("SetPath(%q): %v", command, err)
+				}
+			}
+			_, err := CompileConfig(tree)
+			if tc.wantSet == "" {
+				if err != nil {
+					t.Fatalf("CompileConfig: valid five-edge chain rejected: %v", err)
+				}
+				return
+			}
+			if err == nil ||
+				!strings.Contains(err.Error(), tc.wantSet) ||
+				!strings.Contains(err.Error(), tc.wantDetail) {
+				t.Fatalf("CompileConfig error = %v, want rejection naming set %q for %q",
+					err, tc.wantSet, tc.wantDetail)
+			}
+		})
+	}
+}
