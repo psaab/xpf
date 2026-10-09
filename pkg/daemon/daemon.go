@@ -472,6 +472,9 @@ type Daemon struct {
 	// probePinVerify is the test seam for kernel readback of per-test
 	// rules and routes; nil = d.routing.VerifyProbePins (#12088).
 	probePinVerify func([]routing.ProbePin) map[string]error
+	// probePinEgressIsUp is the admin-state lookup seam for RPM pin holds;
+	// nil reads IFF_UP from the live netlink link.
+	probePinEgressIsUp func(string) bool
 	// pinRetryCancel/pinRetryWg/pinRetryStopped scope the probePinRetryLoop
 	// lifecycle so daemon shutdown can cancel + join it BEFORE FRR/routing
 	// teardown (#5308). The loop used to bind to d.daemonCtx (never cancelled

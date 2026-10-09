@@ -108,7 +108,7 @@ func TestReconcileRPMPinFailureRetry(t *testing.T) {
 	defer cancel()
 	var calls int
 	retFailed := map[string]error{"WAN/t": fmt.Errorf("egress interface missing")}
-	d := &Daemon{rpm: rpm.New(), daemonCtx: ctx}
+	d := &Daemon{rpm: rpm.New(), daemonCtx: ctx, probePinEgressIsUp: func(string) bool { return true }}
 	d.probePinApply = func(pins []routing.ProbePin) map[string]error {
 		calls++
 		if len(pins) != 1 || pins[0].TestKey != "WAN/t" {
@@ -171,7 +171,8 @@ func TestReconcileRPMPinFailureRetry(t *testing.T) {
 // marked-but-unbacked probes through the main table (Codex PR #1899
 // r1 MAJOR-2).
 func TestReconcileRPMNoInstallerHoldsPinnedTests(t *testing.T) {
-	d := &Daemon{rpm: rpm.New(), daemonCtx: context.Background()}
+	d := &Daemon{rpm: rpm.New(), daemonCtx: context.Background(),
+		probePinEgressIsUp: func(string) bool { return true }}
 	defer d.rpm.StopAll()
 
 	if !d.reconcileRPM(rpmPinnedTestConfig()) {
@@ -263,7 +264,8 @@ func TestProbePinPeriodicRetryRecoversWithoutCommit(t *testing.T) {
 	var mu sync.Mutex
 	linkUp := false
 	calls := 0
-	d := &Daemon{rpm: rpm.New(), daemonCtx: ctx, probePinRetryEvery: 5 * time.Millisecond}
+	d := &Daemon{rpm: rpm.New(), daemonCtx: ctx, probePinRetryEvery: 5 * time.Millisecond,
+		probePinEgressIsUp: func(string) bool { return true }}
 	d.probePinApply = func(pins []routing.ProbePin) map[string]error {
 		mu.Lock()
 		defer mu.Unlock()
@@ -324,6 +326,7 @@ func TestReconcileRPMDetectsMissingKernelPinWithoutHashChange12088(t *testing.T)
 		rpm:                rpm.New(),
 		daemonCtx:          ctx,
 		probePinRetryEvery: time.Hour,
+		probePinEgressIsUp: func(string) bool { return true },
 	}
 	defer d.rpm.StopAll()
 	defer d.stopPinRetryLoop()
@@ -371,6 +374,61 @@ func TestReconcileRPMDetectsMissingKernelPinWithoutHashChange12088(t *testing.T)
 	mu.Unlock()
 	if gotApplyCalls != 1 {
 		t.Fatalf("drift detection reinstalled before retry interval: apply calls=%d, want 1", gotApplyCalls)
+	}
+}
+
+func TestProbePinFailuresHoldOnlyOnAdminUpEgress12088(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var stateMu sync.Mutex
+	egressUp := true
+	egressIsUp := func(string) bool {
+		stateMu.Lock()
+		defer stateMu.Unlock()
+		return egressUp
+	}
+	setEgressUp := func(up bool) {
+		stateMu.Lock()
+		egressUp = up
+		stateMu.Unlock()
+	}
+	d := &Daemon{
+		rpm:                rpm.New(),
+		daemonCtx:          ctx,
+		probePinRetryEvery: time.Hour,
+		probePinEgressIsUp: egressIsUp,
+	}
+	d.probePinApply = func(pins []routing.ProbePin) map[string]error {
+		return map[string]error{pins[0].TestKey: fmt.Errorf("pinned route missing")}
+	}
+	d.probePinVerify = func(pins []routing.ProbePin) map[string]error {
+		return map[string]error{pins[0].TestKey: fmt.Errorf("pinned route missing")}
+	}
+	defer func() {
+		cancel()
+		d.stopPinRetryLoop()
+		d.rpm.StopAll()
+	}()
+
+	cfg := rpmPinnedTestConfig()
+	if !d.reconcileRPM(cfg) {
+		t.Fatal("initial reconcile must apply")
+	}
+	if got := d.rpm.PinInstallFailureCount(); got != 1 {
+		t.Fatalf("missing pin on admin-up egress must hold: failures=%d", got)
+	}
+	setEgressUp(false)
+	if d.reconcileRPM(cfg) {
+		t.Fatal("unchanged RPM hash must not restart probes")
+	}
+	if got := d.rpm.PinInstallFailureCount(); got != 0 {
+		t.Fatalf("admin-down egress must not hold the test: failures=%d", got)
+	}
+	setEgressUp(true)
+	if d.reconcileRPM(cfg) {
+		t.Fatal("unchanged RPM hash must not restart probes")
+	}
+	if got := d.rpm.PinInstallFailureCount(); got != 1 {
+		t.Fatalf("missing pin after admin-up must hold again: failures=%d", got)
 	}
 }
 
@@ -594,14 +652,56 @@ func runProbePinKernelDriftInPrivateNetns12088(t *testing.T) {
 		t.Fatalf("last address re-add: %v", err)
 	}
 	waitForRepair("last-address removal and re-add")
+	// An IPv6 pin must read back with the kernel's user-route default metric
+	// (IP6_RT_PRIO_USER, 1024), not the IPv4 zero metric.
+	const v6Iface = "xpf12088v6"
+	v6Dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: v6Iface}}
+	if err := netlink.LinkAdd(v6Dummy); err != nil {
+		t.Fatalf("create IPv6 probe interface: %v", err)
+	}
+	v6Link, err := netlink.LinkByName(v6Iface)
+	if err != nil {
+		t.Fatalf("lookup IPv6 probe interface: %v", err)
+	}
+	v6Addr, err := netlink.ParseAddr("2001:db8:1::2/64")
+	if err != nil {
+		t.Fatalf("parse IPv6 probe interface address: %v", err)
+	}
+	v6Addr.Flags |= unix.IFA_F_NODAD
+	if err := netlink.AddrAdd(v6Link, v6Addr); err != nil {
+		t.Fatalf("add IPv6 probe interface address: %v", err)
+	}
+	if err := netlink.LinkSetUp(v6Link); err != nil {
+		t.Fatalf("raise IPv6 probe interface: %v", err)
+	}
+	v6Cfg := rpmPinnedTestConfig()
+	v6Test := v6Cfg.Services.RPM.Probes["WAN"].Tests["t"]
+	v6Test.Target = "2001:db8:ffff::1"
+	v6Test.NextHop = "2001:db8:1::1"
+	v6Test.DestinationInterface = v6Iface
+	v6Pins := routing.BuildProbePins(v6Cfg.Services.RPM, nil)
+	if failed := rt.ApplyProbePins(v6Pins); len(failed) != 0 {
+		t.Fatalf("IPv6 kernel probe pin install failed: %v", failed)
+	}
+	if failed := rt.VerifyProbePins(v6Pins); len(failed) != 0 {
+		t.Fatalf("freshly installed IPv6 kernel probe pin did not verify: %v", failed)
+	}
+	v6Routes, err := netlink.RouteListFiltered(unix.AF_INET6,
+		&netlink.Route{Table: v6Pins[0].Table}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		t.Fatalf("read IPv6 probe table: %v", err)
+	}
+	if len(v6Routes) != 1 || v6Routes[0].Priority != 1024 {
+		t.Fatalf("IPv6 probe route = %+v, want one route with kernel metric 1024", v6Routes)
+	}
 }
 
 const probePinCarrierLoss12088InnerEnv = "XPF_12088_PROBE_PIN_CARRIER_INNER"
 
 // TestProbePinCarrierLossTriggersIPMonFailover12088 proves that an installed
-// LINKDOWN pin remains probeable: actual ICMP loss crosses RPM's successive
-// loss threshold and reaches the ip-monitoring route-overlay actuator instead
-// of holding the test at ErrProbeSetup.
+// LINKDOWN pin remains probeable when ignore_routes_with_linkdown=1 adds DEAD:
+// actual ICMP loss crosses RPM's successive-loss threshold and reaches the
+// ip-monitoring route-overlay actuator instead of holding the test at ErrProbeSetup.
 func TestProbePinCarrierLossTriggersIPMonFailover12088(t *testing.T) {
 	if os.Getenv(probePinCarrierLoss12088InnerEnv) == "1" {
 		runProbePinCarrierLossInPrivateNetns12088(t)
@@ -633,6 +733,14 @@ func runProbePinCarrierLossInPrivateNetns12088(t *testing.T) {
 		peerAddr  = "198.51.100.2"
 		nextHop   = "198.51.100.254"
 	)
+	for _, path := range []string{
+		"/proc/sys/net/ipv4/conf/all/ignore_routes_with_linkdown",
+		"/proc/sys/net/ipv4/conf/default/ignore_routes_with_linkdown",
+	} {
+		if err := os.WriteFile(path, []byte("1"), 0o644); err != nil {
+			t.Fatalf("enable ignore_routes_with_linkdown: %v", err)
+		}
+	}
 	veth := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: localName}, PeerName: peerName}
 	if err := netlink.LinkAdd(veth); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
@@ -697,7 +805,8 @@ func runProbePinCarrierLossInPrivateNetns12088(t *testing.T) {
 		}
 		for _, route := range routes {
 			if route.Dst != nil && route.Dst.String() == target+"/32" &&
-				route.Flags&int(unix.RTNH_F_LINKDOWN) != 0 {
+				route.Flags&int(unix.RTNH_F_LINKDOWN) != 0 &&
+				route.Flags&int(unix.RTNH_F_DEAD) != 0 {
 				return true
 			}
 		}
@@ -708,7 +817,7 @@ func runProbePinCarrierLossInPrivateNetns12088(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if !linkdown() {
-		t.Fatal("kernel did not retain the pinned host route with RTNH_F_LINKDOWN after carrier loss")
+		t.Fatal("kernel did not retain the pinned host route with DEAD|LINKDOWN after carrier loss and ignore_routes_with_linkdown=1")
 	}
 	if failed := rt.VerifyProbePins(pins); len(failed) != 0 {
 		t.Fatalf("carrier-down pin failed shape verification: %v", failed)

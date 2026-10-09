@@ -387,9 +387,10 @@ func resolveProbePin(ops probePinOps, pin ProbePin) (wantPin, error) {
 //   - a rule with a partial fwmark mask, or any Src/Dst/interface/Tos/
 //     port/proto/UID/invert/goto/flow/suppression selector Apply never emits,
 //     does not satisfy the pin even when mark/table/priority match;
-//   - a route with the wrong gateway, egress, host prefix, table, metric,
-//     required ONLINK flag, type, or scope fails; DEAD/UNRESOLVED nexthops and
-//     equal-or-better-metric competing routes to the same host also fail.
+//   - a route with the wrong gateway, egress, host prefix, table, family-default
+//     metric, required ONLINK flag, type, or scope fails; DEAD without LINKDOWN,
+//     unresolved nexthops, and equal-or-better-metric competing routes to the
+//     same host also fail.
 //
 // RTNH_F_LINKDOWN is deliberately NOT in the fail set: carrier-only loss
 // keeps the pinned route installed (the kernel only flags it) and the
@@ -526,11 +527,21 @@ func probePinRuleInstalled(rules []netlink.Rule, pin ProbePin, family int) bool 
 // the pin's host destination has the exact shape Apply installs. It checks
 // route shape, not current carrier state: RTNH_F_LINKDOWN means the selected
 // pinned path is down, so probing it must report genuine loss rather than hold
-// the test state. Apply leaves metric/priority at its zero default, so any
+// the test state. Apply leaves the route metric unset, so the kernel stores
+// the family default: 0 for IPv4 and IP6_RT_PRIO_USER (1024) for IPv6. Any
 // same-prefix route with an equal or better metric but a different shape makes
 // readback ambiguous and fails closed. Higher-metric routes cannot override
 // the default-metric pin.
+//
+// probePinDefaultMetric returns that family default for the pin's family.
+func probePinDefaultMetric(family int) int {
+	if family == unix.AF_INET6 {
+		return 1024 // IP6_RT_PRIO_USER: kernel default for user-added v6 routes
+	}
+	return 0
+}
 func probePinRouteInstalled(routes []netlink.Route, w wantPin) bool {
+	wantMetric := probePinDefaultMetric(w.family)
 	matched := false
 	for _, r := range routes {
 		if r.Table != w.pin.Table || r.Family != w.family || r.Dst == nil {
@@ -540,18 +551,29 @@ func probePinRouteInstalled(routes []netlink.Route, w wantPin) bool {
 		if ones != bits || bits != w.hostBits || !r.Dst.IP.Equal(w.target) {
 			continue
 		}
-		if r.Priority > 0 {
+		if r.Priority > wantMetric {
 			continue
 		}
-		if r.Priority != 0 || matched {
+		if r.Priority != wantMetric || matched {
 			return false
 		}
 		if r.Gw == nil || !r.Gw.Equal(w.nextHop) || r.LinkIndex != w.linkIdx {
 			return false
 		}
+		// LINKDOWN marks carrier-only loss on the installed path: the route
+		// still selects the pinned next-hop, so genuine probe loss must flow
+		// through RPM instead of holding the test. With
+		// ignore_routes_with_linkdown=1 the kernel additionally ORs in
+		// RTNH_F_DEAD for LINKDOWN nexthops, so DEAD together with
+		// LINKDOWN is the same carrier-loss shape — only DEAD without
+		// LINKDOWN (or UNRESOLVED) means an unusable pin.
 		const unusableFlags = unix.RTNH_F_DEAD | unix.RTNH_F_UNRESOLVED
+		flags := r.Flags
+		if flags&int(unix.RTNH_F_LINKDOWN) != 0 {
+			flags &^= int(unix.RTNH_F_DEAD)
+		}
 		if r.Flags&int(netlink.FLAG_ONLINK) == 0 ||
-			r.Flags&int(unusableFlags) != 0 ||
+			flags&int(unusableFlags) != 0 ||
 			r.Type != unix.RTN_UNICAST || r.Scope != unix.RT_SCOPE_UNIVERSE ||
 			len(r.MultiPath) != 0 {
 			return false

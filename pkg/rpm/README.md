@@ -188,20 +188,24 @@ out-of-range value to a warning.
   derived from `routing.BuildProbePins` — the SAME deterministic
   assignment pkg/routing programs as fwmark rules, so socket mark and
   kernel rule cannot drift.
-- **A next-hop test whose pin is genuinely missing or mismatched never probes** (#1895/#12088):
+- **A next-hop test whose pin is genuinely missing or mismatched never probes on an administratively-up egress** (#1895/#12088):
   an unbacked `SO_MARK` falls through to the main table and measures
   the default path — a dead pinned uplink would false-PASS and
   suppress ip-monitoring failover. `executeProbe` returns
   `ErrProbeSetup` (hold state, no socket opened) while the pin is in
   the `SetPinInstallResults` failed map — or when a next-hop test has
   no pin slot at all (band exhaustion belt-and-braces). A route flagged
-  `RTNH_F_LINKDOWN` is different: the selected pin still exists, so probes
-  must run and let genuine carrier-loss timeouts cross the successive-loss
-  threshold into failover. The daemon retries failed installs on hash-gated
+  `RTNH_F_LINKDOWN` (including `RTNH_F_DEAD|RTNH_F_LINKDOWN` when
+  `ignore_routes_with_linkdown=1`) is different: the selected pin still exists,
+  so probes must run and let genuine carrier-loss timeouts cross the
+  threshold into failover. When the egress is administratively down, probes
+  also run: a socket bound to that device fails with `ENETUNREACH`, which RPM
+  counts as path loss. The daemon retries failed installs on hash-gated
   reconciles and verifies configured pins on a slow periodic loop (30 s).
-  Link/address notifications trigger immediate readback; missing pins are
-  held and reinstalled on the next retry tick, so probes never use an
-  unbacked mark.
+  Link/address notifications trigger immediate readback; closed subscriptions
+  are resubscribed after backoff and all pins are verified to resync the gap.
+  Missing pins on an up egress are held and reinstalled on the next retry tick,
+  so probes never use an unbacked mark.
 - Events expose both the test owner (probe name) and the test name so
   event-options policies can match on either via `attributes-match`.
 - A consecutive-failure counter discriminates transient blips from

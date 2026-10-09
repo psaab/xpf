@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"strings"
 	"time"
 
@@ -291,15 +292,63 @@ func retainProbePinInstallFailures(installed, verified map[string]error) map[str
 	return retained
 }
 
-// verifyProbePinsLocked publishes per-pin readback failures immediately, so
-// the RPM gate returns ErrProbeSetup instead of sending with an unbacked mark.
-// Callers hold rpmMu. nil means this daemon has no readback implementation.
+// probePinEgressAdminUp reports the administrative IFF_UP state for an
+// egress, using the test seam when configured.
+func (d *Daemon) probePinEgressAdminUp(name string) bool {
+	if d.probePinEgressIsUp != nil {
+		return d.probePinEgressIsUp(name)
+	}
+	link, err := netlink.LinkByName(name)
+	return err == nil && link != nil && link.Attrs() != nil &&
+		link.Attrs().Flags&net.FlagUp != 0
+}
+
+// probePinFailuresOnAdminUpEgress keeps a missing/mismatched pin held only
+// while its egress is administratively up. With IFF_UP clear, a socket bound
+// to the interface reports ENETUNREACH before a route lookup, so holding the
+// test would hide a real outage instead of preventing an unbacked-mark
+// false-pass. A missing link is not considered admin-up either.
+func (d *Daemon) probePinFailuresOnAdminUpEgress(pins []routing.ProbePin, failed map[string]error) map[string]error {
+	if len(failed) == 0 {
+		return nil
+	}
+	filtered := make(map[string]error, len(failed))
+	for key, err := range failed {
+		found := false
+		for _, pin := range pins {
+			if pin.TestKey != key {
+				continue
+			}
+			found = true
+			if d.probePinEgressAdminUp(pin.Interface) {
+				filtered[key] = err
+			}
+			break
+		}
+		if !found {
+			filtered[key] = err
+		}
+	}
+	if len(filtered) == len(failed) {
+		return failed
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
+
+// verifyProbePinsLocked publishes readback failures only while the egress is
+// administratively up. A missing route on an up link can false-pass through
+// the main table; a down link instead fails bound sends with ENETUNREACH and
+// must continue feeding RPM's loss threshold. Callers hold rpmMu. nil means
+// this daemon has no readback implementation.
 func (d *Daemon) verifyProbePinsLocked(pins []routing.ProbePin) {
 	verify := d.probePinVerifyFn()
 	if verify == nil || len(pins) == 0 {
 		return
 	}
-	failed := verify(pins)
+	failed := d.probePinFailuresOnAdminUpEgress(pins, verify(pins))
 	d.rpmPinInstallFailures = retainProbePinInstallFailures(d.rpmPinInstallFailures, failed)
 	if len(failed) > 0 && !d.rpmPinsFailed {
 		slog.Warn("kernel probe pin drift detected — affected tests held until retry",
@@ -330,11 +379,12 @@ func (d *Daemon) retryFailedProbePinsLocked() {
 	if applyPins == nil {
 		return
 	}
-	installFailed := d.applyProbePinsHeld(applyPins, pins)
+	installFailed := d.probePinFailuresOnAdminUpEgress(pins,
+		d.applyProbePinsHeld(applyPins, pins))
 	d.rpmPinInstallFailures = installFailed
 	failed := installFailed
 	if verify := d.probePinVerifyFn(); verify != nil {
-		verified := verify(pins)
+		verified := d.probePinFailuresOnAdminUpEgress(pins, verify(pins))
 		d.rpmPinInstallFailures = retainProbePinInstallFailures(installFailed, verified)
 		failed = verified
 	}
@@ -405,43 +455,56 @@ func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 	var linkUpdates <-chan netlink.LinkUpdate
 	var addrUpdates <-chan netlink.AddrUpdate
 	var linkDone, addrDone chan struct{}
+	var linkRetry, addrRetry <-chan time.Time
 	subscriptionErrors := make(chan struct{}, 1)
-	if d.probePinVerifyFn() != nil {
-		onError := func(error) {
-			select {
-			case subscriptionErrors <- struct{}{}:
-			default:
-			}
+	onError := func(err error) {
+		slog.Warn("probe pin netlink subscription reported a gap; checking all pins", "err", err)
+		select {
+		case subscriptionErrors <- struct{}{}:
+		default:
 		}
-		linkCh := make(chan netlink.LinkUpdate, 32)
-		linkDone = make(chan struct{})
-		if err := netlink.LinkSubscribeWithOptions(linkCh, linkDone,
+	}
+	subscribeLink := func() (<-chan netlink.LinkUpdate, chan struct{}, error) {
+		updates := make(chan netlink.LinkUpdate, 32)
+		done := make(chan struct{})
+		if err := netlink.LinkSubscribeWithOptions(updates, done,
 			netlink.LinkSubscribeOptions{ErrorCallback: onError}); err != nil {
-			slog.Warn("probe pin link subscription unavailable; periodic readback remains active",
-				"err", err)
-			close(linkDone)
-			linkDone = nil
-		} else {
-			linkUpdates = linkCh
+			close(done)
+			return nil, nil, err
 		}
-		addrCh := make(chan netlink.AddrUpdate, 32)
-		addrDone = make(chan struct{})
-		if err := netlink.AddrSubscribeWithOptions(addrCh, addrDone,
+		return updates, done, nil
+	}
+	subscribeAddr := func() (<-chan netlink.AddrUpdate, chan struct{}, error) {
+		updates := make(chan netlink.AddrUpdate, 32)
+		done := make(chan struct{})
+		if err := netlink.AddrSubscribeWithOptions(updates, done,
 			netlink.AddrSubscribeOptions{ErrorCallback: onError}); err != nil {
-			slog.Warn("probe pin address subscription unavailable; periodic readback remains active",
-				"err", err)
-			close(addrDone)
-			addrDone = nil
-		} else {
-			addrUpdates = addrCh
+			close(done)
+			return nil, nil, err
+		}
+		return updates, done, nil
+	}
+	if d.probePinVerifyFn() != nil {
+		var err error
+		linkUpdates, linkDone, err = subscribeLink()
+		if err != nil {
+			slog.Warn("probe pin link subscription unavailable; retrying", "err", err)
+			linkRetry = time.After(linkStateResubBackoffDefault)
+		}
+		addrUpdates, addrDone, err = subscribeAddr()
+		if err != nil {
+			slog.Warn("probe pin address subscription unavailable; retrying", "err", err)
+			addrRetry = time.After(linkStateResubBackoffDefault)
 		}
 	}
-	if linkDone != nil {
-		defer close(linkDone)
-	}
-	if addrDone != nil {
-		defer close(addrDone)
-	}
+	defer func() {
+		if linkDone != nil {
+			close(linkDone)
+		}
+		if addrDone != nil {
+			close(addrDone)
+		}
+	}()
 
 	for {
 		select {
@@ -450,14 +513,55 @@ func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 			d.rpmPinRetryActive = false
 			d.rpmMu.Unlock()
 			return
-		case update := <-linkUpdates:
+		case update, ok := <-linkUpdates:
+			if !ok {
+				slog.Warn("probe pin link subscription closed; resubscribing")
+				if linkDone != nil {
+					close(linkDone)
+					linkDone = nil
+				}
+				linkUpdates = nil
+				linkRetry = time.After(linkStateResubBackoffDefault)
+				continue
+			}
 			if update.Attrs() != nil {
 				d.verifyProbePinsForLink(update.Attrs().Name)
 			}
-		case update := <-addrUpdates:
+		case update, ok := <-addrUpdates:
+			if !ok {
+				slog.Warn("probe pin address subscription closed; resubscribing")
+				if addrDone != nil {
+					close(addrDone)
+					addrDone = nil
+				}
+				addrUpdates = nil
+				addrRetry = time.After(linkStateResubBackoffDefault)
+				continue
+			}
 			d.verifyProbePinsForAddress(update.LinkIndex)
+		case <-linkRetry:
+			linkRetry = nil
+			updates, done, err := subscribeLink()
+			if err != nil {
+				slog.Warn("probe pin link resubscription failed; retrying", "err", err)
+				linkRetry = time.After(linkStateResubBackoffDefault)
+				continue
+			}
+			linkUpdates, linkDone = updates, done
+			slog.Info("probe pin link subscription restored; resynchronizing")
+			d.verifyProbePinsForAll()
+		case <-addrRetry:
+			addrRetry = nil
+			updates, done, err := subscribeAddr()
+			if err != nil {
+				slog.Warn("probe pin address resubscription failed; retrying", "err", err)
+				addrRetry = time.After(linkStateResubBackoffDefault)
+				continue
+			}
+			addrUpdates, addrDone = updates, done
+			slog.Info("probe pin address subscription restored; resynchronizing")
+			d.verifyProbePinsForAll()
 		case <-subscriptionErrors:
-			slog.Warn("probe pin netlink subscription reported a gap; checking all pins")
 			d.verifyProbePinsForAll()
 		case <-ticker.C:
 			d.rpmMu.Lock()
@@ -571,24 +675,26 @@ func (d *Daemon) reconcileRPMMode(cfg *config.Config, haTransition bool) bool {
 	d.rpm.HoldPinsForReprogram(probePinKeys(pins), errProbePinReprogram)
 	var failed map[string]error
 	if applyPins != nil {
-		installFailed := applyPins(pins)
+		installFailed := d.probePinFailuresOnAdminUpEgress(pins, applyPins(pins))
 		d.rpmPinInstallFailures = installFailed
 		failed = installFailed
 		if verify := d.probePinVerifyFn(); verify != nil {
-			verified := verify(pins)
+			verified := d.probePinFailuresOnAdminUpEgress(pins, verify(pins))
 			d.rpmPinInstallFailures = retainProbePinInstallFailures(installFailed, verified)
 			failed = verified
-		}
-		if len(failed) > 0 {
-			slog.Warn("probe pin install or readback failures — affected tests hold state until a retry succeeds",
-				"failed", len(failed))
 		}
 	} else {
 		d.rpmPinInstallFailures = nil
 		failed = probePinsAllFailed(pins, errNoProbePinInstaller)
-		if len(failed) > 0 {
+	}
+	failed = d.probePinFailuresOnAdminUpEgress(pins, failed)
+	if len(failed) > 0 {
+		if applyPins == nil {
 			slog.Warn("next-hop probe pins configured but no routing manager — pinned tests hold state",
 				"pins", len(failed))
+		} else {
+			slog.Warn("probe pin install or readback failures — affected tests hold state until a retry succeeds",
+				"failed", len(failed))
 		}
 	}
 	d.rpmPinsFailed = applyPins != nil && len(failed) > 0

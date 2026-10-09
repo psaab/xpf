@@ -2,6 +2,7 @@ package routing
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"testing"
 
@@ -90,8 +91,12 @@ func probePinReadbackFixture12088() ([]ProbePin, *probePinReadbackOps12088) {
 		rule.Table = pin.Table
 		rule.Priority = pin.Priority
 		fake.rules = append(fake.rules, *rule)
+		priority := 0
+		if family == unix.AF_INET6 {
+			priority = 1024 // IP6_RT_PRIO_USER: kernel default for user-added IPv6 routes.
+		}
 		fake.routes = append(fake.routes, netlink.Route{
-			Family: family, Table: pin.Table,
+			Family: family, Table: pin.Table, Priority: priority,
 			Dst: &net.IPNet{
 				IP: net.ParseIP(pin.Target), Mask: net.CIDRMask(bits, bits),
 			},
@@ -271,17 +276,37 @@ func TestVerifyProbePinsRejectsMismatchedRoute12088(t *testing.T) {
 		})
 	}
 }
-
-// Carrier loss only marks the installed route LINKDOWN. The pin shape remains
-// valid, so RPM must send probes and let genuine packet loss drive failover.
-func TestVerifyProbePinsAcceptsLinkdownRoutes12088(t *testing.T) {
-	pins, ops := probePinReadbackFixture12088()
-	for i := range ops.routes {
-		ops.routes[i].Flags |= int(unix.RTNH_F_LINKDOWN)
+func TestVerifyProbePinsRejectsWrongIPv6Metric12088(t *testing.T) {
+	for _, priority := range []int{0, 1025} {
+		t.Run(fmt.Sprintf("priority-%d", priority), func(t *testing.T) {
+			pins, ops := probePinReadbackFixture12088()
+			pin := pins[0] // AUX/v6
+			for i := range ops.routes {
+				if ops.routes[i].Table == pin.Table {
+					ops.routes[i].Priority = priority
+					break
+				}
+			}
+			got := (&probePinManager{ops: ops}).Verify(pins)
+			assertProbePinReadbackOnlyKey12088(t, got, pin.TestKey)
+		})
 	}
+}
 
-	if got := (&probePinManager{ops: ops}).Verify(pins); len(got) != 0 {
-		t.Fatalf("Verify rejected carrier-down pins: %v", got)
+// Carrier loss preserves the selected pin. With
+// ignore_routes_with_linkdown=1, the kernel adds DEAD alongside LINKDOWN;
+// DEAD alone remains an unusable route.
+func TestVerifyProbePinsAcceptsLinkdownRoutes12088(t *testing.T) {
+	for _, extraFlags := range []int{0, int(unix.RTNH_F_DEAD)} {
+		t.Run(fmt.Sprintf("extra-flags-%#x", extraFlags), func(t *testing.T) {
+			pins, ops := probePinReadbackFixture12088()
+			for i := range ops.routes {
+				ops.routes[i].Flags |= int(unix.RTNH_F_LINKDOWN) | extraFlags
+			}
+			if got := (&probePinManager{ops: ops}).Verify(pins); len(got) != 0 {
+				t.Fatalf("Verify rejected carrier-down pins (extra flags %#x): %v", extraFlags, got)
+			}
+		})
 	}
 }
 
