@@ -3,6 +3,7 @@ package frr
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -517,6 +518,11 @@ type qnhMetricSequenceSet11447 map[string]map[int]struct{}
 // These daemons may hold a previous integrated QNH map copy. Clear only the
 // known generated sequences there; metric overlays themselves target ospfd/ripd.
 var qnhMetricCleanupDaemons11447 = []string{"ospfd", "ospf6d", "ripd", "isisd", "bgpd"}
+
+// errQNHMetricDaemonUnavailable11447 marks vtysh's explicit "failed to
+// connect to any daemons" result. Cleanup may skip this: a stopped daemon
+// cannot retain stale in-memory route-map actions. Overlay loads stay strict.
+var errQNHMetricDaemonUnavailable11447 = errors.New("QNH metric daemon unavailable")
 
 func newQNHMetricSequenceSet11447() qnhMetricSequenceSet11447 {
 	return make(qnhMetricSequenceSet11447)

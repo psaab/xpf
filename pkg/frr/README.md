@@ -1556,6 +1556,11 @@ step. Both are required — neither sees the other's case:
   waits at most one teardown window behind a pre-cancelled in-flight
   retry, ≤45s total).
 - QNH metric overlay lifecycle (#12071): before an integrated reload, targeted `no set metric` commands clear only the previous generated QNH sequences on `ospfd`, `ospf6d`, `ripd`, `isisd`, and `bgpd`. This also makes the additive fallback safe, because `vtysh -f` cannot remove the stale action itself. After either full-diff reload or successful additive fallback, the manager restores metric-only overlays to `ospfd`/`ripd`; a degraded retry repeats cleanup, full diff, and overlay replay. Sequence identities come from the prior manager overlays and prior marked `frr.conf`, not a blind route-map wipe. A failed partial overlay application remains marked for targeted cleanup on retry. The overlays are not persisted: after a FRR daemon restart, the shared `frr.conf` contains no QNH metric action until Apply installs the overlays again. Authored policy metric actions are kept separate and untouched.
+  In steady state this runs five daemon-scoped clear loads per reload with
+  prior QNH sequences, followed by up to two metric-overlay loads. A daemon
+  reporting vtysh's explicit "failed to connect to any daemons" result is
+  skipped for cleanup because it cannot retain stale in-memory sequences;
+  other clear/load errors and overlay failures remain hard.
 - Degraded mode: fallback success returns `ErrFRRReloadDegraded`
   (wrapping the primary cause). A single-flight in-manager retry loop
   re-runs the primary at 15s/30s/60s then every 5min until a full diff

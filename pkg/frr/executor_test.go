@@ -40,11 +40,12 @@ type fakeExecutor struct {
 	vtyshLoadResp []byte
 	vtyshLoadErr  error
 
-	daemonLoadResp        []byte
-	daemonLoadErr         error
-	daemonLoadErrByDaemon map[string]error
-	daemonLoads           []daemonLoadCall
-	callOrder             []string
+	daemonLoadResp          []byte
+	daemonLoadRespByDaemon  map[string][]byte
+	daemonLoadErr           error
+	daemonLoadErrByDaemon   map[string]error
+	daemonLoads             []daemonLoadCall
+	callOrder               []string
 
 	// Capture: most recent call args.
 	lastVtyshCmd       string
@@ -132,11 +133,15 @@ func (f *fakeExecutor) VtyshLoadDaemon(ctx context.Context, daemon, conf string)
 	f.daemonLoads = append(f.daemonLoads, daemonLoadCall{
 		daemon: daemon, config: string(contents), ctxLive: ctx.Err() == nil,
 	})
+	resp := f.daemonLoadRespByDaemon[daemon]
+	if resp == nil {
+		resp = f.daemonLoadResp
+	}
 	err := f.daemonLoadErrByDaemon[daemon]
 	if err == nil {
 		err = f.daemonLoadErr
 	}
-	return f.daemonLoadResp, err
+	return resp, err
 }
 
 // TestExecVtyshUsesExecutor proves that Manager.ExecVtysh routes through

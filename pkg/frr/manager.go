@@ -936,7 +936,11 @@ func (m *Manager) loadQNHMetricConfig11447(parent context.Context, daemon, conte
 	defer cancel()
 	output, err := m.executor().VtyshLoadDaemon(ctx, daemon, path)
 	if err != nil {
-		return fmt.Errorf("vtysh -d %s -f QNH config: %w: %s", daemon, err, string(output))
+		failure := fmt.Errorf("vtysh -d %s -f QNH config: %w: %s", daemon, err, string(output))
+		if ctx.Err() == nil && strings.Contains(strings.ToLower(string(output)), "failed to connect to any daemons") {
+			return fmt.Errorf("%w: %w", errQNHMetricDaemonUnavailable11447, failure)
+		}
+		return failure
 	}
 	return nil
 }
@@ -952,10 +956,14 @@ func (m *Manager) clearQNHMetricOverlaysLocked(ctx context.Context) error {
 	config := renderQNHMetricSequenceClears11447(m.qnhMetricOverlayCleanup)
 	for _, daemon := range qnhMetricCleanupDaemons11447 {
 		if err := m.loadQNHMetricConfig11447(ctx, daemon, config); err != nil {
+			if errors.Is(err, errQNHMetricDaemonUnavailable11447) {
+				slog.Info("skipping QNH metric cleanup for unavailable FRR daemon", "daemon", daemon)
+				continue
+			}
 			return fmt.Errorf("clear stale QNH metric sequences on %s: %w", daemon, err)
 		}
 	}
-	slog.Info("cleared prior QNH metric actions from FRR daemons",
+	slog.Info("cleared prior QNH metric actions from reachable FRR daemons",
 		"route_maps", len(m.qnhMetricOverlayCleanup))
 	m.qnhMetricOverlayCleanup = nil
 	return nil

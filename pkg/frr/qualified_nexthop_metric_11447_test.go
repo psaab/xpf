@@ -370,6 +370,107 @@ func TestQNHMetricManagerFallbackRetryAndClear11447(t *testing.T) {
 		t.Fatalf("Clear retained desired QNH overlays: %v", m.qnhMetricOverlays)
 	}
 }
+
+func TestQNHMetricPartialDaemonCleanup11447(t *testing.T) {
+	compiled := compileQNHMetricConfig11447(t,
+		"set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10",
+		"set protocols ospf export static",
+	)
+	fc := &FullConfig{
+		OSPF:          compiled.Protocols.OSPF,
+		StaticRoutes:  compiled.RoutingOptions.StaticRoutes,
+		PolicyOptions: &compiled.PolicyOptions,
+	}
+	newManager := func(t *testing.T, fake *fakeExecutor) *Manager {
+		t.Helper()
+		base, _ := New().buildManagedSectionWithQNH11447(fc)
+		legacy := strings.Replace(base, " on-match next\n", " set metric 10\n on-match next\n", 1)
+		if legacy == base {
+			t.Fatal("fixture did not contain a QNH on-match sequence to seed")
+		}
+		confPath := filepath.Join(t.TempDir(), "frr.conf")
+		oldConfig := "log syslog informational\n" + markerBegin + "\n" + legacy + "\n" + markerEnd + "\n"
+		if err := os.WriteFile(confPath, []byte(oldConfig), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		m := New()
+		m.frrConf = confPath
+		m.exec = fake
+		m.DisableDegradedRetry()
+		t.Cleanup(m.Stop)
+		return m
+	}
+	connectErr := errors.New("exit status 1")
+	connectOutput := []byte("Exiting: failed to connect to any daemons.\n")
+	absentDaemons := []string{"ospf6d", "isisd", "bgpd"}
+
+	t.Run("skips absent clear daemons and keeps commits/removal working", func(t *testing.T) {
+		fake := &fakeExecutor{
+			daemonLoadErrByDaemon:  make(map[string]error),
+			daemonLoadRespByDaemon: make(map[string][]byte),
+		}
+		for _, daemon := range absentDaemons {
+			fake.daemonLoadErrByDaemon[daemon] = connectErr
+			fake.daemonLoadRespByDaemon[daemon] = connectOutput
+		}
+		m := newManager(t, fake)
+		if err := m.ApplyFull(fc); err != nil {
+			t.Fatalf("partial-daemon ApplyFull: %v", err)
+		}
+		wantFirstApply := "daemon-load:ospfd,daemon-load:ospf6d,daemon-load:ripd,daemon-load:isisd,daemon-load:bgpd,reload,daemon-load:ospfd"
+		if got := strings.Join(fake.callOrder, ","); got != wantFirstApply {
+			t.Fatalf("partial-daemon call order = %q, want %q", got, wantFirstApply)
+		}
+		for _, i := range []int{0, 2} {
+			call := fake.daemonLoads[i]
+			if !strings.Contains(call.config, "no set metric\n") ||
+				strings.Contains(call.config, "\n set metric ") {
+				t.Errorf("running daemon %s did not receive stale-metric cleanup:\n%s", call.daemon, call.config)
+			}
+		}
+
+		if err := m.ApplyFull(fc); err != nil {
+			t.Fatalf("second ApplyFull with absent cleanup daemons: %v", err)
+		}
+		if err := m.Clear(); err != nil {
+			t.Fatalf("Clear with absent cleanup daemons: %v", err)
+		}
+	})
+
+	t.Run("configuration load errors remain hard", func(t *testing.T) {
+		loadErr := errors.New("exit status 1")
+		fake := &fakeExecutor{
+			daemonLoadErrByDaemon: map[string]error{"isisd": loadErr},
+			daemonLoadRespByDaemon: map[string][]byte{
+				"isisd": []byte("% Unknown command: route-map\n"),
+			},
+		}
+		m := newManager(t, fake)
+		err := m.ApplyFull(fc)
+		if !errors.Is(err, loadErr) || errors.Is(err, errQNHMetricDaemonUnavailable11447) {
+			t.Fatalf("config rejection error = %v, want a hard non-connect load failure", err)
+		}
+		if fake.frrReloadPyCalls != 0 {
+			t.Fatalf("reload ran after a hard QNH clear error: %d calls", fake.frrReloadPyCalls)
+		}
+	})
+
+	t.Run("overlay connection errors remain strict", func(t *testing.T) {
+		fake := &fakeExecutor{
+			daemonLoadErrByDaemon: map[string]error{"ospfd": connectErr},
+			daemonLoadRespByDaemon: map[string][]byte{
+				"ospfd": connectOutput,
+			},
+		}
+		m := newManager(t, fake)
+		err := m.ApplyFull(fc)
+		if !errors.Is(err, errQNHMetricDaemonUnavailable11447) ||
+			!strings.Contains(err.Error(), "apply QNH metric overlay to ospfd") {
+			t.Fatalf("unavailable overlay error = %v, want strict ospfd overlay failure", err)
+		}
+	})
+}
+
 func TestQNHMetricPartialOverlayIsClearedBeforeRetry11447(t *testing.T) {
 	compiled := compileQNHMetricConfig11447(t,
 		"set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10",
