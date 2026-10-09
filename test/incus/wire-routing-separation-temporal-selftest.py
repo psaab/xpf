@@ -22,7 +22,7 @@ def free_port() -> int:
 
 
 def sender(
-    *, port: int, count: int, tag: str, rate: int = 0, extra: tuple[str, ...] = ()
+    *, port: int, count: int, tag: str, rate: int = 1000, extra: tuple[str, ...] = ()
 ) -> str:
     source_port = free_port()
     cmd = [

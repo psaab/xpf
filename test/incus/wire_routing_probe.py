@@ -6,7 +6,8 @@ steering term is committed. After commit it offers the near-miss control (tag
 N) and probe (tag P) interleaved on one socket. The near miss follows the
 existing main-table route; only its destination port differs from the
 exact-match FBF-steered probe. The peer-side capture spans all three legs.
-The 100-frame control tail starts immediately after the final probe.
+The sender emits `control_count - count` control frames after all probes
+(500 by default, at least 100); the gate measures the first 100 frames.
 
 With WIRE_BROKEN_FIXTURE=1, the harness inserts a temporary explicit accept
 before the routing-instance term. That intentionally bypasses steering to the
