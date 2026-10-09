@@ -148,6 +148,12 @@ func hostInboundFilterExcept(tokens, excluded []string, protocols bool) []string
 	if !protocols {
 		excludedMatches = make(map[string][]L4Match)
 		for _, token := range excluded {
+			// These meta-tokens have no tuple of their own. In particular,
+			// expanding an excluded `all` here would poison the union against
+			// every concrete service.
+			if token == "all" || token == "any-service" {
+				continue
+			}
 			if !KnownHostInboundSystemServices[token] {
 				continue
 			}

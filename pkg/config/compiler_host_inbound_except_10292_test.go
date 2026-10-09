@@ -125,6 +125,83 @@ func TestHostInboundAllExceptSubtractsAdmissionTuples12053(t *testing.T) {
 	}
 }
 
+func TestHostInboundAllExceptConservesAliasTuples12053(t *testing.T) {
+	for _, excluded := range []string{"ssh", "http", "https", "ike", "dhcp", "netconf"} {
+		t.Run(excluded, func(t *testing.T) {
+			gotTokens := hostInboundFilterExcept([]string{"all"}, []string{excluded}, false)
+			for _, family := range []string{"ip", "ip6"} {
+				t.Run(family, func(t *testing.T) {
+					all := hostInboundAdmissionTupleSet12053([]string{"all"}, family)
+					excludedTuples := hostInboundAdmissionTupleSet12053([]string{excluded}, family)
+					want := make(map[hostInboundTupleKey12053]struct{}, len(all))
+					for tuple := range all {
+						if _, excluded := excludedTuples[tuple]; !excluded {
+							want[tuple] = struct{}{}
+						}
+					}
+					got := hostInboundAdmissionTupleSet12053(gotTokens, family)
+					if !reflect.DeepEqual(got, want) {
+						t.Fatalf("all except %s tuple set on %s = %v, want all minus excluded tuples %v",
+							excluded, family, got, want)
+					}
+				})
+			}
+		})
+	}
+}
+
+type hostInboundTupleKey12053 struct {
+	proto       uint8
+	port        uint16
+	icmpType    uint8
+	portSet     bool
+	icmpTypeSet bool
+}
+
+func hostInboundAdmissionTupleSet12053(tokens []string, family string) map[hostInboundTupleKey12053]struct{} {
+	out := make(map[hostInboundTupleKey12053]struct{})
+	for _, token := range tokens {
+		for _, match := range HostInboundServiceMatch(token, family) {
+			if match.Reject {
+				continue
+			}
+			if match.ICMPType != nil {
+				out[hostInboundTupleKey12053{
+					proto: match.Proto, icmpType: *match.ICMPType, icmpTypeSet: true,
+				}] = struct{}{}
+				continue
+			}
+			if len(match.Ports) == 0 {
+				out[hostInboundTupleKey12053{proto: match.Proto}] = struct{}{}
+				continue
+			}
+			for _, ports := range match.Ports {
+				for port := uint32(ports.Lo); port <= uint32(ports.Hi); port++ {
+					out[hostInboundTupleKey12053{
+						proto: match.Proto, port: uint16(port), portSet: true,
+					}] = struct{}{}
+				}
+			}
+		}
+	}
+	return out
+}
+
+func TestHostInboundExceptAllMetaTokenPreservesExplicitServices12053(t *testing.T) {
+	cfg, err := CompileConfig(parse10292(t,
+		`security { zones { security-zone trust { host-inbound-traffic { system-services { ssh; ping; all { except; } } } } } }`))
+	if err != nil {
+		t.Fatalf("strict CompileConfig: %v", err)
+	}
+	got := cfg.Security.Zones["trust"].HostInboundTraffic
+	if !reflect.DeepEqual(got.SystemServices, []string{"ssh", "ping"}) {
+		t.Fatalf("strict compile system-services = %v, want [ssh ping]", got.SystemServices)
+	}
+	if len(cfg.Warnings) != 0 {
+		t.Fatalf("strict compile unexpectedly warned: %v", cfg.Warnings)
+	}
+}
+
 func hostInboundTupleOverlap12053(a, b L4Match) bool {
 	if a.Proto != b.Proto {
 		return false
