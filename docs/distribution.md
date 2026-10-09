@@ -286,11 +286,13 @@ curl -fsSL https://dl.example.com/xpf/install.sh | sudo sh
 ```
 
 `sudo` is required — the installer mutates the host (keyring, apt source, apt
-install), so a non-root run refuses before touching anything. The apt base URL
-+ default channel are BAKED into `install.sh` at publish time
-(`publish.py stamp-installer`); a piped run needs no environment. Set
-`XPF_APT_BASE_URL` only to override the baked value or when running an unbaked
-copy.
+install), so a non-root run refuses before touching anything. The installer
+also requires the `gpg` executable to parse the embedded archive public key
+before writing anything; install the Debian `gpg` package first, since apt
+does not guarantee it on minimal systems. The apt base URL and default channel
+are BAKED into `install.sh` at publish time using `publish.py stamp-installer`;
+a piped run needs no environment. Set `XPF_APT_BASE_URL` only to override the
+baked value or when running an unbaked copy.
 
 Trust level: TLS + first-fetch trust of `install.sh` (the same level
 Tailscale/Docker/rustup accept). `install.sh` first VALIDATES all inputs
@@ -300,8 +302,10 @@ then installs the pinned archive keyring and writes the deb822 apt source. After
 APT verifies the selected signed Release identity, it writes the managed
 channel preference and runs `apt install xpf-appliance`. If that apt step fails,
 the installer removes the source and restores the previous marked pin (or
-removes a new one), so a failed install does not leave a dangling repo or a
-partial channel rebind.
+removes a new one). It also restores the previous keyring (or removes the
+bootstrap keyring on first install) only while the live file still matches the
+installer's write; if dpkg has replaced it with the package-owned keyring, that
+package payload is left intact.
 
 ### Install (Tier B — verify before run)
 

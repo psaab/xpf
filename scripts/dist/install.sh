@@ -80,9 +80,9 @@ SRC=/etc/apt/sources.list.d/xpf.sources
 PIN=/etc/apt/preferences.d/xpf-channel.pref
 PIN_MARKER="# xpf appliance channel pin; Managed by install.sh (#11133)"
 
-# cleanup_on_fail removes the apt source written by this run and restores the
-# prior managed channel pin and archive keyring if installation does not finish.
-# An unmarked preference is never changed.
+# cleanup_on_fail removes the apt source written by this run, restores the
+# prior managed channel pin, and restores the keyring only while its live bytes
+# still match this installer's write. An unmarked preference is never changed.
 cleanup_on_fail() {
     _rc=$?
     if [ "$INSTALL_OK" != "1" ] && [ "$DRY" != "1" ]; then
@@ -113,17 +113,26 @@ cleanup_on_fail() {
             rm -f "$KEYRING_TEMP" || _rc=1
         fi
         if [ "$KEYRING_WRITTEN" = "1" ]; then
-            if [ -n "$KEYRING_BACKUP" ]; then
-                info "install failed (rc=$_rc) — restoring previous $KEYRING"
-                if mv -f "$KEYRING_BACKUP" "$KEYRING"; then
-                    KEYRING_BACKUP=''
+            if [ -f "$KEYRING" ] && [ ! -L "$KEYRING" ] \
+                && printf '%s\n' "$ARCHIVE_KEY" | cmp -s - "$KEYRING"; then
+                if [ -n "$KEYRING_BACKUP" ]; then
+                    info "install failed (rc=$_rc) — restoring previous $KEYRING"
+                    if mv -f "$KEYRING_BACKUP" "$KEYRING"; then
+                        KEYRING_BACKUP=''
+                    else
+                        echo "xpf-install ERROR: could not restore previous $KEYRING" >&2
+                        _rc=1
+                    fi
                 else
-                    echo "xpf-install ERROR: could not restore previous $KEYRING" >&2
-                    _rc=1
+                    info "install failed (rc=$_rc) — removing new $KEYRING"
+                    rm -f "$KEYRING" || _rc=1
                 fi
             else
-                info "install failed (rc=$_rc) — removing new $KEYRING"
-                rm -f "$KEYRING" || _rc=1
+                info "install failed (rc=$_rc) — $KEYRING changed after bootstrap; leaving it intact"
+                if [ -n "$KEYRING_BACKUP" ]; then
+                    rm -f "$KEYRING_BACKUP" || _rc=1
+                    KEYRING_BACKUP=''
+                fi
             fi
         elif [ -n "$KEYRING_BACKUP" ]; then
             rm -f "$KEYRING_BACKUP" || _rc=1
@@ -137,6 +146,9 @@ cleanup_on_fail() {
     exit "$_rc"
 }
 trap cleanup_on_fail EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 
 die() { echo "xpf-install ERROR: $*" >&2; exit 1; }
@@ -144,6 +156,7 @@ info() { echo "xpf-install: $*"; }
 run() {
     if [ "$DRY" = "1" ]; then echo "  (dry-run) $*"; else eval "$*"; fi
 }
+
 
 # ── embedded archive public key (PLACEHOLDER until release) ──────────────
 # Replace the block between the markers with the real ASCII-armored key.
@@ -179,8 +192,13 @@ validate_archive_key() {
         rm -rf "$_key_home"
         die "archive key contains no OpenPGP public key."
     fi
+    if printf '%s\n' "$_key_info" | grep -Eq '^(sec|ssb):'; then
+        rm -rf "$_key_home"
+        die "archive key contains secret OpenPGP key material."
+    fi
     rm -rf "$_key_home" || die "cannot clean temporary archive-key validation home."
 }
+
 
 # ── apt base URL validation (F-065 / #9921) ─────────────────────────────────
 # Mirror of publish.py validate_apt_url (#5685/M40): the URL is interpolated
@@ -348,10 +366,12 @@ install_keyring() {
             KEYRING_BACKUP=$(mktemp "$_keyring_dir/.xpf-archive-keyring.asc.backup.XXXXXX")
             cp -p "$KEYRING" "$KEYRING_BACKUP"
         fi
+        sync "$KEYRING_TEMP" || die "cannot sync temporary archive keyring."
         # Arm rollback before the rename so an unsuccessful move is reversible.
         KEYRING_WRITTEN=1
         mv -f "$KEYRING_TEMP" "$KEYRING"
         KEYRING_TEMP=''
+        sync "$_keyring_dir" || die "cannot sync archive-keyring directory."
     fi
 }
 
