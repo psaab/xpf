@@ -1576,8 +1576,9 @@ step. Both are required — neither sees the other's case:
   other clear/load errors and overlay failures remain hard.
   `vtysh` can also exit rc=0 while applying nothing. Such silent no-ops bypass
   both the connect-failure skip and the hard-failure path; an exit status is
-  not proof of applied state, so QNH overlays use distinguishing-value
-  readback and cleanup verifies the ripd sequence is absent.
+  not proof of applied state. Only the ripd overlay uses distinguishing-value
+  readback; the ospfd overlay trusts rc=0, with its exact metric asserted by
+  the live test. Cleanup verifies the ripd sequence is absent.
 - Degraded mode: fallback success returns `ErrFRRReloadDegraded`
   (wrapping the primary cause). A single-flight in-manager retry loop
   re-runs the primary at 15s/30s/60s then every 5min until a full diff
