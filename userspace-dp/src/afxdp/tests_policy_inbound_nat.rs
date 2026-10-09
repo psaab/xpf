@@ -1016,6 +1016,9 @@ fn v4_source_deny_then_any_snapshot_10686() -> ConfigSnapshot {
     snapshot
 }
 
+// VID 0 on tagged-only ifindex 12 is deliberate: the #11669 mapped-v6 gate
+// must fire before the tagged-ingress VLAN guard, and stamping VID 80 here
+// would mask a #11669 revert (see docs/log/10686.md). Do not "fix" by stamping.
 fn udp_v6_ingress_frame_10686(
     src: Ipv6Addr,
     dst: Ipv6Addr,
