@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "b579834b5dcb821f4817efd55241ce31c8c7f4cc378cea4497d5abfced3b8084"
+	snapshotShapeGolden8892 = "180e7fb5f24b5f523c5253f5ab234476ca9075c46cc2de08ce0766bd08230d5c"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -441,6 +441,16 @@ const (
 	// so they move this Go digest without changing helper-consumed behavior.
 	// The clean base already had window drift: its digest was e138f7… rather
 	// than the old 5f4e… pin. Fold that pre-existing drift into this v45 golden.
+	// v45 STANDS (#12288): Policy.MalformedZonePairShapes is compiler-only
+	// source-shape provenance (`json:"-"`) on the synthetic malformed-zone-pair
+	// carrier. ConfigSnapshot embeds Config, so this walk sees the field under
+	// both global and hierarchical policy collections even though the field is
+	// absent from ConfigSnapshot JSON. The changed rejection-reason string is
+	// diagnostic-only; Rust has no consumer for it, so no helper-visible
+	// behavior or snapshot wire shape changes.
+	// Master already had independent shape drift (golden b579834b, master
+	// 6daa3234), tracked by #12509. Fold that drift and this field into the v45
+	// golden below; do not blame the digest change solely on the base.
 	// v44 -> v45 BUMPED (#11812): single-rate PolicerSnapshot adds optional
 	// marking-action and logical-interface-policer JSON fields. The keys are
 	// omitted by default and the current Rust runtime ignores them; warnings

@@ -285,6 +285,8 @@ func buildOneRuleSnapshot(
 		rejectedSourceAddresses: rejectedSrc,
 		rejectedDestAddresses:   rejectedDst,
 		rejectedApplications:    rejectedApps,
+		// #12288: the malformed shape exists only in compile-time metadata.
+		malformedZonePairShapes: pol.MalformedZonePairShapes,
 	}
 }
 
