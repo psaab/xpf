@@ -1555,6 +1555,7 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 				case "next":
 					recordPolicyNextAction11780(term, nodeVal(ac))
 				case "next-hop":
+					term.hasNextHopOperand12070 = true
 					term.NextHop = nodeVal(ac)
 				case "load-balance":
 					term.LoadBalance = nodeVal(ac)
@@ -1588,6 +1589,7 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 					// `then as-path-prepend` is multi-value. Read every entry
 					// through the firewallMatchValues SSOT, then split quoted
 					// multi-ASN values before storing the operands (#2892/#12070).
+					term.hasASPathPrependOperand12070 = true
 					term.ASPathPrepend = appendPolicyASPathPrependOperands(term.ASPathPrepend, firewallMatchValues(ac))
 				case "origin":
 					term.Origin = nodeVal(ac)
@@ -1686,6 +1688,18 @@ var policyTermInlineKeywords = map[string]bool{
 	"origin": true, "accept": true, "reject": true, "next": true,
 	"neighbor": true, "rib": true, "instance": true, "interface": true,
 	"family": true, "tag": true, "area": true,
+}
+
+// policyTermThenInlineKeywords identifies actual action/clause boundaries
+// while reading an AS-path-prepend value run. The broader
+// policyTermInlineKeywords set also contains `from`-side keywords like `tag`
+// and `area`; treating those as boundaries would erase invalid operands before
+// validatePolicyThenOperandsStrict could reject them.
+var policyTermThenInlineKeywords = map[string]bool{
+	"from": true, "then": true, "next-hop": true, "load-balance": true,
+	"local-preference": true, "metric": true, "metric-type": true,
+	"community": true, "as-path-prepend": true, "origin": true,
+	"accept": true, "reject": true, "next": true,
 }
 
 var policyTermFromUnsupportedThenKeywords11779 = map[string]bool{
@@ -1855,6 +1869,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				i += consumed
 			}
 		case "next-hop":
+			term.hasNextHopOperand12070 = true
 			if i+1 < len(keys) {
 				i++
 				term.NextHop = keys[i]
@@ -1930,10 +1945,20 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				markMalformedPolicyFromList11779(term, "as-path", badClause)
 			}
 		case "as-path-prepend":
-			// Consume consecutive values until the next clause keyword,
-			// splitting quoted multi-ASN values before storing each operand.
-			for i+1 < len(keys) && !policyTermInlineKeywords[keys[i+1]] {
-				i++
+			term.hasASPathPrependOperand12070 = true
+			// Stop only at clause/action keywords. Other policy keywords
+			// (for example `tag` or `area`) are not AS-path-prepend boundaries;
+			// preserve them as operands so the compiled gate rejects rather
+			// than silently dropping the entire clause. Quoted/bracketed
+			// action words are values, not boundaries.
+			for i+1 < len(keys) {
+				next := i + 1
+				quotedValue := next < len(quoted) && quoted[next]
+				bracketedValue := next < len(bracketed) && bracketed[next]
+				if !quotedValue && !bracketedValue && policyTermThenInlineKeywords[keys[next]] {
+					break
+				}
+				i = next
 				term.ASPathPrepend = appendPolicyASPathPrependOperand(term.ASPathPrepend, keys[i])
 			}
 		case "origin":

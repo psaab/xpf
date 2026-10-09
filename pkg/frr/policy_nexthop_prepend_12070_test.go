@@ -367,7 +367,7 @@ func TestPolicyThenFlatRunValidControlsCommitAndRender_12070(t *testing.T) {
 
 func TestPolicyThenCompactAndTermLineOperandsRejected_12070(t *testing.T) {
 	for _, tc := range []struct {
-		name, text, leaf, value string
+		name, text, leaf, value, wantMessage string
 	}{
 		{
 			name:  "compact unsupported next-hop",
@@ -416,6 +416,82 @@ func TestPolicyThenCompactAndTermLineOperandsRejected_12070(t *testing.T) {
 			text:  `policy-options { policy-statement P { term t then accept as-path-prepend "65001 abc"; } }`,
 			leaf:  "as-path-prepend",
 			value: "abc",
+		},
+		{
+			name:        "compact empty next-hop",
+			text:        `policy-options { policy-statement P { term t { then accept next-hop ""; } } }`,
+			leaf:        "next-hop",
+			wantMessage: `invalid value ""`,
+		},
+		{
+			name:        "term-line empty next-hop",
+			text:        `policy-options { policy-statement P { term t then accept next-hop ""; } }`,
+			leaf:        "next-hop",
+			wantMessage: `invalid value ""`,
+		},
+		{
+			name:        "compact whitespace-only prepend",
+			text:        `policy-options { policy-statement P { term t { then accept as-path-prepend " "; } } }`,
+			leaf:        "as-path-prepend",
+			wantMessage: `invalid value " "`,
+		},
+		{
+			name:        "term-line whitespace-only prepend",
+			text:        `policy-options { policy-statement P { term t then accept as-path-prepend " "; } }`,
+			leaf:        "as-path-prepend",
+			wantMessage: `invalid value " "`,
+		},
+		{
+			name:        "compact empty prepend list",
+			text:        `policy-options { policy-statement P { term t { then accept as-path-prepend [ ]; } } }`,
+			leaf:        "as-path-prepend",
+			wantMessage: `invalid value ""`,
+		},
+		{
+			name:        "term-line empty prepend list",
+			text:        `policy-options { policy-statement P { term t then accept as-path-prepend [ ]; } }`,
+			leaf:        "as-path-prepend",
+			wantMessage: `invalid value ""`,
+		},
+		{
+			name:        "compact bracketed whitespace prepend",
+			text:        `policy-options { policy-statement P { term t { then accept as-path-prepend [ " " ]; } } }`,
+			leaf:        "as-path-prepend",
+			wantMessage: `invalid value " "`,
+		},
+		{
+			name:        "term-line bracketed whitespace prepend",
+			text:        `policy-options { policy-statement P { term t then accept as-path-prepend [ " " ]; } }`,
+			leaf:        "as-path-prepend",
+			wantMessage: `invalid value " "`,
+		},
+		{
+			name:        "compact keyword-valued prepend tag",
+			text:        `policy-options { policy-statement P { term t { then accept as-path-prepend tag; } } }`,
+			leaf:        "as-path-prepend",
+			value:       "tag",
+			wantMessage: `invalid value "tag"`,
+		},
+		{
+			name:        "term-line keyword-valued prepend tag",
+			text:        `policy-options { policy-statement P { term t then accept as-path-prepend tag; } }`,
+			leaf:        "as-path-prepend",
+			value:       "tag",
+			wantMessage: `invalid value "tag"`,
+		},
+		{
+			name:        "compact keyword-valued prepend area",
+			text:        `policy-options { policy-statement P { term t { then accept as-path-prepend area; } } }`,
+			leaf:        "as-path-prepend",
+			value:       "area",
+			wantMessage: `invalid value "area"`,
+		},
+		{
+			name:        "term-line keyword-valued prepend area",
+			text:        `policy-options { policy-statement P { term t then accept as-path-prepend area; } }`,
+			leaf:        "as-path-prepend",
+			value:       "area",
+			wantMessage: `invalid value "area"`,
 		},
 		{
 			name:  "compact loopback next-hop",
@@ -478,14 +554,12 @@ func TestPolicyThenCompactAndTermLineOperandsRejected_12070(t *testing.T) {
 				if err == nil {
 					t.Fatalf("%s accepted invalid %s value %q", channel, tc.leaf, tc.value)
 				}
-				for _, want := range []string{
-					`policy-options policy-statement "P" term "t"`,
-					tc.leaf,
-					tc.value,
-				} {
-					if !strings.Contains(err.Error(), want) {
-						t.Errorf("%s error %q does not name %q", channel, err, want)
+				if tc.wantMessage != "" {
+					if !strings.Contains(err.Error(), tc.wantMessage) {
+						t.Errorf("%s error %q does not include %q", channel, err, tc.wantMessage)
 					}
+				} else if !strings.Contains(err.Error(), tc.value) {
+					t.Errorf("%s error %q does not name %q", channel, err, tc.value)
 				}
 			}
 
@@ -506,14 +580,38 @@ func TestPolicyThenCompactAndTermLineOperandsRejected_12070(t *testing.T) {
 			checkError("LoadOverride + CommitCheck", err)
 			_, err = store.Commit()
 			checkError("LoadOverride + Commit", err)
+			// The degenerate operands that motivated R4-F1 must also fail
+			// after LoadMerge converts the hierarchical input back to SetPath.
+			// Keep this check specific to those rows: the legacy from-protocol
+			// term-line control has a separate known LoadMerge normalization
+			// discrepancy and is not part of this fold.
+			if tc.wantMessage != "" {
+				mergeStore, err := configstore.New(filepath.Join(t.TempDir(), "merge.conf"))
+				if err != nil {
+					t.Fatalf("create load-merge store: %v", err)
+				}
+				if err := mergeStore.EnterConfigure(); err != nil {
+					t.Fatalf("LoadMerge EnterConfigure: %v", err)
+				}
+				if err := mergeStore.LoadMerge(tc.text); err != nil {
+					t.Fatalf("LoadMerge(%q): %v", tc.text, err)
+				}
+				_, err = mergeStore.CommitCheck()
+				if err == nil {
+					t.Fatal("LoadMerge + CommitCheck accepted a degenerate policy operand")
+				}
+				if !strings.Contains(err.Error(), tc.leaf) {
+					t.Errorf("LoadMerge + CommitCheck error %q does not name %q", err, tc.leaf)
+				}
+			}
 		})
 	}
 }
 
 func TestPolicyThenBareOperandsCommitAndRender_12070(t *testing.T) {
 	for _, tc := range []struct {
-		name, command, rendered string
-		check                   func(*testing.T, *config.PolicyTerm)
+		name, command, termLine, rendered, renderedAlso string
+		check                                           func(*testing.T, *config.PolicyTerm)
 	}{
 		{
 			name:     "next-hop",
@@ -546,6 +644,89 @@ func TestPolicyThenBareOperandsCommitAndRender_12070(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:     "term-line next-hop",
+			termLine: `policy-options { policy-statement P { term t then next-hop 192.0.2.1; } }`,
+			rendered: " set ip next-hop 192.0.2.1\n",
+			check: func(t *testing.T, term *config.PolicyTerm) {
+				if term.Action != "" || term.NextHop != "192.0.2.1" {
+					t.Fatalf("compiled term = %+v, want bare term-line next-hop", term)
+				}
+			},
+		},
+		{
+			name:         "term-line self alias",
+			termLine:     `policy-options { policy-statement P { term t then next-hop self; } }`,
+			rendered:     " set ip next-hop peer-address\n",
+			renderedAlso: " set ipv6 next-hop peer-address\n",
+			check: func(t *testing.T, term *config.PolicyTerm) {
+				if term.Action != "" || term.NextHop != "self" {
+					t.Fatalf("compiled term = %+v, want bare term-line next-hop self", term)
+				}
+			},
+		},
+		{
+			name:     "term-line IPv6 next-hop",
+			termLine: `policy-options { policy-statement P { term t then next-hop 2001:db8::1; } }`,
+			rendered: " set ipv6 next-hop global 2001:db8::1\n",
+			check: func(t *testing.T, term *config.PolicyTerm) {
+				if term.Action != "" || term.NextHop != "2001:db8::1" {
+					t.Fatalf("compiled term = %+v, want bare term-line IPv6 next-hop", term)
+				}
+			},
+		},
+		{
+			name:     "term-line prepend",
+			termLine: `policy-options { policy-statement P { term t then as-path-prepend 65001 65002; } }`,
+			rendered: " set as-path prepend 65001 65002\n",
+			check: func(t *testing.T, term *config.PolicyTerm) {
+				if term.Action != "" || strings.Join(term.ASPathPrepend, " ") != "65001 65002" {
+					t.Fatalf("compiled term = %+v, want bare term-line prepend", term)
+				}
+			},
+		},
+		{
+			name:     "term-line quoted prepend",
+			termLine: `policy-options { policy-statement P { term t then as-path-prepend "65001 65002"; } }`,
+			rendered: " set as-path prepend 65001 65002\n",
+			check: func(t *testing.T, term *config.PolicyTerm) {
+				if term.Action != "" || strings.Join(term.ASPathPrepend, " ") != "65001 65002" {
+					t.Fatalf("compiled term = %+v, want bare term-line quoted prepend", term)
+				}
+			},
+		},
+		{
+			name:     "term-line next-hop and prepend chain",
+			termLine: `policy-options { policy-statement P { term t then next-hop 192.0.2.1 as-path-prepend 65001 65002; } }`,
+			rendered: " set ip next-hop 192.0.2.1\n set as-path prepend 65001 65002\n",
+			check: func(t *testing.T, term *config.PolicyTerm) {
+				if term.Action != "" || term.NextHop != "192.0.2.1" ||
+					strings.Join(term.ASPathPrepend, " ") != "65001 65002" {
+					t.Fatalf("compiled term = %+v, want bare term-line next-hop/prepend chain", term)
+				}
+			},
+		},
+		{
+			name:     "term-line next-hop then next policy",
+			termLine: `policy-options { policy-statement P { term t then next-hop 192.0.2.1 next policy; } }`,
+			rendered: " set ip next-hop 192.0.2.1\n",
+			check: func(t *testing.T, term *config.PolicyTerm) {
+				if term.Action != "" || term.NextHop != "192.0.2.1" || !term.NextPolicy {
+					t.Fatalf("compiled term = %+v, want next-hop followed by next policy", term)
+				}
+			},
+		},
+		{
+			name:     "term-line from-protocol next-hop accept",
+			termLine: `policy-options { policy-statement P { term t from protocol bgp then next-hop 192.0.2.1 accept; } }`,
+			rendered: " set ip next-hop 192.0.2.1\n",
+			check: func(t *testing.T, term *config.PolicyTerm) {
+				if term.Action != "accept" || term.NextHop != "192.0.2.1" ||
+					len(term.FromProtocols) != 1 || term.FromProtocols[0] != "bgp" {
+					t.Fatalf("compiled term = %+v, want bgp match with accepted next-hop", term)
+				}
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assertCompiled := func(t *testing.T, compiled *config.Config) {
@@ -554,34 +735,129 @@ func TestPolicyThenBareOperandsCommitAndRender_12070(t *testing.T) {
 				tc.check(t, term)
 				got := (&Manager{frrConf: "/dev/null"}).generatePolicyOptions(&compiled.PolicyOptions)
 				if !strings.Contains(got, tc.rendered) {
-					t.Fatalf("bare operand did not render; output:\n%s", got)
+					t.Fatalf("policy operand did not render; output:\n%s", got)
+				}
+				if tc.renderedAlso != "" && !strings.Contains(got, tc.renderedAlso) {
+					t.Fatalf("policy operand did not render additional clause %q; output:\n%s",
+						tc.renderedAlso, got)
 				}
 			}
 
-			compiled, err := configstore.CheckText("set "+tc.command, -1)
-			if err != nil {
-				t.Fatalf("CheckText rejected valid bare operand: %v", err)
+			if tc.command != "" {
+				compiled, err := configstore.CheckText("set "+tc.command, -1)
+				if err != nil {
+					t.Fatalf("CheckText rejected valid bare operand: %v", err)
+				}
+				assertCompiled(t, compiled)
+
+				store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
+				if err != nil {
+					t.Fatalf("create config store: %v", err)
+				}
+				if err := store.EnterConfigure(); err != nil {
+					t.Fatalf("EnterConfigure: %v", err)
+				}
+				if err := store.SetFromInputAs("", tc.command); err != nil {
+					t.Fatalf("SetFromInputAs(%q): %v", tc.command, err)
+				}
+				compiled, err = store.CommitCheck()
+				if err != nil {
+					t.Fatalf("CommitCheck rejected valid bare operand: %v", err)
+				}
+				assertCompiled(t, compiled)
+				if _, err := store.Commit(); err != nil {
+					t.Fatalf("Commit rejected valid bare operand: %v", err)
+				}
 			}
-			assertCompiled(t, compiled)
+
+			if tc.termLine != "" {
+				store, err := configstore.New(filepath.Join(t.TempDir(), "xpf-term-line.conf"))
+				if err != nil {
+					t.Fatalf("create term-line config store: %v", err)
+				}
+				if err := store.EnterConfigure(); err != nil {
+					t.Fatalf("term-line EnterConfigure: %v", err)
+				}
+				if err := store.LoadOverride(tc.termLine); err != nil {
+					t.Fatalf("LoadOverride rejected valid term-line operand: %v", err)
+				}
+				compiled, err := store.CommitCheck()
+				if err != nil {
+					t.Fatalf("LoadOverride + CommitCheck rejected valid term-line operand: %v", err)
+				}
+				assertCompiled(t, compiled)
+				if _, err := store.Commit(); err != nil {
+					t.Fatalf("LoadOverride + Commit rejected valid term-line operand: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// TestPolicyThenOperandsSyncApplyDowngradesAndOmits_12070 pins both tolerant
+// compile routes (#1960) and the renderer's fail-closed belt together. RED on
+// M7 (remove lenientPolicyThenOperands from lenientCompileOpts): both routes
+// reject instead of accepting with the downgrade warning.
+func TestPolicyThenOperandsSyncApplyDowngradesAndOmits_12070(t *testing.T) {
+	for _, tc := range []struct {
+		name, text, bad, forbidden string
+	}{
+		{
+			name:      "compact next-hop",
+			text:      `policy-options { policy-statement P { term t { then accept next-hop discard; } } }`,
+			bad:       "discard",
+			forbidden: "set ip next-hop discard",
+		},
+		{
+			name:      "term-line prepend",
+			text:      `policy-options { policy-statement P { term t then accept as-path-prepend 65001 abc; } }`,
+			bad:       "abc",
+			forbidden: "set as-path prepend 65001 abc",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree, parseErrors := config.NewParser(tc.text).Parse()
+			if len(parseErrors) != 0 {
+				t.Fatalf("parse policy operand: %v", parseErrors)
+			}
+			lenient, err := config.CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("CompileConfigLenient rejected existing policy operand: %v", err)
+			}
+			checkTolerant := func(path string, warnings []string, options *config.PolicyOptionsConfig) {
+				t.Helper()
+				term := options.PolicyStatements["P"].Terms[0]
+				if term.Action != "accept" {
+					t.Fatalf("%s compiled term action = %q, want accept", path, term.Action)
+				}
+				found := false
+				for _, warning := range warnings {
+					if strings.Contains(warning, "policy then operand (downgraded to warning on tolerant path)") &&
+						strings.Contains(warning, tc.bad) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("%s warnings %q do not include downgraded operand %q",
+						path, warnings, tc.bad)
+				}
+				rendered := (&Manager{frrConf: "/dev/null"}).generatePolicyOptions(options)
+				if strings.Contains(rendered, tc.forbidden) {
+					t.Fatalf("%s render emitted invalid policy clause %q:\n%s", path, tc.forbidden, rendered)
+				}
+			}
+			checkTolerant("CompileConfigLenient", lenient.Warnings, &lenient.PolicyOptions)
 
 			store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
 			if err != nil {
 				t.Fatalf("create config store: %v", err)
 			}
-			if err := store.EnterConfigure(); err != nil {
-				t.Fatalf("EnterConfigure: %v", err)
-			}
-			if err := store.SetFromInputAs("", tc.command); err != nil {
-				t.Fatalf("SetFromInputAs(%q): %v", tc.command, err)
-			}
-			compiled, err = store.CommitCheck()
+			synced, err := store.SyncApply(tc.text, nil)
 			if err != nil {
-				t.Fatalf("CommitCheck rejected valid bare operand: %v", err)
+				t.Fatalf("SyncApply rejected existing policy operand: %v", err)
 			}
-			assertCompiled(t, compiled)
-			if _, err := store.Commit(); err != nil {
-				t.Fatalf("Commit rejected valid bare operand: %v", err)
-			}
+			checkTolerant("SyncApply", synced.Warnings, &synced.PolicyOptions)
 		})
 	}
 }

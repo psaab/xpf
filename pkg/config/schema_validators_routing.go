@@ -303,7 +303,13 @@ func appendPolicyASPathPrependOperand(dst []string, value string) []string {
 	if strings.IndexFunc(value, unicode.IsSpace) < 0 {
 		return append(dst, value)
 	}
-	return append(dst, strings.Fields(value)...)
+	operands := strings.Fields(value)
+	if len(operands) == 0 {
+		// Preserve a whitespace-only authored operand so the compiled policy
+		// gate can reject it instead of mistaking it for an absent clause.
+		return append(dst, value)
+	}
+	return append(dst, operands...)
 }
 
 func appendPolicyASPathPrependOperands(dst, values []string) []string {

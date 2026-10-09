@@ -147,6 +147,15 @@ type PolicyTerm struct {
 	// NextPolicy skips the remaining terms and the policy default, then resumes
 	// at the next policy in the evaluated policy chain.
 	NextPolicy bool
+	// hasNextHopOperand12070 / hasASPathPrependOperand12070 preserve action
+	// presence when an empty, whitespace-only, or keyword-valued operand would
+	// otherwise be erased before the #12070 compiled-term gate. Those inputs
+	// compile to an empty field/slice and otherwise look identical to an absent
+	// clause, leaving display-set output that strict validation itself rejects.
+	// Both child and inline parse paths set these flags; direct Config values
+	// without provenance retain their existing behavior.
+	hasNextHopOperand12070       bool `json:"-"`
+	hasASPathPrependOperand12070 bool `json:"-"`
 	// invalidNextPolicy11780 preserves malformed packed `then next <value>`
 	// tokens long enough for strict compilation to reject them. Tolerant
 	// compilation also records Action=reject so the renderer fails closed.

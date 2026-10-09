@@ -1921,10 +1921,12 @@ func validateGenerateRoutePolicyStrict(cfg *Config) error {
 // `then accept ...;` and term-line `term t then accept ...;` spellings pack
 // operands onto a Keys tail the schema walker ignores. The compiler's
 // parsePolicyTermInlineKeys reads those tails into the same PolicyTerm fields
-// as the expanded forms. Checking every compiled term validates packed
-// spellings after parsing when the operand is represented in the typed
-// field; schema validation continues to cover child-based operands. It reuses
-// the exact predicates and errors name the policy, term, leaf, and value.
+// as the expanded forms. Empty next-hop and prepend clauses, plus whitespace-
+// only or keyword-valued prepend operands, can otherwise disappear before this
+// gate; compiler-only presence flags preserve those cases for rejection.
+// Checking every compiled term validates all spellings after parsing while
+// schema validation continues to cover child-based operands. It reuses the
+// exact predicates and errors name the policy, term, leaf, and value.
 //
 // Strict on commit / commit-check; the call site downgrades to a warning on
 // the tolerant load / peer-sync path (opts.lenientPolicyThenOperands, #1960)
@@ -1950,12 +1952,19 @@ func validatePolicyThenOperandsStrict(cfg *Config) error {
 			if term == nil {
 				continue
 			}
-			if term.NextHop != "" && !ValidPolicyThenNextHop(term.NextHop) {
+			if (term.NextHop != "" && !ValidPolicyThenNextHop(term.NextHop)) ||
+				(term.hasNextHopOperand12070 && term.NextHop == "") {
 				return fmt.Errorf(
 					"policy-options policy-statement %q term %q then next-hop: invalid value %q: unsupported next-hop %q: %s",
 					name, term.Name, term.NextHop, term.NextHop, policyThenNextHopUnsupportedReason(term.NextHop))
 			}
-			for _, asn := range SplitPolicyASPathPrependOperands(term.ASPathPrepend) {
+			prependOperands := SplitPolicyASPathPrependOperands(term.ASPathPrepend)
+			if term.hasASPathPrependOperand12070 && len(prependOperands) == 0 {
+				return fmt.Errorf(
+					"policy-options policy-statement %q term %q then as-path-prepend: invalid value %q: AS path prepend value %q contains no ASN operands",
+					name, term.Name, "", "")
+			}
+			for _, asn := range prependOperands {
 				if !ValidPolicyASPathPrependASN(asn) {
 					return fmt.Errorf(
 						"policy-options policy-statement %q term %q then as-path-prepend: invalid value %q: AS path prepend value %q is not an ASN in 1..4294967295 (canonical decimal digits only)",
