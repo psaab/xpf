@@ -1461,7 +1461,7 @@ fi
 # #11343. The child selects a hermetic fixture despite a cluster wrapper:
 # this verdict must not claim that either cluster node produced it.
 wire_fixture="$WORK/wire-routing-fixture.tsv"
-printf 'probe_offered=1000 probe_leaked=0 precommit_control_offered=1500 precommit_control_observed=1500 near_miss_offered=1500 near_miss_observed=1500 cksum_bad=0\n' >"$wire_fixture"
+printf 'probe_offered=1000 probe_leaked=0 precommit_control_offered=1500 precommit_control_observed=1500 near_miss_offered=1500 near_miss_observed=1500 near_miss_tail_observed=99 cksum_bad=0\n' >"$wire_fixture"
 incus() { echo "$fake_sha  /proc/1234/exe"; }
 (harness_result_run --ledger "$LEDGER" --cluster --env testenv --gate wire_routing_separation \
 	--adapter wire-gate --node fake:fw0 --node-peer fake:fw1 --build-exe "$WORK/xpfd" \

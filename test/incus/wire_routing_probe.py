@@ -6,6 +6,7 @@ steering term is committed. After commit it offers the near-miss control (tag
 N) and probe (tag P) interleaved on one socket. The near miss follows the
 existing main-table route; only its destination port differs from the
 exact-match FBF-steered probe. The peer-side capture spans all three legs.
+The final control tail follows the full probe burst and marks liveness at window end.
 
 With WIRE_BROKEN_FIXTURE=1, the harness inserts a temporary explicit accept
 before the routing-instance term. That intentionally bypasses steering to the
@@ -24,6 +25,8 @@ import socket
 import sys
 import time
 
+INTERLEAVE_TAIL_FLOOR = 100
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -35,9 +38,13 @@ def main() -> int:
     ap.add_argument("--tag", required=True, choices=("C", "N", "P"))
     ap.add_argument("--rate", type=float, default=500.0)
     ap.add_argument("--interleave", action="store_true",
-                    help="interleave the control leg before each probe packet")
+                    help="interleave control before each probe, then send a control tail after")
     ap.add_argument("--interleave-control-port", type=int)
-    ap.add_argument("--interleave-control-count", type=int)
+    ap.add_argument(
+        "--interleave-control-count",
+        type=int,
+        help=f"must exceed --count by at least {INTERLEAVE_TAIL_FLOOR} for a post-probe tail",
+    )
     ap.add_argument("--interleave-control-tag", choices=("C", "N", "P"))
     args = ap.parse_args()
     control_args = (
@@ -57,7 +64,7 @@ def main() -> int:
         or (
             args.interleave
             and (
-                args.interleave_control_count <= 0
+                args.interleave_control_count < args.count + INTERLEAVE_TAIL_FLOOR
                 or not 1 <= args.interleave_control_port <= 65535
                 or args.interleave_control_tag == args.tag
             )
@@ -86,15 +93,27 @@ def main() -> int:
             sent[tag] += 1
 
         if args.interleave:
-            for seq in range(max(args.count, args.interleave_control_count)):
-                if seq < args.interleave_control_count:
-                    send(args.interleave_control_tag, seq, args.interleave_control_port)
-                    if interval:
-                        time.sleep(interval)
-                if seq < args.count:
-                    send(args.tag, seq, args.port)
-                    if interval:
-                        time.sleep(interval)
+            # The control tail follows every probe packet, so its observations
+            # prove liveness through the probe window without requiring one
+            # specific final datagram.
+            for seq in range(args.count):
+                send(args.interleave_control_tag, seq, args.interleave_control_port)
+                if interval:
+                    time.sleep(interval)
+                send(args.tag, seq, args.port)
+                if interval:
+                    time.sleep(interval)
+            for seq in range(args.count, args.interleave_control_count - 1):
+                send(args.interleave_control_tag, seq, args.interleave_control_port)
+                if interval:
+                    time.sleep(interval)
+            send(
+                args.interleave_control_tag,
+                args.interleave_control_count - 1,
+                args.interleave_control_port,
+            )
+            if interval:
+                time.sleep(interval)
         else:
             for seq in range(args.count):
                 send(args.tag, seq, args.port)

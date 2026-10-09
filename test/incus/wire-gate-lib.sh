@@ -129,6 +129,34 @@ wire_routing_separation_verdict() {
 		"$out" "$pco" "$pcb"
 	return "$rc"
 }
+# wire_routing_separation_window_verdict <late_near_miss_observed>
+#   <probe_offered> <probe_leaked> <precommit_control_offered>
+#   <precommit_control_observed> <cksum_bad> <near_miss_offered>
+#   <near_miss_observed>
+#
+# The sender reserves a tail segment of near-miss packets until after the
+# complete probe burst. Their peer-side observations prove liveness through
+# the window's end while tolerating loss of an individual final packet. Keep
+# public gate metrics unchanged; an empty tail makes an otherwise-PASS result
+# capture-blind.
+wire_routing_separation_window_verdict() {
+	local tail="${1:-}" po="${2:-}" pl="${3:-}" pco="${4:-}" pcb="${5:-}"
+	local ck="${6:-}" nmo="${7:-}" nmb="${8:-}" out rc
+	if ! wire_num "$tail"; then
+		printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=%s probe_leaked=%s control_offered=%s control_observed=%s cksum_bad=%s precommit_control_offered=%s precommit_control_observed=%s\n' \
+			"$po" "$pl" "$nmo" "$nmb" "$ck" "$pco" "$pcb"
+		return 2
+	fi
+	out="$(wire_routing_separation_verdict "$po" "$pl" "$pco" "$pcb" "$ck" "$nmo" "$nmb")"
+	rc=$?
+	if ((rc == 0)) && ((10#$tail == 0)); then
+		out="${out/WIRE_GATE wire_routing_separation PASS reason=--/WIRE_GATE wire_routing_separation VOID reason=capture-blind}"
+		rc=2
+	fi
+	printf '%s\n' "$out"
+	return "$rc"
+}
+
 #
 # The appmatch-twins verdict. LIVE-FINDING DEMOTION (see plan §16): the lab
 # lan->wan path drops 0-13% of UDP bursts variably (measured same-day,
