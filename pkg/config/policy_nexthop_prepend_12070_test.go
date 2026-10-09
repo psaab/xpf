@@ -16,8 +16,8 @@ import (
 // below commits green → RED until the gate lands.
 func TestPolicyThenNextHop_SchemaGate_12070(t *testing.T) {
 	base := "set policy-options policy-statement P term t1 "
-	bad := []string{"discard", "reject", "next-table", "10.0.0.300", "not-an-ip", "1.2.3", "2001:db8::garbage", "0.0.0.0", "::", "fe80::1", "ff02::1", "224.0.0.1"}
-	good := []string{"192.0.2.1", "10.0.0.1", "2001:db8::1", "peer-address", "self"}
+	bad := []string{"discard", "reject", "next-table", "10.0.0.300", "not-an-ip", "1.2.3", "2001:db8::garbage", "0.0.0.0", "0.1.2.3", "127.0.0.1", "::", "::1", "fe80::1", "ff02::1", "224.0.0.1"}
+	good := []string{"192.0.2.1", "10.0.0.1", "2001:db8::1", "169.254.1.1", "240.0.0.1", "255.255.255.255", "::ffff:192.0.2.1", "peer-address", "self"}
 
 	for _, v := range bad {
 		tree := flatTreeFromSets(t, base+"then next-hop "+v)
@@ -45,6 +45,7 @@ func TestPolicyThenASPathPrepend_SchemaGate_12070(t *testing.T) {
 		"then as-path-prepend 0",
 		"then as-path-prepend 4294967296",
 		"then as-path-prepend 65001.5",
+		"then as-path-prepend 1.10",
 		"then as-path-prepend [ 65001 abc ]",
 		"then as-path-prepend [ 65001 0 ]",
 		"then as-path-prepend 065001",

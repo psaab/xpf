@@ -138,11 +138,11 @@ type PolicyTerm struct {
 	// as the FRR route-map clause `set as-path prepend <asn> <asn> ...`
 	// (#2892). AS-path prepending is a fundamental inbound traffic-engineering
 	// knob — repeating the local ASN lengthens the advertised path so peers
-	// prefer a shorter alternate path. Junos accepts the ASNs as a quoted
-	// space-separated string ("65001 65001") or a bracketed list
-	// ([ 65001 65001 ]); both flatten to this slice, preserving order and
-	// repetition (the count of repeats is the whole point). Empty = no
-	// prepend clause is rendered.
+	// prefer a shorter alternate path. Junos accepts quoted
+	// space-separated ASNs ("65001 65001") or a bracketed list
+	// ([ 65001 65001 ]); the compiler normalizes both to one slice element
+	// per ASN, preserving order and repetition (the count of repeats is the
+	// whole point). Empty = no prepend clause is rendered.
 	ASPathPrepend []string
 	// NextPolicy skips the remaining terms and the policy default, then resumes
 	// at the next policy in the evaluated policy chain.

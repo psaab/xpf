@@ -243,23 +243,30 @@ func plausibleInterfaceName(s string) bool {
 }
 
 // ValidPolicyThenNextHop reports whether a routing-policy `then next-hop`
-// operand is in this renderer's supported subset: a usable IPv4/IPv6 unicast
-// literal, `peer-address`, or `self`. FRR rejects unspecified, link-local,
-// and multicast addresses for these route-map next-hop commands.
+// operand is an IPv4/IPv6 literal accepted by FRR's route-map command, or one
+// of its supported keywords (`peer-address`, `self`). It excludes IPv4 0/8,
+// unspecified, loopback, multicast, and IPv6 link-local addresses; IPv4
+// link-local literals remain supported.
 func ValidPolicyThenNextHop(raw string) bool {
 	switch raw {
 	case "peer-address", "self":
 		return true
 	default:
 		ip := net.ParseIP(raw)
-		return ip != nil && !ip.IsUnspecified() && !ip.IsLinkLocalUnicast() && !ip.IsMulticast()
+		if ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
+			return false
+		}
+		if v4 := ip.To4(); v4 != nil {
+			return v4[0] != 0
+		}
+		return !ip.IsLinkLocalUnicast()
 	}
 }
 
 // ValidatePolicyThenNextHop is the commit-check validator for
 // `policy-options policy-statement ... then next-hop`. The shared predicate
-// rejects Junos-only actions, malformed addresses, and unspecified,
-// link-local, or multicast literals that FRR's route-map grammar refuses.
+// rejects Junos-only actions, malformed addresses, IPv4 0/8, loopback,
+// unspecified, multicast, and IPv6 link-local literals.
 func ValidatePolicyThenNextHop(raw string, _ *Config) error {
 	if !ValidPolicyThenNextHop(raw) {
 		return fmt.Errorf("unsupported next-hop %q (expected an IPv4/IPv6 address, peer-address, or self; discard, reject, and next-table have no FRR route-map lowering)", raw)
@@ -296,10 +303,11 @@ func SplitPolicyASPathPrependOperands(values []string) []string {
 	return values
 }
 
-// ValidPolicyASPathPrependASN reports whether raw is one FRR AS number in
-// the non-reserved 1..2^32-1 range. Only canonical decimal digits are
-// accepted: signs, asdot notation, leading zeroes, whitespace, and
-// non-numeric tokens are outside FRR's grammar.
+// ValidPolicyASPathPrependASN reports whether raw is one canonical decimal
+// AS number in the non-reserved 1..2^32-1 range. This config leaf deliberately
+// narrows FRR's accepted grammar: FRR accepts asdot, but xpf supports decimal
+// notation only. Signs, leading zeroes, whitespace, and non-numeric tokens
+// are rejected.
 func ValidPolicyASPathPrependASN(raw string) bool {
 	if raw == "" || (len(raw) > 1 && raw[0] == '0') {
 		return false

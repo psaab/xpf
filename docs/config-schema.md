@@ -8649,16 +8649,18 @@ value. `parsePolicyTermChildren` and `parsePolicyTermInlineKeys`
 ordered operands in `PolicyTerm.ASPathPrepend []string`. The schema gate and
 renderer apply the same split before per-ASN validation/emission, keeping
 commit-check and tolerant rendering aligned. Each operand must be canonical
-decimal in 1..4294967295 (no leading zeroes). The clause renders as FRR
-`set as-path prepend <asn> <asn> ...`; repetition is the mechanism, so the
-complete ordered list is preserved. Fail-on-revert coverage is in
-`pkg/config/policy_nexthop_prepend_12070_test.go` and
+decimal in 1..4294967295 (no leading zeroes). FRR accepts ASDOT (for example,
+`1.10`), but this config leaf deliberately supports decimal notation only. The
+clause renders as FRR `set as-path prepend <asn> <asn> ...`; repetition is the
+mechanism, so the complete ordered list is preserved. Fail-on-revert coverage
+is in `pkg/config/policy_nexthop_prepend_12070_test.go` and
 `pkg/config/compiler_as_path_prepend_2892_test.go` (parse), and
 `pkg/frr/policy_nexthop_prepend_12070_test.go` plus
 `pkg/frr/policy_as_path_prepend_2892_test.go` (render).
 
-`then next-hop` (#12070) accepts only IPv4/IPv6 address literals that are not
-unspecified, link-local, or multicast, plus `peer-address` and `self`. Junos
+`then next-hop` (#12070) accepts IPv4/IPv6 address literals except unspecified
+and loopback addresses, IPv4 0/8, multicast, and IPv6 link-local, plus
+`peer-address` and `self`. IPv4 link-local addresses remain accepted. Junos
 `discard`, `reject`, and `next-table` have no supported FRR route-map lowering.
 The shared predicate is used by the schema gate and render-side omission belt.
 
