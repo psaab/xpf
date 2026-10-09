@@ -5,6 +5,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // ValidateBGPHoldTime accepts a BGP hold-time in seconds: 0, or 3..65535.
@@ -242,23 +243,23 @@ func plausibleInterfaceName(s string) bool {
 }
 
 // ValidPolicyThenNextHop reports whether a routing-policy `then next-hop`
-// operand is in this renderer's supported subset: an IPv4/IPv6 literal,
-// `peer-address`, or `self`. Junos also admits discard/reject/next-table, but
-// those actions have no faithful FRR lowering here and must not reach
-// `set ip next-hop <operand>`.
+// operand is in this renderer's supported subset: a usable IPv4/IPv6 unicast
+// literal, `peer-address`, or `self`. FRR rejects unspecified, link-local,
+// and multicast addresses for these route-map next-hop commands.
 func ValidPolicyThenNextHop(raw string) bool {
 	switch raw {
 	case "peer-address", "self":
 		return true
 	default:
-		return net.ParseIP(raw) != nil
+		ip := net.ParseIP(raw)
+		return ip != nil && !ip.IsUnspecified() && !ip.IsLinkLocalUnicast() && !ip.IsMulticast()
 	}
 }
 
 // ValidatePolicyThenNextHop is the commit-check validator for
-// `policy-options policy-statement ... then next-hop`. It deliberately rejects
-// Junos-only actions and malformed address literals because the FRR renderer
-// supports only IP addresses, `peer-address`, and the existing `self` lowering.
+// `policy-options policy-statement ... then next-hop`. The shared predicate
+// rejects Junos-only actions, malformed addresses, and unspecified,
+// link-local, or multicast literals that FRR's route-map grammar refuses.
 func ValidatePolicyThenNextHop(raw string, _ *Config) error {
 	if !ValidPolicyThenNextHop(raw) {
 		return fmt.Errorf("unsupported next-hop %q (expected an IPv4/IPv6 address, peer-address, or self; discard, reject, and next-table have no FRR route-map lowering)", raw)
@@ -266,12 +267,41 @@ func ValidatePolicyThenNextHop(raw string, _ *Config) error {
 	return nil
 }
 
+// appendPolicyASPathPrependOperand splits a quoted multi-ASN value before
+// appending it, but takes the allocation-free path for an ordinary ASN.
+func appendPolicyASPathPrependOperand(dst []string, value string) []string {
+	if strings.IndexFunc(value, unicode.IsSpace) < 0 {
+		return append(dst, value)
+	}
+	return append(dst, strings.Fields(value)...)
+}
+
+func appendPolicyASPathPrependOperands(dst, values []string) []string {
+	for _, value := range values {
+		dst = appendPolicyASPathPrependOperand(dst, value)
+	}
+	return dst
+}
+
+// SplitPolicyASPathPrependOperands normalizes the values carried by
+// `then as-path-prepend`. Junos permits one quoted space-separated value as
+// well as bracketed/repeated values; return the original slice when every
+// member is already one token, and split only when whitespace is present.
+func SplitPolicyASPathPrependOperands(values []string) []string {
+	for _, value := range values {
+		if strings.IndexFunc(value, unicode.IsSpace) >= 0 {
+			return appendPolicyASPathPrependOperands(nil, values)
+		}
+	}
+	return values
+}
+
 // ValidPolicyASPathPrependASN reports whether raw is one FRR AS number in
-// the non-reserved 1..2^32-1 range. Only decimal digits are accepted: signs,
-// asdot notation, whitespace, and non-numeric tokens are outside this leaf's
-// FRR `set as-path prepend ASNUM...` grammar.
+// the non-reserved 1..2^32-1 range. Only canonical decimal digits are
+// accepted: signs, asdot notation, leading zeroes, whitespace, and
+// non-numeric tokens are outside FRR's grammar.
 func ValidPolicyASPathPrependASN(raw string) bool {
-	if raw == "" {
+	if raw == "" || (len(raw) > 1 && raw[0] == '0') {
 		return false
 	}
 	for i := range raw {
@@ -284,10 +314,24 @@ func ValidPolicyASPathPrependASN(raw string) bool {
 }
 
 // ValidatePolicyASPathPrependASN is the commit-check validator for one
-// member of a multi-valued `then as-path-prepend` leaf.
+// member of a multi-valued `then as-path-prepend` leaf. A quoted Junos
+// value may contain multiple ASNs, so split it before applying the
+// single-operand validator.
 func ValidatePolicyASPathPrependASN(raw string, _ *Config) error {
-	if !ValidPolicyASPathPrependASN(raw) {
-		return fmt.Errorf("AS path prepend value %q is not an ASN in 1..4294967295 (decimal digits only)", raw)
+	if strings.IndexFunc(raw, unicode.IsSpace) < 0 {
+		if !ValidPolicyASPathPrependASN(raw) {
+			return fmt.Errorf("AS path prepend value %q is not an ASN in 1..4294967295 (canonical decimal digits only)", raw)
+		}
+		return nil
+	}
+	operands := strings.Fields(raw)
+	if len(operands) == 0 {
+		return fmt.Errorf("AS path prepend value %q contains no ASN operands", raw)
+	}
+	for _, operand := range operands {
+		if !ValidPolicyASPathPrependASN(operand) {
+			return fmt.Errorf("AS path prepend value %q is not an ASN in 1..4294967295 (canonical decimal digits only)", operand)
+		}
 	}
 	return nil
 }

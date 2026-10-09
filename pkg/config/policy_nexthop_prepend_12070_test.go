@@ -16,7 +16,7 @@ import (
 // below commits green → RED until the gate lands.
 func TestPolicyThenNextHop_SchemaGate_12070(t *testing.T) {
 	base := "set policy-options policy-statement P term t1 "
-	bad := []string{"discard", "reject", "next-table", "10.0.0.300", "not-an-ip", "1.2.3", "2001:db8::garbage"}
+	bad := []string{"discard", "reject", "next-table", "10.0.0.300", "not-an-ip", "1.2.3", "2001:db8::garbage", "0.0.0.0", "::", "fe80::1", "ff02::1", "224.0.0.1"}
 	good := []string{"192.0.2.1", "10.0.0.1", "2001:db8::1", "peer-address", "self"}
 
 	for _, v := range bad {
@@ -47,6 +47,10 @@ func TestPolicyThenASPathPrepend_SchemaGate_12070(t *testing.T) {
 		"then as-path-prepend 65001.5",
 		"then as-path-prepend [ 65001 abc ]",
 		"then as-path-prepend [ 65001 0 ]",
+		"then as-path-prepend 065001",
+		"then as-path-prepend 00001",
+		"then as-path-prepend [ 65001 065001 ]",
+		"then as-path-prepend [ 65001 00001 ]",
 	}
 	good := []string{
 		"then as-path-prepend 1",
@@ -105,5 +109,54 @@ func TestPolicyThenNextHopPrepend_ValidCompiles_12070(t *testing.T) {
 	})
 	if _, err := CompileConfig(tree); err != nil {
 		t.Fatalf("CompileConfig rejected valid operands: %v", err)
+	}
+}
+
+func TestPolicyThenASPathPrepend_QuotedMultiASN_12070(t *testing.T) {
+	text := `policy-options {
+    policy-statement P {
+        term t1 {
+            from { protocol bgp; }
+            then {
+                as-path-prepend "65001 65001";
+                accept;
+            }
+        }
+    }
+}`
+	tree, parseErrs := NewParser(text).Parse()
+	if len(parseErrs) > 0 {
+		t.Fatalf("parse: %v", parseErrs)
+	}
+	if err := SchemaValidate(tree, nil); err != nil {
+		t.Fatalf("SchemaValidate rejected the documented quoted multi-ASN form: %v", err)
+	}
+	compiled, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("CompileConfig rejected the documented quoted multi-ASN form: %v", err)
+	}
+	wantASNs(t, "quoted ASPathPrepend", compiled.PolicyOptions.PolicyStatements["P"].Terms[0].ASPathPrepend, []string{"65001", "65001"})
+}
+
+func TestPolicyThenASPathPrepend_BlockChildChecksEveryOperand_12070(t *testing.T) {
+	text := `policy-options {
+    policy-statement P {
+        term t1 {
+            then {
+                as-path-prepend {
+                    65001 bad;
+                }
+                accept;
+            }
+        }
+    }
+}`
+	tree, parseErrs := NewParser(text).Parse()
+	if len(parseErrs) > 0 {
+		t.Fatalf("parse: %v", parseErrs)
+	}
+	err := SchemaValidate(tree, nil)
+	if err == nil || !strings.Contains(err.Error(), "bad") {
+		t.Fatalf("SchemaValidate error = %v, want rejection naming second compiler-consumed operand %q", err, "bad")
 	}
 }

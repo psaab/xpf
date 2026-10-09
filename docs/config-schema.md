@@ -8641,17 +8641,26 @@ The policy-statement ACTION `then as-path-prepend "<asn> <asn> ..."` (#2892) is
 the same class on the `then` side. The leaf is `multi:true`
 (`schema_routing.go`: `policy-options policy-statement <name> term <name> then
 as-path-prepend`) so a quoted `"65001 65001"` or bracketed `[ 65001 65001 ]`
-list — the lexer strips quotes and brackets alike — flattens onto the node's
-`Keys`/`Children` rather than collapsing to last-only. `parsePolicyTermChildren`
-and `parsePolicyTermInlineKeys` (`compiler_routing.go`) read EVERY ASN via
-`firewallMatchValues` (reading only `Keys[1]` would drop all but the first
-prepend — and dropping the repeats defeats the AS-path-prepend mechanism, which
-is exactly the repetition). The ordered list lands in `PolicyTerm.ASPathPrepend
-[]string` and renders as the FRR `set as-path prepend <asn> <asn> ...` clause
-(`policy_render.go`). Fail-on-revert covered by `TestASPathPrepend_*` in
-`pkg/config/compiler_as_path_prepend_2892_test.go` (parse) and
-`TestGeneratePolicyOptions_ASPathPrepend` in
+list — the lexer preserves a quoted list as one space-containing value and
+strips brackets — retains every ASN rather than collapsing to the last-only
+value. `parsePolicyTermChildren` and `parsePolicyTermInlineKeys`
+(`compiler_routing.go`) collect every packed/child value via
+`firewallMatchValues`, then split quoted multi-ASN values before storing the
+ordered operands in `PolicyTerm.ASPathPrepend []string`. The schema gate and
+renderer apply the same split before per-ASN validation/emission, keeping
+commit-check and tolerant rendering aligned. Each operand must be canonical
+decimal in 1..4294967295 (no leading zeroes). The clause renders as FRR
+`set as-path prepend <asn> <asn> ...`; repetition is the mechanism, so the
+complete ordered list is preserved. Fail-on-revert coverage is in
+`pkg/config/policy_nexthop_prepend_12070_test.go` and
+`pkg/config/compiler_as_path_prepend_2892_test.go` (parse), and
+`pkg/frr/policy_nexthop_prepend_12070_test.go` plus
 `pkg/frr/policy_as_path_prepend_2892_test.go` (render).
+
+`then next-hop` (#12070) accepts only IPv4/IPv6 address literals that are not
+unspecified, link-local, or multicast, plus `peer-address` and `self`. Junos
+`discard`, `reject`, and `next-table` have no supported FRR route-map lowering.
+The shared predicate is used by the schema gate and render-side omission belt.
 
 ### The as-path REGEX is the whole token tail, and it is validated (#6686)
 

@@ -69,8 +69,9 @@ func TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823(t *t
 					},
 					{
 						Name: "t2",
-						// set as-path prepend — injection with a legitimate
-						// space between ASNs that must survive.
+						// set as-path prepend injection: the embedded newline
+						// makes an ASN invalid, so #12070 omits the whole clause
+						// rather than sanitizing it into a bad FRR command.
 						ASPathPrepend: []string{"65001\n router bgp 65000", "65001"},
 						Action:        "accept",
 					},
@@ -144,12 +145,16 @@ func TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823(t *t
 		want string
 	}{
 		{"match source-protocol", " match source-protocol bgp  router bgp 65000\n"},
-		{"set as-path prepend", " set as-path prepend 65001  router bgp 65000 65001\n"},
 		// #9493: the three NAME slots (match community, match as-path, set
 		// comm-list) render through frrName, not sanitizeFRRValue, and are
 		// asserted below. Collapsing a name onto one line still split it into
 		// extra FRR arguments, so FRR rejected the line; frrName renders it as
 		// one token.
+		// NOTE: `set as-path prepend` moved OUT of this sanitize-onto-one-line
+		// list by #12070. The injected token makes one ASN invalid, so the
+		// render belt now omits the entire clause rather than sanitizing it
+		// onto a syntactically invalid FRR line. The negative assertion below
+		// pins that omission.
 		// NOTE: `set origin` moved OUT of this sanitize-onto-one-line list by
 		// #4919. The origin slot is now fail-closed by the validBGPOrigin
 		// render belt (only igp | egp | incomplete render), so the injection

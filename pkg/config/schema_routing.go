@@ -275,7 +275,8 @@ var schemaPolicyOptions = &schemaNode{desc: "Policy options", children: map[stri
 					desc: "AS path prepend", args: 1, multi: true, groupReplace: true,
 					valueType: ValueInteger, valueDesc: "ASN (1..4294967295; decimal digits)",
 					valueExamples: []string{"65001", "4294967295"},
-					validator:     ValidatePolicyASPathPrependASN, placeholder: "<asn>", children: nil,
+					validator:     ValidatePolicyASPathPrependASN, placeholder: "<asn>",
+					allChildKeysAreValues: true, children: nil,
 				},
 				// #4919: type `then origin` as an enum. Without a validator a
 				// non-control invalid token (e.g. `igpp`) passed the #4498

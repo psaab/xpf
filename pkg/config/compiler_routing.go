@@ -1585,13 +1585,10 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 					// the SSOT and interpret the operation (#2848).
 					applyCommunityAction(term, firewallMatchValues(ac))
 				case "as-path-prepend":
-					// `then as-path-prepend` is a multi-value leaf: a quoted
-					// "65001 65001" or bracketed [ 65001 65001 ] list flattens
-					// onto ac.Keys[1:] and/or ac.Children. Read EVERY ASN via
-					// the firewallMatchValues SSOT (reading only Keys[1] would
-					// drop all but the first prepend, the #2419/#2892 trap) and
-					// accumulate so repeated set lines also keep every ASN.
-					term.ASPathPrepend = append(term.ASPathPrepend, firewallMatchValues(ac)...)
+					// `then as-path-prepend` is multi-value. Read every entry
+					// through the firewallMatchValues SSOT, then split quoted
+					// multi-ASN values before storing the operands (#2892/#12070).
+					term.ASPathPrepend = appendPolicyASPathPrependOperands(term.ASPathPrepend, firewallMatchValues(ac))
 				case "origin":
 					term.Origin = nodeVal(ac)
 				}
@@ -1927,13 +1924,11 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				markMalformedPolicyFromList11779(term, "as-path", badClause)
 			}
 		case "as-path-prepend":
-			// `then as-path-prepend 65001 65001 ...` — the lexer strips any
-			// quotes/brackets, so every ASN arrives as a separate key.
-			// Consume all consecutive values until the next clause keyword so
-			// a multi-ASN list keeps every ASN, not just the first (#2892).
+			// Consume consecutive values until the next clause keyword,
+			// splitting quoted multi-ASN values before storing each operand.
 			for i+1 < len(keys) && !policyTermInlineKeywords[keys[i+1]] {
 				i++
-				term.ASPathPrepend = append(term.ASPathPrepend, keys[i])
+				term.ASPathPrepend = appendPolicyASPathPrependOperand(term.ASPathPrepend, keys[i])
 			}
 		case "origin":
 			if i+1 < len(keys) {

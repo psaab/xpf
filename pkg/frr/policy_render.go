@@ -954,15 +954,16 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			// order (repetition is the mechanism) on a single clause; skip
 			// entirely when no ASNs were configured.
 			if len(term.ASPathPrepend) > 0 {
-				valid := true
-				for _, asn := range term.ASPathPrepend {
+				values := config.SplitPolicyASPathPrependOperands(term.ASPathPrepend)
+				valid := len(values) > 0
+				for _, asn := range values {
 					if !config.ValidPolicyASPathPrependASN(asn) {
 						valid = false
 						break
 					}
 				}
 				if valid {
-					fmt.Fprintf(&b, " set as-path prepend %s\n", sanitizeFRRValue(strings.Join(term.ASPathPrepend, " ")))
+					fmt.Fprintf(&b, " set as-path prepend %s\n", sanitizeFRRValue(strings.Join(values, " ")))
 				} else {
 					slog.Warn("frr: omitting invalid then as-path-prepend value",
 						"route_map", routeMapName, "term", term.Name,
