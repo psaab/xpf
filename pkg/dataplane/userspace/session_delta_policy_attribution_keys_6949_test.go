@@ -286,8 +286,8 @@ func structBody(t *testing.T, path, opener string) string {
 
 func TestSessionDeltaSourceNatProvenanceJSON12187(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		provenance uint8
+		name        string
+		provenance  uint8
 		wantPresent bool
 	}{
 		{name: "unknown omitted", provenance: 0, wantPresent: false},

@@ -132,8 +132,8 @@ type SessionSyncRequest struct {
 	// SourceNatProvenance carries the source-NAT allocation provenance (#12187):
 	// 0 unknown/legacy (omitted), 1 dynamic SNAT, 2 static SNAT.
 	SourceNatProvenance uint8 `json:"source_nat_provenance,omitempty"`
-	FabricIngress      bool  `json:"fabric_ingress,omitempty"`
-	IsReverse          bool  `json:"is_reverse,omitempty"`
+	FabricIngress       bool  `json:"fabric_ingress,omitempty"`
+	IsReverse           bool  `json:"is_reverse,omitempty"`
 	// #2785: the admitting policy's per-policy `then log` selection, carried
 	// so a session synced to the peer logs the same RT_FLOW
 	// SESSION_CREATE/CLOSE records after failover. omitempty is safe — an old
@@ -352,8 +352,8 @@ type SessionDeltaInfo struct {
 	// (0 unknown/legacy, 1 dynamic SNAT, 2 static SNAT), mirrored on both
 	// delta transports. Missing/zero from an older helper remains unknown.
 	SourceNatProvenance uint8 `json:"source_nat_provenance,omitempty"`
-	FabricRedirect     bool  `json:"fabric_redirect,omitempty"`
-	FabricIngress      bool  `json:"fabric_ingress,omitempty"`
+	FabricRedirect      bool  `json:"fabric_redirect,omitempty"`
+	FabricIngress       bool  `json:"fabric_ingress,omitempty"`
 	// #2785: the admitting policy's per-policy `then log` selection. Decoded
 	// from the binary open-frame flags byte (bits 1<<3/1<<4) AND mirrored on
 	// the JSON RPC-fallback delta; stamped onto the synced session's

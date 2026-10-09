@@ -1317,8 +1317,8 @@ const (
 	SessFlagDNAT          = 1 << 1
 	SessFlagStaticNAT     = 1 << 6
 	SessFlagNAT64         = 1 << 7
-	SessFlagNPTV6         = 1 << 8  // bit 8 -- requires uint16 Flags
-	SessFlagClusterSynced = 1 << 9  // #10227 peer-synced origin marker
+	SessFlagNPTV6         = 1 << 8 // bit 8 -- requires uint16 Flags
+	SessFlagClusterSynced = 1 << 9 // #10227 peer-synced origin marker
 	// SessFlagSNATProvenanceKnown is bit 10 (#12187): the known-provenance
 	// marker for the source-NAT provenance carried in Flags. With the marker
 	// set, SessFlagStaticNAT (bit 6) says static (2) when set and dynamic
