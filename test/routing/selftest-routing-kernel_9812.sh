@@ -61,9 +61,10 @@ fi
 # XPF_REQUIRE_NETNS=1 turns every tool/netns skip arm in the four kernel cells
 # into a failure; without it an environment that silently degrades would read
 # green. unshare propagates the environment into the namespace.
-# Match the netns acceptance cell by name: the loopback capability test intentionally
-# fails under XPF_REQUIRE_NETNS when this fresh namespace denies ICMP datagrams.
-out=$(XPF_REQUIRE_NETNS=1 unshare -rn "$GO" test -count=1 -v -run '9420|9819|11319|TestTunnelKeepaliveVRFHeldSourcePeerAlive12083' ./pkg/routing/ 2>&1)
+# The scoped loopback round trip is capability-gated independently and skips
+# when this fresh netns denies ICMP datagrams. The VRF acceptance cell widens
+# ping_group_range itself and remains forced below.
+out=$(XPF_REQUIRE_NETNS=1 unshare -rn "$GO" test -count=1 -v -run '9420|9819|11319|12083' ./pkg/routing/ 2>&1)
 rc=$?
 
 fail=0

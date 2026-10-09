@@ -41,6 +41,7 @@ func runnerFor(tm *tunnelManager, name string) (*keepaliveRunner, bool) {
 // survives commits); removing keepalive STOPS it. ---
 func TestAnchorKeepaliveStartsRunnerLifecycle(t *testing.T) {
 	ops := newFakeLinkOps()
+	seedVRF(ops, "ka12083", 100)
 	// A pre-existing reusable anchor TUN → reuse-in-place (no recreate),
 	// so the runner is started purely by the keepalive reconcile.
 	seedAnchor(ops, "gr-0-0-0", 10, 1500)
@@ -51,6 +52,7 @@ func TestAnchorKeepaliveStartsRunnerLifecycle(t *testing.T) {
 	tm.prober = &fakeProber{results: []probeOutcome{{result: ProbeAlive, kind: UnsupportedNone}}}
 
 	tc := anchorKATC("gr-0-0-0", 60, 3)
+	tc.RoutingInstance = "ka12083"
 
 	// Apply 1: keepalive configured → a runner is started (RED on revert:
 	// the old applyAnchorLocked stopped it → this map entry is absent).
@@ -62,9 +64,9 @@ func TestAnchorKeepaliveStartsRunnerLifecycle(t *testing.T) {
 		t.Fatal("anchor path must START a keepalive runner when keepalive is configured (accepted-but-inert regression, #4071)")
 	}
 	if r1.remote != "203.0.113.1" || r1.source != "198.51.100.1" ||
-		r1.interval != 60 || r1.maxRetries != 3 {
-		t.Fatalf("runner identity mismatch: remote=%q source=%q interval=%d retries=%d",
-			r1.remote, r1.source, r1.interval, r1.maxRetries)
+		r1.transportInstance != "ka12083" || r1.interval != 60 || r1.maxRetries != 3 {
+		t.Fatalf("runner identity mismatch: remote=%q source=%q instance=%q interval=%d retries=%d",
+			r1.remote, r1.source, r1.transportInstance, r1.interval, r1.maxRetries)
 	}
 
 	// Apply 2: identical config → the SAME runner object is retained (a

@@ -450,15 +450,15 @@ func TestKeepaliveSourceBindAndMatches(t *testing.T) {
 		interval:          5,
 		maxRetries:        3,
 	}
-	same := &config.TunnelConfig{Destination: "203.0.113.1", Source: "198.51.100.1", RoutingInstance: "ka12083", Keepalive: 5, KeepaliveRetry: 3}
+	same := &config.TunnelConfig{Destination: "203.0.113.1", Source: "198.51.100.1", RoutingInstance: "ka12083", AnchorOnly: true, Keepalive: 5, KeepaliveRetry: 3}
 	if !r.matches(same) {
 		t.Fatal("matches must be true when identity unchanged")
 	}
-	srcChanged := &config.TunnelConfig{Destination: "203.0.113.1", Source: "192.0.2.9", RoutingInstance: "ka12083", Keepalive: 5, KeepaliveRetry: 3}
+	srcChanged := &config.TunnelConfig{Destination: "203.0.113.1", Source: "192.0.2.9", RoutingInstance: "ka12083", AnchorOnly: true, Keepalive: 5, KeepaliveRetry: 3}
 	if r.matches(srcChanged) {
 		t.Fatal("matches must be false when only the source changed (§5c)")
 	}
-	instanceChanged := &config.TunnelConfig{Destination: "203.0.113.1", Source: "198.51.100.1", RoutingInstance: "other", Keepalive: 5, KeepaliveRetry: 3}
+	instanceChanged := &config.TunnelConfig{Destination: "203.0.113.1", Source: "198.51.100.1", RoutingInstance: "other", AnchorOnly: true, Keepalive: 5, KeepaliveRetry: 3}
 	if r.matches(instanceChanged) {
 		t.Fatal("matches must be false when transport instance changes")
 	}

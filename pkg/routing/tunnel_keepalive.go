@@ -65,9 +65,12 @@ const (
 // source is the tunnel's local endpoint IP (TunnelConfig.Source) bound
 // as the ICMP listen address (§5c) so the echo egresses from the tunnel
 // endpoint; "" → wildcard bind. dst is the underlay Destination, routed
-// in the transport instance's FIB exactly like the tunnel's encapsulated
-// traffic. A non-empty transport instance binds the socket to its VRF
-// device (`vrf-<instance>`), not the overlay interface's VRF.
+// in the FIB used by the tunnel's outer traffic. On the userspace-anchor
+// path, transportInstance selects that FIB; the legacy kernel GRE/IPIP
+// path passes "" because its outer lookup uses the main FIB when no
+// lower link is configured, even if tc.RoutingInstance VRF-binds the
+// tunnel interface. A non-empty transport instance binds the socket to
+// its VRF device (`vrf-<instance>`).
 // seq + nonce uniquely key the reply to THIS probe (§5a — NOT the ICMP ID,
 // which datagram sockets rewrite to the socket source port).
 // The reason return is a short human-readable detail for a

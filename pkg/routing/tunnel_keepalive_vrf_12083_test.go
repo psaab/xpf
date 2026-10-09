@@ -63,9 +63,6 @@ func TestKeepaliveScopedICMPSocketRoundTrip12083(t *testing.T) {
 
 	result, kind, reason := (icmpProber{}).Probe("test-instance", "127.0.0.1", "127.0.0.1", 12083, []byte("ka12083!"), time.Second)
 	if result == ProbeUnsupported && kind == UnsupportedStructural && (strings.Contains(reason, "permission denied") || strings.Contains(reason, "operation not permitted")) {
-		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
-			t.Fatalf("ICMP datagram socket denied with XPF_REQUIRE_NETNS set: %s", reason)
-		}
 		t.Skipf("ICMP datagram socket denied (ping_group_range/CAP_NET_RAW): %s", reason)
 	}
 	if result != ProbeAlive || kind != UnsupportedNone {

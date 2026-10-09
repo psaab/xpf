@@ -791,6 +791,11 @@ func legacyTunnelMatches(existing, desired netlink.Link) bool {
 // path (the daemon always sets AnchorOnly). Compare-then-decide:
 // identical config-driven attrs reuse the device in place; any real
 // change is a legitimate delete+recreate. Caller MUST hold mu.
+// The legacy kernel GRE/IPIP device's lower-link selector is unset
+// (`buildKernelTunnelLink` leaves `Link` zero), so its outer route
+// lookup uses the main FIB. `tc.RoutingInstance` only VRF-binds the
+// tunnel interface; keepalive probes on this path pass an empty
+// transport instance to match the kernel's outer lookup.
 //
 // #5355: returns a non-nil error on a GENUINE reconcile failure (the
 // replace LinkDel, the create LinkAdd, or the finishTunnelLocked
@@ -875,7 +880,7 @@ func (t *tunnelManager) applyKernelTunnelLocked(tc *config.TunnelConfig) error {
 				// recreated — the restarted runner captures the just-bumped
 				// generation and probes the same device.
 				if tc.Keepalive > 0 {
-					t.startKeepalive(tc.Name, tc.RoutingInstance, tc.Source, tc.Destination, tc.Keepalive, tc.KeepaliveRetry)
+					t.startKeepalive(tc.Name, "", tc.Source, tc.Destination, tc.Keepalive, tc.KeepaliveRetry)
 				}
 				return fmt.Errorf("replace tunnel %s: %w", tc.Name, delErr)
 			}
@@ -955,7 +960,7 @@ func (t *tunnelManager) applyKernelTunnelLocked(tc *config.TunnelConfig) error {
 			// startKeepalive stops+drains any predecessor itself;
 			// runs AFTER a recreate so the fresh runner probes the
 			// new device. tc.Source is the bind endpoint (#1918 §5c).
-			t.startKeepalive(tc.Name, tc.RoutingInstance, tc.Source, tc.Destination, tc.Keepalive, tc.KeepaliveRetry)
+			t.startKeepalive(tc.Name, "", tc.Source, tc.Destination, tc.Keepalive, tc.KeepaliveRetry)
 		}
 	} else if hasRunner {
 		t.stopKeepaliveLocked(tc.Name)

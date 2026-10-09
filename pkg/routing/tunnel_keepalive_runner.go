@@ -79,16 +79,23 @@ type keepaliveRunner struct {
 // NORMALIZED keepalive parameters. KeepaliveRetry <= 0 normalizes to 3
 // BEFORE comparison (#1884 r1 Codex F5: comparing a raw config 0
 // against the stored default 3 would restart the runner every apply).
-// The tunnel SOURCE and transport instance are part of the identity:
-// either change restarts the runner so the probe follows the new endpoint/path.
+// The tunnel SOURCE and effective transport instance are part of the
+// identity: either change restarts the runner so the probe follows the
+// new endpoint/path. Legacy kernel tunnels use the main FIB for outer
+// traffic, so their configured interface VRF does not select the probe's
+// transport instance.
 func (r *keepaliveRunner) matches(tc *config.TunnelConfig) bool {
 	retries := tc.KeepaliveRetry
 	if retries <= 0 {
 		retries = 3
 	}
+	transportInstance := tc.RoutingInstance
+	if !tc.AnchorOnly {
+		transportInstance = ""
+	}
 	return r.remote == tc.Destination &&
 		r.source == tc.Source &&
-		r.transportInstance == tc.RoutingInstance &&
+		r.transportInstance == transportInstance &&
 		r.interval == tc.Keepalive &&
 		r.maxRetries == retries
 }
