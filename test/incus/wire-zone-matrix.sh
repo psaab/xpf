@@ -5,7 +5,8 @@
 # dmz=the managed VLAN-50 prober on the loss userspace cluster, then measures
 # all six ordered pairs under default-deny and all six again under
 # default-permit. Each pair has its own control port (55100-55105) and a probe
-# (55001); probes alternate 64-byte and 1400-byte payloads.
+# (55001); deny windows offer all six controls alongside the probe, while the
+# permit windows offer only their expected control. Probes alternate 64/1400 B.
 # Peer-side tcpdump is the oracle. A one/two-zone shortcut is refused.
 #
 # Usage:
@@ -46,6 +47,88 @@ matrix_keys=(
     permit:dmz-'>'trust permit:untrust-'>'dmz permit:dmz-'>'untrust
 )
 
+capture_start() {
+    local dst="$1" dst_addr="$2" port_filter="$3"
+    CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-zone-cap.XXXXXX")"
+    $SG "incus exec ${INCUS_REMOTE}:${dst} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -tt -vv -s 0 udp and dst host ${dst_addr} and '(' ${port_filter} ')'" >"$CAPLOG" 2>&1 &
+    CAP_PID=$!
+    sleep 2
+}
+capture_stop() {
+    local dst="$1"
+    $SG "incus exec ${INCUS_REMOTE}:${dst} -- pkill -f '[t]cpdump.*${PROBE_PORT}'" >/dev/null 2>&1 || true
+    kill "$CAP_PID" >/dev/null 2>&1 || true
+    wait "$CAP_PID" >/dev/null 2>&1 || true
+    CAP_PID=""
+}
+count_len() {
+    local port="$1" size="$2" out
+    out="$(grep -cE "\\.${port}:.*length ${size}([,[:space:]]|$)" "$CAPLOG" 2>/dev/null || true)"
+    [[ "$out" =~ ^[0-9]+$ ]] || out=0
+    printf '%s' "$out"
+}
+# measure_cell <source-index> <destination-index> <mode> <count> <pair-index>
+measure_cell() {
+    local si="$1" di="$2" mode="$3" count="$4" pair_index="$5"
+    local src="${HOSTS[$si]}" dst="${HOSTS[$di]}" dst_addr="${ADDRS[$di]}"
+    local control_port="${CONTROL_PORTS[$pair_index]}" sent legpart totalp=0 totalc=0
+    local item port value i port_filter="dst port ${PROBE_PORT}" legs="--leg ${PROBE_PORT}:${count}" checksum
+    local observed64 observed1400
+    if [[ "$mode" == deny ]]; then
+        for port in "${CONTROL_PORTS[@]}"; do
+            port_filter+=" or dst port ${port}"
+            legs+=" --leg ${port}:${count}"
+        done
+    else
+        port_filter+=" or dst port ${control_port}"
+        legs+=" --leg ${control_port}:${count}"
+    fi
+    capture_start "$dst" "$dst_addr" "$port_filter"
+    sent="$($SG "incus exec ${INCUS_REMOTE}:${src} -- timeout ${STEP_TIMEOUT} python3 ${REMOTE_PROBE} --dst ${dst_addr} ${legs} --sizes 64,1400 --rate ${RATE}" 2>&1 || true)"
+    sleep 2
+    capture_stop "$dst"
+    legpart="${sent##*$'\n'}"
+    legpart="${legpart#SENT legs=}"
+    IFS=',' read -ra _legs <<<"$legpart"
+    for item in "${_legs[@]}"; do
+        port="${item%%=*}"; value="${item#*=}"
+        [[ "$value" =~ ^[0-9]+$ ]] || value=0
+        [[ "$port" == "$PROBE_PORT" ]] && totalp="$value"
+        [[ "$port" == "$control_port" ]] && totalc="$value"
+    done
+    CELL_P64O=$(( (totalp + 1) / 2 )); CELL_P1400O=$(( totalp / 2 ))
+    CELL_C64O=$(( (totalc + 1) / 2 )); CELL_C1400O=$(( totalc / 2 ))
+    CELL_P64B="$(count_len "$PROBE_PORT" 64)"; CELL_P1400B="$(count_len "$PROBE_PORT" 1400)"
+    CELL_CONTROL_IDENTITY_MASK=0
+    if [[ "$mode" == deny ]]; then
+        # All six pair-specific controls share the probe's capture window.
+        # Only the expected leg contributes expected-control counts; every
+        # observed port contributes its identity bit for exact-mask verdicting.
+        for ((i = 0; i < ${#CONTROL_PORTS[@]}; i++)); do
+            port="${CONTROL_PORTS[$i]}"
+            observed64="$(count_len "$port" 64)"
+            observed1400="$(count_len "$port" 1400)"
+            value=$((observed64 + observed1400))
+            if ((value > 0)); then
+                CELL_CONTROL_IDENTITY_MASK=$((CELL_CONTROL_IDENTITY_MASK | (1 << i)))
+            fi
+            if ((i == pair_index)); then
+                CELL_C64B="$observed64"; CELL_C1400B="$observed1400"
+            fi
+        done
+    else
+        CELL_C64B="$(count_len "$control_port" 64)"
+        CELL_C1400B="$(count_len "$control_port" 1400)"
+        if ((CELL_C64B + CELL_C1400B > 0)); then
+            CELL_CONTROL_IDENTITY_MASK=$((1 << pair_index))
+        fi
+    fi
+    checksum="$(grep -ciE 'bad (udp )?(cksum|checksum)' "$CAPLOG" 2>/dev/null || true)"
+    [[ "$checksum" =~ ^[0-9]+$ ]] || checksum=0
+    CELL_CK="$checksum"
+    echo "cell ${mode} src=${src} dst=${dst} sent=${totalp}/${totalc} observed=${CELL_P64B}/${CELL_P1400B}/${CELL_C64B}/${CELL_C1400B} control_identity_mask=${CELL_CONTROL_IDENTITY_MASK}"
+    rm -f "$CAPLOG"; CAPLOG=""
+}
 if [[ "$MODE" == selftest ]]; then
     pass=0
     fail=0
@@ -74,6 +157,115 @@ if [[ "$MODE" == selftest ]]; then
             echo "  FAIL  $label (got '$out' rc=$rc)"; fail=$((fail + 1))
         fi
     }
+    # Exercise the live measurement function with stubbed capture/prober
+    # output. The three verdicts cover same-window healthy, misattributed,
+    # and capture-blind deny cells without an Incus dependency.
+    matrix_fake_sg() {
+        local cmd="$1" port size n window rest count
+        local -a legs=()
+        if [[ "$cmd" == *tcpdump* ]]; then
+            printf x >>"$MATRIX_STUB_WINDOWS_FILE"
+            window=$(wc -c <"$MATRIX_STUB_WINDOWS_FILE")
+            printf '%s\n' "$cmd" >"$MATRIX_STUB_FILTER_FILE"
+            case "$MATRIX_STUB_CAPTURE" in
+            healthy) port="${CONTROL_PORTS[2]}" ;;
+            blind)
+                ((window == 1)) && return 0
+                port="${CONTROL_PORTS[2]}"
+                ;;
+            swap)
+                if [[ "$cmd" == *"dst port ${CONTROL_PORTS[3]}"* ]] || ((window > 1)); then
+                    port="${CONTROL_PORTS[3]}"
+                else
+                    return 0
+                fi
+                ;;
+            esac
+            for size in 64 1400; do
+                for ((n = 0; n < 1100; n++)); do
+                    printf '00:00:00.000000 IP 10.0.0.1.40000 > 10.0.0.2.%s: UDP, length %s\n' "$port" "$size"
+                done
+            done
+            return 0
+        fi
+        if [[ "$cmd" == *python3* ]]; then
+            rest="$cmd"
+            while [[ "$rest" =~ --leg[[:space:]]([0-9]+):([0-9]+) ]]; do
+                port="${BASH_REMATCH[1]}"; count="${BASH_REMATCH[2]}"
+                legs+=("${port}=${count}")
+                rest="${rest#*--leg ${port}:${count}}"
+            done
+            printf '%s\n' "${#legs[@]}" >>"$MATRIX_STUB_LEGS_FILE"
+            local IFS=,
+            printf 'SENT legs=%s\n' "${legs[*]}"
+        fi
+        return 0
+    }
+    # capture_start's sleep waits for the fake tcpdump process to finish
+    # writing the capture, avoiding timing-dependent tests; later sleeps are
+    # skipped because capture_stop clears CAP_PID.
+    sleep() {
+        [[ -n "${CAP_PID:-}" ]] && wait "$CAP_PID" >/dev/null 2>&1 || true
+    }
+    matrix_measure_case() {
+        local scenario="$1" out rc ok=1 offset=20 port filter stub_window stub_legs
+        MATRIX_STUB_CAPTURE="$scenario"
+        MATRIX_STUB_WINDOWS_FILE="$(mktemp "${TMPDIR:-/tmp}/wire-zone-windows.XXXXXX")"
+        MATRIX_STUB_LEGS_FILE="$(mktemp "${TMPDIR:-/tmp}/wire-zone-legs.XXXXXX")"
+        MATRIX_STUB_FILTER_FILE="$(mktemp "${TMPDIR:-/tmp}/wire-zone-filter.XXXXXX")"
+        CAP_PID=""; CAPLOG=""
+        measure_cell 0 2 deny 2200 2 >/dev/null
+        stub_window="$(wc -c <"$MATRIX_STUB_WINDOWS_FILE")"
+        stub_legs=0
+        while IFS= read -r port; do stub_legs="$port"; done <"$MATRIX_STUB_LEGS_FILE"
+        filter="$(cat "$MATRIX_STUB_FILTER_FILE")"
+        ((stub_window == 1 && stub_legs == 7)) || ok=0
+        for port in "${CONTROL_PORTS[@]}"; do
+            [[ "$filter" == *"dst port ${port}"* ]] || ok=0
+        done
+        matrix_make_good
+        MATRIX[offset + 1]="$CELL_CONTROL_IDENTITY_MASK"
+        MATRIX[offset + 2]="$CELL_P64O"; MATRIX[offset + 3]="$CELL_P64B"
+        MATRIX[offset + 4]="$CELL_P1400O"; MATRIX[offset + 5]="$CELL_P1400B"
+        MATRIX[offset + 6]="$CELL_C64O"; MATRIX[offset + 7]="$CELL_C64B"
+        MATRIX[offset + 8]="$CELL_C1400O"; MATRIX[offset + 9]="$CELL_C1400B"
+        out=$(wire_matrix_verdict "$CELL_CK" 12 "${MATRIX[@]}"); rc=$?
+        case "$scenario" in
+        healthy)
+            if [[ "$rc" != 0 || "$out" != *"wire_zone_matrix PASS"* ||
+                "$CELL_CONTROL_IDENTITY_MASK" != 4 ]]; then ok=0; fi
+            ;;
+        blind)
+            if [[ "$rc" != 2 || "$out" != *"wire_zone_matrix VOID reason=capture-blind"* ||
+                "$out" != *"control_missing=2000"* || "$CELL_CONTROL_IDENTITY_MASK" != 0 ]]; then ok=0; fi
+            ;;
+        swap)
+            if [[ "$rc" != 1 || "$out" != *"wire_zone_matrix FAIL"* ||
+                "$out" != *"cells_failed=1"* || "$out" != *"zone_cell_violations=1"* ||
+                "$out" != *"zone_violation_mask=4 "* || "$CELL_CONTROL_IDENTITY_MASK" != 8 ]]; then ok=0; fi
+            ;;
+        esac
+        if ((ok)); then
+            if [[ "$scenario" == blind ]]; then
+                echo "  PASS  live measure_cell blind -> VOID reason=capture-blind rc=2 in one all-controls window"
+            else
+                echo "  PASS  live measure_cell ${scenario} uses one all-controls window"
+            fi
+            pass=$((pass + 1))
+        else
+            echo "  FAIL  live measure_cell ${scenario} (windows=$stub_window legs=$stub_legs mask=$CELL_CONTROL_IDENTITY_MASK got '$out' rc=$rc)"
+            fail=$((fail + 1))
+        fi
+        rm -f "$MATRIX_STUB_WINDOWS_FILE" "$MATRIX_STUB_LEGS_FILE" "$MATRIX_STUB_FILTER_FILE"
+    }
+    SG=matrix_fake_sg
+    PROBE_PORT=55001; CONTROL_PORT_BASE=55100
+    CONTROL_PORTS=(55100 55101 55102 55103 55104 55105)
+    HOSTS=(trust-host untrust-host dmz-host); ADDRS=(10.0.61.102 172.16.80.201 172.16.50.201)
+    INCUS_REMOTE=loss; RATE=2000; STEP_TIMEOUT=300; REMOTE_PROBE=/tmp/wire_probe_burst.py
+    matrix_measure_case healthy
+    matrix_measure_case swap
+    matrix_measure_case blind
     if wire_gate_finalizer_selftest; then
         echo "  PASS  cleanup finalizer shields restore"; pass=$((pass + 1))
     else
@@ -93,7 +285,7 @@ if [[ "$MODE" == selftest ]]; then
     done
     out=$(wire_matrix_verdict 0 12 "${SWAPPED[@]}"); rc=$?
     if [[ "$rc" == 1 && "$out" == *"cells_failed=6"* &&
-        "$out" == *"zone_cell_violations=6"* && "$out" == *"zone_violation_mask=63"* ]]; then
+        "$out" == *"zone_cell_violations=6"* && "$out" == *"zone_violation_mask=63 "* ]]; then
         echo "  PASS  zone-swap fixture fails exactly the six deny cells"; pass=$((pass + 1))
     else
         echo "  FAIL  zone-swap fixture fails exactly the six deny cells (got '$out' rc=$rc)"; fail=$((fail + 1))
@@ -101,7 +293,7 @@ if [[ "$MODE" == selftest ]]; then
     BAD=("${MATRIX[@]}"); BAD[1]=2; BAD[7]=0; BAD[9]=0
     out=$(wire_matrix_verdict 0 12 "${BAD[@]}"); rc=$?
     if [[ "$rc" == 1 && "$out" == *"cells_failed=1"* &&
-        "$out" == *"zone_cell_violations=1"* && "$out" == *"zone_violation_mask=1"* ]]; then
+        "$out" == *"zone_cell_violations=1"* && "$out" == *"zone_violation_mask=1 "* ]]; then
         echo "  PASS  foreign pair control fails only its deny cell"; pass=$((pass + 1))
     else
         echo "  FAIL  foreign pair control fails only its deny cell (got '$out' rc=$rc)"; fail=$((fail + 1))
@@ -450,100 +642,6 @@ apply_mode() {
     ! grep -qE '(^|[[:space:]])(error:|Error:)' /tmp/xpf-wire-zone-matrix-commit.log
 }
 
-capture_start() {
-    local dst="$1" dst_addr="$2" port_filter="$3"
-    CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-zone-cap.XXXXXX")"
-    $SG "incus exec ${INCUS_REMOTE}:${dst} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -tt -vv -s 0 udp and dst host ${dst_addr} and '(' ${port_filter} ')'" >"$CAPLOG" 2>&1 &
-    CAP_PID=$!
-    sleep 2
-}
-capture_stop() {
-    local dst="$1"
-    $SG "incus exec ${INCUS_REMOTE}:${dst} -- pkill -f '[t]cpdump.*${PROBE_PORT}'" >/dev/null 2>&1 || true
-    kill "$CAP_PID" >/dev/null 2>&1 || true
-    wait "$CAP_PID" >/dev/null 2>&1 || true
-    CAP_PID=""
-}
-count_len() {
-    local port="$1" size="$2" out
-    out="$(grep -cE "\\.${port}:.*length ${size}([,[:space:]]|$)" "$CAPLOG" 2>/dev/null || true)"
-    [[ "$out" =~ ^[0-9]+$ ]] || out=0
-    printf '%s' "$out"
-}
-# measure_cell <source-index> <destination-index> <mode> <count> <pair-index>
-measure_cell() {
-    local si="$1" di="$2" mode="$3" count="$4" pair_index="$5"
-    local src="${HOSTS[$si]}" dst="${HOSTS[$di]}" dst_addr="${ADDRS[$di]}"
-    local control_port="${CONTROL_PORTS[$pair_index]}" sent legpart totalp=0 totalc=0
-    local item port value i port_filter legs checksum diag_sent diag_legpart diag_totalc=0 observed64 observed1400
-    capture_start "$dst" "$dst_addr" "dst port ${PROBE_PORT} or dst port ${control_port}"
-    sent="$($SG "incus exec ${INCUS_REMOTE}:${src} -- timeout ${STEP_TIMEOUT} python3 ${REMOTE_PROBE} --dst ${dst_addr} --leg ${PROBE_PORT}:${count} --leg ${control_port}:${count} --sizes 64,1400 --rate ${RATE}" 2>&1 || true)"
-    sleep 2
-    capture_stop "$dst"
-    legpart="${sent##*$'\n'}"
-    legpart="${legpart#SENT legs=}"
-    IFS=',' read -ra _legs <<<"$legpart"
-    for item in "${_legs[@]}"; do
-        port="${item%%=*}"; value="${item#*=}"
-        [[ "$value" =~ ^[0-9]+$ ]] || value=0
-        [[ "$port" == "$PROBE_PORT" ]] && totalp="$value"
-        [[ "$port" == "$control_port" ]] && totalc="$value"
-    done
-    CELL_P64O=$(( (totalp + 1) / 2 )); CELL_P1400O=$(( totalp / 2 ))
-    CELL_C64O=$(( (totalc + 1) / 2 )); CELL_C1400O=$(( totalc / 2 ))
-    CELL_P64B="$(count_len "$PROBE_PORT" 64)"; CELL_P1400B="$(count_len "$PROBE_PORT" 1400)"
-    CELL_C64B="$(count_len "$control_port" 64)"; CELL_C1400B="$(count_len "$control_port" 1400)"
-    checksum="$(grep -ciE 'bad (udp )?(cksum|checksum)' "$CAPLOG" 2>/dev/null || true)"
-    [[ "$checksum" =~ ^[0-9]+$ ]] || checksum=0
-    CELL_CK="$checksum"
-    [[ -n "$CAPLOG" ]] && rm -f "$CAPLOG"
-    CAPLOG=""
-    CELL_CONTROL_IDENTITY_MASK=0
-    if ((CELL_C64B + CELL_C1400B > 0)); then
-        CELL_CONTROL_IDENTITY_MASK=$((1 << pair_index))
-    elif [[ "$mode" == deny ]]; then
-        # The expected control was denied. Probe all pair-specific controls in
-        # a second window to distinguish a wrong existing zone from a blind
-        # capture; any foreign pair port is positive binding-mismatch evidence.
-        port_filter="dst port ${PROBE_PORT}"
-        legs=""
-        for port in "${CONTROL_PORTS[@]}"; do
-            port_filter+=" or dst port ${port}"
-            legs+=" --leg ${port}:${count}"
-        done
-        capture_start "$dst" "$dst_addr" "$port_filter"
-        diag_sent="$($SG "incus exec ${INCUS_REMOTE}:${src} -- timeout ${STEP_TIMEOUT} python3 ${REMOTE_PROBE} --dst ${dst_addr} ${legs} --sizes 64,1400 --rate ${RATE}" 2>&1 || true)"
-        diag_legpart="${diag_sent##*$'\n'}"
-        diag_legpart="${diag_legpart#SENT legs=}"
-        IFS=',' read -ra _legs <<<"$diag_legpart"
-        for item in "${_legs[@]}"; do
-            port="${item%%=*}"; value="${item#*=}"
-            [[ "$value" =~ ^[0-9]+$ ]] || value=0
-            [[ "$port" == "$control_port" ]] && diag_totalc="$value"
-        done
-        CELL_C64O=$((CELL_C64O + (diag_totalc + 1) / 2))
-        CELL_C1400O=$((CELL_C1400O + diag_totalc / 2))
-        capture_stop "$dst"
-        for ((i = 0; i < ${#CONTROL_PORTS[@]}; i++)); do
-            port="${CONTROL_PORTS[$i]}"
-            observed64="$(count_len "$port" 64)"
-            observed1400="$(count_len "$port" 1400)"
-            value=$((observed64 + observed1400))
-            if ((value > 0)); then
-                CELL_CONTROL_IDENTITY_MASK=$((CELL_CONTROL_IDENTITY_MASK | (1 << i)))
-            fi
-            if ((i == pair_index)); then
-                CELL_C64B=$((CELL_C64B + observed64))
-                CELL_C1400B=$((CELL_C1400B + observed1400))
-            fi
-        done
-        checksum="$(grep -ciE 'bad (udp )?(cksum|checksum)' "$CAPLOG" 2>/dev/null || true)"
-        [[ "$checksum" =~ ^[0-9]+$ ]] || checksum=0
-        CELL_CK=$((CELL_CK + checksum))
-    fi
-    echo "cell ${mode} src=${src} dst=${dst} sent=${totalp}/${totalc} observed=${CELL_P64B}/${CELL_P1400B}/${CELL_C64B}/${CELL_C1400B} control_identity_mask=${CELL_CONTROL_IDENTITY_MASK}"
-    rm -f "$CAPLOG"; CAPLOG=""
-}
 
 RESTORE_NEEDED=1
 MATRIX=()

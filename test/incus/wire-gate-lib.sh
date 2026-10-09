@@ -217,9 +217,10 @@ wire_parse_transcript() {
 #   permit:dmz->trust permit:untrust->dmz permit:dmz->untrust
 #
 # Every cell has one probe and its expected pair-specific near-miss control
-# under the capture window. The identity mask has one bit per ordered pair
-# in the order listed above; a foreign observed control is a zone-cell FAIL.
-# The zone_violation_mask metric uses one bit per cell in the twelve-key order.
+# under the capture window. Deny windows also offer all five foreign controls,
+# so the identity mask has one bit per ordered pair in the listed order. For
+# deny cells, any observed mask must be exactly the expected pair bit; a blind
+# zero mask cannot PASS. The zone_violation_mask uses the twelve-key cell order.
 # Deny probes and controls have the §2 drop floor (1,000); permit probes and
 # controls are §2 loss-grade (10,000 frames at EACH of 64 B and 1400 B). A
 # missing expected near-miss control without a foreign control is capture-blind,
@@ -297,8 +298,8 @@ wire_matrix_verdict() {
 	local deny_cells=0 permit_cells=0 permit64o=0 permit64b=0 permit1400o=0 permit1400b=0
 	local reason="--" is_permit identity_index cell_bit
 	local failed_mask=0 zone_cell_violations=0 zone_violation_mask=0
-	# Identity is an observed control-port mask. A nonzero foreign mask is
-	# positive evidence of a different existing zone pair, not capture blindness.
+	# Deny measurements offer all six controls in the probe's capture window.
+	# A nonzero mask must be exactly the expected bit; foreign bits are FAIL evidence.
 	for ((i = 0; i < 12; i++)); do
 		key=${records[$((i * 10))]}
 		identity=${records[$((i * 10 + 1))]}
