@@ -7025,6 +7025,17 @@ tag, asserted only on leaves audited to take a fixed value and NO body
 `hostname`). This is the "design pass on the value-arity contract" the #3332
 body called for; new scalar leaves opt in as they are audited.
 
+**Single-child interface filter blocks (#10293, #12093).** Four interface
+filter bindings opt into `blockValue` (the #6774 opt-in, shared with scalar
+leaves via `singleBlockValue()`): `filter { input { f1; } }` and its `output` /
+`inet6` twins are accepted as one scalar value because the compiler deliberately
+honours the sole child as the filter name (#10293), and strict commit must accept
+what compiles. The exception requires exactly one non-empty child token, no
+grandchildren, and no trailing keys; multi-value and arbitrary sub-statement
+blocks remain rejected by the scalar arity gate. Unlike `default-policy
+{ deny-all; }`, this spelling is not verified as Junos-emitted, so the opt-in
+stays scoped to these four bindings.
+
 **#4415 L12 → #4626 M03 — scoped global-policy `from-zone`/`to-zone` (a zone
 SET).** A Junos global policy may carry an optional `match from-zone` /
 `match to-zone` to scope it to a set of zones (#3148). The typed model behind
