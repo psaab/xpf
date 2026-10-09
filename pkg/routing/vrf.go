@@ -431,6 +431,11 @@ func reconcileVRFs(ops vrfOps, tracked []string, desired []VRFSpec) ([]string, e
 		// A same-name non-VRF is foreign, not a stale VRF. Fail closed
 		// rather than deleting an operator-created device.
 		if _, ok := link.(*netlink.Vrf); !ok {
+			// recordErr keeps only the first error: warn here so every
+			// foreign occupant reaches the journal, not just the first
+			// per reconcile.
+			slog.Warn("refusing to reconcile desired-name foreign non-VRF link",
+				"name", vrfName, "type", link.Type())
 			recordErr(fmt.Errorf("refusing to reconcile VRF %s: existing link is %s, not a VRF",
 				vrfName, link.Type()))
 			continue
@@ -476,6 +481,14 @@ func reconcileVRFs(ops vrfOps, tracked []string, desired []VRFSpec) ([]string, e
 				recordErr(fmt.Errorf("lookup VRF %s for delete: %w", existing, err))
 			}
 			// Not found: already gone; nothing to do.
+			continue
+		}
+		if _, ok := link.(*netlink.Vrf); !ok {
+			// Tracked name swapped out-of-band for a non-VRF (and
+			// removed from config in the same interval): the link is
+			// foreign, not our stale VRF. Refuse deletion (#12062).
+			slog.Warn("refusing to delete tracked-not-desired non-VRF link",
+				"name", existing, "type", link.Type())
 			continue
 		}
 		if err := ops.LinkDel(link); err != nil {

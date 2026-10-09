@@ -36,3 +36,25 @@ func TestReconcileVRFsRejectsDesiredNameForeignLink(t *testing.T) {
 		t.Errorf("tracked VRFs = %v, want no ownership of the foreign link", manager.vrfs)
 	}
 }
+
+// TestReconcileVRFsSkipsDeleteForTrackedNotDesiredForeignLink verifies the
+// tracked-but-not-desired delete loop also refuses a name swapped
+// out-of-band for a non-VRF (GLM review, PR #12320): no LinkDel, no error
+// storm — the foreign link is simply left alone.
+func TestReconcileVRFsSkipsDeleteForTrackedNotDesiredForeignLink(t *testing.T) {
+	ops := newFakeVRFOps()
+	foreign := &netlink.Bridge{
+		LinkAttrs: netlink.LinkAttrs{Name: "vrf-old"},
+	}
+	ops.overlay["vrf-old"] = foreign
+	ops.extraLinks = []netlink.Link{foreign}
+
+	manager := &vrfManager{ops: ops, vrfs: []string{"vrf-old"}}
+	err := manager.Reconcile([]VRFSpec{{Name: "mgmt", TableID: 999}})
+	if err != nil {
+		t.Fatalf("Reconcile error = %v, want nil (foreign skip is silent)", err)
+	}
+	if ops.dels != 0 {
+		t.Errorf("LinkDel calls = %d, want 0 for a tracked-not-desired foreign link", ops.dels)
+	}
+}
