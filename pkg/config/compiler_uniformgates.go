@@ -216,5 +216,18 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
+	// #12089: run after the routing-instance membership tail gates (#11060,
+	// #11312, #11392, #11364) so those diagnostics retain priority and
+	// forwarding/dual-claim memberships are not mistaken for VRF owners.
+	// Effective local-address selection follows the renderer (VPN, gateway,
+	// then external-interface-derived); tolerant conflicts are excluded using
+	// the #11060 quarantine evidence recorded above.
+	gatewayRIRoutingWarnings, err := validateIPsecGatewayRoutingInstance12089(
+		cfg, opts.lenientIPsecGatewayVRF12089)
+	if err != nil {
+		return err
+	}
+	cfg.Warnings = append(cfg.Warnings, gatewayRIRoutingWarnings...)
+
 	return nil
 }

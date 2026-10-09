@@ -111,18 +111,6 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 		}
 	}
 
-	// #12089: strongSwan's IKE socket and xpf's parentless xfrmi are not
-	// scoped to a routing-instance. Refuse gateways whose external-interface
-	// belongs to a non-default instance rather than silently sending outer
-	// IKE/ESP through the wrong routing table. Existing configs still boot
-	// with a warning on tolerant load / peer-sync (#1960).
-	gatewayRIRoutingWarnings, err := validateIPsecGatewayRoutingInstance12089(
-		cfg, opts.lenientIPsecGatewayVRF12089)
-	if err != nil {
-		return err
-	}
-	cfg.Warnings = append(cfg.Warnings, gatewayRIRoutingWarnings...)
-
 	// #9624: reject two IPsec VPNs that render the same swanctl SA name
 	// (child/child or connection/child). The renderer keeps child names unique
 	// only within one VPN (#5122), and `swanctl --initiate --child` identifies a

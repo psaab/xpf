@@ -26,8 +26,8 @@ func ikeVRF12089Warnings(cfg *Config) []string {
 	return out
 }
 
-// TestIKEGatewayRoutingInstanceRefused12089: an IKE gateway whose
-// external-interface lives in a non-default routing-instance must be refused
+// TestIKEGatewayRoutingInstanceRefused12089: an IKE gateway whose effective
+// local address resolves to a non-default routing-instance must be refused
 // at strict commit, naming the gateway and the instance. Neither strongSwan
 // nor the xfrmi is scoped to that instance, so outer IKE/ESP would be routed
 // in the wrong table.
@@ -93,12 +93,54 @@ func TestIKEGatewayRoutingInstanceRefused12089(t *testing.T) {
 			gw: "gw",
 			ri: "VR1",
 		},
+		{
+			name: "P1 gateway local-address selects VR unit without external-interface",
+			lines: []string{
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.1/24",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw local-address 198.51.100.1",
+			},
+			gw: "gw",
+			ri: "VR1",
+		},
+		{
+			name: "P2 gateway local-address overrides default external-interface",
+			lines: []string{
+				"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.1/24",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw external-interface ge-0/0/1.0",
+				"set security ike gateway gw local-address 198.51.100.1",
+			},
+			gw: "gw",
+			ri: "VR1",
+		},
+		{
+			name: "P21 VPN local-address overrides default gateway source",
+			lines: []string{
+				"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.1/24",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw external-interface ge-0/0/1.0",
+				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
+				"set security ipsec vpn tun local-address 198.51.100.1",
+			},
+			gw: "gw",
+			ri: "VR1",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := CompileConfig(buildTree4953(t, tc.lines))
 			if err == nil {
-				t.Fatalf("strict commit accepted IKE gateway %q on instance-owned external-interface; want reject naming gateway + instance %q", tc.gw, tc.ri)
+				t.Fatalf("strict commit accepted IKE gateway %q with an instance-owned effective local address; want reject naming gateway + instance %q", tc.gw, tc.ri)
 			}
 			msg := err.Error()
 			if !strings.Contains(msg, tc.gw) || !strings.Contains(msg, tc.ri) {
@@ -111,10 +153,10 @@ func TestIKEGatewayRoutingInstanceRefused12089(t *testing.T) {
 	}
 }
 
-// TestIKEGatewayRoutingInstanceAccepted12089: control rows — a gateway on a
-// default-instance interface, a gateway with no external-interface, and a
-// gateway whose external-interface names an undeclared interface must still
-// commit cleanly. This gate owns only the instance-owned scope.
+// TestIKEGatewayRoutingInstanceAccepted12089: control rows — a gateway whose
+// effective local address is in the default instance, a gateway with no
+// external-interface, and a gateway whose external-interface names an
+// undeclared interface must not be rejected by this gate.
 func TestIKEGatewayRoutingInstanceAccepted12089(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -144,6 +186,32 @@ func TestIKEGatewayRoutingInstanceAccepted12089(t *testing.T) {
 				"set security ike gateway gw external-interface ge-0/0/1.0",
 				"set routing-instances VR1 instance-type virtual-router",
 				"set routing-instances VR1 interface ge-0/0/1.1",
+			},
+		},
+		{
+			name: "P15 gateway local-address overrides VR external-interface",
+			lines: []string{
+				"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.1/24",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw external-interface ge-0/0/2.0",
+				"set security ike gateway gw local-address 192.0.2.1",
+			},
+		},
+		{
+			name: "P22 VPN local-address overrides VR gateway source",
+			lines: []string{
+				"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.1/24",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw external-interface ge-0/0/2.0",
+				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
+				"set security ipsec vpn tun local-address 192.0.2.1",
 			},
 		},
 		{
@@ -210,5 +278,176 @@ func TestIKEGatewayRoutingInstanceLenient12089(t *testing.T) {
 				t.Fatalf("warning %q names neither gateway nor instance; want both", warns[0])
 			}
 		})
+	}
+}
+
+func TestIKEGatewayRoutingInstanceEffectiveLocalAddressLenient12089(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+	}{
+		{
+			name: "P1 gateway local-address without external-interface",
+			lines: []string{
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.1/24",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw local-address 198.51.100.1",
+			},
+		},
+		{
+			name: "P2 gateway local-address overrides default external-interface",
+			lines: []string{
+				"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.1/24",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw external-interface ge-0/0/1.0",
+				"set security ike gateway gw local-address 198.51.100.1",
+			},
+		},
+		{
+			name: "P21 VPN local-address overrides default gateway source",
+			lines: []string{
+				"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.1/24",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw external-interface ge-0/0/1.0",
+				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
+				"set security ipsec vpn tun local-address 198.51.100.1",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := CompileConfigLenient(buildTree4953(t, tc.lines))
+			if err != nil {
+				t.Fatalf("tolerant compile rejected unsupported local-address scope: %v", err)
+			}
+			warns := ikeVRF12089Warnings(cfg)
+			if len(warns) != 1 || !strings.Contains(warns[0], "VR1") {
+				t.Fatalf("tolerant compile warnings = %v, want one #12089 warning naming VR1", warns)
+			}
+		})
+	}
+}
+
+func TestIKEGatewayRoutingInstanceMembershipPriority12089(t *testing.T) {
+	cases := []struct {
+		name      string
+		lines     []string
+		wantIssue string
+	}{
+		{
+			name: "forwarding member remains owned by #11312",
+			lines: []string{
+				"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+				"set routing-instances FWD instance-type forwarding",
+				"set routing-instances FWD interface ge-0/0/1.0",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw external-interface ge-0/0/1.0",
+			},
+			wantIssue: "#11312",
+		},
+		{
+			name: "dual claim remains owned by #11060",
+			lines: []string{
+				"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/1.0",
+				"set routing-instances VR2 instance-type virtual-router",
+				"set routing-instances VR2 interface ge-0/0/1.0",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw external-interface ge-0/0/1.0",
+			},
+			wantIssue: "#11060",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileConfig(buildTree4953(t, tc.lines))
+			if err == nil || !strings.Contains(err.Error(), tc.wantIssue) {
+				t.Fatalf("strict error = %v, want %s to retain diagnostic priority", err, tc.wantIssue)
+			}
+			if strings.Contains(err.Error(), "#12089") {
+				t.Fatalf("strict error %q was pre-empted by #12089", err)
+			}
+
+			cfg, err := CompileConfigLenient(buildTree4953(t, tc.lines))
+			if err != nil {
+				t.Fatalf("tolerant compile rejected membership diagnostic: %v", err)
+			}
+			foundIssue := false
+			for _, warning := range cfg.Warnings {
+				foundIssue = foundIssue || strings.Contains(warning, tc.wantIssue)
+			}
+			if !foundIssue {
+				t.Fatalf("tolerant warnings %v do not retain %s diagnostic", cfg.Warnings, tc.wantIssue)
+			}
+			if warns := ikeVRF12089Warnings(cfg); len(warns) != 0 {
+				t.Fatalf("membership issue also produced false #12089 warnings: %v", warns)
+			}
+		})
+	}
+}
+
+func TestIKEGatewayRoutingInstanceChecksEachVPNSource12089(t *testing.T) {
+	lines := []string{
+		"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+		"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.1/24",
+		"set routing-instances VR1 instance-type virtual-router",
+		"set routing-instances VR1 interface ge-0/0/2.0",
+		"set security ike gateway gw address 203.0.113.1",
+		"set security ike gateway gw external-interface ge-0/0/1.0",
+		"set security ipsec vpn a-default gateway gw",
+		"set security ipsec vpn a-default bind-interface st0",
+		"set security ipsec vpn a-default local-address 192.0.2.1",
+		"set security ipsec vpn z-vr gateway gw",
+		"set security ipsec vpn z-vr bind-interface st0.1",
+		"set security ipsec vpn z-vr local-address 198.51.100.1",
+	}
+	_, err := CompileConfig(buildTree4953(t, lines))
+	if err == nil || !strings.Contains(err.Error(), `vpn "z-vr"`) ||
+		strings.Contains(err.Error(), `vpn "a-default"`) || !strings.Contains(err.Error(), "VR1") {
+		t.Fatalf("strict error = %v, want only the VR-sourced VPN z-vr and VR1", err)
+	}
+
+	cfg, err := CompileConfigLenient(buildTree4953(t, lines))
+	if err != nil {
+		t.Fatalf("tolerant compile rejected mixed VPN sources: %v", err)
+	}
+	warns := ikeVRF12089Warnings(cfg)
+	if len(warns) != 1 || !strings.Contains(warns[0], `vpn "z-vr"`) ||
+		strings.Contains(warns[0], `vpn "a-default"`) {
+		t.Fatalf("tolerant #12089 warnings = %v, want only z-vr", warns)
+	}
+}
+
+func TestIKEGatewayRoutingInstanceInlineVPNLocalAddress12089(t *testing.T) {
+	lines := []string{
+		"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.1/24",
+		"set routing-instances VR1 instance-type virtual-router",
+		"set routing-instances VR1 interface ge-0/0/2.0",
+		"set security ipsec vpn tun gateway 203.0.113.1",
+		"set security ipsec vpn tun bind-interface st0",
+		"set security ipsec vpn tun local-address 198.51.100.1",
+	}
+	_, err := CompileConfig(buildTree4953(t, lines))
+	if err == nil || !strings.Contains(err.Error(), `ipsec vpn "tun"`) ||
+		!strings.Contains(err.Error(), "VR1") || !strings.Contains(err.Error(), "#12089") {
+		t.Fatalf("strict error = %v, want inline VPN local-address rejection naming tun and VR1", err)
+	}
+	cfg, err := CompileConfigLenient(buildTree4953(t, lines))
+	if err != nil {
+		t.Fatalf("tolerant compile rejected inline VPN local-address: %v", err)
+	}
+	warns := ikeVRF12089Warnings(cfg)
+	if len(warns) != 1 || !strings.Contains(warns[0], `ipsec vpn "tun"`) {
+		t.Fatalf("tolerant #12089 warnings = %v, want one inline VPN warning", warns)
 	}
 }

@@ -8,11 +8,20 @@ import (
 )
 
 // validateIPsecGatewayRoutingInstance12089 refuses IKE gateways whose
-// external-interface resolves to a non-default routing-instance. strongSwan's
-// IKE socket and xpf's parentless xfrmi are not scoped to that instance, so
-// their outer traffic would use the wrong routing table (#12089).
+// EFFECTIVE local address resolves to a non-default routing-instance.
+// strongSwan's IKE socket and xpf's parentless xfrmi are not scoped to that
+// instance, so their outer traffic would use the wrong routing table (#12089).
+//
+// The effective address follows the renderer exactly: a VPN-level
+// `local-address` wins first, then the gateway's `local-address`, and only
+// then is an address derived from `external-interface` (resolveRemoteAddr in
+// pkg/ipsec/policy.go, then PrepareConfig/policy_addr.go resolution). A gate
+// that inspected external-interface alone would both let the bug through
+// (VR-owned local-address with a default external-interface) and refuse valid
+// configs (a default-instance local-address overriding a VR external-interface).
 func validateIPsecGatewayRoutingInstance12089(cfg *Config, lenient bool) ([]string, error) {
-	if cfg == nil || len(cfg.Security.IPsec.Gateways) == 0 {
+	if cfg == nil ||
+		(len(cfg.Security.IPsec.Gateways) == 0 && len(cfg.Security.IPsec.VPNs) == 0) {
 		return nil, nil
 	}
 
@@ -24,37 +33,196 @@ func validateIPsecGatewayRoutingInstance12089(cfg *Config, lenient bool) ([]stri
 
 	tunnelNames := cfg.TunnelNameMap()
 	instanceOwners := ipsecGatewayRoutingInstanceOwners12089(cfg, tunnelNames)
+	quarantined := ipsecGatewayQuarantinedDevices12089(cfg)
 	var warnings []string
-	for _, name := range gatewayNames {
-		gateway := cfg.Security.IPsec.Gateways[name]
-		if gateway == nil || gateway.ExternalIface == "" {
-			continue
-		}
-		instances := make(map[string]struct{})
-		for _, device := range ipsecGatewayExternalDevices12089(cfg, tunnelNames, gateway) {
-			if instance := instanceOwners[device]; instance != "" {
-				instances[instance] = struct{}{}
-			}
-		}
+	report := func(subject, source string, instances []string) error {
 		if len(instances) == 0 {
-			continue
+			return nil
 		}
-		instanceNames := make([]string, 0, len(instances))
-		for instance := range instances {
-			instanceNames = append(instanceNames, instance)
-		}
-		sort.Strings(instanceNames)
-		instanceList := strings.Join(instanceNames, ", ")
+		instanceList := strings.Join(instances, ", ")
 		if !lenient {
-			return nil, fmt.Errorf(
-				"ipsec gateway %q external-interface %q resolves to routing-instance %q, but IKE/ESP outer traffic is not scoped to that routing table; commit refused (#12089)",
-				name, gateway.ExternalIface, instanceList)
+			return fmt.Errorf(
+				"%s %s resolves to routing-instance %q, but IKE/ESP outer traffic is not scoped to that routing table; commit refused (#12089)",
+				subject, source, instanceList)
 		}
 		warnings = append(warnings, fmt.Sprintf(
-			"ipsec gateway %q external-interface %q resolves to routing-instance %q, but IKE/ESP outer traffic is not scoped to that routing table; existing config may route IKE/ESP via the wrong table (#12089)",
-			name, gateway.ExternalIface, instanceList))
+			"%s %s resolves to routing-instance %q, but IKE/ESP outer traffic is not scoped to that routing table; existing config may route IKE/ESP via the wrong table (#12089)",
+			subject, source, instanceList))
+		return nil
+	}
+	for _, name := range gatewayNames {
+		gateway := cfg.Security.IPsec.Gateways[name]
+		if gateway == nil {
+			continue
+		}
+		subject := fmt.Sprintf("ipsec gateway %q", name)
+		referencing := ipsecGatewayReferencingVPNs12089(cfg, name)
+		if len(referencing) == 0 {
+			instances, source := ipsecGatewayScopedInstances12089(
+				cfg, tunnelNames, instanceOwners, quarantined, gateway, nil)
+			if err := report(subject, source, instances); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		for _, vpnName := range referencing {
+			vpn := cfg.Security.IPsec.VPNs[vpnName]
+			instances, source := ipsecGatewayScopedInstances12089(
+				cfg, tunnelNames, instanceOwners, quarantined, gateway, vpn)
+			if err := report(subject+" "+fmt.Sprintf("vpn %q", vpnName), source, instances); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// A VPN may use an inline gateway endpoint (or no gateway object), but its
+	// local-address still becomes swanctl local_addrs. Check those sources too;
+	// there is no gateway external-interface from which to derive a fallback.
+	vpnNames := make([]string, 0, len(cfg.Security.IPsec.VPNs))
+	for name := range cfg.Security.IPsec.VPNs {
+		vpnNames = append(vpnNames, name)
+	}
+	sort.Strings(vpnNames)
+	for _, name := range vpnNames {
+		vpn := cfg.Security.IPsec.VPNs[name]
+		if vpn == nil || vpn.LocalAddr == "" {
+			continue
+		}
+		if gateway := cfg.Security.IPsec.Gateways[vpn.Gateway]; vpn.Gateway != "" && gateway != nil {
+			continue // handled with the referenced gateway above
+		}
+		devices := ipsecLocalAddressDevices12089(cfg, tunnelNames, vpn.LocalAddr)
+		instances := ipsecScopedInstances12089(instanceOwners, quarantined, devices)
+		if err := report(fmt.Sprintf("ipsec vpn %q", name),
+			fmt.Sprintf("local-address %q", vpn.LocalAddr), instances); err != nil {
+			return nil, err
+		}
 	}
 	return warnings, nil
+}
+
+// ipsecGatewayReferencingVPNs12089 returns the sorted names of VPNs that
+// reference the gateway object. A VPN whose Gateway names a literal IP or
+// dotted hostname renders without a gateway object (resolveRemoteAddr's legacy
+// inline shape) and never selects this gateway's local address.
+func ipsecGatewayReferencingVPNs12089(cfg *Config, gatewayName string) []string {
+	if cfg == nil || gatewayName == "" {
+		return nil
+	}
+	var names []string
+	for name, vpn := range cfg.Security.IPsec.VPNs {
+		if vpn != nil && vpn.Gateway == gatewayName {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ipsecGatewayScopedInstances12089 resolves one (gateway, vpn) pair's
+// effective local address to owning instances. An explicit local-address
+// (vpn first, then gateway) maps through the declared interface-unit table
+// exactly like the renderer's local_addrs; only when neither is set does the
+// external-interface derivation apply. Devices under a recorded #11060
+// conflict read as unowned: the dual-claim gate owns that diagnostic, and
+// tolerant quarantine removes every conflicting membership.
+func ipsecGatewayScopedInstances12089(cfg *Config, tunnelNames map[string]string, instanceOwners map[string]string, quarantined map[string]struct{}, gateway *IPsecGateway, vpn *IPsecVPN) ([]string, string) {
+	if vpn != nil && vpn.LocalAddr != "" {
+		devices := ipsecLocalAddressDevices12089(cfg, tunnelNames, vpn.LocalAddr)
+		return ipsecScopedInstances12089(instanceOwners, quarantined, devices), fmt.Sprintf("local-address %q", vpn.LocalAddr)
+	}
+	if gateway.LocalAddress != "" {
+		devices := ipsecLocalAddressDevices12089(cfg, tunnelNames, gateway.LocalAddress)
+		return ipsecScopedInstances12089(instanceOwners, quarantined, devices), fmt.Sprintf("local-address %q", gateway.LocalAddress)
+	}
+	devices := ipsecGatewayExternalDevices12089(cfg, tunnelNames, gateway)
+	return ipsecScopedInstances12089(instanceOwners, quarantined, devices), fmt.Sprintf("external-interface %q", gateway.ExternalIface)
+}
+
+// ipsecScopedInstances12089 maps devices to their owning instances, dropping
+// devices in a recorded #11060 conflict. The sorted names keep the diagnostic
+// deterministic when a bare external-interface fans across instances.
+func ipsecScopedInstances12089(instanceOwners map[string]string, quarantined map[string]struct{}, devices []string) []string {
+	seen := make(map[string]struct{})
+	var instances []string
+	for _, device := range devices {
+		if _, conflicted := quarantined[device]; conflicted {
+			continue
+		}
+		instance := instanceOwners[device]
+		if instance == "" {
+			continue
+		}
+		if _, duplicate := seen[instance]; duplicate {
+			continue
+		}
+		seen[instance] = struct{}{}
+		instances = append(instances, instance)
+	}
+	sort.Strings(instances)
+	return instances
+}
+
+// ipsecGatewayQuarantinedDevices12089 returns the Linux devices under a
+// recorded #11060 dual-claim conflict. On the strict path the conflict set is
+// computed fresh (the #11060 tail gate runs before this one and already owns
+// the diagnostic); on the tolerant path the recorded conflicts describe the
+// memberships quarantineRIDualClaimDevices will remove after the tail gates.
+func ipsecGatewayQuarantinedDevices12089(cfg *Config) map[string]struct{} {
+	devices := make(map[string]struct{})
+	if cfg == nil {
+		return devices
+	}
+	tunnelNames := cfg.TunnelNameMap()
+	for _, conflict := range RoutingInstanceMemberDeviceConflicts(cfg, tunnelNames) {
+		if conflict.LinuxName != "" {
+			devices[conflict.LinuxName] = struct{}{}
+		}
+	}
+	for _, conflict := range cfg.QuarantinedRIMemberDeviceConflicts {
+		if conflict.LinuxName != "" {
+			devices[conflict.LinuxName] = struct{}{}
+		}
+	}
+	return devices
+}
+
+// ipsecLocalAddressDevices12089 maps an explicit local-address to the kernel
+// devices of every declared interface unit carrying that address. The scan
+// covers every interface (Junos spelling and Linux-renamed alike) because a
+// local-address is not scoped to the external-interface's base: the renderer
+// copies it verbatim into local_addrs. Address comparison parses CIDR
+// suffixes so a /24-configured unit matches the bare local-address IP.
+func ipsecLocalAddressDevices12089(cfg *Config, tunnelNames map[string]string, localAddress string) []string {
+	target := ipsecParseConfiguredAddress12089(localAddress)
+	if cfg == nil || target == nil {
+		return nil
+	}
+	baseNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
+	for base := range cfg.Interfaces.Interfaces {
+		baseNames = append(baseNames, base)
+	}
+	sort.Strings(baseNames)
+	var devices []string
+	seen := make(map[string]struct{})
+	for _, base := range baseNames {
+		ifc := cfg.Interfaces.Interfaces[base]
+		if ifc == nil {
+			continue
+		}
+		for _, ref := range ipsecAddressUnitRefs12089(base, ifc, localAddress) {
+			device := cfg.resolveKernelIfNameWith(ref, tunnelNames)
+			if device == "" {
+				continue
+			}
+			if _, duplicate := seen[device]; duplicate {
+				continue
+			}
+			seen[device] = struct{}{}
+			devices = append(devices, device)
+		}
+	}
+	return devices
 }
 
 // ipsecGatewayRoutingInstanceOwners12089 uses the shared RI member device
@@ -64,7 +232,7 @@ func ipsecGatewayRoutingInstanceOwners12089(cfg *Config, tunnelNames map[string]
 	owners := make(map[string]string)
 	instances := make([]*RoutingInstanceConfig, 0, len(cfg.RoutingInstances))
 	for _, ri := range cfg.RoutingInstances {
-		if ri != nil && ri.Name != "" && !IsReservedRoutingInstanceName(ri.Name) {
+		if ri != nil && ri.Name != "" && ri.InstanceType != "forwarding" && !IsReservedRoutingInstanceName(ri.Name) {
 			instances = append(instances, ri)
 		}
 	}
@@ -82,7 +250,9 @@ func ipsecGatewayRoutingInstanceOwners12089(cfg *Config, tunnelNames map[string]
 		}
 	}
 	for _, claim := range routingInstanceTunnelDeviceClaims(cfg) {
-		if claim.LinuxName == "" || claim.Instance == "" || IsReservedRoutingInstanceName(claim.Instance) {
+		if claim.LinuxName == "" || claim.Instance == "" ||
+			ipsecGatewayInstanceIsForwarding12089(cfg, claim.Instance) ||
+			IsReservedRoutingInstanceName(claim.Instance) {
 			continue
 		}
 		if _, exists := owners[claim.LinuxName]; !exists {
@@ -90,6 +260,18 @@ func ipsecGatewayRoutingInstanceOwners12089(cfg *Config, tunnelNames map[string]
 		}
 	}
 	return owners
+}
+
+// ipsecGatewayInstanceIsForwarding12089 reports whether the named instance is
+// a forwarding instance. The daemon does not bind those members to VRF
+// devices, so #11312 owns their diagnostic rather than the #12089 gateway gate.
+func ipsecGatewayInstanceIsForwarding12089(cfg *Config, instance string) bool {
+	for _, ri := range cfg.RoutingInstances {
+		if ri != nil && ri.Name == instance {
+			return ri.InstanceType == "forwarding"
+		}
+	}
+	return false
 }
 
 // ipsecGatewayExternalDevices12089 mirrors policy_addr's configured address
@@ -107,18 +289,13 @@ func ipsecGatewayExternalDevices12089(cfg *Config, tunnelNames map[string]string
 	if split.HasUnit {
 		refs = append(refs, external)
 	} else if ifc := cfg.Interfaces.Interfaces[split.Base]; ifc != nil {
-		if gateway.LocalAddress != "" {
-			refs = append(refs, ipsecAddressUnitRefs12089(split.Base, ifc, gateway.LocalAddress)...)
-		}
-		if len(refs) == 0 && gateway.LocalAddress == "" {
-			for _, family := range ipsecGatewayRemoteFamilies12089(gateway) {
-				unitNum, found := ipsecFirstAddressedUnit12089(ifc, family)
-				if !found && family != 0 {
-					unitNum, found = ipsecFirstAddressedUnit12089(ifc, 0)
-				}
-				if found {
-					refs = append(refs, fmt.Sprintf("%s.%d", split.Base, unitNum))
-				}
+		for _, family := range ipsecGatewayRemoteFamilies12089(gateway) {
+			unitNum, found := ipsecFirstAddressedUnit12089(ifc, family)
+			if !found && family != 0 {
+				unitNum, found = ipsecFirstAddressedUnit12089(ifc, 0)
+			}
+			if found {
+				refs = append(refs, fmt.Sprintf("%s.%d", split.Base, unitNum))
 			}
 		}
 	}
