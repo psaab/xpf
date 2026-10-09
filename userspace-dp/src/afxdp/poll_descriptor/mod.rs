@@ -1948,7 +1948,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // #8125: resolved from the same entry, so the row's
                             // `Timeout:` column reports the window in force.
                             let timeout_secs = sessions.timeout_secs_for(&flow.forward_key);
-                            publish_bpf_conntrack_entry(
+                            publish_bpf_conntrack_entry_with_source_nat(
                                 conntrack_v4_fd,
                                 conntrack_v6_fd,
                                 &flow.forward_key,
@@ -1960,6 +1960,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 session_id,
                                 timeout_secs,
                                 resolved.origin,
+                                resolved.source_nat_static,
                             );
                         }
                         // Log first N session hits from WAN (return path)
@@ -2295,6 +2296,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             resolved.decision,
                             flow,
                             resolved.origin,
+                            resolved.source_nat_static,
                         );
                         let owner_icmp_verdict = if session_hit_revocation.is_none()
                             && foreign_arrival_zone.is_none()
@@ -2337,29 +2339,33 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         }
                         if session_hit_revocation.is_none() {
                             session_hit_revocation = match foreign_arrival_zone {
-                                None => revalidate_zone_policy_on_session_hit(
-                                    worker_ctx.forwarding,
-                                    sessions,
-                                    &resolved.key,
-                                    &resolved.metadata,
-                                    resolved.decision,
-                                    Some(flow),
-                                    meta,
-                                    // #9384: THIS packet's fabric ingress. The from-zone
-                                    // is resolved live from the arrival interface, and a
-                                    // fabric-punted packet arrives on the fabric link —
-                                    // not in the flow's zone — so it keeps the entry's
-                                    // recorded zone instead.
-                                    packet_fabric_ingress,
-                                    fabric_link_ingress,
-                                    worker_ctx.ha_state,
-                                    worker_ctx.dynamic_neighbors,
-                                    now_ns,
-                                    now_secs,
-                                    meta.ingress_ifindex as i32,
-                                    ha_startup_grace_until_secs,
-                                    resolved.origin,
-                                ),
+                                None => {
+                                    revalidate_zone_policy_on_session_hit(
+                                        worker_ctx.forwarding,
+                                        conntrack_v4_fd,
+                                        conntrack_v6_fd,
+                                        sessions,
+                                        &resolved.key,
+                                        &resolved.metadata,
+                                        resolved.decision,
+                                        Some(flow),
+                                        meta,
+                                        // #9384: THIS packet's fabric ingress. The from-zone
+                                        // is resolved live from the arrival interface, and a
+                                        // fabric-punted packet arrives on the fabric link —
+                                        // not in the flow's zone — so it keeps the entry's
+                                        // recorded zone instead.
+                                        packet_fabric_ingress,
+                                        fabric_link_ingress,
+                                        worker_ctx.ha_state,
+                                        worker_ctx.dynamic_neighbors,
+                                        now_ns,
+                                        now_secs,
+                                        meta.ingress_ifindex as i32,
+                                        ha_startup_grace_until_secs,
+                                        resolved.origin,
+                                    )
+                                }
                                 Some(arrival_zone) => match foreign_hit_verdict(
                                     worker_ctx.forwarding,
                                     sessions,
@@ -5056,7 +5062,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         );
                                     }
                                     let forward_installed = track_in_userspace
-                                        && sessions.install_with_protocol_with_origin(
+                                        && sessions.install_with_protocol_with_origin_and_source_nat(
                                             flow.forward_key.clone(),
                                             decision,
                                             forward_metadata.clone(),
@@ -5064,6 +5070,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             now_ns,
                                             meta.protocol,
                                             meta.tcp_flags,
+                                            source_nat_static,
                                         );
                                     if forward_installed {
                                         sessions.mark_source_nat_revalidated(
@@ -5197,25 +5204,24 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 }
                                             }
                                         }
-                                        let forward_entry = SyncedSessionEntry {
-                                            key: flow.forward_key.clone(),
-                                            decision,
-                                            metadata: forward_metadata,
-                                            leak_incarnation: leak_incarnation.unwrap_or(0),
-                                            origin: SessionOrigin::ForwardFlow,
-                                            protocol: meta.protocol,
-                                            tcp_flags: meta.tcp_flags,
-                                            // Local forward-flow learn (#2170): no peer gen.
-                                            generation: 0,
-                                            // #9582: carry the installer's stable id, so every
-                                            // worker replica ADOPTS it instead of minting one.
-                                            // A replica can then announce a close it alone
-                                            // sees with the same id the Open delta, the mirror
-                                            // row and the #9412 sender memo use (#5212).
-                                            session_id: sessions.session_id_for(&flow.forward_key),
-                                            tcp_close_class: 0,
-                                            tcp_handshake_state: sessions.handshake_state_wire_for(&flow.forward_key),
-                                        };
+                                        let forward_entry = SyncedSessionEntry { key: flow.forward_key.clone(),
+                                        decision,
+                                        metadata: forward_metadata,
+                                        source_nat_static,
+                                        leak_incarnation: leak_incarnation.unwrap_or(0),
+                                        origin: SessionOrigin::ForwardFlow,
+                                        protocol: meta.protocol,
+                                        tcp_flags: meta.tcp_flags,
+                                        // Local forward-flow learn (#2170): no peer gen.
+                                        generation: 0,
+                                        // #9582: carry the installer's stable id, so every
+                                        // worker replica ADOPTS it instead of minting one.
+                                        // A replica can then announce a close it alone
+                                        // sees with the same id the Open delta, the mirror
+                                        // row and the #9412 sender memo use (#5212).
+                                        session_id: sessions.session_id_for(&flow.forward_key),
+                                        tcp_close_class: 0,
+                                        tcp_handshake_state: sessions.handshake_state_wire_for(&flow.forward_key) };
                                         // #1789: count failed publishes so
                                         // map-at-capacity / stale-fd
                                         // failures are visible in release
@@ -5298,7 +5304,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // #8125: see the sibling site.
                                         let ct_timeout_secs =
                                             sessions.timeout_secs_for(&flow.forward_key);
-                                        publish_bpf_conntrack_entry_under_gate(
+                                        publish_bpf_conntrack_entry_under_gate_with_source_nat(
                                             conntrack_v4_fd,
                                             conntrack_v6_fd,
                                             &flow.forward_key,
@@ -5310,6 +5316,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             ct_session_id,
                                             ct_timeout_secs,
                                             SessionOrigin::ForwardFlow,
+                                            forward_entry.source_nat_static,
                                         );
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,
@@ -5582,23 +5589,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             }
                                         }
                                         created += 1;
-                                        let reverse_entry = SyncedSessionEntry {
-                                            key: reverse_key,
-                                            decision: reverse_decision,
-                                            metadata: reverse_metadata,
-                                            leak_incarnation: reverse_leak_incarnation.unwrap_or(0),
-                                            origin: SessionOrigin::ReverseFlow,
-                                            protocol: meta.protocol,
-                                            tcp_flags: meta.tcp_flags,
-                                            // Local reverse-flow learn (#2170): no peer gen.
-                                            generation: 0,
-                                            // #5212: a reverse companion never emits
-                                            // RT_FLOW (is_reverse skip) and gets its own
-                                            // fresh id at install — no carried id.
-                                            session_id: 0,
-                                            tcp_close_class: 0,
-                                            tcp_handshake_state: sessions.handshake_state_wire_for(&flow.forward_key),
-                                        };
+                                        let reverse_entry = SyncedSessionEntry { key: reverse_key,
+                                        decision: reverse_decision,
+                                        metadata: reverse_metadata,
+                                        leak_incarnation: reverse_leak_incarnation.unwrap_or(0),
+                                        origin: SessionOrigin::ReverseFlow,
+                                        protocol: meta.protocol,
+                                        tcp_flags: meta.tcp_flags,
+                                        // Local reverse-flow learn (#2170): no peer gen.
+                                        generation: 0,
+                                        // #5212: a reverse companion never emits
+                                        // RT_FLOW (is_reverse skip) and gets its own
+                                        // fresh id at install — no carried id.
+                                        session_id: 0,
+                                        tcp_close_class: 0,
+                                        tcp_handshake_state: sessions.handshake_state_wire_for(&flow.forward_key), source_nat_static: None };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,
                                             worker_ctx.shared_nat_sessions,
@@ -9217,7 +9222,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         sessions.note_admission_refused();
                                     }
                                     let pending_installed = pending_capacity_available
-                                        && sessions.install_with_protocol_with_origin(
+                                        && sessions.install_with_protocol_with_origin_and_source_nat(
                                             flow.forward_key.clone(),
                                             pending_decision,
                                             sess_meta.clone(),
@@ -9225,6 +9230,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             now_ns,
                                             meta.protocol,
                                             meta.tcp_flags,
+                                            source_nat_static,
                                         );
                                     if pending_installed {
                                         sessions.mark_source_nat_revalidated(
@@ -9253,22 +9259,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         if let Some(c) = source_nat_counter.as_ref() {
                                             c.add(nat_hit_len);
                                         }
-                                        let entry = SyncedSessionEntry {
-                                            key: flow.forward_key.clone(),
-                                            decision: pending_decision,
-                                            metadata: sess_meta,
-                                            leak_incarnation: pending_leak_incarnation.unwrap_or(0),
-                                            origin: SessionOrigin::MissingNeighborSeed,
-                                            protocol: meta.protocol,
-                                            tcp_flags: meta.tcp_flags,
-                                            // Local missing-neighbor seed (#2170): no peer gen.
-                                            generation: 0,
-                                            // #9582: carry the seed's stable id, so replicas
-                                            // adopt it (see the forward-flow publish above).
-                                            session_id: sessions.session_id_for(&flow.forward_key),
-                                            tcp_close_class: 0,
-                                            tcp_handshake_state: sessions.handshake_state_wire_for(&flow.forward_key),
-                                        };
+                                        let entry = SyncedSessionEntry { key: flow.forward_key.clone(),
+                                        decision: pending_decision,
+                                        metadata: sess_meta,
+                                        source_nat_static,
+                                        leak_incarnation: pending_leak_incarnation.unwrap_or(0),
+                                        origin: SessionOrigin::MissingNeighborSeed,
+                                        protocol: meta.protocol,
+                                        tcp_flags: meta.tcp_flags,
+                                        // Local missing-neighbor seed (#2170): no peer gen.
+                                        generation: 0,
+                                        // #9582: carry the seed's stable id, so replicas
+                                        // adopt it (see the forward-flow publish above).
+                                        session_id: sessions.session_id_for(&flow.forward_key),
+                                        tcp_close_class: 0,
+                                        tcp_handshake_state: sessions.handshake_state_wire_for(&flow.forward_key) };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,
                                             worker_ctx.shared_nat_sessions,
@@ -9316,7 +9321,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // #8125: see the sibling site.
                                         let timeout_secs =
                                             sessions.timeout_secs_for(&flow.forward_key);
-                                        publish_bpf_conntrack_entry(
+                                        publish_bpf_conntrack_entry_with_source_nat(
                                             conntrack_v4_fd,
                                             conntrack_v6_fd,
                                             &flow.forward_key,
@@ -9328,6 +9333,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             session_id,
                                             timeout_secs,
                                             SessionOrigin::MissingNeighborSeed,
+                                            entry.source_nat_static,
                                         );
                                         // #2244: count failed reverse-NAT publishes so
                                         // map-pressure loss is operator-visible.

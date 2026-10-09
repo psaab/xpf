@@ -2378,6 +2378,10 @@ impl SessionTable {
             }
         }
     }
+    /// Return the ordinary source-NAT origin recorded on this session.
+    pub(crate) fn source_nat_static_for(&self, key: &SessionKey) -> Option<bool> {
+        self.entry_by_key(key).and_then(|entry| entry.source_nat_static)
+    }
 
     /// #10507: the receiver-local provenance paired with the zone policy
     /// stamp. The hit-row fast path answers freshness+authority through
@@ -3141,26 +3145,25 @@ impl SessionTable {
         // The metadata clone bumps the bound policy-counter Arc (#5445). That is
         // acceptable here only because this runs on a class transition, never
         // on the per-packet path.
-        let delta = SessionDelta {
-            provenance: crate::session::ExportProvenance::Incremental,
-            kind: SessionDeltaKind::Update,
-            key: forward_key.clone(),
-            decision: forward.decision,
-            metadata: forward.metadata.clone(),
-            policy_generation: forward.policy_generation,
-            origin: forward.origin,
-            fabric_redirect_sync: false,
-            created_ns: forward.created_ns,
-            last_seen_ns: forward.last_seen_ns,
-            counters: SessionCounters::default(),
-            observed_tos: forward.observed_tos,
-            observed_tcp_flags: forward.observed_tcp_flags,
-            session_id: forward.session_id,
-            bulk_resync: false,
-            tcp_close_class: forward.tcp_close_class_wire(),
-            purge_retirement: false,
-            tcp_handshake_state: forward.tcp_handshake_state_wire(forward_key.protocol),
-        };
+        let delta = SessionDelta { provenance: crate::session::ExportProvenance::Incremental,
+        kind: SessionDeltaKind::Update,
+        key: forward_key.clone(),
+        decision: forward.decision,
+        metadata: forward.metadata.clone(),
+        policy_generation: forward.policy_generation,
+        origin: forward.origin,
+        fabric_redirect_sync: false,
+        created_ns: forward.created_ns,
+        last_seen_ns: forward.last_seen_ns,
+        counters: SessionCounters::default(),
+        observed_tos: forward.observed_tos,
+        observed_tcp_flags: forward.observed_tcp_flags,
+        session_id: forward.session_id,
+        bulk_resync: false,
+        tcp_close_class: forward.tcp_close_class_wire(),
+        purge_retirement: false,
+        tcp_handshake_state: forward.tcp_handshake_state_wire(forward_key.protocol),
+        source_nat_static: forward.source_nat_static };
         self.push_delta(delta);
     }
 
@@ -3346,6 +3349,7 @@ impl SessionTable {
         // Snapshot the OLD index-relevant + collision-relevant state (all Copy).
         let old_origin = record.entry.origin;
         let old_nat = record.entry.decision.nat;
+        let old_source_nat_static = record.entry.source_nat_static;
         let old_is_reverse = record.entry.metadata.is_reverse;
         let old_owner_rg = record.entry.metadata.owner_rg_id;
         let old_ingress_zone = record.entry.metadata.ingress_zone;
@@ -3404,7 +3408,11 @@ impl SessionTable {
                 .expect("handle validated above");
             record.entry.decision = decision;
             record.entry.source_nat_revalidated = None;
-            record.entry.source_nat_static = None;
+            record.entry.source_nat_static = if old_nat == decision.nat {
+                old_source_nat_static
+            } else {
+                None
+            };
             record.entry.forwarding_generation = self.forwarding_revalidation_gen;
             record.entry.metadata = metadata.clone();
             record.entry.origin = origin;
@@ -3563,26 +3571,25 @@ impl SessionTable {
             let tcp_close_class = self.close_class_wire_for(key);
             let tcp_handshake_state = self.handshake_state_wire_for(key);
             let policy_generation = self.entry_by_key(key).map(|e| e.policy_generation).unwrap_or(0);
-            self.push_delta(SessionDelta {
-                provenance: crate::session::ExportProvenance::Incremental,
-                tcp_close_class,
-                tcp_handshake_state,
-                purge_retirement: false,
-                kind: SessionDeltaKind::Open,
-                key: key.clone(),
-                decision,
-                metadata,
-                origin,
-                policy_generation,
-                fabric_redirect_sync: false,
-                created_ns,
-                last_seen_ns: now_ns,
-                counters,
-                observed_tos,
-                observed_tcp_flags,
-                session_id,
-                bulk_resync: false,
-            });
+            let source_nat_static = self.source_nat_static_for(key);
+            self.push_delta(SessionDelta { provenance: crate::session::ExportProvenance::Incremental,
+            tcp_close_class,
+            tcp_handshake_state,
+            purge_retirement: false,
+            kind: SessionDeltaKind::Open,
+            key: key.clone(),
+            decision,
+            metadata,
+            origin,
+            policy_generation,
+            fabric_redirect_sync: false,
+            created_ns,
+            last_seen_ns: now_ns,
+            counters,
+            observed_tos,
+            observed_tcp_flags,
+            session_id,
+            bulk_resync: false, source_nat_static });
         }
         true
     }
@@ -3783,6 +3790,7 @@ impl SessionTable {
             return false;
         }
         let old_nat = record.entry.decision.nat;
+        let old_source_nat_static = record.entry.source_nat_static;
         let old_is_reverse = record.entry.metadata.is_reverse;
         let old_owner_rg = record.entry.metadata.owner_rg_id;
         let old_origin = record.entry.origin;
@@ -3817,7 +3825,11 @@ impl SessionTable {
                 .expect("handle validated above");
             record.entry.decision = decision;
             record.entry.source_nat_revalidated = None;
-            record.entry.source_nat_static = None;
+            record.entry.source_nat_static = if old_nat == new_nat {
+                old_source_nat_static
+            } else {
+                None
+            };
             record.entry.metadata = metadata;
             // #10507 A2 (Main-approved deviation, Option A — see A1): Fresh-only.
             // Stale retains its Recorded fence; Fresh resets to force cold.

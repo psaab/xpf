@@ -264,54 +264,52 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
     // The tunnel's zone, both directions — same as GRE (`egress_zone_id` on
     // the tunnel logical: "what zone is this tunnel in").
     let zone_id = forwarding.egress_zone_id(logical_ifindex);
-    let forward = SyncedSessionEntry {
-        key: parsed.flow.forward_key.clone(),
-        decision,
-        metadata: SessionMetadata {
-            ingress_zone: zone_id,
-            egress_zone: zone_id,
-            ingress_zone_check: crate::session::zone_vintage_check_for_id(
-                &forwarding.zone_id_to_name,
-                zone_id,
-            ),
-            egress_zone_check: crate::session::zone_vintage_check_for_id(
-                &forwarding.zone_id_to_name,
-                zone_id,
-            ),
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            owner_rg_id: owner_rg_for_resolution(forwarding, decision.resolution),
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            // Self-originated: no admitting policy/application (Junos runs no
-            // security policy on firewall-self-originated traffic, #6224), so
-            // zeroed policy fields + the global per-protocol idle timeout
-            // (`None`), exactly like the GRE local-origin builder.
-            // `TunOrigin` (item 5) is POSITIVE provenance — stamped only
-            // here and in the GRE builder — never a peer wire import.
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-        },
-        leak_incarnation: 0,
-        origin: SessionOrigin::TunOrigin,
-        protocol: parsed.meta.protocol,
-        tcp_flags: if parsed.meta.protocol == PROTO_TCP {
-            extract_tcp_flags_and_window(&parsed.frame)
-                .map(|(flags, _)| flags)
-                .unwrap_or_default()
-        } else {
-            0
-        },
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let forward = SyncedSessionEntry { key: parsed.flow.forward_key.clone(),
+    decision,
+    metadata: SessionMetadata {
+        ingress_zone: zone_id,
+        egress_zone: zone_id,
+        ingress_zone_check: crate::session::zone_vintage_check_for_id(
+            &forwarding.zone_id_to_name,
+            zone_id,
+        ),
+        egress_zone_check: crate::session::zone_vintage_check_for_id(
+            &forwarding.zone_id_to_name,
+            zone_id,
+        ),
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: owner_rg_for_resolution(forwarding, decision.resolution),
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        // Self-originated: no admitting policy/application (Junos runs no
+        // security policy on firewall-self-originated traffic, #6224), so
+        // zeroed policy fields + the global per-protocol idle timeout
+        // (`None`), exactly like the GRE local-origin builder.
+        // `TunOrigin` (item 5) is POSITIVE provenance — stamped only
+        // here and in the GRE builder — never a peer wire import.
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    },
+    leak_incarnation: 0,
+    origin: SessionOrigin::TunOrigin,
+    protocol: parsed.meta.protocol,
+    tcp_flags: if parsed.meta.protocol == PROTO_TCP {
+        extract_tcp_flags_and_window(&parsed.frame)
+            .map(|(flags, _)| flags)
+            .unwrap_or_default()
+    } else {
+        0
+    },
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     // Table-scoped synthesis (item 6): the reply target resolves in the
     // tunnel's instance table, so a VRF reverse finds its connected/local
     // view instead of NoRoute-ing against inet.0.

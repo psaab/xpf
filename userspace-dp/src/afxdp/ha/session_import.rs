@@ -737,7 +737,7 @@ impl crate::afxdp::ha::SessionDomain {
     ) -> crate::afxdp::bpf_map::ConntrackPublishResult {
         let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
         let v6_fd = maps.conntrack_v6_fd.as_ref().map_or(-1, |fd| fd.fd);
-        crate::afxdp::bpf_map::publish_bpf_conntrack_entry_under_gate(
+        crate::afxdp::bpf_map::publish_bpf_conntrack_entry_under_gate_with_source_nat(
             v4_fd,
             v6_fd,
             &entry.key,
@@ -749,6 +749,7 @@ impl crate::afxdp::ha::SessionDomain {
             entry.session_id,
             0,
             entry.origin,
+            entry.source_nat_static,
         )
     }
 
@@ -2156,24 +2157,22 @@ impl crate::afxdp::ha::SessionDomain {
             policy_counter_idx: 0,
             policy_counter: None,
         };
-        let _ = self.upsert_synced_session(SyncedSessionEntry {
-            key,
-            decision: SessionDecision {
-                resolution,
-                nat: NatDecision::default(),
-                install_table_domain: 0,
-                install_table_check: 0,
-            },
-            metadata,
-            leak_incarnation: 0,
-            origin: SessionOrigin::ForwardFlow,
-            protocol: PROTO_TCP,
-            tcp_flags: 0,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-        });
+        let _ = self.upsert_synced_session(SyncedSessionEntry { key,
+        decision: SessionDecision {
+            resolution,
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::ForwardFlow,
+        protocol: PROTO_TCP,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0, source_nat_static: None });
     }
 }
 
@@ -2280,53 +2279,51 @@ mod rejected_mirror_reservation_10790_tests {
         generation: u64,
         session_id: u64,
     ) -> SyncedSessionEntry {
-        SyncedSessionEntry {
-            key,
-            decision: SessionDecision {
-                resolution: ForwardingResolution {
-                    disposition: ForwardingDisposition::ForwardCandidate,
-                    local_ifindex: 0,
-                    egress_ifindex: 12,
-                    tx_ifindex: 12,
-                    tunnel_endpoint_id: 0,
-                    next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-                    neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-                    src_mac: None,
-                    tx_vlan_id: 0,
-                    route_mtu: 0,
-                    transport_route_mtu: 0,
-                },
-                nat,
-                install_table_domain: 0,
-                install_table_check: 0,
+        SyncedSessionEntry { key,
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: None,
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
-            metadata: SessionMetadata {
-                ingress_zone: 1,
-                egress_zone: 2,
-                ingress_zone_check: 0,
-                egress_zone_check: 0,
-                ingress_ifindex: 0,
-                ingress_vlan_id: 0,
-                owner_rg_id: 1,
-                fabric_ingress: false,
-                is_reverse: false,
-                nat64_reverse: None,
-                log_session_init: false,
-                log_session_close: false,
-                policy_id: 0,
-                inactivity_timeout_ns: None,
-                policy_counter_idx: 0,
-                policy_counter: None,
-            },
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: 0x10,
-            generation,
-            session_id,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-        }
+            nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: SessionMetadata {
+            ingress_zone: 1,
+            egress_zone: 2,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation,
+        session_id,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0, source_nat_static: None }
     }
 
     fn reserve_nat64_translation(coordinator: &Coordinator, entry: &SyncedSessionEntry) {
@@ -2407,57 +2404,55 @@ mod rejected_mirror_reservation_10790_tests {
             routing_domain: 0,
         };
         let pool_port = 23_090;
-        let entry = SyncedSessionEntry {
-            key: key.clone(),
-            decision: SessionDecision {
-                resolution: ForwardingResolution {
-                    disposition: ForwardingDisposition::ForwardCandidate,
-                    local_ifindex: 0,
-                    egress_ifindex: 12,
-                    tx_ifindex: 12,
-                    tunnel_endpoint_id: 0,
-                    next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
-                    neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
-                    src_mac: None,
-                    tx_vlan_id: 0,
-                    route_mtu: 0,
-                    transport_route_mtu: 0,
-                },
-                nat: NatDecision {
-                    rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
-                    rewrite_src_port: Some(pool_port),
-                    ..NatDecision::default()
-                },
-                install_table_domain: 0,
-                install_table_check: 0,
+        let entry = SyncedSessionEntry { key: key.clone(),
+        decision: SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: None,
+                tx_vlan_id: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
             },
-            metadata: SessionMetadata {
-                ingress_zone: 1,
-                egress_zone: 2,
-                ingress_zone_check: 0,
-                egress_zone_check: 0,
-                ingress_ifindex: 0,
-                ingress_vlan_id: 0,
-                owner_rg_id: 1,
-                fabric_ingress: false,
-                is_reverse: false,
-                nat64_reverse: None,
-                log_session_init: false,
-                log_session_close: false,
-                policy_id: 0,
-                inactivity_timeout_ns: None,
-                policy_counter_idx: 0,
-                policy_counter: None,
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+                rewrite_src_port: Some(pool_port),
+                ..NatDecision::default()
             },
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: 0,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-        };
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: SessionMetadata {
+            ingress_zone: 1,
+            egress_zone: 2,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+        },
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0, source_nat_static: None };
         let allocator = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
         assert!(
             !allocator.debug_is_port_occupied(0, pool_port),

@@ -1319,7 +1319,62 @@ const (
 	SessFlagNAT64         = 1 << 7
 	SessFlagNPTV6         = 1 << 8 // bit 8 -- requires uint16 Flags
 	SessFlagClusterSynced = 1 << 9 // #10227 peer-synced origin marker
+	// SessFlagSNATProvenanceKnown is bit 10 (#12187): the known-provenance
+	// marker for the source-NAT provenance carried in Flags. With the marker
+	// set, SessFlagStaticNAT (bit 6) says static (2) when set and dynamic
+	// SNAT (1) when clear; with the marker clear the provenance is unknown
+	// (0, legacy) and bit 6 is ignored. Uses the next unused uint16 bit
+	// after the #10227 origin marker; the BPF C header owns no bit 10 yet,
+	// so eBPF classifiers never test it.
+	SessFlagSNATProvenanceKnown = 1 << 10
 )
+
+// Source-NAT provenance values (#12187), the Go mirror of the Rust
+// `source_nat_provenance` numeric enum carried on the session-delta JSON leg,
+// the binary open/update records, and SessionSyncRequest. 0 is unknown/legacy
+// and is omitted on every wire encoding (legacy-safe); 1 is dynamic SNAT and
+// 2 is static SNAT.
+const (
+	SourceNatProvenanceUnknown uint8 = 0
+	SourceNatProvenanceDynamic uint8 = 1
+	SourceNatProvenanceStatic  uint8 = 2
+)
+
+// NormalizeSourceNatProvenance clamps unknown/future wire values to unknown so
+// a newer sender's provenance never mis-decodes as static or dynamic here.
+func NormalizeSourceNatProvenance(provenance uint8) uint8 {
+	if provenance > SourceNatProvenanceStatic {
+		return SourceNatProvenanceUnknown
+	}
+	return provenance
+}
+
+// SourceNatProvenanceFromFlags decodes the #12187 two-bit provenance from
+// SessionValue.Flags. No marker => unknown/legacy (bit 6 ignored); marker set
+// => static when bit 6 is set, dynamic otherwise.
+func SourceNatProvenanceFromFlags(flags uint16) uint8 {
+	if flags&SessFlagSNATProvenanceKnown == 0 {
+		return SourceNatProvenanceUnknown
+	}
+	if flags&SessFlagStaticNAT != 0 {
+		return SourceNatProvenanceStatic
+	}
+	return SourceNatProvenanceDynamic
+}
+
+// WithSourceNatProvenance stamps the #12187 two-bit provenance onto flags,
+// clearing both the marker and the static bit for unknown so a stale static
+// bit can never leak into a legacy/unknown reading.
+func WithSourceNatProvenance(flags uint16, provenance uint8) uint16 {
+	switch NormalizeSourceNatProvenance(provenance) {
+	case SourceNatProvenanceStatic:
+		return flags | SessFlagSNATProvenanceKnown | SessFlagStaticNAT
+	case SourceNatProvenanceDynamic:
+		return (flags &^ SessFlagStaticNAT) | SessFlagSNATProvenanceKnown
+	default:
+		return flags &^ (SessFlagSNATProvenanceKnown | SessFlagStaticNAT)
+	}
+}
 
 // StaticNATKeyV4 mirrors the C struct static_nat_key_v4.
 type StaticNATKeyV4 struct {

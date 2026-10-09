@@ -308,141 +308,139 @@ pub(in crate::afxdp) fn session_delta_info(
         nat64_snat_v4,
         source_nat_icmp,
     } = SessionSyncAttribution::from_session(&delta.decision, &delta.metadata);
-    SessionDeltaInfo {
-        timestamp: Utc::now(),
-        slot: ident.slot,
-        queue_id: ident.queue_id,
-        worker_id: ident.worker_id,
-        interface: ident.interface.to_string(),
-        ifindex: ident.ifindex,
-        event: session_delta_event(delta.kind).to_string(),
-        addr_family: delta.key.addr_family,
-        protocol: delta.key.protocol,
-        src_ip: delta.key.src_ip.to_string(),
-        dst_ip: delta.key.dst_ip.to_string(),
-        src_port: delta.key.src_port,
-        dst_port: delta.key.dst_port,
-        ingress_zone: ingress_name,
-        egress_zone: egress_name,
-        ingress_zone_id: delta.metadata.ingress_zone,
-        egress_zone_id: delta.metadata.egress_zone,
-        ingress_ifindex: i32::try_from(delta.metadata.ingress_ifindex).unwrap_or(i32::MAX),
-        ingress_vlan_id: delta.metadata.ingress_vlan_id,
-        owner_rg_id: delta.metadata.owner_rg_id,
-        disposition: match delta.decision.resolution.disposition {
-            ForwardingDisposition::ForwardCandidate => "forward_candidate",
-            ForwardingDisposition::LocalDelivery => "local_delivery",
-            ForwardingDisposition::NoRoute => "no_route",
-            ForwardingDisposition::MissingNeighbor => "missing_neighbor",
-            ForwardingDisposition::PolicyDenied => "policy_denied",
-            ForwardingDisposition::FabricRedirect => "fabric_redirect",
-            ForwardingDisposition::HAInactive => "ha_inactive",
-            ForwardingDisposition::DiscardRoute => "discard_route",
-            ForwardingDisposition::NextTableUnsupported => "next_table_unsupported",
-            ForwardingDisposition::TableUnavailable => "table_unavailable",
-        }
-        .to_string(),
-        origin: delta.origin.as_str().to_string(),
-        egress_ifindex: delta.decision.resolution.egress_ifindex,
-        tx_ifindex: delta.decision.resolution.tx_ifindex,
-        tunnel_endpoint_id: delta.decision.resolution.tunnel_endpoint_id,
-        tx_vlan_id: delta.decision.resolution.tx_vlan_id,
-        next_hop: delta
-            .decision
-            .resolution
-            .next_hop
-            .map(|ip| ip.to_string())
-            .unwrap_or_default(),
-        neighbor_mac: delta
-            .decision
-            .resolution
-            .neighbor_mac
-            .map(format_mac)
-            .unwrap_or_default(),
-        src_mac: delta
-            .decision
-            .resolution
-            .src_mac
-            .map(format_mac)
-            .unwrap_or_default(),
-        nat_src_ip: delta
-            .decision
-            .nat
-            .rewrite_src
-            .map(|ip| ip.to_string())
-            .unwrap_or_default(),
-        nat_dst_ip: delta
-            .decision
-            .nat
-            .rewrite_dst
-            .map(|ip| ip.to_string())
-            .unwrap_or_default(),
-        nat_src_port: delta.decision.nat.rewrite_src_port.unwrap_or(0),
-        nat_dst_port: delta.decision.nat.rewrite_dst_port.unwrap_or(0),
-        fabric_redirect: delta.fabric_redirect_sync
-            || delta.decision.resolution.disposition == ForwardingDisposition::FabricRedirect,
-        fabric_ingress: delta.metadata.fabric_ingress,
-        // #2785: carry the per-policy log selection on the JSON fallback
-        // delta so the synced session logs identically after failover.
-        log_session_init: delta.metadata.log_session_init,
-        log_session_close: delta.metadata.log_session_close,
-        // #6312: carry the ORIGINATING node's stable RT_FLOW session id on the
-        // JSON leg too. `SessionDelta.session_id` is the same value the binary
-        // open frame's trailing u64 carries (#5212); before this the JSON leg
-        // dropped it and a session recovered through a full resync lost its
-        // cross-node correlation. 0 (a synthesized delta with no backing entry)
-        // keeps the legacy "peer allocates a fresh local id" behaviour.
-        rt_flow_session_id: delta.session_id,
-        // #7239 (#7160/#2387): carry the key's ROUTING DOMAIN on the JSON leg
-        // too, at parity with the binary open frame's trailing u32. The value
-        // comes off the KEY, so it is the domain stamped at install from the
-        // interface the flow actually arrived on — which is the whole reason it
-        // is carried rather than re-derived on the peer from an ingress fold
-        // that can name a recycled sibling.
-        routing_domain: crate::session::routing_domain_to_wire(delta.key.routing_domain),
-        // #6949: carry the admitting policy's firewall metadata on the JSON leg
-        // too. The binary open frame has carried policy_id/policy_counter_idx
-        // since #3301 and the app timeout since #3227; this leg carried none,
-        // so a session recovered through the drain fallback or a FullResync
-        // export imported policy 0 (rendered `unattributed`, and excluded from
-        // the commit-time deletion-clear and the #4234 policy-rematch because
-        // id 0 is skipped there), no per-rule hit counter, and the global idle
-        // timeout instead of its per-application one.
-        policy_id,
-        policy_counter_idx,
-        policy_rule_id: policy_rule_id.to_string(),
-        app_timeout: inactivity_timeout_secs,
-        // #6949/#4565: without the pool source a NAT64 session promoted from
-        // this leg cannot rebuild its reverse v4->v6 BIB at all — the standby
-        // cannot derive it from the synced forward v6 key.
-        nat64,
-        nat64_snat_v4: nat64_snat_v4_string(nat64_snat_v4),
-        source_nat_icmp_valid: source_nat_icmp.is_some(),
-        source_nat_icmp_type: source_nat_icmp.map_or(0, |icmp| icmp.0),
-        source_nat_icmp_code: source_nat_icmp.map_or(0, |icmp| icmp.1),
-        // #7188: carry the session key's tunnel discriminator on the JSON leg.
-        // Read from `delta.key`, the SAME key the binary open frame encodes, so
-        // the two legs cannot describe one session's identity differently. A
-        // non-GRE session encodes `None`, which is an EXPLICIT statement and not
-        // the reserved absent tag 0 — that distinction is what lets the receiver
-        // withhold a protocol-47 session from a peer that cannot express it
-        // instead of importing it aliased onto another tunnel's key.
-        tunnel_discriminator: delta.key.discriminator.to_wire(),
-        // #9412: the close class, on the JSON leg exactly as on the binary frame.
-        tcp_close_class: delta.tcp_close_class,
-        // #10888: carry the independent handshake phase on the JSON leg.
-        tcp_handshake_state: delta.tcp_handshake_state,
-        // #9752: the installing-table identity, on the JSON leg exactly as on
-        // the binary frame's trailing pair. Read from `delta.decision`, the
-        // SAME decision the binary open frame encodes, so the two legs cannot
-        // describe one session's table differently.
-        install_table_domain: delta.decision.install_table_domain,
-        install_table_check: delta.decision.install_table_check,
-        // #9752: the purge-retirement marker, exactly as on the binary close
-        // frame's trailing byte. Only meaningful on Close deltas; opens carry
-        // false (the emit paths never set it there).
-        purge_retirement: delta.purge_retirement,
+    SessionDeltaInfo { timestamp: Utc::now(),
+    slot: ident.slot,
+    queue_id: ident.queue_id,
+    worker_id: ident.worker_id,
+    interface: ident.interface.to_string(),
+    ifindex: ident.ifindex,
+    event: session_delta_event(delta.kind).to_string(),
+    addr_family: delta.key.addr_family,
+    protocol: delta.key.protocol,
+    src_ip: delta.key.src_ip.to_string(),
+    dst_ip: delta.key.dst_ip.to_string(),
+    src_port: delta.key.src_port,
+    dst_port: delta.key.dst_port,
+    ingress_zone: ingress_name,
+    egress_zone: egress_name,
+    ingress_zone_id: delta.metadata.ingress_zone,
+    egress_zone_id: delta.metadata.egress_zone,
+    ingress_ifindex: i32::try_from(delta.metadata.ingress_ifindex).unwrap_or(i32::MAX),
+    ingress_vlan_id: delta.metadata.ingress_vlan_id,
+    owner_rg_id: delta.metadata.owner_rg_id,
+    disposition: match delta.decision.resolution.disposition {
+        ForwardingDisposition::ForwardCandidate => "forward_candidate",
+        ForwardingDisposition::LocalDelivery => "local_delivery",
+        ForwardingDisposition::NoRoute => "no_route",
+        ForwardingDisposition::MissingNeighbor => "missing_neighbor",
+        ForwardingDisposition::PolicyDenied => "policy_denied",
+        ForwardingDisposition::FabricRedirect => "fabric_redirect",
+        ForwardingDisposition::HAInactive => "ha_inactive",
+        ForwardingDisposition::DiscardRoute => "discard_route",
+        ForwardingDisposition::NextTableUnsupported => "next_table_unsupported",
+        ForwardingDisposition::TableUnavailable => "table_unavailable",
     }
+    .to_string(),
+    origin: delta.origin.as_str().to_string(),
+    egress_ifindex: delta.decision.resolution.egress_ifindex,
+    tx_ifindex: delta.decision.resolution.tx_ifindex,
+    tunnel_endpoint_id: delta.decision.resolution.tunnel_endpoint_id,
+    tx_vlan_id: delta.decision.resolution.tx_vlan_id,
+    next_hop: delta
+        .decision
+        .resolution
+        .next_hop
+        .map(|ip| ip.to_string())
+        .unwrap_or_default(),
+    neighbor_mac: delta
+        .decision
+        .resolution
+        .neighbor_mac
+        .map(format_mac)
+        .unwrap_or_default(),
+    src_mac: delta
+        .decision
+        .resolution
+        .src_mac
+        .map(format_mac)
+        .unwrap_or_default(),
+    nat_src_ip: delta
+        .decision
+        .nat
+        .rewrite_src
+        .map(|ip| ip.to_string())
+        .unwrap_or_default(),
+    nat_dst_ip: delta
+        .decision
+        .nat
+        .rewrite_dst
+        .map(|ip| ip.to_string())
+        .unwrap_or_default(),
+    nat_src_port: delta.decision.nat.rewrite_src_port.unwrap_or(0),
+    nat_dst_port: delta.decision.nat.rewrite_dst_port.unwrap_or(0),
+    fabric_redirect: delta.fabric_redirect_sync
+        || delta.decision.resolution.disposition == ForwardingDisposition::FabricRedirect,
+    fabric_ingress: delta.metadata.fabric_ingress,
+    // #2785: carry the per-policy log selection on the JSON fallback
+    // delta so the synced session logs identically after failover.
+    log_session_init: delta.metadata.log_session_init,
+    log_session_close: delta.metadata.log_session_close,
+    // #6312: carry the ORIGINATING node's stable RT_FLOW session id on the
+    // JSON leg too. `SessionDelta.session_id` is the same value the binary
+    // open frame's trailing u64 carries (#5212); before this the JSON leg
+    // dropped it and a session recovered through a full resync lost its
+    // cross-node correlation. 0 (a synthesized delta with no backing entry)
+    // keeps the legacy "peer allocates a fresh local id" behaviour.
+    rt_flow_session_id: delta.session_id,
+    // #7239 (#7160/#2387): carry the key's ROUTING DOMAIN on the JSON leg
+    // too, at parity with the binary open frame's trailing u32. The value
+    // comes off the KEY, so it is the domain stamped at install from the
+    // interface the flow actually arrived on — which is the whole reason it
+    // is carried rather than re-derived on the peer from an ingress fold
+    // that can name a recycled sibling.
+    routing_domain: crate::session::routing_domain_to_wire(delta.key.routing_domain),
+    // #6949: carry the admitting policy's firewall metadata on the JSON leg
+    // too. The binary open frame has carried policy_id/policy_counter_idx
+    // since #3301 and the app timeout since #3227; this leg carried none,
+    // so a session recovered through the drain fallback or a FullResync
+    // export imported policy 0 (rendered `unattributed`, and excluded from
+    // the commit-time deletion-clear and the #4234 policy-rematch because
+    // id 0 is skipped there), no per-rule hit counter, and the global idle
+    // timeout instead of its per-application one.
+    policy_id,
+    policy_counter_idx,
+    policy_rule_id: policy_rule_id.to_string(),
+    app_timeout: inactivity_timeout_secs,
+    // #6949/#4565: without the pool source a NAT64 session promoted from
+    // this leg cannot rebuild its reverse v4->v6 BIB at all — the standby
+    // cannot derive it from the synced forward v6 key.
+    nat64,
+    nat64_snat_v4: nat64_snat_v4_string(nat64_snat_v4),
+    source_nat_icmp_valid: source_nat_icmp.is_some(),
+    source_nat_icmp_type: source_nat_icmp.map_or(0, |icmp| icmp.0),
+    source_nat_icmp_code: source_nat_icmp.map_or(0, |icmp| icmp.1),
+    // #7188: carry the session key's tunnel discriminator on the JSON leg.
+    // Read from `delta.key`, the SAME key the binary open frame encodes, so
+    // the two legs cannot describe one session's identity differently. A
+    // non-GRE session encodes `None`, which is an EXPLICIT statement and not
+    // the reserved absent tag 0 — that distinction is what lets the receiver
+    // withhold a protocol-47 session from a peer that cannot express it
+    // instead of importing it aliased onto another tunnel's key.
+    tunnel_discriminator: delta.key.discriminator.to_wire(),
+    // #9412: the close class, on the JSON leg exactly as on the binary frame.
+    tcp_close_class: delta.tcp_close_class,
+    // #10888: carry the independent handshake phase on the JSON leg.
+    tcp_handshake_state: delta.tcp_handshake_state,
+    // #9752: the installing-table identity, on the JSON leg exactly as on
+    // the binary frame's trailing pair. Read from `delta.decision`, the
+    // SAME decision the binary open frame encodes, so the two legs cannot
+    // describe one session's table differently.
+    install_table_domain: delta.decision.install_table_domain,
+    install_table_check: delta.decision.install_table_check,
+    // #9752: the purge-retirement marker, exactly as on the binary close
+    // frame's trailing byte. Only meaningful on Close deltas; opens carry
+    // false (the emit paths never set it there).
+    purge_retirement: delta.purge_retirement, source_nat_provenance: crate::session::source_nat_provenance_to_wire(delta.source_nat_static) }
 }
 
 /// #9856: direct CommandExport conversion — the CONTROL leg of the export.
@@ -478,26 +476,24 @@ pub(in crate::afxdp) fn export_close_direct(
     zone_id_to_name: &FastMap<u16, String>,
     tombstone: &crate::session::ExpiredSession,
 ) -> SessionDeltaInfo {
-    let delta = SessionDelta {
-        provenance: crate::session::ExportProvenance::Incremental,
-        kind: SessionDeltaKind::Close,
-        key: tombstone.key.clone(),
-        decision: tombstone.decision,
-        metadata: tombstone.metadata.clone(),
-        policy_generation: 0,
-        origin: tombstone.origin,
-        fabric_redirect_sync: false,
-        created_ns: 0,
-        last_seen_ns: 0,
-        counters: crate::session::SessionCounters::default(),
-        observed_tos: 0,
-        observed_tcp_flags: 0,
-        session_id: tombstone.session_id,
-        bulk_resync: true,
-        tcp_close_class: tombstone.close_class,
-        tcp_handshake_state: 0,
-        purge_retirement: false,
-    };
+    let delta = SessionDelta { provenance: crate::session::ExportProvenance::Incremental,
+    kind: SessionDeltaKind::Close,
+    key: tombstone.key.clone(),
+    decision: tombstone.decision,
+    metadata: tombstone.metadata.clone(),
+    policy_generation: 0,
+    origin: tombstone.origin,
+    fabric_redirect_sync: false,
+    created_ns: 0,
+    last_seen_ns: 0,
+    counters: crate::session::SessionCounters::default(),
+    observed_tos: 0,
+    observed_tcp_flags: 0,
+    session_id: tombstone.session_id,
+    bulk_resync: true,
+    tcp_close_class: tombstone.close_class,
+    tcp_handshake_state: 0,
+    purge_retirement: false, source_nat_static: None };
     session_delta_info(ident, &delta, zone_id_to_name)
 }
 
@@ -837,10 +833,8 @@ pub(super) fn flush_session_deltas(
         // survivor's peer row.
         let emit_owned: SessionDelta;
         let delta: &SessionDelta = if stale && scoped_id != delta.session_id {
-            emit_owned = SessionDelta {
-                session_id: scoped_id,
-                ..delta.clone()
-            };
+            emit_owned = SessionDelta { session_id: scoped_id,
+            ..delta.clone() };
             &emit_owned
         } else {
             delta

@@ -427,6 +427,7 @@ pub(super) fn source_nat_revocation_on_session_hit(
     decision: SessionDecision,
     flow: &SessionFlow,
     origin: SessionOrigin,
+    source_nat_static: Option<bool>,
 ) -> Option<PolicyRevocation> {
     let (forward_key, forward_decision, forward_metadata, forward_origin, canonical_key, stored_static) =
         if metadata.is_reverse {
@@ -474,7 +475,7 @@ pub(super) fn source_nat_revocation_on_session_hit(
                     metadata.clone(),
                     origin,
                     None,
-                    None,
+                    source_nat_static,
                 ),
             }
         };
@@ -571,6 +572,8 @@ fn policy_kind_for_resolution(resolution: ForwardingResolution) -> PolicyRevalid
 
 pub(super) fn revalidate_zone_policy_on_session_hit(
     forwarding: &ForwardingState,
+    conntrack_v4_fd: std::os::raw::c_int,
+    conntrack_v6_fd: std::os::raw::c_int,
     sessions: &mut SessionTable,
     // The matched entry's WIRE key (`ResolvedFlowSessionDecision::key`).
     session_key: &SessionKey,
@@ -605,6 +608,8 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     // #9604: reverse hits judge by the FORWARD companion (same stamp/zones, pair teardown) — never the swapped pair.
     if metadata.is_reverse {
         return reverse_hit_zone_policy(
+            conntrack_v4_fd,
+            conntrack_v6_fd,
             forwarding,
             sessions,
             session_key,
@@ -619,6 +624,7 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
             ingress_ifindex,
             ha_startup_grace_until_secs,
             decision,
+            metadata,
             meta,
         );
     }
@@ -778,6 +784,21 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
                 &canonical_key,
                 policy_kind_for_resolution(input.decision.resolution),
             );
+            if matches!(&gate.target, PolicyRevalidationTarget::Stale(_)) {
+                let app_id = forwarding.app_catalog.lookup_admitted(
+                    canonical_key.protocol,
+                    canonical_key.src_port,
+                    canonical_key.dst_port,
+                    input.metadata.is_reverse,
+                    input.decision.nat.rewrite_dst_port,
+                );
+                let _ = crate::afxdp::bpf_map::restamp_bpf_conntrack_app_id(
+                    conntrack_v4_fd,
+                    conntrack_v6_fd,
+                    &canonical_key,
+                    app_id,
+                );
+            }
             None
         }
         ZonePolicyJudgment::Decline if gate.fail_closed_decline => {
@@ -804,6 +825,7 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
     }
 }
 
+
 /// Test-only seam for exercising re-derivation without the descriptor MAC gate.
 #[cfg(test)]
 pub(crate) fn revalidate_zone_policy_declines_for_test(
@@ -820,6 +842,8 @@ pub(crate) fn revalidate_zone_policy_declines_for_test(
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     revalidate_zone_policy_on_session_hit(
         forwarding,
+        -1,
+        -1,
         sessions,
         session_key,
         metadata,
@@ -857,6 +881,8 @@ pub(crate) fn revalidate_zone_policy_revokes_for_test(
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     revalidate_zone_policy_on_session_hit(
         forwarding,
+        -1,
+        -1,
         sessions,
         session_key,
         metadata,
@@ -894,6 +920,8 @@ pub(crate) fn revalidate_zone_policy_revocation_for_test(
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     revalidate_zone_policy_on_session_hit(
         forwarding,
+        -1,
+        -1,
         sessions,
         session_key,
         metadata,
@@ -928,6 +956,8 @@ pub(crate) fn revalidate_zone_policy_sessionless_denies_for_test(
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     revalidate_zone_policy_on_session_hit(
         forwarding,
+        -1,
+        -1,
         sessions,
         session_key,
         metadata,
@@ -964,6 +994,8 @@ pub(crate) fn revalidate_zone_policy_canonical_key_for_test(
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     revalidate_zone_policy_on_session_hit(
         forwarding,
+        -1,
+        -1,
         sessions,
         session_key,
         metadata,
@@ -1249,6 +1281,8 @@ fn resolve_current_forward_companion(
 }
 
 fn reverse_hit_zone_policy(
+    conntrack_v4_fd: std::os::raw::c_int,
+    conntrack_v6_fd: std::os::raw::c_int,
     forwarding: &ForwardingState,
     sessions: &mut SessionTable,
     session_key: &SessionKey,
@@ -1263,6 +1297,7 @@ fn reverse_hit_zone_policy(
     ingress_ifindex: i32,
     ha_startup_grace_until_secs: u64,
     fallback_decision: SessionDecision,
+    hit_metadata: &SessionMetadata,
     meta: UserspaceDpMeta,
 ) -> Option<PolicyRevocation> {
     let PolicyGateAnswer {
@@ -1512,6 +1547,21 @@ fn reverse_hit_zone_policy(
                 &rev_canonical,
                 policy_kind_for_resolution(input.decision.resolution),
             );
+            if matches!(&rev_target, PolicyRevalidationTarget::Stale(_)) {
+                let app_id = forwarding.app_catalog.lookup_admitted(
+                    rev_canonical.protocol,
+                    rev_canonical.src_port,
+                    rev_canonical.dst_port,
+                    hit_metadata.is_reverse,
+                    fallback_decision.nat.rewrite_dst_port,
+                );
+                let _ = crate::afxdp::bpf_map::restamp_bpf_conntrack_app_id(
+                    conntrack_v4_fd,
+                    conntrack_v6_fd,
+                    &rev_canonical,
+                    app_id,
+                );
+            }
             None
         }
         ZonePolicyJudgment::Decline if rev_fail_closed_decline || companion_needs_live => {

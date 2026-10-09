@@ -32,6 +32,9 @@ pub(crate) struct SessionInstall {
     pub(crate) key: SessionKey,
     pub(crate) decision: SessionDecision,
     pub(crate) metadata: SessionMetadata,
+    /// Ordinary source-NAT origin from the HA wire; `None` remains unknown for
+    /// legacy peers and for sessions without an ordinary source translation.
+    pub(crate) source_nat_static: Option<bool>,
     pub(crate) origin: SessionOrigin,
     pub(crate) now_ns: u64,
     pub(crate) protocol: u8,

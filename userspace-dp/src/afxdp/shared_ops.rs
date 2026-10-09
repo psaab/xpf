@@ -910,6 +910,9 @@ pub(super) struct ResolvedFlowSessionDecision {
     pub(super) key: SessionKey,
     pub(super) session_id: u64,
     pub(super) decision: SessionDecision,
+    /// Ordinary source-NAT provenance from the installed or synced entry.
+    /// `None` preserves conservative, revocable behavior for legacy rows.
+    pub(super) source_nat_static: Option<bool>,
     pub(super) metadata: SessionMetadata,
     pub(super) origin: SessionOrigin,
     pub(super) created: bool,
@@ -1790,25 +1793,23 @@ pub(super) fn synthesized_synced_reverse_entry_in_table(
         table,
     );
     let metadata = reverse.metadata;
-    Some(SyncedSessionEntry {
-        key: reverse_key,
-        decision: reverse.decision,
-        metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: entry.protocol,
-        tcp_flags: entry.tcp_flags,
-        // #2170: the reverse companion inherits the forward entry's install
-        // generation so a delete refusal is consistent across both halves.
-        generation: entry.generation,
-        session_id: 0,
-        // #9412: the reverse half carries the SAME close class as the forward
-        // import. With 0, every close-state Update (and the takeover prewarm)
-        // re-installed the reverse copy on the established window, and
-        // `companion_keeps_alive` then held the closing forward alive with it.
-        tcp_close_class: entry.tcp_close_class,
-        tcp_handshake_state: entry.tcp_handshake_state,
-    })
+    Some(SyncedSessionEntry { key: reverse_key,
+    decision: reverse.decision,
+    metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: entry.protocol,
+    tcp_flags: entry.tcp_flags,
+    // #2170: the reverse companion inherits the forward entry's install
+    // generation so a delete refusal is consistent across both halves.
+    generation: entry.generation,
+    session_id: 0,
+    // #9412: the reverse half carries the SAME close class as the forward
+    // import. With 0, every close-state Update (and the takeover prewarm)
+    // re-installed the reverse copy on the established window, and
+    // `companion_keeps_alive` then held the closing forward alive with it.
+    tcp_close_class: entry.tcp_close_class,
+    tcp_handshake_state: entry.tcp_handshake_state, source_nat_static: None })
 }
 
 /// #10312: the reverse resolution plus the native installing-table identity
@@ -2052,20 +2053,18 @@ pub(super) fn install_reverse_session_from_forward_match(
         {
             SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
         }
-        let reverse_entry = SyncedSessionEntry {
-            key: reverse_key.clone(),
-            decision: reverse.decision,
-            metadata: reverse.metadata.clone(),
-            leak_incarnation: reverse_leak_incarnation,
-            origin: SessionOrigin::ReverseFlow,
-            protocol,
-            tcp_flags,
-            // Local reverse-flow learning: no peer install generation (#2170).
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: sessions.handshake_state_wire_for(reverse_key),
-        };
+        let reverse_entry = SyncedSessionEntry { key: reverse_key.clone(),
+        decision: reverse.decision,
+        metadata: reverse.metadata.clone(),
+        leak_incarnation: reverse_leak_incarnation,
+        origin: SessionOrigin::ReverseFlow,
+        protocol,
+        tcp_flags,
+        // Local reverse-flow learning: no peer install generation (#2170).
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: sessions.handshake_state_wire_for(reverse_key), source_nat_static: None };
         publish_shared_session(
             shared_sessions,
             shared_nat_sessions,

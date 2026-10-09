@@ -88,6 +88,7 @@ impl crate::afxdp::Coordinator {
                         key: entry.key.clone(),
                         decision: entry.decision,
                         metadata: entry.metadata.clone(),
+                        source_nat_static: None,
                         policy_generation: 0,
                         origin: entry.origin,
                         fabric_redirect_sync: false,

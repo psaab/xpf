@@ -14,22 +14,20 @@ const APP_TIMEOUT_SECS: u32 = 86_400;
 const OWNER_RG: i32 = 1;
 
 fn synced_record(tcp_handshake_state: u8, tcp_close_class: u8) -> SessionSyncRequest {
-    let base = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: crate::ip_proto::PROTO_TCP,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "8.8.8.8".to_string(),
-        src_port: 12345,
-        dst_port: 443,
-        ingress_zone_id: TEST_TRUST_ZONE_ID,
-        egress_zone_id: TEST_UNTRUST_ZONE_ID,
-        owner_rg_id: OWNER_RG,
-        inactivity_timeout: APP_TIMEOUT_SECS,
-        tcp_close_class,
-        session_id: 77,
-        ..SessionSyncRequest::default()
-    };
+    let base = SessionSyncRequest { operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: crate::ip_proto::PROTO_TCP,
+    src_ip: "10.0.0.1".to_string(),
+    dst_ip: "8.8.8.8".to_string(),
+    src_port: 12345,
+    dst_port: 443,
+    ingress_zone_id: TEST_TRUST_ZONE_ID,
+    egress_zone_id: TEST_UNTRUST_ZONE_ID,
+    owner_rg_id: OWNER_RG,
+    inactivity_timeout: APP_TIMEOUT_SECS,
+    tcp_close_class,
+    session_id: 77,
+    ..SessionSyncRequest::default() };
     let mut value = serde_json::to_value(base).expect("FIXTURE: serialize request");
     value["tcp_handshake_state"] = serde_json::json!(tcp_handshake_state);
     serde_json::from_value(value).expect("FIXTURE: deserialize request")

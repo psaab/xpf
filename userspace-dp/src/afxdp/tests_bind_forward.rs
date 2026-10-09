@@ -1468,52 +1468,50 @@ fn icmp_reverse_key_keeps_identifier_position() {
 
 #[test]
 fn synced_replica_entry_keeps_peer_synced_entries_promotable() {
-    let entry = SyncedSessionEntry {
-        key: SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol: PROTO_TCP,
-            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
-            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-            src_port: 12345,
-            dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
-        },
-        decision: SessionDecision { resolution: lookup_forwarding_resolution(
-            &build_forwarding_state(&nat_snapshot()),
-            IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-        ), nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
-        metadata: SessionMetadata {
-            ingress_zone: TEST_LAN_ZONE_ID,
-            egress_zone: TEST_WAN_ZONE_ID,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            owner_rg_id: 1,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-        },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
+    let entry = SyncedSessionEntry { key: SessionKey {
+        addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        src_port: 12345,
+        dst_port: 5201,
+                discriminator: Default::default(),
+                routing_domain: 0,
+    },
+    decision: SessionDecision { resolution: lookup_forwarding_resolution(
+        &build_forwarding_state(&nat_snapshot()),
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+    ), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 },
+    metadata: SessionMetadata {
+        ingress_zone: TEST_LAN_ZONE_ID,
+        egress_zone: TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 1,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     let replica = synced_replica_entry(&entry);
     assert!(replica.origin.is_peer_synced());
     assert!(replica.origin.is_promotable_synced());
@@ -1524,52 +1522,50 @@ fn synced_replica_entry_keeps_peer_synced_entries_promotable() {
 
 #[test]
 fn synced_replica_entry_marks_local_entries_worker_local() {
-    let entry = SyncedSessionEntry {
-        key: SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol: PROTO_TCP,
-            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
-            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-            src_port: 12345,
-            dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
-        },
-        decision: SessionDecision { resolution: lookup_forwarding_resolution(
-            &build_forwarding_state(&nat_snapshot()),
-            IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-        ), nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
-        metadata: SessionMetadata {
-            ingress_zone: TEST_LAN_ZONE_ID,
-            egress_zone: TEST_WAN_ZONE_ID,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            owner_rg_id: 1,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-        },
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
+    let entry = SyncedSessionEntry { key: SessionKey {
+        addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        src_port: 12345,
+        dst_port: 5201,
+                discriminator: Default::default(),
+                routing_domain: 0,
+    },
+    decision: SessionDecision { resolution: lookup_forwarding_resolution(
+        &build_forwarding_state(&nat_snapshot()),
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+    ), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 },
+    metadata: SessionMetadata {
+        ingress_zone: TEST_LAN_ZONE_ID,
+        egress_zone: TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 1,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    },
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     let replica = synced_replica_entry(&entry);
     assert_eq!(replica.origin, SessionOrigin::WorkerLocalImport);
     assert!(replica.origin.is_peer_synced());
@@ -1582,52 +1578,50 @@ fn synced_replica_entry_marks_local_entries_worker_local() {
 #[test]
 fn reconcile_stop_preserves_shared_synced_sessions() {
     let mut coordinator = Coordinator::new();
-    let entry = SyncedSessionEntry {
-        key: SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol: PROTO_TCP,
-            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
-            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-            src_port: 12345,
-            dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
-        },
-        decision: SessionDecision { resolution: lookup_forwarding_resolution(
-            &build_forwarding_state(&nat_snapshot()),
-            IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-        ), nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
-        metadata: SessionMetadata {
-            ingress_zone: TEST_LAN_ZONE_ID,
-            egress_zone: TEST_WAN_ZONE_ID,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            owner_rg_id: 1,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-        },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
+    let entry = SyncedSessionEntry { key: SessionKey {
+        addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        src_port: 12345,
+        dst_port: 5201,
+                discriminator: Default::default(),
+                routing_domain: 0,
+    },
+    decision: SessionDecision { resolution: lookup_forwarding_resolution(
+        &build_forwarding_state(&nat_snapshot()),
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+    ), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 },
+    metadata: SessionMetadata {
+        ingress_zone: TEST_LAN_ZONE_ID,
+        egress_zone: TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 1,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     publish_shared_session(
         &coordinator.sessions.synced,
         &coordinator.sessions.nat,
@@ -1651,52 +1645,50 @@ fn reconcile_stop_preserves_shared_synced_sessions() {
 #[test]
 fn replay_synced_sessions_requeues_preserved_entries_for_new_workers() {
     let coordinator = Coordinator::new();
-    let entry = SyncedSessionEntry {
-        key: SessionKey {
-            addr_family: libc::AF_INET as u8,
-            protocol: PROTO_TCP,
-            src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
-            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-            src_port: 12345,
-            dst_port: 5201,
-                    discriminator: Default::default(),
-                    routing_domain: 0,
-        },
-        decision: SessionDecision { resolution: lookup_forwarding_resolution(
-            &build_forwarding_state(&nat_snapshot()),
-            IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
-        ), nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
-        metadata: SessionMetadata {
-            ingress_zone: TEST_LAN_ZONE_ID,
-            egress_zone: TEST_WAN_ZONE_ID,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            owner_rg_id: 1,
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-        },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
+    let entry = SyncedSessionEntry { key: SessionKey {
+        addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
-        tcp_flags: 0,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        src_port: 12345,
+        dst_port: 5201,
+                discriminator: Default::default(),
+                routing_domain: 0,
+    },
+    decision: SessionDecision { resolution: lookup_forwarding_resolution(
+        &build_forwarding_state(&nat_snapshot()),
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+    ), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 },
+    metadata: SessionMetadata {
+        ingress_zone: TEST_LAN_ZONE_ID,
+        egress_zone: TEST_WAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 1,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     let worker_command_queues = BTreeMap::from([
         (0u32, Arc::new(Mutex::new(VecDeque::new()))),
         (1u32, Arc::new(Mutex::new(VecDeque::new()))),
@@ -2690,19 +2682,17 @@ fn a_sibling_workers_replica_carries_zero_counters_for_a_live_session_7919() {
     }
 
     // ---- a SIBLING worker: the same session, through the REAL replica path ----
-    let replicated = synced_replica_entry(&SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: metadata.clone(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    });
+    let replicated = synced_replica_entry(&SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: metadata.clone(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None });
     let mut sibling = crate::session::SessionTable::new();
     assert!(
         sibling.upsert_synced_with_origin(
@@ -2717,6 +2707,7 @@ fn a_sibling_workers_replica_carries_zero_counters_for_a_live_session_7919() {
                 session_id: replicated.session_id,
                 tcp_close_class: 0,
                 tcp_handshake_state: 0,
+                source_nat_static: None,
             },
             false,
         ),

@@ -254,6 +254,7 @@ impl SessionTable {
     // 7 non-inlined production callers (forwarding, poll_descriptor,
     // session_glue, shared_ops) are on the session-install hot path
     // and cannot absorb that overhead.
+    #[inline]
     pub fn install_with_protocol_with_origin(
         &mut self,
         key: SessionKey,
@@ -263,6 +264,32 @@ impl SessionTable {
         now_ns: u64,
         protocol: u8,
         tcp_flags: u8,
+    ) -> bool {
+        self.install_with_protocol_with_origin_and_source_nat(
+            key,
+            decision,
+            metadata,
+            origin,
+            now_ns,
+            protocol,
+            tcp_flags,
+            None,
+        )
+    }
+
+    /// Install a local session with its ordinary source-NAT origin, when known.
+    /// Unlike the compatibility API above, this stamps both the entry and its
+    /// initial Open delta before either becomes visible to HA export.
+    pub fn install_with_protocol_with_origin_and_source_nat(
+        &mut self,
+        key: SessionKey,
+        decision: SessionDecision,
+        metadata: SessionMetadata,
+        origin: SessionOrigin,
+        now_ns: u64,
+        protocol: u8,
+        tcp_flags: u8,
+        source_nat_static: Option<bool>,
     ) -> bool {
         if self.len() >= self.max_sessions {
             self.create_drops = self.create_drops.saturating_add(1);
@@ -319,7 +346,7 @@ impl SessionTable {
                     .forwarding_revalidation_gen
                     .valid
                     .then_some(self.forwarding_revalidation_gen),
-                source_nat_static: None,
+                source_nat_static,
                 policy_generation,
                 metadata: metadata.clone(),
                 origin,
@@ -443,43 +470,41 @@ impl SessionTable {
         // live-synced; forwards still count toward per-IP limits above).
         if counted && !origin.is_peer_synced() && !origin.is_local_tun_origin() {
             let tcp_handshake_state = self.handshake_state_wire_for(&key);
-            self.push_delta(SessionDelta {
-                provenance: crate::session::ExportProvenance::Incremental,
-                kind: SessionDeltaKind::Open,
-                key,
-                decision,
-                policy_generation,
-                metadata,
-                origin,
-                fabric_redirect_sync: false,
-                // #2465: an Open delta carries the install instant. The
-                // SESSION_CREATE RT_FLOW frame does not report a duration, so
-                // these are informational here, but keeping them consistent
-                // with the entry avoids a 0/unknown asymmetry.
-                created_ns: now_ns,
-                last_seen_ns: now_ns,
-                // #2501: a freshly-installed session has forwarded no
-                // packets yet (the trigger packet is accounted on its own
-                // forwarding pass).
-                counters: SessionCounters::default(),
-                // #2749: mirror the entry's seed flags on the Open delta
-                // (informational — Open deltas have no flowexport consumer).
-                observed_tos: 0,
-                observed_tcp_flags: tcp_flags,
-                // #4915: the stable session id assigned above, so the
-                // SESSION_CREATE RT_FLOW frame carries the id its eventual
-                // SESSION_CLOSE will.
-                session_id,
-                bulk_resync: false,
-                // #9412: a session installed BY a closing packet is already closing.
-                tcp_close_class: if matches!(protocol, PROTO_TCP) && is_closing(tcp_flags) {
-                    TcpCloseClass::from_packet(tcp_flags).to_wire()
-                } else {
-                    0
-                },
-                tcp_handshake_state,
-                purge_retirement: false,
-            });
+            self.push_delta(SessionDelta { provenance: crate::session::ExportProvenance::Incremental,
+            kind: SessionDeltaKind::Open,
+            key,
+            decision,
+            policy_generation,
+            metadata,
+            origin,
+            fabric_redirect_sync: false,
+            // #2465: an Open delta carries the install instant. The
+            // SESSION_CREATE RT_FLOW frame does not report a duration, so
+            // these are informational here, but keeping them consistent
+            // with the entry avoids a 0/unknown asymmetry.
+            created_ns: now_ns,
+            last_seen_ns: now_ns,
+            // #2501: a freshly-installed session has forwarded no
+            // packets yet (the trigger packet is accounted on its own
+            // forwarding pass).
+            counters: SessionCounters::default(),
+            // #2749: mirror the entry's seed flags on the Open delta
+            // (informational — Open deltas have no flowexport consumer).
+            observed_tos: 0,
+            observed_tcp_flags: tcp_flags,
+            // #4915: the stable session id assigned above, so the
+            // SESSION_CREATE RT_FLOW frame carries the id its eventual
+            // SESSION_CLOSE will.
+            session_id,
+            bulk_resync: false,
+            // #9412: a session installed BY a closing packet is already closing.
+            tcp_close_class: if matches!(protocol, PROTO_TCP) && is_closing(tcp_flags) {
+                TcpCloseClass::from_packet(tcp_flags).to_wire()
+            } else {
+                0
+            },
+            tcp_handshake_state,
+            purge_retirement: false, source_nat_static });
         }
         true
     }
@@ -496,22 +521,20 @@ impl SessionTable {
         allow_replace_local: bool,
     ) -> bool {
         self.upsert_synced_with_origin(
-            SessionInstall {
-                key,
-                decision,
-                metadata,
-                origin: SessionOrigin::SyncImport,
-                now_ns,
-                protocol,
-                tcp_flags,
-                // #5212: this legacy convenience wrapper carries no wire id, so
-                // the receiver allocs a fresh node-local one (the real HA path
-                // threads the peer's id via `handle_upsert_synced`).
-                session_id: 0,
-                // #9412: nor a close class; the real HA path threads it the same way.
-                tcp_close_class: 0,
-                tcp_handshake_state: 0,
-            },
+            SessionInstall { key,
+            decision,
+            metadata,
+            origin: SessionOrigin::SyncImport,
+            now_ns,
+            protocol,
+            tcp_flags,
+            // #5212: this legacy convenience wrapper carries no wire id, so
+            // the receiver allocs a fresh node-local one (the real HA path
+            // threads the peer's id via `handle_upsert_synced`).
+            session_id: 0,
+            // #9412: nor a close class; the real HA path threads it the same way.
+            tcp_close_class: 0,
+            tcp_handshake_state: 0, source_nat_static: None },
             allow_replace_local,
         )
     }
@@ -562,6 +585,7 @@ impl SessionTable {
             key,
             decision,
             metadata,
+            source_nat_static,
             origin,
             now_ns,
             protocol,
@@ -684,7 +708,7 @@ impl SessionTable {
                 decision,
                 forwarding_generation: ForwardingGenerationStamp::default(),
                 source_nat_revalidated: None,
-                source_nat_static: None,
+                source_nat_static,
                 policy_generation: 0,
                 metadata: metadata.clone(),
                 origin,
@@ -847,6 +871,7 @@ impl SessionTable {
             .entry_by_key(&key)
             .map(|entry| entry.policy_generation)
             .unwrap_or(0);
+        let source_nat_static = self.source_nat_static_for(&key);
         // #9412: the live entry's close class, so this re-export also restores a
         // close-state Update the incremental stream dropped.
         let tcp_close_class = self.close_class_wire_for(&key);
@@ -879,7 +904,7 @@ impl SessionTable {
         // the #9856 multi-pass cursor slice (CommandExport); the other
         // caller is a `#[cfg(test)]` fixture. A drop of one of these
         // must not arm the loss-of-sync latch that TRIGGERS that export.
-        bulk_resync: true, })
+        bulk_resync: true, source_nat_static })
     }
 
     pub fn emit_open_delta_with_origin(
@@ -968,7 +993,7 @@ impl SessionTable {
         bulk_resync: false,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
-        purge_retirement, });
+        purge_retirement, source_nat_static: None });
     }
 
     pub fn delete(&mut self, key: &SessionKey) {

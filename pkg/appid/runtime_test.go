@@ -215,6 +215,36 @@ func TestResolveSessionNameUsesAppIDWhenEnabled(t *testing.T) {
 	}
 }
 
+// #12191: both API and CLI show/clear application filters share
+// SessionMatches. Once a stale-session permit re-stamps the conntrack id to
+// the active tuple's application, both filters must move from A to B.
+func TestSessionMatchesRestampedAppIDAfterRedefinition12191(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Services.ApplicationIdentification = true
+	appNames := map[uint16]string{11: "app-a", 22: "app-b"}
+	const (
+		protoTCP = 6
+		srcPort  = 40000
+		dstPort  = 443
+	)
+
+	storedID := uint16(11) // create-time label while A owned TCP/443
+	if !SessionMatches("app-a", appNames, cfg, protoTCP, srcPort, dstPort, storedID) {
+		t.Fatal("show/clear by A must select the row before revalidation")
+	}
+	if SessionMatches("app-b", appNames, cfg, protoTCP, srcPort, dstPort, storedID) {
+		t.Fatal("show/clear by B must not select A's create-time row")
+	}
+
+	storedID = 22 // stale policy hit permitted after B takes over TCP/443
+	if SessionMatches("app-a", appNames, cfg, protoTCP, srcPort, dstPort, storedID) {
+		t.Fatal("show/clear by A must stop selecting the row after re-stamp")
+	}
+	if !SessionMatches("app-b", appNames, cfg, protoTCP, srcPort, dstPort, storedID) {
+		t.Fatal("show/clear by B must select the same row after re-stamp")
+	}
+}
+
 func TestResolveSessionNameUnknownWhenEnabled(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Services.ApplicationIdentification = true

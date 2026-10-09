@@ -1437,19 +1437,17 @@ fn synced_entry_for(
     decision: SessionDecision,
     metadata: SessionMetadata,
 ) -> SyncedSessionEntry {
-    SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata,
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    }
+    SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata,
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None }
 }
 
 fn flush_deltas_for_test(
@@ -2386,7 +2384,7 @@ fn cancel_keys_test_delta(purge_retirement: bool) -> SessionDelta {
     bulk_resync: false,
     tcp_close_class: 0,
     tcp_handshake_state: 0,
-    purge_retirement, }
+    purge_retirement, source_nat_static: None }
 }
 
 /// Round 3 item 3, flow-cancel gating: cancelled flows are DROPPED, so the
