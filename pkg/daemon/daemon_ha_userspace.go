@@ -81,9 +81,25 @@ type userspaceXSKBindingController interface {
 // can span multiple redundancy groups in active/active; keeping the complete
 // set makes its ownership independent of interface ordering. Non-RETH zones
 // without an RG are not included (they fall back to global IsPrimaryFn).
+// Quarantined zones (#12237) are skipped outright: the dataplane installs only
+// the surviving zone, and the zone-approximation fallback sync-owns on ANY RG
+// in the set — so a collision loser's RGs would wrong-owner-sync the
+// survivor's unattributable sessions. ZoneQuarantineExclusions is a pure
+// function of the zone-name set, so both HA nodes compute the identical
+// survivor-only map from the identical config.
 func buildZoneRGMap(cfg *config.Config, zoneIDs map[string]uint16) cluster.ZoneRGMap {
 	result := make(cluster.ZoneRGMap)
+	names := make([]string, 0, len(cfg.Security.Zones))
+	for zoneName := range cfg.Security.Zones {
+		names = append(names, zoneName)
+	}
+	excluded := config.ZoneQuarantineExclusions(names)
 	for zoneName, zone := range cfg.Security.Zones {
+		// Quarantined/reserved zones are absent from dataplane enforcement.
+		// Do not let their RGs leak into the survivor's same-ID ownership set.
+		if _, drop := excluded[zoneName]; drop {
+			continue
+		}
 		// Tolerant/programmatic/HA-peer-sync configs can leave a nil zone
 		// value in the map. Skip it rather than panicking during HA apply.
 		if zone == nil {

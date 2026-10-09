@@ -337,6 +337,48 @@ func TestBuildZoneRGMap(t *testing.T) {
 		t.Error("zone 'dmz' (ID 1): should not be in zone RG map (no RG)")
 	}
 }
+func TestBuildZoneRGMapSkipsQuarantinedCollisionLoser12237(t *testing.T) {
+	// z174 and z214 share stable zone ID 53547. z174 is the sorted-first
+	// survivor; z214 is quarantined and must not contribute its distinct RG.
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			Zones: map[string]*config.ZoneConfig{
+				"z174": {Name: "z174", Interfaces: []string{"reth0.0"}},
+				"z214": {Name: "z214", Interfaces: []string{"reth1.0"}},
+			},
+		},
+		Interfaces: config.InterfacesConfig{
+			Interfaces: map[string]*config.InterfaceConfig{
+				"reth0": {Name: "reth0", RedundancyGroup: 1},
+				"reth1": {Name: "reth1", RedundancyGroup: 2},
+			},
+		},
+	}
+	zoneID := config.StableZoneID("z174")
+	if zoneID != config.StableZoneID("z214") {
+		t.Fatalf("fixture zones do not collide: z174=%d z214=%d", zoneID, config.StableZoneID("z214"))
+	}
+	zoneRG := buildZoneRGMap(cfg, buildZoneIDs(cfg))
+	if got := zoneRG[zoneID]; len(got) != 1 || got[0] != 1 {
+		t.Fatalf("survivor ownership RG set = %v, want only RG 1 (quarantined z214 RG 2 must be absent)", got)
+	}
+
+	// Unattributable survivor-zone sessions use the zone-set fallback. Being
+	// primary only for the quarantined zone's RG must not sync them.
+	ss := &cluster.SessionSync{
+		IsPrimaryForRGFn: func(rg int) bool { return rg == 2 },
+	}
+	ss.SetZoneOwnership(zoneRG, nil, nil)
+	row := dataplane.SessionValue{IngressZone: zoneID}
+	if ss.ShouldSyncSessionV4(row) {
+		t.Fatal("survivor-zone session was sync-owned by quarantined z214 RG 2")
+	}
+	ss.IsPrimaryForRGFn = func(rg int) bool { return rg == 1 }
+	if !ss.ShouldSyncSessionV4(row) {
+		t.Fatal("survivor-zone session was not sync-owned by survivor z174 RG 1")
+	}
+}
+
 func TestBuildZoneFoldRGMapResolvesEachIngressGroup11012(t *testing.T) {
 	cfg := &config.Config{Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
 		"reth0":    {Name: "reth0", RedundancyGroup: 1},
