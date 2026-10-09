@@ -158,6 +158,15 @@ func TestPolicyCommunityLiteralShapedFailedResolutionOmitted12069(t *testing.T) 
 					if err != nil {
 						t.Fatalf("tolerant compile failed for %q with %s definition: %v", name, definition, err)
 					}
+					term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+					operand := term.Community
+					if term.CommunityOp == "add" {
+						operand = term.CommunityAdd
+					}
+					if !term.CommunityResolutionFailed || operand != name {
+						t.Fatalf("failed resolution state = (flag %v, operand %q), want (true, authored %q)",
+							term.CommunityResolutionFailed, operand, name)
+					}
 					var logs strings.Builder
 					previous := slog.Default()
 					slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
@@ -169,9 +178,6 @@ func TestPolicyCommunityLiteralShapedFailedResolutionOmitted12069(t *testing.T) 
 					if !strings.Contains(logs.String(), "omitting an unresolvable then community") ||
 						!strings.Contains(logs.String(), name) {
 						t.Fatalf("tolerant renderer did not warn with authored operand %q: %s", name, logs.String())
-					}
-					if strings.Contains(logs.String(), "xpf-invalid-community-resolution") {
-						t.Fatalf("tolerant warning exposed internal poison marker: %s", logs.String())
 					}
 				})
 			}

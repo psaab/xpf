@@ -1114,8 +1114,8 @@ func compilePolicyOptions(node *Node, po *PolicyOptionsConfig) error {
 // resolvePolicyCommunityOperands resolves defined community names used by
 // `then community add|set` and the legacy bare replacement form. It runs
 // after all policy-options roots compile, so forward definitions resolve too.
-// Failed operands carry an unrenderable marker so strict validation and the
-// tolerant renderer preserve this first lookup result without re-resolving.
+// Failed operands remain authored and set a compiler-only flag so strict
+// validation and tolerant rendering preserve this first lookup result.
 func resolvePolicyCommunityOperands(cfg *Config) {
 	if cfg == nil {
 		return
@@ -1129,13 +1129,14 @@ func resolvePolicyCommunityOperands(cfg *Config) {
 			if term == nil {
 				continue
 			}
+			term.CommunityResolutionFailed = false
 			switch term.CommunityOp {
 			case "add":
 				if term.CommunityAdd != "" {
 					if value, ok := ResolveCommunityValue(po, term.CommunityAdd); ok {
 						term.CommunityAdd = value
 					} else {
-						term.CommunityAdd = failedCommunityValue12069(term.CommunityAdd)
+						term.CommunityResolutionFailed = true
 					}
 				}
 			case "", "set":
@@ -1143,7 +1144,7 @@ func resolvePolicyCommunityOperands(cfg *Config) {
 					if value, ok := ResolveCommunityValue(po, term.Community); ok {
 						term.Community = value
 					} else {
-						term.Community = failedCommunityValue12069(term.Community)
+						term.CommunityResolutionFailed = true
 					}
 				}
 			}

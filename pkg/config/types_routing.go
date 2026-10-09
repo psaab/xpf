@@ -99,8 +99,11 @@ type PolicyTerm struct {
 	// rendered no `set metric` clause (#2847). The renderer must gate the
 	// FRR clause on HasMetric, never on Metric > 0.
 	HasMetric  bool
-	MetricType int    // OSPF metric type (1 or 2, 0 = not set)
-	Community  string // BGP community to REPLACE with (`then community set <v>` or the bare `then community <v>`; e.g. "65000:100")
+	MetricType int // OSPF metric type (1 or 2, 0 = not set)
+	// Community is the compiled FRR literal to replace. The compiler resolves
+	// a defined name once; on failure it preserves the authored operand and
+	// marks CommunityResolutionFailed.
+	Community string
 	// CommunityOp distinguishes the Junos `then community (add|delete|set)`
 	// operations from the legacy bare `then community <value>` (= replace).
 	// Junos/vSRX supports append (additive), delete (by community-list), and
@@ -117,10 +120,19 @@ type PolicyTerm struct {
 	// `then community delete [ listA listB ]` must accumulate every name, not
 	// just the first; #2902), and "none" carries no argument (rendered
 	// `set community none`).
-	CommunityOp     string   // "", "set", "add", "delete", "none"
-	CommunityAdd    string   // community value(s) to append (`then community add <v>`)
+	CommunityOp string // "", "set", "add", "delete", "none"
+	// CommunityAdd contains compiled FRR literals to append. Failed resolution
+	// preserves the authored operand and marks CommunityResolutionFailed.
+	CommunityAdd    string
 	CommunityDelete []string // community-list name(s) whose members to strip (`then community delete <name> ...`)
-	Origin          string   // BGP origin: "igp", "egp", "incomplete"
+	// CommunityResolutionFailed marks a failed one-time compiler lookup of an
+	// authored `then community add|set|<value>` operand. Community and
+	// CommunityAdd retain the authored spelling so strict diagnostics and
+	// tolerant warnings can name it; the renderer omits the failed action.
+	// This compiler-only state is excluded from JSON to keep it off both the
+	// helper wire and REST config response.
+	CommunityResolutionFailed bool   `json:"-"`
+	Origin                    string // BGP origin: "igp", "egp", "incomplete"
 	// ASPathPrepend holds the ordered list of ASNs to prepend to the BGP
 	// AS_PATH attribute (`then as-path-prepend "<asn> <asn> ..."`), rendered
 	// as the FRR route-map clause `set as-path prepend <asn> <asn> ...`

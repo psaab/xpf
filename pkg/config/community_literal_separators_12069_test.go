@@ -14,6 +14,7 @@ func TestCommunityLiteralRejectsUnicodeSeparators12069(t *testing.T) {
 		{"no-break space", "\u00a0"},
 		{"em space", "\u2003"},
 		{"line separator", "\u2028"},
+		{"next line (NEL)", "\u0085"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			value := "65000:1" + tc.separator + "65000:2"

@@ -913,8 +913,8 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				b.WriteString(" set community none\n")
 			case "add":
 				if term.CommunityAdd != "" {
-					authoredValue, resolutionFailed := config.CommunityValueResolutionFailure(term.CommunityAdd)
-					authoredValue = sanitizeFRRValue(authoredValue)
+					resolutionFailed := term.CommunityResolutionFailed
+					authoredValue := sanitizeFRRValue(term.CommunityAdd)
 					if !resolutionFailed && config.ValidCommunityValueLiteral(term.CommunityAdd) {
 						fmt.Fprintf(&b, " set community %s additive\n", sanitizeFRRValue(term.CommunityAdd))
 					} else {
@@ -934,8 +934,8 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				}
 			default: // "" or "set" — whole-attribute replace
 				if term.Community != "" {
-					authoredValue, resolutionFailed := config.CommunityValueResolutionFailure(term.Community)
-					authoredValue = sanitizeFRRValue(authoredValue)
+					resolutionFailed := term.CommunityResolutionFailed
+					authoredValue := sanitizeFRRValue(term.Community)
 					if !resolutionFailed && config.ValidCommunityValueLiteral(term.Community) {
 						fmt.Fprintf(&b, " set community %s\n", sanitizeFRRValue(term.Community))
 					} else {

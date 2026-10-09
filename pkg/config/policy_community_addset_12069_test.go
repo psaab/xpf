@@ -38,9 +38,8 @@ func TestPolicyThenCommunityAddSetNameResolves12069(t *testing.T) {
 	}
 }
 
-// #12069 use-before-definition: the policy is authored before its community
-// member in the same flat-set tree; resolution runs over the fully compiled
-// config, not inline while parsing the policy action.
+// #12069 use-before-definition: the policy action appears before its community
+// definition in this flat-set input; compilation still resolves the operand.
 func TestPolicyThenCommunityAddNameResolvesAfterUse12069(t *testing.T) {
 	tree := buildTreeFromSet(t, []string{
 		"set policy-options policy-statement P term t1 then community add CUST",
@@ -216,8 +215,21 @@ func TestPolicyThenCommunityLiteralShapedFailedResolutionRejected12069(t *testin
 					if !strings.Contains(err.Error(), `uses "`+name+`"`) {
 						t.Fatalf("error %q does not name authored operand %q", err, name)
 					}
-					if strings.Contains(err.Error(), "xpf-invalid-community-resolution") {
-						t.Fatalf("error exposed internal poison marker: %q", err)
+					if strings.ContainsRune(err.Error(), '\x00') {
+						t.Fatalf("strict error exposed internal NUL state: %q", err)
+					}
+					lenient, err := CompileConfigLenient(tree)
+					if err != nil {
+						t.Fatalf("CompileConfigLenient: %v", err)
+					}
+					term := lenient.PolicyOptions.PolicyStatements["P"].Terms[0]
+					operand := term.Community
+					if term.CommunityOp == "add" {
+						operand = term.CommunityAdd
+					}
+					if !term.CommunityResolutionFailed || operand != name {
+						t.Fatalf("failed resolution state = (flag %v, operand %q), want (true, authored %q)",
+							term.CommunityResolutionFailed, operand, name)
 					}
 				})
 			}

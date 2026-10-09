@@ -473,11 +473,7 @@ func validatePolicyCommunityReferencesStrict(cfg *Config) error {
 				value = term.Community
 			}
 			if value != "" {
-				authoredValue, resolutionFailed := CommunityValueResolutionFailure(value)
-				if resolutionFailed {
-					value = authoredValue
-				}
-				if resolutionFailed || !ValidCommunityValueLiteral(value) {
+				if term.CommunityResolutionFailed || !ValidCommunityValueLiteral(value) {
 					clause := fmt.Sprintf("`then community %s`", value)
 					if verb != "" {
 						clause = fmt.Sprintf("`then community %s %s`", verb, value)

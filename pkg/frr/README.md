@@ -1501,9 +1501,10 @@ step. Both are required — neither sees the other's case:
   skip the dangling OR branch. This avoids relying on FRR's admission versus
   evaluation behavior for a missing match list. The guard is specific to
   `from community`; `then community delete` is a separate `set comm-list ...
-  `delete` operation. For add/set/bare replacement, the compiler expands an
-  authored community name once when its definition contains only FRR literals;
-  a failed first resolution is retained as an unrenderable marker so a
+  delete` operation. For add/set/bare replacement, the compiler post-pass
+  resolves authored community names once to FRR literals. Failed resolution
+  keeps the authored operand in Community/CommunityAdd and marks the term with
+  compiler-internal `CommunityResolutionFailed` state (`json:"-"`), so a
   literal-shaped spelling cannot pass strict validation or tolerant rendering.
   Strict errors and render warnings name the authored operand; successful
   results are checked as literals and never resolved again.
