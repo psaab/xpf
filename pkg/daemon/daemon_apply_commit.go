@@ -384,13 +384,14 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 		}
 	}
 	if applyErrSkipsPeerSync(applyErr) {
-		// Fatal (required-protocol-gate: dataplane disarmed / fail-closed), a
-		// daemon-stop context abort (#2926 boundary), or a policy READ authority
-		// refusal that blocked local publication: report failure and do NOT push.
-		// The authority refusal leaves the peer's new snapshot ahead of this
-		// node; the shutdown case converges on next boot + reverse-sync. Skip the
-		// deletion-clear too: either the dataplane is disarmed/tearing down or no
-		// safe session candidate set was captured.
+		// Fatal (required-protocol-gate: dataplane disarmed/fail-closed), a
+		// daemon-stop context abort (#2926 boundary), or a policy READ
+		// authority refusal that blocked local publication: report failure
+		// and do NOT push. The peer stays on its prior snapshot because this
+		// node could not safely apply the promoted config. The shutdown case
+		// converges on next boot + reverse-sync. Skip deletion-clear too:
+		// either the dataplane is disarmed/tearing down or no safe session
+		// candidate set was captured.
 		return nil, applyErr
 	}
 	// #4234 Junos-default deletion-clear + modified-policy re-eval + #4342
@@ -471,10 +472,10 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 //     mid-pipeline by a daemon stop. The local node is tearing down; the next
 //     boot re-applies in full and the reverse-sync-on-reconnect converges the
 //     peer, so a push racing the transport teardown is avoided.
-//   - An unknown policy-session READ authority: the C2 apply boundary aborts
-//     before local publication, so pushing the promoted config would diverge
-//     the peer. Known authority is re-anchored before capture; this refusal is
-//     reserved for an unknown or changed outcome.
+//   - A policy-session READ authority refusal: the C2 apply boundary aborts
+//     before local publication, so the promoted config remains local-only;
+//     pushing it would diverge the peer. The refusal means the positional IDs
+//     this capture requires could not be read under the named authority.
 //
 // #7618: context.DeadlineExceeded was in that second class and is NOT any
 // more, because it never had a true positive there.

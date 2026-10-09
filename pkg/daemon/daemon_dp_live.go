@@ -425,11 +425,51 @@ func (a liveDataPlane) SessionCount() (v4, v6 int) {
 }
 
 func (a liveDataPlane) ClearAllSessions() (v4 int, v6 int, err error) {
+	d := a.daemon
+	locked := false
+	if d != nil && d.applySem != nil {
+		if err := d.applySem.Acquire(d.applyCancelCtx(), 1); err != nil {
+			return 0, 0, err
+		}
+		locked = true
+		defer d.applySem.Release(1)
+	}
 	s, err := a.resolve()
 	if err != nil {
 		return 0, 0, err
 	}
-	return s.ClearAllSessions()
+	v4, v6, err = s.ClearAllSessions()
+	if err == nil && locked {
+		d.retirePolicyInvalidationScanDebtAfterFullClearLocked()
+	}
+	return v4, v6, err
+}
+
+// retirePolicyInvalidationScanDebtAfterFullClearLocked relies on the
+// authoritative all-sessions clear to remove rows omitted by an incomplete
+// scan. It retires only a published target under known authority: an unapplied
+// target could still admit sessions under its predecessor before a later
+// publish, recreating the very gap the scan debt protects.
+// Caller holds d.applySem.
+func (d *Daemon) retirePolicyInvalidationScanDebtAfterFullClearLocked() {
+	debt := d.policyInvalidationDebt
+	if debt == nil || debt.scanFailure == nil ||
+		policyInvalidationAppliedConfig(d.dataplane()) != debt.newCfg {
+		return
+	}
+	if d.store != nil && d.store.ActiveConfig() != debt.newCfg {
+		return
+	}
+	d.policyInvalidationDebt = nil
+	if d.policyInvalidationCapture == debt.capture {
+		d.policyInvalidationCapture = nil
+	}
+	if plan := d.policyInvalidationPlan; plan != nil && plan.newCfg == debt.newCfg {
+		d.policyInvalidationPlan = nil
+	}
+	if d.store != nil && debt.appliedDigest != "" {
+		d.store.MarkAppliedDigest(debt.appliedDigest)
+	}
 }
 
 func (a liveDataPlane) DeleteSession(key dataplane.SessionKey) error {
