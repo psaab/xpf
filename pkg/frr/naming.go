@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"net"
 	"sort"
 	"strings"
 
@@ -68,8 +67,9 @@ const (
 	// names well below FRR's 128-byte identifier limit.
 	frrInlinePrefixListMaxLen = 96
 
-	// inlinePrefixListNamespace is the reserved suffix attached to every
-	// xpf-generated route-filter prefix-list. Operator prefix-lists using it
+	// inlinePrefixListNamespace is the reserved infix embedded in every
+	// xpf-generated route-filter prefix-list name, between the readable
+	// prefix and the 16-hex identity digest. Operator prefix-lists using it
 	// are rejected by routeFilterACLNameCollision.
 	inlinePrefixListNamespace  = "-xpf-inline-"
 	inlinePrefixListHashHexLen = 16
@@ -285,56 +285,11 @@ func routeFilterACLNameCollision(po *config.PolicyOptionsConfig) error {
 	return inlinePrefixListNameCollision(po)
 }
 
-type inlinePrefixListIdentity struct {
-	routeMapName string
-	plPrefix     string
-	termName     string
-	familySuffix string
-	family       string
-}
-
-func inlinePrefixListIdentitiesForPolicy(routeMapName, plPrefix string, ps *config.PolicyStatement) []inlinePrefixListIdentity {
-	if ps == nil {
-		return nil
-	}
-	var identities []inlinePrefixListIdentity
-	for _, term := range ps.Terms {
-		if term == nil || len(term.RouteFilters) == 0 {
-			continue
-		}
-		v4, v6 := partitionRouteFiltersByFamily(term.RouteFilters)
-		if len(v4) > 0 && len(v6) > 0 {
-			identities = append(identities,
-				inlinePrefixListIdentity{routeMapName, plPrefix, term.Name, "_v4", "ip"},
-				inlinePrefixListIdentity{routeMapName, plPrefix, term.Name, "_v6", "ipv6"})
-			continue
-		}
-		family := "ip"
-		for _, rf := range term.RouteFilters {
-			if _, _, err := net.ParseCIDR(rf.Prefix); err == nil {
-				if strings.Contains(rf.Prefix, ":") {
-					family = "ipv6"
-				}
-				break
-			}
-		}
-		identities = append(identities, inlinePrefixListIdentity{routeMapName, plPrefix, term.Name, "", family})
-	}
-	return identities
-}
-
-func policyHasInlineRouteFilters(ps *config.PolicyStatement) bool {
-	if ps == nil {
-		return false
-	}
-	for _, term := range ps.Terms {
-		if term != nil && len(term.RouteFilters) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
+// inlinePrefixListNameCollision refuses operator prefix-lists intruding on
+// the reserved inline namespace. Generated-vs-generated identity
+// collisions need no gate: names embed a 64-bit digest over the full
+// structured identity, so distinct identities collide with probability
+// 2^-64 (Opus review, PR #12321).
 func inlinePrefixListNameCollision(po *config.PolicyOptionsConfig) error {
 	names := make([]string, 0, len(po.PrefixLists))
 	for name := range po.PrefixLists {
@@ -354,66 +309,5 @@ func inlinePrefixListNameCollision(po *config.PolicyOptionsConfig) error {
 		}
 	}
 
-	// Mirror the policy-options route-map contexts emitted by the base renderer:
-	// standalone policy maps and per-source-protocol redistribute maps. The
-	// structured route-map identity is included in the digest for composed and
-	// narrowed aliases as well, so their readable prefixes cannot alias these.
-	var policyNames []string
-	for name, ps := range po.PolicyStatements {
-		if policyHasInlineRouteFilters(ps) {
-			policyNames = append(policyNames, name)
-		}
-	}
-	if len(policyNames) == 0 {
-		return nil
-	}
-	sort.Strings(policyNames)
-	var identities []inlinePrefixListIdentity
-	add := func(routeMapName, plPrefix string, ps *config.PolicyStatement) {
-		identities = append(identities, inlinePrefixListIdentitiesForPolicy(routeMapName, plPrefix, ps)...)
-	}
-	for _, policyName := range policyNames {
-		ps := po.PolicyStatements[policyName]
-		if config.RouteMapSequenceCount(po, ps) <= config.MaxRouteMapSequences {
-			add(policyName, policyName, ps)
-		}
-		for _, proto := range redistProtocols(ps) {
-			routeMapName := redistProtocolRouteMapName(policyName, proto)
-			filtered := redistPolicyForProtocol(ps, proto)
-			if config.RouteMapSequenceCount(po, filtered) <= config.MaxRouteMapSequences {
-				add(routeMapName, routeMapName, filtered)
-			}
-		}
-	}
-
-	sort.Slice(identities, func(i, j int) bool {
-		a, b := identities[i], identities[j]
-		if a.routeMapName != b.routeMapName {
-			return a.routeMapName < b.routeMapName
-		}
-		if a.plPrefix != b.plPrefix {
-			return a.plPrefix < b.plPrefix
-		}
-		if a.termName != b.termName {
-			return a.termName < b.termName
-		}
-		if a.familySuffix != b.familySuffix {
-			return a.familySuffix < b.familySuffix
-		}
-		return a.family < b.family
-	})
-	seen := make(map[string]inlinePrefixListIdentity, len(identities))
-	for _, identity := range identities {
-		final := inlinePrefixListName(identity.routeMapName, identity.plPrefix, identity.termName, identity.familySuffix)
-		key := identity.family + "\x00" + final
-		if previous, ok := seen[key]; ok && previous != identity {
-			return fmt.Errorf(
-				"inline route-filter identities %+v and %+v map to the same generated "+
-					"prefix-list name %q in the %s family (#12068 hash collision); "+
-					"FRR would merge them and silently alter a routing policy — refusing to render",
-				previous, identity, final, identity.family)
-		}
-		seen[key] = identity
-	}
 	return nil
 }

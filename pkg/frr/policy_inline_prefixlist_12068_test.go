@@ -100,6 +100,10 @@ func TestInlinePrefixListNamesCollisionFree_12068(t *testing.T) {
 		if otherTerm == name {
 			t.Fatalf("different term identity lost behind readable truncation: %q", name)
 		}
+		otherMember := inlinePrefixListName(part, part+"-other", part, "_v6")
+		if otherMember == name {
+			t.Fatalf("different composed-chain member (plPrefix) lost behind readable truncation: %q", name)
+		}
 	})
 
 	t.Run("reserved operator namespace fails closed", func(t *testing.T) {
@@ -111,6 +115,23 @@ func TestInlinePrefixListNamesCollisionFree_12068(t *testing.T) {
 		err := routeFilterACLNameCollision(po)
 		if err == nil || !strings.Contains(err.Error(), "reserved") {
 			t.Fatalf("routeFilterACLNameCollision = %v, want reserved inline-prefix-list namespace error", err)
+		}
+	})
+
+	t.Run("reserved namespace enforced at ApplyFull", func(t *testing.T) {
+		fc := &FullConfig{
+			PolicyOptions: &config.PolicyOptionsConfig{
+				PrefixLists: map[string]*config.PrefixList{
+					"x-xpf-inline-y": {Name: "x-xpf-inline-y", Prefixes: []string{"192.0.2.0/24"}},
+				},
+			},
+			OSPF: &config.OSPFConfig{
+				Areas: []*config.OSPFArea{{ID: "0.0.0.0"}},
+			},
+		}
+		err := New().ApplyFull(fc)
+		if err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Fatalf("ApplyFull = %v, want reserved inline-prefix-list namespace error", err)
 		}
 	})
 }
