@@ -4,12 +4,15 @@ import (
 	"crypto/rand"
 	"errors"
 	"net"
+	"os"
+	"strings"
 	"syscall"
 	"time"
 
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
+	"golang.org/x/sys/unix"
 )
 
 // ProbeResult is the typed outcome of a single tunnel keepalive probe
@@ -62,25 +65,29 @@ const (
 // source is the tunnel's local endpoint IP (TunnelConfig.Source) bound
 // as the ICMP listen address (§5c) so the echo egresses from the tunnel
 // endpoint; "" → wildcard bind. dst is the underlay Destination, routed
-// in the GLOBAL/underlay FIB exactly like the tunnel's encapsulated
-// traffic (§5b — NO overlay-VRF bind). seq + nonce uniquely key the
-// reply to THIS probe (§5a — NOT the ICMP ID, which datagram sockets
-// rewrite to the socket source port).
+// in the FIB used by the tunnel's outer traffic. On the userspace-anchor
+// path, transportInstance selects that FIB; the legacy kernel GRE/IPIP
+// path passes "" because its outer lookup uses the main FIB when no
+// lower link is configured, even if tc.RoutingInstance VRF-binds the
+// tunnel interface. A non-empty transport instance binds the socket to
+// its VRF device (`vrf-<instance>`).
+// seq + nonce uniquely key the reply to THIS probe (§5a — NOT the ICMP ID,
+// which datagram sockets rewrite to the socket source port).
 // The reason return is a short human-readable detail for a
 // ProbeUnsupported result (the actual syscall errno / config failure),
 // surfaced in KeepaliveInfo and the escalation log so the operator sees
 // WHY the probe could not run — not just a generic label (Copilot PR
 // #1947). Empty for Alive/Dead.
 type tunnelProber interface {
-	Probe(source, dst string, seq int, nonce []byte, deadline time.Duration) (result ProbeResult, kind UnsupportedKind, reason string)
+	Probe(transportInstance, source, dst string, seq int, nonce []byte, deadline time.Duration) (result ProbeResult, kind UnsupportedKind, reason string)
 }
 
 // icmpProber is the production tunnelProber. It uses unprivileged
 // datagram ICMP ("udp4"/"udp6" via x/net/icmp), the same mechanism as
 // the tested pkg/cluster/monitor.go precedent, with the precedent's two
 // gaps fixed: reply matching on Seq + Data-nonce (§5a) and binding to
-// the tunnel source IP (§5c). No SO_BINDTODEVICE — the probe routes in
-// the global/underlay table (§5b).
+// the tunnel source IP (§5c). Transport-instance probes bind to the
+// corresponding `vrf-<instance>` device.
 type icmpProber struct{}
 
 // probeConn is the narrow ICMP socket surface icmpProber needs, so tests
@@ -94,18 +101,114 @@ type probeConn interface {
 }
 
 // listenICMP opens a datagram ICMP socket bound to source (or wildcard
-// when source==""). Indirection point for tests of the production
-// prober.
-var listenICMP = func(network, source string) (probeConn, error) {
-	c, err := icmp.ListenPacket(network, source)
+// when source==""). A non-empty bindDevice is applied before the source
+// bind so a source local only in a VRF is valid. Indirection point for tests.
+var listenICMP = func(network, source, bindDevice string) (probeConn, error) {
+	if bindDevice == "" {
+		c, err := icmp.ListenPacket(network, source)
+		if err != nil {
+			return nil, err
+		}
+		return c, nil
+	}
+	return listenBoundICMP(network, source, bindDevice)
+}
+
+// keepaliveVRFDeviceName mirrors pkg/rpm.vrfDeviceName: routing-instance
+// names map to Linux VRF master devices named vrf-<instance>.
+func keepaliveVRFDeviceName(transportInstance string) string {
+	if transportInstance == "" {
+		return ""
+	}
+	return "vrf-" + transportInstance
+}
+
+// listenBoundICMP is the SO_BINDTODEVICE equivalent of icmp.ListenPacket.
+// x/net/icmp.ListenPacket creates and binds the socket internally without
+// exposing a socket-control hook, so create its datagram ICMP socket here
+// when transport scoping is required.
+func listenBoundICMP(network, source, bindDevice string) (probeConn, error) {
+	family, protocol := 0, 0
+	switch network {
+	case "udp4":
+		family, protocol = unix.AF_INET, unix.IPPROTO_ICMP
+	case "udp6":
+		family, protocol = unix.AF_INET6, unix.IPPROTO_ICMPV6
+	default:
+		return nil, net.InvalidAddrError("unsupported ICMP network: " + network)
+	}
+
+	fd, err := unix.Socket(family, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, protocol)
+	if err != nil {
+		return nil, os.NewSyscallError("socket", err)
+	}
+	defer func() {
+		if fd >= 0 {
+			_ = unix.Close(fd)
+		}
+	}()
+	if err := unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, bindDevice); err != nil {
+		return nil, os.NewSyscallError("setsockopt SO_BINDTODEVICE", err)
+	}
+	addr, err := keepaliveSockaddr(network, source)
 	if err != nil {
 		return nil, err
 	}
-	return c, nil
+	if err := unix.Bind(fd, addr); err != nil {
+		return nil, os.NewSyscallError("bind", err)
+	}
+
+	file := os.NewFile(uintptr(fd), "vrf-bound datagram ICMP")
+	conn, err := net.FilePacketConn(file)
+	closeErr := file.Close()
+	fd = -1
+	if err != nil {
+		return nil, err
+	}
+	if closeErr != nil {
+		_ = conn.Close()
+		return nil, closeErr
+	}
+	return conn, nil
+}
+
+func keepaliveSockaddr(network, source string) (unix.Sockaddr, error) {
+	if network == "udp4" {
+		addr := &unix.SockaddrInet4{}
+		if source == "" || source == "0.0.0.0" {
+			return addr, nil
+		}
+		ip := net.ParseIP(source)
+		if ip == nil || ip.To4() == nil {
+			return nil, net.InvalidAddrError("non-ipv4 address")
+		}
+		copy(addr.Addr[:], ip.To4())
+		return addr, nil
+	}
+
+	addr := &unix.SockaddrInet6{}
+	if source == "" || source == "::" {
+		return addr, nil
+	}
+	host, zone, _ := strings.Cut(source, "%")
+	ip := net.ParseIP(host)
+	if ip == nil || ip.To16() == nil || ip.To4() != nil {
+		return nil, net.InvalidAddrError("non-ipv6 address")
+	}
+	copy(addr.Addr[:], ip.To16())
+	if zone != "" {
+		iface, err := net.InterfaceByName(zone)
+		if err != nil {
+			return nil, err
+		}
+		addr.ZoneId = uint32(iface.Index)
+	}
+	return addr, nil
 }
 
 // Probe sends one ICMP echo to dst and reports the typed result.
-func (icmpProber) Probe(source, dst string, seq int, nonce []byte, deadline time.Duration) (ProbeResult, UnsupportedKind, string) {
+func (icmpProber) Probe(transportInstance, source, dst string, seq int, nonce []byte, deadline time.Duration) (ProbeResult, UnsupportedKind, string) {
+
 	ip := net.ParseIP(dst)
 	if ip == nil {
 		// A non-parseable destination is a configuration error, not a
@@ -138,7 +241,7 @@ func (icmpProber) Probe(source, dst string, seq int, nonce []byte, deadline time
 		listen = source
 	}
 
-	conn, err := listenICMP(network, listen)
+	conn, err := listenICMP(network, listen, keepaliveVRFDeviceName(transportInstance))
 	if err != nil {
 		return ProbeUnsupported, classifyListenErr(err), "listen " + network + " " + listen + ": " + err.Error()
 	}

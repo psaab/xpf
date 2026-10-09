@@ -12,15 +12,16 @@ import (
 
 // KeepaliveState tracks the status of a GRE tunnel keepalive probe.
 type KeepaliveState struct {
-	mu          sync.Mutex
-	Up          bool // true if tunnel is considered up
-	Failures    int  // consecutive probe failures
-	LastSuccess time.Time
-	LastFailure time.Time
-	RemoteAddr  string // underlay remote endpoint being probed
-	SourceAddr  string // tunnel local endpoint IP bound for the probe (§5c)
-	Interval    int    // probe interval in seconds
-	MaxRetries  int    // failures before declaring down
+	mu                sync.Mutex
+	Up                bool // true if tunnel is considered up
+	Failures          int  // consecutive probe failures
+	LastSuccess       time.Time
+	LastFailure       time.Time
+	RemoteAddr        string // underlay remote endpoint being probed
+	SourceAddr        string // tunnel local endpoint IP bound for the probe (§5c)
+	transportInstance string // underlay routing instance for the outer probe path
+	Interval          int    // probe interval in seconds
+	MaxRetries        int    // failures before declaring down
 
 	// #1918 hold-on-unknown bookkeeping. When the prober cannot perform a
 	// probe (ProbeUnsupported), the loop holds the prior Up value and
@@ -58,11 +59,11 @@ type keepaliveRunner struct {
 	// Config identity at start time (#1884 A.7): the reconcile keeps an
 	// unchanged runner alive across applies instead of restarting it
 	// (which would reset probe state every commit).
-	remote     string
-	source     string // tunnel local endpoint IP probed-from (#1918 §5c)
-	interval   int
-	maxRetries int // normalized: <=0 config value stored as 3
-
+	remote            string
+	source            string // tunnel local endpoint IP probed-from (#1918 §5c)
+	transportInstance string // transport VRF used by the underlay keepalive probe
+	interval          int
+	maxRetries        int // normalized: <=0 config value stored as 3
 	// linkGen is the per-tunnel generation token captured at start
 	// (#1918 §6 Axis D, defense-in-depth). The runner reads it LOCK-FREE
 	// (.Load()) before each netlink op and drops the action if it no
@@ -78,15 +79,23 @@ type keepaliveRunner struct {
 // NORMALIZED keepalive parameters. KeepaliveRetry <= 0 normalizes to 3
 // BEFORE comparison (#1884 r1 Codex F5: comparing a raw config 0
 // against the stored default 3 would restart the runner every apply).
-// The tunnel SOURCE is part of the identity (#1918 §5c): a source-only
-// change must restart the runner so the probe binds the new endpoint.
+// The tunnel SOURCE and effective transport instance are part of the
+// identity: either change restarts the runner so the probe follows the
+// new endpoint/path. Legacy kernel tunnels use the main FIB for outer
+// traffic, so their configured interface VRF does not select the probe's
+// transport instance.
 func (r *keepaliveRunner) matches(tc *config.TunnelConfig) bool {
 	retries := tc.KeepaliveRetry
 	if retries <= 0 {
 		retries = 3
 	}
+	transportInstance := tc.RoutingInstance
+	if !tc.AnchorOnly {
+		transportInstance = ""
+	}
 	return r.remote == tc.Destination &&
 		r.source == tc.Source &&
+		r.transportInstance == transportInstance &&
 		r.interval == tc.Keepalive &&
 		r.maxRetries == retries
 }
@@ -144,8 +153,9 @@ func (t *tunnelManager) stopKeepaliveLocked(name string) {
 
 // startKeepalive starts a keepalive probe goroutine for a tunnel.
 // source is the tunnel local endpoint IP the probe binds to (#1918
-// §5c); "" → wildcard. Caller MUST hold mu.
-func (t *tunnelManager) startKeepalive(tunnelName, source, remoteAddr string, interval, maxRetries int) {
+// §5c); transportInstance is the routing-instance carrying the outer
+// tunnel traffic. Caller MUST hold mu.
+func (t *tunnelManager) startKeepalive(tunnelName, transportInstance, source, remoteAddr string, interval, maxRetries int) {
 	// Stop existing keepalive for this tunnel if any. Drain on done
 	// so the replacement doesn't race the old goroutine on the handle.
 	t.stopKeepaliveLocked(tunnelName)
@@ -155,11 +165,12 @@ func (t *tunnelManager) startKeepalive(tunnelName, source, remoteAddr string, in
 	}
 
 	state := &KeepaliveState{
-		Up:         true,
-		RemoteAddr: remoteAddr,
-		SourceAddr: source,
-		Interval:   interval,
-		MaxRetries: maxRetries,
+		Up:                true,
+		RemoteAddr:        remoteAddr,
+		SourceAddr:        source,
+		transportInstance: transportInstance,
+		Interval:          interval,
+		MaxRetries:        maxRetries,
 	}
 
 	// Capture the current generation token (#1918 §6 Axis D
@@ -171,15 +182,16 @@ func (t *tunnelManager) startKeepalive(tunnelName, source, remoteAddr string, in
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	t.keepalives[tunnelName] = &keepaliveRunner{
-		cancel:     cancel,
-		state:      state,
-		done:       done,
-		remote:     remoteAddr,
-		source:     source,
-		interval:   interval,
-		maxRetries: maxRetries,
-		linkGen:    gen,
-		startGen:   startGen,
+		cancel:            cancel,
+		state:             state,
+		done:              done,
+		remote:            remoteAddr,
+		source:            source,
+		transportInstance: transportInstance,
+		interval:          interval,
+		maxRetries:        maxRetries,
+		linkGen:           gen,
+		startGen:          startGen,
 	}
 
 	prober := t.keepaliveProber()
@@ -272,7 +284,7 @@ func (t *tunnelManager) keepaliveTick(tunnelName string, state *KeepaliveState, 
 	deadline := keepaliveProbeDeadline(state.Interval)
 	seq := nextSeq(state)
 	nonce := makeNonce()
-	result, kind, reason := prober.Probe(state.SourceAddr, state.RemoteAddr, seq, nonce, deadline)
+	result, kind, reason := prober.Probe(state.transportInstance, state.SourceAddr, state.RemoteAddr, seq, nonce, deadline)
 
 	// ---- Step 1: classify + commit counters, compute intent ----
 	state.mu.Lock()

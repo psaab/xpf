@@ -930,9 +930,14 @@ ECMP and admits it again after recovery, so userspace forwarding converges
 without an operator commit. Older snapshots omit `link_up` and retain their
 prior underlay-only liveness behavior.
 
-- **Mechanism**: unprivileged datagram ICMP (`udp4`/`udp6` via
-  `golang.org/x/net/icmp`), the same mechanism as the tested
-  `pkg/cluster/monitor.go` precedent. Requires `net.ipv4.ping_group_range`
+- **Mechanism**: unprivileged datagram ICMP (`udp4`/`udp6`), the same
+  mechanism as the tested `pkg/cluster/monitor.go` precedent. The
+  global path opens the socket via `golang.org/x/net/icmp`
+  `ListenPacket`; a transport-scoped probe builds the same datagram
+  socket directly (`unix.Socket` + `SO_BINDTODEVICE` +
+  `net.FilePacketConn` in `listenBoundICMP`), because x/net/icmp
+  exposes no socket-control hook for the device bind. x/net/icmp still
+  marshals/parses the echo. Requires `net.ipv4.ping_group_range`
   to admit the daemon gid (or `CAP_NET_RAW`); when it does not, the probe
   is **ProbeUnsupported** and the link is HELD (never torn down — see
   hold-on-unknown).
@@ -967,9 +972,14 @@ prior underlay-only liveness behavior.
 - **Reply match**: `Seq` + a per-probe random **Data-nonce** — NOT the
   ICMP ID. Datagram ("ping") sockets rewrite the outbound id to the
   socket source port, so id is advisory only.
-- **Probe target / table**: the underlay `Destination`, routed in the
-  GLOBAL/underlay FIB (no `SO_BINDTODEVICE` to an overlay VRF) — exactly
-  where the tunnel's encapsulated packets resolve.
+- **Probe target / table**: the underlay `Destination` is routed in the
+  effective transport context. Anchor-only tunnels use their configured
+  transport instance. Legacy kernel GRE/IPIP tunnels pass an empty instance:
+  with their lower-link selector unset, the kernel outer-route lookup uses
+  the main FIB even if the tunnel interface is VRF-bound. A non-empty
+  effective instance binds the socket with
+  `SO_BINDTODEVICE=vrf-<instance>`; an empty instance keeps global-FIB
+  behavior.
 - **Source bind**: the probe binds the tunnel's local `Source` IP so the
   echo egresses from, and the reply returns to, the tunnel endpoint
   (multi-homed / policy-routed correctness). Empty source → wildcard.

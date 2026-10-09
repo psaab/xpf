@@ -880,13 +880,13 @@ test-mouse-elephant-lib:
 test-rule-dscp-lib:
 	sh ./test/routing/selftest-rule-dscp_7796.sh
 
-# Self-test the #9420 next-table ingress-scope, #9819 VRF-miss terminator, and
-# #11319 PBR-before-leak kernel cells. They SKIP under plain `go test` without
-# a usable netns, and a skipped cell reads identically to a passing one — so
-# this target runs them under `unshare -rn` with XPF_REQUIRE_NETNS=1, where a
+# Self-test the #9420 next-table ingress-scope, #9819 VRF-miss terminator,
+# #11319 PBR-before-leak and #12083 VRF-held-source keepalive kernel cells.
+# They SKIP under plain `go test` without a usable netns; a skipped cell reads
+# like a pass, so this target runs them under `unshare -rn` with XPF_REQUIRE_NETNS=1, where a
 # missing tool or failed namespace is a failure. It SKIPS as a whole (not
 # fails) where user namespaces are unavailable, matching the other tool-gated
-# legs. All three kernel cells are pinned BY NAME inside the script, so a
+# legs. All four kernel cells are pinned BY NAME inside the script, so a
 # rotted -run predicate cannot report a clean pass over nothing.
 # Single-sourced with the `make selftest` legs: each script here is the SAME
 # script the aggregate runs, so the target and the aggregate cannot drift into
@@ -896,7 +896,7 @@ test-routing-kernel-lib:
 	sh ./test/routing/selftest-routing-kernel_9812.sh
 	sh ./test/routing/selftest-routing-probes_9812.sh
 
-# #11418: the routing real-kernel cells (#9420, #9819, #11319) are part of
+# #11418: the routing real-kernel cells (#9420, #9819, #11319, #12083) are part of
 # `make test`, not only the opt-in `make selftest` / `test-routing-kernel-lib`.
 # They exercise kernel FIB behavior that ordinary Go tests cannot observe. The
 # forcing leg's by-name check catches an empty or stale `-run` selection.
@@ -915,7 +915,7 @@ test-routing-kernel:
 			echo "test-routing-kernel: FAIL — XPF_REQUIRE_NETNS=1, but the forcing prerequisites are unavailable."; \
 			exit 1; \
 		fi; \
-		echo "make test: NOT-EXAMINED — routing-kernel (#9420 next-table scope, #9819 VRF-miss terminator, #11319 PBR-before-leak)."; \
+		echo "make test: NOT-EXAMINED — routing-kernel (#9420 next-table scope, #9819 VRF-miss terminator, #11319 PBR-before-leak, #12083 VRF-held-source keepalive)."; \
 		echo "  The host cannot create a private network namespace; the real-kernel cells did not run."; \
 		echo "  Run where unprivileged user namespaces are available, or set XPF_REQUIRE_NETNS=1 to fail instead."; \
 		exit 0; \

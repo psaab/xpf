@@ -34,16 +34,22 @@
 # from #12125 manager_link_refresh netns guards, +1 other from #12126 FRR
 # vtysh-absence skip. #11417's own +1/+1 floor lines are subsumed by this
 # recount (same FRR-absence site).
-total        = 460
+# The census at base 83b5c9553 measured 467 total, 76 privilege-absent, and
+# 376 other sites, versus these prior floors at 460/71/374: unrelated
+# pre-existing drift of +7/+5/+2. #12083 adds seven environment-gated skip
+# sites in pkg/routing/tunnel_keepalive_vrf_12083_test.go: +7 total, +5
+# privilege-absent, and +2 other. Bank each delta separately and preserve
+# both attributions in the commit body.
+total        = 474
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
 # the gap, it swaps which subjects go unexamined.
-priv-absent  = 71
+priv-absent  = 81
 priv-present = 14
 
 # Everything else: environment-, tool- and fixture-gated skips.
-other        = 374
+other        = 378
 
 # Skips this census counted but could NOT classify: `t.SkipNow()` (no message
 # by construction) and non-literal messages. Deliberately a REPORTED bucket
