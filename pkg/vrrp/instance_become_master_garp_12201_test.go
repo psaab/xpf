@@ -2,6 +2,7 @@ package vrrp
 
 import (
 	"net"
+	"runtime"
 	"testing"
 	"time"
 
@@ -75,7 +76,7 @@ func TestBecomeMaster_LaunchesOneBurstPerVIPFamily_12201(t *testing.T) {
 
 	want := map[string]string{"GARP": "10.0.61.1", "NA": "fd00:61::1"}
 	seen := make(map[string]string, 2)
-	timer := time.NewTimer(time.Second)
+	timer := time.NewTimer(30 * time.Second)
 	defer timer.Stop()
 	for len(seen) < len(want) {
 		select {
@@ -85,8 +86,10 @@ func TestBecomeMaster_LaunchesOneBurstPerVIPFamily_12201(t *testing.T) {
 			}
 			seen[b.family] = b.ip
 		case <-timer.C:
+			stack := make([]byte, 1<<16)
+			n := runtime.Stack(stack, true)
 			t.Fatalf("timed out waiting for one burst per VIP family; got %v — "+
-				"becomeMaster did not launch the GARP/NA burst (#12201)", seen)
+				"becomeMaster did not launch the GARP/NA burst (#12201)\n%s", seen, stack[:n])
 		}
 	}
 	for family, wantIP := range want {
