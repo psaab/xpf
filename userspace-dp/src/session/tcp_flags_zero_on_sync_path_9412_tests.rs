@@ -34,18 +34,16 @@ use crate::SessionSyncRequest;
 /// A minimal TCP peer-sync record. It states no close class, so this cell sees
 /// only the `tcp_flags` carrier. #9412's own carrier is `tcp_close_class`.
 fn tcp_sync_req() -> SessionSyncRequest {
-    SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: crate::ip_proto::PROTO_TCP,
-        src_ip: "10.0.61.102".to_string(),
-        dst_ip: "172.16.80.200".to_string(),
-        src_port: 54321,
-        dst_port: 5201,
-        ingress_zone_id: TEST_TRUST_ZONE_ID,
-        egress_zone_id: TEST_UNTRUST_ZONE_ID,
-        ..SessionSyncRequest::default()
-    }
+    SessionSyncRequest { operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: crate::ip_proto::PROTO_TCP,
+    src_ip: "10.0.61.102".to_string(),
+    dst_ip: "172.16.80.200".to_string(),
+    src_port: 54321,
+    dst_port: 5201,
+    ingress_zone_id: TEST_TRUST_ZONE_ID,
+    egress_zone_id: TEST_UNTRUST_ZONE_ID,
+    ..SessionSyncRequest::default() }
 }
 
 #[test]

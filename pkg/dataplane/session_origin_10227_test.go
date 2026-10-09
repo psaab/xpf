@@ -109,3 +109,44 @@ func TestClusterSyncedOriginSurvivesBPFMirrorProjection10227(t *testing.T) {
 		t.Fatalf("v6 BPF mirror flags=%#x, origin bit was lost", got)
 	}
 }
+
+func TestSourceNatProvenanceFlagsRoundTrip12187(t *testing.T) {
+	const unrelatedFlags = SessFlagSNAT | SessFlagDNAT | SessFlagClusterSynced
+	for _, tc := range []struct {
+		name       string
+		provenance uint8
+		want       uint8
+	}{
+		{name: "unknown", provenance: SourceNatProvenanceUnknown, want: SourceNatProvenanceUnknown},
+		{name: "dynamic", provenance: SourceNatProvenanceDynamic, want: SourceNatProvenanceDynamic},
+		{name: "static", provenance: SourceNatProvenanceStatic, want: SourceNatProvenanceStatic},
+		{name: "future value is unknown", provenance: 3, want: SourceNatProvenanceUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			flags := WithSourceNatProvenance(unrelatedFlags|SessFlagStaticNAT, tc.provenance)
+			if got := SourceNatProvenanceFromFlags(flags); got != tc.want {
+				t.Fatalf("decoded provenance=%d, want %d (flags=%#x)", got, tc.want, flags)
+			}
+			if flags&unrelatedFlags != unrelatedFlags {
+				t.Fatalf("unrelated flags %#x were not preserved in %#x", unrelatedFlags, flags)
+			}
+			wantStatic := tc.want == SourceNatProvenanceStatic
+			if gotStatic := flags&SessFlagStaticNAT != 0; gotStatic != wantStatic {
+				t.Fatalf("static flag=%v, want %v (flags=%#x)", gotStatic, wantStatic, flags)
+			}
+			if got := (SessionValue{Flags: flags}).toBPF().sessionValue().Flags; got != flags {
+				t.Fatalf("IPv4 BPF mirror flags=%#x, want %#x", got, flags)
+			}
+			if got := (SessionValueV6{Flags: flags}).toBPF().sessionValue().Flags; got != flags {
+				t.Fatalf("IPv6 BPF mirror flags=%#x, want %#x", got, flags)
+			}
+		})
+	}
+
+	if got := SourceNatProvenanceFromFlags(SessFlagStaticNAT); got != SourceNatProvenanceUnknown {
+		t.Fatalf("marker-clear legacy static bit decoded as provenance %d, want unknown", got)
+	}
+	if got := WithSourceNatProvenance(SessFlagStaticNAT, SourceNatProvenanceUnknown); got&SessFlagStaticNAT != 0 {
+		t.Fatalf("unknown provenance retained stale static flag: %#x", got)
+	}
+}

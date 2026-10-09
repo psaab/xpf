@@ -109,24 +109,22 @@ fn resolution() -> ForwardingResolution {
 }
 
 fn entry(src_port: u16) -> SyncedSessionEntry {
-    SyncedSessionEntry {
-        key: key(src_port),
-        decision: SessionDecision {
-            resolution: resolution(),
-            nat: NatDecision::default(),
-            install_table_domain: 0,
-            install_table_check: 0,
-        },
-        metadata: metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP_LOCAL,
-        tcp_flags: TCP_FLAG_ACK_LOCAL,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    }
+    SyncedSessionEntry { key: key(src_port),
+    decision: SessionDecision {
+        resolution: resolution(),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    },
+    metadata: metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP_LOCAL,
+    tcp_flags: TCP_FLAG_ACK_LOCAL,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None }
 }
 
 type SharedMap = Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>;

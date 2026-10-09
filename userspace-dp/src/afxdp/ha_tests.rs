@@ -428,20 +428,18 @@ fn update_ha_state_prewarms_split_rg_reverse_sessions_on_activation() {
         None,
     );
 
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     publish_shared_session(
         &coordinator.sessions.synced,
         &coordinator.sessions.nat,
@@ -541,20 +539,18 @@ fn update_ha_state_demotion_recovers_from_poisoned_worker_command_mutex() {
     // Locally-owned (non-peer-synced) shared session in RG 1. The
     // demotion must flip its origin to a peer-synced one via
     // demote_shared_owner_rgs.
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        // #2170 test fixture: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    // #2170 test fixture: no peer install generation.
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     publish_shared_session(
         &coordinator.sessions.synced,
         &coordinator.sessions.nat,
@@ -664,19 +660,17 @@ fn prewarm_recovers_from_poisoned_shared_session_mutex() {
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
     let worker_commands = Arc::new(Mutex::new(VecDeque::new()));
 
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     publish_shared_session(
         &coordinator.sessions.synced,
         &coordinator.sessions.nat,
@@ -827,19 +821,17 @@ fn merge_owner_rg_candidate_keys_scales_linearly_not_quadratically() {
 // --- #2170 install-generation guard (helper-side belt-and-suspenders) -----
 
 fn synced_entry_with_generation(generation: u64) -> SyncedSessionEntry {
-    SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        generation,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    }
+    SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    generation,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None }
 }
 
 fn synced_generation(coordinator: &Coordinator, key: &SessionKey) -> Option<u64> {
@@ -1046,22 +1038,20 @@ fn upsert_synced_session_refuses_stale_generation_install() {
 // queue, so the `is_none()` / not-enqueued reject assertions below fail as
 // clean assertions. Target-count = 1 gate site.
 fn synced_entry_port(port: u16, generation: u64) -> SyncedSessionEntry {
-    SyncedSessionEntry {
-        key: SessionKey {
-            src_port: port,
-            ..test_key()
-        },
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    }
+    SyncedSessionEntry { key: SessionKey {
+        src_port: port,
+        ..test_key()
+    },
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None }
 }
 
 #[test]
@@ -1671,19 +1661,17 @@ fn synced_snat_entry() -> SyncedSessionEntry {
         rewrite_src_port: Some(54321),
         ..NatDecision::default()
     };
-    SyncedSessionEntry {
-        key: test_key(),
-        decision,
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    }
+    SyncedSessionEntry { key: test_key(),
+    decision,
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None }
 }
 
 /// #4393 FAIL-ON-REVERT: installing a peer-synced forward SNAT session on the
@@ -1855,19 +1843,17 @@ fn coordinator_with_tunnel_session(tunnel_endpoint_id: u16) -> (Coordinator, Ses
     let mut decision = test_decision();
     decision.resolution.tunnel_endpoint_id = tunnel_endpoint_id;
     let key = test_key();
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata: test_metadata(), // is_reverse = false -> emits a close delta
-        leak_incarnation: 0,
-        origin: SessionOrigin::ForwardFlow,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata: test_metadata(), // is_reverse = false -> emits a close delta
+    leak_incarnation: 0,
+    origin: SessionOrigin::ForwardFlow,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     publish_shared_session(
         &coordinator.sessions.synced,
         &coordinator.sessions.nat,
@@ -2485,26 +2471,24 @@ fn synced_import_zone_unresolved_counts_only_real_degradation_7209() {
 }
 
 fn reserve6600_entry(src_port: u16, pool_port: u16) -> SyncedSessionEntry {
-    SyncedSessionEntry {
-        key: SessionKey {
-            src_port,
-            ..test_key()
-        },
-        decision: SessionDecision { resolution: test_resolution(), nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
-            rewrite_src_port: Some(pool_port),
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    }
+    SyncedSessionEntry { key: SessionKey {
+        src_port,
+        ..test_key()
+    },
+    decision: SessionDecision { resolution: test_resolution(), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+        rewrite_src_port: Some(pool_port),
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 },
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None }
 }
 
 /// #6600 fail-on-revert gate: an import whose translated NAT port is already
@@ -2699,27 +2683,25 @@ fn upsert_synced_session_rolls_back_source_nat_when_nat64_refuses_6600() {
 
     // A NAT64 decision naming pool port 51000 on 203.0.113.1.
     let nat64_port: u16 = 51000;
-    let mk = |src_port: u16| SyncedSessionEntry {
-        key: SessionKey {
-            src_port,
-            ..test_key()
-        },
-        decision: SessionDecision { resolution: test_resolution(), nat: NatDecision {
-            rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
-            rewrite_src_port: Some(nat64_port),
-            nat64: true,
-            ..NatDecision::default()
-        }, install_table_domain: 0, install_table_check: 0 },
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let mk = |src_port: u16| SyncedSessionEntry { key: SessionKey {
+        src_port,
+        ..test_key()
+    },
+    decision: SessionDecision { resolution: test_resolution(), nat: NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+        rewrite_src_port: Some(nat64_port),
+        nat64: true,
+        ..NatDecision::default()
+    }, install_table_domain: 0, install_table_check: 0 },
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
 
     // Occupy the NAT64 translated identity with a DIFFERENT flow, so the
     // import's NAT64 leg refuses while its source-NAT leg succeeds.
@@ -4090,19 +4072,17 @@ fn a_deleted_synced_session_leaves_no_reverse_prewarm_key_after_a_route_moves_72
     // while the entry's own metadata names RG 1 — two distinct buckets, which
     // is what makes the asymmetry observable at all.
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
         SyncedImportOutcome::Applied,
@@ -4182,19 +4162,17 @@ fn deleting_one_synced_session_leaves_its_neighbours_in_the_reverse_prewarm_inde
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
 
-    let doomed = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let doomed = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     // Same source, different port: a distinct key that lands in the SAME two
     // buckets, which is the only arrangement in which an over-broad sweep is
     // observable at all.
@@ -4280,19 +4258,17 @@ fn deleting_one_synced_session_leaves_its_neighbours_in_the_reverse_prewarm_inde
 fn a_route_move_adds_the_new_prewarm_filing_and_delete_clears_all_of_them_7209() {
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
         SyncedImportOutcome::Applied
@@ -4368,19 +4344,17 @@ fn a_removal_outside_the_delete_verb_still_unfiles_the_prewarm_key_7209() {
     ] {
         let mut coordinator = Coordinator::new();
         coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
-        let entry = SyncedSessionEntry {
-            key: test_key(),
-            decision: test_decision(),
-            metadata: test_metadata(),
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: 0x10,
-            generation: 0,
-            session_id: 0,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-        };
+        let entry = SyncedSessionEntry { key: test_key(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0, source_nat_static: None };
         assert_eq!(
             coordinator.upsert_synced_session(entry.clone()),
             SyncedImportOutcome::Applied
@@ -4448,19 +4422,17 @@ fn a_removal_outside_the_delete_verb_still_unfiles_the_prewarm_key_7209() {
 fn a_promoted_then_deleted_synced_session_leaves_no_prewarm_key_7209() {
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
         SyncedImportOutcome::Applied
@@ -4544,19 +4516,17 @@ fn filed_under_7209(coordinator: &Coordinator, key: &SessionKey) -> Vec<i32> {
 fn a_refresh_never_drops_a_prewarm_filing_the_current_fib_cannot_rederive_7209() {
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
         SyncedImportOutcome::Applied
@@ -4677,19 +4647,17 @@ fn reverse_prewarm_owner_rg_candidates_for_test(
 /// resolves to a real egress.
 #[test]
 fn an_import_under_an_emptied_forwarding_table_publishes_a_dead_reverse_companion_7209() {
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     let reverse_key = reverse_session_key(&entry.key, entry.decision.nat);
 
     // CONTROL: a populated table resolves the companion's reply path.
@@ -4831,19 +4799,17 @@ fn the_reconcile_replay_rederives_a_dead_reverse_companion_7209() {
             ..HAGroupStatus::default()
         },
     ]);
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     let reverse_key = reverse_session_key(&entry.key, entry.decision.nat);
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
@@ -4996,19 +4962,17 @@ fn stop_inner_empties_the_forwarding_table_that_a_released_lock_would_expose_720
         "fixture starts with an EMPTY table, so it cannot show that stop_inner \
          is what empties it"
     );
-    let entry = SyncedSessionEntry {
-        key: test_key(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let entry = SyncedSessionEntry { key: test_key(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
         SyncedImportOutcome::Applied
@@ -7886,58 +7850,56 @@ fn queued_stale_reverse_upsert_healed_by_positioned_refresh_9720() {
     // (mirrors the refresh-cell install, as a queued UpsertSynced).
     let forward_key = test_key();
     let reverse_key = reverse_session_key(&forward_key, test_decision().nat);
-    let stale_reverse = SyncedSessionEntry {
-        key: reverse_key.clone(),
-        decision: SessionDecision {
-            resolution: ForwardingResolution {
-                disposition: ForwardingDisposition::FabricRedirect,
-                local_ifindex: 0,
-                egress_ifindex: 21,
-                tx_ifindex: 21,
-                tunnel_endpoint_id: 0,
-                next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
-                neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
-                src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
-                tx_vlan_id: 0,
-                route_mtu: 0,
-                transport_route_mtu: 0,
-            },
-            nat: test_decision().nat.reverse(
-                forward_key.src_ip,
-                forward_key.dst_ip,
-                forward_key.src_port,
-                forward_key.dst_port,
-            ),
-            install_table_domain: 0,
-            install_table_check: 0,
+    let stale_reverse = SyncedSessionEntry { key: reverse_key.clone(),
+    decision: SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::FabricRedirect,
+            local_ifindex: 0,
+            egress_ifindex: 21,
+            tx_ifindex: 21,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2))),
+            neighbor_mac: Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+            src_mac: Some([0x02, 0xbf, 0x72, 0xff, 0x00, 0x01]),
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
         },
-        metadata: SessionMetadata {
-            ingress_zone: 2,
-            egress_zone: 1,
-            ingress_zone_check: 0,
-            egress_zone_check: 0,
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            owner_rg_id: 2,
-            fabric_ingress: false,
-            is_reverse: true,
-            nat64_reverse: None,
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-        },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+        nat: test_decision().nat.reverse(
+            forward_key.src_ip,
+            forward_key.dst_ip,
+            forward_key.src_port,
+            forward_key.dst_port,
+        ),
+        install_table_domain: 0,
+        install_table_check: 0,
+    },
+    metadata: SessionMetadata {
+        ingress_zone: 2,
+        egress_zone: 1,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        owner_rg_id: 2,
+        fabric_ingress: false,
+        is_reverse: true,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+    },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     let now_ns = monotonic_nanos();
 
     coordinator
@@ -8018,22 +7980,20 @@ fn queued_forward_upsert_demoted_by_positioned_demote_9720() {
 
     let key = test_key();
     let now_ns = monotonic_nanos();
-    let forward_upsert = SyncedSessionEntry {
-        key: key.clone(),
-        decision: test_decision(),
-        metadata: SessionMetadata {
-            fabric_ingress: false,
-            ..test_metadata()
-        },
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let forward_upsert = SyncedSessionEntry { key: key.clone(),
+    decision: test_decision(),
+    metadata: SessionMetadata {
+        fabric_ingress: false,
+        ..test_metadata()
+    },
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
 
     coordinator
         .update_ha_state(&[HAGroupStatus {
@@ -8733,24 +8693,22 @@ fn fixture_10512_lease(
         discriminator: Default::default(),
         routing_domain: 0,
     };
-    let mut forward = SyncedSessionEntry {
-        key: key.clone(),
-        decision: SessionDecision {
-            resolution: test_resolution(),
-            nat: NatDecision::default(),
-            install_table_domain: 0,
-            install_table_check: 0,
-        },
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: forward_id,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let mut forward = SyncedSessionEntry { key: key.clone(),
+    decision: SessionDecision {
+        resolution: test_resolution(),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    },
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: forward_id,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     forward.metadata.is_reverse = false;
     let reverse_key = reverse_session_key(&key, NatDecision::default());
     let mut reverse = forward.clone();
@@ -8996,24 +8954,22 @@ fn policy_shared_absent_companion_is_applied_not_partial_10512() {
             discriminator: Default::default(),
             routing_domain: 0,
         };
-        let forward = SyncedSessionEntry {
-            key: key.clone(),
-            decision: SessionDecision {
-                resolution: test_resolution(),
-                nat: NatDecision::default(),
-                install_table_domain: 0,
-                install_table_check: 0,
-            },
-            metadata: test_metadata(),
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: 0x10,
-            generation: 0,
-            session_id: 0xF40512,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-        };
+        let forward = SyncedSessionEntry { key: key.clone(),
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0xF40512,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0, source_nat_static: None };
         crate::afxdp::shared_ops::publish_shared_session(
             &coordinator.sessions.synced,
             &coordinator.sessions.nat,
@@ -9112,24 +9068,22 @@ fn policy_shared_absent_companion_is_applied_not_partial_10512() {
         );
         let mut metadata = test_metadata();
         metadata.is_reverse = false;
-        let forward = SyncedSessionEntry {
-            key: key.clone(),
-            decision: SessionDecision {
-                resolution: test_resolution(),
-                nat: NatDecision::default(),
-                install_table_domain: 0,
-                install_table_check: 0,
-            },
-            metadata,
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: 0x10,
-            generation: 0,
-            session_id: 0xF70512,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-        };
+        let forward = SyncedSessionEntry { key: key.clone(),
+        decision: SessionDecision {
+            resolution: test_resolution(),
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0xF70512,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0, source_nat_static: None };
         crate::afxdp::shared_ops::publish_shared_session(
             &coordinator.sessions.synced,
             &coordinator.sessions.nat,
@@ -10042,19 +9996,17 @@ fn coord_list_shared_only_policy_row_reports_incomplete_11339() {
     let publish = |key: SessionKey, policy_id: u32, session_id: u64| {
         let mut metadata = test_metadata();
         metadata.policy_id = policy_id;
-        let entry = SyncedSessionEntry {
-            key,
-            decision: test_decision(),
-            metadata,
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: 0x10,
-            generation: 0,
-            session_id,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-        };
+        let entry = SyncedSessionEntry { key,
+        decision: test_decision(),
+        metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0, source_nat_static: None };
         publish_shared_session(
             &coordinator.sessions.synced,
             &coordinator.sessions.nat,
@@ -10228,19 +10180,17 @@ fn clear_mirror_removes_same_tuple_in_two_domains_10512() {
     for domain in [7u32, 8u32] {
         let mut key = base.clone();
         key.routing_domain = domain;
-        let entry = SyncedSessionEntry {
-            key,
-            decision: test_decision(),
-            metadata: test_metadata(),
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: 0x10,
-            generation: 0,
-            session_id: 0xC1EA9000 + domain as u64,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-        };
+        let entry = SyncedSessionEntry { key,
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0xC1EA9000 + domain as u64,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0, source_nat_static: None };
         crate::afxdp::shared_ops::publish_shared_session(
             &coordinator.sessions.synced,
             &coordinator.sessions.nat,
@@ -10278,19 +10228,17 @@ fn clear_mirror_removes_same_tuple_in_two_domains_10512() {
 fn clear_mirror_bpf_failure_retains_authority_10512() {
     let coordinator = Coordinator::new();
     let key = test_key();
-    let entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision: test_decision(),
-        metadata: test_metadata(),
-        leak_incarnation: 0,
-        origin: SessionOrigin::SyncImport,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id: 0xC1EA9,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    };
+    let entry = SyncedSessionEntry { key: key.clone(),
+    decision: test_decision(),
+    metadata: test_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0xC1EA9,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None };
     crate::afxdp::shared_ops::publish_shared_session(
         &coordinator.sessions.synced,
         &coordinator.sessions.nat,
@@ -10326,19 +10274,17 @@ fn clear_mirror_over_cap_fails_closed_untouched_10512() {
     for domain in [7u32, 8u32] {
         let mut key = test_key();
         key.routing_domain = domain;
-        let entry = SyncedSessionEntry {
-            key,
-            decision: test_decision(),
-            metadata: test_metadata(),
-            leak_incarnation: 0,
-            origin: SessionOrigin::SyncImport,
-            protocol: PROTO_TCP,
-            tcp_flags: 0x10,
-            generation: 0,
-            session_id: 0xC1EA9000 + domain as u64,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-        };
+        let entry = SyncedSessionEntry { key,
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0xC1EA9000 + domain as u64,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0, source_nat_static: None };
         crate::afxdp::shared_ops::publish_shared_session(
             &coordinator.sessions.synced,
             &coordinator.sessions.nat,

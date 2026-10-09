@@ -1417,6 +1417,9 @@ pub(crate) struct SessionDeltaInfo {
     pub nat_src_port: u16,
     #[serde(rename = "nat_dst_port", default)]
     pub nat_dst_port: u16,
+    /// #12187: 0 unknown/legacy, 1 dynamic SNAT, 2 static SNAT.
+    #[serde(rename = "source_nat_provenance", default)]
+    pub source_nat_provenance: u8,
     #[serde(rename = "fabric_redirect", default)]
     pub fabric_redirect: bool,
     #[serde(rename = "fabric_ingress", default)]

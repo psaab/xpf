@@ -1914,6 +1914,12 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 			// that ends after the rule ID defaults to 0.
 			if off < len(payload) {
 				d.TCPHandshakeState = dataplane.NormalizeTCPHandshakeState(payload[off])
+				off++
+				// #12187: source-NAT provenance is appended after handshake
+				// state on open/update frames. Old frames omit it => unknown.
+				if off < len(payload) {
+					d.SourceNatProvenance = dataplane.NormalizeSourceNatProvenance(payload[off])
+				}
 			}
 		}
 	}

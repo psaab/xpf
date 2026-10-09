@@ -427,7 +427,7 @@ impl SessionTable {
                             bulk_resync: false,
                             tcp_close_class: 0,
                             tcp_handshake_state: 0,
-                            purge_retirement: false, };
+                            purge_retirement: false, source_nat_static: None };
                             (!self.push_expiry_close_delta(close.clone())).then_some(close)
                         } else {
                             None

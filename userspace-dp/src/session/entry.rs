@@ -640,6 +640,30 @@ pub(crate) enum ExportProvenance {
     LossResync,
     CommandExport(u64),
 }
+/// HA wire values for ordinary source-NAT provenance. Zero preserves legacy
+/// peers that cannot state whether a translated source came from a static rule.
+pub(crate) const SOURCE_NAT_PROVENANCE_UNKNOWN: u8 = 0;
+pub(crate) const SOURCE_NAT_PROVENANCE_DYNAMIC: u8 = 1;
+pub(crate) const SOURCE_NAT_PROVENANCE_STATIC: u8 = 2;
+
+pub(crate) fn source_nat_provenance_to_wire(source_nat_static: Option<bool>) -> u8 {
+    match source_nat_static {
+        None => SOURCE_NAT_PROVENANCE_UNKNOWN,
+        Some(false) => SOURCE_NAT_PROVENANCE_DYNAMIC,
+        Some(true) => SOURCE_NAT_PROVENANCE_STATIC,
+    }
+}
+
+pub(crate) fn source_nat_static_from_provenance(value: u8) -> Result<Option<bool>, String> {
+    match value {
+        SOURCE_NAT_PROVENANCE_UNKNOWN => Ok(None),
+        SOURCE_NAT_PROVENANCE_DYNAMIC => Ok(Some(false)),
+        SOURCE_NAT_PROVENANCE_STATIC => Ok(Some(true)),
+        _ => Err(format!("invalid source_nat_provenance {value}")),
+    }
+}
+
+
 
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -648,6 +672,9 @@ pub(crate) struct SessionDelta {
     pub(crate) key: SessionKey,
     pub(crate) decision: SessionDecision,
     pub(crate) metadata: SessionMetadata,
+    /// Ordinary source-NAT origin: `Some(true)` static, `Some(false)` dynamic,
+    /// or `None` when absent/unknown on a legacy peer.
+    pub(crate) source_nat_static: Option<bool>,
     /// Generation under which `metadata.policy_id` was resolved for an Open
     /// delta. Close records instead stamp the generation of their re-resolved
     /// current policy ID at the event-stream boundary.

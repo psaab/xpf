@@ -724,17 +724,30 @@ const _: [(); 144] = [(); std::mem::offset_of!(BpfSessionValueV4, routing_domain
 const _: [(); 192] = [(); std::mem::offset_of!(BpfSessionValueV6, routing_domain)];
 
 /// Session flag constants matching C SESS_FLAG_* defines. `u16` because the
-/// `session_value.flags` field is `__u16` (SESS_FLAG_NPTV6 is bit 8 and
-/// SessFlagClusterSynced is bit 9, #5460/#10227).
+/// `session_value.flags` field is `__u16` (NPTv6 bit 8, cluster origin bit 9,
+/// and SNAT provenance-known bit 10; #5460/#10227/#12187).
 const SESS_FLAG_SNAT: u16 = 1 << 0;
 const SESS_FLAG_DNAT: u16 = 1 << 1;
+const SESS_FLAG_STATIC_NAT: u16 = 1 << 6;
 const SESS_FLAG_CLUSTER_SYNCED: u16 = 1 << 9;
+const SESS_FLAG_SNAT_PROVENANCE_KNOWN: u16 = 1 << 10;
 #[inline]
 fn cluster_synced_flags(flags: u16, peer_synced: bool) -> u16 {
     if peer_synced {
         flags | SESS_FLAG_CLUSTER_SYNCED
     } else {
         flags & !SESS_FLAG_CLUSTER_SYNCED
+    }
+}
+
+#[inline]
+fn source_nat_provenance_flags(flags: u16, source_nat_static: Option<bool>) -> u16 {
+    match source_nat_static {
+        Some(true) => (flags & !SESS_FLAG_STATIC_NAT)
+            | SESS_FLAG_STATIC_NAT
+            | SESS_FLAG_SNAT_PROVENANCE_KNOWN,
+        Some(false) => (flags & !SESS_FLAG_STATIC_NAT) | SESS_FLAG_SNAT_PROVENANCE_KNOWN,
+        None => flags & !(SESS_FLAG_STATIC_NAT | SESS_FLAG_SNAT_PROVENANCE_KNOWN),
     }
 }
 /// Session state constants matching C SESS_STATE_* defines.
@@ -939,6 +952,38 @@ pub(crate) fn publish_bpf_conntrack_entry(
     timeout_secs: u32,
     origin: SessionOrigin,
 ) -> ConntrackPublishResult {
+    publish_bpf_conntrack_entry_with_source_nat(
+        conntrack_v4_fd,
+        conntrack_v6_fd,
+        key,
+        decision,
+        metadata,
+        zone_name_to_id,
+        alg_disable_flags,
+        app_id,
+        session_id,
+        timeout_secs,
+        origin,
+        None,
+    )
+
+}
+
+/// Publish a conntrack row with its ordinary source-NAT provenance.
+pub(crate) fn publish_bpf_conntrack_entry_with_source_nat(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+    decision: SessionDecision,
+    metadata: &SessionMetadata,
+    zone_name_to_id: &FastMap<String, u16>,
+    alg_disable_flags: u8,
+    app_id: u16,
+    session_id: u64,
+    timeout_secs: u32,
+    origin: SessionOrigin,
+    source_nat_static: Option<bool>,
+) -> ConntrackPublishResult {
     match crate::afxdp::bpf_map::global_tuple_gate().with_publish(key, || {
         publish_bpf_conntrack_entry_raw(
             conntrack_v4_fd,
@@ -952,6 +997,7 @@ pub(crate) fn publish_bpf_conntrack_entry(
             session_id,
             timeout_secs,
             origin,
+            source_nat_static,
         )
     }) {
         Ok(result) => result,
@@ -985,6 +1031,7 @@ fn publish_bpf_conntrack_entry_raw(
     // (SessionTable::timeout_secs_for); 0 = no live entry.
     timeout_secs: u32,
     origin: SessionOrigin,
+    source_nat_static: Option<bool>,
 ) -> ConntrackPublishResult {
     // #6965: record the call BEFORE the `fd >= 0` gate below. The gate is what
     // makes this a no-op under a unit test's `-1` fds, and the property the
@@ -1021,6 +1068,7 @@ fn publish_bpf_conntrack_entry_raw(
     if decision.nat.rewrite_dst.is_some() {
         flags |= SESS_FLAG_DNAT;
     }
+    flags = source_nat_provenance_flags(flags, source_nat_static);
     flags = cluster_synced_flags(flags, origin.is_cluster_synced_origin());
 
     let result = match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
@@ -1117,6 +1165,37 @@ pub(crate) fn publish_bpf_conntrack_entry_under_gate(
     timeout_secs: u32,
     origin: SessionOrigin,
 ) -> ConntrackPublishResult {
+    publish_bpf_conntrack_entry_under_gate_with_source_nat(
+        conntrack_v4_fd,
+        conntrack_v6_fd,
+        key,
+        decision,
+        metadata,
+        zone_name_to_id,
+        alg_disable_flags,
+        app_id,
+        session_id,
+        timeout_secs,
+        origin,
+        None,
+    )
+}
+
+/// Publish with source-NAT provenance while the caller owns the tuple admission lease.
+pub(crate) fn publish_bpf_conntrack_entry_under_gate_with_source_nat(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+    decision: SessionDecision,
+    metadata: &SessionMetadata,
+    zone_name_to_id: &FastMap<String, u16>,
+    alg_disable_flags: u8,
+    app_id: u16,
+    session_id: u64,
+    timeout_secs: u32,
+    origin: SessionOrigin,
+    source_nat_static: Option<bool>,
+) -> ConntrackPublishResult {
     publish_bpf_conntrack_entry_raw(
         conntrack_v4_fd,
         conntrack_v6_fd,
@@ -1129,6 +1208,7 @@ pub(crate) fn publish_bpf_conntrack_entry_under_gate(
         session_id,
         timeout_secs,
         origin,
+        source_nat_static,
     )
 }
 

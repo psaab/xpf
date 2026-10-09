@@ -1152,6 +1152,9 @@ pub(crate) struct SessionSyncRequest {
     pub nat_src_port: u16,
     #[serde(rename = "nat_dst_port", default)]
     pub nat_dst_port: u16,
+    /// #12187: 0 unknown/legacy, 1 dynamic SNAT, 2 static SNAT.
+    #[serde(rename = "source_nat_provenance", default)]
+    pub source_nat_provenance: u8,
     /// #11064: ICMP query identity the active used to select a source-NAT
     /// rule. The valid bit preserves type/code `(0,0)`; when absent, the
     /// standby cannot narrow a typed application match from this request.

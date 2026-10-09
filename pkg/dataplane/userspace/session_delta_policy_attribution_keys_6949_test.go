@@ -283,3 +283,54 @@ func structBody(t *testing.T, path, opener string) string {
 	}
 	return body
 }
+
+func TestSessionDeltaSourceNatProvenanceJSON12187(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		provenance  uint8
+		wantPresent bool
+	}{
+		{name: "unknown omitted", provenance: 0, wantPresent: false},
+		{name: "dynamic numeric", provenance: 1, wantPresent: true},
+		{name: "static numeric", provenance: 2, wantPresent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wire, err := json.Marshal(SessionDeltaInfo{SourceNatProvenance: tc.provenance})
+			if err != nil {
+				t.Fatalf("marshal session delta: %v", err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(wire, &fields); err != nil {
+				t.Fatalf("decode session-delta JSON: %v", err)
+			}
+			raw, present := fields["source_nat_provenance"]
+			if present != tc.wantPresent {
+				t.Fatalf("source_nat_provenance presence=%v in %s, want %v", present, wire, tc.wantPresent)
+			}
+			if present {
+				var got uint8
+				if err := json.Unmarshal(raw, &got); err != nil {
+					t.Fatalf("decode source_nat_provenance %s: %v", raw, err)
+				}
+				if got != tc.provenance {
+					t.Fatalf("JSON provenance=%d, want %d", got, tc.provenance)
+				}
+			}
+			var decoded SessionDeltaInfo
+			if err := json.Unmarshal(wire, &decoded); err != nil {
+				t.Fatalf("unmarshal session delta: %v", err)
+			}
+			if decoded.SourceNatProvenance != tc.provenance {
+				t.Fatalf("decoded provenance=%d, want %d", decoded.SourceNatProvenance, tc.provenance)
+			}
+		})
+	}
+
+	var legacy SessionDeltaInfo
+	if err := json.Unmarshal([]byte(`{"event":"open"}`), &legacy); err != nil {
+		t.Fatalf("unmarshal legacy session delta: %v", err)
+	}
+	if legacy.SourceNatProvenance != 0 {
+		t.Fatalf("legacy delta provenance=%d, want unknown (0)", legacy.SourceNatProvenance)
+	}
+}

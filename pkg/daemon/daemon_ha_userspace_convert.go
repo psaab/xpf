@@ -608,8 +608,10 @@ func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 		// 0 means a legacy or rolling-upgrade peer that sent no id; mint as
 		// before, which keeps every #6198 mint test exercising the same path.
 		SessionID: adoptedOrLocalSyncedSessionID(delta.RTFlowSessionID),
-		// #10227: preserve helper provenance through the Go SessionValue.
-		Flags: userspaceSessionOriginFlags(delta.Origin),
+		// #10227: preserve helper origin and #12187 source-NAT provenance
+		// through the Go SessionValue; provenance 0 remains legacy/unknown.
+		Flags: dataplane.WithSourceNatProvenance(
+			userspaceSessionOriginFlags(delta.Origin), delta.SourceNatProvenance),
 		// #5212: the ORIGINATING node's stable RT_FLOW session id (distinct from
 		// SessionID above). Carried across the cluster sync wire so a peer-synced
 		// session adopts it and its SESSION_CREATE/CLOSE records correlate across
@@ -765,8 +767,10 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 		// SessionID: adopted from the peer when it sent one, else minted
 		// node-local (#6666 -- see the V4 converter for the full reasoning).
 		SessionID: adoptedOrLocalSyncedSessionID(delta.RTFlowSessionID),
-		// #10227: preserve helper provenance through the Go SessionValue.
-		Flags: userspaceSessionOriginFlags(delta.Origin),
+		// #10227: preserve helper origin and #12187 source-NAT provenance
+		// through the Go SessionValue; provenance 0 remains legacy/unknown.
+		Flags: dataplane.WithSourceNatProvenance(
+			userspaceSessionOriginFlags(delta.Origin), delta.SourceNatProvenance),
 		// #5212: the ORIGINATING node's stable RT_FLOW session id (see V4) —
 		// adopted by a peer-synced session so its RT_FLOW records correlate
 		// across HA nodes; 0 on a legacy helper => fresh local id on import.

@@ -1337,10 +1337,8 @@ fn sync_session_missing_request_is_rejected() {
 #[test]
 fn sync_session_unknown_operation_is_rejected() {
     let mut request = req("sync_session");
-    request.session_sync = Some(SessionSyncRequest {
-        operation: "frobnicate".to_string(),
-        ..SessionSyncRequest::default()
-    });
+    request.session_sync = Some(SessionSyncRequest { operation: "frobnicate".to_string(),
+    ..SessionSyncRequest::default() });
     let response = run_request(new_state(ProcessStatus::default()), request);
     assert!(!response.ok);
     assert!(
@@ -1355,16 +1353,14 @@ fn sync_session_unknown_operation_is_rejected() {
 #[test]
 fn sync_session_delete_with_valid_key_succeeds() {
     let mut request = req("sync_session");
-    request.session_sync = Some(SessionSyncRequest {
-        operation: "delete".to_string(),
-        addr_family: 2, // AF_INET
-        protocol: 6,    // TCP
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 1234,
-        dst_port: 80,
-        ..SessionSyncRequest::default()
-    });
+    request.session_sync = Some(SessionSyncRequest { operation: "delete".to_string(),
+    addr_family: 2, // AF_INET
+    protocol: 6,    // TCP
+    src_ip: "10.0.0.1".to_string(),
+    dst_ip: "10.0.0.2".to_string(),
+    src_port: 1234,
+    dst_port: 80,
+    ..SessionSyncRequest::default() });
     let response = run_request(new_state(ProcessStatus::default()), request);
     assert!(response.ok, "unexpected error: {}", response.error);
 }
@@ -1375,10 +1371,8 @@ fn sync_session_delete_with_valid_key_succeeds() {
 /// on the wire, so a rename typo cannot round-trip through this struct.
 #[test]
 fn a_sync_session_request_decodes_the_peer_delete_mark_9714() {
-    let mut wire = serde_json::to_value(SessionSyncRequest {
-        operation: "delete".to_string(),
-        ..SessionSyncRequest::default()
-    })
+    let mut wire = serde_json::to_value(SessionSyncRequest { operation: "delete".to_string(),
+    ..SessionSyncRequest::default() })
     .expect("encode a delete");
     wire["peer_delete"] = serde_json::Value::Bool(true);
     let marked: SessionSyncRequest =
@@ -1403,19 +1397,17 @@ fn a_sync_session_request_decodes_the_peer_delete_mark_9714() {
 #[test]
 fn sync_session_upsert_with_valid_entry_succeeds() {
     let mut request = req("sync_session");
-    request.session_sync = Some(SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: 2,
-        protocol: 6,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 1234,
-        dst_port: 80,
-        egress_ifindex: 7,
-        neighbor_mac: "02:bf:72:01:02:03".to_string(),
-        src_mac: "02:bf:72:0a:0b:0c".to_string(),
-        ..SessionSyncRequest::default()
-    });
+    request.session_sync = Some(SessionSyncRequest { operation: "upsert".to_string(),
+    addr_family: 2,
+    protocol: 6,
+    src_ip: "10.0.0.1".to_string(),
+    dst_ip: "10.0.0.2".to_string(),
+    src_port: 1234,
+    dst_port: 80,
+    egress_ifindex: 7,
+    neighbor_mac: "02:bf:72:01:02:03".to_string(),
+    src_mac: "02:bf:72:0a:0b:0c".to_string(),
+    ..SessionSyncRequest::default() });
     let response = run_request(new_state(ProcessStatus::default()), request);
     assert!(response.ok, "unexpected error: {}", response.error);
 }
@@ -1424,20 +1416,18 @@ fn sync_session_upsert_with_valid_entry_succeeds() {
 fn delivered_session_close_deletes_synced_opening_10888() {
     let state = new_state(ProcessStatus::default());
     let mut upsert = req("sync_session");
-    upsert.session_sync = Some(SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: crate::ip_proto::PROTO_TCP,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 1234,
-        dst_port: 80,
-        egress_ifindex: 7,
-        neighbor_mac: "02:bf:72:01:02:03".to_string(),
-        src_mac: "02:bf:72:0a:0b:0c".to_string(),
-        tcp_handshake_state: 1,
-        ..SessionSyncRequest::default()
-    });
+    upsert.session_sync = Some(SessionSyncRequest { operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: crate::ip_proto::PROTO_TCP,
+    src_ip: "10.0.0.1".to_string(),
+    dst_ip: "10.0.0.2".to_string(),
+    src_port: 1234,
+    dst_port: 80,
+    egress_ifindex: 7,
+    neighbor_mac: "02:bf:72:01:02:03".to_string(),
+    src_mac: "02:bf:72:0a:0b:0c".to_string(),
+    tcp_handshake_state: 1,
+    ..SessionSyncRequest::default() });
     let upsert_response = run_request(state.clone(), upsert);
     assert!(
         upsert_response.ok,
@@ -1455,16 +1445,14 @@ fn delivered_session_close_deletes_synced_opening_10888() {
     );
 
     let mut close = req("sync_session");
-    close.session_sync = Some(SessionSyncRequest {
-        operation: "delete".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: crate::ip_proto::PROTO_TCP,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 1234,
-        dst_port: 80,
-        ..SessionSyncRequest::default()
-    });
+    close.session_sync = Some(SessionSyncRequest { operation: "delete".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: crate::ip_proto::PROTO_TCP,
+    src_ip: "10.0.0.1".to_string(),
+    dst_ip: "10.0.0.2".to_string(),
+    src_port: 1234,
+    dst_port: 80,
+    ..SessionSyncRequest::default() });
     let close_response = run_request(state.clone(), close);
     assert!(
         close_response.ok,
@@ -1485,17 +1473,15 @@ fn delivered_session_close_deletes_synced_opening_10888() {
 #[test]
 fn sync_session_upsert_with_malformed_mac_is_rejected() {
     let mut request = req("sync_session");
-    request.session_sync = Some(SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: 2,
-        protocol: 6,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 1234,
-        dst_port: 80,
-        neighbor_mac: "zz:zz:zz:zz:zz:zz".to_string(),
-        ..SessionSyncRequest::default()
-    });
+    request.session_sync = Some(SessionSyncRequest { operation: "upsert".to_string(),
+    addr_family: 2,
+    protocol: 6,
+    src_ip: "10.0.0.1".to_string(),
+    dst_ip: "10.0.0.2".to_string(),
+    src_port: 1234,
+    dst_port: 80,
+    neighbor_mac: "zz:zz:zz:zz:zz:zz".to_string(),
+    ..SessionSyncRequest::default() });
     let response = run_request(new_state(ProcessStatus::default()), request);
     assert!(!response.ok);
     assert!(
@@ -1513,20 +1499,18 @@ fn sync_session_upsert_with_quarantine_sentinel_domain_is_refused_9956() {
     // agreement with Go's `QuarantinedRoutingInstanceDomain` is pinned in
     // `the_quarantine_sentinel_decodes_unrecognized_9956`.
     let mut request = req("sync_session");
-    request.session_sync = Some(SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: 2,
-        protocol: 6,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 1234,
-        dst_port: 80,
-        egress_ifindex: 7,
-        neighbor_mac: "02:bf:72:01:02:03".to_string(),
-        src_mac: "02:bf:72:0a:0b:0c".to_string(),
-        routing_domain: quarantine_sentinel_domain_9956(),
-        ..SessionSyncRequest::default()
-    });
+    request.session_sync = Some(SessionSyncRequest { operation: "upsert".to_string(),
+    addr_family: 2,
+    protocol: 6,
+    src_ip: "10.0.0.1".to_string(),
+    dst_ip: "10.0.0.2".to_string(),
+    src_port: 1234,
+    dst_port: 80,
+    egress_ifindex: 7,
+    neighbor_mac: "02:bf:72:01:02:03".to_string(),
+    src_mac: "02:bf:72:0a:0b:0c".to_string(),
+    routing_domain: quarantine_sentinel_domain_9956(),
+    ..SessionSyncRequest::default() });
     let response = run_request(new_state(ProcessStatus::default()), request);
     assert!(
         !response.ok,
@@ -1574,19 +1558,17 @@ fn sync_session_delete_with_quarantine_sentinel_domain_removes_v4_9956() {
     let sentinel = quarantine_sentinel_domain_9956();
     let afxdp = afxdp::Coordinator::new();
     let entry = crate::server::helpers::build_synced_session_entry(
-        &SessionSyncRequest {
-            operation: "upsert".to_string(),
-            addr_family: libc::AF_INET as u8,
-            protocol: 6,
-            src_ip: "10.0.0.1".to_string(),
-            dst_ip: "10.0.0.2".to_string(),
-            src_port: 1234,
-            dst_port: 80,
-            egress_ifindex: 7,
-            neighbor_mac: "02:bf:72:01:02:03".to_string(),
-            src_mac: "02:bf:72:0a:0b:0c".to_string(),
-            ..SessionSyncRequest::default()
-        },
+        &SessionSyncRequest { operation: "upsert".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        ..SessionSyncRequest::default() },
         afxdp.zone_name_to_id_ref(),
         sentinel,
     )
@@ -1604,17 +1586,15 @@ fn sync_session_delete_with_quarantine_sentinel_domain_removes_v4_9956() {
         quarantined_after_panic: false,
     }));
     let mut request = req("sync_session");
-    request.session_sync = Some(SessionSyncRequest {
-        operation: "delete".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: 6,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 1234,
-        dst_port: 80,
-        routing_domain: sentinel,
-        ..SessionSyncRequest::default()
-    });
+    request.session_sync = Some(SessionSyncRequest { operation: "delete".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: 6,
+    src_ip: "10.0.0.1".to_string(),
+    dst_ip: "10.0.0.2".to_string(),
+    src_port: 1234,
+    dst_port: 80,
+    routing_domain: sentinel,
+    ..SessionSyncRequest::default() });
     let response = run_request(state.clone(), request);
     assert!(
         response.ok,
@@ -1639,19 +1619,17 @@ fn sync_session_delete_with_quarantine_sentinel_domain_removes_v6_9956() {
     let sentinel = quarantine_sentinel_domain_9956();
     let afxdp = afxdp::Coordinator::new();
     let entry = crate::server::helpers::build_synced_session_entry(
-        &SessionSyncRequest {
-            operation: "upsert".to_string(),
-            addr_family: libc::AF_INET6 as u8,
-            protocol: 6,
-            src_ip: "2001:db8::1".to_string(),
-            dst_ip: "2001:db8::2".to_string(),
-            src_port: 1234,
-            dst_port: 80,
-            egress_ifindex: 7,
-            neighbor_mac: "02:bf:72:01:02:03".to_string(),
-            src_mac: "02:bf:72:0a:0b:0c".to_string(),
-            ..SessionSyncRequest::default()
-        },
+        &SessionSyncRequest { operation: "upsert".to_string(),
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 6,
+        src_ip: "2001:db8::1".to_string(),
+        dst_ip: "2001:db8::2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        ..SessionSyncRequest::default() },
         afxdp.zone_name_to_id_ref(),
         sentinel,
     )
@@ -1669,17 +1647,15 @@ fn sync_session_delete_with_quarantine_sentinel_domain_removes_v6_9956() {
         quarantined_after_panic: false,
     }));
     let mut request = req("sync_session");
-    request.session_sync = Some(SessionSyncRequest {
-        operation: "delete".to_string(),
-        addr_family: libc::AF_INET6 as u8,
-        protocol: 6,
-        src_ip: "2001:db8::1".to_string(),
-        dst_ip: "2001:db8::2".to_string(),
-        src_port: 1234,
-        dst_port: 80,
-        routing_domain: sentinel,
-        ..SessionSyncRequest::default()
-    });
+    request.session_sync = Some(SessionSyncRequest { operation: "delete".to_string(),
+    addr_family: libc::AF_INET6 as u8,
+    protocol: 6,
+    src_ip: "2001:db8::1".to_string(),
+    dst_ip: "2001:db8::2".to_string(),
+    src_port: 1234,
+    dst_port: 80,
+    routing_domain: sentinel,
+    ..SessionSyncRequest::default() });
     let response = run_request(state.clone(), request);
     assert!(
         response.ok,
@@ -1700,14 +1676,12 @@ fn sync_session_delete_with_quarantine_sentinel_domain_removes_v6_9956() {
 #[test]
 fn sync_session_delete_with_unparseable_ip_is_rejected() {
     let mut request = req("sync_session");
-    request.session_sync = Some(SessionSyncRequest {
-        operation: "delete".to_string(),
-        addr_family: 2,
-        protocol: 6,
-        src_ip: "not-an-ip".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        ..SessionSyncRequest::default()
-    });
+    request.session_sync = Some(SessionSyncRequest { operation: "delete".to_string(),
+    addr_family: 2,
+    protocol: 6,
+    src_ip: "not-an-ip".to_string(),
+    dst_ip: "10.0.0.2".to_string(),
+    ..SessionSyncRequest::default() });
     let response = run_request(new_state(ProcessStatus::default()), request);
     assert!(!response.ok);
     assert!(
@@ -1748,19 +1722,17 @@ fn rebind_preserves_synced_sessions() {
     });
 
     let mut upsert = req("sync_session");
-    upsert.session_sync = Some(SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: 2,
-        protocol: 6,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 1234,
-        dst_port: 80,
-        egress_ifindex: 7,
-        neighbor_mac: "02:bf:72:01:02:03".to_string(),
-        src_mac: "02:bf:72:0a:0b:0c".to_string(),
-        ..SessionSyncRequest::default()
-    });
+    upsert.session_sync = Some(SessionSyncRequest { operation: "upsert".to_string(),
+    addr_family: 2,
+    protocol: 6,
+    src_ip: "10.0.0.1".to_string(),
+    dst_ip: "10.0.0.2".to_string(),
+    src_port: 1234,
+    dst_port: 80,
+    egress_ifindex: 7,
+    neighbor_mac: "02:bf:72:01:02:03".to_string(),
+    src_mac: "02:bf:72:0a:0b:0c".to_string(),
+    ..SessionSyncRequest::default() });
     let upsert_resp = run_request(state.clone(), upsert);
     assert!(upsert_resp.ok, "upsert failed: {}", upsert_resp.error);
     assert!(
@@ -4387,34 +4359,30 @@ fn sync_session_real_payload_is_served_while_the_state_lock_is_held_7209() {
 
     fn upsert_request() -> ControlRequest {
         let mut request = req("sync_session");
-        request.session_sync = Some(SessionSyncRequest {
-            operation: "upsert".to_string(),
-            addr_family: 2,
-            protocol: 6,
-            src_ip: "10.0.0.1".to_string(),
-            dst_ip: "10.0.0.2".to_string(),
-            src_port: 1234,
-            dst_port: 80,
-            egress_ifindex: 7,
-            neighbor_mac: "02:bf:72:01:02:03".to_string(),
-            src_mac: "02:bf:72:0a:0b:0c".to_string(),
-            ..SessionSyncRequest::default()
-        });
+        request.session_sync = Some(SessionSyncRequest { operation: "upsert".to_string(),
+        addr_family: 2,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        ..SessionSyncRequest::default() });
         request
     }
 
     fn delete_request() -> ControlRequest {
         let mut request = req("sync_session");
-        request.session_sync = Some(SessionSyncRequest {
-            operation: "delete".to_string(),
-            addr_family: 2,
-            protocol: 6,
-            src_ip: "10.0.0.1".to_string(),
-            dst_ip: "10.0.0.2".to_string(),
-            src_port: 1234,
-            dst_port: 80,
-            ..SessionSyncRequest::default()
-        });
+        request.session_sync = Some(SessionSyncRequest { operation: "delete".to_string(),
+        addr_family: 2,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        ..SessionSyncRequest::default() });
         request
     }
 
@@ -4645,19 +4613,17 @@ fn synced_import_rejects_incomplete_packet_path_keys_and_counts_10720() {
     for (name, addr_family, protocol, src_ip, dst_ip, src_port, dst_port, reason) in cases {
         let state = new_state(ProcessStatus::default());
         let mut request = req("sync_session");
-        request.session_sync = Some(SessionSyncRequest {
-            operation: "upsert".to_string(),
-            addr_family,
-            protocol,
-            src_ip: src_ip.to_string(),
-            dst_ip: dst_ip.to_string(),
-            src_port,
-            dst_port,
-            egress_ifindex: 7,
-            neighbor_mac: "02:bf:72:01:02:03".to_string(),
-            src_mac: "02:bf:72:0a:0b:0c".to_string(),
-            ..SessionSyncRequest::default()
-        });
+        request.session_sync = Some(SessionSyncRequest { operation: "upsert".to_string(),
+        addr_family,
+        protocol,
+        src_ip: src_ip.to_string(),
+        dst_ip: dst_ip.to_string(),
+        src_port,
+        dst_port,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        ..SessionSyncRequest::default() });
         let response = run_request(state.clone(), request);
         assert!(!response.ok, "{name}: incomplete key was accepted");
         assert!(
@@ -4686,15 +4652,13 @@ fn synced_import_rejects_incomplete_packet_path_keys_and_counts_10720() {
 }
 #[test]
 fn synced_import_allows_zero_ports_for_non_port_protocol_10720() {
-    let request = SessionSyncRequest {
-        addr_family: libc::AF_INET as u8,
-        protocol: 1,
-        src_ip: "192.0.2.1".to_string(),
-        dst_ip: "192.0.2.2".to_string(),
-        src_port: 0,
-        dst_port: 0,
-        ..SessionSyncRequest::default()
-    };
+    let request = SessionSyncRequest { addr_family: libc::AF_INET as u8,
+    protocol: 1,
+    src_ip: "192.0.2.1".to_string(),
+    dst_ip: "192.0.2.2".to_string(),
+    src_port: 0,
+    dst_port: 0,
+    ..SessionSyncRequest::default() };
     assert!(
         super::helpers::build_synced_session_key(
             &request,
@@ -5489,24 +5453,22 @@ fn nat64_synced_entry_rebuilds_reverse_bib_4565() {
     // NAT64 forward flow: v6 client -> synthetic 64:ff9b::192.168.1.1
     // (dst_v4 = 192.168.1.1 by RFC 6052 /96), translated to pool source
     // 203.0.113.5:40000 on the active node.
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET6 as u8,
-        protocol: crate::ip_proto::PROTO_TCP,
-        src_ip: "2001:db8::1".to_string(),
-        dst_ip: "64:ff9b::c0a8:101".to_string(),
-        src_port: 5001,
-        dst_port: 80,
-        ingress_zone_id: 2,
-        egress_zone_id: 3,
-        egress_ifindex: 12,
-        // The generic NAT fields carry the mangled cross-family remnants on the
-        // real wire; the NAT64 path must OVERRIDE them from nat64_snat_v4.
-        nat_src_ip: "2001:db8:dead:beef::".to_string(),
-        nat_src_port: 40000,
-        nat64_snat_v4: "203.0.113.5".to_string(),
-        ..SessionSyncRequest::default()
-    };
+    let req = SessionSyncRequest { operation: "upsert".to_string(),
+    addr_family: libc::AF_INET6 as u8,
+    protocol: crate::ip_proto::PROTO_TCP,
+    src_ip: "2001:db8::1".to_string(),
+    dst_ip: "64:ff9b::c0a8:101".to_string(),
+    src_port: 5001,
+    dst_port: 80,
+    ingress_zone_id: 2,
+    egress_zone_id: 3,
+    egress_ifindex: 12,
+    // The generic NAT fields carry the mangled cross-family remnants on the
+    // real wire; the NAT64 path must OVERRIDE them from nat64_snat_v4.
+    nat_src_ip: "2001:db8:dead:beef::".to_string(),
+    nat_src_port: 40000,
+    nat64_snat_v4: "203.0.113.5".to_string(),
+    ..SessionSyncRequest::default() };
     let entry = build_synced_session_entry(&req, &zones, 0).expect("build nat64 entry");
 
     // (a) NAT64 cross-family bit set -> tx dispatch reverse-translates + #4564
@@ -5549,21 +5511,19 @@ fn nat64_synced_entry_rebuilds_reverse_bib_4565() {
 
     // A non-NAT64 synced session (empty nat64_snat_v4) is unaffected: no nat64
     // bit, no reverse info, generic nat_src preserved.
-    let plain = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: crate::ip_proto::PROTO_TCP,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 1234,
-        dst_port: 80,
-        ingress_zone_id: 2,
-        egress_zone_id: 3,
-        egress_ifindex: 12,
-        nat_src_ip: "203.0.113.9".to_string(),
-        nat_src_port: 50000,
-        ..SessionSyncRequest::default()
-    };
+    let plain = SessionSyncRequest { operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: crate::ip_proto::PROTO_TCP,
+    src_ip: "10.0.0.1".to_string(),
+    dst_ip: "10.0.0.2".to_string(),
+    src_port: 1234,
+    dst_port: 80,
+    ingress_zone_id: 2,
+    egress_zone_id: 3,
+    egress_ifindex: 12,
+    nat_src_ip: "203.0.113.9".to_string(),
+    nat_src_port: 50000,
+    ..SessionSyncRequest::default() };
     let plain_entry = build_synced_session_entry(&plain, &zones, 0).expect("build plain entry");
     assert!(!plain_entry.decision.nat.nat64, "non-nat64 stays non-nat64");
     assert_eq!(plain_entry.metadata.nat64_reverse, None);
@@ -6548,19 +6508,17 @@ fn failed_queue_reconcile_restores_every_binding_on_the_queue_6750() {
 fn sync_session_upsert_reports_a_semantic_refusal_on_the_wire_6785() {
     fn upsert_request(src_port: u16) -> ControlRequest {
         let mut request = req("sync_session");
-        request.session_sync = Some(SessionSyncRequest {
-            operation: "upsert".to_string(),
-            addr_family: 2,
-            protocol: 6,
-            src_ip: "10.0.0.1".to_string(),
-            dst_ip: "10.0.0.2".to_string(),
-            src_port,
-            dst_port: 80,
-            egress_ifindex: 7,
-            neighbor_mac: "02:bf:72:01:02:03".to_string(),
-            src_mac: "02:bf:72:0a:0b:0c".to_string(),
-            ..SessionSyncRequest::default()
-        });
+        request.session_sync = Some(SessionSyncRequest { operation: "upsert".to_string(),
+        addr_family: 2,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        ..SessionSyncRequest::default() });
         request
     }
 
@@ -6680,20 +6638,18 @@ fn refresh_status_projects_interface_snat_registry_counters_6751() {
 #[test]
 fn session_sync_import_stores_locally_resolved_ingress_7095() {
     let zones = rustc_hash::FxHashMap::default();
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: crate::ip_proto::PROTO_TCP,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 5001,
-        dst_port: 80,
-        ingress_zone_id: 2,
-        egress_zone_id: 3,
-        ingress_ifindex: 42,
-        ingress_vlan_id: 50,
-        ..SessionSyncRequest::default()
-    };
+    let req = SessionSyncRequest { operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: crate::ip_proto::PROTO_TCP,
+    src_ip: "10.0.0.1".to_string(),
+    dst_ip: "10.0.0.2".to_string(),
+    src_port: 5001,
+    dst_port: 80,
+    ingress_zone_id: 2,
+    egress_zone_id: 3,
+    ingress_ifindex: 42,
+    ingress_vlan_id: 50,
+    ..SessionSyncRequest::default() };
     let entry = build_synced_session_entry(&req, &zones, 0).expect("build entry");
     assert_eq!(
         entry.metadata.ingress_ifindex, 42,
@@ -6718,20 +6674,18 @@ fn session_sync_import_stores_locally_resolved_ingress_7095() {
 #[test]
 fn session_sync_import_keeps_zero_ingress_when_unknown_7095() {
     let zones = rustc_hash::FxHashMap::default();
-    let req = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: crate::ip_proto::PROTO_TCP,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 5001,
-        dst_port: 80,
-        ingress_zone_id: 2,
-        egress_zone_id: 3,
-        // No ingress_ifindex / ingress_vlan_id: exactly what an older daemon
-        // sends, since serde defaults them.
-        ..SessionSyncRequest::default()
-    };
+    let req = SessionSyncRequest { operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: crate::ip_proto::PROTO_TCP,
+    src_ip: "10.0.0.1".to_string(),
+    dst_ip: "10.0.0.2".to_string(),
+    src_port: 5001,
+    dst_port: 80,
+    ingress_zone_id: 2,
+    egress_zone_id: 3,
+    // No ingress_ifindex / ingress_vlan_id: exactly what an older daemon
+    // sends, since serde defaults them.
+    ..SessionSyncRequest::default() };
     let entry = build_synced_session_entry(&req, &zones, 0).expect("build entry");
     assert_eq!(
         entry.metadata.ingress_ifindex, 0,
@@ -6757,19 +6711,17 @@ mod routing_domain_delete_7160 {
     const DOMAIN: u32 = 100_007;
 
     fn upsert_request() -> SessionSyncRequest {
-        SessionSyncRequest {
-            operation: "upsert".to_string(),
-            addr_family: libc::AF_INET as u8,
-            protocol: 6,
-            src_ip: "10.0.0.1".to_string(),
-            dst_ip: "10.0.0.2".to_string(),
-            src_port: 1234,
-            dst_port: 80,
-            egress_ifindex: 7,
-            neighbor_mac: "02:bf:72:01:02:03".to_string(),
-            src_mac: "02:bf:72:0a:0b:0c".to_string(),
-            ..SessionSyncRequest::default()
-        }
+        SessionSyncRequest { operation: "upsert".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        ..SessionSyncRequest::default() }
     }
 
     /// The bare-5-tuple delete `deleteHelperSessionsV4` actually sends: "a
@@ -6777,16 +6729,14 @@ mod routing_domain_delete_7160 {
     /// there is no ingress identity to resolve a domain from.
     fn bare_five_tuple_delete() -> ControlRequest {
         let mut request = req("sync_session");
-        request.session_sync = Some(SessionSyncRequest {
-            operation: "delete".to_string(),
-            addr_family: libc::AF_INET as u8,
-            protocol: 6,
-            src_ip: "10.0.0.1".to_string(),
-            dst_ip: "10.0.0.2".to_string(),
-            src_port: 1234,
-            dst_port: 80,
-            ..SessionSyncRequest::default()
-        });
+        request.session_sync = Some(SessionSyncRequest { operation: "delete".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        ..SessionSyncRequest::default() });
         request
     }
 
@@ -8114,19 +8064,17 @@ fn sync_session_import_is_applied_while_the_state_lock_is_held_7209() {
     // not "provided the caller asked for no status". An implementation that
     // took the lock for a status attach would leave the verb starvable by any
     // caller that omitted the flag, and this cell would not see it.
-    request.session_sync = Some(SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: 2,
-        protocol: 6,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 4321,
-        dst_port: 80,
-        egress_ifindex: 7,
-        neighbor_mac: "02:bf:72:01:02:03".to_string(),
-        src_mac: "02:bf:72:0a:0b:0c".to_string(),
-        ..SessionSyncRequest::default()
-    });
+    request.session_sync = Some(SessionSyncRequest { operation: "upsert".to_string(),
+    addr_family: 2,
+    protocol: 6,
+    src_ip: "10.0.0.1".to_string(),
+    dst_ip: "10.0.0.2".to_string(),
+    src_port: 4321,
+    dst_port: 80,
+    egress_ifindex: 7,
+    neighbor_mac: "02:bf:72:01:02:03".to_string(),
+    src_mac: "02:bf:72:0a:0b:0c".to_string(),
+    ..SessionSyncRequest::default() });
 
     // The barrier `apply_snapshot` would be sitting in. Held for the WHOLE
     // request, not merely overlapping its start: a guard released early would

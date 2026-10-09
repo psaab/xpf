@@ -9721,6 +9721,7 @@ fn f4_seed_shared_only(
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        source_nat_static: None,
     };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
         .insert(key.clone(), entry);
@@ -9986,6 +9987,7 @@ fn import_entry_9718(
         session_id: 0,
         tcp_close_class: 0,
         tcp_handshake_state: 0,
+        source_nat_static: None,
     }
 }
 
@@ -10133,6 +10135,7 @@ fn late_reconciler_maps_shared_promote_for_worker_reserve_9718() {
             session_id: LIVE_SESSION_ID,
             tcp_close_class: LIVE_CLOSE_CLASS,
             tcp_handshake_state: 0,
+            source_nat_static: None,
         },
         false,
     ));
@@ -11944,6 +11947,7 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
             session_id: 0,
             tcp_close_class: 0,
             tcp_handshake_state: 0,
+            source_nat_static: None,
         };
         crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
             .insert(key.clone(), entry);

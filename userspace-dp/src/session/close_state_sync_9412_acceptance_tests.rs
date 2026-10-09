@@ -77,19 +77,17 @@ fn a_close_on_the_primary_produces_a_sync_delta_9412() {
 /// (0 = not carried, 1 = CLOSING, 2 = TIME_WAIT, 3 = RST). The key is injected
 /// through JSON, the form the Go sender writes.
 fn record(class: u8) -> SessionSyncRequest {
-    let base = SessionSyncRequest {
-        operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: crate::ip_proto::PROTO_TCP,
-        src_ip: "10.0.61.102".to_string(),
-        dst_ip: "172.16.80.200".to_string(),
-        src_port: 54321,
-        dst_port: 5201,
-        ingress_zone_id: TEST_TRUST_ZONE_ID,
-        egress_zone_id: TEST_UNTRUST_ZONE_ID,
-        owner_rg_id: OWNER_RG,
-        ..SessionSyncRequest::default()
-    };
+    let base = SessionSyncRequest { operation: "upsert".to_string(),
+    addr_family: libc::AF_INET as u8,
+    protocol: crate::ip_proto::PROTO_TCP,
+    src_ip: "10.0.61.102".to_string(),
+    dst_ip: "172.16.80.200".to_string(),
+    src_port: 54321,
+    dst_port: 5201,
+    ingress_zone_id: TEST_TRUST_ZONE_ID,
+    egress_zone_id: TEST_UNTRUST_ZONE_ID,
+    owner_rg_id: OWNER_RG,
+    ..SessionSyncRequest::default() };
     let mut v = serde_json::to_value(&base).expect("FIXTURE: serialize");
     v["tcp_close_class"] = serde_json::json!(class);
     serde_json::from_value(v).expect("FIXTURE: deserialize")

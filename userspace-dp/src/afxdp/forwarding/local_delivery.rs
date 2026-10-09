@@ -118,25 +118,23 @@ pub(in crate::afxdp) fn install_helper_local_session_on_miss(
     ) {
         return false;
     }
-    let local_entry = SyncedSessionEntry {
-        key: key.clone(),
-        decision,
-        metadata,
-        leak_incarnation: 0,
-        origin,
-        protocol,
-        tcp_flags,
-        // Local forwarding-learn entry: no peer install generation (#2170).
-        generation: 0,
-        // #5212: a local-origin shared-map publish. The stable id is carried on
-        // the wire straight off the live entry by the incremental Open delta
-        // (`install_with_protocol_with_origin`) / the owner-RG cold-sync export
-        // (`emit_open_delta_with_origin`), not via this shared replica — so 0
-        // here (a cross-worker materialize of this entry re-allocs a local id).
-        session_id: 0,
-        tcp_close_class: 0,
-        tcp_handshake_state: sessions.handshake_state_wire_for(key),
-    };
+    let local_entry = SyncedSessionEntry { key: key.clone(),
+    decision,
+    metadata,
+    leak_incarnation: 0,
+    origin,
+    protocol,
+    tcp_flags,
+    // Local forwarding-learn entry: no peer install generation (#2170).
+    generation: 0,
+    // #5212: a local-origin shared-map publish. The stable id is carried on
+    // the wire straight off the live entry by the incremental Open delta
+    // (`install_with_protocol_with_origin`) / the owner-RG cold-sync export
+    // (`emit_open_delta_with_origin`), not via this shared replica — so 0
+    // here (a cross-worker materialize of this entry re-allocs a local id).
+    session_id: 0,
+    tcp_close_class: 0,
+    tcp_handshake_state: sessions.handshake_state_wire_for(key), source_nat_static: None };
     // #1789: count a failed helper-local session publish (same
     // shim-missing-key consequence as every other publish site).
     if publish_session_map_entry_for_session(

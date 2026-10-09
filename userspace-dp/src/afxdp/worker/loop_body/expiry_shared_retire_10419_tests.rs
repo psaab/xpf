@@ -96,19 +96,17 @@ fn metadata() -> SessionMetadata {
 }
 
 fn entry(key: SessionKey, origin: SessionOrigin, session_id: u64) -> SyncedSessionEntry {
-    SyncedSessionEntry {
-        key,
-        decision: decision(),
-        metadata: metadata(),
-        leak_incarnation: 0,
-        origin,
-        protocol: PROTO_TCP,
-        tcp_flags: 0x10,
-        generation: 0,
-        session_id,
-        tcp_close_class: 0,
-        tcp_handshake_state: 0,
-    }
+    SyncedSessionEntry { key,
+    decision: decision(),
+    metadata: metadata(),
+    leak_incarnation: 0,
+    origin,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id,
+    tcp_close_class: 0,
+    tcp_handshake_state: 0, source_nat_static: None }
 }
 
 fn expired(entry: &SyncedSessionEntry) -> ExpiredSession {
