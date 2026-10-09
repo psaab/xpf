@@ -16,7 +16,6 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/psaab/xpf/pkg/config"
-	"github.com/psaab/xpf/pkg/dataplane"
 	xpfnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/vishvananda/netlink"
 )
@@ -1333,28 +1332,8 @@ func (m *Manager) verifyBindingsMapLocked() bool {
 				if binding.Ifindex != int(parentIfindex) {
 					continue
 				}
-				// #1666: same forwarding-live gate as the primary repair.
-				if !bindingForwardingLive(binding, deadWorkers) {
-					continue
-				}
-				// Queue-dimension bound guard (#4894): repair-only,
-				// log-and-skip. Same aliasing risk as the primary watchdog
-				// path; the queue-id comes from the parent binding.
-				if binding.QueueID >= bindingQueuesPerIface {
-					slog.Warn("userspace: bindings watchdog alias: queue-id at/above stride would alias adjacent ifindex queue-0 slot, skipping (#4894)",
-						"child", childIfindex, "parent", parentIfindex,
-						"queue", binding.QueueID, "stride", uint32(bindingQueuesPerIface))
-					continue
-				}
-				idx := childIfindex*bindingQueuesPerIface + binding.QueueID
-				// Call-site cap guard (#814): repair-only, log-and-skip
-				// instead of unwinding. VLAN child ifindex is the
-				// overflow risk here.
-				if idx >= dataplane.BindingArrayMaxEntries {
-					slog.Warn("userspace: bindings watchdog alias: ifindex exceeds BindingArrayMaxEntries cap, skipping",
-						"child", childIfindex, "parent", parentIfindex,
-						"queue", binding.QueueID,
-						"idx", idx, "cap", dataplane.BindingArrayMaxEntries)
+				idx, ok := watchdogAliasBindingIndex(childIfindex, parentIfindex, binding, deadWorkers)
+				if !ok {
 					continue
 				}
 				var val userspaceBindingValue
