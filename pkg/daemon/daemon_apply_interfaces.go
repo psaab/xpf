@@ -285,20 +285,28 @@ func (d *Daemon) applyVRFReconcile(ctx context.Context, cfg *config.Config) (ctx
 // VRF master binding (it treats the daemon-created vrf-mgmt device as
 // unmanaged). This is the AUTHORITATIVE, load-bearing management-VRF bind:
 // #5700 aggregates and RETURNS the per-interface bind failures so the caller can
-// join them into commit truth (via networkdErr) instead of swallowing at WARN —
-// a genuine bind failure otherwise reports the management VRF configured while
-// the interface carries no VRF membership (false convergence, no retry owner).
-// The management interfaces exist by this phase, so a failure is genuine, not a
-// transient absence. Returns nil when there is nothing to bind or every bind
-// succeeds. Extracted so the fail-closed bind can be unit-tested directly,
-// mirroring applyInterfaceReconcile (#5310).
-func (d *Daemon) rebindManagementVRFIfaces() error {
+// join them into commit truth (via networkdErr) instead of swallowing at WARN.
+// Management base devices must exist by this phase. A configured tagged VLAN
+// unit may not have a kernel link when it is unzoned; only a confirmed absence
+// for such a unit is skipped. Other lookup and bind failures remain fatal.
+func (d *Daemon) rebindManagementVRFIfaces(cfg *config.Config) error {
 	mgmtSet := d.mgmtVRFIfaceSet()
 	if d.routing == nil || len(mgmtSet) == 0 {
 		return nil
 	}
+	vlanUnitSet := managementVRFVLANUnitSet(cfg)
 	var errs []error
 	for ifName := range mgmtSet {
+		if vlanUnitSet[ifName] {
+			if _, err := d.fabricLinkByName(ifName); err != nil {
+				var notFound netlink.LinkNotFoundError
+				if errors.As(err, &notFound) {
+					slog.Info("configured management VLAN unit has no kernel link; skipping VRF re-bind",
+						"interface", ifName)
+					continue
+				}
+			}
+		}
 		if err := d.routing.BindInterfaceToVRF(ifName, config.ManagementVRFInstanceName); err != nil {
 			slog.Warn("failed to re-bind interface to management VRF",
 				"interface", ifName, "err", err)
@@ -503,15 +511,31 @@ func managementVRFIfaceSet(cfg *config.Config) map[string]bool {
 	if cfg == nil {
 		return out
 	}
+	for name := range cfg.Interfaces.Interfaces {
+		if config.IsManagementIfName(name) {
+			out[config.LinuxIfName(name)] = true
+		}
+	}
+	for name := range managementVRFVLANUnitSet(cfg) {
+		out[name] = true
+	}
+	return out
+}
+
+// managementVRFVLANUnitSet returns the configured tagged-unit link names for
+// management interfaces. Some such units are not materialized in the kernel
+// when their parent is unzoned, so callers distinguish confirmed absence from
+// a genuine bind failure.
+func managementVRFVLANUnitSet(cfg *config.Config) map[string]bool {
+	out := make(map[string]bool)
+	if cfg == nil {
+		return out
+	}
 	for name, ifc := range cfg.Interfaces.Interfaces {
-		if !config.IsManagementIfName(name) {
+		if !config.IsManagementIfName(name) || ifc == nil || !ifc.VlanTagging {
 			continue
 		}
 		linuxName := config.LinuxIfName(name)
-		out[linuxName] = true
-		if ifc == nil || !ifc.VlanTagging {
-			continue
-		}
 		for unitNum, unit := range ifc.Units {
 			if unit == nil || unit.VlanID <= 0 {
 				continue

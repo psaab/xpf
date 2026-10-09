@@ -530,9 +530,10 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// device-map-teardown joins above) instead of swallowing at WARN, so a
 	// genuine bind failure fails the commit closed rather than reporting the
 	// management VRF configured while the interface carries no VRF membership.
-	// The management interfaces and configured VLAN children exist by this phase,
-	// so the bind is transient-free (unlike the pre-networkd best-effort bind and
-	// the routing-instance tunnel-member binds in applyVRFReconcile).
+	// Management base interfaces and VLAN children created from zone references
+	// exist by this phase. Configured VLAN units on an unzoned parent can be
+	// absent; the authoritative rebind skips only a confirmed child absence.
+	// Other bind failures remain commit-failing.
 	// #6805: the routing-instance member re-bind belongs at the SAME point and
 	// for the same reason — the devices exist by this phase. Step 0a runs before
 	// applyInterfaceReconcile creates tunnel/xfrmi devices, so a list-only
@@ -545,12 +546,12 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// is NOT joined into networkdErr: a routing-instance `interface` list can
 	// legitimately name an interface that is genuinely absent on this chassis,
 	// and failing the commit on that would reject configs that are correct for
-	// the fleet. The management set cannot be absent by this phase, which is
-	// exactly why that one is surfaced and this one is not.
+	// the fleet. Management base interfaces must exist by this phase; only a
+	// confirmed absence of an unzoned configured VLAN child is tolerated there.
 	d.rebindRoutingInstanceMembers(cfg)
 
 	if mgmtSet := d.mgmtVRFIfaceSet(); d.routing != nil && len(mgmtSet) > 0 {
-		if err := d.rebindManagementVRFIfaces(); err != nil {
+		if err := d.rebindManagementVRFIfaces(cfg); err != nil {
 			networkdErr = errors.Join(networkdErr, err)
 		}
 		// Restart heartbeat after VRF rebind — networkd reconfigure moves

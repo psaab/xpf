@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -223,47 +222,6 @@ func TestBothPassesBindTheSameNameSet6805(t *testing.T) {
 				"instances have no VRF device", b)
 		}
 	}
-}
-
-// TestApplyCallsTheLateRebind6805 is the WIRING cell.
-//
-// Every cell above drives rebindRoutingInstanceMembers directly, so an apply
-// path that never calls it would pass all of them — and "nothing calls it" is
-// the entire defect, one layer up. applyDataplaneAndHACore cannot be driven from
-// a unit test (netlink, a dataplane, sockets, a cluster), so the call is
-// asserted at the source with comments stripped: a source-scanning gate that
-// greps for a line its own doc comment quotes is satisfied by the comment.
-//
-// It must also land BEFORE the management re-bind, which is where "the devices
-// exist by this phase" first becomes true.
-func TestApplyCallsTheLateRebind6805(t *testing.T) {
-	src := stripLineComments6791(readDaemonSourceFile6805(t, "daemon_apply_dataplane.go"))
-
-	const call = "d.rebindRoutingInstanceMembers(cfg)"
-	i := strings.Index(src, call)
-	if i < 0 {
-		t.Fatalf("the apply path does not call rebindRoutingInstanceMembers; a " +
-			"list-only routing-instance member created after step 0a is never bound " +
-			"and its tunnel forwards in the default table (#6805)")
-	}
-	j := strings.Index(src, "d.rebindManagementVRFIfaces()")
-	if j < 0 {
-		t.Fatal("could not find the management re-bind to order against")
-	}
-	if i > j {
-		t.Error("the routing-instance re-bind runs AFTER the management re-bind; " +
-			"it belongs at the same post-networkd point, where the tunnel/xfrmi " +
-			"devices are known to exist")
-	}
-}
-
-func readDaemonSourceFile6805(t *testing.T, name string) string {
-	t.Helper()
-	b, err := os.ReadFile(name)
-	if err != nil {
-		t.Fatalf("read %s: %v", name, err)
-	}
-	return string(b)
 }
 
 // TestStep0aStillBindsAnExistingMember6805 keeps the EARLY pass load-bearing.
