@@ -178,3 +178,49 @@ func TestPolicyThenCommunityEmptyDefinitionRejected12069(t *testing.T) {
 		}
 	}
 }
+
+// #12069 Astra-R2 fail-open matrix: when a defined name spells a valid
+// community literal, failed definition resolution must not fall through to
+// literal acceptance. The strict error must identify the authored operand.
+func TestPolicyThenCommunityLiteralShapedFailedResolutionRejected12069(t *testing.T) {
+	for _, name := range []string{"65000:1", "no-export"} {
+		for _, definition := range []string{"empty", "regex", "mixed"} {
+			for _, clause := range []string{
+				"then community add " + name,
+				"then community set " + name,
+				"then community " + name,
+			} {
+				t.Run(name+"/"+definition+"/"+clause, func(t *testing.T) {
+					definitionCommands := []string{}
+					community := "set policy-options community \"" + name + "\""
+					switch definition {
+					case "empty":
+						definitionCommands = []string{community}
+					case "regex":
+						definitionCommands = []string{community + ` members "65000:*"`}
+					case "mixed":
+						definitionCommands = []string{
+							community + " members no-export",
+							community + ` members "65000:*"`,
+						}
+					}
+					tree := buildTreeFromSet(t, append(definitionCommands,
+						"set policy-options policy-statement P term t1 "+clause,
+						"set policy-options policy-statement P term t1 then accept",
+					))
+					_, err := CompileConfig(tree)
+					if err == nil {
+						t.Fatalf("CompileConfig accepted literal-shaped name %q with %s definition via %q",
+							name, definition, clause)
+					}
+					if !strings.Contains(err.Error(), `uses "`+name+`"`) {
+						t.Fatalf("error %q does not name authored operand %q", err, name)
+					}
+					if strings.Contains(err.Error(), "xpf-invalid-community-resolution") {
+						t.Fatalf("error exposed internal poison marker: %q", err)
+					}
+				})
+			}
+		}
+	}
+}

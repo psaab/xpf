@@ -1501,11 +1501,12 @@ step. Both are required — neither sees the other's case:
   skip the dangling OR branch. This avoids relying on FRR's admission versus
   evaluation behavior for a missing match list. The guard is specific to
   `from community`; `then community delete` is a separate `set comm-list ...
-  delete` operation. For add/set/bare replacement, the compiler expands an
+  `delete` operation. For add/set/bare replacement, the compiler expands an
   authored community name once when its definition contains only FRR literals;
-  strict commit rejects undefined, empty, regex-backed, or malformed values.
-  The renderer accepts only the compiled literal and never resolves names
-  again; tolerant loads warn and omit an invalid community set clause.
+  a failed first resolution is retained as an unrenderable marker so a
+  literal-shaped spelling cannot pass strict validation or tolerant rendering.
+  Strict errors and render warnings name the authored operand; successful
+  results are checked as literals and never resolved again.
 - **`GetBGPSummary` parses JSON, not the text table (#3942).**
   `GetBGPSummary` runs `show bgp summary json` and decodes it via
   `parseBGPSummaryJSON` (`status_parse.go`), mirroring the `parseRouteJSON`

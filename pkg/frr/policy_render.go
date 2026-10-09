@@ -913,11 +913,13 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				b.WriteString(" set community none\n")
 			case "add":
 				if term.CommunityAdd != "" {
-					if config.ValidCommunityValueLiteral(term.CommunityAdd) {
+					authoredValue, resolutionFailed := config.CommunityValueResolutionFailure(term.CommunityAdd)
+					authoredValue = sanitizeFRRValue(authoredValue)
+					if !resolutionFailed && config.ValidCommunityValueLiteral(term.CommunityAdd) {
 						fmt.Fprintf(&b, " set community %s additive\n", sanitizeFRRValue(term.CommunityAdd))
 					} else {
 						slog.Warn("frr: omitting an unresolvable then community add value",
-							"route_map", routeMapName, "term", term.Name, "value", sanitizeFRRValue(term.CommunityAdd))
+							"route_map", routeMapName, "term", term.Name, "value", authoredValue)
 					}
 				}
 			case "delete":
@@ -932,11 +934,13 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				}
 			default: // "" or "set" — whole-attribute replace
 				if term.Community != "" {
-					if config.ValidCommunityValueLiteral(term.Community) {
+					authoredValue, resolutionFailed := config.CommunityValueResolutionFailure(term.Community)
+					authoredValue = sanitizeFRRValue(authoredValue)
+					if !resolutionFailed && config.ValidCommunityValueLiteral(term.Community) {
 						fmt.Fprintf(&b, " set community %s\n", sanitizeFRRValue(term.Community))
 					} else {
 						slog.Warn("frr: omitting an unresolvable then community replacement value",
-							"route_map", routeMapName, "term", term.Name, "value", sanitizeFRRValue(term.Community))
+							"route_map", routeMapName, "term", term.Name, "value", authoredValue)
 					}
 				}
 			}

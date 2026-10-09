@@ -249,6 +249,22 @@ func ValidCommunityValueLiteral(value string) bool {
 	return frrStandardCommunityLiteral(value)
 }
 
+const failedCommunityValueMarker12069 = "\x00xpf-invalid-community-resolution\x00"
+
+// CommunityValueResolutionFailure reports whether value was replaced by the
+// compiler after its first community-name resolution failed. It returns the
+// authored operand for diagnostics and tolerant-render warnings.
+func CommunityValueResolutionFailure(value string) (string, bool) {
+	if strings.HasPrefix(value, failedCommunityValueMarker12069) {
+		return strings.TrimPrefix(value, failedCommunityValueMarker12069), true
+	}
+	return value, false
+}
+
+func failedCommunityValue12069(value string) string {
+	return failedCommunityValueMarker12069 + value
+}
+
 func frrCommunityWord(w string) bool {
 	for _, n := range frrWellKnownCommunities {
 		if w == n {

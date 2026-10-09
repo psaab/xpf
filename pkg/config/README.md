@@ -1595,11 +1595,11 @@ missing community. The tolerant load/peer-sync path downgrades to a warning
 (`lenientPolicyCommunityRef`) so an already-persisted or peer-synced config an
 older binary accepted still boots (#1960 no-brick doctrine). The same
 strict/tolerant gate also checks `then community add|set` and legacy bare
-replacement values: the compiler resolves authored names with literal-only
-definitions once, and strict validation accepts only the resulting FRR literals.
-The tolerant path warns and the renderer emits only already-resolved literals,
-omitting malformed set clauses; it never re-resolves a literal as another
-community name.
+replacement values: the compiler resolves authored names once, and records a
+failed first resolution with an unrenderable marker. Strict validation rejects
+that marker while reporting the authored operand; tolerant rendering warns and
+omits it even when its spelling is itself a valid literal. Successful results
+are accepted only as FRR literals and are never re-resolved as community names.
 
 **The `-xpf-redist` route-map-name suffix is reserved (#5116/#12065):** the
 FRR renderer derives per-source redistribute maps named
