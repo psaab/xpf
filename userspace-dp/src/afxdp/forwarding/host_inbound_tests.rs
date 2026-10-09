@@ -57,6 +57,32 @@ fn empty_configured_zone_default_denies() {
     );
 }
 
+// #12053: this shared fixture is the concrete system-service list emitted by
+// the Go compiler for `all; ssh except`. A Go regression asserts byte-for-byte
+// that it still matches compiler output; feeding that exact list through the
+// Rust classifier must not re-open TCP/22, while `netconf` keeps TCP/830.
+#[test]
+fn all_except_ssh_emitted_services_do_not_admit_tcp22_12053() {
+    let emitted_services: Vec<String> = serde_json::from_str(include_str!(
+        "host_inbound_all_except_ssh_12053.json"
+    ))
+    .expect("shared Go compiler emission fixture is valid JSON");
+    let hi = zone_host_inbound_from_tokens(&emitted_services, &[]);
+
+    assert!(
+        !hi.admits(6, 22, false, 0),
+        "effective `all; ssh except` list must not re-admit TCP/22 through an alias",
+    );
+    assert!(
+        !hi.admits(6, 22, true, 0),
+        "effective `all; ssh except` list must not re-admit TCP/22 on IPv6",
+    );
+    assert!(
+        hi.admits(6, 830, false, 0),
+        "excluding SSH must preserve the independent `netconf` TCP/830 service",
+    );
+}
+
 // #3310: `system-services ident-reset` must NOT admit TCP/113 on the AF_XDP
 // secondary path — Junos ident-reset resets ident probes, it does not permit
 // the service. The kernel nft chain emits the actual `reject with tcp reset`

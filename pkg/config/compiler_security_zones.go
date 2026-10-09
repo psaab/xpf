@@ -120,9 +120,10 @@ func hostInboundExceptParts(n *Node) (values, excluded []string) {
 // Filtering after all same-key children are aggregated is required for flat
 // SetPath trees, where `all` and `X except` are sibling nodes.
 //
-// `all` is materialized only when an exclusion is present. This preserves the
-// existing representation for ordinary stanzas while making `all except X`
-// a real subtraction rather than a modifier that is silently ignored.
+// `all` is materialized only when an exclusion is present. System-service
+// positives are filtered by their family-scoped L4 matches as well as names,
+// so an alias cannot re-admit an excluded tuple — including when exclusions
+// were retained across merged same-key stanzas.
 func hostInboundFilterExcept(tokens, excluded []string, protocols bool) []string {
 	if len(excluded) == 0 {
 		return tokens
@@ -143,6 +144,28 @@ func hostInboundFilterExcept(tokens, excluded []string, protocols bool) []string
 	} else {
 		expansion = HostInboundAllExpansionServices()
 	}
+	var excludedMatches map[string][]L4Match
+	if !protocols {
+		excludedMatches = make(map[string][]L4Match)
+		for _, token := range excluded {
+			// These meta-tokens have no tuple of their own. In particular,
+			// expanding an excluded `all` here would poison the union against
+			// every concrete service.
+			if token == "all" || token == "any-service" {
+				continue
+			}
+			if !KnownHostInboundSystemServices[token] {
+				continue
+			}
+			for _, family := range []string{"ip", "ip6"} {
+				for _, m := range HostInboundServiceMatch(token, family) {
+					if !m.Reject {
+						excludedMatches[family] = append(excludedMatches[family], m)
+					}
+				}
+			}
+		}
+	}
 	out := make([]string, 0, len(tokens)+len(expansion))
 	invalidExcept := false
 	for _, token := range tokens {
@@ -155,10 +178,14 @@ func hostInboundFilterExcept(tokens, excluded []string, protocols bool) []string
 		}
 		if token == "all" {
 			for _, expanded := range expansion {
-				if !excludedSet[expanded] {
-					out = append(out, expanded)
+				if excludedSet[expanded] || (!protocols && hostInboundServiceTokenMatchesAny(expanded, excludedMatches)) {
+					continue
 				}
+				out = append(out, expanded)
 			}
+			continue
+		}
+		if !protocols && hostInboundServiceTokenMatchesAny(token, excludedMatches) {
 			continue
 		}
 		out = append(out, token)
@@ -169,6 +196,26 @@ func hostInboundFilterExcept(tokens, excluded []string, protocols bool) []string
 		out = append(out, "except")
 	}
 	return out
+}
+
+// hostInboundServiceTokenMatchesAny compares one concrete service token with
+// the excluded matches for its own family. Full-admit tokens have no tuple and
+// reject-only tuples are not admissions, so neither is reduced by this check.
+
+func hostInboundServiceTokenMatchesAny(token string, excluded map[string][]L4Match) bool {
+	for family, matches := range excluded {
+		for _, candidate := range HostInboundServiceMatch(token, family) {
+			if candidate.Reject {
+				continue
+			}
+			for _, exclusion := range matches {
+				if hostInboundL4MatchesIntersect(candidate, exclusion) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // mergeHostInbound unions the SystemServices and Protocols of src into dst,

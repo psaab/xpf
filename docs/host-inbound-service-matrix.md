@@ -459,8 +459,9 @@ that Juniper's list does not define, and excludes them from the expansion:
 - **`r-exec` / `rexec`** — Juniper documents `rlogin` and `rsh` but not rexec.
   Unlike the other xpf-only spellings this one is not a port-neutral alias:
   `webapi-clear-text`/`webapi-ssl` resolve to the http/https ports and
-  `ssh-netconf`/`netconf-ssh` to ssh ∪ netconf, so including them widens
-  nothing, whereas tcp/512 is opened by no other token.
+  `ssh-netconf`/`netconf-ssh` to ssh ∪ netconf, so including them in bare `all`
+  does not widen its tuple union. When an `all` member is excluded, every
+  expansion token sharing that service's L4 tuple is removed as well.
 
 `sip` is deliberately NOT in this set: it is a vSRX ALG service with its own
 #3619 disposition and a fail-on-revert port pin
@@ -1705,9 +1706,12 @@ be a guess, and a guess that silently widens admission.
 worked example in the Juniper topic narrows a second interface with
 `system-services all` plus `ftp except` / `http except`. xpf accepts the
 nested, value-tail, and flat-set spellings for service and protocol exclusions.
-The compiler expands `all`, subtracts the authored exclusions, preserves
-unknown modifiers for strict validation, and emits the existing positive-token
-representation consumed by both enforcement paths.
+The compiler expands `all`, subtracts authored exclusions by name and, for
+system services, by family-scoped L4 tuple so an alias cannot re-open the
+excluded port (#12053). Protocol exclusions still subtract by name only, so
+`protocols { all; igmp except; }` still admits proto 2 via `dvmrp` (#12318). It
+preserves unknown modifiers for strict validation and emits the resulting
+positive-token representation consumed by both enforcement paths.
 `any-service` is not that service union: xpf cannot subtract a named service or
 protocol exclusion from its packet-wide full-admit. A strict commit therefore
 rejects known `system-services` or `protocols` `except` exclusions in the same
