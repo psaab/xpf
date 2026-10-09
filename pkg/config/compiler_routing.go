@@ -1738,7 +1738,8 @@ func appendInlineBracketedMatchValues11779(
 // parsePolicyTermInlineKeys handles flat set syntax where remaining keys
 // after the term name are inline key-value pairs like:
 // "from", "protocol", "direct" or "from", "route-filter", "10.0.0.0/8", "exact"
-// or "then", "accept"
+// or "then", "accept" or "then", "next-hop", "192.0.2.1" or "then",
+// "as-path-prepend", "65001"
 func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quoted []bool, bracketedClosed bool) {
 	inFrom := false
 	for i := 0; i < len(keys); i++ {
@@ -1762,6 +1763,11 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 						value = keys[i]
 					}
 					recordPolicyNextAction11780(term, value)
+					continue
+				}
+				if keys[i+1] == "next-hop" || keys[i+1] == "as-path-prepend" {
+					// Let the normal operand case consume this key and its
+					// value. Advancing here would make the loop skip the key.
 					continue
 				}
 				i++

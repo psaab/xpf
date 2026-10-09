@@ -242,12 +242,8 @@ func plausibleInterfaceName(s string) bool {
 	return hasLetter
 }
 
-// ValidPolicyThenNextHop accepts the supported routing-policy `then next-hop`
-// subset. The `self` spelling is an xpf alias that the renderer maps to FRR's
-// `peer-address`; it is not a FRR route-map keyword. The address restrictions
-// are deliberately conservative rather than an exact FRR grammar mirror:
-// IPv4 0/8, unspecified, loopback, multicast, and IPv6 link-local addresses
-// are excluded, while IPv4 link-local literals remain supported.
+// policyThenNextHopUnsupportedReason returns the reason raw is outside the
+// supported routing-policy `then next-hop` subset.
 func policyThenNextHopUnsupportedReason(raw string) string {
 	switch raw {
 	case "peer-address", "self":
@@ -281,6 +277,12 @@ func policyThenNextHopUnsupportedReason(raw string) string {
 }
 
 // ValidPolicyThenNextHop reports whether raw is in the supported subset.
+//
+// The `self` spelling is an xpf alias that the renderer maps to FRR's
+// `peer-address`; it is not a FRR route-map keyword. The address restrictions
+// are deliberately conservative rather than an exact FRR grammar mirror:
+// IPv4 0/8, unspecified, loopback, multicast, and IPv6 link-local addresses
+// are excluded, while IPv4 link-local literals remain supported.
 func ValidPolicyThenNextHop(raw string) bool {
 	return policyThenNextHopUnsupportedReason(raw) == ""
 }

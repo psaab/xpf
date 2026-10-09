@@ -270,7 +270,11 @@ func TestPolicyThenFlatRunInvalidOperandsRejected_12070(t *testing.T) {
 				if err == nil {
 					t.Fatal("commit-check accepted invalid flat-run operand")
 				}
-				for _, want := range []string{"P", "t", tc.leaf, tc.value} {
+				const wantPath = "policy-options policy-statement P term t "
+				if !strings.Contains(err.Error(), wantPath) {
+					t.Errorf("commit-check error %q does not name policy and term via %q", err, wantPath)
+				}
+				for _, want := range []string{tc.leaf, tc.value} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("commit-check error %q does not name %q", err, want)
 					}
@@ -357,6 +361,227 @@ func TestPolicyThenFlatRunValidControlsCommitAndRender_12070(t *testing.T) {
 				t.Fatalf("Store.CommitCheck rejected valid flat-run input: %v", err)
 			}
 			assertCompiled(t, compiled)
+		})
+	}
+}
+
+func TestPolicyThenCompactAndTermLineOperandsRejected_12070(t *testing.T) {
+	for _, tc := range []struct {
+		name, text, leaf, value string
+	}{
+		{
+			name:  "compact unsupported next-hop",
+			text:  "policy-options { policy-statement P { term t { then accept next-hop discard; } } }",
+			leaf:  "next-hop",
+			value: "discard",
+		},
+		{
+			name:  "compact malformed next-hop",
+			text:  "policy-options { policy-statement P { term t { then accept next-hop 10.0.0.300; } } }",
+			leaf:  "next-hop",
+			value: "10.0.0.300",
+		},
+		{
+			name:  "compact invalid prepend",
+			text:  "policy-options { policy-statement P { term t { then accept as-path-prepend 65001 abc; } } }",
+			leaf:  "as-path-prepend",
+			value: "abc",
+		},
+		{
+			name:  "term-line unsupported next-hop",
+			text:  "policy-options { policy-statement P { term t then accept next-hop discard; } }",
+			leaf:  "next-hop",
+			value: "discard",
+		},
+		{
+			name:  "term-line malformed next-hop",
+			text:  "policy-options { policy-statement P { term t then accept next-hop 10.0.0.300; } }",
+			leaf:  "next-hop",
+			value: "10.0.0.300",
+		},
+		{
+			name:  "term-line invalid prepend",
+			text:  "policy-options { policy-statement P { term t then accept as-path-prepend 65001 abc; } }",
+			leaf:  "as-path-prepend",
+			value: "abc",
+		},
+		{
+			name:  "compact quoted invalid prepend",
+			text:  `policy-options { policy-statement P { term t { then accept as-path-prepend "65001 abc"; } } }`,
+			leaf:  "as-path-prepend",
+			value: "abc",
+		},
+		{
+			name:  "term-line quoted invalid prepend",
+			text:  `policy-options { policy-statement P { term t then accept as-path-prepend "65001 abc"; } }`,
+			leaf:  "as-path-prepend",
+			value: "abc",
+		},
+		{
+			name:  "compact loopback next-hop",
+			text:  "policy-options { policy-statement P { term t { then accept next-hop 127.0.0.1; } } }",
+			leaf:  "next-hop",
+			value: "127.0.0.1",
+		},
+		{
+			name:  "compact chained local-preference next-hop",
+			text:  "policy-options { policy-statement P { term t { then accept local-preference 200 next-hop discard; } } }",
+			leaf:  "next-hop",
+			value: "discard",
+		},
+		{
+			name:  "compact chained next-policy next-hop",
+			text:  "policy-options { policy-statement P { term t { then next policy next-hop discard; } } }",
+			leaf:  "next-hop",
+			value: "discard",
+		},
+		{
+			name:  "compact reject chained next-hop",
+			text:  "policy-options { policy-statement P { term t { then reject next-hop discard; } } }",
+			leaf:  "next-hop",
+			value: "discard",
+		},
+		{
+			name:  "compact leading-zero prepend",
+			text:  "policy-options { policy-statement P { term t { then accept as-path-prepend 065001; } } }",
+			leaf:  "as-path-prepend",
+			value: "065001",
+		},
+		{
+			name:  "term-line from-protocol next-hop",
+			text:  "policy-options { policy-statement P { term t from protocol bgp then accept next-hop discard; } }",
+			leaf:  "next-hop",
+			value: "discard",
+		},
+		{
+			name:  "bare term-line unsupported next-hop",
+			text:  "policy-options { policy-statement P { term t then next-hop discard; } }",
+			leaf:  "next-hop",
+			value: "discard",
+		},
+		{
+			name:  "bare term-line malformed next-hop",
+			text:  "policy-options { policy-statement P { term t then next-hop 10.0.0.300; } }",
+			leaf:  "next-hop",
+			value: "10.0.0.300",
+		},
+		{
+			name:  "bare term-line invalid prepend",
+			text:  "policy-options { policy-statement P { term t then as-path-prepend 65001 abc; } }",
+			leaf:  "as-path-prepend",
+			value: "abc",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checkError := func(channel string, err error) {
+				t.Helper()
+				if err == nil {
+					t.Fatalf("%s accepted invalid %s value %q", channel, tc.leaf, tc.value)
+				}
+				for _, want := range []string{
+					`policy-options policy-statement "P" term "t"`,
+					tc.leaf,
+					tc.value,
+				} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("%s error %q does not name %q", channel, err, want)
+					}
+				}
+			}
+
+			_, err := configstore.CheckText(tc.text, -1)
+			checkError("CheckText", err)
+
+			store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
+			if err != nil {
+				t.Fatalf("create config store: %v", err)
+			}
+			if err := store.EnterConfigure(); err != nil {
+				t.Fatalf("EnterConfigure: %v", err)
+			}
+			if err := store.LoadOverride(tc.text); err != nil {
+				t.Fatalf("LoadOverride(%q): %v", tc.text, err)
+			}
+			_, err = store.CommitCheck()
+			checkError("LoadOverride + CommitCheck", err)
+			_, err = store.Commit()
+			checkError("LoadOverride + Commit", err)
+		})
+	}
+}
+
+func TestPolicyThenBareOperandsCommitAndRender_12070(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, rendered string
+		check                   func(*testing.T, *config.PolicyTerm)
+	}{
+		{
+			name:     "next-hop",
+			command:  "policy-options policy-statement P term t then next-hop 192.0.2.1",
+			rendered: " set ip next-hop 192.0.2.1\n",
+			check: func(t *testing.T, term *config.PolicyTerm) {
+				if term.Action != "" || term.NextHop != "192.0.2.1" {
+					t.Fatalf("compiled term = %+v, want bare next-hop 192.0.2.1", term)
+				}
+			},
+		},
+		{
+			name:     "as-path-prepend",
+			command:  "policy-options policy-statement P term t then as-path-prepend 65001 65002",
+			rendered: " set as-path prepend 65001 65002\n",
+			check: func(t *testing.T, term *config.PolicyTerm) {
+				if term.Action != "" || strings.Join(term.ASPathPrepend, " ") != "65001 65002" {
+					t.Fatalf("compiled term = %+v, want bare prepend [65001 65002]", term)
+				}
+			},
+		},
+		{
+			name:     "next-hop then prepend chain",
+			command:  "policy-options policy-statement P term t then next-hop 192.0.2.1 as-path-prepend 65001 65002",
+			rendered: " set ip next-hop 192.0.2.1\n set as-path prepend 65001 65002\n",
+			check: func(t *testing.T, term *config.PolicyTerm) {
+				if term.Action != "" || term.NextHop != "192.0.2.1" ||
+					strings.Join(term.ASPathPrepend, " ") != "65001 65002" {
+					t.Fatalf("compiled term = %+v, want bare next-hop and prepend chain", term)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertCompiled := func(t *testing.T, compiled *config.Config) {
+				t.Helper()
+				term := compiled.PolicyOptions.PolicyStatements["P"].Terms[0]
+				tc.check(t, term)
+				got := (&Manager{frrConf: "/dev/null"}).generatePolicyOptions(&compiled.PolicyOptions)
+				if !strings.Contains(got, tc.rendered) {
+					t.Fatalf("bare operand did not render; output:\n%s", got)
+				}
+			}
+
+			compiled, err := configstore.CheckText("set "+tc.command, -1)
+			if err != nil {
+				t.Fatalf("CheckText rejected valid bare operand: %v", err)
+			}
+			assertCompiled(t, compiled)
+
+			store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
+			if err != nil {
+				t.Fatalf("create config store: %v", err)
+			}
+			if err := store.EnterConfigure(); err != nil {
+				t.Fatalf("EnterConfigure: %v", err)
+			}
+			if err := store.SetFromInputAs("", tc.command); err != nil {
+				t.Fatalf("SetFromInputAs(%q): %v", tc.command, err)
+			}
+			compiled, err = store.CommitCheck()
+			if err != nil {
+				t.Fatalf("CommitCheck rejected valid bare operand: %v", err)
+			}
+			assertCompiled(t, compiled)
+			if _, err := store.Commit(); err != nil {
+				t.Fatalf("Commit rejected valid bare operand: %v", err)
+			}
 		})
 	}
 }

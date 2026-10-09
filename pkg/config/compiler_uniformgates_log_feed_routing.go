@@ -453,5 +453,20 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 		}
 	}
 
+	// #12070: check typed compiled policy operands rather than relying only on
+	// the spelling-sensitive schema walk. This catches compact and term-line
+	// `then accept ...` Keys tails compiled into NextHop/ASPathPrepend; child-
+	// based forms remain covered by schema validation.
+	// Strict on commit / commit-check; tolerant loads warn and rely on the
+	// render-side omission belts so an existing config still boots.
+	if err := validatePolicyThenOperandsStrict(cfg); err != nil {
+		if opts.lenientPolicyThenOperands {
+			cfg.Warnings = append(cfg.Warnings,
+				fmt.Sprintf("policy then operand (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return err
+		}
+	}
+
 	return nil
 }
