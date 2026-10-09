@@ -1491,7 +1491,9 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 						//     clause tokens, so read only its first key.
 						switch rf.MatchType {
 						case "upto":
-							if argTok := routeFilterTrailingToken(fc); argTok != "" {
+							if argTok := routeFilterTrailingToken(fc); argTok != "" &&
+								!policyTermInlineKeywords[argTok] {
+								rf.UptoToken = argTok
 								if n, ok := parseRouteFilterLen(argTok); ok {
 									rf.UptoLen = n
 								}
@@ -1830,9 +1832,12 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				if i+3 < len(keys) {
 					switch rf.MatchType {
 					case "upto":
-						if n, ok := parseRouteFilterLen(keys[i+3]); ok {
-							rf.UptoLen = n
+						if argTok := keys[i+3]; !policyTermInlineKeywords[argTok] {
+							rf.UptoToken = argTok
 							consumed = 3
+							if n, ok := parseRouteFilterLen(argTok); ok {
+								rf.UptoLen = n
+							}
 						}
 					case "prefix-length-range":
 						if lo, hi, ok := parseRouteFilterRange(keys[i+3]); ok {
@@ -1847,10 +1852,13 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				}
 				term.RouteFilters = append(term.RouteFilters, rf)
 				i += consumed
-			} else {
+			} else if inFrom {
 				// A term-line tail is outside the schema walk. Preserve the
 				// bare route-filter marker so the strict #11779 gate rejects
 				// it rather than compiling a match-all permit with no filter.
+				// Gating on inFrom keeps an action value such as
+				// `then community add route-filter` out of this from-specific
+				// check (#12067 review: X3).
 				term.UnknownFrom = append(term.UnknownFrom, "route-filter")
 			}
 		case "next-hop":

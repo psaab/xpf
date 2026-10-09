@@ -1499,6 +1499,11 @@ func validateRouteFilterMatchTypesStrict(cfg *Config) error {
 					// 0 always means "no parseable length", never an
 					// explicit length.
 					if rf.UptoLen == 0 {
+						if rf.UptoToken != "" {
+							return fmt.Errorf(
+								"policy-statement %q term %q route-filter %q `upto` has invalid or out-of-range prefix length %q",
+								name, term.Name, rf.Prefix, rf.UptoToken)
+						}
 						return fmt.Errorf(
 							"policy-statement %q term %q route-filter %q `upto` requires a prefix length such as /24",
 							name, term.Name, rf.Prefix)

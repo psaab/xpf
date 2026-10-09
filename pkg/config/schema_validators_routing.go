@@ -289,18 +289,19 @@ func validatePackedPolicyRouteFilterTailStrict12067(node *Node, parent *schemaNo
 		// remainder as one leaf, including otherwise-known sibling names.
 		quotedHead := node.KeyQuoted(i)
 		next := i + 3
+		// A term sibling here identifies a fused statement, not an
+		// unconsumed route-filter token. Defer to the #8437 gate for every
+		// packed-head spelling, including quoted heads and missing `upto`
+		// operands.
+		if next < len(node.Keys) && routeFilterKeyIsSibling12067(node, parent, next) {
+			return next, true, nil
+		}
 		switch matchType {
 		case "upto", "prefix-length-range", "through":
 			if next < len(node.Keys) && (quotedHead ||
 				(!routeFilterKeyIsSibling12067(node, parent, next) &&
 					!routeFilterKeyIsSibling12067(node, fromSchema, next))) {
 				if matchType == "upto" {
-					// A clause keyword is a fused sibling, not an `upto`
-					// operand. Let the existing #8437 gate retain its
-					// targeted missing-semicolon diagnostic.
-					if routeFilterKeyIsSibling12067(node, parent, next) {
-						return next, true, nil
-					}
 					if _, ok := parseRouteFilterLen(node.Keys[next]); !ok {
 						return 0, false, invalidRouteFilterUpto12067(node.Keys[next])
 					}

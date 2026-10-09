@@ -32,13 +32,14 @@ func TestTermLineRouteFilterWideningsRejected_12067(t *testing.T) {
 	cases := []struct {
 		name, text, want string
 	}{
-		{"bare route-filter", `policy-options { policy-statement P { term T from route-filter; term T then accept; } }`, "route-filter"},
+		{"bare route-filter", `policy-options { policy-statement P { term T from route-filter; term T then accept; } }`, "route-filter `<prefix> <match-type>`"},
 		{"upto missing length", `policy-options { policy-statement P { term T from route-filter 10.0.0.0/8 upto; term T then accept; } }`, "upto"},
 		{"upto then accept packed", `policy-options { policy-statement P { term T from route-filter 10.0.0.0/8 upto then accept; } }`, "upto"},
 		{"then first", `policy-options { policy-statement P { term T then accept from route-filter 10.0.0.0/8 upto; } }`, "upto"},
 		{"term body", `policy-options { policy-statement P { term T { from route-filter 10.0.0.0/8 upto; then accept; } } }`, "upto"},
 		{"with protocol", `policy-options { policy-statement P { term T from route-filter 10.0.0.0/8 upto protocol static; term T then accept; } }`, "upto"},
 		{"with community", `policy-options { community C1 members 65000:1; policy-statement P { term T from route-filter 10.0.0.0/8 upto community C1; term T then accept; } }`, "upto"},
+		{"upto invalid or out-of-range", `policy-options { policy-statement P { term T from route-filter 10.0.0.0/8 upto /129; term T then accept; } }`, `invalid or out-of-range prefix length "/129"`},
 		{"apply-groups", `groups { G { policy-options { policy-statement P { term T from route-filter; } } } } policy-options { apply-groups G; policy-statement P { term T then accept; } }`, "route-filter"},
 		{"apply-groups upto", `groups { G { policy-options { policy-statement P { term T from route-filter 10.0.0.0/8 upto; } } } } policy-options { apply-groups G; policy-statement P { term T then accept; } }`, "upto"},
 		{"policy-statement packing", `policy-options { policy-statement P term T from route-filter; policy-statement P term T then accept; }`, "route-filter"},
@@ -47,6 +48,19 @@ func TestTermLineRouteFilterWideningsRejected_12067(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rejectRouteFilterTextAndStore12067(t, tc.text, tc.want)
 		})
+	}
+}
+func TestThenCommunityRouteFilterValueIsNotFrom_12067(t *testing.T) {
+	const text = `policy-options {
+community route-filter members 65000:1;
+policy-statement P {
+    term T from protocol static;
+    term T then community add route-filter;
+    term T then accept;
+}
+}`
+	if _, err := CheckText(text, 0); err != nil {
+		t.Fatalf("then-community route-filter value was rejected as a from predicate: %v", err)
 	}
 }
 
@@ -137,7 +151,6 @@ func TestPackedRouteFilterValueControlsRemainValid_12067(t *testing.T) {
 		})
 	}
 }
-
 
 func assertPackedRouteFilterValue12067(t *testing.T, cfg *config.Config, leaf string) {
 	t.Helper()

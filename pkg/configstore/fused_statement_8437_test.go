@@ -116,13 +116,22 @@ func TestRouteFilterUnconsumedTailRejectedBeforeCompile_12067(t *testing.T) {
 }
 
 func TestCheckTextPreservesPackedFromMissingSemicolonDiagnostic_8437(t *testing.T) {
-	const text = `policy-options { policy-statement P { term T {
-from route-filter 10.0.0.0/8 orlonger then accept;
-} } }`
-	_, err := CheckText(text, 0)
-	if err == nil || !strings.Contains(err.Error(), "#8437") ||
-		!strings.Contains(err.Error(), "missing semicolon") || !strings.Contains(err.Error(), "then") {
-		t.Fatalf("CheckText diagnostic = %v, want the actionable packed-from #8437 message", err)
+	cases := []struct {
+		name, text string
+	}{
+		{"unquoted head upto sibling Q5", `policy-options { policy-statement P { term T { from route-filter 10.0.0.0/8 upto then accept; } } }`},
+		{"unquoted head upto sibling X5", `policy-options { policy-statement P { term T { from route-filter 10.0.0.0/8 upto then accept route-filter 10.1.0.0/16 orlonger reject; } } }`},
+		{"quoted head sibling C4", `policy-options { policy-statement P { term T { from "route-filter" 10.0.0.0/8 orlonger then accept; } } }`},
+		{"unquoted head sibling control", `policy-options { policy-statement P { term T { from route-filter 10.0.0.0/8 orlonger then accept; } } }`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CheckText(tc.text, 0)
+			if err == nil || !strings.Contains(err.Error(), "#8437") ||
+				!strings.Contains(err.Error(), "missing semicolon") || !strings.Contains(err.Error(), "then") {
+				t.Fatalf("CheckText diagnostic = %v, want the actionable packed-from #8437 message", err)
+			}
+		})
 	}
 }
 
