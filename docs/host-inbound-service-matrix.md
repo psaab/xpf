@@ -1708,9 +1708,10 @@ worked example in the Juniper topic narrows a second interface with
 nested, value-tail, and flat-set spellings for service and protocol exclusions.
 The compiler expands `all`, subtracts authored exclusions by name and, for
 system services, by family-scoped L4 tuple so an alias cannot re-open the
-excluded port (#12053). It preserves unknown modifiers for strict validation
-and emits the resulting positive-token representation consumed by both
-enforcement paths.
+excluded port (#12053). Protocol exclusions still subtract by name only, so
+`protocols all except igmp` still admits proto 2 via `dvmrp` (#12318). It
+preserves unknown modifiers for strict validation and emits the resulting
+positive-token representation consumed by both enforcement paths.
 `any-service` is not that service union: xpf cannot subtract a named service or
 protocol exclusion from its packet-wide full-admit. A strict commit therefore
 rejects known `system-services` or `protocols` `except` exclusions in the same

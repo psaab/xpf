@@ -162,6 +162,9 @@ func TestHostInboundAllExceptSSHCompilesWithoutSSHAliases12053(t *testing.T) {
 	}
 }
 
+// Regenerate the shared fixture after an intentional emission change with:
+// XPF_HOST_INBOUND_EXCEPT_REGEN=1 go test ./pkg/config -run TestHostInboundAllExceptSSHEmissionMatchesRustFixture12053
+// then re-run the Rust consumer cell to confirm parity.
 func TestHostInboundAllExceptSSHEmissionMatchesRustFixture12053(t *testing.T) {
 	got := hostInbound10292(t, parse10292(t,
 		`security { zones { security-zone trust { host-inbound-traffic { system-services { all; ssh { except; } } } } } }`))
@@ -170,7 +173,15 @@ func TestHostInboundAllExceptSSHEmissionMatchesRustFixture12053(t *testing.T) {
 		t.Fatalf("marshal compiled system-services: %v", err)
 	}
 	emitted = append(emitted, '\n')
-	fixture, err := os.ReadFile("../../userspace-dp/src/afxdp/forwarding/host_inbound_all_except_ssh_12053.json")
+	fixturePath := "../../userspace-dp/src/afxdp/forwarding/host_inbound_all_except_ssh_12053.json"
+	if os.Getenv("XPF_HOST_INBOUND_EXCEPT_REGEN") != "" {
+		if err := os.WriteFile(fixturePath, emitted, 0644); err != nil {
+			t.Fatalf("regenerate shared Rust fixture: %v", err)
+		}
+		t.Logf("regenerated shared fixture at %s", fixturePath)
+		return
+	}
+	fixture, err := os.ReadFile(fixturePath)
 	if err != nil {
 		t.Fatalf("read shared Rust fixture: %v", err)
 	}
