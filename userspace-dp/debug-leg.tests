@@ -881,7 +881,7 @@ xpf-userspace-dp	afxdp::session_glue::tests::fabric_ingress_session_hit_obeys_ha
 xpf-userspace-dp	afxdp::session_glue::tests::flush_session_deltas_event_stream_drop_latches_out_of_sync
 xpf-userspace-dp	afxdp::session_glue::tests::flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync
 xpf-userspace-dp	afxdp::session_glue::tests::flush_session_deltas_routes_a_bulk_export_drop_to_the_non_arming_push_8593
-xpf-userspace-dp	afxdp::session_glue::tests::flush_session_deltas_rt_flow_app_id_uses_post_nat_dst_port
+xpf-userspace-dp	afxdp::session_glue::tests::flush_session_deltas_rt_flow_app_id_tracks_redefinition_by_session_id_12191
 xpf-userspace-dp	afxdp::session_glue::tests::flush_session_deltas_session_close_reresolves_policy_id_after_reorder
 xpf-userspace-dp	afxdp::session_glue::tests::flush_session_deltas_suppresses_command_export_event_stream_echo_9630
 xpf-userspace-dp	afxdp::session_glue::tests::flush_session_deltas_update_syncs_without_an_rt_flow_create_9412
