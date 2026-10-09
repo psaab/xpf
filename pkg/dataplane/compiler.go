@@ -797,10 +797,14 @@ func compileAddressBook(dp DataPlane, cfg *config.Config, result *CompileResult)
 		setNames = append(setNames, name)
 	}
 	sort.Strings(setNames)
+	// Register every set ID before resolving members, since an address member
+	// may legally name another set regardless of sort order.
 	for _, setName := range setNames {
-		setID := addrID
-		result.AddrIDs[setName] = setID
+		result.AddrIDs[setName] = addrID
 		addrID++
+	}
+	for _, setName := range setNames {
+		setID := result.AddrIDs[setName]
 
 		// Recursively expand nested sets to flat address list
 		allAddresses, err := config.ExpandAddressSet(setName, ab)
