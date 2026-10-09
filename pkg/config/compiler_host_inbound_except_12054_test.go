@@ -338,3 +338,68 @@ func TestHostInboundExcept12054DuplicateExclusionsNamedOnce(t *testing.T) {
 		t.Fatalf("strict compile error = %v, want ssh exclusion named exactly once", err)
 	}
 }
+
+func TestHostInboundExcept12054UnknownExclusionFilteredFromLenientWarning(t *testing.T) {
+	tree, errs := NewParser(`security { zones { security-zone trust { host-inbound-traffic {
+		system-services { any-service; ssh except; sssh except; }
+	} } } }`).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("parse: %v", errs)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient: %v", err)
+	}
+	var inert []string
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "inert except") {
+			inert = append(inert, w)
+		}
+	}
+	if len(inert) != 1 || !strings.Contains(inert[0], `system-services "ssh"`) ||
+		strings.Contains(inert[0], "sssh") {
+		t.Fatalf("inert warnings = %q, want one naming only ssh", inert)
+	}
+}
+
+func TestHostInboundExcept12054UnknownOnlyExclusionDrawsNoLenientWarning(t *testing.T) {
+	tree, errs := NewParser(`security { zones { security-zone trust { host-inbound-traffic {
+		system-services { any-service; sssh except; }
+	} } } }`).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("parse: %v", errs)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient: %v", err)
+	}
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "inert except") {
+			t.Fatalf("unexpected inert warning: %q", w)
+		}
+	}
+}
+
+func TestHostInboundExcept12054ProtocolsUnknownExclusionFilteredFromLenientWarning(t *testing.T) {
+	tree, errs := NewParser(`security { zones { security-zone trust { host-inbound-traffic {
+		system-services { any-service; }
+		protocols { all; ospf except; ospff except; }
+	} } } }`).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("parse: %v", errs)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient: %v", err)
+	}
+	var inert []string
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "inert except") {
+			inert = append(inert, w)
+		}
+	}
+	if len(inert) != 1 || !strings.Contains(inert[0], `protocols "ospf"`) ||
+		strings.Contains(inert[0], "ospff") {
+		t.Fatalf("inert warnings = %q, want one naming only ospf", inert)
+	}
+}
