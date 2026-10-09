@@ -239,12 +239,12 @@ func TestDHCPv4FactoryRestartKeepsNetworkUnchanged_12152(t *testing.T) {
 		t.Fatal(err)
 	}
 	steps := []struct {
-		name       string
-		addrs      []netlink.Addr
-		gw4, gw6   string
+		name     string
+		addrs    []netlink.Addr
+		gw4, gw6 string
 	}{
 		{
-			name: "DHCPv4 lease",
+			name:  "DHCPv4 lease",
 			addrs: []netlink.Addr{dhcpAddr12152("192.0.2.10/24")},
 			gw4:   "192.0.2.1",
 		},
@@ -258,7 +258,7 @@ func TestDHCPv4FactoryRestartKeepsNetworkUnchanged_12152(t *testing.T) {
 			gw6: "fe80::1",
 		},
 		{
-			name: "DHCPv4 lease before RA",
+			name:  "DHCPv4 lease before RA",
 			addrs: []netlink.Addr{dhcpAddr12152("192.0.2.10/24")},
 			gw4:   "192.0.2.1",
 		},
