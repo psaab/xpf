@@ -46,6 +46,7 @@ const (
 	HookPeerTimeoutGuard        = "PeerTimeoutGuard"
 	HookPeerNeverSeenSyncFresh  = "PeerNeverSeenSyncFreshFunc"
 	HookHeartbeatRestartNotify  = "HeartbeatRestartNotifyFunc"
+	HookPeerHeartbeatRecovered  = "PeerHeartbeatRecoveredFunc"
 	HookPeerFence               = "PeerFenceFunc"
 	HookPeerFenceConfirm        = "PeerFenceConfirmFunc"
 )
@@ -75,6 +76,7 @@ func (m *Manager) InstalledHooks() map[string]bool {
 		HookPeerTimeoutGuard:        m.peerTimeoutGuardFn != nil,
 		HookPeerNeverSeenSyncFresh:  m.peerNeverSeenSyncFreshFn != nil,
 		HookHeartbeatRestartNotify:  m.hbRestartNotifyFn != nil,
+		HookPeerHeartbeatRecovered:  m.peerHeartbeatRecoveredFn != nil,
 		HookPeerFence:               m.peerFenceFn != nil,
 		HookPeerFenceConfirm:        m.peerFenceConfirmFn != nil,
 	}
