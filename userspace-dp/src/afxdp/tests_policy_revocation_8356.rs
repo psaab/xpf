@@ -10004,7 +10004,13 @@ fn fib_only_reply_same_zone_move_preserves_stateful_snat_12074() {
     }
 }
 
-fn fib_only_reply_nonforwarding_route_12074(discard: bool, warm_reply: bool) {
+fn fib_only_reply_nonforwarding_route_12074(
+    discard: bool,
+    warm_reply: bool,
+    deny: bool,
+    recorded_fwd: bool,
+    deny_on_restore: bool,
+) {
     let mut initial = nat_snapshot();
     initial.generation = 7;
     initial.fib_generation = 9;
@@ -10021,6 +10027,11 @@ fn fib_only_reply_nonforwarding_route_12074(discard: bool, warm_reply: bool) {
     let forwarding_initial = build_forwarding_state(&initial);
 
     let mut moved = initial.clone();
+    let moved_config_generation = if deny { 8 } else { 7 };
+    moved.generation = moved_config_generation;
+    if deny {
+        moved.policies.clear();
+    }
     moved.fib_generation = 10;
     if discard {
         moved.routes.push(RouteSnapshot {
@@ -10053,11 +10064,20 @@ fn fib_only_reply_nonforwarding_route_12074(discard: bool, warm_reply: bool) {
     );
 
     let mut recovered = initial.clone();
+    let recovered_config_generation = if deny_on_restore {
+        moved_config_generation + 1
+    } else {
+        moved_config_generation
+    };
+    recovered.generation = recovered_config_generation;
     recovered.fib_generation = 11;
+    if deny || deny_on_restore {
+        recovered.policies.clear();
+    }
     let forwarding_recovered = build_forwarding_state(&recovered);
-    let validation = |fib_generation| ValidationState {
+    let validation = |config_generation, fib_generation| ValidationState {
         snapshot_installed: true,
-        config_generation: 7,
+        config_generation,
         fib_generation,
     };
     let mut sessions = SessionTable::new();
@@ -10080,7 +10100,7 @@ fn fib_only_reply_nonforwarding_route_12074(discard: bool, warm_reply: bool) {
             &ha_state,
             &frame,
             txn_meta_v4(LAN_IFINDEX as u32, flags, frame.len() as u16),
-            validation(9),
+            validation(7, 9),
         );
         assert_eq!(dbg.tx, 1, "the initial LiveEgress flow must transmit");
     }
@@ -10099,11 +10119,18 @@ fn fib_only_reply_nonforwarding_route_12074(discard: bool, warm_reply: bool) {
             &ha_state,
             &reply,
             reply_meta,
-            validation(9),
+            validation(7, 9),
         );
         assert_eq!((dbg.session_hit, dbg.tx, dbg.policy_revoked_sessions), (1, 1, 0));
     }
+    if recorded_fwd {
+        sessions.mark_policy_revalidated(
+            &forward_key,
+            crate::session::PolicyRevalidationKind::RecordedEgress,
+        );
+    }
 
+    reply_meta.config_generation = moved_config_generation;
     reply_meta.fib_generation = 10;
     let (_batch, moved_dbg) = txn_run_descriptor_with_validation(
         &mut reverse_binding,
@@ -10112,7 +10139,7 @@ fn fib_only_reply_nonforwarding_route_12074(discard: bool, warm_reply: bool) {
         &ha_state,
         &reply,
         reply_meta,
-        validation(10),
+        validation(moved_config_generation, 10),
     );
     let moved_outcome = (
         moved_dbg.policy_revoked_sessions,
@@ -10120,12 +10147,47 @@ fn fib_only_reply_nonforwarding_route_12074(discard: bool, warm_reply: bool) {
         moved_dbg.policy_deny,
         session_count(&sessions),
     );
+    if deny || recorded_fwd {
+        assert_eq!(
+            moved_outcome,
+            (1, 0, 0, 0),
+            "deny must revoke on the first reply; a non-Live companion remains fail-closed; discard={discard}, warm={warm_reply}, deny={deny}, recorded={recorded_fwd}",
+        );
+        assert_slots_gone_9604(&sessions, &forward_key, &reverse_key);
+        return;
+    }
     if !warm_reply {
         assert_eq!(
             sessions.policy_revalidation_target(&reverse_key),
             crate::session::PolicyRevalidationTarget::Stale(reverse_key.clone()),
             "a cold NoRoute/Discard reply must not stamp the reverse policy verdict",
         );
+    }
+    if deny_on_restore {
+        assert_eq!(moved_outcome, (0, 1, 0, 2));
+        let mut restored_reply_meta = reply_meta;
+        restored_reply_meta.config_generation = recovered_config_generation;
+        restored_reply_meta.fib_generation = 11;
+        let (_batch, restored_dbg) = txn_run_descriptor_with_validation(
+            &mut reverse_binding,
+            &mut sessions,
+            &forwarding_recovered,
+            &ha_state,
+            &reply,
+            restored_reply_meta,
+            validation(recovered_config_generation, 11),
+        );
+        assert_eq!(
+            (
+                restored_dbg.policy_revoked_sessions,
+                restored_dbg.tx,
+                session_count(&sessions),
+            ),
+            (1, 0, 0),
+            "a denied stored pair must still revoke when the route recovers",
+        );
+        assert_slots_gone_9604(&sessions, &forward_key, &reverse_key);
+        return;
     }
 
     let forward_ack = build_txn_tcp_syn_frame_v4(
@@ -10138,6 +10200,7 @@ fn fib_only_reply_nonforwarding_route_12074(discard: bool, warm_reply: bool) {
     );
     let mut forward_meta =
         txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, forward_ack.len() as u16);
+    forward_meta.config_generation = recovered_config_generation;
     forward_meta.fib_generation = 11;
     let (_batch, restored_dbg) = txn_run_descriptor_with_validation(
         &mut forward_binding,
@@ -10146,7 +10209,7 @@ fn fib_only_reply_nonforwarding_route_12074(discard: bool, warm_reply: bool) {
         &ha_state,
         &forward_ack,
         forward_meta,
-        validation(11),
+        validation(recovered_config_generation, 11),
     );
     let restored_outcome = (
         restored_dbg.session_hit,
@@ -10157,7 +10220,7 @@ fn fib_only_reply_nonforwarding_route_12074(discard: bool, warm_reply: bool) {
     assert_eq!(
         moved_outcome,
         (0, 1, 0, 2),
-        "a transient non-forwarding reply must Decline without policy denial or teardown; discard={discard}, warm={warm_reply}",
+        "a permitted transient non-forwarding reply must Decline without policy denial or teardown; discard={discard}, warm={warm_reply}",
     );
     assert_eq!(
         restored_outcome,
@@ -10169,21 +10232,64 @@ fn fib_only_reply_nonforwarding_route_12074(discard: bool, warm_reply: bool) {
 #[test]
 fn fib_only_reply_no_route_declines_and_recovers_12074() {
     for warm_reply in [false, true] {
-        fib_only_reply_nonforwarding_route_12074(false, warm_reply);
+        fib_only_reply_nonforwarding_route_12074(false, warm_reply, false, false, false);
     }
 }
 
 #[test]
 fn fib_only_reply_discard_declines_and_recovers_12074() {
-    fib_only_reply_nonforwarding_route_12074(true, true);
+    fib_only_reply_nonforwarding_route_12074(true, true, false, false, false);
 }
 
 #[test]
-fn reverse_sessionless_no_route_fib_stale_declines_12074() {
+fn fib_only_reply_no_route_permit_then_deny_on_restore_12074() {
+    fib_only_reply_nonforwarding_route_12074(false, false, false, false, true);
+}
+
+#[test]
+fn fib_only_reply_no_route_denies_on_both_arms_12074() {
+    for warm_reply in [false, true] {
+        fib_only_reply_nonforwarding_route_12074(false, warm_reply, true, false, false);
+    }
+}
+
+#[test]
+fn fib_only_reply_discard_denies_on_both_arms_12074() {
+    for warm_reply in [false, true] {
+        fib_only_reply_nonforwarding_route_12074(true, warm_reply, true, false, false);
+    }
+}
+
+#[test]
+fn fib_only_reply_recorded_no_route_stays_fenced_12074() {
+    fib_only_reply_nonforwarding_route_12074(false, true, false, true, false);
+}
+
+fn reverse_sessionless_no_route_fib_stale_12074(
+    permit: bool,
+    kind: Option<crate::session::PolicyRevalidationKind>,
+) -> (
+    Option<crate::session::SessionKey>,
+    SessionTable,
+    crate::session::SessionKey,
+) {
     let mut current = policy_deny_snapshot();
     current.generation = 7;
     current.fib_generation = 10;
     current.routes.retain(|route| route.family != "inet");
+    if permit {
+        current.policies.push(PolicyRuleSnapshot {
+            name: "lan-out".into(),
+            from_zone: "lan".into(),
+            to_zone: "wan".into(),
+            source_addresses: vec!["any".into()],
+            destination_addresses: vec!["any".into()],
+            applications: vec!["any".into()],
+            application_terms: Vec::new(),
+            action: "permit".into(),
+            ..Default::default()
+        });
+    }
     let forwarding = build_forwarding_state(&current);
     assert_eq!(
         crate::afxdp::forwarding::lookup_forwarding_resolution(
@@ -10208,10 +10314,9 @@ fn reverse_sessionless_no_route_fib_stale_declines_12074() {
         PROTO_TCP,
         TCP_ACK,
     ));
-    sessions.mark_policy_revalidated(
-        &forward_key,
-        crate::session::PolicyRevalidationKind::LiveEgress,
-    );
+    if let Some(kind) = kind {
+        sessions.mark_policy_revalidated(&forward_key, kind);
+    }
     assert_eq!(
         sessions.policy_revalidation_target(&reverse_key),
         crate::session::PolicyRevalidationTarget::NoLocalEntry,
@@ -10240,9 +10345,36 @@ fn reverse_sessionless_no_route_fib_stale_declines_12074() {
         txn_meta_v4(WAN_IFINDEX as u32, TCP_ACK, 80),
         false,
     );
-    assert_eq!(canonical, None, "the FIB-stale NoRoute must Decline, not revoke");
-    assert!(
-        sessions.entry_with_origin(&forward_key).is_some(),
-        "a transient NoRoute must keep the forward companion",
+    (canonical, sessions, forward_key)
+}
+
+#[test]
+fn reverse_sessionless_no_route_fib_stale_denies_12074() {
+    let (canonical, sessions, forward_key) = reverse_sessionless_no_route_fib_stale_12074(
+        false,
+        Some(crate::session::PolicyRevalidationKind::LiveEgress),
     );
+    assert_eq!(
+        canonical,
+        Some(forward_key.clone()),
+        "the stored forward deny must revoke the authoritative pair",
+    );
+    assert!(sessions.entry_with_origin(&forward_key).is_some());
+}
+
+#[test]
+fn reverse_sessionless_no_route_fib_stale_nonlive_permits_12074() {
+    for kind in [
+        None,
+        Some(crate::session::PolicyRevalidationKind::Unvalidated),
+        Some(crate::session::PolicyRevalidationKind::RecordedEgress),
+    ] {
+        let (canonical, sessions, forward_key) =
+            reverse_sessionless_no_route_fib_stale_12074(true, kind);
+        assert_eq!(
+            canonical, None,
+            "a permitted non-Live NoLocalEntry companion keeps parent parity; kind={kind:?}",
+        );
+        assert!(sessions.entry_with_origin(&forward_key).is_some());
+    }
 }
