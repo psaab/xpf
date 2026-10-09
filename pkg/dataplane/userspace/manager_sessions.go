@@ -65,6 +65,16 @@ func (m *Manager) ListSessionsByPolicy(req SessionPolicyListRequest) (ControlRes
 			return ControlResponse{}, fmt.Errorf("policy session READ deadline exceeded after %s", policyReadDeadline)
 		}
 		m.mu.Lock()
+		// Keep authority validation and this page's LIST in one critical section:
+		// a snapshot publish must not split the check from the helper request.
+		if pageReq.Mode == "prepublish" &&
+			(pageReq.ExpectedConfig == nil ||
+				m.appliedSnapshot.Config != pageReq.ExpectedConfig ||
+				m.applySnapshotOutcomeUnknown) {
+			m.mu.Unlock()
+			return ControlResponse{}, fmt.Errorf(
+				"policy session READ refused: applied snapshot does not match expected config or its outcome is unknown")
+		}
 		page, err := m.requestDetailedLocked(ControlRequest{
 			Type:              "list_sessions_by_policy",
 			SuppressStatus:    true,

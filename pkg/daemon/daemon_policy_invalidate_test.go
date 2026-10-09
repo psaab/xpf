@@ -1142,12 +1142,32 @@ type policyListRead12072DP struct {
 	activeCfg              *config.Config
 	request                dpuserspace.SessionPolicyListRequest
 	deletedPolicy          []dpuserspace.SessionPolicyMatch
+	outcomeUnknown         bool
+	readErr                error
+	incomplete             bool
+	deleteErr              error
+	readCalls              int
+	readErrOnce            bool
 }
 
 func (d *policyListRead12072DP) ListSessionsByPolicy(
 	request dpuserspace.SessionPolicyListRequest,
 ) (dpuserspace.ControlResponse, error) {
 	d.request = request
+	d.readCalls++
+	if request.Mode == "prepublish" && d.outcomeUnknown {
+		return dpuserspace.ControlResponse{}, errors.New("policy session READ skipped: publication outcome unknown")
+	}
+	if request.Mode == "prepublish" && request.ExpectedConfig != d.appliedConfig {
+		return dpuserspace.ControlResponse{}, errors.New("policy session READ skipped: expected snapshot does not match LIST authority")
+	}
+	if d.readErr != nil {
+		err := d.readErr
+		if d.readErrOnce {
+			d.readErr = nil
+		}
+		return dpuserspace.ControlResponse{}, err
+	}
 	matches := make([]dpuserspace.SessionPolicyMatch, 0, len(d.rows))
 	wanted := make(map[uint32]struct{}, len(request.PolicyIDs))
 	for _, id := range request.PolicyIDs {
@@ -1178,14 +1198,25 @@ func (d *policyListRead12072DP) ListSessionsByPolicy(
 	}
 	return dpuserspace.ControlResponse{
 		OK:                    true,
-		SessionPolicyComplete: true,
+		SessionPolicyComplete: !d.incomplete,
 		SessionPolicyMatches:  matches,
 	}, nil
 }
 func (d *policyListRead12072DP) DeletePolicySessions(
 	matches []dpuserspace.SessionPolicyMatch,
 ) (dpuserspace.PolicyDeleteResult, error) {
+	if d.deleteErr != nil {
+		return dpuserspace.PolicyDeleteResult{}, d.deleteErr
+	}
 	d.deletedPolicy = append(d.deletedPolicy, matches...)
+	for _, match := range matches {
+		for i, row := range d.rows {
+			if policyInvalidationMatchID(row) == policyInvalidationMatchID(match) {
+				d.rows = append(d.rows[:i], d.rows[i+1:]...)
+				break
+			}
+		}
+	}
 	return dpuserspace.PolicyDeleteResult{Applied: len(matches)}, nil
 }
 
@@ -1259,13 +1290,9 @@ func TestThreeConfigPolicyInvalidationDoesNotCaptureRenumberedUnrelatedSession12
 	}
 }
 
-// #12323 M1: a retained invalidation debt names C0 while an unknown-outcome
-// publish may already have advanced the helper to C1. The positional target
-// set from C0 cannot safely be resolved in C1's namespace, or the surviving web
-// row can be captured as the deleted tmp row.
-//
-// FAIL-ON-REVERT: remove the AppliedConfig/oldCfg prepublish fence and C1's
-// web@id 1 aliases C0's deleted tmp@id 1; the unguarded capture gathers web.
+// #12323 M1: retained C0 IDs cannot be interpreted in the helper's C1
+// namespace. Cover both acknowledged skew and a lost ACK: in the latter
+// AppliedConfig still says C0 even though the helper already enforces C1.
 func TestPrepublishCaptureFailsClosedOnAppliedSnapshotSkew12323(t *testing.T) {
 	c0 := twoPolicyConfig([]string{"p-first", "tmp", "web"}, nil)
 	c1 := twoPolicyConfig([]string{"p-first", "web"}, nil)
@@ -1289,38 +1316,61 @@ func TestPrepublishCaptureFailsClosedOnAppliedSnapshotSkew12323(t *testing.T) {
 			ExpectedRTFlowSessionID: sessionID,
 		}
 	}
-	dp := &policyListRead12072DP{
-		policyInvalTestDP: &policyInvalTestDP{appliedConfig: c1},
-		rows: []dpuserspace.SessionPolicyMatch{
-			makeMatch(tmpAtC0, 80, 2001),
-			makeMatch(webAtC0, 443, 2002),
-		},
-		stableRuleIDsBySession: map[uint64]string{
-			2001: "trust->untrust/tmp",
-			2002: "trust->untrust/web",
-		},
-		activeCfg: c1,
-	}
-	d := &Daemon{}
-	d.setDataplane(dp)
-	d.armPolicyInvalidationPlan(c0, c1)
-	d.capturePolicyInvalidationLocked(c1)
-	capture := d.policyInvalidationCapture
-	if capture == nil {
-		t.Fatal("skewed plan did not produce a fail-closed capture")
-	}
-	if capture.readErr == nil {
-		t.Fatal("C0 target IDs were read against the helper's already-applied C1 snapshot")
-	}
-	if !capture.deleted.enumFailed || !capture.modified.enumFailed || !capture.deflt.enumFailed {
-		t.Fatalf("snapshot skew must mark every capture class incomplete: %+v", capture)
-	}
-	if !capture.deleted.empty() || !capture.modified.empty() || !capture.deflt.empty() ||
-		len(capture.renamed) != 0 {
-		t.Fatalf("snapshot skew must capture no sessions: %+v", capture)
-	}
-	if len(dp.request.PolicyIDs) != 0 {
-		t.Fatalf("skewed capture must not issue a helper READ: %+v", dp.request)
+	for _, tc := range []struct {
+		name           string
+		acknowledged   *config.Config
+		outcomeUnknown bool
+	}{
+		{name: "acknowledged_skew", acknowledged: c1},
+		{name: "lost_ack", acknowledged: c0, outcomeUnknown: true},
+		{name: "missing_authority"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dp := &policyListRead12072DP{
+				policyInvalTestDP: &policyInvalTestDP{appliedConfig: tc.acknowledged},
+				rows: []dpuserspace.SessionPolicyMatch{
+					makeMatch(tmpAtC0, 80, 2001),
+					makeMatch(webAtC0, 443, 2002),
+				},
+				stableRuleIDsBySession: map[uint64]string{
+					2001: "trust->untrust/tmp",
+					2002: "trust->untrust/web",
+				},
+				activeCfg:      c1,
+				outcomeUnknown: tc.outcomeUnknown,
+			}
+			d := &Daemon{}
+			d.setDataplane(dp)
+			d.armPolicyInvalidationPlan(c0, c1)
+			d.capturePolicyInvalidationLocked(c1)
+			capture := d.policyInvalidationCapture
+			if capture == nil {
+				t.Fatal("skewed plan did not produce a fail-closed capture")
+			}
+			if capture.readErr == nil {
+				t.Fatalf("C0 target IDs were read against the helper's C1 snapshot: captured=%+v", capture.deleted.policy)
+			}
+			if !capture.deleted.enumFailed || !capture.modified.enumFailed || !capture.deflt.enumFailed {
+				t.Fatalf("snapshot skew must mark every capture class incomplete: %+v", capture)
+			}
+			if !capture.deleted.empty() || !capture.modified.empty() || !capture.deflt.empty() ||
+				len(capture.renamed) != 0 {
+				t.Fatalf("snapshot skew must capture no sessions: %+v", capture)
+			}
+			if tc.outcomeUnknown && (dp.request.Mode != "prepublish" || dp.request.PolicyIDs == nil ||
+				dp.request.ExpectedConfig != c0) {
+				t.Fatalf("lost-ACK capture did not attempt the C0-authorized helper LIST: %+v", dp.request)
+			}
+			if !tc.outcomeUnknown && dp.readCalls != 0 {
+				t.Fatalf("skewed capture issued %d helper READs", dp.readCalls)
+			}
+			if err := d.dischargePolicyInvalidationDebtLocked(c0, c1); err == nil {
+				t.Fatal("refused capture must surface partial invalidation after publication")
+			}
+			if len(dp.deletedPolicy) != 0 || len(dp.rows) != 2 {
+				t.Fatalf("refused capture deleted a live session: %+v", dp.deletedPolicy)
+			}
+		})
 	}
 }
 

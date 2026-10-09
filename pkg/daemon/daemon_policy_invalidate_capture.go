@@ -69,6 +69,17 @@ type policyInvalidationPlan struct {
 	renameApply *pendingRenameApply
 }
 
+// policyInvalidationScanFailure is tied to the config pair whose complete
+// session enumeration failed. A later pair can refresh its own candidates but
+// cannot prove that the earlier pair had no unobserved rows.
+type policyInvalidationScanFailure struct {
+	oldCfg  *config.Config
+	newCfg  *config.Config
+	readErr error
+	v4Err   error
+	v6Err   error
+}
+
 // policyInvalidationDebt owns an armed (old,new) pair and its pre-publication
 // candidates until that config's snapshot has actually landed. A deferred
 // userspace snapshot records the manager generation that the status-loop
@@ -78,6 +89,7 @@ type policyInvalidationDebt struct {
 	newCfg            *config.Config
 	renameApply       *pendingRenameApply
 	capture           *policyInvalidationCapture
+	scanFailure       *policyInvalidationScanFailure
 	publishGeneration uint64
 	// appliedDigest is captured only after this target's full local apply
 	// succeeds and is stamped after the debt's candidates clear.
@@ -144,13 +156,19 @@ func (d *Daemon) armPolicyInvalidationPlanWithRename(
 	oldCfg, newCfg *config.Config,
 	renameApply *pendingRenameApply,
 ) {
-	// If an earlier publish did not land, the dataplane still enforces the
-	// oldest owed config. Diff that live config directly against the newest
-	// target, so intermediate configs that never published contribute neither
-	// admissions nor invalidation. Rename ancestry is intentionally dropped
-	// across a merged debt: it describes only the immediate pair and cannot be
-	// safely composed without re-resolving every intermediate binding.
+	// A landed target becomes the namespace for the next fresh scan. Keep
+	// identity-specific delete obligations from the prior capture, but do not
+	// keep interpreting every future diff in its pre-publish namespace.
 	if debt := d.policyInvalidationDebt; debt != nil {
+		if debt.newCfg == oldCfg && debt.publishGeneration != 0 {
+			if rt := d.dataplane(); rt != nil {
+				if provider, ok := dataplane.Unwrap(rt).(interface {
+					AppliedConfig() *config.Config
+				}); ok && provider.AppliedConfig() == oldCfg {
+					debt.oldCfg = oldCfg
+				}
+			}
+		}
 		oldCfg = debt.oldCfg
 		renameApply = nil
 	}
@@ -211,19 +229,21 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	}
 	previousGeneration := uint64(0)
 	var previousCapture *policyInvalidationCapture
+	var previousScanFailure *policyInvalidationScanFailure
 	if debt := d.policyInvalidationDebt; debt != nil {
 		// A retained candidate may no longer appear in the fresh scan after
 		// publication has restamped its policy id. Carry those candidates
 		// forward, but only carry generation eligibility across a same-target
 		// retry; a superseding target must publish its own generation.
 		previousCapture = debt.capture
+		previousScanFailure = debt.scanFailure
 		if debt.newCfg == plan.newCfg {
 			previousGeneration = debt.publishGeneration
 		}
 	}
 	d.policyInvalidationDebt = &policyInvalidationDebt{
 		oldCfg: plan.oldCfg, newCfg: plan.newCfg, renameApply: plan.renameApply,
-		publishGeneration: previousGeneration,
+		scanFailure: previousScanFailure, publishGeneration: previousGeneration,
 	}
 
 	// The three target sets are computed HERE, once, and the clears consume the
@@ -267,6 +287,7 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 
 	rt := d.dataplane()
 	if rt == nil {
+		d.retainPolicyInvalidationCaptureLocked(previousCapture)
 		return
 	}
 	store := rt.Sessions()
@@ -293,10 +314,11 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 
 		ids := captureRequestedPolicyIDs(deleted, modified, deflt, renameBindings)
 		resp, err := lister.ListSessionsByPolicy(dpuserspace.SessionPolicyListRequest{
-			PolicyIDs: ids,
-			Mode:      "prepublish",
-			Families:  []uint8{4, 6},
-			Classes:   []string{"forward"},
+			PolicyIDs:      ids,
+			Mode:           "prepublish",
+			Families:       []uint8{4, 6},
+			Classes:        []string{"forward"},
+			ExpectedConfig: plan.oldCfg,
 		})
 		// P7 terminal (shared with the legacy producer): a transport
 		// error gathers nothing → empty buckets + error. An INCOMPLETE
@@ -382,8 +404,8 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 		d.retainPolicyInvalidationCaptureLocked(mergePolicyInvalidationCaptures(previousCapture, capture))
 		return
 	}
-
 	if store == nil {
+		d.retainPolicyInvalidationCaptureLocked(previousCapture)
 		return
 	}
 
@@ -459,11 +481,66 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	d.retainPolicyInvalidationCaptureLocked(mergePolicyInvalidationCaptures(previousCapture, capture))
 }
 
-func (d *Daemon) retainPolicyInvalidationCaptureLocked(capture *policyInvalidationCapture) {
-	d.policyInvalidationCapture = capture
-	if d.policyInvalidationDebt != nil {
-		d.policyInvalidationDebt.capture = capture
+func policyInvalidationCaptureError(capture *policyInvalidationCapture) error {
+	if capture == nil {
+		return nil
 	}
+	switch {
+	case capture.readErr != nil && capture.v4Err == nil && capture.v6Err == nil:
+		return capture.readErr
+	case capture.readErr == nil && capture.v4Err != nil && capture.v6Err == nil:
+		return capture.v4Err
+	case capture.readErr == nil && capture.v4Err == nil && capture.v6Err != nil:
+		return capture.v6Err
+	default:
+		return errors.Join(capture.readErr, capture.v4Err, capture.v6Err)
+	}
+}
+
+func (d *Daemon) retainPolicyInvalidationCaptureLocked(capture *policyInvalidationCapture) {
+	if debt := d.policyInvalidationDebt; debt != nil {
+		if capture == nil && debt.scanFailure != nil {
+			capture = &policyInvalidationCapture{}
+		}
+		if capture != nil {
+			currentErr := policyInvalidationCaptureError(capture)
+			failure := debt.scanFailure
+			if failure != nil && failure.oldCfg == debt.oldCfg &&
+				failure.newCfg == debt.newCfg && currentErr == nil {
+				// A complete retry of the exact failed pair while its old
+				// snapshot is still authoritative resolves that scan gap.
+				debt.scanFailure = nil
+				failure = nil
+			}
+			createdFailure := false
+			if failure == nil && currentErr != nil {
+				failure = &policyInvalidationScanFailure{
+					oldCfg: debt.oldCfg, newCfg: debt.newCfg,
+					readErr: capture.readErr, v4Err: capture.v4Err, v6Err: capture.v6Err,
+				}
+				debt.scanFailure = failure
+				createdFailure = true
+			}
+			if failure != nil {
+				if !createdFailure {
+					if failure.readErr != nil && !errors.Is(capture.readErr, failure.readErr) {
+						capture.readErr = errors.Join(capture.readErr, failure.readErr)
+					}
+					if failure.v4Err != nil && !errors.Is(capture.v4Err, failure.v4Err) {
+						capture.v4Err = errors.Join(capture.v4Err, failure.v4Err)
+					}
+					if failure.v6Err != nil && !errors.Is(capture.v6Err, failure.v6Err) {
+						capture.v6Err = errors.Join(capture.v6Err, failure.v6Err)
+					}
+				}
+				capture.deleted.enumFailed = true
+				capture.modified.enumFailed = true
+				capture.deflt.enumFailed = true
+			}
+			debt.capture = capture
+		}
+	}
+	d.policyInvalidationCapture = capture
 }
 
 func (d *Daemon) notePolicyInvalidationPublish(cfg *config.Config, generation uint64) {
@@ -499,11 +576,10 @@ func policyInvalidationMatchID(match dpuserspace.SessionPolicyMatch) policyInval
 	}
 }
 
-// mergePolicyInvalidationCaptures keeps fresh observations first and carries
-// forward only prior candidates that the fresh scan did not rediscover. The
-// row keys are stable even when publication has restamped the row's policy id.
-// Pair-specific rename metadata and read errors remain those of the fresh
-// capture; only delete candidates are owed across applies.
+// mergePolicyInvalidationCaptures carries forward prior delete candidates that
+// the fresh scan did not rediscover. The row keys are stable even when
+// publication has restamped the row's policy id; scan failures are tracked
+// separately with the config pair whose enumeration they invalidate.
 func mergePolicyInvalidationCaptures(previous, current *policyInvalidationCapture) *policyInvalidationCapture {
 	if previous == nil {
 		return current

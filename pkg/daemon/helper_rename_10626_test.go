@@ -232,8 +232,9 @@ func TestHelperCaptureRetainsRenamedSession10626(t *testing.T) {
 	match.CreatedSecs = 1_500_000_000
 	dp := &helperRenameDP10626{
 		policyInvalTestDP: &policyInvalTestDP{
-			v4: map[dataplane.SessionKey]dataplane.SessionValue{},
-			v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
+			v4:            map[dataplane.SessionKey]dataplane.SessionValue{},
+			appliedConfig: oldCfg,
+			v6:            map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
 		},
 		matches: []dpuserspace.SessionPolicyMatch{match},
 	}
@@ -287,8 +288,9 @@ func TestHelperCaptureDeniedRenameDeletesOnce10626(t *testing.T) {
 	match.CreatedSecs = 1_500_000_000
 	dp := &helperRenameDP10626{
 		policyInvalTestDP: &policyInvalTestDP{
-			v4: map[dataplane.SessionKey]dataplane.SessionValue{},
-			v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
+			v4:            map[dataplane.SessionKey]dataplane.SessionValue{},
+			appliedConfig: oldCfg,
+			v6:            map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
 		},
 		matches: []dpuserspace.SessionPolicyMatch{match},
 	}
@@ -343,8 +345,9 @@ func TestHelperCaptureDeniedGRE0DeletesViaPolicy10626(t *testing.T) {
 	match.CreatedSecs = 1_500_000_000
 	dp := &helperRenameDP10626{
 		policyInvalTestDP: &policyInvalTestDP{
-			v4: map[dataplane.SessionKey]dataplane.SessionValue{},
-			v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
+			v4:            map[dataplane.SessionKey]dataplane.SessionValue{},
+			appliedConfig: oldCfg,
+			v6:            map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
 		},
 		matches: []dpuserspace.SessionPolicyMatch{match},
 	}
@@ -575,8 +578,9 @@ func TestHelperCaptureDeniedMalformedExcluded10626(t *testing.T) {
 	bad.ExpectedRTFlowSessionID = 0
 	dp := &helperRenameDP10626{
 		policyInvalTestDP: &policyInvalTestDP{
-			v4: map[dataplane.SessionKey]dataplane.SessionValue{},
-			v6: map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
+			v4:            map[dataplane.SessionKey]dataplane.SessionValue{},
+			appliedConfig: oldCfg,
+			v6:            map[dataplane.SessionKeyV6]dataplane.SessionValueV6{},
 		},
 		matches: []dpuserspace.SessionPolicyMatch{good, bad},
 	}
