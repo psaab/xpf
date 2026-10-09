@@ -163,10 +163,17 @@ pub(super) fn resolve_install_table_for_session(
     }
 }
 
-pub(super) fn cached_session_resolution(
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CachedNeighborProvenance {
+    Strict,
+    LocalForwardGeneration,
+}
+
+fn cached_session_resolution(
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     cached: ForwardingResolution,
+    provenance: CachedNeighborProvenance,
 ) -> Option<ForwardingResolution> {
     if cached.disposition != ForwardingDisposition::ForwardCandidate {
         return None;
@@ -174,21 +181,29 @@ pub(super) fn cached_session_resolution(
     if cached.egress_ifindex <= 0 || cached.neighbor_mac.is_none() {
         return None;
     }
-    // #11315: recheck the live neighbor binding before serving a stored
-    // session resolution. A contradictory binding, or an absent binding after
-    // its shard epoch advanced, makes the cached MAC stale. An absent neighbor
-    // with an unchanged epoch can be a never-observed miss (#12255); permit
-    // that fallback, while a removal's epoch bump prevents serving the stale
-    // MAC through recovery.
+    // #11315: reject contradictory live neighbors. The forwarding-generation
+    // gate catches config/snapshot removal; the shard epoch catches runtime
+    // removal. Peer-synced and reverse matches stay strict, while connected-v4
+    // directed broadcasts are denied below before lookup's `None` is ambiguous.
+    // Residual: a tunneled outer-neighbor ifindex is re-derived from live state;
+    // after a runtime removal under the old key, the new key's epoch can remain
+    // zero and an otherwise-current local ForwardFlow may still use the cache.
     if let (Some(next_hop), Some(stored_mac)) = (cached.next_hop, cached.neighbor_mac) {
         let ifindex = super::outer_neighbor_ifindex(forwarding, Some(dynamic_neighbors), &cached);
+        // `lookup_neighbor_entry` deliberately returns None for this deny
+        // case. Do not reinterpret that None as an unseen neighbor miss.
+        if super::forwarding::is_connected_v4_directed_broadcast(forwarding, ifindex, next_hop) {
+            return None;
+        }
         if let Some(live) =
             super::lookup_neighbor_entry(forwarding, Some(dynamic_neighbors), ifindex, next_hop)
         {
             if live.mac != stored_mac {
                 return None;
             }
-        } else if dynamic_neighbors.mac_change_epoch_for(&(ifindex, next_hop)) != 0 {
+        } else if provenance != CachedNeighborProvenance::LocalForwardGeneration
+            || dynamic_neighbors.mac_change_epoch_for(&(ifindex, next_hop)) != 0
+        {
             return None;
         }
     }
@@ -242,6 +257,37 @@ pub(super) fn lookup_forwarding_resolution_for_session(
         decision,
         true,
         true,
+        CachedNeighborProvenance::Strict,
+    )
+}
+
+/// Re-resolve an established hit, permitting an absent-neighbor fallback only
+/// when its local forward origin and session generation stamp prove provenance.
+pub(super) fn lookup_forwarding_resolution_for_session_with_provenance(
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    flow: &SessionFlow,
+    decision: SessionDecision,
+    origin: SessionOrigin,
+    forwarding_generation: ForwardingGenerationStamp,
+    generation_is_current: bool,
+) -> ForwardingResolution {
+    let provenance = if origin == SessionOrigin::ForwardFlow
+        && forwarding_generation.valid
+        && generation_is_current
+    {
+        CachedNeighborProvenance::LocalForwardGeneration
+    } else {
+        CachedNeighborProvenance::Strict
+    };
+    lookup_forwarding_resolution_for_session_with_cache(
+        forwarding,
+        dynamic_neighbors,
+        flow,
+        decision,
+        true,
+        true,
+        provenance,
     )
 }
 
@@ -258,6 +304,7 @@ pub(super) fn lookup_forwarding_resolution_for_session_without_cache(
         decision,
         false,
         false,
+        CachedNeighborProvenance::Strict,
     )
 }
 
@@ -300,6 +347,7 @@ fn lookup_forwarding_resolution_for_session_with_cache(
     decision: SessionDecision,
     allow_cached_fast_path: bool,
     allow_cached_fallback: bool,
+    cached_neighbor_provenance: CachedNeighborProvenance,
 ) -> ForwardingResolution {
     // #9752: validate a stamped installing table BEFORE any stored-resolution
     // shortcut (Codex-r2-F2/F5: cached reuse, the lookup fallback, and the
@@ -374,13 +422,24 @@ fn lookup_forwarding_resolution_for_session_with_cache(
             ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor
                 if allow_cached_fallback =>
             {
-                cached_session_resolution(forwarding, dynamic_neighbors, decision.resolution).unwrap_or(resolved)
+                cached_session_resolution(
+                    forwarding,
+                    dynamic_neighbors,
+                    decision.resolution,
+                    cached_neighbor_provenance,
+                )
+                    .unwrap_or(resolved)
             }
             _ => resolved,
         };
     }
     if allow_cached_fast_path {
-        if let Some(cached) = cached_session_resolution(forwarding, dynamic_neighbors, decision.resolution) {
+        if let Some(cached) = cached_session_resolution(
+            forwarding,
+            dynamic_neighbors,
+            decision.resolution,
+            cached_neighbor_provenance,
+        ) {
             return cached;
         }
     }
@@ -414,7 +473,13 @@ fn lookup_forwarding_resolution_for_session_with_cache(
         ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor
             if allow_cached_fallback =>
         {
-            cached_session_resolution(forwarding, dynamic_neighbors, decision.resolution).unwrap_or(resolved)
+            cached_session_resolution(
+                forwarding,
+                dynamic_neighbors,
+                decision.resolution,
+                cached_neighbor_provenance,
+            )
+            .unwrap_or(resolved)
         }
         _ => resolved,
     }
@@ -433,6 +498,7 @@ fn lookup_forwarding_resolution_for_synced_session(
         decision,
         false,
         true,
+        CachedNeighborProvenance::Strict,
     )
 }
 
@@ -3141,7 +3207,15 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
                 decision,
             )
         } else {
-            lookup_forwarding_resolution_for_session(forwarding, dynamic_neighbors, flow, decision)
+            lookup_forwarding_resolution_for_session_with_provenance(
+                forwarding,
+                dynamic_neighbors,
+                flow,
+                decision,
+                hit_origin,
+                resolved.forwarding_generation,
+                !forwarding_stale,
+            )
         };
         let looked_up_resolution = super::prefer_local_forward_candidate_for_fabric_ingress(
             forwarding,

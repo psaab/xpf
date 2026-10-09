@@ -1796,11 +1796,18 @@ fn session_resolution_falls_back_to_cached_neighbor_on_miss() {
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
-    let resolved = lookup_forwarding_resolution_for_session(
+    let resolved = lookup_forwarding_resolution_for_session_with_provenance(
         &state,
         &Arc::new(ShardedNeighborMap::new()),
         &flow,
         decision,
+        crate::session::SessionOrigin::ForwardFlow,
+        crate::session::ForwardingGenerationStamp {
+            config_generation: 1,
+            fib_generation: 1,
+            valid: true,
+        },
+        true,
     );
     let expected_src = state
         .egress
