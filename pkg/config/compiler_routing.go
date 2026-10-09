@@ -313,6 +313,32 @@ func appendStaticRouteDestinationAlias(route *StaticRoute, destination string) {
 	route.destinationAliases = append(route.destinationAliases, destination)
 }
 
+func appendStaticRouteNoDispositionAliases(existing, route *StaticRoute) {
+	if existing == nil || route == nil {
+		return
+	}
+	appendDestination := func(destination string) {
+		if destination == "" {
+			return
+		}
+		for _, prior := range existing.noDispositionAliases {
+			if prior == destination {
+				return
+			}
+		}
+		existing.noDispositionAliases = append(existing.noDispositionAliases, destination)
+	}
+	if !staticRouteHasDisposition(existing) {
+		appendDestination(existing.Destination)
+	}
+	if !staticRouteHasDisposition(route) {
+		appendDestination(route.Destination)
+	}
+	for _, destination := range route.noDispositionAliases {
+		appendDestination(destination)
+	}
+}
+
 func appendStaticRouteNextTableConflict(route *StaticRoute, target string) {
 	if route == nil || target == "" {
 		return
@@ -347,6 +373,53 @@ func appendStaticRouteNextHopsDeduped(existing *StaticRoute, hops []NextHopEntry
 		duplicate := false
 		for _, prior := range existing.NextHops {
 			if prior == hop {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			existing.NextHops = append(existing.NextHops, hop)
+		}
+	}
+}
+
+type staticRouteNextHopEffectiveKey struct {
+	address       string
+	interfaceName string
+	preference    int
+	metric        int
+}
+
+func staticRouteNextHopEffectiveKeyFor(route *StaticRoute, hop NextHopEntry) staticRouteNextHopEffectiveKey {
+	preference := 5
+	if route != nil {
+		preference = route.Preference
+	}
+	if hop.HasPreference {
+		preference = hop.Preference
+	}
+	metric := 0
+	if hop.HasMetric && hop.Metric >= 0 && uint64(hop.Metric) <= uint64(^uint32(0)) {
+		metric = hop.Metric
+	}
+	return staticRouteNextHopEffectiveKey{
+		address: hop.Address, interfaceName: hop.Interface,
+		preference: preference, metric: metric,
+	}
+}
+
+// Distinct route sources can express the same effective next-hop with
+// different syntax (for example, plain `next-hop` and qualified-next-hop at
+// the route's preference). They are one forwarding member, not ECMP copies.
+func appendStaticRouteNextHopsByEffectiveTier(existing, source *StaticRoute) {
+	if existing == nil || source == nil || len(source.NextHops) == 0 {
+		return
+	}
+	for _, hop := range source.NextHops {
+		key := staticRouteNextHopEffectiveKeyFor(source, hop)
+		duplicate := false
+		for _, prior := range existing.NextHops {
+			if staticRouteNextHopEffectiveKeyFor(existing, prior) == key {
 				duplicate = true
 				break
 			}
@@ -417,6 +490,7 @@ func mergeStaticRouteIdentity(existing, route *StaticRoute) {
 	if existing == nil || route == nil || existing == route {
 		return
 	}
+	appendStaticRouteNoDispositionAliases(existing, route)
 	appendStaticRouteDestinationAlias(existing, route.Destination)
 	for _, alias := range route.destinationAliases {
 		appendStaticRouteDestinationAlias(existing, alias)
@@ -429,9 +503,12 @@ func mergeStaticRouteIdentity(existing, route *StaticRoute) {
 		appendStaticRouteNextTableConflict(existing, existing.NextTable)
 		appendStaticRouteNextTableConflict(existing, route.NextTable)
 	}
-	if existing.NoInstall != route.NoInstall || route.noInstallConflict {
+	noInstallConflict := existing.NoInstall != route.NoInstall || route.noInstallConflict
+	if noInstallConflict {
 		existing.noInstallConflict = true
 	}
+	existingHasAction := existing.Discard || existing.Reject || existing.NextTable != ""
+	routeHasAction := route.Discard || route.Reject || route.NextTable != ""
 	nextHopless := len(existing.NextHops) == 0 && len(route.NextHops) == 0
 	// Distinct spellings/collections are independent route sources. Stamp their
 	// unqualified next-hops before route-level preference precedence can obscure
@@ -451,7 +528,17 @@ func mergeStaticRouteIdentity(existing, route *StaticRoute) {
 			}
 		}
 	}
-	appendStaticRouteNextHopsDeduped(existing, route.NextHops)
+	switch {
+	case noInstallConflict && existing.NoInstall && !route.NoInstall:
+		// The existing source is excluded; only the incoming installable
+		// source may contribute next-hops to the tolerant merged route.
+		existing.NextHops = existing.NextHops[:0]
+		appendStaticRouteNextHopsByEffectiveTier(existing, route)
+	case noInstallConflict && !existing.NoInstall && route.NoInstall:
+		// Do not install next-hops declared by a no-install source.
+	default:
+		appendStaticRouteNextHopsByEffectiveTier(existing, route)
+	}
 	if route.Discard {
 		existing.Discard = true
 	}
@@ -459,11 +546,23 @@ func mergeStaticRouteIdentity(existing, route *StaticRoute) {
 		existing.Reject = true
 	}
 	// Strict validation rejects disagreement between independent sources.
-	// Tolerant compilation retains the installable source.
+	// Tolerant compilation keeps only next-hops from installable sources.
 	existing.NoInstall = existing.NoInstall && route.NoInstall
 	if nextHopless {
-		if route.Preference < existing.Preference {
+		switch {
+		case existingHasAction && routeHasAction:
+			if route.Preference < existing.Preference {
+				existing.Preference = route.Preference
+			}
+		case routeHasAction:
+			// Preference-only aliases do not lower a forwarding action's
+			// route distance.
 			existing.Preference = route.Preference
+		case existingHasAction:
+			// Keep the action-bearing source's preference.
+		default:
+			// No source carries a forwarding action, so neither preference
+			// should alter a route that will be excluded from installation.
 		}
 		existing.HasPreference = existing.HasPreference || route.HasPreference
 	} else if route.HasPreference {

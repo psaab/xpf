@@ -224,13 +224,35 @@ func TestStaticRouteSameSpellingNoInstallStaysExcluded_12084(t *testing.T) {
 }
 
 func TestStaticRouteNextHoplessAliasKeepsMinimumPreference_12084(t *testing.T) {
-	tree := flatTreeFromSets(t,
-		"set routing-options static route 10.8.0.0/16 discard preference 5",
-		"set routing-options static route 10.8.0.1/16 discard preference 250",
-	)
-	cfg := assertCommitAccepts(t, tree)
-	route := compiledRouteIn(t, cfg.RoutingOptions.StaticRoutes, "10.8.0.0/16")
-	if !route.Discard || route.Preference != 5 {
-		t.Fatalf("merged discard route = %+v, want discard at minimum preference 5", route)
+	cases := []struct {
+		name        string
+		text        string
+		destination string
+	}{
+		{
+			name:        "minimum-first",
+			destination: "10.8.0.0/16",
+			text: `routing-options { static {
+				route 10.8.0.0/16 { discard; preference 5; }
+				route 10.8.0.1/16 { discard; preference 250; }
+			} }`,
+		},
+		{
+			name:        "minimum-last",
+			destination: "10.8.0.1/16",
+			text: `routing-options { static {
+				route 10.8.0.1/16 { discard; preference 250; }
+				route 10.8.0.0/16 { discard; preference 5; }
+			} }`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := assertCommitAccepts(t, hierTree(t, tc.text))
+			route := compiledRouteIn(t, cfg.RoutingOptions.StaticRoutes, tc.destination)
+			if !route.Discard || route.Preference != 5 || !route.HasPreference {
+				t.Fatalf("merged discard route = %+v, want explicit minimum preference 5", route)
+			}
+		})
 	}
 }
