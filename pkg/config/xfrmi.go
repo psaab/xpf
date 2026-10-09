@@ -90,14 +90,16 @@ func XFRMIfNameAndID(bindIface string) (string, uint32) {
 // `st0.0` in both cases. The name therefore cannot be derived from the ref at
 // all — see SecureTunnelUnitNetdev, which reads it back from the config.
 //
-// Every resolver now calls it: the two pkg/dataplane/compiler_iface.go sites
-// that used to derive the netdev from the ref (resolveInterfaceRef at :134,
-// buildInterfaceNetworkdModels at :1242) call cfg.SecureTunnelUnitNetdev
-// since 3f997a3da/a04a9bc09, and the RI-member resolvers joined in #12087.
-// Verified by grep at #12087 (compiler_iface.go:134 + :1242, plus the
-// Callers list on SecureTunnelUnitNetdev below). Do not restore a narrower
-// claim here without re-counting the call sites; an unqualified statement
-// in a doc is what a later reader will rely on instead of grepping.
+// Every resolver in the Callers list below calls it, including the two
+// pkg/dataplane/compiler_iface.go sites that used to derive the netdev
+// from the ref (resolveInterfaceRef, buildInterfaceNetworkdModels; since
+// 3f997a3da/a04a9bc09) and the RI-member resolvers (#12087). It is NOT
+// every unit→netdev derivation in the tree:
+// inferIPv6StaticNextHopInterfaces
+// (pkg/daemon/daemon_run_routehelpers.go) still collapses st<N>.0
+// through LogicalUnitDeviceKey (#12514). Do not widen this to "every"
+// without re-counting; an unqualified "every" in a doc is what a later
+// reader will rely on instead of grepping.
 //
 // Callers of the PREDICATE, as of #6691 round 6: SecureTunnelUnitNetdev and
 // ResolveKernelIfName's verbatim fallback — both LEXICAL questions ("is this
@@ -145,7 +147,9 @@ func IsSecureTunnelIfName(base string) bool {
 // (pkg/dataplane/userspace/interfaces.go), junosHostLinuxName
 // (junos_host_deny.go), snapshotUnitDevice
 // (contested_trunk_zone_advisory_7509.go), resolveInterfaceRef and
-// buildInterfaceNetworkdModels (pkg/dataplane/compiler_iface.go).
+// buildInterfaceNetworkdModels (pkg/dataplane/compiler_iface.go), and
+// DeclaredNetdevsForConfig (pkg/frr/config_render.go, passed as a method
+// value to addSecureTunnelNetdevs).
 //
 // #6691: junosHostLinuxName is why this exists as one shared function rather
 // than hand-copied name resolution. It resolves the iifname scope for the
