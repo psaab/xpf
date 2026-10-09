@@ -107,6 +107,8 @@ func toNftViews(views []dpuserspace.ZoneHostInboundView) []xnft.HostInboundZoneV
 			V6Addrs:              v.V6Addrs,
 			IngressDenyV4:        v.IngressDenyV4,
 			IngressDenyV6:        v.IngressDenyV6,
+			ICMPFloodThreshold:   v.ICMPFloodThreshold,
+			UDPFloodThreshold:    v.UDPFloodThreshold,
 			SYNFloodThreshold:    v.SYNFloodThreshold,
 			SYNFloodSrcThreshold: v.SYNFloodSrcThreshold,
 			AlarmWithoutDrop:     v.AlarmWithoutDrop,
