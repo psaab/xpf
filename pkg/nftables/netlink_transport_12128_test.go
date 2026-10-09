@@ -22,6 +22,10 @@ func TestLargeReplaceRecoversUncertainAck12128(t *testing.T) {
 	}
 
 	spec := largeHostInboundSpec12128(512)
+	spec.Views[0].UDPFloodThreshold = 100 // Include one screen-flood rule to exercise named-set readback.
+	if got := len(HostInboundScreenFloodRules(spec.Views)); got != 1 {
+		t.Fatalf("screen-flood rules = %d, want 1 named-set readback case", got)
+	}
 	var socketDials atomic.Int32
 	installer := newNetlinkInstallerConn(func() (*nftables.Conn, error) {
 		return nftables.New(nftables.WithSockOptions(func(conn *netlink.Conn) error {
@@ -50,6 +54,9 @@ func TestLargeReplaceRecoversUncertainAck12128(t *testing.T) {
 		matched, readbackErr := installer.tableMatchesPlan(HostInboundTableName, expected)
 		t.Fatalf("large replace with uncertain ACK: %v; explicit readback=(%t, %v), socket dials=%d",
 			err, matched, readbackErr, socketDials.Load())
+	}
+	if len(expected.screenFloodSets) == 0 {
+		t.Fatal("replacement plan has no named screen-flood sets to read back")
 	}
 	if got := socketDials.Load(); got <= 2 {
 		t.Fatalf("socket dials = %d; want readback after the Flush socket", got)
