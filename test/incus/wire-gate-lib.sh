@@ -101,16 +101,30 @@ wire_deny_verdict() {
 #   <precommit_control_offered> <precommit_control_observed> <cksum_bad>
 #   <near_miss_offered> <near_miss_observed>
 #
-# #10136 uses the same deny oracle and floors as wire_policy_deny, but only
-# the near-miss control offered after the FBF commit may establish capture
-# liveness. Keep the precommit burst diagnostic; never score it as control
-# evidence. The adapter/ledger identity remains a distinct §3 row.
+# #10136 uses the same deny oracle and floors as wire_policy_deny. The
+# post-commit near-miss establishes capture liveness, while the precommit
+# exact-tuple burst proves that the probe tuple itself was forwardable before
+# the steer. Both checks apply: an RSS queue failure can suppress the probe
+# tuple while dport+1 survives. Keep the precommit counts separately named.
+# The adapter/ledger identity remains a distinct §3 row.
+#
+# Since #12080, control_* describes the scored post-commit near-miss;
+# historical ledger control_* values describe the precommit tuple instead.
 wire_routing_separation_verdict() {
 	local po="${1:-}" pl="${2:-}" pco="${3:-}" pcb="${4:-}" ck="${5:-}"
 	local nmo="${6:-}" nmb="${7:-}" out rc
-	out="$(wire_deny_verdict "$po" "$pl" "$nmo" "$nmb" "$ck")"
-	rc=$?
-	out="${out/wire_policy_deny/wire_routing_separation}"
+	if ! wire_num "$pco" || ! wire_num "$pcb"; then
+		out="WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=$po probe_leaked=$pl control_offered=$nmo control_observed=$nmb cksum_bad=$ck"
+		rc=2
+	else
+		out="$(wire_deny_verdict "$po" "$pl" "$nmo" "$nmb" "$ck")"
+		rc=$?
+		out="${out/wire_policy_deny/wire_routing_separation}"
+		if ((rc == 0)) && ((10#$pcb < WIRE_DROP_FLOOR)); then
+			out="WIRE_GATE wire_routing_separation VOID reason=env-void probe_offered=$po probe_leaked=$pl control_offered=$nmo control_observed=$nmb cksum_bad=$ck"
+			rc=2
+		fi
+	fi
 	printf '%s precommit_control_offered=%s precommit_control_observed=%s\n' \
 		"$out" "$pco" "$pcb"
 	return "$rc"

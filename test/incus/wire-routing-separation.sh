@@ -38,7 +38,7 @@ while (($#)); do
     case "$1" in
     --selftest) MODE=selftest ;;
     --fixture) MODE=fixture; shift; FIXTURE="${1:-}" ;;
-    -h|--help) sed -n '1,28p' "$0"; exit 0 ;;
+    -h|--help) sed -n '1,32p' "$0"; exit 0 ;;
     -*) echo "unknown flag: $1" >&2; exit 2 ;;
     *) echo "unexpected argument: $1" >&2; exit 2 ;;
     esac
@@ -173,6 +173,8 @@ if [[ "$MODE" == selftest ]]; then
     cell "observed probe leak fails" FAIL 1 1000 1 1500 1500 0 1500 1500
     reason_cell "precommit control cannot rescue suppressed post-commit near-miss" capture-blind \
         1000 0 1500 1500 0 1500 0
+    reason_cell "precommit exact-tuple suppression is VOID despite live near-miss" env-void \
+        1000 0 1500 0 0 1500 1500
     cell "short successful ingress burst is VOID" VOID 2 999 0 1500 1500 0 1500 1500
     cell "leak survives an under-sampled probe offer" FAIL 1 999 1 1000 1000 0 1500 1500
     cell "checksum corruption fails" FAIL 1 1000 0 1500 1500 1 1500 1500
@@ -224,12 +226,12 @@ if [[ "$MODE" == fixture ]]; then
         exit 2
     fi
     parsed=$(wire_parse_transcript "$FIXTURE") || {
-        printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 near_miss_offered=0 near_miss_observed=0 cksum_bad=0\n'
+        printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0 precommit_control_offered=0 precommit_control_observed=0\n'
         exit 2
     }
     # shellcheck disable=SC2034
     eval "$parsed" || {
-        printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 near_miss_offered=0 near_miss_observed=0 cksum_bad=0\n'
+        printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0 precommit_control_offered=0 precommit_control_observed=0\n'
         exit 2
     }
     po=${probe_offered:-} pl=${probe_leaked:-}
@@ -238,7 +240,7 @@ if [[ "$MODE" == fixture ]]; then
     ck=${cksum_bad:-0}
     if [[ -z "$po" || -z "$pl" || -z "$pco" || -z "$pcb" ||
         -z "$nmo" || -z "$nmb" ]]; then
-        printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 near_miss_offered=0 near_miss_observed=0 cksum_bad=0\n'
+        printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0 precommit_control_offered=0 precommit_control_observed=0\n'
         exit 2
     fi
     wire_routing_separation_verdict "$po" "$pl" "$pco" "$pcb" "$ck" "$nmo" "$nmb"
@@ -260,7 +262,7 @@ NODE1="${FW1:-${INCUS_REMOTE}:xpf-userspace-fw1}"
 TARGET="${TARGET:-${INCUS_REMOTE}:xpf-mouse-target}"
 RI_NAME="${RI_NAME:-wire-10136}"
 [[ "$RI_NAME" =~ ^[A-Za-z][A-Za-z0-9_-]{0,31}$ ]] || {
-    printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 near_miss_offered=0 near_miss_observed=0 cksum_bad=0\n'
+    printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0 precommit_control_offered=0 precommit_control_observed=0\n'
     exit 2
 }
 VRF_NAME="${VRF_NAME:-vrf-${RI_NAME}}"
@@ -393,9 +395,9 @@ RULE_SNAPSHOT=""
 RULE_2000=""
 TABLE_SNAPSHOT=""
 LAN_MASTER_SNAPSHOT=""
-WIRE_GATE_RESTORE_VOID='WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 near_miss_offered=0 near_miss_observed=0 cksum_bad=0'
+WIRE_GATE_RESTORE_VOID='WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0 precommit_control_offered=0 precommit_control_observed=0'
 void_now() {
-    WIRE_GATE_FINAL_OUT="WIRE_GATE wire_routing_separation VOID reason=$1 probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 near_miss_offered=0 near_miss_observed=0 cksum_bad=0"
+    WIRE_GATE_FINAL_OUT="WIRE_GATE wire_routing_separation VOID reason=$1 probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0 precommit_control_offered=0 precommit_control_observed=0"
     WIRE_GATE_FINAL_RC=2
     exit 2
 }

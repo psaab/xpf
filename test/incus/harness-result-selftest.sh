@@ -1639,7 +1639,7 @@ wire_field_is "routing separation PASS transcribes" 0 1 "PASS"
 wire_field_is "routing separation headline is probe_leaked" 0 3 "probe_leaked"
 wire_field_has "routing separation near-miss control is the scored control" 0 5 "control_offered=1500"
 wire_field_has "routing separation retains precommit control as diagnostic" 0 5 "precommit_control_observed=1500"
-wire_log 'WIRE_GATE wire_routing_separation VOID reason=env-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0\n'
+wire_log 'WIRE_GATE wire_routing_separation VOID reason=env-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0 precommit_control_offered=0 precommit_control_observed=0\n'
 wire_field_is "routing separation early VOID transcribes" 0 1 "VOID"
 wire_field_is "routing separation early VOID keeps env-void" 0 2 "env-void"
 wire_field_has "routing separation early VOID keeps zero metrics" 0 5 "control_observed=0"
