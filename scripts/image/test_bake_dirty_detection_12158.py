@@ -17,6 +17,7 @@ mid-build (restored after), so it must not count as dirt anywhere.
 from __future__ import annotations
 
 import importlib.util
+import re
 import shutil
 import subprocess
 import tempfile
@@ -179,6 +180,24 @@ class DirtyDetection12158Tests(unittest.TestCase):
             bake.bind_deb_identity(
                 package_version, output, skip_build=True, head_commit="")
         self.assertIn("dirty build bytes", str(ctx.exception.code))
+
+
+    def test_every_xpf_file_staged_by_debian_rules_is_git_ignored(self):
+        rules = (_ROOT / "debian" / "rules").read_text().replace("\\\n", " ")
+        staged = set(re.findall(
+            r"(?:\bcp\s+\S+\s+|>\s*)(debian/xpf\.[\w.-]+)(?=\s|$)",
+            rules,
+        ))
+        self.assertTrue(staged, "no generated debian/xpf.* files found in debian/rules")
+        for path in sorted(staged):
+            result = subprocess.run(
+                ["git", "check-ignore", "-q", path],
+                cwd=_ROOT, capture_output=True, text=True,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f"{path} staged by debian/rules is not git-ignored",
+            )
 
 
 if __name__ == "__main__":
