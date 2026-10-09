@@ -1,5 +1,11 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Keep generated qualified-next-hop metric actions out of shared FRR route
+    maps and apply them only to ospfd/ripd after each integrated reload or
+    retry. Clear prior actions by their generated route-map sequences across
+    all routing daemons while preserving authored policy metrics; daemon
+    restarts remain fail-closed until the next Apply (#12071).
+
   * Keep declined WireGuard listener keepalives from publishing outer-tuple
     LocalMiss sessions that would steer subsequent same-zone handshakes away
     from the kernel control socket (#11574).

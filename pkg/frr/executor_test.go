@@ -4,10 +4,17 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 )
+
+type daemonLoadCall struct {
+	daemon  string
+	config  string
+	ctxLive bool
+}
 
 // fakeExecutor is a hand-rolled test double for the frrExecutor interface.
 // Per-method response programming + per-method call counting. No external
@@ -32,6 +39,12 @@ type fakeExecutor struct {
 	// vtyshLoadResp / vtyshLoadErr are returned by VtyshLoad.
 	vtyshLoadResp []byte
 	vtyshLoadErr  error
+
+	daemonLoadResp        []byte
+	daemonLoadErr         error
+	daemonLoadErrByDaemon map[string]error
+	daemonLoads           []daemonLoadCall
+	callOrder             []string
 
 	// Capture: most recent call args.
 	lastVtyshCmd       string
@@ -67,6 +80,7 @@ func (f *fakeExecutor) FrrReloadPy(ctx context.Context, conf string) error {
 	f.lastFrrReloadConf = conf
 	hook := f.frrReloadPyHook
 	err := f.frrReloadPyErr
+	f.callOrder = append(f.callOrder, "reload")
 	f.mu.Unlock()
 	if hook != nil {
 		return hook(call)
@@ -97,6 +111,7 @@ func (f *fakeExecutor) reloadPyCalls() int {
 func (f *fakeExecutor) VtyshLoad(ctx context.Context, conf string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.callOrder = append(f.callOrder, "global-load")
 	f.vtyshLoadCalls++
 	f.lastVtyshLoadCtx = ctx
 	f.lastVtyshLoadConf = conf
@@ -104,6 +119,24 @@ func (f *fakeExecutor) VtyshLoad(ctx context.Context, conf string) ([]byte, erro
 	// cancel runs before the test can assert.
 	f.vtyshLoadCtxLiveAtCall = ctx.Err() == nil
 	return f.vtyshLoadResp, f.vtyshLoadErr
+}
+
+func (f *fakeExecutor) VtyshLoadDaemon(ctx context.Context, daemon, conf string) ([]byte, error) {
+	contents, readErr := os.ReadFile(conf)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.callOrder = append(f.callOrder, "daemon-load:"+daemon)
+	if readErr != nil {
+		return nil, readErr
+	}
+	f.daemonLoads = append(f.daemonLoads, daemonLoadCall{
+		daemon: daemon, config: string(contents), ctxLive: ctx.Err() == nil,
+	})
+	err := f.daemonLoadErrByDaemon[daemon]
+	if err == nil {
+		err = f.daemonLoadErr
+	}
+	return f.daemonLoadResp, err
 }
 
 // TestExecVtyshUsesExecutor proves that Manager.ExecVtysh routes through

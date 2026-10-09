@@ -2,6 +2,7 @@ package frr
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +42,19 @@ func qnhMetricRender11447(t *testing.T, commands ...string) string {
 	})
 }
 
+func qnhMetricRenderAndOverlays11447(t *testing.T, commands ...string) (string, map[string]string) {
+	t.Helper()
+	compiled := compileQNHMetricConfig11447(t, commands...)
+	return New().buildManagedSectionWithQNH11447(&FullConfig{
+		OSPF:          compiled.Protocols.OSPF,
+		OSPFv3:        compiled.Protocols.OSPFv3,
+		RIP:           compiled.Protocols.RIP,
+		ISIS:          compiled.Protocols.ISIS,
+		StaticRoutes:  compiled.RoutingOptions.StaticRoutes,
+		PolicyOptions: &compiled.PolicyOptions,
+	})
+}
+
 func routeMapBlock11447(rendered, name string) string {
 	var block strings.Builder
 	inMap := false
@@ -66,18 +80,21 @@ func routeMapBlock11447(rendered, name string) string {
 }
 
 func TestQualifiedNextHopMetricReachesStaticRedistribution11447(t *testing.T) {
-	rendered := qnhMetricRender11447(t,
+	rendered, overlays := qnhMetricRenderAndOverlays11447(t,
 		"set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10",
 		"set protocols ospf export static",
 	)
 	if !strings.Contains(rendered, "redistribute static route-map ") {
 		t.Fatalf("static OSPF export has no synthesized route-map for QNH metric:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "set metric 10\n") {
-		t.Fatalf("qualified-next-hop metric 10 did not reach the OSPF static redistribution route-map:\n%s", rendered)
+	if strings.Contains(rendered, "set metric 10\n") {
+		t.Fatalf("integrated FRR config must keep the QNH metric action out of all daemon copies:\n%s", rendered)
 	}
 	if !strings.Contains(rendered, "match ip next-hop prefix-list ") {
-		t.Fatalf("QNH metric route-map must distinguish the qualified gateway, not only the destination:\n%s", rendered)
+		t.Fatalf("QNH base route-map must distinguish the qualified gateway, not only the destination:\n%s", rendered)
+	}
+	if !strings.Contains(overlays["ospfd"], "set metric 10\n") {
+		t.Fatalf("ospfd QNH overlay omitted the configured metric:\n%v", overlays)
 	}
 }
 
@@ -101,7 +118,7 @@ func TestQualifiedNextHopMetricDoesNotSetBGPMetric11447(t *testing.T) {
 }
 
 func TestQualifiedNextHopMetricDoesNotOverrideAuthoredPolicyMetric11447(t *testing.T) {
-	rendered := qnhMetricRender11447(t,
+	rendered, overlays := qnhMetricRenderAndOverlays11447(t,
 		"set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10",
 		"set protocols ospf export EXPORT-STATIC",
 		"set policy-options policy-statement EXPORT-STATIC term SET-METRIC from protocol static",
@@ -126,16 +143,19 @@ func TestQualifiedNextHopMetricDoesNotOverrideAuthoredPolicyMetric11447(t *testi
 	if strings.Contains(block, "match source-protocol ") {
 		t.Fatalf("QNH static redistribute map must use its attachment instead of a source-protocol clause:\n%s", block)
 	}
+	if strings.Contains(block, "set metric 10\n") {
+		t.Fatalf("the QNH metric action belongs in the ospfd-only overlay:\n%s", block)
+	}
 	if strings.Contains(block, "set metric 200\n") {
 		t.Fatalf("QNH static redistribute map included a connected-only policy term:\n%s", block)
 	}
-	qnhMetric := strings.Index(block, "set metric 10\n")
-	authoredMetric := strings.Index(block, "set metric 100\n")
-	if qnhMetric < 0 || authoredMetric < 0 {
-		t.Fatalf("redistribution map %q must carry QNH metric 10 and authored override 100:\n%s", mapName, rendered)
+	if !strings.Contains(block, "set metric 100\n") {
+		t.Fatalf("authored static policy metric was not retained in integrated config:\n%s", block)
 	}
-	if qnhMetric >= authoredMetric {
-		t.Fatalf("authored metric must follow and override the QNH fallback metric in map %q:\n%s", mapName, block)
+	overlay := overlays["ospfd"]
+	if !strings.Contains(overlay, "route-map "+mapName+" permit 10\n set metric 10\n") ||
+		strings.Contains(overlay, "set metric 100\n") {
+		t.Fatalf("the daemon overlay must contain only the generated QNH action, not authored policy actions:\n%s", overlay)
 	}
 }
 
@@ -197,7 +217,7 @@ func TestQualifiedNextHopMetricGatesIGPsByMatchCapability12071(t *testing.T) {
 		"set protocols isis interface ge-0/0/0.0",
 		"set protocols isis export static",
 	)
-	rendered := New().buildManagedSection(&FullConfig{
+	rendered, overlays := New().buildManagedSectionWithQNH11447(&FullConfig{
 		OSPF:          compiled.Protocols.OSPF,
 		OSPFv3:        compiled.Protocols.OSPFv3,
 		RIP:           compiled.Protocols.RIP,
@@ -231,10 +251,172 @@ func TestQualifiedNextHopMetricGatesIGPsByMatchCapability12071(t *testing.T) {
 	mapBlock := routeMapBlock11447(rendered, qnhMap)
 	if !strings.Contains(mapBlock, "match ip address prefix-list ") ||
 		!strings.Contains(mapBlock, "match ip next-hop prefix-list ") ||
-		!strings.Contains(mapBlock, "set metric 10\n") ||
-		strings.Contains(mapBlock, "match ipv6 ") ||
-		strings.Contains(mapBlock, "set metric 20\n") {
-		t.Fatalf("shared QNH map must contain only fully discriminated IPv4 metric rules:\n%s", mapBlock)
+		strings.Contains(mapBlock, "set metric ") ||
+		strings.Contains(mapBlock, "match ipv6 ") {
+		t.Fatalf("integrated QNH map must contain only metric-free, fully discriminated IPv4 sequences:\n%s", mapBlock)
+	}
+	if len(overlays) != 2 {
+		t.Fatalf("metric overlays must target exactly ospfd and ripd, got %v", mapValues11447(overlays))
+	}
+	for _, daemon := range []string{"ospfd", "ripd"} {
+		overlay := overlays[daemon]
+		if !strings.Contains(overlay, "route-map "+qnhMap+" permit 10\n set metric 10\n") ||
+			strings.Contains(overlay, "set metric 20\n") {
+			t.Errorf("%s overlay must carry only the fully matched IPv4 QNH metric:\n%s", daemon, overlay)
+		}
+	}
+}
+
+func TestQNHMetricManagerFallbackRetryAndClear11447(t *testing.T) {
+	compiled := compileQNHMetricConfig11447(t,
+		"set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10",
+		"set protocols ospf export static",
+		"set protocols rip redistribute static",
+	)
+	fc := &FullConfig{
+		OSPF:          compiled.Protocols.OSPF,
+		RIP:           compiled.Protocols.RIP,
+		StaticRoutes:  compiled.RoutingOptions.StaticRoutes,
+		PolicyOptions: &compiled.PolicyOptions,
+	}
+	base, overlays := New().buildManagedSectionWithQNH11447(fc)
+	var qnhMap string
+	for _, line := range strings.Split(base, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "redistribute static route-map ") {
+			qnhMap = strings.TrimPrefix(line, "redistribute static route-map ")
+			break
+		}
+	}
+	if qnhMap == "" || overlays["ospfd"] == "" || overlays["ripd"] == "" {
+		t.Fatalf("fixture must render one shared QNH map and both capable-daemon overlays:\nbase:\n%s\noverlays:\n%v", base, overlays)
+	}
+
+	// Simulate the pre-fix integrated config, with a metric action present in
+	// every daemon's shared route-map copy.
+	legacy := strings.Replace(base, " on-match next\n", " set metric 10\n on-match next\n", 1)
+	if legacy == base {
+		t.Fatal("fixture did not contain a QNH on-match sequence to seed")
+	}
+	confPath := filepath.Join(t.TempDir(), "frr.conf")
+	oldConfig := "log syslog informational\n" + markerBegin + "\n" + legacy + "\n" + markerEnd + "\n"
+	if err := os.WriteFile(confPath, []byte(oldConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reloadErr := errors.New("frr-reload.py unavailable")
+	fake := &fakeExecutor{
+		frrReloadPyHook: func(call int) error {
+			if call == 1 {
+				return reloadErr
+			}
+			return nil
+		},
+	}
+	m := New()
+	m.frrConf = confPath
+	m.exec = fake
+	m.DisableDegradedRetry()
+	t.Cleanup(m.Stop)
+
+	if err := m.ApplyFull(fc); !errors.Is(err, ErrFRRReloadDegraded) {
+		t.Fatalf("fallback apply error = %v, want ErrFRRReloadDegraded", err)
+	}
+	if got, want := strings.Join(fake.callOrder, ","), "daemon-load:ospfd,daemon-load:ospf6d,daemon-load:ripd,daemon-load:isisd,daemon-load:bgpd,reload,global-load,daemon-load:ospfd,daemon-load:ripd"; got != want {
+		t.Fatalf("fallback operation order = %q, want %q", got, want)
+	}
+	if len(fake.daemonLoads) != 7 {
+		t.Fatalf("targeted config loads = %d, want five clears and two overlays", len(fake.daemonLoads))
+	}
+	for _, call := range fake.daemonLoads[:5] {
+		if !strings.Contains(call.config, "route-map "+qnhMap+" permit 10\n") ||
+			!strings.Contains(call.config, "no set metric\n") ||
+			strings.Contains(call.config, " set metric ") {
+			t.Errorf("%s clear was not restricted to the old QNH sequence:\n%s", call.daemon, call.config)
+		}
+	}
+	for i, daemon := range []string{"ospfd", "ripd"} {
+		call := fake.daemonLoads[5+i]
+		if call.daemon != daemon || !strings.Contains(call.config, "set metric 10\n") {
+			t.Errorf("targeted overlay %d = %+v, want %s with the QNH metric", i, call, daemon)
+		}
+	}
+	installedConfig, err := os.ReadFile(confPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(installedConfig), "set metric 10\n") {
+		t.Fatalf("new integrated frr.conf retained the QNH metric action:\n%s", installedConfig)
+	}
+
+	// A full-diff retry wipes the overlays and Manager must restore both.
+	if stop, notFound := m.retryReloadOnce(context.Background()); !stop || notFound {
+		t.Fatalf("retry result = (%v, %v), want (converged, found)", stop, notFound)
+	}
+	if got, want := strings.Join(fake.callOrder[len(fake.callOrder)-3:], ","), "reload,daemon-load:ospfd,daemon-load:ripd"; got != want {
+		t.Fatalf("retry did not replay only capable-daemon overlays: got %q, want %q", got, want)
+	}
+
+	// Clear first removes the manager-owned actions from their exact old
+	// QNH sequences on every daemon, then full-diffs the config without them.
+	if err := m.Clear(); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	wantClearTail := "daemon-load:ospfd,daemon-load:ospf6d,daemon-load:ripd,daemon-load:isisd,daemon-load:bgpd,reload"
+	if got := strings.Join(fake.callOrder[len(fake.callOrder)-6:], ","); got != wantClearTail {
+		t.Fatalf("Clear operation order = %q, want %q", got, wantClearTail)
+	}
+	if m.qnhMetricOverlays != nil {
+		t.Fatalf("Clear retained desired QNH overlays: %v", m.qnhMetricOverlays)
+	}
+}
+func TestQNHMetricPartialOverlayIsClearedBeforeRetry11447(t *testing.T) {
+	compiled := compileQNHMetricConfig11447(t,
+		"set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10",
+		"set protocols ospf export static",
+		"set protocols rip redistribute static",
+	)
+	fc := &FullConfig{
+		OSPF:          compiled.Protocols.OSPF,
+		RIP:           compiled.Protocols.RIP,
+		StaticRoutes:  compiled.RoutingOptions.StaticRoutes,
+		PolicyOptions: &compiled.PolicyOptions,
+	}
+	loadErr := errors.New("ripd overlay load failed")
+	fake := &fakeExecutor{
+		daemonLoadErrByDaemon: map[string]error{"ripd": loadErr},
+	}
+	m := New()
+	m.frrConf = filepath.Join(t.TempDir(), "frr.conf")
+	m.exec = fake
+	m.DisableDegradedRetry()
+	t.Cleanup(m.Stop)
+
+	if err := m.ApplyFull(fc); !errors.Is(err, loadErr) {
+		t.Fatalf("ApplyFull error = %v, want the failed RIP overlay load", err)
+	}
+	if got, want := strings.Join(fake.callOrder, ","), "reload,daemon-load:ospfd,daemon-load:ripd"; got != want {
+		t.Fatalf("partial overlay operation order = %q, want %q", got, want)
+	}
+	if len(m.qnhMetricOverlayCleanup) == 0 {
+		t.Fatal("partial overlay failure did not retain QNH sequence identities for retry cleanup")
+	}
+
+	fake.daemonLoadErrByDaemon["ripd"] = nil
+	if stop, notFound := m.retryReloadOnce(context.Background()); !stop || notFound {
+		t.Fatalf("retry result = (%v, %v), want (converged, found)", stop, notFound)
+	}
+	wantRetry := "daemon-load:ospfd,daemon-load:ospf6d,daemon-load:ripd,daemon-load:isisd,daemon-load:bgpd,reload,daemon-load:ospfd,daemon-load:ripd"
+	if got := strings.Join(fake.callOrder[len(fake.callOrder)-8:], ","); got != wantRetry {
+		t.Fatalf("retry did not clear the partial overlay before reloading and replaying: got %q, want %q", got, wantRetry)
+	}
+	for _, call := range fake.daemonLoads[2:7] {
+		if !strings.Contains(call.config, "no set metric\n") || strings.Contains(call.config, "\n set metric ") {
+			t.Errorf("%s retry cleanup was not limited to removing the prior QNH action:\n%s", call.daemon, call.config)
+		}
+	}
+	if len(m.qnhMetricOverlayCleanup) != 0 {
+		t.Fatalf("successful overlay replay left cleanup pending: %v", m.qnhMetricOverlayCleanup)
 	}
 }
 
@@ -270,8 +452,8 @@ func TestFRRLoadQualifiedNextHopMetric11447(t *testing.T) {
 	})
 	if !strings.Contains(rendered, "redistribute static\n") ||
 		strings.Contains(rendered, "redistribute static route-map ") ||
-		!strings.Contains(rendered, "set metric 10\n") {
-		t.Fatalf("FRR check config must contain the generated metric route-map without applying IGP metric as BGP MED:\n%s", rendered)
+		strings.Contains(rendered, "set metric 10\n") {
+		t.Fatalf("BGP receives the metric-free shared QNH map but no QNH attachment or metric action:\n%s", rendered)
 	}
 	confPath := filepath.Join(t.TempDir(), "frr.conf")
 	if err := os.WriteFile(confPath, []byte(rendered), 0o600); err != nil {
@@ -281,7 +463,7 @@ func TestFRRLoadQualifiedNextHopMetric11447(t *testing.T) {
 	defer cancel()
 	output, err := exec.CommandContext(ctx, bgpd, "-C", "-f", confPath).CombinedOutput()
 	if err != nil {
-		t.Fatalf("FRR bgpd rejected the QNH metric redistribution config: %v\n%s\nconfig:\n%s", err, output, rendered)
+		t.Fatalf("FRR bgpd rejected the metric-free QNH redistribution config: %v\n%s\nconfig:\n%s", err, output, rendered)
 	}
 }
 
@@ -310,24 +492,29 @@ func TestFRRLoadOSPFQualifiedNextHopMetric11447(t *testing.T) {
 		"set protocols ospf router-id 10.255.0.1",
 		"set protocols ospf export static",
 	)
-	rendered := New().buildManagedSection(&FullConfig{
+	rendered, overlays := New().buildManagedSectionWithQNH11447(&FullConfig{
 		OSPF:          compiled.Protocols.OSPF,
 		StaticRoutes:  compiled.RoutingOptions.StaticRoutes,
 		PolicyOptions: &compiled.PolicyOptions,
 	})
 	if !strings.Contains(rendered, "redistribute static route-map ") ||
 		!strings.Contains(rendered, "match ip next-hop prefix-list ") ||
-		!strings.Contains(rendered, "set metric 10\n") {
-		t.Fatalf("compiled OSPF static export omitted the QNH metric route-map:\n%s", rendered)
+		strings.Contains(rendered, "set metric 10\n") ||
+		!strings.Contains(overlays["ospfd"], "set metric 10\n") {
+		t.Fatalf("compiled OSPF export must split the metric-free base from its targeted overlay:\nbase:\n%s\noverlay:\n%s", rendered, overlays["ospfd"])
 	}
+	// vtysh's per-daemon load merges these same sequence headers, so checking
+	// the composed file here validates both command grammars with the daemon's
+	// own parser; the live test below checks the installed effective copy.
+	effectiveConfig := rendered + "\n" + overlays["ospfd"]
 	confPath := filepath.Join(t.TempDir(), "frr.conf")
-	if err := os.WriteFile(confPath, []byte(rendered), 0o600); err != nil {
+	if err := os.WriteFile(confPath, []byte(effectiveConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, ospfd, "-C", "-f", confPath).CombinedOutput()
 	if err != nil {
-		t.Fatalf("FRR ospfd rejected the QNH metric redistribution config: %v\n%s\nconfig:\n%s", err, output, rendered)
+		t.Fatalf("FRR ospfd rejected the composed QNH config: %v\n%s\nconfig:\n%s", err, output, effectiveConfig)
 	}
 }

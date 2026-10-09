@@ -25,6 +25,10 @@ func TestQualifiedNextHopMetricAppearsInOSPFLSDB11447(t *testing.T) {
 	zebra := liveFRRBinary11447(t, "FRR_ZEBRA_BINARY", "/usr/lib/frr/zebra", "/usr/libexec/frr/zebra")
 	staticd := liveFRRBinary11447(t, "FRR_STATICD_BINARY", "/usr/lib/frr/staticd", "/usr/libexec/frr/staticd")
 	ospfd := liveFRRBinary11447(t, "FRR_OSPFD_BINARY", "/usr/lib/frr/ospfd", "/usr/libexec/frr/ospfd")
+	ospf6d := liveFRRBinary11447(t, "FRR_OSPF6D_BINARY", "/usr/lib/frr/ospf6d", "/usr/libexec/frr/ospf6d")
+	ripd := liveFRRBinary11447(t, "FRR_RIPD_BINARY", "/usr/lib/frr/ripd", "/usr/libexec/frr/ripd")
+	isisd := liveFRRBinary11447(t, "FRR_ISISD_BINARY", "/usr/lib/frr/isisd", "/usr/libexec/frr/isisd")
+	bgpd := liveFRRBinary11447(t, "FRR_BGPD_BINARY", "/usr/lib/frr/bgpd", "/usr/libexec/frr/bgpd")
 	mgmtd := liveFRRBinary11447(t, "FRR_MGMTD_BINARY", "/usr/lib/frr/mgmtd", "/usr/libexec/frr/mgmtd")
 	vtysh, err := exec.LookPath("vtysh")
 	if err != nil {
@@ -40,7 +44,7 @@ func TestQualifiedNextHopMetricAppearsInOSPFLSDB11447(t *testing.T) {
 		{name: "authored policy override", exportPolicy: true, wantMetric: 100},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			liveOSPFMetricLSDB11447(t, ip, zebra, staticd, ospfd, mgmtd, vtysh, i, tc.exportPolicy, tc.wantMetric)
+			liveOSPFMetricLSDB11447(t, ip, zebra, staticd, ospfd, ospf6d, ripd, isisd, bgpd, mgmtd, vtysh, i, tc.exportPolicy, tc.wantMetric)
 		})
 	}
 }
@@ -62,7 +66,7 @@ func liveFRRBinary11447(t *testing.T, envName string, candidates ...string) stri
 	return ""
 }
 
-func liveOSPFMetricLSDB11447(t *testing.T, ip, zebra, staticd, ospfd, mgmtd, vtysh string, index int, exportPolicy bool, wantMetric int) {
+func liveOSPFMetricLSDB11447(t *testing.T, ip, zebra, staticd, ospfd, ospf6d, ripd, isisd, bgpd, mgmtd, vtysh string, index int, exportPolicy bool, wantMetric int) {
 	t.Helper()
 	id := fmt.Sprintf("%d-%d", os.Getpid(), index)
 	namespace := "xpf-qnh-" + id
@@ -122,6 +126,10 @@ func liveOSPFMetricLSDB11447(t *testing.T, ip, zebra, staticd, ospfd, mgmtd, vty
 		filepath.Join(tempDir, "mgmtd.pid"),
 		filepath.Join(tempDir, "staticd.pid"),
 		filepath.Join(tempDir, "ospfd.pid"),
+		filepath.Join(tempDir, "ospf6d.pid"),
+		filepath.Join(tempDir, "ripd.pid"),
+		filepath.Join(tempDir, "isisd.pid"),
+		filepath.Join(tempDir, "bgpd.pid"),
 	}
 	t.Cleanup(func() {
 		for _, pidFile := range pidFiles {
@@ -160,6 +168,7 @@ func liveOSPFMetricLSDB11447(t *testing.T, ip, zebra, staticd, ospfd, mgmtd, vty
 		"set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10",
 		"set protocols ospf router-id 10.255.0.1",
 		"set protocols ospf area 0.0.0.0 interface " + nsIf + " passive",
+		"set protocols rip redistribute static",
 	}
 	if exportPolicy {
 		commands = append(commands,
@@ -172,14 +181,37 @@ func liveOSPFMetricLSDB11447(t *testing.T, ip, zebra, staticd, ospfd, mgmtd, vty
 		commands = append(commands, "set protocols ospf export static")
 	}
 	compiled := compileQNHMetricConfig11447(t, commands...)
-	rendered := New().buildManagedSection(&FullConfig{
+	rendered, overlays := New().buildManagedSectionWithQNH11447(&FullConfig{
 		OSPF:          compiled.Protocols.OSPF,
+		RIP:           compiled.Protocols.RIP,
 		StaticRoutes:  compiled.RoutingOptions.StaticRoutes,
 		PolicyOptions: &compiled.PolicyOptions,
 	})
+	legacyPath := filepath.Join(tempDir, "legacy-qnh.conf")
+	legacy := strings.TrimRight(rendered, "\n") + "\n" + overlays["ospfd"]
 	if err := os.WriteFile(configPath, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(legacyPath, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clearPath := filepath.Join(tempDir, "clear-qnh.conf")
+	clearConfig := renderQNHMetricSequenceClears11447(qnhMetricSequencesFromConfig11447(legacy))
+	if clearConfig == "" {
+		t.Fatal("legacy config did not yield QNH sequence identities to clear")
+	}
+	if err := os.WriteFile(clearPath, []byte(clearConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	overlayPaths := make(map[string]string, len(overlays))
+	for daemon, overlay := range overlays {
+		path := filepath.Join(tempDir, daemon+"-qnh-overlay.conf")
+		if err := os.WriteFile(path, []byte(overlay), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		overlayPaths[daemon] = path
+	}
+	qnhMap := qnhRedistributionMap11447(rendered)
 	for _, daemon := range []struct {
 		binary string
 		pid    string
@@ -189,6 +221,10 @@ func liveOSPFMetricLSDB11447(t *testing.T, ip, zebra, staticd, ospfd, mgmtd, vty
 		{binary: mgmtd, pid: pidFiles[1]},
 		{binary: staticd, pid: pidFiles[2]},
 		{binary: ospfd, pid: pidFiles[3], config: configPath},
+		{binary: ospf6d, pid: pidFiles[4]},
+		{binary: ripd, pid: pidFiles[5]},
+		{binary: isisd, pid: pidFiles[6]},
+		{binary: bgpd, pid: pidFiles[7]},
 	} {
 		args := []string{"netns", "exec", namespace, daemon.binary, "-N", pathspace, "-d"}
 		if daemon.config != "" {
@@ -227,9 +263,29 @@ func liveOSPFMetricLSDB11447(t *testing.T, ip, zebra, staticd, ospfd, mgmtd, vty
 	if !ready {
 		t.Fatal("FRR zebra VTY did not become ready")
 	}
+	if output, err := runVTY(3*time.Second, "-f", legacyPath); err != nil {
+		mgmtdLog, _ := os.ReadFile(filepath.Join(tempDir, "mgmtd-daemon.log"))
+		t.Fatalf("loading legacy shared QNH metric config: %v\n%s\nmgmtd log:\n%s", err, output, mgmtdLog)
+	}
+	for _, daemon := range qnhMetricCleanupDaemons11447 {
+		if output, err := runVTY(3*time.Second, "-d", daemon, "-f", clearPath); err != nil {
+			t.Fatalf("clearing legacy QNH metrics from %s: %v\n%s", daemon, err, output)
+		}
+	}
 	if output, err := runVTY(3*time.Second, "-f", configPath); err != nil {
 		mgmtdLog, _ := os.ReadFile(filepath.Join(tempDir, "mgmtd-daemon.log"))
-		t.Fatalf("loading generated FRR config: %v\n%s\nmgmtd log:\n%s", err, output, mgmtdLog)
+		t.Fatalf("loading metric-free generated FRR config: %v\n%s\nmgmtd log:\n%s", err, output, mgmtdLog)
+	}
+	for _, daemon := range []string{"ospfd", "ripd"} {
+		if output, err := runVTY(3*time.Second, "-d", daemon, "-f", overlayPaths[daemon]); err != nil {
+			t.Fatalf("loading %s QNH metric overlay: %v\n%s", daemon, err, output)
+		}
+	}
+	if qnhMap == "" {
+		t.Fatal("generated config did not identify the QNH redistribution map")
+	}
+	if !exportPolicy {
+		assertQNHMetricDaemonMaps11447(t, runVTY, qnhMap)
 	}
 
 	want := fmt.Sprintf("Metric: %d", wantMetric)
@@ -252,6 +308,91 @@ func runQNHCommand11447(timeout time.Duration, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
+}
+func qnhRedistributionMap11447(config string) string {
+	var routeMap string
+	for _, line := range strings.Split(config, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[0] == "route-map" {
+			routeMap = fields[1]
+			continue
+		}
+		if routeMap != "" && strings.Contains(line, "match ip address prefix-list xpf-qnh-dst-") {
+			return routeMap
+		}
+	}
+	return ""
+}
+
+func assertQNHMetricDaemonMaps11447(t *testing.T, runVTY func(time.Duration, ...string) ([]byte, error), routeMap string) {
+	t.Helper()
+	for _, check := range []struct {
+		daemon     string
+		wantMetric bool
+	}{
+		{daemon: "ospfd", wantMetric: true},
+		{daemon: "ripd", wantMetric: true},
+		{daemon: "isisd"},
+		{daemon: "ospf6d"},
+		{daemon: "bgpd"},
+	} {
+		output, err := runVTY(3*time.Second, "-d", check.daemon, "-c", "show route-map "+routeMap)
+		if err != nil {
+			t.Fatalf("showing %s route-map %s: %v\n%s", check.daemon, routeMap, err, output)
+		}
+		blocks := routeMapSequenceBlocks11447(string(output))
+		if len(blocks) == 0 {
+			t.Fatalf("%s has no route-map %s sequence:\n%s", check.daemon, routeMap, output)
+		}
+		if !check.wantMetric {
+			for _, block := range blocks {
+				if strings.Contains(strings.ToLower(block), "metric ") {
+					t.Errorf("%s route-map %s has an unsupported QNH metric action:\n%s", check.daemon, routeMap, block)
+				}
+			}
+			continue
+		}
+		foundQNHMetric := false
+		for _, block := range blocks {
+			lower := strings.ToLower(block)
+			if !strings.Contains(lower, "xpf-qnh-dst-") {
+				continue
+			}
+			if !strings.Contains(lower, "xpf-qnh-nh-") {
+				t.Errorf("%s route-map %s has a QNH destination sequence without a next-hop discriminator:\n%s", check.daemon, routeMap, block)
+				continue
+			}
+			if !strings.Contains(lower, "metric ") {
+				t.Errorf("%s route-map %s QNH sequence has no metric action:\n%s", check.daemon, routeMap, block)
+				continue
+			}
+			foundQNHMetric = true
+		}
+		if !foundQNHMetric {
+			t.Errorf("%s route-map %s has no effective QNH destination + next-hop metric sequence:\n%s", check.daemon, routeMap, output)
+		}
+	}
+}
+
+func routeMapSequenceBlocks11447(output string) []string {
+	var blocks []string
+	var block strings.Builder
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(strings.ToLower(line), "sequence ") {
+			if block.Len() > 0 {
+				blocks = append(blocks, block.String())
+				block.Reset()
+			}
+		}
+		if block.Len() > 0 || strings.Contains(strings.ToLower(line), "sequence ") {
+			block.WriteString(line)
+			block.WriteByte('\n')
+		}
+	}
+	if block.Len() > 0 {
+		blocks = append(blocks, block.String())
+	}
+	return blocks
 }
 
 func ospfLSDBHasMetric11447(output string, want int) bool {

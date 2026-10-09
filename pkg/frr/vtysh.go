@@ -99,6 +99,10 @@ type frrExecutor interface {
 	// ADDITIVE — it re-applies every desired line but cannot remove
 	// stale config; it is the degraded fallback only.
 	VtyshLoad(ctx context.Context, conf string) ([]byte, error)
+	// VtyshLoadDaemon runs `vtysh -d <daemon> -f <conf>`, applying a
+	// config overlay to exactly one FRR daemon. QNH metric actions use this
+	// path because integrated frr.conf must stay metric-free in every copy.
+	VtyshLoadDaemon(ctx context.Context, daemon, conf string) ([]byte, error)
 
 	// VtyshStream runs `vtysh -c <command>` under ctx and returns stdout
 	// as an io.ReadCloser plus a finish func that reaps the process. The
@@ -209,6 +213,13 @@ func (realExecutor) VtyshLoad(ctx context.Context, conf string) ([]byte, error) 
 	cmd := exec.CommandContext(ctx, vtyshBinary, "-f", conf)
 	// WaitDelay caps the post-SIGKILL pipe-drain window (apply-reachable
 	// via the FRR reload fallback).
+	cmd.WaitDelay = 5 * time.Second
+	return cmd.CombinedOutput()
+}
+
+// VtyshLoadDaemon loads a config file into a single daemon.
+func (realExecutor) VtyshLoadDaemon(ctx context.Context, daemon, conf string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, vtyshBinary, "-d", daemon, "-f", conf)
 	cmd.WaitDelay = 5 * time.Second
 	return cmd.CombinedOutput()
 }
