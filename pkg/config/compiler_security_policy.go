@@ -664,7 +664,6 @@ func policyKeywordDiffersByOneEdit(candidate, known string) bool {
 	return edits == 1
 }
 
-
 // recognizedCollapsedDenyToken reports whether tok is a token that
 // applyCollapsedDenyModifiers acts on inside a FLAT-collapsed `then deny`
 // sequence — the `log`/`count` modifiers plus log's session-init/
