@@ -41,14 +41,11 @@ func TestPolicyCommunityAddRendersResolvedLiteral12069(t *testing.T) {
 	}
 }
 
-func TestPolicyCommunityAddRendersAllDefinedMembers12069(t *testing.T) {
+func TestPolicyCommunityAddRendersResolvedMembers12069(t *testing.T) {
 	po := &config.PolicyOptionsConfig{
-		Communities: map[string]*config.CommunityDef{
-			"CUST": {Name: "CUST", Members: []string{"65000:100", "no-export"}},
-		},
 		PolicyStatements: map[string]*config.PolicyStatement{
 			"P": {Name: "P", Terms: []*config.PolicyTerm{
-				{Name: "t1", CommunityOp: "add", CommunityAdd: "CUST", Action: "accept"},
+				{Name: "t1", CommunityOp: "add", CommunityAdd: "65000:100 no-export", Action: "accept"},
 			}},
 		},
 	}

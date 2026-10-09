@@ -2595,10 +2595,12 @@ type compileOpts struct {
 	// tolerant load / peer-sync paths downgrade to a warning so an
 	// already-persisted or peer-synced config carrying the typo still BOOTS
 	// (#1960 fail-closed-on-load class). Runs on the fully-compiled *Config so
-	// the community map is populated regardless of authoring order. Only a
-	// NAME reference is validated — `then community (set|add) <value>` carries a
-	// community VALUE (e.g. 65000:100), not a list reference, and is not
-	// checked. Same doctrine as lenientRoutingExportRef.
+	// the community map is populated regardless of authoring order. The
+	// `then community (set|add)` and bare replacement operands are separately
+	// resolved once in the compiler post-pass, then checked as literals by
+	// strict validation and the renderer; strict commit rejects invalid values.
+	// On tolerant ingress this flag downgrades the combined reference/value
+	// validator to a warning, and the renderer omits invalid set clauses.
 	lenientPolicyCommunityRef bool
 
 	// lenientSNMPv3KeyMaterial (#7530) downgrades the partial-credential

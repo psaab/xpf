@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"unicode"
 )
 
 // CommunityRegexChars are the characters whose presence in a community member
@@ -181,15 +180,16 @@ var frrWellKnownCommunities = []string{
 
 // frrStandardCommunityLiteral reports whether a non-regex member parses as
 // FRR's `standard` community-list argument. That argument is one or more
-// whitespace-separated communities, each a well-known name or ASN:VALUE with
-// exactly one `:` and both parts 0..65535 (community_valid). Control bytes
-// count as separators, which is what sanitizeFRRValue turns them into at
-// render.
+// ASCII-whitespace-separated communities, each a well-known name or ASN:VALUE
+// with exactly one `:` and both parts 0..65535 (community_valid). C0/DEL
+// controls count as separators because sanitizeFRRValue replaces them with
+// ASCII spaces at render; Unicode whitespace is not a separator in emitted
+// FRR bytes and is deliberately rejected.
 func frrStandardCommunityLiteral(member string) bool {
 	start := -1
 	hasWord := false
 	for i, r := range member {
-		if r < 0x20 || r == 0x7f || unicode.IsSpace(r) {
+		if r < 0x20 || r == 0x7f || r == ' ' {
 			if start >= 0 {
 				if !frrCommunityWord(member[start:i]) {
 					return false
@@ -238,6 +238,15 @@ func ResolveCommunityValue(po *PolicyOptionsConfig, value string) (string, bool)
 		return value, true
 	}
 	return "", false
+}
+
+// ValidCommunityValueLiteral checks an already-resolved `then community`
+// operand without consulting community names. Resolve authored names only in
+// the compiler post-pass; strict validation and rendering use this predicate
+// so a resolved literal that happens to equal another name is never expanded
+// a second time.
+func ValidCommunityValueLiteral(value string) bool {
+	return frrStandardCommunityLiteral(value)
 }
 
 func frrCommunityWord(w string) bool {

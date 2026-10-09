@@ -144,6 +144,7 @@ func TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823(t *t
 		want string
 	}{
 		{"match source-protocol", " match source-protocol bgp  router bgp 65000\n"},
+		{"set as-path prepend", " set as-path prepend 65001  router bgp 65000 65001\n"},
 		// #9493: the three NAME slots (match community, match as-path, set
 		// comm-list) render through frrName, not sanitizeFRRValue, and are
 		// asserted below. Collapsing a name onto one line still split it into

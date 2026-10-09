@@ -460,10 +460,9 @@ func validatePolicyCommunityReferencesStrict(cfg *Config) error {
 					psName, term.Name, c, c, c, c, c)
 			}
 
-			// #12069: add/set/bare operands are values at FRR emission time.
-			// The compile-time post-pass expands defined names, leaving this
-			// strict gate to reject values that are neither FRR literals nor
-			// names with all-literal definitions.
+			// #12069: the compiler post-pass expands an authored community
+			// name once. This strict gate then accepts only the resulting
+			// FRR literal and must not look it up as a name again.
 			verb, value := "", ""
 			switch term.CommunityOp {
 			case "add":
@@ -474,7 +473,7 @@ func validatePolicyCommunityReferencesStrict(cfg *Config) error {
 				value = term.Community
 			}
 			if value != "" {
-				if _, ok := ResolveCommunityValue(&cfg.PolicyOptions, value); !ok {
+				if !ValidCommunityValueLiteral(value) {
 					clause := fmt.Sprintf("`then community %s`", value)
 					if verb != "" {
 						clause = fmt.Sprintf("`then community %s %s`", verb, value)

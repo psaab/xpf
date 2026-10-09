@@ -38,9 +38,9 @@ func TestPolicyThenCommunityAddSetNameResolves12069(t *testing.T) {
 	}
 }
 
-// #12069 RED-before: use-before-define must still resolve. The definition
-// is authored AFTER the policy-statement; resolution runs on the
-// fully-compiled config, not inline during clause parsing.
+// #12069 use-before-definition: the policy is authored before its community
+// member in the same flat-set tree; resolution runs over the fully compiled
+// config, not inline while parsing the policy action.
 func TestPolicyThenCommunityAddNameResolvesAfterUse12069(t *testing.T) {
 	tree := buildTreeFromSet(t, []string{
 		"set policy-options policy-statement P term t1 then community add CUST",
@@ -79,10 +79,10 @@ func TestPolicyThenCommunityAddResolvesAcrossPolicyOptionsRoots12069(t *testing.
 
 func TestPolicyThenCommunityAddRejectsNonLiteral12069(t *testing.T) {
 	for _, tc := range []struct {
-		name, definition, operand string
+		name, definition, operand, errorOperand string
 	}{
-		{"regex member", "65000:*", "BAD"},
-		{"invalid literal", "65000:100", "65000:*"},
+		{"regex member", "65000:*", "BAD", `uses "BAD"`},
+		{"invalid literal", "65000:100", "65000:*", `uses "65000:*"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := buildTreeFromSet(t, []string{
@@ -90,8 +90,12 @@ func TestPolicyThenCommunityAddRejectsNonLiteral12069(t *testing.T) {
 				"set policy-options policy-statement P term t1 then community add " + tc.operand,
 				"set policy-options policy-statement P term t1 then accept",
 			})
-			if _, err := CompileConfig(tree); err == nil {
+			_, err := CompileConfig(tree)
+			if err == nil {
 				t.Fatalf("CompileConfig accepted non-literal community operand %q", tc.operand)
+			}
+			if !strings.Contains(err.Error(), tc.errorOperand) {
+				t.Fatalf("CompileConfig error %q does not identify rejected operand %s", err, tc.errorOperand)
 			}
 		})
 	}
@@ -123,8 +127,15 @@ func TestPolicyThenCommunityBracketedNonLiteralRejected12069(t *testing.T) {
 	if err := tree.SetPathQuotedGrouped(path, quoted, grouped); err != nil {
 		t.Fatalf("SetPathQuotedGrouped: %v", err)
 	}
-	if _, err := CompileConfig(tree); err == nil {
+	_, err = CompileConfig(tree)
+	if err == nil {
 		t.Fatal("CompileConfig accepted non-literal bracketed community operands")
+	}
+	for _, want := range []string{"65000:1 reject", "FRR community literal"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("CompileConfig error %q does not identify bracketed non-literal %q", err, want)
+		}
+
 	}
 }
 
@@ -148,6 +159,22 @@ func TestPolicyThenCommunityAddSetUndefinedRejected12069(t *testing.T) {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("%q: rejection %q does not name %q", clause, err, want)
 			}
+		}
+	}
+}
+func TestPolicyThenCommunityEmptyDefinitionRejected12069(t *testing.T) {
+	tree := buildTreeFromSet(t, []string{
+		"set policy-options community CUST",
+		"set policy-options policy-statement P term t1 then community add CUST",
+		"set policy-options policy-statement P term t1 then accept",
+	})
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("CompileConfig accepted an empty community definition as a then-community operand")
+	}
+	for _, want := range []string{"CUST", "members are all literals"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("CompileConfig error %q does not explain empty community definition %q", err, want)
 		}
 	}
 }
