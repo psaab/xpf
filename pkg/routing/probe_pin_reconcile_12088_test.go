@@ -244,6 +244,7 @@ func TestVerifyProbePinsRejectsMismatchedRoute12088(t *testing.T) {
 		{"wrong table", func(r *netlink.Route) { r.Table += 100 }},
 		{"missing onlink", func(r *netlink.Route) { r.Flags = 0 }},
 		{"dead route", func(r *netlink.Route) { r.Flags |= int(unix.RTNH_F_DEAD) }},
+		{"unresolved nexthop", func(r *netlink.Route) { r.Flags |= int(unix.RTNH_F_UNRESOLVED) }},
 		{"non-host destination", func(r *netlink.Route) { r.Dst.Mask = net.CIDRMask(24, 32) }},
 		{"wrong destination", func(r *netlink.Route) { r.Dst.IP = net.ParseIP("1.1.1.2") }},
 		{"wrong family", func(r *netlink.Route) { r.Family = unix.AF_INET6 }},
@@ -268,6 +269,19 @@ func TestVerifyProbePinsRejectsMismatchedRoute12088(t *testing.T) {
 			got := (&probePinManager{ops: ops}).Verify(pins)
 			assertProbePinReadbackOnlyKey12088(t, got, pin.TestKey)
 		})
+	}
+}
+
+// Carrier loss only marks the installed route LINKDOWN. The pin shape remains
+// valid, so RPM must send probes and let genuine packet loss drive failover.
+func TestVerifyProbePinsAcceptsLinkdownRoutes12088(t *testing.T) {
+	pins, ops := probePinReadbackFixture12088()
+	for i := range ops.routes {
+		ops.routes[i].Flags |= int(unix.RTNH_F_LINKDOWN)
+	}
+
+	if got := (&probePinManager{ops: ops}).Verify(pins); len(got) != 0 {
+		t.Fatalf("Verify rejected carrier-down pins: %v", got)
 	}
 }
 

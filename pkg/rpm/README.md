@@ -188,17 +188,20 @@ out-of-range value to a warning.
   derived from `routing.BuildProbePins` — the SAME deterministic
   assignment pkg/routing programs as fwmark rules, so socket mark and
   kernel rule cannot drift.
-- **A next-hop test whose pin failed to install never probes** (#1895):
+- **A next-hop test whose pin is genuinely missing or mismatched never probes** (#1895/#12088):
   an unbacked `SO_MARK` falls through to the main table and measures
   the default path — a dead pinned uplink would false-PASS and
   suppress ip-monitoring failover. `executeProbe` returns
   `ErrProbeSetup` (hold state, no socket opened) while the pin is in
   the `SetPinInstallResults` failed map — or when a next-hop test has
-  no pin slot at all (band exhaustion belt-and-braces). The daemon
-  retries failed installs on hash-gated reconciles and verifies configured
-  pins on a slow periodic loop (30 s). Link/address notifications trigger
-  immediate readback; missing pins are held and reinstalled on the next
-  retry tick, so probes never use an unbacked mark.
+  no pin slot at all (band exhaustion belt-and-braces). A route flagged
+  `RTNH_F_LINKDOWN` is different: the selected pin still exists, so probes
+  must run and let genuine carrier-loss timeouts cross the successive-loss
+  threshold into failover. The daemon retries failed installs on hash-gated
+  reconciles and verifies configured pins on a slow periodic loop (30 s).
+  Link/address notifications trigger immediate readback; missing pins are
+  held and reinstalled on the next retry tick, so probes never use an
+  unbacked mark.
 - Events expose both the test owner (probe name) and the test name so
   event-options policies can match on either via `attributes-match`.
 - A consecutive-failure counter discriminates transient blips from

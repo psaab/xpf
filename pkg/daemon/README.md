@@ -2569,6 +2569,9 @@ never lock an operator out of a remote box it manages.
     in `Run`, so an early-error return (or an embedded library caller whose ctx
     cancels) that never reaches the shutdown sequence still cancels + joins both
     loops instead of leaking them.
+    Carrier-only loss is not pin drift: `RTNH_F_LINKDOWN` leaves the selected
+    route in place, so the daemon must let RPM count real probe loss toward
+    ip-monitoring failover rather than publish `ErrProbeSetup` hold.
   - **Two MORE background loops are cancelled + joined the same way (#5523
     C179-093):** the session-aggregation flush goroutine (`applyAggregator` →
     `agg.Run`, which binds to `context.Background()` and was previously cancelled

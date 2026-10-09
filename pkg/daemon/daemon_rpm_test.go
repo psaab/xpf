@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/ipmon"
 	"github.com/psaab/xpf/pkg/routing"
 	"github.com/psaab/xpf/pkg/rpm"
 	"github.com/vishvananda/netlink"
@@ -593,4 +594,223 @@ func runProbePinKernelDriftInPrivateNetns12088(t *testing.T) {
 		t.Fatalf("last address re-add: %v", err)
 	}
 	waitForRepair("last-address removal and re-add")
+}
+
+const probePinCarrierLoss12088InnerEnv = "XPF_12088_PROBE_PIN_CARRIER_INNER"
+
+// TestProbePinCarrierLossTriggersIPMonFailover12088 proves that an installed
+// LINKDOWN pin remains probeable: actual ICMP loss crosses RPM's successive
+// loss threshold and reaches the ip-monitoring route-overlay actuator instead
+// of holding the test at ErrProbeSetup.
+func TestProbePinCarrierLossTriggersIPMonFailover12088(t *testing.T) {
+	if os.Getenv(probePinCarrierLoss12088InnerEnv) == "1" {
+		runProbePinCarrierLossInPrivateNetns12088(t)
+		return
+	}
+	unshare, err := exec.LookPath("unshare")
+	if err != nil {
+		t.Skip("carrier-loss acceptance skipped: unshare is not available")
+	}
+	cmd := exec.Command(unshare, "-rn", os.Args[0], "-test.run",
+		"^TestProbePinCarrierLossTriggersIPMonFailover12088$", "-test.v")
+	cmd.Env = append(os.Environ(), probePinCarrierLoss12088InnerEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	t.Logf("private-netns carrier-loss output:\n%s", out)
+	if err != nil {
+		if strings.Contains(string(out), "Operation not permitted") ||
+			strings.Contains(string(out), "unshare:") {
+			t.Skipf("carrier-loss acceptance skipped: cannot create private namespace: %v", err)
+		}
+		t.Fatalf("private-netns carrier-loss acceptance failed: %v", err)
+	}
+}
+
+func runProbePinCarrierLossInPrivateNetns12088(t *testing.T) {
+	const (
+		localName = "xpf12088ca"
+		peerName  = "xpf12088cb"
+		target    = "198.51.100.3"
+		peerAddr  = "198.51.100.2"
+		nextHop   = "198.51.100.254"
+	)
+	veth := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: localName}, PeerName: peerName}
+	if err := netlink.LinkAdd(veth); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+			t.Skipf("carrier-loss acceptance skipped: cannot create veth pair: %v", err)
+		}
+		t.Fatalf("create veth pair: %v", err)
+	}
+	local, err := netlink.LinkByName(localName)
+	if err != nil {
+		t.Fatalf("lookup local veth: %v", err)
+	}
+	peer, err := netlink.LinkByName(peerName)
+	if err != nil {
+		t.Fatalf("lookup peer veth: %v", err)
+	}
+	if err := netlink.AddrAdd(local, mustProbeAddr12088(t, "198.51.100.1/24")); err != nil {
+		t.Fatalf("address local veth: %v", err)
+	}
+	if err := netlink.AddrAdd(peer, mustProbeAddr12088(t, peerAddr+"/24")); err != nil {
+		t.Fatalf("address peer veth: %v", err)
+	}
+	if err := netlink.LinkSetUp(local); err != nil {
+		t.Fatalf("raise local veth: %v", err)
+	}
+	if err := netlink.LinkSetUp(peer); err != nil {
+		t.Fatalf("raise peer veth: %v", err)
+	}
+
+	rt, err := routing.New()
+	if err != nil {
+		t.Fatalf("routing.New: %v", err)
+	}
+	cfg := rpmPinnedTestConfig()
+	test := cfg.Services.RPM.Probes["WAN"].Tests["t"]
+	test.Target = target
+	test.NextHop = nextHop
+	test.DestinationInterface = localName
+	test.ProbeType = "icmp-ping"
+	test.ProbeCount = 1
+	test.ProbeInterval = 1
+	test.TestInterval = 1
+	test.ThresholdSuccessive = 2
+	pins := routing.BuildProbePins(cfg.Services.RPM, nil)
+	if len(pins) != 1 {
+		t.Fatalf("configured pins = %d, want one", len(pins))
+	}
+	if failed := rt.ApplyProbePins(pins); len(failed) != 0 {
+		t.Fatalf("initial probe pin install failed: %v", failed)
+	}
+	if failed := rt.VerifyProbePins(pins); len(failed) != 0 {
+		t.Fatalf("initial probe pin did not verify: %v", failed)
+	}
+
+	if err := netlink.LinkSetDown(peer); err != nil {
+		t.Fatalf("drop peer carrier: %v", err)
+	}
+	linkdown := func() bool {
+		routes, err := netlink.RouteListFiltered(unix.AF_INET,
+			&netlink.Route{Table: pins[0].Table}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			t.Fatalf("read pinned route after carrier loss: %v", err)
+		}
+		for _, route := range routes {
+			if route.Dst != nil && route.Dst.String() == target+"/32" &&
+				route.Flags&int(unix.RTNH_F_LINKDOWN) != 0 {
+				return true
+			}
+		}
+		return false
+	}
+	linkdownDeadline := time.Now().Add(time.Second)
+	for time.Now().Before(linkdownDeadline) && !linkdown() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !linkdown() {
+		t.Fatal("kernel did not retain the pinned host route with RTNH_F_LINKDOWN after carrier loss")
+	}
+	if failed := rt.VerifyProbePins(pins); len(failed) != 0 {
+		t.Fatalf("carrier-down pin failed shape verification: %v", failed)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	d := &Daemon{
+		rpm:                rpm.New(),
+		daemonCtx:          ctx,
+		routing:            rt,
+		probePinRetryEvery: time.Hour,
+		// Keep the already-installed route intact; the real kernel readback
+		// below is the verification under test.
+		probePinApply: func([]routing.ProbePin) map[string]error { return nil },
+	}
+	actuated := make(chan []config.RouteOverlayEntry, 1)
+	var monitor *ipmon.Engine
+	monitor = ipmon.New(func(context.Context) bool {
+		overlay := monitor.ActiveOverlay()
+		if len(overlay) != 0 {
+			select {
+			case actuated <- overlay:
+			default:
+			}
+		}
+		return true
+	})
+	monitor.Apply(&config.IPMonitoringConfig{Policies: map[string]*config.IPMonitoringPolicy{
+		"wan-failover": {
+			Name:          "wan-failover",
+			MatchRPMProbe: "WAN",
+			PreferredRoutes: []*config.PreferredRoute{
+				{Destination: "0.0.0.0/0", NextHop: "203.0.113.1"},
+			},
+		},
+	}}, []*rpm.ProbeResult{{ProbeName: "WAN", TestName: "t", LastStatus: "pass"}})
+	monitor.Start()
+	transitions := make(chan rpm.Transition, 1)
+	d.rpm.SetTransitionCallback(func(tr rpm.Transition) {
+		transitions <- tr
+		monitor.HandleTransition(tr)
+	})
+	defer func() {
+		cancel()
+		d.stopPinRetryLoop()
+		d.rpm.StopAll()
+		monitor.Stop()
+		_ = rt.Close()
+		_ = netlink.LinkDel(local)
+	}()
+
+	if !d.reconcileRPM(cfg) {
+		t.Fatal("initial RPM reconcile did not start the pinned probe")
+	}
+	if got := d.rpm.PinInstallFailureCount(); got != 0 {
+		t.Fatalf("LINKDOWN pin entered ErrProbeSetup hold: pin failures=%d", got)
+	}
+
+	deadline := time.Now().Add(20 * time.Second)
+	var result *rpm.ProbeResult
+	for time.Now().Before(deadline) {
+		for _, current := range d.rpm.Results() {
+			if current.ProbeName == "WAN" && current.TestName == "t" {
+				result = current
+				break
+			}
+		}
+		if result != nil && result.LastStatus == "fail" && result.SuccFail >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if result == nil || result.LastStatus != "fail" || result.SuccFail < 2 || result.TotalSent < 2 {
+		t.Fatalf("carrier loss did not become thresholded probe failure: result=%+v", result)
+	}
+	if got := d.rpm.PinInstallFailureCount(); got != 0 {
+		t.Fatalf("genuine probe loss was held as setup failure: pin failures=%d", got)
+	}
+	select {
+	case tr := <-transitions:
+		if tr.Status != "fail" || tr.ProbeName != "WAN" || tr.TestName != "t" {
+			t.Fatalf("unexpected failover sensor transition: %+v", tr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("thresholded carrier loss did not publish an RPM fail transition")
+	}
+	select {
+	case overlay := <-actuated:
+		if len(overlay) != 1 || overlay[0].Destination != "0.0.0.0/0" ||
+			overlay[0].NextHop != "203.0.113.1" {
+			t.Fatalf("ip-monitoring actuator received overlay %+v, want failover default route via 203.0.113.1", overlay)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("ip-monitoring failover overlay was not actuated after thresholded probe loss")
+	}
+}
+
+func mustProbeAddr12088(t *testing.T, value string) *netlink.Addr {
+	t.Helper()
+	addr, err := netlink.ParseAddr(value)
+	if err != nil {
+		t.Fatalf("parse address %q: %v", value, err)
+	}
+	return addr
 }

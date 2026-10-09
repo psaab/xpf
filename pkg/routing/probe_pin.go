@@ -376,20 +376,28 @@ func resolveProbePin(ops probePinOps, pin ProbePin) (wantPin, error) {
 // steers the probe nowhere (#12088): Verify requires BOTH the exact fwmark
 // rule Apply installs (family, mark, full mask, priority, table, no
 // narrowing selectors) AND the exact pinned host route (host destination,
-// next-hop, egress ifindex, ONLINK, usable unicast, single-path) before it
-// accepts a pin. The daemon holds ErrProbeSetup for failed pins and
-// reinstalls them via Apply on reconcile, so a false healthy here is a
-// false-passing probe and every ambiguous case fails closed:
+// next-hop, egress ifindex, ONLINK, unicast, single-path) before it
+// accepts a pin. Genuinely missing or mismatched pins hold ErrProbeSetup and
+// are reinstalled via Apply on reconcile, preventing a false-passing probe;
+// ambiguous pin shape fails closed:
 //
 //   - an inconsistent probe-band assignment, malformed or mixed-family
 //     target/next-hop, missing egress link, or rule/route dump error is
 //     reported for the affected pin(s) rather than skipped;
 //   - a rule with a partial fwmark mask, or any Src/Dst/interface/Tos/
-//     port/proto/UID/invert/goto/flow/suppression selector Apply never
-//     emits, does not satisfy the pin even when mark/table/priority match;
+//     port/proto/UID/invert/goto/flow/suppression selector Apply never emits,
+//     does not satisfy the pin even when mark/table/priority match;
 //   - a route with the wrong gateway, egress, host prefix, table, metric,
-//     flags, type, or scope fails; an equal-or-better-metric competing
-//     route to the same host destination also fails as ambiguous.
+//     required ONLINK flag, type, or scope fails; DEAD/UNRESOLVED nexthops and
+//     equal-or-better-metric competing routes to the same host also fail.
+//
+// RTNH_F_LINKDOWN is deliberately NOT in the fail set: carrier-only loss
+// keeps the pinned route installed (the kernel only flags it) and the
+// route still selects the pinned path, so a probe sent through it can
+// only report loss — never false-pass via the main table. Holding the
+// pin on LINKDOWN would freeze LastStatus and suppress ip-monitoring
+// failover for the whole outage (blackhole); genuine loss must instead
+// flow through the RPM successive-loss threshold into a fail transition.
 //
 // Dumps are bounded: one RuleList per address family that has at least one
 // valid pin, and one RouteListFiltered per (family, configured table); a
@@ -440,7 +448,7 @@ func (p *probePinManager) Verify(pins []ProbePin) map[string]error {
 	routeErrByTable := make(map[tableKey]error)
 	dumped := make(map[tableKey]bool)
 	for _, w := range want {
-		if _, failed := ruleErrByFamily[w.family]; failed {
+		if _, hasRuleErr := ruleErrByFamily[w.family]; hasRuleErr {
 			continue
 		}
 		k := tableKey{family: w.family, table: w.pin.Table}
@@ -515,10 +523,13 @@ func probePinRuleInstalled(rules []netlink.Rule, pin ProbePin, family int) bool 
 }
 
 // probePinRouteInstalled reports whether the route selected by the kernel for
-// the pin's host destination is the exact route Apply installs. Apply leaves
-// metric/priority at its zero default, so any same-prefix route with an equal
-// or better metric but a different shape makes readback ambiguous and fails
-// closed. Higher-metric routes cannot override the default-metric pin.
+// the pin's host destination has the exact shape Apply installs. It checks
+// route shape, not current carrier state: RTNH_F_LINKDOWN means the selected
+// pinned path is down, so probing it must report genuine loss rather than hold
+// the test state. Apply leaves metric/priority at its zero default, so any
+// same-prefix route with an equal or better metric but a different shape makes
+// readback ambiguous and fails closed. Higher-metric routes cannot override
+// the default-metric pin.
 func probePinRouteInstalled(routes []netlink.Route, w wantPin) bool {
 	matched := false
 	for _, r := range routes {
@@ -538,7 +549,7 @@ func probePinRouteInstalled(routes []netlink.Route, w wantPin) bool {
 		if r.Gw == nil || !r.Gw.Equal(w.nextHop) || r.LinkIndex != w.linkIdx {
 			return false
 		}
-		const unusableFlags = unix.RTNH_F_DEAD | unix.RTNH_F_LINKDOWN | unix.RTNH_F_UNRESOLVED
+		const unusableFlags = unix.RTNH_F_DEAD | unix.RTNH_F_UNRESOLVED
 		if r.Flags&int(netlink.FLAG_ONLINK) == 0 ||
 			r.Flags&int(unusableFlags) != 0 ||
 			r.Type != unix.RTN_UNICAST || r.Scope != unix.RT_SCOPE_UNIVERSE ||
