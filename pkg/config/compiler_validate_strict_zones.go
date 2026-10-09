@@ -844,23 +844,28 @@ func ToleratedUnknownHostInboundChildWarnings(cfg *Config) []string {
 		if zone == nil {
 			continue
 		}
-		warnings = append(warnings, unknownHostInboundChildWarnings(zoneName, "", zone.HostInboundTraffic)...)
+		warnings = append(warnings, unknownHostInboundChildWarnings(zone, zoneName, "", zone.HostInboundTraffic)...)
 		for _, ifName := range zone.SortedInterfaceHostInboundRefs() {
-			warnings = append(warnings, unknownHostInboundChildWarnings(zoneName, ifName, zone.InterfaceHostInbound[ifName])...)
+			warnings = append(warnings, unknownHostInboundChildWarnings(zone, zoneName, ifName, zone.InterfaceHostInbound[ifName])...)
 		}
 	}
 	return warnings
 }
 
-func unknownHostInboundChildWarnings(zoneName, ifName string, hib *HostInboundTraffic) []string {
+func unknownHostInboundChildWarnings(zone *ZoneConfig, zoneName, ifName string, hib *HostInboundTraffic) []string {
 	if hib == nil || len(hib.UnknownChildren) == 0 {
 		return nil
 	}
 	scope := fmt.Sprintf("security zone %q host-inbound-traffic", zoneName)
-	emptyOverride := ifName != "" && !hasKnownHostInboundAdmission(hib)
 	if ifName != "" {
 		scope = fmt.Sprintf("security zone %q interfaces %q host-inbound-traffic", zoneName, ifName)
 	}
+	var overrideServices, overrideProtocols []string
+	if ifName != "" {
+		overrideServices, overrideProtocols, _ = zone.InterfaceHostInboundOverride(ifName)
+	}
+	emptyOverride := ifName != "" && !hasKnownHostInboundAdmission(overrideServices, overrideProtocols)
+
 	warnings := make([]string, 0, len(hib.UnknownChildren))
 	for _, keyword := range hib.UnknownChildren {
 		if keyword == "" {
@@ -875,17 +880,14 @@ func unknownHostInboundChildWarnings(zoneName, ifName string, hib *HostInboundTr
 	return warnings
 }
 
-func hasKnownHostInboundAdmission(hib *HostInboundTraffic) bool {
-	if hib == nil {
-		return false
-	}
-	for _, service := range hib.SystemServices {
-		if KnownHostInboundSystemServices[service] {
+func hasKnownHostInboundAdmission(services, protocols []string) bool {
+	for _, service := range services {
+		if KnownHostInboundSystemServices[strings.ToLower(service)] {
 			return true
 		}
 	}
-	for _, protocol := range hib.Protocols {
-		if KnownHostInboundProtocols[protocol] {
+	for _, protocol := range protocols {
+		if KnownHostInboundProtocols[strings.ToLower(protocol)] {
 			return true
 		}
 	}
@@ -898,27 +900,12 @@ func validateHostInboundUnknownChildrenStrict(cfg *Config) error {
 		if zone == nil {
 			continue
 		}
-		if err := validateHostInboundUnknownChildrenStrictAtScope(zoneName, "", zone.HostInboundTraffic); err != nil {
-			return err
-		}
-		for _, ifName := range zone.SortedInterfaceHostInboundRefs() {
-			if err := validateHostInboundUnknownChildrenStrictAtScope(zoneName, ifName, zone.InterfaceHostInbound[ifName]); err != nil {
-				return err
-			}
+		hib := zone.HostInboundTraffic
+		if hib != nil && len(hib.UnknownChildren) > 0 {
+			return fmt.Errorf("security zone %q host-inbound-traffic has unknown child keyword %q, which would be discarded", zoneName, hib.UnknownChildren[0])
 		}
 	}
 	return nil
-}
-
-func validateHostInboundUnknownChildrenStrictAtScope(zoneName, ifName string, hib *HostInboundTraffic) error {
-	if hib == nil || len(hib.UnknownChildren) == 0 {
-		return nil
-	}
-	scope := "host-inbound-traffic"
-	if ifName != "" {
-		scope = fmt.Sprintf("interfaces %q host-inbound-traffic", ifName)
-	}
-	return fmt.Errorf("security zone %q %s has unknown child keyword %q, which would be discarded", zoneName, scope, hib.UnknownChildren[0])
 }
 
 // knownHostInboundExceptTokens returns distinct, recognized exclusions in

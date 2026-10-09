@@ -175,8 +175,6 @@ func InterfaceZoneMap(cfg *Config) map[string]string {
 // RESULT combines with the zone level — it replaces it — not this merge. Returns
 // nil only when BOTH inputs are nil; a fresh struct is always allocated so the
 // shared config-owned override objects are never mutated in place.
-// Compiler-only unknown-child provenance is unioned too so diagnostics survive
-// this projection.
 func MergeHostInboundTraffic(a, b *HostInboundTraffic) *HostInboundTraffic {
 	if a == nil && b == nil {
 		return nil
@@ -199,12 +197,10 @@ func MergeHostInboundTraffic(a, b *HostInboundTraffic) *HostInboundTraffic {
 	if a != nil {
 		appendUnique(&out.SystemServices, a.SystemServices)
 		appendUnique(&out.Protocols, a.Protocols)
-		appendUnique(&out.UnknownChildren, a.UnknownChildren)
 	}
 	if b != nil {
 		appendUnique(&out.SystemServices, b.SystemServices)
 		appendUnique(&out.Protocols, b.Protocols)
-		appendUnique(&out.UnknownChildren, b.UnknownChildren)
 	}
 	return out
 }

@@ -163,7 +163,6 @@ func buildZoneInterfaceMapLocal(cfg *Config) map[string]string {
 // b (a first, then b's not-already-present tokens). It backs the #3720 additive
 // physical→unit override resolution so the commit-time gate classifies the same
 // effective set the runtime does. Returns nil only when both inputs are nil.
-// Compiler-only unknown-child provenance is also carried through this mirror.
 func mergeHostInboundOverrideLocal(a, b *HostInboundTraffic) *HostInboundTraffic {
 	if a == nil && b == nil {
 		return nil
@@ -186,12 +185,10 @@ func mergeHostInboundOverrideLocal(a, b *HostInboundTraffic) *HostInboundTraffic
 	if a != nil {
 		appendUnique(&out.SystemServices, a.SystemServices)
 		appendUnique(&out.Protocols, a.Protocols)
-		appendUnique(&out.UnknownChildren, a.UnknownChildren)
 	}
 	if b != nil {
 		appendUnique(&out.SystemServices, b.SystemServices)
 		appendUnique(&out.Protocols, b.Protocols)
-		appendUnique(&out.UnknownChildren, b.UnknownChildren)
 	}
 	return out
 }

@@ -913,18 +913,6 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 				compiled.Warnings = append(compiled.Warnings, warning)
 			}
 		}
-		for _, warning := range config.ToleratedUnknownHostInboundChildWarnings(compiled) {
-			found := false
-			for _, existing := range compiled.Warnings {
-				if existing == warning {
-					found = true
-					break
-				}
-			}
-			if !found {
-				compiled.Warnings = append(compiled.Warnings, warning)
-			}
-		}
 	}
 	// #4185 (review Finding 2): the lenient Load/SyncApply path must NOT
 	// hard-reject a node-id mismatch (that would blackout-boot the node or
