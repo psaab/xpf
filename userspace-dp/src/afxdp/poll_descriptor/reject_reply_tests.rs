@@ -2991,6 +2991,69 @@ fn stamped_fabric_filter_reject_suppresses_tcp_rst_and_logs_deny_12051() {
     );
 }
 
+/// #12319 source-equivalent coverage for the ICMP leg: a stamped-fabric UDP
+/// filter reject shares the policy choke, so it queues no unreachable, does
+/// not increment the filter sent counter, and logs the truthful DENY.
+#[test]
+fn stamped_fabric_udp_filter_reject_suppresses_icmp_and_logs_deny_12319() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    use super::filter::{PendingFilterLog, filter_terminal};
+    use crate::afxdp::event_emit::FilterLogSource;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (mut frame, mut meta, flow) = policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x02]);
+    meta.ingress_ifindex = 21;
+    let (handle, rx) = unlimited_event_handle();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let forwarding = stamped_fabric_reject_forwarding();
+    let mut counters = BatchCounters::default();
+
+    let drop = filter_terminal(
+        &mut pipeline,
+        &forwarding,
+        Some(&handle),
+        21,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+        crate::filter::FilterAction::Reject(crate::filter::RejectMessage::ADMIN_PROHIBITED),
+        Some(PendingFilterLog {
+            ingress_zone_id: 7,
+            egress_zone_id: 0,
+            filter_id: 23,
+            term_id: 6,
+            action: crate::filter::FilterAction::Reject(
+                crate::filter::RejectMessage::ADMIN_PROHIBITED,
+            ),
+            source: FilterLogSource::Input,
+            app_id: 0,
+        }),
+        123,
+    );
+
+    assert!(drop, "a filter reject terminal action drops the packet");
+    assert!(
+        pipeline.pending_tx_local.is_empty(),
+        "a stamped-fabric UDP filter reject must not queue ICMP to the synthetic source MAC"
+    );
+    assert_eq!(counters.filter_reject_sent, 0);
+    assert_eq!(counters.policy_reject_sent, 0);
+    let event = rx
+        .try_recv()
+        .expect("filter-log event frame")
+        .decode_dataplane_event()
+        .expect("filter-log payload");
+    assert_eq!(event.action, RT_FLOW_ACTION_DENY);
+}
+
 /// #12051 F2(b) / M6+M6b fail-on-revert: the stamped-fabric gate runs BEFORE
 /// the TX budget gate and the per-zone token gate, so a stamped-fabric TCP
 /// reject flood consumes neither. Drives N stamped policy rejects against a
