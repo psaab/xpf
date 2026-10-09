@@ -2209,4 +2209,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn seeded_finalizer_scatters_high_nibble_keys_12189() {
+        // Opus R1 F1: FNV-1a low bits depend only on the low bits of the seed
+        // and of each input byte, so without the multiply-shift finalizer keys
+        // differing only in high nibbles land in one shard for every seed even
+        // with the seed kept. Fixed seeds and a fixed high-nibble-only set keep
+        // this deterministic; it also catches a low-bits-of-product variant.
+        const SRCS: [u8; 4] = [0x65, 0x75, 0x45, 0x55];
+        const IDENTS: [u32; 8] = [0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70];
+        const SEEDS: [u64; 3] = [1, 7, 42];
+        let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+        for seed in SEEDS {
+            let t = OverlapTracker::with_seed(seed);
+            let mut seen = [false; OVERLAP_SHARDS];
+            for s in SRCS {
+                for ident in IDENTS {
+                    let key = OverlapKey {
+                        addr_family: libc::AF_INET as u8,
+                        src: IpAddr::V4(Ipv4Addr::new(10, 0, 61, s)),
+                        dst,
+                        ident,
+                        protocol: 6,
+                        routing_domain: 7,
+                    };
+                    seen[t.shard_index(&key)] = true;
+                }
+            }
+            let spread = seen.iter().filter(|&&shard_has_keys| shard_has_keys).count();
+            assert!(
+                spread >= 2,
+                "finalizer must scatter high-nibble-only keys at seed {seed} (spread={spread})"
+            );
+        }
+    }
+
 }
