@@ -397,6 +397,12 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 					keyword: keyword,
 				}
 			}
+			if parent == securityPoliciesSchema12217() && len(path) > 0 {
+				return &unknownSecurityPoliciesChildSchemaError12217{
+					path:    strings.Join(redactSecretPath(path), " "),
+					keyword: keyword,
+				}
+			}
 			return fmt.Errorf("%s: unknown configuration keyword %q under closed-world subtree",
 				strings.Join(redactSecretPath(path), " "), keyword)
 		}

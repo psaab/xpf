@@ -158,6 +158,11 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 
 				sec.Policies = append(sec.Policies, zpp)
 			}
+		} else {
+			// The schema rejects unknown direct children at strict commit.
+			// Tolerant compilation skips their entire subtree, which may be a
+			// rulebase, so retain the name for a warning and snapshot poison.
+			recordUnknownSecurityPoliciesChild12217(sec, child.Name())
 		}
 	}
 	if ambiguousDefaultPolicy {
@@ -681,8 +686,8 @@ func applyCollapsedDenyModifiers(pol *Policy, denyNode *Node) {
 }
 
 // LenientDroppedPolicyLocator names the first policy in cfg flagged for
-// dropped enforcement/audit content (#5575/#11013/#11014/#11023) or as the
-// #12039 synthetic global carrier for a skipped malformed zone-pair context,
+// dropped enforcement/audit content (#5575/#11013/#11014/#11023) or as a
+// #12039/#12217 synthetic global carrier for skipped security-policy content,
 // or "" when none is flagged.
 //
 // The flag is the compiler's fail-closed poison: policies_lower.go stamps such

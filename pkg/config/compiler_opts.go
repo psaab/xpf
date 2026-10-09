@@ -2194,6 +2194,10 @@ type compileOpts struct {
 	// keyword may name an enforcement control, the compiler unbinds the zone
 	// so its dropped policy cannot appear healthy on the dataplane.
 	lenientUnknownSecurityZoneChild11575 bool
+	// lenientUnknownPoliciesChild12217 keeps unknown direct children under
+	// `security policies` tolerant-loadable, while recording the dropped
+	// rulebase child and refusing the incomplete userspace policy snapshot.
+	lenientUnknownPoliciesChild12217 bool
 	// lenientTrailingTokens (#3332) downgrades the trailing-token gate
 	// (validateTrailingTokensStrict) from a hard compile error to a
 	// cfg.Warnings entry. The strict commit / commit-check path hard-rejects
@@ -3265,6 +3269,7 @@ func lenientCompileOpts() compileOpts {
 		lenientScreenNumeric:                   true,
 		lenientScreenUnknown:                   true,
 		lenientUnknownSecurityZoneChild11575:   true,
+		lenientUnknownPoliciesChild12217:       true,
 		lenientTrailingTokens:                  true,
 		lenientAddressUnimplementedForms:       true,
 		lenientAddressBookMappedPrefixes:       true,
