@@ -481,8 +481,10 @@ fn imported_snat_request(source_nat_provenance: u8) -> crate::protocol::SessionS
         "owner_rg_id": 1,
         "egress_ifindex": 12,
         "tx_ifindex": 12,
+        "neighbor_mac": "00:11:22:33:44:55",
         "nat_src_ip": "203.0.113.10",
         "nat_src_port": 45000,
+        "session_id": 12_187_001,
         "source_nat_provenance": source_nat_provenance
     }))
     .expect("HA session-sync wire request")
@@ -524,6 +526,7 @@ fn ha_imported_static_snat_survives_first_hit_12187() {
             &flow,
             origin,
             source_nat_static,
+            None,
         )
         .is_none(),
         "an imported static SNAT must survive its first hit with unchanged config"
@@ -566,6 +569,7 @@ fn ha_imported_dynamic_snat_survives_then_static_collision_revokes_12187() {
             &flow,
             origin,
             source_nat_static,
+            None,
         )
         .is_none(),
         "an imported dynamic SNAT must survive its first hit with unchanged config"
@@ -582,6 +586,7 @@ fn ha_imported_dynamic_snat_survives_then_static_collision_revokes_12187() {
             &flow,
             origin,
             source_nat_static,
+            None,
         )
         .is_some(),
         "a later same-tuple static SNAT must not launder the imported dynamic allocation"
@@ -601,29 +606,90 @@ fn ha_imported_transient_dynamic_snat_uses_wire_provenance_12187() {
     )
     .expect("dynamic SNAT session imports from HA wire");
     let key = synced.key.clone();
-    let decision = synced.decision;
-    let metadata = synced.metadata.clone();
-    let origin = synced.origin;
-    let source_nat_static = synced.source_nat_static;
-    let flow = SessionFlow {
-        src_ip: key.src_ip,
-        dst_ip: key.dst_ip,
-        forward_key: key.clone(),
+    let translated_key = crate::session::forward_wire_key(&key, synced.decision.nat);
+    let alias = SyncedSessionEntry {
+        key: translated_key.clone(),
+        ..synced.clone()
     };
-    // This is the transient shared-entry path: its authoritative HA row is
-    // available to the hit, but no worker-local SessionTable row is installed.
+    let flow = SessionFlow {
+        src_ip: translated_key.src_ip,
+        dst_ip: translated_key.dst_ip,
+        forward_key: translated_key.clone(),
+    };
     let mut sessions = SessionTable::new();
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = crate::afxdp::SharedSessionOwnerRgIndexes::default();
+    crate::afxdp::publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &synced,
+    );
+    crate::afxdp::publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &alias,
+    );
+    let forwarding = imported_snat_forwarding(false);
+    let dynamic_neighbors = Arc::new(crate::afxdp::ShardedNeighborMap::new());
+    let peer_worker_commands = Vec::new();
+    let resolved = crate::afxdp::session_glue::resolve_flow_session_decision(
+        &mut sessions,
+        crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &BTreeMap::new(),
+        &dynamic_neighbors,
+        &flow,
+        1_000_000,
+        1,
+        libc::IPPROTO_TCP as u8,
+        0x18,
+        12,
+        0,
+        false,
+        0,
+        0,
+    )
+    .expect("translated shared alias resolves on the inactive peer");
+
+    assert_eq!(resolved.key, translated_key);
+    assert_eq!(resolved.session_id, synced.session_id);
+    assert_eq!(
+        resolved.source_nat_validation_key.as_ref(),
+        Some(&key),
+        "the alias must recover its original tuple through the matching HA session identity"
+    );
+    assert!(
+        shared_sessions
+            .lock()
+            .expect("shared sessions")
+            .get(&translated_key)
+            .is_none(),
+        "transient resolution must purge the translated alias"
+    );
+    assert!(sessions.lookup(&translated_key, 1_000_000, 0x18).is_none());
 
     assert!(
         source_nat_revocation_on_session_hit(
-            &imported_snat_forwarding(false),
+            &forwarding,
             &mut sessions,
-            &key,
-            &metadata,
-            decision,
+            &resolved.key,
+            &resolved.metadata,
+            resolved.decision,
             &flow,
-            origin,
-            source_nat_static,
+            resolved.origin,
+            resolved.source_nat_static,
+            resolved.source_nat_validation_key.as_ref(),
         )
         .is_none(),
         "transient imported dynamic SNAT must survive its unchanged first hit"
@@ -632,14 +698,106 @@ fn ha_imported_transient_dynamic_snat_uses_wire_provenance_12187() {
         source_nat_revocation_on_session_hit(
             &imported_snat_forwarding(true),
             &mut sessions,
-            &key,
-            &metadata,
-            decision,
+            &resolved.key,
+            &resolved.metadata,
+            resolved.decision,
             &flow,
-            origin,
-            source_nat_static,
+            resolved.origin,
+            resolved.source_nat_static,
+            resolved.source_nat_validation_key.as_ref(),
         )
         .is_some(),
         "transient dynamic provenance must still reject a later static collision"
+    );
+    let mut collision = synced.clone();
+    collision.key.src_ip = "10.0.0.2".parse().expect("colliding source IPv4");
+    collision.session_id = 12_187_002;
+    assert_eq!(
+        crate::session::forward_wire_key(&collision.key, collision.decision.nat),
+        translated_key,
+        "the second original tuple must collide at the translated wire key"
+    );
+    crate::afxdp::publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &collision,
+    );
+    crate::afxdp::publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &alias,
+    );
+    assert_eq!(
+        shared_forward_wire_sessions
+            .lock()
+            .expect("shared forward-wire sessions")
+            .get(&translated_key)
+            .expect("colliding shared wire key")
+            .session_id,
+        collision.session_id
+    );
+    let mut collision_forwarding = imported_snat_forwarding(false);
+    collision_forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[
+        crate::protocol::SourceNATRuleSnapshot {
+            name: "pool-snat".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["10.0.0.2/32".to_string()],
+            pool_addresses: vec!["203.0.113.10/32".to_string()],
+            port_low: 45_000,
+            port_high: 45_000,
+            ..Default::default()
+        },
+    ]);
+    let collision_resolved = crate::afxdp::session_glue::resolve_flow_session_decision(
+        &mut sessions,
+        crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &collision_forwarding,
+        &BTreeMap::new(),
+        &dynamic_neighbors,
+        &flow,
+        1_000_000,
+        1,
+        libc::IPPROTO_TCP as u8,
+        0x18,
+        12,
+        0,
+        false,
+        0,
+        0,
+    )
+    .expect("translated alias resolves despite a shared wire-key collision");
+    assert!(
+        collision_resolved.source_nat_validation_key.is_none(),
+        "a colliding original row with another session ID must not authorize this alias"
+    );
+    assert!(
+        source_nat_revocation_on_session_hit(
+            &collision_forwarding,
+            &mut sessions,
+            &collision_resolved.key,
+            &collision_resolved.metadata,
+            collision_resolved.decision,
+            &flow,
+            collision_resolved.origin,
+            collision_resolved.source_nat_static,
+            collision_resolved.source_nat_validation_key.as_ref(),
+        )
+        .is_some(),
+        "ambiguous original-tuple identity must fail closed, not borrow another flow's rule"
+    );
+    assert_eq!(
+        sessions.len(),
+        0,
+        "sessionless SNAT revalidation must not claim the peer's session"
     );
 }

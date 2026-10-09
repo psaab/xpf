@@ -2297,6 +2297,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             flow,
                             resolved.origin,
                             resolved.source_nat_static,
+                            resolved.source_nat_validation_key.as_ref(),
                         );
                         let owner_icmp_verdict = if session_hit_revocation.is_none()
                             && foreign_arrival_zone.is_none()

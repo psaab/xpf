@@ -840,6 +840,53 @@ pub(super) fn lookup_shared_forward_wire_match(
         .cloned()
 }
 
+/// Recover the canonical tuple for a translated transient alias only when the
+/// shared forward-wire candidate carries the same nonzero session identity.
+/// The index stores one candidate per wire key, so a wire-tuple collision must
+/// not borrow another flow's original source selectors.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn shared_source_nat_original_key(
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    wire_key: &SessionKey,
+    alias_key: &SessionKey,
+    decision: SessionDecision,
+    metadata: &SessionMetadata,
+    origin: SessionOrigin,
+    source_nat_static: Option<bool>,
+    session_id: u64,
+) -> Option<SessionKey> {
+    if !origin.is_peer_synced()
+        || metadata.is_reverse
+        || wire_key != alias_key
+        || session_id == 0
+        || decision.nat.rewrite_src != Some(wire_key.src_ip)
+    {
+        return None;
+    }
+
+    let sessions = lock_shared_recover(shared_forward_wire_sessions);
+    let original = sessions.get(wire_key)?;
+    if original.session_id == 0
+        || original.session_id != session_id
+        || !original.origin.is_peer_synced()
+        || original.metadata.is_reverse
+        || original.metadata.owner_rg_id != metadata.owner_rg_id
+        || original.metadata.ingress_zone != metadata.ingress_zone
+        || original.metadata.egress_zone != metadata.egress_zone
+        || original.metadata.ingress_ifindex != metadata.ingress_ifindex
+        || original.metadata.ingress_vlan_id != metadata.ingress_vlan_id
+        || original.metadata.fabric_ingress != metadata.fabric_ingress
+        || original.decision.resolution.egress_ifindex != decision.resolution.egress_ifindex
+        || original.source_nat_static != source_nat_static
+        || original.decision.nat != decision.nat
+        || original.key == *alias_key
+        || forward_wire_key(&original.key, original.decision.nat) != *wire_key
+    {
+        return None;
+    }
+    Some(original.key.clone())
+}
+
 #[derive(Clone, Debug)]
 pub(super) enum ResolvedSessionKey {
     QueryKey,
@@ -915,6 +962,10 @@ pub(super) struct ResolvedFlowSessionDecision {
     pub(super) source_nat_static: Option<bool>,
     pub(super) metadata: SessionMetadata,
     pub(super) origin: SessionOrigin,
+    /// Original forward tuple for a translated peer-synced transient hit.
+    /// It is populated only when the shared alias and canonical row carry
+    /// the same nonzero session identity and SNAT provenance.
+    pub(super) source_nat_validation_key: Option<SessionKey>,
     pub(super) created: bool,
     /// #1861 §5.4: true when a session install was ATTEMPTED for this
     /// decision and refused (max_sessions) — distinct from "no install

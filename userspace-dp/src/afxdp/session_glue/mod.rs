@@ -3103,6 +3103,20 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         let session_id = shared_session_id
             .filter(|session_id| *session_id != 0)
             .unwrap_or_else(|| sessions.session_id_for(resolved_key));
+        let source_nat_validation_key = if keep_transient {
+            shared_source_nat_original_key(
+                shared.forward_wire_sessions,
+                &flow.forward_key,
+                resolved_key,
+                resolved.decision,
+                &resolved.metadata,
+                hit_origin,
+                source_nat_static,
+                session_id,
+            )
+        } else {
+            None
+        };
         let mut decision = resolved.decision;
         let resolution_target = resolution_target_for_session(flow, decision);
         let leak_incarnation = sessions.leak_incarnation(&resolved_key);
@@ -3219,6 +3233,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
             source_nat_static,
             metadata,
             origin: hit_origin,
+            source_nat_validation_key,
             created: false,
             install_failed: shared_was_present && materialize_install_failed,
             close_deferred: hit.close_deferred,
@@ -3367,6 +3382,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         source_nat_static: None,
         metadata,
         origin: SessionOrigin::ReverseFlow,
+        source_nat_validation_key: None,
         // #1861 §5.4 + AGY r1 F1: `created` reports the ACTUAL install
         // outcome (was unconditionally true — session_creates over-counted
         // at cap and publish_bpf_conntrack_entry fired for a session that

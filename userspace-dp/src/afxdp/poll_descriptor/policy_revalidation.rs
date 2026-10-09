@@ -418,6 +418,8 @@ fn source_nat_translation_still_valid(
 /// foreign-hit early exit. A reverse hit is judged through its forward
 /// companion; a forward hit with no local entry is checked sessionlessly and
 /// drops this packet without claiming ownership of the peer's session.
+/// A transient translated alias may use the resolver's identity-checked
+/// original tuple; without that proof it remains checked against the wire key.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn source_nat_revocation_on_session_hit(
     forwarding: &ForwardingState,
@@ -428,6 +430,7 @@ pub(super) fn source_nat_revocation_on_session_hit(
     flow: &SessionFlow,
     origin: SessionOrigin,
     source_nat_static: Option<bool>,
+    source_nat_validation_key: Option<&SessionKey>,
 ) -> Option<PolicyRevocation> {
     let (forward_key, forward_decision, forward_metadata, forward_origin, canonical_key, stored_static) =
         if metadata.is_reverse {
@@ -469,14 +472,24 @@ pub(super) fn source_nat_revocation_on_session_hit(
                         static_nat,
                     )
                 }
-                SourceNatRevalidationTarget::NoLocalEntry => (
-                    flow.forward_key.clone(),
-                    decision,
-                    metadata.clone(),
-                    origin,
-                    None,
-                    source_nat_static,
-                ),
+                SourceNatRevalidationTarget::NoLocalEntry => {
+                    let original_key = source_nat_validation_key
+                        .filter(|key| {
+                            origin.is_peer_synced()
+                                && decision.nat.rewrite_src == Some(session_key.src_ip)
+                                && crate::session::forward_wire_key(key, decision.nat) == *session_key
+                        })
+                        .cloned()
+                        .unwrap_or_else(|| flow.forward_key.clone());
+                    (
+                        original_key,
+                        decision,
+                        metadata.clone(),
+                        origin,
+                        None,
+                        source_nat_static,
+                    )
+                }
             }
         };
 
