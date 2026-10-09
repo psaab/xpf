@@ -549,22 +549,32 @@ func TestPolicyThenCompactAndTermLineOperandsRejected_12070(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			checkError := func(channel string, err error) {
+			checkError := func(channel string, err error, checkMessage bool) {
 				t.Helper()
 				if err == nil {
 					t.Fatalf("%s accepted invalid %s value %q", channel, tc.leaf, tc.value)
 				}
-				if tc.wantMessage != "" {
-					if !strings.Contains(err.Error(), tc.wantMessage) {
-						t.Errorf("%s error %q does not include %q", channel, err, tc.wantMessage)
-					}
-				} else if !strings.Contains(err.Error(), tc.value) {
+				message := err.Error()
+				if !strings.Contains(message, `policy-statement "P"`) &&
+					!strings.Contains(message, "policy-statement P") {
+					t.Errorf("%s error %q does not name policy-statement P", channel, err)
+				}
+				if !strings.Contains(message, `term "t"`) && !strings.Contains(message, "term t") {
+					t.Errorf("%s error %q does not name term t", channel, err)
+				}
+				if !strings.Contains(message, tc.leaf) {
+					t.Errorf("%s error %q does not name %q", channel, err, tc.leaf)
+				}
+				if tc.value != "" && !strings.Contains(err.Error(), tc.value) {
 					t.Errorf("%s error %q does not name %q", channel, err, tc.value)
+				}
+				if checkMessage && tc.wantMessage != "" && !strings.Contains(message, tc.wantMessage) {
+					t.Errorf("%s error %q does not include %q", channel, err, tc.wantMessage)
 				}
 			}
 
 			_, err := configstore.CheckText(tc.text, -1)
-			checkError("CheckText", err)
+			checkError("CheckText", err, true)
 
 			store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
 			if err != nil {
@@ -577,9 +587,9 @@ func TestPolicyThenCompactAndTermLineOperandsRejected_12070(t *testing.T) {
 				t.Fatalf("LoadOverride(%q): %v", tc.text, err)
 			}
 			_, err = store.CommitCheck()
-			checkError("LoadOverride + CommitCheck", err)
+			checkError("LoadOverride + CommitCheck", err, true)
 			_, err = store.Commit()
-			checkError("LoadOverride + Commit", err)
+			checkError("LoadOverride + Commit", err, true)
 			// The degenerate operands that motivated R4-F1 must also fail
 			// after LoadMerge converts the hierarchical input back to SetPath.
 			// Keep this check specific to those rows: the legacy from-protocol
@@ -597,12 +607,10 @@ func TestPolicyThenCompactAndTermLineOperandsRejected_12070(t *testing.T) {
 					t.Fatalf("LoadMerge(%q): %v", tc.text, err)
 				}
 				_, err = mergeStore.CommitCheck()
-				if err == nil {
-					t.Fatal("LoadMerge + CommitCheck accepted a degenerate policy operand")
-				}
-				if !strings.Contains(err.Error(), tc.leaf) {
-					t.Errorf("LoadMerge + CommitCheck error %q does not name %q", err, tc.leaf)
-				}
+				// LoadMerge can report the empty list as "missing value" rather
+				// than the compiled gate's exact `wantMessage`; it still must name
+				// the policy, term, and leaf.
+				checkError("LoadMerge + CommitCheck", err, false)
 			}
 		})
 	}
@@ -800,19 +808,23 @@ func TestPolicyThenBareOperandsCommitAndRender_12070(t *testing.T) {
 // reject instead of accepting with the downgrade warning.
 func TestPolicyThenOperandsSyncApplyDowngradesAndOmits_12070(t *testing.T) {
 	for _, tc := range []struct {
-		name, text, bad, forbidden string
+		name, text, bad string
+		forbidden       []string
 	}{
 		{
-			name:      "compact next-hop",
-			text:      `policy-options { policy-statement P { term t { then accept next-hop discard; } } }`,
-			bad:       "discard",
-			forbidden: "set ip next-hop discard",
+			name: "compact next-hop",
+			text: `policy-options { policy-statement P { term t { then accept next-hop discard; } } }`,
+			bad:  "discard",
+			forbidden: []string{
+				"set ip next-hop ",
+				"set ipv6 next-hop ",
+			},
 		},
 		{
 			name:      "term-line prepend",
 			text:      `policy-options { policy-statement P { term t then accept as-path-prepend 65001 abc; } }`,
 			bad:       "abc",
-			forbidden: "set as-path prepend 65001 abc",
+			forbidden: []string{"set as-path prepend "},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -843,8 +855,14 @@ func TestPolicyThenOperandsSyncApplyDowngradesAndOmits_12070(t *testing.T) {
 						path, warnings, tc.bad)
 				}
 				rendered := (&Manager{frrConf: "/dev/null"}).generatePolicyOptions(options)
-				if strings.Contains(rendered, tc.forbidden) {
-					t.Fatalf("%s render emitted invalid policy clause %q:\n%s", path, tc.forbidden, rendered)
+				if !strings.Contains(rendered, "route-map P permit") {
+					t.Fatalf("%s render omitted the valid accept route-map:\n%s", path, rendered)
+				}
+				for _, prefix := range tc.forbidden {
+					if strings.Contains(rendered, prefix) {
+						t.Fatalf("%s render emitted invalid policy clause prefix %q:\n%s",
+							path, prefix, rendered)
+					}
 				}
 			}
 			checkTolerant("CompileConfigLenient", lenient.Warnings, &lenient.PolicyOptions)
