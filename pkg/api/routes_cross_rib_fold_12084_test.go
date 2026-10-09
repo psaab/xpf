@@ -11,8 +11,8 @@ import (
 func TestRoutesHandlerLabelsCrossRIBFoldAsIPv6_12084(t *testing.T) {
 	tree := &config.ConfigTree{}
 	for _, set := range []string{
-		"set routing-options static route 2602:ffd3::/40 next-hop 2602:ffd3:ffff::1",
-		"set routing-options rib inet6.0 static route 2602:ffd3::/40 next-hop 2602:ffd3:ffff::2",
+		"set routing-options static route 2602:ffd3::/40 next-hop 2602:ffd3:ffff::1 preference 5",
+		"set routing-options rib inet6.0 static route 2602:ffd3::/40 next-hop 2602:ffd3:ffff::2 preference 200",
 	} {
 		path, err := config.ParseSetCommand(set)
 		if err != nil {
@@ -57,6 +57,10 @@ func TestRoutesHandlerLabelsCrossRIBFoldAsIPv6_12084(t *testing.T) {
 		t.Fatalf("cross-RIB IPv6 REST rows = %+v, want both folded next-hops", matching)
 	}
 	gateways := map[string]bool{"2602:ffd3:ffff::1": false, "2602:ffd3:ffff::2": false}
+	preferences := map[string]int{
+		"2602:ffd3:ffff::1": 5,
+		"2602:ffd3:ffff::2": 200,
+	}
 	for _, route := range matching {
 		if route.Family != "inet6" || route.Table != "inet6.0" {
 			t.Fatalf("cross-RIB IPv6 REST row = %+v, want inet6/inet6.0", route)
@@ -65,6 +69,10 @@ func TestRoutesHandlerLabelsCrossRIBFoldAsIPv6_12084(t *testing.T) {
 			t.Fatalf("unexpected REST next-hop row: %+v", route)
 		}
 		gateways[route.NextHop] = true
+		if route.Preference != preferences[route.NextHop] {
+			t.Errorf("REST row for %s reports preference %d, want per-tier %d",
+				route.NextHop, route.Preference, preferences[route.NextHop])
+		}
 	}
 	for gateway, found := range gateways {
 		if !found {

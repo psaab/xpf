@@ -129,7 +129,8 @@ func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig, instanceName st
 		if ribStatic == nil {
 			continue
 		}
-		if n := len(compileStaticRoutes(ribStatic, nil)); n > 0 {
+		compiledRoutes := compileStaticRoutes(ribStatic, nil)
+		if n := len(foldDistinctStaticRouteAliases(compiledRoutes)); n > 0 {
 			ro.UnhandledRibs = append(ro.UnhandledRibs, UnhandledRib{Name: ribName, Routes: n})
 		}
 	}
@@ -338,6 +339,80 @@ func setStaticRouteNextTable(route *StaticRoute, raw string) {
 	route.NextTable = target
 }
 
+func appendStaticRouteNextHopsDeduped(existing *StaticRoute, hops []NextHopEntry) {
+	if existing == nil || len(hops) == 0 {
+		return
+	}
+	for _, hop := range hops {
+		duplicate := false
+		for _, prior := range existing.NextHops {
+			if prior == hop {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			existing.NextHops = append(existing.NextHops, hop)
+		}
+	}
+}
+
+func dedupeStaticRouteNextHops(hops []NextHopEntry) []NextHopEntry {
+	if len(hops) < 2 {
+		return hops
+	}
+	unique := hops[:0]
+	for _, hop := range hops {
+		duplicate := false
+		for _, prior := range unique {
+			if prior == hop {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			unique = append(unique, hop)
+		}
+	}
+	return unique
+}
+
+// mergeSameSpellingStaticRoute merges blocks with the same destination text
+// using Junos block semantics. Distinct-spelling aliases are folded later by
+// mergeStaticRouteIdentity. Competing next-table targets remain recorded
+// because their ambiguity is independent of the route spelling.
+func mergeSameSpellingStaticRoute(existing, route *StaticRoute) {
+	if existing == nil || route == nil || existing == route {
+		return
+	}
+	for _, target := range route.competingNextTableTargets {
+		appendStaticRouteNextTableConflict(existing, target)
+	}
+	if existing.NextTable != "" && route.NextTable != "" &&
+		existing.NextTable != route.NextTable {
+		appendStaticRouteNextTableConflict(existing, existing.NextTable)
+		appendStaticRouteNextTableConflict(existing, route.NextTable)
+	}
+	appendStaticRouteNextHopsDeduped(existing, route.NextHops)
+	if route.Discard {
+		existing.Discard = true
+	}
+	if route.Reject {
+		existing.Reject = true
+	}
+	if route.NoInstall {
+		existing.NoInstall = true
+	}
+	if route.HasPreference {
+		existing.Preference = route.Preference
+		existing.HasPreference = true
+	}
+	if route.NextTable != "" {
+		existing.NextTable = route.NextTable
+		existing.NextTableRaw = route.NextTableRaw
+	}
+}
+
 func mergeStaticRouteIdentity(existing, route *StaticRoute) {
 	if existing == nil || route == nil || existing == route {
 		return
@@ -357,10 +432,11 @@ func mergeStaticRouteIdentity(existing, route *StaticRoute) {
 	if existing.NoInstall != route.NoInstall || route.noInstallConflict {
 		existing.noInstallConflict = true
 	}
-	// A merged route can combine independently configured preference tiers.
-	// Stamp the source route's effective distance on unqualified next-hops so
-	// later route-level preference updates cannot turn floating backups into
-	// ECMP. Explicit qualified-next-hop preferences remain authoritative.
+	nextHopless := len(existing.NextHops) == 0 && len(route.NextHops) == 0
+	// Distinct spellings/collections are independent route sources. Stamp their
+	// unqualified next-hops before route-level preference precedence can obscure
+	// each source's effective distance. Same-spelling blocks are base-merged
+	// before this function is called.
 	if existing.Preference != route.Preference {
 		for i := range existing.NextHops {
 			if !existing.NextHops[i].HasPreference {
@@ -375,21 +451,22 @@ func mergeStaticRouteIdentity(existing, route *StaticRoute) {
 			}
 		}
 	}
-	existing.NextHops = append(existing.NextHops, route.NextHops...)
+	appendStaticRouteNextHopsDeduped(existing, route.NextHops)
 	if route.Discard {
 		existing.Discard = true
 	}
 	if route.Reject {
 		existing.Reject = true
 	}
-	// A conflict is diagnosed on strict commit. On tolerant loads, preserve
-	// installation if any contributing route was installable; NoInstall only
-	// excludes the merged route when every source requested it.
+	// Strict validation rejects disagreement between independent sources.
+	// Tolerant compilation retains the installable source.
 	existing.NoInstall = existing.NoInstall && route.NoInstall
-	// #9125: HasPreference distinguishes an explicit preference 5 from the
-	// compiler default. The source next-hops above retain independent distances
-	// when this route-level value changes.
-	if route.HasPreference {
+	if nextHopless {
+		if route.Preference < existing.Preference {
+			existing.Preference = route.Preference
+		}
+		existing.HasPreference = existing.HasPreference || route.HasPreference
+	} else if route.HasPreference {
 		existing.Preference = route.Preference
 		existing.HasPreference = true
 	}
@@ -399,12 +476,40 @@ func mergeStaticRouteIdentity(existing, route *StaticRoute) {
 	}
 }
 
-// canonicalizeStaticRouteCollections folds aliases split between bare static
-// and rib inet6.0 route lists. The snapshot normalizes by destination family,
-// so an IPv6 route in the bare list and its inet6.0 alias are one effective
-// route. A cross-collection survivor is placed in the list matching its
-// destination family, preserving consumers that use the list as a family tag.
-// Separate routing-instance calls keep otherwise-identical routes isolated.
+// foldDistinctStaticRouteAliases folds only masked aliases. Same-spelling
+// blocks have already been merged with Junos semantics by compileStaticRoutes.
+func foldDistinctStaticRouteAliases(routes []*StaticRoute) []*StaticRoute {
+	if routes == nil {
+		return nil
+	}
+	byIdentity := make(map[string]int, len(routes))
+	folded := make([]*StaticRoute, 0, len(routes))
+	for _, route := range routes {
+		if route == nil {
+			folded = append(folded, nil)
+			continue
+		}
+		key := staticRouteMergeKey(route.Destination)
+		if !strings.HasPrefix(key, "v4\x00") && !strings.HasPrefix(key, "v6\x00") {
+			folded = append(folded, route)
+			continue
+		}
+		if idx, exists := byIdentity[key]; exists {
+			mergeStaticRouteIdentity(folded[idx], route)
+			continue
+		}
+		byIdentity[key] = len(folded)
+		folded = append(folded, route)
+	}
+	return folded
+}
+
+// canonicalizeStaticRouteCollections folds aliases within and across bare
+// static and rib inet6.0 route lists. The snapshot normalizes by destination
+// family, so an IPv6 route in the bare list and its inet6.0 alias are one
+// effective route. Cross-collection survivors are placed in the list matching
+// their destination family, preserving consumers that use the list as a family
+// tag. Separate routing-instance calls keep routes isolated by scope.
 //
 // Competing next-table targets and no-install disagreement are retained as
 // compiler-only conflict metadata. Strict validation rejects these conflicts;
@@ -412,6 +517,8 @@ func mergeStaticRouteIdentity(existing, route *StaticRoute) {
 func canonicalizeStaticRouteCollections(
 	staticRoutes, inet6Routes []*StaticRoute,
 ) ([]*StaticRoute, []*StaticRoute) {
+	staticRoutes = foldDistinctStaticRouteAliases(staticRoutes)
+	inet6Routes = foldDistinctStaticRouteAliases(inet6Routes)
 	if len(staticRoutes) == 0 || len(inet6Routes) == 0 {
 		return staticRoutes, inet6Routes
 	}
@@ -493,10 +600,11 @@ func canonicalizeStaticRoutesAcrossTables(cfg *Config) {
 // compileStaticRoutes parses static route entries from a "static" node,
 // appending to and returning the updated slice.
 func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRoute {
-	// Track destination→index so flat "set" duplicates merge into one route.
+	// Same-spelling blocks retain Junos block semantics here. Distinct masked
+	// aliases are folded after all routing-options roots have been compiled.
 	destIdx := make(map[string]int)
 	for i, sr := range existing {
-		destIdx[staticRouteMergeKey(sr.Destination)] = i
+		destIdx[sr.Destination] = i
 	}
 
 	for _, routeInst := range namedInstances(staticNode.FindChildren("route")) {
@@ -734,12 +842,13 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 			}
 		}
 
-		// Merge routes with the same family-preserving masked destination
-		// (flat "set" syntax creates duplicates).
-		if idx, exists := destIdx[staticRouteMergeKey(route.Destination)]; exists {
-			mergeStaticRouteIdentity(existing[idx], route)
+		// Fold only same-spelling blocks at this stage. Masked aliases are
+		// independent sources and are stamped after all collections are parsed.
+		route.NextHops = dedupeStaticRouteNextHops(route.NextHops)
+		if idx, exists := destIdx[route.Destination]; exists {
+			mergeSameSpellingStaticRoute(existing[idx], route)
 		} else {
-			destIdx[staticRouteMergeKey(route.Destination)] = len(existing)
+			destIdx[route.Destination] = len(existing)
 			existing = append(existing, route)
 		}
 	}

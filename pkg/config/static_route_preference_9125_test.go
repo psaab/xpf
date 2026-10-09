@@ -19,35 +19,36 @@ import "testing"
 // sentinel collisions" finds that it does.
 func TestStaticRoutePreferenceSentinel9125(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		text    string
-		wantRef int
-		wantHas bool
+		name         string
+		text         string
+		wantRef      int
+		wantHas      bool
+		wantNextHops int
 	}{
 		// THE DEFECT. 5 is the value that collides with the sentinel.
 		{"later block sets preference 5", `routing-options { static {
 			route 10.0.0.0/8 { next-hop 192.0.2.1; preference 10; }
-			route 10.0.0.0/8 { preference 5; } } }`, 5, true},
+			route 10.0.0.0/8 { preference 5; } } }`, 5, true, 1},
 
 		// CONTROL: any other value already worked. Without this row a fix that
 		// simply always applied the later block would look identical.
 		{"later block sets preference 7", `routing-options { static {
 			route 10.0.0.0/8 { next-hop 192.0.2.1; preference 10; }
-			route 10.0.0.0/8 { preference 7; } } }`, 7, true},
+			route 10.0.0.0/8 { preference 7; } } }`, 7, true, 1},
 
 		// CONTROL: a later block that says NOTHING about preference must not
 		// clobber the earlier one. This is the case the `!= 5` test was
 		// actually trying to protect, and it must keep working.
 		{"later block is silent on preference", `routing-options { static {
 			route 10.0.0.0/8 { next-hop 192.0.2.1; preference 10; }
-			route 10.0.0.0/8 { next-hop 192.0.2.2; } } }`, 10, true},
+			route 10.0.0.0/8 { next-hop 192.0.2.2; } } }`, 10, true, 2},
 
 		// The bit itself: explicit 5 and absent 5 are now distinguishable,
 		// which is the property the whole fix rests on.
 		{"single block, explicit 5", `routing-options { static {
-			route 10.0.0.0/8 { next-hop 192.0.2.1; preference 5; } } }`, 5, true},
+			route 10.0.0.0/8 { next-hop 192.0.2.1; preference 5; } } }`, 5, true, 1},
 		{"single block, no preference", `routing-options { static {
-			route 10.0.0.0/8 { next-hop 192.0.2.1; } } }`, 5, false},
+			route 10.0.0.0/8 { next-hop 192.0.2.1; } } }`, 5, false, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, perrs := NewParser(tc.text).Parse()
@@ -69,6 +70,20 @@ func TestStaticRoutePreferenceSentinel9125(t *testing.T) {
 				t.Errorf("HasPreference = %v, want %v — an explicit preference and an absent "+
 					"one must be distinguishable, which is the whole point of the bit",
 					r.HasPreference, tc.wantHas)
+			}
+			if len(r.NextHops) != tc.wantNextHops {
+				t.Fatalf("NextHops = %d, want %d: %+v", len(r.NextHops), tc.wantNextHops, r.NextHops)
+			}
+			for _, hop := range r.NextHops {
+				if hop.HasPreference {
+					t.Fatalf("same-spelling next-hop was independently stamped: %+v", hop)
+				}
+			}
+			tiers := StaticRouteNextHopTiers(r)
+			if len(tiers) != 1 || tiers[0].Preference != tc.wantRef ||
+				len(tiers[0].NextHops) != tc.wantNextHops {
+				t.Fatalf("effective next-hop tiers = %+v, want one tier at preference %d with %d paths",
+					tiers, tc.wantRef, tc.wantNextHops)
 			}
 		})
 	}

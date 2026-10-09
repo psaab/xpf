@@ -124,14 +124,14 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
-	// #5633/#12084: static-route conflict gate. Repeated same-prefix aliases
-	// merge their next-hops and latch discard/reject, but conflicting
-	// next-table targets and install/no-install disagreement are retained as
-	// compiler-only metadata instead of silently selecting a target or
-	// withdrawing an installed route. The gate also rejects contradictory
-	// dispositions such as discard plus next-hop. Strict on commit /
-	// commit-check; lenient on load / peer-sync warns and keeps one deterministic
-	// route so persisted configurations still boot. Mirrors
+	// #5633/#12084: static-route conflict gate. Same-spelling route blocks use
+	// Junos base merge semantics; distinct masked aliases and cross-collection
+	// sources retain conflicting next-table targets and install/no-install
+	// disagreement as compiler-only metadata instead of silently selecting a
+	// target or withdrawing an installed route. The gate also rejects
+	// contradictory dispositions such as discard plus next-hop. Strict on
+	// commit / commit-check; lenient on load / peer-sync warns and keeps one
+	// deterministic route so persisted configurations still boot. Mirrors
 	// validateNextTableTargetReferencesStrict.
 	if err := validateStaticRouteDispositionConflictStrict(cfg); err != nil {
 		if opts.lenientRouteDispositionConflict {

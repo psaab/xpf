@@ -1309,13 +1309,13 @@ func staticRouteDestinationNames(sr *StaticRoute) string {
 // actions (next-hop, next-table, discard, reject), it checks compiler metadata
 // for competing next-table targets and install/no-install disagreement.
 //
-// Repeated same-prefix blocks append next-hops and latch discard/reject. When
-// their route preferences differ, the merge stamps each unqualified next-hop
-// with its source preference so floating statics remain separate distance
-// tiers. A conflicting next-table target is retained as metadata instead of
-// selecting a target based on alias spelling or collection order. If sources
-// disagree on no-install, tolerant compilation preserves the installable row
-// while strict validation rejects the ambiguous intent.
+// Same-spelling route blocks use Junos block semantics: they merge next-hops,
+// latch discard/reject, keep NoInstall sticky, and apply the last explicit
+// route preference. Distinct masked aliases and collections are folded later
+// as independent sources; differing route preferences stamp unqualified
+// next-hops into separate tiers. Competing next-table targets and
+// install/no-install disagreement are retained as metadata and rejected on
+// strict validation.
 //
 // Junos permits exactly one action per static route. Rejecting ambiguous
 // dispositions at commit keeps the compiled route unambiguous and operator-

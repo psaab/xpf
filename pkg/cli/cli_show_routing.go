@@ -967,6 +967,12 @@ func (c *CLI) showRoutingOptions() error {
 				printStaticRouteNotInstalled(staticExcluded, sr)
 				continue
 			}
+			tierPreferences := make(map[config.NextHopEntry]int, len(sr.NextHops))
+			for _, tier := range config.StaticRouteNextHopTiers(sr) {
+				for _, nextHop := range tier.NextHops {
+					tierPreferences[nextHop] = tier.Preference
+				}
+			}
 			for i, nh := range sr.NextHops {
 				dest := sr.Destination
 				if i > 0 {
@@ -976,7 +982,7 @@ func (c *CLI) showRoutingOptions() error {
 				if nh.Interface != "" {
 					nhStr += " via " + nh.Interface
 				}
-				fmt.Printf("  %-24s %-20s %-6s %s\n", dest, nhStr, fmtPref(sr.Preference), "")
+				fmt.Printf("  %-24s %-20s %-6s %s\n", dest, nhStr, fmtPref(tierPreferences[nh]), "")
 			}
 			printStaticRouteNotInstalled(staticExcluded, sr)
 		}
@@ -1003,6 +1009,12 @@ func (c *CLI) showRoutingOptions() error {
 				printStaticRouteNotInstalled(staticExcluded, sr)
 				continue
 			}
+			tierPreferences := make(map[config.NextHopEntry]int, len(sr.NextHops))
+			for _, tier := range config.StaticRouteNextHopTiers(sr) {
+				for _, nextHop := range tier.NextHops {
+					tierPreferences[nextHop] = tier.Preference
+				}
+			}
 			for i, nh := range sr.NextHops {
 				dest := sr.Destination
 				if i > 0 {
@@ -1012,7 +1024,7 @@ func (c *CLI) showRoutingOptions() error {
 				if nh.Interface != "" {
 					nhStr += " via " + nh.Interface
 				}
-				fmt.Printf("  %-40s %-30s %-6s\n", dest, nhStr, fmtPref(sr.Preference))
+				fmt.Printf("  %-40s %-30s %-6s\n", dest, nhStr, fmtPref(tierPreferences[nh]))
 			}
 			printStaticRouteNotInstalled(staticExcluded, sr)
 		}
