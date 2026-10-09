@@ -319,6 +319,15 @@ func recordDroppedNamedAddressBookCollisions(tree *ConfigTree, cfg *Config) {
 				for _, entry := range namedInstances(namedBook.FindChildren("address-set")) {
 					markIfGlobalName(entry.name)
 				}
+				// #12215: in set form, an unsupported named book has no schema
+				// child, so SetPath packs the entry into one leaf like
+				// Keys=["red", "address", NAME, VALUE] (or address-set). The
+				// typed compiler drops that leaf; quarantine its defined NAME
+				// without treating the trailing value/member refs as names.
+				if len(namedBook.Keys) >= 3 &&
+					(namedBook.Keys[1] == "address" || namedBook.Keys[1] == "address-set") {
+					markIfGlobalName(namedBook.Keys[2])
+				}
 			}
 		}
 	}
