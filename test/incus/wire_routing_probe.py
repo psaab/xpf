@@ -2,12 +2,10 @@
 """Counted, tagged UDP bursts for the wire_routing_separation gate (#10136).
 
 The harness sender offers an exact-tuple reference burst (tag C) before the
-steering term is committed. After commit it offers a near-miss control (tag N)
-through the existing main-table route, with only the destination port changed
-so the exact-match FBF term does not apply. It then sends the probe (tag P)
-with the original tuple into an owned, manager-created empty routing
-instance. The peer-side capture spans all three bursts; the post-commit
-near-miss control must be observed and the probe must not emerge.
+steering term is committed. After commit it offers the near-miss control (tag
+N) and probe (tag P) interleaved on one socket. The near miss follows the
+existing main-table route; only its destination port differs from the
+exact-match FBF-steered probe. The peer-side capture spans all three legs.
 
 With WIRE_BROKEN_FIXTURE=1, the harness inserts a temporary explicit accept
 before the routing-instance term. That intentionally bypasses steering to the
@@ -36,35 +34,85 @@ def main() -> int:
     ap.add_argument("--count", required=True, type=int)
     ap.add_argument("--tag", required=True, choices=("C", "N", "P"))
     ap.add_argument("--rate", type=float, default=500.0)
+    ap.add_argument("--interleave", action="store_true",
+                    help="interleave the control leg before each probe packet")
+    ap.add_argument("--interleave-control-port", type=int)
+    ap.add_argument("--interleave-control-count", type=int)
+    ap.add_argument("--interleave-control-tag", choices=("C", "N", "P"))
     args = ap.parse_args()
+    control_args = (
+        args.interleave_control_port,
+        args.interleave_control_count,
+        args.interleave_control_tag,
+    )
+    if args.interleave != all(value is not None for value in control_args):
+        ap.error("--interleave requires control port, count, and tag")
+    if not args.interleave and any(value is not None for value in control_args):
+        ap.error("interleave control options require --interleave")
     if (
         args.count <= 0
         or args.rate < 0
         or not 1 <= args.source_port <= 65535
         or not 1 <= args.port <= 65535
+        or (
+            args.interleave
+            and (
+                args.interleave_control_count <= 0
+                or not 1 <= args.interleave_control_port <= 65535
+                or args.interleave_control_tag == args.tag
+            )
+        )
     ):
-        print("invalid count/rate/port", file=sys.stderr)
+        print("invalid count/rate/port or interleave leg", file=sys.stderr)
         return 2
     interval = 1.0 / args.rate if args.rate else 0.0
-    sent = 0
+    sent = {args.tag: 0}
+    if args.interleave:
+        sent[args.interleave_control_tag] = 0
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind((args.src, args.source_port))
-        for seq in range(args.count):
-            payload = f"{args.tag}10136:{seq}:".encode() + b"x" * 32
+
+        def send(tag: str, seq: int, port: int) -> None:
             try:
-                sock.sendto(payload, (args.dst, args.port))
+                sock.sendto(
+                    f"{tag}10136:{seq}:".encode() + b"x" * 32,
+                    (args.dst, port),
+                )
             except OSError as exc:
-                print(f"sendto {args.tag}{seq} failed: {exc}", file=sys.stderr)
-                continue
-            sent += 1
-            if interval:
-                time.sleep(interval)
+                print(f"sendto {tag}{seq} failed: {exc}", file=sys.stderr)
+                return
+            sent[tag] += 1
+
+        if args.interleave:
+            for seq in range(max(args.count, args.interleave_control_count)):
+                if seq < args.interleave_control_count:
+                    send(args.interleave_control_tag, seq, args.interleave_control_port)
+                    if interval:
+                        time.sleep(interval)
+                if seq < args.count:
+                    send(args.tag, seq, args.port)
+                    if interval:
+                        time.sleep(interval)
+        else:
+            for seq in range(args.count):
+                send(args.tag, seq, args.port)
+                if interval:
+                    time.sleep(interval)
     finally:
         sock.close()
-    print(f"SENT tag={args.tag} count={sent}")
-    return 0 if sent == args.count else 1
+    print(f"SENT tag={args.tag} count={sent[args.tag]}")
+    if args.interleave:
+        print(
+            f"SENT tag={args.interleave_control_tag} "
+            f"count={sent[args.interleave_control_tag]}"
+        )
+        return 0 if (
+            sent[args.tag] == args.count
+            and sent[args.interleave_control_tag] == args.interleave_control_count
+        ) else 1
+    return 0 if sent[args.tag] == args.count else 1
 
 
 if __name__ == "__main__":

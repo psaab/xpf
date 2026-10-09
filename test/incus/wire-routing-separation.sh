@@ -5,22 +5,18 @@
 # admitted) is the only offer path. The gate first sends an exact-tuple control
 # from the LAN host through its existing main-table VLAN-80 path, then creates
 # an EMPTY RI and commits an exact-match input FBF term for the probe tuple.
-# After that commit it sends an unsteered near-miss control: same addresses,
-# protocol, direction, and capture filter as the probe, but a different
-# destination port so the FBF term does not select the RI. It then sends the
-# probe tuple into the empty RI. The clean probe reaches the userspace route
-# miss and is denied. `WIRE_BROKEN_FIXTURE=1` inserts a temporary exact explicit
-# `accept` term ahead of the FBF steer at the userspace enforcement point, so
-# the same owned ingress follows main's already-proven VLAN-80 route and is
-# visible at the managed peer. This proves capture/verdict liveness for a
-# pre-steer bypass; it does not exercise fallthrough after an empty selected-VRF
-# lookup.
-# Both controls and the probe run under one peer-side tcpdump window; only the
-# post-commit near-miss control supplies liveness to the verdict. Successful
-# sender sendto calls are the offered-frame count. Sender and capture mirror
-# wire-conntrack-lifecycle: LAN host (cluster-userspace-host) offers, target
-# captures on eth0. The target is deliberately the managed peer, not the
-# host-side fence.
+#
+# After that commit, one sender interleaves an unsteered near-miss control
+# with the probe: same addresses, protocol, direction, and capture filter,
+# differing only in destination port, so only the probe selects the RI. The
+# probe reaches the userspace route miss and is denied. `WIRE_BROKEN_FIXTURE=1`
+# inserts a temporary exact explicit `accept` term ahead of the FBF steer,
+# sending the probe through the already-proven main-table route to the peer.
+# Both controls and the interleaved near-miss/probe run under one peer-side
+# tcpdump window; the near-miss supplies liveness throughout the probe window.
+# Successful sender sendto calls are the offered-frame count. Sender and
+# capture mirror wire-conntrack-lifecycle: LAN host offers, target captures on
+# eth0. The target is the managed peer, not the host-side fence.
 #
 # Usage:
 #   ./test/incus/wire-routing-separation.sh
@@ -179,6 +175,14 @@ if [[ "$MODE" == selftest ]]; then
     cell "leak survives an under-sampled probe offer" FAIL 1 999 1 1000 1000 0 1500 1500
     cell "checksum corruption fails" FAIL 1 1000 0 1500 1500 1 1500 1500
     cell "malformed count is VOID" VOID 2 x 0 1500 1500 0 1500 1500
+
+    if python3 "${SCRIPT_DIR}/wire-routing-separation-temporal-selftest.py"; then
+        echo "  PASS  post-near-miss outage cannot score PASS"
+        pass=$((pass + 1))
+    else
+        echo "  FAIL  post-near-miss outage regression"
+        fail=$((fail + 1))
+    fi
 
     # RED→GREEN proof through the fixture parser/emitter, not just a direct
     # reducer call: stale precommit liveness must not rescue the post-commit
@@ -588,11 +592,14 @@ if [[ -n "${WIRE_BROKEN_FIXTURE:-}" ]]; then
     MAIN_LOOKUP="$(remote "${MAIN_ROUTE_ARGS} 2>&1 || true")"
     [[ "$MAIN_LOOKUP" == *"${EGRESS_DEV}"* ]] || void_now env-void
 fi
-# This control differs from the steered probe only by destination port, so the
+# The near miss differs from the steered probe only by destination port, so the
 # committed exact-match FBF term leaves it on the verified main-table route.
-SENT_NEAR_MISS="$($SG "incus exec ${LAN_REF} -- ${REMOTE_PROBE} --src ${LAN_ADDR} --source-port ${PORT} --dst ${DEST_IP} --port ${NEAR_MISS_PORT} --count ${CONTROL_BURST} --tag N --rate ${RATE}" 2>&1 || true)"
-sleep 1
-SENT_PROBE="$($SG "incus exec ${LAN_REF} -- ${REMOTE_PROBE} --src ${LAN_ADDR} --source-port ${PORT} --dst ${DEST_IP} --port ${PORT} --count ${PROBE_BURST} --tag P --rate ${RATE}" 2>&1 || true)"
+SENT_INTERLEAVED="$($SG "incus exec ${LAN_REF} -- ${REMOTE_PROBE} \
+    --src ${LAN_ADDR} --source-port ${PORT} --dst ${DEST_IP} \
+    --port ${PORT} --count ${PROBE_BURST} --tag P --interleave \
+    --interleave-control-port ${NEAR_MISS_PORT} \
+    --interleave-control-count ${CONTROL_BURST} \
+    --interleave-control-tag N --rate ${RATE}" 2>&1 || true)"
 sleep 3
 if ! kill -0 "$CAP_PID" >/dev/null 2>&1; then
     void_now no-prober
@@ -610,9 +617,9 @@ extract_sent() {
     value=$(sed -n "s/.*SENT tag=${tag} count=\([0-9][0-9]*\).*/\1/p" <<<"$text" | tail -1)
     [[ "$value" =~ ^[0-9]+$ ]] && printf '%s\n' "$value" || printf '0\n'
 }
-POFFERED="$(extract_sent P "$SENT_PROBE")"
+POFFERED="$(extract_sent P "$SENT_INTERLEAVED")"
 COFFERED="$(extract_sent C "$SENT_CONTROL")"
-NEAR_MISS_OFFERED="$(extract_sent N "$SENT_NEAR_MISS")"
+NEAR_MISS_OFFERED="$(extract_sent N "$SENT_INTERLEAVED")"
 PLEAKED="$(grep -cE 'P10136:[0-9]+:' "$CAPLOG" 2>/dev/null || true)"
 COBSERVED="$(grep -cE 'C10136:[0-9]+:' "$CAPLOG" 2>/dev/null || true)"
 NEAR_MISS_OBSERVED="$(grep -cE 'N10136:[0-9]+:' "$CAPLOG" 2>/dev/null || true)"
