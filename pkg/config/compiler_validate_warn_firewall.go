@@ -297,10 +297,29 @@ func validateLo0FilterKernelMirrorWarnings(cfg *Config) []string {
 	return warnings
 }
 
+// lo0FilterHookEnforced reports whether the (unit, direction) lo0 hook is
+// consumed by a host plane (#12091). Unit 0 input is the supported host-filter
+// binding. Any other hook is inert unless lo0 is tunnel-backed — either at the
+// interface level or on the bound unit — which makes lo0 a real GRE netdev
+// with enforcing per-ifindex filters.
+func lo0FilterHookEnforced(lo0 *InterfaceConfig, number int, unit *InterfaceUnit, input bool) bool {
+	if lo0 == nil {
+		return false
+	}
+	if number == 0 && input {
+		return true
+	}
+	if lo0.Tunnel != nil {
+		return true
+	}
+	return unit != nil && unit.Tunnel != nil
+}
+
 // validateLo0UnsupportedFilterBindingsWarnings reports lo0 filter bindings the
 // host planes accept in the interface model but do not consume (#12091). The
-// host-filter contract is limited to unit 0 input in inet and inet6; preserve
-// that supported binding and name every other non-empty lo0 hook.
+// host-filter contract is limited to unit 0 input in inet and inet6, plus any
+// hook on a tunnel-backed lo0; preserve those supported bindings and name every
+// other non-empty lo0 hook.
 func validateLo0UnsupportedFilterBindingsWarnings(cfg *Config) []string {
 	if cfg == nil || cfg.Interfaces.Interfaces == nil {
 		return nil
@@ -327,12 +346,12 @@ func validateLo0UnsupportedFilterBindingsWarnings(cfg *Config) []string {
 			{"inet", unit.FilterInputV4, unit.FilterOutputV4},
 			{"inet6", unit.FilterInputV6, unit.FilterOutputV6},
 		} {
-			if number != 0 && family.input != "" {
+			if family.input != "" && !lo0FilterHookEnforced(lo0, number, unit, true) {
 				warnings = append(warnings, fmt.Sprintf(
 					"interfaces lo0 unit %d family %s filter input %q is accepted but NOT enforced by either host plane; only lo0 unit 0 family inet/inet6 filter input is enforced (#12091)",
 					number, family.name, family.input))
 			}
-			if family.output != "" {
+			if family.output != "" && !lo0FilterHookEnforced(lo0, number, unit, false) {
 				warnings = append(warnings, fmt.Sprintf(
 					"interfaces lo0 unit %d family %s filter output %q is accepted but NOT enforced by either host plane; only lo0 unit 0 family inet/inet6 filter input is enforced (#12091)",
 					number, family.name, family.output))
@@ -374,9 +393,9 @@ func validateLo0UnsupportedFilterBindingsWarnings(cfg *Config) []string {
 // previously-accepted committed config.
 //
 // Scope: only filters actually attached to an input/output hook are checked
-// (library/unused filters are skipped to avoid noise). lo0 is covered because
-// it is stored as an ordinary interface unit under
-// cfg.Interfaces.Interfaces["lo0"].
+// (library/unused filters are skipped to avoid noise). lo0 is stored as an
+// ordinary interface unit under cfg.Interfaces.Interfaces["lo0"], but hooks
+// that #12091 classifies as unenforced are excluded from this advice.
 func validateFilterNoCatchAllWarnings(cfg *Config) []string {
 	if cfg == nil {
 		return nil
@@ -404,23 +423,28 @@ func validateFilterNoCatchAllWarnings(cfg *Config) []string {
 			if unit == nil { // #3494: tolerant/HA-sync path may carry a nil unit
 				continue
 			}
-			// (direction label, referenced filter name, resolved filter). The
-			// label mirrors the existing missing-reference warn loop above
-			// (input / input-v6 / output / output-v6). A filter that does not
-			// resolve is left to that loop (missing-reference warning); this
-			// pass only judges a filter that EXISTS and is attached.
+			// (direction label, input flag, referenced filter name, resolved
+			// filter). The label mirrors the existing missing-reference warn
+			// loop above (input / input-v6 / output / output-v6). A filter that
+			// does not resolve is left to that loop (missing-reference warning);
+			// this pass only judges a filter that EXISTS and is attached.
 			type hook struct {
 				dir    string
+				input  bool
 				name   string
 				filter *FirewallFilter
 			}
 			for _, h := range []hook{
-				{"input", unit.FilterInputV4, cfg.Firewall.FiltersInet[unit.FilterInputV4]},
-				{"input-v6", unit.FilterInputV6, cfg.Firewall.FiltersInet6[unit.FilterInputV6]},
-				{"output", unit.FilterOutputV4, cfg.Firewall.FiltersInet[unit.FilterOutputV4]},
-				{"output-v6", unit.FilterOutputV6, cfg.Firewall.FiltersInet6[unit.FilterOutputV6]},
+				{"input", true, unit.FilterInputV4, cfg.Firewall.FiltersInet[unit.FilterInputV4]},
+				{"input-v6", true, unit.FilterInputV6, cfg.Firewall.FiltersInet6[unit.FilterInputV6]},
+				{"output", false, unit.FilterOutputV4, cfg.Firewall.FiltersInet[unit.FilterOutputV4]},
+				{"output-v6", false, unit.FilterOutputV6, cfg.Firewall.FiltersInet6[unit.FilterOutputV6]},
 			} {
 				if h.name == "" || h.filter == nil {
+					continue
+				}
+				if (ifName == "lo0" || ifc.Name == "lo0") &&
+					!lo0FilterHookEnforced(ifc, unitNum, unit, h.input) {
 					continue
 				}
 				if firewallFilterHasCatchAllTerminator(h.filter) {

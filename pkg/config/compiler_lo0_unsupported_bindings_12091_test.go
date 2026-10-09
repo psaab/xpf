@@ -132,6 +132,59 @@ func TestLo0UnitZeroInputFilterRemainsEnforced12091(t *testing.T) {
 	}
 }
 
+func TestLo0TunnelBackedFilterBindingsDoNotWarn12091(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		unit  int
+	}{
+		{
+			name: "interface tunnel",
+			lines: []string{
+				"set interfaces lo0 tunnel mode gre",
+				"set interfaces lo0 tunnel source 192.0.2.1",
+				"set interfaces lo0 tunnel destination 192.0.2.2",
+				"set interfaces lo0 unit 0 family inet filter output v4",
+			},
+			unit: 0,
+		},
+		{
+			name: "unit tunnel",
+			lines: []string{
+				"set interfaces lo0 unit 1 tunnel mode gre",
+				"set interfaces lo0 unit 1 tunnel source 192.0.2.1",
+				"set interfaces lo0 unit 1 tunnel destination 192.0.2.2",
+				"set interfaces lo0 unit 1 family inet filter input v4",
+			},
+			unit: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := compileLo0Set12091(t, tc.lines...)
+			lo0 := cfg.Interfaces.Interfaces["lo0"]
+			if lo0 == nil {
+				t.Fatal("compiled config is missing lo0")
+			}
+			if tc.unit == 0 {
+				if lo0.Tunnel == nil {
+					t.Fatal("interface-level tunnel was not compiled")
+				}
+			} else {
+				unit := lo0.Units[tc.unit]
+				if unit == nil || unit.Tunnel == nil {
+					t.Fatal("unit-level tunnel was not compiled")
+				}
+			}
+			for _, warning := range cfg.Warnings {
+				if strings.Contains(warning, "#12091") {
+					t.Fatalf("tunnel-backed lo0 binding must not warn: %q", warning)
+				}
+			}
+		})
+	}
+}
+
 func fieldLo0Filter12091(unit *InterfaceUnit, field string) string {
 	switch field {
 	case "FilterInputV4":

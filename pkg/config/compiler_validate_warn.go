@@ -1780,9 +1780,9 @@ func ValidateConfig(cfg *Config) []string {
 	// is already covered by validateFilterLossPriorityWarnings above.
 	warnings = append(warnings, validateLo0FilterKernelMirrorWarnings(cfg)...)
 
-	// #12091: only lo0 unit 0 input filters are consumed by the host planes.
-	// Surface other lo0 unit inputs and every lo0 output hook as accepted but
-	// unenforced so a clean commit cannot imply those bindings are active.
+	// #12091: only lo0 unit 0 input filters on ordinary lo0 are consumed by the
+	// host planes. Surface every other hook on an ordinary lo0 as accepted but
+	// unenforced; tunnel-backed lo0 hooks have real per-ifindex enforcement.
 	warnings = append(warnings, validateLo0UnsupportedFilterBindingsWarnings(cfg)...)
 
 	// #3295: a firewall filter attached to an interface/lo0 input/output hook
