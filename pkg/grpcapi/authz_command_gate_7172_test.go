@@ -292,13 +292,17 @@ func TestEmptyDenyPatternDeniesEverything7172(t *testing.T) {
 // Keep the reboot regression under its own fixture. The zone-pair assertion
 // uses the separate summary-only fixture below, so a GetZonePairSummary
 // mis-charge as `request system reboot` is admitted and fails that assertion.
+// The summary deny's anchors are load-bearing: they make this fixture deny
+// only the canonical summary command. Without them, `show security flow
+// session` (the detail charge) would also match, so the zone-pair denial arm
+// alone would accept a detail-command mis-charge.
 const authzDenyConfig7172 = `
 system {
     host-name authz-deny-test;
     login {
         class limited {
             permissions all;
-            deny-commands "^request system reboot$";
+            deny-commands "request system reboot";
         }
         user opsuser {
             class limited;
@@ -340,6 +344,12 @@ func TestAuthorizeRPCEnforcesDenyCommandsEndToEnd7172(t *testing.T) {
 			"ActiveConfig", ok, err)
 	}
 	_ = rules
+	if _, summaryOK, summaryErr := config.OperationalLoginRegexesFor(
+		summaryServer.activeConfig(), "limited"); summaryErr != nil || !summaryOK {
+		t.Fatalf("the summary-only class must yield compiled rules (ok=%v err=%v); "+
+			"without this the zone-pair denial could pass against a config that "+
+			"never held the deny", summaryOK, summaryErr)
+	}
 
 	// DENIED by the command regex, through the real authorization path.
 	if err := s.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly), full,
@@ -347,10 +357,10 @@ func TestAuthorizeRPCEnforcesDenyCommandsEndToEnd7172(t *testing.T) {
 		t.Error("SystemAction{reboot} maps to `request system reboot`, which this class " +
 			"denies — authorizeRPC admitted it, so the command gate is not reached")
 	}
-	// A separate summary-only class denies the zone-pair RPC. The admitted
-	// detail/inventory controls remain under the reboot-only fixture above.
-	// Together these acceptance rows pin the zone-pair charge to the canonical
-	// session-summary command, not policy simulation.
+	// The summary-only class denies the zone-pair RPC but must still admit the
+	// detail and inventory reads. Because every arm uses summaryServer, a broad
+	// summary deny or a GetSessions mis-charge to summary fails here; the denied
+	// GetZonePairSummary arm distinguishes the summary charge from policy simulation.
 	zoneSummaryMethod := "/" + pb.BpfrxService_ServiceDesc.ServiceName + "/GetZonePairSummary"
 	if err := summaryServer.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly), zoneSummaryMethod,
 		&pb.GetZonePairSummaryRequest{}); status.Code(err) != codes.PermissionDenied {
@@ -358,19 +368,21 @@ func TestAuthorizeRPCEnforcesDenyCommandsEndToEnd7172(t *testing.T) {
 			status.Code(err), err)
 	}
 	sessionsMethod := "/" + pb.BpfrxService_ServiceDesc.ServiceName + "/GetSessions"
-	if err := s.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly), sessionsMethod,
+	if err := summaryServer.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly), sessionsMethod,
 		&pb.GetSessionsRequest{}); err != nil {
-		t.Errorf("GetSessions is charged to the detail command and must remain admitted: %v", err)
+		t.Errorf("GetSessions is charged to the detail command and must remain admitted "+
+			"under the summary-only deny: %v", err)
 	}
 
 	zonesMethod := "/" + pb.BpfrxService_ServiceDesc.ServiceName + "/GetZones"
-	if err := s.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly), zonesMethod,
+	if err := summaryServer.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly), zonesMethod,
 		&pb.GetZonesRequest{}); err != nil {
-		t.Errorf("GetZones is not covered by the session deny and must remain admitted: %v", err)
+		t.Errorf("GetZones is not covered by the summary-only deny and must remain admitted: %v", err)
 	}
 
-	// ADMITTED: existing non-session control retained as well: same class, same
-	// coarse permission, command regex does not cover `show version`.
+	// ADMITTED: existing non-session control on the reboot-only fixture. The
+	// command regex does not cover `show version`; without this arm, the reboot
+	// denial could be consistent with the gate refusing every command here.
 	if err := s.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly),
 		"/"+pb.BpfrxService_ServiceDesc.ServiceName+"/GetStatus",
 		&pb.GetStatusRequest{}); err != nil {

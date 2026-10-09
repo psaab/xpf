@@ -242,7 +242,8 @@ func TestTheREADPathConsultsTheCommandGate9952(t *testing.T) {
 	}
 
 	// REFERENCE ARM, in the same run and through the same middleware: a read the
-	// class's regex does NOT cover must still be served.
+	// class's regex does NOT cover must still be served. Without it a 403 above
+	// is equally consistent with a guard that refuses this principal everything.
 	allowed := runGuardedConfigRead9324(t, s, "/api/v1/security/zones")
 	if allowed.Code != 200 {
 		t.Fatalf("GET /api/v1/security/zones -> %d, want 200: a command the regex does not "+
