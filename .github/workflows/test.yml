@@ -47,7 +47,8 @@ jobs:
       image: debian:forky
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      # Install first: the forky image ships no git, and checkout@v4 falls
+      # back to a metadata-less archive when git is missing.
       - name: Install native dependencies
         run: |
           apt-get update
@@ -55,16 +56,14 @@ jobs:
             bash \
             build-essential \
             ca-certificates \
-            clang \
-            cmake \
             curl \
             git \
             libelf-dev \
             libxdp-dev \
-            nodejs \
             pkg-config \
             zlib1g-dev \
             libzstd-dev
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.1
