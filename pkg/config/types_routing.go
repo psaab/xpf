@@ -350,6 +350,10 @@ type StaticRoute struct {
 	// commit-time diagnostics after compileStaticRoutes folds them by masked
 	// prefix. It is compiler-only and deliberately omitted from the helper wire.
 	destinationAliases []string       `json:"-"`
+	// crossCollectionNextTableTargets records competing table targets found
+	// across bare-static and inet6.0 lists. The tolerant compiler keeps one
+	// last-writer route after warning; strict validation rejects the marker.
+	crossCollectionNextTableTargets []string `json:"-"`
 	NextHops           []NextHopEntry // preference/metric tiers; equal tiers form ECMP
 	Discard            bool           // null route (blackhole): silently drop matching traffic
 	// Reject installs an unreachable route: matching traffic is dropped AND an

@@ -1098,6 +1098,12 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 		return nil, err
 	}
 
+	// #12084 Astra R2: compileStaticRoutes keeps bare static and rib inet6.0
+	// collections separate, but the snapshot maps IPv6 destinations from both
+	// into the same effective table. Fold aliases before any typed routing
+	// validators inspect one collection at a time.
+	canonicalizeStaticRoutesAcrossTables(cfg)
+
 	// P6b (#4406 step 4): uniform fail-open validation gates. Extracted into
 	// runUniformGates (compiler_uniformgates.go) — the long contiguous run of
 	// ~75 independent validators, each of which returns the FIRST strict error

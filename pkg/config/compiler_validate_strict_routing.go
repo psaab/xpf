@@ -1319,42 +1319,83 @@ func staticRouteDispositionConflict(sr *StaticRoute) string {
 //
 // Strict on commit / commit-check (hard reject so the contradiction is
 // operator-visible); the call site downgrades this to a warning on the tolerant
-// load / peer-sync path (opts.lenientRouteDispositionConflict, #1960) so an
-// already-persisted or peer-synced config still BOOTS — the dataplane then
-// resolves the deterministic disposition precedence. Global inet.0/inet6.0 are
-// walked first, then each routing-instance's routes in RoutingInstances order,
-// so the first-reported error is deterministic. Mirrors
-// validateNextTableTargetReferencesStrict.
+// load / peer-sync path so an already-persisted or peer-synced config still
+// BOOTS — the dataplane then resolves the deterministic disposition precedence.
+// Global inet.0/inet6.0 collections are checked as one effective-table scope,
+// then each routing-instance's collections together in RoutingInstances order.
+// Cross-collection aliases fold to one route before this gate; competing
+// next-table targets are retained as compiler-only conflict metadata.
+func staticRouteDestinationNames(sr *StaticRoute) string {
+	if sr == nil {
+		return `""`
+	}
+	destinationNames := fmt.Sprintf("%q", sr.Destination)
+	for _, alias := range sr.destinationAliases {
+		destinationNames += fmt.Sprintf(" (also authored as %q)", alias)
+	}
+	return destinationNames
+}
+
 func validateStaticRouteDispositionConflictStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
 	}
-	check := func(scope string, routes []*StaticRoute) error {
-		for _, sr := range routes {
-			conflict := staticRouteDispositionConflict(sr)
-			if conflict == "" {
-				continue
+	check := func(scope string, routeSets ...[]*StaticRoute) error {
+		seenTargets := make(map[string]*StaticRoute)
+		for _, routes := range routeSets {
+			for _, sr := range routes {
+				if sr == nil {
+					continue
+				}
+				if len(sr.crossCollectionNextTableTargets) > 1 {
+					targets := make([]string, len(sr.crossCollectionNextTableTargets))
+					for i, target := range sr.crossCollectionNextTableTargets {
+						targets[i] = fmt.Sprintf("%q", target)
+					}
+					return fmt.Errorf(
+						"%s %s has competing next-table targets %s for one masked "+
+							"destination prefix",
+						scope, staticRouteDestinationNames(sr),
+						strings.Join(targets, " and "))
+				}
+				key := staticRouteMergeKey(sr.Destination)
+				if (strings.HasPrefix(key, "v4\x00") || strings.HasPrefix(key, "v6\x00")) {
+					if previous, exists := seenTargets[key]; exists {
+						if previous.NextTable != "" && sr.NextTable != "" &&
+							previous.NextTable != sr.NextTable {
+							return fmt.Errorf(
+								"%s %s and %s have competing next-table targets %q and %q "+
+									"for one masked destination prefix",
+								scope, staticRouteDestinationNames(previous),
+								staticRouteDestinationNames(sr), previous.NextTable, sr.NextTable)
+						}
+						if previous.NextTable == "" && sr.NextTable != "" {
+							seenTargets[key] = sr
+						}
+					} else {
+						seenTargets[key] = sr
+					}
+				}
+
+				conflict := staticRouteDispositionConflict(sr)
+				if conflict == "" {
+					continue
+				}
+				return fmt.Errorf(
+					"%s %s defines contradictory dispositions (%s) for one "+
+						"destination prefix; a static route may carry only ONE of "+
+						"next-hop, next-table, discard, or reject (repeated "+
+						"same-prefix `set` lines merge into a single route). Split "+
+						"the destinations or keep one disposition — otherwise the "+
+						"dataplane silently resolves the terminal/leak action and "+
+						"ignores the forwarding next-hop",
+					scope, staticRouteDestinationNames(sr), conflict)
 			}
-			destinationNames := fmt.Sprintf("%q", sr.Destination)
-			for _, alias := range sr.destinationAliases {
-				destinationNames += fmt.Sprintf(" (also authored as %q)", alias)
-			}
-			return fmt.Errorf(
-				"%s %s defines contradictory dispositions (%s) for one "+
-					"destination prefix; a static route may carry only ONE of "+
-					"next-hop, next-table, discard, or reject (repeated "+
-					"same-prefix `set` lines merge into a single route). Split "+
-					"the destinations or keep one disposition — otherwise the "+
-					"dataplane silently resolves the terminal/leak action and "+
-					"ignores the forwarding next-hop",
-				scope, destinationNames, conflict)
 		}
 		return nil
 	}
-	if err := check("routing-options static route", cfg.RoutingOptions.StaticRoutes); err != nil {
-		return err
-	}
-	if err := check("routing-options static route", cfg.RoutingOptions.Inet6StaticRoutes); err != nil {
+	if err := check("routing-options static route",
+		cfg.RoutingOptions.StaticRoutes, cfg.RoutingOptions.Inet6StaticRoutes); err != nil {
 		return err
 	}
 	for _, ri := range cfg.RoutingInstances {
@@ -1362,10 +1403,7 @@ func validateStaticRouteDispositionConflictStrict(cfg *Config) error {
 			continue
 		}
 		scope := fmt.Sprintf("routing-instances %s static route", ri.Name)
-		if err := check(scope, ri.StaticRoutes); err != nil {
-			return err
-		}
-		if err := check(scope, ri.Inet6StaticRoutes); err != nil {
+		if err := check(scope, ri.StaticRoutes, ri.Inet6StaticRoutes); err != nil {
 			return err
 		}
 	}

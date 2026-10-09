@@ -1518,9 +1518,10 @@ type compileOpts struct {
 	// from a hard compile error to a cfg.Warnings entry. Repeated same-prefix
 	// static-route `set` lines merge into a single StaticRoute
 	// (compileStaticRoutes) with appended next-hops and sticky terminal /
-	// next-table fields, so declaring one prefix as `discard` (or `next-table X`)
-	// AND with a `next-hop` compiled into one route holding both a blackhole /
-	// leak and a forwarding next-hop. The strict commit / commit-check path
+	// next-table fields. Aliases split between bare static and inet6.0 lists
+	// are folded before routing gates; merged routes carrying multiple
+	// dispositions and cross-list competing next-table targets are rejected
+	// instead of publishing contradictory actions or duplicate leaks.
 	// hard-rejects so the contradiction is operator-visible; the tolerant load /
 	// peer-sync paths warn so an already-persisted or peer-synced config still
 	// BOOTS (#1960) — the dataplane resolves the deterministic disposition

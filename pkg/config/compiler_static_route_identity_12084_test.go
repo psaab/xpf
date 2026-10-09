@@ -172,3 +172,103 @@ func TestStaticRouteIdentityAliasLegitAccepted_12084(t *testing.T) {
 		}
 	})
 }
+
+func TestStaticRouteCrossCollectionIdentityRejected_12084(t *testing.T) {
+	t.Run("global-bare-static-and-inet6-rib", func(t *testing.T) {
+		tree := flatTreeFromSets(t,
+			"set routing-options static route 2001:db8::/32 discard",
+			"set routing-options rib inet6.0 static route 2001:DB8:0:0:0:0:0:0/32 next-hop 2001:db8::1",
+		)
+		_, err := CompileConfig(tree)
+		if err == nil {
+			t.Fatal("expected cross-collection disposition conflict to reject")
+		}
+		for _, want := range []string{
+			"contradictory dispositions",
+			"2001:db8::/32",
+			"2001:DB8:0:0:0:0:0:0/32",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q does not mention %q", err.Error(), want)
+			}
+		}
+	})
+
+	t.Run("blue-instance-bare-static-and-inet6-rib", func(t *testing.T) {
+		tree := flatTreeFromSets(t,
+			"set routing-instances blue instance-type virtual-router",
+			"set routing-instances blue routing-options static route 2001:db8::/32 discard",
+			"set routing-instances blue routing-options rib blue.inet6.0 static route 2001:DB8:0:0:0:0:0:0/32 next-hop 2001:db8::1",
+		)
+		_, err := CompileConfig(tree)
+		if err == nil {
+			t.Fatal("expected blue-instance cross-collection conflict to reject")
+		}
+		for _, want := range []string{
+			"contradictory dispositions",
+			"routing-instances blue",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q does not mention %q", err.Error(), want)
+			}
+		}
+	})
+
+	t.Run("competing-next-table-targets", func(t *testing.T) {
+		tree := flatTreeFromSets(t,
+			"set routing-instances aaa instance-type virtual-router",
+			"set routing-instances zzz instance-type virtual-router",
+			"set interfaces ge-0/0/0 unit 0",
+			"set routing-options static route 2001:db8::/32 next-table aaa.inet6.0",
+			"set routing-options rib inet6.0 static route 2001:DB8:0:0:0:0:0:0/32 next-table zzz.inet6.0",
+		)
+		_, err := CompileConfig(tree)
+		if err == nil {
+			t.Fatal("expected aliases with competing next-table targets to reject")
+		}
+		for _, want := range []string{"competing next-table targets", "aaa", "zzz"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q does not mention %q", err.Error(), want)
+			}
+		}
+		lenientCfg, err := CompileConfigLenient(tree)
+		if err != nil {
+			t.Fatalf("lenient compilation should warn but keep one route: %v", err)
+		}
+		routes := append(
+			append([]*StaticRoute(nil), lenientCfg.RoutingOptions.StaticRoutes...),
+			lenientCfg.RoutingOptions.Inet6StaticRoutes...)
+		if len(routes) != 1 || routes[0].NextTable != "zzz" {
+			t.Fatalf("lenient cross-container routes = %+v, want one last-writer target zzz", routes)
+		}
+		warned := false
+		for _, warning := range lenientCfg.Warnings {
+			if strings.Contains(warning, "competing next-table targets") {
+				warned = true
+				break
+			}
+		}
+		if !warned {
+			t.Fatalf("lenient compile did not warn about competing targets: %v", lenientCfg.Warnings)
+		}
+	})
+
+	t.Run("global-and-blue-scopes-remain-isolated", func(t *testing.T) {
+		tree := flatTreeFromSets(t,
+			"set routing-instances blue instance-type virtual-router",
+			"set routing-options static route 2001:db8::/32 discard",
+			"set routing-instances blue routing-options rib blue.inet6.0 static route 2001:DB8:0:0:0:0:0:0/32 next-hop 2001:db8::1",
+		)
+		assertCommitAccepts(t, tree)
+	})
+
+	t.Run("different-routing-instances-remain-isolated", func(t *testing.T) {
+		tree := flatTreeFromSets(t,
+			"set routing-instances blue instance-type virtual-router",
+			"set routing-instances red instance-type virtual-router",
+			"set routing-instances blue routing-options static route 2001:db8::/32 discard",
+			"set routing-instances red routing-options rib red.inet6.0 static route 2001:DB8:0:0:0:0:0:0/32 next-hop 2001:db8::1",
+		)
+		assertCommitAccepts(t, tree)
+	})
+}

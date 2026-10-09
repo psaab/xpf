@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -267,12 +268,41 @@ func staticNextHopEntry(raw, iface string) NextHopEntry {
 // not by the exact CIDR spelling authored in the config. Keep the raw value as
 // a fallback for malformed input; strict validation reports those before the
 // compiled routes are used.
+//
+// The key is FAMILY-PRESERVING: netip keeps an IPv4-mapped IPv6 prefix
+// (::ffff:192.0.2.0/120) in the 128-bit space while net.ParseCIDR folds it to
+// the 32-bit "192.0.2.0/24", so keying on prefix.String() merged a native-IPv4
+// route with a mapped-IPv6 route and silently dropped the second disposition
+// (#12084 Astra R1). Prefixing the masked identity with its family keeps them
+// distinct even where their normalized address text could coincide.
 func staticRouteMergeKey(destination string) string {
-	_, prefix, err := net.ParseCIDR(destination)
-	if err != nil {
-		return destination
+	if prefix, err := netip.ParsePrefix(destination); err == nil {
+		masked := prefix.Masked()
+		if masked.Addr().Is6() {
+			return "v6\x00" + masked.String()
+		}
+		return "v4\x00" + masked.String()
 	}
-	return prefix.String()
+	if _, prefix, err := net.ParseCIDR(destination); err == nil {
+		// Keep accepting mask spellings supported by net.ParseCIDR but not
+		// netip.ParsePrefix (for example, a zero-padded prefix length).
+		if slash := strings.LastIndexByte(destination, '/'); slash >= 0 {
+			if addr, err := netip.ParseAddr(destination[:slash]); err == nil {
+				bits, _ := prefix.Mask.Size()
+				masked := netip.PrefixFrom(addr, bits).Masked()
+				if masked.Addr().Is6() {
+					return "v6\x00" + masked.String()
+				}
+				return "v4\x00" + masked.String()
+			}
+		}
+		family := "v4\x00"
+		if strings.Contains(destination, ":") {
+			family = "v6\x00"
+		}
+		return family + prefix.String()
+	}
+	return destination
 }
 
 func appendStaticRouteDestinationAlias(route *StaticRoute, destination string) {
@@ -285,6 +315,152 @@ func appendStaticRouteDestinationAlias(route *StaticRoute, destination string) {
 		}
 	}
 	route.destinationAliases = append(route.destinationAliases, destination)
+}
+
+func appendStaticRouteNextTableConflict(route *StaticRoute, target string) {
+	if route == nil || target == "" {
+		return
+	}
+	for _, existing := range route.crossCollectionNextTableTargets {
+		if existing == target {
+			return
+		}
+	}
+	route.crossCollectionNextTableTargets = append(
+		route.crossCollectionNextTableTargets, target)
+}
+
+func mergeStaticRouteIdentity(existing, route *StaticRoute) {
+	if existing == nil || route == nil || existing == route {
+		return
+	}
+	appendStaticRouteDestinationAlias(existing, route.Destination)
+	for _, alias := range route.destinationAliases {
+		appendStaticRouteDestinationAlias(existing, alias)
+	}
+	for _, target := range route.crossCollectionNextTableTargets {
+		appendStaticRouteNextTableConflict(existing, target)
+	}
+	existing.NextHops = append(existing.NextHops, route.NextHops...)
+	if route.Discard {
+		existing.Discard = true
+	}
+	if route.Reject {
+		existing.Reject = true
+	}
+	if route.NoInstall {
+		existing.NoInstall = true
+	}
+	// #9125: HasPreference, not `!= 5`. The old test could not tell an
+	// operator who wrote `preference 5` from one who wrote nothing,
+	// because 5 is also the compiler's own default -- so an explicit 5
+	// in a later block was silently dropped while any other value applied.
+	if route.HasPreference {
+		existing.Preference = route.Preference
+		existing.HasPreference = true
+	}
+	if route.NextTable != "" {
+		existing.NextTable = route.NextTable
+		existing.NextTableRaw = route.NextTableRaw
+	}
+}
+
+// canonicalizeStaticRouteCollections folds aliases split between bare static
+// and rib inet6.0 route lists. The snapshot normalizes by destination family,
+// so an IPv6 route in the bare list and its inet6.0 alias are one effective
+// route. Keep each survivor in its original collection to avoid changing
+// unrelated consumers' list semantics; separate routing-instance calls keep
+// otherwise-identical routes isolated.
+//
+// Competing cross-collection targets are recorded as compiler-only conflict
+// metadata while the route itself folds to one deterministic last-writer row.
+// The strict gate rejects the metadata; the tolerant gate warns and leaves the
+// single row available to snapshots. Within one collection, the existing
+// compileStaticRoutes last-writer-wins behavior remains unchanged.
+func canonicalizeStaticRouteCollections(
+	staticRoutes, inet6Routes []*StaticRoute,
+) ([]*StaticRoute, []*StaticRoute) {
+	if len(staticRoutes) == 0 || len(inet6Routes) == 0 {
+		return staticRoutes, inet6Routes
+	}
+	type candidate struct {
+		route       *StaticRoute
+		isInet6List bool
+	}
+	byIdentity := make(map[string][]candidate)
+	mergedStatic := make([]*StaticRoute, 0, len(staticRoutes))
+	mergedInet6 := make([]*StaticRoute, 0, len(inet6Routes))
+
+	add := func(routes []*StaticRoute, isInet6List bool) {
+		for _, route := range routes {
+			key := ""
+			if route != nil {
+				key = staticRouteMergeKey(route.Destination)
+			}
+			if !strings.HasPrefix(key, "v4\x00") && !strings.HasPrefix(key, "v6\x00") {
+				if isInet6List {
+					mergedInet6 = append(mergedInet6, route)
+				} else {
+					mergedStatic = append(mergedStatic, route)
+				}
+				continue
+			}
+
+			merged := false
+			for _, prior := range byIdentity[key] {
+				if prior.route == route {
+					merged = true
+					break
+				}
+				// Preserve cross-container target conflicts for the strict gate
+				// while still coalescing to one last-writer row on the tolerant
+				// path, avoiding duplicate same-priority snapshots.
+				if prior.isInet6List != isInet6List &&
+					prior.route.NextTable != "" && route.NextTable != "" &&
+					prior.route.NextTable != route.NextTable {
+					appendStaticRouteNextTableConflict(
+						prior.route, prior.route.NextTable)
+					appendStaticRouteNextTableConflict(prior.route, route.NextTable)
+				}
+				mergeStaticRouteIdentity(prior.route, route)
+				merged = true
+				break
+			}
+			if merged {
+				continue
+			}
+
+			byIdentity[key] = append(byIdentity[key], candidate{
+				route: route, isInet6List: isInet6List,
+			})
+			if isInet6List {
+				mergedInet6 = append(mergedInet6, route)
+			} else {
+				mergedStatic = append(mergedStatic, route)
+			}
+		}
+	}
+	add(staticRoutes, false)
+	add(inet6Routes, true)
+	return mergedStatic, mergedInet6
+}
+
+func canonicalizeStaticRoutesAcrossTables(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.RoutingOptions.StaticRoutes, cfg.RoutingOptions.Inet6StaticRoutes =
+		canonicalizeStaticRouteCollections(
+			cfg.RoutingOptions.StaticRoutes,
+			cfg.RoutingOptions.Inet6StaticRoutes,
+		)
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil {
+			continue
+		}
+		ri.StaticRoutes, ri.Inet6StaticRoutes = canonicalizeStaticRouteCollections(
+			ri.StaticRoutes, ri.Inet6StaticRoutes)
+	}
 }
 
 // compileStaticRoutes parses static route entries from a "static" node,
@@ -533,33 +709,10 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 			}
 		}
 
-		// Merge routes with the same destination (flat "set" syntax creates duplicates).
+		// Merge routes with the same family-preserving masked destination
+		// (flat "set" syntax creates duplicates).
 		if idx, exists := destIdx[staticRouteMergeKey(route.Destination)]; exists {
-			existingRoute := existing[idx]
-			appendStaticRouteDestinationAlias(existingRoute, route.Destination)
-			existingRoute.NextHops = append(existingRoute.NextHops, route.NextHops...)
-			if route.Discard {
-				existingRoute.Discard = true
-			}
-			if route.Reject {
-				existingRoute.Reject = true
-			}
-			if route.NoInstall {
-				existingRoute.NoInstall = true
-			}
-			// #9125: HasPreference, not `!= 5`. The old test could not tell an
-			// operator who wrote `preference 5` from one who wrote nothing,
-			// because 5 is also the compiler's own default -- so an explicit 5
-			// in a later block was silently dropped while any other value
-			// applied.
-			if route.HasPreference {
-				existingRoute.Preference = route.Preference
-				existingRoute.HasPreference = true
-			}
-			if route.NextTable != "" {
-				existingRoute.NextTable = route.NextTable
-				existingRoute.NextTableRaw = route.NextTableRaw
-			}
+			mergeStaticRouteIdentity(existing[idx], route)
 		} else {
 			destIdx[staticRouteMergeKey(route.Destination)] = len(existing)
 			existing = append(existing, route)
