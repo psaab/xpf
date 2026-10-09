@@ -2104,25 +2104,27 @@ never lock an operator out of a remote box it manages.
   explicit `system management-interface` leaf are NEVER marked Unmanaged /
   always-down / address-stripped, even on an empty/absent/rolled-back config.
   An explicit non-fxp0 leaf narrows fxp0 off the auto-protection.
-- **First-commit rollback** (`enterBootstrapMode`): a timed-out first
-  `commit confirmed` stops+discards the NAT pool-alarm monitor (#2114 — the
-  reason is NOT a data race: `dpCell` is an `atomic.Pointer`, so a
-  concurrent load against a later re-arm's clear is well-defined. The
-  reason is that a surviving sampler would keep issuing control-socket
-  calls into a backend the rollback has just torn down. The monitor is
-  rebuilt fresh on a corrected re-arm because it is not restartable after
-  `Stop`), retires config-driven `.network` files while keeping `.link` rename
-  files. Before the first config's networkd reconcile, bootstrap exit snapshots
-  `fxp0.network` only when it carries the bootstrap-lifeline marker. Rollback
-  retains that marked content or restores its exact snapshot if networkd
-  replaced it; with no validated snapshot, unmarked fxp0 content is retained
-  and teardown reports DEGRADED rather than risk management reachability.
+- **First-commit rollback** (`executeConfirmedRollback` → `enterBootstrapMode`):
+  a timed-out first `commit confirmed` stops+discards the NAT pool-alarm monitor
+  (#2114 — the reason is not a data race: `dpCell` is an `atomic.Pointer`, but
+  a surviving sampler would keep issuing control-socket calls into the detached
+  backend), stops the abandoned config's DHCP clients, and retires
+  config-driven `.network` files while keeping `.link` rename files. Bootstrap
+  exit snapshots `fxp0.network` before the first config's networkd reconcile,
+  only when it carries the bootstrap-lifeline marker. That snapshot is restored
+  only for the genuine first-commit rollback; a later #9615 safe-state entry on
+  a committed box never rewrites `fxp0` from the day-0 snapshot. Confirmation
+  of the first-commit window clears the in-memory snapshot.
+
+  The snapshot is process-local, not durable. If xpfd restarts while the
+  first-commit window is pending, a marked lifeline may be retained; if the
+  file is missing/unmarked, rollback reports DEGRADED rather than claiming
+  restoration. It cannot recreate the original bytes from the prior process.
   Each successful file removal or restoration triggers `networkctl reload`;
   teardown then clears FRR and detaches the dataplane instead of applying an
   empty config. The store persists the never-committed marker so a restart
-  re-enters bootstrap. The detach also drops the #5275 armed flag and closes kernel
-  transit forwarding: the node is un-armed by that step, so leaving
-  `ip_forward=1` would let the next apply tail keep routing transit for a
+  re-enters bootstrap. The detach also drops the #5275 armed flag and closes
+  kernel transit forwarding: leaving `ip_forward=1` would route transit for a
   dataplane that is no longer attached.
 
 ## Notable gotchas
