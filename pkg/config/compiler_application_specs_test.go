@@ -671,3 +671,31 @@ func TestApplicationSpec_ShadowedPredefinedBundleMember_AppIDOnControl(t *testin
 		t.Fatalf("error %q must name malformed application junos-sip-tcp and destination-port", err.Error())
 	}
 }
+
+// A user application shadows a predefined bundle with the same name: the
+// strict walk must check user applications BEFORE predefined sets (matching
+// the runtime's ResolveApplication-then-ResolveApplicationSet order). This
+// pins that precedence — moving the PredefinedApplicationSets branch ahead of
+// the user-app check would expand junos-sip to its predefined members, collect
+// nothing user-defined, and commit green while the runtime resolves the
+// malformed user app first and poisons at apply.
+func TestApplicationSpec_UserAppBeforePredefinedSet_AppIDOffRejectsAtCommit(t *testing.T) {
+	tree := flatTreeFromSets(t,
+		"set applications application junos-sip protocol tcp",
+		"set applications application junos-sip destination-port nope",
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
+		"set security policies from-zone trust to-zone untrust policy p match source-address any",
+		"set security policies from-zone trust to-zone untrust policy p match destination-address any",
+		"set security policies from-zone trust to-zone untrust policy p match application junos-sip",
+		"set security policies from-zone trust to-zone untrust policy p then deny",
+	)
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("expected commit to reject malformed user application junos-sip shadowing the predefined junos-sip bundle")
+	}
+	if !strings.Contains(err.Error(), "junos-sip") ||
+		!strings.Contains(err.Error(), "destination-port") {
+		t.Fatalf("error %q must name user application junos-sip and destination-port", err.Error())
+	}
+}

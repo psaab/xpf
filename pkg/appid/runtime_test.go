@@ -115,11 +115,11 @@ func TestCatalogNamesIncludesNATOnlyAppRefs(t *testing.T) {
 //
 // Scope note (#2187 / #3626): the strict walk collects source/destination-NAT
 // `match application` references AND — since #3626 — so does CatalogNames. The
-// fixture now carries a NAT-only user-app reference ("nat-app", referenced by a
-// destination-NAT rule and by NO security policy) so the equality PINS the NAT
-// walk too: before #3626 CatalogNames dropped nat-app and this equality broke;
-// after #3626 both walks include it. The compiler-package tests exercise the
-// commit-gate side of the same NAT reference.
+// fixture carries a NAT-only user-app reference ("nat-app"), pinning the NAT
+// walk too (CatalogNames omitted it before #3626). It also references predefined
+// `junos-sip` with user-defined `junos-sip-tcp`, pinning bundle expansion in both
+// walks. The compiler-package tests exercise the commit-gate side of the NAT
+// reference.
 func TestStrictValidationSetMatchesCatalogNames(t *testing.T) {
 	cfg := &config.Config{
 		Applications: config.ApplicationsConfig{
@@ -130,6 +130,8 @@ func TestStrictValidationSetMatchesCatalogNames(t *testing.T) {
 				"set-app": {Name: "set-app", Protocol: "udp", DestinationPort: "1234"},
 				// referenced ONLY by a destination-NAT rule (#3626)
 				"nat-app": {Name: "nat-app", Protocol: "tcp", DestinationPort: "2222"},
+				// user-defined member reached through the predefined junos-sip bundle
+				"junos-sip-tcp": {Name: "junos-sip-tcp", Protocol: "tcp", DestinationPort: "5060"},
 				// not referenced anywhere — must appear in NEITHER walk
 				"unref-app": {Name: "unref-app", Protocol: "tcp", DestinationPort: "9000"},
 			},
@@ -145,6 +147,7 @@ func TestStrictValidationSetMatchesCatalogNames(t *testing.T) {
 				{
 					Policies: []*config.Policy{
 						{Match: config.PolicyMatch{Applications: []string{"direct-app"}}},
+						{Match: config.PolicyMatch{Applications: []string{"junos-sip"}}},
 						{Match: config.PolicyMatch{Applications: []string{"web-set"}}},
 					},
 				},
@@ -191,8 +194,11 @@ func TestStrictValidationSetMatchesCatalogNames(t *testing.T) {
 	if _, ok := strict["nat-app"]; !ok {
 		t.Fatal("NAT-only app reference must be in the strict-validation set")
 	}
-	if len(strict) != 3 {
-		t.Fatalf("expected exactly {direct-app, nat-app, set-app} in strict set, got %v", sortedKeys(strict))
+	if _, ok := strict["junos-sip-tcp"]; !ok {
+		t.Fatal("user-defined member of the predefined junos-sip bundle must be in the strict-validation set")
+	}
+	if len(strict) != 4 {
+		t.Fatalf("expected exactly {direct-app, junos-sip-tcp, nat-app, set-app} in strict set, got %v", sortedKeys(strict))
 	}
 }
 
