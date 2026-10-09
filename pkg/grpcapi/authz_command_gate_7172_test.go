@@ -288,13 +288,32 @@ func TestEmptyDenyPatternDeniesEverything7172(t *testing.T) {
 // the RPC and anything refused here is refused by the COMMAND regex and nothing
 // else. That separation is the point: a denial from the coarse gate would prove
 // nothing about this one.
+//
+// Keep the reboot regression under its own fixture. The zone-pair assertion
+// uses the separate summary-only fixture below, so a GetZonePairSummary
+// mis-charge as `request system reboot` is admitted and fails that assertion.
 const authzDenyConfig7172 = `
 system {
     host-name authz-deny-test;
     login {
         class limited {
             permissions all;
-            deny-commands "request system reboot|show security flow session summary";
+            deny-commands "^request system reboot$";
+        }
+        user opsuser {
+            class limited;
+        }
+    }
+}
+`
+
+const authzSummaryDenyConfig7172 = `
+system {
+    host-name authz-summary-deny-test;
+    login {
+        class limited {
+            permissions all;
+            deny-commands "^show security flow session summary$";
         }
         user opsuser {
             class limited;
@@ -306,6 +325,7 @@ system {
 func TestAuthorizeRPCEnforcesDenyCommandsEndToEnd7172(t *testing.T) {
 	usePasswdFixture5278(t)
 	s := NewServer("127.0.0.1:0", Config{Store: authzStore5278(t, authzDenyConfig7172)})
+	summaryServer := NewServer("127.0.0.1:0", Config{Store: authzStore5278(t, authzSummaryDenyConfig7172)})
 	full := "/" + pb.BpfrxService_ServiceDesc.ServiceName + "/SystemAction"
 
 	// PRECONDITION: the class committed and carries the pattern. Without this
@@ -327,11 +347,12 @@ func TestAuthorizeRPCEnforcesDenyCommandsEndToEnd7172(t *testing.T) {
 		t.Error("SystemAction{reboot} maps to `request system reboot`, which this class " +
 			"denies — authorizeRPC admitted it, so the command gate is not reached")
 	}
-	// The same class denies the live session summary RPC but retains access to
-	// zone inventory. These are the #12096 acceptance rows: the zone-pair scan
-	// is charged to the canonical session-summary command, not policy simulation.
+	// A separate summary-only class denies the zone-pair RPC. The admitted
+	// detail/inventory controls remain under the reboot-only fixture above.
+	// Together these acceptance rows pin the zone-pair charge to the canonical
+	// session-summary command, not policy simulation.
 	zoneSummaryMethod := "/" + pb.BpfrxService_ServiceDesc.ServiceName + "/GetZonePairSummary"
-	if err := s.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly), zoneSummaryMethod,
+	if err := summaryServer.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly), zoneSummaryMethod,
 		&pb.GetZonePairSummaryRequest{}); status.Code(err) != codes.PermissionDenied {
 		t.Errorf("GetZonePairSummary denial code = %s, want PermissionDenied (err=%v)",
 			status.Code(err), err)
