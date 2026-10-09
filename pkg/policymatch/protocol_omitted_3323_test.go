@@ -37,7 +37,7 @@ func protoConstrainedAppCfg() *config.Config {
 
 // TestProtoConstrainedAppOmittedQueryProtoNoMatchDespitePermittedCompletion
 // pins #3323 and documents the mixed omission semantics in #12227: a partly
-// specified query without protocol fails closed for junos-http, even though the
+// specified query without protocol never matches `junos-http`, even though its
 // concrete tcp/80 completion is permitted. The runtime always carries a
 // concrete protocol and keys per-application terms under it
 // (policy.rs CompiledApplications.matches does `by_protocol.get(&protocol)?`).

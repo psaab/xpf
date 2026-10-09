@@ -33,8 +33,10 @@ func TestShowMatchPoliciesUsageAdvertisesSelectors(t *testing.T) {
 	for _, tok := range []string{
 		"source-port", "destination-port", "icmp-type", "icmp-code", "icmp6",
 		"omitted source/destination IP matches", "any address.",
-		"An omitted protocol, port, or icmp-type/code fails closed",
-		"application term constrained on that dimension",
+		"An omitted protocol, port, or icmp-type/code never matches",
+		"a term constrained on that dimension; unconstrained terms may match.",
+		"A verdict for a partly specified query is not exhaustive — a skipped",
+		"deny can let a later permit match.",
 	} {
 		if !strings.Contains(out, tok) {
 			t.Fatalf("show security match-policies usage missing %q:\n%s", tok, out)

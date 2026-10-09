@@ -806,12 +806,12 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 
 	srcIP := net.ParseIP(srcIPStr)
 	dstIP := net.ParseIP(dstIPStr)
-	// A malformed dst_port/src_port must not silently become 0 (the "any
-	// port" wildcard) — that yields a misleading PERMIT/DENY verdict in the
-	// simulator (#2934). Fail closed with 400. queryIntStrict rejects
-	// malformed/negative values; policymatch.ValidatePort additionally
-	// rejects an out-of-range port (>65535) that cannot describe a real
-	// packet (#3116). 0/absent stays the unspecified wildcard.
+	// A malformed dst_port/src_port must not silently become 0 (unspecified):
+	// a port-constrained term would then never match, while an unconstrained term
+	// could still match and yield a misleading verdict (#2934). Fail closed with
+	// 400. queryIntStrict rejects malformed/negative values;
+	// policymatch.ValidatePort additionally rejects an out-of-range port (>65535)
+	// that cannot describe a real packet (#3116). An absent/0 port is unspecified.
 	dstPort, ok := queryIntStrict(r, "dst_port", 0)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid dst_port: "+r.URL.Query().Get("dst_port"))
@@ -831,11 +831,10 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A non-empty but unknown/out-of-range protocol token (e.g. "tcpp", "999")
-	// must NOT silently become "any protocol" — the shared matcher's matchApp
-	// short-circuits to match-any for an empty/unresolvable protocol, yielding a
-	// misleading PERMIT/DENY verdict for a policy using `application any`
-	// (#3108). Reject it with 400. An empty value still means "unspecified"
-	// (match any protocol), unchanged.
+	// must NOT silently become unspecified: constrained terms would never match,
+	// but `application any` could still match and conceal invalid input (#3108).
+	// Reject it with 400. An empty value leaves the query protocol unspecified;
+	// constrained terms never match, while unconstrained terms may still match.
 	proto := r.URL.Query().Get("protocol")
 	if err := policymatch.ValidateProtocol(proto); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

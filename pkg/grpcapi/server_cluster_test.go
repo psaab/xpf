@@ -213,10 +213,10 @@ func TestShowTestPolicyEmptyIPMatches(t *testing.T) {
 
 // TestMatchPoliciesRejectsInvalidPort asserts the #3116 contract for the gRPC
 // surface: a negative or >65535 port in the int32 field must be rejected with
-// InvalidArgument, not passed through to the shared matcher where a value
-// <= 0 silently becomes "no port constraint" (the matcher gates the port term
-// on port > 0). 0 stays the unspecified wildcard (proto3 cannot distinguish an
-// unset scalar from 0); a valid port proceeds.
+// InvalidArgument, not passed through to the shared matcher as an omitted port.
+// A constrained term would then never match, while an unconstrained term may
+// still match and yield a misleading verdict. 0 is also unspecified (proto3
+// cannot distinguish an unset scalar from 0); a valid port proceeds.
 //
 // FAIL-ON-REVERT: removing the policymatch.ValidatePort guards in
 // MatchPolicies lets DestinationPort=-1 / DestinationPort=70000 reach the

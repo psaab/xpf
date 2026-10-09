@@ -107,7 +107,9 @@ func TestTestPolicySourcePort(t *testing.T) {
 
 // TestTestPolicyRejectsInvalidSourcePort asserts that a malformed or
 // out-of-range source-port returns an error via the shared policymatch.ParsePort
-// validator (#3116) rather than silently coercing to the 0 "any port" wildcard.
+// validator (#3116) rather than silently coercing to the 0 unspecified value;
+// a source-port-constrained term then never matches, while unconstrained terms
+// may still match.
 //
 // FAIL-ON-REVERT: removing the ParsePort call on source-port makes "abc" /
 // "70000" coerce silently, flipping the want-error cases red.

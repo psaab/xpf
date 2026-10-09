@@ -194,11 +194,10 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 	parsedDst := net.ParseIP(req.DestinationIp)
 
 	// A negative or >65535 port cannot describe a real packet. The int32
-	// wire field accepts both; left unchecked they pass through to the
-	// shared matcher, whose port term gates on port > 0, so a negative
-	// value silently becomes "no port constraint" and yields a misleading
-	// verdict (#3116). 0 stays the unspecified wildcard (proto3 cannot
-	// distinguish an unset scalar from 0).
+	// wire field accepts both; without validation a negative value reaches the
+	// shared matcher as an omitted port, so constrained terms never match while
+	// unconstrained terms may still match, yielding a misleading verdict (#3116).
+	// 0 is also unspecified (constrained terms do not match); proto3 cannot
 	if err := policymatch.ValidatePort(int(req.SourcePort)); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid source-port: %v", err)
 	}
@@ -207,10 +206,10 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 	}
 
 	// A non-empty but unknown/out-of-range protocol token ("tcpp", "999") must
-	// be rejected: protocol-constrained applications fail closed on it, while
-	// `application any` would still match and hide the invalid input (#3108).
-	// An empty value leaves the query protocol unspecified; constrained apps fail
-	// closed on the missing value, while unconstrained terms may still match.
+	// be rejected: constrained terms never match it, while `application any`
+	// would still match and hide the invalid input (#3108). An empty value leaves
+	// the query protocol unspecified; constrained terms never match, while
+	// unconstrained terms may still match.
 	if err := policymatch.ValidateProtocol(req.Protocol); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}

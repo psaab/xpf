@@ -142,8 +142,9 @@ func TestRESTZoneFilterFailsClosed(t *testing.T) {
 }
 
 // TestRESTPolicyMatchDstPortFailsClosed asserts the #2934 contract for the
-// policy-match simulator: a malformed dst_port must 400, not silently
-// become the 0 "any port" wildcard (which yields a misleading verdict).
+// policy-match simulator: a malformed dst_port must 400, not silently become
+// the 0 unspecified value (a constrained term then never matches, while an
+// unconstrained term may still match and yield a misleading verdict).
 //
 // FAIL-ON-REVERT: reverting to queryInt(r,"dst_port",0) makes dst_port=abc
 // become 0 and the handler proceed (HTTP 200), flipping the want-400 case.
@@ -239,10 +240,9 @@ func TestRESTPolicyMatchSignedPort(t *testing.T) {
 
 // TestRESTPolicyMatchProtocol asserts the #3108 contract for the policy-match
 // simulator: a non-empty but unknown/out-of-range protocol token must 400, not
-// silently become the "any protocol" wildcard (the shared matcher's matchApp
-// short-circuits an unresolvable protocol to match-any, and the fixture policy
-// uses `application any`, so the protocol is the only constraining dimension).
-// A valid name/number and an absent protocol proceed (HTTP 200) unchanged.
+// be treated as unspecified. Constrained terms would never match it, but the
+// fixture's `application any` term could still match. A valid name/number and an
+// absent protocol proceed (HTTP 200) unchanged.
 //
 // FAIL-ON-REVERT: removing the policymatch.ValidateProtocol guard in
 // matchPoliciesHandler makes protocol=notaproto / protocol=999 pass through and

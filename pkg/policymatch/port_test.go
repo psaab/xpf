@@ -3,9 +3,9 @@ package policymatch
 import "testing"
 
 // TestValidatePort asserts the #3116 contract for already-parsed port values
-// (the gRPC int32 field and the REST query int): 0 means "unspecified" and is
-// accepted, 1..65535 is accepted, and a negative or >65535 value is REJECTED
-// rather than silently coerced to the 0 wildcard.
+// (the gRPC int32 field and the REST query int): 0 means "unspecified"; a
+// port-constrained term never matches without a port. 1..65535 is accepted,
+// and a negative or >65535 value is REJECTED rather than becoming unspecified.
 //
 // FAIL-ON-REVERT: dropping the range check (return nil unconditionally) flips
 // the want-error cases (-1, 65536, 70000) to nil and turns them red.
@@ -14,7 +14,7 @@ func TestValidatePort(t *testing.T) {
 		port    int
 		wantErr bool
 	}{
-		{0, false},     // unspecified wildcard
+		{0, false},     // unspecified; constrained terms do not match
 		{1, false},     // low bound
 		{443, false},   // typical valid
 		{65535, false}, // high bound
@@ -33,10 +33,9 @@ func TestValidatePort(t *testing.T) {
 
 // TestParsePort asserts the #3116 contract for operator string tokens (the CLI
 // surface): an empty/whitespace token is "unspecified" (0, nil), a valid token
-// parses, an explicit "0" is the unspecified wildcard, and a malformed,
-// negative, or out-of-range token is REJECTED rather than silently degrading
-// to the 0 wildcard.
-//
+// parses, and an explicit "0" is also unspecified. A constrained term does not
+// match without a port, while an unconstrained term may still match. A malformed,
+// negative, or out-of-range token is REJECTED rather than silently becoming 0.
 // FAIL-ON-REVERT: restoring `dstPort, _ = strconv.Atoi(token)` (ignoring the
 // error) makes "abc" and "" both become 0 with no error, flipping the want-error
 // "abc"/"70000"/"-1" cases red.

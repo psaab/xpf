@@ -36,31 +36,35 @@ pins that the two surfaces render identically.
 ## Port input validation (#3116)
 
 `Match` gates a port term on `SrcPort/DstPort > 0`, so a port of `0` means
-"unspecified" (no port constraint — the wildcard). That makes a malformed,
-negative, or out-of-range port DANGEROUS at the adapter boundary: if it
-silently coerces to `0` it becomes "match any port" and the simulator returns a
-verdict for a packet that cannot exist on the wire (false confidence during
-policy verification / incident response). Two shared validators close this
-across every surface:
+"unspecified": the query has no concrete port. A port-constrained application
+term never matches it; an unconstrained term may still match. That makes a
+malformed, negative, or out-of-range port DANGEROUS at the adapter boundary: if
+it silently coerces to `0`, a constrained term is skipped while an unconstrained
+term may still match. A verdict for the partly specified query is not
+exhaustive: a skipped deny can let a later permit match. Two shared validators
+close this across every surface:
 
 - `ValidatePort(int) error` — for the already-parsed numeric inputs (the gRPC
   `int32` field, and the REST query int after `queryIntStrict`). Accepts `0`
-  (unspecified) and `1..65535`; rejects negative or `>65535`.
+  (unspecified; constrained terms do not match without a port) and `1..65535`;
+  rejects negative or `>65535`.
 - `ParsePort(string) (int, error)` — for operator string tokens (the CLI
   `destination-port`/`source-port` args, the gRPC `ShowText` `test-policy:`
   `port=` token, and the remote `cli` client's `destination-port`/`source-port`
   — the remote surface was fixed in #3354 to route through `ParsePort` instead
   of a silent `strconv.Atoi` drop that coerced a malformed port to the `0`
-  wildcard). An
-  empty/whitespace token is unspecified `(0, nil)`; a non-empty token must parse
-  and pass `ValidatePort`; a malformed (`abc`), signed (`+80`/`-80`, #3679),
-  or out-of-range token is rejected. An explicit `0` is accepted as
-  "unspecified" for parity with the gRPC `int32` field, where proto3 cannot
-  distinguish an unset scalar from `0`.
+  unspecified value). An empty/whitespace token is unspecified `(0, nil);`
+  a port-constrained term never matches without a port, while unconstrained
+  terms may still match. A non-empty token must parse and pass `ValidatePort`;
+  a malformed (`abc`), signed (`+80`/`-80`, #3679), or out-of-range token is
+  rejected. An explicit `0` is accepted as "unspecified" for parity with the
+  gRPC `int32` field, where proto3 cannot distinguish an unset scalar from `0`.
 - `ParseICMPValue(string) (*uint8, error)` — for the CLI/REST/gRPC ICMP
   `type`/`code` selector tokens. Empty/whitespace is unspecified `(nil, nil)`; a
-  non-empty token must be a canonical unsigned decimal in `0..255`; malformed,
-  signed (`+8`/`-8`, #3679), or out-of-range is rejected.
+  type/code-constrained term never matches without that value, while
+  unconstrained terms may still match. A non-empty token must be a canonical
+  unsigned decimal in `0..255`; malformed, signed (`+8`/`-8`, #3679), or
+  out-of-range is rejected.
 - #3679: `ParsePort` and `ParseICMPValue` route their non-empty token through
   `config.ParseCanonicalUint` — the same canonical-form primitive the #3606
   commit-time and Rust dataplane port parsers use — so a signed spelling
@@ -82,29 +86,30 @@ above), so "all surfaces validate the port" is literally true:
 - CLI `test policy` + `show security match-policies` (local `pkg/cli`) AND the
   remote `cli` client (`cmd/cli`) — `ParsePort` → a command error.
 
-A VALID port (`1..65535`) and an ABSENT port behave exactly as before; only an
-explicitly-invalid port newly errors. Coverage: `port_test.go` (helpers),
-`pkg/api/rest_filter_failclosed_test.go`, `pkg/grpcapi/server_cluster_test.go`
-(`MatchPolicies` + `ShowText` `test-policy:`), `pkg/cli/policymatch_port_test.go`,
-and `cmd/cli/testpolicy_port_test.go`.
+A valid port (`1..65535`) behaves as before. An absent port remains unspecified,
+so constrained terms do not match without it while unconstrained terms may
+still match. Only an explicitly-invalid port newly errors. Coverage: `port_test.go`
+(helpers), `pkg/api/rest_filter_failclosed_test.go`,
+`pkg/grpcapi/server_cluster_test.go` (`MatchPolicies` + `ShowText` `test-policy:`),
+`pkg/cli/policymatch_port_test.go`, and `cmd/cli/testpolicy_port_test.go`.
 
 ## Protocol input validation (#3108)
 
 `matchApp` short-circuits to "match any application" only for the genuine
 match-any cases (`len(apps)==0`, or a policy term of `application any`); a
 protocol-constrained application term is NOT short-circuited by an empty `proto`
-(#3323) — it is resolved through the protocol gate and fails closed for an
-omitted/unresolvable protocol, exactly like the runtime. That still leaves an
+(#3323) — it is resolved through the protocol gate and never matches an omitted
+or unresolvable protocol, exactly like the runtime. That still leaves an
 unvalidated protocol token DANGEROUS at the adapter boundary in exactly the way
 an unvalidated port is: a non-empty but unresolvable protocol (an operator typo
 like `tcpp`, an unknown name, or an out-of-range number like `999`) is never
-rejected by the matcher — it simply fails closed against every
-protocol-constrained term, masking the typo as a default-policy verdict instead
-of surfacing the error. One shared validator closes this:
+rejected by the matcher — it simply never matches a protocol-constrained term,
+masking the typo as a default-policy verdict instead of surfacing the error.
+One shared validator closes this:
 
 - `ValidateProtocol(string) error` — an empty/whitespace token is "unspecified"
   and is accepted; it leaves the query protocol unpinned, but does NOT make
-  every application term match. A protocol-constrained term fails closed when
+  every application term match. A protocol-constrained term never matches when
   the query protocol is omitted (#3323); only genuinely unconstrained cases
   (an empty application list or `application any`) may match. A non-empty token
   must resolve via `appid.ProtocolNumber` (a known name/alias `tcp`/`udp`/`icmp`/
@@ -143,15 +148,18 @@ fail-OPEN defects the session-filter parser hit and #3439 (H5) fixed strictly:
 
 - a value-taking selector present WITHOUT a following value was guarded by
   `if i+1 < len(args)` with no else, so a trailing selector left the field at its
-  zero/empty wildcard — `... destination-port` (no value) evaluated ALL
-  destination ports;
+  zero/empty (omitted) value — `... destination-port` (no value) was evaluated
+  without a destination port; constrained terms never match, while an
+  unconstrained term may still match;
 - the switch had no `default:` arm, so an UNKNOWN/misspelled selector token (and
-  its value) were both silently skipped — `... protcol tcp` dropped both tokens
-  and yielded an any-protocol verdict.
+  its value) were both silently skipped — `... protcol tcp` left the query
+  protocol unspecified, so a skipped deny could let a later permit match.
 
-Because the shared matcher treats a zero port / empty protocol / nil icmp-type
-as "no constraint", either defect silently WIDENED the query: the operator got a
-permit/deny verdict for a BROADER set of traffic than they typed.
+Because the shared matcher interprets a zero port / empty protocol / nil
+icmp-type as omitted, either defect silently changes the typed query into a
+partly specified one: constrained terms for that dimension never match, while
+unconstrained terms may still match. A verdict is not exhaustive — a skipped
+deny can let a later permit match.
 
 The usage text was already a shared SSOT (#3628); the PARSING is now too:
 
@@ -164,10 +172,10 @@ The usage text was already a shared SSOT (#3628); the PARSING is now too:
   `cmd/cli/show.go` `parseFlowSessionArgs`); an unknown token errors
   `unknown selector "X"` (default arm); every value routes through the existing
   `ParsePort` / `ParseICMPValue` / `ValidateProtocol` / `net.ParseIP` validators.
-  A field left at its zero value therefore means the operator OMITTED it (legit
-  wildcard), never "present but silently dropped". `SelectorArgs.Query()` builds
-  a `policymatch.Query` (empty IP → nil `net.IP` wildcard) for the local/gRPC
-  in-process surfaces.
+  A field left at its zero value therefore means the operator OMITTED it
+  (unspecified, not a wildcard for constrained terms), never "present but
+  silently dropped". `SelectorArgs.Query()` builds a `policymatch.Query`
+  for the local/gRPC in-process surfaces (empty IP → nil `net.IP` wildcard).
 
 This is applied at ALL FOUR CLI surfaces (mirroring the #3116 / #3108 wiring)
 plus the gRPC text bridge:
@@ -400,7 +408,7 @@ dynamic-address feed overlay (`Query.FeedOverlay`, supplied by the daemon via
 `feeds.Manager.SnapshotForBindings`). Application matching resolves predefined +
 user apps via `config.ResolveApplication`, expands application-sets recursively
 via `config.ExpandApplicationSet`, compares protocols by IANA number via
-`appid.ProtocolNumber` (a protocol-constrained application term fails closed on
+`appid.ProtocolNumber` (a protocol-constrained application term never matches
 an OMITTED or unresolvable query protocol, #3323 — the runtime always carries a
 concrete protocol and keys its per-application terms under it, `by_protocol.get
 (&protocol)?`, so a protocol-bearing term can only match a packet of that
@@ -414,11 +422,11 @@ commit hard-rejects it (`compiler_validate_strict.go`) — so reporting it as a
 concrete match would over-report vs the runtime; such an app fails closed in the
 simulator too. Only the literal `application any` token is match-any), honors both
 source-port and destination-port terms
-(a destination-port-constrained term fails closed on an OMITTED query
+(a destination-port-constrained term never matches an OMITTED query
 destination port, #3330 — mirroring the runtime keying exact_dst_ports/range
-terms on the concrete packet port; a SOURCE-port-constrained term likewise
-fails closed on an OMITTED query source port, #3415 — the runtime always
-carries a concrete source port and gates the app on it
+terms on the concrete packet port; a SOURCE-port-constrained term never matches
+an OMITTED query source port, #3415 — the runtime always carries a concrete
+source port and gates the app on it
 (`appid.matchTuple`/`policy.rs CompiledApplications.matches`), so certifying a
 permit for an omitted source port over-matches vs the runtime. This supersedes
 #3107's earlier "omitted source port stays unconstrained" diagnostic stance;
@@ -427,7 +435,7 @@ enforces ICMP/ICMPv6 type/code constraints (#3284, for example the predefined
 `junos-icmp-ping` = type 8 and XPF's custom `protocol junos-ping` extension)
 from `Query.ICMPType` / `Query.ICMPCode`. A type-constrained application term
 matches only when the query's type is known and equal (and the code too, when
-the term constrains a code); a query that omits the type fails closed for that
+the term constrains a code); a query that omits the type never matches that
 term, mirroring the dataplane's `packet_icmp = None` path. An unconstrained ICMP
 application (`junos-ping`, `junos-icmp-all`) is unaffected. The surfaces accept
 the type/code as `icmp_type`/`icmp_code` (REST query, gRPC `MatchPolicies`

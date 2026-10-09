@@ -9,13 +9,14 @@ import (
 // selector parser shared by all four CLI surfaces + the gRPC test-policy
 // bridge. Before it, each surface hand-copied a `for i := range args { switch
 // args[i] {...} }` loop guarded by `if i+1 < len(args)` with no else and with
-// no default arm, so a value-taking selector present WITHOUT a value silently
-// stayed at the wildcard and an UNKNOWN selector token (and its value) were
-// silently dropped — either defect widened the firewall-policy query.
+// no default arm. A missing value left its query dimension unspecified, so a
+// constrained term never matched while an unconstrained term could still match;
+// an unknown selector was dropped and a skipped deny could let a later permit
+// match.
 //
 // FAIL-ON-REVERT: relaxing ParseSelectorArgs back to the loose "skip on
-// missing value / ignore unknown token" behavior makes the want-error cases
-// return nil (a silently widened / dropped query), flipping them red.
+// missing value / ignore unknown token" behavior returns nil for malformed input,
+// flipping the want-error cases red.
 func TestParseSelectorArgsFailsClosed(t *testing.T) {
 	cases := []struct {
 		name    string
