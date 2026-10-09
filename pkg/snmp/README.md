@@ -107,8 +107,12 @@ struct; SET requests (`pduSetRequest`, 0xa3) are gated on it:
   the read-only vs read-write distinction is enforced and observable in the
   response error-status.
 
-SNMPv3 SET requests are uniformly refused with `notWritable` (the USM users
-in this config carry no read-write authorization).
+SNMPv3 SET requests whose `notWritable` response fits within the effective
+maximum are refused with `notWritable` (the USM users in this config carry no
+read-write authorization). If that response exceeds the effective maximum,
+the agent instead returns `tooBig` (error-index 0, empty varbind list); if even
+that fallback — which still echoes the requested `contextName` — does not fit,
+it is discarded with no response (RFC 3416 §4.2.5).
 
 ## SNMPv3 contexts (RFC 3412 §4.1, RFC 3413 §3)
 
@@ -129,8 +133,10 @@ views. The scopedPDU `contextEngineID` and `contextName` are decoded and the
   operator-confusion bug, #2611), the agent returns the **empty-view**
   exceptions: `noSuchObject` for unknown objects and `noSuchInstance` for
   missing instances, and `endOfMibView` for every GetNext / GetBulk varbind.
-  SET is refused with `notWritable` as in any context. This is fail-closed: a
-  manager addressing an unknown context never receives default-context values.
+  SET is refused with `notWritable` as in any context, subject to the same
+  size exception above (`tooBig` with no bindings, or dropped if no fit). This
+  is fail-closed: a manager addressing an unknown context never receives
+  default-context values.
 - The response **echoes the requested `contextName`** back in the scopedPDU
   (empty for the default context), so the manager sees the response is bound to
   the context it addressed. `contextEngineID` in the response is our own engine

@@ -1,6 +1,7 @@
 package snmp
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"testing"
 )
@@ -9,9 +10,18 @@ import (
 // LIST of OIDs (each with a NULL value) with a selectable advertised
 // msgMaxSize. It mirrors buildV3GetBulkRequest's USM framing but emits a
 // pduSetRequest (0xA3) so handleV3Packet's SET branch runs end to end with a
-// manager-advertised receive limit.
+// manager-advertised receive limit. The default (empty) context is addressed.
 func buildV3SetRequestMulti(t *testing.T, authProto, userName string, engineID, authKey []byte,
 	boots, tm, msgMaxSize int, oids [][]int) []byte {
+	t.Helper()
+	return buildV3SetRequestMultiCtx(t, authProto, userName, engineID, authKey, boots, tm, msgMaxSize, nil, oids)
+}
+
+// buildV3SetRequestMultiCtx is buildV3SetRequestMulti with an explicit
+// contextName so the fallback-size path can be exercised with an overlong
+// echoed context.
+func buildV3SetRequestMultiCtx(t *testing.T, authProto, userName string, engineID, authKey []byte,
+	boots, tm, msgMaxSize int, contextName []byte, oids [][]int) []byte {
 	t.Helper()
 	hashFn, _ := authHashFunc(authProto)
 	if hashFn == nil {
@@ -48,7 +58,7 @@ func buildV3SetRequestMulti(t *testing.T, authProto, userName string, engineID, 
 	pduBody = append(pduBody, vbListEnc...)
 
 	scopedBody := berEncodeTLV(tagOctetString, engineID)
-	scopedBody = append(scopedBody, berEncodeTLV(tagOctetString, nil)...) // default context
+	scopedBody = append(scopedBody, berEncodeTLV(tagOctetString, contextName)...) // addressed context, echoed in response
 	scopedBody = append(scopedBody, berEncodeTLV(pduSetRequest, pduBody)...)
 	scopedPDU := berEncodeTLV(tagSequence, scopedBody)
 
@@ -130,5 +140,36 @@ func TestV3Set_SmallUnchanged(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("expected 2 echoed varbinds for a 2-OID SET, got %d", len(got))
+	}
+}
+
+// TestV3Set_OversizedFallbackDropped (#12147, Astra R1): an accepted SET whose
+// echoed contextName alone prevents even the empty-binding tooBig fallback
+// from fitting must be dropped (RFC 3416 §4.2.5), never transmitted
+// over-size. Repro: authenticated SHA/authNoPriv SET, 48 OIDs, 1024-byte
+// contextName, msgMaxSize=484 — the 1168-byte tooBig fallback must NOT be
+// transmitted. fail-on-revert: return the fallback without a recheck and this
+// test observes a non-nil, over-cap response.
+func TestV3Set_OversizedFallbackDropped(t *testing.T) {
+	a, authKey, engineID, boots, tm := v3GetBulkAgent(t, nil)
+
+	ctx := bytes.Repeat([]byte{'C'}, 1024)
+	oids := setTestOIDs(48)
+	req := buildV3SetRequestMultiCtx(t, "sha", "alice", engineID, authKey, boots, tm, minMsgMaxSize, ctx, oids)
+	if len(req) > maxPacketSize {
+		t.Fatalf("test setup: SET request %d bytes exceeds maxPacketSize %d", len(req), maxPacketSize)
+	}
+	user := a.snapshotV3User("alice")
+	fallback := a.buildV3Response(11, msgFlagAuth, user, ctx, 77, errTooBig, 0, nil)
+	if len(fallback) <= minMsgMaxSize {
+		t.Fatalf("test setup: tooBig fallback is %d bytes, want > msgMaxSize %d", len(fallback), minMsgMaxSize)
+	}
+
+	if resp := a.handlePacket(req); resp != nil {
+		t.Fatalf("oversized tooBig fallback transmitted: %d bytes > msgMaxSize %d; must be dropped (RFC 3416 §4.2.5)", len(resp), minMsgMaxSize)
+	}
+	start, end, ok := usmAuthParamsRange(req)
+	if !ok || !a.verifyAuth(user, req[start:end]) {
+		t.Fatal("test setup: SET request must pass authenticated SHA validation")
 	}
 }
