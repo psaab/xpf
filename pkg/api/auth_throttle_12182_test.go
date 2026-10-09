@@ -108,3 +108,48 @@ func TestAuthThrottleFullOfExpiredBucketsStillAdmits12182(t *testing.T) {
 		t.Fatalf("table holds %d entries after expired sweep, want within budget %d", total, authThrottleMaxEntries)
 	}
 }
+
+// TestAuthThrottleFullOfLiveLockoutsLegacyInsertionRefuses12182 is the #12182
+// R1 fold-in: the legacy recordFailure insertion path must also refuse new
+// buckets when the shared table is full of live lockouts, instead of growing
+// past authThrottleMaxEntries. Pre-fix, one recordFailure on a full table
+// grew it to 4097 entries.
+func TestAuthThrottleFullOfLiveLockoutsLegacyInsertionRefuses12182(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	tracker := newAuthFailureTracker(func() time.Time { return now })
+	fillAuthThrottleWithLiveLockouts12182(t, tracker, now)
+
+	const victimSource = "198.51.0.0"
+	// New API-key identity: exercises the account + source legacy accessors.
+	tracker.recordFailure("203.0.113.251", authThrottleAPIKeyAccount)
+	// New Basic identity: additionally exercises the global-account accessor.
+	const pressureBasic = authThrottleBasicAccountPrefix + "pressure-victim"
+	tracker.recordFailure("203.0.113.252", pressureBasic)
+
+	live, total := countLiveLockedBuckets12182(tracker, now)
+	if total != authThrottleMaxEntries || live != authThrottleMaxEntries {
+		t.Fatalf("after legacy pressure live/total buckets = %d/%d, want %d/%d: capacity exceeded or live lockouts evicted",
+			live, total, authThrottleMaxEntries, authThrottleMaxEntries)
+	}
+	tracker.mu.Lock()
+	_, accountInserted := tracker.accounts["203.0.113.251\x00"+authThrottleAPIKeyAccount]
+	_, sourceInserted := tracker.sources["203.0.113.251"]
+	_, globalInserted := tracker.globalAccounts[pressureBasic]
+	tracker.mu.Unlock()
+	if accountInserted || sourceInserted || globalInserted {
+		t.Fatalf("legacy insertion admitted new buckets on a full live table (account=%v source=%v global=%v), want refusal",
+			accountInserted, sourceInserted, globalInserted)
+	}
+	if locked, wait := tracker.locked(victimSource, authThrottleAPIKeyAccount); !locked || wait != authThrottleBaseLockout {
+		t.Fatalf("victim lockout after legacy pressure = (%v, %v), want (true, %v): Retry-After erased", locked, wait, authThrottleBaseLockout)
+	}
+
+	// Existing identities remain lookup-safe without growing the table; the
+	// live lockout drops this failure.
+	tracker.recordFailure(victimSource, authThrottleAPIKeyAccount)
+	live, total = countLiveLockedBuckets12182(tracker, now)
+	if total != authThrottleMaxEntries || live != authThrottleMaxEntries {
+		t.Fatalf("after existing-identity failure live/total = %d/%d, want %d/%d",
+			live, total, authThrottleMaxEntries, authThrottleMaxEntries)
+	}
+}

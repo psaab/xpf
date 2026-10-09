@@ -436,16 +436,24 @@ func (t *authFailureTracker) chargeLocked(b *authFailureBucket, now time.Time, t
 }
 
 // recordFailure charges the per-source/account pair, global claimed Basic
-// account when applicable, and source-prefix budgets.
+// account when applicable, and source-prefix budgets. New buckets are refused
+// when no safe capacity is available, preserving the fixed-capacity invariant;
+// existing buckets continue through the normal charge rules.
 func (t *authFailureTracker) recordFailure(source, account string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
-	t.chargeLocked(t.accountBucketLocked(source+"\x00"+account), now, authThrottleAccountFailures)
-	if key := globalBasicAccountKey(account); key != "" {
-		t.chargeLocked(t.globalAccountBucketLocked(key), now, authThrottleGlobalBasicFailures)
+	if b := t.accountBucketLocked(source+"\x00"+account); b != nil {
+		t.chargeLocked(b, now, authThrottleAccountFailures)
 	}
-	t.chargeLocked(t.sourceBucketLocked(source), now, authThrottleSourceFailures)
+	if key := globalBasicAccountKey(account); key != "" {
+		if b := t.globalAccountBucketLocked(key); b != nil {
+			t.chargeLocked(b, now, authThrottleGlobalBasicFailures)
+		}
+	}
+	if b := t.sourceBucketLocked(source); b != nil {
+		t.chargeLocked(b, now, authThrottleSourceFailures)
+	}
 }
 
 // recordSuccess clears the source/account pair and the corresponding global
@@ -458,56 +466,56 @@ func (t *authFailureTracker) recordSuccess(source, account string) {
 	t.clearGlobalBasicAccountLocked(account, now)
 }
 
+// accountBucketLocked returns the existing bucket for key, creating it when
+// room is available. It returns nil when the shared table is full of buckets
+// that must be preserved (live lockouts or in-flight reservations).
 func (t *authFailureTracker) accountBucketLocked(key string) *authFailureBucket {
-	b := t.accounts[key]
-	if b == nil {
-		t.sweepIfFullLocked()
-		b = &authFailureBucket{windowStart: t.now()}
-		t.accounts[key] = b
+	if b := t.accounts[key]; b != nil {
+		return b
 	}
+	if !t.sweepIfFullLocked() {
+		return nil
+	}
+	b := &authFailureBucket{windowStart: t.now()}
+	t.accounts[key] = b
 	return b
 }
 
+// globalAccountBucketLocked returns the existing global bucket for key,
+// creating it when room is available. It returns nil when the shared table
+// is full of buckets that must be preserved.
 func (t *authFailureTracker) globalAccountBucketLocked(key string) *authFailureBucket {
-	b := t.globalAccounts[key]
-	if b == nil {
-		t.sweepIfFullLocked()
-		b = &authFailureBucket{windowStart: t.now()}
-		t.globalAccounts[key] = b
+	if b := t.globalAccounts[key]; b != nil {
+		return b
 	}
+	if !t.sweepIfFullLocked() {
+		return nil
+	}
+	b := &authFailureBucket{windowStart: t.now()}
+	t.globalAccounts[key] = b
 	return b
 }
 
+// sourceBucketLocked returns the existing source bucket, creating it when
+// room is available. It returns nil when the shared table is full of buckets
+// that must be preserved.
 func (t *authFailureTracker) sourceBucketLocked(source string) *authFailureBucket {
-	b := t.sources[source]
-	if b == nil {
-		t.sweepIfFullLocked()
-		b = &authFailureBucket{windowStart: t.now()}
-		t.sources[source] = b
+	if b := t.sources[source]; b != nil {
+		return b
 	}
+	if !t.sweepIfFullLocked() {
+		return nil
+	}
+	b := &authFailureBucket{windowStart: t.now()}
+	t.sources[source] = b
 	return b
 }
 
 // sweepIfFullLocked keeps all tracker tables within the shared entry budget.
 // Expired buckets go first; only unlocked failures may be evicted to make room.
-func (t *authFailureTracker) sweepIfFullLocked() {
-	if t.entryCountLocked() < authThrottleMaxEntries {
-		return
-	}
-	now := t.now()
-	sweepAuthThrottleBuckets(t.accounts, now)
-	sweepAuthThrottleBuckets(t.globalAccounts, now)
-	sweepAuthThrottleBuckets(t.sources, now)
-	for _, buckets := range []map[string]*authFailureBucket{t.accounts, t.globalAccounts, t.sources} {
-		for key, bucket := range buckets {
-			if t.entryCountLocked() < authThrottleMaxEntries {
-				return
-			}
-			if authThrottleBucketEvictable(bucket, now) {
-				delete(buckets, key)
-			}
-		}
-	}
+// It reports whether room is available for one more entry.
+func (t *authFailureTracker) sweepIfFullLocked() bool {
+	return t.makeRoomLocked(1, t.now())
 }
 
 // throttle returns the server's REST credential-failure tracker, building it
