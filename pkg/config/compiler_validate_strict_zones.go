@@ -757,6 +757,104 @@ func validateHostInboundTokensStrict(cfg *Config) error {
 	return nil
 }
 
+// validateHostInboundFullAdmitExceptStrict reports every host-inbound stanza
+// where a known `except` token is inert under a retained `any-service` token.
+// It is separate from validateHostInboundTokensStrict so tolerant compilation
+// can preserve the token validator's diagnostic and still warn once for each
+// affected stanza. Strict compilation returns the first diagnostic; tolerant
+// compilation downgrades every one to a warning.
+func validateHostInboundFullAdmitExceptStrict(cfg *Config) []error {
+	names := make([]string, 0, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var diagnostics []error
+	for _, name := range names {
+		zone := cfg.Security.Zones[name]
+		if zone == nil {
+			continue
+		}
+		if err := validateHostInboundFullAdmitExceptStanza(name, "", zone.HostInboundTraffic); err != nil {
+			diagnostics = append(diagnostics, err)
+		}
+
+		ifNames := make([]string, 0, len(zone.InterfaceHostInbound))
+		for ifName := range zone.InterfaceHostInbound {
+			ifNames = append(ifNames, ifName)
+		}
+		sort.Strings(ifNames)
+		for _, ifName := range ifNames {
+			if err := validateHostInboundFullAdmitExceptStanza(name, ifName, zone.InterfaceHostInbound[ifName]); err != nil {
+				diagnostics = append(diagnostics, err)
+			}
+		}
+	}
+	return diagnostics
+}
+
+func validateHostInboundFullAdmitExceptStanza(zone, ifName string, hib *HostInboundTraffic) error {
+	if hib == nil {
+		return nil
+	}
+	fullAdmit := ""
+	for _, svc := range hib.SystemServices {
+		if HostInboundFullAdmitService(svc) {
+			fullAdmit = svc
+			break
+		}
+	}
+	if fullAdmit == "" {
+		return nil
+	}
+
+	servicesExcept := knownHostInboundExceptTokens(hib.systemServicesExcept, KnownHostInboundSystemServices)
+	protocolsExcept := knownHostInboundExceptTokens(hib.protocolsExcept, KnownHostInboundProtocols)
+	if len(servicesExcept) == 0 && len(protocolsExcept) == 0 {
+		return nil
+	}
+
+	exclusions := make([]string, 0, 2)
+	if len(servicesExcept) > 0 {
+		exclusions = append(exclusions, fmt.Sprintf("system-services %q", strings.Join(servicesExcept, ", ")))
+	}
+	if len(protocolsExcept) > 0 {
+		exclusions = append(exclusions, fmt.Sprintf("protocols %q", strings.Join(protocolsExcept, ", ")))
+	}
+
+	scope := "host-inbound-traffic"
+	if ifName != "" {
+		scope = fmt.Sprintf("interfaces %q host-inbound-traffic", ifName)
+	}
+	return fmt.Errorf(
+		"security zone %q %s has inert except exclusion(s) %s under system-services %q: "+
+			"any-service is a packet-wide full-admit, not a subtractable admission set",
+		zone, scope, strings.Join(exclusions, "; "), fullAdmit)
+}
+
+// knownHostInboundExceptTokens returns distinct, recognized exclusions in
+// authored order. Unknown exclusions stay visible to the ordinary token gate,
+// while repeated exclusions need only be named once in this diagnostic.
+func knownHostInboundExceptTokens(tokens []string, known map[string]bool) []string {
+	if len(tokens) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(tokens))
+	out := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		if !known[token] {
+			continue
+		}
+		if _, ok := seen[token]; ok {
+			continue
+		}
+		seen[token] = struct{}{}
+		out = append(out, token)
+	}
+	return out
+}
+
 // validateHostInboundStanzaStrict validates one host-inbound-traffic stanza's
 // system-services / protocols tokens against the recognized SSOT sets. When
 // ifName is non-empty the error message names the per-interface scope (#3362);
@@ -768,23 +866,6 @@ func validateHostInboundStanzaStrict(zone, ifName string, hib *HostInboundTraffi
 	scope := "host-inbound-traffic"
 	if ifName != "" {
 		scope = fmt.Sprintf("interfaces %q host-inbound-traffic", ifName)
-	}
-	// Unlike `all`, `any-service` is a packet-wide full-admit token, not a
-	// subtractable set of services. The compiler preserves except provenance
-	// while leaving that token intact, so reject the unsupported subtraction
-	// instead of silently treating it as an empty exclusion. The tolerant
-	// compile path downgrades this diagnostic to a warning and still keeps the
-	// authored `any-service` token for runtime compatibility.
-	if len(hib.systemServicesExcept) > 0 {
-		for _, svc := range hib.SystemServices {
-			if !HostInboundFullAdmitService(svc) {
-				continue
-			}
-			return fmt.Errorf(
-				"security zone %q %s system-services %q cannot apply except exclusion(s) %q: "+
-					"any-service is a packet-wide full-admit, not a subtractable service set",
-				zone, scope, svc, strings.Join(hib.systemServicesExcept, ", "))
-		}
 	}
 	for _, svc := range hib.SystemServices {
 		if !KnownHostInboundSystemServices[svc] {
