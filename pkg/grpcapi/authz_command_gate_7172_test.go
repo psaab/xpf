@@ -294,7 +294,7 @@ system {
     login {
         class limited {
             permissions all;
-            deny-commands "request system reboot|show security flow session";
+            deny-commands "request system reboot|show security flow session summary";
         }
         user opsuser {
             class limited;
@@ -336,6 +336,12 @@ func TestAuthorizeRPCEnforcesDenyCommandsEndToEnd7172(t *testing.T) {
 		t.Errorf("GetZonePairSummary denial code = %s, want PermissionDenied (err=%v)",
 			status.Code(err), err)
 	}
+	sessionsMethod := "/" + pb.BpfrxService_ServiceDesc.ServiceName + "/GetSessions"
+	if err := s.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly), sessionsMethod,
+		&pb.GetSessionsRequest{}); err != nil {
+		t.Errorf("GetSessions is charged to the detail command and must remain admitted: %v", err)
+	}
+
 	zonesMethod := "/" + pb.BpfrxService_ServiceDesc.ServiceName + "/GetZones"
 	if err := s.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly), zonesMethod,
 		&pb.GetZonesRequest{}); err != nil {

@@ -137,6 +137,7 @@ func TestRESTAndGRPCChargeTheSameCommandForSharedData9952(t *testing.T) {
 	for route, want := range map[string]string{
 		"GET /api/v1/security/sessions":                    "show security flow session",
 		"GET /api/v1/security/sessions/summary/zone-pairs": "show security flow session summary",
+		"GET /api/v1/security/policies":                    "show security policies",
 		"GET /api/v1/security/zones":                       "show security zones",
 		"GET /api/v1/routes":                               "show route",
 		"GET /api/v1/interfaces":                           "show interfaces",
