@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -231,5 +232,67 @@ func TestPolicyInvalidationFullSessionClearRequiresSuccessAndKnownAuthority12072
 				t.Fatal("non-retirable clear case marked config applied")
 			}
 		})
+	}
+}
+func TestPolicyInvalidationFullSessionClearWaitsForApplySerialization12072(t *testing.T) {
+	r, _, c1 := newPublishedScanFailure12072(t)
+	clearEntered := make(chan struct{}, 1)
+	clearDP := &fullClearSurfaceDP12072{
+		Manager: dataplane.New(),
+		applied: c1,
+		clear: func() (int, int, error) {
+			clearEntered <- struct{}{}
+			return len(r.dp.rows), 0, nil
+		},
+	}
+	r.h.d.setDataplane(clearDP)
+	adapter := liveDataPlane{daemon: r.h.d}
+	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			r.h.d.applySem.Release(1)
+		}
+	}()
+
+	started := make(chan struct{})
+	clearDone := make(chan error, 1)
+	go func() {
+		close(started)
+		_, _, err := adapter.ClearAllSessions()
+		clearDone <- err
+	}()
+	<-started
+	select {
+	case <-clearEntered:
+		r.h.d.applySem.Release(1)
+		released = true
+		<-clearDone
+		t.Fatal("full clear reached the helper while config apply held applySem")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if r.h.d.policyInvalidationDebt == nil {
+		t.Fatal("published scan debt retired before the serialized clear ran")
+	}
+	r.h.d.applySem.Release(1)
+	released = true
+	select {
+	case err := <-clearDone:
+		if err != nil {
+			t.Fatalf("serialized full clear: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("full clear did not finish after applySem was released")
+	}
+	select {
+	case <-clearEntered:
+	default:
+		t.Fatal("full clear did not reach the helper after applySem was released")
+	}
+	if r.h.d.policyInvalidationDebt != nil || !r.h.d.store.ActiveApplied() {
+		t.Fatalf("serialized successful clear did not retire debt: debt=%+v activeApplied=%v",
+			r.h.d.policyInvalidationDebt, r.h.d.store.ActiveApplied())
 	}
 }

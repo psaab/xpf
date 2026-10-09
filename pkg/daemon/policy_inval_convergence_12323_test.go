@@ -784,3 +784,83 @@ func TestPolicyInvalidationRenameKeepsImmediatePairAncestry12072(t *testing.T) {
 		}
 	}
 }
+func TestPolicyInvalidationConfirmedRollbackAfterDefiniteFailure12072(t *testing.T) {
+	r, _ := newConvergenceRun12072(t, []string{"p-first", "a", "b", "web"})
+	store := r.h.d.store
+	c1, err := store.SyncApply(policySetConfigText12072(
+		"rollback-c1", []string{"p-first", "b", "web"}), nil)
+	if err != nil {
+		t.Fatalf("promote C1: %v", err)
+	}
+	r.dp.applied, r.dp.helperCfg = c1, c1
+	ids := dpuserspace.PolicyIDsByStableKey(c1)
+	for i := range r.dp.rows {
+		row := &r.dp.rows[i]
+		row.PolicyID = ids[r.dp.ruleBySession[row.ExpectedRTFlowSessionID]]
+	}
+	store.MarkActiveApplied()
+
+	var tailHosts []string
+	r.h.d.reconcileDNSFn = func(cfg *config.Config, _ bool) error {
+		tailHosts = append(tailHosts, cfg.System.HostName)
+		return nil
+	}
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	if err := store.LoadOverride(policySetConfigText12072(
+		"rollback-c2", []string{"p-first", "web"})); err != nil {
+		t.Fatalf("LoadOverride: %v", err)
+	}
+	c2, err := store.CommitConfirmed(1)
+	if err != nil {
+		t.Fatalf("CommitConfirmed: %v", err)
+	}
+	store.ExitConfigure()
+	gen := store.ConfirmGenForTesting()
+	t.Cleanup(func() { _ = store.ConfirmCommit() })
+
+	publishErr := errors.New("apply_snapshot rejected by helper (definite)")
+	r.dp.invalDebtTestDP12073.script = make([]invalDebtOutcome12073, r.dp.applyCalls+1)
+	r.dp.invalDebtTestDP12073.script[r.dp.applyCalls] = invalDebtOutcome12073{err: publishErr}
+	attemptsBefore := r.dp.applyAttempts
+	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	_, applyErr := r.h.d.applyAndSyncCommitted(c1, c2, peerSyncNever)
+	r.h.d.applySem.Release(1)
+	if !errors.Is(applyErr, publishErr) {
+		t.Fatalf("definite C2 publish failure = %v, want %v", applyErr, publishErr)
+	}
+	if r.dp.applyAttempts != attemptsBefore+1 || r.dp.helperCfg != c1 ||
+		r.dp.unknown || r.hasDeletedSession(2) || !r.hasLiveSession(2) {
+		t.Fatalf("failed C2 premise: attempts+%d helper==C1:%v unknown=%v deleted-b=%v live-b=%v",
+			r.dp.applyAttempts-attemptsBefore, r.dp.helperCfg == c1, r.dp.unknown,
+			r.hasDeletedSession(2), r.hasLiveSession(2))
+	}
+
+	rollbackAttempts := r.dp.applyAttempts
+	rollbackTailCalls := len(tailHosts)
+	r.h.d.executeConfirmedRollback(gen)
+	if store.ActiveConfig() != c1 {
+		t.Fatalf("rollback store config=%p, want prior C1 %p", store.ActiveConfig(), c1)
+	}
+	if r.dp.applyAttempts != rollbackAttempts+1 || r.dp.applied != c1 {
+		t.Fatalf("rollback ApplyConfig attempts+%d applied=%p, want +1 and C1 %p",
+			r.dp.applyAttempts-rollbackAttempts, r.dp.applied, c1)
+	}
+	if len(tailHosts) != rollbackTailCalls+1 || tailHosts[len(tailHosts)-1] != "rollback-c1" {
+		t.Fatalf("rollback did not reach apply tail with C1: tail hosts=%v", tailHosts)
+	}
+	if r.hasDeletedSession(2) || !r.hasLiveSession(2) {
+		t.Fatalf("rollback deleted a session permitted by C1: deleted-b=%v live-b=%v",
+			r.hasDeletedSession(2), r.hasLiveSession(2))
+	}
+	if debt, failures, _ := r.h.d.ConfigApplyDebt(); debt || failures != 0 ||
+		r.h.d.policyInvalidationDebt != nil || r.h.d.policyInvalidationPlan != nil ||
+		!store.ActiveApplied() {
+		t.Fatalf("rollback did not converge: configDebt=%v failures=%d invalidationDebt=%+v plan=%+v ActiveApplied=%v",
+			debt, failures, r.h.d.policyInvalidationDebt, r.h.d.policyInvalidationPlan,
+			store.ActiveApplied())
+	}
+}

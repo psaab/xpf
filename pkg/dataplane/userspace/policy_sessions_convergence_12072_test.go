@@ -671,6 +671,64 @@ func TestDeferredPolicyRecoveryRejectsChangedPolicyOrRenameIdentity12072(t *test
 		})
 	}
 }
+func TestDeferredPolicyRenameRefreshInvalidatesStampedIdentity12072(t *testing.T) {
+	f, _, ancestry, rebinds := deferredPolicyRecoveryFixture12072(t)
+	m := f.m
+	captureCalls := 0
+	m.SetPolicySnapshotPrePublisher(func(uint64) error {
+		captureCalls++
+		return nil
+	})
+	f.model.scriptDrops(1)
+	m.mu.Lock()
+	prepared := m.prepareDeferredPolicySnapshotLocked()
+	err := m.syncSnapshotLocked()
+	initialUnknown := m.applySnapshotOutcomeUnknown
+	stampedGeneration := m.policySnapshotPrepublishGeneration
+	stampedIdentity := m.policySnapshotPrepublishIdentity
+	generation := m.lastSnapshot.Generation
+	m.mu.Unlock()
+	if !prepared || err == nil || !initialUnknown || captureCalls != 1 ||
+		stampedGeneration != generation {
+		t.Fatalf("lost-ACK setup: prepared=%v err=%v unknown=%v capture=%d stamp=%d generation=%d",
+			prepared, err, initialUnknown, captureCalls, stampedGeneration, generation)
+	}
+
+	updatedAncestry := append([]PolicyRenameAncestry(nil), ancestry...)
+	updatedAncestry[0].DestinationRuleID = "replacement"
+	if !m.SetDeferredPolicyRenameMetadata(generation, updatedAncestry, rebinds) {
+		t.Fatal("deferred rename metadata refresh rejected the retained generation")
+	}
+	m.mu.Lock()
+	prepared = m.prepareDeferredPolicySnapshotLocked()
+	unknown := m.applySnapshotOutcomeUnknown
+	updatedIdentity := m.policySnapshotPrepublishIdentity
+	m.mu.Unlock()
+	if !prepared || !unknown || captureCalls != 2 || updatedIdentity == stampedIdentity {
+		t.Fatalf("rename refresh reused stale recovery proof: prepared=%v unknown=%v captures=%d identityChanged=%v",
+			prepared, unknown, captureCalls, updatedIdentity != stampedIdentity)
+	}
+}
+
+func TestStripSingleUseCommitMetadataInvalidatesCachedIdentity12072(t *testing.T) {
+	f, _, ancestry, rebinds := deferredPolicyRecoveryFixture12072(t)
+	next := *f.m.lastSnapshot
+	next.PolicyRenameAncestry = append([]PolicyRenameAncestry(nil), ancestry...)
+	next.PolicySessionRebinds = append([]PolicySessionRebind(nil), rebinds...)
+	before, ok := policySnapshotIdentity(&next)
+	if !ok {
+		t.Fatal("could not cache identity before stripping single-use metadata")
+	}
+
+	stripSingleUseCommitMetadata(&next)
+	after, ok := policySnapshotIdentity(&next)
+	if !ok || after == before || len(next.PolicyRenameAncestry) != 0 ||
+		len(next.PolicySessionRebinds) != 0 {
+		t.Fatalf("stripping single-use metadata left stale identity: ok=%v identityChanged=%v ancestry=%d rebinds=%d",
+			ok, after != before, len(next.PolicyRenameAncestry), len(next.PolicySessionRebinds))
+	}
+}
+
 func TestDeferredPolicyRecoveryInvalidatesProofAfterScheduledPartial12072(t *testing.T) {
 	f, targetCfg, ancestry, rebinds := deferredPolicyRecoveryFixture12072(t)
 	m := f.m

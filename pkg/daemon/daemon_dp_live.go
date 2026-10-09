@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"log/slog"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -238,9 +239,9 @@ func (d *Daemon) liveDataplane() (liveDataPlane, bool) {
 
 // --- forwarders -------------------------------------------------------
 //
-// Uniform shape: resolve, then forward. The methods with no error return
-// report the zero value on an unresolved cell, which is the same thing
-// the consumers' pre-existing `dp == nil` branches produce.
+// Most methods resolve, then forward. ClearAllSessions is serialized with
+// config applies and can retire published scan debt after a successful
+// authoritative clear.
 
 func (a liveDataPlane) IsLoaded() bool {
 	s, err := a.resolve()
@@ -424,6 +425,9 @@ func (a liveDataPlane) SessionCount() (v4, v6 int) {
 	return s.SessionCount()
 }
 
+// ClearAllSessions is serialized with config applies because a successful
+// authoritative clear may retire a published policy-invalidation scan debt.
+// It resolves the backend only after acquiring applySem.
 func (a liveDataPlane) ClearAllSessions() (v4 int, v6 int, err error) {
 	d := a.daemon
 	locked := false
@@ -440,7 +444,14 @@ func (a liveDataPlane) ClearAllSessions() (v4 int, v6 int, err error) {
 	}
 	v4, v6, err = s.ClearAllSessions()
 	if err == nil && locked {
-		d.retirePolicyInvalidationScanDebtAfterFullClearLocked()
+		retired, reason := d.retirePolicyInvalidationScanDebtAfterFullClearLocked()
+		if retired {
+			slog.Info("full session clear retired published policy invalidation scan debt",
+				"v4", v4, "v6", v6)
+		} else {
+			slog.Info("full session clear did not retire policy invalidation scan debt",
+				"reason", reason, "v4", v4, "v6", v6)
+		}
 	}
 	return v4, v6, err
 }
@@ -451,14 +462,16 @@ func (a liveDataPlane) ClearAllSessions() (v4 int, v6 int, err error) {
 // target could still admit sessions under its predecessor before a later
 // publish, recreating the very gap the scan debt protects.
 // Caller holds d.applySem.
-func (d *Daemon) retirePolicyInvalidationScanDebtAfterFullClearLocked() {
+func (d *Daemon) retirePolicyInvalidationScanDebtAfterFullClearLocked() (bool, string) {
 	debt := d.policyInvalidationDebt
-	if debt == nil || debt.scanFailure == nil ||
-		policyInvalidationAppliedConfig(d.dataplane()) != debt.newCfg {
-		return
+	if debt == nil || debt.scanFailure == nil {
+		return false, "no published incomplete policy scan debt"
+	}
+	if policyInvalidationAppliedConfig(d.dataplane()) != debt.newCfg {
+		return false, "helper authority does not match scan target"
 	}
 	if d.store != nil && d.store.ActiveConfig() != debt.newCfg {
-		return
+		return false, "active store config does not match scan target"
 	}
 	d.policyInvalidationDebt = nil
 	if d.policyInvalidationCapture == debt.capture {
@@ -470,6 +483,7 @@ func (d *Daemon) retirePolicyInvalidationScanDebtAfterFullClearLocked() {
 	if d.store != nil && debt.appliedDigest != "" {
 		d.store.MarkAppliedDigest(debt.appliedDigest)
 	}
+	return true, ""
 }
 
 func (a liveDataPlane) DeleteSession(key dataplane.SessionKey) error {

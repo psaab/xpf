@@ -266,6 +266,24 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 		return
 	}
 	applied := policyInvalidationAppliedConfig(d.dataplane())
+	if debt := d.policyInvalidationDebt; debt != nil && applied != nil && debt.newCfg != applied {
+		var active *config.Config
+		if d.store != nil {
+			active = d.store.ActiveConfig()
+		}
+		// Retire only when helper and store agree on another authority. A store
+		// move alone may be a target not yet applied by the helper.
+		if active != debt.newCfg && active == applied {
+			activeHost := ""
+			if active != nil {
+				activeHost = active.System.HostName
+			}
+			slog.Warn("policy session invalidation: retiring superseded target debt",
+				"applied_host", applied.System.HostName, "store_active_host", activeHost)
+			d.policyInvalidationDebt = nil
+			originalDebt = nil
+		}
+	}
 	if applied != nil && applied != plan.oldCfg && applied != plan.newCfg {
 		// Positional policy IDs must be derived from the helper's known
 		// predecessor, not a stale store snapshot.
@@ -273,7 +291,7 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 		if debt := d.policyInvalidationDebt; debt != nil && debt.newCfg == applied {
 			debt.oldCfg = applied
 		}
-	} else if applied != nil && applied == plan.newCfg {
+	} else if applied != nil && applied == plan.newCfg && plan.oldCfg != applied {
 		// The helper has already published this target. Reuse retained
 		// candidates under that known authority. Without matching debt there
 		// is no proof the target's pre-publication capture was discharged, so
@@ -892,7 +910,7 @@ func (d *Daemon) dischargePolicyInvalidationDebtLocked(oldCfg, newCfg *config.Co
 func (d *Daemon) captureAndStagePolicyRenameAncestry(cfg *config.Config) error {
 	d.capturePolicyInvalidationLocked(cfg)
 	if captured := d.policyInvalidationCapture; captured != nil && captured.authorityErr != nil {
-		slog.Error("policy session invalidation authority is unknown; holding snapshot publication",
+		slog.Error("policy session invalidation authority or candidate proof is unavailable; holding snapshot publication",
 			"err", captured.authorityErr)
 		return fmt.Errorf("policy session invalidation authority refusal: %w", captured.authorityErr)
 	}
