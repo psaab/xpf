@@ -1958,6 +1958,11 @@ func validatePolicyThenOperandsStrict(cfg *Config) error {
 					"policy-options policy-statement %q term %q then next-hop: invalid value %q: unsupported next-hop %q: %s",
 					name, term.Name, term.NextHop, term.NextHop, policyThenNextHopUnsupportedReason(term.NextHop))
 			}
+			if term.invalidNextHopExtra12070 {
+				return fmt.Errorf(
+					"policy-options policy-statement %q term %q then next-hop: unknown modifier %q",
+					name, term.Name, term.invalidNextHopExtraValue12070)
+			}
 			prependOperands := SplitPolicyASPathPrependOperands(term.ASPathPrepend)
 			if term.hasASPathPrependOperand12070 && len(prependOperands) == 0 {
 				return fmt.Errorf(

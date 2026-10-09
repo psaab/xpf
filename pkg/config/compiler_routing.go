@@ -1873,6 +1873,27 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 			if i+1 < len(keys) {
 				i++
 				term.NextHop = keys[i]
+				// The schema rejects non-keyword tokens beyond the typed
+				// next-hop operand. Compact/term-line Keys bypass that walk,
+				// so retain the first unquoted tail operand for the compiled
+				// strict gate rather than silently accepting a display-set
+				// command that cannot be reloaded.
+				// Look through quoted tokens: they are not candidates, but
+				// must not hide a later unquoted garbage operand.
+				for next := i + 1; next < len(keys); next++ {
+					if next < len(quoted) && quoted[next] {
+						continue
+					}
+					if policyTermThenInlineKeywords[keys[next]] {
+						break
+					}
+					term.invalidNextHopExtra12070 = true
+					term.invalidNextHopExtraValue12070 = keys[next]
+					// Do not reinterpret a then-side garbage token such as
+					// `protocol` as a from-side match clause.
+					i = next
+					break
+				}
 			}
 		case "load-balance":
 			if i+1 < len(keys) {

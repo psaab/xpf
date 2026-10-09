@@ -156,6 +156,16 @@ type PolicyTerm struct {
 	// without provenance retain their existing behavior.
 	hasNextHopOperand12070       bool `json:"-"`
 	hasASPathPrependOperand12070 bool `json:"-"`
+	// invalidNextHopExtra12070 preserves a compact/term-line `then next-hop`
+	// trailing operand long enough for strict compilation to reject it. The
+	// inline parser consumes exactly one next-hop operand; a following
+	// unquoted token outside the then-action boundary set (compact `[ a b ]`,
+	// `a b`, `a foo`) would otherwise be silently dropped while SetPath,
+	// braced, and LoadMerge spellings reject the same tail as an unknown
+	// modifier. Quoted tails retain their existing behavior. Compiler-only
+	// state, excluded from JSON.
+	invalidNextHopExtra12070      bool   `json:"-"`
+	invalidNextHopExtraValue12070 string `json:"-"`
 	// invalidNextPolicy11780 preserves malformed packed `then next <value>`
 	// tokens long enough for strict compilation to reject them. Tolerant
 	// compilation also records Action=reject so the renderer fails closed.

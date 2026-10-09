@@ -204,6 +204,11 @@ func TestPolicyThenOperandsLenientRegistrationAndCompile_12070(t *testing.T) {
 			bad:  "discard",
 		},
 		{
+			name: "compact next-hop extra operand",
+			text: `policy-options { policy-statement P { term t { then accept next-hop 192.0.2.1 192.0.2.2; } } }`,
+			bad:  "192.0.2.2",
+		},
+		{
 			name: "term-line prepend",
 			text: `policy-options { policy-statement P { term t then accept as-path-prepend 65001 abc; } }`,
 			bad:  "abc",
