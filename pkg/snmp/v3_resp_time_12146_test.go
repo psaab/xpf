@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-// withSteppedEngineTime injects a deterministic 1s tick between the FIRST and
-// SECOND engineTime() reads of a response build: the first read returns base,
-// every subsequent read returns base+1. It restores the real clock after fn.
+// withSteppedEngineTime injects a deterministic 1s tick on every engineTime()
+// read: the first read returns base, and each subsequent read advances by 1.
+// It restores the real clock after fn.
 //
 // The snmp package serves requests on a single serial goroutine and the tests
 // do not run in parallel, so swapping the package var is safe (same rationale
@@ -21,10 +21,7 @@ func withSteppedEngineTime(t *testing.T, base int, fn func()) {
 	calls := 0
 	engineTimeNow = func(a *Agent) int {
 		calls++
-		if calls == 1 {
-			return base
-		}
-		return base + 1
+		return base + calls - 1
 	}
 	defer func() { engineTimeNow = saved }()
 	fn()
