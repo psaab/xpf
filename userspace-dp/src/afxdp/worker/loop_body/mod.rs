@@ -2041,9 +2041,10 @@ pub(crate) fn worker_loop(
         // instead of below it. `worker_loop_drains_the_pptp_control_inbox_7699`
         // enforces both halves of that, including the absence of the interval
         // constant from this file — so do not name it here even in a comment.
-        crate::afxdp::worker_queue::drain_pptp_control_inbox(
+        crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
             &pptp_control,
             &mut sessions,
+            Some(Arc::as_ptr(&commands) as usize),
             &peer_worker_commands,
             loop_now_ns,
         );

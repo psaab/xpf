@@ -911,3 +911,123 @@ mod inbox_drop_policy_tests_7699 {
         }
     }
 }
+
+#[cfg(test)]
+mod call_install_retry_fence_tests_12133 {
+    use super::*;
+    use crate::session::pptp::{ControlChannelId, PptpCall, PptpCallDisconnect};
+
+    fn peers() -> (std::net::IpAddr, std::net::IpAddr) {
+        (
+            "198.51.100.7".parse().unwrap(),
+            "203.0.113.9".parse().unwrap(),
+        )
+    }
+
+    fn channel() -> ControlChannelId {
+        let (pac, pns) = peers();
+        ControlChannelId::new(pac, 49152, pns, 1723)
+    }
+
+    fn call(a: u16, b: u16) -> PptpCall {
+        let (pac, pns) = peers();
+        PptpCall::new(pac, a, pns, b)
+    }
+
+    #[test]
+    fn an_older_reply_and_stale_ack_cannot_replace_a_newer_install_retry_12133() {
+        const QUEUE: usize = 41;
+        const OTHER_QUEUE: usize = 42;
+        let inbox = PptpControlInbox::default();
+        let call = call(0x1111, 0x2222);
+        let control = channel();
+
+        inbox.record_call_install(call, control, 20, vec![QUEUE]);
+        inbox.record_call_install(call, control, 10, vec![OTHER_QUEUE]);
+        inbox.mark_call_install_sent(call, control, 10, QUEUE);
+        let retry = inbox.take_call_install_retries(1_000_000_000);
+        assert_eq!(retry.len(), 1);
+        assert_eq!(
+            retry[0].learned_ns, 20,
+            "an older reply replaced the latest learned timestamp"
+        );
+        assert_eq!(
+            retry[0].unsent_queue_ids,
+            vec![QUEUE],
+            "the older reply or its stale acknowledgement replaced current recipients"
+        );
+
+        inbox.mark_call_install_sent(call, control, 20, QUEUE);
+        assert!(
+            inbox
+                .take_call_install_retries(2_000_000_000)
+                .is_empty(),
+            "an acknowledgement for the current learned timestamp did not clear it"
+        );
+    }
+
+    #[test]
+    fn call_disconnect_retry_cancellation_obeys_timestamp_and_call_scope_12133() {
+        const QUEUE: usize = 51;
+        let inbox = PptpControlInbox::default();
+        let control = channel();
+        let call_a = call(0x1111, 0x2222);
+        let call_b = call(0x3333, 0x4444);
+        inbox.record_call_install(call_a, control, 10, vec![QUEUE]);
+        inbox.record_call_install(call_b, control, 20, vec![QUEUE]);
+        let (pac, _) = peers();
+
+        inbox.forget_call_installs_for_disconnect(PptpCallDisconnect {
+            allocator: pac,
+            call_id: 0x1111,
+            control,
+            disconnected_ns: 9,
+        });
+        let retries = inbox.take_call_install_retries(1_000_000_000);
+        assert_eq!(
+            retries.len(),
+            2,
+            "a CDN older than the learned reply canceled a retry"
+        );
+
+        inbox.forget_call_installs_for_disconnect(PptpCallDisconnect {
+            allocator: pac,
+            call_id: 0x1111,
+            control,
+            disconnected_ns: 10,
+        });
+        let retries = inbox.take_call_install_retries(2_000_000_000);
+        assert_eq!(retries.len(), 1);
+        assert_eq!(
+            retries[0].call, call_b,
+            "a CDN must remove only its call, preserving the later call on the channel"
+        );
+    }
+
+    #[test]
+    fn channel_close_retry_cancellation_preserves_newer_installs_12133() {
+        const QUEUE: usize = 61;
+        let inbox = PptpControlInbox::default();
+        let control = channel();
+        let call_a = call(0x1111, 0x2222);
+        let call_b = call(0x3333, 0x4444);
+        inbox.record_call_install(call_a, control, 10, vec![QUEUE]);
+        inbox.record_call_install(call_b, control, 20, vec![QUEUE]);
+
+        inbox.forget_call_installs_for_channel(control, 15);
+        let retries = inbox.take_call_install_retries(1_000_000_000);
+        assert_eq!(retries.len(), 1);
+        assert_eq!(
+            retries[0].call, call_b,
+            "a close must cancel no-later-than installs and preserve newer ones"
+        );
+
+        inbox.forget_call_installs_for_channel(control, 20);
+        assert!(
+            inbox
+                .take_call_install_retries(2_000_000_000)
+                .is_empty(),
+            "the close timestamp equal to the learned time must cancel that install"
+        );
+    }
+}
