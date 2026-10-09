@@ -160,6 +160,14 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
+	// Memberless ranges lose their shared statements during expansion, so
+	// reject unconsumed filter keywords before that information disappears.
+	memberlessRangeFilterWarnings, err := validateMemberlessInterfaceRangeFilters12090(
+		tree.Children, opts.lenientUnsupportedInterfaceStanzas)
+	if err != nil {
+		return nil, err
+	}
+
 	// #4027 interface-range expansion. Rewrites every `interfaces
 	// interface-range <name> { member <if>; <shared cfg> }` stanza into its
 	// member interfaces BEFORE section compilation (and before the
@@ -787,6 +795,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, flowTraceFileWarnings...)
 	warnings = append(warnings, flowTraceFilterWarnings...)
 	warnings = append(warnings, flowTraceSizeWarnings...)
+	warnings = append(warnings, memberlessRangeFilterWarnings...)
 	warnings = append(warnings, ifaceRangeWarnings...)
 	warnings = append(warnings, identityPatternWarnings...)
 	warnings = append(warnings, unsupportedIfaceWarnings...)

@@ -124,8 +124,9 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 	}
 	// #12090: the only supported filter keyword under interfaces is
 	// `unit <n> family inet|inet6 filter input|output <name>`, which has a
-	// typed InterfaceUnit hook. Anything else named `filter` or
-	// `simple-filter` is accepted by an open-world subtree but has no reader.
+	// typed InterfaceUnit hook. All other named or packed `filter` spellings,
+	// and all `simple-filter` spellings, have no reader under the open-world
+	// subtree.
 	// Walk every interface subtree so another placement cannot silently
 	// expand the accepted population.
 	for _, iface := range ifaceChildren {
@@ -141,6 +142,30 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 						"for this interface binding; remove it) (#12090)",
 					iface.Name(), filterKeywordLabel12090(n)); err != nil {
 					return err
+				}
+			}
+			// Flat-set paths can leave an unknown family token and its
+			// unsupported filter tail packed onto the family node (or onto
+			// an unknown AF leaf beneath it). Inspect only these family-level
+			// key tails; ordinary leaf values elsewhere are not keywords.
+			if n.Name() == "family" || (len(ancestors) > 0 &&
+				ancestors[len(ancestors)-1].Name() == "family" &&
+				len(ancestors[len(ancestors)-1].Keys) == 1) {
+				start := 1
+				if n.Name() == "family" {
+					start = 2 // skip `family` and its AF token
+				}
+				for i := start; i < len(n.Keys); i++ {
+					keyword := n.Keys[i]
+					if keyword != "filter" && keyword != "simple-filter" {
+						continue
+					}
+					if err := emit(
+						"interfaces %s: `%s` is not supported (xpf has no consumer "+
+							"for this interface binding; remove it) (#12090)",
+						iface.Name(), packedFilterKeywordLabel12090(keyword, n.Keys[i+1:])); err != nil {
+						return err
+					}
 				}
 			}
 			next := append(ancestors, n)
@@ -244,6 +269,73 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 	return warnings, nil
 }
 
+// validateMemberlessInterfaceRangeFilters12090 checks range shared paths that
+// would be discarded by expandInterfaceRanges when a range has no members.
+// The ordinary interface walk sees member configurations after expansion.
+func validateMemberlessInterfaceRangeFilters12090(nodes []*Node, lenient bool) ([]string, error) {
+	var warnings []string
+	emit := func(rangeName, label string) error {
+		msg := fmt.Sprintf(
+			"interfaces interface-range %s: `%s` is not supported "+
+				"(xpf has no consumer for this interface binding; remove it) (#12090)",
+			rangeName, label)
+		if !lenient {
+			return fmt.Errorf("%s", msg)
+		}
+		warnings = append(warnings, msg)
+		return nil
+	}
+	for _, root := range nodes {
+		if root == nil || root.Name() != "interfaces" {
+			continue
+		}
+		for _, rangeNode := range root.Children {
+			if rangeNode == nil || rangeNode.Name() != "interface-range" {
+				continue
+			}
+			var ranges []interfaceRangeDef
+			if len(rangeNode.Keys) >= 2 {
+				rd, _ := parseHierInterfaceRange(rangeNode)
+				if rd != nil {
+					ranges = append(ranges, *rd)
+				}
+			} else {
+				ranges, _ = parseFlatInterfaceRanges(rangeNode)
+			}
+			for _, rd := range ranges {
+				if len(rd.members) != 0 {
+					continue
+				}
+				for _, path := range rd.shared {
+					for i, keyword := range path {
+						if keyword != "filter" && keyword != "simple-filter" {
+							continue
+						}
+						if keyword == "filter" && isInterfaceFilterConsumerTokens12090(path, i) {
+							continue
+						}
+						if err := emit(rd.name,
+							packedFilterKeywordLabel12090(keyword, path[i+1:])); err != nil {
+							return nil, err
+						}
+					}
+				}
+			}
+		}
+	}
+	return warnings, nil
+}
+
+// Filter's only interface consumer has the token shape
+// `unit <n> family inet|inet6 filter input|output <name>`.
+// The index check keeps similarly named values in other paths out.
+func isInterfaceFilterConsumerTokens12090(path []string, keyword int) bool {
+	return keyword == 4 && len(path) > 6 &&
+		path[0] == "unit" && path[2] == "family" &&
+		(path[3] == "inet" || path[3] == "inet6") &&
+		path[keyword] == "filter" && isFilterDirection12090(path[keyword+1])
+}
+
 // isInterfaceFilterConsumerPath12090 reports whether a `filter` keyword is
 // directly below the only interface path with a typed hook. The family node
 // carries its AF in Keys[1] in both flat-set and hierarchical parser shapes.
@@ -276,6 +368,15 @@ func isFilterDirection12090(token string) bool {
 	default:
 		return false
 	}
+}
+
+// packedFilterKeywordLabel12090 reports a packed keyword and direction without
+// including authored filter names, which are operator-controlled values.
+func packedFilterKeywordLabel12090(keyword string, rest []string) string {
+	if len(rest) > 0 && isFilterDirection12090(rest[0]) {
+		return keyword + " " + rest[0]
+	}
+	return keyword
 }
 
 // unsupportedInterfaceFilterKnobs returns the exact interface family-level
