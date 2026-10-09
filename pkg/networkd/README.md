@@ -21,7 +21,10 @@ Triggers `networkctl reload` only when files actually changed.
   sweeps every managed file and reloads (#2988). There is no separate `Clear`;
   see the retirement note below (#6852).
 - `FindExternallyManaged(dir string) ExternalMatchSet` — `networkd.go`. Detects non-xpf
-  network files whose supported `Name=` / `MACAddress=` match rules are safe to evaluate.
+  network files with supported `Name=` / `MACAddress=` predicates. `Matches`
+  requires those predicates to establish ownership; `MatchesForApply` keeps
+  durable teardown conservative when supported predicates match alongside
+  unknown `[Match]` keys.
 
 ## Callers
 

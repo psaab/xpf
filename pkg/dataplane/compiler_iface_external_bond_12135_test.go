@@ -62,3 +62,41 @@ func TestStripUnmanagedInterfacesDeletesExternallyMatchedStaleBond12135(t *testi
 		t.Fatalf("deleted stale bond was also marked unmanaged: %+v", result.ManagedInterfaces)
 	}
 }
+
+// FAIL-ON-REVERT: removing the external match check in
+// stripUnmanagedInterfaces must make this interface appear in
+// ManagedInterfaces, proving that the compiler-side half of #12135 is live.
+func TestStripUnmanagedInterfacesSkipsExternallyMatchedName12135(t *testing.T) {
+	const ifindex = 4232
+	mac, err := net.ParseMAC("52:54:00:aa:bb:cc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldLister := interfaceLister
+	t.Cleanup(func() { interfaceLister = oldLister })
+	interfaceLister = func() ([]net.Interface, error) {
+		return []net.Interface{{
+			Index:        ifindex,
+			Name:         "enp9s0",
+			HardwareAddr: mac,
+		}}, nil
+	}
+
+	externalDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(externalDir, "20-external.network"),
+		[]byte("[Match]\nName=en*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	external := networkd.FindExternallyManaged(externalDir)
+	result := &CompileResult{linkIdxMap: map[int]netlink.Link{
+		ifindex: &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{
+			Index: ifindex,
+			Name:  "enp9s0",
+		}},
+	}}
+	stripUnmanagedInterfaces(&config.Config{}, result, map[string]bool{}, external)
+
+	if len(result.ManagedInterfaces) != 0 {
+		t.Fatalf("externally matched interface was stripped under xpf control: %+v", result.ManagedInterfaces)
+	}
+}

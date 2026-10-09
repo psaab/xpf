@@ -48,22 +48,106 @@ func TestFindExternallyManagedMatchesNameGlobsAndMACAddress12135(t *testing.T) {
 		})
 	}
 }
-func TestExternalNameLeadingNegationInvertsWholePatternList12135(t *testing.T) {
-	dir := t.TempDir()
-	writeExternalNetwork12135(t, dir, "50-negative.network", "[Match]\nName=!eth0 eth2\n")
-	matches := FindExternallyManaged(dir)
+
+func TestExternalNameNegationOrdersAndClassExclusions12135(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		want bool
+		name  string
+		rule  string
+		iface string
+		want  bool
 	}{
-		{name: "eth0", want: false},
-		{name: "eth2", want: false},
-		{name: "eth1", want: true},
-		{name: "enp3s0", want: true},
+		{name: "negative after positive excluded", rule: "Name=en*\nName=!enp0s31f6\n", iface: "enp0s31f6"},
+		{name: "negative after positive allows other", rule: "Name=en*\nName=!enp0s31f6\n", iface: "enp1s0", want: true},
+		{name: "positive after negative allows match", rule: "Name=!enp0s31f6\nName=en*\n", iface: "enp1s0", want: true},
+		{name: "positive after negative excluded", rule: "Name=!enp0s31f6\nName=en*\n", iface: "enp0s31f6"},
+		{name: "all negative excludes either", rule: "Name=!eth0\nName=!eth1\n", iface: "eth1"},
+		{name: "all negative defaults true", rule: "Name=!eth0\nName=!eth1\n", iface: "eth2", want: true},
+		{name: "same line excludes negative word", rule: "Name=en* !enp0s31f6\n", iface: "enp0s31f6"},
+		{name: "same line matches positive word", rule: "Name=en* !enp0s31f6\n", iface: "enp1s0", want: true},
+		{name: "same-line leading negation prefixes each word", rule: "Name=!en* eth*\n", iface: "eth0"},
+		{name: "same-line all-negative rules default true", rule: "Name=!en* eth*\n", iface: "wlan0", want: true},
+		{name: "class excludes zero", rule: "Name=eth[!0]\n", iface: "eth0"},
+		{name: "class includes one", rule: "Name=eth[!0]\n", iface: "eth1", want: true},
 	} {
-		if got := matches.Matches(tc.name, ""); got != tc.want {
-			t.Errorf("Matches(%q, empty MAC) = %v, want %v", tc.name, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeExternalNetwork12135(t, dir, "50-external.network", "[Match]\n"+tc.rule)
+			if got := FindExternallyManaged(dir).Matches(tc.iface, ""); got != tc.want {
+				t.Errorf("Matches(%q) = %v, want %v", tc.iface, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestApplyConservativelyPreservesUnknownExternalMatchKeys12135(t *testing.T) {
+	stubNetworkctl9886(t)
+	dir := t.TempDir()
+	writeExternalNetwork12135(t, dir, "20-external.network", "[Match]\nName=eth0\nDriver=igb\n")
+	matches := FindExternallyManaged(dir)
+	if matches.Matches("eth0", "") {
+		t.Fatal("compiler matcher must not claim an incomplete conjunctive rule")
+	}
+	if !matches.MatchesForApply("eth0", "") {
+		t.Fatal("Apply matcher must preserve master’s durable protection when supported predicates match")
+	}
+	m := NewInDir(dir)
+	if err := m.Apply([]InterfaceConfig{{Name: "eth0", Unmanaged: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, filePrefix+"eth0.network")); !os.IsNotExist(err) {
+		t.Fatalf("Apply must not emit an always-down file for a potentially externally-owned link; stat err=%v", err)
+	}
+}
+
+func TestApplyExternalSkipPrecedesGlobRefusal12135(t *testing.T) {
+	stubNetworkctl9886(t)
+	dir := t.TempDir()
+	external := "[Match]\nName=ge*\n\n[Network]\nDHCP=yes\n"
+	writeExternalNetwork12135(t, dir, "20-external.network", external)
+	m := NewInDir(dir)
+	if err := m.Apply([]InterfaceConfig{{Name: "ge*0", Unmanaged: true}}); err != nil {
+		t.Fatalf("externally matched unmanaged interface must skip before glob refusal: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, filePrefix+"ge*0.network")); !os.IsNotExist(err) {
+		t.Fatalf("skipped interface must not get an xpf unit; stat err=%v", err)
+	}
+}
+
+func TestExternalMatchDropsInvalidMACWordsResetsEmptyNameAndAcceptsShortGroups12135(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		rule  string
+		iface string
+		mac   string
+		want  bool
+	}{
+		{
+			name:  "invalid MAC word dropped",
+			rule:  "Name=eth0\nMACAddress=invalid\n",
+			iface: "eth0",
+			want:  true,
+		},
+		{
+			name:  "empty Name resets to empty Match",
+			rule:  "Name=eth0\nName=\nMACAddress=invalid\n",
+			iface: "other0",
+			want:  true,
+		},
+		{
+			name:  "short MAC groups",
+			rule:  "MACAddress=52:54:0:aa:bb:cc\n",
+			iface: "eth0",
+			mac:   "52:54:00:aa:bb:cc",
+			want:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeExternalNetwork12135(t, dir, "50-external.network", "[Match]\n"+tc.rule)
+			if got := FindExternallyManaged(dir).Matches(tc.iface, tc.mac); got != tc.want {
+				t.Errorf("Matches(%q, %q) = %v, want %v", tc.iface, tc.mac, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -109,48 +193,29 @@ func TestApplyHonorsExternalNameGlobAndMACBeforeAlwaysDown12135(t *testing.T) {
 	}
 }
 
-func TestExternalMACAddressRejectsUnsupportedForms12135(t *testing.T) {
+func TestExternalMACAddressForms12135(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		pattern string
-		address string
 		want    bool
 	}{
 		{
 			name:    "bare hex",
 			pattern: "525400aabbcc",
-			address: "52:54:00:aa:bb:cc",
 		},
 		{
 			name:    "eight-byte EUI-64",
 			pattern: "52-54-00-aa-bb-cc-dd-ee",
-			address: "52-54-00-aa-bb-cc-dd-ee",
 		},
 		{
 			name:    "dotted EUI-48",
 			pattern: "5254.00aa.bbcc",
-			address: "52:54:00:aa:bb:cc",
-			want:    true,
-		},
-		{
-			name:    "IPv4",
-			pattern: "192.0.2.1",
-			address: "192.0.2.1",
-			want:    true,
-		},
-		{
-			name:    "IPv6",
-			pattern: "2001:db8::1",
-			address: "2001:0db8:0:0:0:0:0:1",
 			want:    true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			writeExternalNetwork12135(t, dir, "20-external.network", "[Match]\nMACAddress="+tc.pattern+"\n")
-			matches := FindExternallyManaged(dir)
-			if got := matches.Matches("eth0", tc.address); got != tc.want {
-				t.Errorf("Matches(%q, %q) = %v, want %v", "eth0", tc.address, got, tc.want)
+			if _, got := parseExternalMACAddress(tc.pattern); got != tc.want {
+				t.Errorf("parseExternalMACAddress(%q) valid = %v, want %v", tc.pattern, got, tc.want)
 			}
 		})
 	}

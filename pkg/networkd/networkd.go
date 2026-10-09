@@ -353,7 +353,7 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 
 	var filtered []InterfaceConfig
 	for _, ifc := range interfaces {
-		if ifc.Unmanaged && external.Matches(ifc.Name, ifc.MACAddress) {
+		if ifc.Unmanaged && external.MatchesForApply(ifc.Name, ifc.MACAddress) {
 			slog.Debug("skipping externally managed interface", "name", ifc.Name)
 			continue
 		}
@@ -773,9 +773,10 @@ func warnIfAllRPFilterOverrides(tunName string) {
 		"tun", tunName, "all_rp_filter", val, "issue", 2378)
 }
 
-// ExternalMatchSet describes the non-xpf networkd [Match] rules that Apply
-// must leave alone. A rule is considered only when its supported predicates
-// can be evaluated from an interface's name and hardware address.
+// ExternalMatchSet describes non-xpf networkd [Match] rules that must remain
+// outside xpf's unmanaged teardown. Apply uses a conservative supported-key
+// match when other predicates are unknown; the compiler uses Matches so it
+// never skips teardown based on an incomplete conjunction.
 type ExternalMatchSet struct {
 	rules []externalNetworkMatch
 }
@@ -785,16 +786,33 @@ type externalNetworkMatch struct {
 	macPatterns  []string
 	hasName      bool
 	hasMAC       bool
+	matchAll     bool
 	unsupported  bool
 }
 
-// Matches reports whether any external .network rule matches this interface.
-// Supported [Match] keys within one file are conjunctive; values for each key
-// are alternatives. Unsupported keys make that file indeterminate and are
-// conservatively ignored rather than overclaiming an interface.
+// Matches reports whether a rule can be proven to match using only Name= and
+// MACAddress=. Rules with unknown predicates are not treated as matches.
 func (m ExternalMatchSet) Matches(name, mac string) bool {
+	return m.matches(name, mac, false)
+}
+
+// MatchesForApply conservatively preserves the durable protection Apply had
+// before external matching was shared with the compiler. When supported
+// predicates match, unknown additional [Match] keys do not cause xpf to write
+// an always-down unit over a potentially-owned interface.
+func (m ExternalMatchSet) MatchesForApply(name, mac string) bool {
+	return m.matches(name, mac, true)
+}
+
+func (m ExternalMatchSet) matches(name, mac string, allowUnknown bool) bool {
 	for _, rule := range m.rules {
-		if rule.unsupported || (!rule.hasName && !rule.hasMAC) {
+		if rule.matchAll {
+			return true
+		}
+		if rule.unsupported && !allowUnknown {
+			continue
+		}
+		if !rule.hasName && !rule.hasMAC {
 			continue
 		}
 		if rule.hasName && !externalPatternListMatches(rule.namePatterns, name) {
@@ -808,11 +826,11 @@ func (m ExternalMatchSet) Matches(name, mac string) bool {
 	return false
 }
 
-// FindExternallyManaged reads non-xpf .network files and retains rules whose
-// [Match] predicates can be evaluated from Name= and MACAddress=. systemd
-// applies all predicates in a [Match] section together, so matching just one
-// supported key from a rule with other keys could incorrectly protect an
-// unrelated interface.
+// FindExternallyManaged reads non-xpf .network files and retains supported
+// [Match] predicates. systemd applies all predicates in a section together;
+// Apply conservatively ignores additional unknown keys only when at least one
+// supported predicate matches, while Matches requires the complete supported
+// rule to be sufficient.
 func FindExternallyManaged(dir string) ExternalMatchSet {
 	var result ExternalMatchSet
 	entries, err := os.ReadDir(dir)
@@ -829,7 +847,7 @@ func FindExternallyManaged(dir string) ExternalMatchSet {
 			continue
 		}
 		var rule externalNetworkMatch
-		inMatch := false
+		inMatch, sawMatchSection := false, false
 		for _, rawLine := range strings.Split(string(data), "\n") {
 			line := strings.TrimSpace(rawLine)
 			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
@@ -837,6 +855,7 @@ func FindExternallyManaged(dir string) ExternalMatchSet {
 			}
 			if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 				inMatch = line == "[Match]"
+				sawMatchSection = sawMatchSection || inMatch
 				continue
 			}
 			if !inMatch {
@@ -849,45 +868,119 @@ func FindExternallyManaged(dir string) ExternalMatchSet {
 			value = strings.TrimSpace(value)
 			switch strings.TrimSpace(key) {
 			case "Name":
-				rule.hasName = true
-				rule.namePatterns = append(rule.namePatterns, strings.Fields(value)...)
+				if value == "" {
+					rule.namePatterns = nil
+					rule.hasName = false
+					continue
+				}
+				lineNegated := strings.HasPrefix(value, "!")
+				if lineNegated {
+					value = value[1:]
+				}
+				for _, pattern := range strings.Fields(value) {
+					if lineNegated {
+						pattern = "!" + pattern
+					}
+					rule.namePatterns = append(rule.namePatterns, pattern)
+				}
+				rule.hasName = len(rule.namePatterns) > 0
 			case "MACAddress":
-				rule.hasMAC = true
-				rule.macPatterns = append(rule.macPatterns, strings.Fields(value)...)
+				if value == "" {
+					rule.macPatterns = nil
+					rule.hasMAC = false
+					continue
+				}
+				for _, pattern := range strings.Fields(value) {
+					if _, ok := parseExternalMACAddress(pattern); ok {
+						rule.macPatterns = append(rule.macPatterns, pattern)
+					}
+				}
+				rule.hasMAC = len(rule.macPatterns) > 0
 			default:
 				rule.unsupported = true
 			}
 		}
-		if !rule.unsupported && ((rule.hasName && len(rule.namePatterns) > 0) || (rule.hasMAC && len(rule.macPatterns) > 0)) {
+		switch {
+		case rule.hasName || rule.hasMAC:
+			result.rules = append(result.rules, rule)
+		case sawMatchSection && !rule.unsupported:
+			// An empty effective [Match] section matches every interface.
+			rule.matchAll = true
 			result.rules = append(result.rules, rule)
 		}
 	}
 	return result
 }
 
-// externalPatternListMatches implements systemd's whitespace-separated glob
-// alternatives. A leading exclamation mark inverts the complete list.
+// externalPatternListMatches implements systemd's net_condition_test_strv:
+// any matching negative rule vetoes; otherwise a positive must match if one
+// exists, and an all-negative or empty rule set matches by default.
 func externalPatternListMatches(patterns []string, value string) bool {
-	if len(patterns) == 0 {
-		return false
-	}
-	invert := strings.HasPrefix(patterns[0], "!")
-	hasValidPattern, matched := false, false
-	for i, pattern := range patterns {
-		if i == 0 && invert {
+	hasPositive, positiveMatched := false, false
+	for _, pattern := range patterns {
+		negative := strings.HasPrefix(pattern, "!")
+		if negative {
 			pattern = pattern[1:]
+		} else {
+			hasPositive = true
 		}
-		if pattern == "" {
-			continue
-		}
+		pattern = translateFnmatchNegatedClasses(pattern)
 		patternMatch, err := path.Match(pattern, value)
-		if err != nil {
+		if err != nil || !patternMatch {
 			continue
 		}
-		hasValidPattern = true
-		matched = matched || patternMatch
+		if negative {
+			return false
+		}
+		positiveMatched = true
 	}
-	return hasValidPattern && (matched != invert)
+	return !hasPositive || positiveMatched
+}
+
+// translateFnmatchNegatedClasses adapts fnmatch's [!...] class syntax to
+// path.Match's equivalent [^...] syntax without changing escaped brackets.
+func translateFnmatchNegatedClasses(pattern string) string {
+	var out strings.Builder
+	last, i := 0, 0
+	for i < len(pattern) {
+		if pattern[i] == '\\' {
+			i += 2
+			continue
+		}
+		if pattern[i] != '[' || i+1 >= len(pattern) || pattern[i+1] != '!' {
+			i++
+			continue
+		}
+		end := i + 2
+		if end < len(pattern) && pattern[end] == ']' {
+			end++
+		}
+		for end < len(pattern) {
+			if pattern[end] == '\\' {
+				end += 2
+				continue
+			}
+			if pattern[end] == ']' {
+				break
+			}
+			end++
+		}
+		if end >= len(pattern) {
+			i++
+			continue
+		}
+		out.WriteString(pattern[last:i])
+		out.WriteString("[^")
+		out.WriteString(pattern[i+2 : end])
+		out.WriteByte(']')
+		i = end + 1
+		last = i
+	}
+	if last == 0 {
+		return pattern
+	}
+	out.WriteString(pattern[last:])
+	return out.String()
 }
 
 // externalMACAddressListMatches compares normalized hardware addresses. Unlike
@@ -914,15 +1007,39 @@ func parseExternalMACAddress(value string) ([]byte, bool) {
 		return []byte(ip.To16()), true
 	}
 	// net.ParseMAC accepts separator-less hex and 8-byte EUI-64 values, but
-	// systemd's MACAddress= does not accept either form. Require a separator
-	// and an EUI-48 result; net.ParseIP above handles IPv4 and IPv6 addresses.
+	// systemd's MACAddress= does not accept either form. Require a separator.
+	// Parse one- or two-digit colon/hyphen groups as systemd does.
 	if !strings.ContainsAny(value, ":-.") {
 		return nil, false
 	}
 	if hw, err := net.ParseMAC(value); err == nil && len(hw) == 6 {
 		return []byte(hw), true
 	}
-	return nil, false
+	separator := byte(':')
+	if strings.Contains(value, "-") {
+		separator = '-'
+	}
+	groups := strings.Split(value, string(separator))
+	if len(groups) != 6 {
+		return nil, false
+	}
+	hw := make([]byte, len(groups))
+	for i, group := range groups {
+		if len(group) == 0 || len(group) > 2 {
+			return nil, false
+		}
+		for _, digit := range group {
+			if !((digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f') || (digit >= 'A' && digit <= 'F')) {
+				return nil, false
+			}
+		}
+		value, err := strconv.ParseUint(group, 16, 8)
+		if err != nil {
+			return nil, false
+		}
+		hw[i] = byte(value)
+	}
+	return hw, true
 }
 
 func (m *Manager) findExternallyManaged() ExternalMatchSet {
