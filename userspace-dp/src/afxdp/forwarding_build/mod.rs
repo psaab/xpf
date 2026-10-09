@@ -48,6 +48,7 @@ mod connected_ifindex_12063;
 
 // Re-exports for cross-afxdp-sibling consumers reached via
 // `use self::forwarding_build::*;` in `afxdp/mod.rs`.
+pub(crate) use fib::neighbor_family_mismatch;
 pub(in crate::afxdp) use fib::{
     infer_connected_route_target_v4, infer_connected_route_target_v6, parse_route_next_hop,
     parse_route_next_hop_v6, resolve_ifindex, resolve_route_next_hops_v4,

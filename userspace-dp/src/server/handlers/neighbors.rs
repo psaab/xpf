@@ -61,14 +61,54 @@ pub(super) fn update(
         );
     } else if let Some(snapshot) = guard.snapshot.as_mut() {
         if replace {
-            // #12195: replace is the authoritative manager-neighbor set. Keep
-            // the persisted observability snapshot in sync and request a state
-            // write only when the set changes, just like update_fabrics (#3773).
-            if snapshot.neighbors.as_slice() != neighbors {
+            // #12195: an accepted replace defines the stored reconcile-neighbor set.
+            // Keep the snapshot (which arm/rebind rebuild from) in sync, and request
+            // a state write when that set or its digest changes, like update_fabrics (#3773).
+            // #3771 (M11): a family-mismatched row cannot enter this stored
+            // reconcile input, even though the manager table accepts it.
+            let is_family_mismatch = |neigh: &NeighborSnapshot| {
+                if neigh.ifindex <= 0 {
+                    return false;
+                }
+                let Ok(ip) = neigh.ip.parse::<std::net::IpAddr>() else {
+                    return false;
+                };
+                afxdp::neighbor_family_mismatch(&neigh.family, &ip)
+            };
+            let filtered_neighbors = if neighbors.iter().any(|neigh| is_family_mismatch(neigh)) {
+                Some(
+                    neighbors
+                        .iter()
+                        .filter(|neigh| !is_family_mismatch(neigh))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            };
+            let has_family_mismatch = filtered_neighbors.is_some();
+            let stored_set_changed = if let Some(filtered_neighbors) = filtered_neighbors {
+                if snapshot.neighbors.as_slice() != filtered_neighbors.as_slice() {
+                    snapshot.neighbors = filtered_neighbors;
+                    true
+                } else {
+                    false
+                }
+            } else if snapshot.neighbors.as_slice() != neighbors {
                 snapshot.neighbors = neighbors.to_vec();
+                true
+            } else {
+                false
+            };
+            if stored_set_changed {
                 // #9520: the stored snapshot is no longer the full apply its
                 // content digest describes, so it must not vouch for a
                 // same-generation retry of that apply.
+                snapshot.content_digest.clear();
+                *persist_state = true;
+            } else if has_family_mismatch && !snapshot.content_digest.is_empty() {
+                // The applied replace changed the live manager table even though
+                // M11 excluded its rows from the stored reconcile snapshot.
                 snapshot.content_digest.clear();
                 *persist_state = true;
             }
