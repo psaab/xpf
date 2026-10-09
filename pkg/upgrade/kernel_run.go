@@ -167,7 +167,42 @@ func (r *KernelRunner) Arm(candidateVersion string) error {
 	r.logf("kernel-upgrade: armed candidate %s in slot %s; rebooting (one-shot)",
 		j.CandidateVersion, j.InactiveSlot)
 	if err := r.cfg.Sys.Reboot(); err != nil {
-		return disarmWatchdogAfterArmFailure(r.cfg.Sys, err)
+		// Preserve the fully-protected ARMED state until the backstep is
+		// durable. If this write fails, leave BootNext and the watchdog intact:
+		// the host still has the watchdog-protected trial as its recovery path.
+		armedBootID := j.BootID
+		j.BootID = ""
+		if terr := r.ktransition(j, KernelStateArming); terr != nil {
+			j.State = KernelStateArmed
+			j.BootID = armedBootID
+			return fmt.Errorf("%w; journal step back to ARMING failed (%w): "+
+				"the journal remains ARMED with BootID %s, BootNext %s, and the "+
+				"hardware watchdog still armed; the host will reset into the candidate "+
+				"trial within the watchdog timeout unless an operator clears BootNext "+
+				"and resolves the journal first",
+				err, terr, armedBootID, armedBootID)
+		}
+
+		// Now that ARMING is durable, clear BootNext before disarming the
+		// watchdog. If clearing fails, restore the known ARMED state and keep
+		// the watchdog running rather than leave a queued candidate untracked.
+		cause, bootNextCleared := disarmAfterFailedReboot(r.cfg.Sys, err)
+		if !bootNextCleared {
+			j.BootID = armedBootID
+			if terr := r.ktransition(j, KernelStateArmed); terr != nil {
+				j.State = KernelStateArming
+				j.BootID = ""
+				return fmt.Errorf("%w; could not restore the ARMED journal (%w): "+
+					"BootNext %s may still be queued and the watchdog remains armed; "+
+					"the journal remains ARMING, so clear BootNext manually before rebooting: "+
+					"efibootmgr --delete-bootnext",
+					cause, terr, armedBootID)
+			}
+			return fmt.Errorf("%w; journal remains ARMED with BootID %s and the "+
+				"watchdog still armed; clear BootNext before rebooting",
+				cause, armedBootID)
+		}
+		return cause
 	}
 	return nil
 }
@@ -341,7 +376,13 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) error {
 			// BootNext, do NOT reboot. The journal is still INSTALLED (we have not
 			// transitioned to ARMED yet) and BootNext was never set, so the box
 			// stays on the known-good default and a retry can re-arm cleanly.
-			return fmt.Errorf("%w: strict-watchdog (D1) arm failed: %v", ErrKernelChannelUnavailable, err)
+			//
+			// The failed arm may still have partially acquired the watchdog: the
+			// real ArmWatchdog pets after opening /dev/watchdog, before it reports
+			// a WDIOC_SETTIMEOUT failure. Disarm it so the aborted arm does not
+			// leave the driver-default countdown running (#12162).
+			return disarmWatchdogAfterArmFailure(sys, fmt.Errorf(
+				"%w: strict-watchdog (D1) arm failed: %v", ErrKernelChannelUnavailable, err))
 		}
 		// D2 (best-effort): BootNext is the loop-safety. Log and continue; an
 		// early-boot hang would need one external/console reset to recover.
@@ -395,14 +436,16 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) error {
 	// ARMING and surface the error so no false-ARMED journal is persisted.
 	got, err = sys.GetBootNext()
 	if err != nil {
-		return disarmAfterArmFailure(sys, fmt.Errorf(
+		cause, _ := disarmAfterArmFailure(sys, fmt.Errorf(
 			"kernel-upgrade arm: read back BootNext (staying ARMING): %w", err))
+		return cause
 	}
 	if got != inactiveID {
-		return disarmAfterArmFailure(sys, fmt.Errorf(
+		cause, _ := disarmAfterArmFailure(sys, fmt.Errorf(
 			"kernel-upgrade arm: BootNext readback = %q, expected inactive slot %s "+
 				"(%s); firmware did not accept the one-shot — refusing to record ARMED (staying ARMING)",
 			got, j.InactiveSlot, inactiveID))
+		return cause
 	}
 
 	// Verified: the firmware WILL boot the candidate next. Record the confirmed
@@ -413,10 +456,12 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) error {
 	// state; failing here refuses the arm rather than producing an armed
 	// candidate nothing is designated to verify (#6601 r6).
 	if err := r.recordPromoteBinary(j); err != nil {
-		return disarmAfterArmFailure(sys, fmt.Errorf("kernel-upgrade arm: %w", err))
+		cause, _ := disarmAfterArmFailure(sys, fmt.Errorf("kernel-upgrade arm: %w", err))
+		return cause
 	}
 	if err := r.ktransition(j, KernelStateArmed); err != nil {
-		return disarmAfterArmFailure(sys, err)
+		cause, _ := disarmAfterArmFailure(sys, err)
+		return cause
 	}
 
 	return nil
@@ -432,9 +477,9 @@ func disarmWatchdogAfterArmFailure(sys KernelSystem, cause error) error {
 	return cause
 }
 
-// disarmAfterArmFailure disarms the watchdog and clears the one-shot BootNext
-// for a failure that happens AFTER SetBootNext has already succeeded, then
-// returns the original cause (#6758, #12162).
+// disarmAfterArmFailure clears BootNext before disarming the watchdog, after
+// SetBootNext succeeds (or a later Reboot fails). It returns whether BootNext
+// was cleared and preserves the original cause plus cleanup errors (#6758, #12162).
 //
 // THE DIVERGENCE IT CLOSES. The two-phase arm records ARMING before touching
 // NVRAM and only advances to ARMED after a positive BootNext readback. Every
@@ -453,28 +498,38 @@ func disarmWatchdogAfterArmFailure(sys KernelSystem, cause error) error {
 // was designated to verify it — an armed candidate with nothing to run the
 // promotion gate, which #6601 added that record specifically to prevent.
 //
-// SINGLE-SOURCED on purpose: four failure paths need the identical undo, and
-// four copies of it is how one gets missed. Clearing an absent BootNext is not
-// an error, so this is safe on the readback-mismatch path where the firmware
-// may have dropped the variable already.
+// SINGLE-SOURCED for armCandidate's four post-SetBootNext failure paths; a
+// failed Reboot uses the same clear step and disarms only after it succeeds.
+// Clearing an absent BootNext is not an error, so this is safe on the
+// readback-mismatch path where the firmware may have dropped the variable.
 //
-// If the clear itself FAILS the divergence is real and cannot be undone here,
-// so the error says so explicitly and names the operator command. It is
-// deliberately not escalated to a journal state: ARMED asserts a verified
-// one-shot WITH a recorded promote binary, which is precisely what may be
-// missing on the recordPromoteBinary path, so claiming it would substitute a
-// different false record for this one.
+// If the clear itself FAILS, armCandidate still attempts watchdog disarm and
+// reports both cleanup errors. The failed-Reboot path instead keeps the
+// watchdog running and restores the verified ARMED journal. This helper does
+// not mutate the journal: armCandidate cannot manufacture ARMED because the
+// promote binary may be missing on its recordPromoteBinary path.
+func disarmAfterArmFailure(sys KernelSystem, cause error) (error, bool) {
+	cause, bootNextCleared := clearBootNextAfterArmFailure(sys, cause)
+	return disarmWatchdogAfterArmFailure(sys, cause), bootNextCleared
+}
 
-func disarmAfterArmFailure(sys KernelSystem, cause error) error {
-	cause = disarmWatchdogAfterArmFailure(sys, cause)
-	if cerr := sys.ClearBootNext(); cerr != nil {
-		return fmt.Errorf("%w; AND the one-shot BootNext could not be cleared (%v) — "+
-			"the firmware may still boot the candidate on the next reboot while the "+
-			"journal records ARMING (no trial), so self-recovery will not treat this "+
-			"node as being in a trial. Clear it manually before rebooting: "+
-			"efibootmgr --delete-bootnext", cause, cerr)
+// disarmAfterFailedReboot keeps the watchdog armed if BootNext could not be
+// cleared, allowing Arm to restore the already-verified ARMED journal.
+func disarmAfterFailedReboot(sys KernelSystem, cause error) (error, bool) {
+	cause, bootNextCleared := clearBootNextAfterArmFailure(sys, cause)
+	if !bootNextCleared {
+		return cause, false
 	}
-	return cause
+	return disarmWatchdogAfterArmFailure(sys, cause), true
+}
+
+func clearBootNextAfterArmFailure(sys KernelSystem, cause error) (error, bool) {
+	if cerr := sys.ClearBootNext(); cerr != nil {
+		return fmt.Errorf("%w; AND the one-shot BootNext could not be cleared (%w) — "+
+			"the firmware may still boot the candidate on the next reboot. Clear it "+
+			"manually before rebooting: efibootmgr --delete-bootnext", cause, cerr), false
+	}
+	return cause, true
 }
 
 // newArmNonce builds a per-attempt arm token (#5847). It combines the system

@@ -2,6 +2,7 @@ package upgrade
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -122,6 +123,134 @@ func TestArmDisarmsWatchdogWhenRebootFails_12162(t *testing.T) {
 	if f.wdArmed {
 		t.Error("watchdog still armed after Reboot failed")
 	}
+	if f.bootNext != "" {
+		t.Errorf("BootNext = %q after failed Reboot, want it cleared", f.bootNext)
+	}
+	if !contains(f.calls, "bootnext-clear") {
+		t.Error("ClearBootNext was not called after failed Reboot")
+	}
+	j, err := r.loadKernelJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.State != KernelStateArming || j.BootID != "" {
+		t.Errorf("journal after failed Reboot = state %s, BootID %q; want ARMING with no BootID", j.State, j.BootID)
+	}
+	if armed, _, err := r.IsArmed(); err != nil {
+		t.Fatal(err)
+	} else if armed {
+		t.Error("IsArmed() is true after failed Reboot was unwound to ARMING")
+	}
+
+	f.rebootErr = nil
+	if err := r.Arm("6.18.5-12-generic"); err != nil {
+		t.Fatalf("retry from ARMING: %v", err)
+	}
+	if !f.rebooted {
+		t.Error("retry from ARMING did not reboot after re-arming")
+	}
+	if f.armWatchdogCalls != 2 {
+		t.Errorf("ArmWatchdog calls after retry = %d, want 2", f.armWatchdogCalls)
+	}
+	j, err = r.loadKernelJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.State != KernelStateArmed || j.BootID == "" || f.bootNext != j.BootID {
+		t.Errorf("retry state = %s, journal BootID = %q, BootNext = %q; want ARMED with matching nonempty BootID",
+			j.State, j.BootID, f.bootNext)
+	}
+}
+
+func TestArmKeepsProtectedTrialWhenRebootBackstepPersistFails_12162(t *testing.T) {
+	f := newFakeKernelSystem()
+	rebootErr := errors.New("systemctl reboot: exit 1")
+	f.rebootErr = rebootErr
+	r := newKernelRunner(t, f)
+	journalPath := r.cfg.JournalPath
+	armingTransitions := 0
+	r.cfg.Logf = func(_ string, args ...any) {
+		if len(args) != 0 && args[0] == KernelStateArming {
+			armingTransitions++
+			if armingTransitions == 2 {
+				// The first ARMING write is the normal arm path. Fail only the
+				// failed-Reboot backstep, after ARMED has been durably recorded.
+				r.cfg.JournalPath = "/proc/self/12162/reboot-backstep.state"
+			}
+		}
+	}
+
+	err := r.Arm("6.18.5-12-generic")
+	r.cfg.JournalPath = journalPath
+	if !errors.Is(err, rebootErr) {
+		t.Fatalf("Arm error = %v, want original Reboot error %v", err, rebootErr)
+	}
+	if err == nil || !strings.Contains(err.Error(), "journal step back to ARMING failed") ||
+		!strings.Contains(err.Error(), "journal remains ARMED") ||
+		!strings.Contains(err.Error(), "BootNext") ||
+		!strings.Contains(err.Error(), "hardware watchdog still armed") ||
+		!strings.Contains(err.Error(), "host will reset into the candidate trial") ||
+		!strings.Contains(err.Error(), "watchdog timeout") {
+		t.Fatalf("Arm error = %v, want explicit protected-trial state and timeout guidance", err)
+	}
+	if armingTransitions != 2 {
+		t.Fatalf("ARMING transitions = %d, want normal arm plus failed-Reboot backstep", armingTransitions)
+	}
+	if f.bootNext == "" || !f.wdArmed || f.disarmWatchdogCalls != 0 {
+		t.Errorf("BootNext=%q watchdogArmed=%v disarmCalls=%d; want queued BootNext and armed watchdog untouched",
+			f.bootNext, f.wdArmed, f.disarmWatchdogCalls)
+	}
+	j, loadErr := r.loadKernelJournal()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if j.State != KernelStateArmed || j.BootID != f.bootNext {
+		t.Errorf("durable journal = state %s BootID %q, BootNext %q; want ARMED matching queued BootNext",
+			j.State, j.BootID, f.bootNext)
+	}
+	if armed, _, loadErr := r.IsArmed(); loadErr != nil {
+		t.Fatal(loadErr)
+	} else if !armed {
+		t.Error("IsArmed() is false despite the preserved watchdog-protected trial")
+	}
+}
+
+func TestArmRetainsArmedJournalWhenBootNextClearFailsAfterReboot_12162(t *testing.T) {
+	f := newFakeKernelSystem()
+	rebootErr := errors.New("systemctl reboot: exit 1")
+	clearErr := errors.New("efibootmgr: cannot clear BootNext")
+	f.rebootErr = rebootErr
+	f.clearBootNextErr = clearErr
+	r := newKernelRunner(t, f)
+
+	err := r.Arm("6.18.5-12-generic")
+	if !errors.Is(err, rebootErr) || !errors.Is(err, clearErr) {
+		t.Fatalf("Arm error = %v, want Reboot and BootNext-clear causes", err)
+	}
+	if f.bootNext == "" || !contains(f.calls, "bootnext-clear") {
+		t.Errorf("BootNext=%q; want failed clear call to leave the queued id in place", f.bootNext)
+	}
+	if !f.wdArmed || f.disarmWatchdogCalls != 0 {
+		t.Errorf("watchdogArmed=%v disarmCalls=%d; want watchdog left armed until BootNext is cleared",
+			f.wdArmed, f.disarmWatchdogCalls)
+	}
+	j, loadErr := r.loadKernelJournal()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if j.State != KernelStateArmed || j.BootID != f.bootNext {
+		t.Errorf("journal = state %s BootID %q, BootNext %q; want ARMED matching queued BootNext",
+			j.State, j.BootID, f.bootNext)
+	}
+	if armed, _, loadErr := r.IsArmed(); loadErr != nil {
+		t.Fatal(loadErr)
+	} else if !armed {
+		t.Error("IsArmed() is false while BootNext remains queued")
+	}
+	if !strings.Contains(err.Error(), "efibootmgr --delete-bootnext") ||
+		!strings.Contains(err.Error(), "journal remains ARMED") {
+		t.Errorf("Arm error = %v, want manual-clear command and retained journal state", err)
+	}
 }
 
 func TestArmReportsWatchdogDisarmFailure_12162(t *testing.T) {
@@ -171,5 +300,148 @@ func TestSuccessfulArmKeepsWatchdogArmed_12162(t *testing.T) {
 	}
 	if f.bootNext == "" {
 		t.Error("successful arm cleared BootNext; the one-shot must survive")
+	}
+}
+
+func TestArmDisarmsWatchdogOnStrictPartialAcquisition_12162(t *testing.T) {
+	f := newFakeKernelSystem()
+	f.armWatchdogErr = errors.New("watchdog WDIOC_SETTIMEOUT(600s): invalid argument")
+	f.wdArmed = true // ArmWatchdog petted the device before returning its error.
+	r := newKernelRunner(t, f)
+	r.cfg.StrictWatchdog = true
+
+	err := r.Arm("6.18.5-12-generic")
+	if !errors.Is(err, ErrKernelChannelUnavailable) {
+		t.Fatalf("Arm error = %v, want strict-watchdog ErrKernelChannelUnavailable", err)
+	}
+	if f.disarmWatchdogCalls != 1 {
+		t.Errorf("DisarmWatchdog calls = %d, want one after partial acquisition", f.disarmWatchdogCalls)
+	}
+	if f.wdArmed {
+		t.Error("watchdog remained armed after strict partial-acquisition failure")
+	}
+	if f.bootNext != "" || f.rebooted {
+		t.Errorf("strict partial failure set BootNext=%q or rebooted=%v", f.bootNext, f.rebooted)
+	}
+	j, err := r.loadKernelJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.State != KernelStateInstalled {
+		t.Errorf("journal state = %s, want INSTALLED after strict abort", j.State)
+	}
+}
+
+func TestArmReportsDisarmFailureOnBootNextReadbackError_12162(t *testing.T) {
+	f := newFakeKernelSystem()
+	readErr := errors.New("efivarfs readback failed")
+	disarmErr := errors.New("watchdog magic-close failed")
+	f.getBootNextErr = readErr
+	f.disarmWatchdogErr = disarmErr
+	r := newKernelRunner(t, f)
+	j := &KernelJournal{
+		State:            KernelStateInstalled,
+		CandidateVersion: "6.18.5-12-generic",
+		KnownGoodVersion: "6.18.5-10-generic",
+		ActiveSlot:       SlotA,
+		InactiveSlot:     SlotB,
+	}
+
+	err := r.armCandidate(j)
+	if !errors.Is(err, readErr) || !errors.Is(err, disarmErr) {
+		t.Errorf("arm error = %v, want both readback and disarm causes", err)
+	}
+	if f.bootNext != "" {
+		t.Errorf("BootNext = %q after readback failure, want it cleared", f.bootNext)
+	}
+	if !contains(f.calls, "bootnext-clear") {
+		t.Error("ClearBootNext was not called after readback failure")
+	}
+	if f.disarmWatchdogCalls != 1 {
+		t.Errorf("DisarmWatchdog calls = %d, want exactly one", f.disarmWatchdogCalls)
+	}
+}
+
+func TestArmStillDisarmsWhenBootNextClearFails_12162(t *testing.T) {
+	f := newFakeKernelSystem()
+	readErr := errors.New("efivarfs readback failed")
+	clearErr := errors.New("efibootmgr could not clear BootNext")
+	disarmErr := errors.New("watchdog magic-close failed")
+	f.getBootNextErr = readErr
+	f.clearBootNextErr = clearErr
+	f.disarmWatchdogErr = disarmErr
+	r := newKernelRunner(t, f)
+	j := &KernelJournal{
+		State:            KernelStateInstalled,
+		CandidateVersion: "6.18.5-12-generic",
+		KnownGoodVersion: "6.18.5-10-generic",
+		ActiveSlot:       SlotA,
+		InactiveSlot:     SlotB,
+	}
+
+	err := r.armCandidate(j)
+	if !errors.Is(err, readErr) || !errors.Is(err, clearErr) || !errors.Is(err, disarmErr) {
+		t.Errorf("arm error = %v, want readback, BootNext-clear, and disarm causes", err)
+	}
+	if f.bootNext == "" || !contains(f.calls, "bootnext-clear") {
+		t.Errorf("BootNext=%q; want failed clear call to leave the queued id in place", f.bootNext)
+	}
+	if f.disarmWatchdogCalls != 1 || !f.wdArmed {
+		t.Errorf("DisarmWatchdog calls=%d watchdogArmed=%v; want a disarm attempt whose injected failure leaves it armed",
+			f.disarmWatchdogCalls, f.wdArmed)
+	}
+}
+
+func TestArmReportsDisarmFailureWhenRebootFails_12162(t *testing.T) {
+	f := newFakeKernelSystem()
+	rebootErr := errors.New("systemctl reboot: exit 1")
+	disarmErr := errors.New("watchdog magic-close failed")
+	f.rebootErr = rebootErr
+	f.disarmWatchdogErr = disarmErr
+	r := newKernelRunner(t, f)
+
+	err := r.Arm("6.18.5-12-generic")
+	if !errors.Is(err, rebootErr) || !errors.Is(err, disarmErr) {
+		t.Errorf("Arm error = %v, want both Reboot and disarm causes", err)
+	}
+	if f.bootNext != "" {
+		t.Errorf("BootNext = %q after failed Reboot, want it cleared", f.bootNext)
+	}
+	if !contains(f.calls, "bootnext-clear") {
+		t.Error("ClearBootNext was not called after failed Reboot")
+	}
+	j, loadErr := r.loadKernelJournal()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if j.State != KernelStateArming || j.BootID != "" {
+		t.Errorf("journal after failed Reboot = state %s, BootID %q; want ARMING with no BootID", j.State, j.BootID)
+	}
+}
+
+func TestArmReportsDisarmFailureWhenARMINGPersistFails_12162(t *testing.T) {
+	f := newFakeKernelSystem()
+	disarmErr := errors.New("watchdog magic-close failed")
+	f.disarmWatchdogErr = disarmErr
+	r := newKernelRunner(t, f)
+	r.cfg.Logf = func(_ string, args ...any) {
+		if len(args) != 0 && args[0] == KernelStateArming {
+			r.cfg.JournalPath = "/proc/self/12162/kernel-upgrade.state"
+		}
+	}
+	j := &KernelJournal{
+		State:            KernelStateInstalled,
+		CandidateVersion: "6.18.5-12-generic",
+		KnownGoodVersion: "6.18.5-10-generic",
+		ActiveSlot:       SlotA,
+		InactiveSlot:     SlotB,
+	}
+
+	err := r.armCandidate(j)
+	if err == nil || !errors.Is(err, disarmErr) {
+		t.Errorf("arm error = %v, want journal persist and disarm failures", err)
+	}
+	if f.disarmWatchdogCalls != 1 {
+		t.Errorf("DisarmWatchdog calls = %d, want exactly one", f.disarmWatchdogCalls)
 	}
 }

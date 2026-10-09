@@ -1779,15 +1779,18 @@ treats an unreadable observation as a definite safe state:
   and NO reboot, and surfaces a non-revert error so the oneshot maps it to
   an infra exit (not the exit-3 reboot). The next boot re-runs the gate.
 - *StrictWatchdog (D1) arm failure.* The preflight only checks the BAKED
-  watchdog-persistence flag; `armCandidate` now also treats a real
-  `ArmWatchdog` failure as fatal UNDER STRICT MODE — it aborts the arm
+  watchdog-persistence flag; `armCandidate` also treats a real
+  `ArmWatchdog` failure as fatal UNDER STRICT MODE. It aborts the arm
   (no `BootNext`, no reboot, journal stays INSTALLED) rather than
-  rebooting into the candidate with no functioning watchdog. D2 keeps the
-  best-effort log-and-continue. The `realKernelSystem` watchdog helpers no
-  longer swallow I/O errors: `ArmWatchdog` surfaces a `WDIOC_SETTIMEOUT`
-  failure (after still attempting the keepalive), and `DisarmWatchdog`
-  propagates open/write/close failures (a genuinely-absent device is still
-  a clean nil).
+  rebooting into the candidate with no functioning watchdog. Even though
+  `ArmWatchdog` failed, the Linux implementation may already have opened
+  and petted the device before a `WDIOC_SETTIMEOUT` error; the strict abort
+  therefore disarms it too, avoiding a driver-default timeout countdown.
+  D2 keeps the best-effort log-and-continue. The `realKernelSystem`
+  watchdog helpers no longer swallow I/O errors: `ArmWatchdog` surfaces a
+  `WDIOC_SETTIMEOUT` failure (after still attempting the keepalive), and
+  `DisarmWatchdog` propagates open/write/close failures (a genuinely-absent
+  device is still a clean nil).
 - *Two-phase arm + BootNext readback (#5847).* The arm used to persist the
   `ARMED` journal BEFORE `efibootmgr --bootnext`, on the theory that an
   `ARMED`-without-`BootNext` journal is harmless. It is NOT: a crash in
@@ -1805,26 +1808,40 @@ treats an unreadable observation as a definite safe state:
      the variable must NOT yield a verified-ARMED journal;
   4. only THEN durably transition `ARMING -> ARMED`, recording the
      confirmed `BootID` for boot-provenance.
-  5. **and on ANY failure after step 2, clear the one-shot (#6758).**
-     `SetBootNext` has already succeeded by then, so returning an error and
-     leaving the journal at `ARMING` used to leave the FIRMWARE armed while
-     every durable software gate said unarmed — the exact inverse of what
-     `ARMING` asserts below. Steps 3 and 4 both fail this way, as does the
-     `recordPromoteBinary` write between them, and that last one is the
-     sharpest: the readback had already CONFIRMED the one-shot, so the
-     candidate was genuinely queued while no xpfd was designated to verify
-     it — an armed candidate with nothing to run the promotion gate, which
-     #6601 added that record specifically to prevent. The undo is
-     single-sourced (`disarmAfterArmFailure`) because four failure paths
-     needing the identical cleanup is how one gets missed, and clearing an
-     absent BootNext is not an error so it is safe even where the firmware
-     dropped the variable itself. If the clear ITSELF fails the divergence
-     is real and cannot be undone in-process, so the error says so and names
-     `efibootmgr --delete-bootnext`; it is deliberately NOT escalated to a
-     journal state, because `ARMED` asserts a verified one-shot WITH a
-     recorded promote binary — precisely what may be missing on the
-     `recordPromoteBinary` path — so claiming it would substitute a
-     different false record for this one.
+  5. **and on ANY failure after step 2, clear the one-shot and disarm the
+     watchdog (#6758, #12162).** `SetBootNext` has already succeeded by
+     then, so returning an error and leaving the journal at `ARMING` used
+     to leave the FIRMWARE armed while every durable software gate said
+     unarmed — the exact inverse of what `ARMING` asserts below. Steps 3
+     and 4 both fail this way, as does the `recordPromoteBinary` write
+     between them, and that last one is the sharpest: the readback had
+     already CONFIRMED the one-shot, so the candidate was genuinely queued
+     while no xpfd was designated to verify it — an armed candidate with
+     nothing to run the promotion gate, which #6601 added that record
+     specifically to prevent. The undo is single-sourced
+     (`disarmAfterArmFailure`): it disarms the watchdog and clears BootNext.
+     Clearing an absent BootNext is not an error, so it is safe even where
+     the firmware dropped the variable itself. If the clear ITSELF fails
+     the divergence is real and cannot be undone in-process, so the error
+     says so and names `efibootmgr --delete-bootnext`; it is deliberately
+     NOT escalated to a journal state, because `ARMED` asserts a verified
+     one-shot WITH a recorded promote binary — precisely what may be
+     missing on the `recordPromoteBinary` path — so claiming it would
+     substitute a different false record for this one.
+
+  The watchdog is also disarmed on failures after it is acquired but before
+  step 2, including the ARMING-persist and `SetBootNext` errors. The D1
+  partial-acquisition case above does likewise. If `Reboot` fails after
+  the verified `ARMED` transition, the runner first persists the step back
+  to `ARMING`. Only after that succeeds does it clear BootNext, then disarm
+  the watchdog. If the `ARMING` write fails, it leaves the durable `ARMED`
+  journal with its `BootID`, BootNext, and watchdog intact; the error says
+  the host will reset into the trial within the timeout unless an operator
+  clears BootNext and resolves the journal first. If clearing BootNext
+  fails, it restores the `ARMED` journal and keeps the watchdog armed,
+  reporting `efibootmgr --delete-bootnext`. If restoring `ARMED` fails
+  too, the error reports the remaining `ARMING` journal and requires
+  manual BootNext cleanup before reboot.
 
   `ARMING` sits BELOW `ARMED` in the journal order, so a journal stuck
   there (readback failed / never ran) lets `Arm` RE-ARM (the `>= ARMED`
