@@ -75,9 +75,13 @@ measure_cell() {
     local item port value i port_filter="dst port ${PROBE_PORT}" legs="--leg ${PROBE_PORT}:${count}" checksum
     local observed64 observed1400
     if [[ "$mode" == deny ]]; then
+        # The expected control leads the probe: a control count that meets
+        # the floor then proves the capture was live before the probe, so a
+        # late capture start cannot miss a leaking probe yet PASS (R2 F-A).
+        legs="--leg ${control_port}:${count} --leg ${PROBE_PORT}:${count}"
         for port in "${CONTROL_PORTS[@]}"; do
             port_filter+=" or dst port ${port}"
-            legs+=" --leg ${port}:${count}"
+            [[ "$port" == "$control_port" ]] || legs+=" --leg ${port}:${count}"
         done
     else
         port_filter+=" or dst port ${control_port}"
@@ -158,8 +162,8 @@ if [[ "$MODE" == selftest ]]; then
         fi
     }
     # Exercise the live measurement function with stubbed capture/prober
-    # output. The three verdicts cover same-window healthy, misattributed,
-    # and capture-blind deny cells without an Incus dependency.
+    # output. Scenarios cover healthy, leaking, misattributed, and blind
+    # deny cells without an Incus dependency.
     matrix_fake_sg() {
         local cmd="$1" port size n window rest count
         local -a legs=()
@@ -180,10 +184,15 @@ if [[ "$MODE" == selftest ]]; then
                     return 0
                 fi
                 ;;
+            leak) port="${CONTROL_PORTS[2]}" ;;
             esac
             for size in 64 1400; do
                 for ((n = 0; n < 1100; n++)); do
                     printf '00:00:00.000000 IP 10.0.0.1.40000 > 10.0.0.2.%s: UDP, length %s\n' "$port" "$size"
+                    if [[ "$MATRIX_STUB_CAPTURE" == leak &&
+                        "$cmd" == *"dst port ${PROBE_PORT}"* ]]; then
+                        printf '00:00:00.000000 IP 10.0.0.1.40000 > 10.0.0.2.%s: UDP, length %s\n' "$PROBE_PORT" "$size"
+                    fi
                 done
             done
             return 0
@@ -193,10 +202,11 @@ if [[ "$MODE" == selftest ]]; then
             while [[ "$rest" =~ --leg[[:space:]]([0-9]+):([0-9]+) ]]; do
                 port="${BASH_REMATCH[1]}"; count="${BASH_REMATCH[2]}"
                 legs+=("${port}=${count}")
-                rest="${rest#*--leg ${port}:${count}}"
+                rest="${rest#*--leg "${port}":"${count}"}"
             done
-            printf '%s\n' "${#legs[@]}" >>"$MATRIX_STUB_LEGS_FILE"
             local IFS=,
+            printf '%s\n' "${legs[*]}" >"$MATRIX_STUB_LEG_ORDER_FILE"
+            printf '%s\n' "${#legs[@]}" >>"$MATRIX_STUB_LEGS_FILE"
             printf 'SENT legs=%s\n' "${legs[*]}"
         fi
         return 0
@@ -208,10 +218,11 @@ if [[ "$MODE" == selftest ]]; then
         [[ -n "${CAP_PID:-}" ]] && wait "$CAP_PID" >/dev/null 2>&1 || true
     }
     matrix_measure_case() {
-        local scenario="$1" out rc ok=1 offset=20 port filter stub_window stub_legs
+        local scenario="$1" out rc ok=1 offset=20 port filter stub_window stub_legs stub_order
         MATRIX_STUB_CAPTURE="$scenario"
         MATRIX_STUB_WINDOWS_FILE="$(mktemp "${TMPDIR:-/tmp}/wire-zone-windows.XXXXXX")"
         MATRIX_STUB_LEGS_FILE="$(mktemp "${TMPDIR:-/tmp}/wire-zone-legs.XXXXXX")"
+        MATRIX_STUB_LEG_ORDER_FILE="$(mktemp "${TMPDIR:-/tmp}/wire-zone-order.XXXXXX")"
         MATRIX_STUB_FILTER_FILE="$(mktemp "${TMPDIR:-/tmp}/wire-zone-filter.XXXXXX")"
         CAP_PID=""; CAPLOG=""
         measure_cell 0 2 deny 2200 2 >/dev/null
@@ -219,7 +230,10 @@ if [[ "$MODE" == selftest ]]; then
         stub_legs=0
         while IFS= read -r port; do stub_legs="$port"; done <"$MATRIX_STUB_LEGS_FILE"
         filter="$(cat "$MATRIX_STUB_FILTER_FILE")"
+        stub_order="$(<"$MATRIX_STUB_LEG_ORDER_FILE")"
         ((stub_window == 1 && stub_legs == 7)) || ok=0
+        [[ "$stub_order" == "${CONTROL_PORTS[2]}=2200,${PROBE_PORT}=2200,"* ]] || ok=0
+        [[ "$filter" == *"dst port ${PROBE_PORT}"* ]] || ok=0
         for port in "${CONTROL_PORTS[@]}"; do
             [[ "$filter" == *"dst port ${port}"* ]] || ok=0
         done
@@ -234,6 +248,10 @@ if [[ "$MODE" == selftest ]]; then
         healthy)
             if [[ "$rc" != 0 || "$out" != *"wire_zone_matrix PASS"* ||
                 "$CELL_CONTROL_IDENTITY_MASK" != 4 ]]; then ok=0; fi
+            ;;
+        leak)
+            if [[ "$rc" != 1 || "$out" != *"wire_zone_matrix FAIL"* ||
+                "$out" != *"cells_failed=1"* || "$out" != *"deny_leaked=2200"* ]]; then ok=0; fi
             ;;
         blind)
             if [[ "$rc" != 2 || "$out" != *"wire_zone_matrix VOID reason=capture-blind"* ||
@@ -256,7 +274,7 @@ if [[ "$MODE" == selftest ]]; then
             echo "  FAIL  live measure_cell ${scenario} (windows=$stub_window legs=$stub_legs mask=$CELL_CONTROL_IDENTITY_MASK got '$out' rc=$rc)"
             fail=$((fail + 1))
         fi
-        rm -f "$MATRIX_STUB_WINDOWS_FILE" "$MATRIX_STUB_LEGS_FILE" "$MATRIX_STUB_FILTER_FILE"
+        rm -f "$MATRIX_STUB_WINDOWS_FILE" "$MATRIX_STUB_LEGS_FILE" "$MATRIX_STUB_FILTER_FILE" "$MATRIX_STUB_LEG_ORDER_FILE"
     }
     SG=matrix_fake_sg
     PROBE_PORT=55001; CONTROL_PORT_BASE=55100
@@ -266,6 +284,7 @@ if [[ "$MODE" == selftest ]]; then
     matrix_measure_case healthy
     matrix_measure_case swap
     matrix_measure_case blind
+    matrix_measure_case leak
     if wire_gate_finalizer_selftest; then
         echo "  PASS  cleanup finalizer shields restore"; pass=$((pass + 1))
     else
@@ -300,6 +319,14 @@ if [[ "$MODE" == selftest ]]; then
     fi
     BAD=("${MATRIX[@]}"); BAD[1]=64
     check "out-of-range identity mask is VOID" VOID 2 0 12 "${BAD[@]}"
+    BAD=("${MATRIX[@]}"); BAD[1]=3
+    out=$(wire_matrix_verdict 0 12 "${BAD[@]}"); rc=$?
+    if [[ "$rc" == 1 && "$out" == *"cells_failed=1"* &&
+        "$out" == *"zone_cell_violations=1"* && "$out" == *"zone_violation_mask=1 "* ]]; then
+        echo "  PASS  expected-plus-foreign identity fails only its deny cell"; pass=$((pass + 1))
+    else
+        echo "  FAIL  expected-plus-foreign identity fails only its deny cell (got '$out' rc=$rc)"; fail=$((fail + 1))
+    fi
     BAD=("${MATRIX[@]}"); BAD[1]=0
     check "identity mask cannot omit an observed expected control" VOID 2 0 12 "${BAD[@]}"
     BAD=("${MATRIX[@]}"); BAD[3]=1
