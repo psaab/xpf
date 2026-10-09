@@ -67,7 +67,6 @@ type SessionPolicyMatch struct {
 	CreatedSecs                      uint64              `json:"created_secs,omitempty"`
 	CreatedNS                        uint64              `json:"created_ns,omitempty"`
 	ExpectedRTFlowSessionID          uint64              `json:"expected_rt_flow_session_id,omitempty"`
-	CompanionPolicyID                uint32              `json:"companion_policy_id,omitempty"`
 	ExpectedCompanionRTFlowSessionID uint64              `json:"expected_companion_rt_flow_session_id,omitempty"`
 	// #10626: rename-rematch inputs, populated by the helper READ from the
 	// live session key/metadata/decision. All additive + omitempty: an older

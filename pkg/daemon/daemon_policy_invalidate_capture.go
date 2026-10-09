@@ -25,19 +25,23 @@ import (
 // session's stored policy_id is frozen at admission and may reflect an ordering
 // older than oldCfg after an earlier insert or removal. The helper's prepublish
 // READ therefore resolves each bound policy_counter's stable rule_id against
-// the currently published policy snapshot before applying the requested-ID
-// predicate. At this capture boundary that snapshot is oldCfg, so Go receives
-// the same positional ID namespace used to compute the target set.
+// the currently applied snapshot before applying the requested-ID predicate.
+// The AppliedConfig fence below requires that snapshot to be oldCfg, so Go
+// receives the same positional ID namespace used to compute the target set.
 //
 // This read-time resolution is separate from #3395's BPF conntrack-row refresh:
-// that refresh updates the mirror, not SessionTable metadata. A row without a
-// stable rule binding (for example, from an older HA peer that omitted
-// policy_rule_id) is excluded from prepublish ID matching rather than risking
-// deletion of an unrelated session by its stale scalar.
+// that refresh updates the mirror, not SessionTable metadata. In helper-backed
+// prepublish mode, unbound sync-derived rows and SharedPromote rows are excluded
+// because their scalar may be stale; locally authored unbound rows retain the
+// scalar policy-ID path.
 //
-// PROPERTY: every session captured for a policy-ID invalidation was matched by
-// its stable admitting-rule identity as resolved in the active prepublish
-// snapshot. The captured row identity is then used for the post-publish delete.
+// PROPERTY: bound rows in helper-backed prepublish reads are matched after
+// stable rule_id resolution against the verified oldCfg snapshot; orphaned
+// bound handles resolve to the default-policy sentinel. Unbound sync-derived
+// and SharedPromote rows cannot match by stale scalar, while locally authored
+// unbound rows still can. The non-helper BPF fallback uses scalar IDs and does
+// not provide this stable-handle property. Captured row identity is then used
+// for the post-publish delete.
 //
 // RESIDUAL: a session admitted by a to-be-deleted policy between the capture
 // and publish is not in the capture and keeps forwarding until idle timeout.
@@ -272,6 +276,21 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	if lister, ok := rt.(interface {
 		ListSessionsByPolicy(dpuserspace.SessionPolicyListRequest) (dpuserspace.ControlResponse, error)
 	}); ok {
+		// The target IDs belong to plan.oldCfg's positional namespace. An
+		// unknown-outcome publish can leave the helper ahead of that plan, so
+		// never interpret those IDs against a different applied snapshot.
+		appliedProvider, ok := dataplane.Unwrap(rt).(interface {
+			AppliedConfig() *config.Config
+		})
+		if !ok || appliedProvider.AppliedConfig() != plan.oldCfg {
+			capture.readErr = errors.New("policy session READ skipped: applied snapshot does not match invalidation plan")
+			capture.deleted.enumFailed = true
+			capture.modified.enumFailed = true
+			capture.deflt.enumFailed = true
+			d.retainPolicyInvalidationCaptureLocked(mergePolicyInvalidationCaptures(previousCapture, capture))
+			return
+		}
+
 		ids := captureRequestedPolicyIDs(deleted, modified, deflt, renameBindings)
 		resp, err := lister.ListSessionsByPolicy(dpuserspace.SessionPolicyListRequest{
 			PolicyIDs: ids,

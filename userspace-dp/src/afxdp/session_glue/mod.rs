@@ -68,10 +68,10 @@ pub(super) fn resolution_target_for_session(
 ///
 /// `prepublish` requests target IDs from the currently published policy
 /// snapshot. A session's stored `policy_id` is its admission-time positional
-/// value, so a bound stable rule handle is needed to translate a policy-bound
-/// session. An unbound peer-synced row has no stable identity and is excluded
-/// from prepublish ID-keyed deletion; local non-policy rows retain their scalar
-/// behavior. Legacy reads retain their timestamp-fenced scalar behavior.
+/// value, so bound rows resolve through their stable rule handle. Unbound
+/// peer-synced and SharedPromote rows are excluded from prepublish ID matching
+/// because their scalar may be stale; locally authored unbound rows retain
+/// scalar behavior. Legacy reads retain their timestamp-fenced scalar behavior.
 pub(crate) fn policy_id_for_list_request(
     forwarding: &ForwardingState,
     metadata: &crate::session::SessionMetadata,
@@ -82,10 +82,12 @@ pub(crate) fn policy_id_for_list_request(
         return Some(metadata.policy_id);
     }
     let Some(counter) = metadata.policy_counter.as_ref() else {
-        return (!origin.is_peer_synced()).then_some(metadata.policy_id);
+        return (!(origin.is_peer_synced() || origin == crate::session::SessionOrigin::SharedPromote))
+            .then_some(metadata.policy_id);
     };
     if counter.rule_id().is_empty() {
-        return (!origin.is_peer_synced()).then_some(metadata.policy_id);
+        return (!(origin.is_peer_synced() || origin == crate::session::SessionOrigin::SharedPromote))
+            .then_some(metadata.policy_id);
     }
     Some(
         forwarding
@@ -1673,6 +1675,9 @@ pub(super) fn apply_worker_commands(
                     sessions.iter_with_identity(
                         |key, decision, metadata, origin, created_ns, session_id| {
                             let family = crate::afxdp::ha::policy_wire_family(key.addr_family);
+                            if !family_allowed(family) || !class_allowed(metadata.is_reverse) {
+                                return;
+                            }
                             let Some(policy_id) = policy_id_for_list_request(
                                 forwarding,
                                 metadata,
@@ -1681,10 +1686,7 @@ pub(super) fn apply_worker_commands(
                             ) else {
                                 return;
                             };
-                            if !family_allowed(family)
-                                || !class_allowed(metadata.is_reverse)
-                                || !wanted(policy_id)
-                            {
+                            if !wanted(policy_id) {
                                 return;
                             }
                             // Legacy time fence (#6948): keep sessions admitted
@@ -1743,7 +1745,7 @@ pub(super) fn apply_worker_commands(
                                 return;
                             };
                             row.policy_id = policy_id;
-                            if let Some((companion_key, companion_metadata, companion_id)) =
+                            if let Some((companion_key, _, companion_id)) =
                                 sessions.policy_companion(key, decision.nat)
                             {
                                 if companion_id == 0 {
@@ -1765,13 +1767,6 @@ pub(super) fn apply_worker_commands(
                                         .push("unsupported-companion-family".to_string());
                                     return;
                                 }
-                                row.companion_policy_id = policy_id_for_list_request(
-                                    forwarding,
-                                    &companion_metadata,
-                                    origin,
-                                    &request.mode,
-                                )
-                                .unwrap_or(companion_metadata.policy_id);
                                 row.expected_companion_rt_flow_session_id = companion_id;
                             }
                             collected

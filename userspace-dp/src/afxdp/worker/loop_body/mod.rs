@@ -227,7 +227,6 @@ fn rematch_bound_first_policy_sessions(
     let mut candidates = Vec::new();
     sessions.iter_with_origin(|key, decision, metadata, origin| {
         if metadata.is_reverse
-            || metadata.policy_id != 0
             || !metadata
                 .policy_counter
                 .as_ref()

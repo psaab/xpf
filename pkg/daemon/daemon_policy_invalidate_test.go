@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"github.com/cilium/ebpf"
@@ -14,6 +15,7 @@ import (
 	"github.com/psaab/xpf/pkg/policymatch"
 	"golang.org/x/sync/semaphore"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -320,12 +322,13 @@ func TestClearSessionsForDeletedPolicies_NoDeletionIsNoop(t *testing.T) {
 type policyInvalTestDP struct {
 	dataplane.DataPlane // embedded nil — only the overridden methods are called
 
-	v4           map[dataplane.SessionKey]dataplane.SessionValue
-	v6           map[dataplane.SessionKeyV6]dataplane.SessionValueV6
-	iterateCalls int
-	renameWire   []dpuserspace.PolicyRenameAncestry
-	renameRows   []dpuserspace.PolicySessionRebind
-	iterErr      error
+	v4            map[dataplane.SessionKey]dataplane.SessionValue
+	appliedConfig *config.Config
+	v6            map[dataplane.SessionKeyV6]dataplane.SessionValueV6
+	iterateCalls  int
+	renameWire    []dpuserspace.PolicyRenameAncestry
+	renameRows    []dpuserspace.PolicySessionRebind
+	iterErr       error
 	// delErr, when non-nil, is returned by BatchDeleteSessions/V6 after the
 	// configured prefix is removed. A zero prefix models a fully failed delete.
 	delErr          error
@@ -343,6 +346,7 @@ func (d *policyInvalTestDP) ApplyConfig(context.Context, *config.Config) (*datap
 	return &dataplane.ApplyResult{}, nil
 }
 func (d *policyInvalTestDP) LastApplyResult() *dataplane.ApplyResult { return &dataplane.ApplyResult{} }
+func (d *policyInvalTestDP) AppliedConfig() *config.Config           { return d.appliedConfig }
 func (d *policyInvalTestDP) Link() dataplane.LinkController          { return noopLinkController{} }
 func (d *policyInvalTestDP) HA() dataplane.HAController {
 	return dataplane.NewDataPlaneHAController(nil)
@@ -1133,8 +1137,11 @@ func TestCaptureRenameRetainsFeedBackedRowWithPopulatedFeed10623(t *testing.T) {
 
 type policyListRead12072DP struct {
 	*policyInvalTestDP
-	rows    []dpuserspace.SessionPolicyMatch
-	request dpuserspace.SessionPolicyListRequest
+	rows                   []dpuserspace.SessionPolicyMatch
+	stableRuleIDsBySession map[uint64]string
+	activeCfg              *config.Config
+	request                dpuserspace.SessionPolicyListRequest
+	deletedPolicy          []dpuserspace.SessionPolicyMatch
 }
 
 func (d *policyListRead12072DP) ListSessionsByPolicy(
@@ -1146,7 +1153,25 @@ func (d *policyListRead12072DP) ListSessionsByPolicy(
 	for _, id := range request.PolicyIDs {
 		wanted[id] = struct{}{}
 	}
+	// The helper's prepublish resolver translates each bound row's
+	// admission-time scalar through its stable rule handle in the active
+	// snapshot. Carry that handle out-of-band in this fake (the wire match
+	// intentionally has no rule-id field), and use the same production
+	// stable-key-to-runtime-ID helper as the config diff.
+	currentIDs := dpuserspace.PolicyIDsByStableKey(d.activeCfg)
 	for _, row := range d.rows {
+		if request.Mode == "prepublish" {
+			ruleID := d.stableRuleIDsBySession[row.ExpectedRTFlowSessionID]
+			if ruleID == "" {
+				continue // an unbound row has no stable prepublish identity.
+			}
+			currentID, ok := currentIDs[ruleID]
+			if !ok {
+				// Rust resolves an orphaned bound handle to the default-policy sentinel.
+				currentID = dataplane.DefaultPolicySentinelID
+			}
+			row.PolicyID = currentID
+		}
 		if _, ok := wanted[row.PolicyID]; ok {
 			matches = append(matches, row)
 		}
@@ -1156,6 +1181,12 @@ func (d *policyListRead12072DP) ListSessionsByPolicy(
 		SessionPolicyComplete: true,
 		SessionPolicyMatches:  matches,
 	}, nil
+}
+func (d *policyListRead12072DP) DeletePolicySessions(
+	matches []dpuserspace.SessionPolicyMatch,
+) (dpuserspace.PolicyDeleteResult, error) {
+	d.deletedPolicy = append(d.deletedPolicy, matches...)
+	return dpuserspace.PolicyDeleteResult{Applied: len(matches)}, nil
 }
 
 func TestThreeConfigPolicyInvalidationDoesNotCaptureRenumberedUnrelatedSession12072(t *testing.T) {
@@ -1190,11 +1221,16 @@ func TestThreeConfigPolicyInvalidationDoesNotCaptureRenumberedUnrelatedSession12
 	}
 	const webPort = 443
 	dp := &policyListRead12072DP{
-		policyInvalTestDP: &policyInvalTestDP{},
+		policyInvalTestDP: &policyInvalTestDP{appliedConfig: c1},
 		rows: []dpuserspace.SessionPolicyMatch{
 			makeMatch(tmpAtC1, 80, 1001),
-			makeMatch(webAtC1, webPort, 1002),
+			makeMatch(webAtC0, webPort, 1002),
 		},
+		stableRuleIDsBySession: map[uint64]string{
+			1001: "trust->untrust/tmp",
+			1002: "trust->untrust/web",
+		},
+		activeCfg: c1,
 	}
 	d := &Daemon{}
 	d.setDataplane(dp)
@@ -1220,6 +1256,129 @@ func TestThreeConfigPolicyInvalidationDoesNotCaptureRenumberedUnrelatedSession12
 		if match.Tuple.SrcPort == webPort {
 			t.Fatalf("unrelated web session was captured by tmp deletion: %+v", match)
 		}
+	}
+}
+
+// #12323 M1: a retained invalidation debt names C0 while an unknown-outcome
+// publish may already have advanced the helper to C1. The positional target
+// set from C0 cannot safely be resolved in C1's namespace, or the surviving web
+// row can be captured as the deleted tmp row.
+//
+// FAIL-ON-REVERT: remove the AppliedConfig/oldCfg prepublish fence and C1's
+// web@id 1 aliases C0's deleted tmp@id 1; the unguarded capture gathers web.
+func TestPrepublishCaptureFailsClosedOnAppliedSnapshotSkew12323(t *testing.T) {
+	c0 := twoPolicyConfig([]string{"p-first", "tmp", "web"}, nil)
+	c1 := twoPolicyConfig([]string{"p-first", "web"}, nil)
+	c0IDs := dpuserspace.PolicyIDsByStableKey(c0)
+	c1IDs := dpuserspace.PolicyIDsByStableKey(c1)
+	tmpAtC0 := c0IDs["trust->untrust/tmp"]
+	webAtC0 := c0IDs["trust->untrust/web"]
+	webAtC1 := c1IDs["trust->untrust/web"]
+	if tmpAtC0 != 1 || webAtC0 == webAtC1 || webAtC1 != tmpAtC0 {
+		t.Fatalf("unexpected skew fixture IDs: C0=%v C1=%v", c0IDs, c1IDs)
+	}
+	makeMatch := func(policyID uint32, srcPort uint16, sessionID uint64) dpuserspace.SessionPolicyMatch {
+		return dpuserspace.SessionPolicyMatch{
+			AddrFamily: 4,
+			Tuple: dpuserspace.SessionPolicyTuple{
+				AddrFamily: 4, Protocol: 6,
+				SrcIP: "10.0.0.1", DstIP: "10.0.0.2",
+				SrcPort: srcPort, DstPort: 80,
+			},
+			PolicyID:                policyID,
+			ExpectedRTFlowSessionID: sessionID,
+		}
+	}
+	dp := &policyListRead12072DP{
+		policyInvalTestDP: &policyInvalTestDP{appliedConfig: c1},
+		rows: []dpuserspace.SessionPolicyMatch{
+			makeMatch(tmpAtC0, 80, 2001),
+			makeMatch(webAtC0, 443, 2002),
+		},
+		stableRuleIDsBySession: map[uint64]string{
+			2001: "trust->untrust/tmp",
+			2002: "trust->untrust/web",
+		},
+		activeCfg: c1,
+	}
+	d := &Daemon{}
+	d.setDataplane(dp)
+	d.armPolicyInvalidationPlan(c0, c1)
+	d.capturePolicyInvalidationLocked(c1)
+	capture := d.policyInvalidationCapture
+	if capture == nil {
+		t.Fatal("skewed plan did not produce a fail-closed capture")
+	}
+	if capture.readErr == nil {
+		t.Fatal("C0 target IDs were read against the helper's already-applied C1 snapshot")
+	}
+	if !capture.deleted.enumFailed || !capture.modified.enumFailed || !capture.deflt.enumFailed {
+		t.Fatalf("snapshot skew must mark every capture class incomplete: %+v", capture)
+	}
+	if !capture.deleted.empty() || !capture.modified.empty() || !capture.deflt.empty() ||
+		len(capture.renamed) != 0 {
+		t.Fatalf("snapshot skew must capture no sessions: %+v", capture)
+	}
+	if len(dp.request.PolicyIDs) != 0 {
+		t.Fatalf("skewed capture must not issue a helper READ: %+v", dp.request)
+	}
+}
+
+// #12323 M4: a bound row whose stable rule is already absent resolves to the
+// default-policy sentinel and must be revoked when that default changes.
+func TestOrphanBoundSessionSweptOnDefaultPolicyChange12323(t *testing.T) {
+	oldCfg := &config.Config{}
+	oldCfg.Security.DefaultPolicy = config.PolicyPermit
+	newCfg := &config.Config{}
+	newCfg.Security.DefaultPolicy = config.PolicyDeny
+	if !idInSet(defaultPolicyChangeRuntimeIDs(oldCfg, newCfg), dataplane.DefaultPolicySentinelID) {
+		t.Fatal("default-policy change omitted the sentinel target")
+	}
+	const sessionID = 3001
+	dp := &policyListRead12072DP{
+		policyInvalTestDP: &policyInvalTestDP{appliedConfig: oldCfg},
+		rows: []dpuserspace.SessionPolicyMatch{{
+			AddrFamily: 4,
+			Tuple: dpuserspace.SessionPolicyTuple{
+				AddrFamily: 4, Protocol: 6,
+				SrcIP: "10.0.0.1", DstIP: "10.0.0.2",
+				SrcPort: 1234, DstPort: 443,
+			},
+			PolicyID:                17,
+			ExpectedRTFlowSessionID: sessionID,
+		}},
+		stableRuleIDsBySession: map[uint64]string{
+			sessionID: "trust->untrust/removed-in-prior-config",
+		},
+		activeCfg: oldCfg,
+	}
+	d := &Daemon{}
+	d.setDataplane(dp)
+	d.armPolicyInvalidationPlan(oldCfg, newCfg)
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	d.capturePolicyInvalidationLocked(newCfg)
+	capture := d.policyInvalidationCapture
+	if capture == nil {
+		t.Fatal("default-policy change did not produce a capture")
+	}
+	if len(capture.deflt.policy) != 1 ||
+		capture.deflt.policy[0].PolicyID != dataplane.DefaultPolicySentinelID {
+		t.Fatalf("orphan row not captured under default-policy sentinel: %+v", capture.deflt.policy)
+	}
+	if err := d.clearSessionsForDefaultPolicyChange(oldCfg, newCfg); err != nil {
+		t.Fatalf("clearSessionsForDefaultPolicyChange: %v", err)
+	}
+	if len(dp.deletedPolicy) != 1 ||
+		dp.deletedPolicy[0].ExpectedRTFlowSessionID != sessionID {
+		t.Fatalf("default-policy clear deleted %+v; want orphan session %d", dp.deletedPolicy, sessionID)
+	}
+	if !strings.Contains(logs.String(), `change="default-policy changed"`) {
+		t.Fatalf("delete was not labeled as a default-policy change: %s", logs.String())
 	}
 }
 

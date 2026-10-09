@@ -8851,7 +8851,6 @@ impl Fixture10512Lease {
             created_secs: 0,
             created_ns: 0,
             expected_rt_flow_session_id: self.forward.session_id,
-            companion_policy_id: 7,
             expected_companion_rt_flow_session_id: self.reverse.session_id,
             // #10626: delete-path test — zones/rematch inputs irrelevant here.
             ingress_zone_id: 0,
@@ -9957,11 +9956,19 @@ fn pump_list_queues10512(
     queues: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     tables: &mut [SessionTable],
 ) {
+    let forwarding = ForwardingState::default();
+    pump_list_queues_with_forwarding10512(queues, tables, &forwarding);
+}
+
+fn pump_list_queues_with_forwarding10512(
+    queues: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    tables: &mut [SessionTable],
+    forwarding: &ForwardingState,
+) {
     for (q, t) in queues.iter().zip(tables.iter_mut()) {
         if q.lock().expect("queue").is_empty() {
             continue;
         }
-        let forwarding = ForwardingState::default();
         let ha_state = BTreeMap::new();
         let neighbors = Arc::new(ShardedNeighborMap::new());
         crate::afxdp::session_glue::apply_worker_commands(
@@ -9970,7 +9977,7 @@ fn pump_list_queues10512(
             SteeringMap::unshared_for_test(-1),
             -1,
             -1,
-            &forwarding,
+            forwarding,
             &ha_state,
             &neighbors,
             0,
@@ -9994,11 +10001,34 @@ fn call_list_with_pump10512(
     Vec<String>,
     String,
 ) {
+    call_list_with_forwarding_pump10512(
+        domain,
+        req,
+        queues,
+        tables,
+        &ForwardingState::default(),
+    )
+}
+
+/// Run a policy list with a worker forwarding snapshot that matches the
+/// coordinator's published policy view.
+fn call_list_with_forwarding_pump10512(
+    domain: &super::ha::SessionDomain,
+    req: &crate::protocol::SessionPolicyListRequest,
+    queues: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    tables: &mut [SessionTable],
+    forwarding: &ForwardingState,
+) -> (
+    Vec<crate::protocol::SessionPolicyMatch>,
+    bool,
+    Vec<String>,
+    String,
+) {
     let d = domain.clone();
     let r = req.clone();
     let handle = std::thread::spawn(move || d.list_sessions_by_policy(&r));
     while !handle.is_finished() {
-        pump_list_queues10512(queues, tables);
+        pump_list_queues_with_forwarding10512(queues, tables, forwarding);
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     handle.join().expect("list thread")
@@ -10034,6 +10064,195 @@ fn list_req_ha10512(policy_ids: Vec<u32>) -> crate::protocol::SessionPolicyListR
         ..Default::default()
     }
 }
+
+fn prepublish_list_forwarding12072() -> ForwardingState {
+    let mut zone_ids = rustc_hash::FxHashMap::default();
+    zone_ids.insert("lan".to_string(), TEST_LAN_ZONE_ID);
+    zone_ids.insert("wan".to_string(), TEST_WAN_ZONE_ID);
+    let rule = |name: &str, policy_id| crate::PolicyRuleSnapshot {
+        name: name.to_string(),
+        policy_id,
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        action: "permit".to_string(),
+        ..Default::default()
+    };
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_name_to_id = zone_ids.clone();
+    forwarding.policy = crate::policy::parse_policy_state_with_counters(
+        "deny",
+        &[rule("tmp", 1), rule("web", 2)],
+        &zone_ids,
+        &[],
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect("test policy snapshot");
+    assert_eq!(
+        forwarding
+            .policy
+            .rule_for_policy_id(1)
+            .map(|entry| entry.rule_id.as_str()),
+        Some("lan->wan/tmp")
+    );
+    assert_eq!(
+        forwarding
+            .policy
+            .rule_for_policy_id(2)
+            .map(|entry| entry.rule_id.as_str()),
+        Some("lan->wan/web")
+    );
+    forwarding
+}
+
+/// A bound shared-only row must contribute to the coverage gap after resolving
+/// its stable handle against the coordinator's current policy snapshot.
+#[test]
+fn coord_list_bound_shared_only_row_reports_incomplete_12072() {
+    let forwarding = prepublish_list_forwarding12072();
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(forwarding.clone());
+    let q0 = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(q0.clone())),
+        None,
+    );
+
+    let key = test_key();
+    let session_id = 9001;
+    let mut metadata = test_metadata();
+    metadata.policy_id = 77;
+    metadata.policy_counter = Some(Arc::new(crate::policy::PolicyRuleCounter::with_rule_id(
+        "lan->wan/tmp",
+    )));
+    let entry = SyncedSessionEntry {
+        key,
+        decision: test_decision(),
+        metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+    };
+    publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &entry,
+    );
+
+    let domain = coordinator.session_domain();
+    let mut table = SessionTable::new();
+    let (rows, complete, errors, continuation) = call_list_with_forwarding_pump10512(
+        &domain,
+        &list_req_ha10512(vec![1]),
+        &[q0],
+        std::slice::from_mut(&mut table),
+        &forwarding,
+    );
+    assert!(rows.is_empty(), "the shared-only row is absent from workers");
+    assert!(!complete, "the shared-only bound tmp row makes coverage incomplete");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error == "shared-synced-map-uncovered"),
+        "the coverage gap must name the shared synced map: {errors:?}"
+    );
+    assert!(continuation.is_empty(), "an empty response has no page token");
+}
+
+/// A bound SyncImport whose admission-time scalar aliases tmp must list only
+/// under web's current stable-rule ID.
+#[test]
+fn coord_list_bound_sync_import_resolves_current_policy_id_12072() {
+    let forwarding = prepublish_list_forwarding12072();
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(forwarding.clone());
+    let q0 = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(q0.clone())),
+        None,
+    );
+
+    let key = test_key();
+    let mut metadata = test_metadata();
+    metadata.policy_id = 1; // Admission scalar aliases tmp; stable identity is web.
+    metadata.policy_counter = Some(Arc::new(crate::policy::PolicyRuleCounter::with_rule_id(
+        "lan->wan/web",
+    )));
+    let mut table = SessionTable::new();
+    assert!(table.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        metadata.clone(),
+        SessionOrigin::SyncImport,
+        1_000_000_000,
+        PROTO_TCP,
+        0x10,
+    ));
+    let session_id = table.session_id_for(&key);
+    assert_ne!(session_id, 0, "fixture must mint a live session identity");
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision: test_decision(),
+        metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+    };
+    publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &entry,
+    );
+
+    let domain = coordinator.session_domain();
+    let (rows, complete, errors, continuation) = call_list_with_forwarding_pump10512(
+        &domain,
+        &list_req_ha10512(vec![1]),
+        &[q0.clone()],
+        std::slice::from_mut(&mut table),
+        &forwarding,
+    );
+    assert!(
+        rows.is_empty(),
+        "LIST[1] must not match web's admission-time scalar"
+    );
+    assert!(complete, "the excluded scalar alias does not make coverage incomplete");
+    assert!(errors.is_empty(), "unexpected LIST[1] errors: {errors:?}");
+    assert!(continuation.is_empty(), "an empty response has no page token");
+
+    let (rows, complete, errors, continuation) = call_list_with_forwarding_pump10512(
+        &domain,
+        &list_req_ha10512(vec![2]),
+        &[q0],
+        std::slice::from_mut(&mut table),
+        &forwarding,
+    );
+    assert!(complete, "the resolved web row has complete coverage");
+    assert!(errors.is_empty(), "unexpected LIST[2] errors: {errors:?}");
+    assert!(continuation.is_empty(), "one row has no continuation");
+    assert_eq!(rows.len(), 1, "LIST[2] returns the bound web row");
+    assert_eq!(rows[0].policy_id, 2, "wire policy_id is the current web id");
+    assert_eq!(rows[0].expected_rt_flow_session_id, session_id);
+}
+
 
 /// Coordinator fan-out merges rows across workers and dedups the same
 /// (key, identity) replica found in two tables.

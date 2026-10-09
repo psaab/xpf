@@ -17550,6 +17550,15 @@ fn policy_rule_snapshot12072(name: &str, policy_id: u32) -> crate::PolicyRuleSna
 #[test]
 fn worker_list_uses_current_policy_id_after_renumbering_12072() {
     let mut sessions = SessionTable::new();
+    // C0 admission snapshot: the session's bound stable identity is web@id 1.
+    let admission = forwarding_with_policy_rules12072(&[policy_rule_snapshot12072("web", 1)]);
+    assert_eq!(
+        admission
+            .policy
+            .rule_for_policy_id(1)
+            .map(|rule| rule.rule_id.as_str()),
+        Some("lan->wan/web")
+    );
     let key = test_key();
     let mut metadata = test_metadata();
     metadata.policy_id = 1; // web's C0 admission-time id.
@@ -17570,6 +17579,31 @@ fn worker_list_uses_current_policy_id_after_renumbering_12072() {
         policy_rule_snapshot12072("tmp", 1),
         policy_rule_snapshot12072("web", 2),
     ]);
+    // C2 deletes tmp; its old C1 id is also web's new C2 id. The prepublish
+    // resolver must therefore interpret the row against C1, before C2 lands.
+    let c2 = forwarding_with_policy_rules12072(&[
+        policy_rule_snapshot12072("p-first", 0),
+        policy_rule_snapshot12072("web", 1),
+    ]);
+    assert_eq!(
+        forwarding
+            .policy
+            .rule_for_policy_id(1)
+            .map(|rule| rule.rule_id.as_str()),
+        Some("lan->wan/tmp"),
+        "C1 deletion target id 1 must name tmp"
+    );
+    assert!(
+        c2.policy.rule_for_stable_id("lan->wan/tmp").is_none(),
+        "C2 must delete tmp"
+    );
+    assert_eq!(
+        c2.policy
+            .rule_for_policy_id(1)
+            .map(|rule| rule.rule_id.as_str()),
+        Some("lan->wan/web"),
+        "C2 must move web into tmp's former numeric slot"
+    );
     let (tmp_rows, tmp_errs, tmp_left) = run_list_scan_with_forwarding12072(
         &mut sessions,
         list_req10512(vec![1], "prepublish", None, vec![4], vec!["forward".into()]),
@@ -17652,5 +17686,98 @@ fn worker_list_excludes_unbound_peer_rows_from_positional_matching_12072() {
     assert!(
         rows.is_empty(),
         "an unbound peer row must not be deleted by a positional policy-id collision"
+    );
+}
+
+/// #12072 P1a: the unbound-ID exclusion must survive the production promotion
+/// transition. `maybe_promote_synced_session` preserves unbound metadata and
+/// retags the origin to `SharedPromote`, which is NOT `is_peer_synced` — so a
+/// `policy_id_for_list_request` exclusion gated only on the peer-synced set
+/// re-admits the promoted row's stale positional scalar to prepublish
+/// ID-keyed deletion.
+///
+/// This cell drives the ACTUAL promotion transition (SyncImport row →
+/// `maybe_promote_synced_session`), not a fixture stamped with SharedPromote,
+/// then asserts the promoted row is still excluded from positional matching.
+///
+/// FAIL-ON-REVERT: gate the unbound exclusion on `is_peer_synced()` alone and
+/// the promoted row's stale id 1 is captured by LIST [tmp@C1].
+#[test]
+fn worker_list_excludes_promoted_unbound_row_from_positional_matching_12072() {
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let decision = test_decision();
+    let mut metadata = test_metadata();
+    metadata.policy_id = 1; // stale positional scalar from an older snapshot.
+    assert!(metadata.policy_counter.is_none());
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        metadata.clone(),
+        SessionOrigin::SyncImport,
+        monotonic_nanos(),
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+
+    // Drive the production promotion transition: the origin flips to
+    // SharedPromote while the unbound metadata is preserved.
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let shared = super::SharedSessionRefs {
+        sessions: &shared_sessions,
+        nat_sessions: &shared_nat_sessions,
+        forward_wire_sessions: &shared_forward_wire_sessions,
+        owner_rg_indexes: &shared_owner_rg_indexes,
+    };
+    let promoted_metadata = maybe_promote_synced_session(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        shared,
+        &peer_worker_commands,
+        &test_forwarding_state(),
+        &key,
+        decision,
+        metadata,
+        SessionOrigin::SyncImport,
+        false,
+        monotonic_nanos(),
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    );
+    assert!(
+        promoted_metadata.policy_counter.is_none(),
+        "promotion must preserve the unbound metadata"
+    );
+    let (_, stored_metadata, stored_origin) = sessions
+        .entry_with_origin(&key)
+        .expect("the promoted row must remain installed");
+    assert_eq!(stored_origin, SessionOrigin::SharedPromote);
+    assert!(
+        stored_metadata.policy_counter.is_none(),
+        "the stored promoted row must remain unbound"
+    );
+
+    // The promoted row's stale positional id 1 must not be captured by a
+    // prepublish LIST for tmp's current id 1.
+    let forwarding = forwarding_with_policy_rules12072(&[policy_rule_snapshot12072("tmp", 1)]);
+    let (rows, errs, left) = run_list_scan_with_forwarding12072(
+        &mut sessions,
+        list_req10512(vec![1], "prepublish", None, vec![4], vec!["forward".into()]),
+        forwarding.clone(),
+    );
+    assert!(errs.is_empty(), "promoted scan errors: {errs:?}");
+    assert_eq!(left, 0);
+    assert!(
+        rows.is_empty(),
+        "a promoted unbound row must not be deleted by a positional policy-id collision"
+    );
+    assert!(
+        policy_id_for_list_request(&forwarding, &stored_metadata, stored_origin, "prepublish")
+            .is_none(),
+        "the promoted unbound row must be excluded from prepublish ID matching"
     );
 }

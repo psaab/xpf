@@ -1501,3 +1501,119 @@ fn live_unbound_replay_still_installs_after_rotation_10612() {
     );
     harness.shutdown();
 }
+
+/// #12072 P1b: the scalar `policy_id` is admission-time state, not a
+/// candidate-eligibility test for the old first rule. Admit p-first while it is
+/// id 1, move it to id 0 in one extensive rotation, then delete it in the next.
+/// Both forward and reverse halves must be purged by the stable admitting-rule
+/// handle even though their frozen scalar remains nonzero.
+///
+/// FAIL-ON-REVERT: retain `metadata.policy_id != 0` in
+/// `rematch_bound_first_policy_sessions` and the p-first pair is skipped after
+/// it becomes old_first at id 0.
+#[test]
+fn extensive_rematch_purges_nonzero_admission_id_after_first_rule_move_12072() {
+    let old_rules = [rule("p-web", 0), rule("p-first", 1)];
+    let p_first_counter = policy(&old_rules)
+        .hit_counter_by_idx(2)
+        .cloned()
+        .expect("fixture policy must expose p-first's counter");
+    let forward_key = key(40101);
+    let reverse_key = reverse_session_key(&forward_key, NatDecision::default());
+    let mut forward = entry(forward_key.clone(), false, Some(p_first_counter.clone()));
+    forward.metadata.policy_id = 1; // p-first's admission-time C0 scalar.
+    forward.metadata.policy_counter_idx = 2;
+    let mut reverse = entry(reverse_key.clone(), true, Some(p_first_counter));
+    reverse.metadata.policy_id = 1;
+    reverse.metadata.policy_counter_idx = 2;
+
+    let harness = RotationHarness::start_with_extra_origin_old_rules(
+        &[forward, reverse],
+        SessionOrigin::SharedPromote,
+        &old_rules,
+        "lan->wan/p-web",
+    );
+    {
+        let shared = harness.synced.lock().expect("shared synced map");
+        for pair_key in [&forward_key, &reverse_key] {
+            let stored = shared
+                .get(pair_key)
+                .expect("the nonzero-admission p-first pair must install");
+            assert_eq!(stored.metadata.policy_id, 1);
+            assert_eq!(
+                stored
+                    .metadata
+                    .policy_counter
+                    .as_ref()
+                    .expect("bound p-first identity")
+                    .rule_id(),
+                "lan->wan/p-first"
+            );
+        }
+    }
+
+    // C1 moves p-first from nonzero to zero. p-web was the old first rule and
+    // remains present, so this first rotation must leave the p-first pair live.
+    harness.publish(
+        2,
+        &[rule("p-first", 0), rule("p-web", 1)],
+        true,
+        &[],
+        None,
+    );
+    {
+        let shared = harness.synced.lock().expect("shared synced map");
+        for pair_key in [&forward_key, &reverse_key] {
+            let stored = shared
+                .get(pair_key)
+                .expect("the p-first pair must survive its move to id 0");
+            assert_eq!(
+                stored.metadata.policy_id, 1,
+                "rotation must not rewrite the admission-time scalar"
+            );
+        }
+    }
+
+    // C2 deletes the now-first p-first rule. Extensive rematch sees the stable
+    // source identity, but the destination is absent, so both halves must be
+    // torn down atomically rather than left behind by the stale scalar.
+    let ancestry = crate::protocol::PolicyRenameAncestry {
+        source_rule_id: "lan->wan/p-first".to_string(),
+        destination_rule_id: "lan->wan/p-new".to_string(),
+        source_from_zone: "lan".to_string(),
+        source_to_zone: "wan".to_string(),
+        destination_from_zone: "lan".to_string(),
+        destination_to_zone: "wan".to_string(),
+        source_from_zone_id: 1,
+        source_to_zone_id: 2,
+        destination_from_zone_id: 1,
+        destination_to_zone_id: 2,
+        source_from_zone_any: false,
+        source_to_zone_any: false,
+        destination_from_zone_any: false,
+        destination_to_zone_any: false,
+    };
+    harness.publish(
+        3,
+        &[rule("p-other", 0)],
+        true,
+        &[ancestry],
+        None,
+    );
+    let shared = harness.synced.lock().expect("shared synced map");
+    assert!(
+        !shared.contains_key(&forward_key),
+        "the forward half admitted by the deleted first rule survived"
+    );
+    assert!(
+        !shared.contains_key(&reverse_key),
+        "the reverse companion admitted by the deleted first rule survived"
+    );
+    assert!(
+        shared.contains_key(&harness.first_forward)
+            && shared.contains_key(&harness.first_reverse),
+        "unrelated p-web sessions must remain outside the p-first rematch"
+    );
+    drop(shared);
+    harness.shutdown();
+}

@@ -248,6 +248,8 @@ func defaultPolicyChanged(oldCfg, newCfg *config.Config) (changed, unconditional
 // which by construction can never alias policy_id 0 (host-inbound / fabric /
 // tunnel / synced sessions and old HA peers all carry 0, never 0xFFFFFFFF — see
 // DefaultPolicySentinelID). Sweeping the sentinel is therefore safe and precise.
+// A bound row whose stable rule is absent from the active snapshot resolves to
+// this sentinel, so a default-policy change can intentionally sweep that orphan.
 //
 // Caller must hold d.applySem (all commit/sync/rollback call sites do).
 //
@@ -364,15 +366,15 @@ func (d *Daemon) clearSessionsForPolicyChanges(oldCfg, newCfg *config.Config) er
 	)
 }
 
-// (#4234) and the modified-policy re-eval: it deletes captured helper matches
-// (or fallback candidates) using the same companion-aware delete + HA delete-sync
-// propagation the GC and cluster-stale reconcile use. ids is the set of
-// positional IDs assigned by the preceding config; prepublish helper reads
-// resolve stable bound handles into that namespace before matching. An empty
-// set is a no-op (a commit with no matching policy change pays no session-table
-// scan).
-// reason is the documentary delete label; what labels the change class in the
-// summary log line.
+// clearSessionsForPolicyIDs is the shared scalar-ID invalidation core for
+// deleted policies, modified-policy re-evaluation, and default-policy changes.
+// The helper branch uses legacy LIST mode and its activation fence; the fallback
+// scans the session store. Both compare the supplied IDs with scalar policy_id
+// values rather than resolving stable rule handles. Prepublication stable-handle
+// resolution belongs to capturePolicyInvalidationLocked.
+// An empty set is a no-op (a commit with no matching policy change pays no
+// session-table scan). reason is the documentary delete label; what labels the
+// change class in the summary log line.
 //
 // Caller must hold d.applySem (all commit/sync/rollback call sites do), so this
 // cannot race a concurrent apply that would reprogram the policy-ID namespace.
@@ -724,10 +726,12 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 // UNCHANGED policy keeps forwarding. The OLD numeric ID is the target set's
 // positional namespace; helper-backed prepublish reads resolve each bound
 // session's stable identity into that namespace before matching.
-// wire-value reason documented there (host-inbound / fabric / tunnel / synced
-// sessions and old HA peers all carry 0). Unlike a deletion, a MODIFIED first
-// policy is not covered by the helper's #9526 purge, which keys on the rule
-// vanishing from the snapshot: its sessions are left to the next-packet
+// id 0 is deliberately omitted: it is an overloaded wire value for
+// host-inbound / fabric / tunnel / synced sessions and old HA peers, not a
+// configured-policy invalidation target.
+// Unlike a deletion, a MODIFIED first policy is not covered by the helper's
+// #9526 purge, which keys on the rule vanishing from the snapshot: its sessions
+// are left to the next-packet
 // re-derivation, which judges reverse hits by their forward companion too
 // (#9604) and revokes both halves on a non-permit verdict. One remaining
 // reverse-only gap is the declined population — lone-reverse entries with no

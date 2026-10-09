@@ -505,7 +505,6 @@ pub(crate) fn policy_match_from_parts(
         created_secs: created_ns / 1_000_000_000,
         created_ns,
         expected_rt_flow_session_id: session_id,
-        companion_policy_id: 0,
         expected_companion_rt_flow_session_id: 0,
         // #10626: rename-rematch inputs for the Go capture. Zones come from
         // the live metadata; DNAT-ness is a translated dst (covers NPTv6 too,
@@ -1434,16 +1433,21 @@ impl SessionDomain {
         let shared_uncovered = {
             let shared = crate::afxdp::shared_ops::lock_shared_recover(&self.sessions.synced);
             shared.values().any(|entry| {
+                if !family_allowed(policy_wire_family(entry.key.addr_family))
+                    || !class_allowed(entry.metadata.is_reverse)
+                {
+                    return false;
+                }
                 crate::afxdp::session_glue::policy_id_for_list_request(
                     current_forwarding,
                     &entry.metadata,
                     entry.origin,
                     &request.mode,
                 )
-                .is_some_and(|policy_id| wanted.contains(&policy_id))
-                    && family_allowed(policy_wire_family(entry.key.addr_family))
-                    && class_allowed(entry.metadata.is_reverse)
-                    && !collector.contains_identity(&entry.key, entry.session_id)
+                .is_some_and(|policy_id| {
+                    wanted.contains(&policy_id)
+                        && !collector.contains_identity(&entry.key, entry.session_id)
+                })
             })
         };
         let mut rows = collector.take_rows();
