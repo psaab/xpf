@@ -2412,14 +2412,19 @@ impl SessionTable {
             && record.entry.policy_scheduler_expired == self.policy_scheduler_expired)
     }
 
-    /// #12074: make a zone-policy verdict stale after a FIB-only route move
-    /// changes the resolved egress zone. Resolves query keys through the same
-    /// guarded NAT-alias lookup as policy revalidation so reverse-translated
-    /// hits invalidate their canonical entry too.
+    /// #12074: make a LiveEgress zone-policy verdict stale after a FIB-only
+    /// route move changes the resolved egress zone. Only LiveEgress rows are
+    /// invalidated; fresh Unvalidated/Recorded rows carry a fail-closed fence.
+    /// Resolves query keys through the same guarded NAT-alias lookup as policy
+    /// revalidation so reverse-translated hits invalidate their canonical row.
     pub(crate) fn invalidate_policy_revalidation(&mut self, key: &SessionKey) {
         let stale_gen = self.policy_revalidation_gen.wrapping_sub(1);
         if let Some(handle) = self.revalidation_handle(key)
             && let Some(record) = self.entries.get_mut(handle as usize)
+            && matches!(
+                record.entry.policy_revalidation_kind,
+                PolicyRevalidationKind::LiveEgress
+            )
         {
             record.entry.policy_revalidated_gen = stale_gen;
         }

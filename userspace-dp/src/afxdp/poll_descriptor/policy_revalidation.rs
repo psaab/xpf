@@ -1317,6 +1317,12 @@ fn reverse_hit_zone_policy(
                 return None;
             }
             let forward_route_stale = sessions.forwarding_resolution_is_stale(fwd_generation);
+            let forward_route_stale_live = forward_route_stale
+                && matches!(
+                    sessions.policy_revalidation_kind(&fwd_key),
+                    PolicyRevalidationKind::LiveEgress
+                )
+                && fwd_decision.resolution.disposition != ForwardingDisposition::FabricRedirect;
             if forward_route_stale {
                 let current_fwd_resolution = resolve_current_forward_companion(
                     forwarding,
@@ -1342,6 +1348,10 @@ fn reverse_hit_zone_policy(
                     // Continue to judge the recorded policy egress below; the
                     // transport route is not the forward flow's policy zone.
                     fwd_decision.resolution = current_fwd_resolution;
+                } else if forward_route_stale_live {
+                    // FIB staleness alone does not revoke a LiveEgress
+                    // companion on a transient non-forwarding route (#9513).
+                    return None;
                 } else {
                     return Some(PolicyRevocation {
                         canonical_key: Some(fwd_key),
@@ -1467,8 +1477,9 @@ fn reverse_hit_zone_policy(
         rev_force_cold || companion_needs_live || companion_forwarding_stale;
     // Inconsistent-companion arms fail closed when the reverse packet would
     // locally forward and its own row needs cold, or the companion itself
-    // demands live. FIB staleness triggers a fresh forward-pair judgment but
-    // does not change the existing Decline semantics for unjudgeable policy.
+    // demands live. A FIB-stale LiveEgress companion is different: if its
+    // current route is non-forwarding, preserve #9513's Decline semantics
+    // below instead of revoking a session solely for transient route state.
     let reverse_inconsistent_fail_closed =
         (reverse_has_intent && reverse_row_needs_cold) || companion_needs_live;
     if matches!(rev_target, PolicyRevalidationTarget::Fresh) && !force_reverse_cold {
@@ -1513,6 +1524,9 @@ fn reverse_hit_zone_policy(
     // to LiveEgress too: reverse-only traffic must not judge an old route and
     // refresh the reverse row while leaving the forward row on the old FIB.
     let stored_fwd_kind = sessions.policy_revalidation_kind(&fwd_key);
+    let companion_fib_stale_live = companion_forwarding_stale
+        && matches!(stored_fwd_kind, PolicyRevalidationKind::LiveEgress)
+        && fwd_decision.resolution.disposition != ForwardingDisposition::FabricRedirect;
     if reverse_has_intent
         && (fwd_decision.resolution.disposition == ForwardingDisposition::FabricRedirect
             || !matches!(stored_fwd_kind, PolicyRevalidationKind::LiveEgress)
@@ -1539,10 +1553,14 @@ fn reverse_hit_zone_policy(
             // Admit without revoking, stamp nothing, authorize no local TX
             // here. Cell 1 phase 1 pins SyncImport retention (#7770).
             return None;
+        } else if companion_fib_stale_live {
+            // This fence was entered only because the LiveEgress route stamp
+            // is stale. Transient non-forwarding routes Decline like the
+            // forward path; keep the session and leave both stamps untouched.
+            return None;
         } else {
-            // No valid current egress and not a redirect (NoRoute,
-            // HAInactive, would-forward without egress): the reverse packet
-            // must not locally forward on its stored Permit — fail closed.
+            // FabricRedirect and non-Live provenance retain the pre-existing
+            // fail-closed revoke behavior on an unresolvable current egress.
             return revocation_for_hit(sessions, session_key);
         }
     }
