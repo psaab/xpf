@@ -188,24 +188,26 @@ out-of-range value to a warning.
   derived from `routing.BuildProbePins` — the SAME deterministic
   assignment pkg/routing programs as fwmark rules, so socket mark and
   kernel rule cannot drift.
-- **A next-hop test whose pin is genuinely missing or mismatched never probes on an administratively-up egress** (#1895/#12088):
-  an unbacked `SO_MARK` falls through to the main table and measures
-  the default path — a dead pinned uplink would false-PASS and
-  suppress ip-monitoring failover. `executeProbe` returns
-  `ErrProbeSetup` (hold state, no socket opened) while the pin is in
-  the `SetPinInstallResults` failed map — or when a next-hop test has
-  no pin slot at all (band exhaustion belt-and-braces). A route flagged
-  `RTNH_F_LINKDOWN` (including `RTNH_F_DEAD|RTNH_F_LINKDOWN` when
-  `ignore_routes_with_linkdown=1`) is different: the selected pin still exists,
-  so probes must run and let genuine carrier-loss timeouts cross the
-  threshold into failover. When the egress is administratively down, probes
-  also run: a socket bound to that device fails with `ENETUNREACH`, which RPM
-  counts as path loss. The daemon retries failed installs on hash-gated
-  reconciles and verifies configured pins on a slow periodic loop (30 s).
-  Link/address notifications trigger immediate readback; closed subscriptions
-  are resubscribed after backoff and all pins are verified to resync the gap.
-  Missing pins on an up egress are held and reinstalled on the next retry tick,
-  so probes never use an unbacked mark.
+- **A next-hop test whose pin is missing or mismatched is held on an
+  administratively-up egress** (#1895/#12088): an unbacked `SO_MARK` can fall
+  through to the main table and false-PASS, suppressing ip-monitoring failover.
+  `executeProbe` returns `ErrProbeSetup` (hold state, no socket opened) while
+  the pin is in `SetPinInstallResults`' failed map, or when a next-hop test has
+  no pin slot (band-exhaustion belt-and-braces). A carrier-down route flagged
+  `RTNH_F_LINKDOWN` (possibly `RTNH_F_DEAD|RTNH_F_LINKDOWN` when
+  `ignore_routes_with_linkdown=1`) remains a valid installed pin shape, but the
+  kernel may skip it for lookup; `SO_BINDTODEVICE` confines the probe to its
+  configured egress so carrier loss still reaches RPM's failure threshold.
+  With a routing manager, an administratively-down egress is probeable: the
+  bound socket fails with `ENETUNREACH`, counted as path loss. With no installer,
+  every configured pin stays held even while down because nothing can repair it
+  if the egress later comes up. The daemon retries failed installs on
+  hash-gated reconciles, reads pins on a 30 s fallback tick, and verifies
+  immediately on link/address notifications. Closed subscriptions are
+  resubscribed after backoff, then all pins are verified to resync the gap.
+  A link-up notification/hold race remains: a probe can theoretically send
+  before the admin-up drift is published, and repair waits for the next retry
+  tick, so pin failures do not guarantee a strict no-unbacked-send window.
 - Events expose both the test owner (probe name) and the test name so
   event-options policies can match on either via `attributes-match`.
 - A consecutive-failure counter discriminates transient blips from

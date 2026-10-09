@@ -272,6 +272,16 @@ func (d *Daemon) applyProbePinsHeld(applyPins func([]routing.ProbePin) map[strin
 // pins are configured; link/address notifications make drift detection prompt.
 const probePinRetryInterval = 30 * time.Second
 
+func defaultProbePinLinkSubscribe(ch chan<- netlink.LinkUpdate, done <-chan struct{}, onError func(error)) error {
+	return netlink.LinkSubscribeWithOptions(ch, done,
+		netlink.LinkSubscribeOptions{ErrorCallback: onError})
+}
+
+func defaultProbePinAddrSubscribe(ch chan<- netlink.AddrUpdate, done <-chan struct{}, onError func(error)) error {
+	return netlink.AddrSubscribeWithOptions(ch, done,
+		netlink.AddrSubscribeOptions{ErrorCallback: onError})
+}
+
 // retainProbePinInstallFailures preserves only installer errors that the
 // authoritative readback still confirms. These alone keep the legacy
 // unchanged-hash immediate retry behavior; readback-only drift waits for the
@@ -451,6 +461,10 @@ func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	resubBackoff := d.probePinResubBackoff
+	if resubBackoff <= 0 {
+		resubBackoff = linkStateResubBackoffDefault
+	}
 
 	var linkUpdates <-chan netlink.LinkUpdate
 	var addrUpdates <-chan netlink.AddrUpdate
@@ -464,11 +478,18 @@ func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 		default:
 		}
 	}
+	linkSubscribe := d.probePinLinkSubscribe
+	if linkSubscribe == nil {
+		linkSubscribe = defaultProbePinLinkSubscribe
+	}
+	addrSubscribe := d.probePinAddrSubscribe
+	if addrSubscribe == nil {
+		addrSubscribe = defaultProbePinAddrSubscribe
+	}
 	subscribeLink := func() (<-chan netlink.LinkUpdate, chan struct{}, error) {
 		updates := make(chan netlink.LinkUpdate, 32)
 		done := make(chan struct{})
-		if err := netlink.LinkSubscribeWithOptions(updates, done,
-			netlink.LinkSubscribeOptions{ErrorCallback: onError}); err != nil {
+		if err := linkSubscribe(updates, done, onError); err != nil {
 			close(done)
 			return nil, nil, err
 		}
@@ -477,8 +498,7 @@ func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 	subscribeAddr := func() (<-chan netlink.AddrUpdate, chan struct{}, error) {
 		updates := make(chan netlink.AddrUpdate, 32)
 		done := make(chan struct{})
-		if err := netlink.AddrSubscribeWithOptions(updates, done,
-			netlink.AddrSubscribeOptions{ErrorCallback: onError}); err != nil {
+		if err := addrSubscribe(updates, done, onError); err != nil {
 			close(done)
 			return nil, nil, err
 		}
@@ -489,12 +509,12 @@ func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 		linkUpdates, linkDone, err = subscribeLink()
 		if err != nil {
 			slog.Warn("probe pin link subscription unavailable; retrying", "err", err)
-			linkRetry = time.After(linkStateResubBackoffDefault)
+			linkRetry = time.After(resubBackoff)
 		}
 		addrUpdates, addrDone, err = subscribeAddr()
 		if err != nil {
 			slog.Warn("probe pin address subscription unavailable; retrying", "err", err)
-			addrRetry = time.After(linkStateResubBackoffDefault)
+			addrRetry = time.After(resubBackoff)
 		}
 	}
 	defer func() {
@@ -521,7 +541,7 @@ func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 					linkDone = nil
 				}
 				linkUpdates = nil
-				linkRetry = time.After(linkStateResubBackoffDefault)
+				linkRetry = time.After(resubBackoff)
 				continue
 			}
 			if update.Attrs() != nil {
@@ -535,7 +555,7 @@ func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 					addrDone = nil
 				}
 				addrUpdates = nil
-				addrRetry = time.After(linkStateResubBackoffDefault)
+				addrRetry = time.After(resubBackoff)
 				continue
 			}
 			d.verifyProbePinsForAddress(update.LinkIndex)
@@ -544,7 +564,7 @@ func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 			updates, done, err := subscribeLink()
 			if err != nil {
 				slog.Warn("probe pin link resubscription failed; retrying", "err", err)
-				linkRetry = time.After(linkStateResubBackoffDefault)
+				linkRetry = time.After(resubBackoff)
 				continue
 			}
 			linkUpdates, linkDone = updates, done
@@ -555,7 +575,7 @@ func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 			updates, done, err := subscribeAddr()
 			if err != nil {
 				slog.Warn("probe pin address resubscription failed; retrying", "err", err)
-				addrRetry = time.After(linkStateResubBackoffDefault)
+				addrRetry = time.After(resubBackoff)
 				continue
 			}
 			addrUpdates, addrDone = updates, done
@@ -671,7 +691,10 @@ func (d *Daemon) reconcileRPMMode(cfg *config.Config, haTransition bool) bool {
 	// burst cannot be consumed by the temporary reprogram hold. With no
 	// installer, every configured pin is failed by definition
 	// (errNoProbePinInstaller) — never let a next-hop test probe with a
-	// marked-but-unbacked socket.
+	// marked-but-unbacked socket. Unlike installer/readback failures, this
+	// hold is unconditional: nothing re-evaluates it if the egress comes
+	// up later, so filtering it now could false-pass through the main table
+	// after an egress bounce (#12088).
 	d.rpm.HoldPinsForReprogram(probePinKeys(pins), errProbePinReprogram)
 	var failed map[string]error
 	if applyPins != nil {
@@ -687,7 +710,6 @@ func (d *Daemon) reconcileRPMMode(cfg *config.Config, haTransition bool) bool {
 		d.rpmPinInstallFailures = nil
 		failed = probePinsAllFailed(pins, errNoProbePinInstaller)
 	}
-	failed = d.probePinFailuresOnAdminUpEgress(pins, failed)
 	if len(failed) > 0 {
 		if applyPins == nil {
 			slog.Warn("next-hop probe pins configured but no routing manager — pinned tests hold state",

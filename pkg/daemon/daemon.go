@@ -475,6 +475,14 @@ type Daemon struct {
 	// probePinEgressIsUp is the admin-state lookup seam for RPM pin holds;
 	// nil reads IFF_UP from the live netlink link.
 	probePinEgressIsUp func(string) bool
+	// probePinLinkSubscribe and probePinAddrSubscribe start the link/address
+	// netlink subscriptions used by probePinRetryLoop. Nil uses the real
+	// netlink subscription; seams let tests inject a channel close.
+	probePinLinkSubscribe func(ch chan<- netlink.LinkUpdate, done <-chan struct{}, onError func(error)) error
+	probePinAddrSubscribe func(ch chan<- netlink.AddrUpdate, done <-chan struct{}, onError func(error)) error
+	// probePinResubBackoff overrides the close/error resubscribe delay; 0 uses
+	// linkStateResubBackoffDefault.
+	probePinResubBackoff time.Duration
 	// pinRetryCancel/pinRetryWg/pinRetryStopped scope the probePinRetryLoop
 	// lifecycle so daemon shutdown can cancel + join it BEFORE FRR/routing
 	// teardown (#5308). The loop used to bind to d.daemonCtx (never cancelled

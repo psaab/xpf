@@ -112,14 +112,15 @@ func BuildProbePins(rpmCfg *config.RPMConfig, rethMap map[string]string) []Probe
 //
 // #7173: on a rethMap MISS the RETH base falls through to
 // config.LinuxIfName(base) — the raw translated Junos name — rather than
-// failing here. That is the safe direction and is deliberate: the resulting
-// name will not resolve, and the downstream LinkByName failure HOLDS the probe
-// instead of letting it run unpinned. A probe that is held is visibly broken; a
-// probe that silently ran against the wrong interface, or against no interface
-// at all, would report reachability it never measured and drive
-// ip-monitoring route injection off it.
+// failing here. The resulting name will not resolve. The routing manager
+// reports a missing pin, but daemon admin-up filtering does not retain that
+// hold for a missing egress; RPM's SO_BINDTODEVICE setup then fails with
+// ENODEV, and ErrProbeSetup holds the probe without treating it as path loss.
+// A probe silently sent on the wrong interface, or with no interface at all,
+// would report reachability it never measured and could drive ip-monitoring
+// route injection off it.
 //
-// So do not "fix" the miss by substituting a default interface or by dropping
+// So do not "fix" the miss by substituting a default interface or dropping
 // the pin — either turns a held probe into a false-passing one.
 func ResolveProbeInterface(name string, rethMap map[string]string) string {
 	if name == "" {
@@ -392,13 +393,13 @@ func resolveProbePin(ops probePinOps, pin ProbePin) (wantPin, error) {
 //     unresolved nexthops, and equal-or-better-metric competing routes to the
 //     same host also fail.
 //
-// RTNH_F_LINKDOWN is deliberately NOT in the fail set: carrier-only loss
-// keeps the pinned route installed (the kernel only flags it) and the
-// route still selects the pinned path, so a probe sent through it can
-// only report loss — never false-pass via the main table. Holding the
-// pin on LINKDOWN would freeze LastStatus and suppress ip-monitoring
-// failover for the whole outage (blackhole); genuine loss must instead
-// flow through the RPM successive-loss threshold into a fail transition.
+// RTNH_F_LINKDOWN is deliberately NOT in the fail set: it is a carrier-loss
+// flag, not proof that the installed pin is unusable. The kernel may skip
+// DEAD|LINKDOWN nexthops for lookups when ignore_routes_with_linkdown=1;
+// SO_BINDTODEVICE confines RPM to the configured egress, so carrier loss must
+// flow through the loss threshold instead of holding the test. Holding the
+// pin on LINKDOWN would freeze LastStatus and suppress ip-monitoring failover
+// for the outage (blackhole).
 //
 // Dumps are bounded: one RuleList per address family that has at least one
 // valid pin, and one RouteListFiltered per (family, configured table); a
@@ -523,23 +524,23 @@ func probePinRuleInstalled(rules []netlink.Rule, pin ProbePin, family int) bool 
 	return false
 }
 
-// probePinRouteInstalled reports whether the route selected by the kernel for
-// the pin's host destination has the exact shape Apply installs. It checks
-// route shape, not current carrier state: RTNH_F_LINKDOWN means the selected
-// pinned path is down, so probing it must report genuine loss rather than hold
-// the test state. Apply leaves the route metric unset, so the kernel stores
-// the family default: 0 for IPv4 and IP6_RT_PRIO_USER (1024) for IPv6. Any
-// same-prefix route with an equal or better metric but a different shape makes
-// readback ambiguous and fails closed. Higher-metric routes cannot override
-// the default-metric pin.
-//
-// probePinDefaultMetric returns that family default for the pin's family.
+// probePinDefaultMetric returns the family default for the pin's family.
 func probePinDefaultMetric(family int) int {
 	if family == unix.AF_INET6 {
 		return 1024 // IP6_RT_PRIO_USER: kernel default for user-added v6 routes
 	}
 	return 0
 }
+
+// probePinRouteInstalled reports whether the pin's host route has the exact
+// shape Apply installs. It checks route shape, not whether the kernel selects
+// it for lookup: with ignore_routes_with_linkdown=1 the kernel may skip
+// DEAD|LINKDOWN nexthops. SO_BINDTODEVICE confines RPM to the configured
+// egress, so carrier loss must advance the loss threshold instead of holding
+// the test. DEAD without LINKDOWN and UNRESOLVED remain unusable pin shapes.
+// Apply leaves the route metric unset, so the kernel stores the family default
+// (0 for IPv4, 1024 for IPv6). Higher-metric routes cannot override the pin;
+// equal-or-better competitors with another shape fail closed.
 func probePinRouteInstalled(routes []netlink.Route, w wantPin) bool {
 	wantMetric := probePinDefaultMetric(w.family)
 	matched := false
@@ -560,13 +561,11 @@ func probePinRouteInstalled(routes []netlink.Route, w wantPin) bool {
 		if r.Gw == nil || !r.Gw.Equal(w.nextHop) || r.LinkIndex != w.linkIdx {
 			return false
 		}
-		// LINKDOWN marks carrier-only loss on the installed path: the route
-		// still selects the pinned next-hop, so genuine probe loss must flow
-		// through RPM instead of holding the test. With
-		// ignore_routes_with_linkdown=1 the kernel additionally ORs in
-		// RTNH_F_DEAD for LINKDOWN nexthops, so DEAD together with
-		// LINKDOWN is the same carrier-loss shape — only DEAD without
-		// LINKDOWN (or UNRESOLVED) means an unusable pin.
+		// LINKDOWN marks carrier-only loss on the installed path. With
+		// ignore_routes_with_linkdown=1 the kernel may skip a DEAD|LINKDOWN
+		// nexthop for lookup; SO_BINDTODEVICE still confines RPM to this
+		// egress, so genuine carrier loss must flow through RPM instead of
+		// holding the test. DEAD without LINKDOWN or UNRESOLVED is unusable.
 		const unusableFlags = unix.RTNH_F_DEAD | unix.RTNH_F_UNRESOLVED
 		flags := r.Flags
 		if flags&int(unix.RTNH_F_LINKDOWN) != 0 {

@@ -2569,9 +2569,10 @@ never lock an operator out of a remote box it manages.
     in `Run`, so an early-error return (or an embedded library caller whose ctx
     cancels) that never reaches the shutdown sequence still cancels + joins both
     loops instead of leaking them.
-    Carrier-only loss is not pin drift: `RTNH_F_LINKDOWN` leaves the selected
-    route in place, so the daemon must let RPM count real probe loss toward
-    ip-monitoring failover rather than publish `ErrProbeSetup` hold.
+    Carrier-only loss is not pin drift: the kernel may skip DEAD|LINKDOWN
+    routes for lookup when `ignore_routes_with_linkdown=1`, but RPM sockets
+    remain confined to the configured egress with `SO_BINDTODEVICE`, so loss
+    must reach the successive-loss threshold instead of an `ErrProbeSetup` hold.
   - **Two MORE background loops are cancelled + joined the same way (#5523
     C179-093):** the session-aggregation flush goroutine (`applyAggregator` →
     `agg.Run`, which binds to `context.Background()` and was previously cancelled
@@ -3838,11 +3839,14 @@ never lock an operator out of a remote box it manages.
 
 - `daemon_rpm.go` — config-hash-gated RPM probe lifecycle
   (`reconcileRPM`, applyConfigLocked step 17b): probe-set restarts remain
-  hash-gated, while every unchanged-hash reconcile reads back each configured
-  pin's fwmark rule and pinned host route. A link/address notification holds a
-  drifted test immediately; the managed pin loop restores it on the next retry
-  tick and periodically checks for lost notifications (30 s fallback). Also
-  owns the §4.4 HA gating scope (`filterRPMForHAGating`).
+  hash-gated, while unchanged-hash reconciles and link/address notifications
+  verify configured fwmark rules and pinned host routes. Drift on an
+  administratively-up egress is held; an admin-down egress remains probeable
+  so bound sends feed genuine loss to RPM. With no pin installer, every pin
+  stays held even while down because no retry can back it after a later link-up.
+  The managed loop retries on the next tick (30 s fallback), resubscribes
+  closed link/address channels after backoff, then verifies all pins to resync.
+  Also owns the §4.4 HA gating scope (`filterRPMForHAGating`).
 - `daemon_ipmon.go` — `assembleFRRConfig` (the SOLE `frr.FullConfig`
   constructor, shared by the full apply path and the routes-only
   actuator) + `actuateRouteOverlay` (FRR re-render → snapshot publish

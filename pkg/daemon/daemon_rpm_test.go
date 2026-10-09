@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -165,14 +166,14 @@ func TestReconcileRPMPinFailureRetry(t *testing.T) {
 	}
 }
 
-// TestReconcileRPMNoInstallerHoldsPinnedTests: next-hop pins configured
-// but no routing manager (and no seam) — every pin must be marked
-// failed so rpm holds those tests; marks alone would otherwise send
-// marked-but-unbacked probes through the main table (Codex PR #1899
-// r1 MAJOR-2).
+// TestReconcileRPMNoInstallerHoldsPinnedTests: next-hop pins configured but
+// no routing manager to install them; with the egress admin-down, every pin
+// must still be marked failed and held. Marks alone would otherwise send
+// marked-but-unbacked probes through the main table after a later link-up
+// (Codex PR #1899 r1 MAJOR-2).
 func TestReconcileRPMNoInstallerHoldsPinnedTests(t *testing.T) {
 	d := &Daemon{rpm: rpm.New(), daemonCtx: context.Background(),
-		probePinEgressIsUp: func(string) bool { return true }}
+		probePinEgressIsUp: func(string) bool { return false }}
 	defer d.rpm.StopAll()
 
 	if !d.reconcileRPM(rpmPinnedTestConfig()) {
@@ -397,8 +398,8 @@ func TestProbePinFailuresHoldOnlyOnAdminUpEgress12088(t *testing.T) {
 		probePinRetryEvery: time.Hour,
 		probePinEgressIsUp: egressIsUp,
 	}
-	d.probePinApply = func(pins []routing.ProbePin) map[string]error {
-		return map[string]error{pins[0].TestKey: fmt.Errorf("pinned route missing")}
+	d.probePinApply = func([]routing.ProbePin) map[string]error {
+		return nil // Apply succeeds; this test isolates the verify-path filter.
 	}
 	d.probePinVerify = func(pins []routing.ProbePin) map[string]error {
 		return map[string]error{pins[0].TestKey: fmt.Errorf("pinned route missing")}
@@ -429,6 +430,95 @@ func TestProbePinFailuresHoldOnlyOnAdminUpEgress12088(t *testing.T) {
 	}
 	if got := d.rpm.PinInstallFailureCount(); got != 1 {
 		t.Fatalf("missing pin after admin-up must hold again: failures=%d", got)
+	}
+}
+
+// TestProbePinRetryLoopResubscribesAndResyncsOnClosedSubscriptions12088
+// protects the close-channel recovery path: the loop must not panic or spin,
+// must establish fresh link and address subscriptions, and must verify all
+// pins after the subscription gap.
+func TestProbePinRetryLoopResubscribesAndResyncsOnClosedSubscriptions12088(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cfg := rpmPinnedTestConfig()
+	var linkSubscriptions, addrSubscriptions, verifyCalls atomic.Int32
+	d := &Daemon{
+		rpm:                  rpm.New(),
+		daemonCtx:            ctx,
+		rpmEffective:         cfg.Services.RPM,
+		probePinRetryEvery:   time.Hour,
+		probePinResubBackoff: time.Millisecond,
+		probePinEgressIsUp:   func(string) bool { return true },
+		probePinVerify: func([]routing.ProbePin) map[string]error {
+			verifyCalls.Add(1)
+			return nil
+		},
+		probePinLinkSubscribe: func(ch chan<- netlink.LinkUpdate, _ <-chan struct{}, _ func(error)) error {
+			if linkSubscriptions.Add(1) == 1 {
+				close(ch)
+			}
+			return nil
+		},
+		probePinAddrSubscribe: func(ch chan<- netlink.AddrUpdate, _ <-chan struct{}, _ func(error)) error {
+			if addrSubscriptions.Add(1) == 1 {
+				close(ch)
+			}
+			return nil
+		},
+	}
+	defer d.rpm.StopAll()
+
+	loopDone := make(chan any, 1)
+	go func() {
+		defer func() { loopDone <- recover() }()
+		d.probePinRetryLoop(ctx)
+	}()
+
+	var completedEarly bool
+	var panicValue any
+	if !waitUntil(t, 2*time.Second, func() bool {
+		if linkSubscriptions.Load() >= 2 &&
+			addrSubscriptions.Load() >= 2 &&
+			verifyCalls.Load() >= 2 {
+			return true
+		}
+		select {
+		case panicValue = <-loopDone:
+			completedEarly = true
+			return true
+		default:
+			return false
+		}
+	}) {
+		cancel()
+		select {
+		case panicValue = <-loopDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("probe pin retry loop did not exit after cancellation")
+		}
+		t.Fatalf("closed subscriptions did not each resubscribe and resync: link=%d addr=%d verify=%d",
+			linkSubscriptions.Load(), addrSubscriptions.Load(), verifyCalls.Load())
+	}
+	if completedEarly {
+		t.Fatalf("probe pin retry loop exited before recovery (panic=%v)", panicValue)
+	}
+
+	cancel()
+	select {
+	case panicValue = <-loopDone:
+		if panicValue != nil {
+			t.Fatalf("probe pin retry loop panicked after subscription close: %v", panicValue)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("probe pin retry loop did not exit after cancellation")
+	}
+	if got := linkSubscriptions.Load(); got < 2 {
+		t.Fatalf("link subscription count = %d, want resubscription", got)
+	}
+	if got := addrSubscriptions.Load(); got < 2 {
+		t.Fatalf("address subscription count = %d, want resubscription", got)
+	}
+	if got := verifyCalls.Load(); got < 2 {
+		t.Fatalf("verify calls = %d, want a resync after each subscription is restored", got)
 	}
 }
 
