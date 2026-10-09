@@ -33,6 +33,28 @@ func TestPolicyThenNextHop_SchemaGate_12070(t *testing.T) {
 	}
 }
 
+func TestPolicyThenNextHop_ExclusionErrorNamesReason_12070(t *testing.T) {
+	base := "set policy-options policy-statement P term t1 then next-hop "
+	for _, tc := range []struct {
+		address string
+		reason  string
+	}{
+		{"127.0.0.1", "loopback"},
+		{"0.1.2.3", "IPv4 0/8"},
+		{"224.0.0.1", "multicast"},
+		{"fe80::1", "IPv6 link-local"},
+		{"0.0.0.0", "unspecified"},
+	} {
+		t.Run(tc.address, func(t *testing.T) {
+			tree := flatTreeFromSets(t, base+tc.address)
+			err := SchemaValidate(tree, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("SchemaValidate error = %v, want reason %q", err, tc.reason)
+			}
+		})
+	}
+}
+
 // #12070 RED-before: `then as-path-prepend` accepts non-ASN tokens at
 // commit-check. FRR's `set as-path prepend ASNUM...` grammar takes AS
 // numbers only; `65001 abc` renders verbatim and fails the reload. The

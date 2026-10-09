@@ -240,3 +240,123 @@ func TestPolicyThenASPathPrependQuotedOperatorCommitCheckRenders_12070(t *testin
 		t.Fatalf("committed quoted prepend did not render as two ASN operands; output:\n%s", got)
 	}
 }
+
+func TestPolicyThenFlatRunInvalidOperandsRejected_12070(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, leaf, value string
+	}{
+		{
+			name:    "unsupported next-hop",
+			command: "policy-options policy-statement P term t then accept next-hop discard",
+			leaf:    "next-hop",
+			value:   "discard",
+		},
+		{
+			name:    "malformed next-hop",
+			command: "policy-options policy-statement P term t then accept next-hop 10.0.0.300",
+			leaf:    "next-hop",
+			value:   "10.0.0.300",
+		},
+		{
+			name:    "invalid prepend operand",
+			command: "policy-options policy-statement P term t then accept as-path-prepend 65001 abc",
+			leaf:    "as-path-prepend",
+			value:   "abc",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checkError := func(err error) {
+				t.Helper()
+				if err == nil {
+					t.Fatal("commit-check accepted invalid flat-run operand")
+				}
+				for _, want := range []string{"P", "t", tc.leaf, tc.value} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("commit-check error %q does not name %q", err, want)
+					}
+				}
+			}
+
+			if _, err := configstore.CheckText("set "+tc.command, -1); err == nil {
+				t.Fatal("CheckText accepted invalid flat-run operand")
+			} else {
+				checkError(err)
+			}
+
+			store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
+			if err != nil {
+				t.Fatalf("create config store: %v", err)
+			}
+			if err := store.EnterConfigure(); err != nil {
+				t.Fatalf("EnterConfigure: %v", err)
+			}
+			if err := store.SetFromInputAs("", tc.command); err != nil {
+				t.Fatalf("SetFromInputAs(%q): %v", tc.command, err)
+			}
+			_, err = store.CommitCheck()
+			checkError(err)
+		})
+	}
+}
+
+func TestPolicyThenFlatRunValidControlsCommitAndRender_12070(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, rendered string
+		check                   func(*testing.T, *config.PolicyTerm)
+	}{
+		{
+			name:     "next-hop after accept",
+			command:  "policy-options policy-statement P term t then accept next-hop 192.0.2.1",
+			rendered: " set ip next-hop 192.0.2.1\n",
+			check: func(t *testing.T, term *config.PolicyTerm) {
+				if term.Action != "accept" || term.NextHop != "192.0.2.1" {
+					t.Fatalf("compiled term = %+v, want accept with next-hop 192.0.2.1", term)
+				}
+			},
+		},
+		{
+			name:     "prepend after accept",
+			command:  `policy-options policy-statement P term t then accept as-path-prepend "65001 65001"`,
+			rendered: " set as-path prepend 65001 65001\n",
+			check: func(t *testing.T, term *config.PolicyTerm) {
+				if term.Action != "accept" || strings.Join(term.ASPathPrepend, " ") != "65001 65001" {
+					t.Fatalf("compiled term = %+v, want accept with prepend [65001 65001]", term)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertCompiled := func(t *testing.T, compiled *config.Config) {
+				t.Helper()
+				term := compiled.PolicyOptions.PolicyStatements["P"].Terms[0]
+				tc.check(t, term)
+				got := (&Manager{frrConf: "/dev/null"}).generatePolicyOptions(&compiled.PolicyOptions)
+				if !strings.Contains(got, tc.rendered) {
+					t.Fatalf("flat-run clause did not render; output:\n%s", got)
+				}
+			}
+
+			compiled, err := configstore.CheckText("set "+tc.command, -1)
+			if err != nil {
+				t.Fatalf("CheckText rejected valid flat-run input: %v", err)
+			}
+			assertCompiled(t, compiled)
+
+			store, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
+			if err != nil {
+				t.Fatalf("create config store: %v", err)
+			}
+			if err := store.EnterConfigure(); err != nil {
+				t.Fatalf("EnterConfigure: %v", err)
+			}
+			if err := store.SetFromInputAs("", tc.command); err != nil {
+				t.Fatalf("SetFromInputAs(%q): %v", tc.command, err)
+			}
+			compiled, err = store.CommitCheck()
+			if err != nil {
+				t.Fatalf("Store.CommitCheck rejected valid flat-run input: %v", err)
+			}
+			assertCompiled(t, compiled)
+		})
+	}
+}

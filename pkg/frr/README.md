@@ -1263,20 +1263,22 @@ step. Both are required — neither sees the other's case:
   is added. (NOTE: a Junos→FRR as-path regex *syntax* translation is still
   absent — Junos regex operates on whole AS-number terms, FRR uses POSIX ERE
   over the space-separated AS string — tracked separately, not part of #4097.)
-- **The render-side sanitize belt covers route-map `set` clauses, matches, and
-  emitted prefix-list values (#4482).** #4097 wrapped the community-list /
-  as-path-list DEFINITIONS; #4482 extended `sanitizeFRRValue` to the route-map
-  `set community` / `set community additive` / `set comm-list … delete` /
-  `set as-path prepend` clauses, `match community` / `match as-path` names,
-  and `ip/ipv6 prefix-list … permit <prefix>` values. The top-level
-  `policy-options prefix-list` and inline route-filter entries now run through
-  their CIDR ParseCIDR belts first (#10823 / #2105), so malformed values are
-  omitted rather than sanitized into an FRR-invalid line. Other emitted
-  free-text slots still sanitize control chars while preserving legitimate
-  spaces. The remaining sanitize-on-one-line slots are covered by
-  `TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823`;
-  malformed prefix-list cases are covered by
-  `TestPolicyPrefixListRenderOmitsMalformedCIDRs10823`.
+- **The route-map and prefix-list render guards are fail-closed where values
+  have typed grammars (#4482, #10823, #12070).** #4482 extended
+  `sanitizeFRRValue` to the route-map `set community` / `set community
+  additive` / `set comm-list … delete` clauses, `match community` /
+  `match as-path` names, and `ip/ipv6 prefix-list … permit <prefix>` values.
+  `set as-path prepend` and `set ip/ipv6 next-hop` are no longer treated as
+  sanitize-on-one-line slots: #12070 validates their operands and omits an
+  invalid clause with a warning instead of collapsing bad input onto an
+  FRR-invalid line. The top-level `policy-options prefix-list` and inline
+  route-filter entries run through their CIDR ParseCIDR belts first (#10823 /
+  #2105), so malformed values are also omitted. Other emitted free-text slots
+  still sanitize control chars while preserving legitimate spaces.
+  `TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823`
+  covers the remaining sanitize-on-one-line slots and pins omission of the
+  malformed next-hop/prepend injection payloads; malformed prefix-list cases
+  are covered by `TestPolicyPrefixListRenderOmitsMalformedCIDRs10823`.
 - **Malformed routing-only prefix-list entries are omitted before FRR emission
   (#10823).** The #7273 strict CIDR gate is scoped to firewall-referenced
   lists, so a routing-only `policy-options prefix-list` can reach rendering
@@ -1287,22 +1289,18 @@ step. Both are required — neither sees the other's case:
   contributes no match. `TestPolicyPrefixListRenderOmitsMalformedCIDRs10823`
   covers `/33`, bad-octet, and non-IP entries through both compile paths while
   checking valid siblings still render.
-- **Three route-map slots the #4482 sweep missed are now wrapped too
-  (#4498).** The #4494 hostile review noted that `set ip/ipv6 next-hop
-  <term.NextHop>`, `set origin <term.Origin>`, and `match source-protocol
-  <proto>` still rendered their value with a bare `%s` on the tolerant-load
-  path — a residual of the same class #4482 closed (next-hop is the most
-  notable: an IP-typed slot, but a malformed leniently-loaded value could
-  still inject). All three now pass through `sanitizeFRRValue` for parity with
-  the rest of the route-map belt, so EVERY free-text route-map interpolation is
-  sanitized regardless of load path. The #4482 guard test was extended to
-  drive an injection payload through all ten #4482 slots PLUS these three, so a
-  revert of any single wrapped site is caught (the previous guard exercised
-  only 3 of the wrapped slots — an incomplete fail-on-revert). The inline
-  route-filter prefix-list slot's sanitize sits BEHIND the #2105 `net.ParseCIDR`
-  belt (a control-char prefix is skipped fail-closed before the sanitize call),
-  so its coverage is asserted as the fail-closed property, not a payload
-  collapse.
+- **The #4498 route-map sweep is now split between sanitization and semantic
+  omission guards.** The sweep found `set ip/ipv6 next-hop <term.NextHop>`,
+  `set origin <term.Origin>`, and `match source-protocol <proto>` still using
+  bare `%s` on tolerant loads. Subsequent typed guards replaced that generic
+  treatment for next-hop (#12070: validate the operand and omit invalid
+  clauses with a warning) and origin (#4919: only `igp | egp | incomplete`
+  render). `match source-protocol` remains a sanitize-on-one-line slot. The
+  #4482 regression checks its sanitized line and separately asserts that
+  injected invalid next-hop/prepend clauses are omitted; it no longer claims
+  those semantic guards are sanitize wrappers. Inline route-filter prefix
+  sanitization sits behind the #2105 `net.ParseCIDR` belt, so a control-char
+  prefix is skipped fail-closed before sanitization.
 - **A BGP-neighbor SHOW command validates its IP before it reaches vtysh
   (#4588).** The #1798/#4097/#4482 belts above cover the config-RENDER path;
   the operational SHOW path is a separate surface. `GetBGPNeighborReceivedRoutes`

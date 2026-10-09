@@ -219,7 +219,9 @@ var schemaPolicyOptions = &schemaNode{desc: "Policy options", children: map[stri
 				"community":    {desc: "Community", args: 1, multi: true, placeholder: "<community>", children: nil},
 				"as-path":      {desc: "AS path", args: 1, multi: true, placeholder: "<name>", children: nil},
 			}},
-			"then": {desc: "Action", children: map[string]*schemaNode{
+			// parsePolicyTermChildren consumes this chain through
+			// expandFlatRun; commit validation must inspect the same actions.
+			"then": {desc: "Action", packedFlatRun: true, children: map[string]*schemaNode{
 				// `then next policy` leaves this policy's remaining terms and
 				// default action, then continues at the next policy in the chain.
 				"next": {desc: "Continue with the next policy", args: 1,

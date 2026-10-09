@@ -8643,12 +8643,13 @@ the same class on the `then` side. The leaf is `multi:true`
 as-path-prepend`) so a quoted `"65001 65001"` or bracketed `[ 65001 65001 ]`
 list — the lexer preserves a quoted list as one space-containing value and
 strips brackets — retains every ASN rather than collapsing to the last-only
-value. `parsePolicyTermChildren` and `parsePolicyTermInlineKeys`
-(`compiler_routing.go`) collect every packed/child value via
-`firewallMatchValues`, then split quoted multi-ASN values before storing the
-ordered operands in `PolicyTerm.ASPathPrepend []string`. The schema gate and
-renderer apply the same split before per-ASN validation/emission, keeping
-commit-check and tolerant rendering aligned. Each operand must be canonical
+value. `parsePolicyTermChildren` reads packed and child operands through
+`firewallMatchValues`; the separate `parsePolicyTermInlineKeys` scanner
+appends each operand through `appendPolicyASPathPrependOperand`. Both paths
+normalize quoted multi-ASN values before storing ordered operands in
+`PolicyTerm.ASPathPrepend []string`. The schema gate and renderer apply the
+same split before per-ASN validation/emission, keeping commit-check and
+tolerant rendering aligned. Each operand must be canonical
 decimal in 1..4294967295 (no leading zeroes). FRR accepts ASDOT (for example,
 `1.10`), but this config leaf deliberately supports decimal notation only. The
 clause renders as FRR `set as-path prepend <asn> <asn> ...`; repetition is the

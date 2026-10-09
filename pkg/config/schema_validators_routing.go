@@ -242,34 +242,55 @@ func plausibleInterfaceName(s string) bool {
 	return hasLetter
 }
 
-// ValidPolicyThenNextHop reports whether a routing-policy `then next-hop`
-// operand is an IPv4/IPv6 literal accepted by FRR's route-map command, or one
-// of its supported keywords (`peer-address`, `self`). It excludes IPv4 0/8,
-// unspecified, loopback, multicast, and IPv6 link-local addresses; IPv4
-// link-local literals remain supported.
-func ValidPolicyThenNextHop(raw string) bool {
+// ValidPolicyThenNextHop accepts the supported routing-policy `then next-hop`
+// subset. The `self` spelling is an xpf alias that the renderer maps to FRR's
+// `peer-address`; it is not a FRR route-map keyword. The address restrictions
+// are deliberately conservative rather than an exact FRR grammar mirror:
+// IPv4 0/8, unspecified, loopback, multicast, and IPv6 link-local addresses
+// are excluded, while IPv4 link-local literals remain supported.
+func policyThenNextHopUnsupportedReason(raw string) string {
 	switch raw {
 	case "peer-address", "self":
-		return true
-	default:
-		ip := net.ParseIP(raw)
-		if ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
-			return false
-		}
-		if v4 := ip.To4(); v4 != nil {
-			return v4[0] != 0
-		}
-		return !ip.IsLinkLocalUnicast()
+		return ""
+	case "discard", "reject", "next-table":
+		return "Junos next-hop actions have no FRR route-map lowering"
 	}
+	ip := net.ParseIP(raw)
+	if ip == nil {
+		return "expected an IPv4/IPv6 address, peer-address, or self"
+	}
+	if ip.IsUnspecified() {
+		return "unspecified next-hop addresses are unsupported"
+	}
+	if ip.IsLoopback() {
+		return "loopback next-hop addresses are unsupported"
+	}
+	if ip.IsMulticast() {
+		return "multicast next-hop addresses are unsupported"
+	}
+	if v4 := ip.To4(); v4 != nil {
+		if v4[0] == 0 {
+			return "IPv4 0/8 next-hop addresses are unsupported"
+		}
+		return ""
+	}
+	if ip.IsLinkLocalUnicast() {
+		return "IPv6 link-local next-hop addresses are unsupported"
+	}
+	return ""
+}
+
+// ValidPolicyThenNextHop reports whether raw is in the supported subset.
+func ValidPolicyThenNextHop(raw string) bool {
+	return policyThenNextHopUnsupportedReason(raw) == ""
 }
 
 // ValidatePolicyThenNextHop is the commit-check validator for
-// `policy-options policy-statement ... then next-hop`. The shared predicate
-// rejects Junos-only actions, malformed addresses, IPv4 0/8, loopback,
-// unspecified, multicast, and IPv6 link-local literals.
+// `policy-options policy-statement ... then next-hop`. It reports the reason
+// for excluded address classes as well as unsupported Junos-only actions.
 func ValidatePolicyThenNextHop(raw string, _ *Config) error {
-	if !ValidPolicyThenNextHop(raw) {
-		return fmt.Errorf("unsupported next-hop %q (expected an IPv4/IPv6 address, peer-address, or self; discard, reject, and next-table have no FRR route-map lowering)", raw)
+	if reason := policyThenNextHopUnsupportedReason(raw); reason != "" {
+		return fmt.Errorf("unsupported next-hop %q: %s", raw, reason)
 	}
 	return nil
 }
