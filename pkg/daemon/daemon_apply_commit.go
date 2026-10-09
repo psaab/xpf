@@ -373,6 +373,15 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	// below reads it alongside the old-vs-new full-admit comparison.
 	d.clearKeptSuspicious10752()
 	respCfg, applyErr := d.applyConfigLockedForCommit(d.applyCancelCtx(), compiled)
+	if applyErr != nil && !d.policyInvalidationPublishLanded {
+		if debt := d.policyInvalidationDebt; debt != nil &&
+			debt.newCfg == compiled && debt.capture != nil {
+			// An unpublished attempt still must surface its incomplete capture
+			// once; the debt survives for a later complete scan, but settled
+			// retries must not replay the error.
+			applyErr = errors.Join(applyErr, debt.capture.enumerateErr())
+		}
+	}
 	if applyErrSkipsPeerSync(applyErr) {
 		// Fatal (required-protocol-gate: dataplane disarmed / fail-closed) or a
 		// daemon-stop context abort (#2926 boundary): report failure and do NOT

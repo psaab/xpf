@@ -1150,6 +1150,12 @@ type policyListRead12072DP struct {
 	readErrOnce            bool
 }
 
+func (d *policyListRead12072DP) PolicyReadConfig() *config.Config {
+	if d.outcomeUnknown {
+		return nil
+	}
+	return d.appliedConfig
+}
 func (d *policyListRead12072DP) ListSessionsByPolicy(
 	request dpuserspace.SessionPolicyListRequest,
 ) (dpuserspace.ControlResponse, error) {
@@ -1342,30 +1348,29 @@ func TestPrepublishCaptureFailsClosedOnAppliedSnapshotSkew12323(t *testing.T) {
 			d := &Daemon{}
 			d.setDataplane(dp)
 			d.armPolicyInvalidationPlan(c0, c1)
-			d.capturePolicyInvalidationLocked(c1)
+			err := d.captureAndStagePolicyRenameAncestry(c1)
+			if err == nil || !strings.Contains(err.Error(), "authority refusal") {
+				t.Fatalf("skewed authority capture = %v, want publication-blocking refusal", err)
+			}
 			capture := d.policyInvalidationCapture
-			if capture == nil {
-				t.Fatal("skewed plan did not produce a fail-closed capture")
+			if capture == nil || capture.authorityErr == nil || capture.readErr != nil {
+				t.Fatalf("authority refusal was conflated with enumeration failure: %+v", capture)
 			}
-			if capture.readErr == nil {
-				t.Fatalf("C0 target IDs were read against the helper's C1 snapshot: captured=%+v", capture.deleted.policy)
-			}
-			if !capture.deleted.enumFailed || !capture.modified.enumFailed || !capture.deflt.enumFailed {
-				t.Fatalf("snapshot skew must mark every capture class incomplete: %+v", capture)
+			if capture.deleted.enumFailed || capture.modified.enumFailed || capture.deflt.enumFailed {
+				t.Fatalf("authority refusal must not mark a scan incomplete: %+v", capture)
 			}
 			if !capture.deleted.empty() || !capture.modified.empty() || !capture.deflt.empty() ||
 				len(capture.renamed) != 0 {
-				t.Fatalf("snapshot skew must capture no sessions: %+v", capture)
+				t.Fatalf("authority refusal must capture no sessions: %+v", capture)
 			}
-			if tc.outcomeUnknown && (dp.request.Mode != "prepublish" || dp.request.PolicyIDs == nil ||
-				dp.request.ExpectedConfig != c0) {
-				t.Fatalf("lost-ACK capture did not attempt the C0-authorized helper LIST: %+v", dp.request)
+			if debt := d.policyInvalidationDebt; debt == nil || debt.authorityRefusal == nil || debt.scanFailure != nil {
+				t.Fatalf("authority refusal state was not separated from scan failure: %+v", debt)
 			}
-			if !tc.outcomeUnknown && dp.readCalls != 0 {
-				t.Fatalf("skewed capture issued %d helper READs", dp.readCalls)
+			if d.policyInvalidationPlan == nil {
+				t.Fatal("refused publication lost its plan for a later known-authority retry")
 			}
-			if err := d.dischargePolicyInvalidationDebtLocked(c0, c1); err == nil {
-				t.Fatal("refused capture must surface partial invalidation after publication")
+			if dp.readCalls != 0 {
+				t.Fatalf("authority-skewed capture issued %d helper READs", dp.readCalls)
 			}
 			if len(dp.deletedPolicy) != 0 || len(dp.rows) != 2 {
 				t.Fatalf("refused capture deleted a live session: %+v", dp.deletedPolicy)

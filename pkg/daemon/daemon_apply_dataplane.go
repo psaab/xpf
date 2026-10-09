@@ -165,7 +165,9 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// conntrack refresh does not update that session metadata. Capturing before
 	// publication also excludes sessions admitted under the new snapshot. See
 	// daemon_policy_invalidate_capture.go.
-	d.captureAndStagePolicyRenameAncestry(cfg)
+	if err := d.captureAndStagePolicyRenameAncestry(cfg); err != nil {
+		return commitOverlay, networkdErr, nil, nil, err
+	}
 	if rt := d.dataplane(); rt != nil {
 		if adapter, ok := rt.(interface {
 			Manager() *dpuserspace.Manager
@@ -1304,7 +1306,10 @@ func (d *Daemon) reapplyAfterDeferredMAC(cfg *config.Config) {
 			}
 		}
 		if plan := d.policyInvalidationPlan; plan != nil && plan.newCfg == cfg {
-			d.captureAndStagePolicyRenameAncestry(cfg)
+			if err := d.captureAndStagePolicyRenameAncestry(cfg); err != nil {
+				slog.Warn("deferred-MAC replay held until policy READ authority is known", "err", err)
+				return
+			}
 		}
 	}
 	res, err := rt.ApplyConfig(context.Background(), cfg)

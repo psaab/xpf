@@ -143,7 +143,7 @@ func (d *Daemon) clearSessionsForDeletedPolicies(oldCfg, newCfg *config.Config) 
 	// active policy snapshot. The captured rows are deleted after publish; see
 	// daemon_policy_invalidate_capture.go.
 	if c := d.policyInvalidationCapture; c != nil {
-		return d.deleteInvalidatedSessions(c.deleted, dataplane.DeleteReasonPolicyDeleted, "deleted")
+		return d.deleteInvalidatedSessionsBucket(&c.deleted, dataplane.DeleteReasonPolicyDeleted, "deleted")
 	}
 	return d.clearSessionsForPolicyIDs(
 		deletedPolicyRuntimeIDs(oldCfg, newCfg),
@@ -189,7 +189,7 @@ func (d *Daemon) clearSessionsForModifiedPolicies(oldCfg, newCfg *config.Config)
 	// be inherited by a different policy, and the #3395 refresh re-stamps this
 	// policy's own rows to its NEW id — so it consumes the same capture.
 	if c := d.policyInvalidationCapture; c != nil {
-		return d.deleteInvalidatedSessions(c.modified, dataplane.DeleteReasonPolicyModified, "modified (policy-rematch)")
+		return d.deleteInvalidatedSessionsBucket(&c.modified, dataplane.DeleteReasonPolicyModified, "modified (policy-rematch)")
 	}
 	now := time.Now()
 	oldSched := d.policySchedulerActiveStateForApplyLocked(oldCfg, now)
@@ -263,7 +263,7 @@ func (d *Daemon) clearSessionsForDefaultPolicyChange(oldCfg, newCfg *config.Conf
 	// exactly once, at one instant, on the same side of the publication
 	// boundary. A per-class read would put them on different sides of it.
 	if c := d.policyInvalidationCapture; c != nil {
-		return d.deleteInvalidatedSessions(c.deflt, dataplane.DeleteReasonDefaultPolicyChanged, "default-policy changed")
+		return d.deleteInvalidatedSessionsBucket(&c.deflt, dataplane.DeleteReasonDefaultPolicyChanged, "default-policy changed")
 	}
 	return d.clearSessionsForPolicyIDs(
 		defaultPolicyChangeRuntimeIDs(oldCfg, newCfg),
@@ -574,7 +574,11 @@ func (d *Daemon) clearSessionsForPolicyIDs(ids map[uint32]struct{}, reason datap
 //
 // Caller must hold d.applySem.
 func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.DeleteReason, what string) error {
-	if c.empty() {
+	return d.deleteInvalidatedSessionsBucket(&c, reason, what)
+}
+
+func (d *Daemon) deleteInvalidatedSessionsBucket(c *capturedSessions, reason dataplane.DeleteReason, what string) error {
+	if c == nil || c.empty() {
 		return nil
 	}
 	rt := d.dataplane()
@@ -591,6 +595,7 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 		DeletePolicySessions([]dpuserspace.SessionPolicyMatch) (dpuserspace.PolicyDeleteResult, error)
 	}); ok && len(c.policy) > 0 {
 		result, err := invalidator.DeletePolicySessions(c.policy)
+		matched := len(c.policy)
 		var errs []error
 		if err != nil {
 			errs = append(errs, fmt.Errorf(
@@ -632,11 +637,12 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 			slog.Info("cleared sessions of changed policies at commit",
 				"change", what,
 				"policies", c.targets,
-				"matched", len(c.policy),
+				"matched", matched,
 				"cleared", result.Applied,
 				"stale", result.Stale,
 				"ha_sync", d.cluster != nil && d.cluster.IsLocalPrimaryAny())
 		}
+		pruneCapturedPolicyRows(c, result, err)
 		return errors.Join(errs...)
 	}
 
@@ -668,6 +674,7 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 				ss.QueueDeleteV4(key, false)
 			}
 		}
+		pruneCapturedV4(c, exact)
 	}
 
 	v6Cleared := 0
@@ -693,6 +700,7 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 				ss.QueueDeleteV6(key, false)
 			}
 		}
+		pruneCapturedV6(c, exact)
 	}
 
 	// One-time state transition, not a per-session/per-tick event — slog.Info is
@@ -709,6 +717,97 @@ func (d *Daemon) deleteInvalidatedSessions(c capturedSessions, reason dataplane.
 			"ha_sync", syncPeer)
 	}
 	return errors.Join(errs...)
+}
+
+func pruneCapturedPolicyRows(c *capturedSessions, result dpuserspace.PolicyDeleteResult, err error) {
+	if err == nil {
+		c.policy = nil
+		c.v4 = nil
+		c.v6 = nil
+		return
+	}
+	if len(c.policy) == 0 || (result.SettledPrefix == 0 && len(result.SettledBeyondPrefix) == 0) {
+		return
+	}
+	settledBeyond := make(map[int]struct{}, len(result.SettledBeyondPrefix))
+	for _, index := range result.SettledBeyondPrefix {
+		settledBeyond[index] = struct{}{}
+	}
+	isSettled := func(index int) bool {
+		if index < result.SettledPrefix {
+			return true
+		}
+		_, ok := settledBeyond[index]
+		return ok
+	}
+	keepV4 := make(map[dataplane.SessionKey]struct{}, len(c.policy))
+	keepV6 := make(map[dataplane.SessionKeyV6]struct{}, len(c.policy))
+	policy := c.policy[:0]
+	for i, match := range c.policy {
+		if isSettled(i) {
+			continue
+		}
+		policy = append(policy, match)
+		entry4, entry6, convErr := policyMatchEntries(match)
+		if convErr != nil {
+			continue
+		}
+		if entry4 != nil {
+			keepV4[entry4.Key] = struct{}{}
+		}
+		if entry6 != nil {
+			keepV6[entry6.Key] = struct{}{}
+		}
+	}
+	c.policy = policy
+	v4 := c.v4[:0]
+	for _, entry := range c.v4 {
+		if _, ok := keepV4[entry.Key]; ok {
+			v4 = append(v4, entry)
+		}
+	}
+	c.v4 = v4
+	v6 := c.v6[:0]
+	for _, entry := range c.v6 {
+		if _, ok := keepV6[entry.Key]; ok {
+			v6 = append(v6, entry)
+		}
+	}
+	c.v6 = v6
+}
+
+func pruneCapturedV4(c *capturedSessions, removed []dataplane.SessionKey) {
+	if len(removed) == 0 || len(c.v4) == 0 {
+		return
+	}
+	set := make(map[dataplane.SessionKey]struct{}, len(removed))
+	for _, key := range removed {
+		set[key] = struct{}{}
+	}
+	remaining := c.v4[:0]
+	for _, entry := range c.v4 {
+		if _, ok := set[entry.Key]; !ok {
+			remaining = append(remaining, entry)
+		}
+	}
+	c.v4 = remaining
+}
+
+func pruneCapturedV6(c *capturedSessions, removed []dataplane.SessionKeyV6) {
+	if len(removed) == 0 || len(c.v6) == 0 {
+		return
+	}
+	set := make(map[dataplane.SessionKeyV6]struct{}, len(removed))
+	for _, key := range removed {
+		set[key] = struct{}{}
+	}
+	remaining := c.v6[:0]
+	for _, entry := range c.v6 {
+		if _, ok := set[entry.Key]; !ok {
+			remaining = append(remaining, entry)
+		}
+	}
+	c.v6 = remaining
 }
 
 // changedPolicyRuntimeIDs returns the OLD numeric runtime IDs of policies that

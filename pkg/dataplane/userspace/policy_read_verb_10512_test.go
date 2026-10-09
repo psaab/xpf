@@ -2,6 +2,7 @@ package userspace
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -184,6 +185,15 @@ func TestManagerReadRejectsLostSnapshotOutcome12072(t *testing.T) {
 	if err == nil {
 		t.Fatal("prepublish READ with unknown apply outcome must fail closed")
 	}
+	if !errors.Is(err, ErrPolicyReadAuthority) {
+		t.Fatalf("prepublish refusal error = %v, want ErrPolicyReadAuthority", err)
+	}
+	if got := m.PolicyReadConfig(); got != nil {
+		t.Fatalf("PolicyReadConfig under unknown outcome = %p, want nil", got)
+	}
+	if got := m.AppliedConfig(); got != oldCfg {
+		t.Fatalf("AppliedConfig under unknown outcome = %p, want preserved snapshot %p", got, oldCfg)
+	}
 	if len(resp.SessionPolicyMatches) != 0 {
 		t.Fatalf("refused prepublish READ returned %d matches, want none", len(resp.SessionPolicyMatches))
 	}
@@ -210,11 +220,58 @@ func TestManagerReadRejectsMismatchedExpectedConfig12072(t *testing.T) {
 	if err == nil {
 		t.Fatal("prepublish READ with mismatched applied config must fail closed")
 	}
+	if !errors.Is(err, ErrPolicyReadAuthority) {
+		t.Fatalf("prepublish refusal error = %v, want ErrPolicyReadAuthority", err)
+	}
 	if len(resp.SessionPolicyMatches) != 0 {
 		t.Fatalf("refused prepublish READ returned %d matches, want none", len(resp.SessionPolicyMatches))
 	}
 	if got := len(fake.requests()); got != 0 {
 		t.Fatalf("helper received %d LIST requests after config mismatch, want none", got)
+	}
+}
+
+func TestManagerReadRejectsLegacyListWithUnknownAuthority12072(t *testing.T) {
+	m, controlSock := newReadOnlyManager10512(t)
+	fake := startScriptedReadFake10512(t, controlSock, []ControlResponse{{
+		OK: true, SessionPolicyMatches: []SessionPolicyMatch{readMatch10512(1, 100007, 0xA1)},
+		SessionPolicyComplete: true,
+	}})
+	m.mu.Lock()
+	m.applySnapshotOutcomeUnknown = true
+	m.mu.Unlock()
+	beforeSecs := uint64(0)
+	resp, err := m.ListSessionsByPolicy(SessionPolicyListRequest{
+		PolicyIDs: []uint32{1}, Mode: "legacy", BeforeSecs: &beforeSecs,
+	})
+	if !errors.Is(err, ErrPolicyReadAuthority) {
+		t.Fatalf("legacy LIST error = %v, want ErrPolicyReadAuthority", err)
+	}
+	if len(resp.SessionPolicyMatches) != 0 {
+		t.Fatalf("refused legacy LIST returned %d matches, want none", len(resp.SessionPolicyMatches))
+	}
+	if got := len(fake.requests()); got != 0 {
+		t.Fatalf("helper received %d legacy LIST requests under unknown authority, want none", got)
+	}
+}
+
+func TestManagerPolicyReadConfigReturnsKnownAppliedSnapshot12072(t *testing.T) {
+	m := New()
+	want := &config.Config{}
+	m.mu.Lock()
+	m.appliedSnapshot.Config = want
+	m.mu.Unlock()
+	if got := m.PolicyReadConfig(); got != want {
+		t.Fatalf("PolicyReadConfig = %p, want applied config %p", got, want)
+	}
+	m.mu.Lock()
+	m.applySnapshotOutcomeUnknown = true
+	m.mu.Unlock()
+	if got := m.PolicyReadConfig(); got != nil {
+		t.Fatalf("PolicyReadConfig with unknown outcome = %p, want nil", got)
+	}
+	if got := m.AppliedConfig(); got != want {
+		t.Fatalf("AppliedConfig changed semantics under unknown outcome: got %p, want %p", got, want)
 	}
 }
 

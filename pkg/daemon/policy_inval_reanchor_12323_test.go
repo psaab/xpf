@@ -29,7 +29,7 @@ func (d *policyListApply12072DP) ApplyConfig(_ context.Context, cfg *config.Conf
 	return &dataplane.ApplyResult{Generation: d.generation}, nil
 }
 
-func TestPolicyInvalidationReanchorRetainsUnresolvedReadDebt12323(t *testing.T) {
+func TestPolicyInvalidationReanchorRetainsPublishedScanFailure12323(t *testing.T) {
 	c0 := twoPolicyConfig([]string{"p-first", "p-web", "p-ssh"}, nil)
 	c1 := twoPolicyConfig([]string{"p-first", "p-ssh"}, nil)
 	c2 := twoPolicyConfig([]string{"p-first"}, nil)
@@ -106,8 +106,8 @@ func TestPolicyInvalidationReanchorRetainsUnresolvedReadDebt12323(t *testing.T) 
 		t.Fatalf("fresh C2 plan retained stale namespace: %+v", d.policyInvalidationPlan)
 	}
 	d.capturePolicyInvalidationLocked(c2)
-	if capture := d.policyInvalidationCapture; capture == nil || !errors.Is(capture.readErr, readErr) {
-		t.Fatalf("fresh C1→C2 capture must retain the prior C0→C1 scan gap: %+v", capture)
+	if capture := d.policyInvalidationCapture; capture == nil || capture.readErr != nil {
+		t.Fatalf("complete C1→C2 capture retained the superseded C0→C1 scan gap: %+v", capture)
 	}
 	if dp.request.ExpectedConfig != c1 {
 		t.Fatalf("re-anchored helper LIST expected config = %p, want C1 %p", dp.request.ExpectedConfig, c1)
@@ -126,8 +126,8 @@ func TestPolicyInvalidationReanchorRetainsUnresolvedReadDebt12323(t *testing.T) 
 		t.Fatalf("same-pair C2 retry changed its applied namespace: %+v", d.policyInvalidationPlan)
 	}
 	d.capturePolicyInvalidationLocked(c2)
-	if capture := d.policyInvalidationCapture; capture == nil || !errors.Is(capture.readErr, readErr) {
-		t.Fatalf("successful C1→C2 retry cleared the older C0→C1 scan gap: %+v", capture)
+	if capture := d.policyInvalidationCapture; capture == nil || capture.readErr != nil {
+		t.Fatalf("complete C1→C2 retry capture retained the superseded C0→C1 scan gap: %+v", capture)
 	}
 	result, err = dp.ApplyConfig(context.Background(), c2)
 	if err != nil {
@@ -135,19 +135,18 @@ func TestPolicyInvalidationReanchorRetainsUnresolvedReadDebt12323(t *testing.T) 
 	}
 	d.notePolicyInvalidationPublish(c2, result.Generation)
 	recordAppliedDigest()
-	if err := d.dischargePolicyInvalidationDebtLocked(c1, c2); !errors.Is(err, readErr) {
-		t.Fatalf("C2 discharge error = %v, want unresolved C0→C1 READ failure", err)
+	if err := d.dischargePolicyInvalidationDebtLocked(c1, c2); err != nil {
+		t.Fatalf("C2 debt discharge repeated the originating scan error: %v", err)
 	}
-	if debt := d.policyInvalidationDebt; debt == nil || debt.oldCfg != c1 ||
-		debt.capture == nil || !errors.Is(debt.capture.readErr, readErr) ||
-		debt.scanFailure == nil || debt.scanFailure.oldCfg != c0 || debt.scanFailure.newCfg != c1 {
-		t.Fatalf("C2 debt did not retain the unresolved earlier scan origin: %+v", debt)
+	if debt := d.policyInvalidationDebt; debt == nil || debt.scanFailure == nil ||
+		debt.scanFailure.oldCfg != c0 || debt.scanFailure.newCfg != c1 {
+		t.Fatalf("complete C1→C2 scan incorrectly certified the earlier C0→C1 gap: %+v", debt)
 	}
 	if len(dp.deletedPolicy) != 1 || dp.deletedPolicy[0].ExpectedRTFlowSessionID != sshSessionID {
 		t.Fatalf("C2 deleted rows = %+v, want only independent p-ssh session %d", dp.deletedPolicy, sshSessionID)
 	}
 	if d.store.ActiveApplied() {
-		t.Fatal("fresh C1→C2 retry erased the unresolved C0→C1 scan and marked the active config applied")
+		t.Fatal("the unresolved C0→C1 scan gap was marked ActiveApplied")
 	}
 	if len(dp.rows) != 1 || dp.rows[0].ExpectedRTFlowSessionID != webSessionID {
 		t.Fatalf("remaining helper rows = %+v, want unresolved p-web session %d", dp.rows, webSessionID)
