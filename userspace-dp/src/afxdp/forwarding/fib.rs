@@ -433,12 +433,12 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_v4(
 
 #[inline]
 fn local_v4_owned_by_table(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> bool {
-    (state.local_v4.contains(&ip)
+    state.local_v4.contains(&ip)
         && (state.local_nat_any_table_v4.contains(&ip)
             || state
                 .local_tables_v4
                 .get(&ip)
-                .is_some_and(|tables| tables.contains(table))))
+                .is_some_and(|tables| tables.contains(table)))
 }
 
 #[inline]
@@ -753,12 +753,12 @@ pub(in crate::afxdp) fn lookup_forwarding_resolution_v6(
 
 #[inline]
 fn local_v6_owned_by_table(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> bool {
-    (state.local_v6.contains(&ip)
+    state.local_v6.contains(&ip)
         && (state.local_nat_any_table_v6.contains(&ip)
             || state
                 .local_tables_v6
                 .get(&ip)
-                .is_some_and(|tables| tables.contains(table))))
+                .is_some_and(|tables| tables.contains(table)))
 }
 
 #[inline]

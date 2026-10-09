@@ -10658,3 +10658,113 @@ fn pbr_stamped_split_rg_reverse_prewarm_uses_native_table_12086() {
         "activation of RG 2 must enqueue its reverse companion for prewarm",
     );
 }
+
+/// #12086 R2-N1a: a resolved native table, not the base default table,
+/// owns the reverse reply path. Reverting this lookup to `None` must lose
+/// the reply RG filing when the two tables resolve through different RGs.
+#[test]
+fn reverse_prewarm_uses_native_table_instead_of_default_12086() {
+    let mut coordinator = Coordinator::new();
+    let mut forwarding = test_forwarding_state_split_rgs();
+    let mut default_route = forwarding.connected_v4[0].clone();
+    default_route.ifindex = 12;
+    default_route.table = "inet.0".to_string();
+    let mut native_route = forwarding.connected_v4[0].clone();
+    native_route.ifindex = 6;
+    native_route.table = "red.inet.0".to_string();
+    forwarding.connected_v4 = vec![default_route, native_route];
+    let (domain, check) = crate::session::install_table_identity("red");
+    forwarding.install_tables.insert(
+        domain,
+        crate::afxdp::types::InstallTables {
+            v4: Some("red.inet.0".to_string()),
+            v6: None,
+            h2: check,
+        },
+    );
+    coordinator.set_forwarding_for_test(forwarding);
+
+    let mut key = test_key();
+    key.routing_domain = domain;
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+    };
+    assert!(matches!(
+        crate::afxdp::forwarding::native_route_table_for_flow_target(
+            &coordinator.forwarding,
+            key.routing_domain,
+            entry.metadata.ingress_ifindex as i32,
+            entry.metadata.ingress_vlan_id,
+            None,
+            key.src_ip,
+        ),
+        crate::afxdp::forwarding::NativeRouteTable::Table { table, .. }
+            if table == "red.inet.0"
+    ));
+    assert_eq!(
+        coordinator.upsert_synced_session(entry.clone()),
+        SyncedImportOutcome::Applied
+    );
+    assert_eq!(
+        filed_under_7209(&coordinator, &entry.key),
+        vec![1, 2],
+        "red.inet.0 resolves the reply via RG 2; reverting to the base \
+         default table resolves it via RG 1 and drops the distinct filing",
+    );
+}
+
+/// #12086 R2-N1b: an unresolvable native domain is still a best-effort
+/// prewarm candidate in the base default table. Skipping the reply RG on
+/// this branch must leave only the forward entry's RG in the index.
+#[test]
+fn reverse_prewarm_unresolvable_domain_keeps_default_reply_rg_12086() {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
+
+    let mut key = test_key();
+    key.routing_domain = 0x00d0_1208;
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+    };
+    assert!(matches!(
+        crate::afxdp::forwarding::native_route_table_for_flow_target(
+            &coordinator.forwarding,
+            key.routing_domain,
+            entry.metadata.ingress_ifindex as i32,
+            entry.metadata.ingress_vlan_id,
+            None,
+            key.src_ip,
+        ),
+        crate::afxdp::forwarding::NativeRouteTable::Unresolvable { .. }
+    ));
+    assert_eq!(
+        coordinator.upsert_synced_session(entry.clone()),
+        SyncedImportOutcome::Applied
+    );
+    assert_eq!(
+        filed_under_7209(&coordinator, &entry.key),
+        vec![1, 2],
+        "the unresolvable native domain must keep its default-table \
+         best-effort reply RG 2 filing rather than skip it",
+    );
+}
