@@ -22,7 +22,6 @@ type bgpSAFIWarning11815 struct {
 // Strict compilation rejects unsupported SAFIs. Lenient wording is finalized
 // after sibling and inherited activation is merged; unsupported SAFIs stay
 // inert without discarding a supported unicast activation (#11815).
-
 func applyBGPFamilySAFI11815(famNode *Node, afi, scope string, opts compileOpts, warnings *[]string, warningRecords *[]bgpSAFIWarning11815) (unicast, unsupported bool, err error) {
 	if famNode == nil {
 		return true, false, nil

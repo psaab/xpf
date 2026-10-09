@@ -459,6 +459,22 @@ func TestBGPFamilySAFI12112LenientInet6FinalizationCells(t *testing.T) {
 			wantActive: false,
 		},
 		{
+			name: "W1 neighbor inet6 warning uses inet6 activation",
+			tree: hierTree(t, `protocols {
+    bgp {
+        local-as 65001;
+        group external {
+            peer-as 65002;
+            family inet unicast;
+            neighbor 192.0.2.1 {
+                family inet6 labeled-unicast;
+            }
+        }
+    }
+}`),
+			wantInet: true,
+		},
+		{
 			name: "inherited inet6 activation survives neighbor SAFI",
 			tree: hierTree(t, `protocols {
     bgp {
@@ -532,8 +548,8 @@ func TestBGPFamilySAFI12112StrictSiblingAndInheritedShapesReject(t *testing.T) {
         local-as 65001;
         group external {
             peer-as 65002;
+            family inet labeled-unicast;
             family inet unicast;
-            family inet6 labeled-unicast;
             neighbor 2001:db8::1;
         }
     }
@@ -564,5 +580,75 @@ func TestBGPFamilySAFI12112StrictSiblingAndInheritedShapesReject(t *testing.T) {
 				t.Fatalf("strict SAFI diagnostic = %v, want named rejection", err)
 			}
 		})
+	}
+}
+
+func TestBGPFamilySAFI12112LenientGroupWarningsStayInTheirGroup(t *testing.T) {
+	tree := hierTree(t, `protocols {
+    bgp {
+        local-as 65001;
+        group A {
+            peer-as 65002;
+            family inet labeled-unicast;
+            neighbor 192.0.2.1;
+        }
+        group B {
+            peer-as 65003;
+            family inet unicast;
+            neighbor 192.0.2.2;
+        }
+    }
+}`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	if cfg.Protocols.BGP == nil || len(cfg.Protocols.BGP.Neighbors) != 2 {
+		t.Fatalf("compiled BGP neighbors = %+v, want both groups", cfg.Protocols.BGP)
+	}
+	neighbors := make(map[string]*BGPNeighbor, len(cfg.Protocols.BGP.Neighbors))
+	for _, neighbor := range cfg.Protocols.BGP.Neighbors {
+		neighbors[neighbor.Address] = neighbor
+	}
+	if neighbors["192.0.2.1"] == nil || neighbors["192.0.2.1"].FamilyInet {
+		t.Fatalf("group A neighbor activation = %+v, want inet inactive", neighbors["192.0.2.1"])
+	}
+	if neighbors["192.0.2.2"] == nil || !neighbors["192.0.2.2"].FamilyInet {
+		t.Fatalf("group B neighbor activation = %+v, want inet active", neighbors["192.0.2.2"])
+	}
+	warnings := bgpSAFIWarnings11815(cfg)
+	if len(warnings) != 1 ||
+		!strings.Contains(warnings[0], `BGP group "A" family inet:`) ||
+		!strings.Contains(warnings[0], "this family is not activated") ||
+		strings.Contains(warnings[0], "unicast remains activated") {
+		t.Fatalf("group A SAFI warning = %v, want its own inactive activation", warnings)
+	}
+}
+
+func TestBGPFamilySAFI12112DeduplicatesUnsupportedSAFI(t *testing.T) {
+	tree := hierTree(t, `protocols {
+    bgp {
+        local-as 65001;
+        group external {
+            peer-as 65002;
+            family inet {
+                labeled-unicast;
+                labeled-unicast;
+            }
+            neighbor 192.0.2.1;
+        }
+    }
+}`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	warnings := bgpSAFIWarnings11815(cfg)
+	if len(warnings) != 1 || strings.Count(warnings[0], "labeled-unicast") != 1 {
+		t.Fatalf("duplicate SAFI warnings = %v, want one name in one warning", warnings)
+	}
+	_, err = CompileConfig(tree)
+	if err == nil || strings.Count(err.Error(), "labeled-unicast") != 1 {
+		t.Fatalf("strict duplicate SAFI error = %v, want one name", err)
 	}
 }
