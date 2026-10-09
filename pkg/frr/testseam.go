@@ -44,6 +44,9 @@ func (r *RecordingExecutor) VtyshLoad(_ context.Context, conf string) ([]byte, e
 func (r *RecordingExecutor) VtyshLoadDaemon(context.Context, string, string) ([]byte, error) {
 	return nil, nil
 }
+func (r *RecordingExecutor) VtyshDaemon(context.Context, string, string) ([]byte, error) {
+	return nil, nil
+}
 
 func (r *RecordingExecutor) VtyshStream(context.Context, string) (io.ReadCloser, func() error, error) {
 	// The daemon-layer test does not exercise streaming reads; return an empty

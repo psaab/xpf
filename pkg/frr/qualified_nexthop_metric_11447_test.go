@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,12 @@ func compileQNHMetricConfig11447(t *testing.T, commands ...string) *config.Confi
 		t.Fatalf("CompileConfig: %v", err)
 	}
 	return compiled
+}
+
+func qnhMetricShowOutput11447(sequence, metric int) []byte {
+	return []byte("permit, sequence " + strconv.Itoa(sequence) +
+		" Invoked 0 (0 milliseconds total)\n Set clauses:\n  metric " +
+		strconv.Itoa(metric) + "\n")
 }
 
 func qnhMetricRender11447(t *testing.T, commands ...string) string {
@@ -312,6 +319,15 @@ func TestQNHMetricManagerFallbackRetryAndClear11447(t *testing.T) {
 			}
 			return nil
 		},
+		daemonCommandResponseSeq: map[string][]daemonCommandResult{
+			"ripd": {
+				{},
+				{response: qnhMetricShowOutput11447(10, 10)},
+				{response: qnhMetricShowOutput11447(10, 10)},
+				{},
+			},
+		},
+		daemonCommandCallCount: make(map[string]int),
 	}
 	m := New()
 	m.frrConf = confPath
@@ -322,24 +338,30 @@ func TestQNHMetricManagerFallbackRetryAndClear11447(t *testing.T) {
 	if err := m.ApplyFull(fc); !errors.Is(err, ErrFRRReloadDegraded) {
 		t.Fatalf("fallback apply error = %v, want ErrFRRReloadDegraded", err)
 	}
-	if got, want := strings.Join(fake.callOrder, ","), "daemon-load:ospfd,daemon-load:ospf6d,daemon-load:ripd,daemon-load:isisd,daemon-load:bgpd,reload,global-load,daemon-load:ospfd,daemon-load:ripd"; got != want {
-		t.Fatalf("fallback operation order = %q, want %q", got, want)
+	wantApplyOrder := "daemon-load:ospfd,daemon-load:ospf6d,daemon-load:isisd,daemon-load:bgpd,global-load,reload,global-load,daemon-load:ospfd,global-load,daemon-load:ospf6d,daemon-load:isisd,daemon-load:bgpd"
+	if got := strings.Join(fake.callOrder, ","); got != wantApplyOrder {
+		t.Fatalf("fallback operation order = %q, want %q", got, wantApplyOrder)
 	}
-	if len(fake.daemonLoads) != 7 {
-		t.Fatalf("targeted config loads = %d, want five clears and two overlays", len(fake.daemonLoads))
+	if len(fake.daemonLoads) != 8 {
+		t.Fatalf("targeted config loads = %d, want four clears, ospfd overlay, and three post-overlay capability clears", len(fake.daemonLoads))
 	}
-	for _, call := range fake.daemonLoads[:5] {
+	for _, call := range fake.daemonLoads[:4] {
 		if !strings.Contains(call.config, "route-map "+qnhMap+" permit 10\n") ||
 			!strings.Contains(call.config, "no set metric\n") ||
 			strings.Contains(call.config, " set metric ") {
 			t.Errorf("%s clear was not restricted to the old QNH sequence:\n%s", call.daemon, call.config)
 		}
 	}
-	for i, daemon := range []string{"ospfd", "ripd"} {
-		call := fake.daemonLoads[5+i]
-		if call.daemon != daemon || !strings.Contains(call.config, "set metric 10\n") {
-			t.Errorf("targeted overlay %d = %+v, want %s with the QNH metric", i, call, daemon)
+	if call := fake.daemonLoads[4]; call.daemon != "ospfd" || !strings.Contains(call.config, "set metric 10\n") {
+		t.Errorf("ospfd overlay = %+v, want daemon-scoped metric 10", call)
+	}
+	for _, call := range fake.daemonLoads[5:] {
+		if !strings.Contains(call.config, "no set metric\n") || strings.Contains(call.config, "\n set metric ") {
+			t.Errorf("%s did not receive only the post-overlay metric cleanup:\n%s", call.daemon, call.config)
 		}
+	}
+	if got := fake.globalLoads[2]; !strings.Contains(got, "set metric 10\n") {
+		t.Fatalf("integrated ripd overlay = %q, want metric 10", got)
 	}
 	installedConfig, err := os.ReadFile(confPath)
 	if err != nil {
@@ -353,16 +375,17 @@ func TestQNHMetricManagerFallbackRetryAndClear11447(t *testing.T) {
 	if stop, notFound := m.retryReloadOnce(context.Background()); !stop || notFound {
 		t.Fatalf("retry result = (%v, %v), want (converged, found)", stop, notFound)
 	}
-	if got, want := strings.Join(fake.callOrder[len(fake.callOrder)-3:], ","), "reload,daemon-load:ospfd,daemon-load:ripd"; got != want {
-		t.Fatalf("retry did not replay only capable-daemon overlays: got %q, want %q", got, want)
+	wantRetryTail := "reload,daemon-load:ospfd,global-load,daemon-load:ospf6d,daemon-load:isisd,daemon-load:bgpd"
+	if got := strings.Join(fake.callOrder[len(fake.callOrder)-6:], ","); got != wantRetryTail {
+		t.Fatalf("retry did not restore both supported-daemon overlays and scrub unsupported copies: got %q, want %q", got, wantRetryTail)
 	}
 
-	// Clear first removes the manager-owned actions from their exact old
-	// QNH sequences on every daemon, then full-diffs the config without them.
+	// Clear removes manager-owned actions on all daemon copies, including the
+	// ripd copy whose daemon-scoped load silently no-ops on FRR 10.7.
 	if err := m.Clear(); err != nil {
 		t.Fatalf("Clear: %v", err)
 	}
-	wantClearTail := "daemon-load:ospfd,daemon-load:ospf6d,daemon-load:ripd,daemon-load:isisd,daemon-load:bgpd,reload"
+	wantClearTail := "daemon-load:ospfd,daemon-load:ospf6d,daemon-load:isisd,daemon-load:bgpd,global-load,reload"
 	if got := strings.Join(fake.callOrder[len(fake.callOrder)-6:], ","); got != wantClearTail {
 		t.Fatalf("Clear operation order = %q, want %q", got, wantClearTail)
 	}
@@ -400,6 +423,27 @@ func TestQNHMetricPartialDaemonCleanup11447(t *testing.T) {
 		t.Cleanup(m.Stop)
 		return m
 	}
+
+	ripCompiled := compileQNHMetricConfig11447(t,
+		"set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10",
+		"set protocols ospf export static",
+		"set protocols rip redistribute static",
+	)
+	ripFC := &FullConfig{
+		OSPF:          ripCompiled.Protocols.OSPF,
+		RIP:           ripCompiled.Protocols.RIP,
+		StaticRoutes:  ripCompiled.RoutingOptions.StaticRoutes,
+		PolicyOptions: &ripCompiled.PolicyOptions,
+	}
+	newRipManager := func(t *testing.T, fake *fakeExecutor) *Manager {
+		t.Helper()
+		m := New()
+		m.frrConf = filepath.Join(t.TempDir(), "frr.conf")
+		m.exec = fake
+		m.DisableDegradedRetry()
+		t.Cleanup(m.Stop)
+		return m
+	}
 	connectErr := errors.New("exit status 1")
 	connectOutput := []byte("Exiting: failed to connect to any daemons.\n")
 	absentDaemons := []string{"ospf6d", "isisd", "bgpd"}
@@ -417,16 +461,17 @@ func TestQNHMetricPartialDaemonCleanup11447(t *testing.T) {
 		if err := m.ApplyFull(fc); err != nil {
 			t.Fatalf("partial-daemon ApplyFull: %v", err)
 		}
-		wantFirstApply := "daemon-load:ospfd,daemon-load:ospf6d,daemon-load:ripd,daemon-load:isisd,daemon-load:bgpd,reload,daemon-load:ospfd"
+		wantFirstApply := "daemon-load:ospfd,daemon-load:ospf6d,daemon-load:isisd,daemon-load:bgpd,global-load,reload,daemon-load:ospfd"
 		if got := strings.Join(fake.callOrder, ","); got != wantFirstApply {
 			t.Fatalf("partial-daemon call order = %q, want %q", got, wantFirstApply)
 		}
-		for _, i := range []int{0, 2} {
-			call := fake.daemonLoads[i]
-			if !strings.Contains(call.config, "no set metric\n") ||
-				strings.Contains(call.config, "\n set metric ") {
-				t.Errorf("running daemon %s did not receive stale-metric cleanup:\n%s", call.daemon, call.config)
-			}
+		call := fake.daemonLoads[0]
+		if !strings.Contains(call.config, "no set metric\n") ||
+			strings.Contains(call.config, "\n set metric ") {
+			t.Errorf("running daemon %s did not receive stale-metric cleanup:\n%s", call.daemon, call.config)
+		}
+		if len(fake.globalLoads) != 1 || !strings.Contains(fake.globalLoads[0], "no set metric\n") {
+			t.Fatalf("integrated clear must remove stale ripd metric actions: %q", fake.globalLoads)
 		}
 
 		if err := m.ApplyFull(fc); err != nil {
@@ -469,6 +514,31 @@ func TestQNHMetricPartialDaemonCleanup11447(t *testing.T) {
 			t.Fatalf("unavailable overlay error = %v, want strict ospfd overlay failure", err)
 		}
 	})
+
+	t.Run("ripd integrated rc-zero no-op is rejected", func(t *testing.T) {
+		fake := &fakeExecutor{
+			daemonCommandResp: map[string][]byte{"ripd": qnhMetricShowOutput11447(10, 9)},
+		}
+		m := newRipManager(t, fake)
+		err := m.ApplyFull(ripFC)
+		if err == nil || !strings.Contains(err.Error(), "ripd route-map") ||
+			!strings.Contains(err.Error(), "metrics [9], want exactly [10]") {
+			t.Fatalf("silent ripd overlay no-op error = %v, want exact post-verify mismatch", err)
+		}
+	})
+
+	t.Run("ripd overlay connection errors remain strict", func(t *testing.T) {
+		fake := &fakeExecutor{
+			daemonCommandResp: map[string][]byte{"ripd": connectOutput},
+			daemonCommandErr:  map[string]error{"ripd": connectErr},
+		}
+		m := newRipManager(t, fake)
+		err := m.ApplyFull(ripFC)
+		if !errors.Is(err, errQNHMetricDaemonUnavailable11447) ||
+			!strings.Contains(err.Error(), "verify QNH metric overlay on ripd") {
+			t.Fatalf("unavailable ripd overlay error = %v, want a strict verified-overlay failure", err)
+		}
+	})
 }
 
 func TestQNHMetricPartialOverlayIsClearedBeforeRetry11447(t *testing.T) {
@@ -485,7 +555,13 @@ func TestQNHMetricPartialOverlayIsClearedBeforeRetry11447(t *testing.T) {
 	}
 	loadErr := errors.New("ripd overlay load failed")
 	fake := &fakeExecutor{
-		daemonLoadErrByDaemon: map[string]error{"ripd": loadErr},
+		vtyshLoadErr: loadErr,
+		daemonCommandResponseSeq: map[string][]daemonCommandResult{
+			"ripd": {
+				{},
+				{response: qnhMetricShowOutput11447(10, 10)},
+			},
+		},
 	}
 	m := New()
 	m.frrConf = filepath.Join(t.TempDir(), "frr.conf")
@@ -494,27 +570,35 @@ func TestQNHMetricPartialOverlayIsClearedBeforeRetry11447(t *testing.T) {
 	t.Cleanup(m.Stop)
 
 	if err := m.ApplyFull(fc); !errors.Is(err, loadErr) {
-		t.Fatalf("ApplyFull error = %v, want the failed RIP overlay load", err)
+		t.Fatalf("ApplyFull error = %v, want the failed integrated RIP overlay load", err)
 	}
-	if got, want := strings.Join(fake.callOrder, ","), "reload,daemon-load:ospfd,daemon-load:ripd"; got != want {
+	if got, want := strings.Join(fake.callOrder, ","), "reload,daemon-load:ospfd,global-load"; got != want {
 		t.Fatalf("partial overlay operation order = %q, want %q", got, want)
 	}
 	if len(m.qnhMetricOverlayCleanup) == 0 {
 		t.Fatal("partial overlay failure did not retain QNH sequence identities for retry cleanup")
 	}
 
-	fake.daemonLoadErrByDaemon["ripd"] = nil
+	fake.vtyshLoadErr = nil
 	if stop, notFound := m.retryReloadOnce(context.Background()); !stop || notFound {
 		t.Fatalf("retry result = (%v, %v), want (converged, found)", stop, notFound)
 	}
-	wantRetry := "daemon-load:ospfd,daemon-load:ospf6d,daemon-load:ripd,daemon-load:isisd,daemon-load:bgpd,reload,daemon-load:ospfd,daemon-load:ripd"
-	if got := strings.Join(fake.callOrder[len(fake.callOrder)-8:], ","); got != wantRetry {
+	wantRetry := "daemon-load:ospfd,daemon-load:ospf6d,daemon-load:isisd,daemon-load:bgpd,global-load,reload,daemon-load:ospfd,global-load,daemon-load:ospf6d,daemon-load:isisd,daemon-load:bgpd"
+	if got := strings.Join(fake.callOrder[len(fake.callOrder)-11:], ","); got != wantRetry {
 		t.Fatalf("retry did not clear the partial overlay before reloading and replaying: got %q, want %q", got, wantRetry)
 	}
-	for _, call := range fake.daemonLoads[2:7] {
+	for _, call := range fake.daemonLoads[1:5] {
 		if !strings.Contains(call.config, "no set metric\n") || strings.Contains(call.config, "\n set metric ") {
 			t.Errorf("%s retry cleanup was not limited to removing the prior QNH action:\n%s", call.daemon, call.config)
 		}
+	}
+	for _, call := range fake.daemonLoads[6:9] {
+		if !strings.Contains(call.config, "no set metric\n") || strings.Contains(call.config, "\n set metric ") {
+			t.Errorf("%s post-overlay cleanup contained a metric-bearing command:\n%s", call.daemon, call.config)
+		}
+	}
+	if got := fake.globalLoads[2]; !strings.Contains(got, "set metric 10\n") {
+		t.Fatalf("retry did not use integrated vtysh for ripd overlay: %q", got)
 	}
 	if len(m.qnhMetricOverlayCleanup) != 0 {
 		t.Fatalf("successful overlay replay left cleanup pending: %v", m.qnhMetricOverlayCleanup)

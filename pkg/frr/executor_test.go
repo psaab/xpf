@@ -40,12 +40,18 @@ type fakeExecutor struct {
 	vtyshLoadResp []byte
 	vtyshLoadErr  error
 
-	daemonLoadResp          []byte
-	daemonLoadRespByDaemon  map[string][]byte
-	daemonLoadErr           error
-	daemonLoadErrByDaemon   map[string]error
-	daemonLoads             []daemonLoadCall
-	callOrder               []string
+	daemonLoadResp           []byte
+	daemonLoadRespByDaemon   map[string][]byte
+	daemonLoadErr            error
+	daemonLoadErrByDaemon    map[string]error
+	daemonLoads              []daemonLoadCall
+	daemonCommands           []daemonCommandCall
+	daemonCommandResp        map[string][]byte
+	daemonCommandErr         map[string]error
+	daemonCommandResponseSeq map[string][]daemonCommandResult
+	daemonCommandCallCount   map[string]int
+	globalLoads              []string
+	callOrder                []string
 
 	// Capture: most recent call args.
 	lastVtyshCmd       string
@@ -60,6 +66,16 @@ type fakeExecutor struct {
 	// vtyshLoadCtxLiveAtCall records whether the fallback's context was
 	// still live when VtyshLoad ran (fresh-context contract).
 	vtyshLoadCtxLiveAtCall bool
+}
+
+type daemonCommandCall struct {
+	daemon  string
+	command string
+}
+
+type daemonCommandResult struct {
+	response []byte
+	err      error
 }
 
 func (f *fakeExecutor) Vtysh(_ context.Context, command string) (string, error) {
@@ -110,12 +126,14 @@ func (f *fakeExecutor) reloadPyCalls() int {
 }
 
 func (f *fakeExecutor) VtyshLoad(ctx context.Context, conf string) ([]byte, error) {
+	contents, _ := os.ReadFile(conf)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.callOrder = append(f.callOrder, "global-load")
 	f.vtyshLoadCalls++
 	f.lastVtyshLoadCtx = ctx
 	f.lastVtyshLoadConf = conf
+	f.globalLoads = append(f.globalLoads, string(contents))
 	// Liveness must be sampled AT CALL TIME — the caller's deferred
 	// cancel runs before the test can assert.
 	f.vtyshLoadCtxLiveAtCall = ctx.Err() == nil
@@ -142,6 +160,24 @@ func (f *fakeExecutor) VtyshLoadDaemon(ctx context.Context, daemon, conf string)
 		err = f.daemonLoadErr
 	}
 	return resp, err
+}
+
+func (f *fakeExecutor) VtyshDaemon(_ context.Context, daemon, command string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.daemonCommands = append(f.daemonCommands, daemonCommandCall{daemon: daemon, command: command})
+	if f.daemonCommandCallCount == nil {
+		f.daemonCommandCallCount = make(map[string]int)
+	}
+	call := f.daemonCommandCallCount[daemon]
+	f.daemonCommandCallCount[daemon] = call + 1
+	if responses := f.daemonCommandResponseSeq[daemon]; len(responses) > 0 {
+		if call >= len(responses) {
+			call = len(responses) - 1
+		}
+		return responses[call].response, responses[call].err
+	}
+	return f.daemonCommandResp[daemon], f.daemonCommandErr[daemon]
 }
 
 // TestExecVtyshUsesExecutor proves that Manager.ExecVtysh routes through

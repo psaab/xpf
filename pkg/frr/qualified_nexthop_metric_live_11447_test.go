@@ -3,6 +3,7 @@ package frr
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -188,28 +189,18 @@ func liveOSPFMetricLSDB11447(t *testing.T, ip, zebra, staticd, ospfd, ospf6d, ri
 		PolicyOptions: &compiled.PolicyOptions,
 	})
 	legacyPath := filepath.Join(tempDir, "legacy-qnh.conf")
-	legacy := strings.TrimRight(rendered, "\n") + "\n" + overlays["ospfd"]
+	// A stale legacy action must never satisfy the overlay assertion: ripd
+	// can accept a daemon-scoped load with rc=0 without changing its map.
+	legacyOverlay := strings.ReplaceAll(overlays["ospfd"], " set metric 10\n", " set metric 9\n")
+	if !strings.Contains(legacyOverlay, " set metric 9\n") || strings.Contains(legacyOverlay, " set metric 10\n") {
+		t.Fatalf("legacy seed must carry metric 9 while the overlay carries metric 10:\n%s", legacyOverlay)
+	}
+	legacy := strings.TrimRight(rendered, "\n") + "\n" + legacyOverlay
 	if err := os.WriteFile(configPath, []byte(rendered), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(legacyPath, []byte(legacy), 0o644); err != nil {
 		t.Fatal(err)
-	}
-	clearPath := filepath.Join(tempDir, "clear-qnh.conf")
-	clearConfig := renderQNHMetricSequenceClears11447(qnhMetricSequencesFromConfig11447(legacy))
-	if clearConfig == "" {
-		t.Fatal("legacy config did not yield QNH sequence identities to clear")
-	}
-	if err := os.WriteFile(clearPath, []byte(clearConfig), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	overlayPaths := make(map[string]string, len(overlays))
-	for daemon, overlay := range overlays {
-		path := filepath.Join(tempDir, daemon+"-qnh-overlay.conf")
-		if err := os.WriteFile(path, []byte(overlay), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		overlayPaths[daemon] = path
 	}
 	qnhMap := qnhRedistributionMap11447(rendered)
 	for _, daemon := range []struct {
@@ -263,23 +254,28 @@ func liveOSPFMetricLSDB11447(t *testing.T, ip, zebra, staticd, ospfd, ospf6d, ri
 	if !ready {
 		t.Fatal("FRR zebra VTY did not become ready")
 	}
+	manager := New()
+	manager.exec = liveQNHExecutor11447{runVTY: runVTY}
+	manager.DisableDegradedRetry()
+	t.Cleanup(manager.Stop)
+	manager.qnhMetricOverlayCleanup = qnhMetricSequencesFromConfig11447(legacy)
+	if len(manager.qnhMetricOverlayCleanup) == 0 {
+		t.Fatal("legacy config did not yield QNH sequence identities to clear")
+	}
 	if output, err := runVTY(3*time.Second, "-f", legacyPath); err != nil {
 		mgmtdLog, _ := os.ReadFile(filepath.Join(tempDir, "mgmtd-daemon.log"))
 		t.Fatalf("loading legacy shared QNH metric config: %v\n%s\nmgmtd log:\n%s", err, output, mgmtdLog)
 	}
-	for _, daemon := range qnhMetricCleanupDaemons11447 {
-		if output, err := runVTY(3*time.Second, "-d", daemon, "-f", clearPath); err != nil {
-			t.Fatalf("clearing legacy QNH metrics from %s: %v\n%s", daemon, err, output)
-		}
+	if err := manager.clearQNHMetricOverlaysLocked(context.Background()); err != nil {
+		t.Fatalf("clearing legacy QNH metric actions: %v", err)
 	}
 	if output, err := runVTY(3*time.Second, "-f", configPath); err != nil {
 		mgmtdLog, _ := os.ReadFile(filepath.Join(tempDir, "mgmtd-daemon.log"))
 		t.Fatalf("loading metric-free generated FRR config: %v\n%s\nmgmtd log:\n%s", err, output, mgmtdLog)
 	}
-	for _, daemon := range []string{"ospfd", "ripd"} {
-		if output, err := runVTY(3*time.Second, "-d", daemon, "-f", overlayPaths[daemon]); err != nil {
-			t.Fatalf("loading %s QNH metric overlay: %v\n%s", daemon, err, output)
-		}
+	manager.qnhMetricOverlays = cloneQNHMetricOverlays11447(overlays)
+	if err := manager.applyQNHMetricOverlaysLocked(context.Background()); err != nil {
+		t.Fatalf("applying generated QNH metric overlays: %v", err)
 	}
 	if qnhMap == "" {
 		t.Fatal("generated config did not identify the QNH redistribution map")
@@ -295,6 +291,10 @@ func liveOSPFMetricLSDB11447(t *testing.T, ip, zebra, staticd, ospfd, ospf6d, ri
 		database, databaseErr := runVTY(3*time.Second, "-d", "ospfd", "-c", "show ip ospf database external 203.0.113.0")
 		routeOutput, databaseOutput = string(route), string(database)
 		if routeErr == nil && databaseErr == nil && ospfLSDBHasMetric11447(databaseOutput, wantMetric) {
+			manager.qnhMetricOverlayCleanup = qnhMetricSequencesFromOverlay11447(overlays)
+			if err := manager.clearQNHMetricOverlaysLocked(context.Background()); err != nil {
+				t.Fatalf("clearing applied QNH metric overlays: %v", err)
+			}
 			return
 		}
 		time.Sleep(250 * time.Millisecond)
@@ -302,6 +302,45 @@ func liveOSPFMetricLSDB11447(t *testing.T, ip, zebra, staticd, ospfd, ospf6d, ri
 	kernelRoutes, _ := runQNHCommand11447(3*time.Second, ip, "-n", namespace, "route", "show")
 	staticConfig, _ := runVTY(3*time.Second, "-d", "staticd", "-c", "show running-config")
 	t.Fatalf("OSPF LSDB did not show %s for the redistributed static route\nroute:\n%s\nLSDB:\n%s\nkernel routes:\n%s\nstaticd config:\n%s\nconfig:\n%s", want, routeOutput, databaseOutput, kernelRoutes, staticConfig, rendered)
+}
+
+type liveQNHExecutor11447 struct {
+	runVTY func(time.Duration, ...string) ([]byte, error)
+}
+
+func liveQNHTimeout11447(ctx context.Context) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 {
+			return remaining
+		}
+		return time.Millisecond
+	}
+	return 10 * time.Second
+}
+
+func (e liveQNHExecutor11447) Vtysh(ctx context.Context, command string) (string, error) {
+	output, err := e.runVTY(liveQNHTimeout11447(ctx), "-c", command)
+	return string(output), err
+}
+
+func (liveQNHExecutor11447) FrrReloadPy(context.Context, string) error {
+	return fmt.Errorf("unexpected frr-reload.py call in QNH live transport test")
+}
+
+func (e liveQNHExecutor11447) VtyshLoad(ctx context.Context, conf string) ([]byte, error) {
+	return e.runVTY(liveQNHTimeout11447(ctx), "-f", conf)
+}
+
+func (e liveQNHExecutor11447) VtyshLoadDaemon(ctx context.Context, daemon, conf string) ([]byte, error) {
+	return e.runVTY(liveQNHTimeout11447(ctx), "-d", daemon, "-f", conf)
+}
+
+func (e liveQNHExecutor11447) VtyshDaemon(ctx context.Context, daemon, command string) ([]byte, error) {
+	return e.runVTY(liveQNHTimeout11447(ctx), "-d", daemon, "-c", command)
+}
+
+func (liveQNHExecutor11447) VtyshStream(context.Context, string) (io.ReadCloser, func() error, error) {
+	return nil, nil, fmt.Errorf("unexpected vtysh stream call in QNH live transport test")
 }
 
 func runQNHCommand11447(timeout time.Duration, args ...string) ([]byte, error) {
@@ -362,8 +401,15 @@ func assertQNHMetricDaemonMaps11447(t *testing.T, runVTY func(time.Duration, ...
 				t.Errorf("%s route-map %s has a QNH destination sequence without a next-hop discriminator:\n%s", check.daemon, routeMap, block)
 				continue
 			}
-			if !strings.Contains(lower, "metric ") {
-				t.Errorf("%s route-map %s QNH sequence has no metric action:\n%s", check.daemon, routeMap, block)
+			foundExactMetric := false
+			for _, line := range strings.Split(lower, "\n") {
+				if strings.TrimSpace(line) == "metric 10" {
+					foundExactMetric = true
+					break
+				}
+			}
+			if !foundExactMetric {
+				t.Errorf("%s route-map %s QNH sequence lacks overlay metric 10 (legacy seed is 9):\n%s", check.daemon, routeMap, block)
 				continue
 			}
 			foundQNHMetric = true

@@ -515,9 +515,13 @@ func (m *Manager) qnhMetricDaemonOverlays11447(fc *FullConfig, set *qnhMetricSet
 
 type qnhMetricSequenceSet11447 map[string]map[int]struct{}
 
-// These daemons may hold a previous integrated QNH map copy. Clear only the
-// known generated sequences there; metric overlays themselves target ospfd/ripd.
-var qnhMetricCleanupDaemons11447 = []string{"ospfd", "ospf6d", "ripd", "isisd", "bgpd"}
+// These daemons may hold a prior integrated QNH map copy. RIPD cleanup uses
+// integrated vtysh because FRR 10.7's `vtysh -d ripd -f` silently no-ops.
+var qnhMetricCleanupDaemons11447 = []string{"ospfd", "ospf6d", "isisd", "bgpd"}
+
+// RIPD's integrated overlay is broadcast to all connected daemons. Remove its
+// metric actions from the daemons that cannot evaluate the QNH match clauses.
+var qnhMetricUnsupportedDaemons11447 = []string{"ospf6d", "isisd", "bgpd"}
 
 // errQNHMetricDaemonUnavailable11447 marks vtysh's explicit "failed to
 // connect to any daemons" result. Cleanup may skip this: a stopped daemon
@@ -684,4 +688,62 @@ func (m *Manager) generateQNHMetricStaticMaps11447(set *qnhMetricSet11447) strin
 		fmt.Fprintf(&b, "route-map %s permit %d\nexit\n!\n", frrName(scope.staticMap), next)
 	}
 	return b.String()
+}
+
+func qnhMetricOverlayActions11447(overlay string) map[string]map[int]int {
+	actions := make(map[string]map[int]int)
+	var routeMap string
+	var sequence int
+	for _, line := range strings.Split(overlay, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 4 && fields[0] == "route-map" && fields[2] == "permit" {
+			parsed, err := strconv.Atoi(fields[3])
+			if err != nil {
+				routeMap, sequence = "", 0
+				continue
+			}
+			routeMap, sequence = fields[1], parsed
+			continue
+		}
+		if len(fields) == 3 && fields[0] == "set" && fields[1] == "metric" && routeMap != "" {
+			metric, err := strconv.Atoi(fields[2])
+			if err != nil {
+				continue
+			}
+			if actions[routeMap] == nil {
+				actions[routeMap] = make(map[int]int)
+			}
+			actions[routeMap][sequence] = metric
+		}
+	}
+	return actions
+}
+
+func qnhMetricActionsFromShow11447(output []byte) map[int][]int {
+	actions := make(map[int][]int)
+	sequence := 0
+	for _, line := range strings.Split(strings.ToLower(string(output)), "\n") {
+		fields := strings.Fields(line)
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] != "sequence" {
+				continue
+			}
+			parsed, err := strconv.Atoi(strings.Trim(fields[i+1], ",:"))
+			if err == nil {
+				sequence = parsed
+			}
+			break
+		}
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] != "metric" {
+				continue
+			}
+			metric, err := strconv.Atoi(strings.Trim(fields[i+1], ",:"))
+			if err == nil && sequence != 0 {
+				actions[sequence] = append(actions[sequence], metric)
+			}
+			break
+		}
+	}
+	return actions
 }

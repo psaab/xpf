@@ -918,20 +918,30 @@ func (m *Manager) previousQNHMetricSequences11447() (qnhMetricSequenceSet11447, 
 	), nil
 }
 
-func (m *Manager) loadQNHMetricConfig11447(parent context.Context, daemon, contents string) error {
+func writeQNHMetricConfig11447(daemon, contents string) (string, error) {
 	file, err := os.CreateTemp("", "xpf-frr-qnh-"+daemon+"-*.conf")
 	if err != nil {
-		return fmt.Errorf("create temporary QNH config for %s: %w", daemon, err)
+		return "", fmt.Errorf("create temporary QNH config for %s: %w", daemon, err)
 	}
 	path := file.Name()
-	defer os.Remove(path)
 	if _, err := file.WriteString(contents); err != nil {
 		_ = file.Close()
-		return fmt.Errorf("write temporary QNH config for %s: %w", daemon, err)
+		_ = os.Remove(path)
+		return "", fmt.Errorf("write temporary QNH config for %s: %w", daemon, err)
 	}
 	if err := file.Close(); err != nil {
-		return fmt.Errorf("close temporary QNH config for %s: %w", daemon, err)
+		_ = os.Remove(path)
+		return "", fmt.Errorf("close temporary QNH config for %s: %w", daemon, err)
 	}
+	return path, nil
+}
+
+func (m *Manager) loadQNHMetricConfig11447(parent context.Context, daemon, contents string) error {
+	path, err := writeQNHMetricConfig11447(daemon, contents)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(path)
 	ctx, cancel := context.WithTimeout(parent, reloadTimeout)
 	defer cancel()
 	output, err := m.executor().VtyshLoadDaemon(ctx, daemon, path)
@@ -945,9 +955,86 @@ func (m *Manager) loadQNHMetricConfig11447(parent context.Context, daemon, conte
 	return nil
 }
 
+func (m *Manager) loadQNHMetricIntegratedConfig11447(parent context.Context, contents string) error {
+	path, err := writeQNHMetricConfig11447("integrated", contents)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(path)
+	ctx, cancel := context.WithTimeout(parent, reloadTimeout)
+	defer cancel()
+	output, err := m.executor().VtyshLoad(ctx, path)
+	if err != nil {
+		failure := fmt.Errorf("vtysh -f integrated QNH config: %w: %s", err, string(output))
+		if ctx.Err() == nil && strings.Contains(strings.ToLower(string(output)), "failed to connect to any daemons") {
+			return fmt.Errorf("%w: %w", errQNHMetricDaemonUnavailable11447, failure)
+		}
+		return failure
+	}
+	return nil
+}
+
+func (m *Manager) qnhMetricDaemonCommand11447(parent context.Context, daemon, command string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(parent, reloadTimeout)
+	defer cancel()
+	output, err := m.executor().VtyshDaemon(ctx, daemon, command)
+	if err == nil {
+		return output, nil
+	}
+	failure := fmt.Errorf("vtysh -d %s -c %q: %w: %s", daemon, command, err, string(output))
+	if ctx.Err() == nil && strings.Contains(strings.ToLower(string(output)), "failed to connect to any daemons") {
+		return nil, fmt.Errorf("%w: %w", errQNHMetricDaemonUnavailable11447, failure)
+	}
+	return nil, failure
+}
+
+func (m *Manager) verifyQNHMetricOverlay11447(parent context.Context, daemon, overlay string) error {
+	expected := qnhMetricOverlayActions11447(overlay)
+	if len(expected) == 0 {
+		return fmt.Errorf("%s QNH metric overlay contains no verifiable metric actions", daemon)
+	}
+	for routeMap, sequences := range expected {
+		output, err := m.qnhMetricDaemonCommand11447(parent, daemon, "show route-map "+routeMap)
+		if err != nil {
+			return err
+		}
+		actual := qnhMetricActionsFromShow11447(output)
+		for sequence, wantMetric := range sequences {
+			metrics := actual[sequence]
+			if len(metrics) != 1 || metrics[0] != wantMetric {
+				return fmt.Errorf("%s route-map %s sequence %d has metrics %v, want exactly [%d]:\n%s",
+					daemon, routeMap, sequence, metrics, wantMetric, string(output))
+			}
+		}
+	}
+	return nil
+}
+
+func (m *Manager) verifyQNHMetricSequencesCleared11447(parent context.Context, daemon string, sequences qnhMetricSequenceSet11447) error {
+	routeMaps := make([]string, 0, len(sequences))
+	for routeMap := range sequences {
+		routeMaps = append(routeMaps, routeMap)
+	}
+	sort.Strings(routeMaps)
+	for _, routeMap := range routeMaps {
+		output, err := m.qnhMetricDaemonCommand11447(parent, daemon, "show route-map "+routeMap)
+		if err != nil {
+			return err
+		}
+		actual := qnhMetricActionsFromShow11447(output)
+		for sequence := range sequences[routeMap] {
+			if metrics := actual[sequence]; len(metrics) != 0 {
+				return fmt.Errorf("%s route-map %s sequence %d still has metric actions %v after cleanup:\n%s",
+					daemon, routeMap, sequence, metrics, string(output))
+			}
+		}
+	}
+	return nil
+}
+
 // clearQNHMetricOverlaysLocked clears only previously rendered QNH route-map
-// sequences before an integrated reload. The direct clear also covers the
-// additive fallback, which cannot remove stale metric actions itself.
+// sequences before an integrated reload. The integrated clear is required
+// because FRR 10.7's daemon-scoped ripd load returns success without applying.
 func (m *Manager) clearQNHMetricOverlaysLocked(ctx context.Context) error {
 	if len(m.qnhMetricOverlayCleanup) == 0 {
 		m.qnhMetricOverlayCleanup = nil
@@ -962,6 +1049,16 @@ func (m *Manager) clearQNHMetricOverlaysLocked(ctx context.Context) error {
 			}
 			return fmt.Errorf("clear stale QNH metric sequences on %s: %w", daemon, err)
 		}
+	}
+	if err := m.loadQNHMetricIntegratedConfig11447(ctx, config); err != nil &&
+		!errors.Is(err, errQNHMetricDaemonUnavailable11447) {
+		return fmt.Errorf("clear stale QNH metric sequences via integrated vtysh: %w", err)
+	}
+	if err := m.verifyQNHMetricSequencesCleared11447(ctx, "ripd", m.qnhMetricOverlayCleanup); err != nil &&
+		!errors.Is(err, errQNHMetricDaemonUnavailable11447) {
+		return fmt.Errorf("verify stale QNH metric sequences cleared on ripd: %w", err)
+	} else if errors.Is(err, errQNHMetricDaemonUnavailable11447) {
+		slog.Info("skipping QNH metric cleanup verification for unavailable FRR daemon", "daemon", "ripd")
 	}
 	slog.Info("cleared prior QNH metric actions from reachable FRR daemons",
 		"route_maps", len(m.qnhMetricOverlayCleanup))
@@ -990,6 +1087,37 @@ func (m *Manager) applyQNHMetricOverlaysLocked(ctx context.Context) error {
 	for _, daemon := range daemons {
 		if daemon != "ospfd" && daemon != "ripd" {
 			return fmt.Errorf("refusing QNH metric overlay for unsupported daemon %q", daemon)
+		}
+		if daemon == "ripd" {
+			if err := m.loadQNHMetricIntegratedConfig11447(ctx, m.qnhMetricOverlays[daemon]); err != nil {
+				return fmt.Errorf("apply QNH metric overlay to ripd via integrated vtysh: %w", err)
+			}
+			cleanup := qnhMetricSequencesFromOverlay11447(map[string]string{"ripd": m.qnhMetricOverlays[daemon]})
+			clearConfig := renderQNHMetricSequenceClears11447(cleanup)
+			for _, unsupported := range qnhMetricUnsupportedDaemons11447 {
+				if err := m.loadQNHMetricConfig11447(ctx, unsupported, clearConfig); err != nil {
+					if errors.Is(err, errQNHMetricDaemonUnavailable11447) {
+						slog.Info("skipping QNH metric cleanup for unavailable FRR daemon", "daemon", unsupported)
+						continue
+					}
+					return fmt.Errorf("remove broadcast RIP QNH metric actions from %s: %w", unsupported, err)
+				}
+			}
+			if err := m.verifyQNHMetricOverlay11447(ctx, "ripd", m.qnhMetricOverlays[daemon]); err != nil {
+				return fmt.Errorf("verify QNH metric overlay on ripd: %w", err)
+			}
+			for _, unsupported := range qnhMetricUnsupportedDaemons11447 {
+				if err := m.verifyQNHMetricSequencesCleared11447(ctx, unsupported, cleanup); err != nil {
+					if errors.Is(err, errQNHMetricDaemonUnavailable11447) {
+						continue
+					}
+					return fmt.Errorf("verify broadcast RIP QNH metric actions removed from %s: %w", unsupported, err)
+				}
+			}
+			slog.Info("applied and verified integrated QNH metric overlay",
+				"daemon", daemon,
+				"sequences", len(qnhMetricSequencesFromOverlay11447(map[string]string{daemon: m.qnhMetricOverlays[daemon]})))
+			continue
 		}
 		if err := m.loadQNHMetricConfig11447(ctx, daemon, m.qnhMetricOverlays[daemon]); err != nil {
 			return fmt.Errorf("apply QNH metric overlay to %s: %w", daemon, err)
