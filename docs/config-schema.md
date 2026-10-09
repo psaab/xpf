@@ -9647,12 +9647,25 @@ stays valid for back-compat.
 
 | Junos `then community ...` | xpf `CommunityOp` | FRR route-map set clause |
 |----------------------------|-------------------|--------------------------|
-| `add <value>`              | `add`             | `set community <value> additive` |
+| `add <value>`              | `add`             | `set community <resolved-literal> additive` |
 | `delete <name>`            | `delete`          | `set comm-list <name> delete`    |
 | `delete [ <a> <b> ... ]`   | `delete`          | one `set comm-list <name> delete` PER list (#2902) |
-| `set <value>`              | `set`             | `set community <value>`          |
-| `<value>` (bare)           | `""`              | `set community <value>`          |
+| `set <value>`              | `set`             | `set community <resolved-literal>`          |
+| `<value>` (bare)           | `""`              | `set community <resolved-literal>`          |
 | `none`                     | `none`            | `set community none`             |
+
+For `add`, `set`, and bare replacement, `<value>` may be an FRR community
+literal or a defined community name whose members are all literals. The
+compiler resolves authored names once after every `policy-options` root has
+compiled; name lookup takes precedence when an authored operand matches both a
+name and a literal. A failed first resolution is retained with an unrenderable
+marker, so its original spelling cannot pass strict validation or tolerant
+rendering even if it is itself a literal. Strict commit rejects undefined
+names, empty definitions, regex-backed definitions, and invalid literals, with
+errors naming the authored operand. Successful results are accepted as FRR
+literals only; strict validation and rendering never perform another name
+lookup. On tolerant loads, the renderer warns and omits only the malformed
+community set clause.
 
 `add` APPENDS to (does not overwrite) the existing community attribute — the
 parity gap that motivated #2848: emitting only `set community <value>` wiped

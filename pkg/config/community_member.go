@@ -180,27 +180,73 @@ var frrWellKnownCommunities = []string{
 
 // frrStandardCommunityLiteral reports whether a non-regex member parses as
 // FRR's `standard` community-list argument. That argument is one or more
-// whitespace-separated communities, each a well-known name or ASN:VALUE with
-// exactly one `:` and both parts 0..65535 (community_valid). Control bytes
-// count as separators, which is what sanitizeFRRValue turns them into at
-// render.
+// ASCII-whitespace-separated communities, each a well-known name or ASN:VALUE
+// with exactly one `:` and both parts 0..65535 (community_valid). C0/DEL
+// controls count as separators because sanitizeFRRValue replaces them with
+// ASCII spaces at render; Unicode whitespace is not a separator in emitted
+// FRR bytes and is deliberately rejected.
 func frrStandardCommunityLiteral(member string) bool {
-	mapped := strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return ' '
+	start := -1
+	hasWord := false
+	for i, r := range member {
+		if r < 0x20 || r == 0x7f || r == ' ' {
+			if start >= 0 {
+				if !frrCommunityWord(member[start:i]) {
+					return false
+				}
+				start = -1
+				hasWord = true
+			}
+		} else if start < 0 {
+			start = i
 		}
-		return r
-	}, member)
-	words := strings.Fields(mapped)
-	if len(words) == 0 {
-		return false
 	}
-	for _, w := range words {
-		if !frrCommunityWord(w) {
+	if start >= 0 {
+		if !frrCommunityWord(member[start:]) {
 			return false
 		}
+		hasWord = true
 	}
-	return true
+	return hasWord
+}
+
+// ResolveCommunityValue prefers a single defined community name, expanding it
+// to literal members; otherwise it accepts a valid FRR standard literal.
+// It returns false for undefined names, empty definitions, and definitions
+// containing regex or otherwise non-literal members. Community-list
+// definitions can contain several members; FRR's `set community` accepts them
+// as a space-separated value list.
+func ResolveCommunityValue(po *PolicyOptionsConfig, value string) (string, bool) {
+	if value == "" {
+		return "", false
+	}
+	if po != nil && po.Communities != nil &&
+		strings.IndexAny(value, " \t\n\r\v\f") < 0 {
+		if cd, exists := po.Communities[value]; exists {
+			if cd == nil || len(cd.Members) == 0 {
+				return "", false
+			}
+			for _, member := range cd.Members {
+				if !frrStandardCommunityLiteral(member) {
+					return "", false
+				}
+			}
+			return strings.Join(cd.Members, " "), true
+		}
+	}
+	if frrStandardCommunityLiteral(value) {
+		return value, true
+	}
+	return "", false
+}
+
+// ValidCommunityValueLiteral checks an already-resolved `then community`
+// operand without consulting community names. Resolve authored names only in
+// the compiler post-pass; strict validation and rendering use this predicate
+// so a resolved literal that happens to equal another name is never expanded
+// a second time.
+func ValidCommunityValueLiteral(value string) bool {
+	return frrStandardCommunityLiteral(value)
 }
 
 func frrCommunityWord(w string) bool {

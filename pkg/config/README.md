@@ -1593,10 +1593,15 @@ authoring order) and hard-rejects an undefined `from community` / `then
 community delete` reference at commit/commit-check, naming the policy, term, and
 missing community. The tolerant load/peer-sync path downgrades to a warning
 (`lenientPolicyCommunityRef`) so an already-persisted or peer-synced config an
-older binary accepted still boots (#1960 no-brick doctrine). The gate is
-SURGICAL — only NAME references are checked; `then community (set|add) <value>`
-carries a community VALUE (e.g. `65000:100`), not a list reference, and a defined
-community reference commits unchanged.
+older binary accepted still boots (#1960 no-brick doctrine). The same
+strict/tolerant gate also checks `then community add|set` and legacy bare
+replacement set-clause operands: the compiler resolves authored names once.
+On failure it preserves the authored operand and sets the compiler-only
+`PolicyTerm.CommunityResolutionFailed` flag (`json:"-"`). Strict validation
+rejects the flagged operand while reporting its authored spelling; tolerant
+rendering warns and omits it even when that spelling is itself a valid literal.
+Successful results are accepted only as FRR literals and are never re-resolved
+as community names.
 
 **The `-xpf-redist` route-map-name suffix is reserved (#5116/#12065):** the
 FRR renderer derives per-source redistribute maps named

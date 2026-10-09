@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // secretSentinels is the set of distinctive cleartext secret values fed into
@@ -220,5 +221,65 @@ func TestConfigHandlerJSONStaysValid(t *testing.T) {
 	var envelope map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("response is not valid JSON after redaction: %v\nbody: %s", err, rr.Body.String())
+	}
+}
+
+// TestConfigHandlerCommunityResolutionFailureNoNUL12069 ensures a tolerant
+// boot of a config with a failed `then community` name resolution keeps the
+// authored operand in GET /api/v1/config without serializing an internal
+// failure marker. The helper wire and REST JSON both carry config structs, so
+// the failure state must live in a json:"-" compiler-only field.
+func TestConfigHandlerCommunityResolutionFailureNoNUL12069(t *testing.T) {
+	dir := t.TempDir()
+	tree := &config.ConfigTree{}
+	for _, command := range []string{
+		`set policy-options community "65000:1"`,
+		"set policy-options policy-statement P term t1 then community add 65000:1",
+		"set policy-options policy-statement P term t1 then accept",
+	} {
+		path, err := config.ParseSetCommand(command)
+		if err != nil {
+			t.Fatalf("ParseSetCommand(%q): %v", command, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath(%q): %v", command, err)
+		}
+	}
+	if _, err := config.CompileConfig(tree); err == nil {
+		t.Fatal("strict compile accepted an empty literal-shaped community definition")
+	}
+	if _, err := config.CompileConfigLenient(tree); err != nil {
+		t.Fatalf("tolerant compile rejected persisted config: %v", err)
+	}
+
+	db, err := configstore.NewDB(filepath.Join(dir, ".configdb"))
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	db.SetWriterVersion("test-1.0")
+	if err := db.WriteActive(tree); err != nil {
+		t.Fatalf("WriteActive: %v", err)
+	}
+	store := newConfigStore(t, filepath.Join(dir, "xpf.conf"))
+	if err := store.Load(); err != nil {
+		t.Fatalf("tolerant Load: %v", err)
+	}
+	s := &Server{store: store}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/v1/config", nil)
+	s.configHandler(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, `\u0000`) || strings.ContainsRune(body, '\x00') {
+		t.Fatalf("GET /api/v1/config contains a NUL in tolerant-loaded config: %s", body)
+	}
+	if strings.Contains(body, "xpf-invalid-community-resolution") {
+		t.Fatalf("GET /api/v1/config exposed internal community failure marker: %s", body)
+	}
+	if !strings.Contains(body, `"CommunityAdd":"65000:1"`) {
+		t.Fatalf("GET /api/v1/config did not preserve authored CommunityAdd operand: %s", body)
 	}
 }

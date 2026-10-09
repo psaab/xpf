@@ -118,16 +118,16 @@ func TestPopKeepsASingleParentChainNested9620H9(t *testing.T) {
 	}
 }
 
-// CONTROL: the policy-options terms an earlier attempt at H9 broke. They are
-// unchanged by this mechanism because it changes the READER, not the admission —
-// nothing about the policy site's grammar is touched. These pass at master and
-// must keep passing.
+// CONTROL: policy-options terms still compile alike in packed and braced
+// forms after the community-name resolution and strict-literal gates. The
+// community-add case defines C so it exercises parser equivalence without
+// depending on the now-rejected undefined-name behavior.
 func TestPolicyOptionsTermsAreUnchanged9620H9(t *testing.T) {
 	for _, tc := range []struct{ name, packed, braced string }{
 		{
 			name:   "then accept community add C",
-			packed: "policy-options { policy-statement P { term t1 then accept community add C; } }",
-			braced: "policy-options { policy-statement P { term t1 { then { accept; community add C; } } } }",
+			packed: "policy-options { community C { members 65000:100; } policy-statement P { term t1 then accept community add C; } }",
+			braced: "policy-options { community C { members 65000:100; } policy-statement P { term t1 { then { accept; community add C; } } } }",
 		},
 		{
 			name:   "then accept load-balance local-preference",

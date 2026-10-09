@@ -140,20 +140,20 @@ func slotEscapeCommitSet(cmds []string) error {
 			strings.Contains(c, "protocols bgp local-as") {
 			hasProcessAS = true
 		}
-		p, err := ParseSetCommand(c)
+		p, quoted, grouped, err := ParseSetCommandGrouped(c)
 		if err != nil {
 			return fmt.Errorf("parse %q: %w", c, err)
 		}
-		if err := tree.SetPath(p); err != nil {
+		if err := tree.SetPathQuotedGrouped(p, quoted, grouped); err != nil {
 			return fmt.Errorf("setpath %q: %w", c, err)
 		}
 	}
 	if hasBGP && !hasProcessAS {
-		p, err := ParseSetCommand("set routing-options autonomous-system 65000")
+		p, quoted, grouped, err := ParseSetCommandGrouped("set routing-options autonomous-system 65000")
 		if err != nil {
 			return err
 		}
-		if err := tree.SetPath(p); err != nil {
+		if err := tree.SetPathQuotedGrouped(p, quoted, grouped); err != nil {
 			return err
 		}
 	}

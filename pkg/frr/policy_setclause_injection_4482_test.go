@@ -9,7 +9,7 @@ import (
 
 // TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823
 // preserves #4482's hostile newline-injection coverage for values that remain
-// sanitized onto their directive lines. The #10823 render belt now parses
+// sanitized onto their directive lines. The #10823 render belt parses
 // policy-options prefix-list entries as CIDRs before sanitization: malformed
 // newline-bearing values are warned and omitted (fail-closed) rather than
 // emitted as sanitized-but-invalid FRR prefixes. Inline route-filter entries
@@ -17,12 +17,12 @@ import (
 //
 // #4498 completes coverage for the remaining sanitized route-map slots. This
 // test drives a newline payload through each one, verifies no injected
-// top-level command appears, and checks that both malformed top-level
-// prefix-list entries and malformed inline route-filters are absent:
+// top-level command appears, and checks malformed prefix-list entries and
+// community set values are omitted:
 //
 //   - malformed IPv4 / IPv6 policy-options prefix-list entries (#10823)
 //   - match community / match as-path                   (#4482)
-//   - set community (replace / additive)                (#4482)
+//   - set community (replace / additive)                (#12069)
 //   - set comm-list delete / set as-path prepend         (#4482)
 //   - set ip / ipv6 next-hop / origin / source-protocol   (#4498)
 //
@@ -62,7 +62,8 @@ func TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823(t *t
 				Terms: []*config.PolicyTerm{
 					{
 						Name: "t1",
-						// set community (whole-attribute replace) — injection.
+						// A malformed set-community value must be omitted by
+						// the #12069 literal-value render belt.
 						Community: "65000:1\n neighbor 6.6.6.6 remote-as 65000",
 						Action:    "accept",
 					},
@@ -87,7 +88,8 @@ func TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823(t *t
 					},
 					{
 						Name: "t4",
-						// set community <v> additive — injection.
+						// Additive community values use the same #12069
+						// literal-value render belt.
 						CommunityOp:  "add",
 						CommunityAdd: "65000:2\n neighbor 8.8.8.8 remote-as 65000",
 						Action:       "accept",
@@ -134,16 +136,15 @@ func TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823(t *t
 		}
 	}
 
-	// Every still-sanitized route-map payload must survive collapsed onto its
-	// single directive line (newline → space). The prefix-list payloads below
-	// are instead rejected by ParseCIDR and have dedicated omission assertions.
+	// Still-sanitized route-map payloads survive collapsed onto their single
+	// directive line (newline → space). The prefix-list entries are rejected by
+	// ParseCIDR, and the malformed community values are rejected by #12069.
 	wantOnOneLine := []struct {
 		slot string
 		want string
 	}{
-		{"set community (replace)", " set community 65000:1  neighbor 6.6.6.6 remote-as 65000\n"},
-		{"set as-path prepend", " set as-path prepend 65001  router bgp 65000 65001\n"},
 		{"match source-protocol", " match source-protocol bgp  router bgp 65000\n"},
+		{"set as-path prepend", " set as-path prepend 65001  router bgp 65000 65001\n"},
 		// #9493: the three NAME slots (match community, match as-path, set
 		// comm-list) render through frrName, not sanitizeFRRValue, and are
 		// asserted below. Collapsing a name onto one line still split it into
@@ -157,7 +158,6 @@ func TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823(t *t
 		// sanitized onto one line — a strictly stronger guarantee, asserted
 		// separately below. (Parity with the route-filter CIDR fail-closed belt
 		// already documented in this test.)
-		{"set community additive", " set community 65000:2  neighbor 8.8.8.8 remote-as 65000 additive\n"},
 		{"set ipv6 next-hop", " set ipv6 next-hop global 2001:db8::1  router bgp 65000\n"},
 	}
 	for _, tc := range wantOnOneLine {
@@ -168,6 +168,12 @@ func TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823(t *t
 	for _, malformed := range []string{"10.0.0.0/8", "2001:db8::/32"} {
 		if strings.Contains(got, malformed) {
 			t.Errorf("policy-options prefix-list: malformed CIDR %q must be omitted, got:\n%s", malformed, got)
+		}
+	}
+
+	for _, value := range []string{"65000:1", "65000:2"} {
+		if strings.Contains(got, " set community "+value+" ") {
+			t.Errorf("malformed community value %q must be omitted, got:\n%s", value, got)
 		}
 	}
 

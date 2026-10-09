@@ -1501,10 +1501,13 @@ step. Both are required — neither sees the other's case:
   skip the dangling OR branch. This avoids relying on FRR's admission versus
   evaluation behavior for a missing match list. The guard is specific to
   `from community`; `then community delete` is a separate `set comm-list ...
-  delete` operation. Only NAME references are checked — `then community
-  (set|add) <value>` carries a community VALUE (e.g. `65000:100`), not a list
-  reference, and is not validated. Same fail-closed-the-whole-reload class as
-  the community-list definition gate above.
+  delete` operation. For add/set/bare replacement, the compiler post-pass
+  resolves authored community names once to FRR literals. Failed resolution
+  keeps the authored operand in Community/CommunityAdd and marks the term with
+  compiler-internal `CommunityResolutionFailed` state (`json:"-"`), so a
+  literal-shaped spelling cannot pass strict validation or tolerant rendering.
+  Strict errors and render warnings name the authored operand; successful
+  results are checked as literals and never resolved again.
 - **`GetBGPSummary` parses JSON, not the text table (#3942).**
   `GetBGPSummary` runs `show bgp summary json` and decodes it via
   `parseBGPSummaryJSON` (`status_parse.go`), mirroring the `parseRouteJSON`
