@@ -228,9 +228,10 @@ func (c *Config) ResolveFab(ref string) string {
 //     config, NOT reconstructed from the ref. Falls back to the
 //     verbatim ref only when no VPN binds the unit, since no xfrmi
 //     device exists for it then. That whole rule lives in
-//     SecureTunnelUnitNetdev, shared with snapshotLinuxName and
-//     junosHostLinuxName, keeps consumers on one ownership rule rather than
-//     copies asserted to agree (#6691).
+//     SecureTunnelUnitNetdev, which is shared with snapshotLinuxName,
+//     junosHostLinuxName, and the RI-member resolvers, keeping
+//     consumers on one ownership rule rather than copies asserted to
+//     agree (#6691).
 //     b. IRB: look up via IRBToBridge(cfg.BridgeDomains) and return
 //     the bridge device name (no suffix).
 //     c. Tunnel: if TunnelNameMap[ref] is set, return that name

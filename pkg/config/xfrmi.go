@@ -90,19 +90,14 @@ func XFRMIfNameAndID(bindIface string) (string, uint32) {
 // `st0.0` in both cases. The name therefore cannot be derived from the ref at
 // all — see SecureTunnelUnitNetdev, which reads it back from the config.
 //
-// It is NOT true that every resolver calls it. Two live sites in
-// pkg/dataplane/compiler_iface.go still derive the netdev from the ref, and
-// both are reached on the userspace path (loader.go CompileConfig →
-// compiler.go compileZones):
-//
-//	:73   resolveInterfaceRef          physName = config.LinuxIfName(ref)
-//	:805  buildInterfaceNetworkdModels XFRMIfNameAndID("<ifName>.<unit>")
-//
-// That file calls SecureTunnelUnitNetdev zero times. The migration is 4 of 6
-// resolvers, tracked as #6728-#6731, and userspace-dp/src/server/README.md
-// scopes it correctly — this comment is the one that overstated it. Do not
-// restore the absolute here without re-counting the call sites; an unqualified
-// "every" in a doc is what a later reader will rely on instead of grepping.
+// Every resolver now calls it: the two pkg/dataplane/compiler_iface.go sites
+// that used to derive the netdev from the ref (resolveInterfaceRef at :134,
+// buildInterfaceNetworkdModels at :1242) call cfg.SecureTunnelUnitNetdev
+// since 3f997a3da/a04a9bc09, and the RI-member resolvers joined in #12087.
+// Verified by grep at #12087 (compiler_iface.go:134 + :1242, plus the
+// Callers list on SecureTunnelUnitNetdev below). Do not restore a narrower
+// claim here without re-counting the call sites; an unqualified statement
+// in a doc is what a later reader will rely on instead of grepping.
 //
 // Callers of the PREDICATE, as of #6691 round 6: SecureTunnelUnitNetdev and
 // ResolveKernelIfName's verbatim fallback — both LEXICAL questions ("is this
@@ -147,8 +142,10 @@ func IsSecureTunnelIfName(base string) bool {
 //
 // Callers: ResolveKernelIfName (types.go), routingInstanceMemberLinuxName and
 // memberUnitLinuxName (routing_instance_member_devices.go), snapshotLinuxName
-// (pkg/dataplane/userspace/interfaces.go) and junosHostLinuxName
-// (junos_host_deny.go).
+// (pkg/dataplane/userspace/interfaces.go), junosHostLinuxName
+// (junos_host_deny.go), snapshotUnitDevice
+// (contested_trunk_zone_advisory_7509.go), resolveInterfaceRef and
+// buildInterfaceNetworkdModels (pkg/dataplane/compiler_iface.go).
 //
 // #6691: junosHostLinuxName is why this exists as one shared function rather
 // than hand-copied name resolution. It resolves the iifname scope for the
