@@ -185,6 +185,51 @@ func TestLo0TunnelBackedFilterBindingsDoNotWarn12091(t *testing.T) {
 	}
 }
 
+func TestLo0UnsupportedFilterWarningOrder12091(t *testing.T) {
+	cfg := compileLo0Set12091(t,
+		"set interfaces lo0 unit 10 family inet6 filter output v6",
+		"set interfaces lo0 unit 7 family inet6 filter output v6",
+		"set interfaces lo0 unit 7 family inet6 filter input v6",
+		"set interfaces lo0 unit 2 family inet6 filter output v6",
+		"set interfaces lo0 unit 2 family inet6 filter input v6",
+		"set interfaces lo0 unit 2 family inet filter output v4",
+		"set interfaces lo0 unit 2 family inet filter input v4",
+		"set interfaces lo0 unit 0 family inet6 filter output v6",
+		"set interfaces lo0 unit 0 family inet filter output v4")
+
+	want := []string{
+		`interfaces lo0 unit 0 family inet filter output "v4" is accepted but NOT enforced by either host plane; only lo0 unit 0 family inet/inet6 filter input is enforced (#12091)`,
+		`interfaces lo0 unit 0 family inet6 filter output "v6" is accepted but NOT enforced by either host plane; only lo0 unit 0 family inet/inet6 filter input is enforced (#12091)`,
+		`interfaces lo0 unit 2 family inet filter input "v4" is accepted but NOT enforced by either host plane; only lo0 unit 0 family inet/inet6 filter input is enforced (#12091)`,
+		`interfaces lo0 unit 2 family inet filter output "v4" is accepted but NOT enforced by either host plane; only lo0 unit 0 family inet/inet6 filter input is enforced (#12091)`,
+		`interfaces lo0 unit 2 family inet6 filter input "v6" is accepted but NOT enforced by either host plane; only lo0 unit 0 family inet/inet6 filter input is enforced (#12091)`,
+		`interfaces lo0 unit 2 family inet6 filter output "v6" is accepted but NOT enforced by either host plane; only lo0 unit 0 family inet/inet6 filter input is enforced (#12091)`,
+		`interfaces lo0 unit 7 family inet6 filter input "v6" is accepted but NOT enforced by either host plane; only lo0 unit 0 family inet/inet6 filter input is enforced (#12091)`,
+		`interfaces lo0 unit 7 family inet6 filter output "v6" is accepted but NOT enforced by either host plane; only lo0 unit 0 family inet/inet6 filter input is enforced (#12091)`,
+		`interfaces lo0 unit 10 family inet6 filter output "v6" is accepted but NOT enforced by either host plane; only lo0 unit 0 family inet/inet6 filter input is enforced (#12091)`,
+	}
+
+	assertOrder := func(warnings []string) {
+		t.Helper()
+		var got []string
+		for _, warning := range warnings {
+			if strings.Contains(warning, "#12091") {
+				got = append(got, warning)
+			}
+		}
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Fatalf("lo0 #12091 warnings are not in unit/family/direction order:\n got: %v\nwant: %v", got, want)
+		}
+	}
+
+	assertOrder(cfg.Warnings)
+	// Map iteration is randomized. Repeatedly exercise the public validator so
+	// removing the unit sort cannot occasionally pass by luck.
+	for range 32 {
+		assertOrder(ValidateConfig(cfg))
+	}
+}
+
 func fieldLo0Filter12091(unit *InterfaceUnit, field string) string {
 	switch field {
 	case "FilterInputV4":

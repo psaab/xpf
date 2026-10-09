@@ -299,9 +299,11 @@ func validateLo0FilterKernelMirrorWarnings(cfg *Config) []string {
 
 // lo0FilterHookEnforced reports whether the (unit, direction) lo0 hook is
 // consumed by a host plane (#12091). Unit 0 input is the supported host-filter
-// binding. Any other hook is inert unless lo0 is tunnel-backed — either at the
-// interface level or on the bound unit — which makes lo0 a real GRE netdev
-// with enforcing per-ifindex filters.
+// binding. Any other hook is inert unless its effective tunnel — the bound
+// unit's tunnel when present, otherwise the interface tunnel — has usable
+// endpoints (TunnelHasUsableEndpoints, #9156), so it creates the device needed
+// for per-ifindex filtering. A bare `tunnel` stanza without endpoints creates
+// no device, so the hook stays inert and keeps warning.
 func lo0FilterHookEnforced(lo0 *InterfaceConfig, number int, unit *InterfaceUnit, input bool) bool {
 	if lo0 == nil {
 		return false
@@ -309,16 +311,17 @@ func lo0FilterHookEnforced(lo0 *InterfaceConfig, number int, unit *InterfaceUnit
 	if number == 0 && input {
 		return true
 	}
-	if lo0.Tunnel != nil {
-		return true
+	if unit != nil && unit.Tunnel != nil {
+		return TunnelHasUsableEndpoints(unit.Tunnel)
 	}
-	return unit != nil && unit.Tunnel != nil
+	return TunnelHasUsableEndpoints(lo0.Tunnel)
 }
 
 // validateLo0UnsupportedFilterBindingsWarnings reports lo0 filter bindings the
 // host planes accept in the interface model but do not consume (#12091). The
 // host-filter contract is limited to unit 0 input in inet and inet6, plus any
-// hook on a tunnel-backed lo0; preserve those supported bindings and name every
+// hook backed by a usable effective lo0 tunnel (unit-level when present,
+// otherwise interface-level); preserve those supported bindings and name every
 // other non-empty lo0 hook.
 func validateLo0UnsupportedFilterBindingsWarnings(cfg *Config) []string {
 	if cfg == nil || cfg.Interfaces.Interfaces == nil {

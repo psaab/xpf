@@ -178,6 +178,70 @@ func TestFilterNoCatchAllSkipsUnenforcedLo0Hooks3295(t *testing.T) {
 		}
 	})
 
+	t.Run("incomplete tunnel stanzas remain inert", func(t *testing.T) {
+		cases := []struct {
+			name  string
+			lines []string
+			hooks []string
+		}{
+			{
+				name: "unit mode without endpoints",
+				lines: []string{
+					"set interfaces lo0 unit 1 tunnel mode gre",
+					"set interfaces lo0 unit 1 family inet filter input protect-re",
+				},
+				hooks: []string{"protect-re"},
+			},
+			{
+				name: "unit source without destination",
+				lines: []string{
+					"set interfaces lo0 unit 1 tunnel source 192.0.2.1",
+					"set interfaces lo0 unit 1 family inet filter input protect-re",
+				},
+				hooks: []string{"protect-re"},
+			},
+			{
+				name: "interface mode without endpoints",
+				lines: []string{
+					"set interfaces lo0 tunnel mode gre",
+					"set interfaces lo0 unit 0 family inet filter output output-filter",
+				},
+				hooks: []string{"output-filter"},
+			},
+			{
+				name: "interface source without destination",
+				lines: []string{
+					"set interfaces lo0 tunnel source 192.0.2.1",
+					"set interfaces lo0 unit 0 family inet filter output output-filter",
+					"set interfaces lo0 unit 1 family inet filter input protect-re",
+				},
+				hooks: []string{"output-filter", "protect-re"},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				lines := append([]string(nil), filterLines...)
+				lines = append(lines, tc.lines...)
+				warnings := ValidateConfig(compileSetLinesT(t, lines))
+				for _, name := range tc.hooks {
+					if got := hasNoCatchAllWarn(warnings, name); got != "" {
+						t.Errorf("incomplete tunnel hook %q must not receive #3295 advice: %q", name, got)
+					}
+					found12091 := false
+					for _, warning := range warnings {
+						if strings.Contains(warning, "#12091") && strings.Contains(warning, `"`+name+`"`) {
+							found12091 = true
+							break
+						}
+					}
+					if !found12091 {
+						t.Errorf("incomplete tunnel hook %q must receive #12091; warnings: %v", name, warnings)
+					}
+				}
+			})
+		}
+	})
+
 	t.Run("tunnel-backed hook remains enforced", func(t *testing.T) {
 		lines := append([]string(nil), filterLines...)
 		lines = append(lines,
