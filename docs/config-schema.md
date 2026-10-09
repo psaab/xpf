@@ -8637,6 +8637,28 @@ provenance: any observed unclosed bracketed `from` list fails closed, while a
 bare or quoted clause word inside a balanced list remains a value. Fail-on-revert
 coverage is in `pkg/config/routing_policy_unknown_from_11779_test.go`.
 
+### Route-filter tails are checked at strict commit (#12067)
+
+`from route-filter <prefix> <match-type>` may carry one match-type-specific
+operand (`upto /N`, `prefix-length-range /low-/high`, or `through <prefix>`).
+The strict commit/commit-check path rejects unconsumed tails, missing or
+malformed `upto` lengths, and the unsupported `through` / invalid range cases
+instead of letting the compiler or FRR renderer discard or widen the authored
+constraint. This includes term-line forms whose `Keys` tail is not visited by
+the schema walk: a bare `from route-filter` is retained as an `UnknownFrom`
+marker, and a compiled `upto` with no parsed length is rejected before commit.
+Packed `from` runs are segmented with the compiler's schema-arity rules, so a
+prefix-list, community, or as-path named `route-filter` remains a value
+reference rather than being mistaken for another filter head.
+
+`upto /24` remains valid and renders as FRR `le 24`. Tolerant load and peer-sync
+behavior is unchanged; they warn rather than reject, preserving the existing
+handling of configurations accepted before this gate. Coverage is in
+`pkg/config/route_filter_tail_12067_test.go`,
+`pkg/configstore/fused_statement_8437_test.go`, and
+`pkg/configstore/route_filter_r2_12067_test.go`.
+
+
 The policy-statement ACTION `then as-path-prepend "<asn> <asn> ..."` (#2892) is
 the same class on the `then` side. The leaf is `multi:true`
 (`schema_routing.go`: `policy-options policy-statement <name> term <name> then

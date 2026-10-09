@@ -252,21 +252,37 @@ func routeFilterKeyIsSibling12067(node *Node, parent *schemaNode, idx int) bool 
 // compact `from route-filter ...` spelling, where route-filter tokens remain
 // packed on the `from` node instead of becoming a route-filter child node.
 func validatePackedPolicyRouteFilterTailStrict12067(node *Node, parent *schemaNode) error {
-	if node == nil || len(node.Keys) < 2 {
+	if node == nil || len(node.Keys) < 2 || parent == nil {
 		return nil
 	}
-	for i := 1; i < len(node.Keys); i++ {
-		// The compiler dispatches the run head by Name(), even when authored
-		// quoted or bracketed. Provenance only protects non-head values.
-		if node.Keys[i] != "route-filter" || (i != 1 && (node.KeyQuoted(i) || node.KeyBracketed(i))) {
-			continue
-		}
+	fromSchema := resolveSchemaChild(parent, "from")
+	if fromSchema == nil {
+		return nil
+	}
+	tail := *node
+	tail.Keys = node.Keys[1:]
+	tail.Children = nil
+	if len(node.KeysQuoted) == len(node.Keys) {
+		tail.KeysQuoted = node.KeysQuoted[1:]
+	} else {
+		tail.KeysQuoted = nil
+	}
+	if len(node.KeysBracketed) == len(node.Keys) {
+		tail.KeysBracketed = node.KeysBracketed[1:]
+	} else {
+		tail.KeysBracketed = nil
+	}
+	// Segment exactly as the policy compiler does. In particular, a
+	// prefix-list/community/as-path value named "route-filter" belongs to
+	// that preceding leaf by its schema arity, not to a new route-filter.
+	parts := splitPolicyTermFromRun11779(nil, &tail, fromSchema, true)
+	inspectHead := func(i int) (int, bool, error) {
 		if i+2 >= len(node.Keys) {
-			return fmt.Errorf("route-filter in packed `from` is missing its prefix or match-type")
+			return 0, false, fmt.Errorf("route-filter in packed `from` is missing its prefix or match-type")
 		}
 		matchType := node.Keys[i+2]
 		if !routeFilterMatchTypes[matchType] {
-			continue
+			return i + 1, false, nil
 		}
 
 		// A quoted head makes splitPolicyTermFromRun11779 keep the entire
@@ -275,47 +291,81 @@ func validatePackedPolicyRouteFilterTailStrict12067(node *Node, parent *schemaNo
 		next := i + 3
 		switch matchType {
 		case "upto", "prefix-length-range", "through":
-			if next < len(node.Keys) && (quotedHead || !policyFromLeafKeyword12067(node, next)) {
+			if next < len(node.Keys) && (quotedHead ||
+				(!routeFilterKeyIsSibling12067(node, parent, next) &&
+					!routeFilterKeyIsSibling12067(node, fromSchema, next))) {
 				if matchType == "upto" {
+					// A clause keyword is a fused sibling, not an `upto`
+					// operand. Let the existing #8437 gate retain its
+					// targeted missing-semicolon diagnostic.
 					if routeFilterKeyIsSibling12067(node, parent, next) {
-						return nil
+						return next, true, nil
 					}
 					if _, ok := parseRouteFilterLen(node.Keys[next]); !ok {
-						return invalidRouteFilterUpto12067(node.Keys[next])
+						return 0, false, invalidRouteFilterUpto12067(node.Keys[next])
 					}
 				}
 				next++
 			} else if matchType == "upto" {
-				if next < len(node.Keys) && routeFilterKeyIsSibling12067(node, parent, next) {
+				return 0, false, fmt.Errorf("route-filter `upto` requires a prefix length such as /24")
+			}
+		}
+		if next < len(node.Keys) && (quotedHead ||
+			(!routeFilterKeyIsSibling12067(node, parent, next) &&
+				!routeFilterKeyIsSibling12067(node, fromSchema, next))) {
+			return 0, false, fmt.Errorf("unconsumed route-filter token %q after match-type %q", node.Keys[next], matchType)
+		}
+		return next, false, nil
+	}
+
+	nextScan := 1
+	index := 1
+	for _, part := range parts {
+		if part == nil || len(part.Keys) == 0 || index >= len(node.Keys) {
+			break
+		}
+		partEnd := index + len(part.Keys)
+		if part.Name() == "route-filter" {
+			if index >= nextScan && (index == 1 ||
+				(!node.KeyQuoted(index) && !node.KeyBracketed(index))) {
+				next, stop, err := inspectHead(index)
+				if err != nil {
+					return err
+				}
+				if stop {
 					return nil
 				}
-				return fmt.Errorf("route-filter `upto` requires a prefix length such as /24")
+				if next > nextScan {
+					nextScan = next
+				}
+			}
+		} else if resolveSchemaChild(fromSchema, part.Name()) == nil {
+			// The inline parser can resume dispatch after an opaque,
+			// unsupported leaf. Preserve scanner coverage for a later
+			// route-filter head within that unknown tail.
+			for i := index; i < partEnd; i++ {
+				if i < nextScan || node.Keys[i] != "route-filter" ||
+					node.KeyQuoted(i) || node.KeyBracketed(i) {
+					continue
+				}
+				next, stop, err := inspectHead(i)
+				if err != nil {
+					return err
+				}
+				if stop {
+					return nil
+				}
+				if next > nextScan {
+					nextScan = next
+				}
+				if next > i {
+					i = next - 1
+				}
 			}
 		}
-		if next < len(node.Keys) && (quotedHead || !policyFromLeafKeyword12067(node, next)) {
-			if routeFilterKeyIsSibling12067(node, parent, next) {
-				return nil
-			}
-			return fmt.Errorf("unconsumed route-filter token %q after match-type %q", node.Keys[next], matchType)
-		}
-		if matchType == "upto" && next == i+3 && next >= len(node.Keys) {
-			return fmt.Errorf("route-filter `upto` requires a prefix length such as /24")
-		}
-		i = next - 1
+		index = partEnd
 	}
 	return nil
-}
-
-func policyFromLeafKeyword12067(node *Node, idx int) bool {
-	if node.KeyQuoted(idx) || node.KeyBracketed(idx) {
-		return false
-	}
-	switch node.Keys[idx] {
-	case "protocol", "prefix-list", "route-filter", "community", "as-path":
-		return true
-	default:
-		return false
-	}
 }
 
 // ValidateRouteDestination accepts a static-route destination prefix: a

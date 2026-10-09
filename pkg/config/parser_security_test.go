@@ -2653,9 +2653,10 @@ func TestParseRouteFilterLen(t *testing.T) {
 	}
 }
 
-// TestRouteFilterUptoCompile_MalformedLength asserts that an upto with a
-// non-numeric length token compiles with UptoLen 0 (the renderer then
-// degrades to the orlonger default rather than emitting a bad line).
+// TestRouteFilterUptoCompile_MalformedLength asserts that tolerant compilation
+// preserves an unparseable upto length as UptoLen 0; strict compilation rejects
+// the same value because the renderer fallback would widen it to `le maxLen`.
+// This pins parser behavior without re-accepting the fail-open strict commit.
 func TestRouteFilterUptoCompile_MalformedLength(t *testing.T) {
 	tree := &ConfigTree{}
 	path, err := ParseSetCommand("set policy-options policy-statement p term t1 from route-filter 10.0.0.0/8 upto /abc")
@@ -2665,9 +2666,9 @@ func TestRouteFilterUptoCompile_MalformedLength(t *testing.T) {
 	if err := tree.SetPath(path); err != nil {
 		t.Fatalf("SetPath: %v", err)
 	}
-	cfg, err := CompileConfig(tree)
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
-		t.Fatalf("compile: %v", err)
+		t.Fatalf("lenient compile: %v", err)
 	}
 	rf := firstRouteFilter(t, cfg)
 	if rf.MatchType != "upto" {

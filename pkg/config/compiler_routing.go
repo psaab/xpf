@@ -1847,6 +1847,11 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				}
 				term.RouteFilters = append(term.RouteFilters, rf)
 				i += consumed
+			} else {
+				// A term-line tail is outside the schema walk. Preserve the
+				// bare route-filter marker so the strict #11779 gate rejects
+				// it rather than compiling a match-all permit with no filter.
+				term.UnknownFrom = append(term.UnknownFrom, "route-filter")
 			}
 		case "next-hop":
 			if i+1 < len(keys) {
