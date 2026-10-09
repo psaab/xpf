@@ -57,6 +57,11 @@ func TestReconcileVRFsSkipsDeleteForTrackedNotDesiredForeignLink(t *testing.T) {
 	if ops.dels != 0 {
 		t.Errorf("LinkDel calls = %d, want 0 for a tracked-not-desired foreign link", ops.dels)
 	}
+	for _, name := range manager.vrfs {
+		if name == "vrf-old" {
+			t.Errorf("tracked VRFs = %v, want vrf-old ownership released (no newTracked append on skip)", manager.vrfs)
+		}
+	}
 }
 
 // TestReconcileVRFsTrackedDesiredForeignReleasesOwnership verifies a
@@ -97,6 +102,8 @@ func TestReconcileVRFsRefusalDoesNotBlockSiblings(t *testing.T) {
 	ops.overlay["vrf-mgmt"] = foreign
 	ops.extraLinks = []netlink.Link{foreign}
 
+	ops.seed("vrf-orphan", 555)
+
 	manager := &vrfManager{ops: ops}
 	err := manager.Reconcile([]VRFSpec{{Name: "mgmt", TableID: 999}, {Name: "blue", TableID: 100}})
 	if err == nil {
@@ -104,5 +111,11 @@ func TestReconcileVRFsRefusalDoesNotBlockSiblings(t *testing.T) {
 	}
 	if len(manager.vrfs) != 1 || manager.vrfs[0] != "vrf-blue" {
 		t.Errorf("tracked VRFs = %v, want [vrf-blue] (sibling created)", manager.vrfs)
+	}
+	if _, stillThere := ops.links["vrf-orphan"]; stillThere {
+		t.Errorf("orphan vrf-orphan still present, want reaped (sweep ran past the refusal)")
+	}
+	if ops.dels != 1 {
+		t.Errorf("LinkDel calls = %d, want 1 (orphan only, foreign untouched)", ops.dels)
 	}
 }
