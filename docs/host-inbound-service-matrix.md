@@ -91,7 +91,7 @@ follow-up; until it lands, surface 3 stays a hand-mirror held by the set-level
 | Token (aliases) | nft match (`daemon_nft.go`) | Rust admit (`host_inbound.rs`) | Family | Notes |
 |---|---|---|---|---|
 | `all` | union of every row in this table EXCEPT `gre` and `r-exec`/`rexec` | same union (`system_service_all_expansion`) | per expanded token | **#3226:** expands to the named system-services — NOT a packet-wide admit and NOT a full-admit boolean. The zone keeps its catch-all drop, so raw IP protocols (GRE/OSPF/PIM/VRRP/future proto numbers) and unlisted ports are DENIED unless listed explicitly. ESP/AH are the exception: they keep an unconditional global accept (see the ESP/AH row), so they are NOT denied by this change. The expanded `ident-reset` keeps its RESET verdict. See [`system-services all` is the named-service union](#system-services-all-is-the-named-service-union-3226). |
-| `any-service` | full admit | `all_services = true` | dual | Blanket accept for the zone — a **packet-wide** admit of EVERY IP protocol/port. Junos defines `any-service` as "all system services on an entire port range including the system services that are not defined"; xpf reads it as the (wider) packet-wide superset. `config.HostInboundFullAdmitService` is the SSOT; `ValidateConfig` emits a commit-time advisory naming the zone/interface. See [`system-services all` is the named-service union](#system-services-all-is-the-named-service-union-3226). |
+| `any-service` | full admit | `all_services = true` | dual | Blanket accept for the zone — a **packet-wide** admit of EVERY IP protocol/port. Junos defines `any-service` as "all system services on an entire port range including the system services that are not defined"; xpf reads it as the (wider) packet-wide superset. `config.HostInboundFullAdmitService` is the SSOT; `ValidateConfig` emits a commit-time advisory naming the zone/interface. A named `except` cannot be subtracted from this full-admit token: strict commit rejects known `system-services` or `protocols` exclusions in the same host-inbound stanza, while tolerant load retains `any-service` and warns once per affected stanza, naming the known exclusions (#12054). See [`system-services all` is the named-service union](#system-services-all-is-the-named-service-union-3226). |
 | `ssh` | tcp 22 | tcp 22 | dual | |
 | `telnet` | tcp 23 | tcp 23 | dual | |
 | `ftp` | tcp 21 | tcp 21 | dual | Control port only; FTP data is an ALG/transit concern. |
@@ -1708,6 +1708,12 @@ nested, value-tail, and flat-set spellings for service and protocol exclusions.
 The compiler expands `all`, subtracts the authored exclusions, preserves
 unknown modifiers for strict validation, and emits the existing positive-token
 representation consumed by both enforcement paths.
+`any-service` is not that service union: xpf cannot subtract a named service or
+protocol exclusion from its packet-wide full-admit. A strict commit therefore
+rejects known `system-services` or `protocols` `except` exclusions in the same
+host-inbound stanza; tolerant load keeps `any-service` so existing persisted
+configurations still boot, and warns once per affected stanza, naming each
+known exclusion (#12054).
 
 **What upgrading takes away.** For every interface that declares a stanza, the
 lost set is the zone-level tokens the interface stanza does not repeat (after

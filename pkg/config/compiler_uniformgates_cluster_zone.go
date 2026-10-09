@@ -450,21 +450,34 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 	}
 
 	// #3200 host-inbound-traffic token gate. Strict on commit / commit-check
-	// (hard-reject an unknown/typo system-services or protocols token that
-	// would commit but enforce inconsistently — nft kernel mirror fails OPEN
-	// for an all-unknown stanza while the Rust classifier fails CLOSED, a
-	// split-brain posture); lenient on load / peer-sync (downgrade to a warning
-	// so an already-persisted or peer-synced config carrying a stale token
-	// still boots — #1960 no-brick; both enforcement layers ignore the unknown
-	// token and the nft path now fails CLOSED for a zero-match zone, so a
-	// leniently-loaded bad config is inert and consistent). Runs AFTER the zone
-	// gates so a structural/zone-reference error still wins the first-error slot.
+	// (hard-reject an unknown/typo system-services or protocols token that can
+	// make the nft kernel mirror and Rust classifier enforce inconsistently);
+	// lenient on load / peer-sync, where only the unknown token is ignored and
+	// this diagnostic is downgraded to a warning (#1960 no-brick). The separate
+	// #12054 full-admit-except gate below handles inert known exclusions without
+	// taking this gate's one-warning slot. Runs AFTER the zone gates so a
+	// structural/zone-reference error still wins the first-error slot.
 	if err := validateHostInboundTokensStrict(cfg); err != nil {
 		if opts.lenientHostInboundTokens {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("host-inbound-traffic token (downgraded to warning on tolerant path): %v", err))
 		} else {
 			return err
+		}
+	}
+
+	// #12054 full-admit-except gate. Scan independently of the token gate so
+	// a tolerant unknown-token warning does not hide this diagnostic. Every
+	// affected zone or per-interface stanza is reported on tolerant loads;
+	// strict commits reject at the first deterministic diagnostic.
+	if diagnostics := validateHostInboundFullAdmitExceptStrict(cfg); len(diagnostics) > 0 {
+		if opts.lenientHostInboundFullAdmitExcept {
+			for _, diagnostic := range diagnostics {
+				cfg.Warnings = append(cfg.Warnings,
+					fmt.Sprintf("host-inbound-traffic full-admit except (downgraded to warning on tolerant path): %v", diagnostic))
+			}
+		} else {
+			return diagnostics[0]
 		}
 	}
 
