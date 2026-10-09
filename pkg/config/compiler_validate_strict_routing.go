@@ -1293,38 +1293,6 @@ func staticRouteDispositionConflict(sr *StaticRoute) string {
 	return strings.Join(found, " + ")
 }
 
-// validateStaticRouteDispositionConflictStrict hard-rejects a static route that
-// carries MORE THAN ONE mutually-exclusive disposition for a single destination
-// prefix — e.g. `discard` together with a reachable `next-hop`, a `next-table`
-// VRF leak together with a `next-hop`, or `discard` together with `reject`.
-//
-// The compiler merges repeated same-destination static-route blocks (flat "set"
-// syntax emits one block per line) into a single StaticRoute
-// (compileStaticRoutes): next-hops are APPENDED and the terminal / next-table
-// fields are STICKY (discard/reject latch true, next-table/preference are
-// last-writer-wins). A config that declares the SAME prefix once as `discard`
-// (or `next-table X`) and once with a `next-hop` therefore compiled into ONE
-// route holding BOTH a blackhole/leak AND a forwarding next-hop — a
-// contradiction that passed the strict gate. The live snapshot copies every
-// field (pkg/dataplane/userspace/routes.go) and the Rust forwarder resolves
-// discard before next-table before next-hops
-// (userspace-dp/src/afxdp/forwarding/mod.rs), so the stale terminal / leak wins
-// and a later next-hop meant to RESTORE ordinary forwarding is silently ignored
-// — a blackhole or a cross-VRF leak the operator did not author (#5633).
-//
-// Junos permits exactly one action per static route. Rejecting the mix at commit
-// keeps the compiled route unambiguous and the operator informed rather than
-// letting the dataplane pick a precedence the config never expressed. Multiple
-// next-hops for one destination stay legitimate ECMP and do NOT trip this gate.
-//
-// Strict on commit / commit-check (hard reject so the contradiction is
-// operator-visible); the call site downgrades this to a warning on the tolerant
-// load / peer-sync path so an already-persisted or peer-synced config still
-// BOOTS — the dataplane then resolves the deterministic disposition precedence.
-// Global inet.0/inet6.0 collections are checked as one effective-table scope,
-// then each routing-instance's collections together in RoutingInstances order.
-// Cross-collection aliases fold to one route before this gate; competing
-// next-table targets are retained as compiler-only conflict metadata.
 func staticRouteDestinationNames(sr *StaticRoute) string {
 	if sr == nil {
 		return `""`
@@ -1336,20 +1304,40 @@ func staticRouteDestinationNames(sr *StaticRoute) string {
 	return destinationNames
 }
 
+// validateStaticRouteDispositionConflictStrict rejects ambiguous static-route
+// merges before they can silently change forwarding. Besides mutually exclusive
+// actions (next-hop, next-table, discard, reject), it checks compiler metadata
+// for competing next-table targets and install/no-install disagreement.
+//
+// Repeated same-prefix blocks append next-hops and latch discard/reject. When
+// their route preferences differ, the merge stamps each unqualified next-hop
+// with its source preference so floating statics remain separate distance
+// tiers. A conflicting next-table target is retained as metadata instead of
+// selecting a target based on alias spelling or collection order. If sources
+// disagree on no-install, tolerant compilation preserves the installable row
+// while strict validation rejects the ambiguous intent.
+//
+// Junos permits exactly one action per static route. Rejecting ambiguous
+// dispositions at commit keeps the compiled route unambiguous and operator-
+// visible; multiple next-hops for one destination remain legitimate ECMP.
+// The call site downgrades strict errors to warnings on tolerant load/peer-sync
+// paths so persisted configurations still boot with deterministic precedence.
+// Global inet.0/inet6.0 collections are checked as one effective-table scope,
+// then each routing-instance's collections together in RoutingInstances order.
+// Merged aliases retain authored destination spellings for diagnostics.
 func validateStaticRouteDispositionConflictStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
 	}
 	check := func(scope string, routeSets ...[]*StaticRoute) error {
-		seenTargets := make(map[string]*StaticRoute)
 		for _, routes := range routeSets {
 			for _, sr := range routes {
 				if sr == nil {
 					continue
 				}
-				if len(sr.crossCollectionNextTableTargets) > 1 {
-					targets := make([]string, len(sr.crossCollectionNextTableTargets))
-					for i, target := range sr.crossCollectionNextTableTargets {
+				if len(sr.competingNextTableTargets) > 1 {
+					targets := make([]string, len(sr.competingNextTableTargets))
+					for i, target := range sr.competingNextTableTargets {
 						targets[i] = fmt.Sprintf("%q", target)
 					}
 					return fmt.Errorf(
@@ -1358,23 +1346,11 @@ func validateStaticRouteDispositionConflictStrict(cfg *Config) error {
 						scope, staticRouteDestinationNames(sr),
 						strings.Join(targets, " and "))
 				}
-				key := staticRouteMergeKey(sr.Destination)
-				if (strings.HasPrefix(key, "v4\x00") || strings.HasPrefix(key, "v6\x00")) {
-					if previous, exists := seenTargets[key]; exists {
-						if previous.NextTable != "" && sr.NextTable != "" &&
-							previous.NextTable != sr.NextTable {
-							return fmt.Errorf(
-								"%s %s and %s have competing next-table targets %q and %q "+
-									"for one masked destination prefix",
-								scope, staticRouteDestinationNames(previous),
-								staticRouteDestinationNames(sr), previous.NextTable, sr.NextTable)
-						}
-						if previous.NextTable == "" && sr.NextTable != "" {
-							seenTargets[key] = sr
-						}
-					} else {
-						seenTargets[key] = sr
-					}
+				if sr.noInstallConflict {
+					return fmt.Errorf(
+						"%s %s has conflicting install and no-install declarations "+
+							"for one masked destination prefix",
+						scope, staticRouteDestinationNames(sr))
 				}
 
 				conflict := staticRouteDispositionConflict(sr)

@@ -296,11 +296,6 @@ func staticRouteMergeKey(destination string) string {
 				return "v4\x00" + masked.String()
 			}
 		}
-		family := "v4\x00"
-		if strings.Contains(destination, ":") {
-			family = "v6\x00"
-		}
-		return family + prefix.String()
 	}
 	return destination
 }
@@ -321,13 +316,26 @@ func appendStaticRouteNextTableConflict(route *StaticRoute, target string) {
 	if route == nil || target == "" {
 		return
 	}
-	for _, existing := range route.crossCollectionNextTableTargets {
+	for _, existing := range route.competingNextTableTargets {
 		if existing == target {
 			return
 		}
 	}
-	route.crossCollectionNextTableTargets = append(
-		route.crossCollectionNextTableTargets, target)
+	route.competingNextTableTargets = append(
+		route.competingNextTableTargets, target)
+}
+
+func setStaticRouteNextTable(route *StaticRoute, raw string) {
+	if route == nil || raw == "" {
+		return
+	}
+	target := parseNextTableInstance(raw)
+	if route.NextTable != "" && route.NextTable != target {
+		appendStaticRouteNextTableConflict(route, route.NextTable)
+		appendStaticRouteNextTableConflict(route, target)
+	}
+	route.NextTableRaw = raw
+	route.NextTable = target
 }
 
 func mergeStaticRouteIdentity(existing, route *StaticRoute) {
@@ -338,8 +346,34 @@ func mergeStaticRouteIdentity(existing, route *StaticRoute) {
 	for _, alias := range route.destinationAliases {
 		appendStaticRouteDestinationAlias(existing, alias)
 	}
-	for _, target := range route.crossCollectionNextTableTargets {
+	for _, target := range route.competingNextTableTargets {
 		appendStaticRouteNextTableConflict(existing, target)
+	}
+	if existing.NextTable != "" && route.NextTable != "" &&
+		existing.NextTable != route.NextTable {
+		appendStaticRouteNextTableConflict(existing, existing.NextTable)
+		appendStaticRouteNextTableConflict(existing, route.NextTable)
+	}
+	if existing.NoInstall != route.NoInstall || route.noInstallConflict {
+		existing.noInstallConflict = true
+	}
+	// A merged route can combine independently configured preference tiers.
+	// Stamp the source route's effective distance on unqualified next-hops so
+	// later route-level preference updates cannot turn floating backups into
+	// ECMP. Explicit qualified-next-hop preferences remain authoritative.
+	if existing.Preference != route.Preference {
+		for i := range existing.NextHops {
+			if !existing.NextHops[i].HasPreference {
+				existing.NextHops[i].Preference = existing.Preference
+				existing.NextHops[i].HasPreference = true
+			}
+		}
+		for i := range route.NextHops {
+			if !route.NextHops[i].HasPreference {
+				route.NextHops[i].Preference = route.Preference
+				route.NextHops[i].HasPreference = true
+			}
+		}
 	}
 	existing.NextHops = append(existing.NextHops, route.NextHops...)
 	if route.Discard {
@@ -348,13 +382,13 @@ func mergeStaticRouteIdentity(existing, route *StaticRoute) {
 	if route.Reject {
 		existing.Reject = true
 	}
-	if route.NoInstall {
-		existing.NoInstall = true
-	}
-	// #9125: HasPreference, not `!= 5`. The old test could not tell an
-	// operator who wrote `preference 5` from one who wrote nothing,
-	// because 5 is also the compiler's own default -- so an explicit 5
-	// in a later block was silently dropped while any other value applied.
+	// A conflict is diagnosed on strict commit. On tolerant loads, preserve
+	// installation if any contributing route was installable; NoInstall only
+	// excludes the merged route when every source requested it.
+	existing.NoInstall = existing.NoInstall && route.NoInstall
+	// #9125: HasPreference distinguishes an explicit preference 5 from the
+	// compiler default. The source next-hops above retain independent distances
+	// when this route-level value changes.
 	if route.HasPreference {
 		existing.Preference = route.Preference
 		existing.HasPreference = true
@@ -368,15 +402,13 @@ func mergeStaticRouteIdentity(existing, route *StaticRoute) {
 // canonicalizeStaticRouteCollections folds aliases split between bare static
 // and rib inet6.0 route lists. The snapshot normalizes by destination family,
 // so an IPv6 route in the bare list and its inet6.0 alias are one effective
-// route. Keep each survivor in its original collection to avoid changing
-// unrelated consumers' list semantics; separate routing-instance calls keep
-// otherwise-identical routes isolated.
+// route. A cross-collection survivor is placed in the list matching its
+// destination family, preserving consumers that use the list as a family tag.
+// Separate routing-instance calls keep otherwise-identical routes isolated.
 //
-// Competing cross-collection targets are recorded as compiler-only conflict
-// metadata while the route itself folds to one deterministic last-writer row.
-// The strict gate rejects the metadata; the tolerant gate warns and leaves the
-// single row available to snapshots. Within one collection, the existing
-// compileStaticRoutes last-writer-wins behavior remains unchanged.
+// Competing next-table targets and no-install disagreement are retained as
+// compiler-only conflict metadata. Strict validation rejects these conflicts;
+// tolerant loads warn and keep one deterministic route available to snapshots.
 func canonicalizeStaticRouteCollections(
 	staticRoutes, inet6Routes []*StaticRoute,
 ) ([]*StaticRoute, []*StaticRoute) {
@@ -387,7 +419,7 @@ func canonicalizeStaticRouteCollections(
 		route       *StaticRoute
 		isInet6List bool
 	}
-	byIdentity := make(map[string][]candidate)
+	byIdentity := make(map[string]candidate)
 	mergedStatic := make([]*StaticRoute, 0, len(staticRoutes))
 	mergedInet6 := make([]*StaticRoute, 0, len(inet6Routes))
 
@@ -406,33 +438,28 @@ func canonicalizeStaticRouteCollections(
 				continue
 			}
 
-			merged := false
-			for _, prior := range byIdentity[key] {
-				if prior.route == route {
-					merged = true
-					break
+			if prior, exists := byIdentity[key]; exists {
+				if prior.route != route {
+					mergeStaticRouteIdentity(prior.route, route)
 				}
-				// Preserve cross-container target conflicts for the strict gate
-				// while still coalescing to one last-writer row on the tolerant
-				// path, avoiding duplicate same-priority snapshots.
-				if prior.isInet6List != isInet6List &&
-					prior.route.NextTable != "" && route.NextTable != "" &&
-					prior.route.NextTable != route.NextTable {
-					appendStaticRouteNextTableConflict(
-						prior.route, prior.route.NextTable)
-					appendStaticRouteNextTableConflict(prior.route, route.NextTable)
+				if prior.isInet6List != isInet6List {
+					destinationIsIPv6 := strings.HasPrefix(key, "v6\x00")
+					if destinationIsIPv6 && !prior.isInet6List {
+						for i, existing := range mergedStatic {
+							if existing == prior.route {
+								mergedStatic = append(mergedStatic[:i], mergedStatic[i+1:]...)
+								break
+							}
+						}
+						mergedInet6 = append(mergedInet6, prior.route)
+						prior.isInet6List = true
+						byIdentity[key] = prior
+					}
 				}
-				mergeStaticRouteIdentity(prior.route, route)
-				merged = true
-				break
-			}
-			if merged {
 				continue
 			}
 
-			byIdentity[key] = append(byIdentity[key], candidate{
-				route: route, isInet6List: isInet6List,
-			})
+			byIdentity[key] = candidate{route: route, isInet6List: isInet6List}
 			if isInet6List {
 				mergedInet6 = append(mergedInet6, route)
 			} else {
@@ -513,8 +540,7 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 				case "next-table":
 					if i+1 < len(routeInst.node.Keys) {
 						i++
-						route.NextTableRaw = routeInst.node.Keys[i]
-						route.NextTable = parseNextTableInstance(routeInst.node.Keys[i])
+						setStaticRouteNextTable(route, routeInst.node.Keys[i])
 					}
 				case "qualified-next-hop":
 					if i+1 < len(routeInst.node.Keys) {
@@ -703,8 +729,7 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 				route.NextHops = append(route.NextHops, nh)
 			case "next-table":
 				if v := nodeVal(prop); v != "" {
-					route.NextTableRaw = v
-					route.NextTable = parseNextTableInstance(v)
+					setStaticRouteNextTable(route, v)
 				}
 			}
 		}

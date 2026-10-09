@@ -102,32 +102,31 @@ func TestStaticRouteIdentityAliasRejected_12084(t *testing.T) {
 		}
 	})
 
-	// next-table A/B across spellings: same-spelling next-table lines merge
-	// into ONE route (last-writer-wins, single next-table disposition), so
-	// the compiled route set must carry exactly one row for the masked
-	// prefix — never the two same-priority leak rules that let the kernel
-	// (insertion order) and the helper (string order) pick different
-	// instances.
-	t.Run("nexttable-alias-single-row", func(t *testing.T) {
+	// Aliased next-table targets are ambiguous, not last-writer-wins: strict
+	// compilation rejects the conflict before a defined target can mask an
+	// undefined #5693 target, and tolerant compilation warns.
+	t.Run("nexttable-alias-competing-targets-rejected", func(t *testing.T) {
 		tree := flatTreeFromSets(t,
 			"set routing-instances aaa instance-type virtual-router",
-			"set routing-instances zzz instance-type virtual-router",
 			"set interfaces ge-0/0/0 unit 0",
-			"set routing-options static route 172.16.0.0/12 next-table aaa.inet.0",
-			"set routing-options static route 172.16.9.9/12 next-table zzz.inet.0",
+			"set routing-options static route 172.16.0.0/12 next-table aab.inet.0",
+			"set routing-options static route 172.16.9.9/12 next-table aaa.inet.0",
 		)
-		cfg := assertCommitAccepts(t, tree)
-		var rows []*StaticRoute
-		for _, sr := range cfg.RoutingOptions.StaticRoutes {
-			if sr != nil && (sr.Destination == "172.16.0.0/12" || sr.Destination == "172.16.9.9/12") {
-				rows = append(rows, sr)
-			}
+		assertCommitRejects(t, tree, "competing next-table targets")
+		cfg, err := CompileConfigLenient(tree)
+		if err != nil {
+			t.Fatalf("CompileConfigLenient: %v", err)
 		}
-		if len(rows) != 1 {
-			t.Fatalf("expected one compiled row for the aliased prefix, got %d", len(rows))
+		foundWarning := false
+		for _, warning := range cfg.Warnings {
+			foundWarning = foundWarning || strings.Contains(warning, "competing next-table targets")
 		}
-		if rows[0].NextTable != "zzz" {
-			t.Fatalf("expected last-writer-wins next-table %q, got %q", "zzz", rows[0].NextTable)
+		if !foundWarning {
+			t.Fatalf("tolerant compilation did not warn about competing targets: %v", cfg.Warnings)
+		}
+		if len(cfg.RoutingOptions.StaticRoutes) != 1 ||
+			cfg.RoutingOptions.StaticRoutes[0].NextTable != "aaa" {
+			t.Fatalf("tolerant route should retain one deterministic target: %+v", cfg.RoutingOptions.StaticRoutes)
 		}
 	})
 }
@@ -239,7 +238,7 @@ func TestStaticRouteCrossCollectionIdentityRejected_12084(t *testing.T) {
 			append([]*StaticRoute(nil), lenientCfg.RoutingOptions.StaticRoutes...),
 			lenientCfg.RoutingOptions.Inet6StaticRoutes...)
 		if len(routes) != 1 || routes[0].NextTable != "zzz" {
-			t.Fatalf("lenient cross-container routes = %+v, want one last-writer target zzz", routes)
+			t.Fatalf("lenient cross-container routes = %+v, want one deterministic target zzz", routes)
 		}
 		warned := false
 		for _, warning := range lenientCfg.Warnings {

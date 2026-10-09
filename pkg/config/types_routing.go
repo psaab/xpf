@@ -349,13 +349,14 @@ type StaticRoute struct {
 	// destinationAliases retains alternate authored CIDR spellings for
 	// commit-time diagnostics after compileStaticRoutes folds them by masked
 	// prefix. It is compiler-only and deliberately omitted from the helper wire.
-	destinationAliases []string       `json:"-"`
-	// crossCollectionNextTableTargets records competing table targets found
-	// across bare-static and inet6.0 lists. The tolerant compiler keeps one
-	// last-writer route after warning; strict validation rejects the marker.
-	crossCollectionNextTableTargets []string `json:"-"`
-	NextHops           []NextHopEntry // preference/metric tiers; equal tiers form ECMP
-	Discard            bool           // null route (blackhole): silently drop matching traffic
+	destinationAliases []string `json:"-"`
+	// competingNextTableTargets records competing targets found while folding
+	// routes with the same masked destination. The tolerant compiler retains
+	// one deterministic target after warning; strict validation rejects.
+	competingNextTableTargets []string       `json:"-"`
+	noInstallConflict         bool           `json:"-"`
+	NextHops                  []NextHopEntry // preference/metric tiers; equal tiers form ECMP
+	Discard                   bool           // null route (blackhole): silently drop matching traffic
 	// Reject installs an unreachable route: matching traffic is dropped AND an
 	// ICMP unreachable is returned to the source (Junos `route <p> reject` →
 	// FRR `ip route <p> reject`). Distinct from Discard (Junos `discard` → FRR
