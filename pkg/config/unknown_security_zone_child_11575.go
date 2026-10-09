@@ -39,29 +39,42 @@ func recordUnknownSecurityZoneChild11575(zone *ZoneConfig, keyword string) {
 }
 
 // The zone child grammar's enforcement-bearing names are screen (IDS),
-// interface membership, host-inbound policy, TCP-RST, and address-book. A
-// two-edit bound catches short operator typos; matching case-insensitively and
-// recognizing three-or-more-character prefixes also catches common Junos
-// keyword truncations without treating arbitrary metadata as enforcement.
+// interface membership, host-inbound policy, TCP-RST, and address-book
+// behavior. A two-edit bound catches short operator typos; matching
+// case-insensitively and recognizing enforcement-keyword prefixes also catches
+// common Junos keyword truncations. The book's own entry keywords ("address",
+// "address-set") are enforcement-bearing here too: nested directly under a
+// zone they are dropped, and policy references to intended zone-local names
+// then fall back to same-named global entries.
 func enforcementBearingUnknownZoneChild11575(keyword string) bool {
+	if len(keyword) <= 2 {
+		// The zone schema is closed-world and has no modeled child this short.
+		// Treat every one- or two-byte unknown as an enforcement truncation.
+		return true
+	}
 	if containsZoneKeyword11575(keyword, "screen") || containsZoneKeyword11575(keyword, "ids") {
 		return true
 	}
-	for _, supported := range [...]string{"screen", "interfaces", "host-inbound-traffic", "tcp-rst", "address-book"} {
+	if containsZoneKeyword11575(keyword, "addr") && containsZoneKeyword11575(keyword, "book") {
+		return true
+	}
+	for _, supported := range [...]string{"screen", "interfaces", "host-inbound-traffic", "tcp-rst", "address-book", "address-set"} {
 		if zoneKeywordDistanceAtMostTwo11575(keyword, supported) ||
-			zoneKeywordPrefixAtLeastThree11575(keyword, supported) {
+			zoneKeywordPrefixAtLeastTwo11575(keyword, supported) {
 			return true
 		}
 	}
 	return false
 }
 
-// zoneKeywordPrefixAtLeastThree11575 recognizes a plausible truncated
-// enforcement keyword, including "scr" for "screen" and "host-inbound" for
-// "host-inbound-traffic". Requiring a three-byte prefix avoids poisoning a
-// zone for generic one- or two-character unknown metadata.
-func zoneKeywordPrefixAtLeastThree11575(prefix, supported string) bool {
-	if len(prefix) < 3 || len(prefix) >= len(supported) {
+// zoneKeywordPrefixAtLeastTwo11575 recognizes plausible truncated
+// enforcement keywords, including "sc" for "screen" and "host-inbound" for
+// "host-inbound-traffic". The closed-world zone grammar has no legitimate
+// one- or two-byte child; enforcementBearingUnknownZoneChild11575 handles
+// those spellings before this helper, while this helper checks two-byte and
+// longer prefixes of a supported enforcement keyword.
+func zoneKeywordPrefixAtLeastTwo11575(prefix, supported string) bool {
+	if len(prefix) < 2 || len(prefix) >= len(supported) {
 		return false
 	}
 	for i := range len(prefix) {
