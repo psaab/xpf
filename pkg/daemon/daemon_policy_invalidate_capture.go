@@ -119,6 +119,15 @@ func (c capturedSessions) empty() bool {
 	return len(c.v4) == 0 && len(c.v6) == 0 && len(c.policy) == 0
 }
 
+func (c *policyInvalidationCapture) candidateCount() int {
+	if c == nil {
+		return 0
+	}
+	return len(c.deleted.v4) + len(c.deleted.v6) + len(c.deleted.policy) +
+		len(c.modified.v4) + len(c.modified.v6) + len(c.modified.policy) +
+		len(c.deflt.v4) + len(c.deflt.v6) + len(c.deflt.policy)
+}
+
 // policyInvalidationCapture is the whole pre-publication snapshot: one bucket
 // per change class, plus the enumerate errors.
 //
@@ -282,12 +291,19 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 			if active != nil {
 				activeHost = active.System.HostName
 			}
-			slog.Warn("policy session invalidation: retiring superseded target debt",
-				"applied_host", applied.System.HostName, "store_active_host", activeHost)
 			restored := debt.landed
 			if restored != nil && restored.newCfg != applied {
 				restored = nil
 			}
+			restoredCandidateCount := 0
+			if restored != nil {
+				restoredCandidateCount = restored.capture.candidateCount()
+			}
+			slog.Warn("policy session invalidation: retiring superseded target debt",
+				"applied_host", applied.System.HostName, "store_active_host", activeHost,
+				"restored", restored != nil,
+				"scan_failure", restored != nil && restored.scanFailure != nil,
+				"candidate_count", restoredCandidateCount)
 			d.policyInvalidationDebt = restored
 			originalDebt = restored
 		}
@@ -323,8 +339,13 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	var landed *policyInvalidationDebt
 	if debt := d.policyInvalidationDebt; debt != nil {
 		if applied != nil && debt.newCfg == applied && plan.newCfg != applied {
+			// A landed debt's own predecessor was already merged into it and
+			// can never be restored again; cut the chain so it stays bounded.
+			debt.landed = nil
 			landed = debt
-		} else if debt.newCfg == plan.newCfg {
+		} else if debt.newCfg != applied {
+			// An unlanded predecessor passes on the landed obligation it was
+			// itself carrying (nested superseding target, same-target retry).
 			landed = debt.landed
 		}
 		previousCapture = debt.capture
