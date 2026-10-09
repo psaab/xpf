@@ -873,12 +873,13 @@ test-mouse-elephant-lib:
 # These cells SKIP without CAP_NET_ADMIN, which means `make test-go` does NOT
 # exercise them. That is exactly the shape that lets an apply-leg regression sit
 # green forever, so this target runs them under `unshare -rn` where they
-# actually execute. It SKIPS as a whole (not fails) where user namespaces are
-# unavailable, matching the other tool-gated legs.
-# Single-sourced with the `make selftest` leg: both run the SAME script, so the
+# actually execute. It SKIPS as a whole (not fails) without go/unshare/ip or
+# where user namespaces are unavailable, matching the other tool-gated legs.
+# Single-sourced with the `make selftest` leg: both run the SAME scripts, so the
 # target and the aggregate cannot drift into testing different things.
 test-rule-dscp-lib:
 	sh ./test/routing/selftest-rule-dscp_7796.sh
+	sh ./test/routing/selftest-rule-dscp-probes_7796.sh
 
 # Self-test the #9420 next-table ingress-scope, #9819 VRF-miss terminator, and
 # #11319 PBR-before-leak kernel cells. They SKIP under plain `go test` without
