@@ -128,13 +128,13 @@ func ValidateRouteFilterArgPositional(argIdx int, raw string, _ *Config) error {
 // trailing tokens and any second trailer are otherwise silently discarded.
 // This node-level check runs in SchemaValidate, before compilation, and sees
 // both packed Keys and the hierarchical child form used for a trailer.
-func validateRouteFilterTailStrict12067(node *Node, _ *schemaNode) error {
+func validateRouteFilterTailStrict12067(node *Node, parent *schemaNode) error {
 	if node == nil {
 		return nil
 	}
 	if len(node.Keys) < 3 {
 		if len(node.Children) > 0 {
-			return unconsumedRouteFilterChild12067(node.Children[0])
+			return unconsumedRouteFilterChild12067(node, "")
 		}
 		return nil
 	}
@@ -153,10 +153,13 @@ func validateRouteFilterTailStrict12067(node *Node, _ *schemaNode) error {
 
 	consumedTrailer := 0
 	if len(node.Keys) > 3 && trailerLimit == 1 {
+		if routeFilterKeyIsSibling12067(node, parent, 3) {
+			return nil
+		}
 		consumedTrailer = 1
 		if matchType == "upto" {
 			if _, ok := parseRouteFilterLen(node.Keys[3]); !ok {
-				return fmt.Errorf("unconsumed route-filter token %q after `upto` (expected a prefix length such as /24)", node.Keys[3])
+				return invalidRouteFilterUpto12067(node.Keys[3])
 			}
 		}
 	} else if len(node.Keys) == 3 && trailerLimit == 1 && len(node.Children) > 0 {
@@ -164,44 +167,98 @@ func validateRouteFilterTailStrict12067(node *Node, _ *schemaNode) error {
 		// single child token: `upto { /24; }`.
 		if len(node.Children) != 1 || node.Children[0] == nil ||
 			len(node.Children[0].Keys) != 1 || len(node.Children[0].Children) != 0 {
-			return unconsumedRouteFilterChild12067(node.Children[0])
+			return unconsumedRouteFilterChild12067(node, matchType)
 		}
 		consumedTrailer = 1
 		if matchType == "upto" {
 			if _, ok := parseRouteFilterLen(node.Children[0].Keys[0]); !ok {
-				return fmt.Errorf("unconsumed route-filter token %q after `upto` (expected a prefix length such as /24)", node.Children[0].Keys[0])
+				return invalidRouteFilterUpto12067(node.Children[0].Keys[0])
 			}
 		}
 	}
 
 	if extra := 3 + consumedTrailer; len(node.Keys) > extra {
+		if routeFilterKeyIsSibling12067(node, parent, extra) {
+			return nil
+		}
 		return fmt.Errorf("unconsumed route-filter token %q after match-type %q", node.Keys[extra], matchType)
 	}
 	if len(node.Children) > 0 && consumedTrailer == 0 {
-		return unconsumedRouteFilterChild12067(node.Children[0])
+		return unconsumedRouteFilterChild12067(node, matchType)
 	}
 	if consumedTrailer == 1 && len(node.Keys) > 3 && len(node.Children) > 0 {
-		return unconsumedRouteFilterChild12067(node.Children[0])
+		return unconsumedRouteFilterChild12067(node, matchType)
+	}
+	if matchType == "upto" && consumedTrailer == 0 {
+		return fmt.Errorf("route-filter `upto` requires a prefix length such as /24")
 	}
 	return nil
 }
 
-func unconsumedRouteFilterChild12067(node *Node) error {
-	if node == nil || len(node.Keys) == 0 {
-		return fmt.Errorf("unconsumed child after route-filter match-type")
+func invalidRouteFilterUpto12067(token string) error {
+	return fmt.Errorf("invalid route-filter `upto` length %q (expected a prefix length such as /24)", token)
+}
+
+func unconsumedRouteFilterChild12067(routeFilter *Node, matchType string) error {
+	if routeFilter == nil || len(routeFilter.Keys) < 3 {
+		return fmt.Errorf("route-filter match-type must be on the statement line")
 	}
-	return fmt.Errorf("unconsumed route-filter token %q after match-type", node.Keys[0])
+	children := routeFilter.Children
+	if len(children) == 0 {
+		return fmt.Errorf("unconsumed route-filter child after match-type %q", matchType)
+	}
+	first := children[0]
+	if first == nil || len(first.Keys) == 0 {
+		return fmt.Errorf("unconsumed route-filter child after match-type %q", matchType)
+	}
+	if matchType == "upto" && len(routeFilter.Keys) == 3 {
+		if _, ok := parseRouteFilterLen(first.Keys[0]); !ok {
+			return invalidRouteFilterUpto12067(first.Keys[0])
+		}
+		if len(first.Keys) > 1 {
+			return fmt.Errorf("unconsumed route-filter token %q after match-type %q", first.Keys[1], matchType)
+		}
+		if len(first.Children) > 0 && first.Children[0] != nil && len(first.Children[0].Keys) > 0 {
+			return fmt.Errorf("unconsumed route-filter token %q after match-type %q", first.Children[0].Keys[0], matchType)
+		}
+		if len(children) > 1 {
+			second := children[1]
+			if second != nil && len(second.Keys) > 0 {
+				return fmt.Errorf("unconsumed route-filter token %q after match-type %q", second.Keys[0], matchType)
+			}
+		}
+	}
+	return fmt.Errorf("unconsumed route-filter token %q after match-type %q", first.Keys[0], matchType)
+}
+
+func routeFilterKeyIsSibling12067(node *Node, parent *schemaNode, idx int) bool {
+	if node == nil || idx < 0 || idx >= len(node.Keys) ||
+		node.KeyQuoted(idx) || node.KeyBracketed(idx) || parent == nil {
+		return false
+	}
+	token := node.Keys[idx]
+	// The generic #8437 gate skips a sibling token that repeats the current
+	// container keyword; in a packed `from` run this remains an invalid tail.
+	if node.Name() == "from" && token == "from" {
+		return false
+	}
+	if parent.children != nil && parent.children[token] != nil {
+		return true
+	}
+	return false
 }
 
 // validatePackedPolicyRouteFilterTailStrict12067 handles the compiler's
 // compact `from route-filter ...` spelling, where route-filter tokens remain
 // packed on the `from` node instead of becoming a route-filter child node.
-func validatePackedPolicyRouteFilterTailStrict12067(node *Node, _ *schemaNode) error {
+func validatePackedPolicyRouteFilterTailStrict12067(node *Node, parent *schemaNode) error {
 	if node == nil || len(node.Keys) < 2 {
 		return nil
 	}
 	for i := 1; i < len(node.Keys); i++ {
-		if node.Keys[i] != "route-filter" || node.KeyQuoted(i) || node.KeyBracketed(i) {
+		// The compiler dispatches the run head by Name(), even when authored
+		// quoted or bracketed. Provenance only protects non-head values.
+		if node.Keys[i] != "route-filter" || (i != 1 && (node.KeyQuoted(i) || node.KeyBracketed(i))) {
 			continue
 		}
 		if i+2 >= len(node.Keys) {
@@ -212,20 +269,37 @@ func validatePackedPolicyRouteFilterTailStrict12067(node *Node, _ *schemaNode) e
 			continue
 		}
 
+		// A quoted head makes splitPolicyTermFromRun11779 keep the entire
+		// remainder as one leaf, including otherwise-known sibling names.
+		quotedHead := node.KeyQuoted(i)
 		next := i + 3
 		switch matchType {
 		case "upto", "prefix-length-range", "through":
-			if next < len(node.Keys) && !policyFromLeafKeyword12067(node, next) {
+			if next < len(node.Keys) && (quotedHead || !policyFromLeafKeyword12067(node, next)) {
 				if matchType == "upto" {
+					if routeFilterKeyIsSibling12067(node, parent, next) {
+						return nil
+					}
 					if _, ok := parseRouteFilterLen(node.Keys[next]); !ok {
-						return fmt.Errorf("unconsumed route-filter token %q after `upto` (expected a prefix length such as /24)", node.Keys[next])
+						return invalidRouteFilterUpto12067(node.Keys[next])
 					}
 				}
 				next++
+			} else if matchType == "upto" {
+				if next < len(node.Keys) && routeFilterKeyIsSibling12067(node, parent, next) {
+					return nil
+				}
+				return fmt.Errorf("route-filter `upto` requires a prefix length such as /24")
 			}
 		}
-		if next < len(node.Keys) && !policyFromLeafKeyword12067(node, next) {
+		if next < len(node.Keys) && (quotedHead || !policyFromLeafKeyword12067(node, next)) {
+			if routeFilterKeyIsSibling12067(node, parent, next) {
+				return nil
+			}
 			return fmt.Errorf("unconsumed route-filter token %q after match-type %q", node.Keys[next], matchType)
+		}
+		if matchType == "upto" && next == i+3 && next >= len(node.Keys) {
+			return fmt.Errorf("route-filter `upto` requires a prefix length such as /24")
 		}
 		i = next - 1
 	}
