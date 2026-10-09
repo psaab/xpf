@@ -228,11 +228,12 @@ func routeFilterACLName(prefixList, matchKW string) string {
 // routeFilterACLNameCollision fails the apply CLOSED when generated route-
 // filter access-list or inline prefix-list names are not provably unambiguous:
 //
-//   - an operator prefix-list name intrudes on either reserved namespace;
+//   - an operator prefix-list name intrudes on either reserved namespace; or
 //   - two distinct from-prefix-list identities map to one generated access-list
-//     name in the same address family; or
-//   - two distinct inline route-filter identities map to one generated
-//     prefix-list name in the same address family.
+//     name in the same address family.
+//
+// (Inline-vs-inline identity collisions need no gate: names embed a 64-bit
+// digest over the full structured identity. Opus review, PR #12321.)
 //
 // FRR merges same-named objects, so any case could silently widen or narrow a
 // routing policy. Refuse to render — FRR keeps its last-good config — mirroring

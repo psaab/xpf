@@ -1182,13 +1182,14 @@ step. Both are required — neither sees the other's case:
      only ever a BGP `route-map in`/`out`). Per-policy inline route-filter
      prefix-lists use bounded deterministic names derived from route-map name,
      policy prefix, term name, and family suffix. The readable `<policy>-<term>`
-     prefix is followed by a reserved `-xpf-inline-` marker and a 64-bit hash of
-     that structured identity, avoiding the old lossy hyphen-join alias.
+     prefix (plus a `_v4`/`_v6` suffix for split halves) is followed by a
+     reserved `-xpf-inline-` marker and a 64-bit hash of that structured
+     identity, avoiding the old lossy hyphen-join alias.
      `routeFilterACLNameCollision` rejects operator prefix-lists intruding on the
-     reserved marker and checks known generated-name collisions before apply.
+     reserved marker before apply. Generated-vs-generated identity collisions
+     need no gate (64-bit digest over the full structured identity).
      Generated inline `ip`/`ipv6 prefix-list` and same-family access-list
-     definitions are emitted
-     before the route-map body that uses them (each policy's definitions join
+     definitions are emitted before the route-map body that uses them (each policy's definitions join
      immediately before its own map; composed chains collect every part's
      definitions before emitting composed bodies), never inside a route-map
      block. The composed route-map definitions are emitted beside
