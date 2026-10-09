@@ -40,17 +40,39 @@ func policyStatementHasNextPolicy(ps *PolicyStatement) bool {
 	return false
 }
 
+// CanonicalSourceProtocol maps Junos `from protocol` aliases to the spelling
+// used by FRR route-map source-protocol matches.
+func CanonicalSourceProtocol(proto string) string {
+	if proto == "direct" {
+		return "connected"
+	}
+	return proto
+}
+
+// uniqueCanonicalProtocolCount counts the distinct source-protocol matches
+// after alias normalization, matching pkg/frr's sequence expansion.
+func uniqueCanonicalProtocolCount(protos []string) int {
+	if len(protos) == 0 {
+		return 0
+	}
+	seen := make(map[string]struct{}, len(protos))
+	for _, proto := range protos {
+		seen[CanonicalSourceProtocol(proto)] = struct{}{}
+	}
+	return len(seen)
+}
+
 // RouteMapSequenceCount returns the FRR route-map sequences before the final
 // fallback for ps: all rendered term variants, plus an explicit policy-default
 // sequence when `then next policy` can jump over it. It mirrors the renderer's
 // Cartesian expansion exactly: per term, (2 when the term's route-filters mix
 // IPv4 and IPv6 families, else 1) x max(1,|from prefix-list|) x
 // max(1,|from community|) x max(1,|from as-path|) x
-// max(1,|from protocol|), summed over terms.
-//
+// max(1,|unique canonical from protocol|), summed over terms. `direct` and
+// `connected` are the same FRR source-protocol match and count only once.
 // Term count depends on each term's OR-set lengths, route-filter family mix,
 // referenced prefix-list families (not prefix entries), and source-protocol
-// values. emitVariants emits one sequence per list/family ref and protocol.
+// values. emitVariants emits one sequence per unique canonical protocol.
 // Every multiply and the running sum are overflow-checked (checkedMulU64 /
 // saturating add): a pathological crafted policy saturates to math.MaxUint64
 // rather than wrapping back down into the in-bound range.
@@ -80,7 +102,7 @@ func RouteMapSequenceCount(po *PolicyOptionsConfig, ps *PolicyStatement) uint64 
 		v := checkedMulU64(fam, TermPrefixListRefCount(po, term.PrefixList))
 		v = checkedMulU64(v, orOneU64(len(term.FromCommunity)))
 		v = checkedMulU64(v, orOneU64(len(term.FromASPath)))
-		v = checkedMulU64(v, orOneU64(len(term.FromProtocols)))
+		v = checkedMulU64(v, orOneU64(uniqueCanonicalProtocolCount(term.FromProtocols)))
 		if total > math.MaxUint64-v {
 			return math.MaxUint64
 		}

@@ -203,3 +203,71 @@ func TestPolicyProtoSeqFamilySplit_12066(t *testing.T) {
 		t.Errorf("RouteMapSequenceCount = %d, want 4", got)
 	}
 }
+
+// TestPolicyProtoSeqDeduplicatesCanonicalProtocols_12066 proves aliased and
+// literal duplicate protocols render one modifying sequence, so a non-
+// terminating set action cannot run more than once for the same source match.
+func TestPolicyProtoSeqDeduplicatesCanonicalProtocols_12066(t *testing.T) {
+	cases := []struct {
+		name      string
+		routeMap  string
+		protocols []string
+		wantProto string
+	}{
+		{
+			name:      "direct-connected-alias",
+			routeMap:  "ALIASED",
+			protocols: []string{"direct", "connected"},
+			wantProto: "connected",
+		},
+		{
+			name:      "literal-duplicate",
+			routeMap:  "DUPLICATE",
+			protocols: []string{"bgp", "bgp"},
+			wantProto: "bgp",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m := &Manager{frrConf: "/dev/null"}
+			po := &config.PolicyOptionsConfig{
+				PolicyStatements: map[string]*config.PolicyStatement{
+					tc.routeMap: {
+						Name: tc.routeMap,
+						Terms: []*config.PolicyTerm{{
+							Name:          "t1",
+							FromProtocols: tc.protocols,
+							ASPathPrepend: []string{"65000"},
+						}},
+						DefaultAction: "reject",
+					},
+				},
+			}
+
+			got := m.generatePolicyOptions(po)
+			blocks := protoSeqBlocks12066(t, got, tc.routeMap)
+			if len(blocks) != 2 {
+				t.Fatalf("got %d route-map sequences, want one modifying sequence plus default:\n%s",
+					len(blocks), got)
+			}
+			if blocks[0].header != "route-map "+tc.routeMap+" permit 10" {
+				t.Errorf("modifying sequence header = %q, want permit 10", blocks[0].header)
+			}
+			if blocks[0].protos != 1 ||
+				!strings.Contains(blocks[0].body, "match source-protocol "+tc.wantProto+"\n") {
+				t.Errorf("modifying sequence has source-protocol matches %q, want only %q:\n%s",
+					strings.TrimSpace(blocks[0].body), tc.wantProto, got)
+			}
+			if strings.Count(blocks[0].body, "set as-path prepend 65000\n") != 1 ||
+				strings.Count(blocks[0].body, "on-match next\n") != 1 {
+				t.Errorf("duplicate protocols must not duplicate the policy's non-terminating prepend:\n%s",
+					blocks[0].body)
+			}
+			if got := config.RouteMapSequenceCount(po, po.PolicyStatements[tc.routeMap]); got != 1 {
+				t.Errorf("RouteMapSequenceCount = %d, want 1 modifying sequence", got)
+			}
+		})
+	}
+}

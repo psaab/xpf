@@ -466,6 +466,27 @@ func renderNextPolicyTarget(body string, sequence int) string {
 	return strings.ReplaceAll(body, nextPolicySequenceMarker, fmt.Sprintf("on-match goto %d", sequence))
 }
 
+// uniquePolicySourceProtocols returns the unique FRR source-protocol matches
+// in first-seen order. Normalize before dedup so Junos "direct" and FRR
+// "connected" produce one sequence; retaining order keeps rendered output
+// deterministic. An empty set stays empty for emitVariants' "" sentinel.
+func uniquePolicySourceProtocols(protos []string) []string {
+	if len(protos) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(protos))
+	unique := make([]string, 0, len(protos))
+	for _, proto := range protos {
+		proto = config.CanonicalSourceProtocol(proto)
+		if _, exists := seen[proto]; exists {
+			continue
+		}
+		seen[proto] = struct{}{}
+		unique = append(unique, proto)
+	}
+	return unique
+}
+
 func (m *Manager) renderPolicyTermSequences(po *config.PolicyOptionsConfig, routeMapName, plPrefix string, ps *config.PolicyStatement, startSeq int) (string, int) {
 	definitions, body, next := m.renderPolicyTermSequencesWithDefinitions(po, routeMapName, plPrefix, ps, startSeq)
 	return definitions + body, next
@@ -767,11 +788,9 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			// Junos "from protocol [ bgp ospf static ]" matches ANY listed
 			// protocol. FRR stores only one source-protocol match per
 			// route-map sequence, so emitVariants dispatches one sequence per
-			// protocol value and this body emits at most one match line.
+			// unique canonical protocol value and this body emits at most one match line.
 			if fromProtocol != "" {
-				if fromProtocol == "direct" {
-					fromProtocol = "connected"
-				}
+				fromProtocol = config.CanonicalSourceProtocol(fromProtocol)
 				// #4498: sanitize the protocol token — the same #4097/#4482
 				// render-side belt the other route-map free-text slots use.
 				// A tolerant-load / peer-synced / rolled-back FromProtocols
@@ -956,11 +975,11 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		//       sequence per family;
 		//   (b) repeated same-type `from prefix-list` / `from community`
 		//       / `from as-path` matches (#2642); and
-		//   (c) `from protocol` values (#12066) - FRR keeps one source-
-		//       protocol match per route-map sequence.
+		//   (c) unique canonical `from protocol` values (#12066) - FRR
+		//       keeps one source-protocol match per route-map sequence.
 		// FRR holds only one rule of each match TYPE per route-map index
 		// (route_map_add_match replaces same-type), so OR is expressed as
-		// one sequence per value.
+		// one sequence per distinct canonical value.
 		// Different match types must AND, the same type must OR. The
 		// correct structure is the CARTESIAN PRODUCT of the OR-sets: each
 		// emitted sequence carries exactly one prefix-list, one community,
@@ -976,6 +995,10 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		plName := plPrefix + "-" + term.Name
 		v4rf, v6rf := partitionRouteFiltersByFamily(term.RouteFilters)
 		mixedFamily := len(term.RouteFilters) > 0 && len(v4rf) > 0 && len(v6rf) > 0
+
+		// Normalize aliases and deduplicate before sequence expansion. This
+		// matches the source-protocol spelling emitted by emitTermBody.
+		protocols := uniquePolicySourceProtocols(term.FromProtocols)
 
 		// orElseEmpty yields the OR-set to iterate: the field's values, or
 		// a single "" sentinel so a missing match still emits one sequence
@@ -1014,11 +1037,11 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 							if danglingAsp[asp] {
 								continue
 							}
-							if len(term.FromProtocols) == 0 {
+							if len(protocols) == 0 {
 								emitTermBody(seqFam, seq, rfs, famPL, plRef, comm, asp, "")
 								seq += 10
 							} else {
-								for _, proto := range term.FromProtocols {
+								for _, proto := range protocols {
 									emitTermBody(seqFam, seq, rfs, famPL, plRef, comm, asp, proto)
 									seq += 10
 								}

@@ -85,10 +85,7 @@ type redistEntry struct {
 }
 
 func normalizedRedistProtocol(proto string) string {
-	if proto == "direct" {
-		return "connected"
-	}
-	return proto
+	return config.CanonicalSourceProtocol(proto)
 }
 
 func redistProtocolRouteMapName(policy, proto string) string {

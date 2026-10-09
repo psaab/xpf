@@ -7,9 +7,8 @@ import (
 
 // TestRouteMapSequenceCount_ProtoDimension_12066 pins the #12066 admission
 // count: FromProtocols is an OR dimension in the pkg/frr renderer's Cartesian
-// expansion (one sequence per source protocol), so the count must multiply by
-// max(1,|from protocol|). Without the factor, a multi-protocol policy is
-// admitted under the ceiling and renders past FRR's 65535 sequence limit.
+// expansion, so the factor is max(1,|unique canonical source protocols|).
+// Alias `direct` normalizes to `connected` before duplicates are removed.
 func TestRouteMapSequenceCount_ProtoDimension_12066(t *testing.T) {
 	cases := []struct {
 		name string
@@ -54,6 +53,26 @@ func TestRouteMapSequenceCount_ProtoDimension_12066(t *testing.T) {
 			}},
 			5,
 		},
+		{
+			"direct-connected-alias-dedup",
+			&PolicyStatement{Terms: []*PolicyTerm{{Name: "t", FromProtocols: []string{"direct", "connected"}}}},
+			1,
+		},
+		{
+			"literal-protocol-dedup",
+			&PolicyStatement{Terms: []*PolicyTerm{{Name: "t", FromProtocols: []string{"bgp", "bgp"}}}},
+			1,
+		},
+		{
+			"deduped-protocol-cross-product", // 2 pl x 1 canonical proto x 2 comm = 4
+			&PolicyStatement{Terms: []*PolicyTerm{{
+				Name:          "t",
+				PrefixList:    []string{"a", "b"},
+				FromProtocols: []string{"direct", "connected"},
+				FromCommunity: []string{"c1", "c2"},
+			}}},
+			4,
+		},
 	}
 	for _, c := range cases {
 		if got := RouteMapSequenceCount(nil, c.ps); got != c.want {
@@ -96,5 +115,29 @@ func TestPolicyProtoSeqAdmissionRejectsNearCeiling_12066(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "from protocol") {
 		t.Fatalf("overflow error must identify the protocol dimension, got %q", err)
+	}
+}
+
+// TestPolicyProtoSeqAliasDedupAdmissionPassesNearCeiling_12066 proves alias
+// normalization and deduplication also keep the strict admission count aligned
+// with the renderer near the sequence ceiling.
+func TestPolicyProtoSeqAliasDedupAdmissionPassesNearCeiling_12066(t *testing.T) {
+	communityCount := MaxRouteMapSequences/2 + 1
+	policy := &PolicyStatement{
+		Name: "PROTO-ALIASED",
+		Terms: []*PolicyTerm{{
+			Name:          "t",
+			FromCommunity: makeNames("c", communityCount),
+			FromProtocols: []string{"direct", "connected"},
+		}},
+	}
+	cfg := &Config{}
+	cfg.PolicyOptions.PolicyStatements = map[string]*PolicyStatement{"PROTO-ALIASED": policy}
+
+	if got := RouteMapSequenceCount(&cfg.PolicyOptions, policy); got != uint64(communityCount) {
+		t.Fatalf("deduped count = %d, want %d", got, communityCount)
+	}
+	if err := validatePolicyRouteMapSequenceBoundStrict(cfg); err != nil {
+		t.Fatalf("strict sequence bound rejected deduplicated aliased protocols: %v", err)
 	}
 }

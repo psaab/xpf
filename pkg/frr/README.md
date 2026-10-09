@@ -481,9 +481,12 @@ and a config sitting just under the ceiling rendered past it.
 
 A second OR dimension is `from protocol [...]` (#12066). FRR stores only one
 same-type `match source-protocol` rule per route-map sequence, replacing an
-earlier rule; the renderer must therefore emit one sequence per source protocol.
-`emitVariants` crosses that dimension with route-filter families, prefix-list
-refs, communities, and AS paths, and `RouteMapSequenceCount` multiplies by the
+earlier rule; the renderer must therefore emit one sequence per distinct
+canonical source protocol. It normalizes aliases (`direct` to `connected`)
+before deduplication and preserves first-seen order, so duplicate aliases and
+repeated protocol tokens do not emit duplicate sequences. `emitVariants` crosses
+that dimension with route-filter families, prefix-list refs, communities, and
+AS paths, and `RouteMapSequenceCount` multiplies by the unique canonical
 protocol-set size too. Otherwise the renderer could exceed the sequence ceiling
 without the commit-time bound noticing.
 
