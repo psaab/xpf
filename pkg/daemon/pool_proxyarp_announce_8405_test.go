@@ -146,13 +146,19 @@ func TestThePoolAnnounceStopsWhenOwnershipMovesAgain8405(t *testing.T) {
 }
 
 func TestIPv6PoolAddressesAreNotAnnouncedThroughTheV4Path8405(t *testing.T) {
-	// An unsolicited NA, not an ARP. Absent is honest; announcing a v6 address
-	// through the v4 burst would be silently wrong.
+	// An unsolicited NA, not an ARP. Absent from the v4 burst is honest;
+	// announcing a v6 address through the v4 burst would be silently wrong.
 	calls := captureGARP8405(t)
+	// #12172 added the v6 NA branch to this announcer; stub it so the
+	// control stays hermetic (no real unsolicited NAs from unit tests).
+	naCalls := captureNA12172(t)
 	d := &Daemon{}
 	d.announceProxyARPPoolAddresses(
 		cfgWithPoolProxyARP8405(1, "2001:db8::7/128", "172.16.80.7/32"), 1, nil)
 	if len(*calls) != 1 || (*calls)[0].ip != "172.16.80.7" {
 		t.Errorf("only the v4 address may go out through the ARP path; got %v", *calls)
+	}
+	if len(*naCalls) != 1 || (*naCalls)[0].ip != "2001:db8::7" {
+		t.Errorf("the v6 address must go out through the NA path; got %v", *naCalls)
 	}
 }
