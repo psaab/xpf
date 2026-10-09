@@ -232,8 +232,9 @@ fn cached_local_delivery_decision_invalidates_when_owner_rg_is_demoted() {
     let active = BTreeMap::from([(1, active_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
     let demoted = BTreeMap::from([(1, inactive_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    let resolution = interface_nat_local_resolution(&state, "172.16.80.8".parse().expect("v4"))
-        .expect("interface nat local delivery");
+    let resolution =
+        interface_nat_local_resolution(&state, "172.16.80.8".parse().expect("v4"), None)
+            .expect("interface nat local delivery");
     let now_secs = monotonic_nanos() / 1_000_000_000;
 
     assert!(cached_flow_decision_valid(
@@ -1773,8 +1774,13 @@ fn session_hit_keeps_interface_snat_ipv4_local_delivery() {
                     routing_domain: 0,
         },
     };
-    let decision = SessionDecision { resolution: interface_nat_local_resolution(&state, flow.dst_ip)
-        .expect("interface nat local delivery"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: interface_nat_local_resolution(&state, flow.dst_ip, None)
+            .expect("interface nat local delivery"),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
 
     let resolved =
         lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision);
@@ -1805,8 +1811,13 @@ fn inactive_interface_snat_session_hit_redirects_to_fabric() {
                     routing_domain: 0,
         },
     };
-    let decision = SessionDecision { resolution: interface_nat_local_resolution(&state, flow.dst_ip)
-        .expect("interface nat local delivery"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: interface_nat_local_resolution(&state, flow.dst_ip, None)
+            .expect("interface nat local delivery"),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
 
     let looked_up =
         lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision);
@@ -1839,8 +1850,13 @@ fn session_hit_keeps_interface_snat_ipv6_local_delivery() {
                     routing_domain: 0,
         },
     };
-    let decision = SessionDecision { resolution: interface_nat_local_resolution(&state, flow.dst_ip)
-        .expect("interface nat local delivery"), nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
+    let decision = SessionDecision {
+        resolution: interface_nat_local_resolution(&state, flow.dst_ip, None)
+            .expect("interface nat local delivery"),
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
 
     let resolved =
         lookup_forwarding_resolution_for_session(&state, &dynamic_neighbors, &flow, decision);
@@ -2281,8 +2297,9 @@ fn interface_snat_addresses_are_not_treated_as_local_delivery() {
 #[test]
 fn interface_snat_addresses_are_local_delivered_on_session_miss() {
     let state = build_forwarding_state(&nat_snapshot());
-    let resolved_v4 = interface_nat_local_resolution(&state, "172.16.80.8".parse().expect("v4"))
-        .expect("v4 nat local delivery");
+    let resolved_v4 =
+        interface_nat_local_resolution(&state, "172.16.80.8".parse().expect("v4"), None)
+            .expect("v4 nat local delivery");
     assert_eq!(
         resolved_v4.disposition,
         ForwardingDisposition::LocalDelivery
@@ -2290,7 +2307,7 @@ fn interface_snat_addresses_are_local_delivered_on_session_miss() {
     assert_eq!(resolved_v4.local_ifindex, 12);
 
     let resolved_v6 =
-        interface_nat_local_resolution(&state, "2001:559:8585:80::8".parse().expect("v6"))
+        interface_nat_local_resolution(&state, "2001:559:8585:80::8".parse().expect("v6"), None)
             .expect("v6 nat local delivery");
     assert_eq!(
         resolved_v6.disposition,
@@ -2466,8 +2483,13 @@ fn icmp_session_miss_resolution_prefers_frame_destination_for_interface_nat_loca
     assert_eq!(resolution_target, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)));
 
     let resolved =
-        interface_nat_local_resolution_on_session_miss(&state, resolution_target, PROTO_ICMP)
-            .expect("nat local delivery");
+        interface_nat_local_resolution_on_session_miss(
+            &state,
+            resolution_target,
+            PROTO_ICMP,
+            None,
+        )
+        .expect("nat local delivery");
     assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(resolved.local_ifindex, 12);
 }
@@ -2479,6 +2501,7 @@ fn tcp_session_miss_local_delivers_interface_nat_address() {
         &state,
         "172.16.80.8".parse().expect("v4"),
         PROTO_TCP,
+        None,
     )
     .expect("tcp v4 nat local delivery");
     assert_eq!(
@@ -2491,6 +2514,7 @@ fn tcp_session_miss_local_delivers_interface_nat_address() {
         &state,
         "2001:559:8585:80::8".parse().expect("v6"),
         PROTO_UDP,
+        None,
     )
     .expect("udp v6 nat local delivery");
     assert_eq!(
@@ -2507,6 +2531,7 @@ fn tcp_ack_session_miss_does_not_cache_interface_nat_local_delivery() {
         &state,
         "172.16.80.8".parse().expect("v4"),
         PROTO_TCP,
+        None,
     )
     .expect("tcp nat local delivery");
     assert!(!should_cache_local_delivery_session_on_miss(
@@ -2525,6 +2550,7 @@ fn tcp_syn_session_miss_still_caches_interface_nat_local_delivery() {
         &state,
         "172.16.80.8".parse().expect("v4"),
         PROTO_TCP,
+        None,
     )
     .expect("tcp nat local delivery");
     assert!(should_cache_local_delivery_session_on_miss(
@@ -2558,6 +2584,7 @@ fn bare_rst_fin_session_miss_does_not_cache_local_delivery() {
             &state,
             target.parse().expect("v4"),
             PROTO_TCP,
+            None,
         )
         .expect("tcp nat local delivery"),
         ingress_interface_local_resolution_on_session_miss(
@@ -2637,6 +2664,7 @@ fn bare_rst_fin_session_miss_does_not_cache_local_delivery() {
         &state,
         target.parse().expect("v4"),
         PROTO_TCP,
+        None,
     )
     .expect("tcp nat local delivery");
     transit.disposition = ForwardingDisposition::ForwardCandidate;
@@ -2668,6 +2696,7 @@ fn non_handshake_tcp_session_miss_does_not_cache_local_delivery() {
             &state,
             target.parse().expect("v4"),
             PROTO_TCP,
+            None,
         )
         .expect("tcp nat local delivery"),
         ingress_interface_local_resolution_on_session_miss(
@@ -2772,17 +2801,29 @@ fn tunnel_session_miss_blocks_interface_nat_local_delivery() {
         &state,
         tunnel_snat_ip,
         PROTO_TCP,
+        Some("sfmix.inet.0"),
     ));
     assert!(should_block_tunnel_interface_nat_session_miss(
         &state,
         tunnel_snat_ip,
         PROTO_UDP,
+        Some("sfmix.inet.0"),
     ));
     assert!(should_block_tunnel_interface_nat_session_miss(
         &state,
         tunnel_snat_ip,
         PROTO_ICMP,
+        Some("sfmix.inet.0"),
     ));
+    assert!(
+        !should_block_tunnel_interface_nat_session_miss(
+            &state,
+            tunnel_snat_ip,
+            PROTO_TCP,
+            None,
+        ),
+        "the default table must not inherit sfmix's tunnel interface-NAT block",
+    );
 }
 
 #[test]
@@ -4461,6 +4502,152 @@ fn static_nat_local_delivery_is_table_scoped_no_cross_vrf_leak() {
         dflt.disposition,
         ForwardingDisposition::LocalDelivery,
         "default-table packet to a tenant-b NAT external IP must not leak",
+    );
+}
+
+/// #12086 (residual of #3769): interface-NAT addresses need the same
+/// routing-table ownership gate as `local_v*`. The SNAT-excluded WAN
+/// addresses are owned by red, not by the default/blue instance.
+#[test]
+fn interface_nat_local_delivery_is_table_scoped_no_cross_vrf_leak_12086() {
+    let wan_v4 = Ipv4Addr::new(172, 16, 80, 8);
+    let wan_v6 = "2001:db8:80::8".parse::<Ipv6Addr>().expect("WAN v6");
+    let state = build_forwarding_state(&crate::ConfigSnapshot {
+        zones: vec![
+            crate::ZoneSnapshot {
+                name: "lan".to_string(),
+                id: TEST_TRUST_ZONE_ID,
+                ..Default::default()
+            },
+            crate::ZoneSnapshot {
+                name: "wan".to_string(),
+                id: TEST_UNTRUST_ZONE_ID,
+                ..Default::default()
+            },
+        ],
+        interfaces: vec![
+            crate::InterfaceSnapshot {
+                name: "ge-0/0/0.0".to_string(),
+                zone: "lan".to_string(),
+                linux_name: "ge-0-0-0.0".to_string(),
+                ifindex: 11,
+                hardware_addr: "02:00:00:00:00:0b".to_string(),
+                addresses: vec![crate::InterfaceAddressSnapshot {
+                    family: "inet".to_string(),
+                    address: "10.0.0.1/24".to_string(),
+                    scope: 0,
+                }],
+                ..Default::default()
+            },
+            crate::InterfaceSnapshot {
+                name: "ge-0/0/1.0".to_string(),
+                zone: "wan".to_string(),
+                routing_instance: "red".to_string(),
+                linux_name: "ge-0-0-1.0".to_string(),
+                ifindex: 12,
+                hardware_addr: "02:00:00:00:00:0c".to_string(),
+                addresses: vec![
+                    crate::InterfaceAddressSnapshot {
+                        family: "inet".to_string(),
+                        address: "172.16.80.8/24".to_string(),
+                        scope: 0,
+                    },
+                    crate::InterfaceAddressSnapshot {
+                        family: "inet6".to_string(),
+                        address: "2001:db8:80::8/64".to_string(),
+                        scope: 0,
+                    },
+                ],
+                ..Default::default()
+            },
+        ],
+        source_nat_rules: vec![crate::SourceNATRuleSnapshot {
+            name: "snat".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
+            interface_mode: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+
+    for (address, owner_table, other_table, local_ifindex) in [
+        (
+            IpAddr::V4(wan_v4),
+            "red.inet.0",
+            "blue.inet.0",
+            12,
+        ),
+        (
+            IpAddr::V6(wan_v6),
+            "red.inet6.0",
+            "blue.inet6.0",
+            12,
+        ),
+    ] {
+        let owner = interface_nat_local_resolution(&state, address, Some(owner_table))
+            .expect("interface-NAT address must local-deliver in its owning table");
+        assert_eq!(owner.disposition, ForwardingDisposition::LocalDelivery);
+        assert_eq!(owner.local_ifindex, local_ifindex);
+        assert!(
+            interface_nat_local_resolution(&state, address, Some(other_table)).is_none(),
+            "interface-NAT address must not local-deliver in a foreign table",
+        );
+        let reverse_owner = reverse_resolution_for_session_in_table(
+            &state,
+            &BTreeMap::new(),
+            &neighbors,
+            address,
+            TEST_UNTRUST_ZONE_ID,
+            false,
+            0,
+            false,
+            Some(owner_table),
+        );
+        assert_eq!(
+            reverse_owner.disposition,
+            ForwardingDisposition::LocalDelivery,
+            "reverse interface-NAT resolution must honor its owning table",
+        );
+        assert_eq!(reverse_owner.local_ifindex, local_ifindex);
+        let reverse_cross = reverse_resolution_for_session_in_table(
+            &state,
+            &BTreeMap::new(),
+            &neighbors,
+            address,
+            TEST_UNTRUST_ZONE_ID,
+            false,
+            0,
+            false,
+            Some(other_table),
+        );
+        assert_eq!(
+            reverse_cross.disposition,
+            ForwardingDisposition::NoRoute,
+            "reverse interface-NAT resolution must use a foreign table's FIB",
+        );
+    }
+
+    assert!(
+        interface_nat_local_resolution(&state, IpAddr::V4(wan_v4), None).is_none(),
+        "red's v4 SNAT address must not be wildcarded into inet.0",
+    );
+    assert!(
+        interface_nat_local_resolution(&state, IpAddr::V6(wan_v6), None).is_none(),
+        "red's v6 SNAT address must not be wildcarded into inet6.0",
+    );
+    assert_eq!(
+        lookup_forwarding_resolution_in_table_with_dynamic(
+            &state,
+            &neighbors,
+            IpAddr::V4(wan_v4),
+            None,
+        )
+        .disposition,
+        ForwardingDisposition::NoRoute,
+        "the default table follows its own FIB after the interface-NAT arm misses",
     );
 }
 

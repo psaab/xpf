@@ -961,6 +961,7 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
                 forwarding,
                 target,
                 flow.forward_key.protocol,
+                table.as_deref(),
             )
         })
         .as_ref()
@@ -987,12 +988,20 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
         return None;
     }
     let resolution =
-        crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+        crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
             forwarding,
-            dynamic_neighbors,
             target,
+            flow.forward_key.protocol,
             table.as_deref(),
-        );
+        )
+        .unwrap_or_else(|| {
+            crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+                forwarding,
+                dynamic_neighbors,
+                target,
+                table.as_deref(),
+            )
+        });
     Some(SessionHitPbrRouteRevalidation {
         revoked_key: (!no_local_entry && !is_reverse).then_some(canonical_key.clone()),
         canonical_key,

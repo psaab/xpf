@@ -1963,8 +1963,8 @@ pub(super) fn reverse_resolution_for_session_in_table(
     allow_unseeded_tunnel_local: bool,
     table: Option<&str>,
 ) -> ForwardingResolution {
-    let resolved =
-        super::interface_nat_local_resolution(forwarding, target_ip).unwrap_or_else(|| {
+    let resolved = super::interface_nat_local_resolution(forwarding, target_ip, table)
+        .unwrap_or_else(|| {
             super::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
                 forwarding,
                 dynamic_neighbors,
@@ -2594,14 +2594,35 @@ fn reverse_prewarm_owner_rg_candidates(
     if is_fileable_owner_rg(entry.metadata.owner_rg_id) {
         owner_rgs.insert(entry.metadata.owner_rg_id);
     }
-    let reverse_resolution = super::interface_nat_local_resolution(forwarding, entry.key.src_ip)
-        .unwrap_or_else(|| {
-            lookup_forwarding_resolution_with_dynamic(
-                forwarding,
-                dynamic_neighbors,
-                entry.key.src_ip,
-            )
-        });
+    // #12086 R1-F2: derive the reply target's native table exactly as
+    // `synthesized_synced_reverse_entry` does. A forward PBR install stamp is
+    // directional and can name a table with no route to the reply target.
+    // Keep an Unresolvable native table in the add-only index as a best-effort
+    // default-table candidate: over-filing is discarded by the activation
+    // consumer, while under-filing omits the reverse owner RG entirely (#7209).
+    let reverse_table = match super::forwarding::native_route_table_for_flow_target(
+        forwarding,
+        entry.key.routing_domain,
+        entry.metadata.ingress_ifindex as i32,
+        entry.metadata.ingress_vlan_id,
+        None,
+        entry.key.src_ip,
+    ) {
+        super::forwarding::NativeRouteTable::Default
+        | super::forwarding::NativeRouteTable::Unresolvable { .. } => None,
+        super::forwarding::NativeRouteTable::Table { table, .. } => Some(table),
+    };
+    let reverse_table = reverse_table.as_deref();
+    let reverse_resolution =
+        super::interface_nat_local_resolution(forwarding, entry.key.src_ip, reverse_table)
+            .unwrap_or_else(|| {
+                super::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+                    forwarding,
+                    dynamic_neighbors,
+                    entry.key.src_ip,
+                    reverse_table,
+                )
+            });
     let reverse_owner_rg_id = owner_rg_for_resolution(forwarding, reverse_resolution);
     if reverse_owner_rg_id > 0 {
         owner_rgs.insert(reverse_owner_rg_id);

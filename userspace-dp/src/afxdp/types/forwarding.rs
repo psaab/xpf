@@ -127,6 +127,11 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) configured_iface_v6: FastSet<Ipv6Addr>,
     pub(in crate::afxdp) interface_nat_v4: FastMap<Ipv4Addr, i32>,
     pub(in crate::afxdp) interface_nat_v6: FastMap<Ipv6Addr, i32>,
+    /// #12086: owning routing tables for interface-NAT local-delivery
+    /// addresses. Like `local_tables_v*`, these interface addresses are not
+    /// wildcarded across routing instances.
+    pub(in crate::afxdp) interface_nat_tables_v4: FastMap<Ipv4Addr, FastSet<String>>,
+    pub(in crate::afxdp) interface_nat_tables_v6: FastMap<Ipv6Addr, FastSet<String>>,
     pub(in crate::afxdp) connected_v4: Vec<ConnectedRouteV4>,
     /// #10689: build-time index of IPv4 connected-prefix directed broadcasts,
     /// keyed by routing domain so overlapping prefixes do not poison other

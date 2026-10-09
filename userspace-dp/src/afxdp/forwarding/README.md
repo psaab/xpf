@@ -144,6 +144,17 @@ Route metadata crosses the Go→Rust snapshot boundary as `RouteSnapshot`
     match, so its LocalDelivery carries ifindex 0 — now reached ONLY when
     the table genuinely owns the address, and counted by the
     `LOCAL_DELIVERY_IFINDEX0` diagnostic atomic.
+  - **Interface-NAT ownership is table-scoped (#12086).** Interface
+    addresses excluded from local delivery by interface-SNAT enter
+    `interface_nat_v[46]` and `interface_nat_tables_v[46]`, keyed by
+    address and canonical connected table. Leak-target FIB walks admit
+    `LocalDelivery` only when the selected target table is an owner; the
+    address is not globally local. Ordinary source-table lookups keep
+    their separate session-miss gate. A missing or foreign owner match
+    falls through to the selected table's route, or the default table
+    (`inet.0`/`inet6.0`) when no override applies; PBR can govern
+    transit in tables outside the owner set.
+
 - **IPv6 subnet-router anycast (#10692).** Linux installs a connected
   prefix's `prefix::` subnet-router anycast in table local ahead of the
   ordinary connected route. The FIB mirrors that table-scoped LocalDelivery

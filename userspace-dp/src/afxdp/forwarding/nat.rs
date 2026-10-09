@@ -1,6 +1,8 @@
 //! #5650: source-NAT flow matching and interface-NAT local resolution helpers.
 //! Pure code-motion split out of `forwarding/mod.rs` (behavior-identical).
 
+use std::borrow::Cow;
+
 use super::*;
 
 /// #3096: resolve the (ingress, egress) ifindex pair to the interface /
@@ -196,53 +198,81 @@ pub(in crate::afxdp) fn match_source_nat_for_flow_result_at(
     )
 }
 
+/// #12086: interface-NAT local delivery is scoped to the table resolving this
+/// destination. `None` is the family's default table, matching the FIB lookup
+/// contract; interface addresses are never wildcarded across routing instances.
 pub(in crate::afxdp) fn interface_nat_local_resolution(
     state: &ForwardingState,
     dst: IpAddr,
+    resolving_table: Option<&str>,
 ) -> Option<ForwardingResolution> {
     match dst {
-        IpAddr::V4(ip) => state
-            .interface_nat_v4
-            .get(&ip)
-            .copied()
-            .map(|local_ifindex| ForwardingResolution {
-                disposition: ForwardingDisposition::LocalDelivery,
-                local_ifindex,
-                egress_ifindex: local_ifindex,
-                tx_ifindex: local_ifindex,
-                tunnel_endpoint_id: state
-                    .tunnel_endpoint_by_ifindex
-                    .get(&local_ifindex)
-                    .copied()
-                    .unwrap_or_default(),
-                next_hop: None,
-                neighbor_mac: None,
-                src_mac: None,
-                tx_vlan_id: 0,
-                route_mtu: 0,
-                transport_route_mtu: 0,
-            }),
-        IpAddr::V6(ip) => state
-            .interface_nat_v6
-            .get(&ip)
-            .copied()
-            .map(|local_ifindex| ForwardingResolution {
-                disposition: ForwardingDisposition::LocalDelivery,
-                local_ifindex,
-                egress_ifindex: local_ifindex,
-                tx_ifindex: local_ifindex,
-                tunnel_endpoint_id: state
-                    .tunnel_endpoint_by_ifindex
-                    .get(&local_ifindex)
-                    .copied()
-                    .unwrap_or_default(),
-                next_hop: None,
-                neighbor_mac: None,
-                src_mac: None,
-                tx_vlan_id: 0,
-                route_mtu: 0,
-                transport_route_mtu: 0,
-            }),
+        IpAddr::V4(ip) => {
+            let table = resolving_table
+                .map(|table| canonical_route_table(table, false))
+                .unwrap_or(Cow::Borrowed(DEFAULT_V4_TABLE));
+            if !state
+                .interface_nat_tables_v4
+                .get(&ip)
+                .is_some_and(|tables| tables.contains(table.as_ref()))
+            {
+                return None;
+            }
+            state
+                .interface_nat_v4
+                .get(&ip)
+                .copied()
+                .map(|local_ifindex| ForwardingResolution {
+                    disposition: ForwardingDisposition::LocalDelivery,
+                    local_ifindex,
+                    egress_ifindex: local_ifindex,
+                    tx_ifindex: local_ifindex,
+                    tunnel_endpoint_id: state
+                        .tunnel_endpoint_by_ifindex
+                        .get(&local_ifindex)
+                        .copied()
+                        .unwrap_or_default(),
+                    next_hop: None,
+                    neighbor_mac: None,
+                    src_mac: None,
+                    tx_vlan_id: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
+                })
+        }
+        IpAddr::V6(ip) => {
+            let table = resolving_table
+                .map(|table| canonical_route_table(table, true))
+                .unwrap_or(Cow::Borrowed(DEFAULT_V6_TABLE));
+            if !state
+                .interface_nat_tables_v6
+                .get(&ip)
+                .is_some_and(|tables| tables.contains(table.as_ref()))
+            {
+                return None;
+            }
+            state
+                .interface_nat_v6
+                .get(&ip)
+                .copied()
+                .map(|local_ifindex| ForwardingResolution {
+                    disposition: ForwardingDisposition::LocalDelivery,
+                    local_ifindex,
+                    egress_ifindex: local_ifindex,
+                    tx_ifindex: local_ifindex,
+                    tunnel_endpoint_id: state
+                        .tunnel_endpoint_by_ifindex
+                        .get(&local_ifindex)
+                        .copied()
+                        .unwrap_or_default(),
+                    next_hop: None,
+                    neighbor_mac: None,
+                    src_mac: None,
+                    tx_vlan_id: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
+                })
+        }
     }
 }
 
@@ -250,18 +280,20 @@ pub(in crate::afxdp) fn interface_nat_local_resolution_on_session_miss(
     state: &ForwardingState,
     dst: IpAddr,
     _protocol: u8,
+    resolving_table: Option<&str>,
 ) -> Option<ForwardingResolution> {
-    interface_nat_local_resolution(state, dst)
+    interface_nat_local_resolution(state, dst, resolving_table)
 }
 
 pub(in crate::afxdp) fn should_block_tunnel_interface_nat_session_miss(
     state: &ForwardingState,
     dst: IpAddr,
     protocol: u8,
+    resolving_table: Option<&str>,
 ) -> bool {
     matches!(protocol, PROTO_TCP | PROTO_UDP | PROTO_ICMP | PROTO_ICMPV6)
         && matches!(
-            interface_nat_local_resolution(state, dst),
+            interface_nat_local_resolution(state, dst, resolving_table),
             Some(local) if local.tunnel_endpoint_id != 0
         )
 }
