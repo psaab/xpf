@@ -45,7 +45,14 @@ func assertCIDRMaskStampParity12122(t *testing.T, cfg *config.Config, got []stri
 
 func publishCIDRMaskSchedulerSnapshot12122(t *testing.T, cfg *config.Config) *ConfigSnapshot {
 	t.Helper()
-	dir := t.TempDir()
+	// A SHORT temp-dir prefix (not t.TempDir(), whose long sub-test name would
+	// push the AF_UNIX path past the 108-byte sun_path limit -> "bind: invalid
+	// argument"). Honors TMPDIR (run with TMPDIR=/tmp).
+	dir, err := os.MkdirTemp("", "x12122")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
 	controlSock := filepath.Join(dir, "control.sock")
 	ln, err := net.Listen("unix", controlSock)
 	if err != nil {
