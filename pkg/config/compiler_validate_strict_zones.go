@@ -19,10 +19,11 @@ import (
 // reference-exempt). Adding "junos-global" to the reference-exempt set would
 // silently re-open the device-wide-permit class this gate closes, because the
 // dataplane (userspace-dp/src/policy.rs:1021) classifies a "junos-global"
-// reference as a device-wide global rule. (Until #9570 it did so for a
-// reference on EITHER side; it now requires both, and the userspace snapshot
-// builder poisons any zone-pair rule naming the sentinel on the tolerant path
-// — see ZonePairGlobalSentinelSide.)
+// reference as a device-wide global rule. Since #9570, a zone-pair rule naming
+// it on either side is poisoned on the tolerant path
+// (ZonePairGlobalSentinelSide). A tolerated zone definition named `any` is
+// omitted from the zone snapshot; the policy builder poisons zone-pair rules
+// naming that token so they cannot reach its wildcard tiers (#12249).
 //
 //   - "junos-global" — the device-wide global-policy sentinel. The userspace
 //     dataplane (userspace-dp/src/policy.rs) string-matches a from-zone/to-zone
@@ -34,10 +35,9 @@ import (
 //
 //   - "any"         — Junos wildcard zone (`from-zone any`/`to-zone any`); a
 //     reserved policy-context token, never a named zone-id lookup, so a real
-//     zone named "any" can never be selected and would shadow the wildcard.
-//     (The dataplane DOES index a from-zone/to-zone `any` policy as of #3090 —
-//     dedicated from-any/to-any/both-any tiers in userspace-dp/src/policy.rs —
-//     but a zone DEFINITION named "any" is rejected here regardless.)
+//     zone named "any" would shadow the wildcard. Strict commit rejects that
+//     definition; tolerant loads omit it and poison zone-pair references so the
+//     helper cannot reinterpret a zone-scoped rule as a wildcard (#12249).
 //
 //   - "junos-host"  — Junos reserved self-traffic zone (host-inbound / host-
 //     outbound policy context); it is never declared as a `security zone`.
@@ -48,9 +48,9 @@ import (
 // interface identity (the same class used by the daemon's vrf-mgmt apply),
 // while a data member in either name receives the #10308 commit advisory.
 var reservedZoneNames = map[string]struct{}{
-	"junos-global": {},
-	"any":          {},
-	"junos-host":   {},
+	JunosGlobalZoneName:      {},
+	ReservedWildcardZoneName: {},
+	"junos-host":             {},
 }
 
 // policyZoneSpecialTokens is the set of reserved from-zone/to-zone tokens
@@ -64,10 +64,11 @@ var reservedZoneNames = map[string]struct{}{
 //   - "any"         — Junos wildcard zone (`from-zone any`/`to-zone any`); kept
 //     exempt HERE so the undefined-zone gate does not emit a confusing "define
 //     `security zones security-zone any`" error (such a zone definition is
-//     itself rejected). A from-zone/to-zone `any` is a fully-enforced wildcard
-//     as of #3090 (indexed into the from-any/to-any/both-any tiers in
-//     userspace-dp/src/policy.rs), so it is accepted here and NOT specially
-//     rejected — it is simply not an undefined-zone reference.
+//     itself rejected). Without a defined `any` zone, a from-zone/to-zone `any`
+//     is fully enforced as of #3090 (indexed into the dedicated from-any,
+//     to-any, and both-any tiers in userspace-dp/src/policy.rs), so it is
+//     accepted here and is not an undefined-zone reference. A tolerated legacy
+//     `any` definition instead poisons zone-pair policies naming it (#12249).
 //   - "junos-host"  — Junos reserved self-traffic zone (host-inbound / host-
 //     outbound policy context); it is never declared as a `security zone`.
 //
@@ -89,9 +90,9 @@ var reservedZoneNames = map[string]struct{}{
 // Strict now validates against this same special-token + defined-zone gate
 // (empty = all-zones, exempt via "").
 var policyZoneSpecialTokens = map[string]struct{}{
-	"":           {},
-	"any":        {},
-	"junos-host": {},
+	"":                       {},
+	ReservedWildcardZoneName: {},
+	"junos-host":             {},
 }
 
 // validateReservedZoneNamesStrict hard-rejects a `security zones security-zone

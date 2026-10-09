@@ -501,7 +501,7 @@ func TestBuildSnapshotQuarantinesReservedZoneNames(t *testing.T) {
 	}
 }
 
-func TestReservedZoneQuarantineKeepsSentinelPolicyReferences(t *testing.T) {
+func TestReservedZoneQuarantinePoisonsDefinedAnyAndKeepsHostContext(t *testing.T) {
 	snap := &ConfigSnapshot{
 		Zones: []ZoneSnapshot{
 			{Name: "trust", ID: config.StableZoneID("trust")},
@@ -515,7 +515,7 @@ func TestReservedZoneQuarantineKeepsSentinelPolicyReferences(t *testing.T) {
 		},
 		Policies: []PolicyRuleSnapshot{
 			{Name: "host-context", FromZone: "trust", ToZone: "junos-host"},
-			{Name: "wildcard", FromZone: "any", ToZone: "trust"},
+			{Name: "defined-any", FromZone: "any", ToZone: "trust"},
 		},
 	}
 	collisions := quarantineCollidingZones(snap)
@@ -523,7 +523,23 @@ func TestReservedZoneQuarantineKeepsSentinelPolicyReferences(t *testing.T) {
 		t.Fatalf("reserved zones remained installed: %+v", snap.Zones)
 	}
 	if len(snap.Policies) != 2 {
-		t.Fatalf("reserved sentinel references were scrubbed from policies: %+v", snap.Policies)
+		t.Fatalf("zone quarantine unexpectedly removed rules: %+v", snap.Policies)
+	}
+	var definedAny, hostContext *PolicyRuleSnapshot
+	for i := range snap.Policies {
+		switch snap.Policies[i].Name {
+		case "defined-any":
+			definedAny = &snap.Policies[i]
+		case "host-context":
+			hostContext = &snap.Policies[i]
+		}
+	}
+	if definedAny == nil || definedAny.zonePairDefinedAnySide != "from-zone" ||
+		len(definedAny.ApplicationTerms) != 1 || definedAny.ApplicationTerms[0].Protocol != unsupportedApplicationSentinel {
+		t.Fatalf("defined-any policy was not poisoned before quarantine: %+v", definedAny)
+	}
+	if hostContext == nil || hostContext.zonePairDefinedAnySide != "" {
+		t.Fatalf("valid host-context policy was changed: %+v", hostContext)
 	}
 	for _, iface := range snap.Interfaces {
 		if iface.Name != "ge-0-0-0.0" && iface.Zone != "" {

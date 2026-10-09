@@ -418,4 +418,10 @@ type PolicyRuleSnapshot struct {
 	// wire, and the reason the builder poisons the rule instead of relying on
 	// the helper to tell them apart.
 	zonePairGlobalSentinelSide string
+	// #12249: build-time-only marker for a poisoned zone-pair rule that names
+	// the reserved `any` token while a zone definition with that name is
+	// present. The wire token is otherwise a legitimate wildcard, so the
+	// rejection mirror needs this provenance to distinguish this legacy bad
+	// definition from an ordinary accepted wildcard rule.
+	zonePairDefinedAnySide string
 }
