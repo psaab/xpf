@@ -191,6 +191,21 @@ pub(in crate::afxdp) fn is_synthetic_fabric_source_mac(source_mac: &[u8]) -> boo
     source_mac.starts_with(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC])
         || source_mac.starts_with(&FABRIC_NAT_SCOPE_MAC_PREFIX)
 }
+
+/// True when this ingress is a fabric link and the Ethernet source is one of
+/// xpf's synthetic V1/V2 stamps. Replies that reflect the source MAC cannot
+/// reach the originating client in this case.
+#[inline]
+pub(in crate::afxdp) fn ingress_has_synthetic_fabric_source(
+    forwarding: &ForwardingState,
+    ingress_ifindex: i32,
+    frame: &[u8],
+) -> bool {
+    ingress_is_fabric(forwarding, ingress_ifindex)
+        && frame
+            .get(6..12)
+            .is_some_and(is_synthetic_fabric_source_mac)
+}
 /// Returns whether the Ethernet destination is accepted on the observed
 /// ingress link. The AF_XDP shim normally receives only frames accepted by
 /// the NIC's unicast filter, but promiscuous / bridged / virtual devices can

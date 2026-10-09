@@ -443,3 +443,46 @@ fn syn_cookie_reply_enqueues_host_generated_frame_without_transit_policy_metadat
     assert_eq!(counters.syn_cookie_syn_ack_sent, 1);
     assert_eq!(counters.syn_cookie_reply_budget_drops, 0);
 }
+
+/// #12319 residual: a SYN-cookie SYN-ACK on a stamped fabric arrival would
+/// also reflect the synthetic source MAC and must not be counted as sent.
+#[test]
+fn stamped_fabric_syn_cookie_reply_suppresses_unreachable_syn_ack_12319() {
+    let (mut frame, mut meta, flow) = tcp_v4_syn_frame();
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x02]);
+    meta.ingress_ifindex = 21;
+    let mut forwarding = ForwardingState::default();
+    forwarding.fabrics.push(FabricLink {
+        parent_ifindex: 21,
+        overlay_ifindex: 22,
+        peer_addr: "192.0.2.1".parse().unwrap(),
+        peer_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x02],
+        local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
+        up: true,
+    });
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+        0,
+    );
+    let mut counters = BatchCounters::default();
+
+    let sent = enqueue_syn_cookie_reply(
+        &mut pipeline,
+        &forwarding,
+        21,
+        &frame,
+        meta,
+        Some(&flow),
+        SynCookieReply::SynAck(SynCookieChallenge {
+            cookie_isn: 0xaabb_ccdd,
+            peer_mss: 1460,
+        }),
+        &mut counters,
+    );
+
+    assert!(!sent, "an unreachable cookie reply must not report sent");
+    assert!(pipeline.pending_tx_local.is_empty());
+    assert_eq!(counters.syn_cookie_syn_ack_sent, 0);
+    assert_eq!(counters.syn_cookie_reply_budget_drops, 0);
+}

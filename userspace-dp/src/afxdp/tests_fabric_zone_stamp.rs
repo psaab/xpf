@@ -3337,6 +3337,73 @@ fn v2_stamped_fabric_policy_reject_suppresses_rst_on_real_poll_12051() {
     assert_eq!(sessions.len(), 0);
 }
 
+/// #12319: build a valid IPv4/UDP frame for the real-poll stamped-fabric
+/// reject regression. The source MAC is the V1 zone stamp; the caller replaces
+/// it with the producer-minted V2 stamp for the V2 coverage.
+fn stamped_fabric_udp_frame_12319(zone_id: u16) -> Vec<u8> {
+    let mut frame = stamped_fabric_frame(zone_id, TCP_FLAG_SYN);
+    frame[16..18].copy_from_slice(&28u16.to_be_bytes());
+    frame[23] = crate::ip_proto::PROTO_UDP;
+    frame[34..42].copy_from_slice(&[0x30, 0x39, 0x00, 0x35, 0x00, 0x08, 0x00, 0x00]);
+    frame.truncate(42);
+    frame[24..26].fill(0);
+    let checksum = crate::afxdp::frame::checksum16(&frame[14..34]);
+    frame[24..26].copy_from_slice(&checksum.to_be_bytes());
+    frame
+}
+
+/// #12319: a real-poll policy reject with a V2 source stamp minted by the
+/// production ingress-identity redirect helper must suppress the UDP ICMP leg.
+#[test]
+fn v2_stamped_fabric_udp_policy_reject_suppresses_icmp_on_real_poll_12319() {
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let forwarding = build_forwarding_state(&reject_fabric_snapshot(false));
+    let redirect = crate::afxdp::forwarding::resolve_fabric_redirect_for_ingress_identity(
+        &forwarding,
+        Some(TEST_DMZ_ZONE_ID),
+        Some(25),
+    )
+    .expect("dmz ingress-identity fabric redirect");
+    let source_mac = redirect.src_mac.expect("V2 fabric source stamp");
+    assert_eq!(&source_mac[..3], &FABRIC_NAT_SCOPE_MAC_PREFIX);
+    let mut frame = stamped_fabric_udp_frame_12319(TEST_DMZ_ZONE_ID);
+    frame[6..12].copy_from_slice(&source_mac);
+    let mut meta = txn_meta_v4(21, 0, frame.len() as u16);
+    meta.protocol = crate::ip_proto::PROTO_UDP;
+    meta.l4_offset = 34;
+    meta.payload_offset = 42;
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+
+    assert_eq!(dbg.rx, 1, "the descriptor must reach the poll path");
+    assert!(dbg.policy_deny >= 1, "the default policy reject must run");
+    assert_eq!(batch.invalid_fabric_stamp_drops, 0);
+    assert!(
+        binding.tx_pipeline.pending_tx_local.is_empty(),
+        "a V2-stamped UDP policy reject must not queue stamp-addressed ICMP"
+    );
+    assert_eq!(batch.policy_reject_sent, 0);
+    assert_eq!(batch.policy_reject_reply_budget_drops, 0);
+    assert_eq!(batch.policy_reject_rate_limit_drops, 0);
+    assert_eq!(sessions.len(), 0);
+}
+
 /// #12051 B2: an ACK miss on a V1-stamped fabric punt with dmz tcp-rst enabled
 /// still records the strict-SYN drop, but never reflects the synthetic stamp.
 #[test]
