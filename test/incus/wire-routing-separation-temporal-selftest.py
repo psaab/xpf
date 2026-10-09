@@ -85,7 +85,7 @@ def main() -> int:
     forwarded = True
     stopped = False
     deny_probes = False
-    drop_final_tail = False
+    drop_tail_last = False
     late_outage = False
     late_outage_tripped = False
     late_n_baseline = 0
@@ -94,7 +94,7 @@ def main() -> int:
     peer_sequence: list[tuple[str, int]] = []
 
     def relay(sock: socket.socket) -> None:
-        nonlocal forwarded, stopped, deny_probes, drop_final_tail, late_outage
+        nonlocal forwarded, stopped, deny_probes, drop_tail_last, late_outage
         nonlocal late_outage_tripped, late_n_baseline
         while True:
             try:
@@ -124,7 +124,7 @@ def main() -> int:
                     and not (
                         late_outage and tag == "N" and seq >= 1000
                     )
-                    and not (drop_final_tail and tag == "N" and seq == 1499)
+                    and not (drop_tail_last and tag == "N" and seq == 1099)
                 )
                 condition.notify_all()
             if do_forward:
@@ -236,7 +236,7 @@ def main() -> int:
             p_window_observed = peer_counts["P"] - p_before
             window_packets = peer_sequence[sequence_before:]
         tail_observed = sum(
-            1 for tag, seq in window_packets if tag == "N" and 1400 <= seq <= 1499
+            1 for tag, seq in window_packets if tag == "N" and 1000 <= seq <= 1099
         )
         if "SENT tag=P count=1000" not in interleaved or "SENT tag=N count=1500" not in interleaved:
             raise AssertionError(f"interleaved sender count mismatch: {interleaved}")
@@ -248,12 +248,12 @@ def main() -> int:
         green_rc, green_out = window_verdict(n_window_observed, tail_observed)
         if green_rc != 2 or "VOID reason=capture-blind" not in green_out:
             raise AssertionError(f"full outage did not VOID: {green_out} rc={green_rc}")
-        # Losing the final N packet alone must not VOID a healthy capture when
-        # the other late controls were observed after the complete probe burst.
+        # Dropping the final frame in the measured 100-frame tail alone must
+        # not VOID a healthy capture; the tail starts just after the probe.
         with condition:
             forwarded = True
             deny_probes = True
-            drop_final_tail = True
+            drop_tail_last = True
             healthy_n_before = peer_counts["N"]
             healthy_p_before = peer_counts["P"]
             healthy_sequence_before = len(peer_sequence)
@@ -276,12 +276,12 @@ def main() -> int:
             healthy_n_observed = peer_counts["N"] - healthy_n_before
             healthy_p_observed = peer_counts["P"] - healthy_p_before
             healthy_packets = peer_sequence[healthy_sequence_before:]
-            drop_final_tail = False
+            drop_tail_last = False
         healthy_tail_observed = sum(
-            1 for tag, seq in healthy_packets if tag == "N" and 1400 <= seq <= 1499
+            1 for tag, seq in healthy_packets if tag == "N" and 1000 <= seq <= 1099
         )
         healthy_last_observed = sum(
-            1 for tag, seq in healthy_packets if tag == "N" and seq == 1499
+            1 for tag, seq in healthy_packets if tag == "N" and seq == 1099
         )
         if (
             healthy_n_observed != 1499
@@ -299,13 +299,13 @@ def main() -> int:
         )
         if healthy_rc != 0 or " WIRE_GATE wire_routing_separation PASS " not in f" {healthy_out} ":
             raise AssertionError(
-                f"healthy capture with only final N lost did not PASS: {healthy_out} "
+                f"healthy capture with only final tail frame lost did not PASS: {healthy_out} "
                 f"rc={healthy_rc}"
             )
 
         # Trip a later outage after N#999 is peer-observed but before P#999.
-        # The old aggregate floor reaches 1000; only the post-probe tail proves
-        # that liveness continued through the last probe packet.
+        # The old aggregate floor reaches 1000; the first 100 controls after
+        # the probe burst test liveness immediately beyond its final packet.
         with condition:
             forwarded = True
             deny_probes = True
@@ -328,13 +328,28 @@ def main() -> int:
         )
         wait_for(relay_counts, "N", late_relay_n_target)
         wait_for(relay_counts, "P", late_relay_p_target)
+        # Wait on the relay's own trip signal before sampling: the peer
+        # receiver lags the relay under load, so sampling right after the
+        # relay counts arrive reads async state at a fixed point.
+        with condition:
+            trip_deadline = time.monotonic() + 5
+            while not late_outage_tripped:
+                remaining = trip_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError(
+                        "timed out waiting for the late outage to trip: "
+                        f"tripped={late_outage_tripped} "
+                        f"N={peer_counts['N'] - late_n_before} "
+                        f"P={peer_counts['P'] - late_p_before}"
+                    )
+                condition.wait(remaining)
         with condition:
             n_late_observed = peer_counts["N"] - late_n_before
             p_late_observed = peer_counts["P"] - late_p_before
             late_packets = peer_sequence[late_sequence_before:]
             outage_tripped = late_outage_tripped
         late_tail_observed = sum(
-            1 for tag, seq in late_packets if tag == "N" and 1400 <= seq <= 1499
+            1 for tag, seq in late_packets if tag == "N" and 1000 <= seq <= 1099
         )
         if "SENT tag=P count=1000" not in late_interleaved or "SENT tag=N count=1500" not in late_interleaved:
             raise AssertionError(f"late-outage sender counts were incomplete: {late_interleaved}")
@@ -367,8 +382,8 @@ def main() -> int:
             f"{green_out} (exit {green_rc})"
         )
         print(
-            f"Healthy minus final N: N={healthy_n_observed}/1500 "
-            f"tail={healthy_tail_observed}/100 last={healthy_last_observed} "
+            f"Healthy minus final measured tail frame: N={healthy_n_observed}/1500 "
+            f"tail={healthy_tail_observed}/100 tail_last={healthy_last_observed} "
             f"=> {healthy_out} (exit {healthy_rc})"
         )
         print(

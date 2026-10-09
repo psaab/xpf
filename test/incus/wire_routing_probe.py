@@ -6,7 +6,7 @@ steering term is committed. After commit it offers the near-miss control (tag
 N) and probe (tag P) interleaved on one socket. The near miss follows the
 existing main-table route; only its destination port differs from the
 exact-match FBF-steered probe. The peer-side capture spans all three legs.
-The final control tail follows the full probe burst and marks liveness at window end.
+The 100-frame control tail starts immediately after the final probe.
 
 With WIRE_BROKEN_FIXTURE=1, the harness inserts a temporary explicit accept
 before the routing-instance term. That intentionally bypasses steering to the
@@ -93,9 +93,8 @@ def main() -> int:
             sent[tag] += 1
 
         if args.interleave:
-            # The control tail follows every probe packet, so its observations
-            # prove liveness through the probe window without requiring one
-            # specific final datagram.
+            # The first 100 control packets after the probe burst test
+            # liveness at the boundary immediately beyond its final packet.
             for seq in range(args.count):
                 send(args.interleave_control_tag, seq, args.interleave_control_port)
                 if interval:
@@ -103,17 +102,10 @@ def main() -> int:
                 send(args.tag, seq, args.port)
                 if interval:
                     time.sleep(interval)
-            for seq in range(args.count, args.interleave_control_count - 1):
+            for seq in range(args.count, args.interleave_control_count):
                 send(args.interleave_control_tag, seq, args.interleave_control_port)
                 if interval:
                     time.sleep(interval)
-            send(
-                args.interleave_control_tag,
-                args.interleave_control_count - 1,
-                args.interleave_control_port,
-            )
-            if interval:
-                time.sleep(interval)
         else:
             for seq in range(args.count):
                 send(args.tag, seq, args.port)

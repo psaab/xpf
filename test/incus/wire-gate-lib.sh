@@ -134,11 +134,11 @@ wire_routing_separation_verdict() {
 #   <precommit_control_observed> <cksum_bad> <near_miss_offered>
 #   <near_miss_observed>
 #
-# The sender reserves a tail segment of near-miss packets until after the
-# complete probe burst. Their peer-side observations prove liveness through
-# the window's end while tolerating loss of an individual final packet. Keep
-# public gate metrics unchanged; an empty tail makes an otherwise-PASS result
-# capture-blind.
+# The sender reserves the first 100 near-miss packets after the complete
+# probe burst. Their peer-side observations establish liveness immediately
+# after the final probe while tolerating loss of an individual tail packet.
+# Keep public gate metrics unchanged; an empty tail makes an otherwise-PASS
+# result capture-blind.
 wire_routing_separation_window_verdict() {
 	local tail="${1:-}" po="${2:-}" pl="${3:-}" pco="${4:-}" pcb="${5:-}"
 	local ck="${6:-}" nmo="${7:-}" nmb="${8:-}" out rc

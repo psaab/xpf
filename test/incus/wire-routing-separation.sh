@@ -12,8 +12,10 @@
 # probe reaches the userspace route miss and is denied. `WIRE_BROKEN_FIXTURE=1`
 # inserts a temporary exact explicit `accept` term ahead of the FBF steer,
 # sending the probe through the already-proven main-table route to the peer.
+# This does not exercise fallthrough after an empty selected-VRF lookup.
 # Both controls and the interleaved near-miss/probe run under one peer-side
-# tcpdump window; the near-miss supplies liveness throughout the probe window.
+# tcpdump window; the near-miss supplies liveness during the probe and for the
+# first 100 controls immediately after it.
 # Successful sender sendto calls are the offered-frame count. Sender and
 # capture mirror wire-conntrack-lifecycle: LAN host offers, target captures on
 # eth0. The target is the managed peer, not the host-side fence.
@@ -26,7 +28,7 @@
 # Fixture format: one `probe_offered=N probe_leaked=N
 # precommit_control_offered=N precommit_control_observed=N
 # near_miss_offered=N near_miss_observed=N near_miss_tail_observed=N cksum_bad=N` line.
-# Exit: 0 PASS, 1 FAIL, 2 VOID. The tail count covers late controls after all probes.
+# Exit: 0 PASS, 1 FAIL, 2 VOID. The tail covers the first 100 controls after probes.
 set -uo pipefail
 
 MODE=live
@@ -35,7 +37,7 @@ while (($#)); do
     case "$1" in
     --selftest) MODE=selftest ;;
     --fixture) MODE=fixture; shift; FIXTURE="${1:-}" ;;
-    -h|--help) sed -n '1,32p' "$0"; exit 0 ;;
+    -h|--help) sed -n '1,/^# Exit: 0 PASS/{p}' "$0"; exit 0 ;;
     -*) echo "unknown flag: $1" >&2; exit 2 ;;
     *) echo "unexpected argument: $1" >&2; exit 2 ;;
     esac
@@ -214,10 +216,12 @@ if [[ "$MODE" == selftest ]]; then
     bad=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-bad.XXXXXX")
     blind=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-blind.XXXXXX")
     late=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-late.XXXXXX")
+    missing_tail=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-missing-tail.XXXXXX")
     printf '%s\n' 'probe_offered=1000 probe_leaked=0 precommit_control_offered=1500 precommit_control_observed=1500 near_miss_offered=1500 near_miss_observed=1500 near_miss_tail_observed=99 cksum_bad=0' >"$good"
     printf '%s\n' 'probe_offered=1000 probe_leaked=1 precommit_control_offered=1500 precommit_control_observed=1500 near_miss_offered=1500 near_miss_observed=1500 near_miss_tail_observed=99 cksum_bad=0' >"$bad"
     printf '%s\n' 'probe_offered=1000 probe_leaked=0 precommit_control_offered=1500 precommit_control_observed=1500 near_miss_offered=1500 near_miss_observed=0 near_miss_tail_observed=0 cksum_bad=0' >"$blind"
     printf '%s\n' 'probe_offered=1000 probe_leaked=0 precommit_control_offered=1500 precommit_control_observed=1500 near_miss_offered=1500 near_miss_observed=1000 near_miss_tail_observed=0 cksum_bad=0' >"$late"
+    sed 's/ near_miss_tail_observed=99//' "$good" >"$missing_tail"
     out=$("$0" --fixture "$bad"); rc=$?
     if [[ "$rc" == 1 && "$out" == *'WIRE_GATE wire_routing_separation FAIL reason=--'* ]]; then
         echo "  PASS  leaked-probe transcript fails"
@@ -236,11 +240,14 @@ if [[ "$MODE" == selftest ]]; then
         fail=$((fail + 1))
     fi
     out=$("$0" --fixture "$good"); rc=$?
-    if [[ "$rc" == 0 && "$out" == *'WIRE_GATE wire_routing_separation PASS reason=--'* ]]; then
-        echo "  PASS  clean fixture passes"
+    missing_out=$("$0" --fixture "$missing_tail"); missing_rc=$?
+    if [[ "$rc" == 0 && "$out" == *'WIRE_GATE wire_routing_separation PASS reason=--'* &&
+        "$missing_rc" == 2 &&
+        "$missing_out" == *'WIRE_GATE wire_routing_separation VOID reason=harness-void'* ]]; then
+        echo "  PASS  clean fixture passes; missing tail field is VOID"
         pass=$((pass + 1))
     else
-        echo "  FAIL  clean fixture did not pass (rc=$rc out=$out)"
+        echo "  FAIL  fixture tail-field behavior mismatch (good rc=$rc out=$out; missing rc=$missing_rc out=$missing_out)"
         fail=$((fail + 1))
     fi
     out=$("$0" --fixture "$late"); rc=$?
@@ -252,7 +259,7 @@ if [[ "$MODE" == selftest ]]; then
         echo "  FAIL  late outage fixture did not VOID (rc=$rc out=$out)"
         fail=$((fail + 1))
     fi
-    rm -f "$good" "$bad" "$blind" "$late"
+    rm -f "$good" "$bad" "$blind" "$late" "$missing_tail"
     echo "  wire-routing-separation selftest: $pass passed, $fail failed"
     [[ "$fail" -eq 0 && "$pass" -gt 0 ]] || exit 1
     exit 0
@@ -533,8 +540,8 @@ grep -q '^set firewall family inet filter sfmix-pbr term default ' "$BASE0_NORM"
 PORT=$((10#$PORT))
 ((10#$CONTROL_BURST >= 10#$PROBE_BURST + NEAR_MISS_TAIL_SIZE)) ||
     void_now harness-void
-NEAR_MISS_TAIL_START_SEQ=$((10#$CONTROL_BURST - NEAR_MISS_TAIL_SIZE))
-NEAR_MISS_TAIL_END_SEQ=$((10#$CONTROL_BURST - 1))
+NEAR_MISS_TAIL_START_SEQ=$((10#$PROBE_BURST))
+NEAR_MISS_TAIL_END_SEQ=$((10#$PROBE_BURST + NEAR_MISS_TAIL_SIZE - 1))
 if ((PORT == 65535)); then
     NEAR_MISS_PORT=65534
 else
