@@ -51,7 +51,10 @@ fi
 # only `ok` and the leg exits 0. The scan pins the four kernel cells BY NAME,
 # because a `-run` predicate that rots matches nothing and reports a clean pass
 # over an empty set. The two hermetic 7796 cells still run; they cannot skip.
-out=$(unshare -rn "$GO" test -count=1 -v -run 7796 ./pkg/routing/ 2>&1)
+# -json=false: the named scan below parses plain-text RUN records, so an
+# inherited GOFLAGS=-json must not flip the stream to JSON (which would read
+# as four missing cells despite every cell passing).
+out=$(unshare -rn "$GO" test -json=false -count=1 -v -run 7796 ./pkg/routing/ 2>&1)
 rc=$?
 
 fail=0
