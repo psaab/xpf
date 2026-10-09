@@ -245,20 +245,24 @@ def out_text(argv):
 
 
 def deb_version_for_head():
-    """Mirror Makefile's default DEB_VERSION for the current checkout."""
+    """Mirror Makefile's default DEB_VERSION for the current checkout.
+
+    Ignore the transient changelog rewrite performed by `make deb`; include
+    staged, unstaged, and untracked source changes in the dirty marker.
+    """
     try:
         count = out_text(["git", "-C", ROOT, "rev-list", "--count", "HEAD"]).strip()
         commit = out_text(
             ["git", "-C", ROOT, "rev-parse", "--short=12", "HEAD"]).strip()
-        dirty = subprocess.run(
-            ["git", "-C", ROOT, "diff", "--quiet"]).returncode
+        dirty = out_text([
+            "git", "-C", ROOT, "status", "--porcelain",
+            "--untracked-files=normal", "--", ".", ":!debian/changelog",
+        ])
     except (OSError, subprocess.CalledProcessError) as e:
         die(f"cannot derive the current Debian package version: {e}")
     if not count.isdigit() or not re.fullmatch(r"[0-9a-f]{12,40}", commit):
         die("git returned an invalid commit identity for the Debian package version")
-    if dirty not in (0, 1):
-        die("cannot determine whether the Debian package source is dirty")
-    return f"0.0.{count}+g{commit}{'.dirty' if dirty else ''}"
+    return f"0.0.{count}+g{commit}{'.dirty' if dirty.strip() else ''}"
 
 
 def deb_commit_from_version(version):
@@ -293,6 +297,12 @@ def bind_deb_identity(deb_version, staged_version_output, *, skip_build,
     """
     package_commit = deb_commit_from_version(deb_version)
     xpfd_version, xpfd_commit = parse_xpfd_version(staged_version_output)
+    if deb_version.endswith(".dirty"):
+        die(f"package {deb_version} records a dirty source tree; refusing "
+            f"to sign it as commit {package_commit}")
+    if xpfd_version.endswith("-dirty"):
+        die(f"staged xpfd version {xpfd_version!r} does not match package "
+            f"commit {package_commit}: it marks dirty build bytes")
     if not (package_commit.startswith(xpfd_commit)
             or xpfd_commit.startswith(package_commit)):
         die(f"package {deb_version} embeds commit {package_commit}, but its "
@@ -326,13 +336,15 @@ def bind_deb_identity(deb_version, staged_version_output, *, skip_build,
         except (OSError, subprocess.CalledProcessError) as e:
             die(f"cannot verify staged xpfd version against package commit "
                 f"{commit}: {e}")
-        observed = xpfd_version.removesuffix("-dirty")
-        same_version = observed == expected_xpfd_version
-        if not same_version and re.fullmatch(r"[0-9a-f]{7,40}", observed):
+        # Do not discard `-dirty`: a clean package must not attest bytes built
+        # from source that differs from its recorded commit. `make deb`'s
+        # transient changelog edit is excluded from Makefile's VERSION flag.
+        same_version = xpfd_version == expected_xpfd_version
+        if not same_version and re.fullmatch(r"[0-9a-f]{7,40}", xpfd_version):
             same_version = (
                 re.fullmatch(r"[0-9a-f]{7,40}", expected_xpfd_version)
-                and (observed.startswith(expected_xpfd_version)
-                     or expected_xpfd_version.startswith(observed)))
+                and (xpfd_version.startswith(expected_xpfd_version)
+                     or expected_xpfd_version.startswith(xpfd_version)))
         if not same_version:
             die(f"staged xpfd version {xpfd_version!r} does not match package "
                 f"commit {commit} (expected {expected_xpfd_version!r})")
