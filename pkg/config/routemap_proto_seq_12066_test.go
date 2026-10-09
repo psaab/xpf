@@ -64,6 +64,31 @@ func TestRouteMapSequenceCount_ProtoDimension_12066(t *testing.T) {
 			1,
 		},
 		{
+			"padded-protocol-dedup",
+			&PolicyStatement{Terms: []*PolicyTerm{{Name: "t", FromProtocols: []string{"bgp", "bgp "}}}},
+			1,
+		},
+		{
+			"mixed-case-protocol-dedup",
+			&PolicyStatement{Terms: []*PolicyTerm{{Name: "t", FromProtocols: []string{"BGP", "bgp"}}}},
+			1,
+		},
+		{
+			"padded-direct-alias-dedup",
+			&PolicyStatement{Terms: []*PolicyTerm{{Name: "t", FromProtocols: []string{"direct", "connected "}}}},
+			1,
+		},
+		{
+			"padded-case-alias-dedup",
+			&PolicyStatement{Terms: []*PolicyTerm{{Name: "t", FromProtocols: []string{" Direct ", "CONNECTED"}}}},
+			1,
+		},
+		{
+			"unknown-protocols-stay-distinct",
+			&PolicyStatement{Terms: []*PolicyTerm{{Name: "t", FromProtocols: []string{"unknown-a", "unknown-b"}}}},
+			2,
+		},
+		{
 			"deduped-protocol-cross-product", // 2 pl x 1 canonical proto x 2 comm = 4
 			&PolicyStatement{Terms: []*PolicyTerm{{
 				Name:          "t",

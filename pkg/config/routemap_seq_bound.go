@@ -40,11 +40,13 @@ func policyStatementHasNextPolicy(ps *PolicyStatement) bool {
 	return false
 }
 
-// CanonicalSourceProtocol maps Junos `from protocol` aliases to the spelling
-// used by FRR route-map source-protocol matches.
+// CanonicalSourceProtocol maps Junos `from protocol` aliases and spelling
+// variants to the FRR keyword used by route-map source-protocol matches. The
+// routing-protocol domain is the SSOT for aliases, whitespace, and case; keep
+// unknown lenient-path tokens distinct by falling back to the raw value.
 func CanonicalSourceProtocol(proto string) string {
-	if proto == "direct" {
-		return "connected"
+	if keyword, ok := FRRRoutingProtocolKeyword(proto); ok {
+		return keyword
 	}
 	return proto
 }

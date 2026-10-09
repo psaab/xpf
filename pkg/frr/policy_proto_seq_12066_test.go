@@ -271,3 +271,105 @@ func TestPolicyProtoSeqDeduplicatesCanonicalProtocols_12066(t *testing.T) {
 		})
 	}
 }
+
+// TestPolicyProtoSeqPaddedEquivalentDedupes_12066 proves padded and mixed-case
+// spellings of the same protocol collapse to one modifying sequence. The
+// strict gate accepts the broader FRRRoutingProtocolKeyword domain (trim +
+// case-fold) WITHOUT rewriting the stored token, so compile preserves the raw
+// spelling (e.g. "bgp ") and canonicalization must happen at render/count
+// time. Without it [ bgp "bgp " ] expands to two modifying sequences and a
+// non-terminating prepend runs twice for the same route.
+func TestPolicyProtoSeqPaddedEquivalentDedupes_12066(t *testing.T) {
+	cases := []struct {
+		name     string
+		routeMap string
+		fromFrag string
+		raw      []string
+		want     string
+	}{
+		{
+			name:     "padded-bgp",
+			routeMap: "PADDED",
+			fromFrag: `[ bgp "bgp " ]`,
+			raw:      []string{"bgp", "bgp "},
+			want:     "bgp",
+		},
+		{
+			name:     "padded-alias",
+			routeMap: "PADALIAS",
+			fromFrag: `[ direct "connected " ]`,
+			raw:      []string{"direct", "connected "},
+			want:     "connected",
+		},
+		{
+			name:     "mixed-case",
+			routeMap: "MIXEDCASE",
+			fromFrag: `[ BGP bgp ]`,
+			raw:      []string{"BGP", "bgp"},
+			want:     "bgp",
+		},
+		{
+			name:     "padded-mixed-alias",
+			routeMap: "PADMIXED",
+			fromFrag: `[ " Direct " CONNECTED ]`,
+			raw:      []string{" Direct ", "CONNECTED"},
+			want:     "connected",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			tree := &config.ConfigTree{}
+			cmds := []string{
+				"set policy-options policy-statement " + tc.routeMap + " term t1 from protocol " + tc.fromFrag,
+				"set policy-options policy-statement " + tc.routeMap + " term t1 then as-path-prepend 65000",
+				"set policy-options policy-statement " + tc.routeMap + " then reject",
+			}
+			for _, cmd := range cmds {
+				path, err := config.ParseSetCommand(cmd)
+				if err != nil {
+					t.Fatalf("ParseSetCommand(%q): %v", cmd, err)
+				}
+				if err := tree.SetPath(path); err != nil {
+					t.Fatalf("SetPath(%q): %v", cmd, err)
+				}
+			}
+			cfg, err := config.CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("CompileConfig: %v", err)
+			}
+			ps := cfg.PolicyOptions.PolicyStatements[tc.routeMap]
+			if ps == nil || len(ps.Terms) == 0 {
+				t.Fatalf("compiled %s has no terms", tc.routeMap)
+			}
+			gotProtos := ps.Terms[0].FromProtocols
+			if len(gotProtos) != len(tc.raw) {
+				t.Fatalf("compiled FromProtocols = %q, want raw %q", gotProtos, tc.raw)
+			}
+			for i := range tc.raw {
+				if gotProtos[i] != tc.raw[i] {
+					t.Fatalf("compiled FromProtocols = %q, want raw %q (strict accepts without rewriting)", gotProtos, tc.raw)
+				}
+			}
+			m := &Manager{frrConf: "/dev/null"}
+			got := m.generatePolicyOptions(&cfg.PolicyOptions)
+			blocks := protoSeqBlocks12066(t, got, tc.routeMap)
+			if len(blocks) != 2 {
+				t.Fatalf("got %d route-map sequences, want one modifying sequence plus default:\n%s",
+					len(blocks), got)
+			}
+			if blocks[0].protos != 1 ||
+				!strings.Contains(blocks[0].body, "match source-protocol "+tc.want+"\n") {
+				t.Errorf("modifying sequence has source-protocol matches %q, want only %q:\n%s",
+					strings.TrimSpace(blocks[0].body), tc.want, got)
+			}
+			if strings.Count(blocks[0].body, "set as-path prepend 65000\n") != 1 {
+				t.Errorf("padded-equivalent protocols must not duplicate the non-terminating prepend:\n%s",
+					blocks[0].body)
+			}
+			if n := config.RouteMapSequenceCount(&cfg.PolicyOptions, ps); n != 1 {
+				t.Errorf("RouteMapSequenceCount = %d, want 1 modifying sequence", n)
+			}
+		})
+	}
+}

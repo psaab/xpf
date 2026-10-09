@@ -482,13 +482,17 @@ and a config sitting just under the ceiling rendered past it.
 A second OR dimension is `from protocol [...]` (#12066). FRR stores only one
 same-type `match source-protocol` rule per route-map sequence, replacing an
 earlier rule; the renderer must therefore emit one sequence per distinct
-canonical source protocol. It normalizes aliases (`direct` to `connected`)
-before deduplication and preserves first-seen order, so duplicate aliases and
-repeated protocol tokens do not emit duplicate sequences. `emitVariants` crosses
-that dimension with route-filter families, prefix-list refs, communities, and
-AS paths, and `RouteMapSequenceCount` multiplies by the unique canonical
-protocol-set size too. Otherwise the renderer could exceed the sequence ceiling
-without the commit-time bound noticing.
+canonical source protocol. `config.CanonicalSourceProtocol` delegates to
+`config.FRRRoutingProtocolKeyword`, the shared routing-domain mapping also used
+by strict validation: it normalizes aliases (`direct` to `connected`), trims
+whitespace, and folds case before deduplication. Thus `[ bgp "bgp " ]` and
+`[ BGP bgp ]` each produce one match; first-seen order is preserved. Unknown
+tokens from lenient paths remain raw, so distinct unknown values do not
+collapse. `emitVariants` crosses that dimension with route-filter families,
+prefix-list refs, communities, and AS paths, and `RouteMapSequenceCount`
+multiplies by the unique canonical protocol-set size too. Otherwise the
+renderer could exceed the sequence ceiling without the commit-time bound
+noticing.
 
 The fix is not to duplicate family resolution in the bound; it is to share the
 family mapping. `config.PrefixListFamilies` decides WHICH families a list holds
