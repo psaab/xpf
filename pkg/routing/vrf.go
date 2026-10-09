@@ -130,7 +130,9 @@ func (v *vrfManager) IsManaged(name string) bool {
 //   - Desired VRF name occupied by a non-VRF device: return an error,
 //     leave the link untouched, and do not adopt it.
 //   - Desired VRF, absent from kernel: LinkAdd, adopted into v.vrfs.
-//   - Managed VRF in v.vrfs not in desired: LinkDel, removed from v.vrfs.
+//   - Managed VRF in v.vrfs not in desired: LinkDel if the link is a
+//     VRF, removed from v.vrfs; a same-name non-VRF is foreign and
+//     left alone (skipped, not deleted).
 //   - #847 orphan: vrf-<X> in kernel but NOT in desired AND NOT in
 //     v.vrfs (e.g. left over from a routing-instance rename across
 //     a daemon restart, where v.vrfs was empty after the restart):
@@ -371,13 +373,15 @@ func isLinkNotFound(err error) bool {
 // vrfOps so tests can inject a fake. Returns the new tracked set and
 // the first error encountered (others are logged).
 //
-// Ownership semantics: xpfd is authoritative for the ENTIRE "vrf-*"
-// kernel namespace. A VRF is "ours" by virtue of name prefix; if its
-// logical name appears in desired, reconcileVRFs ADOPTS it into
-// v.vrfs (handles the post-restart case). #847 orphan reap: any
-// kernel "vrf-*" device NOT in desired AND NOT in v.vrfs is also
-// deleted, so operators must NOT pre-create vrf-<name> outside
-// xpfd config.
+// Ownership semantics: xpfd manages VRF devices by name, but the link
+// TYPE is authoritative (#12062). A *netlink.Vrf whose logical name
+// appears in desired is ADOPTED into v.vrfs (handles the post-restart
+// case). A same-name non-VRF link (bridge, dummy, …) is FOREIGN: it is
+// never adopted, brought up, or deleted — reconcile refuses with an
+// error until its owner removes it. #847 orphan reap: any kernel VRF
+// device NOT in desired AND NOT in v.vrfs is deleted; non-VRF
+// vrf-* names are skipped. Operators must NOT pre-create vrf-<name>
+// outside xpfd config.
 //
 // Partial-failure contract: if LinkAdd succeeds but a follow-up
 // (LinkByName / LinkSetUp) fails, the VRF is still recorded in the
@@ -441,9 +445,10 @@ func reconcileVRFs(ops vrfOps, tracked []string, desired []VRFSpec) ([]string, e
 			continue
 		}
 
-		// Present in kernel. The name is our namespace only for VRFs.
-		currentTable := vrfTable(link)
-		if currentTable == uint32(spec.TableID) {
+		// Present in kernel and type-asserted above: bind the VRF and
+		// read its table directly.
+		vrf := link.(*netlink.Vrf)
+		if vrf.Table == uint32(spec.TableID) {
 			if err := ops.LinkSetUp(link); err != nil {
 				slog.Debug("VRF set-up failed (non-fatal)", "name", vrfName, "err", err)
 			}
@@ -453,7 +458,7 @@ func reconcileVRFs(ops vrfOps, tracked []string, desired []VRFSpec) ([]string, e
 
 		// Table mismatch — recreate with desired table.
 		slog.Warn("VRF table ID mismatches desired, recreating",
-			"name", vrfName, "old_table", currentTable, "new_table", spec.TableID)
+			"name", vrfName, "old_table", vrf.Table, "new_table", spec.TableID)
 		if err := ops.LinkDel(link); err != nil {
 			// Delete failed — VRF still exists with wrong table.
 			// Retain ownership so a future reconcile can retry.
@@ -509,11 +514,12 @@ func reconcileVRFs(ops vrfOps, tracked []string, desired []VRFSpec) ([]string, e
 	// and delete any VRF that is neither in `desired` nor in
 	// `tracked` (already handled).
 	//
-	// xpfd claims the ENTIRE `vrf-*` kernel namespace — operators
-	// must not pre-create vrf-<X> outside config. This is a
-	// stricter policy than the original #844 plan (which preserved
-	// "external" VRFs); the godoc on Reconcile is the
-	// authoritative contract.
+	// xpfd manages VRF devices by name, but the link type stays
+	// authoritative (#12062): only *netlink.Vrf links are deleted
+	// here; same-name non-VRF links are foreign and left alone. This
+	// is stricter than the original #844 plan (which preserved
+	// "external" VRFs); the godoc on Reconcile is the authoritative
+	// contract.
 	links, err := ops.LinkList()
 	if err != nil {
 		// Best-effort: log and continue. The desired/tracked sets
@@ -592,14 +598,4 @@ func createLinkedVRF(ops vrfOps, vrfName string, tableID int) (bool, error) {
 	}
 	slog.Info("VRF created", "name", vrfName, "table", tableID)
 	return true, nil
-}
-
-// vrfTable returns the routing table of a VRF link, or 0 if the link
-// is not a VRF (which indicates a namespace collision with a
-// non-VRF device of the same name).
-func vrfTable(link netlink.Link) uint32 {
-	if v, ok := link.(*netlink.Vrf); ok {
-		return v.Table
-	}
-	return 0
 }
