@@ -1037,7 +1037,6 @@ fn udp_v6_ingress_frame_10686(
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
         ingress_ifindex: 12,
-        ingress_vlan_id: 80,
         l3_offset: 14,
         l4_offset: 54,
         payload_offset: 62,
