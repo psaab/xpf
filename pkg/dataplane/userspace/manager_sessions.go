@@ -181,8 +181,7 @@ func recordPolicyDeleteSettled(result *PolicyDeleteResult, index int) {
 // the matches returned by ListSessionsByPolicy. The helper owns both the
 // authoritative table and the bare-key mirror repair; this method never uses a
 // Go-side mirror delete that could destroy a colliding survivor.
-
-// Plan §2.4 micro-batches: at most 64 matches and 128 gate keys (forward plus
+// Plan §2.4 micro-batch caps: at most 64 matches and 128 gate keys (forward plus
 // captured companion) per helper round trip, so a full 262144-match capture
 // costs at most 4096 round trips — never one per match. Batches share one
 // absolute 30-second delete deadline; at the deadline, on a batch transport

@@ -27,6 +27,8 @@ type convergenceHelper12072 struct {
 	deleteErrOnce         bool
 	rows                  []dpuserspace.SessionPolicyMatch
 	ruleBySession         map[uint64]string
+	lastExpectedConfig    *config.Config
+	applyAttempts         int
 	reads                 int
 	refused               int
 	deleteRowsSent        int
@@ -43,6 +45,7 @@ func (d *convergenceHelper12072) PolicyReadConfig() *config.Config {
 }
 
 func (d *convergenceHelper12072) ApplyConfig(ctx context.Context, cfg *config.Config) (*dataplane.ApplyResult, error) {
+	d.applyAttempts++
 	if d.lostAckNext {
 		d.lostAckNext = false
 		d.helperCfg = cfg
@@ -57,6 +60,7 @@ func (d *convergenceHelper12072) ApplyConfig(ctx context.Context, cfg *config.Co
 }
 
 func (d *convergenceHelper12072) ListSessionsByPolicy(req dpuserspace.SessionPolicyListRequest) (dpuserspace.ControlResponse, error) {
+	d.lastExpectedConfig = req.ExpectedConfig
 	if req.Mode == "prepublish" && (req.ExpectedConfig == nil || d.PolicyReadConfig() != req.ExpectedConfig) {
 		d.refused++
 		return dpuserspace.ControlResponse{}, errors.New("policy session READ refused: authority changed")
@@ -161,11 +165,21 @@ func newConvergenceRun12072(t *testing.T, policies []string) (*convergenceRun120
 }
 
 func (r *convergenceRun12072) commit(name string, old, next *config.Config) error {
+	return r.commitWithPeer(name, old, next, peerSyncNever)
+}
+
+func (r *convergenceRun12072) commitWithPeer(
+	name string, old, next *config.Config, peerSync peerSyncPolicy,
+) error {
 	r.t.Helper()
 	if _, err := r.h.d.store.SyncApply(fmt.Sprintf("system { host-name %s; }", name), nil); err != nil {
 		r.t.Fatalf("promote %s: %v", name, err)
 	}
-	err := r.h.commit(old, next)
+	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
+		return err
+	}
+	_, err := r.h.d.applyAndSyncCommitted(old, next, peerSync)
+	r.h.d.applySem.Release(1)
 	_, _ = r.h.sender.ApplyQueuedMessagesForTesting(r.h.receiver)
 	return err
 }
@@ -186,6 +200,86 @@ func (r *convergenceRun12072) hasLiveSession(id uint64) bool {
 		}
 	}
 	return false
+}
+
+func TestPolicyInvalidationKnownAuthorityReanchorsBeforeRead12072(t *testing.T) {
+	r, c0 := newConvergenceRun12072(t, []string{"p-first", "a", "web"})
+	c1 := twoPolicyConfig([]string{"p-first", "web"}, nil)
+	c2 := twoPolicyConfig([]string{"p-first"}, nil)
+	readsBefore, attemptsBefore := r.dp.reads, r.dp.applyAttempts
+	if err := r.commitWithPeer("c2", c1, c2, peerSyncNever); err != nil {
+		t.Fatalf("commit with stale store predecessor and known C0 authority: %v", err)
+	}
+	if r.dp.lastExpectedConfig != c0 || r.dp.reads != readsBefore+1 || r.dp.refused != 0 {
+		t.Fatalf("capture authority/read/refusal = %p/%d/%d, want C0/%d/0",
+			r.dp.lastExpectedConfig, r.dp.reads-readsBefore, r.dp.refused, readsBefore+1)
+	}
+	if r.dp.applyAttempts != attemptsBefore+1 ||
+		!r.hasDeletedSession(1) || !r.hasDeletedSession(2) {
+		t.Fatalf("known-authority re-anchor did not apply and revoke C0 targets: attempts=%d deleted=%v",
+			r.dp.applyAttempts-attemptsBefore, r.dp.deleted)
+	}
+}
+
+func TestPolicyInvalidationUnknownAuthorityNeverPushesUnappliedConfig12072(t *testing.T) {
+	r, c0 := newConvergenceRun12072(t, []string{"p-first", "a", "b", "web"})
+	c1 := twoPolicyConfig([]string{"p-first", "b", "web"}, nil)
+	c2 := twoPolicyConfig([]string{"p-first", "web"}, nil)
+	r.dp.lostAckNext = true
+	if err := r.commit("c1", c0, c1); err == nil {
+		t.Fatal("lost apply ACK was not surfaced")
+	}
+	attemptsBefore := r.dp.applyAttempts
+	pushes := 0
+	r.h.d.syncPeerForTest = func() { pushes++ }
+	err := r.commitWithPeer("c2", c1, c2, peerSyncAlways)
+	if !errors.Is(err, dpuserspace.ErrPolicyReadAuthority) {
+		t.Fatalf("unknown-authority commit error = %v, want policy READ authority refusal", err)
+	}
+	if r.dp.applyAttempts != attemptsBefore || pushes != 0 {
+		t.Fatalf("unknown-authority commit attempted local apply/pushed peer: applyAttempts+%d peerPushes+%d",
+			r.dp.applyAttempts-attemptsBefore, pushes)
+	}
+	if !r.dp.unknown || r.dp.helperCfg != c1 {
+		t.Fatalf("unknown helper state changed unexpectedly: unknown=%v helper=%p", r.dp.unknown, r.dp.helperCfg)
+	}
+}
+
+func TestPolicyInvalidationSupersedingCompleteReadClearsUnpublishedScanFailure12072(t *testing.T) {
+	r, c0 := newConvergenceRun12072(t, []string{"p-first", "a", "b", "web"})
+	c1 := twoPolicyConfig([]string{"p-first", "b", "web"}, nil)
+	c2 := twoPolicyConfig([]string{"p-first", "web"}, nil)
+	r.dp.incompleteNext = 1
+	r.h.dp.script = []invalDebtOutcome12073{{
+		err: errors.New("helper control socket: connection refused"),
+	}}
+	if err := r.commit("c1", c0, c1); err == nil {
+		t.Fatal("incomplete READ plus failed C0→C1 publication was not surfaced")
+	}
+	if r.dp.applied != c0 {
+		t.Fatalf("failed C1 publication changed helper authority: got %p, want C0 %p", r.dp.applied, c0)
+	}
+	if debt := r.h.d.policyInvalidationDebt; debt == nil || debt.scanFailure == nil {
+		t.Fatalf("failed C1 publication did not retain scan debt: %+v", debt)
+	}
+
+	readsBefore := r.dp.reads
+	if err := r.commit("c2", c1, c2); err != nil {
+		t.Fatalf("superseding C1→C2 commit at still-authoritative C0 failed: %v", err)
+	}
+	if r.dp.lastExpectedConfig != c0 || r.dp.reads != readsBefore+1 || r.dp.refused != 0 {
+		t.Fatalf("superseding capture authority/read/refusal = %p/%d/%d, want C0/1/0",
+			r.dp.lastExpectedConfig, r.dp.reads-readsBefore, r.dp.refused)
+	}
+	if r.h.d.policyInvalidationDebt != nil || !r.h.d.store.ActiveApplied() {
+		t.Fatalf("complete C0 scan did not retire unpublished C1 debt: debt=%+v activeApplied=%v",
+			r.h.d.policyInvalidationDebt, r.h.d.store.ActiveApplied())
+	}
+	if !r.hasDeletedSession(1) || !r.hasDeletedSession(2) ||
+		r.hasLiveSession(1) || r.hasLiveSession(2) || !r.hasLiveSession(3) {
+		t.Fatalf("superseding scan did not revoke exactly C0's removed a/b rows: deleted=%v rows=%v",
+			r.dp.deleted, r.dp.rows)
+	}
 }
 
 func TestPolicyInvalidationPublishedReadFailureStaysVisibleWithoutWedge12072(t *testing.T) {
@@ -317,8 +411,11 @@ func TestPolicyInvalidationLostAckCatchupReanchorsBeforeNextCommit12072(t *testi
 	if debt := r.h.d.policyInvalidationDebt; debt == nil || debt.publishGeneration != 0 {
 		t.Fatalf("lost-ACK fixture did not retain unstamped debt: %+v", debt)
 	}
-	// Model the status loop confirming the helper's accepted C1 snapshot.
-	r.dp.applied, r.dp.unknown = c1, false
+	// Model the status loop replaying its exact retained C1 snapshot after the
+	// helper reports the prior apply's lost ACK.
+	if _, err := r.dp.ApplyConfig(context.Background(), c1); err != nil {
+		t.Fatalf("status-loop retry of retained C1 failed: %v", err)
+	}
 	readsBefore := r.dp.reads
 	if err := r.commit("c2", c1, c2); err != nil {
 		t.Fatalf("C1→C2 after catch-up failed: %v", err)
@@ -354,8 +451,11 @@ func TestPolicyInvalidationUnknownAuthorityHoldsSupersedingPublish12072(t *testi
 	if r.hasDeletedSession(2) {
 		t.Fatal("b was deleted before a complete capture under a known authority")
 	}
-	// After status-loop catch-up, retry the same C1→C2 commit under known C1.
-	r.dp.applied, r.dp.unknown = c1, false
+	// The status loop retries the same retained C1 generation; it does not
+	// fabricate an authority transition.
+	if _, err := r.dp.ApplyConfig(context.Background(), c1); err != nil {
+		t.Fatalf("status-loop retry of retained C1 failed: %v", err)
+	}
 	if err := r.commit("c2-retry", c1, c2); err != nil {
 		t.Fatalf("known-authority retry failed: %v", err)
 	}
@@ -483,7 +583,11 @@ func TestPolicyInvalidationBareRetryReusesLandedCapture12072(t *testing.T) {
 	if err := r.commit("c1", c0, c1); err == nil {
 		t.Fatal("lost apply ACK was not surfaced")
 	}
-	r.dp.applied, r.dp.unknown = c1, false
+	// Status retries the retained snapshot and confirms C1 before the bare
+	// daemon retry exercises the already captured invalidation.
+	if _, err := r.dp.ApplyConfig(context.Background(), c1); err != nil {
+		t.Fatalf("status-loop retry of retained C1 failed: %v", err)
+	}
 	readsBefore := r.dp.reads
 	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
 		t.Fatal(err)

@@ -318,6 +318,13 @@ func (m *Manager) prepareDeferredPolicySnapshotLocked() bool {
 		return true
 	}
 	generation := m.lastSnapshot.Generation
+	if m.applySnapshotOutcomeUnknown && m.policySnapshotPrepublishGeneration == generation {
+		// This exact retained snapshot already passed the pre-publish capture
+		// before its first send. Its ACK was lost, so do not take a fresh
+		// positional-ID capture while the helper authority is unknown; retry
+		// the identity-stamped snapshot unchanged.
+		return true
+	}
 	callback := m.policySnapshotPrePublisher
 	m.mu.Unlock()
 	err := callback(generation)
@@ -327,8 +334,12 @@ func (m *Manager) prepareDeferredPolicySnapshotLocked() bool {
 			"generation", generation, "err", err)
 		return false
 	}
-	return m.pendingFullSnapshotMetadata && m.publishedSnapshot < generation &&
+	ready := m.pendingFullSnapshotMetadata && m.publishedSnapshot < generation &&
 		m.lastSnapshot != nil && m.lastSnapshot.Generation == generation
+	if ready {
+		m.policySnapshotPrepublishGeneration = generation
+	}
+	return ready
 }
 
 func (m *Manager) statusLoop(ctx context.Context) {

@@ -172,7 +172,7 @@ type Manager struct {
 	captureAuthorityCommitter          func(configGeneration uint64, fibGeneration uint32, captureGeneration uint64)
 	policySnapshotCommitter            func(configGeneration uint64)
 	policySnapshotPrePublisher         func(generation uint64) error
-	// helperHAStatePublished records whether THIS helper process has been sent a
+	policySnapshotPrepublishGeneration uint64
 	// clustered HA inventory at least once (a successful update_ha_state with a
 	// non-empty group set). It is NOT derivable from len(m.haGroups): that is the
 	// MANAGER's view, which seedHAGroupInventoryLocked populates from config

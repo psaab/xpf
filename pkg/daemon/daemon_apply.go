@@ -221,7 +221,7 @@ func (d *Daemon) applyActiveConfigResult() error {
 		return nil
 	}
 	err := d.applyConfigLocked(context.Background(), cfg)
-	if err == nil {
+	if err == nil && d.policyInvalidationDebt == nil {
 		// Stamp before releasing applySem so a competing promotion cannot
 		// inherit this successful apply result.
 		d.store.MarkActiveApplied()
@@ -250,7 +250,7 @@ func (d *Daemon) applyConfigUnderSem(cfg *config.Config) {
 	// generation even when nothing changed). A FAILED apply above returns
 	// early and leaves the prior digest, so a config that never converged is
 	// never marked applied — the same #4957 invariant handleConfigSync relies on.
-	if d.store != nil {
+	if d.store != nil && d.policyInvalidationDebt == nil {
 		d.store.MarkActiveApplied()
 	}
 }

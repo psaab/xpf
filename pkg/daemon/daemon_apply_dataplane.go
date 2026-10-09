@@ -1308,6 +1308,7 @@ func (d *Daemon) reapplyAfterDeferredMAC(cfg *config.Config) {
 		if plan := d.policyInvalidationPlan; plan != nil && plan.newCfg == cfg {
 			if err := d.captureAndStagePolicyRenameAncestry(cfg); err != nil {
 				slog.Warn("deferred-MAC replay held until policy READ authority is known", "err", err)
+				d.recordDataplaneWorkerArmDebt()
 				return
 			}
 		}

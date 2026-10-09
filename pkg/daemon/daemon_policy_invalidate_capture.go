@@ -69,18 +69,12 @@ type policyInvalidationPlan struct {
 	renameApply *pendingRenameApply
 }
 
-// policyInvalidationScanFailure remembers an incomplete enumeration until a
-// complete retry of the same policy transition can scan its original authority.
-// A later published pair is a different namespace and cannot prove that a
-// deleted rule's orphaned rows were found. The originating error is surfaced
-// once; the retained marker is quiet on settled retries.
+// policyInvalidationScanFailure remembers the old authority under which a scan
+// was incomplete. A later complete scan can retire it only if that same
+// authority is still active; the target need not match when its earlier
+// publication failed.
 type policyInvalidationScanFailure struct {
-	oldCfg          *config.Config
-	newCfg          *config.Config
-	newConfigDigest string
-	readErr         error
-	v4Err           error
-	v6Err           error
+	oldCfg *config.Config
 }
 
 // policyInvalidationDebt owns the candidate identities until the corresponding
@@ -271,13 +265,14 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 			"it was armed for a different config than this apply is publishing")
 		return
 	}
-	if debt := d.policyInvalidationDebt; debt != nil {
-		if applied := policyInvalidationAppliedConfig(d.dataplane()); applied != nil &&
-			debt.newCfg == applied && plan.oldCfg != applied {
-			// A previous authority refusal may have preserved this plan. Once
-			// the helper has settled the retained target, re-anchor before
-			// computing positional IDs for the retry.
-			plan.oldCfg = applied
+	if applied := policyInvalidationAppliedConfig(d.dataplane()); applied != nil &&
+		applied != plan.oldCfg && applied != plan.newCfg {
+		// Positional policy IDs must be derived from the helper's known
+		// predecessor, not a stale store snapshot. A helper already at the
+		// target is different: the old identities may have been renumbered
+		// away, so the C0→C1 candidate cannot be reconstructed from C1.
+		plan.oldCfg = applied
+		if debt := d.policyInvalidationDebt; debt != nil && debt.newCfg == applied {
 			debt.oldCfg = applied
 		}
 	}
@@ -353,7 +348,8 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 		appliedCfg := policyInvalidationAppliedConfig(rt)
 		if appliedCfg != plan.oldCfg {
 			refusal := fmt.Errorf(
-				"policy session READ skipped: applied snapshot does not match invalidation plan")
+				"%w: policy session READ authority is unknown or changed during capture",
+				dpuserspace.ErrPolicyReadAuthority)
 			d.refusePolicyInvalidationAuthorityLocked(plan, originalDebt, capture, refusal)
 			return
 		}
@@ -582,25 +578,15 @@ func (d *Daemon) retainPolicyInvalidationCaptureLocked(capture *policyInvalidati
 			currentErr := policyInvalidationCaptureError(capture)
 			if failure := debt.scanFailure; failure != nil &&
 				capture.scanComplete && currentErr == nil &&
-				failure.oldCfg == debt.oldCfg &&
-				(failure.newCfg == debt.newCfg ||
-					(d.store != nil && failure.newConfigDigest != "" &&
-						failure.newConfigDigest == d.store.ActiveDigest())) {
-				// Only a complete retry while the original old snapshot remains
-				// authoritative can repair its missed identities. Pointer identity
-				// is the common path; the stored active digest also recognizes a
-				// recommitted copy of the same target config.
+				failure.oldCfg == debt.oldCfg {
+				// A complete scan at the same old authority proves the
+				// candidate set even if it supersedes a target that never
+				// published. A landed target advances debt.oldCfg, so it
+				// cannot retire a failure from the prior namespace.
 				debt.scanFailure = nil
 			}
 			if debt.scanFailure == nil && currentErr != nil {
-				newConfigDigest := ""
-				if d.store != nil {
-					newConfigDigest = d.store.ActiveDigest()
-				}
-				debt.scanFailure = &policyInvalidationScanFailure{
-					oldCfg: debt.oldCfg, newCfg: debt.newCfg, newConfigDigest: newConfigDigest,
-					readErr: capture.readErr, v4Err: capture.v4Err, v6Err: capture.v6Err,
-				}
+				debt.scanFailure = &policyInvalidationScanFailure{oldCfg: debt.oldCfg}
 			}
 			if capture.scanComplete {
 				debt.authorityRefusal = nil
@@ -1064,16 +1050,15 @@ func policyTupleV6(tuple dpuserspace.SessionPolicyTuple) (dataplane.SessionKeyV6
 // session's stale authorization. The error reaches the originating commit and
 // raises one ERROR-level alarm. The userspace READ contributes at most ONE entry
 // (readErr); v4/v6 legs belong to the store path only (P9).
-// The retained scan-failure marker keeps ActiveApplied false if this partial
-// capture was published; only a complete same-pair retry at the original
-// authority can certify the missed candidates. errorSurfaced keeps later status
-// ticks quiet.
+// The retained scan-failure marker keeps ActiveApplied false while the
+// unresolved identities remain. A complete scan at the same old authority can
+// retire the marker; errorSurfaced keeps later status ticks quiet.
 func (c *policyInvalidationCapture) enumerateErr() error {
 	if c.errorSurfaced || (c.readErr == nil && c.v4Err == nil && c.v6Err == nil) {
 		return nil
 	}
 	c.errorSurfaced = true
-	slog.Error("policy session invalidation: pre-publication scan incomplete; invalidation debt remains and ActiveApplied cannot converge until a complete original-pair retry",
+	slog.Error("policy session invalidation: pre-publication scan incomplete; retry under the original authority if publication did not land; after publication, clear sessions with `clear security flow session` to remove unidentified rows",
 		"read_err", c.readErr, "v4_err", c.v4Err, "v6_err", c.v6Err,
 		"deleted_matched", len(c.deleted.v4)+len(c.deleted.v6),
 		"modified_matched", len(c.modified.v4)+len(c.modified.v6),

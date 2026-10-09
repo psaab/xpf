@@ -139,7 +139,7 @@ func TestPolicyInvalidationReanchorRetainsPublishedScanFailure12323(t *testing.T
 		t.Fatalf("C2 debt discharge repeated the originating scan error: %v", err)
 	}
 	if debt := d.policyInvalidationDebt; debt == nil || debt.scanFailure == nil ||
-		debt.scanFailure.oldCfg != c0 || debt.scanFailure.newCfg != c1 {
+		debt.scanFailure.oldCfg != c0 || debt.oldCfg != c1 {
 		t.Fatalf("complete C1→C2 scan incorrectly certified the earlier C0→C1 gap: %+v", debt)
 	}
 	if len(dp.deletedPolicy) != 1 || dp.deletedPolicy[0].ExpectedRTFlowSessionID != sshSessionID {

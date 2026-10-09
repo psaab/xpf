@@ -321,3 +321,105 @@ func TestDeferredPolicySnapshotAuthorityRefusalBlocksStatusPublish12072(t *testi
 			pending, published, generation-1)
 	}
 }
+func TestR4DeferredLostACKRecoveryReplaysStampedGeneration7WithoutFreshCapture12072(t *testing.T) {
+	m, _ := seamedManager(t)
+	m.proc = selfProc(t)
+	m.syncCancel = func() {} // prevent the retry owner goroutine; this test drives its exact calls.
+	const generation = uint64(7)
+	oldCfg, targetCfg := &config.Config{}, &config.Config{}
+	m.appliedSnapshot = appliedSnapshot{Config: oldCfg, Generation: generation - 1}
+	m.lastSnapshot = &ConfigSnapshot{
+		Version: ProtocolVersion, Generation: generation, Config: targetCfg,
+	}
+	m.generation = generation
+	m.publishedSnapshot = generation - 1
+	m.pendingFullSnapshotMetadata = true
+	m.lastStatus = ProcessStatus{
+		ConfigSnapshotProtocolVersion: ProtocolVersion,
+		LastSnapshotGeneration:        generation - 1,
+	}
+	m.helperStatusObserved = true
+
+	ancestry := []PolicyRenameAncestry{{SourceRuleID: "old", DestinationRuleID: "new"}}
+	rebinds := []PolicySessionRebind{{
+		Family: "ipv4", SrcIP: "192.0.2.1", DstIP: "198.51.100.1",
+		Protocol: 6, PolicyID: 3, RuleID: "new",
+	}}
+	captureCalls := 0
+	m.SetPolicySnapshotPrePublisher(func(got uint64) error {
+		captureCalls++
+		if got != generation || !m.SetDeferredPolicyRenameMetadata(got, ancestry, rebinds) {
+			return errors.New("failed to stamp the retained generation")
+		}
+		return nil
+	})
+	var sent []ConfigSnapshot
+	first := true
+	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		if req.Type != "apply_snapshot" {
+			return nil
+		}
+		snapshot := *req.Snapshot
+		snapshot.PolicyRenameAncestry = append([]PolicyRenameAncestry(nil), snapshot.PolicyRenameAncestry...)
+		snapshot.PolicySessionRebinds = append([]PolicySessionRebind(nil), snapshot.PolicySessionRebinds...)
+		sent = append(sent, snapshot)
+		if first {
+			first = false
+			return errLostResponse9520
+		}
+		if status != nil {
+			reply := readyHelperStatus()
+			reply.ConfigSnapshotProtocolVersion = ProtocolVersion
+			reply.LastSnapshotGeneration = req.Snapshot.Generation
+			reply.LastFIBGeneration = req.Snapshot.FIBGeneration
+			*status = *reply
+		}
+		return nil
+	}
+
+	m.mu.Lock()
+	prepared := m.prepareDeferredPolicySnapshotLocked()
+	m.mu.Unlock()
+	if !prepared || captureCalls != 1 || m.policySnapshotPrepublishGeneration != generation {
+		t.Fatalf("initial deferred capture = prepared:%v calls:%d capturedGeneration:%d",
+			prepared, captureCalls, m.policySnapshotPrepublishGeneration)
+	}
+	m.mu.Lock()
+	err := m.syncSnapshotLocked()
+	unknown, pending := m.applySnapshotOutcomeUnknown, m.pendingFullSnapshotMetadata
+	m.mu.Unlock()
+	policyAuthority := m.PolicyReadConfig()
+	if err == nil || !unknown || !pending || policyAuthority != nil || len(sent) != 1 {
+		t.Fatalf("lost-ACK state = err:%v unknown:%v pending:%v authority:%p sends:%d",
+			err, unknown, pending, policyAuthority, len(sent))
+	}
+
+	// The status-loop retry must reuse this exact snapshot's successful capture;
+	// the unknown outcome is resolved only by the second apply_snapshot ACK.
+	m.mu.Lock()
+	prepared = m.prepareDeferredPolicySnapshotLocked()
+	m.mu.Unlock()
+	if !prepared || captureCalls != 1 {
+		t.Fatalf("stamped unknown recovery re-captured policy IDs: prepared:%v captureCalls:%d",
+			prepared, captureCalls)
+	}
+	m.mu.Lock()
+	err = m.syncSnapshotLocked()
+	unknown, pending = m.applySnapshotOutcomeUnknown, m.pendingFullSnapshotMetadata
+	m.mu.Unlock()
+	policyAuthority = m.PolicyReadConfig()
+	if err != nil || unknown || pending || policyAuthority != targetCfg || len(sent) != 2 {
+		t.Fatalf("recovery = err:%v unknown:%v pending:%v authority:%p sends:%d",
+			err, unknown, pending, policyAuthority, len(sent))
+	}
+	for i, snapshot := range sent {
+		if snapshot.Generation != generation ||
+			len(snapshot.PolicyRenameAncestry) != 1 ||
+			snapshot.PolicyRenameAncestry[0] != ancestry[0] ||
+			len(snapshot.PolicySessionRebinds) != 1 ||
+			snapshot.PolicySessionRebinds[0] != rebinds[0] {
+			t.Fatalf("send %d did not preserve the identity-stamped generation %d: %+v",
+				i+1, generation, snapshot)
+		}
+	}
+}
