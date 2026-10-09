@@ -1126,9 +1126,11 @@ fn learn_dynamic_neighbor_with_mac(
     allow_mac_change: bool,
     now_ns: u64,
 ) {
-    // #12051: synthetic stamps are not host MACs. This shared learn path also
-    // sees forwarded admitted fabric frames on non-fabric ingress legs, so keep
-    // the skip ingress-agnostic.
+    // #3075/#11337: skip xpf's own synthetic fabric-zone (V1) or
+    // interface-scope (V2) source MAC (#12051 shares the predicate but keeps
+    // this skip's original ingress-agnostic semantics: a forwarded admitted
+    // fabric frame reaches this leg too, so the guard stays in the shared MAC
+    // path).
     if crate::afxdp::forwarding::is_synthetic_fabric_source_mac(&src_mac) {
         return;
     }

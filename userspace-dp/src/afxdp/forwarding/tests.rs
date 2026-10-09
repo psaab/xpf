@@ -944,6 +944,141 @@ fn zone_encoded_fabric_ingress_skips_dynamic_neighbor_learning() {
     assert!(neighbors.is_empty());
 }
 
+fn learn_source_mac_for_test(
+    forwarding: &ForwardingState,
+    neighbors: &Arc<ShardedNeighborMap>,
+    ingress_ifindex: i32,
+    src_ip: IpAddr,
+    src_mac: [u8; 6],
+) {
+    let mut frame = vec![0u8; 64];
+    frame[6..12].copy_from_slice(&src_mac);
+    let mut area = MmapArea::new(4096).expect("mmap");
+    area.slice_mut(0, frame.len())
+        .expect("slice")
+        .copy_from_slice(&frame);
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: ingress_ifindex as u32,
+        ..UserspaceDpMeta::default()
+    };
+    learn_dynamic_neighbor_from_packet(
+        &area,
+        XdpDesc {
+            addr: 0,
+            len: frame.len() as u32,
+            options: 0,
+        },
+        meta,
+        src_ip,
+        super::super::neighbor::monotonic_nanos(),
+        &mut LearnedNeighborDedup::default(),
+        forwarding,
+        neighbors,
+    );
+}
+
+fn v2_fabric_source_mac_for_test(forwarding: &mut ForwardingState) -> [u8; 6] {
+    let scope_id = crate::afxdp::forwarding::fabric_nat_scope_stamp_id(
+        TEST_LAN_ZONE_ID,
+        "reth0.7",
+        "default",
+    );
+    forwarding
+        .ifindex_to_fabric_nat_scope_id
+        .insert(21, scope_id);
+    forwarding.fabric_nat_scope_id_to_identity.insert(
+        scope_id,
+        crate::afxdp::types::FabricNatScopeIdentity {
+            zone_id: TEST_LAN_ZONE_ID,
+            ifindex: 21,
+            redundancy_group: 1,
+        },
+    );
+    let source_mac = crate::afxdp::forwarding::resolve_fabric_redirect_for_ingress_identity(
+        forwarding,
+        Some(TEST_LAN_ZONE_ID),
+        Some(21),
+    )
+    .and_then(|redirect| redirect.src_mac)
+    .expect("V2 ingress-identity fabric source stamp");
+    assert_eq!(
+        &source_mac[..3],
+        &[0x02, 0xbf, 0x73],
+        "the producer must return a V2 interface-scope stamp"
+    );
+    source_mac
+}
+
+/// #12051 F2(c) / M8 fail-on-revert: a real V2 fabric source stamp on fabric
+/// ingress is synthetic, not a host neighbor. M8 (V1-only neighbor skip)
+/// learns the V2 MAC and creates a dynamic-neighbor entry, turning this RED.
+#[test]
+fn v2_stamped_fabric_ingress_skips_dynamic_neighbor_learning_12051() {
+    let mut forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+    let stamp = v2_fabric_source_mac_for_test(&mut forwarding);
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let control_ip = IpAddr::V4(Ipv4Addr::new(198, 18, 0, 10));
+    let stamp_ip = IpAddr::V4(Ipv4Addr::new(198, 18, 0, 11));
+
+    learn_source_mac_for_test(
+        &forwarding,
+        &neighbors,
+        21,
+        control_ip,
+        [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01],
+    );
+    assert!(
+        neighbors.get(&(21, control_ip)).is_some(),
+        "a normal unicast source on the fabric ingress must be learnable"
+    );
+    learn_source_mac_for_test(&forwarding, &neighbors, 21, stamp_ip, stamp);
+    assert!(
+        neighbors.get(&(21, stamp_ip)).is_none(),
+        "a V2-stamped fabric source must not enter the dynamic-neighbor map"
+    );
+}
+
+/// #12051 F2(c) / M7+M8 fail-on-revert: synthetic V1 and V2 stamp-shaped
+/// source MACs on native ingress still take the shared, ingress-agnostic
+/// neighbor-skip path. M7 (skip only on fabric ingress) and M8 (V1-only skip)
+/// both learn the V2 native-ingress source; M7 also learns V1, turning this
+/// RED. The ordinary-MAC control proves the native learn path is live.
+#[test]
+fn stamped_native_ingress_skips_dynamic_neighbor_learning_12051() {
+    let mut forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
+    let v2_stamp = v2_fabric_source_mac_for_test(&mut forwarding);
+    let v1_stamp = [0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x01];
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let control_ip = IpAddr::V4(Ipv4Addr::new(198, 18, 0, 20));
+    let v1_ip = IpAddr::V4(Ipv4Addr::new(198, 18, 0, 21));
+    let v2_ip = IpAddr::V4(Ipv4Addr::new(198, 18, 0, 22));
+
+    learn_source_mac_for_test(
+        &forwarding,
+        &neighbors,
+        5,
+        control_ip,
+        [0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02],
+    );
+    assert!(
+        neighbors.get(&(5, control_ip)).is_some(),
+        "a normal unicast source on native ingress must be learnable"
+    );
+    learn_source_mac_for_test(&forwarding, &neighbors, 5, v1_ip, v1_stamp);
+    learn_source_mac_for_test(&forwarding, &neighbors, 5, v2_ip, v2_stamp);
+    assert!(
+        neighbors.get(&(5, v1_ip)).is_none(),
+        "a V1 stamp-shaped native source must not enter the dynamic-neighbor map"
+    );
+    assert!(
+        neighbors.get(&(5, v2_ip)).is_none(),
+        "a V2 stamp-shaped native source must not enter the dynamic-neighbor map"
+    );
+}
+
 #[test]
 fn manager_neighbor_replace_filters_connected_directed_broadcast_11033() {
     let mut coordinator = Coordinator::new();

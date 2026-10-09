@@ -1,6 +1,7 @@
 // #2089/#11303 policy `then reject` replies generally follow Junos semantics:
-// TCP gets a RST unless a synthetic V1/V2 fabric source MAC makes it
-// unreplyable; UDP gets ICMP/ICMPv6 port-unreachable, and other protocols drop.
+// TCP gets a RST unless a synthetic V1/V2 fabric source MAC on a fabric
+// ingress makes it unreplyable (stamp-shaped native MACs still get RSTs);
+// UDP gets ICMP/ICMPv6 port-unreachable, and other protocols drop.
 // Plain `then deny` stays silent. Junos zone `tcp-rst` uses the same reply
 // machinery only for non-SYN TCP transit session misses, not policy denies.
 // Lifted out of poll_descriptor/mod.rs so the hot ingress loop does not carry
@@ -250,7 +251,6 @@ fn enqueue_reject_reply(
     source: RejectReplySource,
     reject_message: crate::filter::RejectMessage,
 ) -> bool {
-
     // #12051: a TCP RST reflects the incoming source MAC. A V1/V2 synthetic
     // fabric stamp is not the client's L2 address, so the reflected reset
     // cannot reach the client. Treat it as unreplyable before building or
