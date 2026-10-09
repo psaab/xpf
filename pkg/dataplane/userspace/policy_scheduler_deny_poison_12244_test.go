@@ -129,3 +129,174 @@ func TestDefinedOffWindowDenyStaysInactive12244(t *testing.T) {
 		t.Fatalf("defined-but-off-window deny must not refuse the snapshot: %q", reasons)
 	}
 }
+
+// F1 (Opus R2): the GlobalPolicies loop of
+// poisonUndefinedSchedulerDenyPolicies12244 must be exercised — a
+// zone-pair-only walker would silently fail open for every global
+// undefined-scheduler deny/reject. RED-on-revert: deleting the GlobalPolicies
+// loop flips every cell below from poisoned to inactive-with-clean-mirror.
+func TestUndefinedSchedulerGlobalDenyRejectPoisons12244(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		action    string
+		scope     string
+		wantScope string
+	}{
+		{name: "unscoped-deny", action: "deny", scope: "", wantScope: "global/gprobe"},
+		{name: "scoped-reject", action: "reject", scope: "from-zone trust; to-zone untrust;", wantScope: "global(trust->untrust)/gprobe"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text := `security {
+    zones { security-zone trust { interfaces { ge-0/0/0.0; } } security-zone untrust { interfaces { ge-0/0/1.0; } } }
+    policies {
+        global {
+            policy gprobe {
+                match { source-address any; destination-address any; application any; ` + tc.scope + ` }
+                then { ` + tc.action + `; }
+                scheduler-name missing-gsched;
+            }
+        }
+    }
+}`
+			p := config.NewParser(text)
+			tree, errs := p.Parse()
+			if len(errs) > 0 {
+				t.Fatalf("parse: %v", errs)
+			}
+			cfg, err := config.CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("lenient compile: %v", err)
+			}
+			if len(cfg.Security.GlobalPolicies) != 1 {
+				t.Fatalf("GlobalPolicies=%d, want 1", len(cfg.Security.GlobalPolicies))
+			}
+			if pol := cfg.Security.GlobalPolicies[0]; !pol.LenientContentDropped {
+				t.Fatalf("undefined-scheduler global %s was NOT poisoned (LenientContentDropped=false) — it installs inactive and silently never denies (#12244)", tc.action)
+			}
+			snap, err := buildSnapshotWithSchedulerState(cfg, config.UserspaceConfig{}, 1, 0, nil, nil, nil)
+			if err != nil {
+				t.Fatalf("buildSnapshot: %v", err)
+			}
+			if !snapshotHasAppSentinel12244(t, snap) {
+				t.Fatalf("undefined-scheduler global %s rule lacks the __unsupported__ poison: %+v", tc.action, snap.Policies[0].ApplicationTerms)
+			}
+			if len(snap.Capabilities.PolicyContentRejected) == 0 {
+				t.Fatalf("PolicyContentRejected empty for undefined-scheduler global %s; want the fail-closed diagnostic", tc.action)
+			}
+			reasons := PolicyContentRejectionReasons(cfg, nil)
+			if len(reasons) == 0 {
+				t.Fatalf("content-rejection mirror empty for undefined-scheduler global %s", tc.action)
+			}
+			joined := strings.Join(reasons, " | ")
+			if !strings.Contains(joined, tc.wantScope) || !strings.Contains(joined, "missing-gsched") {
+				t.Fatalf("mirror must name scope-qualified policy %q + scheduler, got %q", tc.wantScope, reasons)
+			}
+			if _, err := config.CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "missing-gsched") {
+				t.Fatalf("strict commit must reject the undefined global scheduler, got: %v", err)
+			}
+		})
+	}
+}
+
+// F2 (Opus R2): the defined-scheduler guard inside `mark` must be exercised
+// while the poison function actually RUNS — an undefined-scheduler PERMIT in
+// the same config trips validatePolicySchedulerReferencesStrict so
+// poisonUndefinedSchedulerDenyPolicies12244 runs, and the defined-scheduler
+// DENY must still come through clean (no poison, snapshot accepted).
+// RED-on-revert: deleting the `cfg.Schedulers[...]; ok → return` guard
+// poisons b-deny-def and refuses the snapshot (over-poisoning).
+func TestDefinedSchedulerDenyWithUndefinedPermitStaysClean12244(t *testing.T) {
+	text := `schedulers { scheduler workhours { daily { start-time 09:00:00; stop-time 17:00:00; } } }` + `security {
+    zones { security-zone trust { interfaces { ge-0/0/0.0; } } security-zone untrust { interfaces { ge-0/0/1.0; } } }
+    policies {
+        from-zone trust to-zone untrust {
+            policy a-permit-undef {
+                match { source-address any; destination-address any; application any; }
+                then { permit; }
+                scheduler-name missing-sched;
+            }
+            policy b-deny-def {
+                match { source-address any; destination-address any; application any; }
+                then { deny; }
+                scheduler-name workhours;
+            }
+        }
+    }
+}`
+	p := config.NewParser(text)
+	tree, errs := p.Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse: %v", errs)
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	byName := map[string]*config.Policy{}
+	for _, zpp := range cfg.Security.Policies {
+		for _, pol := range zpp.Policies {
+			byName[pol.Name] = pol
+		}
+	}
+	undef, ok := byName["a-permit-undef"]
+	if !ok {
+		t.Fatal("a-permit-undef not found")
+	}
+	if undef.LenientContentDropped {
+		t.Fatal("undefined-scheduler permit must NOT be poisoned (#11071 warn-and-inactive posture)")
+	}
+	def, ok := byName["b-deny-def"]
+	if !ok {
+		t.Fatal("b-deny-def not found")
+	}
+	if def.LenientContentDropped {
+		t.Fatal("defined-scheduler deny must NOT be poisoned even while the poison function runs (guard over-poisoning)")
+	}
+	rules, err := buildPolicySnapshotsWithSchedulerState(cfg, map[string]bool{"workhours": true})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("len(rules)=%d, want 2", len(rules))
+	}
+	if reasons := PolicyContentRejectionReasons(cfg, nil); len(reasons) != 0 {
+		t.Fatalf("defined-scheduler deny alongside an undefined-scheduler permit must not refuse the snapshot: %q", reasons)
+	}
+}
+
+// F3 (Opus R2): only DENY/REJECT scheduler poison is a reported scheduler
+// cause. A separately poisoned PERMIT with an undefined scheduler can still
+// arise from another dropped constraint; do not attribute that rejection to
+// the scheduler.
+func TestUndefinedSchedulerPermitOtherPoisonDoesNotNameScheduler12244(t *testing.T) {
+	cfg := &config.Config{
+		Schedulers: map[string]*config.SchedulerConfig{},
+		Security: config.SecurityConfig{
+			Zones: map[string]*config.ZoneConfig{
+				"trust":   {Name: "trust"},
+				"untrust": {Name: "untrust"},
+			},
+			Policies: []*config.ZonePairPolicies{{
+				FromZone: "trust",
+				ToZone:   "untrust",
+				Policies: []*config.Policy{{
+					Name:                  "bad-destination",
+					Match:                 config.PolicyMatch{SourceAddresses: []string{"any"}, DestinationAddresses: []string{"missing-destination"}, Applications: []string{"any"}},
+					Action:                config.PolicyPermit,
+					SchedulerName:         "missing-sched",
+					LenientContentDropped: true,
+				}},
+			}},
+		},
+	}
+	reasons := PolicyContentRejectionReasons(cfg, nil)
+	if len(reasons) != 1 {
+		t.Fatalf("rejection reasons=%q, want one policy reason", reasons)
+	}
+	if !strings.Contains(reasons[0], `destination-address "missing-destination"`) {
+		t.Fatalf("rejection reason does not name the dropped destination: %q", reasons[0])
+	}
+	if strings.Contains(reasons[0], "scheduler") || strings.Contains(reasons[0], "missing-sched") {
+		t.Fatalf("undefined scheduler on a separately poisoned permit must not be reported as the cause: %q", reasons[0])
+	}
+}

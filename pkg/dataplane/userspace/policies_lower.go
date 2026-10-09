@@ -222,7 +222,11 @@ func buildOneRuleSnapshot(
 		}}
 	}
 	rejectedScheduler := ""
-	if pol.LenientContentDropped && schedulerName != "" {
+	// #12244: only an undefined-scheduler DENY/REJECT is a scheduler cause.
+	// Other tolerant poison may apply to a PERMIT; don't report its scheduler.
+	if pol.LenientContentDropped &&
+		(pol.Action == config.PolicyDeny || pol.Action == config.PolicyReject) &&
+		schedulerName != "" {
 		if _, ok := cfg.Schedulers[schedulerName]; !ok {
 			rejectedScheduler = schedulerName
 		}

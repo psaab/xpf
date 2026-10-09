@@ -587,24 +587,27 @@ type Policy struct {
 	UnknownChildren []string
 	// LenientContentDropped marks a policy the TOLERANT compile path
 	// (CompileConfigLenient / CompileConfigForNodeLenient) accepted only by
-	// DOWNGRADING a hard reject to a warning after silently dropping an
-	// enforcement constraint: a MISSING required match dimension (#3044), an
-	// UNSUPPORTED `match` leaf (#3113, incl. #3142/#3673), an unsupported
-	// `then permit` modifier (#3114), an unrecognized `then` sibling (#11013),
-	// or an enforcement-bearing unknown policy subtree such as `term` or
-	// `session-options` (#11014). Missing or dropped match content can widen a
-	// policy because the userspace matcher reads empty dimensions as match-ANY;
-	// dropped policy actions or subtrees can also leave a direct permit active
-	// when the authored enforcement intent was different. The strict commit
-	// path rejects unsupported then siblings and strict schema validation
-	// rejects unknown policy subtrees, so this flag is set only on tolerant
-	// load / peer-sync paths.
+	// DOWNGRADING a hard reject to a warning when dropped enforcement content
+	// could alter a rule, or an undefined-scheduler DENY/REJECT would otherwise
+	// load inactive: a MISSING required match dimension (#3044), an UNSUPPORTED
+	// `match` leaf (#3113, incl. #3142/#3673), an unsupported `then permit`
+	// modifier (#3114), an unrecognized `then` sibling (#11013), an
+	// enforcement-bearing unknown policy subtree such as `term` or
+	// `session-options` (#11014), or a DENY/REJECT referencing an undefined
+	// scheduler (#12244). Missing or dropped match content can widen a policy
+	// because the userspace matcher reads empty dimensions as match-ANY; dropped
+	// policy actions or subtrees can also leave a direct permit active when the
+	// authored enforcement intent was different. The strict commit path rejects
+	// unsupported then siblings and strict schema validation rejects unknown
+	// policy subtrees, so this flag is set only on tolerant load / peer-sync paths.
 	//
-	// For authored policy content, compilePolicy derives this (never from raw
-	// AST / wire), so both HA peers recompute it identically. The #12039 uniform
-	// gate also sets it on a synthetic global carrier when a malformed
-	// zone-pair context was skipped before any authored Policy could compile;
-	// the same lowerer then refuses the snapshot without inventing a pair.
+	// For authored policy content, compilePolicy derives dropped-content causes;
+	// runEarlyStrictAndFolds also sets this for an undefined-scheduler DENY/REJECT
+	// (#12244). Neither derives it from raw AST / wire, so both HA peers recompute
+	// it identically. The #12039 uniform gate also sets it on a synthetic global
+	// carrier when a malformed zone-pair context was skipped before any authored
+	// Policy could compile; the same lowerer then refuses the snapshot without
+	// inventing a pair.
 	// The userspace snapshot builder (buildOneRuleSnapshot) poisons a flagged
 	// policy with the __unsupported__ application sentinel so the Rust integrity
 	// preflight rejects the WHOLE snapshot (previous-good retained; fresh-boot
