@@ -2890,8 +2890,7 @@ fn stamped_fabric_reject_flood_consumes_no_budget_or_token_12051() {
     let arrival_before = zone_bucket.aggregate_arrival_ns();
     let rate_limited_before = rate_limited_count(GeneratedErrorReason::Reject);
     let (mut stamped_frame, mut stamped_meta, stamped_flow) = tcp_v4_syn();
-    stamped_frame[6..12]
-        .copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x02]);
+    stamped_frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x02]);
     stamped_meta.ingress_ifindex = 21;
     let mut pipeline = tx_pipeline(
         SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
@@ -2974,7 +2973,10 @@ fn stamped_fabric_reject_flood_consumes_no_budget_or_token_12051() {
         &stamped_flow,
         &mut budget_counters,
     );
-    assert!(!sent, "a stamped reject must suppress with an empty TX budget");
+    assert!(
+        !sent,
+        "a stamped reject must suppress with an empty TX budget"
+    );
     assert!(no_budget_pipeline.pending_tx_local.is_empty());
     assert_eq!(
         budget_counters.policy_reject_reply_budget_drops, 0,

@@ -3366,7 +3366,10 @@ fn stamped_fabric_session_miss_tcp_rst_is_suppressed_on_real_poll_12051() {
     );
 
     assert_eq!(dbg.rx, 1, "the descriptor must reach the poll path");
-    assert!(dbg.session_miss >= 1, "the bare ACK must exercise a session miss");
+    assert!(
+        dbg.session_miss >= 1,
+        "the bare ACK must exercise a session miss"
+    );
     assert_eq!(batch.invalid_fabric_stamp_drops, 0);
     assert_eq!(batch.screen_drops, 1, "the strict-SYN miss remains counted");
     assert_eq!(batch.policy_reject_sent, 0);

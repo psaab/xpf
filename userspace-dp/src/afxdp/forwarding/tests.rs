@@ -981,11 +981,8 @@ fn learn_source_mac_for_test(
 }
 
 fn v2_fabric_source_mac_for_test(forwarding: &mut ForwardingState) -> [u8; 6] {
-    let scope_id = crate::afxdp::forwarding::fabric_nat_scope_stamp_id(
-        TEST_LAN_ZONE_ID,
-        "reth0.7",
-        "default",
-    );
+    let scope_id =
+        crate::afxdp::forwarding::fabric_nat_scope_stamp_id(TEST_LAN_ZONE_ID, "reth0.7", "default");
     forwarding
         .ifindex_to_fabric_nat_scope_id
         .insert(21, scope_id);
