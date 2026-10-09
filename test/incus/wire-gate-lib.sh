@@ -98,18 +98,65 @@ wire_deny_verdict() {
 	return 0
 }
 # wire_routing_separation_verdict <probe_offered> <probe_leaked>
-#   <control_offered> <control_observed> <cksum_bad>
+#   <precommit_control_offered> <precommit_control_observed> <cksum_bad>
+#   <near_miss_offered> <near_miss_observed>
 #
-# #10136 uses the same deny oracle and floors as wire_policy_deny, but the
-# adapter/ledger identity is a distinct §3 row. Keep the policy core as the
-# single source of scoring truth and rewrite only its gate token.
+# #10136 uses the same deny oracle and floors as wire_policy_deny. The
+# post-commit near-miss establishes capture liveness, while the precommit
+# exact-tuple burst proves that the probe tuple itself was forwardable before
+# the steer. Both checks apply: an RSS queue failure can suppress the probe
+# tuple while dport+1 survives. Keep the precommit counts separately named.
+# The adapter/ledger identity remains a distinct §3 row.
+#
+# Since #12080, control_* describes the scored post-commit near-miss;
+# historical ledger control_* values describe the precommit tuple instead.
 wire_routing_separation_verdict() {
-	local out rc
-	out="$(wire_deny_verdict "$@")"
-	rc=$?
-	printf '%s\n' "${out/wire_policy_deny/wire_routing_separation}"
+	local po="${1:-}" pl="${2:-}" pco="${3:-}" pcb="${4:-}" ck="${5:-}"
+	local nmo="${6:-}" nmb="${7:-}" out rc
+	if ! wire_num "$pco" || ! wire_num "$pcb"; then
+		out="WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=$po probe_leaked=$pl control_offered=$nmo control_observed=$nmb cksum_bad=$ck"
+		rc=2
+	else
+		out="$(wire_deny_verdict "$po" "$pl" "$nmo" "$nmb" "$ck")"
+		rc=$?
+		out="${out/wire_policy_deny/wire_routing_separation}"
+		if ((rc == 0)) && ((10#$pcb < WIRE_DROP_FLOOR)); then
+			out="WIRE_GATE wire_routing_separation VOID reason=env-void probe_offered=$po probe_leaked=$pl control_offered=$nmo control_observed=$nmb cksum_bad=$ck"
+			rc=2
+		fi
+	fi
+	printf '%s precommit_control_offered=%s precommit_control_observed=%s\n' \
+		"$out" "$pco" "$pcb"
 	return "$rc"
 }
+# wire_routing_separation_window_verdict <late_near_miss_observed>
+#   <probe_offered> <probe_leaked> <precommit_control_offered>
+#   <precommit_control_observed> <cksum_bad> <near_miss_offered>
+#   <near_miss_observed>
+#
+# The sender reserves the first 100 near-miss packets after the complete
+# probe burst. Their peer-side observations establish liveness immediately
+# after the final probe while tolerating loss of an individual tail packet.
+# Keep public gate metrics unchanged; an empty tail makes an otherwise-PASS
+# result capture-blind.
+wire_routing_separation_window_verdict() {
+	local tail="${1:-}" po="${2:-}" pl="${3:-}" pco="${4:-}" pcb="${5:-}"
+	local ck="${6:-}" nmo="${7:-}" nmb="${8:-}" out rc
+	if ! wire_num "$tail"; then
+		printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=%s probe_leaked=%s control_offered=%s control_observed=%s cksum_bad=%s precommit_control_offered=%s precommit_control_observed=%s\n' \
+			"$po" "$pl" "$nmo" "$nmb" "$ck" "$pco" "$pcb"
+		return 2
+	fi
+	out="$(wire_routing_separation_verdict "$po" "$pl" "$pco" "$pcb" "$ck" "$nmo" "$nmb")"
+	rc=$?
+	if ((rc == 0)) && ((10#$tail == 0)); then
+		out="${out/WIRE_GATE wire_routing_separation PASS reason=--/WIRE_GATE wire_routing_separation VOID reason=capture-blind}"
+		rc=2
+	fi
+	printf '%s\n' "$out"
+	return "$rc"
+}
+
 #
 # The appmatch-twins verdict. LIVE-FINDING DEMOTION (see plan §16): the lab
 # lan->wan path drops 0-13% of UDP bursts variably (measured same-day,
