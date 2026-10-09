@@ -62,3 +62,66 @@ func TestDestinationNATFromZoneDefinedNoWarn12245(t *testing.T) {
 		}
 	}
 }
+
+// Global, interface-scoped, and routing-instance-scoped DNAT rule-sets have
+// no FromZone and must not be reported as references to an undefined zone.
+func TestDestinationNATNonZoneFromScopesNoWarn12245(t *testing.T) {
+	tests := []struct {
+		name                string
+		from                string
+		wantInterface       string
+		wantRoutingInstance string
+	}{
+		{name: "global"},
+		{
+			name:          "interface",
+			from:          "from interface ge-0/0/0.0",
+			wantInterface: "ge-0/0/0.0",
+		},
+		{
+			name:                "routing-instance",
+			from:                "from routing-instance blue",
+			wantRoutingInstance: "blue",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ruleSet := "dnat-" + tc.name
+			cmds := []string{
+				"set security nat destination pool P1 address 10.0.30.100",
+			}
+			if tc.from != "" {
+				cmds = append(cmds, "set security nat destination rule-set "+ruleSet+" "+tc.from)
+			}
+			cmds = append(cmds,
+				"set security nat destination rule-set "+ruleSet+" rule R1 match destination-address 198.51.100.5/32",
+				"set security nat destination rule-set "+ruleSet+" rule R1 then destination-nat pool P1",
+			)
+			cfg, err := CompileConfig(buildNATScopeTree(t, cmds...))
+			if err != nil {
+				t.Fatalf("CompileConfig rejected %s DNAT: %v", tc.name, err)
+			}
+
+			if len(cfg.Security.NAT.Destination.RuleSets) != 1 {
+				t.Fatalf("got %d DNAT rule-sets, want 1", len(cfg.Security.NAT.Destination.RuleSets))
+			}
+			rs := cfg.Security.NAT.Destination.RuleSets[0]
+			if rs.FromZone != "" {
+				t.Fatalf("FromZone = %q, want empty for %s DNAT", rs.FromZone, tc.name)
+			}
+			if rs.FromInterface != tc.wantInterface {
+				t.Fatalf("FromInterface = %q, want %q", rs.FromInterface, tc.wantInterface)
+			}
+			if rs.FromRoutingInstance != tc.wantRoutingInstance {
+				t.Fatalf("FromRoutingInstance = %q, want %q", rs.FromRoutingInstance, tc.wantRoutingInstance)
+			}
+
+			for _, warning := range ValidateConfig(cfg) {
+				if strings.Contains(warning, `destination-nat ruleset "`+ruleSet+`"`) &&
+					strings.Contains(warning, "from-zone") {
+					t.Fatalf("%s DNAT emitted a from-zone warning: %q", tc.name, warning)
+				}
+			}
+		})
+	}
+}

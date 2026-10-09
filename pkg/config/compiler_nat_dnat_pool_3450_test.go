@@ -29,6 +29,7 @@ func dnatPoolTree(t *testing.T, poolCmds ...string) *ConfigTree {
 	tree := &ConfigTree{}
 	cmds := append([]string{}, poolCmds...)
 	cmds = append(cmds,
+		"set security zones security-zone untrust",
 		"set security nat destination rule-set RS from zone untrust",
 		"set security nat destination rule-set RS rule R1 match destination-address 203.0.113.10/32",
 		"set security nat destination rule-set RS rule R1 then destination-nat pool p1",
