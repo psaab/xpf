@@ -265,15 +265,30 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 			"it was armed for a different config than this apply is publishing")
 		return
 	}
-	if applied := policyInvalidationAppliedConfig(d.dataplane()); applied != nil &&
-		applied != plan.oldCfg && applied != plan.newCfg {
+	applied := policyInvalidationAppliedConfig(d.dataplane())
+	if applied != nil && applied != plan.oldCfg && applied != plan.newCfg {
 		// Positional policy IDs must be derived from the helper's known
-		// predecessor, not a stale store snapshot. A helper already at the
-		// target is different: the old identities may have been renumbered
-		// away, so the C0→C1 candidate cannot be reconstructed from C1.
+		// predecessor, not a stale store snapshot.
 		plan.oldCfg = applied
 		if debt := d.policyInvalidationDebt; debt != nil && debt.newCfg == applied {
 			debt.oldCfg = applied
+		}
+	} else if applied != nil && applied == plan.newCfg {
+		// The helper has already published this target. Reuse retained
+		// candidates under that known authority. Without matching debt there
+		// is no proof the target's pre-publication capture was discharged, so
+		// keep the refusal fail-closed.
+		if debt := d.policyInvalidationDebt; debt != nil && debt.newCfg == applied {
+			plan.oldCfg = applied
+			debt.oldCfg = applied
+			d.policyInvalidationDebtAdopted = true
+		} else {
+			refusal := fmt.Errorf(
+				"%w: helper already holds the invalidation target without retained candidate debt",
+				dpuserspace.ErrPolicyReadAuthority)
+			d.refusePolicyInvalidationAuthorityLocked(
+				plan, originalDebt, &policyInvalidationCapture{}, refusal)
+			return
 		}
 	}
 	previousGeneration := uint64(0)
@@ -852,6 +867,11 @@ func (d *Daemon) dischargePolicyInvalidationDebtLocked(oldCfg, newCfg *config.Co
 		if d.store != nil {
 			d.store.MarkAppliedDigest(debt.appliedDigest)
 		}
+		if plan := d.policyInvalidationPlan; plan != nil && plan.newCfg == debt.newCfg {
+			// The target's captured work is settled; a stale authority-refusal
+			// plan must not block later background applies of that target.
+			d.policyInvalidationPlan = nil
+		}
 		return nil
 	}
 	return d.reportSessionAuthorizationChanges(oldCfg, newCfg)
@@ -1052,13 +1072,15 @@ func policyTupleV6(tuple dpuserspace.SessionPolicyTuple) (dataplane.SessionKeyV6
 // (readErr); v4/v6 legs belong to the store path only (P9).
 // The retained scan-failure marker keeps ActiveApplied false while the
 // unresolved identities remain. A complete scan at the same old authority can
-// retire the marker; errorSurfaced keeps later status ticks quiet.
+// retire an unpublished failure; after publication, a successful full session
+// clear retires it only while that target is still the known applied config.
+// errorSurfaced keeps later status ticks quiet.
 func (c *policyInvalidationCapture) enumerateErr() error {
 	if c.errorSurfaced || (c.readErr == nil && c.v4Err == nil && c.v6Err == nil) {
 		return nil
 	}
 	c.errorSurfaced = true
-	slog.Error("policy session invalidation: pre-publication scan incomplete; retry under the original authority if publication did not land; after publication, clear sessions with `clear security flow session` to remove unidentified rows",
+	slog.Error("policy session invalidation: pre-publication scan incomplete; retry under the original authority if publication did not land; after publication, a successful full `clear security flow session` at the known target removes unidentified rows and retires the scan debt",
 		"read_err", c.readErr, "v4_err", c.v4Err, "v6_err", c.v6Err,
 		"deleted_matched", len(c.deleted.v4)+len(c.deleted.v6),
 		"modified_matched", len(c.modified.v4)+len(c.modified.v6),

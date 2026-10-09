@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -321,7 +322,7 @@ func TestDeferredPolicySnapshotAuthorityRefusalBlocksStatusPublish12072(t *testi
 			pending, published, generation-1)
 	}
 }
-func TestR4DeferredLostACKRecoveryReplaysStampedGeneration7WithoutFreshCapture12072(t *testing.T) {
+func TestDeferredLostACKRecoveryReplaysStampedGenerationWithoutFreshCapture12072(t *testing.T) {
 	m, _ := seamedManager(t)
 	m.proc = selfProc(t)
 	m.syncCancel = func() {} // prevent the retry owner goroutine; this test drives its exact calls.
@@ -421,5 +422,252 @@ func TestR4DeferredLostACKRecoveryReplaysStampedGeneration7WithoutFreshCapture12
 			t.Fatalf("send %d did not preserve the identity-stamped generation %d: %+v",
 				i+1, generation, snapshot)
 		}
+	}
+}
+
+func deferredPolicyRecoveryFixture12072(
+	t *testing.T,
+) (*fixture9824, *config.Config, []PolicyRenameAncestry, []PolicySessionRebind) {
+	t.Helper()
+	f := newFixture9824(t)
+	oldCfg := &config.Config{}
+	f.cfg = oldCfg
+	zones := baseZones9824()
+	neighbors := []NeighborSnapshot{neighbor9824(7, "10.0.0.2", "02:00:00:00:00:01")}
+	fabrics := []FabricSnapshot{fabricAlpha9824()}
+	old := f.seedPublished(t, 6, zones, neighbors, fabrics)
+
+	targetCfg := &config.Config{}
+	f.cfg = targetCfg
+	target := f.snap9824(7, zones, neighbors, fabrics)
+	target.Policies = []PolicyRuleSnapshot{{
+		PolicyID: 2, Name: "web", FromZone: "trust", ToZone: "untrust", Action: "permit",
+	}}
+	target.PolicyRematchExtensive = true
+	ancestry := []PolicyRenameAncestry{{
+		SourceRuleID: "old", DestinationRuleID: "new",
+		SourceFromZone: "trust", SourceToZone: "untrust",
+	}}
+	rebinds := []PolicySessionRebind{{
+		Family: "ipv4", SrcIP: "192.0.2.1", DstIP: "198.51.100.1",
+		Protocol: 6, PolicyID: 2, RuleID: "new", IngressZone: 1, EgressZone: 2,
+	}}
+	m := f.m
+	m.mu.Lock()
+	m.lastSnapshot = target
+	m.generation = 7
+	m.publishedSnapshot = 6
+	m.publishedPlanKey = snapshotBindingPlanKey(old)
+	m.pendingFullSnapshotMetadata = true
+	m.appliedSnapshot = appliedSnapshot{Config: oldCfg, Generation: 6}
+	m.lastStatus = ProcessStatus{
+		ConfigSnapshotProtocolVersion: ProtocolVersion,
+		LastSnapshotGeneration:        6,
+	}
+	m.helperStatusObserved = true
+	m.mu.Unlock()
+	return f, targetCfg, ancestry, rebinds
+}
+func servePolicyList12072(t *testing.T, m *Manager) <-chan SessionPolicyListRequest {
+	t.Helper()
+	socket := filepath.Join(t.TempDir(), "control.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen policy READ fixture: %v", err)
+	}
+	m.cfg.ControlSocket = socket
+	requests := make(chan SessionPolicyListRequest, 4)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			var req ControlRequest
+			if err := json.NewDecoder(conn).Decode(&req); err != nil {
+				t.Errorf("decode policy READ request: %v", err)
+				_ = conn.Close()
+				continue
+			}
+			if req.Type != "list_sessions_by_policy" || req.SessionPolicyList == nil {
+				t.Errorf("unexpected policy READ request: %+v", req)
+				_ = conn.Close()
+				continue
+			}
+			requests <- *req.SessionPolicyList
+			err = json.NewEncoder(conn).Encode(ControlResponse{
+				OK: true, SessionPolicyComplete: true,
+			})
+			_ = conn.Close()
+			if err != nil {
+				t.Errorf("encode policy READ response: %v", err)
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		<-done
+	})
+	return requests
+}
+
+func readDeferredPolicyMetadata12072(
+	m *Manager, generation uint64, ancestry []PolicyRenameAncestry, rebinds []PolicySessionRebind,
+) error {
+	expected := m.PolicyReadConfig()
+	if expected == nil {
+		return ErrPolicyReadAuthority
+	}
+	if _, err := m.ListSessionsByPolicy(SessionPolicyListRequest{
+		PolicyIDs: []uint32{2}, Mode: "prepublish", ExpectedConfig: expected,
+	}); err != nil {
+		return err
+	}
+	if !m.SetDeferredPolicyRenameMetadata(generation, ancestry, rebinds) {
+		return errors.New("retained generation changed during prepublish capture")
+	}
+	return nil
+}
+
+func assertInitialDeferredPolicyList12072(t *testing.T, requests <-chan SessionPolicyListRequest) {
+	t.Helper()
+	select {
+	case request := <-requests:
+		if request.Mode != "prepublish" || len(request.PolicyIDs) != 1 || request.PolicyIDs[0] != 2 {
+			t.Fatalf("initial policy READ request = %+v, want prepublish for policy ID 2", request)
+		}
+	default:
+		t.Fatal("initial deferred capture did not issue a positional policy READ")
+	}
+}
+
+func requireNoDeferredPolicyList12072(t *testing.T, requests <-chan SessionPolicyListRequest) {
+	t.Helper()
+	select {
+	case request := <-requests:
+		t.Fatalf("unexpected positional READ after first capture: %+v", request)
+	default:
+	}
+}
+
+func TestDeferredPolicyRecoveryPreservesProofAcrossPartialUpdates12072(t *testing.T) {
+	for _, partial := range []string{"neighbor", "fabric", "fib"} {
+		t.Run(partial, func(t *testing.T) {
+			f, targetCfg, ancestry, rebinds := deferredPolicyRecoveryFixture12072(t)
+			m := f.m
+			listRequests := servePolicyList12072(t, m)
+			captureCalls := 0
+			m.SetPolicySnapshotPrePublisher(func(generation uint64) error {
+				captureCalls++
+				return readDeferredPolicyMetadata12072(m, generation, ancestry, rebinds)
+			})
+			f.model.scriptDrops(1)
+
+			m.mu.Lock()
+			prepared := m.prepareDeferredPolicySnapshotLocked()
+			err := m.syncSnapshotLocked()
+			unknown := m.applySnapshotOutcomeUnknown
+			m.mu.Unlock()
+			if !prepared || err == nil || !unknown || captureCalls != 1 || len(listRequests) != 1 {
+				t.Fatalf("lost-ACK setup = prepared:%v err:%v unknown:%v capture:%d list:%d",
+					prepared, err, unknown, captureCalls, len(listRequests))
+			}
+			assertInitialDeferredPolicyList12072(t, listRequests)
+
+			switch partial {
+			case "neighbor":
+				f.neighborFunc = func(*config.Config) []NeighborSnapshot {
+					return []NeighborSnapshot{neighbor9824(7, "10.0.0.2", "02:00:00:00:00:02")}
+				}
+				m.RegenerateNeighborSnapshot()
+			case "fabric":
+				f.fabricFunc = func(*config.Config) []FabricSnapshot {
+					return []FabricSnapshot{fabricBeta9824()}
+				}
+				m.SyncFabricState()
+			case "fib":
+				f.neighborFunc = func(*config.Config) []NeighborSnapshot {
+					return append([]NeighborSnapshot(nil), m.lastSnapshot.Neighbors...)
+				}
+				_, _ = m.BumpFIBGeneration()
+			}
+			m.mu.Lock()
+			generation := m.lastSnapshot.Generation
+			stampedGeneration := m.policySnapshotPrepublishGeneration
+			stampedIdentity := m.policySnapshotPrepublishIdentity
+			currentIdentity, identityOK := policySnapshotIdentity(m.lastSnapshot)
+			m.mu.Unlock()
+			if generation != 8 || stampedGeneration != 7 || !identityOK ||
+				currentIdentity != stampedIdentity {
+				t.Fatalf("partial %s changed proof identity: generation=%d stamp=%d identityOK=%v equal=%v",
+					partial, generation, stampedGeneration, identityOK, currentIdentity == stampedIdentity)
+			}
+
+			m.mu.Lock()
+			prepared = m.prepareDeferredPolicySnapshotLocked()
+			err = m.syncSnapshotLocked()
+			unknown, pending, published := m.applySnapshotOutcomeUnknown,
+				m.pendingFullSnapshotMetadata, m.publishedSnapshot
+			m.mu.Unlock()
+			if !prepared || err != nil || unknown || pending || published != generation ||
+				captureCalls != 1 {
+				t.Fatalf("recovery after %s = prepared:%v err:%v unknown:%v pending:%v "+
+					"published:%d capture:%d",
+					partial, prepared, err, unknown, pending, published, captureCalls)
+			}
+			requireNoDeferredPolicyList12072(t, listRequests)
+			if got := m.PolicyReadConfig(); got != targetCfg {
+				t.Fatalf("recovered policy authority = %p, want target %p", got, targetCfg)
+			}
+			if !f.ctrl.haveStored || f.ctrl.stored.Enabled != 1 {
+				t.Fatalf("successful recovery left userspace ctrl disabled: %+v", f.ctrl)
+			}
+		})
+	}
+}
+
+func TestDeferredPolicyRecoveryRejectsChangedPolicyOrRenameIdentity12072(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ConfigSnapshot)
+	}{
+		{"policy", func(s *ConfigSnapshot) { s.Policies[0].Action = "deny" }},
+		{"rename", func(s *ConfigSnapshot) {
+			s.PolicyRenameAncestry[0].DestinationRuleID = "replacement"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, _, ancestry, rebinds := deferredPolicyRecoveryFixture12072(t)
+			m := f.m
+			listRequests := servePolicyList12072(t, m)
+			captureCalls := 0
+			m.SetPolicySnapshotPrePublisher(func(generation uint64) error {
+				captureCalls++
+				return readDeferredPolicyMetadata12072(m, generation, ancestry, rebinds)
+			})
+			f.model.scriptDrops(1)
+			m.mu.Lock()
+			initialPrepared := m.prepareDeferredPolicySnapshotLocked()
+			err := m.syncSnapshotLocked()
+			invalidatePolicySnapshotIdentity(m.lastSnapshot)
+			tc.mutate(m.lastSnapshot)
+			applyCount := f.model.countVerb("apply_snapshot")
+			recoveryPrepared := m.prepareDeferredPolicySnapshotLocked()
+			applyCountAfter := f.model.countVerb("apply_snapshot")
+			unknown := m.applySnapshotOutcomeUnknown
+			m.mu.Unlock()
+			if !initialPrepared || err == nil || !unknown || applyCount != 1 ||
+				recoveryPrepared || applyCountAfter != 1 || captureCalls != 2 ||
+				len(listRequests) != 1 {
+				t.Fatalf("changed %s identity recovery = prepared:%v→%v err:%v unknown:%v "+
+					"applySnapshots:%d→%d capture:%d list:%d",
+					tc.name, initialPrepared, recoveryPrepared, err, unknown, applyCount,
+					applyCountAfter, captureCalls, len(listRequests))
+			}
+			assertInitialDeferredPolicyList12072(t, listRequests)
+			requireNoDeferredPolicyList12072(t, listRequests)
+		})
 	}
 }

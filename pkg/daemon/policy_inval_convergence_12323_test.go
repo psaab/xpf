@@ -432,6 +432,92 @@ func TestPolicyInvalidationLostAckCatchupReanchorsBeforeNextCommit12072(t *testi
 	}
 }
 
+func policySetConfigText12072(host string, names []string) string {
+	var policies strings.Builder
+	for _, name := range names {
+		fmt.Fprintf(&policies, `
+            policy %s {
+                match { source-address any; destination-address any; application any; }
+                then { permit; }
+            }`, name)
+	}
+	return fmt.Sprintf(`system { host-name %s; }
+security {
+    zones { security-zone trust; security-zone untrust; }
+    policies {
+        from-zone trust to-zone untrust {%s
+        }
+    }
+}`, host, policies.String())
+}
+
+func TestPolicyInvalidationRefusedBackgroundApplyRecoversAfterCatchup12072(t *testing.T) {
+	r, _ := newConvergenceRun12072(t, []string{"p-first", "a", "b", "web"})
+	c0, err := r.h.d.store.SyncApply(policySetConfigText12072(
+		"c0", []string{"p-first", "a", "b", "web"}), nil)
+	if err != nil {
+		t.Fatalf("promote parsed C0: %v", err)
+	}
+	c1, err := r.h.d.store.SyncApply(policySetConfigText12072(
+		"c1", []string{"p-first", "b", "web"}), nil)
+	if err != nil {
+		t.Fatalf("promote parsed C1: %v", err)
+	}
+	r.dp.applied, r.dp.helperCfg = c0, c0
+	ids := dpuserspace.PolicyIDsByStableKey(c0)
+	for i := range r.dp.rows {
+		row := &r.dp.rows[i]
+		rule := r.dp.ruleBySession[row.ExpectedRTFlowSessionID]
+		row.PolicyID = ids[rule]
+	}
+
+	r.dp.lostAckNext = true
+	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	_, commitErr := r.h.d.applyAndSyncCommitted(c0, c1, peerSyncNever)
+	r.h.d.applySem.Release(1)
+	if commitErr == nil {
+		t.Fatal("lost apply ACK was not surfaced")
+	}
+	if debt := r.h.d.policyInvalidationDebt; debt == nil || debt.capture == nil {
+		t.Fatalf("lost-ACK commit did not retain its captured candidates: %+v", debt)
+	}
+
+	// This is the feed owner's result-returning background entry point. It
+	// refuses while helper authority is unknown and must preserve the plan.
+	attemptsBefore := r.dp.applyAttempts
+	if err := r.h.d.applyActiveConfigResult(); !errors.Is(err, dpuserspace.ErrPolicyReadAuthority) {
+		t.Fatalf("background apply under unknown authority = %v, want refusal", err)
+	}
+	if r.dp.applyAttempts != attemptsBefore || r.h.d.policyInvalidationPlan == nil {
+		t.Fatalf("refused background apply attempts+%d plan=%+v; want no ApplyConfig and retained plan",
+			r.dp.applyAttempts-attemptsBefore, r.h.d.policyInvalidationPlan)
+	}
+
+	// Model the status-loop catch-up and run the production debt-discharge
+	// worker synchronously so the next DHCP-shaped apply sees the settled debt.
+	if _, err := r.dp.ApplyConfig(context.Background(), c1); err != nil {
+		t.Fatalf("status-loop catch-up: %v", err)
+	}
+	r.h.d.dischargePolicyInvalidationAfterPublish(7)
+	if r.h.d.policyInvalidationDebt != nil || r.dp.PolicyReadConfig() != c1 {
+		t.Fatalf("catch-up did not settle authority/debt: debt=%+v authority=%p",
+			r.h.d.policyInvalidationDebt, r.dp.PolicyReadConfig())
+	}
+
+	attemptsBefore = r.dp.applyAttempts
+	r.h.d.applyActiveConfig()
+	if r.dp.applyAttempts != attemptsBefore+1 {
+		t.Fatalf("DHCP-shaped background ApplyConfig attempts+%d, want 1 after catch-up; plan=%+v",
+			r.dp.applyAttempts-attemptsBefore, r.h.d.policyInvalidationPlan)
+	}
+	if r.h.d.policyInvalidationPlan != nil || !r.h.d.store.ActiveApplied() {
+		t.Fatalf("background recovery left plan/debt state: plan=%+v debt=%+v activeApplied=%v",
+			r.h.d.policyInvalidationPlan, r.h.d.policyInvalidationDebt, r.h.d.store.ActiveApplied())
+	}
+}
+
 func TestPolicyInvalidationUnknownAuthorityHoldsSupersedingPublish12072(t *testing.T) {
 	r, c0 := newConvergenceRun12072(t, []string{"p-first", "a", "b", "web"})
 	c1 := twoPolicyConfig([]string{"p-first", "b", "web"}, nil)
