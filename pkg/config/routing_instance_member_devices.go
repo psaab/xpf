@@ -523,6 +523,10 @@ func routingInstanceMemberLinuxName(cfg *Config, tunnelNames map[string]string, 
 }
 
 func memberUnitLinuxName(cfg *Config, tunnelNames map[string]string, base, key string) string {
+	// Generated units share the explicit-member secure-tunnel ownership rule.
+	if name, ok := cfg.SecureTunnelUnitNetdev(key); ok {
+		return name
+	}
 	if name := tunnelNames[key]; name != "" {
 		return name
 	}

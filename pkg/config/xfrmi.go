@@ -145,8 +145,8 @@ func IsSecureTunnelIfName(base string) bool {
 // signal for the caller to fall through to its ordinary resolution. It never
 // returns ok=true with an empty name.
 //
-// Callers: ResolveKernelIfName (types.go), routingInstanceMemberLinuxName
-// (routing_instance_member_devices.go), snapshotLinuxName
+// Callers: ResolveKernelIfName (types.go), routingInstanceMemberLinuxName and
+// memberUnitLinuxName (routing_instance_member_devices.go), snapshotLinuxName
 // (pkg/dataplane/userspace/interfaces.go) and junosHostLinuxName
 // (junos_host_deny.go).
 //

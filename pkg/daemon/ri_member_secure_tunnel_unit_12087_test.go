@@ -15,10 +15,10 @@ import (
 
 const riMemberSecureTunnelNetnsChild12087 = "XPF_12087_ST0_NETNS_CHILD"
 
-// #12087: create the same xfrmi name the authored bind-interface creates,
-// apply an RI list binding once, and inspect the kernel's real MasterIndex.
-// The second read uses the same ownership map consumed by stale-member
-// cleanup: the correctly-bound xfrmi must not be queued for unbind.
+// #12087: bind both a bare-member fanout key and an explicit unit to the
+// authored xfrmi names, then inspect the kernel's real MasterIndex. The second
+// read uses the stale-member ownership map: neither correctly-bound xfrmi may
+// be queued for unbind.
 func TestRIMemberSecureTunnelUnitBindsToVRF12087(t *testing.T) {
 	if os.Getenv(riMemberSecureTunnelNetnsChild12087) == "1" {
 		runRIMemberSecureTunnelUnitNetnsChild12087(t)
@@ -44,26 +44,49 @@ func TestRIMemberSecureTunnelUnitBindsToVRF12087(t *testing.T) {
 
 func runRIMemberSecureTunnelUnitNetnsChild12087(t *testing.T) {
 	fmt.Println("NETNS-CHILD-STARTED-12087")
-	vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "vrf-blue"}, Table: 12087}
-	if err := netlink.LinkAdd(vrf); err != nil {
-		t.Fatalf("create vrf-blue in private netns: %v", err)
-	}
-	if err := netlink.LinkSetUp(vrf); err != nil {
-		t.Fatalf("bring vrf-blue up: %v", err)
-	}
-	vrfLink, err := netlink.LinkByName("vrf-blue")
-	if err != nil {
-		t.Fatalf("read vrf-blue: %v", err)
+	vrfIndexes := make(map[string]int)
+	for _, spec := range []struct {
+		name  string
+		table uint32
+	}{
+		{name: "vrf-blue", table: 12087},
+		{name: "vrf-red", table: 12088},
+	} {
+		vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: spec.name}, Table: spec.table}
+		if err := netlink.LinkAdd(vrf); err != nil {
+			t.Fatalf("create %s in private netns: %v", spec.name, err)
+		}
+		if err := netlink.LinkSetUp(vrf); err != nil {
+			t.Fatalf("bring %s up: %v", spec.name, err)
+		}
+		link, err := netlink.LinkByName(spec.name)
+		if err != nil {
+			t.Fatalf("read %s: %v", spec.name, err)
+		}
+		vrfIndexes[spec.name] = link.Attrs().Index
 	}
 
 	cfg := &config.Config{}
 	cfg.Security.IPsec.VPNs = map[string]*config.IPsecVPN{
 		"vpn0": {Name: "vpn0", BindInterface: "st0.0"},
+		"vpn1": {Name: "vpn1", BindInterface: "st1.0"},
 	}
-	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{
-		Name: "blue", InstanceType: "vrf", TableID: 12087,
-		Interfaces: []string{"st0.0"},
-	}}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"st0": {Name: "st0", Units: map[int]*config.InterfaceUnit{
+			0: {Number: 0},
+			1: {Number: 1},
+		}},
+	}
+	cfg.RoutingInstances = []*config.RoutingInstanceConfig{
+		{
+			Name: "blue", InstanceType: "vrf", TableID: 12087,
+			Interfaces: []string{"st0"},
+		},
+		{
+			Name: "red", InstanceType: "vrf", TableID: 12088,
+			Interfaces: []string{"st1.0"},
+		},
+	}
 	rt, err := routing.New()
 	if err != nil {
 		t.Fatalf("routing.New: %v", err)
@@ -75,29 +98,29 @@ func runRIMemberSecureTunnelUnitNetnsChild12087(t *testing.T) {
 	d := &Daemon{routing: rt, linkByNameFn: netlink.LinkByName}
 	d.bindRoutingInstanceMembers(cfg)
 
-	xfrmi, err := netlink.LinkByName("st0.0")
-	if err != nil {
-		t.Fatalf("xfrmi st0.0 absent: %v", err)
+	wantVRF := map[string]string{"st0.0": "vrf-blue", "st1.0": "vrf-red"}
+	assertMaster := func(stage string) {
+		t.Helper()
+		for device, vrfName := range wantVRF {
+			link, err := netlink.LinkByName(device)
+			if err != nil {
+				t.Fatalf("%s: xfrmi %s absent: %v", stage, device, err)
+			}
+			if got, want := link.Attrs().MasterIndex, vrfIndexes[vrfName]; got != want {
+				t.Fatalf("%s: %s master index = %d, want %s (%d)",
+					stage, device, got, vrfName, want)
+			}
+		}
 	}
-	if got, want := xfrmi.Attrs().MasterIndex, vrfLink.Attrs().Index; got != want {
-		t.Fatalf("#12087: st0.0 master index = %d, want vrf-blue (%d); the member resolver must bind the netdev created under the authored bind-interface spelling",
-			got, want)
-	}
+	assertMaster("after bind")
 
 	for _, member := range d.riMembersOutsideTheirVRF(cfg) {
-		if member.unbind && member.linuxName == "st0.0" {
+		if member.unbind && wantVRF[member.linuxName] != "" {
 			t.Fatalf("#12087: stale-member cleanup queued %s for unbind from %s despite current RI ownership",
 				member.linuxName, member.instance)
 		}
 	}
 	d.rebindRIMembersOutsideTheirVRF(cfg)
-	xfrmi, err = netlink.LinkByName("st0.0")
-	if err != nil {
-		t.Fatalf("xfrmi st0.0 absent after stale-member cleanup: %v", err)
-	}
-	if got, want := xfrmi.Attrs().MasterIndex, vrfLink.Attrs().Index; got != want {
-		t.Fatalf("#12087: stale-member cleanup changed st0.0 master index to %d, want vrf-blue (%d)",
-			got, want)
-	}
+	assertMaster("after stale-member cleanup")
 	fmt.Println("NETNS-CHILD-PASSED-12087")
 }
