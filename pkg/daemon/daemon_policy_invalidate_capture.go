@@ -91,6 +91,10 @@ type policyInvalidationDebt struct {
 	// appliedDigest is captured only after this target's full local apply
 	// succeeds and is stamped after the debt's candidates clear.
 	appliedDigest string
+	// landed is the predecessor obligation whose target had already landed
+	// when this unlanded target's capture merged it forward. A superseded
+	// target's retire restores it instead of dropping the whole debt.
+	landed *policyInvalidationDebt
 }
 
 // capturedSessions is one change class's pre-publication candidate set: the
@@ -280,8 +284,12 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 			}
 			slog.Warn("policy session invalidation: retiring superseded target debt",
 				"applied_host", applied.System.HostName, "store_active_host", activeHost)
-			d.policyInvalidationDebt = nil
-			originalDebt = nil
+			restored := debt.landed
+			if restored != nil && restored.newCfg != applied {
+				restored = nil
+			}
+			d.policyInvalidationDebt = restored
+			originalDebt = restored
 		}
 	}
 	if applied != nil && applied != plan.oldCfg && applied != plan.newCfg {
@@ -312,7 +320,13 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	previousGeneration := uint64(0)
 	var previousCapture *policyInvalidationCapture
 	var previousScanFailure *policyInvalidationScanFailure
+	var landed *policyInvalidationDebt
 	if debt := d.policyInvalidationDebt; debt != nil {
+		if applied != nil && debt.newCfg == applied && plan.newCfg != applied {
+			landed = debt
+		} else if debt.newCfg == plan.newCfg {
+			landed = debt.landed
+		}
 		previousCapture = debt.capture
 		previousScanFailure = debt.scanFailure
 		if debt.newCfg == plan.newCfg {
@@ -322,6 +336,7 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	d.policyInvalidationDebt = &policyInvalidationDebt{
 		oldCfg: plan.oldCfg, newCfg: plan.newCfg, renameApply: plan.renameApply,
 		scanFailure: previousScanFailure, publishGeneration: previousGeneration,
+		landed: landed,
 	}
 
 	// The three target sets are computed HERE, once, and the clears consume the

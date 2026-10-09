@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -294,5 +295,32 @@ func TestPolicyInvalidationFullSessionClearWaitsForApplySerialization12072(t *te
 	if r.h.d.policyInvalidationDebt != nil || !r.h.d.store.ActiveApplied() {
 		t.Fatalf("serialized successful clear did not retire debt: debt=%+v activeApplied=%v",
 			r.h.d.policyInvalidationDebt, r.h.d.store.ActiveApplied())
+	}
+}
+
+func TestRoutineFullSessionClearDoesNotLogNoDebtAtInfo12072(t *testing.T) {
+	r, _ := newConvergenceRun12072(t, []string{"p-first", "a", "web"})
+	if r.h.d.policyInvalidationDebt != nil {
+		t.Fatalf("premise: unexpected policy invalidation debt: %+v", r.h.d.policyInvalidationDebt)
+	}
+
+	var logs strings.Builder
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	clearDP := &fullClearSurfaceDP12072{
+		Manager: dataplane.New(),
+		applied: r.dp.applied,
+		clear: func() (int, int, error) {
+			return 0, 0, nil
+		},
+	}
+	r.h.d.setDataplane(clearDP)
+	if _, _, err := (liveDataPlane{daemon: r.h.d}).ClearAllSessions(); err != nil {
+		t.Fatalf("routine full clear: %v", err)
+	}
+	if strings.Contains(logs.String(), "did not retire policy invalidation scan debt") {
+		t.Fatalf("routine no-debt clear emitted an INFO retirement reason: %s", logs.String())
 	}
 }

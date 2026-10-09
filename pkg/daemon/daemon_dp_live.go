@@ -449,7 +449,7 @@ func (a liveDataPlane) ClearAllSessions() (v4 int, v6 int, err error) {
 			slog.Info("full session clear retired published policy invalidation scan debt",
 				"v4", v4, "v6", v6)
 		} else {
-			slog.Info("full session clear did not retire policy invalidation scan debt",
+			slog.Debug("full session clear did not retire policy invalidation scan debt",
 				"reason", reason, "v4", v4, "v6", v6)
 		}
 	}

@@ -109,6 +109,10 @@ func TestPolicyInvalidationReanchorRetainsPublishedScanFailure12323(t *testing.T
 	if capture := d.policyInvalidationCapture; capture == nil || capture.readErr != nil {
 		t.Fatalf("complete C1→C2 capture retained the superseded C0→C1 scan gap: %+v", capture)
 	}
+	if debt := d.policyInvalidationDebt; debt == nil || debt.scanFailure == nil ||
+		debt.scanFailure.oldCfg != c0 {
+		t.Fatalf("store moved ahead of C1 helper authority but C1 scan debt was lost: %+v", debt)
+	}
 	if dp.request.ExpectedConfig != c1 {
 		t.Fatalf("re-anchored helper LIST expected config = %p, want C1 %p", dp.request.ExpectedConfig, c1)
 	}
@@ -339,5 +343,96 @@ func TestPolicyInvalidationDebtReanchorsAndPreservesDeleteIdentity12323(t *testi
 	}
 	if got := dp.readCalls; got != 2 {
 		t.Fatalf("helper READ calls = %d, want C0→C1 and fresh C1→C2 scans", got)
+	}
+}
+
+func TestPolicyInvalidationDoesNotRestoreDebtFromDifferentAuthority12323(t *testing.T) {
+	r, _ := newLandedRollbackRun12072(t)
+	store := r.h.d.store
+	c1, err := store.SyncApply(policySetConfigText12072(
+		"authority-c1", []string{"p-first", "b", "web"}), nil)
+	if err != nil {
+		t.Fatalf("promote C1: %v", err)
+	}
+	r.dp.applied, r.dp.helperCfg = c1, c1
+	ids := dpuserspace.PolicyIDsByStableKey(c1)
+	var permitted dpuserspace.SessionPolicyMatch
+	for i := range r.dp.rows {
+		row := &r.dp.rows[i]
+		row.PolicyID = ids[r.dp.ruleBySession[row.ExpectedRTFlowSessionID]]
+		if row.ExpectedRTFlowSessionID == 2 {
+			permitted = *row
+		}
+	}
+	if permitted.ExpectedRTFlowSessionID != 2 {
+		t.Fatal("C1 permitted-session fixture is missing")
+	}
+	store.MarkActiveApplied()
+
+	c2 := twoPolicyConfig([]string{"p-first", "web"}, nil)
+	c3 := twoPolicyConfig([]string{"p-first", "b", "web"}, nil)
+	staleLanded := &policyInvalidationDebt{
+		oldCfg: c1,
+		newCfg: c2,
+		capture: &policyInvalidationCapture{
+			deleted: capturedSessions{policy: []dpuserspace.SessionPolicyMatch{permitted}},
+		},
+	}
+	r.h.d.policyInvalidationDebt = &policyInvalidationDebt{
+		oldCfg: c2, newCfg: c3, landed: staleLanded,
+	}
+	r.h.d.policyInvalidationPlan = &policyInvalidationPlan{oldCfg: c1, newCfg: c1}
+	r.h.d.capturePolicyInvalidationLocked(c1)
+
+	if debt := r.h.d.policyInvalidationDebt; debt == nil || debt.capture == nil ||
+		len(debt.capture.deleted.policy) != 0 {
+		t.Fatalf("stale C2 candidate entered the C1 capture: %+v", debt)
+	}
+	result, err := r.dp.ApplyConfig(context.Background(), c1)
+	if err != nil {
+		t.Fatalf("apply C1: %v", err)
+	}
+	r.h.d.notePolicyInvalidationPublish(c1, result.Generation)
+	if debt := r.h.d.policyInvalidationDebt; debt != nil {
+		debt.appliedDigest = store.ActiveDigest()
+	}
+	if err := r.h.d.dischargePolicyInvalidationDebtLocked(c1, c1); err != nil {
+		t.Fatalf("discharge C1: %v", err)
+	}
+	if r.hasDeletedSession(2) || !r.hasLiveSession(2) {
+		t.Fatalf("C1 rollback used a stale C2 candidate: deleted-b=%v live-b=%v",
+			r.hasDeletedSession(2), r.hasLiveSession(2))
+	}
+}
+
+func TestPolicyInvalidationStoreMovePreservesUnpublishedCandidates12323(t *testing.T) {
+	r, c1 := newLandedRollbackRun12072(t)
+	publishErr := errors.New("C2 publication failed before landing")
+	r.dp.invalDebtTestDP12073.script = make([]invalDebtOutcome12073, r.dp.invalDebtTestDP12073.applyCalls+1)
+	r.dp.invalDebtTestDP12073.script[r.dp.invalDebtTestDP12073.applyCalls] =
+		invalDebtOutcome12073{err: publishErr}
+	c2, err := publishLandedRollbackConfig12072(
+		t, r, c1, "authority-c2", []string{"p-first", "a", "web"})
+	if !errors.Is(err, publishErr) {
+		t.Fatalf("C1->C2 definite publish failure = %v, want %v", err, publishErr)
+	}
+	debt := r.h.d.policyInvalidationDebt
+	if debt == nil || debt.newCfg != c2 || debt.landed != nil ||
+		debt.capture == nil || len(debt.capture.deleted.policy) != 1 {
+		t.Fatalf("C2 did not retain its unlanded candidate debt: %+v", debt)
+	}
+
+	r.dp.incompleteNext = 1
+	c3, err := publishLandedRollbackConfig12072(
+		t, r, c1, "authority-c3", []string{"p-first", "a", "web"})
+	if c3 == nil {
+		t.Fatalf("promote C3: %v", err)
+	}
+	if debt := r.h.d.policyInvalidationDebt; debt == nil || debt.scanFailure == nil {
+		t.Fatalf("published incomplete C3 did not retain scan-failure debt: %+v", debt)
+	}
+	if !r.hasDeletedSession(2) || r.hasLiveSession(2) {
+		t.Fatalf("store move lost the identified candidate: deleted-b=%v live-b=%v",
+			r.hasDeletedSession(2), r.hasLiveSession(2))
 	}
 }

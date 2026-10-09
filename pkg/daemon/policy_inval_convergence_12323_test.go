@@ -864,3 +864,141 @@ func TestPolicyInvalidationConfirmedRollbackAfterDefiniteFailure12072(t *testing
 			store.ActiveApplied())
 	}
 }
+
+func newLandedRollbackRun12072(t *testing.T) (*convergenceRun12072, *config.Config) {
+	t.Helper()
+	policies := []string{"p-first", "a", "b", "web"}
+	r, _ := newConvergenceRun12072(t, policies)
+	c0, err := r.h.d.store.SyncApply(policySetConfigText12072("rollback-c0", policies), nil)
+	if err != nil {
+		t.Fatalf("promote C0: %v", err)
+	}
+	r.dp.applied, r.dp.helperCfg = c0, c0
+	ids := dpuserspace.PolicyIDsByStableKey(c0)
+	for i := range r.dp.rows {
+		row := &r.dp.rows[i]
+		row.PolicyID = ids[r.dp.ruleBySession[row.ExpectedRTFlowSessionID]]
+	}
+	r.h.d.store.MarkActiveApplied()
+	return r, c0
+}
+
+func publishLandedRollbackConfig12072(
+	t *testing.T, r *convergenceRun12072, old *config.Config, host string, policies []string,
+) (*config.Config, error) {
+	t.Helper()
+	next, err := r.h.d.store.SyncApply(policySetConfigText12072(host, policies), nil)
+	if err != nil {
+		t.Fatalf("promote %s: %v", host, err)
+	}
+	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
+		t.Fatalf("acquire apply semaphore: %v", err)
+	}
+	_, applyErr := r.h.d.applyAndSyncCommitted(old, next, peerSyncNever)
+	r.h.d.applySem.Release(1)
+	_, _ = r.h.sender.ApplyQueuedMessagesForTesting(r.h.receiver)
+	return next, applyErr
+}
+
+func failConfirmedRollbackTarget12072(t *testing.T, r *convergenceRun12072, c1 *config.Config) {
+	t.Helper()
+	store := r.h.d.store
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	if err := store.LoadOverride(policySetConfigText12072(
+		"rollback-c2", []string{"p-first", "web"})); err != nil {
+		t.Fatalf("LoadOverride C2: %v", err)
+	}
+	c2, err := store.CommitConfirmed(1)
+	if err != nil {
+		t.Fatalf("CommitConfirmed: %v", err)
+	}
+	store.ExitConfigure()
+	gen := store.ConfirmGenForTesting()
+	t.Cleanup(func() { _ = store.ConfirmCommit() })
+
+	publishErr := errors.New("apply_snapshot rejected by helper (definite)")
+	r.dp.invalDebtTestDP12073.script = make([]invalDebtOutcome12073, r.dp.invalDebtTestDP12073.applyCalls+1)
+	r.dp.invalDebtTestDP12073.script[r.dp.invalDebtTestDP12073.applyCalls] =
+		invalDebtOutcome12073{err: publishErr}
+	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
+		t.Fatalf("acquire apply semaphore: %v", err)
+	}
+	_, applyErr := r.h.d.applyAndSyncCommitted(c1, c2, peerSyncNever)
+	r.h.d.applySem.Release(1)
+	if !errors.Is(applyErr, publishErr) {
+		t.Fatalf("definite C2 publish failure = %v, want %v", applyErr, publishErr)
+	}
+
+	r.h.d.executeConfirmedRollback(gen)
+	if store.ActiveConfig() != c1 || r.dp.applied != c1 {
+		t.Fatalf("confirmed rollback authority: store=%p helper=%p, want C1 %p",
+			store.ActiveConfig(), r.dp.applied, c1)
+	}
+}
+
+func TestPolicyInvalidationLandedScanDebtSurvivesConfirmedRollback12323(t *testing.T) {
+	r, c0 := newLandedRollbackRun12072(t)
+	r.dp.incompleteNext = 1
+	c1, applyErr := publishLandedRollbackConfig12072(
+		t, r, c0, "rollback-c1", []string{"p-first", "b", "web"})
+	if applyErr == nil {
+		t.Fatal("C0->C1 incomplete policy scan was not surfaced")
+	}
+	if debt := r.h.d.policyInvalidationDebt; debt == nil || debt.scanFailure == nil {
+		t.Fatalf("C1 did not retain its published scan-failure debt: %+v", debt)
+	}
+	failConfirmedRollbackTarget12072(t, r, c1)
+	for retry := range 2 {
+		if err := r.h.d.applyActiveConfigResult(); err != nil {
+			t.Fatalf("background retry %d: %v", retry+1, err)
+		}
+	}
+
+	debt := r.h.d.policyInvalidationDebt
+	if debt == nil || debt.scanFailure == nil {
+		t.Fatalf("confirmed rollback discarded landed scan-failure debt: %+v", debt)
+	}
+	if r.h.d.store.ActiveApplied() {
+		t.Fatal("confirmed rollback reports converged despite the retained scan-failure debt")
+	}
+	if !r.hasLiveSession(1) || !r.hasLiveSession(2) || r.hasDeletedSession(2) {
+		t.Fatalf("scan-failure rollback removed a session: live-a=%v live-b=%v deleted-b=%v",
+			r.hasLiveSession(1), r.hasLiveSession(2), r.hasDeletedSession(2))
+	}
+}
+
+func TestPolicyInvalidationLandedDeleteDebtSurvivesConfirmedRollback12323(t *testing.T) {
+	r, c0 := newLandedRollbackRun12072(t)
+	r.dp.deleteErrOnce = true
+	c1, applyErr := publishLandedRollbackConfig12072(
+		t, r, c0, "rollback-c1", []string{"p-first", "b", "web"})
+	if applyErr == nil {
+		t.Fatal("C0->C1 failed candidate delete was not surfaced")
+	}
+	if debt := r.h.d.policyInvalidationDebt; debt == nil || debt.capture == nil ||
+		len(debt.capture.deleted.policy) == 0 {
+		t.Fatalf("C1 did not retain its failed delete candidate: %+v", debt)
+	}
+	failConfirmedRollbackTarget12072(t, r, c1)
+	for retry := range 2 {
+		if err := r.h.d.applyActiveConfigResult(); err != nil {
+			t.Fatalf("background retry %d: %v", retry+1, err)
+		}
+	}
+
+	if !r.hasDeletedSession(1) || r.hasLiveSession(1) {
+		t.Fatalf("rollback did not discharge C1's forbidden session: deleted-a=%v live-a=%v",
+			r.hasDeletedSession(1), r.hasLiveSession(1))
+	}
+	if !r.hasLiveSession(2) || r.hasDeletedSession(2) {
+		t.Fatalf("rollback over-deleted C1's permitted session: live-b=%v deleted-b=%v",
+			r.hasLiveSession(2), r.hasDeletedSession(2))
+	}
+	if debt, failures, _ := r.h.d.ConfigApplyDebt(); debt || failures != 0 ||
+		r.h.d.policyInvalidationDebt != nil || !r.h.d.store.ActiveApplied() {
+		t.Fatalf("landed delete retry failed to converge: configDebt=%v failures=%d invalidationDebt=%+v ActiveApplied=%v",
+			debt, failures, r.h.d.policyInvalidationDebt, r.h.d.store.ActiveApplied())
+	}
+}
