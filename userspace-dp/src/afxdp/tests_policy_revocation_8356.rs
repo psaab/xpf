@@ -10375,6 +10375,381 @@ fn reverse_sessionless_no_route_fib_stale_nonlive_permits_12074() {
             canonical, None,
             "a permitted non-Live NoLocalEntry companion keeps parent parity; kind={kind:?}",
         );
-        assert!(sessions.entry_with_origin(&forward_key).is_some());
+        let (_, _, _, generation) = sessions
+            .entry_with_origin_and_forwarding_generation(&forward_key)
+            .expect("the permitted forward row remains present");
+        assert!(
+            sessions.forwarding_resolution_is_stale(generation),
+            "a stored-pair NoRoute permit must not stamp the old forward resolution fresh; kind={kind:?}",
+        );
     }
+
+}
+
+fn no_local_entry_current_route_12074(
+    current_kind: &str,
+    permit_new_zone: bool,
+) -> (
+    Option<SessionKey>,
+    SessionTable,
+    SessionKey,
+    ForwardingResolution,
+) {
+    let mut current = policy_deny_snapshot();
+    current.generation = 7;
+    current.fib_generation = 10;
+    current.routes.retain(|route| route.family != "inet");
+    current.policies.push(PolicyRuleSnapshot {
+        name: "lan-out".into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["any".into()],
+        application_terms: Vec::new(),
+        action: "permit".into(),
+        ..Default::default()
+    });
+    match current_kind {
+        "dmz" => {
+            current.interfaces.push(InterfaceSnapshot {
+                name: "reth2.0".into(),
+                zone: "dmz".into(),
+                linux_name: "ge-0-0-2".into(),
+                ifindex: DMZ_IFINDEX,
+                egress_zone: "dmz".into(),
+                hardware_addr: "02:bf:72:02:00:01".into(),
+                addresses: vec![crate::InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "203.0.113.1/24".into(),
+                    scope: 0,
+                }],
+                ..Default::default()
+            });
+            current.neighbors.push(NeighborSnapshot {
+                interface: "ge-0-0-2".into(),
+                ifindex: DMZ_IFINDEX,
+                family: "inet".into(),
+                ip: "203.0.113.2".into(),
+                mac: "00:aa:bb:cc:dd:ee".into(),
+                state: "reachable".into(),
+                router: true,
+                link_local: false,
+                ..Default::default()
+            });
+            current.routes.push(RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: format!("{FIB_MOVE_DST_12074}/32"),
+                next_hops: vec!["203.0.113.2@reth2.0".into()],
+                next_hop_weights: vec![],
+                discard: false,
+                next_table: String::new(),
+                preference: 0,
+                rule_priority: 0,
+                mtu: 0,
+            });
+            if permit_new_zone {
+                let mut permit = current
+                    .policies
+                    .iter()
+                    .find(|rule| rule.name == "lan-out")
+                    .expect("stored-pair permit")
+                    .clone();
+                permit.name = "lan-dmz".into();
+                permit.to_zone = "dmz".into();
+                current.policies.push(permit);
+            }
+        }
+        "local" => {
+            for interface in &mut current.interfaces {
+                if interface.ifindex == WAN_IFINDEX {
+                    interface.addresses.push(crate::InterfaceAddressSnapshot {
+                        family: "inet".into(),
+                        address: format!("{FIB_MOVE_DST_12074}/32"),
+                        scope: 0,
+                    });
+                }
+            }
+            if !permit_new_zone {
+                current.policies.clear();
+            }
+        }
+        _ => panic!("unexpected current route kind: {current_kind}"),
+    }
+    let forwarding = build_forwarding_state(&current);
+    let current_resolution = crate::afxdp::forwarding::lookup_forwarding_resolution(
+        &forwarding,
+        IpAddr::V4(FIB_MOVE_DST_12074),
+    );
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    let forward_key = flow_key_to(FIB_MOVE_DST_12074);
+    let reverse_key = crate::session::reverse_session_key(&forward_key, NatDecision::default());
+    assert!(sessions.install_with_protocol_with_origin(
+        forward_key.clone(),
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    sessions.mark_policy_revalidated(
+        &forward_key,
+        crate::session::PolicyRevalidationKind::LiveEgress,
+    );
+    assert_eq!(
+        sessions.policy_revalidation_target(&reverse_key),
+        crate::session::PolicyRevalidationTarget::NoLocalEntry,
+    );
+    let (_, _, _, old_generation) = sessions
+        .entry_with_origin_and_forwarding_generation(&forward_key)
+        .expect("local forward companion");
+    sessions.set_forwarding_revalidation_gen(7, 10);
+    assert!(
+        sessions.forwarding_resolution_is_stale(old_generation),
+        "the NoLocalEntry companion must start FIB-stale",
+    );
+    let canonical = super::poll_descriptor::revalidate_zone_policy_canonical_key_for_test(
+        &forwarding,
+        &mut sessions,
+        &reverse_key,
+        &metadata(true),
+        decision(LAN_IFINDEX),
+        Some(&SessionFlow {
+            src_ip: reverse_key.src_ip,
+            dst_ip: reverse_key.dst_ip,
+            forward_key: reverse_key.clone(),
+        }),
+        txn_meta_v4(WAN_IFINDEX as u32, TCP_ACK, 80),
+        false,
+    );
+    (canonical, sessions, forward_key, current_resolution)
+}
+
+#[test]
+fn reverse_no_local_entry_fib_stale_cross_zone_deny_re_resolves_12074() {
+    let (canonical, sessions, forward_key, current) =
+        no_local_entry_current_route_12074("dmz", false);
+    assert_eq!(
+        current.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "the current route must forward locally through dmz",
+    );
+    assert_eq!(current.egress_ifindex, DMZ_IFINDEX);
+    assert_eq!(canonical, Some(forward_key.clone()));
+    let (stored, _, _, generation) = sessions
+        .entry_with_origin_and_forwarding_generation(&forward_key)
+        .expect("the seam reports revocation without removing the pair");
+    assert_eq!(stored.resolution.egress_ifindex, WAN_IFINDEX);
+    assert!(
+        sessions.forwarding_resolution_is_stale(generation),
+        "a revoked deny must not persist the new route",
+    );
+}
+
+#[test]
+fn reverse_no_local_entry_fib_stale_cross_zone_permit_persists_12074() {
+    let (canonical, sessions, forward_key, current) =
+        no_local_entry_current_route_12074("dmz", true);
+    assert_eq!(current.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(current.egress_ifindex, DMZ_IFINDEX);
+    assert_eq!(canonical, None);
+    let (stored, _, _, generation) = sessions
+        .entry_with_origin_and_forwarding_generation(&forward_key)
+        .expect("the permitted pair remains present");
+    assert_eq!(stored.resolution.egress_ifindex, DMZ_IFINDEX);
+    assert!(
+        !sessions.forwarding_resolution_is_stale(generation),
+        "a permitted current cross-zone route must be persisted FIB-fresh",
+    );
+}
+
+#[test]
+fn reverse_no_local_entry_local_delivery_stored_deny_revokes_12074() {
+    let (canonical, _, forward_key, current) =
+        no_local_entry_current_route_12074("local", false);
+    assert_eq!(current.disposition, ForwardingDisposition::LocalDelivery);
+    assert_eq!(canonical, Some(forward_key));
+}
+
+fn stale_live_reverse_fence_12074(
+    icmp: bool,
+    decline_ingress0: bool,
+    reverse_kind: crate::session::PolicyRevalidationKind,
+    fib_stale: bool,
+    permit: bool,
+) -> (
+    Option<SessionKey>,
+    SessionKey,
+    SessionKey,
+    bool,
+) {
+    let mut current = policy_deny_snapshot();
+    current.generation = 7;
+    current.fib_generation = if fib_stale { 10 } else { 9 };
+    current.routes.retain(|route| route.family != "inet");
+    if permit {
+        current.policies.push(PolicyRuleSnapshot {
+            name: "lan-out".into(),
+            from_zone: "lan".into(),
+            to_zone: "wan".into(),
+            source_addresses: vec!["any".into()],
+            destination_addresses: vec!["any".into()],
+            applications: vec!["any".into()],
+            application_terms: Vec::new(),
+            action: "permit".into(),
+            ..Default::default()
+        });
+    }
+    if icmp {
+        current.policies.push(junos_icmp_ping_permit());
+    }
+    let forwarding = build_forwarding_state(&current);
+    let proto = if icmp { PROTO_ICMP } else { PROTO_TCP };
+    if icmp {
+        assert!(forwarding.policy.icmp_verdict_may_depend_on_type(proto));
+    }
+    let base = flow_key_to(FIB_MOVE_DST_12074);
+    let forward_key = SessionKey {
+        protocol: proto,
+        src_port: if icmp { ICMP_ID } else { base.src_port },
+        dst_port: if icmp { 0 } else { base.dst_port },
+        ..base
+    };
+    let reverse_key =
+        crate::session::reverse_session_key(&forward_key, NatDecision::default());
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    let mut forward_metadata = metadata(false);
+    if decline_ingress0 {
+        forward_metadata.ingress_ifindex = 0;
+    }
+    let flags = if icmp { 0 } else { TCP_ACK };
+    assert!(sessions.install_with_protocol_with_origin(
+        forward_key.clone(),
+        decision(WAN_IFINDEX),
+        forward_metadata,
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        proto,
+        flags,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        reverse_key.clone(),
+        decision(LAN_IFINDEX),
+        metadata(true),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        proto,
+        flags,
+    ));
+    sessions.mark_policy_revalidated(
+        &forward_key,
+        crate::session::PolicyRevalidationKind::LiveEgress,
+    );
+    sessions.mark_policy_revalidated(&reverse_key, reverse_kind);
+    if fib_stale {
+        sessions.set_forwarding_revalidation_gen(7, 10);
+    }
+    let gate = sessions.policy_revalidation_gate(
+        &reverse_key,
+        crate::session::PolicyGateCurrent::LocalForwarding,
+    );
+    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, flags, 80);
+    meta.protocol = proto;
+    let canonical = super::poll_descriptor::revalidate_zone_policy_canonical_key_for_test(
+        &forwarding,
+        &mut sessions,
+        &reverse_key,
+        &metadata(true),
+        decision(LAN_IFINDEX),
+        Some(&SessionFlow {
+            src_ip: reverse_key.src_ip,
+            dst_ip: reverse_key.dst_ip,
+            forward_key: reverse_key.clone(),
+        }),
+        meta,
+        false,
+    );
+    let reverse_fenced = if icmp {
+        gate.fail_closed_icmp
+    } else {
+        gate.fail_closed_decline
+    };
+    (canonical, forward_key, reverse_key, reverse_fenced)
+}
+
+#[test]
+fn reverse_fib_stale_stored_pair_icmp_obeys_reverse_fence_12074() {
+    for reverse_kind in [
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        crate::session::PolicyRevalidationKind::Unvalidated,
+    ] {
+        let (canonical, _, reverse_key, fenced) =
+            stale_live_reverse_fence_12074(true, false, reverse_kind, true, true);
+        assert!(fenced, "fixture must carry a fenced reverse row: {reverse_kind:?}");
+        assert_eq!(
+            canonical,
+            Some(reverse_key),
+            "ICMP stored-pair judgment must retain the reverse row's #10507 fence: {reverse_kind:?}",
+        );
+    }
+}
+
+#[test]
+fn reverse_fib_stale_stored_pair_decline_obeys_reverse_fence_12074() {
+    for reverse_kind in [
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        crate::session::PolicyRevalidationKind::Unvalidated,
+    ] {
+        let (canonical, _, reverse_key, fenced) =
+            stale_live_reverse_fence_12074(false, true, reverse_kind, true, true);
+        assert!(fenced, "fixture must carry a fenced reverse row: {reverse_kind:?}");
+        assert_eq!(
+            canonical,
+            Some(reverse_key),
+            "Decline must retain the reverse row's #10507 fence: {reverse_kind:?}",
+        );
+    }
+}
+
+#[test]
+fn reverse_fib_stale_stored_pair_icmp_keeps_unfenced_reverse_12074() {
+    let (canonical, _, _, fenced) = stale_live_reverse_fence_12074(
+        true,
+        false,
+        crate::session::PolicyRevalidationKind::LiveEgress,
+        true,
+        true,
+    );
+    assert!(!fenced);
+    assert_eq!(canonical, None);
+}
+
+#[test]
+fn reverse_fib_stale_stored_pair_permit_and_deny_controls_12074() {
+    let (permit, _, _, _) = stale_live_reverse_fence_12074(
+        false,
+        false,
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        true,
+        true,
+    );
+    assert_eq!(permit, None, "the stored-pair Permit must retain the session");
+    let (deny, forward_key, _, _) = stale_live_reverse_fence_12074(
+        false,
+        false,
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        true,
+        false,
+    );
+    assert_eq!(
+        deny,
+        Some(forward_key),
+        "a stored-pair Deny still revokes the authoritative pair",
+    );
 }

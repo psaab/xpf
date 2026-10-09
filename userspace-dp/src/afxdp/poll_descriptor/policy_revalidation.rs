@@ -209,12 +209,13 @@
 //! leaving forward policy stamping unchanged. When a FIB-stale `LiveEgress`
 //! companion currently resolves to a non-forwarding disposition, the reply path
 //! judges the STORED forward pair instead without persisting the route or
-//! stamping either row: non-permit revokes the pair, while Permit/Decline keep
-//! it. The NoLocalEntry arm also preserves the parent's stored-pair verdict for
-//! non-Live companions; the Stale arm retains its #10507 non-Live fence. A
-//! same-zone route move retains its policy verdict, session and NAT. Dormant
-//! sessions are not walked eagerly; route refresh and any required policy
-//! re-judgment happen on hit.
+//! stamping either row: Deny/Reject revokes; Permit keeps. Decline and
+//! type-dependent ICMP retain only when the reverse row's #10507 fence does
+//! not require revocation. The NoLocalEntry arm also preserves the parent's
+//! stored-pair verdict for non-Live companions; the Stale arm retains its
+//! #10507 non-Live fence. A same-zone route move retains its policy verdict,
+//! session and NAT. Dormant sessions are not walked eagerly; route refresh and
+//! any required policy re-judgment happen on hit.
 //!
 //! #11075's generation-advance alarm reports live sessions awaiting lazy
 //! re-resolution at that observation. A route may remain FIB-stale while a
@@ -1479,7 +1480,8 @@ fn reverse_hit_zone_policy(
     // locally forward and its own row needs cold, or the companion itself
     // demands live. A FIB-stale LiveEgress companion with a non-forwarding
     // current route instead judges the STORED pair without persisting that
-    // route or stamping either row: non-permit revokes; Permit/Decline keep.
+    // route or stamping either row: deny/reject revokes; Permit or unfenced
+    // Decline keeps.
     let reverse_inconsistent_fail_closed =
         (reverse_has_intent && reverse_row_needs_cold) || companion_needs_live;
     if matches!(rev_target, PolicyRevalidationTarget::Fresh) && !force_reverse_cold {
@@ -1592,9 +1594,11 @@ fn reverse_hit_zone_policy(
         .policy
         .icmp_verdict_may_depend_on_type(input.protocol)
     {
-        return if stored_pair_only {
-            None
-        } else if rev_fail_closed_icmp || companion_needs_live {
+        // Type-dependent ICMP cannot be rejudged without packet type. A
+        // FIB-stale LiveEgress companion does not exempt the reverse row's
+        // own #10507 fence: a fenced reverse (RecordedEgress or
+        // fresh-Unvalidated) revokes like the parent.
+        return if rev_fail_closed_icmp || companion_needs_live {
             revocation_for_hit(sessions, session_key)
         } else {
             None
@@ -1635,7 +1639,6 @@ fn reverse_hit_zone_policy(
             );
             None
         }
-        ZonePolicyJudgment::Decline if stored_pair_only => None,
         ZonePolicyJudgment::Decline if rev_fail_closed_decline || companion_needs_live => {
             revocation_for_hit(sessions, session_key)
         }
