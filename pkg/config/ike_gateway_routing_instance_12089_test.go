@@ -135,6 +135,78 @@ func TestIKEGatewayRoutingInstanceRefused12089(t *testing.T) {
 			gw: "gw",
 			ri: "VR1",
 		},
+		{
+			name: "N4 VRRP VIP gateway local-address selects VR unit",
+			lines: []string{
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.2/24",
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.2/24 vrrp-group 1 virtual-address 198.51.100.1/24",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw local-address 198.51.100.1",
+			},
+			gw: "gw",
+			ri: "VR1",
+		},
+		{
+			name: "N4b VRRP VIP VPN local-address overrides default external-interface",
+			lines: []string{
+				"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.2/24",
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.2/24 vrrp-group 1 virtual-address 198.51.100.1/24",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw external-interface ge-0/0/1.0",
+				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
+				"set security ipsec vpn tun local-address 198.51.100.1",
+			},
+			gw: "gw",
+			ri: "VR1",
+		},
+		{
+			name: "C3 IPv6 VRRP VIP gateway local-address selects VR unit",
+			lines: []string{
+				"set interfaces ge-0/0/2 unit 0 family inet6 address 2001:db8:2::2/64",
+				"set interfaces ge-0/0/2 unit 0 family inet6 address 2001:db8:2::2/64 vrrp-group 1 virtual-address 2001:db8:2::1/64",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 2001:db8:1::1",
+				"set security ike gateway gw local-address 2001:db8:2::1",
+			},
+			gw: "gw",
+			ri: "VR1",
+		},
+		{
+			name: "C3b IPv6 VRRP VIP VPN local-address overrides default external-interface",
+			lines: []string{
+				"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+				"set interfaces ge-0/0/2 unit 0 family inet6 address 2001:db8:2::2/64",
+				"set interfaces ge-0/0/2 unit 0 family inet6 address 2001:db8:2::2/64 vrrp-group 1 virtual-address 2001:db8:2::1/64",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 2001:db8:1::1",
+				"set security ike gateway gw external-interface ge-0/0/1.0",
+				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
+				"set security ipsec vpn tun local-address 2001:db8:2::1",
+			},
+			gw: "gw",
+			ri: "VR1",
+		},
+		{
+			name: "P1-equivalent plain address control",
+			lines: []string{
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.1/24",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw local-address 198.51.100.1",
+			},
+			gw: "gw",
+			ri: "VR1",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -231,6 +303,15 @@ func TestIKEGatewayRoutingInstanceAccepted12089(t *testing.T) {
 				"set routing-instances VR1 interface ge-0/0/1.0",
 			},
 		},
+		{
+			name: "N4c VRRP VIP on default unit remains accepted",
+			lines: []string{
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.2/24",
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.2/24 vrrp-group 1 virtual-address 198.51.100.1/24",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw local-address 198.51.100.1",
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -322,6 +403,58 @@ func TestIKEGatewayRoutingInstanceEffectiveLocalAddressLenient12089(t *testing.T
 				"set security ipsec vpn tun local-address 198.51.100.1",
 			},
 		},
+		{
+			name: "N4 VRRP VIP gateway local-address",
+			lines: []string{
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.2/24",
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.2/24 vrrp-group 1 virtual-address 198.51.100.1/24",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw local-address 198.51.100.1",
+			},
+		},
+		{
+			name: "N4b VRRP VIP VPN local-address",
+			lines: []string{
+				"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.2/24",
+				"set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.2/24 vrrp-group 1 virtual-address 198.51.100.1/24",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw external-interface ge-0/0/1.0",
+				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
+				"set security ipsec vpn tun local-address 198.51.100.1",
+			},
+		},
+		{
+			name: "C3 IPv6 VRRP VIP gateway local-address",
+			lines: []string{
+				"set interfaces ge-0/0/2 unit 0 family inet6 address 2001:db8:2::2/64",
+				"set interfaces ge-0/0/2 unit 0 family inet6 address 2001:db8:2::2/64 vrrp-group 1 virtual-address 2001:db8:2::1/64",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 2001:db8:1::1",
+				"set security ike gateway gw local-address 2001:db8:2::1",
+			},
+		},
+		{
+			name: "C3b IPv6 VRRP VIP VPN local-address",
+			lines: []string{
+				"set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24",
+				"set interfaces ge-0/0/2 unit 0 family inet6 address 2001:db8:2::2/64",
+				"set interfaces ge-0/0/2 unit 0 family inet6 address 2001:db8:2::2/64 vrrp-group 1 virtual-address 2001:db8:2::1/64",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface ge-0/0/2.0",
+				"set security ike gateway gw address 2001:db8:1::1",
+				"set security ike gateway gw external-interface ge-0/0/1.0",
+				"set security ipsec vpn tun gateway gw",
+				"set security ipsec vpn tun bind-interface st0",
+				"set security ipsec vpn tun local-address 2001:db8:2::1",
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -366,6 +499,17 @@ func TestIKEGatewayRoutingInstanceMembershipPriority12089(t *testing.T) {
 				"set security ike gateway gw external-interface ge-0/0/1.0",
 			},
 			wantIssue: "#11060",
+		},
+		{
+			name: "management member retains #11392 gate priority",
+			lines: []string{
+				"set interfaces fxp0 unit 0 family inet address 192.0.2.1/24",
+				"set routing-instances VR1 instance-type virtual-router",
+				"set routing-instances VR1 interface fxp0.0",
+				"set security ike gateway gw address 203.0.113.1",
+				"set security ike gateway gw external-interface fxp0.0",
+			},
+			wantIssue: "#11392",
 		},
 	}
 	for _, tc := range cases {
