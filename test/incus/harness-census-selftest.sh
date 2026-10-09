@@ -513,7 +513,15 @@ fi
 # exact command in test.yml, pointed at an isolated fixture via the census's
 # supported environment overrides.
 CI_WORKFLOW="${REPO_ROOT}/.github/workflows/test.yml"
-if grep -Fq 'run: sh scripts/harness-census.sh' "$CI_WORKFLOW"; then
+# Slice the census job block through the next top-level job so checks are
+# scoped to the gated job, not other workflow jobs.
+CENSUS_JOB="$(awk 'BEGIN{in_job=0} /^  census:/{in_job=1; print; next} /^  [A-Za-z0-9_.-]+:/{if (in_job) exit} in_job{print}' "$CI_WORKFLOW")"
+# Require the exact command line and reject fail-open job or step mutations.
+CENSUS_RUN_OK=0
+CENSUS_FAIL_OPEN=0
+printf '%s\n' "$CENSUS_JOB" | grep -Eq '^[[:space:]]*run: sh scripts/harness-census\.sh[[:space:]]*$' && CENSUS_RUN_OK=1
+printf '%s\n' "$CENSUS_JOB" | grep -Eq 'continue-on-error|\|\|[[:space:]]*[^[:space:]]*true|\|\|[[:space:]]*:|^[[:space:]]*if[[:space:]]*:' && CENSUS_FAIL_OPEN=1
+if [[ $CENSUS_RUN_OK -eq 1 && $CENSUS_FAIL_OPEN -eq 0 ]]; then
 	FX_CI="$(new_fixture ci-undeclared)"
 	add_harness "$FX_CI" ctl.sh 'echo control'
 	add_harness "$FX_CI" fresh-undeclared-harness.sh 'echo gate'
@@ -534,6 +542,8 @@ MK
 		bad "the CI-invoked census passed a fresh undeclared harness (rc=$rc)"
 		printf '%s\n' "$out" | sed 's/^/         /' >&2
 	fi
+elif [[ $CENSUS_FAIL_OPEN -eq 1 ]]; then
+	bad "test.yml census job is fail-open (continue-on-error, || true, or if:)"
 else
 	bad "test.yml does not invoke the expected fail-closed census command"
 fi
