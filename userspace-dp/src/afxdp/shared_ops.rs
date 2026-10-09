@@ -925,6 +925,21 @@ pub(super) struct ResolvedFlowSessionDecision {
     /// The poll site applies the deferred TCP close after an Owner authority
     /// verdict (`apply_deferred_owner_close`).
     pub(super) close_deferred: bool,
+    /// #12265: a stale-generation forwarding re-resolve computed during
+    /// `resolve`, NOT yet persisted. The poll site persists it after an Owner
+    /// authority verdict (`revalidate_forwarding_resolution`) and drops it
+    /// with a foreign arrival — mirroring the #10636 close deferral. `None`
+    /// when the cached resolution was fresh or no persist is owed.
+    pub(super) deferred_forwarding_revalidation: Option<DeferredForwardingRevalidation>,
+}
+
+/// #12265: the #11373 re-resolve a stale hit computed, held for the #9519
+/// authority verdict. Persisting inside `resolve` lets a denied foreign
+/// packet rewrite the owner's resolution, stamp, and `owner_rg_id`.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DeferredForwardingRevalidation {
+    pub(super) resolution: ForwardingResolution,
+    pub(super) owner_rg_id: Option<i32>,
 }
 
 // Fabric-ingress SNAT-only forward entries are standby-side wire placeholders

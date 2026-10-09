@@ -2971,7 +2971,7 @@ pub(super) fn resolve_flow_session_decision(
     ha_startup_grace_until_secs: u64,
     worker_id: u32,
 ) -> Option<ResolvedFlowSessionDecision> {
-    resolve_flow_session_decision_with_conntrack(
+    let mut resolved = resolve_flow_session_decision_with_conntrack(
         sessions,
         session_map,
         -1,
@@ -2995,7 +2995,15 @@ pub(super) fn resolve_flow_session_decision(
         fabric_ingress,
         ha_startup_grace_until_secs,
         worker_id,
-    )
+    )?;
+    if let Some(revalidation) = resolved.deferred_forwarding_revalidation.take() {
+        sessions.revalidate_forwarding_resolution(
+            &resolved.key,
+            revalidation.resolution,
+            revalidation.owner_rg_id,
+        );
+    }
+    Some(resolved)
 }
 
 pub(super) fn resolve_flow_session_decision_with_conntrack(
@@ -3192,24 +3200,26 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
                 tcp_flags,
             )
         };
-        if forwarding_stale && !keep_transient && !materialize_install_failed {
-            let owner_rg_id = matches!(
-                decision.resolution.disposition,
-                ForwardingDisposition::ForwardCandidate
-                    | ForwardingDisposition::FabricRedirect
-                    | ForwardingDisposition::HAInactive
-                    | ForwardingDisposition::LocalDelivery
-            )
-            .then(|| owner_rg_for_resolution(forwarding, decision.resolution));
-            if let Some(owner_rg_id) = owner_rg_id {
-                metadata.owner_rg_id = owner_rg_id;
-            }
-            sessions.revalidate_forwarding_resolution(
-                resolved_key,
-                decision.resolution,
-                owner_rg_id,
-            );
-        }
+        let deferred_forwarding_revalidation =
+            if forwarding_stale && !keep_transient && !materialize_install_failed {
+                let owner_rg_id = matches!(
+                    decision.resolution.disposition,
+                    ForwardingDisposition::ForwardCandidate
+                        | ForwardingDisposition::FabricRedirect
+                        | ForwardingDisposition::HAInactive
+                        | ForwardingDisposition::LocalDelivery
+                )
+                .then(|| owner_rg_for_resolution(forwarding, decision.resolution));
+                if let Some(owner_rg_id) = owner_rg_id {
+                    metadata.owner_rg_id = owner_rg_id;
+                }
+                Some(DeferredForwardingRevalidation {
+                    resolution: decision.resolution,
+                    owner_rg_id,
+                })
+            } else {
+                None
+            };
         return Some(ResolvedFlowSessionDecision {
             key: resolved_key.clone(),
             session_id,
@@ -3219,6 +3229,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
             created: false,
             install_failed: shared_was_present && materialize_install_failed,
             close_deferred: hit.close_deferred,
+            deferred_forwarding_revalidation,
         });
     }
 
@@ -3375,6 +3386,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         // #10636: reverse-synthesized from a forward match (close, if any,
         // was stamped at install); never a deferred local hit.
         close_deferred: false,
+        deferred_forwarding_revalidation: None,
     })
 }
 

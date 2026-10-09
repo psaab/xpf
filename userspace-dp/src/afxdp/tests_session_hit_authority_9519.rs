@@ -28,8 +28,8 @@ use crate::session::{
 use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN};
 use crate::test_zone_ids::*;
 use crate::{
-    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceSnapshot, NeighborSnapshot,
-    PolicyApplicationSnapshot, PolicyRuleSnapshot, ZoneSnapshot,
+    FirewallFilterSnapshot, FirewallTermSnapshot, InterfaceAddressSnapshot, InterfaceSnapshot,
+    NeighborSnapshot, PolicyApplicationSnapshot, PolicyRuleSnapshot, ZoneSnapshot,
 };
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -164,6 +164,20 @@ pub(super) fn binding(ifindex: i32) -> BindingWorker {
     b
 }
 
+fn tag_wan_ingress_vlan(arrival: i32, frame: &mut Vec<u8>, meta: &mut UserspaceDpMeta) {
+    if arrival != WAN_IFINDEX {
+        return;
+    }
+    // reth0.80 is a tagged logical interface. Its packets must carry VID 80
+    // in both the descriptor metadata and the Ethernet frame.
+    frame.splice(12..12, [0x81, 0x00, 0x00, 80]);
+    meta.ingress_vlan_id = 80;
+    meta.l3_offset += 4;
+    meta.l4_offset += 4;
+    meta.payload_offset += 4;
+    meta.pkt_len = frame.len() as u16;
+}
+
 fn tcp(
     src: Ipv4Addr,
     dst: Ipv4Addr,
@@ -178,8 +192,9 @@ fn tcp(
         DMZ_IFINDEX => AUTHORITY_DMZ_MAC,
         other => panic!("9519 fixture has no destination MAC for ingress ifindex {other}"),
     };
-    let frame = build_txn_tcp_syn_frame_v4(src, dst, sport, dport, flags, dst_mac);
-    let meta = txn_meta_v4(arrival as u32, flags, frame.len() as u16);
+    let mut frame = build_txn_tcp_syn_frame_v4(src, dst, sport, dport, flags, dst_mac);
+    let mut meta = txn_meta_v4(arrival as u32, flags, frame.len() as u16);
+    tag_wan_ingress_vlan(arrival, &mut frame, &mut meta);
     (frame, meta)
 }
 
@@ -614,6 +629,21 @@ fn icmp_type8_rule(name: &str, from_zone: &str, to_zone: &str, action: &str) -> 
 
 fn icmp_hit_forwarding() -> ForwardingState {
     let mut snapshot = policy_deny_snapshot();
+
+    for interface in &mut snapshot.interfaces {
+        match interface.ifindex {
+            WAN_IFINDEX => interface.redundancy_group = 1,
+            LAN_IFINDEX => {
+                interface.redundancy_group = 2;
+                interface.addresses.push(InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "10.0.61.1/24".into(),
+                    scope: 0,
+                });
+            }
+            _ => {}
+        }
+    }
     snapshot.policies = vec![
         icmp_type8_rule("lan-icmp-permit", "lan", "wan", "permit"),
         icmp_type8_rule("dmz-icmp-deny", "dmz", "wan", "deny"),
@@ -627,10 +657,35 @@ fn icmp_hit_forwarding() -> ForwardingState {
         hardware_addr: "02:bf:72:02:00:01".into(),
         ..Default::default()
     });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-0.80".into(),
+        ifindex: WAN_IFINDEX,
+        family: "inet".into(),
+        ip: "172.16.80.200".into(),
+        mac: "02:bf:72:00:80:08".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-1".into(),
+        ifindex: LAN_IFINDEX,
+        family: "inet".into(),
+        ip: REAL.to_string(),
+        mac: "02:bf:72:01:00:01".into(),
+        state: "reachable".into(),
+        router: false,
+        link_local: false,
+        ..Default::default()
+    });
     build_forwarding_state(&snapshot)
 }
 
-fn established_icmp_hit(is_reverse: bool) -> (SessionKey, SessionTable) {
+fn established_icmp_hit(
+    is_reverse: bool,
+    forwarding_generation: Option<(u64, u32)>,
+) -> (SessionKey, SessionTable) {
     let forward_key = SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: crate::ip_proto::PROTO_ICMP,
@@ -671,7 +726,12 @@ fn established_icmp_hit(is_reverse: bool) -> (SessionKey, SessionTable) {
             disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
             local_ifindex: 0,
             egress_ifindex,
-            tx_ifindex: egress_ifindex,
+            // reth0.80 transmits through its physical parent.
+            tx_ifindex: if egress_ifindex == WAN_IFINDEX {
+                11
+            } else {
+                egress_ifindex
+            },
             tunnel_endpoint_id: 0,
             next_hop: Some(key.dst_ip),
             neighbor_mac: Some(mac),
@@ -691,7 +751,7 @@ fn established_icmp_hit(is_reverse: bool) -> (SessionKey, SessionTable) {
         egress_zone_check: 0,
         ingress_ifindex: ingress_ifindex as u32,
         ingress_vlan_id: 0,
-        owner_rg_id: 0,
+        owner_rg_id: if egress_ifindex == WAN_IFINDEX { 1 } else { 2 },
         fabric_ingress: false,
         is_reverse,
         nat64_reverse: None,
@@ -703,6 +763,9 @@ fn established_icmp_hit(is_reverse: bool) -> (SessionKey, SessionTable) {
         policy_counter: None,
     };
     let mut sessions = SessionTable::new();
+    if let Some((config_generation, fib_generation)) = forwarding_generation {
+        sessions.set_forwarding_revalidation_gen(config_generation, fib_generation);
+    }
     assert!(sessions.install_with_protocol_with_origin(
         key.clone(),
         decision,
@@ -714,7 +777,6 @@ fn established_icmp_hit(is_reverse: bool) -> (SessionKey, SessionTable) {
     ));
     (key, sessions)
 }
-
 fn drive_icmp_hit_with_events(
     forwarding: &ForwardingState,
     sessions: &mut SessionTable,
@@ -739,6 +801,7 @@ fn drive_icmp_hit_with_events(
     let mut meta = txn_meta_v4(ingress_ifindex as u32, 0, frame.len() as u16);
     meta.protocol = crate::ip_proto::PROTO_ICMP;
     meta.payload_offset = 42;
+    tag_wan_ingress_vlan(ingress_ifindex, &mut frame, &mut meta);
     let mut b = binding(ingress_ifindex);
     let (batch, dbg, event_handle, event_rx) = txn_run_descriptor_capturing_events(
         &mut b,
@@ -805,10 +868,15 @@ fn established_foreign_and_owner_icmp_denies_emit_policy_events_without_session_
         foreign,
     ) in cases
     {
-        let (key, mut sessions) = established_icmp_hit(is_reverse);
+        let (key, mut sessions) = established_icmp_hit(is_reverse, Some((7, 9)));
         let (before_decision, before_metadata, before_origin) = sessions
             .entry_with_origin(&key)
             .expect("installed ICMP session");
+        let before_forwarding_generation = sessions
+            .probe_with_origin(&key)
+            .expect("installed ICMP session")
+            .0
+            .forwarding_generation;
         let before_session_id = sessions.session_id_for(&key);
         let before_permit_hits = rule_hits(&fw, "lan-icmp-permit");
         let before_foreign_deny_hits = rule_hits(&fw, "dmz-icmp-deny");
@@ -841,10 +909,25 @@ fn established_foreign_and_owner_icmp_denies_emit_policy_events_without_session_
         let (after_decision, after_metadata, after_origin) = sessions
             .entry_with_origin(&key)
             .expect("denied hit preserves session");
-        assert_eq!(
-            after_decision, before_decision,
-            "{name}: forwarding decision"
-        );
+        let after_forwarding_generation = sessions
+            .probe_with_origin(&key)
+            .expect("denied hit preserves forwarding stamp")
+            .0
+            .forwarding_generation;
+        if foreign {
+            assert_eq!(
+                after_metadata.owner_rg_id, before_metadata.owner_rg_id,
+                "{name}: owner RG"
+            );
+            assert_eq!(
+                after_forwarding_generation, before_forwarding_generation,
+                "{name}: forwarding-generation stamp"
+            );
+            assert_eq!(
+                after_decision, before_decision,
+                "{name}: forwarding decision"
+            );
+        }
         assert_eq!(after_origin, before_origin, "{name}: session origin");
         assert_eq!(
             after_metadata.ingress_zone, before_metadata.ingress_zone,
@@ -922,6 +1005,90 @@ fn established_foreign_and_owner_icmp_denies_emit_policy_events_without_session_
             "{name}: exactly one denial event per packet"
         );
     }
+}
+#[test]
+fn stale_foreign_icmp_hit_does_not_mutate_forwarding_session_12265() {
+    let mut fw = icmp_hit_forwarding();
+    let next_hop = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    fw.neighbors
+        .get_mut(&(WAN_IFINDEX, next_hop))
+        .expect("WAN next-hop neighbor")
+        .mac = [0x02, 0x00, 0x5e, 0x00, 0x12, 0x34];
+
+    // The hand-built entry has the default invalid stamp; the descriptor
+    // runner publishes (7, 9), so its foreign hit exercises stale revalidation.
+    // A changed next-hop MAC makes any saved route decision visible.
+    let (key, mut sessions) = established_icmp_hit(false, None);
+    let (before_decision, before_metadata, _) = sessions
+        .entry_with_origin(&key)
+        .expect("installed ICMP session");
+    let before_stamp = sessions
+        .probe_with_origin(&key)
+        .expect("installed forwarding stamp")
+        .0
+        .forwarding_generation;
+    assert_eq!(
+        before_stamp,
+        crate::session::ForwardingGenerationStamp::default()
+    );
+
+    let (foreign_batch, foreign_dbg, _event_handle, _event_rx) =
+        drive_icmp_hit_with_events(&fw, &mut sessions, DMZ_IFINDEX, 8);
+    assert_eq!(foreign_batch.validated_packets, 1);
+    assert_eq!(foreign_dbg.session_hit, 1);
+    assert_eq!(foreign_dbg.foreign_authority_drops, 1);
+    assert_eq!(foreign_dbg.tx, 0);
+
+    let (after_foreign_decision, after_foreign_metadata, _) = sessions
+        .entry_with_origin(&key)
+        .expect("foreign denial preserves the session");
+    let after_foreign_stamp = sessions
+        .probe_with_origin(&key)
+        .expect("foreign denial preserves forwarding stamp")
+        .0
+        .forwarding_generation;
+    assert_eq!(
+        after_foreign_decision, before_decision,
+        "denied foreign packet must not save its re-resolved route"
+    );
+    assert_eq!(
+        after_foreign_metadata.owner_rg_id, before_metadata.owner_rg_id,
+        "denied foreign packet must not re-home the owner RG"
+    );
+    assert_eq!(
+        after_foreign_stamp, before_stamp,
+        "denied foreign packet must not consume the stale generation stamp"
+    );
+
+    // A subsequent owner still consumes the stale stamp and persists the live
+    // route, proving the foreign packet did not suppress owner revalidation.
+    let (owner_batch, owner_dbg, _event_handle, _event_rx) =
+        drive_icmp_hit_with_events(&fw, &mut sessions, LAN_IFINDEX, 8);
+    assert_eq!(owner_batch.validated_packets, 1);
+    assert_eq!(owner_dbg.session_hit, 1);
+    assert_eq!(owner_dbg.foreign_authority_drops, 0);
+    assert_eq!(owner_dbg.tx, 1);
+    let (owner_decision, owner_metadata, _) = sessions
+        .entry_with_origin(&key)
+        .expect("owner hit retains the session");
+    let owner_stamp = sessions
+        .probe_with_origin(&key)
+        .expect("owner hit refreshes forwarding stamp")
+        .0
+        .forwarding_generation;
+    assert_eq!(
+        owner_decision.resolution.neighbor_mac,
+        Some([0x02, 0x00, 0x5e, 0x00, 0x12, 0x34])
+    );
+    assert_eq!(owner_metadata.owner_rg_id, 1);
+    assert_eq!(
+        owner_stamp,
+        crate::session::ForwardingGenerationStamp {
+            config_generation: 7,
+            fib_generation: 9,
+            valid: true,
+        }
+    );
 }
 
 #[test]
