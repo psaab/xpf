@@ -141,6 +141,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// interactive shell. The executor acquires d.applySem then runs store
 	// promotion + dataplane re-apply atomically; see executeConfirmedRollback.
 	d.store.SetRollbackExecutor(d.executeConfirmedRollback)
+	d.store.SetFirstCommitConfirmedHook(d.clearBootstrapLifelineNetwork)
 
 	// Register the #1922 Item 4 protected-set resolver so the dataplane
 	// reconcile (compileZones unmanaged strip) never brings down the

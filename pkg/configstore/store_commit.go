@@ -433,6 +433,21 @@ func (s *Store) SetRollbackExecutor(fn func(gen uint64)) {
 	s.rollbackExecutor = fn
 }
 
+// SetFirstCommitConfirmedHook registers a daemon notification for when the
+// first commit-confirmed window is resolved without rollback. The hook runs
+// under the Store lock and must not call Store methods.
+func (s *Store) SetFirstCommitConfirmedHook(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.firstCommitConfirmedHook = fn
+}
+
+func (s *Store) notifyFirstCommitConfirmedLocked(first bool) {
+	if first && s.firstCommitConfirmedHook != nil {
+		s.firstCommitConfirmedHook()
+	}
+}
+
 // CommitConfirmed validates, compiles, and applies the candidate with an
 // automatic rollback timer. If minutes is 0, defaults to 10.
 // If a bare "commit" is not issued within the timeout, the config auto-reverts.
@@ -1013,9 +1028,11 @@ func (s *Store) clearConfirmResolutionPendingLocked() bool {
 // surface it to the operator (#5835). The non-returning callers (plain commit,
 // demotion) ignore removeErr and rely on the retained retry debt.
 func (s *Store) clearPendingConfirmLocked() (cleared bool, removeErr error) {
+	firstCommit := s.confirmPrevFirst
 	if !s.cancelPendingConfirmTimerLocked() {
 		return false, nil
 	}
+	s.notifyFirstCommitConfirmedLocked(firstCommit)
 	// #4577: the pending confirm is now confirmed (plain commit / HA sync /
 	// explicit confirm / demotion) — drop the persisted crash-recovery state
 	// so a later restart does not resurrect a stale rollback window. A nested
