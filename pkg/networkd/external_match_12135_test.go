@@ -108,3 +108,50 @@ func TestApplyHonorsExternalNameGlobAndMACBeforeAlwaysDown12135(t *testing.T) {
 		})
 	}
 }
+
+func TestExternalMACAddressRejectsUnsupportedForms12135(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pattern string
+		address string
+		want    bool
+	}{
+		{
+			name:    "bare hex",
+			pattern: "525400aabbcc",
+			address: "52:54:00:aa:bb:cc",
+		},
+		{
+			name:    "eight-byte EUI-64",
+			pattern: "52-54-00-aa-bb-cc-dd-ee",
+			address: "52-54-00-aa-bb-cc-dd-ee",
+		},
+		{
+			name:    "dotted EUI-48",
+			pattern: "5254.00aa.bbcc",
+			address: "52:54:00:aa:bb:cc",
+			want:    true,
+		},
+		{
+			name:    "IPv4",
+			pattern: "192.0.2.1",
+			address: "192.0.2.1",
+			want:    true,
+		},
+		{
+			name:    "IPv6",
+			pattern: "2001:db8::1",
+			address: "2001:0db8:0:0:0:0:0:1",
+			want:    true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeExternalNetwork12135(t, dir, "20-external.network", "[Match]\nMACAddress="+tc.pattern+"\n")
+			matches := FindExternallyManaged(dir)
+			if got := matches.Matches("eth0", tc.address); got != tc.want {
+				t.Errorf("Matches(%q, %q) = %v, want %v", "eth0", tc.address, got, tc.want)
+			}
+		})
+	}
+}

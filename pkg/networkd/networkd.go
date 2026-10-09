@@ -5,7 +5,6 @@ package networkd
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -914,20 +913,16 @@ func parseExternalMACAddress(value string) ([]byte, bool) {
 		}
 		return []byte(ip.To16()), true
 	}
-	if hw, err := net.ParseMAC(value); err == nil {
+	// net.ParseMAC accepts separator-less hex and 8-byte EUI-64 values, but
+	// systemd's MACAddress= does not accept either form. Require a separator
+	// and an EUI-48 result; net.ParseIP above handles IPv4 and IPv6 addresses.
+	if !strings.ContainsAny(value, ":-.") {
+		return nil, false
+	}
+	if hw, err := net.ParseMAC(value); err == nil && len(hw) == 6 {
 		return []byte(hw), true
 	}
-	compact := strings.NewReplacer(":", "", "-", "", ".", "").Replace(value)
-	parsed, err := hex.DecodeString(compact)
-	if err != nil {
-		return nil, false
-	}
-	switch len(parsed) {
-	case 4, 6, 8, 16, 20:
-		return parsed, true
-	default:
-		return nil, false
-	}
+	return nil, false
 }
 
 func (m *Manager) findExternallyManaged() ExternalMatchSet {
