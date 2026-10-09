@@ -466,10 +466,10 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 		}
 	}
 
-	// #12054 full-admit-except gate. Scan independently of the token gate so
-	// a tolerant unknown-token warning does not hide this diagnostic. Every
-	// affected zone or per-interface stanza is reported on tolerant loads;
-	// strict commits reject at the first deterministic diagnostic.
+	// #12054/#12313 full-admit-except gate. Scan independently of the token gate
+	// so a tolerant unknown-token warning does not hide this diagnostic. Every
+	// affected stanza and runtime-unioned physical/unit override pair is reported
+	// on tolerant loads; strict commits reject at the first deterministic error.
 	if diagnostics := validateHostInboundFullAdmitExceptStrict(cfg); len(diagnostics) > 0 {
 		if opts.lenientHostInboundFullAdmitExcept {
 			for _, diagnostic := range diagnostics {
