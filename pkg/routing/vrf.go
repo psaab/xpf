@@ -383,9 +383,9 @@ func isLinkNotFound(err error) bool {
 // vrf-* names are skipped. Operators must NOT pre-create vrf-<name>
 // outside xpfd config.
 //
-// Partial-failure contract: if LinkAdd succeeds but a follow-up
-// (LinkByName / LinkSetUp) fails, the VRF is still recorded in the
-// tracked set. Similarly, LinkDel failures retain ownership. This
+// Partial-failure contract: if a VRF is created or adopted but a
+// follow-up (LinkByName / LinkSetUp) fails, the VRF is still recorded in
+// the tracked set. Similarly, LinkDel failures retain ownership. This
 // ensures a future reconcile can retry.
 func reconcileVRFs(ops vrfOps, tracked []string, desired []VRFSpec) ([]string, error) {
 	desiredByName := make(map[string]int, len(desired))
@@ -450,7 +450,8 @@ func reconcileVRFs(ops vrfOps, tracked []string, desired []VRFSpec) ([]string, e
 		vrf := link.(*netlink.Vrf)
 		if vrf.Table == uint32(spec.TableID) {
 			if err := ops.LinkSetUp(link); err != nil {
-				slog.Debug("VRF set-up failed (non-fatal)", "name", vrfName, "err", err)
+				slog.Warn("VRF set-up failed", "name", vrfName, "err", err)
+				recordErr(fmt.Errorf("set VRF %s up: %w", vrfName, err))
 			}
 			newTracked = append(newTracked, vrfName)
 			continue
