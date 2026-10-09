@@ -40,17 +40,42 @@ func policyStatementHasNextPolicy(ps *PolicyStatement) bool {
 	return false
 }
 
+// CanonicalSourceProtocol maps Junos `from protocol` aliases and spelling
+// variants to the FRR keyword used by route-map source-protocol matches. The
+// routing-protocol domain is the SSOT for aliases, whitespace, and case; keep
+// unknown lenient-path tokens distinct by falling back to the raw value.
+func CanonicalSourceProtocol(proto string) string {
+	if keyword, ok := FRRRoutingProtocolKeyword(proto); ok {
+		return keyword
+	}
+	return proto
+}
+
+// uniqueCanonicalProtocolCount counts the distinct source-protocol matches
+// after alias normalization, matching pkg/frr's sequence expansion.
+func uniqueCanonicalProtocolCount(protos []string) int {
+	if len(protos) == 0 {
+		return 0
+	}
+	seen := make(map[string]struct{}, len(protos))
+	for _, proto := range protos {
+		seen[CanonicalSourceProtocol(proto)] = struct{}{}
+	}
+	return len(seen)
+}
+
 // RouteMapSequenceCount returns the FRR route-map sequences before the final
 // fallback for ps: all rendered term variants, plus an explicit policy-default
 // sequence when `then next policy` can jump over it. It mirrors the renderer's
 // Cartesian expansion exactly: per term, (2 when the term's route-filters mix
 // IPv4 and IPv6 families, else 1) x max(1,|from prefix-list|) x
-// max(1,|from community|) x max(1,|from as-path|), summed over terms.
-//
-// The term-variant count depends only on each term's OR-set lengths and
-// route-filter family mix — NOT on referenced list CONTENTS — because
-// emitVariants emits one route-map sequence per NAME, not per prefix. Every
-// multiply and the running sum are overflow-checked (checkedMulU64 /
+// max(1,|from community|) x max(1,|from as-path|) x
+// max(1,|unique canonical from protocol|), summed over terms. `direct` and
+// `connected` are the same FRR source-protocol match and count only once.
+// Term count depends on each term's OR-set lengths, route-filter family mix,
+// referenced prefix-list families (not prefix entries), and source-protocol
+// values. emitVariants emits one sequence per unique canonical protocol.
+// Every multiply and the running sum are overflow-checked (checkedMulU64 /
 // saturating add): a pathological crafted policy saturates to math.MaxUint64
 // rather than wrapping back down into the in-bound range.
 // #7526: po carries the prefix-list table, because the count depends on WHAT
@@ -79,6 +104,7 @@ func RouteMapSequenceCount(po *PolicyOptionsConfig, ps *PolicyStatement) uint64 
 		v := checkedMulU64(fam, TermPrefixListRefCount(po, term.PrefixList))
 		v = checkedMulU64(v, orOneU64(len(term.FromCommunity)))
 		v = checkedMulU64(v, orOneU64(len(term.FromASPath)))
+		v = checkedMulU64(v, orOneU64(uniqueCanonicalProtocolCount(term.FromProtocols)))
 		if total > math.MaxUint64-v {
 			return math.MaxUint64
 		}
@@ -207,9 +233,9 @@ func validatePolicyRouteMapSequenceBoundStrict(cfg *Config) error {
 					"of %d, one reserved for the trailing default) — rendering it would "+
 					"emit a `route-map` line past sequence %d, which FRR rejects and "+
 					"which poisons the ENTIRE frr-reload; reduce the number of `from "+
-					"prefix-list` / `from community` / `from as-path` values (their "+
-					"Cartesian product per term drives the count) or split the policy "+
-					"across multiple policy-statements",
+					"protocol` / `from prefix-list` / `from community` / `from as-path` "+
+					"values (their Cartesian product per term drives the count) or split "+
+					"the policy across multiple policy-statements",
 				name, n, MaxRouteMapSequences, frrMaxRouteMapSeq, routeMapSeqStep, frrMaxRouteMapSeq)
 		}
 	}

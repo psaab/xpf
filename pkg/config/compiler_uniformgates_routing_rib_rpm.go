@@ -189,7 +189,7 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 
 	// #5701: route-map sequence-number overflow gate. A policy-statement whose
 	// per-term Cartesian expansion (families x from-prefix-list x from-community
-	// x from-as-path) produces more sequences than the FRR route-map
+	// x from-as-path x from-protocol) produces more sequences than the FRR route-map
 	// sequence-number space (1..65535, step 10) renders a `route-map` line past
 	// seq 65535. FRR rejects it (CMD_WARNING_CONFIG_FAILED) and a single failed
 	// line makes the vtysh-batched frr-reload exit non-zero, poisoning the WHOLE
