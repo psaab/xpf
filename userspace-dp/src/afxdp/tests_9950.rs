@@ -15,6 +15,8 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
+const TEST_WAN_VLAN_ID: u16 = 80;
+
 fn ipv4_frag_frame_9950(
     src: Ipv4Addr,
     dst: Ipv4Addr,
@@ -1161,6 +1163,7 @@ fn f036_dnat_reply_nonfirst_translated_on_wire_9950() {
         m.flow_dst_port = public_port;
         m.flow_src_addr = [198, 51, 100, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         m.flow_dst_addr = [172, 16, 80, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        m.ingress_vlan_id = TEST_WAN_VLAN_ID;
         m
     };
     let (_b0, dbg0) = txn_run_descriptor_checked(
@@ -1548,6 +1551,7 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
         m.flow_src_port = external_port;
         m.flow_dst_port = pool_port;
         m.l4_offset = 34;
+        m.ingress_vlan_id = TEST_WAN_VLAN_ID;
         m
     };
     let (_b1, dbg1) = txn_run_descriptor_checked(
@@ -1585,6 +1589,7 @@ fn f053_pool_snat_reply_nonfirst_translated_on_wire_9950() {
         let mut m = frag_meta_9950(12, PROTO_TCP, 0, external, pool, reply_tail.len() as u16);
         m.flow_src_port = external_port;
         m.flow_dst_port = pool_port;
+        m.ingress_vlan_id = TEST_WAN_VLAN_ID;
         m
     };
     binding_wan.scratch.scratch_forwards.clear();
@@ -1762,6 +1767,7 @@ fn f053_second_reply_datagram_post_cache_translates_9950() {
             );
             m.flow_src_port = external_port;
             m.flow_dst_port = pool_port;
+            m.ingress_vlan_id = TEST_WAN_VLAN_ID;
             m.l4_offset = 34;
             m
         };
@@ -1789,6 +1795,7 @@ fn f053_second_reply_datagram_post_cache_translates_9950() {
             let mut m = frag_meta_9950(12, PROTO_TCP, 0, external, pool, reply_tail.len() as u16);
             m.flow_src_port = external_port;
             m.flow_dst_port = pool_port;
+            m.ingress_vlan_id = TEST_WAN_VLAN_ID;
             m
         };
         binding_wan.scratch.scratch_forwards.clear();
