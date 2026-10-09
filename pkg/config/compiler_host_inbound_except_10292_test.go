@@ -126,7 +126,7 @@ func TestHostInboundAllExceptSubtractsAdmissionTuples12053(t *testing.T) {
 }
 
 func TestHostInboundAllExceptConservesAliasTuples12053(t *testing.T) {
-	for _, excluded := range []string{"ssh", "http", "https", "ike", "dhcp", "netconf"} {
+	for _, excluded := range HostInboundAllExpansionServices() {
 		t.Run(excluded, func(t *testing.T) {
 			gotTokens := hostInboundFilterExcept([]string{"all"}, []string{excluded}, false)
 			for _, family := range []string{"ip", "ip6"} {
