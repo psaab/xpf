@@ -82,8 +82,8 @@ func (z *ZoneConfig) InterfaceHostInboundOverride(ref string) (svc, proto []stri
 	// the runtime binds is stamped (construction invariant:
 	// stampKeys ⊇ runtimeKeys per zone), so nothing governed is missed and
 	// the method agrees with the runtime map on every query. A nil stamp
-	// (hand-built cfgs bypassing compile) keeps the legacy walk below,
-	// byte-identical.
+	// (hand-built cfgs bypassing compile) keeps the legacy physical+exact lookup,
+	// with the same provenance-aware merge as the compiled runtime view.
 	if z.ResolvedInterfaceOverrides != nil && z.ResolvedInterfaceDeclared != nil {
 		if hib := z.ResolvedInterfaceOverrides[ref]; hib != nil {
 			return UnionHostInboundTokens(hib.SystemServices, nil),
@@ -99,19 +99,22 @@ func (z *ZoneConfig) InterfaceHostInboundOverride(ref string) (svc, proto []stri
 		}
 		return nil, nil, false
 	}
+	var merged *HostInboundTraffic
 	if base, unit, ok := strings.Cut(ref, "."); ok && unit != "" && base != "" {
 		if phys := z.InterfaceHostInbound[base]; phys != nil {
-			svc = UnionHostInboundTokens(svc, phys.SystemServices)
-			proto = UnionHostInboundTokens(proto, phys.Protocols)
+			merged = MergeHostInboundTraffic(merged, phys)
 			declared = true
 		}
 	}
 	if exact := z.InterfaceHostInbound[ref]; exact != nil {
-		svc = UnionHostInboundTokens(svc, exact.SystemServices)
-		proto = UnionHostInboundTokens(proto, exact.Protocols)
+		merged = MergeHostInboundTraffic(merged, exact)
 		declared = true
 	}
-	return svc, proto, declared
+	if merged == nil {
+		return nil, nil, declared
+	}
+	return UnionHostInboundTokens(merged.SystemServices, nil),
+		UnionHostInboundTokens(merged.Protocols, nil), declared
 }
 
 // stampResolvedInterfaceOverrides derives, per zone, the override closure
