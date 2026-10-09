@@ -299,8 +299,7 @@ func validatePackedPolicyRouteFilterTailStrict12067(node *Node, parent *schemaNo
 		switch matchType {
 		case "upto", "prefix-length-range", "through":
 			if next < len(node.Keys) && (quotedHead ||
-				(!routeFilterKeyIsSibling12067(node, parent, next) &&
-					!routeFilterKeyIsSibling12067(node, fromSchema, next))) {
+				!routeFilterKeyIsSibling12067(node, fromSchema, next)) {
 				if matchType == "upto" {
 					if _, ok := parseRouteFilterLen(node.Keys[next]); !ok {
 						return 0, false, invalidRouteFilterUpto12067(node.Keys[next])

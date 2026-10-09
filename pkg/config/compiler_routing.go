@@ -1737,6 +1737,20 @@ func appendInlineBracketedMatchValues11779(
 	return dst, i, ""
 }
 
+// isPolicyTermCommunityActionOperand identifies a `then community` value that
+// must not be mistaken for a bare route-filter marker.
+func isPolicyTermCommunityActionOperand(keys []string, i int) bool {
+	if i < 2 || keys[i-2] != "community" {
+		return false
+	}
+	switch keys[i-1] {
+	case "add", "delete", "set":
+		return true
+	default:
+		return false
+	}
+}
+
 // parsePolicyTermInlineKeys handles flat set syntax where remaining keys
 // after the term name are inline key-value pairs like:
 // "from", "protocol", "direct" or "from", "route-filter", "10.0.0.0/8", "exact"
@@ -1834,9 +1848,9 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 					case "upto":
 						if argTok := keys[i+3]; !policyTermInlineKeywords[argTok] {
 							rf.UptoToken = argTok
-							consumed = 3
 							if n, ok := parseRouteFilterLen(argTok); ok {
 								rf.UptoLen = n
+								consumed = 3
 							}
 						}
 					case "prefix-length-range":
@@ -1852,13 +1866,13 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				}
 				term.RouteFilters = append(term.RouteFilters, rf)
 				i += consumed
-			} else if inFrom {
+			} else if inFrom || !isPolicyTermCommunityActionOperand(keys, i) {
 				// A term-line tail is outside the schema walk. Preserve the
-				// bare route-filter marker so the strict #11779 gate rejects
-				// it rather than compiling a match-all permit with no filter.
-				// Gating on inFrom keeps an action value such as
-				// `then community add route-filter` out of this from-specific
-				// check (#12067 review: X3).
+				// bare marker so the strict #11779 gate rejects it rather than
+				// compiling a match-all permit. A marker immediately following
+				// `then community add|delete|set` is its action value, not a
+				// `from` marker; all other bare markers are retained regardless
+				// of their position in the term line (#12067 review: NEW-2).
 				term.UnknownFrom = append(term.UnknownFrom, "route-filter")
 			}
 		case "next-hop":

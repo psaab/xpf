@@ -43,6 +43,10 @@ func TestTermLineRouteFilterWideningsRejected_12067(t *testing.T) {
 		{"apply-groups", `groups { G { policy-options { policy-statement P { term T from route-filter; } } } } policy-options { apply-groups G; policy-statement P { term T then accept; } }`, "route-filter"},
 		{"apply-groups upto", `groups { G { policy-options { policy-statement P { term T from route-filter 10.0.0.0/8 upto; } } } } policy-options { apply-groups G; policy-statement P { term T then accept; } }`, "upto"},
 		{"policy-statement packing", `policy-options { policy-statement P term T from route-filter; policy-statement P term T then accept; }`, "route-filter"},
+		{"bare marker without from", `policy-options { policy-statement P { term T route-filter; term T then accept; } }`, "supported `from` clauses"},
+		{"bare marker after then", `policy-options { policy-statement P { term T then accept route-filter; } }`, "supported `from` clauses"},
+		{"bare marker after protocol", `policy-options { policy-statement P { term T protocol static route-filter; term T then accept; } }`, "supported `from` clauses"},
+		{"bare marker after from and then", `policy-options { policy-statement P { term T from protocol static then accept route-filter; } }`, "supported `from` clauses"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -50,6 +54,7 @@ func TestTermLineRouteFilterWideningsRejected_12067(t *testing.T) {
 		})
 	}
 }
+
 func TestThenCommunityRouteFilterValueIsNotFrom_12067(t *testing.T) {
 	const text = `policy-options {
 community route-filter members 65000:1;
@@ -59,8 +64,9 @@ policy-statement P {
     term T then accept;
 }
 }`
-	if _, err := CheckText(text, 0); err != nil {
-		t.Fatalf("then-community route-filter value was rejected as a from predicate: %v", err)
+	_, err := CheckText(text, 0)
+	if err != nil && strings.Contains(err.Error(), "supported `from` clauses") {
+		t.Fatalf("then-community route-filter value was misclassified as a from predicate: %v", err)
 	}
 }
 
@@ -198,6 +204,55 @@ func TestRouteFilterValueProvenanceDoesNotHideTail_12067(t *testing.T) {
 			text := `policy-options { policy-statement P { term T { from { route-filter 10.0.0.0/8 orlonger ` + tc.tail + `; } then accept; } } }`
 			if _, err := CheckText(text, 0); err == nil || !strings.Contains(err.Error(), "protocol") {
 				t.Fatalf("CheckText error = %v, want unconsumed route-filter token protocol", err)
+			}
+		})
+	}
+}
+
+func TestTermLineInvalidUptoQuarantinedOnTolerantSync12067(t *testing.T) {
+	cases := []struct {
+		name, prefix, operand string
+		inlineAction          bool
+	}{
+		{"out of range IPv4", "10.0.0.0/8", "/129", false},
+		{"nonnumeric", "10.0.0.0/8", "foo", false},
+		{"zero", "10.0.0.0/8", "/0", false},
+		{"bare slash", "10.0.0.0/8", "/", false},
+		{"signed", "10.0.0.0/8", "+24", false},
+		{"CIDR operand", "10.0.0.0/8", "10.1.0.0/16", false},
+		{"out of range IPv6", "2001:db8::/32", "/129", false},
+		{"nonnumeric with extra token", "10.0.0.0/8", "foo bar", false},
+		{"out of range before protocol", "10.0.0.0/8", "/129 protocol static", false},
+		{"packed out of range then accept", "10.0.0.0/8", "/129 then accept", true},
+		{"packed nonnumeric then accept", "10.0.0.0/8", "foo then accept", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			text := "policy-options { policy-statement P { term T from route-filter " +
+				tc.prefix + " upto " + tc.operand
+			if !tc.inlineAction {
+				text += "; term T then accept;"
+			}
+			text += " } }"
+			cfg, err := newTestStore(t).SyncApply(text, nil)
+			if err != nil {
+				t.Fatalf("SyncApply rejected tolerant config: %v", err)
+			}
+			if cfg == nil {
+				t.Fatal("SyncApply returned nil config")
+			}
+			stmt := cfg.PolicyOptions.PolicyStatements["P"]
+			if stmt == nil || len(stmt.Terms) == 0 || stmt.Terms[0] == nil {
+				t.Fatalf("SyncApply compiled no policy term: %#v", stmt)
+			}
+			term := stmt.Terms[0]
+			if len(term.RouteFilters) == 0 || term.RouteFilters[0] == nil {
+				t.Fatalf("tolerant compile dropped route-filter; Action=%q UnknownFrom=%v",
+					term.Action, term.UnknownFrom)
+			}
+			if term.Action != "reject" {
+				t.Fatalf("tolerant action = %q, want reject; UnknownFrom=%v UptoToken=%q",
+					term.Action, term.UnknownFrom, term.RouteFilters[0].UptoToken)
 			}
 		})
 	}

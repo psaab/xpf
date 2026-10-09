@@ -8685,9 +8685,12 @@ such as bare `from route-filter`, `from prefix-list route-filter`, and
 `from route-filter <prefix> exact route-filter` to `reject`. The first two
 previously rendered permit-all; the last rendered a permissive matched permit.
 They now deny on boot or sync. This is fail-closed, but a rolling HA upgrade
-can temporarily leave peers with different policy behavior. Zero-length
-`upto` remains warning-only on the tolerant path and retains the historical
-`le maxLen` renderer fallback. Coverage is in
+can temporarily leave peers with different policy behavior. On tolerant load
+and peer-sync, present but invalid or out-of-range `upto` operands in
+term-line forms are retained as unknown `from` tokens and force `reject`.
+An absent term-line operand, and legacy braced/compact zero-length `upto`
+entries, remain warning-only and retain the historical `le maxLen` renderer
+fallback. Coverage is in
 `pkg/config/route_filter_tail_12067_test.go`,
 `pkg/configstore/fused_statement_8437_test.go`, and
 `pkg/configstore/route_filter_r2_12067_test.go`.

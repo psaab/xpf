@@ -159,7 +159,7 @@ type RouteFilter struct {
 	Prefix    string // CIDR ("192.168.50.0/24")
 	MatchType string // "exact", "longer", "orlonger", "upto", "prefix-length-range", "through"
 	UptoLen   int    // for "upto" match type
-	UptoToken string `json:"-"` // raw invalid `upto` operand for strict diagnostics; not serialized
+	UptoToken string `json:"-"` // authored `upto` operand for strict diagnostics; not serialized
 	// RangeLow / RangeHigh hold the two prefix-length bounds for the
 	// "prefix-length-range /low-/high" match type (#2525). Both are 0
 	// (unset) for every other match type; parseRouteFilterRange leaves them
