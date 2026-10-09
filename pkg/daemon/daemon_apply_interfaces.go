@@ -167,11 +167,12 @@ func (d *Daemon) applyVRFReconcile(ctx context.Context, cfg *config.Config) (ctx
 	// 0. Reconcile VRF devices (routing-instance VRFs + management VRF).
 	// ReconcileVRFs is idempotent: VRFs already present with the correct
 	// table ID are preserved (ifindex unchanged). Removed-from-config
-	// VRFs are deleted. #847: xpfd claims the entire `vrf-*` kernel
-	// namespace — orphan vrf-* devices not in desired and not in
-	// m.vrfs (e.g. left over from a routing-instance rename across
-	// a daemon restart) are also reaped. Operators MUST NOT
-	// pre-create vrf-<name> outside xpfd config.
+	// VRFs are deleted. #847: orphan VRF devices not in desired and not
+	// in m.vrfs (e.g. left over from a routing-instance rename across
+	// a daemon restart) are also reaped. Link type stays authoritative
+	// (#12062): same-name non-VRF links are foreign and refused, never
+	// adopted or deleted. Operators MUST NOT pre-create vrf-<name>
+	// outside xpfd config.
 	//
 	// (The original docs/pr/844-vrf-idempotent/plan.md described an
 	// earlier design where external VRFs were left alone; the

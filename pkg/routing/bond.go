@@ -322,10 +322,10 @@ func (b *bondManager) createLocked(name string, ifc *config.InterfaceConfig, sig
 	// identity-assertion family: the #6396 create readback re-asserts
 	// *netlink.Bond, xfrm/VRF gate both create and adopt, and this closes the
 	// bond adopt gap. Reclaim the name via delete+recreate (mirroring the xfrm
-	// #5523 adopt gate and the vrfTable→recreate adopt path) rather than
-	// adopting the foreign link. If the delete fails the kernel link is still
-	// present, so a LinkAdd below would EEXIST — surface the delete failure so
-	// the commit fails closed and the next reconcile retries the delete first,
+	// #5523 adopt gate; VRF instead fails closed on a desired-name non-VRF)
+	// rather than adopting the foreign link. If the delete fails, the kernel link
+	// remains present, so LinkAdd below would EEXIST. Surface the delete failure
+	// so the commit fails closed and the next reconcile retries the delete first,
 	// exactly like the #5119 changed-signature and xfrm #5310 recreate paths.
 	if existing, err := b.ops.LinkByName(name); err == nil {
 		if _, isBond := existing.(*netlink.Bond); isBond {
