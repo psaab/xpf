@@ -641,16 +641,17 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 				}
 
 				termNodes := filterInst.node.FindChildren("term")
-				// A leaf under a one-key `term` container is a nameless
-				// statement misread as an instance name. A child block (for
-				// example `T { ... }`) carries its own explicit nested term name.
+				// A child block with one key (for example `T { ... }`) carries an
+				// explicit nested term name. Multi-key children under a one-key
+				// `term` container are instead nameless statements whose leading
+				// value tokens could be consumed as a term name by lowering.
 				var namelessTermNodes map[*Node]struct{}
 				for _, termNode := range termNodes {
 					if len(termNode.Keys) != 1 {
 						continue
 					}
 					for _, child := range termNode.Children {
-						if !child.IsLeaf {
+						if !child.IsLeaf && len(child.Keys) == 1 {
 							continue
 						}
 						if namelessTermNodes == nil {
@@ -664,11 +665,10 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 						Name: termInst.name,
 					}
 					// #10294: inspect the instance's value tail, not a fixed
-					// Keys[2] offset. namedInstances returns both [term, NAME,
-					// ...] and [NAME, ...] shapes; the latter carries its
-					// compact tail starting at Keys[1]. A term-level child
-					// other than `from` or `then` is never read by the term
-					// loop, while valid `then`/`from` tails must remain allowed.
+					// Keys[2] offset. Named terms use [term, NAME, ...]; children
+					// of a one-key `term` container with multiple keys are marked
+					// nameless above before lowering. Any remaining term-level
+					// compact tail other than `from` or `then` is never read.
 					tail := instanceValueTail(termInst.node, termInst.name)
 					if len(tail) > 0 {
 						switch tail[0] {
@@ -687,9 +687,9 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					// A one-key `term` container has no term name. Its children
 					// are misread by namedInstances as terms named after their
 					// first token (for example `term { foo; }` becomes term
-					// "foo"). The tail gate above catches compact extra tokens;
-					// mark the instance so the strict/tolerant gate also rejects
-					// a nameless container when there is no tail.
+					// "foo"). Mark those instances so strict/tolerant validation
+					// rejects the nameless container, including when it has no
+					// tail or its child is a multi-key block.
 					if _, nameless := namelessTermNodes[termInst.node]; nameless {
 						term.nameless = true
 					}

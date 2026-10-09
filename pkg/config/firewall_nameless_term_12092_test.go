@@ -5,12 +5,11 @@ import (
 	"testing"
 )
 
-// RED for #12092: a hierarchical NAMELESS term — `term { then discard; }`
-// (the literal remedy the #3295 no-catch-all advisory prints), `term { then
-// reject; }`, `term { foo bar; }`, `term { foo; }` — passes strict commit and
-// compiles to a fall-through term with empty action. The #10294 gate must
-// inspect each instance's tail and reject nameless term instances, including
-// tails of both namedInstances AST shapes. Named controls still ACCEPT with
+// RED for #12092: hierarchical nameless terms — `term { then discard; }`,
+// `term { then reject; }`, `term { foo bar; }`, `term { foo; }` — passed
+// strict commit and compiled to fall-through terms with empty actions. The
+// #10294 gate must reject these instances, including multi-key child blocks
+// that lowering could consume as a name. Named controls still ACCEPT with
 // action "discard".
 
 // namelessTermHier12092 builds the one-key `term` node shape: namedInstances
@@ -45,8 +44,57 @@ func TestFirewallNamelessTermRejectedHier12092(t *testing.T) {
 			if err == nil {
 				t.Fatalf("nameless `term { %s }` committed cleanly, want strict reject", tc.body)
 			}
-			if !strings.Contains(err.Error(), "#10294") || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("error = %q, want #10294 diagnostic naming %q", err, tc.want)
+			if !strings.Contains(err.Error(), "#10294") ||
+				!strings.Contains(err.Error(), "#12092") ||
+				!strings.Contains(err.Error(), "nameless") ||
+				!strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want nameless #10294/#12092 diagnostic naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestFirewallNestedNameCompactTailRejected12092(t *testing.T) {
+	rows := []struct {
+		name string
+		src  string
+	}{
+		{"P05", `firewall { family inet { filter f1 {
+			term { T from destination-port 22 { then { accept; } } }
+			term deny { then discard; }
+		} } }`},
+		{"then-discard-block", `firewall { family inet { filter f1 {
+			term { T then discard { } }
+		} } }`},
+		{"from-protocol-then-block", `firewall { family inet { filter f1 {
+			term { T from protocol tcp { then { accept; } } }
+		} } }`},
+		{"from-protocol-then-leaf", `firewall { family inet { filter f1 {
+			term { T from protocol tcp { then accept; } }
+		} } }`},
+		{"then-accept-block", `firewall { family inet { filter f1 {
+			term { T then accept { } }
+		} } }`},
+		{"from-protocol-then-accept-block", `firewall { family inet { filter f1 {
+			term { T from protocol tcp then accept { } }
+		} } }`},
+		{"N07", `firewall { family inet { filter f1 {
+			term { T extra { then discard; } }
+		} } }`},
+		{"N17", `firewall { family inet { filter f1 {
+			term { then discard { } }
+		} } }`},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileConfig(hierTree(t, tc.src))
+			if err == nil {
+				t.Fatalf("nested-name compact tail committed cleanly, want strict reject")
+			}
+			if !strings.Contains(err.Error(), "#10294") ||
+				!strings.Contains(err.Error(), "#12092") ||
+				!strings.Contains(err.Error(), "nameless") {
+				t.Fatalf("error = %q, want nameless #10294/#12092 diagnostic", err)
 			}
 		})
 	}
@@ -160,14 +208,28 @@ func TestFirewallNamedTermStillCommits12092(t *testing.T) {
 }
 
 func TestFirewallNamelessTermLenientWarns12092(t *testing.T) {
-	tree := namelessTermHier12092(t, "then discard;")
-	cfg, err := CompileConfigLenient(tree)
-	if err != nil {
-		t.Fatalf("lenient compile must boot: %v", err)
-	}
-	warnings := strings.Join(cfg.Warnings, "\n")
-	if !strings.Contains(warnings, "#10294") || !strings.Contains(warnings, "then") {
-		t.Fatalf("warnings = %q, want #10294 naming then", warnings)
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"then-discard", "then discard;", "then"},
+		{"bare-foo", "foo;", "foo"},
+		{"F1-compact-tail", "T from destination-port 22 { then { accept; } }", "T"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := CompileConfigLenient(namelessTermHier12092(t, tc.body))
+			if err != nil {
+				t.Fatalf("lenient compile must boot: %v", err)
+			}
+			warnings := strings.Join(cfg.Warnings, "\n")
+			if !strings.Contains(warnings, "#10294") ||
+				!strings.Contains(warnings, "#12092") ||
+				!strings.Contains(warnings, "nameless") ||
+				!strings.Contains(warnings, tc.want) {
+				t.Fatalf("warnings = %q, want nameless #10294/#12092 diagnostic naming %q", warnings, tc.want)
+			}
+		})
 	}
 }
 
