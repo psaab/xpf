@@ -3361,7 +3361,29 @@ fn v2_stamped_fabric_udp_policy_reject_suppresses_icmp_on_real_poll_12319() {
         crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
         0,
     );
-    let forwarding = build_forwarding_state(&reject_fabric_snapshot(false));
+    let mut snapshot = reject_fabric_snapshot(false);
+    // #12319 F1: the fabric parent (ifindex 21) ships with no addresses, so
+    // egress[21].primary_v4 is None and build_local_icmp_error_v4 bails at
+    // icmp.rs:419 whether or not the gate exists — the test passed on base
+    // too. Give the parent a fabric-subnet inet so the ICMP leg is buildable
+    // and the gate is the only thing standing between the reject and the TX
+    // queue. Local to this test; the shared fixture is untouched.
+    for iface in &mut snapshot.interfaces {
+        if iface.ifindex == 21 {
+            iface.addresses.push(InterfaceAddressSnapshot {
+                family: "inet".to_string(),
+                address: "10.99.13.1/24".to_string(),
+                scope: 0,
+            });
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    assert_eq!(
+        forwarding.egress.get(&21).and_then(|egress| egress.primary_v4),
+        Some(Ipv4Addr::new(10, 99, 13, 1)),
+        "F1 precondition: the fabric parent must carry an inet primary or the \
+         ICMP leg is unbuildable and this regression is vacuous"
+    );
     let redirect = crate::afxdp::forwarding::resolve_fabric_redirect_for_ingress_identity(
         &forwarding,
         Some(TEST_DMZ_ZONE_ID),
@@ -3396,7 +3418,20 @@ fn v2_stamped_fabric_udp_policy_reject_suppresses_icmp_on_real_poll_12319() {
     assert_eq!(batch.invalid_fabric_stamp_drops, 0);
     assert!(
         binding.tx_pipeline.pending_tx_local.is_empty(),
-        "a V2-stamped UDP policy reject must not queue stamp-addressed ICMP"
+        "a V2-stamped UDP policy reject must not queue stamp-addressed ICMP; \
+         policy_reject_sent={}, queued={}, dst_mac={:?}, icmp_type_code={:?}",
+        batch.policy_reject_sent,
+        binding.tx_pipeline.pending_tx_local.len(),
+        binding
+            .tx_pipeline
+            .pending_tx_local
+            .front()
+            .map(|request| &request.bytes[..6]),
+        binding
+            .tx_pipeline
+            .pending_tx_local
+            .front()
+            .and_then(|request| request.bytes.get(34..36))
     );
     assert_eq!(batch.policy_reject_sent, 0);
     assert_eq!(batch.policy_reject_reply_budget_drops, 0);
