@@ -2,6 +2,7 @@ package configstore
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -76,6 +77,75 @@ func TestLoadOverrideCommitCheckAcceptsSingleChildFilterBlock12093(t *testing.T)
 				}
 			})
 		}
+	}
+}
+
+func TestCommitCheckRejectsSingleChildScalarGuardCases12093(t *testing.T) {
+	cases := []struct {
+		name, text, wantError string
+	}{
+		{
+			name: "empty filter value",
+			text: `interfaces {
+    ge-0/0/0 {
+        unit 0 {
+            family inet {
+                address 10.0.0.1/24;
+                filter { input { ""; } }
+            }
+        }
+    }
+}
+firewall { family inet { filter f1 { term t1 { then accept; } } } }`,
+			wantError: `unexpected trailing token ""`,
+		},
+		{
+			name: "filter sub-statement",
+			text: `interfaces {
+    ge-0/0/0 {
+        unit 0 {
+            family inet {
+                address 10.0.0.1/24;
+                filter { input { f1 { x; } } }
+            }
+        }
+    }
+}
+firewall { family inet { filter f1 { term t1 { then accept; } } } }`,
+			wantError: "no sub-statement",
+		},
+		{
+			name: "description scope",
+			text: `interfaces {
+    ge-0/0/0 {
+        description { foo; }
+        unit 0 { family inet { address 10.0.0.1/24; } }
+    }
+}`,
+			wantError: "no sub-statement",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			commitCheckRejects12093(t, tc.text, tc.wantError)
+		})
+	}
+}
+
+func commitCheckRejects12093(t *testing.T, text, wantError string) {
+	t.Helper()
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	defer s.ExitConfigure()
+	if err := s.LoadOverride(text); err != nil {
+		t.Fatalf("LoadOverride: %v", err)
+	}
+	if _, err := s.CommitCheck(); err == nil {
+		t.Fatal("CommitCheck accepted a configuration that must be rejected")
+	} else if !strings.Contains(err.Error(), wantError) {
+		t.Fatalf("CommitCheck error %q does not contain %q", err, wantError)
 	}
 }
 

@@ -247,8 +247,8 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 					"output": {desc: "Sample output traffic", children: nil},
 				}},
 				"filter": {desc: "Firewall filter", children: map[string]*schemaNode{
-					"input":  {desc: "Input filter", args: 1, scalar: true, allowSingleChildValueBlock: true, placeholder: "<filter-name>", children: nil},
-					"output": {desc: "Output filter", args: 1, scalar: true, allowSingleChildValueBlock: true, placeholder: "<filter-name>", children: nil},
+					"input":  {desc: "Input filter", args: 1, scalar: true, blockValue: true, placeholder: "<filter-name>", children: nil},
+					"output": {desc: "Output filter", args: 1, scalar: true, blockValue: true, placeholder: "<filter-name>", children: nil},
 				}},
 				"dynamic-dns": interfaceDynamicDNSSchema(),
 			}},
@@ -287,8 +287,8 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 					"output": {desc: "Sample output traffic", children: nil},
 				}},
 				"filter": {desc: "Firewall filter", children: map[string]*schemaNode{
-					"input":  {desc: "Input filter", args: 1, scalar: true, allowSingleChildValueBlock: true, placeholder: "<filter-name>", children: nil},
-					"output": {desc: "Output filter", args: 1, scalar: true, allowSingleChildValueBlock: true, placeholder: "<filter-name>", children: nil},
+					"input":  {desc: "Input filter", args: 1, scalar: true, blockValue: true, placeholder: "<filter-name>", children: nil},
+					"output": {desc: "Output filter", args: 1, scalar: true, blockValue: true, placeholder: "<filter-name>", children: nil},
 				}},
 				"dynamic-dns": interfaceDynamicDNSSchema(),
 				"dhcpv6-client": {desc: "DHCPv6 client", children: map[string]*schemaNode{
