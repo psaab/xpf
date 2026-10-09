@@ -75,13 +75,24 @@ fn tcp_syn(
     ingress_ifindex: u32,
     dst_mac: [u8; 6],
 ) -> (Vec<u8>, UserspaceDpMeta) {
-    let frame = build_txn_tcp_syn_frame_v4(src, dst, CLIENT_PORT, dst_port, TCP_FLAG_SYN, dst_mac);
+    let mut frame =
+        build_txn_tcp_syn_frame_v4(src, dst, CLIENT_PORT, dst_port, TCP_FLAG_SYN, dst_mac);
     let mut meta = txn_meta_v4(ingress_ifindex, TCP_FLAG_SYN, frame.len() as u16);
-    // nat_snapshot's WAN interface is the tagged-only reth0.80 unit. Model
-    // the VLAN identity explicitly so the descriptor reaches NAT/policy
-    // instead of being rejected as an untagged frame on a tagged-only bind.
+    // nat_snapshot's WAN interface is the tagged-only reth0.80 unit. Splice
+    // the physical 802.1Q tag so the descriptor is one the XDP shim can
+    // produce: a nonzero VLAN ID requires ingress_vlan_present and L3 at 18
+    // (flow_cache_hit_tests.rs:86-91). Inserting 4 bytes at offset 12 leaves
+    // the IP/TCP content and its checksum byte-identical; shift metadata to
+    // match the tagged frame.
     if ingress_ifindex == WAN_IFINDEX as u32 {
+        frame.splice(12..12, [0x81, 0x00, 0x00, 0x50]);
+        debug_assert_eq!(u16::from_be_bytes([frame[14], frame[15]]), WAN_VLAN_ID);
         meta.ingress_vlan_id = WAN_VLAN_ID;
+        meta.ingress_vlan_present = 1;
+        meta.l3_offset = 18;
+        meta.l4_offset += 4;
+        meta.payload_offset += 4;
+        meta.pkt_len = frame.len() as u16;
     }
     (frame, meta)
 }
