@@ -460,6 +460,69 @@ func TestPolicyThenCompactAndTermLineOperandsRejected_12070(t *testing.T) {
 			wantMessage: "unknown modifier",
 		},
 		{
+			name:        "compact next-hop protocol tail still rejects",
+			text:        `policy-options { policy-statement P { term t { then accept next-hop 192.0.2.1 protocol bgp; } } }`,
+			leaf:        "next-hop",
+			value:       "protocol",
+			wantMessage: `unknown modifier "protocol"`,
+		},
+		{
+			name:        "compact quoted next-hop address tail",
+			text:        `policy-options { policy-statement P { term t { then accept next-hop 192.0.2.1 "192.0.2.2"; } } }`,
+			leaf:        "next-hop",
+			value:       "192.0.2.2",
+			wantMessage: "unknown modifier",
+		},
+		{
+			name:        "compact quoted next-hop text tail",
+			text:        `policy-options { policy-statement P { term t { then accept next-hop 192.0.2.1 "foo"; } } }`,
+			leaf:        "next-hop",
+			value:       "foo",
+			wantMessage: "unknown modifier",
+		},
+		{
+			name:        "term-line quoted next-hop address tail",
+			text:        `policy-options { policy-statement P { term t then accept next-hop 192.0.2.1 "192.0.2.2"; } }`,
+			leaf:        "next-hop",
+			value:       "192.0.2.2",
+			wantMessage: "unknown modifier",
+		},
+		{
+			name:        "compact quoted protocol next-hop tail",
+			text:        `policy-options { policy-statement P { term t { then accept next-hop 192.0.2.1 "protocol" "bgp"; } } }`,
+			leaf:        "next-hop",
+			value:       "protocol",
+			wantMessage: "unknown modifier",
+		},
+		{
+			name:        "prepend protocol tail",
+			text:        `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 protocol bgp; } } }`,
+			leaf:        "as-path-prepend",
+			value:       "protocol",
+			wantMessage: "unknown modifier",
+		},
+		{
+			name:        "prepend prefix-list tail",
+			text:        `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 prefix-list PL; } } }`,
+			leaf:        "as-path-prepend",
+			value:       "prefix-list",
+			wantMessage: "unknown modifier",
+		},
+		{
+			name:        "prepend route-filter tail",
+			text:        `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 route-filter 10.0.0.0/8 exact; } } }`,
+			leaf:        "as-path-prepend",
+			value:       "route-filter",
+			wantMessage: "unknown modifier",
+		},
+		{
+			name:        "prepend as-path tail",
+			text:        `policy-options { as-path AP "^65000 "; policy-statement P { term t { then accept as-path-prepend 65001 as-path AP; } } }`,
+			leaf:        "as-path-prepend",
+			value:       "as-path",
+			wantMessage: "unknown modifier",
+		},
+		{
 			name:        "compact quoted keyword prepend",
 			text:        `policy-options { policy-statement P { term t { then accept as-path-prepend "accept"; } } }`,
 			leaf:        "as-path-prepend",
@@ -859,6 +922,7 @@ func TestPolicyThenOperandsSyncApplyDowngradesAndOmits_12070(t *testing.T) {
 	for _, tc := range []struct {
 		name, text, bad string
 		forbidden       []string
+		required        []string
 	}{
 		{
 			name: "compact next-hop",
@@ -873,6 +937,68 @@ func TestPolicyThenOperandsSyncApplyDowngradesAndOmits_12070(t *testing.T) {
 			name: "compact next-hop extra operand",
 			text: `policy-options { policy-statement P { term t { then accept next-hop 192.0.2.1 192.0.2.2; } } }`,
 			bad:  "192.0.2.2",
+		},
+		{
+			name:     "next-hop protocol tail retains match",
+			text:     `policy-options { policy-statement P { term t { then accept next-hop 192.0.2.1 protocol bgp; } } }`,
+			bad:      "protocol",
+			required: []string{"match source-protocol bgp", "set ip next-hop 192.0.2.1"},
+		},
+		{
+			name:     "next-hop prefix-list tail retains match",
+			text:     `policy-options { policy-statement P { term t { then accept next-hop 192.0.2.1 prefix-list PL; } } }`,
+			bad:      "prefix-list",
+			required: []string{"match ip address prefix-list PL", "set ip next-hop 192.0.2.1"},
+		},
+		{
+			name: "next-hop route-filter tail retains match",
+			text: `policy-options { policy-statement P { term t { then accept next-hop 192.0.2.1 route-filter 10.0.0.0/8 exact; } } }`,
+			bad:  "route-filter",
+			required: []string{
+				"match ip address prefix-list",
+				"permit 10.0.0.0/8",
+				"set ip next-hop 192.0.2.1",
+			},
+		},
+		{
+			name: "next-hop as-path tail retains match",
+			text: `policy-options { as-path AP "^65000 "; policy-statement P { term t { then accept next-hop 192.0.2.1 as-path AP; } } }`,
+			bad:  "as-path",
+			required: []string{
+				"match as-path AP",
+				"set ip next-hop 192.0.2.1",
+			},
+		},
+		{
+			name:     "prepend protocol tail retains match",
+			text:     `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 protocol bgp; } } }`,
+			bad:      "protocol",
+			required: []string{"match source-protocol bgp", "set as-path prepend 65001"},
+		},
+		{
+			name:     "prepend prefix-list tail retains match",
+			text:     `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 prefix-list PL; } } }`,
+			bad:      "prefix-list",
+			required: []string{"match ip address prefix-list PL", "set as-path prepend 65001"},
+		},
+		{
+			name: "prepend route-filter tail retains match",
+			text: `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 route-filter 10.0.0.0/8 exact; } } }`,
+			bad:  "route-filter",
+			required: []string{
+				"match ip address prefix-list",
+				"permit 10.0.0.0/8",
+				"set as-path prepend 65001",
+			},
+		},
+		{
+			name: "prepend as-path tail retains match",
+			text: `policy-options { as-path AP "^65000 "; policy-statement P { term t { then accept as-path-prepend 65001 as-path AP; } } }`,
+			bad:  "as-path",
+			required: []string{
+				"match as-path AP",
+				"set as-path prepend 65001",
+			},
 		},
 		{
 			name:      "term-line prepend",
@@ -916,6 +1042,12 @@ func TestPolicyThenOperandsSyncApplyDowngradesAndOmits_12070(t *testing.T) {
 					if strings.Contains(rendered, prefix) {
 						t.Fatalf("%s render emitted invalid policy clause prefix %q:\n%s",
 							path, prefix, rendered)
+					}
+				}
+				for _, want := range tc.required {
+					if !strings.Contains(rendered, want) {
+						t.Fatalf("%s render lost required retained match/action %q:\n%s",
+							path, want, rendered)
 					}
 				}
 			}

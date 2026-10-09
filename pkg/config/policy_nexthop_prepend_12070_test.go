@@ -209,6 +209,11 @@ func TestPolicyThenOperandsLenientRegistrationAndCompile_12070(t *testing.T) {
 			bad:  "192.0.2.2",
 		},
 		{
+			name: "compact next-hop protocol tail retains match",
+			text: `policy-options { policy-statement P { term t { then accept next-hop 192.0.2.1 protocol bgp; } } }`,
+			bad:  "protocol",
+		},
+		{
 			name: "term-line prepend",
 			text: `policy-options { policy-statement P { term t then accept as-path-prepend 65001 abc; } }`,
 			bad:  "abc",

@@ -1690,8 +1690,8 @@ var policyTermInlineKeywords = map[string]bool{
 	"family": true, "tag": true, "area": true,
 }
 
-// policyTermThenInlineKeywords identifies actual action/clause boundaries
-// while reading an AS-path-prepend value run. The broader
+// policyTermThenInlineKeywords identifies action/clause boundaries while
+// reading next-hop tails and AS-path-prepend value runs. The broader
 // policyTermInlineKeywords set also contains `from`-side keywords like `tag`
 // and `area`; treating those as boundaries would erase invalid operands before
 // validatePolicyThenOperandsStrict could reject them.
@@ -1700,6 +1700,14 @@ var policyTermThenInlineKeywords = map[string]bool{
 	"local-preference": true, "metric": true, "metric-type": true,
 	"community": true, "as-path-prepend": true, "origin": true,
 	"accept": true, "reject": true, "next": true,
+}
+
+// From-match words are parsed by the main inline switch even when encountered
+// after a then action. An AS-path-prepend run must stop before them without
+// consuming them so tolerant boot/sync retains the match and strict validation
+// can reject the invalid prepend tail (#12070 R6-F1).
+var policyTermFromMatchInlineKeywords12070 = map[string]bool{
+	"protocol": true, "prefix-list": true, "route-filter": true, "as-path": true,
 }
 
 var policyTermFromUnsupportedThenKeywords11779 = map[string]bool{
@@ -1875,23 +1883,20 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				term.NextHop = keys[i]
 				// The schema rejects non-keyword tokens beyond the typed
 				// next-hop operand. Compact/term-line Keys bypass that walk,
-				// so retain the first unquoted tail operand for the compiled
-				// strict gate rather than silently accepting a display-set
-				// command that cannot be reloaded.
-				// Look through quoted tokens: they are not candidates, but
-				// must not hide a later unquoted garbage operand.
+				// so retain the first tail operand for the compiled strict
+				// gate rather than silently accepting a display-set command
+				// that cannot be reloaded. Quoted tails are candidates too:
+				// display-set strips the quotes and emits the R5-F1 shape.
+				// Scan without consuming: a then-side from-word such as
+				// `protocol` must still reach the main-loop from-match cases
+				// so tolerant boot/sync keeps master's interpretation
+				// (#12070 R6-F1).
 				for next := i + 1; next < len(keys); next++ {
-					if next < len(quoted) && quoted[next] {
-						continue
-					}
 					if policyTermThenInlineKeywords[keys[next]] {
 						break
 					}
 					term.invalidNextHopExtra12070 = true
 					term.invalidNextHopExtraValue12070 = keys[next]
-					// Do not reinterpret a then-side garbage token such as
-					// `protocol` as a from-side match clause.
-					i = next
 					break
 				}
 			}
@@ -1967,17 +1972,26 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 			}
 		case "as-path-prepend":
 			term.hasASPathPrependOperand12070 = true
-			// Stop only at clause/action keywords. Other policy keywords
-			// (for example `tag` or `area`) are not AS-path-prepend boundaries;
-			// preserve them as operands so the compiled gate rejects rather
-			// than silently dropping the entire clause. Quoted/bracketed
-			// action words are values, not boundaries.
+			// Other policy keywords such as `tag` and `area` remain
+			// prepend operands so the strict gate rejects them rather than
+			// erasing the clause. From-match words are different: the main
+			// switch interprets them as matches even after `then`. Stop
+			// without consuming them, retain compiler-only invalid-tail
+			// evidence for strict validation, and preserve master match
+			// semantics on tolerant boot/sync (#12070 R6-F1).
 			for i+1 < len(keys) {
 				next := i + 1
 				quotedValue := next < len(quoted) && quoted[next]
 				bracketedValue := next < len(bracketed) && bracketed[next]
-				if !quotedValue && !bracketedValue && policyTermThenInlineKeywords[keys[next]] {
-					break
+				if !quotedValue && !bracketedValue {
+					if policyTermThenInlineKeywords[keys[next]] {
+						break
+					}
+					if policyTermFromMatchInlineKeywords12070[keys[next]] {
+						term.invalidASPathPrependExtra12070 = true
+						term.invalidASPathPrependExtraValue12070 = keys[next]
+						break
+					}
 				}
 				i = next
 				term.ASPathPrepend = appendPolicyASPathPrependOperand(term.ASPathPrepend, keys[i])
