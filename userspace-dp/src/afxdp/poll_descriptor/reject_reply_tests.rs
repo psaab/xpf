@@ -200,6 +200,26 @@ fn policy_reject_forwarding() -> ForwardingState {
     forwarding
 }
 
+fn stamped_fabric_reject_forwarding() -> ForwardingState {
+    let mut forwarding = policy_reject_forwarding();
+    let mut ingress_egress = forwarding
+        .egress
+        .get(&5)
+        .expect("policy reject egress fixture")
+        .clone();
+    ingress_egress.bind_ifindex = 21;
+    forwarding.egress.insert(21, ingress_egress);
+    forwarding.fabrics.push(FabricLink {
+        parent_ifindex: 21,
+        overlay_ifindex: 22,
+        peer_addr: "192.0.2.1".parse().unwrap(),
+        peer_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x02],
+        local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
+        up: true,
+    });
+    forwarding
+}
+
 #[test]
 fn policy_reject_udp_uses_port_unreachable_11303_v4() {
     use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
@@ -1908,6 +1928,259 @@ fn deny_reply_and_emit_success_logs_reject() {
         "an enqueued reject must log the truthful REJECT"
     );
 }
+/// #12051: a TCP `then reject` on a stamped fabric arrival is a truthful
+/// silent drop. The incoming source MAC is the synthetic zone stamp, not the
+/// client's L2 address; reflecting it in a RST would only queue on the fabric.
+#[test]
+fn stamped_fabric_policy_reject_suppresses_tcp_rst_and_logs_deny_12051() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (mut frame, mut meta, flow) = tcp_v4_syn();
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, 0xfe, 0x00, 0x02]);
+    meta.ingress_ifindex = 21;
+    let (handle, rx) = unlimited_event_handle();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut forwarding = ForwardingState::default();
+    forwarding.fabrics.push(FabricLink {
+        parent_ifindex: 21,
+        overlay_ifindex: 22,
+        peer_addr: "192.0.2.1".parse().unwrap(),
+        peer_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x02],
+        local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
+        up: true,
+    });
+    let mut counters = BatchCounters::default();
+    deny_reply_and_emit(
+        &mut pipeline,
+        &forwarding,
+        Some(&handle),
+        21,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+        &NatDecision::default(),
+        7,
+        9,
+        0,
+        101,
+        PolicyAction::Reject,
+        0,
+        123,
+    );
+
+    assert!(
+        pipeline.pending_tx_local.is_empty(),
+        "a stamped fabric arrival must not queue its synthetic source MAC as RST destination"
+    );
+    assert_eq!(counters.policy_reject_sent, 0);
+    let event = rx
+        .try_recv()
+        .expect("policy-deny event frame")
+        .decode_dataplane_event()
+        .expect("policy-deny payload");
+    assert_eq!(event.action, RT_FLOW_ACTION_DENY);
+}
+
+/// #12051 regression for preferred V2 fabric stamps. The stamp is produced
+/// by the production ingress-identity redirect helper so this pins the wire
+/// format rather than duplicating it in the test.
+#[test]
+fn v2_stamped_fabric_policy_reject_suppresses_tcp_rst_and_logs_deny_12051() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (mut frame, mut meta, flow) = tcp_v4_syn();
+    meta.ingress_ifindex = 21;
+    let (handle, rx) = unlimited_event_handle();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut forwarding = stamped_fabric_reject_forwarding();
+    let scope_id = crate::afxdp::forwarding::fabric_nat_scope_stamp_id(7, "reth0.7", "default");
+    forwarding
+        .ifindex_to_fabric_nat_scope_id
+        .insert(21, scope_id);
+    forwarding.fabric_nat_scope_id_to_identity.insert(
+        scope_id,
+        crate::afxdp::types::FabricNatScopeIdentity {
+            zone_id: 7,
+            ifindex: 21,
+            redundancy_group: 1,
+        },
+    );
+    let stamp = crate::afxdp::forwarding::resolve_fabric_redirect_for_ingress_identity(
+        &forwarding,
+        Some(7),
+        Some(21),
+    )
+    .expect("V2 ingress-identity fabric redirect");
+    let source_mac = stamp.src_mac.expect("V2 fabric source stamp");
+    assert_eq!(&source_mac[..3], &FABRIC_NAT_SCOPE_MAC_PREFIX);
+    frame[6..12].copy_from_slice(&source_mac);
+
+    let mut counters = BatchCounters::default();
+    deny_reply_and_emit(
+        &mut pipeline,
+        &forwarding,
+        Some(&handle),
+        21,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+        &NatDecision::default(),
+        7,
+        9,
+        0,
+        101,
+        PolicyAction::Reject,
+        0,
+        123,
+    );
+
+    assert!(
+        pipeline.pending_tx_local.is_empty(),
+        "a V2-stamped fabric arrival must not queue its synthetic source MAC as RST destination"
+    );
+    assert_eq!(counters.policy_reject_sent, 0);
+    let event = rx
+        .try_recv()
+        .expect("policy-deny event frame")
+        .decode_dataplane_event()
+        .expect("policy-deny payload");
+    assert_eq!(event.action, RT_FLOW_ACTION_DENY);
+}
+
+/// #12051 M1 control: a stamp-shaped source MAC on native ingress is not a
+/// synthetic fabric arrival, so its ordinary TCP policy reject still RSTs.
+#[test]
+fn stamp_shaped_native_policy_reject_still_enqueues_tcp_rst_12051() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (mut frame, mut meta, flow) = tcp_v4_syn();
+    let stamp = [0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x02];
+    frame[6..12].copy_from_slice(&stamp);
+    meta.ingress_ifindex = 5;
+    let forwarding = ForwardingState::default();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+
+    assert!(enqueue_policy_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        5,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+    ));
+    assert_eq!(counters.policy_reject_sent, 1);
+    let reply = pipeline
+        .pending_tx_local
+        .pop_front()
+        .expect("native TCP reject RST");
+    assert_eq!(&reply.bytes[..6], &stamp);
+    assert_ne!(reply.bytes[14 + 20 + 13] & crate::tcp_flags::TCP_RST, 0);
+}
+
+/// #12051 M2 control: a known fabric ingress without a synthetic source stamp
+/// retains its peer-routable TCP policy reject.
+#[test]
+fn unstamped_fabric_policy_reject_still_enqueues_tcp_rst_12051() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (frame, mut meta, flow) = tcp_v4_syn();
+    let client_mac = frame[6..12].to_vec();
+    meta.ingress_ifindex = 21;
+    let forwarding = stamped_fabric_reject_forwarding();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+
+    assert!(enqueue_policy_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        21,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+    ));
+    assert_eq!(counters.policy_reject_sent, 1);
+    let reply = pipeline
+        .pending_tx_local
+        .pop_front()
+        .expect("unstamped fabric TCP reject RST");
+    assert_eq!(&reply.bytes[..6], client_mac.as_slice());
+}
+
+/// #12051 M3 control: stamp suppression is TCP-only in this change. UDP
+/// keeps emitting ICMPv4 port-unreachable toward the stamp MAC — RECORDED
+/// current behavior, known-unreachable, pending follow-up #12319 (which
+/// will extend the gate to the ICMP leg and update this test).
+#[test]
+fn stamped_fabric_udp_policy_reject_keeps_port_unreachable_12051() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (mut frame, mut meta, flow) = policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x02]);
+    meta.ingress_ifindex = 21;
+    let forwarding = stamped_fabric_reject_forwarding();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+
+    assert!(enqueue_policy_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        21,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+    ));
+    assert_eq!(counters.policy_reject_sent, 1);
+    let reply = pipeline
+        .pending_tx_local
+        .pop_front()
+        .expect("stamped-fabric UDP port-unreachable");
+    assert_eq!(
+        &reply.bytes[34..36],
+        &[3, 3],
+        "stamped-fabric UDP reject still returns ICMPv4 port-unreachable"
+    );
+}
 
 /// #4499 E2 (reject half): a policy `then reject` deny path emits a single
 /// RT_FLOW record whose KIND is `PolicyDeny` — NOT a `SessionCreate`
@@ -2510,4 +2783,218 @@ fn token_allowed_reject_enqueues_with_classify_verdict_5569() {
         req.dscp_rewrite, None,
         "no dscp rewrite configured → verdict.dscp_rewrite passed through as None"
     );
+}
+
+/// #12051 F2(a) / M9 fail-on-revert: the stamped-fabric TCP gate sits in the
+/// shared `enqueue_reject_reply` choke, so a filter `then reject` on a stamped
+/// fabric arrival is suppressed exactly like its policy sibling — no RST
+/// queued, `filter_reject_sent` stays 0, and the filter log reports the
+/// truthful DENY (per the #3615 `FilterAction::Reject` contract: a caller that
+/// cannot synthesize the reject packet must not log that a reject was
+/// generated). M9 (exempting `RejectReplySource::Filter` from the gate —
+/// the shape the first 12051 commit's policy-wrapper guard had) enqueues the
+/// RST and logs REJECT, turning every assertion below RED.
+#[test]
+fn stamped_fabric_filter_reject_suppresses_tcp_rst_and_logs_deny_12051() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    use super::filter::{PendingFilterLog, filter_terminal};
+    use crate::afxdp::event_emit::FilterLogSource;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (mut frame, mut meta, flow) = tcp_v4_syn();
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x02]);
+    meta.ingress_ifindex = 21;
+    let (handle, rx) = unlimited_event_handle();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let forwarding = stamped_fabric_reject_forwarding();
+    let mut counters = BatchCounters::default();
+    let drop = filter_terminal(
+        &mut pipeline,
+        &forwarding,
+        Some(&handle),
+        21,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+        crate::filter::FilterAction::Reject(crate::filter::RejectMessage::ADMIN_PROHIBITED),
+        Some(PendingFilterLog {
+            ingress_zone_id: 7,
+            egress_zone_id: 0,
+            filter_id: 23,
+            term_id: 6,
+            action: crate::filter::FilterAction::Reject(
+                crate::filter::RejectMessage::ADMIN_PROHIBITED,
+            ),
+            source: FilterLogSource::Input,
+            app_id: 0,
+        }),
+        123,
+    );
+    assert!(drop, "a filter reject terminal action drops the packet");
+    assert!(
+        pipeline.pending_tx_local.is_empty(),
+        "a stamped fabric filter arrival must not queue its synthetic source MAC as RST destination"
+    );
+    assert_eq!(counters.filter_reject_sent, 0);
+    assert_eq!(counters.policy_reject_sent, 0);
+    let event = rx
+        .try_recv()
+        .expect("filter-log event frame")
+        .decode_dataplane_event()
+        .expect("filter-log payload");
+    assert_eq!(
+        event.action, RT_FLOW_ACTION_DENY,
+        "a suppressed filter reject on the poll path must log DENY, not REJECT"
+    );
+}
+
+/// #12051 F2(b) / M6+M6b fail-on-revert: the stamped-fabric gate runs BEFORE
+/// the TX budget gate and the per-zone token gate, so a stamped-fabric TCP
+/// reject flood consumes neither. Drives N stamped policy rejects against a
+/// fresh per-zone Reject bucket: the aggregate TAT must not move (no token
+/// spent), the observable `rate_limited_count(Reject)` must not advance
+/// (no deny recorded), and neither budget-drop counter may bump. A trailing
+/// unstamped reject in the SAME zone must still find a token — proving the
+/// flood did not starve the bucket (the #3656 H11 shape). M6 (gate after the
+/// token consume) moves the TAT / starves the trailing RST; M6b (gate after
+/// the budget gate) spends budget on the flood instead.
+#[test]
+fn stamped_fabric_reject_flood_consumes_no_budget_or_token_12051() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    use crate::afxdp::icmp_ratelimit::ZoneLimiter;
+    use crate::afxdp::icmp_ratelimit::{
+        GeneratedErrorReason, global_bucket_test_lock, rate_limited_count, reset_bucket_for_test,
+    };
+    use crate::afxdp::types::FastMap;
+    use std::sync::Arc;
+    // The zone bucket is local, but hold the shared lock + reset the fallback
+    // (mirrors per_zone_reject_isolation_at_call_site_3618) so a sibling
+    // cannot perturb the fallback if any resolution falls through.
+    let _g = global_bucket_test_lock();
+    reset_bucket_for_test(GeneratedErrorReason::Reject, 0);
+    let zone_a = 4_321u16;
+    let mut forwarding = stamped_fabric_reject_forwarding();
+    forwarding.ifindex_to_zone_id.insert(21, zone_a);
+    forwarding.ifindex_to_zone_id.insert(5, zone_a);
+    let zone_bucket = Arc::new(ZoneLimiter::new());
+    let mut reject_buckets: FastMap<u16, Arc<ZoneLimiter>> = FastMap::default();
+    reject_buckets.insert(zone_a, zone_bucket.clone());
+    forwarding.reject_buckets = reject_buckets;
+    let arrival_before = zone_bucket.aggregate_arrival_ns();
+    let rate_limited_before = rate_limited_count(GeneratedErrorReason::Reject);
+    let (mut stamped_frame, mut stamped_meta, stamped_flow) = tcp_v4_syn();
+    stamped_frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x02]);
+    stamped_meta.ingress_ifindex = 21;
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+    // N exceeds the per-source burst and DEFAULT_BURST (1000). A reverted
+    // gate-behind-token order would charge each iteration, causing rate-limit
+    // drops and starving the trailing native control RST.
+    const FLOOD: u64 = 1_500;
+    for _ in 0..FLOOD {
+        let sent = enqueue_policy_reject_reply(
+            &mut pipeline,
+            &forwarding,
+            21,
+            &stamped_frame,
+            stamped_meta,
+            &stamped_flow,
+            &mut counters,
+        );
+        assert!(!sent, "every stamped-fabric TCP reject must suppress");
+    }
+    assert!(
+        pipeline.pending_tx_local.is_empty(),
+        "no stamped-fabric reject may enqueue a reply"
+    );
+    assert_eq!(counters.policy_reject_sent, 0);
+    assert_eq!(
+        counters.policy_reject_reply_budget_drops, 0,
+        "a stamped-fabric reject must not spend TX budget (gate runs first)"
+    );
+    assert_eq!(
+        counters.policy_reject_rate_limit_drops, 0,
+        "a stamped-fabric reject must not spend a token (gate runs first)"
+    );
+    assert_eq!(
+        zone_bucket.aggregate_arrival_ns(),
+        arrival_before,
+        "the stamped flood must not move the zone aggregate TAT (no token spent)"
+    );
+    assert_eq!(
+        rate_limited_count(GeneratedErrorReason::Reject),
+        rate_limited_before,
+        "the stamped flood must not record a rate-limited deny"
+    );
+    // The trailing NATIVE-ingress, unstamped reject in the same zone still
+    // finds a token — proving the flood left the bucket full.
+    let (native_frame, mut native_meta, native_flow) = tcp_v4_syn();
+    native_meta.ingress_ifindex = 5;
+    let sent = enqueue_policy_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        5,
+        &native_frame,
+        native_meta,
+        &native_flow,
+        &mut counters,
+    );
+    assert!(
+        sent,
+        "an unstamped reject must still get a token after a stamped flood"
+    );
+    assert_eq!(counters.policy_reject_sent, 1);
+    assert_eq!(pipeline.pending_tx_local.len(), 1);
+
+    // Isolate the TX-budget ordering control. With no TX budget, a stamped
+    // reject must still stop at the shared gate: neither budget-drop counter
+    // is truthful because the reply is known to be unreplyable on this ingress.
+    // M6b (gate after the budget check) counts this as queue pressure.
+    let budget_arrival_before = zone_bucket.aggregate_arrival_ns();
+    let budget_rate_limited_before = rate_limited_count(GeneratedErrorReason::Reject);
+    let mut no_budget_pipeline = tx_pipeline(0, 0);
+    let mut budget_counters = BatchCounters::default();
+    let sent = enqueue_policy_reject_reply(
+        &mut no_budget_pipeline,
+        &forwarding,
+        21,
+        &stamped_frame,
+        stamped_meta,
+        &stamped_flow,
+        &mut budget_counters,
+    );
+    assert!(
+        !sent,
+        "a stamped reject must suppress with an empty TX budget"
+    );
+    assert!(no_budget_pipeline.pending_tx_local.is_empty());
+    assert_eq!(
+        budget_counters.policy_reject_reply_budget_drops, 0,
+        "a stamped reject is not a TX-budget drop (the gate runs first)"
+    );
+    assert_eq!(
+        budget_counters.policy_reject_rate_limit_drops, 0,
+        "a stamped reject with no TX budget still must not consume a token"
+    );
+    assert_eq!(
+        zone_bucket.aggregate_arrival_ns(),
+        budget_arrival_before,
+        "the zero-budget stamped reject must not move the token bucket"
+    );
+    assert_eq!(
+        rate_limited_count(GeneratedErrorReason::Reject),
+        budget_rate_limited_before,
+        "the zero-budget stamped reject must not record a rate-limited deny"
+    );
+    reset_bucket_for_test(GeneratedErrorReason::Reject, 0);
 }

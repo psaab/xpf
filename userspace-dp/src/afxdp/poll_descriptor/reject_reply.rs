@@ -1,10 +1,11 @@
-// #2089/#11303 policy `then reject` replies follow Junos semantics: TCP gets a
-// RST, UDP gets ICMP/ICMPv6 port-unreachable, and other protocols are dropped.
-// Plain `then deny` stays silent. Junos zone `tcp-rst` is separate: it uses
-// the same reply machinery only for non-SYN TCP transit session misses, not
-// policy denies. Lifted out of poll_descriptor/mod.rs so the hot ingress loop
-// does not carry the reject-path bodies in its codegen unit, mirroring
-// cookie_reply.rs.
+// #2089/#11303 policy `then reject` replies generally follow Junos semantics:
+// TCP gets a RST unless a synthetic V1/V2 fabric source MAC on a fabric
+// ingress makes it unreplyable (stamp-shaped native MACs still get RSTs);
+// UDP gets ICMP/ICMPv6 port-unreachable, and other protocols drop.
+// Plain `then deny` stays silent. Junos zone `tcp-rst` uses the same reply
+// machinery only for non-SYN TCP transit session misses, not policy denies.
+// Lifted out of poll_descriptor/mod.rs so the hot ingress loop does not carry
+// these cold-path bodies in its codegen unit, mirroring cookie_reply.rs.
 //
 // `enqueue_policy_reject_reply` is on the cold policy exception arm and fires
 // solely for `PolicyAction::Reject`. `enqueue_session_miss_rst` is reached only
@@ -53,6 +54,7 @@ pub(super) fn enqueue_policy_reject_reply(
         PROTO_UDP => crate::filter::RejectMessage::PORT_UNREACHABLE,
         _ => return false,
     };
+
     enqueue_reject_reply(
         tx_pipeline,
         forwarding,
@@ -249,6 +251,20 @@ fn enqueue_reject_reply(
     source: RejectReplySource,
     reject_message: crate::filter::RejectMessage,
 ) -> bool {
+    // #12051: a TCP RST reflects the incoming source MAC. A V1/V2 synthetic
+    // fabric stamp is not the client's L2 address, so the reflected reset
+    // cannot reach the client. Treat it as unreplyable before building or
+    // charging the generated-reply budget/rate limit. This shared choke covers
+    // policy/filter rejects and zone `tcp-rst` session-miss replies.
+    if meta.protocol == PROTO_TCP
+        && crate::afxdp::forwarding::ingress_is_fabric(forwarding, ingress_ifindex)
+        && packet_frame
+            .get(6..12)
+            .is_some_and(crate::afxdp::forwarding::is_synthetic_fabric_source_mac)
+    {
+        return false;
+    }
+
     // #3656: determine reply-build FEASIBILITY before consuming the reject
     // rate-limit token OR counting a TX-frame-budget drop. A frame that can
     // NEVER produce a reply — an inbound TCP RST, an inbound ICMP/ICMPv6 error,

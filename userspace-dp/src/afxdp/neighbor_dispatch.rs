@@ -1127,16 +1127,11 @@ fn learn_dynamic_neighbor_with_mac(
     now_ns: u64,
 ) {
     // #3075/#11337: skip xpf's own synthetic fabric-zone (V1) or
-    // interface-scope (V2) source MAC. A forwarded admitted fabric frame
-    // reaches this leg too, so keep the guard in the shared MAC path.
-    if (src_mac[0] == 0x02
-        && src_mac[1] == 0xbf
-        && src_mac[2] == 0x72
-        && src_mac[3] == FABRIC_ZONE_MAC_MAGIC)
-        || (src_mac[0] == FABRIC_NAT_SCOPE_MAC_PREFIX[0]
-            && src_mac[1] == FABRIC_NAT_SCOPE_MAC_PREFIX[1]
-            && src_mac[2] == FABRIC_NAT_SCOPE_MAC_PREFIX[2])
-    {
+    // interface-scope (V2) source MAC (#12051 shares the predicate but keeps
+    // this skip's original ingress-agnostic semantics: a forwarded admitted
+    // fabric frame reaches this leg too, so the guard stays in the shared MAC
+    // path).
+    if crate::afxdp::forwarding::is_synthetic_fabric_source_mac(&src_mac) {
         return;
     }
     if !crate::afxdp::frame::neighbor_mac_is_learnable(src_mac) {

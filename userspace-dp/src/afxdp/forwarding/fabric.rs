@@ -183,6 +183,14 @@ pub(in crate::afxdp) fn ingress_is_fabric(forwarding: &ForwardingState, ingress_
         fabric.parent_ifindex == ingress_ifindex || fabric.overlay_ifindex == ingress_ifindex
     })
 }
+
+/// True when an Ethernet source carries a synthetic V1 zone or V2 fabric-scope
+/// stamp. Ingress eligibility is decided by the caller.
+#[inline]
+pub(in crate::afxdp) fn is_synthetic_fabric_source_mac(source_mac: &[u8]) -> bool {
+    source_mac.starts_with(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC])
+        || source_mac.starts_with(&FABRIC_NAT_SCOPE_MAC_PREFIX)
+}
 /// Returns whether the Ethernet destination is accepted on the observed
 /// ingress link. The AF_XDP shim normally receives only frames accepted by
 /// the NIC's unicast filter, but promiscuous / bridged / virtual devices can
