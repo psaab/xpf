@@ -204,7 +204,7 @@ wire_parse_transcript() {
 	done
 	return 0
 }
-# wire_matrix_verdict <cksum_bad> <cell_count> [<cell-key> <probe64-offered> <probe64-observed> <probe1400-offered> <probe1400-observed> <control64-offered> <control64-observed> <control1400-offered> <control1400-observed>]...
+# wire_matrix_verdict <cksum_bad> <cell_count> [<cell-key> <control-identity-mask> <probe64-offered> <probe64-observed> <probe1400-offered> <probe1400-observed> <control64-offered> <control64-observed> <control1400-offered> <control1400-observed>]...
 #
 # The zone-matrix verdict (#10028) is deliberately not a generic N-cell
 # reducer.  §3 names exactly six ordered pairs under BOTH default policies:
@@ -216,13 +216,15 @@ wire_parse_transcript() {
 #   permit:trust->untrust permit:untrust->trust permit:trust->dmz
 #   permit:dmz->trust permit:untrust->dmz permit:dmz->untrust
 #
-# Every cell has one probe and one SAME-pair near-miss control under its
-# capture window.  Deny probes and controls have the §2 drop floor (1,000);
-# permit probes and controls are §2 loss-grade (10,000 frames at EACH of
-# 64 B and 1400 B).  A loss-grade permit cell passes only with every offered
-# frame observed at the peer-side capture; this is not the #9531 appmatch
-# liveness demotion.  A missing near-miss control is capture-blind, never a
-# deny PASS.  Metrics retain per-size counts and aggregate required metrics.
+# Every cell has one probe and its expected pair-specific near-miss control
+# under the capture window. Deny windows also offer all five foreign controls,
+# so the identity mask has one bit per ordered pair in the listed order. For
+# deny cells, any observed mask must be exactly the expected pair bit; a blind
+# zero mask cannot PASS. The zone_violation_mask uses the twelve-key cell order.
+# Deny probes and controls have the §2 drop floor (1,000); permit probes and
+# controls are §2 loss-grade (10,000 frames at EACH of 64 B and 1400 B). A
+# missing expected near-miss control without a foreign control is capture-blind,
+# never a deny PASS. Metrics retain per-size counts and aggregate required metrics.
 # Prints exactly one `WIRE_GATE wire_zone_matrix ...` line; rc 0/1/2.
 wire_matrix_verdict() {
 	local ck="${1:-}" n="${2:-}"
@@ -239,34 +241,51 @@ wire_matrix_verdict() {
 	fi
 	# The identity/completeness contract is part of this row, not a caller
 	# convention.  A one-cell or duplicate-key fixture cannot certify §3.
-	if ((10#$n != 12)) || (($# != 2 + 9 * 12)); then
+	if ((10#$n != 12)) || (($# != 2 + 10 * 12)); then
 		printf 'WIRE_GATE wire_zone_matrix VOID reason=harness-void %s\n' "$zero"
 		return 2
 	fi
 	shift 2
 	local -a all_records=("$@")
-	local key p64o p64b p1400o p1400b c64o c64b c1400o c1400b
-	local i j found
-	declare -A seen
+	local key identity p64o p64b p1400o p1400b c64o c64b c1400o c1400b
+	local i j found expected_bit identity_value has_expected_control has_expected_identity
+	declare -A seen expected_identity
 	for ((i = 0; i < 12; i++)); do
-		key=$1; p64o=$2; p64b=$3; p1400o=$4; p1400b=$5
-		c64o=$6; c64b=$7; c1400o=$8; c1400b=$9
-		shift 9
+		key=$1; identity=$2; p64o=$3; p64b=$4; p1400o=$5; p1400b=$6
+		c64o=$7; c64b=$8; c1400o=$9; c1400b=${10}
+		shift 10
 		found=0
-		for j in "${expected_keys[@]}"; do
-			if [[ "$key" == "$j" ]]; then found=1; break; fi
+		for ((j = 0; j < 12; j++)); do
+			if [[ "$key" == "${expected_keys[$j]}" ]]; then
+				found=1
+				expected_identity["$key"]=$j
+				break
+			fi
 		done
 		if ((found == 0)) || [[ -n "${seen[$key]:-}" ]]; then
 			printf 'WIRE_GATE wire_zone_matrix VOID reason=harness-void %s\n' "$zero"
 			return 2
 		fi
 		seen["$key"]=1
-		for j in "$p64o" "$p64b" "$p1400o" "$p1400b" "$c64o" "$c64b" "$c1400o" "$c1400b"; do
+		for j in "$identity" "$p64o" "$p64b" "$p1400o" "$p1400b" "$c64o" "$c64b" "$c1400o" "$c1400b"; do
 			if ! wire_num "$j"; then
 				printf 'WIRE_GATE wire_zone_matrix VOID reason=harness-void %s\n' "$zero"
 				return 2
 			fi
 		done
+		if ((10#$identity > 63)); then
+			printf 'WIRE_GATE wire_zone_matrix VOID reason=harness-void %s\n' "$zero"
+			return 2
+		fi
+		expected_bit=$((1 << (expected_identity[$key] % 6)))
+		identity_value=$((10#$identity))
+		has_expected_control=0; has_expected_identity=0
+		if ((10#$c64b > 0 || 10#$c1400b > 0)); then has_expected_control=1; fi
+		if ((identity_value & expected_bit)); then has_expected_identity=1; fi
+		if ((has_expected_control != has_expected_identity)); then
+			printf 'WIRE_GATE wire_zone_matrix VOID reason=harness-void %s\n' "$zero"
+			return 2
+		fi
 	done
 	for key in "${expected_keys[@]}"; do
 		if [[ -z "${seen[$key]:-}" ]]; then
@@ -277,15 +296,26 @@ wire_matrix_verdict() {
 	local -a records=("${all_records[@]}")
 	local failed=0 blind=0 short=0 leaked=0 missing=0 control_missing=0 duplicate=0
 	local deny_cells=0 permit_cells=0 permit64o=0 permit64b=0 permit1400o=0 permit1400b=0
-	local reason="--" is_permit
-	# Re-read the records from the positional array so identity validation
-	# above happens before any metric is scored.
+	local reason="--" is_permit identity_index cell_bit
+	local failed_mask=0 zone_cell_violations=0 zone_violation_mask=0
+	# Deny measurements offer all six controls in the probe's capture window.
+	# A nonzero mask must be exactly the expected bit; foreign bits are FAIL evidence.
 	for ((i = 0; i < 12; i++)); do
-		key=${records[$((i * 9))]}
-		p64o=${records[$((i * 9 + 1))]}; p64b=${records[$((i * 9 + 2))]}
-		p1400o=${records[$((i * 9 + 3))]}; p1400b=${records[$((i * 9 + 4))]}
-		c64o=${records[$((i * 9 + 5))]}; c64b=${records[$((i * 9 + 6))]}
-		c1400o=${records[$((i * 9 + 7))]}; c1400b=${records[$((i * 9 + 8))]}
+		key=${records[$((i * 10))]}
+		identity=${records[$((i * 10 + 1))]}
+		identity_index="${expected_identity[$key]}"
+		identity_value=$((10#$identity))
+		expected_bit=$((1 << (identity_index % 6)))
+		cell_bit=$((1 << identity_index))
+		if ((identity_value != 0 && identity_value != expected_bit)); then
+			zone_cell_violations=$((zone_cell_violations + 1))
+			zone_violation_mask=$((zone_violation_mask | cell_bit))
+			failed_mask=$((failed_mask | cell_bit))
+		fi
+		p64o=${records[$((i * 10 + 2))]}; p64b=${records[$((i * 10 + 3))]}
+		p1400o=${records[$((i * 10 + 4))]}; p1400b=${records[$((i * 10 + 5))]}
+		c64o=${records[$((i * 10 + 6))]}; c64b=${records[$((i * 10 + 7))]}
+		c1400o=${records[$((i * 10 + 8))]}; c1400b=${records[$((i * 10 + 9))]}
 		is_permit=0
 		[[ "$key" == permit:* ]] && is_permit=1
 		local floor=$WIRE_DROP_FLOOR
@@ -321,7 +351,7 @@ wire_matrix_verdict() {
 			local cell_missing=$((d1 + d2))
 			missing=$((missing + cell_missing))
 			if ((over > 0)); then
-				failed=$((failed + 1))
+				failed_mask=$((failed_mask | cell_bit))
 			# The same-pair near-miss control is mandatory, but its offered
 			# count intentionally supplies headroom for routine capture loss.
 			# Only falling below the observed floor is capture-blind; a probe
@@ -330,7 +360,7 @@ wire_matrix_verdict() {
 				control_missing=$((control_missing + d3 + d4))
 				blind=$((blind + 1)); [[ "$reason" == "--" ]] && reason=capture-blind
 			elif ((d1 > 0 || d2 > 0)); then
-				failed=$((failed + 1))
+				failed_mask=$((failed_mask | cell_bit))
 			fi
 		else
 			deny_cells=$((deny_cells + 1))
@@ -339,7 +369,7 @@ wire_matrix_verdict() {
 			local cell_leaked=$((10#$p64b + 10#$p1400b))
 			leaked=$((leaked + cell_leaked))
 			if ((cell_leaked > 0)); then
-				failed=$((failed + 1))
+				failed_mask=$((failed_mask | cell_bit))
 			fi
 			if ((10#$p64o < floor || 10#$c64o < floor ||
 					10#$p1400o < floor || 10#$c1400o < floor)); then
@@ -355,7 +385,13 @@ wire_matrix_verdict() {
 			fi
 		fi
 	done
-	local metrics="cells_measured=12 cells_failed=$failed deny_cells=$deny_cells permit_cells=$permit_cells deny_leaked=$leaked permit_missing=$missing control_missing=$control_missing duplicate_frames=$duplicate permit64_offered=$permit64o permit64_observed=$permit64b permit1400_offered=$permit1400o permit1400_observed=$permit1400b cksum_bad=$ck"
+	failed=0
+	for ((i = 0; i < 12; i++)); do
+		if ((failed_mask & (1 << i))); then
+			failed=$((failed + 1))
+		fi
+	done
+	local metrics="cells_measured=12 cells_failed=$failed zone_cell_violations=$zone_cell_violations zone_violation_mask=$zone_violation_mask deny_cells=$deny_cells permit_cells=$permit_cells deny_leaked=$leaked permit_missing=$missing control_missing=$control_missing duplicate_frames=$duplicate permit64_offered=$permit64o permit64_observed=$permit64b permit1400_offered=$permit1400o permit1400_observed=$permit1400b cksum_bad=$ck"
 	if ((failed > 0)); then
 		printf 'WIRE_GATE wire_zone_matrix FAIL reason=-- %s\n' "$metrics"
 		return 1
