@@ -182,21 +182,55 @@ func TestPolicyProtoSeqFamilySplit_12066(t *testing.T) {
 		t.Fatalf("got %d FAMSPLIT sequences, want 5 (2 fam x 2 proto + default):\n%s", len(blocks), got)
 	}
 
+	// Collect the emitted per-family prefix-list definitions so the
+	// reference assertions below compare full tokens, not substrings
+	// (#12068: names are now `<policy>-<term>-xpf-inline-<hash>`).
+	defined := map[string]bool{}
+	for _, line := range strings.Split(got, "\n") {
+		line = strings.TrimSpace(line)
+		if rest, ok := strings.CutPrefix(line, "ip prefix-list "); ok {
+			name, _, _ := strings.Cut(rest, " ")
+			defined[name] = true
+		}
+		if rest, ok := strings.CutPrefix(line, "ipv6 prefix-list "); ok {
+			name, _, _ := strings.Cut(rest, " ")
+			defined[name] = true
+		}
+	}
 	for i, b := range blocks[:4] {
 		wantProto := []string{"bgp", "ospf", "bgp", "ospf"}[i]
 		wantFamily := "v4"
-		match := "match ip address prefix-list FAMSPLIT-t1_v4"
+		wantPrefix := "match ip address prefix-list "
 		if i >= 2 {
 			wantFamily = "v6"
-			match = "match ipv6 address prefix-list FAMSPLIT-t1_v6"
+			wantPrefix = "match ipv6 address prefix-list "
 		}
 		if b.protos != 1 || !strings.Contains(b.body, "match source-protocol "+wantProto+"\n") {
 			t.Errorf("%s has protocol matches %q, want only %q:\n%s",
 				b.header, strings.TrimSpace(b.body), wantProto, got)
 		}
-		if !strings.Contains(b.body, match) {
-			t.Errorf("%s does not contain the %s-family match %q:\n%s",
-				b.header, wantFamily, match, got)
+		ref := ""
+		for _, line := range strings.Split(b.body, "\n") {
+			line = strings.TrimSpace(line)
+			if rest, ok := strings.CutPrefix(line, strings.TrimSpace(wantPrefix)+" "); ok {
+				ref, _, _ = strings.Cut(rest, " ")
+			}
+		}
+		if ref == "" {
+			t.Errorf("%s has no %s-family prefix-list match:\n%s",
+				b.header, wantFamily, got)
+		} else if !defined[ref] {
+			t.Errorf("%s references undefined %s-family prefix-list %q:\n%s",
+				b.header, wantFamily, ref, got)
+		} else {
+			wantNS := "FAMSPLIT-t1_v4-xpf-inline-"
+			if wantFamily == "v6" {
+				wantNS = "FAMSPLIT-t1_v6-xpf-inline-"
+			}
+			if !strings.HasPrefix(ref, wantNS) {
+				t.Errorf("%s references %q, want the #12068 namespaced form %q*:\n%s",
+					b.header, ref, wantNS, got)
+			}
 		}
 	}
 	if got := config.RouteMapSequenceCount(po, po.PolicyStatements["FAMSPLIT"]); got != 4 {
