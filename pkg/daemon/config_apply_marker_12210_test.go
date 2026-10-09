@@ -143,8 +143,16 @@ func TestBootRetryReconstructsZoneSnapshotAndReceivesBulkAck12210(t *testing.T) 
 	if epoch, _, pending := peer.PendingBulkAck(); pending {
 		t.Errorf("#12210: peer still awaits BulkAck for epoch %d after the receiver's ACK callback", epoch)
 	}
+	// The primed flag is set by d.onSessionSyncBulkAckReceived via the async
+	// `go s.OnBulkSyncAckReceived()` dispatch (pkg/cluster/sync_conn_read.go),
+	// which has no causal link to the peerAcked wait above: poll with a
+	// bounded deadline instead of asserting immediately.
+	primedDeadline := time.Now().Add(10 * time.Second)
+	for !d.syncPeerBulkPrimed.Load() && time.Now().Before(primedDeadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
 	if !d.syncPeerBulkPrimed.Load() {
-		t.Error("#12210: local sync did not observe the peer's matching BulkAck")
+		t.Error("#12210: timed out waiting for syncPeerBulkPrimed via async go s.OnBulkSyncAckReceived() dispatch (pkg/cluster/sync_conn_read.go); local sync did not observe the peer's matching BulkAck")
 	}
 	if local.Stats().BulkSyncEndTime == 0 {
 		t.Error("#12210: reconstructed node did not complete peer-bulk reconciliation")
