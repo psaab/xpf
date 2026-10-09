@@ -16,8 +16,8 @@ dataplane gates it does not run, and where their results are recorded.
 
 | Job | Command | Source of truth |
 |---|---|---|
-| Go build and affected tests | `go build ./...`, then `bash scripts/ci_affected_go_tests.sh "$BASE_SHA" "$HEAD_SHA"` (changed packages + reverse dependents; the full Go suite is red on master) | `test.yml:22-40` |
-| Rust workspace compile check | `cargo check --manifest-path userspace-dp/Cargo.toml --workspace --all-targets` | `test.yml:42-59` |
+| Go build and affected tests | `go build ./...`, then `bash scripts/ci_affected_go_tests.sh "$BASE_SHA" "$HEAD_SHA"` (changed packages + reverse dependents; the full Go suite is red on master) | `test.yml:22-41` |
+| Rust workspace compile check | `cargo check --manifest-path userspace-dp/Cargo.toml --workspace --all-targets` | `test.yml:74-77` |
 
 That is the whole gate. In particular:
 
@@ -50,8 +50,10 @@ terminal output alone as a durable result record. The suite was not run for
 #12228, so this issue log does not claim a Rust result.
 
 
-`userspace-dp/src/policy_prop_tests/strategy.rs:48-73` additionally
-builds synthetic policy configurations rather than observed forwarding,
+`query_strategy` (`userspace-dp/src/policy_prop_tests/strategy.rs:48-73`)
+generates synthetic packet tuples, and `generated_config_strategy`
+(`userspace-dp/src/policy_prop_tests/strategy.rs:120-124,179-204,307-314`)
+constructs synthetic policy configurations, rather than observed forwarding,
 so the prop-test leg cannot substitute for the wire gates below.
 
 ### Wire dataplane gates
@@ -76,7 +78,7 @@ it still needs those instances; see `test/incus/test-wire-properties.sh:25-31`.
 | Wire hostinbound-deny | `make test-wire-hostinbound-deny` (`Makefile:1054-1058`) | Host-inbound deny verdicts observed on the wire |
 | Wire conntrack lifecycle | `make test-wire-conntrack-lifecycle` (`Makefile:1062-1067`) | Create/witness/evict lifecycle observed on the wire |
 | Wire routing separation | `make test-wire-routing-separation` (`Makefile:1074-1080`) | Routing-separation probes observed on the wire |
-| Wire properties | `make test-wire-properties` (`Makefile:1300-1304`) | PMTUD reflection and IPv6 transit, exercised through the local Incus hosts (see `test/incus/test-wire-properties.sh:80-98`) |
+| Wire properties | `make test-wire-properties` (`Makefile:1300-1304`) | IPv6 transit plus a DF/1500-byte probe that accepts either PMTUD feedback or ordinary delivery (a passing run does not necessarily exercise reflection), through the local Incus hosts (see `test/incus/test-wire-properties.sh:80-98`) |
 
 ### HA continuity and NAT failover gates
 
@@ -104,7 +106,7 @@ packet-level run with no ledger row was not measured.
 If it is not in the "What ordinary green CI runs" table, a green CI run
 did not examine it. In particular: **a Rust-test-only policy/NAT/HA
 regression is explicitly out of scope of the ordinary green gate** until
-the `test.yml:10-12` promotion lands. The gates that would catch it are
+the `test.yml:13` promotion lands. The gates that would catch it are
 `make test-rust` (suite output) and the cluster wire gates above
 (`test/results/ledger.d/` rows). Silence was the defect (#9052); a green
 run whose contract names what it did not examine is not a clean board.
