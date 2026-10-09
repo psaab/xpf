@@ -2902,7 +2902,7 @@ fn colliding_ordinary_close_without_identity_drops10512() {
 /// contend on the shared-session mutex. Run with:
 /// `cargo test --release close_check_and_publish_churn_11299 -- --ignored --nocapture`
 #[test]
-#[ignore = "manual loaded shared-session churn measurement"]
+#[ignore = "MEASUREMENT: manual loaded shared-session churn (#11299)"]
 fn close_check_and_publish_churn_11299() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
