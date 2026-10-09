@@ -83,6 +83,47 @@ fn all_except_ssh_emitted_services_do_not_admit_tcp22_12053() {
     );
 }
 
+// #12318: consume the exact protocols emitted by Go for `all; igmp except`.
+// The protocol-plane classifier must receive no proto-2 admit through either
+// alias, while unrelated routing protocols remain available.
+#[test]
+fn all_except_igmp_emitted_protocols_do_not_admit_proto2_12318() {
+    let emitted_protocols: Vec<String> = serde_json::from_str(include_str!(
+        "host_inbound_all_except_igmp_12318.json"
+    ))
+    .expect("shared Go compiler emission fixture is valid JSON");
+    let hi = zone_host_inbound_from_tokens(&[], &emitted_protocols);
+
+    assert!(
+        !hi.admits(2, 0, false, 0),
+        "`all; igmp except` must not re-admit proto 2 on IPv4 through DVMRP",
+    );
+    assert!(
+        !hi.admits_destination(
+            2,
+            0,
+            false,
+            0,
+            "224.0.0.4".parse::<std::net::IpAddr>().unwrap(),
+        ),
+        "`all; igmp except` must deny DVMRP's multicast destination",
+    );
+    assert!(
+        !hi.admits_destination(
+            2,
+            0,
+            false,
+            0,
+            "224.0.0.1".parse::<std::net::IpAddr>().unwrap(),
+        ),
+        "`all; igmp except` must deny the IGMP multicast destination",
+    );
+    assert!(
+        hi.admits(46, 0, false, 0),
+        "excluding proto 2 must preserve unrelated RSVP proto 46",
+    );
+}
+
 // #3310: `system-services ident-reset` must NOT admit TCP/113 on the AF_XDP
 // secondary path — Junos ident-reset resets ident probes, it does not permit
 // the service. The kernel nft chain emits the actual `reject with tcp reset`
