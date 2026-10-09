@@ -1788,6 +1788,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 meta.tcp_flags,
                             );
                         }
+                        // #12265/#11373: route revalidation may use this
+                        // packet's ingress/fabric context. Persist it only
+                        // after #9519 confirms Owner; a foreign packet may
+                        // use its local resolution for this packet's verdict,
+                        // but never stamps or rehomes the owner's session.
+                        if foreign_arrival_zone.is_none()
+                            && let Some(revalidation) =
+                                resolved.deferred_forwarding_revalidation
+                        {
+                            sessions.revalidate_forwarding_resolution(
+                                &resolved.key,
+                                revalidation.resolution,
+                                revalidation.owner_rg_id,
+                            );
+                        }
                         // The zone the filter and host-inbound consumers below
                         // judge by: the entry's for an owner, exactly as before
                         // #9519; the arrival zone for a foreign packet.
