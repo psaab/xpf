@@ -200,6 +200,26 @@ fn policy_reject_forwarding() -> ForwardingState {
     forwarding
 }
 
+fn stamped_fabric_reject_forwarding() -> ForwardingState {
+    let mut forwarding = policy_reject_forwarding();
+    let mut ingress_egress = forwarding
+        .egress
+        .get(&5)
+        .expect("policy reject egress fixture")
+        .clone();
+    ingress_egress.bind_ifindex = 21;
+    forwarding.egress.insert(21, ingress_egress);
+    forwarding.fabrics.push(FabricLink {
+        parent_ifindex: 21,
+        overlay_ifindex: 22,
+        peer_addr: "192.0.2.1".parse().unwrap(),
+        peer_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x02],
+        local_mac: [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01],
+        up: true,
+    });
+    forwarding
+}
+
 #[test]
 fn policy_reject_udp_uses_port_unreachable_11303_v4() {
     use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
@@ -1969,6 +1989,196 @@ fn stamped_fabric_policy_reject_suppresses_tcp_rst_and_logs_deny_12051() {
     assert_eq!(event.action, RT_FLOW_ACTION_DENY);
 }
 
+/// #12051 regression for preferred V2 fabric stamps. The stamp is produced
+/// by the production ingress-identity redirect helper so this pins the wire
+/// format rather than duplicating it in the test.
+#[test]
+fn v2_stamped_fabric_policy_reject_suppresses_tcp_rst_and_logs_deny_12051() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (mut frame, mut meta, flow) = tcp_v4_syn();
+    meta.ingress_ifindex = 21;
+    let (handle, rx) = unlimited_event_handle();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut forwarding = stamped_fabric_reject_forwarding();
+    let scope_id = crate::afxdp::forwarding::fabric_nat_scope_stamp_id(7, "reth0.7", "default");
+    forwarding
+        .ifindex_to_fabric_nat_scope_id
+        .insert(21, scope_id);
+    forwarding.fabric_nat_scope_id_to_identity.insert(
+        scope_id,
+        crate::afxdp::types::FabricNatScopeIdentity {
+            zone_id: 7,
+            ifindex: 21,
+            redundancy_group: 1,
+        },
+    );
+    let stamp = crate::afxdp::forwarding::resolve_fabric_redirect_for_ingress_identity(
+        &forwarding,
+        Some(7),
+        Some(21),
+    )
+    .expect("V2 ingress-identity fabric redirect");
+    let source_mac = stamp.src_mac.expect("V2 fabric source stamp");
+    assert_eq!(&source_mac[..3], &FABRIC_NAT_SCOPE_MAC_PREFIX);
+    frame[6..12].copy_from_slice(&source_mac);
+
+    let mut counters = BatchCounters::default();
+    deny_reply_and_emit(
+        &mut pipeline,
+        &forwarding,
+        Some(&handle),
+        21,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+        &NatDecision::default(),
+        7,
+        9,
+        0,
+        101,
+        PolicyAction::Reject,
+        0,
+        123,
+    );
+
+    assert!(
+        pipeline.pending_tx_local.is_empty(),
+        "a V2-stamped fabric arrival must not queue its synthetic source MAC as RST destination"
+    );
+    assert_eq!(counters.policy_reject_sent, 0);
+    let event = rx
+        .try_recv()
+        .expect("policy-deny event frame")
+        .decode_dataplane_event()
+        .expect("policy-deny payload");
+    assert_eq!(event.action, RT_FLOW_ACTION_DENY);
+}
+
+/// #12051 M1 control: a stamp-shaped source MAC on native ingress is not a
+/// synthetic fabric arrival, so its ordinary TCP policy reject still RSTs.
+#[test]
+fn stamp_shaped_native_policy_reject_still_enqueues_tcp_rst_12051() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (mut frame, mut meta, flow) = tcp_v4_syn();
+    let stamp = [0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x02];
+    frame[6..12].copy_from_slice(&stamp);
+    meta.ingress_ifindex = 5;
+    let forwarding = ForwardingState::default();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+
+    assert!(enqueue_policy_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        5,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+    ));
+    assert_eq!(counters.policy_reject_sent, 1);
+    let reply = pipeline
+        .pending_tx_local
+        .pop_front()
+        .expect("native TCP reject RST");
+    assert_eq!(&reply.bytes[..6], &stamp);
+    assert_ne!(reply.bytes[14 + 20 + 13] & crate::tcp_flags::TCP_RST, 0);
+}
+
+/// #12051 M2 control: a known fabric ingress without a synthetic source stamp
+/// retains its peer-routable TCP policy reject.
+#[test]
+fn unstamped_fabric_policy_reject_still_enqueues_tcp_rst_12051() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (frame, mut meta, flow) = tcp_v4_syn();
+    let client_mac = frame[6..12].to_vec();
+    meta.ingress_ifindex = 21;
+    let forwarding = stamped_fabric_reject_forwarding();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+
+    assert!(enqueue_policy_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        21,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+    ));
+    assert_eq!(counters.policy_reject_sent, 1);
+    let reply = pipeline
+        .pending_tx_local
+        .pop_front()
+        .expect("unstamped fabric TCP reject RST");
+    assert_eq!(&reply.bytes[..6], client_mac.as_slice());
+}
+
+/// #12051 M3 control: stamp suppression is TCP-only; UDP keeps Junos's
+/// policy-reject ICMPv4 port-unreachable response.
+#[test]
+fn stamped_fabric_udp_policy_reject_keeps_port_unreachable_12051() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (mut frame, mut meta, flow) = policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x02]);
+    meta.ingress_ifindex = 21;
+    let forwarding = stamped_fabric_reject_forwarding();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+
+    assert!(enqueue_policy_reject_reply(
+        &mut pipeline,
+        &forwarding,
+        21,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+    ));
+    assert_eq!(counters.policy_reject_sent, 1);
+    let reply = pipeline
+        .pending_tx_local
+        .pop_front()
+        .expect("stamped-fabric UDP port-unreachable");
+    assert_eq!(
+        &reply.bytes[34..36],
+        &[3, 3],
+        "stamped-fabric UDP reject still returns ICMPv4 port-unreachable"
+    );
+}
 
 /// #4499 E2 (reject half): a policy `then reject` deny path emits a single
 /// RT_FLOW record whose KIND is `PolicyDeny` — NOT a `SessionCreate`

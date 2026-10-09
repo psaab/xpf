@@ -977,6 +977,17 @@ fn frag_stamp_snapshot() -> ConfigSnapshot {
     snapshot
 }
 
+fn reject_fabric_snapshot(dmz_tcp_rst: bool) -> ConfigSnapshot {
+    let mut snapshot = frag_stamp_snapshot();
+    snapshot.default_policy = "reject".to_string();
+    for zone in &mut snapshot.zones {
+        if zone.name == "dmz" {
+            zone.tcp_rst = dmz_tcp_rst;
+        }
+    }
+    snapshot
+}
+
 /// One IPv4/UDP fragment of ONE datagram, ingressing the FABRIC link with the
 /// zone-encoded src-MAC stamp for `zone_id`.
 ///
@@ -3275,4 +3286,97 @@ fn flowless_icmp_error_pbr_discard_on_quarantine_counts_11061() {
         "a flowless PBR discard on a quarantined zone must count (RED on revert: the arm reads the unstamped l3 domain)"
     );
     assert!(binding.scratch.scratch_forwards.is_empty());
+}
+
+/// #12051 N1: a preferred V2 stamp produced by the real ingress-identity
+/// redirect helper must not cause the poll path to enqueue a clientless RST.
+#[test]
+fn v2_stamped_fabric_policy_reject_suppresses_rst_on_real_poll_12051() {
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let forwarding = build_forwarding_state(&reject_fabric_snapshot(false));
+    let redirect = crate::afxdp::forwarding::resolve_fabric_redirect_for_ingress_identity(
+        &forwarding,
+        Some(TEST_DMZ_ZONE_ID),
+        Some(25),
+    )
+    .expect("dmz ingress-identity fabric redirect");
+    let source_mac = redirect.src_mac.expect("V2 fabric source stamp");
+    assert_eq!(&source_mac[..3], &FABRIC_NAT_SCOPE_MAC_PREFIX);
+    let mut frame = stamped_fabric_frame(TEST_DMZ_ZONE_ID, TCP_FLAG_SYN);
+    frame[6..12].copy_from_slice(&source_mac);
+    let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+
+    assert_eq!(dbg.rx, 1, "the descriptor must reach the poll path");
+    assert!(dbg.policy_deny >= 1, "the default policy reject must run");
+    assert_eq!(batch.invalid_fabric_stamp_drops, 0);
+    assert!(
+        binding.tx_pipeline.pending_tx_local.is_empty(),
+        "a V2-stamped fabric policy reject must not queue a stamp-addressed RST"
+    );
+    assert_eq!(batch.policy_reject_sent, 0);
+    assert_eq!(batch.policy_reject_reply_budget_drops, 0);
+    assert_eq!(batch.policy_reject_rate_limit_drops, 0);
+    assert_eq!(sessions.len(), 0);
+}
+
+/// #12051 B2: an ACK miss on a V1-stamped fabric punt with dmz tcp-rst enabled
+/// still records the strict-SYN drop, but never reflects the synthetic stamp.
+#[test]
+fn stamped_fabric_session_miss_tcp_rst_is_suppressed_on_real_poll_12051() {
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let forwarding = build_forwarding_state(&reject_fabric_snapshot(true));
+    assert!(forwarding.zone_tcp_rst_enabled(TEST_DMZ_ZONE_ID));
+    let frame = stamped_fabric_frame(TEST_DMZ_ZONE_ID, TCP_FLAG_ACK);
+    let meta = txn_meta_v4(21, TCP_FLAG_ACK, frame.len() as u16);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
+    let mut binding = fabric_binding();
+    let mut sessions = SessionTable::new();
+
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+
+    assert_eq!(dbg.rx, 1, "the descriptor must reach the poll path");
+    assert!(dbg.session_miss >= 1, "the bare ACK must exercise a session miss");
+    assert_eq!(batch.invalid_fabric_stamp_drops, 0);
+    assert_eq!(batch.screen_drops, 1, "the strict-SYN miss remains counted");
+    assert_eq!(batch.policy_reject_sent, 0);
+    assert_eq!(batch.filter_reject_sent, 0);
+    assert_eq!(batch.policy_reject_reply_budget_drops, 0);
+    assert_eq!(batch.policy_reject_rate_limit_drops, 0);
+    assert_eq!(sessions.len(), 0);
+    assert!(binding.scratch.scratch_forwards.is_empty());
+    assert!(
+        binding.tx_pipeline.pending_tx_local.is_empty(),
+        "a V1-stamped session miss must not queue a stamp-addressed RST"
+    );
 }
