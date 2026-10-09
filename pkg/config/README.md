@@ -1190,7 +1190,7 @@ rejected. VPN-object validation, such as the separate missing-bind-interface
 gate (#10638), is independent.
 
 
-**Tolerant policy enforcement poison (#5575, #11013, #11014, #11023):** the #1960
+**Tolerant policy enforcement poison (#5575, #11013, #11014, #11023, #12244):** the #1960
 lenient downgrade keeps the daemon booting, but the compiler may silently drop
 authored enforcement or audit content. Missing required match dimensions
 (#3044) and unsupported `match` leaves / `then permit` modifiers (#3113/#3114)
@@ -1198,8 +1198,10 @@ can widen a rule; an unsupported `then` sibling such as `next term` (#11013)
 can leave an earlier direct permit active; an unknown `then log` mode (#11023)
 silently drops configured session logging; and an unknown policy-level `term`
 or `session-options` subtree can carry enforcement constraints discarded by the
-compiler (#11014). `compilePolicy` sets `Policy.LenientContentDropped` for these
-cases: shared AST predicates cover the existing match/permit gates,
+compiler (#11014). For these dropped-content causes, `compilePolicy` sets
+`Policy.LenientContentDropped`; `runEarlyStrictAndFolds` also sets it for
+undefined-scheduler DENY/REJECT policies (#12244), which would otherwise load
+inactive. Shared AST predicates cover the existing match/permit gates,
 `policyUnsupportedThenSiblings` checks child and compact `then` tails,
 `policyUnsupportedThenLogTokens` checks log-leaf values and compact `then`
 tails. `policyDroppedEnforcementSubtrees` distinguishes enforcement-bearing

@@ -293,10 +293,11 @@ type compileOpts struct {
 	// A policy naming a scheduler that was deleted, renamed, or typo'd would
 	// otherwise BRICK boot and peer-sync (#11071, #1960 class): an already-
 	// persisted or synced config may carry the dangling reference and must
-	// still boot. The dataplane resolves an unknown scheduler name to
-	// inactive (policyRuleInactive: !ok => true), so the leniently-loaded
-	// policy degrades to dropped-rule fail-closed on that boot. Commit /
-	// commit-check stay strict. Same doctrine as lenientSchedulerMapRef.
+	// still boot. An unknown name maps to inactive
+	// (policyRuleInactive: !ok => true): permits are dropped fail-closed,
+	// while DENY/REJECT rules poison and refuse the userspace snapshot (#12244)
+	// rather than silently never denying. Commit / commit-check stay strict.
+	// Same doctrine as lenientSchedulerMapRef.
 	lenientPolicySchedulerRef bool
 
 	// lenientSchedulerMapRef downgrades the class-of-service

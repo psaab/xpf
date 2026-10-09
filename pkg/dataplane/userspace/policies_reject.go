@@ -74,7 +74,8 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 		}
 		srcBad := addressListHasSentinel(rule.SourceLiterals) || addressListHasSentinel(rule.SourceAddresses)
 		dstBad := addressListHasSentinel(rule.DestinationLiterals) || addressListHasSentinel(rule.DestinationAddresses)
-		if !appBad && !srcBad && !dstBad {
+		schedulerBad := rule.rejectedScheduler != ""
+		if !appBad && !srcBad && !dstBad && !schedulerBad {
 			continue
 		}
 		// #3376: name the stable rule identity (scope-qualified, so duplicate
@@ -91,6 +92,9 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 		}
 		if appBad {
 			causes = append(causes, rejectionCause("application", rule.rejectedApplications))
+		}
+		if schedulerBad {
+			causes = append(causes, rejectionCause("scheduler", []string{rule.rejectedScheduler}))
 		}
 		reasons = append(reasons, fmt.Sprintf("policy %s names content the userspace matcher cannot represent: %s",
 			policyRejectionScope(rule), strings.Join(causes, "; ")))
