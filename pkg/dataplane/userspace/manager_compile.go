@@ -1125,6 +1125,7 @@ func (m *Manager) rebuildScheduledPolicySectionsWithLatchLocked(next *ConfigSnap
 	// must equal len(next.Policies).
 	next.Summary.PolicyCount = len(policies)
 	next.AddressBooks = books
+	invalidatePolicySnapshotIdentity(next)
 	next.Capabilities.PolicyContentRejected = collectPolicyContentRejections(policies)
 	next.Capabilities.PolicyContentRejected = append(next.Capabilities.PolicyContentRejected,
 		collectAddressBookFamilyRejections(books)...)

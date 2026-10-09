@@ -671,3 +671,50 @@ func TestDeferredPolicyRecoveryRejectsChangedPolicyOrRenameIdentity12072(t *test
 		})
 	}
 }
+func TestDeferredPolicyRecoveryInvalidatesProofAfterScheduledPartial12072(t *testing.T) {
+	f, targetCfg, ancestry, rebinds := deferredPolicyRecoveryFixture12072(t)
+	m := f.m
+	listRequests := servePolicyList12072(t, m)
+	captureCalls := 0
+	m.SetPolicySnapshotPrePublisher(func(generation uint64) error {
+		captureCalls++
+		return readDeferredPolicyMetadata12072(m, generation, ancestry, rebinds)
+	})
+	f.model.scriptDrops(1)
+	m.mu.Lock()
+	initialPrepared := m.prepareDeferredPolicySnapshotLocked()
+	initialErr := m.syncSnapshotLocked()
+	initialUnknown := m.applySnapshotOutcomeUnknown
+	stampedIdentity := m.policySnapshotPrepublishIdentity
+	m.mu.Unlock()
+	if !initialPrepared || initialErr == nil || !initialUnknown || captureCalls != 1 {
+		t.Fatalf("lost-ACK setup = prepared:%v err:%v unknown:%v capture:%d",
+			initialPrepared, initialErr, initialUnknown, captureCalls)
+	}
+
+	assertInitialDeferredPolicyList12072(t, listRequests)
+
+	if err := m.UpdatePolicyScheduleState(targetCfg, map[string]bool{}); err != nil {
+		t.Fatalf("scheduled partial update: %v", err)
+	}
+	m.mu.Lock()
+	updatedIdentity, identityOK := policySnapshotIdentity(m.lastSnapshot)
+	if !identityOK || updatedIdentity == stampedIdentity {
+		m.mu.Unlock()
+		t.Fatalf("scheduled partial retained stale proof identity: ok=%v equal=%v",
+			identityOK, updatedIdentity == stampedIdentity)
+	}
+	m.lastSnapshot.Generation++
+	m.generation = m.lastSnapshot.Generation
+	m.publishedSnapshot = m.lastSnapshot.Generation - 1
+	m.pendingFullSnapshotMetadata = true
+	m.applySnapshotOutcomeUnknown = true
+	prepared := m.prepareDeferredPolicySnapshotLocked()
+	unknown := m.applySnapshotOutcomeUnknown
+	m.mu.Unlock()
+	if prepared || !unknown || captureCalls != 2 || len(listRequests) != 0 {
+		t.Fatalf("recovery reused pre-scheduler proof: prepared:%v unknown:%v capture:%d list:%d",
+			prepared, unknown, captureCalls, len(listRequests))
+	}
+	requireNoDeferredPolicyList12072(t, listRequests)
+}
