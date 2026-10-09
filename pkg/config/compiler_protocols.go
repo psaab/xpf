@@ -595,9 +595,14 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 							// without RFC 5549 extended-nexthop (which this
 							// config model has no knob for) activating an IPv4
 							// address for IPv6 unicast is invalid and breaks the
-							// peer's AF activation. So an IPv4-addressed neighbor
-							// inherits only the group's inet flag, an
-							// IPv6-addressed neighbor only inet6.
+							// peer's AF activation.
+							//
+							// FRRAddrFamily is the shared family predicate
+							// (#9820). Mapped IPv6 literals (::ffff:a.b.c.d)
+							// remain v6 here, matching the renderer's
+							// colon-bearing IPv6 classification; net.IP.To4()
+							// incorrectly folds them to v4 and can leave them
+							// active in no address family (#12185).
 							//
 							// An address that does not parse (a hostname/peer-
 							// group template or a malformed value) is left to
@@ -605,12 +610,11 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 							// pre-#2454 behavior for the non-literal-IP case
 							// rather than silently dropping a family.
 							inheritInet, inheritInet6 := familyInet, familyInet6
-							if ip := net.ParseIP(nAddr); ip != nil {
-								if ip.To4() != nil {
-									inheritInet6 = false
-								} else {
-									inheritInet = false
-								}
+							switch FRRAddrFamily(nAddr) {
+							case "v4":
+								inheritInet6 = false
+							case "v6":
+								inheritInet = false
 							}
 							// #9192: FIND-OR-CREATE on (GroupName, Address),
 							// instead of appending one *BGPNeighbor per AST

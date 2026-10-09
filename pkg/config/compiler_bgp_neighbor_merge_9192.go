@@ -199,6 +199,33 @@ func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ow
 		case "family":
 			applyNeighborFamily := func(familyNode *Node, afi string) error {
 				scope := fmt.Sprintf("BGP neighbor %q family %s", neighbor.Address, afi)
+				// An explicit per-neighbor inet on an IPv6-literal peer
+				// cannot be rendered: xpf has no RFC 8950 extended-next-hop.
+				// Without a guard, the IPv4 AF cannot receive its policies;
+				// an inet-only peer can land in no AF while FRR's default
+				// IPv4-unicast activation claims it without those policies.
+				// Use FRRAddrFamily, the shared FRR address predicate (#9820),
+				// so IPv4-mapped IPv6 literals classify consistently with
+				// group inheritance and rendering.
+				if afi == "inet" && FRRAddrFamily(neighbor.Address) == "v6" {
+					msg := fmt.Sprintf(
+						"%s: family inet on IPv6 peer %q requires RFC 8950 extended-next-hop support, "+
+							"which xpf does not render; FRR's default ipv4-unicast can otherwise "+
+							"activate this peer without its import/export policy (#12185)",
+						scope, neighbor.Address)
+					if !opts.lenientBGPCrossFamily12185 {
+						return fmt.Errorf("%s", msg)
+					}
+					if !neighbor.CrossFamilyInet && warnings != nil {
+						*warnings = append(*warnings, msg)
+					}
+					neighbor.CrossFamilyInet = true
+					// A family inherited from a group is equally inert on this
+					// peer; clear it so the renderer takes the explicit IPv4
+					// deactivation arm instead of losing the peer in no AF.
+					neighbor.FamilyInet = false
+					return nil
+				}
 				unicast, unsupported, err := applyBGPFamilySAFI11815(familyNode, scope, opts, warnings)
 				if err != nil {
 					return err

@@ -1649,6 +1649,17 @@ defense-in-depth the renderer's `bgpComposedChainCollision` (invoked by
 composed name still collides, so the collision cannot leak even when the strict
 gate was bypassed.
 
+**Per-neighbor `family inet` on an IPv6 BGP peer is rejected (#12185):** the
+compiler used to preserve this explicit flag without checking the address,
+although the FRR renderer cannot activate IPv4 unicast over an IPv6 peer without
+RFC 8950 extended-next-hop support. Strict compilation now rejects the shape
+instead of changing the authored family; tolerant loads warn and leave the inet
+family inert, with an explicit IPv4-unicast deactivation so FRR's default cannot
+activate the peer without its inet policies. A separately declared inet6 family
+remains independent. Group-inherited families use the shared `FRRAddrFamily`
+predicate (#9820), which classifies IPv4-mapped IPv6 literals as IPv6, matching
+the FRR renderer and preventing them from inheriting inet only (#2454).
+
 **Policy-referenced application protocols are validated against the dataplane
 resolver (#3150 — codex-review-067 finding 067-06):** a user-defined
 `set applications application <name> protocol <token>` that is REFERENCED by a

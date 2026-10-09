@@ -1437,6 +1437,18 @@ step. Both are required — neither sees the other's case:
   IPv6 unicast. The fail-on-revert render and FRR config-load cell is
   `TestFamilylessIPv6NeighborWithoutPolicyIsV6Only11564`.
 
+- **Explicit per-neighbor `family inet` on an IPv6 peer is unsupported (#12185).**
+  xpf does not render RFC 8950 extended-next-hop, so this cross-family
+  declaration cannot be activated safely. Strict compilation rejects it;
+  tolerant load warns, leaves the inet family inert, and emits an explicit
+  IPv4-unicast deactivation so FRR's default activation cannot bypass the
+  missing policies. A separately declared `inet6` family remains independent.
+  The group-inheritance gate classifies mapped IPv6 literals as IPv6, matching
+  the renderer. The `TestBGPPerNeighborCrossFamily12185FailsClosedInFRR` and
+  mapped-family render tests check address-family state. The former uses
+  `vtysh -C` for a grammar-only parse with an invalid-command negative control;
+  it does not test live BGP config loading.
+
 - **BGP neighbor control attributes are address-family scoped (#11460).**
   `route-reflector-client`, `allowas-in`, and `remove-private-AS` belong in
   the IPv4/IPv6 unicast block for the neighbor activated in that family; FRR's
