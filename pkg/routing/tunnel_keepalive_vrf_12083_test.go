@@ -62,6 +62,12 @@ func TestKeepaliveScopedICMPSocketRoundTrip12083(t *testing.T) {
 	defer func() { listenICMP = original }()
 
 	result, kind, reason := (icmpProber{}).Probe("test-instance", "127.0.0.1", "127.0.0.1", 12083, []byte("ka12083!"), time.Second)
+	if result == ProbeUnsupported && kind == UnsupportedStructural && (strings.Contains(reason, "permission denied") || strings.Contains(reason, "operation not permitted")) {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatalf("ICMP datagram socket denied with XPF_REQUIRE_NETNS set: %s", reason)
+		}
+		t.Skipf("ICMP datagram socket denied (ping_group_range/CAP_NET_RAW): %s", reason)
+	}
 	if result != ProbeAlive || kind != UnsupportedNone {
 		t.Fatalf("loopback probe over scoped socket = result %v, kind %v, reason %q; want Alive", result, kind, reason)
 	}
@@ -108,6 +114,10 @@ func TestTunnelKeepaliveVRFHeldSourcePeerAlive12083(t *testing.T) {
 func tunnelKeepaliveVRFNetnsChild12083(t *testing.T) {
 	t.Helper()
 	fmt.Println("NETNS-CHILD-STARTED-12083")
+	if err := os.WriteFile("/proc/sys/net/ipv4/ping_group_range", []byte("0 0"), 0o644); err != nil {
+		fmt.Printf("NETNS-CHILD-SKIPPED-12083: widen ping_group_range: %v\n", err)
+		t.Skipf("cannot widen ping_group_range in netns: %v", err)
+	}
 	probeConn, err := listenICMP("udp4", "0.0.0.0", "")
 	if err != nil {
 		fmt.Printf("NETNS-CHILD-SKIPPED-12083: ICMP datagram socket setup: %v\n", err)
