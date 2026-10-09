@@ -1116,7 +1116,7 @@ DNAT/static-NAT/NPTv6/NAT64 is configured, callers must supply the
 post-translation (real-server) `destination-ip`/`destination-port`, not the VIP.
 CLI surfaces print this input requirement with their verdicts. Selectors:
 `source-ip`, `destination-ip`, `source-port`, `destination-port`,
-`icmp-type`, `icmp-code`, `ingress-interface` (#5579), and the valueless
+`protocol <name|number>`, `icmp-type`, `icmp-code`, `ingress-interface` (#5579),
 `non-first-fragment` (#5572). `from-zone` and `to-zone` are required; an OMITTED
 selector matches any.
 

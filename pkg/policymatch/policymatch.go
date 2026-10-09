@@ -344,7 +344,7 @@ const TestPolicyUsage = "usage: test policy" + matchPoliciesUsageTail
 
 // PostNATInputRequirementNote describes the policy-only simulator's tuple-stage
 // contract when inbound destination translation is configured.
-const PostNATInputRequirementNote = "Inbound destination NAT is not simulated: destination-ip and destination-port must be supplied as the post-DNAT/post-translation (real-server) tuple, not the pre-NAT VIP."
+const PostNATInputRequirementNote = "Inbound destination NAT is not simulated. Supply the post-DNAT/post-translation (real-server) tuple, not the pre-NAT VIP: use CLI destination-ip/destination-port or REST dst_ip/dst_port."
 
 func postNATInputNote(cfg *config.Config) string {
 	if cfg == nil {

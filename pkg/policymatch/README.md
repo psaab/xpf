@@ -12,13 +12,6 @@ Single operator-side security-policy simulator shared by every
 Each surface is a THIN adapter: it parses/validates inputs and renders the
 verdict, then delegates the matching to `policymatch.Match`.
 
-## Destination NAT tuple stage (#12246)
-
-`Match` is policy-only and does not perform inbound destination NAT. When
-DNAT, static NAT, NPTv6, or NAT64 is configured, callers must supply the
-post-translation destination address and port. Shared usage text and
-`Result.PostNATInputNote` expose this requirement on operator-facing surfaces.
-
 It also holds the policy **shadow / redundancy lint** behind
 `request security policies check`, for the same reason and by the same rule:
 
@@ -39,6 +32,13 @@ it, and `pkg/grpcapi` cannot import `pkg/cli` (`pkg/cli` imports
 `pkg/grpcapi`), so a server-side implementation had to be either a second copy
 of the analysis or a move. `pkg/cli/policy_check_surface_agreement_8597_test.go`
 pins that the two surfaces render identically.
+
+## Destination NAT tuple stage (#12246)
+
+`Match` is policy-only and does not perform inbound destination NAT. When
+DNAT, static NAT, NPTv6, or NAT64 is configured, callers must supply the
+post-translation destination address and port. Shared usage text and
+`Result.PostNATInputNote` expose this requirement on operator-facing surfaces.
 
 ## Port input validation (#3116)
 
