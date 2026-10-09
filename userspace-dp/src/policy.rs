@@ -3728,7 +3728,7 @@ fn evaluate_policy_result_counted(
     // so every dropped packet re-evaluates here); for default-PERMIT this is
     // the first-packet count and the established fast path re-counts the rest
     // via the reserved handle below. Mirrors the per-rule `rule.hit_counter.add`
-    // in `try_match_rule`.
+    // in `apply_frag_deny_override_and_count`.
     state.default_counter.add_if(packet_len, hit_count);
     PolicyEvaluationResult {
         action: state.default_action,

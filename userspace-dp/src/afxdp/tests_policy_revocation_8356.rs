@@ -3304,7 +3304,7 @@ fn a_default_policy_of_reject_does_not_revoke_a_permitted_flow_9381() {
 // The module header used to state side-effect freedom as a STRUCTURAL property:
 // `evaluate_policy_result_with_icmp` "takes `&PolicyState` and RETURNS a counter
 // handle ...; it cannot count, log or meter by itself." True of the HANDLE,
-// false of the EVALUATION. `try_match_rule` calls `rule.hit_counter.add` on
+// false of the EVALUATION. `apply_frag_deny_override_and_count` calls `rule.hit_counter.add` on
 // every match and the implicit-default path calls `state.default_counter.add`,
 // and `&PolicyState` does not prevent either: the counters are ATOMICS behind
 // shared references, so an immutable borrow is not the guarantee the claim
