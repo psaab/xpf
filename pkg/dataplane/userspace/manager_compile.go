@@ -1093,9 +1093,8 @@ func (m *Manager) rebuildScheduledPolicySectionsWithLatchLocked(next *ConfigSnap
 	// retry and the next tick reconverges once cfg's full apply lands
 	// (m.lastSnapshot.Config == cfg) — the #3780 retry semantics already handle it.
 	if m.lastSnapshot != nil && routeOnlyPublishHybrid(cfg, m.lastSnapshot.Config) {
-		return fmt.Errorf("refusing scheduled-policy republish: cfg carries a zone/policy " +
-			"generation the inherited dataplane snapshot does not reflect; rebuilding and " +
-			"scrubbing against it could drop a live-zone policy and ship a fail-open snapshot (#6480)")
+		return fmt.Errorf("refusing scheduled-policy republish: cfg content differs from the inherited " +
+			"snapshot; rebuilding only scheduler sections could publish a hybrid config (#6480)")
 	}
 	feedOverlay := cloneFeedOverlay(m.feedOverlay)
 	// #2514 / #1606: build the rows and IDs once, then share the IDs with
