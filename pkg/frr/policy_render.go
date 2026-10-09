@@ -624,8 +624,7 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		// and `on-match next`/`exit`. seqFam scopes which family-specific
 		// clauses are emitted:
 		//   - ""   single (unsplit) sequence — the term has homogeneous or
-		//          no route-filters; ALL clauses emit (byte-identical to the
-		//          pre-#2607 render).
+		//          no route-filters; ALL clauses emit on one sequence.
 		//   - "v4" / "v6" one half of a SPLIT mixed-family route-filter
 		//          term — only that family's route-filter entries + match
 		//          line are emitted, and `from prefix-list` is emitted only
@@ -725,7 +724,7 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				// route-map sequence, so BOTH families bind their own `match
 				// ip|ipv6 address` line and neither family's routes silently
 				// fail the term (#2607). A single-family or undefined/empty list
-				// yields exactly one ref, byte-identical to the pre-#2607 render.
+				// yields exactly one ref with the same match behavior.
 				// FRR keeps `ip` and `ipv6` prefix-lists in independent
 				// namespaces, so `match ip address prefix-list PL` resolves to PL's
 				// v4 entries and `match ipv6 address prefix-list PL` to its v6
@@ -967,8 +966,8 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		// Decide single vs split. A term splits ONLY when its route-filters
 		// genuinely mix families (at least one v4 AND one v6 prefix). A
 		// homogeneous or empty route-filter set renders as today — ONE
-		// sequence, ONE plName, byte-identical output (no churn for the
-		// common case).
+		// sequence, ONE derived plName; the common case stays structurally
+		// unchanged.
 		// Independent expansion dimensions multiply the number of emitted
 		// sequences:
 		//   (a) route-filters that genuinely mix families (#2607) - one
@@ -990,9 +989,7 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 		// matches — the Junos semantics.
 		//
 		// The common single-valued / no-match case collapses to ONE
-		// sequence with the historical plName, byte-identical to master:
-		// each OR-set defaults to a single "" sentinel.
-		plName := plPrefix + "-" + term.Name
+		// sequence; each OR-set defaults to a single "" sentinel.
 		v4rf, v6rf := partitionRouteFiltersByFamily(term.RouteFilters)
 		mixedFamily := len(term.RouteFilters) > 0 && len(v4rf) > 0 && len(v6rf) > 0
 
@@ -1059,17 +1056,18 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			// but the distinct NAME keeps the two match lines referencing
 			// disjoint single-family lists). Within each group the from-* OR
 			// cross-product is emitted; v4 first.
-			emitVariants("v4", v4rf, plName+"_v4")
-			emitVariants("v6", v6rf, plName+"_v6")
+			emitVariants("v4", v4rf, inlinePrefixListName(routeMapName, plPrefix, term.Name, "_v4"))
+			emitVariants("v6", v6rf, inlinePrefixListName(routeMapName, plPrefix, term.Name, "_v6"))
 		} else {
 			// Homogeneous or no route-filters: one family group. Pass the
 			// full (possibly empty) indexed route-filter set and the
-			// historical plName. With no repeated from-* matches this is a
-			// single sequence, byte-identical to master.
+			// derived plName. With no repeated from-* matches this is a
+			// single sequence.
 			all := make([]indexedRouteFilter, len(term.RouteFilters))
 			for i, rf := range term.RouteFilters {
 				all[i] = indexedRouteFilter{i, rf}
 			}
+			plName := inlinePrefixListName(routeMapName, plPrefix, term.Name, "")
 			emitVariants("", all, plName)
 		}
 	}

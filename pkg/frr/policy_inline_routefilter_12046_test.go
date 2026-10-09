@@ -74,16 +74,19 @@ func TestInlineRouteFilterDefinitionsPrecedeRouteMaps12046(t *testing.T) {
 		},
 	}
 	section := New().buildManagedSection(&FullConfig{PolicyOptions: po})
+	v4Name := inlinePrefixListName("V4", "V4", "t", "")
+	v6Name := inlinePrefixListName("V6", "V6", "t", "")
+	aclRouteFilterName := inlinePrefixListName("ACL", "ACL", "t", "")
 
-	assertInlineDefinitionsBeforePolicyRouteMap12046(t, section, "V4", "ip prefix-list V4-t seq 5 permit 10.0.0.0/8 le 32\n")
-	assertInlineDefinitionsBeforePolicyRouteMap12046(t, section, "V6", "ipv6 prefix-list V6-t seq 5 permit 2001:db8::/32 le 128\n")
+	assertInlineDefinitionsBeforePolicyRouteMap12046(t, section, "V4", "ip prefix-list "+v4Name+" seq 5 permit 10.0.0.0/8 le 32\n")
+	assertInlineDefinitionsBeforePolicyRouteMap12046(t, section, "V6", "ipv6 prefix-list "+v6Name+" seq 5 permit 2001:db8::/32 le 128\n")
 	aclName := routeFilterACLName("FROM", "ip")
 	assertInlineDefinitionsBeforePolicyRouteMap12046(t, section, "ACL", fmt.Sprintf("access-list %s seq 5 permit 10.1.0.0/16 exact-match\n", aclName))
 
 	for _, want := range []string{
-		" match ip address prefix-list V4-t\n",
-		" match ipv6 address prefix-list V6-t\n",
-		" match ip address prefix-list ACL-t\n",
+		" match ip address prefix-list " + v4Name + "\n",
+		" match ipv6 address prefix-list " + v6Name + "\n",
+		" match ip address prefix-list " + aclRouteFilterName + "\n",
 		" match ip address " + aclName + "\n",
 	} {
 		if !strings.Contains(section, want) {
@@ -115,23 +118,27 @@ func TestComposedRouteFilterDefinitionsPrecedeRouteMap12046(t *testing.T) {
 	section := New().buildManagedSection(fc)
 
 	assertInlineDefinitionsBeforePolicyRouteMap12046(t, section, composed,
-		"ip prefix-list "+composed+"-A-t seq 5 permit 10.0.0.0/8 le 32\n",
-		"ipv6 prefix-list "+composed+"-B-t seq 5 permit 2001:db8::/32 le 128\n",
+		"ip prefix-list "+inlinePrefixListName(composed, composed+"-A", "t", "")+" seq 5 permit 10.0.0.0/8 le 32\n",
+		"ipv6 prefix-list "+inlinePrefixListName(composed, composed+"-B", "t", "")+" seq 5 permit 2001:db8::/32 le 128\n",
 	)
 	assertNoTopLevelLineInsideRouteMap12046(t, section)
 }
 
 func TestQNHRouteFilterDefinitionsPrecedeRouteMap12046(t *testing.T) {
 	policy := &config.PolicyStatement{Name: "P", Terms: []*config.PolicyTerm{{
-		Name: "t", RouteFilters: []*config.RouteFilter{{Prefix: "10.0.0.0/8", MatchType: "orlonger"}}, Action: "accept",
+		Name: "t", FromProtocols: []string{"static"}, RouteFilters: []*config.RouteFilter{{Prefix: "10.0.0.0/8", MatchType: "orlonger"}}, Action: "accept",
 	}}}
 	po := &config.PolicyOptionsConfig{PolicyStatements: map[string]*config.PolicyStatement{"P": policy}}
-	scope := &qnhMetricScope11447{routes: []qnhMetricRoute11447{{
-		destination: "192.0.2.0/24", destinationList: "QNH-DEST", metric: 20,
-	}}}
+	scope := &qnhMetricScope11447{
+		policyMaps: map[string]string{"P": "QNH-P"},
+		routes: []qnhMetricRoute11447{{
+			destination: "192.0.2.0/24", destinationList: "QNH-DEST", metric: 20,
+		}},
+	}
+	qnhMetrics := &qnhMetricSet11447{global: scope}
+	rendered := New().generatePolicyOptionsWithQNH11447(po, nil, qnhMetrics)
 
-	rendered := New().renderQNHMetricPolicyMap11447(po, "QNH-P", policy, scope)
 	assertInlineDefinitionsBeforePolicyRouteMap12046(t, rendered, "QNH-P",
-		"ip prefix-list QNH-P-t seq 5 permit 10.0.0.0/8 le 32\n")
+		"ip prefix-list "+inlinePrefixListName("QNH-P", "QNH-P", "t", "")+" seq 5 permit 10.0.0.0/8 le 32\n")
 	assertNoTopLevelLineInsideRouteMap12046(t, rendered)
 }

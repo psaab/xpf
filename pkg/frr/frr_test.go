@@ -4058,13 +4058,14 @@ func TestRouteFilterExactFRR(t *testing.T) {
 		},
 	}
 	got := m.generatePolicyOptions(po)
+	inlineName := inlinePrefixListName("to-firewall", "to-firewall", "default_v4", "")
 
 	// Each exact route-filter should generate a prefix-list entry without ge/le
 	checks := []string{
-		"ip prefix-list to-firewall-default_v4 seq 5 permit 192.168.50.0/24\n",
-		"ip prefix-list to-firewall-default_v4 seq 10 permit 192.168.99.0/24\n",
-		"ip prefix-list to-firewall-default_v4 seq 15 permit 172.16.100.0/22\n",
-		"match ip address prefix-list to-firewall-default_v4",
+		"ip prefix-list " + inlineName + " seq 5 permit 192.168.50.0/24\n",
+		"ip prefix-list " + inlineName + " seq 10 permit 192.168.99.0/24\n",
+		"ip prefix-list " + inlineName + " seq 15 permit 172.16.100.0/22\n",
+		"match ip address prefix-list " + inlineName,
 		"route-map to-firewall permit 10",
 		"route-map to-firewall deny 20",
 	}
@@ -4103,9 +4104,10 @@ func uptoPolicyOptions(prefix string, uptoLen int) *config.PolicyOptionsConfig {
 // default "le 32"/"le 128" that the pre-fix code produced by falling
 // through the match-type switch.
 func TestRouteFilterUptoFRR(t *testing.T) {
+	inlineName := inlinePrefixListName("p", "p", "t1", "")
 	t.Run("v4_upto24", func(t *testing.T) {
 		got := New().generatePolicyOptions(uptoPolicyOptions("10.0.0.0/8", 24))
-		if !strings.Contains(got, "ip prefix-list p-t1 seq 5 permit 10.0.0.0/8 le 24\n") {
+		if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 5 permit 10.0.0.0/8 le 24\n") {
 			t.Errorf("want bare 'le 24' line, got:\n%s", got)
 		}
 		if strings.Contains(got, "le 32") {
@@ -4118,7 +4120,7 @@ func TestRouteFilterUptoFRR(t *testing.T) {
 
 	t.Run("v6_upto48", func(t *testing.T) {
 		got := New().generatePolicyOptions(uptoPolicyOptions("2001:db8::/32", 48))
-		if !strings.Contains(got, "ipv6 prefix-list p-t1 seq 5 permit 2001:db8::/32 le 48\n") {
+		if !strings.Contains(got, "ipv6 prefix-list "+inlineName+" seq 5 permit 2001:db8::/32 le 48\n") {
 			t.Errorf("want bare 'le 48' line, got:\n%s", got)
 		}
 		if strings.Contains(got, "le 128") {
@@ -4134,7 +4136,7 @@ func TestRouteFilterUptoFRR(t *testing.T) {
 	// render a bare prefix with no le/ge.
 	t.Run("v4_upto_eq_plen_is_exact", func(t *testing.T) {
 		got := New().generatePolicyOptions(uptoPolicyOptions("10.0.0.0/8", 8))
-		if !strings.Contains(got, "ip prefix-list p-t1 seq 5 permit 10.0.0.0/8\n") {
+		if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 5 permit 10.0.0.0/8\n") {
 			t.Errorf("want bare 'permit 10.0.0.0/8' (exact) line, got:\n%s", got)
 		}
 		if strings.Contains(got, "le ") || strings.Contains(got, "ge ") {
@@ -4147,7 +4149,7 @@ func TestRouteFilterUptoFRR(t *testing.T) {
 	// FRR line.
 	t.Run("v4_upto_zero_degrades_to_default", func(t *testing.T) {
 		got := New().generatePolicyOptions(uptoPolicyOptions("10.0.0.0/8", 0))
-		if !strings.Contains(got, "ip prefix-list p-t1 seq 5 permit 10.0.0.0/8 le 32\n") {
+		if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 5 permit 10.0.0.0/8 le 32\n") {
 			t.Errorf("UptoLen 0 must degrade to default 'le 32', got:\n%s", got)
 		}
 		if strings.Contains(got, "ge ") {
@@ -4196,7 +4198,7 @@ func TestRouteFilterUptoFRR(t *testing.T) {
 	// v4 ==plen case (Codex #2102 coverage gap).
 	t.Run("v6_upto_eq_plen_is_exact", func(t *testing.T) {
 		got := New().generatePolicyOptions(uptoPolicyOptions("2001:db8::/32", 32))
-		if !strings.Contains(got, "ipv6 prefix-list p-t1 seq 5 permit 2001:db8::/32\n") {
+		if !strings.Contains(got, "ipv6 prefix-list "+inlineName+" seq 5 permit 2001:db8::/32\n") {
 			t.Errorf("v6 upto /32 on a /32 must be exact, got:\n%s", got)
 		}
 		if strings.Contains(got, "le ") || strings.Contains(got, "ge ") {
@@ -4209,7 +4211,7 @@ func TestRouteFilterUptoFRR(t *testing.T) {
 	// default (le 32), NOT silently render exact (Codex #2102 MAJOR #2).
 	t.Run("v4_default_route_unset_upto_degrades_not_exact", func(t *testing.T) {
 		got := New().generatePolicyOptions(uptoPolicyOptions("0.0.0.0/0", 0))
-		if !strings.Contains(got, "ip prefix-list p-t1 seq 5 permit 0.0.0.0/0 le 32\n") {
+		if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 5 permit 0.0.0.0/0 le 32\n") {
 			t.Errorf("/0 with unset upto must degrade to 'le 32', not exact, got:\n%s", got)
 		}
 	})
@@ -4218,7 +4220,7 @@ func TestRouteFilterUptoFRR(t *testing.T) {
 	// guard must not block a legitimately-parsed length).
 	t.Run("v4_default_route_upto24", func(t *testing.T) {
 		got := New().generatePolicyOptions(uptoPolicyOptions("0.0.0.0/0", 24))
-		if !strings.Contains(got, "ip prefix-list p-t1 seq 5 permit 0.0.0.0/0 le 24\n") {
+		if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 5 permit 0.0.0.0/0 le 24\n") {
 			t.Errorf("/0 upto /24 must render 'le 24', got:\n%s", got)
 		}
 	})
@@ -4229,7 +4231,7 @@ func TestRouteFilterUptoFRR(t *testing.T) {
 	// Codex #2102 MAJOR #1 case. Must render bare exact, never "le 32".
 	t.Run("v4_max_length_upto_below_plen_is_exact", func(t *testing.T) {
 		got := New().generatePolicyOptions(uptoPolicyOptions("192.0.2.1/32", 31))
-		if !strings.Contains(got, "ip prefix-list p-t1 seq 5 permit 192.0.2.1/32\n") {
+		if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 5 permit 192.0.2.1/32\n") {
 			t.Errorf("/32 upto /31 must render bare exact, got:\n%s", got)
 		}
 		if strings.Contains(got, "le 32") {
@@ -4239,7 +4241,7 @@ func TestRouteFilterUptoFRR(t *testing.T) {
 
 	t.Run("v6_max_length_upto_below_plen_is_exact", func(t *testing.T) {
 		got := New().generatePolicyOptions(uptoPolicyOptions("2001:db8::1/128", 127))
-		if !strings.Contains(got, "ipv6 prefix-list p-t1 seq 5 permit 2001:db8::1/128\n") {
+		if !strings.Contains(got, "ipv6 prefix-list "+inlineName+" seq 5 permit 2001:db8::1/128\n") {
 			t.Errorf("/128 upto /127 must render bare exact, got:\n%s", got)
 		}
 		if strings.Contains(got, "le 128") {
@@ -4251,7 +4253,7 @@ func TestRouteFilterUptoFRR(t *testing.T) {
 	// valid "le N" (plen < N < maxLen).
 	t.Run("v4_upto_near_max", func(t *testing.T) {
 		got := New().generatePolicyOptions(uptoPolicyOptions("10.0.0.0/8", 31))
-		if !strings.Contains(got, "ip prefix-list p-t1 seq 5 permit 10.0.0.0/8 le 31\n") {
+		if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 5 permit 10.0.0.0/8 le 31\n") {
 			t.Errorf("/8 upto /31 must render 'le 31', got:\n%s", got)
 		}
 	})
@@ -4284,20 +4286,22 @@ func TestRouteFilterUpto_MixedFamilyTerm(t *testing.T) {
 		},
 	}
 	got := New().generatePolicyOptions(po)
+	inlineV4Name := inlinePrefixListName("p", "p", "t1", "_v4")
+	inlineV6Name := inlinePrefixListName("p", "p", "t1", "_v6")
 	// v4 upto renders an FRR-valid bare "le 24" entry in the _v4 list.
-	if !strings.Contains(got, "ip prefix-list p-t1_v4 seq 5 permit 10.0.0.0/8 le 24\n") {
+	if !strings.Contains(got, "ip prefix-list "+inlineV4Name+" seq 5 permit 10.0.0.0/8 le 24\n") {
 		t.Errorf("v4 upto entry missing/wrong in mixed term:\n%s", got)
 	}
 	// v6 exact renders a bare ipv6 entry (no le/ge) in the _v6 list.
-	if !strings.Contains(got, "ipv6 prefix-list p-t1_v6 seq 10 permit 2001:db8::/32\n") {
+	if !strings.Contains(got, "ipv6 prefix-list "+inlineV6Name+" seq 10 permit 2001:db8::/32\n") {
 		t.Errorf("v6 exact entry missing/wrong in mixed term:\n%s", got)
 	}
 	// BOTH families are bound — one match line per family, each on its own
 	// route-map sequence (the #2607 fix).
-	if !strings.Contains(got, "match ip address prefix-list p-t1_v4\n") {
+	if !strings.Contains(got, "match ip address prefix-list "+inlineV4Name+"\n") {
 		t.Errorf("v4 match line missing in split mixed term:\n%s", got)
 	}
-	if !strings.Contains(got, "match ipv6 address prefix-list p-t1_v6\n") {
+	if !strings.Contains(got, "match ipv6 address prefix-list "+inlineV6Name+"\n") {
 		t.Errorf("v6 match line missing in split mixed term:\n%s", got)
 	}
 	// No FRR-invalid line: neither a "ge" nor the over-matching "le 32".
@@ -4341,6 +4345,9 @@ func TestPolicyMixedFamilyRouteFilterSplit(t *testing.T) {
 		},
 	}
 	got := New().generatePolicyOptions(po)
+	inlineV4Name := inlinePrefixListName("DUAL", "DUAL", "t1", "_v4")
+	inlineV6Name := inlinePrefixListName("DUAL", "DUAL", "t1", "_v6")
+	inlineCombinedName := inlinePrefixListName("DUAL", "DUAL", "t1", "")
 
 	// Two route-map permit sequences for the single term (the split), plus
 	// the default-action deny. The single-matcher / both-in-one-sequence
@@ -4353,14 +4360,14 @@ func TestPolicyMixedFamilyRouteFilterSplit(t *testing.T) {
 	// v4 prefixes live in an `ip prefix-list` (the _v4 per-family list),
 	// bound by `match ip address` in the v4 sequence.
 	wantV4 := []string{
-		"ip prefix-list DUAL-t1_v4 seq 5 permit 10.0.0.0/8 le 32\n",
-		"match ip address prefix-list DUAL-t1_v4\n",
+		"ip prefix-list " + inlineV4Name + " seq 5 permit 10.0.0.0/8 le 32\n",
+		"match ip address prefix-list " + inlineV4Name + "\n",
 	}
 	// v6 prefixes live in an `ipv6 prefix-list` (the _v6 list), bound by
 	// `match ipv6 address` in the v6 sequence.
 	wantV6 := []string{
-		"ipv6 prefix-list DUAL-t1_v6 seq 10 permit 2001:db8::/32 le 128\n",
-		"match ipv6 address prefix-list DUAL-t1_v6\n",
+		"ipv6 prefix-list " + inlineV6Name + " seq 10 permit 2001:db8::/32 le 128\n",
+		"match ipv6 address prefix-list " + inlineV6Name + "\n",
 	}
 	for _, w := range append(append([]string{}, wantV4...), wantV6...) {
 		if !strings.Contains(got, w) {
@@ -4374,19 +4381,16 @@ func TestPolicyMixedFamilyRouteFilterSplit(t *testing.T) {
 		t.Errorf("set clause must appear in BOTH family sequences, got %d:\n%s", n, got)
 	}
 
-	// FAIL-ON-REVERT: the old single-matchV6 emission put both families'
-	// entries in ONE list named `DUAL-t1` and emitted exactly one match
-	// line (v4, the first family). Neither the combined list name nor a
-	// cross-family match against it may appear.
-	if strings.Contains(got, "prefix-list DUAL-t1 ") || strings.Contains(got, "prefix-list DUAL-t1\n") {
-		t.Errorf("must NOT use the combined single-family list name DUAL-t1 (pre-#2607 bug):\n%s", got)
+	// A single unsuffixed list cannot be shared by both family sequences.
+	if strings.Contains(got, "prefix-list "+inlineCombinedName+" ") || strings.Contains(got, "prefix-list "+inlineCombinedName+"\n") {
+		t.Errorf("must NOT use the combined unsuffixed list name %s:\n%s", inlineCombinedName, got)
 	}
 	// The v6 entries must never be referenced by an `ip` (v4) match line,
 	// nor v4 by an `ipv6` match line — the silent-fail the issue reports.
-	if strings.Contains(got, "match ip address prefix-list DUAL-t1_v6") {
+	if strings.Contains(got, "match ip address prefix-list "+inlineV6Name) {
 		t.Errorf("v6 list must not be bound by an IPv4 match line:\n%s", got)
 	}
-	if strings.Contains(got, "match ipv6 address prefix-list DUAL-t1_v4") {
+	if strings.Contains(got, "match ipv6 address prefix-list "+inlineV4Name) {
 		t.Errorf("v4 list must not be bound by an IPv6 match line:\n%s", got)
 	}
 
@@ -4397,22 +4401,24 @@ func TestPolicyMixedFamilyRouteFilterSplit(t *testing.T) {
 }
 
 // TestPolicySingleFamilyRouteFilterUnchanged is the #2607 no-churn control:
-// a homogeneous (single-family) route-filter term must render EXACTLY as
-// before the split — ONE sequence, the historical un-suffixed `<name>-<term>`
-// prefix-list name, ONE match line. This guards the common case against any
-// accidental always-split regression.
+// a homogeneous (single-family) route-filter term must render ONE sequence
+// and one deterministic unsuffixed inline prefix-list name. This guards the
+// common case against any accidental always-split regression.
 func TestPolicySingleFamilyRouteFilterUnchanged(t *testing.T) {
+	inlineName := inlinePrefixListName("p", "p", "t1", "")
+	inlineV4Name := inlinePrefixListName("p", "p", "t1", "_v4")
+	inlineV6Name := inlinePrefixListName("p", "p", "t1", "_v6")
 	// v4-only term.
 	gotV4 := New().generatePolicyOptions(rfPolicyOptions(
 		&config.RouteFilter{Prefix: "10.0.0.0/8", MatchType: "orlonger"},
 		&config.RouteFilter{Prefix: "172.16.0.0/12", MatchType: "exact"}))
-	if !strings.Contains(gotV4, "ip prefix-list p-t1 seq 5 permit 10.0.0.0/8 le 32\n") {
-		t.Errorf("v4-only term must keep the un-suffixed p-t1 list:\n%s", gotV4)
+	if !strings.Contains(gotV4, "ip prefix-list "+inlineName+" seq 5 permit 10.0.0.0/8 le 32\n") {
+		t.Errorf("v4-only term must keep the derived unsuffixed inline list:\n%s", gotV4)
 	}
-	if !strings.Contains(gotV4, "match ip address prefix-list p-t1\n") {
+	if !strings.Contains(gotV4, "match ip address prefix-list "+inlineName+"\n") {
 		t.Errorf("v4-only term must emit one un-suffixed match line:\n%s", gotV4)
 	}
-	if strings.Contains(gotV4, "p-t1_v4") || strings.Contains(gotV4, "p-t1_v6") {
+	if strings.Contains(gotV4, inlineV4Name) || strings.Contains(gotV4, inlineV6Name) {
 		t.Errorf("v4-only term must NOT split into per-family lists:\n%s", gotV4)
 	}
 	if n := strings.Count(gotV4, "route-map p permit "); n != 1 {
@@ -4422,13 +4428,13 @@ func TestPolicySingleFamilyRouteFilterUnchanged(t *testing.T) {
 	// v6-only term.
 	gotV6 := New().generatePolicyOptions(rfPolicyOptions(
 		&config.RouteFilter{Prefix: "2001:db8::/32", MatchType: "orlonger"}))
-	if !strings.Contains(gotV6, "ipv6 prefix-list p-t1 seq 5 permit 2001:db8::/32 le 128\n") {
-		t.Errorf("v6-only term must keep the un-suffixed p-t1 list:\n%s", gotV6)
+	if !strings.Contains(gotV6, "ipv6 prefix-list "+inlineName+" seq 5 permit 2001:db8::/32 le 128\n") {
+		t.Errorf("v6-only term must keep the derived unsuffixed inline list:\n%s", gotV6)
 	}
-	if !strings.Contains(gotV6, "match ipv6 address prefix-list p-t1\n") {
+	if !strings.Contains(gotV6, "match ipv6 address prefix-list "+inlineName+"\n") {
 		t.Errorf("v6-only term must emit one un-suffixed match line:\n%s", gotV6)
 	}
-	if strings.Contains(gotV6, "p-t1_v4") || strings.Contains(gotV6, "p-t1_v6") {
+	if strings.Contains(gotV6, inlineV4Name) || strings.Contains(gotV6, inlineV6Name) {
 		t.Errorf("v6-only term must NOT split into per-family lists:\n%s", gotV6)
 	}
 }
@@ -4471,20 +4477,22 @@ func TestPolicyMixedFamilyEndToEnd(t *testing.T) {
 		t.Fatalf("expected one term with two route-filters, got %#v", cfg.PolicyOptions.PolicyStatements["EXPORT-DUAL"])
 	}
 	got := New().generatePolicyOptions(&cfg.PolicyOptions)
+	inlineV4Name := inlinePrefixListName("EXPORT-DUAL", "EXPORT-DUAL", "t1", "_v4")
+	inlineV6Name := inlinePrefixListName("EXPORT-DUAL", "EXPORT-DUAL", "t1", "_v6")
 	if n := strings.Count(got, "route-map EXPORT-DUAL permit "); n != 2 {
 		t.Fatalf("compiled dual-stack term must render 2 permit sequences, got %d:\n%s", n, got)
 	}
-	if !strings.Contains(got, "match ip address prefix-list EXPORT-DUAL-t1_v4\n") {
+	if !strings.Contains(got, "match ip address prefix-list "+inlineV4Name+"\n") {
 		t.Errorf("v4 family must be bound after compile+render:\n%s", got)
 	}
-	if !strings.Contains(got, "match ipv6 address prefix-list EXPORT-DUAL-t1_v6\n") {
+	if !strings.Contains(got, "match ipv6 address prefix-list "+inlineV6Name+"\n") {
 		t.Errorf("v6 family must be bound after compile+render:\n%s", got)
 	}
 }
 
 // rfPolicyOptions builds a one-term policy "p"/"t1" carrying the given
 // route-filters (verbatim — no implicit upto length), for the #2103/#2105
-// render tests. The prefix-list name the renderer derives is "p-t1".
+// render tests. Prefix-list names are derived from this structured identity.
 func rfPolicyOptions(rfs ...*config.RouteFilter) *config.PolicyOptionsConfig {
 	return &config.PolicyOptionsConfig{
 		PrefixLists: map[string]*config.PrefixList{},
@@ -4507,6 +4515,9 @@ func rfPolicyOptions(rfs ...*config.RouteFilter) *config.PolicyOptionsConfig {
 // than emit an FRR-invalid "ge plen+1 le maxLen" line, while still
 // rendering the valid "ge plen+1 le maxLen" for every shorter prefix.
 func TestRouteFilterLongerFRR(t *testing.T) {
+	inlineName := inlinePrefixListName("p", "p", "t1", "")
+	inlineV4Name := inlinePrefixListName("p", "p", "t1", "_v4")
+	inlineV6Name := inlinePrefixListName("p", "p", "t1", "_v6")
 	// #2103 core: /32 longer must emit NO "ip prefix-list ... permit"
 	// entry (the empty set), but the term MUST still emit the "match ...
 	// prefix-list" line referencing the (then-undefined) list name. In
@@ -4526,11 +4537,11 @@ func TestRouteFilterLongerFRR(t *testing.T) {
 			t.Errorf("/32 longer must emit NO prefix-list entry, got:\n%s", got)
 		}
 		// The match line MUST be present (fail-closed via undefined list).
-		if !strings.Contains(got, "match ip address prefix-list p-t1\n") {
+		if !strings.Contains(got, "match ip address prefix-list "+inlineName+"\n") {
 			t.Errorf("all-skipped term MUST emit the match line (fail-closed), got:\n%s", got)
 		}
-		// But NO "ip prefix-list p-t1 ... permit" entry materialises the list.
-		if strings.Contains(got, "ip prefix-list p-t1 seq") {
+		// But NO generated inline prefix-list entry materialises the list.
+		if strings.Contains(got, "ip prefix-list "+inlineName+" seq") {
 			t.Errorf("all-skipped term must NOT materialise a prefix-list entry, got:\n%s", got)
 		}
 	})
@@ -4546,10 +4557,10 @@ func TestRouteFilterLongerFRR(t *testing.T) {
 		}
 		// Family is derived from the parseable (skipped) v6 entry → the
 		// match line must be the v6 matcher, fail-closed.
-		if !strings.Contains(got, "match ipv6 address prefix-list p-t1\n") {
+		if !strings.Contains(got, "match ipv6 address prefix-list "+inlineName+"\n") {
 			t.Errorf("all-skipped v6 term MUST emit the v6 match line, got:\n%s", got)
 		}
-		if strings.Contains(got, "ipv6 prefix-list p-t1 seq") {
+		if strings.Contains(got, "ipv6 prefix-list "+inlineName+" seq") {
 			t.Errorf("all-skipped v6 term must NOT materialise a prefix-list entry, got:\n%s", got)
 		}
 	})
@@ -4559,7 +4570,7 @@ func TestRouteFilterLongerFRR(t *testing.T) {
 	t.Run("v4_slash31_longer_emits_ge32_le32", func(t *testing.T) {
 		got := New().generatePolicyOptions(rfPolicyOptions(
 			&config.RouteFilter{Prefix: "10.0.0.0/31", MatchType: "longer"}))
-		if !strings.Contains(got, "ip prefix-list p-t1 seq 5 permit 10.0.0.0/31 ge 32 le 32\n") {
+		if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 5 permit 10.0.0.0/31 ge 32 le 32\n") {
 			t.Errorf("/31 longer must emit valid 'ge 32 le 32', got:\n%s", got)
 		}
 	})
@@ -4567,7 +4578,7 @@ func TestRouteFilterLongerFRR(t *testing.T) {
 	t.Run("v6_slash127_longer_emits_ge128_le128", func(t *testing.T) {
 		got := New().generatePolicyOptions(rfPolicyOptions(
 			&config.RouteFilter{Prefix: "2001:db8::/127", MatchType: "longer"}))
-		if !strings.Contains(got, "ipv6 prefix-list p-t1 seq 5 permit 2001:db8::/127 ge 128 le 128\n") {
+		if !strings.Contains(got, "ipv6 prefix-list "+inlineName+" seq 5 permit 2001:db8::/127 ge 128 le 128\n") {
 			t.Errorf("/127 longer must emit valid 'ge 128 le 128', got:\n%s", got)
 		}
 	})
@@ -4576,7 +4587,7 @@ func TestRouteFilterLongerFRR(t *testing.T) {
 	t.Run("v4_slash24_longer_unchanged", func(t *testing.T) {
 		got := New().generatePolicyOptions(rfPolicyOptions(
 			&config.RouteFilter{Prefix: "10.0.0.0/24", MatchType: "longer"}))
-		if !strings.Contains(got, "ip prefix-list p-t1 seq 5 permit 10.0.0.0/24 ge 25 le 32\n") {
+		if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 5 permit 10.0.0.0/24 ge 25 le 32\n") {
 			t.Errorf("/24 longer must still emit 'ge 25 le 32', got:\n%s", got)
 		}
 	})
@@ -4584,7 +4595,7 @@ func TestRouteFilterLongerFRR(t *testing.T) {
 	t.Run("v6_slash64_longer_unchanged", func(t *testing.T) {
 		got := New().generatePolicyOptions(rfPolicyOptions(
 			&config.RouteFilter{Prefix: "2001:db8::/64", MatchType: "longer"}))
-		if !strings.Contains(got, "ipv6 prefix-list p-t1 seq 5 permit 2001:db8::/64 ge 65 le 128\n") {
+		if !strings.Contains(got, "ipv6 prefix-list "+inlineName+" seq 5 permit 2001:db8::/64 ge 65 le 128\n") {
 			t.Errorf("/64 longer must still emit 'ge 65 le 128', got:\n%s", got)
 		}
 	})
@@ -4600,10 +4611,10 @@ func TestRouteFilterLongerFRR(t *testing.T) {
 		if strings.Contains(got, "permit 10.0.0.0/32") {
 			t.Errorf("index-0 /32 longer must be skipped, got:\n%s", got)
 		}
-		if !strings.Contains(got, "ip prefix-list p-t1 seq 10 permit 10.0.0.0/24 ge 25 le 32\n") {
+		if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 10 permit 10.0.0.0/24 ge 25 le 32\n") {
 			t.Errorf("index-1 /24 longer must keep seq 10, got:\n%s", got)
 		}
-		if !strings.Contains(got, "match ip address prefix-list p-t1\n") {
+		if !strings.Contains(got, "match ip address prefix-list "+inlineName+"\n") {
 			t.Errorf("mixed term with a surviving entry must emit the match line, got:\n%s", got)
 		}
 	})
@@ -4612,29 +4623,29 @@ func TestRouteFilterLongerFRR(t *testing.T) {
 	// index 0 followed by a valid v6 entry. This is a genuinely
 	// mixed-family term, so as of #2607 it SPLITS into a v4 sequence and a
 	// v6 sequence. The v4 sequence carries only the (skipped) /32 longer →
-	// no entry materialises in p-t1_v4, but the fail-closed match line
-	// `match ip address prefix-list p-t1_v4` is still emitted (undefined
+	// no entry materialises in the _v4 list, but the fail-closed match line
+	// `match ip address prefix-list <derived _v4 name>` is still emitted (undefined
 	// list → NOMATCH → DENY for v4 routes). The v6 sequence carries the
-	// /64 orlonger → an `ipv6 prefix-list p-t1_v6` entry plus `match ipv6
-	// address prefix-list p-t1_v6`. The two match lines reference DISJOINT
+	// /64 orlonger → an `ipv6 prefix-list <derived _v6 name>` entry plus `match ipv6
+	// address prefix-list <derived _v6 name>`. The two match lines reference DISJOINT
 	// per-family lists, so neither can pick up an off-family entry.
 	t.Run("mixed_family_splits_into_two_sequences", func(t *testing.T) {
 		got := New().generatePolicyOptions(rfPolicyOptions(
 			&config.RouteFilter{Prefix: "10.0.0.0/32", MatchType: "longer"},
 			&config.RouteFilter{Prefix: "2001:db8::/64", MatchType: "orlonger"}))
-		if !strings.Contains(got, "ipv6 prefix-list p-t1_v6 seq 10 permit 2001:db8::/64 le 128\n") {
+		if !strings.Contains(got, "ipv6 prefix-list "+inlineV6Name+" seq 10 permit 2001:db8::/64 le 128\n") {
 			t.Errorf("v6 orlonger entry missing in _v6 list, got:\n%s", got)
 		}
-		if !strings.Contains(got, "match ipv6 address prefix-list p-t1_v6\n") {
+		if !strings.Contains(got, "match ipv6 address prefix-list "+inlineV6Name+"\n") {
 			t.Errorf("v6 sequence match line missing, got:\n%s", got)
 		}
 		// The v4 sequence: all-skipped, but the fail-closed match line is
 		// still emitted against the (undefined, hence NOMATCH) _v4 list.
-		if !strings.Contains(got, "match ip address prefix-list p-t1_v4\n") {
+		if !strings.Contains(got, "match ip address prefix-list "+inlineV4Name+"\n") {
 			t.Errorf("v4 sequence fail-closed match line missing, got:\n%s", got)
 		}
 		// No v4 entry materialises (the /32 longer is the empty set).
-		if strings.Contains(got, "ip prefix-list p-t1_v4 seq") {
+		if strings.Contains(got, "ip prefix-list "+inlineV4Name+" seq") {
 			t.Errorf("skipped /32 longer must NOT materialise a v4 entry, got:\n%s", got)
 		}
 		// Two route-map sequences for the single term (seq 10 and 20),
@@ -4650,12 +4661,13 @@ func TestRouteFilterLongerFRR(t *testing.T) {
 // FRR-VALID (only strictly-less le/ge is rejected). It proves the #2103
 // longer fix did NOT touch orlonger and documents the valid equality.
 func TestRouteFilterOrlongerMaxLengthValid(t *testing.T) {
+	inlineName := inlinePrefixListName("p", "p", "t1", "")
 	got := New().generatePolicyOptions(rfPolicyOptions(
 		&config.RouteFilter{Prefix: "10.0.0.0/32", MatchType: "orlonger"}))
-	if !strings.Contains(got, "ip prefix-list p-t1 seq 5 permit 10.0.0.0/32 le 32\n") {
+	if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 5 permit 10.0.0.0/32 le 32\n") {
 		t.Errorf("orlonger /32 must still emit valid 'le 32', got:\n%s", got)
 	}
-	if !strings.Contains(got, "match ip address prefix-list p-t1\n") {
+	if !strings.Contains(got, "match ip address prefix-list "+inlineName+"\n") {
 		t.Errorf("orlonger /32 term must emit a match line, got:\n%s", got)
 	}
 }
@@ -4668,16 +4680,19 @@ func TestRouteFilterOrlongerMaxLengthValid(t *testing.T) {
 // undefined list → NOMATCH → DENY); a valid prefix alongside it
 // survives.
 func TestRouteFilterMalformedPrefixBelt(t *testing.T) {
+	inlineName := inlinePrefixListName("p", "p", "t1", "")
+	inlineV4Name := inlinePrefixListName("p", "p", "t1", "_v4")
+	inlineV6Name := inlinePrefixListName("p", "p", "t1", "_v6")
 	t.Run("lone_no_mask_emits_no_entry", func(t *testing.T) {
 		got := New().generatePolicyOptions(rfPolicyOptions(
 			&config.RouteFilter{Prefix: "10.0.0.0", MatchType: "exact"}))
 		if strings.Contains(got, "permit 10.0.0.0") {
 			t.Errorf("malformed prefix (no mask) must emit no permit line, got:\n%s", got)
 		}
-		if strings.Contains(got, "prefix-list p-t1 seq") {
+		if strings.Contains(got, "prefix-list "+inlineName+" seq") {
 			t.Errorf("lone malformed prefix must NOT materialise a prefix-list entry, got:\n%s", got)
 		}
-		if !strings.Contains(got, "address prefix-list p-t1\n") {
+		if !strings.Contains(got, "address prefix-list "+inlineName+"\n") {
 			t.Errorf("lone malformed prefix must still emit the fail-closed match line, got:\n%s", got)
 		}
 	})
@@ -4688,7 +4703,7 @@ func TestRouteFilterMalformedPrefixBelt(t *testing.T) {
 		if strings.Contains(got, "permit 10.0.0.0/99") {
 			t.Errorf("out-of-range mask must emit no permit line, got:\n%s", got)
 		}
-		if strings.Contains(got, "prefix-list p-t1 seq") {
+		if strings.Contains(got, "prefix-list "+inlineName+" seq") {
 			t.Errorf("out-of-range mask must NOT materialise a prefix-list entry, got:\n%s", got)
 		}
 	})
@@ -4711,10 +4726,10 @@ func TestRouteFilterMalformedPrefixBelt(t *testing.T) {
 			// No prefix-list ENTRY materialises (a count==0 list is FRR
 			// match-ALL); but the term still emits the match line so it is
 			// fail-closed (undefined list → NOMATCH → DENY).
-			if strings.Contains(got, "prefix-list p-t1 seq") {
+			if strings.Contains(got, "prefix-list "+inlineName+" seq") {
 				t.Errorf("lone bad-address prefix %q must NOT materialise a prefix-list entry, got:\n%s", bad, got)
 			}
-			if !strings.Contains(got, "match ") || !strings.Contains(got, "address prefix-list p-t1\n") {
+			if !strings.Contains(got, "match ") || !strings.Contains(got, "address prefix-list "+inlineName+"\n") {
 				t.Errorf("lone bad-address prefix %q must still emit the fail-closed match line, got:\n%s", bad, got)
 			}
 		}
@@ -4737,20 +4752,20 @@ func TestRouteFilterMalformedPrefixBelt(t *testing.T) {
 	// ("garbage" has no colon → the family heuristic buckets it v4). As of
 	// #2607 the term is mixed-family (one v4-bucketed, one v6) and SPLITS:
 	// the v4 sequence carries only the skipped "garbage" → no entry, but a
-	// fail-closed `match ip address prefix-list p-t1_v4` line; the v6
-	// sequence carries the valid /64 → an entry in p-t1_v6 plus a
-	// `match ipv6 address prefix-list p-t1_v6` line.
+	// fail-closed `match ip address prefix-list <derived _v4 name>` line; the v6
+	// sequence carries the valid /64 → an entry in the derived _v6 list plus a
+	// `match ipv6 address prefix-list <derived _v6 name>` line.
 	t.Run("malformed_index0_then_valid_v6_splits", func(t *testing.T) {
 		got := New().generatePolicyOptions(rfPolicyOptions(
 			&config.RouteFilter{Prefix: "garbage", MatchType: "exact"},
 			&config.RouteFilter{Prefix: "2001:db8::/64", MatchType: "exact"}))
-		if !strings.Contains(got, "ipv6 prefix-list p-t1_v6 seq 10 permit 2001:db8::/64\n") {
+		if !strings.Contains(got, "ipv6 prefix-list "+inlineV6Name+" seq 10 permit 2001:db8::/64\n") {
 			t.Errorf("valid v6 entry must survive in _v6 list, got:\n%s", got)
 		}
-		if !strings.Contains(got, "match ipv6 address prefix-list p-t1_v6\n") {
+		if !strings.Contains(got, "match ipv6 address prefix-list "+inlineV6Name+"\n") {
 			t.Errorf("v6 sequence match line missing, got:\n%s", got)
 		}
-		if !strings.Contains(got, "match ip address prefix-list p-t1_v4\n") {
+		if !strings.Contains(got, "match ip address prefix-list "+inlineV4Name+"\n") {
 			t.Errorf("v4 sequence fail-closed match line missing, got:\n%s", got)
 		}
 		if strings.Contains(got, "permit garbage") {
@@ -4763,7 +4778,7 @@ func TestRouteFilterMalformedPrefixBelt(t *testing.T) {
 	t.Run("valid_prefix_not_false_skipped", func(t *testing.T) {
 		got := New().generatePolicyOptions(rfPolicyOptions(
 			&config.RouteFilter{Prefix: "2001:db8::/64", MatchType: "orlonger"}))
-		if !strings.Contains(got, "ipv6 prefix-list p-t1 seq 5 permit 2001:db8::/64 le 128\n") {
+		if !strings.Contains(got, "ipv6 prefix-list "+inlineName+" seq 5 permit 2001:db8::/64 le 128\n") {
 			t.Errorf("valid v6 /64 orlonger must be emitted, got:\n%s", got)
 		}
 	})
@@ -5214,7 +5229,8 @@ func TestPrefixListMatch_CoResidentRouteFilter_2607(t *testing.T) {
 	// sequence (idempotent in FRR), like the existing #2642 OR-split.
 	po := policyOptionsWithPrefixListTerm("mixed", []string{"10.0.0.0/8", "2001:db8::/32"}, true)
 	got := m.generatePolicyOptions(po)
-	if !strings.Contains(got, " match ip address prefix-list p-t1\n") {
+	inlineName := inlinePrefixListName("p", "p", "t1", "")
+	if !strings.Contains(got, " match ip address prefix-list "+inlineName+"\n") {
 		t.Errorf("co-resident: route-filter v4 matcher missing in:\n%s", got)
 	}
 	// v4 half of the mixed list rendered as an access-list (#5730), not a
@@ -5323,12 +5339,14 @@ func TestGeneratePolicyOptionsPrefixLengthRange(t *testing.T) {
 	}
 
 	got := m.generatePolicyOptions(po)
+	v4Name := inlinePrefixListName("IMPORT-RANGE", "IMPORT-RANGE", "v4", "")
+	v6Name := inlinePrefixListName("IMPORT-RANGE", "IMPORT-RANGE", "v6", "")
 
-	wantV4 := "ip prefix-list IMPORT-RANGE-v4 seq 5 permit 10.0.0.0/8 ge 16 le 24"
+	wantV4 := "ip prefix-list " + v4Name + " seq 5 permit 10.0.0.0/8 ge 16 le 24"
 	if !strings.Contains(got, wantV4) {
 		t.Errorf("v4 prefix-length-range: missing %q in:\n%s", wantV4, got)
 	}
-	wantV6 := "ipv6 prefix-list IMPORT-RANGE-v6 seq 5 permit 2001:db8::/32 ge 48 le 64"
+	wantV6 := "ipv6 prefix-list " + v6Name + " seq 5 permit 2001:db8::/32 ge 48 le 64"
 	if !strings.Contains(got, wantV6) {
 		t.Errorf("v6 prefix-length-range: missing %q in:\n%s", wantV6, got)
 	}
@@ -5341,10 +5359,10 @@ func TestGeneratePolicyOptionsPrefixLengthRange(t *testing.T) {
 		t.Errorf("v6 range leaked the open-ended le 128 fall-through (#2525):\n%s", got)
 	}
 	// The match line must still be emitted so the route-map references the list.
-	if !strings.Contains(got, "match ip address prefix-list IMPORT-RANGE-v4") {
+	if !strings.Contains(got, "match ip address prefix-list "+v4Name) {
 		t.Errorf("v4 match line missing:\n%s", got)
 	}
-	if !strings.Contains(got, "match ipv6 address prefix-list IMPORT-RANGE-v6") {
+	if !strings.Contains(got, "match ipv6 address prefix-list "+v6Name) {
 		t.Errorf("v6 match line missing:\n%s", got)
 	}
 }
@@ -5387,6 +5405,8 @@ func TestGeneratePolicyOptionsPrefixLengthRangeAtOrBelowBaseSkipped(t *testing.T
 	}
 
 	got := m.generatePolicyOptions(po)
+	atBaseName := inlinePrefixListName("P", "P", "atbase", "")
+	belowBaseName := inlinePrefixListName("P", "P", "belowbase", "")
 
 	// No `ge <= base` line may be emitted for either term.
 	for _, bad := range []string{"ge 8 le 24", "ge 4 le 24"} {
@@ -5396,10 +5416,10 @@ func TestGeneratePolicyOptionsPrefixLengthRangeAtOrBelowBaseSkipped(t *testing.T
 	}
 	// The entries are skipped, so no prefix-list line exists; the match line is
 	// still emitted (fail-closed RMAP_NOMATCH).
-	if strings.Contains(got, "prefix-list P-atbase seq") || strings.Contains(got, "prefix-list P-belowbase seq") {
+	if strings.Contains(got, "prefix-list "+atBaseName+" seq") || strings.Contains(got, "prefix-list "+belowBaseName+" seq") {
 		t.Errorf("at/below-base range must emit NO prefix-list line:\n%s", got)
 	}
-	if !strings.Contains(got, "match ip address prefix-list P-atbase") {
+	if !strings.Contains(got, "match ip address prefix-list "+atBaseName) {
 		t.Errorf("at-base term must still emit a match line (fail-closed):\n%s", got)
 	}
 }
@@ -5431,8 +5451,9 @@ func TestGeneratePolicyOptionsThroughSkipped(t *testing.T) {
 	}
 
 	got := m.generatePolicyOptions(po)
+	inlineName := inlinePrefixListName("P", "P", "t1", "")
 
-	if strings.Contains(got, "prefix-list P-t1 seq") {
+	if strings.Contains(got, "prefix-list "+inlineName+" seq") {
 		t.Errorf("through entry must emit NO prefix-list line:\n%s", got)
 	}
 	if strings.Contains(got, "10.0.0.0/8 le 32") {
@@ -5440,7 +5461,7 @@ func TestGeneratePolicyOptionsThroughSkipped(t *testing.T) {
 	}
 	// Fail-closed: the match line referencing the (now-empty) list is still
 	// emitted, so FRR resolves it to RMAP_NOMATCH (DENY).
-	if !strings.Contains(got, "match ip address prefix-list P-t1") {
+	if !strings.Contains(got, "match ip address prefix-list "+inlineName) {
 		t.Errorf("through term must still emit a match line (fail-closed DENY):\n%s", got)
 	}
 }
@@ -5466,12 +5487,13 @@ func TestGeneratePolicyOptionsMatchTypesRegression(t *testing.T) {
 	}
 
 	got := m.generatePolicyOptions(po)
+	nameForTerm := func(term string) string { return inlinePrefixListName("P", "P", term, "") }
 
 	checks := []string{
-		"ip prefix-list P-exact seq 5 permit 10.0.0.0/8\n", // exact: bare prefix, no ge/le
-		"ip prefix-list P-longer seq 5 permit 10.0.0.0/8 ge 9 le 32",
-		"ip prefix-list P-orlong seq 5 permit 10.0.0.0/8 le 32",
-		"ip prefix-list P-upto seq 5 permit 10.0.0.0/8 le 24",
+		"ip prefix-list " + nameForTerm("exact") + " seq 5 permit 10.0.0.0/8\n", // exact: bare prefix, no ge/le
+		"ip prefix-list " + nameForTerm("longer") + " seq 5 permit 10.0.0.0/8 ge 9 le 32",
+		"ip prefix-list " + nameForTerm("orlong") + " seq 5 permit 10.0.0.0/8 le 32",
+		"ip prefix-list " + nameForTerm("upto") + " seq 5 permit 10.0.0.0/8 le 24",
 	}
 	for _, want := range checks {
 		if !strings.Contains(got, want) {
@@ -6066,11 +6088,12 @@ func TestPolicyRouteFilterPrefixListSameFamilyNoCollision(t *testing.T) {
 	}
 
 	got := m.generatePolicyOptions(po)
+	routeFilterName := inlinePrefixListName("MIX", "MIX", "t1", "")
 
 	// The route-filter's prefix-list match line must still be present.
-	if !strings.Contains(got, "match ipv6 address prefix-list MIX-t1") {
+	if !strings.Contains(got, "match ipv6 address prefix-list "+routeFilterName) {
 		t.Errorf("route-filter match line dropped; want %q in:\n%s",
-			"match ipv6 address prefix-list MIX-t1", got)
+			"match ipv6 address prefix-list "+routeFilterName, got)
 	}
 	// The from-prefix-list must render as an ACCESS-LIST match (distinct FRR
 	// rule type) so FRR ANDs it with the route-filter's prefix-list match. The
@@ -6130,8 +6153,9 @@ func TestPolicyRouteFilterPrefixListOffFamilyUnchanged(t *testing.T) {
 	}
 
 	got := m.generatePolicyOptions(po)
+	routeFilterName := inlinePrefixListName("OFF", "OFF", "t1", "")
 
-	if !strings.Contains(got, "match ip address prefix-list OFF-t1") {
+	if !strings.Contains(got, "match ip address prefix-list "+routeFilterName) {
 		t.Errorf("v4 route-filter match line missing; got:\n%s", got)
 	}
 	// Off-family from-prefix-list must remain a prefix-list match (#5702),

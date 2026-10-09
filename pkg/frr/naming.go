@@ -2,6 +2,7 @@ package frr
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"sort"
@@ -62,6 +63,16 @@ const (
 	// logical identities collide only on a 64-bit hash collision — astronomically
 	// unlikely, and routeFilterACLNameCollision still catches it and fails closed.
 	routeFilterACLHashHexLen = 16
+	// frrInlinePrefixListMaxLen bounds generated inline route-filter prefix-list
+	// names well below FRR's 128-byte identifier limit.
+	frrInlinePrefixListMaxLen = 96
+
+	// inlinePrefixListNamespace is the reserved infix embedded in every
+	// xpf-generated route-filter prefix-list name, between the readable
+	// prefix and the 16-hex identity digest. Operator prefix-lists using it
+	// are rejected by routeFilterACLNameCollision.
+	inlinePrefixListNamespace  = "-xpf-inline-"
+	inlinePrefixListHashHexLen = 16
 )
 
 // prefixListFamilies returns the FRR address-family keyword(s) a prefix-list
@@ -126,6 +137,62 @@ func sanitizeFRRIdent(s string) string {
 	return b.String()
 }
 
+// inlinePrefixListName derives a bounded FRR prefix-list name from the
+// structured rendering identity. The readable portion preserves the historical
+// `<policy>-<term>[_v4|_v6]` prefix; the reserved marker and digest keep
+// operator lists and distinct contexts disjoint even when their readable
+// prefixes truncate or their legacy concatenations alias.
+func inlinePrefixListName(routeMapName, plPrefix, termName, familySuffix string) string {
+	identity := make([]byte, 0, len(routeMapName)+len(plPrefix)+len(termName)+len(familySuffix)+4*8)
+	identity = appendInlinePrefixListHashPart(identity, routeMapName)
+	identity = appendInlinePrefixListHashPart(identity, plPrefix)
+	identity = appendInlinePrefixListHashPart(identity, termName)
+	identity = appendInlinePrefixListHashPart(identity, familySuffix)
+	sum := sha256.Sum256(identity)
+	var hashHex [inlinePrefixListHashHexLen]byte
+	hex.Encode(hashHex[:], sum[:inlinePrefixListHashHexLen/2])
+
+	readableBudget := frrInlinePrefixListMaxLen - len(inlinePrefixListNamespace) - inlinePrefixListHashHexLen
+	readableCapacity := len(plPrefix) + 1 + len(termName) + len(familySuffix)
+	if readableCapacity > readableBudget {
+		readableCapacity = readableBudget
+	}
+	var name strings.Builder
+	name.Grow(readableCapacity + len(inlinePrefixListNamespace) + inlinePrefixListHashHexLen)
+	appendFRRInlineIdent(&name, plPrefix, readableBudget)
+	if name.Len() < readableBudget {
+		name.WriteByte('-')
+		appendFRRInlineIdent(&name, termName, readableBudget)
+	}
+	if name.Len() < readableBudget {
+		appendFRRInlineIdent(&name, familySuffix, readableBudget)
+	}
+	name.WriteString(inlinePrefixListNamespace)
+	name.Write(hashHex[:])
+	return name.String()
+}
+
+func appendInlinePrefixListHashPart(dst []byte, value string) []byte {
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(value)))
+	dst = append(dst, length[:]...)
+	return append(dst, value...)
+}
+
+func appendFRRInlineIdent(name *strings.Builder, value string, maxLen int) {
+	for _, r := range value {
+		if name.Len() == maxLen {
+			return
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			name.WriteRune(r)
+		default:
+			name.WriteByte('_')
+		}
+	}
+}
+
 // routeFilterACLName derives the FRR access-list name for the from-prefix-list
 // materialized as an access-list (#5730 same-family coexistence). The name is:
 //
@@ -158,24 +225,22 @@ func routeFilterACLName(prefixList, matchKW string) string {
 	return routeFilterACLNamespace + readable + "-" + hashHex
 }
 
-// routeFilterACLNameCollision fails the apply CLOSED when the route-filter
-// access-list names xpf would generate are not provably unambiguous (#5872):
+// routeFilterACLNameCollision fails the apply CLOSED when generated route-
+// filter access-list or inline prefix-list names are not provably unambiguous:
 //
-//   - an operator prefix-list name that intrudes on the reserved
-//     routeFilterACLNamespace (so a raw name could shadow a generated one), or
-//   - two DISTINCT (family, prefix-list) logical identities that map to the
-//     same final generated name within one address family (a 64-bit hash
-//     collision).
+//   - an operator prefix-list name intrudes on either reserved namespace; or
+//   - two distinct from-prefix-list identities map to one generated access-list
+//     name in the same address family.
 //
-// FRR merges same-named access-lists, so either case could silently widen or
-// narrow a routing policy. Refuse to render — FRR keeps its last-good config —
-// mirroring redistProtocolMapCollision / bgpComposedChainCollision. The
-// order is deterministic (sorted names) so the FIRST offending pair is reported
-// stably. Access-lists are per-family in FRR ("access-list" vs "ipv6
-// access-list" are separate namespaces), so collisions are only compared within
-// a family.
+// (Inline-vs-inline identity collisions need no gate: names embed a 64-bit
+// digest over the full structured identity. Opus review, PR #12321.)
+//
+// FRR merges same-named objects, so any case could silently widen or narrow a
+// routing policy. Refuse to render — FRR keeps its last-good config — mirroring
+// redistProtocolMapCollision / bgpComposedChainCollision. The order is
+// deterministic so the first offending pair is reported stably.
 func routeFilterACLNameCollision(po *config.PolicyOptionsConfig) error {
-	if po == nil || len(po.PrefixLists) == 0 {
+	if po == nil {
 		return nil
 	}
 	names := make([]string, 0, len(po.PrefixLists))
@@ -218,5 +283,32 @@ func routeFilterACLNameCollision(po *config.PolicyOptionsConfig) error {
 			seen[key] = name
 		}
 	}
+	return inlinePrefixListNameCollision(po)
+}
+
+// inlinePrefixListNameCollision refuses operator prefix-lists intruding on
+// the reserved inline namespace. Generated-vs-generated identity
+// collisions need no gate: names embed a 64-bit digest over the full
+// structured identity, so distinct identities collide with probability
+// 2^-64 (Opus review, PR #12321).
+func inlinePrefixListNameCollision(po *config.PolicyOptionsConfig) error {
+	names := make([]string, 0, len(po.PrefixLists))
+	for name := range po.PrefixLists {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		final := frrName(name)
+		if strings.Contains(final, inlinePrefixListNamespace) {
+			return fmt.Errorf(
+				"prefix-list %q uses the reserved %q namespace xpf reserves for "+
+					"generated inline route-filter prefix-lists; FRR merges same-named "+
+					"prefix-lists, so an operator name in this namespace could shadow "+
+					"a generated one and silently alter a routing policy — rename the "+
+					"prefix-list without the reserved marker",
+				name, inlinePrefixListNamespace)
+		}
+	}
+
 	return nil
 }
