@@ -593,6 +593,7 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 					statsDisabledDetail++
 				}
 			}
+			fmt.Fprintln(buf)
 		}
 	}
 	policySetID := uint32(len(cfg.Security.Policies))
