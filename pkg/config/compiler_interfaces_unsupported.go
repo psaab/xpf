@@ -140,7 +140,7 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 			}
 			nodeSchema, identity := schemaNodeAndIdentity12090(parentSchema, n)
 			if keyword := n.Name(); keyword == "simple-filter" ||
-				(keyword == "filter" && !isInterfaceFilterConsumerPath12090(ancestors)) {
+				(keyword == "filter" && !isInterfaceDirectFilterConsumerPath12090(ancestors, n)) {
 				if err := emit(
 					"interfaces %s: `%s` is not supported (xpf has no consumer "+
 						"for this interface binding; remove it) (#12090)",
@@ -391,6 +391,17 @@ func isInterfaceFilterConsumerPath12090(ancestors []*Node) bool {
 	}
 	return len(ancestors) == familyIndex+2 && len(family.Keys) == 1 &&
 		(ancestors[familyIndex+1].Name() == "inet" || ancestors[familyIndex+1].Name() == "inet6")
+}
+
+// isInterfaceDirectFilterConsumerPath12090 limits the direct-name exemption
+// beneath a braced unit identity to the braced filter-child spelling. The
+// compiler populates hooks for `filter { input f; }`, not packed `filter input f;`.
+func isInterfaceDirectFilterConsumerPath12090(ancestors []*Node, filter *Node) bool {
+	if !isInterfaceFilterConsumerPath12090(ancestors) {
+		return false
+	}
+	familyIndex, ok := interfaceUnitFamilyAncestorIndex12090(ancestors)
+	return ok && (familyIndex != 3 || (filter != nil && len(filter.Keys) == 1))
 }
 
 // interfaceUnitFamilyAncestorIndex12090 locates the family in the supported

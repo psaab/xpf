@@ -128,6 +128,67 @@ func TestBracedUnitIdentityFilterConsumersRetainHooks12090(t *testing.T) {
 	}
 }
 
+func TestBracedUnitIdentityFilterPackedChildRejected12090(t *testing.T) {
+	cases := []struct {
+		name, text, wantError string
+	}{
+		{
+			name: "defined-filter",
+			text: "interfaces { ge-0/0/0 { unit { 0 { family inet { filter input f; } } } } } " +
+				"firewall { family inet { filter f { term t { then accept; } } } }",
+			wantError: "#12090",
+		},
+		{
+			name:      "undefined-filter",
+			text:      "interfaces { ge-0/0/0 { unit { 0 { family inet { filter input f; } } } } }",
+			wantError: "#12090",
+		},
+		{
+			name:      "semi-braced-undefined-filter-control",
+			text:      "interfaces { ge-0/0/0 { unit 0 { family inet { filter input f; } } } }",
+			wantError: "references undefined filter",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := CheckText(tc.text, -1); err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("CheckText error = %v; want %q", err, tc.wantError)
+			}
+
+			tree, parseErrors := config.NewParser(tc.text).Parse()
+			if len(parseErrors) != 0 {
+				t.Fatalf("parse test config: %v", parseErrors)
+			}
+			compiled, err := config.CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("lenient compile: %v", err)
+			}
+			warned := false
+			for _, warning := range compiled.Warnings {
+				if strings.Contains(warning, tc.wantError) {
+					warned = true
+					break
+				}
+			}
+			if !warned {
+				t.Fatalf("lenient compile warnings = %q; want %q", compiled.Warnings, tc.wantError)
+			}
+
+			store := newTestStoreAt(t, filepath.Join(t.TempDir(), "xpf.conf"))
+			if err := store.EnterConfigure(); err != nil {
+				t.Fatalf("EnterConfigure: %v", err)
+			}
+			defer store.ExitConfigure()
+			if err := store.LoadOverride(tc.text); err != nil {
+				t.Fatalf("LoadOverride: %v", err)
+			}
+			if _, err := store.Commit(); err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("Store Commit error = %v; want %q", err, tc.wantError)
+			}
+		})
+	}
+}
+
 func TestBracedUnitIdentityPackedFilterTailsRemainRejected12090(t *testing.T) {
 	for _, family := range []string{"inet", "inet6"} {
 		for _, shape := range []string{"compound", "split"} {
