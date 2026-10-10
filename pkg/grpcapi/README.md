@@ -682,6 +682,10 @@ contract.
   a nil state map, which fails closed so scheduled policies are simulated as
   INACTIVE (matching the dataplane's nil-state => dropped) rather than certified
   as-if-active.
+- #12246: the policy-only simulator does not perform inbound destination NAT.
+  When configured, `MatchPoliciesResponse.post_nat_input_note` (field 31) tells
+  callers that destination IP/port must already be post-translation. The local
+  and remote CLI render the same note alongside the policy verdict.
 - #3375: the response `action` is rendered through the shared SSOT
   `policymatch.Result.DisplayAction()` for EVERY verdict, so the gRPC and REST
   surfaces can never diverge. Before #3375 gRPC returned a BLANK `action` for

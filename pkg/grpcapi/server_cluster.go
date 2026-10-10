@@ -302,10 +302,11 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 		// so the explanatory Action string carries the posture (the reasons are
 		// surfaced in full on the REST and `test policy` text surfaces).
 		return &pb.MatchPoliciesResponse{
-			Matched:         false,
-			Action:          res.DisplayAction(),
-			QueriedFromZone: req.FromZone,
-			QueriedToZone:   req.ToZone,
+			PostNatInputNote: res.PostNATInputNote,
+			Matched:          false,
+			Action:           res.DisplayAction(),
+			QueriedFromZone:  req.FromZone,
+			QueriedToZone:    req.ToZone,
 		}, nil
 	}
 	if res.HostInboundUnmatched {
@@ -314,6 +315,7 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 		// self-describing host-inbound verdict (DisplayAction is the SSOT shared
 		// with REST). Matched stays false and there is no default-policy fallback.
 		return &pb.MatchPoliciesResponse{
+			PostNatInputNote:     res.PostNATInputNote,
 			Matched:              false,
 			HostInboundUnmatched: true,
 			Action:               res.DisplayAction(),
@@ -331,6 +333,7 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 	}
 	if !res.Matched {
 		return &pb.MatchPoliciesResponse{
+			PostNatInputNote:         res.PostNATInputNote,
 			Matched:                  false,
 			Action:                   res.DisplayAction(),
 			DefaultUsed:              res.DefaultUsed,
@@ -351,11 +354,12 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 		}, nil
 	}
 	return &pb.MatchPoliciesResponse{
-		Matched:    true,
-		PolicyName: res.PolicyName,
-		Global:     res.Global,
-		FromZone:   res.FromZone,
-		ToZone:     res.ToZone,
+		PostNatInputNote: res.PostNATInputNote,
+		Matched:          true,
+		PolicyName:       res.PolicyName,
+		Global:           res.Global,
+		FromZone:         res.FromZone,
+		ToZone:           res.ToZone,
 		// #3627 M06: also echo the queried zone pair on a positive match. It is
 		// the query context, distinct from from_zone/to_zone (the matched
 		// policy's declared scope), which can differ for a wildcard-zone or

@@ -876,6 +876,10 @@ type MatchPoliciesResult struct {
 	FeedPublicationDebt      bool     `json:"feed_publication_debt,omitempty"`
 	FeedPublicationDebtFeeds []string `json:"feed_publication_debt_feeds,omitempty"`
 	FeedPublicationDebtNote  string   `json:"feed_publication_debt_note,omitempty"`
+	// PostNATInputNote is present when inbound destination NAT is configured;
+	// destination-ip/port selectors must already be post-translation because the
+	// policy simulator does not perform NAT.
+	PostNATInputNote string `json:"post_nat_input_note,omitempty"`
 }
 
 // MatchPoliciesHostInbound is the REST projection of the host-inbound-traffic

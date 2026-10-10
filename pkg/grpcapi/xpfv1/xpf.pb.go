@@ -7793,8 +7793,13 @@ type MatchPoliciesResponse struct {
 	FeedPublicationDebt      bool     `protobuf:"varint,28,opt,name=feed_publication_debt,json=feedPublicationDebt,proto3" json:"feed_publication_debt,omitempty"`
 	FeedPublicationDebtFeeds []string `protobuf:"bytes,29,rep,name=feed_publication_debt_feeds,json=feedPublicationDebtFeeds,proto3" json:"feed_publication_debt_feeds,omitempty"`
 	FeedPublicationDebtNote  string   `protobuf:"bytes,30,opt,name=feed_publication_debt_note,json=feedPublicationDebtNote,proto3" json:"feed_publication_debt_note,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
+	// #12246: the simulator does not perform inbound destination NAT. When this
+	// note is present, destination-ip/port inputs must already describe the
+	// post-translation tuple; it is repeated on matched and unmatched responses
+	// so clients do not read a pre-NAT VIP verdict as the dataplane decision.
+	PostNatInputNote string `protobuf:"bytes,31,opt,name=post_nat_input_note,json=postNatInputNote,proto3" json:"post_nat_input_note,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *MatchPoliciesResponse) Reset() {
@@ -8033,6 +8038,13 @@ func (x *MatchPoliciesResponse) GetFeedPublicationDebtFeeds() []string {
 func (x *MatchPoliciesResponse) GetFeedPublicationDebtNote() string {
 	if x != nil {
 		return x.FeedPublicationDebtNote
+	}
+	return ""
+}
+
+func (x *MatchPoliciesResponse) GetPostNatInputNote() string {
+	if x != nil {
+		return x.PostNatInputNote
 	}
 	return ""
 }
@@ -10069,7 +10081,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\n" +
 	"_icmp_typeB\f\n" +
 	"\n" +
-	"_icmp_code\"\x95\n" +
+	"_icmp_code\"\xc4\n" +
 	"\n" +
 	"\x15MatchPoliciesResponse\x12\x1f\n" +
 	"\vpolicy_name\x18\x01 \x01(\tR\n" +
@@ -10103,7 +10115,8 @@ const file_xpf_proto_rawDesc = "" +
 	"\x0eunzoned_egress\x18\x1b \x01(\bR\runzonedEgress\x122\n" +
 	"\x15feed_publication_debt\x18\x1c \x01(\bR\x13feedPublicationDebt\x12=\n" +
 	"\x1bfeed_publication_debt_feeds\x18\x1d \x03(\tR\x18feedPublicationDebtFeeds\x12;\n" +
-	"\x1afeed_publication_debt_note\x18\x1e \x01(\tR\x17feedPublicationDebtNoteB\f\n" +
+	"\x1afeed_publication_debt_note\x18\x1e \x01(\tR\x17feedPublicationDebtNote\x12-\n" +
+	"\x13post_nat_input_note\x18\x1f \x01(\tR\x10postNatInputNoteB\f\n" +
 	"\n" +
 	"_policy_id\"\x9e\x01\n" +
 	"\x14HostInboundAdmission\x12:\n" +

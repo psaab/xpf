@@ -20,8 +20,12 @@
 //     predefined Junos application (junos-http, ...) never matched, only one
 //     application-set level was expanded, and source-port terms were ignored.
 //
-// This package replicates the runtime precedence and semantics exactly. The
-// ground truth is userspace-dp/src/policy.rs (evaluate_policy_result_with_len
+// This package replicates the runtime policy precedence and matching semantics
+// for the supplied policy-stage tuple. It does not execute inbound destination
+// NAT: when that is configured, callers must supply the post-translation
+// destination address/port. The shared usage text and Result note make this
+// input contract explicit on operator-facing surfaces. The ground truth for
+// policy matching is userspace-dp/src/policy.rs (evaluate_policy_result_with_len
 // + try_match_rule + parse_v3_literal_set + CompiledApplications) fed by the
 // Go snapshot builder (pkg/dataplane/userspace/policies.go). Where the runtime
 // and the old per-surface matchers disagreed, the runtime wins.
@@ -324,7 +328,10 @@ const matchPoliciesUsageTail = ` from-zone <zone> to-zone <zone>
          ... protocol udp source-port 53 destination-port 53
          ... protocol icmp icmp-type 8 icmp-code 0    (IPv4 echo request)
          ... protocol icmp6 icmp-type 128             (IPv6 echo request)
-         ... protocol tcp non-first-fragment          (non-first TCP fragment)`
+         ... protocol tcp non-first-fragment          (non-first TCP fragment)
+       when inbound destination NAT is configured, destination-ip and
+       destination-port must be the post-DNAT/post-translation (real-server)
+       tuple; this simulator does not perform NAT.`
 
 // MatchPoliciesUsage is the full usage/help block printed by `show security
 // match-policies` when the required from-zone/to-zone selectors are missing
@@ -335,7 +342,25 @@ const MatchPoliciesUsage = "usage: show security match-policies" + matchPolicies
 // the required from-zone/to-zone selectors are missing (#3628).
 const TestPolicyUsage = "usage: test policy" + matchPoliciesUsageTail
 
-// Query is a 5-tuple policy-simulation request. A nil SrcIP/DstIP or an empty
+// PostNATInputRequirementNote describes the policy-only simulator's tuple-stage
+// contract when inbound destination translation is configured.
+const PostNATInputRequirementNote = "Inbound destination NAT is not simulated. Supply the post-DNAT/post-translation (real-server) tuple, not the pre-NAT VIP: use CLI destination-ip/destination-port or REST dst_ip/dst_port."
+
+func postNATInputNote(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	nat := cfg.Security.NAT
+	if (nat.Destination != nil && len(nat.Destination.RuleSets) > 0) ||
+		len(nat.Static) > 0 || len(nat.NAT64) > 0 {
+		return PostNATInputRequirementNote
+	}
+	return ""
+}
+
+// Query is a 5-tuple policy-simulation request. The destination address and
+// port are expected to already reflect inbound destination NAT; Match does not
+// execute DNAT, static NAT, NPTv6, or NAT64. A nil SrcIP/DstIP or an empty
 // Protocol means "unspecified" — the corresponding match dimension is not
 // constrained (the established diagnostic behavior). A zero SrcPort/DstPort
 // means "unspecified port" and likewise does not constrain a port-bearing
@@ -750,6 +775,13 @@ type Result struct {
 	// DefaultUsed is true when no policy matched and Action is the configured
 	// default-policy.
 	DefaultUsed bool
+
+	// PostNATInputNote is non-empty when the config contains inbound destination
+	// translation. MatchPolicies is policy-only: callers must provide the
+	// translated destination address/port, not the pre-NAT VIP. The note is
+	// repeated on every result so a verdict is not mistaken for a pre-NAT
+	// dataplane simulation.
+	PostNATInputNote string
 
 	// UnzonedIngress is true when the query's FROM zone is not a known zone, so
 	// the runtime denies it unconditionally (#6682) rather than falling through
@@ -1286,6 +1318,11 @@ func queryTupleFamily(ip net.IP, fam string) string {
 // path (matchJunosHost, #3285): exact ingress->junos-host then
 // `from-zone any`->junos-host, with NO global/default transit fallback.
 func Match(cfg *config.Config, q Query) (res Result) {
+	if note := postNATInputNote(cfg); note != "" {
+		defer func() {
+			res.PostNATInputNote = note
+		}()
+	}
 	// codex-182 A10-b02-C1: an IPv4 source with an IPv6 destination is a tuple
 	// the forwarding path never produces — NAT46 is unsupported, so no inbound
 	// translation yields a v4 source with a v6 destination — and the runtime

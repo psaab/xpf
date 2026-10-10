@@ -565,6 +565,9 @@ func (c *ctl) showMatchPolicies(args []string) error {
 	if err != nil {
 		return fmt.Errorf("%v", err)
 	}
+	if note := resp.GetPostNatInputNote(); note != "" {
+		fmt.Printf("NOTE: %s\n", note)
+	}
 	if resp.FeedPublicationDebt {
 		fmt.Println(resp.FeedPublicationDebtNote)
 		return nil

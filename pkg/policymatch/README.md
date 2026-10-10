@@ -33,6 +33,13 @@ it, and `pkg/grpcapi` cannot import `pkg/cli` (`pkg/cli` imports
 of the analysis or a move. `pkg/cli/policy_check_surface_agreement_8597_test.go`
 pins that the two surfaces render identically.
 
+## Destination NAT tuple stage (#12246)
+
+`Match` is policy-only and does not perform inbound destination NAT. When
+DNAT, static NAT, NPTv6, or NAT64 is configured, callers must supply the
+post-translation destination address and port. Shared usage text and
+`Result.PostNATInputNote` expose this requirement on operator-facing surfaces.
+
 ## Port input validation (#3116)
 
 `Match` gates a port term on `SrcPort/DstPort > 0`, so a port of `0` means
