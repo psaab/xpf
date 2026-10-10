@@ -83,9 +83,9 @@ func TestLoadMergeNamelessTermFlatteningIsPinned12092(t *testing.T) {
 	}
 
 	// These two value-bearing controls reject because their validators see
-	// `then` as a port/protocol value. The no-argument is-fragment leaf
-	// instead swallows the fused tail; pin that known fail-open separately
-	// below (#12528).
+	// `then` as a port/protocol value. The no-argument is-fragment and
+	// flexible-match-range leaves instead swallow the fused tail; the pin
+	// below records the is-fragment fail-open (#12528).
 	rejected := []struct {
 		name, input, wantErr string
 	}{
@@ -157,8 +157,12 @@ func TestLoadMergeNamelessTermFlatteningIsPinned12092(t *testing.T) {
 			t.Fatalf("LoadMerge + CommitCheck rejected known current behavior: %v", err)
 		}
 		terms := cfg.Firewall.FiltersInet["F"].Terms
-		if len(terms) != 2 || terms[0].Name != "T" || !terms[0].IsFragment || terms[0].Action != "" {
-			t.Fatalf("committed is-fragment term = %+v, want T with IsFragment and empty Action", terms)
+		if len(terms) != 2 {
+			t.Fatalf("committed firewall term count = %d, want 2", len(terms))
+		}
+		if terms[0].Name != "T" || !terms[0].IsFragment || terms[0].Action != "" {
+			t.Fatalf("committed is-fragment term = {Name:%q IsFragment:%t Action:%q}, want T with IsFragment and empty Action",
+				terms[0].Name, terms[0].IsFragment, terms[0].Action)
 		}
 		if terms[1].Name != "allow" || terms[1].Action != "accept" {
 			t.Fatalf("committed allow term = %+v, want allow/accept", terms[1])
