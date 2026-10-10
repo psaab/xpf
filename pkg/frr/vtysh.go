@@ -70,9 +70,8 @@ const frrReloadOutputTail = 1024
 
 // frrExecutor is the package-private indirection that all vtysh and
 // frr-reload.py shell-outs route through. Production code uses
-// realExecutor; tests inject a fake. The interface is intentionally
-// minimal: it covers only the three call shapes that exist in pkg/frr
-// today.
+// realExecutor; tests inject a fake. The interface covers the distinct
+// command, load, daemon-scoped, and streaming call shapes in this package.
 type frrExecutor interface {
 	// Vtysh runs `vtysh -c <command>` under ctx and returns stdout. Errors
 	// include the captured stderr in the message string.
@@ -93,12 +92,15 @@ type frrExecutor interface {
 	// converged. (#1880 — replaces the retired SystemctlReload.)
 	FrrReloadPy(ctx context.Context, conf string) error
 
-	// VtyshLoad runs `vtysh -f <conf>` with the supplied context and
-	// returns CombinedOutput (so the caller can include stderr in error
-	// messages — preserves the historical behavior). NOTE: vtysh -f is
-	// ADDITIVE — it re-applies every desired line but cannot remove
-	// stale config; it is the degraded fallback only.
+	// VtyshLoad runs integrated `vtysh -f <conf>` and returns CombinedOutput.
+	// The load is additive and broadcasts config to connected daemons; callers
+	// that need daemon-local state must scope commands or clean/verify copies.
 	VtyshLoad(ctx context.Context, conf string) ([]byte, error)
+	// VtyshLoadDaemon runs `vtysh -d <daemon> -f <conf>`. On FRR versions
+	// where daemon-scoped loads silently no-op, callers must verify state.
+	VtyshLoadDaemon(ctx context.Context, daemon, conf string) ([]byte, error)
+	// VtyshDaemon runs a read-only `vtysh -d <daemon> -c <command>` query.
+	VtyshDaemon(ctx context.Context, daemon, command string) ([]byte, error)
 
 	// VtyshStream runs `vtysh -c <command>` under ctx and returns stdout
 	// as an io.ReadCloser plus a finish func that reaps the process. The
@@ -209,6 +211,21 @@ func (realExecutor) VtyshLoad(ctx context.Context, conf string) ([]byte, error) 
 	cmd := exec.CommandContext(ctx, vtyshBinary, "-f", conf)
 	// WaitDelay caps the post-SIGKILL pipe-drain window (apply-reachable
 	// via the FRR reload fallback).
+	cmd.WaitDelay = 5 * time.Second
+	return cmd.CombinedOutput()
+}
+
+// VtyshLoadDaemon loads a config file into a single daemon.
+func (realExecutor) VtyshLoadDaemon(ctx context.Context, daemon, conf string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, vtyshBinary, "-d", daemon, "-f", conf)
+	cmd.WaitDelay = 5 * time.Second
+	return cmd.CombinedOutput()
+}
+
+// VtyshDaemon runs a command against exactly one daemon and returns
+// CombinedOutput for state verification.
+func (realExecutor) VtyshDaemon(ctx context.Context, daemon, command string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, vtyshBinary, "-d", daemon, "-c", command)
 	cmd.WaitDelay = 5 * time.Second
 	return cmd.CombinedOutput()
 }

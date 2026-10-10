@@ -107,13 +107,22 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 	// #9666: IS-IS renders through resolveISISRedistribute, which takes the
 	// router's level rather than a self literal and hard-codes self "isis"
 	// into redistributeEntries. Its call sites count as "isis" ONLY if that
-	// hard-coding is proven below, and redistributeEntries may have no caller
-	// but the two wrappers, so a third path cannot slip past this census.
+	// hard-coding is proven below.
 	isisCallRE := regexp.MustCompile(`\.resolveISISRedistribute\(`)
 	isisSelfRE := regexp.MustCompile(`func \(m \*Manager\) resolveISISRedistribute\([^)]*\) string \{\s*return isisRedistributeLines\(m\.redistributeEntries\([^,()]+,\s*[^,()]+,\s*"isis",`)
+	// #12071: the QNH overlay generator reaches redistributeEntries through
+	// addExport, whose self parameter must pass through unchanged. Every
+	// addExport call must also pass a literal self this census can read.
+	// With the two wrappers and this proven closure, any fourth caller is an
+	// unseen router whose AFI coverage this census cannot establish.
+	qnhCallRE := regexp.MustCompile(`addExport\(`)
+	qnhLitRE := regexp.MustCompile(`addExport\([^,()]+,\s*"([a-z0-9]*)",`)
+	qnhSelfRE := regexp.MustCompile(`addExport := func\(daemon, self,[^)]*\) \{(?s:.*?)m\.redistributeEntries\(export, fc\.PolicyOptions, self, scope\)`)
 	entriesCallRE := regexp.MustCompile(`\.redistributeEntries\(`)
 	calls, lits := 0, map[string]int{}
 	isisCalls, isisSelfProven, entriesCalls := 0, false, 0
+	qnhCalls, qnhLiteralCalls, qnhSelfProven := 0, 0, false
+	qnhLits := map[string]int{}
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -128,6 +137,14 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 		}
 		isisCalls += len(isisCallRE.FindAllIndex(b, -1))
 		isisSelfProven = isisSelfProven || isisSelfRE.Match(b)
+		qnhCalls += len(qnhCallRE.FindAllIndex(b, -1))
+		for _, mm := range qnhLitRE.FindAllSubmatch(b, -1) {
+			self := string(mm[1])
+			lits[self]++
+			qnhLits[self]++
+			qnhLiteralCalls++
+		}
+		qnhSelfProven = qnhSelfProven || qnhSelfRE.Match(b)
 		entriesCalls += len(entriesCallRE.FindAllIndex(b, -1))
 	}
 	if isisCalls > 0 {
@@ -137,8 +154,18 @@ func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
 		calls += isisCalls
 		lits["isis"] += isisCalls
 	}
-	if entriesCalls != 2 {
-		t.Fatalf("redistributeEntries has %d callers, want exactly the two wrappers (resolveRedistribute, resolveISISRedistribute); another caller would be a router this census cannot see", entriesCalls)
+	if qnhCalls == 0 || !qnhSelfProven {
+		t.Fatalf("found %d QNH addExport calls but could not prove its self parameter reaches redistributeEntries", qnhCalls)
+	}
+	if qnhLiteralCalls != qnhCalls {
+		t.Fatalf("found %d QNH addExport calls but %d with a literal self %v; a call this scan cannot read is a router the filter cannot see", qnhCalls, qnhLiteralCalls, qnhLits)
+	}
+	if qnhLits["ospf"] == 0 || qnhLits["rip"] == 0 {
+		t.Errorf("QNH overlay caller positive control missing ospf/rip self literals: %v", qnhLits)
+	}
+	calls += qnhCalls
+	if entriesCalls != 3 {
+		t.Fatalf("redistributeEntries has %d callers, want exactly the two wrappers plus the proven QNH overlay closure; another caller would be a router this census cannot see", entriesCalls)
 	}
 	n := 0
 	for _, c := range lits {
