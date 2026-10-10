@@ -1858,6 +1858,9 @@ type compileOpts struct {
 	// Tolerant loads retain the historical behavior and warn about the unknown
 	// token; enforcement ignores it. The separate full-admit-except gate below
 	// has its own flag so neither diagnostic masks the other.
+	// The same option retains unknown host-inbound child warnings recorded by
+	// the compiler so tolerant ingestion does not silently discard keywords
+	// (#12219).
 	lenientHostInboundTokens bool
 	// lenientHostInboundFullAdmitExcept downgrades inert known `except`
 	// exclusions under `any-service` from a strict error to one warning per

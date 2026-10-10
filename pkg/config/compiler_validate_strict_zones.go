@@ -834,6 +834,81 @@ func validateHostInboundFullAdmitExceptStanza(zone, ifName string, hib *HostInbo
 		zone, scope, strings.Join(exclusions, "; "), fullAdmit)
 }
 
+// ToleratedUnknownHostInboundChildWarnings returns deterministic diagnostics
+// for unknown host-inbound-traffic children retained by the compiler. An empty
+// per-interface override remains a deny-all override, but its warning names
+// the discarded keyword and the effective consequence.
+func ToleratedUnknownHostInboundChildWarnings(cfg *Config) []string {
+	var warnings []string
+	for _, zoneName := range sortedZoneNames(cfg) {
+		zone := cfg.Security.Zones[zoneName]
+		if zone == nil {
+			continue
+		}
+		warnings = append(warnings, unknownHostInboundChildWarnings(zone, zoneName, "", zone.HostInboundTraffic)...)
+		for _, ifName := range zone.SortedInterfaceHostInboundRefs() {
+			warnings = append(warnings, unknownHostInboundChildWarnings(zone, zoneName, ifName, zone.InterfaceHostInbound[ifName])...)
+		}
+	}
+	return warnings
+}
+
+func unknownHostInboundChildWarnings(zone *ZoneConfig, zoneName, ifName string, hib *HostInboundTraffic) []string {
+	if hib == nil || len(hib.UnknownChildren) == 0 {
+		return nil
+	}
+	scope := fmt.Sprintf("security zone %q host-inbound-traffic", zoneName)
+	if ifName != "" {
+		scope = fmt.Sprintf("security zone %q interfaces %q host-inbound-traffic", zoneName, ifName)
+	}
+	var overrideServices, overrideProtocols []string
+	if ifName != "" {
+		overrideServices, overrideProtocols, _ = zone.InterfaceHostInboundOverride(ifName)
+	}
+	emptyOverride := ifName != "" && !hasKnownHostInboundAdmission(overrideServices, overrideProtocols)
+
+	warnings := make([]string, 0, len(hib.UnknownChildren))
+	for _, keyword := range hib.UnknownChildren {
+		if keyword == "" {
+			continue
+		}
+		warning := fmt.Sprintf("%s: unknown child keyword %q was discarded (tolerant path)", scope, keyword)
+		if emptyOverride {
+			warning = fmt.Sprintf("%s: unknown child keyword %q was discarded; no recognized admission remains, so this stanza replaces zone admission with deny-all (tolerant path)", scope, keyword)
+		}
+		warnings = append(warnings, warning)
+	}
+	return warnings
+}
+
+func hasKnownHostInboundAdmission(services, protocols []string) bool {
+	for _, service := range services {
+		if KnownHostInboundSystemServices[strings.ToLower(service)] {
+			return true
+		}
+	}
+	for _, protocol := range protocols {
+		if KnownHostInboundProtocols[strings.ToLower(protocol)] {
+			return true
+		}
+	}
+	return false
+}
+
+func validateHostInboundUnknownChildrenStrict(cfg *Config) error {
+	for _, zoneName := range sortedZoneNames(cfg) {
+		zone := cfg.Security.Zones[zoneName]
+		if zone == nil {
+			continue
+		}
+		hib := zone.HostInboundTraffic
+		if hib != nil && len(hib.UnknownChildren) > 0 {
+			return fmt.Errorf("security zone %q host-inbound-traffic has unknown child keyword %q, which would be discarded", zoneName, hib.UnknownChildren[0])
+		}
+	}
+	return nil
+}
+
 // knownHostInboundExceptTokens returns distinct, recognized exclusions in
 // authored order. Unknown exclusions stay visible to the ordinary token gate,
 // while repeated exclusions need only be named once in this diagnostic.

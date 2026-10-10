@@ -449,6 +449,14 @@ func runUniformGatesClusterZone(tree *ConfigTree, cfg *Config, opts compileOpts)
 		}
 	}
 
+	// The schema may reject these children on the normal store path, but direct
+	// compiler callers and tolerant ingestion must not silently drop them.
+	if opts.lenientHostInboundTokens {
+		cfg.Warnings = append(cfg.Warnings, ToleratedUnknownHostInboundChildWarnings(cfg)...)
+	} else if err := validateHostInboundUnknownChildrenStrict(cfg); err != nil {
+		return err
+	}
+
 	// #3200 host-inbound-traffic token gate. Strict on commit / commit-check
 	// (hard-reject an unknown/typo system-services or protocols token that can
 	// make the nft kernel mirror and Rust classifier enforce inconsistently);

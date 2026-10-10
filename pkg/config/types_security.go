@@ -522,6 +522,9 @@ type ZoneConfig struct {
 type HostInboundTraffic struct {
 	SystemServices []string // ssh, ping, dns, etc.
 	Protocols      []string // ospf, bgp, etc.
+	// UnknownChildren records inner keywords discarded by this typed view so
+	// strict compilation can reject them and tolerant loads can retain warnings.
+	UnknownChildren []string `json:"-"`
 
 	// Compiler-only provenance for Junos `except` modifiers. The parser
 	// materializes filtered positives immediately; retaining the exclusions
