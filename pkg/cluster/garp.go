@@ -433,7 +433,7 @@ func SendGratuitousIPv6(iface string, ip net.IP, count int) error {
 		return fmt.Errorf("interface %s: %w", iface, err)
 	}
 
-	pkt := buildUnsolicitedNA(ifi.HardwareAddr, ip6)
+	pkt := buildUnsolicitedNA(ifi.HardwareAddr, ip6, ip6)
 
 	fd, err := linuxsock.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htons(unix.ETH_P_IPV6)))
 	if err != nil {
@@ -493,8 +493,40 @@ func SendGratuitousIPv6BurstGated(iface string, ip net.IP, count int, stillValid
 	if err != nil {
 		return fmt.Errorf("interface %s: %w", iface, err)
 	}
+	return sendUnsolicitedIPv6NABurstGated(iface, ifi, ip6, ip6, count, stillValid)
+}
 
-	pkt := buildUnsolicitedNA(ifi.HardwareAddr, ip6)
+// SendProxyGratuitousIPv6BurstGated sends an unsolicited NA for a proxy-NDP
+// target. Unlike a configured VIP, a proxy target is not assigned to the
+// outgoing interface; RFC 4861 §4.4 requires the packet source to be another
+// address actually assigned to that interface. Prefer its global/ULA address
+// and fall back to link-local, matching NDP source selection.
+func SendProxyGratuitousIPv6BurstGated(iface string, targetIP net.IP, count int, stillValid BurstStillValid) error {
+	if count <= 0 {
+		count = 1
+	}
+	target := targetIP.To16()
+	if target == nil || target.To4() != nil {
+		return fmt.Errorf("not an IPv6 proxy target: %s", targetIP)
+	}
+
+	ifi, err := net.InterfaceByName(iface)
+	if err != nil {
+		return fmt.Errorf("interface %s: %w", iface, err)
+	}
+	addrs, err := ifi.Addrs()
+	if err != nil {
+		return fmt.Errorf("interface addresses %s: %w", iface, err)
+	}
+	source := probeIPv6Source(addrs)
+	if source == nil {
+		return fmt.Errorf("no suitable IPv6 source address on %s", iface)
+	}
+	return sendUnsolicitedIPv6NABurstGated(iface, ifi, source, target, count, stillValid)
+}
+
+func sendUnsolicitedIPv6NABurstGated(iface string, ifi *net.Interface, source, target net.IP, count int, stillValid BurstStillValid) error {
+	pkt := buildUnsolicitedNA(ifi.HardwareAddr, source, target)
 
 	fd, err := linuxsock.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htons(unix.ETH_P_IPV6)))
 	if err != nil {
@@ -515,7 +547,7 @@ func SendGratuitousIPv6BurstGated(iface string, ip net.IP, count int, stillValid
 	}
 
 	slog.Info("cluster: sent unsolicited IPv6 NA burst (1st)",
-		"interface", iface, "ip", ip6.String(), "total", count)
+		"interface", iface, "ip", target.String(), "total", count)
 
 	// Schedule remaining NAs in background. As with the GARP burst above,
 	// follow-up sends are the failover-convergence reliability mechanism;
@@ -523,7 +555,7 @@ func SendGratuitousIPv6BurstGated(iface string, ip net.IP, count int, stillValid
 	// loop (never per-iteration). The loop never aborts on a transient
 	// error so the remaining NAs still get a chance to reach the LAN.
 	if count > 1 {
-		go runNABurstFollowups(fd, iface, ip6.String(), pkt, addr, count, stillValid)
+		go runNABurstFollowups(fd, iface, target.String(), pkt, addr, count, stillValid)
 	} else {
 		unix.Close(fd)
 	}
@@ -569,7 +601,8 @@ func runNABurstFollowups(fd int, iface, ip string, pkt []byte, addr unix.Sockadd
 // buildUnsolicitedNA constructs a raw Ethernet + IPv6 + ICMPv6 Neighbor
 // Advertisement packet, sent to the all-nodes multicast address (ff02::1) per
 // RFC 4861 §7.2.6 (unsolicited NA). Includes the Target Link-Layer Address
-// option.
+// option. The source must be assigned to the outgoing interface; the advertised
+// target may instead be an address served by proxy NDP.
 //
 // Flags are Router=1, Override=1, Solicited=0 — see the pkt[58] = 0xA0 setter
 // below, which states the same thing thirty lines further down.
@@ -582,7 +615,7 @@ func runNABurstFollowups(fd int, iface, ip string, pkt []byte, addr unix.Sockadd
 // the old node — precisely the failover convergence this exists to drive. A
 // reader auditing RFC conformance hit the false sentence first, and #6934 spent
 // a round ruling out an Override=0 bug that the code never had.
-func buildUnsolicitedNA(mac net.HardwareAddr, ip net.IP) []byte {
+func buildUnsolicitedNA(mac net.HardwareAddr, source, target net.IP) []byte {
 	// 14 Ethernet + 40 IPv6 + 24 ICMPv6 NA (8 hdr + 16 target) + 8 TLLA option = 86
 	pkt := make([]byte, 86)
 
@@ -598,8 +631,8 @@ func buildUnsolicitedNA(mac net.HardwareAddr, ip net.IP) []byte {
 	binary.BigEndian.PutUint16(pkt[18:20], 32) // Payload Length: ICMPv6 NA(24) + TLLA option(8)
 	pkt[20] = 58                               // Next Header: ICMPv6
 	pkt[21] = 255                              // Hop Limit
-	// Source: our IP
-	copy(pkt[22:38], ip.To16())
+	// RFC 4861 §4.4: source is assigned to the interface sending this packet.
+	copy(pkt[22:38], source.To16())
 	// Destination: ff02::1 (all-nodes multicast)
 	pkt[38] = 0xff
 	pkt[39] = 0x02
@@ -610,15 +643,12 @@ func buildUnsolicitedNA(mac net.HardwareAddr, ip net.IP) []byte {
 	pkt[54] = 136 // Type: Neighbor Advertisement
 	pkt[55] = 0   // Code: 0
 	// pkt[56:58] = checksum (filled below)
-	// Flags: Router=1, Override=1, Solicited=0
-	// RFC 4861 §7.2.5: if IsRouter was true in the neighbor cache and the
-	// received NA has Router=0, the host MUST remove that router from the
-	// Default Router List. We MUST set Router=1 to preserve the host's
-	// default route through this link-local address across failover.
+	// Router=1 describes the forwarding sender; Override=1 updates stale
+	// proxy mappings. Solicited=0 is required for multicast NAs.
 	pkt[58] = 0xA0 // Router(bit 31)=0x80 + Override(bit 29)=0x20
 	// pkt[59:62] = 0 (reserved)
-	// Target address
-	copy(pkt[62:78], ip.To16())
+	// Target may be a proxy address that is not assigned to this interface.
+	copy(pkt[62:78], target.To16())
 
 	// --- Target Link-Layer Address option (8 bytes) ---
 	pkt[78] = 2 // Type: Target Link-Layer Address

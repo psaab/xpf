@@ -484,12 +484,12 @@ func (d *Daemon) scheduleDirectAnnounce(rgID int, reason string) {
 
 // directGARPBurstFn and directNABurstFn are seams over the cluster gated burst
 // senders so directSendGARPs' #2898 abdication gate is unit-testable without
-// raw-socket I/O. Production wires them to the cluster gated senders, which send
-// the first (immediate) frame unconditionally and gate only the 50ms follow-up
-// loop on the supplied BurstStillValid predicate.
+// raw-socket I/O. directProxyNABurstFn uses the same gate but selects a valid
+// interface source address distinct from the proxy target.
 var (
-	directGARPBurstFn = cluster.SendGratuitousARPBurstGated
-	directNABurstFn   = cluster.SendGratuitousIPv6BurstGated
+	directGARPBurstFn    = cluster.SendGratuitousARPBurstGated
+	directNABurstFn      = cluster.SendGratuitousIPv6BurstGated
+	directProxyNABurstFn = cluster.SendProxyGratuitousIPv6BurstGated
 )
 
 // directARPProbeFn is the supplementary gateway ARP-probe sender used by
@@ -750,19 +750,20 @@ func (d *Daemon) clearVIPWarning(ifName string) {
 // pool address needs announcing only if an upstream has it CACHED, which
 // requires it to have been used for translation, and a deployment translating
 // through more than 64 distinct pool addresses in the lifetime of one upstream
-// ARP entry is not the one this fix is for. Exceeding it warns once per RG and
-// announces the first 64 in configured order — deterministic, so the same
+// neighbor entry is not the one this fix is for. Exceeding it warns once per RG
+// and announces the first 64 in configured order — deterministic, so the same
 // addresses are announced on every failover rather than an arbitrary subset.
 const proxyARPAnnounceMaxAddresses = 64
 
-// announceProxyARPPoolAddresses sends ONE gratuitous ARP per proxy-ARP pool
+// announceProxyARPPoolAddresses sends ONE gratuitous ARP for each IPv4
+// proxy-ARP pool address and ONE unsolicited NA for each IPv6 proxy-NDP pool
 // address on the interfaces belonging to rgID.
 //
-// ONE, not a burst of garpCount. The burst exists to survive loss on a path
-// where a single VIP must be re-bound; here the job is breadth — invalidating
-// one upstream binding per address — and depth × breadth is what turns this
-// into a storm. A missed announce is recovered by the upstream's own ARP
-// ageing, which is the pre-#8405 behaviour for every address.
+// ONE, not a burst. The burst exists to survive loss when a single VIP must be
+// re-bound; here the job is breadth — invalidating one upstream binding per
+// address — and depth × breadth is what turns this into a storm. A missed
+// announce is recovered by the upstream's own neighbor-discovery ageing, which
+// was the pre-#8405 behavior for every address.
 //
 // #8621: that recovery sentence is TRUE ONLY NOW. It assumes the upstream's
 // re-ARP gets an answer, and until #8621 nothing answered for a pool address
@@ -785,6 +786,7 @@ func (d *Daemon) announceProxyARPPoolAddresses(cfg *config.Config, rgID int, sti
 		return
 	}
 	sent := 0
+	attempted := 0
 	truncated := false
 	for _, entry := range cfg.Security.NAT.ProxyARP {
 		if proxyARPRedundancyGroupFor(cfg, entry.Interface) != rgID {
@@ -798,27 +800,31 @@ func (d *Daemon) announceProxyARPPoolAddresses(cfg *config.Config, rgID int, sti
 			if stillValid != nil && !stillValid() {
 				return // ownership moved again mid-announce; stop rather than lie
 			}
-			if sent >= proxyARPAnnounceMaxAddresses {
-				truncated = true
-				break
-			}
 			ip, _, err := net.ParseCIDR(cidr)
 			if err != nil {
 				if ip = net.ParseIP(cidr); ip == nil {
 					continue
 				}
 			}
-			if ip.To4() == nil {
-				// IPv6 pool addresses need an unsolicited NA, not an ARP. Not
-				// sent here: the measured fault is IPv4, and announcing v6
-				// through the v4 path would be silently wrong rather than
-				// merely absent.
-				continue
+			if attempted >= proxyARPAnnounceMaxAddresses {
+				truncated = true
+				break
 			}
-			if err := directGARPBurstFn(ifName, ip, 1, stillValid); err != nil {
-				slog.Warn("directSendGARPs: pool proxy-ARP announce failed",
-					"iface", ifName, "ip", ip, "rg", rgID, "err", err)
-				continue
+			// Bound attempted sends, not only successful announcements: a
+			// failed raw-socket send must not reopen the per-failover budget.
+			attempted++
+			if ip.To4() != nil {
+				if err := directGARPBurstFn(ifName, ip, 1, stillValid); err != nil {
+					slog.Warn("directSendGARPs: pool proxy-ARP announce failed",
+						"iface", ifName, "ip", ip, "rg", rgID, "err", err)
+					continue
+				}
+			} else {
+				if err := directProxyNABurstFn(ifName, ip, 1, stillValid); err != nil {
+					slog.Warn("directSendGARPs: pool proxy-NDP announce failed",
+						"iface", ifName, "ip", ip, "rg", rgID, "err", err)
+					continue
+				}
 			}
 			sent++
 		}
@@ -827,12 +833,13 @@ func (d *Daemon) announceProxyARPPoolAddresses(cfg *config.Config, rgID int, sti
 		}
 	}
 	if truncated && d.warnGARPClampOnce(rgID) {
-		slog.Warn("directSendGARPs: pool proxy-ARP announce truncated",
-			"rg", rgID, "announced", sent, "max", proxyARPAnnounceMaxAddresses,
-			"consequence", "the remaining pool addresses rely on upstream ARP ageing")
+		slog.Warn("directSendGARPs: pool proxy-ARP/NDP announce truncated",
+			"rg", rgID, "announced", sent, "attempted", attempted,
+			"max", proxyARPAnnounceMaxAddresses,
+			"consequence", "the remaining pool addresses rely on upstream neighbor-discovery ageing")
 	}
 	if sent > 0 {
-		slog.Info("directSendGARPs: announced pool proxy-ARP addresses",
+		slog.Info("directSendGARPs: announced pool proxy-ARP/NDP addresses",
 			"rg", rgID, "count", sent)
 	}
 }
