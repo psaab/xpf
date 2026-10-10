@@ -61,7 +61,7 @@ var methodCanonicalCommand = map[string]string{
 	"GetPolicies":              "show security policies",
 	"GetSessions":              "show security flow session",
 	"GetSessionSummary":        "show security flow session summary",
-	"GetZonePairSummary":       "show security match-policies",
+	"GetZonePairSummary":       "show security flow session summary",
 	"GetNATSource":             "show security nat source pool",
 	"GetNATDestination":        "show security nat destination pool",
 	"GetScreen":                "show security screen statistics",
