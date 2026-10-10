@@ -978,6 +978,15 @@ func (s *Store) clearConfirmResolutionPendingLocked() bool {
 	if !s.confirmResolvePendingPersist {
 		return false
 	}
+	if s.firstCommitTeardownOwed {
+		// The active rollback target has just become durable. For a FIRST
+		// rollback, publish teardown debt before clearing the retained
+		// confirm.json recovery record.
+		if err := s.noteFirstCommitTeardownLocked(); err != nil {
+			s.deferFirstCommitTeardownMarkerLocked(err)
+			return true
+		}
+	}
 	s.confirmResolvePendingPersist = false
 	// #5835: the replacement config is durable, so remove the retained record.
 	// A durable-removal failure here retains retry debt (degraded health +

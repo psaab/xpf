@@ -2117,11 +2117,16 @@ never lock an operator out of a remote box it manages.
   reason is that a surviving sampler would keep issuing control-socket
   calls into a backend the rollback has just torn down. The monitor is
   rebuilt fresh on a corrected re-arm because it is not restartable after
-  `Stop`), removes the takeover `.network` files (keeping
-  the lifeline + `.link` files), clears the FRR managed section, and
-  detaches the dataplane — instead of applying an empty config — and the
-  store persists the never-committed marker so a restart re-enters
-  bootstrap. The detach also drops the #5275 armed flag and closes kernel
+  `Stop`), retires config-driven `.network` files while keeping `.link` rename
+  files. Before the first config's networkd reconcile, bootstrap exit snapshots
+  `fxp0.network` only when it carries the bootstrap-lifeline marker. Rollback
+  retains that marked content or restores its exact snapshot if networkd
+  replaced it; with no validated snapshot, unmarked fxp0 content is retained
+  and teardown reports DEGRADED rather than risk management reachability.
+  Each successful file removal or restoration triggers `networkctl reload`;
+  teardown then clears FRR and detaches the dataplane instead of applying an
+  empty config. The store persists the never-committed marker so a restart
+  re-enters bootstrap. The detach also drops the #5275 armed flag and closes kernel
   transit forwarding: the node is un-armed by that step, so leaving
   `ip_forward=1` would let the next apply tail keep routing transit for a
   dataplane that is no longer attached.

@@ -83,7 +83,15 @@ func (d *Daemon) setupInterfaceNaming() error {
 			// identity, and (only if it would become fxp0) renames JUST that
 			// NIC + snapshots its addressing into the bootstrap .network so
 			// the operator stays reachable. No other NIC is touched.
-			d.setupBootstrapLifeline()
+			if d.store != nil && d.store.FirstCommitTeardownOwed() {
+				// Do not synthesize a trusted lifeline from runtime state after
+				// a durable rollback. Teardown restores a generation-matched
+				// pre-takeover snapshot or leaves the host DEGRADED.
+				slog.Warn("bootstrap rollback: preserving lifeline until durable teardown resolves",
+					"issue", "#12155")
+			} else {
+				d.setupBootstrapLifeline()
+			}
 		} else {
 			// #1956: device-map mode (opt-in) renames ONLY mapped NICs by
 			// stable identity and leaves the rest alone. Positional mode
@@ -225,6 +233,7 @@ func (d *Daemon) maybeExitBootstrapOnFirstConfig(cfg *config.Config) error {
 		d.bootstrapMode.Store(true)
 		return err
 	}
+	d.captureBootstrapLifelineNetwork()
 	return nil
 }
 

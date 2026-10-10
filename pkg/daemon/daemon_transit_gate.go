@@ -212,6 +212,10 @@ func (d *Daemon) shouldManageTransitGate() bool {
 		d.transitGateOwned.Store(true)
 		return true
 	}
+	if d.store != nil && d.store.FirstCommitTeardownOwed() {
+		d.transitGateOwned.Store(true)
+		return true
+	}
 	if d.store != nil && d.store.EverCommitted() {
 		d.transitGateOwned.Store(true)
 		return true

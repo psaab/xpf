@@ -240,6 +240,22 @@ type Store struct {
 	// false; only the degrade-not-fail resolution paths set it.
 	confirmResolvePendingPersist bool
 
+	// firstCommitTeardownOwed records that a FIRST commit-confirmed window
+	// expired during daemon downtime and its daemon-side takeover teardown is
+	// still owed (#12155). The debt is scoped to the abandoned generation and
+	// its rollback generation so a later durable config cannot authorize cleanup
+	// of replacement output. Protected by mu.
+	firstCommitTeardownOwed         bool
+	firstCommitTeardownGeneration   string
+	firstCommitTeardownRollbackHash string
+	// firstCommitTeardownMarkerDurable distinguishes an on-disk debt marker
+	// from the in-memory signal retained when marker persistence fails.
+	firstCommitTeardownMarkerDurable bool
+	// firstCommitTeardownRollbackDurable prevents clearing debt while a
+	// rollback active write is still pending. The retained confirm record
+	// remains the retry source until this becomes true.
+	firstCommitTeardownRollbackDurable bool
+
 	// confirmRemoveDegraded records that a RESOLVED pending commit-confirmed
 	// window's confirm.json REMOVAL failed to become durable (#5835): either the
 	// unlink failed, or the post-unlink parent-dir fsync failed so the dirent
