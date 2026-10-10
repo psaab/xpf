@@ -2657,6 +2657,10 @@ type compileOpts struct {
 	// authoring order. Same doctrine as lenientPolicyCommunityRef.
 	lenientPolicyASPathRegex    bool
 	lenientPolicyCommunityRegex bool // #8449: sibling of the as-path gate; see lenientPolicyASPathRegex
+	// lenientPolicyThenOperands downgrades the compiled #12070 policy operand
+	// gate to a warning for tolerant loads; the FRR renderer independently
+	// omits invalid next-hop/prepend clauses so an existing config still boots.
+	lenientPolicyThenOperands bool
 	// lenientPolicyReservedRedistName (#5116/#12065) downgrades the reserved
 	// route-map-suffix gate (validatePolicyReservedRedistNameStrict) from a
 	// hard compile error to a cfg.Warnings entry. Generated source-protocol
@@ -3313,6 +3317,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyASPathRef:                 true,
 		lenientPolicyASPathRegex:               true,
 		lenientPolicyCommunityRegex:            true,
+		lenientPolicyThenOperands:              true,
 		lenientPolicyReservedRedistName:        true,
 		lenientPolicyReservedChainName:         true,
 		lenientVRRPVirtualAddress:              true,

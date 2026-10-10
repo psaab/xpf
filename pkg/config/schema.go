@@ -36,6 +36,11 @@ type schemaNode struct {
 	children map[string]*schemaNode // known container children
 	wildcard *schemaNode            // matches any keyword not in children (for dynamic names)
 	multi    bool                   // true = multiple leaf values allowed (e.g. source-address); false = replace on set
+	// allChildKeysAreValues opts a typed multi leaf into validating every key
+	// of each hierarchical block-list child. Default behavior stays first-key
+	// only for leaves whose compiler reads just the child name; as-path-prepend
+	// sets this because firewallMatchValues consumes each child key.
+	allChildKeysAreValues bool
 	// valueList opts a multi leaf that ALSO declares modifier children into
 	// bracket-list value absorption (#3872 static `next-hop [ a b ]`). By
 	// default the SetPath absorber only collapses a trailing value list onto a

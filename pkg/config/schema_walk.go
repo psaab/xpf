@@ -1221,12 +1221,11 @@ func validateTypedLeaf(node *Node, leafSchema *schemaNode, parentPath []string, 
 //     `destination-port 20000 to 20003`. On every other typed multi
 //     leaf `to` is validated as an ordinary value, #4556 L-01), and
 //   - the hierarchical block-list shape, one child node per value
-//     (`name-server { 1.1.1.1; 8.8.8.8; }`). Only each child's FIRST
-//     token is validated — the compilers read exactly that
-//     (compiler_system.go name-server reads ns.Keys[0],
-//     compiler_interfaces.go virtual-address reads child.Name()) and
-//     the compiler-faithful contract forbids validating tokens the
-//     compiler ignores.
+//     (`name-server { 1.1.1.1; 8.8.8.8; }`). By default only each child's
+//     FIRST token is validated, matching leaves whose compiler reads only
+//     the child name (e.g. name-server / virtual-address). A leaf can opt in
+//     via allChildKeysAreValues when its compiler consumes the full child
+//     Keys tail; `as-path-prepend` does because it uses firewallMatchValues.
 //
 // A leaf with no value in either position fails, as do dangling /
 // separator-only tails (["to"], ["20000","to"]).
@@ -1261,15 +1260,22 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 		return typedLeafErrorf(path, "missing value")
 	}
 
-	// Block-list children: one value per child, first token only.
+	// Block-list children default to one compiler-consumed value per child.
+	// Opt-in leaves like as-path-prepend validate every key they compile.
 	for _, c := range node.Children {
 		if c == nil || len(c.Keys) == 0 {
 			continue
 		}
-		if err := check(c.Keys[0]); err != nil {
-			return typedLeafInvalidErrorf(path, c.Keys[0], err)
+		keys := c.Keys[:1]
+		if leafSchema.allChildKeysAreValues {
+			keys = c.Keys
 		}
-		validatedAny = true
+		for _, tok := range keys {
+			if err := check(tok); err != nil {
+				return typedLeafInvalidErrorf(path, tok, err)
+			}
+			validatedAny = true
+		}
 	}
 
 	if !validatedAny {

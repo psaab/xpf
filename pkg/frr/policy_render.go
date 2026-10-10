@@ -814,7 +814,10 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 
 			// then actions
 			if term.NextHop != "" {
-				if term.NextHop == "peer-address" {
+				if !config.ValidPolicyThenNextHop(term.NextHop) {
+					slog.Warn("frr: omitting invalid then next-hop value",
+						"route_map", routeMapName, "term", term.Name, "value", sanitizeFRRValue(term.NextHop))
+				} else if term.NextHop == "peer-address" {
 					// Junos "next-hop peer-address" → FRR. The session AF is not
 					// known here, so emit both forms; FRR applies each only to
 					// the matching address family of the carrying BGP session.
@@ -856,11 +859,10 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 					// AF detection used by the prefix-list renderer above.
 					fmt.Fprintf(&b, " set ipv6 next-hop global %s\n", sanitizeFRRValue(term.NextHop))
 				} else {
-					// #4498: sanitize the next-hop — an IP-typed slot, but on
-					// the tolerant load / peer-sync / rollback path a stored
-					// malformed value with an embedded newline reaches the
-					// renderer (the strict #1798 commit gate does not cover
-					// those paths, #1960). Parity with the #4482 set-clause belt.
+					// #12070 validates next-hop before this point and omits an
+					// invalid operand on tolerant loads. Keep sanitization as
+					// defense-in-depth for the emitted literal, not as a way to
+					// collapse unsupported input into an FRR command.
 					fmt.Fprintf(&b, " set ip next-hop %s\n", sanitizeFRRValue(term.NextHop))
 				}
 			}
@@ -894,16 +896,13 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			// set clause. #12069 resolves authored community names exactly
 			// once in the compiler; this renderer checks and emits only the
 			// already-resolved FRR literal, never looking the value up again.
-			// #4482: every free-text value below (set community,
-			// set comm-list delete name, set as-path prepend, and the match
-			// community / as-path names) is routed through sanitizeFRRValue —
-			// the same #4097 render-side belt the community-list / as-path-list
-			// definitions use — so a tolerant-load / peer-synced / rolled-back
-			// value with an embedded newline cannot inject an extra frr.conf
-			// line regardless of load path. #4498 extended the belt to the
-			// three remaining bare-%s route-map slots the #4482 sweep missed:
-			// `set ip/ipv6 next-hop`, `set origin`, and `match
-			// source-protocol` (all rendered above).
+			// #4482 keeps a sanitize belt on free-text route-map values, but
+			// typed operands also need semantic validation before emission.
+			// #12070 validates next-hop above and prepend below, omitting an
+			// invalid clause rather than sanitizing it onto one line. The
+			// earlier #4498 sweep also found `set origin` and `match
+			// source-protocol`; #4919 now omits invalid origins, while
+			// source-protocol remains a sanitize-on-one-line value.
 			//   - add    → `set community <v> additive` (append)
 			//   - delete → `set comm-list <name> delete` (strip by list)
 			//   - none   → `set community none` (strip all)
@@ -951,7 +950,21 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			// order (repetition is the mechanism) on a single clause; skip
 			// entirely when no ASNs were configured.
 			if len(term.ASPathPrepend) > 0 {
-				fmt.Fprintf(&b, " set as-path prepend %s\n", sanitizeFRRValue(strings.Join(term.ASPathPrepend, " ")))
+				values := config.SplitPolicyASPathPrependOperands(term.ASPathPrepend)
+				valid := len(values) > 0
+				for _, asn := range values {
+					if !config.ValidPolicyASPathPrependASN(asn) {
+						valid = false
+						break
+					}
+				}
+				if valid {
+					fmt.Fprintf(&b, " set as-path prepend %s\n", sanitizeFRRValue(strings.Join(values, " ")))
+				} else {
+					slog.Warn("frr: omitting invalid then as-path-prepend value",
+						"route_map", routeMapName, "term", term.Name,
+						"value", sanitizeFRRValue(strings.Join(term.ASPathPrepend, " ")))
+				}
 			}
 			if term.Origin != "" && validBGPOrigin(term.Origin) {
 				// #4919: skip an invalid origin (fail-closed) — a non-control

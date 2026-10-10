@@ -138,15 +138,39 @@ type PolicyTerm struct {
 	// as the FRR route-map clause `set as-path prepend <asn> <asn> ...`
 	// (#2892). AS-path prepending is a fundamental inbound traffic-engineering
 	// knob — repeating the local ASN lengthens the advertised path so peers
-	// prefer a shorter alternate path. Junos accepts the ASNs as a quoted
-	// space-separated string ("65001 65001") or a bracketed list
-	// ([ 65001 65001 ]); both flatten to this slice, preserving order and
-	// repetition (the count of repeats is the whole point). Empty = no
-	// prepend clause is rendered.
+	// prefer a shorter alternate path. Junos accepts quoted
+	// space-separated ASNs ("65001 65001") or a bracketed list
+	// ([ 65001 65001 ]); the compiler normalizes both to one slice element
+	// per ASN, preserving order and repetition (the count of repeats is the
+	// whole point). Empty = no prepend clause is rendered.
 	ASPathPrepend []string
 	// NextPolicy skips the remaining terms and the policy default, then resumes
 	// at the next policy in the evaluated policy chain.
 	NextPolicy bool
+	// hasNextHopOperand12070 / hasASPathPrependOperand12070 preserve action
+	// presence when an empty, whitespace-only, or keyword-valued operand would
+	// otherwise be erased before the #12070 compiled-term gate. Those inputs
+	// compile to an empty field/slice and otherwise look identical to an absent
+	// clause, leaving display-set output that strict validation itself rejects.
+	// Both child and inline parse paths set these flags; direct Config values
+	// without provenance retain their existing behavior.
+	hasNextHopOperand12070       bool `json:"-"`
+	hasASPathPrependOperand12070 bool `json:"-"`
+	// invalidNextHopExtra12070 preserves a compact/term-line `then next-hop`
+	// trailing operand long enough for strict compilation to reject it. The
+	// inline parser consumes exactly one next-hop operand; a following token
+	// outside the then-action boundary set, including quoted values, would
+	// otherwise be silently dropped or change tolerant boot/sync semantics.
+	// Compiler-only state, excluded from JSON.
+	invalidNextHopExtra12070      bool   `json:"-"`
+	invalidNextHopExtraValue12070 string `json:"-"`
+	// invalidASPathPrependExtra12070 preserves a from-match or quoted/
+	// bracketed then-action word ending a compact/term-line prepend run.
+	// Strict compilation rejects the tail; leaving it unconsumed lets tolerant
+	// boot/sync retain the match or action interpreted by the main parser.
+	// Compiler-only state, excluded from JSON.
+	invalidASPathPrependExtra12070      bool   `json:"-"`
+	invalidASPathPrependExtraValue12070 string `json:"-"`
 	// invalidNextPolicy11780 preserves malformed packed `then next <value>`
 	// tokens long enough for strict compilation to reject them. Tolerant
 	// compilation also records Action=reject so the renderer fails closed.

@@ -5,6 +5,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // ValidateBGPHoldTime accepts a BGP hold-time in seconds: 0, or 3..65535.
@@ -239,4 +240,135 @@ func plausibleInterfaceName(s string) bool {
 		}
 	}
 	return hasLetter
+}
+
+// policyThenNextHopUnsupportedReason returns the reason raw is outside the
+// supported routing-policy `then next-hop` subset.
+func policyThenNextHopUnsupportedReason(raw string) string {
+	switch raw {
+	case "peer-address", "self":
+		return ""
+	case "discard", "reject", "next-table":
+		return "Junos next-hop actions have no FRR route-map lowering"
+	}
+	ip := net.ParseIP(raw)
+	if ip == nil {
+		return "expected an IPv4/IPv6 address, peer-address, or self"
+	}
+	if ip.IsUnspecified() {
+		return "unspecified next-hop addresses are unsupported"
+	}
+	if ip.IsLoopback() {
+		return "loopback next-hop addresses are unsupported"
+	}
+	if ip.IsMulticast() {
+		return "multicast next-hop addresses are unsupported"
+	}
+	if v4 := ip.To4(); v4 != nil {
+		if v4[0] == 0 {
+			return "IPv4 0/8 next-hop addresses are unsupported"
+		}
+		return ""
+	}
+	if ip.IsLinkLocalUnicast() {
+		return "IPv6 link-local next-hop addresses are unsupported"
+	}
+	return ""
+}
+
+// ValidPolicyThenNextHop reports whether raw is in the supported subset.
+//
+// The `self` spelling is an xpf alias that the renderer maps to FRR's
+// `peer-address`; it is not a FRR route-map keyword. The address restrictions
+// are deliberately conservative rather than an exact FRR grammar mirror:
+// IPv4 0/8, unspecified, loopback, multicast, and IPv6 link-local addresses
+// are excluded, while IPv4 link-local literals remain supported.
+func ValidPolicyThenNextHop(raw string) bool {
+	return policyThenNextHopUnsupportedReason(raw) == ""
+}
+
+// ValidatePolicyThenNextHop is the commit-check validator for
+// `policy-options policy-statement ... then next-hop`. It reports the reason
+// for excluded address classes as well as unsupported Junos-only actions.
+func ValidatePolicyThenNextHop(raw string, _ *Config) error {
+	if reason := policyThenNextHopUnsupportedReason(raw); reason != "" {
+		return fmt.Errorf("unsupported next-hop %q: %s", raw, reason)
+	}
+	return nil
+}
+
+// appendPolicyASPathPrependOperand splits a quoted multi-ASN value before
+// appending it, but takes the allocation-free path for an ordinary ASN.
+func appendPolicyASPathPrependOperand(dst []string, value string) []string {
+	if strings.IndexFunc(value, unicode.IsSpace) < 0 {
+		return append(dst, value)
+	}
+	operands := strings.Fields(value)
+	if len(operands) == 0 {
+		// Preserve a whitespace-only authored operand so the compiled policy
+		// gate can reject it instead of mistaking it for an absent clause.
+		return append(dst, value)
+	}
+	return append(dst, operands...)
+}
+
+func appendPolicyASPathPrependOperands(dst, values []string) []string {
+	for _, value := range values {
+		dst = appendPolicyASPathPrependOperand(dst, value)
+	}
+	return dst
+}
+
+// SplitPolicyASPathPrependOperands normalizes the values carried by
+// `then as-path-prepend`. Junos permits one quoted space-separated value as
+// well as bracketed/repeated values; return the original slice when every
+// member is already one token, and split only when whitespace is present.
+func SplitPolicyASPathPrependOperands(values []string) []string {
+	for _, value := range values {
+		if strings.IndexFunc(value, unicode.IsSpace) >= 0 {
+			return appendPolicyASPathPrependOperands(nil, values)
+		}
+	}
+	return values
+}
+
+// ValidPolicyASPathPrependASN reports whether raw is one canonical decimal
+// AS number in the non-reserved 1..2^32-1 range. This config leaf deliberately
+// narrows FRR's accepted grammar: FRR accepts asdot, but xpf supports decimal
+// notation only. Signs, leading zeroes, whitespace, and non-numeric tokens
+// are rejected.
+func ValidPolicyASPathPrependASN(raw string) bool {
+	if raw == "" || (len(raw) > 1 && raw[0] == '0') {
+		return false
+	}
+	for i := range raw {
+		if raw[i] < '0' || raw[i] > '9' {
+			return false
+		}
+	}
+	n, err := strconv.ParseUint(raw, 10, 32)
+	return err == nil && n != 0
+}
+
+// ValidatePolicyASPathPrependASN is the commit-check validator for one
+// member of a multi-valued `then as-path-prepend` leaf. A quoted Junos
+// value may contain multiple ASNs, so split it before applying the
+// single-operand validator.
+func ValidatePolicyASPathPrependASN(raw string, _ *Config) error {
+	if strings.IndexFunc(raw, unicode.IsSpace) < 0 {
+		if !ValidPolicyASPathPrependASN(raw) {
+			return fmt.Errorf("AS path prepend value %q is not an ASN in 1..4294967295 (canonical decimal digits only)", raw)
+		}
+		return nil
+	}
+	operands := strings.Fields(raw)
+	if len(operands) == 0 {
+		return fmt.Errorf("AS path prepend value %q contains no ASN operands", raw)
+	}
+	for _, operand := range operands {
+		if !ValidPolicyASPathPrependASN(operand) {
+			return fmt.Errorf("AS path prepend value %q is not an ASN in 1..4294967295 (canonical decimal digits only)", operand)
+		}
+	}
+	return nil
 }
