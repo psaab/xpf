@@ -526,10 +526,17 @@ func tuneSocketBuffers() {
 
 func findBinary(explicit string) (string, error) {
 	if explicit != "" {
-		if _, err := os.Stat(explicit); err == nil {
-			return explicit, nil
+		info, err := os.Stat(explicit)
+		if err != nil {
+			return "", fmt.Errorf("userspace dataplane binary not found: %s", explicit)
 		}
-		return "", fmt.Errorf("userspace dataplane binary not found: %s", explicit)
+		if info.IsDir() {
+			return "", fmt.Errorf("userspace dataplane binary is a directory, not executable: %s", explicit)
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			return "", fmt.Errorf("userspace dataplane binary is not executable: %s (mode %s)", explicit, info.Mode())
+		}
+		return explicit, nil
 	}
 	candidates := []string{
 		"./xpf-userspace-dp",
@@ -540,7 +547,7 @@ func findBinary(explicit string) (string, error) {
 		if c == "" {
 			continue
 		}
-		if _, err := os.Stat(c); err == nil {
+		if isExecutableBinaryCandidate(c) {
 			return c, nil
 		}
 	}
@@ -548,6 +555,14 @@ func findBinary(explicit string) (string, error) {
 		return p, nil
 	}
 	return "", errors.New("userspace dataplane helper binary not found; build make build-userspace-dp or configure system dataplane binary")
+}
+
+// isExecutableBinaryCandidate mirrors exec.LookPath's file-mode test for
+// implicit candidates: directories and files without any execute bit must not
+// shadow a later usable candidate.
+func isExecutableBinaryCandidate(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0
 }
 
 func (m *Manager) stopLocked() {
