@@ -1018,11 +1018,13 @@ test-incus-lib:
 test-host-inbound:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-host-inbound --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/test-host-inbound.sh
 
 test-host-inbound-failover:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-host-inbound-failover --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/test-host-inbound.sh --with-failover
 
 # #9531 wire-deny gates (need the loss userspace cluster; each script takes
@@ -1031,6 +1033,7 @@ test-host-inbound-failover:
 test-wire-policy-deny:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate wire_policy_deny --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/wire-policy-deny.sh
 
 test-wire-policy-deny-lib:
@@ -1039,6 +1042,7 @@ test-wire-policy-deny-lib:
 test-wire-appmatch-twins:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate wire_appmatch_twins --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/wire-appmatch-twins.sh
 
 test-wire-appmatch-twins-lib:
@@ -1047,6 +1051,7 @@ test-wire-appmatch-twins-lib:
 test-wire-zone-matrix:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate wire_zone_matrix --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/wire-zone-matrix.sh
 
 test-wire-zone-matrix-lib:
@@ -1055,6 +1060,7 @@ test-wire-zone-matrix-lib:
 test-wire-hostinbound-deny:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate wire_hostinbound_deny --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/wire-hostinbound-deny.sh
 
 test-wire-hostinbound-deny-lib:
@@ -1064,6 +1070,7 @@ test-wire-conntrack-lifecycle:
 	./test/incus/with-cluster.sh "wire-conntrack-lifecycle #10030" -- \
 		env BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate wire_conntrack_lifecycle --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/wire-conntrack-lifecycle.sh
 
 test-wire-conntrack-lifecycle-lib:
@@ -1089,6 +1096,7 @@ test-wire-routing-separation-lib:
 test-wg-interop:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-wg-interop --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/wg-interop.sh all
 
 
@@ -1100,9 +1108,11 @@ test-cc-rollback-functional:
 	arm_a_rc=0; arm_b_rc=0; \
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate cc-rollback-arm-a --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/cc-rollback-functional.sh --arm a || arm_a_rc=$$?; \
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate cc-rollback-arm-b --adapter wire-gate --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/cc-rollback-functional.sh --arm b || arm_b_rc=$$?; \
 	if [ "$$arm_a_rc" = "1" ] || [ "$$arm_b_rc" = "1" ]; then exit 1; \
 	elif [ "$$arm_a_rc" = "3" ] || [ "$$arm_b_rc" = "3" ]; then exit 3; \
@@ -1295,6 +1305,7 @@ PRIVATE_RG_MODE ?= $(if $(filter all,$(MODE)),full,$(MODE))
 test-connectivity:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-connectivity --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/test-connectivity.sh $(MODE)
 
 # On-wire properties test (PMTUD reflection + NPTv6 checksum neutrality)
@@ -1307,30 +1318,35 @@ test-wire-properties:
 test-failover:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-failover --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/test-failover.sh
 
 # Double failover test (crash fw0 → fw1 takes over → fw0 rejoins → crash fw1 → fw0 takes over)
 test-double-failover:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-double-failover --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/test-double-failover.sh
 
 # Active/active per-RG failover test (iperf3 through RG split — requires cluster + iperf3 server)
 test-active-active:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-active-active --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/test-active-active.sh
 
 # Rapid failover stress test (repeated failover cycles — requires cluster + iperf3 server)
 test-stress-failover:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-stress-failover --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/test-stress-failover.sh
 
 # Hard-crash / hung-node HA test (force-stop + daemon stop + multi-cycle — requires cluster + iperf3 server)
 test-ha-crash:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-ha-crash --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/test-ha-crash.sh
 
 # #11378: IPv4 FBF fallback after a simulated ISP-B neighbor failure. Keep
@@ -1351,6 +1367,7 @@ test-fbf-steering:
 test-persistent-nat-failover:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-persistent-nat-failover --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/persistent-nat-failover.sh
 
 # #9729: a Kea lease survives a hard failover (#2261). DESTRUCTIVE.
@@ -1364,6 +1381,7 @@ test-dhcp-lease-failover:
 	./test/incus/with-cluster.sh "test-dhcp-lease-failover #10122" -- \
 		env BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-dhcp-lease-failover --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/dhcp-lease-failover.sh
 
 # #9506 S5 — live T12/G2 IPsec capture cells on the loss userspace cluster.
@@ -1388,18 +1406,21 @@ test-t12-g2-9506-lib:
 test-chained-crash:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-chained-crash --adapter ha-smoke --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/test-chained-crash.sh
 
 # Private RG election test (enable/disable private-rg-election, verify VRRP behavior)
 test-private-rg:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-private-rg --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/test-private-rg.sh $(PRIVATE_RG_MODE)
 
 # Restart connectivity regression test (verify no transient loss during daemon restart — requires cluster + iperf3 server)
 test-restart-connectivity:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
 		--gate test-restart-connectivity --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
 		-- ./test/incus/test-restart-connectivity.sh
 
 # Canonical cluster HA test environment (isolated loss userspace cluster).
