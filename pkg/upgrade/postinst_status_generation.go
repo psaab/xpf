@@ -18,8 +18,10 @@ func (r *Runner) statusGenerationPath() string {
 	return filepath.Join(r.cfg.VersionsDir, statusGenerationFile)
 }
 
-// readStatusGeneration treats an absent or malformed counter as the legacy
-// generation zero. Other I/O errors are not safe to ignore at a clear gate.
+// readStatusGeneration treats an absent or malformed counter as generation
+// zero (fail-closed at the clear gate: no valid evidence can match it, since
+// every begin advances from a successfully-read value). Other I/O errors are
+// not safe to ignore at a clear gate.
 func readStatusGeneration(path string) (uint64, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

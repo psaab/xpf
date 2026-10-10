@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -87,6 +88,13 @@ func readBinaryUpgradeStatus(path, unreadablePath string) BinaryUpgradeStatus {
 		return BinaryUpgradeStatus{ReadErr: fmt.Errorf("read binary upgrade status %s: %w", path, err)}
 	}
 	defer f.Close()
+	return parseBinaryUpgradeStatusFile(f, path)
+}
+
+// parseBinaryUpgradeStatusFile parses an already-open status file. The clear
+// path uses it on a held-open dirfd-relative fd so the inode stays pinned
+// through the quarantine decision (ABA-proof); the plain reader opens by path.
+func parseBinaryUpgradeStatusFile(f *os.File, path string) BinaryUpgradeStatus {
 	info, err := f.Stat()
 	if err != nil {
 		return BinaryUpgradeStatus{ReadErr: fmt.Errorf("stat binary upgrade status %s: %w", path, err)}
@@ -203,58 +211,125 @@ func sameBinaryUpgradeStatusRecord(a, b BinaryUpgradeStatus) bool {
 }
 
 // clearBinaryUpgradeStatusIfUnchanged re-reads the lockless postinst writer's
-// record while the caller holds the upgrade lock. The unlink is bound to an
-// open directory fd + fstatat identity re-verification immediately before
-// unlinkat, so a lockless-writer rename landing between the content compare
-// and the unlink cannot be deleted (Opus LV re-confirmation MINOR-1: the
-// prior lstat-then-os.Remove(path) TOCTOU). It does not remove the unreadable
-// marker: a marker appearing concurrently is new failure evidence and must
-// remain fail-closed.
+// record while the caller holds the upgrade lock, then removes it via an
+// atomic quarantine rename: renameat2-NOREPLACE moves the name aside. The
+// re-read fd stays OPEN through the decision (pinning the inode against
+// number-reuse ABA); an fstat comparison between the quarantined file and
+// that fd proves the moved file is the compared one. Then the live name must
+// still be vacant: a writer rename landing after the quarantine move
+// repopulates it, and the clear retains (dropping the quarantined copy)
+// rather than reporting a clear it did not make. Check-then-unlink can never
+// be atomic — the decision is made on the moved-away file plus a vacant
+// live name, never on a live name. It does not remove the unreadable marker:
+// a marker appearing concurrently is new failure evidence and must remain
+// fail-closed.
+//
+// Package hook for the deterministic race test (statConfigDBDir pattern):
+// when non-nil, runs between the quarantine move and the identity decision.
+var clearStatusQuarantineHook func()
+
 func clearBinaryUpgradeStatusIfUnchanged(path string, expected BinaryUpgradeStatus) (bool, error) {
-	current := ReadBinaryUpgradeStatus(path)
+	if path == "" {
+		path = DefaultBinaryUpgradeStatusPath
+	}
+	dirFD, err := unix.Open(filepath.Dir(path), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if err == unix.ENOENT {
+			return false, nil
+		}
+		return false, fmt.Errorf("open binary upgrade status directory before clear: %w", err)
+	}
+	defer unix.Close(dirFD)
+	base := filepath.Base(path)
+	// Open the live name via dirfd and hold the fd OPEN through the whole
+	// decision: this pins the inode, killing inode-number-reuse ABA (a freed
+	// inode cannot be recycled while open).
+	fd, err := unix.Openat(dirFD, base, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if err == unix.ENOENT {
+			return false, nil
+		}
+		return false, fmt.Errorf("open binary upgrade status %s: %w", path, err)
+	}
+	defer unix.Close(fd)
+	var fdStat unix.Stat_t
+	if err := unix.Fstat(fd, &fdStat); err != nil {
+		return false, fmt.Errorf("stat binary upgrade status %s: %w", path, err)
+	}
+	if fdStat.Mode&unix.S_IFMT != unix.S_IFREG {
+		return false, nil
+	}
+	// Wrap a DUPLICATE for parsing: closing the *os.File must not close the
+	// pinned fd (it stays open through the quarantine decision below).
+	parseFD, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return false, fmt.Errorf("duplicate binary upgrade status fd %s: %w", path, err)
+	}
+	parseFile := os.NewFile(uintptr(parseFD), path)
+	if parseFile == nil {
+		unix.Close(int(parseFD))
+		return false, fmt.Errorf("wrap binary upgrade status fd %s", path)
+	}
+	current := parseBinaryUpgradeStatusFile(parseFile, path)
+	parseFile.Close()
 	if current.ReadErr != nil {
 		return false, current.ReadErr
 	}
 	if !sameBinaryUpgradeStatusRecord(expected, current) {
 		return false, nil
 	}
-	if path == "" {
-		path = DefaultBinaryUpgradeStatusPath
-	}
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+	// Quarantine name: matches the writer `$status_name.*` 24h sweep pattern
+	// (debian/xpf.postinst), so a crashed clear cannot strand the directory.
+	quarantine := base + ".clear." + strconv.FormatInt(int64(os.Getpid()), 10)
+	if err := unix.Renameat2(dirFD, base, dirFD, quarantine, unix.RENAME_NOREPLACE); err != nil {
+		if err == unix.ENOENT || err == unix.EEXIST {
 			return false, nil
 		}
-		return false, fmt.Errorf("open binary upgrade status directory before unlink: %w", err)
+		return false, fmt.Errorf("quarantine binary upgrade status %s: %w", path, err)
 	}
-	defer dir.Close()
-	// Re-verify identity through the open directory fd immediately before
-	// unlinkat: a lockless-writer rename between the content compare and
-	// the unlink changes what the name resolves to, and the mismatch
-	// retains instead of deleting the new record.
-	var st unix.Stat_t
-	if err := unix.Fstatat(int(dir.Fd()), filepath.Base(path), &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		if err == unix.ENOENT {
-			return false, nil
+	if clearStatusQuarantineHook != nil {
+		clearStatusQuarantineHook()
+	}
+	// The name now points elsewhere (or nowhere); compare the QUARANTINED
+	// file against the still-open re-read fd. Match → the moved file is the
+	// compared one: unlink it. Mismatch → a rename won a race we did not
+	// see: move it back unless a newer record owns the name.
+	var qStat unix.Stat_t
+	if err := unix.Fstatat(dirFD, quarantine, &qStat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return false, fmt.Errorf("stat quarantined binary upgrade status %s: %w", path, err)
+	}
+	if uint64(qStat.Dev) != uint64(fdStat.Dev) || qStat.Ino != fdStat.Ino {
+		if err := unix.Renameat2(dirFD, quarantine, dirFD, base, unix.RENAME_NOREPLACE); err != nil {
+			if err == unix.EEXIST {
+				// A newer record owns the live name; drop the quarantined one.
+				_ = unix.Unlinkat(dirFD, quarantine, 0)
+				return false, nil
+			}
+			return false, fmt.Errorf("restore quarantined binary upgrade status %s: %w", path, err)
 		}
-		return false, fmt.Errorf("recheck binary upgrade status %s before unlink: %w", path, err)
-	}
-	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return false, nil
 	}
-	if uint64(st.Dev) != expected.identity.device || st.Ino != expected.identity.inode ||
-		st.Size != expected.identity.size {
+	// The quarantined file IS the compared one — but only unlink it if the
+	// live name is still vacant. A writer rename landing after the quarantine
+	// move (the hook point) repopulates the name: that newer record must be
+	// retained AND the clear must report not-cleared (a concurrent writer
+	// invalidates this clear attempt). Restore-then-retain either way.
+	var liveStat unix.Stat_t
+	liveErr := unix.Fstatat(dirFD, base, &liveStat, unix.AT_SYMLINK_NOFOLLOW)
+	if liveErr == nil {
+		// Live name repopulated: move our file back only if possible, but
+		// the name is taken — drop the quarantined copy and retain.
+		_ = unix.Unlinkat(dirFD, quarantine, 0)
 		return false, nil
 	}
-	if err := unix.Unlinkat(int(dir.Fd()), filepath.Base(path), 0); err != nil {
-		if err == unix.ENOENT {
-			return false, nil
-		}
-		return false, fmt.Errorf("clear binary upgrade status %s: %w", path, err)
+	if liveErr != unix.ENOENT {
+		return false, fmt.Errorf("recheck live binary upgrade status %s: %w", path, liveErr)
 	}
-	if err := dir.Sync(); err != nil {
-		return false, fmt.Errorf("sync binary upgrade status directory after unlink: %w", err)
+	if err := unix.Unlinkat(dirFD, quarantine, 0); err != nil {
+		return false, fmt.Errorf("clear quarantined binary upgrade status %s: %w", path, err)
+	}
+	if err := unix.Fsync(dirFD); err != nil {
+		return false, fmt.Errorf("sync binary upgrade status directory after clear: %w", err)
 	}
 	return true, nil
 }

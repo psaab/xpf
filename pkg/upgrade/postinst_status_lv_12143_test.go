@@ -219,6 +219,12 @@ func TestGenerationInvalidEvidenceRetainsDeferredStatus12143(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "upgrade-deferred")
 	writePendingVersionStatus12143(t, path, "1.5.0", "1.0.0")
+	// Corrupt the counter: with generation 0 on disk, the pre-fold legacy
+	// gate (and a dropped-validity-check mutant) would CLEAR here. The
+	// require-validity gate must retain (Opus F2).
+	if err := os.WriteFile(r.statusGenerationPath(), []byte("invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	before := ReadBinaryUpgradeStatus(path)
 	// Generation-invalid evidence cannot occur in production (the only
 	// constructor always carries begin state); the gate must retain
@@ -248,9 +254,11 @@ func TestStatusGenerationReadFailureDoesNotFailRun12143(t *testing.T) {
 
 // TestPreflipFailedRunInvalidatesEarlierEvidence12143 pins the Run begin
 // advance (cutover.go): a later verify-rejected Run (pure pre-STOP failure,
-// no rollback) must invalidate earlier healthy evidence. Without the Run
-// begin the mainline fence never advances, and a targeted begin-removal
-// mutant clears here while the rest of the suite stays green.
+// no rollback) must invalidate earlier healthy evidence. What this test
+// actually kills is the begin-after-verify POSITION mutant (M1b): a full
+// begin-removal mutant is masked here by the require-validity gate (all
+// evidence invalid → retain) and caught by the digit-order/superseded/read-error
+// tests instead.
 func TestPreflipFailedRunInvalidatesEarlierEvidence12143(t *testing.T) {
 	a, cfg, s := statusProcessEnv12143(t, "2.0.0")
 	seedInitialCurrent(t, a, cfg, "1.0.0")
@@ -318,4 +326,72 @@ func TestRollbackBeginInvalidatesEarlierEvidence12143(t *testing.T) {
 		t.Fatalf("current=%q err=%v; want 4.0.0", current, err)
 	}
 	clearStatus12143(t, r, path, proof, false)
+}
+
+// TestClearQuarantineRaceRetainsNewerRecord12143 is the deterministic
+// pin for the quarantine-rename clear: a writer rename landing between the
+// quarantine move and the identity decision must NOT be deleted. The hook
+// fires at exactly that point (statConfigDBDir pattern), so no timing luck
+// is involved. Kills the check-then-unlink shape (T1/T2 mutants).
+func TestClearQuarantineRaceRetainsNewerRecord12143(t *testing.T) {
+	r, cfg, s := statusProcessEnv12143(t, "2.0.0")
+	seedInitialCurrent(t, r, cfg, "1.0.0")
+	if err := r.Run(Options{}); err != nil {
+		t.Fatalf("initial cut: %v", err)
+	}
+	stageStatusVersion12143(t, cfg, "4.0.0")
+	s.stagedVersion = "4.0.0"
+	publishStagedGen(t, r)
+	if err := r.Run(Options{}); err != nil {
+		t.Fatalf("healthy 4.0.0 cut: %v", err)
+	}
+	proof := r.LastCommittedCut()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "upgrade-deferred")
+	writePendingVersionStatus12143(t, path, "3.0.0", "2.0.0")
+	expected := ReadBinaryUpgradeStatus(path)
+	if expected.ReadErr != nil || !expected.Recorded {
+		t.Fatalf("pending status before clear = %+v", expected)
+	}
+	// The hook simulates the lockless writer winning the race at the worst
+	// instant: after the quarantine move, before the identity decision. A
+	// check-then-unlink implementation deletes this 5.0.0 record.
+	hooked := false
+	previousHook := clearStatusQuarantineHook
+	clearStatusQuarantineHook = func() {
+		hooked = true
+		// Atomic rename like the production postinst writer (temp + rename),
+		// not an in-place write: the live name is vacant at this point
+		// (quarantined away), so this installs a genuinely newer record.
+		tmp, err := os.CreateTemp(dir, "upgrade-deferred.hook.*")
+		if err != nil {
+			panic(err)
+		}
+		data := "format=1\nstaged_version=5.0.0\nrunning_version=unknown\nreason=cut-failed\nrecovery=xpfd upgrade\nrecorded_at=2026-10-08T12:00:00Z\n"
+		if _, err := tmp.WriteString(data); err != nil {
+			panic(err)
+		}
+		if err := tmp.Close(); err != nil {
+			panic(err)
+		}
+		if err := os.Rename(tmp.Name(), path); err != nil {
+			panic(err)
+		}
+	}
+	t.Cleanup(func() { clearStatusQuarantineHook = previousHook })
+	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(path, proof)
+	if err != nil {
+		t.Fatalf("clear err: %v", err)
+	}
+	if !hooked {
+		t.Fatal("quarantine hook never fired; test proves nothing")
+	}
+	after := ReadBinaryUpgradeStatus(path)
+	if after.ReadErr != nil || !after.Recorded || after.StagedVersion != "5.0.0" {
+		t.Fatalf("quarantine race: after=%+v cleared=%t; want the 5.0.0 record retained",
+			after, cleared)
+	}
+	if cleared {
+		t.Fatalf("quarantine race: cleared=true while a newer record landed; want retain")
+	}
 }
