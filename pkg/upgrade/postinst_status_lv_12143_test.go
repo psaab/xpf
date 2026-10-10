@@ -211,7 +211,7 @@ func TestStatusGenerationReadErrorRetainsDeferredStatus12143(t *testing.T) {
 	}
 }
 
-func TestCorruptStatusGenerationUsesLegacyZeroEvidence12143(t *testing.T) {
+func TestGenerationInvalidEvidenceRetainsDeferredStatus12143(t *testing.T) {
 	r, cfg, _ := statusProcessEnv12143(t, "2.0.0")
 	seedInitialCurrent(t, r, cfg, "1.0.0")
 	if err := r.Run(Options{}); err != nil {
@@ -219,16 +219,16 @@ func TestCorruptStatusGenerationUsesLegacyZeroEvidence12143(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "upgrade-deferred")
 	writePendingVersionStatus12143(t, path, "1.5.0", "1.0.0")
-	if err := os.WriteFile(r.statusGenerationPath(), []byte("invalid\\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	legacyEvidence := CommittedCut{version: "2.0.0", healthConfirmed: true}
-	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(path, legacyEvidence)
-	if err != nil || !cleared {
-		t.Fatalf("legacy zero-generation evidence clear=%t err=%v; want version-gated clear", cleared, err)
-	}
-	if after := ReadBinaryUpgradeStatus(path); after.ReadErr != nil || after.Recorded {
-		t.Fatalf("status after legacy clear = %+v; want absent", after)
+	before := ReadBinaryUpgradeStatus(path)
+	// Generation-invalid evidence cannot occur in production (the only
+	// constructor always carries begin state); the gate must retain
+	// rather than honor a legacy zero path (Opus MINOR-3).
+	invalidEvidence := CommittedCut{version: "2.0.0", healthConfirmed: true}
+	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(path, invalidEvidence)
+	after := ReadBinaryUpgradeStatus(path)
+	if err != nil || cleared || after != before {
+		t.Fatalf("generation-invalid evidence clear=%t err=%v before=%+v after=%+v; want retain",
+			cleared, err, before, after)
 	}
 }
 
@@ -244,4 +244,78 @@ func TestStatusGenerationReadFailureDoesNotFailRun12143(t *testing.T) {
 	if proof := r.LastCommittedCut(); !proof.healthConfirmed || proof.generationValid {
 		t.Fatalf("cut evidence after generation write failure = %+v; want unusable supersession generation", proof)
 	}
+}
+
+// TestPreflipFailedRunInvalidatesEarlierEvidence12143 pins the Run begin
+// advance (cutover.go): a later verify-rejected Run (pure pre-STOP failure,
+// no rollback) must invalidate earlier healthy evidence. Without the Run
+// begin the mainline fence never advances, and a targeted begin-removal
+// mutant clears here while the rest of the suite stays green.
+func TestPreflipFailedRunInvalidatesEarlierEvidence12143(t *testing.T) {
+	a, cfg, s := statusProcessEnv12143(t, "2.0.0")
+	seedInitialCurrent(t, a, cfg, "1.0.0")
+	if err := a.Run(Options{}); err != nil {
+		t.Fatalf("initial cut: %v", err)
+	}
+	stageStatusVersion12143(t, cfg, "4.0.0")
+	s.stagedVersion = "4.0.0"
+	publishStagedGen(t, a)
+	if err := a.Run(Options{}); err != nil {
+		t.Fatalf("healthy 4.0.0 cut: %v", err)
+	}
+	proof := a.LastCommittedCut()
+	// A later VERIFY-REJECTED Run through a second runner: verify is pure
+	// (pre-STOP, no rollback), so only the Run begin advances the fence.
+	b, err := NewRunner(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.runner = b
+	s.verifyPass = false
+	runErr := b.Run(Options{})
+	s.verifyPass = true
+	if runErr == nil {
+		t.Fatal("verify-rejected cut unexpectedly succeeded")
+	}
+	current, err := b.readCurrentVersion()
+	if err != nil || current != "4.0.0" {
+		t.Fatalf("current=%q err=%v; want 4.0.0", current, err)
+	}
+	path := filepath.Join(t.TempDir(), "upgrade-deferred")
+	writePendingVersionStatus12143(t, path, "3.0.0", "4.0.0")
+	clearStatus12143(t, a, path, proof, false)
+}
+
+// TestRollbackBeginInvalidatesEarlierEvidence12143 pins the RollbackTo begin
+// advance (rollback.go): a rollback round-trip away and back must invalidate
+// earlier healthy evidence (removing the begin clears here while the rest of
+// the suite stays green — verified firsthand).
+func TestRollbackBeginInvalidatesEarlierEvidence12143(t *testing.T) {
+	r, cfg, s := statusProcessEnv12143(t, "2.0.0")
+	seedInitialCurrent(t, r, cfg, "1.0.0")
+	if err := r.Run(Options{}); err != nil {
+		t.Fatalf("initial cut: %v", err)
+	}
+	stageStatusVersion12143(t, cfg, "4.0.0")
+	s.stagedVersion = "4.0.0"
+	publishStagedGen(t, r)
+	if err := r.Run(Options{}); err != nil {
+		t.Fatalf("healthy 4.0.0 cut: %v", err)
+	}
+	proof := r.LastCommittedCut()
+	path := filepath.Join(t.TempDir(), "upgrade-deferred")
+	writePendingVersionStatus12143(t, path, "3.0.0", "2.0.0")
+	// Round-trip away and back to the evidence version: both rollbacks
+	// advance the generation, so the earlier proof must not clear.
+	if err := r.RollbackTo("2.0.0", RollbackOptions{ClusterCoordinated: true}); err != nil {
+		t.Fatalf("rollback away: %v", err)
+	}
+	if err := r.RollbackTo("4.0.0", RollbackOptions{ClusterCoordinated: true}); err != nil {
+		t.Fatalf("rollback back: %v", err)
+	}
+	current, err := r.readCurrentVersion()
+	if err != nil || current != "4.0.0" {
+		t.Fatalf("current=%q err=%v; want 4.0.0", current, err)
+	}
+	clearStatus12143(t, r, path, proof, false)
 }

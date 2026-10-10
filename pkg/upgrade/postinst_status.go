@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // DefaultBinaryUpgradeStatusPath is the durable record written by the Debian
@@ -201,10 +203,13 @@ func sameBinaryUpgradeStatusRecord(a, b BinaryUpgradeStatus) bool {
 }
 
 // clearBinaryUpgradeStatusIfUnchanged re-reads the lockless postinst writer's
-// record while the caller holds the upgrade lock. The final lstat checks that
-// the path still names the compared regular file immediately before unlink.
-// It does not remove the unreadable marker: a marker appearing concurrently is
-// new failure evidence and must remain fail-closed.
+// record while the caller holds the upgrade lock. The unlink is bound to an
+// open directory fd + fstatat identity re-verification immediately before
+// unlinkat, so a lockless-writer rename landing between the content compare
+// and the unlink cannot be deleted (Opus LV re-confirmation MINOR-1: the
+// prior lstat-then-os.Remove(path) TOCTOU). It does not remove the unreadable
+// marker: a marker appearing concurrently is new failure evidence and must
+// remain fail-closed.
 func clearBinaryUpgradeStatusIfUnchanged(path string, expected BinaryUpgradeStatus) (bool, error) {
 	current := ReadBinaryUpgradeStatus(path)
 	if current.ReadErr != nil {
@@ -216,31 +221,40 @@ func clearBinaryUpgradeStatusIfUnchanged(path string, expected BinaryUpgradeStat
 	if path == "" {
 		path = DefaultBinaryUpgradeStatusPath
 	}
-	info, err := os.Lstat(path)
+	dir, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("open binary upgrade status directory before unlink: %w", err)
+	}
+	defer dir.Close()
+	// Re-verify identity through the open directory fd immediately before
+	// unlinkat: a lockless-writer rename between the content compare and
+	// the unlink changes what the name resolves to, and the mismatch
+	// retains instead of deleting the new record.
+	var st unix.Stat_t
+	if err := unix.Fstatat(int(dir.Fd()), filepath.Base(path), &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if err == unix.ENOENT {
 			return false, nil
 		}
 		return false, fmt.Errorf("recheck binary upgrade status %s before unlink: %w", path, err)
 	}
-	if !info.Mode().IsRegular() {
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return false, nil
 	}
-	identity, err := statusFileIdentity(info)
-	if err != nil {
-		return false, fmt.Errorf("identify binary upgrade status %s before unlink: %w", path, err)
-	}
-	if identity != expected.identity {
+	if uint64(st.Dev) != expected.identity.device || st.Ino != expected.identity.inode ||
+		st.Size != expected.identity.size {
 		return false, nil
 	}
-	if err := os.Remove(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+	if err := unix.Unlinkat(int(dir.Fd()), filepath.Base(path), 0); err != nil {
+		if err == unix.ENOENT {
 			return false, nil
 		}
 		return false, fmt.Errorf("clear binary upgrade status %s: %w", path, err)
 	}
-	if err := syncStatusDirectory(filepath.Dir(path)); err != nil {
-		return false, err
+	if err := dir.Sync(); err != nil {
+		return false, fmt.Errorf("sync binary upgrade status directory after unlink: %w", err)
 	}
 	return true, nil
 }
@@ -309,11 +323,10 @@ func (r *Runner) ClearBinaryUpgradeStatusIfCurrent(path string, committed Commit
 	if err != nil {
 		return false, err
 	}
-	if committed.generationValid {
-		if committed.generation != generation {
-			return false, nil
-		}
-	} else if committed.generation != 0 || generation != 0 {
+	// The only evidence constructor (recordCommittedCut) always carries begin
+	// state: generation-invalid evidence cannot occur in production. Require
+	// validity rather than honoring a legacy zero path (Opus MINOR-3).
+	if !committed.generationValid || committed.generation != generation {
 		return false, nil
 	}
 	cmp, err := compareDebianVersions(committed.version, status.StagedVersion)
