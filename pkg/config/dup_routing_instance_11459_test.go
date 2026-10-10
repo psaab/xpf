@@ -136,3 +136,88 @@ func TestDuplicateRoutingInstanceNamedProtocolsGetsNamedWarning12043(t *testing.
 		t.Errorf("duplicate VRF named protocols was misclassified as an unnamed merge: %v", cfg.Warnings)
 	}
 }
+
+func TestSpacedRoutingInstanceMergeWarningsKeepTheirKind12123(t *testing.T) {
+	unnamedCases := []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			name: "routing-options",
+			text: `routing-instances {
+    "a b" {
+        instance-type virtual-router;
+        routing-options { static { route 10.20.0.0/16 { next-hop 192.0.2.1; } } }
+        routing-options { static { route 192.0.2.0/24 { next-hop 192.0.2.2; } } }
+    }
+}`,
+			want: "duplicate unnamed `routing-options` containers under " +
+				"routing-instances \"a b\" were merged in source order (#12043)",
+		},
+		{
+			name: "protocols",
+			text: `routing-instances {
+    "a b" {
+        instance-type virtual-router;
+        protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0; } } }
+        protocols { ospf { area 0.0.0.1 { interface ge-0/0/1.0; } } }
+    }
+}`,
+			want: "duplicate unnamed `protocols` containers under " +
+				"routing-instances \"a b\" were merged in source order (#12043)",
+		},
+	}
+	for _, tc := range unnamedCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tree, parseErrors := NewParser(tc.text).Parse()
+			if len(parseErrors) != 0 {
+				t.Fatalf("parse spaced routing-instance merge: %v", parseErrors[0])
+			}
+			cfg, err := CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("lenient compile: %v", err)
+			}
+			found := false
+			for _, warning := range cfg.Warnings {
+				if strings.Contains(warning, "duplicate routing-instance definition") {
+					t.Fatalf("unnamed %s case emitted misclassified named warning %q "+
+						"(want only the unnamed-kind warning)", tc.name, warning)
+				}
+				if warning == tc.want {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("warnings = %v, want unnamed warning %q", cfg.Warnings, tc.want)
+			}
+		})
+	}
+
+	const named = `routing-instances {
+    "a b routing-options" { instance-type virtual-router; }
+    "a b routing-options" { instance-type virtual-router; }
+}`
+	tree, parseErrors := NewParser(named).Parse()
+	if len(parseErrors) != 0 {
+		t.Fatalf("parse spaced named routing-instance fold: %v", parseErrors[0])
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile named routing-instance fold: %v", err)
+	}
+	namedWarning := "duplicate routing-instance definition `\"a b routing-options\"` was merged into one typed instance in source order (#11459/#9023)"
+	foundNamed := false
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "duplicate unnamed") {
+			t.Fatalf("named control emitted misclassified unnamed warning %q "+
+				"(want only the named-kind warning)", warning)
+		}
+		if warning == namedWarning {
+			foundNamed = true
+		}
+	}
+	if !foundNamed {
+		t.Fatalf("warnings = %v, want named-instance warning %q", cfg.Warnings, namedWarning)
+	}
+}
