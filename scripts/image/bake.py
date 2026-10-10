@@ -255,7 +255,10 @@ def deb_version_for_head(root=ROOT):
         die(f"cannot derive the current Debian package version: {e}")
     if not count.isdigit() or not re.fullmatch(r"[0-9a-f]{12,40}", commit):
         die("git returned an invalid commit identity for the Debian package version")
-    dirty = build_provenance.source_tree_dirty(root)
+    try:
+        dirty = build_provenance.source_tree_dirty(root)
+    except build_provenance.ProvenanceError as e:
+        die(f"cannot attest current build inputs: {e}")
     return f"0.0.{count}+g{commit}{'.dirty' if dirty else ''}"
 
 
@@ -1154,7 +1157,7 @@ def assert_live_matches_manifest(live_files, sums_path, snapshot):
 
 
 def build_manifest_text(*, ver, commit, base_url, base_img, rel, base_sha,
-                        base_pinned, validated, bake_date, kernel,
+                        base_pinned, validated, source_dirty, bake_date, kernel,
                         guest_kernel, proto_lines=""):
     """Assemble the xpf-<ver>.manifest sidecar text (key: value lines).
 
@@ -1165,10 +1168,11 @@ def build_manifest_text(*, ver, commit, base_url, base_img, rel, base_sha,
         REQUIRES validated: true, so a signed-but-unvalidated dev/emergency
         image is no longer indistinguishable from a release.
 
-      - `source_dirty` (#12141, #12158): whether tracked inputs differ from
-        HEAD or a non-ignored untracked build input is consumed. The same
-        state marks the Debian/package version and is covered by the signed
-        manifest sidecar.
+      - `source_dirty` (#12141, #12158): whether current checkout inputs copied
+        into the image differ from HEAD or include a consumed untracked input.
+        It is independent of the selected Debian package version: --skip-build
+        can install a clean prebuilt package while copying dirty image scripts
+        from the current checkout.
 
       - `base_image_pinned` (#4904 B): whether the Ubuntu base was authenticated
         against the repo-pinned trust-anchor digest (bound alongside the base
@@ -1186,7 +1190,7 @@ def build_manifest_text(*, ver, commit, base_url, base_img, rel, base_sha,
     """
     return (
         f"version: {ver}\n"
-        f"source_dirty: {'true' if ver.endswith('.dirty') else 'false'}\n"
+        f"source_dirty: {'true' if source_dirty else 'false'}\n"
         f"git_commit: {commit}\n"
         f"base_image: {base_url}/{base_img}\n"
         f"base_release: {rel}\n"
@@ -1209,14 +1213,17 @@ def main():
     p.add_argument("--skip-validate", action="store_true")
     p.add_argument("--keep-work", action="store_true")
     a = p.parse_args()
+    # Package identity comes from the selected package; source_dirty binds the
+    # current checkout inputs that this bake (including --skip-build) copies.
+    source_version = deb_version_for_head(ROOT)
+    source_dirty = source_version.endswith(".dirty")
     if a.skip_build and a.version is not None:
-        # A prebuilt package owns its recorded provenance; the current checkout
-        # is not an input to a --skip-build bake.
+        # The prebuilt package owns package identity, but current image inputs
+        # still come from this checkout. Keep those two provenance facts apart.
         expected_version = a.version
     else:
-        source_version = deb_version_for_head()
         expected_version = os.environ.get("DEB_VERSION", source_version)
-        if expected_version.endswith(".dirty") != source_version.endswith(".dirty"):
+        if expected_version.endswith(".dirty") != source_dirty:
             die(f"DEB_VERSION {expected_version!r} has dirty provenance inconsistent "
                 f"with the source tree ({source_version!r})")
         if a.version is None:
@@ -1260,9 +1267,10 @@ def main():
         if not a.skip_build:
             info("building xpf .deb (xpfd, cli, xpf-userspace-dp -> staged)...")
             run(["make", "-C", ROOT, "deb"])
-            # Refuse if the build input changed after its version was selected.
-            require_current_build_version(
-                a.version, os.environ.get("DEB_VERSION", deb_version_for_head()))
+            # Recheck the source observation itself. DEB_VERSION selects the
+            # requested package identity before build; it must not override a
+            # fresh post-build observation of source drift.
+            require_current_build_version(a.version, deb_version_for_head(ROOT))
         # Pick only the package whose filename and dpkg metadata match the
         # release identity. Never let filesystem mtime choose the code that
         # gets installed into an image labelled with --version.
@@ -1416,6 +1424,7 @@ def main():
         manifest_fields = dict(
             ver=ver, commit=commit, base_url=base_url, base_img=base_img,
             rel=rel, base_sha=base_sha, base_pinned=base_pinned,
+            source_dirty=source_dirty,
             bake_date=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             kernel=os.uname().release, guest_kernel=guest_kernel,
             proto_lines=proto_lines)

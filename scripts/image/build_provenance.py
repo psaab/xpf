@@ -4,8 +4,26 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import shlex
 import subprocess
+import sys
+
+
+class ProvenanceError(RuntimeError):
+    """Build inputs cannot be safely attested under the current Go flags."""
+
+
+# Make's Go build inputs. Keep these package paths in lockstep with `build` and
+# `build-ctl`; `source_tree_dirty` asks Go for their actual transitive sources.
+GO_BUILD_TARGETS = ("./cmd/xpfd", "./cmd/cli")
+
+# These GOFLAGS can redirect the source/module/compiler input away from files
+# the repository probe can attest. Refuse them rather than sign a false-clean
+# identity. Ordinary flags such as -tags remain supported and are honored by
+# `go list` below.
+UNATTESTABLE_GOFLAGS = ("-overlay", "-modfile", "-toolexec", "-pkgdir")
 
 # Untracked files in these build-input roots can be consumed by package/bake.
 # Tracked changes are checked across the whole tree to preserve the existing
@@ -26,40 +44,165 @@ UNTRACKED_BUILD_INPUTS = (
     "scripts/image",
     "test/incus/xpfd.service",
     "userspace-dp",
+    "vendor",
 )
 
 
-def source_tree_dirty(root):
-    """Return whether tracked or consumed untracked build input differs from HEAD.
+def _check_go_flags():
+    try:
+        flags = shlex.split(os.environ.get("GOFLAGS", ""))
+    except ValueError as e:
+        raise ProvenanceError(f"cannot parse GOFLAGS for provenance: {e}") from e
+    for token in flags:
+        for flag in UNATTESTABLE_GOFLAGS:
+            if token == flag or token.startswith(flag + "="):
+                raise ProvenanceError(
+                    f"GOFLAGS {flag} redirects build inputs that source "
+                    "provenance cannot attest; unset that flag before "
+                    "building")
 
-    `git diff --quiet` compares the worktree with the index and misses staged
-    changes. Compare tracked files against HEAD, then find untracked build
-    inputs. Go compiles ignored generated BPF `.go` files too, so inspect
-    ignored files in its package roots and count those sources. Git errors fail
-    closed as dirty so unverifiable state cannot attest clean.
+
+def _warn_scan_failure(command, result):
+    detail = os.fsdecode(result.stderr).strip()
+    if detail:
+        print(f"WARNING: {command} could not completely enumerate build "
+              f"inputs: {detail}", file=sys.stderr)
+    else:
+        print(f"WARNING: {command} exited {result.returncode} while probing "
+              "build inputs", file=sys.stderr)
+
+
+def _compiled_sources(root):
+    """Return repo-relative files consumed by the two Makefile Go builds."""
+    try:
+        result = subprocess.run(
+            ["go", "list", "-deps", "-compiled", "-json", *GO_BUILD_TARGETS],
+            cwd=root, env={**os.environ, "CGO_ENABLED": "0"},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    except OSError as e:
+        print(f"WARNING: cannot enumerate compiled Go inputs: {e}",
+              file=sys.stderr)
+        return None
+    if result.returncode != 0 or result.stderr:
+        _warn_scan_failure("go list", result)
+        return None
+
+    try:
+        text = result.stdout.decode("utf-8", "strict")
+    except UnicodeDecodeError as e:
+        print(f"WARNING: cannot decode compiled Go input list: {e}",
+              file=sys.stderr)
+        return None
+    decoder = json.JSONDecoder()
+    offset = 0
+    sources = set()
+    try:
+        while offset < len(text):
+            while offset < len(text) and text[offset].isspace():
+                offset += 1
+            if offset == len(text):
+                break
+            package, offset = decoder.raw_decode(text, offset)
+            if package.get("Error") or package.get("DepsErrors"):
+                print("WARNING: go list reported an incomplete package graph",
+                      file=sys.stderr)
+                return None
+            directory = package.get("Dir")
+            if not directory:
+                continue
+            for field in (
+                    "CompiledGoFiles", "GoFiles", "CgoFiles",
+                    "EmbedFiles", "CFiles", "CXXFiles", "MFiles",
+                    "HFiles", "FFiles", "SFiles", "SwigFiles",
+                    "SwigCXXFiles", "SysoFiles"):
+                for name in package.get(field, ()):
+                    path = name if os.path.isabs(name) else os.path.join(
+                        directory, name)
+                    path = os.path.abspath(path)
+                    try:
+                        if os.path.commonpath((root, path)) == root:
+                            sources.add(os.path.relpath(path, root))
+                    except ValueError:
+                        continue
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as e:
+        print(f"WARNING: cannot parse compiled Go input list: {e}",
+              file=sys.stderr)
+        return None
+    return sources
+
+
+def _ignored_compiled_sources(root):
+    sources = _compiled_sources(root)
+    if sources is None:
+        return None
+    if not sources:
+        return False
+    input_paths = b"".join(os.fsencode(path) + b"\0"
+                           for path in sorted(sources))
+    try:
+        result = subprocess.run(
+            ["git", "-C", root, "check-ignore", "-q", "-z", "--stdin"],
+            input=input_paths, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, check=False)
+    except OSError as e:
+        print(f"WARNING: cannot check ignored compiled inputs: {e}",
+              file=sys.stderr)
+        return None
+    if result.stderr or result.returncode not in (0, 1):
+        _warn_scan_failure("git check-ignore", result)
+        return None
+    return result.returncode == 0
+
+
+def _ls_files(root, *args):
+    command = ["git", "-C", root, "ls-files", "-z", *args]
+    try:
+        result = subprocess.run(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False)
+    except OSError as e:
+        print(f"WARNING: cannot enumerate build inputs with git ls-files: {e}",
+              file=sys.stderr)
+        return None
+    # Git can warn (for example, on an unreadable directory) and still exit
+    # zero. Any stderr means enumeration is incomplete or uncertain.
+    if result.returncode != 0 or result.stderr:
+        _warn_scan_failure("git ls-files", result)
+        return None
+    return result.stdout
+
+
+def source_tree_dirty(root):
+    """Return whether tracked or consumed build inputs differ from HEAD.
+
+    Tracked changes are compared with HEAD so staged-only edits are included.
+    Untracked files are considered only in build-input roots. Go's package
+    graph enumerates the exact compiled inputs of Make's two Go build targets;
+    ignored files in that set are checked directly, covering info-exclude and
+    global-ignore rules without marking ignored files in unused packages.
+    Git/Go enumeration warnings fail closed as dirty. No subprocess timeout is
+    configured, so a hung Git or Go process can block the probe.
     """
-    root = os.fspath(root)
+    root = os.path.abspath(os.fspath(root))
+    _check_go_flags()
     try:
         tracked = subprocess.run(
             ["git", "-C", root, "diff", "HEAD", "--quiet"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            check=False).returncode
-        untracked = subprocess.run(
-            ["git", "-C", root, "ls-files", "--others", "--exclude-standard",
-             "--", *UNTRACKED_BUILD_INPUTS],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, check=True).stdout
-        ignored_go = subprocess.run(
-            ["git", "-C", root, "ls-files", "--others", "--ignored",
-             "--exclude-standard", "--", "cmd", "internal", "pkg"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, check=True).stdout
-    except (OSError, subprocess.CalledProcessError):
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            check=False)
+    except OSError:
         return True
-    ignored_bpf_source = any(
-        path.endswith(("_bpfel.go", "_bpfeb.go"))
-        for path in ignored_go.splitlines())
-    return tracked != 0 or bool(untracked.strip()) or ignored_bpf_source
+    if tracked.returncode != 0 or tracked.stderr:
+        return True
+    untracked = _ls_files(
+        root, "--others", "--exclude-standard", "--",
+        *UNTRACKED_BUILD_INPUTS)
+    if untracked is None:
+        return True
+    ignored_compiled = _ignored_compiled_sources(root)
+    if ignored_compiled is None:
+        return True
+    return tracked.returncode != 0 or bool(untracked) or ignored_compiled
 
 
 def main():
@@ -70,8 +213,14 @@ def main():
     args = parser.parse_args()
     if not args.dirty_suffix:
         parser.error("--dirty-suffix is required")
-    print(".dirty" if source_tree_dirty(args.root) else "")
+    try:
+        dirty = source_tree_dirty(args.root)
+    except ProvenanceError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    print(".dirty" if dirty else "")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
