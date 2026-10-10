@@ -82,15 +82,16 @@ func TestLoadMergeNamelessTermFlatteningIsPinned12092(t *testing.T) {
 		})
 	}
 
-	// Populated dangerous nested-name forms remain refused after replay; these
-	// controls make the accepted nameless-shape pin precise rather than
-	// weakening the existing commit gate.
+	// These two value-bearing controls reject because their validators see
+	// `then` as a port/protocol value. The no-argument is-fragment leaf
+	// instead swallows the fused tail; pin that known fail-open separately
+	// below (#12528).
 	rejected := []struct {
 		name, input, wantErr string
 	}{
 		{
-			name:    "P05 destination port",
-			input:   `firewall {
+			name: "P05 destination port",
+			input: `firewall {
     family inet {
         filter F {
             term { T from destination-port 22 { then { accept; } } }
@@ -101,7 +102,7 @@ func TestLoadMergeNamelessTermFlatteningIsPinned12092(t *testing.T) {
 			wantErr: `unknown port "then"`,
 		},
 		{
-			name:  "protocol and action",
+			name: "protocol and action",
 			input: `firewall {
     family inet {
         filter F {
@@ -130,4 +131,37 @@ func TestLoadMergeNamelessTermFlatteningIsPinned12092(t *testing.T) {
 			}
 		})
 	}
+	t.Run("is-fragment fused tail fail-open #12528", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.EnterConfigure(); err != nil {
+			t.Fatalf("EnterConfigure: %v", err)
+		}
+		input := `firewall {
+    family inet {
+        filter F {
+            term { T from is-fragment { then { discard; } } }
+            term allow { then accept; }
+        }
+    }
+}`
+		if err := s.LoadMerge(input); err != nil {
+			t.Fatalf("LoadMerge: %v", err)
+		}
+		wantSet := "set firewall family inet filter F term T from is-fragment then discard\n" +
+			"set firewall family inet filter F term allow then accept\n"
+		if got := s.ShowCandidateSet(); got != wantSet {
+			t.Fatalf("LoadMerge candidate set = %q, want %q", got, wantSet)
+		}
+		cfg, err := s.CommitCheck()
+		if err != nil {
+			t.Fatalf("LoadMerge + CommitCheck rejected known current behavior: %v", err)
+		}
+		terms := cfg.Firewall.FiltersInet["F"].Terms
+		if len(terms) != 2 || terms[0].Name != "T" || !terms[0].IsFragment || terms[0].Action != "" {
+			t.Fatalf("committed is-fragment term = %+v, want T with IsFragment and empty Action", terms)
+		}
+		if terms[1].Name != "allow" || terms[1].Action != "accept" {
+			t.Fatalf("committed allow term = %+v, want allow/accept", terms[1])
+		}
+	})
 }
