@@ -553,7 +553,16 @@ func apiAuthNodeKeyValueAt(parent, keys []string, index int) bool {
 }
 
 func syncCredentialValueEquivalent(active, incoming string) bool {
-	return active == incoming || (IsAPIAuthSecretHash(active) && VerifyAPIAuthSecret(active, incoming))
+	if active == incoming {
+		return true
+	}
+	// Below-minimum cleartext must NOT verify-equivalent: promotion would
+	// install the $xpf-invalid$ deny marker while dedup suppresses the
+	// only push capturing the working verifier (GLM round-1 F1).
+	if utf8.RuneCountInString(incoming) < APIAuthBasicPasswordMinRunes {
+		return false
+	}
+	return IsAPIAuthSecretHash(active) && VerifyAPIAuthSecret(active, incoming)
 }
 
 func equalStrings(a, b []string) bool {

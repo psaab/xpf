@@ -3,6 +3,8 @@ package configstore
 import (
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // TestSyncApplyIdenticalRepushPreservesDistinctHistory12163 pins the #12163
@@ -77,5 +79,50 @@ func TestSyncApplyIdenticalRepushPreservesDistinctHistory12163(t *testing.T) {
 	if after[0] == nil || after[0].Config == nil ||
 		!strings.Contains(after[0].Config.Format(), "node-c-12163") {
 		t.Fatalf("distinct push did not push the displaced config to the head")
+	}
+}
+
+// TestSyncApplyBelowMinimumCleartextPushesHistory12163 pins the GLM round-1
+// F1 edge: legacy cleartext below the slot minimum must NOT verify-equivalent
+// against a valid verifier. Promotion installs the $xpf-invalid$ deny marker,
+// so suppressing the push would leave the working verifier in NEITHER active
+// NOR history. Reachable only via foreign/older peer software (own writes
+// enforce min-runes), hence a dedicated regression, not a cleanliness nit.
+func TestSyncApplyBelowMinimumCleartextPushesHistory12163(t *testing.T) {
+	s := newTestStore(t)
+	plain := "system {\n    host-name below-min-seed-12163;\n}\n"
+	if _, err := s.SyncApply(plain, nil); err != nil {
+		t.Fatalf("SyncApply plain seed: %v", err)
+	}
+	// Seed active with a VALID verifier of a short secret, pushed verbatim
+	// (verifiers pass through hashing unchanged) — the foreign-peer shape.
+	// The host-name matches the plain seed so ONLY the credential differs.
+	verifier, err := config.HashAPIAuthSecret("short5")
+	if err != nil {
+		t.Fatalf("seed verifier: %v", err)
+	}
+	seed := "system {\n    host-name below-min-seed-12163;\n" +
+		"    services {\n        web-management {\n" +
+		"            api-auth {\n                expires 2099-01-01;\n" +
+		"                user admin { password \"" + verifier + "\"; }\n" +
+		"            }\n        }\n    }\n}\n"
+	if _, err := s.SyncApply(seed, nil); err != nil {
+		t.Fatalf("SyncApply seed: %v", err)
+	}
+	before := len(s.ListHistory())
+	// Legacy re-push of the same short cleartext: below the 12-rune minimum,
+	// so equivalence must NOT hold and the push must capture history.
+	retry := "system {\n    host-name below-min-seed-12163;\n" +
+		"    services {\n        web-management {\n" +
+		"            api-auth {\n                expires 2099-01-01;\n" +
+		"                user admin { password \"short5\"; }\n" +
+		"            }\n        }\n    }\n}\n"
+	if _, err := s.SyncApply(retry, nil); err != nil {
+		t.Fatalf("SyncApply below-minimum retry: %v", err)
+	}
+	after := s.ListHistory()
+	if len(after) != before+1 {
+		t.Fatalf("below-minimum retry history len = %d, want %d "+
+			"(must push: promotion installs the deny marker)", len(after), before+1)
 	}
 }
