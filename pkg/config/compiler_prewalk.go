@@ -160,6 +160,14 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
+	// Memberless ranges lose their shared statements during expansion, so
+	// reject unconsumed filter keywords before that information disappears.
+	memberlessRangeFilterWarnings, err := validateMemberlessInterfaceRangeFilters12090(
+		tree.Children, opts.lenientUnsupportedInterfaceStanzas)
+	if err != nil {
+		return nil, err
+	}
+
 	// #4027 interface-range expansion. Rewrites every `interfaces
 	// interface-range <name> { member <if>; <shared cfg> }` stanza into its
 	// member interfaces BEFORE section compilation (and before the
@@ -194,16 +202,24 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
-	// #2008 H9/H10 interface silent-drop gate. Runs on the group-expanded,
-	// inactive-pruned tree (apply-groups-inherited stanzas covered;
+	// #2008/#10293/#12090 interface silent-drop gate. Runs on the group-
+	// expanded, inactive-pruned tree (apply-groups-inherited stanzas covered;
 	// `inactive:` stanzas already stripped upstream) and BEFORE section
-	// compilation. Strict (commit / commit-check): a static `mac` override
-	// or a `family inet|inet6 policer arp` — neither of which the dataplane
-	// can honour — hard-rejects. Lenient (load / peer-sync): warn so an
-	// already-persisted or peer-synced config that an older binary silently
-	// accepted still boots (#1960 fail-closed-on-load class).
+	// compilation. Strict (commit / commit-check): static `mac`, `policer
+	// arp`, and unconsumed `filter` / `simple-filter` spellings hard-reject.
+	// Lenient (load / peer-sync): warn so an already-persisted or peer-synced
+	// config that an older binary silently accepted still boots (#1960).
 	unsupportedIfaceWarnings, err := validateUnsupportedInterfaceStanzasAST(
 		tree.Children, opts.lenientUnsupportedInterfaceStanzas)
+	if err != nil {
+		return nil, err
+	}
+
+	// #12090: no `filter` or `simple-filter` spelling under forwarding-options
+	// has a compiler/dataplane consumer. Reject new strict commits; tolerant
+	// loads warn so older persisted or peer-synced configurations still boot.
+	forwardingFilterWarnings, err := validateUnsupportedForwardingOptionsFiltersAST(
+		tree.Children, opts.lenientForwardingFilters)
 	if err != nil {
 		return nil, err
 	}
@@ -789,9 +805,11 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, flowTraceFileWarnings...)
 	warnings = append(warnings, flowTraceFilterWarnings...)
 	warnings = append(warnings, flowTraceSizeWarnings...)
+	warnings = append(warnings, memberlessRangeFilterWarnings...)
 	warnings = append(warnings, ifaceRangeWarnings...)
 	warnings = append(warnings, identityPatternWarnings...)
 	warnings = append(warnings, unsupportedIfaceWarnings...)
+	warnings = append(warnings, forwardingFilterWarnings...)
 	warnings = append(warnings, appCollisionWarnings...)
 	warnings = append(warnings, fwFilterFamilyWarnings...)
 	warnings = append(warnings, fwFilterFamilyAnyWarnings...)

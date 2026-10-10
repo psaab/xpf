@@ -770,19 +770,25 @@ type compileOpts struct {
 	// inert for that rule. Same doctrine as lenientNATPoolAlarmThreshold.
 	lenientNATHostMask bool
 
-	// lenientUnsupportedInterfaceStanzas (#2008 H9/H10) downgrades the
-	// interface silent-drop gate (validateUnsupportedInterfaceStanzasAST:
-	// `interface [unit] mac` static-MAC override, `family inet|inet6
-	// policer arp` per-unit ARP policer) from a hard error to a warning on
-	// the tolerant load / peer-sync paths. Both stanzas parse-accept and
-	// silently drop on every binary up to this gate, so an
-	// already-persisted or peer-synced config may carry them; an upgrading
-	// / receiving node must still boot through it (warn) rather than
-	// fail-closed-on-load (#1960 class). Commit / commit-check stay strict
-	// — a new operator edit that the dataplane cannot honour is rejected
-	// instead of silently ignored. Same doctrine as
-	// lenientVRRPTrackDuplicates / lenientLogProfileStreamRef.
+	// lenientUnsupportedInterfaceStanzas (#2008 H9/H10, #10293, #12090)
+	// downgrades the interface silent-drop gate
+	// (validateUnsupportedInterfaceStanzasAST: `interface [unit] mac`,
+	// `family inet|inet6 policer arp`, unsupported filter lists/uRPF/policer
+	// binds, and unconsumed `filter` / `simple-filter` placements) from a hard
+	// error to a warning on tolerant load / peer-sync paths. These spellings
+	// already parsed and silently dropped on older binaries, so an
+	// already-persisted or peer-synced config must still boot through them
+	// (#1960). Commit / commit-check stay strict: a new operator edit that the
+	// dataplane cannot honour is rejected instead of silently ignored. Same
+	// doctrine as lenientVRRPTrackDuplicates / lenientLogProfileStreamRef.
 	lenientUnsupportedInterfaceStanzas bool
+
+	// lenientForwardingFilters (#12090) downgrades the forwarding-options
+	// `filter` / `simple-filter` silent-drop gate to a warning on tolerant
+	// load / peer-sync paths. These spellings have no compiler or dataplane
+	// consumer; old persisted configurations must still boot while new strict
+	// commits reject them.
+	lenientForwardingFilters bool
 
 	// lenientQinQVLANStack (#5879) downgrades the canonical per-physical-
 	// interface QinQ / stacked-VLAN honesty gate (validateQinQVLANStackAST:
@@ -3170,6 +3176,7 @@ func lenientCompileOpts() compileOpts {
 		lenientNATPoolAlarmThreshold:           true,
 		lenientNATHostMask:                     true,
 		lenientUnsupportedInterfaceStanzas:     true,
+		lenientForwardingFilters:               true,
 		lenientQinQVLANStack:                   true,
 		lenientVLANMap:                         true,
 		lenientRoutingExportRef:                true,
