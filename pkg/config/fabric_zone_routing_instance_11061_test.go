@@ -212,3 +212,67 @@ func TestFabricZoneTrunkParentAliasInheritsSingleRIRoutingContext11061(t *testin
 		t.Fatalf("strict compile treated the propagated trunk-parent alias as MAIN: %v", err)
 	}
 }
+
+func TestFabricZoneTunnelStanzaCrossesDefaultAndRejects11061A1(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set interfaces gr-0/0/0 tunnel source 192.0.2.1",
+		"set interfaces gr-0/0/0 tunnel destination 192.0.2.2",
+		"set interfaces gr-0/0/0 tunnel routing-instance destination blue",
+		"set interfaces gr-0/0/0 unit 0 family inet address 10.10.10.1/30",
+		"set interfaces ge-0/0/1 unit 0 family inet address 10.0.1.1/24",
+		"set routing-instances blue instance-type virtual-router",
+		"set security zones security-zone trust interfaces gr-0/0/0.0",
+		"set security zones security-zone trust interfaces ge-0/0/1.0",
+	})
+	if _, err := CompileConfig(tree); err == nil {
+		t.Fatal("strict compile accepted tunnel-stanza blue and default-instance members in one zone")
+	} else {
+		for _, want := range []string{"trust", "blue", "MAIN (default instance)", "gr-0/0/0.0", "ge-0/0/1.0"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("strict error %q does not identify %q", err, want)
+			}
+		}
+	}
+
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	members := fabricZoneRoutingInstanceByInterface(cfg)
+	if got := members["gr-0/0/0.0"]; got != "blue" {
+		t.Fatalf("stanza-owned tunnel gate owner = %q, want blue (map=%v)", got, members)
+	}
+	if got, found := members["ge-0/0/1.0"]; found {
+		t.Fatalf("default interface acquired routing-instance %q, want MAIN (map=%v)", got, members)
+	}
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "fabric zone routing-domain ambiguity") {
+			return
+		}
+	}
+	t.Fatalf("tolerant compile omitted the tunnel/default zone warning: %v", cfg.Warnings)
+}
+
+func TestFabricZoneSameTunnelStanzaAndListOwnerAccepted11061A2(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set interfaces gr-0/0/0 tunnel source 192.0.2.1",
+		"set interfaces gr-0/0/0 tunnel destination 192.0.2.2",
+		"set interfaces gr-0/0/0 tunnel routing-instance destination blue",
+		"set interfaces gr-0/0/0 unit 0 family inet address 10.10.10.1/30",
+		"set interfaces ge-0/0/2 unit 0 family inet address 10.0.2.1/24",
+		"set routing-instances blue instance-type virtual-router",
+		"set routing-instances blue interface ge-0/0/2.0",
+		"set security zones security-zone vpn interfaces gr-0/0/0.0",
+		"set security zones security-zone vpn interfaces ge-0/0/2.0",
+	})
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("strict compile rejected a zone whose tunnel stanza and list member share blue: %v", err)
+	}
+	members := fabricZoneRoutingInstanceByInterface(cfg)
+	for _, key := range []string{"gr-0/0/0.0", "ge-0/0/2.0"} {
+		if got := members[key]; got != "blue" {
+			t.Errorf("effective gate owner for %q = %q, want blue (map=%v)", key, got, members)
+		}
+	}
+}

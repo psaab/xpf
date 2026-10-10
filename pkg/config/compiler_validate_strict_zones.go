@@ -396,42 +396,16 @@ func validateZoneInterfaceMembershipStrict(cfg *Config) error {
 		first.iface, first.firstZone, first.secondZone)
 }
 
-// fabricZoneRoutingInstanceByInterface indexes the logical members that the
-// dataplane binds to each RI. Use the shared member resolver so bare RI refs
-// fan down onto configured units, aliases normalize identically, and tunnel
-// device keys match the runtime contract. Literal-only indexing misses bare-RI
-// fan-down and both false-rejects single-RI bare/bare zones and false-accepts
-// bare-RI/unit-zone splits with MAIN. Dual-claimed devices are omitted just as
-// in the dataplane membership map; the independent strict RI-device gate
-// reports that conflict.
+// fabricZoneRoutingInstanceByInterface shares the exact membership decisions
+// used by userspace snapshots, including tunnel stanzas and sibling rows.
 func fabricZoneRoutingInstanceByInterface(cfg *Config) map[string]string {
-	if cfg == nil || len(cfg.RoutingInstances) == 0 {
-		return nil
-	}
-	insts := make([]*RoutingInstanceConfig, 0, len(cfg.RoutingInstances))
-	insts = append(insts, cfg.RoutingInstances...)
-	sort.SliceStable(insts, func(i, j int) bool {
-		if insts[i] == nil || insts[j] == nil {
-			return insts[i] != nil
-		}
-		return insts[i].Name < insts[j].Name
-	})
-	tunnelNames := cfg.TunnelNameMap()
-	dualClaimed := RoutingInstanceDualClaimedLinuxNames(cfg, tunnelNames)
 	out := make(map[string]string)
-	for _, ri := range insts {
-		if ri == nil || ri.Name == "" {
-			continue
+	ForEachRoutingInstanceInterfaceMembership(cfg, func(instance, key string) {
+		if key == "" {
+			return
 		}
-		for _, member := range RoutingInstanceMemberDeviceKeysForInstance(cfg, tunnelNames, ri) {
-			if member.InterfaceKey == "" || dualClaimed[member.LinuxName] {
-				continue
-			}
-			if _, exists := out[member.InterfaceKey]; !exists {
-				out[member.InterfaceKey] = ri.Name
-			}
-		}
-	}
+		out[key] = instance
+	})
 	if len(out) == 0 {
 		return nil
 	}
