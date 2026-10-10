@@ -457,7 +457,7 @@ never retried and the stale IPv6 default-router identity lingered on hosts
   which internally marshals every option, so a single option whose lifetime
   overflows its on-wire field aborts the ENTIRE advertisement — the segment
   then silently stops receiving RAs and hosts lose their default route / SLAAC
-  when the current RAs expire. Two guards, in depth:
+  when the current RAs expire. Three guards, in depth:
   - **Primary (commit-time gate, `pkg/config` `schema_routing.go`):** the
     router-advertisement lifetime leaves are bounded to their wire fields —
     `default-lifetime` ≤ 65535 (RFC 4861 §4.2 16-bit), `prefix
@@ -473,6 +473,13 @@ never retried and the stale IPv6 default-router identity lingered on hosts
     a bad option degrades to "missing that one option" instead of a total RA
     blackout. NDP options are independent on the wire, so per-option probing is
     faithful to how the combined RA marshals.
+  - **Inherited lifetimes share one clamped source:** `buildRA` first bounds
+    Router Lifetime to its 16-bit maximum (65535), and the header and inherited
+    RDNSS lifetime use that same value. Inherited PREF64 uses it too, but its
+    narrower RFC 8781 field tops out at 65528 seconds; values above that
+    saturate to 65528 with one warning per sender instead of pruning the option.
+    If the router lifetime is 0, inherited RDNSS/PREF64 fall back to 1800 seconds
+    (with PREF64 still subject to its 65528-second cap).
 - **`configEqual` must track EVERY field `buildRA` stamps onto the wire.**
   `Apply` gates the sender restart on `configEqual(existing.cfg, cfg)` — an
   interface whose config compares EQUAL keeps running untouched (no RA gap),
