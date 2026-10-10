@@ -369,9 +369,9 @@ APT verifies the selected signed Release identity, it writes the managed
 channel preference and runs `apt install xpf-appliance`. If that apt step fails,
 the installer removes the source and restores the previous marked pin (or
 removes a new one). It also restores the previous keyring (or removes the
-bootstrap keyring on first install) only while the live file still matches the
-installer's write; if dpkg has replaced it with the package-owned keyring, that
-package payload is left intact.
+bootstrap keyring on first install) only while the live path is still the
+bootstrap object (device/inode identity) with matching bytes (#12543); a
+dpkg replacement is preserved even if byte-identical to the bootstrap write.
 
 ### Install (Tier B — verify before run)
 

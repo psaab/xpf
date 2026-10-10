@@ -136,6 +136,7 @@ exec /bin/mv "$@"
             "XPF_TEST_ATOMIC_TRACE": str(self.atomic_trace),
             "XPF_TEST_SOURCE": str(self.source),
             "XPF_TEST_PACKAGE_PAYLOAD": "",
+            "XPF_TEST_IDENT_TRACE": str(self.root / "ident-trace"),
             "PATH": str(self.bindir) + os.pathsep + env.get("PATH", ""),
             "XPF_TEST_FAIL_KEYRING_MV": "",
         })
@@ -153,6 +154,25 @@ case "$1" in
     # keyring, then fail as a maintainer script or later package could.
     printf '%s\\n' "$XPF_TEST_PACKAGE_PAYLOAD" > "$XPF_TEST_KEYRING.dpkg-new"
     mv -f "$XPF_TEST_KEYRING.dpkg-new" "$XPF_TEST_KEYRING"
+    exit 100 ;;
+  *) exit 1 ;;
+esac
+""")
+
+    def _shim_apt_install_fails_after_unpack_with_ident_trace(self):
+        self._shim("apt-get", """#!/bin/sh
+case "$1" in
+  update) exit 0 ;;
+  indextargets)
+    printf 'Sourcesentry: %s:1\nSuite: stable\nCodename: stable\n' "$XPF_TEST_SOURCE"
+    exit 0 ;;
+  install)
+    # Simulate dpkg unpack with inode tracing: stat the bootstrap object
+    # BEFORE the rename-over, then stat the package object after (#12543).
+    stat -c '%d:%i' "$XPF_TEST_KEYRING" >> "$XPF_TEST_IDENT_TRACE"
+    printf '%s\n' "$XPF_TEST_PACKAGE_PAYLOAD" > "$XPF_TEST_KEYRING.dpkg-new"
+    mv -f "$XPF_TEST_KEYRING.dpkg-new" "$XPF_TEST_KEYRING"
+    stat -c '%d:%i' "$XPF_TEST_KEYRING" >> "$XPF_TEST_IDENT_TRACE"
     exit 100 ;;
   *) exit 1 ;;
 esac
@@ -280,6 +300,51 @@ do_install
         self._shim_apt_install_fails_after_unpack()
         result, payload = self._run_apt_unpack_failure()
         self.assertEqual(result.returncode, 100, result.stdout + result.stderr)
+        self.assertEqual(self.keyring.read_bytes(), (payload + "\n").encode())
+        self.assertEqual(list(self.keyring_dir.glob(".xpf-archive-keyring.asc.*")), [])
+
+    def _run_apt_unpack_failure_equal_payload(self, preexisting_old_or_none):
+        # #12543 shape: the dpkg payload is BYTE-IDENTICAL to the bootstrap
+        # ARCHIVE_KEY (same-key release ships the archive key in the .deb).
+        self.source.parent.mkdir(parents=True, exist_ok=True)
+        self.pin.parent.mkdir(parents=True, exist_ok=True)
+        replacement = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nnew test key\n-----END PGP PUBLIC KEY BLOCK-----"
+        env = self._env()
+        env["XPF_TEST_PACKAGE_PAYLOAD"] = replacement
+        if preexisting_old_or_none is not None:
+            self.keyring.write_bytes(preexisting_old_or_none)
+            self.before.write_bytes(preexisting_old_or_none)
+        script = """. "$1"
+DRY=0; CHANNEL=stable; KEYRING="$2"; SRC="$3"; PIN="$4"; ARCHIVE_KEY="$5"
+install_keyring
+write_source
+do_install
+"""
+        result = self._run(script, *self._install_setup_args(), replacement, env=env)
+        return result, replacement
+
+    def test_apt_unpack_equal_payload_existing_key_preserves_package_inode_12543(self):
+        old = b"previous signed-by keyring bytes\x00\xff\n"
+        self._shim_apt_install_fails_after_unpack_with_ident_trace()
+        result, payload = self._run_apt_unpack_failure_equal_payload(old)
+        self.assertEqual(result.returncode, 100, result.stdout + result.stderr)
+        trace = (self.root / "ident-trace").read_text().splitlines()
+        self.assertEqual(len(trace), 2, "ident trace must prove the unpack rename")
+        self.assertNotEqual(trace[0], trace[1], "package inode must differ from bootstrap inode")
+        # Byte-identical payload, REPLACEMENT inode: rollback must preserve it.
+        self.assertEqual(self.keyring.read_bytes(), (payload + "\n").encode())
+        self.assertFalse(self.source.exists())
+        self.assertFalse(self.pin.exists())
+        self.assertEqual(list(self.keyring_dir.glob(".xpf-archive-keyring.asc.*")), [])
+
+    def test_apt_unpack_equal_payload_first_install_keeps_package_keyring_12543(self):
+        self._shim("mv", '#!/bin/sh\nexec /bin/mv "$@"\n')
+        self._shim_apt_install_fails_after_unpack_with_ident_trace()
+        result, payload = self._run_apt_unpack_failure_equal_payload(None)
+        self.assertEqual(result.returncode, 100, result.stdout + result.stderr)
+        trace = (self.root / "ident-trace").read_text().splitlines()
+        self.assertEqual(len(trace), 2, "ident trace must prove the unpack rename")
+        self.assertNotEqual(trace[0], trace[1], "package inode must differ from bootstrap inode")
         self.assertEqual(self.keyring.read_bytes(), (payload + "\n").encode())
         self.assertEqual(list(self.keyring_dir.glob(".xpf-archive-keyring.asc.*")), [])
 
