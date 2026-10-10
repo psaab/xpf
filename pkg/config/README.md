@@ -625,6 +625,14 @@ NAT expansion refuse the set rather than retaining its valid-looking subset.
 Zone-local address-set folds carry the unknown-member taint too. A recognized
 `description` remains accepted metadata and is not a member.
 
+**Address-set depth and cycles are checked at commit (#12214):** strict
+validation applies the same path-local maximum-five-edge and cycle traversal as
+`ExpandAddressSet` to every book set, including unreferenced sets. This prevents
+a green commit from reaching `compileAddressBook`'s apply-time expansion error.
+Five nested edges remain valid; a 6+ edge chain or mutual cycle is rejected with
+the set named. Tolerant loading retains its warning downgrade; applying an
+older persisted invalid book still reaches the shared prepass.
+
 **IPv4-mapped IPv6 address-book prefixes are rejected before commit (#10688):**
 Go's `net.IP.To4()` files `::ffff:a.b.c.d/nn` into `prefixes_v4`, but the
 userspace helper parses the colon-bearing prefix as IPv6 and rejects the entire

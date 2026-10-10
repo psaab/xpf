@@ -68,5 +68,15 @@ func validateAddressSetMembersDefinedStrict(cfg *Config) error {
 			}
 		}
 	}
+
+	// #12214: compileAddressBook expands every set during the shared prepass,
+	// including sets unused by policies. Reject the same depth/cycle failures at
+	// commit instead of allowing a green commit to abort every apply.
+	for _, name := range names {
+		if err := validateAddressSetDepthAndCycles(name, ab); err != nil {
+			return fmt.Errorf("address-set %s cannot be expanded: %w", show(name), err)
+		}
+	}
+
 	return nil
 }
