@@ -1699,14 +1699,14 @@ on a target change the own O.link plus any stale T.link are DELETED
 (MAJOR-1 neutralize — a retained claim would resurrect a wrong identity next
 boot) while a required rename still runs, and the persistence loss is reported
 via an ERROR log, not the #5842 errs channel (errs carries only failures).
-Exception (finding B): a NIC that failed its own temp rename still wears
-another NIC's final name, so its "own" current link is that owner's live
-file. Phase 2 runs unknowns-first, so every neutralize lands before the
-owner rewrites its name with its verified chain (no map order can
-interleave) — and a failed owner write leaves NO claim behind
-(fail-closed: nothing is spared). The stale T.link always goes (sparing
-it would resurrect the occupant under the unknown NIC's target — B-REG
-fail-open).
+Ordering note: phase 2 runs unknowns-first, so every neutralize lands
+before the known owner rewrites its name with its verified chain (no map
+order can interleave). For an unknown whose own temp rename failed, a
+failed owner write leaves NO claim behind (fail-closed: nothing is
+spared). Temp-OK shape excepted: if the temp rename succeeded the
+phase-2 key is xpf-tmp-N and the O.link removal misses (#12557). The
+stale T.link always goes (sparing it would resurrect the occupant under
+the unknown NIC's target — B-REG fail-open).
 Exception (MINOR-3 residual): a NIC renamed in memory by an earlier pass of
 the same boot still emits `OriginalName=<logical>` — without a kernel-name
 oracle the gate cannot tell it from a first rename. The neutralize makes that

@@ -311,10 +311,13 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 	// MINOR-3: unknown NICs run BEFORE any known NIC writes (order within
 	// each class is still map order). Every neutralize lands before the
 	// known owner's writeLinkFile, so no map order can interleave a
-	// neutralize between the owner's write and the end of the pass — and a
-	// failed owner write leaves NO claim behind (fail-closed: nothing was
-	// spared). The ordering key must match the loop's unknown predicate,
-	// including the collided-temp "" re-derivation below — hence the helper.
+	// neutralize between the owner's write and the end of the pass. For an
+	// unknown whose own temp rename FAILED (unfreed current), a failed
+	// owner write leaves NO claim behind (fail-closed: nothing was
+	// spared). Temp-OK shape excepted: if the temp rename SUCCEEDED the
+	// phase-2 key is xpf-tmp-N and the O.link removal misses (#12557).
+	// The ordering key must match the loop's unknown predicate, including
+	// the collided-temp "" re-derivation below — hence the helper.
 	var errs []error
 	// resolvedOriginal is the loop's unknown predicate: the pre-captured
 	// value, or the re-derivation for collided-temp currents whose capture
@@ -366,16 +369,13 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 			// not the #5842 errs channel (errs carries only failures: a
 			// neutralize that fails, a failed rename, or the #7205 unfreed
 			// error).
-			// Finding B: an unknown NIC that failed its own temp rename
-			// still wears another NIC's final name — but with the
-			// unknowns-first ordering above, this neutralize runs BEFORE
-			// the known owner's writeLinkFile(final, original) call in the
-			// else branch below, so there is no map-order race: the owner
-			// always rewrites its own name after every neutralize. (Fold-4
-			// carried an unfreed[current] skip here; fold-5 deleted it —
-			// the skip made the ordering vacuous and left a fail-open
-			// residual on owner-write failure. With no skip, a failed
-			// owner write leaves NO claim behind: fail-closed.)
+			// An unknown NIC that failed its own temp rename still wears
+			// another NIC's final name. With the unknowns-first ordering
+			// above, this neutralize runs BEFORE the known owner's
+			// writeLinkFile(final, original) call in the else branch below,
+			// so there is no map-order race: the owner always rewrites its
+			// own name after every neutralize, and a failed owner write
+			// leaves NO claim behind (fail-closed: nothing is spared).
 			// The stale final link ALWAYS goes: for U→X with X unfreed,
 			// X's occupant V writes Y.link (its own final), never X.link —
 			// nobody else touches the stale claim, and sparing it would

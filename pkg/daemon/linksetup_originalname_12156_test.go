@@ -522,18 +522,17 @@ func TestBootstrapLifelineNeutralizesResurrectableLinksOnRename12156(t *testing.
 	}
 }
 
-// TestRenamePositionalUnfreedKeepsOwnerChain12156 pins finding B: an unknown
-// NIC that failed ITS OWN temp rename still wears another NIC's final name.
-// NIC B (unknown, MAC-form ge-0-0-0 claim) wants fxp0; NIC A (known enp5s0,
-// chain fxp0.link, currently fxp0) wants ge-0-0-0. B's temp rename fails, so
-// ge-0-0-0 (B's CURRENT name, A's final) is unfreed. B neutralizes BOTH its
-// current and stale-final links; with the unknowns-first ordering, A rewrites
-// ge-0-0-0.link with its verified chain AFTER every neutralize, so the chain
-// survives in 200/200 runs regardless of map order within each class (the
-// reviewer TestACUnfreedOrderDependence shape: map-order loop without
-// ordering lost it ~20/200; knowns-first loses 200/200). The pass still
-// reports the #7205 unfreed error. (Fold-4 carried an unfreed[current] skip
-// here; fold-5 deleted it — the skip made the ordering vacuous.)
+// TestRenamePositionalUnfreedKeepsOwnerChain12156 pins the unknowns-first
+// ordering: an unknown NIC that failed ITS OWN temp rename still wears
+// another NIC's final name. NIC B (unknown, MAC-form ge-0-0-0 claim) wants
+// fxp0; NIC A (known enp5s0, chain fxp0.link, currently fxp0) wants
+// ge-0-0-0. B's temp rename fails, so ge-0-0-0 (B's CURRENT name, A's
+// final) is unfreed. B neutralizes BOTH its current and stale-final links;
+// with the unknowns-first ordering, A rewrites ge-0-0-0.link with its
+// verified chain AFTER every neutralize, so the chain survives in 200/200
+// runs regardless of map order within each class (map-order loop without
+// ordering loses it ~20/200; knowns-first loses 200/200 — either mutant
+// FAILS this test). The pass still reports the #7205 unfreed error.
 func TestRenamePositionalUnfreedKeepsOwnerChain12156(t *testing.T) {
 	chain := "# Managed by xpfd \u2014 do not edit\n[Match]\nOriginalName=enp5s0\n\n[Link]\nName=fxp0"
 	macForm := "# Managed by xpfd \u2014 do not edit\n[Match]\nMACAddress=52:54:00:00:00:0b\n\n[Link]\nName=ge-0-0-0\nMTUBytes=1500\n"
@@ -571,24 +570,22 @@ func TestRenamePositionalUnfreedKeepsOwnerChain12156(t *testing.T) {
 		if !strings.Contains(string(got), "OriginalName=enp5s0") {
 			t.Fatalf("iter %d: owner's link lacks the verified chain:\n%s", i, got)
 		}
-		// MINOR-1(a): the stale T.link ALWAYS goes, even with an unfreed
-		// current. Sparing it (SPAREBOTH) resurrects the occupant under
-		// the unknown NIC's target — 26 wrong boots in the temp-fail
-		// matrix. This assertion kills SPAREBOTH at iter 0.
+		// The stale T.link ALWAYS goes, even with an unfreed current.
+		// Sparing it resurrects the occupant under the unknown NIC's
+		// target (B-REG: 26 wrong boots in the temp-fail matrix).
 		if _, err := os.Stat(filepath.Join(dir, linkPrefix+"fxp0.link")); !os.IsNotExist(err) {
 			t.Fatalf("iter %d: stale fxp0.link survived (B-REG resurrection), stat err=%v", i, err)
 		}
 	}
 }
 
-// TestRenamePositionalUnfreedFinalStillNeutralizesTarget12156 pins
-// MINOR-1(b): the inverted fold-2 shape. U (unknown, wears ge-0-0-1 via
-// MAC-form) wants fxp0; K (known enp6s0, wears fxp0 via chain) wants
-// ge-0-0-0, but K's temp rename fails — so fxp0 (U's FINAL) is unfreed.
-// K writes ge-0-0-0.link (its own final), never fxp0.link: nobody else
-// touches the stale claim, and sparing it (BREG) resurrects K under U's
-// target — 30 wrong boots + 6/6 reorder cases in the temp-fail matrix.
-// fxp0.link MUST go. This kills BREG at iter 0; it passes at head.
+// TestRenamePositionalUnfreedFinalStillNeutralizesTarget12156 pins the
+// unfreed-final rule: U (unknown, wears ge-0-0-1 via MAC-form) wants fxp0;
+// K (known enp6s0, wears fxp0 via chain) wants ge-0-0-0, but K's temp rename
+// fails — so fxp0 (U's FINAL) is unfreed. K writes ge-0-0-0.link (its own
+// final), never fxp0.link: nobody else touches the stale claim, and sparing
+// it resurrects K under U's target (B-REG: 30 wrong boots + 6/6 reorder
+// cases in the temp-fail matrix). fxp0.link MUST go.
 func TestRenamePositionalUnfreedFinalStillNeutralizesTarget12156(t *testing.T) {
 	macForm := "# Managed by xpfd \u2014 do not edit\n[Match]\nMACAddress=52:54:00:00:00:0b\n\n[Link]\nName=ge-0-0-1\nMTUBytes=1500\n"
 	chain := "# Managed by xpfd \u2014 do not edit\n[Match]\nOriginalName=enp6s0\n\n[Link]\nName=fxp0"
@@ -615,6 +612,47 @@ func TestRenamePositionalUnfreedFinalStillNeutralizesTarget12156(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(dir, linkPrefix+"fxp0.link")); !os.IsNotExist(err) {
 			t.Fatalf("iter %d: B-REG: unfreed-final fxp0.link (K's chain) survived, stat err=%v", i, err)
+		}
+	}
+}
+
+// TestRenamePositionalUnfreedOwnerWriteFailStaysFailClosed12156 pins the
+// fail-closed property: same shape as the ordering test, but the owner chain
+// carries a glob (OriginalName=enp5s0*) so A's rewrite is refused (#10089)
+// AND B's temp rename fails. B's MAC-form claim is already deleted before
+// A's write fails — both links absent, errs holds the refusal + the #7205
+// error. Sparing the current link instead would leave B's claim behind
+// (fail-open, 200/200 wrong next boot) — this test FAILS then.
+func TestRenamePositionalUnfreedOwnerWriteFailStaysFailClosed12156(t *testing.T) {
+	// A's recorded original carries a glob, so its rewrite is refused (#10089).
+	chain := "# Managed by xpfd \u2014 do not edit\n[Match]\nOriginalName=enp5s0*\n\n[Link]\nName=fxp0"
+	macForm := "# Managed by xpfd \u2014 do not edit\n[Match]\nMACAddress=52:54:00:00:00:0b\n\n[Link]\nName=ge-0-0-0\nMTUBytes=1500\n"
+	for i := 0; i < 200; i++ {
+		dir := withTempLinkDir(t)
+		if err := os.WriteFile(filepath.Join(dir, linkPrefix+"fxp0.link"), []byte(chain), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, linkPrefix+"ge-0-0-0.link"), []byte(macForm), 0644); err != nil {
+			t.Fatal(err)
+		}
+		nics := []pciNIC{
+			{sortKey: 1, busAddr: "0000:05:00.0", name: "ge-0-0-0"},
+			{sortKey: 1, busAddr: "0000:06:00.0", name: "fxp0"},
+		}
+		_, errs := renamePositional(nics, 0, false, func(from, to string) error {
+			if from == "ge-0-0-0" && strings.HasPrefix(to, "xpf-tmp-") {
+				return errors.New("injected temp failure")
+			}
+			return nil
+		})
+		if len(errs) < 2 {
+			t.Fatalf("iter %d: want the refused owner write AND the #7205 unfreed error, got %v", i, errs)
+		}
+		if _, err := os.Stat(filepath.Join(dir, linkPrefix+"ge-0-0-0.link")); !os.IsNotExist(err) {
+			t.Fatalf("iter %d: B's MAC-form claim to A's target survived a refused owner write (fail-open), stat err=%v", i, err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, linkPrefix+"fxp0.link")); !os.IsNotExist(err) {
+			t.Fatalf("iter %d: stale fxp0.link survived, stat err=%v", i, err)
 		}
 	}
 }
