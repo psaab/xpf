@@ -869,6 +869,82 @@ pub(in crate::afxdp) enum WorkerCommand {
     VacateAllSharedExactSlots,
 }
 
+/// One reconcile generation's command queues and their owning worker liveness
+/// slots. The pointer-keyed projection keeps fan-out lookup O(log workers)
+/// without relying on worker-ID ordering or re-resolving IDs per queue.
+///
+/// The queue Arcs remain owned by `commands_by_id`, so their allocation
+/// identities stay live for this projection's lifetime. A new reconcile builds
+/// a new projection with new queues and atomics; worker-ID reuse therefore
+/// cannot inherit the previous worker's dead flag.
+pub(in crate::afxdp) struct WorkerCommandQueues {
+    commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    runtime_atomics_by_queue: BTreeMap<usize, Arc<crate::afxdp::worker_runtime::WorkerRuntimeAtomics>>,
+}
+
+impl WorkerCommandQueues {
+    pub(in crate::afxdp) fn new(
+        commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    ) -> Self {
+        let runtime_atomics_by_queue = commands_by_id
+            .values()
+            .map(|commands| {
+                (
+                    Arc::as_ptr(commands) as *const () as usize,
+                    Arc::new(crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new()),
+                )
+            })
+            .collect();
+        Self {
+            commands_by_id,
+            runtime_atomics_by_queue,
+        }
+    }
+
+    pub(in crate::afxdp) fn runtime_atomics_for_queue(
+        &self,
+        commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+    ) -> Option<&Arc<crate::afxdp::worker_runtime::WorkerRuntimeAtomics>> {
+        self.runtime_atomics_by_queue
+            .get(&(Arc::as_ptr(commands) as *const () as usize))
+    }
+
+    /// Skip and account for a queue whose supervisor has marked its worker
+    /// dead. A queue absent from this generation's identity map is not shed.
+    #[inline]
+    pub(in crate::afxdp) fn shed_if_dead(
+        &self,
+        commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+    ) -> bool {
+        let Some(runtime_atomics) = self.runtime_atomics_for_queue(commands) else {
+            return false;
+        };
+        if runtime_atomics.dead.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl std::ops::Deref for WorkerCommandQueues {
+    type Target = BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.commands_by_id
+    }
+}
+
+pub(in crate::afxdp) fn empty_worker_commands_by_id() -> &'static WorkerCommandQueues {
+    static EMPTY: std::sync::LazyLock<WorkerCommandQueues> =
+        std::sync::LazyLock::new(|| WorkerCommandQueues::new(BTreeMap::new()));
+    &EMPTY
+}
+
+
+
 #[derive(Default)]
 pub(in crate::afxdp) struct DebugPollCounters {
     pub(in crate::afxdp) rx: u64,
@@ -1071,8 +1147,12 @@ pub(in crate::afxdp) struct WorkerContext<'a> {
     /// (idempotent); releasing for one that is still FORWARDING the flow is
     /// not — its port could be handed to another flow — so "release for every
     /// worker" is not a substitute for the id.
-    pub(in crate::afxdp) worker_commands_by_id:
-        &'a BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    /// This generation-scoped projection also pairs each queue with its
+    /// owning runtime atomics by Arc identity. Upsert fan-out uses that
+    /// pointer-keyed liveness map, while existing control paths retain the
+    /// worker-ID map. A reused worker ID therefore cannot make an old queue
+    /// appear to belong to a new worker.
+    pub(in crate::afxdp) worker_commands_by_id: &'a WorkerCommandQueues,
     pub(in crate::afxdp) dnat_fds: &'a DnatTableFds,
     pub(in crate::afxdp) rg_epochs: &'a [AtomicU32; MAX_RG_EPOCHS],
     /// #1620: cold-path latency histogram sample mask. Loaded once
@@ -1085,22 +1165,6 @@ pub(in crate::afxdp) struct WorkerContext<'a> {
     pub(in crate::afxdp) cold_path_sample_mask: u64,
 }
 
-/// #8114 item 4: the empty `worker_commands_by_id` a `WorkerContext` fixture
-/// uses when it is not exercising the dropped-delete repair.
-///
-/// Returned by reference from a `OnceLock` so a fixture can name it inline
-/// without a local binding, and EMPTY on purpose: the repair resolves a refused
-/// queue to its worker id by `Arc` identity against this map, so an empty one
-/// means "no id resolved, no repair attempted" and every pre-#8114 fixture keeps
-/// its exact behaviour. A cell that means to exercise the repair builds a real
-/// map holding the same `Arc`s it puts in `peer_worker_commands`.
-#[cfg(test)]
-pub(in crate::afxdp) fn empty_worker_commands_by_id()
--> &'static BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> {
-    static EMPTY: std::sync::OnceLock<BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>> =
-        std::sync::OnceLock::new();
-    EMPTY.get_or_init(BTreeMap::new)
-}
 
 /// #945: mutable telemetry context for `poll_binding_process_descriptor`.
 pub(in crate::afxdp) struct TelemetryContext<'a> {

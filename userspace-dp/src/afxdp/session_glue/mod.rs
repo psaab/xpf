@@ -2119,10 +2119,9 @@ fn dispatch_transition_debt_op(
 }
 
 /// #4800: calls to [`replicate_session_upsert`] (one per new flow), and the
-/// total number of `UpsertSynced` commands those calls enqueued — the
-/// second is `calls * sibling_worker_count`, so the ratio recovers the
-/// N-way fan-out multiplier without the analysis layer having to know the
-/// worker count out of band.
+/// total number of live-worker `UpsertSynced` commands those calls attempted.
+/// The second is `calls * live sibling count`; the separate worker-queue SHED
+/// counter accounts for dead siblings that were intentionally skipped.
 pub(crate) static SESSION_REPLICATION_UPSERTS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static SESSION_REPLICATION_ENQUEUED: AtomicU64 = AtomicU64::new(0);
 
@@ -2130,11 +2129,12 @@ pub(crate) static SESSION_REPLICATION_ENQUEUED: AtomicU64 = AtomicU64::new(0);
 /// [`replicate_session_upsert`] that found the queue already held.
 ///
 /// The denominator is `SESSION_REPLICATION_ENQUEUED`, which is incremented
-/// once per sibling IMMEDIATELY BEFORE that sibling's acquisition — so the
+/// once per live sibling IMMEDIATELY BEFORE that sibling's acquisition — so the
 /// pair is a ratio over acquisitions actually ATTEMPTED, at every instant and
-/// not merely once a call has returned. Booking the whole fan-out up front
-/// (the pre-fix order) understated contention by the sibling count for any
-/// scrape landing mid-call.
+/// not merely once a call has returned. Dead queues are excluded because their
+/// mutexes are not acquired; their skipped legs are counted by SHED_TOTAL.
+/// Booking the whole fan-out up front (the pre-fix order) understated
+/// contention by the sibling count for any scrape landing mid-call.
 pub(crate) static SESSION_REPLICATION_LOCK_CONTENDED: AtomicU64 = AtomicU64::new(0);
 
 /// #4800: sum of the per-call deepest sibling-queue depth observed at
@@ -2177,6 +2177,7 @@ pub(crate) static SESSION_REPLICATION_QUEUE_DEPTH_MAX: AtomicU64 = AtomicU64::ne
 
 pub(super) fn replicate_session_upsert(
     worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_command_queues: &WorkerCommandQueues,
     entry: &SyncedSessionEntry,
 ) {
     // #4800: in test builds only, hold the shared side of the counter lock for
@@ -2192,13 +2193,20 @@ pub(super) fn replicate_session_upsert(
     // convention, not an invariant. See `afxdp::counter_test_lock`.
     #[cfg(test)]
     let _counter_guard = crate::afxdp::counter_test_lock::counter_mover_guard();
-    let replica = synced_replica_entry(entry);
+    let mut replica = None;
     // #4800: two O(1) counter updates per call rather than per sibling.
     SESSION_REPLICATION_UPSERTS.fetch_add(1, Ordering::Relaxed);
     let mut deepest = 0u64;
     for commands in worker_commands {
-        // #4800: count this sibling's acquisition ATTEMPT immediately before
-        // making it, NOT the whole fan-out up front.
+        // #12192: worker-ID reuse cannot misattribute this queue because
+        // `WorkerCommandQueues` resolves the same Arc identity used to pair
+        // the queue with this generation's runtime atomics.
+        if worker_command_queues.shed_if_dead(commands) {
+            continue;
+        }
+        let replica = replica.get_or_insert_with(|| synced_replica_entry(entry));
+        // #4800: count this live sibling's acquisition ATTEMPT immediately
+        // before making it, NOT the whole fan-out up front.
         //
         // Pre-booking `worker_commands.len()` here made the contention ratio
         // structurally wrong for any scrape taken mid-call, which is every
@@ -2209,8 +2217,8 @@ pub(super) fn replicate_session_upsert(
         // attempted had blocked. The denominator counted work that had not been
         // tried yet. Incrementing per iteration keeps `contended <= enqueued` a
         // ratio over ATTEMPTED acquisitions at every instant, and leaves the
-        // at-rest value identical (every attempt completes), so the fan-out
-        // ratio `enqueued / upserts` is unchanged.
+        // at-rest value identical (every live attempt completes), so the fan-out
+        // ratio `enqueued / upserts` is the live sibling multiplier.
         SESSION_REPLICATION_ENQUEUED.fetch_add(1, Ordering::Relaxed);
         // #1807: recover-and-push — `if let Ok` silently DROPPED the
         // UpsertSynced replica for a poisoned worker queue.
@@ -2979,6 +2987,7 @@ pub(super) fn resolve_flow_session_decision(
         shared_forward_wire_sessions,
         shared_owner_rg_indexes,
         peer_worker_commands,
+        empty_worker_commands_by_id(),
         forwarding,
         ha_state,
         dynamic_neighbors,
@@ -3006,6 +3015,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_commands_by_id: &WorkerCommandQueues,
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
@@ -3186,6 +3196,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
                 conntrack_v6_fd,
                 shared,
                 peer_worker_commands,
+                worker_commands_by_id,
                 forwarding,
                 resolved_key,
                 decision,
@@ -3311,6 +3322,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         shared_forward_wire_sessions,
         shared_owner_rg_indexes,
         peer_worker_commands,
+        worker_commands_by_id,
         forwarding,
         ha_state,
         dynamic_neighbors,
@@ -3363,6 +3375,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         conntrack_v6_fd,
         shared,
         peer_worker_commands,
+        worker_commands_by_id,
         forwarding,
         &flow.forward_key,
         decision,

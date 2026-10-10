@@ -1697,10 +1697,10 @@ fn replay_synced_sessions_requeues_preserved_entries_for_new_workers() {
         tcp_close_class: 0,
         tcp_handshake_state: 0,
     };
-    let worker_command_queues = BTreeMap::from([
+    let worker_command_queues = WorkerCommandQueues::new(BTreeMap::from([
         (0u32, Arc::new(Mutex::new(VecDeque::new()))),
         (1u32, Arc::new(Mutex::new(VecDeque::new()))),
-    ]);
+    ]));
 
     let replayed = coordinator.replay_synced_sessions(
         &[entry.clone()],
@@ -2610,16 +2610,16 @@ fn subnet_directed_broadcast_is_never_locally_delivered_8061() {
 // The mechanism is STRUCTURAL, and this cell is its necessary and sufficient
 // precondition:
 //
-//  1. a local transit install fans the session to EVERY worker
+//  1. a local transit install fans the session to EVERY live worker
 //     (`replicate_session_upsert`, `poll_descriptor/mod.rs`; the doc on
-//     `handle_upsert_synced` says "fanned out to every worker");
+//     `handle_upsert_synced` says "fanned out to every live worker");
 //  2. the replication types carry NO COUNTERS AT ALL — neither
 //     `SyncedSessionEntry` (afxdp/worker/mod.rs) nor `SessionInstall`
 //     (session/ctx.rs) has a counters field — so a sibling's copy is created
 //     at ZERO and nothing on that path can ever advance it. Only
 //     `account_packet` advances counters, and it runs on the worker the flow's
 //     packets actually land on;
-//  3. EVERY worker runs `refresh_bpf_conntrack_last_seen` over its OWN table
+//  3. EVERY live worker runs `refresh_bpf_conntrack_last_seen` over its OWN table
 //     (`worker/loop_body/mod.rs`), not gated to the owner;
 //  4. `iter_with_idle_budgeted` yields every slab record with NO origin filter
 //     and the refresh closure skips only `metadata.is_reverse`;

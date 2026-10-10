@@ -1183,7 +1183,7 @@ fn upsert_synced_session_rejects_over_ceiling_import_and_does_not_fan_out() {
 // `.lock().map(|s| s.len()).unwrap_or(0)`, which on a poisoned mutex yields
 // 0 — and `0 >= synced_cap` is false for ANY nonzero cap, so the aggregate
 // admission bound was skipped entirely and the over-ceiling import was
-// admitted AND fanned out to every worker queue. Identical fail-open shape to
+// admitted AND fanned out to every live worker queue. Identical fail-open shape to
 // the two generation guards, in the same critical section, reached by the
 // same contained worker panic.
 //
@@ -4875,8 +4875,10 @@ fn the_reconcile_replay_rederives_a_dead_reverse_companion_7209() {
         "the companion must be IN the replay set, or this cell asserts a repair \
          of something the replay never saw"
     );
-    let queues: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> =
-        BTreeMap::from([(0u32, Arc::new(Mutex::new(VecDeque::new())))]);
+    let queues = WorkerCommandQueues::new(BTreeMap::from([(
+        0u32,
+        Arc::new(Mutex::new(VecDeque::new())),
+    )]));
     let before = coordinator.synced_reverse_rederived_total();
     let replayed = coordinator.replay_synced_sessions(
         &replay_entries,

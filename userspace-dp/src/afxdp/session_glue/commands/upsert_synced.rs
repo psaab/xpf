@@ -57,7 +57,7 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
     now_ns: u64,
     now_secs: u64,
     // #6211 F2: THIS worker's id, from `WorkerLaunchPlan::worker_id` via
-    // `apply_worker_commands`. The synced entry is fanned out to every worker,
+    // `apply_worker_commands`. The synced entry is fanned out to every live worker,
     // so the reservation below must record which worker took it.
     worker_id: u32,
 ) {

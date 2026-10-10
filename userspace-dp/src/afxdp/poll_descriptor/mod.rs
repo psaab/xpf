@@ -1700,6 +1700,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             worker_ctx.shared_forward_wire_sessions,
                             &worker_ctx.shared_owner_rg_indexes,
                             worker_ctx.peer_worker_commands,
+                            worker_ctx.worker_commands_by_id,
                             worker_ctx.forwarding,
                             worker_ctx.ha_state,
                             worker_ctx.dynamic_neighbors,
@@ -5336,6 +5337,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         }
                                         replicate_session_upsert(
                                             worker_ctx.peer_worker_commands,
+                                            worker_ctx.worker_commands_by_id,
                                             &forward_entry,
                                         );
                                         // #2617: the input-filter `then log`
@@ -5610,6 +5612,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         );
                                         replicate_session_upsert(
                                             worker_ctx.peer_worker_commands,
+                                            worker_ctx.worker_commands_by_id,
                                             &reverse_entry,
                                         );
                                     }

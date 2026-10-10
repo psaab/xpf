@@ -410,7 +410,7 @@ impl super::Coordinator {
     /// #5674: total peer-synced session imports rejected by the coordinator's
     /// aggregate admission bound (`upsert_synced_session`). Locally-created
     /// sessions are capped per worker at `DEFAULT_MAX_SESSIONS`; peer-synced
-    /// imports were previously uncapped and fanned out to every worker, so a
+    /// imports were previously uncapped and fanned out to every live worker, so a
     /// peer under session-table pressure (or a compromised peer) could drive
     /// this node past its own aggregate session ceiling. A rising value means a
     /// peer exceeded this appliance's ceiling.

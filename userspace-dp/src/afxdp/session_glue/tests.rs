@@ -8262,7 +8262,7 @@ fn replicate_session_upsert_delivers_to_poisoned_queue() {
     poison_command_queue(&queues[1]);
 
     let entry = test_synced_entry();
-    replicate_session_upsert(&queues, &entry);
+    replicate_session_upsert(&queues, empty_worker_commands_by_id(), &entry);
 
     for (worker_id, queue) in queues.iter().enumerate() {
         let pending = queue.lock().expect("queue unpoisoned after replicate");
@@ -17478,4 +17478,67 @@ fn demote_owner_rgs_resolves_live_route_before_restamp_11373() {
     );
     assert_eq!(origin, SessionOrigin::SyncImport);
     assert_eq!(cancelled_keys, vec![key]);
+}
+
+/// #12192: a dead worker's queue eventually reaches its cap, and later
+/// session-upsert replicas must be classified as dead-worker sheds rather than
+/// generic bounded-queue drops.
+///
+/// The queue is filled to the production cap, then its generation-scoped
+/// runtime atomics are marked dead, matching the supervisor's recorded state.
+/// The live sibling still receives the upsert; the dead queue is skipped and
+/// counted only in SHED_TOTAL.
+#[test]
+fn session_upsert_fan_out_sheds_dead_sibling_12192() {
+    use std::sync::atomic::Ordering;
+    let _shed_lock = crate::afxdp::worker_queue::SHED_TEST_LOCK
+        .lock()
+        .expect("shed test lock");
+
+    let live_commands: Arc<Mutex<VecDeque<WorkerCommand>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+    let dead_commands: Arc<Mutex<VecDeque<WorkerCommand>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+    dead_commands
+        .lock()
+        .expect("dead queue writable")
+        .resize_with(
+            crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS,
+            || WorkerCommand::VacateAllSharedExactSlots,
+        );
+    let peers = vec![live_commands.clone(), dead_commands.clone()];
+    let worker_commands_by_id = WorkerCommandQueues::new(BTreeMap::from([
+        (1, live_commands.clone()),
+        (2, dead_commands.clone()),
+    ]));
+    let dead_atomics = worker_commands_by_id
+        .runtime_atomics_for_queue(&dead_commands)
+        .expect("dead queue has generation-matched runtime atomics");
+    dead_atomics.dead.store(true, Ordering::Relaxed);
+
+    let shed_before =
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed);
+    let drops_before =
+        crate::afxdp::worker_queue::current_thread_worker_command_queue_drops_for_test();
+    replicate_session_upsert(&peers, &worker_commands_by_id, &test_synced_entry());
+    assert_eq!(
+        live_commands.lock().expect("live queue readable").len(),
+        1,
+        "the survivor's replica must still land"
+    );
+    assert_eq!(
+        dead_commands.lock().expect("dead queue readable").len(),
+        crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS,
+        "the dead sibling's queue must remain at its cap"
+    );
+    assert_eq!(
+        crate::afxdp::worker_queue::current_thread_worker_command_queue_drops_for_test(),
+        drops_before,
+        "a dead-worker shed must never take the generic queue-drop branch"
+    );
+    assert_eq!(
+        crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_SHED_TOTAL.load(Ordering::Relaxed),
+        shed_before + 1,
+        "the dead leg must be counted as shed"
+    );
 }

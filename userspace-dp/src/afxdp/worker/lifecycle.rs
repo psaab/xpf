@@ -44,7 +44,7 @@ pub(super) fn poll_binding(
     last_resolution: &Arc<Mutex<Option<ResolutionEvent>>>,
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     worker_id: u32,
-    worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    worker_commands_by_id: &WorkerCommandQueues,
     shared_recycles: &mut Vec<(u32, u64)>,
     dnat_fds: &DnatTableFds,
     conntrack_v4_fd: c_int,

@@ -1582,15 +1582,15 @@ pub(super) fn restamp_bpf_conntrack_policy(
 /// this walking session entry is mirrored onto it.
 ///
 /// THE DEFECT THIS EXISTS FOR. A local transit install is fanned out to EVERY
-/// worker (`replicate_session_upsert`; `handle_upsert_synced`'s own doc says
-/// "The synced entry is fanned out to every worker"), and the replication types
+/// live worker (`replicate_session_upsert`; `handle_upsert_synced`'s own doc says
+/// "The synced entry is fanned out to every live worker"), and the replication types
 /// carry NO COUNTERS FIELD AT ALL — neither `SyncedSessionEntry`
 /// (`afxdp/worker/mod.rs`) nor `SessionInstall` (`session/ctx.rs`). A worker
 /// that does not receive the flow's packets therefore holds a copy created at
 /// zero that can never advance: only `account_packet` moves counters, and it
 /// runs where the packets land.
 ///
-/// Every worker then refreshes its OWN table into the SAME row. The walk skips
+/// Every live worker then refreshes its OWN table into the SAME row. The walk skips
 /// reverse entries, but all forward entries remain refreshable, including
 /// packet-receiving `WorkerLocalImport` replicas. Before the full
 /// `BPF_EXIST` write, refresh normalizes only bit 9 from the live origin:

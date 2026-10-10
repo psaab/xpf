@@ -336,8 +336,8 @@ would drop this worker's holder bit and re-take it on a same-tuple refresh
 (HA sync reconnect, periodic re-upsert), opening a window for another
 worker's local allocation to steal the port.
 
-#6211 F2: the synced entry is fanned out to EVERY worker while the allocator
-is one shared `Arc`, so N workers reserve the same `(flow, translated)` and
+#6211 F2: the synced entry is fanned out to EVERY live worker while the allocator
+is one shared `Arc`, so N live workers reserve the same `(flow, translated)` and
 each releases it independently. `LiveAllocation.holders` (a `u128` bitmask
 keyed on `worker_id`) makes the release free the port only when the LAST
 holder lets go — before it, the first worker to reap or delete-sync freed a
