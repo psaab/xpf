@@ -156,7 +156,7 @@ type netlinkInstaller struct {
 // NewNetlinkInstaller returns an Installer that talks to the host's default
 // network namespace via netlink (no `nft` binary).
 func NewNetlinkInstaller() Installer {
-	return &netlinkInstaller{newConn: func() (*nftables.Conn, error) { return nftables.New() }}
+	return &netlinkInstaller{newConn: newBoundedNetlinkConn}
 }
 
 // newNetlinkInstallerConn constructs a netlinkInstaller with a custom conn
@@ -301,13 +301,13 @@ func (in *netlinkInstaller) InstallLo0(spec Lo0FilterSpec) (int, error) {
 	})
 }
 
-// replaceTable performs the atomic delete-then-recreate of one inet table +
-// `input` base chain in a SINGLE Flush (plan §12.2). Cold-boot safe: the table
-// is deleted only when it already exists, so an absent table does NOT abort the
-// batch (the unconditional-DelTable v1 bug). On any error the kernel aborts the
-// whole transaction and the PREVIOUS table is retained untouched — the exact
-// atomicity `nft -f -` gave (invariant H4). Each ruleset is its own transaction;
+// replaceTable queues the atomic delete-then-recreate of one inet table and its
+// chains/rules in a SINGLE Flush. Each ruleset is its own transaction;
 // xpf_lo0 / xpf_hostinbound / xpf_hostinbound_gap are never cross-coupled.
+//
+// A Flush error does not prove rollback: the kernel may have committed the
+// atomic batch while its ACK was lost. In that case report success only after
+// kernel readback matches the complete plan; otherwise preserve the Flush error.
 func (in *netlinkInstaller) replaceTable(name string, priority nftables.ChainPriority, build func(p *nlPlan)) (int, error) {
 	c, err := in.newConn()
 	if err != nil {
@@ -332,13 +332,21 @@ func (in *netlinkInstaller) replaceTable(name string, priority nftables.ChainPri
 		Priority: &prio,
 		Policy:   &policy,
 	})
-	p := &nlPlan{c: c, table: tbl, chain: chain}
+	p := &nlPlan{c: c, table: tbl, chain: chain, chains: []*nftables.Chain{chain}}
 	build(p)
 	if p.err != nil {
 		return 0, p.err
 	}
 	if err := c.Flush(); err != nil {
-		return 0, fmt.Errorf("nftables flush %s: %w", name, err)
+		flushErr := fmt.Errorf("nftables flush %s: %w", name, err)
+		installed, readbackErr := in.tableMatchesPlan(name, p)
+		if readbackErr != nil {
+			return 0, errors.Join(flushErr, fmt.Errorf("nftables readback %s: %w", name, readbackErr))
+		}
+		if installed {
+			return len(p.rules), nil
+		}
+		return 0, flushErr
 	}
 	return len(p.rules), nil
 }

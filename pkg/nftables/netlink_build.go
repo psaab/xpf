@@ -70,15 +70,19 @@ func (p nlPort) isRange() bool { return p.lo != p.hi }
 // single *nftables.Conn batch. It carries the sticky first error from any
 // set-allocation helper so rule assembly stays linear.
 type nlPlan struct {
-	c     *nftables.Conn
-	table *nftables.Table
-	chain *nftables.Chain
-	err   error
+	c      *nftables.Conn
+	table  *nftables.Table
+	chain  *nftables.Chain
+	err    error
+	chains []*nftables.Chain
 
 	// rules records every emitted rule's expr list (in order) so the pure-unit
 	// golden (T1b) and mutation-sensitivity tests can inspect the build without a
 	// live kernel. It is populated alongside the AddRule batch call.
 	rules [][]expr.Any
+	// ruleChains records the target chain for each corresponding rules entry so
+	// an uncertain Flush can verify the complete installed table by readback.
+	ruleChains []string
 	// counters records every declared counter-object name (in order) for the
 	// counter-declaration parity check.
 	counters []string
@@ -86,7 +90,8 @@ type nlPlan struct {
 	// canonical rule dump (T1b golden / mutation tests) can render set CONTENTS
 	// inline — otherwise a widened lookup set (a fail-open) would be invisible in
 	// the expr stream (the Lookup expr is identical; only the elements differ).
-	sets map[uint32][]nftables.SetElement
+	sets    map[uint32][]nftables.SetElement
+	setDefs map[uint32]*nftables.Set
 	// screenFloodSets records the named dynamic sets used by the host-inbound
 	// per-source flood meters so render tests can pin their capacity and expiry.
 	screenFloodSets map[string]*nftables.Set
@@ -117,7 +122,9 @@ func (p *nlPlan) regularChain(name string) *nftables.Chain {
 	if p.err != nil {
 		return nil
 	}
-	return p.c.AddChain(&nftables.Chain{Name: name, Table: p.table})
+	chain := p.c.AddChain(&nftables.Chain{Name: name, Table: p.table})
+	p.chains = append(p.chains, chain)
+	return chain
 }
 
 // inChain emits the rules fn builds into ch rather than the plan's base chain.
@@ -171,6 +178,7 @@ func (a *ruleAsm) emit(tail ...expr.Any) {
 	}
 	a.add(tail...)
 	a.p.rules = append(a.p.rules, a.exprs)
+	a.p.ruleChains = append(a.p.ruleChains, a.p.chain.Name)
 	a.p.c.AddRule(&nftables.Rule{Table: a.p.table, Chain: a.p.chain, Exprs: a.exprs})
 }
 
@@ -944,6 +952,10 @@ func (p *nlPlan) addAnonSet(keyType nftables.SetDatatype, interval bool, element
 		p.sets = map[uint32][]nftables.SetElement{}
 	}
 	p.sets[set.ID] = elements
+	if p.setDefs == nil {
+		p.setDefs = make(map[uint32]*nftables.Set)
+	}
+	p.setDefs[set.ID] = set
 	return set
 }
 
