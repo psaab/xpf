@@ -9,10 +9,21 @@
 #   - iperf3 server at IPERF_TARGET4
 #
 # Usage:
-#   ./test/incus/test-private-rg.sh              # Full test (enable, test, disable, test)
-#   ./test/incus/test-private-rg.sh enable        # Enable private-rg-election and test
-#   ./test/incus/test-private-rg.sh disable       # Disable private-rg-election and test
-#   ./test/incus/test-private-rg.sh check         # Check current state only
+#   ./test/incus/test-private-rg.sh              # Full cycle; restore initial mode
+#   ./test/incus/test-private-rg.sh enable       # Enable private-RG and test; leave enabled
+#   ./test/incus/test-private-rg.sh disable      # Enable legacy VRRP and test; leave disabled
+#   ./test/incus/test-private-rg.sh check        # Check current state only
+#
+# Full-cycle mode snapshots the selected cluster config and restores it on
+# every exit. `enable` and `disable` deliberately leave their explicitly
+# requested mode selected.
+#
+# Mode changes use the raw deploy path: the default deb deploy preserves the
+# node's active config and does not push CONF, so it cannot establish the
+# mode this test is meant to exercise.
+#
+# The full cycle tests its two temporary modes and restores the initial
+# configuration and running mode on both nodes before returning.
 
 set -euo pipefail
 
@@ -31,6 +42,96 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/cluster-env.sh"
 
 CONF="${CLUSTER_CONF:-${PROJECT_ROOT}/docs/ha-cluster.conf}"
+# shellcheck source=test/incus/private-rg-lib.sh
+source "${SCRIPT_DIR}/private-rg-lib.sh"
+
+WAN_CAPTURE_IFACE=$(privrg_reth_member "$CONF" reth0) || {
+	echo "ERROR: cannot find the node0 WAN RETH (reth0) member in $CONF" >&2
+	exit 1
+}
+LAN_CAPTURE_IFACE=$(privrg_reth_member "$CONF" reth1) || {
+	echo "ERROR: cannot find the node0 LAN RETH (reth1) member in $CONF" >&2
+	exit 1
+}
+
+PRIVRG_SNAPSHOT=""
+PRIVRG_SNAPSHOT_DIR=""
+PRIVRG_DEPLOY_ATTEMPTED=0
+PRIVRG_BASE_MODE=""
+
+privrg_deploy_config() {
+	PRIVRG_DEPLOY_ATTEMPTED=1
+	# cluster-deploy's default deb path preserves active node config. Force the
+	# raw path so the edited CONF is pushed and the tested mode actually runs.
+	(cd "$PROJECT_ROOT" && XPF_DEPLOY_FAST=1 make cluster-deploy) 2>&1 | tail -5
+}
+
+privrg_finish_full_cycle() {
+	local run_status="$1" cleanup_status=0 expected_mode
+	trap - EXIT INT TERM
+	set +e
+
+	if [[ -n "$PRIVRG_SNAPSHOT" && -f "$PRIVRG_SNAPSHOT" ]]; then
+		if ! privrg_restore_conf "$CONF" "$PRIVRG_SNAPSHOT"; then
+			echo "ERROR: failed to restore $CONF from the full-cycle snapshot" >&2
+			cleanup_status=1
+		fi
+		if ! privrg_conf_byte_identical "$CONF" "$PRIVRG_SNAPSHOT"; then
+			echo "ERROR: restored $CONF is not byte-identical to the full-cycle snapshot" >&2
+			cleanup_status=1
+		fi
+		if git -C "$PROJECT_ROOT" ls-files --error-unmatch "$CONF" >/dev/null 2>&1 &&
+		   ! git -C "$PROJECT_ROOT" diff --quiet -- "$CONF"; then
+			echo "ERROR: tracked config remains dirty after full-cycle restore: $CONF" >&2
+			cleanup_status=1
+		fi
+
+		if [[ "$PRIVRG_DEPLOY_ATTEMPTED" == 1 ]]; then
+			if ! privrg_deploy_config; then
+				echo "ERROR: failed to redeploy restored config on the cluster" >&2
+				cleanup_status=1
+			elif ! wait_cluster_ready; then
+				echo "ERROR: cluster did not become ready after restoring $CONF" >&2
+				cleanup_status=1
+			fi
+		fi
+
+		expected_mode="$PRIVRG_BASE_MODE"
+		if ! privrg_assert_both_running_modes "$FW0" "$FW1" "$expected_mode"; then
+			echo "ERROR: running config on both nodes does not match the restored $CONF mode" >&2
+			cleanup_status=1
+		fi
+		rm -rf -- "$PRIVRG_SNAPSHOT_DIR"
+		PRIVRG_SNAPSHOT=""
+		PRIVRG_SNAPSHOT_DIR=""
+	fi
+
+	if [[ "$run_status" -ne 0 ]]; then
+		exit "$run_status"
+	elif [[ "$cleanup_status" -ne 0 ]]; then
+		exit 1
+	fi
+}
+
+privrg_begin_full_cycle() {
+	# Keep the mode-preserving snapshot private even when CONF is world-readable.
+	PRIVRG_SNAPSHOT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/test-private-rg-conf.XXXXXX") || return 1
+	PRIVRG_SNAPSHOT="${PRIVRG_SNAPSHOT_DIR}/conf"
+	if ! privrg_snapshot_conf "$CONF" "$PRIVRG_SNAPSHOT"; then
+		rm -rf -- "$PRIVRG_SNAPSHOT_DIR"
+		PRIVRG_SNAPSHOT=""
+		PRIVRG_SNAPSHOT_DIR=""
+		return 1
+	fi
+	if grep -Eq '^[[:space:]]*no-private-rg-election[[:space:];]' "$PRIVRG_SNAPSHOT"; then
+		PRIVRG_BASE_MODE=legacy
+	else
+		PRIVRG_BASE_MODE=private
+	fi
+	trap 'privrg_finish_full_cycle "$?"' EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+}
 
 PASS=0
 FAIL=0
@@ -59,50 +160,58 @@ wait_cluster_ready() {
 # ── Check functions ──────────────────────────────────────────────────
 
 check_no_vrrp_multicast() {
-	info "Checking for VRRP multicast on data interfaces..."
-	local count
-	count=$(incus exec "$FW0" -- timeout 3 tcpdump -c 1 -i ge-0-0-1 vrrp 2>&1 | grep -c "packet" || echo "0")
-	# tcpdump reports "0 packets captured" if no VRRP seen
-	if incus exec "$FW0" -- timeout 3 tcpdump -c 1 -i ge-0-0-1 vrrp 2>&1 | grep -q "0 packets captured"; then
-		pass "No VRRP multicast on ge-0-0-1 (WAN)"
+	info "Checking for VRRP multicast on LAN and WAN RETH members..."
+	local capture
+	# A no-packet timeout has a tcpdump summary but a non-zero timeout status.
+	# Preserve the summary so a timeout is not mistaken for a capture error.
+	capture=$(incus exec "$FW0" -- timeout 3 tcpdump -c 1 -i "$WAN_CAPTURE_IFACE" vrrp 2>&1 || true)
+	if [[ "$capture" == *"0 packets captured"* ]]; then
+		pass "No VRRP multicast on $WAN_CAPTURE_IFACE (WAN RETH member)"
 	else
-		fail "VRRP multicast detected on ge-0-0-1 (WAN)"
+		fail "VRRP multicast detected or capture failed on $WAN_CAPTURE_IFACE (WAN RETH member)"
 	fi
 
-	if incus exec "$FW0" -- timeout 3 tcpdump -c 1 -i ge-0-0-0 vrrp 2>&1 | grep -q "0 packets captured"; then
-		pass "No VRRP multicast on ge-0-0-0 (LAN)"
+	capture=$(incus exec "$FW0" -- timeout 3 tcpdump -c 1 -i "$LAN_CAPTURE_IFACE" vrrp 2>&1 || true)
+	if [[ "$capture" == *"0 packets captured"* ]]; then
+		pass "No VRRP multicast on $LAN_CAPTURE_IFACE (LAN RETH member)"
 	else
-		fail "VRRP multicast detected on ge-0-0-0 (LAN)"
+		fail "VRRP multicast detected or capture failed on $LAN_CAPTURE_IFACE (LAN RETH member)"
 	fi
 }
 
 check_vrrp_active() {
-	info "Checking VRRP instances are running..."
+	info "Checking VRRP instances are running in the current xpfd invocation..."
 	local log
-	log=$(incus exec "$FW0" -- journalctl -u xpfd --no-pager -n 100 2>/dev/null)
-
-	if echo "$log" | grep -q "vrrp: instance starting"; then
-		pass "VRRP instances started on fw0"
-	else
-		fail "No VRRP instances on fw0"
+	if ! log=$(privrg_xpfd_journal "$FW0"); then
+		fail "Could not read fw0's current xpfd journal"
+		return
 	fi
 
-	if echo "$log" | grep -q "vrrp: state change.*MASTER"; then
-		pass "VRRP MASTER state reached on fw0"
+	if privrg_log_has_vrrp_start "$log"; then
+		pass "VRRP instances started on fw0 in this xpfd invocation"
 	else
-		fail "VRRP did not reach MASTER on fw0"
+		fail "No VRRP instances on fw0 in the current xpfd invocation"
+	fi
+
+	if privrg_log_has_vrrp_master "$log"; then
+		pass "VRRP MASTER state reached on fw0 in this xpfd invocation"
+	else
+		fail "VRRP did not reach MASTER on fw0 in the current xpfd invocation"
 	fi
 }
 
 check_no_vrrp_instances() {
-	info "Checking VRRP instances are NOT running (private-rg mode)..."
+	info "Checking VRRP instances are NOT running in the current xpfd invocation..."
 	local log
-	log=$(incus exec "$FW0" -- journalctl -u xpfd --no-pager -n 100 2>/dev/null)
+	if ! log=$(privrg_xpfd_journal "$FW0"); then
+		fail "Could not read fw0's current xpfd journal"
+		return
+	fi
 
-	if echo "$log" | grep -q "vrrp: instance starting"; then
+	if privrg_log_has_vrrp_start "$log"; then
 		fail "VRRP instances running in private-rg mode"
 	else
-		pass "No VRRP instances (private-rg mode)"
+		pass "No VRRP instances in the current xpfd invocation (private-rg mode)"
 	fi
 }
 
@@ -231,8 +340,9 @@ check_manual_failover() {
 enable_private_rg() {
 	info "Enabling private-rg-election (default — removing no-private-rg-election if present)..."
 	sed -i '/no-private-rg-election/d' "$CONF"
-	(cd "$PROJECT_ROOT" && make cluster-deploy) 2>&1 | tail -5
+	privrg_deploy_config
 	wait_cluster_ready
+	privrg_assert_both_running_modes "$FW0" "$FW1" private
 }
 
 disable_private_rg() {
@@ -240,8 +350,9 @@ disable_private_rg() {
 	if ! grep -q "no-private-rg-election" "$CONF"; then
 		sed -i '/heartbeat-threshold/a\        no-private-rg-election;' "$CONF"
 	fi
-	(cd "$PROJECT_ROOT" && make cluster-deploy) 2>&1 | tail -5
+	privrg_deploy_config
 	wait_cluster_ready
+	privrg_assert_both_running_modes "$FW0" "$FW1" legacy
 }
 
 # ── Test sequences ───────────────────────────────────────────────────
@@ -284,17 +395,21 @@ main() {
 			;;
 		check)
 			local log
-			log=$(incus exec "$FW0" -- journalctl -u xpfd --no-pager -n 100 2>/dev/null)
-			if echo "$log" | grep -q "vrrp: instance starting"; then
-				info "Mode: VRRP (standard)"
+			if log=$(privrg_xpfd_journal "$FW0"); then
+				if privrg_log_has_vrrp_start "$log"; then
+					info "Mode: VRRP (standard)"
+				else
+					info "Mode: private-rg-election (no VRRP)"
+				fi
 			else
-				info "Mode: private-rg-election (no VRRP)"
+				fail "Could not read fw0's current xpfd journal"
 			fi
 			check_vips_present
 			check_connectivity
 			;;
 		full)
-			# Full cycle: enable → test → disable → test
+			# Full cycle always restores the initial file and running mode.
+			privrg_begin_full_cycle
 			enable_private_rg
 			test_private_rg_enabled
 			disable_private_rg
