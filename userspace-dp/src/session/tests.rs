@@ -3657,6 +3657,68 @@ fn lookup_uses_translated_reverse_alias() {
 }
 
 #[test]
+fn fib_route_and_policy_invalidation_resolve_reverse_translated_alias_12074() {
+    let mut table = SessionTable::new();
+    table.set_policy_revalidation_phase(7, false);
+    table.set_forwarding_revalidation_gen(7, 9);
+    let reverse_wire = SessionKey {
+        addr_family: 2,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 255, 192, 41)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(10, 255, 192, 42)),
+        src_port: 5201,
+        dst_port: 42424,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let reverse_alias = SessionKey {
+        dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102)),
+        ..reverse_wire.clone()
+    };
+    let mut reverse_metadata = metadata();
+    reverse_metadata.is_reverse = true;
+    let reverse_decision = SessionDecision {
+        resolution: resolution(),
+        nat: NatDecision {
+            rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
+            ..NatDecision::default()
+        },
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    assert!(table.install_with_protocol(
+        reverse_wire.clone(),
+        reverse_decision,
+        reverse_metadata,
+        1_000_000_000,
+        PROTO_TCP,
+        0x10,
+    ));
+    table.mark_policy_revalidated(&reverse_wire, PolicyRevalidationKind::LiveEgress);
+    assert_eq!(
+        table.policy_revalidation_target(&reverse_alias),
+        PolicyRevalidationTarget::Fresh,
+    );
+
+    table.invalidate_policy_revalidation(&reverse_alias);
+    assert_eq!(
+        table.policy_revalidation_target(&reverse_alias),
+        PolicyRevalidationTarget::Stale(reverse_wire.clone()),
+        "a query alias must stale its canonical row",
+    );
+    table.set_forwarding_revalidation_gen(7, 10);
+    let mut current_route = resolution();
+    current_route.egress_ifindex = 26;
+    current_route.tx_ifindex = 26;
+    assert!(table.revalidate_forwarding_resolution(&reverse_alias, current_route, None));
+    assert_eq!(
+        table.entry_with_origin(&reverse_wire).unwrap().0.resolution.egress_ifindex,
+        26,
+        "a route refresh through a query alias must update the canonical row",
+    );
+}
+
+#[test]
 fn dnat_port_in_reverse_wire_key() {
     // Forward: client:54321 -> external:80, DNAT rewrites dst to internal:8080
     let forward = SessionKey {

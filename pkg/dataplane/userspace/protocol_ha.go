@@ -2,6 +2,8 @@ package userspace
 
 import (
 	"time"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 type HAStateUpdateRequest struct {
@@ -45,6 +47,12 @@ type SessionPolicyListRequest struct {
 	Families     WireUint8List `json:"families,omitempty"`
 	Classes      []string      `json:"classes,omitempty"`
 	Continuation string        `json:"continuation,omitempty"`
+	// ExpectedConfig is Go-local authority expectation for prepublish READs
+	// (#12072): the config the caller believes the helper has applied
+	// (daemon capture passes plan.oldCfg). Never serialized; the manager
+	// compares it against appliedSnapshot.Config under m.mu before each
+	// helper LIST page and fails closed on mismatch. Nil in legacy mode.
+	ExpectedConfig *config.Config `json:"-"`
 }
 
 type SessionPolicyTuple struct {
@@ -67,7 +75,6 @@ type SessionPolicyMatch struct {
 	CreatedSecs                      uint64              `json:"created_secs,omitempty"`
 	CreatedNS                        uint64              `json:"created_ns,omitempty"`
 	ExpectedRTFlowSessionID          uint64              `json:"expected_rt_flow_session_id,omitempty"`
-	CompanionPolicyID                uint32              `json:"companion_policy_id,omitempty"`
 	ExpectedCompanionRTFlowSessionID uint64              `json:"expected_companion_rt_flow_session_id,omitempty"`
 	// #10626: rename-rematch inputs, populated by the helper READ from the
 	// live session key/metadata/decision. All additive + omitempty: an older

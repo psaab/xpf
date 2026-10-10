@@ -147,6 +147,30 @@ type PolicyTerm struct {
 	// NextPolicy skips the remaining terms and the policy default, then resumes
 	// at the next policy in the evaluated policy chain.
 	NextPolicy bool
+	// hasNextHopOperand12070 / hasASPathPrependOperand12070 preserve action
+	// presence when an empty, whitespace-only, or keyword-valued operand would
+	// otherwise be erased before the #12070 compiled-term gate. Those inputs
+	// compile to an empty field/slice and otherwise look identical to an absent
+	// clause, leaving display-set output that strict validation itself rejects.
+	// Both child and inline parse paths set these flags; direct Config values
+	// without provenance retain their existing behavior.
+	hasNextHopOperand12070       bool `json:"-"`
+	hasASPathPrependOperand12070 bool `json:"-"`
+	// invalidNextHopExtra12070 preserves a compact/term-line `then next-hop`
+	// trailing operand long enough for strict compilation to reject it. The
+	// inline parser consumes exactly one next-hop operand; a following token
+	// outside the then-action boundary set, including quoted values, would
+	// otherwise be silently dropped or change tolerant boot/sync semantics.
+	// Compiler-only state, excluded from JSON.
+	invalidNextHopExtra12070      bool   `json:"-"`
+	invalidNextHopExtraValue12070 string `json:"-"`
+	// invalidASPathPrependExtra12070 preserves a from-match or quoted/
+	// bracketed then-action word ending a compact/term-line prepend run.
+	// Strict compilation rejects the tail; leaving it unconsumed lets tolerant
+	// boot/sync retain the match or action interpreted by the main parser.
+	// Compiler-only state, excluded from JSON.
+	invalidASPathPrependExtra12070      bool   `json:"-"`
+	invalidASPathPrependExtraValue12070 string `json:"-"`
 	// invalidNextPolicy11780 preserves malformed packed `then next <value>`
 	// tokens long enough for strict compilation to reject them. Tolerant
 	// compilation also records Action=reject so the renderer fails closed.
@@ -159,6 +183,7 @@ type RouteFilter struct {
 	Prefix    string // CIDR ("192.168.50.0/24")
 	MatchType string // "exact", "longer", "orlonger", "upto", "prefix-length-range", "through"
 	UptoLen   int    // for "upto" match type
+	UptoToken string `json:"-"` // authored `upto` operand for strict diagnostics; not serialized
 	// RangeLow / RangeHigh hold the two prefix-length bounds for the
 	// "prefix-length-range /low-/high" match type (#2525). Both are 0
 	// (unset) for every other match type; parseRouteFilterRange leaves them

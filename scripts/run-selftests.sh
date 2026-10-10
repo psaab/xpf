@@ -350,9 +350,12 @@ run_shell test/xsk-repro/selftest-probe-filter_6898.sh --selftest
 # kernel rejected it (FRA_TOS masks to IPTOS_TOS_MASK, so DSCP<<2 is refused from
 # dscp 8 up and the whole commit fails). The cells need CAP_NET_ADMIN, so under a
 # plain `go test` they SKIP — and a skipped cell reads identically to a passing
-# one. This leg runs them under `unshare -rn`. SKIPs without go/unshare or where
-# unprivileged user namespaces are unavailable.
+# one. This leg runs them under `unshare -rn`. SKIPs without go/unshare/ip or
+# where unprivileged user namespaces are unavailable.
 run_shell test/routing/selftest-rule-dscp_7796.sh
+# Eight hermetic fixtures pin the leg's post-run ip, by-name RUN/SKIP, and
+# `-json=false` guards; no Go build or netns.
+run_shell test/routing/selftest-rule-dscp-probes_7796.sh
 # #9812 (VAL-03/VAL-04): the routing real-kernel cells. The #9420 next-table
 # ingress-scope cell and the #9819 VRF-miss terminator cell are the kernel
 # halves of their fixes — both SKIP under a plain `go test` without a usable
@@ -388,6 +391,9 @@ fi
 # no network. Guards a negative cell that used to fail to a HEALTHY value:
 # "no leak" and "the probe returned nothing" both scored PASS. Needs bash.
 run_bash test/incus/fbf-steering-selftest.sh
+# #12139: the FBF steering harness end-to-end. Hermetic — drives the real
+# harness against a deterministic fake Incus surface. Needs bash.
+run_bash test/incus/fbf-steering-harness-selftest.sh
 # #6962: the new-flow ceiling harness's node selection. Hermetic — no incus, no
 # cluster. Guards a grep that matched the PEER's row in `show chassis cluster
 # status` and therefore always selected $FW0: it failed to a PLAUSIBLE VALUE

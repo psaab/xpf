@@ -42,7 +42,8 @@ fn policy_inbound_dnat_matches_translated_destination_permit() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    let mut meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -91,7 +92,8 @@ fn policy_inbound_dnat_denies_when_only_original_dst_permitted() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    let mut meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -149,7 +151,8 @@ fn policy_inbound_dnat_matches_translated_destination_port() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    let mut meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -187,7 +190,8 @@ fn policy_inbound_nptv6_matches_translated_destination_permit() {
     // External-prefix destination; NPTv6 maps it to fd35:1940:27:100::102.
     let dst: Ipv6Addr = "2602:fd41:70:100::102".parse().expect("ext dst");
     let frame = build_txn_tcp_syn_frame_v6(src, dst, 54321, 443, crate::afxdp::tests_support::TEST_WAN_MAC);
-    let meta = txn_meta_v6(12, frame.len());
+    let mut meta = txn_meta_v6(12, frame.len());
+    meta.ingress_vlan_id = 80;
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -228,7 +232,8 @@ fn policy_inbound_nptv6_denies_when_only_external_prefix_permitted() {
     let src: Ipv6Addr = "2001:559:8585:80::200".parse().expect("ext client");
     let dst: Ipv6Addr = "2602:fd41:70:100::102".parse().expect("ext dst");
     let frame = build_txn_tcp_syn_frame_v6(src, dst, 54322, 443, crate::afxdp::tests_support::TEST_WAN_MAC);
-    let meta = txn_meta_v6(12, frame.len());
+    let mut meta = txn_meta_v6(12, frame.len());
+    meta.ingress_vlan_id = 80;
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -444,7 +449,8 @@ fn static_nat_precedes_overlapping_dnat_pool_6473() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    let mut meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -538,7 +544,8 @@ fn policy_inbound_dnat_missing_neighbor_permits_on_translated_dst() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    let mut meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -588,7 +595,8 @@ fn policy_inbound_dnat_missing_neighbor_denies_when_only_original_dst_permitted(
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    let mut meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -632,7 +640,8 @@ fn policy_inbound_nptv6_missing_neighbor_permits_on_translated_dst() {
     let src: Ipv6Addr = "2001:559:8585:80::200".parse().expect("ext client");
     let dst: Ipv6Addr = "2602:fd41:70:100::102".parse().expect("ext dst");
     let frame = build_txn_tcp_syn_frame_v6(src, dst, 54331, 443, crate::afxdp::tests_support::TEST_WAN_MAC);
-    let meta = txn_meta_v6(12, frame.len());
+    let mut meta = txn_meta_v6(12, frame.len());
+    meta.ingress_vlan_id = 80;
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -676,7 +685,8 @@ fn policy_inbound_nptv6_missing_neighbor_denies_when_only_external_prefix_permit
     let src: Ipv6Addr = "2001:559:8585:80::200".parse().expect("ext client");
     let dst: Ipv6Addr = "2602:fd41:70:100::102".parse().expect("ext dst");
     let frame = build_txn_tcp_syn_frame_v6(src, dst, 54332, 443, crate::afxdp::tests_support::TEST_WAN_MAC);
-    let meta = txn_meta_v6(12, frame.len());
+    let mut meta = txn_meta_v6(12, frame.len());
+    meta.ingress_vlan_id = 80;
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -810,7 +820,8 @@ fn source_nat_matches_post_dnat_destination_port_9034() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    let mut meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -867,7 +878,8 @@ fn source_nat_does_not_match_pre_dnat_destination_port_9034() {
         TCP_FLAG_SYN,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    let mut meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -1004,6 +1016,9 @@ fn v4_source_deny_then_any_snapshot_10686() -> ConfigSnapshot {
     snapshot
 }
 
+// VID 0 on tagged-only ifindex 12 is deliberate: the #11669 mapped-v6 gate
+// must fire before the tagged-ingress VLAN guard, and stamping VID 80 here
+// would mask a #11669 revert (see docs/log/10686.md). Do not "fix" by stamping.
 fn udp_v6_ingress_frame_10686(
     src: Ipv6Addr,
     dst: Ipv6Addr,
@@ -1187,6 +1202,7 @@ fn v4_deny_and_permit_any_controls_remain_policy_driven_10686() {
             version: USERSPACE_META_VERSION,
             length: std::mem::size_of::<UserspaceDpMeta>() as u16,
             ingress_ifindex: 12,
+            ingress_vlan_id: 80,
             l3_offset: 14,
             l4_offset: 34,
             payload_offset: 42,

@@ -1273,14 +1273,19 @@ fn unresolvable_stamp_serves_any_table_local() {
     );
 }
 
-/// C10 (interface-NAT): an interface-NAT-owned target stays local under an
-/// unresolvable stamp, with its real ifindex.
+/// #12086: an interface-NAT local outcome requires a known resolving table.
+/// Even when the address has an owner row, an unresolvable session stamp must
+/// not take a table-free LocalDelivery shortcut.
 #[test]
-fn unresolvable_stamp_serves_interface_nat_local() {
+fn unresolvable_stamp_does_not_serve_interface_nat_local_12086() {
     let mut forwarding = pbr_state();
+    let address = Ipv4Addr::new(8, 8, 8, 8);
+    forwarding.interface_nat_v4.insert(address, LAN_IFINDEX);
     forwarding
-        .interface_nat_v4
-        .insert(Ipv4Addr::new(8, 8, 8, 8), LAN_IFINDEX);
+        .interface_nat_tables_v4
+        .entry(address)
+        .or_default()
+        .insert("inet.0".to_string());
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let unknown = SessionDecision {
         resolution: unusable_resolution(),
@@ -1294,8 +1299,58 @@ fn unresolvable_stamp_serves_interface_nat_local() {
         &pbr_flow(),
         unknown,
     );
-    assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
-    assert_eq!(resolved.local_ifindex, LAN_IFINDEX);
+    assert_eq!(resolved.disposition, ForwardingDisposition::TableUnavailable);
+}
+
+/// #12086 R1-F3: a session carrying the `blue` installing-table stamp must
+/// not use a default-instance interface-NAT address during re-resolution.
+/// The interface-NAT arm precedes the FIB lookup, so forcing its table
+/// argument to `None` would incorrectly return LocalDelivery here. The
+/// stamped blue FIB has no route to the default-owned address and remains
+/// NoRoute.
+#[test]
+fn stamped_reresolve_scopes_interface_nat_to_install_table_12086() {
+    let mut snapshot = pbr_snapshot();
+    snapshot.source_nat_rules = vec![crate::SourceNATRuleSnapshot {
+        name: "interface-snat".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        interface_mode: true,
+        ..Default::default()
+    }];
+    let forwarding = super::super::forwarding_build::build_forwarding_state(&snapshot);
+    let target = Ipv4Addr::new(172, 16, 60, 1);
+    assert!(
+        forwarding
+            .interface_nat_tables_v4
+            .get(&target)
+            .is_some_and(|tables| tables.contains("inet.0")),
+        "fixture target must be owned by the default table",
+    );
+    assert!(
+        !forwarding
+            .interface_nat_tables_v4
+            .get(&target)
+            .is_some_and(|tables| tables.contains("blue.inet.0")),
+        "fixture target must not be owned by blue",
+    );
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut flow = pbr_flow();
+    flow.dst_ip = IpAddr::V4(target);
+    flow.forward_key.dst_ip = IpAddr::V4(target);
+    let resolved = lookup_forwarding_resolution_for_session(
+        &forwarding,
+        &dynamic_neighbors,
+        &flow,
+        stamped_decision(unusable_resolution()),
+    );
+    assert_eq!(
+        resolved.disposition,
+        ForwardingDisposition::NoRoute,
+        "the session re-resolve must honor its blue stamp instead of \
+         claiming a default-table interface-NAT address",
+    );
 }
 
 /// C7/C10b: a tunnel-marked stored resolution takes the tunnel arm with no
@@ -2902,7 +2957,7 @@ fn colliding_ordinary_close_without_identity_drops10512() {
 /// contend on the shared-session mutex. Run with:
 /// `cargo test --release close_check_and_publish_churn_11299 -- --ignored --nocapture`
 #[test]
-#[ignore = "manual loaded shared-session churn measurement"]
+#[ignore = "MEASUREMENT: manual loaded shared-session churn (#11299)"]
 fn close_check_and_publish_churn_11299() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;

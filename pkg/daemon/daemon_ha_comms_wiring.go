@@ -516,6 +516,7 @@ func (d *Daemon) wireClusterPeerFailoverHooks(ss *cluster.SessionSync) {
 	// not apply the newest config this node sent.
 	d.cluster.SetPeerConfigStaleFunc(d.peerConfigStale)
 	d.cluster.SetPeerTimeoutGuard(d.shouldSuppressPeerHeartbeatTimeout)
+	d.cluster.SetPeerHeartbeatRecoveredFunc(d.notePeerHeartbeatRecovered)
 	// #11682: an idle ACK-only peer may have up to one read-deadline cadence
 	// between inbound sync frames. Use the sync layer's full silence window,
 	// not the shorter heartbeat-timeout suppression window, before deciding a

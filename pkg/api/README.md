@@ -1963,6 +1963,11 @@ the drop fails loudly instead of going quietly vacuous.
   `omitempty`, the inet.0 rows still lead in their original order, so a legacy
   consumer reading the pre-#5439 inet.0 subset positionally is unaffected.
   Pinned by `routes_ipv6_vrf_5439_test.go`.
+  In addition to matching source coverage, each excluded row now carries the
+  shared `config.StaticRouteExclusions` reason as `not_installed_reason`;
+  installable rows omit the additive field, preserving their prior JSON shape.
+  The map is computed once for the whole config because the next-table-window
+  verdict depends on order. Pinned by `routes_notinstalled_red_12095_test.go`.
 - Long full-table read handlers must ABORT when the client disconnects
   (#5232/#5233). The REST server cancels `r.Context()` on disconnect, so a
   handler that walks a large structure has to sample `r.Context().Err()`

@@ -1491,7 +1491,9 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 						//     clause tokens, so read only its first key.
 						switch rf.MatchType {
 						case "upto":
-							if argTok := routeFilterTrailingToken(fc); argTok != "" {
+							if argTok := routeFilterTrailingToken(fc); argTok != "" &&
+								!policyTermInlineKeywords[argTok] {
+								rf.UptoToken = argTok
 								if n, ok := parseRouteFilterLen(argTok); ok {
 									rf.UptoLen = n
 								}
@@ -1555,6 +1557,7 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 				case "next":
 					recordPolicyNextAction11780(term, nodeVal(ac))
 				case "next-hop":
+					term.hasNextHopOperand12070 = true
 					term.NextHop = nodeVal(ac)
 				case "load-balance":
 					term.LoadBalance = nodeVal(ac)
@@ -1588,6 +1591,7 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 					// `then as-path-prepend` is multi-value. Read every entry
 					// through the firewallMatchValues SSOT, then split quoted
 					// multi-ASN values before storing the operands (#2892/#12070).
+					term.hasASPathPrependOperand12070 = true
 					term.ASPathPrepend = appendPolicyASPathPrependOperands(term.ASPathPrepend, firewallMatchValues(ac))
 				case "origin":
 					term.Origin = nodeVal(ac)
@@ -1688,6 +1692,26 @@ var policyTermInlineKeywords = map[string]bool{
 	"family": true, "tag": true, "area": true,
 }
 
+// policyTermThenInlineKeywords identifies action/clause boundaries while
+// reading next-hop tails and AS-path-prepend value runs. The broader
+// policyTermInlineKeywords set also contains `from`-side keywords like `tag`
+// and `area`; treating those as boundaries would erase invalid operands before
+// validatePolicyThenOperandsStrict could reject them.
+var policyTermThenInlineKeywords = map[string]bool{
+	"from": true, "then": true, "next-hop": true, "load-balance": true,
+	"local-preference": true, "metric": true, "metric-type": true,
+	"community": true, "as-path-prepend": true, "origin": true,
+	"accept": true, "reject": true, "next": true,
+}
+
+// From-match words are parsed by the main inline switch even when encountered
+// after a then action. An AS-path-prepend run must stop before them without
+// consuming them so tolerant boot/sync retains the match and strict validation
+// can reject the invalid prepend tail (#12070 R7-F1).
+var policyTermFromMatchInlineKeywords12070 = map[string]bool{
+	"protocol": true, "prefix-list": true, "route-filter": true, "as-path": true,
+}
+
 var policyTermFromUnsupportedThenKeywords11779 = map[string]bool{
 	"accept": true, "as-path-prepend": true, "load-balance": true,
 	"local-preference": true, "metric": true, "metric-type": true,
@@ -1735,10 +1759,25 @@ func appendInlineBracketedMatchValues11779(
 	return dst, i, ""
 }
 
+// isPolicyTermCommunityActionOperand identifies a `then community` value that
+// must not be mistaken for a bare route-filter marker.
+func isPolicyTermCommunityActionOperand(keys []string, i int) bool {
+	if i < 2 || keys[i-2] != "community" {
+		return false
+	}
+	switch keys[i-1] {
+	case "add", "delete", "set":
+		return true
+	default:
+		return false
+	}
+}
+
 // parsePolicyTermInlineKeys handles flat set syntax where remaining keys
 // after the term name are inline key-value pairs like:
 // "from", "protocol", "direct" or "from", "route-filter", "10.0.0.0/8", "exact"
-// or "then", "accept"
+// or "then", "accept" or "then", "next-hop", "192.0.2.1" or "then",
+// "as-path-prepend", "65001"
 func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quoted []bool, bracketedClosed bool) {
 	inFrom := false
 	for i := 0; i < len(keys); i++ {
@@ -1762,6 +1801,11 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 						value = keys[i]
 					}
 					recordPolicyNextAction11780(term, value)
+					continue
+				}
+				if keys[i+1] == "next-hop" || keys[i+1] == "as-path-prepend" {
+					// Let the normal operand case consume this key and its
+					// value. Advancing here would make the loop skip the key.
 					continue
 				}
 				i++
@@ -1830,9 +1874,12 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				if i+3 < len(keys) {
 					switch rf.MatchType {
 					case "upto":
-						if n, ok := parseRouteFilterLen(keys[i+3]); ok {
-							rf.UptoLen = n
-							consumed = 3
+						if argTok := keys[i+3]; !policyTermInlineKeywords[argTok] {
+							rf.UptoToken = argTok
+							if n, ok := parseRouteFilterLen(argTok); ok {
+								rf.UptoLen = n
+								consumed = 3
+							}
 						}
 					case "prefix-length-range":
 						if lo, hi, ok := parseRouteFilterRange(keys[i+3]); ok {
@@ -1847,11 +1894,34 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				}
 				term.RouteFilters = append(term.RouteFilters, rf)
 				i += consumed
+			} else if inFrom || !isPolicyTermCommunityActionOperand(keys, i) {
+				// A term-line tail is outside the schema walk. Preserve the
+				// bare marker so the strict #11779 gate rejects it rather than
+				// compiling a match-all permit. A marker immediately following
+				// `then community add|delete|set` is its action value, not a
+				// `from` marker; all other bare markers are retained regardless
+				// of their position in the term line (#12067 review: NEW-2).
+				term.UnknownFrom = append(term.UnknownFrom, "route-filter")
 			}
 		case "next-hop":
+			term.hasNextHopOperand12070 = true
 			if i+1 < len(keys) {
 				i++
 				term.NextHop = keys[i]
+				// The schema rejects non-keyword tokens beyond the typed
+				// next-hop operand. Compact/term-line Keys bypass that walk,
+				// so retain the first tail operand for the compiled strict
+				// gate rather than silently accepting a display-set command
+				// that cannot be reloaded. Quoted tails are candidates too:
+				// display-set strips the quotes and emits the R5-F1 shape.
+				// Scan without consuming: a then-side from-word such as
+				// `protocol` must still reach the main-loop from-match cases
+				// so tolerant boot/sync keeps master's interpretation
+				// (#12070 R6-F1).
+				if next := i + 1; next < len(keys) && !policyTermThenInlineKeywords[keys[next]] {
+					term.invalidNextHopExtra12070 = true
+					term.invalidNextHopExtraValue12070 = keys[next]
+				}
 			}
 		case "load-balance":
 			if i+1 < len(keys) {
@@ -1924,10 +1994,33 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				markMalformedPolicyFromList11779(term, "as-path", badClause)
 			}
 		case "as-path-prepend":
-			// Consume consecutive values until the next clause keyword,
-			// splitting quoted multi-ASN values before storing each operand.
-			for i+1 < len(keys) && !policyTermInlineKeywords[keys[i+1]] {
-				i++
+			term.hasASPathPrependOperand12070 = true
+			// Other policy keywords such as `tag` and `area` remain prepend
+			// operands so the strict gate rejects them rather than erasing the
+			// clause. From-match words are different: the main switch interprets
+			// them as matches even after `then`. Stop before them without
+			// consuming, retain compiler-only invalid-tail evidence for strict
+			// validation, and preserve the match on tolerant paths (R7-F1).
+			// Quoted/bracketed then-action words likewise remain visible to the
+			// main switch as actions instead of being absorbed (R7-N1/M35).
+			for i+1 < len(keys) {
+				next := i + 1
+				if policyTermFromMatchInlineKeywords12070[keys[next]] {
+					term.invalidASPathPrependExtra12070 = true
+					term.invalidASPathPrependExtraValue12070 = keys[next]
+					break
+				}
+				quotedValue := next < len(quoted) && quoted[next]
+				bracketedValue := next < len(bracketed) && bracketed[next]
+				if (quotedValue || bracketedValue) && policyTermThenInlineKeywords[keys[next]] {
+					term.invalidASPathPrependExtra12070 = true
+					term.invalidASPathPrependExtraValue12070 = keys[next]
+					break
+				}
+				if !quotedValue && !bracketedValue && policyTermThenInlineKeywords[keys[next]] {
+					break
+				}
+				i = next
 				term.ASPathPrepend = appendPolicyASPathPrependOperand(term.ASPathPrepend, keys[i])
 			}
 		case "origin":

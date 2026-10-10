@@ -1384,8 +1384,10 @@ func TestLegacyTunnelKernelPopulatedFieldsIgnored(t *testing.T) {
 
 func TestLegacyKeepaliveRunnerRetainedAcrossApplies(t *testing.T) {
 	ops := newFakeLinkOps()
+	seedVRF(ops, "ka12083", 12083)
 	tm, _ := newReconcileManager(ops)
 	tc := legacyTC("gr-0-0-0", "192.0.2.1", "192.0.2.2")
+	tc.RoutingInstance = "ka12083"
 	tc.Keepalive = 60
 	tc.KeepaliveRetry = 0 // normalizes to 3 — must not restart per apply
 
@@ -1395,6 +1397,9 @@ func TestLegacyKeepaliveRunnerRetainedAcrossApplies(t *testing.T) {
 	runner1 := tm.keepalives["gr-0-0-0"]
 	if runner1 == nil {
 		t.Fatal("keepalive not started")
+	}
+	if runner1.transportInstance != "" {
+		t.Fatalf("legacy runner transport instance = %q, want global FIB", runner1.transportInstance)
 	}
 	defer tm.stopAll()
 
@@ -1407,6 +1412,7 @@ func TestLegacyKeepaliveRunnerRetainedAcrossApplies(t *testing.T) {
 
 	// Changed interval ⇒ restart.
 	tc2 := legacyTC("gr-0-0-0", "192.0.2.1", "192.0.2.2")
+	tc2.RoutingInstance = "ka12083"
 	tc2.Keepalive = 30
 	if err := tm.Apply([]*config.TunnelConfig{tc2}); err != nil {
 		t.Fatalf("Apply 3: %v", err)
@@ -1417,6 +1423,7 @@ func TestLegacyKeepaliveRunnerRetainedAcrossApplies(t *testing.T) {
 
 	// Keepalive removed ⇒ stopped and map entry deleted (SMR2-2).
 	tc3 := legacyTC("gr-0-0-0", "192.0.2.1", "192.0.2.2")
+	tc3.RoutingInstance = "ka12083"
 	if err := tm.Apply([]*config.TunnelConfig{tc3}); err != nil {
 		t.Fatalf("Apply 4: %v", err)
 	}

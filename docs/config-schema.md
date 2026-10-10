@@ -7025,6 +7025,17 @@ tag, asserted only on leaves audited to take a fixed value and NO body
 `hostname`). This is the "design pass on the value-arity contract" the #3332
 body called for; new scalar leaves opt in as they are audited.
 
+**Single-child interface filter blocks (#10293, #12093).** Four interface
+filter bindings opt into `blockValue` (the #6774 opt-in, shared with scalar
+leaves via `singleBlockValue()`): `filter { input { f1; } }` and its `output` /
+`inet6` twins are accepted as one scalar value because the compiler deliberately
+honours the sole child as the filter name (#10293), and strict commit must accept
+what compiles. The exception requires exactly one non-empty child token, no
+grandchildren, and no trailing keys; multi-value and arbitrary sub-statement
+blocks remain rejected by the scalar arity gate. Unlike `default-policy
+{ deny-all; }`, this spelling is not verified as Junos-emitted, so the opt-in
+stays scoped to these four bindings.
+
 **#4415 L12 → #4626 M03 — scoped global-policy `from-zone`/`to-zone` (a zone
 SET).** A Junos global policy may carry an optional `match from-zone` /
 `match to-zone` to scope it to a set of zones (#3148). The typed model behind
@@ -8664,6 +8675,36 @@ and loopback addresses, IPv4 0/8, multicast, and IPv6 link-local, plus
 `peer-address` and `self`. IPv4 link-local addresses remain accepted. Junos
 `discard`, `reject`, and `next-table` have no supported FRR route-map lowering.
 The shared predicate is used by the schema gate and render-side omission belt.
+
+### Route-filter tails are checked at strict commit (#12067)
+
+`from route-filter <prefix> <match-type>` may carry one match-type-specific
+operand (`upto /N`, `prefix-length-range /low-/high`, or `through <prefix>`).
+The strict commit/commit-check path rejects unconsumed tails, missing or
+malformed `upto` lengths, and the unsupported `through` / invalid range cases
+instead of letting the compiler or FRR renderer discard or widen the authored
+constraint. This includes term-line forms whose `Keys` tail is not visited by
+the schema walk: a bare `from route-filter` is retained as an `UnknownFrom`
+marker, and a compiled `upto` with no parsed length is rejected before commit.
+Packed `from` runs are segmented with the compiler's schema-arity rules, so a
+prefix-list, community, or as-path named `route-filter` remains a value
+reference rather than being mistaken for another filter head.
+
+`upto /24` remains valid and renders as FRR `le 24`. On tolerant load and
+peer-sync, the #11779 `UnknownFrom` quarantine forces affected term-line forms
+such as bare `from route-filter`, `from prefix-list route-filter`, and
+`from route-filter <prefix> exact route-filter` to `reject`. The first two
+previously rendered permit-all; the last rendered a permissive matched permit.
+They now deny on boot or sync. This is fail-closed, but a rolling HA upgrade
+can temporarily leave peers with different policy behavior. On tolerant load
+and peer-sync, present but invalid or out-of-range `upto` operands in
+term-line forms are retained as unknown `from` tokens and force `reject`.
+An absent term-line operand, and legacy braced/compact zero-length `upto`
+entries, remain warning-only and retain the historical `le maxLen` renderer
+fallback. Coverage is in
+`pkg/config/route_filter_tail_12067_test.go`,
+`pkg/configstore/fused_statement_8437_test.go`, and
+`pkg/configstore/route_filter_r2_12067_test.go`.
 
 ### The as-path REGEX is the whole token tail, and it is validated (#6686)
 

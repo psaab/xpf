@@ -90,19 +90,16 @@ func XFRMIfNameAndID(bindIface string) (string, uint32) {
 // `st0.0` in both cases. The name therefore cannot be derived from the ref at
 // all — see SecureTunnelUnitNetdev, which reads it back from the config.
 //
-// It is NOT true that every resolver calls it. Two live sites in
-// pkg/dataplane/compiler_iface.go still derive the netdev from the ref, and
-// both are reached on the userspace path (loader.go CompileConfig →
-// compiler.go compileZones):
-//
-//	:73   resolveInterfaceRef          physName = config.LinuxIfName(ref)
-//	:805  buildInterfaceNetworkdModels XFRMIfNameAndID("<ifName>.<unit>")
-//
-// That file calls SecureTunnelUnitNetdev zero times. The migration is 3 of 5
-// resolvers, tracked as #6728-#6731, and userspace-dp/src/server/README.md
-// scopes it correctly — this comment is the one that overstated it. Do not
-// restore the absolute here without re-counting the call sites; an unqualified
-// "every" in a doc is what a later reader will rely on instead of grepping.
+// Every resolver in the Callers list below calls it, including the two
+// pkg/dataplane/compiler_iface.go sites that used to derive the netdev
+// from the ref (resolveInterfaceRef, buildInterfaceNetworkdModels; since
+// 3f997a3da/a04a9bc09) and the RI-member resolvers (#12087). It is NOT
+// every unit→netdev derivation in the tree:
+// inferIPv6StaticNextHopInterfaces
+// (pkg/daemon/daemon_run_routehelpers.go) still collapses st<N>.0
+// through LogicalUnitDeviceKey (#12514). Do not widen this to "every"
+// without re-counting; an unqualified "every" in a doc is what a later
+// reader will rely on instead of grepping.
 //
 // Callers of the PREDICATE, as of #6691 round 6: SecureTunnelUnitNetdev and
 // ResolveKernelIfName's verbatim fallback — both LEXICAL questions ("is this
@@ -145,15 +142,21 @@ func IsSecureTunnelIfName(base string) bool {
 // signal for the caller to fall through to its ordinary resolution. It never
 // returns ok=true with an empty name.
 //
-// Callers: ResolveKernelIfName (types.go), snapshotLinuxName
-// (pkg/dataplane/userspace/interfaces.go) and junosHostLinuxName
-// (junos_host_deny.go).
+// Callers: ResolveKernelIfName (types.go), routingInstanceMemberLinuxName and
+// memberUnitLinuxName (routing_instance_member_devices.go), snapshotLinuxName
+// (pkg/dataplane/userspace/interfaces.go), junosHostLinuxName
+// (junos_host_deny.go), snapshotUnitDevice
+// (contested_trunk_zone_advisory_7509.go), resolveInterfaceRef and
+// buildInterfaceNetworkdModels (pkg/dataplane/compiler_iface.go), and
+// DeclaredNetdevsForConfig (pkg/frr/config_render.go, passed as a method
+// value to addSecureTunnelNetdevs).
 //
-// #6691: junosHostLinuxName is why this exists as a function rather than three
-// copies. It resolves the iifname scope for the `to-zone junos-host ... deny`
-// nft rules, and it did NOT have the rule. Before #5619 that was harmless —
-// both sides collapsed `st0.0` to `st0` and agreed on a wrong name. Adding the
-// rule to the snapshot alone made them disagree on a RIGHT one: the snapshot
+// #6691: junosHostLinuxName is why this exists as one shared function rather
+// than hand-copied name resolution. It resolves the iifname scope for the
+// `to-zone junos-host ... deny` nft rules, and it did NOT have the rule.
+// Before #5619 that was harmless — both sides collapsed `st0.0` to `st0`
+// and agreed on a wrong name. Adding the rule to the snapshot alone made them
+// disagree on a RIGHT one: the snapshot
 // said `st0.0` (the device the xfrmi reconciler actually creates) while the nft
 // renderer still emitted `iifname st0`, so with `bind-interface st0.0` a
 // junos-host deny was scoped to a netdev that does not exist and the decrypted

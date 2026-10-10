@@ -1423,8 +1423,9 @@ func validateStaticNextHopFamilyStrict(cfg *Config) error {
 	return nil
 }
 
-// validateRouteFilterMatchTypesStrict gates the two route-filter match-types
-// that the FRR prefix-list backend cannot render losslessly (#2525):
+// validateRouteFilterMatchTypesStrict gates route-filter match-types and
+// operands that the FRR prefix-list backend cannot render losslessly (#2525,
+// #12067):
 //
 //   - "through <prefix2>" has NO FRR equivalent. Junos "through" matches the
 //     base prefix, prefix2, and only the prefixes on the direct radix-tree
@@ -1437,11 +1438,14 @@ func validateStaticNextHopFamilyStrict(cfg *Config) error {
 //     family-range, or below-base range so the operator fixes it instead of
 //     getting the pre-#2525 silent open-ended "le maxLen" fall-through.
 //
-// Strict on commit / commit-check (hard reject so the unsupported / malformed
-// match-type is operator-visible); the compiler downgrades this to a warning on
-// the tolerant load / peer-sync path (#1960) so an already-persisted or
-// peer-synced config still boots — the renderer then skips the offending entry
-// (match-nothing, fail-closed). Runs on the fully-compiled *Config.
+//   - "upto" requires a parsed length. A missing or malformed value leaves
+//     UptoLen at zero, which the renderer treats as the open-ended "le maxLen"
+//     fallback; reject it at strict commit rather than widening the authored
+//     prefix constraint.
+//
+// Strict on commit / commit-check. The compiler downgrades this to a warning on
+// the tolerant load / peer-sync path (#1960), whose existing rendering behavior
+// remains unchanged. Runs on the fully-compiled *Config.
 func validateRouteFilterMatchTypesStrict(cfg *Config) error {
 	if cfg == nil || cfg.PolicyOptions.PolicyStatements == nil {
 		return nil
@@ -1480,6 +1484,29 @@ func validateRouteFilterMatchTypesStrict(cfg *Config) error {
 						return fmt.Errorf(
 							"policy-statement %q term %q route-filter %q prefix-length-range: %v",
 							name, term.Name, rf.Prefix, err)
+					}
+				case "upto":
+					// #12067: a missing or malformed `upto` length parses to
+					// UptoLen 0 and the renderer degrades to the open-ended
+					// `le maxLen` — an orlonger-style fail-open widening of
+					// the authored constraint. The schema gate rejects this
+					// for flat/hierarchical/compact spellings, but the
+					// term-line spelling (`term T from route-filter ...;`)
+					// packs its tail onto the term node where the schema
+					// walk never looks. Gate the compiled field so every
+					// spelling is covered. UptoLen 0 is unambiguous here:
+					// parseRouteFilterLen rejects /0 on purpose (#2102), so
+					// 0 always means "no parseable length", never an
+					// explicit length.
+					if rf.UptoLen == 0 {
+						if rf.UptoToken != "" {
+							return fmt.Errorf(
+								"policy-statement %q term %q route-filter %q `upto` has invalid or out-of-range prefix length %q",
+								name, term.Name, rf.Prefix, rf.UptoToken)
+						}
+						return fmt.Errorf(
+							"policy-statement %q term %q route-filter %q `upto` requires a prefix length such as /24",
+							name, term.Name, rf.Prefix)
 					}
 				}
 			}
@@ -1909,6 +1936,79 @@ func validateGenerateRoutePolicyStrict(cfg *Config) error {
 				"forwarding plane); remove the policy for the established "+
 				"unconditional-blackhole meaning",
 			gr.Prefix, gr.Policy)
+	}
+	return nil
+}
+
+// validatePolicyThenOperandsStrict hard-rejects compiled policy terms whose
+// `then next-hop` or `then as-path-prepend` operands are outside the
+// FRR-renderable subset (#12070).
+//
+// Schema validation expands child-based action chains, but compact
+// `then accept ...;` and term-line `term t then accept ...;` spellings pack
+// operands onto a Keys tail the schema walker ignores. The compiler's
+// parsePolicyTermInlineKeys reads those tails into the same PolicyTerm fields
+// as the expanded forms. Empty next-hop and prepend clauses, plus whitespace-
+// only or keyword-valued prepend operands, can otherwise disappear before this
+// gate; compiler-only presence flags preserve those cases for rejection.
+// Checking every compiled term validates all spellings after parsing while
+// schema validation continues to cover child-based operands. It reuses the
+// exact predicates and errors name the policy, term, leaf, and value.
+//
+// Strict on commit / commit-check; the call site downgrades to a warning on
+// the tolerant load / peer-sync path (opts.lenientPolicyThenOperands, #1960)
+// so an existing config still boots. The FRR render belt omits invalid
+// next-hop/prepend clauses on that path. Runs on the fully-compiled *Config.
+// Mirrors validateRouteFilterMatchTypesStrict.
+func validatePolicyThenOperandsStrict(cfg *Config) error {
+	if cfg == nil || cfg.PolicyOptions.PolicyStatements == nil {
+		return nil
+	}
+	// Deterministic first-error: iterate policy-statements by sorted name.
+	names := make([]string, 0, len(cfg.PolicyOptions.PolicyStatements))
+	for name := range cfg.PolicyOptions.PolicyStatements {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		ps := cfg.PolicyOptions.PolicyStatements[name]
+		if ps == nil {
+			continue
+		}
+		for _, term := range ps.Terms {
+			if term == nil {
+				continue
+			}
+			if (term.NextHop != "" && !ValidPolicyThenNextHop(term.NextHop)) ||
+				(term.hasNextHopOperand12070 && term.NextHop == "") {
+				return fmt.Errorf(
+					"policy-options policy-statement %q term %q then next-hop: invalid value %q: unsupported next-hop %q: %s",
+					name, term.Name, term.NextHop, term.NextHop, policyThenNextHopUnsupportedReason(term.NextHop))
+			}
+			if term.invalidNextHopExtra12070 {
+				return fmt.Errorf(
+					"policy-options policy-statement %q term %q then next-hop: unknown modifier %q",
+					name, term.Name, term.invalidNextHopExtraValue12070)
+			}
+			prependOperands := SplitPolicyASPathPrependOperands(term.ASPathPrepend)
+			for _, asn := range prependOperands {
+				if !ValidPolicyASPathPrependASN(asn) {
+					return fmt.Errorf(
+						"policy-options policy-statement %q term %q then as-path-prepend: invalid value %q: AS path prepend value %q is not an ASN in 1..4294967295 (canonical decimal digits only)",
+						name, term.Name, asn, asn)
+				}
+			}
+			if term.invalidASPathPrependExtra12070 {
+				return fmt.Errorf(
+					"policy-options policy-statement %q term %q then as-path-prepend: unknown modifier %q",
+					name, term.Name, term.invalidASPathPrependExtraValue12070)
+			}
+			if term.hasASPathPrependOperand12070 && len(prependOperands) == 0 {
+				return fmt.Errorf(
+					"policy-options policy-statement %q term %q then as-path-prepend: invalid value %q: AS path prepend value %q contains no ASN operands",
+					name, term.Name, "", "")
+			}
+		}
 	}
 	return nil
 }

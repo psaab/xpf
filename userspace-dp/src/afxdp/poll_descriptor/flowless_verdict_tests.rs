@@ -512,6 +512,70 @@ mod flowless_local_delivery_tests {
             "override-table-first (the #3600 Note 2 bug) would not deliver",
         );
     }
+    /// #12086 (residual of #3769): the interface-NAT local arm must honor the
+    /// route table selected for this packet. A WAN address owned by `red`
+    /// delivers through `red.inet.0`, but a packet steered to `inet.0` must
+    /// continue to that table's FIB rather than inherit the global map's
+    /// LocalDelivery result. Revert the table gate → the second assertion is
+    /// RED because `flowless_local_resolution` takes the ungated arm.
+    #[test]
+    fn interface_nat_local_delivery_is_scoped_to_resolving_table_12086() {
+        let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8));
+        let mut fw = ForwardingState::default();
+        fw.interface_nat_v4
+            .insert(Ipv4Addr::new(172, 16, 80, 8), 12);
+        fw.interface_nat_tables_v4
+            .entry(Ipv4Addr::new(172, 16, 80, 8))
+            .or_default()
+            .insert("red.inet.0".to_string());
+        let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+        let ha_state: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
+        let mut flow = flowless_flow(PROTO_TCP);
+        flow.dst_ip = dst;
+        flow.forward_key.dst_ip = dst;
+        let meta = flowless_meta(PROTO_TCP);
+
+        // The owner table is the control cell: SNAT exclusion still admits
+        // LocalDelivery for the interface-NAT address in its own instance.
+        let owner = flowless_base_resolution(
+            &fw,
+            &dynamic_neighbors,
+            &ha_state,
+            0,
+            &flow,
+            meta,
+            None,
+            Default::default(),
+            None,
+            None,
+            Some("red.inet.0"),
+        )
+        .expect("owner-table destination resolves");
+        assert_eq!(owner.resolution.disposition, ForwardingDisposition::LocalDelivery);
+        assert_eq!(owner.resolution.local_ifindex, 12);
+
+        // A packet resolving in inet.0 must fall through to inet.0's FIB.
+        let cross = flowless_base_resolution(
+            &fw,
+            &dynamic_neighbors,
+            &ha_state,
+            0,
+            &flow,
+            meta,
+            None,
+            Default::default(),
+            None,
+            None,
+            Some("inet.0"),
+        )
+        .expect("other-table lookup resolves terminally");
+        assert_eq!(
+            cross.resolution.disposition,
+            ForwardingDisposition::NoRoute,
+            "inet.0 must not LocalDeliver an interface-NAT address owned by red (#12086)",
+        );
+    }
+
     /// #10677 helper-side failure witness: a shim tail stamped with the
     /// #7494 no-L4 protocol reaches interface-NAT LocalDelivery if diverted
     /// here, but cannot pass the zone's real GRE host-inbound rule. This is
@@ -522,6 +586,10 @@ mod flowless_local_delivery_tests {
         let dst = Ipv4Addr::new(10, 0, 99, 1);
         let mut fw = fw_with_host_inbound(ZONE, &["gre"], &[]);
         fw.interface_nat_v4.insert(dst, INGRESS_IF);
+        fw.interface_nat_tables_v4
+            .entry(dst)
+            .or_default()
+            .insert("inet.0".to_string());
         let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
         let ha_state: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
 

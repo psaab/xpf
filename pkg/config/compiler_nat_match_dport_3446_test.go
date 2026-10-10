@@ -24,6 +24,7 @@ func dnatTree(t *testing.T, dportCmd string) *ConfigTree {
 	t.Helper()
 	tree := &ConfigTree{}
 	cmds := []string{
+		"set security zones security-zone untrust",
 		"set security nat destination pool p1 address 192.168.1.10",
 		"set security nat destination rule-set RS from zone untrust",
 		"set security nat destination rule-set RS rule R1 match destination-address 203.0.113.10/32",

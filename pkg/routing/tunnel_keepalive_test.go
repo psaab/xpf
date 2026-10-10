@@ -20,9 +20,10 @@ type fakeProber struct {
 	results []probeOutcome
 	idx     int
 	// lastSource records the most recent source bind argument.
-	lastSource string
-	sources    []string
-	calls      int
+	lastInstance string
+	lastSource   string
+	sources      []string
+	calls        int
 }
 
 type probeOutcome struct {
@@ -31,10 +32,11 @@ type probeOutcome struct {
 	reason string
 }
 
-func (p *fakeProber) Probe(source, dst string, seq int, nonce []byte, deadline time.Duration) (ProbeResult, UnsupportedKind, string) {
+func (p *fakeProber) Probe(transportInstance, source, dst string, seq int, nonce []byte, deadline time.Duration) (ProbeResult, UnsupportedKind, string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls++
+	p.lastInstance = transportInstance
 	p.lastSource = source
 	p.sources = append(p.sources, source)
 	if len(p.results) == 0 {
@@ -425,31 +427,40 @@ func TestKeepaliveStatusNotBlockedByNetlink(t *testing.T) {
 	close(ops.blockDown)
 }
 
-// --- §9 source bind (§5c): prober receives tc.Source; matches() on source change ---
+// --- §9 source and transport scope: prober receives tc.Source and the
+// transport instance; matches() restarts when either identity changes. ---
 func TestKeepaliveSourceBindAndMatches(t *testing.T) {
 	ops := newKaOps()
 	tm := &tunnelManager{ops: ops}
 	state, gen := newKAState(true, 3, 1)
+	state.transportInstance = "ka12083"
 	prober := &fakeProber{results: []probeOutcome{{result: ProbeAlive, kind: UnsupportedNone}}}
 	tm.keepaliveTick("gr0", state, prober, gen, 0)
 	if prober.lastSource != state.SourceAddr {
 		t.Fatalf("prober bind source = %q, want %q", prober.lastSource, state.SourceAddr)
 	}
-
-	// matches(): a source-only change must restart the runner.
-	r := &keepaliveRunner{
-		remote:     "203.0.113.1",
-		source:     "198.51.100.1",
-		interval:   5,
-		maxRetries: 3,
+	if prober.lastInstance != state.transportInstance {
+		t.Fatalf("prober transport instance = %q, want %q", prober.lastInstance, state.transportInstance)
 	}
-	same := &config.TunnelConfig{Destination: "203.0.113.1", Source: "198.51.100.1", Keepalive: 5, KeepaliveRetry: 3}
+
+	r := &keepaliveRunner{
+		remote:            "203.0.113.1",
+		source:            "198.51.100.1",
+		transportInstance: "ka12083",
+		interval:          5,
+		maxRetries:        3,
+	}
+	same := &config.TunnelConfig{Destination: "203.0.113.1", Source: "198.51.100.1", RoutingInstance: "ka12083", AnchorOnly: true, Keepalive: 5, KeepaliveRetry: 3}
 	if !r.matches(same) {
 		t.Fatal("matches must be true when identity unchanged")
 	}
-	srcChanged := &config.TunnelConfig{Destination: "203.0.113.1", Source: "192.0.2.9", Keepalive: 5, KeepaliveRetry: 3}
+	srcChanged := &config.TunnelConfig{Destination: "203.0.113.1", Source: "192.0.2.9", RoutingInstance: "ka12083", AnchorOnly: true, Keepalive: 5, KeepaliveRetry: 3}
 	if r.matches(srcChanged) {
 		t.Fatal("matches must be false when only the source changed (§5c)")
+	}
+	instanceChanged := &config.TunnelConfig{Destination: "203.0.113.1", Source: "198.51.100.1", RoutingInstance: "other", AnchorOnly: true, Keepalive: 5, KeepaliveRetry: 3}
+	if r.matches(instanceChanged) {
+		t.Fatal("matches must be false when transport instance changes")
 	}
 }
 

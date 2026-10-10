@@ -112,6 +112,12 @@ usable. Two consequences the code makes explicit:
   `daemon_dp_capability_2114_test.go` binds preservation and
   unreachability in separate bodies; `daemon_dp_probe_canary_test.go` is
   the fence against a new probe asserting on the raw `dp` field.
+- **Full session clear is serialized with config applies.** It acquires
+  `applySem` before resolving the backend. Only a successful helper clear can
+  retire scan-failure debt, and only when its target remains both helper-applied
+  and store-active. Failed clears and moved authorities leave the debt intact;
+  retirement and non-retirement are logged (`ClearAllSessions` in
+  `daemon_dp_live.go`).
 - **Resolve ONCE per operation.** `GetPersistentNAT()` returns a pointer,
   and each call is its own cell load; a `check == nil` followed by a
   second call to `.Len()`/`.Clear()`/`.All()` nil-dereferences if the

@@ -183,3 +183,87 @@ func TestPolicyThenASPathPrepend_BlockChildChecksEveryOperand_12070(t *testing.T
 		t.Fatalf("SchemaValidate error = %v, want rejection naming second compiler-consumed operand %q", err, "bad")
 	}
 }
+
+// TestPolicyThenOperandsLenientRegistrationAndCompile_12070 pins the #1960
+// no-brick half of the compiled #12070 gate. Persisted compact and term-line
+// operands that strict commit refuses must remain bootable on tolerant loads,
+// with the downgrade visible to operators.
+//
+// RED-on-revert: removing lenientPolicyThenOperands from lenientCompileOpts
+// makes CompileConfigLenient reject these configs instead of warning.
+func TestPolicyThenOperandsLenientRegistrationAndCompile_12070(t *testing.T) {
+	if !lenientCompileOpts().lenientPolicyThenOperands {
+		t.Fatal("lenientPolicyThenOperands is not registered in lenientCompileOpts")
+	}
+	for _, tc := range []struct {
+		name, text, bad   string
+		wantFromProtocols []string
+	}{
+		{
+			name: "compact next-hop",
+			text: `policy-options { policy-statement P { term t { then accept next-hop discard; } } }`,
+			bad:  "discard",
+		},
+		{
+			name: "compact next-hop extra operand",
+			text: `policy-options { policy-statement P { term t { then accept next-hop 192.0.2.1 192.0.2.2; } } }`,
+			bad:  "192.0.2.2",
+		},
+		{
+			name:              "compact next-hop protocol tail retains match",
+			text:              `policy-options { policy-statement P { term t { then accept next-hop 192.0.2.1 protocol bgp; } } }`,
+			bad:               "protocol",
+			wantFromProtocols: []string{"bgp"},
+		},
+		{
+			name: "term-line prepend",
+			text: `policy-options { policy-statement P { term t then accept as-path-prepend 65001 abc; } }`,
+			bad:  "abc",
+		},
+		{
+			name:              "quoted prepend protocol tail retains match",
+			text:              `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 "protocol" bgp; } } }`,
+			bad:               "protocol",
+			wantFromProtocols: []string{"bgp"},
+		},
+		{
+			name:              "bracketed prepend protocol tail retains match",
+			text:              `policy-options { policy-statement P { term t { then accept as-path-prepend [ 65001 protocol bgp ]; } } }`,
+			bad:               "protocol",
+			wantFromProtocols: []string{"bgp"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree, parseErrs := NewParser(tc.text).Parse()
+			if len(parseErrs) > 0 {
+				t.Fatalf("parse: %v", parseErrs[0])
+			}
+			if _, err := CompileConfig(tree); err == nil {
+				t.Fatal("strict CompileConfig accepted the invalid policy operand")
+			}
+			compiled, err := CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("CompileConfigLenient rejected the existing invalid operand: %v", err)
+			}
+			if tc.wantFromProtocols != nil {
+				got := compiled.PolicyOptions.PolicyStatements["P"].Terms[0].FromProtocols
+				if strings.Join(got, ",") != strings.Join(tc.wantFromProtocols, ",") {
+					t.Fatalf("CompileConfigLenient FromProtocols = %v, want %v",
+						got, tc.wantFromProtocols)
+				}
+			}
+			found := false
+			for _, warning := range compiled.Warnings {
+				if strings.Contains(warning, "policy then operand (downgraded to warning on tolerant path)") &&
+					strings.Contains(warning, tc.bad) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("CompileConfigLenient warnings %q do not include downgraded operand %q",
+					compiled.Warnings, tc.bad)
+			}
+		})
+	}
+}

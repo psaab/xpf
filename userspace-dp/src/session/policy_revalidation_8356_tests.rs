@@ -664,3 +664,56 @@ fn fenced_matches_gate_fail_closed_bits_10635() {
         "a missing key never fails ICMP closed"
     );
 }
+
+#[test]
+fn fib_zone_invalidation_preserves_fresh_non_live_fence_12074() {
+    let (mut unvalidated, unvalidated_key) = table_with_one_session(41);
+    unvalidated.mark_policy_revalidated(&unvalidated_key, PolicyRevalidationKind::Unvalidated);
+    let before = unvalidated.policy_revalidation_gate(
+        &unvalidated_key,
+        PolicyGateCurrent::LocalForwarding,
+    );
+    assert_eq!(before.target, PolicyRevalidationTarget::Fresh);
+    assert!(unvalidated.policy_revalidation_fenced(&unvalidated_key));
+    assert!(before.force_cold);
+    assert!(before.fail_closed_decline);
+    assert!(before.fail_closed_icmp);
+
+    unvalidated.invalidate_policy_revalidation(&unvalidated_key);
+    let after = unvalidated.policy_revalidation_gate(
+        &unvalidated_key,
+        PolicyGateCurrent::LocalForwarding,
+    );
+    assert_eq!(
+        after.target,
+        PolicyRevalidationTarget::Fresh,
+        "FIB route invalidation must not stale a fresh Unvalidated fence",
+    );
+    assert_eq!(
+        unvalidated.policy_revalidation_kind(&unvalidated_key),
+        PolicyRevalidationKind::Unvalidated,
+    );
+    assert!(unvalidated.policy_revalidation_fenced(&unvalidated_key));
+    assert!(after.force_cold);
+    assert!(after.fail_closed_decline);
+    assert!(after.fail_closed_icmp);
+
+    let (mut recorded, recorded_key) = table_with_one_session(41);
+    recorded.mark_policy_revalidated(&recorded_key, PolicyRevalidationKind::RecordedEgress);
+    recorded.invalidate_policy_revalidation(&recorded_key);
+    assert_eq!(
+        recorded.policy_revalidation_target(&recorded_key),
+        PolicyRevalidationTarget::Fresh,
+        "invalidation must leave RecordedEgress generations untouched",
+    );
+    assert!(recorded.policy_revalidation_fenced(&recorded_key));
+
+    let (mut live, live_key) = table_with_one_session(41);
+    live.mark_policy_revalidated(&live_key, PolicyRevalidationKind::LiveEgress);
+    live.invalidate_policy_revalidation(&live_key);
+    assert_eq!(
+        live.policy_revalidation_target(&live_key),
+        PolicyRevalidationTarget::Stale(live_key),
+        "FIB route invalidation must continue to stale LiveEgress rows",
+    );
+}

@@ -40,11 +40,12 @@ type collisionDP10512 struct {
 	modes   []string
 	reqs    []dpuserspace.SessionPolicyListRequest
 
-	complete  bool
-	readErr   error
-	delErr    error
-	incomple  bool
-	workerErr string
+	appliedConfig *config.Config
+	complete      bool
+	readErr       error
+	delErr        error
+	incomple      bool
+	workerErr     string
 }
 
 func newCollisionDP10512(fwd, rev []dpuserspace.SessionPolicyMatch) *collisionDP10512 {
@@ -58,6 +59,7 @@ func (f *collisionDP10512) ApplyConfig(context.Context, *config.Config) (*datapl
 	return &dataplane.ApplyResult{}, nil
 }
 func (f *collisionDP10512) LastApplyResult() *dataplane.ApplyResult { return &dataplane.ApplyResult{} }
+func (f *collisionDP10512) AppliedConfig() *config.Config           { return f.appliedConfig }
 func (f *collisionDP10512) Link() dataplane.LinkController          { return noopLinkController{} }
 func (f *collisionDP10512) HA() dataplane.HAController {
 	return dataplane.NewDataPlaneHAController(nil)
@@ -265,6 +267,7 @@ func TestT1DeletedV4CaptureReapsOnlyA10512(t *testing.T) {
 	webID := ids["trust->untrust/p-web"]
 	fwd, rev := collisionMatches10512(webID, ids["trust->untrust/p-ssh"])
 	fake := newCollisionDP10512(fwd, rev)
+	fake.appliedConfig = oldCfg
 	d := &Daemon{}
 	d.setDataplane(fake)
 
@@ -309,6 +312,7 @@ func TestT2DeletedV6CaptureReapsOnlyA10512(t *testing.T) {
 	ids := dpuserspace.PolicyIDsByStableKey(oldCfg)
 	fwd, rev := collisionMatches10512(ids["trust->untrust/p-web"], ids["trust->untrust/p-ssh"])
 	fake := newCollisionDP10512(fwd, rev)
+	fake.appliedConfig = oldCfg
 	d := &Daemon{}
 	d.setDataplane(fake)
 
@@ -456,6 +460,7 @@ func TestProtocolContrastEmptyIncompleteMissing10512(t *testing.T) {
 
 	// Complete + zero matches: nil, no delete attempted.
 	fake := newCollisionDP10512(nil, nil)
+	fake.appliedConfig = oldCfg
 	d := &Daemon{}
 	d.setDataplane(fake)
 	if err := driveCapture10512(d, oldCfg, newCfg); err != nil {
@@ -471,6 +476,7 @@ func TestProtocolContrastEmptyIncompleteMissing10512(t *testing.T) {
 	// through clearSessionsForPolicyChanges, so the cell drives that.
 	fwd2, rev2 := collisionMatches10512(ids["trust->untrust/p-web"], ids["trust->untrust/p-ssh"])
 	fake2 := newCollisionDP10512(fwd2, rev2)
+	fake2.appliedConfig = oldCfg
 	fake2.incomple = true
 	fake2.workerErr = "worker-3:queue-full"
 	d2 := &Daemon{}
@@ -527,6 +533,7 @@ func TestT5ModifiedActionChangeReapsOnlyChanged10512(t *testing.T) {
 			d.setDataplane(fake)
 			var err error
 			if producer == "capture" {
+				fake.appliedConfig = oldCfg
 				d.policyInvalidationPlan = &policyInvalidationPlan{oldCfg: oldCfg, newCfg: newCfg}
 				d.capturePolicyInvalidationLocked(newCfg)
 				err = d.clearSessionsForModifiedPolicies(oldCfg, newCfg)
@@ -582,6 +589,7 @@ func TestT6SchedulerFlipReapsOnlyFlipped10512(t *testing.T) {
 			d.setDataplane(fake)
 			var err error
 			if producer == "capture" {
+				fake.appliedConfig = oldCfg
 				d.policyInvalidationPlan = &policyInvalidationPlan{oldCfg: oldCfg, newCfg: newCfg}
 				d.capturePolicyInvalidationLocked(newCfg)
 				err = d.clearSessionsForModifiedPolicies(oldCfg, newCfg)
@@ -627,6 +635,7 @@ func TestT7DefaultFlipReapsOnlyDefault10512(t *testing.T) {
 			d.setDataplane(fake)
 			var err error
 			if producer == "capture" {
+				fake.appliedConfig = oldCfg
 				d.policyInvalidationPlan = &policyInvalidationPlan{oldCfg: oldCfg, newCfg: newCfg}
 				d.capturePolicyInvalidationLocked(newCfg)
 				err = d.clearSessionsForDefaultPolicyChange(oldCfg, newCfg)
@@ -661,6 +670,7 @@ func TestT8FailoverDeleteBeforePromotion10512(t *testing.T) {
 	sshID := ids["trust->untrust/p-ssh"]
 	fwdP, revP := collisionMatches10512(webID, sshID)
 	primary := newCollisionDP10512(fwdP, revP)
+	primary.appliedConfig = oldCfg
 	fwdS, revS := collisionMatches10512(webID, sshID)
 	standby := newCollisionDP10512(fwdS, revS)
 	d := &Daemon{}
@@ -695,6 +705,7 @@ func TestT8FailoverPromotionBeforeDelete10512(t *testing.T) {
 	sshID := ids["trust->untrust/p-ssh"]
 	fwdP, revP := collisionMatches10512(webID, sshID)
 	primary := newCollisionDP10512(fwdP, revP)
+	primary.appliedConfig = oldCfg
 	fwdS, revS := collisionMatches10512(webID, sshID)
 	standby := newCollisionDP10512(fwdS, revS)
 	// Capture + delete on the old primary (pre-promotion identities).
@@ -734,6 +745,7 @@ func TestCaptureOverReturnSkippedLoudly10512(t *testing.T) {
 	webID := ids["trust->untrust/p-web"]
 	fwd, rev := collisionMatches10512(webID, ids["trust->untrust/p-ssh"])
 	fake := newCollisionDP10512(fwd, rev)
+	fake.appliedConfig = oldCfg
 	fake.over = []dpuserspace.SessionPolicyMatch{{
 		AddrFamily: 4, RoutingDomain: 100007, PolicyID: 999,
 		ExpectedRTFlowSessionID: 0xE11CE,
@@ -806,6 +818,7 @@ func TestCapturePartialDeletesAndSyncsPeer10512(t *testing.T) {
 	ids := dpuserspace.PolicyIDsByStableKey(oldCfg)
 	fwd, rev := collisionMatches10512(ids["trust->untrust/p-web"], ids["trust->untrust/p-ssh"])
 	fake := newCollisionDP10512(fwd, rev)
+	fake.appliedConfig = oldCfg
 	fake.incomple = true
 	fake.workerErr = "worker-1:queue-full"
 	d.setDataplane(fake)

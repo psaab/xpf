@@ -40,6 +40,7 @@ func (m *Manager) SetDeferredPolicyRenameMetadata(
 	}
 	m.lastSnapshot.PolicyRenameAncestry = append([]PolicyRenameAncestry(nil), ancestry...)
 	m.lastSnapshot.PolicySessionRebinds = append([]PolicySessionRebind(nil), rebinds...)
+	invalidatePolicySnapshotIdentity(m.lastSnapshot)
 	if m.deferredReplayReady {
 		m.deferredReplayAncestry = append([]PolicyRenameAncestry(nil), ancestry...)
 		m.deferredReplayRebinds = append([]PolicySessionRebind(nil), rebinds...)
@@ -121,4 +122,5 @@ func stripSingleUseCommitMetadata(next *ConfigSnapshot) {
 	}
 	next.PolicyRenameAncestry = nil
 	next.PolicySessionRebinds = nil
+	invalidatePolicySnapshotIdentity(next)
 }

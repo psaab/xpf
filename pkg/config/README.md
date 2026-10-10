@@ -980,10 +980,11 @@ the reference reach the dataplane, which (`policy.rs:1021`) then classifies it a
 a device-wide global rule — re-opening the exact fail-open this gate closes.
 Because the definition gate guarantees no zone named `junos-global` can exist, an
 explicit `junos-global` reference is always the bug, never a legitimate
-named-zone use. The tolerant load/peer-sync path warns, and the snapshot builder
-also quarantines `junos-global`, `any`, and `junos-host` definitions, unzoning
-their interfaces while preserving `any`/`junos-host` policy sentinel references.
-This preserves the #1960 no-brick doctrine, as with #3066/#2401.
+named-zone use. The tolerant load/peer-sync path warns, quarantines reserved
+definitions, and unzones their interfaces. For a legacy definition named `any`,
+the policy builder poisons zone-pair rules naming that token before they reach
+the dataplane's wildcard indexes (#12249); `junos-host` host-context references
+remain intact. This preserves the #1960 no-brick doctrine, as with #3066/#2401.
 
 **A zone-pair stanza naming `junos-global` fails closed on the tolerant path
 (#9570).** The #2401 reference gate rejects `from-zone junos-global` /
@@ -1050,6 +1051,13 @@ interim commit reject (`validatePolicyWildcardZoneStrict` and its
 `lenientPolicyWildcardZone` downgrade, both removed). The unrelated `any` tokens
 elsewhere in a policy (`match source-address any` / `match application any`) are
 unaffected.
+
+A pre-#3055 persisted zone definition named `any` is a tolerant-load exception:
+the zone is omitted and zone-pair policies naming `any` are poisoned before
+publication (#12249), because the helper would otherwise index those rules as
+wildcards. With no zone defined as `any`, the wildcard policies above remain
+legal and unchanged. Other `any` tokens in policy matches (for example,
+`match source-address any` / `match application any`) are unaffected.
 
 **NAT rule-set `from`/`to` `interface`/`routing-instance` scope is fully
 enforced (#3096, lifts the #3079/#3095 interim reject):** Junos NAT rule-sets

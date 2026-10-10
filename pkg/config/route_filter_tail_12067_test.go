@@ -20,6 +20,8 @@ package config_test
 import (
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 const rfSetPrefix12067 = "set policy-options policy-statement P term T from route-filter "
@@ -37,9 +39,12 @@ func TestSchemaValidate_RouteFilter_UnconsumedTailRejected_12067(t *testing.T) {
 		// A second token past a CONSUMED upto trailer: the compiler reads
 		// only Keys[3] / Children[0].Keys[0], so `extra` is silent.
 		rfSetPrefix12067 + "10.0.0.0/8 upto /24 extra",
-		// A malformed upto length parses to UptoLen 0 and degrades to the
-		// open-ended `le maxLen` — an orlonger-style widening of `upto`.
+		// Invalid lengths parse to UptoLen 0 and degrade to the open-ended
+		// `le maxLen` — an orlonger-style widening of `upto`.
 		rfSetPrefix12067 + "10.0.0.0/8 upto foo",
+		rfSetPrefix12067 + "10.0.0.0/8 upto /129",
+		// A missing length has the same UptoLen==0 widening as a malformed one.
+		rfSetPrefix12067 + "10.0.0.0/8 upto",
 	}
 	for _, cmd := range reject {
 		err := flatSchemaCheck(t, cmd,
@@ -134,6 +139,32 @@ func TestSchemaValidate_RouteFilter_UnconsumedTailRejectedHierarchical_12067(t *
         }
     }
 }`,
+		`policy-options {
+    policy-statement P {
+        term T {
+            from {
+                route-filter 10.0.0.0/8 upto;
+            }
+            then accept;
+        }
+    }
+}`,
+		`policy-options {
+    policy-statement P {
+        term T {
+            from route-filter 10.0.0.0/8 upto;
+            then accept;
+        }
+    }
+}`,
+		`policy-options {
+    policy-statement P {
+        term T {
+            from route-filter 10.0.0.0/8 upto protocol static;
+            then accept;
+        }
+    }
+}`,
 	}
 	for i, src := range reject {
 		err := schemaCheck(t, src)
@@ -144,6 +175,75 @@ func TestSchemaValidate_RouteFilter_UnconsumedTailRejectedHierarchical_12067(t *
 		if !strings.Contains(err.Error(), "route-filter") {
 			t.Errorf("hierarchical reject case %d: error must name the route-filter leaf: %v", i, err)
 		}
+	}
+}
+
+func policyTermFrom12067(body string) string {
+	return `policy-options { policy-statement P { term T { from { ` + body +
+		` } then accept; } } }`
+}
+
+func TestSchemaValidate_RouteFilter_PreservesSiblingDiagnostics_12067(t *testing.T) {
+	cases := []struct {
+		name, body, token string
+	}{
+		{"orlonger then protocol", "route-filter 10.0.0.0/8 orlonger protocol static;", "protocol"},
+		{"upto then protocol", "route-filter 10.0.0.0/8 upto /24 protocol static;", "protocol"},
+		{"orlonger then prefix-list", "route-filter 10.0.0.0/8 orlonger prefix-list PL;", "prefix-list"},
+		{"range then protocol", "route-filter 10.0.0.0/8 prefix-length-range protocol static;", "protocol"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := schemaCheck(t, policyTermFrom12067(tc.body))
+			if err == nil || !strings.Contains(err.Error(), "#8437") ||
+				!strings.Contains(err.Error(), "missing semicolon") ||
+				!strings.Contains(err.Error(), tc.token) {
+				t.Fatalf("diagnostic = %v, want actionable #8437 error naming %q", err, tc.token)
+			}
+		})
+	}
+
+	tree, parseErrs := config.NewParser(policyTermFrom12067(
+		"route-filter 10.0.0.0/8 exact route-filter 10.1.0.0/16 exact;",
+	)).Parse()
+	if len(parseErrs) > 0 {
+		t.Fatalf("parse self-repeat case: %v", parseErrs[0])
+	}
+	if _, err := config.CompileConfig(tree); err == nil ||
+		!strings.Contains(err.Error(), "repeats its own keyword") || !strings.Contains(err.Error(), "#9027") {
+		t.Fatalf("self-repeat diagnostic = %v, want the #9027 ambiguity error", err)
+	}
+}
+
+func TestSchemaValidate_RouteFilterPackedRunDoesNotDeferRepeatedFrom_12067(t *testing.T) {
+	const text = `policy-options { policy-statement P { term T {
+from route-filter 10.0.0.0/8 exact from protocol static; then accept;
+} } }`
+	err := schemaCheck(t, text)
+	if err == nil || !strings.Contains(err.Error(), `unconsumed route-filter token "from"`) {
+		t.Fatalf("schema error = %v, want the route-filter gate to reject its packed `from` repeat", err)
+	}
+}
+
+func TestSchemaValidate_RouteFilter_ChildDiagnosticsNameOffendingToken_12067(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+	}{
+		{"extra after child trailer", "route-filter 10.0.0.0/8 upto { /24 extra; }", `"extra"`},
+		{"second child trailer", "route-filter 10.0.0.0/8 upto { /24; /16; }", `"/16"`},
+		{"match-type in child form", "route-filter 10.0.0.0/8 { orlonger; }", "match-type must be on the statement line"},
+		{"child after orlonger", "route-filter 10.0.0.0/8 orlonger { reject; }", `"reject"`},
+		{"child after upto", "route-filter 10.0.0.0/8 upto /24 { reject; }", `"reject"`},
+		{"malformed upto token", "route-filter 10.0.0.0/8 upto foo;", "invalid route-filter `upto` length"},
+		{"out-of-range upto token", "route-filter 10.0.0.0/8 upto /129;", "invalid route-filter `upto` length"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := schemaCheck(t, policyTermFrom12067(tc.body))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("diagnostic = %v, want it to name %s", err, tc.want)
+			}
+		})
 	}
 }
 

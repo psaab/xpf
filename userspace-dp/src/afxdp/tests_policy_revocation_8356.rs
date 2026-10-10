@@ -9434,3 +9434,1322 @@ fn interface_snat_revalidates_fib_generation_egress_address_change_11600() {
         "a FIB-only egress-address change must revalidate and revoke old interface SNAT"
     );
 }
+
+const FIB_MOVE_DST_12074: Ipv4Addr = Ipv4Addr::new(8, 8, 8, 8);
+
+fn add_fib_move_egress_12074(
+    snapshot: &mut crate::ConfigSnapshot,
+    zone_name: &str,
+    zone_id: u16,
+    address: &str,
+    gateway: &str,
+) {
+    if snapshot.zones.iter().all(|zone| zone.name != zone_name) {
+        snapshot.zones.push(crate::ZoneSnapshot {
+            name: zone_name.into(),
+            id: zone_id,
+            host_inbound_configured: true,
+            host_inbound_system_services: vec!["any-service".into()],
+            ..Default::default()
+        });
+    }
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth2.0".into(),
+        zone: zone_name.into(),
+        linux_name: "ge-0-0-2".into(),
+        ifindex: DMZ_IFINDEX,
+        redundancy_group: 1,
+        egress_zone: zone_name.into(),
+        hardware_addr: "02:bf:72:02:00:01".into(),
+        addresses: vec![crate::InterfaceAddressSnapshot {
+            family: "inet".into(),
+            address: address.into(),
+            scope: 0,
+        }],
+        ..Default::default()
+    });
+    snapshot.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-2".into(),
+        ifindex: DMZ_IFINDEX,
+        family: "inet".into(),
+        ip: gateway.into(),
+        mac: "00:aa:bb:cc:dd:ee".into(),
+        state: "reachable".into(),
+        router: true,
+        link_local: false,
+        ..Default::default()
+    });
+}
+
+fn add_fib_move_route_12074(
+    snapshot: &mut crate::ConfigSnapshot,
+    destination: Ipv4Addr,
+    gateway: &str,
+    interface_name: &str,
+) {
+    snapshot.routes.push(RouteSnapshot {
+        table: "inet.0".into(),
+        family: "inet".into(),
+        destination: format!("{destination}/32"),
+        next_hops: vec![format!("{gateway}@{interface_name}")],
+        next_hop_weights: vec![],
+        discard: false,
+        next_table: String::new(),
+        preference: 0,
+        rule_priority: 0,
+        mtu: 0,
+    });
+}
+
+#[test]
+fn fib_only_cross_zone_route_move_rejudges_existing_session_12074() {
+    let mut initial = nat_snapshot();
+    initial.generation = 7;
+    initial.fib_generation = 9;
+    // Isolate the zone-policy verdict from #11600's independent SNAT predicate.
+    initial.source_nat_rules.clear();
+    add_fib_move_egress_12074(
+        &mut initial,
+        "dmz",
+        TEST_DMZ_ZONE_ID,
+        "203.0.113.1/24",
+        "203.0.113.2",
+    );
+    let forwarding_initial = build_forwarding_state(&initial);
+
+    let mut moved = initial.clone();
+    moved.fib_generation = 10;
+    add_fib_move_route_12074(
+        &mut moved,
+        FIB_MOVE_DST_12074,
+        "203.0.113.2",
+        "reth2.0",
+    );
+    let forwarding_moved = build_forwarding_state(&moved);
+    assert_eq!(
+        crate::afxdp::forwarding::lookup_forwarding_resolution(
+            &forwarding_initial,
+            IpAddr::V4(FIB_MOVE_DST_12074),
+        )
+        .egress_ifindex,
+        WAN_IFINDEX,
+    );
+    assert_eq!(
+        crate::afxdp::forwarding::lookup_forwarding_resolution(
+            &forwarding_moved,
+            IpAddr::V4(FIB_MOVE_DST_12074),
+        )
+        .egress_ifindex,
+        DMZ_IFINDEX,
+    );
+    assert_eq!(forwarding_initial.egress_zone_id(DMZ_IFINDEX), TEST_DMZ_ZONE_ID);
+    assert_eq!(forwarding_moved.egress_zone_id(DMZ_IFINDEX), TEST_DMZ_ZONE_ID);
+
+    let mut sessions = SessionTable::new();
+    sessions.set_timeouts(forwarding_initial.session_timeouts);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let ha_state = txn_ha_state();
+    let syn = build_txn_tcp_syn_frame_v4(
+        SRC,
+        FIB_MOVE_DST_12074,
+        SPORT,
+        DPORT,
+        TCP_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let validation_initial = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 9,
+    };
+    let (batch1, dbg1) = txn_run_descriptor_with_validation(
+        &mut binding,
+        &mut sessions,
+        &forwarding_initial,
+        &ha_state,
+        &syn,
+        txn_meta_v4(LAN_IFINDEX as u32, TCP_SYN, syn.len() as u16),
+        validation_initial,
+    );
+    assert_eq!(batch1.validated_packets, 1);
+    assert_eq!(dbg1.tx, 1, "the permitted WAN route admits the initial flow");
+    assert_eq!(session_count(&sessions), 2);
+
+    let ack = build_txn_tcp_syn_frame_v4(
+        SRC,
+        FIB_MOVE_DST_12074,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let (batch2, dbg2) = txn_run_descriptor_with_validation(
+        &mut binding,
+        &mut sessions,
+        &forwarding_initial,
+        &ha_state,
+        &ack,
+        txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, ack.len() as u16),
+        validation_initial,
+    );
+    assert_eq!(batch2.validated_packets, 1);
+    assert_eq!(dbg2.session_hit, 1);
+    assert_eq!(dbg2.tx, 1);
+    assert_eq!(
+        sessions.policy_revalidation_target(&flow_key_to(FIB_MOVE_DST_12074)),
+        crate::session::PolicyRevalidationTarget::Fresh,
+    );
+
+    let mut moved_meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, ack.len() as u16);
+    moved_meta.fib_generation = 10;
+    let validation_moved = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 10,
+    };
+    let (batch3, dbg3) = txn_run_descriptor_with_validation(
+        &mut binding,
+        &mut sessions,
+        &forwarding_moved,
+        &ha_state,
+        &ack,
+        moved_meta,
+        validation_moved,
+    );
+    assert_eq!(batch3.validated_packets, 1);
+    assert_eq!(dbg3.session_hit, 1);
+    assert_eq!(
+        dbg3.policy_revoked_sessions, 1,
+        "the FIB-only move into the default-deny DMZ must re-judge zone policy"
+    );
+    assert_eq!(dbg3.tx, 0, "a denied route move must not transmit");
+    assert_eq!(session_count(&sessions), 0);
+}
+
+#[test]
+fn fib_only_same_zone_route_move_keeps_forwarding_and_nat_12074() {
+    let mut initial = nat_snapshot();
+    initial.generation = 7;
+    initial.fib_generation = 9;
+    initial.source_nat_rules = vec![SourceNATRuleSnapshot {
+        name: "fib-move-pool".into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["10.0.61.0/24".into()],
+        pool_name: "fib-move-pool".into(),
+        pool_addresses: vec!["172.16.80.100/32".into()],
+        port_low: 20_000,
+        port_high: 20_999,
+        ..Default::default()
+    }];
+    add_fib_move_egress_12074(
+        &mut initial,
+        "wan",
+        TEST_WAN_ZONE_ID,
+        "203.0.113.1/24",
+        "203.0.113.2",
+    );
+    let forwarding_initial = build_forwarding_state(&initial);
+
+    let mut moved = initial.clone();
+    moved.fib_generation = 10;
+    add_fib_move_route_12074(
+        &mut moved,
+        FIB_MOVE_DST_12074,
+        "203.0.113.2",
+        "reth2.0",
+    );
+    let forwarding_moved = build_forwarding_state(&moved);
+    assert_eq!(
+        crate::afxdp::forwarding::lookup_forwarding_resolution(
+            &forwarding_moved,
+            IpAddr::V4(FIB_MOVE_DST_12074),
+        )
+        .egress_ifindex,
+        DMZ_IFINDEX,
+    );
+    assert_eq!(forwarding_initial.egress_zone_id(DMZ_IFINDEX), TEST_WAN_ZONE_ID);
+    assert_eq!(forwarding_moved.egress_zone_id(DMZ_IFINDEX), TEST_WAN_ZONE_ID);
+
+    let mut sessions = SessionTable::new();
+    sessions.set_timeouts(forwarding_initial.session_timeouts);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, LAN_IFINDEX, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let ha_state = txn_ha_state();
+    let syn = build_txn_tcp_syn_frame_v4(
+        SRC,
+        FIB_MOVE_DST_12074,
+        SPORT,
+        DPORT,
+        TCP_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let validation_initial = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 9,
+    };
+    let (batch1, dbg1) = txn_run_descriptor_with_validation(
+        &mut binding,
+        &mut sessions,
+        &forwarding_initial,
+        &ha_state,
+        &syn,
+        txn_meta_v4(LAN_IFINDEX as u32, TCP_SYN, syn.len() as u16),
+        validation_initial,
+    );
+    assert_eq!(batch1.validated_packets, 1);
+    assert_eq!(dbg1.tx, 1);
+    let (forward_key, original_nat) = {
+        let mut recorded = None;
+        sessions.iter_with_origin(|key, decision, metadata, _origin| {
+            if !metadata.is_reverse {
+                recorded = Some((key.clone(), decision.nat));
+            }
+        });
+        recorded.expect("the permitted SNAT flow has a forward session")
+    };
+    assert_eq!(
+        original_nat.rewrite_src,
+        Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 100))),
+    );
+
+    let ack = build_txn_tcp_syn_frame_v4(
+        SRC,
+        FIB_MOVE_DST_12074,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let (batch2, dbg2) = txn_run_descriptor_with_validation(
+        &mut binding,
+        &mut sessions,
+        &forwarding_initial,
+        &ha_state,
+        &ack,
+        txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, ack.len() as u16),
+        validation_initial,
+    );
+    assert_eq!(batch2.validated_packets, 1);
+    assert_eq!(dbg2.session_hit, 1);
+    assert_eq!(dbg2.tx, 1);
+
+    let mut moved_meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, ack.len() as u16);
+    moved_meta.fib_generation = 10;
+    let validation_moved = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 10,
+    };
+    let (batch3, dbg3) = txn_run_descriptor_with_validation(
+        &mut binding,
+        &mut sessions,
+        &forwarding_moved,
+        &ha_state,
+        &ack,
+        moved_meta,
+        validation_moved,
+    );
+    assert_eq!(batch3.validated_packets, 1);
+    assert_eq!(dbg3.session_hit, 1);
+    assert_eq!(dbg3.policy_revoked_sessions, 0);
+    assert_eq!(
+        dbg3.tx,
+        1,
+        "same-zone route move must forward; rows={} no_route={} missing_neigh={} ha_inactive={} no_egress_binding={} policy_deny={}",
+        session_count(&sessions),
+        dbg3.no_route,
+        dbg3.missing_neigh,
+        dbg3.ha_inactive,
+        dbg3.no_egress_binding,
+        dbg3.policy_deny,
+    );
+    assert_eq!(session_count(&sessions), 2);
+    let (resolved, _, _) = sessions.entry_with_origin(&forward_key).unwrap();
+    assert_eq!(resolved.resolution.egress_ifindex, DMZ_IFINDEX);
+    assert_eq!(resolved.nat, original_nat, "the established SNAT mapping is retained");
+    assert_eq!(
+        sessions.policy_revalidation_target(&forward_key),
+        crate::session::PolicyRevalidationTarget::Fresh,
+    );
+}
+
+fn fib_only_reply_route_move_12074(same_zone: bool, warm_reply: bool) {
+    let mut initial = nat_snapshot();
+    initial.generation = 7;
+    initial.fib_generation = 9;
+    initial.source_nat_rules.clear();
+    if same_zone {
+        initial.source_nat_rules.push(SourceNATRuleSnapshot {
+            name: "reply-fib-move-pool".into(),
+            from_zone: "lan".into(),
+            to_zone: "wan".into(),
+            source_addresses: vec!["10.0.61.0/24".into()],
+            pool_name: "reply-fib-move-pool".into(),
+            pool_addresses: vec!["172.16.80.100/32".into()],
+            port_low: 20_000,
+            port_high: 20_999,
+            ..Default::default()
+        });
+    }
+    // The reply must be able to transmit before the move, not merely reach
+    // a missing-neighbor drop that hides the stale forward-pair verdict.
+    initial.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-1".into(),
+        ifindex: LAN_IFINDEX,
+        family: "inet".into(),
+        ip: SRC.to_string(),
+        mac: "02:aa:bb:cc:dd:01".into(),
+        state: "reachable".into(),
+        ..Default::default()
+    });
+    add_fib_move_egress_12074(
+        &mut initial,
+        if same_zone { "wan" } else { "dmz" },
+        if same_zone { TEST_WAN_ZONE_ID } else { TEST_DMZ_ZONE_ID },
+        "203.0.113.1/24",
+        "203.0.113.2",
+    );
+    let forwarding_initial = build_forwarding_state(&initial);
+    let mut moved = initial.clone();
+    moved.fib_generation = 10;
+    add_fib_move_route_12074(
+        &mut moved,
+        FIB_MOVE_DST_12074,
+        "203.0.113.2",
+        "reth2.0",
+    );
+    let forwarding_moved = build_forwarding_state(&moved);
+    assert_eq!(
+        crate::afxdp::forwarding::lookup_forwarding_resolution(
+            &forwarding_initial,
+            IpAddr::V4(FIB_MOVE_DST_12074),
+        ).egress_ifindex,
+        WAN_IFINDEX,
+    );
+    assert_eq!(
+        crate::afxdp::forwarding::lookup_forwarding_resolution(
+            &forwarding_moved,
+            IpAddr::V4(FIB_MOVE_DST_12074),
+        ).egress_ifindex,
+        DMZ_IFINDEX,
+    );
+    assert_eq!(
+        forwarding_moved.egress_zone_id(DMZ_IFINDEX),
+        if same_zone { TEST_WAN_ZONE_ID } else { TEST_DMZ_ZONE_ID },
+    );
+    let validation_initial = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 9,
+    };
+    let mut sessions = SessionTable::new();
+    sessions.set_timeouts(forwarding_initial.session_timeouts);
+    let ha_state = txn_ha_state();
+    let mut forward_binding = binding_for_9604(LAN_IFINDEX, "reth1.0");
+    // Real admission and a forward hit earn LiveEgress before the route move.
+    for flags in [TCP_SYN, TCP_ACK] {
+        let frame = build_txn_tcp_syn_frame_v4(
+            SRC, FIB_MOVE_DST_12074, SPORT, DPORT, flags, TEST_LAN_MAC,
+        );
+        let (batch, dbg) = txn_run_descriptor_with_validation(
+            &mut forward_binding,
+            &mut sessions,
+            &forwarding_initial,
+            &ha_state,
+            &frame,
+            txn_meta_v4(LAN_IFINDEX as u32, flags, frame.len() as u16),
+            validation_initial,
+        );
+        assert_eq!(batch.validated_packets, 1);
+        assert_eq!(dbg.tx, 1);
+        if flags == TCP_ACK {
+            assert_eq!(dbg.session_hit, 1);
+        }
+    }
+    assert_eq!(session_count(&sessions), 2);
+    let forward_key = flow_key_to(FIB_MOVE_DST_12074);
+    let (forward_decision, _, _) = sessions.entry_with_origin(&forward_key).unwrap();
+    let original_nat = forward_decision.nat;
+    let reverse_key = crate::session::reverse_session_key(&forward_key, original_nat);
+    assert_eq!(
+        sessions.policy_revalidation_target(&forward_key),
+        crate::session::PolicyRevalidationTarget::Fresh,
+    );
+    assert_eq!(
+        sessions.policy_revalidation_kind(&forward_key),
+        crate::session::PolicyRevalidationKind::LiveEgress,
+    );
+    if same_zone {
+        assert_eq!(
+            original_nat.rewrite_src,
+            Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 100))),
+        );
+        assert!((20_000..=20_999).contains(&original_nat.rewrite_src_port.unwrap()));
+    }
+
+    let (reply, mut reply_meta) = reverse_tcp_frame_v4_9604(&reverse_key, WAN_IFINDEX);
+    // The configured WAN unit is parent-bound: XDP reports physical 11 and
+    // VLAN 80, not logical 12 with VLAN 0.
+    reply_meta.ingress_ifindex = 11;
+    reply_meta.ingress_vlan_id = 80;
+    let mut reverse_binding = binding_for_9604(11, "ge-0-0-0");
+    if warm_reply {
+        let (batch, dbg) = txn_run_descriptor_with_validation(
+            &mut reverse_binding,
+            &mut sessions,
+            &forwarding_initial,
+            &ha_state,
+            &reply,
+            reply_meta,
+            validation_initial,
+        );
+        assert_eq!(batch.validated_packets, 1);
+        assert_eq!((dbg.session_hit, dbg.tx, dbg.policy_revoked_sessions), (1, 1, 0));
+        assert_eq!(
+            sessions.policy_revalidation_target(&reverse_key),
+            crate::session::PolicyRevalidationTarget::Fresh,
+        );
+        assert_eq!(
+            sessions.policy_revalidation_kind(&reverse_key),
+            crate::session::PolicyRevalidationKind::LiveEgress,
+        );
+    }
+
+    // No forward packet is sent after the FIB advance. Test both the first
+    // reply and a previously fresh reverse row: neither may judge stale WAN.
+    reply_meta.fib_generation = 10;
+    let validation_moved = ValidationState {
+        snapshot_installed: true,
+        config_generation: 7,
+        fib_generation: 10,
+    };
+    let (batch, dbg) = txn_run_descriptor_with_validation(
+        &mut reverse_binding,
+        &mut sessions,
+        &forwarding_moved,
+        &ha_state,
+        &reply,
+        reply_meta,
+        validation_moved,
+    );
+    assert_eq!(batch.validated_packets, 1);
+    assert_eq!(dbg.session_hit, 1);
+    assert_eq!(dbg.foreign_authority_drops, 0);
+    if !same_zone {
+        assert_eq!(
+            (dbg.policy_revoked_sessions, dbg.tx, session_count(&sessions)),
+            (1, 0, 0),
+            "reply-only cross-zone move must revoke the forward pair; warm_reply={warm_reply}",
+        );
+        assert_slots_gone_9604(&sessions, &forward_key, &reverse_key);
+        return;
+    }
+
+    // The only rule permits LAN -> WAN. Judging WAN -> LAN independently
+    // would revoke this control, even though the forward route stays in WAN.
+    assert_eq!((dbg.policy_revoked_sessions, dbg.tx), (0, 1));
+    assert_eq!(session_count(&sessions), 2);
+    assert_eq!(
+        sessions
+            .entry_with_origin(&forward_key)
+            .unwrap()
+            .0
+            .resolution
+            .egress_ifindex,
+        DMZ_IFINDEX,
+        "the reverse permit must persist the current forward route",
+    );
+    assert_eq!(sessions.entry_with_origin(&forward_key).unwrap().0.nat, original_nat);
+    let original_reverse_nat = sessions.entry_with_origin(&reverse_key).unwrap().0.nat;
+    assert_eq!(
+        sessions.policy_revalidation_target(&reverse_key),
+        crate::session::PolicyRevalidationTarget::Fresh,
+    );
+    // A continued reply-only stream must retain the exact pooled mapping.
+    let (_, next) = txn_run_descriptor_with_validation(
+        &mut reverse_binding,
+        &mut sessions,
+        &forwarding_moved,
+        &ha_state,
+        &reply,
+        reply_meta,
+        validation_moved,
+    );
+    assert_eq!((next.policy_revoked_sessions, next.tx), (0, 1));
+    assert_eq!(session_count(&sessions), 2);
+    assert_eq!(sessions.entry_with_origin(&forward_key).unwrap().0.nat, original_nat);
+    assert_eq!(
+        sessions.entry_with_origin(&reverse_key).unwrap().0.nat,
+        original_reverse_nat,
+    );
+}
+
+#[test]
+fn fib_only_reply_first_cross_zone_move_revokes_12074() {
+    fib_only_reply_route_move_12074(false, false);
+}
+
+#[test]
+fn fib_only_reply_only_fresh_reverse_cross_zone_move_revokes_12074() {
+    fib_only_reply_route_move_12074(false, true);
+}
+
+#[test]
+fn fib_only_reply_same_zone_move_preserves_stateful_snat_12074() {
+    for warm_reply in [false, true] {
+        fib_only_reply_route_move_12074(true, warm_reply);
+    }
+}
+
+fn fib_only_reply_nonforwarding_route_12074(
+    discard: bool,
+    warm_reply: bool,
+    deny: bool,
+    recorded_fwd: bool,
+    deny_on_restore: bool,
+) {
+    let mut initial = nat_snapshot();
+    initial.generation = 7;
+    initial.fib_generation = 9;
+    initial.source_nat_rules.clear();
+    initial.neighbors.push(NeighborSnapshot {
+        interface: "ge-0-0-1".into(),
+        ifindex: LAN_IFINDEX,
+        family: "inet".into(),
+        ip: SRC.to_string(),
+        mac: "02:aa:bb:cc:dd:01".into(),
+        state: "reachable".into(),
+        ..Default::default()
+    });
+    let forwarding_initial = build_forwarding_state(&initial);
+
+    let mut moved = initial.clone();
+    let moved_config_generation = if deny { 8 } else { 7 };
+    moved.generation = moved_config_generation;
+    if deny {
+        moved.policies.clear();
+    }
+    moved.fib_generation = 10;
+    if discard {
+        moved.routes.push(RouteSnapshot {
+            table: "inet.0".into(),
+            family: "inet".into(),
+            destination: format!("{FIB_MOVE_DST_12074}/32"),
+            next_hops: vec![],
+            next_hop_weights: vec![],
+            discard: true,
+            next_table: String::new(),
+            preference: 0,
+            rule_priority: 0,
+            mtu: 0,
+        });
+    } else {
+        moved.routes.retain(|route| route.family != "inet");
+    }
+    let forwarding_moved = build_forwarding_state(&moved);
+    assert_eq!(
+        crate::afxdp::forwarding::lookup_forwarding_resolution(
+            &forwarding_moved,
+            IpAddr::V4(FIB_MOVE_DST_12074),
+        )
+        .disposition,
+        if discard {
+            crate::afxdp::ForwardingDisposition::DiscardRoute
+        } else {
+            crate::afxdp::ForwardingDisposition::NoRoute
+        },
+    );
+
+    let mut recovered = initial.clone();
+    let recovered_config_generation = if deny_on_restore {
+        moved_config_generation + 1
+    } else {
+        moved_config_generation
+    };
+    recovered.generation = recovered_config_generation;
+    recovered.fib_generation = 11;
+    if deny || deny_on_restore {
+        recovered.policies.clear();
+    }
+    let forwarding_recovered = build_forwarding_state(&recovered);
+    let validation = |config_generation, fib_generation| ValidationState {
+        snapshot_installed: true,
+        config_generation,
+        fib_generation,
+    };
+    let mut sessions = SessionTable::new();
+    sessions.set_timeouts(forwarding_initial.session_timeouts);
+    let ha_state = txn_ha_state();
+    let mut forward_binding = binding_for_9604(LAN_IFINDEX, "reth1.0");
+    for flags in [TCP_SYN, TCP_ACK] {
+        let frame = build_txn_tcp_syn_frame_v4(
+            SRC,
+            FIB_MOVE_DST_12074,
+            SPORT,
+            DPORT,
+            flags,
+            TEST_LAN_MAC,
+        );
+        let (_batch, dbg) = txn_run_descriptor_with_validation(
+            &mut forward_binding,
+            &mut sessions,
+            &forwarding_initial,
+            &ha_state,
+            &frame,
+            txn_meta_v4(LAN_IFINDEX as u32, flags, frame.len() as u16),
+            validation(7, 9),
+        );
+        assert_eq!(dbg.tx, 1, "the initial LiveEgress flow must transmit");
+    }
+    let forward_key = flow_key_to(FIB_MOVE_DST_12074);
+    let (forward_decision, _, _) = sessions.entry_with_origin(&forward_key).unwrap();
+    let reverse_key = crate::session::reverse_session_key(&forward_key, forward_decision.nat);
+    let (reply, mut reply_meta) = reverse_tcp_frame_v4_9604(&reverse_key, WAN_IFINDEX);
+    reply_meta.ingress_ifindex = 11;
+    reply_meta.ingress_vlan_id = 80;
+    let mut reverse_binding = binding_for_9604(11, "ge-0-0-0");
+    if warm_reply {
+        let (_batch, dbg) = txn_run_descriptor_with_validation(
+            &mut reverse_binding,
+            &mut sessions,
+            &forwarding_initial,
+            &ha_state,
+            &reply,
+            reply_meta,
+            validation(7, 9),
+        );
+        assert_eq!((dbg.session_hit, dbg.tx, dbg.policy_revoked_sessions), (1, 1, 0));
+    }
+    if recorded_fwd {
+        sessions.mark_policy_revalidated(
+            &forward_key,
+            crate::session::PolicyRevalidationKind::RecordedEgress,
+        );
+    }
+
+    reply_meta.config_generation = moved_config_generation;
+    reply_meta.fib_generation = 10;
+    let (_batch, moved_dbg) = txn_run_descriptor_with_validation(
+        &mut reverse_binding,
+        &mut sessions,
+        &forwarding_moved,
+        &ha_state,
+        &reply,
+        reply_meta,
+        validation(moved_config_generation, 10),
+    );
+    let moved_outcome = (
+        moved_dbg.policy_revoked_sessions,
+        moved_dbg.tx,
+        moved_dbg.policy_deny,
+        session_count(&sessions),
+    );
+    if deny || recorded_fwd {
+        assert_eq!(
+            moved_outcome,
+            (1, 0, 0, 0),
+            "deny must revoke on the first reply; a non-Live companion remains fail-closed; discard={discard}, warm={warm_reply}, deny={deny}, recorded={recorded_fwd}",
+        );
+        assert_slots_gone_9604(&sessions, &forward_key, &reverse_key);
+        return;
+    }
+    if !warm_reply {
+        assert_eq!(
+            sessions.policy_revalidation_target(&reverse_key),
+            crate::session::PolicyRevalidationTarget::Stale(reverse_key.clone()),
+            "a cold NoRoute/Discard reply must not stamp the reverse policy verdict",
+        );
+    }
+    if deny_on_restore {
+        assert_eq!(moved_outcome, (0, 1, 0, 2));
+        let mut restored_reply_meta = reply_meta;
+        restored_reply_meta.config_generation = recovered_config_generation;
+        restored_reply_meta.fib_generation = 11;
+        let (_batch, restored_dbg) = txn_run_descriptor_with_validation(
+            &mut reverse_binding,
+            &mut sessions,
+            &forwarding_recovered,
+            &ha_state,
+            &reply,
+            restored_reply_meta,
+            validation(recovered_config_generation, 11),
+        );
+        assert_eq!(
+            (
+                restored_dbg.policy_revoked_sessions,
+                restored_dbg.tx,
+                session_count(&sessions),
+            ),
+            (1, 0, 0),
+            "a denied stored pair must still revoke when the route recovers",
+        );
+        assert_slots_gone_9604(&sessions, &forward_key, &reverse_key);
+        return;
+    }
+
+    let forward_ack = build_txn_tcp_syn_frame_v4(
+        SRC,
+        FIB_MOVE_DST_12074,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        TEST_LAN_MAC,
+    );
+    let mut forward_meta =
+        txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, forward_ack.len() as u16);
+    forward_meta.config_generation = recovered_config_generation;
+    forward_meta.fib_generation = 11;
+    let (_batch, restored_dbg) = txn_run_descriptor_with_validation(
+        &mut forward_binding,
+        &mut sessions,
+        &forwarding_recovered,
+        &ha_state,
+        &forward_ack,
+        forward_meta,
+        validation(recovered_config_generation, 11),
+    );
+    let restored_outcome = (
+        restored_dbg.session_hit,
+        restored_dbg.session_miss,
+        restored_dbg.tx,
+        session_count(&sessions),
+    );
+    assert_eq!(
+        moved_outcome,
+        (0, 1, 0, 2),
+        "a permitted transient non-forwarding reply must Decline without policy denial or teardown; discard={discard}, warm={warm_reply}",
+    );
+    assert_eq!(
+        restored_outcome,
+        (1, 0, 1, 2),
+        "the established connection must recover after route restoration; discard={discard}, warm={warm_reply}",
+    );
+}
+
+#[test]
+fn fib_only_reply_no_route_declines_and_recovers_12074() {
+    for warm_reply in [false, true] {
+        fib_only_reply_nonforwarding_route_12074(false, warm_reply, false, false, false);
+    }
+}
+
+#[test]
+fn fib_only_reply_discard_declines_and_recovers_12074() {
+    fib_only_reply_nonforwarding_route_12074(true, true, false, false, false);
+}
+
+#[test]
+fn fib_only_reply_no_route_permit_then_deny_on_restore_12074() {
+    fib_only_reply_nonforwarding_route_12074(false, false, false, false, true);
+}
+
+#[test]
+fn fib_only_reply_no_route_denies_on_both_arms_12074() {
+    for warm_reply in [false, true] {
+        fib_only_reply_nonforwarding_route_12074(false, warm_reply, true, false, false);
+    }
+}
+
+#[test]
+fn fib_only_reply_discard_denies_on_both_arms_12074() {
+    for warm_reply in [false, true] {
+        fib_only_reply_nonforwarding_route_12074(true, warm_reply, true, false, false);
+    }
+}
+
+#[test]
+fn fib_only_reply_recorded_no_route_stays_fenced_12074() {
+    fib_only_reply_nonforwarding_route_12074(false, true, false, true, false);
+}
+
+fn reverse_sessionless_no_route_fib_stale_12074(
+    permit: bool,
+    kind: Option<crate::session::PolicyRevalidationKind>,
+) -> (
+    Option<crate::session::SessionKey>,
+    SessionTable,
+    crate::session::SessionKey,
+) {
+    let mut current = policy_deny_snapshot();
+    current.generation = 7;
+    current.fib_generation = 10;
+    current.routes.retain(|route| route.family != "inet");
+    if permit {
+        current.policies.push(PolicyRuleSnapshot {
+            name: "lan-out".into(),
+            from_zone: "lan".into(),
+            to_zone: "wan".into(),
+            source_addresses: vec!["any".into()],
+            destination_addresses: vec!["any".into()],
+            applications: vec!["any".into()],
+            application_terms: Vec::new(),
+            action: "permit".into(),
+            ..Default::default()
+        });
+    }
+    let forwarding = build_forwarding_state(&current);
+    assert_eq!(
+        crate::afxdp::forwarding::lookup_forwarding_resolution(
+            &forwarding,
+            IpAddr::V4(FIB_MOVE_DST_12074),
+        )
+        .disposition,
+        crate::afxdp::ForwardingDisposition::NoRoute,
+    );
+
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    let forward_key = flow_key_to(FIB_MOVE_DST_12074);
+    let reverse_key = crate::session::reverse_session_key(&forward_key, NatDecision::default());
+    assert!(sessions.install_with_protocol_with_origin(
+        forward_key.clone(),
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    if let Some(kind) = kind {
+        sessions.mark_policy_revalidated(&forward_key, kind);
+    }
+    assert_eq!(
+        sessions.policy_revalidation_target(&reverse_key),
+        crate::session::PolicyRevalidationTarget::NoLocalEntry,
+        "the reverse packet must exercise the NoLocalEntry companion arm",
+    );
+    let (_, _, _, forwarding_generation) = sessions
+        .entry_with_origin_and_forwarding_generation(&forward_key)
+        .expect("the NoLocalEntry arm must have a local forward companion");
+    sessions.set_forwarding_revalidation_gen(7, 10);
+    assert!(
+        sessions.forwarding_resolution_is_stale(forwarding_generation),
+        "the companion's FIB stamp must be stale before exercising NoLocalEntry",
+    );
+
+    let canonical = super::poll_descriptor::revalidate_zone_policy_canonical_key_for_test(
+        &forwarding,
+        &mut sessions,
+        &reverse_key,
+        &metadata(true),
+        decision(LAN_IFINDEX),
+        Some(&SessionFlow {
+            src_ip: reverse_key.src_ip,
+            dst_ip: reverse_key.dst_ip,
+            forward_key: reverse_key.clone(),
+        }),
+        txn_meta_v4(WAN_IFINDEX as u32, TCP_ACK, 80),
+        false,
+    );
+    (canonical, sessions, forward_key)
+}
+
+#[test]
+fn reverse_sessionless_no_route_fib_stale_denies_12074() {
+    let (canonical, sessions, forward_key) = reverse_sessionless_no_route_fib_stale_12074(
+        false,
+        Some(crate::session::PolicyRevalidationKind::LiveEgress),
+    );
+    assert_eq!(
+        canonical,
+        Some(forward_key.clone()),
+        "the stored forward deny must revoke the authoritative pair",
+    );
+    assert!(sessions.entry_with_origin(&forward_key).is_some());
+}
+
+#[test]
+fn reverse_sessionless_no_route_fib_stale_nonlive_permits_12074() {
+    for kind in [
+        None,
+        Some(crate::session::PolicyRevalidationKind::Unvalidated),
+        Some(crate::session::PolicyRevalidationKind::RecordedEgress),
+    ] {
+        let (canonical, sessions, forward_key) =
+            reverse_sessionless_no_route_fib_stale_12074(true, kind);
+        assert_eq!(
+            canonical, None,
+            "a permitted non-Live NoLocalEntry companion keeps parent parity; kind={kind:?}",
+        );
+        let (_, _, _, generation) = sessions
+            .entry_with_origin_and_forwarding_generation(&forward_key)
+            .expect("the permitted forward row remains present");
+        assert!(
+            sessions.forwarding_resolution_is_stale(generation),
+            "a stored-pair NoRoute permit must not stamp the old forward resolution fresh; kind={kind:?}",
+        );
+    }
+
+}
+
+fn no_local_entry_current_route_12074(
+    current_kind: &str,
+    permit_new_zone: bool,
+) -> (
+    Option<SessionKey>,
+    SessionTable,
+    SessionKey,
+    ForwardingResolution,
+) {
+    let mut current = policy_deny_snapshot();
+    current.generation = 7;
+    current.fib_generation = 10;
+    current.routes.retain(|route| route.family != "inet");
+    current.policies.push(PolicyRuleSnapshot {
+        name: "lan-out".into(),
+        from_zone: "lan".into(),
+        to_zone: "wan".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["any".into()],
+        application_terms: Vec::new(),
+        action: "permit".into(),
+        ..Default::default()
+    });
+    match current_kind {
+        "dmz" => {
+            current.interfaces.push(InterfaceSnapshot {
+                name: "reth2.0".into(),
+                zone: "dmz".into(),
+                linux_name: "ge-0-0-2".into(),
+                ifindex: DMZ_IFINDEX,
+                egress_zone: "dmz".into(),
+                hardware_addr: "02:bf:72:02:00:01".into(),
+                addresses: vec![crate::InterfaceAddressSnapshot {
+                    family: "inet".into(),
+                    address: "203.0.113.1/24".into(),
+                    scope: 0,
+                }],
+                ..Default::default()
+            });
+            current.neighbors.push(NeighborSnapshot {
+                interface: "ge-0-0-2".into(),
+                ifindex: DMZ_IFINDEX,
+                family: "inet".into(),
+                ip: "203.0.113.2".into(),
+                mac: "00:aa:bb:cc:dd:ee".into(),
+                state: "reachable".into(),
+                router: true,
+                link_local: false,
+                ..Default::default()
+            });
+            current.routes.push(RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: format!("{FIB_MOVE_DST_12074}/32"),
+                next_hops: vec!["203.0.113.2@reth2.0".into()],
+                next_hop_weights: vec![],
+                discard: false,
+                next_table: String::new(),
+                preference: 0,
+                rule_priority: 0,
+                mtu: 0,
+            });
+            if permit_new_zone {
+                let mut permit = current
+                    .policies
+                    .iter()
+                    .find(|rule| rule.name == "lan-out")
+                    .expect("stored-pair permit")
+                    .clone();
+                permit.name = "lan-dmz".into();
+                permit.to_zone = "dmz".into();
+                current.policies.push(permit);
+            }
+        }
+        "local" => {
+            for interface in &mut current.interfaces {
+                if interface.ifindex == WAN_IFINDEX {
+                    interface.addresses.push(crate::InterfaceAddressSnapshot {
+                        family: "inet".into(),
+                        address: format!("{FIB_MOVE_DST_12074}/32"),
+                        scope: 0,
+                    });
+                }
+            }
+            if !permit_new_zone {
+                current.policies.clear();
+            }
+        }
+        _ => panic!("unexpected current route kind: {current_kind}"),
+    }
+    let forwarding = build_forwarding_state(&current);
+    let current_resolution = crate::afxdp::forwarding::lookup_forwarding_resolution(
+        &forwarding,
+        IpAddr::V4(FIB_MOVE_DST_12074),
+    );
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    let forward_key = flow_key_to(FIB_MOVE_DST_12074);
+    let reverse_key = crate::session::reverse_session_key(&forward_key, NatDecision::default());
+    assert!(sessions.install_with_protocol_with_origin(
+        forward_key.clone(),
+        decision(WAN_IFINDEX),
+        metadata(false),
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        PROTO_TCP,
+        TCP_ACK,
+    ));
+    sessions.mark_policy_revalidated(
+        &forward_key,
+        crate::session::PolicyRevalidationKind::LiveEgress,
+    );
+    assert_eq!(
+        sessions.policy_revalidation_target(&reverse_key),
+        crate::session::PolicyRevalidationTarget::NoLocalEntry,
+    );
+    let (_, _, _, old_generation) = sessions
+        .entry_with_origin_and_forwarding_generation(&forward_key)
+        .expect("local forward companion");
+    sessions.set_forwarding_revalidation_gen(7, 10);
+    assert!(
+        sessions.forwarding_resolution_is_stale(old_generation),
+        "the NoLocalEntry companion must start FIB-stale",
+    );
+    let canonical = super::poll_descriptor::revalidate_zone_policy_canonical_key_for_test(
+        &forwarding,
+        &mut sessions,
+        &reverse_key,
+        &metadata(true),
+        decision(LAN_IFINDEX),
+        Some(&SessionFlow {
+            src_ip: reverse_key.src_ip,
+            dst_ip: reverse_key.dst_ip,
+            forward_key: reverse_key.clone(),
+        }),
+        txn_meta_v4(WAN_IFINDEX as u32, TCP_ACK, 80),
+        false,
+    );
+    (canonical, sessions, forward_key, current_resolution)
+}
+
+#[test]
+fn reverse_no_local_entry_fib_stale_cross_zone_deny_re_resolves_12074() {
+    let (canonical, sessions, forward_key, current) =
+        no_local_entry_current_route_12074("dmz", false);
+    assert_eq!(
+        current.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "the current route must forward locally through dmz",
+    );
+    assert_eq!(current.egress_ifindex, DMZ_IFINDEX);
+    assert_eq!(canonical, Some(forward_key.clone()));
+    let (stored, _, _, generation) = sessions
+        .entry_with_origin_and_forwarding_generation(&forward_key)
+        .expect("the seam reports revocation without removing the pair");
+    assert_eq!(stored.resolution.egress_ifindex, WAN_IFINDEX);
+    assert!(
+        sessions.forwarding_resolution_is_stale(generation),
+        "a revoked deny must not persist the new route",
+    );
+}
+
+#[test]
+fn reverse_no_local_entry_fib_stale_cross_zone_permit_persists_12074() {
+    let (canonical, sessions, forward_key, current) =
+        no_local_entry_current_route_12074("dmz", true);
+    assert_eq!(current.disposition, ForwardingDisposition::ForwardCandidate);
+    assert_eq!(current.egress_ifindex, DMZ_IFINDEX);
+    assert_eq!(canonical, None);
+    let (stored, _, _, generation) = sessions
+        .entry_with_origin_and_forwarding_generation(&forward_key)
+        .expect("the permitted pair remains present");
+    assert_eq!(stored.resolution.egress_ifindex, DMZ_IFINDEX);
+    assert!(
+        !sessions.forwarding_resolution_is_stale(generation),
+        "a permitted current cross-zone route must be persisted FIB-fresh",
+    );
+}
+
+#[test]
+fn reverse_no_local_entry_local_delivery_stored_deny_revokes_12074() {
+    let (canonical, _, forward_key, current) =
+        no_local_entry_current_route_12074("local", false);
+    assert_eq!(current.disposition, ForwardingDisposition::LocalDelivery);
+    assert_eq!(canonical, Some(forward_key));
+}
+
+fn stale_live_reverse_fence_12074(
+    icmp: bool,
+    decline_ingress0: bool,
+    reverse_kind: crate::session::PolicyRevalidationKind,
+    fib_stale: bool,
+    permit: bool,
+) -> (
+    Option<SessionKey>,
+    SessionKey,
+    SessionKey,
+    bool,
+) {
+    let mut current = policy_deny_snapshot();
+    current.generation = 7;
+    current.fib_generation = if fib_stale { 10 } else { 9 };
+    current.routes.retain(|route| route.family != "inet");
+    if permit {
+        current.policies.push(PolicyRuleSnapshot {
+            name: "lan-out".into(),
+            from_zone: "lan".into(),
+            to_zone: "wan".into(),
+            source_addresses: vec!["any".into()],
+            destination_addresses: vec!["any".into()],
+            applications: vec!["any".into()],
+            application_terms: Vec::new(),
+            action: "permit".into(),
+            ..Default::default()
+        });
+    }
+    if icmp {
+        current.policies.push(junos_icmp_ping_permit());
+    }
+    let forwarding = build_forwarding_state(&current);
+    let proto = if icmp { PROTO_ICMP } else { PROTO_TCP };
+    if icmp {
+        assert!(forwarding.policy.icmp_verdict_may_depend_on_type(proto));
+    }
+    let base = flow_key_to(FIB_MOVE_DST_12074);
+    let forward_key = SessionKey {
+        protocol: proto,
+        src_port: if icmp { ICMP_ID } else { base.src_port },
+        dst_port: if icmp { 0 } else { base.dst_port },
+        ..base
+    };
+    let reverse_key =
+        crate::session::reverse_session_key(&forward_key, NatDecision::default());
+    let mut sessions = SessionTable::new();
+    sessions.set_policy_revalidation_gen(7);
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    let mut forward_metadata = metadata(false);
+    if decline_ingress0 {
+        forward_metadata.ingress_ifindex = 0;
+    }
+    let flags = if icmp { 0 } else { TCP_ACK };
+    assert!(sessions.install_with_protocol_with_origin(
+        forward_key.clone(),
+        decision(WAN_IFINDEX),
+        forward_metadata,
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        proto,
+        flags,
+    ));
+    assert!(sessions.install_with_protocol_with_origin(
+        reverse_key.clone(),
+        decision(LAN_IFINDEX),
+        metadata(true),
+        SessionOrigin::ReverseFlow,
+        1_000_000,
+        proto,
+        flags,
+    ));
+    sessions.mark_policy_revalidated(
+        &forward_key,
+        crate::session::PolicyRevalidationKind::LiveEgress,
+    );
+    sessions.mark_policy_revalidated(&reverse_key, reverse_kind);
+    if fib_stale {
+        sessions.set_forwarding_revalidation_gen(7, 10);
+    }
+    let gate = sessions.policy_revalidation_gate(
+        &reverse_key,
+        crate::session::PolicyGateCurrent::LocalForwarding,
+    );
+    let mut meta = txn_meta_v4(WAN_IFINDEX as u32, flags, 80);
+    meta.protocol = proto;
+    let canonical = super::poll_descriptor::revalidate_zone_policy_canonical_key_for_test(
+        &forwarding,
+        &mut sessions,
+        &reverse_key,
+        &metadata(true),
+        decision(LAN_IFINDEX),
+        Some(&SessionFlow {
+            src_ip: reverse_key.src_ip,
+            dst_ip: reverse_key.dst_ip,
+            forward_key: reverse_key.clone(),
+        }),
+        meta,
+        false,
+    );
+    let reverse_fenced = if icmp {
+        gate.fail_closed_icmp
+    } else {
+        gate.fail_closed_decline
+    };
+    (canonical, forward_key, reverse_key, reverse_fenced)
+}
+
+#[test]
+fn reverse_fib_stale_stored_pair_icmp_obeys_reverse_fence_12074() {
+    for reverse_kind in [
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        crate::session::PolicyRevalidationKind::Unvalidated,
+    ] {
+        let (canonical, _, reverse_key, fenced) =
+            stale_live_reverse_fence_12074(true, false, reverse_kind, true, true);
+        assert!(fenced, "fixture must carry a fenced reverse row: {reverse_kind:?}");
+        assert_eq!(
+            canonical,
+            Some(reverse_key),
+            "ICMP stored-pair judgment must retain the reverse row's #10507 fence: {reverse_kind:?}",
+        );
+    }
+}
+
+#[test]
+fn reverse_fib_stale_stored_pair_decline_obeys_reverse_fence_12074() {
+    for reverse_kind in [
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        crate::session::PolicyRevalidationKind::Unvalidated,
+    ] {
+        let (canonical, _, reverse_key, fenced) =
+            stale_live_reverse_fence_12074(false, true, reverse_kind, true, true);
+        assert!(fenced, "fixture must carry a fenced reverse row: {reverse_kind:?}");
+        assert_eq!(
+            canonical,
+            Some(reverse_key),
+            "Decline must retain the reverse row's #10507 fence: {reverse_kind:?}",
+        );
+    }
+}
+
+#[test]
+fn reverse_fib_stale_stored_pair_icmp_keeps_unfenced_reverse_12074() {
+    let (canonical, _, _, fenced) = stale_live_reverse_fence_12074(
+        true,
+        false,
+        crate::session::PolicyRevalidationKind::LiveEgress,
+        true,
+        true,
+    );
+    assert!(!fenced);
+    assert_eq!(canonical, None);
+}
+
+#[test]
+fn reverse_fib_stale_stored_pair_permit_and_deny_controls_12074() {
+    let (permit, _, _, _) = stale_live_reverse_fence_12074(
+        false,
+        false,
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        true,
+        true,
+    );
+    assert_eq!(permit, None, "the stored-pair Permit must retain the session");
+    let (deny, forward_key, _, _) = stale_live_reverse_fence_12074(
+        false,
+        false,
+        crate::session::PolicyRevalidationKind::RecordedEgress,
+        true,
+        false,
+    );
+    assert_eq!(
+        deny,
+        Some(forward_key),
+        "a stored-pair Deny still revokes the authoritative pair",
+    );
+}

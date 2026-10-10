@@ -2,10 +2,59 @@ package userspace
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
 )
+
+type deferredPolicySnapshotIdentity struct {
+	DefaultPolicy          string
+	Zones                  []ZoneSnapshot
+	AddressBooks           []AddressBookSnapshot
+	Policies               []PolicyRuleSnapshot
+	PolicyRematchExtensive bool
+	PolicyRenameAncestry   []PolicyRenameAncestry
+	PolicySessionRebinds   []PolicySessionRebind
+}
+
+func policySnapshotIdentity(snap *ConfigSnapshot) ([32]byte, bool) {
+	if snap == nil {
+		return [32]byte{}, false
+	}
+	if snap.policySnapshotIdentityValid {
+		return snap.policySnapshotIdentity, true
+	}
+	return refreshPolicySnapshotIdentity(snap)
+}
+
+func refreshPolicySnapshotIdentity(snap *ConfigSnapshot) ([32]byte, bool) {
+	if snap == nil {
+		return [32]byte{}, false
+	}
+	data, err := json.Marshal(deferredPolicySnapshotIdentity{
+		DefaultPolicy:          snap.DefaultPolicy,
+		Zones:                  snap.Zones,
+		AddressBooks:           snap.AddressBooks,
+		Policies:               snap.Policies,
+		PolicyRematchExtensive: snap.PolicyRematchExtensive,
+		PolicyRenameAncestry:   snap.PolicyRenameAncestry,
+		PolicySessionRebinds:   snap.PolicySessionRebinds,
+	})
+	if err != nil {
+		return [32]byte{}, false
+	}
+	snap.policySnapshotIdentity = sha256.Sum256(data)
+	snap.policySnapshotIdentityValid = true
+	return snap.policySnapshotIdentity, true
+}
+
+func invalidatePolicySnapshotIdentity(snap *ConfigSnapshot) {
+	if snap != nil {
+		snap.policySnapshotIdentityValid = false
+	}
+}
 
 func (m *Manager) syncSnapshotLocked() error {
 	if m.proc == nil || m.proc.Process == nil || m.lastSnapshot == nil {
@@ -318,6 +367,17 @@ func (m *Manager) prepareDeferredPolicySnapshotLocked() bool {
 		return true
 	}
 	generation := m.lastSnapshot.Generation
+	if m.applySnapshotOutcomeUnknown && m.policySnapshotPrepublishGeneration != 0 {
+		if identity, ok := policySnapshotIdentity(m.lastSnapshot); ok &&
+			identity == m.policySnapshotPrepublishIdentity {
+			// This policy/rename identity already passed the pre-publish capture
+			// before its first send. Its ACK was lost, so a partial neighbor,
+			// fabric, or FIB update may advance Generation without invalidating
+			// the proof. Never take a fresh positional-ID capture while authority
+			// is unknown; changed policy/rename identity does not match this stamp.
+			return true
+		}
+	}
 	callback := m.policySnapshotPrePublisher
 	m.mu.Unlock()
 	err := callback(generation)
@@ -327,8 +387,19 @@ func (m *Manager) prepareDeferredPolicySnapshotLocked() bool {
 			"generation", generation, "err", err)
 		return false
 	}
-	return m.pendingFullSnapshotMetadata && m.publishedSnapshot < generation &&
+	ready := m.pendingFullSnapshotMetadata && m.publishedSnapshot < generation &&
 		m.lastSnapshot != nil && m.lastSnapshot.Generation == generation
+	if ready {
+		identity, ok := policySnapshotIdentity(m.lastSnapshot)
+		if !ok {
+			slog.Warn("userspace deferred snapshot policy identity could not be stamped; will retry",
+				"generation", generation)
+			return false
+		}
+		m.policySnapshotPrepublishGeneration = generation
+		m.policySnapshotPrepublishIdentity = identity
+	}
+	return ready
 }
 
 func (m *Manager) statusLoop(ctx context.Context) {

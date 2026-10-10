@@ -2,29 +2,33 @@
 # #10136 — wire_routing_separation: live VRF-miss deny gate.
 #
 # The product-owned LAN ingress (reth1 / ge-0-0-1, XDP-owned, transit-fence
-# admitted) is the only offer path. The gate first sends the near-miss control
-# from the LAN host through its existing main-table VLAN-80 path. It then
-# creates an EMPTY RI and adds an exact-match input FBF term steering the probe
-# tuple into it. The clean leg therefore reaches the userspace route miss and
-# is denied. `WIRE_BROKEN_FIXTURE=1` inserts a temporary exact explicit
-# `accept` term ahead of the FBF steer at the userspace enforcement point, so
-# the same owned ingress follows main's already-proven VLAN-80 route and is
-# visible at the managed peer. This proves capture/verdict liveness for a
-# pre-steer bypass; it does not exercise fallthrough after an empty selected-VRF
-# lookup.
-# Both bursts run under one peer-side tcpdump window; successful sender
-# sendto calls are the offered-frame count. Sender and capture mirror
-# wire-conntrack-lifecycle: LAN host (cluster-userspace-host) offers, target
-# captures on eth0. The target is deliberately the managed peer, not the
-# host-side fence.
+# admitted) is the only offer path. The gate first sends an exact-tuple control
+# from the LAN host through its existing main-table VLAN-80 path, then creates
+# an EMPTY RI and commits an exact-match input FBF term for the probe tuple.
+#
+# After that commit, one sender interleaves an unsteered near-miss control
+# with the probe: same addresses, protocol, direction, and capture filter,
+# differing only in destination port, so only the probe selects the RI. The
+# probe reaches the userspace route miss and is denied. `WIRE_BROKEN_FIXTURE=1`
+# inserts a temporary exact explicit `accept` term ahead of the FBF steer,
+# sending the probe through the already-proven main-table route to the peer.
+# This does not exercise fallthrough after an empty selected-VRF lookup.
+# Both controls and the interleaved near-miss/probe run under one peer-side
+# tcpdump window; the near-miss supplies liveness during the probe and for the
+# first 100 controls immediately after it.
+# Successful sender sendto calls are the offered-frame count. Sender and
+# capture mirror wire-conntrack-lifecycle: LAN host offers, target captures on
+# eth0. The target is the managed peer, not the host-side fence.
 #
 # Usage:
 #   ./test/incus/wire-routing-separation.sh
 #   ./test/incus/wire-routing-separation.sh --fixture transcript.tsv
 #   ./test/incus/wire-routing-separation.sh --selftest
 #
-# Fixture format: one `probe_offered=N probe_leaked=N control_offered=N
-# control_observed=N cksum_bad=N` line. Exit: 0 PASS, 1 FAIL, 2 VOID.
+# Fixture format: one `probe_offered=N probe_leaked=N
+# precommit_control_offered=N precommit_control_observed=N
+# near_miss_offered=N near_miss_observed=N near_miss_tail_observed=N cksum_bad=N` line.
+# Exit: 0 PASS, 1 FAIL, 2 VOID. The tail covers the first 100 controls after probes.
 set -uo pipefail
 
 MODE=live
@@ -33,7 +37,7 @@ while (($#)); do
     case "$1" in
     --selftest) MODE=selftest ;;
     --fixture) MODE=fixture; shift; FIXTURE="${1:-}" ;;
-    -h|--help) sed -n '1,28p' "$0"; exit 0 ;;
+    -h|--help) sed -n '1,/^# Exit: 0 PASS/{p}' "$0"; exit 0 ;;
     -*) echo "unknown flag: $1" >&2; exit 2 ;;
     *) echo "unexpected argument: $1" >&2; exit 2 ;;
     esac
@@ -98,6 +102,39 @@ if [[ "$MODE" == selftest ]]; then
             fail=$((fail + 1))
         fi
     }
+    window_cell() {
+        local label="$1" want_v="$2" want_rc="$3"
+        shift 3
+        local out rc v
+        out=$(wire_routing_separation_window_verdict "$@")
+        rc=$?
+        v=$(awk '{print $3}' <<<"$out")
+        if [[ "$v" == "$want_v" && "$rc" == "$want_rc" &&
+            "$out" == WIRE_GATE\ wire_routing_separation\ * ]]; then
+            echo "  PASS  $label"
+            pass=$((pass + 1))
+        else
+            echo "  FAIL  $label (got '$out' rc=$rc)"
+            fail=$((fail + 1))
+        fi
+    }
+    reason_cell() {
+        local label="$1" want_reason="$2"
+        shift 2
+        local out rc v
+        out=$(wire_routing_separation_verdict "$@")
+        rc=$?
+        v=$(awk '{print $3}' <<<"$out")
+        if [[ "$v" == VOID && "$rc" == 2 &&
+            "$out" == *"reason=$want_reason"* &&
+            "$out" == WIRE_GATE\ wire_routing_separation\ * ]]; then
+            echo "  PASS  $label"
+            pass=$((pass + 1))
+        else
+            echo "  FAIL  $label (got '$out' rc=$rc)"
+            fail=$((fail + 1))
+        fi
+    }
     marker_cell() {
         local label="$1" want="$2" text="$3" got
         if cli_commit_succeeded "$text"; then got=0; else got=1; fi
@@ -147,20 +184,44 @@ if [[ "$MODE" == selftest ]]; then
         echo "  FAIL  cleanup finalizer shields restore"
         fail=$((fail + 1))
     fi
-    cell "clean VRF miss passes" PASS 0 1000 0 1500 1500 0
-    cell "observed probe leak fails" FAIL 1 1000 1 1500 1500 0
-    cell "missing near-miss capture is VOID" VOID 2 1000 0 1500 999 0
-    cell "short successful ingress burst is VOID" VOID 2 999 0 1500 1500 0
-    cell "leak survives an under-sampled probe offer" FAIL 1 999 1 1000 1000 0
-    cell "checksum corruption fails" FAIL 1 1000 0 1500 1500 1
-    cell "malformed count is VOID" VOID 2 x 0 1500 1500 0
+    cell "clean VRF miss passes" PASS 0 1000 0 1500 1500 0 1500 1500
+    cell "observed probe leak fails" FAIL 1 1000 1 1500 1500 0 1500 1500
+    reason_cell "precommit control cannot rescue suppressed post-commit near-miss" capture-blind \
+        1000 0 1500 1500 0 1500 0
+    reason_cell "precommit exact-tuple suppression is VOID despite live near-miss" env-void \
+        1000 0 1500 0 0 1500 1500
+    cell "short successful ingress burst is VOID" VOID 2 999 0 1500 1500 0 1500 1500
+    cell "leak survives an under-sampled probe offer" FAIL 1 999 1 1000 1000 0 1500 1500
+    cell "checksum corruption fails" FAIL 1 1000 0 1500 1500 1 1500 1500
+    cell "malformed count is VOID" VOID 2 x 0 1500 1500 0 1500 1500
+    window_cell "1000 early controls cannot replace post-probe tail liveness" VOID 2 \
+        0 1000 0 1500 1500 0 1500 1000
+    window_cell "one observed control in tail proves window liveness" PASS 0 \
+        1 1000 0 1500 1500 0 1500 1000
+    window_cell "probe leak fails without post-probe tail" FAIL 1 \
+        0 1000 1 1500 1500 0 1500 1000
+
+    if python3 "${SCRIPT_DIR}/wire-routing-separation-temporal-selftest.py"; then
+        echo "  PASS  post-near-miss outage cannot score PASS"
+        pass=$((pass + 1))
+    else
+        echo "  FAIL  post-near-miss outage regression"
+        fail=$((fail + 1))
+    fi
 
     # RED→GREEN proof through the fixture parser/emitter, not just a direct
-    # reducer call: the leak transcript must fail and the clean baseline pass.
+    # reducer call: stale precommit liveness must not rescue the post-commit
+    # near-miss absence; the leak transcript must fail and the clean fixture pass.
     good=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-good.XXXXXX")
     bad=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-bad.XXXXXX")
-    printf '%s\n' 'probe_offered=1000 probe_leaked=0 control_offered=1500 control_observed=1500 cksum_bad=0' >"$good"
-    printf '%s\n' 'probe_offered=1000 probe_leaked=1 control_offered=1500 control_observed=1500 cksum_bad=0' >"$bad"
+    blind=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-blind.XXXXXX")
+    late=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-late.XXXXXX")
+    missing_tail=$(mktemp "${TMPDIR:-/var/tmp}/xpf-10136-missing-tail.XXXXXX")
+    printf '%s\n' 'probe_offered=1000 probe_leaked=0 precommit_control_offered=1500 precommit_control_observed=1500 near_miss_offered=1500 near_miss_observed=1500 near_miss_tail_observed=99 cksum_bad=0' >"$good"
+    printf '%s\n' 'probe_offered=1000 probe_leaked=1 precommit_control_offered=1500 precommit_control_observed=1500 near_miss_offered=1500 near_miss_observed=1500 near_miss_tail_observed=99 cksum_bad=0' >"$bad"
+    printf '%s\n' 'probe_offered=1000 probe_leaked=0 precommit_control_offered=1500 precommit_control_observed=1500 near_miss_offered=1500 near_miss_observed=0 near_miss_tail_observed=0 cksum_bad=0' >"$blind"
+    printf '%s\n' 'probe_offered=1000 probe_leaked=0 precommit_control_offered=1500 precommit_control_observed=1500 near_miss_offered=1500 near_miss_observed=1000 near_miss_tail_observed=0 cksum_bad=0' >"$late"
+    sed 's/ near_miss_tail_observed=99//' "$good" >"$missing_tail"
     out=$("$0" --fixture "$bad"); rc=$?
     if [[ "$rc" == 1 && "$out" == *'WIRE_GATE wire_routing_separation FAIL reason=--'* ]]; then
         echo "  PASS  leaked-probe transcript fails"
@@ -169,15 +230,36 @@ if [[ "$MODE" == selftest ]]; then
         echo "  FAIL  leaked-probe transcript did not fail (rc=$rc out=$out)"
         fail=$((fail + 1))
     fi
-    out=$("$0" --fixture "$good"); rc=$?
-    if [[ "$rc" == 0 && "$out" == *'WIRE_GATE wire_routing_separation PASS reason=--'* ]]; then
-        echo "  PASS  clean fixture passes"
+    out=$("$0" --fixture "$blind"); rc=$?
+    if [[ "$rc" == 2 && "$out" == *'WIRE_GATE wire_routing_separation VOID reason=capture-blind'* &&
+        "$out" == *'control_observed=0'* && "$out" == *'precommit_control_observed=1500'* ]]; then
+        echo "  PASS  suppressed post-commit near-miss is VOID despite precommit control"
         pass=$((pass + 1))
     else
-        echo "  FAIL  clean fixture did not pass (rc=$rc out=$out)"
+        echo "  FAIL  suppressed near-miss fixture did not VOID (rc=$rc out=$out)"
         fail=$((fail + 1))
     fi
-    rm -f "$good" "$bad"
+    out=$("$0" --fixture "$good"); rc=$?
+    missing_out=$("$0" --fixture "$missing_tail"); missing_rc=$?
+    if [[ "$rc" == 0 && "$out" == *'WIRE_GATE wire_routing_separation PASS reason=--'* &&
+        "$missing_rc" == 2 &&
+        "$missing_out" == *'WIRE_GATE wire_routing_separation VOID reason=harness-void'* ]]; then
+        echo "  PASS  clean fixture passes; missing tail field is VOID"
+        pass=$((pass + 1))
+    else
+        echo "  FAIL  fixture tail-field behavior mismatch (good rc=$rc out=$out; missing rc=$missing_rc out=$missing_out)"
+        fail=$((fail + 1))
+    fi
+    out=$("$0" --fixture "$late"); rc=$?
+    if [[ "$rc" == 2 && "$out" == *'WIRE_GATE wire_routing_separation VOID reason=capture-blind'* &&
+        "$out" == *'control_observed=1000'* ]]; then
+        echo "  PASS  late outage cannot use 1000 earlier controls"
+        pass=$((pass + 1))
+    else
+        echo "  FAIL  late outage fixture did not VOID (rc=$rc out=$out)"
+        fail=$((fail + 1))
+    fi
+    rm -f "$good" "$bad" "$blind" "$late" "$missing_tail"
     echo "  wire-routing-separation selftest: $pass passed, $fail failed"
     [[ "$fail" -eq 0 && "$pass" -gt 0 ]] || exit 1
     exit 0
@@ -189,21 +271,24 @@ if [[ "$MODE" == fixture ]]; then
         exit 2
     fi
     parsed=$(wire_parse_transcript "$FIXTURE") || {
-        printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0\n'
+        printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0 precommit_control_offered=0 precommit_control_observed=0\n'
         exit 2
     }
     # shellcheck disable=SC2034
     eval "$parsed" || {
-        printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0\n'
+        printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0 precommit_control_offered=0 precommit_control_observed=0\n'
         exit 2
     }
-    po=${probe_offered:-} pl=${probe_leaked:-} co=${control_offered:-}
-    cb=${control_observed:-} ck=${cksum_bad:-0}
-    if [[ -z "$po" || -z "$pl" || -z "$co" || -z "$cb" ]]; then
-        printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0\n'
+    po=${probe_offered:-} pl=${probe_leaked:-}
+    pco=${precommit_control_offered:-} pcb=${precommit_control_observed:-}
+    nmo=${near_miss_offered:-} nmb=${near_miss_observed:-}
+    nmt=${near_miss_tail_observed:-} ck=${cksum_bad:-0}
+    if [[ -z "$po" || -z "$pl" || -z "$pco" || -z "$pcb" ||
+        -z "$nmo" || -z "$nmb" || -z "$nmt" ]]; then
+        printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0 precommit_control_offered=0 precommit_control_observed=0\n'
         exit 2
     fi
-    wire_routing_separation_verdict "$po" "$pl" "$co" "$cb" "$ck"
+    wire_routing_separation_window_verdict "$nmt" "$po" "$pl" "$pco" "$pcb" "$ck" "$nmo" "$nmb"
     exit $?
 fi
 
@@ -222,7 +307,7 @@ NODE1="${FW1:-${INCUS_REMOTE}:xpf-userspace-fw1}"
 TARGET="${TARGET:-${INCUS_REMOTE}:xpf-mouse-target}"
 RI_NAME="${RI_NAME:-wire-10136}"
 [[ "$RI_NAME" =~ ^[A-Za-z][A-Za-z0-9_-]{0,31}$ ]] || {
-    printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0\n'
+    printf 'WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0 precommit_control_offered=0 precommit_control_observed=0\n'
     exit 2
 }
 VRF_NAME="${VRF_NAME:-vrf-${RI_NAME}}"
@@ -237,8 +322,10 @@ LAN_ADDR="${LAN_ADDR%%/*}"
 # term ahead of it, exercising the actual userspace enforcement point.
 LAN_DEV="${LAN_DEV:-ge-0-0-1}"
 PORT="${PORT:-$((40000 + RANDOM % 20000))}"
+NEAR_MISS_PORT=""
 PROBE_BURST="${PROBE_BURST:-1000}"
 CONTROL_BURST="${CONTROL_BURST:-1500}"
+NEAR_MISS_TAIL_SIZE=100
 RATE="${RATE:-500}"
 STEP_TIMEOUT="${STEP_TIMEOUT:-120}"
 REMOTE_PROBE="/tmp/xpf-wire-routing-probe-10136-${BASHPID}"
@@ -354,9 +441,9 @@ RULE_SNAPSHOT=""
 RULE_2000=""
 TABLE_SNAPSHOT=""
 LAN_MASTER_SNAPSHOT=""
-WIRE_GATE_RESTORE_VOID='WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0'
+WIRE_GATE_RESTORE_VOID='WIRE_GATE wire_routing_separation VOID reason=harness-void probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0 precommit_control_offered=0 precommit_control_observed=0'
 void_now() {
-    WIRE_GATE_FINAL_OUT="WIRE_GATE wire_routing_separation VOID reason=$1 probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0"
+    WIRE_GATE_FINAL_OUT="WIRE_GATE wire_routing_separation VOID reason=$1 probe_offered=0 probe_leaked=0 control_offered=0 control_observed=0 cksum_bad=0 precommit_control_offered=0 precommit_control_observed=0"
     WIRE_GATE_FINAL_RC=2
     exit 2
 }
@@ -450,6 +537,16 @@ grep -q '^set firewall family inet filter sfmix-pbr term default ' "$BASE0_NORM"
 [[ "$PORT" =~ ^[0-9]+$ && "$PORT" -ge 1 && "$PORT" -le 65535 &&
     "$PROBE_BURST" =~ ^[0-9]+$ && "$CONTROL_BURST" =~ ^[0-9]+$ ]] ||
     void_now harness-void
+PORT=$((10#$PORT))
+((10#$CONTROL_BURST >= 10#$PROBE_BURST + NEAR_MISS_TAIL_SIZE)) ||
+    void_now harness-void
+NEAR_MISS_TAIL_START_SEQ=$((10#$PROBE_BURST))
+NEAR_MISS_TAIL_END_SEQ=$((10#$PROBE_BURST + NEAR_MISS_TAIL_SIZE - 1))
+if ((PORT == 65535)); then
+    NEAR_MISS_PORT=65534
+else
+    NEAR_MISS_PORT=$((PORT + 1))
+fi
 if remote "ip link show ${VRF_NAME}" >/dev/null 2>&1; then void_now env-void; fi
 RULE_SNAPSHOT="$(remote 'ip -4 rule show' 2>/dev/null || true)"
 RULE_2000="$(remote 'ip -4 rule show pref 2000' 2>/dev/null || true)"
@@ -478,15 +575,18 @@ REMOTE_PROBE_OWNED=1
 $SG "incus file push --mode 0755 ${SCRIPT_DIR}/wire_routing_probe.py ${LAN_REF}${REMOTE_PROBE}" ||
     void_now harness-void
 
-# ── Phase 1: same owned LAN ingress, control then empty-RI probe ─────
+# ── Phase 1: exact control, then post-commit near-miss and empty-RI probe ─
 CAPLOG="$(mktemp "${TMPDIR:-/var/tmp}/xpf-wire-routing-cap.XXXXXX")" || void_now harness-void
-$SG "incus exec ${TARGET} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -vv -A -s 0 udp and dst host ${DEST_IP} and dst port ${PORT}" >"$CAPLOG" 2>&1 &
+$SG "incus exec ${TARGET} -- timeout ${STEP_TIMEOUT} tcpdump -i eth0 -nn -vv -A -s 0 'udp and dst host ${DEST_IP} and (dst port ${PORT} or dst port ${NEAR_MISS_PORT})'" >"$CAPLOG" 2>&1 &
 CAP_PID=$!
 sleep 2
 kill -0 "$CAP_PID" >/dev/null 2>&1 || void_now no-prober
 MAIN_ROUTE_ARGS="ip -4 route get ${DEST_IP} from ${LAN_ADDR} iif ${LAN_DEV} ipproto udp sport ${PORT} dport ${PORT}"
 MAIN_LOOKUP="$(remote "${MAIN_ROUTE_ARGS} 2>&1 || true")"
 [[ "$MAIN_LOOKUP" == *"${EGRESS_DEV}"* ]] || void_now env-void
+NEAR_MISS_ROUTE_ARGS="ip -4 route get ${DEST_IP} from ${LAN_ADDR} iif ${LAN_DEV} ipproto udp sport ${PORT} dport ${NEAR_MISS_PORT}"
+NEAR_MISS_LOOKUP="$(remote "${NEAR_MISS_ROUTE_ARGS} 2>&1 || true")"
+[[ "$NEAR_MISS_LOOKUP" == *"${EGRESS_DEV}"* ]] || void_now env-void
 SENT_CONTROL="$($SG "incus exec ${LAN_REF} -- ${REMOTE_PROBE} --src ${LAN_ADDR} --source-port ${PORT} --dst ${DEST_IP} --port ${PORT} --count ${CONTROL_BURST} --tag C --rate ${RATE}" 2>&1 || true)"
 sleep 1
 
@@ -538,7 +638,14 @@ if [[ -n "${WIRE_BROKEN_FIXTURE:-}" ]]; then
     MAIN_LOOKUP="$(remote "${MAIN_ROUTE_ARGS} 2>&1 || true")"
     [[ "$MAIN_LOOKUP" == *"${EGRESS_DEV}"* ]] || void_now env-void
 fi
-SENT_PROBE="$($SG "incus exec ${LAN_REF} -- ${REMOTE_PROBE} --src ${LAN_ADDR} --source-port ${PORT} --dst ${DEST_IP} --port ${PORT} --count ${PROBE_BURST} --tag P --rate ${RATE}" 2>&1 || true)"
+# The near miss differs from the steered probe only by destination port, so the
+# committed exact-match FBF term leaves it on the verified main-table route.
+SENT_INTERLEAVED="$($SG "incus exec ${LAN_REF} -- ${REMOTE_PROBE} \
+    --src ${LAN_ADDR} --source-port ${PORT} --dst ${DEST_IP} \
+    --port ${PORT} --count ${PROBE_BURST} --tag P --interleave \
+    --interleave-control-port ${NEAR_MISS_PORT} \
+    --interleave-control-count ${CONTROL_BURST} \
+    --interleave-control-tag N --rate ${RATE}" 2>&1 || true)"
 sleep 3
 if ! kill -0 "$CAP_PID" >/dev/null 2>&1; then
     void_now no-prober
@@ -556,17 +663,26 @@ extract_sent() {
     value=$(sed -n "s/.*SENT tag=${tag} count=\([0-9][0-9]*\).*/\1/p" <<<"$text" | tail -1)
     [[ "$value" =~ ^[0-9]+$ ]] && printf '%s\n' "$value" || printf '0\n'
 }
-POFFERED="$(extract_sent P "$SENT_PROBE")"
+POFFERED="$(extract_sent P "$SENT_INTERLEAVED")"
 COFFERED="$(extract_sent C "$SENT_CONTROL")"
+NEAR_MISS_OFFERED="$(extract_sent N "$SENT_INTERLEAVED")"
 PLEAKED="$(grep -cE 'P10136:[0-9]+:' "$CAPLOG" 2>/dev/null || true)"
 COBSERVED="$(grep -cE 'C10136:[0-9]+:' "$CAPLOG" 2>/dev/null || true)"
+NEAR_MISS_OBSERVED="$(grep -cE 'N10136:[0-9]+:' "$CAPLOG" 2>/dev/null || true)"
+NEAR_MISS_TAIL_OBSERVED="$(grep -oE 'N10136:[0-9]+:' "$CAPLOG" 2>/dev/null |
+    sed 's/^N10136:\([0-9][0-9]*\):$/\1/' |
+    awk -v first="$NEAR_MISS_TAIL_START_SEQ" -v last="$NEAR_MISS_TAIL_END_SEQ" \
+        '$1 >= first && $1 <= last { count++ } END { print count + 0 }')"
 CKSUM="$(grep -ciE 'bad (udp|ip) (cksum|checksum)' "$CAPLOG" 2>/dev/null || true)"
 rm -f "$CAPLOG"
 [[ "$PLEAKED" =~ ^[0-9]+$ ]] || PLEAKED=0
 [[ "$COBSERVED" =~ ^[0-9]+$ ]] || COBSERVED=0
+[[ "$NEAR_MISS_OFFERED" =~ ^[0-9]+$ ]] || NEAR_MISS_OFFERED=0
+[[ "$NEAR_MISS_OBSERVED" =~ ^[0-9]+$ ]] || NEAR_MISS_OBSERVED=0
+[[ "$NEAR_MISS_TAIL_OBSERVED" =~ ^[0-9]+$ ]] || NEAR_MISS_TAIL_OBSERVED=0
 [[ "$CKSUM" =~ ^[0-9]+$ ]] || CKSUM=0
-printf 'offered: probe=%s control=%s observed: probe=%s control=%s cksum_bad=%s archive=%s\n' \
-    "$POFFERED" "$COFFERED" "$PLEAKED" "$COBSERVED" "$CKSUM" "$ARCHIVE_DIR"
-WIRE_GATE_FINAL_OUT="$(wire_routing_separation_verdict "$POFFERED" "$PLEAKED" "$COFFERED" "$COBSERVED" "$CKSUM")"
+printf 'offered: probe=%s precommit_control=%s near_miss=%s observed: probe=%s precommit_control=%s near_miss=%s near_miss_tail=%s cksum_bad=%s archive=%s\n' \
+    "$POFFERED" "$COFFERED" "$NEAR_MISS_OFFERED" "$PLEAKED" "$COBSERVED" "$NEAR_MISS_OBSERVED" "$NEAR_MISS_TAIL_OBSERVED" "$CKSUM" "$ARCHIVE_DIR"
+WIRE_GATE_FINAL_OUT="$(wire_routing_separation_window_verdict "$NEAR_MISS_TAIL_OBSERVED" "$POFFERED" "$PLEAKED" "$COFFERED" "$COBSERVED" "$CKSUM" "$NEAR_MISS_OFFERED" "$NEAR_MISS_OBSERVED")"
 WIRE_GATE_FINAL_RC=$?
 exit "$WIRE_GATE_FINAL_RC"

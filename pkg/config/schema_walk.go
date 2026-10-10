@@ -1013,6 +1013,21 @@ func validateScalarValueLeaf(node *Node, leafSchema *schemaNode, parentPath []st
 		return fmt.Errorf("%s: unexpected trailing token %q (this leaf takes %d value token(s); the extra token would be silently dropped)",
 			strings.Join(redactSecretPath(leafPath), " "), node.Keys[allowed], leafSchema.args)
 	}
+	// #12093: a scalar leaf that opts into blockValue also accepts the
+	// single-child block spelling `keyword { value; }` — the same
+	// singleBlockValue() shape as the #6774 typed-leaf exception (exactly
+	// one child token, non-empty, no grandchildren, no trailing keys).
+	// The compiler deliberately honours `input { f1; }` on the interface
+	// filter bindings (#10293 pins it compiling to f1), so strict commit
+	// must accept what compiles. Other scalar leaves stay rejected: the
+	// opt-in is scoped to the four filter bindings, and — unlike
+	// `default-policy { deny-all; }` — this spelling is not verified as
+	// Junos-emitted, so it must not spread by default.
+	if leafSchema.blockValue && len(node.Keys) == 1 {
+		if _, ok := singleBlockValue(node); ok {
+			return nil
+		}
+	}
 	for _, c := range node.Children {
 		if c == nil || len(c.Keys) == 0 {
 			continue

@@ -174,6 +174,14 @@ func TestApplySnapshotHasOneSendSite9520(t *testing.T) {
 	if err != nil {
 		t.Fatalf("glob: %v", err)
 	}
+	// This one constant is an explicit exception for the cross-package
+	// recovery fixture. Its request-type literal must stay at package scope
+	// in test_seams.go and may only be consumed by that fixture's constructor.
+	requestTypeAllowlist := map[string]string{
+		"policySnapshotRecoveryApplySnapshotTypeForTest": "NewPolicySnapshotRecoveryFixtureForTest",
+	}
+	requestTypeConstants := make(map[string]int)
+	requestTypeUses := make(map[string]int)
 	var outside []string
 	inWrapper := 0
 	for _, path := range paths {
@@ -185,11 +193,45 @@ func TestApplySnapshotHasOneSendSite9520(t *testing.T) {
 			t.Fatalf("parse %s: %v", path, err)
 		}
 		for _, decl := range f.Decls {
+			if gen, ok := decl.(*ast.GenDecl); ok && gen.Tok == token.CONST {
+				for _, spec := range gen.Specs {
+					values, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for i, name := range values.Names {
+						if i >= len(values.Values) {
+							continue
+						}
+						lit, ok := values.Values[i].(*ast.BasicLit)
+						if !ok || lit.Kind != token.STRING || lit.Value != `"apply_snapshot"` {
+							continue
+						}
+						if _, allowed := requestTypeAllowlist[name.Name]; !allowed ||
+							filepath.Base(path) != "test_seams.go" {
+							t.Errorf("unreviewed package-level apply_snapshot request type in %s: %s",
+								path, name.Name)
+							continue
+						}
+						requestTypeConstants[name.Name]++
+					}
+				}
+			}
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
 				continue
 			}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok {
+					if expectedFn, allowed := requestTypeAllowlist[id.Name]; allowed {
+						if fn.Name.Name != expectedFn {
+							t.Errorf("allowlisted request type %s used outside %s: %s",
+								id.Name, expectedFn, fn.Name.Name)
+						} else {
+							requestTypeUses[id.Name]++
+						}
+					}
+				}
 				lit, ok := n.(*ast.BasicLit)
 				if !ok || lit.Kind != token.STRING || lit.Value != `"apply_snapshot"` {
 					return true
@@ -201,6 +243,12 @@ func TestApplySnapshotHasOneSendSite9520(t *testing.T) {
 				}
 				return true
 			})
+		}
+	}
+	for name, fn := range requestTypeAllowlist {
+		if requestTypeConstants[name] != 1 || requestTypeUses[name] != 1 {
+			t.Errorf("allowlisted request type %s: package constant declarations=%d, uses in %s=%d; want exactly one of each",
+				name, requestTypeConstants[name], fn, requestTypeUses[name])
 		}
 	}
 	if inWrapper == 0 {

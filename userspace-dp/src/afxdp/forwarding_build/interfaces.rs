@@ -884,6 +884,11 @@ pub(super) fn populate_interfaces(
                     }
                     if excluded_local_v4.contains(&v4.addr()) {
                         state.interface_nat_v4.insert(v4.addr(), iface.ifindex);
+                        state
+                            .interface_nat_tables_v4
+                            .entry(v4.addr())
+                            .or_default()
+                            .insert(connected_table_v4.clone());
                     } else {
                         state.local_v4.insert(v4.addr());
                         registered_local = true;
@@ -936,6 +941,11 @@ pub(super) fn populate_interfaces(
                     }
                     if excluded_local_v6.contains(&v6.addr()) {
                         state.interface_nat_v6.insert(v6.addr(), iface.ifindex);
+                        state
+                            .interface_nat_tables_v6
+                            .entry(v6.addr())
+                            .or_default()
+                            .insert(connected_table_v6.clone());
                     } else {
                         state.local_v6.insert(v6.addr());
                         registered_local = true;

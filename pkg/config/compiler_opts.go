@@ -399,6 +399,15 @@ type compileOpts struct {
 	// tunnel) is rejected. Same doctrine as lenientDeviceMap /
 	// lenientPolicyMatchAddress.
 	lenientIPsecGatewayRefs bool
+	// lenientIPsecGatewayVRF12089 downgrades an effective IPsec gateway
+	// local-address sourced from a non-default routing-instance (VPN
+	// local-address, gateway local-address, then external-interface-derived)
+	// from a strict commit error to a warning on tolerant load / peer-sync
+	// paths. strongSwan's IKE socket and the parentless xfrmi are not scoped
+	// to that instance, so their outer traffic can use the wrong routing
+	// table. Existing configs still boot with a warning per the #1960
+	// fail-closed-on-load doctrine.
+	lenientIPsecGatewayVRF12089 bool
 
 	// lenientIKEPolicyChainRef (#2270, #10879) downgrades IKE policy
 	// reference and multi-proposal connection-setting consistency checks from
@@ -2648,6 +2657,10 @@ type compileOpts struct {
 	// authoring order. Same doctrine as lenientPolicyCommunityRef.
 	lenientPolicyASPathRegex    bool
 	lenientPolicyCommunityRegex bool // #8449: sibling of the as-path gate; see lenientPolicyASPathRegex
+	// lenientPolicyThenOperands downgrades the compiled #12070 policy operand
+	// gate to a warning for tolerant loads; the FRR renderer independently
+	// omits invalid next-hop/prepend clauses so an existing config still boots.
+	lenientPolicyThenOperands bool
 	// lenientPolicyReservedRedistName (#5116/#12065) downgrades the reserved
 	// route-map-suffix gate (validatePolicyReservedRedistNameStrict) from a
 	// hard compile error to a cfg.Warnings entry. Generated source-protocol
@@ -3118,6 +3131,7 @@ func lenientCompileOpts() compileOpts {
 		lenientCoSForwardingClassQueue:         true,
 		lenientCoSFairnessRSSExpectation:       true,
 		lenientIPsecGatewayRefs:                true,
+		lenientIPsecGatewayVRF12089:            true,
 		lenientIKEPolicyChainRef:               true,
 		lenientIPsecEndpoints:                  true,
 		lenientIPsecSANameCollision:            true,
@@ -3303,6 +3317,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyASPathRef:                 true,
 		lenientPolicyASPathRegex:               true,
 		lenientPolicyCommunityRegex:            true,
+		lenientPolicyThenOperands:              true,
 		lenientPolicyReservedRedistName:        true,
 		lenientPolicyReservedChainName:         true,
 		lenientVRRPVirtualAddress:              true,

@@ -15,16 +15,18 @@ import (
 // emitted as sanitized-but-invalid FRR prefixes. Inline route-filter entries
 // already use the same fail-closed ParseCIDR posture (#2105).
 //
-// #4498 completes coverage for the remaining sanitized route-map slots. This
-// test drives a newline payload through each one, verifies no injected
-// top-level command appears, and checks malformed prefix-list entries and
-// community set values are omitted:
+// #4498 catalogued the route-map slots whose malformed values had only a
+// sanitize-on-one-line belt. Later typed gates made next-hop and prepend
+// invalid operands fail-closed (#12070), and origin fail-closed (#4919);
+// those clauses are separately asserted omitted below. This test still
+// checks the remaining sanitized source-protocol slot and the name/literal
+// slots that have their own safe rendering rules:
 //
 //   - malformed IPv4 / IPv6 policy-options prefix-list entries (#10823)
 //   - match community / match as-path                   (#4482)
 //   - set community (replace / additive)                (#12069)
-//   - set comm-list delete / set as-path prepend         (#4482)
-//   - set ip / ipv6 next-hop / origin / source-protocol   (#4498)
+//   - set comm-list delete                              (#4482)
+//   - match source-protocol                             (#4498, sanitized)
 //
 // The NAME slots render through frrName rather than sanitizeFRRValue; their
 // assertions below keep the injected values bounded to one FRR token.

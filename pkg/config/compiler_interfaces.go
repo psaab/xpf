@@ -679,11 +679,13 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 								unit.SamplingOutput = true
 							}
 						}
-						if filterNode := afNode.FindChild("filter"); filterNode != nil {
-							if inputNode := filterNode.FindChild("input"); inputNode != nil {
+						for _, filterNode := range afNode.FindChildren("filter") {
+							// Preserve flat-set replacement semantics for repeated
+							// scalar filter leaves in hierarchical text.
+							for _, inputNode := range filterNode.FindChildren("input") {
 								unit.FilterInputV4 = nodeVal(inputNode)
 							}
-							if outputNode := filterNode.FindChild("output"); outputNode != nil {
+							for _, outputNode := range filterNode.FindChildren("output") {
 								unit.FilterOutputV4 = nodeVal(outputNode)
 							}
 						}
@@ -745,11 +747,11 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 								unit.SamplingOutput = true
 							}
 						}
-						if filterNode := afNode.FindChild("filter"); filterNode != nil {
-							if inputNode := filterNode.FindChild("input"); inputNode != nil {
+						for _, filterNode := range afNode.FindChildren("filter") {
+							for _, inputNode := range filterNode.FindChildren("input") {
 								unit.FilterInputV6 = nodeVal(inputNode)
 							}
-							if outputNode := filterNode.FindChild("output"); outputNode != nil {
+							for _, outputNode := range filterNode.FindChildren("output") {
 								unit.FilterOutputV6 = nodeVal(outputNode)
 							}
 						}

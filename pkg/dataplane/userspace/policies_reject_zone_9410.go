@@ -103,13 +103,17 @@ func collectPolicyZoneRejections(policies []PolicyRuleSnapshot, zones []ZoneSnap
 	for i := range policies {
 		rule := &policies[i]
 		// #9570: a zone-pair stanza naming the reserved `junos-global` sentinel.
-		// Checked FIRST, because the both-sided spelling satisfies the global
-		// predicate's zone strings and the half spelling would otherwise be
-		// reported as an ordinary undefined zone. Neither describes what the
-		// helper does with the builder's poison: it refuses the snapshot on the
-		// sentinel application term before it indexes any zone.
+		// It has dedicated poison because the helper classifies its wire strings
+		// as a GLOBAL rule before zone resolution.
 		if rule.zonePairGlobalSentinelSide != "" {
 			reasons = append(reasons, globalSentinelZoneRejectionReason9570(rule))
+			continue
+		}
+		// #12249: a zone-pair `any` becomes dangerous only when that token is
+		// ALSO defined as a zone and thus omitted by quarantine. The policy
+		// builder poisons this rule so the helper cannot widen it to a wildcard.
+		if rule.zonePairDefinedAnySide != "" {
+			reasons = append(reasons, definedAnyZonePairRejectionReason12249(rule))
 			continue
 		}
 		if isGlobalPolicyRule9410(rule) {

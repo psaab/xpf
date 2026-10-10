@@ -186,3 +186,55 @@ func TestPeerHeartbeatFreshLocked_ReceiverWiring(t *testing.T) {
 		t.Fatal("seam must take precedence over the receiver")
 	}
 }
+
+// A heartbeat can be admitted after the daemon guard's stamp clear but before
+// that guard finishes storing its first suppression timestamp. The timeout
+// path must re-check freshness even when the guard suppresses, then clear that
+// late stamp before it returns.
+func TestHandlePeerTimeout_SuppressedGuardClearsLateHeartbeatStamp12165(t *testing.T) {
+	m := NewManager(0, 1)
+	var heartbeatFresh atomic.Bool
+	var suppressionStart atomic.Int64
+
+	m.mu.Lock()
+	m.peerAlive = true
+	m.peerEverSeen = true
+	m.peerHeartbeatFreshFn = heartbeatFresh.Load
+	m.mu.Unlock()
+	m.SetPeerHeartbeatRecoveredFunc(func() {
+		suppressionStart.Store(0)
+	})
+
+	guardStarted := make(chan struct{})
+	releaseGuard := make(chan struct{})
+	m.SetPeerTimeoutGuard(func() (bool, string) {
+		close(guardStarted)
+		<-releaseGuard
+		// Model the daemon guard storing its first stamp after heartbeat
+		// admission cleared it.
+		suppressionStart.Store(1)
+		return true, "recent session-sync traffic"
+	})
+
+	done := make(chan struct{})
+	go func() {
+		m.handlePeerTimeout()
+		close(done)
+	}()
+	<-guardStarted
+
+	// The receiver advances lastSeen before dispatching the packet to the
+	// Manager, so expose freshness and admit the heartbeat while the guard is
+	// blocked outside m.mu.
+	heartbeatFresh.Store(true)
+	m.handlePeerHeartbeat(&HeartbeatPacket{NodeID: 1})
+	close(releaseGuard)
+	<-done
+
+	if got := suppressionStart.Load(); got != 0 {
+		t.Fatalf("suppression stamp after a fresh heartbeat during a suppressing guard = %d, want cleared", got)
+	}
+	if !m.PeerAlive() {
+		t.Fatal("fresh heartbeat during the suppressing guard must keep the peer alive")
+	}
+}
