@@ -230,12 +230,14 @@ class ManifestProvenanceBindingTests(_EnvGuard):
     `base_image_pinned` provenance. build_manifest_text is the pure assembler
     main() writes, so we assert the fields without a full bake."""
 
-    def _text(self, *, base_pinned, validated):
+    def _text(self, *, base_pinned, validated, source_dirty=False,
+              version="9.9.9-test"):
         return bake.build_manifest_text(
-            ver="9.9.9-test", commit="deadbeef",
+            ver=version, commit="deadbeef",
             base_url="https://mirror.invalid/rel", base_img="ubuntu.img",
             rel="26.04", base_sha=FAKE, base_pinned=base_pinned,
-            validated=validated, bake_date="2026-01-01T00:00:00Z",
+            validated=validated, source_dirty=source_dirty,
+            bake_date="2026-01-01T00:00:00Z",
             kernel="6.18.0-test", guest_kernel="7.0.0-15-generic")
 
     def test_base_digest_and_pin_bound(self):
@@ -260,7 +262,8 @@ class ManifestProvenanceBindingTests(_EnvGuard):
                 ver="9.9.9-test", commit="deadbeef",
                 base_url="https://mirror.invalid/rel", base_img="ubuntu.img",
                 rel="26.04", base_sha=FAKE, base_pinned=True,
-                validated=True, bake_date="2026-01-01T00:00:00Z",
+                validated=True, source_dirty=False,
+                bake_date="2026-01-01T00:00:00Z",
                 kernel="6.18.0-test")
 
     def test_validated_true_and_false(self):
@@ -270,6 +273,31 @@ class ManifestProvenanceBindingTests(_EnvGuard):
                       self._text(base_pinned=True, validated=False))
         self.assertIn("base_image_pinned: false\n",
                       self._text(base_pinned=False, validated=True))
+
+    def test_source_dirty_is_independent_of_package_version(self):
+        clean_package_dirty_checkout = self._text(
+            base_pinned=True, validated=True, source_dirty=True)
+        dirty_package_clean_checkout = self._text(
+            base_pinned=True, validated=True, version="9.9.9-test.dirty")
+        self.assertIn("version: 9.9.9-test\n", clean_package_dirty_checkout)
+        self.assertIn("source_dirty: true\n", clean_package_dirty_checkout)
+        self.assertIn("version: 9.9.9-test.dirty\n",
+                      dirty_package_clean_checkout)
+        self.assertIn("source_dirty: false\n", dirty_package_clean_checkout)
+
+    def test_dirty_field_is_in_the_checksum_payload(self):
+        text = self._text(
+            base_pinned=True, validated=True, source_dirty=True,
+            version="9.9.9-test.dirty")
+        with tempfile.TemporaryDirectory() as tmp:
+            sidecar = Path(tmp) / "xpf-9.9.9-test.dirty.manifest"
+            sums = Path(tmp) / "xpf-9.9.9-test.dirty.SHA256SUMS"
+            sidecar.write_text(text)
+            bake.sign.write_manifest(str(sums), [str(sidecar)])
+            signed_hashes = bake.sign.parse_manifest(str(sums))
+            self.assertEqual(
+                signed_hashes[sidecar.name],
+                hashlib.sha256(sidecar.read_bytes()).hexdigest())
 
 
 class InventoryWiringTests(unittest.TestCase):

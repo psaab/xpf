@@ -51,8 +51,9 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 
-# Signed-distribution helpers (#1924) live under scripts/dist.
+sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(ROOT, "scripts", "dist"))
+import build_provenance  # noqa: E402  (#12141, #12158)
 import image_inventory  # noqa: E402  (#6500 inventory format)
 from bridge_floor_10171 import bridge_floor_offline_snippet  # noqa: E402  (#10171)
 from seed_layout_10771 import seeded_runtime_layout_snippet  # noqa: E402  (#10771)
@@ -244,21 +245,28 @@ def out_text(argv):
     return subprocess.run(argv, check=True, capture_output=True, text=True).stdout
 
 
-def deb_version_for_head():
+def deb_version_for_head(root=ROOT):
     """Mirror Makefile's default DEB_VERSION for the current checkout."""
     try:
-        count = out_text(["git", "-C", ROOT, "rev-list", "--count", "HEAD"]).strip()
+        count = out_text(["git", "-C", root, "rev-list", "--count", "HEAD"]).strip()
         commit = out_text(
-            ["git", "-C", ROOT, "rev-parse", "--short=12", "HEAD"]).strip()
-        dirty = subprocess.run(
-            ["git", "-C", ROOT, "diff", "--quiet"]).returncode
+            ["git", "-C", root, "rev-parse", "--short=12", "HEAD"]).strip()
     except (OSError, subprocess.CalledProcessError) as e:
         die(f"cannot derive the current Debian package version: {e}")
     if not count.isdigit() or not re.fullmatch(r"[0-9a-f]{12,40}", commit):
         die("git returned an invalid commit identity for the Debian package version")
-    if dirty not in (0, 1):
-        die("cannot determine whether the Debian package source is dirty")
+    try:
+        dirty = build_provenance.source_tree_dirty(root)
+    except build_provenance.ProvenanceError as e:
+        die(f"cannot attest current build inputs: {e}")
     return f"0.0.{count}+g{commit}{'.dirty' if dirty else ''}"
+
+
+def require_current_build_version(requested, expected):
+    """Do not let explicit --version label a build with another tree's identity."""
+    if requested != expected:
+        die(f"requested package version {requested!r} does not match current "
+            f"build provenance {expected!r}")
 
 
 def deb_commit_from_version(version):
@@ -1149,7 +1157,7 @@ def assert_live_matches_manifest(live_files, sums_path, snapshot):
 
 
 def build_manifest_text(*, ver, commit, base_url, base_img, rel, base_sha,
-                        base_pinned, validated, bake_date, kernel,
+                        base_pinned, validated, source_dirty, bake_date, kernel,
                         guest_kernel, proto_lines=""):
     """Assemble the xpf-<ver>.manifest sidecar text (key: value lines).
 
@@ -1159,6 +1167,12 @@ def build_manifest_text(*, ver, commit, base_url, base_img, rel, base_sha,
         gate passes. A --skip-validate bake binds false. The publish gate
         REQUIRES validated: true, so a signed-but-unvalidated dev/emergency
         image is no longer indistinguishable from a release.
+
+      - `source_dirty` (#12141, #12158): whether current checkout inputs copied
+        into the image differ from HEAD or include a consumed untracked input.
+        It is independent of the selected Debian package version: --skip-build
+        can install a clean prebuilt package while copying dirty image scripts
+        from the current checkout.
 
       - `base_image_pinned` (#4904 B): whether the Ubuntu base was authenticated
         against the repo-pinned trust-anchor digest (bound alongside the base
@@ -1176,6 +1190,7 @@ def build_manifest_text(*, ver, commit, base_url, base_img, rel, base_sha,
     """
     return (
         f"version: {ver}\n"
+        f"source_dirty: {'true' if source_dirty else 'false'}\n"
         f"git_commit: {commit}\n"
         f"base_image: {base_url}/{base_img}\n"
         f"base_release: {rel}\n"
@@ -1198,8 +1213,23 @@ def main():
     p.add_argument("--skip-validate", action="store_true")
     p.add_argument("--keep-work", action="store_true")
     a = p.parse_args()
-    if a.version is None:
-        a.version = deb_version_for_head()
+    # Package identity comes from the selected package; source_dirty binds the
+    # current checkout inputs that this bake (including --skip-build) copies.
+    source_version = deb_version_for_head(ROOT)
+    source_dirty = source_version.endswith(".dirty")
+    if a.skip_build and a.version is not None:
+        # The prebuilt package owns package identity, but current image inputs
+        # still come from this checkout. Keep those two provenance facts apart.
+        expected_version = a.version
+    else:
+        expected_version = os.environ.get("DEB_VERSION", source_version)
+        if expected_version.endswith(".dirty") != source_dirty:
+            die(f"DEB_VERSION {expected_version!r} has dirty provenance inconsistent "
+                f"with the source tree ({source_version!r})")
+        if a.version is None:
+            a.version = expected_version
+        elif not a.skip_build:
+            require_current_build_version(a.version, expected_version)
     # --version is the xpf Debian package version which names the image set.
     # Refuse unsafe paths before they name any xpf-<ver>.* artifact.
     validate_version(a.version, "--version")
@@ -1237,6 +1267,10 @@ def main():
         if not a.skip_build:
             info("building xpf .deb (xpfd, cli, xpf-userspace-dp -> staged)...")
             run(["make", "-C", ROOT, "deb"])
+            # Recheck the source observation itself. DEB_VERSION selects the
+            # requested package identity before build; it must not override a
+            # fresh post-build observation of source drift.
+            require_current_build_version(a.version, deb_version_for_head(ROOT))
         # Pick only the package whose filename and dpkg metadata match the
         # release identity. Never let filesystem mtime choose the code that
         # gets installed into an image labelled with --version.
@@ -1390,6 +1424,7 @@ def main():
         manifest_fields = dict(
             ver=ver, commit=commit, base_url=base_url, base_img=base_img,
             rel=rel, base_sha=base_sha, base_pinned=base_pinned,
+            source_dirty=source_dirty,
             bake_date=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             kernel=os.uname().release, guest_kernel=guest_kernel,
             proto_lines=proto_lines)

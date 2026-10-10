@@ -278,6 +278,10 @@ class MainValidationGateTests(unittest.TestCase):
                 if argv[0] == "virt-cat":
                     return "unused by mocked inventory parser"
                 if argv[0] == "git":
+                    if argv[3] == "rev-list":
+                        return "1\n"
+                    if argv[3] == "rev-parse" and "--short=12" in argv:
+                        return "123456789abc\n"
                     raise subprocess.CalledProcessError(128, argv)
                 if argv[-1] == "protocol-versions":
                     return "ha-protocol-version=1\n"
@@ -285,7 +289,8 @@ class MainValidationGateTests(unittest.TestCase):
 
             def subprocess_run(argv, **kwargs):
                 subprocess_calls.append(argv)
-                return SimpleNamespace(returncode=1)
+                return SimpleNamespace(
+                    returncode=1, stdout=b"", stderr=b"")
 
             def sign(out_dir, sums, ver, snapshot, work):
                 sign_calls.append(ver)
@@ -369,6 +374,10 @@ class MainValidationGateTests(unittest.TestCase):
                 if argv[0] == "virt-cat":
                     return "unused by mocked inventory parser"
                 if argv[0] == "git":
+                    if argv[3] == "rev-list":
+                        return "1\n"
+                    if argv[3] == "rev-parse" and "--short=12" in argv:
+                        return "123456789abc\n"
                     raise subprocess.CalledProcessError(128, argv)
                 if argv[-1] == "protocol-versions":
                     return "ha-protocol-version=1\n"
@@ -376,7 +385,8 @@ class MainValidationGateTests(unittest.TestCase):
 
             def subprocess_run(argv, **kwargs):
                 subprocess_calls.append(argv)
-                return SimpleNamespace(returncode=0)
+                return SimpleNamespace(
+                    returncode=0, stdout=b"", stderr=b"")
 
             with (
                 patch.object(bake.argparse.ArgumentParser, "parse_args",

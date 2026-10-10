@@ -1571,11 +1571,16 @@ loss-cluster-restart:
 # project's git tags are non-numeric (e.g. userspace-forwarding-ok-*),
 # so synthesize 0.0.<commit-count>+g<short-sha>[.dirty] — monotonic in
 # commit count, carries the exact source sha, and is policy-valid.
+# The shared probe compares tracked files with HEAD, scans untracked package/
+# image inputs, and asks Go for the compiled inputs of `build`/`build-ctl` so
+# ignored sources consumed by the compiler are included. Unattestable GOFLAGS
+# redirections are refused; bake.py uses the same probe.
+#
 DEB_GIT_COUNT ?= $(shell git rev-list --count HEAD 2>/dev/null || echo 0)
 DEB_GIT_SHA   ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
-DEB_GIT_DIRTY ?= $(shell git diff --quiet 2>/dev/null || echo .dirty)
+DEB_GIT_DIRTY ?= $(shell python3 "$(CURDIR)/scripts/image/build_provenance.py" \
+  --dirty-suffix --root "$(CURDIR)")
 DEB_VERSION ?= 0.0.$(DEB_GIT_COUNT)+g$(DEB_GIT_SHA)$(DEB_GIT_DIRTY)
-# DEB_OUT is a build-STAGING dir and MUST live OUTSIDE the image publish root
 # `dist/` (HB165 H-5): `make image` runs `make deb` and `make dist-publish`
 # uploads the WHOLE `dist/` tree to the image URL, so a deb staged under
 # `dist/` would ship unsigned. publish.py's default-deny sweep now REFUSES any
@@ -1584,6 +1589,15 @@ DEB_OUT ?= $(CURDIR)/dist-deb
 
 .PHONY: deb
 deb:
+	@source_dirty=$$(python3 "$(CURDIR)/scripts/image/build_provenance.py" \
+	  --dirty-suffix --root "$(CURDIR)") || { \
+	    echo "FATAL: provenance probe refused the build" >&2; exit 1; }; \
+	  version_dirty=; \
+	  case "$(DEB_VERSION)" in *.dirty) version_dirty=.dirty;; esac; \
+	  if [ "$$source_dirty" != "$$version_dirty" ]; then \
+	    echo "FATAL: DEB_VERSION dirty suffix disagrees with source inputs" >&2; \
+	    exit 1; \
+	  fi
 	@echo "==> xpf .deb version: $(DEB_VERSION)"
 	@# Run the whole build inside ONE shell with a trap so the changelog
 	@# version is ALWAYS restored to the committed 0.0.0 and the parent-dir
