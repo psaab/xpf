@@ -1194,6 +1194,11 @@ func (s *Store) fireConfirmTimer(gen uint64) {
 // leaves that path's behavior unchanged (store reverts, dataplane is not
 // re-applied). The #1817 confirmGen guard and #1799 persist-failure
 // semantics are preserved verbatim.
+//
+// Before this promotion, the daemon's first-commit timeout path durably writes
+// a host-auth closeout obligation through BeginFirstCommitHostAuthCloseout.
+// The ordering is intentional: once the empty never-committed active state is
+// durable, a crash between host-auth owners must still leave replay intent.
 func (s *Store) PromoteRollback(gen uint64) (prevCfg *config.Config, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

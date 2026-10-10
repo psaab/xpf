@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
-
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
+	"log/slog"
+	"time"
 )
 
 // bootstrapFromFile reads the text Junos config file and imports it as the
@@ -1037,6 +1037,27 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 		return
 	}
 
+	closeoutIntentDurable := false
+	if firstCommitRollback {
+		written, err := d.store.BeginFirstCommitHostAuthCloseout(gen)
+		if err != nil {
+			// Without a durable intent, promoting would make a process crash
+			// indistinguishable from a completed retirement on next boot.
+			// Leave the confirmed window pending and retry the rollback
+			// transaction after storage has had a chance to recover.
+			slog.Error("could not persist first-commit host-auth closeout intent before rollback promotion; rollback will retry",
+				"err", err)
+			time.AfterFunc(time.Second, func() { d.executeConfirmedRollback(gen) })
+			return
+		}
+		if !written {
+			// The confirm window was superseded between the pre-flight and
+			// this durable-intent gate; do not promote or retire stale state.
+			return
+		}
+		closeoutIntentDurable = true
+	}
+
 	d.pendingRenameMu.Lock()
 	prevCfg, ok := d.store.PromoteRollback(gen)
 	d.pendingRenameMu.Unlock()
@@ -1098,10 +1119,16 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 		// commit rollback. The store flag, not prevCfg nilness, distinguishes
 		// that case from a recovered non-first target that failed compilation.
 		if firstCommitRollback {
-			if err := d.applyBootstrapHostAuthorizationCloseout(activeCfg); err != nil {
+			closeoutErr := d.applyBootstrapHostAuthorizationCloseout(activeCfg)
+			if closeoutErr != nil {
 				slog.Error("commit-confirmed first-commit rollback to bootstrap mode is DEGRADED: "+
 					"host-authorization owners did not fully converge; xpf-owned host-auth state may remain live",
-					"err", err)
+					"err", closeoutErr)
+			} else if closeoutIntentDurable {
+				if err := d.store.CompleteFirstCommitHostAuthCloseout(gen); err != nil {
+					slog.Error("first-commit host-auth closeout converged but its durable replay obligation could not be cleared",
+						"err", err)
+				}
 			}
 		}
 		d.reconcileManagementAfterPromotion(activeCfg,

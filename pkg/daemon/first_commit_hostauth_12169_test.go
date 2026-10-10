@@ -218,6 +218,15 @@ func TestFirstCommitRollbackRetiresOwnedHostAuth12169(t *testing.T) {
 	// Fire the rollback timer's executor branch deterministically: the
 	// first-commit timeout reverts the store to the empty tree and rolls
 	// the daemon back to bootstrap mode.
+	// Model the state after the first apply completed its input-guard
+	// handoff. Rollback must reset both the in-memory and durable completion
+	// state before bootstrapping again.
+	if err := d.setEarlyInputHandoffDone(); err != nil {
+		t.Fatalf("seed completed first-apply handoff: %v", err)
+	}
+	if !d.earlyInputHandoffDone.Load() || !EarlyInputHandoffMarked() {
+		t.Fatal("post-first-apply handoff premise was not seeded")
+	}
 	s.InvokeRollbackTimerForTesting(s.ConfirmGenForTesting())
 
 	if !d.inBootstrap() {

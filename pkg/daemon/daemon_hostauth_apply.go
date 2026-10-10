@@ -492,6 +492,11 @@ func (d *Daemon) reconcileSudoers(cfg *config.Config) (err error) {
 		if _, keep := desired[name]; keep {
 			continue
 		}
+		user := strings.TrimPrefix(name, sudoersPrefix)
+		if d.liveDesiredSudoersGrant12169(user) {
+			staleRevocationSuperseded12169("remove-sudoers-grant", user)
+			continue
+		}
 		path := filepath.Join(sudoersDir, name)
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			slog.Warn("failed to revoke stale sudoers grant",
@@ -499,6 +504,14 @@ func (d *Daemon) reconcileSudoers(cfg *config.Config) (err error) {
 			fail(fmt.Errorf("revoke stale sudoers grant %s: %w", name, err))
 		} else if err == nil {
 			slog.Info("revoked stale super-user sudo grant", "file", name)
+			// Close the check/unlink race: a promotion that landed during
+			// os.Remove must have its grant restored before this owner ends.
+			if d.liveDesiredSudoersGrant12169(user) {
+				staleRevocationSuperseded12169("repair-sudoers-grant", user)
+				if live := d.liveConfig12169(); live != nil {
+					fail(d.reconcileSudoers(live))
+				}
+			}
 		}
 	}
 	return err
@@ -632,6 +645,15 @@ func (d *Daemon) reconcileUserPassword(user *config.LoginUser) (err error) {
 			slog.Info("user encrypted-password applied", "user", user.Name)
 		}
 	case pwLock:
+		// A timed-out rollback owner may resume after a new config re-presents
+		// this account. Never lock a password the live config desires; if the
+		// stale lock operation was already in flight, synchronously re-apply
+		// the live password before returning.
+		if superseded, err := d.repairStalePasswordLock12169(user.Name); superseded {
+			fail(err)
+			break
+		}
+
 		// Only lock the exact account whose PASSWORD xpf provisioned (password
 		// marker) — never an account xpf touched solely for its SSH key (#5841).
 		ownsPassword, ownErr := false, error(nil)
@@ -650,14 +672,29 @@ func (d *Daemon) reconcileUserPassword(user *config.LoginUser) (err error) {
 		if !uidOK || !ownsPassword {
 			break
 		}
+		// Re-read after the ownership lookup as well: a confirmed commit may
+		// have promoted this password since the earlier fence above.
+		if live, desiredNow := d.liveDesiredPasswordUser12169(user.Name); desiredNow &&
+			live.EncryptedPassword.Reveal() != "" {
+			staleRevocationSuperseded12169("lock-password", user.Name)
+			fail(d.reconcileUserPassword(&live))
+			break
+		}
 		stdin := strings.NewReader(user.Name + ":!\n")
-		if out, err := runCommandStdinTimeout(stdin, "chpasswd", "-e"); err != nil {
+		out, lockErr := runCommandStdinTimeout(stdin, "chpasswd", "-e")
+		if lockErr != nil {
 			slog.Warn("failed to lock user password",
-				"user", user.Name, "err", err, "output", strings.TrimSpace(string(out)))
-			fail(fmt.Errorf("lock password for %s: %w", user.Name, err))
+				"user", user.Name, "err", lockErr, "output", strings.TrimSpace(string(out)))
+			fail(fmt.Errorf("lock password for %s: %w", user.Name, lockErr))
 		} else {
 			slog.Info("user password locked (no encrypted-password in config)",
 				"user", user.Name)
+		}
+		// Even an errored/timed-out child may have changed shadow before
+		// returning. Repair the live password on every exit, preserving any
+		// original lock error as a separate closeout failure.
+		if superseded, repairErr := d.repairStalePasswordLock12169(user.Name); superseded {
+			fail(repairErr)
 		}
 	}
 	return err
@@ -735,6 +772,13 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 		}
 	}
 	content := buildSSHDConfig(ssh)
+	if content == "" {
+		if live := d.liveConfig12169(); live != nil && live.System.Services != nil &&
+			buildSSHDConfig(live.System.Services.SSH) != "" {
+			staleRevocationSuperseded12169("remove-sshd-dropin", "sshd")
+			return d.applySSHConfig(live)
+		}
+	}
 
 	// Read the prior content once: needed both to skip no-op writes and to
 	// restore the file if a reload fails after we change it.
@@ -751,6 +795,13 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 	hadDropIn := priorReadable || !os.IsNotExist(priorErr)
 	// Remove the former, later-sorting drop-in during the cutover. A failed
 	// removal must fail the apply rather than silently leave an inert policy.
+	if content == "" {
+		if live := d.liveConfig12169(); live != nil && live.System.Services != nil &&
+			buildSSHDConfig(live.System.Services.SSH) != "" {
+			staleRevocationSuperseded12169("remove-sshd-dropin", "sshd")
+			return d.applySSHConfig(live)
+		}
+	}
 	legacyPath := sshdLegacyConfPath()
 	legacyPresent := false
 	if legacyPath != sshdConfPath {
@@ -778,6 +829,11 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 		// manual restart or a reboot. The retained debt is the only record, so
 		// it joins the gate here and is re-driven by
 		// serviceReloadDebtReassertLoop.
+		if live := d.liveConfig12169(); live != nil && live.System.Services != nil &&
+			buildSSHDConfig(live.System.Services.SSH) != "" {
+			staleRevocationSuperseded12169("remove-sshd-dropin", "sshd")
+			return d.applySSHConfig(live)
+		}
 		if !hadDropIn && !legacyPresent && !d.sshdReloadOwed() {
 			return nil
 		}
@@ -795,7 +851,17 @@ func (d *Daemon) applySSHConfig(cfg *config.Config) (retErr error) {
 				"is gone but sshd has not re-read its configuration — will retry",
 				"err", err, "output", strings.TrimSpace(string(out)))
 			fail(fmt.Errorf("reload sshd after removing drop-in: %w", err))
+			if live := d.liveConfig12169(); live != nil && live.System.Services != nil &&
+				buildSSHDConfig(live.System.Services.SSH) != "" {
+				staleRevocationSuperseded12169("repair-sshd-dropin-after-reload-error", "sshd")
+				fail(d.applySSHConfig(live))
+			}
 			return
+		}
+		if live := d.liveConfig12169(); live != nil && live.System.Services != nil &&
+			buildSSHDConfig(live.System.Services.SSH) != "" {
+			staleRevocationSuperseded12169("repair-sshd-dropin", "sshd")
+			return d.applySSHConfig(live)
 		}
 		slog.Info("SSH config drop-in removed (reverted to defaults)")
 		return nil
@@ -1115,24 +1181,43 @@ func (d *Daemon) applyRootAuth(cfg *config.Config) (retErr error) {
 			"keys and NOT reporting convergence", "err", rootOwnErr)
 		fail(fmt.Errorf("determine root key ownership: %w", rootOwnErr))
 	} else if rootOwnsKeys {
-		// Empty/absent key list AND xpf wrote root's keys: revoke the xpf-managed
-		// root authorized_keys so removing the keys from config actually disables
-		// key-based root login. The KEY marker gate leaves an operator-installed
-		// key file xpf never wrote untouched — provenance-scoped removal,
-		// mirroring applySystemLogin's emptied-key-list branch +
-		// deprovisionLoginUser (the whole file is xpf-owned when the marker
-		// matches). #5276/#5841.
-		keysFile := rootAuthorizedKeysPath()
-		switch err := os.Remove(keysFile); {
-		case err == nil:
-			slog.Info("revoked root SSH keys (root-authentication keys removed from config)")
-			_ = removeProvenanceMarker(provisionedKeysDir(), "root")
-		case os.IsNotExist(err):
-			_ = removeProvenanceMarker(provisionedKeysDir(), "root")
-		default:
-			slog.Warn("failed to remove root authorized_keys after key list emptied",
-				"file", keysFile, "err", err)
-			fail(fmt.Errorf("revoke root authorized_keys: %w", err))
+		// A timed-out rollback owner may resume after root keys were
+		// re-presented. Keep the live keys and ownership marker, repairing
+		// them if a promotion raced the removal.
+		liveRootAuth := d.liveDesiredRootAuth12169()
+		if liveRootAuth != nil && len(liveRootAuth.SSHKeys) > 0 {
+			staleRevocationSuperseded12169("remove-root-keys", "root")
+			if live := d.liveConfig12169(); live != nil {
+				fail(d.applyRootAuth(live))
+			}
+		} else {
+			keysFile := rootAuthorizedKeysPath()
+			switch err := os.Remove(keysFile); {
+			case err == nil:
+				slog.Info("revoked root SSH keys (root-authentication keys removed from config)")
+			case os.IsNotExist(err):
+			default:
+				slog.Warn("failed to remove root authorized_keys after key list emptied",
+					"file", keysFile, "err", err)
+				fail(fmt.Errorf("revoke root authorized_keys: %w", err))
+				return retErr
+			}
+			if current := d.liveDesiredRootAuth12169(); current != nil && len(current.SSHKeys) > 0 {
+				staleRevocationSuperseded12169("repair-root-keys", "root")
+				if live := d.liveConfig12169(); live != nil {
+					fail(d.applyRootAuth(live))
+				}
+			} else {
+				fail(removeProvenanceMarker(provisionedKeysDir(), "root"))
+				// A promotion can race the key-marker unlink itself. Re-run
+				// root auth to restore the live key and ownership claim.
+				if current := d.liveDesiredRootAuth12169(); current != nil && len(current.SSHKeys) > 0 {
+					staleRevocationSuperseded12169("restore-root-keys-after-marker-cleanup", "root")
+					if live := d.liveConfig12169(); live != nil {
+						fail(d.applyRootAuth(live))
+					}
+				}
+			}
 		}
 	}
 	return retErr
