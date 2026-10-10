@@ -604,6 +604,15 @@ func (m *Manager) applyAliasBindingRowsLocked(
 					binding.QueueID, uint32(bindingQueuesPerIface), childIfindex, parentIfindex,
 				))
 			}
+			// Ifindex-dimension bound (#9698), BEFORE the multiply. The child
+			// ifindex can wrap uint32(child)*stride back inside the dense cap,
+			// so the #814 check below would pass and overwrite another row.
+			if !bindingIfindexInRange(int(childIfindex)) {
+				return newBindingIndices, m.failClosedUserspaceCtrlLocked(ctrlMap, ctrl, fmt.Errorf(
+					"update aliased userspace_bindings: child ifindex=%d exceeds cap MaxInterfaces=%d (parent=%d queue=%d); child ifindex*stride would wrap the uint32 composed index onto another interface's row — raise MAX_INTERFACES in bpf/headers/xpf_common.h if the ifindex is real (#9698)",
+					childIfindex, dataplane.MaxInterfaces, parentIfindex, binding.QueueID,
+				))
+			}
 			idx := childIfindex*bindingQueuesPerIface + binding.QueueID
 			// Call-site cap guard (#814): see primary apply above.
 			// VLAN-alias children use their own ifindex here, so the
