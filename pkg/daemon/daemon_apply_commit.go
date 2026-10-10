@@ -1025,6 +1025,10 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// #4234 deletion-clear: a rollback that removes a policy the abandoned commit
 	// added must drop that policy's sessions, same as any commit.
 	oldActive := d.store.ActiveConfig()
+	// #12169: capture the store's recorded origin before PromoteRollback
+	// consumes it; nil compiled targets also arise from recovered non-first
+	// windows whose rollback config no longer compiles (#6538).
+	_, firstCommitRollback, _ := d.store.PendingRollbackTarget(gen)
 
 	// #9615: a window recovered across a restart, possibly by a newer build,
 	// was never pre-flighted here, and a feed-bound target may simply not be
@@ -1089,7 +1093,18 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 		// abandoned. The empty active resolves to the --api-addr flag default
 		// (loopback, no credential), which is exactly the endpoint the reverted
 		// config implies.
-		d.reconcileManagementAfterPromotion(d.store.ActiveConfig(),
+		activeCfg := d.store.ActiveConfig()
+		// #12169: retire host authorization only for the recorded first-
+		// commit rollback. The store flag, not prevCfg nilness, distinguishes
+		// that case from a recovered non-first target that failed compilation.
+		if firstCommitRollback {
+			if err := d.applyBootstrapHostAuthorizationCloseout(activeCfg); err != nil {
+				slog.Error("commit-confirmed first-commit rollback to bootstrap mode is DEGRADED: "+
+					"host-authorization owners did not fully converge; xpf-owned host-auth state may remain live",
+					"err", err)
+			}
+		}
+		d.reconcileManagementAfterPromotion(activeCfg,
 			"first commit-confirmed timeout reverted to bootstrap")
 		// #3868: no peer re-sync here. This branch reverts a FIRST commit on a
 		// fresh store to the empty tree + bootstrap mode; the reverted active

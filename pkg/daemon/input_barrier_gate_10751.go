@@ -196,6 +196,19 @@ func (d *Daemon) ensureEarlyInputBootstrapGuard() {
 		"lifelines", lifelines)
 }
 
+// rearmEarlyInputBootstrapGuard marks the daemon pre-handoff again and installs
+// the lifeline-admitting guard. A first-confirm rollback returns a daemon to
+// bootstrap after the ordinary first apply removed this guard; nft teardown
+// must not leave the bootstrap daemon without it.
+func (d *Daemon) rearmEarlyInputBootstrapGuard() error {
+	d.earlyInputHandoffDone.Store(false)
+	d.ensureEarlyInputBootstrapGuard()
+	if d.EarlyInputGuardSwapFailed() {
+		return errors.New("bootstrap lifeline input guard could not be installed")
+	}
+	return nil
+}
+
 // sampleHostInboundSnapshots samples the interface address rows for the
 // host-inbound apply path. A package var so handoff-race tests can script
 // address transitions between the install sample, the handoff re-sample,
