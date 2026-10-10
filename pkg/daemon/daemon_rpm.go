@@ -377,6 +377,10 @@ func (d *Daemon) verifyProbePinsLocked(pins []routing.ProbePin) {
 		return
 	}
 	failed := d.probePinFailuresExceptAdminDownEgress(pins, verify(pins))
+	// Retire installer-failure history that authoritative readback disproves:
+	// without this, a later independent readback-only drift re-triggers an
+	// immediate full-band retry off stale history (Astra R5-confirmation M1).
+	d.rpmPinInstallFailures = retainProbePinInstallFailures(d.rpmPinInstallFailures, failed)
 	if len(failed) > 0 && !d.rpmPinsFailed {
 		slog.Warn("kernel probe pin drift detected — affected tests held until retry",
 			"failed", len(failed))

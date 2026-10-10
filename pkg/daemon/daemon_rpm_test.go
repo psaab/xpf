@@ -377,6 +377,78 @@ func TestReconcileRPMDetectsMissingKernelPinWithoutHashChange12088(t *testing.T)
 		t.Fatalf("drift detection reinstalled before retry interval: apply calls=%d, want 1", gotApplyCalls)
 	}
 }
+func TestReadbackRecoveryRetiresInstallerFailureHistory12088(t *testing.T) {
+	// Astra R5-confirmation M1: healthy readback must retire historical
+	// installer failures, or a later independent drift triggers an
+	// immediate full-band retry off stale history.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := &Daemon{
+		rpm:                   rpm.New(),
+		daemonCtx:             ctx,
+		probePinRetryEvery:    time.Hour,
+		probePinEgressStateFn: func(string) probePinEgressState { return probePinEgressUp },
+	}
+	defer d.rpm.StopAll()
+	defer d.stopPinRetryLoop()
+
+	var mu sync.Mutex
+	routePresent := false
+	installFails := true
+	var applyCalls int
+	d.probePinApply = func([]routing.ProbePin) map[string]error {
+		mu.Lock()
+		defer mu.Unlock()
+		applyCalls++
+		if installFails {
+			return map[string]error{"WAN/t": fmt.Errorf("installer refused")}
+		}
+		routePresent = true
+		return nil
+	}
+	d.probePinVerify = func(pins []routing.ProbePin) map[string]error {
+		mu.Lock()
+		defer mu.Unlock()
+		if routePresent {
+			return nil
+		}
+		return map[string]error{"WAN/t": fmt.Errorf("pinned route missing")}
+	}
+
+	cfg := rpmPinnedTestConfig()
+	if !d.reconcileRPM(cfg) {
+		t.Fatal("first reconcile must apply")
+	}
+	if got := len(d.rpmPinInstallFailures); got != 1 {
+		t.Fatalf("failed install must record history: got %d", got)
+	}
+	// Repair externally: install now succeeds and the kernel pin is healthy.
+	mu.Lock()
+	installFails = false
+	routePresent = true
+	mu.Unlock()
+	d.verifyProbePinsLocked(routing.BuildProbePins(cfg.Services.RPM, nil))
+	if got := len(d.rpmPinInstallFailures); got != 0 {
+		t.Fatalf("healthy readback must retire installer history: got %d", got)
+	}
+	// Later independent drift: kernel deletes the route; unchanged-hash
+	// reconcile must publish the hold WITHOUT an immediate reinstall.
+	mu.Lock()
+	routePresent = false
+	applyBefore := applyCalls
+	mu.Unlock()
+	if d.reconcileRPM(cfg) {
+		t.Fatal("unchanged RPM hash must not restart probes")
+	}
+	if got := d.rpm.PinInstallFailureCount(); got != 1 {
+		t.Fatalf("drift must hold: failures=%d", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if applyCalls != applyBefore {
+		t.Fatalf("drift reinstalled off stale history: apply calls %d -> %d", applyBefore, applyCalls)
+	}
+}
 
 func TestProbePinFailuresReleaseOnlyOnAdminDownEgress12088(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
