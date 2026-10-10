@@ -324,9 +324,9 @@ func TestReconcileRPMDetectsMissingKernelPinWithoutHashChange12088(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	d := &Daemon{
-		rpm:                  rpm.New(),
-		daemonCtx:            ctx,
-		probePinRetryEvery:   time.Hour,
+		rpm:                   rpm.New(),
+		daemonCtx:             ctx,
+		probePinRetryEvery:    time.Hour,
 		probePinEgressStateFn: func(string) probePinEgressState { return probePinEgressUp },
 	}
 	defer d.rpm.StopAll()
@@ -397,9 +397,9 @@ func TestProbePinFailuresReleaseOnlyOnAdminDownEgress12088(t *testing.T) {
 		stateMu.Unlock()
 	}
 	d := &Daemon{
-		rpm:                  rpm.New(),
-		daemonCtx:            ctx,
-		probePinRetryEvery:   time.Hour,
+		rpm:                   rpm.New(),
+		daemonCtx:             ctx,
+		probePinRetryEvery:    time.Hour,
 		probePinEgressStateFn: egressLookup,
 	}
 	d.probePinApply = func([]routing.ProbePin) map[string]error {
@@ -488,11 +488,11 @@ func TestProbePinRetryLoopResubscribesAndResyncsOnClosedSubscriptions12088(t *te
 	cfg := rpmPinnedTestConfig()
 	var linkSubscriptions, addrSubscriptions, verifyCalls atomic.Int32
 	d := &Daemon{
-		rpm:                  rpm.New(),
-		daemonCtx:            ctx,
-		rpmEffective:         cfg.Services.RPM,
-		probePinRetryEvery:   time.Hour,
-		probePinResubBackoff: time.Millisecond,
+		rpm:                   rpm.New(),
+		daemonCtx:             ctx,
+		rpmEffective:          cfg.Services.RPM,
+		probePinRetryEvery:    time.Hour,
+		probePinResubBackoff:  time.Millisecond,
 		probePinEgressStateFn: func(string) probePinEgressState { return probePinEgressUp },
 		probePinVerify: func([]routing.ProbePin) map[string]error {
 			verifyCalls.Add(1)
