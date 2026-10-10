@@ -5,9 +5,9 @@ import (
 	"sort"
 )
 
-// validateAddressBookCIDRMaskSpellingStrict rejects address-book prefixes whose
-// redundant mask digits are preserved on the wire. Address-book and policy
-// literals use canonical decimal masks so Go and userspace paths cannot diverge.
+// validateAddressBookCIDRMaskSpellingStrict rejects address-book prefixes with
+// leading-zero mask spellings the userspace helper cannot parse. Supported
+// padded forms remain valid, so Go commits and userspace publication agree.
 // It runs on pristine global and zone-local books so diagnostics name the
 // authored entry before zone-local folding.
 func validateAddressBookCIDRMaskSpellingStrict(cfg *Config) error {
@@ -33,7 +33,7 @@ func validateAddressBookCIDRMaskSpellingStrict(cfg *Config) error {
 				continue
 			}
 			return fmt.Errorf(
-				"%s address-book address %q has CIDR prefix %q with redundant leading-zero mask digits; policy CIDR masks must use canonical decimal spelling (#12047)",
+				"%s address-book address %q has CIDR prefix %q with redundant leading-zero mask digits refused by the userspace helper (#12047)",
 				scope, name, value)
 		}
 		return nil

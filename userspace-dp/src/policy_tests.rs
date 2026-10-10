@@ -6,6 +6,60 @@
 use super::*;
 use crate::test_zone_ids::*;
 
+#[test]
+fn padded_policy_masks_match_helper_ipnet_grammar_12178() {
+    for (prefix, accepted, expect_v4) in [
+        ("10.0.0.0/08", true, true),
+        ("2001:db8::/032", true, false),
+        ("2001:db8::/064", true, false),
+        ("2001:db8::/024", true, false),
+        ("10.0.0.0/024", false, true),
+        ("2001:db8::/0064", false, false),
+    ] {
+        let mut v4 = Vec::new();
+        let mut v6 = Vec::new();
+        assert_eq!(
+            parse_address(prefix, &mut v4, &mut v6),
+            accepted,
+            "policy literal parser classified {prefix:?} incorrectly"
+        );
+        assert_eq!(
+            (v4.len(), v6.len()),
+            if accepted {
+                if expect_v4 {
+                    (1, 0)
+                } else {
+                    (0, 1)
+                }
+            } else {
+                (0, 0)
+            },
+            "policy literal parser put {prefix:?} in the wrong family"
+        );
+
+        let mut book_v4 = Vec::new();
+        let mut book_v6 = Vec::new();
+        assert_eq!(
+            parse_book_prefix_into(prefix, expect_v4, &mut book_v4, &mut book_v6),
+            accepted,
+            "address-book parser classified {prefix:?} incorrectly"
+        );
+        assert_eq!(
+            (book_v4.len(), book_v6.len()),
+            if accepted {
+                if expect_v4 {
+                    (1, 0)
+                } else {
+                    (0, 1)
+                }
+            } else {
+                (0, 0)
+            },
+            "address-book parser put {prefix:?} in the wrong family"
+        );
+    }
+}
+
 fn test_zone_name_to_id() -> FxHashMap<String, u16> {
     let mut m = FxHashMap::default();
     m.insert("lan".to_string(), TEST_LAN_ZONE_ID);
