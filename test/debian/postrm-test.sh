@@ -28,6 +28,8 @@ patched_postrm() {
       -e "s#^VERSIONS=.*#VERSIONS=$ROOT/var/lib/xpf/versions#" \
       -e "s#^CURRENT=.*#CURRENT=\"\$VERSIONS/current\"#" \
       -e "s#^STAGED_GEN=.*#STAGED_GEN=$ROOT/var/lib/xpf/staged-gen#" \
+      -e "s#^XPF_UPGRADE_STATUS=.*#XPF_UPGRADE_STATUS=$ROOT/var/lib/xpf/upgrade-deferred#" \
+      -e "s#^XPF_UPGRADE_STATUS_UNREADABLE=.*#XPF_UPGRADE_STATUS_UNREADABLE=$ROOT/var/lib/dpkg/info/xpf.upgrade-deferred-unreadable#" \
       -e "s#^DROPIN=.*#DROPIN=$ROOT/etc/systemd/system/xpfd.service.d/10-xpf-version.conf#" \
       -e "s#^TRANSIT_CLOSED_REQUIRES_LINK=.*#TRANSIT_CLOSED_REQUIRES_LINK=$ROOT/etc/systemd/system/systemd-networkd.service.requires/xpf-transit-closed.service#" \
       -e "s#^INPUT_CLOSED_REQUIRES_LINK=.*#INPUT_CLOSED_REQUIRES_LINK=$ROOT/etc/systemd/system/systemd-networkd.service.requires/xpf-input-closed.service#" \
@@ -65,6 +67,8 @@ run_scenario() {
     CURRENT="$VERSIONS/current"
     STAGED_GEN="$ROOT/var/lib/xpf/staged-gen"
     DROPIN="$ROOT/etc/systemd/system/xpfd.service.d/10-xpf-version.conf"
+    XPF_UPGRADE_STATUS="$ROOT/var/lib/xpf/upgrade-deferred"
+    XPF_UPGRADE_STATUS_UNREADABLE="$ROOT/var/lib/dpkg/info/xpf.upgrade-deferred-unreadable"
     REQUIRES_DIR="$ROOT/etc/systemd/system/systemd-networkd.service.requires"
     REQUIRES_LINK="$REQUIRES_DIR/xpf-transit-closed.service"
     INPUT_REQUIRES_LINK="$ROOT/etc/systemd/system/systemd-networkd.service.requires/xpf-input-closed.service"
@@ -208,6 +212,10 @@ scenario_input_failure_still_restores_forwarding() {
 # the versions/ tree, AND the #1981 staged-gen/ tree.
 scenario_purge_removes_versions() {
     build_hardened "1.0.0"
+    mkdir -p "$(dirname "$XPF_UPGRADE_STATUS")" "$(dirname "$XPF_UPGRADE_STATUS_UNREADABLE")"
+    printf 'durable\n' > "$XPF_UPGRADE_STATUS"
+    printf 'orphan\n' > "$XPF_UPGRADE_STATUS".1234
+    printf 'unreadable\n' > "$XPF_UPGRADE_STATUS_UNREADABLE"
     "$ROOT/postrm" purge
     for b in $BINS; do
         [ -L "$SBIN/$b" ] && { echo "FAIL: sbin $b not removed"; exit 1; } || true
@@ -215,6 +223,9 @@ scenario_purge_removes_versions() {
     [ -e "$VERSIONS" ] && { echo "FAIL: versions/ not removed on purge"; exit 1; } || true
     [ -e "$STAGED_GEN" ] && { echo "FAIL: staged-gen/ not removed on purge"; exit 1; } || true
     [ -e "$DROPIN" ] && { echo "FAIL: drop-in not removed on purge"; exit 1; } || true
+    [ -e "$XPF_UPGRADE_STATUS" ] && { echo "FAIL: durable upgrade-deferred record survived purge"; exit 1; } || true
+    [ -e "$XPF_UPGRADE_STATUS".1234 ] && { echo "FAIL: pid orphan survived purge"; exit 1; } || true
+    [ -e "$XPF_UPGRADE_STATUS_UNREADABLE" ] && { echo "FAIL: durable unreadable marker survived purge"; exit 1; } || true
 }
 
 # #1981 B-P6: a downgrade to a package BELOW the staged-gen floor (0.0.4200) —

@@ -231,6 +231,8 @@ ExecStart=%s
 // If there is no previous version (first cut) or no DB snapshot, rollback
 // is best-effort and surfaces a clear error.
 func (r *Runner) rollback(j *Journal) error {
+	r.beginStatusGeneration()
+
 	if j.PreviousVersion == "" {
 		return fmt.Errorf("no previous version to roll back to (first cut); the new "+
 			"version %s is unhealthy and there is no prior runtime version — "+

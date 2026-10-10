@@ -110,6 +110,7 @@ func (c *RollingConfig) withDefaults() {
 // If the drain predicate cannot be met within the deadline, ABORT WITHOUT
 // cutting — the node is still forwarding, so no harm.
 func RunRolling(r *Runner, cfg Config) error {
+	r.resetCommittedCut()
 	// Acquire the host-wide upgrade lock at the rolling-driver ENTRY and
 	// hold it through rejoin (#1965, plan §5). This covers the whole
 	// window — peer-check + ForceSecondary + the drain wait + the cut +
@@ -133,6 +134,7 @@ func RunRolling(r *Runner, cfg Config) error {
 // RunRollingRollback performs the HA per-node rollback with the same
 // host-wide lock and cluster-control surface as RunRolling.
 func RunRollingRollback(r *Runner, cfg Config, target string) error {
+	r.resetCommittedCut()
 	h, err := acquireUpgradeLock("upgrade --rollback --rolling", target)
 	if err != nil {
 		return fmt.Errorf("upgrade --rollback --rolling: %w", err)
@@ -151,6 +153,7 @@ func RunRollingRollback(r *Runner, cfg Config, target string) error {
 // local node, then mirrors the forward rolling sequence around the destructive
 // rollback cut.
 func runRollingRollbackWith(r *Runner, cl RollingCluster, rc RollingConfig, target string) error {
+	r.resetCommittedCut()
 	rc.withDefaults()
 
 	// All rollback refusal checks happen before ForceSecondary. This includes
@@ -237,7 +240,13 @@ func runRollingRollbackWith(r *Runner, cl RollingCluster, rc RollingConfig, targ
 // NOT acquire the upgrade lock — its only caller, RunRolling, holds it for
 // the whole rolling window, and the inner r.Run() it invokes runs with
 // LockAlreadyHeld so it does not re-flock (#1965).
-func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) error {
+func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) (err error) {
+	r.resetCommittedCut()
+	defer func() {
+		if err != nil {
+			r.resetCommittedCut()
+		}
+	}()
 	rc.withDefaults()
 	logf := r.logf
 

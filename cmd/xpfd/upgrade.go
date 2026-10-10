@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,16 +16,24 @@ import (
 	"github.com/psaab/xpf/pkg/upgrade"
 )
 
-// runUpgradeSubcommand implements `xpfd upgrade [--rollback] [--rolling]` —
-// the in-place cut-over to the dpkg-staged version (#1917 increment B) or its
-// binary+DB-atomic operator rollback. It is invoked from the .deb postinst on
-// a STANDALONE node and by the operator / dogfood deploy driver. On a
-// clustered node the postinst is stage-only; the cluster is cut ONLY via the
-// coordinated rolling forms, which sequence a controlled per-node drain so the
-// cluster keeps forwarding.
+var binaryUpgradeStatusPath = upgrade.DefaultBinaryUpgradeStatusPath
+
+// runUpgradeSubcommand implements `xpfd upgrade [status|--rollback|--rolling]`
+// — the in-place cut-over to the dpkg-staged version (#1917 increment B) or its
+// binary+DB-atomic operator rollback. `status` reads the durable postinst
+// publish/cut failure record. Upgrades run standalone from postinst or through
+// the coordinated rolling driver on clustered nodes.
 //
 // Exit codes: 0 success, 1 error.
 func runUpgradeSubcommand(args []string) {
+	if len(args) > 0 && args[0] == "status" {
+		if err := runBinaryUpgradeStatusSubcommand(os.Stdout, args[1:], binaryUpgradeStatusPath); err != nil {
+			fmt.Fprintf(os.Stderr, "upgrade status: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// #1930: `xpfd upgrade kernel ...` is the LANE-1 verify-gated in-place
 	// kernel channel (a distinct sub-verb from the #1917 binary cut-over).
 	if upgradeArgsSelectKernel(args) {
@@ -52,6 +61,7 @@ func runUpgradeSubcommand(args []string) {
 				os.Exit(1)
 			}
 			fmt.Println("rolling rollback complete")
+			clearBinaryUpgradeStatus(r, upgrade.CommittedCut{})
 			return
 		}
 		if err := r.RollbackTo(flags.target, upgrade.RollbackOptions{}); err != nil {
@@ -59,6 +69,7 @@ func runUpgradeSubcommand(args []string) {
 			os.Exit(1)
 		}
 		fmt.Println("rollback complete")
+		clearBinaryUpgradeStatus(r, upgrade.CommittedCut{})
 		return
 	}
 
@@ -68,6 +79,7 @@ func runUpgradeSubcommand(args []string) {
 			os.Exit(1)
 		}
 		fmt.Println("rolling upgrade complete")
+		clearBinaryUpgradeStatus(r, r.LastCommittedCut())
 		return
 	}
 
@@ -109,6 +121,32 @@ func runUpgradeSubcommand(args []string) {
 		os.Exit(1)
 	}
 	fmt.Println("upgrade complete")
+	clearBinaryUpgradeStatus(r, r.LastCommittedCut())
+}
+
+func clearBinaryUpgradeStatus(r *upgrade.Runner, committed upgrade.CommittedCut) {
+	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(binaryUpgradeStatusPath, committed)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "upgrade: WARNING could not verify resolved postinst status: %v\n", err)
+		return
+	}
+	if !cleared {
+		status := upgrade.ReadBinaryUpgradeStatus(binaryUpgradeStatusPath)
+		if status.ReadErr != nil {
+			fmt.Fprintf(os.Stderr, "upgrade: WARNING unresolved postinst status is unreadable: %v\n", status.ReadErr)
+		} else if status.Recorded {
+			fmt.Fprintf(os.Stderr, "upgrade: WARNING retaining unresolved postinst status for staged version %s; no safe supersession was proven\n",
+				status.StagedVersion)
+		}
+	}
+}
+
+func runBinaryUpgradeStatusSubcommand(w io.Writer, args []string, path string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("unexpected argument(s) %v; this verb takes no arguments", args)
+	}
+	upgrade.RenderBinaryUpgradeStatus(w, upgrade.ReadBinaryUpgradeStatus(path))
+	return nil
 }
 
 // upgradeArgsSelectKernel reports whether `xpfd upgrade <args...>` routes to the

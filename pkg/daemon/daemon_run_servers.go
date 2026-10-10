@@ -663,6 +663,20 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 				Failed:  b.Failed,
 			}
 		},
+		BinaryUpgradeStatusFn: func() api.BinaryUpgradeStatusSnapshot {
+			st := binaryUpgradeStatusSnapshot(daemonBinaryUpgradeStatusPath, d.opts.Version)
+			snap := api.BinaryUpgradeStatusSnapshot{
+				Readable:       st.ReadErr == nil,
+				Pending:        st.Recorded,
+				StagedVersion:  st.StagedVersion,
+				RunningVersion: st.RunningVersion,
+				Reason:         st.Reason,
+			}
+			if !st.RecordedAt.IsZero() {
+				snap.RecordedAtUnix = st.RecordedAt.Unix()
+			}
+			return snap
+		},
 		// #1780 Path A: expose the per-phase age of the Go periodic
 		// neighbor-maintenance loop so a wedged guarded goroutine
 		// (stuck netlink/probe syscall) is observable as a climbing

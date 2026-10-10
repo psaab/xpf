@@ -179,9 +179,45 @@ func (c *Config) withDefaults() {
 	}
 }
 
+// CommittedCut is evidence from one Runner invocation that a version reached
+// COMMIT after passing the target-version health check. Its private generation
+// binds supersession evidence to the current durable cut/rollback history;
+// callers can pass it to the deferred-status gate but cannot manufacture it.
+type CommittedCut struct {
+	version         string
+	healthConfirmed bool
+	generation      uint64
+	generationValid bool
+}
+
 // Runner drives the cut-over state machine.
 type Runner struct {
-	cfg Config
+	cfg                   Config
+	committedCut          CommittedCut
+	statusGeneration      uint64
+	statusGenerationValid bool
+}
+
+// LastCommittedCut returns the evidence from the most recent Run invocation.
+// Run resets it before starting; rollback and failed runs never set it.
+func (r *Runner) LastCommittedCut() CommittedCut {
+	if r == nil {
+		return CommittedCut{}
+	}
+	return r.committedCut
+}
+
+func (r *Runner) resetCommittedCut() {
+	r.committedCut = CommittedCut{}
+}
+
+func (r *Runner) recordCommittedCut(version string) {
+	r.committedCut = CommittedCut{
+		version:         version,
+		healthConfirmed: true,
+		generation:      r.statusGeneration,
+		generationValid: r.statusGenerationValid,
+	}
 }
 
 // NewRunner builds a Runner. Sys must be set.

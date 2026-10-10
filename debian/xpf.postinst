@@ -39,9 +39,135 @@ SBIN=/usr/local/sbin
 # list diverges from manifest.Names(). Edit both together.
 BINS="xpfd cli xpf-userspace-dp xpf-day0-config"
 
-# Runtime state dir, probed (not managed) by the fresh-install barrier gate
-# below. Rewritten to a temp root by the installer test harness.
 XPF_RUN_DIR=/run/xpf
+
+XPF_VERSIONS_DIR=/var/lib/xpf/versions
+XPF_UPGRADE_STATUS=/var/lib/xpf/upgrade-deferred
+XPF_UPGRADE_STATUS_UNREADABLE=/var/lib/dpkg/info/xpf.upgrade-deferred-unreadable
+XPF_PROC_DIR=/proc
+
+# Record a publish/cut failure outside /run (which is tmpfs) so a successful
+# postinst that deliberately leaves the old generation running remains
+# machine-readable after reboot. Use the live daemon's executable when
+# systemd can identify it; otherwise store "unknown" instead of guessing from
+# versions/current.
+record_upgrade_failure() {
+    failure_reason=$1
+    recovery_command=$2
+    staged_version=unknown
+    version_output=$("$STAGED/xpfd" version 2>/dev/null || true)
+    staged_version=$(printf '%s\n' "$version_output" |
+        sed -n 's/^xpfd \([^[:space:]]*\).*/\1/p')
+    [ -n "$staged_version" ] || staged_version=unknown
+
+    running_bin=
+    if [ -d /run/systemd/system ]; then
+        running_pid=$(systemctl show --property=MainPID --value xpfd.service 2>/dev/null || true)
+        case "$running_pid" in
+            ''|0|*[!0-9]*) ;;
+            *)
+                live_bin=$(readlink "$XPF_PROC_DIR/$running_pid/exe" 2>/dev/null || true)
+                case "$live_bin" in
+                    "$XPF_VERSIONS_DIR"/*/xpfd) running_bin=$live_bin ;;
+                esac
+                ;;
+        esac
+    fi
+    running_version=unknown
+    if [ -x "$running_bin" ]; then
+        version_output=$("$running_bin" version 2>/dev/null || true)
+        running_version=$(printf '%s\n' "$version_output" |
+            sed -n 's/^xpfd \([^[:space:]]*\).*/\1/p')
+        [ -n "$running_version" ] || running_version=unknown
+    fi
+
+    # A same-version reinstall cannot produce a staged-vs-running skew. Avoid
+    # leaving an unresolvable cut-failed record for a generation replacement
+    # that the live-version guard correctly refused.
+    if [ "$failure_reason" = cut-failed ] &&
+       [ "$staged_version" != unknown ] &&
+       [ "$staged_version" = "$running_version" ]; then
+        echo "xpf: staged and running versions are both $staged_version; no unresolved binary upgrade status" >&2
+        clear_upgrade_failure
+        return 0
+    fi
+
+    recorded_at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo 1970-01-01T00:00:00Z)
+    marker_tmp="$XPF_UPGRADE_STATUS.$$"
+    status_dir=$(dirname "$XPF_UPGRADE_STATUS")
+    status_name=$(basename "$XPF_UPGRADE_STATUS")
+    # A killed writer can leave a complete-or-partial pid temp before rename.
+    # Keep recent files (another writer may own one); sweep only after a 24h TTL.
+    find "$status_dir" -maxdepth 1 -type f -name "$status_name.*" \
+        -mmin +1440 -delete 2>/dev/null || true
+    if ! mkdir -p "$status_dir" 2>/dev/null; then
+        if ! write_upgrade_status_unreadable_marker; then
+            return 1
+        fi
+        echo "xpf: WARNING could not create durable upgrade-status directory" >&2
+        return 0
+    fi
+    if ! (umask 077
+        {
+            printf 'format=1\n'
+            printf 'staged_version=%s\n' "$staged_version"
+            printf 'running_version=%s\n' "$running_version"
+            printf 'reason=%s\n' "$failure_reason"
+            printf 'recovery=%s\n' "$recovery_command"
+            printf 'recorded_at=%s\n' "$recorded_at"
+        } > "$marker_tmp" &&
+        sync -f "$marker_tmp" 2>/dev/null); then
+        rm -f "$marker_tmp" 2>/dev/null || true
+        if ! write_upgrade_status_unreadable_marker; then
+            return 1
+        fi
+        echo "xpf: WARNING could not write and sync staged-vs-running upgrade status" >&2
+        return 0
+    fi
+    if ! mv -f "$marker_tmp" "$XPF_UPGRADE_STATUS"; then
+        rm -f "$marker_tmp" 2>/dev/null || true
+        if ! write_upgrade_status_unreadable_marker; then
+            return 1
+        fi
+        echo "xpf: WARNING could not install staged-vs-running upgrade status" >&2
+        return 0
+    fi
+    if ! sync -f "$status_dir" 2>/dev/null; then
+        echo "xpf: WARNING upgrade status is present but directory sync failed; durability across a crash is uncertain" >&2
+        return 0
+    fi
+    if rm -f "$XPF_UPGRADE_STATUS_UNREADABLE" 2>/dev/null; then
+        sync -f "$(dirname "$XPF_UPGRADE_STATUS_UNREADABLE")" 2>/dev/null || \
+            echo "xpf: WARNING could not sync removal of unreadable-status marker" >&2
+    fi
+}
+
+write_upgrade_status_unreadable_marker() {
+    status_marker_dir=$(dirname "$XPF_UPGRADE_STATUS_UNREADABLE")
+    if ! mkdir -p "$status_marker_dir" 2>/dev/null; then
+        echo "xpf: WARNING could not create durable unreadable-status marker directory" >&2
+        return 1
+    fi
+    if ! (umask 077
+        printf 'status=unreadable\n' > "$XPF_UPGRADE_STATUS_UNREADABLE" &&
+        sync -f "$XPF_UPGRADE_STATUS_UNREADABLE" 2>/dev/null); then
+        echo "xpf: WARNING could not write durable unreadable-status marker" >&2
+        return 1
+    fi
+    if ! sync -f "$status_marker_dir" 2>/dev/null; then
+        echo "xpf: WARNING could not sync durable unreadable-status marker directory" >&2
+        return 1
+    fi
+}
+
+clear_upgrade_failure() {
+    if rm -f "$XPF_UPGRADE_STATUS" "$XPF_UPGRADE_STATUS_UNREADABLE" 2>/dev/null; then
+        sync -f "$(dirname "$XPF_UPGRADE_STATUS")" 2>/dev/null || true
+        sync -f "$(dirname "$XPF_UPGRADE_STATUS_UNREADABLE")" 2>/dev/null || true
+    else
+        echo "xpf: WARNING could not clear resolved upgrade status" >&2
+    fi
+}
 
 case "$1" in
     configure)
@@ -264,14 +390,16 @@ case "$1" in
             else
                 rc=$?
                 if [ "$rc" = "2" ]; then
-                    # Lock busy: defer. Drop the same marker the cut-contention
-                    # branch drops so recovery is recorded consistently.
-                    mkdir -p /run/xpf
-                    : > /run/xpf/upgrade-deferred 2>/dev/null || true
+                    # Lock busy: preserve the failure and version skew across
+                    # reboot, then leave dpkg configured successfully.
+                    record_upgrade_failure publish-deferred \
+                        "xpfd publish-generation && $CUT_HINT"
                     echo "xpf: staged-generation publish deferred (another upgrade" \
                          "holds the lock) — staged only; after it completes run:" \
                          "xpfd publish-generation && $CUT_HINT" >&2
                 else
+                    record_upgrade_failure publish-failed \
+                        "xpfd publish-generation && $CUT_HINT"
                     echo "xpf: WARNING staged-generation publish failed (rc=$rc) —" \
                          "no new generation published; the cut will read the prior" \
                          "generation or refuse. Re-run: xpfd publish-generation" >&2
@@ -317,21 +445,12 @@ case "$1" in
                 echo "xpf: XPF_NO_POSTINST_CUT=1 — staged only;" \
                      "cut over with: xpfd upgrade" >&2
             elif ! flock -n /run/xpf/upgrade.lock true 2>/dev/null && [ -e /run/xpf/upgrade.lock ]; then
-                # #1965 postinst contention residual: in the rare TOCTOU
-                # case where the host-wide upgrade lock became busy between
-                # the preinst gate (which released its fd at preinst exit)
-                # and now, another upgrade is in progress. The new binary
-                # set is already staged. Do NOT cut (that would race the
-                # other mutator's journal/symlink state) and do NOT fail the
-                # postinst (a non-zero postinst leaves dpkg half-configured,
-                # worse than a deferred cut on a host still running the old
-                # in-memory daemon). Log loudly, drop a deferred marker, and
-                # exit 0; the operator runs `xpfd upgrade` once the other
-                # operation completes.
-                mkdir -p /run/xpf
-                : > /run/xpf/upgrade-deferred 2>/dev/null || true
+                # Another mutator acquired the host-wide lock after preinst.
+                # Do not race it or fail dpkg: persist the skew and leave the
+                # operator the correct recovery command.
+                record_upgrade_failure cut-deferred "$CUT_HINT"
                 echo "xpf: another upgrade is in progress — staged only;" \
-                     "run 'xpfd upgrade' after it completes." >&2
+                     "run '$CUT_HINT' after it completes." >&2
                 cat /run/xpf/upgrade.lock 2>/dev/null >&2 || true
             else
                 echo "xpf: standalone node — performing verified in-place cut-over" >&2
@@ -346,19 +465,14 @@ case "$1" in
                 # re-run xpf-upgrade); surface it loudly instead.
                 if ! "$STAGED/xpfd" upgrade; then
                     echo "xpf: WARNING in-place cut-over did not complete." >&2
-                    # #1965 (Codex MINOR): an operator could have acquired the
-                    # host-wide lock AFTER the shell precheck above but BEFORE
-                    # this inner cut, so the cut aborted busy. Drop the same
-                    # deferred marker the explicit contention branch drops so
-                    # the residual is recorded consistently regardless of which
-                    # window the contention landed in. Best-effort: if the lock
-                    # is still busy now, mark it deferred.
+                    # Record every failed cut, not only lock contention.
                     if [ -e /run/xpf/upgrade.lock ] && \
                        ! flock -n /run/xpf/upgrade.lock true 2>/dev/null; then
-                        mkdir -p /run/xpf
-                        : > /run/xpf/upgrade-deferred 2>/dev/null || true
+                        record_upgrade_failure cut-deferred "$CUT_HINT"
                         echo "xpf: another upgrade is in progress — staged only;" \
-                             "run 'xpfd upgrade' after it completes." >&2
+                             "run '$CUT_HINT' after it completes." >&2
+                    else
+                        record_upgrade_failure cut-failed "$CUT_HINT"
                     fi
                     # Safety net (Copilot): the cut STOPs the unit before it
                     # FLIPs. Most failures (preflight/copy/verify) abort
@@ -377,6 +491,19 @@ case "$1" in
                             echo "xpf: WARNING could not restart xpfd; run: xpfd upgrade" >&2
                     fi
                     echo "xpf: inspect with 'journalctl -u xpfd' and re-run: xpfd upgrade" >&2
+                else
+                    cut_check_output=$("$STAGED/xpfd" version 2>/dev/null || true)
+                    cut_check_staged=$(printf '%s\n' "$cut_check_output" |
+                        sed -n 's/^xpfd \([^[:space:]]*\).*/\1/p')
+                    cut_check_target=$(readlink "$XPF_VERSIONS_DIR/current" 2>/dev/null || true)
+                    cut_check_current=${cut_check_target##*/}
+                    if [ -n "$cut_check_staged" ] &&
+                       [ "$cut_check_staged" = "$cut_check_current" ]; then
+                        clear_upgrade_failure
+                    else
+                        echo "xpf: WARNING cut exited 0 but staged version ${cut_check_staged:-unknown} is not committed at versions/current (${cut_check_current:-unknown})" >&2
+                        record_upgrade_failure cut-failed "$CUT_HINT"
+                    fi
                 fi
             fi
         fi

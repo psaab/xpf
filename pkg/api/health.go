@@ -63,6 +63,25 @@ func (s *Server) healthHandler(w http.ResponseWriter, _ *http.Request) {
 			}
 		}
 	}
+	// The binary-channel marker is durable evidence that postinst returned
+	// success while the package's staged generation was not cut to the running
+	// daemon. It is informational: unlike config-apply debt, the node is still
+	// forwarding the version it reports, so do not pull it from rotation.
+	// /health is unauthenticated (#5031): expose only readable/pending state,
+	// the stable failure code and timestamp. Exact build versions remain on the
+	// local `xpfd upgrade status` surface.
+	if s.binaryUpgradeStatusFn != nil {
+		st := s.binaryUpgradeStatusFn()
+		payload["binary_upgrade_status_readable"] = st.Readable
+		if st.Readable {
+			payload["binary_upgrade_pending"] = st.Pending
+			if st.Pending {
+				payload["binary_upgrade_failure"] = st.Reason
+				payload["binary_upgrade_recorded_at_unix"] = st.RecordedAtUnix
+			}
+		}
+	}
+
 	if s.configPersistDegradedFn != nil {
 		degraded := s.configPersistDegradedFn()
 		payload["config_persist_degraded"] = degraded

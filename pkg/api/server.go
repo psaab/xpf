@@ -161,6 +161,18 @@ type BootstrapImportSnapshot struct {
 	Failed  bool // true for an import or initial credential-apply failure
 }
 
+// BinaryUpgradeStatusSnapshot mirrors the durable postinst result without
+// exposing parse errors or shell/journal details on the unauthenticated health
+// endpoint. Readable distinguishes an absent record from an unreadable one.
+type BinaryUpgradeStatusSnapshot struct {
+	Readable       bool
+	Pending        bool
+	StagedVersion  string
+	RunningVersion string
+	Reason         string
+	RecordedAtUnix int64
+}
+
 // Config configures the API server.
 type Config struct {
 	Addr           string
@@ -225,6 +237,12 @@ type Config struct {
 	// is the goal — not pulling a still-reachable box from a probe-gated
 	// rotation. Optional; if nil, the field is omitted.
 	BootstrapImportFn func() BootstrapImportSnapshot
+
+	// BinaryUpgradeStatusFn reports a durable postinst publish/cut failure and
+	// the daemon's actual running version. It is informational: the old
+	// generation remains available, so this does not pull a forwarding node
+	// from readiness rotation. Optional; if nil, fields are omitted.
+	BinaryUpgradeStatusFn func() BinaryUpgradeStatusSnapshot
 
 	// HostInboundAppliedFn returns the #7181 APPLIED state of the host-inbound
 	// nftables surface. nil renders desired-only, exactly as before #7181 -- an
@@ -654,6 +672,7 @@ type Server struct {
 	commitConfirmedFn     func(ctx context.Context, authority configstore.CommitAuthority, minutes int) (*config.Config, error)
 	compileHealthFn       func() CompileHealthSnapshot
 	bootstrapImportFn     func() BootstrapImportSnapshot
+	binaryUpgradeStatusFn func() BinaryUpgradeStatusSnapshot
 	// #7181: applied state of the host-inbound nft surface; nil = unwired.
 	hostInboundAppliedFn                 func() HostInboundAppliedSnapshot
 	configPersistDegradedFn              func() bool
@@ -788,6 +807,7 @@ func NewServer(cfg Config) *Server {
 		commitConfirmedFn:                    cfg.CommitConfirmedFn,
 		compileHealthFn:                      cfg.CompileHealthFn,
 		bootstrapImportFn:                    cfg.BootstrapImportFn,
+		binaryUpgradeStatusFn:                cfg.BinaryUpgradeStatusFn,
 		hostInboundAppliedFn:                 cfg.HostInboundAppliedFn,
 		configPersistDegradedFn:              cfg.ConfigPersistDegradedFn,
 		earlyInputGuardSwapFailedFn:          cfg.EarlyInputGuardSwapFailedFn,
