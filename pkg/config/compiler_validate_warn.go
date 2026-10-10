@@ -1782,7 +1782,8 @@ func ValidateConfig(cfg *Config) []string {
 
 	// #12091: only lo0 unit 0 input filters on ordinary lo0 are consumed by the
 	// host planes. Surface every other hook on an ordinary lo0 as accepted but
-	// unenforced; tunnel-backed lo0 hooks have real per-ifindex enforcement.
+	// unenforced; lo0 hooks with usable-endpoint tunnels have real per-ifindex
+	// enforcement (incomplete tunnel stanzas warn, since no device exists).
 	warnings = append(warnings, validateLo0UnsupportedFilterBindingsWarnings(cfg)...)
 
 	// #3295: a firewall filter attached to an interface/lo0 input/output hook
