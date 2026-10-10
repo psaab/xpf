@@ -73,9 +73,10 @@ func TestFirstCommitRollbackGateIgnoresNilNonFirstTarget12154(t *testing.T) {
 // the safe state WITHOUT first-commit cleanup. The store is committed
 // (everCommitted=true: a real config exists, since a failed-compile recovery
 // left the old committed config in place), but confirmPrevCfg is nil. A
-// DHCP client from an interface NOT in the abandoned config must SURVIVE:
-// the gate must not Reconcile(nil). Deriving first-commit-ness from
-// prevCfg==nil instead of the recorded flag kills the client and fails.
+// running DHCP client the rollback must never touch (its interface keeps the
+// same dhcp stanza in the abandoned config) must SURVIVE: the gate must not
+// Reconcile(nil). Deriving first-commit-ness from prevCfg==nil instead of
+// the recorded flag kills the client and fails.
 func TestFirstCommitRollbackGateIgnoresNilTarget6538Shape12154(t *testing.T) {
 	dir := lifelineNetworkDir12154(t)
 	store, err := configstore.New(filepath.Join(t.TempDir(), "config.db"))
