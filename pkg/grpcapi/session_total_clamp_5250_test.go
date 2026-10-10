@@ -18,6 +18,7 @@
 package grpcapi
 
 import (
+	"context"
 	"math"
 	"path/filepath"
 	"reflect"
@@ -42,7 +43,7 @@ func TestSessionsTotalSaturates_5250(t *testing.T) {
 	s := &Server{dp: dp, store: newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))}
 
 	resp := &pb.GetSessionsResponse{}
-	if err := s.setSessionsTotal(resp, &sessionFilter{}); err != nil {
+	if err := s.setSessionsTotal(context.Background(), resp, &sessionFilter{}); err != nil {
 		t.Fatalf("setSessionsTotal: %v", err)
 	}
 	if resp.Total < 0 {
