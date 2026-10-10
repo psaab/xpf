@@ -48,6 +48,10 @@ type Node struct {
 	// fromGroups remains the node-level fallback for ordinary leaves and
 	// containers. Union members use the parallel field below when available.
 	fromGroups []string
+	// duplicateBlockMergeMarkers9023 carries transient compiler metadata for
+	// group-scoped duplicate-container diagnostics. It is never persisted or
+	// rendered as user annotation and is removed after group expansion.
+	duplicateBlockMergeMarkers9023 []string
 
 	// leafMemberGroups9862 carries per-member contributor provenance for a
 	// cross-group leaf-list union. It is aligned with leafListMembers9627's
@@ -672,8 +676,9 @@ func cloneNodes(nodes []*Node) []*Node {
 			// #4474 memo store/handout. Deep-copied: clones must never share the
 			// backing array (tag union-adds append). Nil-preserving, so untagged
 			// nodes allocate nothing.
-			fromGroups:           append([]string(nil), n.fromGroups...),
-			leafMemberGroups9862: cloneLeafMemberGroups9862(n.leafMemberGroups9862),
+			fromGroups:                    append([]string(nil), n.fromGroups...),
+			duplicateBlockMergeMarkers9023: append([]string(nil), n.duplicateBlockMergeMarkers9023...),
+			leafMemberGroups9862:          cloneLeafMemberGroups9862(n.leafMemberGroups9862),
 			Inactive:             n.Inactive,
 			Line:                 n.Line,
 			Column:               n.Column,

@@ -1476,12 +1476,23 @@ path warns (`lenientIPsecBindTSOverlap`) rather than newly bricking an
 already-persisted config (#1960). This is a static admission proof; it does not
 replace the lab check that each routed prefix is encrypted only on its own SA.
 
-**Repeated unnamed routing containers merge (#12043):** hierarchical loads can
-retain sibling `routing-options { static { ... } }` blocks or repeated
-per-instance `routing-options` and `protocols` containers. Junos merges these
-stanzas, so strict compilation folds their contents in source order before
-building routes and protocols; every sibling's configuration survives, and the
-compiler emits a merge warning instead of silently selecting one block.
+**Repeated unnamed routing containers merge (#12043/#12120):** hierarchical
+loads retain repeated `routing-options` children (`static`, `generate`, and
+`interface-routes`) at global and instance scopes, repeated `rib-group` children
+under `interface-routes` (including separate `inet`/`inet6` selectors), repeated
+`rib inet.0 static`, and `protocols` blocks for OSPF, OSPFv3, BGP, RIP, IS-IS,
+LLDP, and router-advertisement, including separate top-level `protocols` roots. Junos
+merges these stanzas, so strict and tolerant compilation fold their contents in
+source order before typed compilation. Successful compiles include a merge
+warning naming the protocol/container and its routing-instance or effective
+group scope. A group warning is emitted only when expansion contributes the
+duplicate site: unapplied, inactive, excepted, and non-selected `${node}` group
+bodies stay silent. The conservation census compares duplicate input to its
+hand-merged form.
+The `protocols` registrations are limited to the root and routing-instance paths,
+including those paths in group bodies; security-zone and per-interface
+`host-inbound-traffic protocols` are intentionally outside this routing fold,
+so their `except` child boundaries remain intact.
 
 **Static routes through XFRM must fit the remote selector union (#11422):**
 the typed gate checks global and routing-instance static routes whose

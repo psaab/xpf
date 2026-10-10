@@ -474,20 +474,20 @@ func foldWidenedWarning9571(w foldWidenedPolicy9571) string {
 		"(#3473/#9571)"
 }
 
-// mergeSiblingContainers9209 folds sibling CONTAINERS that share identical Keys
-// into the first of them, recursively.
-//
-// Issue 9209. It runs only on a node that mergeInstancesUnder has just folded a
-// duplicate into, so it cannot change a config that contained no repeated block.
-//
-// LEAVES ARE LEFT ALONE, deliberately. Two leaves with the same key are a
-// value-level question -- replace, accumulate, or reject -- already answered
-// per leaf by `multi` and by the compilers, and re-answering it here would
-// override those decisions from a layer that cannot see them. Only containers,
-// where "the same stanza written twice" has one Junos meaning, are merged.
+// mergeSiblingContainers9209 folds sibling containers with identical keys,
+// except at an explicitly registered unnamed-routing site. Those site-owned
+// duplicates are left for mergeDuplicateBlocks9023 so the fold is independent
+// of surrounding stanzas and produces its own scoped diagnostic.
 func mergeSiblingContainers9209(n *Node, depth int) {
+	mergeSiblingContainers9209WithParentAndPath(n, depth, "", nil)
+}
+
+func mergeSiblingContainers9209WithParentAndPath(n *Node, depth int, parent string, path []string) {
 	if n == nil || depth > 8 || len(n.Children) < 2 {
 		return
+	}
+	if parent == "" {
+		parent = n.Name()
 	}
 	first := map[string]*Node{}
 	var kept []*Node
@@ -496,7 +496,7 @@ func mergeSiblingContainers9209(n *Node, depth int) {
 		if ch == nil {
 			continue
 		}
-		if ch.IsLeaf || ch.Children == nil {
+		if ch.IsLeaf || ch.Children == nil || isRegisteredUnnamedRoutingMergeSite9023(parent, ch.Name(), path) {
 			kept = append(kept, ch)
 			continue
 		}
@@ -513,7 +513,10 @@ func mergeSiblingContainers9209(n *Node, depth int) {
 	if changed {
 		n.Children = kept
 	}
+	childPath := appendDuplicateMergeNodePath9023(path, n)
 	for _, ch := range n.Children {
-		mergeSiblingContainers9209(ch, depth+1)
+		if ch != nil && !isRegisteredUnnamedRoutingMergeSite9023(parent, ch.Name(), path) {
+			mergeSiblingContainers9209WithParentAndPath(ch, depth+1, "", childPath)
+		}
 	}
 }
