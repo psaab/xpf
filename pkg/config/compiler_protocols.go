@@ -307,6 +307,9 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 		// state with the main instance's.
 		ownExport9192 := map[*BGPNeighbor]bool{}
 		ownImport9192 := map[*BGPNeighbor]bool{}
+		// #11815: neighbor warnings are finalized after every group block has
+		// contributed to the merged neighbor activation.
+		var neighborSAFIWarningRecords9192 map[*BGPNeighbor][]bgpSAFIWarning11815
 
 		// #8939, and the consequence here is not a lost setting -- it is the
 		// whole protocol. `set protocols bgp graceful-restart cluster-id
@@ -407,6 +410,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			var groupImport []string
 			var familyInet, familyInet6 bool
 			var groupFamilyInetUnsupportedSAFI, groupFamilyInet6UnsupportedSAFI bool
+			var groupSAFIWarningRecords []bgpSAFIWarning11815
 			var groupPrefixLimitInet, groupPrefixLimitInet6 int
 			var groupAuthKey string
 			var groupBFD bool
@@ -443,7 +447,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			groupChildren := expandFlatRun(groupInst.node.Children, bgpGroupSchema9181())
 			applyGroupFamily := func(familyNode *Node, afi string) error {
 				scope := fmt.Sprintf("BGP group %q family %s", groupInst.name, afi)
-				unicast, unsupported, err := applyBGPFamilySAFI11815(familyNode, scope, opts, warnings)
+				unicast, unsupported, err := applyBGPFamilySAFI11815(familyNode, afi, scope, opts, warnings, &groupSAFIWarningRecords)
 				if err != nil {
 					return err
 				}
@@ -667,13 +671,40 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 							// node -- see compiler_bgp_neighbor_merge_9192.go.
 							neighborOwnExport := ownExport9192[neighbor]
 							neighborOwnImport := ownImport9192[neighbor]
-							if err := applyBGPNeighborProps9192(neighbor, child, &neighborOwnExport, &neighborOwnImport, opts, warnings); err != nil {
+							var neighborSAFIWarningRecords []bgpSAFIWarning11815
+							if err := applyBGPNeighborProps9192(neighbor, child, &neighborOwnExport, &neighborOwnImport, opts, warnings, &neighborSAFIWarningRecords); err != nil {
 								return fmt.Errorf("BGP group %q neighbor %q: %w", groupInst.name, nAddr, err)
+							}
+							if len(neighborSAFIWarningRecords) > 0 {
+								if neighborSAFIWarningRecords9192 == nil {
+									neighborSAFIWarningRecords9192 = map[*BGPNeighbor][]bgpSAFIWarning11815{}
+								}
+								neighborSAFIWarningRecords9192[neighbor] = append(neighborSAFIWarningRecords9192[neighbor], neighborSAFIWarningRecords...)
 							}
 							ownExport9192[neighbor] = neighborOwnExport
 							ownImport9192[neighbor] = neighborOwnImport
 						}
 					}
+				}
+				if pass == 0 && warnings != nil {
+					for _, record := range groupSAFIWarningRecords {
+						unicast := familyInet
+						if record.afi == "inet6" {
+							unicast = familyInet6
+						}
+						setBGPFamilySAFIWarningActivation11815(warnings, record, unicast)
+					}
+				}
+			}
+		}
+		if warnings != nil {
+			for neighbor, records := range neighborSAFIWarningRecords9192 {
+				for _, record := range records {
+					unicast := neighbor.FamilyInet
+					if record.afi == "inet6" {
+						unicast = neighbor.FamilyInet6
+					}
+					setBGPFamilySAFIWarningActivation11815(warnings, record, unicast)
 				}
 			}
 		}
