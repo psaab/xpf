@@ -11,21 +11,27 @@ import (
 )
 
 // TestBootstrapNonIndexRemedyIsActionable12151 pins the operator-facing
-// remedies for a higher-index PCI lifeline and a non-PCI management route. The
-// strict config path silently ignores system management-interface; neither
-// refusal should mutate the interface or network-file state.
+// remedies for higher-index PCI, non-PCI, and empty-PCI-enumeration lifelines.
+// The strict config path silently ignores system management-interface; each
+// refusal must leave interface and network-file state unchanged.
 func TestBootstrapNonIndexRemedyIsActionable12151(t *testing.T) {
 	tests := []struct {
-		name     string
-		lifeline string
-		wantLog  []string
+		name       string
+		lifeline   string
+		nics       []pciNIC
+		wantLog    []string
+		wantAbsent []string
 	}{
 		{
 			name:     "higher PCI index",
 			lifeline: "enp5s0",
 			wantLog: []string{
-				"re-wire",
-				"enumerates as index 0",
+				"not enumeration index 0",
+				"move the management default route and its addressing onto the nic identified by index0_interface and index0_pci",
+				"virtio-first enumeration",
+				"recabling alone can strand management",
+				"chassis device-map interface fxp0 pci <mgmt pci>",
+				"commit confirmed",
 				"restart xpfd or reboot",
 				"index0_interface=enp1s0",
 				"index0_pci=0000:01:00.0",
@@ -39,11 +45,29 @@ func TestBootstrapNonIndexRemedyIsActionable12151(t *testing.T) {
 				"not present in the pci nic enumeration",
 				"bond, vlan, or bridge",
 				"rewiring that interface cannot make it enumeration index 0",
-				"move the management default route onto a pci nic",
+				"move the management default route and its addressing onto the nic identified by index0_interface and index0_pci",
 				"restart xpfd or reboot",
 				"index0_interface=enp1s0",
 				"index0_pci=0000:01:00.0",
 				"silently ignored",
+			},
+			wantAbsent: []string{"chassis device-map"},
+		},
+		{
+			name:     "no PCI NIC enumerated",
+			lifeline: "vmbus0",
+			nics:     []pciNIC{},
+			wantLog: []string{
+				"no pci nic enumerated",
+				"vmbus-only host",
+				"refusing to rename/cycle any interface",
+				"no interface changes",
+				"silently ignored",
+			},
+			wantAbsent: []string{
+				"bond, vlan, or bridge",
+				"index0_interface=",
+				"index0_pci=",
 			},
 		},
 	}
@@ -68,6 +92,9 @@ func TestBootstrapNonIndexRemedyIsActionable12151(t *testing.T) {
 			lifelineRecordFileForTest = filepath.Join(dir, "lifeline-interface")
 			detectLifelineInterfaceFn = func() (string, bool, error) { return tt.lifeline, true, nil }
 			enumeratePCINICsFn = func() ([]pciNIC, error) {
+				if tt.nics != nil {
+					return tt.nics, nil
+				}
 				return []pciNIC{
 					{sortKey: 0, busAddr: "0000:01:00.0", name: "enp1s0"},
 					{sortKey: 1, busAddr: "0000:05:00.0", name: "enp5s0"},
@@ -102,6 +129,11 @@ func TestBootstrapNonIndexRemedyIsActionable12151(t *testing.T) {
 					t.Errorf("refusal remedy omitted %q; logs: %s", want, logs.String())
 				}
 			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(got, absent) {
+					t.Errorf("refusal remedy unexpectedly included %q; logs: %s", absent, logs.String())
+				}
+			}
 			if strings.Contains(got, "'system management-interface' and 'commit confirmed'") {
 				t.Errorf("refusal still recommends the unsettable config leaf: %s", logs.String())
 			}
@@ -110,10 +142,10 @@ func TestBootstrapNonIndexRemedyIsActionable12151(t *testing.T) {
 				t.Errorf("non-PCI refusal offers an inapplicable rewire remedy: %s", logs.String())
 			}
 			if renamed || reloaded {
-				t.Errorf("non-index-0 refusal mutated interface state: renamed=%v reloaded=%v", renamed, reloaded)
+				t.Errorf("refusal mutated interface state: renamed=%v reloaded=%v", renamed, reloaded)
 			}
 			if _, err := os.Stat(filepath.Join(linkDir, linkPrefix+"fxp0.network")); !os.IsNotExist(err) {
-				t.Errorf("non-index-0 refusal wrote an fxp0 network file: err=%v", err)
+				t.Errorf("refusal wrote an fxp0 network file: err=%v", err)
 			}
 		})
 	}

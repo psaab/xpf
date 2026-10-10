@@ -1239,15 +1239,25 @@ func (d *Daemon) setupBootstrapLifeline() {
 		// the virtio-first, then PCI-address enumeration order.
 		index0Name, index0PCI = nics[0].name, nics[0].busAddr
 	}
+	if len(nics) == 0 {
+		slog.Warn("bootstrap lifeline: no PCI NIC enumerated; this can occur on a "+
+			"VMBus-only host. No PCI NIC can be selected to become fxp0. Refusing "+
+			"to rename/cycle any interface; staying in bootstrap with NO interface "+
+			"changes. Reach the host via its console and attach/configure a PCI NIC "+
+			"for management before restarting xpfd or rebooting. The `system "+
+			"management-interface` leaf is not implemented in config mode and would "+
+			"be silently ignored.",
+			"interface", lifeline, "enum_index", idx)
+		return
+	}
 	if idx == -1 {
 		slog.Warn("bootstrap lifeline: management default-route interface is not present in "+
 			"the PCI NIC enumeration (common for a bond, VLAN, or bridge), so rewiring that "+
 			"interface cannot make it enumeration index 0. From the console, move the "+
-			"management default route onto a PCI NIC; index 0 is identified by the "+
-			"index0_interface and index0_pci fields. A chassis device-map can give PCI NICs "+
-			"stable names. Restart xpfd or reboot after the change. The `system "+
-			"management-interface` leaf is not implemented in config mode and would be "+
-			"silently ignored.",
+			"management default route and its addressing onto the NIC identified by "+
+			"index0_interface and index0_pci. Restart xpfd or reboot after the change. "+
+			"The `system management-interface` leaf is not implemented in config mode "+
+			"and would be silently ignored.",
 			"interface", lifeline, "enum_index", idx,
 			"index0_interface", index0Name, "index0_pci", index0PCI)
 		return
@@ -1255,10 +1265,14 @@ func (d *Daemon) setupBootstrapLifeline() {
 	if idx != 0 {
 		slog.Warn("bootstrap lifeline: management default-route NIC is NOT enumeration index 0, "+
 			"so it would not become fxp0. Refusing to rename/cycle any interface; staying in "+
-			"bootstrap. From the console, re-wire the management NIC so it enumerates as "+
-			"index 0; the index-0 NIC is identified by the index0_interface and index0_pci "+
-			"fields. Restart xpfd or reboot after the change. The `system management-interface` "+
-			"leaf is not implemented in config mode and would be silently ignored.",
+			"bootstrap. From the console, move the management default route and its addressing "+
+			"onto the NIC identified by index0_interface and index0_pci. Virtio-first "+
+			"enumeration keeps its virtio NIC at index 0, so recabling cannot make the PCI "+
+			"management NIC index 0 and recabling alone can strand management. Alternatively, from "+
+			"the console, enter `set chassis device-map interface fxp0 pci <mgmt PCI>` and then "+
+			"`commit confirmed`. Restart xpfd or reboot after the change. The `system "+
+			"management-interface` leaf is not implemented in config mode and would be silently "+
+			"ignored.",
 			"interface", lifeline, "enum_index", idx,
 			"index0_interface", index0Name, "index0_pci", index0PCI)
 		return
