@@ -515,7 +515,22 @@ func equivalentSyncNodes(active, incoming []*Node, activePath, incomingPath []st
 			if aCredential != bCredential {
 				return false
 			}
-			if a.Keys[k] != b.Keys[k] && (!aCredential || !syncCredentialValueEquivalent(a.Keys[k], b.Keys[k])) {
+			// Derive the slot from the credential KEYWORD (keys[k-1] for
+			// in-Keys values), not from the inherited/path slot: at this
+			// point the current node keys are not yet appended to the path,
+			// so path-derived resolution sees the parent keyword (e.g.
+			// "admin") and yields "" — which mis-gates passwords at 16
+			// (GLM slot-confirmation MAJOR-1).
+			slot := incomingValueSlot
+			if k > 0 {
+				for _, keyword := range []string{"password", "api-key", "secret"} {
+					if apiAuthSecretKeywordAt(incomingPath, b.Keys, k-1, keyword) {
+						slot = keyword
+						break
+					}
+				}
+			}
+			if a.Keys[k] != b.Keys[k] && (!aCredential || !syncCredentialValueEquivalent(a.Keys[k], b.Keys[k], slot)) {
 				return false
 			}
 		}
@@ -552,8 +567,19 @@ func apiAuthNodeKeyValueAt(parent, keys []string, index int) bool {
 	return index > apiKeyIndex && apiAuthSecretKeywordAt(parent, keys, apiKeyIndex, "api-key")
 }
 
-func syncCredentialValueEquivalent(active, incoming string) bool {
-	return active == incoming || (IsAPIAuthSecretHash(active) && VerifyAPIAuthSecret(active, incoming))
+func syncCredentialValueEquivalent(active, incoming, slot string) bool {
+	if active == incoming {
+		return true
+	}
+	// Below-minimum cleartext must NOT verify-equivalent: promotion would
+	// install the $xpf-invalid$ deny marker while dedup suppresses the
+	// only push capturing the working verifier (GLM round-1 F1). The minimum
+	// is slot-aware (password 12, api-key/secret 16) matching promotion
+	// (GLM F1-confirmation follow-up).
+	if utf8.RuneCountInString(incoming) < apiAuthSecretMinRunes(slot) {
+		return false
+	}
+	return IsAPIAuthSecretHash(active) && VerifyAPIAuthSecret(active, incoming)
 }
 
 func equalStrings(a, b []string) bool {

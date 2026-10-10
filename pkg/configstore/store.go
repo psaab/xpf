@@ -1053,6 +1053,12 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 			"path", p, "issue", "#1798")
 	}
 
+	// #12163: capture legacy credential equivalence before #10826 replaces
+	// cleartext secrets with fresh salted verifiers. This signal affects only
+	// the rollback-history decision; SyncApply still promotes, persists, and
+	// returns the compiled config so the caller retries every failed apply.
+	syncEquivalentToActive := config.ConfigTreesEquivalentForSync(s.active, tree)
+
 	// #10826: lenient compilers hash a private expansion clone for runtime
 	// credentials, but SyncApply persists this source tree below. Hash the
 	// peer-supplied tree itself before compile/promotion so an older primary
@@ -1073,11 +1079,17 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 	// be compared with the unshared-commit mark.
 	divergence := s.classifySyncLocked(tree)
 
-	// Push current active to history.
-	s.history.Push(&HistoryEntry{
-		Config:    s.active.Clone(),
-		Timestamp: time.Now(),
-	})
+	// #12163: a repeated peer sync carries no new rollback target. The digest
+	// handles canonical-identical retries; the pre-hash equivalence check
+	// handles legacy cleartext credentials whose fresh salts change the
+	// rendered digest. Real credential changes fail verification, and real
+	// non-credential changes fail structural equivalence, so both still push.
+	if configTextDigest(tree.Format()) != configTextDigest(s.active.Format()) && !syncEquivalentToActive {
+		s.history.Push(&HistoryEntry{
+			Config:    s.active.Clone(),
+			Timestamp: time.Now(),
+		})
+	}
 
 	s.active = tree
 	s.compiled = compiled
