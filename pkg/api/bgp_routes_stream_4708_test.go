@@ -45,6 +45,14 @@ func (f fakeBGPExecutor) VtyshStream(context.Context, string) (io.ReadCloser, fu
 	return io.NopCloser(strings.NewReader(f.vtyshOut)), func() error { return nil }, nil
 }
 
+func (f fakeBGPExecutor) VtyshDaemon(context.Context, string, string) ([]byte, error) {
+	return nil, nil
+}
+
+func (f fakeBGPExecutor) VtyshLoadDaemon(context.Context, string, string) ([]byte, error) {
+	return nil, nil
+}
+
 // makeFRRBGPOutput renders route tuples into an FRR `show bgp ipv4 unicast`-
 // style block. GetBGPRoutes keeps lines starting with "*"/" " that have >=3
 // fields, taking Network=fields[1], NextHop=fields[2], Path=join(fields[4:]).

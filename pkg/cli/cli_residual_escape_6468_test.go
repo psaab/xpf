@@ -99,6 +99,14 @@ func (vtyshEscapeExecutor6468) VtyshStream(context.Context, string) (io.ReadClos
 	return io.NopCloser(strings.NewReader("")), func() error { return nil }, nil
 }
 
+func (vtyshEscapeExecutor6468) VtyshDaemon(context.Context, string, string) ([]byte, error) {
+	return nil, nil
+}
+
+func (vtyshEscapeExecutor6468) VtyshLoadDaemon(context.Context, string, string) ([]byte, error) {
+	return nil, nil
+}
+
 // escapeVtyshCLI6468 wires a CLI whose FRR manager returns the hostile block
 // from every vtysh call.
 func escapeVtyshCLI6468(t *testing.T) *CLI {
