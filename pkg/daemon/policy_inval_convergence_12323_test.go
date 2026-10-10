@@ -1343,3 +1343,128 @@ func TestPolicyInvalidationLandedDebtChainStaysBounded12323(t *testing.T) {
 		}
 	}
 }
+
+// landedBaselineThenConfirmed12072 builds the MAJOR-1 premise: Cb is the
+// confirmed baseline carrying a landed delete debt for s1 (Cb forbids rule
+// a), and C2 is a landed commit-confirmed target whose discharge also
+// failed, so C2's debt holds s1 (from Cb) plus s2 (C2 forbids b) with
+// landed=Cb's debt.
+func landedBaselineThenConfirmed12072(t *testing.T) (*convergenceRun12072, *config.Config, *config.Config, uint64) {
+	t.Helper()
+	r, c0 := newLandedRollbackRun12072(t)
+	r.dp.deleteErrOnce = true
+	cb, err := publishLandedRollbackConfig12072(t, r, c0, "landed-cb", []string{"p-first", "b", "web"})
+	if err == nil {
+		t.Fatal("premise: C0->Cb failed delete not surfaced")
+	}
+	if d := r.h.d.policyInvalidationDebt; d == nil || d.newCfg != cb || d.capture == nil || d.capture.candidateCount() == 0 {
+		t.Fatalf("premise: Cb delete debt missing: %+v", d)
+	}
+	r.dp.deleteErrOnce = true
+	c2, gen, err := publishConfirmedRollbackTarget12072(t, r, cb, "landed-c2", []string{"p-first", "web"})
+	if err == nil {
+		t.Fatal("premise: Cb->C2 failed delete not surfaced")
+	}
+	d := r.h.d.policyInvalidationDebt
+	if d == nil || d.newCfg != c2 || d.landed == nil || d.landed.newCfg != cb || d.predecessorCfg != cb || r.dp.applied != c2 {
+		t.Fatalf("premise: C2 debt shape wrong: %+v helper=%p", d, r.dp.applied)
+	}
+	if !r.hasLiveSession(1) || !r.hasLiveSession(2) || !r.hasLiveSession(3) {
+		t.Fatal("premise: sessions changed before rollback")
+	}
+	return r, cb, c2, gen
+}
+
+func TestPolicyInvalidationUndoRestoresEarlierLandedDebt12323(t *testing.T) {
+	r, cb, _, gen := landedBaselineThenConfirmed12072(t)
+	r.h.d.executeConfirmedRollback(gen)
+	if r.h.d.store.ActiveConfig() != cb || r.dp.applied != cb {
+		t.Fatalf("rollback authority: store=%p helper=%p, want Cb %p",
+			r.h.d.store.ActiveConfig(), r.dp.applied, cb)
+	}
+	if !r.hasDeletedSession(1) || r.hasLiveSession(1) {
+		t.Fatal("UNDER-DELETION: Cb forbids rule a but s1 survived the rollback to Cb")
+	}
+	if r.hasDeletedSession(2) || !r.hasLiveSession(2) {
+		t.Fatal("OVER-DELETION: Cb permits rule b but s2 was deleted")
+	}
+	if !r.hasLiveSession(3) {
+		t.Fatal("OVER-DELETION: s3 (web) deleted")
+	}
+}
+
+func TestPolicyInvalidationLandedSameTargetRetryThenUndo12323(t *testing.T) {
+	r, cb, c2, gen := landedBaselineThenConfirmed12072(t)
+	r.dp.deleteErrOnce = true
+	if err := r.h.d.applyActiveConfigResult(); err != nil {
+		t.Logf("bare retry returned: %v", err)
+	}
+	d := r.h.d.policyInvalidationDebt
+	if d == nil || d.newCfg != c2 || !r.hasLiveSession(1) {
+		t.Fatalf("premise: bare retry discharged or moved the debt: %+v", d)
+	}
+	t.Logf("after landed bare retry: %+v", d)
+	r.h.d.executeConfirmedRollback(gen)
+	if r.h.d.store.ActiveConfig() != cb || r.dp.applied != cb {
+		t.Fatalf("rollback authority: store=%p helper=%p, want Cb %p",
+			r.h.d.store.ActiveConfig(), r.dp.applied, cb)
+	}
+	if !r.hasDeletedSession(1) || r.hasLiveSession(1) {
+		t.Fatalf("UNDER-DELETION (fail-open): Cb forbids rule a but s1 survived rollback to Cb; debt=%+v ActiveApplied=%v",
+			r.h.d.policyInvalidationDebt, r.h.d.store.ActiveApplied())
+	}
+	if r.hasDeletedSession(2) || !r.hasLiveSession(2) {
+		t.Fatal("OVER-DELETION: Cb permits rule b but s2 was deleted")
+	}
+}
+
+func TestPolicyInvalidationLandedBareRetryPublishFailThenUndo12323(t *testing.T) {
+	r, cb, c2, gen := landedBaselineThenConfirmed12072(t)
+	r.dp.script = make([]invalDebtOutcome12073, r.dp.applyCalls+1)
+	r.dp.script[r.dp.applyCalls] = invalDebtOutcome12073{err: errors.New("apply_snapshot rejected by helper (transient)")}
+	err := r.h.d.applyActiveConfigResult()
+	d := r.h.d.policyInvalidationDebt
+	if err == nil || d == nil || d.newCfg != c2 || r.dp.applied != c2 || !r.hasLiveSession(1) {
+		t.Fatalf("premise: err=%v debt=%+v helper=%p", err, d, r.dp.applied)
+	}
+	t.Logf("after publish-failed bare retry: %+v", d)
+	r.h.d.executeConfirmedRollback(gen)
+	if r.h.d.store.ActiveConfig() != cb || r.dp.applied != cb {
+		t.Fatalf("rollback authority: store=%p helper=%p, want Cb %p",
+			r.h.d.store.ActiveConfig(), r.dp.applied, cb)
+	}
+	if !r.hasDeletedSession(1) || r.hasLiveSession(1) {
+		t.Fatalf("UNDER-DELETION (fail-open): Cb forbids rule a but s1 survived rollback to Cb; debt=%+v ActiveApplied=%v",
+			r.h.d.policyInvalidationDebt, r.h.d.store.ActiveApplied())
+	}
+	if r.hasDeletedSession(2) || !r.hasLiveSession(2) {
+		t.Fatal("OVER-DELETION: Cb permits rule b but s2 was deleted")
+	}
+}
+
+func TestPolicyInvalidationPredecessorSurvivesLandedReanchor12323(t *testing.T) {
+	r, c0 := newLandedRollbackRun12072(t)
+	r.dp.deleteErrOnce = true
+	c1, gen, err := publishConfirmedRollbackTarget12072(t, r, c0, "reanchor-c1", []string{"p-first", "b", "web"})
+	if err == nil {
+		t.Fatal("premise: C0->C1 failed delete not surfaced")
+	}
+	r.dp.deleteErrOnce = true
+	if err := r.h.d.applyActiveConfigResult(); err != nil {
+		t.Logf("bare retry returned: %v", err)
+	}
+	d := r.h.d.policyInvalidationDebt
+	if d == nil || d.newCfg != c1 || d.oldCfg != c1 {
+		t.Fatalf("premise: landed re-anchor did not happen: %+v", d)
+	}
+	if d.predecessorCfg != c0 {
+		t.Fatalf("predecessor lost across landed re-anchor: %+v", d)
+	}
+	r.h.d.executeConfirmedRollback(gen)
+	if r.hasDeletedSession(1) || !r.hasLiveSession(1) {
+		t.Fatal("OVER-DELETION after re-anchor: rollback to C0 deleted s1")
+	}
+	if r.h.d.policyInvalidationDebt != nil || !r.h.d.store.ActiveApplied() {
+		t.Fatal("undo after re-anchor did not converge")
+	}
+}

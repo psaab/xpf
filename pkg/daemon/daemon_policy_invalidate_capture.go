@@ -81,8 +81,8 @@ type policyInvalidationScanFailure struct {
 // authorization changes succeed. A refusal to enumerate under a mismatched or
 // unknown authority is tracked separately from an incomplete enumeration.
 type policyInvalidationDebt struct {
-	oldCfg            *config.Config
-	newCfg            *config.Config
+	oldCfg *config.Config
+	newCfg *config.Config
 	// predecessorCfg is retained across authority re-anchors to recognize
 	// when a rollback exactly restores the target's predecessor.
 	predecessorCfg    *config.Config
@@ -358,9 +358,9 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 				debt.landed = nil
 				landed = debt
 			}
-		} else if debt.newCfg != applied {
-			// An unlanded predecessor passes on the landed obligation it was
-			// itself carrying (nested superseding target, same-target retry).
+		} else {
+			// Carry landed obligations across superseding targets and same-target
+			// adopts. Reusing the existing record keeps the chain depth at one.
 			landed = debt.landed
 		}
 		previousCapture = debt.capture

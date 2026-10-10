@@ -1,8 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
-  * Drop landed session-delete candidates when commit-confirmed rollback
-    restores their predecessor; retain incomplete scan debt fail-closed until
-    complete recapture or an authoritative full session clear (#12072).
+  * Drop landed session-delete candidates on a single-level exact
+    commit-confirmed rollback to its predecessor; retain incomplete scan debt
+    fail-closed until complete recapture or an authoritative full session clear
+    (#12072).
 
   * Keep declined WireGuard listener keepalives from publishing outer-tuple
     LocalMiss sessions that would steer subsequent same-zone handshakes away
