@@ -212,6 +212,7 @@ func TestSetupBootstrapLifelineAppliance(t *testing.T) {
 			oldEnum := enumeratePCINICsFn
 			oldRename := renameInterfaceFn
 			oldReload := networkctlReloadFn
+			oldNetworkd := networkdActiveFn
 			t.Cleanup(func() {
 				linkDir = oldLinkDir
 				applianceMarkerFile = oldMarker
@@ -220,11 +221,12 @@ func TestSetupBootstrapLifelineAppliance(t *testing.T) {
 				enumeratePCINICsFn = oldEnum
 				renameInterfaceFn = oldRename
 				networkctlReloadFn = oldReload
+				networkdActiveFn = oldNetworkd
 			})
 
+			networkdActiveFn = func() error { return nil }
 			// No default route — the #7114 precondition.
 			detectLifelineInterfaceFn = func() (string, bool, error) { return "", false, nil }
-			// One NIC whose current name differs from fxp0. The factory
 			// row exercises the rename seam; the other rows must not call it.
 			enumeratePCINICsFn = func() ([]pciNIC, error) {
 				return []pciNIC{{sortKey: 0, busAddr: "0000:05:00.0", name: "enp5s0"}}, nil
