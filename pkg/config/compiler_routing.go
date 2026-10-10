@@ -1705,7 +1705,7 @@ var policyTermThenInlineKeywords = map[string]bool{
 // From-match words are parsed by the main inline switch even when encountered
 // after a then action. An AS-path-prepend run must stop before them without
 // consuming them so tolerant boot/sync retains the match and strict validation
-// can reject the invalid prepend tail (#12070 R6-F1).
+// can reject the invalid prepend tail (#12070 R7-F1).
 var policyTermFromMatchInlineKeywords12070 = map[string]bool{
 	"protocol": true, "prefix-list": true, "route-filter": true, "as-path": true,
 }
@@ -1891,13 +1891,9 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				// `protocol` must still reach the main-loop from-match cases
 				// so tolerant boot/sync keeps master's interpretation
 				// (#12070 R6-F1).
-				for next := i + 1; next < len(keys); next++ {
-					if policyTermThenInlineKeywords[keys[next]] {
-						break
-					}
+				if next := i + 1; next < len(keys) && !policyTermThenInlineKeywords[keys[next]] {
 					term.invalidNextHopExtra12070 = true
 					term.invalidNextHopExtraValue12070 = keys[next]
-					break
 				}
 			}
 		case "load-balance":
@@ -1972,26 +1968,30 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 			}
 		case "as-path-prepend":
 			term.hasASPathPrependOperand12070 = true
-			// Other policy keywords such as `tag` and `area` remain
-			// prepend operands so the strict gate rejects them rather than
-			// erasing the clause. From-match words are different: the main
-			// switch interprets them as matches even after `then`. Stop
-			// without consuming them, retain compiler-only invalid-tail
-			// evidence for strict validation, and preserve master match
-			// semantics on tolerant boot/sync (#12070 R6-F1).
+			// Other policy keywords such as `tag` and `area` remain prepend
+			// operands so the strict gate rejects them rather than erasing the
+			// clause. From-match words are different: the main switch interprets
+			// them as matches even after `then`. Stop before them without
+			// consuming, retain compiler-only invalid-tail evidence for strict
+			// validation, and preserve the match on tolerant paths (R7-F1).
+			// Quoted/bracketed then-action words likewise remain visible to the
+			// main switch as actions instead of being absorbed (R7-N1/M35).
 			for i+1 < len(keys) {
 				next := i + 1
+				if policyTermFromMatchInlineKeywords12070[keys[next]] {
+					term.invalidASPathPrependExtra12070 = true
+					term.invalidASPathPrependExtraValue12070 = keys[next]
+					break
+				}
 				quotedValue := next < len(quoted) && quoted[next]
 				bracketedValue := next < len(bracketed) && bracketed[next]
-				if !quotedValue && !bracketedValue {
-					if policyTermThenInlineKeywords[keys[next]] {
-						break
-					}
-					if policyTermFromMatchInlineKeywords12070[keys[next]] {
-						term.invalidASPathPrependExtra12070 = true
-						term.invalidASPathPrependExtraValue12070 = keys[next]
-						break
-					}
+				if (quotedValue || bracketedValue) && policyTermThenInlineKeywords[keys[next]] {
+					term.invalidASPathPrependExtra12070 = true
+					term.invalidASPathPrependExtraValue12070 = keys[next]
+					break
+				}
+				if !quotedValue && !bracketedValue && policyTermThenInlineKeywords[keys[next]] {
+					break
 				}
 				i = next
 				term.ASPathPrepend = appendPolicyASPathPrependOperand(term.ASPathPrepend, keys[i])

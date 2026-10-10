@@ -197,6 +197,7 @@ func TestPolicyThenOperandsLenientRegistrationAndCompile_12070(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name, text, bad string
+		wantFromProtocols []string
 	}{
 		{
 			name: "compact next-hop",
@@ -212,11 +213,24 @@ func TestPolicyThenOperandsLenientRegistrationAndCompile_12070(t *testing.T) {
 			name: "compact next-hop protocol tail retains match",
 			text: `policy-options { policy-statement P { term t { then accept next-hop 192.0.2.1 protocol bgp; } } }`,
 			bad:  "protocol",
+			wantFromProtocols: []string{"bgp"},
 		},
 		{
 			name: "term-line prepend",
 			text: `policy-options { policy-statement P { term t then accept as-path-prepend 65001 abc; } }`,
 			bad:  "abc",
+		},
+		{
+			name: "quoted prepend protocol tail retains match",
+			text: `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 "protocol" bgp; } } }`,
+			bad:  "protocol",
+			wantFromProtocols: []string{"bgp"},
+		},
+		{
+			name: "bracketed prepend protocol tail retains match",
+			text: `policy-options { policy-statement P { term t { then accept as-path-prepend [ 65001 protocol bgp ]; } } }`,
+			bad:  "protocol",
+			wantFromProtocols: []string{"bgp"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -230,6 +244,13 @@ func TestPolicyThenOperandsLenientRegistrationAndCompile_12070(t *testing.T) {
 			compiled, err := CompileConfigLenient(tree)
 			if err != nil {
 				t.Fatalf("CompileConfigLenient rejected the existing invalid operand: %v", err)
+			}
+			if tc.wantFromProtocols != nil {
+				got := compiled.PolicyOptions.PolicyStatements["P"].Terms[0].FromProtocols
+				if strings.Join(got, ",") != strings.Join(tc.wantFromProtocols, ",") {
+					t.Fatalf("CompileConfigLenient FromProtocols = %v, want %v",
+						got, tc.wantFromProtocols)
+				}
 			}
 			found := false
 			for _, warning := range compiled.Warnings {

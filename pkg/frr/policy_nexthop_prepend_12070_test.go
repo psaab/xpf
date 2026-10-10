@@ -502,6 +502,48 @@ func TestPolicyThenCompactAndTermLineOperandsRejected_12070(t *testing.T) {
 			wantMessage: "unknown modifier",
 		},
 		{
+			name:        "compact quoted prepend protocol tail",
+			text:        `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 "protocol" bgp; } } }`,
+			leaf:        "as-path-prepend",
+			value:       "protocol",
+			wantMessage: `unknown modifier "protocol"`,
+		},
+		{
+			name:        "term-line quoted prepend protocol tail",
+			text:        `policy-options { policy-statement P { term t then accept as-path-prepend 65001 "protocol" bgp; } }`,
+			leaf:        "as-path-prepend",
+			value:       "protocol",
+			wantMessage: `unknown modifier "protocol"`,
+		},
+		{
+			name:        "compact quoted protocol prepend match argument",
+			text:        `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 "protocol" "bgp"; } } }`,
+			leaf:        "as-path-prepend",
+			value:       "protocol",
+			wantMessage: `unknown modifier "protocol"`,
+		},
+		{
+			name:        "compact quoted prefix-list prepend tail",
+			text:        `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 "prefix-list" PL; } } }`,
+			leaf:        "as-path-prepend",
+			value:       "prefix-list",
+			wantMessage: `unknown modifier "prefix-list"`,
+		},
+		{
+			name:        "compact bracketed prepend protocol tail",
+			text:        `policy-options { policy-statement P { term t { then accept as-path-prepend [ 65001 protocol bgp ]; } } }`,
+			leaf:        "as-path-prepend",
+			value:       "protocol",
+			wantMessage: `unknown modifier "protocol"`,
+		},
+		{
+			name:        "prepend malformed operand precedes from-match diagnostic",
+			text:        `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 abc protocol bgp; } } }`,
+			leaf:        "as-path-prepend",
+			value:       "abc",
+			wantMessage: `invalid value "abc"`,
+		},
+		{
 			name:        "prepend prefix-list tail",
 			text:        `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 prefix-list PL; } } }`,
 			leaf:        "as-path-prepend",
@@ -527,7 +569,7 @@ func TestPolicyThenCompactAndTermLineOperandsRejected_12070(t *testing.T) {
 			text:        `policy-options { policy-statement P { term t { then accept as-path-prepend "accept"; } } }`,
 			leaf:        "as-path-prepend",
 			value:       "accept",
-			wantMessage: `invalid value "accept"`,
+			wantMessage: `unknown modifier "accept"`,
 		},
 		{
 			name:        "compact empty next-hop",
@@ -976,6 +1018,36 @@ func TestPolicyThenOperandsSyncApplyDowngradesAndOmits_12070(t *testing.T) {
 			required: []string{"match source-protocol bgp", "set as-path prepend 65001"},
 		},
 		{
+			name:     "quoted prepend protocol tail retains match",
+			text:     `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 "protocol" bgp; } } }`,
+			bad:      "protocol",
+			required: []string{"match source-protocol bgp", "set as-path prepend 65001"},
+		},
+		{
+			name:     "term-line quoted prepend protocol tail retains match",
+			text:     `policy-options { policy-statement P { term t then accept as-path-prepend 65001 "protocol" bgp; } }`,
+			bad:      "protocol",
+			required: []string{"match source-protocol bgp", "set as-path prepend 65001"},
+		},
+		{
+			name:     "quoted protocol prepend match argument retains match",
+			text:     `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 "protocol" "bgp"; } } }`,
+			bad:      "protocol",
+			required: []string{"match source-protocol bgp", "set as-path prepend 65001"},
+		},
+		{
+			name:     "quoted prefix-list prepend tail retains match",
+			text:     `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 "prefix-list" PL; } } }`,
+			bad:      "prefix-list",
+			required: []string{"match ip address prefix-list PL", "set as-path prepend 65001"},
+		},
+		{
+			name:     "bracketed prepend protocol tail retains match",
+			text:     `policy-options { policy-statement P { term t { then accept as-path-prepend [ 65001 protocol bgp ]; } } }`,
+			bad:      "protocol",
+			required: []string{"match source-protocol bgp", "set as-path prepend 65001"},
+		},
+		{
 			name:     "prepend prefix-list tail retains match",
 			text:     `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 prefix-list PL; } } }`,
 			bad:      "prefix-list",
@@ -1064,4 +1136,42 @@ func TestPolicyThenOperandsSyncApplyDowngradesAndOmits_12070(t *testing.T) {
 			checkTolerant("SyncApply", synced.Warnings, &synced.PolicyOptions)
 		})
 	}
+}
+func TestPolicyThenQuotedActionPrependTailDoesNotWiden_12070(t *testing.T) {
+	text := `policy-options { policy-statement P { term t from protocol static then as-path-prepend 65001 "reject"; term u then accept; } }`
+	assertDenied := func(path string, options *config.PolicyOptionsConfig) {
+		t.Helper()
+		terms := options.PolicyStatements["P"].Terms
+		if got := terms[0].Action; got != "reject" {
+			t.Fatalf("%s term t action = %q, want reject", path, got)
+		}
+		if got := terms[0].FromProtocols; len(got) != 1 || got[0] != "static" {
+			t.Fatalf("%s term t FromProtocols = %v, want [static]", path, got)
+		}
+		rendered := (&Manager{frrConf: "/dev/null"}).generatePolicyOptions(options)
+		if !strings.Contains(rendered, "route-map P deny 10") ||
+			strings.Contains(rendered, "route-map P permit 10") {
+			t.Fatalf("%s render widened term t instead of denying it:\n%s", path, rendered)
+		}
+	}
+
+	tree, parseErrors := config.NewParser(text).Parse()
+	if len(parseErrors) != 0 {
+		t.Fatalf("parse policy: %v", parseErrors)
+	}
+	lenient, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient rejected persisted policy: %v", err)
+	}
+	assertDenied("CompileConfigLenient", &lenient.PolicyOptions)
+
+	store, err := configstore.New(filepath.Join(t.TempDir(), "quoted-action.conf"))
+	if err != nil {
+		t.Fatalf("create config store: %v", err)
+	}
+	synced, err := store.SyncApply(text, nil)
+	if err != nil {
+		t.Fatalf("SyncApply rejected persisted policy: %v", err)
+	}
+	assertDenied("SyncApply", &synced.PolicyOptions)
 }

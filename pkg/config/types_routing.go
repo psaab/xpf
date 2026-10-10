@@ -164,9 +164,10 @@ type PolicyTerm struct {
 	// Compiler-only state, excluded from JSON.
 	invalidNextHopExtra12070      bool   `json:"-"`
 	invalidNextHopExtraValue12070 string `json:"-"`
-	// invalidASPathPrependExtra12070 preserves a from-match word that ended a
-	// compact/term-line prepend run. Strict compilation rejects that tail;
-	// leaving it unconsumed lets tolerant boot/sync retain master's match.
+	// invalidASPathPrependExtra12070 preserves a from-match or quoted/
+	// bracketed then-action word ending a compact/term-line prepend run.
+	// Strict compilation rejects the tail; leaving it unconsumed lets tolerant
+	// boot/sync retain the match or action interpreted by the main parser.
 	// Compiler-only state, excluded from JSON.
 	invalidASPathPrependExtra12070      bool   `json:"-"`
 	invalidASPathPrependExtraValue12070 string `json:"-"`
