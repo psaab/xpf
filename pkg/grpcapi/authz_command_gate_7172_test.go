@@ -292,10 +292,6 @@ func TestEmptyDenyPatternDeniesEverything7172(t *testing.T) {
 // Keep the reboot regression under its own fixture. The zone-pair assertion
 // uses the separate summary-only fixture below, so a GetZonePairSummary
 // mis-charge as `request system reboot` is admitted and fails that assertion.
-// The summary deny's anchors are load-bearing: they make this fixture deny
-// only the canonical summary command. Without them, `show security flow
-// session` (the detail charge) would also match, so the zone-pair denial arm
-// alone would accept a detail-command mis-charge.
 const authzDenyConfig7172 = `
 system {
     host-name authz-deny-test;
@@ -311,6 +307,14 @@ system {
 }
 `
 
+// The summary-only deny names the `summary` leaf, so it cannot match the
+// detail charge `show security flow session`; a GetZonePairSummary
+// mis-charge to detail is admitted and fails the denial arm. A deny
+// widened to cover detail or inventory reads is caught by the
+// same-fixture GetSessions/GetZones controls below. The anchors only
+// stop a charge that merely contains the summary command from
+// satisfying the denial arm, which TestEveryMappedCommandIsCanonical7172
+// rejects anyway.
 const authzSummaryDenyConfig7172 = `
 system {
     host-name authz-summary-deny-test;
