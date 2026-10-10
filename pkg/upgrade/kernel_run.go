@@ -2,6 +2,7 @@ package upgrade
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -88,6 +89,7 @@ func (r *KernelRunner) ktransition(j *KernelJournal, s KernelState) error {
 // the process dies right after SetBootNext, the firmware clears BootNext on the
 // next boot, so at worst the candidate is tried once and falls back.
 func (r *KernelRunner) Arm(candidateVersion string) error {
+	journalPath := r.cfg.JournalPath
 	// FIRST, before the candidate is even looked at (#6631). A journal the boot
 	// gate does not read makes this arm unpromotable no matter what is armed,
 	// so it outranks every per-invocation complaint below: telling an operator
@@ -159,7 +161,8 @@ func (r *KernelRunner) Arm(candidateVersion string) error {
 	}
 
 	// ---- ARM (point inactive slot selector + BootNext + watchdog) ----
-	if err := r.armCandidate(j); err != nil {
+	watchdogArmed, err := r.armCandidate(j)
+	if err != nil {
 		return err
 	}
 
@@ -167,40 +170,80 @@ func (r *KernelRunner) Arm(candidateVersion string) error {
 	r.logf("kernel-upgrade: armed candidate %s in slot %s; rebooting (one-shot)",
 		j.CandidateVersion, j.InactiveSlot)
 	if err := r.cfg.Sys.Reboot(); err != nil {
-		// Preserve the fully-protected ARMED state until the backstep is
-		// durable. If this write fails, leave BootNext and the watchdog intact:
-		// the host still has the watchdog-protected trial as its recovery path.
 		armedBootID := j.BootID
 		j.BootID = ""
-		if terr := r.ktransition(j, KernelStateArming); terr != nil {
+		backstepErr := r.ktransition(j, KernelStateArming)
+		if backstepErr != nil && !isPostRenameJournalError(backstepErr) {
 			j.State = KernelStateArmed
 			j.BootID = armedBootID
+			watchdogStatus := "the watchdog was not confirmed armed, so do not rely on an automatic reset"
+			if watchdogArmed {
+				watchdogStatus = "the watchdog is armed and will reset the host into the candidate trial within the watchdog timeout"
+			}
 			return fmt.Errorf("%w; journal step back to ARMING failed (%w): "+
-				"the journal remains ARMED with BootID %s, BootNext %s, and the "+
-				"hardware watchdog still armed; the host will reset into the candidate "+
-				"trial within the watchdog timeout unless an operator clears BootNext "+
-				"and resolves the journal first",
-				err, terr, armedBootID, armedBootID)
+				"the journal remains ARMED with BootID %s and BootNext %s; %s. "+
+				"Clear BootNext and resolve the journal before rebooting",
+				err, backstepErr, armedBootID, armedBootID, watchdogStatus)
+		}
+		cause := err
+		if backstepErr != nil {
+			cause = fmt.Errorf("%w; the ARMING journal rename landed but its directory sync failed (%w)",
+				err, backstepErr)
 		}
 
-		// Now that ARMING is durable, clear BootNext before disarming the
-		// watchdog. If clearing fails, restore the known ARMED state and keep
-		// the watchdog running rather than leave a queued candidate untracked.
-		cause, bootNextCleared := disarmAfterFailedReboot(r.cfg.Sys, err)
+		// ARMING is now visible. Clear BootNext before disarming the watchdog.
+		// If clearing fails, restore the verified ARMED trial instead.
+		bootNextCleared, cause := disarmAfterFailedReboot(r.cfg.Sys, cause)
 		if !bootNextCleared {
 			j.BootID = armedBootID
-			if terr := r.ktransition(j, KernelStateArmed); terr != nil {
+			restoreErr := r.ktransition(j, KernelStateArmed)
+			if restoreErr != nil && !isPostRenameJournalError(restoreErr) {
 				j.State = KernelStateArming
 				j.BootID = ""
-				return fmt.Errorf("%w; could not restore the ARMED journal (%w): "+
-					"BootNext %s may still be queued and the watchdog remains armed; "+
-					"the journal remains ARMING, so clear BootNext manually before rebooting: "+
+				disarmErr := r.cfg.Sys.DisarmWatchdog()
+				recordErr := clearArmRecordForJournal(journalPath)
+				if disarmErr != nil {
+					watchdogStatus := "watchdog arming was not confirmed, so an automatic watchdog reset is not guaranteed"
+					if watchdogArmed {
+						watchdogStatus = "the watchdog may still be armed and will force a reboot into the candidate within the watchdog timeout"
+					}
+					branchErr := fmt.Errorf("%w; could not restore the ARMED journal (%w): "+
+						"BootNext %s may still be queued and the journal remains ARMING; "+
+						"watchdog disarm also failed (%w); %s. Clear BootNext before then: "+
+						"efibootmgr --delete-bootnext",
+						cause, restoreErr, armedBootID, disarmErr, watchdogStatus)
+					if recordErr != nil {
+						return fmt.Errorf("%w; stale arm record could not be removed: %w",
+							branchErr, recordErr)
+					}
+					return branchErr
+				}
+				branchErr := fmt.Errorf("%w; could not restore the ARMED journal (%w): "+
+					"BootNext %s may still be queued and the journal remains ARMING; "+
+					"the watchdog was disarmed, so clear BootNext before rebooting: "+
 					"efibootmgr --delete-bootnext",
-					cause, terr, armedBootID)
+					cause, restoreErr, armedBootID)
+				if recordErr != nil {
+					return fmt.Errorf("%w; stale arm record could not be removed: %w",
+						branchErr, recordErr)
+				}
+				return branchErr
 			}
-			return fmt.Errorf("%w; journal remains ARMED with BootID %s and the "+
-				"watchdog still armed; clear BootNext before rebooting",
-				cause, armedBootID)
+			if restoreErr != nil {
+				cause = fmt.Errorf("%w; the ARMED journal rename landed but its directory sync failed (%w)",
+					cause, restoreErr)
+			}
+			watchdogStatus := "the watchdog was not confirmed armed, so do not rely on an automatic reset"
+			if watchdogArmed {
+				watchdogStatus = "the watchdog remains armed and will reset the host into the candidate trial within the watchdog timeout"
+			}
+			return fmt.Errorf("%w; journal remains ARMED with BootID %s and the queued BootNext; %s. "+
+				"Clear BootNext before rebooting: efibootmgr --delete-bootnext",
+				cause, armedBootID, watchdogStatus)
+		}
+		if recordErr := clearArmRecordForJournal(journalPath); recordErr != nil {
+			return fmt.Errorf("%w; BootNext was cleared and watchdog disarm was attempted, "+
+				"but the stale arm record could not be removed: %w", cause, recordErr)
 		}
 		return cause
 	}
@@ -340,32 +383,35 @@ func (r *KernelRunner) installCandidate(j *KernelJournal, candidateVersion strin
 	return r.ktransition(j, KernelStateInstalled)
 }
 
-func (r *KernelRunner) armCandidate(j *KernelJournal) error {
+// armCandidate returns whether ArmWatchdog succeeded; a best-effort D2 failure
+// can continue arming but does not justify promising a watchdog-driven reset.
+func (r *KernelRunner) armCandidate(j *KernelJournal) (bool, error) {
 	sys := r.cfg.Sys
 
 	// Point the INACTIVE slot's selector at the candidate (atomic ESP write).
 	if err := sys.WriteSlotSelector(j.InactiveSlot, j.CandidateVersion); err != nil {
-		return fmt.Errorf("kernel-upgrade arm: write %s selector: %w", j.InactiveSlot, err)
+		return false, fmt.Errorf("kernel-upgrade arm: write %s selector: %w", j.InactiveSlot, err)
 	}
 	// Verify the selector reads back the candidate before we arm BootNext.
 	got, err := sys.ReadSlotSelector(j.InactiveSlot)
 	if err != nil {
-		return fmt.Errorf("kernel-upgrade arm: read back %s selector: %w", j.InactiveSlot, err)
+		return false, fmt.Errorf("kernel-upgrade arm: read back %s selector: %w", j.InactiveSlot, err)
 	}
 	if got != j.CandidateVersion {
-		return fmt.Errorf("kernel-upgrade arm: %s selector reads %q, expected candidate %q",
+		return false, fmt.Errorf("kernel-upgrade arm: %s selector reads %q, expected candidate %q",
 			j.InactiveSlot, got, j.CandidateVersion)
 	}
 
 	entries, err := sys.BootEntries()
 	if err != nil {
-		return fmt.Errorf("kernel-upgrade arm: read boot entries: %w", err)
+		return false, fmt.Errorf("kernel-upgrade arm: read boot entries: %w", err)
 	}
 	inactiveID, ok := entries[j.InactiveSlot]
 	if !ok {
-		return fmt.Errorf("kernel-upgrade arm: inactive slot %s not registered", j.InactiveSlot)
+		return false, fmt.Errorf("kernel-upgrade arm: inactive slot %s not registered", j.InactiveSlot)
 	}
 
+	watchdogArmed := false
 	if err := sys.ArmWatchdog(); err != nil {
 		if r.cfg.StrictWatchdog {
 			// D1 (strict): a strict deployment REQUIRES a functioning watchdog.
@@ -381,12 +427,13 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) error {
 			// real ArmWatchdog pets after opening /dev/watchdog, before it reports
 			// a WDIOC_SETTIMEOUT failure. Disarm it so the aborted arm does not
 			// leave the driver-default countdown running (#12162).
-			return disarmWatchdogAfterArmFailure(sys, fmt.Errorf(
-				"%w: strict-watchdog (D1) arm failed: %v", ErrKernelChannelUnavailable, err))
+			return false, disarmStrictWatchdogAfterArmFailure(sys, err)
 		}
 		// D2 (best-effort): BootNext is the loop-safety. Log and continue; an
 		// early-boot hang would need one external/console reset to recover.
 		r.logf("kernel-upgrade arm: WARNING arm watchdog: %v (continuing; BootNext closes the loop)", err)
+	} else {
+		watchdogArmed = true
 	}
 
 	// Two-phase arm (#5847). The previous order persisted ARMED *before* the
@@ -417,7 +464,7 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) error {
 	j.ArmNonce = r.newArmNonce(j)
 	j.BootID = ""
 	if err := r.ktransition(j, KernelStateArming); err != nil {
-		return disarmWatchdogAfterArmFailure(sys, err)
+		return false, disarmWatchdogAfterArmFailure(sys, err)
 	}
 
 	if err := sys.SetBootNext(inactiveID); err != nil {
@@ -426,7 +473,7 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) error {
 		// cleanly. Leave the journal at ARMING (do NOT drop back to INSTALLED):
 		// re-entry resumes the arm, and self-recovery already treats ARMING as
 		// no-trial.
-		return disarmWatchdogAfterArmFailure(sys,
+		return false, disarmWatchdogAfterArmFailure(sys,
 			fmt.Errorf("kernel-upgrade arm: efibootmgr --bootnext %s: %w", inactiveID, err))
 	}
 
@@ -436,16 +483,14 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) error {
 	// ARMING and surface the error so no false-ARMED journal is persisted.
 	got, err = sys.GetBootNext()
 	if err != nil {
-		cause, _ := disarmAfterArmFailure(sys, fmt.Errorf(
+		return false, disarmAfterArmFailure(sys, fmt.Errorf(
 			"kernel-upgrade arm: read back BootNext (staying ARMING): %w", err))
-		return cause
 	}
 	if got != inactiveID {
-		cause, _ := disarmAfterArmFailure(sys, fmt.Errorf(
+		return false, disarmAfterArmFailure(sys, fmt.Errorf(
 			"kernel-upgrade arm: BootNext readback = %q, expected inactive slot %s "+
 				"(%s); firmware did not accept the one-shot — refusing to record ARMED (staying ARMING)",
 			got, j.InactiveSlot, inactiveID))
-		return cause
 	}
 
 	// Verified: the firmware WILL boot the candidate next. Record the confirmed
@@ -456,15 +501,13 @@ func (r *KernelRunner) armCandidate(j *KernelJournal) error {
 	// state; failing here refuses the arm rather than producing an armed
 	// candidate nothing is designated to verify (#6601 r6).
 	if err := r.recordPromoteBinary(j); err != nil {
-		cause, _ := disarmAfterArmFailure(sys, fmt.Errorf("kernel-upgrade arm: %w", err))
-		return cause
+		return false, disarmAfterArmFailure(sys, fmt.Errorf("kernel-upgrade arm: %w", err))
 	}
 	if err := r.ktransition(j, KernelStateArmed); err != nil {
-		cause, _ := disarmAfterArmFailure(sys, err)
-		return cause
+		return false, disarmAfterArmFailure(sys, err)
 	}
 
-	return nil
+	return watchdogArmed, nil
 }
 
 // disarmWatchdogAfterArmFailure disarms the watchdog on a failed arm and
@@ -477,9 +520,22 @@ func disarmWatchdogAfterArmFailure(sys KernelSystem, cause error) error {
 	return cause
 }
 
+// disarmStrictWatchdogAfterArmFailure reports LANE 2 only when cleanup
+// successfully disarmed any partially acquired watchdog.
+func disarmStrictWatchdogAfterArmFailure(sys KernelSystem, armErr error) error {
+	if err := sys.DisarmWatchdog(); err != nil {
+		return fmt.Errorf("strict-watchdog (D1) arm failed: %w; AND the hardware watchdog "+
+			"could not be disarmed (%w) — it may still reset the host; abort with an "+
+			"infrastructure error rather than falling through to LANE 2",
+			armErr, err)
+	}
+	return fmt.Errorf("%w: strict-watchdog (D1) arm failed: %v",
+		ErrKernelChannelUnavailable, armErr)
+}
+
 // disarmAfterArmFailure clears BootNext before disarming the watchdog, after
-// SetBootNext succeeds (or a later Reboot fails). It returns whether BootNext
-// was cleared and preserves the original cause plus cleanup errors (#6758, #12162).
+// SetBootNext succeeds (or a later Reboot fails). It preserves the original
+// cause plus cleanup errors (#6758, #12162).
 //
 // THE DIVERGENCE IT CLOSES. The two-phase arm records ARMING before touching
 // NVRAM and only advances to ARMED after a positive BootNext readback. Every
@@ -505,31 +561,31 @@ func disarmWatchdogAfterArmFailure(sys KernelSystem, cause error) error {
 //
 // If the clear itself FAILS, armCandidate still attempts watchdog disarm and
 // reports both cleanup errors. The failed-Reboot path instead keeps the
-// watchdog running and restores the verified ARMED journal. This helper does
-// not mutate the journal: armCandidate cannot manufacture ARMED because the
+// watchdog running until it can restore the verified ARMED journal. This helper
+// does not mutate the journal: armCandidate cannot manufacture ARMED because the
 // promote binary may be missing on its recordPromoteBinary path.
-func disarmAfterArmFailure(sys KernelSystem, cause error) (error, bool) {
-	cause, bootNextCleared := clearBootNextAfterArmFailure(sys, cause)
-	return disarmWatchdogAfterArmFailure(sys, cause), bootNextCleared
+func disarmAfterArmFailure(sys KernelSystem, cause error) error {
+	_, cause = clearBootNextAfterArmFailure(sys, cause)
+	return disarmWatchdogAfterArmFailure(sys, cause)
 }
 
 // disarmAfterFailedReboot keeps the watchdog armed if BootNext could not be
 // cleared, allowing Arm to restore the already-verified ARMED journal.
-func disarmAfterFailedReboot(sys KernelSystem, cause error) (error, bool) {
-	cause, bootNextCleared := clearBootNextAfterArmFailure(sys, cause)
+func disarmAfterFailedReboot(sys KernelSystem, cause error) (bool, error) {
+	bootNextCleared, cause := clearBootNextAfterArmFailure(sys, cause)
 	if !bootNextCleared {
-		return cause, false
+		return false, cause
 	}
-	return disarmWatchdogAfterArmFailure(sys, cause), true
+	return true, disarmWatchdogAfterArmFailure(sys, cause)
 }
 
-func clearBootNextAfterArmFailure(sys KernelSystem, cause error) (error, bool) {
+func clearBootNextAfterArmFailure(sys KernelSystem, cause error) (bool, error) {
 	if cerr := sys.ClearBootNext(); cerr != nil {
-		return fmt.Errorf("%w; AND the one-shot BootNext could not be cleared (%w) — "+
+		return false, fmt.Errorf("%w; AND the one-shot BootNext could not be cleared (%w) — "+
 			"the firmware may still boot the candidate on the next reboot. Clear it "+
-			"manually before rebooting: efibootmgr --delete-bootnext", cause, cerr), false
+			"manually before rebooting: efibootmgr --delete-bootnext", cause, cerr)
 	}
-	return cause, true
+	return true, cause
 }
 
 // newArmNonce builds a per-attempt arm token (#5847). It combines the system
@@ -859,4 +915,8 @@ func (j *KernelJournal) summary() string {
 	}
 	return fmt.Sprintf("kernel-upgrade %s: candidate=%s known-good=%s active-slot=%s",
 		strings.ToLower(string(j.State)), j.CandidateVersion, j.KnownGoodVersion, j.ActiveSlot)
+}
+func isPostRenameJournalError(err error) bool {
+	var post *fsatomic.PostRenameSyncError
+	return errors.As(err, &post)
 }

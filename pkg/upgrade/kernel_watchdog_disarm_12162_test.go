@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
 // #12162 — a failed kernel arm leaves the hardware watchdog counting toward a
@@ -88,7 +90,7 @@ func TestArmDisarmsWatchdogOnPostAcquisitionFailures_12162(t *testing.T) {
 				}
 			}
 
-			if err := r.armCandidate(j); err == nil {
+			if _, err := r.armCandidate(j); err == nil {
 				t.Fatal("premise broken: the staged arm failure must be returned")
 			}
 			if f.armWatchdogCalls != 1 {
@@ -188,8 +190,8 @@ func TestArmKeepsProtectedTrialWhenRebootBackstepPersistFails_12162(t *testing.T
 	if err == nil || !strings.Contains(err.Error(), "journal step back to ARMING failed") ||
 		!strings.Contains(err.Error(), "journal remains ARMED") ||
 		!strings.Contains(err.Error(), "BootNext") ||
-		!strings.Contains(err.Error(), "hardware watchdog still armed") ||
-		!strings.Contains(err.Error(), "host will reset into the candidate trial") ||
+		!strings.Contains(err.Error(), "the watchdog is armed") ||
+		!strings.Contains(err.Error(), "will reset the host into the candidate trial") ||
 		!strings.Contains(err.Error(), "watchdog timeout") {
 		t.Fatalf("Arm error = %v, want explicit protected-trial state and timeout guidance", err)
 	}
@@ -268,7 +270,7 @@ func TestArmReportsWatchdogDisarmFailure_12162(t *testing.T) {
 		InactiveSlot:     SlotB,
 	}
 
-	err := r.armCandidate(j)
+	_, err := r.armCandidate(j)
 	if !errors.Is(err, armErr) {
 		t.Errorf("arm error = %v, want original failure %v", err, armErr)
 	}
@@ -347,7 +349,7 @@ func TestArmReportsDisarmFailureOnBootNextReadbackError_12162(t *testing.T) {
 		InactiveSlot:     SlotB,
 	}
 
-	err := r.armCandidate(j)
+	_, err := r.armCandidate(j)
 	if !errors.Is(err, readErr) || !errors.Is(err, disarmErr) {
 		t.Errorf("arm error = %v, want both readback and disarm causes", err)
 	}
@@ -379,7 +381,7 @@ func TestArmStillDisarmsWhenBootNextClearFails_12162(t *testing.T) {
 		InactiveSlot:     SlotB,
 	}
 
-	err := r.armCandidate(j)
+	_, err := r.armCandidate(j)
 	if !errors.Is(err, readErr) || !errors.Is(err, clearErr) || !errors.Is(err, disarmErr) {
 		t.Errorf("arm error = %v, want readback, BootNext-clear, and disarm causes", err)
 	}
@@ -437,11 +439,235 @@ func TestArmReportsDisarmFailureWhenARMINGPersistFails_12162(t *testing.T) {
 		InactiveSlot:     SlotB,
 	}
 
-	err := r.armCandidate(j)
+	_, err := r.armCandidate(j)
 	if err == nil || !errors.Is(err, disarmErr) {
 		t.Errorf("arm error = %v, want journal persist and disarm failures", err)
 	}
 	if f.disarmWatchdogCalls != 1 {
 		t.Errorf("DisarmWatchdog calls = %d, want exactly one", f.disarmWatchdogCalls)
+	}
+}
+
+func TestArmBackstepPostRenameSyncFailureUnwinds_12162(t *testing.T) {
+	f := newFakeKernelSystem()
+	rebootErr := errors.New("systemctl reboot: exit 1")
+	f.rebootErr = rebootErr
+	r := newKernelRunner(t, f)
+	journalPath := r.cfg.JournalPath
+	armingWrites := 0
+	var restore func()
+	t.Cleanup(func() {
+		if restore != nil {
+			restore()
+		}
+	})
+	r.cfg.Logf = func(_ string, args ...any) {
+		if restore != nil {
+			restore()
+			restore = nil
+		}
+		if len(args) != 0 && args[0] == KernelStateArming {
+			armingWrites++
+			if armingWrites == 2 {
+				restore = fsatomic.SetAfterRenameSyncDirForTesting(func(string) error {
+					return errors.New("injected journal directory fsync failure")
+				})
+			}
+		}
+	}
+
+	err := r.Arm("6.18.5-12-generic")
+	if restore != nil {
+		restore()
+		restore = nil
+	}
+	if !errors.Is(err, rebootErr) {
+		t.Fatalf("Arm error = %v, want original Reboot error", err)
+	}
+	var post *fsatomic.PostRenameSyncError
+	if !errors.As(err, &post) {
+		t.Fatalf("Arm error = %v, want wrapped PostRenameSyncError from the backstep", err)
+	}
+	j, loadErr := r.loadKernelJournal()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if j.State != KernelStateArming || j.BootID != "" {
+		t.Errorf("durable journal = state %s BootID %q, want ARMING without BootID", j.State, j.BootID)
+	}
+	if f.bootNext != "" || f.wdArmed || f.disarmWatchdogCalls != 1 {
+		t.Errorf("BootNext=%q watchdogArmed=%v disarmCalls=%d; want cleared and disarmed once",
+			f.bootNext, f.wdArmed, f.disarmWatchdogCalls)
+	}
+	if strings.Contains(err.Error(), "journal remains ARMED") {
+		t.Errorf("error falsely claims durable ARMED state: %v", err)
+	}
+	record, recordErr := ReadArmRecord(journalPath)
+	if recordErr != nil || record != "" {
+		t.Errorf("arm record after ARMING backstep = %q, err=%v; want absent before retry/cut", record, recordErr)
+	}
+}
+
+func TestArmRestoreArmedPostRenameSyncFailureKeepsArmed_12162(t *testing.T) {
+	f := newFakeKernelSystem()
+	rebootErr := errors.New("systemctl reboot: exit 1")
+	clearErr := errors.New("efivarfs is read-only")
+	f.rebootErr = rebootErr
+	f.clearBootNextErr = clearErr
+	r := newKernelRunner(t, f)
+	armedWrites := 0
+	var restore func()
+	t.Cleanup(func() {
+		if restore != nil {
+			restore()
+		}
+	})
+	r.cfg.Logf = func(_ string, args ...any) {
+		if restore != nil {
+			restore()
+			restore = nil
+		}
+		if len(args) != 0 && args[0] == KernelStateArmed {
+			armedWrites++
+			if armedWrites == 2 {
+				restore = fsatomic.SetAfterRenameSyncDirForTesting(func(string) error {
+					return errors.New("injected restore directory fsync failure")
+				})
+			}
+		}
+	}
+
+	err := r.Arm("6.18.5-12-generic")
+	if restore != nil {
+		restore()
+		restore = nil
+	}
+	if !errors.Is(err, rebootErr) || !errors.Is(err, clearErr) {
+		t.Fatalf("Arm error = %v, want Reboot and BootNext-clear causes", err)
+	}
+	var post *fsatomic.PostRenameSyncError
+	if !errors.As(err, &post) {
+		t.Fatalf("Arm error = %v, want wrapped PostRenameSyncError from the ARMED restore", err)
+	}
+	j, loadErr := r.loadKernelJournal()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if j.State != KernelStateArmed || j.BootID == "" || j.BootID != f.bootNext {
+		t.Errorf("durable journal = state %s BootID %q BootNext %q; want matching ARMED trial",
+			j.State, j.BootID, f.bootNext)
+	}
+	if !f.wdArmed || f.disarmWatchdogCalls != 0 {
+		t.Errorf("watchdogArmed=%v disarmCalls=%d; want protected trial retained",
+			f.wdArmed, f.disarmWatchdogCalls)
+	}
+	if strings.Contains(err.Error(), "journal remains ARMING") {
+		t.Errorf("error falsely claims durable ARMING state: %v", err)
+	}
+}
+
+func TestArmTripleFaultDisarmsAndReportsSurvivingDisarmFailure_12162(t *testing.T) {
+	f := newFakeKernelSystem()
+	rebootErr := errors.New("systemctl reboot: exit 1")
+	clearErr := errors.New("efivarfs is read-only")
+	disarmErr := errors.New("watchdog magic-close failed")
+	f.rebootErr = rebootErr
+	f.clearBootNextErr = clearErr
+	f.disarmWatchdogErr = disarmErr
+	r := newKernelRunner(t, f)
+	journalPath := r.cfg.JournalPath
+	armedWrites := 0
+	r.cfg.Logf = func(_ string, args ...any) {
+		r.cfg.JournalPath = journalPath
+		if len(args) != 0 && args[0] == KernelStateArmed {
+			armedWrites++
+			if armedWrites == 2 {
+				r.cfg.JournalPath = "/proc/self/12162/restore.state"
+			}
+		}
+	}
+
+	err := r.Arm("6.18.5-12-generic")
+	r.cfg.JournalPath = journalPath
+	if !errors.Is(err, rebootErr) || !errors.Is(err, clearErr) || !errors.Is(err, disarmErr) {
+		t.Fatalf("Arm error = %v, want Reboot, clear, and watchdog-disarm failures", err)
+	}
+	if f.disarmWatchdogCalls != 1 || !f.wdArmed {
+		t.Errorf("disarm calls=%d watchdogArmed=%v; want attempted disarm failure with watchdog still armed",
+			f.disarmWatchdogCalls, f.wdArmed)
+	}
+	if !strings.Contains(err.Error(), "will force a reboot into the candidate") ||
+		!strings.Contains(err.Error(), "efibootmgr --delete-bootnext") {
+		t.Errorf("operator error = %v, want forced-reboot and manual-clear guidance", err)
+	}
+	j, loadErr := r.loadKernelJournal()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if j.State != KernelStateArming || j.BootID != "" || f.bootNext == "" {
+		t.Errorf("journal=%s BootID=%q BootNext=%q; want ARMING without BootID and queued BootNext reported",
+			j.State, j.BootID, f.bootNext)
+	}
+	record, recordErr := ReadArmRecord(journalPath)
+	if recordErr != nil || record != "" {
+		t.Errorf("arm record after failed ARMED restore = %q, err=%v; want absent in ARMING",
+			record, recordErr)
+	}
+}
+
+func TestArmStrictPartialDisarmFailureIsNotLane2Fallback_12162(t *testing.T) {
+	f := newFakeKernelSystem()
+	armErr := errors.New("WDIOC_SETTIMEOUT failed after pet")
+	disarmErr := errors.New("watchdog magic-close failed")
+	f.armWatchdogErr = armErr
+	f.disarmWatchdogErr = disarmErr
+	f.wdArmed = true
+	r := newKernelRunner(t, f)
+	r.cfg.StrictWatchdog = true
+
+	err := r.Arm("6.18.5-12-generic")
+	if !errors.Is(err, armErr) || !errors.Is(err, disarmErr) {
+		t.Fatalf("Arm error = %v, want both partial-arm and disarm failures", err)
+	}
+	if errors.Is(err, ErrKernelChannelUnavailable) {
+		t.Errorf("Arm error = %v, must not select exit-2/LANE-2 fallback while watchdog may still reset", err)
+	}
+	if !strings.Contains(err.Error(), "infrastructure error") ||
+		!strings.Contains(err.Error(), "may still reset the host") {
+		t.Errorf("Arm error = %v, want unsafe-cleanup/exit-1 guidance", err)
+	}
+	if f.disarmWatchdogCalls != 1 || !f.wdArmed || f.bootNext != "" || f.rebooted {
+		t.Errorf("disarmCalls=%d watchdogArmed=%v BootNext=%q rebooted=%v; want disarm attempt, no BootNext/reboot",
+			f.disarmWatchdogCalls, f.wdArmed, f.bootNext, f.rebooted)
+	}
+}
+
+func TestArmFailedD2WatchdogDoesNotPromiseReset_12162(t *testing.T) {
+	f := newFakeKernelSystem()
+	f.armWatchdogErr = errors.New("watchdog not available")
+	f.rebootErr = errors.New("systemctl reboot: exit 1")
+	r := newKernelRunner(t, f)
+	journalPath := r.cfg.JournalPath
+	armingWrites := 0
+	r.cfg.Logf = func(_ string, args ...any) {
+		r.cfg.JournalPath = journalPath
+		if len(args) != 0 && args[0] == KernelStateArming {
+			armingWrites++
+			if armingWrites == 2 {
+				r.cfg.JournalPath = "/proc/self/12162/backstep.state"
+			}
+		}
+	}
+
+	err := r.Arm("6.18.5-12-generic")
+	r.cfg.JournalPath = journalPath
+	if err == nil || !strings.Contains(err.Error(), "watchdog was not confirmed armed") {
+		t.Fatalf("Arm error = %v, want explicit no-watchdog-reset warning", err)
+	}
+	if strings.Contains(err.Error(), "will reset the host") || strings.Contains(err.Error(), "will force a reboot") {
+		t.Errorf("Arm error falsely promises a watchdog reset: %v", err)
+	}
+	if f.wdArmed {
+		t.Error("D2 fake has no confirmed watchdog, but reports it armed")
 	}
 }

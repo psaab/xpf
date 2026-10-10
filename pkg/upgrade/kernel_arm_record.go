@@ -106,7 +106,11 @@ func (r *KernelRunner) recordPromoteBinary(j *KernelJournal) error {
 // the boot-time gate treat an absent record as a definitive "nothing to
 // promote" rather than as a failure.
 func (r *KernelRunner) clearArmRecord() error {
-	if err := os.Remove(ArmRecordPath(r.cfg.JournalPath)); err != nil && !os.IsNotExist(err) {
+	return clearArmRecordForJournal(r.cfg.JournalPath)
+}
+
+func clearArmRecordForJournal(journalPath string) error {
+	if err := os.Remove(ArmRecordPath(journalPath)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove arm record: %w", err)
 	}
 	return nil
