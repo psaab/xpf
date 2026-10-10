@@ -302,15 +302,23 @@ func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath
 	// First, collect apply-groups references at this level.
 	// Support bracket-list syntax, where names are statement keys, and block
 	// leaf-list syntax, where names are child keys.
-	var applyNames []string
+	type applyGroupReference struct {
+		name    string
+		markers []string
+	}
+	var applyRefs []applyGroupReference
 	for _, n := range *nodes {
 		if n.Name() == "apply-groups" {
-			applyNames = appendApplyGroupNames(applyNames, n, vars)
+			markers := duplicateBlockMergeMarkers9023(n)
+			for _, name := range appendApplyGroupNames(nil, n, vars) {
+				applyRefs = append(applyRefs, applyGroupReference{name: name, markers: markers})
+			}
 		}
 	}
 
 	// Expand each referenced group.
-	for _, name := range applyNames {
+	for _, ref := range applyRefs {
+		name := ref.name
 		g, ok := groups[name]
 		if !ok {
 			return fmt.Errorf("apply-groups references undefined group %q", name)
@@ -344,7 +352,9 @@ func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath
 				if err := budget.charge(countNodes(cached)); err != nil {
 					return err
 				}
-				if err := mergeNodes(nodes, cloneNodes(cached), ancestorPath, budget, name, vars, nil, haveExcept, deferWildcards); err != nil {
+				body := cloneNodes(cached)
+				appendDuplicateBlockMergeMarkersToLeaves9023(body, ref.markers)
+				if err := mergeNodes(nodes, body, ancestorPath, budget, name, vars, nil, haveExcept, deferWildcards); err != nil {
 					return err
 				}
 			}
@@ -404,7 +414,12 @@ func expandGroupsRecursive(nodes *[]*Node, groups map[string]*Node, ancestorPath
 		// merge a SEPARATE clone into the parent so the cache is never mutated.
 		memo[memoKey] = cloneNodes(expanded)
 		if expanded != nil {
-			if err := mergeNodes(nodes, expanded, ancestorPath, budget, name, vars, nil, haveExcept, deferWildcards); err != nil {
+			body := expanded
+			if len(ref.markers) > 0 {
+				body = cloneNodes(expanded)
+				appendDuplicateBlockMergeMarkersToLeaves9023(body, ref.markers)
+			}
+			if err := mergeNodes(nodes, body, ancestorPath, budget, name, vars, nil, haveExcept, deferWildcards); err != nil {
 				return err
 			}
 		}
@@ -515,6 +530,15 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			!filterLeafListMembers9862(s, level) {
 			continue
 		}
+		markers := duplicateBlockMergeMarkersInAnnotation9023(s.Annotation)
+		if !s.IsLeaf && len(markers) > 0 {
+			s.Annotation = stripDuplicateBlockMergeMarkerAnnotation9023(s.Annotation)
+			if len(s.Children) == 0 {
+				appendDuplicateBlockMergeMarkers9023(s, markers)
+			} else {
+				appendDuplicateBlockMergeMarkersToLeaves9023(s.Children, markers)
+			}
+		}
 		if s.IsLeaf {
 			key := ""
 			if len(s.Keys) > 0 {
@@ -545,6 +569,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			}
 			if bracketedPeer := bracketedAddressPeer9859(ancestorPath, *dst, s); bracketedPeer != nil &&
 				mergeBracketedAddressInto9859(ancestorPath, *dst, bracketedPeer, s) {
+				appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{bracketedPeer}, markers)
 				continue
 			}
 			if peer != nil {
@@ -574,6 +599,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 							}
 							addNodeContrib9862(body, contrib)
 						}
+						appendDuplicateBlockMergeMarkersToLeaves9023(body, markers)
 						if err := budget.charge(countNodes(body)); err != nil {
 							return err
 						}
@@ -591,6 +617,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				// range-bearing leaves all take the override path.
 				if leafListUnionEligible(ancestorPath, key, peer, s) {
 					mergeLeafListInto(peer, s)
+					appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{peer}, markers)
 				} else if body, ok := promoteLeafPeerForPackedGroup9855(ancestorPath, peer, s); ok {
 					// #9855: a PACKED group leaf naming the same instance as an
 					// inline LEAF peer. Promoting the peer to its braced shape
@@ -598,6 +625,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					// one group produce one outcome; the override decision
 					// happens one level down, so an inline value still wins.
 					budget.notePromoted9855(peer)
+					appendDuplicateBlockMergeMarkersToLeaves9023(body, markers)
 					if err := budget.charge(countNodes(body)); err != nil {
 						return err
 					}
@@ -610,6 +638,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 					// same-instance container (promoted earlier in this merge
 					// or authored braced) is also present — merge there instead
 					// of dropping the tail.
+					appendDuplicateBlockMergeMarkersToLeaves9023(cbody, markers)
 					if err := budget.charge(countNodes(cbody)); err != nil {
 						return err
 					}
@@ -629,6 +658,7 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			// leaves after a promotion remain suppressed as the base suppressed
 			// them (suppressSuccessiveLeaf9855).
 			if cpeer, cbody, ok := sameInstanceContainerPeer9855(ancestorPath, *dst, s); ok {
+				appendDuplicateBlockMergeMarkersToLeaves9023(cbody, markers)
 				if err := budget.charge(countNodes(cbody)); err != nil {
 					return err
 				}
@@ -707,6 +737,8 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			if peer := leafListPeer(*dst, s.Keys[0]); peer != nil {
 				if leafListUnionEligible(ancestorPath, s.Keys[0], peer, s) {
 					mergeLeafListInto(peer, s)
+					appendDuplicateBlockMergeMarkersToLeaves9023([]*Node{peer},
+						duplicateBlockMergeMarkers9023(s))
 				}
 				// else OVERRIDE: a range-bearing inline peer wins, group block
 				// dropped (a groupReplace leaf never reaches here — its

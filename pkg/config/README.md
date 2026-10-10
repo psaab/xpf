@@ -1475,8 +1475,11 @@ and `protocols` blocks for OSPF, OSPFv3, BGP, RIP, IS-IS, LLDP, and
 router-advertisement, including separate top-level `protocols` roots. Junos
 merges these stanzas, so strict and tolerant compilation fold their contents in
 source order before typed compilation. Successful compiles include a merge
-warning naming the protocol/container and its routing-instance or group scope;
-the conservation census compares duplicate input to its hand-merged form.
+warning naming the protocol/container and its routing-instance or effective
+group scope. A group warning is emitted only when expansion contributes the
+duplicate site: unapplied, inactive, excepted, and non-selected `${node}` group
+bodies stay silent. The conservation census compares duplicate input to its
+hand-merged form.
 
 **Static routes through XFRM must fit the remote selector union (#11422):**
 the typed gate checks global and routing-instance static routes whose

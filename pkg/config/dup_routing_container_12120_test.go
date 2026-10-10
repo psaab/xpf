@@ -594,16 +594,46 @@ func TestUnnamedRoutingContainerGroupDiagnostics12120(t *testing.T) {
 	}`
 	for _, tc := range []struct {
 		name, text, want string
+		applied          bool
+		hostName         string
 	}{
 		{
-			name: "directly applied group",
-			text: `groups { "group blue" { ` + repeated + ` } } apply-groups "group blue";`,
-			want: `groups "group blue" protocols`,
+			name:    "directly applied group",
+			text:    `groups { "group blue" { ` + repeated + ` } } apply-groups "group blue";`,
+			want:    `groups "group blue" protocols`,
+			applied: true,
 		},
 		{
-			name: "transitively applied group",
-			text: `groups { G { apply-groups H; } H { ` + repeated + ` } } apply-groups G;`,
-			want: "groups H protocols",
+			name:    "transitively applied group",
+			text:    `groups { G { apply-groups H; } H { ` + repeated + ` } } apply-groups G;`,
+			want:    "groups H protocols",
+			applied: true,
+		},
+		{
+			name:    "positive control without exception",
+			text:    `groups { G { ` + repeated + ` } } apply-groups G;`,
+			want:    "groups G protocols",
+			applied: true,
+		},
+		{
+			name: "excepted group",
+			text: `groups { G { ` + repeated + ` } } apply-groups G; apply-groups-except G;`,
+		},
+		{
+			name: "partially excepted group",
+			text: `groups { G { ` + repeated + ` system { host-name FROM-GROUP; } } }
+				apply-groups G; protocols { apply-groups-except G; }`,
+			hostName: "FROM-GROUP",
+		},
+		{
+			name: "inactive application",
+			text: `groups { G { ` + repeated + ` } } inactive: apply-groups G;`,
+		},
+		{
+			name: "inactive duplicate site in applied group",
+			text: `groups { G { inactive: ` + repeated + ` system { host-name FROM-GROUP; } } }
+				apply-groups G;`,
+			hostName: "FROM-GROUP",
 		},
 		{
 			name: "unapplied group",
@@ -612,6 +642,22 @@ func TestUnnamedRoutingContainerGroupDiagnostics12120(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := compileMergeDiagnostics12120(t, tc.text)
+			if got := cfg.Protocols.OSPF != nil; got != tc.applied {
+				t.Fatalf("effective group application = %v, want %v", got, tc.applied)
+			}
+			if tc.applied {
+				areaIDs := make(map[string]bool, len(cfg.Protocols.OSPF.Areas))
+				for _, area := range cfg.Protocols.OSPF.Areas {
+					areaIDs[area.ID] = true
+				}
+				if len(areaIDs) != 2 || !areaIDs["0.0.0.0"] || !areaIDs["0.0.0.1"] {
+					t.Fatalf("effective OSPF areas = %v, want both group areas", areaIDs)
+				}
+			}
+			if tc.hostName != "" && cfg.System.HostName != tc.hostName {
+				t.Fatalf("group application outside excepted site: host-name = %q, want %q",
+					cfg.System.HostName, tc.hostName)
+			}
 			var warnings []string
 			for _, warning := range cfg.Warnings {
 				if strings.Contains(warning, "#12120") {
@@ -620,7 +666,7 @@ func TestUnnamedRoutingContainerGroupDiagnostics12120(t *testing.T) {
 			}
 			if tc.want == "" {
 				if len(warnings) != 0 {
-					t.Fatalf("unapplied group body emitted merge diagnostics: %v", warnings)
+					t.Fatalf("group body with no effective application emitted merge diagnostics: %v", warnings)
 				}
 				return
 			}
@@ -635,6 +681,56 @@ func TestUnnamedRoutingContainerGroupDiagnostics12120(t *testing.T) {
 				t.Errorf("applied-group diagnostic does not name %q: %v", tc.want, warnings)
 			}
 		})
+	}
+}
+
+func TestUnnamedRoutingContainerNodeGroupDiagnostics12120(t *testing.T) {
+	const text = `groups {
+		node0 { protocols {
+			ospf { area 0.0.0.0 { interface ge-0/0/0.0; } }
+			ospf { area 0.0.0.1 { interface ge-0/0/1.0; } }
+		} }
+		node1 { protocols {
+			ospf { area 0.0.1.0 { interface ge-0/0/2.0; } }
+			ospf { area 0.0.1.1 { interface ge-0/0/3.0; } }
+		} }
+	}
+	apply-groups "${node}";`
+	for nodeID, tc := range []struct {
+		warning string
+		areas   [2]string
+	}{
+		{warning: "groups node0 protocols", areas: [2]string{"0.0.0.0", "0.0.0.1"}},
+		{warning: "groups node1 protocols", areas: [2]string{"0.0.1.0", "0.0.1.1"}},
+	} {
+		want := tc.warning
+		tree, parseErrs := NewParser(text).Parse()
+		if len(parseErrs) != 0 || tree == nil {
+			t.Fatalf("node%d fixture parse: %v", nodeID, parseErrs)
+		}
+		cfg, err := CompileConfigForNode(tree, nodeID)
+		if err != nil {
+			t.Fatalf("node%d strict compile: %v", nodeID, err)
+		}
+		if cfg.Protocols.OSPF == nil {
+			t.Fatalf("node%d did not receive its ${node} group", nodeID)
+		}
+		areaIDs := make(map[string]bool, len(cfg.Protocols.OSPF.Areas))
+		for _, area := range cfg.Protocols.OSPF.Areas {
+			areaIDs[area.ID] = true
+		}
+		if len(areaIDs) != 2 || !areaIDs[tc.areas[0]] || !areaIDs[tc.areas[1]] {
+			t.Fatalf("node%d OSPF areas = %v, want only %v", nodeID, areaIDs, tc.areas)
+		}
+		var groupWarnings []string
+		for _, warning := range cfg.Warnings {
+			if strings.Contains(warning, "#12120") {
+				groupWarnings = append(groupWarnings, warning)
+			}
+		}
+		if len(groupWarnings) != 1 || !strings.Contains(groupWarnings[0], want) {
+			t.Fatalf("node%d warning = %v, want only effective site %q", nodeID, groupWarnings, want)
+		}
 	}
 }
 

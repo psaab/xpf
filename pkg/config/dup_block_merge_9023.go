@@ -1,5 +1,10 @@
 package config
 
+import (
+	"strconv"
+	"strings"
+)
+
 // Issue 9023: a repeated named BLOCK silently discarded the earlier one.
 //
 //	snmp { trap-group tg1 { targets 10.0.0.1; }
@@ -147,20 +152,23 @@ type duplicateBlockMerge9023 struct {
 	name            string
 	scope           string
 	group           string
+	marker          string
 }
 
 // mergeDuplicateBlocks9023 folds the explicitly enumerated repeated named
 // and unnamed containers and returns structured context for each merge.
-func mergeDuplicateBlocks9023(tree *ConfigTree, vars ...map[string]string) []duplicateBlockMerge9023 {
+func mergeDuplicateBlocks9023(tree *ConfigTree) []duplicateBlockMerge9023 {
 	if tree == nil {
 		return nil
 	}
-	var groupVars map[string]string
-	if len(vars) > 0 {
-		groupVars = vars[0]
-	}
-	appliedGroups := appliedGroupNames12120(tree, groupVars)
 	var merged []duplicateBlockMerge9023
+	appendMerge := func(merge duplicateBlockMerge9023, target *Node) {
+		if merge.group != "" && target != nil {
+			merge.marker = strconv.Itoa(len(merged))
+			markDuplicateBlockMergeLeaves9023(target, merge.marker)
+		}
+		merged = append(merged, merge)
+	}
 	var rootsMerged bool
 	tree.Children, rootsMerged = mergeDuplicateRoutingInstanceContainers9023(tree.Children)
 	if rootsMerged {
@@ -187,10 +195,10 @@ func mergeDuplicateBlocks9023(tree *ConfigTree, vars ...map[string]string) []dup
 		var containersMerged bool
 		n.Children, containersMerged = mergeDuplicateRoutingInstanceContainers9023(n.Children)
 		if containersMerged {
-			merged = append(merged, duplicateBlockMerge9023{
+			appendMerge(duplicateBlockMerge9023{
 				kind: duplicateBlockMergeContainer9023, parent: "routing-instances",
 				scope: scope, group: group,
-			})
+			}, namedChild9023(n, "routing-instances"))
 		}
 		for _, site := range dupBlockMergeSites9023 {
 			if n.Name() != site.parent {
@@ -198,19 +206,19 @@ func mergeDuplicateBlocks9023(tree *ConfigTree, vars ...map[string]string) []dup
 			}
 			if site.keyword == "*" {
 				for _, name := range mergeDuplicateNamedChildren9023(n) {
-					merged = append(merged, duplicateBlockMerge9023{
+					appendMerge(duplicateBlockMerge9023{
 						kind: duplicateBlockMergeNamed9023, parent: site.parent,
 						name: name, scope: scope, group: group,
-					})
+					}, namedChild9023(n, name))
 				}
 				continue
 			}
 			names, _, _ := mergeInstancesUnder(n, site.keyword, askNone9571)
 			for _, name := range names {
-				merged = append(merged, duplicateBlockMerge9023{
+				appendMerge(duplicateBlockMerge9023{
 					kind: duplicateBlockMergeNamed9023, parent: site.parent,
 					keyword: site.keyword, name: name, scope: scope, group: group,
-				})
+				}, namedSiteChild9023(n, site.keyword, name))
 			}
 		}
 		if n.Name() == "routing-instances" {
@@ -226,11 +234,11 @@ func mergeDuplicateBlocks9023(tree *ConfigTree, vars ...map[string]string) []dup
 					children, didMerge := mergeDuplicateUnnamedRoutingChildren(instance.Children, site.keyword)
 					instance.Children = children
 					if didMerge {
-						merged = append(merged, duplicateBlockMerge9023{
+						appendMerge(duplicateBlockMerge9023{
 							kind: duplicateBlockMergeUnnamed9023, parent: site.parent,
 							keyword: site.keyword, name: instance.Name(), scope: instanceScope,
 							group: group,
-						})
+						}, namedChild9023(instance, site.keyword))
 					}
 				}
 				walk(instance, depth+1, instanceScope, group)
@@ -245,10 +253,10 @@ func mergeDuplicateBlocks9023(tree *ConfigTree, vars ...map[string]string) []dup
 			children, didMerge := mergeDuplicateUnnamedRoutingChildren(n.Children, site.keyword)
 			n.Children = children
 			if didMerge {
-				merged = append(merged, duplicateBlockMerge9023{
+				appendMerge(duplicateBlockMerge9023{
 					kind: duplicateBlockMergeUnnamed9023, parent: site.parent,
 					keyword: site.keyword, scope: scope, group: group,
-				})
+				}, namedChild9023(n, site.keyword))
 			}
 		}
 		for _, ch := range n.Children {
@@ -275,57 +283,189 @@ func mergeDuplicateBlocks9023(tree *ConfigTree, vars ...map[string]string) []dup
 		walk(root, 0, "", "")
 	}
 
-	// The fold is required before expansion so applied group bodies conserve
-	// their contents. Their diagnostics are retained only when that group is
-	// reachable from an active apply-groups statement (including transitively).
-	active := merged[:0]
-	for _, merge := range merged {
-		if merge.group != "" && !appliedGroups[merge.group] {
-			continue
-		}
-		active = append(active, merge)
-	}
-	return active
+	return merged
 }
 
-func appliedGroupNames12120(tree *ConfigTree, vars map[string]string) map[string]bool {
-	groups := make(map[string]*Node)
-	for _, root := range tree.Children {
-		if root == nil || root.Name() != "groups" {
+const duplicateBlockMergeMarkerPrefix9023 = "\x00xpf-duplicate-block-merge-9023:"
+
+func namedChild9023(parent *Node, name string) *Node {
+	if parent == nil {
+		return nil
+	}
+	for _, child := range parent.Children {
+		if child != nil && child.Name() == name {
+			return child
+		}
+	}
+	return nil
+}
+
+func namedSiteChild9023(parent *Node, keyword, mergeName string) *Node {
+	name := strings.TrimPrefix(mergeName, keyword+" ")
+	if parent == nil {
+		return nil
+	}
+	for _, child := range parent.Children {
+		if child != nil && len(child.Keys) > 1 &&
+			child.Keys[0] == keyword && child.Keys[1] == name {
+			return child
+		}
+	}
+	return nil
+}
+
+func markDuplicateBlockMergeLeaves9023(node *Node, marker string) {
+	if node == nil {
+		return
+	}
+	if node.IsLeaf || len(node.Children) == 0 {
+		appendDuplicateBlockMergeMarker9023(node, marker)
+		return
+	}
+	for _, child := range node.Children {
+		markDuplicateBlockMergeLeaves9023(child, marker)
+	}
+}
+
+func appendDuplicateBlockMergeMarker9023(node *Node, marker string) {
+	if node == nil {
+		return
+	}
+	encoded := duplicateBlockMergeMarkerPrefix9023 + marker + "\x00"
+	if !strings.Contains(node.Annotation, encoded) {
+		node.Annotation += encoded
+	}
+}
+
+func duplicateBlockMergeMarkersInAnnotation9023(annotation string) []string {
+	var markers []string
+	for {
+		start := strings.Index(annotation, duplicateBlockMergeMarkerPrefix9023)
+		if start < 0 {
+			return markers
+		}
+		annotation = annotation[start+len(duplicateBlockMergeMarkerPrefix9023):]
+		end := strings.IndexByte(annotation, '\x00')
+		if end < 0 {
+			return markers
+		}
+		if marker := annotation[:end]; marker != "" {
+			markers = append(markers, marker)
+		}
+		annotation = annotation[end+1:]
+	}
+}
+
+func duplicateBlockMergeMarkers9023(node *Node) []string {
+	var seen map[string]struct{}
+	var markers []string
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		for _, marker := range duplicateBlockMergeMarkersInAnnotation9023(n.Annotation) {
+			if _, ok := seen[marker]; !ok {
+				if seen == nil {
+					seen = make(map[string]struct{})
+				}
+				seen[marker] = struct{}{}
+				markers = append(markers, marker)
+			}
+		}
+		for _, child := range n.Children {
+			walk(child)
+		}
+	}
+	walk(node)
+	return markers
+}
+
+func stripDuplicateBlockMergeMarkerAnnotation9023(annotation string) string {
+	for {
+		start := strings.Index(annotation, duplicateBlockMergeMarkerPrefix9023)
+		if start < 0 {
+			return annotation
+		}
+		end := strings.IndexByte(annotation[start+len(duplicateBlockMergeMarkerPrefix9023):], '\x00')
+		if end < 0 {
+			return annotation
+		}
+		end += start + len(duplicateBlockMergeMarkerPrefix9023) + 1
+		annotation = annotation[:start] + annotation[end:]
+	}
+}
+
+func appendDuplicateBlockMergeMarkers9023(node *Node, markers []string) {
+	for _, marker := range markers {
+		appendDuplicateBlockMergeMarker9023(node, marker)
+	}
+}
+
+func appendDuplicateBlockMergeMarkersToLeaves9023(nodes []*Node, markers []string) {
+	if len(markers) == 0 {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.IsLeaf || len(n.Children) == 0 {
+			for _, marker := range markers {
+				appendDuplicateBlockMergeMarker9023(n, marker)
+			}
+			return
+		}
+		for _, child := range n.Children {
+			walk(child)
+		}
+	}
+	for _, node := range nodes {
+		walk(node)
+	}
+}
+
+func stripDuplicateBlockMergeMarkers9023(tree *ConfigTree) {
+	if tree == nil {
+		return
+	}
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		n.Annotation = stripDuplicateBlockMergeMarkerAnnotation9023(n.Annotation)
+		for _, child := range n.Children {
+			walk(child)
+		}
+	}
+	for _, child := range tree.Children {
+		walk(child)
+	}
+}
+
+func resolveDuplicateBlockMergeWarnings9023(tree *ConfigTree, merges []duplicateBlockMerge9023, existing []string) []string {
+	var applied map[string]bool
+	if tree != nil {
+		for _, root := range tree.Children {
+			for _, marker := range duplicateBlockMergeMarkers9023(root) {
+				if applied == nil {
+					applied = make(map[string]bool)
+				}
+				applied[marker] = true
+			}
+		}
+	}
+	stripDuplicateBlockMergeMarkers9023(tree)
+	warnings := make([]string, 0, len(merges)+len(existing))
+	for _, merge := range merges {
+		if merge.group != "" && !applied[merge.marker] {
 			continue
 		}
-		for _, group := range root.Children {
-			if group != nil && !group.IsLeaf && len(group.Keys) > 0 {
-				groups[group.Name()] = group
-			}
-		}
+		warnings = append(warnings, duplicateBlockMergeWarning9023(merge))
 	}
-	applied := make(map[string]bool)
-	var collect func(nodes []*Node, includeGroups bool)
-	collect = func(nodes []*Node, includeGroups bool) {
-		for _, n := range nodes {
-			if n == nil {
-				continue
-			}
-			if n.Name() == "groups" && !includeGroups {
-				continue
-			}
-			if n.Name() == "apply-groups" {
-				for _, name := range appendApplyGroupNames(nil, n, vars) {
-					if applied[name] {
-						continue
-					}
-					applied[name] = true
-					if group := groups[name]; group != nil {
-						collect(group.Children, true)
-					}
-				}
-			}
-			collect(n.Children, includeGroups)
-		}
-	}
-	collect(tree.Children, false)
-	return applied
+	return append(warnings, existing...)
 }
 
 // mergeDuplicateRoutingInstanceContainers9023 folds sibling

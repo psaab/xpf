@@ -424,9 +424,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	// so strict and tolerant paths produce one deterministic record per name;
 	// the policy fold below remains tolerant-only because strict commits reject
 	// duplicate policy names.
-	for _, merge := range mergeDuplicateBlocks9023(tree, map[string]string{"node": "node0"}) {
-		dupMergeWarnings = append(dupMergeWarnings, duplicateBlockMergeWarning9023(merge))
-	}
+	registeredMerges := mergeDuplicateBlocks9023(tree)
 	// Keep the pre-fold tree for group conflict provenance. The main tolerant
 	// fold remains pre-expansion; the clone preserves source boundaries while
 	// the effective group-expanded policies are inspected below.
@@ -436,6 +434,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	if opts.lenientDuplicatePolicyNames {
 		if treeHasGroupApplications11063(tree) {
 			expandedPolicySourceTree = tree.Clone()
+			stripDuplicateBlockMergeMarkers9023(expandedPolicySourceTree)
 		}
 		var merged []string
 		merged, foldWidened, directActionConflicts = mergeDuplicateNamedInstances(tree)
@@ -651,6 +650,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 			return nil, fmt.Errorf("apply-groups: %w", err)
 		}
 	}
+	dupMergeWarnings = resolveDuplicateBlockMergeWarnings9023(tree, registeredMerges, dupMergeWarnings)
 
 	if expandedPolicySourceTree != nil {
 		if err := expandedPolicySourceTree.ExpandGroupsTagged(); err != nil {
@@ -789,9 +789,7 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	// so strict and tolerant paths produce one deterministic record per name;
 	// the policy fold below remains tolerant-only because strict commits reject
 	// duplicate policy names.
-	for _, merge := range mergeDuplicateBlocks9023(tree, map[string]string{"node": fmt.Sprintf("node%d", nodeID)}) {
-		dupMergeWarnings = append(dupMergeWarnings, duplicateBlockMergeWarning9023(merge))
-	}
+	registeredMerges := mergeDuplicateBlocks9023(tree)
 	// Keep the pre-fold tree for group conflict provenance. The main tolerant
 	// fold remains pre-expansion; the clone preserves source boundaries while
 	// the effective group-expanded policies are inspected below.
@@ -801,6 +799,7 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	if opts.lenientDuplicatePolicyNames {
 		if treeHasGroupApplications11063(tree) {
 			expandedPolicySourceTree = tree.Clone()
+			stripDuplicateBlockMergeMarkers9023(expandedPolicySourceTree)
 		}
 		var merged []string
 		merged, foldWidened, directActionConflicts = mergeDuplicateNamedInstances(tree)
@@ -989,6 +988,7 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 		directActionConflicts = mergeDirectConflicts11063(
 			directActionConflicts, expandedConflicts)
 	}
+	dupMergeWarnings = resolveDuplicateBlockMergeWarnings9023(tree, registeredMerges, dupMergeWarnings)
 
 	// #4329: thread the runtime cluster node identity into compileExpanded so
 	// it can stamp ClusterConfig.NodeID for a leaf-less flat vSRX config
