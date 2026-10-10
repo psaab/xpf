@@ -40,6 +40,7 @@ type rollbackPlan struct {
 // ordinary Runner.Run therefore continues toward the destination rather than
 // undoing the operator rollback.
 func (r *Runner) RollbackTo(target string, opts RollbackOptions) error {
+	r.resetCommittedCut()
 	if !opts.ClusterCoordinated {
 		present, err := r.clusterNodeIDPresent()
 		if err != nil {

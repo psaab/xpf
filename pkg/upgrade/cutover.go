@@ -150,6 +150,7 @@ func (r *Runner) resolveSource(j *Journal) (genid, dir string, err error) {
 // The standalone single-node flow. The HA rolling driver wraps this with
 // a controlled drain (rolling.go).
 func (r *Runner) Run(opts Options) (err error) {
+	r.resetCommittedCut()
 	// ---- CLUSTER GATE (#5284): refuse an UNCOORDINATED standalone cut on a
 	// clustered node. This is the FINAL privileged boundary — evaluated
 	// BEFORE the host-wide upgrade lock and BEFORE any journal read or live
@@ -548,7 +549,11 @@ func (r *Runner) Run(opts Options) (err error) {
 		if err := r.stampCommittedVersion(j); err != nil {
 			return fmt.Errorf("persist commit record for resumed version %s: %w", j.TargetVersion, err)
 		}
-		return r.clearJournal()
+		if err := r.clearJournal(); err != nil {
+			return err
+		}
+		r.recordCommittedCut(j.TargetVersion)
+		return nil
 	}
 
 	// ---- PREFLIGHT (pure) ----
@@ -834,7 +839,11 @@ func (r *Runner) Run(opts Options) (err error) {
 		return err
 	}
 	r.logf("upgrade: committed version %s", j.TargetVersion)
-	return r.clearJournal()
+	if err := r.clearJournal(); err != nil {
+		return err
+	}
+	r.recordCommittedCut(j.TargetVersion)
+	return nil
 }
 
 // versionDirComplete reports a diagnostic error if the flipped-in version

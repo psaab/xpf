@@ -954,11 +954,12 @@ window for ALL FOUR managed binaries:
   `xpfd upgrade status` renders the local record; unauthenticated `/health`
   reports only readable/pending state, a stable reason code, and timestamp
   (#5031), not exact build versions. After a successful CLI cut, the status gate
-  clears the record when its staged version matches `versions/current`, or when
-  a nonempty committed version differs from the record's running version,
-  showing that the node has moved past the recorded skew. A bare or rolling
-  re-cut of the same version as the recorded running version remains pending;
-  resuming a rollback to that recorded running version also remains pending.
+  clears under the upgrade lock only when the known staged version equals
+  `versions/current` and no cut journal is in progress, or when this `Runner`
+  invocation provides health-confirmed evidence of a strictly newer Debian
+  version. It does not infer supersession from `running_version` motion: unknown
+  versions, rollback movement, and failed-health FLIPPED/ROLLING_BACK cuts stay
+  pending; unknown or unorderable versions are never compared as versions.
   Clustered stage-only upgrades and `XPF_NO_POSTINST_CUT=1` remain intentional
   and do not create a failure record. A later stage-only install does not rewrite
   an existing record: its staged version describes the failure that created it,

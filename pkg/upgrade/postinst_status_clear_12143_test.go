@@ -20,7 +20,7 @@ func writePendingVersionStatus12143(t *testing.T, path, staged, running string) 
 
 func assertStatusRetained12143(t *testing.T, r *Runner, path, staged, current string) {
 	t.Helper()
-	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(path)
+	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(path, r.LastCommittedCut())
 	if err != nil {
 		t.Fatalf("ClearBinaryUpgradeStatusIfCurrent: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestSupersededStatusClearsAfterNewerRollingCut12143(t *testing.T) {
 	if err != nil || current != "4.0.0" {
 		t.Fatalf("current = %q, err=%v; want newer committed 4.0.0", current, err)
 	}
-	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(path)
+	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(path, r.LastCommittedCut())
 	if err != nil || !cleared {
 		t.Fatalf("superseded clear = %v, err=%v; want record cleared", cleared, err)
 	}
@@ -159,7 +159,7 @@ func TestMatchingCommittedVersionClearsStatus12143(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "upgrade-deferred")
 	writePendingVersionStatus12143(t, path, "2.0.0", "1.0.0")
-	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(path)
+	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(path, r.LastCommittedCut())
 	if err != nil || !cleared {
 		t.Fatalf("matching clear = %v, err=%v; want cleared", cleared, err)
 	}

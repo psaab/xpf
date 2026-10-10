@@ -176,14 +176,14 @@ func syncStatusDirectory(path string) error {
 	return nil
 }
 
-// ClearBinaryUpgradeStatusIfCurrent removes a postinst failure record only
-// when its staged version is committed, or when the committed version differs
-// from the recorded running version. The latter clears superseded failures
-// after a newer cut while retaining same-version re-cuts and rollback resumes.
-// The upgrade lock serializes the current-link check and clear against other
-// cutovers. Missing/unreadable records and records without a committed version
-// are retained.
-func (r *Runner) ClearBinaryUpgradeStatusIfCurrent(path string) (bool, error) {
+// ClearBinaryUpgradeStatusIfCurrent removes a resolved postinst failure record.
+// It clears when the staged version is the known committed current version, or
+// when this invocation supplies health-confirmed evidence of a strictly newer
+// Debian version. A change away from running_version is not supersession
+// evidence: unknown sentinels, rollback motion, and unconfirmed journals cannot
+// prove that the failed staged generation was replaced by a successful cut.
+// The upgrade lock protects the status and journal checks against cutovers.
+func (r *Runner) ClearBinaryUpgradeStatusIfCurrent(path string, committed CommittedCut) (bool, error) {
 	if r == nil {
 		return false, fmt.Errorf("clear binary upgrade status: nil runner")
 	}
@@ -200,13 +200,30 @@ func (r *Runner) ClearBinaryUpgradeStatusIfCurrent(path string) (bool, error) {
 	if !status.Recorded {
 		return false, nil
 	}
+	journal, err := r.loadJournal()
+	if err != nil {
+		return false, fmt.Errorf("read upgrade journal before clearing binary upgrade status: %w", err)
+	}
+	if journal.State != StateInit && journal.State != StateCommitted {
+		return false, nil
+	}
 	current, err := r.readCurrentVersion()
 	if err != nil {
 		return false, fmt.Errorf("read committed version before clearing binary upgrade status: %w", err)
 	}
-	if current == "" ||
-		(status.StagedVersion != current &&
-			(status.RunningVersion == "" || current == status.RunningVersion)) {
+	if status.StagedVersion != "unknown" && current != "" &&
+		current != "unknown" && status.StagedVersion == current {
+		if err := ClearBinaryUpgradeStatus(path); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if status.StagedVersion == "unknown" || !committed.healthConfirmed ||
+		committed.version == "" || committed.version == "unknown" {
+		return false, nil
+	}
+	cmp, err := compareDebianVersions(committed.version, status.StagedVersion)
+	if err != nil || cmp <= 0 {
 		return false, nil
 	}
 	if err := ClearBinaryUpgradeStatus(path); err != nil {
