@@ -401,7 +401,39 @@ func isInterfaceDirectFilterConsumerPath12090(ancestors []*Node, filter *Node) b
 		return false
 	}
 	familyIndex, ok := interfaceUnitFamilyAncestorIndex12090(ancestors)
-	return ok && (familyIndex != 3 || (filter != nil && len(filter.Keys) == 1))
+	return ok && (familyIndex != 3 || isInterfaceBracedFilterConsumer12090(filter))
+}
+
+// isInterfaceBracedFilterConsumer12090 accepts only filter-child shapes that
+// compileInterfaces reads. The braced unit-identity path bypasses the #10293
+// family-level list check, so every child must be one valued input/output
+// leaf, with no duplicate direction or ignored child.
+func isInterfaceBracedFilterConsumer12090(filter *Node) bool {
+	if filter == nil || len(filter.Keys) != 1 || len(filter.Children) == 0 {
+		return false
+	}
+	seenInput, seenOutput := false, false
+	for _, child := range filter.Children {
+		if child == nil || len(child.Keys) != 2 || child.Keys[1] == "" ||
+			len(child.Children) != 0 || !child.IsLeaf {
+			return false
+		}
+		switch child.Name() {
+		case "input":
+			if seenInput {
+				return false
+			}
+			seenInput = true
+		case "output":
+			if seenOutput {
+				return false
+			}
+			seenOutput = true
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // interfaceUnitFamilyAncestorIndex12090 locates the family in the supported

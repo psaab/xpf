@@ -128,6 +128,72 @@ func TestBracedUnitIdentityFilterConsumersRetainHooks12090(t *testing.T) {
 	}
 }
 
+func TestBracedUnitIdentityFilterListsRejected12090(t *testing.T) {
+	for _, family := range []string{"inet", "inet6"} {
+		for _, shape := range []string{"compound", "split"} {
+			for _, direction := range []string{"input-list", "output-list"} {
+				for _, defined := range []bool{true, false} {
+					name := family + "/" + shape + "/" + direction + "/undefined"
+					value := "missing"
+					firewall := ""
+					if defined {
+						name = family + "/" + shape + "/" + direction + "/defined"
+						value = "f"
+						firewall = "firewall { family " + family +
+							" { filter f { term t { then accept; } } } } "
+					}
+					t.Run(name, func(t *testing.T) {
+						filter := "filter { " + direction + " " + value + "; }"
+						var binding string
+						if shape == "compound" {
+							binding = "family " + family + " { " + filter + " }"
+						} else {
+							binding = "family { " + family + " { " + filter + " } }"
+						}
+						text := firewall + "interfaces { lo0 { unit { 0 { " + binding +
+							" } } } }"
+
+						if _, err := CheckText(text, -1); err == nil || !strings.Contains(err.Error(), "#12090") {
+							t.Fatalf("CheckText error = %v; want #12090 rejection", err)
+						}
+
+						tree, parseErrors := config.NewParser(text).Parse()
+						if len(parseErrors) != 0 {
+							t.Fatalf("parse test config: %v", parseErrors)
+						}
+						compiled, err := config.CompileConfigLenient(tree)
+						if err != nil {
+							t.Fatalf("lenient compile: %v", err)
+						}
+						warned := false
+						for _, warning := range compiled.Warnings {
+							if strings.Contains(warning, "#12090") {
+								warned = true
+								break
+							}
+						}
+						if !warned {
+							t.Fatalf("lenient compile warnings = %q; want #12090", compiled.Warnings)
+						}
+
+						store := newTestStoreAt(t, filepath.Join(t.TempDir(), "xpf.conf"))
+						if err := store.EnterConfigure(); err != nil {
+							t.Fatalf("EnterConfigure: %v", err)
+						}
+						defer store.ExitConfigure()
+						if err := store.LoadOverride(text); err != nil {
+							t.Fatalf("LoadOverride: %v", err)
+						}
+						if _, err := store.Commit(); err == nil || !strings.Contains(err.Error(), "#12090") {
+							t.Fatalf("Store Commit error = %v; want #12090 rejection", err)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
 func TestBracedUnitIdentityFilterPackedChildRejected12090(t *testing.T) {
 	cases := []struct {
 		name, text, wantError string
