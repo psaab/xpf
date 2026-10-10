@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -32,6 +33,25 @@ type BinaryUpgradeStatus struct {
 	Recovery       string
 	RecordedAt     time.Time
 	ReadErr        error
+	identity       binaryUpgradeStatusIdentity
+}
+
+type binaryUpgradeStatusIdentity struct {
+	device uint64
+	inode  uint64
+	size   int64
+}
+
+func statusFileIdentity(info os.FileInfo) (binaryUpgradeStatusIdentity, error) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return binaryUpgradeStatusIdentity{}, fmt.Errorf("unsupported binary upgrade status file identity")
+	}
+	return binaryUpgradeStatusIdentity{
+		device: uint64(stat.Dev),
+		inode:  stat.Ino,
+		size:   info.Size(),
+	}, nil
 }
 
 // ReadBinaryUpgradeStatus reads the durable postinst failure record. A missing
@@ -65,6 +85,14 @@ func readBinaryUpgradeStatus(path, unreadablePath string) BinaryUpgradeStatus {
 		return BinaryUpgradeStatus{ReadErr: fmt.Errorf("read binary upgrade status %s: %w", path, err)}
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return BinaryUpgradeStatus{ReadErr: fmt.Errorf("stat binary upgrade status %s: %w", path, err)}
+	}
+	identity, err := statusFileIdentity(info)
+	if err != nil {
+		return BinaryUpgradeStatus{ReadErr: fmt.Errorf("identify binary upgrade status %s: %w", path, err)}
+	}
 
 	values := make(map[string]string, 6)
 	scanner := bufio.NewScanner(f)
@@ -130,6 +158,7 @@ func readBinaryUpgradeStatus(path, unreadablePath string) BinaryUpgradeStatus {
 		Reason:         values["reason"],
 		Recovery:       values["recovery"],
 		RecordedAt:     recordedAt,
+		identity:       identity,
 	}
 }
 
@@ -161,6 +190,61 @@ func ClearBinaryUpgradeStatus(path string) error {
 	return nil
 }
 
+func sameBinaryUpgradeStatusRecord(a, b BinaryUpgradeStatus) bool {
+	return a.Recorded && b.Recorded &&
+		a.identity == b.identity &&
+		a.StagedVersion == b.StagedVersion &&
+		a.RunningVersion == b.RunningVersion &&
+		a.Reason == b.Reason &&
+		a.Recovery == b.Recovery &&
+		a.RecordedAt.Equal(b.RecordedAt)
+}
+
+// clearBinaryUpgradeStatusIfUnchanged re-reads the lockless postinst writer's
+// record while the caller holds the upgrade lock. The final lstat checks that
+// the path still names the compared regular file immediately before unlink.
+// It does not remove the unreadable marker: a marker appearing concurrently is
+// new failure evidence and must remain fail-closed.
+func clearBinaryUpgradeStatusIfUnchanged(path string, expected BinaryUpgradeStatus) (bool, error) {
+	current := ReadBinaryUpgradeStatus(path)
+	if current.ReadErr != nil {
+		return false, current.ReadErr
+	}
+	if !sameBinaryUpgradeStatusRecord(expected, current) {
+		return false, nil
+	}
+	if path == "" {
+		path = DefaultBinaryUpgradeStatusPath
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("recheck binary upgrade status %s before unlink: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, nil
+	}
+	identity, err := statusFileIdentity(info)
+	if err != nil {
+		return false, fmt.Errorf("identify binary upgrade status %s before unlink: %w", path, err)
+	}
+	if identity != expected.identity {
+		return false, nil
+	}
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("clear binary upgrade status %s: %w", path, err)
+	}
+	if err := syncStatusDirectory(filepath.Dir(path)); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func syncStatusDirectory(path string) error {
 	dir, err := os.Open(path)
 	if err != nil {
@@ -178,12 +262,12 @@ func syncStatusDirectory(path string) error {
 
 // ClearBinaryUpgradeStatusIfCurrent removes a resolved postinst failure record.
 // It clears when the staged version is the known committed current version, or
-// when this invocation supplies health-confirmed evidence for the current
-// runtime and a strictly newer Debian version. A change away from
-// running_version is not supersession evidence: unknown sentinels, rollback
-// motion, and unconfirmed journals cannot prove that the failed staged
-// generation was replaced by a successful cut. The upgrade lock protects the
-// status, journal, and current-version checks against cutovers.
+// when this invocation supplies health-confirmed evidence from the current
+// durable cut generation for a strictly newer Debian version. A later Runner
+// operation advances that generation, invalidating saved evidence even when it
+// rolls back to the same runtime version. The upgrade lock protects generation,
+// journal, and current-version checks against cutovers; the final record
+// re-read protects against the lockless postinst status writer.
 func (r *Runner) ClearBinaryUpgradeStatusIfCurrent(path string, committed CommittedCut) (bool, error) {
 	if r == nil {
 		return false, fmt.Errorf("clear binary upgrade status: nil runner")
@@ -214,24 +298,29 @@ func (r *Runner) ClearBinaryUpgradeStatusIfCurrent(path string, committed Commit
 	}
 	if status.StagedVersion != "unknown" && current != "" &&
 		current != "unknown" && status.StagedVersion == current {
-		if err := ClearBinaryUpgradeStatus(path); err != nil {
-			return false, err
-		}
-		return true, nil
+		return clearBinaryUpgradeStatusIfUnchanged(path, status)
 	}
 	if status.StagedVersion == "unknown" || !committed.healthConfirmed ||
 		committed.version == "" || committed.version == "unknown" ||
 		current != committed.version {
 		return false, nil
 	}
+	generation, err := readStatusGeneration(r.statusGenerationPath())
+	if err != nil {
+		return false, err
+	}
+	if committed.generationValid {
+		if committed.generation != generation {
+			return false, nil
+		}
+	} else if committed.generation != 0 || generation != 0 {
+		return false, nil
+	}
 	cmp, err := compareDebianVersions(committed.version, status.StagedVersion)
 	if err != nil || cmp <= 0 {
 		return false, nil
 	}
-	if err := ClearBinaryUpgradeStatus(path); err != nil {
-		return false, err
-	}
-	return true, nil
+	return clearBinaryUpgradeStatusIfUnchanged(path, status)
 }
 
 // RenderBinaryUpgradeStatus writes the read-only operator status for deferred

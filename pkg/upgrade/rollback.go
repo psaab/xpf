@@ -58,6 +58,7 @@ func (r *Runner) RollbackTo(target string, opts RollbackOptions) error {
 		}
 		defer func() { _ = h.Release() }()
 	}
+	r.beginStatusGeneration()
 
 	plan, j, err := r.rollbackInvocationPlan(target)
 	if err != nil {

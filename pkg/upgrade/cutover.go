@@ -217,6 +217,7 @@ func (r *Runner) Run(opts Options) (err error) {
 		}
 		defer func() { _ = h.Release() }()
 	}
+	r.beginStatusGeneration()
 
 	j, err := r.loadJournal()
 	if err != nil {
