@@ -305,65 +305,68 @@ func (c *CLI) handleShowSecurity(args []string) error {
 			// Brief tabular summary
 			fmt.Printf("%-12s %-12s %-20s %-8s %s\n",
 				"From", "To", "Name", "Action", "Hits")
-			policySetID := uint32(0)
-			for _, zpp := range cfg.Security.Policies {
-				// #3476: skip a nil zone-pair set (tolerant / HA-sync path)
-				// while advancing the policy-set ID, like the runtime walker.
-				if zpp == nil {
-					policySetID++
-					continue
-				}
-				if fromZone != "" && zpp.FromZone != fromZone {
-					policySetID++
-					continue
-				}
-				if toZone != "" && zpp.ToZone != toZone {
-					policySetID++
-					continue
-				}
-				for i, pol := range zpp.Policies {
-					// #3476: skip a nil rule like the runtime walker does.
-					if pol == nil {
+			passes := 1
+			if fromZone != "" || toZone != "" {
+				passes = 3
+			}
+			pairFilter := policymatch.NewZonePairPolicyFilter(cfg, fromZone, toZone)
+			for tier := range passes {
+				for setIdx, zpp := range cfg.Security.Policies {
+					// #3476: skip a nil zone-pair set (tolerant / HA-sync path).
+					if zpp == nil {
 						continue
 					}
-					action := "permit"
-					switch pol.Action {
-					case 1:
-						action = "deny"
-					case 2:
-						action = "reject"
+					if !policymatch.ZonePairPolicyAppliesToFilterPair(pairFilter, zpp.FromZone, zpp.ToZone) {
+						continue
 					}
-					ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
-					// Default to "0" (consistent with the hit-count table
-					// and the gRPC/REST surfaces, which render 0 whenever
-					// the counter is unavailable or the knob is off);
-					// overwrite only on a successful gated read.
-					hits := "0"
-					if (statsEnabled || pol.Count) && readPolicy != nil {
-						counters, err := readPolicy(ruleID)
-						switch {
-						case err == nil:
-							hits = fmt.Sprintf("%d", counters.Packets)
-						case errors.Is(err, dpuserspace.ErrPolicyCounterUnpublished):
-							hits = "n/a" // #7016
-							unpublished++
-						default:
-							if readErr == nil {
-								readErr = err
-							}
+					policySetID := uint32(setIdx)
+					if passes > 1 && policymatch.ZonePairPolicyFilterTier(zpp.FromZone, zpp.ToZone) != tier {
+						continue
+					}
+					for i, pol := range zpp.Policies {
+						// #3476: skip a nil rule like the runtime walker does.
+						if pol == nil {
+							continue
 						}
-					} else if !statsEnabled && !pol.Count {
-						// #8177: the "0" above was never read. Explicit rather
-						// than an `else`, because the other way into this branch
-						// is readPolicy == nil (dataplane not loaded), which is
-						// a different fact and must not be counted here.
-						statsDisabled++
+						action := "permit"
+						switch pol.Action {
+						case 1:
+							action = "deny"
+						case 2:
+							action = "reject"
+						}
+						ruleID := policySetID*dataplane.MaxRulesPerPolicy + uint32(i)
+						// Default to "0" (consistent with the hit-count table
+						// and the gRPC/REST surfaces, which render 0 whenever
+						// the counter is unavailable or the knob is off);
+						// overwrite only on a successful gated read.
+						hits := "0"
+						if (statsEnabled || pol.Count) && readPolicy != nil {
+							counters, err := readPolicy(ruleID)
+							switch {
+							case err == nil:
+								hits = fmt.Sprintf("%d", counters.Packets)
+							case errors.Is(err, dpuserspace.ErrPolicyCounterUnpublished):
+								hits = "n/a" // #7016
+								unpublished++
+							default:
+								if readErr == nil {
+									readErr = err
+								}
+							}
+						} else if !statsEnabled && !pol.Count {
+							// #8177: the "0" above was never read. Explicit rather
+							// than an `else`, because the other way into this branch
+							// is readPolicy == nil (dataplane not loaded), which is
+							// a different fact and must not be counted here.
+							statsDisabled++
+						}
+						fmt.Printf("%-12s %-12s %-20s %-8s %s\n",
+							zpp.FromZone, zpp.ToZone, pol.Name, action, hits)
 					}
-					fmt.Printf("%-12s %-12s %-20s %-8s %s\n",
-						zpp.FromZone, zpp.ToZone, pol.Name, action, hits)
 				}
-				policySetID++
 			}
+			policySetID := uint32(len(cfg.Security.Policies))
 			// Global policies in brief view. #3357: a from/to-zone filter no
 			// longer suppresses the globals — show the unscoped globals (every
 			// pair) plus any scoped global (#3148) targeting the filtered pair.
@@ -442,63 +445,63 @@ func (c *CLI) handleShowSecurity(args []string) error {
 		// #3063: render the detail Index from the span-accumulated runtime
 		// policy-ID namespace so it matches the RT_FLOW/event log policy ID.
 		runtimeIDs := dpuserspace.RuntimePolicyIDs(cfg)
-		policySetID := uint32(0)
+		policySetID := uint32(len(cfg.Security.Policies))
 		if !globalOnly {
-			for _, zpp := range cfg.Security.Policies {
-				// #3476: skip a nil zone-pair set (tolerant / HA-sync path)
-				// while advancing the policy-set ID, like the runtime walker.
-				if zpp == nil {
-					policySetID++
-					continue
-				}
-				if fromZone != "" && zpp.FromZone != fromZone {
-					policySetID++
-					continue
-				}
-				if toZone != "" && zpp.ToZone != toZone {
-					policySetID++
-					continue
-				}
-				// Junos format: "From zone: X, To zone: Y" header
-				fmt.Printf("From zone: %s, To zone: %s\n", zpp.FromZone, zpp.ToZone)
-				for i, pol := range zpp.Policies {
-					// #3476: skip a nil rule like the runtime walker does.
-					if pol == nil {
+			passes := 1
+			if fromZone != "" || toZone != "" {
+				passes = 3
+			}
+			pairFilter := policymatch.NewZonePairPolicyFilter(cfg, fromZone, toZone)
+			for tier := range passes {
+				for setIdx, zpp := range cfg.Security.Policies {
+					// #3476: skip a nil zone-pair set (tolerant / HA-sync path).
+					if zpp == nil {
 						continue
 					}
-					action := "permit"
-					switch pol.Action {
-					case 1:
-						action = "deny"
-					case 2:
-						action = "reject"
+					if !policymatch.ZonePairPolicyAppliesToFilterPair(pairFilter, zpp.FromZone, zpp.ToZone) {
+						continue
 					}
-					ruleID := runtimePolicyIndex(runtimeIDs, policySetID, uint32(i))
-					// Junos: Policy: <name>, State: enabled, Index: <N>, Scope Policy: 0, Sequence number: <N>
-					// #3062: a scheduler-inactive policy reports State: inactive.
-					state := policyDetailState(pol.SchedulerName, schedActive, haveSched)
-					fmt.Printf("  Policy: %s, State: %s, Index: %d, Scope Policy: 0, Sequence number: %d\n",
-						pol.Name, state, ruleID, i+1)
-					if pol.Description != "" {
-						fmt.Printf("    Description: %s\n", pol.Description)
+					policySetID := uint32(setIdx)
+					if passes > 1 && policymatch.ZonePairPolicyFilterTier(zpp.FromZone, zpp.ToZone) != tier {
+						continue
 					}
-					fmt.Printf("    Source addresses: %s\n",
-						joinDisplayAddressNames(pol.Match.SourceAddresses))
-					fmt.Printf("    Destination addresses: %s\n",
-						joinDisplayAddressNames(pol.Match.DestinationAddresses))
-					fmt.Printf("    Applications: %s\n",
-						strings.Join(pol.Match.Applications, ", "))
-					actionStr := action
-					if pol.Log != nil {
-						actionStr += ", log"
+					// Junos format: "From zone: X, To zone: Y" header
+					fmt.Printf("From zone: %s, To zone: %s\n", zpp.FromZone, zpp.ToZone)
+					for i, pol := range zpp.Policies {
+						// #3476: skip a nil rule like the runtime walker does.
+						if pol == nil {
+							continue
+						}
+						action := "permit"
+						switch pol.Action {
+						case 1:
+							action = "deny"
+						case 2:
+							action = "reject"
+						}
+						ruleID := runtimePolicyIndex(runtimeIDs, policySetID, uint32(i))
+						// Junos: Policy: <name>, State: enabled, Index: <N>, Scope Policy: 0, Sequence number: <N>
+						// #3062: a scheduler-inactive policy reports State: inactive.
+						state := policyDetailState(pol.SchedulerName, schedActive, haveSched)
+						fmt.Printf("  Policy: %s, State: %s, Index: %d, Scope Policy: 0, Sequence number: %d\n",
+							pol.Name, state, ruleID, i+1)
+						if pol.Description != "" {
+							fmt.Printf("    Description: %s\n", pol.Description)
+						}
+						fmt.Printf("    Source addresses: %s\n",
+							joinDisplayAddressNames(pol.Match.SourceAddresses))
+						fmt.Printf("    Destination addresses: %s\n",
+							joinDisplayAddressNames(pol.Match.DestinationAddresses))
+						fmt.Printf("    Applications: %s\n",
+							strings.Join(pol.Match.Applications, ", "))
+						actionStr := action
+						if pol.Log != nil {
+							actionStr += ", log"
+						}
+						fmt.Printf("    Action: %s\n", actionStr)
 					}
-					fmt.Printf("    Action: %s\n", actionStr)
 				}
-				policySetID++
 			}
-		} else {
-			// When globalOnly, still count zone-pair policy sets to get correct global ruleID base
-			policySetID = uint32(len(cfg.Security.Policies))
 		}
 		// Global policies. #3357: a from/to-zone filter no longer suppresses the
 		// global block (only `global`-only and the unfiltered view did before) —

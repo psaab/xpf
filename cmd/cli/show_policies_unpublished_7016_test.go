@@ -41,7 +41,10 @@ func unpublishedPoliciesResp() *pb.GetPoliciesResponse {
 }
 
 func TestRenderRuleMarksUnavailableHitCounters(t *testing.T) {
-	c := &ctl{client: &fakeBpfrxClient{getPoliciesResp: unpublishedPoliciesResp()}}
+	c := &ctl{client: &fakeBpfrxClient{
+		getPoliciesResp: unpublishedPoliciesResp(),
+		getZonesResp:    &pb.GetZonesResponse{Zones: []*pb.ZoneInfo{{Name: "trust"}, {Name: "untrust"}}},
+	}}
 
 	out := captureStdout(t, func() {
 		if err := c.showPoliciesFiltered("trust", "untrust", false); err != nil {
@@ -89,7 +92,10 @@ func TestRenderRuleHealthyCountersUnchanged(t *testing.T) {
 	rule.HitPackets = 12
 	rule.HitBytes = 1200
 
-	c := &ctl{client: &fakeBpfrxClient{getPoliciesResp: resp}}
+	c := &ctl{client: &fakeBpfrxClient{
+		getPoliciesResp: resp,
+		getZonesResp:    &pb.GetZonesResponse{Zones: []*pb.ZoneInfo{{Name: "trust"}, {Name: "untrust"}}},
+	}}
 	detail := captureStdout(t, func() {
 		if err := c.showPoliciesFiltered("trust", "untrust", false); err != nil {
 			t.Fatalf("showPoliciesFiltered: %v", err)
