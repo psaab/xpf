@@ -56,8 +56,18 @@ fn txn_non_decap_missing_neighbor_buffers_and_retries_correctly() {
     // LAN hairpin: 10.0.61.102 -> 10.0.61.50, directly connected on
     // reth1.0 (egress == ingress binding), neighbor cold.
     let dst = Ipv4Addr::new(10, 0, 61, 50);
-    let frame = build_txn_tcp_syn_frame_v4(Ipv4Addr::new(10, 0, 61, 102), dst, 12345, 443, TCP_FLAG_SYN, crate::afxdp::tests_support::TEST_LAN_MAC);
-    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+    let src = Ipv4Addr::new(10, 0, 61, 102);
+    let frame = build_txn_tcp_syn_frame_v4(
+        src,
+        dst,
+        12345,
+        443,
+        TCP_FLAG_SYN,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    );
+    let mut meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+    meta.flow_src_addr[..4].copy_from_slice(&src.octets());
+    meta.flow_dst_addr[..4].copy_from_slice(&dst.octets());
     let (_batch, dbg) = txn_run_descriptor_checked(
         &mut bindings[0],
         &mut sessions,
