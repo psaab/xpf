@@ -31,17 +31,12 @@ use super::*;
 ///
 /// A WorkerLocalImport is a replica of a session authored by this node's
 /// other worker, so charging it again makes the effective cap depend on RSS
-/// worker count rather than logical sessions. True HA peer origins remain
-/// counted for #3122 failover enforcement. The two transient local seeds
-/// retain their existing uncounted status.
+/// worker count rather than logical sessions. Transient-local seeds still
+/// consume worker-table slots and therefore count toward the quota even
+/// though their separate HA provenance keeps them node-local.
 #[inline]
 pub(crate) fn session_limit_origin_counted(origin: SessionOrigin) -> bool {
-    !matches!(
-        origin,
-        SessionOrigin::WorkerLocalImport
-            | SessionOrigin::MissingNeighborSeed
-            | SessionOrigin::FabricPuntSeed
-    )
+    !matches!(origin, SessionOrigin::WorkerLocalImport)
 }
 
 impl SessionTable {
@@ -438,10 +433,14 @@ impl SessionTable {
             // install.
             self.session_limit_inc(session_limit_zone, key.src_ip, key.dst_ip);
         }
-        // #10038 item 5: TUN-origin never Opens (node-local provenance — the
-        // peer must never hold TUN-derived state, so it is neither bulk- nor
-        // live-synced; forwards still count toward per-IP limits above).
-        if counted && !origin.is_peer_synced() && !origin.is_local_tun_origin() {
+        // #10038/#12179: node-local TUN origins and transient seeds never
+        // emit Open deltas. Their independent quota accounting still charges
+        // the forward session classes above.
+        if counted
+            && !origin.is_peer_synced()
+            && !origin.is_local_tun_origin()
+            && !origin.is_transient_local_seed()
+        {
             let tcp_handshake_state = self.handshake_state_wire_for(&key);
             self.push_delta(SessionDelta {
                 provenance: crate::session::ExportProvenance::Incremental,
@@ -1013,7 +1012,8 @@ impl SessionTable {
                 entry.origin = SessionOrigin::SyncImport;
             }
             // Borrow on `entry` ends here so the &mut self count helper can
-            // run. SyncImport is counted; transient seeds remain uncounted.
+            // run. SyncImport and forward transient seeds are counted; seeds
+            // remain node-local through demotion and keep their existing charge.
             let old_counted =
                 !is_reverse && session_limit_origin_counted(old_origin);
             let new_counted =
