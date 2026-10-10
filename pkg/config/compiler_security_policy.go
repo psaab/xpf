@@ -393,12 +393,10 @@ func compilePolicy(polInst struct {
 		pol.SchedulerName = nodeVal(snNode)
 	}
 
-	// #4232 (fable-167 P-4b): record any DIRECT child of `policy <name>` whose
-	// keyword the compiler does not read. match/then/description/scheduler-name
-	// are the recognized leaves; anything else (a typo like `descripton`, or an
-	// unimplemented policy option) was silently dropped. Recording it lets the
-	// compiler emit an accepted-but-inert / probable-typo advisory. Iterate in
-	// config order for a deterministic warning.
+	// #4232 (fable-167 P-4b): record any DIRECT policy child whose keyword the
+	// compiler does not read. The advisory reports unknown children; enforcement-
+	// bearing typos and unknown nested subtrees also poison the tolerant policy
+	// snapshot below (#12234). Iterate in config order for deterministic warnings.
 	for _, child := range polInst.node.Children {
 		switch child.Name() {
 		case "match", "then", "description", "scheduler-name":
@@ -411,6 +409,9 @@ func compilePolicy(polInst struct {
 	// #11014: directly dropped term or session-options children can carry
 	// enforcement constraints; dropping them must poison any direct policy action.
 	droppedEnforcementSubtrees := policyDroppedEnforcementSubtrees(polInst.node)
+	// #12234: an unknown nested child or a one-edit typo of an enforcement
+	// keyword (including scheduler-name) may carry constraints the compiler drops.
+	unknownEnforcementChildren := policyUnknownEnforcementChildren(polInst.node)
 	// #4626 M03: canonicalize the accumulated scoped-global zone sets to a
 	// sorted, de-duplicated form so display is stable, HA expansion is
 	// order-symmetric, and `[ dmz trust ]` == `[ trust dmz ]`. A single-zone
@@ -420,24 +421,23 @@ func compilePolicy(polInst struct {
 	pol.Match.FromZones = sortDedupZones(pol.Match.FromZones)
 	pol.Match.ToZones = sortDedupZones(pol.Match.ToZones)
 
-	// #5575 / #11013 / #11014 / #11023 / #11063: fail-CLOSED on tolerant
-	// load / peer-sync. A policy the strict gates reject for dropped match/then
-	// enforcement or unsupported then-log mode is downgraded to a warning, but
-	// the compiler silently discards that content. Empty match dimensions become
-	// match-ANY; a dropped then sibling can leave an earlier permit active; an
-	// unknown log mode drops configured session logging; and an unknown policy
-	// subtree can carry enforcement constraints the direct policy compiler
-	// ignores. Record those invalidations so the userspace snapshot builder
-	// poisons the rule with the __unsupported__ sentinel instead of publishing
-	// incomplete policy content. Direct terminal-action conflicts are captured
-	// from each source policy before duplicate-name folding; lenient grouped
-	// policies are checked again on an expanded pre-fold clone.
+	// #5575 / #11013 / #11014 / #11023 / #11063 / #12234: fail-CLOSED on
+	// tolerant load / peer-sync. A policy the strict gates reject for dropped
+	// match/then enforcement, unsupported then-log mode, or an enforcement-like
+	// unknown direct child is downgraded to a warning, but the compiler silently
+	// discards that content. Empty match dimensions become match-ANY; a dropped
+	// then sibling can leave an earlier permit active; an unknown log mode drops
+	// configured session logging; and an unknown nested policy child can carry
+	// constraints the direct policy compiler ignores. Record those invalidations
+	// so the userspace snapshot builder poisons the rule with the __unsupported__
+	// sentinel instead of publishing incomplete policy content. Direct terminal-
+	// action conflicts are captured from each source policy before duplicate-
+	// name folding; lenient grouped policies are checked again on an expanded
+	// pre-fold clone.
 	//
-	// These per-policy predicates share their definitions with the strict
-	// gates where available. The unsupported-then-sibling and unsupported-
-	// then-log predicates are also used by their strict/warning gate;
-	// enforcement-bearing unknown subtrees are identified separately from
-	// harmless unknown policy metadata.
+	// These per-policy predicates share their definitions with strict gates
+	// where available. Enforcement-bearing unknown children are distinguished
+	// from unrelated unknown scalar metadata, which remains advisory-only.
 	// Explicit `any` remains distinguishable from omitted or valueless match
 	// content; the AST predicates below preserve that distinction.
 	//
@@ -455,7 +455,8 @@ func compilePolicy(polInst struct {
 		len(policyUnsupportedThenPermitModifiers(polInst.node)) > 0 ||
 		len(policyUnsupportedThenSiblings(polInst.node)) > 0 ||
 		len(policyUnsupportedThenLogTokens(polInst.node)) > 0 ||
-		len(droppedEnforcementSubtrees) > 0 {
+		len(droppedEnforcementSubtrees) > 0 ||
+		len(unknownEnforcementChildren) > 0 {
 		pol.LenientContentDropped = true
 	}
 
@@ -586,8 +587,8 @@ func policyUnsupportedThenLogTokens(polNode *Node) []string {
 	return unsupported
 }
 
-// policyDroppedEnforcementSubtrees distinguishes unknown policy metadata
-// from direct children that may contain constraints the compiler would discard.
+// policyDroppedEnforcementSubtrees returns direct `term` and `session-options`
+// children whose enforcement constraints the compiler would discard.
 func policyDroppedEnforcementSubtrees(polNode *Node) []string {
 	var dropped []string
 	if polNode == nil {
@@ -600,6 +601,67 @@ func policyDroppedEnforcementSubtrees(polNode *Node) []string {
 		}
 	}
 	return dropped
+}
+
+// policyUnknownEnforcementChildren identifies unknown direct policy children
+// the compiler drops, except for scalar one-edit typos of metadata-only
+// `description`. Every other unknown child may carry enforcement or scheduler
+// intent; nested unknown subtrees are quarantined regardless of their name.
+func policyUnknownEnforcementChildren(polNode *Node) []string {
+	var unknown []string
+	if polNode == nil {
+		return unknown
+	}
+	for _, child := range polNode.Children {
+		switch child.Name() {
+		case "match", "then", "description", "scheduler-name", "term", "session-options":
+			continue
+		}
+		if len(child.Children) > 0 ||
+			!policyKeywordDiffersByOneEdit(child.Name(), "description") {
+			unknown = append(unknown, child.Name())
+		}
+	}
+	return unknown
+}
+
+// policyKeywordDiffersByOneEdit recognizes a single insertion, deletion,
+// substitution, or adjacent transposition between two policy child keywords.
+func policyKeywordDiffersByOneEdit(candidate, known string) bool {
+	if candidate == known || len(candidate) > len(known)+1 || len(known) > len(candidate)+1 {
+		return false
+	}
+	i, j, edits := 0, 0, 0
+	for i < len(candidate) && j < len(known) {
+		if candidate[i] == known[j] {
+			i++
+			j++
+			continue
+		}
+		edits++
+		if edits > 1 {
+			return false
+		}
+		if len(candidate) == len(known) && i+1 < len(candidate) && j+1 < len(known) &&
+			candidate[i] == known[j+1] && candidate[i+1] == known[j] {
+			i += 2
+			j += 2
+			continue
+		}
+		switch {
+		case len(candidate) > len(known):
+			i++
+		case len(candidate) < len(known):
+			j++
+		default:
+			i++
+			j++
+		}
+	}
+	if i < len(candidate) || j < len(known) {
+		edits++
+	}
+	return edits == 1
 }
 
 // recognizedCollapsedDenyToken reports whether tok is a token that

@@ -759,8 +759,9 @@ func validatePolicyUnsupportedThenSiblings(nodes []*Node, lenient bool) ([]strin
 }
 
 // validatePolicyEnforcementSubtrees rejects direct policy `term` and
-// `session-options` children that compilePolicy drops, while allowing harmless
-// unknown policy metadata to remain advisory-only.
+// `session-options` children, plus unknown children that may carry dropped
+// enforcement content. Only scalar one-edit typos of metadata-only
+// `description` remain advisory-only.
 func validatePolicyEnforcementSubtrees(nodes []*Node, lenient bool) ([]string, error) {
 	var warnings []string
 	checkPolicy := func(scope, policyName string, polNode *Node) error {
@@ -769,6 +770,17 @@ func validatePolicyEnforcementSubtrees(nodes []*Node, lenient bool) ([]string, e
 				"security policies %s policy %q contains dropped enforcement subtree %q "+
 					"(nested enforcement is not compiled and could weaken the direct policy action) (#11014)",
 				scope, policyName, subtree,
+			)
+			if !lenient {
+				return fmt.Errorf("%s", msg)
+			}
+			warnings = append(warnings, msg)
+		}
+		for _, child := range policyUnknownEnforcementChildren(polNode) {
+			msg := fmt.Sprintf(
+				"security policies %s policy %q contains unknown enforcement-bearing child %q "+
+					"that the compiler drops; the incomplete policy is poisoned on tolerant load (#12234)",
+				scope, policyName, child,
 			)
 			if !lenient {
 				return fmt.Errorf("%s", msg)

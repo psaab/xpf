@@ -204,16 +204,16 @@ func buildOneRuleSnapshot(
 			Protocol: unsupportedApplicationSentinel,
 		}}
 	}
-	// #5575 / #11013 / #11014: a policy the tolerant load / peer-sync compile
-	// path accepted only by DOWNGRADING a reject for dropped enforcement
-	// content had its constraint silently discarded, leaving an empty match
-	// dimension, an unconditional direct permit, or an incomplete policy
-	// subtree. Poison the rule with the __unsupported__ application sentinel
-	// so the Rust integrity preflight rejects the WHOLE snapshot
-	// (previous-good retained; fresh-boot default-deny) — an action-agnostic
-	// fail-CLOSED instead of publishing the incomplete policy.
-	// A strict commit rejects these policies outright, so this only fires on
-	// tolerant load / peer-sync ingress.
+	// #5575 / #11013 / #11014 / #12234: a policy the tolerant load / peer-sync
+	// compile path accepted only by DOWNGRADING a reject for dropped
+	// enforcement content had its constraint silently discarded, leaving an
+	// empty match dimension, an unconditional direct permit, or an incomplete
+	// policy subtree / enforcement-like unknown child. Poison the rule with the
+	// __unsupported__ application sentinel so the Rust integrity preflight
+	// rejects the WHOLE snapshot (previous-good retained; fresh-boot
+	// default-deny) — an action-agnostic fail-CLOSED instead of publishing
+	// incomplete policy content. A strict commit rejects these policies
+	// outright, so this only fires on tolerant load / peer-sync ingress.
 	if pol.LenientContentDropped {
 		if len(rejectedApps) == 0 {
 			rejectedApps = []string{lenientDroppedConstraintToken}
