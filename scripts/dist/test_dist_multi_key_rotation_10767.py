@@ -8,6 +8,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -162,6 +163,48 @@ class MultiKeyRotation10767(unittest.TestCase):
             publish.gate_latest(str(self.dist), "stable", {self.VER: self.manifest},
                                 [str(self.old_pub), str(self.new_pub)])
         self.assertIn("new.pub", str(caught.exception))
+
+    def test_fresh_pointer_is_readable_by_distinct_uid(self):
+        os.chmod(self.tmp, 0o755)
+        old_umask = os.umask(0o022)
+        try:
+            publish.make_latest(str(self.dist), "stable", self.VER)
+        finally:
+            os.umask(old_umask)
+
+        latest = self.dist / "stable" / "latest.json"
+        code = ("import pathlib,sys; "
+                "print(pathlib.Path(sys.argv[1]).read_text(), end='')")
+        sudo = shutil.which("sudo")
+        if sudo:
+            result = subprocess.run(
+                [sudo, "-n", "-u", "nobody", sys.executable, "-c", code,
+                 str(latest)], capture_output=True, text=True)
+        elif os.geteuid() == 0:
+            def drop_to_nobody():
+                os.setgroups([])
+                os.setgid(65534)
+                os.setuid(65534)
+            result = subprocess.run(
+                [sys.executable, "-c", code, str(latest)],
+                capture_output=True, text=True, preexec_fn=drop_to_nobody)
+        else:
+            self.skipTest("sudo or root is required for a distinct-UID read")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(self.VER, result.stdout)
+        self.assertEqual(stat.S_IMODE(latest.stat().st_mode), 0o644)
+
+    def test_make_latest_preserves_existing_mode_0640(self):
+        publish.make_latest(str(self.dist), "stable", self.VER)
+        latest = self.dist / "stable" / "latest.json"
+        latest.chmod(0o640)
+        next_version = "1.2.4-1-gccccccc"
+        (self.dist / f"xpf-{next_version}.SHA256SUMS").touch()
+        old_date = sign.parse_latest_date(json.loads(latest.read_text())["date"])
+        with mock.patch.object(publish.time, "time", return_value=old_date + 1):
+            publish.make_latest(str(self.dist), "stable", next_version)
+        self.assertEqual(stat.S_IMODE(latest.stat().st_mode), 0o640)
+        self.assertEqual(json.loads(latest.read_text())["version"], next_version)
 
     def test_make_latest_signing_failure_preserves_and_recovers_pointer(self):
         next_version = "1.2.4-1-gccccccc"

@@ -1014,6 +1014,11 @@ def make_latest(dist, channel, version):
             f.write("\n")
         if os.path.exists(latest):
             shutil.copymode(latest, tmp_latest)
+        else:
+            # Match open(..., "w") creation permissions for a new pointer.
+            mask = os.umask(0)
+            os.umask(mask)
+            os.chmod(tmp_latest, 0o666 & ~mask)
         tmp_sig = tmp_latest + ".minisig"
         try:
             generated = sign.sign_manifest(
