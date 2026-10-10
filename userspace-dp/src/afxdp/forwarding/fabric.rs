@@ -932,7 +932,6 @@ pub(in crate::afxdp) fn fabric_punt_seed_metadata(
     src_port: u16,
     dst_port: u16,
     packet_icmp: Option<(u8, u8)>,
-    packet_len: u64,
     now_ns: u64,
 ) -> Option<SessionMetadata> {
     // #3110: 0 is the "unknown zone" sentinel, against which policy evaluation
@@ -944,7 +943,8 @@ pub(in crate::afxdp) fn fabric_punt_seed_metadata(
     if from_zone_id == 0 || to_zone_id == 0 {
         return None;
     }
-    let policy_result = crate::policy::evaluate_policy_result_with_icmp_at(
+    // #12212: this adjudication only authorizes a seed; the peer counts the punted packet.
+    let policy_result = crate::policy::evaluate_policy_result_without_counting_at(
         &forwarding.policy,
         from_zone_id,
         to_zone_id,
@@ -954,7 +954,6 @@ pub(in crate::afxdp) fn fabric_punt_seed_metadata(
         src_port,
         dst_port,
         packet_icmp,
-        packet_len,
         now_ns,
     );
     if !matches!(policy_result.action, crate::policy::PolicyAction::Permit) {
