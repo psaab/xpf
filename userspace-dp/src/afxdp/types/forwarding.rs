@@ -1082,10 +1082,11 @@ impl ForwardingState {
     /// `to-routing-instance`, or unscoped; `nat_translated_local_exclusions`),
     /// e.g. the WAN `reth0.80` IP, so reusing it left the router's own
     /// SNAT/WAN interface IP poisonable. The `local_v*` membership is still
-    /// OR-ed in so DNAT-destination addresses appended to `local_v*` (late-stage
-    /// local-delivery targets the router also answers for) keep their #2851
-    /// protection; `configured_iface_v*` adds the genuine interface IPs that
-    /// the NAT exclusion stripped. NAT-translated POOL addresses are in
+    /// OR-ed in so the static-NAT-external and DNAT-destination addresses
+    /// appended to `local_v*` (late-stage local-delivery targets the router
+    /// also answers for) keep their #2851 protection; `configured_iface_v*`
+    /// adds the genuine interface IPs that the NAT exclusion stripped.
+    /// NAT-translated POOL addresses are in
     /// neither set, so the gate still scopes to addresses the router owns.
     #[inline]
     pub(in crate::afxdp) fn owns_configured_ip(&self, ip: IpAddr) -> bool {

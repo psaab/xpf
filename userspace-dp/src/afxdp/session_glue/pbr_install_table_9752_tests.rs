@@ -75,6 +75,7 @@ fn pbr_snapshot() -> ConfigSnapshot {
         InterfaceSnapshot {
             name: "ge-0/0/2".to_string(),
             zone: "wan".to_string(),
+            egress_zone: "wan".to_string(),
             linux_name: "ge-0-0-2".to_string(),
             ifindex: BLUE_IFINDEX,
             routing_instance: "blue".to_string(),
@@ -91,6 +92,7 @@ fn pbr_snapshot() -> ConfigSnapshot {
             name: "ge-0/0/3".to_string(),
             zone: "wan".to_string(),
             linux_name: "ge-0-0-3".to_string(),
+            egress_zone: "wan".to_string(),
             ifindex: DEFAULT_IFINDEX,
             hardware_addr: "02:bf:72:00:03:0d".to_string(),
             addresses: vec![InterfaceAddressSnapshot {

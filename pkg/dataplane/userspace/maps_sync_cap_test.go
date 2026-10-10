@@ -253,8 +253,10 @@ func TestSyncInterfaceNATAddressMapsAddsBeforeRemovingStale(t *testing.T) {
 
 	err = m.syncInterfaceNATAddressMapsLocked(&ConfigSnapshot{
 		Interfaces: []InterfaceSnapshot{{
-			Name: "reth1.0",
-			Zone: "untrust",
+			Name:       "reth1.0",
+			Zone:       "untrust",
+			EgressZone: "untrust",
+			Ifindex:    5,
 			Addresses: []InterfaceAddressSnapshot{{
 				Family:  "inet",
 				Address: "198.51.100.1/24",
@@ -343,9 +345,10 @@ func TestSamePlanClassifierMapRefreshFailsClosedOnNATSyncFailure(t *testing.T) {
 
 	err = m.syncUserspaceClassifierMapsFailClosedLocked(&ConfigSnapshot{
 		Interfaces: []InterfaceSnapshot{{
-			Name:    "reth1.0",
-			Zone:    "untrust",
-			Ifindex: 5,
+			Name:       "reth1.0",
+			Zone:       "untrust",
+			EgressZone: "untrust",
+			Ifindex:    5,
 			Addresses: []InterfaceAddressSnapshot{{
 				Family:  "inet",
 				Address: "198.51.100.1/24",
@@ -534,9 +537,10 @@ func classifierRefreshFailureSnapshot() *ConfigSnapshot {
 			Workers: 3,
 		},
 		Interfaces: []InterfaceSnapshot{{
-			Name:    "reth1.0",
-			Zone:    "untrust",
-			Ifindex: 5,
+			Name:       "reth1.0",
+			Zone:       "untrust",
+			EgressZone: "untrust",
+			Ifindex:    5,
 			Addresses: []InterfaceAddressSnapshot{{
 				Family:  "inet",
 				Address: "198.51.100.1/24",
@@ -581,8 +585,10 @@ func TestSyncInterfaceNATAddressMapsReplacesStaleWhenCapacityAllows(t *testing.T
 
 	if err := m.syncInterfaceNATAddressMapsLocked(&ConfigSnapshot{
 		Interfaces: []InterfaceSnapshot{{
-			Name: "reth1.0",
-			Zone: "untrust",
+			Name:       "reth1.0",
+			Zone:       "untrust",
+			EgressZone: "untrust",
+			Ifindex:    5,
 			Addresses: []InterfaceAddressSnapshot{{
 				Family:  "inet",
 				Address: "198.51.100.1/24",

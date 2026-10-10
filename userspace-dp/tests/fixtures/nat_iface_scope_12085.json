@@ -30,6 +30,24 @@
       ]
     },
     {
+      "name": "ge-0/0/8.0",
+      "zone": "wan",
+      "egress_zone": "wan",
+      "ifindex": 0,
+      "addresses": [
+        { "family": "inet", "address": "192.0.2.8/24" }
+      ]
+    },
+    {
+      "name": "ge-0/0/9.0",
+      "zone": "lan",
+      "egress_zone": "wan",
+      "ifindex": 21,
+      "addresses": [
+        { "family": "inet", "address": "198.18.1.9/24" }
+      ]
+    },
+    {
       "name": "fxp0.0",
       "zone": "wan",
       "egress_zone": "wan",
@@ -96,6 +114,7 @@
       "rule": { "name": "snat-zone", "to_zone": "wan", "interface_mode": true },
       "want": [
         "198.51.100.2", "2001:db8::2",
+        "198.18.1.9",
         "10.255.192.42", "2001:db8:4::42"
       ]
     },
@@ -115,6 +134,7 @@
       "want": [
         "198.51.100.2", "2001:db8::2",
         "192.0.2.2", "2001:db8:1::2",
+        "198.18.1.9",
         "10.255.192.42", "2001:db8:4::42"
       ]
     },

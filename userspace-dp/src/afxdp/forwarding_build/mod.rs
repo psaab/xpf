@@ -54,7 +54,7 @@ pub(in crate::afxdp) use fib::{
     resolve_route_next_hops_v6,
 };
 pub(in crate::afxdp) use interfaces::{
-    connected_route_tables, pick_interface_v4, pick_interface_v6,
+    connected_route_tables, is_host_inbound_lifeline, pick_interface_v4, pick_interface_v6,
 };
 // #1866: WG row-identity hydration shared with the coordinator's
 // tombstone-respawn coherence check + defer-branch prune. (The

@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"sort"
-	"strings"
 )
 
 // compiler_validate_warn_nat_iface_addr.go is the Track-1 (#5837) commit-time
@@ -131,6 +130,21 @@ func interfaceLocalAddressIndex(cfg *Config) map[string]string {
 	return out
 }
 
+// interfaceSNATRegistrationLifeline reuses the config's management-interface
+// name class and normalized base-name helper; lo0 is the additional registration
+// lifeline not in the management class.
+func interfaceSNATRegistrationLifeline(name string) bool {
+	base := LifelineBaseName(name)
+	return IsManagementIfName(base) || base == "lo0"
+}
+
+func interfaceInSNATRegistrationScope(rs *NATRuleSet, ifName, logical string, zoneByIface, riByIface map[string]string, noBareRIFallback map[string]struct{}) bool {
+	if rs.ToInterface != "" && rs.ToInterface != logical {
+		return false
+	}
+	return interfaceInEgressScope(rs, ifName, logical, zoneByIface, riByIface, noBareRIFallback)
+}
+
 // interfaceModeSNATExcludedAddresses mirrors the userspace-dp dataplane's
 // nat_translated_local_exclusions: it returns the set of normalized host IPs the
 // dataplane moves OUT of the kernel-local set and INTO interface_nat_v4/v6.
@@ -150,26 +164,6 @@ func interfaceLocalAddressIndex(cfg *Config) map[string]string {
 // just as runtime scope_matches does. The config mirror cannot observe the
 // runtime ifindex; the dataplane independently enforces ifindex>0 before
 // registering any address.
-
-// interfaceSNATRegistrationLifeline matches the name-based lifeline classes
-// excluded from interface-NAT registration. Keep this in step with the
-// snapshot builder and Rust twin; tunnel names are intentionally not excluded.
-func interfaceSNATRegistrationLifeline(name string) bool {
-	base := name
-	if idx := strings.IndexByte(base, '.'); idx >= 0 {
-		base = base[:idx]
-	}
-	return strings.HasPrefix(base, "fxp") || strings.HasPrefix(base, "em") ||
-		strings.HasPrefix(base, "fab") || base == "lo0"
-}
-
-func interfaceInSNATRegistrationScope(rs *NATRuleSet, ifName, logical string, zoneByIface, riByIface map[string]string, noBareRIFallback map[string]struct{}) bool {
-	if rs.ToInterface != "" && rs.ToInterface != logical {
-		return false
-	}
-	return interfaceInEgressScope(rs, ifName, logical, zoneByIface, riByIface, noBareRIFallback)
-}
-
 // This mirror uses the SAFE SUPERSET: it excludes EVERY configured address of
 // a qualifying interface unit, not just the single picked v4/v6 address. VRRP
 // VIPs are deliberately NOT excluded because they are not configured unit

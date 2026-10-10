@@ -4542,6 +4542,7 @@ fn interface_nat_local_delivery_is_table_scoped_no_cross_vrf_leak_12086() {
             crate::InterfaceSnapshot {
                 name: "ge-0/0/1.0".to_string(),
                 zone: "wan".to_string(),
+                egress_zone: "wan".to_string(),
                 routing_instance: "red".to_string(),
                 linux_name: "ge-0-0-1.0".to_string(),
                 ifindex: 12,
@@ -9483,6 +9484,7 @@ fn subnet_router_anycast_v6_prefix_len_guards_10692() {
         crate::InterfaceSnapshot {
             name: "ge-0/0/2.0".to_string(),
             zone: "wan".to_string(),
+            egress_zone: "wan".to_string(),
             linux_name: "ge-0-0-2.0".to_string(),
             ifindex: 13,
             hardware_addr: "02:00:00:00:00:0d".to_string(),
@@ -9496,6 +9498,7 @@ fn subnet_router_anycast_v6_prefix_len_guards_10692() {
         crate::InterfaceSnapshot {
             name: "ge-0/0/3.0".to_string(),
             zone: "wan".to_string(),
+            egress_zone: "wan".to_string(),
             linux_name: "ge-0-0-3.0".to_string(),
             ifindex: 14,
             hardware_addr: "02:00:00:00:00:0e".to_string(),

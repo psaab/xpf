@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // #7717 — DETECTION ONLY.
@@ -138,15 +140,6 @@ func interfaceInSnapshotEgressScope(rule SourceNATRuleSnapshot, ifc InterfaceSna
 	return true
 }
 
-// natEgressLifelineBaseName is the interface name with any unit suffix
-// removed — the string the lifeline arms test.
-func natEgressLifelineBaseName(name string) string {
-	if idx := strings.IndexByte(name, '.'); idx >= 0 {
-		return name[:idx]
-	}
-	return name
-}
-
 // interfaceSnapshotCanBeSNATEgress reports whether a snapshot row can be a
 // runtime interface-mode SNAT egress. The helper builds its forwarding maps
 // only for rows with ifindex>0. Management/HA/fabric/loopback lifelines are
@@ -156,11 +149,8 @@ func interfaceSnapshotCanBeSNATEgress(ifc *InterfaceSnapshot) bool {
 	if ifc.Ifindex <= 0 || ifc.AdminDisabled || ifc.Zone == "" {
 		return false
 	}
-	base := natEgressLifelineBaseName(ifc.Name)
-	return !strings.HasPrefix(base, "fxp") &&
-		!strings.HasPrefix(base, "em") &&
-		!strings.HasPrefix(base, "fab") &&
-		base != "lo0"
+	base := config.LifelineBaseName(ifc.Name)
+	return !config.IsManagementIfName(base) && base != "lo0"
 }
 
 // snapshotInterfaceNameMatches intentionally accepts a bare unit base only

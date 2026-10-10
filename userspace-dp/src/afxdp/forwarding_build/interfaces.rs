@@ -1787,7 +1787,7 @@ fn host_inbound_base_name(name: &str) -> &str {
     }
 }
 
-fn is_host_inbound_lifeline(name: &str) -> bool {
+pub(in crate::afxdp) fn is_host_inbound_lifeline(name: &str) -> bool {
     let base = host_inbound_base_name(name);
     base.starts_with("fxp") || base.starts_with("em") || base.starts_with("fab") || base == "lo0"
 }

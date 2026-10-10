@@ -27,8 +27,7 @@ pub(super) fn nat_translated_local_exclusions(
     }
 
     let mut candidates = Vec::with_capacity(snapshot.interfaces.len());
-    let mut by_scope: std::collections::HashMap<(&str, &str, &str), Vec<usize>> =
-        std::collections::HashMap::with_capacity(snapshot.interfaces.len());
+    let mut by_scope: FastMap<(&str, &str, &str), Vec<usize>> = FastMap::default();
     for iface in &snapshot.interfaces {
         if !interface_can_be_snat_egress(iface) {
             continue;
@@ -101,14 +100,7 @@ fn interface_can_be_snat_egress(iface: &InterfaceSnapshot) -> bool {
     if iface.ifindex <= 0 || iface.admin_disabled || iface.zone.is_empty() {
         return false;
     }
-    let base = iface
-        .name
-        .split_once('.')
-        .map_or(iface.name.as_str(), |(base, _)| base);
-    !base.starts_with("fxp")
-        && !base.starts_with("em")
-        && !base.starts_with("fab")
-        && base != "lo0"
+    !is_host_inbound_lifeline(&iface.name)
 }
 
 #[cfg(test)]
