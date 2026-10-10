@@ -282,7 +282,7 @@ func validatePackedPolicyRouteFilterTailStrict12067(node *Node, parent *schemaNo
 		}
 		matchType := node.Keys[i+2]
 		if !routeFilterMatchTypes[matchType] {
-			return i + 1, false, nil
+			return 0, false, fmt.Errorf("not a valid route-filter match-type %q (expected one of: exact, longer, orlonger, upto, prefix-length-range, through)", matchType)
 		}
 
 		// A quoted head makes splitPolicyTermFromRun11779 keep the entire

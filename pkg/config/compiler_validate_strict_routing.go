@@ -1526,6 +1526,12 @@ func validateRouteFilterMatchTypesStrict(cfg *Config) error {
 							"policy-statement %q term %q route-filter %q `upto` requires a prefix length such as /24",
 							name, term.Name, rf.Prefix)
 					}
+				case "exact", "longer", "orlonger":
+					// Handled directly by FRR prefix-list rendering.
+				default:
+					return fmt.Errorf(
+						"policy-statement %q term %q route-filter %q: not a valid route-filter match-type %q (expected one of: exact, longer, orlonger, upto, prefix-length-range, through)",
+						name, term.Name, rf.Prefix, rf.MatchType)
 				}
 			}
 		}

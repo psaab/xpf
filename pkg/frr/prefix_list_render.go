@@ -113,12 +113,11 @@ func renderRouteFilterEntry(b *strings.Builder, plName string, idx int, rf *conf
 		// emit a wrong / open-ended line (#2525).
 		skipEntry = true
 	default:
-		// Any match-type admitted by the schema but not handled above (a
-		// future keyword, or a value that slipped past validation on a
-		// tolerant path) MUST NOT fall through to the pre-switch
-		// open-ended "le maxLen" default — that silently degrades a
-		// constrained match to an orlonger-style permit (#2525). Skip the
-		// entry instead: match-nothing is fail-closed.
+		// Any match-type not handled above is rejected at the strict gate
+		// for flat, hierarchical, compact, and term-line syntax (#12538).
+		// A value that reaches the renderer via the tolerant path
+		// MUST NOT fall through to an open-ended default; skip the entry
+		// instead (match-nothing is fail-closed, #2525).
 		skipEntry = true
 	case "upto":
 		// upto /N = this prefix or any more specific, but no longer than
