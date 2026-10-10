@@ -23,7 +23,7 @@ func TestBuildRA_12134_InheritedLifetimesAreBounded(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&log, nil)))
 	t.Cleanup(func() { slog.SetDefault(oldLogger) })
 
-	for _, lifetime := range []int{65532, 65533, 65534, 65535, 1 << 32} {
+	for _, lifetime := range []int{0, 65532, 65533, 65534, 65535, 1 << 32} {
 		name := fmt.Sprintf("lifetime_%d", lifetime)
 		t.Run(name, func(t *testing.T) {
 			s := newTestSender3895(&config.RAInterfaceConfig{
@@ -51,6 +51,14 @@ func TestBuildRA_12134_InheritedLifetimesAreBounded(t *testing.T) {
 			if wantRouterLifetime > config.RARouterMaxLifetimeSeconds {
 				wantRouterLifetime = config.RARouterMaxLifetimeSeconds
 			}
+			wantOptionLifetime := wantRouterLifetime
+			if wantOptionLifetime <= 0 {
+				wantOptionLifetime = defaultRouterLifetime
+			}
+			wantPREF64Lifetime := wantOptionLifetime
+			if wantPREF64Lifetime > config.RAPREF64MaxLifetimeSeconds {
+				wantPREF64Lifetime = config.RAPREF64MaxLifetimeSeconds
+			}
 			if got := int(decoded.RouterLifetime / time.Second); got != wantRouterLifetime {
 				t.Errorf("wire Router Lifetime = %d, want clamped value %d", got, wantRouterLifetime)
 			}
@@ -68,14 +76,14 @@ func TestBuildRA_12134_InheritedLifetimesAreBounded(t *testing.T) {
 			if dns == nil {
 				t.Fatal("inherited RDNSS option is missing")
 			}
-			if got := int(dns.Lifetime / time.Second); got != wantRouterLifetime {
-				t.Errorf("wire RDNSS Lifetime = %d, want source-clamped value %d", got, wantRouterLifetime)
+			if got := int(dns.Lifetime / time.Second); got != wantOptionLifetime {
+				t.Errorf("wire RDNSS Lifetime = %d, want inherited option lifetime %d", got, wantOptionLifetime)
 			}
 			if pref64 == nil {
 				t.Fatal("inherited PREF64 was silently pruned")
 			}
-			if got := int(pref64.Lifetime / time.Second); got != 65528 {
-				t.Errorf("wire PREF64 Lifetime = %d, want saturated value 65528", got)
+			if got := int(pref64.Lifetime / time.Second); got != wantPREF64Lifetime {
+				t.Errorf("wire PREF64 Lifetime = %d, want saturated/fallback value %d", got, wantPREF64Lifetime)
 			}
 			// A repeat build must not repeat the saturation warning for this sender.
 			s.buildRA()

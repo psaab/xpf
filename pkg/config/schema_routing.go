@@ -750,7 +750,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 					// maximum (8191*8 = 65528s). A larger value makes
 					// ndp.PREF64.marshal fail, aborting the entire RA.
 					"lifetime": {desc: "Lifetime", args: 1, placeholder: "<seconds>",
-						valueType: ValueInteger, valueDesc: "PREF64 lifetime in seconds (0 = router lifetime; RFC 8781 max 65528)",
+						valueType: ValueInteger, valueDesc: "PREF64 lifetime in seconds (0 = router lifetime capped at 65528; 1800 when router lifetime is 0; RFC 8781 max 65528)",
 						valueExamples: []string{"0", "1800"}, validator: ValidateInteger(0, RAPREF64MaxLifetimeSeconds), children: nil},
 				}},
 			"nat64prefix": {desc: "NAT64 prefix", args: 1, placeholder: "<prefix>",
@@ -761,7 +761,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 					// maximum (8191*8 = 65528s). A larger value makes
 					// ndp.PREF64.marshal fail, aborting the entire RA.
 					"lifetime": {desc: "Lifetime", args: 1, placeholder: "<seconds>",
-						valueType: ValueInteger, valueDesc: "PREF64 lifetime in seconds (0 = router lifetime; RFC 8781 max 65528)",
+						valueType: ValueInteger, valueDesc: "PREF64 lifetime in seconds (0 = router lifetime capped at 65528; 1800 when router lifetime is 0; RFC 8781 max 65528)",
 						valueExamples: []string{"0", "1800"}, validator: ValidateInteger(0, RAPREF64MaxLifetimeSeconds), children: nil},
 				}},
 		}},

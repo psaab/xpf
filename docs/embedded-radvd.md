@@ -302,9 +302,11 @@ while declining default-router duty on a multi-router LAN. To support that:
   "unset" and could never emit Router Lifetime 0.
 - The Prefix Information options carry their own valid / preferred lifetimes
   (30d / 7d), so on-link prefixes and SLAAC keep working with a Router Lifetime
-  of 0. The RDNSS and PREF64 options — whose lifetimes DEFAULT to the router
-  lifetime — fall back to 1800s (never 0) when the router lifetime is an
-  explicit 0, so a 0 Router Lifetime withdraws only default-router duty, not the
+  of 0.
+- The RDNSS and PREF64 option lifetimes default to the bounded router lifetime:
+  RDNSS is capped at 65535 seconds and PREF64 at 65528 seconds. If the router
+  lifetime is an explicit 0, both fall back to 1800s (PREF64 remains capped at
+  65528s), so a 0 Router Lifetime withdraws only default-router duty, not the
   DNS server or NAT64 prefix.
 - `configEqual` compares `DefaultLifetimeSet` so an unset → `default-lifetime 0`
   edit (both have `DefaultLifetime == 0` but a different wire value) restarts

@@ -1172,8 +1172,9 @@ func classifyAddrAddResult(addErr error) (logAdded bool, err error) {
 //
 // Binding to config.RARouterMaxLifetimeSeconds rather than a local 65535 is the
 // point: the gate and the sender must not be able to disagree about where the
-// ceiling is. See the comment at the call site for what the unbounded version
-// put on the wire.
+// ceiling is. See pkg/ra/README.md ("The three RA header timers are bounded
+// before ndp marshals them (#8597)") for what the unbounded version put on
+// the wire.
 func clampRAHeaderSeconds(v int) int {
 	if v < 0 {
 		return 0
