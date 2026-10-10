@@ -977,6 +977,11 @@ type ConfigSnapshot struct {
 	// hashes the JSON encoding) therefore excludes it as well.
 	schedulerActiveState    map[string]bool
 	schedulerActiveStateSet bool
+	// policySnapshotIdentity is the cached policy/rename authorization identity.
+	// It is manager-local, excluded from the wire and snapshot content hash, and
+	// survives partial snapshot copies that change only non-policy sections.
+	policySnapshotIdentity      [32]byte
+	policySnapshotIdentityValid bool
 }
 
 // AddressBookSnapshot is #1606: one row of the deduplicated address-book

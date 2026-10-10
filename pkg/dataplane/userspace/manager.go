@@ -172,8 +172,16 @@ type Manager struct {
 	captureAuthorityCommitter          func(configGeneration uint64, fibGeneration uint32, captureGeneration uint64)
 	policySnapshotCommitter            func(configGeneration uint64)
 	policySnapshotPrePublisher         func(generation uint64) error
+	// policySnapshotPrepublishGeneration records the deferred full snapshot
+	// whose prepublish capture succeeded. Recovery reuses that proof only while
+	// its policy/rename identity remains unchanged, even if a partial publish
+	// advances the snapshot generation.
+	policySnapshotPrepublishGeneration uint64
+	// policySnapshotPrepublishIdentity binds that capture to the policy/rename
+	// inputs. Neighbor, fabric, and FIB-only partial updates preserve this proof.
+	policySnapshotPrepublishIdentity [32]byte
 	// helperHAStatePublished records whether THIS helper process has been sent a
-	// clustered HA inventory at least once (a successful update_ha_state with a
+	// non-empty HA group inventory (a successful update_ha_state with a
 	// non-empty group set). It is NOT derivable from len(m.haGroups): that is the
 	// MANAGER's view, which seedHAGroupInventoryLocked populates from config
 	// before any publish, so it is non-empty long before the helper knows

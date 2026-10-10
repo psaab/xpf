@@ -1421,8 +1421,6 @@ pub(crate) struct SessionPolicyMatch {
     pub created_ns: u64,
     #[serde(rename = "expected_rt_flow_session_id", default)]
     pub expected_rt_flow_session_id: u64,
-    #[serde(rename = "companion_policy_id", default)]
-    pub companion_policy_id: u32,
     #[serde(rename = "expected_companion_rt_flow_session_id", default)]
     pub expected_companion_rt_flow_session_id: u64,
     // #10626: rename-rematch inputs, populated by the READ from the live
