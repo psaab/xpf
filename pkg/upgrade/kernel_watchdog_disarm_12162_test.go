@@ -215,6 +215,17 @@ func TestArmKeepsProtectedTrialWhenRebootBackstepPersistFails_12162(t *testing.T
 	} else if !armed {
 		t.Error("IsArmed() is false despite the preserved watchdog-protected trial")
 	}
+	// Opus NF1b: the ARMED journal keeps its arm record (clearing it here
+	// would strand ARMED-without-record → gate refusal as UNVERIFIED).
+	journal, err := r.loadKernelJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, recordErr := ReadArmRecord(journalPath)
+	if recordErr != nil || record != journal.PromoteBinary {
+		t.Errorf("arm record = %q, err=%v; want the ARMED promote record %q",
+			record, recordErr, journal.PromoteBinary)
+	}
 }
 
 func TestArmRetainsArmedJournalWhenBootNextClearFailsAfterReboot_12162(t *testing.T) {
@@ -564,6 +575,12 @@ func TestArmRestoreArmedPostRenameSyncFailureKeepsArmed_12162(t *testing.T) {
 	if strings.Contains(err.Error(), "journal remains ARMING") {
 		t.Errorf("error falsely claims durable ARMING state: %v", err)
 	}
+	// Opus NF1b: the restored ARMED journal keeps its arm record.
+	record, recordErr := ReadArmRecord(r.cfg.JournalPath)
+	if recordErr != nil || record != j.PromoteBinary {
+		t.Errorf("arm record = %q, err=%v; want the restored ARMED promote record %q",
+			record, recordErr, j.PromoteBinary)
+	}
 }
 
 func TestArmTripleFaultDisarmsAndReportsSurvivingDisarmFailure_12162(t *testing.T) {
@@ -669,5 +686,85 @@ func TestArmFailedD2WatchdogDoesNotPromiseReset_12162(t *testing.T) {
 	}
 	if f.wdArmed {
 		t.Error("D2 fake has no confirmed watchdog, but reports it armed")
+	}
+}
+
+// TestArmFailedD2RestoreDoesNotPromiseReset_12162 pins the watchdogArmed
+// gate on the restore-OK message (Opus NF1/MG): with no confirmed watchdog,
+// the restored-ARMED message must NOT promise an armed reset. Inverting the
+// condition ships green without this test.
+func TestArmFailedD2RestoreDoesNotPromiseReset_12162(t *testing.T) {
+	f := newFakeKernelSystem()
+	f.armWatchdogErr = errors.New("watchdog not available")
+	f.rebootErr = errors.New("systemctl reboot: exit 1")
+	f.clearBootNextErr = errors.New("efivarfs is read-only")
+	r := newKernelRunner(t, f)
+
+	err := r.Arm("6.18.5-12-generic")
+	if err == nil || !strings.Contains(err.Error(), "watchdog was not confirmed armed") {
+		t.Fatalf("Arm error = %v, want explicit no-watchdog-reset warning", err)
+	}
+	if strings.Contains(err.Error(), "remains armed and will reset") {
+		t.Errorf("D2 restore message falsely promises an armed reset: %v", err)
+	}
+	if f.wdArmed {
+		t.Error("D2 fake has no confirmed watchdog, but reports it armed")
+	}
+}
+
+// TestArmTripleFaultDisarmSuccessUnwindsCleanly_12162 pins the disarm-SUCCESS
+// triple-fault branch (Opus NF1a): Reboot fails + ClearBootNext fails +
+// ARMED-restore fails, but the watchdog disarms. The journal must end ARMING
+// (disarmed, no record), the error must chain reboot+clear+restore causes
+// with delete-bootnext guidance, and must NOT promise a forced reboot.
+func TestArmTripleFaultDisarmSuccessUnwindsCleanly_12162(t *testing.T) {
+	f := newFakeKernelSystem()
+	rebootErr := errors.New("systemctl reboot: exit 1")
+	clearErr := errors.New("efivarfs is read-only")
+	f.rebootErr = rebootErr
+	f.clearBootNextErr = clearErr
+	r := newKernelRunner(t, f)
+	journalPath := r.cfg.JournalPath
+	armedWrites := 0
+	r.cfg.Logf = func(_ string, args ...any) {
+		r.cfg.JournalPath = journalPath
+		if len(args) != 0 && args[0] == KernelStateArmed {
+			armedWrites++
+			if armedWrites == 2 {
+				r.cfg.JournalPath = "/proc/self/12162/restore.state"
+			}
+		}
+	}
+
+	err := r.Arm("6.18.5-12-generic")
+	r.cfg.JournalPath = journalPath
+	if !errors.Is(err, rebootErr) || !errors.Is(err, clearErr) {
+		t.Fatalf("Arm error = %v, want Reboot and clear failures", err)
+	}
+	if !strings.Contains(err.Error(), "could not restore the ARMED journal") {
+		t.Fatalf("Arm error = %v, want the restore-failure cause", err)
+	}
+	if f.disarmWatchdogCalls != 1 || f.wdArmed {
+		t.Fatalf("disarm calls=%d watchdogArmed=%v; want one successful disarm",
+			f.disarmWatchdogCalls, f.wdArmed)
+	}
+	if !strings.Contains(err.Error(), "the watchdog was disarmed") ||
+		!strings.Contains(err.Error(), "efibootmgr --delete-bootnext") {
+		t.Errorf("operator error = %v, want disarmed + manual-clear guidance", err)
+	}
+	if strings.Contains(err.Error(), "will force a reboot") {
+		t.Errorf("disarmed unwind must not promise a forced reboot: %v", err)
+	}
+	j, loadErr := r.loadKernelJournal()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if j.State != KernelStateArming || j.BootID != "" {
+		t.Errorf("journal=%s BootID=%q; want ARMING without BootID", j.State, j.BootID)
+	}
+	record, recordErr := ReadArmRecord(journalPath)
+	if recordErr != nil || record != "" {
+		t.Errorf("arm record after disarmed unwind = %q, err=%v; want absent in ARMING",
+			record, recordErr)
 	}
 }

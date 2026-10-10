@@ -534,8 +534,8 @@ func disarmStrictWatchdogAfterArmFailure(sys KernelSystem, armErr error) error {
 }
 
 // disarmAfterArmFailure clears BootNext before disarming the watchdog, after
-// SetBootNext succeeds (or a later Reboot fails). It preserves the original
-// cause plus cleanup errors (#6758, #12162).
+// SetBootNext succeeds. It preserves the original cause plus cleanup errors
+// (#6758, #12162). (The failed-Reboot path uses disarmAfterFailedReboot.)
 //
 // THE DIVERGENCE IT CLOSES. The two-phase arm records ARMING before touching
 // NVRAM and only advances to ARMED after a positive BootNext readback. Every

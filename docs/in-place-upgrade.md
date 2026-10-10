@@ -1823,9 +1823,9 @@ treats an unreadable observation as a definite safe state:
      BootNext is safe to clear. If clearing fails, the arm-candidate path
      still attempts watchdog disarm and reports both cleanup errors.
 
-  Failures before step 2 also disarm after watchdog acquisition, including
-  the ARMING-persist and `SetBootNext` errors. Strict D1 partial acquisition
-  is disarmed too. In D2, an `ArmWatchdog` error is best-effort and the
+  Failures at or before step 2 also disarm after watchdog acquisition,
+  including the ARMING-persist and `SetBootNext` errors. Strict D1 partial
+  acquisition is disarmed too. In D2, an `ArmWatchdog` error is best-effort and the
   subsequent error messages do not promise an automatic watchdog reset.
 
   If `Reboot` fails after the verified `ARMED` transition, the runner clears
