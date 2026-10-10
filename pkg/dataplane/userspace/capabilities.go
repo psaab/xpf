@@ -387,96 +387,31 @@ func expandUserspacePolicyApplications(cfg *config.Config, apps []string) ([]Pol
 	}
 	expanded := make([]PolicyApplicationSnapshot, 0, len(apps))
 	seen := make(map[string]struct{}, len(apps))
-	for _, appName := range apps {
+	for i, appName := range apps {
 		if appName == "" || appName == "any" {
+			// #12223: a wildcard must not hide a later unresolvable or
+			// otherwise unrepresentable application reference.
+			for _, laterAppName := range apps[i+1:] {
+				if laterAppName == "" || laterAppName == "any" || cfg == nil {
+					continue
+				}
+				if !validateOneAppRef(cfg, laterAppName, nil) {
+					return nil, false
+				}
+			}
 			return nil, true
 		}
-		resolved, ok := resolveUserspaceApplicationNames(cfg, appName)
-		if !ok || len(resolved) == 0 {
-			return nil, false
-		}
-		// #9525: an application the tolerant compile could only WARN about may
-		// still resolve and parse here while matching something other than
-		// what was authored (a port on a protocol with no L4 ports, a dropped
-		// icmp-type, a dangling or conflicting match leaf, a discarded direct
-		// body). Refuse the reference so the policy lowers to the #3261
-		// __unsupported__ sentinel instead of installing that term. The set of
-		// drops, and what is deliberately left out, is documented on
-		// config.ApplicationReferenceMatchDrops.
-		if len(config.ApplicationReferenceMatchDrops(appName, &cfg.Applications)) > 0 {
-			return nil, false
-		}
-		for _, resolvedName := range resolved {
-			app, ok := config.ResolveApplication(resolvedName, cfg.Applications.Applications)
-			if !ok || app == nil {
-				return nil, false
-			}
-			proto := normalizeUserspaceApplicationProtocol(app.Protocol)
-			if proto == "" {
-				return nil, false
-			}
-			// #2124: fail closed on any protocol the Rust matcher cannot
-			// represent. Returning ok=false makes buildOneRuleSnapshot emit
-			// the reserved __unsupported__ sentinel term so the helper
-			// integrity preflight rejects the whole snapshot (#3261). Without
-			// this a named protocol like esp/ah/sctp (accepted at commit, only
-			// lowercased here) reaches the matcher, gets dropped, and the rule
-			// collapses to match-any — permitting ALL traffic for the zone
-			// pair.
-			num, ok := appid.ProtocolNumber(proto)
-			if !ok {
-				return nil, false
-			}
-			// Canonicalize to the IANA number any protocol token the Rust
-			// matcher could NOT parse before this fix — i.e. anything
-			// `rustParsedProtocolBeforeFix` returns false for. In practice that
-			// is the newly-supported named set (esp/ah/sctp/vrrp/igmp/pim/egp),
-			// but it also covers any other appid-resolvable token outside the
-			// pre-fix set (e.g. a junos-* alias such as junos-ospf, were one to
-			// reach this path) so a mixed-version helper that predates the new
-			// parse_protocol arms still parses it. Tokens the matcher has always
-			// understood (tcp/udp/icmp/icmpv6/gre/ospf/ipip + bare numeric) are
-			// left as-is to avoid churning the wire form (and the snapshot hash)
-			// for every existing policy.
-			if !rustParsedProtocolBeforeFix(proto) {
-				proto = strconv.Itoa(int(num))
-			}
-			// #2124: ports must parse the way the Rust parse_port_spec does;
-			// a malformed port would otherwise drop the term and collapse the
-			// rule to match-any (the same fail-open as the protocol case).
-			if !userspacePortSpecRepresentable(app.SourcePort) ||
-				!userspacePortSpecRepresentable(app.DestinationPort) {
-				return nil, false
-			}
-			snap := PolicyApplicationSnapshot{
-				Name:            resolvedName,
-				Protocol:        proto,
-				SourcePort:      app.SourcePort,
-				DestinationPort: app.DestinationPort,
-				// #3020: carry an optional ICMP/ICMPv6 type/code constraint so the
-				// Rust matcher can enforce echo-only applications such as
-				// junos-icmp-ping. junos-ping is protocol-only (#11340), and nil
-				// keeps every ICMP type/code of the protocol unconstrained.
-				ICMPType: app.ICMPType,
-				ICMPCode: app.ICMPCode,
-				// #3227: carry the per-application inactivity (idle) timeout so
-				// the userspace session GC ages a flow admitted by this app out
-				// on the app's timeout, not the global per-protocol timeout
-				// (the legacy eBPF maps wired this `appTimeout`; closing the
-				// userspace parity regression). 0 = use the global timeout
-				// (back-compat, byte-identical). A negative configured value is
-				// impossible (the parser stores a non-negative int), but clamp
-				// defensively so a stray value can never wrap the u32.
-				InactivityTimeout: clampNonNegU32(app.InactivityTimeout),
-			}
+		if !validateOneAppRef(cfg, appName, func(snap PolicyApplicationSnapshot) {
 			key := strings.Join([]string{snap.Name, snap.Protocol, snap.SourcePort, snap.DestinationPort,
 				icmpKeyPart(snap.ICMPType), icmpKeyPart(snap.ICMPCode),
 				strconv.FormatUint(uint64(snap.InactivityTimeout), 10)}, "\x00")
 			if _, exists := seen[key]; exists {
-				continue
+				return
 			}
 			seen[key] = struct{}{}
 			expanded = append(expanded, snap)
+		}) {
+			return nil, false
 		}
 	}
 	// #3298: emit the application terms in CONFIG order — the order the apps
@@ -501,6 +436,95 @@ func expandUserspacePolicyApplications(cfg *config.Config, apps []string) ([]Pol
 	// the order-independent `seen` map above, so dropping the sort does not
 	// re-introduce duplicate terms.
 	return expanded, true
+}
+
+// validateOneAppRef resolves one policy application reference and validates
+// every member before optionally emitting its snapshots. A nil emit performs
+// validation only, for the wildcard short-circuit. Any invalid or unresolved
+// reference is refused in both paths.
+func validateOneAppRef(cfg *config.Config, name string, emit func(PolicyApplicationSnapshot)) bool {
+	if cfg == nil {
+		return false
+	}
+	resolved, ok := resolveUserspaceApplicationNames(cfg, name)
+	if !ok || len(resolved) == 0 {
+		return false
+	}
+	// #9525: an application the tolerant compile could only WARN about may
+	// still resolve and parse here while matching something other than what was
+	// authored (a port on a protocol with no L4 ports, a dropped icmp-type, a
+	// dangling or conflicting match leaf, a discarded direct body). Refuse the
+	// reference so the policy lowers to the #3261 __unsupported__ sentinel. The
+	// set of drops, and what is deliberately left out, is documented on
+	// config.ApplicationReferenceMatchDrops.
+	if len(config.ApplicationReferenceMatchDrops(name, &cfg.Applications)) > 0 {
+		return false
+	}
+	for _, resolvedName := range resolved {
+		app, ok := config.ResolveApplication(resolvedName, cfg.Applications.Applications)
+		if !ok || app == nil {
+			return false
+		}
+		proto := normalizeUserspaceApplicationProtocol(app.Protocol)
+		if proto == "" {
+			return false
+		}
+		// #2124: fail closed on any protocol the Rust matcher cannot represent.
+		// Returning ok=false makes buildOneRuleSnapshot emit the reserved
+		// __unsupported__ sentinel term so the helper integrity preflight rejects
+		// the whole snapshot (#3261). Without this a named protocol like esp/ah/
+		// sctp (accepted at commit, only lowercased here) reaches the matcher, gets
+		// dropped, and the rule collapses to match-any — permitting ALL traffic
+		// for the zone pair.
+		num, ok := appid.ProtocolNumber(proto)
+		if !ok {
+			return false
+		}
+		// Canonicalize to the IANA number any protocol token the Rust
+		// matcher could NOT parse before this fix — i.e. anything
+		// `rustParsedProtocolBeforeFix` returns false for. In practice that
+		// is the newly-supported named set (esp/ah/sctp/vrrp/igmp/pim/egp),
+		// but it also covers any other appid-resolvable token outside the
+		// pre-fix set (e.g. a junos-* alias such as junos-ospf, were one to
+		// reach this path) so a mixed-version helper that predates the new
+		// parse_protocol arms still parses it. Tokens the matcher has always
+		// understood (tcp/udp/icmp/icmpv6/gre/ospf/ipip + bare numeric) are
+		// left as-is to avoid churning the wire form (and the snapshot hash).
+		if !rustParsedProtocolBeforeFix(proto) {
+			proto = strconv.Itoa(int(num))
+		}
+		// #2124: ports must parse the way the Rust parse_port_spec does; a
+		// malformed port would otherwise drop the term and collapse the rule to
+		// match-any (the same fail-open as the protocol case).
+		if !userspacePortSpecRepresentable(app.SourcePort) ||
+			!userspacePortSpecRepresentable(app.DestinationPort) {
+			return false
+		}
+		if emit != nil {
+			emit(PolicyApplicationSnapshot{
+				Name:            resolvedName,
+				Protocol:        proto,
+				SourcePort:      app.SourcePort,
+				DestinationPort: app.DestinationPort,
+				// #3020: carry an optional ICMP/ICMPv6 type/code constraint so the
+				// Rust matcher can enforce echo-only applications such as
+				// junos-icmp-ping. junos-ping is protocol-only (#11340), and nil
+				// keeps every ICMP type/code of the protocol unconstrained.
+				ICMPType: app.ICMPType,
+				ICMPCode: app.ICMPCode,
+				// #3227: carry the per-application inactivity (idle) timeout so
+				// the userspace session GC ages a flow admitted by this app out
+				// on the app's timeout, not the global per-protocol timeout
+				// (the legacy eBPF maps wired this `appTimeout`; closing the
+				// userspace parity regression). 0 = use the global timeout
+				// (back-compat, byte-identical). A negative configured value is
+				// impossible (the parser stores a non-negative int), but clamp
+				// defensively so a stray value can never wrap the u32.
+				InactivityTimeout: clampNonNegU32(app.InactivityTimeout),
+			})
+		}
+	}
+	return true
 }
 
 // icmpKeyPart renders an optional ICMP type/code constraint as a stable string
