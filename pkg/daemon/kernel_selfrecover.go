@@ -38,6 +38,20 @@ func (d *Daemon) newKernelSystem() upgrade.KernelSystem {
 	return daemonKernelSystem()
 }
 
+// runningKernelMatchesCandidate is the discriminator between a candidate trial
+// and a known-good fallback boot that still has an ARMED journal. If the running
+// kernel cannot be established, callers fail closed and keep the election hold.
+func (d *Daemon) runningKernelMatchesCandidate(candidate string) (bool, error) {
+	if candidate == "" {
+		return false, fmt.Errorf("armed kernel journal has empty candidate version")
+	}
+	running, err := d.newKernelSystem().RunningKernel()
+	if err != nil {
+		return false, fmt.Errorf("read running kernel: %w", err)
+	}
+	return running == candidate, nil
+}
+
 // holdSecondaryIfKernelCandidateArmed keeps a CANDIDATE-TRIAL boot SECONDARY
 // until the promotion gate verifies the dataplane (r2 AGY Critical). The drain
 // the orchestrator set is in-memory ManualFailover, lost across the reboot, so a
@@ -46,15 +60,15 @@ func (d *Daemon) newKernelSystem() upgrade.KernelSystem {
 // BEFORE xpf-kernel-promote.service runs verify-dataplane + the forward beacon.
 // A verifier-rejected candidate claiming primary would blackhole cluster traffic.
 //
-// FIX (r2 AGY: the prior ForceSecondary-at-startup was a no-op because peerAlive
-// is still false before heartbeats start): set the UNCONDITIONAL
-// kernelUpgradeHold flag — which election honors regardless of peer state and
-// does NOT auto-clear for an isolated node. The caller invokes this BEFORE
-// cluster.UpdateConfig (which itself runs the first election) so there is no
-// election window. The hold is released by reconcileKernelUpgradeHold once the
-// promotion marker confirms this kernel was verified+promoted (a reverted node
-// reboots to known-good where the hold is never set), or by rejoin
-// (ResetAllFailover). No-op on an ordinary boot.
+// Set the unconditional kernelUpgradeHold before cluster.UpdateConfig (which
+// itself runs the first election) so there is no election window. The hold
+// cannot auto-clear for an isolated node. Reconciliation releases it only after
+// the promotion marker verifies the running candidate; ResetAllFailover also
+// clears it on rejoin. An ARMED journal on a running known-good fallback is not
+// a candidate trial and must not acquire the hold, or the gate's discard path
+// would leave a healthy node ineligible.
+//
+// No-op on an ordinary boot.
 func (d *Daemon) holdSecondaryIfKernelCandidateArmed() {
 	if d.cluster == nil {
 		return
@@ -89,6 +103,21 @@ func (d *Daemon) holdSecondaryIfKernelCandidateArmed() {
 		return
 	}
 	if !armed {
+		return
+	}
+	candidateRunning, err := d.runningKernelMatchesCandidate(j.CandidateVersion)
+	if err != nil {
+		// We cannot prove this is the known-good fallback, so fail closed and
+		// preserve candidate-trial protection.
+		d.cluster.SetKernelUpgradeHold(cluster.KernelUpgradeHoldCandidate)
+		d.kernelUpgradeHoldFailClosed = false
+		slog.Warn("kernel-upgrade journal is ARMED but running kernel is unknown; "+
+			"holding SECONDARY fail-closed", "candidate", j.CandidateVersion, "err", err)
+		return
+	}
+	if !candidateRunning {
+		slog.Info("kernel-upgrade journal is ARMED but running kernel is not the candidate; "+
+			"skipping candidate election hold", "candidate", j.CandidateVersion)
 		return
 	}
 	d.cluster.SetKernelUpgradeHold(cluster.KernelUpgradeHoldCandidate)
@@ -145,9 +174,10 @@ func (d *Daemon) reconcileKernelUpgradeHold() {
 	// promotion marker will never appear when the underlying cause was a transient
 	// I/O blip with no upgrade in progress. Re-read the journal:
 	//   - still unreadable        -> keep holding (nothing changed).
-	//   - now readable & ARMED    -> a real candidate IS in progress: convert to a
-	//                                normal armed hold (clear the fail-closed flag)
-	//                                and fall through to the promotion-marker gate.
+	//   - now readable & ARMED    -> check the running kernel; convert to an
+	//                                ordinary armed hold only if it matches the
+	//                                candidate, else release on known-good.
+	//                                Keep fail-closed if the kernel is unreadable.
 	//   - now readable & NOT armed-> the boot-time error was transient and there is
 	//                                no upgrade pending: release the hold so the
 	//                                node is not stranded SECONDARY forever.
@@ -156,11 +186,25 @@ func (d *Daemon) reconcileKernelUpgradeHold() {
 		if err != nil {
 			return // cannot construct a reader; keep holding fail-closed
 		}
-		armed, _, ierr := r.IsArmed()
+		armed, j, ierr := r.IsArmed()
 		switch {
 		case ierr != nil:
 			return // journal still unreadable; keep holding fail-closed
 		case armed:
+			candidateRunning, err := d.runningKernelMatchesCandidate(j.CandidateVersion)
+			if err != nil {
+				return // cannot prove this is a known-good fallback; keep holding
+			}
+			if !candidateRunning {
+				// The journal is readable and ARMED, but this is a known-good
+				// fallback boot. The gate will discard the candidate; retaining
+				// either hold would strand an otherwise healthy node.
+				d.kernelUpgradeHoldFailClosed = false
+				d.cluster.ClearKernelUpgradeHold()
+				slog.Info("kernel-upgrade journal is ARMED but running kernel is not the candidate; "+
+					"releasing fail-closed election hold", "candidate", j.CandidateVersion)
+				return
+			}
 			// A genuine candidate is armed after all — this is now an ordinary
 			// armed hold; the promotion-marker gate below governs its release.
 			d.kernelUpgradeHoldFailClosed = false

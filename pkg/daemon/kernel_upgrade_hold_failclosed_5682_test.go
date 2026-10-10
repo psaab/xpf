@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -144,7 +143,13 @@ func TestHoldSecondaryIfKernelCandidateArmed_FailClosed(t *testing.T) {
 			dir := t.TempDir()
 			path := tt.setup(t, dir)
 			m := cluster.NewManager(0, 1)
-			d := &Daemon{cluster: m, kernelRunnerFn: runnerAt(path)}
+			d := &Daemon{
+				cluster:        m,
+				kernelRunnerFn: runnerAt(path),
+				kernelSystemFn: func() upgrade.KernelSystem {
+					return fakeKernelSys{running: "6.18.5-test"}
+				},
+			}
 
 			d.holdSecondaryIfKernelCandidateArmed()
 
@@ -195,9 +200,9 @@ func TestReconcileKernelUpgradeHold_FailClosedSelfHeals(t *testing.T) {
 }
 
 // TestReconcileKernelUpgradeHold_FailClosedBecomesArmed proves that when a
-// fail-closed hold's journal later reads as genuinely ARMED, the hold is
-// converted to a normal armed hold (fail-closed flag cleared) and continues to
-// hold under the strict promotion-marker gate rather than self-healing away.
+// fail-closed hold's journal later reads as genuinely ARMED and the running
+// kernel matches the candidate, the hold is converted to a normal armed hold
+// (fail-closed flag cleared) and remains under the strict marker gate.
 func TestReconcileKernelUpgradeHold_FailClosedBecomesArmed(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "kernel-upgrade.state")
@@ -208,10 +213,10 @@ func TestReconcileKernelUpgradeHold_FailClosedBecomesArmed(t *testing.T) {
 	d := &Daemon{
 		cluster:        m,
 		kernelRunnerFn: runnerAt(path),
-		// promotion-marker gate: running kernel unreadable -> reconcile returns
-		// early (keeps holding). Proves an armed hold is NOT self-healed away.
+		// A genuine candidate boot converts to an ordinary candidate hold, then
+		// the promotion-marker gate keeps holding until promotion is confirmed.
 		kernelSystemFn: func() upgrade.KernelSystem {
-			return fakeKernelSys{runningErr: errors.New("uname unreadable")}
+			return fakeKernelSys{running: "6.18.5-test"}
 		},
 	}
 	d.holdSecondaryIfKernelCandidateArmed()
