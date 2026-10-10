@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -128,7 +129,8 @@ func compileRoutingOptions(node *Node, ro *RoutingOptionsConfig, instanceName st
 		if ribStatic == nil {
 			continue
 		}
-		if n := len(compileStaticRoutes(ribStatic, nil)); n > 0 {
+		compiledRoutes := compileStaticRoutes(ribStatic, nil)
+		if n := len(foldDistinctStaticRouteAliases(compiledRoutes)); n > 0 {
 			ro.UnhandledRibs = append(ro.UnhandledRibs, UnhandledRib{Name: ribName, Routes: n})
 		}
 	}
@@ -263,10 +265,453 @@ func staticNextHopEntry(raw, iface string) NextHopEntry {
 	return NextHopEntry{Address: raw, Interface: iface}
 }
 
+// staticRouteMergeKey identifies routes by their masked destination prefix,
+// not by the exact CIDR spelling authored in the config. Keep the raw value as
+// a fallback for malformed input; strict validation reports those before the
+// compiled routes are used.
+//
+// The key is FAMILY-PRESERVING: netip keeps an IPv4-mapped IPv6 prefix
+// (::ffff:192.0.2.0/120) in the 128-bit space while net.ParseCIDR folds it to
+// the 32-bit "192.0.2.0/24", so keying on prefix.String() merged a native-IPv4
+// route with a mapped-IPv6 route and silently dropped the second disposition
+// (#12084 Astra R1). Prefixing the masked identity with its family keeps them
+// distinct even where their normalized address text could coincide.
+func staticRouteMergeKey(destination string) string {
+	if prefix, err := netip.ParsePrefix(destination); err == nil {
+		masked := prefix.Masked()
+		if masked.Addr().Is6() {
+			return "v6\x00" + masked.String()
+		}
+		return "v4\x00" + masked.String()
+	}
+	if _, prefix, err := net.ParseCIDR(destination); err == nil {
+		// Keep accepting mask spellings supported by net.ParseCIDR but not
+		// netip.ParsePrefix (for example, a zero-padded prefix length).
+		if slash := strings.LastIndexByte(destination, '/'); slash >= 0 {
+			if addr, err := netip.ParseAddr(destination[:slash]); err == nil {
+				bits, _ := prefix.Mask.Size()
+				masked := netip.PrefixFrom(addr, bits).Masked()
+				if masked.Addr().Is6() {
+					return "v6\x00" + masked.String()
+				}
+				return "v4\x00" + masked.String()
+			}
+		}
+	}
+	return destination
+}
+
+func appendStaticRouteDestinationAlias(route *StaticRoute, destination string) {
+	if route == nil || destination == route.Destination {
+		return
+	}
+	for _, alias := range route.destinationAliases {
+		if alias == destination {
+			return
+		}
+	}
+	route.destinationAliases = append(route.destinationAliases, destination)
+}
+
+func appendStaticRouteNoDispositionAliases(existing, route *StaticRoute) {
+	if existing == nil || route == nil {
+		return
+	}
+	appendDestination := func(destination string) {
+		if destination == "" {
+			return
+		}
+		for _, prior := range existing.noDispositionAliases {
+			if prior == destination {
+				return
+			}
+		}
+		existing.noDispositionAliases = append(existing.noDispositionAliases, destination)
+	}
+	if !staticRouteHasDisposition(existing) {
+		appendDestination(existing.Destination)
+	}
+	if !staticRouteHasDisposition(route) {
+		appendDestination(route.Destination)
+	}
+	for _, destination := range route.noDispositionAliases {
+		appendDestination(destination)
+	}
+}
+
+func appendStaticRouteNextTableConflict(route *StaticRoute, target string) {
+	if route == nil || target == "" {
+		return
+	}
+	for _, existing := range route.competingNextTableTargets {
+		if existing == target {
+			return
+		}
+	}
+	route.competingNextTableTargets = append(
+		route.competingNextTableTargets, target)
+}
+
+func setStaticRouteNextTable(route *StaticRoute, raw string) {
+	if route == nil || raw == "" {
+		return
+	}
+	target := parseNextTableInstance(raw)
+	if route.NextTable != "" && route.NextTable != target {
+		appendStaticRouteNextTableConflict(route, route.NextTable)
+		appendStaticRouteNextTableConflict(route, target)
+	}
+	route.NextTableRaw = raw
+	route.NextTable = target
+}
+
+func appendStaticRouteNextHopsDeduped(existing *StaticRoute, hops []NextHopEntry) {
+	if existing == nil || len(hops) == 0 {
+		return
+	}
+	for _, hop := range hops {
+		duplicate := false
+		for _, prior := range existing.NextHops {
+			if prior == hop {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			existing.NextHops = append(existing.NextHops, hop)
+		}
+	}
+}
+
+type staticRouteNextHopEffectiveKey struct {
+	address       string
+	interfaceName string
+	preference    int
+	metric        int
+}
+
+func staticRouteNextHopEffectiveKeyFor(route *StaticRoute, hop NextHopEntry) staticRouteNextHopEffectiveKey {
+	preference := 5
+	if route != nil {
+		preference = route.Preference
+	}
+	if hop.HasPreference {
+		preference = hop.Preference
+	}
+	metric := 0
+	if hop.HasMetric && hop.Metric >= 0 && uint64(hop.Metric) <= uint64(^uint32(0)) {
+		metric = hop.Metric
+	}
+	return staticRouteNextHopEffectiveKey{
+		address: hop.Address, interfaceName: hop.Interface,
+		preference: preference, metric: metric,
+	}
+}
+
+// Distinct route sources can express the same effective next-hop with
+// different syntax (for example, plain `next-hop` and qualified-next-hop at
+// the route's preference). They are one forwarding member, not ECMP copies.
+func appendStaticRouteNextHopsByEffectiveTier(existing, source *StaticRoute) {
+	if existing == nil || source == nil || len(source.NextHops) == 0 {
+		return
+	}
+	for _, hop := range source.NextHops {
+		key := staticRouteNextHopEffectiveKeyFor(source, hop)
+		duplicate := false
+		for _, prior := range existing.NextHops {
+			if staticRouteNextHopEffectiveKeyFor(existing, prior) == key {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			existing.NextHops = append(existing.NextHops, hop)
+		}
+	}
+}
+
+func dedupeStaticRouteNextHops(hops []NextHopEntry) []NextHopEntry {
+	if len(hops) < 2 {
+		return hops
+	}
+	unique := hops[:0]
+	for _, hop := range hops {
+		duplicate := false
+		for _, prior := range unique {
+			if prior == hop {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			unique = append(unique, hop)
+		}
+	}
+	return unique
+}
+
+// mergeSameSpellingStaticRoute merges blocks with the same destination text
+// using Junos block semantics. Distinct-spelling aliases are folded later by
+// mergeStaticRouteIdentity. Competing next-table targets remain recorded
+// because their ambiguity is independent of the route spelling.
+func mergeSameSpellingStaticRoute(existing, route *StaticRoute) {
+	if existing == nil || route == nil || existing == route {
+		return
+	}
+	for _, target := range route.competingNextTableTargets {
+		appendStaticRouteNextTableConflict(existing, target)
+	}
+	if existing.NextTable != "" && route.NextTable != "" &&
+		existing.NextTable != route.NextTable {
+		appendStaticRouteNextTableConflict(existing, existing.NextTable)
+		appendStaticRouteNextTableConflict(existing, route.NextTable)
+	}
+	appendStaticRouteNextHopsDeduped(existing, route.NextHops)
+	if route.Discard {
+		existing.Discard = true
+	}
+	if route.Reject {
+		existing.Reject = true
+	}
+	if route.NoInstall {
+		existing.NoInstall = true
+	}
+	if route.HasPreference {
+		existing.Preference = route.Preference
+		existing.HasPreference = true
+	}
+	if route.NextTable != "" {
+		existing.NextTable = route.NextTable
+		existing.NextTableRaw = route.NextTableRaw
+	}
+}
+
+func mergeStaticRouteIdentity(existing, route *StaticRoute) {
+	if existing == nil || route == nil || existing == route {
+		return
+	}
+	appendStaticRouteNoDispositionAliases(existing, route)
+	appendStaticRouteDestinationAlias(existing, route.Destination)
+	for _, alias := range route.destinationAliases {
+		appendStaticRouteDestinationAlias(existing, alias)
+	}
+	for _, target := range route.competingNextTableTargets {
+		appendStaticRouteNextTableConflict(existing, target)
+	}
+	if existing.NextTable != "" && route.NextTable != "" &&
+		existing.NextTable != route.NextTable {
+		appendStaticRouteNextTableConflict(existing, existing.NextTable)
+		appendStaticRouteNextTableConflict(existing, route.NextTable)
+	}
+	noInstallConflict := existing.NoInstall != route.NoInstall || route.noInstallConflict
+	if noInstallConflict {
+		existing.noInstallConflict = true
+	}
+	existingExcluded := noInstallConflict && existing.NoInstall
+	routeExcluded := noInstallConflict && route.NoInstall
+	existingHasAction := !existingExcluded && (existing.Discard || existing.Reject || existing.NextTable != "")
+	routeHasAction := !routeExcluded && (route.Discard || route.Reject || route.NextTable != "")
+	nextHopless := len(existing.NextHops) == 0 && len(route.NextHops) == 0
+	// Distinct spellings/collections are independent route sources. Stamp their
+	// unqualified next-hops before route-level preference precedence can obscure
+	// each source's effective distance. Same-spelling blocks are base-merged
+	// before this function is called.
+	if existing.Preference != route.Preference {
+		for i := range existing.NextHops {
+			if !existing.NextHops[i].HasPreference {
+				existing.NextHops[i].Preference = existing.Preference
+				existing.NextHops[i].HasPreference = true
+			}
+		}
+		for i := range route.NextHops {
+			if !route.NextHops[i].HasPreference {
+				route.NextHops[i].Preference = route.Preference
+				route.NextHops[i].HasPreference = true
+			}
+		}
+	}
+	switch {
+	case existingExcluded && !routeExcluded:
+		// The existing source is excluded. Replace all of its forwarding
+		// state with the incoming installable source, not just its hops.
+		existing.Discard = route.Discard
+		existing.Reject = route.Reject
+		existing.NextTable = route.NextTable
+		existing.NextTableRaw = route.NextTableRaw
+		existing.Preference = route.Preference
+		existing.HasPreference = route.HasPreference
+		existing.NextHops = existing.NextHops[:0]
+		appendStaticRouteNextHopsByEffectiveTier(existing, route)
+	case routeExcluded:
+		// A no-install source contributes no actions, preference, or hops.
+	default:
+		appendStaticRouteNextHopsByEffectiveTier(existing, route)
+		if route.Discard {
+			existing.Discard = true
+		}
+		if route.Reject {
+			existing.Reject = true
+		}
+	}
+	// Strict validation rejects disagreement between independent sources.
+	// Tolerant compilation keeps only forwarding state from installable
+	// sources when their no-install intent disagrees.
+	existing.NoInstall = existing.NoInstall && route.NoInstall
+	if !existingExcluded && !routeExcluded {
+		if nextHopless {
+			switch {
+			case existingHasAction && routeHasAction:
+				if route.Preference < existing.Preference {
+					existing.Preference = route.Preference
+				}
+			case routeHasAction:
+				// Preference-only aliases do not lower a forwarding action's
+				// route distance.
+				existing.Preference = route.Preference
+			case existingHasAction:
+				// Keep the action-bearing source's preference.
+			default:
+				// No source carries a forwarding action, so neither preference
+				// should alter a route that will be excluded from installation.
+			}
+			existing.HasPreference = existing.HasPreference || route.HasPreference
+		} else if route.HasPreference {
+			existing.Preference = route.Preference
+			existing.HasPreference = true
+		}
+		if route.NextTable != "" {
+			existing.NextTable = route.NextTable
+			existing.NextTableRaw = route.NextTableRaw
+		}
+	}
+}
+
+// foldDistinctStaticRouteAliases folds only masked aliases. Same-spelling
+// blocks have already been merged with Junos semantics by compileStaticRoutes.
+func foldDistinctStaticRouteAliases(routes []*StaticRoute) []*StaticRoute {
+	if routes == nil {
+		return nil
+	}
+	byIdentity := make(map[string]int, len(routes))
+	folded := make([]*StaticRoute, 0, len(routes))
+	for _, route := range routes {
+		if route == nil {
+			folded = append(folded, nil)
+			continue
+		}
+		key := staticRouteMergeKey(route.Destination)
+		if !strings.HasPrefix(key, "v4\x00") && !strings.HasPrefix(key, "v6\x00") {
+			folded = append(folded, route)
+			continue
+		}
+		if idx, exists := byIdentity[key]; exists {
+			mergeStaticRouteIdentity(folded[idx], route)
+			continue
+		}
+		byIdentity[key] = len(folded)
+		folded = append(folded, route)
+	}
+	return folded
+}
+
+// canonicalizeStaticRouteCollections folds aliases within and across bare
+// static and rib inet6.0 route lists. The snapshot normalizes by destination
+// family, so an IPv6 route in the bare list and its inet6.0 alias are one
+// effective route. Cross-collection survivors are placed in the list matching
+// their destination family, preserving consumers that use the list as a family
+// tag. Separate routing-instance calls keep routes isolated by scope.
+//
+// Competing next-table targets and no-install disagreement are retained as
+// compiler-only conflict metadata. Strict validation rejects these conflicts;
+// tolerant loads warn and keep one deterministic route available to snapshots.
+func canonicalizeStaticRouteCollections(
+	staticRoutes, inet6Routes []*StaticRoute,
+) ([]*StaticRoute, []*StaticRoute) {
+	staticRoutes = foldDistinctStaticRouteAliases(staticRoutes)
+	inet6Routes = foldDistinctStaticRouteAliases(inet6Routes)
+	if len(staticRoutes) == 0 || len(inet6Routes) == 0 {
+		return staticRoutes, inet6Routes
+	}
+	type candidate struct {
+		route       *StaticRoute
+		isInet6List bool
+	}
+	byIdentity := make(map[string]candidate)
+	mergedStatic := make([]*StaticRoute, 0, len(staticRoutes))
+	mergedInet6 := make([]*StaticRoute, 0, len(inet6Routes))
+
+	add := func(routes []*StaticRoute, isInet6List bool) {
+		for _, route := range routes {
+			key := ""
+			if route != nil {
+				key = staticRouteMergeKey(route.Destination)
+			}
+			if !strings.HasPrefix(key, "v4\x00") && !strings.HasPrefix(key, "v6\x00") {
+				if isInet6List {
+					mergedInet6 = append(mergedInet6, route)
+				} else {
+					mergedStatic = append(mergedStatic, route)
+				}
+				continue
+			}
+
+			if prior, exists := byIdentity[key]; exists {
+				if prior.route != route {
+					mergeStaticRouteIdentity(prior.route, route)
+				}
+				if prior.isInet6List != isInet6List {
+					destinationIsIPv6 := strings.HasPrefix(key, "v6\x00")
+					if destinationIsIPv6 && !prior.isInet6List {
+						for i, existing := range mergedStatic {
+							if existing == prior.route {
+								mergedStatic = append(mergedStatic[:i], mergedStatic[i+1:]...)
+								break
+							}
+						}
+						mergedInet6 = append(mergedInet6, prior.route)
+						prior.isInet6List = true
+						byIdentity[key] = prior
+					}
+				}
+				continue
+			}
+
+			byIdentity[key] = candidate{route: route, isInet6List: isInet6List}
+			if isInet6List {
+				mergedInet6 = append(mergedInet6, route)
+			} else {
+				mergedStatic = append(mergedStatic, route)
+			}
+		}
+	}
+	add(staticRoutes, false)
+	add(inet6Routes, true)
+	return mergedStatic, mergedInet6
+}
+
+func canonicalizeStaticRoutesAcrossTables(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.RoutingOptions.StaticRoutes, cfg.RoutingOptions.Inet6StaticRoutes =
+		canonicalizeStaticRouteCollections(
+			cfg.RoutingOptions.StaticRoutes,
+			cfg.RoutingOptions.Inet6StaticRoutes,
+		)
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil {
+			continue
+		}
+		ri.StaticRoutes, ri.Inet6StaticRoutes = canonicalizeStaticRouteCollections(
+			ri.StaticRoutes, ri.Inet6StaticRoutes)
+	}
+}
+
 // compileStaticRoutes parses static route entries from a "static" node,
 // appending to and returning the updated slice.
 func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRoute {
-	// Track destination→index so flat "set" duplicates merge into one route.
+	// Same-spelling blocks retain Junos block semantics here. Distinct masked
+	// aliases are folded after all routing-options roots have been compiled.
 	destIdx := make(map[string]int)
 	for i, sr := range existing {
 		destIdx[sr.Destination] = i
@@ -313,8 +758,7 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 				case "next-table":
 					if i+1 < len(routeInst.node.Keys) {
 						i++
-						route.NextTableRaw = routeInst.node.Keys[i]
-						route.NextTable = parseNextTableInstance(routeInst.node.Keys[i])
+						setStaticRouteNextTable(route, routeInst.node.Keys[i])
 					}
 				case "qualified-next-hop":
 					if i+1 < len(routeInst.node.Keys) {
@@ -503,38 +947,16 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 				route.NextHops = append(route.NextHops, nh)
 			case "next-table":
 				if v := nodeVal(prop); v != "" {
-					route.NextTableRaw = v
-					route.NextTable = parseNextTableInstance(v)
+					setStaticRouteNextTable(route, v)
 				}
 			}
 		}
 
-		// Merge routes with the same destination (flat "set" syntax creates duplicates).
+		// Fold only same-spelling blocks at this stage. Masked aliases are
+		// independent sources and are stamped after all collections are parsed.
+		route.NextHops = dedupeStaticRouteNextHops(route.NextHops)
 		if idx, exists := destIdx[route.Destination]; exists {
-			existingRoute := existing[idx]
-			existingRoute.NextHops = append(existingRoute.NextHops, route.NextHops...)
-			if route.Discard {
-				existingRoute.Discard = true
-			}
-			if route.Reject {
-				existingRoute.Reject = true
-			}
-			if route.NoInstall {
-				existingRoute.NoInstall = true
-			}
-			// #9125: HasPreference, not `!= 5`. The old test could not tell an
-			// operator who wrote `preference 5` from one who wrote nothing,
-			// because 5 is also the compiler's own default -- so an explicit 5
-			// in a later block was silently dropped while any other value
-			// applied.
-			if route.HasPreference {
-				existingRoute.Preference = route.Preference
-				existingRoute.HasPreference = true
-			}
-			if route.NextTable != "" {
-				existingRoute.NextTable = route.NextTable
-				existingRoute.NextTableRaw = route.NextTableRaw
-			}
+			mergeSameSpellingStaticRoute(existing[idx], route)
 		} else {
 			destIdx[route.Destination] = len(existing)
 			existing = append(existing, route)

@@ -368,6 +368,12 @@ func (s *Server) showRoutingOptions(cfg *config.Config, buf *strings.Builder) {
 					}
 					continue
 				}
+				tierPreferences := make(map[config.NextHopEntry]int, len(sr.NextHops))
+				for _, tier := range config.StaticRouteNextHopTiers(sr) {
+					for _, nextHop := range tier.NextHops {
+						tierPreferences[nextHop] = tier.Preference
+					}
+				}
 				for i, nh := range sr.NextHops {
 					dest := sr.Destination
 					if i > 0 {
@@ -377,7 +383,7 @@ func (s *Server) showRoutingOptions(cfg *config.Config, buf *strings.Builder) {
 					if nh.Interface != "" {
 						nhStr += " via " + nh.Interface
 					}
-					fmt.Fprintf(buf, "  %-24s %-20s %s\n", dest, nhStr, fmtPref(sr.Preference))
+					fmt.Fprintf(buf, "  %-24s %-20s %s\n", dest, nhStr, fmtPref(tierPreferences[nh]))
 				}
 				if reason := staticExcluded[sr]; reason != "" {
 					fmt.Fprintf(buf, "      NOT INSTALLED: %s\n", reason)
@@ -411,6 +417,12 @@ func (s *Server) showRoutingOptions(cfg *config.Config, buf *strings.Builder) {
 					}
 					continue
 				}
+				tierPreferences := make(map[config.NextHopEntry]int, len(sr.NextHops))
+				for _, tier := range config.StaticRouteNextHopTiers(sr) {
+					for _, nextHop := range tier.NextHops {
+						tierPreferences[nextHop] = tier.Preference
+					}
+				}
 				for i, nh := range sr.NextHops {
 					dest := sr.Destination
 					if i > 0 {
@@ -420,7 +432,7 @@ func (s *Server) showRoutingOptions(cfg *config.Config, buf *strings.Builder) {
 					if nh.Interface != "" {
 						nhStr += " via " + nh.Interface
 					}
-					fmt.Fprintf(buf, "  %-40s %-30s %s\n", dest, nhStr, fmtPref(sr.Preference))
+					fmt.Fprintf(buf, "  %-40s %-30s %s\n", dest, nhStr, fmtPref(tierPreferences[nh]))
 				}
 				if reason := staticExcluded[sr]; reason != "" {
 					fmt.Fprintf(buf, "      NOT INSTALLED: %s\n", reason)

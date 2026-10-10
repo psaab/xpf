@@ -7,14 +7,12 @@ import (
 
 // #5633: the compiler merges repeated same-destination static-route blocks
 // (flat "set" syntax emits one block per line) into a single StaticRoute
-// (compileStaticRoutes): next-hops are APPENDED and the terminal / next-table
-// fields are STICKY (discard/reject latch true, next-table is last-writer-wins).
-// A config that declares the SAME prefix once as `discard` (or `next-table X`)
-// and once with a `next-hop` therefore compiled into ONE route holding BOTH a
-// blackhole/leak AND a forwarding next-hop — a contradiction the strict gate
-// accepted. The live snapshot copies every field and the Rust forwarder
-// resolves discard > next-table > next-hop, so the stale terminal/leak wins and
-// the later next-hop meant to restore ordinary forwarding is silently ignored.
+// (compileStaticRoutes): next-hops are appended and discard/reject latch true.
+// Contradictory actions, competing next-table targets, and install/no-install
+// disagreement are retained as compiler-only conflict metadata for strict
+// validation. Without the gate a merged route could silently combine an
+// unusable next-hop with a terminal action, overwrite a competing table target,
+// or withdraw an otherwise installed route.
 //
 // validateStaticRouteDispositionConflictStrict rejects that mix at commit.
 //

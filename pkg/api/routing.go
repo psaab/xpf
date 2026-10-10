@@ -212,10 +212,17 @@ func appendStaticRoutes(result []RouteInfo, routes []*config.StaticRoute, family
 			result = append(result, ri)
 			continue
 		}
+		tierPreferences := make(map[config.NextHopEntry]int, len(r.NextHops))
+		for _, tier := range config.StaticRouteNextHopTiers(r) {
+			for _, nextHop := range tier.NextHops {
+				tierPreferences[nextHop] = tier.Preference
+			}
+		}
 		for _, nh := range r.NextHops {
 			ri := base
 			ri.NextHop = nh.Address
 			ri.Interface = nh.Interface
+			ri.Preference = tierPreferences[nh]
 			result = append(result, ri)
 		}
 	}

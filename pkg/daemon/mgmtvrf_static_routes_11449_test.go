@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"net"
+	"reflect"
 	"testing"
 
 	"github.com/vishvananda/netlink"
@@ -252,4 +253,78 @@ func TestBackupRouterIPv6DefaultUsesTable99911449(t *testing.T) {
 		}
 	}
 	t.Fatalf("IPv6 backup-router default missing from table 999: %+v", fake.routes)
+}
+func TestMgmtV6StaticRouteFoldDeduplicatesNextHops_12084(t *testing.T) {
+	cases := []struct {
+		name        string
+		destination string
+		sets        []string
+		wantHops    []string
+	}{
+		{
+			name:        "same-single-member-from-bare-and-rib",
+			destination: "::/0",
+			sets: []string{
+				"set interfaces fxp0 unit 0 family inet6 address 2001:db8:10::2/64",
+				"set routing-options static route ::/0 next-hop 2001:db8:10::1 interface fxp0",
+				"set routing-options rib inet6.0 static route ::/0 next-hop 2001:db8:10::1 interface fxp0",
+			},
+			wantHops: []string{"2001:db8:10::1"},
+		},
+		{
+			name:        "repeated-member-in-folded-multipath",
+			destination: "2001:db8:20::/48",
+			sets: []string{
+				"set interfaces fxp0 unit 0 family inet6 address 2001:db8:10::2/64",
+				"set routing-options static route 2001:db8:20::/48 next-hop 2001:db8:10::1 interface fxp0",
+				"set routing-options rib inet6.0 static route 2001:db8:20::/48 next-hop 2001:db8:10::1 interface fxp0",
+				"set routing-options rib inet6.0 static route 2001:db8:20::/48 next-hop 2001:db8:10::3 interface fxp0",
+			},
+			wantHops: []string{"2001:db8:10::1", "2001:db8:10::3"},
+		},
+		{
+			name:        "repeated-member-in-one-route-block",
+			destination: "2001:db8:30::/48",
+			sets: []string{
+				"set interfaces fxp0 unit 0 family inet6 address 2001:db8:10::2/64",
+				"set routing-options static route 2001:db8:30::/48 next-hop 2001:db8:10::1 interface fxp0",
+				"set routing-options static route 2001:db8:30::/48 next-hop 2001:db8:10::1 interface fxp0",
+			},
+			wantHops: []string{"2001:db8:10::1"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := testStoreWithSetConfig(t, tc.sets)
+			fake := &mgmtStaticRouteFake11449{links: map[string]int{"fxp0": 7}}
+			desired := mgmtStaticRoutesDesired(fake, store.ActiveConfig(),
+				map[string]bool{"fxp0": true}, [2][]netlink.Route{})
+			if len(desired) != 1 {
+				t.Fatalf("desired management routes = %+v, want one route", desired)
+			}
+			var route netlink.Route
+			for _, target := range desired {
+				route = target.route
+			}
+			if got := routeDst11449(route, netlink.FAMILY_V6); got != tc.destination {
+				t.Fatalf("management destination = %s, want %s", got, tc.destination)
+			}
+			var gotHops []string
+			if len(route.MultiPath) == 0 {
+				if route.Gw != nil {
+					gotHops = append(gotHops, route.Gw.String())
+				}
+			} else {
+				for _, nextHop := range route.MultiPath {
+					if nextHop.Gw != nil {
+						gotHops = append(gotHops, nextHop.Gw.String())
+					}
+				}
+			}
+			if !reflect.DeepEqual(gotHops, tc.wantHops) {
+				t.Fatalf("management route next-hops = %v, want deduped %v (route %+v)",
+					gotHops, tc.wantHops, route)
+			}
+		})
+	}
 }

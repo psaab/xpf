@@ -451,12 +451,29 @@ func ValidateConfig(cfg *Config) []string {
 	// keeps it out of the helper FIB so it cannot shadow a less-specific route.
 	warnZeroDisposition := func(scope string, routes []*StaticRoute) {
 		for _, sr := range routes {
-			if sr == nil || staticRouteHasDisposition(sr) {
+			if sr == nil {
 				continue
 			}
-			warnings = append(warnings, fmt.Sprintf(
-				"%s %q has no forwarding disposition (no next-hop, next-table, discard, or reject) and will not be installed (#11327)",
-				scope, sr.Destination))
+			hasDisposition := staticRouteHasDisposition(sr)
+			if !hasDisposition {
+				alreadyRecorded := false
+				for _, destination := range sr.noDispositionAliases {
+					if destination == sr.Destination {
+						alreadyRecorded = true
+						break
+					}
+				}
+				if !alreadyRecorded {
+					warnings = append(warnings, fmt.Sprintf(
+						"%s %q has no forwarding disposition (no next-hop, next-table, discard, or reject) and will not be installed (#11327)",
+						scope, sr.Destination))
+				}
+			}
+			for _, destination := range sr.noDispositionAliases {
+				warnings = append(warnings, fmt.Sprintf(
+					"%s %q has no forwarding disposition (no next-hop, next-table, discard, or reject) and will not be installed (#11327)",
+					scope, destination))
+			}
 		}
 	}
 	warnZeroDisposition("static route", cfg.RoutingOptions.StaticRoutes)

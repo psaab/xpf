@@ -1293,64 +1293,85 @@ func staticRouteDispositionConflict(sr *StaticRoute) string {
 	return strings.Join(found, " + ")
 }
 
-// validateStaticRouteDispositionConflictStrict hard-rejects a static route that
-// carries MORE THAN ONE mutually-exclusive disposition for a single destination
-// prefix — e.g. `discard` together with a reachable `next-hop`, a `next-table`
-// VRF leak together with a `next-hop`, or `discard` together with `reject`.
+func staticRouteDestinationNames(sr *StaticRoute) string {
+	if sr == nil {
+		return `""`
+	}
+	destinationNames := fmt.Sprintf("%q", sr.Destination)
+	for _, alias := range sr.destinationAliases {
+		destinationNames += fmt.Sprintf(" (also authored as %q)", alias)
+	}
+	return destinationNames
+}
+
+// validateStaticRouteDispositionConflictStrict rejects ambiguous static-route
+// merges before they can silently change forwarding. Besides mutually exclusive
+// actions (next-hop, next-table, discard, reject), it checks compiler metadata
+// for competing next-table targets and install/no-install disagreement.
 //
-// The compiler merges repeated same-destination static-route blocks (flat "set"
-// syntax emits one block per line) into a single StaticRoute
-// (compileStaticRoutes): next-hops are APPENDED and the terminal / next-table
-// fields are STICKY (discard/reject latch true, next-table/preference are
-// last-writer-wins). A config that declares the SAME prefix once as `discard`
-// (or `next-table X`) and once with a `next-hop` therefore compiled into ONE
-// route holding BOTH a blackhole/leak AND a forwarding next-hop — a
-// contradiction that passed the strict gate. The live snapshot copies every
-// field (pkg/dataplane/userspace/routes.go) and the Rust forwarder resolves
-// discard before next-table before next-hops
-// (userspace-dp/src/afxdp/forwarding/mod.rs), so the stale terminal / leak wins
-// and a later next-hop meant to RESTORE ordinary forwarding is silently ignored
-// — a blackhole or a cross-VRF leak the operator did not author (#5633).
+// Same-spelling route blocks use Junos block semantics: they merge next-hops,
+// latch discard/reject, keep NoInstall sticky, and apply the last explicit
+// route preference. Distinct masked aliases and collections are folded later
+// as independent sources; differing route preferences stamp unqualified
+// next-hops into separate tiers. Competing next-table targets and
+// install/no-install disagreement are retained as metadata and rejected on
+// strict validation.
 //
-// Junos permits exactly one action per static route. Rejecting the mix at commit
-// keeps the compiled route unambiguous and the operator informed rather than
-// letting the dataplane pick a precedence the config never expressed. Multiple
-// next-hops for one destination stay legitimate ECMP and do NOT trip this gate.
-//
-// Strict on commit / commit-check (hard reject so the contradiction is
-// operator-visible); the call site downgrades this to a warning on the tolerant
-// load / peer-sync path (opts.lenientRouteDispositionConflict, #1960) so an
-// already-persisted or peer-synced config still BOOTS — the dataplane then
-// resolves the deterministic disposition precedence. Global inet.0/inet6.0 are
-// walked first, then each routing-instance's routes in RoutingInstances order,
-// so the first-reported error is deterministic. Mirrors
-// validateNextTableTargetReferencesStrict.
+// Junos permits exactly one action per static route. Rejecting ambiguous
+// dispositions at commit keeps the compiled route unambiguous and operator-
+// visible; multiple next-hops for one destination remain legitimate ECMP.
+// The call site downgrades strict errors to warnings on tolerant load/peer-sync
+// paths so persisted configurations still boot with deterministic precedence.
+// Global inet.0/inet6.0 collections are checked as one effective-table scope,
+// then each routing-instance's collections together in RoutingInstances order.
+// Merged aliases retain authored destination spellings for diagnostics.
 func validateStaticRouteDispositionConflictStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
 	}
-	check := func(scope string, routes []*StaticRoute) error {
-		for _, sr := range routes {
-			conflict := staticRouteDispositionConflict(sr)
-			if conflict == "" {
-				continue
+	check := func(scope string, routeSets ...[]*StaticRoute) error {
+		for _, routes := range routeSets {
+			for _, sr := range routes {
+				if sr == nil {
+					continue
+				}
+				if len(sr.competingNextTableTargets) > 1 {
+					targets := make([]string, len(sr.competingNextTableTargets))
+					for i, target := range sr.competingNextTableTargets {
+						targets[i] = fmt.Sprintf("%q", target)
+					}
+					return fmt.Errorf(
+						"%s %s has competing next-table targets %s for one masked "+
+							"destination prefix",
+						scope, staticRouteDestinationNames(sr),
+						strings.Join(targets, " and "))
+				}
+				if sr.noInstallConflict {
+					return fmt.Errorf(
+						"%s %s has conflicting install and no-install declarations "+
+							"for one masked destination prefix",
+						scope, staticRouteDestinationNames(sr))
+				}
+
+				conflict := staticRouteDispositionConflict(sr)
+				if conflict == "" {
+					continue
+				}
+				return fmt.Errorf(
+					"%s %s defines contradictory dispositions (%s) for one "+
+						"destination prefix; a static route may carry only ONE of "+
+						"next-hop, next-table, discard, or reject (repeated "+
+						"same-prefix `set` lines merge into a single route). Split "+
+						"the destinations or keep one disposition — otherwise the "+
+						"dataplane silently resolves the terminal/leak action and "+
+						"ignores the forwarding next-hop",
+					scope, staticRouteDestinationNames(sr), conflict)
 			}
-			return fmt.Errorf(
-				"%s %q defines contradictory dispositions (%s) for one "+
-					"destination prefix; a static route may carry only ONE of "+
-					"next-hop, next-table, discard, or reject (repeated "+
-					"same-prefix `set` lines merge into a single route). Split "+
-					"the destinations or keep one disposition — otherwise the "+
-					"dataplane silently resolves the terminal/leak action and "+
-					"ignores the forwarding next-hop",
-				scope, sr.Destination, conflict)
 		}
 		return nil
 	}
-	if err := check("routing-options static route", cfg.RoutingOptions.StaticRoutes); err != nil {
-		return err
-	}
-	if err := check("routing-options static route", cfg.RoutingOptions.Inet6StaticRoutes); err != nil {
+	if err := check("routing-options static route",
+		cfg.RoutingOptions.StaticRoutes, cfg.RoutingOptions.Inet6StaticRoutes); err != nil {
 		return err
 	}
 	for _, ri := range cfg.RoutingInstances {
@@ -1358,10 +1379,7 @@ func validateStaticRouteDispositionConflictStrict(cfg *Config) error {
 			continue
 		}
 		scope := fmt.Sprintf("routing-instances %s static route", ri.Name)
-		if err := check(scope, ri.StaticRoutes); err != nil {
-			return err
-		}
-		if err := check(scope, ri.Inet6StaticRoutes); err != nil {
+		if err := check(scope, ri.StaticRoutes, ri.Inet6StaticRoutes); err != nil {
 			return err
 		}
 	}

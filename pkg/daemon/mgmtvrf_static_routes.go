@@ -139,6 +139,11 @@ func mgmtStaticRoutesDesired(
 			}
 
 			byPriority := make(map[int][]*netlink.NexthopInfo)
+			type resolvedHopKey struct {
+				linkIndex int
+				gateway   string
+			}
+			seenByPriority := make(map[int]map[resolvedHopKey]struct{})
 			routeScoped, routeAvailable := true, true
 			for _, tier := range config.StaticRouteNextHopTiers(static) {
 				for _, nextHop := range tier.NextHops {
@@ -188,6 +193,19 @@ func mgmtStaticRoutesDesired(
 						}
 					}
 
+					key := resolvedHopKey{linkIndex: linkIndex}
+					if gateway != nil {
+						key.gateway = gateway.String()
+					}
+					seen := seenByPriority[tier.ManagementPrio]
+					if seen == nil {
+						seen = make(map[resolvedHopKey]struct{})
+						seenByPriority[tier.ManagementPrio] = seen
+					}
+					if _, duplicate := seen[key]; duplicate {
+						continue
+					}
+					seen[key] = struct{}{}
 					byPriority[tier.ManagementPrio] = append(byPriority[tier.ManagementPrio], &netlink.NexthopInfo{
 						LinkIndex: linkIndex,
 						Gw:        gateway,
