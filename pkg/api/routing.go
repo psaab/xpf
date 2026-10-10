@@ -151,15 +151,18 @@ func (s *Server) routesHandler(w http.ResponseWriter, _ *http.Request) {
 	// name so a consumer can tell inet from inet6 and the default table from
 	// a VRF. The inet.0 rows still come first, in their original order, so a
 	// legacy consumer's positional reads are unchanged.
+	// Compute the whole-config verdict once: the next-table window exclusion
+	// depends on order, and gRPC/CLI render this same map.
+	staticExcluded := config.StaticRouteExclusions(cfg)
 	var result []RouteInfo
-	result = appendStaticRoutes(result, cfg.RoutingOptions.StaticRoutes, "inet", "inet.0")
-	result = appendStaticRoutes(result, cfg.RoutingOptions.Inet6StaticRoutes, "inet6", "inet6.0")
+	result = appendStaticRoutes(result, cfg.RoutingOptions.StaticRoutes, "inet", "inet.0", staticExcluded)
+	result = appendStaticRoutes(result, cfg.RoutingOptions.Inet6StaticRoutes, "inet6", "inet6.0", staticExcluded)
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil {
 			continue
 		}
-		result = appendStaticRoutes(result, ri.StaticRoutes, "inet", ri.Name+".inet.0")
-		result = appendStaticRoutes(result, ri.Inet6StaticRoutes, "inet6", ri.Name+".inet6.0")
+		result = appendStaticRoutes(result, ri.StaticRoutes, "inet", ri.Name+".inet.0", staticExcluded)
+		result = appendStaticRoutes(result, ri.Inet6StaticRoutes, "inet6", ri.Name+".inet6.0", staticExcluded)
 	}
 	if result == nil {
 		result = []RouteInfo{}
@@ -169,25 +172,21 @@ func (s *Server) routesHandler(w http.ResponseWriter, _ *http.Request) {
 
 // appendStaticRoutes renders each static route in routes into one or more
 // RouteInfo rows tagged with the given family ("inet"/"inet6") and Junos RIB
-// table name, appending them to result. It applies the same disposition
-// labeling the CLI/gRPC `show route` text uses (#5298/#5410): a route with no
-// forwarding next-hop carries a "reject" (RTN_UNREACHABLE), "discard"
-// (RTN_BLACKHOLE), or "connected" (directly-connected) label, while a
-// next-table route carries next_table and a normal route emits one row per
-// next-hop. Reject and Discard are mutually exclusive and are checked before
-// the no-next-hop fallthrough since a reject/discard route also carries no
-// NextHops. Shared by the global inet.0/inet6.0 tables and every per-VRF
-// table so all four sources render identically.
-func appendStaticRoutes(result []RouteInfo, routes []*config.StaticRoute, family, table string) []RouteInfo {
+// table name, appending them to result. It applies the same disposition and
+// not-installed labeling the CLI/gRPC `show route` text uses: excluded routes
+// carry the shared config.StaticRouteExclusions reason; installable routes
+// omit it. A normal route emits one row per next-hop.
+func appendStaticRoutes(result []RouteInfo, routes []*config.StaticRoute, family, table string, excluded map[*config.StaticRoute]string) []RouteInfo {
 	for _, r := range routes {
 		if r == nil {
 			continue
 		}
 		base := RouteInfo{
-			Destination: r.Destination,
-			Preference:  r.Preference,
-			Family:      family,
-			Table:       table,
+			Destination:        r.Destination,
+			Preference:         r.Preference,
+			Family:             family,
+			Table:              table,
+			NotInstalledReason: excluded[r],
 		}
 		if r.NextTable != "" {
 			ri := base
@@ -213,10 +212,17 @@ func appendStaticRoutes(result []RouteInfo, routes []*config.StaticRoute, family
 			result = append(result, ri)
 			continue
 		}
+		tierPreferences := make(map[config.NextHopEntry]int, len(r.NextHops))
+		for _, tier := range config.StaticRouteNextHopTiers(r) {
+			for _, nextHop := range tier.NextHops {
+				tierPreferences[nextHop] = tier.Preference
+			}
+		}
 		for _, nh := range r.NextHops {
 			ri := base
 			ri.NextHop = nh.Address
 			ri.Interface = nh.Interface
+			ri.Preference = tierPreferences[nh]
 			result = append(result, ri)
 		}
 	}

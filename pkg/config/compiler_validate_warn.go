@@ -341,6 +341,20 @@ func ValidateConfig(cfg *Config) []string {
 				"static-nat ruleset %q: from-zone %q not defined", rs.Name, rs.FromZone))
 		}
 	}
+	// Destination NAT also scopes its inbound rule-sets by the exact ingress
+	// zone name. An undefined from-zone therefore leaves the rule-set unable
+	// to match, so surface the typo like static NAT (#12245).
+	if dnat := cfg.Security.NAT.Destination; dnat != nil {
+		for _, rs := range dnat.RuleSets {
+			if rs == nil {
+				continue
+			}
+			if rs.FromZone != "" && !zones[rs.FromZone] {
+				warnings = append(warnings, fmt.Sprintf(
+					"destination-nat ruleset %q: from-zone %q not defined", rs.Name, rs.FromZone))
+			}
+		}
+	}
 
 	// Validate screen references in zones
 	for name, zone := range cfg.Security.Zones {
@@ -437,12 +451,29 @@ func ValidateConfig(cfg *Config) []string {
 	// keeps it out of the helper FIB so it cannot shadow a less-specific route.
 	warnZeroDisposition := func(scope string, routes []*StaticRoute) {
 		for _, sr := range routes {
-			if sr == nil || staticRouteHasDisposition(sr) {
+			if sr == nil {
 				continue
 			}
-			warnings = append(warnings, fmt.Sprintf(
-				"%s %q has no forwarding disposition (no next-hop, next-table, discard, or reject) and will not be installed (#11327)",
-				scope, sr.Destination))
+			hasDisposition := staticRouteHasDisposition(sr)
+			if !hasDisposition {
+				alreadyRecorded := false
+				for _, destination := range sr.noDispositionAliases {
+					if destination == sr.Destination {
+						alreadyRecorded = true
+						break
+					}
+				}
+				if !alreadyRecorded {
+					warnings = append(warnings, fmt.Sprintf(
+						"%s %q has no forwarding disposition (no next-hop, next-table, discard, or reject) and will not be installed (#11327)",
+						scope, sr.Destination))
+				}
+			}
+			for _, destination := range sr.noDispositionAliases {
+				warnings = append(warnings, fmt.Sprintf(
+					"%s %q has no forwarding disposition (no next-hop, next-table, discard, or reject) and will not be installed (#11327)",
+					scope, destination))
+			}
 		}
 	}
 	warnZeroDisposition("static route", cfg.RoutingOptions.StaticRoutes)
@@ -1779,6 +1810,12 @@ func ValidateConfig(cfg *Config) []string {
 	// — rather than silently dropping them from the kernel mirror. loss-priority
 	// is already covered by validateFilterLossPriorityWarnings above.
 	warnings = append(warnings, validateLo0FilterKernelMirrorWarnings(cfg)...)
+
+	// #12091: only lo0 unit 0 input filters on ordinary lo0 are consumed by the
+	// host planes. Surface every other hook on an ordinary lo0 as accepted but
+	// unenforced; lo0 hooks with usable-endpoint tunnels have real per-ifindex
+	// enforcement (incomplete tunnel stanzas warn, since no device exists).
+	warnings = append(warnings, validateLo0UnsupportedFilterBindingsWarnings(cfg)...)
 
 	// #3295: a firewall filter attached to an interface/lo0 input/output hook
 	// with no terminal catch-all term relies on xpf's implicit-accept of

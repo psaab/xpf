@@ -1,0 +1,289 @@
+package config
+
+import (
+	"strings"
+	"testing"
+)
+
+// RED for #12092: hierarchical nameless terms — `term { then discard; }`,
+// `term { then reject; }`, `term { foo bar; }`, `term { foo; }` — passed
+// strict commit and compiled to fall-through terms with empty actions. The
+// #10294 gate must reject these instances, including multi-key child blocks
+// that lowering could consume as a name. Named controls still ACCEPT with
+// action "discard".
+
+// namelessTermHier12092 builds the one-key `term` node shape: namedInstances
+// turns each CHILD into an instance named by its own first key, so `then
+// discard` becomes a term named `then` whose node Keys=[then, discard].
+func namelessTermHier12092(t *testing.T, body string) *ConfigTree {
+	t.Helper()
+	return hierTree(t, `firewall {
+    family inet {
+        filter f1 {
+            term {
+                `+body+`
+            }
+        }
+    }
+}`)
+}
+
+func TestFirewallNamelessTermRejectedHier12092(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"then-discard", "then discard;", "then"},
+		{"then-reject", "then reject;", "then"},
+		{"foo-bar", "foo bar;", "foo"},
+		{"bare-foo", "foo;", "foo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileConfig(namelessTermHier12092(t, tc.body))
+			if err == nil {
+				t.Fatalf("nameless `term { %s }` committed cleanly, want strict reject", tc.body)
+			}
+			if !strings.Contains(err.Error(), "#10294") ||
+				!strings.Contains(err.Error(), "#12092") ||
+				!strings.Contains(err.Error(), "nameless") ||
+				!strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want nameless #10294/#12092 diagnostic naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestFirewallNestedNameCompactTailRejected12092(t *testing.T) {
+	rows := []struct {
+		name string
+		src  string
+	}{
+		{"P05", `firewall { family inet { filter f1 {
+			term { T from destination-port 22 { then { accept; } } }
+			term deny { then discard; }
+		} } }`},
+		{"then-discard-block", `firewall { family inet { filter f1 {
+			term { T then discard { } }
+		} } }`},
+		{"from-protocol-then-block", `firewall { family inet { filter f1 {
+			term { T from protocol tcp { then { accept; } } }
+		} } }`},
+		{"from-protocol-then-leaf", `firewall { family inet { filter f1 {
+			term { T from protocol tcp { then accept; } }
+		} } }`},
+		{"then-accept-block", `firewall { family inet { filter f1 {
+			term { T then accept { } }
+		} } }`},
+		{"from-protocol-then-accept-block", `firewall { family inet { filter f1 {
+			term { T from protocol tcp then accept { } }
+		} } }`},
+		{"N07", `firewall { family inet { filter f1 {
+			term { T extra { then discard; } }
+		} } }`},
+		{"N17", `firewall { family inet { filter f1 {
+			term { then discard { } }
+		} } }`},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileConfig(hierTree(t, tc.src))
+			if err == nil {
+				t.Fatalf("nested-name compact tail committed cleanly, want strict reject")
+			}
+			if !strings.Contains(err.Error(), "#10294") ||
+				!strings.Contains(err.Error(), "#12092") ||
+				!strings.Contains(err.Error(), "nameless") {
+				t.Fatalf("error = %q, want nameless #10294/#12092 diagnostic", err)
+			}
+		})
+	}
+}
+
+// Flat-set terms with an unrecognized child must remain rejected as well.
+// `term foo` on its own is a named empty term in this syntax, not the
+// nameless hierarchical `term { foo; }` shape above.
+func TestFirewallFlatUnknownTermTailsStillRejected12092(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sets []string
+		want string
+	}{
+		{"then-discard", []string{"set firewall family inet filter f1 term then discard"}, "then"},
+		{"then-reject", []string{"set firewall family inet filter f1 term then reject"}, "then"},
+		{"foo-bar", []string{"set firewall family inet filter f1 term foo bar"}, "foo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CompileConfig(flatTreeFromSets(t, tc.sets...))
+			if err == nil {
+				t.Fatalf("flat term %q committed cleanly, want strict reject", tc.sets)
+			}
+			if !strings.Contains(err.Error(), "#10294") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want #10294 diagnostic naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestFirewallCompactTermTailStillRejected12092(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"then-discard", "then discard;", "discard"},
+		{"then-reject", "then reject;", "reject"},
+		{"foo-bar", "foo bar;", "bar"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The compact spelling puts the term instance name and tail on
+			// the same node (Keys=["term", name, tail...]); the hierarchical
+			// nameless cases above exercise the sub-node shape
+			// (Keys=[name, tail...]).
+			tree := hierTree(t, `firewall {
+    family inet {
+        filter f1 {
+            term `+tc.body+`
+        }
+    }
+}`)
+			_, err := CompileConfig(tree)
+			if err == nil {
+				t.Fatalf("compact term tail %q committed cleanly, want #10294 reject", tc.body)
+			}
+			if !strings.Contains(err.Error(), "#10294") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want #10294 diagnostic naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestFirewallNamedTermStillCommits12092(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tree func(t *testing.T) *ConfigTree
+	}{
+		{"hier", func(t *testing.T) *ConfigTree {
+			return hierTree(t, `firewall {
+    family inet {
+        filter f1 {
+            term last {
+                then {
+                    discard;
+                }
+            }
+        }
+    }
+}`)
+		}},
+		{"packed", func(t *testing.T) *ConfigTree {
+			return hierTree(t, `firewall {
+    family inet {
+        filter f1 {
+            term last then discard;
+        }
+    }
+}`)
+		}},
+		{"flat", func(t *testing.T) *ConfigTree {
+			return flatTreeFromSets(t,
+				"set firewall family inet filter f1 term last then discard",
+			)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := CompileConfig(tc.tree(t))
+			if err != nil {
+				t.Fatalf("named control was rejected: %v", err)
+			}
+			term := cfg.Firewall.FiltersInet["f1"].Terms[0]
+			if term.Name != "last" || term.Action != "discard" {
+				t.Fatalf("named control compiled to name=%q action=%q, want last/discard", term.Name, term.Action)
+			}
+			if len(term.unknownChildren) != 0 {
+				t.Fatalf("named control recorded unknown children: %v", term.unknownChildren)
+			}
+		})
+	}
+}
+
+func TestFirewallNamelessTermLenientWarns12092(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"then-discard", "then discard;", "then"},
+		{"bare-foo", "foo;", "foo"},
+		{"F1-compact-tail", "T from destination-port 22 { then { accept; } }", "T"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := CompileConfigLenient(namelessTermHier12092(t, tc.body))
+			if err != nil {
+				t.Fatalf("lenient compile must boot: %v", err)
+			}
+			warnings := strings.Join(cfg.Warnings, "\n")
+			if !strings.Contains(warnings, "#10294") ||
+				!strings.Contains(warnings, "#12092") ||
+				!strings.Contains(warnings, "nameless") ||
+				!strings.Contains(warnings, tc.want) {
+				t.Fatalf("warnings = %q, want nameless #10294/#12092 diagnostic naming %q", warnings, tc.want)
+			}
+		})
+	}
+}
+
+// RED for #12092 (advisory half): the #3295 warning prints the nameless
+// `term { then discard; }` remedy — the very spelling the gate must reject.
+// The advisory must name the term, and the printed remedy (with a name
+// substituted) must silence the advisory.
+func TestNoCatchAllAdvisoryNamesTheTerm12092(t *testing.T) {
+	cfg := compileSetLinesT(t, []string{
+		"set system dataplane-type userspace",
+		"set firewall family inet filter protect-re term allow-ssh from destination-port 22",
+		"set firewall family inet filter protect-re term allow-ssh then accept",
+		"set interfaces ge-0-0-0 unit 0 family inet filter input protect-re",
+	})
+	got := hasNoCatchAllWarn(ValidateConfig(cfg), "protect-re")
+	if got == "" {
+		t.Fatalf("expected a no-catch-all warning for attached allowlist filter, got: %v", ValidateConfig(cfg))
+	}
+	if !strings.Contains(got, "term <name> { then discard; }") {
+		t.Fatalf("advisory does not name the term: %q", got)
+	}
+}
+
+func TestNoCatchAllPrintedRemedySilencesAdvisory12092(t *testing.T) {
+	// The printed remedy, `term <name> { then discard; }`, with `last`
+	// substituted and pasted as hierarchical config, must silence the warning.
+	tree := hierTree(t, `system {
+    dataplane-type userspace;
+}
+firewall {
+    family inet {
+        filter protect-re {
+            term allow-ssh {
+                from { destination-port 22; }
+                then { accept; }
+            }
+            term last { then discard; }
+        }
+    }
+}
+interfaces {
+    ge-0-0-0 {
+        unit 0 {
+            family inet {
+                filter { input protect-re; }
+            }
+        }
+    }
+}`)
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("hierarchical printed remedy was rejected: %v", err)
+	}
+	if got := hasNoCatchAllWarn(ValidateConfig(cfg), "protect-re"); got != "" {
+		t.Fatalf("printed remedy did not silence the advisory: %q", got)
+	}
+}

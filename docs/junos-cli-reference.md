@@ -866,10 +866,13 @@ From zone: guest, To zone: lan
 
 ### Filtering
 
-- `show security policies from-zone lan to-zone Internet-ATT` shows only that zone pair.
-  Global policies that govern the pair are also shown (#3357): an unscoped/`any`
-  global and a scoped global (#3148) whose `match from-zone`/`to-zone` equals the
-  filter; a scoped global bound to a different pair is omitted.
+- `show security policies from-zone lan to-zone Internet-ATT` shows the policies
+  that govern that pair: the exact zone-pair stanza, applicable single-wildcard
+  stanzas, and the both-wildcard stanza, in enforcement order. Stanzas for an
+  unrelated concrete pair are omitted. Global policies that govern the pair are
+  also shown (#3357) after the zone-pair tiers: an unscoped/`any` global and a
+  scoped global (#3148) whose `match from-zone`/`to-zone` includes the filter;
+  a scoped global bound to a different pair is omitted.
 
 ---
 
@@ -1071,6 +1074,24 @@ Global policies:
   `... brief` prints the per-rule `match_from_zone`/`match_to_zone` (falling back
   to `*`/`*` only for an unscoped global) instead of the group `*`. The shared
   selection predicate is `policymatch.GlobalPolicyAppliesToZonePair`.
+
+- **#12094 — wildcard zone-pair policies appear in filtered views.** The
+  gRPC hit-count/detail, local hit-count/detail/standard/brief, and remote
+  filtered views include `from-zone any` and/or `to-zone any` stanzas enforced
+  for a defined transit pair. Output follows the runtime tiers — exact,
+  single-wildcard, both-wildcard, then global — and excludes an unrelated
+  concrete pair. The
+  host-bound view is narrower: it includes exact and `from-zone any` ->
+  `junos-host` stanzas but never transit `to-zone any` / `any -> any` stanzas,
+  which the host gate does not enforce. Explicit `any` filters use literal
+  zone-name matching: no transit wildcard expansion, with authored literal
+  stanzas shown. Undefined filters do not select transit tiers, and quarantined
+  filters retain only their exact authored pair. The host-specific
+  `any -> junos-host` rule remains applicable to unknown ingress. Global-group
+  selection remains separate; the pre-existing unscoped-global host-view
+  mismatch is tracked as a #12094 follow-up. One shared
+  `policymatch.ZonePairPolicyAppliesToFilterPair` predicate governs the gRPC
+  text, local CLI, and remote CLI views.
 - **#3683 (M02) — remote FILTERED policy view normalizes the global scope to
   `any`.** The remote `show security policies` (filtered) `showPoliciesFiltered`
   (`cmd/cli/show.go`) hand-rolled an all-zones global scope as `*`, so an

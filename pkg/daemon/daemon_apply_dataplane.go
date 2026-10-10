@@ -157,18 +157,17 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 		return commitOverlay, networkdErr, nil, nil, err
 	}
 
-	// #6948: capture the commit-time session-invalidation candidates HERE — the
-	// last statement before the dataplane publishes the new policy snapshot.
-	// Runtime policy ids are positional, so the new snapshot renumbers them; the
-	// invalidation's target set is derived from the OLD numbering and the live
-	// rows stop carrying that numbering the moment ApplyConfig returns (new
-	// admissions use the new ids, and the helper's #3395 refresh re-stamps
-	// established rows to them). Reading the table after the apply therefore
-	// sweeps sessions of the policy that INHERITED a deleted policy's id and
-	// misses the deleted policy's own. Placement is the design: this is a READ,
-	// so it cannot re-admit anything, and moving it any later re-opens the
-	// window. See daemon_policy_invalidate_capture.go.
-	d.captureAndStagePolicyRenameAncestry(cfg)
+	// #6948/#12072: capture invalidation candidates HERE, immediately before
+	// publishing the new policy snapshot. The target set uses oldCfg's
+	// positional IDs, while SessionTable policy_id values may be frozen from an
+	// earlier ordering. The helper resolves each bound stable rule handle
+	// against the active snapshot during this prepublish READ; #3395's BPF
+	// conntrack refresh does not update that session metadata. Capturing before
+	// publication also excludes sessions admitted under the new snapshot. See
+	// daemon_policy_invalidate_capture.go.
+	if err := d.captureAndStagePolicyRenameAncestry(cfg); err != nil {
+		return commitOverlay, networkdErr, nil, nil, err
+	}
 	if rt := d.dataplane(); rt != nil {
 		if adapter, ok := rt.(interface {
 			Manager() *dpuserspace.Manager
@@ -1307,7 +1306,11 @@ func (d *Daemon) reapplyAfterDeferredMAC(cfg *config.Config) {
 			}
 		}
 		if plan := d.policyInvalidationPlan; plan != nil && plan.newCfg == cfg {
-			d.captureAndStagePolicyRenameAncestry(cfg)
+			if err := d.captureAndStagePolicyRenameAncestry(cfg); err != nil {
+				slog.Warn("deferred-MAC replay held until policy READ authority is known", "err", err)
+				d.recordDataplaneWorkerArmDebt()
+				return
+			}
 		}
 	}
 	res, err := rt.ApplyConfig(context.Background(), cfg)

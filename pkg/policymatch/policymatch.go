@@ -1724,6 +1724,128 @@ func ipFamilyStrict(ip net.IP, fam string) string {
 	return "ip6"
 }
 
+// ZonePairPolicyFilter holds a prepared zone-pair display selector. Resolve
+// zone validity once per render so walking many policy sets does not recompute
+// the quarantine projection for every stanza.
+type ZonePairPolicyFilter struct {
+	filterFrom, filterTo           string
+	unknownFrom, unknownTo         bool
+	quarantinedFrom, quarantinedTo bool
+	literalAny                     bool
+}
+
+// NewZonePairPolicyFilter prepares a selector using the configured zone
+// inventory and its runtime quarantine projection.
+func NewZonePairPolicyFilter(cfg *config.Config, filterFrom, filterTo string) ZonePairPolicyFilter {
+	f := ZonePairPolicyFilter{
+		filterFrom: filterFrom,
+		filterTo:   filterTo,
+		literalAny: filterFrom == "any" || filterTo == "any",
+	}
+	if filterFrom == "" && filterTo == "" {
+		return f
+	}
+	var quarantined map[string]struct{}
+	if cfg != nil {
+		quarantined = quarantinedZoneNames(cfg)
+	}
+	filterZoneState := func(zone string) (known, defined bool) {
+		if cfg == nil {
+			return false, false
+		}
+		_, defined = cfg.Security.Zones[zone]
+		if !defined {
+			return false, false
+		}
+		_, isQuarantined := quarantined[zone]
+		return !isQuarantined, true
+	}
+	if filterFrom != "" && filterFrom != "any" {
+		known, defined := filterZoneState(filterFrom)
+		f.unknownFrom = !known
+		f.quarantinedFrom = f.unknownFrom && defined
+	}
+	if filterTo != "" && filterTo != "any" && filterTo != JunosHostZone {
+		known, defined := filterZoneState(filterTo)
+		f.unknownTo = !known
+		f.quarantinedTo = f.unknownTo && defined
+	}
+	return f
+}
+
+// ZonePairPolicyAppliesToFilterPair reports whether a zone-pair policy stanza
+// participates in a filtered view. A zone-pair wildcard is only the explicit
+// "any" token; an empty configured zone is not a wildcard.
+//
+// #12094 F1: the host gate consults ONLY the exact `<from> -> junos-host` pair,
+// then `any -> junos-host` — `to-zone any` and `any -> any` transit wildcards
+// are deliberately NOT pulled onto the host path, which has no implicit
+// default-deny. Exclude every stanza with toZone == "any" from a host-bound
+// view, or transit denies appear to govern traffic the runtime delivers locally.
+//
+// #12094 F4: literal `any` filters and undefined/quarantined filters do not
+// expand transit wildcard tiers. Literal `any` filters retain the base literal
+// match for authored stanzas. A quarantined filter can still show its exact
+// authored pair; gRPC hit-count/detail and local hit-count/detail mark it
+// quarantined, while local brief/standard and remote views do not render
+// quarantine state (a pre-existing gap). The host gate is separate: it can
+// apply `from-zone any to-zone junos-host` to unknown ingress, but never pulls
+// in a transit `to-zone any` stanza.
+func ZonePairPolicyAppliesToFilterPair(filter ZonePairPolicyFilter, fromZone, toZone string) bool {
+	if filter.filterTo == JunosHostZone && toZone == "any" {
+		return false
+	}
+	if filter.filterTo == JunosHostZone && filter.unknownFrom {
+		if fromZone == "any" && toZone == JunosHostZone {
+			return true
+		}
+		if !filter.quarantinedFrom {
+			return false
+		}
+	}
+	if (filter.unknownFrom && !filter.quarantinedFrom) ||
+		(filter.unknownTo && !filter.quarantinedTo) {
+		return false
+	}
+	if filter.quarantinedFrom || filter.quarantinedTo {
+		if fromZone == "any" || toZone == "any" {
+			return false
+		}
+		if filter.filterFrom != "" && fromZone != filter.filterFrom {
+			return false
+		}
+		if filter.filterTo != "" && toZone != filter.filterTo {
+			return false
+		}
+		return true
+	}
+	if filter.literalAny && filter.filterTo != JunosHostZone {
+		return (filter.filterFrom == "" || fromZone == filter.filterFrom) &&
+			(filter.filterTo == "" || toZone == filter.filterTo)
+	}
+	axisApplies := func(zone, selected string) bool {
+		return selected == "" || zone == "any" || zone == selected
+	}
+	return axisApplies(fromZone, filter.filterFrom) && axisApplies(toZone, filter.filterTo)
+}
+
+// ZonePairPolicyFilterTier returns the precedence tier used to order applicable
+// zone-pair stanzas in a filtered policy view: exact, one wildcard, both
+// wildcards. The runtime and display treat only the explicit "any" zone-pair
+// token as a wildcard.
+func ZonePairPolicyFilterTier(fromZone, toZone string) int {
+	fromAny := fromZone == "any"
+	toAny := toZone == "any"
+	switch {
+	case fromAny && toAny:
+		return 2
+	case fromAny || toAny:
+		return 1
+	default:
+		return 0
+	}
+}
+
 // GlobalPolicyAppliesToZonePair reports whether a global policy (#3148) with the
 // given match-scope zones is selected by a `from-zone X to-zone Y` display
 // filter (#3357). It governs which scoped/unscoped globals a FILTERED policy

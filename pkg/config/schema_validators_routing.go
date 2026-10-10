@@ -5,6 +5,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // ValidateBGPHoldTime accepts a BGP hold-time in seconds: 0, or 3..65535.
@@ -119,6 +120,252 @@ func ValidateRouteFilterArgPositional(argIdx int, raw string, _ *Config) error {
 		return nil
 	}
 	return fmt.Errorf("not a valid route-filter match-type %q (expected one of: exact, longer, orlonger, upto, prefix-length-range, through)", tok)
+}
+
+// validateRouteFilterTailStrict12067 checks the portion of a route-filter
+// node beyond its declared prefix and match-type. The compiler reads one
+// trailer only for `upto`, `prefix-length-range`, and `through`; all other
+// trailing tokens and any second trailer are otherwise silently discarded.
+// This node-level check runs in SchemaValidate, before compilation, and sees
+// both packed Keys and the hierarchical child form used for a trailer.
+func validateRouteFilterTailStrict12067(node *Node, parent *schemaNode) error {
+	if node == nil {
+		return nil
+	}
+	if len(node.Keys) < 3 {
+		if len(node.Children) > 0 {
+			return unconsumedRouteFilterChild12067(node, "")
+		}
+		return nil
+	}
+	matchType := node.Keys[2]
+	if !routeFilterMatchTypes[matchType] {
+		// Let ValidateRouteFilterArgPositional report an unsupported match
+		// type in its established slot-specific error.
+		return nil
+	}
+
+	trailerLimit := 0
+	switch matchType {
+	case "upto", "prefix-length-range", "through":
+		trailerLimit = 1
+	}
+
+	consumedTrailer := 0
+	if len(node.Keys) > 3 && trailerLimit == 1 {
+		if routeFilterKeyIsSibling12067(node, parent, 3) {
+			return nil
+		}
+		consumedTrailer = 1
+		if matchType == "upto" {
+			if _, ok := parseRouteFilterLen(node.Keys[3]); !ok {
+				return invalidRouteFilterUpto12067(node.Keys[3])
+			}
+		}
+	} else if len(node.Keys) == 3 && trailerLimit == 1 && len(node.Children) > 0 {
+		// The hierarchical block spelling parks a consumed trailer as a
+		// single child token: `upto { /24; }`.
+		if len(node.Children) != 1 || node.Children[0] == nil ||
+			len(node.Children[0].Keys) != 1 || len(node.Children[0].Children) != 0 {
+			return unconsumedRouteFilterChild12067(node, matchType)
+		}
+		consumedTrailer = 1
+		if matchType == "upto" {
+			if _, ok := parseRouteFilterLen(node.Children[0].Keys[0]); !ok {
+				return invalidRouteFilterUpto12067(node.Children[0].Keys[0])
+			}
+		}
+	}
+
+	if extra := 3 + consumedTrailer; len(node.Keys) > extra {
+		if routeFilterKeyIsSibling12067(node, parent, extra) {
+			return nil
+		}
+		return fmt.Errorf("unconsumed route-filter token %q after match-type %q", node.Keys[extra], matchType)
+	}
+	if len(node.Children) > 0 && consumedTrailer == 0 {
+		return unconsumedRouteFilterChild12067(node, matchType)
+	}
+	if consumedTrailer == 1 && len(node.Keys) > 3 && len(node.Children) > 0 {
+		return unconsumedRouteFilterChild12067(node, matchType)
+	}
+	if matchType == "upto" && consumedTrailer == 0 {
+		return fmt.Errorf("route-filter `upto` requires a prefix length such as /24")
+	}
+	return nil
+}
+
+func invalidRouteFilterUpto12067(token string) error {
+	return fmt.Errorf("invalid route-filter `upto` length %q (expected a prefix length such as /24)", token)
+}
+
+func unconsumedRouteFilterChild12067(routeFilter *Node, matchType string) error {
+	if routeFilter == nil || len(routeFilter.Keys) < 3 {
+		return fmt.Errorf("route-filter match-type must be on the statement line")
+	}
+	children := routeFilter.Children
+	if len(children) == 0 {
+		return fmt.Errorf("unconsumed route-filter child after match-type %q", matchType)
+	}
+	first := children[0]
+	if first == nil || len(first.Keys) == 0 {
+		return fmt.Errorf("unconsumed route-filter child after match-type %q", matchType)
+	}
+	if matchType == "upto" && len(routeFilter.Keys) == 3 {
+		if _, ok := parseRouteFilterLen(first.Keys[0]); !ok {
+			return invalidRouteFilterUpto12067(first.Keys[0])
+		}
+		if len(first.Keys) > 1 {
+			return fmt.Errorf("unconsumed route-filter token %q after match-type %q", first.Keys[1], matchType)
+		}
+		if len(first.Children) > 0 && first.Children[0] != nil && len(first.Children[0].Keys) > 0 {
+			return fmt.Errorf("unconsumed route-filter token %q after match-type %q", first.Children[0].Keys[0], matchType)
+		}
+		if len(children) > 1 {
+			second := children[1]
+			if second != nil && len(second.Keys) > 0 {
+				return fmt.Errorf("unconsumed route-filter token %q after match-type %q", second.Keys[0], matchType)
+			}
+		}
+	}
+	return fmt.Errorf("unconsumed route-filter token %q after match-type %q", first.Keys[0], matchType)
+}
+
+func routeFilterKeyIsSibling12067(node *Node, parent *schemaNode, idx int) bool {
+	if node == nil || idx < 0 || idx >= len(node.Keys) ||
+		node.KeyQuoted(idx) || node.KeyBracketed(idx) || parent == nil {
+		return false
+	}
+	token := node.Keys[idx]
+	// The generic #8437 gate skips a sibling token that repeats the current
+	// container keyword; in a packed `from` run this remains an invalid tail.
+	if node.Name() == "from" && token == "from" {
+		return false
+	}
+	if parent.children != nil && parent.children[token] != nil {
+		return true
+	}
+	return false
+}
+
+// validatePackedPolicyRouteFilterTailStrict12067 handles the compiler's
+// compact `from route-filter ...` spelling, where route-filter tokens remain
+// packed on the `from` node instead of becoming a route-filter child node.
+func validatePackedPolicyRouteFilterTailStrict12067(node *Node, parent *schemaNode) error {
+	if node == nil || len(node.Keys) < 2 || parent == nil {
+		return nil
+	}
+	fromSchema := resolveSchemaChild(parent, "from")
+	if fromSchema == nil {
+		return nil
+	}
+	tail := *node
+	tail.Keys = node.Keys[1:]
+	tail.Children = nil
+	if len(node.KeysQuoted) == len(node.Keys) {
+		tail.KeysQuoted = node.KeysQuoted[1:]
+	} else {
+		tail.KeysQuoted = nil
+	}
+	if len(node.KeysBracketed) == len(node.Keys) {
+		tail.KeysBracketed = node.KeysBracketed[1:]
+	} else {
+		tail.KeysBracketed = nil
+	}
+	// Segment exactly as the policy compiler does. In particular, a
+	// prefix-list/community/as-path value named "route-filter" belongs to
+	// that preceding leaf by its schema arity, not to a new route-filter.
+	parts := splitPolicyTermFromRun11779(nil, &tail, fromSchema, true)
+	inspectHead := func(i int) (int, bool, error) {
+		if i+2 >= len(node.Keys) {
+			return 0, false, fmt.Errorf("route-filter in packed `from` is missing its prefix or match-type")
+		}
+		matchType := node.Keys[i+2]
+		if !routeFilterMatchTypes[matchType] {
+			return i + 1, false, nil
+		}
+
+		// A quoted head makes splitPolicyTermFromRun11779 keep the entire
+		// remainder as one leaf, including otherwise-known sibling names.
+		quotedHead := node.KeyQuoted(i)
+		next := i + 3
+		// A term sibling here identifies a fused statement, not an
+		// unconsumed route-filter token. Defer to the #8437 gate for every
+		// packed-head spelling, including quoted heads and missing `upto`
+		// operands.
+		if next < len(node.Keys) && routeFilterKeyIsSibling12067(node, parent, next) {
+			return next, true, nil
+		}
+		switch matchType {
+		case "upto", "prefix-length-range", "through":
+			if next < len(node.Keys) && (quotedHead ||
+				!routeFilterKeyIsSibling12067(node, fromSchema, next)) {
+				if matchType == "upto" {
+					if _, ok := parseRouteFilterLen(node.Keys[next]); !ok {
+						return 0, false, invalidRouteFilterUpto12067(node.Keys[next])
+					}
+				}
+				next++
+			} else if matchType == "upto" {
+				return 0, false, fmt.Errorf("route-filter `upto` requires a prefix length such as /24")
+			}
+		}
+		if next < len(node.Keys) && (quotedHead ||
+			(!routeFilterKeyIsSibling12067(node, parent, next) &&
+				!routeFilterKeyIsSibling12067(node, fromSchema, next))) {
+			return 0, false, fmt.Errorf("unconsumed route-filter token %q after match-type %q", node.Keys[next], matchType)
+		}
+		return next, false, nil
+	}
+
+	nextScan := 1
+	index := 1
+	for _, part := range parts {
+		if part == nil || len(part.Keys) == 0 || index >= len(node.Keys) {
+			break
+		}
+		partEnd := index + len(part.Keys)
+		if part.Name() == "route-filter" {
+			if index >= nextScan && (index == 1 ||
+				(!node.KeyQuoted(index) && !node.KeyBracketed(index))) {
+				next, stop, err := inspectHead(index)
+				if err != nil {
+					return err
+				}
+				if stop {
+					return nil
+				}
+				if next > nextScan {
+					nextScan = next
+				}
+			}
+		} else if resolveSchemaChild(fromSchema, part.Name()) == nil {
+			// The inline parser can resume dispatch after an opaque,
+			// unsupported leaf. Preserve scanner coverage for a later
+			// route-filter head within that unknown tail.
+			for i := index; i < partEnd; i++ {
+				if i < nextScan || node.Keys[i] != "route-filter" ||
+					node.KeyQuoted(i) || node.KeyBracketed(i) {
+					continue
+				}
+				next, stop, err := inspectHead(i)
+				if err != nil {
+					return err
+				}
+				if stop {
+					return nil
+				}
+				if next > nextScan {
+					nextScan = next
+				}
+				if next > i {
+					i = next - 1
+				}
+			}
+		}
+		index = partEnd
+	}
+	return nil
 }
 
 // ValidateRouteDestination accepts a static-route destination prefix: a
@@ -239,4 +486,135 @@ func plausibleInterfaceName(s string) bool {
 		}
 	}
 	return hasLetter
+}
+
+// policyThenNextHopUnsupportedReason returns the reason raw is outside the
+// supported routing-policy `then next-hop` subset.
+func policyThenNextHopUnsupportedReason(raw string) string {
+	switch raw {
+	case "peer-address", "self":
+		return ""
+	case "discard", "reject", "next-table":
+		return "Junos next-hop actions have no FRR route-map lowering"
+	}
+	ip := net.ParseIP(raw)
+	if ip == nil {
+		return "expected an IPv4/IPv6 address, peer-address, or self"
+	}
+	if ip.IsUnspecified() {
+		return "unspecified next-hop addresses are unsupported"
+	}
+	if ip.IsLoopback() {
+		return "loopback next-hop addresses are unsupported"
+	}
+	if ip.IsMulticast() {
+		return "multicast next-hop addresses are unsupported"
+	}
+	if v4 := ip.To4(); v4 != nil {
+		if v4[0] == 0 {
+			return "IPv4 0/8 next-hop addresses are unsupported"
+		}
+		return ""
+	}
+	if ip.IsLinkLocalUnicast() {
+		return "IPv6 link-local next-hop addresses are unsupported"
+	}
+	return ""
+}
+
+// ValidPolicyThenNextHop reports whether raw is in the supported subset.
+//
+// The `self` spelling is an xpf alias that the renderer maps to FRR's
+// `peer-address`; it is not a FRR route-map keyword. The address restrictions
+// are deliberately conservative rather than an exact FRR grammar mirror:
+// IPv4 0/8, unspecified, loopback, multicast, and IPv6 link-local addresses
+// are excluded, while IPv4 link-local literals remain supported.
+func ValidPolicyThenNextHop(raw string) bool {
+	return policyThenNextHopUnsupportedReason(raw) == ""
+}
+
+// ValidatePolicyThenNextHop is the commit-check validator for
+// `policy-options policy-statement ... then next-hop`. It reports the reason
+// for excluded address classes as well as unsupported Junos-only actions.
+func ValidatePolicyThenNextHop(raw string, _ *Config) error {
+	if reason := policyThenNextHopUnsupportedReason(raw); reason != "" {
+		return fmt.Errorf("unsupported next-hop %q: %s", raw, reason)
+	}
+	return nil
+}
+
+// appendPolicyASPathPrependOperand splits a quoted multi-ASN value before
+// appending it, but takes the allocation-free path for an ordinary ASN.
+func appendPolicyASPathPrependOperand(dst []string, value string) []string {
+	if strings.IndexFunc(value, unicode.IsSpace) < 0 {
+		return append(dst, value)
+	}
+	operands := strings.Fields(value)
+	if len(operands) == 0 {
+		// Preserve a whitespace-only authored operand so the compiled policy
+		// gate can reject it instead of mistaking it for an absent clause.
+		return append(dst, value)
+	}
+	return append(dst, operands...)
+}
+
+func appendPolicyASPathPrependOperands(dst, values []string) []string {
+	for _, value := range values {
+		dst = appendPolicyASPathPrependOperand(dst, value)
+	}
+	return dst
+}
+
+// SplitPolicyASPathPrependOperands normalizes the values carried by
+// `then as-path-prepend`. Junos permits one quoted space-separated value as
+// well as bracketed/repeated values; return the original slice when every
+// member is already one token, and split only when whitespace is present.
+func SplitPolicyASPathPrependOperands(values []string) []string {
+	for _, value := range values {
+		if strings.IndexFunc(value, unicode.IsSpace) >= 0 {
+			return appendPolicyASPathPrependOperands(nil, values)
+		}
+	}
+	return values
+}
+
+// ValidPolicyASPathPrependASN reports whether raw is one canonical decimal
+// AS number in the non-reserved 1..2^32-1 range. This config leaf deliberately
+// narrows FRR's accepted grammar: FRR accepts asdot, but xpf supports decimal
+// notation only. Signs, leading zeroes, whitespace, and non-numeric tokens
+// are rejected.
+func ValidPolicyASPathPrependASN(raw string) bool {
+	if raw == "" || (len(raw) > 1 && raw[0] == '0') {
+		return false
+	}
+	for i := range raw {
+		if raw[i] < '0' || raw[i] > '9' {
+			return false
+		}
+	}
+	n, err := strconv.ParseUint(raw, 10, 32)
+	return err == nil && n != 0
+}
+
+// ValidatePolicyASPathPrependASN is the commit-check validator for one
+// member of a multi-valued `then as-path-prepend` leaf. A quoted Junos
+// value may contain multiple ASNs, so split it before applying the
+// single-operand validator.
+func ValidatePolicyASPathPrependASN(raw string, _ *Config) error {
+	if strings.IndexFunc(raw, unicode.IsSpace) < 0 {
+		if !ValidPolicyASPathPrependASN(raw) {
+			return fmt.Errorf("AS path prepend value %q is not an ASN in 1..4294967295 (canonical decimal digits only)", raw)
+		}
+		return nil
+	}
+	operands := strings.Fields(raw)
+	if len(operands) == 0 {
+		return fmt.Errorf("AS path prepend value %q contains no ASN operands", raw)
+	}
+	for _, operand := range operands {
+		if !ValidPolicyASPathPrependASN(operand) {
+			return fmt.Errorf("AS path prepend value %q is not an ASN in 1..4294967295 (canonical decimal digits only)", operand)
+		}
+	}
+	return nil
 }

@@ -70,9 +70,10 @@ func TestStopPinRetryLoopCancelsJoinsNoLateSyscall(t *testing.T) {
 	callsAfterJoin := 0
 
 	d := &Daemon{
-		rpm:                rpm.New(),
-		daemonCtx:          context.Background(), // production: never cancelled
-		probePinRetryEvery: 2 * time.Millisecond,
+		rpm:                   rpm.New(),
+		daemonCtx:             context.Background(), // production: never cancelled
+		probePinRetryEvery:    2 * time.Millisecond,
+		probePinEgressStateFn: func(string) probePinEgressState { return probePinEgressUp },
 	}
 	d.probePinApply = func(pins []routing.ProbePin) map[string]error {
 		mu.Lock()

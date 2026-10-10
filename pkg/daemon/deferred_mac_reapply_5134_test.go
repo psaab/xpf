@@ -8,6 +8,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
 // deferredMACReapplyTestDP is a minimal RuntimeDataPlane whose ApplyConfig can
@@ -17,6 +18,7 @@ type deferredMACReapplyTestDP struct {
 	applyErr    error
 	applyCalls  int
 	debtRecords int
+	policyReads int
 }
 
 func (d *deferredMACReapplyTestDP) Start(context.Context) error { return nil }
@@ -43,6 +45,13 @@ func (d *deferredMACReapplyTestDP) Sessions() dataplane.SessionStore {
 }
 func (d *deferredMACReapplyTestDP) Telemetry() dataplane.Telemetry              { return dataplane.TelemetryOf(nil) }
 func (d *deferredMACReapplyTestDP) SessionDeltas() dpruntime.SessionDeltaSource { return nil }
+func (d *deferredMACReapplyTestDP) PolicyReadConfig() *config.Config            { return nil }
+func (d *deferredMACReapplyTestDP) ListSessionsByPolicy(
+	dpuserspace.SessionPolicyListRequest,
+) (dpuserspace.ControlResponse, error) {
+	d.policyReads++
+	return dpuserspace.ControlResponse{}, dpuserspace.ErrPolicyReadAuthority
+}
 
 // RecordDeferredWorkerArmDebt is the #5134 debt-recorder the daemon reaches via
 // an optional type assertion on d.dp.
@@ -88,5 +97,24 @@ func TestReapplyAfterDeferredMACNoDebtOnSuccess(t *testing.T) {
 	}
 	if dp.debtRecords != 0 {
 		t.Fatalf("worker-arm debt records = %d, want 0 on a successful re-apply", dp.debtRecords)
+	}
+}
+func TestReapplyAfterDeferredMACRecordsDebtWhenAuthorityUnknown(t *testing.T) {
+	dp := &deferredMACReapplyTestDP{}
+	d := &Daemon{}
+	d.setDataplane(dp)
+	oldCfg := twoPolicyConfig([]string{"p-first", "a"}, nil)
+	cfg := twoPolicyConfig([]string{"p-first"}, nil)
+	d.policyInvalidationPublishLanded = false
+	d.policyInvalidationPlan = &policyInvalidationPlan{oldCfg: oldCfg, newCfg: cfg}
+
+	d.reapplyAfterDeferredMAC(cfg)
+
+	if dp.applyCalls != 0 || dp.policyReads != 0 {
+		t.Fatalf("unknown authority attempted reapply/READ: ApplyConfig=%d policyReads=%d",
+			dp.applyCalls, dp.policyReads)
+	}
+	if dp.debtRecords != 1 {
+		t.Fatalf("unknown authority worker-arm debt records = %d, want 1", dp.debtRecords)
 	}
 }

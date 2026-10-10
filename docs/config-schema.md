@@ -7025,6 +7025,17 @@ tag, asserted only on leaves audited to take a fixed value and NO body
 `hostname`). This is the "design pass on the value-arity contract" the #3332
 body called for; new scalar leaves opt in as they are audited.
 
+**Single-child interface filter blocks (#10293, #12093).** Four interface
+filter bindings opt into `blockValue` (the #6774 opt-in, shared with scalar
+leaves via `singleBlockValue()`): `filter { input { f1; } }` and its `output` /
+`inet6` twins are accepted as one scalar value because the compiler deliberately
+honours the sole child as the filter name (#10293), and strict commit must accept
+what compiles. The exception requires exactly one non-empty child token, no
+grandchildren, and no trailing keys; multi-value and arbitrary sub-statement
+blocks remain rejected by the scalar arity gate. Unlike `default-policy
+{ deny-all; }`, this spelling is not verified as Junos-emitted, so the opt-in
+stays scoped to these four bindings.
+
 **#4415 L12 → #4626 M03 — scoped global-policy `from-zone`/`to-zone` (a zone
 SET).** A Junos global policy may carry an optional `match from-zone` /
 `match to-zone` to scope it to a set of zones (#3148). The typed model behind
@@ -8641,17 +8652,59 @@ The policy-statement ACTION `then as-path-prepend "<asn> <asn> ..."` (#2892) is
 the same class on the `then` side. The leaf is `multi:true`
 (`schema_routing.go`: `policy-options policy-statement <name> term <name> then
 as-path-prepend`) so a quoted `"65001 65001"` or bracketed `[ 65001 65001 ]`
-list — the lexer strips quotes and brackets alike — flattens onto the node's
-`Keys`/`Children` rather than collapsing to last-only. `parsePolicyTermChildren`
-and `parsePolicyTermInlineKeys` (`compiler_routing.go`) read EVERY ASN via
-`firewallMatchValues` (reading only `Keys[1]` would drop all but the first
-prepend — and dropping the repeats defeats the AS-path-prepend mechanism, which
-is exactly the repetition). The ordered list lands in `PolicyTerm.ASPathPrepend
-[]string` and renders as the FRR `set as-path prepend <asn> <asn> ...` clause
-(`policy_render.go`). Fail-on-revert covered by `TestASPathPrepend_*` in
-`pkg/config/compiler_as_path_prepend_2892_test.go` (parse) and
-`TestGeneratePolicyOptions_ASPathPrepend` in
+list — the lexer preserves a quoted list as one space-containing value and
+strips brackets — retains every ASN rather than collapsing to the last-only
+value. `parsePolicyTermChildren` reads packed and child operands through
+`firewallMatchValues`; the separate `parsePolicyTermInlineKeys` scanner
+appends each operand through `appendPolicyASPathPrependOperand`. Both paths
+normalize quoted multi-ASN values before storing ordered operands in
+`PolicyTerm.ASPathPrepend []string`. The schema gate and renderer apply the
+same split before per-ASN validation/emission, keeping commit-check and
+tolerant rendering aligned. Each operand must be canonical
+decimal in 1..4294967295 (no leading zeroes). FRR accepts ASDOT (for example,
+`1.10`), but this config leaf deliberately supports decimal notation only. The
+clause renders as FRR `set as-path prepend <asn> <asn> ...`; repetition is the
+mechanism, so the complete ordered list is preserved. Fail-on-revert coverage
+is in `pkg/config/policy_nexthop_prepend_12070_test.go` and
+`pkg/config/compiler_as_path_prepend_2892_test.go` (parse), and
+`pkg/frr/policy_nexthop_prepend_12070_test.go` plus
 `pkg/frr/policy_as_path_prepend_2892_test.go` (render).
+
+`then next-hop` (#12070) accepts IPv4/IPv6 address literals except unspecified
+and loopback addresses, IPv4 0/8, multicast, and IPv6 link-local, plus
+`peer-address` and `self`. IPv4 link-local addresses remain accepted. Junos
+`discard`, `reject`, and `next-table` have no supported FRR route-map lowering.
+The shared predicate is used by the schema gate and render-side omission belt.
+
+### Route-filter tails are checked at strict commit (#12067)
+
+`from route-filter <prefix> <match-type>` may carry one match-type-specific
+operand (`upto /N`, `prefix-length-range /low-/high`, or `through <prefix>`).
+The strict commit/commit-check path rejects unconsumed tails, missing or
+malformed `upto` lengths, and the unsupported `through` / invalid range cases
+instead of letting the compiler or FRR renderer discard or widen the authored
+constraint. This includes term-line forms whose `Keys` tail is not visited by
+the schema walk: a bare `from route-filter` is retained as an `UnknownFrom`
+marker, and a compiled `upto` with no parsed length is rejected before commit.
+Packed `from` runs are segmented with the compiler's schema-arity rules, so a
+prefix-list, community, or as-path named `route-filter` remains a value
+reference rather than being mistaken for another filter head.
+
+`upto /24` remains valid and renders as FRR `le 24`. On tolerant load and
+peer-sync, the #11779 `UnknownFrom` quarantine forces affected term-line forms
+such as bare `from route-filter`, `from prefix-list route-filter`, and
+`from route-filter <prefix> exact route-filter` to `reject`. The first two
+previously rendered permit-all; the last rendered a permissive matched permit.
+They now deny on boot or sync. This is fail-closed, but a rolling HA upgrade
+can temporarily leave peers with different policy behavior. On tolerant load
+and peer-sync, present but invalid or out-of-range `upto` operands in
+term-line forms are retained as unknown `from` tokens and force `reject`.
+An absent term-line operand, and legacy braced/compact zero-length `upto`
+entries, remain warning-only and retain the historical `le maxLen` renderer
+fallback. Coverage is in
+`pkg/config/route_filter_tail_12067_test.go`,
+`pkg/configstore/fused_statement_8437_test.go`, and
+`pkg/configstore/route_filter_r2_12067_test.go`.
 
 ### The as-path REGEX is the whole token tail, and it is validated (#6686)
 

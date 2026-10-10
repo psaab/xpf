@@ -514,11 +514,12 @@ func (c *xpfCollector) initControlPlaneDescriptors() {
 	)
 	c.rpmPinInstallFailures = prometheus.NewDesc(
 		"xpf_rpm_probe_pin_install_failures",
-		"Number of RPM next-hop probe pins whose kernel fwmark rule / "+
-			"pinned route failed to install. Affected tests hold their "+
-			"prior state (ErrProbeSetup) instead of probing the default "+
-			"path, so a nonzero value means those uplinks are NOT being "+
-			"health-checked (#1895).",
+		"Number of RPM next-hop tests currently held because their kernel pin "+
+			"failed install/readback, the egress is missing or unreadable, no "+
+			"installer is available, or the pin band is being reprogrammed. "+
+			"A confirmed admin-down egress with an installer is probed instead. "+
+			"Nonzero means held tests are not being health-checked "+
+			"(#1895/#12088).",
 		nil, nil,
 	)
 }

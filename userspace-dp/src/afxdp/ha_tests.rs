@@ -8007,7 +8007,24 @@ fn queued_forward_upsert_demoted_by_positioned_demote_9720() {
     // #9720 review B4: surveyed-free worker id (see demote cell).
     const W: u32 = 107;
     let mut coordinator = Coordinator::new();
-    coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
+    // #12252: this transition must start from a live forward candidate. Without
+    // the route and neighbor, re-resolution correctly remains NoRoute and this
+    // cell cannot exercise the FabricRedirect rewrite.
+    let mut forwarding = test_forwarding_state_with_fabric();
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(172, 16, 80, 0), 24).unwrap()),
+        host: Ipv4Addr::new(172, 16, 80, 8),
+        ifindex: 12,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.neighbors.insert(
+        (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        NeighborEntry {
+            mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x77],
+        },
+    );
+    coordinator.set_forwarding_for_test(forwarding);
     let commands = Arc::new(Mutex::new(VecDeque::new()));
     coordinator.workers.register(
         W,
@@ -8017,7 +8034,43 @@ fn queued_forward_upsert_demoted_by_positioned_demote_9720() {
     crate::afxdp::worker_queue::clear_transition_debt(W);
 
     let key = test_key();
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    let live_resolution =
+        crate::afxdp::session_glue::lookup_forwarding_resolution_for_session_without_cache(
+            &coordinator.forwarding,
+            &Arc::new(ShardedNeighborMap::new()),
+            &flow,
+            test_decision(),
+        );
+    assert_eq!(
+        live_resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "fixture: the destination must resolve through the seeded live route and neighbor",
+    );
     let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let inactive_ha_state = BTreeMap::from([(1, inactive_ha_runtime(now_secs))]);
+    let inactive_resolution = crate::afxdp::forwarding::enforce_ha_resolution_snapshot(
+        &coordinator.forwarding,
+        &inactive_ha_state,
+        now_secs,
+        live_resolution,
+    );
+    let pre_demote_redirect = crate::afxdp::session_glue::redirect_session_via_fabric_if_needed(
+        &coordinator.forwarding,
+        inactive_resolution,
+        false,
+        test_metadata().ingress_zone,
+    );
+    assert_eq!(
+        pre_demote_redirect.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "fixture: inactive HA enforcement must turn the live candidate into a FabricRedirect",
+    );
     let forward_upsert = SyncedSessionEntry {
         key: key.clone(),
         decision: test_decision(),
@@ -8798,7 +8851,6 @@ impl Fixture10512Lease {
             created_secs: 0,
             created_ns: 0,
             expected_rt_flow_session_id: self.forward.session_id,
-            companion_policy_id: 7,
             expected_companion_rt_flow_session_id: self.reverse.session_id,
             // #10626: delete-path test — zones/rematch inputs irrelevant here.
             ingress_zone_id: 0,
@@ -9904,11 +9956,19 @@ fn pump_list_queues10512(
     queues: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     tables: &mut [SessionTable],
 ) {
+    let forwarding = ForwardingState::default();
+    pump_list_queues_with_forwarding10512(queues, tables, &forwarding);
+}
+
+fn pump_list_queues_with_forwarding10512(
+    queues: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    tables: &mut [SessionTable],
+    forwarding: &ForwardingState,
+) {
     for (q, t) in queues.iter().zip(tables.iter_mut()) {
         if q.lock().expect("queue").is_empty() {
             continue;
         }
-        let forwarding = ForwardingState::default();
         let ha_state = BTreeMap::new();
         let neighbors = Arc::new(ShardedNeighborMap::new());
         crate::afxdp::session_glue::apply_worker_commands(
@@ -9917,7 +9977,7 @@ fn pump_list_queues10512(
             SteeringMap::unshared_for_test(-1),
             -1,
             -1,
-            &forwarding,
+            forwarding,
             &ha_state,
             &neighbors,
             0,
@@ -9941,11 +10001,34 @@ fn call_list_with_pump10512(
     Vec<String>,
     String,
 ) {
+    call_list_with_forwarding_pump10512(
+        domain,
+        req,
+        queues,
+        tables,
+        &ForwardingState::default(),
+    )
+}
+
+/// Run a policy list with a worker forwarding snapshot that matches the
+/// coordinator's published policy view.
+fn call_list_with_forwarding_pump10512(
+    domain: &super::ha::SessionDomain,
+    req: &crate::protocol::SessionPolicyListRequest,
+    queues: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    tables: &mut [SessionTable],
+    forwarding: &ForwardingState,
+) -> (
+    Vec<crate::protocol::SessionPolicyMatch>,
+    bool,
+    Vec<String>,
+    String,
+) {
     let d = domain.clone();
     let r = req.clone();
     let handle = std::thread::spawn(move || d.list_sessions_by_policy(&r));
     while !handle.is_finished() {
-        pump_list_queues10512(queues, tables);
+        pump_list_queues_with_forwarding10512(queues, tables, forwarding);
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     handle.join().expect("list thread")
@@ -9981,6 +10064,195 @@ fn list_req_ha10512(policy_ids: Vec<u32>) -> crate::protocol::SessionPolicyListR
         ..Default::default()
     }
 }
+
+fn prepublish_list_forwarding12072() -> ForwardingState {
+    let mut zone_ids = rustc_hash::FxHashMap::default();
+    zone_ids.insert("lan".to_string(), TEST_LAN_ZONE_ID);
+    zone_ids.insert("wan".to_string(), TEST_WAN_ZONE_ID);
+    let rule = |name: &str, policy_id| crate::PolicyRuleSnapshot {
+        name: name.to_string(),
+        policy_id,
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        action: "permit".to_string(),
+        ..Default::default()
+    };
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_name_to_id = zone_ids.clone();
+    forwarding.policy = crate::policy::parse_policy_state_with_counters(
+        "deny",
+        &[rule("tmp", 1), rule("web", 2)],
+        &zone_ids,
+        &[],
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect("test policy snapshot");
+    assert_eq!(
+        forwarding
+            .policy
+            .rule_for_policy_id(1)
+            .map(|entry| entry.rule_id.as_str()),
+        Some("lan->wan/tmp")
+    );
+    assert_eq!(
+        forwarding
+            .policy
+            .rule_for_policy_id(2)
+            .map(|entry| entry.rule_id.as_str()),
+        Some("lan->wan/web")
+    );
+    forwarding
+}
+
+/// A bound shared-only row must contribute to the coverage gap after resolving
+/// its stable handle against the coordinator's current policy snapshot.
+#[test]
+fn coord_list_bound_shared_only_row_reports_incomplete_12072() {
+    let forwarding = prepublish_list_forwarding12072();
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(forwarding.clone());
+    let q0 = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(q0.clone())),
+        None,
+    );
+
+    let key = test_key();
+    let session_id = 9001;
+    let mut metadata = test_metadata();
+    metadata.policy_id = 77;
+    metadata.policy_counter = Some(Arc::new(crate::policy::PolicyRuleCounter::with_rule_id(
+        "lan->wan/tmp",
+    )));
+    let entry = SyncedSessionEntry {
+        key,
+        decision: test_decision(),
+        metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+    };
+    publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &entry,
+    );
+
+    let domain = coordinator.session_domain();
+    let mut table = SessionTable::new();
+    let (rows, complete, errors, continuation) = call_list_with_forwarding_pump10512(
+        &domain,
+        &list_req_ha10512(vec![1]),
+        &[q0],
+        std::slice::from_mut(&mut table),
+        &forwarding,
+    );
+    assert!(rows.is_empty(), "the shared-only row is absent from workers");
+    assert!(!complete, "the shared-only bound tmp row makes coverage incomplete");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error == "shared-synced-map-uncovered"),
+        "the coverage gap must name the shared synced map: {errors:?}"
+    );
+    assert!(continuation.is_empty(), "an empty response has no page token");
+}
+
+/// A bound SyncImport whose admission-time scalar aliases tmp must list only
+/// under web's current stable-rule ID.
+#[test]
+fn coord_list_bound_sync_import_resolves_current_policy_id_12072() {
+    let forwarding = prepublish_list_forwarding12072();
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(forwarding.clone());
+    let q0 = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(q0.clone())),
+        None,
+    );
+
+    let key = test_key();
+    let mut metadata = test_metadata();
+    metadata.policy_id = 1; // Admission scalar aliases tmp; stable identity is web.
+    metadata.policy_counter = Some(Arc::new(crate::policy::PolicyRuleCounter::with_rule_id(
+        "lan->wan/web",
+    )));
+    let mut table = SessionTable::new();
+    assert!(table.install_with_protocol_with_origin(
+        key.clone(),
+        test_decision(),
+        metadata.clone(),
+        SessionOrigin::SyncImport,
+        1_000_000_000,
+        PROTO_TCP,
+        0x10,
+    ));
+    let session_id = table.session_id_for(&key);
+    assert_ne!(session_id, 0, "fixture must mint a live session identity");
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision: test_decision(),
+        metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+    };
+    publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &entry,
+    );
+
+    let domain = coordinator.session_domain();
+    let (rows, complete, errors, continuation) = call_list_with_forwarding_pump10512(
+        &domain,
+        &list_req_ha10512(vec![1]),
+        &[q0.clone()],
+        std::slice::from_mut(&mut table),
+        &forwarding,
+    );
+    assert!(
+        rows.is_empty(),
+        "LIST[1] must not match web's admission-time scalar"
+    );
+    assert!(complete, "the excluded scalar alias does not make coverage incomplete");
+    assert!(errors.is_empty(), "unexpected LIST[1] errors: {errors:?}");
+    assert!(continuation.is_empty(), "an empty response has no page token");
+
+    let (rows, complete, errors, continuation) = call_list_with_forwarding_pump10512(
+        &domain,
+        &list_req_ha10512(vec![2]),
+        &[q0],
+        std::slice::from_mut(&mut table),
+        &forwarding,
+    );
+    assert!(complete, "the resolved web row has complete coverage");
+    assert!(errors.is_empty(), "unexpected LIST[2] errors: {errors:?}");
+    assert!(continuation.is_empty(), "one row has no continuation");
+    assert_eq!(rows.len(), 1, "LIST[2] returns the bound web row");
+    assert_eq!(rows[0].policy_id, 2, "wire policy_id is the current web id");
+    assert_eq!(rows[0].expected_rt_flow_session_id, session_id);
+}
+
 
 /// Coordinator fan-out merges rows across workers and dedups the same
 /// (key, identity) replica found in two tables.
@@ -10027,10 +10299,10 @@ fn coord_list_fans_out_merges_and_dedups_10512() {
     assert_eq!(policies, vec![5, 6]);
 }
 
-/// A matching row in shared HA authority but absent from every worker-local
-/// table must not become an authoritative empty READ (#11339).
+/// A shared peer row without a stable rule binding is excluded from
+/// prepublish ID-keyed reads; legacy reads retain the scalar coverage fence.
 #[test]
-fn coord_list_shared_only_policy_row_reports_incomplete_11339() {
+fn coord_list_unbound_peer_row_excluded_from_prepublish_12072() {
     let now_ns = 1_000_000_000u64;
     let mut coordinator = Coordinator::new();
     let q0 = Arc::new(Mutex::new(VecDeque::new()));
@@ -10078,9 +10350,18 @@ fn coord_list_shared_only_policy_row_reports_incomplete_11339() {
         std::slice::from_mut(&mut coverage_table),
     );
     assert!(rows.is_empty(), "the worker has no policy-5 row");
-    assert!(complete, "an out-of-scope shared row does not break coverage");
-    assert!(errors.is_empty(), "out-of-scope rows are not READ errors: {errors:?}");
-    assert!(continuation.is_empty(), "an empty response has no page token");
+    assert!(
+        complete,
+        "an out-of-scope shared row does not break coverage"
+    );
+    assert!(
+        errors.is_empty(),
+        "out-of-scope rows are not READ errors: {errors:?}"
+    );
+    assert!(
+        continuation.is_empty(),
+        "an empty response has no page token"
+    );
 
     let mut covered_table = SessionTable::new();
     let mut key = test_key();
@@ -10099,15 +10380,22 @@ fn coord_list_shared_only_policy_row_reports_incomplete_11339() {
         std::slice::from_ref(&q0),
         std::slice::from_mut(&mut empty_table),
     );
-    assert!(rows.is_empty(), "the matching row is absent from workers");
-    assert!(!complete, "shared-only coverage must not report complete");
     assert!(
-        errors
-            .iter()
-            .any(|error| error == "shared-synced-map-uncovered"),
-        "the response must name the coverage gap, got {errors:?}"
+        rows.is_empty(),
+        "the unbound shared row has no stable rule identity"
     );
-    assert!(continuation.is_empty(), "an empty response has no page token");
+    assert!(
+        complete,
+        "prepublish matching must exclude the ambiguous peer-synced policy_id"
+    );
+    assert!(
+        errors.is_empty(),
+        "an excluded unbound row is not an incomplete READ: {errors:?}"
+    );
+    assert!(
+        continuation.is_empty(),
+        "an empty response has no page token"
+    );
 
     let mut legacy_request = request.clone();
     legacy_request.mode = "legacy".to_string();
@@ -10118,8 +10406,14 @@ fn coord_list_shared_only_policy_row_reports_incomplete_11339() {
         std::slice::from_ref(&q0),
         std::slice::from_mut(&mut empty_table),
     );
-    assert!(rows.is_empty(), "the matching legacy row is absent from workers");
-    assert!(!complete, "an unbounded legacy scan must expose shared-only coverage");
+    assert!(
+        rows.is_empty(),
+        "the matching legacy row is absent from workers"
+    );
+    assert!(
+        !complete,
+        "an unbounded legacy scan must expose shared-only coverage"
+    );
     assert!(
         errors
             .iter()
@@ -10133,8 +10427,14 @@ fn coord_list_shared_only_policy_row_reports_incomplete_11339() {
         std::slice::from_ref(&q0),
         std::slice::from_mut(&mut covered_table),
     );
-    assert!(errors.is_empty(), "worker-local coverage is complete: {errors:?}");
-    assert!(complete, "a shared row captured by a worker remains complete");
+    assert!(
+        errors.is_empty(),
+        "worker-local coverage is complete: {errors:?}"
+    );
+    assert!(
+        complete,
+        "a shared row captured by a worker remains complete"
+    );
     assert_eq!(rows.len(), 1, "the worker returns the covered matching row");
     assert_eq!(rows[0].expected_rt_flow_session_id, session_id);
 }
@@ -10546,5 +10846,225 @@ fn purge_stale_replay_counts_removals_not_declines_10612() {
     assert!(
         coordinator.sessions.synced.lock().expect("shared").contains_key(&live_key),
         "a Declined live replacement must survive the purge"
+    );
+}
+
+/// #12086 R1-F2: the forward session is PBR-stamped with `blue`, which has
+/// no route to the reply target. Reverse-prewarm must still derive the native
+/// reply table and file the session under both owner RGs; otherwise activation
+/// of the LAN-side RG never reaches the reverse companion synthesized by the
+/// activation consumer.
+#[test]
+fn pbr_stamped_split_rg_reverse_prewarm_uses_native_table_12086() {
+    let mut coordinator = Coordinator::new();
+    let mut forwarding = test_forwarding_state_split_rgs();
+    let (domain, check) = crate::session::install_table_identity("blue");
+    forwarding.install_tables.insert(
+        domain,
+        crate::afxdp::types::InstallTables {
+            v4: Some("blue.inet.0".to_string()),
+            v6: None,
+            h2: check,
+        },
+    );
+    coordinator.set_forwarding_for_test(forwarding);
+    let worker_commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(worker_commands.clone())),
+        None,
+    );
+
+    let mut decision = test_decision();
+    decision.install_table_domain = domain;
+    decision.install_table_check = check;
+    let mut metadata = test_metadata();
+    metadata.fabric_ingress = false;
+    let entry = SyncedSessionEntry {
+        key: test_key(),
+        decision,
+        metadata,
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+    };
+
+    assert_eq!(
+        coordinator.upsert_synced_session(entry.clone()),
+        SyncedImportOutcome::Applied
+    );
+    assert_eq!(
+        filed_under_7209(&coordinator, &entry.key),
+        vec![1, 2],
+        "PBR target `blue` cannot resolve the reply target; reverse-prewarm \
+         must use the native table and file the reply owner RG 2 as well as \
+         forward owner RG 1",
+    );
+
+    coordinator
+        .update_ha_state(&[
+            HAGroupStatus {
+                rg_id: 1,
+                active: true,
+                ..HAGroupStatus::default()
+            },
+            HAGroupStatus {
+                rg_id: 2,
+                active: false,
+                ..HAGroupStatus::default()
+            },
+        ])
+        .expect("seed HA state with the LAN-side owner inactive");
+    worker_commands.lock().expect("commands").clear();
+    coordinator
+        .update_ha_state(&[
+            HAGroupStatus {
+                rg_id: 1,
+                active: true,
+                ..HAGroupStatus::default()
+            },
+            HAGroupStatus {
+                rg_id: 2,
+                active: true,
+                ..HAGroupStatus::default()
+            },
+        ])
+        .expect("activate LAN-side RG 2");
+
+    let reverse_key = reverse_session_key(&entry.key, entry.decision.nat);
+    let reverse = coordinator
+        .sessions
+        .synced
+        .lock()
+        .expect("shared sessions")
+        .get(&reverse_key)
+        .cloned()
+        .expect("activation must synthesize the reverse companion");
+    assert!(reverse.metadata.is_reverse);
+    assert_eq!(reverse.metadata.owner_rg_id, 2);
+    assert!(
+        worker_commands.lock().expect("commands").iter().any(|command| {
+            matches!(
+                command,
+                WorkerCommand::UpsertSynced(session)
+                    if session.metadata.is_reverse && session.metadata.owner_rg_id == 2
+            )
+        }),
+        "activation of RG 2 must enqueue its reverse companion for prewarm",
+    );
+}
+
+/// #12086 R2-N1a: a resolved native table, not the base default table,
+/// owns the reverse reply path. Reverting this lookup to `None` must lose
+/// the reply RG filing when the two tables resolve through different RGs.
+#[test]
+fn reverse_prewarm_uses_native_table_instead_of_default_12086() {
+    let mut coordinator = Coordinator::new();
+    let mut forwarding = test_forwarding_state_split_rgs();
+    let mut default_route = forwarding.connected_v4[0].clone();
+    default_route.ifindex = 12;
+    default_route.table = "inet.0".to_string();
+    let mut native_route = forwarding.connected_v4[0].clone();
+    native_route.ifindex = 6;
+    native_route.table = "red.inet.0".to_string();
+    forwarding.connected_v4 = vec![default_route, native_route];
+    let (domain, check) = crate::session::install_table_identity("red");
+    forwarding.install_tables.insert(
+        domain,
+        crate::afxdp::types::InstallTables {
+            v4: Some("red.inet.0".to_string()),
+            v6: None,
+            h2: check,
+        },
+    );
+    coordinator.set_forwarding_for_test(forwarding);
+
+    let mut key = test_key();
+    key.routing_domain = domain;
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+    };
+    assert!(matches!(
+        crate::afxdp::forwarding::native_route_table_for_flow_target(
+            &coordinator.forwarding,
+            key.routing_domain,
+            entry.metadata.ingress_ifindex as i32,
+            entry.metadata.ingress_vlan_id,
+            None,
+            key.src_ip,
+        ),
+        crate::afxdp::forwarding::NativeRouteTable::Table { table, .. }
+            if table == "red.inet.0"
+    ));
+    assert_eq!(
+        coordinator.upsert_synced_session(entry.clone()),
+        SyncedImportOutcome::Applied
+    );
+    assert_eq!(
+        filed_under_7209(&coordinator, &entry.key),
+        vec![1, 2],
+        "red.inet.0 resolves the reply via RG 2; reverting to the base \
+         default table resolves it via RG 1 and drops the distinct filing",
+    );
+}
+
+/// #12086 R2-N1b: an unresolvable native domain is still a best-effort
+/// prewarm candidate in the base default table. Skipping the reply RG on
+/// this branch must leave only the forward entry's RG in the index.
+#[test]
+fn reverse_prewarm_unresolvable_domain_keeps_default_reply_rg_12086() {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
+
+    let mut key = test_key();
+    key.routing_domain = 0x00d0_1208;
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+    };
+    assert!(matches!(
+        crate::afxdp::forwarding::native_route_table_for_flow_target(
+            &coordinator.forwarding,
+            key.routing_domain,
+            entry.metadata.ingress_ifindex as i32,
+            entry.metadata.ingress_vlan_id,
+            None,
+            key.src_ip,
+        ),
+        crate::afxdp::forwarding::NativeRouteTable::Unresolvable { .. }
+    ));
+    assert_eq!(
+        coordinator.upsert_synced_session(entry.clone()),
+        SyncedImportOutcome::Applied
+    );
+    assert_eq!(
+        filed_under_7209(&coordinator, &entry.key),
+        vec![1, 2],
+        "the unresolvable native domain must keep its default-table \
+         best-effort reply RG 2 filing rather than skip it",
     );
 }

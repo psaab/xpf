@@ -25,7 +25,7 @@ use crate::{
     InterfaceAddressSnapshot, InterfaceSnapshot, NeighborSnapshot, RouteSnapshot, ZoneSnapshot,
 };
 use serde::Deserialize;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// One leak the operator authored: a prefix, its kernel rule priority, and the
 /// table it redirects into.
@@ -117,6 +117,7 @@ fn snapshot_for(leaks: &[Leak]) -> crate::ConfigSnapshot {
         .iter()
         .map(|leak| InterfaceSnapshot {
             name: format!("ge-0/0/{}.50", leak.egress_ifindex),
+            routing_instance: leak.target.to_string(),
             zone: "wan".to_string(),
             linux_name: format!("ge-0-0-{}.50", leak.egress_ifindex),
             ifindex: leak.egress_ifindex,
@@ -471,25 +472,51 @@ struct LeakCorpusRow9955 {
 }
 
 fn snapshot_from_go_leak_corpus_9955(row: &LeakCorpusRow9955) -> crate::ConfigSnapshot {
-    let interface = |ifindex: i32, v4: &str, v6: &str| InterfaceSnapshot {
-        name: format!("ge-0/0/{ifindex}.50"),
-        linux_name: format!("ge-0-0-{ifindex}.50"),
-        ifindex,
-        zone: "wan".to_string(),
-        hardware_addr: "02:bf:72:00:50:08".to_string(),
-        addresses: vec![
-            InterfaceAddressSnapshot {
-                family: "inet".to_string(),
-                address: v4.to_string(),
-                ..Default::default()
-            },
-            InterfaceAddressSnapshot {
-                family: "inet6".to_string(),
-                address: v6.to_string(),
-                ..Default::default()
-            },
-        ],
-        ..Default::default()
+    // The Go route oracle checks table choice and egress interface, but not
+    // interface ownership. Reflect each synthetic egress interface's owning
+    // route table so the Rust fixture obeys its same-routing-instance check.
+    let interface = |ifindex: i32, v4: &str, v6: &str| {
+        let interface_name = format!("ge-0/0/{ifindex}.50");
+        let routing_instance = row
+            .routes
+            .iter()
+            .find_map(|route| {
+                let instance = route
+                    .table
+                    .strip_suffix(".inet.0")
+                    .or_else(|| route.table.strip_suffix(".inet6.0"))?;
+                route
+                    .next_hops
+                    .iter()
+                    .any(|next_hop| {
+                        next_hop
+                            .rsplit_once('@')
+                            .is_some_and(|(_, name)| name == interface_name.as_str())
+                    })
+                    .then(|| instance.to_string())
+            })
+            .unwrap_or_default();
+        InterfaceSnapshot {
+            name: interface_name,
+            routing_instance,
+            linux_name: format!("ge-0-0-{ifindex}.50"),
+            ifindex,
+            zone: "wan".to_string(),
+            hardware_addr: "02:bf:72:00:50:08".to_string(),
+            addresses: vec![
+                InterfaceAddressSnapshot {
+                    family: "inet".to_string(),
+                    address: v4.to_string(),
+                    ..Default::default()
+                },
+                InterfaceAddressSnapshot {
+                    family: "inet6".to_string(),
+                    address: v6.to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
     };
 
     super::super::test_fixtures::v5(crate::ConfigSnapshot {
@@ -710,4 +737,229 @@ fn v6_leak_target_preserves_local_delivery_9955() {
     );
     assert_eq!(resolved.disposition, ForwardingDisposition::LocalDelivery);
     assert_eq!(resolved.local_ifindex, 12);
+}
+/// #12086 R1-F1: a leak target owns the destination as an interface-NAT
+/// address. The target-table lookup must retain the local-delivery decision —
+/// the same #9955 contract as `v4_leak_target_preserves_local_delivery_9955`
+/// — and agree with the no-SNAT control (`ctl_no_snat`).
+///
+/// Shape A: `inet.0` leaks the WAN /24 into `red.inet.0`; the SNAT WAN
+/// address lives in red; the packet resolves in the default table.
+/// Shape B (the classic VRF setup): red leaks `0/0` into `inet.0`; the SNAT
+/// WAN address lives in `inet.0`; the packet resolves in `red.inet.0`.
+///
+/// Pre-fix, both shapes regressed to `MissingNeighbor` aimed at the
+/// firewall's own address while `ctl_no_snat` stayed `LocalDelivery`.
+/// RED on revert of the FIB interface-NAT ownership check.
+#[allow(clippy::too_many_arguments)]
+fn snapshot_12086_leak_parity(
+    lan_ri: &str,
+    wan_ri: &str,
+    with_snat: bool,
+    leak_table: &str,
+    leak_family: &str,
+    leak_dest: &str,
+    leak_next: &str,
+    leak_len: u8,
+    addr_bits: u8,
+    wan_addr: &str,
+    wan_family: &str,
+) -> crate::ConfigSnapshot {
+    super::super::test_fixtures::v5(crate::ConfigSnapshot {
+        zones: vec![
+            ZoneSnapshot {
+                name: "lan".to_string(),
+                id: TEST_TRUST_ZONE_ID,
+                ..Default::default()
+            },
+            ZoneSnapshot {
+                name: "wan".to_string(),
+                id: TEST_UNTRUST_ZONE_ID,
+                ..Default::default()
+            },
+        ],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "ge-0/0/0.0".to_string(),
+                zone: "lan".to_string(),
+                routing_instance: lan_ri.to_string(),
+                linux_name: "ge-0-0-0.0".to_string(),
+                ifindex: 11,
+                hardware_addr: "02:00:00:00:00:0b".to_string(),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: wan_family.to_string(),
+                    address: if wan_family == "inet" {
+                        "10.0.0.1/24".to_string()
+                    } else {
+                        "2001:db8::1/64".to_string()
+                    },
+                    scope: 0,
+                }],
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0/0/1.0".to_string(),
+                zone: "wan".to_string(),
+                routing_instance: wan_ri.to_string(),
+                linux_name: "ge-0-0-1.0".to_string(),
+                ifindex: 12,
+                hardware_addr: "02:00:00:00:00:0c".to_string(),
+                addresses: vec![InterfaceAddressSnapshot {
+                    family: wan_family.to_string(),
+                    address: wan_addr.to_string(),
+                    scope: 0,
+                }],
+                ..Default::default()
+            },
+        ],
+        routes: vec![RouteSnapshot {
+            table: leak_table.to_string(),
+            family: leak_family.to_string(),
+            destination: leak_dest.to_string(),
+            next_table: leak_next.to_string(),
+            rule_priority: leak_priority(leak_len, addr_bits, LeakKind::NextTable),
+            mtu: 0,
+            ..Default::default()
+        }],
+        source_nat_rules: if with_snat {
+            vec![crate::SourceNATRuleSnapshot {
+                name: "snat".to_string(),
+                from_zone: "lan".to_string(),
+                to_zone: "wan".to_string(),
+                source_addresses: vec!["0.0.0.0/0".to_string(), "::/0".to_string()],
+                interface_mode: true,
+                ..Default::default()
+            }]
+        } else {
+            Vec::new()
+        },
+        ..Default::default()
+    })
+}
+
+fn assert_12086_leak_parity(
+    lan_ri: &str,
+    wan_ri: &str,
+    resolving: Option<&str>,
+    leak_table: &str,
+    leak_family: &str,
+    leak_dest: &str,
+    leak_next: &str,
+    leak_len: u8,
+    addr_bits: u8,
+    wan: IpAddr,
+    wan_addr: &str,
+    wan_family: &str,
+) {
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let mk = |with_snat: bool| {
+        build_forwarding_state(&snapshot_12086_leak_parity(
+            lan_ri, wan_ri, with_snat, leak_table, leak_family, leak_dest, leak_next,
+            leak_len, addr_bits, wan_addr, wan_family,
+        ))
+    };
+    let snat = mk(true);
+    let ctl = mk(false);
+    // Session-miss arm order (poll_descriptor/mod.rs): the interface-NAT arm
+    // runs first, then the FIB in the same table. The dst is the WAN
+    // address, never the LAN ingress address, so the ingress-interface arm
+    // cannot claim it.
+    let arm = interface_nat_local_resolution_on_session_miss(
+        &snat,
+        wan,
+        crate::ip_proto::PROTO_TCP,
+        resolving,
+    );
+    let fib = lookup_forwarding_resolution_in_table_with_dynamic(&snat, &neighbors, wan, resolving);
+    let snat_final = arm.unwrap_or(fib);
+    let ctl_fib =
+        lookup_forwarding_resolution_in_table_with_dynamic(&ctl, &neighbors, wan, resolving);
+    assert_eq!(
+        ctl_fib.disposition,
+        ForwardingDisposition::LocalDelivery,
+        "ctl_no_snat must local-deliver (the #9955 contract baseline)",
+    );
+    assert_eq!(
+        snat_final.disposition,
+        ForwardingDisposition::LocalDelivery,
+        "SNAT must match ctl_no_snat: leak into the owner table keeps LocalDelivery \
+         (arm={arm:?}, fib={fib:?})",
+    );
+    assert_eq!(
+        snat_final.local_ifindex, ctl_fib.local_ifindex,
+        "SNAT and ctl_no_snat must agree on the owning interface",
+    );
+    assert_eq!(snat_final.local_ifindex, 12);
+}
+
+#[test]
+fn interface_nat_leak_into_owner_table_shape_a_v4_12086() {
+    assert_12086_leak_parity(
+        "",
+        "red",
+        None,
+        "inet.0",
+        "inet",
+        "172.16.80.0/24",
+        "red.inet.0",
+        24,
+        32,
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
+        "172.16.80.8/24",
+        "inet",
+    );
+}
+
+#[test]
+fn interface_nat_leak_into_owner_table_shape_b_v4_12086() {
+    assert_12086_leak_parity(
+        "red",
+        "",
+        Some("red.inet.0"),
+        "red.inet.0",
+        "inet",
+        "0.0.0.0/0",
+        "inet.0",
+        0,
+        32,
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
+        "172.16.80.8/24",
+        "inet",
+    );
+}
+
+#[test]
+fn interface_nat_leak_into_owner_table_shape_a_v6_12086() {
+    assert_12086_leak_parity(
+        "",
+        "red",
+        None,
+        "inet6.0",
+        "inet6",
+        "2001:db8:80::/64",
+        "red.inet6.0",
+        64,
+        128,
+        IpAddr::V6("2001:db8:80::8".parse::<Ipv6Addr>().expect("WAN v6")),
+        "2001:db8:80::8/64",
+        "inet6",
+    );
+}
+
+#[test]
+fn interface_nat_leak_into_owner_table_shape_b_v6_12086() {
+    assert_12086_leak_parity(
+        "red",
+        "",
+        Some("red.inet6.0"),
+        "red.inet6.0",
+        "inet6",
+        "::/0",
+        "inet6.0",
+        0,
+        128,
+        IpAddr::V6("2001:db8:80::8".parse::<Ipv6Addr>().expect("WAN v6")),
+        "2001:db8:80::8/64",
+        "inet6",
+    );
 }

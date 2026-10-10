@@ -8,6 +8,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
 // bootstrapFromFile reads the text Junos config file and imports it as the
@@ -326,11 +327,11 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 // precisely when the local apply had a recoverable hiccup — the worst time to
 // skip it.
 //
-// applyErrSkipsPeerSync distinguishes the two error classes that MUST still
-// suppress the sync (a disarmed dataplane, or a daemon-stop context abort)
-// from a non-fatal subsystem error that must NOT. On a non-fatal error the
-// committed config is returned alongside the error so the operator sees the
-// failure while the standby still converges.
+// applyErrSkipsPeerSync distinguishes the three error classes that MUST still
+// suppress the sync (a disarmed dataplane, daemon-stop context abort, or
+// unknown policy-session READ authority) from a non-fatal subsystem error that
+// must NOT. On a non-fatal error the committed config is returned alongside
+// the error so the operator sees the failure while the standby still converges.
 func (d *Daemon) applyAndSyncCommitted(oldActive, compiled *config.Config, syncPeer peerSyncPolicy) (*config.Config, error) {
 	return d.applyAndSyncCommittedWithPeerSnapshotAuthorization(oldActive, compiled, syncPeer, nil)
 }
@@ -373,13 +374,24 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	// below reads it alongside the old-vs-new full-admit comparison.
 	d.clearKeptSuspicious10752()
 	respCfg, applyErr := d.applyConfigLockedForCommit(d.applyCancelCtx(), compiled)
+	if applyErr != nil && !d.policyInvalidationPublishLanded {
+		if debt := d.policyInvalidationDebt; debt != nil &&
+			debt.newCfg == compiled && debt.capture != nil {
+			// An unpublished attempt still must surface its incomplete capture
+			// once; the debt survives for a later complete scan, but settled
+			// retries must not replay the error.
+			applyErr = errors.Join(applyErr, debt.capture.enumerateErr())
+		}
+	}
 	if applyErrSkipsPeerSync(applyErr) {
-		// Fatal (required-protocol-gate: dataplane disarmed / fail-closed) or a
-		// daemon-stop context abort (#2926 boundary): report failure and do NOT
-		// push. Pushing a disarm-config to the standby is strictly worse, and a
-		// shutdown-aborted apply reconverges on next boot + reverse-sync. Skip the
-		// deletion-clear too: the dataplane is disarmed / tearing down, so there is
-		// no live forwarding state to invalidate.
+		// Fatal (required-protocol-gate: dataplane disarmed/fail-closed), a
+		// daemon-stop context abort (#2926 boundary), or a policy READ
+		// authority refusal that blocked local publication: report failure
+		// and do NOT push. The peer stays on its prior snapshot because this
+		// node could not safely apply the promoted config. The shutdown case
+		// converges on next boot + reverse-sync. Skip deletion-clear too:
+		// either the dataplane is disarmed/tearing down or no safe session
+		// candidate set was captured.
 		return nil, applyErr
 	}
 	// #4234 Junos-default deletion-clear + modified-policy re-eval + #4342
@@ -449,10 +461,9 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 }
 
 // applyErrSkipsPeerSync reports whether an applyConfigLocked error means the
-// just-committed config must NOT be pushed to the cluster peer (#4034). Two
+// just-committed config must NOT be pushed to the cluster peer (#4034). Three
 // classes skip the sync; every OTHER (non-fatal, best-effort subsystem) error
 // still syncs because the config is committed + active and the dataplane armed:
-//
 //   - A required-protocol-gate error (compileErrorMustAbortApply): the
 //     dataplane is DISARMED (fail-closed, #2138). The commit is reported failed;
 //     pushing a config that would disarm the standby's dataplane too is strictly
@@ -461,6 +472,10 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 //     mid-pipeline by a daemon stop. The local node is tearing down; the next
 //     boot re-applies in full and the reverse-sync-on-reconnect converges the
 //     peer, so a push racing the transport teardown is avoided.
+//   - A policy-session READ authority refusal: the C2 apply boundary aborts
+//     before local publication, so the promoted config remains local-only;
+//     pushing it would diverge the peer. The refusal means the positional IDs
+//     this capture requires could not be read under the named authority.
 //
 // #7618: context.DeadlineExceeded was in that second class and is NOT any
 // more, because it never had a true positive there.
@@ -508,7 +523,8 @@ func applyErrSkipsPeerSync(err error) bool {
 	if compileErrorMustAbortApply(err) {
 		return true
 	}
-	return errors.Is(err, context.Canceled)
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, dpuserspace.ErrPolicyReadAuthority)
 }
 
 // pushCommittedConfigToPeer pushes the current active config to the cluster

@@ -3,10 +3,12 @@
 package networkd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/fsatomic"
@@ -350,7 +353,7 @@ func (m *Manager) Apply(interfaces []InterfaceConfig) error {
 
 	var filtered []InterfaceConfig
 	for _, ifc := range interfaces {
-		if ifc.Unmanaged && external[ifc.Name] {
+		if ifc.Unmanaged && external.MatchesForApply(ifc.Name, ifc.MACAddress) {
 			slog.Debug("skipping externally managed interface", "name", ifc.Name)
 			continue
 		}
@@ -770,35 +773,571 @@ func warnIfAllRPFilterOverrides(tunName string) {
 		"tun", tunName, "all_rp_filter", val, "issue", 2378)
 }
 
-func FindExternallyManaged(dir string) map[string]bool {
-	result := make(map[string]bool)
+// ExternalMatchSet describes non-xpf networkd [Match] rules that must remain
+// outside xpf's unmanaged teardown. Apply uses a conservative supported-key
+// match when other predicates are unknown; the compiler uses Matches so it
+// never skips teardown based on an incomplete conjunction.
+type ExternalMatchSet struct {
+	rules []externalNetworkMatch
+}
+
+type externalNetworkMatch struct {
+	namePatterns []string
+	macPatterns  []string
+	hasName      bool
+	hasMAC       bool
+	matchAll     bool
+	unsupported  bool
+}
+
+// Matches reports whether a rule can be proven to match using only Name= and
+// MACAddress=. Rules with unknown predicates are not treated as matches.
+func (m ExternalMatchSet) Matches(name, mac string) bool {
+	return m.matches(name, mac, false)
+}
+
+// MatchesForApply conservatively preserves the durable protection Apply had
+// before external matching was shared with the compiler. When supported
+// predicates match, unknown additional [Match] keys do not cause xpf to write
+// an always-down unit over a potentially-owned interface.
+func (m ExternalMatchSet) MatchesForApply(name, mac string) bool {
+	return m.matches(name, mac, true)
+}
+
+func (m ExternalMatchSet) matches(name, mac string, allowUnknown bool) bool {
+	for _, rule := range m.rules {
+		if rule.matchAll {
+			return true
+		}
+		if rule.unsupported && !allowUnknown {
+			continue
+		}
+		if !rule.hasName && !rule.hasMAC {
+			continue
+		}
+		if rule.hasName && !externalPatternListMatches(rule.namePatterns, name) {
+			continue
+		}
+		if rule.hasMAC && !externalMACAddressListMatches(rule.macPatterns, mac) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// FindExternallyManaged reads non-xpf .network files and retains supported
+// [Match] predicates. systemd applies all predicates in a section together;
+// Apply conservatively ignores additional unknown keys only when at least one
+// supported predicate matches, while Matches requires the complete supported
+// rule to be sufficient.
+func FindExternallyManaged(dir string) ExternalMatchSet {
+	var result ExternalMatchSet
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return result
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if strings.HasPrefix(name, filePrefix) || !strings.HasSuffix(name, ".network") {
+		if entry.IsDir() || strings.HasPrefix(name, filePrefix) || !strings.HasSuffix(name, ".network") {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			continue
 		}
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "Name=") {
-				ifName := strings.TrimSpace(strings.TrimPrefix(line, "Name="))
-				if ifName != "" {
-					result[ifName] = true
-				}
+		var rule externalNetworkMatch
+		inMatch, sawMatchSection := false, false
+		for _, rawLine := range strings.Split(string(data), "\n") {
+			line := strings.TrimSpace(rawLine)
+			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+				continue
 			}
+			if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+				inMatch = line == "[Match]"
+				sawMatchSection = sawMatchSection || inMatch
+				continue
+			}
+			if !inMatch {
+				continue
+			}
+			key, value, ok := strings.Cut(line, "=")
+			if !ok {
+				continue
+			}
+			value = strings.TrimSpace(value)
+			switch strings.TrimSpace(key) {
+			case "Name":
+				if value == "" {
+					rule.namePatterns = nil
+					rule.hasName = false
+					continue
+				}
+				lineNegated := strings.HasPrefix(value, "!")
+				if lineNegated {
+					value = value[1:]
+				}
+				for _, pattern := range strings.Fields(value) {
+					if lineNegated {
+						pattern = "!" + pattern
+					}
+					rule.namePatterns = append(rule.namePatterns, pattern)
+				}
+				rule.hasName = len(rule.namePatterns) > 0
+			case "MACAddress":
+				if value == "" {
+					rule.macPatterns = nil
+					rule.hasMAC = false
+					continue
+				}
+				for _, pattern := range strings.Fields(value) {
+					if _, ok := parseExternalMACAddress(pattern); ok {
+						rule.macPatterns = append(rule.macPatterns, pattern)
+					}
+				}
+				rule.hasMAC = len(rule.macPatterns) > 0
+			default:
+				rule.unsupported = true
+			}
+		}
+		switch {
+		case rule.hasName || rule.hasMAC:
+			result.rules = append(result.rules, rule)
+		case sawMatchSection && !rule.unsupported:
+			// An empty effective [Match] section matches every interface.
+			rule.matchAll = true
+			result.rules = append(result.rules, rule)
 		}
 	}
 	return result
 }
 
-func (m *Manager) findExternallyManaged() map[string]bool {
+// externalPatternListMatches implements systemd's net_condition_test_strv:
+// any matching negative rule vetoes; otherwise a positive must match if one
+// exists, and an all-negative or empty rule set matches by default.
+func externalPatternListMatches(patterns []string, value string) bool {
+	hasPositive, positiveMatched := false, false
+	for _, pattern := range patterns {
+		negative := strings.HasPrefix(pattern, "!")
+		if negative {
+			pattern = pattern[1:]
+		} else {
+			hasPositive = true
+		}
+		if !fnmatchInterfaceName(pattern, value) {
+			continue
+		}
+		if negative {
+			return false
+		}
+		positiveMatched = true
+	}
+	return !hasPositive || positiveMatched
+}
+
+type fnmatchNameTokenKind uint8
+
+const (
+	fnmatchNameNever fnmatchNameTokenKind = iota
+	fnmatchNameLiteral
+	fnmatchNameAny
+	fnmatchNameStar
+	fnmatchNameCharClass
+)
+
+type fnmatchNameToken struct {
+	kind    fnmatchNameTokenKind
+	literal rune
+	class   fnmatchNameClass
+}
+
+type fnmatchNameClass struct {
+	pattern      string
+	contentStart int
+	end          int
+	negated      bool
+}
+
+// fnmatchInterfaceName implements libc fnmatch(..., flags=0) for interface
+// name patterns. It deliberately does not route character classes through
+// path.Match: fnmatch's first-position ] and edge-position - differ there.
+func fnmatchInterfaceName(pattern, value string) bool {
+	patternIndex, valueIndex := 0, 0
+	starPattern, starValue := -1, -1
+	for valueIndex < len(value) {
+		token, next := fnmatchNameTokenAt(pattern, patternIndex)
+		if token.kind == fnmatchNameStar {
+			starPattern, starValue = next, valueIndex
+			patternIndex = next
+			continue
+		}
+		valueRune, valueSize := utf8.DecodeRuneInString(value[valueIndex:])
+		matched := false
+		switch token.kind {
+		case fnmatchNameLiteral:
+			matched = token.literal == valueRune
+		case fnmatchNameAny:
+			matched = true
+		case fnmatchNameCharClass:
+			var valid bool
+			matched, valid = token.class.matches(valueRune)
+			if !valid {
+				return false
+			}
+		}
+		if matched {
+			patternIndex = next
+			valueIndex += valueSize
+			continue
+		}
+		if starPattern < 0 || starValue >= len(value) {
+			return false
+		}
+		_, size := utf8.DecodeRuneInString(value[starValue:])
+		starValue += size
+		valueIndex = starValue
+		patternIndex = starPattern
+	}
+	for patternIndex < len(pattern) {
+		token, next := fnmatchNameTokenAt(pattern, patternIndex)
+		if token.kind != fnmatchNameStar {
+			return false
+		}
+		patternIndex = next
+	}
+	return true
+}
+
+func fnmatchNameTokenAt(pattern string, start int) (fnmatchNameToken, int) {
+	if start >= len(pattern) {
+		return fnmatchNameToken{kind: fnmatchNameNever}, start
+	}
+	switch pattern[start] {
+	case '*':
+		next := start + 1
+		for next < len(pattern) && pattern[next] == '*' {
+			next++
+		}
+		return fnmatchNameToken{kind: fnmatchNameStar}, next
+	case '?':
+		return fnmatchNameToken{kind: fnmatchNameAny}, start + 1
+	case '\\':
+		if start+1 >= len(pattern) {
+			return fnmatchNameToken{kind: fnmatchNameNever}, len(pattern)
+		}
+		r, size := utf8.DecodeRuneInString(pattern[start+1:])
+		return fnmatchNameToken{kind: fnmatchNameLiteral, literal: r}, start + 1 + size
+	case '[':
+		class, next, ok := parseFnmatchNameClass(pattern, start)
+		if ok {
+			return fnmatchNameToken{kind: fnmatchNameCharClass, class: class}, next
+		}
+		if fnmatchUnterminatedTrailingHyphenClass(pattern, start) {
+			return fnmatchNameToken{kind: fnmatchNameNever}, len(pattern)
+		}
+		return fnmatchNameToken{kind: fnmatchNameLiteral, literal: '['}, start + 1
+	default:
+		r, size := utf8.DecodeRuneInString(pattern[start:])
+		return fnmatchNameToken{kind: fnmatchNameLiteral, literal: r}, start + size
+	}
+}
+
+func parseFnmatchNameClass(pattern string, start int) (fnmatchNameClass, int, bool) {
+	i := start + 1
+	class := fnmatchNameClass{pattern: pattern}
+	if i < len(pattern) && (pattern[i] == '!' || pattern[i] == '^') {
+		class.negated = true
+		i++
+	}
+	class.contentStart = i
+	first := true
+	for i < len(pattern) {
+		if pattern[i] == ']' {
+			if first {
+				i++
+				first = false
+				continue
+			}
+			class.end = i
+			return class, i + 1, true
+		}
+		if pattern[i] == '\\' {
+			i++
+			if i >= len(pattern) {
+				break
+			}
+			_, size := utf8.DecodeRuneInString(pattern[i:])
+			i += size
+			first = false
+			continue
+		}
+		if pattern[i] == '[' && i+1 < len(pattern) && strings.ContainsRune(":.=", rune(pattern[i+1])) {
+			if end := fnmatchBracketTermEnd(pattern, i, len(pattern), pattern[i+1]); end >= 0 {
+				i = end + 2
+				first = false
+				continue
+			}
+		}
+		_, size := utf8.DecodeRuneInString(pattern[i:])
+		i += size
+		first = false
+	}
+	return fnmatchNameClass{}, start + 1, false
+}
+
+// glibc treats an unterminated range with no upper endpoint as no-match.
+func fnmatchUnterminatedTrailingHyphenClass(pattern string, start int) bool {
+	end := len(pattern) - 1
+	if end-start < 2 || pattern[end] != '-' {
+		return false
+	}
+	backslashes := 0
+	for i := end - 1; i > start && pattern[i] == '\\'; i-- {
+		backslashes++
+	}
+	if backslashes%2 != 0 {
+		return false
+	}
+	contentStart := start + 1
+	if contentStart < end && (pattern[contentStart] == '!' || pattern[contentStart] == '^') {
+		contentStart++
+	}
+	return contentStart < end
+}
+
+func fnmatchBracketTermEnd(pattern string, start, limit int, marker byte) int {
+	for i := start + 2; i+1 < limit; i++ {
+		if pattern[i] == marker && pattern[i+1] == ']' {
+			return i
+		}
+	}
+	return -1
+}
+
+type fnmatchClassAtomKind uint8
+
+const (
+	fnmatchClassLiteral fnmatchClassAtomKind = iota
+	fnmatchClassNamed
+	fnmatchClassCollating
+)
+
+type fnmatchClassAtom struct {
+	kind    fnmatchClassAtomKind
+	value   rune
+	start   int
+	end     int
+	escaped bool
+}
+
+func (class fnmatchNameClass) matches(value rune) (bool, bool) {
+	matched := false
+	for i := class.contentStart; i < class.end; {
+		atom, next, ok := fnmatchClassAtomAt(class, i)
+		if !ok {
+			return false, false
+		}
+		if atom.kind == fnmatchClassLiteral && atom.value == '-' && !atom.escaped {
+			matched = matched || value == '-'
+			i = next
+			continue
+		}
+		if atom.kind == fnmatchClassLiteral {
+			hyphen, afterHyphen, hasHyphen := fnmatchClassAtomAt(class, next)
+			if hasHyphen && hyphen.kind == fnmatchClassLiteral && hyphen.value == '-' && !hyphen.escaped {
+				high, afterHigh, hasHigh := fnmatchClassAtomAt(class, afterHyphen)
+				if hasHigh {
+					if high.kind != fnmatchClassLiteral {
+						return false, false
+					}
+					if atom.value <= high.value {
+						matched = matched || atom.value <= value && value <= high.value
+					}
+					i = afterHigh
+					continue
+				}
+			}
+		}
+		atomMatches, valid := atom.matches(class.pattern, value)
+		if !valid {
+			return false, false
+		}
+		matched = matched || atomMatches
+		i = next
+	}
+	if class.negated {
+		return !matched, true
+	}
+	return matched, true
+}
+
+func fnmatchClassAtomAt(class fnmatchNameClass, start int) (fnmatchClassAtom, int, bool) {
+	if start >= class.end {
+		return fnmatchClassAtom{}, start, false
+	}
+	pattern := class.pattern
+	if pattern[start] == '\\' {
+		start++
+		if start >= class.end {
+			return fnmatchClassAtom{}, start, false
+		}
+		value, size := utf8.DecodeRuneInString(pattern[start:])
+		return fnmatchClassAtom{kind: fnmatchClassLiteral, value: value, escaped: true}, start + size, true
+	}
+	if pattern[start] == '[' && start+1 < class.end && strings.ContainsRune(":.=", rune(pattern[start+1])) {
+		marker := pattern[start+1]
+		if end := fnmatchBracketTermEnd(pattern, start, class.end, marker); end >= 0 {
+			kind := fnmatchClassCollating
+			if marker == ':' {
+				kind = fnmatchClassNamed
+			}
+			return fnmatchClassAtom{kind: kind, start: start + 2, end: end}, end + 2, true
+		}
+	}
+	value, size := utf8.DecodeRuneInString(pattern[start:])
+	return fnmatchClassAtom{kind: fnmatchClassLiteral, value: value}, start + size, true
+}
+
+func (atom fnmatchClassAtom) matches(pattern string, value rune) (bool, bool) {
+	switch atom.kind {
+	case fnmatchClassLiteral:
+		return atom.value == value, true
+	case fnmatchClassNamed:
+		return fnmatchPOSIXCharacterClass(pattern[atom.start:atom.end], value)
+	case fnmatchClassCollating:
+		content := pattern[atom.start:atom.end]
+		r, size := utf8.DecodeRuneInString(content)
+		if size == len(content) {
+			return r == value, true
+		}
+		return false, false
+	default:
+		return false, false
+	}
+}
+
+func fnmatchPOSIXCharacterClass(name string, value rune) (bool, bool) {
+	if value < 0 || value > 0x7f {
+		return false, true
+	}
+	c := byte(value)
+	alpha := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+	digit := c >= '0' && c <= '9'
+	switch name {
+	case "alnum":
+		return alpha || digit, true
+	case "alpha":
+		return alpha, true
+	case "blank":
+		return c == ' ' || c == '\t', true
+	case "cntrl":
+		return c < 0x20 || c == 0x7f, true
+	case "digit":
+		return digit, true
+	case "graph":
+		return c >= 0x21 && c <= 0x7e, true
+	case "lower":
+		return c >= 'a' && c <= 'z', true
+	case "print":
+		return c >= 0x20 && c <= 0x7e, true
+	case "punct":
+		return c >= 0x21 && c <= 0x7e && !alpha && !digit, true
+	case "space":
+		return c == ' ' || c >= '\t' && c <= '\r', true
+	case "upper":
+		return c >= 'A' && c <= 'Z', true
+	case "xdigit":
+		return digit || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F', true
+	default:
+		return false, false
+	}
+}
+
+// externalMACAddressListMatches compares normalized hardware addresses. Unlike
+// Name=, systemd's MACAddress= accepts address lists, not shell globs.
+func externalMACAddressListMatches(patterns []string, address string) bool {
+	actual, ok := parseExternalMACAddress(address)
+	if !ok {
+		return false
+	}
+	for _, pattern := range patterns {
+		candidate, ok := parseExternalMACAddress(pattern)
+		if ok && bytes.Equal(candidate, actual) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseExternalMACAddress(value string) ([]byte, bool) {
+	if ip := net.ParseIP(value); ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			return []byte(v4), true
+		}
+		return []byte(ip.To16()), true
+	}
+	// net.ParseMAC accepts separator-less hex and 8-byte EUI-64 values, but
+	// systemd's MACAddress= does not accept either form. Require a separator.
+	// Parse one- or two-digit colon/hyphen groups as systemd does.
+	if !strings.ContainsAny(value, ":-.") {
+		return nil, false
+	}
+	if hw, err := net.ParseMAC(value); err == nil && len(hw) == 6 {
+		return []byte(hw), true
+	}
+	// The six-byte dotted form groups bytes into three variable-width 16-bit fields.
+	if strings.Contains(value, ".") {
+		groups := strings.Split(value, ".")
+		if len(groups) != 3 {
+			return nil, false
+		}
+		hw := make([]byte, 6)
+		for i, group := range groups {
+			if len(group) == 0 || len(group) > 4 {
+				return nil, false
+			}
+			for _, digit := range group {
+				if !((digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f') || (digit >= 'A' && digit <= 'F')) {
+					return nil, false
+				}
+			}
+			value, err := strconv.ParseUint(group, 16, 16)
+			if err != nil {
+				return nil, false
+			}
+			hw[i*2] = byte(value >> 8)
+			hw[i*2+1] = byte(value)
+		}
+		return hw, true
+	}
+	separator := byte(':')
+	if strings.Contains(value, "-") {
+		separator = '-'
+	}
+	groups := strings.Split(value, string(separator))
+	if len(groups) != 6 {
+		return nil, false
+	}
+	hw := make([]byte, len(groups))
+	for i, group := range groups {
+		if len(group) == 0 || len(group) > 2 {
+			return nil, false
+		}
+		for _, digit := range group {
+			if !((digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f') || (digit >= 'A' && digit <= 'F')) {
+				return nil, false
+			}
+		}
+		value, err := strconv.ParseUint(group, 16, 8)
+		if err != nil {
+			return nil, false
+		}
+		hw[i] = byte(value)
+	}
+	return hw, true
+}
+
+func (m *Manager) findExternallyManaged() ExternalMatchSet {
 	return FindExternallyManaged(m.networkDir)
 }
 

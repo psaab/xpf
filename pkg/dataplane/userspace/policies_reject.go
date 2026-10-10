@@ -62,17 +62,29 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 				break
 			}
 		}
-		// #9570: the reserved-sentinel poison uses the application sentinel only
-		// as its wire carrier. Its reason is reported by the zone arm
-		// (collectPolicyZoneRejections), which names the real cause; reporting it
-		// here as well would tell the operator that `application any` is
-		// unrepresentable. An application that is independently bad still
-		// records its own offending tokens, so it is still reported.
-		if appBad && rule.zonePairGlobalSentinelSide != "" && len(rule.rejectedApplications) == 0 {
+		// #9570 / #12249: reserved-zone poison uses the application sentinel
+		// only as its wire carrier. Its cause is reported by the zone arm
+		// (collectPolicyZoneRejections); reporting it here as well would tell
+		// the operator that `application any` is unrepresentable. An
+		// application that is independently bad still records its own offending
+		// tokens, so it is still reported.
+		if appBad && (rule.zonePairGlobalSentinelSide != "" || rule.zonePairDefinedAnySide != "") &&
+			len(rule.rejectedApplications) == 0 {
 			appBad = false
 		}
 		srcBad := addressListHasSentinel(rule.SourceLiterals) || addressListHasSentinel(rule.SourceAddresses)
 		dstBad := addressListHasSentinel(rule.DestinationLiterals) || addressListHasSentinel(rule.DestinationAddresses)
+		// #12288: the synthetic malformed-zone-pair carrier has no compiled
+		// authored policy, so its generic application token is only the wire
+		// poison. Render the compile-time shape metadata as the actual cause.
+		if appBad && len(rule.malformedZonePairShapes) > 0 &&
+			len(rule.rejectedApplications) == 1 &&
+			rule.rejectedApplications[0] == lenientDroppedConstraintToken &&
+			!srcBad && !dstBad {
+			reasons = append(reasons, fmt.Sprintf("names content the userspace matcher cannot represent: %s was skipped; the userspace helper rejects the whole policy snapshot (synthetic carrier %s)",
+				rejectionCause("malformed zone-pair context", rule.malformedZonePairShapes), policyRejectionScope(rule)))
+			continue
+		}
 		if !appBad && !srcBad && !dstBad {
 			continue
 		}

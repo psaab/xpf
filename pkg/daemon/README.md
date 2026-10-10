@@ -112,6 +112,12 @@ usable. Two consequences the code makes explicit:
   `daemon_dp_capability_2114_test.go` binds preservation and
   unreachability in separate bodies; `daemon_dp_probe_canary_test.go` is
   the fence against a new probe asserting on the raw `dp` field.
+- **Full session clear is serialized with config applies.** It acquires
+  `applySem` before resolving the backend. Only a successful helper clear can
+  retire scan-failure debt, and only when its target remains both helper-applied
+  and store-active. Failed clears and moved authorities leave the debt intact;
+  retirement and non-retirement are logged (`ClearAllSessions` in
+  `daemon_dp_live.go`).
 - **Resolve ONCE per operation.** `GetPersistentNAT()` returns a pointer,
   and each call is its own cell load; a `check == nil` followed by a
   second call to `.Len()`/`.Clear()`/`.All()` nil-dereferences if the
@@ -2569,6 +2575,10 @@ never lock an operator out of a remote box it manages.
     in `Run`, so an early-error return (or an embedded library caller whose ctx
     cancels) that never reaches the shutdown sequence still cancels + joins both
     loops instead of leaking them.
+    Carrier-only loss is not pin drift: the kernel may skip DEAD|LINKDOWN
+    routes for lookup when `ignore_routes_with_linkdown=1`, but RPM sockets
+    remain confined to the configured egress with `SO_BINDTODEVICE`, so loss
+    must reach the successive-loss threshold instead of an `ErrProbeSetup` hold.
   - **Two MORE background loops are cancelled + joined the same way (#5523
     C179-093):** the session-aggregation flush goroutine (`applyAggregator` →
     `agg.Run`, which binds to `context.Background()` and was previously cancelled
@@ -3834,10 +3844,16 @@ never lock an operator out of a remote box it manages.
 ## RPM + ip-monitoring wiring (#1827)
 
 - `daemon_rpm.go` — config-hash-gated RPM probe lifecycle
-  (`reconcileRPM`, applyConfigLocked step 17b): probes + probe-pin
-  rules re-apply only when the rendered RPM stanza (or RETH map, or
-  the HA gating filter result) changed, so unrelated commits never
-  wipe probe state. Also owns the §4.4 HA gating scope
+  (`reconcileRPM`, applyConfigLocked step 17b): probe-set restarts remain
+  hash-gated, while unchanged-hash reconciles and link/address notifications
+  verify configured fwmark rules and pinned host routes. Drift stays held unless
+  `LinkByName` confirms the installer-backed egress exists with `IFF_UP` clear;
+  missing or unreadable egress state remains unknown and held. An admin-down
+  egress remains probeable so bound sends feed `ENETUNREACH` loss to RPM. With
+  no pin installer, every pin stays held even while down because no retry can
+  back it after a later link-up. The managed loop retries on the next tick
+  (30 s fallback), resubscribes closed link/address channels after backoff,
+  then verifies all pins to resync. Also owns the §4.4 HA gating scope
   (`filterRPMForHAGating`).
 - `daemon_ipmon.go` — `assembleFRRConfig` (the SOLE `frr.FullConfig`
   constructor, shared by the full apply path and the routes-only

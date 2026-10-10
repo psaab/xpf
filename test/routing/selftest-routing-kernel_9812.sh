@@ -1,9 +1,9 @@
 #!/bin/sh
-# selftest-routing-kernel_9812.sh — run the routing real-kernel cells (#9420, #9819, #11319).
+# selftest-routing-kernel_9812.sh — run the routing real-kernel cells (#9420, #9819, #11319, #12083).
 #
-# Why this leg exists at all: the #9420 next-table ingress-scope cell, the
-# #9819 VRF-miss terminator cell, and the #11319 PBR-before-leak precedence cell
-# are kernel halves of their fixes. The pre-fix code passed compile-side tests;
+# Why this leg exists at all: the #9420 next-table ingress-scope, #9819 VRF-miss
+# terminator, #11319 PBR-before-leak and #12083 VRF-held-source keepalive are
+# kernel halves of their fixes. The pre-fix code passed compile-side tests;
 # the failures were entirely in what the KERNEL resolved (an unscoped ip rule
 # diverting VRF ingress into another table; a VRF miss falling through to main;
 # and a leak rule outranking an explicit PBR selector). The only instrument
@@ -17,7 +17,7 @@
 # failed namespace is a failure, not a skip.
 #
 # The predicate runs the issue-numbered cells in pkg/routing. The fake-ops
-# cells are hermetic and harmless under unshare; the guard below pins all three
+# cells are hermetic and harmless under unshare; the guard below pins all four
 # kernel cells BY NAME, because a `-run` predicate that rots matches nothing
 # and reports a clean pass over an empty set.
 #
@@ -58,14 +58,17 @@ if ! unshare -rn true 2>/dev/null; then
 fi
 
 # -count=1 so a cached PASS can never stand in for a run that did not happen.
-# XPF_REQUIRE_NETNS=1 turns every tool/netns skip arm in the three kernel cells
+# XPF_REQUIRE_NETNS=1 turns every tool/netns skip arm in the four kernel cells
 # into a failure; without it an environment that silently degrades would read
 # green. unshare propagates the environment into the namespace.
-out=$(XPF_REQUIRE_NETNS=1 unshare -rn "$GO" test -count=1 -v -run '9420|9819|11319' ./pkg/routing/ 2>&1)
+# The scoped loopback round trip is capability-gated independently and skips
+# when this fresh netns denies ICMP datagrams. The VRF acceptance cell widens
+# ping_group_range itself and remains forced below.
+out=$(XPF_REQUIRE_NETNS=1 unshare -rn "$GO" test -count=1 -v -run '9420|9819|11319|12083' ./pkg/routing/ 2>&1)
 rc=$?
 
 fail=0
-for cell in TestNextTableIngressScopeOnRealKernel_9420 TestVRFMissTerminatorOnRealKernel9819 TestPBRPrecedesLeakBandsOnRealKernel11319; do
+for cell in TestNextTableIngressScopeOnRealKernel_9420 TestVRFMissTerminatorOnRealKernel9819 TestPBRPrecedesLeakBandsOnRealKernel11319 TestTunnelKeepaliveVRFHeldSourcePeerAlive12083; do
 	if ! printf '%s\n' "$out" | grep -q "^=== RUN   $cell\$"; then
 		echo "FAIL: $cell did not run — the -run predicate has rotted"
 		fail=1
@@ -83,5 +86,5 @@ if [ "$fail" -ne 0 ]; then
 	printf '%s\n' "$out" | sed 's/^/      /'
 	exit 1
 fi
-echo "PASS: all three routing kernel cells ran and passed"
+echo "PASS: all four routing kernel cells ran and passed"
 exit 0

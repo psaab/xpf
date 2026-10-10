@@ -1,22 +1,34 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 const bgpSAFIUnicast11815 = "unicast"
 
+// bgpSAFIWarning11815 captures warning details so merged activation can be
+// finalized without parsing the rendered diagnostic.
+type bgpSAFIWarning11815 struct {
+	index int
+	afi   string
+	scope string
+	safi  string
+}
+
 // applyBGPFamilySAFI11815 preserves only the route family xpf can render.
-// A bare `family inet|inet6` retains Junos's unicast default. An explicit
-// unsupported SAFI is rejected on strict compilation; on lenient load/sync
-// the gate warns here — its call sites see every AST shape, including a
-// hierarchical one-liner's packed Keys tail — and the family stays inert,
-// never activating unicast (#11815).
-func applyBGPFamilySAFI11815(famNode *Node, scope string, opts compileOpts, warnings *[]string) (unicast, unsupported bool, err error) {
+// A bare `family inet|inet6` retains Junos's unicast default. The gate sees
+// every AST shape, including a hierarchical one-liner's packed Keys tail.
+// Strict compilation rejects unsupported SAFIs. Lenient wording is finalized
+// after sibling and inherited activation is merged; unsupported SAFIs stay
+// inert without discarding a supported unicast activation (#11815).
+func applyBGPFamilySAFI11815(famNode *Node, afi, scope string, opts compileOpts, warnings *[]string, warningRecords *[]bgpSAFIWarning11815) (unicast, unsupported bool, err error) {
 	if famNode == nil {
 		return true, false, nil
 	}
 
 	sawSAFI := false
-	unsupportedName := ""
+	unsupportedNames := make([]string, 0, 1)
 	accept := func(safi string) {
 		sawSAFI = true
 		if safi == bgpSAFIUnicast11815 {
@@ -24,9 +36,12 @@ func applyBGPFamilySAFI11815(famNode *Node, scope string, opts compileOpts, warn
 			return
 		}
 		unsupported = true
-		if unsupportedName == "" {
-			unsupportedName = safi
+		for _, name := range unsupportedNames {
+			if name == safi {
+				return
+			}
 		}
+		unsupportedNames = append(unsupportedNames, safi)
 	}
 
 	// The compound family node is Keys=[family, inet|inet6]. The first tail
@@ -54,22 +69,52 @@ func applyBGPFamilySAFI11815(famNode *Node, scope string, opts compileOpts, warn
 		return unicast, false, nil
 	}
 
-	// A mixed family still activates its explicitly configured unicast; only
-	// the unsupported SAFI is dropped. Say which, so a lenient boot/sync
-	// warning never reads as "this family is not activated" when unicast is.
-	var msg string
-	if unicast {
-		msg = fmt.Sprintf("%s: BGP address-family SAFI %q is unsupported and is skipped; explicitly configured unicast remains activated (#11815)", scope, unsupportedName)
-	} else {
-		msg = fmt.Sprintf("%s: BGP address-family SAFI %q is unsupported; only unicast is compiled, so this family is not activated (#11815)", scope, unsupportedName)
-	}
+	// Lenient mixed-family warnings are finalized after sibling and inherited
+	// activation has been merged by the group/neighbor compiler.
 	if !opts.lenientBGPSAFI11815 {
-		return false, true, fmt.Errorf("%s", msg)
+		quotedNames := make([]string, len(unsupportedNames))
+		for i, name := range unsupportedNames {
+			quotedNames[i] = fmt.Sprintf("%q", name)
+		}
+		noun, verb := "SAFI", "is"
+		if len(quotedNames) != 1 {
+			noun, verb = "SAFIs", "are"
+		}
+		return false, true, fmt.Errorf(
+			"%s: BGP address-family %s %s %s unsupported; the configured family is rejected on strict compilation (#11815)",
+			scope, noun, strings.Join(quotedNames, ", "), verb,
+		)
 	}
 	if warnings != nil {
-		*warnings = append(*warnings, msg)
+		for _, name := range unsupportedNames {
+			index := len(*warnings)
+			*warnings = append(*warnings, formatBGPFamilySAFIWarning11815(scope, name, unicast))
+			if warningRecords != nil {
+				*warningRecords = append(*warningRecords, bgpSAFIWarning11815{
+					index: index,
+					afi:   afi,
+					scope: scope,
+					safi:  name,
+				})
+			}
+		}
 	}
 	return unicast, true, nil
+}
+
+func formatBGPFamilySAFIWarning11815(scope, safi string, unicast bool) string {
+	quotedSAFI := fmt.Sprintf("%q", safi)
+	if unicast {
+		return fmt.Sprintf("%s: BGP address-family SAFI %s is unsupported and is skipped; unicast remains activated in the merged configuration (#11815)", scope, quotedSAFI)
+	}
+	return fmt.Sprintf("%s: BGP address-family SAFI %s is unsupported; only unicast is compiled, so this family is not activated (#11815)", scope, quotedSAFI)
+}
+
+func setBGPFamilySAFIWarningActivation11815(warnings *[]string, record bgpSAFIWarning11815, unicast bool) {
+	if warnings == nil || record.index < 0 || record.index >= len(*warnings) {
+		return
+	}
+	(*warnings)[record.index] = formatBGPFamilySAFIWarning11815(record.scope, record.safi, unicast)
 }
 
 // isBGPSAFIWarningOwned11815 reports whether keyword is a BGP family SAFI

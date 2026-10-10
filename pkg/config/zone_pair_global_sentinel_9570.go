@@ -7,6 +7,11 @@ package config
 // a zone-pair REFERENCE to it at commit.
 const JunosGlobalZoneName = "junos-global"
 
+// ReservedWildcardZoneName is the Junos wildcard zone-context token. A
+// definition of this name is tolerated only on legacy load paths and is
+// quarantined from the dataplane (#3055, #12249).
+const ReservedWildcardZoneName = "any"
+
 // ZonePairGlobalSentinelSide reports which structural side(s) of a ZONE-PAIR
 // security-policy stanza (`from-zone <a> to-zone <b> { policy ... }`) name the
 // reserved global-policy sentinel: "from-zone", "to-zone",
@@ -38,6 +43,30 @@ const JunosGlobalZoneName = "junos-global"
 func ZonePairGlobalSentinelSide(fromZone, toZone string) string {
 	from := fromZone == JunosGlobalZoneName
 	to := toZone == JunosGlobalZoneName
+	switch {
+	case from && to:
+		return "from-zone and to-zone"
+	case from:
+		return "from-zone"
+	case to:
+		return "to-zone"
+	}
+	return ""
+}
+
+// ZonePairDefinedAnySide reports which structural sides of a zone-pair policy
+// name the wildcard token when `any` is also a defined zone. In that legacy
+// tolerant-load shape, the zone definition is omitted from the zone snapshot;
+// allowing its policy to reach the helper would reinterpret the literal as a
+// wildcard and broaden the rule. Policy builders poison such zone-pair rules so
+// the helper rejects the snapshot instead. When the zone is not defined, `any`
+// remains a legitimate policy wildcard.
+func ZonePairDefinedAnySide(fromZone, toZone string, definedAny bool) string {
+	if !definedAny {
+		return ""
+	}
+	from := fromZone == ReservedWildcardZoneName
+	to := toZone == ReservedWildcardZoneName
 	switch {
 	case from && to:
 		return "from-zone and to-zone"

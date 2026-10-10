@@ -3,10 +3,11 @@ package config
 import "fmt"
 
 // validateFirewallUnknownChildrenStrict closes the remaining TERM-level
-// open-world paths in #10294. compileFirewall records direct term-body
-// children other than `from` and `then`; compileNATSource records unknown
-// children under the source-NAT action. The caller downgrades the same
-// findings to warnings on tolerant load/peer-sync (#1960).
+// open-world paths in #10294: nameless terms and unknown direct children.
+// compileFirewall records direct term-body children other than `from` and
+// `then`; compileNATSource records unknown children under the source-NAT action.
+// The caller downgrades the same findings to warnings on tolerant load/peer-sync
+// (#1960).
 func validateFirewallUnknownChildrenStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -17,7 +18,16 @@ func validateFirewallUnknownChildrenStrict(cfg *Config) error {
 				continue
 			}
 			for _, term := range filter.Terms {
-				if term == nil || len(term.unknownChildren) == 0 {
+				if term == nil {
+					continue
+				}
+				if term.nameless {
+					return fmt.Errorf(
+						"firewall family %s filter %q contains a nameless `term` block starting with %q (#10294/#12092): "+
+							"give every term an explicit name",
+						family, name, term.Name)
+				}
+				if len(term.unknownChildren) == 0 {
 					continue
 				}
 				return fmt.Errorf(

@@ -64,20 +64,50 @@ pub(super) fn resolution_target_for_session(
     decision.nat.rewrite_dst.unwrap_or(flow.dst_ip)
 }
 
-/// #9752: the table-independent local outcomes for a target whose installing
-/// table is unresolvable — the ONE classifier shared by D4 re-resolve and the
-/// D8 purge walk (Codex-r4-F4): interface-NAT (global maps) or the any-table
-/// wildcard (mirroring `fib.rs:274-284` with ifindex 0 — no connected scan is
-/// possible without a table, exactly the NAT-only shape). Deliberately NOT
-/// bumping `LOCAL_DELIVERY_IFINDEX0`, which counts table-OWNED-no-ifindex, a
-/// different cause (asserted in cell 10).
+/// Resolve the policy discriminator used by a helper policy-list read.
+///
+/// `prepublish` requests target IDs from the currently published policy
+/// snapshot. A session's stored `policy_id` is its admission-time positional
+/// value, so bound rows resolve through their stable rule handle. Unbound
+/// peer-synced and SharedPromote rows are excluded from prepublish ID matching
+/// because their scalar may be stale; locally authored unbound rows retain
+/// scalar behavior. Legacy reads retain their timestamp-fenced scalar behavior.
+pub(crate) fn policy_id_for_list_request(
+    forwarding: &ForwardingState,
+    metadata: &crate::session::SessionMetadata,
+    origin: crate::session::SessionOrigin,
+    mode: &str,
+) -> Option<u32> {
+    if mode != "prepublish" {
+        return Some(metadata.policy_id);
+    }
+    let Some(counter) = metadata.policy_counter.as_ref() else {
+        return (!(origin.is_peer_synced() || origin == crate::session::SessionOrigin::SharedPromote))
+            .then_some(metadata.policy_id);
+    };
+    if counter.rule_id().is_empty() {
+        return (!(origin.is_peer_synced() || origin == crate::session::SessionOrigin::SharedPromote))
+            .then_some(metadata.policy_id);
+    }
+    Some(
+        forwarding
+            .policy
+            .reresolve_session_policy_id(Some(counter), metadata.policy_id),
+    )
+}
+
+/// #9752: the table-independent local outcome for an unresolvable installing
+/// table is the any-table NAT wildcard (mirroring `fib.rs:274-284` with
+/// ifindex 0 — no connected scan is possible without a table). Interface-NAT
+/// addresses are table-owned (#12086), so they cannot be admitted here without
+/// knowing which routing table owns the packet.
+///
+/// Deliberately NOT bumping `LOCAL_DELIVERY_IFINDEX0`, which counts
+/// table-OWNED-no-ifindex, a different cause (asserted in cell 10).
 pub(in crate::afxdp) fn local_resolution_without_install_table(
     forwarding: &ForwardingState,
     target: IpAddr,
 ) -> Option<ForwardingResolution> {
-    if let Some(local) = super::interface_nat_local_resolution(forwarding, target) {
-        return Some(local);
-    }
     let wildcard_owned = match target {
         IpAddr::V4(ip) => {
             forwarding.local_v4.contains(&ip) && forwarding.local_nat_any_table_v4.contains(&ip)
@@ -385,7 +415,7 @@ fn lookup_forwarding_resolution_for_session_with_cache(
         }
     }
     let target = resolution_target_for_session(flow, decision);
-    if let Some(local) = super::interface_nat_local_resolution(forwarding, target) {
+    if let Some(local) = super::interface_nat_local_resolution(forwarding, target, table) {
         return local;
     }
     // #2734: spread ECMP equal-cost members by the per-FLOW 5-tuple hash
@@ -1624,7 +1654,10 @@ pub(super) fn apply_worker_commands(
                 };
                 let family_allowed = |family: u8| {
                     request.families.is_empty()
-                        || request.families.iter().any(|candidate| *candidate == family)
+                        || request
+                            .families
+                            .iter()
+                            .any(|candidate| *candidate == family)
                 };
                 let class_allowed = |is_reverse: bool| {
                     request.classes.is_empty()
@@ -1640,12 +1673,20 @@ pub(super) fn apply_worker_commands(
                         .push("legacy-before-secs-missing".to_string());
                 } else {
                     sessions.iter_with_identity(
-                        |key, decision, metadata, _origin, created_ns, session_id| {
+                        |key, decision, metadata, origin, created_ns, session_id| {
                             let family = crate::afxdp::ha::policy_wire_family(key.addr_family);
-                            if !family_allowed(family)
-                                || !class_allowed(metadata.is_reverse)
-                                || !wanted(metadata.policy_id)
-                            {
+                            if !family_allowed(family) || !class_allowed(metadata.is_reverse) {
+                                return;
+                            }
+                            let Some(policy_id) = policy_id_for_list_request(
+                                forwarding,
+                                metadata,
+                                origin,
+                                &request.mode,
+                            ) else {
+                                return;
+                            };
+                            if !wanted(policy_id) {
                                 return;
                             }
                             // Legacy time fence (#6948): keep sessions admitted
@@ -1703,7 +1744,8 @@ pub(super) fn apply_worker_commands(
                                     .push("unsupported-address-family".to_string());
                                 return;
                             };
-                            if let Some((companion_key, companion_metadata, companion_id)) =
+                            row.policy_id = policy_id;
+                            if let Some((companion_key, _, companion_id)) =
                                 sessions.policy_companion(key, decision.nat)
                             {
                                 if companion_id == 0 {
@@ -1725,7 +1767,6 @@ pub(super) fn apply_worker_commands(
                                         .push("unsupported-companion-family".to_string());
                                     return;
                                 }
-                                row.companion_policy_id = companion_metadata.policy_id;
                                 row.expected_companion_rt_flow_session_id = companion_id;
                             }
                             collected
@@ -3101,6 +3142,13 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         let session_id = shared_session_id
             .filter(|session_id| *session_id != 0)
             .unwrap_or_else(|| sessions.session_id_for(resolved_key));
+        let previous_policy_to_zone_id = forwarding_stale.then(|| {
+            if resolved.decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
+                resolved.metadata.egress_zone
+            } else {
+                forwarding.egress_zone_id(resolved.decision.resolution.egress_ifindex)
+            }
+        });
         let mut decision = resolved.decision;
         let resolution_target = resolution_target_for_session(flow, decision);
         let leak_incarnation = sessions.leak_incarnation(&resolved_key);
@@ -3193,6 +3241,17 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
             )
         };
         if forwarding_stale && !keep_transient && !materialize_install_failed {
+            let policy_to_zone_id =
+                if decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
+                    metadata.egress_zone
+                } else {
+                    forwarding.egress_zone_id(decision.resolution.egress_ifindex)
+                };
+            if previous_policy_to_zone_id
+                .is_some_and(|previous| previous != policy_to_zone_id)
+            {
+                sessions.invalidate_policy_revalidation(resolved_key);
+            }
             let owner_rg_id = matches!(
                 decision.resolution.disposition,
                 ForwardingDisposition::ForwardCandidate

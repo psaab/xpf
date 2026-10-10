@@ -291,9 +291,10 @@ func runUniformGatesFirewallNAT2(tree *ConfigTree, cfg *Config, opts compileOpts
 			return err
 		}
 	}
-	// #10294: term-level children outside `from`/`then`, and unknown
-	// source-NAT action children, previously compiled away without a
-	// diagnostic. Strict commit rejects; tolerant load/peer-sync warns.
+	// #10294/#12092: nameless firewall terms, term-level children outside
+	// `from`/`then`, and unknown source-NAT action children were previously
+	// compiled away without a diagnostic. Strict commit rejects; tolerant
+	// load/peer-sync warns.
 	if err := validateFirewallUnknownChildrenStrict(cfg); err != nil {
 		if opts.lenientFirewallRefs {
 			cfg.Warnings = append(cfg.Warnings,

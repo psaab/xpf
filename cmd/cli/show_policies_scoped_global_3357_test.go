@@ -64,7 +64,12 @@ func scopedGlobalPoliciesResp() *pb.GetPoliciesResponse {
 // drops the whole "*"/"*" global block, so the scoped-tu / open-global
 // assertions go RED.
 func TestShowPoliciesFilteredKeepsScopedGlobal(t *testing.T) {
-	fake := &fakeBpfrxClient{getPoliciesResp: scopedGlobalPoliciesResp()}
+	fake := &fakeBpfrxClient{
+		getPoliciesResp: scopedGlobalPoliciesResp(),
+		getZonesResp: &pb.GetZonesResponse{Zones: []*pb.ZoneInfo{
+			{Name: "trust"}, {Name: "untrust"}, {Name: "dmz"},
+		}},
+	}
 	c := &ctl{client: fake}
 
 	out := captureStdout(t, func() {

@@ -124,18 +124,14 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
-	// #5633: static-route disposition-conflict gate. Repeated same-prefix
-	// static-route `set` lines merge into a single StaticRoute
-	// (compileStaticRoutes) that appends next-hops and latches sticky terminal /
-	// next-table fields, so declaring one destination once as `discard` (or
-	// `next-table X`) and once with a `next-hop` compiled into ONE route holding
-	// a blackhole/leak AND a forwarding next-hop — a contradiction the strict
-	// gate accepted. The live snapshot copies every field and the Rust forwarder
-	// resolves discard > next-table > next-hop, so the stale terminal/leak wins
-	// and a later next-hop meant to restore forwarding is silently ignored.
-	// Strict on commit / commit-check (hard reject so the contradiction is
-	// operator-visible); lenient on load / peer-sync (warn — #1960; the dataplane
-	// resolves the deterministic precedence so the config still boots). Mirrors
+	// #5633/#12084: static-route conflict gate. Same-spelling route blocks use
+	// Junos base merge semantics; distinct masked aliases and cross-collection
+	// sources retain conflicting next-table targets and install/no-install
+	// disagreement as compiler-only metadata instead of silently selecting a
+	// target or withdrawing an installed route. The gate also rejects
+	// contradictory dispositions such as discard plus next-hop. Strict on
+	// commit / commit-check; lenient on load / peer-sync warns and keeps one
+	// deterministic route so persisted configurations still boot. Mirrors
 	// validateNextTableTargetReferencesStrict.
 	if err := validateStaticRouteDispositionConflictStrict(cfg); err != nil {
 		if opts.lenientRouteDispositionConflict {

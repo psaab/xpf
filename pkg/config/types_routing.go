@@ -138,15 +138,39 @@ type PolicyTerm struct {
 	// as the FRR route-map clause `set as-path prepend <asn> <asn> ...`
 	// (#2892). AS-path prepending is a fundamental inbound traffic-engineering
 	// knob — repeating the local ASN lengthens the advertised path so peers
-	// prefer a shorter alternate path. Junos accepts the ASNs as a quoted
-	// space-separated string ("65001 65001") or a bracketed list
-	// ([ 65001 65001 ]); both flatten to this slice, preserving order and
-	// repetition (the count of repeats is the whole point). Empty = no
-	// prepend clause is rendered.
+	// prefer a shorter alternate path. Junos accepts quoted
+	// space-separated ASNs ("65001 65001") or a bracketed list
+	// ([ 65001 65001 ]); the compiler normalizes both to one slice element
+	// per ASN, preserving order and repetition (the count of repeats is the
+	// whole point). Empty = no prepend clause is rendered.
 	ASPathPrepend []string
 	// NextPolicy skips the remaining terms and the policy default, then resumes
 	// at the next policy in the evaluated policy chain.
 	NextPolicy bool
+	// hasNextHopOperand12070 / hasASPathPrependOperand12070 preserve action
+	// presence when an empty, whitespace-only, or keyword-valued operand would
+	// otherwise be erased before the #12070 compiled-term gate. Those inputs
+	// compile to an empty field/slice and otherwise look identical to an absent
+	// clause, leaving display-set output that strict validation itself rejects.
+	// Both child and inline parse paths set these flags; direct Config values
+	// without provenance retain their existing behavior.
+	hasNextHopOperand12070       bool `json:"-"`
+	hasASPathPrependOperand12070 bool `json:"-"`
+	// invalidNextHopExtra12070 preserves a compact/term-line `then next-hop`
+	// trailing operand long enough for strict compilation to reject it. The
+	// inline parser consumes exactly one next-hop operand; a following token
+	// outside the then-action boundary set, including quoted values, would
+	// otherwise be silently dropped or change tolerant boot/sync semantics.
+	// Compiler-only state, excluded from JSON.
+	invalidNextHopExtra12070      bool   `json:"-"`
+	invalidNextHopExtraValue12070 string `json:"-"`
+	// invalidASPathPrependExtra12070 preserves a from-match or quoted/
+	// bracketed then-action word ending a compact/term-line prepend run.
+	// Strict compilation rejects the tail; leaving it unconsumed lets tolerant
+	// boot/sync retain the match or action interpreted by the main parser.
+	// Compiler-only state, excluded from JSON.
+	invalidASPathPrependExtra12070      bool   `json:"-"`
+	invalidASPathPrependExtraValue12070 string `json:"-"`
 	// invalidNextPolicy11780 preserves malformed packed `then next <value>`
 	// tokens long enough for strict compilation to reject them. Tolerant
 	// compilation also records Action=reject so the renderer fails closed.
@@ -159,6 +183,7 @@ type RouteFilter struct {
 	Prefix    string // CIDR ("192.168.50.0/24")
 	MatchType string // "exact", "longer", "orlonger", "upto", "prefix-length-range", "through"
 	UptoLen   int    // for "upto" match type
+	UptoToken string `json:"-"` // authored `upto` operand for strict diagnostics; not serialized
 	// RangeLow / RangeHigh hold the two prefix-length bounds for the
 	// "prefix-length-range /low-/high" match type (#2525). Both are 0
 	// (unset) for every other match type; parseRouteFilterRange leaves them
@@ -345,9 +370,21 @@ type NextHopEntry struct {
 
 // StaticRoute defines a single static route.
 type StaticRoute struct {
-	Destination string         // CIDR: "10.0.0.0/8" or "::/0"
-	NextHops    []NextHopEntry // preference/metric tiers; equal tiers form ECMP
-	Discard     bool           // null route (blackhole): silently drop matching traffic
+	Destination string // CIDR: "10.0.0.0/8" or "::/0"
+	// destinationAliases retains alternate authored CIDR spellings for
+	// commit-time diagnostics after compileStaticRoutes folds them by masked
+	// prefix. It is compiler-only and deliberately omitted from the helper wire.
+	destinationAliases []string `json:"-"`
+	// competingNextTableTargets records competing targets found while folding
+	// routes with the same masked destination. The tolerant compiler retains
+	// one deterministic target after warning; strict validation rejects.
+	competingNextTableTargets []string `json:"-"`
+	noInstallConflict         bool     `json:"-"`
+	// noDispositionAliases preserves #11327 diagnostics when an actionless
+	// alias folds into an installable route.
+	noDispositionAliases []string       `json:"-"`
+	NextHops             []NextHopEntry // preference/metric tiers; equal tiers form ECMP
+	Discard              bool           // null route (blackhole): silently drop matching traffic
 	// Reject installs an unreachable route: matching traffic is dropped AND an
 	// ICMP unreachable is returned to the source (Junos `route <p> reject` →
 	// FRR `ip route <p> reject`). Distinct from Discard (Junos `discard` → FRR

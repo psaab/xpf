@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -48,6 +49,25 @@ const (
 // shrink it like the 5380 deadline vars.
 var clearAllDeadline = 30 * time.Second
 
+// ErrPolicyReadAuthority marks a policy-session READ refused because the
+// helper's applied snapshot cannot be proven to match the requested authority.
+var ErrPolicyReadAuthority = errors.New("policy session READ authority unavailable")
+
+// PolicyReadConfig returns the config whose policy IDs are safe to use for
+// helper READs, or nil while an apply outcome is unknown. The snapshot and
+// outcome marker are read together under Manager.mu.
+func (m *Manager) PolicyReadConfig() *config.Config {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.applySnapshotOutcomeUnknown {
+		return nil
+	}
+	return m.appliedSnapshot.Config
+}
+
 // ListSessionsByPolicy performs the #10512 READ phase against the helper-owned
 // session authority. It deliberately uses the control socket: this request is
 // the commit-time discovery boundary and must not be accepted on the dedicated
@@ -65,6 +85,17 @@ func (m *Manager) ListSessionsByPolicy(req SessionPolicyListRequest) (ControlRes
 			return ControlResponse{}, fmt.Errorf("policy session READ deadline exceeded after %s", policyReadDeadline)
 		}
 		m.mu.Lock()
+		// Keep authority validation and this page's LIST in one critical section:
+		// a snapshot publish must not split the check from the helper request.
+		mismatch := pageReq.ExpectedConfig != nil &&
+			m.appliedSnapshot.Config != pageReq.ExpectedConfig
+		missingExpected := pageReq.Mode == "prepublish" && pageReq.ExpectedConfig == nil
+		if m.applySnapshotOutcomeUnknown || mismatch || missingExpected {
+			m.mu.Unlock()
+			return ControlResponse{}, fmt.Errorf(
+				"%w: applied snapshot does not match expected config or its outcome is unknown",
+				ErrPolicyReadAuthority)
+		}
 		page, err := m.requestDetailedLocked(ControlRequest{
 			Type:              "list_sessions_by_policy",
 			SuppressStatus:    true,
@@ -128,24 +159,39 @@ type PolicyDeleteResult struct {
 	Partial           int
 	Refused           int
 	RefusedSessionIDs []uint64
+	// SettledPrefix counts the confirmed settled inputs starting at index 0.
+	// SettledBeyondPrefix lists later settled input indexes in ascending order.
+	// It remains nil when no settled input lies beyond the prefix.
+	SettledPrefix       int
+	SettledBeyondPrefix []int
+}
+
+// recordPolicyDeleteSettled preserves the maximal settled input prefix without
+// allocating on the ordinary all-settled path. Only a settlement beyond a gap
+// grows the sparse index slice.
+func recordPolicyDeleteSettled(result *PolicyDeleteResult, index int) {
+	if index == result.SettledPrefix {
+		result.SettledPrefix++
+		return
+	}
+	result.SettledBeyondPrefix = append(result.SettledBeyondPrefix, index)
 }
 
 // DeletePolicySessions performs helper-first, identity-conditional deletes for
 // the matches returned by ListSessionsByPolicy. The helper owns both the
 // authoritative table and the bare-key mirror repair; this method never uses a
 // Go-side mirror delete that could destroy a colliding survivor.
-//
-// Plan §2.4 micro-batches: at most 64 matches and 128 gate keys (forward plus
+// Plan §2.4 micro-batch caps: at most 64 matches and 128 gate keys (forward plus
 // captured companion) per helper round trip, so a full 262144-match capture
 // costs at most 4096 round trips — never one per match. Batches share one
 // absolute 30-second delete deadline; at the deadline, on a batch transport
 // failure, or on an incomplete batch answer, it stops issuing new batches and
-// returns the partial counts with an error. The remainder is a SURFACED
-// PERSISTENT GAP, not a retryable backlog: the commit already activated the
-// new config, so no recommit re-captures these matches (§2.4: no cross-commit
-// retention) — the survivors forward until idle timeout unless the operator
-// clears sessions or recommits an touching change. Callers join the error
-// into the commit result (#5578) rather than reporting success.
+// returns partial counts and per-input settlement with an error. Settled rows
+// are confirmed applied, stale-forward, or partial-companion outcomes;
+// refused, failed, and unprocessed inputs remain unresolved. Callers retain
+// only those unresolved identities for recovery after partial failure. A nil
+// error means every input is settled. Callers join non-nil errors into the
+// commit result (#5578) rather than reporting success.
 func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDeleteResult, error) {
 	var result PolicyDeleteResult
 	if len(matches) == 0 {
@@ -183,9 +229,9 @@ func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDele
 		if m.proc == nil || m.procGen != startProcGen {
 			// Helper churned mid-invalidation (crash/restart/upgrade): the
 			// capture predates the new incarnation, whose rebuilt tables may
-			// carry reminted identities. Never evaluate a stale capture
-			// against fresh tables — gap loud and let a touching recommit
-			// re-capture (precedent: owner_rg_export_paging_9344 procGen fence).
+			// carry reminted identities. Never evaluate a stale capture against
+			// fresh tables; report the unresolved inputs so the daemon can retain
+			// their identities for recovery under a proven authority.
 			cur := m.procGen
 			m.mu.Unlock()
 			return result, policyDeleteGapError(
@@ -272,22 +318,23 @@ func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDele
 			switch outcome {
 			case "applied":
 				result.Applied++
+				recordPolicyDeleteSettled(&result, start+i)
 			case "stale_forward":
 				// Forward gone or replaced: benign conditional no-op.
 				result.Stale++
+				recordPolicyDeleteSettled(&result, start+i)
 			case "refused_identity":
 				// Same-incarnation refusal (#10650): the captured forward IS
 				// the live entry, but an unnamed companion exists (reply
 				// installed between the capture READ and the delete batch),
-				// so the helper removed NOTHING. The revoked forward
-				// survived — a surfaced persistent gap (#5578), never silent
-				// success. Unlike stale ("already gone"), refused means
-				// "still forwarding": counted separately, gapped loud below.
+				// so the helper removed NOTHING. Keep this input unresolved
+				// and report its RT_FLOW identity even if a later batch fails.
 				result.Refused++
 				result.RefusedSessionIDs = append(result.RefusedSessionIDs, batch[i].ExpectedRTFlowSessionID)
 			case "partial_companion":
 				result.Applied++
 				result.Partial++
+				recordPolicyDeleteSettled(&result, start+i)
 			default:
 				// Unknown token (helper newer than Go): contract breach — stop.
 				return result, policyDeleteGapError(
@@ -314,17 +361,17 @@ func (m *Manager) DeletePolicySessions(matches []SessionPolicyMatch) (PolicyDele
 	return result, nil
 }
 
-// policyDeleteGapError reports a partial policy invalidation as the persistent
-// gap it is: `confirmed` counts only fully-resolved batches (a later success
-// never jumps over an earlier failed range), and every unconfirmed match will
-// NOT be re-captured by a recommit (the config is already active). Survivors
-// among them persist until idle timeout. Refused identities are also reported
-// independently so a later error cannot hide known live survivors (#10866).
+// policyDeleteGapError reports an incomplete policy invalidation. `confirmed`
+// counts only fully-accounted batches, so a later success never erases an
+// earlier unresolved range. SettledPrefix and SettledBeyondPrefix are the
+// per-input source of truth for pruning; failed, refused, and unprocessed
+// identities remain available to the caller for recovery. Refused identities
+// are also reported independently so a later error cannot hide known live
+// survivors (#10866).
 func policyDeleteGapError(err error, result PolicyDeleteResult, confirmed, total int) error {
 	return fmt.Errorf(
 		"policy session delete INCOMPLETE: %v (applied %d, stale %d, partial %d, refused %d session(s) of %d matches, %d without confirmed outcomes; "+
-			"survivors persist until idle timeout — recommit does not re-capture; "+
-			"clear sessions or recommit an touching change to force)",
+			"unresolved identities remain available for recovery)",
 		err, result.Applied, result.Stale, result.Partial, result.Refused, total, total-confirmed)
 }
 

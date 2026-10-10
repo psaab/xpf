@@ -71,7 +71,7 @@ var restRouteCommand = map[string]string{
 	"GET /api/v1/security/policies":                    "show security policies",
 	"GET /api/v1/security/sessions":                    "show security flow session",
 	"GET /api/v1/security/sessions/summary":            "show security flow session summary",
-	"GET /api/v1/security/sessions/summary/zone-pairs": "show security match-policies",
+	"GET /api/v1/security/sessions/summary/zone-pairs": "show security flow session summary",
 	"GET /api/v1/security/match":                       "show security match-policies",
 	"GET /api/v1/security/nat/source":                  "show security nat source pool",
 	"GET /api/v1/security/nat/pools":                   "show security nat source pool",

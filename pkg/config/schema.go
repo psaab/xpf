@@ -36,6 +36,11 @@ type schemaNode struct {
 	children map[string]*schemaNode // known container children
 	wildcard *schemaNode            // matches any keyword not in children (for dynamic names)
 	multi    bool                   // true = multiple leaf values allowed (e.g. source-address); false = replace on set
+	// allChildKeysAreValues opts a typed multi leaf into validating every key
+	// of each hierarchical block-list child. Default behavior stays first-key
+	// only for leaves whose compiler reads just the child name; as-path-prepend
+	// sets this because firewallMatchValues consumes each child key.
+	allChildKeysAreValues bool
 	// valueList opts a multi leaf that ALSO declares modifier children into
 	// bracket-list value absorption (#3872 static `next-hop [ a b ]`). By
 	// default the SetPath absorber only collapses a trailing value list onto a
@@ -100,9 +105,10 @@ type schemaNode struct {
 	// where Junos renders both the packed and standalone spellings.
 	packedValueSibling string
 
-	// blockValue opts a single-value typed leaf into the HIERARCHICAL BLOCK
+	// blockValue opts a single-value leaf — typed (#6774) or scalar
+	// (#12093, via validateScalarValueLeaf) — into the HIERARCHICAL BLOCK
 	// spelling `keyword { value; }`, in addition to the ordinary
-	// `keyword value` (#6774).
+	// `keyword value`.
 	//
 	// This is an OPT-IN, not a general relaxation, because the two spellings
 	// are not interchangeable in Junos. `default-policy` is a CHOICE
@@ -115,7 +121,18 @@ type schemaNode struct {
 	// canonical Junos, that the compiler compiles correctly, and that the
 	// tolerated Load/SyncApply path already applies.
 	//
-	// Most typed leaves must NOT set this. `mtu { 1500; }` is not Junos, and
+	// The same opt-in also covers SCALAR leaves whose block spelling the
+	// compiler deliberately HONOURS: the four interface filter bindings
+	// (`filter input` / `output` under inet/inet6, #12093). nodeVal reads
+	// the sole child of `input { f1; }` as the filter name, and #10293
+	// pins that spelling as compiling to the named filter, so strict
+	// commit must accept it. This follows the schema/compile agreement
+	// established by #6774. The exception is deliberately narrower
+	// than the default-policy case: the block spelling is NOT verified as
+	// Junos-emitted there (unlike `default-policy { deny-all; }`), so the
+	// opt-in stays scoped to bindings whose compiler support is tested.
+	//
+	// Most leaves must NOT set this. `mtu { 1500; }` is not Junos, and
 	// the rejection there is correct; the compiler tolerates it only
 	// incidentally, through the generic nodeVal helper. A census of setSchema
 	// found 42 distinct leaves where the compiler accepts a block form the
@@ -176,7 +193,7 @@ type schemaNode struct {
 	// test's synthetic port-range leaf sets it today.
 	rangeSeparator bool
 
-	scalar bool // true = fixed-arity scalar value leaf (keyword + exactly `args` value tokens, NO body); rejects trailing tokens at commit (#3332). Opt-in; see isScalarValueLeaf.
+	scalar bool // true = fixed-arity scalar value leaf; rejects trailing tokens at commit (#3332). By default, no body.
 	// allowEmptyValue permits a presence-only spelling for an otherwise
 	// value-taking leaf. It is deliberately separate from args: args remains
 	// the maximum flat-token consumption, while this flag models Junos leaves

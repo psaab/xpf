@@ -7846,8 +7846,7 @@ fn reverse_materialized_shared_hit_adopts_replica_session_id_6313() {
     );
 }
 
-// === #1346 dispatcher order-pin + dedup test =================================
-//
+// === #1346 dispatcher order-pin + dedup test ==========================//
 // Round-2 Codex review required two test additions:
 //   (a) An interleaved-variant dispatcher test that pins side-effect
 //       order across all four WorkerCommandResults fields.
@@ -18202,4 +18201,306 @@ fn same_pass_cdn_does_not_resurrect_queued_install_12133() {
         assert_eq!(x_res, None, "backlog={backlog}: X must also forget the call");
         assert_eq!(pending, 0, "backlog={backlog}: retry must not linger");
     }
+}
+// #12072: a session's admission-time policy_id is frozen across a reorder,
+// while the read request names policy IDs in the currently published snapshot.
+fn run_list_scan_with_forwarding12072(
+    sessions: &mut SessionTable,
+    req: crate::protocol::SessionPolicyListRequest,
+    forwarding: ForwardingState,
+) -> (Vec<crate::protocol::SessionPolicyMatch>, Vec<String>, usize) {
+    let collected = Arc::new(Mutex::new(crate::afxdp::PolicyReadCollector::default()));
+    let overflow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let pending = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+    let commands = Arc::new(Mutex::new(VecDeque::from([
+        crate::afxdp::WorkerCommand::ListSessionsByPolicy {
+            request: req,
+            collected: Arc::clone(&collected),
+            overflow: Arc::clone(&overflow),
+            errors: Arc::clone(&errors),
+            pending: Arc::clone(&pending),
+        },
+    ])));
+    apply_worker_commands(
+        &commands,
+        sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &forwarding,
+        &BTreeMap::new(),
+        &Arc::new(ShardedNeighborMap::new()),
+        0,
+        &mut VecDeque::new(),
+    );
+    let rows = collected.lock().expect("collector").take_rows();
+    let errs = errors.lock().expect("errors").clone();
+    let left = pending.load(Ordering::Acquire);
+    (rows, errs, left)
+}
+
+fn forwarding_with_policy_rules12072(rules: &[crate::PolicyRuleSnapshot]) -> ForwardingState {
+    let mut zone_ids = rustc_hash::FxHashMap::default();
+    zone_ids.insert("lan".to_string(), TEST_LAN_ZONE_ID);
+    zone_ids.insert("wan".to_string(), TEST_WAN_ZONE_ID);
+    let mut forwarding = test_forwarding_state();
+    forwarding.policy = crate::policy::parse_policy_state_with_counters(
+        "deny",
+        rules,
+        &zone_ids,
+        &[],
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect("test policy snapshot");
+    forwarding
+}
+
+fn policy_rule_snapshot12072(name: &str, policy_id: u32) -> crate::PolicyRuleSnapshot {
+    crate::PolicyRuleSnapshot {
+        name: name.to_string(),
+        policy_id,
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        action: "permit".to_string(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn worker_list_uses_current_policy_id_after_renumbering_12072() {
+    let mut sessions = SessionTable::new();
+    // C0 admission snapshot: the session's bound stable identity is web@id 1.
+    let admission = forwarding_with_policy_rules12072(&[policy_rule_snapshot12072("web", 1)]);
+    assert_eq!(
+        admission
+            .policy
+            .rule_for_policy_id(1)
+            .map(|rule| rule.rule_id.as_str()),
+        Some("lan->wan/web")
+    );
+    let key = test_key();
+    let mut metadata = test_metadata();
+    metadata.policy_id = 1; // web's C0 admission-time id.
+    metadata.policy_counter = Some(Arc::new(crate::policy::PolicyRuleCounter::with_rule_id(
+        "lan->wan/web",
+    )));
+    assert!(sessions.install_with_protocol_with_origin(
+        key,
+        test_decision(),
+        metadata,
+        SessionOrigin::ForwardFlow,
+        monotonic_nanos(),
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    // C1 inserted tmp before web: tmp is now id 1, web id 2.
+    let forwarding = forwarding_with_policy_rules12072(&[
+        policy_rule_snapshot12072("tmp", 1),
+        policy_rule_snapshot12072("web", 2),
+    ]);
+    // C2 deletes tmp; its old C1 id is also web's new C2 id. The prepublish
+    // resolver must therefore interpret the row against C1, before C2 lands.
+    let c2 = forwarding_with_policy_rules12072(&[
+        policy_rule_snapshot12072("p-first", 0),
+        policy_rule_snapshot12072("web", 1),
+    ]);
+    assert_eq!(
+        forwarding
+            .policy
+            .rule_for_policy_id(1)
+            .map(|rule| rule.rule_id.as_str()),
+        Some("lan->wan/tmp"),
+        "C1 deletion target id 1 must name tmp"
+    );
+    assert!(
+        c2.policy.rule_for_stable_id("lan->wan/tmp").is_none(),
+        "C2 must delete tmp"
+    );
+    assert_eq!(
+        c2.policy
+            .rule_for_policy_id(1)
+            .map(|rule| rule.rule_id.as_str()),
+        Some("lan->wan/web"),
+        "C2 must move web into tmp's former numeric slot"
+    );
+    let (tmp_rows, tmp_errs, tmp_left) = run_list_scan_with_forwarding12072(
+        &mut sessions,
+        list_req10512(vec![1], "prepublish", None, vec![4], vec!["forward".into()]),
+        forwarding.clone(),
+    );
+    assert!(tmp_errs.is_empty(), "tmp scan errors: {tmp_errs:?}");
+    assert_eq!(tmp_left, 0);
+    assert!(
+        tmp_rows.is_empty(),
+        "LIST [tmp@C1] must not return the pre-C1 web session"
+    );
+    let (web_rows, web_errs, web_left) = run_list_scan_with_forwarding12072(
+        &mut sessions,
+        list_req10512(vec![2], "prepublish", None, vec![4], vec!["forward".into()]),
+        forwarding,
+    );
+    assert!(web_errs.is_empty(), "web scan errors: {web_errs:?}");
+    assert_eq!(web_left, 0);
+    assert_eq!(
+        web_rows.len(),
+        1,
+        "LIST [web@C1] must return the pre-C1 web session"
+    );
+    assert_eq!(web_rows[0].policy_id, 2);
+}
+
+#[test]
+fn worker_list_does_not_rebind_renamed_rule_alias_12072() {
+    let mut sessions = SessionTable::new();
+    let mut metadata = test_metadata();
+    metadata.policy_id = 1;
+    metadata.policy_counter = Some(Arc::new(crate::policy::PolicyRuleCounter::with_rule_id(
+        "lan->wan/alias",
+    )));
+    assert!(sessions.install_with_protocol_with_origin(
+        test_key(),
+        test_decision(),
+        metadata,
+        SessionOrigin::ForwardFlow,
+        monotonic_nanos(),
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let forwarding = forwarding_with_policy_rules12072(&[policy_rule_snapshot12072("renamed", 1)]);
+    let (rows, errs, left) = run_list_scan_with_forwarding12072(
+        &mut sessions,
+        list_req10512(vec![1], "prepublish", None, vec![4], vec!["forward".into()]),
+        forwarding,
+    );
+    assert!(errs.is_empty(), "rename scan errors: {errs:?}");
+    assert_eq!(left, 0);
+    assert!(
+        rows.is_empty(),
+        "an alias-bound session must not be rebound to a renamed rule"
+    );
+}
+
+#[test]
+fn worker_list_excludes_unbound_peer_rows_from_positional_matching_12072() {
+    let mut sessions = SessionTable::new();
+    let mut metadata = test_metadata();
+    metadata.policy_id = 1;
+    assert!(sessions.install_with_protocol_with_origin(
+        test_key(),
+        test_decision(),
+        metadata,
+        SessionOrigin::SyncImport,
+        monotonic_nanos(),
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    let forwarding = forwarding_with_policy_rules12072(&[policy_rule_snapshot12072("tmp", 1)]);
+    let (rows, errs, left) = run_list_scan_with_forwarding12072(
+        &mut sessions,
+        list_req10512(vec![1], "prepublish", None, vec![4], vec!["forward".into()]),
+        forwarding,
+    );
+    assert!(errs.is_empty(), "unbound scan errors: {errs:?}");
+    assert_eq!(left, 0);
+    assert!(
+        rows.is_empty(),
+        "an unbound peer row must not be deleted by a positional policy-id collision"
+    );
+}
+
+/// #12072 P1a: the unbound-ID exclusion must survive the production promotion
+/// transition. `maybe_promote_synced_session` preserves unbound metadata and
+/// retags the origin to `SharedPromote`, which is NOT `is_peer_synced` — so a
+/// `policy_id_for_list_request` exclusion gated only on the peer-synced set
+/// re-admits the promoted row's stale positional scalar to prepublish
+/// ID-keyed deletion.
+///
+/// This cell drives the ACTUAL promotion transition (SyncImport row →
+/// `maybe_promote_synced_session`), not a fixture stamped with SharedPromote,
+/// then asserts the promoted row is still excluded from positional matching.
+///
+/// FAIL-ON-REVERT: gate the unbound exclusion on `is_peer_synced()` alone and
+/// the promoted row's stale id 1 is captured by LIST [tmp@C1].
+#[test]
+fn worker_list_excludes_promoted_unbound_row_from_positional_matching_12072() {
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    let decision = test_decision();
+    let mut metadata = test_metadata();
+    metadata.policy_id = 1; // stale positional scalar from an older snapshot.
+    assert!(metadata.policy_counter.is_none());
+    assert!(sessions.install_with_protocol_with_origin(
+        key.clone(),
+        decision,
+        metadata.clone(),
+        SessionOrigin::SyncImport,
+        monotonic_nanos(),
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+
+    // Drive the production promotion transition: the origin flips to
+    // SharedPromote while the unbound metadata is preserved.
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let shared = super::SharedSessionRefs {
+        sessions: &shared_sessions,
+        nat_sessions: &shared_nat_sessions,
+        forward_wire_sessions: &shared_forward_wire_sessions,
+        owner_rg_indexes: &shared_owner_rg_indexes,
+    };
+    let promoted_metadata = maybe_promote_synced_session(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        shared,
+        &peer_worker_commands,
+        &test_forwarding_state(),
+        &key,
+        decision,
+        metadata,
+        SessionOrigin::SyncImport,
+        false,
+        monotonic_nanos(),
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    );
+    assert!(
+        promoted_metadata.policy_counter.is_none(),
+        "promotion must preserve the unbound metadata"
+    );
+    let (_, stored_metadata, stored_origin) = sessions
+        .entry_with_origin(&key)
+        .expect("the promoted row must remain installed");
+    assert_eq!(stored_origin, SessionOrigin::SharedPromote);
+    assert!(
+        stored_metadata.policy_counter.is_none(),
+        "the stored promoted row must remain unbound"
+    );
+
+    // The promoted row's stale positional id 1 must not be captured by a
+    // prepublish LIST for tmp's current id 1.
+    let forwarding = forwarding_with_policy_rules12072(&[policy_rule_snapshot12072("tmp", 1)]);
+    let (rows, errs, left) = run_list_scan_with_forwarding12072(
+        &mut sessions,
+        list_req10512(vec![1], "prepublish", None, vec![4], vec!["forward".into()]),
+        forwarding.clone(),
+    );
+    assert!(errs.is_empty(), "promoted scan errors: {errs:?}");
+    assert_eq!(left, 0);
+    assert!(
+        rows.is_empty(),
+        "a promoted unbound row must not be deleted by a positional policy-id collision"
+    );
+    assert!(
+        policy_id_for_list_request(&forwarding, &stored_metadata, stored_origin, "prepublish")
+            .is_none(),
+        "the promoted unbound row must be excluded from prepublish ID matching"
+    );
 }

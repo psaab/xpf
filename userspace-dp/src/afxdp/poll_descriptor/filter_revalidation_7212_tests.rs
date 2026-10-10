@@ -2741,10 +2741,12 @@ fn forwarding_with_ri_local_12056(
     v6: bool,
     interface_nat: bool,
     pbr_target: Option<&str>,
+    nat_owner: &str,
     has_local_address: bool,
 ) -> ForwardingState {
     let mut snapshot = policy_deny_snapshot();
     let (blue_domain, _) = crate::session::install_table_identity("blue");
+    let (nat_owner_domain, _) = crate::session::install_table_identity(nat_owner);
     let family = if v6 { "inet6" } else { "inet" };
     let local_address = if has_local_address {
         vec![InterfaceAddressSnapshot {
@@ -2785,6 +2787,8 @@ fn forwarding_with_ri_local_12056(
                 }
             }
         } else if interface_nat && iface.ifindex == 12 {
+            iface.routing_instance = nat_owner.to_string();
+            iface.routing_domain = nat_owner_domain;
             iface.addresses = nat_address.clone();
         }
     }
@@ -2908,13 +2912,14 @@ fn unchanged_ri_local_miss_arms_keep_sessions_for_v4_v6_tcp_udp_12056() {
         for proto in [PROTO_TCP, PROTO_UDP_12056] {
             for interface_nat in [false, true] {
                 let forwarding =
-                    forwarding_with_ri_local_12056(v6, interface_nat, None, true);
+                    forwarding_with_ri_local_12056(v6, interface_nat, None, "blue", true);
                 let flow = local_flow_12056(v6, proto, interface_nat);
                 let local = if interface_nat {
                     crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
                         &forwarding,
                         flow.dst_ip,
                         proto,
+                        Some(if v6 { "blue.inet6.0" } else { "blue.inet.0" }),
                     )
                 } else {
                     crate::afxdp::forwarding::ingress_interface_local_resolution_on_session_miss(
@@ -2981,13 +2986,14 @@ fn static_pbr_local_session_tracks_retarget_and_address_removal_12056() {
             for interface_nat in [false, true] {
                 let blue_identity = crate::session::install_table_identity("blue");
                 let forwarding =
-                    forwarding_with_ri_local_12056(v6, interface_nat, Some("blue"), true);
+                    forwarding_with_ri_local_12056(v6, interface_nat, Some("blue"), "blue", true);
                 let flow = local_flow_12056(v6, proto, interface_nat);
                 let local = if interface_nat {
                     crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
                         &forwarding,
                         flow.dst_ip,
                         proto,
+                        Some(if v6 { "blue.inet6.0" } else { "blue.inet.0" }),
                     )
                 } else {
                     crate::afxdp::forwarding::ingress_interface_local_resolution_on_session_miss(
@@ -3046,6 +3052,7 @@ fn static_pbr_local_session_tracks_retarget_and_address_removal_12056() {
                         v6,
                         interface_nat,
                         Some(target),
+                        "blue",
                         has_local_address,
                     );
                     let route = revalidate_static_pbr_route_on_session_hit(
@@ -3078,13 +3085,66 @@ fn static_pbr_local_session_tracks_retarget_and_address_removal_12056() {
 }
 
 #[test]
+fn pbr_revalidation_keeps_interface_nat_local_delivery_in_owner_table_12086() {
+    let initial = forwarding_with_ri_local_12056(false, true, Some("blue"), "blue", true);
+    let flow = local_flow_12056(false, PROTO_TCP, true);
+    let local = crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
+        &initial,
+        flow.dst_ip,
+        PROTO_TCP,
+        Some("blue.inet.0"),
+    )
+    .expect("initial owner table must local-deliver the WAN SNAT address");
+    let blue_identity = crate::session::install_table_identity("blue");
+    let stored = local_decision_12056(local, blue_identity);
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    assert!(sessions.install_with_protocol_with_origin(
+        flow.forward_key.clone(),
+        stored,
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+        PROTO_TCP,
+        0,
+    ));
+
+    let retargeted = forwarding_with_ri_local_12056(false, true, Some("green"), "green", true);
+    let route = revalidate_static_pbr_route_on_session_hit(
+        &retargeted,
+        &std::sync::Arc::new(ShardedNeighborMap::new()),
+        &sessions,
+        &flow.forward_key,
+        &flow,
+        &frame(),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+        stored,
+        false,
+    )
+    .expect("retargeted PBR table must revalidate the local session");
+    assert_eq!(
+        route.resolution.disposition,
+        crate::afxdp::ForwardingDisposition::LocalDelivery,
+        "the retargeted table owns the interface-NAT address",
+    );
+    assert_eq!(route.resolution.local_ifindex, 12);
+    assert_eq!(
+        (route.install_table_domain, route.install_table_check),
+        crate::session::install_table_identity("green"),
+    );
+}
+
+
+#[test]
 fn removing_static_pbr_revalidates_local_session_under_native_ri_12056() {
-    let forwarding = forwarding_with_ri_local_12056(false, true, Some("green"), true);
+    let forwarding = forwarding_with_ri_local_12056(false, true, Some("green"), "green", true);
     let flow = local_flow_12056(false, PROTO_TCP, true);
     let local = crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
         &forwarding,
         flow.dst_ip,
         PROTO_TCP,
+        Some("green.inet.0"),
     )
     .expect("WAN SNAT destination must use the interface-NAT local arm");
     assert_eq!(local.local_ifindex, 12);
@@ -3114,7 +3174,7 @@ fn removing_static_pbr_revalidates_local_session_under_native_ri_12056() {
         0,
     ));
 
-    let native = forwarding_with_ri_local_12056(false, true, None, true);
+    let native = forwarding_with_ri_local_12056(false, true, None, "green", true);
     let native_identity =
         miss_install_table_12056(&native, &flow, false).expect("native RI must select blue");
     assert_eq!(native_identity, crate::session::install_table_identity("blue"));

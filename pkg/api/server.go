@@ -340,13 +340,13 @@ type Config struct {
 	// counters for the xpf_event_actions_* / xpf_event_action_queue_depth
 	// metrics (#2157). Optional; if nil, the family is omitted.
 	EventActionStatsFn func() eventengine.Stats
-	// RPMPinFailedFn surfaces the count of RPM next-hop probe pins
-	// whose kernel install (fwmark rule + pinned route) is currently
-	// failed — the affected tests hold state instead of probing the
-	// default path, so a nonzero value means those uplinks are not
-	// being health-checked (#1895). Backs the
-	// xpf_rpm_probe_pin_install_failures gauge. Optional; if nil, the
-	// gauge is not emitted.
+	// RPMPinFailedFn surfaces the count of RPM next-hop pins currently
+	// held because install/readback failed, the egress is missing or
+	// unreadable, no installer is available, or the pin band is being
+	// reprogrammed. Held tests do not probe the default path. A confirmed
+	// admin-down egress with an installer is probed instead (#1895/#12088).
+	// Backs the xpf_rpm_probe_pin_install_failures gauge. Optional; if nil,
+	// the gauge is not emitted.
 	RPMPinFailedFn func() float64
 	// FRRReloadDegradedFn reports whether the last applied FRR reload
 	// fell back to the additive vtysh -f path (full frr-reload.py diff

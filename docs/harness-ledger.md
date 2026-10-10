@@ -162,9 +162,10 @@ hashes are distinct provenance values:
 * `running_exe_sha256` / `running_exe_sha256_peer` — SHA-256 of each live
   process image, read back from the corresponding node.
 
-Helper-dependent gates use the same node-specific rule and also record
-`build_helper_exe_sha256_peer`; different fw0/fw1 helper builds are valid only
-when each live helper matches its own slot.
+Helper-dependent cluster gates opt into the same provenance contract with
+`--require-helper-attestation`. They record the helper's per-node build and
+live hashes, `helper_exe_check`, and `helper_exe_scope`. Different fw0/fw1
+helper builds are valid only when each live helper matches its own slot.
 
 Schema 2 records the deploy-artifact meaning of `build_exe_sha256`; the
 additive peer build field identifies the peer slot without changing historical
@@ -243,6 +244,11 @@ node and may legitimately leave it down when the gate ends, so voiding there
 would red exactly the gates whose job is to kill a node. That case records
 `exe_scope=local-only` instead, which a reader can tell apart from a
 whole-cluster `MATCH`.
+
+The helper attestation follows the same exception on these crash gates: an
+unreadable peer with a valid helper slot records `helper_exe_scope=local-only`;
+a missing peer slot or readable mismatch remains `UNAVAILABLE`/`MISMATCH` and
+forces the row to VOID.
 
 Peer-attestation and `measurement_scope` fields are **additive**:
 `REQUIRED_KEYS` is unchanged, so older rows still lint. A row without

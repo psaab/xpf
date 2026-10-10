@@ -114,6 +114,12 @@ type Manager struct {
 	// move the exec outside the lock).
 	reloadMu sync.Mutex
 	confGen  uint64
+	// Desired QNH metric actions and the exact previously emitted QNH
+	// sequences to clear are protected by reloadMu. frr.conf stays
+	// metric-free; overlays are replayed after each integrated reload.
+	qnhMetricOverlays                map[string]string
+	qnhMetricOverlayCleanup          qnhMetricSequenceSet11447
+	qnhMetricOverlayBroadcastCleanup qnhMetricSequenceSet11447
 
 	// degraded is 1 while the last APPLIED reload fell back to the
 	// additive vtysh -f path and the retry loop has not yet converged a
@@ -642,7 +648,8 @@ func (m *Manager) ApplyFull(fc *FullConfig) error {
 		}
 	}
 
-	return m.commitManagedSection(m.buildManagedSection(fc))
+	section, overlays := m.buildManagedSectionWithQNH11447(fc)
+	return m.commitManagedSection(section, overlays)
 }
 
 // collectAllBGPAcceptDefault builds the GLOBAL union (default instance + every
@@ -668,6 +675,11 @@ func collectAllBGPAcceptDefault(fc *FullConfig) map[string]bool {
 // fc.ConsistentHash side effect still happens here (ApplyFull's only
 // caller invokes it before commit).
 func (m *Manager) buildManagedSection(fc *FullConfig) string {
+	section, _ := m.buildManagedSectionWithQNH11447(fc)
+	return section
+}
+
+func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[string]string) {
 	// #6807: the quarantine set describes the section this call produces, so
 	// clear it before rendering rather than accumulating across applies.
 	m.resetQuarantined()
@@ -821,7 +833,7 @@ func (m *Manager) buildManagedSection(fc *FullConfig) string {
 	// emitted exactly once outside any router/instance scope.
 	b.WriteString(bfdSec.render())
 
-	return b.String()
+	return b.String(), m.qnhMetricDaemonOverlays11447(fc, qnhMetrics)
 }
 
 // commitManagedSection is the single write+reload critical section
@@ -834,10 +846,12 @@ func (m *Manager) buildManagedSection(fc *FullConfig) string {
 //
 // Return contract: nil = full diff convergence; ErrFRRReloadDegraded
 // (errors.Is) = additive fallback applied, retry scheduled when
-// enabled; other errors = HARD failure, nothing applied — the generation
-// is marked degraded and the retry is likewise scheduled when enabled
-// (#5109) so live FRR self-heals, and the error is returned.
-func (m *Manager) commitManagedSection(section string) error {
+// enabled; other errors = HARD failure and the generation is marked
+// degraded with retry scheduled when enabled. QNH metric cleanup and replay
+// begin only after a config load succeeds, so a rejected load does not
+// pre-clear the previous QNH metrics. FRR loads are not transactional:
+// commands accepted before a later rejection may already have taken effect.
+func (m *Manager) commitManagedSection(section string, overlays map[string]string) error {
 	m.signalRetryCancel()
 	m.reloadMu.Lock()
 	defer m.reloadMu.Unlock()
@@ -855,13 +869,20 @@ func (m *Manager) commitManagedSection(section string) error {
 		}
 	}()
 
+	cleanup, broadcast, err := m.previousQNHMetricSequences11447()
+	if err != nil {
+		return err
+	}
 	if err := m.writeManagedSection(section); err != nil {
 		return err
 	}
+	m.qnhMetricOverlayCleanup = cleanup
+	m.qnhMetricOverlayBroadcastCleanup = broadcast
+	m.qnhMetricOverlays = cloneQNHMetricOverlays11447(overlays)
 	m.confGen++
 	slog.Info("FRR config written", "path", m.frrConf, "generation", m.confGen)
 
-	err := m.reloadLocked()
+	err = m.reloadLocked()
 	m.noteReloadOutcomeLocked(err)
 	if err != nil && !errors.Is(err, ErrFRRReloadDegraded) {
 		slog.Warn("FRR reload failed", "err", err)
@@ -869,12 +890,287 @@ func (m *Manager) commitManagedSection(section string) error {
 	return err
 }
 
+func cloneQNHMetricOverlays11447(overlays map[string]string) map[string]string {
+	if len(overlays) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(overlays))
+	for daemon, overlay := range overlays {
+		cloned[daemon] = overlay
+	}
+	return cloned
+}
+
+// previousQNHMetricSequences11447 selects route-map sequences emitted by the
+// prior managed section or held by this Manager. It separately records
+// metric-bearing legacy config: those actions may have been broadcast to
+// unsupported daemons and must be cleared even when OSPFD still targets the
+// same route-map sequence.
+func (m *Manager) previousQNHMetricSequences11447() (
+	qnhMetricSequenceSet11447,
+	qnhMetricSequenceSet11447,
+	error,
+) {
+	sequences := mergeQNHMetricSequenceSets11447(
+		m.qnhMetricOverlayCleanup,
+		m.qnhMetricOverlayBroadcastCleanup,
+		qnhMetricSequencesFromOverlay11447(m.qnhMetricOverlays),
+	)
+	broadcast := mergeQNHMetricSequenceSets11447(m.qnhMetricOverlayBroadcastCleanup)
+	content, err := os.ReadFile(m.frrConf)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return sequences, broadcast, nil
+		}
+		return nil, nil, fmt.Errorf("read frr.conf before QNH overlay cleanup: %w", err)
+	}
+	return mergeQNHMetricSequenceSets11447(
+			sequences,
+			qnhMetricSequencesFromManagedConfig11447(string(content)),
+		), mergeQNHMetricSequenceSets11447(
+			broadcast,
+			qnhMetricSequencesWithSetMetricFromManagedConfig11447(string(content)),
+		), nil
+}
+
+func writeQNHMetricConfig11447(daemon, contents string) (string, error) {
+	file, err := os.CreateTemp("", "xpf-frr-qnh-"+daemon+"-*.conf")
+	if err != nil {
+		return "", fmt.Errorf("create temporary QNH config for %s: %w", daemon, err)
+	}
+	path := file.Name()
+	if _, err := file.WriteString(contents); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return "", fmt.Errorf("write temporary QNH config for %s: %w", daemon, err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("close temporary QNH config for %s: %w", daemon, err)
+	}
+	return path, nil
+}
+
+func (m *Manager) loadQNHMetricConfig11447(parent context.Context, daemon, contents string) error {
+	path, err := writeQNHMetricConfig11447(daemon, contents)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(path)
+	ctx, cancel := context.WithTimeout(parent, reloadTimeout)
+	defer cancel()
+	output, err := m.executor().VtyshLoadDaemon(ctx, daemon, path)
+	if err != nil {
+		failure := fmt.Errorf("vtysh -d %s -f QNH config: %w: %s", daemon, err, string(output))
+		if ctx.Err() == nil && strings.Contains(strings.ToLower(string(output)), "failed to connect to any daemons") {
+			return fmt.Errorf("%w: %w", errQNHMetricDaemonUnavailable11447, failure)
+		}
+		return failure
+	}
+	return nil
+}
+
+func (m *Manager) loadQNHMetricIntegratedConfig11447(parent context.Context, contents string) error {
+	path, err := writeQNHMetricConfig11447("integrated", contents)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(path)
+	ctx, cancel := context.WithTimeout(parent, reloadTimeout)
+	defer cancel()
+	output, err := m.executor().VtyshLoad(ctx, path)
+	if err != nil {
+		failure := fmt.Errorf("vtysh -f integrated QNH config: %w: %s", err, string(output))
+		if ctx.Err() == nil && strings.Contains(strings.ToLower(string(output)), "failed to connect to any daemons") {
+			return fmt.Errorf("%w: %w", errQNHMetricDaemonUnavailable11447, failure)
+		}
+		return failure
+	}
+	return nil
+}
+
+func (m *Manager) qnhMetricDaemonCommand11447(parent context.Context, daemon, command string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(parent, reloadTimeout)
+	defer cancel()
+	output, err := m.executor().VtyshDaemon(ctx, daemon, command)
+	if err == nil {
+		return output, nil
+	}
+	failure := fmt.Errorf("vtysh -d %s -c %q: %w: %s", daemon, command, err, string(output))
+	if ctx.Err() == nil && strings.Contains(strings.ToLower(string(output)), "failed to connect to any daemons") {
+		return nil, fmt.Errorf("%w: %w", errQNHMetricDaemonUnavailable11447, failure)
+	}
+	return nil, failure
+}
+
+func (m *Manager) verifyQNHMetricOverlay11447(parent context.Context, daemon, overlay string) error {
+	expected := qnhMetricOverlayActions11447(overlay)
+	if len(expected) == 0 {
+		return fmt.Errorf("%s QNH metric overlay contains no verifiable metric actions", daemon)
+	}
+	for routeMap, sequences := range expected {
+		output, err := m.qnhMetricDaemonCommand11447(parent, daemon, "show route-map "+routeMap)
+		if err != nil {
+			return err
+		}
+		actual := qnhMetricActionsFromShow11447(output)
+		for sequence, wantMetric := range sequences {
+			metrics := actual[sequence]
+			if len(metrics) != 1 || metrics[0] != wantMetric {
+				return fmt.Errorf("%s route-map %s sequence %d has metrics %v, want exactly [%d]:\n%s",
+					daemon, routeMap, sequence, metrics, wantMetric, string(output))
+			}
+		}
+	}
+	return nil
+}
+
+func (m *Manager) verifyQNHMetricSequencesReconciled11447(
+	parent context.Context,
+	daemon string,
+	sequences, configured qnhMetricSequenceSet11447,
+) error {
+	routeMaps := make([]string, 0, len(sequences))
+	for routeMap := range sequences {
+		routeMaps = append(routeMaps, routeMap)
+	}
+	sort.Strings(routeMaps)
+	for _, routeMap := range routeMaps {
+		output, err := m.qnhMetricDaemonCommand11447(parent, daemon, "show route-map "+routeMap)
+		if err != nil {
+			return err
+		}
+		metrics := qnhMetricActionsFromShow11447(output)
+		present := qnhMetricSequencesPresentFromShow11447(output)
+		for sequence := range sequences[routeMap] {
+			if actions := metrics[sequence]; len(actions) != 0 {
+				return fmt.Errorf("%s route-map %s sequence %d still has metric actions %v after reconciliation:\n%s",
+					daemon, routeMap, sequence, actions, string(output))
+			}
+			if _, retained := configured[routeMap][sequence]; !retained {
+				if _, found := present[sequence]; found {
+					return fmt.Errorf("%s route-map %s stale sequence %d still exists after reconciliation:\n%s",
+						daemon, routeMap, sequence, string(output))
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// clearQNHMetricOverlaysLocked reconciles prior generated QNH sequences only
+// after an integrated reload has succeeded. The integrated clear reaches
+// every daemon copy because daemon-scoped `vtysh -f` silently no-ops for
+// several FRR 10.7 daemons; readback verifies every known copy before the
+// cleanup identity is discarded.
+func (m *Manager) clearQNHMetricOverlaysLocked(
+	ctx context.Context,
+	configured qnhMetricSequenceSet11447,
+) error {
+	if len(m.qnhMetricOverlayCleanup) == 0 {
+		m.qnhMetricOverlayCleanup = nil
+		m.qnhMetricOverlayBroadcastCleanup = nil
+		return nil
+	}
+	config := renderQNHMetricSequenceReconciliation11447(m.qnhMetricOverlayCleanup, configured)
+	if config == "" {
+		m.qnhMetricOverlayCleanup = nil
+		m.qnhMetricOverlayBroadcastCleanup = nil
+		return nil
+	}
+	if err := m.loadQNHMetricIntegratedConfig11447(ctx, config); err != nil &&
+		!errors.Is(err, errQNHMetricDaemonUnavailable11447) {
+		return fmt.Errorf("clear stale QNH metric sequences via integrated vtysh: %w", err)
+	}
+	for _, daemon := range qnhMetricCleanupDaemons11447 {
+		if err := m.verifyQNHMetricSequencesReconciled11447(ctx, daemon, m.qnhMetricOverlayCleanup, configured); err != nil {
+			if errors.Is(err, errQNHMetricDaemonUnavailable11447) {
+				slog.Info("skipping QNH metric cleanup verification for unavailable FRR daemon", "daemon", daemon)
+				continue
+			}
+			return fmt.Errorf("verify stale QNH metric sequences reconciled on %s: %w", daemon, err)
+		}
+	}
+	slog.Info("reconciled prior QNH metric actions on reachable FRR daemons",
+		"route_maps", len(m.qnhMetricOverlayCleanup))
+	m.qnhMetricOverlayCleanup = nil
+	m.qnhMetricOverlayBroadcastCleanup = nil
+	return nil
+}
+
+func (m *Manager) reconcileQNHMetricOverlaysLocked(ctx context.Context) error {
+	targets := qnhMetricSequencesFromOverlay11447(m.qnhMetricOverlays)
+	configured := newQNHMetricSequenceSet11447()
+	nonQNH := newQNHMetricSequenceSet11447()
+	if len(m.qnhMetricOverlayCleanup) > 0 {
+		contentBytes, err := os.ReadFile(m.frrConf)
+		if err != nil {
+			return fmt.Errorf("read frr.conf for QNH metric reconciliation: %w", err)
+		}
+		managedConfig := string(contentBytes)
+		configured = qnhMetricRouteMapSequencesFromManagedConfig11447(managedConfig)
+		nonQNH = qnhMetricNonQNHSequencesFromManagedConfig11447(managedConfig)
+	}
+	stale := newQNHMetricSequenceSet11447()
+	for routeMap, sequences := range m.qnhMetricOverlayCleanup {
+		for sequence := range sequences {
+			if _, preserved := nonQNH[routeMap][sequence]; preserved {
+				continue
+			}
+			_, retained := targets[routeMap][sequence]
+			_, broadcast := m.qnhMetricOverlayBroadcastCleanup[routeMap][sequence]
+			if !retained || broadcast {
+				stale.add(routeMap, sequence)
+			}
+		}
+	}
+	m.qnhMetricOverlayCleanup = stale
+	if err := m.clearQNHMetricOverlaysLocked(ctx, configured); err != nil {
+		return err
+	}
+	return m.applyQNHMetricOverlaysLocked(ctx)
+}
+
+// applyQNHMetricOverlaysLocked restores QNH set actions only to ospfd, whose
+// daemon-scoped loader confines the action to the daemon with both match
+// discriminators. RIP stays metric-free because FRR 10.7 only offers an
+// integrated load there, which broadcasts unsafe copies to other daemons.
+// Overlays are memory-only; a restart loads the metric-free config until Apply.
+func (m *Manager) applyQNHMetricOverlaysLocked(ctx context.Context) error {
+	daemons := make([]string, 0, len(m.qnhMetricOverlays))
+	for daemon := range m.qnhMetricOverlays {
+		daemons = append(daemons, daemon)
+	}
+	sort.Strings(daemons)
+	sequences := qnhMetricSequencesFromOverlay11447(m.qnhMetricOverlays)
+	if len(sequences) == 0 {
+		return nil
+	}
+	m.qnhMetricOverlayCleanup = mergeQNHMetricSequenceSets11447(m.qnhMetricOverlayCleanup, sequences)
+	for _, daemon := range daemons {
+		if daemon != "ospfd" {
+			return fmt.Errorf("refusing QNH metric overlay for unsupported daemon %q", daemon)
+		}
+		if err := m.loadQNHMetricConfig11447(ctx, daemon, m.qnhMetricOverlays[daemon]); err != nil {
+			return fmt.Errorf("apply QNH metric overlay to %s: %w", daemon, err)
+		}
+		if err := m.verifyQNHMetricOverlay11447(ctx, daemon, m.qnhMetricOverlays[daemon]); err != nil {
+			return fmt.Errorf("verify QNH metric overlay on %s: %w", daemon, err)
+		}
+		slog.Info("applied and verified daemon-scoped QNH metric overlay",
+			"daemon", daemon,
+			"sequences", len(qnhMetricSequencesFromOverlay11447(map[string]string{daemon: m.qnhMetricOverlays[daemon]})))
+	}
+	m.qnhMetricOverlayCleanup = nil
+	return nil
+}
+
 // Clear removes the xpf managed section from frr.conf and reloads FRR.
 // Unlike the historical version it PROPAGATES the reload outcome
 // (including ErrFRRReloadDegraded) instead of discarding it — `xpfd
 // cleanup` logs it loudly while still exiting 0 (#1880).
 func (m *Manager) Clear() error {
-	err := m.commitManagedSection("")
+	err := m.commitManagedSection("", nil)
 	// A clear attempt removes the managed section from the desired
 	// configuration. Reset the narrowing gauges even when reload reports a
 	// degraded outcome: its retry may later remove the section, and leaving
@@ -1186,6 +1482,9 @@ func (m *Manager) reloadLocked() error {
 	pcancel()
 	if perr == nil {
 		slog.Info("FRR reloaded via frr-reload.py (full diff)")
+		if err := m.reconcileQNHMetricOverlaysLocked(m.lifetimeCtx()); err != nil {
+			return fmt.Errorf("reconcile QNH metric overlays after full FRR reload: %w", err)
+		}
 		return nil
 	}
 	if isFrrReloadPyMissing(perr) {
@@ -1203,7 +1502,9 @@ func (m *Manager) reloadLocked() error {
 		// (slow-cadence retry + the daemon's persistent-cause message, #9947).
 		return fmt.Errorf("vtysh reload: %w (primary frr-reload.py also failed: %w): %s", err, perr, string(output))
 	}
-	slog.Warn("FRR config loaded via additive vtysh -f (degraded: stale-config removal deferred to retry)")
+	if err := m.reconcileQNHMetricOverlaysLocked(m.lifetimeCtx()); err != nil {
+		return fmt.Errorf("reconcile QNH metric overlays after additive reload: %w (primary frr-reload.py failed: %w)", err, perr)
+	}
 	return fmt.Errorf("%w: %w", ErrFRRReloadDegraded, perr)
 }
 
@@ -1249,17 +1550,15 @@ func (m *Manager) warnPytoolsOnce(err error) {
 //     ensure a retry episode (when enabled). A pythontools-missing cause
 //     starts the retry at the slow cadence directly.
 //   - other errors (HARD failure, #5109): both frr-reload.py AND the
-//     additive vtysh -f fallback failed, so NOTHING was applied — live
-//     FRR keeps its previous config while frr.conf on disk already holds
-//     the new desired managed section. Treat it exactly like a degraded
-//     reload for recovery: set the gauge and arm the retry so the next
-//     reconcile re-runs the primary reload against the on-disk config and
-//     self-heals. The error still propagates to the caller (warn-and-
-//     continue at commit, loud log at cleanup). Before #5109 a hard
-//     failure from a non-degraded state hit no case here: the gauge
-//     stayed 0, no retry debt was armed, and live FRR kept the stale
-//     forwarding state until the next commit or a daemon restart while
-//     the operator's commit reported success.
+//     additive vtysh -f fallback failed. QNH cleanup/replay only runs after
+//     a config load succeeds, so prior QNH metrics are not pre-cleared; the
+//     FRR load itself is not transactional and earlier accepted commands may
+//     still have taken effect. Treat it like degraded for recovery: set the
+//     gauge and arm a retry against the on-disk managed section. The error
+//     still propagates to the caller. Before #5109 a hard failure from a
+//     non-degraded state hit no case here: the gauge stayed 0, no retry debt
+//     was armed, and stale forwarding state persisted until another commit
+//     or daemon restart while the operator's commit reported success.
 func (m *Manager) noteReloadOutcomeLocked(err error) {
 	switch {
 	case err == nil:
@@ -1404,6 +1703,10 @@ func (m *Manager) retryReloadOnce(ctx context.Context) (stop, notFound bool) {
 			slog.Warn("FRR degraded-retry reload failed", "err", err)
 		}
 		return false, nf
+	}
+	if err := m.reconcileQNHMetricOverlaysLocked(ctx); err != nil {
+		slog.Warn("FRR degraded-retry could not reconcile QNH metric overlays", "err", err)
+		return false, false
 	}
 	if m.confGen != gen {
 		// Invariant assertion (#1880 plan r4): confGen cannot change

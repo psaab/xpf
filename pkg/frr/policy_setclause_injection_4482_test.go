@@ -15,16 +15,18 @@ import (
 // emitted as sanitized-but-invalid FRR prefixes. Inline route-filter entries
 // already use the same fail-closed ParseCIDR posture (#2105).
 //
-// #4498 completes coverage for the remaining sanitized route-map slots. This
-// test drives a newline payload through each one, verifies no injected
-// top-level command appears, and checks malformed prefix-list entries and
-// community set values are omitted:
+// #4498 catalogued the route-map slots whose malformed values had only a
+// sanitize-on-one-line belt. Later typed gates made next-hop and prepend
+// invalid operands fail-closed (#12070), and origin fail-closed (#4919);
+// those clauses are separately asserted omitted below. This test still
+// checks the remaining sanitized source-protocol slot and the name/literal
+// slots that have their own safe rendering rules:
 //
 //   - malformed IPv4 / IPv6 policy-options prefix-list entries (#10823)
 //   - match community / match as-path                   (#4482)
 //   - set community (replace / additive)                (#12069)
-//   - set comm-list delete / set as-path prepend         (#4482)
-//   - set ip / ipv6 next-hop / origin / source-protocol   (#4498)
+//   - set comm-list delete                              (#4482)
+//   - match source-protocol                             (#4498, sanitized)
 //
 // The NAME slots render through frrName rather than sanitizeFRRValue; their
 // assertions below keep the injected values bounded to one FRR token.
@@ -69,8 +71,9 @@ func TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823(t *t
 					},
 					{
 						Name: "t2",
-						// set as-path prepend — injection with a legitimate
-						// space between ASNs that must survive.
+						// set as-path prepend injection: the embedded newline
+						// makes an ASN invalid, so #12070 omits the whole clause
+						// rather than sanitizing it into a bad FRR command.
 						ASPathPrepend: []string{"65001\n router bgp 65000", "65001"},
 						Action:        "accept",
 					},
@@ -144,13 +147,16 @@ func TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823(t *t
 		want string
 	}{
 		{"match source-protocol", " match source-protocol bgp  router bgp 65000\n"},
-		{"set as-path prepend", " set as-path prepend 65001  router bgp 65000 65001\n"},
 		// #9493: the three NAME slots (match community, match as-path, set
 		// comm-list) render through frrName, not sanitizeFRRValue, and are
 		// asserted below. Collapsing a name onto one line still split it into
 		// extra FRR arguments, so FRR rejected the line; frrName renders it as
 		// one token.
-		{"set ip next-hop", " set ip next-hop 1.2.3.4  router bgp 65000\n"},
+		// NOTE: `set as-path prepend` moved OUT of this sanitize-onto-one-line
+		// list by #12070. The injected token makes one ASN invalid, so the
+		// render belt now omits the entire clause rather than sanitizing it
+		// onto a syntactically invalid FRR line. The negative assertion below
+		// pins that omission.
 		// NOTE: `set origin` moved OUT of this sanitize-onto-one-line list by
 		// #4919. The origin slot is now fail-closed by the validBGPOrigin
 		// render belt (only igp | egp | incomplete render), so the injection
@@ -158,7 +164,6 @@ func TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823(t *t
 		// sanitized onto one line — a strictly stronger guarantee, asserted
 		// separately below. (Parity with the route-filter CIDR fail-closed belt
 		// already documented in this test.)
-		{"set ipv6 next-hop", " set ipv6 next-hop global 2001:db8::1  router bgp 65000\n"},
 	}
 	for _, tc := range wantOnOneLine {
 		if !strings.Contains(got, tc.want) {
@@ -174,6 +179,19 @@ func TestGeneratePolicyOptions_SetClauseSanitizedAndPrefixListOmitted_10823(t *t
 	for _, value := range []string{"65000:1", "65000:2"} {
 		if strings.Contains(got, " set community "+value+" ") {
 			t.Errorf("malformed community value %q must be omitted, got:\n%s", value, got)
+		}
+	}
+
+	// #12070: IP-looking but malformed next-hop operands and non-numeric
+	// prepend tokens are omitted entirely instead of being sanitized onto a
+	// syntactically invalid FRR command.
+	for _, invalid := range []string{
+		"set ip next-hop 1.2.3.4  router bgp 65000",
+		"set ipv6 next-hop global 2001:db8::1  router bgp 65000",
+		"set as-path prepend 65001  router bgp 65000 65001",
+	} {
+		if strings.Contains(got, invalid) {
+			t.Errorf("invalid next-hop/prepend clause %q must be omitted, got:\n%s", invalid, got)
 		}
 	}
 

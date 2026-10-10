@@ -195,10 +195,11 @@ pub(super) struct FlowlessBaseResolution {
 /// fail-closed for transit, but first retain untranslated LocalDelivery so its
 /// existing host-inbound gates still run.
 ///
-/// INGRESS-interface and interface-NAT local-delivery resolution are still
-/// tried BEFORE the PBR (`then routing-instance`) override-aware route-table
-/// lookup, so a host-bound flowless packet reaches `LocalDelivery` instead of
-/// being steered into an override table that has no local route for it.
+/// Ingress-interface local delivery remains ahead of the PBR override, because
+/// it identifies the packet's actual ingress interface. Interface-NAT
+/// delivery is also checked before the lookup, but it receives the selected
+/// table and matches only when that table owns the address (#12086); otherwise
+/// the PBR table governs the transit fallback.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn flowless_base_resolution(
@@ -228,7 +229,8 @@ pub(super) fn flowless_base_resolution(
             (decision, counter)
         }
         super::frag_assoc::FlowlessPreRoutingNat::Untranslatable => {
-            let resolution = flowless_local_resolution(forwarding, meta, l3_flow.dst_ip)?;
+            let resolution =
+                flowless_local_resolution(forwarding, meta, l3_flow.dst_ip, route_override)?;
             return Some(FlowlessBaseResolution {
                 resolution,
                 nat: NatDecision::default(),
@@ -237,7 +239,8 @@ pub(super) fn flowless_base_resolution(
         }
     };
     let dst = nat.rewrite_dst.unwrap_or(l3_flow.dst_ip);
-    let resolution = flowless_local_resolution(forwarding, meta, dst).unwrap_or_else(|| {
+    let resolution =
+        flowless_local_resolution(forwarding, meta, dst, route_override).unwrap_or_else(|| {
         enforce_ha_resolution_snapshot(
             forwarding,
             ha_state,
@@ -270,6 +273,7 @@ fn flowless_local_resolution(
     forwarding: &ForwardingState,
     meta: UserspaceDpMeta,
     dst: IpAddr,
+    resolving_table: Option<&str>,
 ) -> Option<ForwardingResolution> {
     ingress_interface_local_resolution_on_session_miss(
         forwarding,
@@ -278,7 +282,14 @@ fn flowless_local_resolution(
         dst,
         meta.protocol,
     )
-    .or_else(|| interface_nat_local_resolution_on_session_miss(forwarding, dst, meta.protocol))
+    .or_else(|| {
+        interface_nat_local_resolution_on_session_miss(
+            forwarding,
+            dst,
+            meta.protocol,
+            resolving_table,
+        )
+    })
 }
 
 #[cfg(test)]

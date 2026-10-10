@@ -246,24 +246,33 @@ Deployment guidance:
   capability regression cannot inject/withdraw preferred routes
   fleet-wide. Only genuine on-the-wire failures (timeout, unreachable)
   drive ip-monitoring.
-- **Pin install failures hold state too (#1895)**: when a pin's kernel
-  programming fails (missing egress link at boot, rule/route add
-  error), the test does NOT probe — an unbacked `SO_MARK` would fall
-  through to the main table and report the *default* path's health as
-  the pinned uplink's (false PASS, failover suppression). The test
-  holds its prior state exactly like other setup errors, a partial
-  install is rolled back (best-effort — a failed rollback is swept by
-  the next band reprogram; the pin reports failed either way), and the
-  daemon retries the pin install while it stays failed: on every
-  commit or RG transition AND autonomously every 30 s (so a pin that
-  failed during boot recovers on a quiet box with no commits — the
-  recovery logs "probe pin install recovered on retry"). Pinned
-  probes are also pre-held while the band is being reprogrammed, and
-  pins are marked failed wholesale when no routing manager exists to
-  install them. Observability: rate-limited probe-loop
-  warning, per-pin install warnings, and the
-  `xpf_rpm_probe_pin_install_failures` gauge (nonzero = those uplinks
-  are not being health-checked).
+- **Probe pins are read back, held, and repaired (#1895/#12088):** the
+  daemon checks each installed fwmark rule and pinned host route on
+  unchanged-hash reconciles, relevant link/address events, and a 30-second
+  fallback tick. A missing or mismatched pin stays held unless an
+  installer-backed egress is confirmed admin-down; an unbacked `SO_MARK` can
+  fall through to the main table and false-pass.
+  Link or address events publish a hold promptly; readback drift is repaired
+  on the next 30-second tick, so failback after link recovery can be delayed
+  by the same interval (plus the normal probe cycle). Installer failures may
+  also retry on a reconcile; readback-only drift waits for the tick.
+- **Admin-down is a real outage:** with an installer, a failed pin is released
+  only when `LinkByName` confirms the egress exists with `IFF_UP` clear.
+  `SO_BINDTODEVICE` keeps the probe on that egress; its `ENETUNREACH` result is
+  counted as loss and can drive ip-monitoring failover. Carrier-down
+  `RTNH_F_LINKDOWN` routes remain valid pin shapes for the same reason.
+- **Missing egress stays held:** a missing or unreadable link has unknown
+  state, not confirmed admin-down, so the daemon keeps the failed pin in
+  `SetPinInstallResults` and RPM returns `ErrProbeSetup` before opening a
+  socket. If socket setup is reached, `SO_BINDTODEVICE` also fails with
+  `ENODEV`. The gauge counts this hold plus install/readback failures,
+  no-installer holds, and temporary pin-band reprogram holds; nonzero means
+  those held tests are not being health-checked.
+- **No installer means an unconditional hold:** every configured pin stays
+  held even when its egress is admin-down, because no routing manager can
+  install or repair it after a later link-up. Pins are also pre-held while
+  their kernel band is being reprogrammed; failed partial installs are rolled
+  back best-effort and swept by a later band reprogram.
 
 ## Failover policy (PR-1b)
 

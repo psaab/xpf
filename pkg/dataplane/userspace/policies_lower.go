@@ -102,6 +102,7 @@ func buildPolicySnapshotsWithAddressBookAndFailClosed(cfg *config.Config, active
 		return result
 	}
 	out := make([]PolicyRuleSnapshot, 0)
+	_, definedAny := cfg.Security.Zones[config.ReservedWildcardZoneName]
 	// walkPolicyRuleSlots is the single source of truth for the runtime
 	// policy-ID namespace (#3143/#3145). Using it on the snapshot WRITE side
 	// guarantees the IDs assigned here decode back to the same policy on the
@@ -123,6 +124,7 @@ func buildPolicySnapshotsWithAddressBookAndFailClosed(cfg *config.Config, active
 	}); err != nil {
 		return nil, err
 	}
+	poisonDefinedAnyZonePairPolicies(out, definedAny)
 	return out, nil
 }
 
@@ -283,6 +285,8 @@ func buildOneRuleSnapshot(
 		rejectedSourceAddresses: rejectedSrc,
 		rejectedDestAddresses:   rejectedDst,
 		rejectedApplications:    rejectedApps,
+		// #12288: the malformed shape exists only in compile-time metadata.
+		malformedZonePairShapes: pol.MalformedZonePairShapes,
 	}
 }
 

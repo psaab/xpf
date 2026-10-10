@@ -176,14 +176,14 @@ type Manager struct {
 	// pkg/routing programs (routing.BuildProbePins).
 	marks map[string]uint32
 
-	// pinFailed maps "probe/test" to the kernel install error for pins
-	// whose fwmark rule / pinned route failed to program (#1895), as
-	// reported by routing.Manager.ApplyProbePins and threaded in by the
-	// daemon via SetPinInstallResults. A test with a failed pin never
-	// probes (executeProbe returns ErrProbeSetup before any socket is
-	// opened) — an unbacked SO_MARK would fall through to the main
-	// table and measure the default path, turning a dead pinned uplink
-	// into a false PASS that suppresses ip-monitoring failover.
+	// pinFailed maps "probe/test" to the cause for a pin hold: install or
+	// readback failure, an unknown/missing egress, no installer, or a pin-band
+	// reprogram. The daemon releases the hold only when LinkByName confirms
+	// admin-down (except for the unconditional no-installer hold). A failed pin
+	// never probes (executeProbe returns ErrProbeSetup before any socket is
+	// opened) — an unbacked SO_MARK would fall through to the main table and
+	// measure the default path, turning a dead pinned uplink into a false PASS
+	// that suppresses ip-monitoring failover.
 	pinFailed map[string]error
 
 	// icmpListen is the injectable raw-socket seam for the ICMP echo
@@ -319,9 +319,11 @@ func (m *Manager) HoldPinsForReprogram(newPinKeys []string, cause error) {
 	m.pinFailed = held
 }
 
-// PinInstallFailureCount reports how many next-hop probe pins are
-// currently failed-to-install (backs the
-// xpf_rpm_probe_pin_install_failures gauge, #1895).
+// PinInstallFailureCount reports how many next-hop probe pins are currently
+// held because their install/readback failed, their egress is missing or
+// unreadable, no installer is available, or the pin band is being
+// reprogrammed. It backs the xpf_rpm_probe_pin_install_failures gauge
+// (#1895/#12088).
 func (m *Manager) PinInstallFailureCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

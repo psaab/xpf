@@ -1,5 +1,21 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Keep generated qualified-next-hop route-maps metric-free in shared FRR
+    config. After successful loads, reconcile legacy metric-bearing sequences
+    across all 17 route-map-recipient daemons and verify reachable copies,
+    then install the positive metric overlay only to ospfd. Exclude
+    current-generation authored (non-QNH) sequences from stale cleanup so a
+    QNH shrink cannot delete a renumbered authored metric or deny. Do not
+    pre-clear before a load: FRR configuration loads are not transactional.
+    FRR 10.7.1 silently ignores daemon-scoped ripd config, while integrated
+    loads broadcast, so warn that RIP redistribution receives its default
+    metric; track restoration in #12531. Preserve authored policy metrics
+    (#12071).
+  * Drop landed session-delete candidates on a single-level exact
+    commit-confirmed rollback to its predecessor; retain incomplete scan debt
+    fail-closed until complete recapture or an authoritative full session clear
+    (#12072).
+
   * Keep declined WireGuard listener keepalives from publishing outer-tuple
     LocalMiss sessions that would steer subsequent same-zone handshakes away
     from the kernel control socket (#11574).

@@ -618,6 +618,15 @@ type Policy struct {
 	// permit broader than the operator configured), so it carries the same flag.
 	// markFoldWidenedPolicies9571 sets it after the compile.
 	LenientContentDropped bool
+	// MalformedZonePairShapes carries the compiler-recorded malformed context
+	// diagnostics on the synthetic #12039 poison carrier so the userspace
+	// rejection mirror can name the offending shape (#12288). Authored policies
+	// leave it empty.
+	//
+	// `json:"-"` per the #9246 MalformedZonePairs precedent: this is a
+	// COMPILE-TIME diagnostic, not config content, so serializing it would
+	// perturb fixtures and ConfigFingerprint comparisons.
+	MalformedZonePairShapes []string `json:"-"`
 }
 
 // PolicyMatch defines what traffic a policy matches.

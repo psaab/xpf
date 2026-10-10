@@ -884,3 +884,141 @@ fn poll_descriptor_transit_install_stamps_ingress_binding_without_an_rg_4983() {
         "the ingress 802.1Q VID is likewise unconditional"
     );
 }
+
+/// #12086 R1-F3: drive a flow-backed session miss on a native-RI ingress,
+/// where the destination is an interface-NAT address owned only by the
+/// default table. The selected `red.inet.0` table must gate the interface-NAT
+/// arm before the FIB falls through to NoRoute.
+#[test]
+fn flow_miss_interface_nat_uses_native_route_table_12086() {
+    let (domain, check) = crate::session::install_table_identity("red");
+    let mut snapshot = nat_snapshot();
+    let lan = snapshot
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.ifindex == 24)
+        .expect("LAN ingress");
+    lan.routing_instance = "red".to_string();
+    lan.routing_domain = domain;
+    let mut forwarding = build_forwarding_state(&snapshot);
+    forwarding.install_tables.insert(
+        domain,
+        crate::afxdp::types::InstallTables {
+            v4: Some("red.inet.0".to_string()),
+            v6: Some("red.inet6.0".to_string()),
+            h2: check,
+        },
+    );
+    let target = Ipv4Addr::new(172, 16, 80, 8);
+    assert!(
+        forwarding
+            .interface_nat_tables_v4
+            .get(&target)
+            .is_some_and(|tables| tables.contains("inet.0")),
+        "fixture destination must be interface-NAT-owned in inet.0",
+    );
+    assert!(
+        !forwarding
+            .interface_nat_tables_v4
+            .get(&target)
+            .is_some_and(|tables| tables.contains("red.inet.0")),
+        "fixture destination must not be owned by red.inet.0",
+    );
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    assert_eq!(
+        crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+            &forwarding,
+            &dynamic_neighbors,
+            IpAddr::V4(target),
+            Some("red.inet.0"),
+        )
+        .disposition,
+        ForwardingDisposition::NoRoute,
+        "red's FIB must not inherit inet.0's connected WAN route",
+    );
+
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        target,
+        12345,
+        179,
+        TCP_FLAG_SYN,
+        TEST_LAN_MAC,
+    );
+    let meta = txn_meta_v4(24, TCP_FLAG_SYN, frame.len() as u16);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &txn_ha_state(),
+        &frame,
+        meta,
+        true,
+    );
+    assert_eq!(dbg.rx, 1, "the SYN must reach the poll body");
+    assert_eq!(batch.validated_packets, 1, "the SYN must be validated");
+    assert_eq!(
+        dbg.local, 0,
+        "a flow-backed miss in red must not take LocalDelivery for the \
+         default-owned interface-NAT destination",
+    );
+}
+
+/// #12086 R1-F3: the flow-backed miss tunnel guard must receive the selected
+/// PBR table. `sfmix` owns this tunnel interface-NAT address; the gate blocks
+/// it before the local-delivery arm. Forcing the guard's table to `None`
+/// misses the block, and the following table-scoped arm takes LocalDelivery.
+#[test]
+fn flow_miss_tunnel_interface_nat_block_uses_selected_table_12086() {
+    let mut snapshot = native_gre_pbr_snapshot(true);
+    snapshot.source_nat_rules = vec![crate::SourceNATRuleSnapshot {
+        name: "lan-to-sfmix".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "sfmix".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        interface_mode: true,
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let target = IpAddr::V4(Ipv4Addr::new(10, 255, 192, 42));
+    assert!(
+        crate::afxdp::forwarding::should_block_tunnel_interface_nat_session_miss(
+            &forwarding,
+            target,
+            PROTO_TCP,
+            Some("sfmix.inet.0"),
+        ),
+        "the selected sfmix table owns the tunnel interface-NAT address",
+    );
+    let lan_mac = [0x02, 0xbf, 0x72, 0x01, 0x00, 0x00];
+    let frame = build_txn_tcp_syn_frame_v4(
+        Ipv4Addr::new(10, 0, 61, 102),
+        Ipv4Addr::new(10, 255, 192, 42),
+        12345,
+        179,
+        TCP_FLAG_SYN,
+        lan_mac,
+    );
+    let meta = txn_meta_v4(5, TCP_FLAG_SYN, frame.len() as u16);
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 5, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &txn_ha_state(),
+        &frame,
+        meta,
+        true,
+    );
+    assert_eq!(dbg.rx, 1, "the SYN must reach the poll body");
+    assert_eq!(batch.validated_packets, 1, "the SYN must be validated");
+    assert_eq!(
+        dbg.local, 0,
+        "the tunnel interface-NAT block must win before LocalDelivery",
+    );
+}

@@ -6,6 +6,8 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // #7172 cut 5b — the command tables are now READ and `deny-commands` is
@@ -286,6 +288,10 @@ func TestEmptyDenyPatternDeniesEverything7172(t *testing.T) {
 // the RPC and anything refused here is refused by the COMMAND regex and nothing
 // else. That separation is the point: a denial from the coarse gate would prove
 // nothing about this one.
+//
+// Keep the reboot regression under its own fixture. The zone-pair assertion
+// uses the separate summary-only fixture below, so a GetZonePairSummary
+// mis-charge as `request system reboot` is admitted and fails that assertion.
 const authzDenyConfig7172 = `
 system {
     host-name authz-deny-test;
@@ -301,9 +307,34 @@ system {
 }
 `
 
+// The summary-only deny names the `summary` leaf, so it cannot match the
+// detail charge `show security flow session`; a GetZonePairSummary
+// mis-charge to detail is admitted and fails the denial arm. A deny
+// widened to cover detail or inventory reads is caught by the
+// same-fixture GetSessions/GetZones controls below. The `$` anchor is
+// load-bearing: `session` takes options in any order, so a mis-charge
+// to a longer canonical command such as `show security flow session
+// summary zone` passes TestEveryMappedCommandIsCanonical7172, and only
+// this anchored deny keeps it from satisfying the denial arm.
+const authzSummaryDenyConfig7172 = `
+system {
+    host-name authz-summary-deny-test;
+    login {
+        class limited {
+            permissions all;
+            deny-commands "^show security flow session summary$";
+        }
+        user opsuser {
+            class limited;
+        }
+    }
+}
+`
+
 func TestAuthorizeRPCEnforcesDenyCommandsEndToEnd7172(t *testing.T) {
 	usePasswdFixture5278(t)
 	s := NewServer("127.0.0.1:0", Config{Store: authzStore5278(t, authzDenyConfig7172)})
+	summaryServer := NewServer("127.0.0.1:0", Config{Store: authzStore5278(t, authzSummaryDenyConfig7172)})
 	full := "/" + pb.BpfrxService_ServiceDesc.ServiceName + "/SystemAction"
 
 	// PRECONDITION: the class committed and carries the pattern. Without this
@@ -318,6 +349,12 @@ func TestAuthorizeRPCEnforcesDenyCommandsEndToEnd7172(t *testing.T) {
 			"ActiveConfig", ok, err)
 	}
 	_ = rules
+	if _, summaryOK, summaryErr := config.OperationalLoginRegexesFor(
+		summaryServer.activeConfig(), "limited"); summaryErr != nil || !summaryOK {
+		t.Fatalf("the summary-only class must yield compiled rules (ok=%v err=%v); "+
+			"without this the zone-pair denial could pass against a config that "+
+			"never held the deny", summaryOK, summaryErr)
+	}
 
 	// DENIED by the command regex, through the real authorization path.
 	if err := s.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly), full,
@@ -325,10 +362,32 @@ func TestAuthorizeRPCEnforcesDenyCommandsEndToEnd7172(t *testing.T) {
 		t.Error("SystemAction{reboot} maps to `request system reboot`, which this class " +
 			"denies — authorizeRPC admitted it, so the command gate is not reached")
 	}
+	// The summary-only class denies the zone-pair RPC but must still admit the
+	// detail and inventory reads. Because every arm uses summaryServer, a broad
+	// summary deny or a GetSessions mis-charge to summary fails here; the denied
+	// GetZonePairSummary arm distinguishes the summary charge from policy simulation.
+	zoneSummaryMethod := "/" + pb.BpfrxService_ServiceDesc.ServiceName + "/GetZonePairSummary"
+	if err := summaryServer.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly), zoneSummaryMethod,
+		&pb.GetZonePairSummaryRequest{}); status.Code(err) != codes.PermissionDenied {
+		t.Errorf("GetZonePairSummary denial code = %s, want PermissionDenied (err=%v)",
+			status.Code(err), err)
+	}
+	sessionsMethod := "/" + pb.BpfrxService_ServiceDesc.ServiceName + "/GetSessions"
+	if err := summaryServer.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly), sessionsMethod,
+		&pb.GetSessionsRequest{}); err != nil {
+		t.Errorf("GetSessions is charged to the detail command and must remain admitted "+
+			"under the summary-only deny: %v", err)
+	}
 
-	// ADMITTED: same class, same coarse permission, a command the pattern does
-	// not match. Without this arm the cell would also pass if the gate denied
-	// everything, which is not the property under test.
+	zonesMethod := "/" + pb.BpfrxService_ServiceDesc.ServiceName + "/GetZones"
+	if err := summaryServer.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly), zonesMethod,
+		&pb.GetZonesRequest{}); err != nil {
+		t.Errorf("GetZones is not covered by the summary-only deny and must remain admitted: %v", err)
+	}
+
+	// ADMITTED: existing non-session control on the reboot-only fixture. The
+	// command regex does not cover `show version`; without this arm, the reboot
+	// denial could be consistent with the gate refusing every command here.
 	if err := s.authorizeRPC(ctxWithPeerUID(authzUIDReadOnly),
 		"/"+pb.BpfrxService_ServiceDesc.ServiceName+"/GetStatus",
 		&pb.GetStatusRequest{}); err != nil {

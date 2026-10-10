@@ -186,7 +186,7 @@ var schemaPolicyOptions = &schemaNode{desc: "Policy options", children: map[stri
 	"as-path": {desc: "AS path", args: 2, multi: true, placeholder: "<name>", keyValidatorPos: ValidateASPathNameArg, children: nil},
 	"policy-statement": {desc: "Policy statement", args: 1, placeholder: "<name>", keyValidator: ValidateFRRObjectName, children: map[string]*schemaNode{
 		"term": {desc: "Term name", args: 1, placeholder: "<term-name>", keyValidator: ValidateFRRObjectName, children: map[string]*schemaNode{
-			"from": {desc: "Match condition", children: map[string]*schemaNode{
+			"from": {desc: "Match condition", nodeValidator: validatePackedPolicyRouteFilterTailStrict12067, children: map[string]*schemaNode{
 				// "from protocol" is a multi-value match: Junos accepts
 				// "from protocol [ bgp ospf static ]" and, equivalently, a
 				// sequence of separate "set ... from protocol <X>" commands.
@@ -215,20 +215,27 @@ var schemaPolicyOptions = &schemaNode{desc: "Policy options", children: map[stri
 				// arg lands as a fourth packed key via the multi value-tail
 				// absorber, matching the brace AST the compiler already reads.
 				"prefix-list":  {desc: "Prefix list", args: 1, multi: true, placeholder: "<list-name>", children: nil},
-				"route-filter": {desc: "Route filter", args: 2, multi: true, placeholder: "<prefix>", keyValidatorPos: ValidateRouteFilterArgPositional, children: nil},
+				"route-filter": {desc: "Route filter", args: 2, multi: true, placeholder: "<prefix>", keyValidatorPos: ValidateRouteFilterArgPositional, nodeValidator: validateRouteFilterTailStrict12067, children: nil},
 				"community":    {desc: "Community", args: 1, multi: true, placeholder: "<community>", children: nil},
 				"as-path":      {desc: "AS path", args: 1, multi: true, placeholder: "<name>", children: nil},
 			}},
-			"then": {desc: "Action", children: map[string]*schemaNode{
+			// parsePolicyTermChildren consumes this chain through
+			// expandFlatRun; commit validation must inspect the same actions.
+			"then": {desc: "Action", packedFlatRun: true, children: map[string]*schemaNode{
 				// `then next policy` leaves this policy's remaining terms and
 				// default action, then continues at the next policy in the chain.
 				"next": {desc: "Continue with the next policy", args: 1,
 					valueType: ValueEnumOf, valueDesc: "Policy continuation (policy)",
 					valueExamples: []string{"policy"}, validator: ValidateEnum([]string{"policy"}),
 					placeholder: "<policy>", children: nil},
-				"accept":       {desc: "Accept route", children: nil},
-				"reject":       {desc: "Reject route", children: nil},
-				"next-hop":     {desc: "Next hop", args: 1, placeholder: "<address>", children: nil},
+				"accept": {desc: "Accept route", children: nil},
+				"reject": {desc: "Reject route", children: nil},
+				"next-hop": {
+					desc: "Next hop (IPv4/IPv6 address | peer-address | self; Junos discard/reject/next-table are unsupported by FRR)",
+					args: 1, valueType: ValueIPAddress, valueDesc: "IPv4/IPv6 address, peer-address, or self",
+					valueExamples: []string{"192.0.2.1", "2001:db8::1", "peer-address", "self"},
+					validator:     ValidatePolicyThenNextHop, placeholder: "<address>", children: nil,
+				},
 				"load-balance": {desc: "Load balance", args: 1, placeholder: "<policy>", children: nil},
 				// #4688: type these three `then` leaves. Without a validator a
 				// non-numeric value (`then local-preference abc`) committed
@@ -266,7 +273,13 @@ var schemaPolicyOptions = &schemaNode{desc: "Policy options", children: map[stri
 				// [ 65001 65001 ] list keeps EVERY ASN (order + repetition
 				// matter — repeating the ASN is the whole mechanism); a
 				// single-value leaf would drop all but the first (#2892).
-				"as-path-prepend": {desc: "AS path prepend", args: 1, multi: true, groupReplace: true, placeholder: "<asn>", children: nil},
+				"as-path-prepend": {
+					desc: "AS path prepend", args: 1, multi: true, groupReplace: true,
+					valueType: ValueInteger, valueDesc: "ASN (1..4294967295; decimal digits)",
+					valueExamples: []string{"65001", "4294967295"},
+					validator:     ValidatePolicyASPathPrependASN, placeholder: "<asn>",
+					allChildKeysAreValues: true, children: nil,
+				},
 				// #4919: type `then origin` as an enum. Without a validator a
 				// non-control invalid token (e.g. `igpp`) passed the #4498
 				// sanitize belt and reached FRR verbatim, failing the route-map
@@ -302,7 +315,8 @@ const (
 	// on the wire, so the maximum representable lifetime is 8191*8 = 65528s.
 	// A larger value makes ndp.PREF64.marshal return "scaled lifetime is too
 	// large" and aborts the whole RA (the #3895 blackhole).
-	raPREF64MaxLifetimeSeconds = 65528
+	// RAPREF64MaxLifetimeSeconds is shared by the strict gate and sender clamp.
+	RAPREF64MaxLifetimeSeconds = 65528
 	// RFC 4861 §4.2: the RA header Router Lifetime is a 16-bit seconds field.
 	// A larger value silently wraps in ndp's uint16(lifetime) (65536 -> 0 =
 	// "not a default router"), so hosts drop their default route.
@@ -749,8 +763,8 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 					// maximum (8191*8 = 65528s). A larger value makes
 					// ndp.PREF64.marshal fail, aborting the entire RA.
 					"lifetime": {desc: "Lifetime", args: 1, placeholder: "<seconds>",
-						valueType: ValueInteger, valueDesc: "PREF64 lifetime in seconds (0 = router lifetime; RFC 8781 max 65528)",
-						valueExamples: []string{"0", "1800"}, validator: ValidateInteger(0, raPREF64MaxLifetimeSeconds), children: nil},
+						valueType: ValueInteger, valueDesc: "PREF64 lifetime in seconds (0 = router lifetime capped at 65528; 1800 when router lifetime is 0; RFC 8781 max 65528)",
+						valueExamples: []string{"0", "1800"}, validator: ValidateInteger(0, RAPREF64MaxLifetimeSeconds), children: nil},
 				}},
 			"nat64prefix": {desc: "NAT64 prefix", args: 1, placeholder: "<prefix>",
 				keyValueType: ValueCIDR, keyValueDesc: "NAT64 prefix (RFC 8781 length /32 /40 /48 /56 /64 /96)",
@@ -760,8 +774,8 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 					// maximum (8191*8 = 65528s). A larger value makes
 					// ndp.PREF64.marshal fail, aborting the entire RA.
 					"lifetime": {desc: "Lifetime", args: 1, placeholder: "<seconds>",
-						valueType: ValueInteger, valueDesc: "PREF64 lifetime in seconds (0 = router lifetime; RFC 8781 max 65528)",
-						valueExamples: []string{"0", "1800"}, validator: ValidateInteger(0, raPREF64MaxLifetimeSeconds), children: nil},
+						valueType: ValueInteger, valueDesc: "PREF64 lifetime in seconds (0 = router lifetime capped at 65528; 1800 when router lifetime is 0; RFC 8781 max 65528)",
+						valueExamples: []string{"0", "1800"}, validator: ValidateInteger(0, RAPREF64MaxLifetimeSeconds), children: nil},
 				}},
 		}},
 	}},

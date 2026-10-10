@@ -167,7 +167,7 @@ var (
 type IfData struct {
 	IfIndex     int
 	IfDescr     string
-	IfType      int // 6=ethernetCsmacd, 1=other, 131=tunnel, 53=propVirtual
+	IfType      int // 6=ethernetCsmacd, 1=other, 24=softwareLoopback, 131=tunnel, 53=propVirtual
 	IfMtu       int
 	IfSpeed     uint32 // bits per second
 	AdminStatus int    // 1=up, 2=down

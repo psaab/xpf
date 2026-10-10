@@ -1293,64 +1293,85 @@ func staticRouteDispositionConflict(sr *StaticRoute) string {
 	return strings.Join(found, " + ")
 }
 
-// validateStaticRouteDispositionConflictStrict hard-rejects a static route that
-// carries MORE THAN ONE mutually-exclusive disposition for a single destination
-// prefix — e.g. `discard` together with a reachable `next-hop`, a `next-table`
-// VRF leak together with a `next-hop`, or `discard` together with `reject`.
+func staticRouteDestinationNames(sr *StaticRoute) string {
+	if sr == nil {
+		return `""`
+	}
+	destinationNames := fmt.Sprintf("%q", sr.Destination)
+	for _, alias := range sr.destinationAliases {
+		destinationNames += fmt.Sprintf(" (also authored as %q)", alias)
+	}
+	return destinationNames
+}
+
+// validateStaticRouteDispositionConflictStrict rejects ambiguous static-route
+// merges before they can silently change forwarding. Besides mutually exclusive
+// actions (next-hop, next-table, discard, reject), it checks compiler metadata
+// for competing next-table targets and install/no-install disagreement.
 //
-// The compiler merges repeated same-destination static-route blocks (flat "set"
-// syntax emits one block per line) into a single StaticRoute
-// (compileStaticRoutes): next-hops are APPENDED and the terminal / next-table
-// fields are STICKY (discard/reject latch true, next-table/preference are
-// last-writer-wins). A config that declares the SAME prefix once as `discard`
-// (or `next-table X`) and once with a `next-hop` therefore compiled into ONE
-// route holding BOTH a blackhole/leak AND a forwarding next-hop — a
-// contradiction that passed the strict gate. The live snapshot copies every
-// field (pkg/dataplane/userspace/routes.go) and the Rust forwarder resolves
-// discard before next-table before next-hops
-// (userspace-dp/src/afxdp/forwarding/mod.rs), so the stale terminal / leak wins
-// and a later next-hop meant to RESTORE ordinary forwarding is silently ignored
-// — a blackhole or a cross-VRF leak the operator did not author (#5633).
+// Same-spelling route blocks use Junos block semantics: they merge next-hops,
+// latch discard/reject, keep NoInstall sticky, and apply the last explicit
+// route preference. Distinct masked aliases and collections are folded later
+// as independent sources; differing route preferences stamp unqualified
+// next-hops into separate tiers. Competing next-table targets and
+// install/no-install disagreement are retained as metadata and rejected on
+// strict validation.
 //
-// Junos permits exactly one action per static route. Rejecting the mix at commit
-// keeps the compiled route unambiguous and the operator informed rather than
-// letting the dataplane pick a precedence the config never expressed. Multiple
-// next-hops for one destination stay legitimate ECMP and do NOT trip this gate.
-//
-// Strict on commit / commit-check (hard reject so the contradiction is
-// operator-visible); the call site downgrades this to a warning on the tolerant
-// load / peer-sync path (opts.lenientRouteDispositionConflict, #1960) so an
-// already-persisted or peer-synced config still BOOTS — the dataplane then
-// resolves the deterministic disposition precedence. Global inet.0/inet6.0 are
-// walked first, then each routing-instance's routes in RoutingInstances order,
-// so the first-reported error is deterministic. Mirrors
-// validateNextTableTargetReferencesStrict.
+// Junos permits exactly one action per static route. Rejecting ambiguous
+// dispositions at commit keeps the compiled route unambiguous and operator-
+// visible; multiple next-hops for one destination remain legitimate ECMP.
+// The call site downgrades strict errors to warnings on tolerant load/peer-sync
+// paths so persisted configurations still boot with deterministic precedence.
+// Global inet.0/inet6.0 collections are checked as one effective-table scope,
+// then each routing-instance's collections together in RoutingInstances order.
+// Merged aliases retain authored destination spellings for diagnostics.
 func validateStaticRouteDispositionConflictStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
 	}
-	check := func(scope string, routes []*StaticRoute) error {
-		for _, sr := range routes {
-			conflict := staticRouteDispositionConflict(sr)
-			if conflict == "" {
-				continue
+	check := func(scope string, routeSets ...[]*StaticRoute) error {
+		for _, routes := range routeSets {
+			for _, sr := range routes {
+				if sr == nil {
+					continue
+				}
+				if len(sr.competingNextTableTargets) > 1 {
+					targets := make([]string, len(sr.competingNextTableTargets))
+					for i, target := range sr.competingNextTableTargets {
+						targets[i] = fmt.Sprintf("%q", target)
+					}
+					return fmt.Errorf(
+						"%s %s has competing next-table targets %s for one masked "+
+							"destination prefix",
+						scope, staticRouteDestinationNames(sr),
+						strings.Join(targets, " and "))
+				}
+				if sr.noInstallConflict {
+					return fmt.Errorf(
+						"%s %s has conflicting install and no-install declarations "+
+							"for one masked destination prefix",
+						scope, staticRouteDestinationNames(sr))
+				}
+
+				conflict := staticRouteDispositionConflict(sr)
+				if conflict == "" {
+					continue
+				}
+				return fmt.Errorf(
+					"%s %s defines contradictory dispositions (%s) for one "+
+						"destination prefix; a static route may carry only ONE of "+
+						"next-hop, next-table, discard, or reject (repeated "+
+						"same-prefix `set` lines merge into a single route). Split "+
+						"the destinations or keep one disposition — otherwise the "+
+						"dataplane silently resolves the terminal/leak action and "+
+						"ignores the forwarding next-hop",
+					scope, staticRouteDestinationNames(sr), conflict)
 			}
-			return fmt.Errorf(
-				"%s %q defines contradictory dispositions (%s) for one "+
-					"destination prefix; a static route may carry only ONE of "+
-					"next-hop, next-table, discard, or reject (repeated "+
-					"same-prefix `set` lines merge into a single route). Split "+
-					"the destinations or keep one disposition — otherwise the "+
-					"dataplane silently resolves the terminal/leak action and "+
-					"ignores the forwarding next-hop",
-				scope, sr.Destination, conflict)
 		}
 		return nil
 	}
-	if err := check("routing-options static route", cfg.RoutingOptions.StaticRoutes); err != nil {
-		return err
-	}
-	if err := check("routing-options static route", cfg.RoutingOptions.Inet6StaticRoutes); err != nil {
+	if err := check("routing-options static route",
+		cfg.RoutingOptions.StaticRoutes, cfg.RoutingOptions.Inet6StaticRoutes); err != nil {
 		return err
 	}
 	for _, ri := range cfg.RoutingInstances {
@@ -1358,10 +1379,7 @@ func validateStaticRouteDispositionConflictStrict(cfg *Config) error {
 			continue
 		}
 		scope := fmt.Sprintf("routing-instances %s static route", ri.Name)
-		if err := check(scope, ri.StaticRoutes); err != nil {
-			return err
-		}
-		if err := check(scope, ri.Inet6StaticRoutes); err != nil {
+		if err := check(scope, ri.StaticRoutes, ri.Inet6StaticRoutes); err != nil {
 			return err
 		}
 	}
@@ -1423,8 +1441,9 @@ func validateStaticNextHopFamilyStrict(cfg *Config) error {
 	return nil
 }
 
-// validateRouteFilterMatchTypesStrict gates the two route-filter match-types
-// that the FRR prefix-list backend cannot render losslessly (#2525):
+// validateRouteFilterMatchTypesStrict gates route-filter match-types and
+// operands that the FRR prefix-list backend cannot render losslessly (#2525,
+// #12067):
 //
 //   - "through <prefix2>" has NO FRR equivalent. Junos "through" matches the
 //     base prefix, prefix2, and only the prefixes on the direct radix-tree
@@ -1437,11 +1456,14 @@ func validateStaticNextHopFamilyStrict(cfg *Config) error {
 //     family-range, or below-base range so the operator fixes it instead of
 //     getting the pre-#2525 silent open-ended "le maxLen" fall-through.
 //
-// Strict on commit / commit-check (hard reject so the unsupported / malformed
-// match-type is operator-visible); the compiler downgrades this to a warning on
-// the tolerant load / peer-sync path (#1960) so an already-persisted or
-// peer-synced config still boots — the renderer then skips the offending entry
-// (match-nothing, fail-closed). Runs on the fully-compiled *Config.
+//   - "upto" requires a parsed length. A missing or malformed value leaves
+//     UptoLen at zero, which the renderer treats as the open-ended "le maxLen"
+//     fallback; reject it at strict commit rather than widening the authored
+//     prefix constraint.
+//
+// Strict on commit / commit-check. The compiler downgrades this to a warning on
+// the tolerant load / peer-sync path (#1960), whose existing rendering behavior
+// remains unchanged. Runs on the fully-compiled *Config.
 func validateRouteFilterMatchTypesStrict(cfg *Config) error {
 	if cfg == nil || cfg.PolicyOptions.PolicyStatements == nil {
 		return nil
@@ -1480,6 +1502,29 @@ func validateRouteFilterMatchTypesStrict(cfg *Config) error {
 						return fmt.Errorf(
 							"policy-statement %q term %q route-filter %q prefix-length-range: %v",
 							name, term.Name, rf.Prefix, err)
+					}
+				case "upto":
+					// #12067: a missing or malformed `upto` length parses to
+					// UptoLen 0 and the renderer degrades to the open-ended
+					// `le maxLen` — an orlonger-style fail-open widening of
+					// the authored constraint. The schema gate rejects this
+					// for flat/hierarchical/compact spellings, but the
+					// term-line spelling (`term T from route-filter ...;`)
+					// packs its tail onto the term node where the schema
+					// walk never looks. Gate the compiled field so every
+					// spelling is covered. UptoLen 0 is unambiguous here:
+					// parseRouteFilterLen rejects /0 on purpose (#2102), so
+					// 0 always means "no parseable length", never an
+					// explicit length.
+					if rf.UptoLen == 0 {
+						if rf.UptoToken != "" {
+							return fmt.Errorf(
+								"policy-statement %q term %q route-filter %q `upto` has invalid or out-of-range prefix length %q",
+								name, term.Name, rf.Prefix, rf.UptoToken)
+						}
+						return fmt.Errorf(
+							"policy-statement %q term %q route-filter %q `upto` requires a prefix length such as /24",
+							name, term.Name, rf.Prefix)
 					}
 				}
 			}
@@ -1909,6 +1954,79 @@ func validateGenerateRoutePolicyStrict(cfg *Config) error {
 				"forwarding plane); remove the policy for the established "+
 				"unconditional-blackhole meaning",
 			gr.Prefix, gr.Policy)
+	}
+	return nil
+}
+
+// validatePolicyThenOperandsStrict hard-rejects compiled policy terms whose
+// `then next-hop` or `then as-path-prepend` operands are outside the
+// FRR-renderable subset (#12070).
+//
+// Schema validation expands child-based action chains, but compact
+// `then accept ...;` and term-line `term t then accept ...;` spellings pack
+// operands onto a Keys tail the schema walker ignores. The compiler's
+// parsePolicyTermInlineKeys reads those tails into the same PolicyTerm fields
+// as the expanded forms. Empty next-hop and prepend clauses, plus whitespace-
+// only or keyword-valued prepend operands, can otherwise disappear before this
+// gate; compiler-only presence flags preserve those cases for rejection.
+// Checking every compiled term validates all spellings after parsing while
+// schema validation continues to cover child-based operands. It reuses the
+// exact predicates and errors name the policy, term, leaf, and value.
+//
+// Strict on commit / commit-check; the call site downgrades to a warning on
+// the tolerant load / peer-sync path (opts.lenientPolicyThenOperands, #1960)
+// so an existing config still boots. The FRR render belt omits invalid
+// next-hop/prepend clauses on that path. Runs on the fully-compiled *Config.
+// Mirrors validateRouteFilterMatchTypesStrict.
+func validatePolicyThenOperandsStrict(cfg *Config) error {
+	if cfg == nil || cfg.PolicyOptions.PolicyStatements == nil {
+		return nil
+	}
+	// Deterministic first-error: iterate policy-statements by sorted name.
+	names := make([]string, 0, len(cfg.PolicyOptions.PolicyStatements))
+	for name := range cfg.PolicyOptions.PolicyStatements {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		ps := cfg.PolicyOptions.PolicyStatements[name]
+		if ps == nil {
+			continue
+		}
+		for _, term := range ps.Terms {
+			if term == nil {
+				continue
+			}
+			if (term.NextHop != "" && !ValidPolicyThenNextHop(term.NextHop)) ||
+				(term.hasNextHopOperand12070 && term.NextHop == "") {
+				return fmt.Errorf(
+					"policy-options policy-statement %q term %q then next-hop: invalid value %q: unsupported next-hop %q: %s",
+					name, term.Name, term.NextHop, term.NextHop, policyThenNextHopUnsupportedReason(term.NextHop))
+			}
+			if term.invalidNextHopExtra12070 {
+				return fmt.Errorf(
+					"policy-options policy-statement %q term %q then next-hop: unknown modifier %q",
+					name, term.Name, term.invalidNextHopExtraValue12070)
+			}
+			prependOperands := SplitPolicyASPathPrependOperands(term.ASPathPrepend)
+			for _, asn := range prependOperands {
+				if !ValidPolicyASPathPrependASN(asn) {
+					return fmt.Errorf(
+						"policy-options policy-statement %q term %q then as-path-prepend: invalid value %q: AS path prepend value %q is not an ASN in 1..4294967295 (canonical decimal digits only)",
+						name, term.Name, asn, asn)
+				}
+			}
+			if term.invalidASPathPrependExtra12070 {
+				return fmt.Errorf(
+					"policy-options policy-statement %q term %q then as-path-prepend: unknown modifier %q",
+					name, term.Name, term.invalidASPathPrependExtraValue12070)
+			}
+			if term.hasASPathPrependOperand12070 && len(prependOperands) == 0 {
+				return fmt.Errorf(
+					"policy-options policy-statement %q term %q then as-path-prepend: invalid value %q: AS path prepend value %q contains no ASN operands",
+					name, term.Name, "", "")
+			}
+		}
 	}
 	return nil
 }

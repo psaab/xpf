@@ -20,8 +20,14 @@ Triggers `networkctl reload` only when files actually changed.
 - `Apply(...)` — `networkd.go`. Also the TEARDOWN entry point: `Apply(nil)`
   sweeps every managed file and reloads (#2988). There is no separate `Clear`;
   see the retirement note below (#6852).
-- `FindExternallyManaged(dir string) map[string]bool` — `networkd.go`. Detects networkd files
-  the daemon doesn't own.
+- `FindExternallyManaged(dir string) ExternalMatchSet` — `networkd.go`. Detects non-xpf
+  network files with supported `Name=` / `MACAddress=` predicates. Name patterns
+  use the tested systemd-compatible `fnmatch` forms. Systemd consumes field-level
+  backslashes before matching and rejects `:` in interface names, so matcher-helper
+  escape and POSIX named-class coverage is not a file-level parity claim. MAC forms
+  normalize systemd's colon-, hyphen-, and dotted EUI-48 spellings. `Matches` requires
+  predicates to establish ownership; `MatchesForApply` keeps durable teardown
+  conservative when supported predicates match alongside unknown `[Match]` keys.
 
 ## Callers
 

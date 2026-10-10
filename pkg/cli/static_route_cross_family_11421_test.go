@@ -72,3 +72,58 @@ func TestCrossFamilyStaticRouteExclusionSurfacesAgree11421(t *testing.T) {
 		}
 	}
 }
+func TestStaticRouteTierPreferencesVisibleOnCLIAndGRPC_12084(t *testing.T) {
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	_, err := store.SyncApply(`routing-options {
+    static {
+        route 2602:ffd3::/40 {
+            next-hop 2602:ffd3:ffff::1;
+            preference 5;
+        }
+    }
+    rib inet6.0 {
+        static {
+            route 2602:ffd3::/40 {
+                next-hop 2602:ffd3:ffff::2;
+                preference 200;
+            }
+        }
+    }
+}`, nil)
+	if err != nil {
+		t.Fatalf("SyncApply: %v", err)
+	}
+
+	grpcServer := grpcapi.NewServer("", grpcapi.Config{Store: store})
+	grpcResp, err := grpcServer.ShowText(context.Background(), &pb.ShowTextRequest{Topic: "routing-options"})
+	if err != nil {
+		t.Fatalf("ShowText(routing-options): %v", err)
+	}
+	cliOut := captureStdout(t, func() {
+		if err := (&CLI{store: store}).showRoutingOptions(); err != nil {
+			t.Fatalf("showRoutingOptions: %v", err)
+		}
+	})
+	wants := map[string]string{
+		"2602:ffd3:ffff::1": "5",
+		"2602:ffd3:ffff::2": "200",
+	}
+	for surface, output := range map[string]string{"CLI": cliOut, "gRPC": grpcResp.GetOutput()} {
+		for gateway, preference := range wants {
+			var rows []string
+			for _, line := range strings.Split(output, "\n") {
+				if strings.Contains(line, gateway) {
+					rows = append(rows, line)
+				}
+			}
+			if len(rows) != 1 {
+				t.Errorf("%s rows for %s = %q, want one row", surface, gateway, rows)
+				continue
+			}
+			fields := strings.Fields(rows[0])
+			if len(fields) == 0 || fields[len(fields)-1] != preference {
+				t.Errorf("%s row = %q, want per-tier preference %s", surface, rows[0], preference)
+			}
+		}
+	}
+}

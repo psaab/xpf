@@ -500,9 +500,10 @@ func (a *Agent) handleV3Packet(msgBody []byte) []byte {
 
 	case pduSetRequest:
 		// The agent exposes no writable objects; refuse SET with notWritable
-		// rather than silently dropping the request. SNMPv3 access control is
-		// per-USM-user and carries no read-write authorization in this config,
-		// so every SET is refused uniformly.
+		// rather than silently dropping a fitting error response. SNMPv3
+		// access control is per-USM-user and carries no read-write
+		// authorization in this config. If that response is too large, use
+		// the RFC 3416 §4.2.5 tooBig fallback, dropping it if it also cannot fit.
 		var oids [][]int
 		requestID, _, _, oids, err = decodePDUFields(pduBody)
 		if err != nil {
@@ -515,7 +516,21 @@ func (a *Agent) handleV3Packet(msgBody []byte) []byte {
 		if len(oids) > 0 {
 			errIdx = 1
 		}
-		return a.buildV3Response(msgID, msgFlags, user, echoContext, requestID, errNotWritable, errIdx, respVarbinds)
+		maxSize := effectiveMaxSize(msgMaxSize)
+		resp := a.buildV3Response(msgID, msgFlags, user, echoContext, requestID, errNotWritable, errIdx, respVarbinds)
+		if len(resp) > maxSize {
+			// The fallback still echoes the request's contextName, which is
+			// accepted without a length bound, so recheck the fully-encoded
+			// fallback against the same maximum and discard it if it still
+			// does not fit (RFC 3416 §4.2.5) rather than emitting an
+			// over-size datagram the manager cannot receive.
+			fallback := a.buildV3Response(msgID, msgFlags, user, echoContext, requestID, errTooBig, 0, nil)
+			if len(fallback) > maxSize {
+				return nil
+			}
+			return fallback
+		}
+		return resp
 
 	default:
 		slog.Debug("SNMPv3: unsupported PDU type", "type", pduTag)

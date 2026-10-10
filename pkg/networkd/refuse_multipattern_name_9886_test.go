@@ -146,31 +146,6 @@ func TestApplyRefusesSlashPlusSpaceExactlyOnce_9886(t *testing.T) {
 	}
 }
 
-// #9886: skip-first ordering — an unmanaged interface with an external config is
-// never rendered by xpf, so even a multi-pattern name there must not trip the
-// belt. Silent skip, no error contribution.
-func TestApplySkipsExternallyManagedMultiPatternName_9886(t *testing.T) {
-	stubNetworkctl9886(t)
-	dir := t.TempDir()
-	external := "[Match]\nName=ge 0\n\n[Network]\nDHCP=yes\n"
-	if err := os.WriteFile(filepath.Join(dir, "zz-external.network"), []byte(external), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	m := &Manager{networkDir: dir}
-	if err := m.Apply([]InterfaceConfig{{Name: "ge 0", Unmanaged: true}}); err != nil {
-		t.Fatalf("#9886: externally-managed skip must not trip the belt, got %v", err)
-	}
-	if got, _ := os.ReadFile(filepath.Join(dir, "zz-external.network")); string(got) != external {
-		t.Fatalf("external file disturbed: got %q", got)
-	}
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), filePrefix) {
-			t.Fatalf("#9886: skip must write no xpf files, found %s", e.Name())
-		}
-	}
-}
-
 // #9886: a refused name that is ALSO in the protected set keeps its files —
 // lifeline wins over the sweep — while the refusal still fails the commit.
 func TestApplyProtectedPlusPoisonedKeepsFilesAndFails_9886(t *testing.T) {

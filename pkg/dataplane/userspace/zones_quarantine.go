@@ -121,13 +121,18 @@ func quarantineCollidingZones(snap *ConfigSnapshot) []ZoneIDCollision {
 	}
 	// Scrub collision-loser zone references so the snapshot carries no dangling
 	// policy->zone reference (which the Rust UnresolvableZoneReference preflight
-	// would reject wholesale — a whole-snapshot brick on a fresh boot). Reserved
-	// names such as `any` and `junos-host` are policy sentinels, not configured
-	// zone references, so their wildcard/host-context policies remain intact.
-	// The scrub is shared with scheduler-only / route-overlay republish paths
-	// (#6480), which rebuild policies from raw cfg against the reduced zone list.
+	// would reject wholesale — a whole-snapshot brick on a fresh boot).
+	// `any` is normally a policy sentinel and its wildcard policies stay intact.
+	// When an actual `any` zone definition is present, policy lowering poisons
+	// zone-pair rules naming it before this quarantine runs; the sentinel keeps
+	// the helper from widening them and lets the rejection mirror explain the
+	// whole-snapshot refusal (#12249). `junos-host` remains a valid host-context
+	// token, and global policies keep their structural `junos-global` sentinels.
+	// This collision scrub is shared with scheduler-only / route-overlay
+	// republish paths (#6480).
 	policyQuarantined := config.QuarantinedZoneNames(names)
 	snap.Policies = scrubPoliciesForQuarantinedZones(snap.Policies, policyQuarantined)
+	poisonDefinedAnyZonePairPolicies(snap.Policies, config.HasDefinedAnyZoneName(names))
 	sort.Slice(collisions, func(i, j int) bool {
 		if collisions[i].ID != collisions[j].ID {
 			return collisions[i].ID < collisions[j].ID
