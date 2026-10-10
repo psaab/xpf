@@ -126,13 +126,14 @@ func (c *CLI) showPoliciesHitCount(cfg *config.Config, fromZone, toZone string) 
 	if fromZone != "" || toZone != "" {
 		passes = 3
 	}
+	pairFilter := policymatch.NewZonePairPolicyFilter(cfg, fromZone, toZone)
 	for tier := range passes {
 		for setIdx, zpp := range cfg.Security.Policies {
 			// #3476: skip a nil zone-pair set (tolerant / HA-sync path).
 			if zpp == nil {
 				continue
 			}
-			if !policymatch.ZonePairPolicyAppliesToFilterPair(zpp.FromZone, zpp.ToZone, fromZone, toZone) {
+			if !policymatch.ZonePairPolicyAppliesToFilterPair(pairFilter, zpp.FromZone, zpp.ToZone) {
 				continue
 			}
 			policySetID := uint32(setIdx)
@@ -404,13 +405,14 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 	if fromZone != "" || toZone != "" {
 		passes = 3
 	}
+	pairFilter := policymatch.NewZonePairPolicyFilter(cfg, fromZone, toZone)
 	for tier := range passes {
 		for setIdx, zpp := range cfg.Security.Policies {
 			// #3476: skip a nil zone-pair set (tolerant / HA-sync path).
 			if zpp == nil {
 				continue
 			}
-			if !policymatch.ZonePairPolicyAppliesToFilterPair(zpp.FromZone, zpp.ToZone, fromZone, toZone) {
+			if !policymatch.ZonePairPolicyAppliesToFilterPair(pairFilter, zpp.FromZone, zpp.ToZone) {
 				continue
 			}
 			policySetID := uint32(setIdx)

@@ -393,6 +393,22 @@ func (c *ctl) showPoliciesFiltered(fromZone, toZone string, globalOnly bool) err
 	if err != nil {
 		return fmt.Errorf("%v", err)
 	}
+	filtered := fromZone != "" || toZone != ""
+	zoneFilterConfig := (*config.Config)(nil)
+	if filtered {
+		zonesResp, err := c.client.GetZones(c.ctx(), &pb.GetZonesRequest{})
+		if err != nil {
+			return fmt.Errorf("resolving policy filter zones: %v", err)
+		}
+		zones := make(map[string]*config.ZoneConfig, len(zonesResp.GetZones()))
+		for _, zone := range zonesResp.GetZones() {
+			// Include quarantined names too: the shared filter constructor
+			// derives the same quarantine projection from the complete inventory,
+			// preserving exact authored rows without expanding wildcard tiers.
+			zones[zone.GetName()] = &config.ZoneConfig{Name: zone.GetName()}
+		}
+		zoneFilterConfig = &config.Config{Security: config.SecurityConfig{Zones: zones}}
+	}
 	renderRule := func(rule *pb.PolicyRule) {
 		fmt.Printf("  Rule: %s\n", rule.Name)
 		if rule.Description != "" {
@@ -482,8 +498,8 @@ func (c *ctl) showPoliciesFiltered(fromZone, toZone string, globalOnly bool) err
 		}
 		fmt.Println()
 	}
-	filtered := fromZone != "" || toZone != ""
 	if filtered && !globalOnly {
+		pairFilter := policymatch.NewZonePairPolicyFilter(zoneFilterConfig, fromZone, toZone)
 		// Zone-pair rule inventory follows runtime precedence, not config-group
 		// placement: exact, single-wildcard, then both-wildcard. Globals render
 		// after this loop below.
@@ -492,7 +508,7 @@ func (c *ctl) showPoliciesFiltered(fromZone, toZone string, globalOnly bool) err
 				if pi.FromZone == "*" && pi.ToZone == "*" {
 					continue
 				}
-				if !policymatch.ZonePairPolicyAppliesToFilterPair(pi.FromZone, pi.ToZone, fromZone, toZone) ||
+				if !policymatch.ZonePairPolicyAppliesToFilterPair(pairFilter, pi.FromZone, pi.ToZone) ||
 					policymatch.ZonePairPolicyFilterTier(pi.FromZone, pi.ToZone) != tier {
 					continue
 				}

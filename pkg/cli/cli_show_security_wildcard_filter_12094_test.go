@@ -20,11 +20,22 @@ func wildcardPolicyConfig12094(t *testing.T) (*config.Config, *CLI) {
 		{FromZone: "dmz", ToZone: "untrust", Policies: []*config.Policy{{Name: "off-pair", Action: config.PolicyDeny}}},
 	}
 	cfg.Security.GlobalPolicies = []*config.Policy{{Name: "open-global", Action: config.PolicyPermit}}
+	counters := make(map[uint32]dataplane.CounterValue)
+	for setIdx, zpp := range cfg.Security.Policies {
+		for ruleIdx := range zpp.Policies {
+			id := uint32(setIdx)*dataplane.MaxRulesPerPolicy + uint32(ruleIdx)
+			packets := uint64(id) + 1000
+			counters[id] = dataplane.CounterValue{Packets: packets, Bytes: packets * 10}
+		}
+	}
+	globalID := uint32(len(cfg.Security.Policies)) * dataplane.MaxRulesPerPolicy
+	counters[globalID] = dataplane.CounterValue{Packets: uint64(globalID) + 1000, Bytes: (uint64(globalID) + 1000) * 10}
+	counters[dataplane.DefaultPolicySentinelID] = dataplane.CounterValue{Packets: 9000, Bytes: 90000}
 	c := &CLI{
 		store: store,
 		dp: &policyCounterCLIDP{
 			Manager:  dataplane.New(),
-			counters: map[uint32]dataplane.CounterValue{},
+			counters: counters,
 		},
 	}
 	return cfg, c
@@ -38,7 +49,17 @@ func Test12094LocalPolicyViewsIncludeWildcardPairs(t *testing.T) {
 	if hitErr != nil {
 		t.Fatalf("showPoliciesHitCount: %v", hitErr)
 	}
+	allHit := captureStdout(t, func() {
+		if err := c.showPoliciesHitCount(cfg, "", ""); err != nil {
+			t.Fatalf("unfiltered showPoliciesHitCount: %v", err)
+		}
+	})
 	assertPolicyView12094(t, hit, []string{"exact-allow", "wild-to-any", "wild-from-any", "both-any-deny", "open-global"}, []string{"off-pair"})
+	for _, name := range []string{"wild-to-any", "wild-from-any", "both-any-deny"} {
+		if got, want := policyCounterValue12094(hit, name), policyCounterValue12094(allHit, name); got != want {
+			t.Errorf("%s filtered hit count = %q, unfiltered hit count = %q", name, got, want)
+		}
+	}
 
 	detail := captureStdout(t, func() {
 		if err := c.showPoliciesDetail(cfg, "trust", "untrust"); err != nil {
@@ -46,7 +67,17 @@ func Test12094LocalPolicyViewsIncludeWildcardPairs(t *testing.T) {
 		}
 	})
 	assertPolicyView12094(t, detail, []string{"exact-allow", "wild-to-any", "wild-from-any", "both-any-deny", "open-global"}, []string{"off-pair"})
+	allDetail := captureStdout(t, func() {
+		if err := c.showPoliciesDetail(cfg, "", ""); err != nil {
+			t.Fatalf("unfiltered showPoliciesDetail: %v", err)
+		}
+	})
 
+	for _, name := range []string{"wild-to-any", "wild-from-any", "both-any-deny"} {
+		if got, want := policyDetailIndex12094(detail, name), policyDetailIndex12094(allDetail, name); got == "" || got != want {
+			t.Errorf("%s filtered Index = %q, unfiltered Index = %q", name, got, want)
+		}
+	}
 	brief := captureStdout(t, func() {
 		if err := c.handleShowSecurity([]string{"policies", "brief", "from-zone", "trust", "to-zone", "untrust"}); err != nil {
 			t.Fatalf("handleShowSecurity(brief): %v", err)
@@ -60,6 +91,37 @@ func Test12094LocalPolicyViewsIncludeWildcardPairs(t *testing.T) {
 		}
 	})
 	assertPolicyView12094(t, standard, []string{"exact-allow", "wild-to-any", "wild-from-any", "both-any-deny", "open-global"}, []string{"off-pair"})
+}
+
+func policyCounterValue12094(out, name string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, name) {
+			fields := strings.Fields(line)
+			if len(fields) > 4 {
+				return fields[4]
+			}
+		}
+	}
+	return ""
+}
+
+func policyDetailIndex12094(out, name string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "Policy: "+name+",") {
+			continue
+		}
+		const marker = "Index: "
+		index := strings.Index(line, marker)
+		if index < 0 {
+			return ""
+		}
+		rest := line[index+len(marker):]
+		if comma := strings.IndexByte(rest, ','); comma >= 0 {
+			rest = rest[:comma]
+		}
+		return strings.TrimSpace(rest)
+	}
+	return ""
 }
 
 func assertPolicyView12094(t *testing.T, out string, ordered, excluded []string) {

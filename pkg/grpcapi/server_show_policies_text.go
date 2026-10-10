@@ -203,13 +203,14 @@ func (s *Server) showPoliciesHitCount(filter string, buf *strings.Builder) {
 	if filterFrom != "" || filterTo != "" {
 		passes = 3
 	}
+	pairFilter := policymatch.NewZonePairPolicyFilter(cfg, filterFrom, filterTo)
 	for tier := range passes {
 		for setIdx, zpp := range cfg.Security.Policies {
 			// #3476: skip a nil zone-pair set (tolerant / HA-sync path).
 			if zpp == nil {
 				continue
 			}
-			if !policymatch.ZonePairPolicyAppliesToFilterPair(zpp.FromZone, zpp.ToZone, filterFrom, filterTo) {
+			if !policymatch.ZonePairPolicyAppliesToFilterPair(pairFilter, zpp.FromZone, zpp.ToZone) {
 				continue
 			}
 			policySetID := uint32(setIdx)
@@ -507,13 +508,14 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 	if filterFrom != "" || filterTo != "" {
 		passes = 3
 	}
+	pairFilter := policymatch.NewZonePairPolicyFilter(cfg, filterFrom, filterTo)
 	for tier := range passes {
 		for setIdx, zpp := range cfg.Security.Policies {
 			// #3476: skip a nil zone-pair set (tolerant / HA-sync path).
 			if zpp == nil {
 				continue
 			}
-			if !policymatch.ZonePairPolicyAppliesToFilterPair(zpp.FromZone, zpp.ToZone, filterFrom, filterTo) {
+			if !policymatch.ZonePairPolicyAppliesToFilterPair(pairFilter, zpp.FromZone, zpp.ToZone) {
 				continue
 			}
 			policySetID := uint32(setIdx)

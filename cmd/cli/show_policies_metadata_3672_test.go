@@ -60,7 +60,12 @@ func metadataPoliciesResp() *pb.GetPoliciesResponse {
 // FAIL-ON-REVERT: restoring the old renderRule (name/desc/raw addr/action/hits)
 // drops every one of these lines, so each assertion goes RED.
 func TestRenderRuleSurfacesAllMetadata(t *testing.T) {
-	fake := &fakeBpfrxClient{getPoliciesResp: metadataPoliciesResp()}
+	fake := &fakeBpfrxClient{
+		getPoliciesResp: metadataPoliciesResp(),
+		getZonesResp: &pb.GetZonesResponse{Zones: []*pb.ZoneInfo{
+			{Name: "trust"}, {Name: "untrust"},
+		}},
+	}
 	c := &ctl{client: fake}
 
 	out := captureStdout(t, func() {
@@ -93,13 +98,16 @@ func TestRenderRuleSurfacesAllMetadata(t *testing.T) {
 // TestRenderRuleInactiveWithoutScheduler pins the standalone inactive
 // annotation for a rule marked inactive without a scheduler name.
 func TestRenderRuleInactiveWithoutScheduler(t *testing.T) {
-	fake := &fakeBpfrxClient{getPoliciesResp: &pb.GetPoliciesResponse{
-		Policies: []*pb.PolicyInfo{{
-			FromZone: "trust",
-			ToZone:   "untrust",
-			Rules:    []*pb.PolicyRule{{Name: "r", Action: "permit", Inactive: true}},
-		}},
-	}}
+	fake := &fakeBpfrxClient{
+		getPoliciesResp: &pb.GetPoliciesResponse{
+			Policies: []*pb.PolicyInfo{{
+				FromZone: "trust",
+				ToZone:   "untrust",
+				Rules:    []*pb.PolicyRule{{Name: "r", Action: "permit", Inactive: true}},
+			}},
+		},
+		getZonesResp: &pb.GetZonesResponse{Zones: []*pb.ZoneInfo{{Name: "trust"}, {Name: "untrust"}}},
+	}
 	c := &ctl{client: fake}
 	out := captureStdout(t, func() {
 		if err := c.showPoliciesFiltered("trust", "untrust", false); err != nil {
@@ -115,19 +123,22 @@ func TestRenderRuleInactiveWithoutScheduler(t *testing.T) {
 // no metadata bits set renders no exclusion marker, no Log/Scheduler/Inactive
 // line, and no zero hit-count line (byte-identical to the pre-#3672 output).
 func TestRenderRulePlainRuleUnchanged(t *testing.T) {
-	fake := &fakeBpfrxClient{getPoliciesResp: &pb.GetPoliciesResponse{
-		Policies: []*pb.PolicyInfo{{
-			FromZone: "trust",
-			ToZone:   "untrust",
-			Rules: []*pb.PolicyRule{{
-				Name:         "allow-web",
-				Action:       "permit",
-				SrcAddresses: []string{"any"},
-				DstAddresses: []string{"web"},
-				Applications: []string{"junos-http"},
+	fake := &fakeBpfrxClient{
+		getPoliciesResp: &pb.GetPoliciesResponse{
+			Policies: []*pb.PolicyInfo{{
+				FromZone: "trust",
+				ToZone:   "untrust",
+				Rules: []*pb.PolicyRule{{
+					Name:         "allow-web",
+					Action:       "permit",
+					SrcAddresses: []string{"any"},
+					DstAddresses: []string{"web"},
+					Applications: []string{"junos-http"},
+				}},
 			}},
-		}},
-	}}
+		},
+		getZonesResp: &pb.GetZonesResponse{Zones: []*pb.ZoneInfo{{Name: "trust"}, {Name: "untrust"}}},
+	}
 	c := &ctl{client: fake}
 	out := captureStdout(t, func() {
 		if err := c.showPoliciesFiltered("trust", "untrust", false); err != nil {

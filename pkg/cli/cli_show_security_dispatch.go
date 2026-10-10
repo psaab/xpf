@@ -309,13 +309,14 @@ func (c *CLI) handleShowSecurity(args []string) error {
 			if fromZone != "" || toZone != "" {
 				passes = 3
 			}
+			pairFilter := policymatch.NewZonePairPolicyFilter(cfg, fromZone, toZone)
 			for tier := range passes {
 				for setIdx, zpp := range cfg.Security.Policies {
 					// #3476: skip a nil zone-pair set (tolerant / HA-sync path).
 					if zpp == nil {
 						continue
 					}
-					if !policymatch.ZonePairPolicyAppliesToFilterPair(zpp.FromZone, zpp.ToZone, fromZone, toZone) {
+					if !policymatch.ZonePairPolicyAppliesToFilterPair(pairFilter, zpp.FromZone, zpp.ToZone) {
 						continue
 					}
 					policySetID := uint32(setIdx)
@@ -450,13 +451,14 @@ func (c *CLI) handleShowSecurity(args []string) error {
 			if fromZone != "" || toZone != "" {
 				passes = 3
 			}
+			pairFilter := policymatch.NewZonePairPolicyFilter(cfg, fromZone, toZone)
 			for tier := range passes {
 				for setIdx, zpp := range cfg.Security.Policies {
 					// #3476: skip a nil zone-pair set (tolerant / HA-sync path).
 					if zpp == nil {
 						continue
 					}
-					if !policymatch.ZonePairPolicyAppliesToFilterPair(zpp.FromZone, zpp.ToZone, fromZone, toZone) {
+					if !policymatch.ZonePairPolicyAppliesToFilterPair(pairFilter, zpp.FromZone, zpp.ToZone) {
 						continue
 					}
 					policySetID := uint32(setIdx)
@@ -501,6 +503,7 @@ func (c *CLI) handleShowSecurity(args []string) error {
 				}
 			}
 		}
+		// Global policies. #3357: a from/to-zone filter no longer suppresses the
 		// global block (only `global`-only and the unfiltered view did before) —
 		// the filtered standard view must show an unscoped global (every pair)
 		// and a scoped global (#3148) targeting the filtered pair. When globalOnly

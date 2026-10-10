@@ -1076,10 +1076,19 @@ Global policies:
   selection predicate is `policymatch.GlobalPolicyAppliesToZonePair`.
 
 - **#12094 — wildcard zone-pair policies appear in filtered views.** The
-  filtered hit-count, detail, standard, and brief views include `from-zone any`
-  and/or `to-zone any` stanzas that are enforced for the selected pair. Output
-  follows the runtime tiers — exact, single-wildcard, both-wildcard, then global
-  — and excludes an unrelated concrete pair. One shared
+  gRPC hit-count/detail, local hit-count/detail/standard/brief, and remote
+  filtered views include `from-zone any` and/or `to-zone any` stanzas enforced
+  for a defined transit pair. Output follows the runtime tiers — exact,
+  single-wildcard, both-wildcard, then global — and excludes an unrelated
+  concrete pair. The
+  host-bound view is narrower: it includes exact and `from-zone any` ->
+  `junos-host` stanzas but never transit `to-zone any` / `any -> any` stanzas,
+  which the host gate does not enforce. Explicit `any` filters do not expand
+  transit wildcard stanzas; undefined filters do not select transit tiers, and
+  quarantined filters retain only their exact authored pair. The host-specific
+  `any -> junos-host` rule remains applicable to unknown ingress. Global-group
+  selection remains separate; the pre-existing unscoped-global host-view
+  mismatch is tracked as a #12094 follow-up. One shared
   `policymatch.ZonePairPolicyAppliesToFilterPair` predicate governs the gRPC
   text, local CLI, and remote CLI views.
 - **#3683 (M02) — remote FILTERED policy view normalizes the global scope to
