@@ -2310,6 +2310,9 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
     binding.interface = Arc::<str>::from("reth0.80");
     let mut sessions = SessionTable::new();
+    // Match the production admission path: an installed forward SNAT row is
+    // stamped with the live config/FIB generation and its NAT provenance.
+    sessions.set_forwarding_revalidation_gen(7, 9);
 
     // Forward session: 10.0.61.102:12345 -> 8.8.8.8:443, interface SNAT
     // to 172.16.80.8 (no port rewrite). Installed below cap, then the
@@ -2337,7 +2340,7 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
         install_table_check: 0,
     };
     assert!(sessions.install_with_protocol_with_origin(
-        forward_key,
+        forward_key.clone(),
         forward_decision,
         SessionMetadata {
             ingress_zone: TEST_LAN_ZONE_ID,
@@ -2367,6 +2370,7 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
         PROTO_TCP,
         TCP_FLAG_SYN,
     ));
+    sessions.mark_source_nat_revalidated(&forward_key, Some(false));
     sessions.set_max_sessions_for_test(1);
 
     // Reply: 8.8.8.8:443 -> 172.16.80.8:12345 (pure ACK) from the WAN.
@@ -2378,7 +2382,8 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
         0x10,
         crate::afxdp::tests_support::TEST_WAN_MAC,
     );
-    let meta = txn_meta_v4(12, 0x10, (reply.len() - 14) as u16);
+    let mut meta = txn_meta_v4(12, 0x10, (reply.len() - 14) as u16);
+    meta.ingress_vlan_id = 80;
     let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -2406,7 +2411,8 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
     // Below cap, the next reply re-fires the repair and installs the
     // reverse session — the self-heal property the cache gate restores.
     sessions.set_max_sessions_for_test(16);
-    let meta2 = txn_meta_v4(12, 0x10, (reply.len() - 14) as u16);
+    let mut meta2 = txn_meta_v4(12, 0x10, (reply.len() - 14) as u16);
+    meta2.ingress_vlan_id = 80;
     let (batch2, dbg2) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
