@@ -93,6 +93,14 @@ func (vtyshEscapeExecutor6468) VtyshStream(context.Context, string) (io.ReadClos
 	return io.NopCloser(strings.NewReader("")), func() error { return nil }, nil
 }
 
+func (vtyshEscapeExecutor6468) VtyshDaemon(context.Context, string, string) ([]byte, error) {
+	return nil, nil
+}
+
+func (vtyshEscapeExecutor6468) VtyshLoadDaemon(context.Context, string, string) ([]byte, error) {
+	return nil, nil
+}
+
 // escapeVtyshServer6468 wires a Server whose FRR manager returns the hostile
 // block from every vtysh call.
 func escapeVtyshServer6468(t *testing.T) *Server {

@@ -75,6 +75,14 @@ func (rowEscapeExecutor6579) VtyshStream(context.Context, string) (io.ReadCloser
 	return io.NopCloser(strings.NewReader("")), func() error { return nil }, nil
 }
 
+func (rowEscapeExecutor6579) VtyshDaemon(context.Context, string, string) ([]byte, error) {
+	return nil, nil
+}
+
+func (rowEscapeExecutor6579) VtyshLoadDaemon(context.Context, string, string) ([]byte, error) {
+	return nil, nil
+}
+
 func rowEscapeCLI6579(t *testing.T) *CLI {
 	t.Helper()
 	m := frr.NewForTest(filepath.Join(t.TempDir(), "frr.conf"), rowEscapeExecutor6579{})
