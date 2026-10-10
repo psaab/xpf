@@ -293,6 +293,133 @@ func TestHostInboundExceptTupleFiltersAliasAcrossMergedStanzas12053(t *testing.T
 	}
 }
 
+// TestHostInboundAllProtocolsExceptSubtractsAdmissionTuples12318 audits every
+// protocol token in the `all` expansion. Any token that shares an excluded
+// family-scoped tuple must be removed; unrelated admissions must survive.
+func TestHostInboundAllProtocolsExceptSubtractsAdmissionTuples12318(t *testing.T) {
+	for _, excluded := range HostInboundAllExpansionProtocols() {
+		t.Run(excluded, func(t *testing.T) {
+			got := hostInboundFilterExcept([]string{"all"}, []string{excluded}, true)
+			want := make([]string, 0, len(HostInboundAllExpansionProtocols()))
+			for _, candidate := range HostInboundAllExpansionProtocols() {
+				remove := candidate == excluded
+				for _, family := range []string{"ip", "ip6"} {
+					for _, candidateMatch := range HostInboundProtocolMatch(candidate, family) {
+						for _, excludedMatch := range HostInboundProtocolMatch(excluded, family) {
+							if hostInboundTupleOverlap12053(candidateMatch, excludedMatch) {
+								remove = true
+							}
+						}
+					}
+				}
+				if !remove {
+					want = append(want, candidate)
+				}
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("protocols all except %s = %v, want tuple subtraction %v", excluded, got, want)
+			}
+		})
+	}
+}
+
+func TestHostInboundProtocolsExceptIgmpDvmrpAndControls12318(t *testing.T) {
+	const prefix = `security { zones { security-zone trust { host-inbound-traffic { `
+	const suffix = ` } } } }`
+	wantWithoutProto2 := without10292(HostInboundAllExpansionProtocols(), "igmp", "dvmrp")
+	cases := []struct {
+		name string
+		tree *ConfigTree
+		want []string
+	}{
+		{
+			name: "igmp-except-hierarchical",
+			tree: parse10292(t, prefix+`protocols { all; igmp except; }`+suffix),
+			want: wantWithoutProto2,
+		},
+		{
+			name: "dvmrp-except-hierarchical",
+			tree: parse10292(t, prefix+`protocols { all; dvmrp except; }`+suffix),
+			want: wantWithoutProto2,
+		},
+		{
+			name: "igmp-except-flat",
+			tree: flat10292(t,
+				"set security zones security-zone trust host-inbound-traffic protocols all",
+				"set security zones security-zone trust host-inbound-traffic protocols igmp except"),
+			want: wantWithoutProto2,
+		},
+		{
+			name: "all-control-retains-proto-2",
+			tree: parse10292(t, prefix+`protocols { all; }`+suffix),
+			want: []string{"all"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hostInbound10292(t, tc.tree)
+			if !reflect.DeepEqual(got.Protocols, tc.want) {
+				t.Fatalf("effective protocols = %v, want %v", got.Protocols, tc.want)
+			}
+			if tc.name == "all-control-retains-proto-2" {
+				if !containsString(HostInboundAllExpansionProtocols(), "igmp") ||
+					!containsString(HostInboundAllExpansionProtocols(), "dvmrp") ||
+					!reflect.DeepEqual(HostInboundProtocolMatch("igmp", "ip"), HostInboundProtocolMatch("dvmrp", "ip")) {
+					t.Fatal("unexcluded protocols all must preserve both aliases of IPv4 proto 2")
+				}
+				return
+			}
+			if containsString(got.Protocols, "igmp") || containsString(got.Protocols, "dvmrp") {
+				t.Fatalf("proto-2 exclusion retained an alias: %v", got.Protocols)
+			}
+			if !containsString(got.Protocols, "rsvp") {
+				t.Fatalf("proto-2 exclusion removed unrelated RSVP control: %v", got.Protocols)
+			}
+		})
+	}
+}
+
+func TestHostInboundProtocolsExceptFiltersMergedStanzas12318(t *testing.T) {
+	got := hostInbound10292(t, parse10292(t, `security { zones { security-zone trust {
+		host-inbound-traffic { protocols { all; igmp except; } }
+		host-inbound-traffic { protocols { dvmrp; rsvp; } }
+	} } }`))
+	if containsString(got.Protocols, "igmp") || containsString(got.Protocols, "dvmrp") {
+		t.Fatalf("merged protocol stanza re-admitted excluded proto 2: %v", got.Protocols)
+	}
+	if !containsString(got.Protocols, "rsvp") {
+		t.Fatalf("merged protocol stanza lost independent RSVP control: %v", got.Protocols)
+	}
+}
+
+// Regenerate the Rust consumer fixture after an intentional protocol emission
+// change with:
+// XPF_HOST_INBOUND_EXCEPT_IGMP_REGEN=1 go test ./pkg/config -run TestHostInboundAllExceptIGMPEmissionMatchesRustFixture12318
+func TestHostInboundAllExceptIGMPEmissionMatchesRustFixture12318(t *testing.T) {
+	got := hostInbound10292(t, parse10292(t,
+		`security { zones { security-zone trust { host-inbound-traffic { protocols { all; igmp except; } } } } }`))
+	emitted, err := json.MarshalIndent(got.Protocols, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal compiled protocols: %v", err)
+	}
+	emitted = append(emitted, '\n')
+	fixturePath := "../../userspace-dp/src/afxdp/forwarding/host_inbound_all_except_igmp_12318.json"
+	if os.Getenv("XPF_HOST_INBOUND_EXCEPT_IGMP_REGEN") != "" {
+		if err := os.WriteFile(fixturePath, emitted, 0644); err != nil {
+			t.Fatalf("regenerate shared Rust fixture: %v", err)
+		}
+		t.Logf("regenerated shared fixture at %s", fixturePath)
+		return
+	}
+	fixture, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("read shared Rust fixture: %v", err)
+	}
+	if !bytes.Equal(fixture, emitted) {
+		t.Fatalf("Rust fixture does not match Go compiler emission byte-for-byte\nfixture:\n%s\ncompiler:\n%s", fixture, emitted)
+	}
+}
+
 func TestHostInboundExcept10292Protocols(t *testing.T) {
 	const prefix = `security { zones { security-zone trust { host-inbound-traffic { `
 	const suffix = ` } } } }`
