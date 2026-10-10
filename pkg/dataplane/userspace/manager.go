@@ -148,6 +148,13 @@ type Manager struct {
 	// starts with an empty table even when the cluster sync transport survives.
 	// Zero means there is no generation-scoped inventory debt.
 	sessionInventoryDebtGen uint64
+	// sessionInventoryDebtOwed marks that the NEXT spawned helper generation
+	// owes an inventory replay. Set at reset time (when the next generation
+	// number is not yet knowable — StopHelperForReset bumps procGen again),
+	// converted into sessionInventoryDebtGen=procGen by
+	// startHelperSupervisorLocked at spawn time (Opus F1: predicting
+	// procGen+1 at reset desyncs to newGen=3 debt=2 and deadlocks the gate).
+	sessionInventoryDebtOwed bool
 	// sessionInventoryRequestAt throttles peer bulk requests while the current
 	// helper generation waits for its authoritative session inventory.
 	sessionInventoryRequestAt time.Time

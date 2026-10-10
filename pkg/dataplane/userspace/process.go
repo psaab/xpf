@@ -699,14 +699,12 @@ func (m *Manager) resetAfterHelperGoneLocked() {
 	m.bindingsBusySince = time.Time{}
 	m.lastBindingsAutoRebind = time.Time{}
 	m.consecutiveFailedAutoRebinds = 0
-	// The replacement helper starts at the next process generation and has no
-	// inherited session table. Keep takeover readiness closed until that exact
-	// generation completes an authoritative peer bulk.
-	if m.clusterHA {
-		m.sessionInventoryDebtGen = m.procGen + 1
-	} else {
-		m.sessionInventoryDebtGen = 0
-	}
+	// The replacement helper has no inherited session table. Do NOT predict
+	// its generation here (procGen+1 desyncs when StopHelperForReset bumps
+	// again before the spawn): mark owed and let the spawn bind the debt to
+	// the allocated generation (Opus F1).
+	m.sessionInventoryDebtGen = 0
+	m.sessionInventoryDebtOwed = m.clusterHA
 	m.sessionInventoryRequestAt = time.Time{}
 
 	m.publishedSnapshot = 0

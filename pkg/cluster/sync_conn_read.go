@@ -253,10 +253,13 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		// as cold-prime bulks. Coalesce concurrent requests before they reach
 		// bulkSendMu, without blocking this receive loop.
 		if s.bulkRequestInFlight.CompareAndSwap(false, true) {
+			s.wg.Add(1)
 			go func() {
+				defer s.wg.Done()
 				defer s.bulkRequestInFlight.Store(false)
 				if err := s.doBulkSync(); err != nil {
-					slog.Warn("cluster sync: requested bulk sync failed", "err", err)
+					slog.Debug("cluster sync: requested bulk sync failed; will retry on next request",
+						"err", err)
 				}
 			}()
 		}

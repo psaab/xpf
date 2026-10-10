@@ -256,6 +256,13 @@ func (m *Manager) scheduleRestartTimer(d time.Duration, fn func()) {
 // Called with m.mu held, immediately after a successful cmd.Start().
 func (m *Manager) startHelperSupervisorLocked(cmd *exec.Cmd) {
 	m.procGen++
+	// Bind owed inventory debt to the ALLOCATED generation (Opus F1): the
+	// reset marked it owed without knowing this number.
+	if m.sessionInventoryDebtOwed {
+		m.sessionInventoryDebtGen = m.procGen
+		m.sessionInventoryDebtOwed = false
+		m.sessionInventoryRequestAt = time.Time{}
+	}
 	// Keep the helper-session epoch ahead of any sender while this new process
 	// is still being published. The subsequent snapshot publication records
 	// the same live generation together with its capability and inventory.

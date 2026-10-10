@@ -473,3 +473,35 @@ func TestPeerSessionInventoryOlderBulkCannotClearNewGeneration12160(t *testing.T
 		t.Fatal("new-generation inventory request remained pending after its bulk completed")
 	}
 }
+
+// TestBulkReconcileRejectsStaleSerial12160 pins the serial fence in
+// reconcileStaleSessions (Opus F7): a reconcile for a superseded bulk
+// serial must not consume the in-progress window. Kills M9 (serial check
+// dropped). Short name: the 12160 test names must survive long TMPDIR
+// unix-socket paths (F7 socket-path limit).
+func TestBulkReconcileRejectsStaleSerial12160(t *testing.T) {
+	s := NewSessionSync(":0", "peer", nil)
+	s.bulkMu.Lock()
+	s.bulkInProgress = true
+	s.bulkRecvSerial = 7
+	s.bulkMu.Unlock()
+	if ok, _, _ := s.reconcileStaleSessions(6); ok {
+		t.Fatal("stale serial 6 reconciled window for serial 7")
+	}
+	s.bulkMu.Lock()
+	stillInProgress, serial := s.bulkInProgress, s.bulkRecvSerial
+	s.bulkMu.Unlock()
+	if !stillInProgress || serial != 7 {
+		t.Fatalf("stale reconcile disturbed the window: inProgress=%v serial=%d", stillInProgress, serial)
+	}
+	// Matching serial passes the fence and consumes the window (the
+	// reconcile itself may still decline on validation — the fence only
+	// gates entry).
+	s.reconcileStaleSessions(7)
+	s.bulkMu.Lock()
+	consumed := !s.bulkInProgress
+	s.bulkMu.Unlock()
+	if !consumed {
+		t.Fatal("matching serial 7 did not consume the window")
+	}
+}

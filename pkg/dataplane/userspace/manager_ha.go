@@ -493,6 +493,9 @@ func (m *Manager) takeoverReadyLocked() (bool, []string) {
 		reasons = append(reasons, fmt.Sprintf(
 			"userspace session inventory not reconciled for helper generation %d",
 			m.sessionInventoryDebtGen))
+	} else if m.sessionInventoryDebtOwed {
+		reasons = append(reasons,
+			"userspace session inventory not reconciled for the next helper generation (spawn pending)")
 	}
 
 	// #9642: an indebted node must not advertise takeover readiness. Its
