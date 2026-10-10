@@ -13,7 +13,7 @@ import (
 // multi-term application additionally MINTS an implicit application-set under the
 // application's own name (apps.ApplicationSets[appName] = implicitSet). Every one
 // of these writes is last-write-wins: a second definition silently OVERWRITES
-// the first, with no commit error. The observable failures (#3339):
+// the first, with no commit error. The observable failures (#3339 and #12220):
 //
 //   - M07: an explicit `applications application-set <X>` silently replaces the
 //     implicit set minted for a multi-term `applications application <X>` (or,
@@ -29,15 +29,20 @@ import (
 //     when a single term carries multiple protocols) — the later
 //     apps.Applications[name] = t silently overwrites the earlier while the
 //     implicit set still lists the duplicated member. Ambiguous and silent.
+//   - #12220: an authored `application-set <X>` can shadow a predefined
+//     application `<X>` without overwriting either user map. Direct references
+//     resolve application-first, while nested set members resolve user-set-first,
+//     so the same token can have different enforced meanings by reference path.
 //
 // Junos treats applications and application-sets as a SINGLE flat namespace and
 // rejects a duplicate definition / a name used for both; this gate restores that
 // parity. It is an AST pre-walk (run on the group-expanded, inactive-pruned tree
-// in compileExpanded) rather than a post-compile check on the typed *Config,
-// because by the time the maps are built the colliding definitions have ALREADY
-// been merged away by last-write-wins — only the raw AST still carries every
-// definition. This mirrors validateUnsupportedInterfaceStanzasAST and the other
-// AST reject-at-commit gates.
+// in compileExpanded) rather than a post-compile check: duplicate definitions
+// and authored app/set collisions can be merged away by last-write-wins, while
+// #12220 must compare authored application-set names with predefined applications
+// before the differing resolution paths are used. The raw AST preserves every
+// authored stanza so one gate can handle both cases. This mirrors
+// validateUnsupportedInterfaceStanzasAST and the other AST reject-at-commit gates.
 //
 // Strict path (commit / commit-check, lenient=false): the first collision is a
 // hard compile error naming the offending name. Lenient path (load / peer-sync,
@@ -49,11 +54,12 @@ import (
 // rather than publishing the arbitrary map winner.
 //
 // Scope notes:
-//   - Only USER-authored AST stanzas are examined. The predefined junos-* table
-//     lives outside the AST, so a user `application junos-http` that shadows a
-//     predefined application is NOT a collision (one AST stanza, no peer) and is
-//     left untouched — the legitimate shadow/extend case the #3339 issue calls
-//     out.
+//   - The predefined junos-* table lives outside the AST, so a user
+//     `application junos-http` that shadows a predefined application remains
+//     allowed — that is the legitimate shadow/extend case from #3339.
+//   - A user `application-set` shadowing a predefined application is different:
+//     direct references resolve application-first, while nested members resolve
+//     user-set-first. Section 4 diagnoses that cross-kind ambiguity.
 //   - A multi-term application <X> minting an implicit set <X> is NOT a
 //     self-collision: the application stanza and its synthesized set share a name
 //     by design. The collision is only between two OPERATOR-authored stanzas,
@@ -75,7 +81,7 @@ import (
 // (H02), or collides with another parent's generated name (H03) is rejected
 // under strict commit (warned on the tolerant load / peer-sync path), and a
 // generated name that shadows a predefined junos-* application (M03) is always
-// surfaced as a warning. See section 5 below.
+// surfaced as a warning. See section 6 below.
 func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string, map[string]struct{}, error) {
 	// The compiler compiles EVERY top-level `applications` node (compiler.go's
 	// `for _, node := range tree.Children` switch hits `case "applications"`
@@ -195,7 +201,32 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 		}
 	}
 
-	// 4. Duplicate generated per-term application name within one application
+	// 4. A user application-set shadowing a predefined application makes the
+	//    same member token resolve differently by reference path: direct
+	//    application resolution finds the predefined application, while nested
+	//    set expansion selects the user-defined application-set first. The
+	//    authored application shadow of a predefined name remains allowed; this
+	//    check is specifically for the set/application cross-kind ambiguity.
+	for _, name := range setNames {
+		if appCounts[name] > 0 {
+			continue
+		}
+		if _, isPredefinedApplication := PredefinedApplications[name]; !isPredefinedApplication {
+			continue
+		}
+		markCollision(name)
+		if err := emit(
+			"application-set %q shadows predefined application %q — direct application "+
+				"references resolve to the predefined application, but nested "+
+				"application-set members resolve the user-defined set; a policy can "+
+				"therefore enforce different applications by reference path (rename "+
+				"the set or member) (#12220)",
+			name, name); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// 5. Duplicate generated per-term application name within one application
 	//    (M08). Two terms whose generated `<parent>-<term>` names collide make
 	//    the later overwrite the earlier in apps.Applications. Computed via the
 	//    SAME parseApplicationTerms the compiler uses so the detected names match
@@ -212,7 +243,7 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 	// #3339's gate only counted AUTHORED names, so a generated name was invisible to
 	// it and silently last-write-wins into the map. Build a global table of every
 	// generated name -> the distinct parent applications that produce it (in
-	// first-seen order) so the post-loop pass (section 5) can reject a generated
+	// first-seen order) so the post-loop pass (section 6) can reject a generated
 	// name that overwrites an authored application (H01), collides cross-namespace
 	// with an authored application-set (H02), or collides with another parent's
 	// generated name (H03), and warn on one that shadows a predefined junos-* app
@@ -285,7 +316,7 @@ func validateApplicationNameCollisionsAST(nodes []*Node, lenient bool) ([]string
 		}
 	}
 
-	// 5. Generated per-term application names vs the rest of the flat Junos
+	// 6. Generated per-term application names vs the rest of the flat Junos
 	//    namespace (#3472). compileApplications writes every generated
 	//    `<parent>-<term>` into apps.Applications and mints each term-based
 	//    parent's implicit set, but #3339's appCounts/setCounts only enumerated
