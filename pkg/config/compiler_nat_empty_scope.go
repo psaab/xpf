@@ -9,15 +9,20 @@ import "fmt"
 func validateNATRuleSetEmptyScopesAST(nodes []*Node, lenient bool) ([]string, error) {
 	var warnings []string
 	emit := func(natKind, rsName, clause string) error {
-		msg := fmt.Sprintf(
-			"security nat %s rule-set %q: the `%s` clause contains no non-empty scope. "+
-				"The empty value is discarded and the resulting scope becomes match-any, "+
-				"so this rule-set silently WIDENS (fail-open, #7525); name the scope or remove the clause",
+		base := fmt.Sprintf(
+			"security nat %s rule-set %q: the `%s` clause contains no non-empty scope",
 			natKind, rsName, clause)
 		if !lenient {
-			return fmt.Errorf("%s", msg)
+			return fmt.Errorf(
+				"%s. The empty value is discarded and the resulting scope would become "+
+					"match-any, so this rule-set would silently WIDEN (fail-open, #7525); "+
+					"name the scope or remove the clause",
+				base)
 		}
-		warnings = append(warnings, msg)
+		warnings = append(warnings, fmt.Sprintf(
+			"%s; the rule-set is OMITTED from this tolerant load (its NAT rules do not "+
+				"apply) because an empty scope must not widen to match-any (#7525)",
+			base))
 		return nil
 	}
 	checkClause := func(natKind, rsName string, rsNode *Node, clause string) error {
