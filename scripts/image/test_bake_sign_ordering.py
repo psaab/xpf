@@ -276,7 +276,11 @@ class MainValidationGateTests(unittest.TestCase):
                 if argv[0] == "virt-filesystems":
                     return "/dev/sda1 1 ext4 2\n"
                 if argv[0] == "virt-cat":
-                    return "unused by mocked inventory parser"
+                    if argv[-1] == bake.image_inventory.INVENTORY_GUEST_PATH:
+                        return "unused by mocked inventory parser"
+                    return ("-----BEGIN PGP PUBLIC KEY BLOCK-----\n"
+                            "test key\n"
+                            "-----END PGP PUBLIC KEY BLOCK-----\n")
                 if argv[0] == "git":
                     raise subprocess.CalledProcessError(128, argv)
                 if argv[-1] == "protocol-versions":
@@ -367,7 +371,11 @@ class MainValidationGateTests(unittest.TestCase):
                 if argv[0] == "virt-filesystems":
                     return "/dev/sda1 1 ext4 2\n"
                 if argv[0] == "virt-cat":
-                    return "unused by mocked inventory parser"
+                    if argv[-1] == bake.image_inventory.INVENTORY_GUEST_PATH:
+                        return "unused by mocked inventory parser"
+                    return ("-----BEGIN PGP PUBLIC KEY BLOCK-----\n"
+                            "test key\n"
+                            "-----END PGP PUBLIC KEY BLOCK-----\n")
                 if argv[0] == "git":
                     raise subprocess.CalledProcessError(128, argv)
                 if argv[-1] == "protocol-versions":

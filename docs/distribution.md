@@ -277,6 +277,17 @@ superset is allowed during dual-sign) and cover the signer (so a fresh install's
 first `apt-get update`, before the packaged keyring lands, verifies the repo).
 Any mismatch fails the publish. `selftest.sh` (§5d) exercises the gate.
 
+Image publication has a separate guest-side check (#12188): `bake.py` reads
+the installed archive keyring back from the image and refuses the placeholder
+before signing. `publish.py gate_provenance` independently reads
+`/usr/share/keyrings/xpf-archive-keyring.asc` from every qcow with
+`virt-filesystems`/`virt-cat`, requires a parseable non-placeholder OpenPGP
+key, and, when a signed `install.sh` is present, requires the guest keyring
+to cover the installer's embedded key. Thus image-only publishing checks the
+key actually installed in the guest rather than trusting the package-build
+inputs or inventory sidecar. Missing libguestfs tools or an unreadable image
+keyring fail closed.
+
 ## Operator runbook
 
 ### Install (Tier A — one-liner)

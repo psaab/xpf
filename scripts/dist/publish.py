@@ -23,6 +23,10 @@ artifact in the publish set is properly signed:
       so a stale/unsigned non-target pointer must not ship unverified (HB165
       H-13).
 
+For every image set, publish also opens the qcow offline and requires a
+parseable, non-placeholder installed archive keyring (#12188); when
+`install.sh` is present, its embedded key must be covered by that keyring.
+
 The bake may be fail-OPEN (a dev bake without a key still produces artifacts),
 but PUBLISH is fail-CLOSED — an unsigned dev bake can never reach the channel.
 
@@ -293,49 +297,52 @@ def stamp_installer(out, src=INSTALLSH_SRC, archive_key=None, apt_url=None,
          "archive key baked). Sign it next, then publish.")
 
 
-def _primary_fprs_from_gpg_colons(colon_text):
-    """Extract the set of PRIMARY key fingerprints from `gpg --with-colons`
-    output. The `fpr:` line immediately following a `pub:` record is the
-    primary key's fingerprint; `fpr:` lines after `sub:` records (subkeys) are
-    ignored so we compare primary fingerprints consistently with the InRelease
-    signer's primary fpr (the last VALIDSIG field)."""
-    fprs = set()
-    want = False
-    for line in colon_text.splitlines():
-        f = line.split(":")
-        if not f:
-            continue
-        if f[0] == "pub":
-            want = True
-        elif f[0] == "sub":
-            want = False
-        elif f[0] == "fpr" and want:
-            if len(f) > 9 and f[9]:
-                fprs.add(f[9])
-            want = False
-    return fprs
-
-
 def _key_fingerprints(key_source):
-    """Return the set of PRIMARY key fingerprints in an armored key file by
-    importing it into an ephemeral keyring (matching gate_apt's import style)
-    so we never touch the publisher's global gpg keyring."""
-    import tempfile
-    with tempfile.TemporaryDirectory() as gnupghome:
-        os.chmod(gnupghome, 0o700)
-        env = dict(os.environ, GNUPGHOME=gnupghome)
-        r = subprocess.run(["gpg", "--batch", "--import", key_source],
-                           env=env, capture_output=True, text=True)
-        if r.returncode != 0:
-            die(f"could not import key {key_source} for fingerprint "
-                f"cross-check: {r.stderr.strip()}")
-        r = subprocess.run(
-            ["gpg", "--batch", "--with-colons", "--fingerprint", "--list-keys"],
-            env=env, capture_output=True, text=True)
-        if r.returncode != 0:
-            die(f"could not list fingerprints for {key_source}: "
-                f"{r.stderr.strip()}")
-        return _primary_fprs_from_gpg_colons(r.stdout)
+    """Return primary OpenPGP fingerprints without using the global keyring."""
+    try:
+        with open(key_source, "rb") as f:
+            return sign.openpgp_fingerprints(f.read(), key_source)
+    except OSError as e:
+        die(f"cannot read OpenPGP key {key_source} for fingerprint "
+            f"cross-check: {e}")
+    except sign.SignError as e:
+        die(str(e))
+
+
+def _read_image_guest_file(image, guest_path):
+    """Read a file from any guest filesystem, failing closed if unreadable."""
+    try:
+        filesystems = subprocess.run(
+            ["virt-filesystems", "-a", image, "--filesystems", "--long",
+             "--no-title"], capture_output=True, text=True)
+    except OSError as e:
+        die(f"cannot inspect image {image} for {guest_path}: {e} "
+            "(install libguestfs-tools)")
+    if filesystems.returncode != 0:
+        die(f"cannot enumerate filesystems in image {image} for "
+            f"{guest_path}: {filesystems.stderr.strip() or filesystems.returncode}")
+    devices = []
+    for line in filesystems.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 3 and fields[1] == "filesystem":
+            devices.append(fields[0])
+    if not devices:
+        die(f"image {image} has no readable filesystem containing {guest_path}")
+
+    errors = []
+    for device in devices:
+        try:
+            result = subprocess.run(
+                ["virt-cat", "-a", image, "-m", device, guest_path],
+                capture_output=True, text=True)
+        except OSError as e:
+            die(f"cannot read {guest_path} from image {image}: {e} "
+                "(install libguestfs-tools)")
+        if result.returncode == 0:
+            return result.stdout
+        errors.append(f"{device}: {result.stderr.strip() or result.returncode}")
+    die(f"cannot read {guest_path} from image {image}: "
+        + "; ".join(errors))
 
 
 def _extract_installsh_key(installsh_path):
@@ -753,6 +760,42 @@ def gate_provenance(dist, versions, pub):
                 f"the inventory sidecar says {inv_kern!r}. Both are covered by "
                 "the same signature, so these cannot disagree on an untampered "
                 "bake. Refusing to publish.")
+        qcow = os.path.join(dist, f"xpf-{ver}.qcow2")
+        keyring_text = _read_image_guest_file(
+            qcow, sign.ARCHIVE_KEYRING_GUEST_PATH)
+        if sign.PLACEHOLDER_ARCHIVE_KEY_MARKER in keyring_text:
+            die(f"image set {ver} carries the PLACEHOLDER archive keyring at "
+                f"{sign.ARCHIVE_KEYRING_GUEST_PATH} — refusing to publish an "
+                "image that cannot verify the apt repository (#12188).")
+        try:
+            image_key_fprs = sign.openpgp_fingerprints(
+                keyring_text, f"{ver} image {sign.ARCHIVE_KEYRING_GUEST_PATH}")
+        except sign.SignError as e:
+            die(f"image set {ver} has no valid installed archive keyring at "
+                f"{sign.ARCHIVE_KEYRING_GUEST_PATH}: {e} (#12188)")
+
+        # Image-only publish must still bind the key actually installed in the
+        # guest to the signed Tier-A installer when one is shipped. The apt
+        # gate performs the corresponding InRelease/package cross-check.
+        installer = os.path.join(dist, "install.sh")
+        if os.path.isfile(installer):
+            armored = _extract_installsh_key(installer)
+            if armored is None:
+                die("install.sh is in the publish set but has no embedded "
+                    "archive key to compare with the image keyring (#12188).")
+            try:
+                installer_fprs = sign.openpgp_fingerprints(
+                    armored, "signed install.sh archive key")
+            except sign.SignError as e:
+                die(f"install.sh has no valid archive key to compare with the "
+                    f"image keyring: {e} (#12188)")
+            if not installer_fprs <= image_key_fprs:
+                die(f"image set {ver} installed archive keyring "
+                    f"{sorted(image_key_fprs)} does not cover install.sh key "
+                    f"{sorted(installer_fprs)} — an image-first install could "
+                    "not verify the repository (#12188).")
+        info(f"image set {ver}: installed archive keyring fingerprints "
+             f"{sorted(image_key_fprs)}")
         info(f"image set {ver}: provenance validated=true base_image_pinned=true "
              f"guest_kernel={gkern} inventory={len(inv_pkgs)} packages")
 

@@ -308,6 +308,21 @@ class InventoryWiringTests(unittest.TestCase):
     def test_main_passes_the_guest_kernel_into_the_manifest(self):
         self.assertIn("guest_kernel=guest_kernel", self.SRC)
 
+    def test_placeholder_archive_keyring_refuses_the_bake(self):
+        placeholder = (
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----\n"
+            "PLACEHOLDER-xpf-archive-keyring-not-yet-issued\n"
+            "-----END PGP PUBLIC KEY BLOCK-----\n")
+        with self.assertRaises(SystemExit) as ctx:
+            bake.validate_image_keyring_text(placeholder, "test image")
+        self.assertIn("PLACEHOLDER archive keyring", str(ctx.exception))
+
+    def test_bake_reads_the_installed_keyring_from_the_image(self):
+        self.assertIn("sign.ARCHIVE_KEYRING_GUEST_PATH", self.SRC)
+        self.assertIn("validate_image_keyring_text(", self.SRC)
+        self.assertIn('"virt-cat", "-a", work_qcow', self.SRC)
+
+
 
 if __name__ == "__main__":
     unittest.main()

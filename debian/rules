@@ -125,16 +125,24 @@ override_dh_auto_install:
 	@# key before `apt install`, so dpkg would hit a conffile prompt (hangs
 	@# unattended installs) and `force-confnew` would clobber the real key
 	@# with the placeholder (fleet lockout). /usr/share/keyrings is
-	@# package-owned and updates seamlessly on upgrade (AGY-A1). Prefer the
-	@# real key when the release build has dropped it in; otherwise ship the
-	@# placeholder (apt rejects the signature — the correct fail-safe).
+	@# package-owned and updates seamlessly on upgrade (AGY-A1). #12188:
+	@# the real key is REQUIRED — a deb embedding the placeholder would
+	@# install into the baked image, and image-only publish never opened
+	@# the image keyring, so a signed image shipped that could not verify
+	@# the repo. FAIL the build when the drop-in is absent (dev builds
+	@# opt out explicitly with XPF_ALLOW_PLACEHOLDER_KEYRING=1).
 	install -d debian/xpf/usr/share/keyrings
 	if [ -f scripts/dist/xpf-archive-keyring.asc ]; then \
 	    install -m 0644 scripts/dist/xpf-archive-keyring.asc \
 	            debian/xpf/usr/share/keyrings/xpf-archive-keyring.asc; \
-	else \
+	elif [ "$${XPF_ALLOW_PLACEHOLDER_KEYRING:-}" = "1" ]; then \
+	    echo "WARNING: shipping the PLACEHOLDER archive keyring (XPF_ALLOW_PLACEHOLDER_KEYRING=1) — this .deb is NOT releasable" >&2; \
 	    install -m 0644 scripts/dist/xpf-archive-keyring.asc.placeholder \
 	            debian/xpf/usr/share/keyrings/xpf-archive-keyring.asc; \
+	else \
+	    echo "FATAL: scripts/dist/xpf-archive-keyring.asc is missing — refusing to embed the placeholder archive keyring (#12188)" >&2; \
+	    echo "FATAL: drop in the real key (see scripts/dist/README.md), or build a dev-only .deb with XPF_ALLOW_PLACEHOLDER_KEYRING=1" >&2; \
+	    exit 1; \
 	fi
 	@# #1930 LANE-1 kernel channel: the slot-registration + promotion-gate
 	@# scripts and the $cmdpath grub.d fragment ship in the .deb so a manual /
