@@ -281,6 +281,13 @@ func (m *Manager) ApplyPBRRules(rules []PBRRule) error {
 // (#1895).
 func (m *Manager) ApplyProbePins(pins []ProbePin) map[string]error { return m.probePin.Apply(pins) }
 
+// VerifyProbePins reads back the desired probe-pin rules and routes. It
+// returns only missing, mismatched, or unreadable pins keyed by TestKey;
+// nil means every pin is installed as requested. The check is read-only.
+func (m *Manager) VerifyProbePins(pins []ProbePin) map[string]error {
+	return m.probePin.Verify(pins)
+}
+
 // ClearProbePins removes all probe pin rules and flushes the reserved
 // probe tables. The daemon calls it at startup only when xpf owns host
 // routing posture, preserving shared bands on uncommitted foreign hosts.

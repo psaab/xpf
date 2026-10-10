@@ -357,6 +357,16 @@ delegate to the owning domain. Exported types:
   `pkg/config` commit validation, this package, and `pkg/rpm` all
   consume them. `ClearProbePins` sweeps the range at startup only when xpf owns
   host routing posture; uncommitted foreign-host installs preserve it.
+  `VerifyProbePins` reads back each configured mark rule and pinned host route;
+  the daemon uses this to detect kernel cleanup that removes a route while
+  leaving its fwmark rule intact. Readback accounts for the kernel's family
+  default route metric (0 for IPv4, 1024 for IPv6). A host route flagged
+  `RTNH_F_LINKDOWN` remains a valid installed pin shape, including
+  `RTNH_F_DEAD` when `ignore_routes_with_linkdown=1` adds it alongside
+  LINKDOWN. The kernel may skip that route for lookup; RPM's `SO_BINDTODEVICE`
+  confines carrier-loss probes to the configured egress so loss reaches RPM
+  rather than an `ErrProbeSetup` hold. DEAD without LINKDOWN or unresolved
+  nexthops still fail verification.
 - `30000–30999`: the shared destination-leak priority range for next-table
   inter-VRF leaks and rib-group per-prefix interface-route leaks.
   `config.RouteLeakRulePriority` maps destination prefix length into this

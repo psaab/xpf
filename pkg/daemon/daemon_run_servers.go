@@ -870,9 +870,9 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 			}
 			return eventengine.Stats{}
 		},
-		// #1895: currently-failed RPM probe-pin installs (tests
-		// holding state on ErrProbeSetup instead of probing the
-		// default path).
+		// #1895/#12088: currently held RPM probe pins (install/readback
+		// failure, unknown egress, no installer, or pin-band reprogram), whose
+		// tests hold state on ErrProbeSetup instead of probing the default path.
 		RPMPinFailedFn: func() float64 {
 			if d.rpm != nil {
 				return float64(d.rpm.PinInstallFailureCount())
