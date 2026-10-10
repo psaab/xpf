@@ -224,8 +224,12 @@ func sameBinaryUpgradeStatusRecord(a, b BinaryUpgradeStatus) bool {
 // a marker appearing concurrently is new failure evidence and must remain
 // fail-closed.
 //
-// Package hook for the deterministic race test (statConfigDBDir pattern):
-// when non-nil, runs between the quarantine move and the identity decision.
+// Package hooks for the deterministic race tests (statConfigDBDir pattern):
+// clearStatusPreQuarantineHook runs after the content compare, before the
+// quarantine move (reaches the fstat-match + restore window); the quarantine
+// hook runs between the quarantine move and the identity decision (reaches
+// the vacancy window). Both are nil in production.
+var clearStatusPreQuarantineHook func()
 var clearStatusQuarantineHook func()
 
 func clearBinaryUpgradeStatusIfUnchanged(path string, expected BinaryUpgradeStatus) (bool, error) {
@@ -278,6 +282,22 @@ func clearBinaryUpgradeStatusIfUnchanged(path string, expected BinaryUpgradeStat
 	if !sameBinaryUpgradeStatusRecord(expected, current) {
 		return false, nil
 	}
+	// Re-check the durable unreadable marker: the lockless writer may have
+	// failed to persist a NEWER record (installing the marker) between the
+	// gate read and this re-read. Clearing through that would delete the
+	// evidence the marker exists to protect (Opus MINOR-B).
+	if _, markerErr := os.Stat(DefaultBinaryUpgradeStatusUnreadablePath); markerErr == nil {
+		return false, fmt.Errorf(
+			"postinst could not persist binary upgrade status (durable marker %s is present)",
+			DefaultBinaryUpgradeStatusUnreadablePath)
+	} else if !errors.Is(markerErr, os.ErrNotExist) {
+		return false, fmt.Errorf(
+			"check durable binary upgrade status marker %s: %w",
+			DefaultBinaryUpgradeStatusUnreadablePath, markerErr)
+	}
+	if clearStatusPreQuarantineHook != nil {
+		clearStatusPreQuarantineHook()
+	}
 	// Quarantine name: matches the writer `$status_name.*` 24h sweep pattern
 	// (debian/xpf.postinst), so a crashed clear cannot strand the directory.
 	quarantine := base + ".clear." + strconv.FormatInt(int64(os.Getpid()), 10)
@@ -311,14 +331,17 @@ func clearBinaryUpgradeStatusIfUnchanged(path string, expected BinaryUpgradeStat
 	}
 	// The quarantined file IS the compared one — but only unlink it if the
 	// live name is still vacant. A writer rename landing after the quarantine
-	// move (the hook point) repopulates the name: that newer record must be
-	// retained AND the clear must report not-cleared (a concurrent writer
-	// invalidates this clear attempt). Restore-then-retain either way.
+	// move repopulates the name: that newer record is retained and this
+	// clear reports not-cleared (drop the quarantined copy; the name is
+	// taken so no restore is possible). NOTE: a writer landing after THIS
+	// vacancy check still yields cleared=true with the newer record retained
+	// — inherent to any final check, and the record (not the bool) is the
+	// safety property.
 	var liveStat unix.Stat_t
 	liveErr := unix.Fstatat(dirFD, base, &liveStat, unix.AT_SYMLINK_NOFOLLOW)
 	if liveErr == nil {
-		// Live name repopulated: move our file back only if possible, but
-		// the name is taken — drop the quarantined copy and retain.
+		// Live name repopulated by a newer record: drop our quarantined
+		// copy (no restore possible — the name is taken) and retain.
 		_ = unix.Unlinkat(dirFD, quarantine, 0)
 		return false, nil
 	}

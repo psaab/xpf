@@ -395,3 +395,66 @@ func TestClearQuarantineRaceRetainsNewerRecord12143(t *testing.T) {
 		t.Fatalf("quarantine race: cleared=true while a newer record landed; want retain")
 	}
 }
+
+// TestClearPreQuarantineRaceRestoresNewerRecord12143 pins the fstat-match +
+// restore window (writer rename between the pinned re-read and the quarantine
+// move). The pre-quarantine hook installs a 5.0.0 record at exactly that
+// point; the clear must retain it with cleared=false. Kills F0 (match
+// removed) and R0 (restore turned into drop), which both ship the suite
+// green without this test (Opus MINOR-A).
+func TestClearPreQuarantineRaceRestoresNewerRecord12143(t *testing.T) {
+	r, cfg, s := statusProcessEnv12143(t, "2.0.0")
+	seedInitialCurrent(t, r, cfg, "1.0.0")
+	if err := r.Run(Options{}); err != nil {
+		t.Fatalf("initial cut: %v", err)
+	}
+	stageStatusVersion12143(t, cfg, "4.0.0")
+	s.stagedVersion = "4.0.0"
+	publishStagedGen(t, r)
+	if err := r.Run(Options{}); err != nil {
+		t.Fatalf("healthy 4.0.0 cut: %v", err)
+	}
+	proof := r.LastCommittedCut()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "upgrade-deferred")
+	writePendingVersionStatus12143(t, path, "3.0.0", "2.0.0")
+	expected := ReadBinaryUpgradeStatus(path)
+	if expected.ReadErr != nil || !expected.Recorded {
+		t.Fatalf("pending status before clear = %+v", expected)
+	}
+	hooked := false
+	previousHook := clearStatusPreQuarantineHook
+	clearStatusPreQuarantineHook = func() {
+		hooked = true
+		tmp, err := os.CreateTemp(dir, "upgrade-deferred.prehook.*")
+		if err != nil {
+			panic(err)
+		}
+		data := "format=1\nstaged_version=5.0.0\nrunning_version=unknown\nreason=cut-failed\nrecovery=xpfd upgrade\nrecorded_at=2026-10-08T12:00:00Z\n"
+		if _, err := tmp.WriteString(data); err != nil {
+			panic(err)
+		}
+		if err := tmp.Close(); err != nil {
+			panic(err)
+		}
+		if err := os.Rename(tmp.Name(), path); err != nil {
+			panic(err)
+		}
+	}
+	t.Cleanup(func() { clearStatusPreQuarantineHook = previousHook })
+	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(path, proof)
+	if err != nil {
+		t.Fatalf("clear err: %v", err)
+	}
+	if !hooked {
+		t.Fatal("pre-quarantine hook never fired; test proves nothing")
+	}
+	after := ReadBinaryUpgradeStatus(path)
+	if after.ReadErr != nil || !after.Recorded || after.StagedVersion != "5.0.0" {
+		t.Fatalf("pre-quarantine race: after=%+v cleared=%t; want the 5.0.0 record retained",
+			after, cleared)
+	}
+	if cleared {
+		t.Fatalf("pre-quarantine race: cleared=true while a newer record landed; want retain")
+	}
+}
