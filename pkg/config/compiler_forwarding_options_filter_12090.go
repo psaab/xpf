@@ -25,6 +25,10 @@ func validateUnsupportedForwardingOptionsFiltersAST(nodes []*Node, lenient bool)
 		if n == nil {
 			return nil
 		}
+		// Apply statements and their tails are values, not filter heads.
+		if isApplyStatementKeyword(n.Name()) {
+			return nil
+		}
 		instanceName := isDHCPRelayInstanceName12090(n, ancestors)
 		if !instanceName && (n.Name() == "filter" || n.Name() == "simple-filter") {
 			if err := emit(filterKeywordLabel12090(n)); err != nil {
@@ -32,7 +36,7 @@ func validateUnsupportedForwardingOptionsFiltersAST(nodes []*Node, lenient bool)
 			}
 		}
 		nodeSchema, identity := schemaNodeAndIdentity12090(parentSchema, n)
-		if !instanceName {
+		if !instanceName && inspectPackedHead12090(n, nodeSchema, ancestors) {
 			if head, rest, ok := packedHead12090(n, identity); ok &&
 				(head == "filter" || head == "simple-filter") {
 				if err := emit(packedFilterKeywordLabel12090(head, rest)); err != nil {
@@ -65,7 +69,8 @@ func isDHCPRelayInstanceName12090(n *Node, ancestors []*Node) bool {
 		return false
 	}
 	parent := ancestors[len(ancestors)-1]
-	if parent.Name() != "server-group" && parent.Name() != "group" {
+	if (parent.Name() != "server-group" && parent.Name() != "group") ||
+		len(parent.Keys) != 1 {
 		return false
 	}
 	for i := len(ancestors) - 2; i >= 0; i-- {

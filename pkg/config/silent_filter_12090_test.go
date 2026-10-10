@@ -187,6 +187,10 @@ func TestFilterKeywordPopulationCannotCommitUnbound12090(t *testing.T) {
 			}
 		})
 	}
+	// Keyword-looking values and apply statements are outside this gate's
+	// keyword-head population and must keep their Junos value semantics.
+	testFilterKeywordValueCases12090(t)
+
 }
 
 func TestCompactFilterHeadsRejectAndWarn12090(t *testing.T) {
@@ -218,6 +222,71 @@ func TestCompactFilterHeadsRejectAndWarn12090(t *testing.T) {
 			}
 			t.Fatalf("lenient packed filter load must warn with #12090, got %q", cfg.Warnings)
 		})
+	}
+}
+
+func TestApplyGroupInlinePeerOverrideDropTracked12090(t *testing.T) {
+	tree := hierTree(t, `groups {
+		g { interfaces { ge-0/0/0 { unit 0 filter input f; } } }
+	}
+	apply-groups g;
+	interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }`)
+	if _, err := CompileConfig(tree); err != nil {
+		t.Fatalf("the existing inline-peer expansion gap is tracked by #12530: %v", err)
+	}
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile through the tracked #12530 gap: %v", err)
+	}
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "#12090") {
+			t.Fatalf("the inline-peer override currently removes the packed tail before #12090: %q", warning)
+		}
+	}
+}
+
+func TestDHCPRelayNamedGroupFilterRejects12090(t *testing.T) {
+	for _, keyword := range []string{"filter", "simple-filter"} {
+		t.Run(keyword, func(t *testing.T) {
+			tree := hierTree(t, `forwarding-options {
+				dhcp-relay {
+					server-group sg { 10.0.0.1; }
+					group lan {
+						active-server-group sg;
+						interface ge-0/0/0.0;
+						`+keyword+` { input f; }
+					}
+				}
+			}`)
+			_, err := CompileConfig(tree)
+			if err == nil || !strings.Contains(err.Error(), "#12090") {
+				t.Fatalf("filter keyword under named relay group must reject with #12090; got %v", err)
+			}
+			cfg, err := CompileConfigLenient(tree)
+			if err != nil {
+				t.Fatalf("lenient named relay group must continue booting: %v", err)
+			}
+			if !strings.Contains(strings.Join(cfg.Warnings, "\n"), "#12090") {
+				t.Fatalf("lenient named relay group must warn with #12090; got %q", cfg.Warnings)
+			}
+		})
+	}
+}
+
+func TestDHCPRelayBracedFilterGroupNameRemainsAccepted12090(t *testing.T) {
+	tree := hierTree(t, `forwarding-options {
+		dhcp-relay {
+			server-group sg { 10.0.0.1; }
+			group { filter { active-server-group sg; interface ge-0/0/0.0; } }
+		}
+	}`)
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("braced group instance named filter must remain accepted: %v", err)
+	}
+	if cfg.ForwardingOptions.DHCPRelay == nil ||
+		cfg.ForwardingOptions.DHCPRelay.Groups["filter"] == nil {
+		t.Fatalf("braced group instance name filter was not compiled: %+v", cfg.ForwardingOptions.DHCPRelay)
 	}
 }
 
@@ -254,13 +323,113 @@ func TestFilterKeywordValuesRemainAccepted12090(t *testing.T) {
 		name string
 		set  string
 	}{
-		{"vlan-member", "set interfaces ge-0/0/0 unit 0 family ethernet-switching vlan members filter"},
 		{"memberless-range-description", "set interfaces interface-range r description filter"},
 		{"memberless-range-unit-description", "set interfaces interface-range r unit 0 description simple-filter"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := CompileConfig(flatTreeFromSets(t, tc.set)); err != nil {
 				t.Fatalf("keyword used as a value must remain accepted: %v", err)
+			}
+		})
+	}
+	testFilterKeywordValueCases12090(t)
+}
+
+func testFilterKeywordValueCases12090(t *testing.T) {
+	t.Helper()
+	for _, tc := range []struct {
+		name string
+		set  string
+		hier string
+	}{
+		{
+			name: "vlan-member-braced",
+			set:  "set interfaces ge-0/0/0 unit 0 family ethernet-switching vlan members filter",
+			hier: "interfaces { ge-0/0/0 { unit 0 { family ethernet-switching { vlan { members filter; } } } } }",
+		},
+		{
+			name: "vlan-member-list-braced",
+			set:  "set interfaces ge-0/0/0 unit 0 family ethernet-switching vlan members [ filter v20 ]",
+			hier: "interfaces { ge-0/0/0 { unit 0 { family ethernet-switching { vlan { members [ filter v20 ]; } } } } }",
+		},
+		{
+			name: "vlan-member-singleton-list",
+			set:  "set interfaces ge-0/0/0 unit 0 family ethernet-switching vlan members [ filter ]",
+			hier: "interfaces { ge-0/0/0 { unit 0 { family ethernet-switching { vlan { members [ filter ]; } } } } }",
+		},
+		{
+			name: "vlan-member-simple-filter",
+			set:  "set interfaces ge-0/0/0 unit 0 family ethernet-switching vlan members simple-filter",
+			hier: "interfaces { ge-0/0/0 { unit 0 { family ethernet-switching { vlan { members simple-filter; } } } } }",
+		},
+		{
+			name: "memberless-vlan-members",
+			set:  "set interfaces interface-range r vlan members filter",
+			hier: "interfaces { interface-range r { vlan { members filter; } } }",
+		},
+		{
+			name: "apply-macro-interface-value",
+			set:  "set interfaces ge-0/0/0 apply-macro filter k v",
+			hier: "interfaces { ge-0/0/0 { apply-macro filter { k v; } } }",
+		},
+		{
+			name: "apply-macro-unit-value",
+			set:  "set interfaces ge-0/0/0 unit 0 apply-macro filter k v",
+			hier: "interfaces { ge-0/0/0 { unit 0 { apply-macro filter { k v; } } } }",
+		},
+		{
+			name: "apply-macro-family-value",
+			set:  "set interfaces ge-0/0/0 unit 0 family inet apply-macro simple-filter k v",
+			hier: "interfaces { ge-0/0/0 { unit 0 { family inet { apply-macro simple-filter { k v; } } } } }",
+		},
+		{
+			name: "apply-groups-except-interface-value",
+			set:  "set interfaces ge-0/0/0 apply-groups-except filter",
+			hier: "interfaces { ge-0/0/0 { apply-groups-except filter; } }",
+		},
+		{
+			name: "apply-macro-forwarding-value",
+			set:  "set forwarding-options apply-macro filter k v",
+			hier: "forwarding-options { apply-macro filter { k v; } }",
+		},
+		{
+			name: "apply-groups-except-forwarding-value",
+			set:  "set forwarding-options apply-groups-except filter",
+			hier: "forwarding-options { apply-groups-except filter; }",
+		},
+		{
+			name: "analyzer-name-filter",
+			set:  "set forwarding-options analyzer filter x",
+			hier: "forwarding-options { analyzer filter { x; } }",
+		},
+		{
+			name: "memberless-range-apply-macro-value",
+			set:  "set interfaces interface-range r apply-macro filter k v",
+			hier: "interfaces { interface-range r { apply-macro filter { k v; } } }",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, shape := range []struct {
+				name string
+				tree *ConfigTree
+			}{
+				{name: "flat-set", tree: flatTreeFromSets(t, tc.set)},
+				{name: "hierarchical", tree: hierTree(t, tc.hier)},
+			} {
+				t.Run(shape.name, func(t *testing.T) {
+					if _, err := CompileConfig(shape.tree); err != nil {
+						t.Fatalf("keyword-looking value must remain accepted: %v", err)
+					}
+					cfg, err := CompileConfigLenient(shape.tree)
+					if err != nil {
+						t.Fatalf("lenient keyword-looking value must remain loadable: %v", err)
+					}
+					for _, warning := range cfg.Warnings {
+						if strings.Contains(warning, "#12090") {
+							t.Fatalf("value must not produce a false #12090 warning: %q", warning)
+						}
+					}
+				})
 			}
 		})
 	}
@@ -390,6 +559,44 @@ func TestForwardingOptionsFamilyNodePackedFilterKeys12090(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "filter input") ||
 		!strings.Contains(err.Error(), "#12090") {
 		t.Fatalf("packed family-node filter keys must be rejected with #12090; got %v", err)
+	}
+}
+
+func TestSplitFamilyPackedFilterConsumerRemainsAccepted12090(t *testing.T) {
+	nodes := []*Node{{
+		Keys: []string{"interfaces"},
+		Children: []*Node{{
+			Keys: []string{"ge-0/0/0"},
+			Children: []*Node{{
+				Keys: []string{"unit", "0"},
+				Children: []*Node{{
+					Keys:     []string{"family"},
+					Children: []*Node{{Keys: []string{"inet", "filter", "input", "f"}, IsLeaf: true}},
+				}},
+			}},
+		}},
+	}}
+	if _, err := validateUnsupportedInterfaceStanzasAST(nodes, false); err != nil {
+		t.Fatalf("packed filter under the inet child of a bare family is the supported split-family consumer: %v", err)
+	}
+}
+
+func TestNonAFChildOfBareFamilyIsNotInspectedAsPackedHead12090(t *testing.T) {
+	nodes := []*Node{{
+		Keys: []string{"interfaces"},
+		Children: []*Node{{
+			Keys: []string{"ge-0/0/0"},
+			Children: []*Node{{
+				Keys: []string{"unit", "0"},
+				Children: []*Node{{
+					Keys:     []string{"family"},
+					Children: []*Node{{Keys: []string{"description", "filter"}, IsLeaf: true}},
+				}},
+			}},
+		}},
+	}}
+	if _, err := validateUnsupportedInterfaceStanzasAST(nodes, false); err != nil {
+		t.Fatalf("a non-AF value under bare family must not be scanned as a packed keyword: %v", err)
 	}
 }
 func TestNonInetFamilyWithoutFilterRemainsAccepted12090(t *testing.T) {

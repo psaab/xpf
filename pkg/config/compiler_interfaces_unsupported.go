@@ -134,6 +134,10 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 			if n == nil {
 				return nil
 			}
+			// Apply statements own their value tail and apply-macro body.
+			if isApplyStatementKeyword(n.Name()) {
+				return nil
+			}
 			nodeSchema, identity := schemaNodeAndIdentity12090(parentSchema, n)
 			if keyword := n.Name(); keyword == "simple-filter" ||
 				(keyword == "filter" && !isInterfaceFilterConsumerPath12090(ancestors)) {
@@ -144,20 +148,23 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 					return err
 				}
 			}
-			// Compact spellings leave their first child keyword on the
-			// containing node's Keys. Inspect that head only: the remaining
-			// tail may contain authored values such as "description filter".
-			if head, rest, ok := packedHead12090(n, identity); ok &&
-				(head == "filter" || head == "simple-filter") {
-				consumer := head == "filter" &&
-					(isInterfaceFilterConsumerPath12090(ancestors) ||
-						isInterfacePackedFilterConsumer12090(ancestors, n))
-				if !consumer {
-					if err := emit(
-						"interfaces %s: `%s` is not supported (xpf has no consumer "+
-							"for this interface binding; remove it) (#12090)",
-						iface.Name(), packedFilterKeywordLabel12090(head, rest)); err != nil {
-						return err
+			// Compact spellings put their first child keyword in Keys. Inspect
+			// only schema-resolved nodes, family nodes, and AF leaves directly
+			// under a bare family. Otherwise the apparent head may be a value
+			// (for example `members filter` or `apply-macro filter`).
+			if inspectPackedHead12090(n, nodeSchema, ancestors) {
+				if head, rest, ok := packedHead12090(n, identity); ok &&
+					(head == "filter" || head == "simple-filter") {
+					consumer := head == "filter" &&
+						(isInterfaceFilterConsumerPath12090(ancestors) ||
+							isInterfacePackedFilterConsumer12090(ancestors, n))
+					if !consumer {
+						if err := emit(
+							"interfaces %s: `%s` is not supported (xpf has no consumer "+
+								"for this interface binding; remove it) (#12090)",
+							iface.Name(), packedFilterKeywordLabel12090(head, rest)); err != nil {
+							return err
+						}
 					}
 				}
 			}
@@ -303,6 +310,11 @@ func validateMemberlessInterfaceRangeFilters12090(nodes []*Node, lenient bool) (
 					pathSchema := schemaForPath("interfaces", "x")
 					for i := 0; i < len(path); {
 						keyword := path[i]
+						// Apply statements own the remaining path tail, so
+						// their values cannot be filter keyword heads.
+						if isApplyStatementKeyword(keyword) {
+							break
+						}
 						if keyword == "filter" || keyword == "simple-filter" {
 							if keyword != "filter" || !isInterfaceFilterConsumerTokens12090(path, i) {
 								if err := emit(rd.name,
@@ -403,6 +415,35 @@ func schemaNodeAndIdentity12090(parent *schemaNode, n *Node) (*schemaNode, int) 
 		}
 	}
 	return nodeSchema, identity
+}
+
+// inspectPackedHead12090 limits packed-tail scanning to keyword positions.
+// Schema-resolved nodes have an unambiguous head; the explicit family cases
+// retain coverage for legacy ASTs with a bare family and an unmodelled AF child.
+func inspectPackedHead12090(n *Node, nodeSchema *schemaNode, ancestors []*Node) bool {
+	if n == nil || isApplyStatementKeyword(n.Name()) {
+		return false
+	}
+	if nodeSchema != nil || n.Name() == "family" {
+		return true
+	}
+	if len(ancestors) == 0 {
+		return false
+	}
+	parent := ancestors[len(ancestors)-1]
+	return parent.Name() == "family" && len(parent.Keys) == 1 &&
+		isInterfaceFamilyAF12090(n.Name())
+}
+
+func isInterfaceFamilyAF12090(name string) bool {
+	switch name {
+	case "inet", "inet6", "inet-vpn", "inet6-vpn",
+		"iso", "mpls", "ccc", "tcc", "bridge", "vpls",
+		"ethernet-switching", "evpn":
+		return true
+	default:
+		return false
+	}
 }
 
 func packedHead12090(n *Node, identity int) (head string, rest []string, ok bool) {
