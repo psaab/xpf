@@ -222,24 +222,28 @@ func parseNATMatchScopes(node *Node) []natMatchScope {
 }
 
 // collectNATScopes reads the `from` (and, when wantTo, `to`) clauses of a
-// rule-set node into from/to scope lists. An empty side defaults to a single
-// match-any zone scope ({kind:"zone", value:""}) — the legacy global
-// behaviour. #3096.
+// rule-set node into from/to scope lists. It injects the match-any default
+// ({kind:"zone", value:""}) only for an absent clause; a present clause that
+// contains no non-empty scope stays empty so it cannot widen to match-any.
+// #3096.
 func collectNATScopes(rsNode *Node, wantTo bool) (fromScopes, toScopes []natMatchScope) {
+	fromPresent, toPresent := false, false
 	for _, child := range rsNode.Children {
 		switch child.Name() {
 		case "from":
+			fromPresent = true
 			fromScopes = append(fromScopes, parseNATMatchScopes(child)...)
 		case "to":
 			if wantTo {
+				toPresent = true
 				toScopes = append(toScopes, parseNATMatchScopes(child)...)
 			}
 		}
 	}
-	if len(fromScopes) == 0 {
+	if !fromPresent {
 		fromScopes = []natMatchScope{{kind: "zone", value: ""}}
 	}
-	if wantTo && len(toScopes) == 0 {
+	if wantTo && !toPresent {
 		toScopes = []natMatchScope{{kind: "zone", value: ""}}
 	}
 	return fromScopes, toScopes

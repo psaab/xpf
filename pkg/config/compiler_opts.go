@@ -2781,6 +2781,12 @@ type compileOpts struct {
 	// lenientDNATToScope.
 	lenientNATMixedScope bool
 
+	// lenientNATEmptyScope downgrades a present NAT from/to clause with no
+	// non-empty scope values to a warning. Such a clause is not an absent
+	// clause: strict commit rejects it, and the compiler does not inject the
+	// match-any default for it (#7525).
+	lenientNATEmptyScope bool
+
 	// lenientNATTerminalAction (#5628, codex-review-181 M16) downgrades the
 	// source/destination NAT terminal-action cardinality gate
 	// (validateNATTerminalActionCardinalityStrict) from a hard compile error to
@@ -3326,6 +3332,7 @@ func lenientCompileOpts() compileOpts {
 		lenientVRRPVIPEmpty:                    true,
 		lenientDNATToScope:                     true,
 		lenientNATMixedScope:                   true,
+		lenientNATEmptyScope:                   true,
 		lenientNATTerminalAction:               true,
 		lenientInterfaceUnitAliasCollisions:    true,
 		lenientEventWithinTrigger:              true,
