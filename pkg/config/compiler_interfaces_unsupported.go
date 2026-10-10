@@ -404,6 +404,16 @@ func schemaNodeAndIdentity12090(parent *schemaNode, n *Node) (*schemaNode, int) 
 		if n.Name() == "family" && len(n.Keys) > 1 {
 			return nil, 2
 		}
+		// In block form, an args-bearing container stores its braced
+		// identity as a child node. Keep the container schema for the
+		// identity node's body, while its own keys still begin with the
+		// identity tokens. This lets packed-head inspection reach tails
+		// beneath `unit { 0 ... }`, sampling `instance { s ... }`, and
+		// relay `group { lan ... }` without treating args:0 value slots
+		// (such as `members filter`) as keyword positions.
+		if parent != nil && parent.args > 0 && parent.children != nil {
+			return parent, parent.args
+		}
 		return nil, identity
 	}
 	identity += nodeSchema.args
