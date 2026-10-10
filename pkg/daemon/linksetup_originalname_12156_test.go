@@ -115,11 +115,13 @@ func TestRenamePositionalWarnsWhenPersistenceIsAbsent12156(t *testing.T) {
 	}
 }
 
-// TestRenamePositionalRetainsMACFormWhileRenamingAfterShift12156 covers the
+// TestRenamePositionalNeutralizesResurrectableLinksAfterShift12156 covers the
 // lower-PCI insertion case: a MAC-form .link assigned the current logical name,
-// but positional order now requires a different target. The file must remain
-// byte-identical while the NIC still renames to its new target.
-func TestRenamePositionalRetainsMACFormWhileRenamingAfterShift12156(t *testing.T) {
+// but positional order now requires a different target. MAJOR-1: the NIC's own
+// name-only O.link (MAC still matches it) plus any stale T.link would each
+// resurrect a WRONG identity next boot — both are neutralized so the next boot
+// falls back to kernel names (fail-closed), while the NIC still renames.
+func TestRenamePositionalNeutralizesResurrectableLinksAfterShift12156(t *testing.T) {
 	dir := withTempLinkDir(t)
 	linkPath := filepath.Join(dir, linkPrefix+"ge-0-0-0.link")
 	chained := `# Managed by xpfd — do not edit
@@ -145,8 +147,8 @@ Name=ge-0-0-0
 	if !changed || len(renamed) != 1 || renamed[0] != [2]string{"ge-0-0-0", "fxp0"} {
 		t.Fatalf("shifted NIC must still rename to fxp0, changed=%v renames=%v", changed, renamed)
 	}
-	if data, err := os.ReadFile(linkPath); err != nil || string(data) != chained {
-		t.Fatalf("the existing MAC-form link must be retained byte-for-byte, got %q err=%v", data, err)
+	if _, err := os.Stat(linkPath); !os.IsNotExist(err) {
+		t.Fatalf("the resurrectable O.link must be neutralized, stat err=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, linkPrefix+"fxp0.link")); !os.IsNotExist(err) {
 		t.Fatalf("an unmatchable fxp0 .link must not be written, stat err=%v", err)
@@ -385,5 +387,52 @@ Name=fxp0`
 	data, err := os.ReadFile(linkPath)
 	if err != nil || string(data) != canonical {
 		t.Fatalf("the verified .link must be normalized with the recorded original, got %q err=%v", data, err)
+	}
+}
+
+// TestRenamePositionalUnknownTargetChangeLeavesNoResurrectableClaim12156 pins
+// MAJOR-1: an unknown NIC renaming O→T must neutralize both its own name-only
+// O.link and any stale T.link, so the next boot falls back to kernel names
+// instead of resurrecting another NIC's identity. Reproduces the reviewer
+// swap shape (pre-fold: both files retained → wrong identity next boot).
+func TestRenamePositionalUnknownTargetChangeLeavesNoResurrectableClaim12156(t *testing.T) {
+	dir := withTempLinkDir(t)
+	ownLink := `# Managed by xpfd — do not edit
+[Match]
+MACAddress=52:54:00:00:00:01
+
+[Link]
+Name=ge-0-0-0
+`
+	staleTarget := `# Managed by xpfd — do not edit
+[Match]
+OriginalName=enp9s0
+
+[Link]
+Name=fxp0
+`
+	if err := os.WriteFile(filepath.Join(dir, linkPrefix+"ge-0-0-0.link"), []byte(ownLink), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, linkPrefix+"fxp0.link"), []byte(staleTarget), 0644); err != nil {
+		t.Fatal(err)
+	}
+	nics := []pciNIC{{sortKey: 1, busAddr: "0000:05:00.0", name: "ge-0-0-0"}}
+	var renamed [][2]string
+	changed, errs := renamePositional(nics, 0, false, func(from, to string) error {
+		renamed = append(renamed, [2]string{from, to})
+		return nil
+	})
+	if len(errs) != 0 {
+		t.Fatalf("unknown original must not refuse the required rename: %v", errs)
+	}
+	if !changed || len(renamed) != 1 || renamed[0] != [2]string{"ge-0-0-0", "fxp0"} {
+		t.Fatalf("NIC must still rename to fxp0, changed=%v renames=%v", changed, renamed)
+	}
+	// Both resurrectable claims are gone: neither file may re-apply next boot.
+	for _, name := range []string{"ge-0-0-0", "fxp0"} {
+		if _, err := os.Stat(filepath.Join(dir, linkPrefix+name+".link")); !os.IsNotExist(err) {
+			t.Fatalf("resurrectable %s.link survived the unknown-target rename, stat err=%v", name, err)
+		}
 	}
 }

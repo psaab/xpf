@@ -1694,10 +1694,11 @@ cluster node ID. It writes `.link` files when the kernel original is available
 from a recorded chain or the current name of a first-rename NIC. If a
 `10-xpf-*.link` already assigns the current name without `OriginalName=`, that
 name is treated as logical and unknown regardless of the new target: the
-unsafe `.link` write is skipped, but a required rename still runs. The logical
-name is never persisted as `OriginalName=` without evidence it is the kernel
-name. Verifying a retained `MACAddress=` against the NIC identity is tracked by
-follow-up #12550.
+unsafe `.link` write is skipped, but a required rename still runs. Exception
+(MINOR-3 residual): a NIC renamed in memory by an earlier pass of the same
+boot still emits `OriginalName=<logical>` — without a kernel-name oracle the
+gate cannot tell it from a first rename. Verifying a retained `MACAddress=`
+against the NIC identity is tracked by follow-up #12550.
 
 RETH members match by `OriginalName=` (PCI kernel name), not `MACAddress=` —
 the MAC alternates between physical and virtual at boot, and
