@@ -17,7 +17,7 @@ import (
 // WHY THIS IS SEPARATE FROM THE ARITHMETIC TESTS. pkg/cluster pins the cost's
 // value — large enough to lose to a ready peer, small enough to leave the node
 // eligible. Those pass whether or not anything ever applies it. Deleting the
-// applyDataplaneReadyTrack call from the re-evaluation path leaves every one
+// applyTransitElectionDebt call from the re-evaluation path leaves every one
 // of these tests green, because they exercise rgWeightFromDebt directly. The
 // defect being fixed lives in the WIRING — a node that failed to become ready
 // went on holding RG mastership — so the wiring is what this file asserts.

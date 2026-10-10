@@ -35,7 +35,7 @@ const (
 //   - If peer is lost, local becomes primary (if weight > 0)
 //   - If peer is alive, compare effective priorities
 //   - Preempt: higher effective priority wins immediately
-//   - Non-preempt: incumbent stays unless weight drops to 0
+//   - Non-preempt: incumbent stays, except a dataplane-unready incumbent yields to a healthier peer
 //   - Split-brain (both primary): lower node ID wins
 func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (electionResult, string) {
 	// Skip disabled groups entirely.
@@ -260,11 +260,24 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 		return electNoChange, ""
 	}
 
-	// Non-preempt: incumbent stays unless weight drops to 0.
+	// Non-preempt: incumbent stays, except an incumbent whose transit gate is
+	// closed by dataplane-arm debt yields to a peer with greater weight. The
+	// arm debt remains above zero so an isolated node keeps management/VIP
+	// ownership; with a healthier peer present, retaining a blackholed RG is
+	// worse than the usual non-preempt priority rule (#12164).
 	// If we are currently secondary and peer is primary, we stay secondary.
-	// If we are currently primary, we stay primary (peer can't preempt us).
-	// If neither is primary (both secondary, e.g. initial state), use priority.
 	if rg.State == StatePrimary {
+		// Only the reserved arm-debt marker carries this exception. Ordinary
+		// monitor debt retains the established non-preempt behavior.
+		if peerGroup.State == StatePrimary || peerGroup.State == StateSecondary {
+			if peerWeight > localWeight {
+				for _, iface := range rg.MonitorFails {
+					if iface == DataplaneArmMonitorIface {
+						return electLocalSecondary, "Local dataplane not ready; peer has higher weight"
+					}
+				}
+			}
+		}
 		if peerGroup.State == StatePrimary {
 			// DUAL-ACTIVE: resolve by effective priority, then node ID.
 			if localEff < peerEff {
@@ -743,25 +756,31 @@ const maxRedundancyGroupWeight = 255
 const DataplaneArmMonitorIface = "__dataplane-arm__"
 
 // DataplaneArmMonitorCost is the weight debt a dataplane that is not ready to
-// serve contributes: enough to lose to any peer that IS ready, but NOT enough
-// to reach weight 0.
+// serve contributes: enough to lose to a healthier peer, but NOT enough to
+// reach weight 0.
 //
-// #7178/#9842: the floor is the design, not an implementation detail. A node
-// whose dataplane failed to arm, or whose arm has not yet yielded a kernel-
-// proven XDP link, forwards no transit (#5275/#9725 close kernel forwarding)
-// while deliberately keeping management up, so on a cluster the right answer
-// is "let the peer have it" — which a large debt achieves, because the election
-// is RELATIVE and a ready peer at 255 outbids this node at 1.
-//
-// But driving the weight to 0 would also demote a STANDALONE node that has no
-// ready dataplane, and there nothing else picks up the VIPs. Landing at 1 keeps
-// a lone node primary and lets a healthy peer win, from one rule rather than a
-// special case.
+// #7178/#9842: the floor is intentional. An unready node closes kernel transit
+// but keeps management reachable; with no peer, it must retain primary/VIP
+// ownership rather than resign. When a peer has greater weight, the arm-debt
+// election exception (#12164) lets that healthier node take over even in
+// non-preempt mode. Other monitor debt still follows the normal non-preempt
+// rule.
 //
 // The floor of 1 also mirrors the VRRP `track-interface priority-cost` clamp of
 // [1,254]: that machinery already settled that "demoted" means the bottom of
 // the range, never out of it.
 const DataplaneArmMonitorCost = maxRedundancyGroupWeight - 1
+
+// HelperCrashLoopMonitorIface is the election-debt key for a userspace helper
+// that has exhausted its restart backoff. Unlike ordinary dataplane-arm debt,
+// a persistent helper crash loop resigns the RG so a non-preempt incumbent
+// cannot retain ownership while its attached shim drops transit.
+const HelperCrashLoopMonitorIface = "__userspace-helper-crash-loop__"
+
+// HelperCrashLoopMonitorCost drives the effective weight to zero. A zero
+// weight is required to demote a non-preempt incumbent; the dataplane-arm debt
+// intentionally bottoms out at 1 to keep standalone nodes eligible.
+const HelperCrashLoopMonitorCost = maxRedundancyGroupWeight
 
 // rgWeightFromDebt converts a redundancy group's accumulated monitor debt into
 // its effective weight, bounded to [0, maxRedundancyGroupWeight].
@@ -882,15 +901,14 @@ func (m *Manager) reconcileMonitorDebtsLocked(cfg *config.ClusterConfig) {
 		// #8338: skip every key this reconciler does not OWN, not just the IP
 		// class. The previous shape exempted only `isIPMonitorName`, so the
 		// reserved `__dataplane-arm__` debt — which is never in `desired`,
-		// because `desired` is built solely from `InterfaceMonitors` — was
-		// deleted by every commit that reached here. `applyDataplaneReadyTrack`
-		// is edge-triggered from the three ready-transition helpers, so a commit
-		// taken while the node was ALREADY unready reinstalled nothing: the
-		// node kept forwarding nothing and lost the penalty that expressed it,
-		// and could then win an election and hold the RG as a blackhole.
+		// because `desired` is built solely from InterfaceMonitors — was
+		// deleted by every commit that reached here. The daemon's
+		// `applyTransitElectionDebt` is edge-triggered from readiness and
+		// supervisor transitions, so a commit taken while unready could lose
+		// the penalty and let a blackholed node win the RG.
 		//
-		// Ownership is now POSITIVE. A future reserved debt is safe by default
-		// rather than requiring someone to remember a third exemption here.
+		// Ownership is now POSITIVE. Reserved debts are safe by default rather
+		// than requiring someone to remember each exemption here.
 		if isReservedMonitorName(key.iface) {
 			continue
 		}

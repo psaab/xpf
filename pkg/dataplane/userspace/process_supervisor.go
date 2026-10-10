@@ -34,9 +34,8 @@ import (
 //
 // # What this is NOT
 //
-// It is not a fix for "the box forwards without policy after a helper crash",
-// because the box does not do that. The XDP shim stays attached and is owned by
-// xpfd, not the helper, and it drops transit through THREE independent
+// This is not a packet-policy fallback. The XDP shim stays attached and is
+// owned by xpfd, not the helper, and it drops transit through THREE independent
 // degraded-path gates, verified in userspace-xdp/src/lib.rs:
 //
 //   - a missing or not-ready binding row -> drop_degraded_transit;
@@ -45,19 +44,16 @@ import (
 //     writing USERSPACE_HEARTBEAT immediately);
 //   - a failed XSK redirect -> drop_degraded_transit.
 //
-// All three PASS proven local/control traffic (pass_local_control) so the node
-// stays manageable, and DROP transit. The post-crash failure mode is therefore
-// a transit blackhole, not unadjudicated kernel forwarding. That is the safer
-// failure and it is why this file's job is availability and honesty rather than
-// closing a forwarding hole.
+// All three PASS proven local/control traffic (pass_local_control), keeping
+// management available while dropping transit. The daemon observes supervisor
+// death, closes the host transit gate immediately, and applies full election
+// debt only when the restart backoff reaches its crash-loop cap. A fast
+// recovery reopens the gate without flapping ownership.
 //
-// The honesty half is the security-relevant one: takeoverReadyLocked gates on
-// `m.proc == nil` and on m.lastStatus, and BOTH were stale after a crash, so
-// TakeoverReady() returned true — with no reasons — for a node whose dataplane
-// was dead. In a chassis cluster the peer consults exactly that to decide
-// whether an RG ownership move can rely on this node for forwarding, so a
-// crashed node advertised itself as a valid failover target and would blackhole
-// every flow handed to it.
+// The supervisor also keeps TakeoverReady honest: an unexpected exit clears
+// m.proc and stale status before the peer can hand this node an RG. Before
+// #5838, those stale fields let a crashed node advertise itself as a valid
+// failover target, blackholing every flow handed to it.
 
 // helperGeneration is one spawned helper process and the SINGLE Wait that owns
 // it.
@@ -350,6 +346,7 @@ func (m *Manager) handleUnexpectedHelperExitLocked(g *helperGeneration) {
 		restartGen: g.gen,
 	}
 	m.scheduleHelperRestartLocked(g.gen)
+	m.notifyHelperSupervisorLocked()
 }
 
 // scheduleHelperRestartLocked arms the next restart attempt for the generation
@@ -357,6 +354,9 @@ func (m *Manager) handleUnexpectedHelperExitLocked(g *helperGeneration) {
 // simply advancing procGen.
 func (m *Manager) scheduleHelperRestartLocked(gen uint64) {
 	m.helperCrash.Restarts++
+	// Keep the state predicate fenced to the retry just armed. A failed
+	// readiness attempt can retire its spawned generation before we get here.
+	m.helperCrash.restartGen = gen
 	delay := helperRestartDelay(m.helperCrash.Restarts)
 	m.helperCrash.NextRestart = time.Now().Add(delay)
 	slog.Warn("userspace dataplane helper restart scheduled",
@@ -392,15 +392,16 @@ func (m *Manager) restartHelperAfterCrash(gen uint64) {
 		// failed readiness; re-fence the retry on whatever is current so the
 		// timer chain cannot fork.
 		m.scheduleHelperRestartLocked(m.procGen)
+		m.notifyHelperSupervisorLocked()
 		return
 	}
 	slog.Info("userspace dataplane helper restarted after unexpected exit",
 		"attempts", m.helperCrash.Restarts)
 	// #8397: this is the ONE moment an episode is known to have ended in
 	// recovery, and the next line destroys the only record of it. Append
-	// before the wipe, not after.
 	m.recordRecoveredCrashEpisodeLocked(time.Now())
 	m.helperCrash = HelperCrashRecord{}
+	m.notifyHelperSupervisorLocked()
 	// The crash tore the 1 Hz reconcile loop down with the generation it was
 	// polling; the replacement needs its own.
 	m.ensureStatusLoopLocked()
@@ -422,4 +423,38 @@ func (m *Manager) HelperCrashState() HelperCrashRecord {
 		m.proc == nil &&
 		m.procGen == rec.restartGen
 	return rec
+}
+
+// HelperSupervisorState reports whether a helper process is currently
+// supervised and whether an armed retry for its unexpected-exit episode has
+// reached the restart-backoff cap. An intentional stop or cancelled retry is
+// not a crash loop even though the crash record remains available for status.
+func (m *Manager) HelperSupervisorState() (running, crashLooping bool) {
+	if m == nil {
+		return false, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	running = m.proc != nil && m.proc.Process != nil
+	crashLooping = !running &&
+		m.procGen == m.helperCrash.restartGen &&
+		m.helperCrash.CrashLooping()
+	return running, crashLooping
+}
+
+// SetHelperSupervisorObserver installs a wake-only state-change observer.
+// The callback runs under m.mu and must not call back into Manager.
+func (m *Manager) SetHelperSupervisorObserver(fn func()) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.helperSupervisorObserver = fn
+}
+
+func (m *Manager) notifyHelperSupervisorLocked() {
+	if m.helperSupervisorObserver != nil {
+		m.helperSupervisorObserver()
+	}
 }

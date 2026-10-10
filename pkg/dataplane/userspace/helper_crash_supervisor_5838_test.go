@@ -152,15 +152,38 @@ func TestHelperCrashIsReapedAndFailsClosed5838(t *testing.T) {
 	if ready, reasons := m.TakeoverReady(); !ready {
 		t.Fatalf("premise broken: a healthy supervised helper is not takeover-ready (%v)", reasons)
 	}
+	// The production death path must wake daemon transit reassertion through
+	// the RuntimeDataPlane adapter after publishing stopped/backoff state.
+	adapter := NewLegacyDataPlaneAdapter(m)
+	if running, crashLooping := adapter.HelperSupervisorState(); !running || crashLooping {
+		t.Fatalf("healthy supervisor state = (running=%v, crashLooping=%v), want (true,false)",
+			running, crashLooping)
+	}
+
+	observed := make(chan struct{}, 1)
+	adapter.SetHelperSupervisorObserver(func() {
+		select {
+		case observed <- struct{}{}:
+		default:
+		}
+	})
 
 	m.mu.Lock()
 	exited := m.procSup.exited
 	m.mu.Unlock()
-
 	if err := cmd.Process.Kill(); err != nil {
 		t.Fatalf("kill: %v", err)
 	}
 	awaitSupervisor(t, m, exited)
+	select {
+	case <-observed:
+	case <-time.After(time.Second):
+		t.Fatal("production supervisor-death path did not notify its observer")
+	}
+	if running, crashLooping := adapter.HelperSupervisorState(); running || crashLooping {
+		t.Fatalf("single failed restart state = (running=%v, crashLooping=%v), want (false,false)",
+			running, crashLooping)
+	}
 
 	if st := procState(pid); st == "Z" {
 		t.Errorf("child pid %d is still a ZOMBIE after the supervisor ran: nothing reaped it", pid)
@@ -330,9 +353,24 @@ func TestHelperRestartBackoffIsBounded5838(t *testing.T) {
 // what would let takeoverReadyLocked go true again.
 func TestFailedRestartRetainsDebtAndStaysFailClosed5838(t *testing.T) {
 	m, cmd, rec := spawnSupervisedChild(t)
+	// Prime the episode one failed attempt below the crash-loop cap. The
+	// first real child exit must remain a fast-restart case; a failed retry
+	// below will cross the cap and notify the daemon.
+	loopAttempt := 1
+	for helperRestartDelay(loopAttempt) < helperRestartBackoffMax {
+		loopAttempt++
+	}
+	observed := make(chan struct{}, 2)
+	m.SetHelperSupervisorObserver(func() {
+		select {
+		case observed <- struct{}{}:
+		default:
+		}
+	})
 	// A binary that cannot exist, so the restart's ensureProcessLocked fails at
 	// findBinary without spawning anything.
 	m.mu.Lock()
+	m.helperCrash.Restarts = loopAttempt - 2
 	m.cfg.Binary = filepath.Join(t.TempDir(), "no-such-helper")
 	gen := m.procGen
 	exited := m.procSup.exited
@@ -340,14 +378,30 @@ func TestFailedRestartRetainsDebtAndStaysFailClosed5838(t *testing.T) {
 
 	_ = cmd.Process.Kill()
 	awaitSupervisor(t, m, exited)
+	select {
+	case <-observed:
+	case <-time.After(time.Second):
+		t.Fatal("initial supervisor death did not notify daemon")
+	}
+	if running, looping := m.HelperSupervisorState(); running || looping {
+		t.Fatalf("single-crash state = (running=%v, looping=%v), want (false,false)", running, looping)
+	}
 
 	if len(rec.snapshot()) != 1 {
 		t.Fatalf("crash scheduled %d restarts, want exactly 1: %v", len(rec.snapshot()), rec.snapshot())
 	}
 	first := rec.snapshot()[0]
 
-	// Run the scheduled restart; it must fail and re-arm on a longer delay.
+	// Run the scheduled restart; it must fail, cross the cap, and notify again.
 	m.restartHelperAfterCrash(gen)
+	select {
+	case <-observed:
+	case <-time.After(time.Second):
+		t.Fatal("failed restart crossing the crash-loop cap did not notify daemon")
+	}
+	if running, looping := m.HelperSupervisorState(); running || !looping {
+		t.Fatalf("capped retry state = (running=%v, looping=%v), want (false,true)", running, looping)
+	}
 
 	if len(rec.snapshot()) != 2 {
 		t.Fatalf("a FAILED restart did not re-arm: delays=%v", rec.snapshot())
@@ -505,10 +559,15 @@ func TestCrashClearsHelperDerivedState5838(t *testing.T) {
 // cmd.Args / captured config instead of calling ensureProcessLocked(m.cfg).
 func TestRestartUsesTheCurrentConfigNotTheDeadGeneration5838(t *testing.T) {
 	m, cmd, rec := spawnSupervisedChild(t)
+	loopAttempt := 1
+	for helperRestartDelay(loopAttempt) < helperRestartBackoffMax {
+		loopAttempt++
+	}
 
 	m.mu.Lock()
 	oldSocket := m.cfg.ControlSocket
 	gen := m.procGen
+	m.helperCrash.Restarts = loopAttempt - 2
 	exited := m.procSup.exited
 	m.mu.Unlock()
 
@@ -574,7 +633,11 @@ func TestRestartUsesTheCurrentConfigNotTheDeadGeneration5838(t *testing.T) {
 	if len(rec.snapshot()) != 2 {
 		t.Errorf("restart did not re-arm after failing against the new config: %v", rec.snapshot())
 	}
-	if crash.Restarts != 2 {
-		t.Errorf("restart attempts = %d, want 2", crash.Restarts)
+	if crash.Restarts != loopAttempt {
+		t.Errorf("restart attempts = %d, want %d", crash.Restarts, loopAttempt)
+	}
+	if running, looping := m.HelperSupervisorState(); running || !looping {
+		t.Fatalf("failed readiness at retry cap state = (running=%v, looping=%v), want (false,true)",
+			running, looping)
 	}
 }

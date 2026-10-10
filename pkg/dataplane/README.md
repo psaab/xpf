@@ -682,12 +682,20 @@ would blackhole every flow handed to it.
   capability / event-stream readiness gates all still run before
   forwarding is re-armed.
 
-- **Named crash-loop state (#7250).** `HelperCrashRecord.CrashLooping()`
-  is the predicate an operator or a health surface reads as "this helper
-  is not coming back". It is **backoff at the cap**, not a raw restart
-  count: a count is time-blind, and twenty restarts over a week and
-  twenty in a minute are different situations. With the shipped 1s base
-  and 60s cap it trips at seven consecutive attempts.
+- **Named crash-loop state (#7250, #12159).** `HelperCrashRecord.CrashLooping()`
+  is the predicate an operator, health surface, or the daemon's HA gate can
+  read as "this helper is not coming back". It is **backoff at the cap**, not
+  a raw restart count: a count is time-blind, and twenty restarts over a week
+  and twenty in a minute are different situations. With the shipped 1s base
+  and 60s cap it trips at seven consecutive attempts. The daemon's
+  `HelperSupervisorState` only treats it as election debt while the retry is
+  still armed; an intentional stop or cancelled retry does not resign an RG.
+- **HA response (#12159).** Supervisor death wakes the daemon transit gate,
+  which closes while the helper is down even though the xpfd-owned XDP shim is
+  still attached. A fast restart reopens transit without changing RG weight.
+  When the restart backoff reaches its cap, a dedicated full-cost monitor debt
+  takes the local RG weight to 0 so even a non-preempt incumbent yields. A
+  successful helper recovery clears that debt.
 - **Operator surface (#7250).** `show chassis forwarding` renders the
   crash block, via `pkg/fwdstatus` so the in-process CLI and the remote
   `cli` binary share one implementation. It was chosen over the other

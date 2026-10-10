@@ -260,68 +260,59 @@ func writeTransitForwardSysctls(on bool) {
 }
 
 // DataplaneArmed reports whether the runtime dataplane has been successfully
-// started in this daemon's lifetime. Kernel transit is NOT opened by this bit
-// alone: #9725 requires a separate kernel-truth XDP-link count, continuously
-// re-evaluated by transit_gate_tick_9725.go.
+// started in this daemon's lifetime. Kernel transit additionally requires a
+// kernel-truth XDP-link count and, for userspace runtimes, a live helper
+// supervisor; transit_gate_tick_9725.go continuously re-evaluates both.
 func (d *Daemon) DataplaneArmed() bool { return d.dataplaneArmed.Load() }
 
-// markDataplaneArmed records a successful Start. It deliberately leaves the
-// transit gate and RG bid closed until the same predicate proves a live XDP
-// link; first ApplyConfig or the periodic tick opens both once the kernel
-// reports one.
+// markDataplaneArmed records a successful Start. It leaves the transit gate
+// closed until both the kernel proves a live XDP link and any userspace helper
+// is alive; first ApplyConfig or the supervisor/link wake opens it.
 func (d *Daemon) markDataplaneArmed(stage string) {
 	if d == nil || !d.shouldManageTransitGate() {
 		return
 	}
 	d.transitGateMu.Lock()
 	d.dataplaneArmed.Store(true)
-	ready := d.attachedXDPLinks() > 0
-	opened := d.writeTransitGateLocked(stage, ready)
-	d.applyDataplaneReadyTrack(opened)
+	kernelReady := d.attachedXDPLinks() > 0
+	helperRunning, crashLooping := d.helperSupervisorState()
+	opened := d.writeTransitGateLocked(stage, kernelReady && helperRunning)
+	d.applyTransitElectionDebt(kernelReady && (!helperRunning || opened), crashLooping)
 	d.transitGateMu.Unlock()
 	slog.Info("dataplane armed; transit gate re-evaluated", "stage", stage,
 		"kernel_transit_open", opened)
 }
 
-// applyDataplaneReadyTrack mirrors the ready-to-serve predicate into
-// redundancy-group weight so a node that cannot forward stops outbidding a
-// peer that can (#7178).
-//
-// The predicate is deliberately stricter than Start success: a node is ready
-// only when the dataplane is armed AND the kernel has proven at least one live
-// XDP link (#9842). This is the same verdict used by the transit gate, so a
-// node can never bid full weight while the gate is closed, or shed a servable
-// dataplane.
-//
-// It rides the EXISTING interface-monitor debt path rather than adding a rule
-// to the election. The cost is sub-total ON PURPOSE (see
-// cluster.DataplaneArmMonitorCost): the node lands at weight 1, not 0, so an
-// attached peer at 255 wins while a standalone node stays primary.
-//
-// The snapshot check makes repeated 1s kernel-truth ticks a read-only fast
-// path: only a sentinel transition takes the Manager write lock and re-runs
-// elections.
-//
-// Idempotent and safe with no cluster configured: SetMonitorWeight is a no-op
-// for an unknown RG, and a nil manager short-circuits here.
-func (d *Daemon) applyDataplaneReadyTrack(ready bool) {
+// applyTransitElectionDebt mirrors kernel dataplane readiness and persistent
+// helper crash-loop state into their independent synthetic monitor debts.
+// Kernel/XDP-not-ready debt remains sub-total (weight 1) so standalone nodes
+// stay eligible; a helper crash loop uses full debt to resign even a
+// non-preempt incumbent. With a higher-weight peer, the election yields a
+// non-preempt incumbent while arm debt is present (#12164). Both transitions
+// share one RG snapshot per gate pass.
+func (d *Daemon) applyTransitElectionDebt(dataplaneReady, crashLooping bool) {
 	if d.cluster == nil {
 		return
 	}
 	for _, rg := range d.cluster.GroupStates() {
-		hasDebt := false
+		hasArmDebt, hasCrashLoopDebt := false, false
 		for _, iface := range rg.MonitorFails {
-			if iface == cluster.DataplaneArmMonitorIface {
-				hasDebt = true
-				break
+			switch iface {
+			case cluster.DataplaneArmMonitorIface:
+				hasArmDebt = true
+			case cluster.HelperCrashLoopMonitorIface:
+				hasCrashLoopDebt = true
 			}
 		}
-		wantDebt := !ready
-		if hasDebt == wantDebt {
-			continue
+		wantArmDebt := !dataplaneReady
+		if hasArmDebt != wantArmDebt {
+			d.cluster.SetMonitorWeight(rg.GroupID, cluster.DataplaneArmMonitorIface,
+				wantArmDebt, cluster.DataplaneArmMonitorCost)
 		}
-		d.cluster.SetMonitorWeight(rg.GroupID, cluster.DataplaneArmMonitorIface,
-			wantDebt, cluster.DataplaneArmMonitorCost)
+		if hasCrashLoopDebt != crashLooping {
+			d.cluster.SetMonitorWeight(rg.GroupID, cluster.HelperCrashLoopMonitorIface,
+				crashLooping, cluster.HelperCrashLoopMonitorCost)
+		}
 	}
 }
 
@@ -341,7 +332,8 @@ func (d *Daemon) markDataplaneArmFailed(stage, remediation string, err error) {
 	// #7191: install the nft barrier FIRST on the closing path. Both legs
 	// close, so the order only affects how early closure is complete.
 	_ = d.writeTransitGateLocked(stage, false)
-	d.applyDataplaneReadyTrack(false)
+	_, crashLooping := d.helperSupervisorState()
+	d.applyTransitElectionDebt(false, crashLooping)
 	d.transitGateMu.Unlock()
 	slog.Error("dataplane arm FAILED; kernel transit forwarding DISABLED (fail-closed, degraded): "+
 		"nothing adjudicates transit on this node, so it forwards none — management (SSH/CLI/gRPC/REST) "+
@@ -369,7 +361,8 @@ func (d *Daemon) markDataplaneNotArmed(stage, reason string) {
 	// #7178: DELIBERATE and FAILED are the same fact to a peer — this node
 	// forwards no transit either way, so it must not outbid one that does. The
 	// distinction is why this logs at Info while the failure path logs at Error.
-	d.applyDataplaneReadyTrack(false)
+	_, crashLooping := d.helperSupervisorState()
+	d.applyTransitElectionDebt(false, crashLooping)
 	d.transitGateMu.Unlock()
 	slog.Info("dataplane not armed; kernel transit forwarding disabled (fail-closed)",
 		"stage", stage, "reason", reason)
