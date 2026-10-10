@@ -515,7 +515,11 @@ func equivalentSyncNodes(active, incoming []*Node, activePath, incomingPath []st
 			if aCredential != bCredential {
 				return false
 			}
-			if a.Keys[k] != b.Keys[k] && (!aCredential || !syncCredentialValueEquivalent(a.Keys[k], b.Keys[k])) {
+			slot := incomingValueSlot
+			if keyword, ok := apiAuthSecretSlotAtPath(incomingPath); ok {
+				slot = keyword
+			}
+			if a.Keys[k] != b.Keys[k] && (!aCredential || !syncCredentialValueEquivalent(a.Keys[k], b.Keys[k], slot)) {
 				return false
 			}
 		}
@@ -552,14 +556,16 @@ func apiAuthNodeKeyValueAt(parent, keys []string, index int) bool {
 	return index > apiKeyIndex && apiAuthSecretKeywordAt(parent, keys, apiKeyIndex, "api-key")
 }
 
-func syncCredentialValueEquivalent(active, incoming string) bool {
+func syncCredentialValueEquivalent(active, incoming, slot string) bool {
 	if active == incoming {
 		return true
 	}
 	// Below-minimum cleartext must NOT verify-equivalent: promotion would
 	// install the $xpf-invalid$ deny marker while dedup suppresses the
-	// only push capturing the working verifier (GLM round-1 F1).
-	if utf8.RuneCountInString(incoming) < APIAuthBasicPasswordMinRunes {
+	// only push capturing the working verifier (GLM round-1 F1). The minimum
+	// is slot-aware (password 12, api-key/secret 16) matching promotion
+	// (GLM F1-confirmation follow-up).
+	if utf8.RuneCountInString(incoming) < apiAuthSecretMinRunes(slot) {
 		return false
 	}
 	return IsAPIAuthSecretHash(active) && VerifyAPIAuthSecret(active, incoming)

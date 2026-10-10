@@ -126,3 +126,35 @@ func TestSyncApplyBelowMinimumCleartextPushesHistory12163(t *testing.T) {
 			"(must push: promotion installs the deny marker)", len(after), before+1)
 	}
 }
+
+// TestSyncApplyBelowSlotMinimumKeyPushesHistory12163 pins the GLM
+// F1-confirmation follow-up: the minimum gate is slot-aware. A 14-rune
+// api-key cleartext (below the 16-rune key minimum, above the 12-rune
+// password minimum) must NOT verify-equivalent — promotion installs the
+// deny marker for the key slot too.
+func TestSyncApplyBelowSlotMinimumKeyPushesHistory12163(t *testing.T) {
+	s := newTestStore(t)
+	key14 := "0123456789abcd"
+	verifier, err := config.HashAPIAuthSecret(key14)
+	if err != nil {
+		t.Fatalf("seed verifier: %v", err)
+	}
+	mk := func(pw string) string {
+		return "system {\n    host-name slotmin-12163;\n" +
+			"    services {\n        web-management {\n" +
+			"            api-auth {\n                expires 2099-01-01;\n" +
+			"                api-key \"" + pw + "\";\n" +
+			"            }\n        }\n    }\n}\n"
+	}
+	if _, err := s.SyncApply(mk(verifier), nil); err != nil {
+		t.Fatalf("SyncApply seed: %v", err)
+	}
+	before := len(s.ListHistory())
+	if _, err := s.SyncApply(mk(key14), nil); err != nil {
+		t.Fatalf("SyncApply below-slot-minimum retry: %v", err)
+	}
+	if after := s.ListHistory(); len(after) != before+1 {
+		t.Fatalf("below-slot-minimum retry history len = %d, want %d",
+			len(after), before+1)
+	}
+}
