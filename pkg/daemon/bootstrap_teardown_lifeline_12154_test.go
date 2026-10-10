@@ -160,6 +160,71 @@ func TestFirstCommitRollbackRestoresLifelineNetwork12154(t *testing.T) {
 	}
 }
 
+func TestRestartAfterFirstCommitRollbackRestoresLifeline12154(t *testing.T) {
+	dir := lifelineNetworkDir12154(t)
+	path := filepath.Join(dir, linkPrefix+"fxp0.network")
+	lifeline := []byte(bootstrapLifelineNetworkMarker +
+		" (static snapshot)\n[Match]\nName=fxp0\n\n[Network]\nAddress=192.0.2.99/24\n")
+	if err := os.WriteFile(path, lifeline, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.db")
+
+	storeA, err := configstore.New(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storeA.Load(); err != nil {
+		t.Fatalf("fresh Load: %v", err)
+	}
+	dA := lifelineDaemon12154(t, storeA, dir,
+		[]networkd.InterfaceConfig{{Name: "fxp0", Addresses: []string{"192.0.2.99/24"}}})
+	dA.bootstrapMode.Store(true)
+	commitConfirmedText12154(t, storeA,
+		"interfaces { fxp0 { unit 0 { family inet { address 192.0.2.99/24; } } } }\n")
+	if err := dA.applyConfigLocked(context.Background(), storeA.ActiveConfig()); err != nil {
+		t.Fatalf("first process apply: %v", err)
+	}
+	storeA.InvokeRollbackTimerForTesting(storeA.ConfirmGenForTesting())
+	if !dA.inBootstrap() {
+		t.Fatal("first first-commit rollback did not re-enter bootstrap")
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != string(lifeline) {
+		t.Fatalf("first rollback lifeline = %q, err=%v; want original .99 bytes %q",
+			got, err, lifeline)
+	}
+
+	storeB, err := configstore.New(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := storeB.Load(); err != nil {
+		t.Fatalf("restart Load: %v", err)
+	}
+	if storeB.EverCommitted() || storeB.ActiveConfig() == nil {
+		t.Fatalf("restart state: EverCommitted=%v ActiveConfig!=nil=%v; want never-committed with compiled empty tree",
+			storeB.EverCommitted(), storeB.ActiveConfig() != nil)
+	}
+	dB := lifelineDaemon12154(t, storeB, dir,
+		[]networkd.InterfaceConfig{{Name: "fxp0", Addresses: []string{"192.0.2.77/24"}}})
+	dB.bootstrapMode.Store(true)
+	commitConfirmedText12154(t, storeB,
+		"interfaces { fxp0 { unit 0 { family inet { address 192.0.2.77/24; } } } }\n")
+	if err := dB.applyConfigLocked(context.Background(), storeB.ActiveConfig()); err != nil {
+		t.Fatalf("restarted process apply: %v", err)
+	}
+	storeB.InvokeRollbackTimerForTesting(storeB.ConfirmGenForTesting())
+
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != string(lifeline) {
+		t.Fatalf("restart-separated first-commit rollback fxp0 = %q, err=%v; want restored .99 bytes %q",
+			got, err, lifeline)
+	}
+	if !dB.inBootstrap() {
+		t.Fatal("restart-separated first-commit rollback did not re-enter bootstrap")
+	}
+}
+
 func lifelineNetworkDir12154(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -368,7 +433,7 @@ func TestRestoreLifelineRejectsDifferentMarkedFile12154(t *testing.T) {
 	if err := os.WriteFile(path, current, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	d := &Daemon{bootstrapLifelineNetwork: snapshot}
+	d := &Daemon{bootstrapLifelineNetwork: snapshot, bootstrapLifelineCaptured: true, bootstrapLifelinePresent: true}
 	changed, err := d.restoreBootstrapLifelineNetwork()
 	if err != nil || !changed {
 		t.Fatalf("different marked file restore = (changed=%v, err=%v), want changed=true", changed, err)
@@ -409,7 +474,7 @@ func TestFirstCommitRollbackSurfacesLifelineWriteError12154(t *testing.T) {
 	if err := os.Mkdir(path, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	d := &Daemon{bootstrapLifelineNetwork: snapshot}
+	d := &Daemon{bootstrapLifelineNetwork: snapshot, bootstrapLifelineCaptured: true, bootstrapLifelinePresent: true}
 	steps := d.runBootstrapTeardownSteps(true)
 	err, degraded := summarizeBootstrapTeardown(steps)
 	if err == nil || !degraded || !strings.Contains(err.Error(), "restore management lifeline network") {

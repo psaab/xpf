@@ -2133,9 +2133,9 @@ never lock an operator out of a remote box it manages.
   durable pre-takeover record and its boot-time restore belong to #12155,
   which owns the `.xpf-first-commit-lifeline.snapshot` file. If this process
   has no snapshot and the file is missing/unmarked, rollback reports DEGRADED
-  rather than claiming restoration.
-  Each successful file removal or restoration triggers `networkctl reload`;
-  teardown then clears FRR and detaches the dataplane instead of applying an
+  rather than claiming restoration. At most one `networkctl reload` runs per
+  teardown (not one per file); teardown then clears FRR and detaches the
+  dataplane instead of applying an
   empty config. The store persists the never-committed marker so a restart
   re-enters bootstrap. The detach also drops the #5275 armed flag and closes
   kernel transit forwarding: leaving `ip_forward=1` would route transit for a
