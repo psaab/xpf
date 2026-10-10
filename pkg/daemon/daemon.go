@@ -1742,6 +1742,15 @@ type Daemon struct {
 	// every subsystem.
 	bootstrapMode atomic.Bool
 
+	// bootstrapLifelineMu protects the snapshot from an explicit commit-confirm
+	// resolving the first-commit window outside applySem.
+	bootstrapLifelineMu sync.Mutex
+	// bootstrapLifelineNetwork is the exact validated lifeline .network captured
+	// before first-config networkd takeover. The first-commit rollback restores
+	// it if networkd replaced the same filename. The confirmation hook clears it
+	// when the first-commit window resolves. Access is serialized by the mutex.
+	bootstrapLifelineNetwork []byte
+
 	// emptyHANamingPending is the #4179 one-shot flag for the HA-guard
 	// EMPTY-config takeover. A node with /etc/xpf/node-id but no committed
 	// config resolves NOT-bootstrap (computeBootClass HA-node guard) and names

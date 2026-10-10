@@ -1032,6 +1032,7 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	if d.confirmRollbackTargetHandledAtFire(gen) {
 		return
 	}
+	_, firstCommitRollback, firstCommitPending := d.store.PendingRollbackTarget(gen)
 
 	d.pendingRenameMu.Lock()
 	prevCfg, ok := d.store.PromoteRollback(gen)
@@ -1042,15 +1043,27 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 		return
 	}
 	if prevCfg == nil {
-		// #1922 Item 1b: first commit confirmed on a fresh store timed out.
+		// #1922 Item 1b: the first commit confirmed on a fresh store timed out.
 		// The store already reverted to the empty tree AND persisted the
 		// never-committed marker (PromoteRollback). A normal apply of an
 		// empty config is WRONG here — it would resurrect the dataplane the
 		// failed takeover started and leave a half-configured box. Instead
-		// roll the daemon back to bootstrap mode: re-suppress takeover and
-		// clean up the takeover artifacts (networkd files, FRR managed
-		// section, dataplane attach) the failed first commit created, except
-		// the management lifeline. Runs under d.applySem (held above).
+		// roll the daemon back to bootstrap mode. Restore the captured lifeline
+		// only when the store says this was genuinely the first-commit window;
+		// a nil compiled target also represents a previously-committed config
+		// that failed recovery compilation (#6538).
+		//
+		// #12154: stop every abandoned DHCP client on this first-commit rollback.
+		// The config-derived set is empty after promotion; Reconcile(nil) stops
+		// renewals and removes leases before bootstrap teardown returns.
+		firstCommitRollback = firstCommitPending && firstCommitRollback
+		if firstCommitRollback && d.dhcp != nil {
+			d.dhcp.Reconcile(nil)
+		}
+		slog.Warn("commit confirmed timed out with no compiled rollback target (first commit " +
+			"on a fresh store, or a recovered rollback target that no longer compiles); " +
+			"rolling back to BOOTSTRAP mode (retiring takeover state; restoring the " +
+			"lifeline only for the first-commit window)")
 		//
 		// #6538: a nil prevCfg has a SECOND provenance — a window recovered by
 		// recoverPendingConfirmLocked whose rollback target failed even the
@@ -1064,10 +1077,6 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 		// rather than from this nil: the second provenance persists the target
 		// as COMMITTED, so the box is not durably re-classified into
 		// bootstrap. The log below therefore names both cases.
-		slog.Warn("commit confirmed timed out with no compiled rollback target (first commit " +
-			"on a fresh store, or a recovered rollback target that no longer compiles); " +
-			"rolling back to BOOTSTRAP mode (removing interface/FRR/dataplane takeover, " +
-			"keeping the management lifeline)")
 		// #5868: enterBootstrapMode now attempts every teardown step best-effort
 		// but returns an aggregated error (and has already logged each failed
 		// step + the DEGRADED summary at ERROR) if any step did not converge.
@@ -1076,7 +1085,7 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 		// re-surface it once at the rollback-decision layer so the DEGRADED
 		// state is attributable to THIS first-commit-timeout event and an
 		// operator scraping for the timeout sees the box did not come back clean.
-		if err := d.enterBootstrapMode(); err != nil {
+		if err := d.enterBootstrapModeWithLifeline(firstCommitRollback); err != nil {
 			slog.Error("commit-confirmed first-commit rollback to bootstrap mode is DEGRADED: "+
 				"teardown did not fully converge (see the teardown step errors above); "+
 				"config-driven takeover state may remain partially live", "err", err)

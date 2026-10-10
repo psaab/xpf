@@ -354,6 +354,10 @@ type Store struct {
 	// to performAutoRollback, which stays self-contained and correct for
 	// that path.
 	rollbackExecutor func(gen uint64)
+	// firstCommitConfirmedHook is notified when a first-commit rollback window
+	// is resolved by confirmation (not timeout). It runs under s.mu and must
+	// not call back into Store.
+	firstCommitConfirmedHook func()
 
 	// Exclusive configuration mode
 	exclusiveHolder string // who holds exclusive lock (empty = unlocked)
@@ -1111,8 +1115,10 @@ func (s *Store) SyncApply(content string, chassisPreserve func(*config.ConfigTre
 	// record; the re-armed rollback would then be lost. cancelPending returns
 	// true iff a window was actually pending, so confirm.json is touched only
 	// when there was one to resolve.
+	firstCommitConfirm := s.confirmPrevFirst
 	syncSupersededConfirm := s.cancelPendingConfirmTimerLocked()
 	if syncSupersededConfirm {
+		s.notifyFirstCommitConfirmedLocked(firstCommitConfirm)
 		slog.Info("HA config-sync apply confirmed a pending commit-confirmed window")
 	}
 	// #9887: the sync ALSO supersedes the #8566 lost window. No timer was
