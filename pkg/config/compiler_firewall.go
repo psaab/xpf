@@ -640,20 +640,41 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 					filter.InterfaceSpecific = true
 				}
 
-				for _, termInst := range namedInstances(filterInst.node.FindChildren("term")) {
+				termNodes := filterInst.node.FindChildren("term")
+				// A child block with one key (for example `T { ... }`) carries an
+				// explicit nested term name. Multi-key children under a one-key
+				// `term` container are instead nameless statements whose leading
+				// value tokens could be consumed as a term name by lowering.
+				var namelessTermNodes map[*Node]struct{}
+				for _, termNode := range termNodes {
+					if len(termNode.Keys) != 1 {
+						continue
+					}
+					for _, child := range termNode.Children {
+						if !child.IsLeaf && len(child.Keys) == 1 {
+							continue
+						}
+						if namelessTermNodes == nil {
+							namelessTermNodes = make(map[*Node]struct{})
+						}
+						namelessTermNodes[child] = struct{}{}
+					}
+				}
+				for _, termInst := range namedInstances(termNodes) {
 					term := &FirewallFilterTerm{
 						Name: termInst.name,
 					}
-					// #10294: a term-level child other than `from` or
-					// `then` is never read by the term loop. In compact
-					// form the first tail token is the child head; valid
-					// `term t1 then accept` / `term t1 from ...` tails
-					// must not be mistaken for unknown children.
-					if len(termInst.node.Keys) >= 3 {
-						switch termInst.node.Keys[2] {
+					// #10294: inspect the instance's value tail, not a fixed
+					// Keys[2] offset. Named terms use [term, NAME, ...]; children
+					// of a one-key `term` container with multiple keys are marked
+					// nameless above before lowering. Any remaining term-level
+					// compact tail other than `from` or `then` is never read.
+					tail := instanceValueTail(termInst.node, termInst.name)
+					if len(tail) > 0 {
+						switch tail[0] {
 						case "from", "then":
 						default:
-							term.unknownChildren = append(term.unknownChildren, termInst.node.Keys[2])
+							term.unknownChildren = append(term.unknownChildren, tail[0])
 						}
 					}
 					for _, child := range termInst.node.Children {
@@ -663,7 +684,15 @@ func compileFirewall(node *Node, fw *FirewallConfig) error {
 							term.unknownChildren = append(term.unknownChildren, child.Name())
 						}
 					}
-
+					// A one-key `term` container has no term name. Its children
+					// are misread by namedInstances as terms named after their
+					// first token (for example `term { foo; }` becomes term
+					// "foo"). Mark those instances so strict/tolerant validation
+					// rejects the nameless container, including when it has no
+					// tail or its child is a multi-key block.
+					if _, nameless := namelessTermNodes[termInst.node]; nameless {
+						term.nameless = true
+					}
 					// #3850: apply EVERY `from {}` block, not just the first via
 					// FindChild — a duplicate block (a `load merge`/`load
 					// override` that splits its conditions, or a hierarchical
