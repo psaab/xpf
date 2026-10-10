@@ -5,9 +5,10 @@ import (
 	"testing"
 )
 
-// TestUnnamedRoutingContainersPreserveTypedStateAt12043Sites checks each of
-// the three unnamed-container sites addressed by #12043. Remaining unnamed
-// shapes are tracked in #12120; this is not a complete census.
+// TestUnnamedRoutingContainersPreserveTypedStateAt12043Sites retains the three
+// original #12043 behavioral fixtures. Global routing-options static is now
+// folded by the broader #12120 "any" registration, so only the two
+// instance-scope sites remain in the #12043 registry.
 func TestUnnamedRoutingContainersPreserveTypedStateAt12043Sites(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -19,7 +20,7 @@ func TestUnnamedRoutingContainersPreserveTypedStateAt12043Sites(t *testing.T) {
 	}{
 		{
 			name: "routing-options static",
-			site: "global routing-options static",
+			site: "",
 			dup: `routing-options {
 				static { route 10.10.0.0/16 { next-hop 192.0.2.1; } }
 				static { route 192.0.2.0/24 { next-hop 192.0.2.2; } }
@@ -103,10 +104,12 @@ func TestUnnamedRoutingContainersPreserveTypedStateAt12043Sites(t *testing.T) {
 	covered := make(map[string]bool, len(cases))
 	silent := 0
 	for _, tc := range cases {
-		if covered[tc.site] {
-			t.Fatalf("duplicate site fixture for %q", tc.site)
+		if tc.site != "" {
+			if covered[tc.site] {
+				t.Fatalf("duplicate site fixture for %q", tc.site)
+			}
+			covered[tc.site] = true
 		}
-		covered[tc.site] = true
 		t.Run(tc.name, func(t *testing.T) {
 			want := compileText(t, tc.merged)
 			if want == nil {
@@ -135,5 +138,5 @@ func TestUnnamedRoutingContainersPreserveTypedStateAt12043Sites(t *testing.T) {
 	if len(covered) != len(dupUnnamedRoutingMergeSites12043) {
 		t.Errorf("#12043 site list has %d fixtures for %d listed sites", len(covered), len(dupUnnamedRoutingMergeSites12043))
 	}
-	t.Logf("unnamed routing containers at the three #12043 sites: SILENT: %d (checked %d sites; remaining shapes tracked in #12120)", silent, len(covered))
+	t.Logf("unnamed routing containers in the #12043 fixtures: SILENT: %d (checked %d retained registry sites; global static is covered by #12120)", silent, len(covered))
 }

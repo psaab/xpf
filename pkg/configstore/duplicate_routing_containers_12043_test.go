@@ -15,13 +15,15 @@ import (
 func TestLoadOverrideCommitPreservesRepeatedUnnamedRoutingContainers12043(t *testing.T) {
 	cases := []struct {
 		name   string
+		issue  string
 		dup    string
 		merged string
 		read   func(*config.Config) any
 		valid  func(any) bool
 	}{
 		{
-			name: "routing-options static",
+			name:  "routing-options static",
+			issue: "#12120",
 			dup: `routing-options {
 				static { route 10.10.0.0/16 { next-hop 192.0.2.1; } }
 				static { route 192.0.2.0/24 { next-hop 192.0.2.2; } }
@@ -39,7 +41,8 @@ func TestLoadOverrideCommitPreservesRepeatedUnnamedRoutingContainers12043(t *tes
 			},
 		},
 		{
-			name: "routing-instances routing-options",
+			name:  "routing-instances routing-options",
+			issue: "#12043",
 			dup: `routing-instances { blue {
 				instance-type virtual-router;
 				routing-options { static { route 10.20.0.0/16 { next-hop 192.0.2.1; } } }
@@ -64,7 +67,8 @@ func TestLoadOverrideCommitPreservesRepeatedUnnamedRoutingContainers12043(t *tes
 			},
 		},
 		{
-			name: "routing-instances protocols",
+			name:  "routing-instances protocols",
+			issue: "#12043",
 			dup: `routing-instances { blue {
 				instance-type virtual-router;
 				protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0; } } }
@@ -128,16 +132,16 @@ func TestLoadOverrideCommitPreservesRepeatedUnnamedRoutingContainers12043(t *tes
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("LoadOverride+Commit duplicate state differs from merged control:\n duplicate: %#v\n merged:    %#v", got, want)
 			}
-			if !hasRoutingContainerMergeWarning12043(duplicateConfig.Warnings) {
-				t.Errorf("duplicate container merged without its #12043 diagnostic: %v", duplicateConfig.Warnings)
+			if !hasRoutingContainerMergeWarning(duplicateConfig.Warnings, tc.issue) {
+				t.Errorf("duplicate container merged without its %s diagnostic: %v", tc.issue, duplicateConfig.Warnings)
 			}
 		})
 	}
 }
 
-func hasRoutingContainerMergeWarning12043(warnings []string) bool {
+func hasRoutingContainerMergeWarning(warnings []string, issue string) bool {
 	for _, warning := range warnings {
-		if strings.Contains(warning, "#12043") {
+		if strings.Contains(warning, issue) {
 			return true
 		}
 	}

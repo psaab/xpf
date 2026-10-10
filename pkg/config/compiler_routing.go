@@ -1973,7 +1973,9 @@ func mergeRibGroupDefinition(ribGroups map[string]*RibGroup, next *RibGroup, war
 	if first := ribGroups[next.Name]; first != nil {
 		first.ImportRibs = append(first.ImportRibs, next.ImportRibs...)
 		if warnings != nil {
-			*warnings = append(*warnings, duplicateBlockMergeWarning9023("rib-groups "+next.Name))
+			*warnings = append(*warnings, duplicateBlockMergeWarning9023(duplicateBlockMerge9023{
+				kind: duplicateBlockMergeNamed9023, parent: "rib-groups", name: next.Name,
+			}))
 		}
 		return
 	}

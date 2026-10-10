@@ -1470,12 +1470,13 @@ replace the lab check that each routed prefix is encrypted only on its own SA.
 
 **Repeated unnamed routing containers merge (#12043/#12120):** hierarchical
 loads retain repeated `routing-options` children (`static`, `generate`, and
-`interface-routes`) at global and instance scopes, repeated `rib inet.0 static`
-and `protocols ospf`/`bgp` blocks, plus separate top-level `protocols` roots.
-Junos merges these stanzas, so strict and tolerant compilation fold their
-contents in source order before typed compilation. Successful compiles include
-a merge warning; the conservation census covers the original #12043 sites and
-each added #12120 shape.
+`interface-routes`) at global and instance scopes, repeated `rib inet.0 static`,
+and `protocols` blocks for OSPF, OSPFv3, BGP, RIP, IS-IS, LLDP, and
+router-advertisement, including separate top-level `protocols` roots. Junos
+merges these stanzas, so strict and tolerant compilation fold their contents in
+source order before typed compilation. Successful compiles include a merge
+warning naming the protocol/container and its routing-instance or group scope;
+the conservation census compares duplicate input to its hand-merged form.
 
 **Static routes through XFRM must fit the remote selector union (#11422):**
 the typed gate checks global and routing-instance static routes whose
