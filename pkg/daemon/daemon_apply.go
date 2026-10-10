@@ -221,7 +221,7 @@ func (d *Daemon) applyActiveConfigResult() error {
 		return nil
 	}
 	err := d.applyConfigLocked(context.Background(), cfg)
-	if err == nil {
+	if err == nil && d.policyInvalidationPublishLanded {
 		// Stamp before releasing applySem so a competing promotion cannot
 		// inherit this successful apply result.
 		d.store.MarkActiveApplied()
@@ -250,7 +250,7 @@ func (d *Daemon) applyConfigUnderSem(cfg *config.Config) {
 	// generation even when nothing changed). A FAILED apply above returns
 	// early and leaves the prior digest, so a config that never converged is
 	// never marked applied — the same #4957 invariant handleConfigSync relies on.
-	if d.store != nil {
+	if d.store != nil && d.policyInvalidationPublishLanded {
 		d.store.MarkActiveApplied()
 	}
 }
@@ -335,8 +335,11 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	// having to remember. A per-caller clear would be four sites today and a fifth
 	// silently missing tomorrow.
 	defer func() {
-		if retErr != nil && d.store != nil {
-			d.store.InvalidateAppliedDigest()
+		if retErr != nil {
+			if d.store != nil {
+				d.store.InvalidateAppliedDigest()
+			}
+			d.failDeferredSnapshotApplyForConfig(cfg, retErr)
 		}
 	}()
 	defer func() {
@@ -399,6 +402,22 @@ func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (ret
 	if cfg == nil {
 		return nil
 	}
+	// Settle an older deferred config only after this apply's complete tail
+	// succeeds. A synchronous dataplane publish alone is not enough to advance
+	// HA's applied high-water if the rest of the config apply failed.
+	defer func() {
+		if retErr != nil || !d.policyInvalidationPublishLanded {
+			return
+		}
+		rt := d.dataplane()
+		if rt == nil {
+			return
+		}
+		result := rt.LastApplyResult()
+		if result != nil && result.Generation != 0 && !result.SnapshotPublishDeferred {
+			d.resolveDeferredSnapshotApplyAfterSynchronousPublish(cfg, result.Generation)
+		}
+	}()
 	// Successful full applies discharge scoped gap debt even when the active
 	// config no longer renders a host-inbound table to install (for example,
 	// a config change removed the last enforcing scope).

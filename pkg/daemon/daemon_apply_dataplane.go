@@ -187,6 +187,7 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 					d.publishIpsecCaptureSnapshotAuthority(configGeneration, fibGeneration, captureGeneration)
 				})
 				mgr.SetPolicySnapshotCommitter(d.policyInvalidationSnapshotPublished)
+				mgr.SetPolicySnapshotPublishFailure(d.rejectDeferredSnapshotPublish)
 				mgr.SetPolicySnapshotPrePublisher(d.capturePolicyInvalidationBeforeDeferredPublish)
 			}
 		}
@@ -254,6 +255,12 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			d.policyInvalidationPublishLanded = fresh
 			if applyResult != nil {
 				d.notePolicyInvalidationPublish(cfg, applyResult.Generation)
+			}
+			if !fresh && applyResult != nil {
+				if d.store != nil {
+					d.store.InvalidateAppliedDigest()
+				}
+				d.recordDeferredSnapshotApply(cfg, applyResult.Generation)
 			}
 			if publishedTail {
 				applyErr = err

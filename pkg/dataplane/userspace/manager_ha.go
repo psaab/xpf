@@ -440,13 +440,17 @@ func (m *Manager) takeoverReadyLocked() (bool, []string) {
 			"userspace worker-session repair overflow; full session inventory replay required: "+
 				m.sessionRepairOverflowErr)
 	}
-	// #9642: an indebted node must not advertise takeover readiness. Its
-	// classifier maps are at an unpublished plan with ctrl held at 0; handing
-	// it an RG would cut transit over until the debt converges. Name the
-	// unpublished generation so the operator sees what is owed.
+	// An indebted node or a deferred full snapshot must not advertise takeover
+	// readiness while the helper is still enforcing the previous generation.
+	// Name the unpublished generation so the operator sees what is owed.
 	if m.snapshotRetryDebtLocked() {
 		reasons = append(reasons, fmt.Sprintf(
 			"userspace snapshot retry debt outstanding (generation %d unpublished)",
+			m.lastSnapshot.Generation))
+	} else if m.pendingFullSnapshotMetadata && m.lastSnapshot != nil &&
+		m.publishedSnapshot < m.lastSnapshot.Generation {
+		reasons = append(reasons, fmt.Sprintf(
+			"userspace snapshot generation %d unpublished",
 			m.lastSnapshot.Generation))
 	}
 	// Gate on the LOCAL event-stream listener being bound — the primary push
