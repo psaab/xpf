@@ -124,7 +124,7 @@ security {
 		t.Fatalf("expected 2 top-level security roots, got %d", got)
 	}
 
-	if _, err := validateZoneIDCollisionAST(tree, false); err == nil {
+	if _, _, err := validateZoneIDCollisionAST(tree, false); err == nil {
 		t.Fatalf("expected a zone-id collision error across split security roots "+
 			"(zones %q/%q both fold to %d), got nil (#5691)", a, b, StableZoneID(a))
 	}

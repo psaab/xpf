@@ -45,7 +45,8 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 		allZoneNames = append(allZoneNames, name)
 	}
 	sort.Strings(allZoneNames)
-	quarantined := config.ZoneQuarantineExclusions(allZoneNames)
+	quarantineNames := config.ZoneQuarantineNamesForConfig(cfg)
+	quarantined := config.ZoneQuarantineExclusions(quarantineNames)
 	zoneNames := make([]string, 0, len(allZoneNames))
 	for _, name := range allZoneNames {
 		if filter != "" && name != filter {
@@ -80,7 +81,7 @@ func (s *Server) showZonesDetail(cfg *config.Config, filter string, buf *strings
 		}
 		survivor := ""
 		if reason != "" {
-			survivor = config.ZoneQuarantineSurvivorName(name, allZoneNames)
+			survivor = config.ZoneQuarantineSurvivorName(name, quarantineNames)
 		}
 		if zoneID > 0 {
 			if survivor != "" {
@@ -347,6 +348,7 @@ func (s *Server) showTestZone(req *pb.ShowTextRequest, cfg *config.Config, buf *
 			allZoneNames = append(allZoneNames, zoneName)
 		}
 		sort.Strings(allZoneNames)
+		quarantineNames := config.ZoneQuarantineNamesForConfig(cfg)
 		for _, zoneName := range allZoneNames {
 			zone := cfg.Security.Zones[zoneName]
 			if zone == nil { // #3493: tolerant/HA-sync path may carry a nil zone value
@@ -357,7 +359,7 @@ func (s *Server) showTestZone(req *pb.ShowTextRequest, cfg *config.Config, buf *
 					fmt.Fprintf(buf, "Interface %s belongs to zone: %s\n", ifName, zoneName)
 					if reason := config.ZoneQuarantineExcludedReason(zoneName, cfg); reason != "" {
 						id := config.StableZoneID(zoneName)
-						survivor := config.ZoneQuarantineSurvivorName(zoneName, allZoneNames)
+						survivor := config.ZoneQuarantineSurvivorName(zoneName, quarantineNames)
 						fmt.Fprintf(buf, "  %s\n", config.ZoneQuarantineTestZoneQualifierFor(id, survivor))
 					}
 					if zone.Description != "" {

@@ -445,7 +445,7 @@ func buildZoneHostInboundViewsFromSnaps(cfg *config.Config, snaps []InterfaceSna
 		zoneNamesSorted = append(zoneNamesSorted, name)
 	}
 	sort.Strings(zoneNamesSorted)
-	quarantined := config.ZoneQuarantineExclusions(zoneNamesSorted)
+	quarantined := config.ZoneQuarantineExclusionsForConfig(cfg)
 	for _, name := range zoneNamesSorted {
 		if _, drop := quarantined[name]; drop {
 			continue

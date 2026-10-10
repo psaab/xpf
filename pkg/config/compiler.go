@@ -411,7 +411,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	// on the PRE-expansion tree and unions zone names across all groups (Views
 	// 1/2/3, see zoneid.go) so both cluster nodes accept/reject identically.
 	// Strict hard-rejects a colliding pair; lenient warns.
-	zoneIDWarnings, zoneIDErr := validateZoneIDCollisionAST(
+	zoneIDWarnings, zoneQuarantineNames, zoneIDErr := validateZoneIDCollisionAST(
 		tree, opts.lenientZoneIDCollision)
 	if zoneIDErr != nil {
 		return nil, zoneIDErr
@@ -612,6 +612,7 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	if err != nil {
 		return nil, err
 	}
+	cfg.ZoneQuarantineNames = zoneQuarantineNames
 	if usedNodeFallback {
 		cfg.Warnings = append(cfg.Warnings, `apply-groups "${node}" resolved using default node0 context during generic compile`)
 	}
@@ -771,7 +772,7 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	// #3075: stable-zone-id collision gate — see compileConfigWithOpts.
 	// Pre-expansion union across all groups so the verdict is identical on both
 	// cluster nodes; read-only, safe on the soon-to-be-expanded copy.
-	zoneIDWarnings, zoneIDErr := validateZoneIDCollisionAST(
+	zoneIDWarnings, zoneQuarantineNames, zoneIDErr := validateZoneIDCollisionAST(
 		tree, opts.lenientZoneIDCollision)
 	if zoneIDErr != nil {
 		return nil, zoneIDErr
@@ -942,6 +943,7 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	if err != nil {
 		return nil, err
 	}
+	cfg.ZoneQuarantineNames = zoneQuarantineNames
 
 	// Mark source-action conflicts and widening folds after compilation, when
 	// the LenientContentDropped flag lives on the compiled policy.

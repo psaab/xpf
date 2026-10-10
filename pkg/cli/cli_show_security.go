@@ -66,7 +66,7 @@ func (c *CLI) showPoliciesHitCount(cfg *config.Config, fromZone, toZone string) 
 	for name := range cfg.Security.Zones {
 		zoneNames = append(zoneNames, name)
 	}
-	quarantinedZones := config.ZoneQuarantineExclusions(zoneNames)
+	quarantinedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
 	isQuarantined := func(name string) bool {
 		_, ok := quarantinedZones[name]
 		return ok
@@ -361,7 +361,7 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 	for name := range cfg.Security.Zones {
 		zoneNames = append(zoneNames, name)
 	}
-	quarantinedZones := config.ZoneQuarantineExclusions(zoneNames)
+	quarantinedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
 	isQuarantined := func(name string) bool {
 		_, ok := quarantinedZones[name]
 		return ok

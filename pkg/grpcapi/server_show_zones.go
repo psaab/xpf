@@ -26,7 +26,8 @@ func (s *Server) GetZones(_ context.Context, _ *pb.GetZonesRequest) (*pb.GetZone
 	for zoneName := range cfg.Security.Zones {
 		zoneNames = append(zoneNames, zoneName)
 	}
-	quarantinedZones := config.ZoneQuarantineExclusions(zoneNames)
+	quarantineNames := config.ZoneQuarantineNamesForConfig(cfg)
+	quarantinedZones := config.ZoneQuarantineExclusions(quarantineNames)
 
 	// #3408: a per-zone counter read failure must surface as codes.Internal
 	// rather than a clean-zero field, mirroring GetGlobalStats (#3345).
@@ -46,7 +47,7 @@ func (s *Server) GetZones(_ context.Context, _ *pb.GetZonesRequest) (*pb.GetZone
 		if quarantined {
 			zi.QuarantineState = pb.ZoneQuarantineState_ZONE_QUARANTINE_STATE_QUARANTINED
 			zi.QuarantineSurvivorZone =
-				config.ZoneQuarantineSurvivorName(zoneName, zoneNames)
+				config.ZoneQuarantineSurvivorName(zoneName, quarantineNames)
 		} else {
 			zi.QuarantineState = pb.ZoneQuarantineState_ZONE_QUARANTINE_STATE_NOT_QUARANTINED
 		}
@@ -213,7 +214,7 @@ func (s *Server) GetPolicies(_ context.Context, _ *pb.GetPoliciesRequest) (*pb.G
 	for name := range cfg.Security.Zones {
 		zoneNames = append(zoneNames, name)
 	}
-	quarantinedZones := config.ZoneQuarantineExclusions(zoneNames)
+	quarantinedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
 	isQuarantined := func(name string) bool {
 		_, ok := quarantinedZones[name]
 		return ok

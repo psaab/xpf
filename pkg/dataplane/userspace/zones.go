@@ -89,7 +89,7 @@ func authoredZoneRefs(cfg *config.Config) map[string]string {
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
-	excludedZones := config.ZoneQuarantineExclusions(zoneNames)
+	excludedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
 	conflictedInterfaces := config.QuarantinedZoneInterfaceKeys(cfg)
 	for _, zoneName := range zoneNames {
 		if _, excluded := excludedZones[zoneName]; excluded {
@@ -139,16 +139,9 @@ func authoredZoneRefs(cfg *config.Config) map[string]string {
 }
 
 // quarantinedZoneNames returns the zone names excluded from dataplane install.
-// It reads the same cfg.Security.Zones key set as quarantineCollidingZones.
+// It uses the compiler's full three-view name union.
 func quarantinedZoneNames(cfg *config.Config) map[string]struct{} {
-	if cfg == nil || len(cfg.Security.Zones) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(cfg.Security.Zones))
-	for name := range cfg.Security.Zones {
-		names = append(names, name)
-	}
-	return config.ZoneQuarantineExclusions(names)
+	return config.ZoneQuarantineExclusionsForConfig(cfg)
 }
 
 func buildInterfaceZoneMap(cfg *config.Config) map[string]string {

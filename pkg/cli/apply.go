@@ -40,7 +40,7 @@ func syslogZoneNameMap(cfg *config.Config) map[uint16]string {
 	// neither kind of excluded zone may claim an id in the syslog reverse map.
 	// Otherwise RT_FLOW/syslog could render a real zone's traffic under the
 	// wrong name.
-	quarantined := config.ZoneQuarantineExclusions(names)
+	quarantined := config.ZoneQuarantineExclusionsForConfig(cfg)
 	znMap := make(map[uint16]string, len(names))
 	for _, name := range names {
 		if _, drop := quarantined[name]; drop {

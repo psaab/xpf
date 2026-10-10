@@ -61,13 +61,14 @@ func RenderDestRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config, 
 			names = append(names, name)
 		}
 		sort.Strings(names)
-		quarantined := config.ZoneQuarantineExclusions(names)
+		quarantineNames := config.ZoneQuarantineNamesForConfig(cfg)
+		quarantined := config.ZoneQuarantineExclusions(quarantineNames)
 		for _, name := range names {
 			if _, drop := quarantined[name]; drop {
 				continue
 			}
 			id := cr.ZoneIDs[name]
-			owner := config.StableZoneIDOwner(names, id)
+			owner := config.StableZoneIDOwner(quarantineNames, id)
 			if owner == "" {
 				if _, exists := zoneByID[id]; exists {
 					continue

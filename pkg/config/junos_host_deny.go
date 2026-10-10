@@ -305,7 +305,7 @@ func BuildJunosHostDenyProjection(cfg *Config) JunosHostDenyProjection {
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
-	excludedZones := ZoneQuarantineExclusions(zoneNames)
+	excludedZones := ZoneQuarantineExclusionsForConfig(cfg)
 
 	for _, zoneName := range zoneNames {
 		if _, excluded := excludedZones[zoneName]; excluded {
@@ -1483,7 +1483,7 @@ func junosHostZoneByInterface(cfg *Config) map[string]string {
 		zoneNames = append(zoneNames, name)
 	}
 	sort.Strings(zoneNames)
-	excludedZones := ZoneQuarantineExclusions(zoneNames)
+	excludedZones := ZoneQuarantineExclusionsForConfig(cfg)
 	conflictedInterfaces := QuarantinedZoneInterfaceKeys(cfg)
 	for _, zoneName := range zoneNames {
 		if _, excluded := excludedZones[zoneName]; excluded {
