@@ -196,7 +196,7 @@ func TestPolicyThenOperandsLenientRegistrationAndCompile_12070(t *testing.T) {
 		t.Fatal("lenientPolicyThenOperands is not registered in lenientCompileOpts")
 	}
 	for _, tc := range []struct {
-		name, text, bad string
+		name, text, bad   string
 		wantFromProtocols []string
 	}{
 		{
@@ -210,9 +210,9 @@ func TestPolicyThenOperandsLenientRegistrationAndCompile_12070(t *testing.T) {
 			bad:  "192.0.2.2",
 		},
 		{
-			name: "compact next-hop protocol tail retains match",
-			text: `policy-options { policy-statement P { term t { then accept next-hop 192.0.2.1 protocol bgp; } } }`,
-			bad:  "protocol",
+			name:              "compact next-hop protocol tail retains match",
+			text:              `policy-options { policy-statement P { term t { then accept next-hop 192.0.2.1 protocol bgp; } } }`,
+			bad:               "protocol",
 			wantFromProtocols: []string{"bgp"},
 		},
 		{
@@ -221,15 +221,15 @@ func TestPolicyThenOperandsLenientRegistrationAndCompile_12070(t *testing.T) {
 			bad:  "abc",
 		},
 		{
-			name: "quoted prepend protocol tail retains match",
-			text: `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 "protocol" bgp; } } }`,
-			bad:  "protocol",
+			name:              "quoted prepend protocol tail retains match",
+			text:              `policy-options { policy-statement P { term t { then accept as-path-prepend 65001 "protocol" bgp; } } }`,
+			bad:               "protocol",
 			wantFromProtocols: []string{"bgp"},
 		},
 		{
-			name: "bracketed prepend protocol tail retains match",
-			text: `policy-options { policy-statement P { term t { then accept as-path-prepend [ 65001 protocol bgp ]; } } }`,
-			bad:  "protocol",
+			name:              "bracketed prepend protocol tail retains match",
+			text:              `policy-options { policy-statement P { term t { then accept as-path-prepend [ 65001 protocol bgp ]; } } }`,
+			bad:               "protocol",
 			wantFromProtocols: []string{"bgp"},
 		},
 	} {
