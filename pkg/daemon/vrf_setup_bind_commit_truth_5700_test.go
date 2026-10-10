@@ -131,7 +131,7 @@ func TestRebindManagementVRFSurfacesBindFailure_5700(t *testing.T) {
 	d := &Daemon{routing: routing.NewManagerWithLinkOpsForTest(ops)}
 	d.publishMgmtVRFIfaces(map[string]bool{"fxp0": true})
 
-	err := d.rebindManagementVRFIfaces()
+	err := d.rebindManagementVRFIfaces(mgmtIfaceConfig())
 	if err == nil {
 		t.Fatal("rebindManagementVRFIfaces must return the management-VRF bind failure " +
 			"(fail-closed); got nil — the swallowed false-convergence #5700 describes")
@@ -148,7 +148,7 @@ func TestRebindManagementVRFToleratesSuccess_5700(t *testing.T) {
 	d := &Daemon{routing: routing.NewManagerWithLinkOpsForTest(ops)}
 	d.publishMgmtVRFIfaces(map[string]bool{"fxp0": true})
 
-	if err := d.rebindManagementVRFIfaces(); err != nil {
+	if err := d.rebindManagementVRFIfaces(mgmtIfaceConfig()); err != nil {
 		t.Fatalf("a successful management-VRF re-bind must not fail the commit, got %v", err)
 	}
 }
@@ -159,7 +159,7 @@ func TestRebindManagementVRFNoSetIsNoop_5700(t *testing.T) {
 	ops := newReconcileFakeLinkOps()
 	d := &Daemon{routing: routing.NewManagerWithLinkOpsForTest(ops)}
 	// No publishMgmtVRFIfaces -> mgmtVRFIfaceSet() is empty.
-	if err := d.rebindManagementVRFIfaces(); err != nil {
+	if err := d.rebindManagementVRFIfaces(nil); err != nil {
 		t.Fatalf("no management-VRF interface set must be a no-op, got %v", err)
 	}
 }
