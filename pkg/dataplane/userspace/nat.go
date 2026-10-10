@@ -66,7 +66,8 @@ func resolveNATAddressNamePrefixes(cfg *config.Config, feedOverlay map[string][]
 		return nil
 	}
 	visited := make(map[string]bool)
-	out, unknownMember := expandBookNameRecursive(cfg.Security.AddressBook, feedOverlay, name, visited, 0)
+	out, unknownMember := expandBookNameRecursive(
+		cfg.Security.AddressBook, feedOverlay, cfg.Security.DynamicAddress.AddressBindings, name, visited, 0)
 	if unknownMember || len(out) == 0 {
 		return nil
 	}
