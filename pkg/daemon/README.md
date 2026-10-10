@@ -2106,10 +2106,12 @@ never lock an operator out of a remote box it manages.
     answer. The second swallowed error there (`LinkByIndex` on a found route)
     is propagated for the same reason.
 - **Protected set** (`resolveProtectedInterfaces` →
-  `dataplane.SetProtectedInterfaceResolver`): fxp0 + the lifeline NIC + an
-  explicit `system management-interface` leaf are NEVER marked Unmanaged /
-  always-down / address-stripped, even on an empty/absent/rolled-back config.
-  An explicit non-fxp0 leaf narrows fxp0 off the auto-protection.
+  `dataplane.SetProtectedInterfaceResolver`): fxp0 + the lifeline NIC are NEVER
+  marked Unmanaged / always-down / address-stripped, even on an
+  empty/absent/rolled-back config. The internal typed
+  `system management-interface` field can add a protected name and narrow fxp0
+  when populated, but its config-mode grammar is deferred; operators cannot
+  currently use it as a remedy.
 - **First-commit rollback** (`enterBootstrapMode`): a timed-out first
   `commit confirmed` stops+discards the NAT pool-alarm monitor (#2114 — the
   reason is NOT a data race: `dpCell` is an `atomic.Pointer`, so a

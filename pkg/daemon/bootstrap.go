@@ -118,9 +118,9 @@ func day0RejectMarkerDetail(configFile string) string {
 const lifelineRecordFile = "/etc/xpf/lifeline-interface"
 
 // defaultMgmtInterface is the conventional management interface name. It is
-// always a member of the protected set unless an explicit non-fxp0
-// `system management-interface` leaf narrows it off (Item 4 / OQ-D escape
-// valve).
+// always a member of the protected set unless an explicit non-fxp0 value in
+// the internal `system management-interface` field narrows it off (Item 4 /
+// OQ-D escape valve; config-mode grammar is deferred).
 const defaultMgmtInterface = "fxp0"
 
 // applianceMarkerFile marks a host that was PROVISIONED FROM THE XPF APPLIANCE
@@ -899,12 +899,12 @@ func readLifelineRecordAt(path string) (lifelineRecord, bool) {
 //
 // Resolution ladder (OQ-C resolution): the interface carrying the active
 // IPv4 default route, else the active IPv6 default route, else none
-// (refuse takeover, stay bootstrap, console-only). The default-route
-// interface is "the NIC the operator reaches the box on" in the common
-// single-homed case. A multi-homed / policy-routed mgmt box is the residual
-// the operator resolves with an explicit `system management-interface` leaf
-// once a config exists; the genuinely-fresh box has no leaf yet, so the
-// default-route signal is the only config-independent option.
+// (refuse takeover, stay bootstrap, console-only). The default-route interface
+// is "the NIC the operator reaches the box on" in the common single-homed
+// case. A multi-homed / policy-routed mgmt box is the residual that requires
+// manual console-side recovery; the intended `system management-interface`
+// override cannot currently be set in config mode because its parser grammar
+// is deferred.
 //
 // detectLifelineInterfaceFn / enumeratePCINICsFn are injectable seams for the
 // world-reading half of setupBootstrapLifeline, so the #7114 selection wiring
@@ -1060,16 +1060,17 @@ func resolveLifelineCurrentName() (string, bool) {
 }
 
 // protectedInterfaces returns the management protected set (Item 4): the
-// union of the explicit `system management-interface` leaf (when set), the
-// default fxp0 (unless narrowed off by an explicit non-fxp0 leaf), and the
+// union of the `system management-interface` field (when internally set), the
+// default fxp0 (unless narrowed off by an explicit non-fxp0 field), and the
 // lifeline-recorded interface resolved from its PCI address to the current
 // name. Members are NEVER marked Unmanaged / always-down / address-stripped
 // by the reconcile path, regardless of the active config (config-independent;
 // invariant 3).
 //
 // mgmtLeaf is the configured `system management-interface` value ("" when
-// unset). The OQ-D escape valve: an explicit non-fxp0 leaf NARROWS fxp0 out
-// of the auto-protection so an operator can repurpose fxp0 as a revenue port.
+// unset). An explicit non-fxp0 value narrows fxp0 out of the auto-protection.
+// The field has no config-mode parser grammar yet, so operators cannot
+// currently use this behavior to repurpose fxp0 as a revenue port.
 func protectedInterfaces(mgmtLeaf string) map[string]bool {
 	lifeline, ok := resolveLifelineCurrentName()
 	if !ok {
@@ -1084,9 +1085,9 @@ func protectedInterfaces(mgmtLeaf string) map[string]bool {
 func protectedInterfacesWith(mgmtLeaf, lifeline string) map[string]bool {
 	set := make(map[string]bool)
 	// narrowFxp0 is the OQ-D escape valve: an explicit non-fxp0
-	// management-interface leaf removes fxp0 from the auto-protection so the
-	// operator can repurpose fxp0 as a revenue port. It must apply to BOTH
-	// the leaf/default contribution AND the lifeline-record union — the
+	// management-interface field removes fxp0 from auto-protection so it may
+	// be repurposed. Config-mode parser grammar is deferred. It must apply to
+	// both the leaf/default contribution and the lifeline-record union: the
 	// persisted lifeline record can resolve to fxp0 and would otherwise
 	// silently re-add it (Codex r3 BLOCKER).
 	narrowFxp0 := mgmtLeaf != "" && mgmtLeaf != defaultMgmtInterface
@@ -1113,8 +1114,11 @@ func protectedInterfacesWith(mgmtLeaf, lifeline string) map[string]bool {
 //     writes a lifeline-aware bootstrap .network that snapshots its current
 //     addressing (DHCP or static) so the link cycle restores reachability,
 //  4. otherwise touches NO interface (refuse takeover, stay reachable on the
-//     un-renamed kernel name), logs loudly, and requires the operator to
-//     re-wire or set `system management-interface` + commit.
+//     un-renamed kernel name) and logs loudly. For a higher-index PCI NIC, it
+//     directs the operator to rewire it to index 0; for a non-PCI management
+//     route, it directs the operator to move that route onto a PCI NIC. Restart
+//     xpfd or reboot after the change. The `system management-interface`
+//     config-mode grammar is deferred and is not a supported remedy.
 //
 // No other NIC is renamed, cycled, or reconfigured in bootstrap mode.
 //
@@ -1228,12 +1232,49 @@ func (d *Daemon) setupBootstrapLifeline() {
 			break
 		}
 	}
+	index0Name, index0PCI := "", ""
+	if len(nics) > 0 {
+		// The warning identifies the currently first PCI device so an operator
+		// can distinguish it from the management path without reconstructing
+		// the virtio-first, then PCI-address enumeration order.
+		index0Name, index0PCI = nics[0].name, nics[0].busAddr
+	}
+	if len(nics) == 0 {
+		slog.Warn("bootstrap lifeline: no PCI NIC enumerated; this can occur on a "+
+			"VMBus-only host. No PCI NIC can be selected to become fxp0. Refusing "+
+			"to rename/cycle any interface; staying in bootstrap with NO interface "+
+			"changes. Reach the host via its console and attach/configure a PCI NIC "+
+			"for management before restarting xpfd or rebooting. The `system "+
+			"management-interface` leaf is not implemented in config mode and would "+
+			"be silently ignored.",
+			"interface", lifeline, "enum_index", idx)
+		return
+	}
+	if idx == -1 {
+		slog.Warn("bootstrap lifeline: management default-route interface is not present in "+
+			"the PCI NIC enumeration (common for a bond, VLAN, or bridge), so rewiring that "+
+			"interface cannot make it enumeration index 0. From the console, move the "+
+			"management default route and its addressing onto the NIC identified by "+
+			"index0_interface and index0_pci. Restart xpfd or reboot after the change. "+
+			"The `system management-interface` leaf is not implemented in config mode "+
+			"and would be silently ignored.",
+			"interface", lifeline, "enum_index", idx,
+			"index0_interface", index0Name, "index0_pci", index0PCI)
+		return
+	}
 	if idx != 0 {
 		slog.Warn("bootstrap lifeline: management default-route NIC is NOT enumeration index 0, "+
 			"so it would not become fxp0. Refusing to rename/cycle any interface; staying in "+
-			"bootstrap. Re-wire the management NIC to the first PCI slot, or set "+
-			"'system management-interface' and 'commit confirmed'.",
-			"interface", lifeline, "enum_index", idx)
+			"bootstrap. From the console, move the management default route and its addressing "+
+			"onto the NIC identified by index0_interface and index0_pci. Virtio-first "+
+			"enumeration keeps its virtio NIC at index 0, so recabling cannot make the PCI "+
+			"management NIC index 0 and recabling alone can strand management. Alternatively, from "+
+			"the console, enter `set chassis device-map interface fxp0 pci <mgmt PCI>` and then "+
+			"`commit confirmed`. Restart xpfd or reboot after the change. The `system "+
+			"management-interface` leaf is not implemented in config mode and would be silently "+
+			"ignored.",
+			"interface", lifeline, "enum_index", idx,
+			"index0_interface", index0Name, "index0_pci", index0PCI)
 		return
 	}
 
