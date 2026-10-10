@@ -160,9 +160,10 @@ func buildZoneInterfaceMapLocal(cfg *Config) map[string]string {
 // mergeHostInboundOverrideLocal mirrors
 // pkg/dataplane/userspace.mergeHostInboundTraffic: it returns a NEW
 // *HostInboundTraffic whose token lists are the order-preserving UNION of a and
-// b (a first, then b's not-already-present tokens). It backs the #3720 additive
-// physical→unit override resolution so the commit-time gate classifies the same
-// effective set the runtime does. Returns nil only when both inputs are nil.
+// b (a first, then b's not-already-present tokens), with unioned exclusions
+// reapplied after the token union. It backs the #3720 physical→unit override
+// resolution so the commit-time gate classifies the same effective set the
+// runtime does. Returns nil only when both inputs are nil.
 func mergeHostInboundOverrideLocal(a, b *HostInboundTraffic) *HostInboundTraffic {
 	if a == nil && b == nil {
 		return nil
@@ -185,11 +186,17 @@ func mergeHostInboundOverrideLocal(a, b *HostInboundTraffic) *HostInboundTraffic
 	if a != nil {
 		appendUnique(&out.SystemServices, a.SystemServices)
 		appendUnique(&out.Protocols, a.Protocols)
+		appendUnique(&out.systemServicesExcept, a.systemServicesExcept)
+		appendUnique(&out.protocolsExcept, a.protocolsExcept)
 	}
 	if b != nil {
 		appendUnique(&out.SystemServices, b.SystemServices)
 		appendUnique(&out.Protocols, b.Protocols)
+		appendUnique(&out.systemServicesExcept, b.systemServicesExcept)
+		appendUnique(&out.protocolsExcept, b.protocolsExcept)
 	}
+	out.SystemServices = hostInboundFilterExcept(out.SystemServices, out.systemServicesExcept, false)
+	out.Protocols = hostInboundFilterExcept(out.Protocols, out.protocolsExcept, true)
 	return out
 }
 

@@ -167,11 +167,12 @@ func InterfaceZoneMap(cfg *Config) map[string]string {
 
 // MergeHostInboundTraffic returns a NEW *HostInboundTraffic whose token
 // lists are the order-preserving UNION of a and b (a's tokens first, then any of
-// b's not already present, exact-string dedup). It underpins the #3720
+// b's not already present, exact-string dedup). Exclusions are unioned too and
+// reapplied after the positive-token union, so an alias from either scope cannot
+// re-admit a tuple excluded by the other. It underpins the #3720
 // physical→unit override resolution: a physical-interface override and a
-// more-specific unit-level override on the same unit are UNIONed (both are
-// INTERFACE-level statements) rather than the sorted-first physical ref silently
-// shadowing the unit ref (the #3720 first-writer-wins bug). #6515 changed how the
+// more-specific unit-level override on the same unit are BOTH INTERFACE-level
+// statements and union with exclusion provenance intact. #6515 changed how the
 // RESULT combines with the zone level — it replaces it — not this merge. Returns
 // nil only when BOTH inputs are nil; a fresh struct is always allocated so the
 // shared config-owned override objects are never mutated in place.
@@ -197,11 +198,17 @@ func MergeHostInboundTraffic(a, b *HostInboundTraffic) *HostInboundTraffic {
 	if a != nil {
 		appendUnique(&out.SystemServices, a.SystemServices)
 		appendUnique(&out.Protocols, a.Protocols)
+		appendUnique(&out.systemServicesExcept, a.systemServicesExcept)
+		appendUnique(&out.protocolsExcept, a.protocolsExcept)
 	}
 	if b != nil {
 		appendUnique(&out.SystemServices, b.SystemServices)
 		appendUnique(&out.Protocols, b.Protocols)
+		appendUnique(&out.systemServicesExcept, b.systemServicesExcept)
+		appendUnique(&out.protocolsExcept, b.protocolsExcept)
 	}
+	out.SystemServices = hostInboundFilterExcept(out.SystemServices, out.systemServicesExcept, false)
+	out.Protocols = hostInboundFilterExcept(out.Protocols, out.protocolsExcept, true)
 	return out
 }
 
