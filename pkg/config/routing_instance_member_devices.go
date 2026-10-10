@@ -353,8 +353,8 @@ type routingInstanceTunnelDeviceClaim struct {
 // tunnel routing-instance claims in sorted interface/unit order, using each
 // tunnel's compiled Linux device name verbatim: the compiler assigns shared
 // WireGuard units the parent name and mode-overriding units their distinct uN
-// name. The conflict detector and the membership-owner map share this one
-// traversal so both agree on claim identity and order (#11310).
+// name. The conflict detector and membership-owner map share this traversal
+// so they agree on claim identity and order (#11310).
 func routingInstanceTunnelDeviceClaims(cfg *Config) []routingInstanceTunnelDeviceClaim {
 	if cfg == nil {
 		return nil
@@ -393,6 +393,125 @@ func routingInstanceTunnelDeviceClaims(cfg *Config) []routingInstanceTunnelDevic
 		}
 	}
 	return out
+}
+
+// ForEachRoutingInstanceInterfaceMembership visits effective interface-row
+// owners in stable order. Userspace snapshots and strict zone validation share
+// this traversal, including tunnel siblings and common ownership filters.
+func ForEachRoutingInstanceInterfaceMembership(cfg *Config, visit func(instance, key string)) {
+	if cfg == nil || visit == nil {
+		return
+	}
+	type memberKeys struct {
+		instance string
+		keys     []RoutingInstanceMemberDeviceKey
+	}
+	tunnelNames := cfg.TunnelNameMap()
+	dualClaimed := RoutingInstanceDualClaimedLinuxNames(cfg, tunnelNames)
+	members := make([]memberKeys, 0)
+	activeInstances := make(map[string]struct{})
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.Name == "" || ri.InstanceType == "forwarding" {
+			continue
+		}
+		activeInstances[ri.Name] = struct{}{}
+		for _, member := range ri.Interfaces {
+			keys := RoutingInstanceMemberDeviceKeys(cfg, tunnelNames, member)
+			if len(keys) != 0 {
+				members = append(members, memberKeys{instance: ri.Name, keys: keys})
+			}
+		}
+		for _, claim := range cfg.QuarantinedRIMemberPrimaryClaims {
+			if claim.Instance == ri.Name && claim.InterfaceKey != "" && claim.LinuxName != "" {
+				members = append(members, memberKeys{instance: ri.Name, keys: []RoutingInstanceMemberDeviceKey{{
+					InterfaceKey: claim.InterfaceKey, LinuxName: claim.LinuxName,
+				}}})
+			}
+		}
+	}
+
+	rowKeysByLinuxName := make(map[string][]RoutingInstanceMemberDeviceKey)
+	interfaceNames := make([]string, 0, len(cfg.Interfaces.Interfaces))
+	for name := range cfg.Interfaces.Interfaces {
+		interfaceNames = append(interfaceNames, name)
+	}
+	sort.Strings(interfaceNames)
+	for _, name := range interfaceNames {
+		for _, key := range RoutingInstanceMemberDeviceKeys(cfg, tunnelNames, name) {
+			if key.LinuxName != "" {
+				rowKeysByLinuxName[key.LinuxName] = append(rowKeysByLinuxName[key.LinuxName], key)
+			}
+		}
+	}
+	tunnelLinuxNames := make(map[string]struct{}, len(tunnelNames))
+	for _, name := range tunnelNames {
+		if name != "" {
+			tunnelLinuxNames[name] = struct{}{}
+		}
+	}
+
+	assigned := make(map[string]struct{})
+	seen := make(map[string]struct{})
+	for pass := range 2 {
+		for _, member := range members {
+			if pass == 0 {
+				primary := member.keys[0]
+				seen[primary.InterfaceKey] = struct{}{}
+				if !dualClaimed[primary.LinuxName] {
+					visit(member.instance, primary.InterfaceKey)
+					assigned[member.instance+"\x00"+primary.InterfaceKey] = struct{}{}
+				}
+				continue
+			}
+			for _, key := range member.keys[1:] {
+				if !key.Fanout {
+					continue
+				}
+				if _, exists := seen[key.InterfaceKey]; exists {
+					continue
+				}
+				seen[key.InterfaceKey] = struct{}{}
+				if !dualClaimed[key.LinuxName] {
+					visit(member.instance, key.InterfaceKey)
+					assigned[member.instance+"\x00"+key.InterfaceKey] = struct{}{}
+				}
+			}
+		}
+	}
+	for _, member := range members {
+		for _, key := range member.keys {
+			if key.LinuxName == "" || dualClaimed[key.LinuxName] {
+				continue
+			}
+			if _, isTunnel := tunnelLinuxNames[key.LinuxName]; !isTunnel {
+				continue
+			}
+			for _, rowKey := range rowKeysByLinuxName[key.LinuxName] {
+				identity := member.instance + "\x00" + rowKey.InterfaceKey
+				if _, exists := assigned[identity]; exists {
+					continue
+				}
+				assigned[identity] = struct{}{}
+				visit(member.instance, rowKey.InterfaceKey)
+			}
+		}
+	}
+	for _, claim := range routingInstanceTunnelDeviceClaims(cfg) {
+		if claim.LinuxName == "" || dualClaimed[claim.LinuxName] {
+			continue
+		}
+		if _, exists := activeInstances[claim.Instance]; !exists {
+			continue
+		}
+		for _, key := range rowKeysByLinuxName[claim.LinuxName] {
+			identity := claim.Instance + "\x00" + key.InterfaceKey
+			if _, exists := assigned[identity]; exists {
+				continue
+			}
+			assigned[identity] = struct{}{}
+			visit(claim.Instance, key.InterfaceKey)
+		}
+	}
 }
 
 // RoutingInstanceMemberDeviceConflicts finds every Linux device claimed by

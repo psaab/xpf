@@ -980,63 +980,11 @@ func canonicalRoutePrefix(s string) string {
 // #11312: forwarding instances have no VRF device; skip their member keys so
 // tolerant loads keep connected routes and ingress scope in the kernel's
 // default instance. Strict config commits reject the unsupported membership.
+// #12082: tunnel routing-instance stanzas and list membership both own the
+// resolved Linux device. Attribute every snapshot row resolving to that
+// device after the list pass, using the same #11060 contested-device filter.
 func forEachRoutingInstanceInterfaceKey(cfg *config.Config, bind func(riName, key string)) {
-	if cfg == nil {
-		return
-	}
-	type memberKeys struct {
-		riName string
-		keys   []config.RoutingInstanceMemberDeviceKey
-	}
-	tunnelNames := cfg.TunnelNameMap()
-	dualClaimed := config.RoutingInstanceDualClaimedLinuxNames(cfg, tunnelNames)
-	members := make([]memberKeys, 0)
-	for _, ri := range cfg.RoutingInstances {
-		if ri == nil || ri.Name == "" {
-			continue
-		}
-		if ri.InstanceType == "forwarding" {
-			continue
-		}
-		for _, member := range ri.Interfaces {
-			keys := config.RoutingInstanceMemberDeviceKeys(cfg, tunnelNames, member)
-			if len(keys) != 0 {
-				members = append(members, memberKeys{riName: ri.Name, keys: keys})
-			}
-		}
-		for _, claim := range cfg.QuarantinedRIMemberPrimaryClaims {
-			if claim.Instance == ri.Name && claim.InterfaceKey != "" && claim.LinuxName != "" {
-				members = append(members, memberKeys{riName: ri.Name, keys: []config.RoutingInstanceMemberDeviceKey{{
-					InterfaceKey: claim.InterfaceKey, LinuxName: claim.LinuxName,
-				}}})
-			}
-		}
-	}
-	seen := make(map[string]struct{})
-	for pass := range 2 {
-		for _, member := range members {
-			if pass == 0 {
-				primary := member.keys[0]
-				seen[primary.InterfaceKey] = struct{}{}
-				if !dualClaimed[primary.LinuxName] {
-					bind(member.riName, primary.InterfaceKey)
-				}
-				continue
-			}
-			for _, key := range member.keys[1:] {
-				if !key.Fanout {
-					continue
-				}
-				if _, exists := seen[key.InterfaceKey]; exists {
-					continue
-				}
-				seen[key.InterfaceKey] = struct{}{}
-				if !dualClaimed[key.LinuxName] {
-					bind(member.riName, key.InterfaceKey)
-				}
-			}
-		}
-	}
+	config.ForEachRoutingInstanceInterfaceMembership(cfg, bind)
 }
 
 func buildInterfaceRouteTables(cfg *config.Config) (map[string]string, map[string]string) {
