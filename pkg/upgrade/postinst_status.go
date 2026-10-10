@@ -16,6 +16,12 @@ import (
 // deliberately lives under /var/lib/xpf rather than /run, which is tmpfs.
 const DefaultBinaryUpgradeStatusPath = "/var/lib/xpf/upgrade-deferred"
 
+// DefaultBinaryUpgradeStatusUnreadablePath is a durable fail-closed signal
+// written under dpkg's package metadata directory when the primary status
+// record cannot be persisted. Its presence prevents readers from reporting a
+// clean state after postinst returned with an unresolved cut.
+const DefaultBinaryUpgradeStatusUnreadablePath = "/var/lib/dpkg/info/xpf.upgrade-deferred-unreadable"
+
 // BinaryUpgradeStatus is the operator-facing snapshot of a nonfatal postinst
 // publish/cut failure. A zero value means no failure is pending.
 type BinaryUpgradeStatus struct {
@@ -32,8 +38,24 @@ type BinaryUpgradeStatus struct {
 // record is the ordinary state; malformed or unreadable records are reported
 // rather than being mistaken for no pending upgrade.
 func ReadBinaryUpgradeStatus(path string) BinaryUpgradeStatus {
+	return readBinaryUpgradeStatus(path, DefaultBinaryUpgradeStatusUnreadablePath)
+}
+
+func readBinaryUpgradeStatus(path, unreadablePath string) BinaryUpgradeStatus {
 	if path == "" {
 		path = DefaultBinaryUpgradeStatusPath
+	}
+	if unreadablePath != "" {
+		_, markerErr := os.Stat(unreadablePath)
+		if markerErr == nil {
+			return BinaryUpgradeStatus{ReadErr: fmt.Errorf(
+				"postinst could not persist binary upgrade status (durable marker %s is present)",
+				unreadablePath)}
+		}
+		if !errors.Is(markerErr, os.ErrNotExist) {
+			return BinaryUpgradeStatus{ReadErr: fmt.Errorf(
+				"check durable binary upgrade status marker %s: %w", unreadablePath, markerErr)}
+		}
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -120,7 +142,27 @@ func ClearBinaryUpgradeStatus(path string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("clear binary upgrade status %s: %w", path, err)
 	}
-	dir, err := os.Open(filepath.Dir(path))
+	markerRemoved := false
+	if err := os.Remove(DefaultBinaryUpgradeStatusUnreadablePath); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("clear durable binary upgrade status marker: %w", err)
+		}
+	} else {
+		markerRemoved = true
+	}
+	if err := syncStatusDirectory(filepath.Dir(path)); err != nil {
+		return err
+	}
+	if markerRemoved && filepath.Dir(path) != filepath.Dir(DefaultBinaryUpgradeStatusUnreadablePath) {
+		if err := syncStatusDirectory(filepath.Dir(DefaultBinaryUpgradeStatusUnreadablePath)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func syncStatusDirectory(path string) error {
+	dir, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -132,6 +174,40 @@ func ClearBinaryUpgradeStatus(path string) error {
 		return fmt.Errorf("sync binary upgrade status directory: %w", err)
 	}
 	return nil
+}
+
+// ClearBinaryUpgradeStatusIfCurrent removes a postinst failure record only
+// when its staged version is the version currently committed by the cutover.
+// The upgrade lock serializes the current-link check and clear against other
+// cutovers. A missing, unreadable, or mismatched record is left untouched.
+func (r *Runner) ClearBinaryUpgradeStatusIfCurrent(path string) (bool, error) {
+	if r == nil {
+		return false, fmt.Errorf("clear binary upgrade status: nil runner")
+	}
+	h, err := acquireUpgradeLock("upgrade status clear", "")
+	if err != nil {
+		return false, fmt.Errorf("clear binary upgrade status: %w", err)
+	}
+	defer func() { _ = h.Release() }()
+
+	status := ReadBinaryUpgradeStatus(path)
+	if status.ReadErr != nil {
+		return false, status.ReadErr
+	}
+	if !status.Recorded {
+		return false, nil
+	}
+	current, err := r.readCurrentVersion()
+	if err != nil {
+		return false, fmt.Errorf("read committed version before clearing binary upgrade status: %w", err)
+	}
+	if current == "" || status.StagedVersion != current {
+		return false, nil
+	}
+	if err := ClearBinaryUpgradeStatus(path); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // RenderBinaryUpgradeStatus writes the read-only operator status for deferred

@@ -5,15 +5,15 @@ import (
 	"testing"
 )
 
-func TestHealthSurfacesStagedVersusRunningBinaryUpgrade12143(t *testing.T) {
+func TestHealthReportsOnlyNonSensitiveBinaryUpgradeStatus12143(t *testing.T) {
 	server := NewServer(Config{
 		Store: newConfigStore(t, t.TempDir()+"/xpf.conf"),
 		BinaryUpgradeStatusFn: func() BinaryUpgradeStatusSnapshot {
 			return BinaryUpgradeStatusSnapshot{
 				Readable:       true,
 				Pending:        true,
-				StagedVersion:  "v2",
-				RunningVersion: "v1",
+				StagedVersion:  "sensitive-staged-build",
+				RunningVersion: "sensitive-running-build",
 				Reason:         "cut-failed",
 				RecordedAtUnix: 1791460800,
 			}
@@ -31,17 +31,16 @@ func TestHealthSurfacesStagedVersusRunningBinaryUpgrade12143(t *testing.T) {
 	if pending, _ := data["binary_upgrade_pending"].(bool); !pending {
 		t.Errorf("binary_upgrade_pending = %v, want true", data["binary_upgrade_pending"])
 	}
-	for key, want := range map[string]string{
-		"binary_upgrade_staged_version":  "v2",
-		"binary_upgrade_running_version": "v1",
-		"binary_upgrade_failure":         "cut-failed",
-	} {
-		if got, _ := data[key].(string); got != want {
-			t.Errorf("%s = %q, want %q", key, got, want)
-		}
+	if got, _ := data["binary_upgrade_failure"].(string); got != "cut-failed" {
+		t.Errorf("binary_upgrade_failure = %q, want stable reason code cut-failed", got)
 	}
 	if at, _ := data["binary_upgrade_recorded_at_unix"].(float64); at != 1791460800 {
 		t.Errorf("binary_upgrade_recorded_at_unix = %v, want 1791460800", data["binary_upgrade_recorded_at_unix"])
+	}
+	for _, key := range []string{"binary_upgrade_staged_version", "binary_upgrade_running_version"} {
+		if _, present := data[key]; present {
+			t.Errorf("%s must not disclose an exact build version on unauthenticated /health", key)
+		}
 	}
 }
 

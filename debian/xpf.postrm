@@ -69,6 +69,8 @@ CURRENT="$VERSIONS/current"
 # removes it. We must remove it on purge (else an orphan dir survives, a Policy
 # violation) and on a pre-B downgrade (the old postrm never learns about it).
 STAGED_GEN=/var/lib/xpf/staged-gen
+XPF_UPGRADE_STATUS=/var/lib/xpf/upgrade-deferred
+XPF_UPGRADE_STATUS_UNREADABLE=/var/lib/dpkg/info/xpf.upgrade-deferred-unreadable
 DROPIN=/etc/systemd/system/xpfd.service.d/10-xpf-version.conf
 # #10758/#10751 legacy Requires-link cleanup. Both boot-fence units use
 # RequiredBy=systemd-networkd.service, creating links under /etc/systemd.
@@ -336,12 +338,13 @@ case "$1" in
         remove_install_sh_apt_source
         remove_install_sh_apt_pin
         if [ "$1" = "purge" ]; then
-            # versions/ and staged-gen/ are package-derived (copied binaries),
-            # not operator config — remove the whole trees on purge. staged-gen/
-            # (#1981) is a never-recorded runtime dir, so dpkg's own cleanup
-            # never touches it; an orphan would survive purge (Policy 6.8).
+            # versions/, staged-gen/, and postinst status files are
+            # package-derived runtime artifacts, not operator configuration.
+            # Remove pid temps left by a killed atomic status writer too.
             rm -rf "$VERSIONS"
             rm -rf "$STAGED_GEN"
+            rm -f "$XPF_UPGRADE_STATUS" "$XPF_UPGRADE_STATUS".*
+            rm -f "$XPF_UPGRADE_STATUS_UNREADABLE"
         fi
         ;;
     upgrade)

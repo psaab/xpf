@@ -74,6 +74,46 @@ func TestBinaryUpgradeStatusDistinguishesMissingFromUnreadable12143(t *testing.T
 	}
 }
 
+func TestBinaryUpgradeStatusUnreadableFallbackNeverLooksClean12143(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "upgrade-deferred")
+	fallback := filepath.Join(dir, "upgrade-deferred-unreadable")
+	if err := os.WriteFile(fallback, []byte("status=unreadable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, durableExists := range []bool{false, true} {
+		if durableExists {
+			writeBinaryUpgradeStatus12143(t, path)
+		} else if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		status := readBinaryUpgradeStatus(path, fallback)
+		if status.ReadErr == nil || status.Recorded {
+			t.Fatalf("durableExists=%v: status = %+v, want unreadable/unknown", durableExists, status)
+		}
+	}
+}
+
+func TestBinaryUpgradeStatusAcceptsPostinstTimestampFallback12143(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "upgrade-deferred")
+	data := "format=1\n" +
+		"staged_version=v2\n" +
+		"running_version=v1\n" +
+		"reason=cut-failed\n" +
+		"recovery=xpfd upgrade\n" +
+		"recorded_at=1970-01-01T00:00:00Z\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status := ReadBinaryUpgradeStatus(path)
+	if status.ReadErr != nil || !status.Recorded {
+		t.Fatalf("fallback timestamp record = %+v, want accepted status", status)
+	}
+	if want := time.Unix(0, 0).UTC(); !status.RecordedAt.Equal(want) {
+		t.Errorf("RecordedAt = %s, want %s", status.RecordedAt, want)
+	}
+}
+
 func TestClearBinaryUpgradeStatusRemovesResolvedFailure12143(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "upgrade-deferred")
 	writeBinaryUpgradeStatus12143(t, path)

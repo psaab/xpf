@@ -61,7 +61,7 @@ func runUpgradeSubcommand(args []string) {
 				os.Exit(1)
 			}
 			fmt.Println("rolling rollback complete")
-			clearBinaryUpgradeStatus()
+			clearBinaryUpgradeStatus(r)
 			return
 		}
 		if err := r.RollbackTo(flags.target, upgrade.RollbackOptions{}); err != nil {
@@ -69,7 +69,7 @@ func runUpgradeSubcommand(args []string) {
 			os.Exit(1)
 		}
 		fmt.Println("rollback complete")
-		clearBinaryUpgradeStatus()
+		clearBinaryUpgradeStatus(r)
 		return
 	}
 
@@ -79,7 +79,7 @@ func runUpgradeSubcommand(args []string) {
 			os.Exit(1)
 		}
 		fmt.Println("rolling upgrade complete")
-		clearBinaryUpgradeStatus()
+		clearBinaryUpgradeStatus(r)
 		return
 	}
 
@@ -121,12 +121,23 @@ func runUpgradeSubcommand(args []string) {
 		os.Exit(1)
 	}
 	fmt.Println("upgrade complete")
-	clearBinaryUpgradeStatus()
+	clearBinaryUpgradeStatus(r)
 }
 
-func clearBinaryUpgradeStatus() {
-	if err := upgrade.ClearBinaryUpgradeStatus(binaryUpgradeStatusPath); err != nil {
-		fmt.Fprintf(os.Stderr, "upgrade: WARNING could not clear resolved postinst status: %v\n", err)
+func clearBinaryUpgradeStatus(r *upgrade.Runner) {
+	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(binaryUpgradeStatusPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "upgrade: WARNING could not verify resolved postinst status: %v\n", err)
+		return
+	}
+	if !cleared {
+		status := upgrade.ReadBinaryUpgradeStatus(binaryUpgradeStatusPath)
+		if status.ReadErr != nil {
+			fmt.Fprintf(os.Stderr, "upgrade: WARNING unresolved postinst status is unreadable: %v\n", status.ReadErr)
+		} else if status.Recorded {
+			fmt.Fprintf(os.Stderr, "upgrade: WARNING retaining unresolved postinst status for staged version %s; it does not match the committed version\n",
+				status.StagedVersion)
+		}
 	}
 }
 

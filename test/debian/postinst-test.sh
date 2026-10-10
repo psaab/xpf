@@ -19,10 +19,9 @@ POSTINST="${1:-$HERE/../../debian/xpf.postinst}"
 
 BINS="xpfd cli xpf-userspace-dp xpf-day0-config"
 
-# Run the REAL postinst with overridden absolute path vars by editing the
-# script's var assignments + CURRENT_DIR to point under a temp ROOT, and
-# neutralizing the side-effecting #DEBHELPER# / systemctl bits that a unit
-# test must not trigger. We generate a patched copy per scenario.
+# Run the REAL postinst with rewritten filesystem paths under a temp ROOT.
+# Keep the production systemd-directory condition intact and exercise its true
+# branch with fake systemctl and a hermetic /proc/<pid>/exe symlink.
 patched_postinst() {
     sed \
       -e "s#^STAGED=.*#STAGED=$ROOT/usr/local/share/xpf/staged#" \
@@ -30,10 +29,12 @@ patched_postinst() {
       -e "s#^XPF_RUN_DIR=.*#XPF_RUN_DIR=$ROOT/run/xpf#" \
       -e "s#^XPF_VERSIONS_DIR=.*#XPF_VERSIONS_DIR=$ROOT/var/lib/xpf/versions#" \
       -e "s#^XPF_UPGRADE_STATUS=.*#XPF_UPGRADE_STATUS=$ROOT/var/lib/xpf/upgrade-deferred#" \
+      -e "s#^XPF_UPGRADE_STATUS_UNREADABLE=.*#XPF_UPGRADE_STATUS_UNREADABLE=$ROOT/var/lib/dpkg/info/xpf.upgrade-deferred-unreadable#" \
+      -e "s#^XPF_PROC_DIR=.*#XPF_PROC_DIR=$ROOT/proc#" \
       -e "s#^\([[:space:]]*\)CURRENT_DIR=.*#\1CURRENT_DIR=$ROOT/var/lib/xpf/versions/current#" \
       -e "s#/run/xpf/upgrade.lock#$ROOT/run/xpf/upgrade.lock#g" \
       -e "s#/etc/xpf/node-id#$ROOT/etc/xpf/node-id#g" \
-      -e "s#\\[ -d /run/systemd/system \\]#false#g" \
+      -e "s#/run/systemd/system#$ROOT/run/systemd/system#g" \
       "$POSTINST" > "$ROOT/postinst"
     chmod +x "$ROOT/postinst"
     [ "$(grep -E '^STAGED=' "$ROOT/postinst" || true)" = "STAGED=$ROOT/usr/local/share/xpf/staged" ] || {
@@ -44,8 +45,12 @@ patched_postinst() {
         echo "FAIL: patched postinst missing rewritten XPF_RUN_DIR assignment"; exit 1; }
     [ "$(grep -E '^XPF_UPGRADE_STATUS=' "$ROOT/postinst" || true)" = "XPF_UPGRADE_STATUS=$ROOT/var/lib/xpf/upgrade-deferred" ] || {
         echo "FAIL: patched postinst missing rewritten durable upgrade-status path"; exit 1; }
+    [ "$(grep -E '^XPF_UPGRADE_STATUS_UNREADABLE=' "$ROOT/postinst" || true)" = "XPF_UPGRADE_STATUS_UNREADABLE=$ROOT/var/lib/dpkg/info/xpf.upgrade-deferred-unreadable" ] || {
+        echo "FAIL: patched postinst missing rewritten durable unreadable-status path"; exit 1; }
     [ "$(grep -E '^XPF_VERSIONS_DIR=' "$ROOT/postinst" || true)" = "XPF_VERSIONS_DIR=$ROOT/var/lib/xpf/versions" ] || {
         echo "FAIL: patched postinst missing rewritten versions path"; exit 1; }
+    [ "$(grep -E '^XPF_PROC_DIR=' "$ROOT/postinst" || true)" = "XPF_PROC_DIR=$ROOT/proc" ] || {
+        echo "FAIL: patched postinst missing rewritten proc path"; exit 1; }
     current_line=$(grep -E '^[[:space:]]*CURRENT_DIR=' "$ROOT/postinst" || true)
     case "$current_line" in
         *"CURRENT_DIR=$ROOT/var/lib/xpf/versions/current") ;;
@@ -53,8 +58,8 @@ patched_postinst() {
     esac
     grep -Fqx "            elif [ -f $ROOT/etc/xpf/node-id ]; then" "$ROOT/postinst" || {
         echo "FAIL: patched postinst missing rewritten node-id gate"; exit 1; }
-    grep -Fqx "                    if false && ! systemctl is-active --quiet xpfd; then" "$ROOT/postinst" || {
-        echo "FAIL: patched postinst missing neutralized systemd gate"; exit 1; }
+    grep -Fq "[ -d $ROOT/run/systemd/system ] && ! systemctl is-active --quiet xpfd" "$ROOT/postinst" || {
+        echo "FAIL: patched postinst altered the production systemd-directory check"; exit 1; }
 }
 
 run_scenario() {
@@ -401,9 +406,9 @@ scenario_oldbug_repairs_to_staged_proves_nontautology() {
 # first-install branch must start the barrier live (dh_installsystemd
 # --no-start only stages it for next boot).
 patched_postinst_barrier_live() {
-    # Standard rewrites neutralize every systemd gate; re-arm ONLY the
-    # barrier gate (unique: it tests $SBIN/xpfd executability).
-    sed -i 's|if false && \[ -x "\$SBIN/xpfd" \]; then # 10751-BARRIER-GATE|if true; then # 10751-BARRIER-GATE|' "$ROOT/postinst"
+    # Re-arm ONLY the barrier gate; the path rewrite leaves the production
+    # systemd-directory predicate intact but no fixture directory exists here.
+    sed -i 's|^            if \[ -d .*/run/systemd/system \] && \[ -x "\$SBIN/xpfd" \]; then # 10751-BARRIER-GATE|            if true; then # 10751-BARRIER-GATE|' "$ROOT/postinst"
     grep -Fq 'if true; then # 10751-BARRIER-GATE' "$ROOT/postinst" || {
         echo "FAIL: barrier gate re-arm did not match (postinst drift?)"; exit 1; }
     NFT_TABLE_PRESENT=no
@@ -688,7 +693,14 @@ run_failure_case() {
     cut_rc=$3
     lock_mode=$4
     stage_only=$5
-    mkdir -p "$STAGED" "$SBIN" "$VERSIONS/v1" "$ROOT/etc/xpf" "$ROOT/run/xpf" "$ROOT/bin"
+    cut_mode=$6
+    systemd_mode=$7
+    date_mode=$8
+    sync_mode=$9
+    staged_version=${10}
+    [ -n "$staged_version" ] || staged_version=v2
+    mkdir -p "$STAGED" "$SBIN" "$VERSIONS/v1" "$ROOT/etc/xpf" \
+        "$ROOT/run/xpf" "$ROOT/bin" "$ROOT/var/lib/xpf" "$ROOT/var/lib/dpkg/info"
     : > "$ROOT/run/xpf/upgrade.lock"
     cat > "$VERSIONS/v1/xpfd" <<'EOF'
 #!/bin/sh
@@ -705,9 +717,15 @@ EOF
     cat > "$STAGED/xpfd" <<'EOF'
 #!/bin/sh
 case "$1" in
-    version) echo "xpfd v2 (staged)" ;;
+    version) echo "xpfd ${POSTINST_STAGE_VERSION:-v2} (staged)" ;;
     publish-generation) exit "${POSTINST_PUBLISH_RC:-0}" ;;
-    upgrade) exit "${POSTINST_CUT_RC:-0}" ;;
+    upgrade)
+        if [ "${POSTINST_CUT_RC:-0}" = 0 ] &&
+           [ "${POSTINST_KEEP_CURRENT:-0}" != 1 ]; then
+            ln -sfn "${POSTINST_STAGE_VERSION:-v2}" "$POSTINST_CURRENT"
+        fi
+        exit "${POSTINST_CUT_RC:-0}"
+        ;;
     *) exit 9 ;;
 esac
 EOF
@@ -728,34 +746,94 @@ esac
 exit 0
 EOF
     chmod +x "$ROOT/bin/flock"
+    cat > "$ROOT/bin/date" <<'EOF'
+#!/bin/sh
+[ "${POSTINST_DATE_FAIL:-0}" = 1 ] && exit 1
+exec /usr/bin/date "$@"
+EOF
+    chmod +x "$ROOT/bin/date"
+    cat > "$ROOT/bin/sync" <<'EOF'
+#!/bin/sh
+case "${POSTINST_SYNC_FAIL:-}" in
+    file) case "$2" in *upgrade-deferred.*) exit 1 ;; esac ;;
+    dir) [ "$2" = "$POSTINST_STATUS_DIR" ] && exit 1 ;;
+esac
+exec /usr/bin/sync "$@"
+EOF
+    chmod +x "$ROOT/bin/sync"
 
+    if [ "$systemd_mode" = present ]; then
+        mkdir -p "$ROOT/run/systemd/system" "$ROOT/proc/1234"
+        ln -s "$VERSIONS/v1/xpfd" "$ROOT/proc/1234/exe"
+        cat > "$ROOT/bin/systemctl" <<'EOF'
+#!/bin/sh
+case "$1" in
+    show) echo 1234 ;;
+    is-active|start) exit 0 ;;
+    *) exit 1 ;;
+esac
+EOF
+        chmod +x "$ROOT/bin/systemctl"
+    fi
+
+    if [ "$stage_only" = orphan ]; then
+        printf 'partial\n' > "$ROOT/var/lib/xpf/upgrade-deferred.999"
+        touch -t 202001010000 "$ROOT/var/lib/xpf/upgrade-deferred.999"
+        printf 'active\n' > "$ROOT/var/lib/xpf/upgrade-deferred.998"
+    fi
     saved_path=$PATH
     PATH="$ROOT/bin:$PATH"
     POSTINST_PUBLISH_RC=$publish_rc
     POSTINST_CUT_RC=$cut_rc
     POSTINST_LOCK_MODE=$lock_mode
     POSTINST_LOCK_COUNT="$ROOT/flock-count"
+    POSTINST_CURRENT=$CURRENT
+    POSTINST_STAGE_VERSION=$staged_version
+    POSTINST_DATE_FAIL=
+    POSTINST_SYNC_FAIL=$sync_mode
+    POSTINST_STATUS_DIR="$ROOT/var/lib/xpf"
+    POSTINST_KEEP_CURRENT=
+    [ "$date_mode" != fail ] || POSTINST_DATE_FAIL=1
+    [ "$cut_mode" != keep ] || POSTINST_KEEP_CURRENT=1
     export PATH POSTINST_PUBLISH_RC POSTINST_CUT_RC POSTINST_LOCK_MODE POSTINST_LOCK_COUNT
+    export POSTINST_CURRENT POSTINST_STAGE_VERSION POSTINST_DATE_FAIL POSTINST_SYNC_FAIL
+    export POSTINST_STATUS_DIR POSTINST_KEEP_CURRENT
     if [ "$stage_only" = manual ]; then
         XPF_NO_POSTINST_CUT=1
         export XPF_NO_POSTINST_CUT
     fi
     status_file="$ROOT/var/lib/xpf/upgrade-deferred"
+    fallback_file="$ROOT/var/lib/dpkg/info/xpf.upgrade-deferred-unreadable"
     if [ "$stage_only" = clear ]; then
         printf 'previous failure\n' > "$status_file"
     fi
-    "$ROOT/postinst" configure v1
+    "$ROOT/postinst" configure v1 2>"$ROOT/postinst.log"
+    if [ "$expected_reason" = unreadable ]; then
+        [ ! -e "$status_file" ] || {
+            echo "FAIL: pre-rename status-write failure unexpectedly installed a durable record"; exit 1; }
+        [ -f "$fallback_file" ] || {
+            echo "FAIL: unwritable durable status did not leave an unreadable fallback marker"; exit 1; }
+        grep -Fq 'could not write and sync staged-vs-running upgrade status' "$ROOT/postinst.log" || {
+            echo "FAIL: missing warning for a failed status write"; exit 1; }
+        PATH=$saved_path
+        unset POSTINST_PUBLISH_RC POSTINST_CUT_RC POSTINST_LOCK_MODE POSTINST_LOCK_COUNT \
+            POSTINST_CURRENT POSTINST_STAGE_VERSION POSTINST_DATE_FAIL POSTINST_SYNC_FAIL \
+            POSTINST_STATUS_DIR POSTINST_KEEP_CURRENT XPF_NO_POSTINST_CUT
+        return
+    fi
     if [ -z "$expected_reason" ]; then
         [ ! -e "$status_file" ] || {
             if [ "$stage_only" = manual ]; then
                 echo "FAIL: intentional manual stage-only recorded a failure"
             else
-                echo "FAIL: successful cut did not clear the previous status"
+                echo "FAIL: successful/resolved cut did not clear the previous status"
             fi
             exit 1
         }
         PATH=$saved_path
-        unset POSTINST_PUBLISH_RC POSTINST_CUT_RC POSTINST_LOCK_MODE POSTINST_LOCK_COUNT XPF_NO_POSTINST_CUT
+        unset POSTINST_PUBLISH_RC POSTINST_CUT_RC POSTINST_LOCK_MODE POSTINST_LOCK_COUNT \
+            POSTINST_CURRENT POSTINST_STAGE_VERSION POSTINST_DATE_FAIL POSTINST_SYNC_FAIL \
+            POSTINST_STATUS_DIR POSTINST_KEEP_CURRENT XPF_NO_POSTINST_CUT
         return
     fi
     [ -f "$status_file" ] || {
@@ -765,18 +843,36 @@ EOF
         echo "FAIL: durable status mode is $mode, want 600"; exit 1; }
     grep -Fqx 'format=1' "$status_file" || {
         echo "FAIL: durable status has no supported format"; exit 1; }
-    grep -Fqx 'staged_version=v2' "$status_file" || {
-        echo "FAIL: durable status did not record staged version v2"; exit 1; }
-    grep -Fqx 'running_version=unknown' "$status_file" || {
-        echo "FAIL: durable status did not avoid guessing a non-live version"; exit 1; }
+    grep -Fqx "staged_version=$staged_version" "$status_file" || {
+        echo "FAIL: durable status did not record staged version $staged_version"; exit 1; }
+    expected_running=unknown
+    [ "$systemd_mode" != present ] || expected_running=v1
+    grep -Fqx "running_version=$expected_running" "$status_file" || {
+        echo "FAIL: durable status running version differs from $expected_running"; exit 1; }
     grep -Fqx "reason=$expected_reason" "$status_file" || {
         echo "FAIL: durable status reason is not $expected_reason"; exit 1; }
     grep -Eq '^recorded_at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$status_file" || {
-        echo "FAIL: durable status has no UTC recording time"; exit 1; }
-    [ ! -e "$ROOT/run/xpf/upgrade-deferred" ] || {
-        echo "FAIL: deferred status was written only to volatile /run"; exit 1; }
+        echo "FAIL: durable status has no reader-accepted UTC recording time"; exit 1; }
+    [ ! -e "$fallback_file" ] || {
+        echo "FAIL: unreadable fallback remains after the durable record was synced"; exit 1; }
+    if [ "$date_mode" = fail ]; then
+        grep -Fqx 'recorded_at=1970-01-01T00:00:00Z' "$status_file" || {
+            echo "FAIL: date failure did not use the reader-accepted fallback timestamp"; exit 1; }
+    fi
+    if [ "$sync_mode" = dir ]; then
+        grep -Fq 'upgrade status is present but directory sync failed; durability across a crash is uncertain' "$ROOT/postinst.log" || {
+            echo "FAIL: directory-sync warning did not describe the surviving record's durability risk"; exit 1; }
+    fi
+    if [ "$stage_only" = orphan ]; then
+        [ ! -e "$ROOT/var/lib/xpf/upgrade-deferred.999" ] || {
+            echo "FAIL: expired pid temp survived the 24h orphan sweep"; exit 1; }
+        [ -e "$ROOT/var/lib/xpf/upgrade-deferred.998" ] || {
+            echo "FAIL: recent temp was swept while potentially active"; exit 1; }
+    fi
     PATH=$saved_path
-    unset POSTINST_PUBLISH_RC POSTINST_CUT_RC POSTINST_LOCK_MODE POSTINST_LOCK_COUNT
+    unset POSTINST_PUBLISH_RC POSTINST_CUT_RC POSTINST_LOCK_MODE POSTINST_LOCK_COUNT \
+        POSTINST_CURRENT POSTINST_STAGE_VERSION POSTINST_DATE_FAIL POSTINST_SYNC_FAIL \
+        POSTINST_STATUS_DIR POSTINST_KEEP_CURRENT XPF_NO_POSTINST_CUT
 }
 
 scenario_publish_failure_records_durable_status() {
@@ -807,6 +903,34 @@ scenario_successful_cut_clears_durable_status() {
     run_failure_case "" 0 0 free clear
 }
 
+scenario_exit_zero_without_current_match_records_failure() {
+    run_failure_case cut-failed 0 0 free "" keep "" "" "" v3
+}
+
+scenario_same_version_reinstall_does_not_record_false_pending() {
+    run_failure_case "" 0 1 free "" "" present "" "" v1
+}
+
+scenario_live_systemd_version_capture_is_enabled() {
+    run_failure_case cut-failed 0 1 free "" "" present
+}
+
+scenario_unwritable_record_leaves_unreadable_fallback() {
+    run_failure_case unreadable 0 1 free "" "" "" "" file
+}
+
+scenario_recorded_at_fallback_is_reader_accepted() {
+    run_failure_case cut-failed 0 1 free "" "" fail
+}
+
+scenario_directory_sync_warning_describes_durability_risk() {
+    run_failure_case cut-failed 0 1 free "" "" "" "" dir
+}
+
+scenario_old_pid_temps_are_swept_after_ttl() {
+    run_failure_case cut-failed 0 1 free orphan
+}
+
 run_scenario first_install_configure_empty_seeds_layout
 run_scenario first_install_seed_failure_falls_back_to_staged
 run_scenario first_install_killed_during_seed_keeps_launch_links
@@ -826,6 +950,13 @@ run_scenario leaves_existing_and_dangling_links
 run_scenario new_managed_binary_stays_absent
 run_scenario legacy_no_current_leaves_absent
 run_scenario oldbug_repairs_to_staged_proves_nontautology
+run_scenario exit_zero_without_current_match_records_failure
+run_scenario same_version_reinstall_does_not_record_false_pending
+run_scenario live_systemd_version_capture_is_enabled
+run_scenario unwritable_record_leaves_unreadable_fallback
+run_scenario recorded_at_fallback_is_reader_accepted
+run_scenario directory_sync_warning_describes_durability_risk
+run_scenario old_pid_temps_are_swept_after_ttl
 run_scenario publish_failure_records_durable_status
 run_scenario publish_lock_busy_records_durable_status
 run_scenario cut_failure_records_durable_status

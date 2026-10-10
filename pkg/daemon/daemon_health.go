@@ -134,6 +134,8 @@ func (d *Daemon) bootstrapShowSnapshot() bootstrapshow.Snapshot {
 	}
 }
 
+var daemonBinaryUpgradeStatusPath = upgrade.DefaultBinaryUpgradeStatusPath
+
 // binaryUpgradeStatusSnapshot reads the postinst's durable failure record and
 // replaces its captured running version with this daemon process's build
 // identity. The in-memory version is authoritative; versions/current can move

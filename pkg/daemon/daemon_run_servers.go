@@ -17,7 +17,6 @@ import (
 	"github.com/psaab/xpf/pkg/nfqueue"
 	"github.com/psaab/xpf/pkg/rpm"
 	"github.com/psaab/xpf/pkg/sysservices"
-	"github.com/psaab/xpf/pkg/upgrade"
 	"github.com/psaab/xpf/pkg/webmgmt"
 	"log/slog"
 	"net"
@@ -665,7 +664,7 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 			}
 		},
 		BinaryUpgradeStatusFn: func() api.BinaryUpgradeStatusSnapshot {
-			st := binaryUpgradeStatusSnapshot(upgrade.DefaultBinaryUpgradeStatusPath, d.opts.Version)
+			st := binaryUpgradeStatusSnapshot(daemonBinaryUpgradeStatusPath, d.opts.Version)
 			snap := api.BinaryUpgradeStatusSnapshot{
 				Readable:       st.ReadErr == nil,
 				Pending:        st.Recorded,

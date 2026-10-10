@@ -947,19 +947,30 @@ window for ALL FOUR managed binaries:
   postinst's deliberate exit-0 contract but atomically records
   `/var/lib/xpf/upgrade-deferred`, outside `/run`'s reboot-cleared tmpfs. The
   mode-0600 record captures the staged version, the running daemon version,
-  a stable failure reason, the recovery command, and UTC time; all publish
-  errors and cut errors (including both lock-contention windows) are recorded.
-  `xpfd upgrade status` renders the record, and `/health` reports
-  `binary_upgrade_pending` with staged/running versions and a reason code. A
-  successful binary cut or rollback clears the record. Clustered stage-only
-  upgrades and `XPF_NO_POSTINST_CUT=1` remain intentional and do not create a
-  failure record. For deferred publish, recover with
-  `xpfd publish-generation && xpfd upgrade` (`dpkg-reconfigure xpf` is
-  equivalent). A bare `xpfd upgrade` alone would re-read the OLD `current-gen`
-  and no-op, so publish first. **On a CLUSTERED node**
-  (`/etc/xpf/node-id` present), use `xpfd upgrade --rolling`, never the bare
-  standalone verb; the postinst recovery hint is node-id-aware and the runtime
-  gate in `Runner.Run` refuses an uncoordinated cut (#5284).
+  a stable failure reason, recovery command, and UTC time. Publish errors and
+  cut errors that leave the staged version different from the running version
+  are recorded, including both lock-contention windows; a same-version
+  reinstall is treated as resolved rather than leaving false pending state.
+  `xpfd upgrade status` renders the local record; unauthenticated `/health`
+  reports only readable/pending state, a stable reason code, and timestamp
+  (#5031), not exact build versions. A cut clears the record only when the
+  record's staged version matches `versions/current`; a successful bare re-cut
+  of the previous generation therefore leaves the failure visible. Clustered
+  stage-only upgrades and `XPF_NO_POSTINST_CUT=1` remain intentional and do not
+  create a failure record. A later stage-only install does not rewrite an
+  existing record: its staged version describes the failure that created it,
+  not necessarily the newest dpkg-unpacked build.
+  For deferred publish, recover with `xpfd publish-generation && xpfd upgrade`
+  (`dpkg-reconfigure xpf` is equivalent). A bare `xpfd upgrade` does not
+  publish; it can fully restart the prior generation and still return success,
+  so publish first. During the first rollout, dpkg may have installed the new
+  staged binary while `/usr/local/sbin/xpfd` is still the old binary, which
+  does not know the `status` verb. Read the record with
+  `/usr/local/share/xpf/staged/xpfd upgrade status`; this is a read-only
+  operator command. **On a CLUSTERED node** (`/etc/xpf/node-id` present), use
+  `xpfd upgrade --rolling`, never the bare standalone verb; the postinst
+  recovery hint is node-id-aware and the runtime gate in `Runner.Run` refuses
+  an uncoordinated cut (#5284).
 - **Disk budget.** Each binary set is ~50-70 MB (dominated by `xpfd`
   embedding the kernel-verified shim + `xpf-userspace-dp`). Steady-state
   copies: `staged/` (1) + `staged-gen/` current+1 (2) + `versions/`
