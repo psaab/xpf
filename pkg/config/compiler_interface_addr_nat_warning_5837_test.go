@@ -273,6 +273,60 @@ func TestDNATInterfaceAddressExcludedByUnscopedAndToInterfaceSNAT_5837(t *testin
 	}
 }
 
+
+// The warning mirror must not suppress an advisory for a row that runtime
+// interface-NAT registration cannot own: lifelines, unzoned interfaces,
+// disabled interfaces, or a bare base name that does not match the runtime
+// logical interface name.
+func TestDNATInterfaceAddressMirrorKeepsIneligibleSNATEgressWarnings_5837(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		ifName      string
+		zone        string
+		toInterface string
+		disabled    bool
+	}{
+		{name: "lifeline", ifName: "fxp0", zone: "untrust"},
+		{name: "unzoned", ifName: "ge-0/0/2"},
+		{name: "disabled", ifName: "ge-0/0/2", zone: "untrust", disabled: true},
+		{name: "bare to-interface", ifName: "ge-0/0/2", zone: "untrust", toInterface: "ge-0/0/2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := []string{
+				"set interfaces ge-0/0/1 unit 0 family inet address 10.0.61.1/24",
+				"set security zones security-zone trust interfaces ge-0/0/1.0",
+				"set interfaces " + tc.ifName + " unit 0 family inet address 172.16.50.8/24",
+			}
+			if tc.zone != "" {
+				lines = append(lines, "set security zones security-zone untrust interfaces "+tc.ifName+".0")
+			}
+			if tc.disabled {
+				lines = append(lines, "set interfaces "+tc.ifName+" disable")
+			}
+			lines = append(lines, "set security nat source rule-set S from zone trust")
+			if tc.toInterface != "" {
+				lines = append(lines, "set security nat source rule-set S to interface "+tc.toInterface)
+			}
+			lines = append(lines,
+				"set security nat source rule-set S rule R match source-address 10.0.61.0/24",
+				"set security nat source rule-set S rule R then source-nat interface",
+				"set security nat destination pool P1 address 10.0.30.100",
+				"set security nat destination rule-set RD from zone untrust",
+				"set security nat destination rule-set RD rule R1 match destination-address 172.16.50.8/32",
+				"set security nat destination rule-set RD rule R1 then destination-nat pool P1",
+			)
+			cfg, err := CompileConfig(buildTree(t, lines))
+			if err != nil {
+				t.Fatalf("config must compile, got: %v", err)
+			}
+			ws := nat5837Warnings(cfg)
+			if len(ws) != 1 || !strings.Contains(ws[0], "172.16.50.8") {
+				t.Fatalf("ineligible SNAT egress must not suppress the #5837 warning, got: %v", ws)
+			}
+		})
+	}
+}
+
 // Keep-green control: interface-mode source-NAT exists but its to-scope does NOT
 // match the interface that owns the matched WAN-IP, so that address stays
 // kernel-local (it is not routed into interface_nat) and the DNAT is still inert
