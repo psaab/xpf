@@ -5662,6 +5662,130 @@ fn flowless_fragment_fails_closed_against_skipped_port_bearing_deny_4569() {
     );
 }
 
+#[test]
+fn flowless_fragment_override_does_not_count_permit_rule_12226() {
+    let state = parse_policy_state(
+        "deny",
+        &[frag_deny_https_snapshot(), frag_permit_any_snapshot()],
+        &test_zone_name_to_id(),
+    );
+    let permit_counter = &state.rules[1].hit_counter;
+    let deny_counter = &state.rules[0].hit_counter;
+    assert_eq!(permit_counter.test_packet_count(), 0);
+    assert_eq!(deny_counter.test_packet_count(), 0);
+
+    let frag = evaluate_policy_result_l3_aware(
+        &state,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 2, 3)),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 5)),
+        PROTO_TCP,
+        0,
+        0,
+        None,
+        64,
+        false,
+    );
+
+    assert_eq!(frag.action, PolicyAction::Deny);
+    assert_eq!(
+        permit_counter.test_packet_count(),
+        0,
+        "the overridden permit must not count this dropped fragment",
+    );
+    assert_eq!(
+        deny_counter.test_packet_count(),
+        0,
+        "the skipped port-bearing deny remains deliberately uncounted",
+    );
+    assert_eq!(permit_counter.test_byte_count(), 0);
+    assert_eq!(deny_counter.test_byte_count(), 0);
+
+    assert_eq!(
+        evaluate_policy_result_l3_aware(
+            &state,
+            TEST_TRUST_ZONE_ID,
+            TEST_UNTRUST_ZONE_ID,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 5)),
+            PROTO_TCP,
+            0,
+            0,
+            None,
+            64,
+            false,
+        )
+        .action,
+        PolicyAction::Permit,
+    );
+    assert_eq!(permit_counter.test_packet_count(), 1);
+    assert_eq!(permit_counter.test_byte_count(), 64);
+    assert_eq!(deny_counter.test_packet_count(), 0);
+}
+
+#[test]
+fn junos_host_fragment_override_does_not_count_permit_rule_12226() {
+    let state = parse_policy_state(
+        "permit",
+        &[
+            junos_host_frag_deny_https_snapshot(),
+            junos_host_frag_permit_any_snapshot(),
+        ],
+        &test_zone_name_to_id(),
+    );
+    let permit_counter = &state.rules[1].hit_counter;
+    let deny_counter = &state.rules[0].hit_counter;
+
+    let frag = evaluate_junos_host_policy_l3_aware(
+        &state,
+        TEST_TRUST_ZONE_ID,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 2, 3)),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 1, 1)),
+        PROTO_TCP,
+        0,
+        0,
+        None,
+        64,
+        false,
+    )
+    .expect("the skipped host deny overrides the permit");
+
+    assert_eq!(frag.action, PolicyAction::Deny);
+    assert_eq!(
+        permit_counter.test_packet_count(),
+        0,
+        "the overridden host permit must not count this dropped fragment",
+    );
+    assert_eq!(
+        deny_counter.test_packet_count(),
+        0,
+        "the skipped host deny remains deliberately uncounted",
+    );
+    assert_eq!(permit_counter.test_byte_count(), 0);
+    assert_eq!(deny_counter.test_byte_count(), 0);
+
+    assert_eq!(
+        evaluate_junos_host_policy_l3_aware(
+            &state,
+            TEST_TRUST_ZONE_ID,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 1)),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 1, 1)),
+            PROTO_TCP,
+            0,
+            0,
+            None,
+            64,
+            false,
+        )
+        .map(|result| result.action),
+        Some(PolicyAction::Permit),
+    );
+    assert_eq!(permit_counter.test_packet_count(), 1);
+    assert_eq!(permit_counter.test_byte_count(), 64);
+    assert_eq!(deny_counter.test_packet_count(), 0);
+}
+
 // ── #11009: one app + one L3 evaluation per rule per flowless fragment ──
 //
 // A tier miss used to evaluate a deny rule's app/L3 predicates TWICE for a

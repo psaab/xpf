@@ -129,7 +129,7 @@
 //! reasoning was half right in a way that mattered: `evaluate_policy_result_*`
 //! does take `&PolicyState` and does RETURN a counter handle
 //! (`policy_counter_idx`) for the caller to bump, and this module never bumps
-//! what it is handed. But the EVALUATION counts internally — `try_match_rule`
+//! what it is handed. But the EVALUATION counts internally — `apply_frag_deny_override_and_count`
 //! calls `rule.hit_counter.add` on every match and the implicit-default path
 //! calls `state.default_counter.add` — and `&PolicyState` does not prevent it,
 //! because those counters are ATOMICS behind shared references, so an immutable
