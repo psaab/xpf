@@ -332,7 +332,8 @@ type KernelSystem interface {
 	// NON-DESTRUCTIVELY (preserving all other entries), making it the
 	// durable default. Used to promote the candidate slot.
 	SetBootOrderFront(bootID string) error
-	// DisarmWatchdog disarms the watchdog after a successful promote.
+	// DisarmWatchdog stops the hardware watchdog after a successful promote or
+	// a failed arm unwind.
 	DisarmWatchdog() error
 	// PruneInactiveSlot resets the inactive slot's selector back to the
 	// known-good kernel and purges the un-promoted candidate kernel pkg.

@@ -1478,7 +1478,11 @@ names the path the gate reads, so it is actionable.
 
 The sentinel is deliberately **not** `ErrKernelChannelUnavailable`: that
 one means *use LANE 2 instead* and exits 2, which the kernel-roll
-orchestrator proceeds past. A mistyped flag is exit 1 — fix the command.
+orchestrator proceeds past. A strict-watchdog arm failure uses that exit
+only when cleanup successfully disarms a possibly partial acquisition. If
+disarm fails, Arm returns an infrastructure error without the sentinel
+(exit 1), so orchestration cannot proceed while the watchdog may reset.
+A mistyped flag is still exit 1 — fix the command.
 
 **For the kernel channel, `--journal` is therefore accepted only on the
 verbs that cannot strand a candidate** (`status` and the crash-recovery
@@ -1779,15 +1783,18 @@ treats an unreadable observation as a definite safe state:
   and NO reboot, and surfaces a non-revert error so the oneshot maps it to
   an infra exit (not the exit-3 reboot). The next boot re-runs the gate.
 - *StrictWatchdog (D1) arm failure.* The preflight only checks the BAKED
-  watchdog-persistence flag; `armCandidate` now also treats a real
-  `ArmWatchdog` failure as fatal UNDER STRICT MODE — it aborts the arm
+  watchdog-persistence flag; `armCandidate` also treats a real
+  `ArmWatchdog` failure as fatal UNDER STRICT MODE. It aborts the arm
   (no `BootNext`, no reboot, journal stays INSTALLED) rather than
-  rebooting into the candidate with no functioning watchdog. D2 keeps the
-  best-effort log-and-continue. The `realKernelSystem` watchdog helpers no
-  longer swallow I/O errors: `ArmWatchdog` surfaces a `WDIOC_SETTIMEOUT`
-  failure (after still attempting the keepalive), and `DisarmWatchdog`
-  propagates open/write/close failures (a genuinely-absent device is still
-  a clean nil).
+  rebooting into the candidate with no functioning watchdog. Even though
+  `ArmWatchdog` failed, the Linux implementation may already have opened
+  and petted the device before a `WDIOC_SETTIMEOUT` error; the strict abort
+  therefore disarms it too, avoiding a driver-default timeout countdown.
+  D2 keeps the best-effort log-and-continue. The `realKernelSystem`
+  watchdog helpers no longer swallow I/O errors: `ArmWatchdog` surfaces a
+  `WDIOC_SETTIMEOUT` failure (after still attempting the keepalive), and
+  `DisarmWatchdog` propagates open/write/close failures (a genuinely-absent
+  device is still a clean nil).
 - *Two-phase arm + BootNext readback (#5847).* The arm used to persist the
   `ARMED` journal BEFORE `efibootmgr --bootnext`, on the theory that an
   `ARMED`-without-`BootNext` journal is harmless. It is NOT: a crash in
@@ -1805,26 +1812,52 @@ treats an unreadable observation as a definite safe state:
      the variable must NOT yield a verified-ARMED journal;
   4. only THEN durably transition `ARMING -> ARMED`, recording the
      confirmed `BootID` for boot-provenance.
-  5. **and on ANY failure after step 2, clear the one-shot (#6758).**
-     `SetBootNext` has already succeeded by then, so returning an error and
-     leaving the journal at `ARMING` used to leave the FIRMWARE armed while
-     every durable software gate said unarmed — the exact inverse of what
-     `ARMING` asserts below. Steps 3 and 4 both fail this way, as does the
-     `recordPromoteBinary` write between them, and that last one is the
-     sharpest: the readback had already CONFIRMED the one-shot, so the
-     candidate was genuinely queued while no xpfd was designated to verify
-     it — an armed candidate with nothing to run the promotion gate, which
-     #6601 added that record specifically to prevent. The undo is
-     single-sourced (`disarmAfterArmFailure`) because four failure paths
-     needing the identical cleanup is how one gets missed, and clearing an
-     absent BootNext is not an error so it is safe even where the firmware
-     dropped the variable itself. If the clear ITSELF fails the divergence
-     is real and cannot be undone in-process, so the error says so and names
-     `efibootmgr --delete-bootnext`; it is deliberately NOT escalated to a
-     journal state, because `ARMED` asserts a verified one-shot WITH a
-     recorded promote binary — precisely what may be missing on the
-     `recordPromoteBinary` path — so claiming it would substitute a
-     different false record for this one.
+  5. **Before a verified `ARMED` transition, a failed post-`SetBootNext`
+     step clears BootNext and then attempts watchdog disarm (#6758,
+     #12162).** A readback error/mismatch or a `recordPromoteBinary` failure
+     used to leave the firmware one-shot queued while the journal remained
+     `ARMING`, so durable software gates treated the node as unarmed. The
+     record failure was the sharpest case: BootNext had been positively
+     confirmed, but no xpfd was designated to verify the candidate (#6601).
+     The shared unwind clears BootNext first, then disarms; an absent
+     BootNext is safe to clear. If clearing fails, the arm-candidate path
+     still attempts watchdog disarm and reports both cleanup errors.
+
+  Failures at or before step 2 also disarm after watchdog acquisition,
+  including the ARMING-persist and `SetBootNext` errors. Strict D1 partial
+  acquisition is disarmed too. In D2, an `ArmWatchdog` error is best-effort and the
+  subsequent error messages do not promise an automatic watchdog reset.
+
+  If `Reboot` fails after the verified `ARMED` transition, the runner clears
+  `BootID` and persists a backstep to `ARMING` before touching NVRAM. A
+  pre-rename backstep-write failure leaves the durable journal `ARMED` and
+  preserves BootNext plus the watchdog if arming succeeded; if D2 watchdog
+  arming failed, the error does not promise an automatic reset. A
+  `PostRenameSyncError` means the `ARMING` rename is already visible, so the
+  runner treats the backstep as landed and continues to clear BootNext,
+  disarm, and remove the stale arm record. The resulting `ARMING` state has
+  no `BootID` or arm sidecar, so a binary cut before retry does not leave a
+  stale gate cross-check.
+
+  If clearing BootNext after a failed `Reboot` fails, the runner tries to
+  restore the verified `ARMED` journal and keeps the watchdog running when
+  that state is visible (including a post-rename sync error). If the restore
+  fails before rename, it leaves `ARMING` and attempts watchdog disarm per
+  the clear-failure policy. A disarm error is returned. If watchdog arming
+  had succeeded, the error warns that the watchdog may still be armed and
+  will force a reboot into the queued candidate; clear BootNext before then.
+  If D2 arming was not confirmed, it does not promise an automatic reset.
+  If disarm succeeds, it reports that the watchdog was disarmed and still
+  requires manual BootNext cleanup before reboot. If the restore failed
+  before rename, the stale arm-record sidecar is cleared because the
+  durable journal remains `ARMING`. A `PostRenameSyncError` on the ARMED
+  restore is classified as a landed ARMED state, not as a remaining
+  ARMING journal.
+
+  A post-rename directory-sync error from `armCandidate`'s own ARMED
+  persistence is a separate pre-existing false-ARMED case (#12549): the
+  ARMED rename is visible although the arm unwind also clears BootNext and
+  disarms. It is not the failed-Reboot backstep handled here.
 
   `ARMING` sits BELOW `ARMED` in the journal order, so a journal stuck
   there (readback failed / never ran) lets `Arm` RE-ARM (the `>= ARMED`
