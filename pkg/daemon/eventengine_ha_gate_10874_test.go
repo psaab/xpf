@@ -44,8 +44,7 @@ func TestEventEngineRemediationDefersAcrossRG0Failover10874(t *testing.T) {
 		ThenCommands: []string{"set system host-name remediated"},
 	}})
 
-	// The standby closes publication before making its config store read-only.
-	d.applyRG0OwnershipTransition(cluster.StateSecondary)
+	d.applyRG0OwnershipTransition(cluster.StateSecondary, false)
 	if d.eventEngine.PublishEnabled() || !d.store.ClusterReadOnly() {
 		t.Fatal("RG0 demotion must close event publication and config writes")
 	}
@@ -62,8 +61,7 @@ func TestEventEngineRemediationDefersAcrossRG0Failover10874(t *testing.T) {
 	}
 
 	// There is no second FAIL edge on takeover; promotion must reopen the gate
-	// and let the already-accepted action complete.
-	d.applyRG0OwnershipTransition(cluster.StatePrimary)
+	d.applyRG0OwnershipTransition(cluster.StatePrimary, false)
 	if !d.eventEngine.PublishEnabled() || d.store.ClusterReadOnly() {
 		t.Fatal("RG0 promotion must reopen event publication and config writes")
 	}

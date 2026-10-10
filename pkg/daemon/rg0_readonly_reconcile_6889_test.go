@@ -189,34 +189,25 @@ func TestReconcileRGStateDrivesTheGate6889(t *testing.T) {
 
 	if d.store.ClusterReadOnly() {
 		t.Fatal("reconcileRGState did not reconcile the RG0 config-ownership gate — " +
-			"it is the dropped-event recovery path, so the gate is never re-driven " +
-			"and the node stays stranded (#6889)")
+			"it is the dropped-event recovery path, so a dropped promotion must not " +
+			"leave the store read-only (#6889)")
 	}
 }
 
-// TestNeverTransitionedSecondaryGetsGated6889_6890 records a CONSEQUENCE of
-// deriving the gate from state rather than from the transition edge: it also
-// closes the sibling gap, #6890.
+// TestNeverTransitionedSecondaryGetsGated6889_6890 records the cold-start
+// secondary case: no ownership event is required for the first reconcile to
+// derive the gate from RG0 state.
 //
-// #6890 is the cold-start standby that seats as secondary and NEVER transitions.
-// RGs are created with State: StateSecondary (group_state.go), so a node whose
-// peer wins RG0 reaches steady state without ever crossing a transition edge —
-// applyRG0OwnershipTransition never runs, and the gate is never armed. That
-// node's store stays WRITABLE, and pkg/api/config.go enters a configure session
-// with no RG0 check of its own, so REST is a way in on a node that does not own
-// config.
-//
-// This is not a coincidence and could not have been avoided: you cannot derive
-// the gate from state and simultaneously preserve a hole that exists only
-// because the edge was never taken. The cell exists so the claim is BOUND
-// rather than asserted in a PR body — and so that if someone later narrows the
-// reconcile to the promotion direction only, the reintroduction of #6890 reds
-// here instead of being discovered from a REST session on a standby.
+// RGs are initially created as StateSecondary (group_state.go), and the daemon
+// can reach steady secondary state without crossing a transition edge. Before
+// the first reconcile the zero-value store is writable; reconcileRG0ConfigOwnership
+// then arms the gate even though applyRG0OwnershipTransition was never called
+// by an event. This closes #6890 while preserving the distinction between
+// initial-secondary seating and a real demotion (#12171).
 func TestNeverTransitionedSecondaryGetsGated6889_6890(t *testing.T) {
-	// A node seated as secondary, with the gate never armed because no
-	// transition ever fired. Distinguished from the dropped-demotion cell only
-	// by provenance — the reconcile derives from state and cannot tell them
-	// apart, which is the point.
+	// A node seated as secondary before any ownership event. The dropped-
+	// demotion control below records prior local Primary; this boot fixture
+	// does not, so the reconcile must arm the same gate without confirming.
 	d := clusteredDaemon6889(t, cluster.StateSecondary, false /* never armed */)
 
 	if d.store.ClusterReadOnly() {
@@ -231,8 +222,8 @@ func TestNeverTransitionedSecondaryGetsGated6889_6890(t *testing.T) {
 	d.reconcileRGState()
 
 	if !d.store.ClusterReadOnly() {
-		t.Fatal("a node seated as RG0 secondary that never transitioned still accepts " +
-			"config writes — #6890 is not closed by the #6889 reconcile")
+		t.Fatal("a node seated as RG0 secondary still accepts config writes after " +
+			"the first reconcile — #6890 is not closed by the #6889 re-derivation")
 	}
 	if err := d.store.EnterConfigure(); err == nil {
 		d.store.ExitConfigure()
@@ -244,8 +235,8 @@ func TestNeverTransitionedSecondaryGetsGated6889_6890(t *testing.T) {
 // TestReconcileRedrivesTheWholeTransitionNotJustTheBit6889 closes a gap the
 // mutation matrix found in my own coverage.
 //
-// Replacing the reconcile's `applyRG0OwnershipTransition(rg0.State)` with a
-// bare `SetClusterReadOnly(wantReadOnly)` left every other cell in this file
+// Replacing the reconcile's call to `applyRG0OwnershipTransition` with a bare
+// `SetClusterReadOnly(wantReadOnly)` left every other cell in this file
 // GREEN — they all assert the BIT, and the bit is identical either way. But the
 // gate is not the transition's only consequence, and a dropped event skipped
 // all of them:
@@ -260,9 +251,14 @@ func TestNeverTransitionedSecondaryGetsGated6889_6890(t *testing.T) {
 // observable, so it is what binds the decision. A reconcile that sets the bit
 // alone leaves the window ARMED on a node that just became read-only —
 // precisely the #4378 divergence, reintroduced through the recovery path.
+// The reconcile must distinguish this dropped demotion from initial-secondary
+// seating, so first observe local Primary with the gate already agreeing and
+// then lose the transition event.
 func TestReconcileRedrivesTheWholeTransitionNotJustTheBit6889(t *testing.T) {
-	// Writable store + RG0 secondary is the dropped-DEMOTION divergence.
 	d := clusteredDaemon6889(t, cluster.StateSecondary, false)
+	d.cluster.SetGroupStateForTesting(0, cluster.StatePrimary)
+	d.reconcileRG0ConfigOwnership() // gate agrees; reconciliation still observes Primary.
+	d.cluster.SetGroupStateForTesting(0, cluster.StateSecondary)
 
 	// Arm a commit-confirmed window: commit A, then commit-confirmed B.
 	if err := d.store.EnterConfigure(); err != nil {

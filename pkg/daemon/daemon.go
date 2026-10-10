@@ -776,7 +776,11 @@ type Daemon struct {
 	// scheduler teardown; read lock-free by the metrics collector.
 	schedulerRepublishFailing        atomic.Bool
 	schedulerRepublishFirstFailNanos atomic.Int64
-	cluster                          *cluster.Manager
+	// rg0WasPrimary latches a local-primary observation until secondary
+	// handling consumes it, distinguishing dropped demotions from initial
+	// secondary seating after restart.
+	rg0WasPrimary atomic.Bool
+	cluster       *cluster.Manager
 	// kernelUpgradeHoldFailClosed records that the kernel-upgrade election hold
 	// was set FAIL-CLOSED because the kernel-upgrade journal was UNREADABLE at
 	// boot (I/O error / corruption / parse failure — NOT a clean ENOENT), rather

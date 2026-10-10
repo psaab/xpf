@@ -327,6 +327,19 @@ func (m *Manager) SetGroupStateForTesting(rgID int, st NodeState) {
 	}
 }
 
+// SetPeerGroupStateForTesting injects the peer's last advertised RG state
+// without running an election. Test-only; it exercises consumers of
+// IsPeerPrimary without requiring a heartbeat socket.
+func (m *Manager) SetPeerGroupStateForTesting(rgID int, st NodeState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.peerGroups == nil {
+		m.peerGroups = make(map[int]PeerGroupState)
+	}
+	m.peerGroups[rgID] = PeerGroupState{GroupID: rgID, State: st}
+	m.peerAlive = true
+}
+
 // IsLocalPrimary returns true if this node is primary for the given RG.
 func (m *Manager) IsLocalPrimary(rgID int) bool {
 	m.mu.RLock()
