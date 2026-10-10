@@ -536,6 +536,9 @@ func (m *Manager) applyCompiledSnapshot(
 	m.recordZoneIDCollisionsLocked(snap.zoneIDCollisions)
 	m.clusterHA = cfg != nil && cfg.Chassis.Cluster != nil
 	m.seedHAGroupInventoryLocked(cfg)
+	// Plan classification and the eventual digest/send must observe one interface
+	// sample. Revalidation detaches snap.Interfaces before it compacts in place.
+	prepareSnapshotForApply(snap)
 	prevPlanKey := snapshotBindingPlanKey(m.lastSnapshot)
 	newPlanKey := snapshotBindingPlanKey(snap)
 	pendingXSKStartup := m.proc != nil &&
@@ -695,7 +698,7 @@ func (m *Manager) applyCompiledSnapshot(
 	// publish is rejected so the maps can never run a generation ahead of the
 	// applied Rust snapshot (fail-open). The bootstrap path already set
 	// ctrl.Enabled=0, so it needs no extra fail-closed.
-	if err := m.publishSnapshotFailClosedLocked(&publishSnap, &status, samePlanRefresh); err != nil {
+	if err := m.publishPreparedSnapshotFailClosedLocked(&publishSnap, &status, samePlanRefresh); err != nil {
 		return result, err
 	}
 	// apply_snapshot succeeded, so the scheduler state carried by this full
@@ -705,6 +708,7 @@ func (m *Manager) applyCompiledSnapshot(
 	m.logWgEndpointSetTransitionLocked(&publishSnap, "apply")
 	// #9520: a content-conflict republish moves the snapshot to a fresh generation.
 	m.adoptPublishedGenerationLocked(snap, publishSnap.Generation)
+	snap.Interfaces = publishSnap.Interfaces
 	m.lastSnapshot = snap
 	// #5485: apply_snapshot landed and the retained authority has advanced, so
 	// the obsolete XDP/TC attachments may now be reconciled away. Placed
@@ -722,11 +726,11 @@ func (m *Manager) applyCompiledSnapshot(
 	m.rebuildMonitoredIfindexes()
 	m.pendingFullSnapshotMetadata = false
 	m.publishedSnapshot = snap.Generation
-	m.publishedPlanKey = newPlanKey
+	m.publishedPlanKey = snapshotBindingPlanKey(&publishSnap)
 	// #2079: this full apply_snapshot succeeded — record the applied
 	// (config, generation) for the NAT pool-utilization-alarm monitor.
 	m.markAppliedSnapshotLocked()
-	if h, ok := snapshotContentHash(snap); ok {
+	if h, ok := snapshotContentHash(&publishSnap); ok {
 		m.lastSnapshotHash = h
 	}
 	// #9684: the helper now holds exactly the sections re-sampled above.
@@ -841,8 +845,27 @@ func (m *Manager) applyCompiledSnapshot(
 // which already programmed ctrl.Enabled=0 before this publish, so a publish
 // error is already fail-closed and the error is returned unchanged.
 func (m *Manager) publishSnapshotFailClosedLocked(publishSnap *ConfigSnapshot, status *ProcessStatus, mapsMutatedInPlace bool) error {
+	return m.publishSnapshotFailClosedWithPreparationLocked(publishSnap, status, mapsMutatedInPlace, false)
+}
+
+func (m *Manager) publishPreparedSnapshotFailClosedLocked(publishSnap *ConfigSnapshot, status *ProcessStatus, mapsMutatedInPlace bool) error {
+	return m.publishSnapshotFailClosedWithPreparationLocked(publishSnap, status, mapsMutatedInPlace, true)
+}
+
+func (m *Manager) publishSnapshotFailClosedWithPreparationLocked(
+	publishSnap *ConfigSnapshot,
+	status *ProcessStatus,
+	mapsMutatedInPlace bool,
+	prepared bool,
+) error {
 	wasDebt := m.snapshotRetryDebtLocked()
-	if err := m.requestApplySnapshotLocked(publishSnap, status); err != nil {
+	var err error
+	if prepared {
+		err = m.requestApplySnapshotPreparedLocked(publishSnap, status)
+	} else {
+		err = m.requestApplySnapshotLocked(publishSnap, status)
+	}
+	if err != nil {
 		publishErr := fmt.Errorf("publish userspace snapshot: %w", err)
 		// #7468: a rejected publish must never return with the manager lacking
 		// a reconcile worker. On the samePlanRefresh path the loop is already
@@ -1235,6 +1258,7 @@ func (m *Manager) UpdatePolicyScheduleStateWithLatch(cfg *config.Config, activeS
 		// retries autonomously on the next scheduler tick.
 		return fmt.Errorf("userspace: publish policy scheduler snapshot: %w", err)
 	}
+	next.Interfaces = publishSnap.Interfaces
 	// The helper accepted the snapshot, so its scheduler bits now match the
 	// desired state carried by this snapshot. Commit the applied/show cache only
 	// at this success boundary; every return above leaves it unchanged.
@@ -1248,10 +1272,10 @@ func (m *Manager) UpdatePolicyScheduleStateWithLatch(cfg *config.Config, activeS
 	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = next.Generation
 	m.pendingFullSnapshotMetadata = false
-	m.publishedPlanKey = snapshotBindingPlanKey(&next)
+	m.publishedPlanKey = snapshotBindingPlanKey(&publishSnap)
 	// #2079: full apply_snapshot succeeded — record the applied snapshot.
 	m.markAppliedSnapshotLocked()
-	if h, ok := snapshotContentHash(&next); ok {
+	if h, ok := snapshotContentHash(&publishSnap); ok {
 		m.lastSnapshotHash = h
 	}
 	m.resolvePartialOutcomesLocked(resampled)

@@ -580,6 +580,9 @@ type Manager struct {
 	// WG-zone/admission, and interface-NAT classifier map writes in unit tests
 	// (#7468). Nil in production.
 	syncClassifierMapsHook func(*ConfigSnapshot) error
+	// programBootstrapMapsHook replaces bootstrap-map programming in tests that
+	// exercise Compile classification without privileged BPF maps.
+	programBootstrapMapsHook func(*ConfigSnapshot, config.UserspaceConfig) error
 
 	// controlRequestHook replaces requestLocked in unit tests that exercise
 	// manager state transitions without opening a Unix control socket.

@@ -166,7 +166,7 @@ func TestApplySnapshotCarriesAContentDigestFreeOfIdentityFields9520(t *testing.T
 	}
 }
 
-// TestApplySnapshotHasOneSendSite9520: a send outside requestApplySnapshotLocked
+// TestApplySnapshotHasOneSendSite9520: a send outside requestApplySnapshotPreparedLocked
 // carries no digest and cannot republish past a conflict.
 func TestApplySnapshotHasOneSendSite9520(t *testing.T) {
 	fset := token.NewFileSet()
@@ -175,7 +175,7 @@ func TestApplySnapshotHasOneSendSite9520(t *testing.T) {
 		t.Fatalf("glob: %v", err)
 	}
 	var outside []string
-	inWrapper := 0
+	inSendSite := 0
 	for _, path := range paths {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
@@ -194,8 +194,8 @@ func TestApplySnapshotHasOneSendSite9520(t *testing.T) {
 				if !ok || lit.Kind != token.STRING || lit.Value != `"apply_snapshot"` {
 					return true
 				}
-				if fn.Name.Name == "requestApplySnapshotLocked" {
-					inWrapper++
+				if fn.Name.Name == "requestApplySnapshotPreparedLocked" {
+					inSendSite++
 				} else {
 					outside = append(outside, fmt.Sprintf("%s (%s)", fset.Position(lit.Pos()), fn.Name.Name))
 				}
@@ -203,23 +203,23 @@ func TestApplySnapshotHasOneSendSite9520(t *testing.T) {
 			})
 		}
 	}
-	if inWrapper == 0 {
-		t.Fatal("liveness: no \"apply_snapshot\" literal found in requestApplySnapshotLocked — the scan " +
+	if inSendSite == 0 {
+		t.Fatal("liveness: no \"apply_snapshot\" literal found in requestApplySnapshotPreparedLocked — the scan " +
 			"is not reading this package, so an empty result below would mean nothing")
 	}
 	if len(outside) > 0 {
-		t.Errorf("apply_snapshot is sent outside requestApplySnapshotLocked:\n  %s\n"+
+		t.Errorf("apply_snapshot is sent outside requestApplySnapshotPreparedLocked:\n  %s\n"+
 			"such a send carries no content digest and does not republish past a content conflict (#9520)",
 			strings.Join(outside, "\n  "))
 	}
 }
 
 // TestCompileCommitsThePublishedGeneration9520 pins applyCompiledSnapshot's
-// bookkeeping STRUCTURALLY: without real BPF maps it fails before apply_snapshot
-// (see TestAttachmentsNotDetachedBeforePublish_5485), so no behavioural cell can
-// reach the adopt. The published copy's generation must be adopted into snap
-// after the publish and before snap becomes m.lastSnapshot, because everything
-// after (published generation, applied view, recordApplyResultLocked) reads it.
+// bookkeeping STRUCTURALLY: the prepared fail-closed publish path carries the
+// already-sampled interfaces, and the published copy's generation must be
+// adopted into snap after the publish and before snap becomes m.lastSnapshot,
+// because everything after (published generation, applied view,
+// recordApplyResultLocked) reads it.
 func TestCompileCommitsThePublishedGeneration9520(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "manager_compile.go", nil, 0)
@@ -245,7 +245,7 @@ func TestCompileCommitsThePublishedGeneration9520(t *testing.T) {
 				return true
 			}
 			switch sel.Sel.Name {
-			case "publishSnapshotFailClosedLocked":
+			case "publishPreparedSnapshotFailClosedLocked":
 				if publish == token.NoPos {
 					publish = x.Pos()
 				}
@@ -275,7 +275,7 @@ func TestCompileCommitsThePublishedGeneration9520(t *testing.T) {
 	}
 	adopt := adopts[0]
 	if !(publish < adopt.Pos() && adopt.Pos() < retain) {
-		t.Fatalf("adoptPublishedGenerationLocked must run after publishSnapshotFailClosedLocked and before " +
+		t.Fatalf("adoptPublishedGenerationLocked must run after publishPreparedSnapshotFailClosedLocked and before " +
 			"m.lastSnapshot = snap, or the retained snapshot records the refused generation")
 	}
 	if len(adopt.Args) != 2 {

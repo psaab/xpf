@@ -211,21 +211,9 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	next.FIBGeneration = m.readFIBGeneration()
 	next.GeneratedAt = time.Now().UTC()
 	next.Config = cfg
-	// Keepalive and interface link transitions trigger this routes-only publish.
-	// Resample link state before hashing so a flap with unchanged route content
-	// still reaches the helper and updates interface-only ECMP liveness.
-	next.Interfaces = append([]InterfaceSnapshot(nil), next.Interfaces...)
-	for i := range next.Interfaces {
-		row := &next.Interfaces[i]
-		if row.LinuxName == "" {
-			continue
-		}
-		resolveLinuxName := row.LinuxName
-		if row.LogicalOnly && row.ParentLinuxName != "" {
-			resolveLinuxName = row.ParentLinuxName
-		}
-		row.LinkUp = snapshotLinkUp(resolveLinuxName)
-	}
+	// Revalidate once before route derivation and content dedup. This isolated
+	// sample is also the interface state sent if the snapshot is published.
+	prepareSnapshotForApply(&next)
 	// Tunnel endpoint link state also controls route-only ECMP liveness.
 	next.TunnelEndpoints = append([]TunnelEndpointSnapshot(nil), next.TunnelEndpoints...)
 	for i := range next.TunnelEndpoints {
@@ -302,9 +290,10 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	if err := m.disarmBeforeUnsupportedPublishLocked(&next); err != nil {
 		return false, err
 	}
-	if err := m.requestApplySnapshotLocked(&publishSnap, &status); err != nil {
+	if err := m.requestApplySnapshotPreparedLocked(&publishSnap, &status); err != nil {
 		return false, fmt.Errorf("publish route overlay snapshot: %w", err)
 	}
+	next.Interfaces = publishSnap.Interfaces
 	// The helper accepted the overlay snapshot, so commit any scheduler state
 	// it carries to the applied/show cache. Error returns above leave that
 	// cache at the previous enforced state.
@@ -318,10 +307,10 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = next.Generation
 	m.pendingFullSnapshotMetadata = false
-	m.publishedPlanKey = snapshotBindingPlanKey(&next)
+	m.publishedPlanKey = snapshotBindingPlanKey(&publishSnap)
 	// #2079: full apply_snapshot succeeded — record the applied snapshot.
 	m.markAppliedSnapshotLocked()
-	if h, ok := snapshotContentHash(&next); ok {
+	if h, ok := snapshotContentHash(&publishSnap); ok {
 		m.lastSnapshotHash = h
 	}
 	m.resolvePartialOutcomesLocked(resampled)
@@ -359,6 +348,7 @@ func (m *Manager) RepublishCurrentCaptureAuthority() (bool, error) {
 	next.FIBGeneration = m.readFIBGeneration()
 	next.GeneratedAt = time.Now().UTC()
 	m.refreshCaptureAuthorityLocked(&next)
+	prepareSnapshotForApply(&next)
 	resampled := m.resampleUnresolvedSectionsLocked(&next)
 	if hash, ok := snapshotContentHash(&next); ok &&
 		hash == m.lastSnapshotHash &&
@@ -377,9 +367,10 @@ func (m *Manager) RepublishCurrentCaptureAuthority() (bool, error) {
 	publishSnap := next
 	publishSnap.Neighbors = filterPublishableNeighbors(next.Neighbors)
 	var status ProcessStatus
-	if err := m.requestApplySnapshotLocked(&publishSnap, &status); err != nil {
+	if err := m.requestApplySnapshotPreparedLocked(&publishSnap, &status); err != nil {
 		return false, fmt.Errorf("republish capture authority: %w", err)
 	}
+	next.Interfaces = publishSnap.Interfaces
 
 	// The helper accepted the cloned snapshot. Use the same success bookkeeping
 	// as the other partial publishers, but do not pretend routes or policy were
@@ -392,9 +383,9 @@ func (m *Manager) RepublishCurrentCaptureAuthority() (bool, error) {
 	m.rebuildMonitoredIfindexes()
 	m.publishedSnapshot = next.Generation
 	m.pendingFullSnapshotMetadata = false
-	m.publishedPlanKey = snapshotBindingPlanKey(&next)
+	m.publishedPlanKey = snapshotBindingPlanKey(&publishSnap)
 	m.markAppliedSnapshotLocked()
-	if h, ok := snapshotContentHash(&next); ok {
+	if h, ok := snapshotContentHash(&publishSnap); ok {
 		m.lastSnapshotHash = h
 	}
 	m.resolvePartialOutcomesLocked(resampled)

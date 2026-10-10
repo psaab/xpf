@@ -238,19 +238,19 @@ func TestProtocolGateSitesRouteThroughFailClosedHelper5488(t *testing.T) {
 	}{
 		{
 			// #5485 split Compile at the m.mu boundary; the publish site is now
-			// applyCompiledSnapshot. Retargeted, not relaxed — both asserted
-			// substrings are unchanged.
+			// applyCompiledSnapshot. The prepared wrapper preserves the required
+			// fail-closed handling after interface revalidation.
 			file:      "manager_compile.go",
 			fn:        "applyCompiledSnapshot",
 			wantGate:  "m.disarmSnapshotProtocolFailClosedLocked(snap, err, samePlanRefresh)",
-			wantPub:   "publishSnapshotFailClosedLocked(&publishSnap, &status, samePlanRefresh)",
+			wantPub:   "publishPreparedSnapshotFailClosedLocked(&publishSnap, &status, samePlanRefresh)",
 			whyInPlce: "samePlanRefresh mutates the classifier maps in place before the publish",
 		},
 		{
 			file:      "process_status.go",
 			fn:        "syncSnapshotLocked",
 			wantGate:  "m.disarmSnapshotProtocolFailClosedLocked(&publishSnap, err, true)",
-			wantPub:   "publishSnapshotFailClosedLocked(&publishSnap, &status, true)",
+			wantPub:   "publishPreparedSnapshotFailClosedLocked(&publishSnap, &status, true)",
 			whyInPlce: "its only producer of an unpublished lastSnapshot is Compile's pendingXSKStartup branch, which always mutates the maps in place",
 		},
 	} {
