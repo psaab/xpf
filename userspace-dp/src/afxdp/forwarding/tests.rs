@@ -7541,6 +7541,11 @@ fn unzoned_macless_unit_does_not_inherit_a_zoned_siblings_zone_6722() {
 #[test]
 fn shared_ifindex_ingress_and_egress_both_refuse_a_siblings_zone_7509() {
     let state = build_forwarding_state(&sibling_tunnel_units_reverse_policy_snapshot_7509());
+    assert_eq!(
+        resolve_ingress_logical_ifindex(&state, SHARED_TUNNEL_IFINDEX_6722, 0),
+        Some(SHARED_TUNNEL_IFINDEX_6722),
+        "the untagged parent key belongs to unit 0, not its nonzero-index sibling"
+    );
 
     // Precondition: the ifindex really is shared, and the zoned sibling really
     // is on its own. Without this the cell could pass on a state where `st0.0`

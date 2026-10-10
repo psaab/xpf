@@ -1,0 +1,7 @@
+# Issue #12250 — forwarding lane
+
+- **Base / STEP-0**: `a714c90d472a3c3d98a3799831cfef3ec311a61c` (`origin/master`). Read the full issue body before validation. The forwarding test module was red on base: 175 passed and the five forwarding cells failed in `build_forwarding_state` with `InterfaceDuplicateIngressKey { bind_ifindex: 42, vlan_id: 0, first_ifindex: 42, second_ifindex: 43, first_interface: "st0.0", second_interface: "st0.1" }`.
+- **Change**: A nonzero logical unit with no VLAN ID and a distinct own ifindex does not own the parent's VID-0 ingress key. Preserve the base/unit-0 mapping for untagged traffic while retaining duplicate-key rejection for parent-bound VLAN identities. Added a regression assertion that `(ifindex 42, VID 0)` resolves to ifindex 42.
+- **GREEN-after**: `CARGO_TARGET_DIR=/var/tmp/cargo-12250a cargo test --bin xpf-userspace-dp afxdp::forwarding::tests::` passed (180 passed, 0 failed); all five issue cells passed, including the new ingress-key ownership assertion. `CARGO_TARGET_DIR=/var/tmp/cargo-12250a cargo test --bin xpf-userspace-dp afxdp::forwarding_build::tests::` passed (200 passed, 0 failed), retaining the duplicate VLAN-key integrity coverage.
+- **Cargo target directory**: `/dev/shm` had no available space, so validation used the required `/var/tmp/cargo-12250a` fallback.
+- **Risk**: Narrow to untagged nonzero logical units; positive-VID parent-bound duplicate validation and unit-0/native-VLAN mapping remain covered by the forwarding-build module. No live-cluster mutation.

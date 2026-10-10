@@ -1,0 +1,12 @@
+- **Timestamp**: 2026-10-08
+  - **Action**: Recorded filter-log lane validation on top of the shared ingress-key validator fix (`bb4c3c58155b2fd24a464390867175fd2a25c434`). No filter-specific production change was needed: the existing egress-zone resolver and cached-output event path report the adjudicated zone once the shared snapshot builder accepts this valid tunnel-unit shape.
+  - **File(s)**: `userspace-dp/src/afxdp/poll_descriptor/filter.rs` (validated, unchanged)
+- **Timestamp**: 2026-10-08
+  - **Action**: STEP-0 at `a714c90d472a3c3d98a3799831cfef3ec311a61c`: `filter_log_egress_zone_tests` was RED, 0 passed / 3 failed. All three named cells panicked in `build_forwarding_state` with `InterfaceDuplicateIngressKey { bind_ifindex: 42, vlan_id: 0, first_ifindex: 42, second_ifindex: 43, first_interface: "st0.0", second_interface: "st0.1" }`. The initial `/dev/shm/cargo-12250c` build hit ENOSPC; the scoped run was retried using `/var/tmp/cargo-12250c`.
+  - **File(s)**: `userspace-dp/src/afxdp/poll_descriptor/filter.rs` (STEP-0 tests)
+- **Timestamp**: 2026-10-08
+  - **Action**: After rebasing onto the shared fix, `CARGO_TARGET_DIR=/var/tmp/cargo-12250c cargo test --bin xpf-userspace-dp filter_log_egress_zone_tests` passed all 3 cells: `cached_output_filter_log_reports_the_adjudicated_zone_6722`, `filter_log_egress_zone_id_reports_a_macless_tunnels_zone_6713`, and `filter_log_egress_zone_id_reports_no_zone_for_an_ambiguous_ifindex_6722`.
+  - **File(s)**: `userspace-dp/src/afxdp/poll_descriptor/filter.rs` (validated, unchanged)
+- **Timestamp**: 2026-10-08
+  - **Action**: The full `afxdp::poll_descriptor::filter::` scope on the shared-fix stack reported 54 passed and 3 failed. The failures were the three `filter_revalidation_7212_tests` tunneled-PBR liveness checks (`a_steady_state_tunneled_pbr_steer_stays_pinned_10630`, `a_tunneled_pbr_steer_retargeted_to_a_different_tunnel_revokes_10630`, `a_tunneled_pbr_steer_retargeted_to_native_revokes_10630`). Repeating the same scope on clean `origin/master` reported 51 passed and 6 failed: the same three tunneled-PBR checks plus the three STEP-0 cells. Thus those three broader-scope failures are same-base residual reds; all three assigned cells changed RED-to-GREEN on the stack.
+  - **File(s)**: `userspace-dp/src/afxdp/poll_descriptor/filter.rs` (scoped validation)
