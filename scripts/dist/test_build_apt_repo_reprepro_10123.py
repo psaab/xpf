@@ -28,20 +28,31 @@ pattern) and is skipped without them.
 
 RED on revert: drop the assert and every refusal cell below exits 0 —
 duplicate/missing/skewed Valid-Until ships silently.
+
+The real-binary suite also verifies the signed builder-to-gate path and that a
+flat rebuild after reprepro removes the stale mode marker; a byte-tamper check
+confirms the flat gate is restored after that transition.
 """
 
 from __future__ import annotations
 
 import email.utils
+import importlib.util
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _DIST = Path(__file__).resolve().parent
 _BUILDER = _DIST / "build-apt-repo.sh"
+_SPEC = importlib.util.spec_from_file_location(
+    "publish_10123", _DIST / "publish.py")
+publish = importlib.util.module_from_spec(_SPEC)
+assert _SPEC.loader is not None
+_SPEC.loader.exec_module(publish)
 
 _HAS_REAL_REPREPRO = bool(shutil.which("reprepro")
                           and shutil.which("gpg")
@@ -253,6 +264,11 @@ class RealRepreproTests(unittest.TestCase):
         self.assertTrue(fpr, "key generation failed")
         self.fpr = fpr
         self.env = env
+        public_key = subprocess.run(
+            ["gpg", "--batch", "--armor", "--export", self.fpr],
+            capture_output=True, check=True, env=env, timeout=60).stdout
+        self.archive_pub = os.path.join(self.dir, "archive.asc")
+        Path(self.archive_pub).write_bytes(public_key)
         # reprepro requires a Section field on the .deb (else it skips it).
         pkgdir = os.path.join(self.dir, "pkg")
         debdir = os.path.join(pkgdir, "DEBIAN")
@@ -261,9 +277,159 @@ class RealRepreproTests(unittest.TestCase):
             "Package: xpf-appliance\nVersion: 0.0.0-10123\nSection: admin\n"
             "Priority: optional\nArchitecture: amd64\n"
             "Maintainer: t <t@x.invalid>\nDescription: 10123 fixture\n")
+        keydir = os.path.join(pkgdir, "usr/share/keyrings")
+        os.makedirs(keydir)
+        shutil.copyfile(self.archive_pub,
+                        os.path.join(keydir, "xpf-archive-keyring.asc"))
         self.deb = os.path.join(self.dir, "xpf-appliance_0.0.0-10123_amd64.deb")
         subprocess.run(["dpkg-deb", "--build", pkgdir, self.deb], check=True,
                        capture_output=True, timeout=60)
+
+
+    def _build_suite(self, outdir, suite, tool):
+        env = dict(self.env)
+        env.update({"XPF_APT_TOOL": tool, "XPF_GPG_KEY": self.fpr,
+                    "XPF_ARCHIVE_PUBKEY": self.archive_pub})
+        built = subprocess.run(
+            ["sh", str(_BUILDER), "--out", outdir, "--suite", suite,
+             "--debs", self.deb],
+            capture_output=True, text=True, env=env, timeout=180)
+        self.assertEqual(built.returncode, 0, (built.stdout or "") +
+                         (built.stderr or ""))
+        return env
+
+    def _gate_apt(self, outdir, expected_versions):
+        with patch.dict(os.environ,
+                        {"XPF_ARCHIVE_PUBKEY": self.archive_pub}):
+            publish.gate_apt(outdir, "stable", expected_versions)
+
+    @unittest.skipUnless(shutil.which("apt-ftparchive"),
+                         "needs apt-ftparchive for a flat target suite")
+    def test_mixed_tree_enforces_flat_target_version_binding(self):
+        outdir = os.path.join(self.dir, "out-mixed-version")
+        self._build_suite(outdir, "stable", "flat")
+        self._build_suite(outdir, "edge", "reprepro")
+        marker = Path(outdir, "apt/conf/distributions")
+        self.assertIn("Codename: edge", marker.read_text())
+        with self.assertRaisesRegex(
+                SystemExit, "outside the verified target image version"):
+            self._gate_apt(outdir, {"9.9.9"})
+
+    @unittest.skipUnless(shutil.which("apt-ftparchive"),
+                         "needs apt-ftparchive for a flat target suite")
+    def test_mixed_tree_rejects_same_identity_package_substitution(self):
+        outdir = os.path.join(self.dir, "out-mixed-bytes")
+        self._build_suite(outdir, "stable", "flat")
+        self._build_suite(outdir, "edge", "reprepro")
+        flat_pool = Path(outdir, "apt/pool/stable/main/x/xpf",
+                         Path(self.deb).name)
+        with flat_pool.open("ab") as package:
+            package.write(b"substituted same-identity package bytes\n")
+        with self.assertRaisesRegex(SystemExit, "Size/SHA256"):
+            self._gate_apt(outdir, {"0.0.0-10123"})
+
+    @unittest.skipUnless(shutil.which("apt-ftparchive"),
+                         "needs apt-ftparchive for a flat target suite")
+    def test_empty_distributions_marker_does_not_disable_flat_binding(self):
+        outdir = os.path.join(self.dir, "out-empty-marker")
+        self._build_suite(outdir, "stable", "flat")
+        marker = Path(outdir, "apt/conf/distributions")
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("")
+        flat_pool = Path(outdir, "apt/pool/stable/main/x/xpf",
+                         Path(self.deb).name)
+        with flat_pool.open("ab") as package:
+            package.write(b"planted-marker substitution\n")
+        with self.assertRaisesRegex(SystemExit, "Size/SHA256"):
+            self._gate_apt(outdir, {"0.0.0-10123"})
+
+    @unittest.skipUnless(shutil.which("apt-ftparchive"),
+                         "needs apt-ftparchive for a flat target suite")
+    def test_flat_rebuild_retains_foreign_suite_marker(self):
+        outdir = os.path.join(self.dir, "out-reverse-mixed")
+        self._build_suite(outdir, "edge", "reprepro")
+        self._build_suite(outdir, "stable", "flat")
+        marker = Path(outdir, "apt/conf/distributions")
+        self.assertIn("Codename: edge", marker.read_text())
+        with self.assertRaisesRegex(
+                SystemExit, "outside the verified target image version"):
+            self._gate_apt(outdir, {"9.9.9"})
+    def test_real_reprepro_repo_passes_publish_gate(self):
+        outdir = os.path.join(self.dir, "out-gate")
+        env = dict(self.env)
+        env.update({"XPF_APT_TOOL": "reprepro", "XPF_GPG_KEY": self.fpr,
+                    "XPF_ARCHIVE_PUBKEY": self.archive_pub})
+        built = subprocess.run(
+            ["sh", str(_BUILDER), "--out", outdir, "--suite", "stable",
+             "--debs", self.deb],
+            capture_output=True, text=True, env=env, timeout=180)
+        self.assertEqual(built.returncode, 0, (built.stdout or "") +
+                         (built.stderr or ""))
+        self.assertTrue(Path(outdir, "apt/conf/distributions").is_file())
+        self.assertFalse(Path(outdir, "apt/pool/stable").exists(),
+                         "reprepro must not create a flat suite pool")
+        # Legacy builder output has this empty suite pool beside reprepro's
+        # retained pool; the gate must classify conf/distributions first.
+        Path(outdir, "apt/pool/stable/main/x/xpf").mkdir(parents=True)
+        gated = subprocess.run(
+            ["python3", str(_DIST / "publish.py"), "--dist", outdir,
+             "--channel", "stable", "--no-image"],
+            capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(gated.returncode, 0, (gated.stdout or "") +
+                         (gated.stderr or ""))
+        self.assertIn("gate PASSED", gated.stdout)
+
+
+    @unittest.skipUnless(shutil.which("apt-ftparchive"),
+                         "needs apt-ftparchive for a flat transition")
+    def test_flat_rebuild_removes_reprepro_marker_and_restores_gate(self):
+        outdir = os.path.join(self.dir, "out-transition")
+        env = dict(self.env)
+        env.pop("XPF_DEB_VERSION", None)
+        env.update({"XPF_APT_TOOL": "reprepro", "XPF_GPG_KEY": self.fpr,
+                    "XPF_ARCHIVE_PUBKEY": self.archive_pub})
+        reprepro = subprocess.run(
+            ["sh", str(_BUILDER), "--out", outdir, "--suite", "stable",
+             "--debs", self.deb],
+            capture_output=True, text=True, env=env, timeout=180)
+        self.assertEqual(reprepro.returncode, 0,
+                         (reprepro.stdout or "") + (reprepro.stderr or ""))
+        marker = Path(outdir, "apt/conf/distributions")
+        self.assertTrue(marker.is_file())
+
+        flat_env = dict(env, XPF_APT_TOOL="flat")
+        flat = subprocess.run(
+            ["sh", str(_BUILDER), "--out", outdir, "--suite", "stable",
+             "--debs", self.deb],
+            capture_output=True, text=True, env=flat_env, timeout=180)
+        self.assertEqual(flat.returncode, 0,
+                         (flat.stdout or "") + (flat.stderr or ""))
+        self.assertFalse(marker.exists(), "flat rebuild left reprepro marker")
+
+        gate_cmd = ["python3", str(_DIST / "publish.py"), "--dist", outdir,
+                    "--channel", "stable", "--no-image"]
+        gated = subprocess.run(gate_cmd, capture_output=True, text=True,
+                               env=flat_env, timeout=120)
+        self.assertEqual(gated.returncode, 0,
+                         (gated.stdout or "") + (gated.stderr or ""))
+
+        tampered_pkg = Path(self.dir, "tampered-pkg")
+        shutil.copytree(Path(self.dir, "pkg"), tampered_pkg)
+        payload = tampered_pkg / "usr/share/doc/xpf"
+        payload.mkdir(parents=True)
+        (payload / "tampered.txt").write_text("same identity, changed bytes\\n")
+        altered = Path(self.dir, "tampered.deb")
+        subprocess.run(["dpkg-deb", "--build", str(tampered_pkg), str(altered)],
+                       check=True, capture_output=True, timeout=60)
+        flat_pool = Path(outdir, "apt/pool/stable/main/x/xpf",
+                         Path(self.deb).name)
+        shutil.copyfile(altered, flat_pool)
+        rejected = subprocess.run(gate_cmd, capture_output=True, text=True,
+                                  env=flat_env, timeout=120)
+        self.assertNotEqual(rejected.returncode, 0,
+                            "flat gate accepted substituted package bytes")
+        self.assertIn("Size/SHA256",
+                      (rejected.stdout or "") + (rejected.stderr or ""))
 
     def _run_real(self, days):
         outdir = os.path.join(self.dir, "out-" + days)

@@ -719,8 +719,10 @@ dist-sign:
 	done; test -z "$$fail"
 
 # Build the signed apt repo (flat default; XPF_APT_TOOL=reprepro to opt in).
+# Bind the default dist-deb selection to the same authoritative version used by
+# `make deb`; stale and higher-version files in append-only dist-deb are ignored.
 dist-repo:
-	XPF_GPG_KEY="$(XPF_GPG_KEY)" sh scripts/dist/build-apt-repo.sh
+	XPF_GPG_KEY="$(XPF_GPG_KEY)" XPF_DEB_VERSION="$(DEB_VERSION)" sh scripts/dist/build-apt-repo.sh
 
 # Fail-closed publish: verifies every artifact is signed, then dispatches
 # XPF_PUBLISH_CMD once per URL. Refuses to upload anything unsigned.

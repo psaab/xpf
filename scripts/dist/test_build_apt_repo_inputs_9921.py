@@ -179,6 +179,64 @@ class RefusalTests(unittest.TestCase):
                 self.assertEqual(stray, [],
                                  f"content written outside --out: {stray}")
 
+    @unittest.skipUnless(shutil.which("dpkg-deb"),
+                         "needs dpkg-deb for a valid package fixture")
+    def test_pool_sink_containment_covers_flat_and_reprepro(self):
+        deb = os.path.join(self.dir, _FAKE_DEB_NAME)
+        _make_deb(deb)
+        for tool in ("flat", "reprepro"):
+            for sink in ("pool", "component"):
+                with self.subTest(tool=tool, sink=sink):
+                    outdir = os.path.join(self.dir, f"out-{tool}-{sink}")
+                    apt = Path(outdir) / "apt"
+                    victim = Path(self.dir) / f"victim-{tool}-{sink}"
+                    victim.mkdir()
+                    if sink == "pool":
+                        apt.mkdir(parents=True)
+                        (apt / "pool").symlink_to(
+                            victim, target_is_directory=True)
+                    else:
+                        pool_parent = apt / "pool"
+                        if tool == "flat":
+                            pool_parent /= "stable"
+                        pool_parent.mkdir(parents=True)
+                        (pool_parent / "main").symlink_to(
+                            victim, target_is_directory=True)
+
+                    rc, out = _build(
+                        outdir, deb,
+                        {"XPF_APT_TOOL": tool, "XPF_GPG_KEY": "TESTKEY9921"})
+                    self.assertNotEqual(rc, 0,
+                                        f"{tool} accepted a {sink} escape: {out[-500:]}")
+                    self.assertIn("escapes --out", out,
+                                  f"{tool} refusal names no escape: {out[-500:]}")
+                    stray = [str(path) for path in victim.rglob("*")
+                             if path.is_file()]
+                    self.assertEqual(stray, [],
+                                     f"{tool} wrote outside --out: {stray}")
+
+    @unittest.skipUnless(shutil.which("dpkg-deb"),
+                         "needs dpkg-deb for a valid package fixture")
+    def test_conf_symlink_refuses_without_deleting_external_marker(self):
+        deb = os.path.join(self.dir, _FAKE_DEB_NAME)
+        _make_deb(deb)
+        outdir = os.path.join(self.dir, "out-conf-symlink")
+        apt = Path(outdir) / "apt"
+        apt.mkdir(parents=True)
+        external = Path(self.dir) / "external-conf"
+        external.mkdir()
+        marker = external / "distributions"
+        marker.write_text("Codename: stable\n")
+        (apt / "conf").symlink_to(external, target_is_directory=True)
+
+        rc, out = _build(outdir, deb, {})
+        self.assertNotEqual(rc, 0, "flat build accepted symlinked apt/conf")
+        self.assertIn("apt conf path is a symlink; refusing", out)
+        self.assertEqual(marker.read_text(), "Codename: stable\n",
+                         "flat build deleted a marker through apt/conf symlink")
+        self.assertEqual(list((apt / "pool").rglob("*.deb")), [],
+                         "flat build pooled a package before refusing conf symlink")
+
 
 @unittest.skipUnless(_HAS_BUILD_TOOLS,
                      "needs apt-ftparchive + dpkg-deb for a real build")

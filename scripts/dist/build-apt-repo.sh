@@ -5,10 +5,10 @@
 # (no reprepro Berkeley DB to carry between runs). Opt into reprepro with
 # XPF_APT_TOOL=reprepro for a persistent publisher.
 #
-# Produces a standard dists/+pool/ tree under <out>/apt, ready to publish to
-# XPF_APT_BASE_URL (a directory-serving host — NOT GitHub Releases flat
-# assets). The on-disk layout is identical for both tools so install.sh's
-# deb822 source is unaffected by the choice.
+# Produces a standard dists/+pool/ apt repository under <out>/apt, ready to
+# publish to XPF_APT_BASE_URL (a directory-serving host — NOT GitHub Releases
+# flat assets). Flat uses suite-scoped pools; reprepro uses its shared component
+# pool. Both use the same install.sh deb822 source.
 #
 # Usage:
 #   build-apt-repo.sh [--out DIR] [--suite stable|edge] [--debs GLOB...]
@@ -21,6 +21,13 @@
 #   XPF_APT_SUITE      stable (default) | edge          (overridden by --suite)
 #   XPF_APT_COMPONENT  main (default)
 #   XPF_APT_ARCH       amd64 (default)
+#   XPF_DEB_VERSION    authoritative release version for the DEFAULT deb set
+#                      (e.g. make's DEB_VERSION). When --debs is omitted, the
+#                      dist-deb glob is filtered to filenames at this version,
+#                      then every selected filename is checked against dpkg-deb
+#                      Package/Version/Architecture. Other accumulated versions
+#                      are excluded, and explicit mixed/duplicate sets fail
+#                      closed. Unset -> fail closed: pass --debs.
 #   XPF_APT_VALID_DAYS Valid-Until horizon in days (default 365 — long, for a
 #                      manual/air-gap signing cadence; a short window REQUIRES
 #                      an automated re-sign job, §5.6 NIT-1).
@@ -87,33 +94,64 @@ case "${XPF_GPG_KEY-}" in
 '*) die "gpg key id must be single-line" ;;
 esac
 
-# Default deb set: the freshly built binary + appliance packages.
+# A default build must be bound to the Makefile's authoritative DEB_VERSION.
+# dist-deb is append-only, so choose only that version from its glob rather
+# than letting an old or planted higher-version artifact define the release.
+# Only the default glob is pinned; --debs is an explicit operator-selected set.
+VERSION_PINNED=0
 if [ -z "$DEBS" ]; then
-    DEBS=$(ls "$ROOT"/dist-deb/xpf_*.deb "$ROOT"/dist-deb/xpf-appliance_*.deb 2>/dev/null || true)
-    [ -n "$DEBS" ] || die "no debs in dist-deb (run 'make deb' first, or pass --debs)"
+    VERSION_PINNED=1
+    [ -n "${XPF_DEB_VERSION:-}" ] || die "XPF_DEB_VERSION is required with the default dist-deb set (run via 'make dist-repo' or pass --debs)"
+    _candidates=$(ls "$ROOT"/dist-deb/xpf_*.deb "$ROOT"/dist-deb/xpf-appliance_*.deb 2>/dev/null || true)
+    [ -n "$_candidates" ] || die "no debs in dist-deb (run 'make deb' first, or pass --debs)"
+    set -f
+    for _d in $_candidates; do
+        _base=$(basename "$_d")
+        case "$_base" in
+            xpf-appliance_*) _name=${_base#xpf-appliance_} ;;
+            xpf_*) _name=${_base#xpf_} ;;
+            *) continue ;;
+        esac
+        case "$_name" in *_*.deb) _filename_version=${_name%_*} ;; *) continue ;; esac
+        [ "$_filename_version" = "$XPF_DEB_VERSION" ] && DEBS="$DEBS $_d"
+    done
+    set +f
+    [ -n "$DEBS" ] || die "no dist-deb package has authoritative version '$XPF_DEB_VERSION'"
 fi
+
 
 APT="$OUT/apt"
 # Pool is keyed PER SUITE (#4201): a shared pool/<component> made each suite's
 # Packages scan the WHOLE component pool, so a stable rebuild after an edge
 # build listed the edge version in stable (validly signed) and a stable
 # subscriber could pull an edge build. Isolate the pool under the suite so each
-# suite's apt-ftparchive scan sees ONLY its own debs. The reprepro path (below)
-# isolates suites in its own database and does not use $POOL.
+# suite's apt-ftparchive scan sees ONLY its own debs. Reprepro isolates suites
+# in its own database and uses the shared component pool; do not create an empty
+# pool/<suite> there, which would mislead the publish gate's layout check.
 POOL="$APT/pool/$SUITE/$COMPONENT/x/xpf"
 DISTDIR="$APT/dists/$SUITE/$COMPONENT/binary-$ARCH"
-mkdir -p "$POOL" "$DISTDIR"
+mkdir -p "$DISTDIR"
+set -- "$DISTDIR"
+if [ "$TOOL" = reprepro ]; then
+    REPREPRO_POOL="$APT/pool/$COMPONENT"
+    mkdir -p "$REPREPRO_POOL"
+    set -- "$REPREPRO_POOL" "$@"
+else
+    mkdir -p "$POOL"
+    set -- "$POOL" "$@"
+fi
+
 # F-066b/#9921 (parent review): lexical validation cannot see a PRE-PLANTED
-# symlink: $OUT/apt/dists/stable/<escape> -> /external makes a lexically
-# VALID COMPONENT=escape resolve outside --out, and mkdir -p happily creates
-# binary-$ARCH through it. Resolve both COMPONENT-derived sinks and verify
-# containment within the resolved --out; die loudly on escape. (Static
-# subpaths like conf/ are the operator's exclusive-dir responsibility; only
-# validated-input-derived sinks are pinned here. A planter racing mkdir
-# itself is narrowed to microseconds by this ordering, not closed — shell
-# cannot mkdir with O_NOFOLLOW.)
+# symlink: COMPONENT-derived paths can resolve outside --out, and mkdir -p
+# happily creates their child paths through it. Resolve every sink created
+# above (including reprepro's $APT/pool/$COMPONENT) and verify containment
+# within the resolved --out; die loudly on escape. Reprepro's other static
+# paths in conf/ remain the operator's responsibility; flat-mode stale-marker
+# removal below refuses a symlinked conf directory.
+# A planter racing mkdir is narrowed to microseconds by this ordering, not
+# closed — shell cannot mkdir with O_NOFOLLOW.
 _out_resolved=$(cd "$OUT" && pwd -P) || die "cannot resolve --out $OUT"
-for _d in "$POOL" "$DISTDIR"; do
+for _d do
     _r=$(cd "$_d" 2>/dev/null && pwd -P) || _r=""
     case "${_r:-MISSING}" in
         "$_out_resolved"|"$_out_resolved"/*) : ;;
@@ -121,6 +159,24 @@ for _d in "$POOL" "$DISTDIR"; do
     esac
 done
 unset _d _r _out_resolved
+# A flat rebuild can reuse output from an earlier reprepro build. Remove only
+# this suite's mode marker; retain foreign-suite stanzas in a mixed tree.
+# Reject a symlinked conf directory before reading or unlinking its child.
+if [ "$TOOL" != reprepro ] && [ -d "$APT/conf" ]; then
+    [ ! -L "$APT/conf" ] || die "apt conf path is a symlink; refusing to remove stale reprepro marker"
+    if awk -v suite="$SUITE" '
+        /^Codename:/ {
+            codename = substr($0, 10)
+            sub(/^[[:space:]]+/, "", codename)
+            sub(/[[:space:]]+$/, "", codename)
+            if (codename == suite) found = 1
+        }
+        END { exit !found }
+    ' "$APT/conf/distributions"; then
+        rm -f "$APT/conf/distributions"
+    fi
+fi
+
 
 info "apt repo tool: $TOOL, suite: $SUITE, arch: $ARCH, out: $APT"
 
@@ -176,6 +232,53 @@ EOF
 fi
 
 # ── flat signed repo (default) ───────────────────────────────────────────
+# Bind every selected filename to its dpkg control identity. The explicit
+# input list is the expected set; the default set is additionally pinned to
+# XPF_DEB_VERSION. Only the two packages built by this project may enter the
+# flat pool, and each package/architecture may appear once.
+command -v dpkg-deb >/dev/null 2>&1 || die "dpkg-deb not found"
+_seen_packages='
+'
+_set_version=""
+set -f
+for d in $DEBS; do
+    set +f
+    case "$d" in *[!-./+_A-Za-z0-9]*) die "deb path contains an unsupported char: $d";; esac
+    _base=$(basename "$d")
+    case "$_base" in
+        xpf-appliance_*) _filename_package=xpf-appliance; _name=${_base#xpf-appliance_} ;;
+        xpf_*) _filename_package=xpf; _name=${_base#xpf_} ;;
+        *) die "unsupported package filename: $_base" ;;
+    esac
+    case "$_name" in *_*.deb) ;; *) die "malformed package filename: $_base" ;; esac
+    _filename_version=${_name%_*}
+    _filename_arch=${_name##*_}
+    _filename_arch=${_filename_arch%.deb}
+    [ -n "$_filename_version" ] && [ -n "$_filename_arch" ] || die "malformed package filename: $_base"
+    _package=$(dpkg-deb -f "$d" Package 2>/dev/null) || die "cannot read Package from $d"
+    _version=$(dpkg-deb -f "$d" Version 2>/dev/null) || die "cannot read Version from $d"
+    _arch=$(dpkg-deb -f "$d" Architecture 2>/dev/null) || die "cannot read Architecture from $d"
+    [ "$_package" = "$_filename_package" ] || die "package identity mismatch for $_base: Package=$_package"
+    [ "$_version" = "$_filename_version" ] || die "package identity mismatch for $_base: filename Version=$_filename_version, dpkg-deb Version=$_version"
+    [ "$_arch" = "$_filename_arch" ] || die "package identity mismatch for $_base: filename Architecture=$_filename_arch, dpkg-deb Architecture=$_arch"
+    [ "$_package" = xpf ] || [ "$_package" = xpf-appliance ] || die "unsupported package identity: $_package"
+    [ "$_arch" = "$ARCH" ] || die "package $_base Architecture=$_arch does not match repo arch $ARCH"
+    if [ "$VERSION_PINNED" = 1 ] && [ -n "${XPF_DEB_VERSION:-}" ]; then
+        [ "$_version" = "$XPF_DEB_VERSION" ] || die "package $_base Version=$_version does not match authoritative XPF_DEB_VERSION=$XPF_DEB_VERSION"
+    fi
+    case "$_seen_packages" in *"
+$_package/$_arch
+"*) die "duplicate package identity in expected set: $_package/$_arch" ;; esac
+    _seen_packages="${_seen_packages}${_package}/${_arch}
+"
+    if [ -z "$_set_version" ]; then
+        _set_version=$_version
+    elif [ "$_version" != "$_set_version" ]; then
+        die "package versions differ in expected set: $_set_version and $_version"
+    fi
+    set -f
+done
+set +f
 command -v apt-ftparchive >/dev/null 2>&1 || die "apt-ftparchive not found (apt-get install apt-utils)"
 
 # Clear stale signed metadata BEFORE rebuilding (Codex-H2): an unsigned
@@ -185,18 +288,19 @@ command -v apt-ftparchive >/dev/null 2>&1 || die "apt-ftparchive not found (apt-
 rm -f "$APT/dists/$SUITE/Release" "$APT/dists/$SUITE/Release.gpg" \
       "$APT/dists/$SUITE/InRelease"
 
-# DEBS holds paths this script controls (built debs / explicit --debs). Guard
-# the word-split loop against pathname globbing with `set -f` (A5); paths must
-# not contain whitespace (asserted below). `+` is allowed: `make deb` names
-# every package `0.0.N+g<sha>` (Makefile DEB_VERSION), so refusing it breaks
-# the documented flat path on the project's own artifacts (#10767 F3).
+# Flat repos represent the current selected set, not the union of every file
+# ever copied into this persistent pool. Remove all prior package archives in
+# the suite/component before copying the validated expected set; apt-ftparchive
+# below indexes the whole component tree.
+find "$APT/pool/$SUITE/$COMPONENT" -name '*.deb' -exec rm -f -- {} + \
+    || die "cannot prune old debs from $APT/pool/$SUITE/$COMPONENT"
+
+# DEBS was identity-checked above. Guard the word-split loop against pathname
+# globbing with `set -f`; paths must not contain whitespace (asserted above).
 set -f
 for d in $DEBS; do
-    set +f
-    case "$d" in *[!-./+_A-Za-z0-9]*) die "deb path contains an unsupported char: $d";; esac
     cp -f "$d" "$POOL/"
     info "pooled $(basename "$d")"
-    set -f
 done
 set +f
 
