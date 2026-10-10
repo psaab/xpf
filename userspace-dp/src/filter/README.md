@@ -1319,15 +1319,21 @@ plain `then dscp` is not applied on lo0); only the drop is enforced.
 ### `then reject` synthesizes an active reply (#2521)
 
 `FilterAction::Reject` (`then reject`) normally synthesizes an active reply:
-TCP gets a RST except when a known fabric ingress carries a synthetic V1/V2
-source-MAC stamp (#12051); non-TCP gets the ICMP/ICMPv6 Destination
-Unreachable selected by the term's configured `then reject <message-type>`.
-A bare filter `then reject` defaults to administratively-prohibited. This is
-distinct from security-policy `reject` (#11303), which sends TCP RST for
-TCP subject to the same stamp guard and port-unreachable for UDP only;
-other non-TCP/UDP protocols are dropped silently. Zone `tcp-rst`
-session-miss RSTs on those known fabric stamps are suppressed by the same
-gate. `FilterAction::Discard` (`then discard`) remains a silent drop.
+TCP gets a RST; non-TCP gets the ICMP/ICMPv6 Destination Unreachable selected
+by the term's configured `then reject <message-type>`. A bare filter
+`then reject` defaults to administratively-prohibited. Before synthesis, the
+shared reply gate suppresses every reflected reply when the arrival is on a
+known fabric ingress carrying a synthetic V1/V2 source-MAC stamp (#12051,
+extended from TCP RSTs to all reject-reply protocols by #12319). This is not
+a TCP-only exception: it also suppresses the ICMP/ICMPv6 reply that a stamped
+UDP or other non-TCP filter reject would otherwise generate.
+
+This differs from security-policy `reject` (#11303), which sends TCP RST for
+TCP and port-unreachable for UDP only; other non-TCP/UDP policy rejects are
+dropped silently. The same stamp gate suppresses every reply that the policy
+path would otherwise emit. Zone `tcp-rst` session-miss RSTs on those known
+fabric stamps are suppressed by the same gate. `FilterAction::Discard`
+(`then discard`) remains a silent drop.
 
 Both sources use the shared `enqueue_reject_reply` synthesis,
 output-classification, and suppression machinery. The policy wrapper

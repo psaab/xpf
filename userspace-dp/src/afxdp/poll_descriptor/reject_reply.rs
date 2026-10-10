@@ -1,9 +1,12 @@
 // #2089/#11303 policy `then reject` replies generally follow Junos semantics:
 // TCP gets a RST unless a synthetic V1/V2 fabric source MAC on a fabric
 // ingress makes it unreplyable (stamp-shaped native MACs still get RSTs);
-// UDP gets ICMP/ICMPv6 port-unreachable, and other protocols drop.
-// Plain `then deny` stays silent. Junos zone `tcp-rst` uses the same reply
-// machinery only for non-SYN TCP transit session misses, not policy denies.
+// UDP gets ICMP/ICMPv6 port-unreachable except on a stamped fabric arrival,
+// where the reflected ICMP would target the synthetic stamp, not the client
+// (#12319 — suppressed exactly like the #12051 TCP RST, logged as DENY).
+// Other protocols drop. Plain `then deny` stays silent. Junos zone `tcp-rst`
+// uses the same reply machinery only for non-SYN TCP session misses, not
+// policy denies.
 // Lifted out of poll_descriptor/mod.rs so the hot ingress loop does not carry
 // these cold-path bodies in its codegen unit, mirroring cookie_reply.rs.
 //
@@ -256,12 +259,17 @@ fn enqueue_reject_reply(
     // cannot reach the client. Treat it as unreplyable before building or
     // charging the generated-reply budget/rate limit. This shared choke covers
     // policy/filter rejects and zone `tcp-rst` session-miss replies.
-    if meta.protocol == PROTO_TCP
-        && crate::afxdp::forwarding::ingress_is_fabric(forwarding, ingress_ifindex)
-        && packet_frame
-            .get(6..12)
-            .is_some_and(crate::afxdp::forwarding::is_synthetic_fabric_source_mac)
-    {
+    // #12319: the ICMP/ICMPv6 leg reflects the inbound source MAC identically
+    // (`ingress_reply_l2`), so a stamped-fabric UDP reject would emit
+    // port-unreachable addressed to the synthetic stamp — undeliverable
+    // backscatter counted as sent with a REJECT event, against the #3615
+    // "never logs a reject that did not happen" contract. The gate is
+    // therefore protocol-agnostic: any stamped fabric arrival is unreplyable.
+    if crate::afxdp::forwarding::ingress_has_synthetic_fabric_source(
+        forwarding,
+        ingress_ifindex,
+        packet_frame,
+    ) {
         return false;
     }
 

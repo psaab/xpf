@@ -54,6 +54,18 @@ pub(super) fn enqueue_syn_cookie_reply(
     reply: SynCookieReply,
     counters: &mut BatchCounters,
 ) -> bool {
+    // #12319 residual: both SYN-cookie SYN-ACK and ACK-RST reflect the
+    // inbound source MAC. A stamped fabric source is synthetic, so such a
+    // reply is unreachable backscatter; suppress it before consuming the TX
+    // budget or incrementing a sent counter.
+    if crate::afxdp::forwarding::ingress_has_synthetic_fabric_source(
+        forwarding,
+        ifindex,
+        packet_frame,
+    ) {
+        return false;
+    }
+
     if !syn_cookie_reply_budget_available(tx_pipeline) {
         counters.touched = true;
         counters.syn_cookie_reply_budget_drops += 1;

@@ -220,6 +220,29 @@ fn stamped_fabric_reject_forwarding() -> ForwardingState {
     forwarding
 }
 
+fn producer_minted_v2_reject_stamp(forwarding: &mut ForwardingState) -> [u8; 6] {
+    let scope_id = crate::afxdp::forwarding::fabric_nat_scope_stamp_id(7, "reth0.7", "default");
+    forwarding
+        .ifindex_to_fabric_nat_scope_id
+        .insert(21, scope_id);
+    forwarding.fabric_nat_scope_id_to_identity.insert(
+        scope_id,
+        crate::afxdp::types::FabricNatScopeIdentity {
+            zone_id: 7,
+            ifindex: 21,
+            redundancy_group: 1,
+        },
+    );
+    crate::afxdp::forwarding::resolve_fabric_redirect_for_ingress_identity(
+        forwarding,
+        Some(7),
+        Some(21),
+    )
+    .expect("V2 ingress-identity fabric redirect")
+    .src_mac
+    .expect("V2 fabric source stamp")
+}
+
 #[test]
 fn policy_reject_udp_uses_port_unreachable_11303_v4() {
     use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
@@ -2139,12 +2162,11 @@ fn unstamped_fabric_policy_reject_still_enqueues_tcp_rst_12051() {
     assert_eq!(&reply.bytes[..6], client_mac.as_slice());
 }
 
-/// #12051 M3 control: stamp suppression is TCP-only in this change. UDP
-/// keeps emitting ICMPv4 port-unreachable toward the stamp MAC — RECORDED
-/// current behavior, known-unreachable, pending follow-up #12319 (which
-/// will extend the gate to the ICMP leg and update this test).
+/// #12319 M3: both legs of a stamped-fabric UDP policy reject must fail closed.
+/// ICMP would reflect the synthetic source stamp, so no reply is queued or
+/// counted and the policy-deny event reports DENY rather than REJECT.
 #[test]
-fn stamped_fabric_udp_policy_reject_keeps_port_unreachable_12051() {
+fn stamped_fabric_udp_policy_reject_suppresses_icmp_and_logs_deny_12319() {
     use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
     let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
     crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
@@ -2155,31 +2177,150 @@ fn stamped_fabric_udp_policy_reject_keeps_port_unreachable_12051() {
     frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x02]);
     meta.ingress_ifindex = 21;
     let forwarding = stamped_fabric_reject_forwarding();
+    let (handle, rx) = unlimited_event_handle();
     let mut pipeline = tx_pipeline(
         SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
         SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
     );
     let mut counters = BatchCounters::default();
 
-    assert!(enqueue_policy_reject_reply(
+    deny_reply_and_emit(
         &mut pipeline,
         &forwarding,
+        Some(&handle),
         21,
         &frame,
         meta,
         &flow,
         &mut counters,
-    ));
+        &NatDecision::default(),
+        7,
+        9,
+        0,
+        101,
+        PolicyAction::Reject,
+        0,
+        123,
+    );
+
+    assert!(pipeline.pending_tx_local.is_empty());
+    assert_eq!(counters.policy_reject_sent, 0);
+    assert_eq!(counters.policy_reject_reply_budget_drops, 0);
+    assert_eq!(counters.policy_reject_rate_limit_drops, 0);
+    let event = rx
+        .try_recv()
+        .expect("policy-deny event frame")
+        .decode_dataplane_event()
+        .expect("policy-deny payload");
+    assert_eq!(event.action, RT_FLOW_ACTION_DENY);
+    assert!(rx.try_recv().is_err());
+}
+
+/// #12319: a V2 stamp produced by the ingress-identity redirect helper is
+/// suppressed by the same shared gate as the V1 stamp above.
+#[test]
+fn v2_stamped_fabric_udp_policy_reject_suppresses_icmp_12319() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (mut frame, mut meta, flow) = policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
+    meta.ingress_ifindex = 21;
+    let mut forwarding = stamped_fabric_reject_forwarding();
+    let source_mac = producer_minted_v2_reject_stamp(&mut forwarding);
+    frame[6..12].copy_from_slice(&source_mac);
+    let (handle, rx) = unlimited_event_handle();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+
+    deny_reply_and_emit(
+        &mut pipeline,
+        &forwarding,
+        Some(&handle),
+        21,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+        &NatDecision::default(),
+        7,
+        9,
+        0,
+        101,
+        PolicyAction::Reject,
+        0,
+        123,
+    );
+
+    assert!(pipeline.pending_tx_local.is_empty());
+    assert_eq!(counters.policy_reject_sent, 0);
+    let event = rx
+        .try_recv()
+        .expect("policy-deny event frame")
+        .decode_dataplane_event()
+        .expect("policy-deny payload");
+    assert_eq!(event.action, RT_FLOW_ACTION_DENY);
+}
+
+/// #12319 positive control: an unstamped fabric UDP reject keeps its
+/// peer-routable ICMPv4 port-unreachable, counts the queued reply, and logs
+/// REJECT rather than over-suppressing every fabric ingress.
+#[test]
+fn unstamped_fabric_udp_policy_reject_still_enqueues_icmp_12319() {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (frame, mut meta, flow) = policy_reject_packet_v4(crate::ip_proto::PROTO_UDP);
+    let client_mac = frame[6..12].to_vec();
+    meta.ingress_ifindex = 21;
+    let forwarding = stamped_fabric_reject_forwarding();
+    let (handle, rx) = unlimited_event_handle();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+
+    deny_reply_and_emit(
+        &mut pipeline,
+        &forwarding,
+        Some(&handle),
+        21,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+        &NatDecision::default(),
+        7,
+        9,
+        0,
+        101,
+        PolicyAction::Reject,
+        0,
+        123,
+    );
+
     assert_eq!(counters.policy_reject_sent, 1);
     let reply = pipeline
         .pending_tx_local
         .pop_front()
-        .expect("stamped-fabric UDP port-unreachable");
-    assert_eq!(
-        &reply.bytes[34..36],
-        &[3, 3],
-        "stamped-fabric UDP reject still returns ICMPv4 port-unreachable"
-    );
+        .expect("unstamped-fabric UDP ICMP reply");
+    assert_eq!(&reply.bytes[..6], client_mac.as_slice());
+    assert_eq!(&reply.bytes[34..36], &[3, 3]);
+    let event = rx
+        .try_recv()
+        .expect("policy-deny event frame")
+        .decode_dataplane_event()
+        .expect("policy-deny payload");
+    assert_eq!(event.action, RT_FLOW_ACTION_REJECT);
 }
 
 /// #4499 E2 (reject half): a policy `then reject` deny path emits a single
@@ -2853,6 +2994,86 @@ fn stamped_fabric_filter_reject_suppresses_tcp_rst_and_logs_deny_12051() {
         event.action, RT_FLOW_ACTION_DENY,
         "a suppressed filter reject on the poll path must log DENY, not REJECT"
     );
+}
+
+/// #12319 source-equivalent coverage for non-TCP filter rejects. Both UDP and
+/// ICMP would reflect an unreachable to the synthetic source stamp, so each
+/// must share the protocol-agnostic reject gate.
+fn assert_stamped_fabric_filter_reject_suppressed(protocol: u8) {
+    use super::cookie_reply::SYN_COOKIE_REPLY_PENDING_RESERVE;
+    use super::filter::{PendingFilterLog, filter_terminal};
+    use crate::afxdp::event_emit::FilterLogSource;
+    let _g = crate::afxdp::icmp_ratelimit::global_bucket_test_lock();
+    crate::afxdp::icmp_ratelimit::reset_bucket_for_test(
+        crate::afxdp::icmp_ratelimit::GeneratedErrorReason::Reject,
+        0,
+    );
+    let (mut frame, mut meta, flow) = policy_reject_packet_v4(protocol);
+    let mut forwarding = stamped_fabric_reject_forwarding();
+    let source_mac = if protocol == crate::ip_proto::PROTO_ICMP {
+        producer_minted_v2_reject_stamp(&mut forwarding)
+    } else {
+        [0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, 0x00, 0x02]
+    };
+    frame[6..12].copy_from_slice(&source_mac);
+    meta.ingress_ifindex = 21;
+    let (handle, rx) = unlimited_event_handle();
+    let mut pipeline = tx_pipeline(
+        SYN_COOKIE_REPLY_PENDING_RESERVE * 2,
+        SYN_COOKIE_REPLY_PENDING_RESERVE + 1,
+    );
+    let mut counters = BatchCounters::default();
+
+    let drop = filter_terminal(
+        &mut pipeline,
+        &forwarding,
+        Some(&handle),
+        21,
+        &frame,
+        meta,
+        &flow,
+        &mut counters,
+        crate::filter::FilterAction::Reject(crate::filter::RejectMessage::ADMIN_PROHIBITED),
+        Some(PendingFilterLog {
+            ingress_zone_id: 7,
+            egress_zone_id: 0,
+            filter_id: 23,
+            term_id: 6,
+            action: crate::filter::FilterAction::Reject(
+                crate::filter::RejectMessage::ADMIN_PROHIBITED,
+            ),
+            source: FilterLogSource::Input,
+            app_id: 0,
+        }),
+        123,
+    );
+
+    assert!(drop, "a filter reject terminal action drops the packet");
+    assert!(
+        pipeline.pending_tx_local.is_empty(),
+        "a stamped-fabric protocol {protocol} filter reject must not queue an \
+         unreachable reply to the synthetic source MAC"
+    );
+    assert_eq!(counters.filter_reject_sent, 0);
+    assert_eq!(counters.policy_reject_sent, 0);
+    let event = rx
+        .try_recv()
+        .expect("filter-log event frame")
+        .decode_dataplane_event()
+        .expect("filter-log payload");
+    assert_eq!(event.action, RT_FLOW_ACTION_DENY);
+}
+
+#[test]
+fn stamped_fabric_udp_filter_reject_suppresses_icmp_and_logs_deny_12319() {
+    assert_stamped_fabric_filter_reject_suppressed(crate::ip_proto::PROTO_UDP);
+}
+
+/// #12319 F3 / M3: the reject gate is protocol-agnostic, including ICMP
+/// filter rejects whose normal response is administratively-prohibited.
+#[test]
+fn stamped_fabric_icmp_filter_reject_suppresses_unreachable_12319() {
+    assert_stamped_fabric_filter_reject_suppressed(crate::ip_proto::PROTO_ICMP);
 }
 
 /// #12051 F2(b) / M6+M6b fail-on-revert: the stamped-fabric gate runs BEFORE
