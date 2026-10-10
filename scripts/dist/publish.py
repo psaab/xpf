@@ -1056,10 +1056,17 @@ def gate_apt(dist, channel, expected_versions=None):
             # Flat repositories have a suite-scoped pool and exact-set
             # semantics. Reprepro keeps its own package history in a shared
             # component pool; preserve that opt-in backend's retention policy.
-            # Prefer its explicit marker: older builders also created an empty
-            # pool/<suite> directory for reprepro.
-            if os.path.isfile(os.path.join(apt_root, "conf",
-                                           "distributions")):
+            # Older builders also created an empty pool/<suite> directory for
+            # reprepro, so classify per suite using its Codename stanza rather
+            # than treating the repo-global file's presence as authoritative.
+            _conf = os.path.join(apt_root, "conf", "distributions")
+            _codenames = set()
+            if os.path.isfile(_conf):
+                with open(_conf) as _f:
+                    _codenames = {line.split(":", 1)[1].strip()
+                                  for line in _f
+                                  if line.startswith("Codename:")}
+            if suite in _codenames:
                 info(f"apt InRelease ({suite}) uses reprepro's retained pool")
             elif os.path.isdir(os.path.join(apt_root, "pool", suite)):
                 suite_versions = expected_versions if suite == channel else None

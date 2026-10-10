@@ -132,18 +132,22 @@ POOL="$APT/pool/$SUITE/$COMPONENT/x/xpf"
 DISTDIR="$APT/dists/$SUITE/$COMPONENT/binary-$ARCH"
 mkdir -p "$DISTDIR"
 set -- "$DISTDIR"
-if [ "$TOOL" != reprepro ]; then
+if [ "$TOOL" = reprepro ]; then
+    REPREPRO_POOL="$APT/pool/$COMPONENT"
+    mkdir -p "$REPREPRO_POOL"
+    set -- "$REPREPRO_POOL" "$@"
+else
     mkdir -p "$POOL"
     set -- "$POOL" "$@"
 fi
 
 # F-066b/#9921 (parent review): lexical validation cannot see a PRE-PLANTED
-# symlink: $OUT/apt/dists/stable/<escape> -> /external makes a lexically
-# valid COMPONENT=escape resolve outside --out, and mkdir -p happily creates
-# binary-$ARCH through it. Resolve each COMPONENT-derived sink created above
-# and verify containment within the resolved --out; die loudly on escape.
-# Static reprepro subpaths in conf/ remain the operator's responsibility;
-# flat-mode stale-marker removal below refuses a symlinked conf directory.
+# symlink: COMPONENT-derived paths can resolve outside --out, and mkdir -p
+# happily creates their child paths through it. Resolve every sink created
+# above (including reprepro's $APT/pool/$COMPONENT) and verify containment
+# within the resolved --out; die loudly on escape. Reprepro's other static
+# paths in conf/ remain the operator's responsibility; flat-mode stale-marker
+# removal below refuses a symlinked conf directory.
 # A planter racing mkdir is narrowed to microseconds by this ordering, not
 # closed — shell cannot mkdir with O_NOFOLLOW.
 _out_resolved=$(cd "$OUT" && pwd -P) || die "cannot resolve --out $OUT"
@@ -155,12 +159,22 @@ for _d do
     esac
 done
 unset _d _r _out_resolved
-# A flat rebuild can reuse output from an earlier reprepro build. Remove the
-# mode marker so the publish gate applies flat pool/index binding; reject a
-# symlinked conf directory before unlinking its child.
+# A flat rebuild can reuse output from an earlier reprepro build. Remove only
+# this suite's mode marker; retain foreign-suite stanzas in a mixed tree.
+# Reject a symlinked conf directory before reading or unlinking its child.
 if [ "$TOOL" != reprepro ] && [ -d "$APT/conf" ]; then
     [ ! -L "$APT/conf" ] || die "apt conf path is a symlink; refusing to remove stale reprepro marker"
-    rm -f "$APT/conf/distributions"
+    if awk -v suite="$SUITE" '
+        /^Codename:/ {
+            codename = substr($0, 10)
+            sub(/^[[:space:]]+/, "", codename)
+            sub(/[[:space:]]+$/, "", codename)
+            if (codename == suite) found = 1
+        }
+        END { exit !found }
+    ' "$APT/conf/distributions"; then
+        rm -f "$APT/conf/distributions"
+    fi
 fi
 
 

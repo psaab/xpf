@@ -37,15 +37,22 @@ confirms the flat gate is restored after that transition.
 from __future__ import annotations
 
 import email.utils
+import importlib.util
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _DIST = Path(__file__).resolve().parent
 _BUILDER = _DIST / "build-apt-repo.sh"
+_SPEC = importlib.util.spec_from_file_location(
+    "publish_10123", _DIST / "publish.py")
+publish = importlib.util.module_from_spec(_SPEC)
+assert _SPEC.loader is not None
+_SPEC.loader.exec_module(publish)
 
 _HAS_REAL_REPREPRO = bool(shutil.which("reprepro")
                           and shutil.which("gpg")
@@ -278,6 +285,75 @@ class RealRepreproTests(unittest.TestCase):
         subprocess.run(["dpkg-deb", "--build", pkgdir, self.deb], check=True,
                        capture_output=True, timeout=60)
 
+
+    def _build_suite(self, outdir, suite, tool):
+        env = dict(self.env)
+        env.update({"XPF_APT_TOOL": tool, "XPF_GPG_KEY": self.fpr,
+                    "XPF_ARCHIVE_PUBKEY": self.archive_pub})
+        built = subprocess.run(
+            ["sh", str(_BUILDER), "--out", outdir, "--suite", suite,
+             "--debs", self.deb],
+            capture_output=True, text=True, env=env, timeout=180)
+        self.assertEqual(built.returncode, 0, (built.stdout or "") +
+                         (built.stderr or ""))
+        return env
+
+    def _gate_apt(self, outdir, expected_versions):
+        with patch.dict(os.environ,
+                        {"XPF_ARCHIVE_PUBKEY": self.archive_pub}):
+            publish.gate_apt(outdir, "stable", expected_versions)
+
+    @unittest.skipUnless(shutil.which("apt-ftparchive"),
+                         "needs apt-ftparchive for a flat target suite")
+    def test_mixed_tree_enforces_flat_target_version_binding(self):
+        outdir = os.path.join(self.dir, "out-mixed-version")
+        self._build_suite(outdir, "stable", "flat")
+        self._build_suite(outdir, "edge", "reprepro")
+        marker = Path(outdir, "apt/conf/distributions")
+        self.assertIn("Codename: edge", marker.read_text())
+        with self.assertRaisesRegex(
+                SystemExit, "outside the verified target image version"):
+            self._gate_apt(outdir, {"9.9.9"})
+
+    @unittest.skipUnless(shutil.which("apt-ftparchive"),
+                         "needs apt-ftparchive for a flat target suite")
+    def test_mixed_tree_rejects_same_identity_package_substitution(self):
+        outdir = os.path.join(self.dir, "out-mixed-bytes")
+        self._build_suite(outdir, "stable", "flat")
+        self._build_suite(outdir, "edge", "reprepro")
+        flat_pool = Path(outdir, "apt/pool/stable/main/x/xpf",
+                         Path(self.deb).name)
+        with flat_pool.open("ab") as package:
+            package.write(b"substituted same-identity package bytes\n")
+        with self.assertRaisesRegex(SystemExit, "Size/SHA256"):
+            self._gate_apt(outdir, {"0.0.0-10123"})
+
+    @unittest.skipUnless(shutil.which("apt-ftparchive"),
+                         "needs apt-ftparchive for a flat target suite")
+    def test_empty_distributions_marker_does_not_disable_flat_binding(self):
+        outdir = os.path.join(self.dir, "out-empty-marker")
+        self._build_suite(outdir, "stable", "flat")
+        marker = Path(outdir, "apt/conf/distributions")
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("")
+        flat_pool = Path(outdir, "apt/pool/stable/main/x/xpf",
+                         Path(self.deb).name)
+        with flat_pool.open("ab") as package:
+            package.write(b"planted-marker substitution\n")
+        with self.assertRaisesRegex(SystemExit, "Size/SHA256"):
+            self._gate_apt(outdir, {"0.0.0-10123"})
+
+    @unittest.skipUnless(shutil.which("apt-ftparchive"),
+                         "needs apt-ftparchive for a flat target suite")
+    def test_flat_rebuild_retains_foreign_suite_marker(self):
+        outdir = os.path.join(self.dir, "out-reverse-mixed")
+        self._build_suite(outdir, "edge", "reprepro")
+        self._build_suite(outdir, "stable", "flat")
+        marker = Path(outdir, "apt/conf/distributions")
+        self.assertIn("Codename: edge", marker.read_text())
+        with self.assertRaisesRegex(
+                SystemExit, "outside the verified target image version"):
+            self._gate_apt(outdir, {"9.9.9"})
     def test_real_reprepro_repo_passes_publish_gate(self):
         outdir = os.path.join(self.dir, "out-gate")
         env = dict(self.env)
