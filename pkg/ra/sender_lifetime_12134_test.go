@@ -33,6 +33,7 @@ func TestBuildRA_12134_InheritedLifetimesAreBounded(t *testing.T) {
 				DNSServers:         []string{"2001:db8::53"},
 				NAT64Prefix:        "64:ff9b::/96",
 			})
+			warningsBefore := strings.Count(log.String(), "clamped inherited PREF64 lifetime")
 			ra := s.buildRA()
 			wire, err := ndp.MarshalMessage(ra)
 			if err != nil {
@@ -87,6 +88,14 @@ func TestBuildRA_12134_InheritedLifetimesAreBounded(t *testing.T) {
 			}
 			// A repeat build must not repeat the saturation warning for this sender.
 			s.buildRA()
+			warningDelta := strings.Count(log.String(), "clamped inherited PREF64 lifetime") - warningsBefore
+			wantWarnings := 0
+			if wantOptionLifetime > config.RAPREF64MaxLifetimeSeconds {
+				wantWarnings = 1
+			}
+			if warningDelta != wantWarnings {
+				t.Errorf("lifetime %d PREF64 saturation warnings = %d, want %d", lifetime, warningDelta, wantWarnings)
+			}
 		})
 	}
 
