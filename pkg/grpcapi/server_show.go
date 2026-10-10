@@ -256,7 +256,7 @@ func (s *Server) showText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 	case "sessions-top:bytes", "sessions-top:packets":
 		// #1043 Phase 5: case body extracted to server_show_flow.go
 		// #5319: bounded top-K selection; surface iterator errors.
-		if err := s.showSessionsTop(cfg, req.Topic, &buf); err != nil {
+		if err := s.showSessionsTop(ctx, cfg, req.Topic, &buf); err != nil {
 			return nil, err
 		}
 
