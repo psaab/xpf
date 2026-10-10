@@ -162,7 +162,7 @@ func TestUnboundControlTransportStartsHeartbeatSocket11384(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	t.Cleanup(manager.StopHeartbeat)
-	d.startHeartbeatWithRetry(ctx, "lo", "127.0.0.1", vrfDevice)
+	d.startHeartbeatWithRetry(ctx, "lo", "127.0.0.1")
 	if !manager.HeartbeatRunning() {
 		t.Fatal("heartbeat socket did not start without a VRF binding")
 	}

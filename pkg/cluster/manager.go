@@ -853,6 +853,15 @@ func (m *Manager) HeartbeatControlInterface() string {
 	return m.hbControlIface
 }
 
+// HeartbeatVRFDevice returns the VRF device supplied to the last successfully
+// published heartbeat start. A non-empty value means its sockets were created
+// with SO_BINDTODEVICE for that device.
+func (m *Manager) HeartbeatVRFDevice() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.hbVRFDevice
+}
+
 // controlLinkAuthKey returns the configured cluster control-channel PSK (raw
 // bytes), or nil when no key is configured. The value is a secret and must
 // never be logged. The slice is only ever replaced (never mutated in place),

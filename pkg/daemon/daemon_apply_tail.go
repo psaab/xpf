@@ -350,7 +350,7 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, networkdErr, applyErr, 
 	// Only restart if comms were previously started (activeClusterTransport
 	// is non-zero) and the new config differs.
 	if d.cluster != nil && d.daemonCtx != nil {
-		newTransport := clusterTransportFromConfig(cfg)
+		newTransport := d.clusterTransportForConfig(cfg)
 		// #6290: ONE guarded snapshot. The boot startClusterComms writes this
 		// field holding neither applySem nor clusterCommsMu, and a DHCP
 		// lease-change callback re-enters this step on a goroutine started

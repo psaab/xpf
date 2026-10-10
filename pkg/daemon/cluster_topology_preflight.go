@@ -436,12 +436,12 @@ func controlInterfaceMoveRefusal8987(have, want string) error {
 // three different questions. Getting the wrong one is how #8965 and #8987 came
 // to miss a whole cluster shape:
 //
-//   - clusterTransportKey (6 fields, daemon_ha_sync.go) answers "does step 20
-//     RESTART cluster comms?". It is deliberately wide and it is correct for
-//     that question. It is NOT the set to gate on: a fabric1-only change
-//     restarts comms, but fab1 is a REDUNDANT secondary path (sync_conn.go
-//     logs "secondary fabric listen failed, using primary only") — the push
-//     still lands over fab0, so refusing it would be a FALSE REJECTION.
+//   - clusterTransportKey (endpoint and VRF-binding fields, daemon_ha_sync.go)
+//     answers "does step 20 RESTART cluster comms?". It is deliberately wide
+//     and it is correct for that question. It is NOT the set to gate on: a
+//     fabric1-only change restarts comms, but fab1 is a REDUNDANT secondary
+//     path (sync_conn.go logs "secondary fabric listen failed, using primary
+//     only") — the push still lands over fab0, so refusing it would be a FALSE REJECTION.
 //     #9121's own suggested fix direction named Fabric1PeerAddress; that is
 //     the over-gate, and it is why the set had to be derived rather than
 //     copied.

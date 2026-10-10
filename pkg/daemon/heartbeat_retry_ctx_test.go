@@ -48,7 +48,7 @@ func TestStartHeartbeatWithRetryExitsBeforeStartOnCancel(t *testing.T) {
 	go func() {
 		// A real control interface would resolve here, but the ctx guard runs
 		// first, so the interface name is irrelevant.
-		d.startHeartbeatWithRetry(ctx, "127.0.0.1", "127.0.0.1", "")
+		d.startHeartbeatWithRetry(ctx, "127.0.0.1", "127.0.0.1")
 		close(done)
 	}()
 
@@ -79,7 +79,7 @@ func TestStartHeartbeatWithRetryExitsMidRetryOnCancel(t *testing.T) {
 	go func() {
 		// "xpf-nonexistent-4033" does not exist, so resolveClusterInterfaceAddr
 		// returns "" and the loop parks in the ctx-aware retry sleep.
-		d.startHeartbeatWithRetry(ctx, "xpf-nonexistent-4033", "127.0.0.1", "")
+		d.startHeartbeatWithRetry(ctx, "xpf-nonexistent-4033", "127.0.0.1")
 		close(done)
 	}()
 
