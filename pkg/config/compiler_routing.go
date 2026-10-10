@@ -2244,6 +2244,21 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 					// value. Advancing here would make the loop skip the key.
 					continue
 				}
+				if policyTermThenValueActions12513[keys[i+1]] {
+					// #12513: likewise for the other value-carrying actions;
+					// storing the keyword in term.Action dropped the value
+					// (#8933). The main switch used to read the operand slot,
+					// so a slot holding no operand still goes there: an eaten
+					// `reject` would turn a deny into a fall-through permit,
+					// and an eaten `protocol` would drop the match on tolerant
+					// boot/sync. Skip only the action keyword and keep the
+					// evidence for the strict gate.
+					if value, missing := policyThenOperandMissing12513(keys, i+1); missing {
+						i++
+						recordInvalidPolicyThenOperand12513(term, keys[i], value)
+					}
+					continue
+				}
 				i++
 				term.Action = keys[i]
 			}
@@ -2360,31 +2375,35 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				}
 			}
 		case "load-balance":
-			if i+1 < len(keys) {
-				i++
-				term.LoadBalance = keys[i]
+			if v, ok := policyThenScalarOperand12513(term, keys, &i); ok {
+				term.LoadBalance = v
 			}
 		case "local-preference":
-			if i+1 < len(keys) {
-				i++
-				if n, err := strconv.Atoi(keys[i]); err == nil {
+			if v, ok := policyThenScalarOperand12513(term, keys, &i); ok {
+				if n, err := strconv.Atoi(v); err == nil {
 					term.LocalPreference = n
 					term.HasLocalPreference = true
+				} else {
+					recordInvalidPolicyThenOperand12513(term, "local-preference", v)
 				}
 			}
 		case "metric":
-			if i+1 < len(keys) {
-				i++
-				if n, err := strconv.Atoi(keys[i]); err == nil {
+			if v, ok := policyThenScalarOperand12513(term, keys, &i); ok {
+				if n, err := strconv.Atoi(v); err == nil {
 					term.Metric = n
 					term.HasMetric = true
+				} else {
+					recordInvalidPolicyThenOperand12513(term, "metric", v)
 				}
 			}
 		case "metric-type":
-			if i+1 < len(keys) {
-				i++
-				if n, err := strconv.Atoi(keys[i]); err == nil {
+			if v, ok := policyThenScalarOperand12513(term, keys, &i); ok {
+				// MetricType 0 means "not set", so an authored 0 stays
+				// evidence for the strict 1..2 check instead.
+				if n, err := strconv.Atoi(v); err == nil && n != 0 {
 					term.MetricType = n
+				} else {
+					recordInvalidPolicyThenOperand12513(term, "metric-type", v)
 				}
 			}
 		case "community":
@@ -2398,29 +2417,31 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				continue
 			}
 			// `then community` may carry an operation keyword
-			// (add|delete|set|none) optionally followed by a value. Consume
-			// the operation token plus, where the operation takes an
-			// argument, the value token. Belt-and-suspenders: the inline path
-			// is not reached for `then community` under the current schema
-			// (SetPath/block parse both nest `then` as a child node), but keep
-			// it correct in case dispatch ever changes (#2848).
-			if i+1 < len(keys) {
-				op := keys[i+1]
-				switch op {
-				case "add", "delete", "set":
-					if i+2 < len(keys) {
-						applyCommunityAction(term, []string{op, keys[i+2]})
-						i += 2
-					} else {
-						i++
-					}
-				case "none":
-					applyCommunityAction(term, []string{op})
-					i++
-				default:
-					applyCommunityAction(term, []string{op})
-					i++
+			// (add|delete|set|none) followed by its value: one token, or a
+			// whole bracketed list. The term-line dispatch (#12513) and
+			// compact or term-line `then accept community ...` tails reach
+			// this case; block and flat-set spellings use the child path.
+			if i+1 >= len(keys) {
+				recordInvalidPolicyThenOperand12513(term, "community", "")
+				continue
+			}
+			switch op := keys[i+1]; op {
+			case "none":
+				applyCommunityAction(term, []string{op})
+				i++
+			case "add", "delete", "set":
+				i++
+				if i+1 >= len(keys) {
+					recordInvalidPolicyThenOperand12513(term, "community", "")
+					continue
 				}
+				var vals []string
+				vals, i = readPolicyThenCommunityValues12513(term, append(make([]string, 0, 2), op), keys, bracketed, i+1)
+				applyCommunityAction(term, vals)
+			default:
+				var vals []string
+				vals, i = readPolicyThenCommunityValues12513(term, nil, keys, bracketed, i+1)
+				applyCommunityAction(term, vals)
 			}
 		case "as-path":
 			var badClause string
@@ -2460,9 +2481,8 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				term.ASPathPrepend = appendPolicyASPathPrependOperand(term.ASPathPrepend, keys[i])
 			}
 		case "origin":
-			if i+1 < len(keys) {
-				i++
-				term.Origin = keys[i]
+			if v, ok := policyThenScalarOperand12513(term, keys, &i); ok {
+				term.Origin = v
 			}
 		case "accept":
 			if !inFrom {

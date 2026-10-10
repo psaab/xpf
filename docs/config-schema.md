@@ -8676,6 +8676,21 @@ and loopback addresses, IPv4 0/8, multicast, and IPv6 link-local, plus
 `discard`, `reject`, and `next-table` have no supported FRR route-map lowering.
 The shared predicate is used by the schema gate and render-side omission belt.
 
+The term-line spelling `term <name> then <action> <value>` (#12513) compiles
+`local-preference`, `metric`, `metric-type`, `origin`, `community`, and
+`load-balance` into the same typed fields as the braced spelling, and `then
+community add|delete|set` (or the bare replace form) reads a whole bracketed
+list. Packed `then` tails (term-line, and compact `then accept ...`) bypass the
+schema walk, so the compiled-term gate applies the same leaf validators:
+local-preference and metric 0..4294967295, metric-type 1 or 2, origin
+`igp | egp | incomplete`. A missing operand, a non-integer, or an action or
+match word where the term-line operand belongs (for example `then origin
+reject`) also fails strict commit. On tolerant load and peer-sync the gate only
+warns, that word keeps its action or match, and the renderer omits
+local-preference and metric values outside 0..4294967295. Fail-on-revert
+coverage is in `pkg/config/policy_termline_values_12513_test.go` and
+`pkg/frr/policy_termline_values_12513_test.go`.
+
 ### Route-filter tails and match-types are checked at strict commit (#12067, #12538)
 
 `from route-filter <prefix> <match-type>` may carry one match-type-specific
