@@ -16,6 +16,8 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/insomniacslk/dhcp/dhcpv6/nclient6"
 	"github.com/insomniacslk/dhcp/iana"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // errV6AddrInvalidated signals that a DHCPv6 Reply EXPLICITLY invalidated the
@@ -1127,9 +1129,10 @@ func (m *Manager) buildDHCPv6Modifiers(ifaceName string, opts *DHCPv6Options) []
 // defaults (#4874 B).
 //
 // An IAPREFIX whose decoded mask is degenerate (wire prefix-length 0 or
-// > 128, or a non-contiguous mask) is dropped and enters NEITHER set — a
-// > 128 length otherwise decodes to a /0 that would be advertised on-link
-// to the LAN (#6531).
+// > 128, or a non-contiguous mask), or whose address is outside global-unicast
+// space (including ULA and documentation ranges), is dropped and enters
+// NEITHER set — a > 128 length otherwise decodes to a /0 that would be
+// advertised on-link to the LAN (#6531).
 func extractDelegatedPrefixes(msg *dhcpv6.Message, ifaceName string, now time.Time, expectedIAID ...*[4]byte) (live, withdrawn []DelegatedPrefix) {
 	for _, opt := range msg.Options.Options {
 		iapdOpt, ok := opt.(*dhcpv6.OptIAPD)
@@ -1173,8 +1176,9 @@ func extractDelegatedPrefixes(msg *dhcpv6.Message, ifaceName string, now time.Ti
 			// never becomes a DelegatedPrefix, so it reaches neither the live
 			// set, the withdrawn set, nor the RA sender — while a sibling
 			// prefix in the same IA_PD is exactly what a correct server would
-			// have sent on its own.
-			//
+			// have sent on its own. The same per-IAPREFIX salvage rule applies
+			// to invalid address classes; an unsafe element cannot make a
+			// sibling valid delegation unusable (#6531/#6581).
 			// When the skip empties BOTH sets the outcome depends on what
 			// else the reply carried. Neither branch can yield a /0, but they
 			// are NOT the same branch (#6581 review):
@@ -1205,9 +1209,17 @@ func extractDelegatedPrefixes(msg *dhcpv6.Message, ifaceName string, now time.Ti
 			if !ok {
 				continue
 			}
+			delegated := netip.PrefixFrom(ip, ones)
+			if reason := config.DelegatedIPv6PrefixRefusalReason(delegated); reason != "" {
+				slog.Warn("DHCPv6: refusing IA_PD prefix with invalid address class",
+					"interface", ifaceName,
+					"prefix", delegated,
+					"reason", reason)
+				continue
+			}
 			dp := DelegatedPrefix{
 				Interface:         ifaceName,
-				Prefix:            netip.PrefixFrom(ip, ones),
+				Prefix:            delegated,
 				PreferredLifetime: prefix.PreferredLifetime,
 				ValidLifetime:     prefix.ValidLifetime,
 				Obtained:          now,

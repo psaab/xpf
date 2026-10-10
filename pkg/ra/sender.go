@@ -918,29 +918,34 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 			prefLife = validLife
 		}
 
-		// #6587: refuse to advertise a DELEGATED /0.
+		// The decoder is the primary guard. This sink repeats the global-
+		// unicast/class check for delegated provenance and also refuses a
+		// delegated prefix that overlaps an operator-authored PIO or this
+		// interface's PREF64. The daemon builder checks the wider configured
+		// interface/RA/NAT64 set before it creates a delegated RAPrefix.
 		//
-		// #6581 closed this at the DHCPv6 decoder, which is the right primary
-		// place — an IA_PD prefix-length of 0 or >128 is refused before it
-		// becomes a DelegatedPrefix. This is the defense-in-depth layer that
-		// PR deliberately did not add, and the reason it could not add it
-		// naively is recorded in its own test: at this point a delegated /0 is
-		// "indistinguishable from an operator-authored
-		// `set interfaces <if> ipv6 router-advertisement prefix ::/0`", which
-		// is legitimate configuration. RAPrefix.Delegated supplies the
-		// provenance that was missing, so the floor applies to exactly the
-		// population that can never be intentional.
-		//
-		// A /0 here would be advertised on-link AND autonomous to the LAN:
-		// every SLAAC host would treat the entire IPv6 address space as
-		// on-link and stop routing through this firewall.
-		//
-		// Only 0 is reachable: netip.ParsePrefix succeeded above, so Bits() is
-		// in [0,128] and the uint8 conversion below cannot wrap.
+		// Keep the /0 provenance gate explicit: an operator-authored ::/0 is
+		// legitimate, while a delegated /0 would make every SLAAC host treat
+		// the entire IPv6 address space as on-link. RAPrefix.Delegated marks
+		// exactly the DHCP-derived population.
 		if pfx.Delegated && prefix.Bits() == 0 {
 			slog.Warn("ra: refusing to advertise a delegated /0 prefix",
 				"prefix", pfx.Prefix, "interface", s.cfg.Interface)
 			continue
+		}
+		if pfx.Delegated {
+			if reason := config.DelegatedIPv6PrefixRefusalReason(prefix); reason != "" {
+				slog.Warn("ra: refusing to advertise delegated prefix with invalid address class",
+					"prefix", pfx.Prefix, "interface", s.cfg.Interface,
+					"reason", reason)
+				continue
+			}
+			if overlap, ok := delegatedPrefixOverlapsRAPrefixes(prefix, s.cfg); ok {
+				slog.Warn("ra: refusing to advertise delegated prefix overlapping configured prefix",
+					"prefix", pfx.Prefix, "overlap", overlap,
+					"interface", s.cfg.Interface)
+				continue
+			}
 		}
 
 		ra.Options = append(ra.Options, &ndp.PrefixInformation{
@@ -1008,6 +1013,31 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 	ra.Options = pruneUnmarshalableOptions(s.cfg.Interface, ra.Options)
 
 	return ra
+}
+
+// delegatedPrefixOverlapsRAPrefixes checks the configured-prefix subset the
+// sender can see. The daemon builder checks interface addresses and global
+// NAT64 configuration before producing RAPrefix values.
+func delegatedPrefixOverlapsRAPrefixes(delegated netip.Prefix, cfg *config.RAInterfaceConfig) (string, bool) {
+	if cfg == nil {
+		return "", false
+	}
+	for _, pfx := range cfg.Prefixes {
+		if pfx == nil || pfx.Delegated {
+			continue
+		}
+		configured, err := netip.ParsePrefix(pfx.Prefix)
+		if err == nil && config.IPv6PrefixesOverlap(delegated, configured) {
+			return configured.String(), true
+		}
+	}
+	if cfg.NAT64Prefix != "" {
+		configured, err := netip.ParsePrefix(cfg.NAT64Prefix)
+		if err == nil && config.IPv6PrefixesOverlap(delegated, configured) {
+			return configured.String(), true
+		}
+	}
+	return "", false
 }
 
 // pruneUnmarshalableOptions returns the subset of opts that marshal

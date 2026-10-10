@@ -4,6 +4,7 @@ package daemon
 import (
 	"log/slog"
 	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +29,14 @@ func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig 
 	if d.dhcp != nil {
 		// Merge PD-derived prefixes from DHCPv6 clients.
 		for _, mapping := range d.dhcp.DelegatedPrefixesForRA() {
+			if overlap, ok := delegatedPrefixOverlapsConfigured(mapping.Prefix, cfg); ok {
+				slog.Warn("DHCPv6 PD: refusing configured-prefix overlap",
+					"delegated", mapping.Prefix,
+					"configured", overlap,
+					"source_interface", mapping.Interface,
+					"ra_interface", mapping.RAIface)
+				continue
+			}
 			subPrefix := dhcp.DeriveSubPrefix(mapping.Prefix, mapping.SubPrefLen)
 			if !subPrefix.IsValid() {
 				slog.Warn("DHCPv6 PD: invalid sub-prefix derivation",
@@ -112,6 +121,80 @@ func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig 
 	}
 
 	return result
+}
+
+// delegatedPrefixOverlapsConfigured rejects a DHCP delegation that intersects
+// any configured interface address, static RA prefix, or NAT64 prefix. There is
+// no PD pin/allowlist mechanism, so intentional overlap cannot be exempted.
+func delegatedPrefixOverlapsConfigured(delegated netip.Prefix, cfg *config.Config) (string, bool) {
+	if cfg == nil || !delegated.IsValid() {
+		return "", false
+	}
+	for _, iface := range cfg.Interfaces.Interfaces {
+		if iface == nil {
+			continue
+		}
+		for _, unit := range iface.Units {
+			if unit == nil {
+				continue
+			}
+			for _, address := range unit.Addresses {
+				if configuredIPv6PrefixOverlaps(delegated, address) {
+					return address, true
+				}
+			}
+			if configuredIPv6PrefixOverlaps(delegated, unit.PrimaryAddress) {
+				return unit.PrimaryAddress, true
+			}
+			if configuredIPv6PrefixOverlaps(delegated, unit.PreferredAddress) {
+				return unit.PreferredAddress, true
+			}
+			for _, group := range unit.VRRPGroups {
+				if group == nil {
+					continue
+				}
+				for _, address := range group.VirtualAddresses {
+					if configuredIPv6PrefixOverlaps(delegated, address) {
+						return address, true
+					}
+				}
+			}
+		}
+	}
+	for _, ra := range cfg.Protocols.RouterAdvertisement {
+		if ra == nil {
+			continue
+		}
+		for _, pfx := range ra.Prefixes {
+			if pfx != nil && configuredIPv6PrefixOverlaps(delegated, pfx.Prefix) {
+				return pfx.Prefix, true
+			}
+		}
+		if configuredIPv6PrefixOverlaps(delegated, ra.NAT64Prefix) {
+			return ra.NAT64Prefix, true
+		}
+	}
+	for _, nat64 := range cfg.Security.NAT.NAT64 {
+		if nat64 != nil && configuredIPv6PrefixOverlaps(delegated, nat64.Prefix) {
+			return nat64.Prefix, true
+		}
+	}
+	return "", false
+}
+
+func configuredIPv6PrefixOverlaps(delegated netip.Prefix, raw string) bool {
+	if raw == "" {
+		return false
+	}
+	configured, err := netip.ParsePrefix(raw)
+	if err != nil {
+		addr, addrErr := netip.ParseAddr(raw)
+		if addrErr != nil || !addr.Is6() || addr.Is4In6() {
+			return false
+		}
+		configured = netip.PrefixFrom(addr, addr.BitLen())
+	}
+	return config.IPv6PrefixesOverlap(delegated, configured)
 }
 
 // resolveRASourceLinkLocal resolves the operator-configured IPv6 link-local
