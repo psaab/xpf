@@ -264,6 +264,16 @@ func TestArmRetainsArmedJournalWhenBootNextClearFailsAfterReboot_12162(t *testin
 		!strings.Contains(err.Error(), "journal remains ARMED") {
 		t.Errorf("Arm error = %v, want manual-clear command and retained journal state", err)
 	}
+	// Opus residuals B3/C4: the clean ARMED-restore path keeps its record and
+	// promises the armed reset (both asserts verified to kill their mutants).
+	record, recordErr := ReadArmRecord(r.cfg.JournalPath)
+	if recordErr != nil || record != j.PromoteBinary {
+		t.Errorf("arm record = %q, err=%v; want the clean-restore promote record %q",
+			record, recordErr, j.PromoteBinary)
+	}
+	if !strings.Contains(err.Error(), "the watchdog remains armed and will reset") {
+		t.Errorf("Arm error = %v, want the armed-reset promise", err)
+	}
 }
 
 func TestArmReportsWatchdogDisarmFailure_12162(t *testing.T) {
@@ -743,6 +753,12 @@ func TestArmTripleFaultDisarmSuccessUnwindsCleanly_12162(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "could not restore the ARMED journal") {
 		t.Fatalf("Arm error = %v, want the restore-failure cause", err)
+	}
+	// Opus M2: pin the restoreErr VALUE, not just the branch literal (A13
+	// drops restoreErr and survives on the literal alone). No trailing slash:
+	// the message ends "mkdir /proc/self/12162:".
+	if !strings.Contains(err.Error(), "/proc/self/12162") {
+		t.Errorf("Arm error = %v, want the ARMED-restore failure reason", err)
 	}
 	if f.disarmWatchdogCalls != 1 || f.wdArmed {
 		t.Fatalf("disarm calls=%d watchdogArmed=%v; want one successful disarm",
