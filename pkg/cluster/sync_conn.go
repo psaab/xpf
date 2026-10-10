@@ -1599,6 +1599,10 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		s.bulkRecvV4 = nil
 		s.bulkRecvV6 = nil
 		s.bulkZoneSnapshot = nil
+		s.inventoryPending = false
+		s.inventoryPendingGeneration = 0
+		s.inventoryActive = false
+		s.inventoryActiveGeneration = 0
 		s.bulkMu.Unlock()
 		if hadBulkInProgress {
 			slog.Info("cluster sync: reset in-progress bulk receive on disconnect")

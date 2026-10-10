@@ -248,6 +248,21 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				}
 			}
 		}
+	case syncMsgBulkRequest:
+		// Request-triggered sends use the same authoritative source selection
+		// as cold-prime bulks. Coalesce concurrent requests before they reach
+		// bulkSendMu, without blocking this receive loop.
+		if s.bulkRequestInFlight.CompareAndSwap(false, true) {
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				defer s.bulkRequestInFlight.Store(false)
+				if err := s.doBulkSync(); err != nil {
+					slog.Debug("cluster sync: requested bulk sync failed; will retry on next request",
+						"err", err)
+				}
+			}()
+		}
 	case syncMsgBulkStart:
 		var epoch uint64
 		if len(payload) >= 8 {
@@ -323,6 +338,15 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			break
 		}
 		s.bulkInProgress = true
+		s.bulkRecvSerial++
+		if s.bulkRecvSerial == 0 {
+			s.bulkRecvSerial++
+		}
+		s.inventoryActive = s.inventoryPending
+		s.inventoryActiveGeneration = s.inventoryPendingGeneration
+		if !s.inventoryActive {
+			s.inventoryActiveGeneration = 0
+		}
 		s.bulkRecvEpoch = epoch
 		// #9174 V013: remember WHICH BOOT started this bulk, so its end marker
 		// can be matched on more than the epoch. Recorded on the accepted path
@@ -516,8 +540,10 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		if !endInc.known() || !s.bulkRecvIncarnation.known() {
 			s.stats.BulkEndsEpochOnlyMatched.Add(1)
 		}
+		bulkSerial := s.bulkRecvSerial
 		s.bulkMu.Unlock()
-		if !s.reconcileStaleSessions() {
+		reconciled, inventoryGen, inventoryRequested := s.reconcileStaleSessions(bulkSerial)
+		if !reconciled {
 			slog.Warn("cluster sync: bulk reconcile did not complete; withholding BulkAck and failover release",
 				"epoch", epoch)
 			break
@@ -528,6 +554,20 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		s.bulkEverCompleted.Store(true)
 		if s.OnBulkSyncReceived != nil {
 			go s.OnBulkSyncReceived()
+		}
+		if inventoryRequested {
+			s.bulkMu.Lock()
+			// A retry for the same helper generation is already covered by
+			// this successful full inventory. A newer helper generation stays
+			// pending and requires its own accepted bulk window.
+			if s.inventoryPending && s.inventoryPendingGeneration == inventoryGen {
+				s.inventoryPending = false
+				s.inventoryPendingGeneration = 0
+			}
+			s.bulkMu.Unlock()
+			if cb := s.OnSessionInventoryBulkReceived; cb != nil {
+				go cb(inventoryGen)
+			}
 		}
 	case syncMsgBulkAck:
 		if len(payload) < 8 {

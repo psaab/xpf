@@ -699,6 +699,14 @@ func (m *Manager) resetAfterHelperGoneLocked() {
 	m.bindingsBusySince = time.Time{}
 	m.lastBindingsAutoRebind = time.Time{}
 	m.consecutiveFailedAutoRebinds = 0
+	// The replacement helper has no inherited session table. Do NOT predict
+	// its generation here (procGen+1 desyncs when StopHelperForReset bumps
+	// again before the spawn): mark owed and let the spawn bind the debt to
+	// the allocated generation (Opus F1).
+	m.sessionInventoryDebtGen = 0
+	m.sessionInventoryDebtOwed = m.clusterHA
+	m.sessionInventoryRequestAt = time.Time{}
+
 	m.publishedSnapshot = 0
 	// #7465: a new helper starts with an EMPTY HA inventory, so the fact that the
 	// previous process had been told says nothing about this one. Without this

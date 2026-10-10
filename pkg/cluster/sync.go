@@ -232,6 +232,11 @@ const (
 	//
 	// Payload: {version: u8}
 	syncMsgAuthUpgradeRequest = 37
+	// syncMsgBulkRequest asks the peer to run its normal authoritative bulk
+	// source path (#12160). The payload is opaque; request generations are
+	// correlated only on the requester. An old peer ignores this additive
+	// message and leaves the request fail-closed.
+	syncMsgBulkRequest = 42
 )
 
 // syncHeader is the wire header for each sync message.
@@ -996,6 +1001,9 @@ type SessionSync struct {
 	OnForwardSessionInstalled func()
 	// OnBulkSyncReceived fires when an inbound bulk sync completes.
 	OnBulkSyncReceived func()
+	// OnSessionInventoryBulkReceived fires after an authoritative inbound bulk
+	// captured a pending inventory request and reconciled successfully.
+	OnSessionInventoryBulkReceived func(generation uint64)
 	// BulkSyncOverride, if set, runs as a best-effort fast-population pre-step
 	// BEFORE the authoritative BulkSync in doBulkSync (it does NOT replace it,
 	// #5085). It is NO LONGER wired in production — the async, lossy
@@ -1382,6 +1390,9 @@ type SessionSync struct {
 	// flag bounds it to a single in-flight re-drive so a survivor that ALSO
 	// flaps cannot cause a re-drive storm.
 	bulkRedriveInFlight atomic.Bool
+	// bulkRequestInFlight coalesces concurrent inbound syncMsgBulkRequest
+	// handlers; ordinary bulks still serialize through bulkSendMu.
+	bulkRequestInFlight atomic.Bool
 	// needColdPrime latches the outstanding cold-prime obligation across the
 	// per-accept goroutines (#4962). It is armed under s.mu on a full
 	// disconnect -> connect transition (both fabric slots were empty) and
@@ -1411,7 +1422,15 @@ type SessionSync struct {
 	needColdPrime  atomic.Bool
 	bulkMu         sync.Mutex
 	bulkInProgress bool
-	bulkRecvEpoch  uint64
+	// The next accepted bulk window captures the pending local helper
+	// generation. This generation remains active through reconciliation, so
+	// completion is tied to the exact helper inventory it may satisfy.
+	inventoryPending           bool
+	inventoryPendingGeneration uint64
+	inventoryActive            bool
+	inventoryActiveGeneration  uint64
+	bulkRecvSerial             uint64 // accepted-window identity carried through reconciliation
+	bulkRecvEpoch              uint64
 	// bulkRecvIncarnation is the peer boot incarnation that started the bulk
 	// `bulkRecvEpoch` names, so a BulkEnd can be matched on more than the epoch
 	// (#9174 V013 — reasoning at the two sites, sync_conn_read.go's BulkEnd arm
@@ -2495,16 +2514,20 @@ func (s *SessionSync) snapshotZoneOwnership() *zoneOwnershipSnapshot {
 	return snap
 }
 
-func (s *SessionSync) reconcileStaleSessions() bool {
+func (s *SessionSync) reconcileStaleSessions(bulkSerial uint64) (bool, uint64, bool) {
 	s.bulkMu.Lock()
-	if !s.bulkInProgress {
+	if !s.bulkInProgress || s.bulkRecvSerial != bulkSerial {
 		s.bulkMu.Unlock()
-		return false
+		return false, 0, false
 	}
 	recvV4 := s.bulkRecvV4
 	recvV6 := s.bulkRecvV6
 	zoneSnap := s.bulkZoneSnapshot
+	inventoryGeneration := s.inventoryActiveGeneration
+	inventoryRequested := s.inventoryActive
 	s.bulkInProgress = false
+	s.inventoryActive = false
+	s.inventoryActiveGeneration = 0
 	s.bulkRecvV4 = nil
 	s.bulkRecvV6 = nil
 	s.bulkZoneSnapshot = nil
@@ -2527,7 +2550,7 @@ func (s *SessionSync) reconcileStaleSessions() bool {
 	// "empty means delete-all" heuristic, just the normal absent-key delete.
 	if s.sessions == nil {
 		slog.Info("cluster sync: reconcile stale sessions skipped (no dataplane)")
-		return false
+		return false, inventoryGeneration, inventoryRequested
 	}
 	// #9655: a bulk with no zone snapshot has nothing to judge ownership by, and
 	// deleting on a guess is the failure this reconcile can cause. Only a nil
@@ -2535,7 +2558,7 @@ func (s *SessionSync) reconcileStaleSessions() bool {
 	// all-unmapped snapshot whose rows are filtered by #10227 origin gating.
 	if zoneSnap == nil {
 		slog.Info("cluster sync: reconcile stale sessions skipped (no zone snapshot)")
-		return false
+		return false, inventoryGeneration, inventoryRequested
 	}
 	// #9655: the snapshot answers for the zone map it was taken from. A map with
 	// different contents installed during the bulk can move a zone to this node,
@@ -2547,7 +2570,7 @@ func (s *SessionSync) reconcileStaleSessions() bool {
 	if mapGen != zoneSnap.mapGen {
 		slog.Info("cluster sync: reconcile stale sessions skipped (zone map changed during the bulk)",
 			"snapshot_map_gen", zoneSnap.mapGen, "map_gen", mapGen)
-		return false
+		return false, inventoryGeneration, inventoryRequested
 	}
 	// #9655: judged by the zone answers this bulk started with. A zone the map
 	// does not name uses the captured RG 0 fallback.
@@ -2569,7 +2592,7 @@ func (s *SessionSync) reconcileStaleSessions() bool {
 	if err != nil {
 		slog.Warn("cluster sync: reconcile stale sessions failed", "err", err)
 		s.stats.Errors.Add(1)
-		return false
+		return false, inventoryGeneration, inventoryRequested
 	}
 	slog.Info(
 		"cluster sync: reconcile stale sessions applied",
@@ -2582,7 +2605,7 @@ func (s *SessionSync) reconcileStaleSessions() bool {
 		slog.Info("cluster sync: reconciled stale sessions", "deleted", deleted)
 	}
 	slog.Info("cluster sync: reconcile stale sessions complete", "deleted", deleted, "elapsed", time.Since(start))
-	return true
+	return true, inventoryGeneration, inventoryRequested
 }
 
 func (s *SessionSync) FormatStats() string {

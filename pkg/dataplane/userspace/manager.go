@@ -143,6 +143,25 @@ type Manager struct {
 	// which counts CONFIG snapshots: one config can outlive many helper
 	// processes across a crash-restart, and one helper can serve many configs.
 	procGen uint64
+	// sessionInventoryDebtGen is the helper process generation whose complete
+	// peer-owned session inventory has not yet been replayed. A helper restart
+	// starts with an empty table even when the cluster sync transport survives.
+	// Zero means there is no generation-scoped inventory debt.
+	sessionInventoryDebtGen uint64
+	// sessionInventoryDebtOwed marks that the NEXT spawned helper generation
+	// owes an inventory replay. Set at reset time (when the next generation
+	// number is not yet knowable — StopHelperForReset bumps procGen again),
+	// converted into sessionInventoryDebtGen=procGen by
+	// startHelperSupervisorLocked at spawn time (Opus F1: predicting
+	// procGen+1 at reset desyncs to newGen=3 debt=2 and deadlocks the gate).
+	sessionInventoryDebtOwed bool
+	// sessionInventoryRequestAt throttles peer bulk requests while the current
+	// helper generation waits for its authoritative session inventory.
+	sessionInventoryRequestAt time.Time
+	// sessionInventoryRequester asks the connected peer to send its authoritative
+	// owner-RG session inventory. It is installed by daemon cluster-sync wiring.
+	sessionInventoryRequester func(generation uint64) bool
+
 	// sessionOperationID is monotonic within this Manager/helper lifecycle and
 	// is paired with procGen on every helper-first tuple mutation.
 	sessionOperationID uint64

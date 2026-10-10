@@ -471,6 +471,7 @@ switch ("standby retains newer set").
 | 34 | *(retired)* | — | Was AuthUpgradeAck, the fourth frame of the pre-#7163 exchange. Left unused rather than recycled. |
 | 36 | AuthUpgradeConfirm | Initiator -> Responder | In-place authentication upgrade: handshake-binding MAC, and the responder's read boundary (#7163) |
 | 37 | AuthUpgradeRequest | Responder -> Initiator | In-place authentication upgrade: the responder-role node asking the initiator-role node to start (#7163) |
+| 42 | BulkRequest | Secondary -> Primary | Ask the peer to run its authoritative bulk source path (#12160); opaque payload, request generations correlated only on the requester; old peers ignore it fail-closed |
 
 ### In-Place Authentication Upgrade (#6628)
 

@@ -395,10 +395,59 @@ func (m *Manager) desiredForwardingArmedLocked() bool {
 // where an HA ownership move can rely on it for forwarding immediately.
 // This intentionally rejects "startup-like" states so HA cutover does not
 // begin queue bring-up work during UpdateRGActive().
+// While restart inventory debt is outstanding, it also asks the connected peer
+// for a complete session bulk, throttled to avoid duplicate requests.
 func (m *Manager) TakeoverReady() (bool, []string) {
 	m.mu.Lock()
+	ready, reasons := m.takeoverReadyLocked()
+	generation := m.sessionInventoryDebtGen
+	request := m.sessionInventoryRequester
+	requestAt := time.Time{}
+	if generation != 0 && request != nil &&
+		m.proc != nil && m.proc.Process != nil && m.procGen == generation &&
+		m.lastStatus.Enabled && m.lastStatus.ForwardingArmed &&
+		m.lastStatus.Capabilities.ForwardingSupported {
+		now := time.Now()
+		if m.sessionInventoryRequestAt.IsZero() ||
+			now.Sub(m.sessionInventoryRequestAt) >= sessionInventoryRequestRetryInterval {
+			m.sessionInventoryRequestAt = now
+			requestAt = now
+		}
+	}
+	m.mu.Unlock()
+
+	// Never hold Manager.mu while asking SessionSync to queue the bulk request.
+	// TakeoverReady is level-triggered, so retrying here also recovers a request
+	// lost while the peer transport was disconnected. A rejected enqueue keeps
+	// the throttle too, avoiding an error loop while the queue remains full.
+	if !requestAt.IsZero() {
+		request(generation)
+	}
+	return ready, reasons
+}
+
+const sessionInventoryRequestRetryInterval = 5 * time.Second
+
+// SetSessionInventoryRequester installs the daemon's peer-bulk request path.
+func (m *Manager) SetSessionInventoryRequester(requester func(generation uint64) bool) {
+	m.mu.Lock()
+	m.sessionInventoryRequester = requester
+	m.sessionInventoryRequestAt = time.Time{}
+	m.mu.Unlock()
+}
+
+// MarkSessionInventoryReconciled clears restart debt only when the completed
+// peer bulk belongs to the currently running helper generation.
+func (m *Manager) MarkSessionInventoryReconciled(generation uint64) bool {
+	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.takeoverReadyLocked()
+	if generation == 0 || m.sessionInventoryDebtGen != generation ||
+		m.procGen != generation || m.proc == nil || m.proc.Process == nil {
+		return false
+	}
+	m.sessionInventoryDebtGen = 0
+	m.sessionInventoryRequestAt = time.Time{}
+	return true
 }
 
 func (m *Manager) takeoverReadyLocked() (bool, []string) {
@@ -440,6 +489,15 @@ func (m *Manager) takeoverReadyLocked() (bool, []string) {
 			"userspace worker-session repair overflow; full session inventory replay required: "+
 				m.sessionRepairOverflowErr)
 	}
+	if m.sessionInventoryDebtGen != 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"userspace session inventory not reconciled for helper generation %d",
+			m.sessionInventoryDebtGen))
+	} else if m.sessionInventoryDebtOwed {
+		reasons = append(reasons,
+			"userspace session inventory not reconciled for the next helper generation (spawn pending)")
+	}
+
 	// #9642: an indebted node must not advertise takeover readiness. Its
 	// classifier maps are at an unpublished plan with ctrl held at 0; handing
 	// it an RG would cut transit over until the debt converges. Name the
