@@ -3,8 +3,9 @@
 xpf's default interface handling is **positional**: at startup it enumerates
 every PCI NIC, sorts virtio-first then by PCI bus address, and assigns vSRX
 names by enumeration index (`fxp0`, `em0`, `ge-{fpc}-0-{n}`). Unconfigured
-NICs are renamed and brought down. That is correct for the appliance image and
-controlled-topology VMs, but it is hazardous on real bare metal:
+NICs that are not matched by a non-xpf systemd-networkd `.network` file are
+brought down. That is correct for the appliance image and controlled-topology
+VMs, but it is hazardous on real bare metal:
 
 - **Unstable naming** — adding a card, a BIOS bus renumber, or onboard +
   add-in + BMC-NIC ordering shifts the index→name binding, so `ge-0/0/3`
@@ -21,8 +22,11 @@ controlled-topology VMs, but it is hazardous on real bare metal:
   only thing that closes that.)
 - **Claims everything** — a real host has NICs xpf must not touch: a
   BMC/IPMI shared NIC, a storage/cluster fabric, the admin's own management
-  path. Positional mode renames them all and, if unconfigured, forces them
-  `always-down`.
+  path. Positional mode normally brings unconfigured NICs down, but a matching
+  non-xpf `.network` file now exempts them from both xpf's address stripping
+  and durable `always-down` unit. A catch-all match such as `Name=*` can let
+  networkd bring them up outside xpf zones and host-inbound policy; this
+  upgrade behavior needs an owner decision.
 
 The **device-map** is an opt-in stanza that fixes both: it binds each xpf
 logical name to a NIC by **stable identity** (PCI bus address, with a
@@ -214,9 +218,10 @@ time rather than hours later on a machine nobody is watching.
 - **`leave-alone` (default in device-map mode):** NICs with no entry are
   invisible to xpf — never renamed, never `always-down`, never
   address-stripped. This is the bare-metal-safe default.
-- **`manage-down`:** reproduces today's claim-all behavior (bring
-  unconfigured NICs down). Choose this only if you want xpf to own the whole
-  box.
+- **`manage-down`:** brings unconfigured NICs down unless a non-xpf `.network`
+  file matches them. Choose this only if you want xpf to own the whole box;
+  catch-all external matches remain exempt and may bring links up outside xpf
+  policy (see the #12135 upgrade-risk note above).
 
 The #1922 management lifeline / protected set is always honored regardless of
 the policy — an explicit map can NAME the management NIC but can never remove
