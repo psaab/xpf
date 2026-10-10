@@ -694,6 +694,18 @@ func (d *Daemon) captureBootstrapLifelineNetwork() {
 	d.bootstrapLifelineMu.Lock()
 	defer d.bootstrapLifelineMu.Unlock()
 	if d.bootstrapLifelineCaptured {
+		// P1: two FIRST windows in one process. Window 1 rolled back live
+		// (memory snapshot kept, durable record bound to window 1). If a
+		// second bootstrap exit runs under a NEW generation with the same
+		// marked bytes still present, re-persist under the new generation —
+		// otherwise a window-2 expiry-across-restart gates authentic bytes
+		// against the wrong generation and sticks the box DEGRADED.
+		if generation != "" && generation != d.bootstrapLifelineGeneration &&
+			d.bootstrapLifelinePresent && isBootstrapLifelineNetwork(d.bootstrapLifelineNetwork) {
+			d.persistBootstrapLifelineSnapshotLocked(d.bootstrapLifelineNetwork, generation)
+			slog.Debug("bootstrap exit: re-persisted pre-takeover lifeline under a new generation",
+				"generation", generation, "issue", "#12155")
+		}
 		return
 	}
 	path := filepath.Join(linkDir, linkPrefix+"fxp0.network")
@@ -762,26 +774,31 @@ func (d *Daemon) clearBootstrapLifelineNetwork() {
 }
 
 // loadBootstrapLifelineSnapshot reads the durable pre-takeover record (#12155).
-// It returns ok=false unless the record exists and decodes. The abandoned-
+// Tri-state (N2): absent (ok=false, unreadable=false) vs present-but-bad
+// (ok=false, unreadable=true: oversized, FIFO/symlink, corrupt JSON) vs
+// decoded (ok=true). The caller must treat present-but-bad as DEGRADED
+// with debt retained — never as the absent-absent no-op. The abandoned-
 // generation binding is checked by the caller against
 // FirstCommitTeardownGeneration. No mutex: callers hold it or are
 // single-threaded boot; never call into the Store here (NEW-MAJOR-A).
-func (d *Daemon) loadBootstrapLifelineSnapshot() (snapshot []byte, generation string, ok bool) {
+func (d *Daemon) loadBootstrapLifelineSnapshot() (snapshot []byte, generation string, ok, unreadable bool) {
 	// Bounded read (#8597 census): a FIFO here must not hang boot nor a
-	// runaway file exhaust memory. Oversized/non-regular retains debt
-	// with a decode failure downstream (fail-closed).
+	// runaway file exhaust memory.
 	data, err := readBootstrapLifelineSnapshot(filepath.Join(linkDir, bootstrapLifelineSnapshotBase))
 	if err != nil {
-		return nil, "", false
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, "", false, false
+		}
+		return nil, "", false, true
 	}
 	if len(data) > maxBootstrapLifelineSnapshotSize {
-		return nil, "", false
+		return nil, "", false, true
 	}
 	var record bootstrapLifelineSnapshotRecord
 	if err := json.Unmarshal(data, &record); err != nil {
-		return nil, "", false
+		return nil, "", false, true
 	}
-	return append([]byte(nil), record.Network...), record.Generation, true
+	return append([]byte(nil), record.Network...), record.Generation, true, false
 }
 
 // restoreBootstrapLifelineNetwork restores exact pre-takeover bytes: from the
@@ -803,10 +820,22 @@ func (d *Daemon) restoreBootstrapLifelineNetwork() (bool, error) {
 	// the in-memory snapshot. Recover the durable record when teardown debt
 	// is owed. The Store read happens OUTSIDE bootstrapLifelineMu
 	// (NEW-MAJOR-A: the confirm hook takes this mutex under Store.mu).
+	// N2: a present-but-unreadable record (oversized, FIFO/symlink, corrupt
+	// JSON) is evidence a lifeline existed — DEGRADED with debt retained,
+	// never the absent-absent no-op.
+	unreadableRecord := false
 	if !captured && d.store != nil && d.store.FirstCommitTeardownOwed() {
-		if loaded, loadedGen, ok := d.loadBootstrapLifelineSnapshot(); ok {
+		if loaded, loadedGen, ok, bad := d.loadBootstrapLifelineSnapshot(); ok {
 			snapshot, generation, captured, present = loaded, loadedGen, true, true
+		} else if bad {
+			unreadableRecord = true
 		}
+	}
+	if unreadableRecord {
+		slog.Warn("bootstrap rollback: pre-takeover lifeline snapshot is present but unreadable; "+
+			"retaining teardown debt", "file", bootstrapLifelineSnapshotBase, "issue", "#12155")
+		return false, fmt.Errorf("%s: pre-takeover lifeline snapshot present but unreadable; teardown debt retained",
+			name)
 	}
 	if captured && d.store != nil && d.store.FirstCommitTeardownOwed() {
 		if len(snapshot) == 0 || generation == "" ||
