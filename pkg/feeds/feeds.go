@@ -1264,6 +1264,33 @@ func (m *Manager) refreshLoop(ctx context.Context, fs *feedState, interval time.
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	var holdTimer *time.Timer
+	var holdExpiry <-chan time.Time
+	resetHoldTimer := func() {
+		if holdTimer != nil && !holdTimer.Stop() {
+			select {
+			case <-holdTimer.C:
+			default:
+			}
+		}
+		delay, armed := m.holdExpiryDelay(fs)
+		if !armed {
+			holdExpiry = nil
+			return
+		}
+		if holdTimer == nil {
+			holdTimer = time.NewTimer(delay)
+		} else {
+			holdTimer.Reset(delay)
+		}
+		holdExpiry = holdTimer.C
+	}
+	defer func() {
+		if holdTimer != nil {
+			holdTimer.Stop()
+		}
+	}()
+	resetHoldTimer()
 
 	for {
 		select {
@@ -1271,6 +1298,10 @@ func (m *Manager) refreshLoop(ctx context.Context, fs *feedState, interval time.
 			return
 		case <-ticker.C:
 			m.fetchFeed(ctx, fs)
+			resetHoldTimer()
+		case <-holdExpiry:
+			m.expireStaleHold(fs)
+			resetHoldTimer()
 		}
 	}
 }
@@ -2078,6 +2109,7 @@ type feedFailureTransition struct {
 	current      bool
 	enteredStale bool
 	dropped      bool
+	retryDropped bool
 	lastError    string
 	holdInterval time.Duration
 }
@@ -2106,6 +2138,12 @@ func (m *Manager) recordFailureLocked(fs *feedState, ferr error) feedFailureTran
 			transition.dropped = true
 		}
 	}
+	// A rejected hold-drop leaves the desired state empty but the dataplane's
+	// published hash unchanged. Retry that debt on the next failed fetch, just
+	// as installSnapshot retries rejected good content on an identical refetch.
+	if !transition.dropped && fs.holdDropped && feedPublicationDebt(fs) {
+		transition.retryDropped = true
+	}
 	return transition
 }
 
@@ -2132,10 +2170,57 @@ func (m *Manager) recordFailure(fs *feedState, ferr error) {
 	m.finishFailure(fs, transition, true)
 }
 
+// holdExpiryDelay returns the time until a current feed's retained snapshot
+// reaches its hold deadline. The refresh loop uses this to wake independently
+// of the (potentially much longer) fetch cadence.
+func (m *Manager) holdExpiryDelay(fs *feedState) (time.Duration, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if cur, ok := m.feeds[fs.name]; !ok || cur != fs ||
+		fs.holdInterval <= 0 || !fs.hasSnapshot || len(fs.prefixes) == 0 ||
+		fs.staleSince.IsZero() {
+		return 0, false
+	}
+	delay := fs.staleSince.Add(fs.holdInterval).Sub(m.now())
+	if delay < 0 {
+		delay = 0
+	}
+	return delay, true
+}
+
+// expireStaleHold applies a due hold expiry without waiting for another fetch
+// failure. The drop transition and publish happen outside m.mu just like the
+// recordFailure path.
+func (m *Manager) expireStaleHold(fs *feedState) {
+	m.mu.Lock()
+	if cur, ok := m.feeds[fs.name]; !ok || cur != fs ||
+		fs.holdInterval <= 0 || !fs.hasSnapshot || len(fs.prefixes) == 0 ||
+		fs.staleSince.IsZero() {
+		m.mu.Unlock()
+		return
+	}
+	now := m.now()
+	if now.Sub(fs.staleSince) < fs.holdInterval {
+		m.mu.Unlock()
+		return
+	}
+	transition := feedFailureTransition{
+		current:      true,
+		dropped:      true,
+		lastError:    fs.lastError,
+		holdInterval: fs.holdInterval,
+	}
+	dropSnapshotToEmptyLocked(fs)
+	m.mu.Unlock()
+	m.finishFailure(fs, transition, false)
+}
+
 func (m *Manager) finishFailure(fs *feedState, transition feedFailureTransition, logRetained bool) {
-	if transition.dropped {
-		slog.Warn("dynamic-address: hold interval elapsed, dropping stale feed to empty",
-			"name", fs.name, "err", transition.lastError, "hold", transition.holdInterval)
+	if transition.dropped || transition.retryDropped {
+		if transition.dropped {
+			slog.Warn("dynamic-address: hold interval elapsed, dropping stale feed to empty",
+				"name", fs.name, "err", transition.lastError, "hold", transition.holdInterval)
+		}
 		if m.onUpdate != nil {
 			// An empty set has no fixed safety direction: a denylist stops
 			// denying while an allowlist stops permitting. The existing binding

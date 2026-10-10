@@ -312,8 +312,11 @@ The fix decouples the **installed-content** hash from the **published** hash:
 - A hold-interval drop changes the desired installed state to empty. Its apply
   advances the published marker to the empty-set hash only when accepted; a
   rejected apply retains the previous marker and therefore remains publication
-  debt. A recovery fetch also differs from the published empty-set hash and
-  retries applying the recovered prefixes.
+  debt. While the dropped state remains desired, a subsequent failed fetch
+  retries the empty apply (one attempt per fetch) and debt remains until the
+  callback accepts it. A successful recovery fetch returns to the ordinary
+  published-hash comparison: already-published content needs no apply, while
+  changed content is published normally.
 
 `show security dynamic-address` distinguishes the installed snapshot hash from
 the last published hash and marks pending publication as `PUBLICATION-DEBT`.
