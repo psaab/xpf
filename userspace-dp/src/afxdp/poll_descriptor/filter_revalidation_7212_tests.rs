@@ -2097,6 +2097,7 @@ fn push_second_gre_10630(snapshot: &mut crate::protocol::snapshot::ConfigSnapsho
 /// reproduce its tunneled decision).
 fn forwarding_with_blue_pbr_tunnel_10630() -> ForwardingState {
     let mut snapshot = policy_deny_snapshot();
+    snapshot.forwarding_tables.push("blue.inet.0".into());
     snapshot.filters = vec![FirewallFilterSnapshot {
         name: "edge-in".into(),
         family: "inet".into(),
@@ -2142,6 +2143,7 @@ fn forwarding_with_green_pbr_native_10630() -> ForwardingState {
     let mut term = pbr_term("pbr-route", "5201", "accept");
     term.routing_instance = "green".into();
     let mut snapshot = policy_deny_snapshot();
+    snapshot.forwarding_tables.push("green.inet.0".into());
     snapshot.filters = vec![FirewallFilterSnapshot {
         name: "edge-in".into(),
         family: "inet".into(),
@@ -2195,6 +2197,7 @@ fn forwarding_with_green_pbr_tunnel_10630() -> ForwardingState {
     let mut term = pbr_term("pbr-route", "5201", "accept");
     term.routing_instance = "green".into();
     let mut snapshot = policy_deny_snapshot();
+    snapshot.forwarding_tables.push("green.inet.0".into());
     snapshot.filters = vec![FirewallFilterSnapshot {
         name: "edge-in".into(),
         family: "inet".into(),
