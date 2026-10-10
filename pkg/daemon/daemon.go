@@ -1747,6 +1747,15 @@ type Daemon struct {
 	// it if networkd replaced the same filename. Access is serialized by applySem.
 	bootstrapLifelineNetwork []byte
 
+	// bootstrapLifelineGeneration binds the persisted snapshot to the config
+	// that took over the bootstrap lifeline.
+	bootstrapLifelineGeneration string
+
+	// firstCommitNetworkdReloadOwed records downstream networkd reload debt
+	// independently of the filesystem scan. The durable store teardown marker
+	// re-arms it on every startup retry until networkctl acknowledges reload.
+	firstCommitNetworkdReloadOwed bool
+
 	// emptyHANamingPending is the #4179 one-shot flag for the HA-guard
 	// EMPTY-config takeover. A node with /etc/xpf/node-id but no committed
 	// config resolves NOT-bootstrap (computeBootClass HA-node guard) and names
