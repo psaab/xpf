@@ -399,6 +399,7 @@ Name=fxp0`
 // instead of resurrecting another NIC's identity. Reproduces the reviewer
 // swap shape (pre-fold: both files retained → wrong identity next boot).
 func TestRenamePositionalUnknownTargetChangeLeavesNoResurrectableClaim12156(t *testing.T) {
+	logs := captureLogs12156(t)
 	dir := withTempLinkDir(t)
 	ownLink := `# Managed by xpfd — do not edit
 [Match]
@@ -437,6 +438,25 @@ Name=fxp0
 		if _, err := os.Stat(filepath.Join(dir, linkPrefix+name+".link")); !os.IsNotExist(err) {
 			t.Fatalf("resurrectable %s.link survived the unknown-target rename, stat err=%v", name, err)
 		}
+	}
+	// The neutralize log LINE itself must carry level=ERROR (kills N7: a
+	// split assertion is satisfied by the phase-0 F1 ERROR even when the
+	// neutralize log is demoted). The phase-0 F1 line itself must also be
+	// ERROR (kills N5).
+	foundNeutralize, foundPhase0 := false, false
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "level=ERROR") && strings.Contains(line, "neutralized retained .link claims") {
+			foundNeutralize = true
+		}
+		if strings.Contains(line, "level=ERROR") && strings.Contains(line, "no persistence exists for the target") {
+			foundPhase0 = true
+		}
+	}
+	if !foundNeutralize {
+		t.Fatalf("positional neutralize must log its own ERROR line, got:\n%s", logs.String())
+	}
+	if !foundPhase0 {
+		t.Fatalf("phase-0 F1 skip must log its own ERROR line, got:\n%s", logs.String())
 	}
 }
 
@@ -486,42 +506,57 @@ func TestBootstrapLifelineNeutralizesResurrectableLinksOnRename12156(t *testing.
 	if !*st.renamed {
 		t.Error("the lifeline must still attempt the rename to fxp0 after neutralizing")
 	}
-	if got := logs.String(); !strings.Contains(got, "level=ERROR") ||
-		!strings.Contains(got, "neutralized retained .link claims") {
-		t.Fatalf("bootstrap neutralize must log ERROR, got:\n%s", got)
+	// The neutralize log LINE itself must carry level=ERROR: a split
+	// assertion (level=ERROR somewhere + neutralize text somewhere) is
+	// satisfied by logUnknownOriginalLinkSkip's own F1 ERROR even when the
+	// neutralize log is demoted (N10/N5 survive). Match both on one line.
+	found := false
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "level=ERROR") && strings.Contains(line, "neutralized retained .link claims") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("bootstrap neutralize must log its own ERROR line, got:\n%s", logs.String())
 	}
 }
 
-// TestRenamePositionalUnfreedSkipsStaleFinalNeutralize12156 pins finding B:
-// when phase 1 could not free a name (temp rename fails), the unknown NIC
-// whose target IS that unfreed name must NOT neutralize the occupant's live
-// final link. Index 0 (unknown, wears ge-0-0-1 via MAC-form) wants fxp0;
-// index 1 (known enp6s0, wears fxp0 via chain) wants ge-0-0-0 but its temp
-// rename fails, so fxp0 (the unknown NIC's target) is unfreed. The unknown
-// NIC still neutralizes its own current link but must spare the occupant's
-// chain fxp0.link (200 iterations like the reviewer repro); the pass still
-// reports the #7205 unfreed error.
-func TestRenamePositionalUnfreedSkipsStaleFinalNeutralize12156(t *testing.T) {
-	macForm := "# Managed by xpfd \u2014 do not edit\n[Match]\nMACAddress=52:54:00:00:00:0b\n\n[Link]\nName=ge-0-0-1\nMTUBytes=1500\n"
+// TestRenamePositionalUnfreedSkipsCurrentLinkNeutralize12156 pins finding B
+// (BALT direction): an unknown NIC that failed ITS OWN temp rename still
+// wears another NIC's final name, so its "own" current link is the known
+// owner's live file. NIC B (unknown, MAC-form ge-0-0-0 claim) wants fxp0;
+// NIC A (known enp5s0, chain fxp0.link, currently fxp0) wants ge-0-0-0.
+// B's temp rename fails, so ge-0-0-0 (B's CURRENT name, A's final) is
+// unfreed. B must skip neutralizing ge-0-0-0.link (A's live file, which A
+// rewrites with its verified chain in its own turn) while still
+// neutralizing the stale fxp0.link. A's chain must be kept in 200/200 runs
+// regardless of phase-2 map order (the reviewer TestACUnfreedOrderDependence
+// shape, which showed the chain absent in ~20/200 without the skip); the
+// pass still reports the #7205 unfreed error.
+func TestRenamePositionalUnfreedSkipsCurrentLinkNeutralize12156(t *testing.T) {
+	chain := "# Managed by xpfd \u2014 do not edit\n[Match]\nOriginalName=enp5s0\n\n[Link]\nName=fxp0"
+	macForm := "# Managed by xpfd \u2014 do not edit\n[Match]\nMACAddress=52:54:00:00:00:0b\n\n[Link]\nName=ge-0-0-0\nMTUBytes=1500\n"
 	for i := 0; i < 200; i++ {
 		dir := withTempLinkDir(t)
-		ownerPath := filepath.Join(dir, linkPrefix+"fxp0.link")
-		ownerContent := "# Managed by xpfd \u2014 do not edit\n[Match]\nOriginalName=enp6s0\n\n[Link]\nName=fxp0"
-		if err := os.WriteFile(ownerPath, []byte(ownerContent), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, linkPrefix+"fxp0.link"), []byte(chain), 0644); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, linkPrefix+"ge-0-0-1.link"), []byte(macForm), 0644); err != nil {
+		ownerPath := filepath.Join(dir, linkPrefix+"ge-0-0-0.link")
+		if err := os.WriteFile(ownerPath, []byte(macForm), 0644); err != nil {
 			t.Fatal(err)
 		}
-		// idx0 (unknown, MAC-form ge-0-0-1) -> fxp0; idx1 (known enp6s0,
-		// chain fxp0.link) -> ge-0-0-0. Temp-rename of fxp0 fails, so
-		// fxp0 is unfreed and idx1 strands.
+		// Slice order: B (unknown, wears ge-0-0-0, wants fxp0) sorts
+		// first; A (known enp5s0, wears fxp0, wants ge-0-0-0) second.
+		// B's temp rename fails, so ge-0-0-0 is unfreed: B's current
+		// link IS A's live file. B must spare it and still take the
+		// stale fxp0.link; A rewrites its own name with its chain.
 		nics := []pciNIC{
-			{sortKey: 0, busAddr: "0000:04:00.0", name: "ge-0-0-1"},
+			{sortKey: 1, busAddr: "0000:05:00.0", name: "ge-0-0-0"},
 			{sortKey: 1, busAddr: "0000:06:00.0", name: "fxp0"},
 		}
 		_, errs := renamePositional(nics, 0, false, func(from, to string) error {
-			if from == "fxp0" && strings.HasPrefix(to, "xpf-tmp-") {
+			if from == "ge-0-0-0" && strings.HasPrefix(to, "xpf-tmp-") {
 				return errors.New("injected temp failure")
 			}
 			return nil
@@ -531,10 +566,10 @@ func TestRenamePositionalUnfreedSkipsStaleFinalNeutralize12156(t *testing.T) {
 		}
 		got, err := os.ReadFile(ownerPath)
 		if err != nil {
-			t.Fatalf("iter %d: occupant chain fxp0.link was neutralized: %v", i, err)
+			t.Fatalf("iter %d: owner's ge-0-0-0.link was neutralized: %v", i, err)
 		}
-		if string(got) != ownerContent {
-			t.Fatalf("iter %d: occupant link rewritten:\n%s", i, got)
+		if !strings.Contains(string(got), "OriginalName=enp5s0") {
+			t.Fatalf("iter %d: owner's link lacks the verified chain:\n%s", i, got)
 		}
 	}
 }

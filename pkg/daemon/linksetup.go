@@ -339,18 +339,23 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 			// pre-fold behavior) and rename as required (stranding is worse).
 			// Persistence loss is reported via the phase-2 ERROR log below,
 			// not the #5842 errs channel (errs carries only failures: a
-			// neutralize that fails, or the #7205 unfreed error).
-			// Finding B: when phase 1 could not free this target, ANOTHER NIC
-			// still wears the final name (the temp rename failed) — so the
-			// "stale" final link is that occupant's live file, and the known
-			// occupant rewrites it with its verified chain in its own phase-2
-			// turn (map-order-dependent race with that :366 write).
-			// Neutralize only the current link then; the final name stays
-			// owned by its occupant. When the target IS freed, the final link
-			// is genuinely stale (nobody wears that name) and both go.
-			targets := []string{linkPrefix + current + ".link"}
-			if !unfreed[final] {
-				targets = []string{linkPrefix + current + ".link", linkPrefix + final + ".link"}
+			// neutralize that fails, a failed rename, or the #7205 unfreed
+			// error).
+			// Finding B (BALT direction): when THIS NIC failed its own temp
+			// rename it still wears its current name — which is another
+			// NIC's final (unfreed[current] is set: the name's current
+			// occupant is not its final owner). Its "own" current link is
+			// then the known owner's live file, and neutralizing it races
+			// the owner's writeLinkFile(final) at :367 (map-order
+			// dependent). Skip the current link then; the owner rewrites
+			// its own name with its verified chain in its own phase-2
+			// turn. The stale final link ALWAYS goes: for U→X with X
+			// unfreed, X's occupant V writes Y.link (its own final), never
+			// X.link — nobody else touches the stale claim, and sparing it
+			// would resurrect V under U's target (B-REG fail-open).
+			targets := []string{linkPrefix + current + ".link", linkPrefix + final + ".link"}
+			if unfreed[current] {
+				targets = []string{linkPrefix + final + ".link"}
 			}
 			for _, name := range targets {
 				if err := neutralizeResurrectableLink(name); err != nil {
