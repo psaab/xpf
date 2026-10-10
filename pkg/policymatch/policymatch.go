@@ -1783,11 +1783,14 @@ func NewZonePairPolicyFilter(cfg *config.Config, filterFrom, filterTo string) Zo
 // default-deny. Exclude every stanza with toZone == "any" from a host-bound
 // view, or transit denies appear to govern traffic the runtime delivers locally.
 //
-// #12094 F4: literal `any` and undefined/quarantined filters do not expand
-// transit wildcard tiers. A quarantined filter can still show its exact
-// authored pair (the renderers mark it quarantined). The host gate is separate:
-// it can apply `from-zone any to-zone junos-host` to unknown ingress, but never
-// pulls in a transit `to-zone any` stanza.
+// #12094 F4: literal `any` filters and undefined/quarantined filters do not
+// expand transit wildcard tiers. Literal `any` filters retain the base literal
+// match for authored stanzas. A quarantined filter can still show its exact
+// authored pair; gRPC hit-count/detail and local hit-count/detail mark it
+// quarantined, while local brief/standard and remote views do not render
+// quarantine state (a pre-existing gap). The host gate is separate: it can
+// apply `from-zone any to-zone junos-host` to unknown ingress, but never pulls
+// in a transit `to-zone any` stanza.
 func ZonePairPolicyAppliesToFilterPair(filter ZonePairPolicyFilter, fromZone, toZone string) bool {
 	if filter.filterTo == JunosHostZone && toZone == "any" {
 		return false
@@ -1799,9 +1802,6 @@ func ZonePairPolicyAppliesToFilterPair(filter ZonePairPolicyFilter, fromZone, to
 		if !filter.quarantinedFrom {
 			return false
 		}
-	}
-	if filter.literalAny && filter.filterTo != JunosHostZone {
-		return false
 	}
 	if (filter.unknownFrom && !filter.quarantinedFrom) ||
 		(filter.unknownTo && !filter.quarantinedTo) {
@@ -1818,6 +1818,10 @@ func ZonePairPolicyAppliesToFilterPair(filter ZonePairPolicyFilter, fromZone, to
 			return false
 		}
 		return true
+	}
+	if filter.literalAny && filter.filterTo != JunosHostZone {
+		return (filter.filterFrom == "" || fromZone == filter.filterFrom) &&
+			(filter.filterTo == "" || toZone == filter.filterTo)
 	}
 	axisApplies := func(zone, selected string) bool {
 		return selected == "" || zone == "any" || zone == selected

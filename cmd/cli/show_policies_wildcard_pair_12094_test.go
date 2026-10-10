@@ -88,10 +88,10 @@ func TestShowPoliciesFilteredScopesUnknownAndLiteralAnyZones12094(t *testing.T) 
 			t.Fatalf("showPoliciesFiltered(any): %v", err)
 		}
 	})
-	if strings.Contains(anyOut, "Rule: wild-from-any") ||
+	if !strings.Contains(anyOut, "Rule: wild-from-any") ||
 		strings.Contains(anyOut, "Rule: both-any-deny") ||
 		strings.Contains(anyOut, "Rule: wild-to-any") {
-		t.Fatalf("literal any filter listed wildcard policies as governing:\n%s", anyOut)
+		t.Fatalf("literal any filter did not show only its authored wildcard policy:\n%s", anyOut)
 	}
 }
 func TestShowPoliciesFilteredPreservesExactQuarantinedZonePair12094(t *testing.T) {

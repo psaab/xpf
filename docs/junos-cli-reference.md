@@ -1083,9 +1083,10 @@ Global policies:
   concrete pair. The
   host-bound view is narrower: it includes exact and `from-zone any` ->
   `junos-host` stanzas but never transit `to-zone any` / `any -> any` stanzas,
-  which the host gate does not enforce. Explicit `any` filters do not expand
-  transit wildcard stanzas; undefined filters do not select transit tiers, and
-  quarantined filters retain only their exact authored pair. The host-specific
+  which the host gate does not enforce. Explicit `any` filters use literal
+  zone-name matching: no transit wildcard expansion, with authored literal
+  stanzas shown. Undefined filters do not select transit tiers, and quarantined
+  filters retain only their exact authored pair. The host-specific
   `any -> junos-host` rule remains applicable to unknown ingress. Global-group
   selection remains separate; the pre-existing unscoped-global host-view
   mismatch is tracked as a #12094 follow-up. One shared
