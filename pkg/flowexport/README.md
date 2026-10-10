@@ -536,9 +536,9 @@ The package is split by responsibility (#1988):
   that drives it.
 - `ipfix.go` — IPFIX (v10) template/record encoding and the
   `IPFIXExporter` that drives it.
-- `exporterid.go` — `stableExporterID(protocol, instance, template)`
-  (#3740): the stable, nonzero 32-bit per-group id used as the v9 SourceID
-  / IPFIX Observation Domain ID. See "Exporter identity" below.
+- `exporterid.go` — `stableExporterID(protocol, instance, template, isV6)`
+  (#3740/#12148): the stable, nonzero 32-bit per-group id used as the v9
+  SourceID / IPFIX Observation Domain ID. See "Exporter identity" below.
 - `routemask.go` — the `MaskResolver` func type and
   `NewRouteMaskResolver` (#2866): a TTL-cached, size-bounded FIB
   longest-prefix-match lookup that resolves a flow's `srcMask`/`dstMask`
@@ -582,68 +582,66 @@ exporters MUST NOT share the same rule:
   Elastiflow) read as packet loss or an exporter restart. Pinned by
   `TestIPFIXTemplateRefreshPreservesSequenceNumber` (fail-on-revert).
 
-## Exporter identity — SourceID / Observation Domain ID (#3740)
+## Exporter identity — SourceID / Observation Domain ID (#3740/#12148)
 
-The resolvers start **one exporter per (sampling-instance, template)
-group** (`ResolveV9TemplateGroups` / `ResolveIPFIXTemplateGroups`), but
-every exporter previously hardcoded the NetFlow v9 header **SourceID**
-(RFC 3954 §5.1) and the IPFIX header **Observation Domain ID** (RFC 7011
-§3.1) to `1`, and every group reuses template IDs 256/257. Two groups
-pointed at the SAME collector therefore presented an identical RFC decode
-key — `(exporter source IP, SourceID/ODID, templateID)` — so the collector
-saw template **redefinitions** (256 under one group vs another) and two
-**interleaved sequence streams** under one observation domain, read as
-packet loss or an exporter restart. #3745's per-collector source-address
-does not fix this by default: auto/identical source-address yields the
-same source IP, and SourceID stayed 1 for both.
+The resolvers start **one exporter per (sampling-instance, template, family)
+group** (`ResolveV9TemplateGroups` / `ResolveIPFIXTemplateGroups`). Before
+#3740 every exporter hardcoded the NetFlow v9 header **SourceID** (RFC 3954
+§5.1) and IPFIX header **Observation Domain ID** (RFC 7011 §3.1) to `1`.
+#3740 derived a stable id from the instance and template, giving groups pointed
+at the SAME collector distinct domains. #6811 then split groups by family to
+prevent cross-family export but left the family out of the id. A same-instance,
+same-template dual-family setup therefore reused the ID across its inet and
+inet6 groups. For NetFlow v9, collectors commonly key streams on
+`(exporter source IP, SourceID)`, so same-source-IP groups could expose
+independent sequence streams as false loss or exporter restarts. IPFIX/UDP
+Transport Sessions include ports, so its separate sockets already distinguish
+those streams for conforming collectors; distinct family ODIDs are still used
+for consistent per-group identity.
 
-Each exporter now derives a **stable, nonzero 32-bit id** from its config
-identity via `stableExporterID(protocol, instance, template)`
-(`exporterid.go`): FNV-1a 64 over `"protocol|instance|template"`,
-xor-folded to 32 bits, mapped into `[1, 0xFFFFFFFF]`. It mirrors
-`config.StableTunnelEndpointID` (#1873). `NewExporter` stamps it as the v9
-SourceID; `NewIPFIXExporter` as the IPFIX Observation Domain ID.
+Each exporter derives a **stable, nonzero 32-bit id** via
+`stableExporterID(protocol, instance, template, isV6)` (`exporterid.go`):
+FNV-1a 64 over `"protocol|instance|template"` for inet and
+`"protocol|instance|template|v6"` for inet6, xor-folded to 32 bits and mapped
+into `[1, 0xFFFFFFFF]`. It mirrors `config.StableTunnelEndpointID` (#1873).
+`NewExporter` stamps it as the v9 SourceID; `NewIPFIXExporter` as the IPFIX
+Observation Domain ID.
 
 - **Template IDs stay 256/257.** A unique ODID/SourceID restores the RFC
   scoping key, so 256 under ODID-A is a different template from 256 under
   ODID-B — no per-group template-ID allocator needed.
-- **Per-exporter sequence counters stay** (now correct: each group has its
-  own observation domain, so its own sequence stream).
-- **HA symmetry (load-bearing).** Flow export is NOT gated on RG
-  mastership (`reconcileFlowExporters` has no master/standby guard), so
-  both cluster nodes run exporters from the same synced config. The id is
-  a pure function of config-synced fields (protocol/instance/template) and
-  of NOTHING node-specific, so both nodes compute the IDENTICAL id for a
-  group and a failover never presents the collector a new observation
-  domain — the same argument #1873 relies on.
-- **Protocol tag** (`"netflow9"` vs `"ipfix"`) is folded in so a v9 and an
-  IPFIX group with the same instance/template never share a value
-  (belt-and-braces; a flow-server binds one version per #2136).
-- **Degenerate-default guard.** A hand-built `ExportConfig{}` with no
-  instance AND no template (the singular `Build*` helpers and several unit
-  tests) keeps SourceID/ODID = `1`, preserving the pre-#3740 wire for the
-  unnamed single-default deployment. Real multi-group configs always carry
-  a non-empty `InstanceName` (sampling instances are named), so they
-  always get distinct hashed ids.
+- **Per-exporter sequence counters stay** (each group has its own observation
+  domain and sequence stream).
+- **HA symmetry (load-bearing).** Flow export is NOT gated on RG mastership
+  (`reconcileFlowExporters` has no master/standby guard), so both cluster nodes
+  run exporters from the same synced config. The ID is a pure function of
+  config-synced fields (protocol/instance/template/family) and of NOTHING
+  node-specific, so both nodes compute the IDENTICAL ID for a group and a
+  failover never presents the collector a new observation domain.
+- **Protocol and family identity.** The protocol tag (`"netflow9"` vs
+  `"ipfix"`) disambiguates exporter versions. The address family is also part
+  of the identity: inet IDs retain their existing value, while inet6 hashes
+  append `|v6`.
+- **Degenerate-default guard.** A hand-built `ExportConfig{}` with no instance
+  AND no template keeps the inet SourceID/ODID = `1`, preserving the
+  pre-#3740 wire for the unnamed default. An inet6 group still gets a
+  family-suffixed ID so it cannot collide with the inet default.
 
-**One-time upgrade churn (release note).** For any *named* or *multi-group*
-deployment the SourceID/ODID changes from `1` to the hashed value the
-first time this build runs. This is the intended, collector-visible
-correctness change: a collector sees a **new observation domain** once,
-and any dashboards/filters keyed on `ODID=1` (or `SourceID=1`) must be
-updated to the new per-group id. The truly-degenerate unnamed default
-(empty instance + template) stays at `1`. This is a NetFlow/IPFIX
-**wire-value** change to the external collector only — it is NOT an
-internal Go↔Rust snapshot wire change (no `protocol_wire_v1.json` regen).
+**ID migration (#12148).** Existing inet groups keep their IDs. Each inet6
+group's SourceID/ODID changes to its family-suffixed hash after upgrade, which
+separates v9 streams that previously shared an ID. Collectors or dashboards
+keyed on the former inet6 ID may need their filters updated; templates are
+re-announced automatically. This is a NetFlow/IPFIX wire-value change to the
+external collector only, not an internal Go↔Rust snapshot wire change (no
+`protocol_wire_v1.json` regen).
 
-Fail-on-revert pins (`exporter_id_3740_test.go`, loopback UDP):
-`TestNetflowV9SourceIDDistinctPerGroup` /
-`TestIPFIXObservationDomainDistinctPerGroup` (two same-collector groups
-differing only in template, and only in instance, emit distinct ids —
-restoring the constant `1` flips them RED),
-`TestStableExporterIDDegenerateDefault` (the all-empty default stays 1),
-and `TestStableExporterIDHASymmetry` (deterministic id + protocol
-disambiguation).
+Fail-on-revert pins (`exporter_id_3740_test.go` and
+`exporter_id_family_12148_test.go`, loopback UDP): the #3740 tests preserve
+per-group uniqueness, the 12148 cells require distinct inet/inet6 IDs through
+the real resolver path for a same-destination dual-family instance, and
+`TestStableExporterIDFamilyMigration` pins existing inet values while
+requiring distinct, deterministic inet6 values.
+
 
 ## Unusable collectors are excluded at build time (#8163)
 

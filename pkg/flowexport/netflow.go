@@ -589,10 +589,11 @@ func NewExporter(cfg *ExportConfig) (*Exporter, error) {
 		// construction time, so a session that started before a daemon restart
 		// is not truncated to FirstSwitched=0.
 		bootTime: bootTimeFunc(),
-		// #3740: stable per-group SourceID (RFC 3954 §5.1) derived from the
-		// config identity so two same-collector groups no longer collide on
-		// SourceID=1. HA-symmetric (pure function of config-synced fields).
-		sourceID:     stableExporterID("netflow9", cfg.InstanceName, cfg.TemplateName),
+		// #3740/#12148: stable per-group SourceID (RFC 3954 §5.1) derived
+		// from protocol/instance/template/family, so same-collector v4 and v6
+		// groups use separate observation domains. HA-symmetric (all inputs
+		// are config-synced).
+		sourceID:     stableExporterID("netflow9", cfg.InstanceName, cfg.TemplateName, cfg.GroupIsV6),
 		fieldsV4:     buildTemplateFieldsV4(cfg.V9TemplateOpts),
 		fieldsV6:     buildTemplateFieldsV6(cfg.V9TemplateOpts),
 		MaskResolver: NewRouteMaskResolver(0),
