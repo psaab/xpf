@@ -81,6 +81,38 @@ var deepDupRules = []deepDupRule{
 		kind:   "security flow traceoptions packet-filter",
 		effect: dupEffectSplitInstances,
 	},
+
+	// #12308, found during #12184: typing the QNH metric leaf let the
+	// synthetic probe use valid integer metrics, which showed the census's
+	// QNH skip hiding a genuine reduction. The compiler appends one
+	// NextHopEntry PER BLOCK (compiler_routing.go), so a repeated block for
+	// the same gateway is not last-wins — it is a SPLIT, measured in BOTH
+	// orders with interface in one block and preference in the other:
+	//
+	//	interface then preference  -> 2 next-hops: {iface, pref=5} {no-iface, pref=250}
+	//	preference  then interface -> 2 next-hops: {no-iface, pref=250} {iface, pref=5}
+	//	merged                      -> 1 next-hop:  {iface, pref=250}
+	//	flat `set` (both orders)    -> 1 next-hop:  {iface, pref=250}
+	//
+	// The halves land in DIFFERENT failover tiers: the interface half
+	// inherits the route preference (5) while the preference half carries
+	// 250, so one authored floating backup becomes a primary-tier path plus
+	// an interfaceless backup — a failover that fires at the wrong admin
+	// distance. The flat spelling merges (SetPath collapses same-gateway
+	// lines onto one node), so the gate fires only on the hierarchical
+	// re-opening; two DISTINCT gateways stay two legitimate backups.
+	// The rib-scoped route compiles through the same loop, so it splits the
+	// same way and needs its own row.
+	{
+		path:   []string{"routing-options", "static", "route", "qualified-next-hop"},
+		kind:   "static route qualified-next-hop",
+		effect: dupEffectSplitInstances,
+	},
+	{
+		path:   []string{"routing-options", "rib", "static", "route", "qualified-next-hop"},
+		kind:   "rib static route qualified-next-hop",
+		effect: dupEffectSplitInstances,
+	},
 }
 
 // deepDupUnreportable records the not-conserved containers this gate does NOT
