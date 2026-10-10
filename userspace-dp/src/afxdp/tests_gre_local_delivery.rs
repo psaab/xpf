@@ -1785,7 +1785,7 @@ fn gre_outer_host_inbound_denial_blocks_decap_11054() {
 /// delegate the packet only after a matching SA hit.
 #[test]
 fn gre_inner_ipsec_sa_hit_reaches_delegated_outlet_10516() {
-    let mut forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    let mut forwarding = build_forwarding_state(&gre_to_self_native_untagged_snapshot());
     forwarding.ipsec_sa.publish_empty_dump_for_test();
     let src = IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2));
     let dst = IpAddr::V4(Ipv4Addr::new(10, 255, 0, 1));
@@ -1939,7 +1939,7 @@ fn unknown_tunnel_mode_classifies_as_unknown_not_gre() {
 /// path via `poll_binding_process_descriptor` (not a synthetic leaf call).
 #[test]
 fn gre_decap_inner_icmp_echo_denied_by_host_inbound_reads_inner_type() {
-    let mut forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    let mut forwarding = build_forwarding_state(&gre_to_self_native_untagged_snapshot());
     // Ping-less posture: a present-but-EMPTY host-inbound set on every zone so
     // an inner ICMP echo to the firewall-local gr- address is denied (Junos
     // deny-all), while ICMP ERROR types stay globally admitted (#3171). This is
@@ -1970,13 +1970,19 @@ fn gre_decap_inner_icmp_echo_denied_by_host_inbound_reads_inner_type() {
     );
     frame[34] = 0x0B; // ICMPv4 time-exceeded (11) — an error type in the #3171 set
     let meta = gre_to_self_outer_meta(0, frame.len());
+    let ingress_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
+        &forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .expect("VID 0 must resolve to native VLAN 80's logical interface");
     // The outer GRE must reach decap so this test exercises the INNER
     // host-inbound check; only GRE is admitted on the underlay interface.
     let outer_gre =
         crate::afxdp::forwarding::zone_host_inbound_from_tokens(&["gre".to_string()], &[]);
     forwarding
         .ifindex_host_inbound
-        .insert(meta.ingress_ifindex as i32, outer_gre);
+        .insert(ingress_logical, outer_gre);
 
     let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
@@ -2044,7 +2050,7 @@ fn gre_decap_inner_icmp_echo_denied_by_host_inbound_reads_inner_type() {
 /// `host_inbound_gated_lo0_action` icmp_type argument and this goes RED.
 #[test]
 fn gre_decap_session_hit_host_inbound_reads_inner_icmp_type_5615() {
-    let mut forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    let mut forwarding = build_forwarding_state(&gre_to_self_native_untagged_snapshot());
     let ha_state = txn_ha_state();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
     binding.interface = Arc::<str>::from("ge-0-0-0");
@@ -2063,6 +2069,12 @@ fn gre_decap_session_hit_host_inbound_reads_inner_icmp_type_5615() {
     );
     frame[34] = 0x0B; // ICMPv4 time-exceeded (11) — an error type in the #3171 set
     let meta = gre_to_self_outer_meta(0, frame.len());
+    let ingress_logical = crate::afxdp::forwarding::resolve_ingress_logical_ifindex(
+        &forwarding,
+        meta.ingress_ifindex as i32,
+        meta.ingress_vlan_id,
+    )
+    .expect("VID 0 must resolve to native VLAN 80's logical interface");
 
     // Pass 1 — admit-all host-inbound: the inner echo is admitted on the
     // session-MISS local-delivery arm and caches a host-local session.
@@ -2099,7 +2111,7 @@ fn gre_decap_session_hit_host_inbound_reads_inner_icmp_type_5615() {
         crate::afxdp::forwarding::zone_host_inbound_from_tokens(&["gre".to_string()], &[]);
     forwarding
         .ifindex_host_inbound
-        .insert(meta.ingress_ifindex as i32, outer_gre);
+        .insert(ingress_logical, outer_gre);
 
     // Pass 2 — session-HIT: the host-inbound re-check reads the INNER ICMP type.
     let (batch2, dbg2) = txn_run_descriptor_checked(

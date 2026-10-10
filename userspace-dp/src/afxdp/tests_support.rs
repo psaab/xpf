@@ -2290,6 +2290,21 @@ pub(super) fn gre_to_self_snapshot() -> ConfigSnapshot {
     snapshot
 }
 
+/// GRE-to-self fixture with its untagged underlay explicitly classified as
+/// native VLAN 80. The base NAT fixture has a VLAN-80 child on ifindex 11;
+/// without this native-VLAN selection, VID-0 frames are correctly rejected
+/// before GRE decapsulation as unknown ingress.
+pub(super) fn gre_to_self_native_untagged_snapshot() -> ConfigSnapshot {
+    let mut snapshot = gre_to_self_snapshot();
+    let parent = snapshot
+        .interfaces
+        .iter_mut()
+        .find(|iface| iface.ifindex == 11 && iface.parent_ifindex == 0)
+        .expect("GRE fixture has the base underlay row");
+    parent.native_vlan_id = 80;
+    snapshot
+}
+
 
 /// Inner ICMP echo request 10.255.0.2 -> 10.255.0.1 (the gr-local
 /// inner address): 20-byte IPv4 header + 8-byte ICMP + 8 payload.
@@ -2370,7 +2385,12 @@ pub(super) fn gre_to_self_outer_meta(vlan_id: u16, frame_len: usize) -> Userspac
 /// channel and assert the TUN-bound payload is the decapped INNER
 /// packet, byte-identical, delivered EXACTLY once.
 pub(super) fn assert_gre_to_self_delivers_inner_exactly_once(vlan_id: u16) {
-    let forwarding = build_forwarding_state(&gre_to_self_snapshot());
+    let snapshot = if vlan_id == 0 {
+        gre_to_self_native_untagged_snapshot()
+    } else {
+        gre_to_self_snapshot()
+    };
+    let forwarding = build_forwarding_state(&snapshot);
     let ha_state = txn_ha_state();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
     binding.interface = Arc::<str>::from("ge-0-0-0");
