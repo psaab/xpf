@@ -589,9 +589,14 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	// Do not restate the position as a safety property: it is not one, and a
 	// comment claiming a guarantee the code does not depend on is how the
 	// next reader stops looking for the guarantee that matters.
-	capped, err := addLearnedRouteSnapshots(cfg, out, addSnapshot)
+	capped, suppressedMTUs, err := addLearnedRouteSnapshots(cfg, out, addSnapshot)
 	if err != nil {
 		return nil, false, err
+	}
+	for index, mtu := range suppressedMTUs {
+		if out[index].MTU == 0 || mtu < out[index].MTU {
+			out[index].MTU = mtu
+		}
 	}
 
 	out = applyRouteOverlay(out, overlay)
@@ -1341,9 +1346,11 @@ const learnedRouteMainTableID = 254
 // group. It is distinct from "nothing was imported": an empty kernel table and
 // a budget-limited table both may add zero routes, but only the latter leaves
 // the helper FIB deliberately incomplete.
-func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addSnapshot func(RouteSnapshot)) (bool, error) {
+// The returned index-to-MTU map identifies existing snapshots whose forwarding
+// path matched a suppressed learned route; callers apply it after additions.
+func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addSnapshot func(RouteSnapshot)) (bool, map[int]int, error) {
 	if learnedRouteImportFn == nil {
-		return false, nil
+		return false, nil, nil
 	}
 	instByTableID := make(map[int]string)
 	instanceTableIDs := make([]int, 0, len(cfg.RoutingInstances))
@@ -1358,17 +1365,17 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 
 	learned, err := learnedRouteImportFn(routing.LearnedRouteTableIDs(instanceTableIDs))
 	if err != nil {
-		return false, fmt.Errorf("route snapshot: %w", err)
+		return false, nil, fmt.Errorf("route snapshot: %w", err)
 	}
 	if len(learned) == 0 {
-		return false, nil
+		return false, nil, nil
 	}
 	// #10824: shed complete (table, protocol) groups rather than declining the
 	// entire learned-route import. The cap-hit counters identify the affected
 	// protocol so one flooded BGP peer cannot evict unrelated learned routes.
 	learned, capped := capLearnedRouteGroups(learned)
 	if capped && len(learned) == 0 {
-		return true, nil
+		return true, nil, nil
 	}
 
 	configuredPreference := make(map[string]int, len(existing))
@@ -1419,6 +1426,7 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 	var lastMetricKey string
 	var lowestMetric int
 	haveMetricKey := false
+	var suppressedMTUs map[int]int
 	for _, lr := range sorted {
 		family := "inet"
 		if lr.Family == netlink.FAMILY_V6 {
@@ -1472,6 +1480,30 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 				// Keep a configured route that is at least as preferred as
 				// the learned protocol route. A worse configured fallback
 				// remains beside it for the Rust FIB's preference ordering.
+				//
+				// A same-prefix kernel route can be suppressed even though its
+				// route-wide MTU is still a constraint on the identical selected
+				// path. Carry that constraint only onto the best configured
+				// candidate with the same next hops and weights; a competing
+				// route's MTU must not constrain a different selected path.
+				if lr.MTU > 0 && !lr.Discard {
+					learnedWeights := nonDefaultRouteWeights(lr.NextHopWeights)
+					for i, snap := range existing {
+						if snap.NextTable != "" || snap.Discard ||
+							snap.Table != table || snap.Family != family ||
+							snap.Destination != dest || snap.Preference != best ||
+							!slices.Equal(snap.NextHops, lr.NextHops) ||
+							!slices.Equal(snap.NextHopWeights, learnedWeights) {
+							continue
+						}
+						if suppressedMTUs == nil {
+							suppressedMTUs = make(map[int]int)
+						}
+						if mtu, ok := suppressedMTUs[i]; !ok || lr.MTU < mtu {
+							suppressedMTUs[i] = lr.MTU
+						}
+					}
+				}
 				continue
 			}
 		}
@@ -1486,7 +1518,7 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 			MTU:            lr.MTU,
 		})
 	}
-	return capped, nil
+	return capped, suppressedMTUs, nil
 }
 
 // learnedRouteProtocolDistance returns FRR's default distance for dynamic
