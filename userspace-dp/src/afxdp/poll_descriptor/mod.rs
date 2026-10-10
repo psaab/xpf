@@ -9946,11 +9946,13 @@ mod pptp_control_teardown_tests_11053 {
         let (a, b, key) = control_key();
         let control = crate::session::pptp::ControlChannelId::new(a, 49152, b, 1723);
         let call = PptpCall::new(a, 0x1111, b, 0x2222);
-        let own_queue = Arc::new(Mutex::new(VecDeque::from([WorkerCommand::InstallPptpCall {
-            call,
-            control,
-            learned_ns: 1,
-        }])));
+        let own_queue = Arc::new(Mutex::new(VecDeque::from([
+            WorkerCommand::InstallPptpCall {
+                call,
+                control,
+                learned_ns: 1,
+            },
+        ])));
         let peer_queue = Arc::new(Mutex::new(VecDeque::new()));
         let inbox = crate::session::pptp_control::PptpControlInbox::default();
         let mut sessions = SessionTable::new();
@@ -9968,7 +9970,10 @@ mod pptp_control_teardown_tests_11053 {
         );
         {
             let pending = own_queue.lock().expect("own queue");
-            assert!(matches!(pending.front(), Some(WorkerCommand::InstallPptpCall { .. })));
+            assert!(matches!(
+                pending.front(),
+                Some(WorkerCommand::InstallPptpCall { .. })
+            ));
             assert!(matches!(
                 pending.back(),
                 Some(WorkerCommand::ForgetPptpControlChannel {
