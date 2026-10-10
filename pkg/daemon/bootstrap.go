@@ -1299,9 +1299,32 @@ func (d *Daemon) setupBootstrapLifeline() {
 		return
 	}
 
-	// Rename just this one NIC to fxp0 (writes the .link + renames).
-	original := recoverOriginalName(lifeline)
-	if _, err := writeLinkFile(defaultMgmtInterface, original); err != nil {
+	// Rename just this one NIC to fxp0 (writes the .link + renames). A
+	// 10-xpf .link with Name=<lifeline> and no OriginalName= identifies a
+	// logical current name, so retain that file rather than persisting it as
+	// OriginalName=; still perform the required rename when lifeline != fxp0
+	// (#12156/F1).
+	original, originalOK := positionalOriginalNameFor(lifeline, defaultMgmtInterface)
+	if !originalOK {
+		logUnknownOriginalLinkSkip("bootstrap", lifeline, defaultMgmtInterface)
+		if lifeline != defaultMgmtInterface {
+			// MAJOR-1 (same fail-open as the positional path): the lifeline
+			// is renaming to fxp0 without a verifiable kernel name. Its own
+			// name-only link plus any stale fxp0.link would each resurrect
+			// a wrong identity next boot — neutralize both (fail-closed).
+			// No error channel here: the log IS the signal (ERROR, not Info).
+			for _, name := range []string{linkPrefix + lifeline + ".link", linkPrefix + defaultMgmtInterface + ".link"} {
+				if err := neutralizeResurrectableLink(name); err != nil {
+					slog.Error("bootstrap: failed to neutralize resurrectable .link",
+						"file", name, "err", err)
+				}
+			}
+			slog.Error("bootstrap: unknown-original lifeline renamed to fxp0 without a "+
+				"verifiable kernel name; neutralized retained .link claims so the next "+
+				"boot falls back to kernel names",
+				"from", lifeline)
+		}
+	} else if _, err := writeLinkFile(defaultMgmtInterface, original); err != nil {
 		// #5842: the bootstrap lifeline .link is the file that keeps the
 		// management NIC named fxp0 across the next boot. Log it loudly rather
 		// than discarding — this path has no error channel to return on, so

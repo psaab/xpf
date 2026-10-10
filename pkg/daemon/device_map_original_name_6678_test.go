@@ -143,7 +143,7 @@ func TestEnumerateAndRenameMappedWritesLinkWhenOriginalDerivable_6678(t *testing
 	if strings.Contains(content, "OriginalName=ge-0-0-3") {
 		t.Errorf("the LOGICAL name must never be recorded as OriginalName:\n%s", content)
 	}
-	if strings.Contains(content, deviceMapOriginalUnknown) {
+	if strings.Contains(content, originalNameUnknown) {
 		t.Errorf("the sentinel must never reach a .link file:\n%s", content)
 	}
 }
@@ -152,10 +152,10 @@ func TestEnumerateAndRenameMappedWritesLinkWhenOriginalDerivable_6678(t *testing
 // makes carrying the sentinel as a map VALUE safe: it can never collide with a
 // real interface name, so it cannot be mistaken for one if it ever escapes.
 func TestDeviceMapUnknownSentinelIsNotAnInterfaceName_6678(t *testing.T) {
-	if !strings.ContainsRune(deviceMapOriginalUnknown, 0) {
-		t.Fatalf("the sentinel must be unrepresentable as an interface name, got %q", deviceMapOriginalUnknown)
+	if !strings.ContainsRune(originalNameUnknown, 0) {
+		t.Fatalf("the sentinel must be unrepresentable as an interface name, got %q", originalNameUnknown)
 	}
-	if len(deviceMapOriginalUnknown) <= 16 {
-		t.Logf("note: sentinel %q is short enough to fit IFNAMSIZ, but the NUL keeps it unrepresentable", deviceMapOriginalUnknown)
+	if len(originalNameUnknown) <= 16 {
+		t.Logf("note: sentinel %q is short enough to fit IFNAMSIZ, but the NUL keeps it unrepresentable", originalNameUnknown)
 	}
 }

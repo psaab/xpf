@@ -255,20 +255,21 @@ func assignName(idx, fpc int, clusterMode bool) string {
 }
 
 // renamePositional performs the collision-safe two-pass positional rename
-// (#4178). It captures every NIC's OriginalName from the EXISTING .link set
-// BEFORE writing any file (so a mid-pass overwrite can never feed a corrupted
-// OriginalName into a later NIC's recovery), breaks target-name collisions via
-// temp names (so an enumeration shift does not EEXIST-strand a rename), then
-// writes each .link with the pre-captured OriginalName and renames to the
-// final name. renameFn is injected so production passes renameInterface and
-// tests can model EEXIST semantics. Returns true if any .link changed or any
-// rename ran.
+// (#4178). It captures each verified OriginalName (or an unknown sentinel)
+// from the EXISTING .link set BEFORE writing any file (so a mid-pass overwrite
+// can never feed a corrupted OriginalName into a later NIC's recovery), breaks
+// target-name collisions via temp names (so an enumeration shift does not
+// EEXIST-strand a rename), then writes eligible .link files and renames to the
+// final name. When the original is unknown it skips only the write; if the
+// current name differs from the target, it still attempts the rename. renameFn
+// is injected so production passes renameInterface and tests can model EEXIST
+// semantics. Returns true if any .link changed or any rename ran.
 func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(from, to string) error) (bool, []error) {
-	// Phase 0: snapshot targets and capture EVERY OriginalName up-front, from
-	// the .link set as it exists BEFORE this pass writes anything. This is the
-	// core of the #4178 fix: the previous single-pass loop wrote .link file idx
-	// then let idx+1's recoverOriginalName read that just-overwritten file, so
-	// an enumeration shift corrupted the OriginalName chain.
+	// Phase 0: snapshot targets and capture each verified OriginalName or
+	// unknown sentinel up-front, from the .link set as it exists BEFORE this
+	// pass writes anything. This is the core of the #4178 fix: the previous
+	// single-pass loop wrote .link file idx then let idx+1's recovery read that
+	// just-overwritten file, so an enumeration shift corrupted the chain.
 	desiredByCurrent := make(map[string]string, len(nics))
 	originalByCurrent := make(map[string]string, len(nics))
 	desiredNames := make(map[string]bool, len(nics))
@@ -276,7 +277,17 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 	for idx, nic := range nics {
 		target := assignName(idx, fpc, clusterMode)
 		desiredByCurrent[nic.name] = target
-		originalByCurrent[nic.name] = recoverOriginalName(nic.name)
+		if original, ok := positionalOriginalNameFor(nic.name, target); ok {
+			originalByCurrent[nic.name] = original
+		} else {
+			// #12156: a 10-xpf .link assigns this current name without
+			// recording its kernel original, or the NIC already wears its
+			// target name without any original record. Carry "unknown" through
+			// the shared collision-break re-keying without manufacturing
+			// OriginalName=<logical name>.
+			originalByCurrent[nic.name] = originalNameUnknown
+			logUnknownOriginalLinkSkip("linksetup", nic.name, target)
+		}
 		desiredNames[target] = true
 		currentNames[idx] = nic.name
 	}
@@ -299,14 +310,50 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 	for current, final := range desiredByCurrent {
 		original := originalByCurrent[current]
 		if original == "" {
-			original = recoverOriginalName(current)
+			var ok bool
+			original, ok = positionalOriginalNameFor(current, final)
+			if !ok {
+				original = originalNameUnknown
+			}
 		}
-		wrote, err := writeLinkFile(final, original)
-		if err != nil {
-			errs = append(errs, err)
-		}
-		if wrote {
-			changed = true
+		if original == originalNameUnknown {
+			// #12156: no udev-matchable kernel original is known. Skip the
+			// .link write rather than persisting OriginalName=<logical name>,
+			// which udev never presents. The phase-0 log distinguishes a
+			// retained name-only link from the absence of usable persistence.
+			if current == final {
+				// Already at the final name: there is no rename to run, and
+				// nothing here can resurrect a wrong identity (no target
+				// change), so the retained files stay as they are.
+				continue
+			}
+			// MAJOR-1: an unknown NIC changing target MUST NOT leave
+			// resurrectable claims behind. Its own name-only O.link (whose
+			// MAC still matches it) and any stale T.link (another NIC's
+			// claim) would each re-apply at the next boot and put a NIC up
+			// under ANOTHER NIC's logical name — fail-open. Neutralize both
+			// so the next boot falls back to kernel names (fail-closed, the
+			// pre-fold behavior), rename as required (stranding is worse),
+			// and report on the #5842 error channel like device-map does.
+			for _, name := range []string{linkPrefix + current + ".link", linkPrefix + final + ".link"} {
+				if err := neutralizeResurrectableLink(name); err != nil {
+					errs = append(errs, err)
+				} else {
+					changed = true
+				}
+			}
+			slog.Error("linksetup: unknown-original NIC changed target without a "+
+				"verifiable kernel name; neutralized retained .link claims so the next "+
+				"boot falls back to kernel names",
+				"from", current, "to", final)
+		} else {
+			wrote, err := writeLinkFile(final, original)
+			if err != nil {
+				errs = append(errs, err)
+			}
+			if wrote {
+				changed = true
+			}
 		}
 		if current != final {
 			// #7205: phase 1 could not free this name, so the rename below
@@ -329,6 +376,66 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 		}
 	}
 	return changed, errs
+}
+
+// positionalOriginalNameFor determines whether positional naming has a
+// udev-matchable OriginalName for this NIC. A previously recorded name is
+// verified by the existing .link chain. With no recorded original and no
+// name-only .link assigning the current name, a NIC whose current name
+// differs from its assigned final name is ASSUMED under its kernel name
+// (first rename). That assumption is FALSE for a NIC renamed in memory by
+// an earlier pass of this same boot (shift-back writes OriginalName=<logical>
+// there — MINOR-3, residual): without a kernel-name oracle the gate cannot
+// tell, so that shape still emits a logical original. A 10-xpf .link that
+// assigns the current name without an OriginalName= means the current name
+// is logical and the kernel original is unknown whatever the final name is
+// (#12156/F1).
+func positionalOriginalNameFor(current, final string) (string, bool) {
+	original, matchedNameOnly, _ := recoverOriginalName(current)
+	if original != current {
+		return original, true
+	}
+	if matchedNameOnly {
+		return "", false
+	}
+	if current != final {
+		return current, true
+	}
+	return "", false
+}
+
+// logUnknownOriginalLinkSkip distinguishes a matching name-only link from the
+// absence of usable persistence. When the NIC is already at its final name
+// the skip is benign (no target change, nothing to persist): MAC-form links
+// log at Info, missing persistence at Warn. When the NIC must still rename
+// (the F1 path), no persistence exists for the target and the retained file
+// will be neutralized — that logs at ERROR like the device-map analogue
+// (MINOR-4: Info-only there is fail-quiet on the F1 path itself).
+func logUnknownOriginalLinkSkip(logPrefix, current, final string) {
+	_, matchedNameOnly, matchedMAC := recoverOriginalName(current)
+	if current != final {
+		slog.Error(logPrefix+": unknown-original NIC must rename without a "+
+			"verifiable kernel name; no persistence exists for the target",
+			"current", current, "logical", final)
+		return
+	}
+	if matchedNameOnly {
+		if matchedMAC {
+			slog.Info(logPrefix+": existing MAC-form .link found; skipping an "+
+				"unmatchable OriginalName= write",
+				"current", current, "logical", final)
+		} else {
+			slog.Info(logPrefix+": existing name-only .link found; skipping an "+
+				"unmatchable OriginalName= write",
+				"current", current, "logical", final)
+		}
+		return
+	}
+	slog.Warn(logPrefix+": cannot determine the pre-rename kernel name for "+
+		"this NIC and no usable .link exists to retain; skipping the .link write "+
+		"instead of persisting an unmatchable OriginalName=. Boot-time persistence "+
+		"is NOT established.",
+		"current", current, "logical", final)
 }
 
 // breakNameCollisions is the shared phase-1 collision break used by BOTH the
@@ -491,13 +598,16 @@ func verifyPositionalNames(fpc int, clusterMode bool) []error {
 	return errs
 }
 
-// recoverOriginalName returns the OriginalName from an existing .link file
-// if the interface was previously renamed, otherwise returns the current name.
-func recoverOriginalName(currentName string) string {
+// recoverOriginalName returns the OriginalName from an existing 10-xpf .link
+// that names currentName, plus whether a matching Name= has no recorded
+// OriginalName= and whether that name-only link matches by MACAddress=. The
+// distinction matters because Name=<current> without OriginalName= proves the
+// NIC already wears a logical name, not its kernel name (#12156/F1).
+func recoverOriginalName(currentName string) (original string, matchedNameOnly, matchedMAC bool) {
 	// Search existing .link files for one that renames TO this name.
 	entries, err := os.ReadDir(linkDir)
 	if err != nil {
-		return currentName
+		return currentName, false, false
 	}
 	for _, e := range entries {
 		if !strings.HasPrefix(e.Name(), linkPrefix) || !strings.HasSuffix(e.Name(), ".link") {
@@ -512,18 +622,25 @@ func recoverOriginalName(currentName string) string {
 		if !containsLine(content, "Name="+currentName) {
 			continue
 		}
-		// Extract OriginalName= value.
+		var recordedOriginal string
+		hasMACMatch := false
 		for _, line := range strings.Split(content, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "OriginalName=") {
-				orig := strings.TrimPrefix(line, "OriginalName=")
-				if orig != "" {
-					return orig
-				}
+				recordedOriginal = strings.TrimPrefix(line, "OriginalName=")
+			}
+			if strings.HasPrefix(line, "MACAddress=") &&
+				strings.TrimSpace(strings.TrimPrefix(line, "MACAddress=")) != "" {
+				hasMACMatch = true
 			}
 		}
+		if recordedOriginal != "" {
+			return recordedOriginal, false, false
+		}
+		matchedNameOnly = true
+		matchedMAC = matchedMAC || hasMACMatch
 	}
-	return currentName
+	return currentName, matchedNameOnly, matchedMAC
 }
 
 // containsLine checks if the text contains an exact line matching s.
@@ -534,6 +651,22 @@ func containsLine(text, s string) bool {
 		}
 	}
 	return false
+}
+
+// neutralizeResurrectableLink removes a managed .link file that udev could
+// otherwise re-apply at the next boot. Used on the MAJOR-1 path: an unknown
+// NIC renaming O→T must not leave O.link (MAC still matches it) or a stale
+// T.link (another NIC's claim) behind — either resurrects a wrong identity.
+// Missing files are not errors; only xpfd-managed names are ever removed.
+func neutralizeResurrectableLink(name string) error {
+	if !strings.HasPrefix(name, linkPrefix) || !strings.HasSuffix(name, ".link") {
+		return fmt.Errorf("linksetup: refusing to remove unmanaged link file %q", name)
+	}
+	path := filepath.Join(linkDir, name)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove resurrectable .link %s: %w", path, err)
+	}
+	return nil
 }
 
 // writeLinkFile writes a systemd .link file for the given target name.

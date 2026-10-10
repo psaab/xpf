@@ -113,7 +113,7 @@ func TestDeviceMapLinkOriginalNameRoundTrips(t *testing.T) {
 	}
 	// A subsequent run that sees the NIC already named ge-0-0-3 must recover
 	// the original kernel name from the existing .link, not the logical name.
-	if got := recoverOriginalName("ge-0-0-3"); got != "enp9s0" {
+	if got, _, _ := recoverOriginalName("ge-0-0-3"); got != "enp9s0" {
 		t.Fatalf("OriginalName round-trip failed: recovered %q, want enp9s0", got)
 	}
 	// Re-writing the identical .link is a no-op (no churn).
@@ -153,7 +153,7 @@ func TestDeviceMapOriginalNameFallbackViaDeriveKernelName(t *testing.T) {
 	}
 
 	// Replicate the originalByCurrent population logic that the fix touches.
-	orig := recoverOriginalName("ge-0-0-3") // returns "ge-0-0-3" (no .link)
+	orig, _, _ := recoverOriginalName("ge-0-0-3") // returns "ge-0-0-3" (no .link)
 	if orig == "ge-0-0-3" {
 		if dk := deriveKernelNameFn("ge-0-0-3"); dk != "" {
 			orig = dk
@@ -167,7 +167,7 @@ func TestDeviceMapOriginalNameFallbackViaDeriveKernelName(t *testing.T) {
 	if !changed {
 		t.Fatalf("first write should create the .link")
 	}
-	if got := recoverOriginalName("ge-0-0-3"); got != "enp9s0" {
+	if got, _, _ := recoverOriginalName("ge-0-0-3"); got != "enp9s0" {
 		t.Fatalf("written .link must record OriginalName=enp9s0, recovered %q", got)
 	}
 }
