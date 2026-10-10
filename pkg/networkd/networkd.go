@@ -979,7 +979,11 @@ func fnmatchInterfaceName(pattern, value string) bool {
 		case fnmatchNameAny:
 			matched = true
 		case fnmatchNameCharClass:
-			matched, _ = token.class.matches(valueRune)
+			var valid bool
+			matched, valid = token.class.matches(valueRune)
+			if !valid {
+				return false
+			}
 		}
 		if matched {
 			patternIndex = next
@@ -1028,6 +1032,9 @@ func fnmatchNameTokenAt(pattern string, start int) (fnmatchNameToken, int) {
 		if ok {
 			return fnmatchNameToken{kind: fnmatchNameCharClass, class: class}, next
 		}
+		if fnmatchUnterminatedTrailingHyphenClass(pattern, start) {
+			return fnmatchNameToken{kind: fnmatchNameNever}, len(pattern)
+		}
 		return fnmatchNameToken{kind: fnmatchNameLiteral, literal: '['}, start + 1
 	default:
 		r, size := utf8.DecodeRuneInString(pattern[start:])
@@ -1038,7 +1045,7 @@ func fnmatchNameTokenAt(pattern string, start int) (fnmatchNameToken, int) {
 func parseFnmatchNameClass(pattern string, start int) (fnmatchNameClass, int, bool) {
 	i := start + 1
 	class := fnmatchNameClass{pattern: pattern}
-	if i < len(pattern) && pattern[i] == '!' {
+	if i < len(pattern) && (pattern[i] == '!' || pattern[i] == '^') {
 		class.negated = true
 		i++
 	}
@@ -1076,6 +1083,26 @@ func parseFnmatchNameClass(pattern string, start int) (fnmatchNameClass, int, bo
 		first = false
 	}
 	return fnmatchNameClass{}, start + 1, false
+}
+
+// glibc treats an unterminated range with no upper endpoint as no-match.
+func fnmatchUnterminatedTrailingHyphenClass(pattern string, start int) bool {
+	end := len(pattern) - 1
+	if end-start < 2 || pattern[end] != '-' {
+		return false
+	}
+	backslashes := 0
+	for i := end - 1; i > start && pattern[i] == '\\'; i-- {
+		backslashes++
+	}
+	if backslashes%2 != 0 {
+		return false
+	}
+	contentStart := start + 1
+	if contentStart < end && (pattern[contentStart] == '!' || pattern[contentStart] == '^') {
+		contentStart++
+	}
+	return contentStart < end
 }
 
 func fnmatchBracketTermEnd(pattern string, start, limit int, marker byte) int {
@@ -1120,10 +1147,12 @@ func (class fnmatchNameClass) matches(value rune) (bool, bool) {
 			if hasHyphen && hyphen.kind == fnmatchClassLiteral && hyphen.value == '-' && !hyphen.escaped {
 				high, afterHigh, hasHigh := fnmatchClassAtomAt(class, afterHyphen)
 				if hasHigh {
-					if high.kind != fnmatchClassLiteral || atom.value > high.value {
+					if high.kind != fnmatchClassLiteral {
 						return false, false
 					}
-					matched = matched || atom.value <= value && value <= high.value
+					if atom.value <= high.value {
+						matched = matched || atom.value <= value && value <= high.value
+					}
 					i = afterHigh
 					continue
 				}
@@ -1176,14 +1205,12 @@ func (atom fnmatchClassAtom) matches(pattern string, value rune) (bool, bool) {
 	case fnmatchClassNamed:
 		return fnmatchPOSIXCharacterClass(pattern[atom.start:atom.end], value)
 	case fnmatchClassCollating:
-		for i := atom.start; i < atom.end; {
-			r, size := utf8.DecodeRuneInString(pattern[i:])
-			if r == value {
-				return true, true
-			}
-			i += size
+		content := pattern[atom.start:atom.end]
+		r, size := utf8.DecodeRuneInString(content)
+		if size == len(content) {
+			return r == value, true
 		}
-		return false, atom.start < atom.end
+		return false, false
 	default:
 		return false, false
 	}

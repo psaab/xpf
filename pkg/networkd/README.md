@@ -22,8 +22,10 @@ Triggers `networkctl reload` only when files actually changed.
   see the retirement note below (#6852).
 - `FindExternallyManaged(dir string) ExternalMatchSet` — `networkd.go`. Detects non-xpf
   network files with supported `Name=` / `MACAddress=` predicates. Name patterns
-  use systemd-style `fnmatch` classes and in-pattern escapes; MAC forms normalize systemd's
-  colon-, hyphen-, and dotted EUI-48 spellings. `Matches` requires those
+  use the tested systemd-compatible `fnmatch` forms. Systemd consumes field-level
+  backslashes before matching and rejects `:` in interface names, so matcher-helper
+  escape and POSIX named-class coverage is not a file-level parity claim. MAC forms
+  normalize systemd's colon-, hyphen-, and dotted EUI-48 spellings. `Matches` requires
   predicates to establish ownership; `MatchesForApply` keeps durable teardown
   conservative when supported predicates match alongside unknown `[Match]` keys.
 

@@ -68,6 +68,16 @@ func TestExternalNameNegationOrdersAndClassExclusions12135(t *testing.T) {
 		{name: "same-line all-negative rules default true", rule: "Name=!en* eth*\n", iface: "wlan0", want: true},
 		{name: "class excludes zero", rule: "Name=eth[!0]\n", iface: "eth0"},
 		{name: "class includes one", rule: "Name=eth[!0]\n", iface: "eth1", want: true},
+		{name: "caret class excludes zero", rule: "Name=eth[^0]\n", iface: "eth0"},
+		{name: "caret class includes one", rule: "Name=eth[^0]\n", iface: "eth1", want: true},
+		{name: "negative name rule vetoes caret match", rule: "Name=!eth[^0]\n", iface: "eth1"},
+		{name: "negative name rule allows caret nonmatch", rule: "Name=!eth[^0]\n", iface: "eth0", want: true},
+		{name: "caret class after star", rule: "Name=e*[^0-9]\n", iface: "ethx", want: true},
+		{name: "caret class with trailing star", rule: "Name=en[^p]*\n", iface: "enq0", want: true},
+		{name: "caret class with trailing star excludes p", rule: "Name=en[^p]*\n", iface: "enp0"},
+		{name: "negative caret class allows enp", rule: "Name=!en[^p]*\n", iface: "enp0", want: true},
+		{name: "negative caret class vetoes enq", rule: "Name=!en[^p]*\n", iface: "enq0"},
+		{name: "caret range excludes 1 to 3", rule: "Name=eth[^1-3]\n", iface: "eth4", want: true},
 		{name: "nested opening bracket does not match caret", rule: "Name=eth[[!0]\n", iface: "eth^"},
 		{name: "nested opening bracket includes zero", rule: "Name=eth[[!0]\n", iface: "eth0", want: true},
 		{name: "nested opening bracket includes literal bracket", rule: "Name=eth[[!0]\n", iface: "eth[", want: true},
@@ -80,12 +90,19 @@ func TestExternalNameNegationOrdersAndClassExclusions12135(t *testing.T) {
 		{name: "trailing hyphen in class is literal", rule: "Name=eth[0-]\n", iface: "eth-", want: true},
 		{name: "unmatched opening bracket is literal", rule: "Name=eth[\n", iface: "eth[", want: true},
 		{name: "unmatched opening bracket does not match other names", rule: "Name=eth[\n", iface: "eth0"},
-		{name: "invalid positive range does not match", rule: "Name=eth[z-a]\n", iface: "eth0"},
-		{name: "invalid negative range uses all-negative default", rule: "Name=!eth[z-a]\n", iface: "eth0", want: true},
-		{name: "POSIX digit class matches", rule: "Name=eth[[:digit:]]\n", iface: "eth0", want: true},
-		{name: "POSIX collating symbol matches its character", rule: "Name=eth[.ch.]\n", iface: "ethc", want: true},
-		{name: "POSIX equivalence class matches its character", rule: "Name=eth[=ab=]\n", iface: "etha", want: true},
-		{name: "unknown POSIX character class does not match", rule: "Name=eth[[:bogus:]]\n", iface: "eth0"},
+		{name: "unterminated class with trailing hyphen does not match", rule: "Name=eth[a-\n", iface: "eth[a-"},
+		{name: "reversed positive range does not match", rule: "Name=eth[z-a]\n", iface: "eth0"},
+		{name: "negative name rule allows reversed range nonmatch", rule: "Name=!eth[z-a]\n", iface: "eth0", want: true},
+		{name: "reversed range followed by matching member", rule: "Name=eth[z-a0]\n", iface: "eth0", want: true},
+		{name: "reversed range followed by negated class match", rule: "Name=eth[!z-a]\n", iface: "eth0", want: true},
+		{name: "reversed range continues to valid range member", rule: "Name=eth[0-9a-Z]\n", iface: "eth5", want: true},
+		{name: "negative name rule vetoes reversed-range pattern match", rule: "Name=!eth[0-9a-Z]\n", iface: "eth5"},
+		{name: "POSIX single-character collating symbol", rule: "Name=eth[[.c.]]\n", iface: "ethc", want: true},
+		{name: "POSIX collating symbol excludes other character", rule: "Name=eth[[.c.]]\n", iface: "ethh"},
+		{name: "POSIX multi-character collating symbol is no-match", rule: "Name=eth[[.ab.]]\n", iface: "etha"},
+		{name: "POSIX single-character equivalence class", rule: "Name=eth[[=a=]]\n", iface: "etha", want: true},
+		{name: "POSIX equivalence class excludes other character", rule: "Name=eth[[=a=]]\n", iface: "ethb"},
+		{name: "POSIX multi-character equivalence class is no-match", rule: "Name=eth[[=ab=]]\n", iface: "etha"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -94,6 +111,20 @@ func TestExternalNameNegationOrdersAndClassExclusions12135(t *testing.T) {
 				t.Errorf("Matches(%q) = %v, want %v", tc.iface, got, tc.want)
 			}
 		})
+	}
+}
+
+// POSIX named classes are supported by the matcher helper, but a Match.Name
+// containing ':' is rejected by systemd's interface-name parser. This is
+// matcher-only coverage, not file-level parity: the parser drops the
+// assignment, and networkd's verifier later ignores a file with no valid
+// Match settings.
+func TestFnmatchInterfaceNameNamedClassMatcherOnly12135(t *testing.T) {
+	if !fnmatchInterfaceName("eth[[:digit:]]", "eth0") {
+		t.Fatal("matcher helper must recognize the POSIX digit class")
+	}
+	if fnmatchInterfaceName("eth[[:digit:]]", "ethx") {
+		t.Fatal("matcher helper must reject a non-digit")
 	}
 }
 
@@ -303,14 +334,24 @@ func TestApplyExternalFnmatchClassesMatchSystemd12135(t *testing.T) {
 	}{
 		{name: "nested opening bracket excludes caret", match: "Name=eth[[!0]", iface: "eth^"},
 		{name: "nested opening bracket includes zero", match: "Name=eth[[!0]", iface: "eth0", wantExternal: true},
+		{name: "caret class includes one", match: "Name=eth[^0]", iface: "eth1", wantExternal: true},
+		{name: "negative name rule vetoes caret class match", match: "Name=!eth[^0]", iface: "eth1"},
 		{name: "negative literal closing bracket class", match: "Name=!eth[]0]", iface: "eth0"},
 		{name: "literal closing bracket class", match: "Name=eth[]0]", iface: "eth0", wantExternal: true},
 		{name: "negative class with literal closing bracket", match: "Name=eth[!]]", iface: "eth0", wantExternal: true},
 		{name: "leading hyphen class", match: "Name=eth[-0]", iface: "eth-", wantExternal: true},
 		{name: "trailing hyphen class", match: "Name=eth[0-]", iface: "eth-", wantExternal: true},
-		{name: "invalid positive range", match: "Name=eth[z-a]", iface: "eth0"},
-		{name: "invalid negative range uses all-negative default", match: "Name=!eth[z-a]", iface: "eth0", wantExternal: true},
-		{name: "POSIX digit class", match: "Name=eth[[:digit:]]", iface: "eth0", wantExternal: true},
+		{name: "reversed positive range continues", match: "Name=eth[0-9a-Z]", iface: "eth5", wantExternal: true},
+		{name: "caret class excludes zero", match: "Name=eth[^0]", iface: "eth0"},
+		{name: "negative name rule vetoes reversed-range match", match: "Name=!eth[0-9a-Z]", iface: "eth5"},
+		{name: "reversed range followed by member", match: "Name=eth[z-a0]", iface: "eth0", wantExternal: true},
+		{name: "reversed range inside negated class", match: "Name=eth[!z-a]", iface: "eth0", wantExternal: true},
+		{name: "reversed range does not match", match: "Name=eth[z-a]", iface: "eth0"},
+		{name: "single-character collating symbol", match: "Name=eth[[.c.]]", iface: "ethc", wantExternal: true},
+		{name: "multi-character collating symbol is no-match", match: "Name=eth[[.ab.]]", iface: "etha"},
+		{name: "single-character equivalence class", match: "Name=eth[[=a=]]", iface: "etha", wantExternal: true},
+		{name: "multi-character equivalence class is no-match", match: "Name=eth[[=ab=]]", iface: "etha"},
+		{name: "unterminated trailing-hyphen class", match: "Name=eth[a-", iface: "eth0"},
 		{name: "unmatched bracket literal does not match", match: "Name=eth[", iface: "eth0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -339,7 +380,9 @@ func TestApplyExternalFnmatchClassesMatchSystemd12135(t *testing.T) {
 	}
 }
 
-func TestFnmatchInterfaceNamePatternEscapes12135(t *testing.T) {
+// Systemd's config parser removes backslashes before calling fnmatch; this
+// covers matcher-level escape semantics only, not Name= file-level parity.
+func TestFnmatchInterfaceNamePatternEscapesAtMatcherLevel12135(t *testing.T) {
 	for _, tc := range []struct {
 		pattern string
 		value   string
@@ -353,14 +396,5 @@ func TestFnmatchInterfaceNamePatternEscapes12135(t *testing.T) {
 		if got := fnmatchInterfaceName(tc.pattern, tc.value); got != tc.want {
 			t.Errorf("fnmatchInterfaceName(%q, %q) = %v, want %v", tc.pattern, tc.value, got, tc.want)
 		}
-	}
-	dir := t.TempDir()
-	writeExternalNetwork12135(t, dir, "50-external.network", "[Match]\nName=eth\\*\n")
-	matches := FindExternallyManaged(dir)
-	if !matches.Matches("eth*", "") {
-		t.Fatal("escaped asterisk should match its literal interface name")
-	}
-	if matches.Matches("eth0", "") {
-		t.Fatal("escaped asterisk should not match a wildcard expansion")
 	}
 }
