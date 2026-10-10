@@ -862,8 +862,9 @@ func (a *Agent) nextPrivSalt() ([]byte, error) {
 // encryptPDU encrypts a scopedPDU using the user's privacy key. It returns an
 // error (rather than silently downgrading) when a securely-encrypted PDU cannot
 // be produced — most importantly when the RNG fails to generate the per-message
-// privacy salt — so the caller can fail closed.
-func (a *Agent) encryptPDU(user *usmUser, scopedPDU []byte) ([]byte, []byte, error) {
+// privacy salt — so the caller can fail closed. engineTime is the response-local
+// snapshot used in the AES IV and the response's USM parameters.
+func (a *Agent) encryptPDU(user *usmUser, scopedPDU []byte, engineTime int) ([]byte, []byte, error) {
 	if user.privKey == nil {
 		return nil, nil, fmt.Errorf("snmpv3: user %q has no privacy key", user.name)
 	}
@@ -903,7 +904,7 @@ func (a *Agent) encryptPDU(user *usmUser, scopedPDU []byte) ([]byte, []byte, err
 		}
 		return enc, desSalt, nil
 	case "aes128":
-		enc, err := encryptAES128(user.privKey, scopedPDU, salt, a.engineBoots, a.engineTime())
+		enc, err := encryptAES128(user.privKey, scopedPDU, salt, a.engineBoots, engineTime)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1148,12 +1149,14 @@ func (a *Agent) buildV3Response(msgID int, reqFlags byte, user *usmUser,
 
 	// Determine response flags.
 	respFlags := reqFlags & (msgFlagAuth | msgFlagPriv)
+	// Pin the authoritative time before encryption so the AES IV and USM stamp match.
+	responseEngineTime := a.engineTime()
 
 	// Handle encryption.
 	var scopedPDUEncoded []byte
 	var privParamsVal []byte
 	if respFlags&msgFlagPriv != 0 && user.privKey != nil {
-		enc, pp, err := a.encryptPDU(user, scopedPDU)
+		enc, pp, err := a.encryptPDU(user, scopedPDU, responseEngineTime)
 		if err != nil {
 			// Fail closed (RFC 3414 §8.2.1): the manager requested privacy but
 			// we could not produce a securely-encrypted PDU — most importantly
@@ -1183,7 +1186,7 @@ func (a *Agent) buildV3Response(msgID int, reqFlags byte, user *usmUser,
 	// USM security parameters.
 	usmFields := berEncodeTLV(tagOctetString, a.engineID)
 	usmFields = append(usmFields, berEncodeIntegerTLV(a.engineBoots)...)
-	usmFields = append(usmFields, berEncodeIntegerTLV(a.engineTime())...)
+	usmFields = append(usmFields, berEncodeIntegerTLV(responseEngineTime)...)
 	usmFields = append(usmFields, berEncodeTLV(tagOctetString, []byte(user.name))...)
 	usmFields = append(usmFields, berEncodeTLV(tagOctetString, authPlaceholder)...)
 	usmFields = append(usmFields, berEncodeTLV(tagOctetString, privParamsVal)...)

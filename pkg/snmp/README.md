@@ -232,12 +232,11 @@ sender learned about us via discovery, not our local clock at receive time.
   clock instead (the #2640 bug) corrupted the CFB keystream and silently dropped
   every encrypted query made while the manager's cached time drifted from ours —
   the normal steady state under clock advance.
-- **Response encrypt** uses the agent's *current* `engineBoots`/`engineTime()`
-  (`encryptPDU → encryptAES128`), and the same values are written into the
-  response's `msgAuthoritativeEngineBoots`/`...Time`. We are the authoritative
-  engine for our own reply, so the IV and the header boots/time agree by
-  construction and a manager decrypts the response using the boots/time it reads
-  from our header. This path is unchanged by the #2640 fix.
+- **Response encrypt** uses the agent's authoritative `engineBoots` and snapshots
+  `engineTime()` once in `buildV3Response` as `responseEngineTime`. That
+  snapshot is passed through `encryptPDU → encryptAES128` for the AES IV and
+  written as the response's `msgAuthoritativeEngineTime` (#12146), so a manager
+  decrypts with the same boots/time carried in the header.
 - DES (`decryptDES`/`encryptDES`, RFC 3414 §8) derives its IV from `privParams`
   XOR the pre-IV salt alone, so boots/time do not enter the DES IV.
 - DES privacy (`privacy-des`, 56-bit effective) is **deprecated** and stays only

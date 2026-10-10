@@ -73,7 +73,7 @@ func TestEncryptPDUDistinctSaltsPerMessage(t *testing.T) {
 	seen := make(map[uint64]struct{}, N)
 	var prev uint64
 	for i := 0; i < N; i++ {
-		_, pp, err := a.encryptPDU(user, scoped)
+		_, pp, err := a.encryptPDU(user, scoped, a.engineTime())
 		if err != nil {
 			t.Fatalf("encryptPDU error at i=%d: %v", i, err)
 		}

@@ -668,9 +668,15 @@ func (a *Agent) loadAndIncrementEngineBoots() int {
 	return boots
 }
 
+// engineTimeNow is the clock source used by Agent.engineTime. Tests replace it
+// to exercise engine-time boundary transitions deterministically.
+var engineTimeNow = func(a *Agent) int {
+	return int(time.Since(a.startTime).Seconds())
+}
+
 // engineTime returns the number of seconds since agent start.
 func (a *Agent) engineTime() int {
-	return int(time.Since(a.startTime).Seconds())
+	return engineTimeNow(a)
 }
 
 // checkTimeliness applies the RFC 3414 §3.2 timeliness window for the agent

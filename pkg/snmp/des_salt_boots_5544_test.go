@@ -70,7 +70,7 @@ func TestDESSaltCarriesEngineBoots5544(t *testing.T) {
 	a, user := newDESPrivAgent(t, boots)
 	scoped := []byte("scopedPDU-des-salt-boots-5544-roundtrip-check!!")
 
-	enc, salt, err := a.encryptPDU(user, scoped)
+	enc, salt, err := a.encryptPDU(user, scoped, a.engineTime())
 	if err != nil {
 		t.Fatalf("encryptPDU(des) error: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestDESSaltCarriesEngineBoots5544(t *testing.T) {
 
 	// (3) a second encrypt keeps the boots prefix and strictly advances the
 	// low-32 monotonic counter.
-	_, salt2, err := a.encryptPDU(user, scoped)
+	_, salt2, err := a.encryptPDU(user, scoped, a.engineTime())
 	if err != nil {
 		t.Fatalf("encryptPDU(des) second call error: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestDESvsAESSaltDivergence5544(t *testing.T) {
 
 	// First encrypt: DES. Counter = seed+1 = 0x1122334400000001. The DES branch
 	// overlays engineBoots onto the high 32 bits.
-	_, desSalt, err := a.encryptPDU(desUser, scoped)
+	_, desSalt, err := a.encryptPDU(desUser, scoped, a.engineTime())
 	if err != nil {
 		t.Fatalf("encryptPDU(des): %v", err)
 	}
@@ -167,7 +167,7 @@ func TestDESvsAESSaltDivergence5544(t *testing.T) {
 	// Second encrypt: AES. Counter = seed+2 = 0x1122334400000002. The AES branch
 	// returns the counter RAW — salt[0:4] stays the counter's high bytes
 	// (0x11223344) and is NOT forced to engineBoots.
-	_, aesSalt, err := a.encryptPDU(aesUser, scoped)
+	_, aesSalt, err := a.encryptPDU(aesUser, scoped, a.engineTime())
 	if err != nil {
 		t.Fatalf("encryptPDU(aes): %v", err)
 	}
