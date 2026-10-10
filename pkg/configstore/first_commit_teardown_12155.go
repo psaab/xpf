@@ -36,6 +36,10 @@ import (
 	"path/filepath"
 )
 
+// maxFirstCommitTeardownMarkerSize bounds the boot-path marker read: the
+// marker is four short strings; 4 KiB is generous without risking memory.
+const maxFirstCommitTeardownMarkerSize = 4096
+
 type firstCommitTeardownMarker struct {
 	Issue        string `json:"issue"`
 	Action       string `json:"action"`
@@ -70,7 +74,10 @@ func (s *Store) loadFirstCommitTeardownLocked() {
 		return
 	}
 	path := firstCommitTeardownMarkerPath(s.db.dir)
-	data, err := os.ReadFile(path)
+	// Bounded + non-regular-refusing read: this runs at the top of Load, so
+	// a FIFO here must not hang boot nor a runaway file exhaust memory
+	// (#8597 census; GLM F1–F5-confirmation MINOR).
+	data, err := ReadBoundedFile(path, maxFirstCommitTeardownMarkerSize)
 	if err == nil {
 		s.firstCommitTeardownOwed = true
 		s.firstCommitTeardownMarkerDurable = true

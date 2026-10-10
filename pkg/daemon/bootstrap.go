@@ -12,11 +12,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/psaab/xpf/pkg/fsatomic"
@@ -128,6 +130,30 @@ const defaultMgmtInterface = "fxp0"
 const bootstrapLifelineNetworkMarker = "# Managed by xpfd — #1922 bootstrap lifeline"
 
 const bootstrapLifelineSnapshotBase = ".xpf-first-commit-lifeline.snapshot"
+
+// maxBootstrapLifelineSnapshotSize bounds the boot-path snapshot reads: the
+// record is a generation hash plus one .network file; 1 MiB is generous
+// without risking memory on a runaway file (#12155 census follow-up).
+const maxBootstrapLifelineSnapshotSize = 1 << 20
+
+// readBootstrapLifelineSnapshot reads the pre-takeover snapshot with a size
+// cap and non-regular refusal: a FIFO here must not hang boot nor a runaway
+// file exhaust memory (same hazard class as the #8597 configstore census).
+func readBootstrapLifelineSnapshot(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("refusing non-regular lifeline snapshot %s", path)
+	}
+	return io.ReadAll(io.LimitReader(f, maxBootstrapLifelineSnapshotSize+1))
+}
 
 type bootstrapLifelineSnapshotRecord struct {
 	Generation string `json:"generation"`
@@ -700,7 +726,7 @@ func (d *Daemon) restoreBootstrapLifelineNetwork() (bool, error) {
 	durableDebt := d.store != nil && d.store.FirstCommitTeardownOwed()
 	if len(d.bootstrapLifelineNetwork) == 0 && durableDebt {
 		snapshotPath := filepath.Join(linkDir, bootstrapLifelineSnapshotBase)
-		data, err := os.ReadFile(snapshotPath)
+		data, err := readBootstrapLifelineSnapshot(snapshotPath)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) && errors.Is(readErr, os.ErrNotExist) {
 				return false, nil
@@ -750,7 +776,7 @@ func (d *Daemon) restoreBootstrapLifelineNetwork() (bool, error) {
 
 func (d *Daemon) clearBootstrapLifelineSnapshot(generation string) {
 	path := filepath.Join(linkDir, bootstrapLifelineSnapshotBase)
-	data, err := os.ReadFile(path)
+	data, err := readBootstrapLifelineSnapshot(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
