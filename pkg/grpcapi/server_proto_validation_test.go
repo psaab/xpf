@@ -12,11 +12,9 @@ import (
 
 // TestMatchPoliciesRejectsInvalidProtocol asserts the #3108 contract for the
 // gRPC MatchPolicies surface: a non-empty but unknown/out-of-range protocol
-// token must be rejected with InvalidArgument, not passed through to the shared
-// matcher where matchApp short-circuits an unresolvable protocol to match-any
-// (the test policy uses `application any`, so the protocol dimension is the only
-// thing that could constrain the verdict). An empty protocol stays the
-// unspecified wildcard; a valid name/number proceeds.
+// token must be rejected with InvalidArgument, not passed through as unspecified.
+// Constrained terms would never match it, but an `application any` term may
+// still match. An empty protocol stays unspecified; a valid name/number proceeds.
 //
 // FAIL-ON-REVERT: removing the policymatch.ValidateProtocol guard in
 // MatchPolicies lets Protocol="tcpp"/"999" reach the matcher and return a

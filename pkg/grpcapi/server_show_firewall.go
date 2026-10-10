@@ -215,12 +215,15 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 	// #3696: fail CLOSED on malformed selector grammar, the server-boundary
 	// sibling of the strict CLI parser (policymatch.ParseSelectorArgs). The old
 	// `if len(parts) != 2 { continue }` silently DROPPED any comma segment
-	// lacking a `key=value` — `...,port` left dstPort at the 0 wildcard and the
-	// simulator evaluated ALL ports — and the switch had no default arm, so an
-	// unknown key (`prot=tcp`) was ignored, leaving proto empty (any protocol).
+	// lacking a `key=value` — `...,port` left the query port unspecified; a
+	// constrained term would not match, while an unconstrained term may still
+	// match. An unknown key (`prot=tcp`) likewise left protocol unspecified; a
+	// constrained term would not match, but `application any` could still match,
+	// so a skipped deny could let a later permit match.
 	// An explicit-empty typed value (`port=`) was likewise treated as omitted
 	// because ParsePort("") returns (0, nil), so the handler could not tell
-	// "key absent" (legit wildcard) from "key present, empty value" (malformed).
+	// "key absent" (unspecified; constrained terms do not match) from "key
+	// present, empty value" (malformed).
 	// A malformed segment, an unknown key, or an empty value is now a reported
 	// error, distinguishing key-absent from key-empty (M01). An entirely empty
 	// param string (bare `test-policy:`) still falls through to the
@@ -267,28 +270,27 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 				// CLI `test policy` topic, overmatching source-port-constrained
 				// applications). Validate via the shared helper (#3116) so a
 				// malformed/out-of-range value reports an error instead of
-				// silently coercing to the 0 "any port" wildcard.
+				// silently becoming the 0 unspecified value.
 				srcPort, srcPortErr = policymatch.ParsePort(parts[1])
 			case "port":
-				// #3116: a malformed/out-of-range port must NOT silently coerce to
-				// the 0 "any port" wildcard (the shared matcher gates the port term
-				// on dstPort > 0), which would yield a verdict for a packet that
-				// cannot exist. Route through the shared validator and report the
-				// error the way a bad src/dst is reported below.
+				// #3116: a malformed/out-of-range port must NOT silently become 0
+				// (the unspecified value). A constrained term would then never
+				// match, while an unconstrained term could still match and produce
+				// a misleading verdict. Validate via the shared helper and report
+				// the error the way a bad src/dst is reported below.
 				dstPort, portErr = policymatch.ParsePort(parts[1])
 			case "proto":
-				// #3108: a non-empty but unknown/out-of-range protocol token must
-				// NOT silently coerce to the empty "any protocol" wildcard (the
-				// shared matcher's matchApp short-circuits to match-any for an
-				// unresolvable protocol), which would yield a verdict for traffic
-				// that cannot exist. Validate via the shared helper and report the
-				// error the way a bad port/src is reported below.
+				// #3108: reject an unknown/out-of-range protocol token rather than
+				// treating it as unspecified: constrained terms would never match,
+				// but `application any` could still match and conceal invalid input.
+				// Validate via the shared helper and report the error the way a bad
+				// port/src is reported below.
 				proto = parts[1]
 				protoErr = policymatch.ValidateProtocol(proto)
 			case "ictype":
 				// #3284: ICMP/ICMPv6 type so a type-constrained application term
 				// (junos-icmp-ping = type 8) is honored. Empty is unspecified (the
-				// term fails closed); a malformed/out-of-range value errors.
+				// term never matches); a malformed/out-of-range value errors.
 				icmpType, icmpTypeErr = policymatch.ParseICMPValue(parts[1])
 			case "iccode":
 				icmpCode, icmpCodeErr = policymatch.ParseICMPValue(parts[1])

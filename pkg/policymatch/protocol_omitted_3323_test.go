@@ -35,39 +35,31 @@ func protoConstrainedAppCfg() *config.Config {
 	return cfgWith(sec, config.ApplicationsConfig{})
 }
 
-// TestProtoConstrainedAppOmittedQueryProtoNoMatch pins #3323: an
-// application-constrained policy must NOT match when the query OMITS the
-// protocol. The runtime always carries a concrete protocol and keys its
-// per-application terms under it (policy.rs CompiledApplications.matches does
-// `by_protocol.get(&protocol)?`), so a protocol-bearing app term only ever
-// matches a packet whose protocol equals it. An omitted query protocol cannot
-// describe any such packet, so the term fails closed and the query falls through
-// to the configured default-policy.
+// TestProtoConstrainedAppOmittedQueryProtoNoMatchDespitePermittedCompletion
+// pins #3323 and documents the mixed omission semantics in #12227: a partly
+// specified query without protocol never matches `junos-http`, even though its
+// concrete tcp/80 completion is permitted. The runtime always carries a
+// concrete protocol and keys per-application terms under it
+// (policy.rs CompiledApplications.matches does `by_protocol.get(&protocol)?`).
 //
 // FAIL-ON-REVERT: restoring the `if proto == "" { return true }` short-circuit
 // in matchApp makes the protocol-less query match the junos-http permit
-// (Matched=true, permit), failing the want-default-deny assertion — the exact
-// over-match #3323 fixes.
-func TestProtoConstrainedAppOmittedQueryProtoNoMatch(t *testing.T) {
+// (Matched=true, permit), failing the want-default-deny assertion. The tcp/80
+// positive control ensures the permitted completion remains visible.
+func TestProtoConstrainedAppOmittedQueryProtoNoMatchDespitePermittedCompletion(t *testing.T) {
 	cfg := protoConstrainedAppCfg()
 
 	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust"}) // Protocol omitted ("")
 	if res.Matched {
-		t.Fatalf("app-constrained policy over-matched an omitted query protocol (#3323); res = %+v", res)
+		t.Fatalf("app-constrained policy over-matched an omitted query protocol (#3323/#12227); res = %+v", res)
 	}
 	if !res.DefaultUsed || res.Action != config.PolicyDeny {
 		t.Fatalf("want default-policy deny for an omitted query protocol, got %+v", res)
 	}
-}
 
-// TestProtoConstrainedAppMatchingProtoStillPermits is the positive control: the
-// concrete protocol+port still matches (the fix narrows, not breaks, matching).
-func TestProtoConstrainedAppMatchingProtoStillPermits(t *testing.T) {
-	cfg := protoConstrainedAppCfg()
-
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
-	if !res.Matched || res.Action != config.PolicyPermit {
-		t.Fatalf("concrete tcp/80 no longer matches junos-http (#3323 over-narrowed); res = %+v", res)
+	completion := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	if !completion.Matched || completion.Action != config.PolicyPermit {
+		t.Fatalf("permitted tcp/80 completion no longer matches junos-http, got %+v", completion)
 	}
 }
 

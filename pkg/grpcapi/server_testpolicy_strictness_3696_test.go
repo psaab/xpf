@@ -11,14 +11,15 @@ import (
 // TestShowTestPolicyStrictGrammar is the #3696 RED-on-revert guard for the gRPC
 // ShowText "test-policy:" bridge (the server-boundary sibling of the strict CLI
 // parser). The old handler used `if len(parts) != 2 { continue }` and had no
-// default arm, so a comma segment lacking `key=value` was silently dropped
-// (`...,port` -> dstPort 0 -> all ports), an unknown key (`prot=tcp`) was
-// ignored (proto empty -> any protocol), and an explicit-empty typed value
-// (`port=`) read as omitted (ParsePort("") -> (0, nil)). Each silently widened
-// the query.
+// default arm, so a comma segment lacking `key=value` left its query dimension
+// unspecified (`...,port` left the destination port absent; `prot=tcp` left the
+// protocol absent). A constrained term would not match, while an unconstrained
+// term might; a skipped deny could let a later permit match. An explicit-empty
+// typed value (`port=`) also read as omitted (ParsePort("") -> (0, nil)). These
+// defects silently produced a non-exhaustive partial-query verdict.
 //
 // FAIL-ON-REVERT: removing the malformed-segment / empty-value / default-arm
-// handling makes these inputs evaluate a widened query and print a "Policy
+// handling makes these inputs evaluate a partial query and print a "Policy
 // match" (or a default verdict) with no diagnostic, flipping the assertions red.
 func TestShowTestPolicyStrictGrammar(t *testing.T) {
 	s := &Server{store: matchPoliciesTestStore(t)}

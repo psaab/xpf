@@ -1114,8 +1114,11 @@ The 5-tuple policy simulator answers "which policy does this flow match?" over
 the same precedence the dataplane enforces. Selectors: `source-ip`,
 `destination-ip`, `source-port`, `destination-port`, `protocol <name|number>`,
 `icmp-type`, `icmp-code`, `ingress-interface` (#5579), and the valueless
-`non-first-fragment` (#5572). `from-zone` and `to-zone` are required; an OMITTED
-selector matches any.
+`non-first-fragment` (#5572). `from-zone` and `to-zone` are required; omitted
+source/destination IP matches any address. An omitted protocol, port, or ICMP
+type/code never matches an application term constrained on that dimension;
+unconstrained terms may still match. A verdict for a partly specified query is
+not exhaustive — a skipped deny can let a later permit match.
 
 **Per-interface host-inbound scoping (#5579).** A security zone can carry
 MULTIPLE per-interface `host-inbound-traffic` effective views (#3362) — e.g. SSH

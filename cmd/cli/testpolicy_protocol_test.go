@@ -8,8 +8,8 @@ import (
 // TestTestPolicyRejectsInvalidProtocol covers the #3108 gap on the remote `cli`
 // client's `test policy` command (cmd/cli). A non-empty but unknown/out-of-range
 // protocol token must return a clear command error and NEVER be forwarded to the
-// backend, where matchApp would short-circuit an unresolvable protocol to the
-// "any protocol" wildcard and return a misleading verdict.
+// backend: constrained terms would never match it, but an `application any`
+// term may still match and return a misleading verdict.
 //
 // Only the rejection path is unit-testable here: a VALID/ABSENT protocol
 // proceeds to c.showText, which dials the gRPC client (an integration path). The

@@ -40,8 +40,9 @@ security {
 
 // TestTestPolicyRejectsInvalidPort asserts the #3116 contract for the CLI
 // `test policy` surface: a malformed or out-of-range destination-port must
-// return an error instead of silently becoming the 0 "any port" wildcard. A
-// valid port and an absent port proceed without error.
+// return an error instead of silently becoming the 0 unspecified value. A
+// constrained term would then never match, while an unconstrained term may still
+// match. A valid port and an absent port proceed without error.
 //
 // FAIL-ON-REVERT: restoring `dstPort, _ = strconv.Atoi(args[i])` makes "abc"
 // and "70000" become 0 / a bogus value with no error, flipping the want-error

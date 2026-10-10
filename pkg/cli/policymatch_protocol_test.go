@@ -7,10 +7,9 @@ import (
 
 // TestTestPolicyRejectsInvalidProtocol asserts the #3108 contract for the CLI
 // `test policy` surface: a non-empty but unknown/out-of-range protocol token
-// must return an error instead of silently becoming the "any protocol"
-// wildcard (matchApp short-circuits an unresolvable protocol to match-any, and
-// the fixture policy uses `application any`). A valid name/number and an absent
-// protocol proceed without error.
+// must return an error, not be treated as unspecified. Constrained terms would
+// never match it, but the fixture's `application any` term may still match. A
+// valid name/number and an absent protocol proceed without error.
 //
 // FAIL-ON-REVERT: removing the policymatch.ValidateProtocol guard in testPolicy
 // lets "notaproto"/"999" pass into the matcher with no error, flipping the

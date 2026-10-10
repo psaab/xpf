@@ -8,16 +8,16 @@ import (
 // TestShowMatchPoliciesRejectsInvalidPort covers the #3354 gap on the remote
 // CLI surface: `show security match-policies source-port/destination-port` was
 // parsed with an assign-on-success-only strconv.Atoi, so a malformed/out-of-
-// range token was silently dropped and the field stayed the 0 wildcard — the
-// remote CLI then asked the server to evaluate an unconstrained-port query and
-// returned a verdict for a packet the operator never described. The local CLI
-// and `test policy` already route through policymatch.ParsePort; the remote CLI
-// must too, returning an explicit error. The error returns during arg parsing,
-// before any RPC, so an empty client suffices.
+// range token was silently dropped and the field stayed unspecified. A
+// constrained term would not match, but an unconstrained term could still match,
+// allowing a skipped deny to reach a later permit. The remote CLI then asked the
+// server for a partial query whose verdict was not exhaustive. The local CLI and
+// `test policy` already route through policymatch.ParsePort; the remote CLI must
+// too, returning an explicit error before any RPC.
 //
 // FAIL-ON-REVERT: restoring the inline `if v, err := strconv.Atoi(...); err ==
-// nil` drop makes these want-error cases return nil (no error) and silently
-// wildcard, turning the assertions red.
+// nil (no error) and silently left the field unspecified, turning the assertions
+// red.
 func TestShowMatchPoliciesRejectsInvalidPort(t *testing.T) {
 	cases := []struct {
 		name string

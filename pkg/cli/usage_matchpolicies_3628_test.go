@@ -30,9 +30,16 @@ func TestShowMatchPoliciesUsageAdvertisesSelectors(t *testing.T) {
 	if strings.Contains(out, "protocol <tcp|udp>") {
 		t.Fatalf("show security match-policies still prints the stale tcp|udp-only usage:\n%s", out)
 	}
-	for _, tok := range []string{"source-port", "destination-port", "icmp-type", "icmp-code", "icmp6"} {
+	for _, tok := range []string{
+		"source-port", "destination-port", "icmp-type", "icmp-code", "icmp6",
+		"omitted source/destination IP matches", "any address.",
+		"An omitted protocol, port, or icmp-type/code never matches",
+		"a term constrained on that dimension; unconstrained terms may match.",
+		"A verdict for a partly specified query is not exhaustive — a skipped",
+		"deny can let a later permit match.",
+	} {
 		if !strings.Contains(out, tok) {
-			t.Fatalf("show security match-policies usage missing selector %q:\n%s", tok, out)
+			t.Fatalf("show security match-policies usage missing %q:\n%s", tok, out)
 		}
 	}
 }

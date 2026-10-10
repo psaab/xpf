@@ -3,17 +3,16 @@ package policymatch
 import "testing"
 
 // TestValidateProtocol asserts the #3108 contract for the simulator protocol
-// token, the protocol analogue of TestValidatePort/TestParsePort (#3116): an
-// empty/whitespace token is "unspecified" (no constraint) and is accepted; a
-// known name/alias ("tcp", "udp", "icmp", "ospf") or a numeric value in 0-255
-// is accepted; and an unknown name ("notaproto", "tcpp"), an out-of-range
-// number ("999"), or other non-resolvable garbage is REJECTED rather than
-// silently treated as "any protocol".
+// token: an empty/whitespace token leaves the query protocol unspecified and is
+// accepted; a known name/alias ("tcp", "udp", "icmp", "ospf") or a numeric
+// value in 0-255 is accepted; an unknown name ("notaproto", "tcpp"), an
+// out-of-range number ("999"), or other non-resolvable garbage is REJECTED.
+// Without validation, constrained terms would never match an unknown protocol,
+// but `application any` could still match and conceal invalid input.
 //
 // FAIL-ON-REVERT: replacing the body with `return nil` (dropping the
 // appid.ProtocolNumber gate) flips every want-error case ("notaproto", "tcpp",
-// "999", "256", "-1") to nil and turns them red — the exact silent-wildcard
-// regression #3108 fixes.
+// "999", "256", "-1") to nil and turns them red.
 func TestValidateProtocol(t *testing.T) {
 	cases := []struct {
 		in      string
@@ -33,7 +32,7 @@ func TestValidateProtocol(t *testing.T) {
 		{"999", true},       // out of range number
 		{"256", true},       // one past the 8-bit top
 		{"-1", true},        // negative number
-		{"any", true},       // no "any" protocol keyword; omit for wildcard
+		{"any", true},       // no "any" protocol keyword; omit for unspecified
 	}
 	for _, tc := range cases {
 		err := ValidateProtocol(tc.in)

@@ -8,7 +8,8 @@ import (
 // TestTestPolicyRejectsInvalidSourcePort covers the #3107/#3116 gap on the
 // remote `cli` client's `test policy` command (cmd/cli): a malformed or
 // out-of-range source-port must return a clear command error and NEVER silently
-// coerce to the 0 "any port" wildcard before the gRPC topic is built.
+// coerce to the 0 unspecified value. A constrained term would then never match,
+// while an unconstrained term may still match and produce a misleading verdict.
 //
 // Only the rejection path is unit-testable here: a VALID/ABSENT port proceeds
 // to c.showText, which dials the gRPC client. The rejection returns before any
