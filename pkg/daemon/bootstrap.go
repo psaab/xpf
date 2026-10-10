@@ -1334,9 +1334,10 @@ func writeBootstrapLifelineNetwork(lifeline string, hasRouteEvidence bool) (bool
 		var b strings.Builder
 		b.WriteString("# Managed by xpfd — #1922 bootstrap lifeline (address snapshot)\n")
 		b.WriteString("[Match]\nName=fxp0\n\n[Network]\n")
+		// Both-dynamic routes through the factory arm above (static4 and
+		// static6 are both false there): inside this branch at most one
+		// dhcp flag can be true (GLM round-1 F1), so no DHCP=yes case.
 		switch {
-		case snap.dhcpV4 && snap.dhcpV6:
-			b.WriteString("DHCP=yes\n")
 		case snap.dhcpV4:
 			b.WriteString("DHCP=ipv4\n")
 		case snap.dhcpV6:
