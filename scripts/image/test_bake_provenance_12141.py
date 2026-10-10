@@ -330,6 +330,43 @@ class BuildProvenanceTests(unittest.TestCase):
                       refused_build.stderr)
         self.assertIn("FATAL: provenance probe refused the build",
                       refused_build.stderr)
+    def test_go_overlay_double_dash_spelling_is_refused(self):
+        # Go accepts --flag identically to -flag: the refusal must match
+        # both spellings (GLM F1-F5 confirmation defect).
+        overlay = self.root.parent / f"{self.root.name}-overlay-dd.json"
+        overlay.write_text(json.dumps({"Replace": {}}))
+        self.addCleanup(overlay.unlink, missing_ok=True)
+        env = self.probe_env()
+        env["GOFLAGS"] = f"--overlay={overlay}"
+        result = subprocess.run(
+            [sys.executable, str(_HERE / "build_provenance.py"),
+             "--dirty-suffix", "--root", str(self.root)],
+            env=env, capture_output=True, text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GOFLAGS -overlay redirects build inputs", result.stderr)
+
+    def test_go_env_file_goflags_are_refused(self):
+        # `go env -w` persisted GOFLAGS are honored by every go subprocess
+        # but invisible to os.environ: read the effective flags (GLM defect).
+        overlay = self.root.parent / f"{self.root.name}-overlay-env.json"
+        overlay.write_text(json.dumps({"Replace": {}}))
+        self.addCleanup(overlay.unlink, missing_ok=True)
+        goenv = self.root.parent / f"{self.root.name}-goenv"
+        env = self.probe_env()
+        env["GOENV"] = str(goenv)
+        env.pop("GOFLAGS", None)
+        self.addCleanup(goenv.unlink, missing_ok=True)
+        persist = subprocess.run(
+            ["go", "env", "-w", f"GOFLAGS=-overlay={overlay}"],
+            env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(persist.returncode, 0, persist.stderr)
+        result = subprocess.run(
+            [sys.executable, str(_HERE / "build_provenance.py"),
+             "--dirty-suffix", "--root", str(self.root)],
+            env=env, capture_output=True, text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GOFLAGS -overlay redirects build inputs", result.stderr)
+
 
     def test_non_ascii_ignored_bpf_source_is_dirty_and_compiled(self):
         source = self.root / "pkg/dataplane/é_bpfel.go"

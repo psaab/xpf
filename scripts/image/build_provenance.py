@@ -49,13 +49,27 @@ UNTRACKED_BUILD_INPUTS = (
 
 
 def _check_go_flags():
+    # Read the EFFECTIVE flags: `go env GOFLAGS` merges `go env -w`
+    # persisted flags that os.environ cannot see. Fall back to the
+    # environment on any go-env failure (fail closed on unparseable).
     try:
-        flags = shlex.split(os.environ.get("GOFLAGS", ""))
+        env = subprocess.run(
+            ["go", "env", "GOFLAGS"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, check=False).stdout.strip()
+    except OSError:
+        env = ""
+    raw = env if env else os.environ.get("GOFLAGS", "")
+    try:
+        flags = shlex.split(raw)
     except ValueError as e:
         raise ProvenanceError(f"cannot parse GOFLAGS for provenance: {e}") from e
     for token in flags:
+        # Go accepts -flag and --flag identically: strip ALL leading
+        # dashes before matching so neither spelling evades the check.
+        normalized = "-" + token.lstrip("-").split("=", 1)[0]
         for flag in UNATTESTABLE_GOFLAGS:
-            if token == flag or token.startswith(flag + "="):
+            if normalized == flag:
                 raise ProvenanceError(
                     f"GOFLAGS {flag} redirects build inputs that source "
                     "provenance cannot attest; unset that flag before "
