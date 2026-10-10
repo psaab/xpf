@@ -322,6 +322,9 @@ func validatePolicyMatchLeavesStrict(nodes []*Node, lenient bool) ([]string, err
 						for _, fzSub := range child.Children {
 							tzNode := fzSub.FindChild("to-zone")
 							if tzNode == nil {
+								// This prewalk assigns scope only to real pairs. The
+								// compiler records and poisons a missing-to-zone
+								// source context instead of inventing a pair scope.
 								continue
 							}
 							for _, tzSub := range tzNode.Children {
