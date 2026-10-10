@@ -48,22 +48,79 @@ UNTRACKED_BUILD_INPUTS = (
 )
 
 
-def _check_go_flags():
+def _split_go_flags(raw):
+    # Go-compatible field splitting for GOFLAGS: unlike Python shlex (which
+    # concatenates adjacent quoted strings), Go's quoted.Split emits each
+    # quoted field separately, including adjacent fields without whitespace.
+    # `"-tags=x""--overlay=A"` is ONE shlex token but TWO Go flags — and the
+    # second one redirects source. Split on quote boundaries the way Go does
+    # so no flag hides inside a benign token (Astra GOFLAGS-confirmation F3).
+    fields, buf, quote, had = [], [], None, False
+    i = 0
+    while i < len(raw):
+        ch = raw[i]
+        if quote is not None:
+            if ch == quote:
+                quote = None
+                had = True
+            elif ch == "\\" and i + 1 < len(raw):
+                i += 1
+                buf.append(raw[i])
+            else:
+                buf.append(ch)
+        elif ch in ("'", '"'):
+            # A quote starting a new field right after token content (no
+            # whitespace) begins a SEPARATE field, per Go quoted.Split.
+            if had:
+                fields.append("".join(buf))
+                buf, had = [], False
+            quote = ch
+        elif ch.isspace():
+            if had:
+                fields.append("".join(buf))
+                buf, had = [], False
+        elif ch == "\\" and i + 1 < len(raw):
+            i += 1
+            buf.append(raw[i])
+            had = True
+        else:
+            buf.append(ch)
+            had = True
+        i += 1
+    if quote is not None:
+        raise ProvenanceError("cannot parse GOFLAGS for provenance: unterminated quote")
+    if had:
+        fields.append("".join(buf))
+    return fields
+
+
+def _check_go_flags(root):
     # Read the EFFECTIVE flags: `go env GOFLAGS` merges `go env -w`
-    # persisted flags that os.environ cannot see. Fall back to the
-    # environment on any go-env failure (fail closed on unparseable).
+    # persisted flags that os.environ cannot see. Run it with cwd=root:
+    # relative GOENV paths resolve from the caller directory, so a query
+    # anywhere else can inspect a different env file than the build
+    # consumes (Astra F2). On ANY discovery failure refuse: falling back
+    # to possibly-empty os.environ would certify persisted redirections
+    # as clean (Astra F1).
     try:
-        env = subprocess.run(
+        env_result = subprocess.run(
             ["go", "env", "GOFLAGS"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, check=False).stdout.strip()
-    except OSError:
-        env = ""
-    raw = env if env else os.environ.get("GOFLAGS", "")
-    try:
-        flags = shlex.split(raw)
-    except ValueError as e:
-        raise ProvenanceError(f"cannot parse GOFLAGS for provenance: {e}") from e
+            cwd=root,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, check=False)
+    except OSError as e:
+        raise ProvenanceError(f"cannot discover effective GOFLAGS for provenance: {e}") from e
+    if env_result.returncode != 0:
+        raise ProvenanceError(
+            "cannot discover effective GOFLAGS for provenance: "
+            f"go env exited {env_result.returncode}: {env_result.stderr.strip()}")
+    raw = env_result.stdout.strip()
+    if not raw:
+        # go env succeeded but reports no flags: authoritative ONLY if
+        # os.environ agrees (belt-and-braces; go env merges both, so a
+        # divergence here means the query missed live configuration).
+        raw = os.environ.get("GOFLAGS", "")
+    flags = _split_go_flags(raw)
     for token in flags:
         # Go accepts -flag and --flag identically: strip ALL leading
         # dashes before matching so neither spelling evades the check.
@@ -198,7 +255,7 @@ def source_tree_dirty(root):
     configured, so a hung Git or Go process can block the probe.
     """
     root = os.path.abspath(os.fspath(root))
-    _check_go_flags()
+    _check_go_flags(root)
     try:
         tracked = subprocess.run(
             ["git", "-C", root, "diff", "HEAD", "--quiet"],

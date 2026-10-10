@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import shutil
 import sys
 import tempfile
 import unittest
@@ -366,6 +367,80 @@ class BuildProvenanceTests(unittest.TestCase):
             env=env, capture_output=True, text=True, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("GOFLAGS -overlay redirects build inputs", result.stderr)
+    def test_go_env_failure_refuses_rather_than_certifying_clean(self):
+        # Astra F1: a failing `go env` discovery must refuse, never fall
+        # back to possibly-empty os.environ and certify clean. Break go-env
+        # AT THE PROBED ROOT (a poisoned PATH) so the root-scoped query
+        # itself fails; also persist an overlay in GOENV so a fallback
+        # would certify substituted source as clean.
+        overlay = self.root.parent / f"{self.root.name}-overlay-f1.json"
+        overlay.write_text(json.dumps({"Replace": {}}))
+        self.addCleanup(overlay.unlink, missing_ok=True)
+        fakego = self.root.parent / f"{self.root.name}-fakego"
+        fakego.mkdir(exist_ok=True)
+        self.addCleanup(shutil.rmtree, fakego, ignore_errors=True)
+        (fakego / "go").write_text("#!/bin/sh\necho 'go: fake toolchain failure' >&2\nexit 1\n")
+        os.chmod(fakego / "go", 0o755)
+        goenv = self.root.parent / f"{self.root.name}-goenv-f1"
+        env = self.probe_env()
+        env["GOENV"] = str(goenv)
+        env.pop("GOFLAGS", None)
+        self.addCleanup(goenv.unlink, missing_ok=True)
+        persist = subprocess.run(
+            ["go", "env", "-w", f"GOFLAGS=-overlay={overlay}"],
+            env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(persist.returncode, 0, persist.stderr)
+        env["PATH"] = f"{fakego}{os.pathsep}{env.get('PATH', '')}"
+        result = subprocess.run(
+            [sys.executable, str(_HERE / "build_provenance.py"),
+             "--dirty-suffix", "--root", str(self.root)],
+            env=env, capture_output=True, text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot discover effective GOFLAGS", result.stderr)
+
+    def test_relative_goenv_is_resolved_from_probed_root(self):
+        # Astra F2: relative GOENV must resolve from --root, not the caller
+        # CWD — else a successful query inspects the wrong env file.
+        overlay = self.root.parent / f"{self.root.name}-overlay-rel.json"
+        overlay.write_text(json.dumps({"Replace": {}}))
+        self.addCleanup(overlay.unlink, missing_ok=True)
+        rel_goenv = ".git/review-goenv-f2"
+        env = self.probe_env()
+        env["GOENV"] = rel_goenv
+        env.pop("GOFLAGS", None)
+        persist = subprocess.run(
+            ["go", "env", "-w", f"GOFLAGS=-overlay={overlay}"],
+            cwd=self.root, env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(persist.returncode, 0, persist.stderr)
+        self.addCleanup(os.unlink, str(self.root / rel_goenv))
+        # Sanity: from elsewhere the same env sees no flags (wrong file).
+        elsewhere = subprocess.run(
+            ["go", "env", "GOFLAGS"], cwd="/tmp",
+            env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(elsewhere.stdout.strip(), "")
+        result = subprocess.run(
+            [sys.executable, str(_HERE / "build_provenance.py"),
+             "--dirty-suffix", "--root", str(self.root)],
+            cwd="/tmp", env=env, capture_output=True, text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GOFLAGS -overlay redirects build inputs", result.stderr)
+
+    def test_adjacent_quoted_goflags_cannot_hide_overlay(self):
+        # Astra F3: Go splits adjacent quoted fields separately (shlex
+        # concatenates) — `"-tags=x""--overlay=A"` must still refuse.
+        overlay = self.root.parent / f"{self.root.name}-overlay-adj.json"
+        overlay.write_text(json.dumps({"Replace": {}}))
+        self.addCleanup(overlay.unlink, missing_ok=True)
+        env = self.probe_env()
+        env["GOENV"] = "off"
+        env["GOFLAGS"] = f'"-tags=review""--overlay={overlay}"'
+        result = subprocess.run(
+            [sys.executable, str(_HERE / "build_provenance.py"),
+             "--dirty-suffix", "--root", str(self.root)],
+            env=env, capture_output=True, text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GOFLAGS -overlay redirects build inputs", result.stderr)
+
 
 
     def test_non_ascii_ignored_bpf_source_is_dirty_and_compiled(self):
