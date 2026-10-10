@@ -264,3 +264,56 @@ func TestNoncollidingNamesKeepTheirWireAndMirror12049(t *testing.T) {
 		t.Fatalf("noncolliding configuration must not be rejected: %q", reasons)
 	}
 }
+
+func TestZoneLocalFoldLiteralTwinQuarantinesPolicy12232(t *testing.T) {
+	const qualified = "zone-local/trust/A"
+	text := `security {
+		zones {
+			security-zone trust { address-book { address A 10.1.0.0/24; } }
+			security-zone untrust;
+		}
+		address-book { global { address zone-local/trust/A 10.9.9.0/24; } }
+		policies {
+			default-policy { deny-all; }
+			from-zone trust to-zone untrust {
+				policy p1 {
+					match { source-address A; destination-address any; application any; }
+					then { deny; }
+				}
+			}
+		}
+	}`
+	tree, errs := config.NewParser(text).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("parse: %v", errs)
+	}
+	if _, err := config.CompileConfig(tree); err == nil {
+		t.Fatal("strict compile accepted an operator entry in the reserved zone-local namespace")
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient compile must keep the persisted pre-validator config bootable: %v", err)
+	}
+	global := cfg.Security.AddressBook
+	if got := global.Addresses[qualified]; got == nil || got.Value != "10.9.9.0/24" {
+		t.Fatalf("no-clobber must preserve global literal twin P1, got %+v", got)
+	}
+	if got := cfg.Security.Zones["trust"].AddressBook.Addresses["A"]; got == nil || got.Value != "10.1.0.0/24" {
+		t.Fatalf("zone-local definition P2 was lost, got %+v", got)
+	}
+	if _, colliding := global.CollidingNames[qualified]; !colliding {
+		t.Fatalf("qualified key %q was not marked colliding", qualified)
+	}
+
+	rules, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, nil)
+	if err != nil || len(rules) != 1 {
+		t.Fatalf("build policy snapshots: rules=%d err=%v", len(rules), err)
+	}
+	if !addressListHasSentinel(rules[0].SourceLiterals) || !addressListHasSentinel(rules[0].SourceAddresses) {
+		t.Fatalf("zone-local policy reference must be refused, not bind literal twin P1: literals=%v addresses=%v",
+			rules[0].SourceLiterals, rules[0].SourceAddresses)
+	}
+	if len(rules[0].SourceBookIDs) != 0 {
+		t.Fatalf("refused policy reference must not bind the global twin's book ID: %v", rules[0].SourceBookIDs)
+	}
+}

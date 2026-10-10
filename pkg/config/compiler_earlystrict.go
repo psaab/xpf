@@ -96,9 +96,10 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 	// prefix-in-name convention real vSRX configs use (#4340). This MUST run on
 	// the pristine global book — i.e. before the fold injects the `/`-bearing
 	// synthetic names — so it is placed here rather than in the post-fold
-	// accumulator. Strict on commit / commit-check (hard-reject); tolerant load /
-	// peer-sync downgrade to a warning (#1960 no-brick; the fold's no-clobber
-	// guard keeps it from silently overwriting an operator entry).
+	// Strict on commit / commit-check (hard-reject); tolerant load / peer-sync
+	// downgrade to a warning (#1960 no-brick). If the fold encounters an
+	// existing qualified entry, it preserves that operator entry and marks the
+	// name colliding so policy references are refused instead of misbound.
 	if err := validateAddressBookEntryNamesStrict(cfg); err != nil {
 		if opts.lenientAddressBookNames {
 			cfg.Warnings = append(cfg.Warnings,

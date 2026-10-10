@@ -126,6 +126,12 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 	// name. Address-set member references are re-pointed to the same zone's
 	// qualified name when the member is also zone-local (zone-local first),
 	// otherwise left as a global reference.
+	markFoldCollision := func(name string) {
+		if gb.CollidingNames == nil {
+			gb.CollidingNames = make(map[string]struct{})
+		}
+		gb.CollidingNames[name] = struct{}{}
+	}
 	for zoneName, z := range sec.Zones {
 		if z == nil || z.AddressBook == nil {
 			continue
@@ -141,7 +147,10 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 		for name, addr := range z.AddressBook.Addresses {
 			q := zoneLocalQualify(zoneName, name)
 			if _, exists := gb.Addresses[q]; exists {
-				continue // no-clobber (see zoneLocalNamePrefix); strict path never hits this
+				// Keep the operator's entry, but refuse policy references rather
+				// than silently substituting it for the zone-local definition.
+				markFoldCollision(q)
+				continue
 			}
 			// #9524: carry the unimplemented-form taint, or a zone-local mixed
 			// entry would resolve to its prefix alone once folded.
@@ -151,7 +160,8 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 		for name, set := range z.AddressBook.AddressSets {
 			q := zoneLocalQualify(zoneName, name)
 			if _, exists := gb.AddressSets[q]; exists {
-				continue // no-clobber (see zoneLocalNamePrefix)
+				markFoldCollision(q)
+				continue
 			}
 			ns := &AddressSet{
 				Name:           q,
