@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"net"
 	"os"
@@ -16,8 +17,10 @@ import (
 // .link existed and when a 10-xpf .link assigned Name=current without an
 // OriginalName=. The latter is evidence that currentName is logical, not the
 // kernel original, regardless of the next positional/bootstrap target. These
-// regressions require the code to retain MAC-form links, avoid inventing an
-// OriginalName, and still perform a required rename.
+// regressions require the code to retain MAC-form links on the same-name path,
+// neutralize the resurrectable O.link + stale T.link on a target change
+// (MAJOR-1), avoid inventing an OriginalName, and still perform a required
+// rename.
 
 // macFormFxp0Link is what networkd's generateLink renders for fxp0 when
 // OriginalName is empty: MAC match, no OriginalName= line.
@@ -433,6 +436,105 @@ Name=fxp0
 	for _, name := range []string{"ge-0-0-0", "fxp0"} {
 		if _, err := os.Stat(filepath.Join(dir, linkPrefix+name+".link")); !os.IsNotExist(err) {
 			t.Fatalf("resurrectable %s.link survived the unknown-target rename, stat err=%v", name, err)
+		}
+	}
+}
+
+// TestBootstrapLifelineNeutralizesResurrectableLinksOnRename12156 pins
+// finding A: the bootstrap half of the MAJOR-1 neutralize. The B1 shape —
+// the lifeline wears ge-0-0-0 via a MAC-form link while a stale fxp0.link
+// (another NIC's claim) exists — must remove BOTH links, attempt the rename
+// to fxp0, and log ERROR. Pre-fold this left the other NIC holding fxp0
+// forever with no ERROR; a revert of the bootstrap branch must fail here.
+func TestBootstrapLifelineNeutralizesResurrectableLinksOnRename12156(t *testing.T) {
+	logs := captureLogs12156(t)
+	st := staticLifelineSeams(t)
+	// The lifeline is NOT fxp0 (it must rename), and it wears its name via
+	// a MAC-form link (unknown original).
+	detectLifelineInterfaceFn = func() (string, bool, error) { return "ge-0-0-0", true, nil }
+	enumeratePCINICsFn = func() ([]pciNIC, error) {
+		return []pciNIC{{sortKey: 0, busAddr: "0000:05:00.0", name: "ge-0-0-0"}}, nil
+	}
+	ownLink := filepath.Join(st.linkDir, linkPrefix+"ge-0-0-0.link")
+	ownContent := strings.Replace(macFormFxp0Link12156, "Name=fxp0", "Name=ge-0-0-0", 1)
+	if err := os.WriteFile(ownLink, []byte(ownContent), 0644); err != nil {
+		t.Fatalf("write own MAC-form fixture: %v", err)
+	}
+	staleLink := filepath.Join(st.linkDir, linkPrefix+"fxp0.link")
+	staleContent := strings.Replace(macFormFxp0Link12156, "52:54:00:12:34:56", "52:54:00:99:99:99", 1)
+	if err := os.WriteFile(staleLink, []byte(staleContent), 0644); err != nil {
+		t.Fatalf("write stale fxp0 fixture: %v", err)
+	}
+	lifelineLinkByName = func(string) (netlink.Link, error) { return okLink(), nil }
+	lifelineAddrList = func(netlink.Link, int) ([]netlink.Addr, error) {
+		return []netlink.Addr{staticAddr("192.0.2.10/24")}, nil
+	}
+	lifelineRouteList = func(_ netlink.Link, family int) ([]netlink.Route, error) {
+		if family == netlink.FAMILY_V4 {
+			return []netlink.Route{{Gw: net.ParseIP("192.0.2.1")}}, nil
+		}
+		return nil, nil
+	}
+	d := &Daemon{store: newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))}
+	d.setupBootstrapLifeline()
+	if _, err := os.Stat(ownLink); !os.IsNotExist(err) {
+		t.Fatalf("own MAC-form ge-0-0-0.link survived the unknown rename (stat err=%v)", err)
+	}
+	if _, err := os.Stat(staleLink); !os.IsNotExist(err) {
+		t.Fatalf("stale fxp0.link survived the unknown rename (stat err=%v)", err)
+	}
+	if !*st.renamed {
+		t.Error("the lifeline must still attempt the rename to fxp0 after neutralizing")
+	}
+	if got := logs.String(); !strings.Contains(got, "level=ERROR") ||
+		!strings.Contains(got, "neutralized retained .link claims") {
+		t.Fatalf("bootstrap neutralize must log ERROR, got:\n%s", got)
+	}
+}
+
+// TestRenamePositionalUnfreedSkipsStaleFinalNeutralize12156 pins finding B:
+// when phase 1 could not free a name (temp rename fails), the unknown NIC
+// whose target IS that unfreed name must NOT neutralize the occupant's live
+// final link. Index 0 (unknown, wears ge-0-0-1 via MAC-form) wants fxp0;
+// index 1 (known enp6s0, wears fxp0 via chain) wants ge-0-0-0 but its temp
+// rename fails, so fxp0 (the unknown NIC's target) is unfreed. The unknown
+// NIC still neutralizes its own current link but must spare the occupant's
+// chain fxp0.link (200 iterations like the reviewer repro); the pass still
+// reports the #7205 unfreed error.
+func TestRenamePositionalUnfreedSkipsStaleFinalNeutralize12156(t *testing.T) {
+	macForm := "# Managed by xpfd \u2014 do not edit\n[Match]\nMACAddress=52:54:00:00:00:0b\n\n[Link]\nName=ge-0-0-1\nMTUBytes=1500\n"
+	for i := 0; i < 200; i++ {
+		dir := withTempLinkDir(t)
+		ownerPath := filepath.Join(dir, linkPrefix+"fxp0.link")
+		ownerContent := "# Managed by xpfd \u2014 do not edit\n[Match]\nOriginalName=enp6s0\n\n[Link]\nName=fxp0"
+		if err := os.WriteFile(ownerPath, []byte(ownerContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, linkPrefix+"ge-0-0-1.link"), []byte(macForm), 0644); err != nil {
+			t.Fatal(err)
+		}
+		// idx0 (unknown, MAC-form ge-0-0-1) -> fxp0; idx1 (known enp6s0,
+		// chain fxp0.link) -> ge-0-0-0. Temp-rename of fxp0 fails, so
+		// fxp0 is unfreed and idx1 strands.
+		nics := []pciNIC{
+			{sortKey: 0, busAddr: "0000:04:00.0", name: "ge-0-0-1"},
+			{sortKey: 1, busAddr: "0000:06:00.0", name: "fxp0"},
+		}
+		_, errs := renamePositional(nics, 0, false, func(from, to string) error {
+			if from == "fxp0" && strings.HasPrefix(to, "xpf-tmp-") {
+				return errors.New("injected temp failure")
+			}
+			return nil
+		})
+		if len(errs) == 0 {
+			t.Fatal("the stranded rename must report the #7205 unfreed error")
+		}
+		got, err := os.ReadFile(ownerPath)
+		if err != nil {
+			t.Fatalf("iter %d: occupant chain fxp0.link was neutralized: %v", i, err)
+		}
+		if string(got) != ownerContent {
+			t.Fatalf("iter %d: occupant link rewritten:\n%s", i, got)
 		}
 	}
 }

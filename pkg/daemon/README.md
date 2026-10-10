@@ -1693,12 +1693,19 @@ assigns vSRX names to PCI-enumerated NICs based on PCI bus order plus the
 cluster node ID. It writes `.link` files when the kernel original is available
 from a recorded chain or the current name of a first-rename NIC. If a
 `10-xpf-*.link` already assigns the current name without `OriginalName=`, that
-name is treated as logical and unknown regardless of the new target: the
-unsafe `.link` write is skipped, but a required rename still runs. Exception
-(MINOR-3 residual): a NIC renamed in memory by an earlier pass of the same
-boot still emits `OriginalName=<logical>` — without a kernel-name oracle the
-gate cannot tell it from a first rename. Verifying a retained `MACAddress=`
-against the NIC identity is tracked by follow-up #12550.
+name is treated as logical and unknown regardless of the new target. On the
+same-name path the unsafe `.link` write is skipped (the retained file stays);
+on a target change the own O.link plus any stale T.link are DELETED
+(MAJOR-1 neutralize — a retained claim would resurrect a wrong identity next
+boot) while a required rename still runs, and the persistence loss is reported
+via an ERROR log, not the #5842 errs channel (errs carries only failures).
+Exception (MINOR-3 residual): a NIC renamed in memory by an earlier pass of
+the same boot still emits `OriginalName=<logical>` — without a kernel-name
+oracle the gate cannot tell it from a first rename. The neutralize makes that
+shape more frequent (ML matrix logical-original writes 4→10, wider matrix
+70→156 — still below master 178/4624); those files never match at boot, so no
+wrong identity results. Verifying a retained `MACAddress=` against the NIC
+identity is tracked by follow-up #12550.
 
 RETH members match by `OriginalName=` (PCI kernel name), not `MACAddress=` —
 the MAC alternates between physical and virtual at boot, and

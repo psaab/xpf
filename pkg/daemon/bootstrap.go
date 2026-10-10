@@ -1237,9 +1237,10 @@ func (d *Daemon) setupBootstrapLifeline() {
 
 	// Rename just this one NIC to fxp0 (writes the .link + renames). A
 	// 10-xpf .link with Name=<lifeline> and no OriginalName= identifies a
-	// logical current name, so retain that file rather than persisting it as
-	// OriginalName=; still perform the required rename when lifeline != fxp0
-	// (#12156/F1).
+	// logical current name: when the lifeline is already fxp0 that file is
+	// retained rather than persisted as OriginalName=; when it must rename,
+	// both the own link and any stale fxp0.link are neutralized (MAJOR-1)
+	// and the required rename still runs (#12156/F1).
 	original, originalOK := positionalOriginalNameFor(lifeline, defaultMgmtInterface)
 	if !originalOK {
 		logUnknownOriginalLinkSkip("bootstrap", lifeline, defaultMgmtInterface)

@@ -260,10 +260,12 @@ func assignName(idx, fpc int, clusterMode bool) string {
 // can never feed a corrupted OriginalName into a later NIC's recovery), breaks
 // target-name collisions via temp names (so an enumeration shift does not
 // EEXIST-strand a rename), then writes eligible .link files and renames to the
-// final name. When the original is unknown it skips only the write; if the
-// current name differs from the target, it still attempts the rename. renameFn
-// is injected so production passes renameInterface and tests can model EEXIST
-// semantics. Returns true if any .link changed or any rename ran.
+// final name. When the original is unknown and the NIC is already at its
+// target, it skips only the write (the retained file stays); when the target
+// differs, it neutralizes the resurrectable O.link + stale T.link claims
+// (MAJOR-1) and still attempts the rename. renameFn is injected so production
+// passes renameInterface and tests can model EEXIST semantics. Returns true
+// if any .link changed or any rename ran.
 func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(from, to string) error) (bool, []error) {
 	// Phase 0: snapshot targets and capture each verified OriginalName or
 	// unknown sentinel up-front, from the .link set as it exists BEFORE this
@@ -317,10 +319,11 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 			}
 		}
 		if original == originalNameUnknown {
-			// #12156: no udev-matchable kernel original is known. Skip the
-			// .link write rather than persisting OriginalName=<logical name>,
-			// which udev never presents. The phase-0 log distinguishes a
-			// retained name-only link from the absence of usable persistence.
+			// #12156: no udev-matchable kernel original is known. On the
+			// same-name path the .link write is skipped (a retained name-only
+			// link stays; the phase-0 log tells that apart from the absence
+			// of usable persistence). On the target-change path the
+			// resurrectable claims are neutralized instead (MAJOR-1 below).
 			if current == final {
 				// Already at the final name: there is no rename to run, and
 				// nothing here can resurrect a wrong identity (no target
@@ -333,9 +336,23 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 			// claim) would each re-apply at the next boot and put a NIC up
 			// under ANOTHER NIC's logical name — fail-open. Neutralize both
 			// so the next boot falls back to kernel names (fail-closed, the
-			// pre-fold behavior), rename as required (stranding is worse),
-			// and report on the #5842 error channel like device-map does.
-			for _, name := range []string{linkPrefix + current + ".link", linkPrefix + final + ".link"} {
+			// pre-fold behavior) and rename as required (stranding is worse).
+			// Persistence loss is reported via the phase-2 ERROR log below,
+			// not the #5842 errs channel (errs carries only failures: a
+			// neutralize that fails, or the #7205 unfreed error).
+			// Finding B: when phase 1 could not free this target, ANOTHER NIC
+			// still wears the final name (the temp rename failed) — so the
+			// "stale" final link is that occupant's live file, and the known
+			// occupant rewrites it with its verified chain in its own phase-2
+			// turn (map-order-dependent race with that :366 write).
+			// Neutralize only the current link then; the final name stays
+			// owned by its occupant. When the target IS freed, the final link
+			// is genuinely stale (nobody wears that name) and both go.
+			targets := []string{linkPrefix + current + ".link"}
+			if !unfreed[final] {
+				targets = []string{linkPrefix + current + ".link", linkPrefix + final + ".link"}
+			}
+			for _, name := range targets {
 				if err := neutralizeResurrectableLink(name); err != nil {
 					errs = append(errs, err)
 				} else {
