@@ -23,10 +23,18 @@ import (
 
 // overlargePREF64Life is a PREF64 lifetime whose RFC 8781 §4 13-bit
 // scaled-by-8 wire field overflows: round(100000/8) = 12500 > 8191, so
-// ndp.PREF64.marshal returns "scaled lifetime is too large". The commit-time
-// schema bound rejects this value; it can still reach buildRA from a config
-// committed before that bound existed — exactly the defense-in-depth path.
+// ndp.PREF64.marshal returns "scaled lifetime is too large". Only the direct
+// helper test below hands it to the probe: an explicit lifetime this large
+// that reaches buildRA is dropped before the probe by the #12536 sink check.
 const overlargePREF64Life = 100000
+
+// unmarshalablePREF64Prefix keeps the buildRA-level probe test honest. Paired
+// with a valid lifetime no sink check drops it, but /33 is outside the RFC 8781
+// §4 length set {32,40,48,56,64,96}, so ndp.PREF64.marshal fails with
+// "invalid pref64 prefix size". The commit-time gate rejects the length
+// (#2497 ValidatePREF64CIDR); tolerant Load / peer-sync ingress can still
+// deliver it to buildRA, where the probe is the only guard.
+const unmarshalablePREF64Prefix = "64:ff9b::/33"
 
 func newTestSender3895(cfg *config.RAInterfaceConfig) *sender {
 	return &sender{
@@ -38,18 +46,21 @@ func newTestSender3895(cfg *config.RAInterfaceConfig) *sender {
 	}
 }
 
-// An over-large PREF64 lifetime that reaches the sender must NOT abort the
-// whole RA. buildRA prunes the un-marshalable PREF64 so the rest of the RA
-// (SLLA + on-link prefix) still marshals and goes out on the wire.
+// An un-marshalable PREF64 that reaches the sender must NOT abort the whole
+// RA. buildRA prunes it so the rest of the RA (SLLA + on-link prefix) still
+// marshals and goes out on the wire.
 //
 // RED-on-revert: remove the buildRA prune call and the bad PREF64 stays in
 // ra.Options; ndp.MarshalMessage — the same encoder conn.WriteTo runs — then
-// fails, so the segment stops getting RAs (the #3895 blackhole).
-func TestBuildRA_3895_PruneOverlargePREF64(t *testing.T) {
+// fails, so the segment stops getting RAs (the #3895 blackhole). The option
+// must stay un-marshalable for a reason no earlier buildRA check catches: an
+// over-large explicit lifetime is now dropped before the probe (#12536), so
+// that shape would pass here even with the prune call removed.
+func TestBuildRA_3895_PruneUnmarshalablePREF64(t *testing.T) {
 	s := newTestSender3895(&config.RAInterfaceConfig{
 		Interface:       "trust0",
-		NAT64Prefix:     "64:ff9b::/96",
-		NAT64PrefixLife: overlargePREF64Life,
+		NAT64Prefix:     unmarshalablePREF64Prefix,
+		NAT64PrefixLife: 1800,
 		Prefixes: []*config.RAPrefix{
 			{Prefix: "2001:db8::/64", OnLink: true, Autonomous: true},
 		},
@@ -65,7 +76,7 @@ func TestBuildRA_3895_PruneOverlargePREF64(t *testing.T) {
 	// The bad PREF64 must be gone...
 	for _, opt := range ra.Options {
 		if _, ok := opt.(*ndp.PREF64); ok {
-			t.Fatal("over-large PREF64 option should have been pruned")
+			t.Fatal("un-marshalable PREF64 option should have been pruned")
 		}
 	}
 
