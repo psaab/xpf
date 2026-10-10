@@ -9,7 +9,6 @@ package daemon
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -126,13 +125,6 @@ const lifelineRecordFile = "/etc/xpf/lifeline-interface"
 const defaultMgmtInterface = "fxp0"
 
 const bootstrapLifelineNetworkMarker = "# Managed by xpfd — #1922 bootstrap lifeline"
-
-const bootstrapLifelineSnapshotBase = ".xpf-first-commit-lifeline.snapshot"
-
-type bootstrapLifelineSnapshotRecord struct {
-	Generation string `json:"generation"`
-	Network    []byte `json:"network"`
-}
 
 // applianceMarkerFile marks a host that was PROVISIONED FROM THE XPF APPLIANCE
 // IMAGE. `scripts/image/bake.py` writes it into the baked root filesystem; the
@@ -425,8 +417,10 @@ func (d *Daemon) exitBootstrapMode(reason string) {
 // config-driven claims. The caller holds d.applySem.
 //
 // #12154: the lifeline .network restore is scoped to the FIRST-commit rollback
-// (prevCfg==nil). A snapshot captured during bootstrap exit must never be used
-// by a later safe-state entry on a committed box (#1960 freeze-in-last-known-good).
+// (the recorded confirmPrevFirst flag, not prevCfg==nil — a retry after an
+// Item-1b rollback carries a non-nil compiled empty target). A snapshot
+// captured during bootstrap exit must never be used by a later safe-state
+// entry on a committed box (#1960 freeze-in-last-known-good).
 // #5868: teardown is best-effort and reports DEGRADED if any step fails rather
 // than falsely logging "rollback complete".
 func (d *Daemon) enterBootstrapMode() error {
@@ -643,13 +637,19 @@ func isBootstrapLifelineNetwork(content []byte) bool {
 	return bytes.HasPrefix(content, []byte(bootstrapLifelineNetworkMarker))
 }
 
-// captureBootstrapLifelineNetwork records the exact pre-takeover file content.
-// It runs after startup takeover and before the first config's networkd
-// reconciliation can overwrite the lifeline.
 // captureBootstrapLifelineNetwork snapshots the exact pre-takeover fxp0 file,
 // including an absent or unmarked file. The first-commit window scopes use of
 // the snapshot; marker validation alone cannot distinguish console-only state
-// from a lifeline that was lost after takeover.
+// from a lifeline that was lost after takeover. It runs after startup takeover
+// and before the first config's networkd reconciliation can overwrite it.
+//
+// The snapshot is LIVE-PATH ONLY: it never touches the durable
+// .xpf-first-commit-lifeline.snapshot file, which #12155 owns (capture,
+// GuardedHash binding, boot-time teardown). A crash between PromoteRollback
+// and the daemon teardown leaves no in-memory snapshot here; #12155's boot
+// consumer restores from its own durable record. This function never calls
+// into the Store (the confirm hook takes bootstrapLifelineMu under Store.mu;
+// reversing that order deadlocked the daemon — NEW-MAJOR-A).
 func (d *Daemon) captureBootstrapLifelineNetwork() {
 	d.bootstrapLifelineMu.Lock()
 	defer d.bootstrapLifelineMu.Unlock()
@@ -673,11 +673,6 @@ func (d *Daemon) captureBootstrapLifelineNetwork() {
 	d.bootstrapLifelineCaptured = true
 	d.bootstrapLifelinePresent = true
 	d.bootstrapLifelineNetwork = content
-	// MINOR-3: persist the snapshot durably (shared #12155 contract:
-	// identical file, JSON shape, generation binding) so a crash between
-	// PromoteRollback and the daemon teardown still owes the restore on
-	// restart. Memory-only provenance would lose the pre-takeover bytes.
-	d.persistBootstrapLifelineSnapshotLocked(content)
 	if !isBootstrapLifelineNetwork(content) {
 		slog.Debug("bootstrap exit: captured an unmarked pre-takeover fxp0 network file",
 			"path", path)
@@ -686,78 +681,23 @@ func (d *Daemon) captureBootstrapLifelineNetwork() {
 	slog.Debug("bootstrap exit: captured pre-takeover management lifeline network",
 		"path", path)
 }
-
-// persistBootstrapLifelineSnapshotLocked writes the generation-bound snapshot
-// record. Caller holds bootstrapLifelineMu. Best-effort: a persist failure
-// degrades to memory-only provenance (warned), never fails bootstrap exit.
-func (d *Daemon) persistBootstrapLifelineSnapshotLocked(content []byte) {
-	if d.store == nil {
-		slog.Warn("bootstrap exit: cannot persist lifeline provenance without the config store",
-			"issue", "#12154")
-		return
-	}
-	d.bootstrapLifelineGeneration = d.store.ActiveConfigGeneration()
-	if d.bootstrapLifelineGeneration == "" {
-		slog.Warn("bootstrap exit: active config generation unavailable; lifeline provenance is memory-only",
-			"issue", "#12154")
-		return
-	}
-	record, err := json.Marshal(bootstrapLifelineSnapshotRecord{
-		Generation: d.bootstrapLifelineGeneration,
-		Network:    content,
-	})
-	if err == nil {
-		record = append(record, '\n')
-		err = fsatomic.WriteFileDurable(filepath.Join(linkDir, bootstrapLifelineSnapshotBase), record, 0o600)
-	}
-	if err != nil {
-		slog.Warn("bootstrap exit: could not persist authentic management lifeline snapshot; "+
-			"first-commit rollback may be degraded", "path",
-			filepath.Join(linkDir, bootstrapLifelineSnapshotBase), "err", err, "issue", "#12154")
-		return
-	}
-}
-
 func (d *Daemon) clearBootstrapLifelineNetwork() {
+	// Live-path only: drop the in-memory snapshot. The durable file is
+	// #12155's (it clears its own debt on teardown completion); removing it
+	// here would steal #12155's crash-recovery evidence on confirm.
 	d.bootstrapLifelineMu.Lock()
 	d.bootstrapLifelineCaptured = false
 	d.bootstrapLifelinePresent = false
 	d.bootstrapLifelineNetwork = nil
-	d.bootstrapLifelineGeneration = ""
 	d.bootstrapLifelineMu.Unlock()
-	// Remove only the durable snapshot; the live fxp0.network is untouched.
-	// Best-effort: a stale snapshot is harmless (generation-gated on read).
-	_ = os.Remove(filepath.Join(linkDir, bootstrapLifelineSnapshotBase))
-}
-
-// loadBootstrapLifelineSnapshot reads the durable pre-takeover record written
-// at bootstrap exit. It returns ok=false unless the record exists, decodes,
-// and binds to the CURRENT active config generation (a stale snapshot from an
-// older abandoned generation must never restore). Shared #12155 file/JSON
-// contract for integration dedupe.
-func (d *Daemon) loadBootstrapLifelineSnapshot() (snapshot []byte, ok bool) {
-	if d.store == nil {
-		return nil, false
-	}
-	want := d.store.ActiveConfigGeneration()
-	if want == "" {
-		return nil, false
-	}
-	data, err := os.ReadFile(filepath.Join(linkDir, bootstrapLifelineSnapshotBase))
-	if err != nil {
-		return nil, false
-	}
-	var record bootstrapLifelineSnapshotRecord
-	if err := json.Unmarshal(data, &record); err != nil || record.Generation != want {
-		return nil, false
-	}
-	return append([]byte(nil), record.Network...), true
 }
 
 // restoreBootstrapLifelineNetwork retains a marked lifeline when this process
 // has no snapshot, restores exact pre-takeover bytes when the file existed, or
 // removes an xpfd-generated candidate file when the pre-takeover state was
 // absent. Unknown files are never removed without a captured absent-state.
+// Live-path only: with no in-memory snapshot there is nothing to restore
+// from — the durable crash record is #12155's and its boot consumer owns it.
 func (d *Daemon) restoreBootstrapLifelineNetwork() (bool, error) {
 	name := linkPrefix + "fxp0.network"
 	path := filepath.Join(linkDir, name)
@@ -765,14 +705,6 @@ func (d *Daemon) restoreBootstrapLifelineNetwork() (bool, error) {
 	snapshot := d.bootstrapLifelineNetwork
 	captured, present := d.bootstrapLifelineCaptured, d.bootstrapLifelinePresent
 	d.bootstrapLifelineMu.Unlock()
-	// MINOR-3: a crash between PromoteRollback and the daemon teardown loses
-	// the in-memory snapshot. Recover the durable record (generation-gated:
-	// only a snapshot bound to the CURRENT active config may restore).
-	if !captured {
-		if loaded, ok := d.loadBootstrapLifelineSnapshot(); ok {
-			snapshot, captured, present = loaded, true, true
-		}
-	}
 	content, err := os.ReadFile(path)
 	if !captured {
 		if err == nil && isBootstrapLifelineNetwork(content) {

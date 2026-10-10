@@ -77,3 +77,13 @@ func (s *Store) SetPersistRetryBackoffForTesting(initial, max time.Duration) {
 	s.persistRetryInitialBackoff = initial
 	s.persistRetryMaxBackoff = max
 }
+
+// SetConfirmPrevCfgForTesting overrides the pending window's compiled rollback
+// target (#6538 shape: a recovered target that failed even the lenient
+// compile leaves confirmPrevCfg nil on a NON-first window). Not for
+// production callers.
+func (s *Store) SetConfirmPrevCfgForTesting(target *config.Config) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.confirmPrevCfg = target
+}
