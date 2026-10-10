@@ -96,27 +96,31 @@ var dupUnnamedRoutingMergeSites12043 = []struct {
 }
 
 // dupUnnamedRoutingMergeSites12120 lists the additional repeated unnamed
-// routing containers found by #12120. "any" means every matching parent node;
+// routing containers found by #12120. "any" rows are restricted to routing
+// contexts: the root, a routing-instance, or those same paths in a group body.
 // "root" is the top-level protocols container, whose separate roots otherwise
 // dispatch independently and overwrite the same typed protocol.
 //
-// EACH SITE WAS CHECKED FOR AN EXISTING GATE BEFORE BEING ADDED, the
-// dup_block_merge_9023.go:57-74 discipline. At afb932ee1 strict and tolerant
-// compilation both accepted and silently dropped the second block for every
-// newly registered shape:
+// The #12120 protocol/static rows were checked for existing gates before being
+// added, following the dup_block_merge_9023.go:57-74 discipline. At afb932ee1
+// strict and tolerant compilation accepted and silently dropped the second
+// block for these shapes:
 //
 //	routing-options static (instance)   ACCEPTS, silent; global twin already #12043
-//	protocols ospf3 (global/instance)   ACCEPTS, silent
-//	protocols rip                       ACCEPTS, silent
-//	protocols isis                      ACCEPTS, silent
-//	protocols lldp                      ACCEPTS, silent
-//	protocols router-advertisement      ACCEPTS, silent
+//	protocols ospf3 (global/instance)    ACCEPTS, silent
+//	protocols rip                        ACCEPTS, silent
+//	protocols isis                       ACCEPTS, silent
+//	protocols lldp                       ACCEPTS, silent
+//	protocols router-advertisement       ACCEPTS, silent
 //
 // The isis/rip gate check also verified the authType="" keyless result when
 // md5 key/type were in the dropped second block. Merging restores the pair
 // before #9105 reads it; strict and tolerant inputs then match their hand-merged
-// controls. The global `interface-routes` gate/rejection is an existing
-// registered site and its strict merged selectors are asserted below.
+// controls. The nested `interface-routes rib-group` row was separately
+// confirmed against X1/X3 and global selector fixtures: it preserves inet and
+// inet6 together, while the global unsupported gate sees both selectors after
+// the fold. The global `interface-routes` site itself remains registered with
+// its strict merged-selector assertion.
 var dupUnnamedRoutingMergeSites12120 = []struct {
 	scope, parent, keyword string
 }{
@@ -131,6 +135,7 @@ var dupUnnamedRoutingMergeSites12120 = []struct {
 	{"any", "protocols", "isis"},
 	{"any", "protocols", "lldp"},
 	{"any", "protocols", "router-advertisement"},
+	{"any", "interface-routes", "rib-group"},
 	{"root", "root", "protocols"},
 }
 
@@ -177,18 +182,19 @@ func mergeDuplicateBlocks9023(tree *ConfigTree) []duplicateBlockMerge9023 {
 		})
 	}
 
-	var walk func(n *Node, depth int, scope, group string)
-	walk = func(n *Node, depth int, scope, group string) {
+	var walk func(n *Node, depth int, scope, group string, path []string)
+	walk = func(n *Node, depth int, scope, group string, path []string) {
 		if n == nil || depth > 6 {
 			return
 		}
 		if n.Name() == "groups" {
+			groupPath := appendDuplicateMergeNodePath9023(path, n)
 			for _, groupNode := range n.Children {
 				if groupNode == nil || groupNode.IsLeaf || len(groupNode.Keys) == 0 {
 					continue
 				}
 				groupName := groupNode.Name()
-				walk(groupNode, depth+1, "", groupName)
+				walk(groupNode, depth+1, "", groupName, groupPath)
 			}
 			return
 		}
@@ -205,7 +211,7 @@ func mergeDuplicateBlocks9023(tree *ConfigTree) []duplicateBlockMerge9023 {
 				continue
 			}
 			if site.keyword == "*" {
-				for _, name := range mergeDuplicateNamedChildren9023(n) {
+				for _, name := range mergeDuplicateNamedChildren9023(n, path) {
 					appendMerge(duplicateBlockMerge9023{
 						kind: duplicateBlockMergeNamed9023, parent: site.parent,
 						name: name, scope: scope, group: group,
@@ -222,16 +228,19 @@ func mergeDuplicateBlocks9023(tree *ConfigTree) []duplicateBlockMerge9023 {
 			}
 		}
 		if n.Name() == "routing-instances" {
+			routingInstancesPath := appendDuplicateMergeNodePath9023(path, n)
 			for _, instance := range n.Children {
 				if instance == nil || instance.IsLeaf || len(instance.Keys) == 0 {
 					continue
 				}
 				instanceScope := "routing-instances " + diagnosticMergeName9023(instance.Name())
+				instancePath := appendDuplicateMergeNodePath9023(routingInstancesPath, instance)
 				for _, site := range dupUnnamedRoutingMergeSites12043 {
 					if site.parent != n.Name() {
 						continue
 					}
-					children, didMerge := mergeDuplicateUnnamedRoutingChildren(instance.Children, site.keyword)
+					children, didMerge := mergeDuplicateUnnamedRoutingChildrenAtPath9023(
+						instance.Children, site.keyword, instancePath)
 					instance.Children = children
 					if didMerge {
 						appendMerge(duplicateBlockMerge9023{
@@ -241,16 +250,19 @@ func mergeDuplicateBlocks9023(tree *ConfigTree) []duplicateBlockMerge9023 {
 						}, namedChild9023(instance, site.keyword))
 					}
 				}
-				walk(instance, depth+1, instanceScope, group)
+				walk(instance, depth+1, instanceScope, group, routingInstancesPath)
 			}
 			return
 		}
 
+		nodePath := appendDuplicateMergeNodePath9023(path, n)
 		for _, site := range dupUnnamedRoutingMergeSites12120 {
-			if site.scope != "any" || n.Name() != site.parent {
+			if site.scope != "any" || n.Name() != site.parent ||
+				!isAnyRoutingMergeParentPath9023(path, site.parent) {
 				continue
 			}
-			children, didMerge := mergeDuplicateUnnamedRoutingChildren(n.Children, site.keyword)
+			children, didMerge := mergeDuplicateUnnamedRoutingChildrenAtPath9023(
+				n.Children, site.keyword, nodePath)
 			n.Children = children
 			if didMerge {
 				appendMerge(duplicateBlockMerge9023{
@@ -260,7 +272,7 @@ func mergeDuplicateBlocks9023(tree *ConfigTree) []duplicateBlockMerge9023 {
 			}
 		}
 		for _, ch := range n.Children {
-			walk(ch, depth+1, scope, group)
+			walk(ch, depth+1, scope, group, nodePath)
 		}
 	}
 
@@ -271,7 +283,7 @@ func mergeDuplicateBlocks9023(tree *ConfigTree) []duplicateBlockMerge9023 {
 		if site.scope == "root" {
 			var didMerge bool
 			tree.Children, didMerge = mergeDuplicateUnnamedRoutingChildrenRecursion9023(
-				tree.Children, site.keyword, false)
+				tree.Children, site.keyword, false, nil)
 			if didMerge {
 				merged = append(merged, duplicateBlockMerge9023{
 					kind: duplicateBlockMergeUnnamed9023, keyword: site.keyword,
@@ -279,21 +291,53 @@ func mergeDuplicateBlocks9023(tree *ConfigTree) []duplicateBlockMerge9023 {
 			}
 		}
 	}
+	path := make([]string, 0, 24)
 	for _, root := range tree.Children {
-		walk(root, 0, "", "")
+		walk(root, 0, "", "", path[:0])
 	}
 
 	return merged
 }
 
-const duplicateBlockMergeMarkerPrefix9023 = "\x00xpf-duplicate-block-merge-9023:"
+func appendDuplicateMergeNodePath9023(path []string, node *Node) []string {
+	if node == nil {
+		return path
+	}
+	return append(path, node.Keys...)
+}
+
+func routingMergePath9023(path []string) []string {
+	if len(path) >= 2 && path[0] == "groups" {
+		return path[2:]
+	}
+	return path
+}
+
+func isRootOrRoutingInstancePath9023(path []string) bool {
+	path = routingMergePath9023(path)
+	return len(path) == 0 ||
+		(len(path) == 2 && path[0] == "routing-instances")
+}
+
+func isAnyRoutingMergeParentPath9023(path []string, parent string) bool {
+	path = routingMergePath9023(path)
+	switch parent {
+	case "protocols", "routing-options":
+		return isRootOrRoutingInstancePath9023(path)
+	case "rib", "interface-routes":
+		return (len(path) == 1 && path[0] == "routing-options") ||
+			(len(path) == 3 && path[0] == "routing-instances" && path[2] == "routing-options")
+	default:
+		return false
+	}
+}
 
 func namedChild9023(parent *Node, name string) *Node {
 	if parent == nil {
 		return nil
 	}
 	for _, child := range parent.Children {
-		if child != nil && child.Name() == name {
+		if child != nil && !child.IsLeaf && child.Name() == name {
 			return child
 		}
 	}
@@ -331,29 +375,19 @@ func appendDuplicateBlockMergeMarker9023(node *Node, marker string) {
 	if node == nil {
 		return
 	}
-	encoded := duplicateBlockMergeMarkerPrefix9023 + marker + "\x00"
-	if !strings.Contains(node.Annotation, encoded) {
-		node.Annotation += encoded
+	for _, existing := range node.duplicateBlockMergeMarkers9023 {
+		if existing == marker {
+			return
+		}
 	}
+	node.duplicateBlockMergeMarkers9023 = append(node.duplicateBlockMergeMarkers9023, marker)
 }
 
-func duplicateBlockMergeMarkersInAnnotation9023(annotation string) []string {
-	var markers []string
-	for {
-		start := strings.Index(annotation, duplicateBlockMergeMarkerPrefix9023)
-		if start < 0 {
-			return markers
-		}
-		annotation = annotation[start+len(duplicateBlockMergeMarkerPrefix9023):]
-		end := strings.IndexByte(annotation, '\x00')
-		if end < 0 {
-			return markers
-		}
-		if marker := annotation[:end]; marker != "" {
-			markers = append(markers, marker)
-		}
-		annotation = annotation[end+1:]
+func duplicateBlockMergeMarkersAtNode9023(node *Node) []string {
+	if node == nil {
+		return nil
 	}
+	return node.duplicateBlockMergeMarkers9023
 }
 
 func duplicateBlockMergeMarkers9023(node *Node) []string {
@@ -364,7 +398,7 @@ func duplicateBlockMergeMarkers9023(node *Node) []string {
 		if n == nil {
 			return
 		}
-		for _, marker := range duplicateBlockMergeMarkersInAnnotation9023(n.Annotation) {
+		for _, marker := range n.duplicateBlockMergeMarkers9023 {
 			if _, ok := seen[marker]; !ok {
 				if seen == nil {
 					seen = make(map[string]struct{})
@@ -379,21 +413,6 @@ func duplicateBlockMergeMarkers9023(node *Node) []string {
 	}
 	walk(node)
 	return markers
-}
-
-func stripDuplicateBlockMergeMarkerAnnotation9023(annotation string) string {
-	for {
-		start := strings.Index(annotation, duplicateBlockMergeMarkerPrefix9023)
-		if start < 0 {
-			return annotation
-		}
-		end := strings.IndexByte(annotation[start+len(duplicateBlockMergeMarkerPrefix9023):], '\x00')
-		if end < 0 {
-			return annotation
-		}
-		end += start + len(duplicateBlockMergeMarkerPrefix9023) + 1
-		annotation = annotation[:start] + annotation[end:]
-	}
 }
 
 func appendDuplicateBlockMergeMarkers9023(node *Node, markers []string) {
@@ -435,7 +454,7 @@ func stripDuplicateBlockMergeMarkers9023(tree *ConfigTree) {
 		if n == nil {
 			return
 		}
-		n.Annotation = stripDuplicateBlockMergeMarkerAnnotation9023(n.Annotation)
+		n.duplicateBlockMergeMarkers9023 = nil
 		for _, child := range n.Children {
 			walk(child)
 		}
@@ -445,19 +464,30 @@ func stripDuplicateBlockMergeMarkers9023(tree *ConfigTree) {
 	}
 }
 
-func resolveDuplicateBlockMergeWarnings9023(tree *ConfigTree, merges []duplicateBlockMerge9023, existing []string) []string {
-	var applied map[string]bool
-	if tree != nil {
-		for _, root := range tree.Children {
-			for _, marker := range duplicateBlockMergeMarkers9023(root) {
-				if applied == nil {
-					applied = make(map[string]bool)
-				}
-				applied[marker] = true
-			}
+func hasGroupScopedDuplicateBlockMerge9023(merges []duplicateBlockMerge9023) bool {
+	for _, merge := range merges {
+		if merge.group != "" {
+			return true
 		}
 	}
-	stripDuplicateBlockMergeMarkers9023(tree)
+	return false
+}
+
+func resolveDuplicateBlockMergeWarnings9023(tree *ConfigTree, merges []duplicateBlockMerge9023, existing []string) []string {
+	var applied map[string]bool
+	if hasGroupScopedDuplicateBlockMerge9023(merges) {
+		if tree != nil {
+			for _, root := range tree.Children {
+				for _, marker := range duplicateBlockMergeMarkers9023(root) {
+					if applied == nil {
+						applied = make(map[string]bool)
+					}
+					applied[marker] = true
+				}
+			}
+		}
+		stripDuplicateBlockMergeMarkers9023(tree)
+	}
 	warnings := make([]string, 0, len(merges)+len(existing))
 	for _, merge := range merges {
 		if merge.group != "" && !applied[merge.marker] {
@@ -499,7 +529,7 @@ func mergeDuplicateRoutingInstanceContainers9023(children []*Node) ([]*Node, boo
 
 // mergeDuplicateNamedChildren9023 folds repeated dynamic-name children into
 // the first occurrence, preserving packed leaf tails and braced bodies.
-func mergeDuplicateNamedChildren9023(parent *Node) []string {
+func mergeDuplicateNamedChildren9023(parent *Node, path []string) []string {
 	if parent == nil {
 		return nil
 	}
@@ -527,10 +557,11 @@ func mergeDuplicateNamedChildren9023(parent *Node) []string {
 		}
 		prev.Children = append(prev.Children, child.Children...)
 		prev.IsLeaf = false
+		parentPath := appendDuplicateMergeNodePath9023(path, parent)
 		if parent.Name() == "routing-instances" {
-			mergeSiblingContainers9209WithParent(prev, 0, "routing-instances")
+			mergeSiblingContainers9209WithParentAndPath(prev, 0, "routing-instances", parentPath)
 		} else {
-			mergeSiblingContainers9209(prev, 0)
+			mergeSiblingContainers9209WithParentAndPath(prev, 0, "", parentPath)
 		}
 		merged = append(merged, name)
 	}
@@ -540,17 +571,17 @@ func mergeDuplicateNamedChildren9023(parent *Node) []string {
 	return merged
 }
 
-// mergeDuplicateUnnamedRoutingChildren folds a repeated unnamed routing
-// container at one explicitly registered site into its first sibling,
-// preserving source order and recursively merging identical child containers.
-func mergeDuplicateUnnamedRoutingChildren(children []*Node, keyword string) ([]*Node, bool) {
-	return mergeDuplicateUnnamedRoutingChildrenRecursion9023(children, keyword, true)
+// mergeDuplicateUnnamedRoutingChildrenAtPath9023 folds a repeated unnamed
+// routing container at one registered site and carries its ancestor path into
+// recursive sibling handling.
+func mergeDuplicateUnnamedRoutingChildrenAtPath9023(children []*Node, keyword string, parentPath []string) ([]*Node, bool) {
+	return mergeDuplicateUnnamedRoutingChildrenRecursion9023(children, keyword, true, parentPath)
 }
 
 // mergeDuplicateUnnamedRoutingChildrenRecursion9023 lets the top-level
 // protocols fold defer nested merges until their registered protocol site is
 // visited, so those folds are deterministic and individually diagnosed.
-func mergeDuplicateUnnamedRoutingChildrenRecursion9023(children []*Node, keyword string, recurse bool) ([]*Node, bool) {
+func mergeDuplicateUnnamedRoutingChildrenRecursion9023(children []*Node, keyword string, recurse bool, parentPath []string) ([]*Node, bool) {
 	if len(children) == 0 {
 		return children, false
 	}
@@ -584,7 +615,7 @@ func mergeDuplicateUnnamedRoutingChildrenRecursion9023(children []*Node, keyword
 		first.Children = append(first.Children, child.Children...)
 		first.IsLeaf = false
 		if recurse {
-			mergeSiblingContainers9209(first, 0)
+			mergeSiblingContainers9209WithParentAndPath(first, 0, "", parentPath)
 		}
 		merged = true
 	}
@@ -593,15 +624,16 @@ func mergeDuplicateUnnamedRoutingChildrenRecursion9023(children []*Node, keyword
 	}
 	return children, false
 }
-func isRegisteredUnnamedRoutingMergeSite9023(parent, keyword string) bool {
+func isRegisteredUnnamedRoutingMergeSite9023(parent, keyword string, path []string) bool {
+	normalizedPath := routingMergePath9023(path)
 	for _, site := range dupUnnamedRoutingMergeSites12043 {
 		if site.scope == "instance" && site.parent == parent && site.keyword == keyword {
-			return true
+			return len(normalizedPath) == 1 && normalizedPath[0] == "routing-instances"
 		}
 	}
 	for _, site := range dupUnnamedRoutingMergeSites12120 {
 		if site.scope == "any" && site.parent == parent && site.keyword == keyword {
-			return true
+			return isAnyRoutingMergeParentPath9023(path, parent)
 		}
 	}
 	return false

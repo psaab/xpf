@@ -414,6 +414,30 @@ func TestUnnamedRoutingContainersMergeAt12120Sites(t *testing.T) {
 				return ok && ospf != nil && len(ospf.Areas) == 2
 			},
 		},
+		{
+			name:            "nested interface-routes rib-group",
+			site:            "any interface-routes rib-group",
+			diagnostic:      "interface-routes rib-group",
+			warningFragment: "routing-options interface-routes",
+			strictReject:    []string{"not implemented", `inet "RG4"`, `inet6 "RG6"`},
+			dup: `routing-options { interface-routes {
+				rib-group { inet RG4; }
+				rib-group { inet6 RG6; }
+			} }`,
+			merged: `routing-options { interface-routes {
+				rib-group { inet RG4; inet6 RG6; }
+			} }`,
+			read: func(c *Config) any {
+				return struct{ V4, V6 string }{
+					c.RoutingOptions.InterfaceRoutesRibGroup,
+					c.RoutingOptions.InterfaceRoutesRibGroupV6,
+				}
+			},
+			populated: func(v any) bool {
+				groups, ok := v.(struct{ V4, V6 string })
+				return ok && groups.V4 == "RG4" && groups.V6 == "RG6"
+			},
+		},
 	}
 
 	compile := func(t *testing.T, text string, lenient bool) (*Config, error) {
@@ -823,4 +847,370 @@ func compileMergeDiagnostics12120(t *testing.T, text string) *Config {
 		t.Fatalf("strict compile: %v", err)
 	}
 	return cfg
+}
+func TestUnnamedRoutingContainerHostInboundExceptionsStayOutOfScope12120(t *testing.T) {
+	const interfaces = `interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } } `
+	hostProtocols := func(cfg *Config, perInterface bool) []string {
+		zone := cfg.Security.Zones["trust"]
+		if zone == nil {
+			return nil
+		}
+		if !perInterface {
+			if zone.HostInboundTraffic == nil {
+				return nil
+			}
+			return zone.HostInboundTraffic.Protocols
+		}
+		for _, host := range zone.InterfaceHostInbound {
+			if host != nil {
+				return host.Protocols
+			}
+		}
+		return nil
+	}
+	compile := func(t *testing.T, text string, lenient bool) (*Config, error) {
+		t.Helper()
+		tree, parseErrs := NewParser(text).Parse()
+		if len(parseErrs) != 0 || tree == nil {
+			t.Fatalf("fixture parse: %v", parseErrs)
+		}
+		if lenient {
+			return CompileConfigLenient(tree)
+		}
+		return CompileConfig(tree)
+	}
+	for _, keyword := range []string{"ospf", "bgp", "ospf3", "rip", "isis"} {
+		for _, perInterface := range []bool{false, true} {
+			scope := "zone"
+			site := `interfaces { ge-0/0/0.0; } host-inbound-traffic { protocols { `
+			mergedScope := `interfaces { ge-0/0/0.0; } host-inbound-traffic { protocols { `
+			if perInterface {
+				scope = "interface"
+				site = `interfaces { ge-0/0/0.0 { host-inbound-traffic { protocols { `
+				mergedScope = site
+			}
+			closeScope := ` } } } } }`
+			if perInterface {
+				closeScope = ` } } } } } } }`
+			}
+			dup := interfaces + `security { zones { security-zone trust { ` + site +
+				`all; ` + keyword + ` { except; } ` + keyword + ` { except; }` +
+				closeScope
+			merged := interfaces + `security { zones { security-zone trust { ` + mergedScope +
+				`all; ` + keyword + ` { except; }` + closeScope
+			t.Run(scope+"/"+keyword, func(t *testing.T) {
+				for _, lenient := range []bool{false, true} {
+					mode := "strict"
+					if lenient {
+						mode = "lenient"
+					}
+					t.Run(mode, func(t *testing.T) {
+						got, err := compile(t, dup, lenient)
+						if err != nil {
+							t.Fatalf("duplicate config compile: %v", err)
+						}
+						want, err := compile(t, merged, lenient)
+						if err != nil {
+							t.Fatalf("single-exclusion control compile: %v", err)
+						}
+						gotProtocols := hostProtocols(got, perInterface)
+						wantProtocols := hostProtocols(want, perInterface)
+						if !reflect.DeepEqual(gotProtocols, wantProtocols) {
+							t.Fatalf("host-inbound protocols differ from single-exclusion control: got=%v want=%v",
+								gotProtocols, wantProtocols)
+						}
+						for _, protocol := range gotProtocols {
+							if protocol == keyword {
+								t.Fatalf("host-inbound exclusion for %q was not honored: %v", keyword, gotProtocols)
+							}
+						}
+						if warningsContain12120(got.Warnings) {
+							t.Fatalf("non-routing host-inbound protocols emitted a #12120 merge warning: %v", got.Warnings)
+						}
+					})
+				}
+			})
+		}
+	}
+}
+
+func TestNestedInterfaceRoutesRibGroupMerge12120(t *testing.T) {
+	const ribGroups = `routing-options { rib-groups { leak { import-rib [ inet.0 blue.inet.0 ]; } } } `
+	cases := []struct {
+		name string
+		text string
+	}{
+		{
+			name: "X1-instance-interface-routes-rib-group",
+			text: ribGroups + `routing-instances { blue { instance-type virtual-router;
+				routing-options { interface-routes {
+					rib-group { inet leak; } rib-group { inet6 leak; }
+				} }
+			} }`,
+		},
+		{
+			name: "X2-plus-empty-interface-routes",
+			text: ribGroups + `routing-instances { blue { instance-type virtual-router;
+				routing-options {
+					interface-routes { rib-group { inet leak; } rib-group { inet6 leak; } }
+					interface-routes { }
+				}
+			} }`,
+		},
+		{
+			name: "X3-plus-unrelated-routing-options",
+			text: ribGroups + `routing-instances { blue { instance-type virtual-router;
+				routing-options { interface-routes {
+					rib-group { inet leak; } rib-group { inet6 leak; }
+				} }
+				routing-options { autonomous-system 65001; }
+			} }`,
+		},
+	}
+	compile := func(t *testing.T, text string, lenient bool) (*Config, error) {
+		t.Helper()
+		tree, parseErrs := NewParser(text).Parse()
+		if len(parseErrs) != 0 || tree == nil {
+			t.Fatalf("fixture parse: %v", parseErrs)
+		}
+		if lenient {
+			return CompileConfigLenient(tree)
+		}
+		return CompileConfig(tree)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, lenient := range []bool{false, true} {
+				mode := "strict"
+				if lenient {
+					mode = "lenient"
+				}
+				t.Run(mode, func(t *testing.T) {
+					cfg, err := compile(t, tc.text, lenient)
+					if err != nil {
+						t.Fatalf("compile: %v", err)
+					}
+					var instance *RoutingInstanceConfig
+					for _, ri := range cfg.RoutingInstances {
+						if ri.Name == "blue" {
+							instance = ri
+							break
+						}
+					}
+					if instance == nil || instance.InterfaceRoutesRibGroup != "leak" ||
+						instance.InterfaceRoutesRibGroupV6 != "leak" {
+						t.Fatalf("interface-routes rib-group state = %#v, want inet=inet6=leak", instance)
+					}
+					if !warningsContain12120Site(cfg.Warnings, "rib-group") ||
+						!warningsContain12120Site(cfg.Warnings, "routing-options interface-routes") {
+						t.Fatalf("nested rib-group fold warning is missing its site: %v", cfg.Warnings)
+					}
+				})
+			}
+		})
+	}
+
+	const globalDuplicate = `routing-options { interface-routes {
+		rib-group { inet RG4; } rib-group { inet6 RG6; }
+	} }`
+	for _, lenient := range []bool{false, true} {
+		mode := "strict"
+		if lenient {
+			mode = "lenient"
+		}
+		t.Run("global/"+mode, func(t *testing.T) {
+			cfg, err := compile(t, globalDuplicate, lenient)
+			if lenient {
+				if err != nil {
+					t.Fatalf("lenient compile: %v", err)
+				}
+				if cfg.RoutingOptions.InterfaceRoutesRibGroup != "RG4" ||
+					cfg.RoutingOptions.InterfaceRoutesRibGroupV6 != "RG6" {
+					t.Fatalf("global rib-group selectors = %q/%q, want RG4/RG6",
+						cfg.RoutingOptions.InterfaceRoutesRibGroup,
+						cfg.RoutingOptions.InterfaceRoutesRibGroupV6)
+				}
+				if !warningsContain12120Site(cfg.Warnings, "rib-group") {
+					t.Fatalf("global nested rib-group warning is missing: %v", cfg.Warnings)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), `inet "RG4"`) ||
+				!strings.Contains(err.Error(), `inet6 "RG6"`) {
+				t.Fatalf("strict global compile error = %v, want both merged selectors", err)
+			}
+		})
+	}
+}
+
+func TestUnnamedRoutingContainerGroupLeafTarget12120(t *testing.T) {
+	for _, tc := range []struct {
+		name, text string
+		wantAreas  []string
+	}{
+		{
+			name: "G26-inline-peer",
+			text: `groups { G { protocols { ospf; ` +
+				`ospf { area 0.0.0.0 { interface ge-0/0/0.0; } } ` +
+				`ospf { area 0.0.0.1 { interface ge-0/0/1.0; } } } } } ` +
+				`apply-groups G; protocols { ospf { area 0.0.0.9 { interface ge-0/0/9.0; } } }`,
+			wantAreas: []string{"0.0.0.0", "0.0.0.1", "0.0.0.9"},
+		},
+		{
+			name: "G27-no-inline-peer",
+			text: `groups { G { protocols { ospf; ` +
+				`ospf { area 0.0.0.0 { interface ge-0/0/0.0; } } ` +
+				`ospf { area 0.0.0.1 { interface ge-0/0/1.0; } } } } } apply-groups G;`,
+			wantAreas: []string{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, lenient := range []bool{false, true} {
+				tree, parseErrs := NewParser(tc.text).Parse()
+				if len(parseErrs) != 0 || tree == nil {
+					t.Fatalf("fixture parse: %v", parseErrs)
+				}
+				var cfg *Config
+				var err error
+				if lenient {
+					cfg, err = CompileConfigLenient(tree)
+				} else {
+					cfg, err = CompileConfig(tree)
+				}
+				if err != nil {
+					t.Fatalf("compile (lenient=%v): %v", lenient, err)
+				}
+				if cfg.Protocols.OSPF == nil {
+					t.Fatal("group OSPF configuration missing")
+				}
+				got := make([]string, 0, len(cfg.Protocols.OSPF.Areas))
+				for _, area := range cfg.Protocols.OSPF.Areas {
+					got = append(got, area.ID)
+				}
+				if len(got) != len(tc.wantAreas) {
+					t.Fatalf("OSPF areas = %v, want %v", got, tc.wantAreas)
+				}
+				gotSet := make(map[string]bool, len(got))
+				for _, area := range got {
+					gotSet[area] = true
+				}
+				for _, area := range tc.wantAreas {
+					if !gotSet[area] {
+						t.Fatalf("OSPF areas = %v, missing wanted %q", got, area)
+					}
+				}
+				if !warningsContain12120Site(cfg.Warnings, "groups G protocols") {
+					t.Fatalf("effective group merge warning missing: %v", cfg.Warnings)
+				}
+			}
+		})
+	}
+}
+
+func TestUnnamedRoutingContainerMarkerPropagationPaths12120(t *testing.T) {
+	cases := []struct {
+		name, text, warning string
+		instance            bool
+		wantAreas           map[string][]string
+	}{
+		{
+			name: "M6-apply-groups-marker-propagation",
+			text: `groups {
+				H { protocols {
+					ospf { apply-groups G2; }
+					ospf { apply-groups G3; }
+				} }
+				G2 { protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0; } } } }
+				G3 { protocols { ospf { area 0.0.0.1 { interface ge-0/0/1.0; } } } }
+			}
+			apply-groups H;`,
+			warning:   "groups H protocols",
+			wantAreas: map[string][]string{"0.0.0.0": {"ge-0/0/0.0"}, "0.0.0.1": {"ge-0/0/1.0"}},
+		},
+		{
+			name: "M6b-instance-apply-groups-marker-propagation",
+			text: `groups {
+				H { routing-instances { blue {
+					instance-type virtual-router;
+					protocols { ospf { apply-groups G2; } }
+					protocols { ospf { apply-groups G3; } }
+				} } }
+				G2 { routing-instances { blue { protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0; } } } } } }
+				G3 { routing-instances { blue { protocols { ospf { area 0.0.0.1 { interface ge-0/0/1.0; } } } } } }
+			}
+			apply-groups H;`,
+			warning:   "groups H / routing-instances blue protocols",
+			instance:  true,
+			wantAreas: map[string][]string{"0.0.0.0": {"ge-0/0/0.0"}, "0.0.0.1": {"ge-0/0/1.0"}},
+		},
+		{
+			name: "M5-container-marker-push-down",
+			text: `groups {
+				G {
+					protocols {
+						ospf { area 0.0.0.0 { } }
+						ospf { area 0.0.0.0 { } }
+					}
+					apply-groups X;
+				}
+				X { protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0; } } } }
+			}
+			apply-groups G;
+			protocols { ospf { area 0.0.0.0 { interface ge-0/0/5.0; } } }`,
+			warning:   "groups G protocols",
+			wantAreas: map[string][]string{"0.0.0.0": {"ge-0/0/5.0", "ge-0/0/0.0"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, lenient := range []bool{false, true} {
+				mode := "strict"
+				if lenient {
+					mode = "lenient"
+				}
+				t.Run(mode, func(t *testing.T) {
+					tree, parseErrs := NewParser(tc.text).Parse()
+					if len(parseErrs) != 0 || tree == nil {
+						t.Fatalf("fixture parse: %v", parseErrs)
+					}
+					var cfg *Config
+					var err error
+					if lenient {
+						cfg, err = CompileConfigLenient(tree)
+					} else {
+						cfg, err = CompileConfig(tree)
+					}
+					if err != nil {
+						t.Fatalf("compile: %v", err)
+					}
+					var ospf *OSPFConfig
+					if tc.instance {
+						for _, instance := range cfg.RoutingInstances {
+							if instance.Name == "blue" {
+								ospf = instance.OSPF
+								break
+							}
+						}
+					} else {
+						ospf = cfg.Protocols.OSPF
+					}
+					if ospf == nil {
+						t.Fatal("expected effective OSPF configuration")
+					}
+					got := make(map[string][]string, len(ospf.Areas))
+					for _, area := range ospf.Areas {
+						for _, iface := range area.Interfaces {
+							got[area.ID] = append(got[area.ID], iface.Name)
+						}
+					}
+					if !reflect.DeepEqual(got, tc.wantAreas) {
+						t.Fatalf("effective OSPF state = %v, want %v", got, tc.wantAreas)
+					}
+					if !warningsContain12120Site(cfg.Warnings, tc.warning) {
+						t.Fatalf("merged group diagnostic missing %q: %v", tc.warning, cfg.Warnings)
+					}
+				})
+			}
+		})
+	}
 }

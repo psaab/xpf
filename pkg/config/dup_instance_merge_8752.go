@@ -479,10 +479,10 @@ func foldWidenedWarning9571(w foldWidenedPolicy9571) string {
 // duplicates are left for mergeDuplicateBlocks9023 so the fold is independent
 // of surrounding stanzas and produces its own scoped diagnostic.
 func mergeSiblingContainers9209(n *Node, depth int) {
-	mergeSiblingContainers9209WithParent(n, depth, "")
+	mergeSiblingContainers9209WithParentAndPath(n, depth, "", nil)
 }
 
-func mergeSiblingContainers9209WithParent(n *Node, depth int, parent string) {
+func mergeSiblingContainers9209WithParentAndPath(n *Node, depth int, parent string, path []string) {
 	if n == nil || depth > 8 || len(n.Children) < 2 {
 		return
 	}
@@ -496,7 +496,7 @@ func mergeSiblingContainers9209WithParent(n *Node, depth int, parent string) {
 		if ch == nil {
 			continue
 		}
-		if ch.IsLeaf || ch.Children == nil || isRegisteredUnnamedRoutingMergeSite9023(parent, ch.Name()) {
+		if ch.IsLeaf || ch.Children == nil || isRegisteredUnnamedRoutingMergeSite9023(parent, ch.Name(), path) {
 			kept = append(kept, ch)
 			continue
 		}
@@ -513,9 +513,10 @@ func mergeSiblingContainers9209WithParent(n *Node, depth int, parent string) {
 	if changed {
 		n.Children = kept
 	}
+	childPath := appendDuplicateMergeNodePath9023(path, n)
 	for _, ch := range n.Children {
-		if ch != nil && !isRegisteredUnnamedRoutingMergeSite9023(parent, ch.Name()) {
-			mergeSiblingContainers9209WithParent(ch, depth+1, "")
+		if ch != nil && !isRegisteredUnnamedRoutingMergeSite9023(parent, ch.Name(), path) {
+			mergeSiblingContainers9209WithParentAndPath(ch, depth+1, "", childPath)
 		}
 	}
 }

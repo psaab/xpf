@@ -53,6 +53,10 @@ func duplicateBlockMergeWarning9023(merge duplicateBlockMerge9023) string {
 			}
 			return "duplicate unnamed `" + merge.keyword + "` containers under " +
 				site + " were merged in source order (#12043)"
+		case merge.parent == "interface-routes" && merge.keyword == "rib-group":
+			return "duplicate unnamed `rib-group` containers under `" +
+				duplicateMergeSite9023(merge, "routing-options interface-routes") +
+				"` were merged in source order (#12120)"
 		case merge.parent == "rib":
 			return "duplicate unnamed `static` containers under `" +
 				duplicateMergeSite9023(merge, "rib") +
@@ -434,7 +438,9 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	if opts.lenientDuplicatePolicyNames {
 		if treeHasGroupApplications11063(tree) {
 			expandedPolicySourceTree = tree.Clone()
-			stripDuplicateBlockMergeMarkers9023(expandedPolicySourceTree)
+			if hasGroupScopedDuplicateBlockMerge9023(registeredMerges) {
+				stripDuplicateBlockMergeMarkers9023(expandedPolicySourceTree)
+			}
 		}
 		var merged []string
 		merged, foldWidened, directActionConflicts = mergeDuplicateNamedInstances(tree)
@@ -799,7 +805,9 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	if opts.lenientDuplicatePolicyNames {
 		if treeHasGroupApplications11063(tree) {
 			expandedPolicySourceTree = tree.Clone()
-			stripDuplicateBlockMergeMarkers9023(expandedPolicySourceTree)
+			if hasGroupScopedDuplicateBlockMerge9023(registeredMerges) {
+				stripDuplicateBlockMergeMarkers9023(expandedPolicySourceTree)
+			}
 		}
 		var merged []string
 		merged, foldWidened, directActionConflicts = mergeDuplicateNamedInstances(tree)

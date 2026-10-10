@@ -530,9 +530,9 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 			!filterLeafListMembers9862(s, level) {
 			continue
 		}
-		markers := duplicateBlockMergeMarkersInAnnotation9023(s.Annotation)
+		markers := duplicateBlockMergeMarkersAtNode9023(s)
 		if !s.IsLeaf && len(markers) > 0 {
-			s.Annotation = stripDuplicateBlockMergeMarkerAnnotation9023(s.Annotation)
+			s.duplicateBlockMergeMarkers9023 = nil
 			if len(s.Children) == 0 {
 				appendDuplicateBlockMergeMarkers9023(s, markers)
 			} else {
