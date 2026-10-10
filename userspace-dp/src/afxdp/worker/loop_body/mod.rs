@@ -1915,6 +1915,7 @@ pub(crate) fn worker_loop(
                 crate::afxdp::poll_descriptor::forget_pptp_control_channel(
                     &mut sessions,
                     &pptp_control,
+                    worker_commands_by_id.get(&worker_id),
                     &peer_worker_commands,
                     key,
                     loop_now_ns,
@@ -2039,9 +2040,10 @@ pub(crate) fn worker_loop(
         // instead of below it. `worker_loop_drains_the_pptp_control_inbox_7699`
         // enforces both halves of that, including the absence of the interval
         // constant from this file — so do not name it here even in a comment.
-        crate::afxdp::worker_queue::drain_pptp_control_inbox(
+        crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
             &pptp_control,
             &mut sessions,
+            Some(&commands),
             &peer_worker_commands,
             loop_now_ns,
         );

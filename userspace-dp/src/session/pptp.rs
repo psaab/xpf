@@ -63,6 +63,12 @@ impl PptpCall {
         }
     }
 
+    /// Whether this call contains the given allocator/call-id alias.
+    pub(crate) fn has_alias(&self, allocator: IpAddr, call_id: u16) -> bool {
+        (self.lo == allocator && self.lo_call_id == call_id)
+            || (self.hi == allocator && self.hi_call_id == call_id)
+    }
+
     /// Encode the call-id pair for the HA sync wire (#7699).
     ///
     /// Never returns [`PPTP_CALL_IDS_ABSENT`], so a receiver can read `0` as

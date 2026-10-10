@@ -108,12 +108,13 @@ use super::*;
 use crate::policy::evaluate_policy_result_with_icmp_at;
 
 /// #11053: close the PPTP control channel locally, purge buffered Reply
-/// segments, and queue a channel-scoped forget for every peer worker. Full
-/// queues are recorded for retry by the periodic control-inbox drain.
+/// segments, and queue a channel-scoped forget for every worker. Full queues
+/// are recorded for retry by the periodic control-inbox drain.
 #[cold]
 pub(in crate::afxdp) fn forget_pptp_control_channel(
     sessions: &mut SessionTable,
     inbox: &crate::session::pptp_control::PptpControlInbox,
+    self_worker_commands: Option<&Arc<Mutex<VecDeque<WorkerCommand>>>>,
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     control_key: &SessionKey,
     closed_ns: u64,
@@ -124,10 +125,27 @@ pub(in crate::afxdp) fn forget_pptp_control_channel(
         control_key.dst_ip,
         control_key.dst_port,
     );
-    let forgotten = sessions.pptp_mut().forget_control_channel(control);
     inbox.forget_channel(control);
+    inbox.forget_call_installs_for_channel(control, closed_ns);
+
+    let mut forgotten = 0;
     let mut queued = 0;
     let mut unsent = Vec::new();
+    if let Some(queue) = self_worker_commands {
+        let mut pending = crate::afxdp::worker_queue::lock_recover(queue);
+        if pending.is_empty() {
+            forgotten = sessions.pptp_mut().forget_control_channel(control);
+        } else if crate::afxdp::worker_queue::push_bounded(
+            &mut pending,
+            WorkerCommand::ForgetPptpControlChannel { control, closed_ns },
+        ) {
+            queued += 1;
+        } else {
+            unsent.push(Arc::as_ptr(queue) as usize);
+        }
+    } else {
+        forgotten = sessions.pptp_mut().forget_control_channel(control);
+    }
     for queue in peer_worker_commands {
         let mut pending = crate::afxdp::worker_queue::lock_recover(queue);
         if crate::afxdp::worker_queue::push_bounded(
@@ -7615,6 +7633,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 forget_pptp_control_channel(
                                     sessions,
                                     worker_ctx.pptp_control,
+                                    worker_ctx
+                                        .worker_commands_by_id
+                                        .get(&worker_ctx.ident.worker_id),
                                     worker_ctx.peer_worker_commands,
                                     &flow.forward_key,
                                     now_ns,
@@ -9817,7 +9838,7 @@ mod pptp_control_teardown_tests_11053 {
             .collect();
 
         assert_eq!(
-            forget_pptp_control_channel(&mut sessions, &inbox, &peer_queues, &key, 3),
+            forget_pptp_control_channel(&mut sessions, &inbox, None, &peer_queues, &key, 3),
             (2, 3)
         );
         assert_eq!(sessions.pptp().resolve(a, 0x1111), None);
@@ -9850,6 +9871,7 @@ mod pptp_control_teardown_tests_11053 {
             forget_pptp_control_channel(
                 &mut sessions,
                 &inbox,
+                None,
                 std::slice::from_ref(&queue),
                 &key,
                 7
@@ -9895,7 +9917,7 @@ mod pptp_control_teardown_tests_11053 {
 
         let mut sessions = SessionTable::new();
         assert_eq!(
-            forget_pptp_control_channel(&mut sessions, &inbox, &[], &key, 10),
+            forget_pptp_control_channel(&mut sessions, &inbox, None, &[], &key, 10),
             (0, 0)
         );
         assert_eq!(
@@ -9916,6 +9938,68 @@ mod pptp_control_teardown_tests_11053 {
             sessions.pptp().resolve(b, 0x2222),
             None,
             "the queued Reply must not resurrect a call after close"
+        );
+    }
+
+    #[test]
+    fn local_channel_close_orders_after_queued_install_11053() {
+        let (a, b, key) = control_key();
+        let control = crate::session::pptp::ControlChannelId::new(a, 49152, b, 1723);
+        let call = PptpCall::new(a, 0x1111, b, 0x2222);
+        let own_queue = Arc::new(Mutex::new(VecDeque::from([
+            WorkerCommand::InstallPptpCall {
+                call,
+                control,
+                learned_ns: 1,
+            },
+        ])));
+        let peer_queue = Arc::new(Mutex::new(VecDeque::new()));
+        let inbox = crate::session::pptp_control::PptpControlInbox::default();
+        let mut sessions = SessionTable::new();
+
+        assert_eq!(
+            forget_pptp_control_channel(
+                &mut sessions,
+                &inbox,
+                Some(&own_queue),
+                std::slice::from_ref(&peer_queue),
+                &key,
+                2,
+            ),
+            (0, 2)
+        );
+        {
+            let pending = own_queue.lock().expect("own queue");
+            assert!(matches!(
+                pending.front(),
+                Some(WorkerCommand::InstallPptpCall { .. })
+            ));
+            assert!(matches!(
+                pending.back(),
+                Some(WorkerCommand::ForgetPptpControlChannel {
+                    control: queued,
+                    closed_ns: 2
+                }) if *queued == control
+            ));
+        }
+
+        let result = crate::afxdp::session_glue::apply_worker_commands(
+            &own_queue,
+            &mut sessions,
+            crate::afxdp::SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &crate::afxdp::ForwardingState::default(),
+            &BTreeMap::new(),
+            &Arc::new(crate::afxdp::ShardedNeighborMap::new()),
+            0,
+            &mut VecDeque::new(),
+        );
+        assert!(!result.commands_backlogged);
+        assert_eq!(
+            sessions.pptp().resolve(a, 0x1111),
+            None,
+            "the queued channel close must follow and remove the queued install"
         );
     }
 }

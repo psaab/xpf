@@ -102,15 +102,18 @@ struct InboxInner {
     /// this one means the drain could not keep up, the other means the data
     /// simply arrived first.
     dropped: u64,
-    /// Control closes refused by a full peer queue, retried by periodic drain.
+    /// Control closes refused by full worker queues, retried by periodic drain.
     pending_forgets: Vec<PendingChannelForget>,
     last_forget_retry_ns: u64,
-    /// Per-call CDN commands refused by full peer queues.
+    /// Per-call CDN commands refused by full worker queues.
     pending_call_forgets: Vec<PendingCallForget>,
     last_call_forget_retry_ns: u64,
+    /// PPTP installs refused by full worker queues.
+    pending_call_installs: Vec<PendingCallInstall>,
+    last_call_install_retry_ns: u64,
 }
 
-/// A control close still waiting for bounded peer-worker queues to accept it.
+/// A control close still waiting for a bounded worker queue or local table.
 #[derive(Clone, Debug)]
 pub(crate) struct PendingChannelForget {
     pub(crate) control: crate::session::pptp::ControlChannelId,
@@ -118,10 +121,19 @@ pub(crate) struct PendingChannelForget {
     pub(crate) unsent_queue_ids: Vec<usize>,
 }
 
-/// A CDN still waiting for bounded peer-worker queues to accept it.
+/// A CDN still waiting for a bounded worker queue or local table.
 #[derive(Clone, Debug)]
 pub(crate) struct PendingCallForget {
     pub(crate) disconnect: crate::session::pptp::PptpCallDisconnect,
+    pub(crate) unsent_queue_ids: Vec<usize>,
+}
+
+/// A PPTP install still waiting for a bounded worker queue or local table.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingCallInstall {
+    pub(crate) call: crate::session::pptp::PptpCall,
+    pub(crate) control: crate::session::pptp::ControlChannelId,
+    pub(crate) learned_ns: u64,
     pub(crate) unsent_queue_ids: Vec<usize>,
 }
 
@@ -281,6 +293,94 @@ impl PptpControlInbox {
         }
     }
 
+    /// Track the recipients still missing the latest install for this call.
+    ///
+    /// A later reply supersedes an older retry: the new broadcast attempted
+    /// every peer, so its refused-recipient list is the authoritative set.
+    pub(crate) fn record_call_install(
+        &self,
+        call: crate::session::pptp::PptpCall,
+        control: crate::session::pptp::ControlChannelId,
+        learned_ns: u64,
+        unsent_queue_ids: Vec<usize>,
+    ) {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(index) = inner
+            .pending_call_installs
+            .iter()
+            .position(|pending| pending.call == call && pending.control == control)
+        {
+            if inner.pending_call_installs[index].learned_ns > learned_ns {
+                return;
+            }
+            if unsent_queue_ids.is_empty() {
+                inner.pending_call_installs.remove(index);
+            } else {
+                let pending = &mut inner.pending_call_installs[index];
+                pending.learned_ns = learned_ns;
+                pending.unsent_queue_ids = unsent_queue_ids;
+            }
+        } else if !unsent_queue_ids.is_empty() {
+            inner.pending_call_installs.push(PendingCallInstall {
+                call,
+                control,
+                learned_ns,
+                unsent_queue_ids,
+            });
+        }
+    }
+
+    /// Forget install retries superseded by a complete broadcast.
+    pub(crate) fn complete_call_install_broadcast(
+        &self,
+        call: crate::session::pptp::PptpCall,
+        control: crate::session::pptp::ControlChannelId,
+        learned_ns: u64,
+    ) {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner.pending_call_installs.retain(|pending| {
+            pending.call != call || pending.control != control || pending.learned_ns > learned_ns
+        });
+    }
+
+    /// A call disconnect cancels retries for that call learned no later than
+    /// the notice, so a delayed install cannot resurrect torn-down state.
+    pub(crate) fn forget_call_installs_for_disconnect(
+        &self,
+        disconnect: crate::session::pptp::PptpCallDisconnect,
+    ) {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner.pending_call_installs.retain(|pending| {
+            pending.control != disconnect.control
+                || pending.learned_ns > disconnect.disconnected_ns
+                || !pending.call.has_alias(disconnect.allocator, disconnect.call_id)
+        });
+    }
+
+    /// A control-channel close cancels retries learned no later than the close.
+    pub(crate) fn forget_call_installs_for_channel(
+        &self,
+        control: crate::session::pptp::ControlChannelId,
+        closed_ns: u64,
+    ) {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner.pending_call_installs.retain(|pending| {
+            pending.control != control || pending.learned_ns > closed_ns
+        });
+    }
+
     /// Take a snapshot of due close retries. Queue locks are acquired only
     /// after this inbox lock has been released.
     pub(crate) fn take_channel_forget_retries(&self, now_ns: u64) -> Vec<PendingChannelForget> {
@@ -313,7 +413,23 @@ impl PptpControlInbox {
         inner.pending_call_forgets.clone()
     }
 
-    /// Acknowledge a close accepted by one peer queue.
+    /// Take due install retries without holding the inbox lock while workers
+    /// are queued.
+    pub(crate) fn take_call_install_retries(&self, now_ns: u64) -> Vec<PendingCallInstall> {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if inner.last_call_install_retry_ns != 0
+            && now_ns.saturating_sub(inner.last_call_install_retry_ns) < CONTROL_DRAIN_INTERVAL_NS
+        {
+            return Vec::new();
+        }
+        inner.last_call_install_retry_ns = now_ns;
+        inner.pending_call_installs.clone()
+    }
+
+    /// Acknowledge a close delivered to its queue or applied to its local table.
     pub(crate) fn mark_channel_forget_sent(
         &self,
         control: crate::session::pptp::ControlChannelId,
@@ -332,7 +448,7 @@ impl PptpControlInbox {
         });
     }
 
-    /// Acknowledge a CDN accepted by one peer queue.
+    /// Acknowledge a CDN delivered to its queue or applied to its local table.
     pub(crate) fn mark_call_forget_sent(
         &self,
         disconnect: crate::session::pptp::PptpCallDisconnect,
@@ -344,6 +460,29 @@ impl PptpControlInbox {
         };
         inner.pending_call_forgets.retain_mut(|pending| {
             if pending.disconnect == disconnect {
+                pending.unsent_queue_ids.retain(|id| *id != queue_id);
+            }
+            !pending.unsent_queue_ids.is_empty()
+        });
+    }
+
+    /// Acknowledge an install delivered to its queue or applied to its local table.
+    pub(crate) fn mark_call_install_sent(
+        &self,
+        call: crate::session::pptp::PptpCall,
+        control: crate::session::pptp::ControlChannelId,
+        learned_ns: u64,
+        queue_id: usize,
+    ) {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        inner.pending_call_installs.retain_mut(|pending| {
+            if pending.call == call
+                && pending.control == control
+                && pending.learned_ns == learned_ns
+            {
                 pending.unsent_queue_ids.retain(|id| *id != queue_id);
             }
             !pending.unsent_queue_ids.is_empty()
@@ -770,5 +909,125 @@ mod inbox_drop_policy_tests_7699 {
                 s.payload[0]
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod call_install_retry_fence_tests_12133 {
+    use super::*;
+    use crate::session::pptp::{ControlChannelId, PptpCall, PptpCallDisconnect};
+
+    fn peers() -> (std::net::IpAddr, std::net::IpAddr) {
+        (
+            "198.51.100.7".parse().unwrap(),
+            "203.0.113.9".parse().unwrap(),
+        )
+    }
+
+    fn channel() -> ControlChannelId {
+        let (pac, pns) = peers();
+        ControlChannelId::new(pac, 49152, pns, 1723)
+    }
+
+    fn call(a: u16, b: u16) -> PptpCall {
+        let (pac, pns) = peers();
+        PptpCall::new(pac, a, pns, b)
+    }
+
+    #[test]
+    fn an_older_reply_and_stale_ack_cannot_replace_a_newer_install_retry_12133() {
+        const QUEUE: usize = 41;
+        const OTHER_QUEUE: usize = 42;
+        let inbox = PptpControlInbox::default();
+        let call = call(0x1111, 0x2222);
+        let control = channel();
+
+        inbox.record_call_install(call, control, 20, vec![QUEUE]);
+        inbox.record_call_install(call, control, 10, vec![OTHER_QUEUE]);
+        inbox.mark_call_install_sent(call, control, 10, QUEUE);
+        let retry = inbox.take_call_install_retries(1_000_000_000);
+        assert_eq!(retry.len(), 1);
+        assert_eq!(
+            retry[0].learned_ns, 20,
+            "an older reply replaced the latest learned timestamp"
+        );
+        assert_eq!(
+            retry[0].unsent_queue_ids,
+            vec![QUEUE],
+            "the older reply or its stale acknowledgement replaced current recipients"
+        );
+
+        inbox.mark_call_install_sent(call, control, 20, QUEUE);
+        assert!(
+            inbox
+                .take_call_install_retries(2_000_000_000)
+                .is_empty(),
+            "an acknowledgement for the current learned timestamp did not clear it"
+        );
+    }
+
+    #[test]
+    fn call_disconnect_retry_cancellation_obeys_timestamp_and_call_scope_12133() {
+        const QUEUE: usize = 51;
+        let inbox = PptpControlInbox::default();
+        let control = channel();
+        let call_a = call(0x1111, 0x2222);
+        let call_b = call(0x3333, 0x4444);
+        inbox.record_call_install(call_a, control, 10, vec![QUEUE]);
+        inbox.record_call_install(call_b, control, 20, vec![QUEUE]);
+        let (pac, _) = peers();
+
+        inbox.forget_call_installs_for_disconnect(PptpCallDisconnect {
+            allocator: pac,
+            call_id: 0x1111,
+            control,
+            disconnected_ns: 9,
+        });
+        let retries = inbox.take_call_install_retries(1_000_000_000);
+        assert_eq!(
+            retries.len(),
+            2,
+            "a CDN older than the learned reply canceled a retry"
+        );
+
+        inbox.forget_call_installs_for_disconnect(PptpCallDisconnect {
+            allocator: pac,
+            call_id: 0x1111,
+            control,
+            disconnected_ns: 10,
+        });
+        let retries = inbox.take_call_install_retries(2_000_000_000);
+        assert_eq!(retries.len(), 1);
+        assert_eq!(
+            retries[0].call, call_b,
+            "a CDN must remove only its call, preserving the later call on the channel"
+        );
+    }
+
+    #[test]
+    fn channel_close_retry_cancellation_preserves_newer_installs_12133() {
+        const QUEUE: usize = 61;
+        let inbox = PptpControlInbox::default();
+        let control = channel();
+        let call_a = call(0x1111, 0x2222);
+        let call_b = call(0x3333, 0x4444);
+        inbox.record_call_install(call_a, control, 10, vec![QUEUE]);
+        inbox.record_call_install(call_b, control, 20, vec![QUEUE]);
+
+        inbox.forget_call_installs_for_channel(control, 15);
+        let retries = inbox.take_call_install_retries(1_000_000_000);
+        assert_eq!(retries.len(), 1);
+        assert_eq!(
+            retries[0].call, call_b,
+            "a close must cancel no-later-than installs and preserve newer ones"
+        );
+
+        inbox.forget_call_installs_for_channel(control, 20);
+        assert!(
+            inbox
+                .take_call_install_retries(2_000_000_000)
+                .is_empty(),
+            "the close timestamp equal to the learned time must cancel that install"
+        );
     }
 }

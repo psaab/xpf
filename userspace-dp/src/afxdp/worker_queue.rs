@@ -978,19 +978,20 @@ pub(crate) mod tests;
 /// co-located — RSS hashes the flow tuple, so they share a worker only by
 /// chance — which is why this is a broadcast rather than a send to one worker.
 ///
-/// Returns the number of queues that ACCEPTED the command. A short count is not
-/// an error but it is not nothing either: a worker that missed the install
-/// resolves that call's packets as UNASSOCIATED until it is re-published, which
-/// is the forward-and-count path rather than a drop. Callers that can retry
-/// should; callers that cannot should surface the shortfall rather than treat a
-/// partial broadcast as a complete one.
+/// Returns the number of queues that ACCEPTED the command and the identities of
+/// queues that refused it. The control inbox retries refused recipients on a
+/// later drain. A short count is not an error but it is not nothing either: a
+/// worker that missed the install resolves that call's packets as UNASSOCIATED
+/// until it is re-published, which is the forward-and-count path rather than a
+/// drop.
 pub(in crate::afxdp) fn broadcast_pptp_install(
     queues: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     call: crate::session::pptp::PptpCall,
     control: crate::session::pptp::ControlChannelId,
     learned_ns: u64,
-) -> usize {
+) -> (usize, Vec<usize>) {
     let mut accepted = 0;
+    let mut unsent_queue_ids = Vec::new();
     for q in queues {
         let mut pending = lock_recover(q);
         if push_bounded(
@@ -1002,9 +1003,172 @@ pub(in crate::afxdp) fn broadcast_pptp_install(
             },
         ) {
             accepted += 1;
+        } else {
+            unsent_queue_ids.push(Arc::as_ptr(q) as usize);
         }
     }
-    accepted
+    (accepted, unsent_queue_ids)
+}
+
+fn retry_pending_pptp_call_installs(
+    inbox: &crate::session::pptp_control::PptpControlInbox,
+    sessions: &mut crate::session::SessionTable,
+    self_worker_commands: Option<&Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    now_ns: u64,
+) {
+    let self_worker_queue_id = self_worker_commands.map(|queue| Arc::as_ptr(queue) as usize);
+    for retry in inbox.take_call_install_retries(now_ns) {
+        // A worker's peer list excludes itself. If it was the refused
+        // recipient, preserve its queue's FIFO just as for peers: an empty
+        // queue permits a local install; otherwise append behind its backlog.
+        if let Some(queue) = self_worker_commands
+            && let Some(queue_id) = self_worker_queue_id
+            && retry.unsent_queue_ids.contains(&queue_id)
+        {
+            let mut pending = lock_recover(queue);
+            if pending.is_empty() {
+                match sessions
+                    .pptp_mut()
+                    .install(retry.call, retry.control, retry.learned_ns)
+                {
+                    Ok(_) => inbox.mark_call_install_sent(
+                        retry.call,
+                        retry.control,
+                        retry.learned_ns,
+                        queue_id,
+                    ),
+                    Err(e) => {
+                        // The install error does not distinguish a permanent
+                        // handle collision from an alias held until an older
+                        // teardown arrives. Retain the retry for the next
+                        // interval on any error rather than lose a transient
+                        // AllocatorCollision.
+                        debug_log!("PPTP association refused; retaining retry: {:?}", e);
+                    }
+                }
+            } else if push_bounded(
+                &mut pending,
+                WorkerCommand::InstallPptpCall {
+                    call: retry.call,
+                    control: retry.control,
+                    learned_ns: retry.learned_ns,
+                },
+            ) {
+                inbox.mark_call_install_sent(retry.call, retry.control, retry.learned_ns, queue_id);
+            }
+        }
+        for queue in peer_worker_commands {
+            let queue_id = Arc::as_ptr(queue) as usize;
+            if Some(queue_id) == self_worker_queue_id || !retry.unsent_queue_ids.contains(&queue_id)
+            {
+                continue;
+            }
+            let mut pending = lock_recover(queue);
+            if push_bounded(
+                &mut pending,
+                WorkerCommand::InstallPptpCall {
+                    call: retry.call,
+                    control: retry.control,
+                    learned_ns: retry.learned_ns,
+                },
+            ) {
+                inbox.mark_call_install_sent(retry.call, retry.control, retry.learned_ns, queue_id);
+            }
+        }
+    }
+}
+
+fn retry_pending_pptp_control_forgets(
+    inbox: &crate::session::pptp_control::PptpControlInbox,
+    sessions: &mut crate::session::SessionTable,
+    self_worker_commands: Option<&Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    now_ns: u64,
+) {
+    let self_worker_queue_id = self_worker_commands.map(|queue| Arc::as_ptr(queue) as usize);
+    for retry in inbox.take_channel_forget_retries(now_ns) {
+        if let Some(queue) = self_worker_commands
+            && let Some(queue_id) = self_worker_queue_id
+            && retry.unsent_queue_ids.contains(&queue_id)
+        {
+            let mut pending = lock_recover(queue);
+            if pending.is_empty() {
+                sessions
+                    .pptp_mut()
+                    .forget_control_channel_learned_by(retry.control, retry.closed_ns);
+                inbox.mark_channel_forget_sent(retry.control, retry.closed_ns, queue_id);
+            } else if push_bounded(
+                &mut pending,
+                WorkerCommand::ForgetPptpControlChannel {
+                    control: retry.control,
+                    closed_ns: retry.closed_ns,
+                },
+            ) {
+                inbox.mark_channel_forget_sent(retry.control, retry.closed_ns, queue_id);
+            }
+        }
+        for queue in peer_worker_commands {
+            let queue_id = Arc::as_ptr(queue) as usize;
+            if Some(queue_id) == self_worker_queue_id || !retry.unsent_queue_ids.contains(&queue_id)
+            {
+                continue;
+            }
+            let mut pending = lock_recover(queue);
+            if push_bounded(
+                &mut pending,
+                WorkerCommand::ForgetPptpControlChannel {
+                    control: retry.control,
+                    closed_ns: retry.closed_ns,
+                },
+            ) {
+                inbox.mark_channel_forget_sent(retry.control, retry.closed_ns, queue_id);
+            }
+        }
+    }
+    for retry in inbox.take_call_forget_retries(now_ns) {
+        if let Some(queue) = self_worker_commands
+            && let Some(queue_id) = self_worker_queue_id
+            && retry.unsent_queue_ids.contains(&queue_id)
+        {
+            let mut pending = lock_recover(queue);
+            if pending.is_empty() {
+                sessions
+                    .pptp_mut()
+                    .forget_call_disconnected_by(retry.disconnect);
+                inbox.mark_call_forget_sent(retry.disconnect, queue_id);
+            } else if push_bounded(
+                &mut pending,
+                WorkerCommand::ForgetPptpCallByControl(retry.disconnect),
+            ) {
+                inbox.mark_call_forget_sent(retry.disconnect, queue_id);
+            }
+        }
+        for queue in peer_worker_commands {
+            let queue_id = Arc::as_ptr(queue) as usize;
+            if Some(queue_id) == self_worker_queue_id || !retry.unsent_queue_ids.contains(&queue_id)
+            {
+                continue;
+            }
+            let mut pending = lock_recover(queue);
+            if push_bounded(
+                &mut pending,
+                WorkerCommand::ForgetPptpCallByControl(retry.disconnect),
+            ) {
+                inbox.mark_call_forget_sent(retry.disconnect, queue_id);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(in crate::afxdp) fn drain_pptp_control_inbox(
+    inbox: &crate::session::pptp_control::PptpControlInbox,
+    sessions: &mut crate::session::SessionTable,
+    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    now_ns: u64,
+) -> usize {
+    drain_pptp_control_inbox_for_worker(inbox, sessions, None, peer_worker_commands, now_ns)
 }
 
 /// #7699: drain the PPTP control inbox — parse, install locally, publish.
@@ -1033,55 +1197,33 @@ pub(in crate::afxdp) fn broadcast_pptp_install(
 /// broadcast alone would therefore teach every worker but the one that saw the
 /// segment — and since RSS does not co-locate the control and data channels,
 /// that worker is as likely as any to be the one the call's GRE data lands on.
-/// The local install is not a duplicate of the broadcast; it is the half the
-/// broadcast structurally cannot reach.
-fn retry_pending_pptp_control_forgets(
-    inbox: &crate::session::pptp_control::PptpControlInbox,
-    peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
-    now_ns: u64,
-) {
-    for retry in inbox.take_channel_forget_retries(now_ns) {
-        for queue in peer_worker_commands {
-            let queue_id = Arc::as_ptr(queue) as usize;
-            if !retry.unsent_queue_ids.contains(&queue_id) {
-                continue;
-            }
-            let mut pending = lock_recover(queue);
-            if push_bounded(
-                &mut pending,
-                WorkerCommand::ForgetPptpControlChannel {
-                    control: retry.control,
-                    closed_ns: retry.closed_ns,
-                },
-            ) {
-                inbox.mark_channel_forget_sent(retry.control, retry.closed_ns, queue_id);
-            }
-        }
-    }
-    for retry in inbox.take_call_forget_retries(now_ns) {
-        for queue in peer_worker_commands {
-            let queue_id = Arc::as_ptr(queue) as usize;
-            if !retry.unsent_queue_ids.contains(&queue_id) {
-                continue;
-            }
-            let mut pending = lock_recover(queue);
-            if push_bounded(
-                &mut pending,
-                WorkerCommand::ForgetPptpCallByControl(retry.disconnect),
-            ) {
-                inbox.mark_call_forget_sent(retry.disconnect, queue_id);
-            }
-        }
-    }
-}
-
-pub(in crate::afxdp) fn drain_pptp_control_inbox(
+/// A refused retry for this worker uses its own queue when present, preserving
+/// command order behind an existing backlog. Only an empty queue permits a
+/// direct local install.
+pub(in crate::afxdp) fn drain_pptp_control_inbox_for_worker(
     inbox: &crate::session::pptp_control::PptpControlInbox,
     sessions: &mut crate::session::SessionTable,
+    self_worker_commands: Option<&Arc<Mutex<VecDeque<WorkerCommand>>>>,
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     now_ns: u64,
 ) -> usize {
-    retry_pending_pptp_control_forgets(inbox, peer_worker_commands, now_ns);
+    // Deliver older teardown retries before replacement installs. The retry
+    // gate snapshots are separate, but this order makes a single drainer's
+    // accepted commands preserve the old-call -> replacement-call sequence.
+    retry_pending_pptp_control_forgets(
+        inbox,
+        sessions,
+        self_worker_commands,
+        peer_worker_commands,
+        now_ns,
+    );
+    retry_pending_pptp_call_installs(
+        inbox,
+        sessions,
+        self_worker_commands,
+        peer_worker_commands,
+        now_ns,
+    );
     let mut learned = 0;
     for seg in inbox.take_pending(now_ns) {
         let parsed = crate::session::pptp_control::parse_control_segment(&seg.payload);
@@ -1106,7 +1248,13 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox(
                     debug_log!("PPTP association refused on the local worker: {:?}", e);
                     continue;
                 }
-                broadcast_pptp_install(peer_worker_commands, call, control, seg.captured_ns);
+                let (accepted, unsent) =
+                    broadcast_pptp_install(peer_worker_commands, call, control, seg.captured_ns);
+                if accepted == peer_worker_commands.len() {
+                    inbox.complete_call_install_broadcast(call, control, seg.captured_ns);
+                } else {
+                    inbox.record_call_install(call, control, seg.captured_ns, unsent);
+                }
                 learned += 1;
             }
             crate::session::pptp_control::ControlParse::CallDisconnect { call_id } => {
@@ -1116,13 +1264,29 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox(
                     control,
                     disconnected_ns: seg.captured_ns,
                 };
-                // Broadcast even when local state is absent: another worker
-                // may still have the association, or may be the only one
-                // whose queue can accept this notification.
-                let _ = sessions
-                    .pptp_mut()
-                    .forget_call_disconnected_by(disconnect);
-                let unsent = broadcast_pptp_call_forget(peer_worker_commands, disconnect);
+                // Serialize this worker's own time-fenced forget with its
+                // queued installs. Applying it directly while an earlier
+                // install is queued would let that install resurrect the call.
+                let self_worker_queue_id =
+                    self_worker_commands.map(|queue| Arc::as_ptr(queue) as usize);
+                let mut unsent_self = Vec::new();
+                if let Some(queue) = self_worker_commands {
+                    let queue_id = self_worker_queue_id.expect("queue id");
+                    let mut pending = lock_recover(queue);
+                    if pending.is_empty() {
+                        let _ = sessions.pptp_mut().forget_call_disconnected_by(disconnect);
+                    } else if !push_bounded(
+                        &mut pending,
+                        WorkerCommand::ForgetPptpCallByControl(disconnect),
+                    ) {
+                        unsent_self.push(queue_id);
+                    }
+                } else {
+                    let _ = sessions.pptp_mut().forget_call_disconnected_by(disconnect);
+                }
+                inbox.forget_call_installs_for_disconnect(disconnect);
+                let mut unsent = broadcast_pptp_call_forget(peer_worker_commands, disconnect);
+                unsent.extend(unsent_self);
                 inbox.record_call_forget(disconnect, unsent);
             }
             crate::session::pptp_control::ControlParse::Ignored
@@ -1211,7 +1375,7 @@ mod pptp_broadcast_tests_7699 {
     #[test]
     fn an_install_reaches_every_worker_7699() {
         let qs = queues(4);
-        assert_eq!(broadcast_pptp_install(&qs, a_call(), a_ctl(), 0), 4);
+        assert_eq!(broadcast_pptp_install(&qs, a_call(), a_ctl(), 0).0, 4);
         for (i, q) in qs.iter().enumerate() {
             let pending = q.lock().expect("queue");
             assert_eq!(pending.len(), 1, "worker {i} did not receive the install");
@@ -1250,14 +1414,541 @@ mod pptp_broadcast_tests_7699 {
                 full.push_back(WorkerCommand::VacateAllSharedExactSlots);
             }
         }
+        let (accepted, unsent) = broadcast_pptp_install(&qs, a_call(), a_ctl(), 0);
         assert_eq!(
-            broadcast_pptp_install(&qs, a_call(), a_ctl(), 0),
+            accepted,
             1,
             "a broadcast that reached only one of two workers must report 1; \
              reporting 2 would let a caller treat a half-delivered association \
              as installed"
         );
+        assert_eq!(unsent, vec![Arc::as_ptr(&qs[1]) as usize]);
     }
+
+    /// A refused recipient must learn through its own peer-excluding drain.
+    ///
+    /// Worker Q's queue refused X's broadcast. Q's peer list contains only X,
+    /// so the retry must apply to Q's own session table rather than consume the
+    /// shared gate and skip Q's identity.
+    #[test]
+    fn a_refused_worker_applies_its_install_retry_to_its_own_table_12133() {
+        use crate::session::pptp_control::{
+            PendingControlSegment, PptpControlInbox,
+            fixtures_7699::outgoing_call_reply,
+        };
+
+        let pac: std::net::IpAddr = "198.51.100.7".parse().unwrap();
+        let pns: std::net::IpAddr = "203.0.113.9".parse().unwrap();
+        let queues = queues(2);
+        {
+            let mut full = queues[0].lock().expect("Q queue");
+            for _ in 0..MAX_PENDING_WORKER_COMMANDS {
+                full.push_back(WorkerCommand::VacateAllSharedExactSlots);
+            }
+        }
+
+        let inbox = PptpControlInbox::default();
+        let mut x_sessions = crate::session::SessionTable::new();
+        let mut q_sessions = crate::session::SessionTable::new();
+        assert!(inbox.push(PendingControlSegment {
+            src: pac,
+            dst: pns,
+            src_port: 1723,
+            dst_port: 49152,
+            captured_ns: 10,
+            payload: outgoing_call_reply(0x1111, 0x2222, 1),
+        }));
+        // X's peer list contains Q, but excludes X itself.
+        assert_eq!(
+            drain_pptp_control_inbox_for_worker(
+                &inbox,
+                &mut x_sessions,
+                Some(&queues[1]),
+                std::slice::from_ref(&queues[0]),
+                1_000_000_000,
+            ),
+            1
+        );
+        let handle = PptpCall::new(pac, 0x1111, pns, 0x2222).handle();
+        assert_eq!(x_sessions.pptp().resolve(pac, 0x1111), Some(handle));
+        assert!(
+            !queues[0]
+                .lock()
+                .expect("Q queue")
+                .iter()
+                .any(|command| matches!(command, WorkerCommand::InstallPptpCall { .. })),
+            "the full Q queue must have refused X's first broadcast"
+        );
+
+        drain_queue_bounded(&queues[0]);
+        // Q's peer list contains X, but excludes Q. Q is first through the
+        // retry gate, so its own table must receive the refused record.
+        assert_eq!(
+            drain_pptp_control_inbox_for_worker(
+                &inbox,
+                &mut q_sessions,
+                Some(&queues[0]),
+                std::slice::from_ref(&queues[1]),
+                2_000_000_000,
+            ),
+            0,
+            "a retry must not count as a second local learn"
+        );
+        assert_eq!(
+            q_sessions.pptp().resolve(pac, 0x1111),
+            Some(handle),
+            "Q skipped its own refused queue after consuming the shared retry gate"
+        );
+        assert_eq!(q_sessions.pptp().resolve(pns, 0x2222), Some(handle));
+    }
+
+    /// A real CDN frees the colliding alias, after a peer-present broadcast
+    /// left the replacement retry pending for Q.
+    #[test]
+    fn own_retry_retains_allocator_collision_until_cdn_frees_alias_12133() {
+        use crate::session::pptp::{ControlChannelId, PptpCall};
+        use crate::session::pptp_control::{
+            PendingControlSegment, PptpControlInbox,
+            fixtures_7699::{call_disconnect_notify, outgoing_call_reply},
+        };
+
+        let (pac, pns): (std::net::IpAddr, std::net::IpAddr) = (
+            "198.51.100.7".parse().unwrap(),
+            "203.0.113.9".parse().unwrap(),
+        );
+        let control = ControlChannelId::new(pac, 1723, pns, 49152);
+        let old_call = PptpCall::new(pac, 0x1111, pns, 0x2222);
+        let replacement = PptpCall::new(pac, 0x1111, pns, 0x3333);
+        let queues = queues(2);
+        let mut q_sessions = crate::session::SessionTable::new();
+        let mut x_sessions = crate::session::SessionTable::new();
+        q_sessions
+            .pptp_mut()
+            .install(old_call, control, 10)
+            .expect("old Q association");
+        {
+            let mut full = queues[0].lock().expect("Q queue");
+            for _ in 0..MAX_PENDING_WORKER_COMMANDS {
+                full.push_back(WorkerCommand::VacateAllSharedExactSlots);
+            }
+        }
+        let inbox = PptpControlInbox::default();
+        assert!(inbox.push(PendingControlSegment {
+            src: pac,
+            dst: pns,
+            src_port: 1723,
+            dst_port: 49152,
+            captured_ns: 30,
+            payload: outgoing_call_reply(0x1111, 0x3333, 1),
+        }));
+
+        // X learns the reply and its real broadcast is refused by Q's full
+        // queue. Q retains the older association, so a direct retry collides.
+        assert_eq!(
+            drain_pptp_control_inbox_for_worker(
+                &inbox,
+                &mut x_sessions,
+                Some(&queues[1]),
+                std::slice::from_ref(&queues[0]),
+                1_000_000_000,
+            ),
+            1
+        );
+        assert_eq!(
+            x_sessions.pptp().resolve(pac, 0x1111),
+            Some(replacement.handle())
+        );
+        assert_eq!(
+            q_sessions.pptp().resolve(pac, 0x1111),
+            Some(old_call.handle())
+        );
+        queues[0].lock().expect("Q queue").clear();
+        drain_pptp_control_inbox_for_worker(
+            &inbox,
+            &mut q_sessions,
+            Some(&queues[0]),
+            std::slice::from_ref(&queues[1]),
+            2_000_000_000,
+        );
+        assert_eq!(
+            q_sessions.pptp().resolve(pac, 0x1111),
+            Some(old_call.handle())
+        );
+
+        // The real disconnect timestamp predates the replacement reply. It
+        // frees only the old association and does not cancel the newer retry.
+        assert!(inbox.push(PendingControlSegment {
+            src: pac,
+            dst: pns,
+            src_port: 1723,
+            dst_port: 49152,
+            captured_ns: 20,
+            payload: call_disconnect_notify(0x1111),
+        }));
+        drain_pptp_control_inbox_for_worker(
+            &inbox,
+            &mut q_sessions,
+            Some(&queues[0]),
+            std::slice::from_ref(&queues[1]),
+            3_000_000_000,
+        );
+        assert_eq!(q_sessions.pptp().resolve(pac, 0x1111), None);
+        drain_pptp_control_inbox_for_worker(
+            &inbox,
+            &mut q_sessions,
+            Some(&queues[0]),
+            std::slice::from_ref(&queues[1]),
+            4_000_000_000,
+        );
+        assert_eq!(
+            q_sessions.pptp().resolve(pac, 0x1111),
+            Some(replacement.handle()),
+            "the collision retry must survive until the real CDN frees the alias"
+        );
+
+        let forwarding = crate::afxdp::ForwardingState::default();
+        let dynamic_neighbors = Arc::new(crate::afxdp::ShardedNeighborMap::new());
+        let mut scratch = VecDeque::new();
+        let result = crate::afxdp::session_glue::apply_worker_commands(
+            &queues[1],
+            &mut x_sessions,
+            crate::afxdp::SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &forwarding,
+            &std::collections::BTreeMap::new(),
+            &dynamic_neighbors,
+            0,
+            &mut scratch,
+        );
+        assert!(!result.commands_backlogged);
+        assert_eq!(
+            x_sessions.pptp().resolve(pac, 0x1111),
+            Some(replacement.handle()),
+            "the older CDN must not remove a later association on the peer"
+        );
+        assert!(
+            inbox.take_call_install_retries(5_000_000_000).is_empty(),
+            "a successful own-table install acknowledges Q"
+        );
+    }
+
+    fn drain_queue_bounded(queue: &Arc<Mutex<VecDeque<WorkerCommand>>>) {
+        let mut scratch = VecDeque::new();
+        for _ in 0..MAX_PENDING_WORKER_COMMANDS.div_ceil(WORKER_COMMAND_DRAIN_BUDGET) {
+            let backlogged = {
+                let mut pending = lock_recover(queue);
+                drain_bounded_into(&mut pending, &mut scratch)
+            };
+            scratch.clear();
+            if !backlogged {
+                break;
+            }
+        }
+        assert!(queue.lock().expect("drained queue").is_empty());
+    }
+
+    /// A CDN cancels an outstanding install retry before the queue is cleared.
+    #[test]
+    fn a_cdn_cancels_a_pending_pptp_install_retry_12133() {
+        use crate::session::pptp_control::{
+            PendingControlSegment, PptpControlInbox,
+            fixtures_7699::{call_disconnect_notify, outgoing_call_reply},
+        };
+
+        let pac: std::net::IpAddr = "198.51.100.7".parse().unwrap();
+        let pns: std::net::IpAddr = "203.0.113.9".parse().unwrap();
+        let queues = queues(2);
+        {
+            let mut full = queues[1].lock().expect("queue");
+            for _ in 0..MAX_PENDING_WORKER_COMMANDS {
+                full.push_back(WorkerCommand::VacateAllSharedExactSlots);
+            }
+        }
+        let inbox = PptpControlInbox::default();
+        let mut local = crate::session::SessionTable::new();
+        assert!(inbox.push(PendingControlSegment {
+            src: pac,
+            dst: pns,
+            src_port: 1723,
+            dst_port: 49152,
+            captured_ns: 10,
+            payload: outgoing_call_reply(0x1111, 0x2222, 1),
+        }));
+        assert_eq!(
+            drain_pptp_control_inbox(&inbox, &mut local, &queues, 1_000_000_000),
+            1
+        );
+
+        assert!(inbox.push(PendingControlSegment {
+            src: pac,
+            dst: pns,
+            src_port: 1723,
+            dst_port: 49152,
+            captured_ns: 20,
+            payload: call_disconnect_notify(0x1111),
+        }));
+        assert_eq!(
+            drain_pptp_control_inbox(&inbox, &mut local, &queues, 2_000_000_000),
+            0
+        );
+        assert_eq!(local.pptp().resolve(pac, 0x1111), None);
+
+        queues[1].lock().expect("queue").clear();
+        assert_eq!(
+            drain_pptp_control_inbox(&inbox, &mut local, &queues, 3_000_000_000),
+            0
+        );
+        let pending = queues[1].lock().expect("queue");
+        assert!(
+            pending.iter().any(|command| matches!(
+                command,
+                WorkerCommand::ForgetPptpCallByControl(disconnect)
+                    if disconnect.call_id == 0x1111
+            )),
+            "the refused CDN must still retry"
+        );
+        assert!(
+            !pending
+                .iter()
+                .any(|command| matches!(command, WorkerCommand::InstallPptpCall { .. })),
+            "a CDN must cancel a pending install, or the install retries after \
+             the teardown and resurrects the call"
+        );
+    }
+
+    /// A CDN for A must not cancel B's retry on the same control channel.
+    ///
+    /// The next interval is the #12133 path under test: after Q's bounded
+    /// queue drain, Q's self-excluding drainer must still learn B directly.
+    #[test]
+    fn a_cdn_cancels_only_its_call_and_the_next_call_still_retries_12133() {
+        use crate::session::pptp_control::{
+            PendingControlSegment, PptpControlInbox,
+            fixtures_7699::{call_disconnect_notify, outgoing_call_reply},
+        };
+
+        let pac: std::net::IpAddr = "198.51.100.7".parse().unwrap();
+        let pns: std::net::IpAddr = "203.0.113.9".parse().unwrap();
+        let queues = queues(2);
+        {
+            let mut full = queues[0].lock().expect("Q queue");
+            for _ in 0..MAX_PENDING_WORKER_COMMANDS {
+                full.push_back(WorkerCommand::VacateAllSharedExactSlots);
+            }
+        }
+        let inbox = PptpControlInbox::default();
+        let mut x_sessions = crate::session::SessionTable::new();
+        let mut q_sessions = crate::session::SessionTable::new();
+        for (captured_ns, call_id, peer_call_id) in [(10, 0x1111, 0x2222), (11, 0x3333, 0x4444)] {
+            assert!(inbox.push(PendingControlSegment {
+                src: pac,
+                dst: pns,
+                src_port: 1723,
+                dst_port: 49152,
+                captured_ns,
+                payload: outgoing_call_reply(call_id, peer_call_id, 1),
+            }));
+        }
+        // X's peer list contains Q only; both installs are refused there.
+        assert_eq!(
+            drain_pptp_control_inbox_for_worker(
+                &inbox,
+                &mut x_sessions,
+                Some(&queues[1]),
+                std::slice::from_ref(&queues[0]),
+                1_000_000_000,
+            ),
+            2
+        );
+        assert!(inbox.push(PendingControlSegment {
+            src: pac,
+            dst: pns,
+            src_port: 1723,
+            dst_port: 49152,
+            captured_ns: 20,
+            payload: call_disconnect_notify(0x1111),
+        }));
+        assert_eq!(
+            drain_pptp_control_inbox_for_worker(
+                &inbox,
+                &mut x_sessions,
+                Some(&queues[1]),
+                std::slice::from_ref(&queues[0]),
+                2_000_000_000,
+            ),
+            0
+        );
+        assert_eq!(x_sessions.pptp().resolve(pac, 0x1111), None);
+        assert_eq!(
+            x_sessions.pptp().resolve(pac, 0x3333),
+            Some(PptpCall::new(pac, 0x3333, pns, 0x4444).handle())
+        );
+
+        drain_queue_bounded(&queues[0]);
+        assert_eq!(
+            drain_pptp_control_inbox_for_worker(
+                &inbox,
+                &mut q_sessions,
+                Some(&queues[0]),
+                std::slice::from_ref(&queues[1]),
+                3_000_000_000,
+            ),
+            0,
+            "retrying B is not a second local learn"
+        );
+        assert_eq!(
+            q_sessions.pptp().resolve(pac, 0x1111),
+            None,
+            "the CDN-named call A must not be retried"
+        );
+        let b_handle = PptpCall::new(pac, 0x3333, pns, 0x4444).handle();
+        assert_eq!(
+            q_sessions.pptp().resolve(pac, 0x3333),
+            Some(b_handle),
+            "the CDN for A canceled B's retry, restoring #12133 for B"
+        );
+        assert_eq!(q_sessions.pptp().resolve(pns, 0x4444), Some(b_handle));
+    }
+
+    /// Closing the control channel cancels retries learned on that channel.
+    #[test]
+    fn closing_a_control_channel_cancels_a_pending_pptp_install_retry_12133() {
+        use crate::session::pptp_control::{
+            PendingControlSegment, PptpControlInbox, fixtures_7699::outgoing_call_reply,
+        };
+
+        let pac: std::net::IpAddr = "198.51.100.7".parse().unwrap();
+        let pns: std::net::IpAddr = "203.0.113.9".parse().unwrap();
+        let queues = queues(2);
+        {
+            let mut full = queues[1].lock().expect("queue");
+            for _ in 0..MAX_PENDING_WORKER_COMMANDS {
+                full.push_back(WorkerCommand::VacateAllSharedExactSlots);
+            }
+        }
+        let inbox = PptpControlInbox::default();
+        let mut local = crate::session::SessionTable::new();
+        assert!(inbox.push(PendingControlSegment {
+            src: pac,
+            dst: pns,
+            src_port: 1723,
+            dst_port: 49152,
+            captured_ns: 10,
+            payload: outgoing_call_reply(0x1111, 0x2222, 1),
+        }));
+        assert_eq!(
+            drain_pptp_control_inbox(&inbox, &mut local, &queues, 1_000_000_000),
+            1
+        );
+
+        let control_key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: libc::IPPROTO_TCP as u8,
+            src_ip: pac,
+            dst_ip: pns,
+            src_port: 1723,
+            dst_port: 49152,
+            discriminator: crate::session::TunnelDiscriminator::None,
+            routing_domain: 0,
+        };
+        let (forgotten, _) = crate::afxdp::poll_descriptor::forget_pptp_control_channel(
+            &mut local,
+            &inbox,
+            None,
+            &queues,
+            &control_key,
+            20,
+        );
+        assert_eq!(forgotten, 1);
+        assert_eq!(local.pptp().resolve(pac, 0x1111), None);
+
+        queues[1].lock().expect("queue").clear();
+        assert_eq!(
+            drain_pptp_control_inbox(&inbox, &mut local, &queues, 2_000_000_000),
+            0
+        );
+        let pending = queues[1].lock().expect("queue");
+        assert!(
+            pending.iter().any(|command| matches!(
+                command,
+                WorkerCommand::ForgetPptpControlChannel { closed_ns: 20, .. }
+            )),
+            "the channel close must still reach the late worker"
+        );
+        assert!(
+            !pending
+                .iter()
+                .any(|command| matches!(command, WorkerCommand::InstallPptpCall { .. })),
+            "a channel close must cancel pending installs, or one retries after \
+             the teardown and resurrects a call"
+        );
+    }
+
+    /// A complete later broadcast supersedes an older refused install retry.
+    #[test]
+    fn a_complete_rebroadcast_clears_the_older_install_retry_12133() {
+        use crate::session::pptp_control::{
+            PendingControlSegment, PptpControlInbox, fixtures_7699::outgoing_call_reply,
+        };
+
+        let pac: std::net::IpAddr = "198.51.100.7".parse().unwrap();
+        let pns: std::net::IpAddr = "203.0.113.9".parse().unwrap();
+        let queues = queues(2);
+        {
+            let mut full = queues[1].lock().expect("refused queue");
+            for _ in 0..MAX_PENDING_WORKER_COMMANDS {
+                full.push_back(WorkerCommand::VacateAllSharedExactSlots);
+            }
+        }
+        let inbox = PptpControlInbox::default();
+        let mut local = crate::session::SessionTable::new();
+        assert!(inbox.push(PendingControlSegment {
+            src: pac,
+            dst: pns,
+            src_port: 1723,
+            dst_port: 49152,
+            captured_ns: 10,
+            payload: outgoing_call_reply(0x1111, 0x2222, 1),
+        }));
+        assert_eq!(
+            drain_pptp_control_inbox(&inbox, &mut local, &queues, 1_000_000_000),
+            1
+        );
+
+        // Keep the old retry alive and advance only its gate while Q remains
+        // full. A new reply can then be parsed before another retry snapshot.
+        retry_pending_pptp_call_installs(&inbox, &mut local, None, &queues, 2_000_000_000);
+        queues[1].lock().expect("refused queue").clear();
+        assert!(inbox.push(PendingControlSegment {
+            src: pac,
+            dst: pns,
+            src_port: 1723,
+            dst_port: 49152,
+            captured_ns: 20,
+            payload: outgoing_call_reply(0x1111, 0x2222, 1),
+        }));
+        assert_eq!(
+            drain_pptp_control_inbox(&inbox, &mut local, &queues, 2_500_000_000),
+            1
+        );
+
+        retry_pending_pptp_call_installs(&inbox, &mut local, None, &queues, 3_000_000_000);
+        let pending = queues[1].lock().expect("previously refused queue");
+        let learned_ns: Vec<_> = pending
+            .iter()
+            .filter_map(|command| match command {
+                WorkerCommand::InstallPptpCall { learned_ns, .. } => Some(*learned_ns),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            learned_ns,
+            vec![20],
+            "the old refusal survived a complete re-broadcast and retried too"
+        );
+    }
+
 }
 #[cfg(test)]
 mod session_import_repair_debt_tests_11360 {
