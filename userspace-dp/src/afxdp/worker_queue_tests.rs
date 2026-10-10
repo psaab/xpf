@@ -299,7 +299,7 @@ fn worker_queue_6929_drops_are_not_folded_into_poison_recoveries() {
 // change what they exercise. `worker_queue.rs` is excluded because it contains
 // the one legitimate `push_back`, inside `push_bounded` itself.
 
-/// Blank out `//` line comments, `/* */` blocks and string-literal bodies.
+/// Blank out `//` line comments, nested `/* */` blocks and string-literal bodies.
 ///
 /// Comments are stripped so this guard cannot be satisfied by prose that
 /// merely quotes the pattern it forbids — the doc comment on `push_bounded`
@@ -323,11 +323,19 @@ pub(crate) fn blank_comments_and_strings(src: &str) -> String {
             }
         } else if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
             i += 2;
-            while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
-                keep_nl(&mut out, i);
-                i += 1;
+            let mut depth = 1;
+            while i < b.len() && depth > 0 {
+                if b[i..].starts_with(b"/*") {
+                    depth += 1;
+                    i += 2;
+                } else if b[i..].starts_with(b"*/") {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    keep_nl(&mut out, i);
+                    i += 1;
+                }
             }
-            i = (i + 2).min(b.len());
         } else if b[i] == b'r' && i + 1 < b.len() && (b[i + 1] == b'"' || b[i + 1] == b'#') {
             // Raw string: r"..", r#".."#, r##".."##
             let mut j = i + 1;
@@ -578,13 +586,13 @@ pub(crate) fn cfg_test_modules(root: &std::path::Path) -> std::collections::Hash
             .to_string()
     }
 
-    // Pass 1 collects every module declaration in the tree, remembering for each
-    // OWNING FILE which files it brings in and whether the bringing-in carried
-    // #[cfg(test)]. Pass 2 takes the transitive closure, because `#[cfg(test)]`
-    // is INHERITED: a plain `mod control_frames;` inside a file that is itself
-    // only compiled under test is equally test-only. Without the closure, 36
-    // files under directories like `event_stream/tests/` were still classified
-    // as production — the third defect this control caught.
+    // Pass 1 collects every module declaration and literal include! in the
+    // tree, remembering each source file's incoming test gate and included
+    // files. Pass 2 takes the transitive closure, because #[cfg(test)] is
+    // INHERITED: a plain mod or include! inside a file that is itself only
+    // compiled under test is equally test-only. Without the closure, 36 files
+    // under directories like event_stream/tests/ were still classified as
+    // production — the third defect this control caught.
     let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut edges: Vec<(String, String)> = Vec::new();
     let mut files = Vec::new();
@@ -606,7 +614,8 @@ pub(crate) fn cfg_test_modules(root: &std::path::Path) -> std::collections::Hash
 
         let mut cfg_test = false;
         let mut path_attr: Option<String> = None;
-        for line in text.lines() {
+        let code = blank_comments_and_strings(&text);
+        for (line, code_line) in text.lines().zip(code.lines()) {
             let t = line.trim();
             if t.starts_with("#[cfg(test)]") {
                 cfg_test = true;
@@ -617,6 +626,30 @@ pub(crate) fn cfg_test_modules(root: &std::path::Path) -> std::collections::Hash
                     path_attr = Some(rest[..end].to_string());
                 }
                 continue;
+            }
+            // include! source belongs to the file containing the macro,
+            // unlike a module resolved from the owning module directory.
+            // Record an edge so test-only parents classify included files too.
+            // Match only a complete macro name at the start of a code line.
+            // The blanked copy preserves byte offsets, so the path still comes
+            // from the original string literal, never comment/string contents.
+            let item = code_line.trim_start();
+            let item = item.strip_prefix("::").unwrap_or(item);
+            if let Some(rest) = item.strip_prefix("include!(") {
+                let offset = code_line.len() - rest.len();
+                let rest = line[offset..].trim_start();
+                if let Some(rest) = rest.strip_prefix('"') {
+                    if let Some(end) = rest.find('"') {
+                        if let Some(dir) = path.parent() {
+                            let from = normalise(&path, root);
+                            let target = normalise(&dir.join(&rest[..end]), root);
+                            if cfg_test {
+                                out.insert(target.clone());
+                            }
+                            edges.push((from, target));
+                        }
+                    }
+                }
             }
             // Visibility is stripped generically rather than by listing forms.
             // The first version matched only `mod ` and `pub mod `, and missed
@@ -702,6 +735,119 @@ pub(crate) fn cfg_test_modules(root: &std::path::Path) -> std::collections::Hash
         }
     }
     out
+}
+
+#[test]
+fn cfg_test_include_edges_ignore_non_code_text_12270() {
+    let temp = std::env::temp_dir().join(format!(
+        "xpf-include-edge-12270-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&temp);
+    std::fs::create_dir_all(&temp).unwrap();
+    let non_code = [
+        (
+            "trailing_line_comment",
+            r#"const VALUE: usize = 0; // include!("../prod.rs")"#,
+        ),
+        (
+            "raw_string",
+            r##"const DOC: &str = r#"include!("../prod.rs")"#;"##,
+        ),
+        ("block_comment", r#"/* include!("../prod.rs") */"#),
+        (
+            "multiline_block_comment",
+            "/* comment\n * include!(\"../prod.rs\");\n */",
+        ),
+        (
+            "nested_block_comment",
+            "/* outer /* inner */ include!(\"../prod.rs\") */",
+        ),
+        ("macro_name", r#"my_include!("../prod.rs");"#),
+        (
+            "cfg_test_raw_string",
+            "#[cfg(test)]\nconst DOC: &str = r#\"see include!(\"../prod.rs\")\"#;",
+        ),
+        ("doc_comment", r#"/// include!("../prod.rs")"#),
+        (
+            "escaped_normal_string",
+            r#"const DOC: &str = "escaped quote: \" include!(\"../prod.rs\")";"#,
+        ),
+        ("include_str", r#"include_str!("../prod.rs");"#),
+    ];
+
+    for (name, fixture) in non_code {
+        let root = temp.join(name);
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::create_dir_all(root.join("prod")).unwrap();
+        std::fs::write(
+            root.join("test_parent.rs"),
+            "#[cfg(test)]\n#[path = \"tests/fixture.rs\"]\nmod tests;\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("tests/fixture.rs"), fixture).unwrap();
+        std::fs::write(root.join("prod.rs"), "mod child;\n").unwrap();
+        std::fs::write(root.join("prod/child.rs"), "").unwrap();
+
+        let fixtures = cfg_test_modules(&root);
+        assert!(
+            fixtures.contains("tests/fixture.rs"),
+            "{name}: synthetic test parent was not recognized"
+        );
+        assert!(
+            !fixtures.contains("prod.rs"),
+            "{name}: non-code include text created an edge to prod.rs"
+        );
+        assert!(
+            !fixtures.contains("prod/child.rs"),
+            "{name}: a false include edge propagated through prod.rs modules"
+        );
+    }
+
+    let root = temp.join("positive_include_chain");
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::create_dir_all(root.join("nested")).unwrap();
+    std::fs::write(
+        root.join("test_parent.rs"),
+        "#[cfg(test)]\n#[path = \"tests/fixture.rs\"]\nmod tests;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests/fixture.rs"),
+        "::include!(\"../nested/first.rs\");\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("nested/first.rs"), "include!(\"../second.rs\");\n").unwrap();
+    std::fs::write(root.join("second.rs"), "").unwrap();
+    let fixtures = cfg_test_modules(&root);
+    assert!(fixtures.contains("nested/first.rs"), "literal include edge was missed");
+    assert!(
+        fixtures.contains("second.rs"),
+        "nested include! edge or its .. path was not followed"
+    );
+
+    let root = temp.join("cfg_include_resets_before_mod");
+    std::fs::create_dir_all(root.join("parent")).unwrap();
+    std::fs::write(
+        root.join("parent.rs"),
+        "#[cfg(test)]\ninclude!(\"included.rs\");\nmod after;\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("included.rs"), "").unwrap();
+    std::fs::write(root.join("parent/after.rs"), "").unwrap();
+    let fixtures = cfg_test_modules(&root);
+    assert!(fixtures.contains("included.rs"), "cfg(test) include edge was missed");
+    assert!(
+        !fixtures.contains("parent/after.rs"),
+        "include! parsing leaked cfg(test) to the following mod"
+    );
+
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    assert!(
+        cfg_test_modules(&src).contains("afxdp/icmp_ptb_primary_fallback_11437_tests.rs"),
+        "the real icmp_ptb_tests.rs:10 include! edge must remain classified"
+    );
+    let _ = std::fs::remove_dir_all(&temp);
 }
 
 
