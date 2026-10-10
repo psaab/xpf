@@ -1917,6 +1917,7 @@ pub(crate) fn worker_loop(
                 crate::afxdp::poll_descriptor::forget_pptp_control_channel(
                     &mut sessions,
                     &pptp_control,
+                    worker_commands_by_id.get(&worker_id),
                     &peer_worker_commands,
                     key,
                     loop_now_ns,

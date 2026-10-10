@@ -13293,13 +13293,12 @@ fn a_refused_pptp_install_reaches_the_worker_on_retry_12133() {
     assert_eq!(worker_two.pptp().resolve(pns, 0xBBBB), Some(handle));
 }
 
-/// Drive the Astra F1-FIFO schedule with the real worker-command drain.
+/// Drive the refused-both FIFO schedule with the real worker-command drain.
 ///
-/// Q has a 4095-command backlog when X publishes an older CDN and then a
-/// replacement call using the released PAC alias. The CDN is accepted in Q's
-/// final slot; the replacement install is refused. Q drains exactly one real
-/// 256-command prefix before its self-excluding retry pass, leaving the CDN
-/// behind 3839 older commands.
+/// Q has a full 4096-command backlog when X publishes an older CDN and then a
+/// replacement call using the released PAC alias. Both the CDN and replacement
+/// install are refused. Q drains exactly one real 256-command prefix before
+/// its retry pass, leaving 3840 older commands ahead of either retry.
 fn run_own_pptp_retry_behind_queued_cdn_12133(own_retry: bool) -> (Option<u32>, usize) {
     use crate::session::pptp::{ControlChannelId, PptpCall};
     use crate::session::pptp_control::{
@@ -13331,7 +13330,7 @@ fn run_own_pptp_retry_behind_queued_cdn_12133(own_retry: bool) -> (Option<u32>, 
         .expect("old X association");
     {
         let mut pending = queues[0].lock().expect("Q queue");
-        for _ in 0..4095 {
+        for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
             pending.push_back(WorkerCommand::VacateAllSharedExactSlots);
         }
     }
@@ -13368,11 +13367,12 @@ fn run_own_pptp_retry_behind_queued_cdn_12133(own_retry: bool) -> (Option<u32>, 
         let pending = queues[0].lock().expect("Q queue");
         assert_eq!(pending.len(), 4096);
         assert!(
-            matches!(
-                pending.back(),
-                Some(WorkerCommand::ForgetPptpCallByControl(_))
-            ),
-            "the CDN must occupy Q's last command slot"
+            !pending.iter().any(|command| matches!(
+                command,
+                WorkerCommand::ForgetPptpCallByControl(_)
+                    | WorkerCommand::InstallPptpCall { .. }
+            )),
+            "both the CDN and install must be refused by Q's full queue"
         );
     }
 
@@ -17796,4 +17796,410 @@ fn demote_owner_rgs_resolves_live_route_before_restamp_11373() {
     );
     assert_eq!(origin, SessionOrigin::SyncImport);
     assert_eq!(cancelled_keys, vec![key]);
+}
+
+/// F-A (#12133 follow-up): at a 4096 backlog BOTH the older CDN and the
+/// replacement install are refused by Q's full queue. The CDN lands in
+/// `pending_call_forgets`, the install in `pending_call_installs`. Whichever
+/// worker drains next, Q must still resolve the replacement once the backlog
+/// clears: the teardown retry must be delivered (in order) before the install
+/// retry, and Q must deliver its own pending CDN to itself.
+///
+/// mode 0 = Q drains next with a non-empty queue; mode 1 = Q drains next with
+/// an empty queue; mode 2 = peer X drains next.
+fn run_both_refused_pptp_retry_resolves_replacement_12133(
+    mode: u8,
+) -> (Option<u32>, Option<u32>, Option<u32>, usize, usize) {
+    use crate::session::pptp::{ControlChannelId, PptpCall};
+    use crate::session::pptp_control::{
+        PendingControlSegment, PptpControlInbox,
+        fixtures_7699::{call_disconnect_notify, outgoing_call_reply},
+    };
+
+    let (pac, pns): (IpAddr, IpAddr) = (
+        "198.51.100.7".parse().unwrap(),
+        "203.0.113.9".parse().unwrap(),
+    );
+    let control = ControlChannelId::new(pac, 1723, pns, 49152);
+    let old_call = PptpCall::new(pac, 0x1111, pns, 0x2222);
+    let queues: Vec<_> = (0..2)
+        .map(|_| Arc::new(Mutex::new(VecDeque::new())))
+        .collect();
+    let q_id = Arc::as_ptr(&queues[0]) as usize;
+    let mut q_sessions = SessionTable::new();
+    let mut x_sessions = SessionTable::new();
+    q_sessions
+        .pptp_mut()
+        .install(old_call, control, 10)
+        .expect("old Q association");
+    x_sessions
+        .pptp_mut()
+        .install(old_call, control, 10)
+        .expect("old X association");
+    {
+        let mut pending = queues[0].lock().expect("Q queue");
+        for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+            pending.push_back(WorkerCommand::VacateAllSharedExactSlots);
+        }
+    }
+
+    let inbox = PptpControlInbox::default();
+    assert!(inbox.push(PendingControlSegment {
+        src: pac,
+        dst: pns,
+        src_port: 1723,
+        dst_port: 49152,
+        captured_ns: 20,
+        payload: call_disconnect_notify(0x1111),
+    }));
+    assert!(inbox.push(PendingControlSegment {
+        src: pac,
+        dst: pns,
+        src_port: 1723,
+        dst_port: 49152,
+        captured_ns: 30,
+        payload: outgoing_call_reply(0x1111, 0x3333, 1),
+    }));
+    assert_eq!(
+        crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
+            &inbox,
+            &mut x_sessions,
+            Some(&queues[1]),
+            std::slice::from_ref(&queues[0]),
+            1_000_000_000,
+        ),
+        1
+    );
+    {
+        let pending = queues[0].lock().expect("Q queue");
+        assert_eq!(
+            pending.len(),
+            crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS,
+            "fixture: full Q refuses both the CDN and the install"
+        );
+        assert!(
+            !pending.iter().any(|command| matches!(
+                command,
+                WorkerCommand::ForgetPptpCallByControl(_)
+                    | WorkerCommand::InstallPptpCall { .. }
+            )),
+            "fixture: neither the CDN nor the install reached Q's queue"
+        );
+    }
+
+    let session_map = SteeringMap::unshared_for_test(-1);
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut scratch = VecDeque::new();
+    let mut apply_queue = |queue: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+                           sessions: &mut SessionTable| {
+        apply_worker_commands(
+            queue,
+            sessions,
+            session_map,
+            -1,
+            -1,
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            0,
+            &mut scratch,
+        )
+    };
+    let drain_q = |sessions: &mut SessionTable, now_ns: u64| {
+        crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
+            &inbox,
+            sessions,
+            Some(&queues[0]),
+            std::slice::from_ref(&queues[1]),
+            now_ns,
+        )
+    };
+    let drain_x = |sessions: &mut SessionTable, now_ns: u64| {
+        crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
+            &inbox,
+            sessions,
+            Some(&queues[1]),
+            std::slice::from_ref(&queues[0]),
+            now_ns,
+        )
+    };
+
+    if mode == 1 {
+        // Q clears the whole backlog before the retry interval: the own-empty
+        // (direct) path.
+        loop {
+            let result = apply_queue(&queues[0], &mut q_sessions);
+            if !result.commands_backlogged {
+                break;
+            }
+        }
+        assert!(queues[0].lock().expect("Q queue").is_empty());
+    } else {
+        // One production-equivalent 256-command prefix; Q stays non-empty.
+        let result = apply_queue(&queues[0], &mut q_sessions);
+        assert!(result.commands_backlogged);
+        assert_eq!(
+            queues[0].lock().expect("Q queue").len(),
+            crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS - 256
+        );
+    }
+    if mode == 2 {
+        drain_x(&mut x_sessions, 2_000_000_000);
+    } else {
+        drain_q(&mut q_sessions, 2_000_000_000);
+    }
+    for secs in [3u64, 4, 5, 6, 7, 8] {
+        if secs % 2 == 1 {
+            drain_x(&mut x_sessions, secs * 1_000_000_000);
+        } else {
+            drain_q(&mut q_sessions, secs * 1_000_000_000);
+        }
+        loop {
+            let result = apply_queue(&queues[0], &mut q_sessions);
+            if !result.commands_backlogged {
+                break;
+            }
+        }
+        loop {
+            let result = apply_queue(&queues[1], &mut x_sessions);
+            if !result.commands_backlogged {
+                break;
+            }
+        }
+    }
+    assert!(queues[0].lock().expect("Q queue").is_empty());
+
+    let pending_installs = inbox
+        .take_call_install_retries(100_000_000_000)
+        .iter()
+        .filter(|retry| retry.unsent_queue_ids.contains(&q_id))
+        .count();
+    let pending_cdns = inbox
+        .take_call_forget_retries(100_000_000_000)
+        .iter()
+        .filter(|retry| retry.unsent_queue_ids.contains(&q_id))
+        .count();
+    (
+        q_sessions.pptp().resolve(pac, 0x1111),
+        q_sessions.pptp().resolve(pns, 0x3333),
+        x_sessions.pptp().resolve(pac, 0x1111),
+        pending_installs,
+        pending_cdns,
+    )
+}
+
+#[test]
+fn both_refused_pptp_retry_resolves_replacement_own_nonempty_12133() {
+    let (q_pac, q_pns, x_pac, pending_installs, pending_cdns) =
+        run_both_refused_pptp_retry_resolves_replacement_12133(0);
+    eprintln!(
+        "F-A: mode=own-nonempty Q(pac,0x1111)={q_pac:?} Q(pns,0x3333)={q_pns:?} \
+         X(pac,0x1111)={x_pac:?} pending_installs={pending_installs} \
+         pending_cdns={pending_cdns}"
+    );
+    assert_eq!(q_pac, Some(1907514186));
+    assert_eq!(q_pns, Some(1907514186));
+    assert_eq!(pending_installs, 0);
+    assert_eq!(pending_cdns, 0);
+}
+
+#[test]
+fn both_refused_pptp_retry_resolves_replacement_own_empty_12133() {
+    let (q_pac, q_pns, x_pac, pending_installs, pending_cdns) =
+        run_both_refused_pptp_retry_resolves_replacement_12133(1);
+    eprintln!(
+        "F-A: mode=own-empty Q(pac,0x1111)={q_pac:?} Q(pns,0x3333)={q_pns:?} \
+         X(pac,0x1111)={x_pac:?} pending_installs={pending_installs} \
+         pending_cdns={pending_cdns}"
+    );
+    assert_eq!(q_pac, Some(1907514186));
+    assert_eq!(q_pns, Some(1907514186));
+    assert_eq!(pending_installs, 0);
+    assert_eq!(pending_cdns, 0);
+}
+
+#[test]
+fn both_refused_pptp_retry_resolves_replacement_peer_12133() {
+    let (q_pac, q_pns, x_pac, pending_installs, pending_cdns) =
+        run_both_refused_pptp_retry_resolves_replacement_12133(2);
+    eprintln!(
+        "F-A: mode=peer Q(pac,0x1111)={q_pac:?} Q(pns,0x3333)={q_pns:?} \
+         X(pac,0x1111)={x_pac:?} pending_installs={pending_installs} \
+         pending_cdns={pending_cdns}"
+    );
+    assert_eq!(q_pac, Some(1907514186));
+    assert_eq!(q_pns, Some(1907514186));
+    assert_eq!(pending_installs, 0);
+    assert_eq!(pending_cdns, 0);
+}
+
+/// F-B (#12133 follow-up): Q's own install retry for a call is queued behind
+/// a backlog, and a CDN for the SAME call arrives in the same drain pass. The
+/// teardown must order with the queued install (not bypass it): after both
+/// land, the torn-down association must stay gone on every worker.
+fn run_same_pass_cdn_does_not_resurrect_queued_install_12133(
+    backlog: usize,
+) -> (Option<u32>, Option<u32>, usize) {
+    use crate::session::pptp::PptpCall;
+    use crate::session::pptp_control::{
+        PendingControlSegment, PptpControlInbox,
+        fixtures_7699::{call_disconnect_notify, outgoing_call_reply},
+    };
+
+    let (pac, pns): (IpAddr, IpAddr) = (
+        "198.51.100.7".parse().unwrap(),
+        "203.0.113.9".parse().unwrap(),
+    );
+    let new_handle = PptpCall::new(pac, 0x1111, pns, 0x3333).handle();
+    let queues: Vec<_> = (0..2)
+        .map(|_| Arc::new(Mutex::new(VecDeque::new())))
+        .collect();
+    let q_id = Arc::as_ptr(&queues[0]) as usize;
+    let mut q_sessions = SessionTable::new();
+    let mut x_sessions = SessionTable::new();
+    {
+        let mut pending = queues[0].lock().expect("Q queue");
+        for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+            pending.push_back(WorkerCommand::VacateAllSharedExactSlots);
+        }
+    }
+    let inbox = PptpControlInbox::default();
+    assert!(inbox.push(PendingControlSegment {
+        src: pac,
+        dst: pns,
+        src_port: 1723,
+        dst_port: 49152,
+        captured_ns: 30,
+        payload: outgoing_call_reply(0x1111, 0x3333, 1),
+    }));
+    assert_eq!(
+        crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
+            &inbox,
+            &mut x_sessions,
+            Some(&queues[1]),
+            std::slice::from_ref(&queues[0]),
+            1_000_000_000,
+        ),
+        1
+    );
+    assert_eq!(x_sessions.pptp().resolve(pac, 0x1111), Some(new_handle));
+    assert!(
+        !queues[0]
+            .lock()
+            .expect("Q queue")
+            .iter()
+            .any(|command| matches!(command, WorkerCommand::InstallPptpCall { .. })),
+        "fixture: full Q must have refused the install"
+    );
+
+    let session_map = SteeringMap::unshared_for_test(-1);
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut scratch = VecDeque::new();
+    let mut apply_queue = |queue: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+                           sessions: &mut SessionTable| {
+        apply_worker_commands(
+            queue,
+            sessions,
+            session_map,
+            -1,
+            -1,
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            0,
+            &mut scratch,
+        )
+    };
+    loop {
+        let result = apply_queue(&queues[0], &mut q_sessions);
+        if !result.commands_backlogged {
+            break;
+        }
+    }
+    assert!(queues[0].lock().expect("Q queue").is_empty());
+    {
+        let mut pending = queues[0].lock().expect("Q queue");
+        for _ in 0..backlog {
+            pending.push_back(WorkerCommand::VacateAllSharedExactSlots);
+        }
+    }
+    assert!(inbox.push(PendingControlSegment {
+        src: pac,
+        dst: pns,
+        src_port: 1723,
+        dst_port: 49152,
+        captured_ns: 1_500_000_000,
+        payload: call_disconnect_notify(0x1111),
+    }));
+    crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
+        &inbox,
+        &mut q_sessions,
+        Some(&queues[0]),
+        std::slice::from_ref(&queues[1]),
+        2_000_000_000,
+    );
+    for secs in [3u64, 4, 5, 6] {
+        if secs % 2 == 1 {
+            crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
+                &inbox,
+                &mut x_sessions,
+                Some(&queues[1]),
+                std::slice::from_ref(&queues[0]),
+                secs * 1_000_000_000,
+            );
+        } else {
+            crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
+                &inbox,
+                &mut q_sessions,
+                Some(&queues[0]),
+                std::slice::from_ref(&queues[1]),
+                secs * 1_000_000_000,
+            );
+        }
+        loop {
+            let result = apply_queue(&queues[0], &mut q_sessions);
+            if !result.commands_backlogged {
+                break;
+            }
+        }
+        loop {
+            let result = apply_queue(&queues[1], &mut x_sessions);
+            if !result.commands_backlogged {
+                break;
+            }
+        }
+    }
+    let pending_installs = inbox
+        .take_call_install_retries(100_000_000_000)
+        .iter()
+        .filter(|retry| retry.unsent_queue_ids.contains(&q_id))
+        .count();
+    (
+        q_sessions.pptp().resolve(pac, 0x1111),
+        x_sessions.pptp().resolve(pac, 0x1111),
+        pending_installs,
+    )
+}
+
+#[test]
+fn same_pass_cdn_does_not_resurrect_queued_install_12133() {
+    let mut observed = Vec::new();
+    for backlog in [0usize, 1, 300] {
+        let result = run_same_pass_cdn_does_not_resurrect_queued_install_12133(backlog);
+        eprintln!(
+            "F-B: backlog={backlog} Q(pac,0x1111)={:?} \
+             X(pac,0x1111)={:?} pending_installs_for_Q={}",
+            result.0, result.1, result.2
+        );
+        observed.push((backlog, result));
+    }
+    for (backlog, (q_res, x_res, pending)) in observed {
+        assert_eq!(q_res, None, "backlog={backlog}: torn-down call resurrected on Q");
+        assert_eq!(x_res, None, "backlog={backlog}: X must also forget the call");
+        assert_eq!(pending, 0, "backlog={backlog}: retry must not linger");
+    }
 }

@@ -102,18 +102,18 @@ struct InboxInner {
     /// this one means the drain could not keep up, the other means the data
     /// simply arrived first.
     dropped: u64,
-    /// Control closes refused by a full peer queue, retried by periodic drain.
+    /// Control closes refused by full worker queues, retried by periodic drain.
     pending_forgets: Vec<PendingChannelForget>,
     last_forget_retry_ns: u64,
-    /// Per-call CDN commands refused by full peer queues.
+    /// Per-call CDN commands refused by full worker queues.
     pending_call_forgets: Vec<PendingCallForget>,
     last_call_forget_retry_ns: u64,
-    /// PPTP installs refused by a full peer queue.
+    /// PPTP installs refused by full worker queues.
     pending_call_installs: Vec<PendingCallInstall>,
     last_call_install_retry_ns: u64,
 }
 
-/// A control close still waiting for bounded peer-worker queues to accept it.
+/// A control close still waiting for a bounded worker queue or local table.
 #[derive(Clone, Debug)]
 pub(crate) struct PendingChannelForget {
     pub(crate) control: crate::session::pptp::ControlChannelId,
@@ -121,14 +121,14 @@ pub(crate) struct PendingChannelForget {
     pub(crate) unsent_queue_ids: Vec<usize>,
 }
 
-/// A CDN still waiting for bounded peer-worker queues to accept it.
+/// A CDN still waiting for a bounded worker queue or local table.
 #[derive(Clone, Debug)]
 pub(crate) struct PendingCallForget {
     pub(crate) disconnect: crate::session::pptp::PptpCallDisconnect,
     pub(crate) unsent_queue_ids: Vec<usize>,
 }
 
-/// A PPTP install still waiting for bounded peer-worker queues to accept it.
+/// A PPTP install still waiting for a bounded worker queue or local table.
 #[derive(Clone, Debug)]
 pub(crate) struct PendingCallInstall {
     pub(crate) call: crate::session::pptp::PptpCall,
@@ -429,7 +429,7 @@ impl PptpControlInbox {
         inner.pending_call_installs.clone()
     }
 
-    /// Acknowledge a close accepted by one peer queue.
+    /// Acknowledge a close delivered to its queue or applied to its local table.
     pub(crate) fn mark_channel_forget_sent(
         &self,
         control: crate::session::pptp::ControlChannelId,
@@ -448,7 +448,7 @@ impl PptpControlInbox {
         });
     }
 
-    /// Acknowledge a CDN accepted by one peer queue.
+    /// Acknowledge a CDN delivered to its queue or applied to its local table.
     pub(crate) fn mark_call_forget_sent(
         &self,
         disconnect: crate::session::pptp::PptpCallDisconnect,
@@ -466,7 +466,7 @@ impl PptpControlInbox {
         });
     }
 
-    /// Acknowledge an install accepted by one peer queue.
+    /// Acknowledge an install delivered to its queue or applied to its local table.
     pub(crate) fn mark_call_install_sent(
         &self,
         call: crate::session::pptp::PptpCall,
