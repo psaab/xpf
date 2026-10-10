@@ -1719,6 +1719,16 @@ host-inbound stanza; tolerant load keeps `any-service` so existing persisted
 configurations still boot, and warns once per affected stanza, naming each
 known exclusion (#12054).
 
+The runtime also unions a physical-interface override with that same
+interface's unit-level override (#3720). If one of those two contributing
+stanzas retains `any-service` and the other carries a known `except`, the
+exclusion cannot narrow the packet-wide admit: strict commit rejects it, while
+tolerant load retains the runtime union and warns with both scopes named
+(#12313). This rule applies only to the physical↔unit union. A zone-level
+stanza and an interface-level stanza are not unioned: under #6515, the
+interface stanza replaces the zone stanza, so a zone `any-service` does not
+make an interface-level `except` inert.
+
 **What upgrading takes away.** For every interface that declares a stanza, the
 lost set is the zone-level tokens the interface stanza does not repeat (after
 `all`-expansion). The services most likely to disappear are exactly the ones that
