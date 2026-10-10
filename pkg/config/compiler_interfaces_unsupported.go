@@ -22,7 +22,6 @@ import "fmt"
 //     node (programRethMAC, 02:bf:72:CC:RR:NN) and Junos treats the
 //     interface MAC as read-only, so a static override is both
 //     unimplemented and divergent.
-
 //   - #10293 / #12090: interface filter LISTS, uRPF, policer binds, unit-level
 //     `filter`, and `simple-filter` are not consumed by an InterfaceUnit hook.
 //     Only one-name `filter input|output` under family inet|inet6 is wired;
@@ -89,9 +88,8 @@ import "fmt"
 // Detection is scoped to the `interfaces` stanza so the firewall
 // `policer <name>` definition and chassis `device-map interface ... mac`
 // identity key (both legitimate uses of these keywords elsewhere) are
-// never touched. The #12090 scan below also rejects every interface-tree
-// `filter` / `simple-filter` spelling outside the supported family hook.
-
+// never touched. The #12090 scan below rejects `filter` / `simple-filter`
+// keyword heads outside the supported family hook, not same-spelled values.
 func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]string, error) {
 	// #5744: union across EVERY top-level `interfaces` root, not just the first.
 	// A hierarchical config can split its interfaces across two sibling
@@ -124,17 +122,19 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 	}
 	// #12090: the only supported filter keyword under interfaces is
 	// `unit <n> family inet|inet6 filter input|output <name>`, which has a
-	// typed InterfaceUnit hook. All other named or packed `filter` spellings,
-	// and all `simple-filter` spellings, have no reader under the open-world
-	// subtree.
+	// typed InterfaceUnit hook. This scan recognizes keyword positions, not
+	// arbitrary same-spelled values or authored filter names. All other
+	// `filter` heads and all `simple-filter` heads have no reader under the
+	// open-world subtree.
 	// Walk every interface subtree so another placement cannot silently
 	// expand the accepted population.
 	for _, iface := range ifaceChildren {
-		var walk func(*Node, []*Node) error
-		walk = func(n *Node, ancestors []*Node) error {
+		var walk func(*Node, []*Node, *schemaNode) error
+		walk = func(n *Node, ancestors []*Node, parentSchema *schemaNode) error {
 			if n == nil {
 				return nil
 			}
+			nodeSchema, identity := schemaNodeAndIdentity12090(parentSchema, n)
 			if keyword := n.Name(); keyword == "simple-filter" ||
 				(keyword == "filter" && !isInterfaceFilterConsumerPath12090(ancestors)) {
 				if err := emit(
@@ -144,39 +144,32 @@ func validateUnsupportedInterfaceStanzasAST(nodes []*Node, lenient bool) ([]stri
 					return err
 				}
 			}
-			// Flat-set paths can leave an unknown family token and its
-			// unsupported filter tail packed onto the family node (or onto
-			// an unknown AF leaf beneath it). Inspect only these family-level
-			// key tails; ordinary leaf values elsewhere are not keywords.
-			if n.Name() == "family" || (len(ancestors) > 0 &&
-				ancestors[len(ancestors)-1].Name() == "family" &&
-				len(ancestors[len(ancestors)-1].Keys) == 1) {
-				start := 1
-				if n.Name() == "family" {
-					start = 2 // skip `family` and its AF token
-				}
-				for i := start; i < len(n.Keys); i++ {
-					keyword := n.Keys[i]
-					if keyword != "filter" && keyword != "simple-filter" {
-						continue
-					}
+			// Compact spellings leave their first child keyword on the
+			// containing node's Keys. Inspect that head only: the remaining
+			// tail may contain authored values such as "description filter".
+			if head, rest, ok := packedHead12090(n, identity); ok &&
+				(head == "filter" || head == "simple-filter") {
+				consumer := head == "filter" &&
+					(isInterfaceFilterConsumerPath12090(ancestors) ||
+						isInterfacePackedFilterConsumer12090(ancestors, n))
+				if !consumer {
 					if err := emit(
 						"interfaces %s: `%s` is not supported (xpf has no consumer "+
 							"for this interface binding; remove it) (#12090)",
-						iface.Name(), packedFilterKeywordLabel12090(keyword, n.Keys[i+1:])); err != nil {
+						iface.Name(), packedFilterKeywordLabel12090(head, rest)); err != nil {
 						return err
 					}
 				}
 			}
 			next := append(ancestors, n)
 			for _, child := range n.Children {
-				if err := walk(child, next); err != nil {
+				if err := walk(child, next, nodeSchema); err != nil {
 					return err
 				}
 			}
 			return nil
 		}
-		if err := walk(iface, nil); err != nil {
+		if err := walk(iface, nil, schemaForPath("interfaces")); err != nil {
 			return nil, err
 		}
 	}
@@ -307,17 +300,53 @@ func validateMemberlessInterfaceRangeFilters12090(nodes []*Node, lenient bool) (
 					continue
 				}
 				for _, path := range rd.shared {
-					for i, keyword := range path {
-						if keyword != "filter" && keyword != "simple-filter" {
+					pathSchema := schemaForPath("interfaces", "x")
+					for i := 0; i < len(path); {
+						keyword := path[i]
+						if keyword == "filter" || keyword == "simple-filter" {
+							if keyword != "filter" || !isInterfaceFilterConsumerTokens12090(path, i) {
+								if err := emit(rd.name,
+									packedFilterKeywordLabel12090(keyword, path[i+1:])); err != nil {
+									return nil, err
+								}
+							}
+							i++
+							if i+1 < len(path) && isFilterDirection12090(path[i]) {
+								i += 2 // direction and authored filter name
+							}
 							continue
 						}
-						if keyword == "filter" && isInterfaceFilterConsumerTokens12090(path, i) {
+						// The Ethernet-switching VLAN list is open-world in
+						// this schema, but `members` owns the remaining values.
+						if keyword == "vlan" && i+1 < len(path) && path[i+1] == "members" {
+							break
+						}
+						child := schemaChildFor(pathSchema, keyword)
+						if child == nil {
+							if keyword == "family" && i+1 < len(path) {
+								i += 2 // compound family name is part of its identity
+								pathSchema = nil
+								continue
+							}
+							i++
+							pathSchema = nil
 							continue
 						}
-						if err := emit(rd.name,
-							packedFilterKeywordLabel12090(keyword, path[i+1:])); err != nil {
-							return nil, err
+						identity := 1 + child.args
+						if child.compoundKey && i+identity < len(path) {
+							family := path[i+identity]
+							identity++
+							if sub, ok := child.children[family]; ok {
+								child = sub
+							} else {
+								child = nil
+							}
 						}
+						if i+identity > len(path) {
+							break
+						}
+						i += identity
+						pathSchema = child
 					}
 				}
 			}
@@ -337,13 +366,65 @@ func isInterfaceFilterConsumerTokens12090(path []string, keyword int) bool {
 }
 
 // isInterfaceFilterConsumerPath12090 reports whether a `filter` keyword is
-// directly below the only interface path with a typed hook. The family node
-// carries its AF in Keys[1] in both flat-set and hierarchical parser shapes.
+// directly below the only interface path with a typed hook. The compiler
+// consumes both compound `family inet` and split `family { inet { ... } }`.
 func isInterfaceFilterConsumerPath12090(ancestors []*Node) bool {
+	if len(ancestors) == 3 && ancestors[1].Name() == "unit" &&
+		ancestors[2].Name() == "family" {
+		return isInetFamily(ancestors[2])
+	}
+	return len(ancestors) == 4 &&
+		ancestors[1].Name() == "unit" &&
+		ancestors[2].Name() == "family" &&
+		len(ancestors[2].Keys) == 1 &&
+		(ancestors[3].Name() == "inet" || ancestors[3].Name() == "inet6")
+}
+
+// schemaNodeAndIdentity12090 resolves a node's schema and the number of its
+// identity keys, including the second key of compound `family` nodes.
+func schemaNodeAndIdentity12090(parent *schemaNode, n *Node) (*schemaNode, int) {
+	identity := 1
+	if n == nil {
+		return nil, identity
+	}
+	nodeSchema := schemaChildFor(parent, n.Name())
+	if nodeSchema == nil {
+		if n.Name() == "family" && len(n.Keys) > 1 {
+			return nil, 2
+		}
+		return nil, identity
+	}
+	identity += nodeSchema.args
+	if nodeSchema.compoundKey && len(n.Keys) > identity {
+		family := n.Keys[identity]
+		identity++
+		if child, ok := nodeSchema.children[family]; ok {
+			nodeSchema = child
+		}
+	}
+	return nodeSchema, identity
+}
+
+func packedHead12090(n *Node, identity int) (head string, rest []string, ok bool) {
+	if n == nil || identity < 0 || identity >= len(n.Keys) {
+		return "", nil, false
+	}
+	return n.Keys[identity], n.Keys[identity+1:], true
+}
+
+func isInterfacePackedFilterConsumer12090(ancestors []*Node, n *Node) bool {
+	if n == nil {
+		return false
+	}
+	if len(ancestors) == 2 && ancestors[1].Name() == "unit" &&
+		n.Name() == "family" && isInetFamily(n) {
+		return true
+	}
 	return len(ancestors) == 3 &&
 		ancestors[1].Name() == "unit" &&
 		ancestors[2].Name() == "family" &&
-		isInetFamily(ancestors[2])
+		len(ancestors[2].Keys) == 1 &&
+		(n.Name() == "inet" || n.Name() == "inet6")
 }
 
 // filterKeywordLabel12090 names a filter keyword and direction without

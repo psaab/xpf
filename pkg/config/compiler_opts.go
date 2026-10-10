@@ -1847,20 +1847,14 @@ type compileOpts struct {
 	// operator-visible warning naming what was lost. Same doctrine as
 	// lenientZoneInterfacesNonEmpty.
 	lenientZoneInterfacePackedTail bool
-	// lenientHostInboundTokens (#3200) downgrades the host-inbound-traffic
-	// token gate (validateHostInboundTokensStrict) from a hard compile error
-	// to a cfg.Warnings entry. The strict commit / commit-check path
-	// hard-rejects a `host-inbound-traffic system-services`/`protocols` token
-	// that is not in the recognized SSOT (host_inbound_tokens.go) — such a
-	// typo committed cleanly and then enforced inconsistently across the
-	// nftables kernel mirror (fail OPEN for an all-unknown stanza) and the
-	// Rust AF_XDP classifier (fail CLOSED), a split-brain posture. The
-	// tolerant load / peer-sync paths downgrade to a warning so an already-
-	// persisted or peer-synced config carrying a stale token still BOOTS
-	// (#1960 no-brick) — both enforcement layers independently ignore the
-	// unknown token (Rust ignores it; nft now emits a catch-all drop for the
-	// zone so it too fails CLOSED), so a leniently-loaded bad config is inert
-	// and consistent. Same doctrine as lenientPolicyZoneRefs.
+	// lenientHostInboundTokens (#3200) downgrades only the unknown-token gate
+	// (validateHostInboundTokensStrict) from a hard compile error to a warning.
+	// The strict path rejects a system-services / protocols token outside the
+	// recognized SSOT (host_inbound_tokens.go), which could otherwise make the
+	// nftables kernel mirror and Rust AF_XDP classifier enforce inconsistently.
+	// Tolerant loads retain the historical behavior and warn about the unknown
+	// token; enforcement ignores it. The separate full-admit-except gate below
+	// has its own flag so neither diagnostic masks the other.
 	lenientHostInboundTokens bool
 	// lenientHostInboundFullAdmitExcept downgrades inert known `except`
 	// exclusions under `any-service` from a strict error to one warning per

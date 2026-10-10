@@ -2,8 +2,9 @@ package config
 
 import "fmt"
 
-// validateUnsupportedForwardingOptionsFiltersAST rejects every `filter` or
-// `simple-filter` keyword under forwarding-options. No forwarding-options
+// validateUnsupportedForwardingOptionsFiltersAST rejects unsupported
+// `filter`/`simple-filter` keyword heads under forwarding-options. DHCP relay
+// server-group names are instances, not filter keywords. No forwarding-options
 // filter hook has a compiler or dataplane consumer, and open-world schema
 // walking otherwise accepts and drops these nodes (#12090).
 func validateUnsupportedForwardingOptionsFiltersAST(nodes []*Node, lenient bool) ([]string, error) {
@@ -19,39 +20,29 @@ func validateUnsupportedForwardingOptionsFiltersAST(nodes []*Node, lenient bool)
 		return nil
 	}
 
-	var walk func(*Node) error
-	walk = func(n *Node) error {
+	var walk func(*Node, *schemaNode, []*Node) error
+	walk = func(n *Node, parentSchema *schemaNode, ancestors []*Node) error {
 		if n == nil {
 			return nil
 		}
-		if n.Name() == "filter" || n.Name() == "simple-filter" {
+		instanceName := isDHCPRelayInstanceName12090(n, ancestors)
+		if !instanceName && (n.Name() == "filter" || n.Name() == "simple-filter") {
 			if err := emit(filterKeywordLabel12090(n)); err != nil {
 				return err
 			}
 		}
-		if n.Name() == "family" {
-			// Flat-set and persisted trees may pack the filter tail either
-			// onto the family node itself or onto its AF child. AF tokens are
-			// open-ended; the unsupported keyword, not a family whitelist,
-			// determines whether this gate fires.
-			if len(n.Keys) >= 3 &&
-				(n.Keys[2] == "filter" || n.Keys[2] == "simple-filter") {
-				if err := emit(packedFilterKeywordLabel12090(n.Keys[2], n.Keys[3:])); err != nil {
-					return err
-				}
-			}
-			for _, af := range n.Children {
-				if af == nil || len(af.Keys) < 2 ||
-					(af.Keys[1] != "filter" && af.Keys[1] != "simple-filter") {
-					continue
-				}
-				if err := emit(packedFilterKeywordLabel12090(af.Keys[1], af.Keys[2:])); err != nil {
+		nodeSchema, identity := schemaNodeAndIdentity12090(parentSchema, n)
+		if !instanceName {
+			if head, rest, ok := packedHead12090(n, identity); ok &&
+				(head == "filter" || head == "simple-filter") {
+				if err := emit(packedFilterKeywordLabel12090(head, rest)); err != nil {
 					return err
 				}
 			}
 		}
+		next := append(ancestors, n)
 		for _, child := range n.Children {
-			if err := walk(child); err != nil {
+			if err := walk(child, nodeSchema, next); err != nil {
 				return err
 			}
 		}
@@ -61,11 +52,26 @@ func validateUnsupportedForwardingOptionsFiltersAST(nodes []*Node, lenient bool)
 		if node == nil || node.Name() != "forwarding-options" {
 			continue
 		}
-		for _, child := range node.Children {
-			if err := walk(child); err != nil {
-				return nil, err
-			}
+		if err := walk(node, setSchema, nil); err != nil {
+			return nil, err
 		}
 	}
 	return warnings, nil
+}
+
+func isDHCPRelayInstanceName12090(n *Node, ancestors []*Node) bool {
+	if n == nil || (n.Name() != "filter" && n.Name() != "simple-filter") ||
+		len(ancestors) < 3 {
+		return false
+	}
+	parent := ancestors[len(ancestors)-1]
+	if parent.Name() != "server-group" && parent.Name() != "group" {
+		return false
+	}
+	for i := len(ancestors) - 2; i >= 0; i-- {
+		if ancestors[i].Name() == "dhcp-relay" {
+			return true
+		}
+	}
+	return false
 }
