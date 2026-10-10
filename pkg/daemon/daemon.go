@@ -89,6 +89,12 @@ type Daemon struct {
 	opts  Options
 	store *configstore.Store
 
+	// feedHistoryMu fences history callbacks across zeroize: taking it waits
+	// for any active durable write, and feedHistoryFenced suppresses callbacks
+	// until a wipe failure reopens persistence for the still-live tenant.
+	feedHistoryMu     sync.Mutex
+	feedHistoryFenced bool
+
 	// pendingRenameApplies is keyed by the monotonic promoted active
 	// generation. A failed apply keeps its exact ancestry available for retry;
 	// a later promotion has a different key even if its text is identical.

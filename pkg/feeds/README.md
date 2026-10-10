@@ -42,6 +42,9 @@ High-water history survives same-name reconfiguration and removal/recreation,
 and the daemon durably stores each feed's count and hash in
 `/var/lib/xpf/feed-shrink-history.json`. A cold boot restores that epoch before
 starting producers, so its first successful bootstrap is audited against it.
+Factory reset erases this file after fencing and draining the daemon's
+in-flight persistence callback, so a re-tenanted device does not inherit a
+prior tenant's same-named feed baseline.
 
 Thresholds are runtime `feed-server` configuration, not build-time variables:
 

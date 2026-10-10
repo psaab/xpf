@@ -528,6 +528,15 @@ func TestFactoryResetMarksHandoffDirtyOnSweepFailure10769(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
 	isolateHandoffFlag(t)
+	oldHistoryPath := feedShrinkHistoryPath
+	feedShrinkHistoryPath = filepath.Join(t.TempDir(), "state", "feed-shrink-history.json")
+	t.Cleanup(func() { feedShrinkHistoryPath = oldHistoryPath })
+	if err := os.MkdirAll(filepath.Dir(feedShrinkHistoryPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(feedShrinkHistoryPath, []byte(`[{"name":"stable-feed","count":64,"hash":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	blocker := filepath.Join(t.TempDir(), "blocker")
 	if err := os.WriteFile(blocker, []byte("not a dir"), 0o600); err != nil {
 		t.Fatal(err)
@@ -537,7 +546,12 @@ func TestFactoryResetMarksHandoffDirtyOnSweepFailure10769(t *testing.T) {
 	stub := &resetHelperDP{}
 	d := &Daemon{store: store, applySem: semaphore.NewWeighted(1)}
 	d.setDataplane(stub)
-	if err := d.factoryReset(context.Background(), func() error { return nil }); err == nil {
+	d.ensureFeedManager()
+	t.Cleanup(d.feeds.StopAll)
+	d.persistFeedShrinkHistory(d.feeds)
+	if err := d.factoryReset(context.Background(), func() error {
+		return os.Remove(feedShrinkHistoryPath)
+	}); err == nil {
 		t.Fatal("sweep failure must fail the reset")
 	}
 	if _, dirty, _, present, _ := configstore.ReadResetHandoff(); !present || dirty == "" {
@@ -545,6 +559,10 @@ func TestFactoryResetMarksHandoffDirtyOnSweepFailure10769(t *testing.T) {
 	}
 	if stub.stops != 1 {
 		t.Fatal("helper stop precedes the sweep and must still have run")
+	}
+	d.persistFeedShrinkHistory(d.feeds)
+	if _, err := os.Stat(feedShrinkHistoryPath); !os.IsNotExist(err) {
+		t.Fatalf("a post-wipe verification failure must keep stale feed callbacks fenced: %v", err)
 	}
 }
 

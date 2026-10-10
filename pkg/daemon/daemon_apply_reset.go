@@ -429,6 +429,11 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 	}
 	defer d.applySem.Release(1)
 	d.enterResetGeneration()
+	// Feed refresh callbacks bypass applySem. Fence and drain their durable
+	// high-water writes before the wipe erases FeedShrinkHistoryPath; otherwise
+	// a completion from a still-running producer could recreate prior-tenant
+	// history after the seal-residue leg.
+	resumeFeedShrinkHistoryPersistence := d.fenceFeedShrinkHistoryPersistence()
 	// #5869: fence + drain the async config-archive writers BEFORE the wipe
 	// erases /var/lib/xpf/archive. Auto-archive launches a fire-and-forget
 	// configstore goroutine per commit that the #5281 reset generation does NOT
@@ -480,6 +485,13 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 			if restoreErr := d.restoreDHCPAfterFailedReset(); restoreErr != nil {
 				errs = append(errs, fmt.Errorf("restore DHCP after failed factory reset: %w", restoreErr))
 			}
+		}
+		// An incomplete wipe leaves the old tenant live, so its feed history
+		// writes resume. After a successful wipe, keep the fence even if later
+		// verification fails: the in-memory producers still describe the prior
+		// tenant and must not recreate the erased epoch.
+		if !wipeSucceeded {
+			resumeFeedShrinkHistoryPersistence()
 		}
 		if d.store != nil {
 			d.store.ResumeArchival()

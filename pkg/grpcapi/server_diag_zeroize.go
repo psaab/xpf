@@ -1681,7 +1681,9 @@ var performZeroizeWipe = func(configDir, configBase, archiveDir string) error {
 	}
 
 	// Factory-seal state that is safe to regenerate is removed before the other
-	// wipe legs.
+	// wipe legs. This includes the daemon-owned feed-shrink history; the daemon
+	// factory-reset transaction fences its asynchronous persistence callback
+	// before invoking this shared wipe.
 	sealErr := zeroizeImageSealResidue()
 
 	// Wipe every security-critical artifact outside the config root first. The

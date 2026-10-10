@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/feeds"
 	"github.com/psaab/xpf/pkg/fsatomic"
 )
@@ -19,7 +20,7 @@ import (
 // Keep guard epochs outside active config so same-name feeds retain their
 // review baseline across both config removal and daemon restart.
 var (
-	feedShrinkHistoryPath      = "/var/lib/xpf/feed-shrink-history.json"
+	feedShrinkHistoryPath      = configstore.FeedShrinkHistoryPath
 	feedShrinkHistoryWriteLock sync.Mutex
 )
 
@@ -38,7 +39,7 @@ func (d *Daemon) ensureFeedManager() {
 	manager := feeds.New(d.onFeedUpdate)
 	manager.RestoreShrinkHighWater(readFeedShrinkHistory())
 	manager.SetShrinkHighWaterChangedCallback(func() {
-		persistFeedShrinkHistory(manager)
+		d.persistFeedShrinkHistory(manager)
 	})
 	d.feeds = manager
 }
@@ -77,6 +78,29 @@ func persistFeedShrinkHistory(manager *feeds.Manager) {
 	}
 	if err := fsatomic.WriteFileDurable(feedShrinkHistoryPath, data, 0o600); err != nil {
 		slog.Warn("dynamic-address: failed to persist shrink high-water history", "path", feedShrinkHistoryPath, "err", err)
+	}
+}
+
+// persistFeedShrinkHistory serializes the daemon's feed-history callback with
+// factory reset. The reset fence takes this mutex after any active write has
+// completed, then keeps later callbacks from recreating the file it erased.
+func (d *Daemon) persistFeedShrinkHistory(manager *feeds.Manager) {
+	d.feedHistoryMu.Lock()
+	defer d.feedHistoryMu.Unlock()
+	if d.feedHistoryFenced {
+		return
+	}
+	persistFeedShrinkHistory(manager)
+}
+
+func (d *Daemon) fenceFeedShrinkHistoryPersistence() func() {
+	d.feedHistoryMu.Lock()
+	d.feedHistoryFenced = true
+	d.feedHistoryMu.Unlock()
+	return func() {
+		d.feedHistoryMu.Lock()
+		d.feedHistoryFenced = false
+		d.feedHistoryMu.Unlock()
 	}
 }
 
