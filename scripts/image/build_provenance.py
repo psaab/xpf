@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shlex
 import subprocess
 import sys
 
@@ -49,48 +48,39 @@ UNTRACKED_BUILD_INPUTS = (
 
 
 def _split_go_flags(raw):
-    # Go-compatible field splitting for GOFLAGS: unlike Python shlex (which
-    # concatenates adjacent quoted strings), Go's quoted.Split emits each
-    # quoted field separately, including adjacent fields without whitespace.
-    # `"-tags=x""--overlay=A"` is ONE shlex token but TWO Go flags — and the
-    # second one redirects source. Split on quote boundaries the way Go does
-    # so no flag hides inside a benign token (Astra GOFLAGS-confirmation F3).
-    fields, buf, quote, had = [], [], None, False
-    i = 0
-    while i < len(raw):
-        ch = raw[i]
-        if quote is not None:
-            if ch == quote:
-                quote = None
-                had = True
-            elif ch == "\\" and i + 1 < len(raw):
+    # EXACT port of Go cmd/internal/quoted.Split (used for GOFLAGS at
+    # cmd/go/internal/base/goflags.go:41). Do NOT "improve" this with
+    # shlex semantics: two rounds of hand-rolled tokenizing produced
+    # two bypass classes (adjacent-quote, post-close content). Rules,
+    # verbatim from quoted.go: whitespace is ONLY space/tab/CR/LF; a
+    # quote counts ONLY at the start of a field; the closing quote ENDS
+    # the field (post-close content is a new field); NO unescaping
+    # anywhere (backslash is literal); unterminated quote is an error.
+    fields = []
+    s = raw
+    while len(s) > 0:
+        while len(s) > 0 and s[0] in (" ", "\t", "\n", "\r"):
+            s = s[1:]
+        if len(s) == 0:
+            break
+        if s[0] == '"' or s[0] == "'":
+            quote = s[0]
+            s = s[1:]
+            i = 0
+            while i < len(s) and s[i] != quote:
                 i += 1
-                buf.append(raw[i])
-            else:
-                buf.append(ch)
-        elif ch in ("'", '"'):
-            # A quote starting a new field right after token content (no
-            # whitespace) begins a SEPARATE field, per Go quoted.Split.
-            if had:
-                fields.append("".join(buf))
-                buf, had = [], False
-            quote = ch
-        elif ch.isspace():
-            if had:
-                fields.append("".join(buf))
-                buf, had = [], False
-        elif ch == "\\" and i + 1 < len(raw):
+            if i >= len(s):
+                raise ProvenanceError(
+                    "cannot parse GOFLAGS for provenance: "
+                    f"unterminated {quote} string")
+            fields.append(s[:i])
+            s = s[i + 1:]
+            continue
+        i = 0
+        while i < len(s) and s[i] not in (" ", "\t", "\n", "\r"):
             i += 1
-            buf.append(raw[i])
-            had = True
-        else:
-            buf.append(ch)
-            had = True
-        i += 1
-    if quote is not None:
-        raise ProvenanceError("cannot parse GOFLAGS for provenance: unterminated quote")
-    if had:
-        fields.append("".join(buf))
+        fields.append(s[:i])
+        s = s[i:]
     return fields
 
 
@@ -116,9 +106,12 @@ def _check_go_flags(root):
             f"go env exited {env_result.returncode}: {env_result.stderr.strip()}")
     raw = env_result.stdout.strip()
     if not raw:
-        # go env succeeded but reports no flags: authoritative ONLY if
-        # os.environ agrees (belt-and-braces; go env merges both, so a
-        # divergence here means the query missed live configuration).
+        # go env succeeded but reports no flags. With a real toolchain
+        # this branch never adds anything: go env already merged
+        # os.environ (cfg.Getenv prefers it), so only a lying/fake go
+        # (rc 0 + empty stdout while flags exist) would reach here with
+        # OS GOFLAGS set. Re-read os.environ as a last-resort additive
+        # net: it can only ADD flags to check, never remove any.
         raw = os.environ.get("GOFLAGS", "")
     flags = _split_go_flags(raw)
     for token in flags:
@@ -255,6 +248,9 @@ def source_tree_dirty(root):
     configured, so a hung Git or Go process can block the probe.
     """
     root = os.path.abspath(os.fspath(root))
+    if not os.path.isdir(root):
+        raise ProvenanceError(
+            f"cannot attest build inputs: root {root!r} is not a directory")
     _check_go_flags(root)
     try:
         tracked = subprocess.run(

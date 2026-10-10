@@ -331,6 +331,7 @@ class BuildProvenanceTests(unittest.TestCase):
                       refused_build.stderr)
         self.assertIn("FATAL: provenance probe refused the build",
                       refused_build.stderr)
+
     def test_go_overlay_double_dash_spelling_is_refused(self):
         # Go accepts --flag identically to -flag: the refusal must match
         # both spellings (GLM F1-F5 confirmation defect).
@@ -367,12 +368,14 @@ class BuildProvenanceTests(unittest.TestCase):
             env=env, capture_output=True, text=True, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("GOFLAGS -overlay redirects build inputs", result.stderr)
+
     def test_go_env_failure_refuses_rather_than_certifying_clean(self):
         # Astra F1: a failing `go env` discovery must refuse, never fall
-        # back to possibly-empty os.environ and certify clean. Break go-env
-        # AT THE PROBED ROOT (a poisoned PATH) so the root-scoped query
-        # itself fails; also persist an overlay in GOENV so a fallback
-        # would certify substituted source as clean.
+        # back to os.environ. A fake go that always fails breaks BOTH
+        # queries, so on pre-fold code this shape exits 0 with .dirty
+        # (false-dirty, not false-clean); the test still catches any
+        # return of a fallback arm. The env-only false-clean shape (go
+        # env fails while go list succeeds) is reviewer-proven (F1b).
         overlay = self.root.parent / f"{self.root.name}-overlay-f1.json"
         overlay.write_text(json.dumps({"Replace": {}}))
         self.addCleanup(overlay.unlink, missing_ok=True)
@@ -440,8 +443,46 @@ class BuildProvenanceTests(unittest.TestCase):
             env=env, capture_output=True, text=True, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("GOFLAGS -overlay redirects build inputs", result.stderr)
-
-
+    def test_go_flags_splitter_matches_go_quoted_split(self):
+        # Opus F3 confirmation: the splitter must match Go quoted.Split on
+        # every B-class (post-close content, backslash-space, mid-field
+        # quote, in-quote backslash, single-quote backslash, VT). Ground
+        # truth verified against /usr/lib/go-1.26 quoted.go via a go-run
+        # driver (parent check, 15/15 + 2 empty-input shapes).
+        _PROV_SPEC = importlib.util.spec_from_file_location(
+            "xpf_build_provenance_head", _HERE / "build_provenance.py")
+        assert _PROV_SPEC.loader is not None
+        _prov = importlib.util.module_from_spec(_PROV_SPEC)
+        _PROV_SPEC.loader.exec_module(_prov)
+        _split_go_flags = _prov._split_go_flags
+        DQ, SQ, BS, VT, NB = chr(34), chr(39), chr(92), chr(11), chr(160)
+        A = "/tmp/x.json"
+        cases = [
+            ('"-tags=review""--overlay=' + A + '"',
+             ["-tags=review", "--overlay=" + A]),
+            ('"-mod=mod"-overlay=' + A,
+             ["-mod=mod", "-overlay=" + A]),
+            ("-tags=x" + BS + " -overlay=" + A,
+             ["-tags=x" + BS, "-overlay=" + A]),
+            ("-tags=a" + SQ + " -overlay=" + A + " -tags=b" + SQ,
+             ["-tags=a" + SQ, "-overlay=" + A, "-tags=b" + SQ]),
+            ("-tags=v" + VT + "y -overlay=" + A + " -tags=z",
+             ["-tags=v" + VT + "y", "-overlay=" + A, "-tags=z"]),
+            ("plain -overlay=" + A + " tail",
+             ["plain", "-overlay=" + A, "tail"]),
+            ("-flag=x" + NB + "-overlay=" + A,
+             ["-flag=x" + NB + "-overlay=" + A]),
+            ('"a"b"c"d', ["a", 'b"c"d']),
+            ("x" + DQ + "y", ["x" + DQ + "y"]),
+        ]
+        for raw, want in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(_split_go_flags(raw), want)
+        with self.subTest(raw="unterminated-quote"):
+            with self.assertRaises(Exception):
+                _split_go_flags(DQ + "unterminated")
+        self.assertEqual(_split_go_flags(""), [])
+        self.assertEqual(_split_go_flags("   "), [])
 
     def test_non_ascii_ignored_bpf_source_is_dirty_and_compiled(self):
         source = self.root / "pkg/dataplane/é_bpfel.go"
