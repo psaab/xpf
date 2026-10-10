@@ -60,6 +60,43 @@ func TestAnyIPv4KeywordReachesTheWireAsCIDR9574(t *testing.T) {
 	}
 }
 
+func TestAny4Any6KeywordsReachTheWireAsLongFormCIDRs12242(t *testing.T) {
+	policy := func(source, destination string) []string {
+		p := "set security policies from-zone trust to-zone untrust policy fam "
+		// Unrelated global address: forces cfg.Security.AddressBook non-nil so
+		// validatePolicyMatchAddressSetMembersStrict executes (not early-return).
+		lines := append([]string{"set security address-book global address unused-addr 10.9.9.9/32"}, zones9574...)
+		lines = append(lines,
+			p+"match source-address "+source,
+			p+"match destination-address "+destination,
+			p+"match application any",
+			p+"then permit",
+		)
+		return lines
+	}
+	build := func(source, destination string) *PolicyRuleSnapshot {
+		cfg := compileStrictSet9574(t, policy(source, destination))
+		rules, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, nil)
+		if err != nil || len(rules) != 1 {
+			t.Fatalf("build %q/%q: rules=%d err=%v", source, destination, len(rules), err)
+		}
+		return &rules[0]
+	}
+
+	short := build("any4", "any6")
+	long := build("any-ipv4", "any-ipv6")
+	if !reflect.DeepEqual(short.SourceLiterals, long.SourceLiterals) ||
+		!reflect.DeepEqual(short.DestinationLiterals, long.DestinationLiterals) {
+		t.Fatalf("short-form literals = %v / %v, want long-form %v / %v",
+			short.SourceLiterals, short.DestinationLiterals, long.SourceLiterals, long.DestinationLiterals)
+	}
+	if !reflect.DeepEqual(short.SourceLiterals, []string{"0.0.0.0/0"}) ||
+		!reflect.DeepEqual(short.DestinationLiterals, []string{"::/0"}) {
+		t.Fatalf("short forms did not lower to family CIDRs: %v / %v",
+			short.SourceLiterals, short.DestinationLiterals)
+	}
+}
+
 func TestObjectNamedAMatchAllCIDRDoesNotCaptureTheKeyword9574(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

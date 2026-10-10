@@ -10,7 +10,7 @@ import (
 
 // validatePolicyMatchAddressesStrict hard-rejects a policy
 // source-address / destination-address token that is neither a known
-// address-book name (Address or AddressSet), the `any` keyword, nor a
+// address-book name (Address or AddressSet), a policy match-all keyword, nor a
 // parseable CIDR / bare IP (#2008). Such a token (a typo) reaches the
 // dataplane as an opaque string, fails CIDR/IP parsing in the Rust
 // literal parser, and is silently dropped to an empty set. Under
@@ -19,13 +19,12 @@ import (
 // address ends up matching every address). Failing the typo at commit
 // turns the bypass into an operator-visible error.
 //
-// Legitimate forms accepted: address-book names, `any` (and the
-// family-scoped `any-ipv4` / `any-ipv6`, which compilePolicy already
-// normalizes to `0.0.0.0/0` / `::/0` and which parse as CIDRs anyway),
-// literal CIDRs, and bare IPv4 / IPv6 addresses. Junos address RANGES
-// are an address-book construct (expanded to /32s under the book) and
-// are referenced from a policy only by book NAME, so no range form
-// reaches this token list.
+// Legitimate forms accepted: address-book names, `any`, family-scoped keywords
+// `any-ipv4` / `any4` and `any-ipv6` / `any6`, literal CIDRs, and bare IPv4 / IPv6
+// addresses. The snapshot builder lowers the family keywords to `0.0.0.0/0` /
+// `::/0`. Junos address RANGES are an address-book construct (expanded to /32s
+// under the book) and are referenced from a policy only by book NAME, so no range
+// form reaches this token list.
 // policyMatchNamedAddressRefs collects every NAME that is a valid non-literal
 // policy source/destination-address reference: an address-book entry (an
 // Address or an AddressSet, global or already folded from a zone-local book)
@@ -63,17 +62,16 @@ func policyMatchNamedAddressRefs(cfg *Config) map[string]bool {
 
 // policyMatchAddressTokenRecognized reports whether tok is a syntactically
 // recognized policy source/destination-address reference of ANY form: the
-// reserved wildcards (`any` / `any-ipv4` / `any-ipv6` / the empty token), a
-// literal CIDR or bare IP, or a name in `named` (an address-book entry or a
-// dynamic-address feed binding — see policyMatchNamedAddressRefs). It is the
-// exact acceptance predicate validatePolicyMatchAddressesStrict (#2008/#3294)
+// reserved wildcards (`any` / `any-ipv4` / `any4` / `any-ipv6` / `any6` / the
+// empty token), a literal CIDR or bare IP, or a name in `named` (an address-book
+// entry or dynamic-address feed binding — see policyMatchNamedAddressRefs). It is
+// the exact acceptance predicate validatePolicyMatchAddressesStrict (#2008/#3294)
 // uses, factored out so the warn pass agrees with strict (#3958). It reports
 // only that the token is a well-formed reference form, NOT that a named
 // address-set's members fully resolve — that deeper check is #3149's domain
 // (validatePolicyMatchAddressSetMembersStrict).
 func policyMatchAddressTokenRecognized(tok string, named map[string]bool) bool {
-	switch tok {
-	case "", "any", "any-ipv4", "any-ipv6":
+	if tok == "" || IsPolicyAddressWildcardKeyword(tok) {
 		return true
 	}
 	if named[tok] {
@@ -427,9 +425,9 @@ func policyMatchAddressBookResolves(ab *AddressBook, name string) error {
 // Resolution mirrors resolveUserspaceAddressBookEntry +
 // expandUserspacePolicyAddresses EXACTLY (see policyMatchAddressBookResolves),
 // so the commit gate and the runtime gate cannot diverge. `any` / `any-ipv4` /
-// `any-ipv6` / the empty token and literal CIDR/IP tokens are not book names and
-// are passed through (the #2008 gate already covers literals). Covers zone-pair
-// + global policies and both source and destination, including the recursive
+// `any4` / `any-ipv6` / `any6` / the empty token and literal CIDR/IP tokens are
+// not book names and are passed through (the #2008 gate already covers literals).
+// Covers zone-pair + global policies and both source and destination, including
 // address-set-of-address-sets case.
 //
 // Strict on commit / commit-check (hard reject naming the policy scope, the
@@ -456,8 +454,7 @@ func validatePolicyMatchAddressSetMembersStrict(cfg *Config) error {
 		return false
 	}
 	checkToken := func(scope, policyName, field, tok string) error {
-		switch tok {
-		case "", "any", "any-ipv4", "any-ipv6":
+		if tok == "" || IsPolicyAddressWildcardKeyword(tok) {
 			return nil
 		}
 		// A wholly-undefined token / literal is the domain of
