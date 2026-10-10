@@ -205,6 +205,14 @@ func (*frrHAEventExecutor11415) VtyshLoad(context.Context, string) ([]byte, erro
 	return nil, nil
 }
 
+func (*frrHAEventExecutor11415) VtyshLoadDaemon(context.Context, string, string) ([]byte, error) {
+	return nil, nil
+}
+
+func (*frrHAEventExecutor11415) VtyshDaemon(context.Context, string, string) ([]byte, error) {
+	return nil, nil
+}
+
 func (*frrHAEventExecutor11415) VtyshStream(context.Context, string) (io.ReadCloser, func() error, error) {
 	return io.NopCloser(strings.NewReader("")), func() error { return nil }, nil
 }
