@@ -133,9 +133,8 @@ COMMAND_SHAPE_OK=0
 incus() {
 	[[ "$1" == exec && "$2" == "$CLUSTER_LAN_HOST" && "$3" == -- ]] || return 90
 	local command="$6"
-	if [[ "$command" == *"iperf3 --json-stream --forceflush --connect-timeout 5000 -t"* &&
-	      "$command" == *"-p \"\$3\" -P \"\$4\""* &&
-	      "$command" != *"-i 1"* ]]; then
+	if [[ "$command" == *"interval_args=()"* &&
+	      "$command" == *'interval_args=(-i "$8")'* ]]; then
 		COMMAND_SHAPE_OK=1
 	fi
 	shift 3
@@ -145,7 +144,15 @@ incus() {
 mkdir -p "$TMP_DIR/bin"
 cat >"$TMP_DIR/bin/iperf3" <<'MOCK'
 #!/usr/bin/env bash
-[[ " $* " == *" --json-stream "* && " $* " == *" --forceflush "* && " $* " != *" -i 1 "* ]] || exit 90
+[[ " $* " == *" --json-stream "* && " $* " == *" --forceflush "* ]] || exit 90
+case " $* " in
+	*" -p 5211 "*) args_file="${MOCK_ARGS_DIR}/main.args" ;;
+	*" -p 5212 "*) args_file="${MOCK_ARGS_DIR}/interval.args" ;;
+	*" -p 5210 "*) args_file="${MOCK_ARGS_DIR}/pool.args" ;;
+	*) exit 91 ;;
+esac
+printf ' %s' "$@" >"$args_file"
+printf '\n' >>"$args_file"
 sleep 60 &
 child=$!
 trap 'kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true' TERM EXIT
@@ -155,6 +162,8 @@ chmod +x "$TMP_DIR/bin/iperf3"
 PATH="${TMP_DIR}/bin:${PATH}"
 export PATH
 CLUSTER_LAN_HOST=local-test
+MOCK_ARGS_DIR="$TMP_DIR"
+export MOCK_ARGS_DIR
 export FAILOVER_IPERF_TIMEOUT_MARGIN=30
 
 failover_start_main_iperf 60 192.0.2.1 5211 8 "$TMP_DIR/main.log" "$TMP_DIR/main.pid"
@@ -164,6 +173,21 @@ if [[ "$COMMAND_SHAPE_OK" == 1 && "$main_pid" =~ ^[0-9]+$ ]] &&
 	ok "JSON client command shape and main process identity are preserved"
 else
 	bad "JSON client command shape and main process identity are preserved"
+fi
+if ! grep -qE '(^| )-i( |$)' "$TMP_DIR/main.args"; then
+	ok "omitted interval keeps the existing iperf3 command unchanged"
+else
+	bad "omitted interval keeps the existing iperf3 command unchanged"
+fi
+
+failover_start_main_iperf 60 192.0.2.1 5212 2 "$TMP_DIR/interval.log" "$TMP_DIR/interval.pid" 0.1
+interval_pid=$(cat "$TMP_DIR/interval.pid" 2>/dev/null || true)
+if [[ "$interval_pid" =~ ^[0-9]+$ ]] &&
+   failover_main_iperf_running "$TMP_DIR/interval.pid" 192.0.2.1 5212 2 &&
+   grep -qE '(^| )-i 0\.1( |$)' "$TMP_DIR/interval.args"; then
+	ok "tracked client passes the configured 100-ms interval"
+else
+	bad "tracked client passes the configured 100-ms interval"
 fi
 
 failover_start_main_iperf 60 192.0.2.1 5210 2 "$TMP_DIR/pool.log" "$TMP_DIR/pool.pid"
@@ -176,11 +200,13 @@ else
 fi
 
 failover_stop_main_iperf "$TMP_DIR/main.pid" 192.0.2.1 5211 8
+failover_stop_main_iperf "$TMP_DIR/interval.pid" 192.0.2.1 5212 2
 if ! failover_main_iperf_running "$TMP_DIR/main.pid" 192.0.2.1 5211 8 &&
+   ! failover_main_iperf_running "$TMP_DIR/interval.pid" 192.0.2.1 5212 2 &&
    kill -0 "$pool_pid" 2>/dev/null; then
-	ok "termination stops only the tracked main JSON client"
+	ok "termination stops only the tracked main JSON clients"
 else
-	bad "termination stops only the tracked main JSON client"
+	bad "termination stops only the tracked main JSON clients"
 fi
 failover_stop_main_iperf "$TMP_DIR/pool.pid" 192.0.2.1 5210 2
 if ! kill -0 "$pool_pid" 2>/dev/null; then
@@ -188,6 +214,7 @@ if ! kill -0 "$pool_pid" 2>/dev/null; then
 else
 	bad "separate client termination remains scoped to its pidfile"
 fi
+
 
 echo "----------------------------------------"
 echo "failover client selftest: $PASS passed, $FAIL failed"

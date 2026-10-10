@@ -140,6 +140,7 @@ test/incus/failover-clock-lib.sh
 test/incus/failover-journal-lib.sh
 test/incus/host-inbound-lib.sh
 test/incus/iperf-throughput-lib.sh
+test/incus/ha-smoke-iperf-lib.sh
 test/incus/mouse-elephant-lib.sh
 test/incus/newflow-ceiling-lib.sh
 test/incus/screen-probe-lib.sh

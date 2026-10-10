@@ -4,21 +4,24 @@
 # separately from the pool-mode client so a second iperf3 process cannot mask
 # loss of the stream being measured.
 
-# failover_start_main_iperf <duration> <target> <port> <streams> <log> <pidfile>
+# failover_start_main_iperf <duration> <target> <port> <streams> <log> <pidfile> [interval]
+#   Optional interval preserves the default client command exactly when absent.
 #   The client runs under timeout(1) with a wall clock of duration +
 #   FAILOVER_IPERF_TIMEOUT_MARGIN (default 30s). --connect-timeout covers the
 #   connect only, and a flaky far end can hang the final control exchange
 #   forever (#11861). The pidfile records the timeout supervisor, whose cmdline
-#   still carries the iperf3 match keys for failover_main_iperf_running.
 failover_start_main_iperf() {
 	local duration="$1" target="$2" port="$3" streams="$4" log="$5" pidfile="$6"
+	local interval="${7:-}"
 	local margin="${FAILOVER_IPERF_TIMEOUT_MARGIN:-30}"
 	case "$margin" in ''|*[!0-9]*) margin=30 ;; esac
 	local wall=$(( duration + margin ))
 	incus exec "$CLUSTER_LAN_HOST" -- bash -c '
-		timeout -k 5 "$7" iperf3 --json-stream --forceflush --connect-timeout 5000 -t "$1" -c "$2" -p "$3" -P "$4" >"$5" 2>&1 &
+		interval_args=()
+		if [[ -n "$8" ]]; then interval_args=(-i "$8"); fi
+		timeout -k 5 "$7" iperf3 --json-stream --forceflush --connect-timeout 5000 "${interval_args[@]}" -t "$1" -c "$2" -p "$3" -P "$4" >"$5" 2>&1 &
 		echo "$!" > "$6"
-	' _ "$duration" "$target" "$port" "$streams" "$log" "$pidfile" "$wall"
+	' _ "$duration" "$target" "$port" "$streams" "$log" "$pidfile" "$wall" "$interval"
 }
 
 # failover_stop_main_iperf <pidfile> <target> <port> <streams>

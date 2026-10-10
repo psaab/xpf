@@ -18,6 +18,7 @@ test-double-failover no rows in the tracked ledger; needs a recorded double-fail
 test-fbf-steering no rows in the tracked ledger; needs an operator-authorized live IPv4 fallback transition and correlated peer-capture run on the loss cluster
 test-private-rg no rows in the tracked ledger; needs a recorded private-RG election run on the loss cluster
 test-restart-connectivity no rows in the tracked ledger; needs a recorded daemon-restart run (cluster + iperf3 server)
+test-rolling-upgrade no rows in the tracked ledger; needs a recorded two-cut rolling-upgrade run with per-stream traffic and both running-version transitions on the loss cluster
 test-stress-failover no rows in the tracked ledger; needs a recorded stress-failover run (cluster + iperf3 server)
 test-wire-properties no rows in the tracked ledger; needs a recorded run (read gate, hermetic wrap)
 wire_appmatch_twins no rows in the tracked ledger; needs a recorded run of the #9531 appmatch-twins gate on the loss cluster

@@ -6,7 +6,7 @@
 # Usage: ./test/incus/harness-result-selftest.sh   (rc 0 = all pass)
 #
 # The load-bearing cell is the ADAPTER CENSUS. It does not invent a summary
-# line; it EXTRACTS the real `echo` from each of the thirteen gates that carry the
+# line; it EXTRACTS the real `echo` from each of the fourteen gates that carry the
 # shape. Two consequences:
 #
 #   * an adapter anchored on a label prefix ("Failover test:") covers six of
@@ -15,7 +15,7 @@
 #   * an adapter anchored at end of line drops test-connectivity.sh, whose
 #     summary continues ", <n> skipped" after the pair;
 #
-# and if any of those thirteen gates changes its summary format, this reds instead
+# and if any of those fourteen gates changes its summary format, this reds instead
 # of the ledger quietly filling with VOIDs.
 #
 # Falsifiability of this file: if the adapter table is wrong, the cell naming
@@ -282,9 +282,9 @@ expect_field() {
 	fi
 }
 
-# ── 1. The adapter census: 5 iperf smokes + 8 cells smokes ──────────
+# ── 1. The adapter census: 6 iperf smokes + 8 cells smokes ──────────
 #
-# #9922 F-155: ONE adapter can no longer cover both classes. The five smokes
+# #9922 F-155: ONE adapter can no longer cover both classes. The six smokes
 # that emit an iperf3 throughput cell keep ha-smoke (PASS headline FIXED to
 # throughput_gbps, figure required); the eight smokes that emit cells only take
 # smoke-cells (PASS/FAIL headline FIXED to cells_passed). The declared sets
@@ -296,6 +296,7 @@ DECLARED_IPERF_SMOKES=(
 	test-stress-failover
 	test-chained-crash
 	test-active-active
+	test-rolling-upgrade
 )
 DECLARED_CELLS_SMOKES=(
 	test-ha-crash
@@ -372,7 +373,7 @@ score_gate() {
 for g in "${DECLARED_IPERF_SMOKES[@]}"; do score_gate "$g" ha-smoke; done
 for g in "${DECLARED_CELLS_SMOKES[@]}"; do score_gate "$g" smoke-cells; done
 if ((census_covered == census_total)); then
-	ok "adapter census: own adapter covers all $census_total declared gates (5 ha-smoke + 8 smoke-cells)"
+	ok "adapter census: own adapter covers all $census_total declared gates (6 ha-smoke + 8 smoke-cells)"
 else
 	bad "adapter census: covered $census_covered of $census_total declared gates"
 fi
@@ -429,30 +430,34 @@ for g in "${DECLARED_IPERF_SMOKES[@]}" "${DECLARED_CELLS_SMOKES[@]}"; do
 	*"--adapter smoke-cells"*) mk_adapter="smoke-cells" ;;
 	*) map_bad="$map_bad $g(no-makefile-wrap)"; continue ;;
 	esac
-	if grep -qE 'iperf_throughput_(json_)?verdict' "$SCRIPT_DIR/$g.sh"; then
+	if grep -qE 'iperf_throughput_(json_)?verdict|ha_smoke_iperf_verdicts' "$SCRIPT_DIR/$g.sh"; then
 		[[ "$mk_adapter" == "ha-smoke" ]] || map_bad="$map_bad $g(emits-iperf-but-wrapped-$mk_adapter)"
 	else
 		[[ "$mk_adapter" == "smoke-cells" ]] || map_bad="$map_bad $g(no-iperf-but-wrapped-$mk_adapter)"
 	fi
 done
 if [[ -z "$map_bad" ]]; then
-	ok "adapter census: Makefile --adapter matches iperf emission for all 13 smoke gates"
+	ok "adapter census: Makefile --adapter matches iperf emission for all 14 smoke gates"
 else
 	bad "adapter census: Makefile/script adapter mismatch:$map_bad"
 fi
-# Pin the JSON call shape only on test-failover; its four human-log siblings
-# retain the original text verdict call shape.
+# Pin the JSON call shape on test-failover and its three event-driven siblings;
+# test-stress-failover remains the one legacy text-SUM sibling.
 if grep -q 'iperf_throughput_json_verdict "$MIN_THROUGHPUT" "$avg_gbps"' "$SCRIPT_DIR/test-failover.sh"; then
 	json_call_shape_ok=1
 else
 	json_call_shape_ok=0
 fi
-for sibling in test-double-failover test-chained-crash test-active-active test-stress-failover; do
-	grep -q 'iperf_throughput_verdict "$MIN_THROUGHPUT" "$sum_line"' "$SCRIPT_DIR/$sibling.sh" \
+for sibling in test-double-failover test-chained-crash test-active-active; do
+	grep -q 'ha_smoke_iperf_verdicts "$LOG" "$IPERF_DURATION" "$IPERF_STREAMS"' "$SCRIPT_DIR/$sibling.sh" \
+		|| json_call_shape_ok=0
+	grep -q 'failover_start_main_iperf "$IPERF_DURATION" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS"' "$SCRIPT_DIR/$sibling.sh" \
 		|| json_call_shape_ok=0
 done
+grep -q 'iperf_throughput_verdict "$MIN_THROUGHPUT" "$sum_line"' "$SCRIPT_DIR/test-stress-failover.sh" \
+	|| json_call_shape_ok=0
 if (( json_call_shape_ok )); then
-	ok "adapter census: failover uses JSON verdict and four siblings retain text verdict"
+	ok "adapter census: failover and three event-driven siblings use JSON; stress retains text verdict"
 else
 	bad "adapter census: JSON/text throughput verdict call shapes changed"
 fi

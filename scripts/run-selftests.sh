@@ -205,6 +205,7 @@ test/incus/miri-census-selftest.sh
 scripts/close_keyword_lint_ci.sh
 scripts/git-hooks/commit-msg
 scripts/git-hooks/install.sh
+test/incus/ha-smoke-iperf-lib.sh
 "
 for s in $SH_SCRIPTS; do
 	[ -f "$s" ] || continue

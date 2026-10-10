@@ -30,16 +30,27 @@ set -euo pipefail
 # so a concurrent deploy/smoke can't collide with our reboot (it
 # queues behind a held /tmp/xpf-cluster.lock instead of colliding).
 _CELL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$_CELL_DIR"
+if [[ "${1:-}" == "--selftest" ]]; then
+	if [[ $# -ne 1 ]]; then
+		echo "usage: $0 --selftest" >&2
+		exit 2
+	fi
+	exec bash "${SCRIPT_DIR}/iperf-throughput-selftest.sh" "$(basename "${BASH_SOURCE[0]}")"
+fi
+
 # shellcheck source=cluster-cell.sh
 source "${_CELL_DIR}/cluster-cell.sh"
 xpf_enter_destructive_cluster_cell "test-active-active $*" "$0" "$@"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
+# shellcheck source=test/incus/deploy-lib.sh
+source "${SCRIPT_DIR}/deploy-lib.sh"
 # shellcheck source=test/incus/iperf-throughput-lib.sh
 source "${SCRIPT_DIR}/iperf-throughput-lib.sh"
-
+# shellcheck source=test/incus/ha-smoke-iperf-lib.sh
+source "${SCRIPT_DIR}/ha-smoke-iperf-lib.sh"
 IPERF_TARGET="${IPERF_TARGET:-$IPERF_TARGET4}"
 # #9691: measure the UNSHAPED class. iperf3 defaults to port 5201, which
 # cos-iperf-config.set classifies as iperf-100m (transmit-rate 100m exact) on
@@ -52,6 +63,14 @@ IPERF_DURATION=90       # seconds — enough to span two failovers + settling
 IPERF_STREAMS=8
 SETTLE_WAIT=3           # seconds to let VRRP + election settle
 MIN_THROUGHPUT=1.0      # Gbps — iperf3 must report at least this
+LOG="/tmp/iperf3-active-active.log"
+PIDFILE="/tmp/iperf3-active-active.pid"
+IPERF_START_SECONDS=0
+FAILOVER_EVENTS=()
+
+main_iperf_running() {
+	failover_main_iperf_running "$PIDFILE" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS"
+}
 
 PASS=0
 FAIL=0
@@ -70,9 +89,8 @@ instance_running() {
 }
 
 cleanup() {
-	# Kill iperf3 on LAN host
-	incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
-	# Reset any manual failovers
+	# Stop only this harness's tracked iperf3 client.
+	failover_stop_main_iperf "$PIDFILE" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
 	incus exec "$FW0" -- cli -c 'request chassis cluster failover reset redundancy-group 1' 2>/dev/null || true
 	incus exec "$FW1" -- cli -c 'request chassis cluster failover reset redundancy-group 1' 2>/dev/null || true
 	# With preempt=false, resetting the flag alone doesn't move VRRP.
@@ -108,13 +126,7 @@ for rg in 0 1 2; do
 done
 sleep 3
 
-# Verify fw0 is primary for all RGs
-fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
-rg0_primary=$(echo "$fw0_status" | grep -A2 "Redundancy group: 0" | grep "node0" | grep -c "primary" || true)
-rg1_primary=$(echo "$fw0_status" | grep -A2 "Redundancy group: 1" | grep "node0" | grep -c "primary" || true)
-rg2_primary=$(echo "$fw0_status" | grep -A2 "Redundancy group: 2" | grep "node0" | grep -c "primary" || true)
-
-if [[ "$rg0_primary" -eq 1 && "$rg1_primary" -eq 1 && "$rg2_primary" -eq 1 ]]; then
+if printf '%s\n' "$fw0_status" | deploy_node_role_every_rg_ok node0 primary; then
 	pass "fw0 is primary for all RGs"
 else
 	die "fw0 is not primary for all RGs — reset cluster state first"
@@ -127,30 +139,32 @@ else
 	die "Cannot reach iperf3 target $IPERF_TARGET from ${CLUSTER_LAN_HOST}"
 fi
 
-# Kill any stale iperf3
-incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
+# Stop only a previous client recorded by this harness.
+failover_stop_main_iperf "$PIDFILE" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
 sleep 1
 
 # ── Phase 1: Start iperf3 ───────────────────────────────────────────
 
 info "Phase 1: Starting iperf3 -P${IPERF_STREAMS} -t${IPERF_DURATION} → ${IPERF_TARGET}"
 
-incus exec "$CLUSTER_LAN_HOST" -- bash -c \
-	"iperf3 --forceflush --connect-timeout 5000 -t ${IPERF_DURATION} -c ${IPERF_TARGET} -p ${IPERF_PORT} -P ${IPERF_STREAMS} > /tmp/iperf3-active-active.log 2>&1 &"
+failover_start_main_iperf "$IPERF_DURATION" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" \
+	"$LOG" "$PIDFILE" 1
+IPERF_START_SECONDS=$SECONDS
 
 sleep 8  # all parallel streams must be fully established before failover
 
-# Verify iperf3 is running
-if incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
-	pass "iperf3 running"
+# Verify the tracked supervisor, not an unrelated iperf3 process.
+if main_iperf_running; then
+	pass "tracked iperf3 client running"
 else
-	die "iperf3 failed to start — check /tmp/iperf3-active-active.log on ${CLUSTER_LAN_HOST}"
+	die "iperf3 failed to start — check ${LOG} on ${CLUSTER_LAN_HOST}"
 fi
 
 # ── Phase 2: Failover RG1 (WAN) to fw1 ──────────────────────────────
 
 info "Phase 2: Failover RG1 (WAN) to node1 — creating active/active split"
 
+FAILOVER_EVENTS+=("$((SECONDS - IPERF_START_SECONDS))")
 incus exec "$FW0" -- cli -c 'request chassis cluster failover redundancy-group 1' 2>/dev/null || true
 sleep "$SETTLE_WAIT"
 
@@ -196,19 +210,10 @@ info "Phase 3: Verify traffic survives active/active split (fabric forwarding)"
 
 sleep 5  # let traffic settle after failover
 
-if incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
-	# Check last interval of iperf3 output for throughput
-	# With -P N, each interval has N+2 lines (N streams + SUM + separator)
-	tail_lines=$(( IPERF_STREAMS * 2 + 5 ))
-	last_sum=$(incus exec "$CLUSTER_LAN_HOST" -- tail -"$tail_lines" /tmp/iperf3-active-active.log 2>/dev/null | grep "SUM" | tail -1 || true)
-	if echo "$last_sum" | grep -qiE "[0-9]+ [MG]bits/sec"; then
-		bps=$(echo "$last_sum" | grep -oiE "[0-9.]+ [MG]bits/sec" | head -1)
-		pass "iperf3 survived RG split ($bps)"
-	else
-		fail "iperf3 running but no throughput after RG split"
-	fi
+if main_iperf_running; then
+	pass "tracked iperf3 client survived RG split (active/active fabric forwarding)"
 else
-	fail "iperf3 died after RG split (active/active fabric forwarding broken)"
+	fail "tracked iperf3 client died after RG split (active/active fabric forwarding broken)"
 fi
 
 # ── Phase 3b: Verify NEW TCP connections work during split ────────────
@@ -242,18 +247,17 @@ fi
 
 info "Phase 4: Failover RG1 (WAN) back to node0 — reunifying all RGs"
 
+FAILOVER_EVENTS+=("$((SECONDS - IPERF_START_SECONDS))")
 incus exec "$FW0" -- cli -c 'request chassis cluster failover redundancy-group 1 node 0' 2>/dev/null || true
 sleep "$SETTLE_WAIT"
 
 # Verify all RGs back on fw0
 fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
 
-rg1_node0=$(echo "$fw0_status" | grep -A2 "Redundancy group: 1" | grep "node0" | awk '{print $3}')
-
-if [[ "$rg1_node0" == "primary" ]]; then
-	pass "RG1 (WAN) back on fw0"
+if printf '%s\n' "$fw0_status" | deploy_node_role_every_rg_ok node0 primary; then
+	pass "all RGs returned to fw0 after reunification"
 else
-	fail "RG1 did not return to fw0 (node0 state: $rg1_node0)"
+	fail "not all RGs returned to fw0 after reunification"
 fi
 
 # ── Phase 5: Verify iperf3 survives reunification ────────────────────
@@ -262,52 +266,38 @@ info "Phase 5: Verify traffic survives RG reunification"
 
 sleep 5
 
-if incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
-	tail_lines=$(( IPERF_STREAMS * 2 + 5 ))
-	last_sum=$(incus exec "$CLUSTER_LAN_HOST" -- tail -"$tail_lines" /tmp/iperf3-active-active.log 2>/dev/null | grep "SUM" | tail -1 || true)
-	if echo "$last_sum" | grep -qiE "[0-9]+ [MG]bits/sec"; then
-		bps=$(echo "$last_sum" | grep -oiE "[0-9.]+ [MG]bits/sec" | head -1)
-		pass "iperf3 survived RG reunification ($bps)"
-	else
-		fail "iperf3 running but no throughput after reunification"
-	fi
+if main_iperf_running; then
+	pass "tracked iperf3 client survived RG reunification"
 else
-	fail "iperf3 died after RG reunification"
+	fail "tracked iperf3 client died after RG reunification"
 fi
 
-# ── Phase 6: Wait for iperf3 to complete and validate results ─────────
+# ── Phase 6: validate throughput and both failover transitions ────────
 
-info "Waiting for iperf3 to complete"
+info "Waiting for iperf3 to complete and validating both transition intervals"
 
-for i in $(seq 1 "$IPERF_DURATION"); do
-	if ! incus exec "$CLUSTER_LAN_HOST" -- pgrep -x iperf3 &>/dev/null; then
+for _ in $(seq 1 "$IPERF_DURATION"); do
+	if ! main_iperf_running; then
 		break
 	fi
 	sleep 1
 done
 
-# Check iperf3 completed successfully
-if incus exec "$CLUSTER_LAN_HOST" -- grep -q "iperf Done" /tmp/iperf3-active-active.log 2>/dev/null; then
-	pass "iperf3 completed successfully"
+if [[ "${#FAILOVER_EVENTS[@]}" -ne 2 ]]; then
+	fail "iperf3 failover oracle expected two transition events, observed ${#FAILOVER_EVENTS[@]}"
 else
-	iperf_log=$(incus exec "$CLUSTER_LAN_HOST" -- tail -5 /tmp/iperf3-active-active.log 2>/dev/null || echo "(no log)")
-	fail "iperf3 did not complete: $iperf_log"
+	oracle_output=$(ha_smoke_iperf_verdicts "$LOG" "$IPERF_DURATION" "$IPERF_STREAMS" \
+		"$MIN_THROUGHPUT" "${FAILOVER_EVENTS[@]}")
+	while IFS= read -r verdict; do
+		case "$verdict" in
+		PASS\ *) pass "${verdict#PASS }" ;;
+		FAIL\ *) fail "${verdict#FAIL }" ;;
+		*)       fail "iperf3 oracle: unexpected verdict '${verdict}'" ;;
+		esac
+	done <<<"$oracle_output"
 fi
 
-# #9690: one TOTAL throughput cell from iperf-throughput-lib.sh. The inline
-# block parsed "Gbits" only and judged a sub-Gbit run as "0 Gbps" (#6897 fixed the same in test-failover.sh).
-sum_line=$(incus exec "$CLUSTER_LAN_HOST" -- grep '\[SUM\].*sender' /tmp/iperf3-active-active.log 2>/dev/null | tail -1 || true)
-throughput_verdict=$(iperf_throughput_verdict "$MIN_THROUGHPUT" "$sum_line")
-case "$throughput_verdict" in
-PASS\ *) pass "${throughput_verdict#PASS }" ;;
-FAIL\ *) fail "${throughput_verdict#FAIL }" ;;
-*) fail "iperf3 throughput: unexpected verdict '${throughput_verdict}'" ;;
-esac
-
-# ── Cleanup & Results ────────────────────────────────────────────────
-
-# Kill iperf3
-incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
+failover_stop_main_iperf "$PIDFILE" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
