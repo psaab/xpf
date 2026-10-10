@@ -10,14 +10,15 @@ In the HA cluster, RETH interfaces use VRRP on physical member interfaces (no bo
 
 ## Solution
 
-Program a deterministic virtual MAC on RETH physical member interfaces at daemon startup. The MAC is **per node**: its last byte is the node id (`config.RethVirtualMAC`, which `cluster.RethMAC` returns), so the two nodes present DIFFERENT MACs for the same RETH and a failover changes the RETH's L2 identity. Recovery rides on the GARP / unsolicited-NA burst -- `ReconcileVIPs` forces one precisely because the MAC just changed (#2081). The MAC is deliberately not shared: one MAC on two member interfaces in one L2 domain makes the switch see a single address on two ports (see the comment on `cluster.RethMAC`).
+Program a deterministic virtual MAC on RETH physical member interfaces at daemon startup. The MAC is **per node and per RETH**: the last byte packs the RETH index and node id (`2*rethIndex+nodeID`, returned by `config.RethVirtualMAC` / `cluster.RethMAC`). Canonical `rethN` owners use their numeric suffix; other structurally valid owner names receive unused indexes in sorted-name order. This keeps every accepted RETH owner uniquely identifiable across peers using the same config. Same-RG RETHs therefore have distinct member MACs, while the two nodes still present DIFFERENT MACs for each RETH and a failover changes that RETH's L2 identity. Recovery rides on the GARP / unsolicited-NA burst -- `ReconcileVIPs` forces one precisely because the MAC just changed (#2081). The MAC is deliberately not shared: one MAC on two member interfaces in one L2 domain makes the switch see a single address on two ports (see the comment on `cluster.RethMAC`).
 
-The stable IPv6 router identity comes from a separate address instead. `cluster.StableRethLinkLocal` gives both nodes the same link-local `fe80::bf72:CC:RR`, with no node component, and it is the RA source address, so hosts keep one router identity across a failover. It sorts below the per-node EUI-64 link-locals, so the link-local resolver prefers it.
+The stable IPv6 router identity comes from a separate address instead. `cluster.StableRethLinkLocal` gives both nodes the same link-local `fe80::bf72:CC:RR` per redundancy group, with no node or RETH-index component, and it is the RA source address, so hosts keep one router identity across a failover. It sorts below the per-node EUI-64 link-locals, so the link-local resolver prefers it.
 
 ## MAC Format
 
 ```
-02:bf:72:CC:RR:NN
+02:bf:72:CC:RR:II
+II = 2 * reth-index + node-id
 ```
 
 | Byte | Value | Meaning |
@@ -25,16 +26,22 @@ The stable IPv6 router identity comes from a separate address instead. `cluster.
 | 0 | `02` | Locally-administered unicast (U/L bit set) |
 | 1 | `bf` | xpf identifier |
 | 2 | `72` | ASCII 'r' (bpf**r**x) |
-| 3 | `CC` | cluster_id (from config; one byte, bounded 0..255 at commit) |
-| 4 | `RR` | redundancy_group_id (0..15 after commit) |
-| 5 | `NN` | node id (0 or 1) |
+| 3 | `CC` | cluster ID (one byte, bounded 0..255 at commit) |
+| 4 | `RR` | redundancy-group ID (0..15 after commit) |
+| 5 | `II` | `2*reth-index+node-id`; indexes 0..127 and node IDs 0..1 map to 0..255 |
 
-Example for cluster_id=1:
-- reth0 (RG1): node 0 `02:bf:72:01:01:00` (EUI-64 link-local `fe80::bf:72ff:fe01:100`), node 1 `02:bf:72:01:01:01` (`fe80::bf:72ff:fe01:101`)
-- reth1 (RG2): node 0 `02:bf:72:01:02:00` (`fe80::bf:72ff:fe01:200`), node 1 `02:bf:72:01:02:01` (`fe80::bf:72ff:fe01:201`)
+Example for cluster ID 1, RG1:
+- reth0 (index 0): node 0 `02:bf:72:01:01:00`, node 1 `02:bf:72:01:01:01`
+- reth1 (index 1): node 0 `02:bf:72:01:01:02`, node 1 `02:bf:72:01:01:03`
 - shared router link-local for RG1 on both nodes: `fe80::bf72:1:1` (`StableRethLinkLocal`)
 
-Earlier revisions of this document gave byte 5 as a reserved `00` and said both nodes present the same MAC. That was never what the code built; `CLAUDE.md`'s `02:bf:72:CC:RR:NN` was right (#9248).
+The reth0 addresses retain the original encoding. The final octet adds the RETH index without changing the six-byte MAC format, preventing a same-RG member-recovery search from matching a healthy sibling.
+
+During an upgrade, several same-RG members may still carry the old shared MAC.
+Recovery first seeks the indexed MAC; if it is absent, it excludes every
+configured RETH member name and accepts the legacy MAC only when one unconfigured
+interface matches. Multiple legacy matches are ambiguous, so recovery leaves
+them untouched rather than renaming a sibling.
 
 ## Ordering
 
@@ -52,26 +59,20 @@ requirement). `renameRethMember` therefore downs the link, renames it,
 and then brings it back UP — the function that downs a link owns
 bringing it back up.
 
-It must NOT delegate the UP to the subsequent `programRethMAC`.
-`programRethMAC` early-returns (no UP) when the virtual MAC already
-matches, and that is precisely the situation after a rename:
-`renameRethMember` locates the interface by matching that same virtual
-MAC, so on a just-renamed member the MAC always already matches and
-`programRethMAC` always no-ops. (A second facet: even in the MAC-change
-path, `programRethMAC`'s fast path sets the MAC while the link is still
-DOWN, which succeeds without a cycle and returns without an UP.) If the
-UP were skipped, the RETH data link would be left DOWN → the interface
-track detects link-down → the redundancy group demotes → traffic
-blackhole.
+`programRethMAC` must not be relied on to bring the link UP. If the recovered
+member already has its indexed virtual MAC, `programRethMAC` early-returns; if
+recovery used the legacy-MAC upgrade fallback, it may need to change the MAC.
+`renameRethMember` therefore owns the DOWN → rename → UP sequence itself. The
+subsequent `programRethMAC` attempts a live set while the link is UP and only
+performs its own joined cycle if the kernel refuses that update. If the rename's
+UP were skipped, the member could remain DOWN on the fast path → the interface
+track detects link-down → the redundancy group demotes → traffic blackhole.
 
-There is no flap: whenever a rename happens the MAC already matches so
-`programRethMAC` no-ops, leaving `renameRethMember`'s UP as the final
-state; and even in the defensive case where `programRethMAC` does cycle,
-the member still ends UP. Bringing the member UP before `programRethMAC`
-also restores that function's live-address-change attempt, which needs an
-UP link to have any chance of succeeding — a DOWN link takes the fast
-path that sets the MAC without a cycle, so the fallback is never
-exercised and the member never gets its post-cycle recovery.
+A successful rename is tracked as an apply-wide link-cycle recovery: addresses
+are reconciled and AF_XDP workers are rebound once after the RETH loop. The
+rename is the only cycle when the MAC already matches; a legacy MAC change
+usually applies live, and requires the normal second cycle only if the kernel
+refuses the live update.
 
 ## The AF_XDP Worker Join Precedes the Link Cycle (#5103)
 
@@ -1019,11 +1020,13 @@ node never terminally publishes a workerless snapshot while reporting success.
 
 | File | Function |
 |------|----------|
-| `pkg/cluster/reth.go` | `RethMAC(clusterID, rgID, nodeID)` -- returns the per-node MAC (`config.RethVirtualMAC`) |
+| `pkg/cluster/reth.go` | `RethMAC(clusterID, rgID, rethIndex, nodeID)` -- returns the per-node/per-RETH MAC (`config.RethVirtualMAC`) |
+| `pkg/config/types.go` | `RethIndex(name)` parses canonical `rethN` names; `Config.RethMACIndexes()` also assigns unique, stable indexes to structurally valid noncanonical RETH owners |
+| `pkg/config/reth_virtual_mac_8340.go` | `RethVirtualMAC` -- packs RETH index and node ID into the final MAC octet |
 | `pkg/cluster/reth.go` | `IsVirtualRethMAC(mac)` -- detects virtual RETH pattern |
-| `pkg/daemon/daemon_reth.go` | `renameRethMember()` -- renames a member found by virtual MAC (down → rename → **up**, #3920); takes the same `beforeCycle` AF_XDP worker-join hook as `programRethMAC` (#6911) |
+| `pkg/daemon/daemon_reth.go` | `renameRethMember()` -- recovers by indexed MAC or unique legacy MAC, excludes configured siblings, and refuses ambiguous matches (down → rename → **up**); takes the same `beforeCycle` AF_XDP worker-join hook as `programRethMAC` |
 | `pkg/daemon/daemon_reth.go` | `programRethMAC()` -- sets MAC via netlink (step 2.6 in applyConfig); takes the mandatory `beforeCycle` AF_XDP worker-join hook (#5103) |
-| `pkg/dataplane/compiler.go` | Skips `.link` file when RETH member has virtual MAC |
+| `pkg/dataplane/compiler_iface.go` | Searches for a lost `.link` rename using the indexed RETH key and an unambiguous legacy-MAC fallback |
 
 ## Impact
 

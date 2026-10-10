@@ -531,8 +531,8 @@ options = append(options, &ndp.LinkLayerAddress{
 ```
 
 This is especially important for RETH interfaces with virtual MACs — the RA carries
-the deterministic `02:bf:72:CC:RR:00` MAC, ensuring hosts associate the correct MAC
-with the router's link-local address.
+the deterministic per-node/per-RETH `02:bf:72:CC:RR:(2*reth-index+node-id)` MAC,
+ensuring hosts associate the correct MAC with the router's link-local address.
 
 ## 5. XDP Interaction
 

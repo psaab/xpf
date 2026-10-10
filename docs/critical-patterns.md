@@ -301,7 +301,7 @@ See the deploy backing table in
   (`resolve_fabric_redirect()` / `ingress_is_fabric()` in
   `userspace-dp/src/afxdp/forwarding/mod.rs`; see
   [`fabric-cross-chassis-fwd.md`](fabric-cross-chassis-fwd.md)).
-- **RETH virtual MAC**: per-node `02:bf:72:CC:RR:NN`; `programRethMAC()`
+- **RETH virtual MAC**: per-node, per-RETH `02:bf:72:CC:RR:(2*index+node)`; `programRethMAC()`
   does link DOWN → set MAC → link UP, then `ReconcileVIPs()` re-adds
   VRRP VIPs.
 - **Sync hold**: VRRP starts with `preempt=false`, released after bulk

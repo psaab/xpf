@@ -625,7 +625,7 @@ func TestRandomAdvInterval_Defaults(t *testing.T) {
 }
 
 func TestBuildRA_RethVirtualMAC(t *testing.T) {
-	// RETH virtual MAC pattern: 02:bf:72:CC:RR:00
+	// reth0, node 0 RETH virtual MAC: 02:bf:72:CC:RR:(2*index+node) = ...:00.
 	rethMAC := net.HardwareAddr{0x02, 0xbf, 0x72, 0x01, 0x01, 0x00}
 	s := &sender{
 		cfg: &config.RAInterfaceConfig{

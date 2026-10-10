@@ -284,15 +284,15 @@ the userspace dataplane admission boundary is in
   sweep, and a cycle that exceeds its deadline records
   `IPMonitorCycleOverruns` and defers (never fails) its unfinished targets
   (#5301). `pkg/cluster/monitor.go`.
-- **Bondless RETH**: VRRP on physical member interfaces, per-node virtual
-  MAC (`02:bf:72:CC:RR:NN`), no Linux bonding required.
+- **Bondless RETH**: VRRP on physical member interfaces, per-node/per-RETH
+  MAC (`02:bf:72:CC:RR:(2*reth-index+node-id)`), no Linux bonding required.
 - **VRRP L2 identity is a deliberate deviation from RFC 5798 (#5091).** The RFC
   specifies a *shared* virtual-router MAC — `00-00-5E-00-01-{VRID}` for IPv4 and
   `00-00-5E-00-02-{VRID}` for IPv6 — which both routers use, so the virtual
   router's L2 identity survives a failover untouched. xpf instead derives a
-  **per-node** locally-administered MAC (`02:bf:72:CC:RR:NN` = cluster, RG,
-  node) and advertises from the physical member interface. Two consequences an
-  operator must plan for:
+  **per-node, per-RETH** locally-administered MAC
+  (`02:bf:72:CC:RR:(2*reth-index+node-id)` = cluster, RG, RETH index, node)
+  and advertises from the physical member interface. Two consequences an
   - **Failover changes the L2 identity**, so recovery depends on the
     gratuitous-ARP burst (IPv4) and unsolicited neighbour advertisements
     (IPv6) reaching peers and updating switch FDBs, rather than on the MAC
@@ -309,7 +309,7 @@ the userspace dataplane admission boundary is in
   routinely share an L2 domain — SR-IOV VFs from the same PF, or two ports on
   the same physical switch — and a genuinely shared MAC there produces FDB
   conflicts and MAC flapping as the switch sees one address on two ports. The
-  per-node MAC trades RFC conformance for a deterministic L2 topology. See
+  per-node/per-RETH key also keeps sibling RETHs in one RG distinct. See
   `RethMAC` in `pkg/cluster/reth.go`.
 - **Legacy RETH VRRP reserves VRIDs 101-115 on every RETH member segment
   (#9724).**

@@ -73,19 +73,27 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	rethMACPending := false
 	deferWorkersActive := false
 	var clearDeferWorkers func()
+	rethToPhys := cfg.RethToPhysical()
+	rethMACIndexes := cfg.RethMACIndexes()
+
 	if d.cluster != nil && cfg.Chassis.Cluster != nil && d.dataplane() != nil {
 		cc := cfg.Chassis.Cluster
-		for rethName, physName := range cfg.RethToPhysical() {
+		for rethName, physName := range rethToPhys {
 			rethCfg, ok := cfg.Interfaces.Interfaces[rethName]
 			if !ok || rethCfg == nil || rethCfg.RedundancyGroup <= 0 {
 				continue
 			}
+			rethIndex, ok := rethMACIndexes[rethName]
+			if !ok {
+				slog.Warn("skipping RETH without a supported virtual-MAC index", "reth", rethName)
+				continue
+			}
 			linuxName := config.LinuxIfName(physName)
-			link, err := netlink.LinkByName(linuxName)
+			link, err := rethLinkOpsFn.byName(linuxName)
 			if err != nil {
 				continue
 			}
-			mac := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, cc.NodeID)
+			mac := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, rethIndex, cc.NodeID)
 			if !bytes.Equal(link.Attrs().HardwareAddr, mac) {
 				rethMACPending = true
 				break
@@ -365,10 +373,11 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 		}
 	}
 	// 2.6. Program deterministic virtual MACs on RETH member interfaces.
-	// Each node gets a per-node MAC (02:bf:72:CC:RR:NN) to avoid FDB conflicts
-	// when both nodes' members are on the same L2 domain. VRRP + gratuitous NA
-	// handle failover; RA goodbye packets handle IPv6 default gateway transitions.
-	// Must run AFTER networkd.Apply() so .link renames are applied first.
+	// Each node gets a unique MAC per RETH (02:bf:72:CC:RR:(2*index+node))
+	// to avoid FDB conflicts when both nodes' members share one L2 domain.
+	// VRRP + gratuitous NA handle failover; RA goodbye packets handle IPv6
+	// default gateway transitions. Must run AFTER networkd.Apply() so .link
+	// renames are applied first.
 	needLinkCycleRecovery := false
 	// #7007: set when an aborted member's in-loop rollback rebound WITHOUT
 	// releasing the apply's lease. It is what makes the end-of-apply release
@@ -380,7 +389,10 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	rethRollbackKeptLease := false
 	if d.cluster != nil && cfg.Chassis.Cluster != nil {
 		cc := cfg.Chassis.Cluster
-		rethToPhys := cfg.RethToPhysical()
+		rethMemberNames := make(map[string]struct{}, len(rethToPhys))
+		for _, physName := range rethToPhys {
+			rethMemberNames[config.LinuxIfName(physName)] = struct{}{}
+		}
 
 		// #5103: the AF_XDP worker join is handed to programRethMAC as a
 		// beforeCycle hook rather than run after it returns. Whether a cycle
@@ -400,27 +412,55 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			if !ok || rethCfg == nil || rethCfg.RedundancyGroup <= 0 {
 				continue
 			}
+			rethIndex, ok := rethMACIndexes[rethName]
+			if !ok {
+				slog.Warn("skipping RETH without a supported virtual-MAC index", "reth", rethName)
+				continue
+			}
 			linuxName := config.LinuxIfName(physName)
-			// If the interface doesn't exist under its config name,
-			// find it by RETH virtual MAC and rename it.
-			if _, err := netlink.LinkByName(linuxName); err != nil {
-				mac := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, cc.NodeID)
-				// #6911: renameRethMember cycles the link too, so it gets the
-				// same worker join programRethMAC has had since #5103. The
-				// lease PrepareLinkCycle takes is released by the
-				// abandonLinkCycleLease deferred over this whole apply, so the
-				// rebind is owned exactly as it is for the MAC-programming
-				// cycle — this hook adds a join, not a new lifecycle.
+			// If the interface doesn't exist under its config name, find it by
+			// its indexed MAC, or by the legacy shared MAC when upgrading.
+			if _, err := rethLinkOpsFn.byName(linuxName); err != nil {
+				mac := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, rethIndex, cc.NodeID)
+				legacyMAC := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, 0, cc.NodeID)
+				var renameRuntime dataplane.RuntimeDataPlane
+				renamePrepared := false
 				renameJoin := func() error {
 					rt := d.dataplane()
 					if rt == nil {
 						return nil
 					}
+					renameRuntime = rt
+					renamePrepared = true
 					slog.Info("userspace: stopping workers before RETH member rename",
 						"iface", linuxName)
 					return rt.Link().PrepareLinkCycle()
 				}
-				if oldName := renameRethMember(linuxName, mac, renameJoin); oldName != "" {
+				oldName, renameCycled, renameErr := renameRethMember(
+					linuxName, mac, legacyMAC, rethMemberNames, renameJoin)
+				if renameErr != nil {
+					slog.Warn("failed to recover RETH member interface",
+						"to", linuxName, "err", renameErr)
+					if renamePrepared {
+						networkdErr = errors.Join(networkdErr,
+							fmt.Errorf("%w: %w", errRethPrepareLinkCycle, renameErr))
+					}
+				}
+				if renameCycled {
+					// The rename itself is a link cycle. Reconcile addresses
+					// and rebind workers in the apply-wide recovery tail.
+					needLinkCycleRecovery = true
+				} else if renamePrepared {
+					// A prepare that failed before a link cycle still needs its
+					// worker state repaired. Keep the apply lease until the
+					// final release, just as the MAC-cycle rollback does.
+					rethRollbackKeptLease = true
+					if err := renameRuntime.Link().NotifyLinkCycleKeepingLease(); err != nil {
+						networkdErr = errors.Join(networkdErr,
+							fmt.Errorf("%w: %w", errRethPrepareLinkCycle, err))
+					}
+				}
+				if oldName != "" {
 					slog.Info("renamed RETH member interface",
 						"from", oldName, "to", linuxName)
 					fixRethLinkFile(linuxName, oldName)
@@ -429,11 +469,10 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 			// Ensure the .link file uses OriginalName= (not MACAddress=)
 			// for stable matching across reboots. The bootstrap .link
 			// files may use MACAddress= which breaks after virtual MAC
-			// programming — the interface reboots with physical MAC but
-			// the MACAddress= line might reference the wrong one.
+			// programming — the MACAddress= line might reference the wrong one.
 			ensureRethLinkOriginalName(linuxName)
 			setRethIPv6Knobs(linuxName)
-			mac := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, cc.NodeID)
+			mac := cluster.RethMAC(cc.ClusterID, rethCfg.RedundancyGroup, rethIndex, cc.NodeID)
 			networkdErr, needLinkCycleRecovery, rethRollbackKeptLease =
 				d.programRethMemberMAC(linuxName, mac, networkdErr,
 					needLinkCycleRecovery, rethRollbackKeptLease)

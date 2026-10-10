@@ -20,9 +20,8 @@ var schemaChassis = &schemaNode{desc: "Chassis configuration", children: map[str
 	// contract consumes identity tokens without validation; typing them
 	// needs a new walker feature (deferred, see docs/config-schema.md).
 	"cluster": {desc: "Chassis cluster (high-availability) configuration", children: map[string]*schemaNode{
-		// One byte in the RETH virtual MAC 02:bf:72:CC:RR:NN
-		// (cluster.RethMAC, pkg/cluster/reth.go:113) and in the stable
-		// link-local (reth.go:124) — 256+ would silently alias MACs.
+		// One byte of the RETH virtual MAC 02:bf:72:CC:RR:(2*reth-index+node).
+		// The cluster-id byte remains bounded to 0..255; 256+ would alias MACs.
 		// Heartbeat wire is uint16 (heartbeat.go:128), so the MAC byte
 		// is the narrowest consumer. Junos vSRX: 0..255 (0 = disabled).
 		// Deployed: 22 (docs/ha-cluster-userspace.conf:64).
@@ -47,7 +46,7 @@ var schemaChassis = &schemaNode{desc: "Chassis configuration", children: map[str
 			validator:     ValidateInteger(0, 1),
 			children:      nil,
 		},
-		// Junos vSRX reth-count range 1..128. Compiled verbatim
+		// Junos vSRX reth-count range 1..MaxRethCount. Compiled verbatim
 		// (compiler_system.go) and consumed for display (`show chassis
 		// cluster information`, pkg/cli/cli_show_cluster.go:182).
 		"reth-count": {
@@ -56,7 +55,7 @@ var schemaChassis = &schemaNode{desc: "Chassis configuration", children: map[str
 			valueType:     ValueInteger,
 			valueDesc:     "Number of RETH interfaces (1..128)",
 			valueExamples: []string{"2"},
-			validator:     ValidateInteger(1, 128),
+			validator:     ValidateInteger(1, MaxRethCount),
 			children:      nil,
 		},
 		// Milliseconds. xpf-DIVERGENT from Junos (1000..2000 ms): the

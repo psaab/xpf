@@ -32,7 +32,7 @@ func TestEUI64LinkLocal(t *testing.T) {
 		},
 		{
 			name: "reth-virtual-mac",
-			// RETH virtual MAC form 02:bf:72:CC:RR:NN; bit already set -> 0x00.
+			// reth0 MAC: the packed index/node octet is 0 for node 0.
 			mac:  net.HardwareAddr{0x02, 0xbf, 0x72, 0x01, 0x00, 0x00},
 			want: net.IP{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x00, 0xbf, 0x72, 0xff, 0xfe, 0x01, 0x00, 0x00},
 		},

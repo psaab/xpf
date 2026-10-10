@@ -1216,6 +1216,11 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 		clusterNodeID = cfg.Chassis.Cluster.NodeID
 	}
 	rethToPhys := cfg.RethToPhysical()
+	rethMACIndexes := cfg.RethMACIndexes()
+	rethMemberNames := make(map[string]struct{}, len(rethToPhys))
+	for _, physicalName := range rethToPhys {
+		rethMemberNames[config.LinuxIfName(physicalName)] = struct{}{}
+	}
 	for ifName, ifCfg := range cfg.Interfaces.Interfaces {
 		if ifCfg == nil {
 			continue
@@ -1327,21 +1332,23 @@ func buildInterfaceNetworkdModels(cfg *config.Config, result *CompileResult, see
 		physIface, err := result.cachedInterfaceByName(linuxName)
 		if err != nil && isVRRPReth && cfg.Chassis.Cluster != nil {
 			// Interface not found under its config name — it may exist
-			// under its kernel name if the .link rename was lost. Search
-			// by the expected RETH virtual MAC.
-			rgID := effectiveCfg.RedundancyGroup
-			// #8340 (K105): the SAME construction the daemon programs, not a
-			// second copy of the literal. This is a search KEY — a format drift
-			// in one copy would make the recovery search find nothing and drop
-			// the RETH member silently, which is the failure this path exists
-			// to prevent.
-			expectedMAC := config.RethVirtualMAC(
-				cfg.Chassis.Cluster.ClusterID, rgID, clusterNodeID)
-			physIface = findInterfaceByMAC(expectedMAC)
+			// under its kernel name if the .link rename was lost.
+			rethIndex, ok := rethMACIndexes[ifCfg.RedundantParent]
+			if ok {
+				rgID := effectiveCfg.RedundancyGroup
+				expectedMAC := config.RethVirtualMAC(
+					cfg.Chassis.Cluster.ClusterID, rgID, rethIndex, clusterNodeID)
+				legacyMAC := config.RethVirtualMAC(
+					cfg.Chassis.Cluster.ClusterID, rgID, 0, clusterNodeID)
+				if ifaces, listErr := net.Interfaces(); listErr == nil {
+					physIface = findRethMemberByMAC(
+						expectedMAC, legacyMAC, ifaces, rethMemberNames)
+				}
+			}
 			if physIface != nil {
 				slog.Info("found RETH member under kernel name",
 					"config", linuxName, "actual", physIface.Name,
-					"mac", expectedMAC)
+					"mac", physIface.HardwareAddr)
 				// Mark kernel name as seen so unmanaged detection skips it.
 				seen[physIface.Name] = true
 				// Use OriginalName= in .link for stable matching across

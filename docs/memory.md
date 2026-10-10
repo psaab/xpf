@@ -69,7 +69,7 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
 
 ### Chassis Cluster (HA)
 - **State machine:** StateSecondary(0), StatePrimary(1), SecondaryHold(2), Lost(3), Disabled(4); weight-based election
-- **VRRP-backed RETH (bondless):** native Go VRRPv3 (`pkg/vrrp/`), 30ms interval (configurable), virtual MAC `02:bf:72:CC:RR:NN`
+- **VRRP-backed RETH (bondless):** native Go VRRPv3 (`pkg/vrrp/`), 30ms interval (configurable), per-node/per-RETH MAC `02:bf:72:CC:RR:(2*index+node)`
 - **Sync:** TCP RTO on fabric link — 11 msg types (sessions, config, IPsec SA, failover, fence); incremental 1s sweep + GC delete callbacks; `writeMu` serializes ALL conn.Write paths
 - **Sync hardening (#69-#73):** connection-specific disconnect (stale goroutine guard), per-RG BulkSync filtering, stale session reconciliation on BulkEnd, peer fencing (`syncMsgFence`), hard-crash test (`make test-ha-crash`)
 - **Sync race fixes (#76-#80):** writeMu + single-buffer writeMsg, sync-hold 30s+reason, config authority, fast fabric_fwd ARP probe, fresh config per tick

@@ -1987,19 +1987,43 @@ func getPermAddr(ifName string, result *CompileResult) string {
 	return perm.String()
 }
 
-// findInterfaceByMAC searches all system interfaces for one matching the
-// given MAC address. Used to locate RETH members that weren't renamed.
-func findInterfaceByMAC(mac net.HardwareAddr) *net.Interface {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return nil
-	}
+// findInterfaceByMAC returns the unique interface with mac, excluding names
+// already assigned to configured RETH members. A count greater than one is
+// ambiguous and must not be resolved by host interface enumeration order.
+func findInterfaceByMAC(mac net.HardwareAddr, ifaces []net.Interface,
+	excludedNames map[string]struct{}) (*net.Interface, int) {
+	var found *net.Interface
+	matches := 0
 	for i := range ifaces {
+		if _, excluded := excludedNames[ifaces[i].Name]; excluded {
+			continue
+		}
 		if bytes.Equal(ifaces[i].HardwareAddr, mac) {
-			return &ifaces[i]
+			found = &ifaces[i]
+			matches++
 		}
 	}
-	return nil
+	return found, matches
+}
+
+func findRethMemberByMAC(expectedMAC, legacyMAC net.HardwareAddr,
+	ifaces []net.Interface, excludedNames map[string]struct{}) *net.Interface {
+	found, matches := findInterfaceByMAC(expectedMAC, ifaces, excludedNames)
+	if matches > 1 {
+		slog.Warn("skipping ambiguous indexed-MAC RETH member recovery",
+			"mac", expectedMAC, "matches", matches)
+		return nil
+	}
+	if found != nil || bytes.Equal(expectedMAC, legacyMAC) {
+		return found
+	}
+	found, matches = findInterfaceByMAC(legacyMAC, ifaces, excludedNames)
+	if matches > 1 {
+		slog.Warn("skipping ambiguous legacy-MAC RETH member recovery",
+			"mac", legacyMAC, "matches", matches)
+		return nil
+	}
+	return found
 }
 
 // readOriginalNameFromLink reads the OriginalName= value from an existing
