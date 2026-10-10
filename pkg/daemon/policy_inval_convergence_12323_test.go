@@ -938,6 +938,109 @@ func failConfirmedRollbackTarget12072(t *testing.T, r *convergenceRun12072, c1 *
 	}
 }
 
+func publishConfirmedRollbackTarget12072(
+	t *testing.T, r *convergenceRun12072, c0 *config.Config, host string, policies []string,
+) (*config.Config, uint64, error) {
+	t.Helper()
+	store := r.h.d.store
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	if err := store.LoadOverride(policySetConfigText12072(host, policies)); err != nil {
+		store.ExitConfigure()
+		t.Fatalf("LoadOverride %s: %v", host, err)
+	}
+	c1, err := store.CommitConfirmed(1)
+	store.ExitConfigure()
+	if err != nil {
+		t.Fatalf("CommitConfirmed %s: %v", host, err)
+	}
+	gen := store.ConfirmGenForTesting()
+	t.Cleanup(func() { _ = store.ConfirmCommit() })
+
+	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
+		t.Fatalf("acquire apply semaphore: %v", err)
+	}
+	_, applyErr := r.h.d.applyAndSyncCommitted(c0, c1, peerSyncNever)
+	r.h.d.applySem.Release(1)
+	_, _ = r.h.sender.ApplyQueuedMessagesForTesting(r.h.receiver)
+	return c1, gen, applyErr
+}
+
+func TestPolicyInvalidationLandedDeleteDebtRollbackToPredecessor12323(t *testing.T) {
+	r, c0 := newLandedRollbackRun12072(t)
+	r.dp.deleteErrOnce = true
+	c1, gen, applyErr := publishConfirmedRollbackTarget12072(
+		t, r, c0, "rollback-predecessor-c1", []string{"p-first", "b", "web"})
+	if applyErr == nil {
+		t.Fatal("C0->C1 failed candidate delete was not surfaced")
+	}
+	if debt := r.h.d.policyInvalidationDebt; debt == nil || debt.newCfg != c1 ||
+		debt.capture == nil || len(debt.capture.deleted.policy) == 0 {
+		t.Fatalf("C1 did not retain its failed delete candidate: %+v", debt)
+	}
+
+	r.h.d.executeConfirmedRollback(gen)
+	if r.h.d.store.ActiveConfig() != c0 || r.dp.applied != c0 {
+		t.Fatalf("rollback authority: store=%p helper=%p, want C0 %p",
+			r.h.d.store.ActiveConfig(), r.dp.applied, c0)
+	}
+	if r.hasDeletedSession(1) || !r.hasLiveSession(1) {
+		t.Fatalf("rollback to C0 over-deleted its re-authorized session: deleted=%v live=%v",
+			r.hasDeletedSession(1), r.hasLiveSession(1))
+	}
+	if r.h.d.policyInvalidationDebt != nil || !r.h.d.store.ActiveApplied() {
+		t.Fatalf("rollback did not retire the undone delete debt: debt=%+v ActiveApplied=%v",
+			r.h.d.policyInvalidationDebt, r.h.d.store.ActiveApplied())
+	}
+}
+
+func TestPolicyInvalidationLandedScanDebtRollbackToPredecessorStaysFailClosed12323(t *testing.T) {
+	r, c0 := newLandedRollbackRun12072(t)
+	r.dp.incompleteNext = 1
+	_, gen, applyErr := publishConfirmedRollbackTarget12072(
+		t, r, c0, "rollback-scan-predecessor-c1", []string{"p-first", "b", "web"})
+	if applyErr == nil {
+		t.Fatal("C0->C1 incomplete policy scan was not surfaced")
+	}
+	if debt := r.h.d.policyInvalidationDebt; debt == nil || debt.scanFailure == nil {
+		t.Fatalf("C1 did not retain its published scan-failure debt: %+v", debt)
+	}
+
+	r.h.d.executeConfirmedRollback(gen)
+	debt := r.h.d.policyInvalidationDebt
+	if r.h.d.store.ActiveConfig() != c0 || r.dp.applied != c0 {
+		t.Fatalf("rollback authority: store=%p helper=%p, want C0 %p",
+			r.h.d.store.ActiveConfig(), r.dp.applied, c0)
+	}
+	if debt == nil || debt.scanFailure == nil {
+		t.Fatalf("rollback discarded scan failure instead of remaining fail-closed: debt=%+v", debt)
+	}
+	if !r.hasLiveSession(1) || r.hasDeletedSession(1) {
+		t.Fatalf("rollback scan debt changed the re-authorized session: live=%v deleted=%v",
+			r.hasLiveSession(1), r.hasDeletedSession(1))
+	}
+
+	clearDP := &fullClearSurfaceDP12072{
+		Manager: dataplane.New(),
+		applied: c0,
+		clear: func() (int, int, error) {
+			cleared := len(r.dp.rows)
+			r.dp.rows = nil
+			return cleared, 0, nil
+		},
+	}
+	r.h.d.setDataplane(clearDP)
+	v4, v6, err := (liveDataPlane{daemon: r.h.d}).ClearAllSessions()
+	if err != nil || v4 != 3 || v6 != 0 {
+		t.Fatalf("authoritative full clear = (%d,%d,%v), want (3,0,nil)", v4, v6, err)
+	}
+	if r.h.d.policyInvalidationDebt != nil || !r.h.d.store.ActiveApplied() {
+		t.Fatalf("full clear did not recover the rollback scan debt: debt=%+v ActiveApplied=%v",
+			r.h.d.policyInvalidationDebt, r.h.d.store.ActiveApplied())
+	}
+}
+
 func TestPolicyInvalidationLandedScanDebtSurvivesConfirmedRollback12323(t *testing.T) {
 	r, c0 := newLandedRollbackRun12072(t)
 	r.dp.incompleteNext = 1

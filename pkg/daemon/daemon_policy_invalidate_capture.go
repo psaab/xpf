@@ -83,6 +83,9 @@ type policyInvalidationScanFailure struct {
 type policyInvalidationDebt struct {
 	oldCfg            *config.Config
 	newCfg            *config.Config
+	// predecessorCfg is retained across authority re-anchors to recognize
+	// when a rollback exactly restores the target's predecessor.
+	predecessorCfg    *config.Config
 	renameApply       *pendingRenameApply
 	capture           *policyInvalidationCapture
 	scanFailure       *policyInvalidationScanFailure
@@ -338,11 +341,23 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	var previousScanFailure *policyInvalidationScanFailure
 	var landed *policyInvalidationDebt
 	if debt := d.policyInvalidationDebt; debt != nil {
+		undoesLandedTarget := applied != nil && debt.newCfg == applied &&
+			plan.newCfg != applied && debt.predecessorCfg != nil &&
+			debt.predecessorCfg == plan.newCfg
 		if applied != nil && debt.newCfg == applied && plan.newCfg != applied {
-			// A landed debt's own predecessor was already merged into it and
-			// can never be restored again; cut the chain so it stays bounded.
-			debt.landed = nil
-			landed = debt
+			// An exact rollback restores the landed target's predecessor, so
+			// its candidates are no longer owed. Restore only any earlier
+			// landed debt; preserve scanFailure below to remain fail-closed
+			// until a complete capture or authoritative full clear.
+			if undoesLandedTarget {
+				landed = debt.landed
+			} else {
+				// A landed debt's own predecessor was already merged into it
+				// and can never be restored again; cut the chain so it stays
+				// bounded.
+				debt.landed = nil
+				landed = debt
+			}
 		} else if debt.newCfg != applied {
 			// An unlanded predecessor passes on the landed obligation it was
 			// itself carrying (nested superseding target, same-target retry).
@@ -350,14 +365,26 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 		}
 		previousCapture = debt.capture
 		previousScanFailure = debt.scanFailure
+		if undoesLandedTarget {
+			// The current capture may contain both this target's candidates
+			// and its predecessor's. Only the latter remain owed after undo.
+			previousCapture = nil
+			if landed != nil {
+				previousCapture = landed.capture
+			}
+		}
 		if debt.newCfg == plan.newCfg {
 			previousGeneration = debt.publishGeneration
 		}
 	}
+	predecessorCfg := plan.oldCfg
+	if debt := d.policyInvalidationDebt; debt != nil && debt.newCfg == plan.newCfg {
+		predecessorCfg = debt.predecessorCfg
+	}
 	d.policyInvalidationDebt = &policyInvalidationDebt{
-		oldCfg: plan.oldCfg, newCfg: plan.newCfg, renameApply: plan.renameApply,
-		scanFailure: previousScanFailure, publishGeneration: previousGeneration,
-		landed: landed,
+		oldCfg: plan.oldCfg, newCfg: plan.newCfg, predecessorCfg: predecessorCfg,
+		renameApply: plan.renameApply, scanFailure: previousScanFailure,
+		publishGeneration: previousGeneration, landed: landed,
 	}
 
 	// The three target sets are computed HERE, once, and the clears consume the
@@ -633,7 +660,7 @@ func (d *Daemon) refusePolicyInvalidationAuthorityLocked(
 		return
 	}
 	d.policyInvalidationDebt = &policyInvalidationDebt{
-		oldCfg: plan.oldCfg, newCfg: plan.newCfg,
+		oldCfg: plan.oldCfg, newCfg: plan.newCfg, predecessorCfg: plan.oldCfg,
 		renameApply: plan.renameApply, authorityRefusal: err,
 	}
 }
