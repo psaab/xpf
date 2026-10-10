@@ -13293,6 +13293,209 @@ fn a_refused_pptp_install_reaches_the_worker_on_retry_12133() {
     assert_eq!(worker_two.pptp().resolve(pns, 0xBBBB), Some(handle));
 }
 
+/// Drive the Astra F1-FIFO schedule with the real worker-command drain.
+///
+/// Q has a 4095-command backlog when X publishes an older CDN and then a
+/// replacement call using the released PAC alias. The CDN is accepted in Q's
+/// final slot; the replacement install is refused. Q drains exactly one real
+/// 256-command prefix before its self-excluding retry pass, leaving the CDN
+/// behind 3839 older commands.
+fn run_own_pptp_retry_behind_queued_cdn_12133(own_retry: bool) -> (Option<u32>, usize) {
+    use crate::session::pptp::{ControlChannelId, PptpCall};
+    use crate::session::pptp_control::{
+        PendingControlSegment, PptpControlInbox,
+        fixtures_7699::{call_disconnect_notify, outgoing_call_reply},
+    };
+
+    let (pac, pns): (IpAddr, IpAddr) = (
+        "198.51.100.7".parse().unwrap(),
+        "203.0.113.9".parse().unwrap(),
+    );
+    let control = ControlChannelId::new(pac, 1723, pns, 49152);
+    let old_call = PptpCall::new(pac, 0x1111, pns, 0x2222);
+    let new_call = PptpCall::new(pac, 0x1111, pns, 0x3333);
+    let new_handle = new_call.handle();
+    let queues: Vec<_> = (0..2)
+        .map(|_| Arc::new(Mutex::new(VecDeque::new())))
+        .collect();
+    let q_id = Arc::as_ptr(&queues[0]) as usize;
+    let mut q_sessions = SessionTable::new();
+    let mut x_sessions = SessionTable::new();
+    q_sessions
+        .pptp_mut()
+        .install(old_call, control, 10)
+        .expect("old Q association");
+    x_sessions
+        .pptp_mut()
+        .install(old_call, control, 10)
+        .expect("old X association");
+    {
+        let mut pending = queues[0].lock().expect("Q queue");
+        for _ in 0..4095 {
+            pending.push_back(WorkerCommand::VacateAllSharedExactSlots);
+        }
+    }
+
+    let inbox = PptpControlInbox::default();
+    assert!(inbox.push(PendingControlSegment {
+        src: pac,
+        dst: pns,
+        src_port: 1723,
+        dst_port: 49152,
+        captured_ns: 20,
+        payload: call_disconnect_notify(0x1111),
+    }));
+    assert!(inbox.push(PendingControlSegment {
+        src: pac,
+        dst: pns,
+        src_port: 1723,
+        dst_port: 49152,
+        captured_ns: 30,
+        payload: outgoing_call_reply(0x1111, 0x3333, 1),
+    }));
+    assert_eq!(
+        crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
+            &inbox,
+            &mut x_sessions,
+            Some(&queues[1]),
+            std::slice::from_ref(&queues[0]),
+            1_000_000_000,
+        ),
+        1
+    );
+    assert_eq!(x_sessions.pptp().resolve(pac, 0x1111), Some(new_handle));
+    {
+        let pending = queues[0].lock().expect("Q queue");
+        assert_eq!(pending.len(), 4096);
+        assert!(
+            matches!(
+                pending.back(),
+                Some(WorkerCommand::ForgetPptpCallByControl(_))
+            ),
+            "the CDN must occupy Q's last command slot"
+        );
+    }
+
+    let session_map = SteeringMap::unshared_for_test(-1);
+    let forwarding = test_forwarding_state();
+    let ha_state = BTreeMap::new();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut scratch = VecDeque::new();
+    let apply_q_once = |sessions: &mut SessionTable, scratch: &mut VecDeque<WorkerCommand>| {
+        apply_worker_commands(
+            &queues[0],
+            sessions,
+            session_map,
+            -1,
+            -1,
+            &forwarding,
+            &ha_state,
+            &dynamic_neighbors,
+            0,
+            scratch,
+        )
+    };
+    // One production-equivalent pass: exactly 256 ordinary commands, leaving
+    // the CDN behind 3839 commands.
+    let result = apply_q_once(&mut q_sessions, &mut scratch);
+    assert!(result.commands_backlogged);
+    assert_eq!(queues[0].lock().expect("Q queue").len(), 4096 - 256);
+    assert_eq!(
+        q_sessions.pptp().resolve(pns, 0x2222),
+        Some(old_call.handle()),
+        "the queued CDN has not reached Q's table yet"
+    );
+
+    if own_retry {
+        crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
+            &inbox,
+            &mut q_sessions,
+            Some(&queues[0]),
+            std::slice::from_ref(&queues[1]),
+            2_000_000_000,
+        );
+    } else {
+        // Peer-enqueue control on the same queue/backlog. X's peer list
+        // contains Q, so the install must follow the already-queued CDN.
+        crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
+            &inbox,
+            &mut x_sessions,
+            Some(&queues[1]),
+            std::slice::from_ref(&queues[0]),
+            2_000_000_000,
+        );
+    }
+
+    for _ in 0..32 {
+        let result = apply_q_once(&mut q_sessions, &mut scratch);
+        if !result.commands_backlogged {
+            break;
+        }
+    }
+    assert!(queues[0].lock().expect("Q queue").is_empty());
+
+    // A later retry interval exposes whether a failed local collision was
+    // wrongly acknowledged and discarded. The peer control has already
+    // queued its install behind the CDN.
+    if own_retry {
+        crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
+            &inbox,
+            &mut q_sessions,
+            Some(&queues[0]),
+            std::slice::from_ref(&queues[1]),
+            3_000_000_000,
+        );
+    }
+    let pending_install_count = inbox
+        .take_call_install_retries(4_000_000_000)
+        .iter()
+        .filter(|retry| retry.unsent_queue_ids.contains(&q_id))
+        .count();
+    (
+        q_sessions.pptp().resolve(pac, 0x1111),
+        pending_install_count,
+    )
+}
+
+#[test]
+fn own_pptp_retry_does_not_overtake_queued_cdn_12133() {
+    let (resolved, pending) = run_own_pptp_retry_behind_queued_cdn_12133(true);
+    eprintln!(
+        "CDN_FIFO: own_retry=true, new_call_resolve={resolved:?}, \
+         expected=1907514186, pending_installs={pending}"
+    );
+    let (pac, pns): (IpAddr, IpAddr) = (
+        "198.51.100.7".parse().unwrap(),
+        "203.0.113.9".parse().unwrap(),
+    );
+    assert_eq!(
+        resolved,
+        Some(crate::session::pptp::PptpCall::new(pac, 0x1111, pns, 0x3333).handle()),
+        "own retry overtook the older queued CDN, hit AllocatorCollision, \
+         and was acknowledged/lost"
+    );
+    assert_eq!(pending, 0);
+}
+
+#[test]
+fn peer_pptp_retry_preserves_queued_cdn_ordering_12133() {
+    let (resolved, pending) = run_own_pptp_retry_behind_queued_cdn_12133(false);
+    eprintln!(
+        "CDN_FIFO: own_retry=false, new_call_resolve={resolved:?}, \
+         expected=1907514186, pending_installs={pending}"
+    );
+    let (pac, pns): (IpAddr, IpAddr) = (
+        "198.51.100.7".parse().unwrap(),
+        "203.0.113.9".parse().unwrap(),
+    );
+    assert_eq!(
+        resolved,
+        Some(crate::session::pptp::PptpCall::new(pac, 0x1111, pns, 0x3333).handle()),
+        "peer-enqueue retry must be ordered behind the older queued CDN"
+    );
+    assert_eq!(pending, 0);
+}
+
 /// #7699 stage 2 END-TO-END: control-channel BYTES through to an association a
 /// data packet resolves against.
 ///

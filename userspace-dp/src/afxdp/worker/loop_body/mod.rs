@@ -2044,7 +2044,7 @@ pub(crate) fn worker_loop(
         crate::afxdp::worker_queue::drain_pptp_control_inbox_for_worker(
             &pptp_control,
             &mut sessions,
-            Some(Arc::as_ptr(&commands) as usize),
+            Some(&commands),
             &peer_worker_commands,
             loop_now_ns,
         );

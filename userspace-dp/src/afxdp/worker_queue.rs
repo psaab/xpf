@@ -1013,35 +1013,54 @@ pub(in crate::afxdp) fn broadcast_pptp_install(
 fn retry_pending_pptp_call_installs(
     inbox: &crate::session::pptp_control::PptpControlInbox,
     sessions: &mut crate::session::SessionTable,
-    self_worker_queue_id: Option<usize>,
+    self_worker_commands: Option<&Arc<Mutex<VecDeque<WorkerCommand>>>>,
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     now_ns: u64,
 ) {
+    let self_worker_queue_id = self_worker_commands.map(|queue| Arc::as_ptr(queue) as usize);
     for retry in inbox.take_call_install_retries(now_ns) {
         // A worker's peer list excludes itself. If it was the refused
-        // recipient, apply the install directly to its own table instead of
-        // consuming the shared retry gate and skipping the record.
-        if let Some(queue_id) = self_worker_queue_id
+        // recipient, preserve its queue's FIFO just as for peers: an empty
+        // queue permits a local install; otherwise append behind its backlog.
+        if let Some(queue) = self_worker_commands
+            && let Some(queue_id) = self_worker_queue_id
             && retry.unsent_queue_ids.contains(&queue_id)
         {
-            if let Err(e) = sessions
-                .pptp_mut()
-                .install(retry.call, retry.control, retry.learned_ns)
-            {
-                debug_log!("PPTP association refused: {:?}", e);
+            let mut pending = lock_recover(queue);
+            if pending.is_empty() {
+                match sessions
+                    .pptp_mut()
+                    .install(retry.call, retry.control, retry.learned_ns)
+                {
+                    Ok(_) => inbox.mark_call_install_sent(
+                        retry.call,
+                        retry.control,
+                        retry.learned_ns,
+                        queue_id,
+                    ),
+                    Err(e) => {
+                        // The install error does not distinguish a permanent
+                        // handle collision from an alias held until an older
+                        // teardown arrives. Retain the retry for the next
+                        // interval on any error rather than lose a transient
+                        // AllocatorCollision.
+                        debug_log!("PPTP association refused; retaining retry: {:?}", e);
+                    }
+                }
+            } else if push_bounded(
+                &mut pending,
+                WorkerCommand::InstallPptpCall {
+                    call: retry.call,
+                    control: retry.control,
+                    learned_ns: retry.learned_ns,
+                },
+            ) {
+                inbox.mark_call_install_sent(retry.call, retry.control, retry.learned_ns, queue_id);
             }
-            inbox.mark_call_install_sent(
-                retry.call,
-                retry.control,
-                retry.learned_ns,
-                queue_id,
-            );
         }
         for queue in peer_worker_commands {
             let queue_id = Arc::as_ptr(queue) as usize;
-            if Some(queue_id) == self_worker_queue_id
-                || !retry.unsent_queue_ids.contains(&queue_id)
-            {
+            if Some(queue_id) == self_worker_queue_id || !retry.unsent_queue_ids.contains(&queue_id) {
                 continue;
             }
             let mut pending = lock_recover(queue);
@@ -1053,12 +1072,7 @@ fn retry_pending_pptp_call_installs(
                     learned_ns: retry.learned_ns,
                 },
             ) {
-                inbox.mark_call_install_sent(
-                    retry.call,
-                    retry.control,
-                    retry.learned_ns,
-                    queue_id,
-                );
+                inbox.mark_call_install_sent(retry.call, retry.control, retry.learned_ns, queue_id);
             }
         }
     }
@@ -1140,19 +1154,20 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox(
 /// broadcast alone would therefore teach every worker but the one that saw the
 /// segment — and since RSS does not co-locate the control and data channels,
 /// that worker is as likely as any to be the one the call's GRE data lands on.
-/// The local install is not a duplicate of the broadcast; it is the half the
-/// broadcast structurally cannot reach.
+/// A refused retry for this worker uses its own queue when present, preserving
+/// command order behind an existing backlog. Only an empty queue permits a
+/// direct local install.
 pub(in crate::afxdp) fn drain_pptp_control_inbox_for_worker(
     inbox: &crate::session::pptp_control::PptpControlInbox,
     sessions: &mut crate::session::SessionTable,
-    self_worker_queue_id: Option<usize>,
+    self_worker_commands: Option<&Arc<Mutex<VecDeque<WorkerCommand>>>>,
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     now_ns: u64,
 ) -> usize {
     retry_pending_pptp_call_installs(
         inbox,
         sessions,
-        self_worker_queue_id,
+        self_worker_commands,
         peer_worker_commands,
         now_ns,
     );
@@ -1356,8 +1371,6 @@ mod pptp_broadcast_tests_7699 {
         let pac: std::net::IpAddr = "198.51.100.7".parse().unwrap();
         let pns: std::net::IpAddr = "203.0.113.9".parse().unwrap();
         let queues = queues(2);
-        let q_id = Arc::as_ptr(&queues[0]) as usize;
-        let x_id = Arc::as_ptr(&queues[1]) as usize;
         {
             let mut full = queues[0].lock().expect("Q queue");
             for _ in 0..MAX_PENDING_WORKER_COMMANDS {
@@ -1381,7 +1394,7 @@ mod pptp_broadcast_tests_7699 {
             drain_pptp_control_inbox_for_worker(
                 &inbox,
                 &mut x_sessions,
-                Some(x_id),
+                Some(&queues[1]),
                 std::slice::from_ref(&queues[0]),
                 1_000_000_000,
             ),
@@ -1398,14 +1411,14 @@ mod pptp_broadcast_tests_7699 {
             "the full Q queue must have refused X's first broadcast"
         );
 
-        queues[0].lock().expect("Q queue").clear();
+        drain_queue_bounded(&queues[0]);
         // Q's peer list contains X, but excludes Q. Q is first through the
         // retry gate, so its own table must receive the refused record.
         assert_eq!(
             drain_pptp_control_inbox_for_worker(
                 &inbox,
                 &mut q_sessions,
-                Some(q_id),
+                Some(&queues[0]),
                 std::slice::from_ref(&queues[1]),
                 2_000_000_000,
             ),
@@ -1418,6 +1431,84 @@ mod pptp_broadcast_tests_7699 {
             "Q skipped its own refused queue after consuming the shared retry gate"
         );
         assert_eq!(q_sessions.pptp().resolve(pns, 0x2222), Some(handle));
+    }
+
+    /// A local alias collision is not an acknowledgement: the install can
+    /// succeed on a later retry after the old association is released.
+    #[test]
+    fn own_retry_retains_allocator_collision_until_alias_is_free_12133() {
+        use crate::session::pptp::{ControlChannelId, PptpCall};
+        use crate::session::pptp_control::PptpControlInbox;
+
+        let (pac, pns): (std::net::IpAddr, std::net::IpAddr) = (
+            "198.51.100.7".parse().unwrap(),
+            "203.0.113.9".parse().unwrap(),
+        );
+        let control = ControlChannelId::new(pac, 1723, pns, 49152);
+        let old_call = PptpCall::new(pac, 0x1111, pns, 0x2222);
+        let replacement = PptpCall::new(pac, 0x1111, pns, 0x3333);
+        let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let queue_id = Arc::as_ptr(&queue) as usize;
+        let inbox = PptpControlInbox::default();
+        let mut sessions = crate::session::SessionTable::new();
+        sessions
+            .pptp_mut()
+            .install(old_call, control, 10)
+            .expect("old association");
+        inbox.record_call_install(replacement, control, 30, vec![queue_id]);
+
+        drain_pptp_control_inbox_for_worker(
+            &inbox,
+            &mut sessions,
+            Some(&queue),
+            &[],
+            1_000_000_000,
+        );
+        let retry = inbox.take_call_install_retries(2_000_000_000);
+        assert_eq!(
+            retry.len(),
+            1,
+            "AllocatorCollision on an empty own queue must retain the retry"
+        );
+        assert_eq!(retry[0].unsent_queue_ids, vec![queue_id]);
+        assert_eq!(
+            sessions.pptp().resolve(pac, 0x1111),
+            Some(old_call.handle()),
+            "failed replacement must not disturb the old association"
+        );
+
+        assert!(sessions.pptp_mut().remove(old_call.handle()));
+        drain_pptp_control_inbox_for_worker(
+            &inbox,
+            &mut sessions,
+            Some(&queue),
+            &[],
+            3_000_000_000,
+        );
+        assert_eq!(
+            sessions.pptp().resolve(pac, 0x1111),
+            Some(replacement.handle()),
+            "the retained retry must install after the alias becomes free"
+        );
+        assert!(
+            inbox.take_call_install_retries(4_000_000_000).is_empty(),
+            "a successful local install must acknowledge the recipient"
+        );
+    }
+
+    fn drain_queue_bounded(queue: &Arc<Mutex<VecDeque<WorkerCommand>>>) {
+        let mut scratch = VecDeque::new();
+        for _ in 0..MAX_PENDING_WORKER_COMMANDS.div_ceil(WORKER_COMMAND_DRAIN_BUDGET) {
+            let backlogged = {
+                let mut pending = lock_recover(queue);
+                drain_bounded_into(&mut pending, &mut scratch)
+            };
+            scratch.clear();
+            if !backlogged {
+                break;
+            }
+        }
+        assert!(queue.lock().expect("drained queue").is_empty());
     }
 
     /// A CDN cancels an outstanding install retry before the queue is cleared.
@@ -1491,8 +1582,8 @@ mod pptp_broadcast_tests_7699 {
 
     /// A CDN for A must not cancel B's retry on the same control channel.
     ///
-    /// The next interval is the #12133 path under test: after Q clears its
-    /// full queue, Q's self-excluding drainer must still learn B directly.
+    /// The next interval is the #12133 path under test: after Q's bounded
+    /// queue drain, Q's self-excluding drainer must still learn B directly.
     #[test]
     fn a_cdn_cancels_only_its_call_and_the_next_call_still_retries_12133() {
         use crate::session::pptp_control::{
@@ -1503,8 +1594,6 @@ mod pptp_broadcast_tests_7699 {
         let pac: std::net::IpAddr = "198.51.100.7".parse().unwrap();
         let pns: std::net::IpAddr = "203.0.113.9".parse().unwrap();
         let queues = queues(2);
-        let q_id = Arc::as_ptr(&queues[0]) as usize;
-        let x_id = Arc::as_ptr(&queues[1]) as usize;
         {
             let mut full = queues[0].lock().expect("Q queue");
             for _ in 0..MAX_PENDING_WORKER_COMMANDS {
@@ -1529,7 +1618,7 @@ mod pptp_broadcast_tests_7699 {
             drain_pptp_control_inbox_for_worker(
                 &inbox,
                 &mut x_sessions,
-                Some(x_id),
+                Some(&queues[1]),
                 std::slice::from_ref(&queues[0]),
                 1_000_000_000,
             ),
@@ -1547,7 +1636,7 @@ mod pptp_broadcast_tests_7699 {
             drain_pptp_control_inbox_for_worker(
                 &inbox,
                 &mut x_sessions,
-                Some(x_id),
+                Some(&queues[1]),
                 std::slice::from_ref(&queues[0]),
                 2_000_000_000,
             ),
@@ -1559,12 +1648,12 @@ mod pptp_broadcast_tests_7699 {
             Some(PptpCall::new(pac, 0x3333, pns, 0x4444).handle())
         );
 
-        queues[0].lock().expect("Q queue").clear();
+        drain_queue_bounded(&queues[0]);
         assert_eq!(
             drain_pptp_control_inbox_for_worker(
                 &inbox,
                 &mut q_sessions,
-                Some(q_id),
+                Some(&queues[0]),
                 std::slice::from_ref(&queues[1]),
                 3_000_000_000,
             ),
