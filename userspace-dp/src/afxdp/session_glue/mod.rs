@@ -3099,6 +3099,13 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         let session_id = shared_session_id
             .filter(|session_id| *session_id != 0)
             .unwrap_or_else(|| sessions.session_id_for(resolved_key));
+        let previous_policy_to_zone_id = forwarding_stale.then(|| {
+            if resolved.decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
+                resolved.metadata.egress_zone
+            } else {
+                forwarding.egress_zone_id(resolved.decision.resolution.egress_ifindex)
+            }
+        });
         let mut decision = resolved.decision;
         let resolution_target = resolution_target_for_session(flow, decision);
         let leak_incarnation = sessions.leak_incarnation(&resolved_key);
@@ -3191,6 +3198,17 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
             )
         };
         if forwarding_stale && !keep_transient && !materialize_install_failed {
+            let policy_to_zone_id =
+                if decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
+                    metadata.egress_zone
+                } else {
+                    forwarding.egress_zone_id(decision.resolution.egress_ifindex)
+                };
+            if previous_policy_to_zone_id
+                .is_some_and(|previous| previous != policy_to_zone_id)
+            {
+                sessions.invalidate_policy_revalidation(resolved_key);
+            }
             let owner_rg_id = matches!(
                 decision.resolution.disposition,
                 ForwardingDisposition::ForwardCandidate
