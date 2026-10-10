@@ -636,6 +636,47 @@ func qnhMetricRouteMapSequencesFromManagedConfig11447(text string) qnhMetricSequ
 	return qnhMetricRouteMapSequencesFromConfig11447(section)
 }
 
+// qnhMetricNonQNHSequencesFromConfig11447 identifies route-map sequences
+// reserved under xpf-qnh-* names that are not generated QNH rules. An
+// authored policy term or terminal rule may reuse an old QNH sequence number;
+// stale cleanup must not alter that current-generation sequence.
+func qnhMetricNonQNHSequencesFromConfig11447(text string) qnhMetricSequenceSet11447 {
+	generated := qnhMetricSequencesFromConfig11447(text)
+	sequences := newQNHMetricSequenceSet11447()
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 4 || fields[0] != "route-map" ||
+			(fields[2] != "permit" && fields[2] != "deny") ||
+			!strings.HasPrefix(fields[1], "xpf-qnh-") {
+			continue
+		}
+		sequence, err := strconv.Atoi(fields[3])
+		if err != nil {
+			continue
+		}
+		if _, isGeneratedQNH := generated[fields[1]][sequence]; !isGeneratedQNH {
+			sequences.add(fields[1], sequence)
+		}
+	}
+	return sequences
+}
+
+func qnhMetricNonQNHSequencesFromManagedConfig11447(text string) qnhMetricSequenceSet11447 {
+	start := strings.Index(text, markerBegin)
+	if start < 0 {
+		return newQNHMetricSequenceSet11447()
+	}
+	start += len(markerBegin)
+	if start < len(text) && text[start] == '\n' {
+		start++
+	}
+	section := text[start:]
+	if end := strings.Index(section, markerEnd); end >= 0 {
+		section = section[:end]
+	}
+	return qnhMetricNonQNHSequencesFromConfig11447(section)
+}
+
 func renderQNHMetricSequenceReconciliation11447(
 	sequences, configured qnhMetricSequenceSet11447,
 ) string {

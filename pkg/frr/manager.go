@@ -1063,17 +1063,15 @@ func (m *Manager) verifyQNHMetricSequencesReconciled11447(
 // every daemon copy because daemon-scoped `vtysh -f` silently no-ops for
 // several FRR 10.7 daemons; readback verifies every known copy before the
 // cleanup identity is discarded.
-func (m *Manager) clearQNHMetricOverlaysLocked(ctx context.Context) error {
+func (m *Manager) clearQNHMetricOverlaysLocked(
+	ctx context.Context,
+	configured qnhMetricSequenceSet11447,
+) error {
 	if len(m.qnhMetricOverlayCleanup) == 0 {
 		m.qnhMetricOverlayCleanup = nil
 		m.qnhMetricOverlayBroadcastCleanup = nil
 		return nil
 	}
-	contentBytes, err := os.ReadFile(m.frrConf)
-	if err != nil {
-		return fmt.Errorf("read frr.conf for QNH metric cleanup: %w", err)
-	}
-	configured := qnhMetricRouteMapSequencesFromManagedConfig11447(string(contentBytes))
 	config := renderQNHMetricSequenceReconciliation11447(m.qnhMetricOverlayCleanup, configured)
 	if config == "" {
 		m.qnhMetricOverlayCleanup = nil
@@ -1102,9 +1100,23 @@ func (m *Manager) clearQNHMetricOverlaysLocked(ctx context.Context) error {
 
 func (m *Manager) reconcileQNHMetricOverlaysLocked(ctx context.Context) error {
 	targets := qnhMetricSequencesFromOverlay11447(m.qnhMetricOverlays)
+	configured := newQNHMetricSequenceSet11447()
+	nonQNH := newQNHMetricSequenceSet11447()
+	if len(m.qnhMetricOverlayCleanup) > 0 {
+		contentBytes, err := os.ReadFile(m.frrConf)
+		if err != nil {
+			return fmt.Errorf("read frr.conf for QNH metric reconciliation: %w", err)
+		}
+		managedConfig := string(contentBytes)
+		configured = qnhMetricRouteMapSequencesFromManagedConfig11447(managedConfig)
+		nonQNH = qnhMetricNonQNHSequencesFromManagedConfig11447(managedConfig)
+	}
 	stale := newQNHMetricSequenceSet11447()
 	for routeMap, sequences := range m.qnhMetricOverlayCleanup {
 		for sequence := range sequences {
+			if _, preserved := nonQNH[routeMap][sequence]; preserved {
+				continue
+			}
 			_, retained := targets[routeMap][sequence]
 			_, broadcast := m.qnhMetricOverlayBroadcastCleanup[routeMap][sequence]
 			if !retained || broadcast {
@@ -1113,7 +1125,7 @@ func (m *Manager) reconcileQNHMetricOverlaysLocked(ctx context.Context) error {
 		}
 	}
 	m.qnhMetricOverlayCleanup = stale
-	if err := m.clearQNHMetricOverlaysLocked(ctx); err != nil {
+	if err := m.clearQNHMetricOverlaysLocked(ctx, configured); err != nil {
 		return err
 	}
 	return m.applyQNHMetricOverlaysLocked(ctx)

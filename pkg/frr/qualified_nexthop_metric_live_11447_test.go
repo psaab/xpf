@@ -54,7 +54,7 @@ func TestQualifiedNextHopMetricAppearsInOSPFLSDB11447(t *testing.T) {
 		wantMetric   int
 	}{
 		{name: "OSPF-only daemon-scoped overlay", wantMetric: 10},
-		{name: "authored policy override", exportPolicy: true, wantMetric: 100},
+		{name: "authored policy override survives QNH shrink", exportPolicy: true, wantMetric: 100},
 		{name: "RIP default metric; no broadcast", ripExport: true, wantMetric: 10},
 		{name: "primary active then QNH backup", primary: true, wantMetric: 20},
 	} {
@@ -217,6 +217,9 @@ func liveOSPFMetricLSDB11447(
 		commands = append(commands, "set routing-options static route "+routePrefix+" next-hop 192.0.3.20")
 		commands = append(commands, "set routing-options static route "+routePrefix+" qualified-next-hop 192.0.2.10 preference 100")
 	}
+	if exportPolicy {
+		commands = append(commands, "set routing-options static route 198.51.100.0/24 qualified-next-hop 192.0.2.20 metric 20")
+	}
 	commands = append(commands, "set routing-options static route "+routePrefix+" qualified-next-hop 192.0.2.10 metric 10")
 	commands = append(commands,
 		"set protocols ospf router-id 10.255.0.1",
@@ -325,6 +328,54 @@ func liveOSPFMetricLSDB11447(
 	if err := manager.commitManagedSection(rendered, overlays); err != nil &&
 		!errors.Is(err, ErrFRRReloadDegraded) {
 		t.Fatalf("committing the metric-free managed section and OSPF overlay: %v", err)
+	}
+	if exportPolicy {
+		shrinkingRoute := "set routing-options static route 198.51.100.0/24 qualified-next-hop 192.0.2.20 metric 20"
+		shrunkCommands := make([]string, 0, len(commands)-1)
+		for _, command := range commands {
+			if command != shrinkingRoute {
+				shrunkCommands = append(shrunkCommands, command)
+			}
+		}
+		shrunkCompiled := compileQNHMetricConfig11447(t, shrunkCommands...)
+		shrunk, shrunkOverlays := New().buildManagedSectionWithQNH11447(&FullConfig{
+			OSPF:          shrunkCompiled.Protocols.OSPF,
+			RIP:           shrunkCompiled.Protocols.RIP,
+			StaticRoutes:  shrunkCompiled.RoutingOptions.StaticRoutes,
+			PolicyOptions: &shrunkCompiled.PolicyOptions,
+		})
+		if err := manager.commitManagedSection(shrunk, shrunkOverlays); err != nil &&
+			!errors.Is(err, ErrFRRReloadDegraded) {
+			t.Fatalf("committing authored-policy config after QNH shrink: %v", err)
+		}
+		qnhMap = qnhRedistributionMap11447(shrunk)
+		output, err := runVTY(3*time.Second, "-d", "ospfd", "-c", "show route-map "+qnhMap)
+		if err != nil {
+			t.Fatalf("showing authored route-map after QNH shrink: %v\n%s", err, output)
+		}
+		if metrics := qnhMetricActionsFromShow11447(output)[20]; len(metrics) != 1 || metrics[0] != 100 {
+			t.Fatalf("authored metric at reused route-map sequence 20 = %v, want [100]:\n%s", metrics, output)
+		}
+		var reusedAuthoredBlock string
+		for _, block := range routeMapSequenceBlocks11447(string(output)) {
+			if strings.Contains(block, "sequence 20") {
+				reusedAuthoredBlock = block
+				break
+			}
+		}
+		if reusedAuthoredBlock == "" {
+			t.Fatalf("authored route-map sequence 20 is absent after QNH shrink:\n%s", output)
+		}
+		for _, staleQNH := range []string{
+			"xpf-qnh-dst-",
+			"xpf-qnh-nh-",
+			"on-match next",
+			"match interface ",
+		} {
+			if strings.Contains(strings.ToLower(reusedAuthoredBlock), staleQNH) {
+				t.Fatalf("reused authored route-map sequence 20 retains old QNH clause %q:\n%s", staleQNH, reusedAuthoredBlock)
+			}
+		}
 	}
 	if !exportPolicy {
 		assertQNHMetricDaemonMaps11447(t, runVTY, qnhMap, ripExport)
