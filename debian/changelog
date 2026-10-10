@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Reject non-global-unicast IA_PD prefixes before lease or RA use and
+    refuse configured-prefix overlaps before advertisement while preserving
+    valid siblings (#10856).
+
   * Keep declined WireGuard listener keepalives from publishing outer-tuple
     LocalMiss sessions that would steer subsequent same-zone handshakes away
     from the kernel control socket (#11574).
