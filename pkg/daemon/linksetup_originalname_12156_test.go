@@ -571,5 +571,50 @@ func TestRenamePositionalUnfreedSkipsCurrentLinkNeutralize12156(t *testing.T) {
 		if !strings.Contains(string(got), "OriginalName=enp5s0") {
 			t.Fatalf("iter %d: owner's link lacks the verified chain:\n%s", i, got)
 		}
+		// MINOR-1(a): the stale T.link ALWAYS goes, even with an unfreed
+		// current. Sparing it (SPAREBOTH) resurrects the occupant under
+		// the unknown NIC's target — 26 wrong boots in the temp-fail
+		// matrix. This assertion kills SPAREBOTH at iter 0.
+		if _, err := os.Stat(filepath.Join(dir, linkPrefix+"fxp0.link")); !os.IsNotExist(err) {
+			t.Fatalf("iter %d: stale fxp0.link survived (B-REG resurrection), stat err=%v", i, err)
+		}
+	}
+}
+
+// TestRenamePositionalUnfreedFinalStillNeutralizesTarget12156 pins
+// MINOR-1(b): the inverted fold-2 shape. U (unknown, wears ge-0-0-1 via
+// MAC-form) wants fxp0; K (known enp6s0, wears fxp0 via chain) wants
+// ge-0-0-0, but K's temp rename fails — so fxp0 (U's FINAL) is unfreed.
+// K writes ge-0-0-0.link (its own final), never fxp0.link: nobody else
+// touches the stale claim, and sparing it (BREG) resurrects K under U's
+// target — 30 wrong boots + 6/6 reorder cases in the temp-fail matrix.
+// fxp0.link MUST go. This kills BREG at iter 0; it passes at head.
+func TestRenamePositionalUnfreedFinalStillNeutralizesTarget12156(t *testing.T) {
+	macForm := "# Managed by xpfd \u2014 do not edit\n[Match]\nMACAddress=52:54:00:00:00:0b\n\n[Link]\nName=ge-0-0-1\nMTUBytes=1500\n"
+	chain := "# Managed by xpfd \u2014 do not edit\n[Match]\nOriginalName=enp6s0\n\n[Link]\nName=fxp0"
+	for i := 0; i < 200; i++ {
+		dir := withTempLinkDir(t)
+		if err := os.WriteFile(filepath.Join(dir, linkPrefix+"fxp0.link"), []byte(chain), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, linkPrefix+"ge-0-0-1.link"), []byte(macForm), 0644); err != nil {
+			t.Fatal(err)
+		}
+		nics := []pciNIC{
+			{sortKey: 0, busAddr: "0000:04:00.0", name: "ge-0-0-1"},
+			{sortKey: 1, busAddr: "0000:06:00.0", name: "fxp0"},
+		}
+		_, errs := renamePositional(nics, 0, false, func(from, to string) error {
+			if from == "fxp0" && strings.HasPrefix(to, "xpf-tmp-") {
+				return errors.New("injected temp failure")
+			}
+			return nil
+		})
+		if len(errs) == 0 {
+			t.Fatal("the stranded rename must report the #7205 unfreed error")
+		}
+		if _, err := os.Stat(filepath.Join(dir, linkPrefix+"fxp0.link")); !os.IsNotExist(err) {
+			t.Fatalf("iter %d: B-REG: unfreed-final fxp0.link (K's chain) survived, stat err=%v", i, err)
+		}
 	}
 }
