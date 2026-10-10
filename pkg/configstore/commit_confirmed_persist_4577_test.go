@@ -1,6 +1,7 @@
 package configstore
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -150,8 +151,7 @@ func TestConfirmRecovery_WithinWindowReArmsOnLoad_4577(t *testing.T) {
 	}
 }
 
-// A reboot-time wall-clock step can make a still-live deadline look farther
-// away. When chrony reports an active clock-skew alarm, recovery must roll back
+// When chrony reports an active clock-skew alarm, recovery must roll back
 // instead of trusting that shifted deadline and re-arming it (#10875).
 func TestConfirmRecovery_ClockSkewAlarmRollsBackAfterWallStep_10875(t *testing.T) {
 	originalNow, originalBootID := confirmWallNow, confirmBootID
@@ -193,10 +193,9 @@ func TestConfirmRecovery_ClockSkewAlarmRollsBackAfterWallStep_10875(t *testing.T
 					rec.ArmedAt, rec.ArmedBootID, armWall)
 			}
 
-			// Model a reboot during downtime followed by a backward wall-clock
-			// step. The persisted deadline is still in the future, but its
-			// apparent remaining duration has grown from ten to fifteen minutes.
-			now = armWall.Add(-5 * time.Minute)
+			// Model downtime while keeping the clock after the arm time. A
+			// backward step before ArmedAt is covered separately below.
+			now = armWall.Add(time.Minute)
 			bootID = "boot-after"
 			recovered := newTestStoreAt(t, path)
 			recovered.SetConfirmRecoveryClockSkewCheck(func(*config.Config) bool {
@@ -230,6 +229,157 @@ func TestConfirmRecovery_ClockSkewAlarmRollsBackAfterWallStep_10875(t *testing.T
 			}
 			if recovered.confirmTimer != nil {
 				recovered.confirmTimer.Stop()
+			}
+		})
+	}
+}
+
+// A standalone node has no cluster clock-skew alarm, so recovery must use
+// the persisted arm time as conclusive evidence of a backward wall-clock step.
+// Since elapsed downtime cannot be reconstructed, fail closed by rolling back
+// rather than re-arming a timer beyond the original confirm window (#12167).
+func TestConfirmRecovery_BackwardWallClockRollsBackStandalone_12167(t *testing.T) {
+	originalNow, originalBootID := confirmWallNow, confirmBootID
+	armWall := time.Date(2030, 4, 5, 6, 7, 8, 0, time.UTC)
+	now := armWall
+	bootID := "boot-before"
+	confirmWallNow = func() time.Time { return now }
+	confirmBootID = func() string { return bootID }
+	t.Cleanup(func() {
+		confirmWallNow = originalNow
+		confirmBootID = originalBootID
+	})
+
+	path := filepath.Join(t.TempDir(), "config")
+	armed := armedConfirmStore(t, path, 10)
+	t.Cleanup(func() { armed.CancelConfirmTimerForTesting() })
+	rec, err := armed.db.ReadConfirm()
+	if err != nil || rec == nil {
+		t.Fatalf("ReadConfirm: rec=%v err=%v", rec, err)
+	}
+	if !rec.ArmedAt.Equal(armWall) || !rec.Deadline.Equal(armWall.Add(10*time.Minute)) {
+		t.Fatalf("persisted arm=(%v, %v), want (%v, %v)",
+			rec.ArmedAt, rec.Deadline, armWall, armWall.Add(10*time.Minute))
+	}
+
+	// Reboot 30 days behind the arm time while the original deadline remains
+	// apparently 30 days away. The daemon's standalone alarm callback is clear.
+	now = armWall.Add(-30 * 24 * time.Hour)
+	bootID = "boot-after"
+	recovered := newTestStoreAt(t, path)
+	recovered.SetConfirmRecoveryClockSkewCheck(func(*config.Config) bool { return false })
+	if err := recovered.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	t.Cleanup(func() { recovered.CancelConfirmTimerForTesting() })
+
+	if recovered.IsConfirmPending() {
+		t.Fatal("backward wall clock with no trustworthy elapsed downtime must roll back, not re-arm")
+	}
+	if got := recovered.ActiveConfig().System.HostName; got != "Base" {
+		t.Fatalf("active config after backward-clock recovery = %q, want rollback target Base", got)
+	}
+	if r, err := recovered.db.ReadConfirm(); err != nil || r != nil {
+		t.Fatalf("confirm.json must be removed after backward-clock rollback: rec=%v err=%v", r, err)
+	}
+}
+
+// A backward-clock rollback of a first commit must retain #12155's durable
+// daemon teardown debt while applying the same fail-closed clock policy.
+func TestConfirmRecovery_BackwardFirstCommitKeepsTeardownDebt_12167(t *testing.T) {
+	originalNow, originalBootID := confirmWallNow, confirmBootID
+	armWall := time.Date(2030, 4, 5, 6, 7, 8, 0, time.UTC)
+	now := armWall
+	bootID := "boot-before"
+	confirmWallNow = func() time.Time { return now }
+	confirmBootID = func() string { return bootID }
+	t.Cleanup(func() {
+		confirmWallNow = originalNow
+		confirmBootID = originalBootID
+	})
+
+	path := filepath.Join(t.TempDir(), "config")
+	armed := newTestStoreAt(t, path)
+	if err := armed.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	if err := armed.SetFromInput("system host-name FirstWindow"); err != nil {
+		t.Fatalf("SetFromInput: %v", err)
+	}
+	if _, err := armed.CommitConfirmed(10); err != nil {
+		t.Fatalf("CommitConfirmed: %v", err)
+	}
+	armed.ExitConfigure()
+	t.Cleanup(func() { armed.CancelConfirmTimerForTesting() })
+
+	rec, err := armed.db.ReadConfirm()
+	if err != nil || rec == nil || !rec.FirstCommit {
+		t.Fatalf("first commit record = %+v, err=%v; want FirstCommit=true", rec, err)
+	}
+	now = armWall.Add(-30 * 24 * time.Hour)
+	bootID = "boot-after"
+	recovered := newTestStoreAt(t, path)
+	recovered.SetConfirmRecoveryClockSkewCheck(func(*config.Config) bool { return false })
+	if err := recovered.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if !recovered.FirstCommitTeardownOwed() {
+		t.Fatal("backward-clock first-commit rollback lost #12155 teardown debt")
+	}
+	if _, committed, err := recovered.db.ReadActiveMeta(); err != nil || committed {
+		t.Fatalf("rollback active marker committed=%v err=%v; want committed=false", committed, err)
+	}
+	configDB := filepath.Join(filepath.Dir(path), ".configdb")
+	markerPath := firstCommitTeardownMarkerPath(configDB)
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("durable #12155 teardown marker missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(configDB, "confirm.json")); !os.IsNotExist(err) {
+		t.Fatalf("confirm.json remains after durable teardown marker publication: %v", err)
+	}
+}
+
+// The recovered timer is bounded by the persisted original window. A legacy
+// record without an arm timestamp is still capped by the maximum accepted API
+// window rather than by an arbitrarily distant wall-clock deadline.
+func TestRecoveredConfirmDelayBounded_12167(t *testing.T) {
+	arm := time.Date(2030, 4, 5, 6, 7, 8, 0, time.UTC)
+	window := 10 * time.Minute
+	maxWindow := time.Duration(MaxCommitConfirmedMinutes) * time.Minute
+
+	tests := []struct {
+		name     string
+		deadline time.Time
+		now      time.Time
+		armedAt  time.Time
+		want     time.Duration
+	}{
+		{
+			name:     "persisted original window",
+			deadline: arm.Add(window),
+			now:      arm.Add(-30 * 24 * time.Hour),
+			armedAt:  arm,
+			want:     window,
+		},
+		{
+			name:     "legacy record without arm timestamp",
+			deadline: arm.Add(maxWindow + time.Minute),
+			now:      arm,
+			want:     maxWindow,
+		},
+		{
+			name:     "normal remaining time",
+			deadline: arm.Add(window),
+			now:      arm.Add(time.Minute),
+			armedAt:  arm,
+			want:     window - time.Minute,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := recoveredConfirmDelay(tt.deadline, tt.now, tt.armedAt); got != tt.want {
+				t.Fatalf("recoveredConfirmDelay() = %v, want %v", got, tt.want)
 			}
 		})
 	}

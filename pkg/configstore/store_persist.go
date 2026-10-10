@@ -105,6 +105,10 @@ func (s *Store) Load() error {
 		}
 	}
 
+	// A durable FIRST-rollback teardown marker survives process exit between
+	// this store recovery and the daemon's later teardown phase.
+	s.loadFirstCommitTeardownLocked()
+
 	tree, committed, err := s.db.ReadActiveMeta()
 	if err != nil {
 		// A read/parse/decrypt/envelope failure on a PRESENT active.json is
@@ -705,7 +709,8 @@ func (s *Store) absentActiveHasRecoveryMarkers() bool {
 		name := entry.Name()
 		switch {
 		case (strings.HasPrefix(name, "rollback.") && strings.HasSuffix(name, ".json")) ||
-			name == "confirm.json" || name == apiAuthMigrationStagingFilename:
+			name == "confirm.json" || name == firstCommitTeardownMarkerBase ||
+			name == apiAuthMigrationStagingFilename:
 			return true
 		}
 	}
@@ -722,6 +727,28 @@ func (s *Store) SetConfirmRecoveryClockSkewCheck(check func(*config.Config) bool
 	s.db.confirmRecoveryClockSkewCheck = check
 }
 
+// recoveredConfirmDelay bounds the boot timer by the duration recorded at arm
+// time. Records predating ArmedAt still receive the maximum duration accepted
+// by CommitConfirmed rather than an unbounded wall-clock-derived delay.
+func recoveredConfirmDelay(deadline, now, armedAt time.Time) time.Duration {
+	remaining := deadline.Sub(now)
+	if remaining <= 0 {
+		return 0
+	}
+
+	maxDelay := time.Duration(MaxCommitConfirmedMinutes) * time.Minute
+	if !armedAt.IsZero() {
+		originalWindow := deadline.Sub(armedAt)
+		if originalWindow > 0 && originalWindow < maxDelay {
+			maxDelay = originalWindow
+		}
+	}
+	if remaining > maxDelay {
+		return maxDelay
+	}
+	return remaining
+}
+
 // recoverPendingConfirmLocked restores a commit-confirmed window that was
 // still pending when the daemon last stopped (#4577). The in-memory
 // time.AfterFunc rollback timer does not survive a process restart, so without
@@ -733,13 +760,12 @@ func (s *Store) SetConfirmRecoveryClockSkewCheck(check func(*config.Config) bool
 // property.
 //
 // Runs at the tail of Load once active.json is read — on the success path
-// and on the compile-failed path (#9884) — under s.mu. Two outcomes:
-//   - an expired deadline OR active clock-skew alarm -> roll back to the
-//     persisted prev tree NOW, including the #1922 Item 1b first-commit
-//     never-committed marker, then clear the state.
-//   - a future deadline with no active clock-skew alarm -> re-arm the timer
-//     for the REMAINING duration; a clean restart inside the window keeps
-//     the hatch.
+// and on the compile-failed path (#9884) — under s.mu. Recovery rolls back
+// when the deadline has passed, the daemon's clock-skew alarm is active, or
+// the current wall clock precedes a persisted non-zero ArmedAt. Otherwise it
+// re-arms for the lesser of the deadline's remaining duration and the
+// original duration recorded at arm time (or the maximum accepted window
+// for legacy records without ArmedAt).
 //
 // #6538: it returns an error so Load can FAIL CLOSED when the recovery leaves
 // no compiled config. The rollback target here is a previously-committed
@@ -860,10 +886,19 @@ func (s *Store) recoverPendingConfirmLocked() error {
 		prevTree = &config.ConfigTree{}
 	}
 
-	deadlineExpired := confirmWallNow().After(deadline)
-	clockSkewAlarm := !deadlineExpired && s.db.confirmRecoveryClockSkewCheck != nil &&
-		s.db.confirmRecoveryClockSkewCheck(s.compiled)
-	if deadlineExpired || clockSkewAlarm {
+	recoveryNow := confirmWallNow()
+	deadlineExpired := recoveryNow.After(deadline)
+	clockMovedBackward := !rec.ArmedAt.IsZero() && recoveryNow.Before(rec.ArmedAt)
+	clockSkewAlarm := false
+	if !deadlineExpired && !clockMovedBackward && s.db.confirmRecoveryClockSkewCheck != nil {
+		clockSkewAlarm = s.db.confirmRecoveryClockSkewCheck(s.compiled)
+		if !clockSkewAlarm {
+			recoveryNow = confirmWallNow()
+			deadlineExpired = recoveryNow.After(deadline)
+			clockMovedBackward = !rec.ArmedAt.IsZero() && recoveryNow.Before(rec.ArmedAt)
+		}
+	}
+	if deadlineExpired || clockSkewAlarm || clockMovedBackward {
 		// The operator never confirmed, so the unconfirmed config on disk
 		// must NOT stand. Revert to the prev tree with the same persistence
 		// semantics as PromoteRollback.
@@ -873,14 +908,19 @@ func (s *Store) recoverPendingConfirmLocked() error {
 		// this branch so the rollback's persistence/journal/record-removal all
 		// still run first.
 		var recoverErr error
+		var teardownMarkerErr error
 		if rec.FirstCommit {
 			// #1922 Item 1b: the rollback target is the empty bootstrap tree;
 			// persist committed=0 and clear everCommitted so a later restart
 			// re-classifies into bootstrap, not operator-committed-empty.
+			// #12155: keep this boot fail-closed even if the active rollback
+			// write fails; confirm.json remains the retry source, and the
+			// durable marker is published only after the active write lands.
 			s.compiled = nil
 			s.publishActiveLocked() // #9905: publish the new active snapshot
 			s.persistMarkerCommitted = false
 			s.everCommitted = false
+			s.firstCommitTeardownOwed = true
 			perr = s.writeActiveMarker(prevTree, false)
 		} else {
 			compiled, cerr := s.compileTreeLenient(prevTree)
@@ -921,21 +961,33 @@ func (s *Store) recoverPendingConfirmLocked() error {
 		} else {
 			s.persistDegraded = false
 			s.confirmResolvePendingPersist = false
+			if rec.FirstCommit {
+				// #12155: confirm.json is the retry source until teardown debt
+				// is durable. Do not remove it if the marker write fails.
+				if err := s.noteFirstCommitTeardownLocked(); err != nil {
+					teardownMarkerErr = err
+					s.deferFirstCommitTeardownMarkerLocked(err)
+				}
+			}
 		}
 		if s.candidate != nil {
 			s.candidate = s.active.Clone()
 			s.bumpCandidateGenLocked() // #5848: candidate reset by confirm-recovery rollback
 		}
-		if perr == nil {
-			// #5835: durable-or-retry removal — a failed DeleteConfirm retains
-			// retry debt + degraded health so a crash before the retry heals
-			// re-reads the record (deadline still past) and re-reverts, rather
-			// than silently swallowing the failure.
+		if perr == nil && teardownMarkerErr == nil {
+			// #5835: remove confirm.json only after the active rollback is
+			// durable, retaining normal removal debt if unlink does not converge.
+			// On FIRST rollback the teardown marker is durable before removal,
+			// so either debt survives a crash before daemon teardown.
 			s.resolveConfirmRemovalLocked("confirm_recovery_remove")
 		}
 		detail := "commit-confirmed window expired during daemon downtime; reverted on boot (#4577)"
 		principal := "system:commit-confirmed-timeout"
-		if clockSkewAlarm {
+		switch {
+		case clockMovedBackward:
+			detail = "wall clock precedes persisted commit-confirmed arm time; rolled back pending config on boot (#12167)"
+			principal = "system:commit-confirmed-clock-skew"
+		case clockSkewAlarm:
 			detail = "clock-skew alarm active during confirm recovery; rolled back pending config on boot (#10875)"
 			principal = "system:commit-confirmed-clock-skew"
 		}
@@ -945,7 +997,13 @@ func (s *Store) recoverPendingConfirmLocked() error {
 			ConfigHash: journalConfigHash(s.active),
 			Principal:  principal,
 		})
-		if clockSkewAlarm {
+		if clockMovedBackward {
+			slog.Warn("wall clock precedes persisted commit-confirmed arm time; "+
+				"configuration rolled back to the pre-confirm state on boot",
+				"armed_at", rec.ArmedAt, "armed_boot_id", rec.ArmedBootID,
+				"current_wall_time", recoveryNow, "current_boot_id", confirmBootID(),
+				"issue", "#12167")
+		} else if clockSkewAlarm {
 			slog.Warn("clock-skew alarm active while recovering a pending commit-confirmed window; "+
 				"configuration rolled back to the pre-confirm state on boot",
 				"armed_at", rec.ArmedAt, "armed_boot_id", rec.ArmedBootID,
@@ -963,7 +1021,6 @@ func (s *Store) recoverPendingConfirmLocked() error {
 	// rollback target) are restored so a subsequent expiry / plain-commit /
 	// sync resolves correctly. confirm.json is left in place until the window
 	// is resolved.
-	remaining := deadline.Sub(confirmWallNow())
 	s.confirmPrevTree = prevTree
 	// #6538: first-commit-ness comes from the PERSISTED record, which is the
 	// only authority on whether PrevTree is the empty bootstrap tree. It must
@@ -990,6 +1047,7 @@ func (s *Store) recoverPendingConfirmLocked() error {
 	}
 	s.confirmGen++
 	gen := s.confirmGen
+	remaining := recoveredConfirmDelay(deadline, confirmWallNow(), rec.ArmedAt)
 	s.confirmTimer = time.AfterFunc(remaining, func() {
 		s.fireConfirmTimer(gen)
 	})

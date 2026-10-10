@@ -161,6 +161,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// proceeding into steady state. A PLAIN phase error keeps the historical
 	// path: return the error and let the deferred loop stops (#5308) run.
 	var configFailClosed bool
+	var durableRollbackFilesystemTeardownDone bool
 	// Phase order is LOAD-BEARING: reset-handoff-reconcile MUST precede
 	// config-load-bootstrap so dirty-handoff repair runs before any
 	// bootstrap promotion can import N+1 config (#10769 d05-F6 R1); it
@@ -186,6 +187,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		{"manager-init", func(context.Context) error {
 			return d.initManagers(configFailClosed)
 		}},
+		{"durable-first-commit-teardown", func(context.Context) error {
+			durableRollbackFilesystemTeardownDone = d.teardownRecoveredFirstCommitBeforeDataplane()
+			return nil
+		}},
 		// #9615: after manager-init so the feed manager exists; an alarm only,
 		// never a refusal to keep the recovered window armed.
 		{"recovered-confirm-preflight", func(context.Context) error {
@@ -194,6 +199,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}},
 		{"dataplane-setup", func(context.Context) error {
 			return d.setupDataplaneAndInitialConfig()
+		}},
+		{"durable-first-commit-dataplane-teardown", func(context.Context) error {
+			d.completeRecoveredFirstCommitTeardown(durableRollbackFilesystemTeardownDone)
+			return nil
 		}},
 	}
 	eventBuf, startupErr := d.runStartupWithEventBuffer(ctx, phases, func(abortErr error) error {

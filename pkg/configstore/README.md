@@ -860,13 +860,17 @@ per-path:
   or the previous hash while the candidate is not yet durable; unrelated hashes
   are stale and dropped. An already-expired deadline rolls back to the prev
   tree (including the Item 1b committed=0 marker on a first-commit target);
-  a future deadline re-arms the timer for its remaining duration.
-  Each arm also persists the wall time and `/proc/sys/kernel/random/boot_id`
-  captured at arm. During recovery the daemon samples the clock-skew alarm
-  against the loaded config; an active alarm makes recovery roll back to the
-  previous config instead of re-arming a wall-clock deadline that may have
-  shifted during downtime. The boot ID and wall timestamp are diagnostic
-  provenance, not a monotonic deadline that can survive reboot.
+  a future deadline re-arms the timer for its remaining duration, bounded by
+  the original duration recorded at arm time. Each arm also persists the wall
+  time and `/proc/sys/kernel/random/boot_id` captured at arm. During recovery,
+  the daemon's active clock-skew alarm still causes rollback; independently,
+  when the current wall clock precedes a non-zero `ArmedAt`, recovery treats
+  that as a backward step and rolls back even on standalone nodes. Downtime
+  elapsed with an untrusted clock cannot be reconstructed, so this fails
+  closed instead of trusting or extending the wall-clock deadline. Older
+  records without `ArmedAt` are capped at the maximum accepted confirm window.
+  The boot ID remains diagnostic provenance; neither value is a monotonic
+  deadline that can survive reboot.
   Every confirmation path (`clearPendingConfirmLocked` — plain commit / HA sync /
   explicit confirm / demotion) and timeout rollback (`PromoteRollback`) remove
   `confirm.json`; a nested `commit confirmed` replaces it with the extended

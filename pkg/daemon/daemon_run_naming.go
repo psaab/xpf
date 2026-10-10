@@ -225,6 +225,7 @@ func (d *Daemon) maybeExitBootstrapOnFirstConfig(cfg *config.Config) error {
 		d.bootstrapMode.Store(true)
 		return err
 	}
+	d.captureBootstrapLifelineNetwork()
 	return nil
 }
 

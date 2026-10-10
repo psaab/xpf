@@ -298,9 +298,10 @@ type confirmRecord struct {
 	// Deadline is the absolute wall-clock time the confirm window expires.
 	Deadline time.Time `json:"deadline"`
 	// ArmedAt and ArmedBootID identify the wall-clock/OS incarnation at arm
-	// time. They let recovery diagnose a deadline that crossed a reboot or a
-	// wall-clock step; neither value is used as a substitute for a monotonic
-	// deadline, which cannot survive reboot.
+	// time. Recovery treats a current wall clock earlier than ArmedAt as
+	// conclusive backward-step evidence and bounds the re-armed timer by the
+	// original duration. They cannot substitute for a monotonic deadline,
+	// which does not survive reboot.
 	ArmedAt     time.Time `json:"armed_at,omitempty"`
 	ArmedBootID string    `json:"armed_boot_id,omitempty"`
 	// still-unconfirmed commit-confirmed. For a NESTED confirmed commit it
