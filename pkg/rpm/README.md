@@ -46,17 +46,20 @@ out-of-range value to a warning.
 - `SetTransitionCallback(fn)` — `rpm.go` (#1827).
 - `SetRethMap(map[string]string)` — `rpm.go` (#1827). RETH → physical
   member translation for `destination-interface` resolution.
-- `SetPinInstallResults(map[string]error)` — `rpm.go` (#1895). Per-test
-  probe-pin install failures from `routing.Manager.ApplyProbePins`
-  (map replaced wholesale, so a successful retry resumes probing
-  without a probe restart).
+- `SetPinInstallResults(map[string]error)` — `rpm.go` (#1895/#12088).
+  Per-test pin holds from install/readback failures, including missing or
+  unreadable egresses; the daemon excludes only a confirmed admin-down egress
+  when an installer is available. Replacing the map wholesale releases a
+  recovered test without restarting its probe.
 - `HoldPinsForReprogram([]string, error)` — `rpm.go` (#1895). Pre-holds
   the union of currently-marked live tests and the new pin set while
   the kernel band is cleared-and-reprogrammed; the daemon publishes
   the real results via `SetPinInstallResults` after the reprogram
   (after `Apply` on a config change — the first probe cycle may hold,
   bounded by one test-interval).
-- `PinInstallFailureCount()` — `rpm.go` (#1895). Backs the
+- `PinInstallFailureCount()` — `rpm.go` (#1895/#12088). Counts currently
+  held pins from install/readback failures, missing egresses, or no installer,
+  plus temporary reprogram holds; backs the
   `xpf_rpm_probe_pin_install_failures` gauge.
 
 ## Callers
@@ -188,26 +191,32 @@ out-of-range value to a warning.
   derived from `routing.BuildProbePins` — the SAME deterministic
   assignment pkg/routing programs as fwmark rules, so socket mark and
   kernel rule cannot drift.
-- **A next-hop test whose pin is missing or mismatched is held on an
-  administratively-up egress** (#1895/#12088): an unbacked `SO_MARK` can fall
-  through to the main table and false-PASS, suppressing ip-monitoring failover.
-  `executeProbe` returns `ErrProbeSetup` (hold state, no socket opened) while
-  the pin is in `SetPinInstallResults`' failed map, or when a next-hop test has
-  no pin slot (band-exhaustion belt-and-braces). A carrier-down route flagged
-  `RTNH_F_LINKDOWN` (possibly `RTNH_F_DEAD|RTNH_F_LINKDOWN` when
-  `ignore_routes_with_linkdown=1`) remains a valid installed pin shape, but the
-  kernel may skip it for lookup; `SO_BINDTODEVICE` confines the probe to its
-  configured egress so carrier loss still reaches RPM's failure threshold.
-  With a routing manager, an administratively-down egress is probeable: the
-  bound socket fails with `ENETUNREACH`, counted as path loss. With no installer,
-  every configured pin stays held even while down because nothing can repair it
-  if the egress later comes up. The daemon retries failed installs on
-  hash-gated reconciles, reads pins on a 30 s fallback tick, and verifies
-  immediately on link/address notifications. Closed subscriptions are
-  resubscribed after backoff, then all pins are verified to resync the gap.
-  A link-up notification/hold race remains: a probe can theoretically send
-  before the admin-up drift is published, and repair waits for the next retry
-  tick, so pin failures do not guarantee a strict no-unbacked-send window.
+- **A next-hop test whose pin is missing or mismatched stays held unless the
+  installer-backed egress is confirmed admin-down** (#1895/#12088): an
+  unbacked `SO_MARK` can fall through to the main table and false-PASS,
+  suppressing ip-monitoring failover. `executeProbe` returns `ErrProbeSetup`
+  (hold state, no socket opened) while the pin is in `SetPinInstallResults`'
+  failed map, or when a next-hop test has no pin slot (band-exhaustion
+  belt-and-braces). A missing or unreadable egress remains unknown and held;
+  RPM returns `ErrProbeSetup` before opening a socket. If socket setup is
+  reached, `SO_BINDTODEVICE` fails with `ENODEV`. The failed-map count backs
+  `xpf_rpm_probe_pin_install_failures`, including missing-egress and
+  no-installer holds.
+- A carrier-down route flagged `RTNH_F_LINKDOWN` (possibly
+  `RTNH_F_DEAD|RTNH_F_LINKDOWN` when `ignore_routes_with_linkdown=1`) remains
+  a valid installed pin shape, but the kernel may skip it for lookup;
+  `SO_BINDTODEVICE` confines the probe to its configured egress so carrier
+  loss still reaches RPM's failure threshold. With an installer, a confirmed
+  admin-down egress is probeable: the bound socket fails with `ENETUNREACH`,
+  counted as path loss. With no installer, every configured pin stays held
+  even while down because nothing can repair it if the egress later comes up.
+- The daemon retries installer failures on hash-gated reconciles and on the
+  30 s fallback tick. It reads pins on that tick and verifies immediately on
+  link/address notifications; event-detected readback drift is repaired on
+  the next tick. Closed subscriptions are resubscribed after backoff, then
+  all pins are verified to resync the gap. A link-up notification/hold race
+  remains: a probe can theoretically send before admin-up drift is published,
+  and repair waits for the next retry tick.
 - Events expose both the test owner (probe name) and the test name so
   event-options policies can match on either via `attributes-match`.
 - A consecutive-failure counter discriminates transient blips from

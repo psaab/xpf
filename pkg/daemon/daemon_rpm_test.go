@@ -109,7 +109,7 @@ func TestReconcileRPMPinFailureRetry(t *testing.T) {
 	defer cancel()
 	var calls int
 	retFailed := map[string]error{"WAN/t": fmt.Errorf("egress interface missing")}
-	d := &Daemon{rpm: rpm.New(), daemonCtx: ctx, probePinEgressIsUp: func(string) bool { return true }}
+	d := &Daemon{rpm: rpm.New(), daemonCtx: ctx, probePinEgressStateFn: func(string) probePinEgressState { return probePinEgressUp }}
 	d.probePinApply = func(pins []routing.ProbePin) map[string]error {
 		calls++
 		if len(pins) != 1 || pins[0].TestKey != "WAN/t" {
@@ -173,7 +173,7 @@ func TestReconcileRPMPinFailureRetry(t *testing.T) {
 // (Codex PR #1899 r1 MAJOR-2).
 func TestReconcileRPMNoInstallerHoldsPinnedTests(t *testing.T) {
 	d := &Daemon{rpm: rpm.New(), daemonCtx: context.Background(),
-		probePinEgressIsUp: func(string) bool { return false }}
+		probePinEgressStateFn: func(string) probePinEgressState { return probePinEgressDown }}
 	defer d.rpm.StopAll()
 
 	if !d.reconcileRPM(rpmPinnedTestConfig()) {
@@ -266,7 +266,7 @@ func TestProbePinPeriodicRetryRecoversWithoutCommit(t *testing.T) {
 	linkUp := false
 	calls := 0
 	d := &Daemon{rpm: rpm.New(), daemonCtx: ctx, probePinRetryEvery: 5 * time.Millisecond,
-		probePinEgressIsUp: func(string) bool { return true }}
+		probePinEgressStateFn: func(string) probePinEgressState { return probePinEgressUp }}
 	d.probePinApply = func(pins []routing.ProbePin) map[string]error {
 		mu.Lock()
 		defer mu.Unlock()
@@ -324,10 +324,10 @@ func TestReconcileRPMDetectsMissingKernelPinWithoutHashChange12088(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	d := &Daemon{
-		rpm:                rpm.New(),
-		daemonCtx:          ctx,
-		probePinRetryEvery: time.Hour,
-		probePinEgressIsUp: func(string) bool { return true },
+		rpm:                  rpm.New(),
+		daemonCtx:            ctx,
+		probePinRetryEvery:   time.Hour,
+		probePinEgressStateFn: func(string) probePinEgressState { return probePinEgressUp },
 	}
 	defer d.rpm.StopAll()
 	defer d.stopPinRetryLoop()
@@ -378,25 +378,29 @@ func TestReconcileRPMDetectsMissingKernelPinWithoutHashChange12088(t *testing.T)
 	}
 }
 
-func TestProbePinFailuresHoldOnlyOnAdminUpEgress12088(t *testing.T) {
+func TestProbePinFailuresReleaseOnlyOnAdminDownEgress12088(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var stateMu sync.Mutex
-	egressUp := true
-	egressIsUp := func(string) bool {
+	egressState := probePinEgressUp
+	egressLookup := func(string) probePinEgressState {
 		stateMu.Lock()
 		defer stateMu.Unlock()
-		return egressUp
+		return egressState
 	}
 	setEgressUp := func(up bool) {
 		stateMu.Lock()
-		egressUp = up
+		if up {
+			egressState = probePinEgressUp
+		} else {
+			egressState = probePinEgressDown
+		}
 		stateMu.Unlock()
 	}
 	d := &Daemon{
-		rpm:                rpm.New(),
-		daemonCtx:          ctx,
-		probePinRetryEvery: time.Hour,
-		probePinEgressIsUp: egressIsUp,
+		rpm:                  rpm.New(),
+		daemonCtx:            ctx,
+		probePinRetryEvery:   time.Hour,
+		probePinEgressStateFn: egressLookup,
 	}
 	d.probePinApply = func([]routing.ProbePin) map[string]error {
 		return nil // Apply succeeds; this test isolates the verify-path filter.
@@ -433,6 +437,48 @@ func TestProbePinFailuresHoldOnlyOnAdminUpEgress12088(t *testing.T) {
 	}
 }
 
+func TestProbePinFailuresHoldMissingEgress12088(t *testing.T) {
+	missingName := fmt.Sprintf("xpf%d", os.Getpid())
+	if _, err := netlink.LinkByName(missingName); err == nil {
+		t.Skipf("test egress %q unexpectedly exists", missingName)
+	}
+	manager := rpm.New()
+	defer manager.StopAll()
+	d := &Daemon{rpm: manager}
+	if state := d.probePinEgressStateForName(missingName); state != probePinEgressUnknown {
+		t.Fatalf("missing egress state = %v, want unknown", state)
+	}
+	pins := routing.BuildProbePins(rpmPinnedTestConfig().Services.RPM, nil)
+	if len(pins) != 1 {
+		t.Fatalf("built pins = %d, want 1", len(pins))
+	}
+	pins[0].Interface = missingName
+	failed := map[string]error{pins[0].TestKey: fmt.Errorf("pinned route missing")}
+	held := d.probePinFailuresExceptAdminDownEgress(pins, failed)
+	manager.SetPinInstallResults(held)
+	if got := manager.PinInstallFailureCount(); got != 1 {
+		t.Fatalf("missing-egress pin failure gauge count = %d, want 1", got)
+	}
+
+	// A transient LinkByName error is the same unknown state and also
+	// must not release the pin hold.
+	d.probePinEgressStateFn = func(string) probePinEgressState { return probePinEgressUnknown }
+	held = d.probePinFailuresExceptAdminDownEgress(pins, failed)
+	manager.SetPinInstallResults(held)
+	if got := manager.PinInstallFailureCount(); got != 1 {
+		t.Fatalf("unreadable-egress pin failure gauge count = %d, want 1", got)
+	}
+
+	// A confirmed existing-but-admin-down egress is the only state that
+	// releases the hold, because its bound probes can report ENETUNREACH.
+	d.probePinEgressStateFn = func(string) probePinEgressState { return probePinEgressDown }
+	held = d.probePinFailuresExceptAdminDownEgress(pins, failed)
+	manager.SetPinInstallResults(held)
+	if got := manager.PinInstallFailureCount(); got != 0 {
+		t.Fatalf("admin-down egress pin failure gauge count = %d, want 0", got)
+	}
+}
+
 // TestProbePinRetryLoopResubscribesAndResyncsOnClosedSubscriptions12088
 // protects the close-channel recovery path: the loop must not panic or spin,
 // must establish fresh link and address subscriptions, and must verify all
@@ -447,7 +493,7 @@ func TestProbePinRetryLoopResubscribesAndResyncsOnClosedSubscriptions12088(t *te
 		rpmEffective:         cfg.Services.RPM,
 		probePinRetryEvery:   time.Hour,
 		probePinResubBackoff: time.Millisecond,
-		probePinEgressIsUp:   func(string) bool { return true },
+		probePinEgressStateFn: func(string) probePinEgressState { return probePinEgressUp },
 		probePinVerify: func([]routing.ProbePin) map[string]error {
 			verifyCalls.Add(1)
 			return nil

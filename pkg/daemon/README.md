@@ -3840,13 +3840,15 @@ never lock an operator out of a remote box it manages.
 - `daemon_rpm.go` — config-hash-gated RPM probe lifecycle
   (`reconcileRPM`, applyConfigLocked step 17b): probe-set restarts remain
   hash-gated, while unchanged-hash reconciles and link/address notifications
-  verify configured fwmark rules and pinned host routes. Drift on an
-  administratively-up egress is held; an admin-down egress remains probeable
-  so bound sends feed genuine loss to RPM. With no pin installer, every pin
-  stays held even while down because no retry can back it after a later link-up.
-  The managed loop retries on the next tick (30 s fallback), resubscribes
-  closed link/address channels after backoff, then verifies all pins to resync.
-  Also owns the §4.4 HA gating scope (`filterRPMForHAGating`).
+  verify configured fwmark rules and pinned host routes. Drift stays held unless
+  `LinkByName` confirms the installer-backed egress exists with `IFF_UP` clear;
+  missing or unreadable egress state remains unknown and held. An admin-down
+  egress remains probeable so bound sends feed `ENETUNREACH` loss to RPM. With
+  no pin installer, every pin stays held even while down because no retry can
+  back it after a later link-up. The managed loop retries on the next tick
+  (30 s fallback), resubscribes closed link/address channels after backoff,
+  then verifies all pins to resync. Also owns the §4.4 HA gating scope
+  (`filterRPMForHAGating`).
 - `daemon_ipmon.go` — `assembleFRRConfig` (the SOLE `frr.FullConfig`
   constructor, shared by the full apply path and the routes-only
   actuator) + `actuateRouteOverlay` (FRR re-render → snapshot publish

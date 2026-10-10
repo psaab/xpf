@@ -113,12 +113,13 @@ func BuildProbePins(rpmCfg *config.RPMConfig, rethMap map[string]string) []Probe
 // #7173: on a rethMap MISS the RETH base falls through to
 // config.LinuxIfName(base) — the raw translated Junos name — rather than
 // failing here. The resulting name will not resolve. The routing manager
-// reports a missing pin, but daemon admin-up filtering does not retain that
-// hold for a missing egress; RPM's SO_BINDTODEVICE setup then fails with
-// ENODEV, and ErrProbeSetup holds the probe without treating it as path loss.
-// A probe silently sent on the wrong interface, or with no interface at all,
-// would report reachability it never measured and could drive ip-monitoring
-// route injection off it.
+// reports a missing pin, and the daemon keeps that hold because the missing
+// egress state is unknown; only a confirmed existing-but-admin-down egress
+// releases installer-backed failures. If socket setup is reached, RPM's
+// SO_BINDTODEVICE also fails with ENODEV and ErrProbeSetup holds the probe
+// without treating it as path loss. A probe silently sent on the wrong
+// interface, or with no interface at all, would report reachability it never
+// measured and could drive ip-monitoring route injection off it.
 //
 // So do not "fix" the miss by substituting a default interface or dropping
 // the pin — either turns a held probe into a false-passing one.

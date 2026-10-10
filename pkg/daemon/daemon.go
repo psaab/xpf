@@ -472,9 +472,9 @@ type Daemon struct {
 	// probePinVerify is the test seam for kernel readback of per-test
 	// rules and routes; nil = d.routing.VerifyProbePins (#12088).
 	probePinVerify func([]routing.ProbePin) map[string]error
-	// probePinEgressIsUp is the admin-state lookup seam for RPM pin holds;
-	// nil reads IFF_UP from the live netlink link.
-	probePinEgressIsUp func(string) bool
+	// probePinEgressStateFn is the egress admin-state lookup seam for RPM pin
+	// holds; nil reads IFF_UP from the live netlink link.
+	probePinEgressStateFn func(string) probePinEgressState
 	// probePinLinkSubscribe and probePinAddrSubscribe start the link/address
 	// netlink subscriptions used by probePinRetryLoop. Nil uses the real
 	// netlink subscription; seams let tests inject a channel close.

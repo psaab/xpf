@@ -73,7 +73,7 @@ func TestStopPinRetryLoopCancelsJoinsNoLateSyscall(t *testing.T) {
 		rpm:                rpm.New(),
 		daemonCtx:          context.Background(), // production: never cancelled
 		probePinRetryEvery: 2 * time.Millisecond,
-		probePinEgressIsUp: func(string) bool { return true },
+		probePinEgressStateFn: func(string) probePinEgressState { return probePinEgressUp },
 	}
 	d.probePinApply = func(pins []routing.ProbePin) map[string]error {
 		mu.Lock()

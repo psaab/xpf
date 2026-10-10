@@ -302,23 +302,40 @@ func retainProbePinInstallFailures(installed, verified map[string]error) map[str
 	return retained
 }
 
-// probePinEgressAdminUp reports the administrative IFF_UP state for an
-// egress, using the test seam when configured.
-func (d *Daemon) probePinEgressAdminUp(name string) bool {
-	if d.probePinEgressIsUp != nil {
-		return d.probePinEgressIsUp(name)
+// probePinEgressState distinguishes definite administrative state from a
+// missing or unreadable link. Unknown is deliberately fail-closed: it cannot
+// release a pin hold.
+type probePinEgressState uint8
+
+const (
+	probePinEgressUnknown probePinEgressState = iota
+	probePinEgressUp
+	probePinEgressDown
+)
+
+// probePinEgressStateForName reports the administrative IFF_UP state for an
+// egress, using the test seam when configured. Failed or incomplete lookups
+// return Unknown so they cannot release a pin hold.
+func (d *Daemon) probePinEgressStateForName(name string) probePinEgressState {
+	if d.probePinEgressStateFn != nil {
+		return d.probePinEgressStateFn(name)
 	}
 	link, err := netlink.LinkByName(name)
-	return err == nil && link != nil && link.Attrs() != nil &&
-		link.Attrs().Flags&net.FlagUp != 0
+	if err != nil || link == nil || link.Attrs() == nil {
+		return probePinEgressUnknown
+	}
+	if link.Attrs().Flags&net.FlagUp != 0 {
+		return probePinEgressUp
+	}
+	return probePinEgressDown
 }
 
-// probePinFailuresOnAdminUpEgress keeps a missing/mismatched pin held only
-// while its egress is administratively up. With IFF_UP clear, a socket bound
-// to the interface reports ENETUNREACH before a route lookup, so holding the
-// test would hide a real outage instead of preventing an unbacked-mark
-// false-pass. A missing link is not considered admin-up either.
-func (d *Daemon) probePinFailuresOnAdminUpEgress(pins []routing.ProbePin, failed map[string]error) map[string]error {
+// probePinFailuresExceptAdminDownEgress holds missing/mismatched pins unless
+// LinkByName confirms the egress exists with IFF_UP clear. Bound sends on an
+// admin-down link report ENETUNREACH, so those probes must remain able to drive
+// loss thresholds instead of being hidden by ErrProbeSetup. Missing or
+// unreadable links remain held because their state is unknown.
+func (d *Daemon) probePinFailuresExceptAdminDownEgress(pins []routing.ProbePin, failed map[string]error) map[string]error {
 	if len(failed) == 0 {
 		return nil
 	}
@@ -330,7 +347,7 @@ func (d *Daemon) probePinFailuresOnAdminUpEgress(pins []routing.ProbePin, failed
 				continue
 			}
 			found = true
-			if d.probePinEgressAdminUp(pin.Interface) {
+			if d.probePinEgressStateForName(pin.Interface) != probePinEgressDown {
 				filtered[key] = err
 			}
 			break
@@ -348,18 +365,18 @@ func (d *Daemon) probePinFailuresOnAdminUpEgress(pins []routing.ProbePin, failed
 	return filtered
 }
 
-// verifyProbePinsLocked publishes readback failures only while the egress is
-// administratively up. A missing route on an up link can false-pass through
-// the main table; a down link instead fails bound sends with ENETUNREACH and
-// must continue feeding RPM's loss threshold. Callers hold rpmMu. nil means
-// this daemon has no readback implementation.
+// verifyProbePinsLocked publishes readback failures except for a confirmed
+// admin-down egress. A missing route on an up egress can false-pass through
+// the main table; a missing or unreadable egress remains held because its
+// state is unknown. A confirmed down link instead fails bound sends with
+// ENETUNREACH and must feed RPM's loss threshold. Callers hold rpmMu. nil
+// means this daemon has no readback implementation.
 func (d *Daemon) verifyProbePinsLocked(pins []routing.ProbePin) {
 	verify := d.probePinVerifyFn()
 	if verify == nil || len(pins) == 0 {
 		return
 	}
-	failed := d.probePinFailuresOnAdminUpEgress(pins, verify(pins))
-	d.rpmPinInstallFailures = retainProbePinInstallFailures(d.rpmPinInstallFailures, failed)
+	failed := d.probePinFailuresExceptAdminDownEgress(pins, verify(pins))
 	if len(failed) > 0 && !d.rpmPinsFailed {
 		slog.Warn("kernel probe pin drift detected — affected tests held until retry",
 			"failed", len(failed))
@@ -389,12 +406,12 @@ func (d *Daemon) retryFailedProbePinsLocked() {
 	if applyPins == nil {
 		return
 	}
-	installFailed := d.probePinFailuresOnAdminUpEgress(pins,
+	installFailed := d.probePinFailuresExceptAdminDownEgress(pins,
 		d.applyProbePinsHeld(applyPins, pins))
 	d.rpmPinInstallFailures = installFailed
 	failed := installFailed
 	if verify := d.probePinVerifyFn(); verify != nil {
-		verified := d.probePinFailuresOnAdminUpEgress(pins, verify(pins))
+		verified := d.probePinFailuresExceptAdminDownEgress(pins, verify(pins))
 		d.rpmPinInstallFailures = retainProbePinInstallFailures(installFailed, verified)
 		failed = verified
 	}
@@ -698,11 +715,11 @@ func (d *Daemon) reconcileRPMMode(cfg *config.Config, haTransition bool) bool {
 	d.rpm.HoldPinsForReprogram(probePinKeys(pins), errProbePinReprogram)
 	var failed map[string]error
 	if applyPins != nil {
-		installFailed := d.probePinFailuresOnAdminUpEgress(pins, applyPins(pins))
+		installFailed := d.probePinFailuresExceptAdminDownEgress(pins, applyPins(pins))
 		d.rpmPinInstallFailures = installFailed
 		failed = installFailed
 		if verify := d.probePinVerifyFn(); verify != nil {
-			verified := d.probePinFailuresOnAdminUpEgress(pins, verify(pins))
+			verified := d.probePinFailuresExceptAdminDownEgress(pins, verify(pins))
 			d.rpmPinInstallFailures = retainProbePinInstallFailures(installFailed, verified)
 			failed = verified
 		}
