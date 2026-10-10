@@ -6080,8 +6080,8 @@ fn static_interface_next_hop_resolves_only_within_route_table_11074() {
 }
 
 /// #11317: retaining a mixed direct+recursive ECMP row must preserve the
-/// directly connected member; the recursive member gets ifindex 0 and is
-/// excluded from live selection rather than blackholing the usable path.
+/// directly connected member and make its second-static recursive member
+/// usable by baking the terminal gateway and egress onto it.
 #[test]
 fn recursive_ecmp_preserves_direct_member_11317() {
     let direct_gateway = Ipv4Addr::new(192, 168, 0, 254);
@@ -6134,18 +6134,18 @@ fn recursive_ecmp_preserves_direct_member_11317() {
         .iter()
         .find(|route| route.prefix.contains(Ipv4Addr::new(10, 20, 0, 5)))
         .expect("mixed recursive route");
-    let direct = route
-        .next_hops
-        .iter()
-        .find(|next_hop| next_hop.next_hop == Some(direct_gateway))
-        .expect("direct ECMP member");
-    assert_eq!(direct.ifindex, 201, "direct ECMP member must resolve");
-    let recursive = route
-        .next_hops
-        .iter()
-        .find(|next_hop| next_hop.next_hop == Some(Ipv4Addr::new(10, 10, 0, 1)))
-        .expect("recursive ECMP member");
-    assert_eq!(recursive.ifindex, 0, "recursive member must remain unresolved");
+    assert_eq!(
+        route.next_hops.len(),
+        2,
+        "mixed ECMP row must retain both members"
+    );
+    assert!(
+        route
+            .next_hops
+            .iter()
+            .all(|next_hop| next_hop.next_hop == Some(direct_gateway) && next_hop.ifindex == 201),
+        "direct and recursively resolved members must both use the terminal gateway"
+    );
 
     let resolution = lookup_forwarding_resolution_v4(
         &state,
@@ -12148,4 +12148,354 @@ fn admin_disabled_interface_addresses_do_not_enter_fib_state_11463() {
         enabled.local_v4.contains(&host),
         "enabled control must retain local-delivery registration"
     );
+}
+
+/// #12183: a mixed direct/recursive static row whose direct member is dead
+/// must drive the recursive member through the second static that resolves
+/// it — not bake `(R, ifindex 0)` and let the dead direct member win the
+/// drivable fallback. Fixture: direct A has no neighbor (the connected prefix
+/// remains live), while bare R `10.10.0.1` resolves only via second static S
+/// (`10.10.0.0/24` via connected G `192.168.0.254`). The R leg must bake
+/// the TERMINAL gateway `(G, ifindex 201)`: lookup ARPs/transmits via
+/// `nh.next_hop`, so an ifindex alone would still ARP for R.
+#[test]
+fn mixed_static_recursive_backup_resolves_via_second_static_12183() {
+    use std::net::Ipv4Addr;
+    let direct_dead = Ipv4Addr::new(192, 168, 0, 99);
+    let terminal_gateway = Ipv4Addr::new(192, 168, 0, 254);
+    let recursive_gateway = Ipv4Addr::new(10, 10, 0, 1);
+    let snapshot = |routes: Vec<crate::RouteSnapshot>| ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "ge-0-0-1".into(),
+            ifindex: 201,
+            hardware_addr: "02:00:00:00:02:01".into(),
+            addresses: vec![crate::protocol::snapshot::InterfaceAddressSnapshot {
+                family: "inet".into(),
+                address: "192.168.0.1/24".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        neighbors: vec![crate::NeighborSnapshot {
+            interface: "ge-0-0-1".into(),
+            ifindex: 201,
+            family: "inet".into(),
+            ip: terminal_gateway.to_string(),
+            mac: "02:00:00:00:00:fe".into(),
+            state: "reachable".into(),
+            ..Default::default()
+        }],
+        routes,
+        ..Default::default()
+    };
+    let second_static = crate::RouteSnapshot {
+        table: "inet.0".into(),
+        family: "inet".into(),
+        destination: "10.10.0.0/24".into(),
+        next_hops: vec![terminal_gateway.to_string()],
+        ..Default::default()
+    };
+    let mixed_row = crate::RouteSnapshot {
+        table: "inet.0".into(),
+        family: "inet".into(),
+        destination: "10.20.0.0/24".into(),
+        next_hops: vec![direct_dead.to_string(), recursive_gateway.to_string()],
+        ..Default::default()
+    };
+    for (label, order) in [
+        (
+            "mixed row first",
+            vec![mixed_row.clone(), second_static.clone()],
+        ),
+        (
+            "second static first",
+            vec![second_static.clone(), mixed_row.clone()],
+        ),
+    ] {
+        let state = build_forwarding_state(&snapshot(order));
+        let route = state
+            .routes_v4
+            .get("inet.0")
+            .expect("inet.0 table")
+            .iter()
+            .find(|route| route.prefix.contains(Ipv4Addr::new(10, 20, 0, 5)))
+            .expect("mixed recursive route");
+        // #11317 pin preserved: the row stays with both members.
+        assert_eq!(
+            route.next_hops.len(),
+            2,
+            "{label}: mixed row must keep both members"
+        );
+        let backup = route
+            .next_hops
+            .iter()
+            .find(|next_hop| next_hop.next_hop == Some(terminal_gateway))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{label}: recursive leg must bake terminal gateway {terminal_gateway}, got {:?}",
+                    route
+                        .next_hops
+                        .iter()
+                        .map(|nh| (nh.next_hop, nh.ifindex))
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            backup.ifindex, 201,
+            "{label}: recursive leg must bake egress ifindex"
+        );
+        let resolution = lookup_forwarding_resolution_v4(
+            &state,
+            None,
+            Ipv4Addr::new(10, 20, 0, 5),
+            "inet.0",
+            0,
+            true,
+            None,
+        );
+        assert_eq!(
+            resolution.disposition,
+            ForwardingDisposition::ForwardCandidate,
+            "{label}: dead direct member must not block the recursive backup"
+        );
+        assert_eq!(
+            resolution.egress_ifindex, 201,
+            "{label}: backup must egress the connected interface"
+        );
+        assert_eq!(
+            resolution.next_hop,
+            Some(IpAddr::V4(terminal_gateway)),
+            "{label}: backup must ARP/transmit via the terminal gateway"
+        );
+    }
+}
+
+/// #12183 v6 twin: same shape — direct A has no neighbor, bare R via second
+/// static S — must bake the terminal gateway on the recursive leg.
+#[test]
+fn mixed_static_recursive_backup_resolves_via_second_static_v6_12183() {
+    use std::net::Ipv6Addr;
+    let direct_dead: Ipv6Addr = "2001:db8:1::99".parse().unwrap();
+    let terminal_gateway: Ipv6Addr = "2001:db8:1::2".parse().unwrap();
+    let recursive_gateway: Ipv6Addr = "2001:db8:10::1".parse().unwrap();
+    let mut snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "ge-0-0-1".into(),
+            ifindex: 201,
+            hardware_addr: "02:00:00:00:02:01".into(),
+            addresses: vec![crate::protocol::snapshot::InterfaceAddressSnapshot {
+                family: "inet6".into(),
+                address: "2001:db8:1::1/64".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        neighbors: vec![crate::NeighborSnapshot {
+            interface: "ge-0-0-1".into(),
+            ifindex: 201,
+            family: "inet6".into(),
+            ip: terminal_gateway.to_string(),
+            mac: "02:00:00:00:00:fe".into(),
+            state: "reachable".into(),
+            ..Default::default()
+        }],
+        routes: vec![
+            crate::RouteSnapshot {
+                table: "inet6.0".into(),
+                family: "inet6".into(),
+                destination: "2001:db8:20::/64".into(),
+                next_hops: vec![direct_dead.to_string(), recursive_gateway.to_string()],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "inet6.0".into(),
+                family: "inet6".into(),
+                destination: "2001:db8:10::/64".into(),
+                next_hops: vec![terminal_gateway.to_string()],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    let route = state
+        .routes_v6
+        .get("inet6.0")
+        .expect("inet6.0 table")
+        .iter()
+        .find(|route| route.prefix.contains("2001:db8:20::5".parse().unwrap()))
+        .expect("mixed recursive v6 route");
+    assert_eq!(
+        route.next_hops.len(),
+        2,
+        "mixed v6 row must keep both members"
+    );
+    let backup = route
+        .next_hops
+        .iter()
+        .find(|next_hop| next_hop.next_hop == Some(terminal_gateway))
+        .unwrap_or_else(|| {
+            panic!(
+                "recursive v6 leg must bake terminal gateway {terminal_gateway}, got {:?}",
+                route
+                    .next_hops
+                    .iter()
+                    .map(|nh| (nh.next_hop, nh.ifindex))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(
+        backup.ifindex, 201,
+        "recursive v6 leg must bake egress ifindex"
+    );
+    let resolution = lookup_forwarding_resolution_v6(
+        &state,
+        None,
+        "2001:db8:20::5".parse().unwrap(),
+        "inet6.0",
+        0,
+        true,
+        None,
+    );
+    assert_eq!(
+        resolution.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "dead direct v6 member must not block the recursive backup"
+    );
+    assert_eq!(resolution.egress_ifindex, 201);
+    assert_eq!(resolution.next_hop, Some(IpAddr::V6(terminal_gateway)));
+    snapshot.routes.reverse();
+    let reordered = build_forwarding_state(&snapshot);
+    let reordered_route = reordered
+        .routes_v6
+        .get("inet6.0")
+        .expect("reordered inet6.0 table")
+        .iter()
+        .find(|route| route.prefix.contains("2001:db8:20::5".parse().unwrap()))
+        .expect("reordered mixed recursive v6 route");
+    assert_eq!(
+        reordered_route.next_hops.len(),
+        2,
+        "reordered v6 mixed row must retain both members"
+    );
+    assert!(reordered_route
+        .next_hops
+        .iter()
+        .any(|next_hop| next_hop.next_hop == Some(terminal_gateway) && next_hop.ifindex == 201));
+    let reordered_resolution = lookup_forwarding_resolution_v6(
+        &reordered,
+        None,
+        "2001:db8:20::5".parse().unwrap(),
+        "inet6.0",
+        0,
+        true,
+        None,
+    );
+    assert_eq!(
+        reordered_resolution.disposition,
+        ForwardingDisposition::ForwardCandidate
+    );
+    assert_eq!(
+        reordered_resolution.next_hop,
+        Some(IpAddr::V6(terminal_gateway))
+    );
+}
+
+/// #12183 controls (green pre- and post-fix): recursion must fail closed.
+/// A self-recursive row, an all-bare row with no resolving static, a
+/// cross-table second static, and a discard-covered R must all leave the
+/// recursive leg at ifindex 0 — never bind a wrong egress.
+#[test]
+fn mixed_static_recursion_fails_closed_controls_12183() {
+    use std::net::Ipv4Addr;
+    let snapshot = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "ge-0-0-1".into(),
+            ifindex: 201,
+            hardware_addr: "02:00:00:00:02:01".into(),
+            addresses: vec![crate::protocol::snapshot::InterfaceAddressSnapshot {
+                family: "inet".into(),
+                address: "192.168.0.1/24".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        routes: vec![
+            // Self-recursive: R is covered only by its own row.
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "10.30.0.0/24".into(),
+                next_hops: vec!["10.30.0.1".into()],
+                ..Default::default()
+            },
+            // All-bare with no resolving static anywhere.
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "10.31.0.0/24".into(),
+                next_hops: vec!["10.99.0.1".into()],
+                ..Default::default()
+            },
+            // Cross-table: the only covering static lives in VRF B.
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "10.32.0.0/24".into(),
+                next_hops: vec!["10.40.0.1".into()],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "tenant-b.inet.0".into(),
+                family: "inet".into(),
+                destination: "10.40.0.0/24".into(),
+                next_hops: vec!["192.168.0.254".into()],
+                ..Default::default()
+            },
+            // Discard-covered R: the covering prefix is a blackhole, not an egress.
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "10.33.0.0/24".into(),
+                next_hops: vec!["10.50.0.1".into()],
+                ..Default::default()
+            },
+            crate::RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: "10.50.0.0/24".into(),
+                next_hops: vec!["192.168.0.254".into()],
+                discard: true,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&snapshot);
+    let table = state.routes_v4.get("inet.0").expect("inet.0 table");
+    for (destination, member) in [
+        ("10.30.0.5", Ipv4Addr::new(10, 30, 0, 1)),
+        ("10.31.0.5", Ipv4Addr::new(10, 99, 0, 1)),
+        ("10.32.0.5", Ipv4Addr::new(10, 40, 0, 1)),
+        ("10.33.0.5", Ipv4Addr::new(10, 50, 0, 1)),
+    ] {
+        let route = table
+            .iter()
+            .find(|route| route.prefix.contains(destination.parse().unwrap()))
+            .unwrap_or_else(|| panic!("control route for {destination}"));
+        assert_eq!(
+            route.next_hops.len(),
+            1,
+            "control row for {destination} must retain its member"
+        );
+        assert_eq!(
+            route.next_hops[0].ifindex, 0,
+            "control row for {destination} must stay unresolved"
+        );
+        assert_eq!(
+            route.next_hops[0].next_hop,
+            Some(member),
+            "control row for {destination} must keep its authored gateway"
+        );
+    }
 }
