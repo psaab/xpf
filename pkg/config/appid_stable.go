@@ -76,7 +76,19 @@ func StableAppID(name string) uint16 {
 // guarantee. The zero-residual path is Option A (versioning application identity
 // in session state — a cross-language conntrack-ABI + HA-wire flag day),
 // deliberately out of scope for this bounded, Go-only fix.
+// AssignStableAppIDs assigns IDs and warns when a collision displaces a name.
 func AssignStableAppIDs(names []string) (map[string]uint16, error) {
+	return assignStableAppIDs(names, true)
+}
+
+// AssignStableAppIDsQuiet assigns the same IDs without warnings. Runtime
+// fallback lookups can repeat assignment for colliding overlaps, so they must
+// not emit a catalog-build diagnostic for each rendered session.
+func AssignStableAppIDsQuiet(names []string) (map[string]uint16, error) {
+	return assignStableAppIDs(names, false)
+}
+
+func assignStableAppIDs(names []string, warnOnDisplacement bool) (map[string]uint16, error) {
 	set := make(map[string]struct{}, len(names))
 	for _, n := range names {
 		set[n] = struct{}{}
@@ -138,12 +150,14 @@ func AssignStableAppIDs(names []string) (map[string]uint16, error) {
 			// bumped to the lowest free id. That bumped id is NOT a pure
 			// function of the app name alone, so this small colliding set can
 			// renumber across catalog edits — the one case the doc says needs
-			// operator attention. This runs at catalog build (config compile),
-			// never per-packet/per-session, so a Warn is correct here (#5988).
-			slog.Warn("application id displaced by stable-id hash collision; its app_id may renumber across catalog edits (rare — see docs/services-application-identification.md)",
-				"application", n,
-				"natural_app_id", StableAppID(n),
-				"assigned_app_id", free[i])
+			// operator attention. The warning is for config/catalog assignment;
+			// runtime fallback uses the quiet form to avoid logging per session.
+			if warnOnDisplacement {
+				slog.Warn("application id displaced by stable-id hash collision; its app_id may renumber across catalog edits (rare — see docs/services-application-identification.md)",
+					"application", n,
+					"natural_app_id", StableAppID(n),
+					"assigned_app_id", free[i])
+			}
 		}
 	}
 
