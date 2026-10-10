@@ -196,12 +196,14 @@ func (d *Daemon) applyServicesReconcile(cfg *config.Config) (error, error) {
 // on the commit itself.
 //
 // Return contract (#9947 F-007, fail-closed): nil on a full-diff
-// convergence; non-nil otherwise. A HARD reload failure (NOTHING
-// applied — live FRR keeps its previous config while frr.conf on disk
-// holds the new section) and ANY degraded reload (additive vtysh -f
-// applied the new lines but deferred stale-config removal) both return
-// an error so the tail commit-error join fails the commit instead of
-// reporting an unqualified success for a removal that did not happen.
+// convergence; non-nil otherwise. A HARD reload failure means neither
+// the primary nor additive load completed successfully. QNH cleanup and
+// replay are deferred until a config load succeeds, so prior QNH metrics
+// are not stripped before such a failure; FRR loads remain nontransactional
+// and may have accepted earlier commands before rejecting a later one.
+// Any degraded reload (additive vtysh -f applied desired lines but deferred
+// stale-config removal) also returns an error, so the commit cannot report
+// unqualified success for a removal that did not happen.
 // There is deliberately NO pytools-missing exemption: without
 // frr-reload.py the fallback cannot remove anything and the retry
 // re-invokes the missing program forever, so the unenforced removal is

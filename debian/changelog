@@ -1,12 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
 
-  * Keep generated qualified-next-hop metric actions out of shared FRR route
-    maps by default. Use daemon-scoped overlays for ospfd and integrated
-    vtysh for ripd because FRR 10.7 silently ignores `vtysh -d ripd -f`;
-    remove broadcast metric copies from unsupported daemons and verify the
-    exact ripd map state. Clear prior actions across daemon copies while
-    preserving authored policy metrics; skip cleanup only for explicit
-    daemon-connection failures (#12071).
+  * Keep generated qualified-next-hop route-maps metric-free in shared FRR
+    config. After successful loads, reconcile legacy metric-bearing sequences
+    across all 17 known daemons and verify reachable copies, then install the
+    positive metric overlay only to ospfd. Do not pre-clear before a load:
+    FRR configuration loads are not transactional. FRR 10.7.1 silently ignores
+    daemon-scoped ripd config, while integrated loads broadcast, so warn that
+    RIP redistribution receives its default metric; track restoration in
+    #12531. Preserve authored policy metrics (#12071).
 
   * Keep declined WireGuard listener keepalives from publishing outer-tuple
     LocalMiss sessions that would steer subsequent same-zone handshakes away

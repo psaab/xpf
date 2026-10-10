@@ -438,25 +438,31 @@ func renderQNHMetricSetOverlay11447(scope *qnhMetricScope11447, routeMap string)
 	return b.String()
 }
 
-// qnhMetricDaemonOverlays11447 emits metric actions only for QNH maps attached
-// to the daemons whose route-map match hooks preserve both discriminators.
-// The integrated map bodies remain metric-free in every daemon's copy.
+// qnhMetricDaemonOverlays11447 emits metric actions only for OSPF, whose
+// daemon-scoped loader applies them without broadcasting to other daemons.
+// FRR 10.7 cannot safely confine a RIP metric overlay: daemon-scoped loads
+// silently no-op, while integrated loads broadcast the action to daemons that
+// discard the required match clauses. RIP therefore keeps the default metric.
 func (m *Manager) qnhMetricDaemonOverlays11447(fc *FullConfig, set *qnhMetricSet11447) map[string]string {
 	if fc == nil || set == nil {
 		return nil
 	}
-	targets := map[string]map[string]*qnhMetricScope11447{
-		"ospfd": {},
-		"ripd":  {},
-	}
+	targets := map[string]map[string]*qnhMetricScope11447{"ospfd": {}}
 	addExport := func(daemon, self, export string, scope *qnhMetricScope11447) {
 		if qnhMetricScopeForDaemon11447(scope, self) == nil {
 			return
 		}
-		for _, entry := range m.redistributeEntries(export, fc.PolicyOptions, self, scope) {
-			if entry.proto == "static" && entry.routeMap != "" {
-				targets[daemon][entry.routeMap] = scope
+		entries := m.redistributeEntries(export, fc.PolicyOptions, self, scope)
+		for _, entry := range entries {
+			if entry.proto != "static" || entry.routeMap == "" {
+				continue
 			}
+			if daemon == "ripd" {
+				slog.Warn("QNH metric is not applied to RIP on FRR 10.7; RIP receives its default metric (see #12071)",
+					"issue", "#12071", "scope", scope.key, "redistribution", export)
+				return
+			}
+			targets[daemon][entry.routeMap] = scope
 		}
 	}
 	addProtocols := func(ospf *config.OSPFConfig, rip *config.RIPConfig, scope *qnhMetricScope11447) {
@@ -515,13 +521,12 @@ func (m *Manager) qnhMetricDaemonOverlays11447(fc *FullConfig, set *qnhMetricSet
 
 type qnhMetricSequenceSet11447 map[string]map[int]struct{}
 
-// These daemons may hold a prior integrated QNH map copy. RIPD cleanup uses
-// integrated vtysh because FRR 10.7's `vtysh -d ripd -f` silently no-ops.
-var qnhMetricCleanupDaemons11447 = []string{"ospfd", "ospf6d", "isisd", "bgpd"}
-
-// RIPD's integrated overlay is broadcast to all connected daemons. Remove its
-// metric actions from the daemons that cannot evaluate the QNH match clauses.
-var qnhMetricUnsupportedDaemons11447 = []string{"ospf6d", "isisd", "bgpd"}
+// Integrated loads broadcast route-map commands. This list bounds cleanup
+// verification to FRR daemons that can retain a QNH metric route-map copy.
+var qnhMetricCleanupDaemons11447 = []string{
+	"zebra", "mgmtd", "staticd", "ospfd", "ospf6d", "ripd", "isisd", "bgpd",
+	"ripngd", "eigrpd", "fabricd", "pimd", "pim6d", "babeld", "pbrd", "vrrpd", "bfdd",
+}
 
 // errQNHMetricDaemonUnavailable11447 marks vtysh's explicit "failed to
 // connect to any daemons" result. Cleanup may skip this: a stopped daemon
@@ -585,16 +590,78 @@ func qnhMetricSequencesFromConfig11447(text string) qnhMetricSequenceSet11447 {
 			continue
 		}
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "match ip address prefix-list xpf-qnh-dst-") {
+		if strings.HasPrefix(line, "match ip address prefix-list xpf-qnh-dst-") ||
+			strings.HasPrefix(line, "match ipv6 address prefix-list xpf-qnh-dst-") {
 			hasQNHDestination = true
 		}
 		if strings.HasPrefix(line, "match ip next-hop prefix-list xpf-qnh-nh-") ||
+			strings.HasPrefix(line, "match ipv6 next-hop prefix-list xpf-qnh-nh-") ||
 			strings.HasPrefix(line, "match interface ") {
 			hasQNHDiscriminator = true
 		}
 	}
 	flush()
 	return sequences
+}
+
+func qnhMetricRouteMapSequencesFromConfig11447(text string) qnhMetricSequenceSet11447 {
+	sequences := newQNHMetricSequenceSet11447()
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 4 || fields[0] != "route-map" ||
+			fields[2] != "permit" || !strings.HasPrefix(fields[1], "xpf-qnh-") {
+			continue
+		}
+		sequence, err := strconv.Atoi(fields[3])
+		if err == nil {
+			sequences.add(fields[1], sequence)
+		}
+	}
+	return sequences
+}
+
+func qnhMetricRouteMapSequencesFromManagedConfig11447(text string) qnhMetricSequenceSet11447 {
+	start := strings.Index(text, markerBegin)
+	if start < 0 {
+		return newQNHMetricSequenceSet11447()
+	}
+	start += len(markerBegin)
+	if start < len(text) && text[start] == '\n' {
+		start++
+	}
+	section := text[start:]
+	if end := strings.Index(section, markerEnd); end >= 0 {
+		section = section[:end]
+	}
+	return qnhMetricRouteMapSequencesFromConfig11447(section)
+}
+
+func renderQNHMetricSequenceReconciliation11447(
+	sequences, configured qnhMetricSequenceSet11447,
+) string {
+	routeMaps := make([]string, 0, len(sequences))
+	for routeMap := range sequences {
+		routeMaps = append(routeMaps, routeMap)
+	}
+	sort.Strings(routeMaps)
+	var b strings.Builder
+	for _, routeMap := range routeMaps {
+		seqs := make([]int, 0, len(sequences[routeMap]))
+		for sequence := range sequences[routeMap] {
+			seqs = append(seqs, sequence)
+		}
+		sort.Ints(seqs)
+		for _, sequence := range seqs {
+			if _, stillConfigured := configured[routeMap][sequence]; stillConfigured {
+				fmt.Fprintf(&b, "route-map %s permit %d\n no set metric\nexit\n!\n",
+					frrName(routeMap), sequence)
+			} else {
+				fmt.Fprintf(&b, "no route-map %s permit %d\n!\n",
+					frrName(routeMap), sequence)
+			}
+		}
+	}
+	return b.String()
 }
 
 func qnhMetricSequencesFromOverlay11447(overlays map[string]string) qnhMetricSequenceSet11447 {
@@ -649,26 +716,48 @@ func qnhMetricSequencesFromManagedConfig11447(text string) qnhMetricSequenceSet1
 	}
 	return qnhMetricSequencesFromConfig11447(section)
 }
+func qnhMetricSequencesWithSetMetricFromConfig11447(text string) qnhMetricSequenceSet11447 {
+	candidates := qnhMetricSequencesFromConfig11447(text)
+	sequences := newQNHMetricSequenceSet11447()
+	var routeMap string
+	var sequence int
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == "route-map" {
+			routeMap = ""
+			sequence = 0
+			if len(fields) != 4 || fields[2] != "permit" || !strings.HasPrefix(fields[1], "xpf-qnh-") {
+				continue
+			}
+			parsed, err := strconv.Atoi(fields[3])
+			if err == nil {
+				routeMap, sequence = fields[1], parsed
+			}
+			continue
+		}
+		if routeMap != "" && strings.HasPrefix(strings.TrimSpace(line), "set metric ") {
+			if _, qnhSequence := candidates[routeMap][sequence]; qnhSequence {
+				sequences.add(routeMap, sequence)
+			}
+		}
+	}
+	return sequences
+}
 
-func renderQNHMetricSequenceClears11447(sequences qnhMetricSequenceSet11447) string {
-	routeMaps := make([]string, 0, len(sequences))
-	for routeMap := range sequences {
-		routeMaps = append(routeMaps, routeMap)
+func qnhMetricSequencesWithSetMetricFromManagedConfig11447(text string) qnhMetricSequenceSet11447 {
+	start := strings.Index(text, markerBegin)
+	if start < 0 {
+		return newQNHMetricSequenceSet11447()
 	}
-	sort.Strings(routeMaps)
-	var b strings.Builder
-	for _, routeMap := range routeMaps {
-		seqs := make([]int, 0, len(sequences[routeMap]))
-		for sequence := range sequences[routeMap] {
-			seqs = append(seqs, sequence)
-		}
-		sort.Ints(seqs)
-		for _, sequence := range seqs {
-			fmt.Fprintf(&b, "route-map %s permit %d\n no set metric\nexit\n!\n",
-				frrName(routeMap), sequence)
-		}
+	start += len(markerBegin)
+	if start < len(text) && text[start] == '\n' {
+		start++
 	}
-	return b.String()
+	section := text[start:]
+	if end := strings.Index(section, markerEnd); end >= 0 {
+		section = section[:end]
+	}
+	return qnhMetricSequencesWithSetMetricFromConfig11447(section)
 }
 
 func (m *Manager) generateQNHMetricStaticMaps11447(set *qnhMetricSet11447) string {
@@ -746,4 +835,22 @@ func qnhMetricActionsFromShow11447(output []byte) map[int][]int {
 		}
 	}
 	return actions
+}
+
+func qnhMetricSequencesPresentFromShow11447(output []byte) map[int]struct{} {
+	present := make(map[int]struct{})
+	for _, line := range strings.Split(strings.ToLower(string(output)), "\n") {
+		fields := strings.Fields(line)
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] != "sequence" {
+				continue
+			}
+			sequence, err := strconv.Atoi(strings.Trim(fields[i+1], ",:"))
+			if err == nil {
+				present[sequence] = struct{}{}
+			}
+			break
+		}
+	}
+	return present
 }

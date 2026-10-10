@@ -820,7 +820,21 @@ step. Both are required — neither sees the other's case:
   folded into a single route-level `Preference`, so every next-hop rendered at
   equal cost and the floating static became equal-cost ECMP that load-balanced
   over the backup. A plain `next-hop [ a b ]` bracket LIST is equal-cost ECMP
-- **IGP export metric (#11447, #12071).** The shared generated QNH route-map in `frr.conf` contains destination + configured-next-hop matches and `on-match next`, but no QNH `set metric`. After reload, additive fallback, and full-diff retry, the manager applies metric-only overlays through daemon-scoped `vtysh -d` loads to `ospfd` and `ripd` only. Prior QNH metric actions are cleared by exact generated route-map sequence identity across the known routing daemons; authored policy-action sequences are excluded. These overlays are memory-only, so a FRR restart loads the metric-free integrated config and remains fail-closed until the next Apply. Authored policy `then metric` actions remain in `frr.conf` and can override the QNH metric when their later policy terms run; QNH metrics are never exported as BGP MED.
+- **IGP export metric (#11447, #12071).** The shared QNH route-map in
+  `frr.conf` has destination + configured-next-hop matches and `on-match
+  next`, but no QNH `set metric`. After a successful reload, the manager
+  restores the metric only to `ospfd` through a daemon-scoped load and verifies
+  it by readback. FRR 10.7.1's daemon-scoped `ripd` load silently does nothing;
+  the integrated loader broadcasts a RIP metric into other daemons, so no RIP
+  overlay, scrub, or readback is attempted. RIP redistribution therefore gets
+  its default metric, and commit warns when QNH metric configuration would
+  affect RIP; restoring RIP backup-cost export is tracked by #12531. Legacy
+  metric-bearing sequences are reconciled after a successful load and checked
+  across the known daemons, including stale IPv6 sequences. No pre-clear runs
+  before a load, since FRR loads are not transactional. Overlays are
+  memory-only, so a restart loads the metric-free config until Apply. Authored
+  policy `then metric` actions remain in `frr.conf` and can override the QNH
+  metric; QNH metrics are never exported as BGP MED.
 - **Userspace static failover by QNH metric (#11792).** The userspace snapshot
   builder emits one row per effective-preference/metric tier, preserving the
   authored preference and ordering equal-preference rows by metric. Rust tries
@@ -1555,30 +1569,28 @@ step. Both are required — neither sees the other's case:
   path: ≤40s (2×15s + up to two 5s WaitDelay windows; an apply also
   waits at most one teardown window behind a pre-cancelled in-flight
   retry, ≤45s total).
-- QNH metric overlay lifecycle (#12071): before an integrated reload, targeted
-  `no set metric` commands clear prior generated sequences on `ospfd`,
-  `ospf6d`, `isisd`, and `bgpd`, then an integrated clear removes the ripd
-  copy. This is necessary because stock FRR 10.7.1-2 returns rc=0 for
-  `vtysh -d ripd -f` without applying the config. After a reload, ospfd still
-  uses its daemon-scoped overlay; ripd uses integrated `vtysh -f`, whose
-  metric-bearing route-map commands are broadcast, so the manager immediately
-  clears those sequences from unsupported daemons and verifies the exact ripd
-  metric plus metric-free unsupported copies before logging success. The
-  integrated config remains metric-free; a failed partial overlay remains
-  marked for targeted cleanup on retry. Overlays are memory-only and replay
-  after each reload. Cleanup identity comes from prior overlays and the prior
-  marked `frr.conf`, never a blind route-map wipe.
-  In steady state this runs four daemon-scoped clears plus one integrated
-  clear per reload with prior QNH sequences, followed by up to two overlay
-  loads; a ripd overlay adds up to three daemon-scoped cleanup loads. A daemon
-  returning vtysh's explicit "failed to connect to any daemons" result is
-  skipped during cleanup because it cannot retain stale in-memory sequences;
-  other clear/load errors and overlay failures remain hard.
-  `vtysh` can also exit rc=0 while applying nothing. Such silent no-ops bypass
-  both the connect-failure skip and the hard-failure path; an exit status is
-  not proof of applied state. Only the ripd overlay uses distinguishing-value
-  readback; the ospfd overlay trusts rc=0, with its exact metric asserted by
-  the live test. Cleanup verifies the ripd sequence is absent.
+- QNH metric overlay lifecycle (#12071): the integrated route-map in
+  `frr.conf` remains metric-free. After a successful full-diff reload,
+  additive fallback, or retry, the manager reconciles old generated
+  metric-bearing sequences through integrated `vtysh -f`, then reads back
+  every known FRR daemon (`zebra`, `mgmtd`, `staticd`, `ospfd`, `ospf6d`,
+  `ripd`, `isisd`, `bgpd`, `ripngd`, `eigrpd`, `fabricd`, `pimd`, `pim6d`,
+  `babeld`, `pbrd`, `vrrpd`, and `bfdd`). The old sequence identities come
+  from the prior manager overlay and marked config; legacy metric actions are
+  force-cleared even when OSPFD still targets the same sequence, so no old
+  broadcast copy is retained. Only then is the exact metric overlay installed
+  to `ospfd` with daemon-scoped `vtysh -d` and verified by readback.
+  FRR 10.7.1-2 accepts `vtysh -d ripd -f` but applies nothing; using integrated
+  `vtysh -f` for RIP broadcasts the metric action to multiple daemons. RIP
+  therefore receives no QNH metric overlay, scrub, or readback and uses its
+  default redistribution metric. Commit warns when a QNH metric setting would
+  export to RIP; the lost RIP backup-cost behavior is tracked in #12531.
+  Cleanup is post-load only: if the reload fails, no pre-clear is attempted.
+  FRR loads are not transactional, so a failed load may still have partial
+  effects. Explicit "failed to connect to any daemons" readback errors are
+  skipped for unavailable daemons; other cleanup and OSPFD overlay errors are
+  hard. Overlays are memory-only, so a restart loads the metric-free config
+  until Apply. Authored policy metrics are not copied into QNH overlays.
 - Degraded mode: fallback success returns `ErrFRRReloadDegraded`
   (wrapping the primary cause). A single-flight in-manager retry loop
   re-runs the primary at 15s/30s/60s then every 5min until a full diff
