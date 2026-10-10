@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
 	"net"
 	"testing"
@@ -18,6 +19,13 @@ var errStep0NoLink = errors.New("no such link")
 func TestRenameRethMemberSelectsIndexedSameRGMember_12157(t *testing.T) {
 	legacyMAC := cluster.RethMAC(1, 1, 0, 0)
 	memberMAC := cluster.RethMAC(1, 1, 1, 0)
+	// Decouple the daemon layer from the encoding under test (GLM R1):
+	// reth1/node0 in cluster 1 RG 1 is 02:bf:72:01:01:02 by the
+	// 02:bf:72:CC:RR:II layout (II = 2*rethIndex + nodeID).
+	want := net.HardwareAddr{0x02, 0xbf, 0x72, 0x01, 0x01, 0x02}
+	if !bytes.Equal(memberMAC, want) {
+		t.Fatalf("memberMAC = %s, want literal %s", memberMAC, want)
+	}
 	configuredNames := map[string]struct{}{
 		"ge-0-0-0": {},
 		"ge-0-0-1": {},
