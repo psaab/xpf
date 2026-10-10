@@ -81,9 +81,9 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 	"disable":               {desc: "Disable this interface", children: nil},
 	"vlan-tagging":          {desc: "Enable 802.1Q VLAN tagging", children: nil},
 	"flexible-vlan-tagging": {desc: "Enable flexible 802.1Q VLAN tagging (QinQ)", children: nil},
-	// #4308 (fable-review-167 I-3): typed + compiled parity settings. The
-	// native-vlan-id is enforced by #11434's userspace ingress mapping; the
-	// gratuitous-ARP knobs still lack sysctls, unnumbered-address lacks a
+	// #4308: native-vlan-id is enforced by #11434's userspace ingress mapping,
+	// with a compile-time advisory when no unique matching unit exists (#12248).
+	// The gratuitous-ARP knobs still lack sysctls, unnumbered-address lacks a
 	// networkd implementation, and targeted-broadcast lacks dataplane
 	// forwarding. See validateInterfaceParityWarnings.
 	"native-vlan-id": {desc: "VLAN ID whose matching logical unit receives untagged frames (native VLAN — #11434)", args: 1, placeholder: "<number>",

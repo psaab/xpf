@@ -107,6 +107,7 @@ func TestInterfaceParityKnobsAdvisory_4308(t *testing.T) {
 func TestNativeVLANHasNoAcceptedOnlyAdvisory_11434(t *testing.T) {
 	cfg := compileTreeFromSet(t, []string{
 		"set interfaces ge-0-0-0 native-vlan-id 100",
+		"set interfaces ge-0-0-0 unit 100 vlan-id 100",
 	})
 	for _, warning := range ValidateConfig(cfg) {
 		if strings.Contains(warning, "native-vlan-id") {

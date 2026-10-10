@@ -170,9 +170,10 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 			ifc.FlexibleVlanTagging = true
 		}
 
-		// #4308: typed interface settings. native-vlan-id is enforced from
-		// InterfaceSnapshot by the userspace ingress builder (#11434); the
-		// remaining ARP/addressing knobs retain their accepted-only advisory.
+		// #4308: typed interface settings. Native VLAN ingress uses a unique
+		// vlan-id unit when present (#11434); otherwise the dataplane rejects
+		// untagged traffic, so warn after compiling the units below (#12248).
+		// The remaining ARP/addressing knobs retain their accepted-only advisory.
 		if nvNode := child.FindChild("native-vlan-id"); nvNode != nil {
 			if v := nodeVal(nvNode); v != "" {
 				if n, err := strconv.Atoi(v); err == nil {
@@ -824,11 +825,37 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 				ifc.Tunnel.Addresses = append(ifc.Tunnel.Addresses, unit.Addresses...)
 			}
 		}
+		if warnings != nil {
+			if warning := nativeVLANBindingWarning(ifName, ifc); warning != "" {
+				*warnings = append(*warnings, warning)
+			}
+		}
 
 		ifaces.Interfaces[ifName] = ifc
 	}
 	suppressInvalidRethAddresses(ifaces, invalidRethRG)
 	return nil
+}
+func nativeVLANBindingWarning(ifName string, ifc *InterfaceConfig) string {
+	if ifc == nil || ifc.NativeVlanID <= 0 {
+		return ""
+	}
+	matches := 0
+	for _, unit := range ifc.Units {
+		if unit != nil && unit.VlanID == ifc.NativeVlanID {
+			matches++
+			if matches > 1 {
+				break
+			}
+		}
+	}
+	if matches == 1 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"interfaces %s native-vlan-id %d has no unique matching unit with vlan-id %d; untagged ingress is rejected (#12248)",
+		ifName, ifc.NativeVlanID, ifc.NativeVlanID,
+	)
 }
 
 // suppressInvalidRethAddresses strips every configured address from a reth
