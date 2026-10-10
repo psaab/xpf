@@ -48,7 +48,11 @@ pub(super) fn nat_translated_local_exclusions(
             {
                 continue;
             }
-            let to_interface = if mask & 1 != 0 { iface.name.as_str() } else { "" };
+            let to_interface = if mask & 1 != 0 {
+                iface.name.as_str()
+            } else {
+                ""
+            };
             let to_routing_instance = if mask & 2 != 0 {
                 iface.routing_instance.as_str()
             } else {
@@ -170,9 +174,9 @@ mod nat_iface_scope_12085_tests {
     fn forwarding_interface_nat_map_matches_shared_go_matrix_12085() {
         let fixture = fixture();
         for case in &fixture.cases {
-            let state = crate::afxdp::forwarding_build::build_forwarding_state(
-                &snapshot(&fixture, &case.rule),
-            );
+            let state = crate::afxdp::forwarding_build::build_forwarding_state(&snapshot(
+                &fixture, &case.rule,
+            ));
             let mut got: Vec<String> = state
                 .interface_nat_v4
                 .keys()
@@ -221,7 +225,10 @@ mod nat_iface_scope_12085_tests {
             .find(|case| case.name == "off-rule")
             .expect("shared fixture has off-rule row");
         let (v4, v6) = nat_translated_local_exclusions(&snapshot(&fixture, &case.rule));
-        assert!(v4.is_empty() && v6.is_empty(), "off rule registered addresses");
+        assert!(
+            v4.is_empty() && v6.is_empty(),
+            "off rule registered addresses"
+        );
     }
 
     #[test]
@@ -234,7 +241,10 @@ mod nat_iface_scope_12085_tests {
         };
         let bare = snapshot(&fixture, &rule);
         let (v4, v6) = nat_translated_local_exclusions(&bare);
-        assert!(v4.is_empty() && v6.is_empty(), "bare base name matched a unit");
+        assert!(
+            v4.is_empty() && v6.is_empty(),
+            "bare base name matched a unit"
+        );
 
         rule.to_interface = "ge-0/0/1.0".into();
         let exact = snapshot(&fixture, &rule);
@@ -257,10 +267,16 @@ mod nat_iface_scope_12085_tests {
         let snapshot = snapshot(&fixture, &case.rule);
         let addr: Ipv4Addr = "203.0.113.2".parse().expect("unzoned fixture address");
         let (v4, _) = nat_translated_local_exclusions(&snapshot);
-        assert!(!v4.contains(&addr), "unzoned address entered interface-NAT exclusions");
+        assert!(
+            !v4.contains(&addr),
+            "unzoned address entered interface-NAT exclusions"
+        );
 
         let state = crate::afxdp::forwarding_build::build_forwarding_state(&snapshot);
-        assert!(state.local_v4.contains(&addr), "unzoned address must remain local");
+        assert!(
+            state.local_v4.contains(&addr),
+            "unzoned address must remain local"
+        );
         assert!(
             !state.interface_nat_v4.contains_key(&addr),
             "unzoned address must not enter interface_nat_v4"

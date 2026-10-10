@@ -106,7 +106,8 @@
   ],
   "zones": [
     { "name": "wan", "id": 1 },
-    { "name": "vrf", "id": 2 }
+    { "name": "vrf", "id": 2 },
+    { "name": "lan", "id": 3 }
   ],
   "cases": [
     {

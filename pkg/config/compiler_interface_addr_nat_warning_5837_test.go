@@ -273,7 +273,6 @@ func TestDNATInterfaceAddressExcludedByUnscopedAndToInterfaceSNAT_5837(t *testin
 	}
 }
 
-
 // The warning mirror must not suppress an advisory for a row that runtime
 // interface-NAT registration cannot own: lifelines, unzoned interfaces,
 // disabled interfaces, or a bare base name that does not match the runtime
