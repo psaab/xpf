@@ -584,8 +584,8 @@ func TestRenamePositionalUnfreedKeepsOwnerChain12156(t *testing.T) {
 // K (known enp6s0, wears fxp0 via chain) wants ge-0-0-0, but K's temp rename
 // fails — so fxp0 (U's FINAL) is unfreed. K writes ge-0-0-0.link (its own
 // final), never fxp0.link: nobody else touches the stale claim, and sparing
-// it resurrects K under U's target (B-REG: 30 wrong boots + 6/6 reorder
-// cases in the temp-fail matrix). fxp0.link MUST go.
+// it resurrects K under U's target (8 wrong boots + 6/6 reorder cases in
+// the temp-fail matrix). fxp0.link MUST go.
 func TestRenamePositionalUnfreedFinalStillNeutralizesTarget12156(t *testing.T) {
 	macForm := "# Managed by xpfd \u2014 do not edit\n[Match]\nMACAddress=52:54:00:00:00:0b\n\n[Link]\nName=ge-0-0-1\nMTUBytes=1500\n"
 	chain := "# Managed by xpfd \u2014 do not edit\n[Match]\nOriginalName=enp6s0\n\n[Link]\nName=fxp0"
