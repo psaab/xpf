@@ -2,6 +2,7 @@ package upgrade
 
 import (
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -255,17 +256,115 @@ func TestFailedRollingResultDoesNotExposeCutEvidence12143(t *testing.T) {
 	r, cfg, _ := statusProcessEnv12143(t, "2.0.0")
 	seedInitialCurrent(t, r, cfg, "1.0.0")
 	cluster := &fakeCluster{
-		peerAlive:   true,
-		synced:      true,
-		compatible:  true,
-		peerReady:   true,
-		drainAfter:  1,
-		rejoinErr:   fmt.Errorf("injected post-cut rejoin failure"),
+		peerAlive:  true,
+		synced:     true,
+		compatible: true,
+		peerReady:  true,
+		drainAfter: 1,
+		rejoinErr:  fmt.Errorf("injected post-cut rejoin failure"),
 	}
 	if err := runRollingWith(r, cluster, fastRC()); err == nil {
 		t.Fatal("rolling result unexpectedly succeeded without a confirmed rejoin")
 	}
 	if evidence := r.LastCommittedCut(); evidence.healthConfirmed || evidence.version != "" {
 		t.Fatalf("failed rolling result exposed commit evidence %+v", evidence)
+	}
+}
+
+func TestCompletedRollbackRejectsSavedSupersessionEvidence12143(t *testing.T) {
+	for _, sameRunner := range []bool{false, true} {
+		for _, statusAfterRollback := range []bool{false, true} {
+			t.Run(fmt.Sprintf("same_runner=%t/record_after_rollback=%t", sameRunner, statusAfterRollback), func(t *testing.T) {
+				r, cfg, s := statusProcessEnv12143(t, "2.0.0")
+				seedInitialCurrent(t, r, cfg, "1.0.0")
+				if err := r.Run(Options{}); err != nil {
+					t.Fatalf("initial cut: %v", err)
+				}
+				path := filepath.Join(t.TempDir(), "upgrade-deferred")
+				if !statusAfterRollback {
+					writePendingVersionStatus12143(t, path, "3.0.0", "2.0.0")
+				}
+
+				stageStatusVersion12143(t, cfg, "4.0.0")
+				s.stagedVersion = "4.0.0"
+				publishStagedGen(t, r)
+				if err := r.Run(Options{}); err != nil {
+					t.Fatalf("healthy superseding cut: %v", err)
+				}
+				evidence := r.LastCommittedCut()
+				if !evidence.healthConfirmed || evidence.version != "4.0.0" {
+					t.Fatalf("saved evidence = %+v; want health-confirmed 4.0.0", evidence)
+				}
+
+				rollbackRunner := r
+				if !sameRunner {
+					var err error
+					rollbackRunner, err = NewRunner(r.cfg)
+					if err != nil {
+						t.Fatal(err)
+					}
+					s.runner = rollbackRunner
+				}
+				if err := rollbackRunner.RollbackTo("2.0.0", RollbackOptions{}); err != nil {
+					t.Fatalf("completed rollback: %v", err)
+				}
+				current, err := r.readCurrentVersion()
+				if err != nil || current != "2.0.0" || s.running != "2.0.0" {
+					t.Fatalf("after rollback current=%q process=%q err=%v; want 2.0.0", current, s.running, err)
+				}
+				journal, err := r.loadJournal()
+				if err != nil || journal.State != StateInit {
+					t.Fatalf("after rollback journal=%+v err=%v; want cleared journal", journal, err)
+				}
+				if statusAfterRollback {
+					writePendingVersionStatus12143(t, path, "3.0.0", "2.0.0")
+				}
+
+				// Keep the pre-rollback copy even when the same Runner reset its
+				// LastCommittedCut during rollback.
+				clearStatus12143(t, r, path, evidence, false)
+			})
+		}
+	}
+}
+
+func TestDebianDigitOrderClearDirections12143(t *testing.T) {
+	pairs := []struct {
+		name  string
+		lower string
+		upper string
+	}{
+		{name: "upstream dotted", lower: "1.0.1", upper: "1.0.a"},
+		{name: "revision mixed", lower: "1.0-1ubuntu1", upper: "1.0-1ubuntuA"},
+		{name: "upstream mixed suffix", lower: "1.0a1", upper: "1.0a.a"},
+	}
+	for _, pair := range pairs {
+		t.Run(pair.name, func(t *testing.T) {
+			if output, err := exec.Command("dpkg", "--compare-versions", pair.lower, "lt", pair.upper).CombinedOutput(); err != nil {
+				t.Fatalf("dpkg oracle %s < %s: %s %v", pair.lower, pair.upper, output, err)
+			}
+			for _, newerCut := range []bool{false, true} {
+				t.Run(map[bool]string{false: "older-cut-retains", true: "newer-cut-clears"}[newerCut], func(t *testing.T) {
+					r, cfg, s := statusProcessEnv12143(t, "0.9")
+					seedInitialCurrent(t, r, cfg, "0.8")
+					if err := r.Run(Options{}); err != nil {
+						t.Fatalf("initial cut: %v", err)
+					}
+					statusVersion, cutVersion, wantClear := pair.upper, pair.lower, false
+					if newerCut {
+						statusVersion, cutVersion, wantClear = pair.lower, pair.upper, true
+					}
+					path := filepath.Join(t.TempDir(), "upgrade-deferred")
+					writePendingVersionStatus12143(t, path, statusVersion, "0.9")
+					stageStatusVersion12143(t, cfg, cutVersion)
+					s.stagedVersion = cutVersion
+					publishStagedGen(t, r)
+					if err := r.Run(Options{}); err != nil {
+						t.Fatalf("real cut to %s: %v", cutVersion, err)
+					}
+					clearStatus12143(t, r, path, r.LastCommittedCut(), wantClear)
+				})
+			}
+		})
 	}
 }

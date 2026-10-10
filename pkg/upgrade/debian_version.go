@@ -138,7 +138,7 @@ func debianCharOrder(c byte) int {
 	switch {
 	case c == '~':
 		return -1
-	case c == 0:
+	case c == 0 || asciiDigit(c):
 		return 0
 	case asciiLetter(c):
 		return int(c)

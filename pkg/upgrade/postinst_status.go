@@ -178,11 +178,12 @@ func syncStatusDirectory(path string) error {
 
 // ClearBinaryUpgradeStatusIfCurrent removes a resolved postinst failure record.
 // It clears when the staged version is the known committed current version, or
-// when this invocation supplies health-confirmed evidence of a strictly newer
-// Debian version. A change away from running_version is not supersession
-// evidence: unknown sentinels, rollback motion, and unconfirmed journals cannot
-// prove that the failed staged generation was replaced by a successful cut.
-// The upgrade lock protects the status and journal checks against cutovers.
+// when this invocation supplies health-confirmed evidence for the current
+// runtime and a strictly newer Debian version. A change away from
+// running_version is not supersession evidence: unknown sentinels, rollback
+// motion, and unconfirmed journals cannot prove that the failed staged
+// generation was replaced by a successful cut. The upgrade lock protects the
+// status, journal, and current-version checks against cutovers.
 func (r *Runner) ClearBinaryUpgradeStatusIfCurrent(path string, committed CommittedCut) (bool, error) {
 	if r == nil {
 		return false, fmt.Errorf("clear binary upgrade status: nil runner")
@@ -219,7 +220,8 @@ func (r *Runner) ClearBinaryUpgradeStatusIfCurrent(path string, committed Commit
 		return true, nil
 	}
 	if status.StagedVersion == "unknown" || !committed.healthConfirmed ||
-		committed.version == "" || committed.version == "unknown" {
+		committed.version == "" || committed.version == "unknown" ||
+		current != committed.version {
 		return false, nil
 	}
 	cmp, err := compareDebianVersions(committed.version, status.StagedVersion)

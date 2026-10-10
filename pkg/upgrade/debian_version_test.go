@@ -17,6 +17,9 @@ func TestCompareDebianVersions(t *testing.T) {
 		{name: "numeric block", a: "1.0.10", b: "1.0.9", want: 1},
 		{name: "upstream continuation", a: "1.0", b: "1.0.0", want: -1},
 		{name: "end sorts after tilde", a: "1.0a", b: "1.0a~", want: 1},
+		{name: "digit before upstream letter", a: "1.0.1", b: "1.0.a", want: -1},
+		{name: "digit before revision letter", a: "1.0-1ubuntu1", b: "1.0-1ubuntuA", want: -1},
+		{name: "digit before suffix letter", a: "1.0a1", b: "1.0a.a", want: -1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
