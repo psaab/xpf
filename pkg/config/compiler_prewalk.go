@@ -642,6 +642,16 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
+	// #7525: a present NAT from/to clause with no non-empty scope value is not
+	// an absent clause. Empty values are discarded by scope collection, so
+	// treating this shape as the implicit match-any default would silently
+	// widen the rule-set. Strict commit rejects it; tolerant load warns.
+	natEmptyScopeWarnings, err := validateNATRuleSetEmptyScopesAST(
+		tree.Children, opts.lenientNATEmptyScope)
+	if err != nil {
+		return nil, err
+	}
+
 	// #4881 NAT rule-set mixed-scope-kind gate. A single `from` / source-`to`
 	// / static-`from` clause that mixes scope KINDS (zone + interface +
 	// routing-instance) is OR-expanded by the #3096 Cartesian product into
@@ -804,6 +814,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, emptyIdentityWarnings...)
 	warnings = append(warnings, zoneGroupWarnings...)
 	warnings = append(warnings, dnatToScopeWarnings...)
+	warnings = append(warnings, natEmptyScopeWarnings...)
 	warnings = append(warnings, natMixedScopeWarnings...)
 	warnings = append(warnings, chassisIdentityWarnings...)
 	warnings = append(warnings, rethRGWarnings...)

@@ -309,19 +309,35 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 	compiledPools := make(map[string]bool)
 
 	for _, rs := range natCfg.Source {
-		if _, ok := result.ZoneIDs[rs.FromZone]; !ok {
+		// #12525: validate provenance per side. A non-empty scope or the
+		// compiler stamp for that absent clause is required independently;
+		// one side's stamp must never authorize an empty scope on the other.
+		if !rs.HasNATFromScopeStamp() {
 			return fmt.Errorf("source NAT from-zone %q not found", rs.FromZone)
 		}
-		if _, ok := result.ZoneIDs[rs.ToZone]; !ok {
+		if !rs.HasNATToScopeStamp() {
 			return fmt.Errorf("source NAT to-zone %q not found", rs.ToZone)
 		}
-
+		if rs.FromZone != "" {
+			if _, ok := result.ZoneIDs[rs.FromZone]; !ok {
+				return fmt.Errorf("source NAT from-zone %q not found", rs.FromZone)
+			}
+		}
+		if rs.ToZone != "" {
+			if _, ok := result.ZoneIDs[rs.ToZone]; !ok {
+				return fmt.Errorf("source NAT to-zone %q not found", rs.ToZone)
+			}
+		}
 		for _, rule := range rs.Rules {
 			if !rule.Then.Interface && rule.Then.PoolName == "" && !rule.Then.Off {
 				compileWarn(dp, "SNAT rule has no action",
 					"rule", rule.Name, "rule-set", rs.Name)
 				continue
 			}
+			// Assign the translation-hit counter independently of interface
+			// egress-IP resolution. Non-zone to-scopes have no ToZone entry,
+			// but their userspace snapshots still need this rule identity.
+			counterID := assignNATCounterID(result, NATCounterTypeSource, rs.Name, rule.Name)
 
 			// source-nat off: exemption rule (no pool allocation)
 			if rule.Then.Off {
@@ -336,8 +352,6 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 				if len(dstAddrs) == 0 {
 					dstAddrs = []string{rule.Match.DestinationAddress}
 				}
-
-				counterID := assignNATCounterID(result, NATCounterTypeSource, rs.Name, rule.Name)
 
 				for _, srcAddr := range srcAddrs {
 					srcAddrID, err := resolveSNATMatchAddr(dp, srcAddr, result)
@@ -377,11 +391,13 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 				// already treats a nil zone slot as reachable — its comment
 				// names the tolerant/programmatic and HA-peer-sync paths, which
 				// do not go through the parser that always allocates a zone.
-				// Treat nil exactly like a zone with no interfaces: this rule
-				// resolves nothing, so warn and skip.
+				// Treat nil exactly like a zone with no interfaces: skip the
+				// rule, warning only when the operator named a to-zone.
 				if !ok || toZoneCfg == nil || len(toZoneCfg.Interfaces) == 0 {
-					compileWarn(dp, "to-zone has no interfaces",
-						"zone", rs.ToZone, "rule-set", rs.Name)
+					if rs.ToZone != "" {
+						compileWarn(dp, "to-zone has no interfaces",
+							"zone", rs.ToZone, "rule-set", rs.Name)
+					}
 					continue
 				}
 
@@ -557,9 +573,6 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 			if len(dstAddrs) == 0 {
 				dstAddrs = []string{rule.Match.DestinationAddress}
 			}
-
-			// Assign NAT rule counter ID (shared across expanded address pairs)
-			counterID := assignNATCounterID(result, NATCounterTypeSource, rs.Name, rule.Name)
 
 			for _, srcAddr := range srcAddrs {
 				srcAddrID, err := resolveSNATMatchAddr(dp, srcAddr, result)

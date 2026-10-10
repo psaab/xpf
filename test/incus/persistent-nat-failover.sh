@@ -247,16 +247,14 @@ cleanup_tmp() { rm -rf "$PNAT_TMP"; }
 # and the leaf is `inactivity-timeout`, not `timeout`.
 #
 # RETARGET the cluster's EXISTING `lan-to-wan` rule rather than adding a new
-# rule-set. Two reasons, both measured against the real compilers rather than
-# guessed:
+# rule-set:
 #
-#   * an INTERFACE-scoped rule-set does not compile. `pkg/dataplane`'s
-#     compileNAT requires a resolvable FromZone/ToZone and an interface-scoped
-#     rule-set has neither, so it fails with `source NAT from-zone "" not
-#     found`. (`pkg/config` accepts it — the two compilers disagree, so
-#     validating against only the first is not enough.)
+#   * #12525 now accepts non-zone interface, routing-instance, and unscoped
+#     source-NAT rule-sets. This failover scenario intentionally keeps its
+#     existing zone-scoped `lan-to-wan` rule rather than broadening the policy
+#     it exercises.
 #   * a second ZONE-scoped rule-set would race the existing one for precedence.
-#     Retargeting the rule that already matches is deterministic.
+#     Retargeting the matching rule is deterministic.
 #
 # `configure` FIRST: without it every `set` lands in operational mode and the
 # REPL answers "unknown command: set" for each, then exits 0.
