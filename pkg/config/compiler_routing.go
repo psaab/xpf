@@ -507,8 +507,10 @@ func mergeStaticRouteIdentity(existing, route *StaticRoute) {
 	if noInstallConflict {
 		existing.noInstallConflict = true
 	}
-	existingHasAction := existing.Discard || existing.Reject || existing.NextTable != ""
-	routeHasAction := route.Discard || route.Reject || route.NextTable != ""
+	existingExcluded := noInstallConflict && existing.NoInstall
+	routeExcluded := noInstallConflict && route.NoInstall
+	existingHasAction := !existingExcluded && (existing.Discard || existing.Reject || existing.NextTable != "")
+	routeHasAction := !routeExcluded && (route.Discard || route.Reject || route.NextTable != "")
 	nextHopless := len(existing.NextHops) == 0 && len(route.NextHops) == 0
 	// Distinct spellings/collections are independent route sources. Stamp their
 	// unqualified next-hops before route-level preference precedence can obscure
@@ -529,49 +531,58 @@ func mergeStaticRouteIdentity(existing, route *StaticRoute) {
 		}
 	}
 	switch {
-	case noInstallConflict && existing.NoInstall && !route.NoInstall:
-		// The existing source is excluded; only the incoming installable
-		// source may contribute next-hops to the tolerant merged route.
-		existing.NextHops = existing.NextHops[:0]
-		appendStaticRouteNextHopsByEffectiveTier(existing, route)
-	case noInstallConflict && !existing.NoInstall && route.NoInstall:
-		// Do not install next-hops declared by a no-install source.
-	default:
-		appendStaticRouteNextHopsByEffectiveTier(existing, route)
-	}
-	if route.Discard {
-		existing.Discard = true
-	}
-	if route.Reject {
-		existing.Reject = true
-	}
-	// Strict validation rejects disagreement between independent sources.
-	// Tolerant compilation keeps only next-hops from installable sources.
-	existing.NoInstall = existing.NoInstall && route.NoInstall
-	if nextHopless {
-		switch {
-		case existingHasAction && routeHasAction:
-			if route.Preference < existing.Preference {
-				existing.Preference = route.Preference
-			}
-		case routeHasAction:
-			// Preference-only aliases do not lower a forwarding action's
-			// route distance.
-			existing.Preference = route.Preference
-		case existingHasAction:
-			// Keep the action-bearing source's preference.
-		default:
-			// No source carries a forwarding action, so neither preference
-			// should alter a route that will be excluded from installation.
-		}
-		existing.HasPreference = existing.HasPreference || route.HasPreference
-	} else if route.HasPreference {
-		existing.Preference = route.Preference
-		existing.HasPreference = true
-	}
-	if route.NextTable != "" {
+	case existingExcluded && !routeExcluded:
+		// The existing source is excluded. Replace all of its forwarding
+		// state with the incoming installable source, not just its hops.
+		existing.Discard = route.Discard
+		existing.Reject = route.Reject
 		existing.NextTable = route.NextTable
 		existing.NextTableRaw = route.NextTableRaw
+		existing.Preference = route.Preference
+		existing.HasPreference = route.HasPreference
+		existing.NextHops = existing.NextHops[:0]
+		appendStaticRouteNextHopsByEffectiveTier(existing, route)
+	case routeExcluded:
+		// A no-install source contributes no actions, preference, or hops.
+	default:
+		appendStaticRouteNextHopsByEffectiveTier(existing, route)
+		if route.Discard {
+			existing.Discard = true
+		}
+		if route.Reject {
+			existing.Reject = true
+		}
+	}
+	// Strict validation rejects disagreement between independent sources.
+	// Tolerant compilation keeps only forwarding state from installable
+	// sources when their no-install intent disagrees.
+	existing.NoInstall = existing.NoInstall && route.NoInstall
+	if !existingExcluded && !routeExcluded {
+		if nextHopless {
+			switch {
+			case existingHasAction && routeHasAction:
+				if route.Preference < existing.Preference {
+					existing.Preference = route.Preference
+				}
+			case routeHasAction:
+				// Preference-only aliases do not lower a forwarding action's
+				// route distance.
+				existing.Preference = route.Preference
+			case existingHasAction:
+				// Keep the action-bearing source's preference.
+			default:
+				// No source carries a forwarding action, so neither preference
+				// should alter a route that will be excluded from installation.
+			}
+			existing.HasPreference = existing.HasPreference || route.HasPreference
+		} else if route.HasPreference {
+			existing.Preference = route.Preference
+			existing.HasPreference = true
+		}
+		if route.NextTable != "" {
+			existing.NextTable = route.NextTable
+			existing.NextTableRaw = route.NextTableRaw
+		}
 	}
 }
 

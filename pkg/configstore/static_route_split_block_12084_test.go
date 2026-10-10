@@ -68,3 +68,34 @@ func TestSyncApplyKeepsSplitBlockNoInstallExcluded_12084(t *testing.T) {
 		}
 	}
 }
+func TestSyncApplyTolerantNoInstallConflictKeepsOnlyInstallableSource12084(t *testing.T) {
+	store := newTestStore(t)
+	const text = `routing-options { static {
+		route 10.20.0.0/16 { next-hop 192.0.2.1; }
+		route 10.20.0.1/16 { discard; no-install; }
+	} }`
+	cfg, err := store.SyncApply(text, nil)
+	if err != nil {
+		t.Fatalf("SyncApply: %v", err)
+	}
+	if len(cfg.RoutingOptions.StaticRoutes) != 1 {
+		t.Fatalf("synced routes = %+v, want one folded route", cfg.RoutingOptions.StaticRoutes)
+	}
+	route := cfg.RoutingOptions.StaticRoutes[0]
+	if route.NoInstall || route.Discard || route.Reject || route.NextTable != "" || route.NextTableRaw != "" ||
+		len(route.NextHops) != 1 || route.NextHops[0].Address != "192.0.2.1" {
+		t.Fatalf("SyncApply route = %+v, want installable gateway source only", route)
+	}
+	downgraded := false
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "static route disposition conflict") &&
+			strings.Contains(warning, "downgraded to warning on tolerant path") &&
+			strings.Contains(warning, "install and no-install") {
+			downgraded = true
+			break
+		}
+	}
+	if !downgraded {
+		t.Fatalf("SyncApply did not downgrade the strict conflict to a warning: %v", cfg.Warnings)
+	}
+}

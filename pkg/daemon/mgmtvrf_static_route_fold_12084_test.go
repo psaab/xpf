@@ -7,6 +7,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 func TestMgmtStaticRouteAliasDeduplicationInstallsInKernel12084(t *testing.T) {
@@ -125,6 +126,8 @@ func TestMgmtStaticRouteAliasDeduplicationInstallsInKernel12084(t *testing.T) {
 
 func TestMgmtStaticRoutesDesiredDeduplicatesEffectiveHops12084(t *testing.T) {
 	sets := []string{
+		"set interfaces fxp0 unit 0 family inet6 address 2001:db8:ffff::2/64",
+		"set interfaces fxp0 unit 0 family inet address 192.0.2.2/24",
 		"set routing-options static route 2001:db8:40::/48 next-hop 2001:db8:ffff::1 interface fxp0",
 		"set routing-options rib inet6.0 static route 2001:db8:40::/48 qualified-next-hop 2001:db8:ffff::1 interface fxp0",
 		"set routing-options rib inet6.0 static route 2001:db8:40::/48 qualified-next-hop 2001:db8:ffff::1 preference 5",
@@ -138,6 +141,14 @@ func TestMgmtStaticRoutesDesiredDeduplicatesEffectiveHops12084(t *testing.T) {
 		"set routing-options static route 2001:db8:70::/48 next-hop 2001:db8:ffff::1 interface fxp0",
 		"set routing-options rib inet6.0 static route 2001:db8:70::/48 next-hop 2001:db8:ffff::1 interface fxp0",
 		"set routing-options rib inet6.0 static route 2001:db8:70::/48 next-hop 2001:db8:ffff::3 interface fxp0",
+		"set routing-options static route 2001:db8:41::/48 next-hop 2001:db8:ffff::1",
+		"set routing-options rib inet6.0 static route 2001:db8:41::/48 qualified-next-hop 2001:db8:ffff::1 interface fxp0",
+		"set routing-options static route 2001:db8:42::/48 next-hop 2001:DB8:FFFF::1",
+		"set routing-options rib inet6.0 static route 2001:db8:42::/48 qualified-next-hop 2001:db8:ffff::1 interface fxp0",
+		"set routing-options static route 2001:db8:43::/48 next-hop 2001:db8:ffff:0:0::1",
+		"set routing-options rib inet6.0 static route 2001:db8:43::/48 qualified-next-hop 2001:db8:ffff::1 interface fxp0",
+		"set routing-options static route 10.71.0.0/16 next-hop 192.0.2.1",
+		"set routing-options static route 10.71.0.1/16 qualified-next-hop 192.0.2.1 interface fxp0",
 	}
 	tree := &config.ConfigTree{}
 	for _, set := range sets {
@@ -153,9 +164,19 @@ func TestMgmtStaticRoutesDesiredDeduplicatesEffectiveHops12084(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompileConfig: %v", err)
 	}
+	connected := [2][]netlink.Route{
+		{{
+			Family:    netlink.FAMILY_V4,
+			Dst:       mustRoute11449(t, "192.0.2.0/24"),
+			LinkIndex: 7,
+			Protocol:  unix.RTPROT_KERNEL,
+			Scope:     netlink.SCOPE_LINK,
+		}},
+		nil,
+	}
 	desired := mgmtStaticRoutesDesired(
 		&mgmtStaticRouteFake11449{links: map[string]int{"fxp0": 7}},
-		cfg, map[string]bool{"fxp0": true}, [2][]netlink.Route{})
+		cfg, map[string]bool{"fxp0": true}, connected)
 	got := make(map[string]map[int][]string)
 	for _, target := range desired {
 		route := target.route
@@ -180,6 +201,10 @@ func TestMgmtStaticRoutesDesiredDeduplicatesEffectiveHops12084(t *testing.T) {
 	}
 	expected := map[string]map[int][]string{
 		"2001:db8:40::/48": {5: {"2001:db8:ffff::1"}},
+		"2001:db8:41::/48": {5: {"2001:db8:ffff::1"}},
+		"2001:db8:42::/48": {5: {"2001:db8:ffff::1"}},
+		"2001:db8:43::/48": {5: {"2001:db8:ffff::1"}},
+		"10.71.0.0/16":     {5: {"192.0.2.1"}},
 		"2001:db8:50::/48": {
 			5:   {"2001:db8:ffff::1"},
 			200: {"2001:db8:ffff::1"},
