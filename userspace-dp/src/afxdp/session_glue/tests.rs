@@ -1164,7 +1164,15 @@ fn cached_session_resolution_skips_fabric_redirect() {
     };
 
         let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
-    assert!(cached_session_resolution(&forwarding, &dynamic_neighbors, cached).is_none());
+    assert!(
+        cached_session_resolution(
+            &forwarding,
+            &dynamic_neighbors,
+            cached,
+            CachedNeighborProvenance::Strict,
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -16894,7 +16902,13 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v4_11315() {
     );
     // Direct helper check: the stale cached resolution is rejected.
     assert!(
-        cached_session_resolution(&forwarding, &dynamic_neighbors, stored.resolution).is_none(),
+        cached_session_resolution(
+            &forwarding,
+            &dynamic_neighbors,
+            stored.resolution,
+            CachedNeighborProvenance::Strict,
+        )
+        .is_none(),
         "cached_session_resolution must reject a live-contradicted MAC"
     );
 }
@@ -17011,10 +17025,293 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v6_11315() {
         "stale cached MAC A must re-resolve to live MAC B (#11315 v6)"
     );
     assert!(
-        cached_session_resolution(&forwarding, &dynamic_neighbors, stored.resolution).is_none(),
+        cached_session_resolution(
+            &forwarding,
+            &dynamic_neighbors,
+            stored.resolution,
+            CachedNeighborProvenance::Strict,
+        )
+        .is_none(),
         "cached_session_resolution must reject a live-contradicted MAC (v6)"
     );
 }
+
+fn current_forwarding_generation_stamp() -> ForwardingGenerationStamp {
+    ForwardingGenerationStamp {
+        config_generation: 1,
+        fib_generation: 1,
+        valid: true,
+    }
+}
+
+struct CachedNeighborProvenanceFixture {
+    forwarding: ForwardingState,
+    dynamic_neighbors: Arc<ShardedNeighborMap>,
+    flow: SessionFlow,
+    stored: ForwardingResolution,
+    ifindex: i32,
+    next_hop: IpAddr,
+    mac: [u8; 6],
+}
+
+fn cached_neighbor_provenance_fixture(next_hop: Ipv4Addr) -> CachedNeighborProvenanceFixture {
+    let ifindex = 6;
+    let next_hop = IpAddr::V4(next_hop);
+    let mut forwarding = ForwardingState::default();
+    forwarding.connected_v4.push(ConnectedRouteV4 {
+        prefix: PrefixV4::from_net(Ipv4Net::new(Ipv4Addr::new(192, 0, 2, 0), 24).unwrap()),
+        host: Ipv4Addr::new(192, 0, 2, 0),
+        ifindex,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.egress.insert(
+        ifindex,
+        EgressInterface {
+            bind_ifindex: ifindex,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0, 0, 0, 0, 1],
+            zone_id: 0,
+            redundancy_group: 0,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    let flow_src = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    let flow = SessionFlow {
+        src_ip: flow_src,
+        dst_ip: next_hop,
+        forward_key: SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_TCP,
+            src_ip: flow_src,
+            dst_ip: next_hop,
+            src_port: 5201,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
+    };
+    CachedNeighborProvenanceFixture {
+        forwarding,
+        dynamic_neighbors: Arc::new(ShardedNeighborMap::new()),
+        flow,
+        stored: ForwardingResolution {
+            disposition: ForwardingDisposition::ForwardCandidate,
+            local_ifindex: 0,
+            egress_ifindex: ifindex,
+            tx_ifindex: ifindex,
+            tunnel_endpoint_id: 0,
+            next_hop: Some(next_hop),
+            neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]),
+            src_mac: None,
+            tx_vlan_id: 0,
+            route_mtu: 0,
+            transport_route_mtu: 0,
+        },
+        ifindex,
+        next_hop,
+        mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01],
+    }
+}
+
+fn session_decision_for_cached_resolution(resolution: ForwardingResolution) -> SessionDecision {
+    SessionDecision {
+        resolution,
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    }
+}
+
+#[test]
+fn cached_neighbor_does_not_survive_static_neighbor_removal_12309() {
+    let mut fixture = cached_neighbor_provenance_fixture(Ipv4Addr::new(192, 0, 2, 42));
+    let key = (fixture.ifindex, fixture.next_hop);
+    fixture
+        .forwarding
+        .neighbors
+        .insert(key, NeighborEntry { mac: fixture.mac });
+    assert_eq!(
+        fixture.dynamic_neighbors.mac_change_epoch_for(&key),
+        0,
+        "static-neighbor lifecycle does not advance the dynamic shard epoch"
+    );
+    fixture.forwarding.neighbors.remove(&key);
+
+    let resolved = lookup_forwarding_resolution_for_session_with_provenance(
+        &fixture.forwarding,
+        &fixture.dynamic_neighbors,
+        &fixture.flow,
+        session_decision_for_cached_resolution(fixture.stored),
+        crate::session::SessionOrigin::ForwardFlow,
+        current_forwarding_generation_stamp(),
+        false,
+    );
+    assert_eq!(
+        resolved.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "removing a static neighbor must not be mistaken for a never-observed miss"
+    );
+    assert_eq!(resolved.neighbor_mac, None);
+}
+
+#[test]
+fn cached_neighbor_absence_is_strict_for_peer_synced_sessions_12309() {
+    let fixture = cached_neighbor_provenance_fixture(Ipv4Addr::new(192, 0, 2, 42));
+    let resolved = lookup_forwarding_resolution_for_synced_session(
+        &fixture.forwarding,
+        &fixture.dynamic_neighbors,
+        &fixture.flow,
+        session_decision_for_cached_resolution(fixture.stored),
+    );
+    assert_eq!(
+        resolved.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "a peer-synced cached MAC has no local generation provenance"
+    );
+    assert_eq!(resolved.neighbor_mac, None);
+}
+
+#[test]
+fn cached_neighbor_absence_is_strict_for_reverse_matches_12309() {
+    let fixture = cached_neighbor_provenance_fixture(Ipv4Addr::new(192, 0, 2, 42));
+    let resolved = lookup_forwarding_resolution_for_session_with_provenance(
+        &fixture.forwarding,
+        &fixture.dynamic_neighbors,
+        &fixture.flow,
+        session_decision_for_cached_resolution(fixture.stored),
+        crate::session::SessionOrigin::ReverseFlow,
+        current_forwarding_generation_stamp(),
+        true,
+    );
+    assert_eq!(
+        resolved.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "a reverse-match decision is strict even with a current local generation"
+    );
+    assert_eq!(resolved.neighbor_mac, None);
+}
+
+#[test]
+fn cached_neighbor_fallback_cannot_resolve_connected_directed_broadcast_12309() {
+    let mut fixture = cached_neighbor_provenance_fixture(Ipv4Addr::new(192, 0, 2, 255));
+    let key = (fixture.ifindex, fixture.next_hop);
+    fixture
+        .forwarding
+        .connected_v4_directed_broadcast_neighbor_keys
+        .insert((fixture.ifindex, Ipv4Addr::new(192, 0, 2, 255)));
+    fixture
+        .forwarding
+        .neighbors
+        .insert(key, NeighborEntry { mac: fixture.mac });
+
+    let resolved = lookup_forwarding_resolution_for_session_with_provenance(
+        &fixture.forwarding,
+        &fixture.dynamic_neighbors,
+        &fixture.flow,
+        session_decision_for_cached_resolution(fixture.stored),
+        crate::session::SessionOrigin::ForwardFlow,
+        current_forwarding_generation_stamp(),
+        true,
+    );
+    assert_eq!(
+        resolved.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "the cached MAC must not bypass connected directed-broadcast exclusion"
+    );
+    assert_eq!(resolved.neighbor_mac, None);
+}
+
+#[test]
+fn cached_neighbor_current_local_generation_still_observes_runtime_epoch_12309() {
+    let mut fixture = cached_neighbor_provenance_fixture(Ipv4Addr::new(192, 0, 2, 42));
+    let key = (fixture.ifindex, fixture.next_hop);
+    fixture
+        .dynamic_neighbors
+        .insert(key, NeighborEntry { mac: fixture.mac });
+    assert!(fixture.dynamic_neighbors.remove_if_present(&key));
+    assert_ne!(fixture.dynamic_neighbors.mac_change_epoch_for(&key), 0);
+
+    let resolved = lookup_forwarding_resolution_for_session_with_provenance(
+        &fixture.forwarding,
+        &fixture.dynamic_neighbors,
+        &fixture.flow,
+        session_decision_for_cached_resolution(fixture.stored),
+        crate::session::SessionOrigin::ForwardFlow,
+        current_forwarding_generation_stamp(),
+        true,
+    );
+    assert_eq!(
+        resolved.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "a current config generation cannot override a runtime MAC-change epoch"
+    );
+    assert_eq!(resolved.neighbor_mac, None);
+}
+
+#[test]
+fn static_neighbor_removal_generation_disables_cached_absence_12309() {
+    let mut fixture = cached_neighbor_provenance_fixture(Ipv4Addr::new(192, 0, 2, 42));
+    let key = (fixture.ifindex, fixture.next_hop);
+    fixture
+        .forwarding
+        .neighbors
+        .insert(key, NeighborEntry { mac: fixture.mac });
+
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(sessions.install_with_protocol_with_origin(
+        fixture.flow.forward_key.clone(),
+        session_decision_for_cached_resolution(fixture.stored),
+        test_metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000_000,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+    ));
+    fixture.forwarding.neighbors.remove(&key);
+    sessions.set_forwarding_revalidation_gen(1, 2);
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands = Vec::new();
+    let ha_state = BTreeMap::new();
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &fixture.forwarding,
+        &ha_state,
+        &fixture.dynamic_neighbors,
+        &fixture.flow,
+        2_000_000,
+        2,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        fixture.ifindex,
+        0,
+        false,
+        0,
+        0,
+    )
+    .expect("generation-stale established session hit");
+
+    assert_eq!(
+        resolved.decision.resolution.disposition,
+        ForwardingDisposition::MissingNeighbor,
+        "static-neighbor removal changes the forwarding generation and must not retain its cached MAC"
+    );
+    assert_eq!(resolved.decision.resolution.neighbor_mac, None);
+}
+
 #[test]
 fn established_session_re_resolves_after_fib_generation_changes_11373() {
     let mut snapshot = crate::afxdp::test_fixtures::forwarding_snapshot(true);
