@@ -220,7 +220,6 @@ var instanceNameBlindBaseline9091 = []string{
 	"/routing-options/static/route",
 	"/routing-options/static/route/next-hop",
 	"/routing-options/static/route/qualified-next-hop",
-	"/schedulers/scheduler",
 	// #10078 removes the security-level blind rows above: the security arm
 	// deliberately closes these instance-name containers (and their children)
 	// rather than preserving an open-world exception.
@@ -276,6 +275,8 @@ var instanceNameBlindCeiling9091 = len(instanceNameBlindBaseline9091)
 // leaf-complete, so typos inside them must be rejected rather than ignored.
 // #11800 moves it 49 -> 52: the CoS scheduler definition now rejects undeclared
 // scheduler children instead of accepting a typo that the compiler ignores.
+// #12239 moves 52 -> 53: the time-range scheduler schema is closed-world, so
+// misspelled weekdays and window leaves no longer silently disappear.
 var instanceNameArmedBaseline9091 = []string{
 	"/chassis/cluster/control-ports/fpc",
 	"/chassis/cluster/redundancy-group/node",
@@ -291,6 +292,7 @@ var instanceNameArmedBaseline9091 = []string{
 	"/protocols/rip/group",
 	"/routing-instances/*/protocols/ospf/area/interface/authentication/md5",
 	"/routing-instances/*/protocols/rip/group",
+	"/schedulers/scheduler",
 	"/security/address-book/global/address-set",
 	"/security/ike/proposal",
 	"/security/ipsec/proposal",
