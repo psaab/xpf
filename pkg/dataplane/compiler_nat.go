@@ -309,11 +309,24 @@ func compileNAT(dp DataPlane, cfg *config.Config, result *CompileResult) error {
 	compiledPools := make(map[string]bool)
 
 	for _, rs := range natCfg.Source {
-		if _, ok := result.ZoneIDs[rs.FromZone]; !ok {
+		// #12525: non-empty zone/interface/routing-instance fields identify
+		// explicit scopes. applyNATFromScope/applyNATToScope also record the
+		// implicit unscoped default privately, so a compiler-stamped
+		// all-empty rule-set differs from a zero-value with no provenance.
+		// Missing provenance fails closed. FromZone may be empty for
+		// from-interface, from-routing-instance, or unscoped rule-sets.
+		if !rs.HasNATScopeStamp() {
 			return fmt.Errorf("source NAT from-zone %q not found", rs.FromZone)
 		}
-		if _, ok := result.ZoneIDs[rs.ToZone]; !ok {
-			return fmt.Errorf("source NAT to-zone %q not found", rs.ToZone)
+		if rs.FromZone != "" {
+			if _, ok := result.ZoneIDs[rs.FromZone]; !ok {
+				return fmt.Errorf("source NAT from-zone %q not found", rs.FromZone)
+			}
+		}
+		if rs.ToZone != "" {
+			if _, ok := result.ZoneIDs[rs.ToZone]; !ok {
+				return fmt.Errorf("source NAT to-zone %q not found", rs.ToZone)
+			}
 		}
 
 		for _, rule := range rs.Rules {

@@ -16,6 +16,9 @@ xpf (0.0.0) unstable; urgency=medium
     fail-closed until complete recapture or an authoritative full session clear
     (#12072).
 
+  * Accept compiler-stamped unscoped source-NAT rule-sets and interface /
+    routing-instance scopes without synthetic zone IDs; retain named-zone
+    checks and fail closed when unscoped provenance is missing (#12525).
   * Keep declined WireGuard listener keepalives from publishing outer-tuple
     LocalMiss sessions that would steer subsequent same-zone handshakes away
     from the kernel control socket (#11574).

@@ -975,6 +975,26 @@ type NATRuleSet struct {
 	FromRoutingInstance string
 	ToRoutingInstance   string
 	Rules               []*NATRule
+	// These private flags record the compiler-injected match-any default for
+	// an absent from/to clause. They let the dataplane distinguish a
+	// deliberately compiled unscoped rule-set from a zero-value
+	// NATRuleSet with no compiler provenance. They are not operator-settable
+	// and are intentionally not serialized; a lost marker fails closed.
+	fromUnscopedStamped bool
+	toUnscopedStamped   bool
+}
+
+// HasNATScopeStamp reports whether a rule-set carries a non-empty scope field
+// or the compiler-stamped match-any default for an absent from/to clause. A
+// programmatic zero-value rule-set has no such provenance and returns false.
+func (rs *NATRuleSet) HasNATScopeStamp() bool {
+	if rs == nil {
+		return false
+	}
+	return rs.FromZone != "" || rs.FromInterface != "" ||
+		rs.FromRoutingInstance != "" || rs.ToZone != "" ||
+		rs.ToInterface != "" || rs.ToRoutingInstance != "" ||
+		rs.fromUnscopedStamped || rs.toUnscopedStamped
 }
 
 // NATRule is a single NAT rule.

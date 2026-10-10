@@ -254,6 +254,9 @@ func applyNATFromScope(rs *NATRuleSet, s natMatchScope) {
 		rs.FromRoutingInstance = s.value
 	default: // "zone"
 		rs.FromZone = s.value
+		if s.value == "" {
+			rs.fromUnscopedStamped = true
+		}
 	}
 }
 
@@ -266,6 +269,9 @@ func applyNATToScope(rs *NATRuleSet, s natMatchScope) {
 		rs.ToRoutingInstance = s.value
 	default: // "zone"
 		rs.ToZone = s.value
+		if s.value == "" {
+			rs.toUnscopedStamped = true
+		}
 	}
 }
 
