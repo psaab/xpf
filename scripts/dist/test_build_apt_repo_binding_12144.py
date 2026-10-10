@@ -136,6 +136,15 @@ class AptBindingTests(unittest.TestCase):
         pool = self.out / "apt/pool/stable/main/x/xpf"
         self.assertEqual(list(pool.glob("*.deb")), [])
 
+    def test_explicit_debs_ignore_default_version_pin(self):
+        version = "0.0.1+g1111111"
+        xpf = self._deb(f"xpf_{version}_amd64.deb", "xpf", version)
+        rc, out = _run(_BUILDER, self.out, (xpf,), env_extra={
+            "XPF_DEB_VERSION": "9.9.9+g9999999",
+        })
+        self.assertEqual(rc, 0, out[-800:])
+        self.assertIn(f"Version: {version}", self._packages())
+
     def test_explicit_set_rejects_higher_duplicate_package(self):
         version = "0.0.1+g1111111"
         xpf = self._deb(f"xpf_{version}_amd64.deb", "xpf", version)

@@ -253,6 +253,11 @@ class RealRepreproTests(unittest.TestCase):
         self.assertTrue(fpr, "key generation failed")
         self.fpr = fpr
         self.env = env
+        public_key = subprocess.run(
+            ["gpg", "--batch", "--armor", "--export", self.fpr],
+            capture_output=True, check=True, env=env, timeout=60).stdout
+        self.archive_pub = os.path.join(self.dir, "archive.asc")
+        Path(self.archive_pub).write_bytes(public_key)
         # reprepro requires a Section field on the .deb (else it skips it).
         pkgdir = os.path.join(self.dir, "pkg")
         debdir = os.path.join(pkgdir, "DEBIAN")
@@ -261,9 +266,39 @@ class RealRepreproTests(unittest.TestCase):
             "Package: xpf-appliance\nVersion: 0.0.0-10123\nSection: admin\n"
             "Priority: optional\nArchitecture: amd64\n"
             "Maintainer: t <t@x.invalid>\nDescription: 10123 fixture\n")
+        keydir = os.path.join(pkgdir, "usr/share/keyrings")
+        os.makedirs(keydir)
+        shutil.copyfile(self.archive_pub,
+                        os.path.join(keydir, "xpf-archive-keyring.asc"))
         self.deb = os.path.join(self.dir, "xpf-appliance_0.0.0-10123_amd64.deb")
         subprocess.run(["dpkg-deb", "--build", pkgdir, self.deb], check=True,
                        capture_output=True, timeout=60)
+
+    def test_real_reprepro_repo_passes_publish_gate(self):
+        outdir = os.path.join(self.dir, "out-gate")
+        env = dict(self.env)
+        env.update({"XPF_APT_TOOL": "reprepro", "XPF_GPG_KEY": self.fpr,
+                    "XPF_ARCHIVE_PUBKEY": self.archive_pub})
+        built = subprocess.run(
+            ["sh", str(_BUILDER), "--out", outdir, "--suite", "stable",
+             "--debs", self.deb],
+            capture_output=True, text=True, env=env, timeout=180)
+        self.assertEqual(built.returncode, 0, (built.stdout or "") +
+                         (built.stderr or ""))
+        self.assertTrue(Path(outdir, "apt/conf/distributions").is_file())
+        self.assertFalse(Path(outdir, "apt/pool/stable").exists(),
+                         "reprepro must not create a flat suite pool")
+        # Legacy builder output has this empty suite pool beside reprepro's
+        # retained pool; the gate must classify conf/distributions first.
+        Path(outdir, "apt/pool/stable/main/x/xpf").mkdir(parents=True)
+        gated = subprocess.run(
+            ["python3", str(_DIST / "publish.py"), "--dist", outdir,
+             "--channel", "stable", "--no-image"],
+            capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(gated.returncode, 0, (gated.stdout or "") +
+                         (gated.stderr or ""))
+        self.assertIn("gate PASSED", gated.stdout)
+
 
     def _run_real(self, days):
         outdir = os.path.join(self.dir, "out-" + days)
