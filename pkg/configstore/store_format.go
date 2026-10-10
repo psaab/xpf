@@ -104,6 +104,17 @@ func (s *Store) EverCommitted() bool {
 	return s.everCommitted
 }
 
+// ActiveConfigGeneration returns the canonical content identity used by
+// commit-confirmed recovery to bind a durable transition to active state.
+func (s *Store) ActiveConfigGeneration() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return guardedConfigHash(s.active)
+}
+
 // ActiveTree returns a deep copy of the active configuration tree.
 func (s *Store) ActiveTree() *config.ConfigTree {
 	s.mu.RLock()

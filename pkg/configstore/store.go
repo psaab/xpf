@@ -242,10 +242,12 @@ type Store struct {
 
 	// firstCommitTeardownOwed records that a FIRST commit-confirmed window
 	// expired during daemon downtime and its daemon-side takeover teardown is
-	// still owed (#12155). The durable marker is written before confirm.json
-	// removal so a crash between Store.Load and daemon teardown retries it at
-	// the next boot. Protected by mu.
-	firstCommitTeardownOwed bool
+	// still owed (#12155). The debt is scoped to the abandoned generation and
+	// its rollback generation so a later durable config cannot authorize cleanup
+	// of replacement output. Protected by mu.
+	firstCommitTeardownOwed         bool
+	firstCommitTeardownGeneration   string
+	firstCommitTeardownRollbackHash string
 	// firstCommitTeardownMarkerDurable distinguishes an on-disk debt marker
 	// from the in-memory signal retained when marker persistence fails.
 	firstCommitTeardownMarkerDurable bool

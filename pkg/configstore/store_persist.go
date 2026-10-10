@@ -178,6 +178,7 @@ func (s *Store) Load() error {
 	// leaf to absent (defaults to userspace) lets the daemon come
 	// up so the operator can fix the config from CLI.
 	activeHashOnDisk := guardedConfigHash(tree)
+	s.discardSupersededFirstCommitTeardownLocked(activeHashOnDisk)
 
 	rewriteRetiredDataplaneType(tree, LoadCaller)
 
@@ -839,6 +840,23 @@ func (s *Store) recoverPendingConfirmLocked() error {
 	// window or a prior rollback persistence is being superseded. Until the new
 	// active file is durable, recovery accepts the previous disk generation.
 	activeHash := guardedConfigHash(s.active)
+	// A FIRST rollback may have written the active rollback marker and died
+	// before publishing the teardown marker. The retained expired confirm
+	// record is the recovery evidence; committed=0 plus a different guarded
+	// hash proves the active rollback already landed.
+	if rec.FirstCommit && !s.everCommitted && rec.GuardedHash != "" &&
+		rec.GuardedHash != activeHash && confirmWallNow().After(rec.Deadline) {
+		s.firstCommitTeardownOwed = true
+		s.firstCommitTeardownGeneration = rec.GuardedHash
+		s.firstCommitTeardownRollbackHash = activeHash
+		s.firstCommitTeardownRollbackDurable = true
+		if err := s.noteFirstCommitTeardownLocked(); err != nil {
+			s.deferFirstCommitTeardownMarkerLocked(err)
+			return nil
+		}
+		s.resolveConfirmRemovalLocked("first_commit_teardown_marker_recovery")
+		return nil
+	}
 	if rec.GuardedHash != "" && rec.GuardedHash != activeHash && rec.PreviousHash != activeHash {
 		slog.Warn("ignoring a stale pending commit-confirmed record on boot: it guards a config "+
 			"that is no longer active (a later commit/confirm superseded it); not resurrecting its "+
@@ -886,11 +904,15 @@ func (s *Store) recoverPendingConfirmLocked() error {
 			// #12155: keep this boot fail-closed even if the active rollback
 			// write fails; confirm.json remains the retry source, and the
 			// durable marker is published only after the active write lands.
+			// Bind cleanup to the abandoned config and the durable rollback
+			// target so a later commit cannot reuse this debt.
+			s.firstCommitTeardownGeneration = rec.GuardedHash
+			s.firstCommitTeardownRollbackHash = guardedConfigHash(prevTree)
+			s.firstCommitTeardownOwed = true
 			s.compiled = nil
 			s.publishActiveLocked() // #9905: publish the new active snapshot
 			s.persistMarkerCommitted = false
 			s.everCommitted = false
-			s.firstCommitTeardownOwed = true
 			perr = s.writeActiveMarker(prevTree, false)
 		} else {
 			compiled, cerr := s.compileTreeLenient(prevTree)

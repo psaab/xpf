@@ -16,35 +16,41 @@ package configstore
 // a durable marker file under .configdb, written BEFORE confirm.json is
 // removed and deleted only after the daemon teardown converges:
 //
-//   - recovery sets the in-memory flag + writes the marker on the expired
-//     FirstCommit branch; a marker-write failure retains confirm.json +
-//     confirmResolvePendingPersist so the next boot re-drives the rollback;
-//   - Load re-arms the in-memory flag from the marker file at the top, so a
-//     crash between Load and the teardown phase retries the teardown on the
-//     next boot;
-//   - the daemon's boot teardown clears marker + flag only when the teardown
-//     converges; a DEGRADED teardown keeps both for retry.
+//   - recovery records the abandoned and rollback config hashes in the marker; if
+//     marker publication fails after the rollback write, confirm.json is retained
+//     and the next Load reconstructs debt from that recovery record before resolving it;
+//   - Load re-arms debt from a durable marker and suppresses it when a later active
+//     config no longer matches the marker's rollback hash;
+//   - the daemon clears marker + flag only when teardown converges; a DEGRADED
+//     teardown keeps both for retry.
 //
 // The marker is a single file, not a new confirm.json field: the record format
 // is a downgrade-sensitive safety envelope (unknown fields refused), which
 // remains unchanged by this separate teardown state.
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 )
 
+type firstCommitTeardownMarker struct {
+	Issue        string `json:"issue"`
+	Action       string `json:"action"`
+	Generation   string `json:"generation,omitempty"`
+	RollbackHash string `json:"rollback_hash,omitempty"`
+}
+
 // firstCommitTeardownMarkerBase is the .configdb filename recording that an
 // expired FIRST-window durable rollback still owes its daemon-side takeover
-// teardown (#12155). Content is a one-line human-readable marker; presence is
-// the signal, not the bytes.
+// teardown (#12155). Presence signals debt; the JSON content binds the
+// abandoned and rollback config hashes when available.
 const firstCommitTeardownMarkerBase = "first-commit-teardown.json"
 
-// firstCommitTeardownMarkerText is the marker content. It carries the issue
-// and the owed action so an operator inspecting .configdb can tell what the
-// debt is without reading code.
+// firstCommitTeardownMarkerText is the legacy/minimal marker content used by
+// tests and old-format fixtures. Current writes include config-generation hashes.
 const firstCommitTeardownMarkerText = "{\"issue\":\"#12155\",\"action\":\"teardown-first-commit-takeover\"}\n"
 
 // firstCommitTeardownMarkerPath returns the marker path for the DB dir.
@@ -52,52 +58,110 @@ func firstCommitTeardownMarkerPath(dbDir string) string {
 	return filepath.Join(dbDir, firstCommitTeardownMarkerBase)
 }
 
-// loadFirstCommitTeardownLocked re-arms the teardown debt from disk. Call at
-// the top of Load (under s.mu) before any recovery can run, so a marker left
-// by a previous boot's rollback — or by a crash between this boot's Load and
-// the daemon teardown phase — still drives teardown. It never clears: only
-// ClearFirstCommitTeardown (after converged teardown) clears.
+// loadFirstCommitTeardownLocked re-arms teardown debt from disk. Call at the
+// top of Load (under s.mu) before recovery can run.
 func (s *Store) loadFirstCommitTeardownLocked() {
 	s.firstCommitTeardownOwed = false
+	s.firstCommitTeardownGeneration = ""
+	s.firstCommitTeardownRollbackHash = ""
 	s.firstCommitTeardownMarkerDurable = false
 	s.firstCommitTeardownRollbackDurable = false
 	if s.db == nil {
 		return
 	}
 	path := firstCommitTeardownMarkerPath(s.db.dir)
-	if _, err := os.Lstat(path); err == nil {
+	data, err := os.ReadFile(path)
+	if err == nil {
 		s.firstCommitTeardownOwed = true
 		s.firstCommitTeardownMarkerDurable = true
 		s.firstCommitTeardownRollbackDurable = true
+		var marker firstCommitTeardownMarker
+		if json.Unmarshal(data, &marker) == nil {
+			s.firstCommitTeardownGeneration = marker.Generation
+			s.firstCommitTeardownRollbackHash = marker.RollbackHash
+		}
 		return
-	} else if !os.IsNotExist(err) {
-		// An observation failure must not silently drop teardown debt: retain
-		// it in memory and let the eventual durable clear retry the directory
-		// operation. The next boot re-observes; the marker itself is untouched.
-		s.firstCommitTeardownOwed = true
-		s.firstCommitTeardownRollbackDurable = true
-		slog.Warn("could not check FIRST-rollback teardown debt marker; teardown may be owed but unobserved",
-			"path", path, "err", err, "issue", "#12155")
 	}
+	if os.IsNotExist(err) {
+		return
+	}
+	// An observation failure must not silently drop teardown debt.
+	s.firstCommitTeardownOwed = true
+	s.firstCommitTeardownRollbackDurable = true
+	slog.Warn("could not check FIRST-rollback teardown debt marker; teardown may be owed but unobserved",
+		"path", path, "err", err, "issue", "#12155")
+}
+
+// discardSupersededFirstCommitTeardownLocked prevents an old rollback marker
+// from authorizing teardown after a later config became active. The persisted
+// committed bit is authoritative: a replacement can be byte-identical to the
+// rollback target, while a content mismatch alone is not proof of a commit.
+// A failed marker unlink is harmless; each later Load repeats this decision.
+func (s *Store) discardSupersededFirstCommitTeardownLocked(activeHash string) {
+	if !s.firstCommitTeardownOwed {
+		return
+	}
+	if !s.everCommitted {
+		if s.firstCommitTeardownRollbackHash != "" &&
+			activeHash != s.firstCommitTeardownRollbackHash {
+			slog.Warn("active config differs from the rollback hash while FIRST teardown is still uncommitted; retaining fail-closed debt",
+				"issue", "#12155")
+		}
+		return
+	}
+	if s.db != nil && s.firstCommitTeardownMarkerDurable {
+		path := firstCommitTeardownMarkerPath(s.db.dir)
+		if err := rbRemove(path); err == nil || os.IsNotExist(err) {
+			if syncErr := rbSyncDir(filepath.Dir(path)); syncErr != nil {
+				slog.Warn("could not durably remove superseded FIRST-rollback debt marker",
+					"path", path, "err", syncErr, "issue", "#12155")
+			}
+		} else {
+			slog.Warn("could not remove superseded FIRST-rollback debt marker",
+				"path", path, "err", err, "issue", "#12155")
+		}
+	}
+	s.firstCommitTeardownOwed = false
+	s.firstCommitTeardownGeneration = ""
+	s.firstCommitTeardownRollbackHash = ""
+	s.firstCommitTeardownMarkerDurable = false
+	s.firstCommitTeardownRollbackDurable = false
 }
 
 // noteFirstCommitTeardownLocked records teardown debt for an expired FIRST
-// rollback whose active write already landed. It sets the in-memory flag AND
-// writes the durable marker; the caller must retain confirm.json +
-// confirmResolvePendingPersist on error so the next boot re-drives the
-// rollback instead of booting committed=0 with the debt lost. Caller holds s.mu.
+// rollback whose active write already landed. The durable marker binds the
+// abandoned and rollback config-content hashes; caller holds s.mu.
 func (s *Store) noteFirstCommitTeardownLocked() error {
 	s.firstCommitTeardownOwed = true
 	s.firstCommitTeardownRollbackDurable = true
 	if s.db == nil || s.firstCommitTeardownMarkerDurable {
 		return nil
 	}
-	if err := rbWriteFileDurable(firstCommitTeardownMarkerPath(s.db.dir),
-		[]byte(firstCommitTeardownMarkerText), 0600); err != nil {
+	data, err := json.Marshal(firstCommitTeardownMarker{
+		Issue: "#12155", Action: "teardown-first-commit-takeover",
+		Generation:   s.firstCommitTeardownGeneration,
+		RollbackHash: s.firstCommitTeardownRollbackHash,
+	})
+	if err != nil {
+		return fmt.Errorf("encode FIRST-rollback teardown debt: %w", err)
+	}
+	data = append(data, '\n')
+	if err := rbWriteFileDurable(firstCommitTeardownMarkerPath(s.db.dir), data, 0600); err != nil {
 		return fmt.Errorf("persist FIRST-rollback teardown debt: %w", err)
 	}
 	s.firstCommitTeardownMarkerDurable = true
 	return nil
+}
+
+// FirstCommitTeardownGeneration reports the abandoned config-content hash used
+// to validate its durable bootstrap lifeline snapshot.
+func (s *Store) FirstCommitTeardownGeneration() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.firstCommitTeardownGeneration
 }
 
 // deferFirstCommitTeardownMarkerLocked keeps confirm.json as the recovery
@@ -161,6 +225,8 @@ func (s *Store) ClearFirstCommitTeardown() error {
 		}
 	}
 	s.firstCommitTeardownOwed = false
+	s.firstCommitTeardownGeneration = ""
+	s.firstCommitTeardownRollbackHash = ""
 	s.firstCommitTeardownMarkerDurable = false
 	s.firstCommitTeardownRollbackDurable = false
 	return nil
