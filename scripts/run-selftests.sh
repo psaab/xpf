@@ -353,7 +353,7 @@ run_shell test/xsk-repro/selftest-probe-filter_6898.sh --selftest
 # one. This leg runs them under `unshare -rn`. SKIPs without go/unshare/ip or
 # where unprivileged user namespaces are unavailable.
 run_shell test/routing/selftest-rule-dscp_7796.sh
-# Five hermetic fixtures pin the leg's post-run ip, by-name RUN/SKIP, and
+# Eight hermetic fixtures pin the leg's post-run ip, by-name RUN/SKIP, and
 # `-json=false` guards; no Go build or netns.
 run_shell test/routing/selftest-rule-dscp-probes_7796.sh
 # #9812 (VAL-03/VAL-04): the routing real-kernel cells. The #9420 next-table

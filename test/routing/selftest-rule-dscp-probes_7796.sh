@@ -1,9 +1,10 @@
 #!/bin/sh
 # selftest-rule-dscp-probes_7796.sh — pin the #7796 leg's output guards.
 #
-# Run the real leg against fixture PATHs and canned go test output. These cells
-# need neither a Go build nor a network namespace; they catch regressions in the
-# post-run ip decision, named RUN/SKIP scans, and -json=false output pin.
+# Run the real leg against fixture PATHs and canned go test output. These eight
+# hermetic fixtures need neither a Go build nor a network namespace; they catch
+# regressions in the post-run ip decision, named RUN/SKIP scans, and -json=false
+# output pin.
 set -u
 
 # shellcheck disable=SC1007  # `CDPATH= cd` clears CDPATH for this command only
@@ -27,10 +28,21 @@ abspath() {
 }
 
 FIX=$(mktemp -d); trap 'rm -rf "$FIX"' EXIT
-for t in sh go unshare ip grep sed true cat; do
+for t in sh grep sed true cat; do
 	p=$(abspath "$t") || { echo "FAIL: cannot resolve fixture tool $t"; exit 1; }
 	ln -s "$p" "$FIX/$t"
 done
+# go, unshare and ip are stubbed, never resolved: every fixture replaces go and
+# unshare with fakes, ip is only probed with `command -v`, and this probe must
+# also run on go-less and ip-less hosts.
+for t in go unshare ip; do
+	printf '#!/bin/sh\nexit 0\n' > "$FIX/$t"
+	chmod +x "$FIX/$t"
+done
+
+# An inherited absolute GO would bypass the fixture's fake go and run a real
+# build outside any netns; every fixture pins PATH, so drop it.
+unset GO
 
 mkfix() {
 	name=$1; shift
@@ -55,7 +67,8 @@ EOF
 }
 
 write_fake_go() {
-	printf '#!/bin/sh\ncat "%s"\nexit 0\n' "$2" > "$1"
+	go_rc=${3:-0}
+	printf '#!/bin/sh\ncat "%s"\nexit %s\n' "$2" "$go_rc" > "$1"
 	chmod +x "$1"
 }
 
@@ -164,6 +177,70 @@ if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q 'PASS: all four 7796 kernel
 	ok "-json=false is passed explicitly under GOFLAGS=-json"
 else
 	bad "-json=false argv guard expected pass, got $rc: $out"
+fi
+# 6. A go test failure with ip absent must FAIL, never SKIP: the pre-run gate
+# and a deleted or reordered rc guard all read this shape as 77.
+d=$(mkfix rc1 ip); rm -f "$d/unshare" "$d/go"
+write_fake_unshare "$d/unshare"
+cat > "$d/canned.txt" <<'EOF'
+=== RUN   TestRuleAddDSCPAcceptedByKernel7796
+--- FAIL: TestRuleAddDSCPAcceptedByKernel7796 (0.00s)
+    rule_dscp_kernel_7796_test.go:1: kernel REJECTED a dscp 1 rule: invalid argument
+=== RUN   TestRuleDSCPRoundTripsThroughKernel7796
+--- SKIP: TestRuleDSCPRoundTripsThroughKernel7796 (0.00s)
+=== RUN   TestRuleAddDSCPRejectsLegacyTOS7796
+--- PASS: TestRuleAddDSCPRejectsLegacyTOS7796 (0.00s)
+=== RUN   TestDSCPZeroIsDistinctFromNoDSCP7796
+--- SKIP: TestDSCPZeroIsDistinctFromNoDSCP7796 (0.00s)
+EOF
+write_fake_go "$d/go" "$d/canned.txt" 1
+out=$(PATH="$d" sh "$LEG" 2>&1); rc=$?
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q 'FAIL: go test exited 1'; then
+	ok "go test failure with missing ip fails instead of skipping"
+else
+	bad "go test failure with missing ip expected rc 1, got $rc: $out"
+fi
+
+# 7. A non-readback SKIP with ip absent must FAIL and name that cell: only
+# readback-only skips yield 77.
+d=$(mkfix otherskip ip); rm -f "$d/unshare" "$d/go"
+write_fake_unshare "$d/unshare"
+cat > "$d/canned.txt" <<'EOF'
+=== RUN   TestRuleAddDSCPAcceptedByKernel7796
+--- SKIP: TestRuleAddDSCPAcceptedByKernel7796 (0.00s)
+=== RUN   TestRuleDSCPRoundTripsThroughKernel7796
+--- SKIP: TestRuleDSCPRoundTripsThroughKernel7796 (0.00s)
+=== RUN   TestRuleAddDSCPRejectsLegacyTOS7796
+--- PASS: TestRuleAddDSCPRejectsLegacyTOS7796 (0.00s)
+=== RUN   TestDSCPZeroIsDistinctFromNoDSCP7796
+--- SKIP: TestDSCPZeroIsDistinctFromNoDSCP7796 (0.00s)
+EOF
+write_fake_go "$d/go" "$d/canned.txt"
+out=$(PATH="$d" sh "$LEG" 2>&1); rc=$?
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q 'FAIL: TestRuleAddDSCPAcceptedByKernel7796 SKIPPED'; then
+	ok "non-readback SKIP with missing ip fails by cell name"
+else
+	bad "non-readback SKIP with missing ip expected named FAIL, got $rc: $out"
+fi
+
+# 8. A missing cell with ip absent must FAIL as did not run: 77 requires all
+# four cells to have run.
+d=$(mkfix noipmissing ip); rm -f "$d/unshare" "$d/go"
+write_fake_unshare "$d/unshare"
+cat > "$d/canned.txt" <<'EOF'
+=== RUN   TestRuleAddDSCPAcceptedByKernel7796
+--- PASS: TestRuleAddDSCPAcceptedByKernel7796 (0.00s)
+=== RUN   TestRuleDSCPRoundTripsThroughKernel7796
+--- SKIP: TestRuleDSCPRoundTripsThroughKernel7796 (0.00s)
+=== RUN   TestRuleAddDSCPRejectsLegacyTOS7796
+--- PASS: TestRuleAddDSCPRejectsLegacyTOS7796 (0.00s)
+EOF
+write_fake_go "$d/go" "$d/canned.txt"
+out=$(PATH="$d" sh "$LEG" 2>&1); rc=$?
+if [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -q 'FAIL: TestDSCPZeroIsDistinctFromNoDSCP7796 did not run'; then
+	ok "missing cell with missing ip fails as did not run"
+else
+	bad "missing cell with missing ip expected named FAIL, got $rc: $out"
 fi
 
 echo
