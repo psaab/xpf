@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"bytes"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -10,23 +12,12 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// #12156. recoverOriginalName matches Name=<current> and returns the current
-// name when the .link carries NO OriginalName= line. networkd renders exactly
-// such a MAC-form fxp0 .link when OriginalName is empty (networkd.go
-// generateLink), so on the next naming pass the positional capture
-// (linksetup.go renamePositional) and the bootstrap lifeline (bootstrap.go
-// setupBootstrapLifeline) both "recover" fxp0 and persist
-// OriginalName=fxp0 / Name=fxp0 — a .link udev can never match, because udev
-// never presents the logical name as the kernel original. The device-map path
-// has the #6678 guard; this regression covers the corresponding missing
-// positional/bootstrap guard.
-//
-// The fix contract, mirrored on #6678: when no kernel original name is
-// recorded and the NIC already wears its final name, the pass must NOT
-// persist the logical name as OriginalName=. It retains the existing
-// MAC-form link (which still matches — the MAC is stable for non-RETH NICs)
-// and reports the unestablished persistence loudly instead of writing a file
-// that silently never matches.
+// #12156. recoverOriginalName previously returned currentName both when no
+// .link existed and when a 10-xpf .link assigned Name=current without an
+// OriginalName=. The latter is evidence that currentName is logical, not the
+// kernel original, regardless of the next positional/bootstrap target. These
+// regressions require the code to retain MAC-form links, avoid inventing an
+// OriginalName, and still perform a required rename.
 
 // macFormFxp0Link is what networkd's generateLink renders for fxp0 when
 // OriginalName is empty: MAC match, no OriginalName= line.
@@ -62,6 +53,15 @@ func assertNoSelfOriginal12156(t *testing.T, path string) {
 	}
 }
 
+func captureLogs12156(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &logs
+}
+
 // TestRenamePositionalRetainsMACFormLink12156 drives the real positional pass
 // with a NIC already wearing fxp0 and only a MAC-form .link on disk. The
 // pass must leave that file alone — no OriginalName=fxp0 — while positional
@@ -70,6 +70,7 @@ func assertNoSelfOriginal12156(t *testing.T, path string) {
 // FAIL-ON-REVERT: restoring the unconditional recoverOriginalName capture
 // makes the pass overwrite the MAC-form file with OriginalName=fxp0.
 func TestRenamePositionalRetainsMACFormLink12156(t *testing.T) {
+	logs := captureLogs12156(t)
 	dir := withTempLinkDir(t)
 	linkPath := writeMACFormFxp0Link12156(t, dir)
 
@@ -87,6 +88,124 @@ func TestRenamePositionalRetainsMACFormLink12156(t *testing.T) {
 	if len(errs) != 0 {
 		t.Fatalf("skipping an unmatchable .link must not refuse positional naming: %v", errs)
 	}
+	if got := logs.String(); !strings.Contains(got, "level=INFO") ||
+		!strings.Contains(got, "existing MAC-form .link found") ||
+		strings.Contains(got, "level=WARN") {
+		t.Fatalf("a matching healthy MAC-form link must log at Info only, got:\n%s", got)
+	}
+}
+
+func TestRenamePositionalWarnsWhenPersistenceIsAbsent12156(t *testing.T) {
+	dir := withTempLinkDir(t)
+	logs := captureLogs12156(t)
+	_, errs := renamePositional(
+		[]pciNIC{{sortKey: 1, busAddr: "0000:05:00.0", name: "fxp0"}},
+		0, false, func(string, string) error { return nil },
+	)
+	if len(errs) != 0 {
+		t.Fatalf("unknown original without a persistence file must not fail the pass: %v", errs)
+	}
+	if got := logs.String(); !strings.Contains(got, "level=WARN") ||
+		!strings.Contains(got, "no usable .link exists") ||
+		strings.Contains(got, "retaining the existing") {
+		t.Fatalf("missing persistence must produce a warning, got logs:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, linkPrefix+"fxp0.link")); !os.IsNotExist(err) {
+		t.Fatalf("a missing original must not create a persistence file, stat err=%v", err)
+	}
+}
+
+// TestRenamePositionalRetainsMACFormWhileRenamingAfterShift12156 covers the
+// lower-PCI insertion case: a MAC-form .link assigned the current logical name,
+// but positional order now requires a different target. The file must remain
+// byte-identical while the NIC still renames to its new target.
+func TestRenamePositionalRetainsMACFormWhileRenamingAfterShift12156(t *testing.T) {
+	dir := withTempLinkDir(t)
+	linkPath := filepath.Join(dir, linkPrefix+"ge-0-0-0.link")
+	chained := `# Managed by xpfd — do not edit
+[Match]
+MACAddress=52:54:00:00:00:01
+
+[Link]
+Name=ge-0-0-0
+`
+	if err := os.WriteFile(linkPath, []byte(chained), 0644); err != nil {
+		t.Fatalf("write MAC-form logical-name fixture: %v", err)
+	}
+
+	nics := []pciNIC{{sortKey: 1, busAddr: "0000:05:00.0", name: "ge-0-0-0"}}
+	var renamed [][2]string
+	changed, errs := renamePositional(nics, 0, false, func(from, to string) error {
+		renamed = append(renamed, [2]string{from, to})
+		return nil
+	})
+	if len(errs) != 0 {
+		t.Fatalf("unknown original must not refuse the required rename: %v", errs)
+	}
+	if !changed || len(renamed) != 1 || renamed[0] != [2]string{"ge-0-0-0", "fxp0"} {
+		t.Fatalf("shifted NIC must still rename to fxp0, changed=%v renames=%v", changed, renamed)
+	}
+	if data, err := os.ReadFile(linkPath); err != nil || string(data) != chained {
+		t.Fatalf("the existing MAC-form link must be retained byte-for-byte, got %q err=%v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, linkPrefix+"fxp0.link")); !os.IsNotExist(err) {
+		t.Fatalf("an unmatchable fxp0 .link must not be written, stat err=%v", err)
+	}
+}
+
+// TestRenamePositionalCarriesUnknownOriginalAcrossCollision12156 verifies the
+// phase-1 temp rename does not turn an unknown original into OriginalName=xpf-tmp-N.
+// The existing MAC-form fxp0.link is necessarily replaced by the other NIC's
+// new fxp0 assignment; the unknown NIC still must rename to ge-0-0-0 without
+// writing a temp-name link.
+func TestRenamePositionalCarriesUnknownOriginalAcrossCollision12156(t *testing.T) {
+	dir := withTempLinkDir(t)
+	macForm := `# Managed by xpfd — do not edit
+[Match]
+MACAddress=52:54:00:00:00:02
+
+[Link]
+Name=fxp0
+`
+	if err := os.WriteFile(filepath.Join(dir, linkPrefix+"fxp0.link"), []byte(macForm), 0644); err != nil {
+		t.Fatalf("write colliding MAC-form fixture: %v", err)
+	}
+
+	nics := []pciNIC{
+		{sortKey: 1, busAddr: "0000:05:00.0", name: "enp5s0"},
+		{sortKey: 1, busAddr: "0000:06:00.0", name: "fxp0"},
+	}
+	var renamed [][2]string
+	changed, errs := renamePositional(nics, 0, false, func(from, to string) error {
+		renamed = append(renamed, [2]string{from, to})
+		return nil
+	})
+	if len(errs) != 0 || !changed {
+		t.Fatalf("collision pass must finish without errors, changed=%v errs=%v", changed, errs)
+	}
+	seen := make(map[string]bool, len(renamed))
+	for _, pair := range renamed {
+		seen[pair[0]+"->"+pair[1]] = true
+	}
+	for _, want := range []string{
+		"fxp0->xpf-tmp-0",
+		"enp5s0->fxp0",
+		"xpf-tmp-0->ge-0-0-0",
+	} {
+		if !seen[want] {
+			t.Errorf("collision-safe naming did not perform %s; renames=%v", want, renamed)
+		}
+	}
+	if len(renamed) != 3 {
+		t.Fatalf("unexpected extra or missing rename calls: %v", renamed)
+	}
+	fxp0, err := os.ReadFile(filepath.Join(dir, linkPrefix+"fxp0.link"))
+	if err != nil || !strings.Contains(string(fxp0), "OriginalName=enp5s0") {
+		t.Fatalf("fxp0 persistence must belong to the new index-0 NIC, got %q err=%v", fxp0, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, linkPrefix+"ge-0-0-0.link")); !os.IsNotExist(err) {
+		t.Fatalf("the unknown-original NIC must not get a link with a temp name, stat err=%v", err)
+	}
 }
 
 // TestBootstrapLifelineRetainsMACFormLink12156 drives the real bootstrap
@@ -97,6 +216,7 @@ func TestRenamePositionalRetainsMACFormLink12156(t *testing.T) {
 // FAIL-ON-REVERT: restoring the bare recoverOriginalName call at the
 // bootstrap write site overwrites the MAC-form file with OriginalName=fxp0.
 func TestBootstrapLifelineRetainsMACFormLink12156(t *testing.T) {
+	logs := captureLogs12156(t)
 	st := staticLifelineSeams(t)
 	linkPath := writeMACFormFxp0Link12156(t, st.linkDir)
 
@@ -119,6 +239,11 @@ func TestBootstrapLifelineRetainsMACFormLink12156(t *testing.T) {
 	assertNoSelfOriginal12156(t, linkPath)
 	if !*st.reloaded {
 		t.Error("the lifeline must still complete (reload networkd) when it retains the MAC-form link")
+	}
+	if got := logs.String(); !strings.Contains(got, "level=INFO") ||
+		!strings.Contains(got, "bootstrap: existing MAC-form .link found") ||
+		strings.Contains(got, "level=ERROR") {
+		t.Fatalf("bootstrap MAC-form detection must log at Info without Error, got:\n%s", got)
 	}
 }
 
@@ -165,6 +290,37 @@ func TestBootstrapFactoryFallbackRetainsMACFormLink12156(t *testing.T) {
 	}
 }
 
+// TestBootstrapFirstRenameWritesKernelOriginal12156 is the bootstrap positive
+// control: an index-0 lifeline still under its kernel name, with an empty link
+// directory, must receive an fxp0 .link recording that kernel name.
+func TestBootstrapFirstRenameWritesKernelOriginal12156(t *testing.T) {
+	st := staticLifelineSeams(t)
+	detectLifelineInterfaceFn = func() (string, bool, error) { return "enp5s0", true, nil }
+	enumeratePCINICsFn = func() ([]pciNIC, error) {
+		return []pciNIC{{sortKey: 0, busAddr: "0000:05:00.0", name: "enp5s0"}}, nil
+	}
+	lifelineLinkByName = func(string) (netlink.Link, error) { return okLink(), nil }
+	lifelineAddrList = func(netlink.Link, int) ([]netlink.Addr, error) {
+		return []netlink.Addr{staticAddr("192.0.2.10/24")}, nil
+	}
+	lifelineRouteList = func(_ netlink.Link, family int) ([]netlink.Route, error) {
+		if family == netlink.FAMILY_V4 {
+			return []netlink.Route{{Gw: net.ParseIP("192.0.2.1")}}, nil
+		}
+		return nil, nil
+	}
+
+	d := &Daemon{store: newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))}
+	d.setupBootstrapLifeline()
+	data, err := os.ReadFile(filepath.Join(st.linkDir, linkPrefix+"fxp0.link"))
+	if err != nil || !strings.Contains(string(data), "OriginalName=enp5s0") {
+		t.Fatalf("bootstrap first rename must persist OriginalName=enp5s0, got %q err=%v", data, err)
+	}
+	if !*st.renamed || !*st.reloaded {
+		t.Fatalf("bootstrap first rename must rename+reload: renamed=%v reloaded=%v", *st.renamed, *st.reloaded)
+	}
+}
+
 // TestRenamePositionalWritesGenuineKernelName12156 is the positive control:
 // a NIC that does NOT yet wear its final name is genuinely pre-rename, so
 // its current name IS the kernel original and the pass must persist it.
@@ -198,14 +354,15 @@ func TestRenamePositionalWritesGenuineKernelName12156(t *testing.T) {
 
 // TestRenamePositionalRecoversVerifiedOriginal12156 is the second positive
 // control: a NIC wearing its final name whose .link DOES record a genuine
-// kernel OriginalName= keeps that chain — the fix must only refuse the
-// unverified self-name, never a verified original.
+// kernel OriginalName= must rewrite a non-canonical chain to the canonical
+// rendering. This distinguishes honoring the recorded original from skipping
+// the write as though the original were unknown.
 func TestRenamePositionalRecoversVerifiedOriginal12156(t *testing.T) {
 	dir := withTempLinkDir(t)
-	chained := "# Managed by xpfd — do not edit\n[Match]\nOriginalName=enp5s0\n\n[Link]\nName=fxp0"
+	chained := "# Managed by xpfd — do not edit\n[Match]\nOriginalName=enp5s0\n\n[Link]\nName=fxp0\n"
 	linkPath := filepath.Join(dir, linkPrefix+"fxp0.link")
 	if err := os.WriteFile(linkPath, []byte(chained), 0644); err != nil {
-		t.Fatalf("write chained fixture: %v", err)
+		t.Fatalf("write non-canonical recorded-original fixture: %v", err)
 	}
 
 	nics := []pciNIC{{sortKey: 1, busAddr: "0000:05:00.0", name: "fxp0"}}
@@ -216,11 +373,17 @@ func TestRenamePositionalRecoversVerifiedOriginal12156(t *testing.T) {
 	for _, err := range errs {
 		t.Fatalf("the verified-original control must be error-free, got %v", err)
 	}
-	if changed {
-		t.Fatal("re-rendering an identical verified .link must be a no-op (no churn)")
+	if !changed {
+		t.Fatal("a non-canonical verified .link must be rewritten, not skipped")
 	}
+	const canonical = `# Managed by xpfd — do not edit
+[Match]
+OriginalName=enp5s0
+
+[Link]
+Name=fxp0`
 	data, err := os.ReadFile(linkPath)
-	if err != nil || string(data) != chained {
-		t.Fatalf("the verified .link must be byte-identical, got %q err=%v", data, err)
+	if err != nil || string(data) != canonical {
+		t.Fatalf("the verified .link must be normalized with the recorded original, got %q err=%v", data, err)
 	}
 }

@@ -260,9 +260,10 @@ func assignName(idx, fpc int, clusterMode bool) string {
 // can never feed a corrupted OriginalName into a later NIC's recovery), breaks
 // target-name collisions via temp names (so an enumeration shift does not
 // EEXIST-strand a rename), then writes eligible .link files and renames to the
-// final name. renameFn is injected so production passes renameInterface and
-// tests can model EEXIST semantics. Returns true if any .link changed or any
-// rename ran.
+// final name. When the original is unknown it skips only the write; if the
+// current name differs from the target, it still attempts the rename. renameFn
+// is injected so production passes renameInterface and tests can model EEXIST
+// semantics. Returns true if any .link changed or any rename ran.
 func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(from, to string) error) (bool, []error) {
 	// Phase 0: snapshot targets and capture each verified OriginalName or
 	// unknown sentinel up-front, from the .link set as it exists BEFORE this
@@ -279,11 +280,13 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 		if original, ok := positionalOriginalNameFor(nic.name, target); ok {
 			originalByCurrent[nic.name] = original
 		} else {
-			// #12156: the NIC already wears its final logical name, but no
-			// .link records a kernel original. Carry "unknown" through the
-			// shared collision-break re-keying without manufacturing
+			// #12156: a 10-xpf .link assigns this current name without
+			// recording its kernel original, or the NIC already wears its
+			// target name without any original record. Carry "unknown" through
+			// the shared collision-break re-keying without manufacturing
 			// OriginalName=<logical name>.
 			originalByCurrent[nic.name] = originalNameUnknown
+			logUnknownOriginalLinkSkip("linksetup", nic.name, target)
 		}
 		desiredNames[target] = true
 		currentNames[idx] = nic.name
@@ -314,22 +317,25 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 			}
 		}
 		if original == originalNameUnknown {
-			// #12156: no udev-matchable kernel original is known. Keep any
-			// existing MAC-form .link intact rather than replacing it with
-			// OriginalName=<logical name>, which udev never presents. Positional
-			// naming still claims every NIC, so this skip is not a rename refusal.
-			slog.Warn("linksetup: cannot determine the pre-rename kernel name for "+
-				"this NIC; skipping the .link write instead of persisting an "+
-				"unmatchable OriginalName=. Any existing MAC-form .link is retained.",
-				"current", current, "logical", final)
-			continue
-		}
-		wrote, err := writeLinkFile(final, original)
-		if err != nil {
-			errs = append(errs, err)
-		}
-		if wrote {
-			changed = true
+			// #12156: no udev-matchable kernel original is known. Skip the
+			// .link write rather than persisting OriginalName=<logical name>,
+			// which udev never presents. The phase-0 log distinguishes a
+			// retained name-only link from the absence of usable persistence.
+			if current == final {
+				// Already at the final name: there is no rename to run.
+				continue
+			}
+			// #12156/F1: skip only the write. A name-only .link may have
+			// assigned the current logical name; still perform the required
+			// rename or positional naming would strand the NIC.
+		} else {
+			wrote, err := writeLinkFile(final, original)
+			if err != nil {
+				errs = append(errs, err)
+			}
+			if wrote {
+				changed = true
+			}
 		}
 		if current != final {
 			// #7205: phase 1 could not free this name, so the rename below
@@ -358,18 +364,46 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 // udev-matchable OriginalName for this NIC. A previously recorded name is
 // verified by the existing .link chain. With no recorded original, a NIC
 // whose current name differs from its assigned final name is still under its
-// kernel name (first rename); when current == final, the name alone cannot
-// prove a kernel original, so callers must retain any existing MAC-form link
-// instead of persisting an unmatchable OriginalName=<logical name> (#12156).
+// kernel name (first rename) — UNLESS a 10-xpf .link assigns that current
+// name without an OriginalName=, in which case the current name is logical and
+// the kernel original is unknown whatever the final name is (#12156/F1).
 func positionalOriginalNameFor(current, final string) (string, bool) {
-	original := recoverOriginalName(current)
+	original, matchedNameOnly, _ := recoverOriginalName(current)
 	if original != current {
 		return original, true
+	}
+	if matchedNameOnly {
+		return "", false
 	}
 	if current != final {
 		return current, true
 	}
 	return "", false
+}
+
+// logUnknownOriginalLinkSkip distinguishes a matching name-only link from the
+// absence of usable persistence. Existing MAC-form links log at Info; if there
+// is no matching name-only link and no verified OriginalName, a Warn signals
+// that boot-time persistence is not established.
+func logUnknownOriginalLinkSkip(logPrefix, current, final string) {
+	_, matchedNameOnly, matchedMAC := recoverOriginalName(current)
+	if matchedNameOnly {
+		if matchedMAC {
+			slog.Info(logPrefix+": existing MAC-form .link found; skipping an "+
+				"unmatchable OriginalName= write",
+				"current", current, "logical", final)
+		} else {
+			slog.Info(logPrefix+": existing name-only .link found; skipping an "+
+				"unmatchable OriginalName= write",
+				"current", current, "logical", final)
+		}
+		return
+	}
+	slog.Warn(logPrefix+": cannot determine the pre-rename kernel name for "+
+		"this NIC and no usable .link exists to retain; skipping the .link write "+
+		"instead of persisting an unmatchable OriginalName=. Boot-time persistence "+
+		"is NOT established.",
+		"current", current, "logical", final)
 }
 
 // breakNameCollisions is the shared phase-1 collision break used by BOTH the
@@ -532,15 +566,16 @@ func verifyPositionalNames(fpc int, clusterMode bool) []error {
 	return errs
 }
 
-// recoverOriginalName returns the OriginalName from an existing .link file
-// if one is recorded for this name, otherwise returns currentName. The
-// fallback is not itself proof that currentName is a pre-rename kernel name;
-// callers persisting it must check their target-name context first (#12156).
-func recoverOriginalName(currentName string) string {
+// recoverOriginalName returns the OriginalName from an existing 10-xpf .link
+// that names currentName, plus whether a matching Name= has no recorded
+// OriginalName= and whether that name-only link matches by MACAddress=. The
+// distinction matters because Name=<current> without OriginalName= proves the
+// NIC already wears a logical name, not its kernel name (#12156/F1).
+func recoverOriginalName(currentName string) (original string, matchedNameOnly, matchedMAC bool) {
 	// Search existing .link files for one that renames TO this name.
 	entries, err := os.ReadDir(linkDir)
 	if err != nil {
-		return currentName
+		return currentName, false, false
 	}
 	for _, e := range entries {
 		if !strings.HasPrefix(e.Name(), linkPrefix) || !strings.HasSuffix(e.Name(), ".link") {
@@ -555,18 +590,25 @@ func recoverOriginalName(currentName string) string {
 		if !containsLine(content, "Name="+currentName) {
 			continue
 		}
-		// Extract OriginalName= value.
+		var recordedOriginal string
+		hasMACMatch := false
 		for _, line := range strings.Split(content, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "OriginalName=") {
-				orig := strings.TrimPrefix(line, "OriginalName=")
-				if orig != "" {
-					return orig
-				}
+				recordedOriginal = strings.TrimPrefix(line, "OriginalName=")
+			}
+			if strings.HasPrefix(line, "MACAddress=") &&
+				strings.TrimSpace(strings.TrimPrefix(line, "MACAddress=")) != "" {
+				hasMACMatch = true
 			}
 		}
+		if recordedOriginal != "" {
+			return recordedOriginal, false, false
+		}
+		matchedNameOnly = true
+		matchedMAC = matchedMAC || hasMACMatch
 	}
-	return currentName
+	return currentName, matchedNameOnly, matchedMAC
 }
 
 // containsLine checks if the text contains an exact line matching s.

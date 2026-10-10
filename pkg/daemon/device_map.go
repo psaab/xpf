@@ -178,7 +178,7 @@ func notePositionalIgnoresProtected(protected map[string]bool) {
 // the NIC under its kernel name is a state the rest of the daemon understands;
 // a .link that silently never matches is not.
 func deviceMapOriginalNameFor(currentNIC, logical string) (string, bool) {
-	orig := recoverOriginalName(currentNIC)
+	orig, _, _ := recoverOriginalName(currentNIC)
 	if orig != currentNIC {
 		return orig, true // an existing .link chain recorded the true original
 	}
@@ -369,7 +369,7 @@ func enumerateAndRenameMapped(dm *config.DeviceMapConfig, cfg *config.Config, pr
 		// before any temp rename; fall back to recovering it if absent.
 		original := originalByCurrent[current]
 		if original == "" {
-			original = recoverOriginalName(current)
+			original, _, _ = recoverOriginalName(current)
 		}
 		if original == originalNameUnknown {
 			// #6678: no udev-matchable pre-rename name exists for this NIC.

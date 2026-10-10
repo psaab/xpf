@@ -1688,12 +1688,20 @@ both through the shared `vrrp.GatewayProbeTarget` helper.
 
 ## Interface management
 
-`enumerateAndRenameInterfaces()` runs at startup (in `linksetup.go`),
-writes `.link` files for every PCI-enumerated NIC, and assigns vSRX names
-based on PCI bus order plus the cluster node ID. RETH members match by
-`OriginalName=` (PCI kernel name), not `MACAddress=` — the MAC alternates
-between physical and virtual at boot, and `ensureRethLinkOriginalName()`
-auto-fixes stale `.link` files.
+`enumerateAndRenameInterfaces()` runs at startup (in `linksetup.go`) and
+assigns vSRX names to PCI-enumerated NICs based on PCI bus order plus the
+cluster node ID. It writes `.link` files when the kernel original is available
+from a recorded chain or the current name of a first-rename NIC. If a
+`10-xpf-*.link` already assigns the current name without `OriginalName=`, that
+name is treated as logical and unknown regardless of the new target: the
+unsafe `.link` write is skipped, but a required rename still runs. The logical
+name is never persisted as `OriginalName=` without evidence it is the kernel
+name. Verifying a retained `MACAddress=` against the NIC identity is tracked by
+follow-up #12550.
+
+RETH members match by `OriginalName=` (PCI kernel name), not `MACAddress=` —
+the MAC alternates between physical and virtual at boot, and
+`ensureRethLinkOriginalName()` auto-fixes stale `.link` files.
 
 It **returns an error when naming does not converge** (#5842). Every step
 that can fail — the `.link` write, the rename, and the `networkctl reload`
