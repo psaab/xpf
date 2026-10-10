@@ -1122,6 +1122,11 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// without the plan it falls back to the pre-#6948 post-apply scan, which
 	// sweeps the sessions of whichever policy inherited a deleted policy's id.
 	d.armPolicyInvalidationPlan(oldActive, prevCfg)
+	// #6296: capture the active rollback target's convergence digest under
+	// applySem before applying it, so the success stamp cannot key a later
+	// promotion that this rollback did not apply.
+	appliedDigest := d.store.ActiveDigest()
+
 	// #9811: latch the outcome. The log alone left the node ENFORCING the
 	// abandoned config C2 while the store, `show configuration`, the peer
 	// resync and /health all reported C1, with nothing to retry it — this is a
@@ -1139,11 +1144,18 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// being lost. The helper now RETURNS the error so the two returning call
 	// sites (commit + peer-sync) join it into their result; here the log is the
 	// only available surface.
+	markerHandledByInvalidation := d.policyInvalidationPublishLanded && d.policyInvalidationDebt != nil
+	var clearErr error
 	if d.policyInvalidationPublishLanded {
-		if err := d.dischargePolicyInvalidationDebtLocked(oldActive, prevCfg); err != nil {
+		clearErr = d.dischargePolicyInvalidationDebtLocked(oldActive, prevCfg)
+		if clearErr != nil {
 			slog.Error("commit confirmed auto-rollback: policy session invalidation was PARTIAL; "+
-				"some rolled-back-policy sessions may keep forwarding under stale authorization", "err", err)
+				"some rolled-back-policy sessions may keep forwarding under stale authorization", "err", clearErr)
 		}
+	}
+	if applyErr == nil && clearErr == nil && !markerHandledByInvalidation &&
+		d.policyInvalidationDebt == nil && d.store != nil {
+		d.store.MarkAppliedDigest(appliedDigest)
 	}
 	// #3868: RE-SYNC the rolled-back config (C1) to the cluster peer. The
 	// standby already received the unconfirmed config (C2) via config-sync

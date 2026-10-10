@@ -64,6 +64,9 @@ func TestConfirmedRollbackApplyFailureIsRetriedUntilItConverges9811(t *testing.T
 	if !strings.Contains(lastErr, "connection refused") {
 		t.Errorf("last error = %q, want the apply's own error", lastErr)
 	}
+	if d.store.ActiveApplied() {
+		t.Fatal("a failed auto-rollback apply must not stamp the active config as applied")
+	}
 
 	// The retry owner runs while the fault persists. The COUNT must climb: a
 	// flat count with the debt still owed is exactly the signature of a debt
@@ -75,6 +78,9 @@ func TestConfirmedRollbackApplyFailureIsRetriedUntilItConverges9811(t *testing.T
 	}
 	if owed, failures, _ := d.ConfigApplyDebt(); !owed || failures != 2 {
 		t.Fatalf("after one retry against a persisting fault: owed=%v failures=%d, want true/2 — a flat count with the debt owed means nothing is retrying it", owed, failures)
+	}
+	if d.store.ActiveApplied() {
+		t.Fatal("a failed retry must not stamp the active config as applied")
 	}
 
 	// Fault clears; the next tick must converge and discharge.
@@ -90,6 +96,10 @@ func TestConfirmedRollbackApplyFailureIsRetriedUntilItConverges9811(t *testing.T
 	if lastErr != "" {
 		t.Errorf("last error = %q after convergence, want it cleared", lastErr)
 	}
+	if !d.store.ActiveApplied() {
+		t.Fatal("a converging retry did not stamp the active rollback target as applied")
+	}
+
 }
 
 // TestSuccessfulConfirmedRollbackOwesNothing9811 is the control the issue asks
@@ -102,6 +112,9 @@ func TestSuccessfulConfirmedRollbackOwesNothing9811(t *testing.T) {
 
 	if owed, failures, _ := d.ConfigApplyDebt(); owed || failures != 0 {
 		t.Fatalf("a SUCCESSFUL auto-rollback owes a config apply (owed=%v failures=%d); over-latching pins /health at 503 on a converged node", owed, failures)
+	}
+	if !d.store.ActiveApplied() {
+		t.Fatal("a successful auto-rollback did not stamp its active config as applied")
 	}
 	if got := d.store.ActiveConfig().System.HostName; got != "A" {
 		t.Fatalf("store did not roll back: host-name = %q, want A", got)

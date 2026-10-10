@@ -145,8 +145,14 @@ func (d *Daemon) reassertConfigApplyOnce(ctx context.Context) {
 	if !d.configApplyOwed() {
 		return
 	}
+	appliedDigest := d.store.ActiveDigest()
 	err := configApplyReassertFn(d)
 	d.noteConfigApplyResult(err)
+	// reassertConfigApplyOnce owns applySem, so this captured digest names the
+	// active config the retry applied and cannot drift to a concurrent promotion.
+	if err == nil && d.policyInvalidationDebt == nil {
+		d.store.MarkAppliedDigest(appliedDigest)
+	}
 	if err != nil {
 		slog.Warn("config apply re-assert failed; will retry", "err", err, "issue", "#9811")
 	}
