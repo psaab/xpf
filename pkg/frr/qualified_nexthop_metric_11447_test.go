@@ -81,6 +81,67 @@ func TestQualifiedNextHopMetricReachesStaticRedistribution11447(t *testing.T) {
 	}
 }
 
+func TestQualifiedNextHopMetricPolicyAttachesForStaticProtocolSpellings12312(t *testing.T) {
+	route := "set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10"
+	canonical := qnhMetricRender11447(t,
+		route,
+		"set protocols ospf export POLICY",
+		"set policy-options policy-statement POLICY term T from protocol static",
+		"set policy-options policy-statement POLICY term T then accept",
+	)
+	for _, tc := range []struct {
+		name     string
+		protocol string
+	}{
+		{name: "canonical", protocol: "static"},
+		{name: "uppercase", protocol: "STATIC"},
+		{name: "mixed case", protocol: "Static"},
+		{name: "trailing whitespace", protocol: "\"static \""},
+		{name: "surrounding whitespace", protocol: "\" Static \""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rendered := qnhMetricRender11447(t,
+				route,
+				"set protocols ospf export POLICY",
+				"set policy-options policy-statement POLICY term T from protocol "+tc.protocol,
+				"set policy-options policy-statement POLICY term T then accept",
+			)
+			var routeMap string
+			for _, line := range strings.Split(rendered, "\n") {
+				fields := strings.Fields(line)
+				if len(fields) == 4 && fields[0] == "redistribute" && fields[1] == "static" && fields[2] == "route-map" {
+					routeMap = fields[3]
+					break
+				}
+			}
+			if !strings.HasPrefix(routeMap, "xpf-qnh-policy-") {
+				t.Fatalf("static redistribution must attach the synthesized QNH policy map, got %q:\n%s", routeMap, rendered)
+			}
+			block := routeMapBlock11447(rendered, routeMap)
+			if !strings.Contains(block, "set metric 10\n") {
+				t.Fatalf("attached QNH route-map %q lacks the qualified-next-hop metric:\n%s", routeMap, block)
+			}
+			if rendered != canonical {
+				t.Fatalf("variant %q must render byte-identical to canonical static:\n%s", tc.protocol, rendered)
+			}
+		})
+	}
+
+	rendered := qnhMetricRender11447(t,
+		"set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10",
+		"set protocols ospf export POLICY",
+		"set policy-options policy-statement POLICY term T from protocol connected",
+		"set policy-options policy-statement POLICY term T then accept",
+	)
+	for _, line := range strings.Split(rendered, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 4 && fields[0] == "redistribute" && fields[2] == "route-map" &&
+			strings.HasPrefix(fields[3], "xpf-qnh-policy-") {
+			t.Fatalf("non-static policy must not attach a QNH policy map: %q", line)
+		}
+	}
+}
+
 func TestQualifiedNextHopMetricDoesNotSetBGPMetric11447(t *testing.T) {
 	compiled := compileQNHMetricConfig11447(t,
 		"set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10",
