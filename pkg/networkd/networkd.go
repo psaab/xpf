@@ -11,12 +11,12 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/fsatomic"
@@ -924,9 +924,7 @@ func externalPatternListMatches(patterns []string, value string) bool {
 		} else {
 			hasPositive = true
 		}
-		pattern = translateFnmatchNegatedClasses(pattern)
-		patternMatch, err := path.Match(pattern, value)
-		if err != nil || !patternMatch {
+		if !fnmatchInterfaceName(pattern, value) {
 			continue
 		}
 		if negative {
@@ -937,50 +935,295 @@ func externalPatternListMatches(patterns []string, value string) bool {
 	return !hasPositive || positiveMatched
 }
 
-// translateFnmatchNegatedClasses adapts fnmatch's [!...] class syntax to
-// path.Match's equivalent [^...] syntax without changing escaped brackets.
-func translateFnmatchNegatedClasses(pattern string) string {
-	var out strings.Builder
-	last, i := 0, 0
+type fnmatchNameTokenKind uint8
+
+const (
+	fnmatchNameNever fnmatchNameTokenKind = iota
+	fnmatchNameLiteral
+	fnmatchNameAny
+	fnmatchNameStar
+	fnmatchNameCharClass
+)
+
+type fnmatchNameToken struct {
+	kind    fnmatchNameTokenKind
+	literal rune
+	class   fnmatchNameClass
+}
+
+type fnmatchNameClass struct {
+	pattern      string
+	contentStart int
+	end          int
+	negated      bool
+}
+
+// fnmatchInterfaceName implements libc fnmatch(..., flags=0) for interface
+// name patterns. It deliberately does not route character classes through
+// path.Match: fnmatch's first-position ] and edge-position - differ there.
+func fnmatchInterfaceName(pattern, value string) bool {
+	patternIndex, valueIndex := 0, 0
+	starPattern, starValue := -1, -1
+	for valueIndex < len(value) {
+		token, next := fnmatchNameTokenAt(pattern, patternIndex)
+		if token.kind == fnmatchNameStar {
+			starPattern, starValue = next, valueIndex
+			patternIndex = next
+			continue
+		}
+		valueRune, valueSize := utf8.DecodeRuneInString(value[valueIndex:])
+		matched := false
+		switch token.kind {
+		case fnmatchNameLiteral:
+			matched = token.literal == valueRune
+		case fnmatchNameAny:
+			matched = true
+		case fnmatchNameCharClass:
+			matched, _ = token.class.matches(valueRune)
+		}
+		if matched {
+			patternIndex = next
+			valueIndex += valueSize
+			continue
+		}
+		if starPattern < 0 || starValue >= len(value) {
+			return false
+		}
+		_, size := utf8.DecodeRuneInString(value[starValue:])
+		starValue += size
+		valueIndex = starValue
+		patternIndex = starPattern
+	}
+	for patternIndex < len(pattern) {
+		token, next := fnmatchNameTokenAt(pattern, patternIndex)
+		if token.kind != fnmatchNameStar {
+			return false
+		}
+		patternIndex = next
+	}
+	return true
+}
+
+func fnmatchNameTokenAt(pattern string, start int) (fnmatchNameToken, int) {
+	if start >= len(pattern) {
+		return fnmatchNameToken{kind: fnmatchNameNever}, start
+	}
+	switch pattern[start] {
+	case '*':
+		next := start + 1
+		for next < len(pattern) && pattern[next] == '*' {
+			next++
+		}
+		return fnmatchNameToken{kind: fnmatchNameStar}, next
+	case '?':
+		return fnmatchNameToken{kind: fnmatchNameAny}, start + 1
+	case '\\':
+		if start+1 >= len(pattern) {
+			return fnmatchNameToken{kind: fnmatchNameNever}, len(pattern)
+		}
+		r, size := utf8.DecodeRuneInString(pattern[start+1:])
+		return fnmatchNameToken{kind: fnmatchNameLiteral, literal: r}, start + 1 + size
+	case '[':
+		class, next, ok := parseFnmatchNameClass(pattern, start)
+		if ok {
+			return fnmatchNameToken{kind: fnmatchNameCharClass, class: class}, next
+		}
+		return fnmatchNameToken{kind: fnmatchNameLiteral, literal: '['}, start + 1
+	default:
+		r, size := utf8.DecodeRuneInString(pattern[start:])
+		return fnmatchNameToken{kind: fnmatchNameLiteral, literal: r}, start + size
+	}
+}
+
+func parseFnmatchNameClass(pattern string, start int) (fnmatchNameClass, int, bool) {
+	i := start + 1
+	class := fnmatchNameClass{pattern: pattern}
+	if i < len(pattern) && pattern[i] == '!' {
+		class.negated = true
+		i++
+	}
+	class.contentStart = i
+	first := true
 	for i < len(pattern) {
-		if pattern[i] == '\\' {
-			i += 2
-			continue
-		}
-		if pattern[i] != '[' || i+1 >= len(pattern) || pattern[i+1] != '!' {
-			i++
-			continue
-		}
-		end := i + 2
-		if end < len(pattern) && pattern[end] == ']' {
-			end++
-		}
-		for end < len(pattern) {
-			if pattern[end] == '\\' {
-				end += 2
+		if pattern[i] == ']' {
+			if first {
+				i++
+				first = false
 				continue
 			}
-			if pattern[end] == ']' {
+			class.end = i
+			return class, i + 1, true
+		}
+		if pattern[i] == '\\' {
+			i++
+			if i >= len(pattern) {
 				break
 			}
-			end++
-		}
-		if end >= len(pattern) {
-			i++
+			_, size := utf8.DecodeRuneInString(pattern[i:])
+			i += size
+			first = false
 			continue
 		}
-		out.WriteString(pattern[last:i])
-		out.WriteString("[^")
-		out.WriteString(pattern[i+2 : end])
-		out.WriteByte(']')
-		i = end + 1
-		last = i
+		if pattern[i] == '[' && i+1 < len(pattern) && strings.ContainsRune(":.=", rune(pattern[i+1])) {
+			if end := fnmatchBracketTermEnd(pattern, i, len(pattern), pattern[i+1]); end >= 0 {
+				i = end + 2
+				first = false
+				continue
+			}
+		}
+		_, size := utf8.DecodeRuneInString(pattern[i:])
+		i += size
+		first = false
 	}
-	if last == 0 {
-		return pattern
+	return fnmatchNameClass{}, start + 1, false
+}
+
+func fnmatchBracketTermEnd(pattern string, start, limit int, marker byte) int {
+	for i := start + 2; i+1 < limit; i++ {
+		if pattern[i] == marker && pattern[i+1] == ']' {
+			return i
+		}
 	}
-	out.WriteString(pattern[last:])
-	return out.String()
+	return -1
+}
+
+type fnmatchClassAtomKind uint8
+
+const (
+	fnmatchClassLiteral fnmatchClassAtomKind = iota
+	fnmatchClassNamed
+	fnmatchClassCollating
+)
+
+type fnmatchClassAtom struct {
+	kind    fnmatchClassAtomKind
+	value   rune
+	start   int
+	end     int
+	escaped bool
+}
+
+func (class fnmatchNameClass) matches(value rune) (bool, bool) {
+	matched := false
+	for i := class.contentStart; i < class.end; {
+		atom, next, ok := fnmatchClassAtomAt(class, i)
+		if !ok {
+			return false, false
+		}
+		if atom.kind == fnmatchClassLiteral && atom.value == '-' && !atom.escaped {
+			matched = matched || value == '-'
+			i = next
+			continue
+		}
+		if atom.kind == fnmatchClassLiteral {
+			hyphen, afterHyphen, hasHyphen := fnmatchClassAtomAt(class, next)
+			if hasHyphen && hyphen.kind == fnmatchClassLiteral && hyphen.value == '-' && !hyphen.escaped {
+				high, afterHigh, hasHigh := fnmatchClassAtomAt(class, afterHyphen)
+				if hasHigh {
+					if high.kind != fnmatchClassLiteral || atom.value > high.value {
+						return false, false
+					}
+					matched = matched || atom.value <= value && value <= high.value
+					i = afterHigh
+					continue
+				}
+			}
+		}
+		atomMatches, valid := atom.matches(class.pattern, value)
+		if !valid {
+			return false, false
+		}
+		matched = matched || atomMatches
+		i = next
+	}
+	if class.negated {
+		return !matched, true
+	}
+	return matched, true
+}
+
+func fnmatchClassAtomAt(class fnmatchNameClass, start int) (fnmatchClassAtom, int, bool) {
+	if start >= class.end {
+		return fnmatchClassAtom{}, start, false
+	}
+	pattern := class.pattern
+	if pattern[start] == '\\' {
+		start++
+		if start >= class.end {
+			return fnmatchClassAtom{}, start, false
+		}
+		value, size := utf8.DecodeRuneInString(pattern[start:])
+		return fnmatchClassAtom{kind: fnmatchClassLiteral, value: value, escaped: true}, start + size, true
+	}
+	if pattern[start] == '[' && start+1 < class.end && strings.ContainsRune(":.=", rune(pattern[start+1])) {
+		marker := pattern[start+1]
+		if end := fnmatchBracketTermEnd(pattern, start, class.end, marker); end >= 0 {
+			kind := fnmatchClassCollating
+			if marker == ':' {
+				kind = fnmatchClassNamed
+			}
+			return fnmatchClassAtom{kind: kind, start: start + 2, end: end}, end + 2, true
+		}
+	}
+	value, size := utf8.DecodeRuneInString(pattern[start:])
+	return fnmatchClassAtom{kind: fnmatchClassLiteral, value: value}, start + size, true
+}
+
+func (atom fnmatchClassAtom) matches(pattern string, value rune) (bool, bool) {
+	switch atom.kind {
+	case fnmatchClassLiteral:
+		return atom.value == value, true
+	case fnmatchClassNamed:
+		return fnmatchPOSIXCharacterClass(pattern[atom.start:atom.end], value)
+	case fnmatchClassCollating:
+		for i := atom.start; i < atom.end; {
+			r, size := utf8.DecodeRuneInString(pattern[i:])
+			if r == value {
+				return true, true
+			}
+			i += size
+		}
+		return false, atom.start < atom.end
+	default:
+		return false, false
+	}
+}
+
+func fnmatchPOSIXCharacterClass(name string, value rune) (bool, bool) {
+	if value < 0 || value > 0x7f {
+		return false, true
+	}
+	c := byte(value)
+	alpha := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+	digit := c >= '0' && c <= '9'
+	switch name {
+	case "alnum":
+		return alpha || digit, true
+	case "alpha":
+		return alpha, true
+	case "blank":
+		return c == ' ' || c == '\t', true
+	case "cntrl":
+		return c < 0x20 || c == 0x7f, true
+	case "digit":
+		return digit, true
+	case "graph":
+		return c >= 0x21 && c <= 0x7e, true
+	case "lower":
+		return c >= 'a' && c <= 'z', true
+	case "print":
+		return c >= 0x20 && c <= 0x7e, true
+	case "punct":
+		return c >= 0x21 && c <= 0x7e && !alpha && !digit, true
+	case "space":
+		return c == ' ' || c >= '\t' && c <= '\r', true
+	case "upper":
+		return c >= 'A' && c <= 'Z', true
+	case "xdigit":
+		return digit || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F', true
+	default:
+		return false, false
+	}
 }
 
 // externalMACAddressListMatches compares normalized hardware addresses. Unlike
@@ -1014,6 +1257,31 @@ func parseExternalMACAddress(value string) ([]byte, bool) {
 	}
 	if hw, err := net.ParseMAC(value); err == nil && len(hw) == 6 {
 		return []byte(hw), true
+	}
+	// The six-byte dotted form groups bytes into three variable-width 16-bit fields.
+	if strings.Contains(value, ".") {
+		groups := strings.Split(value, ".")
+		if len(groups) != 3 {
+			return nil, false
+		}
+		hw := make([]byte, 6)
+		for i, group := range groups {
+			if len(group) == 0 || len(group) > 4 {
+				return nil, false
+			}
+			for _, digit := range group {
+				if !((digit >= '0' && digit <= '9') || (digit >= 'a' && digit <= 'f') || (digit >= 'A' && digit <= 'F')) {
+					return nil, false
+				}
+			}
+			value, err := strconv.ParseUint(group, 16, 16)
+			if err != nil {
+				return nil, false
+			}
+			hw[i*2] = byte(value >> 8)
+			hw[i*2+1] = byte(value)
+		}
+		return hw, true
 	}
 	separator := byte(':')
 	if strings.Contains(value, "-") {
