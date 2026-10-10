@@ -429,7 +429,7 @@ for g in "${DECLARED_IPERF_SMOKES[@]}" "${DECLARED_CELLS_SMOKES[@]}"; do
 	*"--adapter smoke-cells"*) mk_adapter="smoke-cells" ;;
 	*) map_bad="$map_bad $g(no-makefile-wrap)"; continue ;;
 	esac
-	if grep -qE 'iperf_throughput_(json_)?verdict' "$SCRIPT_DIR/$g.sh"; then
+	if grep -qE 'iperf_throughput_(json_)?verdict|ha_smoke_iperf_verdicts' "$SCRIPT_DIR/$g.sh"; then
 		[[ "$mk_adapter" == "ha-smoke" ]] || map_bad="$map_bad $g(emits-iperf-but-wrapped-$mk_adapter)"
 	else
 		[[ "$mk_adapter" == "smoke-cells" ]] || map_bad="$map_bad $g(no-iperf-but-wrapped-$mk_adapter)"
@@ -440,19 +440,23 @@ if [[ -z "$map_bad" ]]; then
 else
 	bad "adapter census: Makefile/script adapter mismatch:$map_bad"
 fi
-# Pin the JSON call shape only on test-failover; its four human-log siblings
-# retain the original text verdict call shape.
+# Pin the JSON call shape on test-failover and its three event-driven siblings;
+# test-stress-failover remains the one legacy text-SUM sibling.
 if grep -q 'iperf_throughput_json_verdict "$MIN_THROUGHPUT" "$avg_gbps"' "$SCRIPT_DIR/test-failover.sh"; then
 	json_call_shape_ok=1
 else
 	json_call_shape_ok=0
 fi
-for sibling in test-double-failover test-chained-crash test-active-active test-stress-failover; do
-	grep -q 'iperf_throughput_verdict "$MIN_THROUGHPUT" "$sum_line"' "$SCRIPT_DIR/$sibling.sh" \
+for sibling in test-double-failover test-chained-crash test-active-active; do
+	grep -q 'ha_smoke_iperf_verdicts "$LOG" "$IPERF_DURATION" "$IPERF_STREAMS"' "$SCRIPT_DIR/$sibling.sh" \
+		|| json_call_shape_ok=0
+	grep -q 'failover_start_main_iperf "$IPERF_DURATION" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS"' "$SCRIPT_DIR/$sibling.sh" \
 		|| json_call_shape_ok=0
 done
+grep -q 'iperf_throughput_verdict "$MIN_THROUGHPUT" "$sum_line"' "$SCRIPT_DIR/test-stress-failover.sh" \
+	|| json_call_shape_ok=0
 if (( json_call_shape_ok )); then
-	ok "adapter census: failover uses JSON verdict and four siblings retain text verdict"
+	ok "adapter census: failover and three event-driven siblings use JSON; stress retains text verdict"
 else
 	bad "adapter census: JSON/text throughput verdict call shapes changed"
 fi

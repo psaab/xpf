@@ -32,17 +32,29 @@ set -euo pipefail
 # so a concurrent deploy/smoke can't collide with our reboot (it
 # queues behind a held /tmp/xpf-cluster.lock instead of colliding).
 _CELL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$_CELL_DIR"
+if [[ "${1:-}" == "--selftest" ]]; then
+	if [[ $# -ne 1 ]]; then
+		echo "usage: $0 --selftest" >&2
+		exit 2
+	fi
+	exec bash "${SCRIPT_DIR}/iperf-throughput-selftest.sh" "$(basename "${BASH_SOURCE[0]}")"
+fi
+
 # shellcheck source=cluster-cell.sh
 source "${_CELL_DIR}/cluster-cell.sh"
 xpf_enter_destructive_cluster_cell "test-double-failover $*" "$0" "$@"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
+# shellcheck source=test/incus/deploy-lib.sh
+source "${SCRIPT_DIR}/deploy-lib.sh"
 # shellcheck source=test/incus/iperf-throughput-lib.sh
 source "${SCRIPT_DIR}/iperf-throughput-lib.sh"
 # shellcheck source=test/incus/failover-clock-lib.sh
 source "${SCRIPT_DIR}/failover-clock-lib.sh"
+# shellcheck source=test/incus/ha-smoke-iperf-lib.sh
+source "${SCRIPT_DIR}/ha-smoke-iperf-lib.sh"
 
 IPERF_TARGET="${IPERF_TARGET:-$IPERF_TARGET4}"
 # #9691: measure the UNSHAPED class. iperf3 defaults to port 5201, which
@@ -59,6 +71,14 @@ SYNC_WAIT=5             # seconds to wait for session sync sweep
 REBOOT_WAIT=90          # max seconds to wait for a node to come back
 TAKEOVER_WAIT=60        # max seconds to wait for "Takeover ready: yes"
 MIN_THROUGHPUT=1.0      # Gbps — iperf3 must report at least this
+LOG="/tmp/iperf3-double-failover.log"
+PIDFILE="/tmp/iperf3-double-failover.pid"
+IPERF_START_SECONDS=0
+FAILOVER_EVENTS=()
+
+main_iperf_running() {
+	failover_main_iperf_running "$PIDFILE" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS"
+}
 
 PASS=0
 FAIL=0
@@ -102,12 +122,11 @@ for rg in 0 1 2; do
 done
 sleep 2
 
-# Verify fw0 is primary
 fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
-if echo "$fw0_status" | grep -q "node0.*primary"; then
-	pass "fw0 is primary"
+if printf '%s\n' "$fw0_status" | deploy_node_role_every_rg_ok node0 primary; then
+	pass "fw0 is primary for every redundancy group"
 else
-	die "fw0 is not primary — cannot run double failover test"
+	die "fw0 is not primary for every redundancy group — cannot run double failover test"
 fi
 
 # Verify iperf target reachable
@@ -117,8 +136,9 @@ else
 	die "Cannot reach iperf3 target $IPERF_TARGET from ${CLUSTER_LAN_HOST}"
 fi
 
-# Kill any stale iperf3
-incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
+# Stop only the previous tracked client; unrelated iperf3 processes are not this
+# smoke's evidence and must not be killed or allowed to satisfy its liveness.
+failover_stop_main_iperf "$PIDFILE" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
 sleep 1
 
 # ── Phase 1: Start iperf3 ───────────────────────────────────────────
@@ -127,14 +147,15 @@ info "Starting iperf3 -P${IPERF_STREAMS} -t${IPERF_DURATION} → ${IPERF_TARGET}
 
 iperf_started=false
 for attempt in 1 2 3; do
-	incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
+	failover_stop_main_iperf "$PIDFILE" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
 	sleep 1
-	incus exec "$CLUSTER_LAN_HOST" -- bash -c \
-		"iperf3 --forceflush --connect-timeout 5000 -t ${IPERF_DURATION} -c ${IPERF_TARGET} -p ${IPERF_PORT} -P ${IPERF_STREAMS} > /tmp/iperf3-double-failover.log 2>&1 &"
+	failover_start_main_iperf "$IPERF_DURATION" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" \
+		"$LOG" "$PIDFILE" 1
+	IPERF_START_SECONDS=$SECONDS
 
 	sleep 8  # all parallel streams must be fully established
 
-	if ! incus exec "$CLUSTER_LAN_HOST" -- pgrep iperf3 &>/dev/null; then
+	if ! main_iperf_running; then
 		info "iperf3 exited on attempt $attempt — server may be busy, retrying"
 		sleep $((attempt * 5))
 		continue
@@ -147,10 +168,10 @@ for attempt in 1 2 3; do
 		break
 	fi
 
-	# iperf3 is running but not enough sessions — streams may have timed out
-	if incus exec "$CLUSTER_LAN_HOST" -- grep -q "unable to connect" /tmp/iperf3-double-failover.log 2>/dev/null; then
+	# Retry only on iperf3's captured JSON connection-failure event.
+	if failover_main_iperf_connect_failed "$LOG"; then
 		info "iperf3 stream connect failed on attempt $attempt — server busy, retrying"
-		incus exec "$CLUSTER_LAN_HOST" -- pkill -9 iperf3 2>/dev/null || true
+		failover_stop_main_iperf "$PIDFILE" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
 		sleep $((attempt * 10))
 		continue
 	fi
@@ -160,17 +181,17 @@ for attempt in 1 2 3; do
 done
 
 if ! $iperf_started; then
-	if ! incus exec "$CLUSTER_LAN_HOST" -- pgrep iperf3 &>/dev/null; then
-		incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-double-failover.log 2>/dev/null || true
+	if ! main_iperf_running; then
+		incus exec "$CLUSTER_LAN_HOST" -- cat "$LOG" 2>/dev/null || true
 		die "iperf3 failed to start after 3 attempts"
 	fi
 fi
 
-# Verify iperf3 is running
-if incus exec "$CLUSTER_LAN_HOST" -- pgrep iperf3 &>/dev/null; then
-	pass "iperf3 running on ${CLUSTER_LAN_HOST}"
+# Verify the tracked iperf3 supervisor, not an unrelated process.
+if main_iperf_running; then
+	pass "tracked iperf3 client running on ${CLUSTER_LAN_HOST}"
 else
-	incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-double-failover.log 2>/dev/null || true
+	incus exec "$CLUSTER_LAN_HOST" -- cat "$LOG" 2>/dev/null || true
 	die "iperf3 failed to start"
 fi
 
@@ -205,6 +226,8 @@ info "Crashing fw0 (sysrq reboot — unclean shutdown, tests worst-case failover
 # forwards SIGTERM to the (dead) remote session — only the SIGKILL
 # follow-up reliably reaps the local client (measured 47min/38min hangs
 # on test-failover.sh before the bound was added).
+# Record the transition against the iperf3 JSON stream's monotonic seconds.
+FAILOVER_EVENTS+=("$((SECONDS - IPERF_START_SECONDS))")
 { timeout -k 5 10 incus exec "$FW0" -- bash -c 'echo b > /proc/sysrq-trigger' || true; } 2>/dev/null
 
 # Wait for fw1 to detect failure and become primary
@@ -212,17 +235,17 @@ sleep 5
 
 # Verify fw1 became primary
 fw1_status=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
-if echo "$fw1_status" | grep -q "node1.*primary"; then
-	pass "fw1 became primary after fw0 crash"
+if printf '%s\n' "$fw1_status" | deploy_node_role_every_rg_ok node1 primary; then
+	pass "fw1 became primary for every redundancy group after fw0 crash"
 else
-	fail "fw1 did not become primary after fw0 crash"
+	fail "fw1 did not become primary for every redundancy group after fw0 crash"
 fi
 
-# Verify iperf3 survived the first failover
-if incus exec "$CLUSTER_LAN_HOST" -- pgrep iperf3 &>/dev/null; then
-	pass "iperf3 survived first failover (fw0 crash → fw1)"
+# Verify the original tracked client survived the first failover.
+if main_iperf_running; then
+	pass "tracked iperf3 client survived first failover (fw0 crash → fw1)"
 else
-	fail "iperf3 DIED during first failover — fw0 crash broke TCP connections"
+	fail "tracked iperf3 client died during first failover — fw0 crash broke the stream"
 fi
 
 # ── Phase 4: Wait for fw0 to reboot and rejoin ──────────────────────
@@ -259,23 +282,19 @@ sleep 20
 
 # Verify fw0 is secondary (no auto-preempt)
 fw0_status_after=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
-if echo "$fw0_status_after" | grep -q "node0.*secondary"; then
-	pass "fw0 rejoined as secondary (no auto-preempt)"
-elif echo "$fw0_status_after" | grep -q "node0.*primary"; then
+if printf '%s\n' "$fw0_status_after" | deploy_node_role_every_rg_ok node0 secondary; then
+	pass "fw0 rejoined as secondary for every redundancy group (no auto-preempt)"
+elif printf '%s\n' "$fw0_status_after" | deploy_node_role_every_rg_ok node0 primary; then
 	fail "fw0 auto-preempted to primary (should stay secondary)"
 else
-	fail "fw0 cluster status unclear: $fw0_status_after"
+	fail "fw0 role is unclear for one or more redundancy groups: $fw0_status_after"
 fi
 
-# Verify iperf3 still running after fw0 rejoin
-if incus exec "$CLUSTER_LAN_HOST" -- pgrep iperf3 &>/dev/null; then
-	pass "iperf3 survived fw0 rejoin"
+# Verify the original tracked client remains alive after fw0 rejoins.
+if main_iperf_running; then
+	pass "tracked iperf3 client survived fw0 rejoin"
 else
-	if incus exec "$CLUSTER_LAN_HOST" -- grep -q "iperf Done" /tmp/iperf3-double-failover.log 2>/dev/null; then
-		pass "iperf3 completed successfully (finished before rejoin check)"
-	else
-		fail "iperf3 DIED during fw0 rejoin"
-	fi
+	fail "tracked iperf3 client died during fw0 rejoin"
 fi
 
 # ── Phase 5: Wait for "Takeover ready: yes" on fw0 ──────────────────
@@ -319,6 +338,7 @@ fi
 info "Crashing fw1 (sysrq reboot — second failover, fw0 must take over)"
 
 # Same timeout -k rationale as the fw0 crash above (#1880).
+FAILOVER_EVENTS+=("$((SECONDS - IPERF_START_SECONDS))")
 { timeout -k 5 10 incus exec "$FW1" -- bash -c 'echo b > /proc/sysrq-trigger' || true; } 2>/dev/null
 
 # Wait for fw0 to detect failure and become primary
@@ -326,61 +346,45 @@ sleep 5
 
 # Verify fw0 became primary
 fw0_status_second=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
-if echo "$fw0_status_second" | grep -q "node0.*primary"; then
-	pass "fw0 became primary after fw1 crash (second failover)"
+if printf '%s\n' "$fw0_status_second" | deploy_node_role_every_rg_ok node0 primary; then
+	pass "fw0 became primary for every redundancy group after fw1 crash (second failover)"
 else
-	fail "fw0 did not become primary after fw1 crash"
+	fail "fw0 did not become primary for every redundancy group after fw1 crash"
 fi
 
-# Verify iperf3 survived the second failover
-if incus exec "$CLUSTER_LAN_HOST" -- pgrep iperf3 &>/dev/null; then
-	pass "iperf3 survived second failover (fw1 crash → fw0)"
+# Verify the original tracked client survived the second failover.
+if main_iperf_running; then
+	pass "tracked iperf3 client survived second failover (fw1 crash → fw0)"
 else
-	if incus exec "$CLUSTER_LAN_HOST" -- grep -q "iperf Done" /tmp/iperf3-double-failover.log 2>/dev/null; then
-		pass "iperf3 completed successfully (finished before second failover check)"
-	else
-		fail "iperf3 DIED during second failover — session sync round-trip FAILED"
-	fi
+	fail "tracked iperf3 client died during second failover — session sync round-trip FAILED"
 fi
 
-# ── Phase 8: Wait for iperf3 to complete and validate results ────────
+# ── Phase 8: validate throughput and both failover transitions ────────
 
-info "Waiting for iperf3 to complete"
+info "Waiting for iperf3 to complete and validating both transition intervals"
 
 for i in $(seq 1 "$IPERF_DURATION"); do
-	if ! incus exec "$CLUSTER_LAN_HOST" -- pgrep iperf3 &>/dev/null; then
+	if ! main_iperf_running; then
 		break
 	fi
 	sleep 1
 done
 
-# Check iperf3 completed successfully.
-# iperf3's control socket may close during failover even though all data
-# streams survived — this produces "control socket has closed unexpectedly"
-# instead of "iperf Done". Accept either outcome as long as the sender
-# [SUM] line shows adequate throughput.
-sum_line=$(incus exec "$CLUSTER_LAN_HOST" -- grep '\[SUM\].*sender' /tmp/iperf3-double-failover.log 2>/dev/null | tail -1 || true)
-throughput=$(iperf_sum_rate_gbps "$sum_line")
-
-if incus exec "$CLUSTER_LAN_HOST" -- grep -q "iperf Done" /tmp/iperf3-double-failover.log 2>/dev/null; then
-	pass "iperf3 completed successfully"
-elif [[ -n "$throughput" ]] && awk "BEGIN{exit !($throughput >= $MIN_THROUGHPUT)}"; then
-	pass "iperf3 data transfer completed (${throughput} Gbps) — control socket disrupted during failover"
+if [[ "${#FAILOVER_EVENTS[@]}" -ne 2 ]]; then
+	fail "iperf3 failover oracle expected two transition events, observed ${#FAILOVER_EVENTS[@]}"
 else
-	iperf_log=$(incus exec "$CLUSTER_LAN_HOST" -- tail -5 /tmp/iperf3-double-failover.log 2>/dev/null || echo "(no log)")
-	fail "iperf3 did not complete: $iperf_log"
+	oracle_output=$(ha_smoke_iperf_verdicts "$LOG" "$IPERF_DURATION" "$IPERF_STREAMS" \
+		"$MIN_THROUGHPUT" "${FAILOVER_EVENTS[@]}")
+	while IFS= read -r verdict; do
+		case "$verdict" in
+		PASS\ *) pass "${verdict#PASS }" ;;
+		FAIL\ *) fail "${verdict#FAIL }" ;;
+		*)       fail "iperf3 oracle: unexpected verdict '${verdict}'" ;;
+		esac
+	done <<<"$oracle_output"
 fi
 
-# #9690: one TOTAL throughput cell from iperf-throughput-lib.sh. The inline
-# block parsed "Gbits" only and had no else, so a sub-Gbit run emitted no cell,
-# the summary still read "0 failed", and the ha-smoke ledger recorded PASS with
-# no throughput_gbps (#6897 fixed the same in test-failover.sh).
-throughput_verdict=$(iperf_throughput_verdict "$MIN_THROUGHPUT" "$sum_line")
-case "$throughput_verdict" in
-PASS\ *) pass "${throughput_verdict#PASS }" ;;
-FAIL\ *) fail "${throughput_verdict#FAIL }" ;;
-*) fail "iperf3 throughput: unexpected verdict '${throughput_verdict}'" ;;
-esac
+failover_stop_main_iperf "$PIDFILE" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
 
 # ── Results ──────────────────────────────────────────────────────────
 
