@@ -1856,30 +1856,103 @@ func encodeSteeredPortSet(selected []uint16) (uint32, [config.MaxSteeredWireGuar
 	return uint32(n), ports
 }
 
-// buildNATTranslatedLocalAddressExclusions collects the addresses live
-// interface-mode source-NAT rules can translate onto. The set is removed from
-// local delivery and registered for the interface-NAT reverse-translation path.
+// buildNATTranslatedLocalAddressExclusions collects addresses of eligible
+// egress interfaces selected by live interface-mode source-NAT rules. The
+// interface-NAT map takes precedence in is_local_destination; kernel addresses
+// may still appear in userspace_local_v4/v6 after netlink enumeration.
+//
+// Primary addresses are picked once per interface. Each interface is indexed
+// under its eight exact/wildcard to-scope tuples; each distinct rule scope then
+// resolves directly to its candidates, avoiding per-rule interface copies and
+// repeated address parsing.
 func buildNATTranslatedLocalAddressExclusions(snapshot *ConfigSnapshot) (map[uint32]bool, map[[16]byte]bool) {
 	excludedV4 := make(map[uint32]bool)
 	excludedV6 := make(map[[16]byte]bool)
 	if snapshot == nil || len(snapshot.SourceNAT) == 0 || len(snapshot.Interfaces) == 0 {
 		return excludedV4, excludedV6
 	}
-	for _, nat := range snapshot.SourceNAT {
+
+	type registrationScope struct {
+		toInterface        string
+		toRoutingInstance string
+		toZone             string
+	}
+	type candidate struct {
+		v4    uint32
+		hasV4 bool
+		v6    [16]byte
+		hasV6 bool
+	}
+
+	candidates := make([]candidate, 0, len(snapshot.Interfaces))
+	byScope := make(map[registrationScope][]int, len(snapshot.Interfaces))
+	for i := range snapshot.Interfaces {
+		iface := &snapshot.Interfaces[i]
+		if !interfaceSnapshotCanBeSNATEgress(iface) {
+			continue
+		}
+		var item candidate
+		if ip := pickInterfaceSnapshotV4(*iface); ip != nil {
+			item.v4 = binary.BigEndian.Uint32(ip.To4())
+			item.hasV4 = true
+		}
+		if ip := pickInterfaceSnapshotV6(*iface); ip != nil {
+			copy(item.v6[:], ip.To16())
+			item.hasV6 = true
+		}
+		if !item.hasV4 && !item.hasV6 {
+			continue
+		}
+
+		index := len(candidates)
+		candidates = append(candidates, item)
+		for mask := range 8 {
+			scope := registrationScope{
+				toInterface:        iface.Name,
+				toRoutingInstance: iface.RoutingInstance,
+				toZone:             iface.EgressZone,
+			}
+			if mask&1 == 0 {
+				scope.toInterface = ""
+			} else if scope.toInterface == "" {
+				continue
+			}
+			if mask&2 == 0 {
+				scope.toRoutingInstance = ""
+			} else if scope.toRoutingInstance == "" {
+				continue
+			}
+			if mask&4 == 0 {
+				scope.toZone = ""
+			} else if scope.toZone == "" {
+				continue
+			}
+			byScope[scope] = append(byScope[scope], index)
+		}
+	}
+
+	seenScopes := make(map[registrationScope]struct{}, len(snapshot.SourceNAT))
+	for i := range snapshot.SourceNAT {
+		nat := &snapshot.SourceNAT[i]
 		if !nat.InterfaceMode || nat.Off {
 			continue
 		}
-		for _, iface := range snapshot.Interfaces {
-			if !interfaceInSnapshotEgressScope(nat, iface) {
-				continue
+		scope := registrationScope{
+			toInterface:        nat.ToInterface,
+			toRoutingInstance: nat.ToRoutingInstance,
+			toZone:             nat.ToZone,
+		}
+		if _, seen := seenScopes[scope]; seen {
+			continue
+		}
+		seenScopes[scope] = struct{}{}
+		for _, index := range byScope[scope] {
+			item := candidates[index]
+			if item.hasV4 {
+				excludedV4[item.v4] = true
 			}
-			if ip := pickInterfaceSnapshotV4(iface); ip != nil {
-				excludedV4[binary.BigEndian.Uint32(ip.To4())] = true
-			}
-			if ip := pickInterfaceSnapshotV6(iface); ip != nil {
-				var key [16]byte
-				copy(key[:], ip.To16())
-				excludedV6[key] = true
+			if item.hasV6 {
+				excludedV6[item.v6] = true
 			}
 		}
 	}

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // compiler_validate_warn_nat_iface_addr.go is the Track-1 (#5837) commit-time
@@ -141,28 +142,40 @@ func interfaceLocalAddressIndex(cfg *Config) map[string]string {
 // is not gated on local membership). Warning on such a rule is a false-warn; the
 // #5837 rev6052 fold excludes these addresses.
 //
-// Predicate mirror: for every source-NAT rule-set carrying a live interface-mode
-// rule (rule.Then.Interface && !rule.Then.Off), the dataplane registers the
-// picked v4/v6 address (pick_interface_v4/v6) of every interface in that
-// rule-set's to-side scope. Scope is the AND of the configured to-zone,
-// to-interface, and to-routing-instance constraints with each empty scope a
-// wildcard — a fully unscoped rule-set matches every interface (#12085). The Go
-// mirror reuses interfaceInEgressScope (compiler_nat_iface_egress.go), the same
-// shape as the snapshot builder's interfaceInSnapshotEgressScope and the
-// runtime's scope_matches.
-//
+// Predicate mirror: for every source-NAT rule-set carrying a live
+// interface-mode rule (rule.Then.Interface && !rule.Then.Off), the dataplane
+// registers the picked v4/v6 address of each eligible interface in that
+// rule-set's to-side scope. It excludes disabled, unzoned, and fxp/em/fab/lo0
+// lifeline rows, and matches to-interface against the full logical unit name
+// just as runtime scope_matches does. The config mirror cannot observe the
+// runtime ifindex; the dataplane independently enforces ifindex>0 before
+// registering any address.
+
+// interfaceSNATRegistrationLifeline matches the name-based lifeline classes
+// excluded from interface-NAT registration. Keep this in step with the
+// snapshot builder and Rust twin; tunnel names are intentionally not excluded.
+func interfaceSNATRegistrationLifeline(name string) bool {
+	base := name
+	if idx := strings.IndexByte(base, '.'); idx >= 0 {
+		base = base[:idx]
+	}
+	return strings.HasPrefix(base, "fxp") || strings.HasPrefix(base, "em") ||
+		strings.HasPrefix(base, "fab") || base == "lo0"
+}
+
+func interfaceInSNATRegistrationScope(rs *NATRuleSet, ifName, logical string, zoneByIface, riByIface map[string]string, noBareRIFallback map[string]struct{}) bool {
+	if rs.ToInterface != "" && rs.ToInterface != logical {
+		return false
+	}
+	return interfaceInEgressScope(rs, ifName, logical, zoneByIface, riByIface, noBareRIFallback)
+}
+
 // This mirror uses the SAFE SUPERSET: it excludes EVERY configured address of
-// such an interface unit, not just the single pick_interface_v4/v6 result. The
-// superset can never false-warn (the whole point of this fold — the canonical
-// masquerade + WAN-port-forward config no longer trips the advisory); it can only
-// slightly UNDER-warn on a genuinely-inert SECONDARY (non-picked) address of a
-// multi-address interface, an accepted trade vs a false-warn on the canonical
-// config, and one that also insulates the commit-time check from the kernel /
-// config address-ordering divergence a runtime pick_interface would see. VRRP
-// VIPs are deliberately NOT excluded: pick_interface_v4/v6 iterates
-// iface.addresses (configured unit addresses), never VIPs, so the dataplane keeps
-// a VIP kernel-local and a DNAT/static match on a VIP stays genuinely inert (it
-// must still warn).
+// a qualifying interface unit, not just the single picked v4/v6 address. VRRP
+// VIPs are deliberately NOT excluded because they are not configured unit
+// addresses. The superset only affects warning classification; the runtime
+// registration set is exactly the picked addresses and is separately gated by
+// live ifindex.
 func interfaceModeSNATExcludedAddresses(cfg *Config) map[string]bool {
 	if cfg == nil {
 		return nil
@@ -180,11 +193,9 @@ func interfaceModeSNATExcludedAddresses(cfg *Config) map[string]bool {
 	if len(scoped) == 0 {
 		return nil
 	}
-	// Step 2: every interface unit in ANY retained rule-set's to-side scope;
-	// exclude all of its configured addresses (safe superset of the dataplane's
-	// pick_interface_v4/v6). interfaceInEgressScope resolves zone membership
-	// (unit key first, then the bare physical name) and routing-instance
-	// membership, treating each empty scope as a wildcard.
+	// Step 2: every eligible interface unit in ANY retained rule-set's to-side
+	// scope. The config mirror excludes all of its configured addresses (a safe
+	// superset of the dataplane's picked address); it cannot observe live ifindex.
 	zoneByIface := buildZoneInterfaceMapLocal(cfg)
 	riByIface, noBareRIFallback := routingInstanceByInterface(cfg)
 	excluded := make(map[string]bool)
@@ -195,7 +206,7 @@ func interfaceModeSNATExcludedAddresses(cfg *Config) map[string]bool {
 	sort.Strings(ifNames)
 	for _, ifName := range ifNames {
 		ifc := cfg.Interfaces.Interfaces[ifName]
-		if ifc == nil {
+		if ifc == nil || ifc.Disable || interfaceSNATRegistrationLifeline(ifName) {
 			continue
 		}
 		unitNums := make([]int, 0, len(ifc.Units))
@@ -209,9 +220,14 @@ func interfaceModeSNATExcludedAddresses(cfg *Config) map[string]bool {
 				continue
 			}
 			logical := fmt.Sprintf("%s.%d", ifName, un)
+			// An empty/unresolved zone is not a runtime SNAT egress and must
+			// remain local so the #5659 sentinel is not suppressed.
+			if zoneByIface[logical] == "" {
+				continue
+			}
 			inScope := false
 			for _, rs := range scoped {
-				if interfaceInEgressScope(rs, ifName, logical, zoneByIface, riByIface, noBareRIFallback) {
+				if interfaceInSNATRegistrationScope(rs, ifName, logical, zoneByIface, riByIface, noBareRIFallback) {
 					inScope = true
 					break
 				}

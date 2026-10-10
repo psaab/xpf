@@ -53,7 +53,7 @@ func TestBuildNATTranslatedLocalAddressExclusions12085Matrix(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			snapshot := natIfaceScopeSnapshot12085(fixture, tc.Rule)
 			gotV4, gotV6 := buildNATTranslatedLocalAddressExclusions(snapshot)
-			got := make([]string, 0, len(gotV4)+len(gotV6))
+			var got []string
 			for key := range gotV4 {
 				var octets [4]byte
 				binary.BigEndian.PutUint32(octets[:], key)
@@ -69,6 +69,9 @@ func TestBuildNATTranslatedLocalAddressExclusions12085Matrix(t *testing.T) {
 				t.Fatalf("Go interface-NAT exclusion set = %v, want matrix set %v", got, want)
 			}
 
+			// Snapshot-derived LOCAL entries omit registered egress. Kernel
+			// enumeration may add them back later; interface-NAT map membership
+			// takes precedence in the shim.
 			local := buildLocalAddressEntries(snapshot)
 			for _, entry := range local {
 				var addr string
@@ -87,7 +90,7 @@ func TestBuildNATTranslatedLocalAddressExclusions12085Matrix(t *testing.T) {
 			}
 
 			nat := buildInterfaceNATAddressEntries(snapshot)
-			natGot := make([]string, 0, len(nat))
+			var natGot []string
 			for _, entry := range nat {
 				if entry.v4 {
 					var octets [4]byte
@@ -101,18 +104,57 @@ func TestBuildNATTranslatedLocalAddressExclusions12085Matrix(t *testing.T) {
 			if !reflect.DeepEqual(natGot, want) {
 				t.Fatalf("Go interface-NAT entries = %v, want matrix set %v", natGot, want)
 			}
+
+			desiredV4, desiredV6, rstV4, rstV6 := buildDesiredInterfaceNATAddressSets(snapshot)
+			var desiredGot, rstGot []string
+			for key := range desiredV4 {
+				var octets [4]byte
+				binary.BigEndian.PutUint32(octets[:], key)
+				desiredGot = append(desiredGot, netip.AddrFrom4(octets).String())
+			}
+			for key := range desiredV6 {
+				desiredGot = append(desiredGot, netip.AddrFrom16(key.Addr).String())
+			}
+			for _, addr := range rstV4 {
+				rstGot = append(rstGot, addr.String())
+			}
+			for _, addr := range rstV6 {
+				rstGot = append(rstGot, addr.String())
+			}
+			sort.Strings(desiredGot)
+			sort.Strings(rstGot)
+			if !reflect.DeepEqual(desiredGot, want) {
+				t.Fatalf("Go desired interface-NAT map = %v, want matrix set %v", desiredGot, want)
+			}
+			if !reflect.DeepEqual(rstGot, want) {
+				t.Fatalf("Go RST suppression addresses = %v, want matrix set %v", rstGot, want)
+			}
 		})
 	}
 }
 
 func TestBuildNATTranslatedLocalAddressExclusions12085Guards(t *testing.T) {
 	fixture := readNATIfaceScopeFixture12085(t)
-	base := fixture.Cases[len(fixture.Cases)-1].Rule // unscoped row
+	var base SourceNATRuleSnapshot
+	found := false
+	for _, tc := range fixture.Cases {
+		if tc.Name == "unscoped" {
+			base = tc.Rule
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("shared fixture is missing the unscoped control")
+	}
 	base.Off = true
 	if v4, v6 := buildNATTranslatedLocalAddressExclusions(natIfaceScopeSnapshot12085(fixture, base)); len(v4)+len(v6) != 0 {
 		t.Fatalf("off rule minted exclusions: v4=%v v6=%v", v4, v6)
 	}
 	base.Off = false
+	if v4, v6 := buildNATTranslatedLocalAddressExclusions(natIfaceScopeSnapshot12085(fixture, base)); len(v4)+len(v6) == 0 {
+		t.Fatalf("active unscoped control did not register addresses: v4=%v v6=%v", v4, v6)
+	}
 	base.InterfaceMode = false
 	if v4, v6 := buildNATTranslatedLocalAddressExclusions(natIfaceScopeSnapshot12085(fixture, base)); len(v4)+len(v6) != 0 {
 		t.Fatalf("pool-mode rule minted exclusions: v4=%v v6=%v", v4, v6)
