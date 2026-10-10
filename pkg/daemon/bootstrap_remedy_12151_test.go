@@ -78,12 +78,17 @@ func TestBootstrapNonIndexRemedyIsActionable12151(t *testing.T) {
 			oldDetect, oldEnumerate := detectLifelineInterfaceFn, enumeratePCINICsFn
 			oldRename, oldReload, oldInstaller := renameInterfaceFn, networkctlReloadFn, nftInstaller
 			oldLink, oldAddr, oldRoute := lifelineLinkByName, lifelineAddrList, lifelineRouteList
+			oldNetworkd := networkdActiveFn
 			t.Cleanup(func() {
 				linkDir, lifelineRecordFileForTest = oldLinkDir, oldRecord
 				detectLifelineInterfaceFn, enumeratePCINICsFn = oldDetect, oldEnumerate
 				renameInterfaceFn, networkctlReloadFn, nftInstaller = oldRename, oldReload, oldInstaller
 				lifelineLinkByName, lifelineAddrList, lifelineRouteList = oldLink, oldAddr, oldRoute
+				networkdActiveFn = oldNetworkd
 			})
+			// The #12153 networkd gate runs before the remedy branches; this
+			// test pins the remedy text, so networkd is stubbed active.
+			networkdActiveFn = func() error { return nil }
 
 			linkDir = filepath.Join(dir, "network")
 			if err := os.MkdirAll(linkDir, 0o755); err != nil {
