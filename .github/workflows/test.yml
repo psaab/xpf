@@ -2,7 +2,8 @@
 # are required in master branch rulesets. Do not require the Go job while
 # ordinary affected-package selections are red on master.
 # Owner action, once those baselines are green: require `CI tests / Go build
-# and affected tests` and `CI tests / Rust workspace compile check`.
+# and affected tests`, `CI tests / Rust workspace compile check`, and
+# `CI tests / Harness census and self-test`.
 #
 # The full Go suite is currently red on master, so the Go test step selects the
 # changed packages and their reverse dependents. Once `go test ./... -count=1`
@@ -74,3 +75,14 @@ jobs:
         run: >-
           cargo check --manifest-path userspace-dp/Cargo.toml
           --workspace --all-targets
+
+  census:
+    name: Harness census and self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Census runnable-harness reachability
+        run: sh scripts/harness-census.sh
+      - name: Self-test the census
+        run: bash ./test/incus/harness-census-selftest.sh
