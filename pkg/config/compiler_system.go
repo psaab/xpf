@@ -2907,8 +2907,19 @@ func compileSchedulers(node *Node, cfg *Config) error {
 						if win.StopTime != "" {
 							w.StopTime = win.StopTime
 						}
-						w.AllDay = w.AllDay || win.AllDay
-						w.Exclude = w.Exclude || win.Exclude
+						// Explicit later flags replace both values, so a later
+						// all-day/exclude directive can supersede its contradiction.
+						// A complete time window also contradicts both flags.
+						// Partial time fragments only add a boundary and preserve
+						// flags, allowing complementary fragments to merge.
+						switch {
+						case win.AllDay || win.Exclude:
+							w.AllDay = win.AllDay
+							w.Exclude = win.Exclude
+						case win.StartTime != "" && win.StopTime != "":
+							w.AllDay = false
+							w.Exclude = false
+						}
 						sched.Days[name] = &w
 					}
 				}
