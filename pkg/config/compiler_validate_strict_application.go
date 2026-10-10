@@ -733,11 +733,11 @@ func applicationsToValidateStrict(cfg *Config) map[string]struct{} {
 	// no commit error — and a bad app referenced ONLY by a NAT rule (not by any
 	// policy) escaped both this commit gate (policy-only) and the #2124 runtime
 	// gate (policy-only). Collect NAT-rule app references the same way as policy
-	// references (single app or application-set) so they are hard-rejected at
-	// commit, lenient on load — identical wiring to the policy path. Static NAT
-	// is intentionally not walked: StaticNATRule has no application match
-	// (compileNATStatic parses only source/destination-address), so there is no
-	// app reference to validate there.
+	// references (every ApplicationList() value, each a direct app or app-set), so
+	// they are hard-rejected at commit, lenient on load — identical wiring to
+	// the policy path. Static NAT is intentionally not walked: StaticNATRule has
+	// no application match (compileNATStatic parses only source/destination-
+	// address), so there is no app reference to validate there.
 	walkNATRules := func(rs *NATRuleSet) {
 		if rs == nil {
 			return
@@ -746,7 +746,9 @@ func applicationsToValidateStrict(cfg *Config) map[string]struct{} {
 			if rule == nil {
 				continue
 			}
-			addRef(rule.Match.Application)
+			for _, appName := range rule.Match.ApplicationList() {
+				addRef(appName)
+			}
 		}
 	}
 	for _, rs := range cfg.Security.NAT.Source {

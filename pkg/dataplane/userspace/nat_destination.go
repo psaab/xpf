@@ -262,8 +262,19 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 				dstPortConfigured bool
 			}
 			var appTerms []appTerm
+			hasProtocollessApp := false
 
-			appTermFor := func(a *config.Application) appTerm {
+			appTermFor := func(a *config.Application) (appTerm, bool) {
+				if a.Protocol == "" {
+					// SNAT maps a protocol-less application to its never-match
+					// protocol sentinel. DNAT has no equivalent wire protocol
+					// token: an empty protocol is PROTO_ANY, which would widen
+					// this invalid application to every protocol. Omit this
+					// term instead; the strict app-spec gate rejects it at
+					// commit, and tolerant compilation must fail closed.
+					hasProtocollessApp = true
+					return appTerm{}, false
+				}
 				srcPorts := appPortRangesFromSpec(a.SourcePort)
 				if a.SourcePort != "" && len(srcPorts) == 0 {
 					// #3437: a configured source-port that coalesces to nothing
@@ -279,7 +290,7 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 					icmpType:          a.ICMPType,
 					icmpCode:          a.ICMPCode,
 					dstPortConfigured: a.DestinationPort != "",
-				}
+				}, true
 			}
 
 			// #3431: expand EVERY application of a bracket list / repeated
@@ -333,7 +344,9 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 					}
 					app, found := config.ResolveApplication(appName, userApps)
 					if found {
-						appTerms = append(appTerms, appTermFor(app))
+						if term, ok := appTermFor(app); ok {
+							appTerms = append(appTerms, term)
+						}
 					} else if _, isSet := config.ResolveApplicationSet(appName, cfg.Applications.ApplicationSets); isSet {
 						// #5629: resolve the SET through the #4102
 						// predefined-set-aware config.ResolveApplicationSet, NOT a
@@ -351,7 +364,11 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 								if !ok {
 									continue
 								}
-								appTerms = append(appTerms, appTermFor(tApp))
+								term, ok := appTermFor(tApp)
+								if !ok {
+									continue
+								}
+								appTerms = append(appTerms, term)
 							}
 						}
 					}
@@ -361,8 +378,10 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 			// If no application terms resolved, the behavior depends on WHETHER
 			// an application was configured:
 			//
-			//   - #3434: an application WAS configured (rule.Match.Application !=
-			//     "") but resolved to ZERO terms — a typo / dangling reference or
+			// A resolved protocol-less app is omitted below rather than emitted
+			// with PROTO_ANY, which would widen the invalid application.
+			//   - #3434: a real value in rule.Match.ApplicationList() was
+			//     configured but resolved to ZERO terms — a typo / dangling ref or
 			//     a defined-but-EMPTY application-set. Falling through to the
 			//     explicit-match fallback would emit proto="" + dstPort=0 = a
 			//     wildcard match-ALL term and publish the pool VIP for EVERY
@@ -388,6 +407,12 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 			//     application-present path.
 			if len(appTerms) == 0 {
 				if appConfigured {
+					if hasProtocollessApp {
+						// Never publish an empty-protocol row (PROTO_ANY) for a
+						// protocol-less application: it would widen the invalid
+						// reference rather than fail closed.
+						continue
+					}
 					appTerms = []appTerm{{srcPorts: []NatPortRangeWire{natNeverMatchPortRange}}}
 				} else {
 					// #3431: one explicit-match term per protocol of a bracket

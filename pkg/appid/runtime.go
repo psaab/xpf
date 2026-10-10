@@ -144,8 +144,8 @@ func CatalogNames(cfg *config.Config, includeAll bool) ([]string, error) {
 	// or the dataplane cannot resolve it and session naming for that flow falls
 	// back to tuple/numeric. Walk NAT rule references exactly as the strict
 	// validator does (compiler_validate_strict.go applicationsToValidateStrict:
-	// Source + Destination.RuleSets, skipping nil rule-sets/rules, the scalar
-	// rule.Match.Application) so the runtime catalog and the commit-time strict
+	// Source + Destination.RuleSets, skipping nil rule-sets/rules and walking each
+	// value from rule.Match.ApplicationList()) so the runtime catalog and the
 	// gate agree on the referenced-app set — TestStrictValidationSetMatches-
 	// CatalogNames pins the two walks together. Static NAT carries no
 	// application match, so only source and destination NAT are walked.
@@ -157,8 +157,10 @@ func CatalogNames(cfg *config.Config, includeAll bool) ([]string, error) {
 			if rule == nil {
 				continue
 			}
-			if err := addAppRef(rule.Match.Application); err != nil {
-				return err
+			for _, appName := range rule.Match.ApplicationList() {
+				if err := addAppRef(appName); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

@@ -123,3 +123,77 @@ func TestBuildSNATSnapshotExpandsEveryApplication(t *testing.T) {
 			protos, tcp, udp, terms)
 	}
 }
+
+func TestDNATSecondProtocollessApplicationDoesNotEmitProtoAny12224(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Applications.Applications = map[string]*config.Application{
+		"web":      {Name: "web", Protocol: "tcp", DestinationPort: "80"},
+		"no-proto": {Name: "no-proto"},
+	}
+	cfg.Security.NAT.Destination = &config.DestinationNATConfig{
+		Pools: map[string]*config.NATPool{
+			"p1": {Name: "p1", Address: "192.168.1.10"},
+		},
+		RuleSets: []*config.NATRuleSet{{
+			Name:     "rs",
+			FromZone: "untrust",
+			Rules: []*config.NATRule{{
+				Name: "r1",
+				Match: config.NATMatch{
+					DestinationAddress: "203.0.113.10",
+					Application:        "web",
+					Applications:       []string{"web", "no-proto"},
+				},
+				Then: config.NATThen{Type: config.NATDestination, PoolName: "p1"},
+			}},
+		}},
+	}
+
+	snaps := buildDestinationNATSnapshots(cfg, nil)
+	if len(snaps) != 1 || snaps[0].Protocol != "tcp" || snaps[0].DestinationPort != 80 {
+		t.Fatalf("DNAT snapshots = %+v, want only web's tcp/80 term (no PROTO_ANY)", snaps)
+	}
+
+	rule := cfg.Security.NAT.Destination.RuleSets[0].Rules[0]
+	rule.Match.Application = "no-proto"
+	rule.Match.Applications = []string{"no-proto"}
+	if snaps := buildDestinationNATSnapshots(cfg, nil); len(snaps) != 0 {
+		t.Fatalf("protocol-less-only DNAT app emitted snapshots = %+v, want none", snaps)
+	}
+}
+
+func TestSNATSecondProtocollessApplicationUsesNeverMatch12224(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Applications.Applications = map[string]*config.Application{
+		"web":      {Name: "web", Protocol: "tcp", DestinationPort: "80"},
+		"no-proto": {Name: "no-proto"},
+	}
+	cfg.Security.NAT.Source = []*config.NATRuleSet{{
+		Name:     "rs",
+		FromZone: "trust",
+		ToZone:   "untrust",
+		Rules: []*config.NATRule{{
+			Name: "r1",
+			Match: config.NATMatch{
+				Application:  "web",
+				Applications: []string{"web", "no-proto"},
+			},
+			Then: config.NATThen{Type: config.NATSource, Interface: true},
+		}},
+	}}
+
+	snaps := buildSourceNATSnapshots(cfg, nil)
+	if len(snaps) != 1 {
+		t.Fatalf("len(source NAT snapshots) = %d, want 1", len(snaps))
+	}
+	protocols := make(map[uint16]bool, len(snaps[0].MatchApplications))
+	for _, term := range snaps[0].MatchApplications {
+		protocols[term.Protocol] = true
+	}
+	if !protocols[natAppProtoNumber("tcp")] || !protocols[natProtoNever] {
+		t.Fatalf("SNAT application protocols = %v, want tcp plus never-match (%d)", protocols, natProtoNever)
+	}
+	if protocols[natProtoAny] {
+		t.Fatalf("SNAT protocol-less application emitted PROTO_ANY: %+v", snaps[0].MatchApplications)
+	}
+}
