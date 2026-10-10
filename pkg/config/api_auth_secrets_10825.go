@@ -515,9 +515,20 @@ func equivalentSyncNodes(active, incoming []*Node, activePath, incomingPath []st
 			if aCredential != bCredential {
 				return false
 			}
+			// Derive the slot from the credential KEYWORD (keys[k-1] for
+			// in-Keys values), not from the inherited/path slot: at this
+			// point the current node keys are not yet appended to the path,
+			// so path-derived resolution sees the parent keyword (e.g.
+			// "admin") and yields "" — which mis-gates passwords at 16
+			// (GLM slot-confirmation MAJOR-1).
 			slot := incomingValueSlot
-			if keyword, ok := apiAuthSecretSlotAtPath(incomingPath); ok {
-				slot = keyword
+			if k > 0 {
+				for _, keyword := range []string{"password", "api-key", "secret"} {
+					if apiAuthSecretKeywordAt(incomingPath, b.Keys, k-1, keyword) {
+						slot = keyword
+						break
+					}
+				}
 			}
 			if a.Keys[k] != b.Keys[k] && (!aCredential || !syncCredentialValueEquivalent(a.Keys[k], b.Keys[k], slot)) {
 				return false

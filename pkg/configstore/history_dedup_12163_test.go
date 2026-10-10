@@ -158,3 +158,35 @@ func TestSyncApplyBelowSlotMinimumKeyPushesHistory12163(t *testing.T) {
 			len(after), before+1)
 	}
 }
+
+// TestSyncApplyPasswordMinimumBandDedups12163 pins the GLM slot-confirmation
+// MAJOR-1 fix: 12–15-rune passwords (at/above the 12-rune password minimum,
+// below the 16-rune key minimum) must DEDUP on verifying retry — the slot
+// gate must resolve the password keyword, not fall back to the key minimum.
+func TestSyncApplyPasswordMinimumBandDedups12163(t *testing.T) {
+	for _, pw := range []string{"0123456789ab", "0123456789abc", "0123456789abcde"} {
+		verifier, err := config.HashAPIAuthSecret(pw)
+		if err != nil {
+			t.Fatalf("seed verifier: %v", err)
+		}
+		mk := func(val string) string {
+			return "system {\n    host-name pwband-12163;\n" +
+				"    services {\n        web-management {\n" +
+				"            api-auth {\n                expires 2099-01-01;\n" +
+				"                user admin { password \"" + val + "\"; }\n" +
+				"            }\n        }\n    }\n}\n"
+		}
+		s := newTestStore(t)
+		if _, err := s.SyncApply(mk(verifier), nil); err != nil {
+			t.Fatalf("SyncApply seed: %v", err)
+		}
+		before := len(s.ListHistory())
+		if _, err := s.SyncApply(mk(pw), nil); err != nil {
+			t.Fatalf("SyncApply retry: %v", err)
+		}
+		if after := s.ListHistory(); len(after) != before {
+			t.Fatalf("password-%d retry history len = %d, want %d (must dedup)",
+				len(pw), len(after), before)
+		}
+	}
+}
