@@ -4,8 +4,11 @@ CARGO ?= $(HOME)/.cargo/bin/cargo
 BINARY := xpfd
 PREFIX ?= /usr/local
 
-# Version info embedded at build time
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# Version info embedded at build time. `make deb` rewrites debian/changelog
+# after make has parsed these variables, so exclude that transient version edit
+# from dirtiness while including staged, unstaged, and untracked source changes.
+DEB_GIT_DIRTY ?= $(shell if ! status=$$(git status --porcelain --untracked-files=normal -- . ':!debian/changelog' 2>/dev/null); then echo .dirty; elif test -n "$$status"; then echo .dirty; fi)
+VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo dev)$(if $(filter .dirty,$(DEB_GIT_DIRTY)),-dirty)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)
@@ -1571,7 +1574,6 @@ loss-cluster-restart:
 # commit count, carries the exact source sha, and is policy-valid.
 DEB_GIT_COUNT ?= $(shell git rev-list --count HEAD 2>/dev/null || echo 0)
 DEB_GIT_SHA   ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
-DEB_GIT_DIRTY ?= $(shell git diff --quiet 2>/dev/null || echo .dirty)
 DEB_VERSION ?= 0.0.$(DEB_GIT_COUNT)+g$(DEB_GIT_SHA)$(DEB_GIT_DIRTY)
 # DEB_OUT is a build-STAGING dir and MUST live OUTSIDE the image publish root
 # `dist/` (HB165 H-5): `make image` runs `make deb` and `make dist-publish`
