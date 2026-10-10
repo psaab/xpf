@@ -325,6 +325,53 @@ func emitHostInboundZoneIngressNetlink(p *nlPlan, v HostInboundZoneView, f nlFam
 	}
 }
 
+// hostInboundEmitsLifelineIngressDrop reports whether a view has a withheld
+// lifeline-shared address and an ingress scope on which it must be denied.
+func hostInboundEmitsLifelineIngressDrop(v HostInboundZoneView, f nlFamily) bool {
+	addrs := v.IngressDenyV4
+	if f == famV6 {
+		addrs = v.IngressDenyV6
+	}
+	if len(addrs) == 0 {
+		return false
+	}
+	if len(hostInboundDirectIngressNetdevs(v)) > 0 {
+		return true
+	}
+	for _, scope := range v.IngressVRFScopes {
+		if scope.Master != "" && len(scope.Slaves) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// emitHostInboundLifelineIngressDrop denies only the lifeline-shared
+// destination values withheld from a deny-all view's destination-only drop.
+// The interface-qualified scope preserves management traffic arriving on the
+// lifeline itself.
+func emitHostInboundLifelineIngressDrop(p *nlPlan, v HostInboundZoneView, f nlFamily) {
+	if !hostInboundEmitsLifelineIngressDrop(v, f) {
+		return
+	}
+	addrs := v.IngressDenyV4
+	if f == famV6 {
+		addrs = v.IngressDenyV6
+	}
+	cn := HostInboundDenyCounterName(v.Zone, familyToken(f))
+	direct := hostInboundDirectIngressNetdevs(v)
+	if len(direct) > 0 {
+		p.rule().iifname(direct).daddr(f, addrs, false).counterRef(cn).emit(verdictDrop()...)
+	}
+	for _, scope := range v.IngressVRFScopes {
+		if scope.Master == "" || len(scope.Slaves) == 0 {
+			continue
+		}
+		p.rule().iifname([]string{scope.Master}).sdifname(scope.Slaves).
+			daddr(f, addrs, false).counterRef(cn).emit(verdictDrop()...)
+	}
+}
+
 func emitHostInboundZoneIngressScopeNetlink(p *nlPlan, v HostInboundZoneView, f nlFamily, scoped func() *ruleAsm) {
 	if hostInboundAllowsAll(v) {
 		scoped().emit(verdictAccept()...)

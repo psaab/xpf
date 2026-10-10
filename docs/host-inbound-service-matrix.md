@@ -1138,11 +1138,11 @@ Two observability surfaces consume it:
 **What the builders subtract.** `BuildZoneHostInboundViews` and
 `BuildUnzonedHostInboundAddrs` skip a snapshot whose *interface* is a lifeline
 (`hostInboundLifelineInterface` — fxp0 plus explicitly configured chassis-cluster
-control/fabric links, #3277), **and** withhold any address
-*value* that lives on a lifeline (`hostInboundLifelineSharedAddrs`, #7284). The
-value half matters because the interface check answers "is the snapshot I am
-walking a lifeline", while a destination-only drop rule poses a different
-question: "is this address also reachable as a management address".
+control/fabric links, #3277), **and** withhold any address *value* that lives on
+a lifeline from destination-only drop sets (`hostInboundLifelineSharedAddrs`,
+#7284). The value half matters because the interface check answers "is the
+snapshot I am walking a lifeline", while a destination-only drop rule poses a
+different question: "is this address also reachable as a management address".
 
 Until #7284 only the interface check existed on the real-table side. If the same
 firewall-local address was ALSO configured on a non-lifeline interface, that
@@ -1151,62 +1151,61 @@ fence had partitioned per address value since #6492; the two disagreed, and that
 divergence WAS the defect. Both now derive the lifeline address set from one
 walk (`forEachFirewallLocalAddr`).
 
-**Why it reaches management.** The destination-address rules carry no `iifname`
-qualifier (#3718). A drop scoped to a shared management address therefore applies
-to traffic arriving on the lifeline too — the rule cannot tell the two ingress
-paths apart. That is why the fix is a subtraction and not an ingress qualifier.
-The #9637 ingress-zone rules (see "Ingress-zone judgement (#9637)") do not change
-this. A lifeline netdev is never in a view's ingress scope, so traffic arriving on
-the lifeline still meets only the destination-address rules.
+**Why the destination-only subtraction is not the whole rule.** Destination-
+address drops carry no `iifname` qualifier (#3718), so a drop for a shared
+management address would also match packets arriving on fxp0. A lifeline netdev
+is not a view's ingress scope, so #9637's ordinary zone rules cannot judge that
+address on fxp0. For an empty-admit data-zone view, #12229 keeps the address out
+of the destination-only catch-all but carries it separately as
+`IngressDenyV4/V6`: the renderer drops it only on that view's `iifname` scope
+(or its exact VRF master/member scope). The lifeline ingress is not in that
+scope, preserving management while denying the data-zone path.
 
 **The topology is one the commit gate accepts.**
 `validateDuplicateHostLocalAddressStrict` permits a management address shared
 onto a non-lifeline interface (`pkg/config/dup_host_local_address_3718_test.go`,
 `TestDupHostLocalLifelineExcluded`), so this could never have been closed by
 tightening the gate — the configuration is legal and the enforcement has to
-handle it. Three variants, all verified by driving the real builders:
+handle it. Three variants, all driven by the real builders:
 
-| Shared onto | Real table for the shared address | New mgmt connection | Established mgmt session |
+| Shared onto | Real table for the shared address | New management connection via fxp0 | Established management session |
 |---|---|---|---|
-| a zone that **admits** the service | `daddr <ip> tcp dport 22 accept` then `daddr <ip> … drop` | survives (accept precedes) | survives (#5566 admits tcp/22) |
-| a zone with **no `host-inbound-traffic` stanza** (#3405) | address withheld — no rule for it | survives | survives (not in the covered set) |
-| an **unzoned** interface (#4420 HI-2) | address withheld — no rule for it | survives | survives (not in the covered set) |
+| a zone that **admits** the service | the address remains in the view; ingress service accepts precede its catch-all drop | survives (the configured management service is admitted) | survives (#5566 admits permitted service flows) |
+| a zone with **no `host-inbound-traffic` stanza** (#3405) | destination-only address withheld; ingress-only drop on that data-zone scope | survives (fxp0 is outside the data ingress scope) | survives (shared value stays out of the #5566 covered set) |
+| an **unzoned** interface (#4420 HI-2) | address withheld from the destination-only unzoned set; no zone view owns an ingress-only drop | survives | survives (not in the covered set) |
 
-**Row 1 is deliberately left alone**, and that is the reason the subtraction is
-scoped to EMPTY-admit views rather than applied like the fence's. A view that
-admits something emits its `accept` before the catch-all drop, so management
-already survives there, and the drop still expresses a real policy for every
-OTHER service on that address. Withholding the address from that view would
-delete the accept and the deny together, leaving every host service reachable on
-it — a far wider hole than the lockout being fixed. An empty-admit view has no
-such policy to preserve: its only possible outcome for the address is a drop with
-no accept.
+**The admitting-zone row is deliberately left alone.** A view that admits
+something emits its `accept` before the catch-all drop, so management already
+survives there and the drop still expresses a real policy for every OTHER
+service on that address. Withholding the address from that view would delete the
+accept and the deny together, leaving every host service reachable on it — a far
+wider hole than the lockout being fixed. The ingress-only exception is therefore
+populated only for empty-admit views.
 
-**This is a widening of a drop set, deliberately.** Rows 2-3 previously denied
-the shared address; they no longer do. #6492 blessed the same trade for the
-fence. The bound on it is that only an address ACTUALLY on a lifeline is
-withheld — an address that is not is still denied by the #3405 default-deny and
-still in the #4420 HI-2 unzoned set, so neither fail-open is reopened. That
-boundary is the one the tests exist to hold.
+**The deny-all-zone row is now ingress-specific.** The regression cell
+`TestLifelineSharedDenyAllVerdictsOnRealKernel12229` drives an fxp0 address shared
+onto an untrust interface with no host-inbound stanza: TCP/22 from untrust to the
+shared address is dropped, while the same destination remains reachable through
+fxp0. It exercises both the text oracle and production netlink installer. The
+address stays out of the destination-only `V4Addrs`/`V6Addrs` sets and therefore
+out of the conntrack flush coverage, while `IngressDenyV4/V6` is not used by the
+cold-boot fence.
 
-**Both halves move together.** `daemon_nft.go` builds one `views` /
-`unzonedV4` / `unzonedV6` triple and passes it to BOTH `toNftHostInboundSpec`
-(the rules) and `flushDeniedHostInboundConntrack` (the #5566 reconcile), so
-withholding at the builders removes the address from the covered set as well as
-from the chain. Fixing only the rule emission would have stopped NEW management
-connections being dropped and still torn down the operator's CURRENT session on
-the next apply.
+**The unzoned row remains distinct.** `BuildUnzonedHostInboundAddrs` still
+withholds a shared lifeline address from its destination-only catch-all; there
+is no deny-all zone view from which to derive the issue's scoped ingress rule.
+That is separate from #12229's configured deny-all data-zone topology.
 
 **What the FENCE does about it.** A fence is the real table with every
-per-service ACCEPT removed, so it would collapse row 1 into rows 2-3 for the
-fence window — that was #6492 Finding A. #6492 fixes it by giving the fence its
-own drop scope, which WITHHOLDS any address shared with a lifeline interface, so
-a fence never drops a shared management address on any render (see "Fence drop
-scope is not the real ruleset's scope"). The guarantee is narrower than
-"management is safe": an address the operator manages the box on that is NOT
-shared with a lifeline is fenced like any other for the fence window. The global
-mandatory admits (`ct established,related`, raw ESP/AH, IPv6 ND, v4/v6 PMTUD)
-precede every drop, so an already-established session survives the chain.
+per-service ACCEPT removed, so it has no safe data-zone ingress exception for a
+lifeline-shared address. #6492 gives the fence its own drop scope and withholds
+any address shared with a lifeline from every fence drop, so a fence never drops
+a shared management address on any render (see "Fence drop scope is not the
+real ruleset's scope"). The guarantee is narrower than "management is safe": an
+address the operator manages the box on that is NOT shared with a lifeline is
+fenced like any other for the fence window. The global mandatory admits
+(`ct established,related`, raw ESP/AH, IPv6 ND, v4/v6 PMTUD) precede every drop,
+so an already-established session survives the chain.
 
 **What is still true.** A lifeline address that is NOT shared onto any
 non-lifeline interface never enters a view or the unzoned set. That is the case
@@ -1322,13 +1321,12 @@ snapshot produces a zero-drop table shell:
   It carries **no per-service accept and no named counters** — it is strictly the
   real table with every service ACCEPT removed, so during the fence window even a
   `system-services all` zone is denied (maximally fail-closed). The address sets
-  exclude lifeline INTERFACES (fxp0 and explicitly configured chassis-cluster
-  control/fabric links) via `BuildZoneHostInboundViews` /
-  `BuildUnzonedHostInboundAddrs` — but **not** lifeline address VALUES. A
-  management address also configured on a non-lifeline interface IS in the
-  fence's drop set, and the drop carries no `iifname`, so the fence drops new
-  management connections to it for the whole fence window (#6492 Finding A). See
-  "Lifeline exclusion is by address VALUE, in the fence and the real table".
+  exclude lifeline INTERFACES and lifeline-shared address VALUES via
+  `BuildFenceAddrSets` (`WithheldV4` / `WithheldV6`). The fence does not carry the
+  real table's ingress-only deny exception: its address-value exclusion prevents
+  a shared management address from being dropped on either the lifeline or data
+  interface for the whole fence window (#6492 Finding A). See "Lifeline
+  exclusion is by address VALUE, in the fence and the real table".
 - The requested apply still **fails** (`applyHostInboundFilter` returns the
   wrapped real nft error, joined with a fallback error when fallback also fails).
   A later full apply seeing an address gets another fallback opportunity only if
@@ -1479,19 +1477,20 @@ is called by BOTH fence sites (`installHostInboundColdBootFence`,
 `installLo0ColdBootFence`). It differs from `BuildZoneHostInboundViews` +
 `BuildUnzonedHostInboundAddrs` in two directions:
 
-- **Narrower — lifeline-shared addresses are WITHHELD (Finding A).** The view
-  builders exclude lifeline INTERFACES (fxp0 and explicitly configured
-  control/fabric links), not lifeline address VALUES. If the same IP is also
-  configured on a non-lifeline interface — a topology xpf explicitly accepts,
-  `pkg/config/dup_host_local_address_3718_test.go` — that snapshot re-adds it, and
-  the fence's drop rule carries **no `iifname` qualifier**, so it renders as a bare
-  `ip daddr <mgmt-ip> drop` that kills every NEW management connection to it for
-  the whole fence window. Such addresses are removed from the fence's drop set and
-  reported at WARN (`logFenceWithheld`: `withheld_v4` / `withheld_v6`). This is
-  fence-only: the REAL table keeps denying them, because its per-service accepts
-  (the mgmt zone's `system-services ssh`) precede its catch-all DROP and still
-  admit the session. Withholding them in the view builder instead would relax the
-  real table's default-deny — a fail-open.
+- **Narrower — lifeline-shared addresses are WITHHELD (Finding A).** The fence
+  excludes lifeline INTERFACES (fxp0 and explicitly configured control/fabric
+  links) and any address VALUE also configured on a lifeline. If the same IP is
+  also configured on a non-lifeline interface — a topology xpf explicitly
+  accepts, `pkg/config/dup_host_local_address_3718_test.go` — its bare
+  `ip daddr <mgmt-ip> drop` would kill NEW management connections arriving on
+  fxp0. `BuildFenceAddrSets` removes these values from every fence drop and
+  reports them at WARN (`logFenceWithheld`: `withheld_v4` / `withheld_v6`).
+  The real table handles an empty-admit data-zone view differently: it keeps
+  the shared value out of the destination-only drop but carries an
+  `IngressDenyV4/V6` rule scoped to that zone's ingress, preserving fxp0 while
+  denying the data-zone path (#12229). The cold-boot fence deliberately does
+  not carry that exception because the fence has no per-service admits and
+  withholds the shared address from all drops.
 - **Wider — every firewall-local address is covered, zones or not (Finding B).**
   Both view builders return nothing when the config declares no security zone,
   because the real host-inbound default-deny is a zone-model construct. But
@@ -1735,12 +1734,13 @@ therefore drops LIVE sessions to a removed service, not merely refuses new ones.
 **What is structurally out of scope.** Lifeline interfaces (fxp0 and explicitly
 configured chassis-cluster control/fabric links) are excluded from host-inbound
 deny scoping by INTERFACE, so management over fxp0 and the HA control plane are
-unaffected by this flip. Since #7284 the exclusion is also by address VALUE: a
-management address additionally configured on a zoned or unzoned interface is
-withheld from any drop set that would deny it with no accept (see "Lifeline
-exclusion is by address VALUE, in the fence and the real table"). VRRP advertisements
-are unaffected because the views scope drops to unicast interface addresses plus
-VRRP VIPs only, and 224.0.0.18 is never in that scope.
+unaffected by this flip. Since #7284, shared address VALUES are withheld from
+destination-only drops. For a deny-all zone, #12229 additionally applies an
+ingress-only drop on the data-zone scope; the lifeline ingress remains outside
+that rule. Shared addresses on unzoned interfaces remain withheld from the
+unzoned destination-only set. VRRP advertisements are unaffected because the
+views scope drops to unicast interface addresses plus VRRP VIPs only, and
+224.0.0.18 is never in that scope.
 
 **Migration.** `validateHostInboundOverrideReplaceWarnings`
 (`pkg/config/compiler_validate_warn_host_inbound.go`) emits a commit-time
@@ -2322,9 +2322,12 @@ The kernel host-inbound chain's destination-address rules match on
 **destination address only**. Each is `<fam> daddr <zone-addrs> ...`, with **no**
 ingress-interface / VRF / zone predicate, in a **single global**
 `inet xpf_hostinbound` input chain (`emitHostInboundZone`,
-`pkg/daemon/daemon_nft.go`). Since #9637 the ingress-zone rules come before them
-and decide every packet that arrives on a netdev some view claims. What follows
-describes the destination-address rules, which still decide every other packet.
+`pkg/daemon/daemon_nft.go`). Since #9637 the ordinary ingress-zone rules come
+before them and judge traffic on a view's data ingress for zone-owned
+destinations. #12229 adds one narrow case for a lifeline-shared value withheld
+from an empty-admit view: an ingress-only deny on that data scope, not a
+destination-only rule that would also match fxp0. This section describes the
+ordinary destination-address rules, which judge the remaining fallback traffic.
 So when two security zones
 resolve the **same** firewall-local address — a duplicated interface address, a
 duplicated VRRP VIP, or the same address reused across routing-instances (a zone

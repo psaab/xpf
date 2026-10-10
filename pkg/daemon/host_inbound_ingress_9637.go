@@ -315,6 +315,27 @@ func hostInboundEmitsIngressDrop(v dpuserspace.ZoneHostInboundView, dests []stri
 		hostInboundEmitsDrop(v, dests)
 }
 
+// hostInboundEmitsLifelineIngressDrop reports whether a view carries withheld
+// lifeline-shared addresses that need an ingress-only deny.
+func hostInboundEmitsLifelineIngressDrop(v dpuserspace.ZoneHostInboundView, family string) bool {
+	addrs := v.IngressDenyV4
+	if family == "ip6" {
+		addrs = v.IngressDenyV6
+	}
+	if len(addrs) == 0 {
+		return false
+	}
+	if len(hostInboundDirectIngressNetdevs(v)) > 0 {
+		return true
+	}
+	for _, scope := range v.IngressVRFScopes {
+		if scope.Master != "" && len(scope.Slaves) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // hostInboundAmbiguousIngressNetdevs returns the builder's single, sorted list
 // of effective netdevs claimed by multiple zone views. The builder attaches
 // this list to one view only, rather than duplicating its global guard.
@@ -360,6 +381,33 @@ func emitHostInboundZoneIngress(rules *[]string, v dpuserspace.ZoneHostInboundVi
 			continue
 		}
 		emitHostInboundZoneIngressScope(rules, v, hostInboundVRFIngressPrefix(scope.Master, scope.Slaves), family, dests)
+	}
+}
+
+// emitHostInboundLifelineIngressDrop denies values withheld from a deny-all
+// view's destination-only scope only on that view's data ingress. The lifeline
+// netdev is never an ingress scope, preserving its management path.
+func emitHostInboundLifelineIngressDrop(rules *[]string, v dpuserspace.ZoneHostInboundView, family string) {
+	if !hostInboundEmitsLifelineIngressDrop(v, family) {
+		return
+	}
+	addrs := v.IngressDenyV4
+	if family == "ip6" {
+		addrs = v.IngressDenyV6
+	}
+	cn := xnft.HostInboundDenyCounterName(v.Zone, family)
+	direct := hostInboundDirectIngressNetdevs(v)
+	if len(direct) > 0 {
+		scope := "iifname " + nftIifnameSet(direct) + " " + family + " daddr " + nftAddrSet(addrs)
+		*rules = append(*rules, "    "+scope+" counter name \""+cn+"\" drop")
+	}
+	for _, scope := range v.IngressVRFScopes {
+		if scope.Master == "" || len(scope.Slaves) == 0 {
+			continue
+		}
+		rule := hostInboundVRFIngressPrefix(scope.Master, scope.Slaves) +
+			family + " daddr " + nftAddrSet(addrs)
+		*rules = append(*rules, "    "+rule+" counter name \""+cn+"\" drop")
 	}
 }
 
