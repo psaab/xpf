@@ -70,10 +70,10 @@ const (
 	// lockouts double up to authThrottleMaxLockout.
 	authThrottleBaseLockout = 5 * time.Minute
 	authThrottleMaxLockout  = time.Hour
-	// authThrottleMaxEntries bounds the combined tracker tables. Past it, an
-	// insert sweeps expired buckets and then evicts arbitrarily — eviction only
-	// forgives failures early (fail-open on memory pressure, never fail-closed
-	// into a permanent lockout).
+	// authThrottleMaxEntries bounds the combined tracker tables. Insertions sweep
+	// expired buckets and evict unlocked failures; active lockouts are never
+	// evicted. Admission is refused if no unlocked bucket can make room, keeping
+	// the table bounded without erasing a live Retry-After.
 	authThrottleMaxEntries = 4096
 	// Identity namespaces keep Basic usernames, Bearer presentations, malformed
 	// Basic headers, unsupported Authorization schemes, and API keys from
@@ -343,7 +343,8 @@ func clearAuthThrottleBucket(bucket *authFailureBucket, now time.Time) {
 }
 
 // makeRoomLocked keeps the combined tracker bounded without evicting buckets
-// with admitted verifier work or buckets participating in this admission.
+// with admitted verifier work, active lockouts, or buckets participating in
+// this admission.
 func (t *authFailureTracker) makeRoomLocked(needed int, now time.Time, protected ...*authFailureBucket) bool {
 	if t.entryCountLocked()+needed <= authThrottleMaxEntries {
 		return true
@@ -356,7 +357,7 @@ func (t *authFailureTracker) makeRoomLocked(needed int, now time.Time, protected
 			if t.entryCountLocked()+needed <= authThrottleMaxEntries {
 				return true
 			}
-			if authThrottleBucketEvictable(bucket, protected...) {
+			if authThrottleBucketEvictable(bucket, now, protected...) {
 				delete(buckets, key)
 			}
 		}
@@ -370,7 +371,7 @@ func (t *authFailureTracker) entryCountLocked() int {
 
 func sweepAuthThrottleBuckets(buckets map[string]*authFailureBucket, now time.Time, protected ...*authFailureBucket) {
 	for key, bucket := range buckets {
-		if authThrottleBucketEvictable(bucket, protected...) &&
+		if authThrottleBucketEvictable(bucket, now, protected...) &&
 			now.After(bucket.lockedUntil) &&
 			now.Sub(authThrottleQuietSince(bucket)) > authThrottleWindow {
 			delete(buckets, key)
@@ -378,8 +379,8 @@ func sweepAuthThrottleBuckets(buckets map[string]*authFailureBucket, now time.Ti
 	}
 }
 
-func authThrottleBucketEvictable(bucket *authFailureBucket, protected ...*authFailureBucket) bool {
-	if bucket.inFlight != 0 {
+func authThrottleBucketEvictable(bucket *authFailureBucket, now time.Time, protected ...*authFailureBucket) bool {
+	if bucket.inFlight != 0 || bucket.lockedUntil.After(now) {
 		return false
 	}
 	for _, active := range protected {
@@ -435,16 +436,24 @@ func (t *authFailureTracker) chargeLocked(b *authFailureBucket, now time.Time, t
 }
 
 // recordFailure charges the per-source/account pair, global claimed Basic
-// account when applicable, and source-prefix budgets.
+// account when applicable, and source-prefix budgets. New buckets are refused
+// when no safe capacity is available, preserving the fixed-capacity invariant;
+// existing buckets continue through the normal charge rules.
 func (t *authFailureTracker) recordFailure(source, account string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
-	t.chargeLocked(t.accountBucketLocked(source+"\x00"+account), now, authThrottleAccountFailures)
-	if key := globalBasicAccountKey(account); key != "" {
-		t.chargeLocked(t.globalAccountBucketLocked(key), now, authThrottleGlobalBasicFailures)
+	if b := t.accountBucketLocked(source+"\x00"+account); b != nil {
+		t.chargeLocked(b, now, authThrottleAccountFailures)
 	}
-	t.chargeLocked(t.sourceBucketLocked(source), now, authThrottleSourceFailures)
+	if key := globalBasicAccountKey(account); key != "" {
+		if b := t.globalAccountBucketLocked(key); b != nil {
+			t.chargeLocked(b, now, authThrottleGlobalBasicFailures)
+		}
+	}
+	if b := t.sourceBucketLocked(source); b != nil {
+		t.chargeLocked(b, now, authThrottleSourceFailures)
+	}
 }
 
 // recordSuccess clears the source/account pair and the corresponding global
@@ -457,57 +466,56 @@ func (t *authFailureTracker) recordSuccess(source, account string) {
 	t.clearGlobalBasicAccountLocked(account, now)
 }
 
+// accountBucketLocked returns the existing bucket for key, creating it when
+// room is available. It returns nil when the shared table is full of buckets
+// that must be preserved (live lockouts or in-flight reservations).
 func (t *authFailureTracker) accountBucketLocked(key string) *authFailureBucket {
-	b := t.accounts[key]
-	if b == nil {
-		t.sweepIfFullLocked()
-		b = &authFailureBucket{windowStart: t.now()}
-		t.accounts[key] = b
+	if b := t.accounts[key]; b != nil {
+		return b
 	}
+	if !t.sweepIfFullLocked() {
+		return nil
+	}
+	b := &authFailureBucket{windowStart: t.now()}
+	t.accounts[key] = b
 	return b
 }
 
+// globalAccountBucketLocked returns the existing global bucket for key,
+// creating it when room is available. It returns nil when the shared table
+// is full of buckets that must be preserved.
 func (t *authFailureTracker) globalAccountBucketLocked(key string) *authFailureBucket {
-	b := t.globalAccounts[key]
-	if b == nil {
-		t.sweepIfFullLocked()
-		b = &authFailureBucket{windowStart: t.now()}
-		t.globalAccounts[key] = b
+	if b := t.globalAccounts[key]; b != nil {
+		return b
 	}
+	if !t.sweepIfFullLocked() {
+		return nil
+	}
+	b := &authFailureBucket{windowStart: t.now()}
+	t.globalAccounts[key] = b
 	return b
 }
 
+// sourceBucketLocked returns the existing source bucket, creating it when
+// room is available. It returns nil when the shared table is full of buckets
+// that must be preserved.
 func (t *authFailureTracker) sourceBucketLocked(source string) *authFailureBucket {
-	b := t.sources[source]
-	if b == nil {
-		t.sweepIfFullLocked()
-		b = &authFailureBucket{windowStart: t.now()}
-		t.sources[source] = b
+	if b := t.sources[source]; b != nil {
+		return b
 	}
+	if !t.sweepIfFullLocked() {
+		return nil
+	}
+	b := &authFailureBucket{windowStart: t.now()}
+	t.sources[source] = b
 	return b
 }
 
 // sweepIfFullLocked keeps all tracker tables within the shared entry budget.
-// Expired buckets go first; the remainder is evicted arbitrarily, which only
-// forgives failures early.
-func (t *authFailureTracker) sweepIfFullLocked() {
-	if t.entryCountLocked() < authThrottleMaxEntries {
-		return
-	}
-	now := t.now()
-	sweepAuthThrottleBuckets(t.accounts, now)
-	sweepAuthThrottleBuckets(t.globalAccounts, now)
-	sweepAuthThrottleBuckets(t.sources, now)
-	for _, buckets := range []map[string]*authFailureBucket{t.accounts, t.globalAccounts, t.sources} {
-		for key, bucket := range buckets {
-			if t.entryCountLocked() < authThrottleMaxEntries {
-				return
-			}
-			if authThrottleBucketEvictable(bucket) {
-				delete(buckets, key)
-			}
-		}
-	}
+// Expired buckets go first; only unlocked failures may be evicted to make room.
+// It reports whether room is available for one more entry.
+func (t *authFailureTracker) sweepIfFullLocked() bool {
+	return t.makeRoomLocked(1, t.now())
 }
 
 // throttle returns the server's REST credential-failure tracker, building it
