@@ -820,6 +820,14 @@ func (d *Daemon) restoreBootstrapLifelineNetwork() (bool, error) {
 		if err == nil && isBootstrapLifelineNetwork(content) {
 			return false, nil
 		}
+		// #12155 absent-absent rule (debt-owed boots only): no snapshot
+		// anywhere (memory, durable, or live file) means no lifeline was
+		// ever taken over — a no-op, not DEGRADED. The live path keeps
+		// #12154's fail-closed read error (a restart inside the window
+		// with no snapshot and no file reports DEGRADED).
+		if errors.Is(err, os.ErrNotExist) && d.store != nil && d.store.FirstCommitTeardownOwed() {
+			return false, nil
+		}
 		if err != nil {
 			return false, fmt.Errorf("%s: read management lifeline: %w", name, err)
 		}
