@@ -26,6 +26,12 @@ const DefaultBinaryUpgradeStatusPath = "/var/lib/xpf/upgrade-deferred"
 // clean state after postinst returned with an unresolved cut.
 const DefaultBinaryUpgradeStatusUnreadablePath = "/var/lib/dpkg/info/xpf.upgrade-deferred-unreadable"
 
+// binaryUpgradeStatusUnreadablePath is the marker path the locked re-read
+// checks. A package var (statConfigDBDir pattern) so the deterministic
+// marker test can point it at a scratch file; production always uses the
+// default constant.
+var binaryUpgradeStatusUnreadablePath = DefaultBinaryUpgradeStatusUnreadablePath
+
 // BinaryUpgradeStatus is the operator-facing snapshot of a nonfatal postinst
 // publish/cut failure. A zero value means no failure is pending.
 type BinaryUpgradeStatus struct {
@@ -285,15 +291,17 @@ func clearBinaryUpgradeStatusIfUnchanged(path string, expected BinaryUpgradeStat
 	// Re-check the durable unreadable marker: the lockless writer may have
 	// failed to persist a NEWER record (installing the marker) between the
 	// gate read and this re-read. Clearing through that would delete the
-	// evidence the marker exists to protect (Opus MINOR-B).
-	if _, markerErr := os.Stat(DefaultBinaryUpgradeStatusUnreadablePath); markerErr == nil {
+	// superseded record and return cleared=true, suppressing the CLI warning
+	// while the could-not-persist marker is present (Opus MINOR-B; the marker
+	// itself survives — readers stay fail-closed — but this run goes silent).
+	if _, markerErr := os.Stat(binaryUpgradeStatusUnreadablePath); markerErr == nil {
 		return false, fmt.Errorf(
 			"postinst could not persist binary upgrade status (durable marker %s is present)",
-			DefaultBinaryUpgradeStatusUnreadablePath)
+			binaryUpgradeStatusUnreadablePath)
 	} else if !errors.Is(markerErr, os.ErrNotExist) {
 		return false, fmt.Errorf(
 			"check durable binary upgrade status marker %s: %w",
-			DefaultBinaryUpgradeStatusUnreadablePath, markerErr)
+			binaryUpgradeStatusUnreadablePath, markerErr)
 	}
 	if clearStatusPreQuarantineHook != nil {
 		clearStatusPreQuarantineHook()

@@ -458,3 +458,48 @@ func TestClearPreQuarantineRaceRestoresNewerRecord12143(t *testing.T) {
 		t.Fatalf("pre-quarantine race: cleared=true while a newer record landed; want retain")
 	}
 }
+
+// TestClearRechecksUnreadableMarkerBeforeQuarantine12143 pins the MINOR-B
+// re-check: a marker installed between the gate read and the locked re-read
+// must fail the clear with the marker error and retain the record. Kills the
+// MB0 mutant (re-check deleted). The pre-quarantine hook installs the marker
+// at exactly the re-check point, deterministically.
+func TestClearRechecksUnreadableMarkerBeforeQuarantine12143(t *testing.T) {
+	r, cfg, s := statusProcessEnv12143(t, "2.0.0")
+	seedInitialCurrent(t, r, cfg, "1.0.0")
+	if err := r.Run(Options{}); err != nil {
+		t.Fatalf("initial cut: %v", err)
+	}
+	stageStatusVersion12143(t, cfg, "4.0.0")
+	s.stagedVersion = "4.0.0"
+	publishStagedGen(t, r)
+	if err := r.Run(Options{}); err != nil {
+		t.Fatalf("healthy 4.0.0 cut: %v", err)
+	}
+	proof := r.LastCommittedCut()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "upgrade-deferred")
+	writePendingVersionStatus12143(t, path, "3.0.0", "2.0.0")
+	expected := ReadBinaryUpgradeStatus(path)
+	if expected.ReadErr != nil || !expected.Recorded {
+		t.Fatalf("pending status before clear = %+v", expected)
+	}
+	marker := filepath.Join(dir, "upgrade-deferred-unreadable")
+	previousPath := binaryUpgradeStatusUnreadablePath
+	binaryUpgradeStatusUnreadablePath = marker
+	t.Cleanup(func() { binaryUpgradeStatusUnreadablePath = previousPath })
+	// Install the marker AFTER the expected-read (simulating a writer
+	// failure between the gate read and the locked re-read) but BEFORE the
+	// clear runs: the re-check inside the clear must observe it.
+	if err := os.WriteFile(marker, []byte("unpersisted 5.0.0"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(path, proof)
+	if err == nil || cleared {
+		t.Fatalf("marker re-check: cleared=%t err=%v; want (false, marker error)", cleared, err)
+	}
+	after := ReadBinaryUpgradeStatus(path)
+	if after.ReadErr != nil || !after.Recorded || after.StagedVersion != "3.0.0" {
+		t.Fatalf("marker re-check: after=%+v; want the 3.0.0 record retained", after)
+	}
+}
