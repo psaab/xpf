@@ -37,9 +37,11 @@ func TestTakeoverReadinessWaitsForReplacementHelperSessionInventory12160(t *test
 	if !m.sessionInventoryDebtOwed {
 		t.Fatal("reset did not mark inventory debt owed for the next generation")
 	}
-	// Simulate the spawn binding the owed debt to the allocated generation
-	// (startHelperSupervisorLocked path).
-	m.startHelperSupervisorLocked(&exec.Cmd{Process: &os.Process{Pid: os.Getpid()}})
+	// Bind via the extracted method, NOT startHelperSupervisorLocked: starting
+	// a supervisor here would leak a real goroutine + restart timer that
+	// races this fixture (Opus MAJ-1 — flaky 26-33/300 under -race).
+	m.procGen++
+	m.bindOwedInventoryDebtLocked()
 	debtGeneration := m.sessionInventoryDebtGen
 	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
 	m.mode = ModeUserspaceCompat

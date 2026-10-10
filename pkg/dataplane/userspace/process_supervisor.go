@@ -256,13 +256,7 @@ func (m *Manager) scheduleRestartTimer(d time.Duration, fn func()) {
 // Called with m.mu held, immediately after a successful cmd.Start().
 func (m *Manager) startHelperSupervisorLocked(cmd *exec.Cmd) {
 	m.procGen++
-	// Bind owed inventory debt to the ALLOCATED generation (Opus F1): the
-	// reset marked it owed without knowing this number.
-	if m.sessionInventoryDebtOwed {
-		m.sessionInventoryDebtGen = m.procGen
-		m.sessionInventoryDebtOwed = false
-		m.sessionInventoryRequestAt = time.Time{}
-	}
+	m.bindOwedInventoryDebtLocked()
 	// Keep the helper-session epoch ahead of any sender while this new process
 	// is still being published. The subsequent snapshot publication records
 	// the same live generation together with its capability and inventory.
@@ -270,6 +264,20 @@ func (m *Manager) startHelperSupervisorLocked(cmd *exec.Cmd) {
 	g := &helperGeneration{gen: m.procGen, cmd: cmd, exited: make(chan struct{})}
 	m.procSup = g
 	go m.superviseHelper(g)
+}
+
+// bindOwedInventoryDebtLocked binds reset-marked inventory debt to the
+// currently allocated generation. Called with m.mu held, by
+// startHelperSupervisorLocked after the procGen bump (and directly by tests
+// that must not start a supervisor goroutine).
+func (m *Manager) bindOwedInventoryDebtLocked() {
+	// Bind owed inventory debt to the ALLOCATED generation (Opus F1): the
+	// reset marked it owed without knowing this number.
+	if m.sessionInventoryDebtOwed {
+		m.sessionInventoryDebtGen = m.procGen
+		m.sessionInventoryDebtOwed = false
+		m.sessionInventoryRequestAt = time.Time{}
+	}
 }
 
 // superviseHelper is the single waiter for one generation.

@@ -57,7 +57,8 @@ func TestSessionInventoryWiringBound12160(t *testing.T) {
 	if len(spy.marked) != 1 || spy.marked[0] != 9 {
 		t.Errorf("completion did not reach the runtime: %v", spy.marked)
 	}
-	// A superseded SessionSync must neither request nor complete.
+	// A superseded SessionSync must not complete (request-fencing via
+	// rewiring is intentionally not pinned here — the closure is replaced).
 	d.sessionSync = cluster.NewSessionSync("127.0.0.1:4785", "127.0.0.1:4785", nil)
 	ss.OnSessionInventoryBulkReceived(10)
 	if len(spy.marked) != 1 {
