@@ -61,14 +61,14 @@ func raPrefixesFor6531(t *testing.T, delegated netip.Prefix) []*config.RAPrefix 
 // prefix, on-link + autonomous, with the delegation's lifetimes carried over.
 // GREEN under a revert of the pkg/dhcp guard.
 func TestBuildRAConfigs_6531_DelegatedPrefixBecomesRAPrefix(t *testing.T) {
-	pfxs := raPrefixesFor6531(t, netip.MustParsePrefix("2001:db8:900d::/64"))
+	pfxs := raPrefixesFor6531(t, netip.MustParsePrefix("2606:4700:4700:900d::/64"))
 
 	if len(pfxs) != 1 {
 		t.Fatalf("got %d RA prefixes %v, want exactly the delegated one", len(pfxs), pfxs)
 	}
 	got := pfxs[0]
-	if got.Prefix != "2001:db8:900d::/64" {
-		t.Errorf("advertised prefix = %q, want %q", got.Prefix, "2001:db8:900d::/64")
+	if got.Prefix != "2606:4700:4700:900d::/64" {
+		t.Errorf("advertised prefix = %q, want %q", got.Prefix, "2606:4700:4700:900d::/64")
 	}
 	if !got.OnLink || !got.Autonomous {
 		t.Errorf("OnLink = %v, Autonomous = %v, want both true — buildRAConfigs "+
@@ -122,7 +122,7 @@ func TestBuildRAConfigs_6587_StampsDelegatedProvenance(t *testing.T) {
 	mgr := dhcp.NewManagerForTesting(nil)
 	mgr.SeedDelegatedPrefixesForRATesting("ge-0/0/3", "trust0", []dhcp.DelegatedPrefix{{
 		Interface:         "ge-0/0/3",
-		Prefix:            netip.MustParsePrefix("2001:db8:900d::/64"),
+		Prefix:            netip.MustParsePrefix("2606:4700:4700:9000::/64"),
 		PreferredLifetime: 3600 * time.Second,
 		ValidLifetime:     7200 * time.Second,
 	}})

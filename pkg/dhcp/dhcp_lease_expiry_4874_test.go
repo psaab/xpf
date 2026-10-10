@@ -605,14 +605,14 @@ func iaPDReply(t *testing.T, prefixes ...*dhcpv6.OptIAPrefix) *dhcpv6.Message {
 func TestExtractDelegatedPrefixesPartition(t *testing.T) {
 	now := time.Now()
 	msg := iaPDReply(t,
-		pdPrefixOpt(t, "2001:db8:1000::/48", 3600*time.Second, 7200*time.Second),
-		pdPrefixOpt(t, "2001:db8:dead::/56", 0, 0), // withdrawn
+		pdPrefixOpt(t, "2606:4700:4700::/48", 3600*time.Second, 7200*time.Second),
+		pdPrefixOpt(t, "2606:4700:4701::/56", 0, 0), // withdrawn
 	)
 	live, withdrawn := extractDelegatedPrefixes(msg, "wan0", now)
-	if len(live) != 1 || live[0].Prefix != netip.MustParsePrefix("2001:db8:1000::/48") {
+	if len(live) != 1 || live[0].Prefix != netip.MustParsePrefix("2606:4700:4700::/48") {
 		t.Fatalf("live = %+v, want the single /48", live)
 	}
-	if len(withdrawn) != 1 || withdrawn[0].Prefix != netip.MustParsePrefix("2001:db8:dead::/56") {
+	if len(withdrawn) != 1 || withdrawn[0].Prefix != netip.MustParsePrefix("2606:4700:4701::/56") {
 		t.Fatalf("withdrawn = %+v, want the single /56", withdrawn)
 	}
 }
@@ -688,7 +688,7 @@ func TestParseV6ReplyWithdrawnPD(t *testing.T) {
 		})
 		adv.AddOption(&dhcpv6.OptIAPD{IaId: [4]byte{0, 0, 0, 1},
 			Options: dhcpv6.PDOptions{Options: dhcpv6.Options{
-				pdPrefixOpt(t, "2001:db8:1000::/48", 0, 0)}}})
+				pdPrefixOpt(t, "2606:4700:4700::/48", 0, 0)}}})
 
 		res, err := m.parseV6Reply(context.Background(), "wan0", adv, opts)
 		if err != nil {
@@ -707,7 +707,7 @@ func TestParseV6ReplyWithdrawnPD(t *testing.T) {
 
 	t.Run("PD-only, only-withdrawn PD => acquisition failure", func(t *testing.T) {
 		opts := &DHCPv6Options{IATypes: []string{"ia-pd"}} // wantNA=false
-		adv := iaPDReply(t, pdPrefixOpt(t, "2001:db8:1000::/48", 0, 0))
+		adv := iaPDReply(t, pdPrefixOpt(t, "2606:4700:4700::/48", 0, 0))
 		if _, err := m.parseV6Reply(context.Background(), "wan0", adv, opts); err == nil {
 			t.Fatal("PD-only reply whose only IA_PD is withdrawn must fail acquisition, not settle an empty lease")
 		}

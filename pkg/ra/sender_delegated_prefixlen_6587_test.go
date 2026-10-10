@@ -96,7 +96,7 @@ func TestBuildRA_6587_ProvenanceIsWhatDiscriminates(t *testing.T) {
 // dropped every delegated prefix would pass the two tests above.
 func TestBuildRA_6587_DelegatedNormalPrefixStillAdvertised(t *testing.T) {
 	got := prefixInfosFor(t, &config.RAPrefix{
-		Prefix: "2001:db8:1000::/64", OnLink: true, Autonomous: true, Delegated: true,
+		Prefix: "2606:4700:4700:1000::/64", OnLink: true, Autonomous: true, Delegated: true,
 	})
 	if len(got) != 1 {
 		t.Fatalf("a delegated /64 produced %d PrefixInformation options, want 1 — "+

@@ -174,38 +174,37 @@ func TestIAPDPrefixLen6531_WireBoundaryTable(t *testing.T) {
 				"cannot re-enter through the length-0 door.",
 		},
 		{
-			name:    "length 1 accepted",
+			name:    "length 1 refused for non-unicast coverage",
 			prefLen: 1,
-			want:    "2001:db8:1000::/1",
-			why: "A legal encoding: net.CIDRMask(1, 128) is contiguous and RFC 8415 " +
-				"sets no floor on delegation size. Refusing it would be a new " +
-				"minimum-prefix-length policy, not a decode fix, and would break " +
-				"legitimate very-large delegations. Out of scope for #6531.",
+			want:    "",
+			why: "Although /1 is a contiguous wire mask, it covers address space " +
+				"outside the IPv6 global-unicast allocation and therefore cannot " +
+				"be accepted as a globally scoped delegation (#10856).",
 		},
 		{
 			name:    "length 48 accepted",
 			prefLen: 48,
-			want:    "2001:db8:1000::/48",
-			why:     "Over-reach guard: the common delegation must still decode.",
+			want:    "2606:4700:4700:1000::/48",
+			why:     "Over-reach guard: a global-unicast /48 must still decode.",
 		},
 		{
 			name:    "length 56 accepted",
 			prefLen: 56,
-			want:    "2001:db8:1000::/56",
-			why:     "Over-reach guard: the common delegation must still decode.",
+			want:    "2606:4700:4700:1000::/56",
+			why:     "Over-reach guard: a global-unicast /56 must still decode.",
 		},
 		{
 			name:    "length 64 accepted",
 			prefLen: 64,
-			want:    "2001:db8:1000::/64",
-			why:     "Over-reach guard: the common delegation must still decode.",
+			want:    "2606:4700:4700:1000::/64",
+			why:     "Over-reach guard: a global-unicast /64 must still decode.",
 		},
 		{
 			name:    "length 128 accepted",
 			prefLen: 128,
-			want:    "2001:db8:1000::/128",
-			why: "Legal: a single-address delegation. The upper bound is INCLUSIVE — " +
-				"an off-by-one guard (>= 128) would reject a conforming server.",
+			want:    "2606:4700:4700:1000::/128",
+			why: "Legal: a single-address global-unicast delegation. The upper bound is " +
+				"INCLUSIVE — an off-by-one guard (>= 128) would reject it.",
 		},
 		{
 			name:    "length 129 refused",
@@ -231,7 +230,7 @@ func TestIAPDPrefixLen6531_WireBoundaryTable(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			msg := decodeReplyWire(t, 1,
-				iaPDWire(iaPrefixWire(tc.prefLen, "2001:db8:1000::", 3600, 7200)))
+				iaPDWire(iaPrefixWire(tc.prefLen, "2606:4700:4700:1000::", 3600, 7200)))
 
 			live, withdrawn := extractDelegatedPrefixes(msg, "wan0", now)
 
@@ -271,7 +270,7 @@ func TestIAPDPrefixLen6531_WireBoundaryTable(t *testing.T) {
 func TestIAPDPrefixLen6531_BadSiblingDoesNotRideAlong(t *testing.T) {
 	now := time.Now()
 
-	good := func() []byte { return iaPrefixWire(56, "2001:db8:900d::", 3600, 7200) }
+	good := func() []byte { return iaPrefixWire(56, "2606:4700:4700:900d::", 3600, 7200) }
 	bad := func() []byte { return iaPrefixWire(200, "2001:db8:bad::", 3600, 7200) }
 
 	for _, tc := range []struct {
@@ -289,8 +288,8 @@ func TestIAPDPrefixLen6531_BadSiblingDoesNotRideAlong(t *testing.T) {
 			if len(live) != 1 {
 				t.Fatalf("got %d live prefixes %v, want exactly the good /56", len(live), live)
 			}
-			if got := live[0].Prefix; got != netip.MustParsePrefix("2001:db8:900d::/56") {
-				t.Errorf("live prefix = %s, want 2001:db8:900d::/56", got)
+			if got := live[0].Prefix; got != netip.MustParsePrefix("2606:4700:4700:900d::/56") {
+				t.Errorf("live prefix = %s, want 2606:4700:4700:900d::/56", got)
 			}
 			if len(withdrawn) != 0 {
 				t.Errorf("withdrawn = %v, want empty", withdrawn)
@@ -421,13 +420,13 @@ func TestIAPDPrefixLen6531_NormalDelegationSurvivesSubPrefixDerivation(t *testin
 		subPrefLen int
 		advertised string
 	}{
-		{56, "2001:db8:900d::/56", 64, "2001:db8:900d::/64"},
-		{64, "2001:db8:900d::/64", 64, "2001:db8:900d::/64"},
-		{48, "2001:db8:900d::/48", 0, "2001:db8:900d::/48"},
+		{56, "2606:4700:4700:9000::/56", 64, "2606:4700:4700:9000::/64"},
+		{64, "2606:4700:4700:9000::/64", 64, "2606:4700:4700:9000::/64"},
+		{48, "2606:4700:4700:9000::/48", 0, "2606:4700:4700:9000::/48"},
 	} {
 		t.Run(tc.delegated, func(t *testing.T) {
 			msg := decodeReplyWire(t, 1,
-				iaPDWire(iaPrefixWire(tc.prefLen, "2001:db8:900d::", 3600, 7200)))
+				iaPDWire(iaPrefixWire(tc.prefLen, "2606:4700:4700:9000::", 3600, 7200)))
 
 			live, _ := extractDelegatedPrefixes(msg, "wan0", now)
 			if len(live) != 1 {
