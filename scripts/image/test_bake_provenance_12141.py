@@ -443,12 +443,13 @@ class BuildProvenanceTests(unittest.TestCase):
             env=env, capture_output=True, text=True, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("GOFLAGS -overlay redirects build inputs", result.stderr)
+
     def test_go_flags_splitter_matches_go_quoted_split(self):
         # Opus F3 confirmation: the splitter must match Go quoted.Split on
         # every B-class (post-close content, backslash-space, mid-field
         # quote, in-quote backslash, single-quote backslash, VT). Ground
         # truth verified against /usr/lib/go-1.26 quoted.go via a go-run
-        # driver (parent check, 15/15 + 2 empty-input shapes).
+        # driver (11 table cells + unterminated + 2 empty-input shapes).
         _PROV_SPEC = importlib.util.spec_from_file_location(
             "xpf_build_provenance_head", _HERE / "build_provenance.py")
         assert _PROV_SPEC.loader is not None
@@ -474,12 +475,25 @@ class BuildProvenanceTests(unittest.TestCase):
              ["-flag=x" + NB + "-overlay=" + A]),
             ('"a"b"c"d', ["a", 'b"c"d']),
             ("x" + DQ + "y", ["x" + DQ + "y"]),
+            # B5: backslash inside double quotes is literal in Go (no
+            # unescaping) — the quote after the backslash still closes.
+            (DQ + "-tags=x" + BS + DQ + " -overlay=" + A +
+             " -tags=" + BS + DQ + "y" + DQ,
+             ["-tags=x" + BS, "-overlay=" + A,
+              "-tags=" + BS + DQ + "y" + DQ]),
+            # SQBS: same shape in single quotes (the bypass the prior
+            # fold introduced by unescaping inside single quotes).
+            (SQ + "-tags=x" + BS + SQ + " -overlay=" + A +
+             " -tags=" + BS + SQ + "y" + SQ,
+             ["-tags=x" + BS, "-overlay=" + A,
+              "-tags=" + BS + SQ + "y" + SQ]),
         ]
         for raw, want in cases:
             with self.subTest(raw=raw):
                 self.assertEqual(_split_go_flags(raw), want)
         with self.subTest(raw="unterminated-quote"):
-            with self.assertRaises(Exception):
+            with self.assertRaisesRegex(
+                    _prov.ProvenanceError, 'unterminated " string'):
                 _split_go_flags(DQ + "unterminated")
         self.assertEqual(_split_go_flags(""), [])
         self.assertEqual(_split_go_flags("   "), [])

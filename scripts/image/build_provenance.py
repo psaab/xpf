@@ -106,12 +106,11 @@ def _check_go_flags(root):
             f"go env exited {env_result.returncode}: {env_result.stderr.strip()}")
     raw = env_result.stdout.strip()
     if not raw:
-        # go env succeeded but reports no flags. With a real toolchain
-        # this branch never adds anything: go env already merged
-        # os.environ (cfg.Getenv prefers it), so only a lying/fake go
-        # (rc 0 + empty stdout while flags exist) would reach here with
-        # OS GOFLAGS set. Re-read os.environ as a last-resort additive
-        # net: it can only ADD flags to check, never remove any.
+        # go env succeeded but reports no flags. Reachable only with
+        # whitespace-only GOFLAGS (go env echoes it, .strip() empties
+        # it) or a lying/fake go (rc 0 + empty stdout while flags
+        # exist). Re-read os.environ as a last-resort additive net:
+        # it can only ADD flags to check, never remove any.
         raw = os.environ.get("GOFLAGS", "")
     flags = _split_go_flags(raw)
     for token in flags:
