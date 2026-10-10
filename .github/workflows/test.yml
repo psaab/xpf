@@ -7,9 +7,10 @@
 # The full Go suite is currently red on master, so the Go test step selects the
 # changed packages and their reverse dependents. Once `go test ./... -count=1`
 # is green on master, replace that selector with the full-suite command.
-# The Rust workspace test suite is also red on master (baseline evidence and
-# the full-test expansion path are recorded in this PR); keep the all-targets
-# compile check until `cargo test --workspace` is green, then promote it here.
+# The Rust workspace test suite is also red on master; its unpromoted
+# packet-level gates and results-recording contract are documented in
+# `docs/ci-gate-contract.md`. Keep the all-targets compile check until
+# `cargo test --workspace` is green, then promote it here.
 name: CI tests
 
 on:
