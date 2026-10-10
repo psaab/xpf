@@ -10,6 +10,7 @@ pub(super) fn update(
     neighbors: Option<&Vec<NeighborSnapshot>>,
     generation: u64,
     replace: bool,
+    persist_state: &mut bool,
 ) {
     // #5864: an authoritative replace with zero entries must CLEAR the
     // manager-neighbor table. When the Go publishable set transitions to
@@ -59,11 +60,63 @@ pub(super) fn update(
             guard.afxdp.last_applied_manager_neighbor_generation()
         );
     } else if let Some(snapshot) = guard.snapshot.as_mut() {
-        // #9520: the helper now enforces neighbours the installed full apply
-        // did not carry, so that apply's content digest no longer describes
-        // what is enforced and must not vouch for a same-generation retry of it
-        // (handlers/snapshot.rs refuses one against an empty installed digest).
-        snapshot.content_digest.clear();
+        if replace {
+            // #12195: an accepted replace defines the stored reconcile-neighbor set.
+            // Keep the snapshot (which arm/rebind rebuild from) in sync, and request
+            // a state write when that set or its digest changes, like update_fabrics (#3773).
+            // #3771 (M11): a family-mismatched row cannot enter this stored
+            // reconcile input, even though the manager table accepts it.
+            let is_family_mismatch = |neigh: &NeighborSnapshot| {
+                if neigh.ifindex <= 0 {
+                    return false;
+                }
+                let Ok(ip) = neigh.ip.parse::<std::net::IpAddr>() else {
+                    return false;
+                };
+                afxdp::neighbor_family_mismatch(&neigh.family, &ip)
+            };
+            let filtered_neighbors = if neighbors.iter().any(|neigh| is_family_mismatch(neigh)) {
+                Some(
+                    neighbors
+                        .iter()
+                        .filter(|neigh| !is_family_mismatch(neigh))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            };
+            let has_family_mismatch = filtered_neighbors.is_some();
+            let stored_set_changed = if let Some(filtered_neighbors) = filtered_neighbors {
+                if snapshot.neighbors.as_slice() != filtered_neighbors.as_slice() {
+                    snapshot.neighbors = filtered_neighbors;
+                    true
+                } else {
+                    false
+                }
+            } else if snapshot.neighbors.as_slice() != neighbors {
+                snapshot.neighbors = neighbors.to_vec();
+                true
+            } else {
+                false
+            };
+            if stored_set_changed {
+                // #9520: the stored snapshot is no longer the full apply its
+                // content digest describes, so it must not vouch for a
+                // same-generation retry of that apply.
+                snapshot.content_digest.clear();
+                *persist_state = true;
+            } else if has_family_mismatch && !snapshot.content_digest.is_empty() {
+                // The applied replace changed the live manager table even though
+                // M11 excluded its rows from the stored reconcile snapshot.
+                snapshot.content_digest.clear();
+                *persist_state = true;
+            }
+        } else {
+            // Additive updates still change enforced content even though they
+            // cannot replace the stored neighbor set.
+            snapshot.content_digest.clear();
+        }
     }
     refresh_status(guard);
 }

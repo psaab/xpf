@@ -391,7 +391,7 @@ pub(crate) struct FlowSnapshot {
     pub alg_disable_flags: u8,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 pub(crate) struct NeighborSnapshot {
     #[serde(default)]
     pub interface: String,

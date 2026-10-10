@@ -421,7 +421,7 @@ pub(super) fn populate_neighbors(
 /// does not match the actual family of `ip`. An empty family (older / omitted
 /// producer) is unconstrained and never a mismatch; any non-empty non-matching
 /// value (including a corrupt/unknown token) fails closed.
-fn neighbor_family_mismatch(family: &str, ip: &IpAddr) -> bool {
+pub(crate) fn neighbor_family_mismatch(family: &str, ip: &IpAddr) -> bool {
     let fam = family.trim();
     if fam.is_empty() {
         return false;

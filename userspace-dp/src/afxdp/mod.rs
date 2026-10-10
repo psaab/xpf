@@ -241,6 +241,7 @@ use self::mirror::*;
 use self::mpsc_inbox::MpscInbox;
 use self::neighbor::*;
 pub use self::neighbor::{neighbor_state_usable_str, parse_mac_str};
+pub(crate) use self::forwarding_build::neighbor_family_mismatch;
 pub(crate) use self::neighbor::monotonic_nanos;
 pub(crate) use self::rst::remove_kernel_rst_suppression;
 use self::rst::*;

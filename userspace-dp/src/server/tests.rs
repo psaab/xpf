@@ -3656,6 +3656,7 @@ fn a_partial_update_stops_the_installed_digest_vouching_for_a_retry_9520() {
                 state: "reachable".to_string(),
                 ..NeighborSnapshot::default()
             }]);
+            partial.neighbor_replace = true;
             partial.neighbor_generation = 1;
         }
         let _ = run_request(state.clone(), partial);
@@ -5345,6 +5346,225 @@ fn update_fabrics_unchanged_set_does_not_rewrite_state_file() {
     );
     let _ = std::fs::remove_file(&state_file);
 }
+/// #12195: an `update_neighbors` that CHANGES the accepted neighbor set must fold
+/// the accepted NeighborSnapshots into the STORED snapshot AND persist — exactly
+/// like `update_fabrics` (#3773 L4). Before #12195 the neighbors arm cleared the
+/// installed digest but neither updated the stored snapshot nor set
+/// `persist_state`, so a changed push lived only in the coordinator's in-memory
+/// forwarding state — the next ordinary persist (here an explicit `status` beat,
+/// which always sets `persist_state`) serialized the STALE apply-time neighbor
+/// set as current state.
+/// fail-on-revert: dropping the snapshot fold + `persist_state` leaves the
+/// decoded `state.snapshot.neighbors` at the empty apply-time set (RED).
+#[test]
+fn update_neighbors_changed_set_folds_and_persists_12195() {
+    use crate::{ConfigSnapshot, NeighborSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    let state = new_state(ProcessStatus::default());
+    let state_file = unique_state_file("neighbor-persist");
+    // Seed an apply_snapshot with NO neighbors. This persists the state file
+    // with an empty neighbor set.
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 1,
+            fib_generation: 1,
+            generated_at: chrono::Utc::now(),
+            ..ConfigSnapshot::default()
+        });
+        assert!(run_request_on_file(state.clone(), request, &state_file).ok);
+    }
+    // Go pushes a changed accepted neighbor set via update_neighbors.
+    let accepted = NeighborSnapshot {
+        interface: "ge-0-0-1".to_string(),
+        ifindex: 7,
+        family: "inet".to_string(),
+        ip: "10.0.0.1".to_string(),
+        mac: "02:00:00:00:00:01".to_string(),
+        state: "REACHABLE".to_string(),
+        ..NeighborSnapshot::default()
+    };
+    let before_update = std::fs::metadata(&state_file)
+        .expect("state file exists after seed apply")
+        .modified()
+        .expect("mtime");
+    // Ensure the state-file timestamp can distinguish the changed update's
+    // required write from the preceding apply.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    {
+        let mut request = req("update_neighbors");
+        request.neighbor_replace = true;
+        request.neighbor_generation = 1;
+        request.neighbors = Some(vec![accepted.clone()]);
+        assert!(run_request_on_file(state.clone(), request, &state_file).ok);
+    }
+    let after_update = std::fs::metadata(&state_file)
+        .expect("changed update state file exists")
+        .modified()
+        .expect("mtime");
+    // A subsequent ORDINARY persist (the `status` heartbeat, which always sets
+    // `persist_state`) must serialize the accepted set — not the stale
+    // apply-time one.
+    assert!(run_request_on_file(state.clone(), req("status"), &state_file).ok);
+    let bytes = std::fs::read(&state_file).expect("read persisted state file");
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("parse persisted state file");
+    assert_eq!(
+        persisted["snapshot"]["neighbors"],
+        serde_json::to_value(vec![accepted]).expect("serialize accepted neighbors"),
+        "persisted snapshot neighbors must exactly match the accepted set (#12195)"
+    );
+    assert_ne!(
+        before_update, after_update,
+        "a changed update_neighbors must request persistence immediately"
+    );
+    let _ = std::fs::remove_file(&state_file);
+}
+
+/// #12195: an `update_neighbors` whose accepted set is UNCHANGED from the stored
+/// snapshot must NOT rewrite the state file — mirroring the #3773 L4 unchanged
+/// control for fabrics. Persisting on every unchanged update would churn the
+/// disk on the periodic neighbor refresh; the fold gates on an actual change.
+#[test]
+fn update_neighbors_unchanged_set_does_not_rewrite_state_file_12195() {
+    use crate::{ConfigSnapshot, NeighborSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    let accepted = NeighborSnapshot {
+        interface: "ge-0-0-1".to_string(),
+        ifindex: 7,
+        family: "inet".to_string(),
+        ip: "10.0.0.1".to_string(),
+        mac: "02:00:00:00:00:01".to_string(),
+        state: "REACHABLE".to_string(),
+        ..NeighborSnapshot::default()
+    };
+    let state = new_state(ProcessStatus::default());
+    let state_file = unique_state_file("neighbor-nochurn");
+    // Seed a snapshot that ALREADY carries the accepted neighbor.
+    {
+        let mut request = req("apply_snapshot");
+        request.snapshot = Some(ConfigSnapshot {
+            version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+            generation: 1,
+            fib_generation: 1,
+            generated_at: chrono::Utc::now(),
+            neighbors: vec![accepted.clone()],
+            ..ConfigSnapshot::default()
+        });
+        assert!(run_request_on_file(state.clone(), request, &state_file).ok);
+    }
+    let before = std::fs::metadata(&state_file)
+        .expect("state file exists after seed apply")
+        .modified()
+        .expect("mtime");
+    // A same-set update_neighbors: nothing changed, so no rewrite.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    {
+        let mut request = req("update_neighbors");
+        request.neighbor_replace = true;
+        request.neighbor_generation = 1;
+        request.neighbors = Some(vec![accepted.clone()]);
+        assert!(run_request_on_file(state.clone(), request, &state_file).ok);
+    }
+    let after = std::fs::metadata(&state_file)
+        .expect("state file still exists")
+        .modified()
+        .expect("mtime");
+    assert_eq!(
+        before, after,
+        "an unchanged update_neighbors must not rewrite the state file"
+    );
+    let _ = std::fs::remove_file(&state_file);
+}
+
+/// #3771 (M11): a replace must not fold the Go IPv4-mapped IPv6 sampler row
+/// (`family=inet6`, dotted-quad IP) into the stored reconcile snapshot. The
+/// family check in the forwarding build would reject that snapshot and make
+/// every rebind fail closed.
+#[test]
+fn update_neighbors_replace_skips_family_mismatch_and_clears_digest_3771_9520() {
+    use crate::{
+        ConfigSnapshot, NeighborSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        SNAPSHOT_CONTENT_CONFLICT_PREFIX,
+    };
+
+    let state = new_state(ProcessStatus {
+        forwarding_armed: true,
+        last_snapshot_generation: 1,
+        last_fib_generation: 1,
+        capabilities: forwarding_caps(),
+        ..ProcessStatus::default()
+    });
+    state.lock().expect("state").snapshot = Some(ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 1,
+        fib_generation: 1,
+        generated_at: chrono::Utc::now(),
+        content_digest: "digest-a".to_string(),
+        map_pins: ok_map_pins(),
+        ..ConfigSnapshot::default()
+    });
+    // #10694 test seam: keep this reconcile proof independent of monitor privileges.
+    state.lock().expect("state").afxdp.force_ipsec_sa_ready = true;
+
+    // Exact family/address mismatch emitted when net.IP.String() formats an
+    // IPv4-mapped IPv6 neighbor as a dotted quad.
+    let mut replace = req("update_neighbors");
+    replace.neighbor_replace = true;
+    replace.neighbor_generation = 1;
+    replace.neighbors = Some(vec![NeighborSnapshot {
+        interface: "ge-0-0-1".to_string(),
+        ifindex: 7,
+        family: "inet6".to_string(),
+        ip: "192.0.2.1".to_string(),
+        mac: "02:00:00:00:00:01".to_string(),
+        state: "permanent".to_string(),
+        ..NeighborSnapshot::default()
+    }]);
+    let response = run_request(state.clone(), replace);
+    assert!(response.ok, "replace failed: {}", response.error);
+
+    {
+        let guard = state.lock().expect("state");
+        let stored = guard.snapshot.as_ref().expect("stored snapshot");
+        assert!(
+            stored.content_digest.is_empty(),
+            "an applied replace with filtered rows must not retain the stale digest"
+        );
+        assert!(
+            stored.neighbors.is_empty(),
+            "a family-mismatched replace row must not enter the reconcile snapshot"
+        );
+        assert!(
+            guard.afxdp.validate_snapshot_buildable(Some(stored)).is_ok(),
+            "the folded snapshot must remain buildable"
+        );
+    }
+
+    let mut replay = req("apply_snapshot");
+    replay.snapshot = Some(ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 1,
+        fib_generation: 1,
+        generated_at: chrono::Utc::now(),
+        content_digest: "digest-a".to_string(),
+        map_pins: ok_map_pins(),
+        ..ConfigSnapshot::default()
+    });
+    let replay = run_request(state.clone(), replay);
+    assert!(
+        !replay.ok && replay.error.starts_with(SNAPSHOT_CONTENT_CONFLICT_PREFIX),
+        "the cleared digest must refuse a same-generation full-apply replay: ok={} error={}",
+        replay.ok,
+        replay.error
+    );
+
+    // The stored snapshot is the input to rebind. It must still reconcile
+    // successfully after the mismatched row was observed.
+    let rebind = run_request(state, req("rebind"));
+    assert!(rebind.ok, "rebind failed: {}", rebind.error);
+}
+
+
 
 /// #9803: an `update_fabrics` carrying a new fabric parent ifindex, followed by
 /// a full apply with the same rows, must end with the fabric bindings replanned.
@@ -5738,6 +5958,76 @@ fn update_neighbors_response_distinguishes_apply_and_exact_fence_10035() {
             .map(|status| status.manager_neighbor_generation),
         Some(7),
         "fenced ACK must retain the applied generation"
+    );
+}
+
+/// #12195/#10035: a fenced replace must leave the stored reconcile snapshot
+/// untouched. The first replace sets the generation fence without changing the
+/// accepted set; a same-generation request with a different MAC must not fold.
+#[test]
+fn update_neighbors_fenced_replace_does_not_fold_snapshot_12195() {
+    use crate::{ConfigSnapshot, NeighborSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+
+    let accepted = NeighborSnapshot {
+        interface: "ge-0-0-1".to_string(),
+        ifindex: 7,
+        family: "inet".to_string(),
+        ip: "10.0.0.1".to_string(),
+        mac: "02:00:00:00:00:01".to_string(),
+        state: "REACHABLE".to_string(),
+        ..NeighborSnapshot::default()
+    };
+    let state = new_state(ProcessStatus::default());
+    state.lock().expect("state").snapshot = Some(ConfigSnapshot {
+        version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        generation: 1,
+        fib_generation: 1,
+        generated_at: chrono::Utc::now(),
+        content_digest: "digest-a".to_string(),
+        neighbors: vec![accepted.clone()],
+        ..ConfigSnapshot::default()
+    });
+
+    let mut applied = req("update_neighbors");
+    applied.neighbor_replace = true;
+    applied.neighbor_generation = 7;
+    applied.neighbors = Some(vec![accepted.clone()]);
+    let response = run_request(state.clone(), applied);
+    assert!(response.ok, "applied replace failed: {}", response.error);
+    assert_eq!(
+        response
+            .status
+            .as_ref()
+            .and_then(|status| status.neighbor_replace_applied),
+        Some(true)
+    );
+
+    let mut fenced = req("update_neighbors");
+    fenced.neighbor_replace = true;
+    fenced.neighbor_generation = 7;
+    let mut stale = accepted.clone();
+    stale.mac = "02:00:00:00:00:99".to_string();
+    fenced.neighbors = Some(vec![stale]);
+    let response = run_request(state.clone(), fenced);
+    assert!(response.ok, "fenced replace failed: {}", response.error);
+    assert_eq!(
+        response
+            .status
+            .as_ref()
+            .and_then(|status| status.neighbor_replace_applied),
+        Some(false)
+    );
+
+    let guard = state.lock().expect("state");
+    let stored = guard.snapshot.as_ref().expect("stored snapshot");
+    assert_eq!(
+        stored.neighbors,
+        vec![accepted],
+        "a fenced replace must not fold its stale rows"
+    );
+    assert_eq!(
+        stored.content_digest, "digest-a",
+        "a fenced replace must leave the digest untouched"
     );
 }
 
