@@ -627,6 +627,11 @@ func TestArmTripleFaultDisarmsAndReportsSurvivingDisarmFailure_12162(t *testing.
 		!strings.Contains(err.Error(), "efibootmgr --delete-bootnext") {
 		t.Errorf("operator error = %v, want forced-reboot and manual-clear guidance", err)
 	}
+	// Opus X1: pin the restoreErr VALUE on the sibling disarm-failure branch
+	// (same gap class as M2; no trailing slash — message ends with colon).
+	if !strings.Contains(err.Error(), "/proc/self/12162") {
+		t.Errorf("Arm error = %v, want the ARMED-restore failure reason", err)
+	}
 	j, loadErr := r.loadKernelJournal()
 	if loadErr != nil {
 		t.Fatal(loadErr)
