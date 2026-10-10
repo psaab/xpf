@@ -8676,6 +8676,36 @@ and loopback addresses, IPv4 0/8, multicast, and IPv6 link-local, plus
 `discard`, `reject`, and `next-table` have no supported FRR route-map lowering.
 The shared predicate is used by the schema gate and render-side omission belt.
 
+### Route-filter tails are checked at strict commit (#12067)
+
+`from route-filter <prefix> <match-type>` may carry one match-type-specific
+operand (`upto /N`, `prefix-length-range /low-/high`, or `through <prefix>`).
+The strict commit/commit-check path rejects unconsumed tails, missing or
+malformed `upto` lengths, and the unsupported `through` / invalid range cases
+instead of letting the compiler or FRR renderer discard or widen the authored
+constraint. This includes term-line forms whose `Keys` tail is not visited by
+the schema walk: a bare `from route-filter` is retained as an `UnknownFrom`
+marker, and a compiled `upto` with no parsed length is rejected before commit.
+Packed `from` runs are segmented with the compiler's schema-arity rules, so a
+prefix-list, community, or as-path named `route-filter` remains a value
+reference rather than being mistaken for another filter head.
+
+`upto /24` remains valid and renders as FRR `le 24`. On tolerant load and
+peer-sync, the #11779 `UnknownFrom` quarantine forces affected term-line forms
+such as bare `from route-filter`, `from prefix-list route-filter`, and
+`from route-filter <prefix> exact route-filter` to `reject`. The first two
+previously rendered permit-all; the last rendered a permissive matched permit.
+They now deny on boot or sync. This is fail-closed, but a rolling HA upgrade
+can temporarily leave peers with different policy behavior. On tolerant load
+and peer-sync, present but invalid or out-of-range `upto` operands in
+term-line forms are retained as unknown `from` tokens and force `reject`.
+An absent term-line operand, and legacy braced/compact zero-length `upto`
+entries, remain warning-only and retain the historical `le maxLen` renderer
+fallback. Coverage is in
+`pkg/config/route_filter_tail_12067_test.go`,
+`pkg/configstore/fused_statement_8437_test.go`, and
+`pkg/configstore/route_filter_r2_12067_test.go`.
+
 ### The as-path REGEX is the whole token tail, and it is validated (#6686)
 
 `policy-options as-path <name> <regex>` is a `args: 2, multi: true` schema node

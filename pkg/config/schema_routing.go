@@ -186,7 +186,7 @@ var schemaPolicyOptions = &schemaNode{desc: "Policy options", children: map[stri
 	"as-path": {desc: "AS path", args: 2, multi: true, placeholder: "<name>", keyValidatorPos: ValidateASPathNameArg, children: nil},
 	"policy-statement": {desc: "Policy statement", args: 1, placeholder: "<name>", keyValidator: ValidateFRRObjectName, children: map[string]*schemaNode{
 		"term": {desc: "Term name", args: 1, placeholder: "<term-name>", keyValidator: ValidateFRRObjectName, children: map[string]*schemaNode{
-			"from": {desc: "Match condition", children: map[string]*schemaNode{
+			"from": {desc: "Match condition", nodeValidator: validatePackedPolicyRouteFilterTailStrict12067, children: map[string]*schemaNode{
 				// "from protocol" is a multi-value match: Junos accepts
 				// "from protocol [ bgp ospf static ]" and, equivalently, a
 				// sequence of separate "set ... from protocol <X>" commands.
@@ -215,7 +215,7 @@ var schemaPolicyOptions = &schemaNode{desc: "Policy options", children: map[stri
 				// arg lands as a fourth packed key via the multi value-tail
 				// absorber, matching the brace AST the compiler already reads.
 				"prefix-list":  {desc: "Prefix list", args: 1, multi: true, placeholder: "<list-name>", children: nil},
-				"route-filter": {desc: "Route filter", args: 2, multi: true, placeholder: "<prefix>", keyValidatorPos: ValidateRouteFilterArgPositional, children: nil},
+				"route-filter": {desc: "Route filter", args: 2, multi: true, placeholder: "<prefix>", keyValidatorPos: ValidateRouteFilterArgPositional, nodeValidator: validateRouteFilterTailStrict12067, children: nil},
 				"community":    {desc: "Community", args: 1, multi: true, placeholder: "<community>", children: nil},
 				"as-path":      {desc: "AS path", args: 1, multi: true, placeholder: "<name>", children: nil},
 			}},

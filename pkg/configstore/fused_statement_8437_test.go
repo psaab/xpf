@@ -3,6 +3,8 @@ package configstore
 import (
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 const fusedBase8437 = `
@@ -93,5 +95,127 @@ func TestFusedStatementGateDoesNotCondemnValidTrailingTokens_8437(t *testing.T) 
 		t.Errorf("`then static-nat prefix <cidr>` REJECTED — an under-declared leaf's "+
 			"legitimate trailing tokens must not be read as a fused statement: %v",
 			strings.SplitN(err.Error(), "\n", 2)[0])
+	}
+}
+
+// #12067. A non-keyword route-filter tail is silently ignored by the compiler
+// and is not covered by #11779's unsupported-from gate. Reject it during the
+// operator commit-check, before the term can be installed as an unconstrained
+// orlonger match.
+func TestRouteFilterUnconsumedTailRejectedBeforeCompile_12067(t *testing.T) {
+	_, err := CheckText(psTerm8437("route-filter 10.0.0.0/8 orlonger foo;"), 0)
+	if err == nil {
+		t.Fatal("commit-check accepted an unconsumed route-filter tail")
+	}
+	if !strings.Contains(err.Error(), "route-filter") {
+		t.Fatalf("commit-check error must name the route-filter leaf: %v", err)
+	}
+	if !strings.Contains(err.Error(), "foo") {
+		t.Fatalf("commit-check error must identify the unconsumed token: %v", err)
+	}
+}
+
+func TestCheckTextPreservesPackedFromMissingSemicolonDiagnostic_8437(t *testing.T) {
+	cases := []struct {
+		name, text string
+	}{
+		{"unquoted head upto sibling Q5", `policy-options { policy-statement P { term T { from route-filter 10.0.0.0/8 upto then accept; } } }`},
+		{"unquoted head upto sibling X5", `policy-options { policy-statement P { term T { from route-filter 10.0.0.0/8 upto then accept route-filter 10.1.0.0/16 orlonger reject; } } }`},
+		{"quoted head sibling C4", `policy-options { policy-statement P { term T { from "route-filter" 10.0.0.0/8 orlonger then accept; } } }`},
+		{"unquoted head sibling control", `policy-options { policy-statement P { term T { from route-filter 10.0.0.0/8 orlonger then accept; } } }`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := CheckText(tc.text, 0)
+			if err == nil || !strings.Contains(err.Error(), "#8437") ||
+				!strings.Contains(err.Error(), "missing semicolon") || !strings.Contains(err.Error(), "then") {
+				t.Fatalf("CheckText diagnostic = %v, want the actionable packed-from #8437 message", err)
+			}
+		})
+	}
+}
+
+func TestCheckTextRejectsQuotedAndBracketedRouteFilterHeads_12067(t *testing.T) {
+	cases := []struct {
+		name, from string
+	}{
+		{"quoted head", `"route-filter" 10.0.0.0/8 orlonger reject`},
+		{"bracketed head", `[ route-filter 10.0.0.0/8 orlonger reject ]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			text := `policy-options { policy-statement P { term T { from ` + tc.from +
+				`; then accept; } } }`
+			_, err := CheckText(text, 0)
+			if err == nil || !strings.Contains(err.Error(), "route-filter") ||
+				!strings.Contains(err.Error(), "reject") {
+				t.Fatalf("CheckText error = %v, want route-filter gate to name `reject`", err)
+			}
+		})
+	}
+}
+
+func TestStoreRejectsQuotedAndBracketedRouteFilterHeads_12067(t *testing.T) {
+	cases := []struct {
+		name, from string
+	}{
+		{"quoted head", `"route-filter" 10.0.0.0/8 orlonger reject`},
+		{"bracketed head", `[ route-filter 10.0.0.0/8 orlonger reject ]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+			if err := store.EnterConfigure(); err != nil {
+				t.Fatal(err)
+			}
+			text := `policy-options { policy-statement P { term T { from ` + tc.from +
+				`; then accept; } } }`
+			if err := store.LoadOverride(text); err != nil {
+				t.Fatalf("LoadOverride: %v", err)
+			}
+			if _, err := store.CommitCheck(); err == nil ||
+				!strings.Contains(err.Error(), "route-filter") ||
+				!strings.Contains(err.Error(), "reject") {
+				t.Fatalf("CommitCheck error = %v, want route-filter gate to name `reject`", err)
+			}
+			if _, err := store.Commit(); err == nil ||
+				!strings.Contains(err.Error(), "route-filter") ||
+				!strings.Contains(err.Error(), "reject") {
+				t.Fatalf("Commit error = %v, want route-filter gate to name `reject`", err)
+			}
+		})
+	}
+}
+
+func TestRouteFilterNameRemainsValidPrefixListValue_12067(t *testing.T) {
+	const text = `policy-options {
+    prefix-list route-filter { 10.0.0.0/8; }
+    policy-statement P {
+        term T {
+            from prefix-list route-filter;
+            then accept;
+        }
+    }
+}`
+	compiled, err := CheckText(text, 0)
+	if err != nil {
+		t.Fatalf("CheckText rejected prefix-list named route-filter: %v", err)
+	}
+	store := newTestStore(t)
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadOverride(text); err != nil {
+		t.Fatalf("LoadOverride: %v", err)
+	}
+	committed, err := store.Commit()
+	if err != nil {
+		t.Fatalf("Commit rejected prefix-list named route-filter: %v", err)
+	}
+	for label, cfg := range map[string]*config.Config{"CheckText": compiled, "Commit": committed} {
+		term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+		if len(term.PrefixList) != 1 || term.PrefixList[0] != "route-filter" {
+			t.Errorf("%s compiled PrefixList=%v, want the object name [route-filter]", label, term.PrefixList)
+		}
 	}
 }

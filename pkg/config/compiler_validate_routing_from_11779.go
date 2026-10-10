@@ -43,7 +43,7 @@ func validatePolicyFromUnknownStrict11779(cfg *Config) error {
 			}
 			if len(term.UnknownFrom) > 0 {
 				problems = append(problems, fmt.Sprintf(
-					"policy-options policy-statement %q term %q: `from %s` is not enforced by the routing-policy compiler (#11779); supported `from` types are protocol, prefix-list, route-filter, community, and as-path",
+					"policy-options policy-statement %q term %q: `from %s` is not enforced by the routing-policy compiler (#11779); supported `from` clauses are protocol, prefix-list, route-filter `<prefix> <match-type>`, community, and as-path",
 					stmtName, term.Name, strings.Join(term.UnknownFrom, ", ")))
 			}
 		}
