@@ -28,6 +28,10 @@ pattern) and is skipped without them.
 
 RED on revert: drop the assert and every refusal cell below exits 0 —
 duplicate/missing/skewed Valid-Until ships silently.
+
+The real-binary suite also verifies the signed builder-to-gate path and that a
+flat rebuild after reprepro removes the stale mode marker; a byte-tamper check
+confirms the flat gate is restored after that transition.
 """
 
 from __future__ import annotations
@@ -299,6 +303,57 @@ class RealRepreproTests(unittest.TestCase):
                          (gated.stderr or ""))
         self.assertIn("gate PASSED", gated.stdout)
 
+
+    @unittest.skipUnless(shutil.which("apt-ftparchive"),
+                         "needs apt-ftparchive for a flat transition")
+    def test_flat_rebuild_removes_reprepro_marker_and_restores_gate(self):
+        outdir = os.path.join(self.dir, "out-transition")
+        env = dict(self.env)
+        env.pop("XPF_DEB_VERSION", None)
+        env.update({"XPF_APT_TOOL": "reprepro", "XPF_GPG_KEY": self.fpr,
+                    "XPF_ARCHIVE_PUBKEY": self.archive_pub})
+        reprepro = subprocess.run(
+            ["sh", str(_BUILDER), "--out", outdir, "--suite", "stable",
+             "--debs", self.deb],
+            capture_output=True, text=True, env=env, timeout=180)
+        self.assertEqual(reprepro.returncode, 0,
+                         (reprepro.stdout or "") + (reprepro.stderr or ""))
+        marker = Path(outdir, "apt/conf/distributions")
+        self.assertTrue(marker.is_file())
+
+        flat_env = dict(env, XPF_APT_TOOL="flat")
+        flat = subprocess.run(
+            ["sh", str(_BUILDER), "--out", outdir, "--suite", "stable",
+             "--debs", self.deb],
+            capture_output=True, text=True, env=flat_env, timeout=180)
+        self.assertEqual(flat.returncode, 0,
+                         (flat.stdout or "") + (flat.stderr or ""))
+        self.assertFalse(marker.exists(), "flat rebuild left reprepro marker")
+
+        gate_cmd = ["python3", str(_DIST / "publish.py"), "--dist", outdir,
+                    "--channel", "stable", "--no-image"]
+        gated = subprocess.run(gate_cmd, capture_output=True, text=True,
+                               env=flat_env, timeout=120)
+        self.assertEqual(gated.returncode, 0,
+                         (gated.stdout or "") + (gated.stderr or ""))
+
+        tampered_pkg = Path(self.dir, "tampered-pkg")
+        shutil.copytree(Path(self.dir, "pkg"), tampered_pkg)
+        payload = tampered_pkg / "usr/share/doc/xpf"
+        payload.mkdir(parents=True)
+        (payload / "tampered.txt").write_text("same identity, changed bytes\\n")
+        altered = Path(self.dir, "tampered.deb")
+        subprocess.run(["dpkg-deb", "--build", str(tampered_pkg), str(altered)],
+                       check=True, capture_output=True, timeout=60)
+        flat_pool = Path(outdir, "apt/pool/stable/main/x/xpf",
+                         Path(self.deb).name)
+        shutil.copyfile(altered, flat_pool)
+        rejected = subprocess.run(gate_cmd, capture_output=True, text=True,
+                                  env=flat_env, timeout=120)
+        self.assertNotEqual(rejected.returncode, 0,
+                            "flat gate accepted substituted package bytes")
+        self.assertIn("Size/SHA256",
+                      (rejected.stdout or "") + (rejected.stderr or ""))
 
     def _run_real(self, days):
         outdir = os.path.join(self.dir, "out-" + days)

@@ -141,11 +141,11 @@ fi
 # symlink: $OUT/apt/dists/stable/<escape> -> /external makes a lexically
 # valid COMPONENT=escape resolve outside --out, and mkdir -p happily creates
 # binary-$ARCH through it. Resolve each COMPONENT-derived sink created above
-# and verify containment within the resolved --out; die loudly on escape. (Static
-# subpaths like conf/ are the operator's exclusive-dir responsibility; only
-# validated-input-derived sinks are pinned here. A planter racing mkdir
-# itself is narrowed to microseconds by this ordering, not closed — shell
-# cannot mkdir with O_NOFOLLOW.)
+# and verify containment within the resolved --out; die loudly on escape.
+# Static reprepro subpaths in conf/ remain the operator's responsibility;
+# flat-mode stale-marker removal below refuses a symlinked conf directory.
+# A planter racing mkdir is narrowed to microseconds by this ordering, not
+# closed — shell cannot mkdir with O_NOFOLLOW.
 _out_resolved=$(cd "$OUT" && pwd -P) || die "cannot resolve --out $OUT"
 for _d do
     _r=$(cd "$_d" 2>/dev/null && pwd -P) || _r=""
@@ -155,6 +155,14 @@ for _d do
     esac
 done
 unset _d _r _out_resolved
+# A flat rebuild can reuse output from an earlier reprepro build. Remove the
+# mode marker so the publish gate applies flat pool/index binding; reject a
+# symlinked conf directory before unlinking its child.
+if [ "$TOOL" != reprepro ] && [ -d "$APT/conf" ]; then
+    [ ! -L "$APT/conf" ] || die "apt conf path is a symlink; refusing to remove stale reprepro marker"
+    rm -f "$APT/conf/distributions"
+fi
+
 
 info "apt repo tool: $TOOL, suite: $SUITE, arch: $ARCH, out: $APT"
 
