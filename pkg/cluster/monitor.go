@@ -819,12 +819,13 @@ const ipAggregateMonitorName = "ip-monitoring"
 // the interface-monitor reconciler.
 //
 // #8338: ONE list, consumed by both `isReservedMonitorName` and the guard test
-// that proves each survives a config commit. A third reserved debt added
-// without appearing here is what the guard is for — the predicate and the test
-// cannot disagree about the category, because they read the same slice.
+// that proves each survives a config commit. Every reserved debt must appear
+// here — the predicate and test read the same slice and cannot disagree about
+// the category.
 var reservedMonitorNames = []string{
 	ipAggregateMonitorName,
 	DataplaneArmMonitorIface,
+	HelperCrashLoopMonitorIface,
 }
 
 // isReservedMonitorName reports whether a monitor key belongs to some owner
@@ -832,10 +833,9 @@ var reservedMonitorNames = []string{
 //
 // #8338: the category, named once. Before this there was a single exemption for
 // the IP class and the surrounding comment described the interface reconciler as
-// owning "the rest" — a fail-OPEN default. `__dataplane-arm__` fell into "the
-// rest" and every config commit deleted it, so a node whose dataplane failed to
-// arm lost its election penalty on the next unrelated commit and could take the
-// RG while unable to forward.
+// owning "the rest" — a fail-OPEN default. Both `__dataplane-arm__` and
+// `__userspace-helper-crash-loop__` are daemon-owned debts; deleting either on
+// an unrelated config commit can leave the RG owned by a node unable to forward.
 //
 // The default is now inverted: this reconciler owns only keys it can recognise
 // as interface monitors, so a future reserved class is safe unless someone

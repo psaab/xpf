@@ -461,6 +461,7 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) error {
 					m.setLastStatusLocked(status)
 				}
 				slog.Info("userspace dataplane helper started", "pid", cmd.Process.Pid, "socket", cfg.ControlSocket)
+				m.notifyHelperSupervisorLocked()
 				return nil
 			}
 		}
@@ -611,6 +612,7 @@ func (m *Manager) stopLocked() {
 		m.haDegradedHaveLastSent = false
 		m.haDegradedMu.Unlock()
 		m.publishHAWatchdogSnapshotLocked()
+		m.notifyHelperSupervisorLocked()
 		return
 	}
 	// Disable userspace forwarding BEFORE stopping the helper. Without this,
@@ -649,6 +651,7 @@ func (m *Manager) stopLocked() {
 	m.proc = nil
 	m.procSup = nil
 	m.resetAfterHelperGoneLocked()
+	m.notifyHelperSupervisorLocked()
 }
 
 // helperExitedChanLocked returns the channel the current generation's waiter
