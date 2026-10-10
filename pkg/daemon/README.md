@@ -3001,17 +3001,18 @@ never lock an operator out of a remote box it manages.
     in a private netns (`unshare -rn`) and skips without `CAP_NET_ADMIN`.
   - Routing-instance interface-LIST members have the same gap, and
     `riMemberVRFReassertLoop` closes it. Step 0a and the #6805 late pass bind
-    them, both only from an apply, so a member netdev re-created outside one (a
+    them only during an apply, so a member netdev re-created outside one (a
     driver re-probe, a VF reset) or unbound out of band forwards in the DEFAULT
     table until the next apply. The loop binds only a member whose master is not
-    its VRF: `BindInterfaceToVRF` logs at Info on every call, so re-running the
-    apply's bind loop each tick would log on every tick of a healthy node. It
-    leaves a tunnel carrying its own `routing-instance` stanza alone, because
-    that is the tunnel manager's claim (`reconcileVRFClaimLocked` case 1, recorded
-    in `appliedRI` only from its own bind), and it resolves devices through the
-    shared `config.RoutingInstanceMemberLinuxNames` helper, so both passes reason
-    about ONE device set. It takes `applySem` before the config read that drives
-    the binding (#4001). Tests: `ri_member_vrf_reassert_9813_test.go`, including a kernel cell.
+    its VRF: `BindInterfaceToVRF` checks the live master before issuing
+    `LinkSetMaster`, but still performs netlink lookups. Re-running the apply's
+    bind loop each tick would therefore do unnecessary kernel work for healthy
+    links. It leaves a tunnel carrying its own `routing-instance` stanza alone,
+    because that is the tunnel manager's claim (`reconcileVRFClaimLocked` case 1,
+    recorded in `appliedRI` only from its own bind), and it resolves devices
+    through the shared `config.RoutingInstanceMemberLinuxNames` helper, so both
+    passes reason about ONE device set. It takes `applySem` before the config
+    read that drives the binding (#4001). Tests: `ri_member_vrf_reassert_9813_test.go`, including a kernel cell.
   - Management-class RI list members (`fxp*`, `fab*`, `em*`) remain owned by
     `vrf-mgmt` (#11392). Strict compilation rejects them and tolerant
     load/peer-sync warns while quarantining the management-class references
@@ -3022,19 +3023,20 @@ never lock an operator out of a remote box it manages.
     fighting the fabric-overlay rebind for `fab0`/`fab1`; see
     `ri_member_mgmt_11392_test.go`.
 
-  - **Published management-VRF membership reassertion (#11448).** `fxp*` and
-    `em*` links were rebound only during config apply, so a driver re-probe,
-    networkd reload, VF reset, or out-of-band `ip link set nomaster` left the
-    published management interface outside `vrf-mgmt` until another commit.
-    The always-on `mgmtVRFReassertLoop` checks the last apply's immutable
-    `mgmtVRFIfaceSet` every 30s, compares each present link's `MasterIndex` to
-    `vrf-mgmt`, and takes `applySem` only for drift (rechecking after acquire).
-    It warns and rebinds only drifted links, then reapplies management DHCP
-    routes; failures latch #11450 management-route debt, whose 30s routing
-    owner retries without a new config or DHCP event. A healthy node makes no
-    bind or route writes. The set can include `fab*`, which the #9813 fabric
-    loop also owns; semaphore serialization and the in-lock drift check keep
-    those owners from issuing duplicate binds.
+  - **Published management-VRF membership reassertion (#11448).**
+    `mgmtVRFIfaceSet` covers `fxp*`, `fab*`, and `em*` links plus configured
+    VLAN children of tagged management interfaces. The apply path binds this
+    set after networkd activation; a driver re-probe, networkd reload, VF reset,
+    or out-of-band `ip link set nomaster` can still move a published device out
+    of `vrf-mgmt`. The always-on `mgmtVRFReassertLoop` checks the immutable set
+    (including VLAN children such as `fxp0.100`) every 30s, compares each
+    present link's `MasterIndex` to `vrf-mgmt`, and takes `applySem` only for
+    drift (rechecking after acquire), then reapplies management DHCP routes;
+    failures latch #11450 management-route debt, whose 30s routing owner retries
+    without a new config or DHCP event. A healthy node makes no bind or route
+    writes. The set can include `fab*`, which the #9813 fabric loop also owns;
+    semaphore serialization and the in-lock drift check keep those owners from
+    issuing duplicate binds.
     `mgmt_vrf_reassert_11448_test.go` covers drift, healthy-path silence, route
     debt, cancellation, periodic convergence, and an out-of-band kernel unbind
     in a private netns (skipped without `CAP_NET_ADMIN`).
@@ -3308,7 +3310,10 @@ never lock an operator out of a remote box it manages.
   bind failures; `applyDataplaneAndHACore` joins them into `networkdErr` (like the
   #1956 device-map-teardown joins), so a genuine management-VRF bind failure also
   fails the commit closed. A failed commit is the retry owner (the next apply
-  re-reconciles). The heartbeat restart that follows the rebind is surfaced the
+  re-reconciles). The rebind skips only a confirmed missing link for a configured
+  tagged management unit that was not materialized (for example, an unzoned
+  parent); missing base interfaces and all other lookup/bind failures still fail
+  closed. The heartbeat restart that follows the rebind is surfaced the
   same way (#9751): `restartHeartbeatAfterRebind` joins a restart that exhausted
   its bind retries into `networkdErr`. That restart leaves the heartbeat stopped,
   owing a retry the next apply performs. The old call discarded

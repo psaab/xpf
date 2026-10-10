@@ -3,11 +3,11 @@ package routing
 import (
 	"errors"
 	"fmt"
+	"github.com/psaab/xpf/pkg/config"
+	"github.com/vishvananda/netlink"
 	"log/slog"
 	"strings"
 	"sync"
-
-	"github.com/vishvananda/netlink"
 )
 
 // VRFSpec describes a single VRF by its logical name (no "vrf-"
@@ -217,7 +217,9 @@ func (v *vrfManager) MissTerminatorNeedsReconcile() bool {
 	return v.term != nil && (v.termRequired || v.termRemovePending)
 }
 
-// BindInterfaceToVRF binds a network interface to a VRF device.
+// BindInterfaceToVRF binds a network interface to a VRF device. For management
+// physical interfaces it also binds their VLAN descendants, whose independent
+// kernel links must carry the same VRF master.
 //
 // A VRF link is type-asserted before binding: reconcile's name-based
 // reclamation can be separated from this call by other netlink activity.
@@ -238,11 +240,62 @@ func (v *vrfManager) BindInterfaceToVRF(ifaceName, instanceName string) error {
 	if !ok || vrfLink == nil || vrfLink.Attrs() == nil {
 		return fmt.Errorf("VRF %s is not a VRF device", vrfName)
 	}
-	if err := v.ops.LinkSetMaster(iface, vrfLink); err != nil {
-		return fmt.Errorf("bind %s to VRF %s: %w", ifaceName, vrfName, err)
+	if err := v.bindLinkToVRF(ifaceName, iface, vrfLink); err != nil {
+		return err
 	}
-	slog.Info("interface bound to VRF", "interface", ifaceName, "vrf", vrfName)
+	if instanceName == config.ManagementVRFInstanceName &&
+		config.IsManagementIfName(ifaceName) {
+		if _, isVLAN := iface.(*netlink.Vlan); !isVLAN {
+			return v.bindManagementVLANDescendants(iface, vrfLink)
+		}
+	}
 	return nil
+}
+
+func (v *vrfManager) bindLinkToVRF(ifaceName string, iface netlink.Link, vrf *netlink.Vrf) error {
+	if iface == nil || iface.Attrs() == nil {
+		return fmt.Errorf("interface %s has no link attributes", ifaceName)
+	}
+	attrs := iface.Attrs()
+	vrfIndex := vrf.Attrs().Index
+	if vrfIndex > 0 && attrs.MasterIndex == vrfIndex {
+		return nil
+	}
+	if err := v.ops.LinkSetMaster(iface, vrf); err != nil {
+		return fmt.Errorf("bind %s to VRF %s: %w", ifaceName, vrf.Attrs().Name, err)
+	}
+	slog.Info("interface bound to VRF", "interface", ifaceName, "vrf", vrf.Attrs().Name)
+	return nil
+}
+
+func (v *vrfManager) bindManagementVLANDescendants(root netlink.Link, vrf *netlink.Vrf) error {
+	links, err := v.ops.LinkList()
+	if err != nil {
+		return fmt.Errorf("list VLAN children of %s: %w", root.Attrs().Name, err)
+	}
+	queue := make([]netlink.Link, 1, len(links)+1)
+	queue[0] = root
+	var bindErrs []error
+	for next := 0; next < len(queue); next++ {
+		parent := queue[next]
+		parentAttrs := parent.Attrs()
+		if parentAttrs == nil || parentAttrs.Index <= 0 {
+			continue
+		}
+		for _, link := range links {
+			vlan, ok := link.(*netlink.Vlan)
+			if !ok || vlan == nil || vlan.Attrs() == nil ||
+				vlan.Attrs().ParentIndex != parentAttrs.Index {
+				continue
+			}
+			childName := vlan.Attrs().Name
+			if err := v.bindLinkToVRF(childName, vlan, vrf); err != nil {
+				bindErrs = append(bindErrs, err)
+			}
+			queue = append(queue, vlan)
+		}
+	}
+	return errors.Join(bindErrs...)
 }
 
 // UnbindInterfaceFromVRFs detaches ifaceName only when its current master is
