@@ -177,9 +177,12 @@ func syncStatusDirectory(path string) error {
 }
 
 // ClearBinaryUpgradeStatusIfCurrent removes a postinst failure record only
-// when its staged version is the version currently committed by the cutover.
+// when its staged version is committed, or when the committed version differs
+// from the recorded running version. The latter clears superseded failures
+// after a newer cut while retaining same-version re-cuts and rollback resumes.
 // The upgrade lock serializes the current-link check and clear against other
-// cutovers. A missing, unreadable, or mismatched record is left untouched.
+// cutovers. Missing/unreadable records and records without a committed version
+// are retained.
 func (r *Runner) ClearBinaryUpgradeStatusIfCurrent(path string) (bool, error) {
 	if r == nil {
 		return false, fmt.Errorf("clear binary upgrade status: nil runner")
@@ -201,7 +204,9 @@ func (r *Runner) ClearBinaryUpgradeStatusIfCurrent(path string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("read committed version before clearing binary upgrade status: %w", err)
 	}
-	if current == "" || status.StagedVersion != current {
+	if current == "" ||
+		(status.StagedVersion != current &&
+			(status.RunningVersion == "" || current == status.RunningVersion)) {
 		return false, nil
 	}
 	if err := ClearBinaryUpgradeStatus(path); err != nil {

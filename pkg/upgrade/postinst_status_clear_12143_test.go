@@ -7,12 +7,12 @@ import (
 	"testing"
 )
 
-func writePendingVersionStatus12143(t *testing.T, path, staged string) {
+func writePendingVersionStatus12143(t *testing.T, path, staged, running string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	data := fmt.Sprintf("format=1\nstaged_version=%s\nrunning_version=2.0.0\nreason=cut-failed\nrecovery=xpfd upgrade\nrecorded_at=2026-10-08T12:00:00Z\n", staged)
+	data := fmt.Sprintf("format=1\nstaged_version=%s\nrunning_version=%s\nreason=cut-failed\nrecovery=xpfd upgrade\nrecorded_at=2026-10-08T12:00:00Z\n", staged, running)
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestBareRerunAfterFailedPublishRetainsStatus12143(t *testing.T) {
 	}
 	fs.stagedVersion = "2.0.0" // failed publish leaves current-gen on 2.0.0
 	path := filepath.Join(t.TempDir(), "upgrade-deferred")
-	writePendingVersionStatus12143(t, path, "3.0.0")
+	writePendingVersionStatus12143(t, path, "3.0.0", "2.0.0")
 	if err := r.Run(Options{}); err != nil {
 		t.Fatalf("bare re-run of prior generation: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestRollingAfterFailedPublishRetainsStatus12143(t *testing.T) {
 	}
 	fs.stagedVersion = "2.0.0"
 	path := filepath.Join(t.TempDir(), "upgrade-deferred")
-	writePendingVersionStatus12143(t, path, "3.0.0")
+	writePendingVersionStatus12143(t, path, "3.0.0", "2.0.0")
 	if err := runRollingWith(r, cluster(), fastRC()); err != nil {
 		t.Fatalf("rolling re-run of prior generation: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestResumeRollbackAfterPublishRetainsStatus12143(t *testing.T) {
 	}
 	publishStagedGen(t, r)
 	path := filepath.Join(t.TempDir(), "upgrade-deferred")
-	writePendingVersionStatus12143(t, path, "3.0.0")
+	writePendingVersionStatus12143(t, path, "3.0.0", "1.0.0")
 	if err := r.Run(Options{}); err != nil {
 		t.Fatalf("resume rollback: %v", err)
 	}
@@ -114,6 +114,42 @@ func TestResumeRollbackAfterPublishRetainsStatus12143(t *testing.T) {
 	assertStatusRetained12143(t, r, path, "3.0.0", current)
 }
 
+func TestSupersededStatusClearsAfterNewerRollingCut12143(t *testing.T) {
+	fs := newFakeSystem(t, "2.0.0")
+	r, cfg := testEnv(t, fs)
+	seedInitialCurrent(t, r, cfg, "1.0.0")
+	cluster := func() *fakeCluster {
+		return &fakeCluster{peerAlive: true, synced: true, compatible: true, peerReady: true, drainAfter: 1}
+	}
+	if err := runRollingWith(r, cluster(), fastRC()); err != nil {
+		t.Fatalf("initial rolling cut: %v", err)
+	}
+
+	fs.stagedVersion = "4.0.0"
+	for _, bin := range managedBins {
+		writeFakeBin(t, filepath.Join(cfg.StagedDir, bin), "binary-"+bin+"-4.0.0")
+	}
+	publishStagedGen(t, r)
+
+	path := filepath.Join(t.TempDir(), "upgrade-deferred")
+	writePendingVersionStatus12143(t, path, "3.0.0", "2.0.0")
+	if err := runRollingWith(r, cluster(), fastRC()); err != nil {
+		t.Fatalf("rolling cut to superseding version: %v", err)
+	}
+	current, err := r.readCurrentVersion()
+	if err != nil || current != "4.0.0" {
+		t.Fatalf("current = %q, err=%v; want newer committed 4.0.0", current, err)
+	}
+	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(path)
+	if err != nil || !cleared {
+		t.Fatalf("superseded clear = %v, err=%v; want record cleared", cleared, err)
+	}
+	status := ReadBinaryUpgradeStatus(path)
+	if status.ReadErr != nil || status.Recorded {
+		t.Fatalf("status after superseded clear = %+v, want absent", status)
+	}
+}
+
 func TestMatchingCommittedVersionClearsStatus12143(t *testing.T) {
 	fs := newFakeSystem(t, "2.0.0")
 	r, cfg := testEnv(t, fs)
@@ -122,7 +158,7 @@ func TestMatchingCommittedVersionClearsStatus12143(t *testing.T) {
 		t.Fatalf("cut to staged version: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "upgrade-deferred")
-	writePendingVersionStatus12143(t, path, "2.0.0")
+	writePendingVersionStatus12143(t, path, "2.0.0", "1.0.0")
 	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(path)
 	if err != nil || !cleared {
 		t.Fatalf("matching clear = %v, err=%v; want cleared", cleared, err)

@@ -953,12 +953,15 @@ window for ALL FOUR managed binaries:
   reinstall is treated as resolved rather than leaving false pending state.
   `xpfd upgrade status` renders the local record; unauthenticated `/health`
   reports only readable/pending state, a stable reason code, and timestamp
-  (#5031), not exact build versions. A cut clears the record only when the
-  record's staged version matches `versions/current`; a successful bare re-cut
-  of the previous generation therefore leaves the failure visible. Clustered
-  stage-only upgrades and `XPF_NO_POSTINST_CUT=1` remain intentional and do not
-  create a failure record. A later stage-only install does not rewrite an
-  existing record: its staged version describes the failure that created it,
+  (#5031), not exact build versions. After a successful CLI cut, the status gate
+  clears the record when its staged version matches `versions/current`, or when
+  a nonempty committed version differs from the record's running version,
+  showing that the node has moved past the recorded skew. A bare or rolling
+  re-cut of the same version as the recorded running version remains pending;
+  resuming a rollback to that recorded running version also remains pending.
+  Clustered stage-only upgrades and `XPF_NO_POSTINST_CUT=1` remain intentional
+  and do not create a failure record. A later stage-only install does not rewrite
+  an existing record: its staged version describes the failure that created it,
   not necessarily the newest dpkg-unpacked build.
   For deferred publish, recover with `xpfd publish-generation && xpfd upgrade`
   (`dpkg-reconfigure xpf` is equivalent). A bare `xpfd upgrade` does not
@@ -971,6 +974,17 @@ window for ALL FOUR managed binaries:
   `xpfd upgrade --rolling`, never the bare standalone verb; the postinst
   recovery hint is node-id-aware and the runtime gate in `Runner.Run` refuses
   an uncoordinated cut (#5284).
+  If `xpfd upgrade status` reports unreadable, a leftover
+  `/var/lib/dpkg/info/xpf.upgrade-deferred-unreadable` marker blocks all CLI
+  clears, even if the ordinary status record is readable. Fix the underlying
+  storage/permission problem, then run a dpkg operation whose postinst can
+  durably rewrite the status record or verify a successful cut; only those
+  postinst paths remove the marker. `dpkg-reconfigure xpf` or reinstall invokes
+  postinst but clears the marker only if it reaches one of those paths. A
+  clustered stage-only postinst (including reconfigure that takes that branch)
+  and a successful rolling CLI cut alone do not remove the marker; there is no
+  CLI bypass. Keep the marker until postinst can safely persist replacement
+  status or confirm the committed version. Do not delete the marker manually.
 - **Disk budget.** Each binary set is ~50-70 MB (dominated by `xpfd`
   embedding the kernel-verified shim + `xpf-userspace-dp`). Steady-state
   copies: `staged/` (1) + `staged-gen/` current+1 (2) + `versions/`
