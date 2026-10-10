@@ -1,6 +1,7 @@
 package upgrade
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -462,8 +463,11 @@ func TestClearPreQuarantineRaceRestoresNewerRecord12143(t *testing.T) {
 // TestClearRechecksUnreadableMarkerBeforeQuarantine12143 pins the MINOR-B
 // re-check: a marker installed between the gate read and the locked re-read
 // must fail the clear with the marker error and retain the record. Kills the
-// MB0 mutant (re-check deleted). The pre-quarantine hook installs the marker
-// at exactly the re-check point, deterministically.
+// MB0 mutant (re-check deleted). The seam redirects only the re-check: the
+// gate read (ReadBinaryUpgradeStatus) stays on the production constant, so a
+// scratch marker installed before the call is invisible to the gate and
+// visible to the re-check, deterministically (no hook: the pre-quarantine
+// hook fires after the re-check).
 func TestClearRechecksUnreadableMarkerBeforeQuarantine12143(t *testing.T) {
 	r, cfg, s := statusProcessEnv12143(t, "2.0.0")
 	seedInitialCurrent(t, r, cfg, "1.0.0")
@@ -495,11 +499,43 @@ func TestClearRechecksUnreadableMarkerBeforeQuarantine12143(t *testing.T) {
 		t.Fatal(err)
 	}
 	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(path, proof)
-	if err == nil || cleared {
+	if err == nil || cleared || !strings.Contains(err.Error(), marker) {
 		t.Fatalf("marker re-check: cleared=%t err=%v; want (false, marker error)", cleared, err)
 	}
 	after := ReadBinaryUpgradeStatus(path)
 	if after.ReadErr != nil || !after.Recorded || after.StagedVersion != "3.0.0" {
 		t.Fatalf("marker re-check: after=%+v; want the 3.0.0 record retained", after)
+	}
+}
+
+// TestClearRecheckMarkerStatErrorFailsClosed12143 pins the re-check's
+// non-ENOENT branch: a marker stat error must fail the clear closed and
+// retain the record (kills ERR0: stat error treated as "no marker").
+func TestClearRecheckMarkerStatErrorFailsClosed12143(t *testing.T) {
+	r, cfg, s := statusProcessEnv12143(t, "2.0.0")
+	seedInitialCurrent(t, r, cfg, "1.0.0")
+	if err := r.Run(Options{}); err != nil {
+		t.Fatalf("initial cut: %v", err)
+	}
+	stageStatusVersion12143(t, cfg, "4.0.0")
+	s.stagedVersion = "4.0.0"
+	publishStagedGen(t, r)
+	if err := r.Run(Options{}); err != nil {
+		t.Fatalf("healthy 4.0.0 cut: %v", err)
+	}
+	proof := r.LastCommittedCut()
+	path := filepath.Join(t.TempDir(), "upgrade-deferred")
+	writePendingVersionStatus12143(t, path, "3.0.0", "2.0.0")
+	previousPath := binaryUpgradeStatusUnreadablePath
+	// ENOTDIR: the marker's parent is the regular status file.
+	binaryUpgradeStatusUnreadablePath = filepath.Join(path, "marker")
+	t.Cleanup(func() { binaryUpgradeStatusUnreadablePath = previousPath })
+	cleared, err := r.ClearBinaryUpgradeStatusIfCurrent(path, proof)
+	if cleared || !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("marker stat error: cleared=%t err=%v; want (false, ENOTDIR)", cleared, err)
+	}
+	after := ReadBinaryUpgradeStatus(path)
+	if after.ReadErr != nil || !after.Recorded || after.StagedVersion != "3.0.0" {
+		t.Fatalf("marker stat error: after=%+v; want the 3.0.0 record retained", after)
 	}
 }
