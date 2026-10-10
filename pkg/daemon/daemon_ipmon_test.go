@@ -463,6 +463,14 @@ func (hardFailFRRExec) FrrReloadPy(context.Context, string) error {
 func (hardFailFRRExec) VtyshLoad(context.Context, string) ([]byte, error) {
 	return nil, errors.New("vtysh -f boom")
 }
+
+func (hardFailFRRExec) VtyshLoadDaemon(context.Context, string, string) ([]byte, error) {
+	return nil, errors.New("vtysh -d -f boom")
+}
+
+func (hardFailFRRExec) VtyshDaemon(context.Context, string, string) ([]byte, error) {
+	return nil, errors.New("vtysh -d -c boom")
+}
 func (hardFailFRRExec) VtyshStream(context.Context, string) (io.ReadCloser, func() error, error) {
 	return io.NopCloser(strings.NewReader("")), func() error { return nil }, nil
 }
