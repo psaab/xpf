@@ -522,19 +522,19 @@ func TestBootstrapLifelineNeutralizesResurrectableLinksOnRename12156(t *testing.
 	}
 }
 
-// TestRenamePositionalUnfreedSkipsCurrentLinkNeutralize12156 pins finding B
-// (BALT direction): an unknown NIC that failed ITS OWN temp rename still
-// wears another NIC's final name, so its "own" current link is the known
-// owner's live file. NIC B (unknown, MAC-form ge-0-0-0 claim) wants fxp0;
-// NIC A (known enp5s0, chain fxp0.link, currently fxp0) wants ge-0-0-0.
-// B's temp rename fails, so ge-0-0-0 (B's CURRENT name, A's final) is
-// unfreed. B must skip neutralizing ge-0-0-0.link (A's live file, which A
-// rewrites with its verified chain in its own turn) while still
-// neutralizing the stale fxp0.link. A's chain must be kept in 200/200 runs
-// regardless of phase-2 map order (the reviewer TestACUnfreedOrderDependence
-// shape, which showed the chain absent in ~20/200 without the skip); the
-// pass still reports the #7205 unfreed error.
-func TestRenamePositionalUnfreedSkipsCurrentLinkNeutralize12156(t *testing.T) {
+// TestRenamePositionalUnfreedKeepsOwnerChain12156 pins finding B: an unknown
+// NIC that failed ITS OWN temp rename still wears another NIC's final name.
+// NIC B (unknown, MAC-form ge-0-0-0 claim) wants fxp0; NIC A (known enp5s0,
+// chain fxp0.link, currently fxp0) wants ge-0-0-0. B's temp rename fails, so
+// ge-0-0-0 (B's CURRENT name, A's final) is unfreed. B neutralizes BOTH its
+// current and stale-final links; with the unknowns-first ordering, A rewrites
+// ge-0-0-0.link with its verified chain AFTER every neutralize, so the chain
+// survives in 200/200 runs regardless of map order within each class (the
+// reviewer TestACUnfreedOrderDependence shape: map-order loop without
+// ordering lost it ~20/200; knowns-first loses 200/200). The pass still
+// reports the #7205 unfreed error. (Fold-4 carried an unfreed[current] skip
+// here; fold-5 deleted it — the skip made the ordering vacuous.)
+func TestRenamePositionalUnfreedKeepsOwnerChain12156(t *testing.T) {
 	chain := "# Managed by xpfd \u2014 do not edit\n[Match]\nOriginalName=enp5s0\n\n[Link]\nName=fxp0"
 	macForm := "# Managed by xpfd \u2014 do not edit\n[Match]\nMACAddress=52:54:00:00:00:0b\n\n[Link]\nName=ge-0-0-0\nMTUBytes=1500\n"
 	for i := 0; i < 200; i++ {
@@ -548,9 +548,9 @@ func TestRenamePositionalUnfreedSkipsCurrentLinkNeutralize12156(t *testing.T) {
 		}
 		// Slice order: B (unknown, wears ge-0-0-0, wants fxp0) sorts
 		// first; A (known enp5s0, wears fxp0, wants ge-0-0-0) second.
-		// B's temp rename fails, so ge-0-0-0 is unfreed: B's current
-		// link IS A's live file. B must spare it and still take the
-		// stale fxp0.link; A rewrites its own name with its chain.
+		// B's temp rename fails, so ge-0-0-0 is unfreed. B neutralizes
+		// both links; unknowns-first ordering lets A rewrite its own
+		// name with its chain after every neutralize.
 		nics := []pciNIC{
 			{sortKey: 1, busAddr: "0000:05:00.0", name: "ge-0-0-0"},
 			{sortKey: 1, busAddr: "0000:06:00.0", name: "fxp0"},

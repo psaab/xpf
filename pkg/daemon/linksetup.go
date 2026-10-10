@@ -263,10 +263,9 @@ func assignName(idx, fpc int, clusterMode bool) string {
 // final name. When the original is unknown and the NIC is already at its
 // target, it skips only the write (the retained file stays); when the target
 // differs, it neutralizes the resurrectable O.link + stale T.link claims
-// (MAJOR-1; except the unfreed[current] current-link spare below) and still
-// attempts the rename. renameFn is injected so production passes renameInterface
-// and tests can model EEXIST semantics. Returns true if any .link changed or any
-// rename ran.
+// (MAJOR-1) and still attempts the rename. renameFn is injected so production
+// passes renameInterface and tests can model EEXIST semantics. Returns true
+// if any .link changed or any rename ran.
 func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(from, to string) error) (bool, []error) {
 	// Phase 0: snapshot targets and capture each verified OriginalName or
 	// unknown sentinel up-front, from the .link set as it exists BEFORE this
@@ -309,16 +308,13 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 	// abandoning it midway would leave the NIC set half-renamed, which is
 	// worse than finishing and reporting — while the caller learns naming did
 	// not converge. Mirrors the device-map path's renameErrs (#4956).
-	//
 	// MINOR-3: unknown NICs run BEFORE any known NIC writes (order within
-	// each class is still map order). The unfreed[current] skip spares a
-	// file the known owner must rewrite; with unknowns-first the owner's
-	// write always lands after every neutralize, so no map order can
-	// interleave a neutralize between the owner's write and the end of the
-	// pass. Residual: if the known owner's write itself FAILS, the spared
-	// MAC-form claim survives (two faults; both reported in errs). The
-	// ordering key must match the loop's unknown predicate, including the
-	// collided-temp "" re-derivation below — hence the helper.
+	// each class is still map order). Every neutralize lands before the
+	// known owner's writeLinkFile, so no map order can interleave a
+	// neutralize between the owner's write and the end of the pass — and a
+	// failed owner write leaves NO claim behind (fail-closed: nothing was
+	// spared). The ordering key must match the loop's unknown predicate,
+	// including the collided-temp "" re-derivation below — hence the helper.
 	var errs []error
 	// resolvedOriginal is the loop's unknown predicate: the pre-captured
 	// value, or the re-derivation for collided-temp currents whose capture
@@ -370,26 +366,21 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 			// not the #5842 errs channel (errs carries only failures: a
 			// neutralize that fails, a failed rename, or the #7205 unfreed
 			// error).
-			// Finding B (BALT direction): when THIS NIC failed its own temp
-			// rename it still wears its current name — which is another
-			// NIC's final (unfreed[current] is set: the name's current
-			// occupant is not its final owner). Its "own" current link is
-			// then the known owner's live file, and neutralizing it races
-			// the owner's writeLinkFile(final, original) call in the else
-			// branch below. Skip the current link then; with the
-			// unknowns-first ordering the owner rewrites its own name with
-			// its verified chain after every neutralize. Residual: if that
-			// owner write itself FAILS, the spared claim survives (two
-			// faults; both in errs). The stale final link ALWAYS goes: for
-			// U→X with X unfreed, X's occupant V writes Y.link (its own
-			// final), never X.link — nobody else touches the stale claim,
-			// and sparing it would resurrect V under U's target (B-REG
-			// fail-open).
-			targets := []string{linkPrefix + current + ".link", linkPrefix + final + ".link"}
-			if unfreed[current] {
-				targets = []string{linkPrefix + final + ".link"}
-			}
-			for _, name := range targets {
+			// Finding B: an unknown NIC that failed its own temp rename
+			// still wears another NIC's final name — but with the
+			// unknowns-first ordering above, this neutralize runs BEFORE
+			// the known owner's writeLinkFile(final, original) call in the
+			// else branch below, so there is no map-order race: the owner
+			// always rewrites its own name after every neutralize. (Fold-4
+			// carried an unfreed[current] skip here; fold-5 deleted it —
+			// the skip made the ordering vacuous and left a fail-open
+			// residual on owner-write failure. With no skip, a failed
+			// owner write leaves NO claim behind: fail-closed.)
+			// The stale final link ALWAYS goes: for U→X with X unfreed,
+			// X's occupant V writes Y.link (its own final), never X.link —
+			// nobody else touches the stale claim, and sparing it would
+			// resurrect V under U's target (B-REG fail-open).
+			for _, name := range []string{linkPrefix + current + ".link", linkPrefix + final + ".link"} {
 				if err := neutralizeResurrectableLink(name); err != nil {
 					errs = append(errs, err)
 				} else {
