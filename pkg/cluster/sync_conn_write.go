@@ -89,6 +89,42 @@ func (s *SessionSync) queueMessage(msg []byte, sentCounter *atomic.Uint64, sourc
 	return false
 }
 
+// RequestPeerSessionInventory asks the connected peer to send its
+// authoritative session inventory. Generation zero is reserved for no pending
+// request; nonzero generations are correlated locally, not sent on the wire.
+func (s *SessionSync) RequestPeerSessionInventory(generation uint64) bool {
+	if generation == 0 {
+		return false
+	}
+	s.mu.Lock()
+	if s.activeConnLocked() == nil || !s.stats.Connected.Load() {
+		s.mu.Unlock()
+		return false
+	}
+	s.bulkMu.Lock()
+	if (s.inventoryPending && generation < s.inventoryPendingGeneration) ||
+		(s.inventoryActive && generation < s.inventoryActiveGeneration) {
+		s.bulkMu.Unlock()
+		s.mu.Unlock()
+		return false
+	}
+	msg := encodeRawMessage(syncMsgBulkRequest, nil)
+	if !s.enqueueQueuedFrame(msg) {
+		s.stats.Errors.Add(1)
+		s.bulkMu.Unlock()
+		s.mu.Unlock()
+		return false
+	}
+	s.inventoryPending = true
+	s.inventoryPendingGeneration = generation
+	// A bulk accepted before the first pending request cannot satisfy it. Keep
+	// an already active request intact: a completed bulk for the same helper
+	// generation also satisfies a retry queued while that bulk was running.
+	s.bulkMu.Unlock()
+	s.mu.Unlock()
+	return true
+}
+
 // QueueSessionV4 queues a v4 session for synchronization to the peer. The
 // session is stamped with a fresh #2170 install generation so the matching
 // delete can echo it and the peer can refuse a stale superseded delete.

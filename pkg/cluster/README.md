@@ -4531,6 +4531,14 @@ it.
     `bulkEverCompleted`, and `OnBulkSyncReceived`. The failover sync hold therefore
     stays armed until a later complete bulk is reconciled instead of treating a
     keep-all fallback as authoritative.
+  - Transient helper transport failures are tracked per session, separately from
+    the received-key set. A failed key keeps the receive window open at
+    `BulkEnd`, so the receiver neither reconciles an incomplete snapshot nor
+    sends `BulkAck` / releases the failover hold. A later successful install
+    clears only its key's failure marker. The sender's existing bounded
+    bulk-prime retry re-sends the authoritative table; semantic helper
+    refusals remain the intentional-ACK path. Cell:
+    `sync_bulk_install_outcome_12166_test.go`.
   - `snapshotZoneOwnership` captures each RG's primary answer, the zone-level
     answers and RG 0 fallback at BulkStart; per-session reconcile uses only
     those captured answers, never re-querying ownership at BulkEnd.

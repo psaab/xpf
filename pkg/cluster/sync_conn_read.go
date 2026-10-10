@@ -248,6 +248,18 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 				}
 			}
 		}
+	case syncMsgBulkRequest:
+		// Request-triggered sends use the same authoritative source selection
+		// as cold-prime bulks. Coalesce concurrent requests before they reach
+		// bulkSendMu, without blocking this receive loop.
+		if s.bulkRequestInFlight.CompareAndSwap(false, true) {
+			go func() {
+				defer s.bulkRequestInFlight.Store(false)
+				if err := s.doBulkSync(); err != nil {
+					slog.Warn("cluster sync: requested bulk sync failed", "err", err)
+				}
+			}()
+		}
 	case syncMsgBulkStart:
 		var epoch uint64
 		if len(payload) >= 8 {
@@ -323,6 +335,15 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 			break
 		}
 		s.bulkInProgress = true
+		s.bulkRecvSerial++
+		if s.bulkRecvSerial == 0 {
+			s.bulkRecvSerial++
+		}
+		s.inventoryActive = s.inventoryPending
+		s.inventoryActiveGeneration = s.inventoryPendingGeneration
+		if !s.inventoryActive {
+			s.inventoryActiveGeneration = 0
+		}
 		s.bulkRecvEpoch = epoch
 		// #9174 V013: remember WHICH BOOT started this bulk, so its end marker
 		// can be matched on more than the epoch. Recorded on the accepted path
@@ -333,6 +354,8 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		s.bulkRecvConn = conn
 		s.bulkRecvV4 = make(map[dataplane.SessionKey]struct{})
 		s.bulkRecvV6 = make(map[dataplane.SessionKeyV6]struct{})
+		s.bulkInstallFailedV4 = make(map[dataplane.SessionKey]struct{})
+		s.bulkInstallFailedV6 = make(map[dataplane.SessionKeyV6]struct{})
 		s.bulkZoneSnapshot = zoneSnap
 		s.bulkMu.Unlock()
 		// The generation reset moves to the ACCEPTED path only. It is the
@@ -516,8 +539,21 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		if !endInc.known() || !s.bulkRecvIncarnation.known() {
 			s.stats.BulkEndsEpochOnlyMatched.Add(1)
 		}
+		bulkSerial := s.bulkRecvSerial
+		failedV4, failedV6 := len(s.bulkInstallFailedV4), len(s.bulkInstallFailedV6)
 		s.bulkMu.Unlock()
-		if !s.reconcileStaleSessions() {
+		if failedV4+failedV6 > 0 {
+			// Do not reconcile this incomplete authoritative snapshot: absent
+			// rows would be deleted. Keeping the receive window open also keeps
+			// transfer readiness blocked until the sender's bounded bulk retry
+			// re-requests the table. Semantic refusals are excluded from these
+			// sets and retain their intentional-ACK behavior.
+			slog.Warn("cluster sync: bulk contains transient helper install failures; withholding BulkAck and failover release",
+				"epoch", epoch, "failed_v4", failedV4, "failed_v6", failedV6)
+			break
+		}
+		reconciled, inventoryGen, inventoryRequested := s.reconcileStaleSessions(bulkSerial)
+		if !reconciled {
 			slog.Warn("cluster sync: bulk reconcile did not complete; withholding BulkAck and failover release",
 				"epoch", epoch)
 			break
@@ -528,6 +564,20 @@ func (s *SessionSync) handleMessage(conn net.Conn, msgType uint8, payload []byte
 		s.bulkEverCompleted.Store(true)
 		if s.OnBulkSyncReceived != nil {
 			go s.OnBulkSyncReceived()
+		}
+		if inventoryRequested {
+			s.bulkMu.Lock()
+			// A retry for the same helper generation is already covered by
+			// this successful full inventory. A newer helper generation stays
+			// pending and requires its own accepted bulk window.
+			if s.inventoryPending && s.inventoryPendingGeneration == inventoryGen {
+				s.inventoryPending = false
+				s.inventoryPendingGeneration = 0
+			}
+			s.bulkMu.Unlock()
+			if cb := s.OnSessionInventoryBulkReceived; cb != nil {
+				go cb(inventoryGen)
+			}
 		}
 	case syncMsgBulkAck:
 		if len(payload) < 8 {
