@@ -1,0 +1,137 @@
+{
+  "interfaces": [
+    {
+      "name": "ge-0/0/0.0",
+      "zone": "wan",
+      "egress_zone": "wan",
+      "ifindex": 10,
+      "addresses": [
+        { "family": "inet", "address": "198.51.100.2/24" },
+        { "family": "inet6", "address": "2001:db8::2/64" }
+      ]
+    },
+    {
+      "name": "ge-0/0/1.0",
+      "egress_zone": "vrf",
+      "zone": "vrf",
+      "routing_instance": "VR1",
+      "ifindex": 11,
+      "addresses": [
+        { "family": "inet", "address": "192.0.2.2/24" },
+        { "family": "inet6", "address": "2001:db8:1::2/64" }
+      ]
+    },
+    {
+      "name": "ge-0/0/2.0",
+      "ifindex": 12,
+      "addresses": [
+        { "family": "inet", "address": "203.0.113.2/24" },
+        { "family": "inet6", "address": "2001:db8:2::2/64" }
+      ]
+    },
+    {
+      "name": "fxp0.0",
+      "zone": "wan",
+      "egress_zone": "wan",
+      "ifindex": 13,
+      "addresses": [
+        { "family": "inet", "address": "192.168.255.10/24" }
+      ]
+    },
+    {
+      "name": "em0.0",
+      "zone": "wan",
+      "egress_zone": "wan",
+      "ifindex": 14,
+      "addresses": [
+        { "family": "inet", "address": "10.255.0.1/24" }
+      ]
+    },
+    {
+      "name": "fab0.0",
+      "zone": "wan",
+      "egress_zone": "wan",
+      "ifindex": 15,
+      "addresses": [
+        { "family": "inet", "address": "10.99.1.1/24" }
+      ]
+    },
+    {
+      "name": "lo0.0",
+      "zone": "wan",
+      "egress_zone": "wan",
+      "ifindex": 16,
+      "addresses": [
+        { "family": "inet", "address": "192.0.2.250/32" }
+      ]
+    },
+    {
+      "name": "lo0.1",
+      "zone": "wan",
+      "egress_zone": "wan",
+      "ifindex": 0,
+      "addresses": [
+        { "family": "inet", "address": "192.0.2.251/32" }
+      ]
+    },
+    {
+      "name": "gr-0/0/0.0",
+      "zone": "wan",
+      "egress_zone": "wan",
+      "ifindex": 20,
+      "tunnel": true,
+      "addresses": [
+        { "family": "inet", "address": "10.255.192.42/32" },
+        { "family": "inet6", "address": "2001:db8:4::42/128" }
+      ]
+    }
+  ],
+  "zones": [
+    { "name": "wan", "id": 1 },
+    { "name": "vrf", "id": 2 }
+  ],
+  "cases": [
+    {
+      "name": "to-zone",
+      "rule": { "name": "snat-zone", "to_zone": "wan", "interface_mode": true },
+      "want": [
+        "198.51.100.2", "2001:db8::2",
+        "10.255.192.42", "2001:db8:4::42"
+      ]
+    },
+    {
+      "name": "to-interface",
+      "rule": { "name": "snat-interface", "to_interface": "ge-0/0/1.0", "interface_mode": true },
+      "want": [ "192.0.2.2", "2001:db8:1::2" ]
+    },
+    {
+      "name": "to-routing-instance",
+      "rule": { "name": "snat-ri", "to_routing_instance": "VR1", "interface_mode": true },
+      "want": [ "192.0.2.2", "2001:db8:1::2" ]
+    },
+    {
+      "name": "unscoped",
+      "rule": { "name": "snat-any", "interface_mode": true },
+      "want": [
+        "198.51.100.2", "2001:db8::2",
+        "192.0.2.2", "2001:db8:1::2",
+        "10.255.192.42", "2001:db8:4::42"
+      ]
+    },
+    {
+      "name": "bare-name-does-not-match-unit",
+      "rule": { "name": "snat-bare", "to_interface": "ge-0/0/1", "interface_mode": true },
+      "want": []
+    },
+    {
+      "name": "off-rule",
+      "rule": { "name": "snat-off", "interface_mode": true, "off": true },
+      "want": []
+    },
+    {
+      "name": "non-matching-scope",
+      "rule": { "name": "snat-other", "to_zone": "missing", "interface_mode": true },
+      "want": []
+    }
+  ]
+}
