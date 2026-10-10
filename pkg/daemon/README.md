@@ -2116,12 +2116,13 @@ never lock an operator out of a remote box it manages.
   a committed box never rewrites `fxp0` from the day-0 snapshot. Confirmation
   of the first-commit window clears the in-memory snapshot.
 
-  The snapshot is process-local, not durable. If xpfd restarts while the
-  first-commit window is pending, a marked lifeline may be retained; if the
-  file is missing/unmarked, rollback reports DEGRADED rather than claiming
-  restoration. It cannot recreate the original bytes from the prior process.
-  Each successful file removal or restoration triggers `networkctl reload`;
-  teardown then clears FRR and detaches the dataplane instead of applying an
+  The snapshot is captured in memory at bootstrap exit and ALSO persisted
+  durably (generation-bound record, shared #12155 file/JSON contract), so a
+  crash between PromoteRollback and the daemon teardown still restores on
+  restart. If no snapshot exists (memory or durable) and the file is
+  missing/unmarked, rollback reports DEGRADED rather than claiming
+  restoration. At most one `networkctl reload` runs per teardown (not one per
+  file); teardown then clears FRR and detaches the dataplane instead of applying an
   empty config. The store persists the never-committed marker so a restart
   re-enters bootstrap. The detach also drops the #5275 armed flag and closes
   kernel transit forwarding: leaving `ip_forward=1` would route transit for a

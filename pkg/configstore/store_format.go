@@ -59,6 +59,18 @@ func (s *Store) ActiveConfig() *config.Config {
 	return s.compiled
 }
 
+// ActiveConfigGeneration returns the canonical content identity used by
+// commit-confirmed recovery to bind a durable transition to active state.
+// Byte-compatible with the #12155 implementation (shared marker contract).
+func (s *Store) ActiveConfigGeneration() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return guardedConfigHash(s.active)
+}
+
 // ActiveConfigAndText returns the compiled active config, its hierarchical
 // text, and its publication generation under one read lock. The three values
 // therefore describe the same active promotion.

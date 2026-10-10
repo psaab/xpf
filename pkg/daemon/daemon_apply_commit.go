@@ -1042,29 +1042,36 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 		// pending rollback target — nothing happened, nothing to apply.
 		return
 	}
-	if prevCfg == nil {
-		// #1922 Item 1b: the first commit confirmed on a fresh store timed out.
-		// The store already reverted to the empty tree AND persisted the
-		// never-committed marker (PromoteRollback). A normal apply of an
-		// empty config is WRONG here — it would resurrect the dataplane the
-		// failed takeover started and leave a half-configured box. Instead
-		// roll the daemon back to bootstrap mode. Restore the captured lifeline
-		// only when the store says this was genuinely the first-commit window;
-		// a nil compiled target also represents a previously-committed config
-		// that failed recovery compilation (#6538).
-		//
+	// #12154 MAJOR-1: a genuine first-commit rollback takes the bootstrap
+	// path whether or not the compiled target is nil. After an Item-1b
+	// rollback + restart, Load compiles the committed=0 empty tree into a
+	// NON-nil config, so the next first-commit arm records a non-nil
+	// confirmPrevCfg with confirmPrevFirst=true; routing on prevCfg==nil
+	// alone sent that retry down the normal apply path and left the
+	// abandoned addressing live. firstCommitPending gates the recorded
+	// flag: PromoteRollback consumed the window above, so a stale or
+	// superseded generation must not take the bootstrap path on a leftover
+	// flag.
+	firstCommitRollback = firstCommitPending && firstCommitRollback
+	if prevCfg == nil || firstCommitRollback {
+		// A first commit can have either a nil target (fresh Store) or a
+		// compiled empty target (a never-committed Store loaded after an
+		// earlier first-commit rollback). Both must return to bootstrap; a
+		// nil target with firstCommitRollback=false is the #6538 recovery
+		// case and enters the same safe state without first-commit cleanup.
 		// #12154: stop every abandoned DHCP client on this first-commit rollback.
 		// The config-derived set is empty after promotion; Reconcile(nil) stops
 		// renewals and removes leases before bootstrap teardown returns.
-		firstCommitRollback = firstCommitPending && firstCommitRollback
 		if firstCommitRollback && d.dhcp != nil {
 			d.dhcp.Reconcile(nil)
 		}
-		slog.Warn("commit confirmed timed out with no compiled rollback target (first commit " +
-			"on a fresh store, or a recovered rollback target that no longer compiles); " +
-			"rolling back to BOOTSTRAP mode (retiring takeover state; restoring the " +
-			"lifeline only for the first-commit window)")
-		//
+		if firstCommitRollback {
+			slog.Warn("first commit confirmed timed out; returning to BOOTSTRAP mode " +
+				"(retiring takeover state and restoring the captured lifeline when available)")
+		} else {
+			slog.Warn("commit confirmed timed out with no compiled rollback target; entering " +
+				"the bootstrap/lifeline safe state without changing first-commit persistence")
+		}
 		// #6538: a nil prevCfg has a SECOND provenance — a window recovered by
 		// recoverPendingConfirmLocked whose rollback target failed even the
 		// lenient compile (so confirmPrevCfg was nil at re-arm time). The
