@@ -1500,7 +1500,9 @@ while IFS=$'\t' read -r gate has_helper; do
 	[[ "$has_helper" == "1" ]] || missing_helper_gates+=("$gate")
 done <<<"$helper_gate_inventory"
 hermetic_target=$(sed -n '/^test-wire-properties:/,/^$/p' "$makefile")
-if [[ "$helper_gate_count" == "23" && "${#missing_helper_gates[@]}" == "0" &&
+if [[ -z "$hermetic_target" ]]; then
+	bad "#12140: hermetic gate lookup swept ZERO lines for test-wire-properties — the target was renamed or removed (empty sweep)"
+elif [[ "$helper_gate_count" == "23" && "${#missing_helper_gates[@]}" == "0" &&
 	"$hermetic_target" != *"--require-helper-attestation"* ]]; then
 	ok "#12140: all $helper_gate_count cluster gate invocations require helper provenance; hermetic gate is excluded"
 else
@@ -1558,6 +1560,54 @@ while IFS=$'\t' read -r gate has_helper; do
 	fi
 done <<<"$helper_gate_inventory"
 
+# #12140: local helper MATCH + peer READABLE-but-stale. The per-gate loop
+# above forces a LOCAL mismatch first, so the peer-folding branch
+# (harness-result.sh:1288-1290) never ran in-suite: a refactor putting the
+# crash-gate carve-out before the mismatch elif would pass the suite while
+# letting crash gates attest a stale peer. The mock answers per node (the
+# #9044 fixture shape), and BOTH a crash gate and a non-crash gate must VOID:
+# the crash allowlist covers DOWN peers only and must not leak to readable
+# mismatches.
+# shellcheck disable=SC2329  # The harness calls this mock indirectly.
+incus() {
+	local arg node1=0 helper=0
+	for arg in "$@"; do
+		[[ "$arg" == *fw1* ]] && node1=1
+		[[ "$arg" == *'pidof xpf-userspace-dp'* ]] && helper=1
+	done
+	if ((helper)); then
+		if ((node1)); then echo "$helper_stale_sha  /proc/9876/exe"; else echo "$helper_sha  /proc/9876/exe"; fi
+	else
+		echo "$fake_sha  /proc/1234/exe"
+	fi
+}
+for gate in test-ha-crash test-failover; do
+	(harness_result_run --ledger "$LEDGER" --cluster --require-helper-attestation \
+		--env testenv --gate "$gate" --adapter smoke-cells \
+		--node fake:fw0 --node-peer fake:fw1 --build-exe "$WORK/xpfd" \
+		--build-helper-exe "$WORK/xpf-userspace-dp" -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+	if [[ "$(last_row_field gate)" == "$gate" &&
+		"$(last_row_field verdict)" == "VOID" &&
+		"$(last_row_field exe_check)" == "MATCH" &&
+		"$(last_row_field helper_exe_check)" == "MISMATCH" &&
+		"$(last_row_field helper_exe_scope)" == "both" &&
+		"$(last_row_field void_reason)" == *"helper_exe_check=MISMATCH"* ]]; then
+		ok "#12140: $gate voids a READABLE-but-stale peer helper (crash allowlist covers down peers only)"
+	else
+		bad "#12140: $gate peer-stale-helper gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check) helper_exe_check=$(last_row_field helper_exe_check) helper_exe_scope=$(last_row_field helper_exe_scope)"
+	fi
+done
+if [[ "$(last_row_field running_helper_exe_sha256_peer)" == "$helper_stale_sha" ]]; then
+	ok "#12140: the row carries the PEER's running helper sha, so what fw1 was running is recoverable"
+else
+	bad "#12140: running_helper_exe_sha256_peer is '$(last_row_field running_helper_exe_sha256_peer)', expected $helper_stale_sha"
+fi
+if [[ "$(last_row_field void_reason)" == *"peer_running_helper_exe_sha256"* ]]; then
+	ok "#12140: the helper VOID reason names the peer readback, so the row says WHICH node was unattributable"
+else
+	bad "#12140: helper VOID reason does not name the peer: $(last_row_field void_reason)"
+fi
+
 # shellcheck disable=SC2329  # The harness calls this mock indirectly.
 incus() {
 	local arg
@@ -1595,6 +1645,54 @@ if [[ "$(last_row_field verdict)" == "VOID" &&
 	ok "#12140: a down peer on a non-crash gate remains VOID"
 else
 	bad "#12140: non-crash down-peer gave verdict=$(last_row_field verdict) helper_exe_check=$(last_row_field helper_exe_check)"
+fi
+# #12140: missing PEER helper slot fails closed even on a crash gate
+# (harness-result.sh:1286-1287). The --build-helper-exe path always sets the
+# peer slot, and the manifest cells with missing slots never passed
+# --require-helper-attestation, so this branch had no in-suite fixture. The
+# peer reads back FINE here — only its deploy-time provenance is missing
+# (node 1 helper JSON null) — so a VOID pins the slot guard specifically,
+# not the empty-readback branch.
+write_manifest_fixture unknown "$manifest_peer_root_sha" "$manifest_peer_helper_sha"
+python3 - "$WORK/deploy-manifest.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    doc = json.load(f)
+doc["nodes"]["1"]["binaries"]["xpf-userspace-dp"] = None
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump(doc, f)
+    f.write("\n")
+PY
+# shellcheck disable=SC2329  # The harness calls this mock indirectly.
+incus() {
+	local arg node1=0 helper=0
+	for arg in "$@"; do
+		[[ "$arg" == *fw1* ]] && node1=1
+		[[ "$arg" == *'pidof xpf-userspace-dp'* ]] && helper=1
+	done
+	if ((helper)); then
+		echo "$manifest_helper_sha  /proc/9876/exe"
+	elif ((node1)); then
+		echo "$manifest_peer_root_sha  /proc/1234/exe"
+	else
+		echo "$manifest_root_sha  /proc/1234/exe"
+	fi
+}
+(XPF_REPO_ROOT="$MANIFEST_ROOT" XPF_DEPLOY_MANIFEST="$WORK/deploy-manifest.json" \
+	BPFRX_CLUSTER_ENV="$custom_cluster_env" harness_result_run --ledger "$LEDGER" --cluster \
+	--require-helper-attestation --env testenv --gate test-ha-crash --adapter smoke-cells \
+	--node custom:prod-fw0-blue --node-peer custom:prod-fw1-blue -- "$WORK/fake-gate.sh" >/dev/null 2>&1)
+if [[ "$(last_row_field gate)" == "test-ha-crash" &&
+	"$(last_row_field verdict)" == "VOID" &&
+	"$(last_row_field exe_check)" == "MATCH" &&
+	"$(last_row_field helper_exe_check)" == "UNAVAILABLE" &&
+	"$(last_row_field helper_exe_scope)" == "both" &&
+	"$(last_row_field void_reason)" == *"helper_exe_check=UNAVAILABLE"* &&
+	"$(last_row_field build_helper_exe_sha256)" == "$manifest_helper_sha" &&
+	"$(last_row_field build_helper_exe_sha256_peer)" == "None" ]]; then
+	ok "#12140: a missing peer helper slot voids even a crash gate (fail closed)"
+else
+	bad "#12140: missing peer helper slot gave verdict=$(last_row_field verdict) exe_check=$(last_row_field exe_check) helper_exe_check=$(last_row_field helper_exe_check) helper_exe_scope=$(last_row_field helper_exe_scope) peer_slot=$(last_row_field build_helper_exe_sha256_peer)"
 fi
 rm -f "$WORK/xpf-userspace-dp"
 unset -f incus _peer_incus_mock
