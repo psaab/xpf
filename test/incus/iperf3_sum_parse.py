@@ -215,8 +215,9 @@ def failover_stream_verdict(
     recovery_deadline_seconds: float = 3,
     *,
     json_stream: bool = False,
-) -> Tuple[bool, str]:
-    """Require all expected streams to resume within three seconds of failover."""
+    event_label: str = "failover",
+) -> Tuple[Optional[bool], str]:
+    """Require all expected streams to resume within three seconds of the event."""
     try:
         rows, _ = _oracle_interval_rows(text, json_stream)
     except ValueError as exc:
@@ -226,13 +227,22 @@ def failover_stream_verdict(
         if row[0] is not None and 0.5 <= row[2] - row[1] <= 1.5
     ]
 
+    if intervals:
+        last_end = max(row[2] for row in intervals)
+        if last_end < event_seconds + 1:
+            return (
+                None if event_label == "failback" else False,
+                f"client telemetry ends at {last_end:.2f}s, before the {event_label} "
+                f"event at {event_seconds:g}s: no {event_label} stream evidence",
+            )
+
     before = {
         stream for stream, start, _, bps in intervals
         if event_seconds - pre_window_seconds <= start < event_seconds and bps > 0
     }
     if len(before) != expected_streams:
         return False, (
-            f"expected {expected_streams} active streams before failover, observed "
+            f"expected {expected_streams} active streams before {event_label}, observed "
             f"{len(before)} ({', '.join(map(str, sorted(before))) or 'none'})"
         )
 
@@ -244,11 +254,11 @@ def failover_stream_verdict(
     missing = sorted(before - after)
     if missing:
         return False, (
-            f"streams {', '.join(map(str, missing))} carried data before failover "
+            f"streams {', '.join(map(str, missing))} carried data before {event_label} "
             f"but did not resume within {recovery_deadline_seconds:g}s"
         )
     return True, (
-        f"all {len(before)} pre-failover streams ({', '.join(map(str, sorted(before)))}) "
+        f"all {len(before)} pre-{event_label} streams ({', '.join(map(str, sorted(before)))}) "
         f"resumed data within {recovery_deadline_seconds:g}s"
     )
 
@@ -263,6 +273,15 @@ def main() -> int:
     parser.add_argument("--streams", type=int, required=True)
     parser.add_argument("--min-throughput-gbps", type=float, required=True)
     parser.add_argument("--crash-at", type=float, required=True)
+    parser.add_argument(
+        "--failback-at",
+        type=float,
+        default=None,
+        help=(
+            "seconds from iperf start to the manual-failback instant "
+            "(last RG moved); adds a second per-stream verdict"
+        ),
+    )
     parser.add_argument(
         "--json-stream",
         action="store_true",
@@ -281,8 +300,26 @@ def main() -> int:
             text, args.crash_at, args.streams, json_stream=args.json_stream
         ),
     ]
+    if args.failback_at is not None:
+        if args.failback_at <= args.crash_at:
+            checks.append((
+                False,
+                f"failback event at {args.failback_at:g}s does not follow the crash "
+                f"event at {args.crash_at:g}s: failback stream evidence is unordered",
+            ))
+        else:
+            checks.append(
+                failover_stream_verdict(
+                    text,
+                    args.failback_at,
+                    args.streams,
+                    json_stream=args.json_stream,
+                    event_label="failback",
+                )
+            )
     for ok, message in checks:
-        print(f"{'PASS' if ok else 'FAIL'} {message}")
+        status = "VOID" if ok is None else ("PASS" if ok else "FAIL")
+        print(f"{status} {message}")
     return 0
 
 

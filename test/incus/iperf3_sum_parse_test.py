@@ -73,20 +73,27 @@ class FailoverTelemetryTests(unittest.TestCase):
     def log(
         streams=range(5, 13),
         dead_after_crash=(),
+        dead_after_failback=(),
         delayed_streams=(),
         outage=(),
         duration=32,
+        failback_at=20,
     ):
         lines = []
         streams = tuple(streams)
         dead_after_crash = set(dead_after_crash)
         delayed_streams = set(delayed_streams)
         outage = set(outage)
+        dead_after_failback = set(dead_after_failback)
         sum_rates = []
         for second in range(duration):
             live_streams = [
                 stream for stream in streams
                 if not (stream in dead_after_crash and second >= 10)
+                and not (
+                    stream in dead_after_failback
+                    and second >= failback_at + 2
+                )
                 and not (stream in delayed_streams and 12 <= second < 15)
             ]
             interval_dipped = second in outage or second in (10, 11, 20, 21)
@@ -109,6 +116,11 @@ class FailoverTelemetryTests(unittest.TestCase):
             for stream in streams:
                 live = not interval_dipped
                 if stream in dead_after_crash and second >= 10:
+                    live = False
+                if (
+                    stream in dead_after_failback
+                    and second >= failback_at + 2
+                ):
                     live = False
                 if stream in delayed_streams and 12 <= second < 15:
                     live = False
@@ -223,6 +235,74 @@ class FailoverTelemetryTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("expected 8 active streams", reason)
         self.assert_json_twins(text)
+
+    def test_failback_stream_loss_is_detected_after_crash_oracle_passes(self):
+        text = self.log(
+            dead_after_failback=range(6, 13),
+            duration=32,
+            failback_at=20,
+        )
+        self.assertTrue(failover_interval_verdict(text)[0])
+        self.assertTrue(failover_stream_verdict(text, 10, 8)[0])
+
+        json_text = self.json_stream(text)
+        ok, reason = failover_stream_verdict(
+            json_text, 20, 8, json_stream=True, event_label="failback"
+        )
+        self.assertFalse(ok)
+        self.assertIn("streams 6, 7, 8, 9, 10, 11, 12", reason)
+
+        parser = os.path.join(os.path.dirname(__file__), "iperf3_sum_parse.py")
+        command = [
+            sys.executable,
+            parser,
+            "--failover-check",
+            "--json-stream",
+            "--streams",
+            "8",
+            "--min-throughput-gbps",
+            "1.0",
+            "--crash-at",
+            "10",
+            "--failback-at",
+            "20",
+        ]
+        result = subprocess.run(
+            command, input=json_text, capture_output=True, text=True, check=True
+        )
+        self.assertEqual(len(result.stdout.splitlines()), 3)
+        self.assertTrue(result.stdout.splitlines()[0].startswith("PASS "))
+        self.assertTrue(result.stdout.splitlines()[1].startswith("PASS "))
+        self.assertIn("FAIL streams 6, 7, 8, 9, 10, 11, 12", result.stdout)
+
+    def test_client_ending_before_failback_is_void_not_pass(self):
+        text = self.json_stream(self.log(duration=32))
+        parser = os.path.join(os.path.dirname(__file__), "iperf3_sum_parse.py")
+        result = subprocess.run(
+            [
+                sys.executable,
+                parser,
+                "--failover-check",
+                "--json-stream",
+                "--streams",
+                "8",
+                "--min-throughput-gbps",
+                "1.0",
+                "--crash-at",
+                "10",
+                "--failback-at",
+                "40",
+            ],
+            input=text,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[2].split(" ", 1)[0], "VOID")
+        self.assertIn("before the failback event", lines[2])
+
 
     def test_failover_cli_emits_interval_and_stream_verdicts(self):
         parser = os.path.join(os.path.dirname(__file__), "iperf3_sum_parse.py")
