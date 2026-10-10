@@ -86,3 +86,63 @@ func TestBracedFilterSchemaSlotsReject12090(t *testing.T) {
 		})
 	}
 }
+
+func TestBracedUnitIdentityFilterConsumersRetainHooks12090(t *testing.T) {
+	for _, iface := range []string{"ge-0/0/0", "lo0"} {
+		for _, family := range []string{"inet", "inet6"} {
+			for _, shape := range []string{"compound", "split"} {
+				t.Run(iface+"/"+family+"/"+shape, func(t *testing.T) {
+					var binding string
+					if shape == "compound" {
+						binding = "family " + family + " { filter { input f; } }"
+					} else {
+						binding = "family { " + family + " { filter { input f; } } }"
+					}
+					text := "firewall { family { " + family +
+						" { filter f { term t { then accept; } } } } } " +
+						"interfaces { " + iface + " { unit { 0 { " + binding + " } } } }"
+					compiled, err := CheckText(text, -1)
+					if err != nil {
+						t.Fatalf("CheckText rejected supported %s/%s filter: %v", iface, family, err)
+					}
+					ifaceConfig := compiled.Interfaces.Interfaces[iface]
+					if ifaceConfig == nil || ifaceConfig.Units[0] == nil {
+						t.Fatalf("compiled interface/unit missing: %#v", ifaceConfig)
+					}
+					unit := ifaceConfig.Units[0]
+					got := unit.FilterInputV4
+					if family == "inet6" {
+						got = unit.FilterInputV6
+					}
+					if got != "f" {
+						t.Fatalf("%s/%s filter hook = %q, want f", iface, family, got)
+					}
+					for _, warning := range compiled.Warnings {
+						if strings.Contains(warning, "#12090") {
+							t.Fatalf("supported filter emitted #12090 warning: %q", warning)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestBracedUnitIdentityPackedFilterTailsRemainRejected12090(t *testing.T) {
+	for _, family := range []string{"inet", "inet6"} {
+		for _, shape := range []string{"compound", "split"} {
+			t.Run(family+"/"+shape, func(t *testing.T) {
+				var binding string
+				if shape == "compound" {
+					binding = "family " + family + " filter input f;"
+				} else {
+					binding = "family { " + family + " filter input f; }"
+				}
+				text := "interfaces { ge-0/0/0 { unit { 0 { " + binding + " } } } }"
+				if _, err := CheckText(text, -1); err == nil || !strings.Contains(err.Error(), "#12090") {
+					t.Fatalf("unconsumed packed filter tail error = %v; want #12090", err)
+				}
+			})
+		}
+	}
+}

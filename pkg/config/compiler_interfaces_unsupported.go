@@ -381,15 +381,37 @@ func isInterfaceFilterConsumerTokens12090(path []string, keyword int) bool {
 // directly below the only interface path with a typed hook. The compiler
 // consumes both compound `family inet` and split `family { inet { ... } }`.
 func isInterfaceFilterConsumerPath12090(ancestors []*Node) bool {
-	if len(ancestors) == 3 && ancestors[1].Name() == "unit" &&
-		ancestors[2].Name() == "family" {
-		return isInetFamily(ancestors[2])
+	familyIndex, ok := interfaceUnitFamilyAncestorIndex12090(ancestors)
+	if !ok {
+		return false
 	}
-	return len(ancestors) == 4 &&
-		ancestors[1].Name() == "unit" &&
-		ancestors[2].Name() == "family" &&
-		len(ancestors[2].Keys) == 1 &&
-		(ancestors[3].Name() == "inet" || ancestors[3].Name() == "inet6")
+	family := ancestors[familyIndex]
+	if len(ancestors) == familyIndex+1 {
+		return isInetFamily(family)
+	}
+	return len(ancestors) == familyIndex+2 && len(family.Keys) == 1 &&
+		(ancestors[familyIndex+1].Name() == "inet" || ancestors[familyIndex+1].Name() == "inet6")
+}
+
+// interfaceUnitFamilyAncestorIndex12090 locates the family in the supported
+// unit path, accounting for a braced unit-identity node between `unit` and
+// `family`.
+func interfaceUnitFamilyAncestorIndex12090(ancestors []*Node) (int, bool) {
+	if len(ancestors) < 3 || ancestors[1] == nil || ancestors[1].Name() != "unit" || ancestors[2] == nil {
+		return 0, false
+	}
+	if ancestors[2].Name() == "family" {
+		return 2, true
+	}
+	if len(ancestors) >= 4 && isBracedUnitIdentityNode12090(ancestors[2]) &&
+		ancestors[3] != nil && ancestors[3].Name() == "family" {
+		return 3, true
+	}
+	return 0, false
+}
+
+func isBracedUnitIdentityNode12090(n *Node) bool {
+	return n != nil && len(n.Keys) == 1 && n.Name() != "family"
 }
 
 // schemaNodeAndIdentity12090 resolves a node's schema and the number of its
@@ -467,14 +489,15 @@ func isInterfacePackedFilterConsumer12090(ancestors []*Node, n *Node) bool {
 	if n == nil {
 		return false
 	}
-	if len(ancestors) == 2 && ancestors[1].Name() == "unit" &&
-		n.Name() == "family" && isInetFamily(n) {
-		return true
+	// Keep the packed-tail exemption restricted to its existing AST shapes.
+	// A packed tail beneath a braced unit identity does not populate the
+	// InterfaceUnit filter hook; only the braced filter-child path is a consumer.
+	if n.Name() == "family" && isInetFamily(n) {
+		return len(ancestors) == 2 && ancestors[1] != nil && ancestors[1].Name() == "unit"
 	}
-	return len(ancestors) == 3 &&
-		ancestors[1].Name() == "unit" &&
-		ancestors[2].Name() == "family" &&
-		len(ancestors[2].Keys) == 1 &&
+	familyIndex, ok := interfaceUnitFamilyAncestorIndex12090(ancestors)
+	return ok && familyIndex == 2 && len(ancestors) == familyIndex+1 &&
+		len(ancestors[familyIndex].Keys) == 1 &&
 		(n.Name() == "inet" || n.Name() == "inet6")
 }
 
