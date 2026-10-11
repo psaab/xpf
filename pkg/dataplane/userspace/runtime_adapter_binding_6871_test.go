@@ -69,7 +69,9 @@ import (
 // half of the HA path is reachable without privileges.
 func newAdapterBindingManager(t *testing.T) (*Manager, *leaseControlServer) {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "control.sock")
+	// #12565: short dir — t.TempDir()'s long sub-test name pushes the socket
+	// path past the 108-byte sun_path limit under go1.24 (no TempDir cap).
+	sock := filepath.Join(shortSockDir9322(t), "control.sock")
 	m := newLinkCycleProcessOnlyManager(t, sock)
 	srv := startLeaseControlServer(t, sock, ProcessStatus{
 		PID:          8888,

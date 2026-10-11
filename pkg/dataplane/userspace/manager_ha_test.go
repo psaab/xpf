@@ -25,7 +25,9 @@ import (
 // are torn down via t.Cleanup.
 func boundEventStream(t *testing.T) *EventStream {
 	t.Helper()
-	es := NewEventStream(filepath.Join(t.TempDir(), "events.sock"))
+	// #12565: short dir — t.TempDir()'s long sub-test name pushes the socket
+	// path past the 108-byte sun_path limit under go1.24 (no TempDir cap).
+	es := NewEventStream(filepath.Join(shortSockDir9322(t), "events.sock"))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	if err := es.Start(ctx); err != nil {
