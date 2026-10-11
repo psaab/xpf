@@ -62,14 +62,23 @@ func TestElidedRoutingInstanceKeepsRoutingOptions9055(t *testing.T) {
 // AND an interface silently changed routing table.
 func TestElidedRoutingInstanceDoesNotStealTheOSPFInterface9055(t *testing.T) {
 	const proto = "protocols { ospf { area 0.0.0.0 { interface ge-0/0/1.0; } } }"
-
-	braced := ri9055(t, "ri1 { instance-type vrf; "+proto+" }")
-	elided := ri9055(t, "ri1 "+proto)
+	// #11310: the RI must own ge-0/0/1.0 before OSPF can reference it.
+	// Membership is declared on BOTH spellings. In the elided spelling the
+	// member precedes the protocols container with instance-type first —
+	// a container keyword takes the rest of the run, so a member AFTER
+	// protocols would be swallowed into it. The theft discriminator below
+	// compares interface SETS (not just lengths): a regressed elided
+	// parse re-binding the OSPF token as a member would duplicate the
+	// existing member — and ri.Interfaces is a plain append with no dedup,
+	// so the duplicate shows up as a length + content difference.
+	braced := ri9055(t, "ri1 { instance-type vrf; interface ge-0/0/1.0; "+proto+" }")
+	elided := ri9055(t, "ri1 instance-type vrf interface ge-0/0/1.0 "+proto)
 
 	// THE THEFT. Asserted against the braced control rather than against a
 	// hardcoded empty list, so it stays true if the braced spelling ever does
 	// legitimately record an interface here.
-	if len(elided.Interfaces) != len(braced.Interfaces) {
+	if len(elided.Interfaces) != len(braced.Interfaces) ||
+		(len(elided.Interfaces) == 1 && len(braced.Interfaces) == 1 && elided.Interfaces[0] != braced.Interfaces[0]) {
 		t.Errorf("elided protocols bound %v as VRF member interfaces, braced bound "+
 			"%v. The OSPF area's interface token fell through to the `interface` "+
 			"case: the interface silently changed routing table, which is an "+
