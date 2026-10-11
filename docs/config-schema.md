@@ -16485,3 +16485,35 @@ strict rejection with a zone named `policy` and a specific tolerant warning
 when it is undefined. The combined, flat-set, direct-nested, and fully nested
 controls remain in `pkg/config/nested_zonepair_7523_test.go`.
 
+## Nameless routing-policy terms fail strict commit (#12521)
+
+A one-key hierarchical `term` container has no authored term name. The base
+compiler skipped these containers, silently dropping their statements from
+the compiled policy. A tolerant load now warns and replaces each malformed
+container with one neutral placeholder, so its matches and actions do not
+change the policy's existing fallback. If a malformed container also holds a
+named nested term, that nested child is not compiled.
+
+Strict compilation and operator `CommitCheck` reject nameless term bodies with
+a diagnostic naming the policy-statement and first body token. `LoadMerge`
+checks the literal hierarchical input before converting it to set paths. It
+unpacks packed keys before a policy term on a clone while preserving each
+term-name key run and its body shape. It then scans root `policy-options` and
+every `policy-options` subtree under `groups`. It does not expand the fragment;
+group references can resolve against the existing candidate, and inactive or
+`${node}` references remain deferred to the normal load/commit path. The scan
+includes inactive nodes as a fail-safe.
+
+An explicitly named nested term such as
+`policy-statement P { term { T { then accept; } } }` now compiles as term `T`;
+the base compiler silently dropped it. Tolerant loads emit a #12521 warning
+naming both the policy and term. This is an intentional behavior change on
+upgrade; strict compilation also applies the named term without warning.
+
+Write an explicit name on each term body, for example
+`policy-statement P { term T { then accept; } }`. Regression coverage is in
+`pkg/config/policy_nameless_term_12521_test.go`,
+`pkg/configstore/policy_nameless_term_12521_test.go`, and
+`pkg/frr/policy_nameless_term_12521_test.go`. The configstore suite covers 11
+named hierarchical and packed spellings plus set-to-show-to-LoadMerge round
+trips.

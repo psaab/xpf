@@ -58,8 +58,15 @@ type PolicyStatement struct {
 
 // PolicyTerm is a single match+action clause within a policy-statement.
 type PolicyTerm struct {
-	Name          string
-	FromProtocols []string // "direct", "static", "bgp", "ospf" — Junos
+	Name string
+	// nameless marks a term lowered from a one-key `term` container, whose
+	// children have no authored term-name token.
+	nameless bool
+	// nestedContainer12521 marks an explicitly named term lowered from the
+	// one-key `term { NAME { ... } }` spelling. Tolerant loads warn about its
+	// newly active behavior; it is compile-only metadata.
+	nestedContainer12521 bool
+	FromProtocols        []string // "direct", "static", "bgp", "ospf" — Junos
 	// "from protocol [ bgp ospf static ]" matches ANY listed protocol.
 	// PrefixList / FromCommunity / FromASPath hold the term's `from
 	// prefix-list`, `from community`, and `from as-path` match statements.
