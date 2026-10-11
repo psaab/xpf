@@ -1,6 +1,7 @@
 package upgrade
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,12 @@ import (
 
 	"github.com/psaab/xpf/pkg/configstore"
 )
+
+// errRollbackRefusedBeforeStop marks a RollbackTo refusal raised before the
+// unit was stopped (plan/envelope gates). The rolling driver fails those
+// back; anything past this point stays passive for inspection. It must wrap
+// with %w (never %v) so errors.Is survives the "upgrade --rollback" prefix.
+var errRollbackRefusedBeforeStop = errors.New("refused before STOP")
 
 // RollbackOptions controls a single operator rollback. ClusterCoordinated is
 // set only by the rolling driver after it has drained this node to its peer;
@@ -62,7 +69,9 @@ func (r *Runner) RollbackTo(target string, opts RollbackOptions) error {
 
 	plan, j, err := r.rollbackInvocationPlan(target)
 	if err != nil {
-		return fmt.Errorf("upgrade --rollback: %w", err)
+		// Plan/envelope refusals fire before any STOP: mark them so the
+		// rolling driver can fail back instead of stranding the drain.
+		return fmt.Errorf("upgrade --rollback: %w: %w", errRollbackRefusedBeforeStop, err)
 	}
 	if j.State == StateRollingBack {
 		return r.executeRollback(plan, j, opts)

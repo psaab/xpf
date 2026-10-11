@@ -685,7 +685,12 @@ state machines are untouched.
    secondary not undone, peer takeover unproven → possible both-nodes-secondary
    outage) so an operator investigates — it must NOT keep claiming "still
    forwarding" (#5845, mirroring the kernel-roll drain path `kernel_drain.go`).
-5. single-node cut (auto-rollback disabled).
+5. single-node cut (auto-rollback disabled). A cut that REFUSES before STOP
+   (verifier REJECT, envelope refusal, no restorable target) fails back:
+   `ResetFailover` runs and the per-RG rejoin is read back before the
+   refusal is returned, so the node resumes forwarding. Any failure at or
+   after a STOP attempt leaves the node secondary for operator inspection
+   (#12175).
 6. wait for session sync to re-establish, bounded by `RejoinDeadline`
    (60s default). The cut just restarted xpfd, so the local gRPC socket
    refuses connections for the first few seconds — that `connection

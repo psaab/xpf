@@ -241,7 +241,12 @@ func (r *Runner) Run(opts Options) (err error) {
 	if err != nil {
 		return err
 	}
-	stopAttempted = j.State.atLeast(StateStopped)
+	// A ROLLINGBACK journal resumes through executeRollback/rollback below,
+	// both of which STOP the unit — so it counts as stop-attempted even
+	// though StateRollingBack orders below StateStopped (MAJOR-1). Preserve
+	// the UnitAlreadyStopped seed from entry (MINOR-1): with the STOP block
+	// skipped, later flip/start failures must not read as pre-STOP.
+	stopAttempted = stopAttempted || j.State == StateRollingBack || j.State.atLeast(StateStopped)
 
 	// A loaded journal's version fields key versions/<ver>, the .dbsnap
 	// dotfile, the `current` symlink, and the unit drop-in (#1964 C1). A

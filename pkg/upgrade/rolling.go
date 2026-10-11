@@ -215,10 +215,19 @@ func runRollingRollbackWith(r *Runner, cl RollingCluster, rc RollingConfig, targ
 	}
 	r.logf("rolling: rollback drain complete (peer owns RGs, local backup, rg_active=false, sync clean)")
 
+	// RollbackTo re-runs the envelope gate AFTER the drain above (the target
+	// binary's --capability-check executes inside validateRollbackPlan), so
+	// a transient exec failure refuses here on a healthy drained daemon.
+	// Fail those refusals back like the forward driver does; only a cut that
+	// actually STOPped stays passive for inspection (MINOR-3).
 	if err := r.RollbackTo(plan.toVersion, RollbackOptions{
 		ClusterCoordinated: true,
 		LockAlreadyHeld:    true,
 	}); err != nil {
+		if errors.Is(err, errRollbackRefusedBeforeStop) {
+			r.logf("rolling: rollback refused before STOP; resetting failover and aborting")
+			return failbackAfterPreStopRefusal(cl, err)
+		}
 		return fmt.Errorf("rolling rollback: single-node rollback failed (inspect the drained node): %w", err)
 	}
 
