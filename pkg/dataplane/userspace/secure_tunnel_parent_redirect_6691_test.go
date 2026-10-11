@@ -922,10 +922,12 @@ func TestRetainedLiveXfrmiLeavesTheAdjudicatedSets(t *testing.T) {
 		// convergence while the device is still there, which is what
 		// makes it the most dangerous of the three.
 		wantApplyErr bool
-		// wantErrSubstr pins WHICH delete path retained the device: the
-		// tracked retry ("delete xfrmi") or the orphan sweep ("delete
-		// orphan xfrmi"). Without it the two LinkDel-failure rows would
-		// prove the same thing.
+		// wantErrSubstr pins WHICH delete path retained the device, and
+		// ONLY that path: the tracked retry ("delete xfrmi") or the orphan
+		// sweep ("delete orphan xfrmi"). The check is an exact match on
+		// the joined error — presence alone would let a sweep that also
+		// double-deletes tracked names through (P4). Without it the two
+		// LinkDel-failure rows would prove the same thing.
 		wantErrSubstr string
 	}{
 		{name: "LinkDel fails", failLinkDel: true, wantApplyErr: true, wantErrSubstr: "delete xfrmi st10"},
@@ -954,7 +956,11 @@ func TestRetainedLiveXfrmiLeavesTheAdjudicatedSets(t *testing.T) {
 				kernel.linkDelErr = errors.New("device busy")
 			}
 			if tc.failLinkList {
-				kernel.linkListErr = errors.New("netlink transport down")
+				// Transient routing-only LinkList failure: the #11443 sweep
+				// skips ("retrying on next apply"). Only the routing half
+				// sees it — the snapshot xfrm dump stays healthy — so this
+				// is NOT a full netlink-transport outage.
+				kernel.linkListErr = errors.New("netlink busy")
 			}
 			if tc.restart {
 				mgr = routing.NewManagerWithLinkOpsForTest(kernel)
@@ -964,9 +970,12 @@ func TestRetainedLiveXfrmiLeavesTheAdjudicatedSets(t *testing.T) {
 				t.Fatalf("ApplyXfrmi(nil) error = %v, want error present = %v",
 					err, tc.wantApplyErr)
 			}
-			if tc.wantErrSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr)) {
-				t.Fatalf("ApplyXfrmi(nil) error = %v, want substring %q",
-					err, tc.wantErrSubstr)
+			if tc.wantErrSubstr != "" {
+				want := tc.wantErrSubstr + ": device busy"
+				if err == nil || strings.TrimSpace(err.Error()) != want {
+					t.Fatalf("ApplyXfrmi(nil) error = %v, want exactly %q",
+						err, want)
+				}
 			}
 
 			// 3. THE COMPOSITION: the device the reconciler left behind is
@@ -1050,9 +1059,9 @@ type fakeXfrmKernel struct {
 	links      map[string]netlink.Link
 	nextIndex  int
 	linkDelErr error
-	// linkListErr makes LinkList fail, modelling the netlink-transport
-	// outage under which the #11443 orphan sweep skips ("retrying on next
-	// apply") instead of deleting anything.
+	// linkListErr makes LinkList fail, modelling the transient
+	// routing-only failure under which the #11443 orphan sweep skips
+	// ("retrying on next apply") instead of deleting anything.
 	linkListErr error
 }
 
