@@ -33,10 +33,8 @@ func logRGs12175(t *testing.T, br *managerBridge12175) {
 }
 
 // MAJOR: the PR's own STOP-attempt invariant, applied to the rollback resume
-// that the forward driver's inner Run performs first (cutover.go:267-288).
+// that the forward driver's inner Run performs first (the rollback-resume branch at the top of Run).
 func TestRolling_RollingBackResumeStopFailureKeepsDrain_12175(t *testing.T) {
-	heartbeatFixtureMu12175.Lock()
-	t.Cleanup(heartbeatFixtureMu12175.Unlock)
 	local, _ := twoNodeManagers12175(t)
 	fx := seedRollingBackJournal12175(t)
 	stopErr := errors.New("injected StopUnit failure")
@@ -58,8 +56,6 @@ func TestRolling_RollingBackResumeStopFailureKeepsDrain_12175(t *testing.T) {
 
 // MAJOR variant: STOP+flip+START ran, helper health failed.
 func TestRolling_RollingBackResumeHealthFailureKeepsDrain_12175(t *testing.T) {
-	heartbeatFixtureMu12175.Lock()
-	t.Cleanup(heartbeatFixtureMu12175.Unlock)
 	local, _ := twoNodeManagers12175(t)
 	fx := seedRollingBackJournal12175(t)
 	br := &managerBridge12175{m: local, synced: true, peerReady: true, drainAfter: 1}
@@ -77,8 +73,6 @@ func TestRolling_RollingBackResumeHealthFailureKeepsDrain_12175(t *testing.T) {
 
 // MAJOR variant: legacy auto-rollback journal, StartUnit fails -> daemon DOWN.
 func TestRolling_AutoRollbackResumeStartFailureKeepsDrain_12175(t *testing.T) {
-	heartbeatFixtureMu12175.Lock()
-	t.Cleanup(heartbeatFixtureMu12175.Unlock)
 	local, _ := twoNodeManagers12175(t)
 	fx := setupRollback(t, "2.0.0", "1.0.0", rollbackV1Snap)
 	if err := fx.r.saveJournal(&Journal{State: StateRollingBack, TargetVersion: "2.0.0", PreviousVersion: "1.0.0"}); err != nil {
@@ -95,7 +89,7 @@ func TestRolling_AutoRollbackResumeStartFailureKeepsDrain_12175(t *testing.T) {
 	}
 }
 
-// MINOR (latent): opts.UnitAlreadyStopped is overwritten at cutover.go:242.
+// MINOR (latent): opts.UnitAlreadyStopped was overwritten by the classifier assignment.
 func TestRun_UnitAlreadyStoppedPreservedAcrossClassifier_12175(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -140,8 +134,6 @@ func (b *drainHookBridge12175) DrainComplete() (bool, error) {
 }
 
 func TestRolling_RollbackTwinPostDrainRefusalFailsBack_12175(t *testing.T) {
-	heartbeatFixtureMu12175.Lock()
-	t.Cleanup(heartbeatFixtureMu12175.Unlock)
 	local, _ := twoNodeManagers12175(t)
 	fx := setupRollback(t, "2.0.0", "1.0.0", rollbackV1Snap)
 	inner := &managerBridge12175{m: local, synced: true, peerReady: true, drainAfter: 1}
@@ -160,11 +152,9 @@ func TestRolling_RollbackTwinPostDrainRefusalFailsBack_12175(t *testing.T) {
 	assertNoResidualHold12175(t, local)
 }
 
-// Guard probe: passes on e314d68f1; FAILS when cutover.go:242 is deleted
-// (mutant M2 survives the whole committed pkg/upgrade suite).
+// Guard: a FLIPPED-resume START-health failure keeps the hold. Kills the
+// classifier-deletion mutant (M2).
 func TestRolling_FlippedResumeHealthFailureKeepsHold_12175(t *testing.T) {
-	heartbeatFixtureMu12175.Lock()
-	t.Cleanup(heartbeatFixtureMu12175.Unlock)
 	local, _ := twoNodeManagers12175(t)
 	fs := newFakeSystem(t, "2.0.0")
 	r, cfg := testEnv(t, fs)

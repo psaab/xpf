@@ -69,9 +69,16 @@ func (r *Runner) RollbackTo(target string, opts RollbackOptions) error {
 
 	plan, j, err := r.rollbackInvocationPlan(target)
 	if err != nil {
-		// Plan/envelope refusals fire before any STOP: mark them so the
-		// rolling driver can fail back instead of stranding the drain.
-		return fmt.Errorf("upgrade --rollback: %w: %w", errRollbackRefusedBeforeStop, err)
+		// Fresh-plan (StateInit) refusals fire before any STOP: mark them
+		// so the rolling driver can fail back instead of stranding the
+		// drain. Refusals on a ROLLINGBACK journal resume keep the hold —
+		// the forward driver treats ROLLINGBACK as stop-attempted
+		// (cutover.go classifier), and the twin must match it, not
+		// invert it: a prior attempt may have STOPped already.
+		if lj, lerr := r.loadJournal(); lerr == nil && lj.State == StateInit {
+			return fmt.Errorf("upgrade --rollback: %w: %w", errRollbackRefusedBeforeStop, err)
+		}
+		return fmt.Errorf("upgrade --rollback: %w", err)
 	}
 	if j.State == StateRollingBack {
 		return r.executeRollback(plan, j, opts)

@@ -2,8 +2,9 @@ package upgrade
 
 import (
 	"errors"
+	"fmt"
+	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -11,23 +12,16 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// heartbeatFixtureMu12175 serializes the loopback-heartbeat fixtures below.
-// Both managers bind the FIXED HeartbeatPort (:4784) with SO_REUSEPORT, so
-// two test processes running these cells concurrently steal each other's
-// datagrams and the pair never converges (MINOR-4). The port is a package
-// const with no override seam; serialization is the bounded fix.
-var heartbeatFixtureMu12175 sync.Mutex
-
 // #12175: RunRolling calls ForceSecondary (drain start) and then invokes the
 // single-node cut. If the cut REFUSES before STOP (verifier REJECT, envelope
 // refusal, no restorable rollback target), the error returned at
 // rolling.go (the single-node-cut error branch) WITHOUT ResetFailover —
 // unlike the drain-timeout path, which fails back and reads the result back.
-// The rollback twin
-// (runRollingRollbackWith) runs its refusal checks BEFORE demoting
-// (:149-160). The node was left held at weight 0 with a healthy daemon while
-// the doc (docs/in-place-upgrade.md:61-65) says PREFLIGHT/COPY/VERIFY
-// failures leave things untouched.
+// The rollback twin (runRollingRollbackWith) runs its refusal checks BEFORE
+// demoting, but RollbackTo re-runs the envelope gate after the drain — a
+// transient post-drain refusal failed back only after the MINOR-3 fold.
+// The node was left held at weight 0 with a healthy daemon while the
+// operator doc says PREFLIGHT/COPY/VERIFY failures leave things untouched.
 //
 // These cells drive runRollingWith against a REAL two-node cluster.Manager
 // pair (loopback heartbeats, RG configured on both) behind a thin
@@ -58,11 +52,14 @@ func twoNodeManagers12175(t *testing.T) (local, peer *cluster.Manager) {
 	peer.UpdateConfig(mkCfg(1))
 	// Loopback heartbeats: node 0 <-> node 1 use distinct IPv4 loopback
 	// addresses and the fixed HeartbeatPort, so both real receivers can bind.
-	if err := local.StartHeartbeat("127.0.0.1", "127.0.0.2", "", "lo"); err != nil {
+	pid := os.Getpid()
+	la := fmt.Sprintf("127.%d.%d.1", 1+(pid>>8)%254, pid%256)
+	pa := fmt.Sprintf("127.%d.%d.2", 1+(pid>>8)%254, pid%256)
+	if err := local.StartHeartbeat(la, pa, "", "lo"); err != nil {
 		t.Fatalf("local StartHeartbeat: %v", err)
 	}
 	t.Cleanup(local.StopHeartbeat)
-	if err := peer.StartHeartbeat("127.0.0.2", "127.0.0.1", "", "lo"); err != nil {
+	if err := peer.StartHeartbeat(pa, la, "", "lo"); err != nil {
 		t.Fatalf("peer StartHeartbeat: %v", err)
 	}
 	t.Cleanup(peer.StopHeartbeat)
@@ -152,8 +149,6 @@ func assertNoResidualHold12175(t *testing.T, m *cluster.Manager) {
 
 func TestRolling_PreStopRefusalLeavesNoHold_12175(t *testing.T) {
 	t.Run("verifier REJECT fails back with readback", func(t *testing.T) {
-		heartbeatFixtureMu12175.Lock()
-		t.Cleanup(heartbeatFixtureMu12175.Unlock)
 		local, _ := twoNodeManagers12175(t)
 		if !local.IsLocalPrimary(1) {
 			t.Fatalf("precondition: local node is not primary for data RG 1 (state=%v)", local.GroupState(1).State)
@@ -187,8 +182,6 @@ func TestRolling_PreStopRefusalLeavesNoHold_12175(t *testing.T) {
 	})
 
 	t.Run("envelope refusal fails back with readback", func(t *testing.T) {
-		heartbeatFixtureMu12175.Lock()
-		t.Cleanup(heartbeatFixtureMu12175.Unlock)
 		local, _ := twoNodeManagers12175(t)
 		if !local.IsLocalPrimary(1) {
 			t.Fatalf("precondition: local node is not primary for data RG 1 (state=%v)", local.GroupState(1).State)
@@ -229,8 +222,6 @@ type stopFailureSystem12175 struct {
 func (s stopFailureSystem12175) StopUnit(string) error { return s.err }
 
 func TestRolling_StopAttemptFailureKeepsDrain_12175(t *testing.T) {
-	heartbeatFixtureMu12175.Lock()
-	t.Cleanup(heartbeatFixtureMu12175.Unlock)
 	local, _ := twoNodeManagers12175(t)
 	fs := newFakeSystem(t, "2.0.0")
 	r, cfg := testEnv(t, fs)

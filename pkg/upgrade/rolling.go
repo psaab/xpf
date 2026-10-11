@@ -218,15 +218,16 @@ func runRollingRollbackWith(r *Runner, cl RollingCluster, rc RollingConfig, targ
 	// RollbackTo re-runs the envelope gate AFTER the drain above (the target
 	// binary's --capability-check executes inside validateRollbackPlan), so
 	// a transient exec failure refuses here on a healthy drained daemon.
-	// Fail those refusals back like the forward driver does; only a cut that
-	// actually STOPped stays passive for inspection (MINOR-3).
+	// Fail FRESH-PLAN refusals back (sentinel); anything else — a STOP was
+	// attempted, or the journal is a ROLLINGBACK resume the forward driver
+	// would equally keep passive — stays passive for inspection (MINOR-3).
 	if err := r.RollbackTo(plan.toVersion, RollbackOptions{
 		ClusterCoordinated: true,
 		LockAlreadyHeld:    true,
 	}); err != nil {
 		if errors.Is(err, errRollbackRefusedBeforeStop) {
-			r.logf("rolling: rollback refused before STOP; resetting failover and aborting")
-			return failbackAfterPreStopRefusal(cl, err)
+			r.logf("rolling rollback: refused before STOP; resetting failover and aborting")
+			return failbackAfterRollbackRefusal(cl, err)
 		}
 		return fmt.Errorf("rolling rollback: single-node rollback failed (inspect the drained node): %w", err)
 	}
@@ -251,10 +252,21 @@ func runRollingRollbackWith(r *Runner, cl RollingCluster, rc RollingConfig, targ
 // the node recovered. Errors after STOP deliberately do not use this path:
 // those leave the node secondary for operator inspection.
 func failbackAfterPreStopRefusal(cl RollingCluster, cause error) error {
+	return failbackAfterRefusal(cl, cause, "single-node cut")
+}
+
+// failbackAfterRollbackRefusal is the twin of failbackAfterPreStopRefusal
+// with rollback wording: the shared helper says "cut", which mislabels a
+// rollback refusal in the operator text.
+func failbackAfterRollbackRefusal(cl RollingCluster, cause error) error {
+	return failbackAfterRefusal(cl, cause, "single-node rollback")
+}
+
+func failbackAfterRefusal(cl RollingCluster, cause error, what string) error {
 	if resetErr := cl.ResetFailover(); resetErr != nil {
-		return fmt.Errorf("rolling: single-node cut refused before STOP AND "+
+		return fmt.Errorf("rolling: %s refused before STOP AND "+
 			"failback (ResetFailover) FAILED — node may remain held secondary: %w",
-			errors.Join(cause, resetErr))
+			what, errors.Join(cause, resetErr))
 	}
 	rejoined, readbackErr := cl.LocalRejoinComplete()
 	if readbackErr != nil || !rejoined {
@@ -262,12 +274,12 @@ func failbackAfterPreStopRefusal(cl RollingCluster, cause error) error {
 		if readbackErr != nil {
 			joined = errors.Join(cause, readbackErr)
 		}
-		return fmt.Errorf("rolling: single-node cut refused before STOP; failback "+
+		return fmt.Errorf("rolling: %s refused before STOP; failback "+
 			"acknowledged but local rejoin is not confirmed (local-rejoined=%v "+
-			"readback-error=%v): %w", rejoined, readbackErr, joined)
+			"readback-error=%v): %w", what, rejoined, readbackErr, joined)
 	}
-	return fmt.Errorf("rolling: single-node cut refused before STOP; failback "+
-		"confirmed by per-RG readback: %w", cause)
+	return fmt.Errorf("rolling: %s refused before STOP; failback "+
+		"confirmed by per-RG readback: %w", what, cause)
 }
 
 // runRollingWith is the testable core (cluster + timing injected). It does
