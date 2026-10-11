@@ -150,6 +150,9 @@ func TestRolling_RollbackTwinPostDrainRefusalFailsBack_12175(t *testing.T) {
 		}
 	}
 	assertNoResidualHold12175(t, local)
+	if err == nil || !strings.Contains(err.Error(), "single-node rollback refused before STOP") {
+		t.Errorf("twin failback wording wrong, got %v", err)
+	}
 }
 
 // Guard: a FLIPPED-resume START-health failure keeps the hold. Kills the

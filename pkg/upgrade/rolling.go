@@ -156,7 +156,10 @@ func runRollingRollbackWith(r *Runner, cl RollingCluster, rc RollingConfig, targ
 	r.resetCommittedCut()
 	rc.withDefaults()
 
-	// All rollback refusal checks happen before ForceSecondary. This includes
+	// The pre-demote refusal gates run here, before ForceSecondary: the
+	// rollback plan gate plus the peer/sync/compat/readiness gates below.
+	// (RollbackTo re-runs the plan/envelope gate after the drain; fresh-plan
+	// refusals there fail back via the sentinel — see the post-drain call.)
 	plan, _, err := r.rollbackInvocationPlan(target)
 	if err != nil {
 		return fmt.Errorf("rolling rollback: %w", err)

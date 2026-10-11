@@ -299,6 +299,7 @@ node, wait for sync re-establishment and per-redundancy-group rejoin, then
 roll the other node. Before demoting, it gates in order on rollback
 preflight (restorable target, current snapshot, envelope compatibility),
 peer liveness, session-sync established, HA-protocol compatibility,
+session-sync-wire compatibility, and peer takeover readiness; then it
 drains the node, performs the stop → snapshot restore → re-flip → start
 sequence, then waits for sync and confirms every redundancy group has
 rejoined before reporting `rolling rollback complete`. The envelope gate

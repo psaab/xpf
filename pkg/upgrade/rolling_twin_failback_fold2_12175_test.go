@@ -72,6 +72,15 @@ func TestRolling_ForwardRollingBackRefusalKeepsHold_12175(t *testing.T) {
 	err := runRollingWith(fx.r, cl, fastRC())
 	t.Logf("FWD err=%v", err)
 	t.Logf("FWD forced=%v resetCalled=%v rejoinChecks=%d calls=%v", cl.forced, cl.resetCalled, cl.rejoinChecks, fx.fs.calls)
+	if err == nil || !strings.Contains(err.Error(), "transient capability-check exec failure") {
+		t.Fatalf("premise: want the transient refusal in the error, got %v", err)
+	}
+	if cl.resetCalled {
+		t.Error("forward driver failed back a ROLLINGBACK-resume refusal (an earlier STOP may already have happened)")
+	}
+	if strings.Contains(err.Error(), "refused before STOP") {
+		t.Error("forward driver claims pre-STOP for a ROLLINGBACK-resume refusal")
+	}
 }
 
 // P2c: twin re-run over a ROLLINGBACK journal whose prior attempt STOPPED,
@@ -98,6 +107,15 @@ func TestRolling_ForwardUnhealthyRollingBackRefusalKeepsHold_12175(t *testing.T)
 	err := runRollingWith(fx.r, cl, fastRC())
 	t.Logf("FWD-UNHEALTHY err=%v", err)
 	t.Logf("FWD-UNHEALTHY resetCalled=%v unitRunning=%v calls=%v", cl.resetCalled, fx.fs.unitRunning, fx.fs.calls)
+	if err == nil || !strings.Contains(err.Error(), "transient capability-check exec failure") {
+		t.Fatalf("premise: want the transient refusal in the error, got %v", err)
+	}
+	if cl.resetCalled {
+		t.Error("forward driver failed back an unhealthy-target ROLLINGBACK refusal")
+	}
+	if strings.Contains(err.Error(), "refused before STOP") {
+		t.Error("forward driver claims pre-STOP for an unhealthy-target ROLLINGBACK refusal")
+	}
 }
 
 // P3: negative direction of MINOR-3 — a twin failure AFTER this run's STOP
@@ -208,7 +226,7 @@ func TestRolling_StoppedResumeFlipFailureKeepsHold_12175(t *testing.T) {
 	}
 	t.Logf("seed journal state=%s unitRunning=%v", j.State, fs.unitRunning)
 	if j.State != StateStopped {
-		t.Skipf("seed did not land at STOPPED (state=%s)", j.State)
+		t.Fatalf("seed must land at STOPPED (state=%s) — this cell is the only M3 killer", j.State)
 	}
 	fs.daemonReloadFailOnce = true
 	cl := healthyFake12175()

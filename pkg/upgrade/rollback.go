@@ -11,9 +11,10 @@ import (
 	"github.com/psaab/xpf/pkg/configstore"
 )
 
-// errRollbackRefusedBeforeStop marks a RollbackTo refusal raised before the
-// unit was stopped (plan/envelope gates). The rolling driver fails those
-// back; anything past this point stays passive for inspection. It must wrap
+// errRollbackRefusedBeforeStop marks a RollbackTo FRESH-plan refusal raised
+// before the unit was stopped (StateInit-branch plan/envelope gates). The
+// rolling driver fails those back; ROLLINGBACK-journal refusals and
+// anything past this point stay passive for inspection. It must wrap
 // with %w (never %v) so errors.Is survives the "upgrade --rollback" prefix.
 var errRollbackRefusedBeforeStop = errors.New("refused before STOP")
 
