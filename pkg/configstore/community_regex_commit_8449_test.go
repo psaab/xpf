@@ -9,6 +9,7 @@ import (
 
 const commBase8449 = `
 system { host-name p; }
+routing-options { autonomous-system 65000; }
 interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.1.1/24; } } } }
 security { zones { security-zone trust { interfaces { ge-0/0/0.0; } } } }
 `
