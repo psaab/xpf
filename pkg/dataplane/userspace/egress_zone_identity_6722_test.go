@@ -1745,7 +1745,8 @@ func TestNilUnitSlotOnARethMemberIsNotAnL3Identity_6722(t *testing.T) {
 // separate clauses in separate functions, and this one bites where the nil slot
 // happens to carry an AUTHORED zone reference — which is producible, because a
 // `security-zone <z> interfaces <ifc>.<n>` reference to a unit that does not
-// exist is admitted by the STRICT compiler.
+// exist is admitted by the TOLERANT load path (strict commit rejects it
+// since #11433; Load/SyncApply warn and keep the reference).
 //
 // Deterministic in every map order: the nil slot's zone disagrees with the real
 // units' zone, so counting it always collapses the carrier to "" whichever unit
@@ -1762,7 +1763,7 @@ func TestNilUnitSlotCastsNoTrunkZoneVote_6722(t *testing.T) {
 	links := map[string]int{"ge-0-0-1": 25, "ge-0-0-1.50": 26, "ge-0-0-1.80": 27}
 	macs := map[string]string{"ge-0-0-1": "02:bf:72:01:00:02"}
 
-	cfg := compileWithStubbedLinks6722(t, lines, links, macs, false)
+	cfg := compileWithStubbedLinks6722(t, lines, links, macs, true)
 	if got := authoredZoneRefs(cfg)["ge-0/0/1.99"]; got != "dmz" {
 		t.Fatalf("precondition: authoredZoneRefs[ge-0/0/1.99] = %q, want %q — the "+
 			"zone reference to the not-yet-existing unit is what the nil slot "+

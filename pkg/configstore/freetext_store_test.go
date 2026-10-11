@@ -68,6 +68,12 @@ func TestLoadBootsAndSanitizesPersistedNewlineDescription(t *testing.T) {
 	if err := s2.EnterConfigure(); err != nil {
 		t.Fatalf("EnterConfigure: %v", err)
 	}
+	// The zone reference needs a real unit 0 since #11433 (absent-unit
+	// zone refs fail strict commit); the #1798 property is the scrubbed
+	// description, not the zone target.
+	if err := s2.SetFromInput("interfaces ge-0-0-0 unit 0 family inet"); err != nil {
+		t.Fatalf("SetFromInput: %v", err)
+	}
 	if err := s2.SetFromInput("security zones security-zone trust interfaces ge-0-0-0.0"); err != nil {
 		t.Fatalf("SetFromInput: %v", err)
 	}
@@ -119,6 +125,10 @@ func TestSyncApplySanitizesNewlineDescription(t *testing.T) {
 	// The stored active tree must be clean for any later strict commit.
 	if err := s.EnterConfigure(); err != nil {
 		t.Fatalf("EnterConfigure: %v", err)
+	}
+	// Real unit 0 for the zone reference since #11433 (see above).
+	if err := s.SetFromInput("interfaces ge-0-0-0 unit 0 family inet"); err != nil {
+		t.Fatalf("SetFromInput: %v", err)
 	}
 	if err := s.SetFromInput("security zones security-zone trust interfaces ge-0-0-0.0"); err != nil {
 		t.Fatalf("SetFromInput: %v", err)
