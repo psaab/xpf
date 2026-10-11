@@ -1790,7 +1790,7 @@ func TestNilUnitSlotCastsNoTrunkZoneVote_6722(t *testing.T) {
 	ctl := compileWithStubbedLinks6722(t, append(append([]string{}, lines...),
 		"set interfaces ge-0/0/1 unit 99 vlan-id 99 family inet address 172.16.99.8/24"),
 		map[string]int{"ge-0-0-1": 25, "ge-0-0-1.50": 26, "ge-0-0-1.80": 27, "ge-0-0-1.99": 29},
-		macs, false)
+		macs, true)
 	assertEgressZone6722(t, buildInterfaceSnapshots(ctl), 25, "",
 		"control: with unit 99 REAL and zoned `dmz` the disagreement is a genuine "+
 			"operator statement and the carrier must fail closed; if this also "+
