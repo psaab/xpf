@@ -58,13 +58,16 @@ if ! unshare -rn true 2>/dev/null; then
 fi
 
 # -count=1 so a cached PASS can never stand in for a run that did not happen.
+# -json=false pins text output: the guard below scans anchored `=== RUN`
+# records, and an inherited GOFLAGS=-json would embed them in JSON Output
+# records and false-red every cell as "did not run".
 # XPF_REQUIRE_NETNS=1 turns every tool/netns skip arm in the four kernel cells
 # into a failure; without it an environment that silently degrades would read
 # green. unshare propagates the environment into the namespace.
 # The scoped loopback round trip is capability-gated independently and skips
 # when this fresh netns denies ICMP datagrams. The VRF acceptance cell widens
 # ping_group_range itself and remains forced below.
-out=$(XPF_REQUIRE_NETNS=1 unshare -rn "$GO" test -count=1 -v -run '9420|9819|11319|12083' ./pkg/routing/ 2>&1)
+out=$(XPF_REQUIRE_NETNS=1 unshare -rn "$GO" test -json=false -count=1 -v -run '9420|9819|11319|12083' ./pkg/routing/ 2>&1)
 rc=$?
 
 fail=0
