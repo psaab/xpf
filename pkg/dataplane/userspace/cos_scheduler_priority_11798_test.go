@@ -18,7 +18,7 @@ func TestBuildClassOfServiceSnapshotClearsUnknownSchedulerPriority11798(t *testi
 	snapshot := buildClassOfServiceSnapshot(&config.Config{
 		ClassOfService: &config.ClassOfServiceConfig{
 			Schedulers: map[string]*config.CoSScheduler{
-				"bad-scheduler": {Name: "bad-scheduler", Priority: "ultra-high"},
+				"bad-scheduler":  {Name: "bad-scheduler", Priority: "ultra-high"},
 				"good-scheduler": {Name: "good-scheduler", Priority: "strict-high"},
 			},
 		},

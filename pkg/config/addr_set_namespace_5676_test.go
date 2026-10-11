@@ -130,7 +130,6 @@ func TestAddrSetCollisionLenientDowngrades(t *testing.T) {
 	}
 }
 
-
 // TestAddrSetNoCollisionCompilesUnchanged — configs that do NOT collide must
 // keep compiling clean on the strict path: only an address, only a set, an
 // address-set whose MEMBER shares a distinct address's name, and a global

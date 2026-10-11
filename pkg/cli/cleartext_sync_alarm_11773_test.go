@@ -18,8 +18,8 @@ func (cleartextAlarmStats11773) Stats() cluster.SyncStatsSnapshot {
 		CleartextSyncAlarmLatched: true, PeerBootIncarnation: "none",
 	}
 }
-func (cleartextAlarmStats11773) IsConnected() bool { return true }
-func (cleartextAlarmStats11773) PeerSessionSyncWireVersion() uint16 { return 0 }
+func (cleartextAlarmStats11773) IsConnected() bool                     { return true }
+func (cleartextAlarmStats11773) PeerSessionSyncWireVersion() uint16    { return 0 }
 func (cleartextAlarmStats11773) UnauthenticatedSessionConns() []string { return nil }
 
 // TestClusterCLIReportsLatchedCleartextSync11773 exercises the console

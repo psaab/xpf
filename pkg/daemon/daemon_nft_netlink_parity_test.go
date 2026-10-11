@@ -660,6 +660,7 @@ var iifnameNeSetRe = regexp.MustCompile(`iifname != \{[^{}]*\}`)
 // ruleIifnameScope below. Single-name `meta sdifname "x"` lines byte
 // compare directly (inline Cmp data renders intact).
 var sdifnameSetRe = regexp.MustCompile(`meta sdifname \{[^{}]*\}`)
+
 // sdifnameNeSetRe is the negated counterpart. Preserve `!=` so the per-rule
 // scope assertion and text diff still catch an admission polarity change.
 var sdifnameNeSetRe = regexp.MustCompile(`meta sdifname != \{[^{}]*\}`)

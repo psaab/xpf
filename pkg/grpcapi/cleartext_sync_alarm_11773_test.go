@@ -19,8 +19,8 @@ func (cleartextSyncStats11773) Stats() cluster.SyncStatsSnapshot {
 		CleartextSyncAlarmLatched: true, PeerBootIncarnation: "none",
 	}
 }
-func (cleartextSyncStats11773) IsConnected() bool { return true }
-func (cleartextSyncStats11773) PeerSessionSyncWireVersion() uint16 { return 0 }
+func (cleartextSyncStats11773) IsConnected() bool                     { return true }
+func (cleartextSyncStats11773) PeerSessionSyncWireVersion() uint16    { return 0 }
 func (cleartextSyncStats11773) UnauthenticatedSessionConns() []string { return nil }
 
 // TestGRPCClusterShowReportsLatchedCleartextSync11773 exercises the remote

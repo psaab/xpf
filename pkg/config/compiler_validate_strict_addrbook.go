@@ -153,7 +153,6 @@ func addressBookCollisionNames(ab *AddressBook) []string {
 	return names
 }
 
-
 // addressBookNameCollision returns the first same-name `address` +
 // `address-set` collision in ab (walked in sorted name order for a
 // deterministic first error), naming the offending entry and the book scope.

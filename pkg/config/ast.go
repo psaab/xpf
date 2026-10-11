@@ -676,12 +676,12 @@ func cloneNodes(nodes []*Node) []*Node {
 			// #4474 memo store/handout. Deep-copied: clones must never share the
 			// backing array (tag union-adds append). Nil-preserving, so untagged
 			// nodes allocate nothing.
-			fromGroups:                    append([]string(nil), n.fromGroups...),
+			fromGroups:                     append([]string(nil), n.fromGroups...),
 			duplicateBlockMergeMarkers9023: append([]string(nil), n.duplicateBlockMergeMarkers9023...),
-			leafMemberGroups9862:          cloneLeafMemberGroups9862(n.leafMemberGroups9862),
-			Inactive:             n.Inactive,
-			Line:                 n.Line,
-			Column:               n.Column,
+			leafMemberGroups9862:           cloneLeafMemberGroups9862(n.leafMemberGroups9862),
+			Inactive:                       n.Inactive,
+			Line:                           n.Line,
+			Column:                         n.Column,
 		}
 	}
 	return result

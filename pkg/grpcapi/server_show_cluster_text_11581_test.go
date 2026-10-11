@@ -75,13 +75,13 @@ func clusterManager11581() *cluster.Manager {
 	manager.SetSyncTransport("fabric")
 	manager.SetSyncStats(fakeSyncStats11581{
 		snapshot: cluster.SyncStatsSnapshot{
-			SessionsSent:     321,
-			SessionsReceived: 321,
+			SessionsSent:      321,
+			SessionsReceived:  321,
 			SessionsInstalled: 321,
-			DeletesSent:      8,
-			DeletesReceived:  8,
-			ConfigsSent:      12,
-			ConfigsReceived:  12,
+			DeletesSent:       8,
+			DeletesReceived:   8,
+			ConfigsSent:       12,
+			ConfigsReceived:   12,
 		},
 		connected: true,
 	})
@@ -108,15 +108,15 @@ func clusterManager11581() *cluster.Manager {
 //   - Session delta pending=0 with sent==received above: a sync-idle fixture.
 func processStatus11581() dpuserspace.ProcessStatus {
 	return dpuserspace.ProcessStatus{
-		PID:                   4242,
-		HelperMode:            "rust-native",
-		Enabled:               true,
-		ForwardingArmed:       true,
-		Workers:               2,
-		RingEntries:           4096,
-		SessionTableEntries:   321,
-		MaxSessions:           1000,
-		Capabilities:          dpuserspace.UserspaceCapabilities{ForwardingSupported: true},
+		PID:                 4242,
+		HelperMode:          "rust-native",
+		Enabled:             true,
+		ForwardingArmed:     true,
+		Workers:             2,
+		RingEntries:         4096,
+		SessionTableEntries: 321,
+		MaxSessions:         1000,
+		Capabilities:        dpuserspace.UserspaceCapabilities{ForwardingSupported: true},
 		HAGroups: []dpuserspace.HAGroupStatus{
 			{RGID: 0, Active: true, WatchdogTimestamp: 100},
 			{RGID: 1, Active: false, WatchdogTimestamp: 0},
@@ -365,7 +365,6 @@ func assertCensus11581(t *testing.T, method, output string, census []string) {
 		t.Fatalf("%s transcript fabric table lacks a parseable fab0 parent row:\n%s", method, output)
 	}
 }
-
 
 // checkGolden11581 compares renderer output against the checked-in golden
 // (writing it under -update-11581) and asserts the fail-closed label census

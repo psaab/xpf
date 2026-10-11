@@ -7,6 +7,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 )
+
 // RED on revert: these config-to-snapshot cells catch the single-rate fields
 // disappearing after compileFirewall, and require warnings for the runtime
 // semantics that remain unsupported.

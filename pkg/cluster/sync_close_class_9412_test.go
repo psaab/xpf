@@ -415,7 +415,6 @@ func TestCloseClassMemoIsBoundedAtTheGenerationCap9412(t *testing.T) {
 	}
 }
 
-
 func TestTCPHandshakeMemoIsBoundedAndUnknownIsEstablished10888(t *testing.T) {
 	const memoCap = 2
 	m := map[int]sentTCPHandshakeState{

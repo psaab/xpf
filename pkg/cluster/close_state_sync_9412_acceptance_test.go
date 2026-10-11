@@ -96,7 +96,7 @@ func TestTCPHandshakeStateCrossesClusterWire10888(t *testing.T) {
 	}
 
 	v6 := dataplane.SessionValueV6{
-		PolicyRuleID: "lan->wan/allow-web",
+		PolicyRuleID:      "lan->wan/allow-web",
 		TCPHandshakeState: dataplane.TCPHandshakeStateSynAckFirstPending,
 	}
 	key6 := dataplane.SessionKeyV6{SrcPort: 41003, DstPort: 5201, Protocol: 6}

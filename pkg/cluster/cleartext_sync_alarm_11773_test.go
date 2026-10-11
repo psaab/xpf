@@ -57,7 +57,7 @@ func TestCleartextFallbackLatchesAlarmAndCounter11773(t *testing.T) {
 				t.Fatalf("clean config sync must not render a latched cleartext warning:\n%s", information)
 			}
 			for name, statistics := range map[string]string{
-				"cluster statistics": manager.FormatStatistics(),
+				"cluster statistics":    manager.FormatStatistics(),
 				"data-plane statistics": manager.FormatDataPlaneStatistics(),
 			} {
 				if strings.Contains(statistics, "Config cleartext") {
