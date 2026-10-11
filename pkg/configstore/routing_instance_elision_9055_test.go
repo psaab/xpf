@@ -1,6 +1,7 @@
 package configstore
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -64,21 +65,22 @@ func TestElidedRoutingInstanceDoesNotStealTheOSPFInterface9055(t *testing.T) {
 	const proto = "protocols { ospf { area 0.0.0.0 { interface ge-0/0/1.0; } } }"
 	// #11310: the RI must own ge-0/0/1.0 before OSPF can reference it.
 	// Membership is declared on BOTH spellings. In the elided spelling the
-	// member precedes the protocols container with instance-type first —
-	// a container keyword takes the rest of the run, so a member AFTER
-	// protocols would be swallowed into it. The theft discriminator below
-	// compares interface SETS (not just lengths): a regressed elided
-	// parse re-binding the OSPF token as a member would duplicate the
-	// existing member — and ri.Interfaces is a plain append with no dedup,
-	// so the duplicate shows up as a length + content difference.
+	// member precedes the protocols container (a container keyword takes
+	// the rest of the run; a member placed after the protocols body parses
+	// as a separate instance refused by #9323, and a member fused inside
+	// the run trips the #8437 sibling gate). The theft discriminator below
+	// compares the member LISTS with duplicates included (never as sets:
+	// {X,X} == {X} would be blind to the duplicate): a regressed elided
+	// parse re-binding the OSPF token as a member duplicates the existing
+	// member — and ri.Interfaces is a plain append with no dedup, so the
+	// duplicate shows up as a list difference.
 	braced := ri9055(t, "ri1 { instance-type vrf; interface ge-0/0/1.0; "+proto+" }")
 	elided := ri9055(t, "ri1 instance-type vrf interface ge-0/0/1.0 "+proto)
 
 	// THE THEFT. Asserted against the braced control rather than against a
 	// hardcoded empty list, so it stays true if the braced spelling ever does
 	// legitimately record an interface here.
-	if len(elided.Interfaces) != len(braced.Interfaces) ||
-		(len(elided.Interfaces) == 1 && len(braced.Interfaces) == 1 && elided.Interfaces[0] != braced.Interfaces[0]) {
+	if !reflect.DeepEqual(elided.Interfaces, braced.Interfaces) {
 		t.Errorf("elided protocols bound %v as VRF member interfaces, braced bound "+
 			"%v. The OSPF area's interface token fell through to the `interface` "+
 			"case: the interface silently changed routing table, which is an "+
@@ -90,6 +92,26 @@ func TestElidedRoutingInstanceDoesNotStealTheOSPFInterface9055(t *testing.T) {
 	if (elided.OSPF == nil) != (braced.OSPF == nil) {
 		t.Errorf("elided OSPF present=%v, braced present=%v — the adjacency vanishes "+
 			"on a commit that reports success", elided.OSPF != nil, braced.OSPF != nil)
+	}
+}
+
+// PARITY (F1 hardening): the theft check above sees theft only as a DUPLICATE
+// member, which a future ri.Interfaces de-duplication would hide. This cell
+// does not depend on duplicates or on #11310 staying strict: both spellings
+// of the no-member pair must reach the SAME verdict, and if both commit their
+// instances must be DeepEqual (the 9620 agree-harness shape). Under theft the
+// elided spelling commits a stolen member while the braced spelling is
+// refused — RED either way. Under a drop regression the instances differ.
+func TestElidedRoutingInstanceNoMemberParity9055(t *testing.T) {
+	const proto = "protocols { ospf { area 0.0.0.0 { interface ge-0/0/1.0; } } }"
+	iface := "interfaces { ge-0/0/1 { unit 0 { family inet { address 10.0.1.1/24; } } } }\n"
+	ec, eerr := CheckText(iface+"routing-instances { ri1 instance-type vrf "+proto+" }\n", 0)
+	bc, berr := CheckText(iface+"routing-instances { ri1 { instance-type vrf; "+proto+" } }\n", 0)
+	if (eerr == nil) != (berr == nil) {
+		t.Errorf("no-member pair reaches different verdicts: elided err=%v, braced err=%v", eerr, berr)
+	} else if eerr == nil && !reflect.DeepEqual(ec.RoutingInstances, bc.RoutingInstances) {
+		t.Errorf("no-member pair commits different instances:\n elided %+v\n braced %+v",
+			ec.RoutingInstances, bc.RoutingInstances)
 	}
 }
 
