@@ -859,12 +859,35 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool,
 
 		// This is a container (or a leaf with trailing value tokens).
 		// Find or create matching node.
+		//
+		// #12508: interface filter/sampling siblings are compiled in order,
+		// so the last active sibling supplies the binding. Reuse it when it
+		// is a container; if the last sibling is a compact leaf, append a
+		// container so the new value remains compiler-visible. Other
+		// containers retain the historical first-match behavior.
 		found := false
-		for _, n := range *current {
-			if !n.IsLeaf && keysEqual(n.Keys, nodeKeys) {
-				current = &n.Children
-				found = true
-				break
+		if interfaceFilterSamplingSchema12508(childSchema) {
+			last := -1
+			for k, n := range *current {
+				if n != nil && !n.Inactive && len(n.Keys) > 0 &&
+					n.Keys[0] == nodeKeys[0] {
+					last = k
+				}
+			}
+			if last >= 0 {
+				n := (*current)[last]
+				if !n.IsLeaf && keysEqual(n.Keys, nodeKeys) {
+					current = &n.Children
+					found = true
+				}
+			}
+		} else {
+			for _, n := range *current {
+				if !n.IsLeaf && keysEqual(n.Keys, nodeKeys) {
+					current = &n.Children
+					found = true
+					break
+				}
 			}
 		}
 		if !found {
@@ -910,6 +933,15 @@ func (t *ConfigTree) DeletePathGrouped(path []string, grouped []bool) error {
 func deletePath(current *[]*Node, path []string, grouped []bool, schema *schemaNode, i int) error {
 	if i >= len(path) {
 		return ErrPathNotFound
+	}
+	if schema != nil {
+		if childSchema := schemaChildFor(schema, path[i]); interfaceFilterSamplingSchema12508(childSchema) {
+			if handled, err := deleteInterfaceFilterSampling12508(
+				current, path, childSchema, i,
+			); handled {
+				return err
+			}
+		}
 	}
 
 	// #8992: before anything else at the TOP level, a fully elided stanza --
@@ -1140,6 +1172,13 @@ func setInactiveAtPath(current *[]*Node, path []string, grouped []bool, schema *
 		// No schema match: remaining tokens form leaf keys.
 		return markMatchingNodeInactive(current, path[i:], inactive)
 	}
+	if interfaceFilterSamplingSchema12508(childSchema) {
+		if handled, err := setInterfaceFilterSamplingInactive12508(
+			current, path, childSchema, i, inactive,
+		); handled {
+			return err
+		}
+	}
 
 	// Value-list multi-leaf: the same bracket-list class deletePath intercepts
 	// (see the deletePath comment). A `multi: true` leaf with a single value slot
@@ -1218,6 +1257,140 @@ func removeMatchingNode(nodes *[]*Node, targetKeys []string) error {
 		}
 	}
 	return fmt.Errorf("%w: no node matching %q", ErrPathNotFound, strings.Join(targetKeys, " "))
+}
+
+// interfaceFilterSamplingSchema12508 limits last-sibling editor behavior to
+// the interface-family containers whose compiler readers fold every sibling.
+func interfaceFilterSamplingSchema12508(candidate *schemaNode) bool {
+	if candidate == nil || schemaInterfaces == nil || schemaInterfaces.wildcard == nil {
+		return false
+	}
+	unit := schemaInterfaces.wildcard.children["unit"]
+	if unit == nil {
+		return false
+	}
+	family := unit.children["family"]
+	if family == nil {
+		return false
+	}
+	inet := family.children["inet"]
+	inet6 := family.children["inet6"]
+	return inet != nil && (candidate == inet.children["filter"] || candidate == inet.children["sampling"]) ||
+		inet6 != nil && (candidate == inet6.children["filter"] || candidate == inet6.children["sampling"])
+}
+
+// deleteInterfaceFilterSampling12508 removes the compiler-visible binding
+// across every repeated sibling. Compact leaves live beside braced containers;
+// both representations must be cleared or a stale value can become effective.
+func deleteInterfaceFilterSampling12508(
+	nodes *[]*Node, path []string, containerSchema *schemaNode, i int,
+) (bool, error) {
+	keyCount := 1 + containerSchema.args
+	if i+keyCount > len(path) {
+		return false, nil
+	}
+	nodeKeys := path[i : i+keyCount]
+	if i+keyCount == len(path) {
+		if removeAllMatchingNodes12508(nodes, nodeKeys) {
+			return true, nil
+		}
+		return true, fmt.Errorf("%w: no node matching %q",
+			ErrPathNotFound, strings.Join(nodeKeys, " "))
+	}
+
+	targetKeys := path[i:]
+	childKeys := path[i+keyCount:]
+	matched := false
+	for k := len(*nodes) - 1; k >= 0; k-- {
+		n := (*nodes)[k]
+		if n == nil || len(n.Keys) == 0 || n.Keys[0] != nodeKeys[0] {
+			continue
+		}
+		if n.IsLeaf {
+			if keysMatch(n.Keys, targetKeys) {
+				*nodes = append((*nodes)[:k], (*nodes)[k+1:]...)
+				matched = true
+			}
+			continue
+		}
+		if keysEqual(n.Keys, nodeKeys) && removeAllMatchingNodes12508(&n.Children, childKeys) {
+			matched = true
+		}
+	}
+	if matched {
+		return true, nil
+	}
+	return true, fmt.Errorf("%w: no node matching %q",
+		ErrPathNotFound, strings.Join(targetKeys, " "))
+}
+
+// setInterfaceFilterSamplingInactive12508 applies deactivate/activate to every
+// matching sibling so no surviving binding contradicts the editor operation.
+func setInterfaceFilterSamplingInactive12508(
+	nodes *[]*Node, path []string, containerSchema *schemaNode, i int, inactive bool,
+) (bool, error) {
+	keyCount := 1 + containerSchema.args
+	if i+keyCount > len(path) {
+		return false, nil
+	}
+	nodeKeys := path[i : i+keyCount]
+	targetKeys := path[i:]
+	if i+keyCount == len(path) {
+		if markAllMatchingNodesInactive12508(nodes, nodeKeys, inactive) > 0 {
+			return true, nil
+		}
+		return true, fmt.Errorf("path not found: no node matching %q", strings.Join(nodeKeys, " "))
+	}
+
+	childKeys := path[i+keyCount:]
+	matched := false
+	for _, n := range *nodes {
+		if n == nil || len(n.Keys) == 0 || n.Keys[0] != nodeKeys[0] {
+			continue
+		}
+		if n.IsLeaf {
+			if keysMatch(n.Keys, targetKeys) {
+				n.Inactive = inactive
+				matched = true
+			}
+			continue
+		}
+		if keysEqual(n.Keys, nodeKeys) &&
+			markAllMatchingNodesInactive12508(&n.Children, childKeys, inactive) > 0 {
+			matched = true
+		}
+	}
+	if matched {
+		return true, nil
+	}
+	return true, fmt.Errorf("path not found: no node matching %q", strings.Join(targetKeys, " "))
+}
+
+func removeAllMatchingNodes12508(nodes *[]*Node, targetKeys []string) bool {
+	matched := false
+	kept := (*nodes)[:0]
+	for _, n := range *nodes {
+		if n != nil && keysMatch(n.Keys, targetKeys) {
+			matched = true
+			continue
+		}
+		kept = append(kept, n)
+	}
+	if matched {
+		*nodes = kept
+	}
+	return matched
+}
+
+func markAllMatchingNodesInactive12508(nodes *[]*Node, targetKeys []string, inactive bool) int {
+	matched := 0
+	for _, n := range *nodes {
+		if n != nil && keysMatch(n.Keys, targetKeys) {
+			n.Inactive = inactive
+			matched++
+		}
+	}
+	return matched
 }
 
 // removeMultiLeafMembers implements member-specific deletion for a value-list
