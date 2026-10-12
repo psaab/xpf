@@ -861,21 +861,56 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool,
 		// Find or create matching node.
 		//
 		// #12508: interface filter/sampling siblings are compiled in order,
-		// so the last active sibling supplies the binding. Reuse it when it
-		// is a container; if the last sibling is a compact leaf, append a
-		// container so the new value remains compiler-visible. Other
-		// containers retain the historical first-match behavior.
+		// so the last active sibling supplies the binding. If no active
+		// sibling exists, keep edits in the inactive statement; inside
+		// `groups`, retain first-match editing because expansion is first-wins.
 		found := false
-		if interfaceFilterSamplingSchema12508(childSchema) {
-			last := -1
+		if interfaceFilterSamplingSchema12508(childSchema) && path[0] != "groups" {
+			last, inactiveOnly := -1, -1
 			for k, n := range *current {
-				if n != nil && !n.Inactive && len(n.Keys) > 0 &&
-					n.Keys[0] == nodeKeys[0] {
-					last = k
+				if n == nil || len(n.Keys) == 0 || n.Keys[0] != nodeKeys[0] {
+					continue
 				}
+				if n.Inactive {
+					if !n.IsLeaf && keysEqual(n.Keys, nodeKeys) ||
+						n.IsLeaf && keysMatch(n.Keys, nodeKeys) &&
+							len(n.Keys) > len(nodeKeys) && elidedNodeIsExactlyOneStatement(n, schema) {
+						if inactiveOnly < 0 {
+							inactiveOnly = k
+						}
+					}
+					continue
+				}
+				last = k
 			}
 			if last >= 0 {
 				n := (*current)[last]
+				if !n.IsLeaf && keysEqual(n.Keys, nodeKeys) {
+					current = &n.Children
+					found = true
+				}
+			} else if inactiveOnly >= 0 {
+				n := (*current)[inactiveOnly]
+				if n.IsLeaf {
+					// Promote a single compact inactive statement so the edit
+					// can update or add its child without activating the node.
+					oldKeys, oldQuoted, oldBracketed := n.Keys, n.KeysQuoted, n.KeysBracketed
+					child := &Node{
+						Keys:   append([]string(nil), oldKeys[len(nodeKeys):]...),
+						IsLeaf: true,
+					}
+					if len(oldQuoted) == len(oldKeys) {
+						child.setKeysQuoted(oldQuoted[len(nodeKeys):])
+					}
+					if len(oldBracketed) == len(oldKeys) {
+						child.setKeysBracketed(oldBracketed[len(nodeKeys):])
+					}
+					n.Keys = append([]string(nil), nodeKeys...)
+					n.setKeysQuoted(quotedRange(keyStart, i))
+					n.setKeysBracketed(groupedRange(keyStart, i), closed...)
+					n.IsLeaf = false
+					n.Children = []*Node{child}
+				}
 				if !n.IsLeaf && keysEqual(n.Keys, nodeKeys) {
 					current = &n.Children
 					found = true
@@ -935,40 +970,9 @@ func deletePath(current *[]*Node, path []string, grouped []bool, schema *schemaN
 		return ErrPathNotFound
 	}
 	if schema != nil {
-		if childSchema := schemaChildFor(schema, path[i]); interfaceFilterSamplingSchema12508(childSchema) {
-			if handled, err := deleteInterfaceFilterSampling12508(
-				current, path, childSchema, i,
-			); handled {
-				return err
-			}
-		}
-	}
-
-	// #8992: before anything else at the TOP level, a fully elided stanza --
-	// `system master-password ascii-text "x";` -- is ONE node whose Keys carry
-	// the whole path, so no descent by container name can find it. Handled
-	// here rather than in the not-found branch because the elided node may sit
-	// beside a BRACED container of the same name, in which case the descent
-	// succeeds, fails deeper, and reports "no node matching <leaf>" while the
-	// elided node is never examined at all. See elided_delete_8992.go for the
-	// bound: only a node encoding exactly ONE statement is removed.
-	// #8997: at EVERY level, not just the top. An elided node can sit at any
-	// depth -- `chassis { cluster strict-session-auth; }` puts it one level
-	// down -- and restricting this to i == 0 meant a partially elided stanza
-	// was never examined. `schema` is the schema node for the CURRENT
-	// container, so the bound below is evaluated in the right scope; where the
-	// descent has dropped the schema (nil) the check is skipped, which is the
-	// conservative direction for a delete.
-	if schema != nil {
-		if idx := findElidedNodeForPath(*current, path[i:], schema); idx >= 0 {
-			*current = append((*current)[:idx], (*current)[idx+1:]...)
-			return nil
-		}
-		// The stanza IS present, elided, but packed together with at least one
-		// other statement on the same node. Removing the node would take the
-		// others with it (#3846's fail-wide), and splitting it is
-		// consumeNodeKeys work #8932 records as unfinished -- so refuse, and
-		// say which.
+		// Refuse a delete that would remove packed siblings before the
+		// interface filter/sampling intercept can remove all matching nodes.
+		// #8992/#8997: an elided packed run can occur at any depth.
 		if keys := elidedPackedRunCarrying(*current, path[i:], schema); keys != nil {
 			return fmt.Errorf("%w: %q is present in an ELIDED spelling packed together "+
 				"with other statements on one line (%q), and deleting it would remove "+
@@ -976,17 +980,27 @@ func deletePath(current *[]*Node, path []string, grouped []bool, schema *schemaN
 				"(#8992, #8932)",
 				ErrPathNotFound, strings.Join(path, " "), strings.Join(keys, " "), path[len(path)-1])
 		}
-		// #9799: a LATER member of a bracketed group (`zgb` in `security-zone
-		// [ zga zgb ]`) never matched the walk below and was reported as no
-		// node. It is the same one-line group, so it gets the same guidance.
+		// #9799: a later member of a bracketed group cannot be deleted alone.
 		if keys := groupCarryingLaterMember9799(*current, path[i:]); keys != nil {
 			return fmt.Errorf("%w: %q is one member of a group written on one line (%q), and "+
 				"deleting it would remove the others too. Re-author that line with braces "+
 				"around %q, then delete it (#9799, #8992)",
 				ErrPathNotFound, strings.Join(path, " "), strings.Join(keys, " "), path[len(path)-1])
 		}
+		if childSchema := schemaChildFor(schema, path[i]); interfaceFilterSamplingSchema12508(childSchema) {
+			if handled, err := deleteInterfaceFilterSampling12508(
+				current, path, childSchema, i,
+			); handled {
+				return err
+			}
+		}
+		// Remove one exactly-elided statement only after the packed refusals
+		// and the interface all-sibling delete have had a chance to run.
+		if idx := findElidedNodeForPath(*current, path[i:], schema); idx >= 0 {
+			*current = append((*current)[:idx], (*current)[idx+1:]...)
+			return nil
+		}
 	}
-
 	keyword := path[i]
 
 	// Look up keyword in current schema level (#9685).
@@ -1259,8 +1273,10 @@ func removeMatchingNode(nodes *[]*Node, targetKeys []string) error {
 	return fmt.Errorf("%w: no node matching %q", ErrPathNotFound, strings.Join(targetKeys, " "))
 }
 
-// interfaceFilterSamplingSchema12508 limits last-sibling editor behavior to
-// the interface-family containers whose compiler readers fold every sibling.
+// interfaceFilterSamplingSchema12508 identifies the interface-family filter
+// and sampling nodes affected by the editor/compiler mismatch. The `groups`
+// schema reuses these pointers, so SetPath separately excludes group-body
+// paths whose apply-groups expansion follows first-sibling merge semantics.
 func interfaceFilterSamplingSchema12508(candidate *schemaNode) bool {
 	if candidate == nil || schemaInterfaces == nil || schemaInterfaces.wildcard == nil {
 		return false
