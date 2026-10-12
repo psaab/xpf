@@ -449,6 +449,14 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 			"it was armed for a different config than this apply is publishing")
 		return
 	}
+	// A retained authority refusal for an exact rollback to the debt's
+	// predecessor is retried by a later background apply, not by the original
+	// rollback caller. Let that matching successful publication discharge the
+	// recaptured debt; a superseding commit is not an exact rollback.
+	if originalDebt != nil && originalDebt.authorityRefusal != nil &&
+		originalDebt.predecessorCfg != nil && plan.newCfg == originalDebt.predecessorCfg {
+		d.policyInvalidationDebtAdopted = true
+	}
 	applied := policyInvalidationAppliedConfig(d.dataplane())
 	if debt := d.policyInvalidationDebt; debt != nil && applied != nil && debt.newCfg != applied {
 		var active *config.Config
@@ -588,6 +596,29 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	capture.deflt.targets = len(deflt)
 
 	if len(deleted)+len(modified)+len(deflt) == 0 && len(renameBindings) == 0 {
+		// #12515: an empty diff is convergence-proof only when the helper's
+		// applied snapshot is provably the plan's old authority. A lost-ACK
+		// commit-confirm C2 republishes as a C1->C1 rollback plan (debt.oldCfg
+		// re-anchor above); a session admitted only by C2 may still be live.
+		// Refuse publication under unknown or mismatched authority so the retry
+		// can re-anchor to the helper's reconciled C2 snapshot and capture its
+		// sessions before applying C1.
+		// This runs under applySem, so no daemon config publication can change
+		// the sampled authority before the matching ApplyConfig.
+		if rt := d.dataplane(); rt != nil && plan.oldCfg != nil {
+			// Only dataplans with the helper's authority-aware LIST surface
+			// have a snapshot authority to fence here; legacy fallbacks cannot
+			// distinguish unknown publication outcomes.
+			if _, ok := rt.(interface {
+				ListSessionsByPolicy(dpuserspace.SessionPolicyListRequest) (dpuserspace.ControlResponse, error)
+			}); ok && policyInvalidationAppliedConfig(rt) != plan.oldCfg {
+				refusal := fmt.Errorf(
+					"%w: empty-diff policy invalidation authority is unknown or changed",
+					dpuserspace.ErrPolicyReadAuthority)
+				d.refusePolicyInvalidationAuthorityLocked(plan, originalDebt, capture, refusal)
+				return
+			}
+		}
 		// Nothing to invalidate on this commit — record the empty capture so the
 		// clears know one was taken and skip the session-table scan entirely.
 		d.retainPolicyInvalidationCaptureLocked(mergePolicyInvalidationCaptures(previousCapture, capture))
