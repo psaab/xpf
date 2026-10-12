@@ -16,6 +16,8 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/insomniacslk/dhcp/dhcpv6/nclient6"
 	"github.com/insomniacslk/dhcp/iana"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // errV6AddrInvalidated signals that a DHCPv6 Reply EXPLICITLY invalidated the
@@ -1205,9 +1207,17 @@ func extractDelegatedPrefixes(msg *dhcpv6.Message, ifaceName string, now time.Ti
 			if !ok {
 				continue
 			}
+			delegated := netip.PrefixFrom(ip, ones)
+			if reason := config.DelegatedIPv6PrefixRefusalReasonBlocklist(delegated); reason != "" {
+				slog.Warn("DHCPv6: refusing IA_PD prefix with blocked address class",
+					"interface", ifaceName,
+					"prefix", delegated,
+					"reason", reason)
+				continue
+			}
 			dp := DelegatedPrefix{
 				Interface:         ifaceName,
-				Prefix:            netip.PrefixFrom(ip, ones),
+				Prefix:            delegated,
 				PreferredLifetime: prefix.PreferredLifetime,
 				ValidLifetime:     prefix.ValidLifetime,
 				Obtained:          now,

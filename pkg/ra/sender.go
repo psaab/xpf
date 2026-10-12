@@ -932,6 +932,14 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 				"prefix", pfx.Prefix, "interface", s.cfg.Interface)
 			continue
 		}
+		if pfx.Delegated {
+			if reason := config.DelegatedIPv6PrefixRefusalReasonBlocklist(prefix.Masked()); reason != "" {
+				slog.Warn("ra: refusing to advertise delegated prefix with blocked address class",
+					"prefix", pfx.Prefix, "interface", s.cfg.Interface,
+					"reason", reason)
+				continue
+			}
+		}
 
 		ra.Options = append(ra.Options, &ndp.PrefixInformation{
 			PrefixLength:                   uint8(prefix.Bits()),
