@@ -2048,6 +2048,17 @@ func validatePolicyThenOperandsStrict(cfg *Config) error {
 			if err := validatePolicyThenValueOperands12513(cfg, name, term); err != nil {
 				return err
 			}
+			if term.invalidPolicyThenTail12517 {
+				if term.invalidPolicyThenTailAction12517 == "then" {
+					return fmt.Errorf(
+						"policy-options policy-statement %q term %q then: unexpected trailing token %q",
+						name, term.Name, term.invalidPolicyThenTailValue12517)
+				}
+				return fmt.Errorf(
+					"policy-options policy-statement %q term %q then %s: unknown modifier %q",
+					name, term.Name, term.invalidPolicyThenTailAction12517,
+					term.invalidPolicyThenTailValue12517)
+			}
 		}
 	}
 	return nil

@@ -187,6 +187,16 @@ type PolicyTerm struct {
 	// rejects this evidence instead. Compiler-only state, excluded from JSON.
 	invalidThenOperand12513      string `json:"-"`
 	invalidThenOperandValue12513 string `json:"-"`
+	// invalidPolicyThenTail12517 retains a token beyond a recognized `then`
+	// action (or a then-side from-match word) for the compiled strict gate.
+	// Tolerant load/sync paths warn instead of silently dropping the tail.
+	// Compiler-only provenance is excluded from JSON.
+	invalidPolicyThenTail12517       bool   `json:"-"`
+	invalidPolicyThenTailAction12517 string `json:"-"`
+	invalidPolicyThenTailValue12517  string `json:"-"`
+	// quotedThenNextHopReject12517 preserves a deny when quoted `then` inside
+	// an as-path-prepend run diverts `next-hop reject` to the next-hop operand.
+	quotedThenNextHopReject12517 bool `json:"-"`
 	// invalidNextPolicy11780 preserves malformed packed `then next <value>`
 	// tokens long enough for strict compilation to reject them. Tolerant
 	// compilation also records Action=reject so the renderer fails closed.
