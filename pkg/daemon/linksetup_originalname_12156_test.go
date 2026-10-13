@@ -141,6 +141,7 @@ Name=ge-0-0-0
 		t.Fatalf("write MAC-form logical-name fixture: %v", err)
 	}
 
+	stubIdentity12550(t, "52:54:00:00:00:01", nil)
 	nics := []pciNIC{{sortKey: 1, busAddr: "0000:05:00.0", name: "ge-0-0-0"}}
 	var renamed [][2]string
 	changed, errs := renamePositional(nics, 0, false, func(from, to string) error {
@@ -178,6 +179,7 @@ Name=fxp0
 	if err := os.WriteFile(filepath.Join(dir, linkPrefix+"fxp0.link"), []byte(macForm), 0644); err != nil {
 		t.Fatalf("write colliding MAC-form fixture: %v", err)
 	}
+	stubIdentity12550(t, "52:54:00:00:00:02", nil)
 
 	nics := []pciNIC{
 		{sortKey: 1, busAddr: "0000:05:00.0", name: "enp5s0"},
@@ -426,6 +428,7 @@ Name=fxp0
 	if err := os.WriteFile(filepath.Join(dir, linkPrefix+"fxp0.link"), []byte(staleTarget), 0644); err != nil {
 		t.Fatal(err)
 	}
+	stubIdentity12550(t, "52:54:00:00:00:01", nil)
 	nics := []pciNIC{{sortKey: 1, busAddr: "0000:05:00.0", name: "ge-0-0-0"}}
 	var renamed [][2]string
 	changed, errs := renamePositional(nics, 0, false, func(from, to string) error {
@@ -468,8 +471,10 @@ Name=fxp0
 // TestBootstrapLifelineNeutralizesResurrectableLinksOnRename12156 pins
 // finding A: the bootstrap half of the MAJOR-1 neutralize. The B1 shape —
 // the lifeline wears ge-0-0-0 via a MAC-form link while a stale fxp0.link
-// (another NIC's claim) exists — must remove BOTH links, attempt the rename
-// to fxp0, and log ERROR. Pre-fold this left the other NIC holding fxp0
+// (another NIC's claim) exists — the stale foreign fxp0.link SURVIVES
+// (#12709 MAC verification), the rename to fxp0 is attempted, and the
+// persistence loss is logged. Pre-#12709 this removed both links by
+// filename; pre-fold this left the other NIC holding fxp0
 // forever with no ERROR; a revert of the bootstrap branch must fail here.
 func TestBootstrapLifelineNeutralizesResurrectableLinksOnRename12156(t *testing.T) {
 	logs := captureLogs12156(t)
@@ -490,6 +495,7 @@ func TestBootstrapLifelineNeutralizesResurrectableLinksOnRename12156(t *testing.
 	if err := os.WriteFile(staleLink, []byte(staleContent), 0644); err != nil {
 		t.Fatalf("write stale fxp0 fixture: %v", err)
 	}
+	stubIdentity12550(t, "52:54:00:12:34:56", nil)
 	lifelineLinkByName = func(string) (netlink.Link, error) { return okLink(), nil }
 	lifelineAddrList = func(netlink.Link, int) ([]netlink.Addr, error) {
 		return []netlink.Addr{staticAddr("192.0.2.10/24")}, nil
@@ -505,8 +511,8 @@ func TestBootstrapLifelineNeutralizesResurrectableLinksOnRename12156(t *testing.
 	if _, err := os.Stat(ownLink); !os.IsNotExist(err) {
 		t.Fatalf("own MAC-form ge-0-0-0.link survived the unknown rename (stat err=%v)", err)
 	}
-	if _, err := os.Stat(staleLink); !os.IsNotExist(err) {
-		t.Fatalf("stale fxp0.link survived the unknown rename (stat err=%v)", err)
+	if _, err := os.Stat(staleLink); err != nil {
+		t.Fatalf("foreign MAC-form fxp0.link must survive the unknown lifeline rename, stat err=%v", err)
 	}
 	if !*st.renamed {
 		t.Error("the lifeline must still attempt the rename to fxp0 after neutralizing")
@@ -546,6 +552,7 @@ Name=ge-0-0-0
 	if err := os.MkdirAll(filepath.Join(dir, linkPrefix+"fxp0.link", "keep"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	stubIdentity12550(t, "52:54:00:00:00:01", nil)
 	nics := []pciNIC{{sortKey: 1, busAddr: "0000:05:00.0", name: "ge-0-0-0"}}
 	var renamed [][2]string
 	_, errs := renamePositional(nics, 0, false, func(from, to string) error {
@@ -585,6 +592,7 @@ func TestBootstrapLifelineNeutralizeFailureNotReportedNeutralized12704(t *testin
 	if err := os.WriteFile(ownLink, []byte(ownContent), 0644); err != nil {
 		t.Fatalf("write own MAC-form fixture: %v", err)
 	}
+	stubIdentity12550(t, "52:54:00:12:34:56", nil)
 	if err := os.MkdirAll(filepath.Join(st.linkDir, linkPrefix+"fxp0.link", "keep"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -723,6 +731,7 @@ func TestRenamePositionalUnfreedOwnerWriteFailStaysFailClosed12156(t *testing.T)
 	// A's recorded original carries a glob, so its rewrite is refused (#10089).
 	chain := "# Managed by xpfd \u2014 do not edit\n[Match]\nOriginalName=enp5s0*\n\n[Link]\nName=fxp0"
 	macForm := "# Managed by xpfd \u2014 do not edit\n[Match]\nMACAddress=52:54:00:00:00:0b\n\n[Link]\nName=ge-0-0-0\nMTUBytes=1500\n"
+	stubIdentity12550(t, "52:54:00:00:00:0b", nil)
 	for i := 0; i < 200; i++ {
 		dir := withTempLinkDir(t)
 		if err := os.WriteFile(filepath.Join(dir, linkPrefix+"fxp0.link"), []byte(chain), 0644); err != nil {
@@ -789,6 +798,7 @@ func TestCHSingleFaultTempOKOwnerWriteFail12557(t *testing.T) {
 		{name: "known-first", unknown: "fxp0", owner: "ge-0-0-0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			stubIdentity12550(t, "52:54:00:00:00:0b", nil)
 			for range 100 {
 				dir := withTempLinkDir(t)
 				if err := os.WriteFile(filepath.Join(dir, linkPrefix+tc.owner+".link"), []byte(chain(tc.owner)), 0644); err != nil {
