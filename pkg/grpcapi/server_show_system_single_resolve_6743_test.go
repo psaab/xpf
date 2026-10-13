@@ -1,6 +1,7 @@
 package grpcapi
 
 import (
+	"context"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -195,6 +196,10 @@ func (*mapStatsBackend) SessionCount() (int, int) {
 	return singleLoadV4, singleLoadV6
 }
 
+func (*mapStatsBackend) SessionCountContext(context.Context) (int, int, error) {
+	return singleLoadV4, singleLoadV6, nil
+}
+
 func (*mapStatsBackend) GetMapStats() []dataplane.MapStats {
 	return []dataplane.MapStats{{
 		Name:       "sessions_v4",
@@ -218,6 +223,9 @@ func (*userspaceArmBackend) SessionCount() (int, int) {
 	return singleLoadV4, singleLoadV6
 }
 
+func (*userspaceArmBackend) SessionCountContext(context.Context) (int, int, error) {
+	return singleLoadV4, singleLoadV6, nil
+}
 func (*userspaceArmBackend) Status() (dpuserspace.ProcessStatus, error) {
 	return dpuserspace.ProcessStatus{
 		SessionTableEntries: 9,
@@ -269,11 +277,10 @@ var singleLoadRenders = []struct {
 //
 // FAIL-ON-REVERT, per arm:
 //
-//   - map-stats arm: restore `v4, v6 := s.dp.SessionCount()` in place of
-//     backendSessionCount(backend) at the tail of the else-branch. Load 2
-//     resolves the emptied cell, SessionCount returns (0,0), and the
-//     "Active sessions" line disappears — loads=2 and the marker assertion
-//     both go RED.
+//   - map-stats arm: resolve the backend once, then perform the session
+//     count against that backend. A second indirection load resolves the
+//     emptied cell and drops the "Active sessions" line, flipping the
+//     load-count and marker assertions red.
 //   - userspace arm: the same substitution inside the
 //     `if provider, ok := backend.(userspaceStatusProvider)` branch, which
 //     is the line this PR's diff created. Same two REDs.
@@ -317,9 +324,8 @@ func TestShowBuffersTakesOneCellLoad(t *testing.T) {
 				// though the firewall simply had no sessions.
 				if !strings.Contains(out, singleLoadActiveSessions) {
 					t.Fatalf("%s/%s dropped the session-count line (loads=%d): want %q. "+
-						"The tail must read backendSessionCount(backend), not "+
-						"s.dp.SessionCount() — the latter loads the cell a second time "+
-						"and reports (0,0) against the emptied cell.\n%s",
+						"The tail must use the already-resolved backend for its cancellable "+
+						"count rather than resolving s.dp again and reporting (0,0).\n%s",
 						render.name, arm.name, dp.loads.Load(), singleLoadActiveSessions, out)
 				}
 

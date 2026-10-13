@@ -42,6 +42,10 @@ func (d *countBoundDP) SessionCount() (int, int) {
 	return d.v4, d.v6
 }
 
+func (d *countBoundDP) SessionCountContext(context.Context) (int, int, error) {
+	return d.v4, d.v6, nil
+}
+
 func (*countBoundDP) GetMapStats() []dataplane.MapStats { return nil }
 
 func newCountBoundServer(t *testing.T, dp *countBoundDP) *Server {

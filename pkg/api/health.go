@@ -1,11 +1,18 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"time"
 
+	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/flowexport"
 )
+
+func statusSessionCountContext(ctx context.Context, dp apiRuntimeDataPlane) (int, int, error) {
+	return dp.SessionCountContext(ctx)
+}
 
 // healthHandler surfaces dataplane compile health (#758) and config
 // persistence health (#1799) alongside the simple "ok" probe. When the
@@ -176,7 +183,7 @@ func (s *Server) flowExportersHandler(w http.ResponseWriter, _ *http.Request) {
 	writeOK(w, map[string]any{"collectors": collectors})
 }
 
-func (s *Server) statusHandler(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) statusHandler(w http.ResponseWriter, r *http.Request) {
 	resp := StatusResponse{
 		Uptime:          time.Since(s.startTime).Truncate(time.Second).String(),
 		DataplaneLoaded: s.dp != nil && s.dp.IsLoaded(),
@@ -191,25 +198,29 @@ func (s *Server) statusHandler(w http.ResponseWriter, _ *http.Request) {
 	// gc.Stats().TotalEntries is permanently 0 — this reported 0 sessions on
 	// every real deployment.
 	if s.dp != nil && s.dp.IsLoaded() {
-		// #5939: SessionCount() is a full v4+v6 session-map iteration holding the
-		// per-bucket BPF-map locks for O(table) — the SAME lock-contention DoS
-		// class #5708/#5782 bounded, reachable UNGATED here on the REST surface.
-		// Gate it through the shared diagcmd.SessionWalkLimiter (the same instance
-		// the /security/sessions* scans use, sessions.go) and fail fast with HTTP
-		// 429 on contention rather than driving another concurrent full-table walk,
-		// mirroring sessions.go. This is the AUTHENTICATED /api/v1/status query
-		// (authCheck exempts only /health + loopback-/metrics); the unauthenticated
-		// liveness /health handler does NOT walk the session table, so a 429 here
-		// cannot flap the liveness probe.
 		release, err := sessionWalkLimiter.Acquire()
 		if err != nil {
 			writeError(w, http.StatusTooManyRequests,
 				"session count concurrency limit reached; retry shortly")
 			return
 		}
-		defer release() // idempotent; released on panic too (limiter contract)
-		v4, v6 := s.dp.SessionCount()
+		defer release()
+		v4, v6, err := statusSessionCountContext(r.Context(), s.dp)
+		if err != nil {
+			if r.Context().Err() != nil {
+				return
+			}
+			if errors.Is(err, dataplane.ErrNotPublished) {
+				writeError(w, http.StatusServiceUnavailable, "dataplane not loaded")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "count sessions: "+err.Error())
+			return
+		}
 		resp.SessionCount = v4 + v6
+	}
+	if r.Context().Err() != nil {
+		return
 	}
 	writeOK(w, resp)
 }

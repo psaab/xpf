@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"sort"
 	"strconv"
 	"sync"
@@ -1471,6 +1472,10 @@ func (c *xpfCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
+	c.collectContext(context.Background(), ch)
+}
+
+func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.Metric) {
 	// #5045: emit the xpf_counter_read_errors_total scrape-error sample on
 	// EVERY return path of Collect, so the #3345/#3462 omit-plus-error contract
 	// (a series OMITTED because its read failed => the SAME scrape MUST carry
@@ -2029,7 +2034,7 @@ func (c *xpfCollector) Collect(ch chan<- prometheus.Metric) {
 	// deferred emit covers this normal-completion path AND the unloaded early
 	// return above with exactly one emission per scrape.
 	c.collectNATPoolMetrics(ch, dp, userspaceStatus)
-	c.collectSessionGauges(ch, dp)
+	c.collectSessionGaugesContext(ctx, ch, dp)
 	c.collectUserspaceStatus(ch, userspaceStatus)
 	// #6845: a top-level status-derived signal, emitted only when a status was
 	// actually read — see emitZoneCounterOverflow for why its absence and its 0

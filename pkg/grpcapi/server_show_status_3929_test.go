@@ -23,6 +23,10 @@ type statusSessionsDP struct {
 func (d *statusSessionsDP) IsLoaded() bool           { return true }
 func (d *statusSessionsDP) SessionCount() (int, int) { return d.v4, d.v6 }
 
+func (d *statusSessionsDP) SessionCountContext(context.Context) (int, int, error) {
+	return d.v4, d.v6, nil
+}
+
 // TestGetStatusSessionCountFromUserspaceTable is the #3929 RED-on-revert guard
 // for the gRPC GetStatus SessionCount. It must report the live dataplane
 // session count (forward-only v4+v6 = 7), NOT gc.Stats().TotalEntries, which is

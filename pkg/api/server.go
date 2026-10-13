@@ -21,9 +21,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
@@ -778,17 +775,15 @@ const (
 	// buffer unbounded header data before the timeouts fire.
 	apiMaxHeaderBytes = 1 << 20 // 1 MiB
 
-	// metricsScrapeTimeout bounds a single /metrics scrape (#4162). promhttp
-	// aborts the handler and returns 503 if a scrape runs longer than this,
-	// so a scrape that stalls inside a slow dataplane read cannot pin a
-	// goroutine indefinitely. Generous relative to a healthy scrape (the
-	// session walk is now cached) but a hard ceiling on a wedged one.
+	// metricsScrapeTimeout is promhttp's response timeout for each scrape.
+	// The shared session census deliberately runs independently of the scrape
+	// that starts it so it can complete into cache for healthy joiners and
+	// later requests.
 	metricsScrapeTimeout = 10 * time.Second
-	// metricsMaxInFlight bounds concurrent /metrics scrapes (#4162). promhttp
-	// returns 503 to scrapes beyond this many in flight, so a burst of parallel
-	// scrapers cannot each spin up a collector pass at once. The session walk
-	// is coalesced by the TTL cache, but this is the belt-and-suspenders limit
-	// on the rest of the collector's per-scrape work.
+	// metricsMaxInFlight bounds concurrent /metrics collector passes (#4162).
+	// metricsHandler owns this slot until Collect returns, even if promhttp has
+	// already sent a timeout response; excess scrapes receive 503 before a
+	// collector pass starts.
 	metricsMaxInFlight = 3
 )
 
@@ -886,15 +881,8 @@ func NewServer(cfg Config) *Server {
 	mux.HandleFunc("GET /health", s.healthHandler)
 
 	// Prometheus metrics with isolated registry
-	registry := prometheus.NewRegistry()
-	registry.MustRegister(newCollector(s))
-	mux.Handle("GET /metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{
-		// #4162: bound slow / concurrent scrapes. Empty opts left both zero
-		// (no timeout, unlimited concurrency), so a stalled or bursty scraper
-		// could pile up collector passes over the dataplane.
-		Timeout:             metricsScrapeTimeout,
-		MaxRequestsInFlight: metricsMaxInFlight,
-	}))
+	collector := newCollector(s)
+	mux.Handle("GET /metrics", newMetricsHandler(collector, metricsScrapeTimeout))
 
 	// REST API v1
 	mux.HandleFunc("GET /api/v1/status", s.statusHandler)

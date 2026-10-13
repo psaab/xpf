@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,11 @@ func (d *userspaceSessionsDP) SessionCount() (int, int) {
 		}
 	}
 	return v4, v6
+}
+
+func (d *userspaceSessionsDP) SessionCountContext(context.Context) (int, int, error) {
+	v4, v6 := d.SessionCount()
+	return v4, v6, nil
 }
 
 // newUserspaceSessionsDP builds a snapshot with:

@@ -1158,3 +1158,12 @@ func (a *LegacyDataPlaneAdapter) IterateSessionsV6From(cursor *dataplane.Session
 	}
 	return ErrCursorIterationUnsupported
 }
+
+// SessionCountContext forwards cancellable live-table counting to the userspace
+// manager's mirrored maps.
+func (a *LegacyDataPlaneAdapter) SessionCountContext(ctx context.Context) (int, int, error) {
+	if a == nil || a.manager == nil || a.manager.bpfShim == nil {
+		return 0, 0, errors.New("nil userspace dataplane")
+	}
+	return a.manager.bpfShim.SessionCountContext(ctx)
+}

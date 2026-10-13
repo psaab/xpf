@@ -79,8 +79,8 @@ var managerMethodClasses = map[string]string{
 	// --- class 2: neutral-outcome, any signature, WITH the uniform
 	// synchronization rule (fresh outcome == master's missing-map outcome,
 	// byte-for-byte) ---
-	"Compile":                     "class2", // redirect_capable optional skip-and-continue
-	"SessionCount":                "class2",
+	"Compile":      "class2", // redirect_capable optional skip-and-continue
+	"SessionCount": "class2", "SessionCountContext": "class2",
 	"GetMapStats":                 "class2",
 	"ClearSessionCounts":          "class2",
 	"UpdatePolicyScheduleState":   "class2", // the #3780 deliberate nil
@@ -245,8 +245,8 @@ func TestManager_PreArmMethodMatrix(t *testing.T) {
 			}
 		}
 	}
-	if len(inventory) != 145 {
-		t.Fatalf("exported *Manager method inventory = %d, want 145 (the 140-method baseline plus the #9725 kernel-truth XDP-link count and wake-only observer registration, the #10302 provenance-bearing ifindex census, and the #10519 post-acceptance detach-debt reconciler plus test debt seeder; reconcile the count or the plan)", len(inventory))
+	if len(inventory) != 146 {
+		t.Fatalf("exported *Manager method inventory = %d, want 146 (the 140-method baseline plus the #9725 kernel-truth XDP-link count and wake-only observer registration, the #10302 provenance-bearing ifindex census, the #10519 post-acceptance detach-debt reconciler plus test debt seeder, and the cancellable session census; reconcile the count or the plan)", len(inventory))
 	}
 	for name := range inventory {
 		if _, ok := managerMethodClasses[name]; !ok {
@@ -1266,6 +1266,8 @@ var registryCallsiteManifest = []registryCallsiteManifestEntry{
 	{"maps_session.go", "SeedSessionIDCounter", "map", `"session_id_gen"`, "optional"},
 	{"maps_session.go", "SessionCount", "map", `"sessions"`, "optional"}, // leg: v4 AND v6 both reported (continuation)
 	{"maps_session.go", "SessionCount", "map", `"sessions_v6"`, "optional"},
+	{"maps_session.go", "SessionCountContext", "map", `"sessions"`, "optional"}, // leg: v4 AND v6 both reported (continuation)
+	{"maps_session.go", "SessionCountContext", "map", `"sessions_v6"`, "optional"},
 	{"maps_session.go", "SetSessionV4", "map", `"sessions"`, "required"},
 	{"maps_session.go", "SetSessionV6", "map", `"sessions_v6"`, "required"},
 	{"maps_stale.go", "DeleteStaleApplications", "map", `"applications"`, "optional"},

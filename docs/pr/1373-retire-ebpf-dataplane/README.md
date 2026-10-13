@@ -253,6 +253,7 @@ surfaces move to domain interfaces such as `RuntimeDataPlane`, `SessionStore`,
 | `cmd/shimverify/main.go` | #1864 build-time verifier gate: thin wrapper over `dataplane.VerifyUserspaceShimObject` (verify-only kernel-verifier load; no production load path). Deliberate, not retirement debt. |
 | `cmd/shim-manifest/main.go` | #4977 build-time freshness gate: thin wrapper over `dataplane.WriteUserspaceXDPManifest` (regenerates the source→object manifest during `make generate`; no production load path). Deliberate, not retirement debt. |
 | `cmd/xpfd/main.go` | Backend selection, cleanup, and backend registration still cross the root package. |
+| `pkg/api/health.go` | #12609 — REST `/status` counts live session entries through cancellable legacy session iterators. |
 | `pkg/api/api.go` | Shared REST helpers still reference legacy dataplane counters and types (#1540 split entry: `apiRuntimeDataPlane` interface, `applyResult` adapter). |
 | `pkg/api/metrics.go` | Prometheus telemetry still reads legacy counters and metadata. |
 | `pkg/api/metrics_counters.go` | Prometheus map-counter collectors still call legacy dataplane reads (#1540 metrics split). |

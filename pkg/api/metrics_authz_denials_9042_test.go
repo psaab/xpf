@@ -66,11 +66,11 @@ func TestAuthzDenialsEmittedForEverySurface9042(t *testing.T) {
 // described-but-never-emitted metric scrapes as ABSENT — precisely the state
 // this issue exists to end — and nothing about either file looks wrong.
 //
-// Asserted on the SOURCE rather than by calling Collect: Collect dereferences
-// c.srv and panics on the nil-server collector these metric tests use, so a
-// behavioural check here would need a live server and would be testing the
-// harness. The property is "the call exists in Collect", which is exactly what
-// went missing.
+// Asserted on the source rather than by calling Collect: Collect dereferences
+// c.srv and panics on the nil-server collector these metric tests use. The
+// production scrape path now enters through collectContext so the HTTP request
+// context can reach long session-table walks; that method is shared by Collect
+// and the request-bound metrics adapter.
 func TestAuthzDenialsIsWiredIntoCollect9042(t *testing.T) {
 	src, err := os.ReadFile("metrics.go")
 	if err != nil {
@@ -83,13 +83,13 @@ func TestAuthzDenialsIsWiredIntoCollect9042(t *testing.T) {
 	}
 	var collect *ast.FuncDecl
 	for _, d := range f.Decls {
-		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "Collect" && fd.Body != nil {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "collectContext" && fd.Body != nil {
 			collect = fd
 			break
 		}
 	}
 	if collect == nil {
-		t.Fatal("#9042: Collect not found in metrics.go — this guard is keyed to it by name")
+		t.Fatal("#9042: collectContext not found in metrics.go")
 	}
 	found := false
 	ast.Inspect(collect.Body, func(n ast.Node) bool {
@@ -103,7 +103,7 @@ func TestAuthzDenialsIsWiredIntoCollect9042(t *testing.T) {
 		return true
 	})
 	if !found {
-		t.Error("#9042: Collect never calls emitAuthzDenials, so xpf_authz_denials_total is " +
+		t.Error("#9042: collectContext never calls emitAuthzDenials, so xpf_authz_denials_total is " +
 			"DESCRIBED but never emitted and scrapes as absent. The denial logs were demoted " +
 			"to Debug on the strength of this counter existing.")
 	}

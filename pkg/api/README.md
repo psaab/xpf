@@ -2236,15 +2236,24 @@ the drop fails loudly instead of going quietly vacuous.
   and `xpf_sessions_established` (forward entries in the ESTABLISHED
   state) from the SAME `IterateSessions`/`IterateSessionsV6` scan that
   backs the type breakdown, so all session gauges share one scan (no new
-  periodic scan; the #333 GC-skip optimization stands) and one
-  fail-loud `scrape_ok` gate. The REST `/status` and gRPC `GetStatus`
-  `SessionCount` read `dp.SessionCount()` (forward-only live total).
-  Before #3929 all three read `gc.Stats().TotalEntries` /
-  `EstablishedSessions`, which are permanently 0 on the userspace
-  dataplane (the only live forwarding path) because the BPF GC sweep is
-  skipped (#333) — so active-session metrics/dashboards read a constant 0
-  regardless of real load. `xpf_gc_sweep_duration_seconds` still reflects
-  the (skipped, 0) BPF sweep and is orthogonal.
+  periodic scan; the #333 GC-skip optimization stands) and one fail-loud
+  `scrape_ok` gate. REST `/status`, gRPC `GetStatus`, and gRPC `show system
+  buffers`/`buffers-detail` use cancellable sampled v4+v6 walks (#12609):
+  cancellation aborts the active family, prevents a later v6 pass, and never
+  publishes a partial total. The REST and gRPC count paths call the
+  context-aware dataplane session-count method through the daemon live adapter.
+  The metrics handler builds a fixed pool of three lanes at construction and
+  limits collector passes to three; each slot remains held until its
+  collector returns, even after promhttp has sent a timeout response. The
+  shared singleflight census is detached from the scrape context; a timeout
+  does not cancel the walk, so healthy joiners and later scrapes can use its
+  cached result. A canceled waiter still returns `scrape_ok=0` promptly and does
+  not receive a late result. Iterator failures discard partial counts, preserve
+  the last good snapshot, omit the session gauges, and expose `scrape_ok=0`.
+  Before #3929 these surfaces read GC stats, permanently 0 on the userspace
+  dataplane because its BPF GC sweep is skipped (#333).
+  `xpf_gc_sweep_duration_seconds` still reflects the skipped zero BPF sweep
+  and is orthogonal.
 - Dataplane counter read failures get a uniform observability-integrity
   treatment (#3345 global; #3408 per-zone / per-policy / screen-flood /
   filter): a failed counter read is no longer swallowed to `0`, because a

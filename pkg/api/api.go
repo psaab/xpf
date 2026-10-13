@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -26,11 +27,10 @@ type apiRuntimeDataPlane interface {
 	// direction's volume.
 	GetSessionV4(dataplane.SessionKey) (dataplane.SessionValue, error)
 	GetSessionV6(dataplane.SessionKeyV6) (dataplane.SessionValueV6, error)
-	// SessionCount returns the live forward-only session count (v4, v6) read
-	// from the dataplane session table — the same source `show security flow
-	// session` uses. The /status handler reports it as SessionCount (#3929):
-	// GC sweep stats are permanently 0 on the userspace dataplane (#333).
+	// SessionCount returns the live forward-only count. The cancellable
+	// variant is used by request-bound full-table reads.
 	SessionCount() (v4, v6 int)
+	SessionCountContext(context.Context) (v4, v6 int, err error)
 	ClearAllSessions() (int, int, error)
 
 	ReadGlobalCounter(uint32) (uint64, error)

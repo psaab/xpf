@@ -497,6 +497,10 @@ func (s *Server) showTask(cfg *config.Config, buf *strings.Builder) {
 }
 
 func (s *Server) showBuffers(cfg *config.Config, buf *strings.Builder) error {
+	return s.showBuffersContext(context.Background(), cfg, buf)
+}
+
+func (s *Server) showBuffersContext(ctx context.Context, cfg *config.Config, buf *strings.Builder) error {
 	// #2114/#6743-F3: `dp != nil` no longer means "a dataplane exists" —
 	// the daemon publishes a permanently non-nil live indirection, so a
 	// daemon whose startup arm FAILED and cleared the cell would fall into
@@ -515,15 +519,9 @@ func (s *Server) showBuffers(cfg *config.Config, buf *strings.Builder) error {
 	// had a backend at all. Loading once and asserting every capability
 	// off that single value makes the whole render describe one instant.
 	//
-	// r4-F1 CORRECTION: r7 asserted this sentence here while the render
-	// still took TWO loads. The map-stats arm below ended in
-	// `s.dp.SessionCount()`, which under the live indirection resolves the
-	// cell again; only the userspace arm had been converted to
-	// backendSessionCount(backend). The comment was the whole guard, and a
-	// comment cannot fail. The residual is fixed and the property is now
-	// bound by TestShowBuffersTakesOneCellLoad, whose fixture counts CELL
-	// LOADS — not Unwrap calls, which is what the r7 guard counted and why
-	// it stayed green over a second load that was not an Unwrap.
+	// The map-stats arm and the userspace arm use the same already-resolved
+	// backend for the context-aware count, so neither takes another cell load.
+	// TestShowBuffersTakesOneCellLoad pins the one-load property.
 	if backend := dataplane.Unwrap(s.dp); backend != nil {
 		// #5782: this render ends with a full v4+v6 SessionCount() table walk
 		// (same per-bucket BPF-map lock contention as the session read-scans).
@@ -544,7 +542,10 @@ func (s *Server) showBuffers(cfg *config.Config, buf *strings.Builder) error {
 				fmt.Fprintf(buf, "Userspace buffer metrics unavailable: %v\n", err)
 			} else {
 				buf.WriteString(dpformat.FormatSystemBuffers(status, false))
-				v4, v6 := backendSessionCount(backend)
+				v4, v6, err := backendSessionCountContext(ctx, backend)
+				if err != nil {
+					return sessionCountStatus(ctx, err)
+				}
 				if v4 > 0 || v6 > 0 {
 					fmt.Fprintf(buf, "\nActive sessions: %d IPv4, %d IPv6, %d total\n", v4, v6, v4+v6)
 				}
@@ -581,20 +582,12 @@ func (s *Server) showBuffers(cfg *config.Config, buf *strings.Builder) error {
 					fmt.Fprintf(buf, "\n%d map(s) at high utilization — consider increasing max_entries\n", warnings)
 				}
 			}
-			// #6743 r4-F1: backendSessionCount(backend), never
-			// s.dp.SessionCount(). The live indirection resolves the cell
-			// INSIDE SessionCount as well (liveDataPlane.SessionCount ->
-			// resolve(), daemon_dp_live.go), so calling it here is a
-			// SECOND load of the same cell: the map table above would
-			// describe backend A while this line described whatever the
-			// cell held an instant later, and against an emptied cell it
-			// returns (0,0) and silently DROPS the "Active sessions" line
-			// rather than reporting anything. The userspace arm three
-			// lines up was converted in the original #2114 pass for
-			// exactly this reason; this arm was missed there because no
-			// fixture entered it. Bound by
-			// TestShowBuffersTakesOneCellLoad.
-			v4, v6 := backendSessionCount(backend)
+			// Count from the same already-resolved backend as these map stats;
+			// backendSessionCountContext also aborts on ShowText cancellation.
+			v4, v6, err := backendSessionCountContext(ctx, backend)
+			if err != nil {
+				return sessionCountStatus(ctx, err)
+			}
 			if v4 > 0 || v6 > 0 {
 				fmt.Fprintf(buf, "\nActive sessions: %d IPv4, %d IPv6, %d total\n", v4, v6, v4+v6)
 			}
@@ -606,12 +599,15 @@ func (s *Server) showBuffers(cfg *config.Config, buf *strings.Builder) error {
 }
 
 func (s *Server) showBuffersDetail(cfg *config.Config, buf *strings.Builder) error {
+	return s.showBuffersDetailContext(context.Background(), cfg, buf)
+}
+
+func (s *Server) showBuffersDetailContext(ctx context.Context, cfg *config.Config, buf *strings.Builder) error {
 	// #2114/#6743-F3 + r7: same single-LOAD contract as showBuffers — one
 	// Unwrap feeds the publication check, the optional status probe, the
 	// map-stats fallback AND the session-count tail, so the whole render
 	// describes one instant instead of several separate cell loads. The
-	// tail is the r4-F1 correction: it read s.dp.SessionCount() here too.
-	// Bound, for this render as well, by TestShowBuffersTakesOneCellLoad.
+	// The session-count tail uses the same already-resolved backend.
 	if backend := dataplane.Unwrap(s.dp); backend != nil {
 		// #5782: same full-table SessionCount() walk gate as showBuffers.
 		release, err := sessionWalkLimiter.Acquire()
@@ -626,7 +622,10 @@ func (s *Server) showBuffersDetail(cfg *config.Config, buf *strings.Builder) err
 				fmt.Fprintf(buf, "Userspace buffer metrics unavailable: %v\n", err)
 			} else {
 				buf.WriteString(dpformat.FormatSystemBuffers(status, true))
-				v4, v6 := backendSessionCount(backend)
+				v4, v6, err := backendSessionCountContext(ctx, backend)
+				if err != nil {
+					return sessionCountStatus(ctx, err)
+				}
 				if v4 > 0 || v6 > 0 {
 					fmt.Fprintf(buf, "\nActive sessions: %d IPv4, %d IPv6, %d total\n", v4, v6, v4+v6)
 				}
@@ -676,20 +675,12 @@ func (s *Server) showBuffersDetail(cfg *config.Config, buf *strings.Builder) err
 					fmt.Fprintf(buf, "  Status: %s\n\n", sts)
 				}
 			}
-			// #6743 r4-F1: backendSessionCount(backend), never
-			// s.dp.SessionCount(). The live indirection resolves the cell
-			// INSIDE SessionCount as well (liveDataPlane.SessionCount ->
-			// resolve(), daemon_dp_live.go), so calling it here is a
-			// SECOND load of the same cell: the map table above would
-			// describe backend A while this line described whatever the
-			// cell held an instant later, and against an emptied cell it
-			// returns (0,0) and silently DROPS the "Active sessions" line
-			// rather than reporting anything. The userspace arm three
-			// lines up was converted in the original #2114 pass for
-			// exactly this reason; this arm was missed there because no
-			// fixture entered it. Bound by
-			// TestShowBuffersTakesOneCellLoad.
-			v4, v6 := backendSessionCount(backend)
+			// Count from the same already-resolved backend as these map stats;
+			// backendSessionCountContext also aborts on ShowText cancellation.
+			v4, v6, err := backendSessionCountContext(ctx, backend)
+			if err != nil {
+				return sessionCountStatus(ctx, err)
+			}
 			if v4 > 0 || v6 > 0 {
 				fmt.Fprintf(buf, "Active sessions: %d IPv4, %d IPv6, %d total\n", v4, v6, v4+v6)
 			}

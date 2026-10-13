@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -212,5 +213,62 @@ func TestSessionGaugeCacheValuesCorrect(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("cached snapshot = %+v, want %+v (== fresh walk)", got, want)
+	}
+}
+func TestSessionGaugeCanceledFollowerAbandonsSharedWalk12609(t *testing.T) {
+	c := newSessionGaugeCollector()
+	c.sessionGaugeTTLOverride = time.Hour
+	dp := &countingSessionDP{
+		Manager: dataplane.New(),
+		entered: make(chan struct{}, 1),
+		gate:    make(chan struct{}),
+		v4:      []dataplane.SessionValue{{IsReverse: 0}},
+	}
+
+	type result struct {
+		snapshot sessionGaugeSnapshot
+		ok       bool
+	}
+	leaderDone := make(chan result, 1)
+	go func() {
+		snapshot, ok := c.sessionGaugeSnapshotCachedContext(context.Background(), dp)
+		leaderDone <- result{snapshot: snapshot, ok: ok}
+	}()
+	<-dp.entered
+
+	ctx, cancel := context.WithCancel(context.Background())
+	followerDone := make(chan result, 1)
+	go func() {
+		snapshot, ok := c.sessionGaugeSnapshotCachedContext(ctx, dp)
+		followerDone <- result{snapshot: snapshot, ok: ok}
+	}()
+	// Let the second scrape join the in-flight refresh before canceling it.
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+
+	var follower result
+	followerReturned := false
+	select {
+	case follower = <-followerDone:
+		followerReturned = true
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	// Always release the leader, including on the old blocking-Do behavior, so
+	// a failed assertion does not leak a goroutine.
+	close(dp.gate)
+	leader := <-leaderDone
+	if !followerReturned {
+		<-followerDone
+		t.Fatal("canceled follower stayed blocked until the leader's walk finished")
+	}
+	if follower.ok || follower.snapshot != (sessionGaugeSnapshot{}) {
+		t.Fatalf("canceled follower received snapshot %+v with ok=%v, want no successful snapshot", follower.snapshot, follower.ok)
+	}
+	if !leader.ok || leader.snapshot.active != 1 {
+		t.Fatalf("leader result = (%+v, %v), want one successful active session", leader.snapshot, leader.ok)
+	}
+	if got := dp.walks.Load(); got != 1 {
+		t.Fatalf("shared conntrack walks = %d, want one", got)
 	}
 }
