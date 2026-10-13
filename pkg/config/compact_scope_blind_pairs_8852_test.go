@@ -249,6 +249,26 @@ var knownBlindScopePairs8852 = map[string]string{
 	// which stays true however the fold behaves. A boundary, not a clearance.
 	"inet dhcp":           "plain-container",
 	"inet6 dhcpv6-client": "plain-container",
+	// #12596 admitted ("inet","sampling") and ("inet6","sampling") so the
+	// family-elided interface-sampling spellings fold: `family inet sampling
+	// { input; }` compiled both flags false where braced set them, on a commit
+	// strict accepted with no warning.
+	//
+	// Both heads are plain containers -- args:0, children input/output, no
+	// wildcard -- so the census emits no site for either and arm 2
+	// adjudicates nothing. The direction pairs admitted with them,
+	// ("sampling","input") and ("sampling","output"), are NOT registered
+	// here: their heads are valueless flags, a shape the census has emitted
+	// since #9056, so arm 2 adjudicates them directly.
+	//
+	// COVERED THERE IS NOT ADJUDICATED HERE, as for the entries above:
+	// TestSamplingElidedSpellings12596 pins the compiled flags of the elided
+	// and packed spellings for both families, and
+	// TestCheckTextSamplingElided12596 pins the strict CheckText path. This
+	// entry records only that arm 2 is blind to the two heads. A boundary,
+	// not a clearance.
+	"inet sampling":  "plain-container",
+	"inet6 sampling": "plain-container",
 	// issue 8858. Unlike the two confirmed-broken entries above, this pair's
 	// fold IS repaired and measured -- but by its own cells, not by arm 2, and
 	// a pair leaves this list only when arm 2 starts generating a site for it.

@@ -602,11 +602,17 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 	// while the hierarchical parser leaves it on the container head's Keys. That
 	// bounded the exposure to configuration TEXT -- a saved config, `load merge`,
 	// a restored backup -- and is why the interactive CLI never showed it.
+	// #12596 adds interface sampling heads: compact spellings were measured
+	// to compile with both flags false, where their braced twins set them.
 	switch containerKeyword + " " + head {
 	case "inet address",
 		"inet6 address",
 		"inet dhcp",
 		"inet6 dhcpv6-client",
+		"inet sampling",
+		"inet6 sampling",
+		"sampling input",
+		"sampling output",
 		"filter input",
 		"filter output":
 		return true

@@ -269,8 +269,6 @@ interfaces xpfname unit xpfarg family inet address xpfarg preferred	empty
 interfaces xpfname unit xpfarg family inet address xpfarg primary	empty
 interfaces xpfname unit xpfarg family inet address xpfarg vrrp-group	empty
 interfaces xpfname unit xpfarg family inet mtu	empty
-interfaces xpfname unit xpfarg family inet sampling input	empty
-interfaces xpfname unit xpfarg family inet sampling output	empty
 interfaces xpfname unit xpfarg family inet targeted-broadcast	empty
 interfaces xpfname unit xpfarg family inet unnumbered-address	empty
 interfaces xpfname unit xpfarg family inet6 address xpfarg preferred	empty
@@ -281,8 +279,6 @@ interfaces xpfname unit xpfarg family inet6 dhcpv6-client prefix-delegating pref
 interfaces xpfname unit xpfarg family inet6 dhcpv6-client prefix-delegating sub-prefix-length	empty
 interfaces xpfname unit xpfarg family inet6 dhcpv6-client update-router-advertisement interface	empty
 interfaces xpfname unit xpfarg family inet6 mtu	empty
-interfaces xpfname unit xpfarg family inet6 sampling input	empty
-interfaces xpfname unit xpfarg family inet6 sampling output	empty
 interfaces xpfname unit xpfarg point-to-point	empty
 interfaces xpfname vlan-tagging	partial
 protocols bgp graceful-restart	empty

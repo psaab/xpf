@@ -169,6 +169,8 @@ rewrite-rules ieee-802.1	class-of-service/interfaces/rewrite-rules,class-of-serv
 rib static	routing-instances/*/routing-options/rib,routing-options/rib
 rib-group inet	routing-instances/*/interface-routes/rib-group,routing-instances/*/routing-options/interface-routes/rib-group,routing-options/interface-routes/rib-group
 rib-group inet6	routing-instances/*/interface-routes/rib-group,routing-instances/*/routing-options/interface-routes/rib-group,routing-options/interface-routes/rib-group
+sampling input	interfaces/*/unit/family/inet/sampling,interfaces/*/unit/family/inet6/sampling
+sampling output	interfaces/*/unit/family/inet/sampling,interfaces/*/unit/family/inet6/sampling
 rip authentication-key	protocols/rip,routing-instances/*/protocols/rip
 rip authentication-type	protocols/rip,routing-instances/*/protocols/rip
 rip group	protocols/rip,routing-instances/*/protocols/rip
