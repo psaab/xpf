@@ -52,15 +52,16 @@ func collectZoneNamesAST(securityNode *Node, out map[string]struct{}) {
 	if securityNode == nil {
 		return
 	}
-	zonesNode := securityNode.FindChild("zones")
-	if zonesNode == nil {
-		return
-	}
-	for _, inst := range bracketedGroupInstances8794(zonesNode.FindChildren("security-zone")) {
-		if inst.name == "" {
-			continue
+	// compileSecurity processes each sibling `zones` block. Keep collision
+	// detection and runtime quarantine enumeration aligned with that same
+	// behavior instead of silently considering only the first block (#12829).
+	for _, zonesNode := range securityNode.FindChildren("zones") {
+		for _, inst := range bracketedGroupInstances8794(zonesNode.FindChildren("security-zone")) {
+			if inst.name == "" {
+				continue
+			}
+			out[inst.name] = struct{}{}
 		}
-		out[inst.name] = struct{}{}
 	}
 }
 
