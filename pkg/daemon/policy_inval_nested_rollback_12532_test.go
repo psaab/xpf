@@ -509,6 +509,59 @@ func TestPolicyInvalidationReauthorizationRefusesZoneIDCollision12532(t *testing
 	}
 }
 
+// #12797: when the restored config denies every candidate, the all-kept
+// return must not alias the input's backing arrays: pruneCapturedPolicyRows
+// compacts kept rows in place (c.policy[:0]), so sharing backing would
+// compact the rollback source too and leave a duplicate stale tail that a
+// same-target retry could re-attempt as a settled candidate.
+func TestReauthorizeAllKeptDoesNotAliasCapture12797(t *testing.T) {
+	r, c0 := newLandedRollbackRun12072(t)
+	trustID := config.StableZoneID("trust")
+	source := &policyInvalidationCapture{candidateRuleIDs: map[policyInvalidationMatchIdentity]string{}}
+	const keptRows = 4
+	for i := range keptRows {
+		match := dpuserspace.SessionPolicyMatch{
+			AddrFamily: 4,
+			Tuple: dpuserspace.SessionPolicyTuple{
+				AddrFamily: 4, Protocol: 6, SrcIP: "10.0.0.1", DstIP: "10.0.0.2",
+				SrcPort: uint16(4000 + i), DstPort: 80,
+			},
+			ExpectedRTFlowSessionID: uint64(4000 + i),
+			IngressZoneID:           trustID,
+			EgressZoneID:            config.StableZoneID("untrust"),
+		}
+		source.deleted.policy = append(source.deleted.policy, match)
+		source.candidateRuleIDs[policyInvalidationMatchID(match)] = "trust->untrust/denied"
+	}
+	orig := append([]dpuserspace.SessionPolicyMatch(nil), source.deleted.policy...)
+
+	// c0 permits trust->untrust/a only; the recorded key is unknown to it, so
+	// every candidate is kept (fail closed) and permitted stays nil.
+	kept, permitted := r.h.d.reauthorizePolicyCandidates(source, c0, false)
+	if permitted != nil || kept.candidateCount() != keptRows {
+		t.Fatalf("premise: want all %d kept and nil permitted, got kept=%d permitted=%v",
+			keptRows, kept.candidateCount(), permitted)
+	}
+	if len(kept.deleted.policy) != keptRows {
+		t.Fatalf("all-kept row count = %d, want %d", len(kept.deleted.policy), keptRows)
+	}
+
+	// Simulate a partial conditional delete settling row 0. The real pruning
+	// helper compacts policy rows in place; the source must retain its full
+	// contents and stale tail for a same-target retry.
+	pruneCapturedPolicyRows(&kept.deleted,
+		dpuserspace.PolicyDeleteResult{SettledPrefix: 1}, errors.New("partial delete"))
+	if len(kept.deleted.policy) != keptRows-1 {
+		t.Fatalf("pruned kept row count = %d, want %d", len(kept.deleted.policy), keptRows-1)
+	}
+	for i, want := range orig {
+		if got := source.deleted.policy[i]; got.ExpectedRTFlowSessionID != want.ExpectedRTFlowSessionID {
+			t.Fatalf("pruning kept rows corrupted source row %d: got session %d, want %d (source=%v)",
+				i, got.ExpectedRTFlowSessionID, want.ExpectedRTFlowSessionID, source.deleted.policy)
+		}
+	}
+}
+
 // provenanceCostConfig12532 builds total permit-any policies in 200-rule zone
 // pairs (MaxRulesPerPolicy is 256). The victim rule, when requested, follows
 // p-first: runtime policy ID 0 is never swept, so it must not be the victim.
