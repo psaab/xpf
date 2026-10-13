@@ -106,8 +106,8 @@
 //! commit-time memory advisory.
 
 use super::rate::{RateCounter, TokenBucket};
-use rustc_hash::FxHasher;
-use std::hash::Hasher;
+use crate::hot_hash_seed::HotPathSeededState;
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::net::IpAddr;
 
 /// One count-min sketch cell: charge an event and report whether the key is
@@ -266,13 +266,8 @@ impl<C: SketchCell> SynRateSketch<C> {
     /// column count).
     #[inline]
     fn cell_index(&self, row: usize, ip: &IpAddr) -> usize {
-        let mut h = FxHasher::default();
-        h.write_u64(ROW_SEEDS[row]);
-        h.write_u64(self.seed);
-        match ip {
-            IpAddr::V4(a) => h.write(&a.octets()),
-            IpAddr::V6(a) => h.write(&a.octets()),
-        }
+        let mut h = HotPathSeededState::new(self.seed).build_hasher();
+        (ROW_SEEDS[row], ip).hash(&mut h);
         (h.finish() as usize) & self.mask
     }
 
@@ -321,14 +316,8 @@ impl<C: SketchCell> SynRateSketch<C> {
     /// threshold`, which caps the rate to a destination IP AND port (#4112).
     #[inline]
     fn cell_index_ip_port(&self, row: usize, ip: &IpAddr, port: u16) -> usize {
-        let mut h = FxHasher::default();
-        h.write_u64(ROW_SEEDS[row]);
-        h.write_u64(self.seed);
-        match ip {
-            IpAddr::V4(a) => h.write(&a.octets()),
-            IpAddr::V6(a) => h.write(&a.octets()),
-        }
-        h.write_u16(port);
+        let mut h = HotPathSeededState::new(self.seed).build_hasher();
+        (ROW_SEEDS[row], ip, port).hash(&mut h);
         (h.finish() as usize) & self.mask
     }
 

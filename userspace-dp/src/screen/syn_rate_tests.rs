@@ -204,6 +204,80 @@ fn cell_mapping_depends_on_per_boot_seed() {
     );
 }
 
+/// #12789 adversarial family: v6 keys identical except the third segment
+/// (`s3`). Under seed-additive FxHasher this family collides in one cell for
+/// every seed; keyed SipHash must disperse it in every row.
+fn v6_s3_ips(n: u16) -> Vec<IpAddr> {
+    (0..n)
+        .map(|i| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, i, 0, 0, 0, 1)))
+        .collect()
+}
+
+#[test]
+fn cell_v6_s3_clique_disperses_for_every_pinned_seed_12789() {
+    let ips = v6_s3_ips(256);
+    for seed in [
+        0x0123_4567_89AB_CDEFu64,
+        0xA5A5_0000_C3C3_FFFF,
+        0xDEAD_BEEF_CAFE_BABE,
+        1,
+        42,
+        u64::MAX,
+    ] {
+        let s = SynRateSketch::with_cols_seeded(SRC_COLS, seed);
+        for row in 0..ROWS {
+            let distinct: std::collections::BTreeSet<usize> = ips
+                .iter()
+                .map(|ip| s.cell_indices(ip)[row])
+                .collect();
+            assert!(
+                distinct.len() > 64,
+                "#12789: v6 s3-clique collapsed to {} cells in row {row} under seed {seed:#x}",
+                distinct.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn cell_ip_port_v6_s3_clique_disperses_for_every_pinned_seed_12789() {
+    let ips = v6_s3_ips(256);
+    for seed in [
+        0x0123_4567_89AB_CDEFu64,
+        0xA5A5_0000_C3C3_FFFF,
+        0xDEAD_BEEF_CAFE_BABE,
+        1,
+        42,
+        u64::MAX,
+    ] {
+        let s = SynRateSketch::with_cols_seeded(DST_COLS, seed);
+        for row in 0..ROWS {
+            let distinct: std::collections::BTreeSet<usize> = ips
+                .iter()
+                .map(|ip| s.cell_indices_ip_port(ip, 53)[row])
+                .collect();
+            assert!(
+                distinct.len() > 64,
+                "#12789: v6 s3-clique (ip,port) collapsed to {} cells in row {row} under seed {seed:#x}",
+                distinct.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn cell_ip_port_mapping_is_stable_and_depends_on_per_boot_seed_12789() {
+    let ips = v6_s3_ips(128);
+    let distribution = |seed| {
+        let s = SynRateSketch::<RateCounter>::with_cols_seeded(DST_COLS, seed);
+        ips.iter()
+            .map(|ip| s.cell_indices_ip_port(ip, 443))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(distribution(42), distribution(42));
+    assert_ne!(distribution(42), distribution(43));
+}
+
 /// #4382 (detection preserved): the per-boot seed changes only WHICH cells a
 /// key maps to, never the counting. A real single-source flood still crosses
 /// `source-threshold` under an arbitrary pinned seed — same thresholds, same

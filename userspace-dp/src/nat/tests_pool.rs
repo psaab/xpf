@@ -3640,20 +3640,49 @@ fn pool_snat_address_persistent_spreads_distinct_sources_across_pool() {
 }
 
 #[test]
-fn pool_snat_address_persistent_userspace_v2_contract_fixtures() {
-    // Golden vectors pinning the FxHash-seeded mapping (#2349). These guard
-    // against an accidental change to the sticky-index hash; a deliberate hash
-    // change must re-pin them and bump the seed version.
-    assert_eq!(sticky_pool_index("10.0.1.100".parse().unwrap(), 4), 3);
-    assert_eq!(sticky_pool_index("10.0.1.101".parse().unwrap(), 4), 2);
-    assert_eq!(sticky_pool_index("192.0.2.1".parse().unwrap(), 5), 3);
-    assert_eq!(sticky_pool_index("198.51.100.25".parse().unwrap(), 5), 2);
-    assert_eq!(sticky_pool_index("2001:db8::1".parse().unwrap(), 257), 109);
-    assert_eq!(sticky_pool_index("2001:db8::2".parse().unwrap(), 257), 240);
+fn pool_snat_sticky_index_changes_with_secret_seed_and_stays_in_bounds_12789() {
+    let sources = [
+        IpAddr::V4(Ipv4Addr::new(10, 0, 1, 100)),
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        IpAddr::V6("2001:db8::1".parse().unwrap()),
+        IpAddr::V6("2001:db8:1:2:3:4:5:6".parse().unwrap()),
+    ];
+    let distribution = |seed| {
+        sources
+            .iter()
+            .map(|src| super::allocator::sticky_pool_index_seeded(*src, 64, seed))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(distribution(42), distribution(42));
+    assert_ne!(distribution(42), distribution(43));
+    for index in distribution(42) {
+        assert!(index < 64, "sticky pool index {index} out of bounds");
+    }
+    for src in sources {
+        assert_eq!(super::allocator::sticky_pool_index_seeded(src, 0, 42), 0);
+        assert_eq!(super::allocator::sticky_pool_index_seeded(src, 1, 42), 0);
+    }
 }
 
 #[test]
-fn pool_snat_address_persistent_userspace_v2_selects_pool_addresses() {
+fn pool_snat_sticky_index_v6_s3_clique_disperses_for_each_seed_12789() {
+    for seed in [1, 42, 0x0123_4567_89AB_CDEF, u64::MAX] {
+        let distinct: std::collections::BTreeSet<usize> = (0..256u16)
+            .map(|i| {
+                let src = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, i, 0, 0, 0, 1));
+                super::allocator::sticky_pool_index_seeded(src, 64, seed)
+            })
+            .collect();
+        assert!(
+            distinct.len() > 32,
+            "#12789: v6 s3-clique collapsed to {} of 64 sticky slots under seed {seed:#x}",
+            distinct.len()
+        );
+    }
+}
+
+#[test]
+fn pool_snat_address_persistent_selects_keyed_pool_addresses() {
     let rules = parse_source_nat_rules(&[SourceNATRuleSnapshot {
         name: "userspace-v1-selection".to_string(),
         from_zone: "lan".to_string(),
@@ -3677,30 +3706,37 @@ fn pool_snat_address_persistent_userspace_v2_selects_pool_addresses() {
     }]);
 
     let cases = [
-        ("10.0.1.100", "8.8.8.8", 50000, "203.0.113.13"),
-        ("10.0.1.101", "8.8.4.4", 50001, "203.0.113.12"),
-        (
-            "2001:db8::1",
-            "2001:4860:4860::8888",
-            50002,
-            "2001:db8:ffff::11",
-        ),
-        (
-            "fd00::3",
-            "2001:4860:4860::8844",
-            50003,
-            "2001:db8:ffff::13",
-        ),
+        ("10.0.1.100", "8.8.8.8", 50000),
+        ("10.0.1.101", "8.8.4.4", 50001),
+        ("2001:db8::1", "2001:4860:4860::8888", 50002),
+        ("fd00::3", "2001:4860:4860::8844", 50003),
     ];
 
-    for (src, dst, src_port, want_src) in cases {
+    let pool_addresses: Vec<IpAddr> = [
+        "203.0.113.10",
+        "203.0.113.11",
+        "203.0.113.12",
+        "203.0.113.13",
+        "2001:db8:ffff::10",
+        "2001:db8:ffff::11",
+        "2001:db8:ffff::12",
+        "2001:db8:ffff::13",
+    ]
+    .into_iter()
+    .map(|addr| addr.parse().unwrap())
+    .collect();
+
+    for (src, dst, src_port) in cases {
+        let src: IpAddr = src.parse().unwrap();
+        let family_offset = if src.is_ipv4() { 0 } else { 4 };
+        let expected = pool_addresses[family_offset + sticky_pool_index(src, 4)];
         let decision = expect_snat_decision(match_source_nat_result_for_tuple(
             &InterfaceNatAllocators::default(),
             &rules,
             &NatScopeCtx::default(),
             "lan",
             "wan",
-            src.parse().unwrap(),
+            src,
             dst.parse().unwrap(),
             Some(6),
             src_port,
@@ -3714,58 +3750,27 @@ fn pool_snat_address_persistent_userspace_v2_selects_pool_addresses() {
             &mut None,
         ));
 
-        assert_eq!(decision.rewrite_src, Some(want_src.parse().unwrap()));
+        assert_eq!(decision.rewrite_src, Some(expected));
         assert_eq!(decision.rewrite_src_port, Some(40000));
     }
 }
 
-#[test]
-fn pool_snat_address_persistent_differs_from_legacy_backend_algorithms() {
-    let v4: Ipv4Addr = "10.0.1.100".parse().unwrap();
-    assert_eq!(sticky_pool_index(IpAddr::V4(v4), 4), 3);
-    assert_eq!(legacy_backend_v4_index(v4, 4), 2);
-
-    let v6: Ipv6Addr = "2001:db8::1".parse().unwrap();
-    assert_eq!(sticky_pool_index(IpAddr::V6(v6), 257), 109);
-    assert_eq!(legacy_backend_v6_index(v6, 257), 116);
-}
-
-fn legacy_backend_v4_index(src_ip: Ipv4Addr, pool_len: usize) -> usize {
-    if pool_len <= 1 {
-        return 0;
-    }
-    (u32::from_le_bytes(src_ip.octets()) as usize) % pool_len
-}
-
-fn legacy_backend_v6_index(src_ip: Ipv6Addr, pool_len: usize) -> usize {
-    if pool_len <= 1 {
-        return 0;
-    }
-    let mut hash = 0u32;
-    for chunk in src_ip.octets().chunks_exact(4) {
-        let mut word = [0u8; 4];
-        word.copy_from_slice(chunk);
-        hash ^= u32::from_le_bytes(word);
-    }
-    (hash as usize) % pool_len
-}
 
 #[test]
-fn pool_snat_address_persistent_hashes_full_ipv6_address() {
+fn pool_snat_address_persistent_seeded_hashes_full_ipv6_address_12789() {
     let a: IpAddr = "2001:db8::1".parse().unwrap();
     let b: IpAddr = "2001:db8::2".parse().unwrap();
-
-    assert_eq!(sticky_pool_index(a, 257), 109);
-    assert_eq!(sticky_pool_index(b, 257), 240);
+    assert_ne!(
+        super::allocator::sticky_pool_index_seeded(a, 64, 42),
+        super::allocator::sticky_pool_index_seeded(b, 64, 42),
+        "adjacent full IPv6 source addresses should use full-address hashing"
+    );
 }
 
 #[test]
 fn pool_snat_address_persistent_sticky_index_is_deterministic_and_stable() {
-    // Determinism + persistence contract (#2349): the same source IP must map
-    // to the same pool slot on every call, regardless of how many other
-    // sources have been hashed in between (the FxHasher is constructed fresh
-    // per call, so there is no shared mutable state — but assert it anyway so
-    // a future change that introduces state fails here).
+    // Same-process sticky contract: the per-process secret is held fixed for
+    // the process lifetime, so other source lookups cannot perturb this key.
     let sources: &[&str] = &[
         "10.0.1.100",
         "10.0.1.101",
@@ -3791,12 +3796,10 @@ fn pool_snat_address_persistent_sticky_index_is_deterministic_and_stable() {
                 );
             }
 
-            // Interleaving other sources does not perturb this one's slot —
-            // proves the SELECTOR (sticky_pool_index) is a pure deterministic
-            // function with no shared/mutable hasher state, so the same source
-            // always hashes to the same slot. This is distinct from the
-            // separate lease cache (persistent_by_source), which memoizes the
-            // chosen address; the hash itself caches nothing.
+            // Interleaving other sources cannot perturb this key because
+            // each lookup initializes a fresh keyed hasher from the same
+            // process seed. The separate lease cache memoizes allocations;
+            // the selector itself caches nothing.
             for other in sources {
                 let _ = sticky_pool_index(other.parse().unwrap(), pool_len);
             }
