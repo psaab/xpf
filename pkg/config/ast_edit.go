@@ -432,6 +432,17 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool,
 	if grouped != nil && len(grouped) != len(path) {
 		return fmt.Errorf("grouped mask length %d != path length %d", len(grouped), len(path))
 	}
+	// #12516: a then-first policy term line (`term T then accept from ...`)
+	// is two statements, the term's `from` clause and its actions. Replay
+	// both halves, or refuse a `from` that cannot be placed, before the
+	// schema walk files the clause under an action where nothing reads it.
+	thenAt, fromAt, err := policyTermThenFromSplit12516(path, quoted, grouped)
+	if err != nil {
+		return err
+	}
+	if fromAt >= 0 {
+		return t.setPolicyTermThenFrom12516(path, quoted, grouped, thenAt, fromAt, closed...)
+	}
 	// quotedRange returns the provenance for path[from:to] — every node built
 	// below takes its keys from exactly one CONTIGUOUS range of path (the
 	// schema slice, plus any compound-key or trailing-value tokens, which are
@@ -915,7 +926,9 @@ func (t *ConfigTree) DeletePathGrouped(path []string, grouped []bool) error {
 	if grouped != nil && len(grouped) != len(path) {
 		return fmt.Errorf("grouped mask length %d != path length %d", len(grouped), len(path))
 	}
-
+	if err := refusePolicyTermThenFromEdit12516("delete", path, grouped); err != nil {
+		return err
+	}
 	return deletePath(&t.Children, path, grouped, setSchema, 0)
 }
 
@@ -1106,6 +1119,9 @@ func (t *ConfigTree) DeactivatePathGrouped(path []string, grouped []bool) error 
 	if grouped != nil && len(grouped) != len(path) {
 		return fmt.Errorf("grouped mask length %d != path length %d", len(grouped), len(path))
 	}
+	if err := refusePolicyTermThenFromEdit12516("deactivate", path, grouped); err != nil {
+		return err
+	}
 	return setInactiveAtPath(&t.Children, path, grouped, setSchema, 0, true)
 }
 
@@ -1125,6 +1141,9 @@ func (t *ConfigTree) ActivatePathGrouped(path []string, grouped []bool) error {
 	}
 	if grouped != nil && len(grouped) != len(path) {
 		return fmt.Errorf("grouped mask length %d != path length %d", len(grouped), len(path))
+	}
+	if err := refusePolicyTermThenFromEdit12516("activate", path, grouped); err != nil {
+		return err
 	}
 	return setInactiveAtPath(&t.Children, path, grouped, setSchema, 0, false)
 }
