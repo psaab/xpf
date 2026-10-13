@@ -892,12 +892,16 @@ func TestRefusedNetdevNeedsEveryOwnerToAgree(t *testing.T) {
 //	(a) LinkDel FAILS. deleteLocked retains tracking and returns the error;
 //	    Apply joins it. daemon_apply.go treats applyInterfaceReconcile's result
 //	    as a DEFERRED error and runs the dataplane apply anyway.
-//	(b) DAEMON RESTART. A fresh xfrmManager has EMPTY tracking, so the removed
-//	    -desired delete pass has nothing to iterate and issues no LinkDel at
-//	    all. The device is never even attempted.
+//	(b) DAEMON RESTART. A fresh xfrmManager has EMPTY tracking, so the
+//	    removed-desired delete pass has nothing to iterate — but the #11443
+//	    orphan sweep deletes the untracked device anyway. A retained live
+//	    xfrmi after restart now survives only when the sweep itself cannot
+//	    delete it: its LinkDel fails (surfaced as "delete orphan xfrmi") or
+//	    its LinkList fails (the sweep is skipped "retrying on next apply"
+//	    and the apply reports a clean convergence). (#12569)
 //
 // FAIL-ON-REVERT: drop the kernel half of snapshotSecureTunnel (return only
-// secureTunnelOwned) and both subtests go RED — measured at head, this snapshot
+// secureTunnelOwned) and all three subtests go RED — measured at head, this snapshot
 // produced ingress [10 11] and allowlist [ge-0-0-0 st10].
 func TestRetainedLiveXfrmiLeavesTheAdjudicatedSets(t *testing.T) {
 	const (
@@ -906,18 +910,28 @@ func TestRetainedLiveXfrmiLeavesTheAdjudicatedSets(t *testing.T) {
 	)
 
 	for _, tc := range []struct {
-		name        string
-		failLinkDel bool
+		name         string
+		failLinkDel  bool
+		failLinkList bool
 		// restart drops the manager's in-memory tracking before the
 		// VPN-removal apply, standing in for a daemon restart.
 		restart bool
-		// wantApplyErr: route (a) surfaces the failure; route (b) reports a
-		// clean convergence while the device is still there, which is what
-		// makes it the more dangerous of the two.
+		// wantApplyErr: the tracked delete and the orphan-sweep delete
+		// surface their failure; the sweep-skipped case reports a clean
+		// convergence while the device is still there, which is what
+		// makes it the most dangerous of the three.
 		wantApplyErr bool
+		// wantErr is the WHOLE expected error, compared verbatim. It pins
+		// WHICH delete path retained the device, and ONLY that path: the
+		// tracked retry ("delete xfrmi") or the orphan sweep ("delete
+		// orphan xfrmi"). Presence or a substring would let a sweep that
+		// also double-deletes tracked names through (P4). Without it the
+		// two LinkDel-failure rows would prove the same thing.
+		wantErr string
 	}{
-		{name: "LinkDel fails", failLinkDel: true, wantApplyErr: true},
-		{name: "untracked after daemon restart", restart: true, wantApplyErr: false},
+		{name: "LinkDel fails", failLinkDel: true, wantApplyErr: true, wantErr: "delete xfrmi st10: device busy"},
+		{name: "untracked after daemon restart, orphan reap LinkDel fails", restart: true, failLinkDel: true, wantApplyErr: true, wantErr: "delete orphan xfrmi st10: device busy"},
+		{name: "untracked after daemon restart, orphan reap LinkList fails", restart: true, failLinkList: true, wantApplyErr: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			kernel := newFakeXfrmKernel()
@@ -935,9 +949,17 @@ func TestRetainedLiveXfrmiLeavesTheAdjudicatedSets(t *testing.T) {
 			}
 
 			// 2. The VPN is removed. Either the delete fails, or the daemon
-			//    restarted and no longer tracks the device.
+			//    restarted and the orphan sweep cannot remove the device it
+			//    no longer tracks.
 			if tc.failLinkDel {
 				kernel.linkDelErr = errors.New("device busy")
+			}
+			if tc.failLinkList {
+				// Transient routing-only LinkList failure: the #11443 sweep
+				// skips ("retrying on next apply"). Only the routing half
+				// sees it — the snapshot xfrm dump stays healthy — so this
+				// is NOT a full netlink-transport outage.
+				kernel.linkListErr = errors.New("netlink busy")
 			}
 			if tc.restart {
 				mgr = routing.NewManagerWithLinkOpsForTest(kernel)
@@ -946,6 +968,12 @@ func TestRetainedLiveXfrmiLeavesTheAdjudicatedSets(t *testing.T) {
 			if (err != nil) != tc.wantApplyErr {
 				t.Fatalf("ApplyXfrmi(nil) error = %v, want error present = %v",
 					err, tc.wantApplyErr)
+			}
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("ApplyXfrmi(nil) error = %v, want exactly %q",
+						err, tc.wantErr)
+				}
 			}
 
 			// 3. THE COMPOSITION: the device the reconciler left behind is
@@ -1029,6 +1057,10 @@ type fakeXfrmKernel struct {
 	links      map[string]netlink.Link
 	nextIndex  int
 	linkDelErr error
+	// linkListErr makes LinkList fail, modelling the transient
+	// routing-only failure under which the #11443 orphan sweep skips
+	// ("retrying on next apply") instead of deleting anything.
+	linkListErr error
 }
 
 func newFakeXfrmKernel() *fakeXfrmKernel {
@@ -1088,6 +1120,9 @@ func (f *fakeXfrmKernel) LinkSetMaster(netlink.Link, netlink.Link) error {
 func (f *fakeXfrmKernel) LinkSetNoMaster(netlink.Link) error { return nil }
 func (f *fakeXfrmKernel) LinkSetMTU(netlink.Link, int) error { return nil }
 func (f *fakeXfrmKernel) LinkList() ([]netlink.Link, error) {
+	if f.linkListErr != nil {
+		return nil, f.linkListErr
+	}
 	out := make([]netlink.Link, 0, len(f.links))
 	for _, link := range f.links {
 		out = append(out, link)
