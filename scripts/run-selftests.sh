@@ -5,9 +5,9 @@
 # These self-tests (grow-root stamp discipline, bake sign-ordering, the
 # signed-distribution roundtrip, and the xpf-deploy pure-function + mixed-base
 # HA gate coverage) all pass but were wired into NOTHING: `make test` runs only
-# the Go + Rust suites (#4006), there is no CI, and each self-test could only be
-# run by hand. A regression re-introducing sign-before-validate (#4017) or
-# breaking the grow-root stamp discipline (#2047) merged green.
+# the Go + Rust suites (#4006), and the self-tests were reachable only by hand.
+# A regression re-introducing sign-before-validate (#4017) or breaking the
+# grow-root stamp discipline (#2047) merged green.
 #
 # This runner DISCOVERS and runs every registered self-test with one command
 # (`make selftest`). It needs no live Incus cluster or network, but it is not
@@ -326,6 +326,9 @@ run_bash scripts/no-git-stash-selftest.sh
 # DOCS_CHECK_ROOT; the row that matters is the positive control -- the phantom
 # symbol in a LIVE doc must still fail once the history archives are excluded.
 run_bash scripts/docs/check-upgrade-docs-selftest.sh
+# #12632: no-CI claims canary; fixtures prove stale live prose fails while
+# accurate manual-gate statements and archived history do not trigger it.
+run_bash scripts/docs/check-no-ci-claims-selftest.sh
 # AF_XDP reproducer strict-warning build — fail-on-revert gate for #4906
 # (HC-081 uninitialized-counter false PASS). SKIPs on a host without a C
 # toolchain / libbpf-dev / libxdp-dev / xxd.

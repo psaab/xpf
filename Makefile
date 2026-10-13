@@ -87,11 +87,11 @@ build-userspace-dp:
 # Manual build check for the diagnostic `debug-log` feature (#1678).
 # The debug-log build is not the production target and is deliberately
 # NOT wired into `all`/`build`/`test`, mirroring the opt-in
-# `audit-check` precedent. There is no CI in this repo, so this is a
-# developer convenience, not an automated gate: nothing runs it unless
-# invoked. It exists so the feature build (which silently rotted until
-# #1678 because nothing compiled it) can be revalidated with one
-# command before a commit. Compile-only; does not install.
+# `audit-check` precedent. The pull-request workflows do not invoke this
+# opt-in build, so this is a developer convenience, not an automated gate:
+# run it explicitly when validating the debug feature. It exists so the
+# #1678's earlier build break showed how this feature can silently rot; it
+# can be revalidated with one command before a commit. Compile-only; does not install.
 build-userspace-dp-debug-log:
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned build --manifest-path userspace-dp/Cargo.toml --release --features debug-log
 
@@ -172,9 +172,9 @@ test-root: test-shim-run test-memlock-guards test-xfrm-lifecycle
 #
 # pkg/memlockcensus enumerates every test that goes inert without the privilege
 # to create a BPF map and defers enforcement to "a privileged CI leg, gated on
-# XPF_REQUIRE_MEMLOCK_GUARDS=1". THAT LEG DID NOT EXIST. `.github/` holds only
-# `instructions/` — there is no CI in this repository at all — and nothing
-# anywhere set the variable. 42 guards had been deferring to a name.
+# XPF_REQUIRE_MEMLOCK_GUARDS=1". THAT LEG DID NOT EXIST. The current
+# pull-request workflows run on GitHub-hosted runners without CAP_BPF, and
+# none sets XPF_REQUIRE_MEMLOCK_GUARDS=1. 42 guards had been deferring to a name.
 #
 # CAP_BPF, not CAP_SYS_RESOURCE. Measured (#9337): with only the memlock rlimit
 # raised, the census reported "memlock is available here — all 42 registered
@@ -638,6 +638,7 @@ audit-refresh:
 .PHONY: docs-check
 docs-check:
 	bash scripts/docs/check-upgrade-docs.sh
+	bash scripts/docs/check-no-ci-claims.sh
 
 # Single entry point for the day-0/image/dist/deploy self-tests (#4210 H-19).
 # Before this, scripts/image/test-grow-root.sh, test_bake_sign_ordering.py,
@@ -652,9 +653,9 @@ docs-check:
 # aggregate can take longer. Missing tools produce a named SKIP (including
 # how many distribution checks were skipped), not a false PASS. The #6923 BPF
 # probe uses `sudo -n` when passwordless sudo exists and SKIPs otherwise.
-# Standalone by design (this repo has no CI); it is the one command to run
-# before touching image/day-0/dist/deploy tooling, and the single hook a future
-# CI would call. The Incus/QEMU image boot matrix (scripts/image/validate.py)
+# Standalone by design: this aggregate is not a step in either pull-request
+# workflow; run it before touching image/day-0/dist/deploy tooling. The
+# Incus/QEMU image boot matrix (scripts/image/validate.py)
 # and loss-cluster smokes are NOT included; they need a hypervisor.
 .PHONY: selftest
 selftest: close-keyword-lint
