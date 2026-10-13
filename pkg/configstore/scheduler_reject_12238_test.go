@@ -279,3 +279,21 @@ schedulers { scheduler S { monday { start-time 09:00:00; stop-time 17:00:00; } }
 		})
 	}
 }
+
+func TestSchedulerDailyAllDayWindowCommitCheckRejects12745(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	text := `schedulers {
+    scheduler S { daily { all-day; start-time 09:00:00; stop-time 17:00:00; } }
+}`
+	if err := s.LoadOverrideAs("", text); err != nil {
+		t.Fatalf("LoadOverrideAs: %v", err)
+	}
+	_, err := s.CommitCheck()
+	if err == nil || !strings.Contains(err.Error(), `scheduler "S"`) ||
+		!strings.Contains(err.Error(), "daily") || !strings.Contains(err.Error(), "#12745") {
+		t.Fatalf("CommitCheck = %v, want a #12745 rejection naming scheduler S and daily", err)
+	}
+}

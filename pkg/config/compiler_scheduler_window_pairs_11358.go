@@ -24,6 +24,7 @@ const (
 	schedulerWindowFindingAllDayExclude12238
 	schedulerWindowFindingFlagWindow12238
 	schedulerWindowFindingAllDayWindow12643
+	schedulerWindowFindingDailyAllDayWindow12745
 )
 
 // schedulerWeekdayContribution12238 is what one weekday statement (one
@@ -110,8 +111,9 @@ func (c *schedulerWeekdayContributors12238) splitFlagWindow() bool {
 // validateSchedulerWindowPairs11358 checks effective cluster-node views before
 // node-local expansion can hide a peer-only group. It rejects conflicting
 // boundary repeats (#11358), split weekday all-day/exclude/time-window meanings
-// (#12238), and a weekday all-day flag combined with a complete time window
-// (#12643), because the scheduler model stores only one window per day.
+// (#12238), weekday all-day with a complete time window (#12643), and daily
+// all-day with a complete time window (#12745), because the scheduler runtime
+// evaluates all-day before time bounds.
 func validateSchedulerWindowPairs11358(tree *ConfigTree, lenient bool) ([]string, error) {
 	if tree == nil {
 		return nil, nil
@@ -172,6 +174,11 @@ func validateSchedulerWindowPairs11358(tree *ConfigTree, lenient bool) ([]string
 				"scheduler %q %s combines all-day with a complete start-time/stop-time window; runtime enforces all-day before time bounds, so xpf cannot represent both meanings (#12643)",
 				key.scheduler, key.day))
 		}
+		if findings[key]&schedulerWindowFindingDailyAllDayWindow12745 != 0 {
+			addMessage(fmt.Sprintf(
+				"scheduler %q daily combines all-day with a complete start-time/stop-time window; runtime enforces all-day before time bounds, so xpf cannot represent both meanings (#12745)",
+				key.scheduler))
+		}
 		if !lenient {
 			return nil, fmt.Errorf("%s", message)
 		}
@@ -214,6 +221,7 @@ func containsSchedulerSection11358(nodes []*Node) bool {
 func collectSchedulerWindowPairFindings11358(tree *ConfigTree, findings map[schedulerWindowKey11358]schedulerWindowFinding11358) {
 	var windows map[schedulerWindowKey11358]*schedulerWindowBoundaryValues11358
 	var weekdayContributors map[schedulerWindowKey11358]*schedulerWeekdayContributors12238
+	dailyWindows := make(map[string]SchedulerDayWindow)
 	record := func(scheduler, day, boundary, value string) {
 		if value == "" {
 			return
@@ -265,26 +273,51 @@ func collectSchedulerWindowPairFindings11358(tree *ConfigTree, findings map[sche
 				switch prop.Name() {
 				case "start-time", "stop-time":
 					// Legacy direct scheduler leaves are the daily scalar window.
+					daily := dailyWindows[inst.name]
+					if prop.Name() == "start-time" {
+						daily.StartTime = nodeVal(prop)
+					} else {
+						daily.StopTime = nodeVal(prop)
+					}
+					dailyWindows[inst.name] = daily
 					record(inst.name, "daily", prop.Name(), nodeVal(prop))
-				case "daily", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday":
-					if _, isWeekday := schedulerWeekdays[prop.Name()]; isWeekday {
-						if win, ok := schedulerWindowFromNode(prop); ok {
-							if weekdayContributors == nil {
-								weekdayContributors = make(map[schedulerWindowKey11358]*schedulerWeekdayContributors12238)
-							}
-							key := schedulerWindowKey11358{scheduler: inst.name, day: prop.Name()}
-							contributors := weekdayContributors[key]
-							if contributors == nil {
-								contributors = &schedulerWeekdayContributors12238{}
-								weekdayContributors[key] = contributors
-							}
-							contributors.add(prop, schedulerWeekdayContribution12238{
-								allDay:  win.AllDay,
-								exclude: win.Exclude,
-								start:   win.StartTime != "",
-								stop:    win.StopTime != "",
-							})
+				case "daily":
+					if win, ok := schedulerWindowFromNode(prop); ok {
+						daily := dailyWindows[inst.name]
+						if win.StartTime != "" {
+							daily.StartTime = win.StartTime
 						}
+						if win.StopTime != "" {
+							daily.StopTime = win.StopTime
+						}
+						daily.AllDay = win.AllDay
+						dailyWindows[inst.name] = daily
+					}
+					for _, leaf := range expandFlatRun(prop.Children, schedulerDayLeafSchema8939()) {
+						if leaf == nil {
+							continue
+						}
+						if boundary := leaf.Name(); boundary == "start-time" || boundary == "stop-time" {
+							record(inst.name, "daily", boundary, nodeVal(leaf))
+						}
+					}
+				case "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday":
+					if win, ok := schedulerWindowFromNode(prop); ok {
+						if weekdayContributors == nil {
+							weekdayContributors = make(map[schedulerWindowKey11358]*schedulerWeekdayContributors12238)
+						}
+						key := schedulerWindowKey11358{scheduler: inst.name, day: prop.Name()}
+						contributors := weekdayContributors[key]
+						if contributors == nil {
+							contributors = &schedulerWeekdayContributors12238{}
+							weekdayContributors[key] = contributors
+						}
+						contributors.add(prop, schedulerWeekdayContribution12238{
+							allDay:  win.AllDay,
+							exclude: win.Exclude,
+							start:   win.StartTime != "",
+							stop:    win.StopTime != "",
+						})
 					}
 					for _, leaf := range expandFlatRun(prop.Children, schedulerDayLeafSchema8939()) {
 						if leaf == nil {
@@ -313,6 +346,11 @@ func collectSchedulerWindowPairFindings11358(tree *ConfigTree, findings map[sche
 	for key, values := range windows {
 		if values.repeatedStart || values.repeatedStop {
 			findings[key] |= schedulerWindowFindingRepeatedBoundary11358
+		}
+	}
+	for scheduler, daily := range dailyWindows {
+		if daily.AllDay && daily.StartTime != "" && daily.StopTime != "" {
+			findings[schedulerWindowKey11358{scheduler: scheduler, day: "daily"}] |= schedulerWindowFindingDailyAllDayWindow12745
 		}
 	}
 }

@@ -118,9 +118,13 @@ func TestSchedulerEqualWindowWarns(t *testing.T) {
 			wantWarn: false,
 		},
 		{
-			name: "daily all-day plus equal bounds does not warn",
-			cfg: compileHier(t, "schedulers {\n    scheduler allwithtimes {\n        daily {\n"+
-				"            all-day;\n            start-time 09:00:00;\n            stop-time 09:00:00;\n        }\n    }\n}"),
+			name: "daily all-day plus equal bounds is not a strict commit shape",
+			cfg: directSchedulerConfig(&config.SchedulerConfig{
+				Name: "dayallwithtimes",
+				Days: map[string]*config.SchedulerDayWindow{
+					"daily": {AllDay: true, StartTime: "09:00:00", StopTime: "09:00:00"},
+				},
+			}),
 			wantWarn: false,
 		},
 		{

@@ -8993,7 +8993,12 @@ that a peer-only group supplies are rejected on either node.
   tolerant load / peer-sync warns while preserving the existing union
   (#12643). A flag next to only a partial start/stop pair remains valid, as
   does `exclude` with a time window because `exclude` already forces the day
-  closed. Daily windows retain their existing scalar/precedence behavior.
+  closed.
+- Daily `all-day` plus a complete start/stop window is also rejected: runtime
+  enforces daily all-day before time bounds, so the window silently becomes
+  ineffective (#12745). Strict compile rejects and tolerant load / peer-sync
+  warns while preserving the union. Daily scalar last-wins behavior for
+  separate statements remains unchanged.
 - The check examines each effective node view before node-local compilation,
   so a peer-only inherited all-day flag cannot evade validation when it merges
   into an inline weekday window.
@@ -9004,7 +9009,8 @@ that a peer-only group supplies are rejected on either node.
 
 Regression coverage is in
 `pkg/config/compiler_scheduler_weekday_reject_12238_test.go`,
-`pkg/config/compiler_scheduler_weekday_single_12643_test.go`, and
+`pkg/config/compiler_scheduler_weekday_single_12643_test.go`,
+`pkg/config/compiler_scheduler_daily_single_12745_test.go`, and
 `pkg/configstore/scheduler_reject_12238_test.go`.
 
 ### Quoted-value escape round-trip contract (#3854)
