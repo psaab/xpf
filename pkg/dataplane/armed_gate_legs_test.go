@@ -956,6 +956,11 @@ type armedGateFakeLink struct {
 	closed   bool
 }
 
+// Pin/Unpin mirror the #9847 pinTrackingLink9847 model: Close's re-pin
+// (ensureXDPLinkPinned) calls Unpin then Pin on every registered link whose
+// pin file is missing, so a fake without them dereferences the embedded nil
+// link.Link (#12784). Pin records the call by writing the pin file the
+// verifier stats, exactly as a real pinned bpf_link would.
 func (l *armedGateFakeLink) Unpin() error { l.unpinned = true; return nil }
 func (l *armedGateFakeLink) Close() error { l.closed = true; return nil }
 
@@ -976,6 +981,8 @@ func (l *armedGateFakeLink) Close() error { l.closed = true; return nil }
 func TestManagerTeardownClearsLinkMembership(t *testing.T) {
 	defer func(fn func() error) { teardownCleanupFn = fn }(teardownCleanupFn)
 	teardownCleanupFn = func() error { return nil }
+
+	withTempPinDir9847(t)
 
 	xdpFake := &armedGateFakeLink{}
 	tcFake := &armedGateFakeLink{}

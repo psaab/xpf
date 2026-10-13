@@ -141,7 +141,7 @@ func TestBatchAndClearRouteToHelper5096(t *testing.T) {
 	if _, err := adapter.BatchDeleteSessions([]dataplane.SessionKey{v4Key}); err != nil {
 		t.Fatalf("BatchDeleteSessions: %v", err)
 	}
-	if !rec.deletedIP("delete", "10.0.61.102", "172.16.80.200") {
+	if !rec.deletedIP("mirror_delete_batch", "10.0.61.102", "172.16.80.200") {
 		t.Fatalf("BatchDeleteSessions did not send helper delete for v4 key; recorded=%d", rec.count())
 	}
 
@@ -162,7 +162,7 @@ func TestBatchAndClearRouteToHelper5096(t *testing.T) {
 	if _, err := adapter.BatchDeleteSessionsV6([]dataplane.SessionKeyV6{v6Key}); err != nil {
 		t.Fatalf("BatchDeleteSessionsV6: %v", err)
 	}
-	if !rec.deletedIP("delete", "2001:559:8585:ef00::100", "2001:559:8585:80::200") {
+	if !rec.deletedIP("mirror_delete_batch", "2001:559:8585:ef00::100", "2001:559:8585:80::200") {
 		t.Fatalf("BatchDeleteSessionsV6 did not send helper delete for v6 key; recorded=%d", rec.count())
 	}
 
