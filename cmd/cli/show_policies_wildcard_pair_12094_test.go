@@ -131,3 +131,31 @@ func TestShowPoliciesFilteredPreservesExactQuarantinedZonePair12094(t *testing.T
 		t.Fatalf("quarantined host filter omitted the runtime from-any exception:\n%s", hostOut)
 	}
 }
+func TestShowPoliciesFilteredJunosHostExcludesUnscopedGlobal12523(t *testing.T) {
+	c := &ctl{client: &fakeBpfrxClient{
+		getPoliciesResp: &pb.GetPoliciesResponse{Policies: []*pb.PolicyInfo{
+			{FromZone: "*", ToZone: "*", Rules: []*pb.PolicyRule{
+				{Name: "unscoped-transit-global", Action: "deny"},
+				{Name: "host-scoped-global", Action: "deny", MatchToZone: "junos-host"},
+				{Name: "off-pair-host-global", Action: "deny", MatchFromZone: "dmz", MatchToZone: "junos-host"},
+			}},
+		}},
+		getZonesResp: &pb.GetZonesResponse{Zones: []*pb.ZoneInfo{
+			{Name: "trust"}, {Name: "dmz"},
+		}},
+	}}
+	out := captureStdout(t, func() {
+		if err := c.showPoliciesFiltered("trust", "junos-host", false); err != nil {
+			t.Fatalf("showPoliciesFiltered(junos-host): %v", err)
+		}
+	})
+	if strings.Contains(out, "Rule: unscoped-transit-global") {
+		t.Fatalf("filtered junos-host view presented unscoped transit global as host policy:\n%s", out)
+	}
+	if !strings.Contains(out, "Rule: host-scoped-global") {
+		t.Fatalf("filtered junos-host view dropped host-scoped global:\n%s", out)
+	}
+	if strings.Contains(out, "Rule: off-pair-host-global") {
+		t.Fatalf("filtered junos-host view leaked a global scoped to another ingress:\n%s", out)
+	}
+}

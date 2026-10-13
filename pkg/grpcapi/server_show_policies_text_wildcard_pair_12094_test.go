@@ -216,6 +216,8 @@ func TestGRPCDetailFilteredKeepsWildcardPairs(t *testing.T) {
 	}
 }
 
+// #12523: host-bound filtering keeps only explicitly host-scoped globals;
+// unscoped transit globals remain visible for transit pairs.
 func TestGRPCHostFilterExcludesTransitWildcards12094(t *testing.T) {
 	store := wildcardPairFilterStore(t)
 	cfg := store.ActiveConfig()
@@ -246,8 +248,8 @@ func TestGRPCHostFilterExcludesTransitWildcards12094(t *testing.T) {
 	s.showPoliciesHitCount("from-zone trust to-zone junos-host", &buf)
 	out := buf.String()
 
-	assertPolicyOrder(t, out, []string{"host-exact", "host-from-any", "open-global", "g-host"})
-	for _, excluded := range []string{"wild-to-any", "wild-deny", "both-any-deny"} {
+	assertPolicyOrder(t, out, []string{"host-exact", "host-from-any", "g-host"})
+	for _, excluded := range []string{"wild-to-any", "wild-deny", "both-any-deny", "open-global"} {
 		if strings.Contains(out, excluded) {
 			t.Fatalf("host-bound filtered view listed transit-only policy %q:\n%s", excluded, out)
 		}
@@ -263,11 +265,9 @@ func TestGRPCHostFilterExcludesTransitWildcards12094(t *testing.T) {
 	globalSetID := uint32(len(cfg.Security.Policies))
 	wantPackets := counters[hostSetID*dataplane.MaxRulesPerPolicy].Packets +
 		counters[(hostSetID+1)*dataplane.MaxRulesPerPolicy].Packets +
-		counters[globalSetID*dataplane.MaxRulesPerPolicy].Packets +
 		counters[globalSetID*dataplane.MaxRulesPerPolicy+1].Packets
 	wantBytes := counters[hostSetID*dataplane.MaxRulesPerPolicy].Bytes +
 		counters[(hostSetID+1)*dataplane.MaxRulesPerPolicy].Bytes +
-		counters[globalSetID*dataplane.MaxRulesPerPolicy].Bytes +
 		counters[globalSetID*dataplane.MaxRulesPerPolicy+1].Bytes
 	fields := strings.Fields(totalLine)
 	if len(fields) < 2 || fields[len(fields)-2] != strconv.FormatUint(wantPackets, 10) ||
