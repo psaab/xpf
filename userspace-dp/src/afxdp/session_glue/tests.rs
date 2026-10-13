@@ -897,15 +897,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
 
     // #9519 foreign leg: the mutation boundaries reject the verdict and
     // preserve both deferred effects for a later authorized decision.
-    apply_deferred_shared_materialization(
-        &mut sessions,
-        &forwarding,
-        1_000_000,
-        0x18,
-        SessionHitVerdict::Foreign,
-        &mut resolved,
-    );
-    apply_deferred_synced_promotion(
+    maybe_promote_synced_session_with_conntrack(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
         -1,
@@ -919,6 +911,9 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         &peer_worker_commands,
         empty_worker_commands_by_id(),
         &forwarding,
+        1_000_000,
+        0x18,
+        0,
         SessionHitVerdict::Foreign,
         &mut resolved,
     );
@@ -937,15 +932,7 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         shared_sessions.lock().expect("shared sessions").get(&key).unwrap().origin,
         SessionOrigin::SyncImport
     );
-    apply_deferred_shared_materialization(
-        &mut sessions,
-        &forwarding,
-        1_000_000,
-        0x18,
-        SessionHitVerdict::Owner,
-        &mut resolved,
-    );
-    apply_deferred_synced_promotion(
+    maybe_promote_synced_session_with_conntrack(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
         -1,
@@ -959,6 +946,9 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         &peer_worker_commands,
         empty_worker_commands_by_id(),
         &forwarding,
+        1_000_000,
+        0x18,
+        0,
         SessionHitVerdict::Owner,
         &mut resolved,
     );

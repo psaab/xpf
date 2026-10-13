@@ -12,8 +12,7 @@ pub(in crate::afxdp) use install_table_purge::{
     INSTALL_TABLE_PURGE_BUDGET, InstallTablePurge, install_table_purge_predicate,
 };
 pub(in crate::afxdp) use promote::{
-    SharedSessionRefs, apply_deferred_synced_promotion, apply_deferred_synced_purge,
-    maybe_promote_synced_session, maybe_promote_synced_session_with_conntrack,
+    SharedSessionRefs, maybe_promote_synced_session, maybe_promote_synced_session_with_conntrack,
     SessionHitVerdict,
 };
 /// #10507 Cell 5a test seam: command-driven Demote/Refresh funnels for
@@ -3086,30 +3085,7 @@ pub(super) fn resolve_flow_session_decision(
         worker_id,
         None,
     )?;
-    apply_deferred_synced_purge(
-        sessions,
-        session_map,
-        SharedSessionRefs {
-            sessions: shared_sessions,
-            nat_sessions: shared_nat_sessions,
-            forward_wire_sessions: shared_forward_wire_sessions,
-            owner_rg_indexes: shared_owner_rg_indexes,
-        },
-        forwarding,
-        now_ns,
-        worker_id,
-        verdict,
-        &mut resolved,
-    );
-    apply_deferred_shared_materialization(
-        sessions,
-        forwarding,
-        now_ns,
-        tcp_flags,
-        verdict,
-        &mut resolved,
-    );
-    apply_deferred_synced_promotion(
+    maybe_promote_synced_session_with_conntrack(
         sessions,
         session_map,
         -1,
@@ -3123,6 +3099,9 @@ pub(super) fn resolve_flow_session_decision(
         peer_worker_commands,
         empty_worker_commands_by_id(),
         forwarding,
+        now_ns,
+        tcp_flags,
+        worker_id,
         verdict,
         &mut resolved,
     );
@@ -3146,7 +3125,7 @@ pub(super) fn resolve_flow_session_decision(
 }
 
 /// Materialize a shared entry only after the packet's Owner verdict.
-pub(in crate::afxdp) fn apply_deferred_shared_materialization(
+pub(in crate::afxdp::session_glue) fn apply_deferred_shared_materialization(
     sessions: &mut SessionTable,
     forwarding: &ForwardingState,
     now_ns: u64,
@@ -3600,26 +3579,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
     if decision.resolution.disposition == ForwardingDisposition::TableUnavailable {
         flag_install_table_purge(worker_id);
     }
-    // Reverse sessions created from forward NAT matches are locally
-    let metadata = maybe_promote_synced_session_with_conntrack(
-        sessions,
-        session_map,
-        conntrack_v4_fd,
-        conntrack_v6_fd,
-        shared,
-        peer_worker_commands,
-        worker_commands_by_id,
-        forwarding,
-        &flow.forward_key,
-        decision,
-        resolved.metadata,
-        SessionOrigin::ReverseFlow,
-        fabric_ingress,
-        now_ns,
-        protocol,
-        tcp_flags,
-        SessionHitVerdict::Unresolved,
-    );
+    let metadata = resolved.metadata;
     Some(ResolvedFlowSessionDecision {
         key: flow.forward_key.clone(),
         session_id: sessions.session_id_for(&flow.forward_key),

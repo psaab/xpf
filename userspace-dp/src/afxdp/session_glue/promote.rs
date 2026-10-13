@@ -75,7 +75,7 @@ pub(in crate::afxdp) enum SessionHitVerdict {
 ///
 /// The compatibility wrapper keeps the pre-#1346 13-argument shape for tests;
 /// the production variant adds the two conntrack fds to invalidate only origin.
-pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
+fn promote_synced_session_with_conntrack(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
     conntrack_v4_fd: c_int,
@@ -92,11 +92,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
     now_ns: u64,
     protocol: u8,
     tcp_flags: u8,
-    verdict: SessionHitVerdict,
 ) -> SessionMetadata {
-    if verdict != SessionHitVerdict::Owner {
-        return metadata;
-    }
     if !origin.is_promotable_synced()
         || decision.resolution.disposition != ForwardingDisposition::ForwardCandidate
     {
@@ -204,7 +200,10 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
     tcp_flags: u8,
     verdict: SessionHitVerdict,
 ) -> SessionMetadata {
-    maybe_promote_synced_session_with_conntrack(
+    if verdict != SessionHitVerdict::Owner {
+        return metadata;
+    }
+    promote_synced_session_with_conntrack(
         sessions,
         session_map,
         -1,
@@ -221,13 +220,13 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
         now_ns,
         protocol,
         tcp_flags,
-        verdict,
     )
 }
 
-/// Apply a promotion only after the caller has established that this packet
-/// is its owner. The resolved verdict is checked again at the mutation boundary.
-pub(in crate::afxdp) fn apply_deferred_synced_promotion(
+/// Evaluate the session-hit verdict before applying any deferred synced
+/// materialization, purge, or promotion. Foreign and unresolved packets leave
+/// the decision, metadata, shared maps, and local session state untouched.
+pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
     conntrack_v4_fd: c_int,
@@ -236,16 +235,39 @@ pub(in crate::afxdp) fn apply_deferred_synced_promotion(
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     worker_commands_by_id: &WorkerCommandQueues,
     forwarding: &ForwardingState,
+    now_ns: u64,
+    tcp_flags: u8,
+    worker_id: u32,
     verdict: SessionHitVerdict,
     resolved: &mut ResolvedFlowSessionDecision,
 ) {
     if verdict != SessionHitVerdict::Owner {
         return;
     }
+
+    apply_deferred_synced_purge(
+        sessions,
+        session_map,
+        shared,
+        forwarding,
+        now_ns,
+        worker_id,
+        verdict,
+        resolved,
+    );
+    super::apply_deferred_shared_materialization(
+        sessions,
+        forwarding,
+        now_ns,
+        tcp_flags,
+        verdict,
+        resolved,
+    );
+
     let Some(promotion) = resolved.deferred_synced_promotion.take() else {
         return;
     };
-    resolved.metadata = maybe_promote_synced_session_with_conntrack(
+    resolved.metadata = promote_synced_session_with_conntrack(
         sessions,
         session_map,
         conntrack_v4_fd,
@@ -262,7 +284,6 @@ pub(in crate::afxdp) fn apply_deferred_synced_promotion(
         promotion.now_ns,
         promotion.protocol,
         promotion.tcp_flags,
-        verdict,
     );
 }
 
@@ -340,7 +361,7 @@ pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit(
         worker_id,
     );
 }
-pub(in crate::afxdp) fn apply_deferred_synced_purge(
+fn apply_deferred_synced_purge(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
     shared: SharedSessionRefs<'_>,

@@ -1903,30 +1903,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             } => (Some(arrival_zone), on_admitting_interface),
                         };
                         if foreign_arrival_zone.is_none() {
-                            crate::afxdp::session_glue::apply_deferred_synced_purge(
-                                sessions,
-                                binding.bpf_maps.session_map.handle(),
-                                crate::afxdp::session_glue::SharedSessionRefs {
-                                    sessions: worker_ctx.shared_sessions,
-                                    nat_sessions: worker_ctx.shared_nat_sessions,
-                                    forward_wire_sessions: worker_ctx.shared_forward_wire_sessions,
-                                    owner_rg_indexes: &worker_ctx.shared_owner_rg_indexes,
-                                },
-                                worker_ctx.forwarding,
-                                now_ns,
-                                worker_id,
-                                crate::afxdp::session_glue::SessionHitVerdict::Owner,
-                                &mut resolved,
-                            );
-                            crate::afxdp::session_glue::apply_deferred_shared_materialization(
-                                sessions,
-                                worker_ctx.forwarding,
-                                now_ns,
-                                meta.tcp_flags,
-                                crate::afxdp::session_glue::SessionHitVerdict::Owner,
-                                &mut resolved,
-                            );
-                            crate::afxdp::session_glue::apply_deferred_synced_promotion(
+                            crate::afxdp::session_glue::maybe_promote_synced_session_with_conntrack(
                                 sessions,
                                 binding.bpf_maps.session_map.handle(),
                                 conntrack_v4_fd,
@@ -1940,6 +1917,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 worker_ctx.peer_worker_commands,
                                 worker_ctx.worker_commands_by_id,
                                 worker_ctx.forwarding,
+                                now_ns,
+                                meta.tcp_flags,
+                                worker_id,
                                 crate::afxdp::session_glue::SessionHitVerdict::Owner,
                                 &mut resolved,
                             );
