@@ -2,9 +2,11 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,6 +39,84 @@ var (
 	nlLinkSetName = netlink.LinkSetName
 	nlLinkSetUp   = netlink.LinkSetUp
 )
+
+// netlink-backed retained MAC identity reader. Tests replace this cold-path
+// seam to distinguish a verified match, mismatch, and unreadable observation.
+var nicIdentityMACFn = readNICIdentityMAC
+
+type retainedMACVerdict uint8
+
+const (
+	retainedMACAbsent retainedMACVerdict = iota
+	retainedMACMatch
+	retainedMACMismatch
+	retainedMACUnreadable
+)
+
+func readNICIdentityMAC(name string) (string, error) {
+	link, err := nlLinkByName(name)
+	if err != nil {
+		return "", err
+	}
+	attrs := link.Attrs()
+	if len(attrs.PermHWAddr) != 0 {
+		return attrs.PermHWAddr.String(), nil
+	}
+	if len(attrs.HardwareAddr) != 0 {
+		return attrs.HardwareAddr.String(), nil
+	}
+	return "", errors.New("link has neither permanent nor running MAC")
+}
+
+func verifyRetainedMACLink(currentName string) retainedMACVerdict {
+	want := retainedMACAddress(currentName)
+	if want == "" {
+		return retainedMACAbsent
+	}
+	got, err := nicIdentityMACFn(currentName)
+	if err != nil || strings.TrimSpace(got) == "" {
+		return retainedMACUnreadable
+	}
+	wantMAC, wantErr := net.ParseMAC(strings.TrimSpace(want))
+	gotMAC, gotErr := net.ParseMAC(strings.TrimSpace(got))
+	if wantErr != nil || gotErr != nil {
+		return retainedMACUnreadable
+	}
+	if !bytes.Equal(wantMAC, gotMAC) {
+		return retainedMACMismatch
+	}
+	return retainedMACMatch
+}
+
+// retainedMACAddress returns the MACAddress= value from a name-only managed
+// .link. Such a link is the only persistence shape whose identity needs this
+// check; OriginalName= links and files without a MAC remain unchanged.
+func retainedMACAddress(currentName string) string {
+	entries, err := os.ReadDir(linkDir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), linkPrefix) || !strings.HasSuffix(e.Name(), ".link") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(linkDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		content := string(data)
+		if !containsLine(content, "Name="+currentName) || strings.Contains(content, "OriginalName=") {
+			continue
+		}
+		for _, line := range strings.Split(content, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "MACAddress=") {
+				return strings.TrimSpace(strings.TrimPrefix(line, "MACAddress="))
+			}
+		}
+	}
+	return ""
+}
 
 // pciNIC holds enumeration data for one physical NIC.
 type pciNIC struct {
@@ -353,9 +433,23 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 			// of usable persistence). On the target-change path the
 			// resurrectable claims are neutralized instead (MAJOR-1 below).
 			if current == final {
-				// Already at the final name: there is no rename to run, and
-				// nothing here can resurrect a wrong identity (no target
-				// change), so the retained files stay as they are.
+				switch verdict := verifyRetainedMACLink(current); verdict {
+				case retainedMACMismatch, retainedMACUnreadable:
+					reason := "mismatch"
+					if verdict == retainedMACUnreadable {
+						reason = "identity unreadable; comparison unavailable"
+					}
+					name := linkPrefix + current + ".link"
+					if err := neutralizeResurrectableLink(name); err != nil {
+						errs = append(errs, err)
+					} else {
+						changed = true
+					}
+					slog.Error("linksetup: retained MAC-form .link identity "+reason+
+						"; removed the file so it cannot claim this name on a later boot",
+						"interface", current)
+					errs = append(errs, fmt.Errorf("linksetup: retained MAC-form .link for %s has %s; persistence removed (#12550)", current, reason))
+				}
 				continue
 			}
 			// MAJOR-1: an unknown NIC changing target MUST NOT leave

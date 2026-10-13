@@ -1627,6 +1627,23 @@ func (d *Daemon) setupBootstrapLifeline() {
 	// and the required rename still runs (#12156/F1).
 	original, originalOK := positionalOriginalNameFor(lifeline, defaultMgmtInterface)
 	if !originalOK {
+		if lifeline == defaultMgmtInterface {
+			switch verdict := verifyRetainedMACLink(lifeline); verdict {
+			case retainedMACMismatch, retainedMACUnreadable:
+				reason := "mismatch"
+				if verdict == retainedMACUnreadable {
+					reason = "identity unreadable; mismatch could not be determined"
+				}
+				name := linkPrefix + lifeline + ".link"
+				if err := neutralizeResurrectableLink(name); err != nil {
+					slog.Error("bootstrap: failed to neutralize unverifiable retained .link",
+						"file", name, "err", err)
+				}
+				slog.Error("bootstrap: retained MAC-form .link identity "+reason+
+					"; removed the file so it cannot claim fxp0 on a later boot",
+					"interface", lifeline)
+			}
+		}
 		logUnknownOriginalLinkSkip("bootstrap", lifeline, defaultMgmtInterface)
 		if lifeline != defaultMgmtInterface {
 			// MAJOR-1 (same fail-open as the positional path): the lifeline
