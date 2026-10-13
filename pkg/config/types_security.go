@@ -164,9 +164,11 @@ type SecurityConfig struct {
 	// that is nil in every valid config.
 	MalformedZonePairs []string `json:"-"`
 	// UnknownPoliciesChildren records unrecognized or policy-container-valid
-	// non-enforcement direct children of `security policies`. Enforcement-
-	// bearing unknowns poison tolerant snapshots; known-benign children only
-	// produce a warning. The persisted AST reconstructs this compile diagnostic.
+	// non-enforcement direct children of `security policies`, plus qualified
+	// misnested contexts (for example, `global policies polcy`, #12629).
+	// Enforcement-bearing unknowns poison tolerant snapshots; known-benign
+	// children only produce a warning. The persisted AST reconstructs this
+	// compile diagnostic.
 	UnknownPoliciesChildren []string `json:"-"`
 	// GlobalPolicies are global rules applied to all zone pairs.
 	GlobalPolicies     []*Policy

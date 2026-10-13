@@ -55,8 +55,9 @@ func enforcementSecurityPoliciesChildren12217(sec *SecurityConfig) []string {
 }
 
 // Apply statements are valid at any Junos hierarchy point, so they are not
-// unknown policy-container children even though the compiler does not expand
-// apply-macro or apply-groups-except here.
+// unknown policy-context children even though the compiler does not expand
+// apply-macro or apply-groups-except here. Context walks may pass a qualified
+// location (for example, `global policies polcy`) rather than a bare keyword.
 func recordUnknownSecurityPoliciesChild12217(sec *SecurityConfig, keyword string) {
 	if sec == nil || keyword == "" || isApplyStatementKeyword(keyword) {
 		return
