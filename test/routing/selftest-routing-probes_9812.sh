@@ -153,6 +153,7 @@ if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q "all four routing kernel ce
 else
 	bad "-json=false argv guard expected pass, got $rc: $out"
 fi
+
 # ── 6. positive control: probes pass and the guard parses a good run ──
 d=$(mkfix ok); rm -f "$d/unshare" "$d/go"
 write_fake_unshare "$d/unshare"
