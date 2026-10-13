@@ -853,6 +853,14 @@ func TestArmCandidateArmedPostRenameSyncProceedsToReboot_12549(t *testing.T) {
 	if !contains(f.calls, "reboot") {
 		t.Error("Reboot was not called after the landed ARMED write")
 	}
+	rearmErr := r.Arm("6.18.5-12-generic")
+	if rearmErr == nil {
+		t.Error("Arm accepted a second attempt while the landed ARMED trial is in flight")
+	}
+	if f.bootNext != j.BootID || !f.wdArmed || f.disarmWatchdogCalls != 0 {
+		t.Errorf("after rejected re-arm: BootNext=%q watchdogArmed=%v disarmCalls=%d; want original trial retained",
+			f.bootNext, f.wdArmed, f.disarmWatchdogCalls)
+	}
 	record, recordErr := ReadArmRecord(r.cfg.JournalPath)
 	if recordErr != nil || record != j.PromoteBinary {
 		t.Errorf("arm record = %q, err=%v; want the ARMED promote record %q",
