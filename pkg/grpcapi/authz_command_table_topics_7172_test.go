@@ -51,7 +51,6 @@ import (
 // unable to fire so nobody reads a green suite as evidence that it was
 // exercised.
 //
-//
 // canon != cmd is now reached only by WHITESPACE. strings.Fields collapses
 // and trims it, so `show  version` or ` show version` passes both arms above
 // and canonicalizes to the single-spaced string. That failure is not

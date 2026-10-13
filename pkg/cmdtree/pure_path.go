@@ -1,7 +1,5 @@
 package cmdtree
 
-import "strings"
-
 // EveryWordIsAKeyword reports whether words spell one argument-free command
 // path against tree: every word names a real node in the tree rather than
 // being consumed by a value slot, and only the LAST word may be a leaf. A
@@ -24,7 +22,7 @@ import "strings"
 func EveryWordIsAKeyword(tree map[string]*Node, words []string) bool {
 	current := tree
 	for i, w := range words {
-		if strings.HasPrefix(w, "<") && strings.HasSuffix(w, ">") {
+		if isPlaceholder(w) {
 			return false
 		}
 		node, ok := current[w]
