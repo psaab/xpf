@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -25,6 +26,9 @@ func TestPackedStaticRouteNextHopAndQualifiedNextHop_12648(t *testing.T) {
 		{name: "unpacked control", tree: unpacked},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if err := SchemaValidate(tc.tree, nil); err != nil {
+				t.Fatalf("SchemaValidate: %v", err)
+			}
 			cfg, err := CompileConfig(tc.tree)
 			if err != nil {
 				t.Fatalf("CompileConfig: %v", err)
@@ -32,6 +36,20 @@ func TestPackedStaticRouteNextHopAndQualifiedNextHop_12648(t *testing.T) {
 			route := findStaticRoute3871(t, cfg.RoutingOptions.StaticRoutes, "10.5.0.0/16")
 			if !reflect.DeepEqual(route.NextHops, want) {
 				t.Fatalf("NextHops = %+v, want %+v", route.NextHops, want)
+			}
+		})
+	}
+}
+
+func TestPackedStaticRouteRejectsIncompleteQualifiedNextHop_12648(t *testing.T) {
+	for name, config := range map[string]string{
+		"missing gateway": `routing-options { static { route 10.5.0.0/16 next-hop 10.0.0.1 qualified-next-hop; } }`,
+		"unsupported trailing clause": `routing-options { static { route 10.5.0.0/16 next-hop 10.0.0.1 qualified-next-hop 10.0.0.2 preference 250 next-table blue.inet.0; } }`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := SchemaValidate(hierTree(t, config), nil)
+			if err == nil || !strings.Contains(err.Error(), "qualified-next-hop") {
+				t.Fatalf("SchemaValidate error = %v, want explicit qualified-next-hop rejection", err)
 			}
 		})
 	}

@@ -896,45 +896,11 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 				// on the keys (`next-hop fe80::1 interface reth0.50`) or as a
 				// child node — that egress interface applies to the gateway(s).
 				var addrs []string
-				var packedQualified []NextHopEntry
 				iface := ""
-				// Compact inline normalization can leave route-level clauses
-				// after the next-hop values on this leaf. A qualified-next-hop
-				// is a separate floating path, not another ECMP gateway (#12648).
+				// Compact inline normalization can leave a route-level
+				// `no-install` token in the next-hop leaf's packed keys. Keep
+				// that option out of the gateway list and apply it to the route.
 				for j := 1; j < len(prop.Keys); j++ {
-					if prop.Keys[j] == "qualified-next-hop" {
-						if j+1 >= len(prop.Keys) {
-							continue
-						}
-						nh := NextHopEntry{Address: prop.Keys[j+1]}
-						k := j + 2
-						for k+1 < len(prop.Keys) {
-							consumed := true
-							switch prop.Keys[k] {
-							case "interface":
-								nh.Interface = prop.Keys[k+1]
-							case "preference":
-								if n, err := strconv.Atoi(prop.Keys[k+1]); err == nil {
-									nh.Preference = n
-									nh.HasPreference = true
-								}
-							case "metric":
-								if n, err := strconv.Atoi(prop.Keys[k+1]); err == nil {
-									nh.Metric = n
-									nh.HasMetric = true
-								}
-							default:
-								consumed = false
-							}
-							if !consumed {
-								break
-							}
-							k += 2
-						}
-						packedQualified = append(packedQualified, nh)
-						j = k - 1
-						continue
-					}
 					if prop.Keys[j] == "no-install" {
 						route.NoInstall = true
 						continue
@@ -982,9 +948,6 @@ func compileStaticRoutes(staticNode *Node, existing []*StaticRoute) []*StaticRou
 				}
 				for _, a := range addrs {
 					route.NextHops = append(route.NextHops, staticNextHopEntry(a, iface))
-				}
-				for _, nh := range packedQualified {
-					route.NextHops = mergeQualifiedNextHop12308(route.NextHops, nh)
 				}
 			case "no-install":
 				route.NoInstall = true
