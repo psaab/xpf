@@ -1572,8 +1572,7 @@ func compileForwardingOptions(node *Node, fo *ForwardingOptionsConfig) error {
 }
 
 func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, opts compileOpts, warnings *[]string) error {
-	sampNode := node.FindChild("sampling")
-	if sampNode != nil {
+	for _, sampNode := range node.FindChildren("sampling") {
 		if err := compileSampling(sampNode, fo); err != nil {
 			return err
 		}
@@ -1748,9 +1747,12 @@ func compilePortMirroring(node *Node, fo *ForwardingOptionsConfig) error {
 }
 
 func compileSampling(node *Node, fo *ForwardingOptionsConfig) error {
-	sc := &SamplingConfig{
-		Instances: make(map[string]*SamplingInstance),
+	if fo.Sampling == nil {
+		fo.Sampling = &SamplingConfig{
+			Instances: make(map[string]*SamplingInstance),
+		}
 	}
+	sc := fo.Sampling
 
 	for _, sampInst := range namedInstances(node.FindChildren("instance")) {
 		inst := &SamplingInstance{Name: sampInst.name}
