@@ -16112,9 +16112,15 @@ silently dropping them. `apply-groups-except` and `apply-macro` inside this
 subtree are currently rejected by the shared walker; this known Junos
 compatibility gap is tracked as #12635. A weekday packed onto the scheduler
 line (`scheduler S monday { ... }`) is not validated as a day window and
-remains a known input-shape gap (#12636). Scheduler-level
-`start-time X stop-time Y` and `start-date X stop-date Y` one-line runs remain
-strict-rejected (#12637).
+remains a known input-shape gap (#12636).
+
+Scheduler-level Junos inline pairs are accepted: `start-time X stop-time Y`
+and `start-date X stop-date Y`. Their start-leaf tail validators accept only
+the recognized typed stop leaf and its value, preserving the same validation
+as split forms without adding synthetic scheduler schema children.
+`compileSchedulers` reads both boundaries from the one-line AST, so the
+compiled daily window/date range matches the corresponding separate leaves
+(#12637).
 
 Expanding day runs also makes the `daily` / weekday
 `start-time X stop-time Y` one-liner commit-acceptable in both the flat-set
