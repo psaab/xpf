@@ -114,12 +114,11 @@ func mgmtVRFRouteInventory(
 			continue
 		}
 		if route.Protocol == unix.RTPROT_KERNEL {
-			if route.Scope == netlink.SCOPE_LINK && route.Dst != nil && route.Gw == nil {
+			if mgmtRouteIsConnected(route, family) {
 				if prefix, ok := mgmtRoutePrefix(route, family); ok {
 					connectedPrefixes = append(connectedPrefixes, prefix)
 				}
-				if _, protected := controlFabricLinks[route.LinkIndex]; protected &&
-					route.Scope == netlink.SCOPE_LINK && route.Dst != nil && route.Gw == nil {
+				if _, protected := controlFabricLinks[route.LinkIndex]; protected {
 					controlFabricConnected = append(controlFabricConnected, route)
 				}
 			}
@@ -140,6 +139,19 @@ func mgmtVRFRouteInventory(
 			"protocol", route.Protocol, "table", mgmtVRFTableID)
 	}
 	return operators, dynamic, controlFabricConnected, connectedPrefixes, nil
+}
+
+// mgmtRouteIsConnected recognizes the kernel's directly-connected route shape.
+// IPv4 connected routes use link scope; Linux lists IPv6 connected routes with
+// universe scope, so accepting only SCOPE_LINK silently misses the live v6 RIB.
+func mgmtRouteIsConnected(route netlink.Route, family int) bool {
+	if route.Protocol != unix.RTPROT_KERNEL || route.Dst == nil || route.Gw != nil {
+		return false
+	}
+	if route.Scope == netlink.SCOPE_LINK {
+		return true
+	}
+	return family == netlink.FAMILY_V6 && route.Scope == netlink.SCOPE_UNIVERSE
 }
 
 func mgmtRouteIsDynamicProtocol(protocol netlink.RouteProtocol) bool {
