@@ -1917,6 +1917,40 @@ func GlobalPolicyAppliesToZonePair(matchFrom, matchTo []string, filterFrom, filt
 	return axisApplies(matchFrom, filterFrom) && axisApplies(matchTo, filterTo)
 }
 
+// GlobalPolicyAppliesToZonePairInZones is GlobalPolicyAppliesToZonePair
+// with zone-inventory awareness (#12684). A transit filter naming a zone
+// that is not defined cannot be traversed (runtime UnzonedIngress /
+// UnzonedEgress), so no global applies to it — including unscoped ones.
+// A junos-host axis is exempt: host traffic resolves zone id 0, and a
+// from-zone junos-host filter with a junos-host to-zone keeps the host
+// semantics of #12523/#10644. from-zone junos-host with a transit
+// to-zone selects nothing (host-originated traffic never traverses the
+// RX policy gate; strict compile rejects such scopes).
+func GlobalPolicyAppliesToZonePairInZones(matchFrom, matchTo []string, filterFrom, filterTo string, defined map[string]bool) bool {
+	if filterFrom == JunosHostZone && filterTo != JunosHostZone {
+		return false
+	}
+	for _, axis := range []string{filterFrom, filterTo} {
+		if axis != "" && axis != JunosHostZone && axis != "any" && !defined[axis] {
+			return false
+		}
+	}
+	return GlobalPolicyAppliesToZonePair(matchFrom, matchTo, filterFrom, filterTo)
+}
+
+// DefinedZoneNames returns the config's defined transit zone names for
+// GlobalPolicyAppliesToZonePairInZones.
+func DefinedZoneNames(cfg *config.Config) map[string]bool {
+	if cfg == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(cfg.Security.Zones))
+	for name := range cfg.Security.Zones {
+		out[name] = true
+	}
+	return out
+}
+
 // globalScopeSetMatches replicates GlobalZoneScope::matches + build_global_zone_scope
 // (policy.rs, #3148/#4626) for a zone SET scope. An empty scope or one that
 // contains "any" (config.IsWildcardZoneSet) applies to every zone. Otherwise the

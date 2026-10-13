@@ -378,7 +378,7 @@ func (c *CLI) handleShowSecurity(args []string) error {
 						continue
 					}
 					// #3357: drop a scoped global for a different zone pair.
-					if !policymatch.GlobalPolicyAppliesToZonePair(pol.Match.FromZones, pol.Match.ToZones, fromZone, toZone) {
+					if !policymatch.GlobalPolicyAppliesToZonePairInZones(pol.Match.FromZones, pol.Match.ToZones, fromZone, toZone, policymatch.DefinedZoneNames(cfg)) {
 						continue
 					}
 					action := "permit"
@@ -520,7 +520,7 @@ func (c *CLI) handleShowSecurity(args []string) error {
 					continue
 				}
 				// #3357: drop a scoped global for a different zone pair.
-				if !policymatch.GlobalPolicyAppliesToZonePair(pol.Match.FromZones, pol.Match.ToZones, fromZone, toZone) {
+				if !policymatch.GlobalPolicyAppliesToZonePairInZones(pol.Match.FromZones, pol.Match.ToZones, fromZone, toZone, policymatch.DefinedZoneNames(cfg)) {
 					continue
 				}
 				if !globalHeaderPrinted {

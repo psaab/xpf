@@ -56,3 +56,36 @@ func TestGlobalPolicyAppliesToZonePair(t *testing.T) {
 		})
 	}
 }
+
+// #12684: inventory-aware selection. Undefined transit filters select
+// nothing; junos-host axes keep host semantics.
+func TestGlobalPolicyAppliesToZonePairInZones12684(t *testing.T) {
+	defined := map[string]bool{"trust": true, "untrust": true, "dmz": true}
+	cases := []struct {
+		name               string
+		matchFrom, matchTo []string
+		filtFrom, filtTo   string
+		want               bool
+	}{
+		{"defined pair, unscoped", nil, nil, "trust", "untrust", true},
+		{"undefined from, unscoped excluded", nil, nil, "ghost", "untrust", false},
+		{"undefined to, unscoped excluded", nil, nil, "trust", "ghost", false},
+		{"undefined from, scoped excluded", []string{"trust"}, nil, "ghost", "", false},
+		{"defined from-only", nil, nil, "trust", "", true},
+		{"from junos-host transit to, scoped host global excluded", nil, []string{"junos-host"}, "junos-host", "untrust", false},
+		{"from junos-host transit to, unscoped excluded", nil, nil, "junos-host", "untrust", false},
+		{"host pair, host-scoped included", []string{"any"}, []string{"junos-host"}, "junos-host", "junos-host", true},
+		{"host pair, unscoped excluded", nil, nil, "junos-host", "junos-host", false},
+		{"to junos-host, undefined from excluded", nil, []string{"junos-host"}, "ghost", "junos-host", false},
+		{"to junos-host, defined from included", []string{"trust"}, []string{"junos-host"}, "trust", "junos-host", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := GlobalPolicyAppliesToZonePairInZones(tc.matchFrom, tc.matchTo, tc.filtFrom, tc.filtTo, defined)
+			if got != tc.want {
+				t.Fatalf("InZones(%v,%v,%q,%q) = %v, want %v",
+					tc.matchFrom, tc.matchTo, tc.filtFrom, tc.filtTo, got, tc.want)
+			}
+		})
+	}
+}

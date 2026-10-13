@@ -490,7 +490,7 @@ func (c *ctl) showPoliciesFiltered(fromZone, toZone string, globalOnly bool) err
 	}
 	renderGlobalGroup := func(pi *pb.PolicyInfo) {
 		for _, rule := range pi.Rules {
-			if !policymatch.GlobalPolicyAppliesToZonePair(effectiveMatchFromZones(rule), effectiveMatchToZones(rule), fromZone, toZone) {
+			if !policymatch.GlobalPolicyAppliesToZonePairInZones(effectiveMatchFromZones(rule), effectiveMatchToZones(rule), fromZone, toZone, policymatch.DefinedZoneNames(zoneFilterConfig)) {
 				continue
 			}
 			// #3683 (M02) / #4626: render the effective zone SET through
@@ -841,6 +841,7 @@ func (c *ctl) showPoliciesBriefFiltered(fromZone, toZone string) error {
 	}
 	filtered := fromZone != "" || toZone != ""
 	var pairFilter policymatch.ZonePairPolicyFilter
+	zoneFilterConfig := (*config.Config)(nil)
 	if filtered {
 		zonesResp, err := c.client.GetZones(c.ctx(), &pb.GetZonesRequest{})
 		if err != nil {
@@ -850,7 +851,7 @@ func (c *ctl) showPoliciesBriefFiltered(fromZone, toZone string) error {
 		for _, zone := range zonesResp.GetZones() {
 			zones[zone.GetName()] = &config.ZoneConfig{Name: zone.GetName()}
 		}
-		zoneFilterConfig := &config.Config{Security: config.SecurityConfig{Zones: zones}}
+		zoneFilterConfig = &config.Config{Security: config.SecurityConfig{Zones: zones}}
 		pairFilter = policymatch.NewZonePairPolicyFilter(zoneFilterConfig, fromZone, toZone)
 	}
 	fmt.Printf("%-12s %-12s %-20s %-8s %s\n",
@@ -875,8 +876,8 @@ func (c *ctl) showPoliciesBriefFiltered(fromZone, toZone string) error {
 	}
 	renderGlobals := func(pi *pb.PolicyInfo) {
 		for _, rule := range pi.Rules {
-			if filtered && !policymatch.GlobalPolicyAppliesToZonePair(
-				effectiveMatchFromZones(rule), effectiveMatchToZones(rule), fromZone, toZone) {
+			if filtered && !policymatch.GlobalPolicyAppliesToZonePairInZones(
+				effectiveMatchFromZones(rule), effectiveMatchToZones(rule), fromZone, toZone, policymatch.DefinedZoneNames(zoneFilterConfig)) {
 				continue
 			}
 			renderRule(pi, rule)
