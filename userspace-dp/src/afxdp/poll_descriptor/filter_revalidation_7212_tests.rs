@@ -3143,7 +3143,125 @@ fn pbr_revalidation_keeps_interface_nat_local_delivery_in_owner_table_12086() {
     );
 }
 
+/// #12642: a same-table local-arm change must not be pinned merely because the
+/// fresh interface-NAT helper resolves to LocalDelivery. Model a WG tunnel
+/// becoming the current table-scoped owner of the local address.
+#[test]
+fn pbr_revalidation_rejects_changed_wg_local_arm_with_same_identity_12642() {
+    let mut forwarding = forwarding_with_ri_local_12056(false, true, Some("blue"), "blue", true);
+    let flow = local_flow_12056(false, PROTO_TCP, true);
+    let local = crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
+        &forwarding,
+        flow.dst_ip,
+        PROTO_TCP,
+        Some("blue.inet.0"),
+    )
+    .expect("initial owner table must local-deliver the address");
+    let identity = crate::session::install_table_identity("blue");
+    let stored = local_decision_12056(local, identity);
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    assert!(sessions.install_with_protocol_with_origin(
+        flow.forward_key.clone(),
+        stored,
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+        PROTO_TCP,
+        0,
+    ));
+    let address = match flow.dst_ip {
+        IpAddr::V4(address) => address,
+        IpAddr::V6(_) => unreachable!("the fixture flow is IPv4"),
+    };
+    forwarding.interface_nat_v4.insert(address, 400);
+    forwarding
+        .interface_nat_tables_v4
+        .entry(address)
+        .or_default()
+        .insert("blue.inet.0".to_string());
+    forwarding.tunnel_endpoint_by_ifindex.insert(400, 1);
+    let fresh = crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
+        &forwarding,
+        flow.dst_ip,
+        PROTO_TCP,
+        Some("blue.inet.0"),
+    )
+    .expect("the changed tunnel-local arm must still resolve");
+    assert_eq!(
+        fresh.disposition,
+        crate::afxdp::ForwardingDisposition::LocalDelivery
+    );
+    assert_ne!(fresh, stored.resolution);
+    let route = revalidate_static_pbr_route_on_session_hit(
+        &forwarding,
+        &std::sync::Arc::new(ShardedNeighborMap::new()),
+        &sessions,
+        &flow.forward_key,
+        &flow,
+        &frame(),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+        stored,
+        false,
+    )
+    .expect("same-identity changed local arm must revalidate");
+    assert_eq!(route.resolution, fresh);
+    assert_eq!(
+        (route.install_table_domain, route.install_table_check),
+        identity,
+    );
+}
 
+/// #12642: the tail equality also rejects address loss when the PBR identity
+/// remains unchanged. Without full-resolution equality, this would pin NoRoute.
+#[test]
+fn pbr_revalidation_rejects_removed_local_address_with_same_identity_12642() {
+    let initial = forwarding_with_ri_local_12056(false, true, Some("blue"), "blue", true);
+    let flow = local_flow_12056(false, PROTO_TCP, true);
+    let local = crate::afxdp::forwarding::interface_nat_local_resolution_on_session_miss(
+        &initial,
+        flow.dst_ip,
+        PROTO_TCP,
+        Some("blue.inet.0"),
+    )
+    .expect("initial owner table must local-deliver the address");
+    let identity = crate::session::install_table_identity("blue");
+    let stored = local_decision_12056(local, identity);
+    let mut sessions = SessionTable::new();
+    sessions.set_filter_revalidation_gen(7);
+    assert!(sessions.install_with_protocol_with_origin(
+        flow.forward_key.clone(),
+        stored,
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        1_000,
+        PROTO_TCP,
+        0,
+    ));
+    let forwarding = forwarding_with_ri_local_12056(false, true, Some("blue"), "blue", false);
+    let route = revalidate_static_pbr_route_on_session_hit(
+        &forwarding,
+        &std::sync::Arc::new(ShardedNeighborMap::new()),
+        &sessions,
+        &flow.forward_key,
+        &flow,
+        &frame(),
+        meta(LAN_IFINDEX as u32, 0, false),
+        Some(TEST_LAN_ZONE_ID),
+        stored,
+        false,
+    )
+    .expect("removed address must revalidate under unchanged table identity");
+    assert_eq!(
+        (route.install_table_domain, route.install_table_check),
+        identity,
+    );
+    assert_eq!(
+        route.resolution.disposition,
+        crate::afxdp::ForwardingDisposition::NoRoute,
+    );
+}
 #[test]
 fn removing_static_pbr_revalidates_local_session_under_native_ri_12056() {
     let forwarding = forwarding_with_ri_local_12056(false, true, Some("green"), "green", true);
