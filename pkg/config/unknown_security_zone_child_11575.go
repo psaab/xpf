@@ -51,15 +51,9 @@ func toleratedUnknownSecurityZoneChildWarnings11575(cfg *Config) []string {
 			continue
 		}
 		for _, keyword := range zone.UnknownZoneChildren {
-			if zone.DroppedEnforcementChild {
-				warnings = append(warnings, fmt.Sprintf(
-					"security zone %q: unknown child keyword %q was dropped; the zone is unbound because the keyword may configure enforcement (tolerant path)",
-					name, keyword))
-			} else {
-				warnings = append(warnings, fmt.Sprintf(
-					"security zone %q: unknown child keyword %q was dropped (tolerant path; strict commit rejects this)",
-					name, keyword))
-			}
+			warnings = append(warnings, fmt.Sprintf(
+				"security zone %q: unknown child keyword %q was dropped; the zone is unbound because the keyword may configure enforcement (tolerant path)",
+				name, keyword))
 		}
 	}
 	return warnings
