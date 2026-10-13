@@ -22,9 +22,19 @@ func newTestStoreAt(t *testing.T, path string) *Store {
 }
 
 // newTestStore creates a Store backed by a temp file for testing.
+//
+// #12565: NOT t.TempDir(). Its directory name embeds the full test and
+// sub-test names; under go1.24 (no 64-byte TempDir cap) a long-named caller
+// pushes a path component past NAME_MAX. A short prefix keeps the path
+// bounded no matter the caller name.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	return newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
+	dir, err := os.MkdirTemp("", "xcfg")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return newTestStoreAt(t, filepath.Join(dir, "config"))
 }
 
 // #1319: end-to-end gate — CommitCheck/Commit must reject typed-leaf

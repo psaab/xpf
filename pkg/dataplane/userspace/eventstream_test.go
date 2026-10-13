@@ -2677,7 +2677,9 @@ func TestEventStreamPolicyDenyGenerationAcrossBacklogAndReplay10978(t *testing.T
 			buffer := logging.NewEventBuffer(8)
 			reader := logging.NewEventReader(nil, buffer)
 			reader.SetPolicyNamesForGeneration(generationA, map[uint32]string{policyID: "policy-A"})
-			es := NewEventStream(filepath.Join(t.TempDir(), "policy-events.sock"))
+			// #12565: short dir — t.TempDir()'s long sub-test name pushes the
+			// socket path past the 108-byte sun_path limit under go1.24.
+			es := NewEventStream(filepath.Join(shortSockDir9322(t), "policy-events.sock"))
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if err := es.Start(ctx); err != nil {

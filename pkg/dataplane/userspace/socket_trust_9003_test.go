@@ -337,7 +337,9 @@ func TestPeerCredentialReadFailsClosed9003(t *testing.T) {
 	})
 
 	t.Run("a closed connection is refused, not defaulted", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "closed.sock")
+		// #12565: short dir — t.TempDir()'s long sub-test name pushes the
+		// socket path past the 108-byte sun_path limit under go1.24.
+		path := filepath.Join(shortSockDir9322(t), "closed.sock")
 		ln, err := net.Listen("unix", path)
 		if err != nil {
 			t.Fatal(err)
