@@ -1497,6 +1497,11 @@ func validateRouteFilterMatchTypesStrict(cfg *Config) error {
 				if rf == nil {
 					continue
 				}
+				if err := ValidateRouteFilterArgPositional(0, rf.Prefix, nil); err != nil {
+					return fmt.Errorf(
+						"policy-statement %q term %q route-filter prefix %q: not a valid CIDR: %v",
+						name, term.Name, rf.Prefix, err)
+				}
 				switch rf.MatchType {
 				case "through":
 					return fmt.Errorf(
