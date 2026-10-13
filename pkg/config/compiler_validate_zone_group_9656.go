@@ -54,6 +54,7 @@ func validateZoneStatementTails9656(nodes []*Node, lenient bool) ([]string, erro
 			for _, ch := range zs.Children {
 				if ch == nil || len(ch.Keys) < 3 || ch.Keys[0] != "security-zone" || len(ch.Children) > 0 {
 					continue
+				}
 				// A complete apply-macro tail is inert, but any token beyond its
 				// single macro name remains dropped content and must be refused.
 				if (len(ch.Keys) == 4 && ch.Keys[2] == "apply-macro") || !zoneTailDropsKeys9656(ch) {
