@@ -183,7 +183,7 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 	// second dump could disagree with the first about the same device — which
 	// would put a netdev's owners on opposite sides of the unanimity rule for
 	// no reason but sampling.
-	liveXfrm := sampleLiveXfrmNetdevs()
+	liveXfrm, xfrmDumpFailed := sampleLiveXfrmNetdevs()
 	interfaces := buildInterfaceSnapshotsFrom(cfg, liveXfrm)
 	// #2514 / #1606: build the address-book IDs and rows once, then share the
 	// IDs with policy lowering. A collision remains a build error so the apply
@@ -325,6 +325,7 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 	// configuration — never from snap.TunnelEndpoints, which drop a tunnel whose
 	// netdev is absent. See ConfigSnapshot.WgSteeredListenPorts.
 	_, snap.WgSteeredListenPorts, _ = config.SplitSteeredPorts(config.SteeredWireGuardListenPorts(cfg))
+	snap.xfrmDumpFailed = xfrmDumpFailed
 	snap.zoneIDCollisions = quarantineCollidingZones(snap)
 	// Removed-zone derivation is valid only for a populated, collision-free
 	// producer snapshot. A quarantined collision intentionally leaves the

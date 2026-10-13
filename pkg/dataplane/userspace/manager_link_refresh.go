@@ -99,7 +99,7 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 
 	// Always rebuild from the desired config. Cloning current.Interfaces would
 	// make a row removed by #11086 unrecoverable when its netdev is recreated.
-	liveXfrm := sampleLiveXfrmNetdevs()
+	liveXfrm, _ := sampleLiveXfrmNetdevs()
 	next.Interfaces = buildInterfaceSnapshotsFrom(cfg, liveXfrm)
 	// Rows are freshly built here, so revalidate their owned backing once before
 	// deriving routes and other interface-dependent sections. The prepared send

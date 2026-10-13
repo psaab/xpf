@@ -132,8 +132,9 @@ func userspaceBindTargetNetdev(iface InterfaceSnapshot) string {
 // physical interface, we emit the parent Linux name — that is the netdev the
 // AF_XDP socket actually binds to.
 //
-// Returns nil on nil config. Never returns an error: this is a
-// best-effort derivation used to scope a best-effort optimization.
+// Returns nil on nil config, snapshot-build error, or failed xfrm dump. This
+// best-effort derivation grants reshape permission only when its evidence is
+// complete.
 func UserspaceBoundLinuxInterfaces(cfg *config.Config) []string {
 	if cfg == nil {
 		return nil
@@ -154,7 +155,7 @@ func UserspaceBoundLinuxInterfaces(cfg *config.Config) []string {
 	// the real apply path (ApplyConfig) surfaces the same error to the
 	// operator and rejects the commit.
 	snap, err := buildSnapshot(cfg, ucfg, 0, 0)
-	if err != nil || snap == nil {
+	if err != nil || snap == nil || snap.xfrmDumpFailed {
 		return nil
 	}
 	seen := make(map[string]struct{})
@@ -251,7 +252,7 @@ func UserspaceBoundLinuxInterfaces(cfg *config.Config) []string {
 }
 
 // sampleLiveXfrmNetdevs takes the ONE kernel xfrm-device sample a snapshot
-// build is entitled to and applies the fail-open policy for a dump that failed.
+// build is entitled to and reports whether the dump failed.
 //
 // #6691 round 8 resolved this ONCE per snapshot rather than per row — it is a
 // single RTM_GETLINK dump, against the two netlink lookups buildLinkSnapshot
@@ -264,20 +265,19 @@ func UserspaceBoundLinuxInterfaces(cfg *config.Config) []string {
 // TestXfrmDumpFailureIsLoggedNotSwallowed binds it. Round 9 left it as a bare
 // slog.Error inside a 200-line builder, where no test could reach it and a
 // silent deletion would have looked like a cleanup.
-func sampleLiveXfrmNetdevs() map[string]bool {
+func sampleLiveXfrmNetdevs() (map[string]bool, bool) {
 	liveXfrm, err := liveXfrmNetdevs()
 	if err != nil {
 		// The kernel half of snapshotSecureTunnel is unavailable for this
 		// build. Log LOUDLY and continue on the config half, which stays
-		// authoritative for every tunnel an IPsec stanza names — the gap this
-		// leaves is exactly the stale-xfrmi case, which no config-keyed
-		// predicate could have covered anyway. Failing the whole apply on a
-		// transient RTM_GETLINK error would brick commits for a belt.
+		// authoritative for every tunnel an IPsec stanza names. Return the
+		// failure status as well so the reshape allowlist can fail closed
+		// without changing this snapshot's established fallback.
 		slog.Error("userspace: could not classify xfrm netdevs; secure-tunnel "+
 			"exclusion falls back to configuration ownership only",
 			"err", err)
 	}
-	return liveXfrm
+	return liveXfrm, err != nil
 }
 
 // buildInterfaceSnapshots builds the interface rows against a FRESH kernel xfrm
@@ -287,7 +287,8 @@ func buildInterfaceSnapshots(cfg *config.Config) []InterfaceSnapshot {
 	if !snapshotHasInterfaceRows(cfg) {
 		return nil
 	}
-	return buildInterfaceSnapshotsFrom(cfg, sampleLiveXfrmNetdevs())
+	liveXfrm, _ := sampleLiveXfrmNetdevs()
+	return buildInterfaceSnapshotsFrom(cfg, liveXfrm)
 }
 
 // BuildInterfaceSnapshots builds the interface rows against a FRESH kernel
