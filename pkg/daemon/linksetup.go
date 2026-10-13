@@ -53,6 +53,16 @@ const (
 	retainedMACUnreadable
 )
 
+// reason is the operator-facing wording for the two removal verdicts, shared
+// by the positional and bootstrap paths so they cannot drift. Unreadable never
+// says "mismatch": no comparison took place.
+func (v retainedMACVerdict) reason() string {
+	if v == retainedMACUnreadable {
+		return "identity unreadable; comparison unavailable"
+	}
+	return "identity mismatch"
+}
+
 func readNICIdentityMAC(name string) (string, error) {
 	link, err := nlLinkByName(name)
 	if err != nil {
@@ -435,20 +445,20 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 			if current == final {
 				switch verdict := verifyRetainedMACLink(current); verdict {
 				case retainedMACMismatch, retainedMACUnreadable:
-					reason := "mismatch"
-					if verdict == retainedMACUnreadable {
-						reason = "identity unreadable; comparison unavailable"
-					}
+					reason := verdict.reason()
 					name := linkPrefix + current + ".link"
 					if err := neutralizeResurrectableLink(name); err != nil {
-						errs = append(errs, err)
+						slog.Error("linksetup: retained MAC-form .link "+reason+
+							"; could not remove the file, so it may still claim this name on a later boot",
+							"interface", current, "file", name, "err", err)
+						errs = append(errs, fmt.Errorf("linksetup: retained MAC-form .link for %s has %s; removal failed (#12550): %w", current, reason, err))
 					} else {
 						changed = true
+						slog.Error("linksetup: retained MAC-form .link "+reason+
+							"; removed the file so it cannot claim this name on a later boot",
+							"interface", current)
+						errs = append(errs, fmt.Errorf("linksetup: retained MAC-form .link for %s has %s; persistence removed (#12550)", current, reason))
 					}
-					slog.Error("linksetup: retained MAC-form .link identity "+reason+
-						"; removed the file so it cannot claim this name on a later boot",
-						"interface", current)
-					errs = append(errs, fmt.Errorf("linksetup: retained MAC-form .link for %s has %s; persistence removed (#12550)", current, reason))
 				}
 				continue
 			}

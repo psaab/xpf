@@ -1630,18 +1630,16 @@ func (d *Daemon) setupBootstrapLifeline() {
 		if lifeline == defaultMgmtInterface {
 			switch verdict := verifyRetainedMACLink(lifeline); verdict {
 			case retainedMACMismatch, retainedMACUnreadable:
-				reason := "mismatch"
-				if verdict == retainedMACUnreadable {
-					reason = "identity unreadable; mismatch could not be determined"
-				}
 				name := linkPrefix + lifeline + ".link"
 				if err := neutralizeResurrectableLink(name); err != nil {
-					slog.Error("bootstrap: failed to neutralize unverifiable retained .link",
-						"file", name, "err", err)
+					slog.Error("bootstrap: retained MAC-form .link "+verdict.reason()+
+						"; could not remove the file, so it may still claim fxp0 on a later boot",
+						"interface", lifeline, "file", name, "err", err)
+				} else {
+					slog.Error("bootstrap: retained MAC-form .link "+verdict.reason()+
+						"; removed the file so it cannot claim fxp0 on a later boot",
+						"interface", lifeline)
 				}
-				slog.Error("bootstrap: retained MAC-form .link identity "+reason+
-					"; removed the file so it cannot claim fxp0 on a later boot",
-					"interface", lifeline)
 			}
 		}
 		logUnknownOriginalLinkSkip("bootstrap", lifeline, defaultMgmtInterface)
