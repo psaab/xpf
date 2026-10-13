@@ -195,6 +195,11 @@ func TestQualifiedNextHopMetricPolicyAttachesForStaticProtocolSpellings12312(t *
 			if strings.Contains(block, "set metric 10\n") {
 				t.Fatalf("integrated QNH route-map must remain metric-free:\n%s", block)
 			}
+			if !strings.Contains(block, "route-map "+routeMap+" permit 10\n match ip address prefix-list ") ||
+				!strings.Contains(block, " match ip next-hop prefix-list ") ||
+				!strings.Contains(block, " on-match next\n") {
+				t.Fatalf("overlay target sequence 10 must be the discriminated QNH match sequence:\n%s", block)
+			}
 			if !strings.Contains(overlays["ospfd"], "route-map "+routeMap+" permit 10\n set metric 10\n") {
 				t.Fatalf("attached QNH map's metric is missing from ospfd overlay:\n%v", overlays)
 			}
