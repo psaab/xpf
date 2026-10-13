@@ -944,18 +944,27 @@ func publishConfirmedRollbackTarget12072(
 	t *testing.T, r *convergenceRun12072, c0 *config.Config, host string, policies []string,
 ) (*config.Config, uint64, error) {
 	t.Helper()
+	return publishConfirmedRollbackText12072(t, r, c0, policySetConfigText12072(host, policies))
+}
+
+// publishConfirmedRollbackText12072 commit-confirms an arbitrary config text
+// and applies it from c0, returning the confirm generation for a timer rollback.
+func publishConfirmedRollbackText12072(
+	t *testing.T, r *convergenceRun12072, c0 *config.Config, text string,
+) (*config.Config, uint64, error) {
+	t.Helper()
 	store := r.h.d.store
 	if err := store.EnterConfigure(); err != nil {
 		t.Fatalf("EnterConfigure: %v", err)
 	}
-	if err := store.LoadOverride(policySetConfigText12072(host, policies)); err != nil {
+	if err := store.LoadOverride(text); err != nil {
 		store.ExitConfigure()
-		t.Fatalf("LoadOverride %s: %v", host, err)
+		t.Fatalf("LoadOverride: %v\n%s", err, text)
 	}
 	c1, err := store.CommitConfirmed(1)
 	store.ExitConfigure()
 	if err != nil {
-		t.Fatalf("CommitConfirmed %s: %v", host, err)
+		t.Fatalf("CommitConfirmed: %v\n%s", err, text)
 	}
 	gen := store.ConfirmGenForTesting()
 	t.Cleanup(func() { _ = store.ConfirmCommit() })
