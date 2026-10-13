@@ -2454,8 +2454,9 @@ never lock an operator out of a remote box it manages.
   acquires the SAME `applySem` commit/apply/HA-sync serialize on (draining any
   in-flight apply), enters a **terminal reset generation** (`d.resetting`,
   `isResetting`/`enterResetGeneration`/`exitResetGeneration`) BEFORE running the
-  wipe closure, and — on a successful wipe — leaves that generation set for the
-  daemon's remaining lifetime (the gRPC handler stops xpfd moments later). Once
+  wipe closure, and — once the wipe passes post-verification and its reset
+  handoff flag is flipped clean — leaves that generation set for the daemon's
+  remaining lifetime (the gRPC handler stops xpfd moments later). Once
   set, every config writer that acquires `applySem` short-circuits on
   `errDaemonResetting`: `commitAndApply` / `commitConfirmedAndApply` /
   `syncAndApply` reject **before** persisting (so a racing commit/HA-sync cannot
@@ -2464,9 +2465,16 @@ never lock an operator out of a remote box it manages.
   `ipsecApplyForLeaseChange` refuses (so a DHCP-lease rebind cannot re-render
   the erased swanctl PSK snippet), and `actuateRouteOverlayLocked` refuses (so an
   `ip-monitoring` probe-flap sweep cannot re-render `/etc/frr/frr.conf` and
-  re-materialize the erased routing-auth keys). It fail-CLOSES: a wipe error exits the reset
-  generation and releases the gate so the box stays recoverable, and the handler
-  reports the reset incomplete and does NOT stop the daemon. The DHCP lease
+  re-materialize the erased routing-auth keys). It fail-CLOSES: a failure
+  before that clean handoff (a pre-wipe step, the wipe, post-verification, or
+  the clean flip) exits the reset generation and releases the gate so the box
+  stays recoverable, and the handler reports the reset incomplete and does NOT
+  stop the daemon. The clean handoff also latches `d.resetWipeSucceeded`
+  (#12616), so a later failed retry in the same daemon lifetime stays terminal:
+  it restores and resumes nothing, keeping the generation and every writer
+  fence (feed history, config archive, `rescue.conf`) because the box is
+  already wiped and verified; xpfd stays fenced until it exits, and the reboot
+  completes the factory reset. The DHCP lease
   writers observe the generation too: the VRRP pre-seed and socket seed
   short-circuit (the pre-seed also crosses ddnsResetMu, held across the wipe),
   the async DHCP enqueue refuses, and the DHCP DNS reconcile refuses (the

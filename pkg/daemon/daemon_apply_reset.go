@@ -49,13 +49,13 @@ func (d *Daemon) isResetting() bool { return d.resetting.Load() }
 
 // enterResetGeneration marks the daemon as being factory-reset. Called by
 // factoryReset while it holds applySem, BEFORE the wipe, so any writer that
-// later acquires applySem re-renders nothing (#5281). It is left set for the
-// daemon's remaining lifetime on a successful wipe (the daemon is stopped
-// moments later) and cleared again only if the wipe FAILED (exitResetGeneration).
+// later acquires applySem re-renders nothing (#5281). It remains set for the
+// daemon's remaining lifetime after the wipe passes post-verification and its
+// handoff is marked clean; failures before that point leave the box recoverable.
 func (d *Daemon) enterResetGeneration() { d.resetting.Store(true) }
 
-// exitResetGeneration leaves the reset generation. Called only on a FAILED wipe
-// so the box stays recoverable and normal config work resumes (#5281).
+// exitResetGeneration leaves the reset generation after a failed reset only
+// when no invocation has already completed successfully.
 func (d *Daemon) exitResetGeneration() { d.resetting.Store(false) }
 
 // quiesceDDNSForReset fences new reconcile launches and joins both guarded
@@ -422,15 +422,24 @@ func markResetHandoffDirtyQuiet(reason string) {
 //  3. Run the wipe while holding applySem. The wipe records a PENDING reset
 //     handoff (never clean): daemon post-verification below flips it clean
 //     only after passing, so a crash in between leaves repair-or-retry.
-//     - On FAILURE: exit the reset generation and release applySem (deferred)
-//     so the half-reset box is recoverable and a retry can run, and return
-//     the error. The caller must NOT stop the daemon — a stop here would
-//     strand a box whose secrets are still on disk.
+//     - On FAILURE while no invocation has yet completed a clean reset
+//     (including a wipe that ran but failed post-verification or the clean
+//     flip): exit the reset generation and release applySem (deferred) so
+//     the half-reset box is recoverable and a retry can run, and return the
+//     error. The caller must NOT stop the daemon — a stop here would strand
+//     a box whose secrets may still be on disk.
+//     - On FAILURE after an earlier invocation completed a clean reset
+//     (resetWipeSucceeded, #12616): skip every restore/resume step, stay in
+//     the terminal reset generation with every writer fence held, and
+//     return the error. The box is already wiped and verified, so a retry
+//     is not its recovery path: the daemon stays fenced until it exits, and
+//     the reboot completes the factory reset.
 //     - On SUCCESS: stop the helper, sweep and re-verify its state plus the
-//     Kea leases and DDNS/IPsec temps, flip the handoff clean, stay in the
-//     reset generation (never cleared) and return nil; the caller stops
-//     xpfd. applySem is released on return, but the resetting flag keeps
-//     every later writer from re-rendering during the stop window.
+//     Kea leases and DDNS/IPsec temps, flip the handoff clean, latch
+//     resetWipeSucceeded, stay in the reset generation (never cleared, not
+//     even by a later failed retry) and return nil; the caller stops xpfd.
+//     applySem is released on return, but the resetting flag keeps every
+//     later writer from re-rendering during the stop window.
 func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		return err
@@ -468,44 +477,41 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 	kernelBeforeReset := ""
 	resetFailed := func(err error) error {
 		errs := []error{err}
-		// Restore the pre-wipe identity files only when the wipe itself ran
-		// and did not complete: after a completed wipe the config is gone and
-		// the fresh identity is the correct state for the wiped box.
-		if wipeStarted && !wipeSucceeded && identity != nil {
-			if restoreErr := restoreResetIdentity(identity); restoreErr != nil {
-				errs = append(errs, restoreErr)
+		// A previously completed factoryReset is terminal even if a later
+		// invocation fails before or during its own wipe.
+		if !d.resetWipeSucceeded.Load() {
+			// Restore the pre-wipe identity files only when the wipe itself ran
+			// and did not complete: after a completed wipe the config is gone
+			// and the fresh identity is the correct state for the wiped box.
+			if wipeStarted && !wipeSucceeded && identity != nil {
+				if restoreErr := restoreResetIdentity(identity); restoreErr != nil {
+					errs = append(errs, restoreErr)
+				}
 			}
-		}
-		// The wipe moves the live kernel name with /etc/hostname; move it
-		// back on the same failed-wipe path (empty when the pre-wipe read
-		// failed, in which case there is nothing to restore to).
-		if wipeStarted && !wipeSucceeded && kernelBeforeReset != "" {
-			if rerr := sethostname([]byte(kernelBeforeReset)); rerr != nil {
-				errs = append(errs, fmt.Errorf("restore kernel hostname after failed factory reset: %w", rerr))
+			if wipeStarted && !wipeSucceeded && kernelBeforeReset != "" {
+				if rerr := sethostname([]byte(kernelBeforeReset)); rerr != nil {
+					errs = append(errs, fmt.Errorf("restore kernel hostname after failed factory reset: %w", rerr))
+				}
 			}
-		}
-		if ipsecMayNeedRestore {
-			if restoreErr := d.restoreIPsecAfterFailedReset(); restoreErr != nil {
-				errs = append(errs, fmt.Errorf("restore IPsec after failed factory reset: %w", restoreErr))
+			if ipsecMayNeedRestore {
+				if restoreErr := d.restoreIPsecAfterFailedReset(); restoreErr != nil {
+					errs = append(errs, fmt.Errorf("restore IPsec after failed factory reset: %w", restoreErr))
+				}
 			}
-		}
-		if dhcpMayNeedRestore {
-			if restoreErr := d.restoreDHCPAfterFailedReset(); restoreErr != nil {
-				errs = append(errs, fmt.Errorf("restore DHCP after failed factory reset: %w", restoreErr))
+			if dhcpMayNeedRestore {
+				if restoreErr := d.restoreDHCPAfterFailedReset(); restoreErr != nil {
+					errs = append(errs, fmt.Errorf("restore DHCP after failed factory reset: %w", restoreErr))
+				}
 			}
-		}
-		// An incomplete wipe leaves the old tenant live, so its feed history
-		// writes resume. After a successful wipe, keep the fence even if later
-		// verification fails: the in-memory producers still describe the prior
-		// tenant and must not recreate the erased epoch.
-		if !wipeSucceeded {
+			// An incomplete wipe leaves the old tenant live, so its feed
+			// history writes resume.
 			resumeFeedShrinkHistoryPersistence()
+			if d.store != nil {
+				d.store.ResumeArchival()
+				d.store.ResumeRescueWrites()
+			}
+			d.exitResetGeneration()
 		}
-		if d.store != nil {
-			d.store.ResumeArchival()
-			d.store.ResumeRescueWrites()
-		}
-		d.exitResetGeneration()
 		return errors.Join(errs...)
 	}
 	// Snapshot the identity files the wipe overwrites before any destructive
@@ -630,5 +636,6 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 	if ferr := configstore.FlipResetHandoffClean(); ferr != nil {
 		return resetFailed(ferr)
 	}
+	d.resetWipeSucceeded.Store(true)
 	return nil
 }

@@ -1644,16 +1644,15 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	if _, err := os.Lstat(straggler); !os.IsNotExist(err) {
 		t.Fatalf("failed wipe must still sweep temps beside the alias: %v", err)
 	}
-	// Phase 2: no commit on the still-running daemon can converge. The
-	// in-band fix is gate-refused; a direct store commit fails
-	// persistence against the wiped DB (and would resurrect the whole
-	// stale tree if it could persist).
 	if err := store.EnterConfigure(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.LoadSet("set system dataplane state-file " + fixed + "\n"); err != nil {
 		t.Fatalf("LoadSet fix: %v", err)
 	}
+	// The wipe removed .configdb but left a dirty handoff, so an in-band fix
+	// is rejected as incomplete while direct persistence also cannot recreate
+	// the wiped prior-tenant state.
 	if _, err := d.commitAndApply(context.Background(), configstore.InternalCommitter(), "", peerSyncNever); !errors.Is(err, configstore.ErrResetHandoffDirty) {
 		t.Fatalf("in-band fix while dirty = %v, want incomplete", err)
 	}
