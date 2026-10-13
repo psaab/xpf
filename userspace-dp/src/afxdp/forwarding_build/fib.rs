@@ -17,8 +17,7 @@
 use super::super::*;
 use super::interfaces::IfaceIndex;
 use crate::RouteSnapshot;
-use ipnet::{Ipv4Net, Ipv6Net};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -131,23 +130,39 @@ fn validate_route_next_hop_family(
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-struct IndexedStaticRouteV4<'a> {
-    prefix: PrefixV4,
-    route: &'a RouteSnapshot,
-}
 
-#[derive(Clone, Copy)]
-struct IndexedStaticRouteV6<'a> {
-    prefix: PrefixV6,
-    route: &'a RouteSnapshot,
-}
-
-/// Snapshot-order-independent route index used during FIB construction.
+/// Snapshot-order-independent prefix index used during FIB construction.
+/// Each route table is keyed by canonical network and prefix length, making
+/// recursive longest-prefix selection bounded by the address width.
 #[derive(Default)]
 struct RecursiveGatewayRoutes<'a> {
-    v4: BTreeMap<String, Vec<IndexedStaticRouteV4<'a>>>,
-    v6: BTreeMap<String, Vec<IndexedStaticRouteV6<'a>>>,
+    v4: BTreeMap<String, HashMap<(u32, u8), Vec<&'a RouteSnapshot>>>,
+    v6: BTreeMap<String, HashMap<(u128, u8), Vec<&'a RouteSnapshot>>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static RECURSIVE_CANDIDATE_EXAMINATIONS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_candidate_examination() {
+    RECURSIVE_CANDIDATE_EXAMINATIONS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn note_candidate_examination() {}
+
+#[cfg(test)]
+fn candidate_examinations() -> u64 {
+    RECURSIVE_CANDIDATE_EXAMINATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_candidate_examinations() {
+    RECURSIVE_CANDIDATE_EXAMINATIONS.with(|count| count.set(0));
 }
 
 impl<'a> RecursiveGatewayRoutes<'a> {
@@ -155,44 +170,68 @@ impl<'a> RecursiveGatewayRoutes<'a> {
         let mut index = Self::default();
         for route in &snapshot.routes {
             if let Ok(prefix) = route.destination.parse::<Ipv4Net>() {
+                let prefix = PrefixV4::from_net(prefix);
                 let table = canonical_route_table(&route.table, false).into_owned();
                 index
                     .v4
                     .entry(table)
                     .or_default()
-                    .push(IndexedStaticRouteV4 {
-                        prefix: PrefixV4::from_net(prefix),
-                        route,
-                    });
+                    .entry((u32::from(prefix.addr()), prefix.prefix_len()))
+                    .or_default()
+                    .push(route);
             } else if let Ok(prefix) = route.destination.parse::<Ipv6Net>() {
+                let prefix = PrefixV6::from_net(prefix);
                 let table = canonical_route_table(&route.table, true).into_owned();
                 index
                     .v6
                     .entry(table)
                     .or_default()
-                    .push(IndexedStaticRouteV6 {
-                        prefix: PrefixV6::from_net(prefix),
-                        route,
-                    });
+                    .entry((u128::from(prefix.addr()), prefix.prefix_len()))
+                    .or_default()
+                    .push(route);
             }
         }
-        for routes in index.v4.values_mut() {
-            routes.sort_by(|a, b| {
-                b.prefix
-                    .prefix_len()
-                    .cmp(&a.prefix.prefix_len())
-                    .then(a.route.preference.cmp(&b.route.preference))
-            });
+        for prefixes in index.v4.values_mut() {
+            for routes in prefixes.values_mut() {
+                routes.sort_by_key(|route| route.preference);
+            }
         }
-        for routes in index.v6.values_mut() {
-            routes.sort_by(|a, b| {
-                b.prefix
-                    .prefix_len()
-                    .cmp(&a.prefix.prefix_len())
-                    .then(a.route.preference.cmp(&b.route.preference))
-            });
+        for prefixes in index.v6.values_mut() {
+            for routes in prefixes.values_mut() {
+                routes.sort_by_key(|route| route.preference);
+            }
         }
         index
+    }
+
+    fn v4_candidates(&self, ip: Ipv4Addr, table: &str) -> Option<&[&'a RouteSnapshot]> {
+        let prefixes = self.v4.get(table)?;
+        let address = u32::from(ip);
+        for len in (0..=32).rev() {
+            note_candidate_examination();
+            let mask = if len == 0 { 0 } else { u32::MAX << (32 - len) };
+            if let Some(routes) = prefixes.get(&(address & mask, len as u8)) {
+                return Some(routes);
+            }
+        }
+        None
+    }
+
+    fn v6_candidates(&self, ip: Ipv6Addr, table: &str) -> Option<&[&'a RouteSnapshot]> {
+        let prefixes = self.v6.get(table)?;
+        let address = u128::from(ip);
+        for len in (0..=128).rev() {
+            note_candidate_examination();
+            let mask = if len == 0 {
+                0
+            } else {
+                u128::MAX << (128 - len)
+            };
+            if let Some(routes) = prefixes.get(&(address & mask, len as u8)) {
+                return Some(routes);
+            }
+        }
+        None
     }
 }
 
@@ -220,17 +259,8 @@ fn recursive_static_target_v4(
     }
     *work -= 1;
     visited[depth] = Some(ip);
-    let candidates = routes.v4.get(table)?;
-    let prefix_len = candidates
-        .iter()
-        .filter(|entry| entry.prefix.contains(ip))
-        .map(|entry| entry.prefix.prefix_len())
-        .max()?;
-    for entry in candidates
-        .iter()
-        .filter(|entry| entry.prefix.prefix_len() == prefix_len && entry.prefix.contains(ip))
-    {
-        let route = entry.route;
+    let candidates = routes.v4_candidates(ip, table)?;
+    for route in candidates {
         if route.discard || !route.next_table.is_empty() {
             return None;
         }
@@ -303,17 +333,8 @@ fn recursive_static_target_v6(
     }
     *work -= 1;
     visited[depth] = Some(ip);
-    let candidates = routes.v6.get(table)?;
-    let prefix_len = candidates
-        .iter()
-        .filter(|entry| entry.prefix.contains(ip))
-        .map(|entry| entry.prefix.prefix_len())
-        .max()?;
-    for entry in candidates
-        .iter()
-        .filter(|entry| entry.prefix.prefix_len() == prefix_len && entry.prefix.contains(ip))
-    {
-        let route = entry.route;
+    let candidates = routes.v6_candidates(ip, table)?;
+    for route in candidates {
         if route.discard || !route.next_table.is_empty() {
             return None;
         }
@@ -1185,4 +1206,196 @@ mod recursive_cycle_guard_12398_tests {
             "a repeated gateway must be rejected instead of resolving through itself"
         );
     }
+}
+#[cfg(test)]
+mod recursive_prefix_index_12617_tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn snapshot_v4(count: usize) -> ConfigSnapshot {
+        let routes = (0..count)
+            .map(|n| RouteSnapshot {
+                table: "inet.0".into(),
+                family: "inet".into(),
+                destination: format!("10.{}.{}.{} /32", (n >> 16) & 255, (n >> 8) & 255, n & 255)
+                    .replace(" ", ""),
+                next_hops: vec!["203.0.113.1".into()],
+                ..Default::default()
+            })
+            .collect();
+        ConfigSnapshot {
+            routes,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn recursive_prefix_index_uses_prefix_width_not_table_size_12617() {
+        let snapshot = snapshot_v4(65_536);
+        let index = RecursiveGatewayRoutes::from_snapshot(&snapshot);
+        reset_candidate_examinations();
+        let candidates = index
+            .v4_candidates("10.0.0.17".parse().unwrap(), "inet.0")
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].destination, "10.0.0.17/32");
+        assert_eq!(
+            candidate_examinations(),
+            1,
+            "a /32 hit requires one keyed prefix probe regardless of 65,536 table rows"
+        );
+        reset_candidate_examinations();
+        assert!(index
+            .v4_candidates("203.0.113.1".parse().unwrap(), "inet.0")
+            .is_none());
+        assert_eq!(
+            candidate_examinations(),
+            33,
+            "an IPv4 miss probes at most the 33 prefix lengths"
+        );
+    }
+
+    #[test]
+    fn recursive_prefix_index_keeps_lpm_and_route_tie_order_12617() {
+        let snapshot = ConfigSnapshot {
+            routes: vec![
+                RouteSnapshot {
+                    table: "inet.0".into(),
+                    destination: "10.0.0.0/8".into(),
+                    preference: 1,
+                    ..Default::default()
+                },
+                RouteSnapshot {
+                    table: "inet.0".into(),
+                    destination: "10.1.0.0/16".into(),
+                    preference: 20,
+                    ..Default::default()
+                },
+                RouteSnapshot {
+                    table: "inet.0".into(),
+                    destination: "10.1.0.0/16".into(),
+                    preference: 10,
+                    ..Default::default()
+                },
+                RouteSnapshot {
+                    table: "inet.0".into(),
+                    destination: "0.0.0.0/0".into(),
+                    preference: 1,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let index = RecursiveGatewayRoutes::from_snapshot(&snapshot);
+        let routes = index
+            .v4_candidates("10.1.2.3".parse().unwrap(), "inet.0")
+            .unwrap();
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].preference, 10);
+        assert_eq!(routes[1].preference, 20);
+        assert_eq!(
+            index
+                .v4_candidates("11.1.2.3".parse().unwrap(), "inet.0")
+                .unwrap()[0]
+                .destination,
+            "0.0.0.0/0"
+        );
+    }
+
+    #[test]
+    fn recursive_prefix_index_ipv6_hit_and_miss_are_bounded_12617() {
+        let snapshot = ConfigSnapshot {
+            routes: vec![RouteSnapshot {
+                table: "inet6.0".into(),
+                destination: "2001:db8:1::/64".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let index = RecursiveGatewayRoutes::from_snapshot(&snapshot);
+        reset_candidate_examinations();
+        assert_eq!(
+            index
+                .v6_candidates("2001:db8:1::42".parse().unwrap(), "inet6.0")
+                .unwrap()[0]
+                .destination,
+            "2001:db8:1::/64"
+        );
+        assert_eq!(candidate_examinations(), 65);
+        reset_candidate_examinations();
+        assert!(index
+            .v6_candidates("2001:db8:2::42".parse().unwrap(), "inet6.0")
+            .is_none());
+        assert_eq!(candidate_examinations(), 129);
+    }
+
+    #[test]
+    fn recursive_static_probe_budget_exhausts_closed_at_512_12617() {
+        let misses = (1..=511).map(|n| format!("192.0.{}.{}", 2 + n / 256, n % 256));
+        let mut next_hops: Vec<String> = misses.collect();
+        next_hops.push("198.51.100.1".into());
+        let snapshot = ConfigSnapshot {
+            routes: vec![
+                RouteSnapshot {
+                    table: "inet.0".into(),
+                    destination: "10.0.0.0/24".into(),
+                    next_hops,
+                    ..Default::default()
+                },
+                RouteSnapshot {
+                    table: "inet.0".into(),
+                    destination: "198.51.100.1/32".into(),
+                    next_hops: vec!["192.0.4.1".into()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let index = RecursiveGatewayRoutes::from_snapshot(&snapshot);
+        let mut state = ForwardingState::default();
+        state.connected_v4.push(ConnectedRouteV4 {
+            prefix: PrefixV4::from_net("192.0.4.0/24".parse().unwrap()),
+            host: "192.0.4.1".parse().unwrap(),
+            ifindex: 7,
+            tunnel_endpoint_id: 0,
+            table: "inet.0".into(),
+        });
+        let mut work = MAX_RECURSIVE_STATIC_WORK;
+        let resolved = recursive_static_target_v4(
+            &state,
+            &index,
+            "10.0.0.1".parse().unwrap(),
+            "inet.0",
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &mut [None; MAX_RECURSIVE_STATIC_DEPTH],
+            0,
+            &mut work,
+        );
+        assert_eq!(
+            resolved, None,
+            "the reachable terminal beyond the budget must fail closed"
+        );
+        assert_eq!(
+            work, 0,
+            "the 512th recursive probe consumes the whole budget"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual learned-table build scaling probe for issue #12617"]
+    fn recursive_prefix_index_build_scaling_probe_12617() {
+        for count in [1_000, 4_000, 16_000, 65_000] {
+            let snapshot = snapshot_v4(count);
+            let started = Instant::now();
+            let state = build_forwarding_state(&snapshot);
+            println!(
+                "rows={count} full_build_us={}",
+                started.elapsed().as_micros()
+            );
+            std::hint::black_box(state);
+        }
+    }
+
+
 }
