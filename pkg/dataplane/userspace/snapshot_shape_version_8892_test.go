@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "c2ea3156c32eae9885059ffa5f964805ef061cd1fa2e66e0504d5c187fe155fe"
+	snapshotShapeGolden8892 = "c31d169a651700fc1f407bb0f3d48099fc2d810ec3bf78ef2650befd356cf06d"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -502,6 +502,26 @@ const (
 	// ConfigSnapshot.RouteTableIdentities transmits the route-table name to
 	// (domain, table) authority used by D14. Both are helper-consumed wire
 	// fields; the golden is the digest measured on the v46 tree.
+	// v46 STANDS (#12756): `AddressBook.UnknownBookEntries` was added by
+	// #12622 (26d7cb86e) to the typed config, and ConfigSnapshot embeds the
+	// whole Config, so it moved this digest. Same arm as #9246/#9956: it is
+	// tagged `json:"-"`, it is COMPILE-TIME metadata recording unsupported
+	// direct address-book children so strict compilation can reject them
+	// and tolerant loads can warn, quarantine zone-local references, and
+	// unbind the zone -- all decided Go-side before any snapshot is built.
+	// Measured, not argued: dumping the sorted reflection walk at
+	// 26d7cb86e^ and at HEAD differs by exactly three lines (the field
+	// itself, tagged "-", plus its element type's Keyword/Names, which are
+	// reachable only through the excluded field), the parent walk hashes
+	// to the previous golden c2ea3156, and the HEAD walk hashes to the new
+	// golden below. The element type's untagged fields never transmit on
+	// their own. Rust models `config` as one opaque serde_json::Value
+	// (userspace-dp/src/protocol/snapshot.rs:798), names no field inside
+	// it, and `grep -rn UnknownBookEntries userspace-dp/src/` returns zero
+	// hits; every consumer is in pkg/config. Nothing transmits the field,
+	// so no helper of any vintage can observe it, and bumping for it
+	// would spend the one signal that says the wire really changed.
+	// ProtocolVersion stays at 46.
 	snapshotShapeVersion8892 = 46
 )
 
