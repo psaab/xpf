@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -657,5 +659,100 @@ func TestRenamePositionalUnfreedOwnerWriteFailStaysFailClosed12156(t *testing.T)
 		if _, err := os.Stat(filepath.Join(dir, linkPrefix+"fxp0.link")); !os.IsNotExist(err) {
 			t.Fatalf("iter %d: stale fxp0.link survived, stat err=%v", i, err)
 		}
+	}
+}
+
+// TestCHSingleFaultTempOKOwnerWriteFail12557 is the single-fault owner-write
+// failure shape: an unknown NIC is successfully temp-renamed while the known
+// owner's OriginalName glob makes writeLinkFile refuse its final write. The
+// unknown's MAC-form O.link must still be neutralized under its pre-temp name,
+// or the next boot resurrects it under the owner's identity. The two cases
+// swap which NIC is unknown, so the unknown is the first temp-renamed NIC in
+// one case and the second in the other: a carry that keeps only one
+// temp-renamed NIC leaves the unknown's claim behind in one of them.
+// FAIL-ON-REVERT: dropping the pre-temp-name carry leaves ge-0-0-0.link
+// (unknown-first) or fxp0.link (known-first) behind.
+func TestCHSingleFaultTempOKOwnerWriteFail12557(t *testing.T) {
+	const header = "# Managed by xpfd \u2014 do not edit\n[Match]\n"
+	chain := func(name string) string {
+		return header + "OriginalName=enp5s0*\n\n[Link]\nName=" + name
+	}
+	macForm := func(name string) string {
+		return header + "MACAddress=52:54:00:00:00:0b\n\n[Link]\nName=" + name + "\nMTUBytes=1500\n"
+	}
+	// Both cases use the same NICs: the 0000:05 NIC wears ge-0-0-0 and
+	// wants fxp0, the 0000:06 NIC wears fxp0 and wants ge-0-0-0. Both temp
+	// renames succeed, then both final renames run.
+	wantRenames := []string{"fxp0->xpf-tmp-1", "ge-0-0-0->xpf-tmp-0", "xpf-tmp-0->fxp0", "xpf-tmp-1->ge-0-0-0"}
+	for _, tc := range []struct {
+		name string
+		// unknown is the name the unknown NIC wears (its MAC-form claim);
+		// owner is the name the known glob-chain NIC wears. Each NIC's
+		// target is the other's current name.
+		unknown, owner string
+	}{
+		// The unknown NIC sorts first, so it is the first temp-renamed NIC.
+		{name: "unknown-first", unknown: "ge-0-0-0", owner: "fxp0"},
+		// The known owner sorts first, so the unknown is the SECOND
+		// temp-renamed NIC.
+		{name: "known-first", unknown: "fxp0", owner: "ge-0-0-0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for range 100 {
+				dir := withTempLinkDir(t)
+				if err := os.WriteFile(filepath.Join(dir, linkPrefix+tc.owner+".link"), []byte(chain(tc.owner)), 0644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, linkPrefix+tc.unknown+".link"), []byte(macForm(tc.unknown)), 0644); err != nil {
+					t.Fatal(err)
+				}
+				nics := []pciNIC{
+					{sortKey: 1, busAddr: "0000:05:00.0", name: "ge-0-0-0"},
+					{sortKey: 1, busAddr: "0000:06:00.0", name: "fxp0"},
+				}
+				var renamed []string
+				_, errs := renamePositional(nics, 0, false, func(from, to string) error {
+					renamed = append(renamed, from+"->"+to)
+					return nil
+				})
+				// The owner's write of its new name (the unknown's old one)
+				// is refused for the '*' in OriginalName= (#10089). That
+				// refusal is the ONLY fault.
+				if len(errs) != 1 || !strings.Contains(errs[0].Error(), "#10089") ||
+					!strings.Contains(errs[0].Error(), `OriginalName "enp5s0*" for target "`+tc.unknown+`"`) {
+					t.Fatalf("want exactly the #10089 refusal of the owner's %s write, got %v", tc.unknown, errs)
+				}
+				slices.Sort(renamed)
+				if !slices.Equal(renamed, wantRenames) {
+					t.Fatalf("want both temp renames and both final renames, got %v", renamed)
+				}
+				if _, err := os.Stat(filepath.Join(dir, linkPrefix+tc.unknown+".link")); !os.IsNotExist(err) {
+					t.Fatalf("unknown's MAC-form %s.link survived owner write failure (resurrection), stat err=%v", tc.unknown, err)
+				}
+				if _, err := os.Stat(filepath.Join(dir, linkPrefix+tc.owner+".link")); !os.IsNotExist(err) {
+					t.Fatalf("stale %s.link survived, stat err=%v", tc.owner, err)
+				}
+			}
+		})
+	}
+}
+
+// TestBreakNameCollisionsCarriesPreTempName12557 pins the carry with more
+// than one temp-renamed NIC: each desired source moved to xpf-tmp-N maps back
+// to its own pre-temp name under the temp key that now carries its desired
+// final, and a source whose current name nobody wants (enp7s0) is not carried.
+func TestBreakNameCollisionsCarriesPreTempName12557(t *testing.T) {
+	desiredByCurrent := map[string]string{"ge-0-0-0": "fxp0", "fxp0": "ge-0-0-0", "enp7s0": "ge-0-0-1"}
+	originalByCurrent := map[string]string{"ge-0-0-0": originalNameUnknown, "fxp0": "enp5s0", "enp7s0": "enp7s0"}
+	_, preTemp, _, _ := breakNameCollisions("test",
+		[]string{"ge-0-0-0", "fxp0", "enp7s0"},
+		map[string]bool{"fxp0": true, "ge-0-0-0": true, "ge-0-0-1": true},
+		desiredByCurrent, originalByCurrent,
+		func(string, string) error { return nil })
+	if want := map[string]string{"xpf-tmp-0": "ge-0-0-0", "xpf-tmp-1": "fxp0"}; !maps.Equal(preTemp, want) {
+		t.Fatalf("every temp-renamed source must map its temp key to its own pre-temp name: got %v, want %v", preTemp, want)
+	}
+	if want := map[string]string{"xpf-tmp-0": "fxp0", "xpf-tmp-1": "ge-0-0-0", "enp7s0": "ge-0-0-1"}; !maps.Equal(desiredByCurrent, want) {
+		t.Fatalf("each temp key must carry its source's desired final: got %v, want %v", desiredByCurrent, want)
 	}
 }

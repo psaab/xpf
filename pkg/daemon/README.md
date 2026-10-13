@@ -1710,10 +1710,11 @@ boot) while a required rename still runs, and the persistence loss is reported
 via an ERROR log, not the #5842 errs channel (errs carries only failures).
 Ordering note: phase 2 runs unknowns-first, so every neutralize lands
 before the known owner rewrites its name with its verified chain (no map
-order can interleave). For an unknown whose own temp rename failed, a
-failed owner write leaves NO claim behind (fail-closed: nothing is
-spared). Temp-OK shape excepted: if the temp rename succeeded the
-phase-2 key is xpf-tmp-N and the O.link removal misses (#12557). The
+order can interleave). A failed owner write leaves NO claim behind
+(fail-closed: nothing is spared) whether the unknown's own temp rename
+failed or succeeded: after a successful temp rename the phase-2 key is
+xpf-tmp-N, so the O.link is removed under the pre-temp name that
+`breakNameCollisions` returns in `preTemp` (#12557). The
 stale T.link always goes (sparing it would resurrect the occupant under
 the unknown NIC's target — B-REG fail-open).
 Exception (MINOR-3 residual): a NIC renamed in memory by an earlier pass of

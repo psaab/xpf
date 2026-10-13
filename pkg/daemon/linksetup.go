@@ -388,7 +388,7 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 	// After this every desired final name is free. The positional path names
 	// every present NIC, so there are no unmapped stranded NICs — the stranded
 	// set is empty and ignored.
-	_, unfreed, changed := breakNameCollisions("linksetup", currentNames, desiredNames,
+	_, preTemp, unfreed, changed := breakNameCollisions("linksetup", currentNames, desiredNames,
 		desiredByCurrent, originalByCurrent, renameFn)
 
 	// Phase 2: write each .link with its pre-captured OriginalName and rename
@@ -401,11 +401,12 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 	// MINOR-3: unknown NICs run BEFORE any known NIC writes (order within
 	// each class is still map order). Every neutralize lands before the
 	// known owner's writeLinkFile, so no map order can interleave a
-	// neutralize between the owner's write and the end of the pass. For an
-	// unknown whose own temp rename FAILED (unfreed current), a failed
-	// owner write leaves NO claim behind (fail-closed: nothing was
-	// spared). Temp-OK shape excepted: if the temp rename SUCCEEDED the
-	// phase-2 key is xpf-tmp-N and the O.link removal misses (#12557).
+	// neutralize between the owner's write and the end of the pass. A
+	// failed owner write leaves NO claim behind (fail-closed: nothing was
+	// spared) whether the unknown's own temp rename FAILED (unfreed
+	// current, so its O.link is named by current) or SUCCEEDED (the
+	// phase-2 key is xpf-tmp-N, so the O.link is removed under the
+	// pre-temp name that breakNameCollisions returns in preTemp, #12557).
 	// The ordering key must match the loop's unknown predicate, including
 	// the collided-temp "" re-derivation below — hence the helper.
 	var errs []error
@@ -484,7 +485,14 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 			// X's occupant V writes Y.link (its own final), never X.link —
 			// nobody else touches the stale claim, and sparing it would
 			// resurrect V under U's target (B-REG fail-open).
-			for _, name := range []string{linkPrefix + current + ".link", linkPrefix + final + ".link"} {
+			// current may be xpf-tmp-N; use the pre-temp name whose MAC-form
+			// link still matches this NIC, otherwise owner-write failure can
+			// leave that claim to resurrect the wrong identity (#12557).
+			removeName := current
+			if pre, ok := preTemp[current]; ok {
+				removeName = pre
+			}
+			for _, name := range []string{linkPrefix + removeName + ".link", linkPrefix + final + ".link"} {
 				if err := neutralizeResurrectableLink(name); err != nil {
 					errs = append(errs, err)
 				} else {
@@ -606,6 +614,14 @@ func logUnknownOriginalLinkSkip(logPrefix, current, final string) {
 // restore it to a host-predictable name; the positional caller has no unmapped
 // NICs, so it receives an empty map.
 //
+// A temp-renamed desired source is returned in preTemp (tempName → its
+// pre-temp current name), so the caller can still find the .link filed under
+// the name the NIC wore before phase 1: the positional caller neutralizes an
+// unknown-original NIC's O.link under that name (#12557). The device-map
+// caller ignores it: deviceMapOriginalNameFor reports an unknown original only
+// for a NIC that already wears its final logical name, and phase 1 never
+// temp-renames such a NIC.
+//
 // currentNames MUST list every present NIC name — it is used both to decide
 // occupancy and to pick an xpf-tmp-N that is not already in use (a leftover
 // temp name from a prior crashed run must not cause an EEXIST temp rename).
@@ -621,7 +637,7 @@ func breakNameCollisions(
 	desiredByCurrent map[string]string,
 	originalByCurrent map[string]string,
 	renameFn func(from, to string) error,
-) (stranded map[string]string, unfreed map[string]bool, changed bool) {
+) (stranded map[string]string, preTemp map[string]string, unfreed map[string]bool, changed bool) {
 	inUse := make(map[string]bool, len(currentNames))
 	for _, name := range currentNames {
 		inUse[name] = true
@@ -636,6 +652,7 @@ func breakNameCollisions(
 		}
 	}
 	stranded = make(map[string]string)
+	preTemp = make(map[string]string)
 	unfreed = make(map[string]bool)
 	for _, name := range currentNames {
 		if !desiredNames[name] {
@@ -662,9 +679,11 @@ func breakNameCollisions(
 		changed = true
 		if final, ok := desiredByCurrent[name]; ok {
 			// This NIC is itself a desired source — carry its mapping and its
-			// TRUE OriginalName across the temp rename.
+			// TRUE OriginalName across the temp rename and retain its original
+			// link filename for the caller's cleanup.
 			delete(desiredByCurrent, name)
 			desiredByCurrent[tmp] = final
+			preTemp[tmp] = name
 			if orig, ok := originalByCurrent[name]; ok {
 				delete(originalByCurrent, name)
 				originalByCurrent[tmp] = orig
@@ -673,7 +692,7 @@ func breakNameCollisions(
 			stranded[tmp] = name
 		}
 	}
-	return stranded, unfreed, changed
+	return stranded, preTemp, unfreed, changed
 }
 
 // unfreedNameErr is the error both rename paths report when phase 1 could not
