@@ -739,6 +739,10 @@ pub(super) fn build_local_origin_tunnel_tx_request(
             );
         if let Some(rev) = reverse.as_mut() {
             rev.origin = SessionOrigin::TunOrigin;
+            if let Some(instance) = table.strip_suffix(".inet.0").filter(|name| !name.is_empty()) {
+                (rev.decision.install_table_domain, rev.decision.install_table_check) =
+                    crate::session::install_table_identity(instance);
+            }
         }
         reverse
     });
