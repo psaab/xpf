@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"log/slog"
 	"net"
 	"sort"
@@ -178,6 +179,13 @@ func inferIPv6StaticNextHopInterfaces(cfg *config.Config, overlay []config.Route
 			// (config.LogicalUnitDeviceKeyForRef) so the two sides cannot drift
 			// apart again the way #8321 left them.
 			logical = config.LogicalUnitDeviceKey(base, unitNum, unit)
+			// #12514: LogicalUnitDeviceKey collapses st<N>.0 onto st<N>, but
+			// an IPsec bind authored as st0.0 creates the netdev st0.0. The
+			// shared resolver is authoritative for secure-tunnel units and
+			// declines unbound refs, preserving ordinary collapse there.
+			if dev, ok := cfg.SecureTunnelUnitNetdev(fmt.Sprintf("%s.%d", ifName, unitNum)); ok {
+				logical = dev
+			}
 			// ipv6OnUnit tracks whether this logical unit participates in
 			// IPv6 at all, so it earns a synthetic fe80::/64 candidate even
 			// when it only carries a VRRP virtual address (bondless RETH,
