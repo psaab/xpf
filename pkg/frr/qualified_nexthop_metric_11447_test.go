@@ -151,12 +151,18 @@ func TestQualifiedNextHopMetricReachesStaticRedistribution11447(t *testing.T) {
 
 func TestQualifiedNextHopMetricPolicyAttachesForStaticProtocolSpellings12312(t *testing.T) {
 	route := "set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10"
-	canonical := qnhMetricRender11447(t,
+	// #12071 was merged after #12312's test was authored. Its safety policy
+	// keeps the integrated route-map metric-free and applies QNH metrics via
+	// an ospfd-only overlay.
+	canonical, canonicalOverlays := qnhMetricRenderAndOverlays11447(t,
 		route,
 		"set protocols ospf export POLICY",
 		"set policy-options policy-statement POLICY term T from protocol static",
 		"set policy-options policy-statement POLICY term T then accept",
 	)
+	if !strings.Contains(canonicalOverlays["ospfd"], "set metric 10\n") {
+		t.Fatalf("canonical static spelling must carry the metric in ospfd overlay:\n%v", canonicalOverlays)
+	}
 	for _, tc := range []struct {
 		name     string
 		protocol string
@@ -168,7 +174,7 @@ func TestQualifiedNextHopMetricPolicyAttachesForStaticProtocolSpellings12312(t *
 		{name: "surrounding whitespace", protocol: "\" Static \""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rendered := qnhMetricRender11447(t,
+			rendered, overlays := qnhMetricRenderAndOverlays11447(t,
 				route,
 				"set protocols ospf export POLICY",
 				"set policy-options policy-statement POLICY term T from protocol "+tc.protocol,
@@ -186,8 +192,11 @@ func TestQualifiedNextHopMetricPolicyAttachesForStaticProtocolSpellings12312(t *
 				t.Fatalf("static redistribution must attach the synthesized QNH policy map, got %q:\n%s", routeMap, rendered)
 			}
 			block := routeMapBlock11447(rendered, routeMap)
-			if !strings.Contains(block, "set metric 10\n") {
-				t.Fatalf("attached QNH route-map %q lacks the qualified-next-hop metric:\n%s", routeMap, block)
+			if strings.Contains(block, "set metric 10\n") {
+				t.Fatalf("integrated QNH route-map must remain metric-free:\n%s", block)
+			}
+			if !strings.Contains(overlays["ospfd"], "route-map "+routeMap+" permit 10\n set metric 10\n") {
+				t.Fatalf("attached QNH map's metric is missing from ospfd overlay:\n%v", overlays)
 			}
 			if rendered != canonical {
 				t.Fatalf("variant %q must render byte-identical to canonical static:\n%s", tc.protocol, rendered)
