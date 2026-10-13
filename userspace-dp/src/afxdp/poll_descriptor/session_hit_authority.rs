@@ -104,9 +104,9 @@
 //!
 //! ## Residuals
 //!
-//! * The lookup that found the entry has already refreshed its idle time, and a
-//!   synced hit may already have been materialized or promoted. A foreign packet
-//!   can keep an idle session alive; it cannot change what the session does.
+//! * The lookup that found the entry has already refreshed its idle time.
+//!   Synced hits are materialized or promoted only after an Owner verdict
+//!   (#12644), so a foreign packet cannot change what the session does.
 //! * A permitted foreign packet whose entry is HA-inactive here rides the fabric
 //!   redirect computed inside the lookup, which carries the entry's zone stamp.
 //! * A deny drops without a reject reply, emits a limiter-bounded `POLICY_DENY`
