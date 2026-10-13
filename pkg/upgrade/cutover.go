@@ -438,10 +438,45 @@ func (r *Runner) Run(opts Options) (err error) {
 						return fmt.Errorf("stale STOPPED recovery: restore known-good version %s: %w",
 							j.PreviousVersion, err)
 					}
-					// The shared STOPPED recovery path below starts the restored
-					// known-good runtime and fails closed if it cannot restart.
+					loadedVersion, runningVersion, err := r.stoppedResumeExecutionVersions(j)
+					if err != nil {
+						return fmt.Errorf("stale STOPPED recovery: verify known-good unit execution: %w", err)
+					}
+					if loadedVersion != j.PreviousVersion || runningVersion == j.TargetVersion {
+						return fmt.Errorf("stale STOPPED recovery: unit execution remains unverified after restoring %s (loaded=%q running=%q); preserving journal",
+							j.PreviousVersion, loadedVersion, runningVersion)
+					}
 				case j.PreviousVersion:
-					// Expected pre-FLIP STOPPED state; restart below.
+					// A prior recovery may have repointed current to PreviousVersion
+					// but crashed before daemon-reload. Do not restart with the stale
+					// target ExecStart; prove systemd's loaded command and any running
+					// process are no longer the unverified target first.
+					loadedVersion, runningVersion, err := r.stoppedResumeExecutionVersions(j)
+					if err != nil {
+						return fmt.Errorf("stale STOPPED recovery: inspect unit execution after restoring current: %w", err)
+					}
+					if loadedVersion == j.TargetVersion || runningVersion == j.TargetVersion {
+						if err := r.validateRestorableVersion(j.PreviousVersion); err != nil {
+							return fmt.Errorf("stale STOPPED recovery: known-good previous version %s is not restorable: %w",
+								j.PreviousVersion, err)
+						}
+						if err := r.cfg.Sys.StopUnit(r.cfg.Unit); err != nil {
+							return fmt.Errorf("stale STOPPED recovery: stop unit before reloading known-good version %s: %w",
+								j.PreviousVersion, err)
+						}
+						if err := r.flip(j.PreviousVersion); err != nil {
+							return fmt.Errorf("stale STOPPED recovery: reload known-good version %s: %w",
+								j.PreviousVersion, err)
+						}
+						loadedVersion, runningVersion, err = r.stoppedResumeExecutionVersions(j)
+						if err != nil {
+							return fmt.Errorf("stale STOPPED recovery: verify known-good unit execution: %w", err)
+						}
+						if loadedVersion != j.PreviousVersion || runningVersion == j.TargetVersion {
+							return fmt.Errorf("stale STOPPED recovery: unit execution remains unverified after restoring %s (loaded=%q running=%q); preserving journal",
+								j.PreviousVersion, loadedVersion, runningVersion)
+						}
+					}
 				default:
 					return fmt.Errorf("stale STOPPED recovery: current version %q is neither journaled previous %q nor unverified target %q; preserving journal for operator recovery",
 						current, j.PreviousVersion, j.TargetVersion)
@@ -1100,6 +1135,9 @@ func (r *Runner) stoppedResumeExecutionVersions(j *Journal) (string, string, err
 		runningVersion = j.PreviousVersion
 	case j.TargetVersion != "" && runningExe == filepath.Join(r.versionDir(j.TargetVersion), "xpfd"):
 		runningVersion = j.TargetVersion
+	case runningExe == filepath.Join(r.cfg.SbinDir, "xpfd"):
+		// The managed sbin path follows versions/current, but cannot be
+		// attributed to a concrete version from the executable path.
 	default:
 		return "", "", fmt.Errorf("resume STOPPED: running unit executable %q matches neither recorded previous version %q nor target version %q; inspect the unit and restore a known-good runtime before retrying",
 			runningExe, j.PreviousVersion, j.TargetVersion)

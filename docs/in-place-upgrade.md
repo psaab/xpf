@@ -75,9 +75,12 @@ already repointed `current` before the interruption. If `current` still names
 the journaled `PreviousVersion`, recovery restarts the known-good daemon. If
 `current` names the stale target, that target has NOT been health-confirmed:
 recovery first stops the unit, restores the journaled known-good version, and
-then restarts it. The old DB snapshot is not restored, preserving commits
-made by a restarted old daemon since STOP. An unexpected `current` value, an
-unrestorable previous version, or a lifecycle error aborts recovery
+then restarts it. If recovery itself is interrupted after changing `current`
+but before `daemon-reload`, the journal remains STOPPED; the next run checks
+the loaded `ExecStart` and running executable and reloads the known-good
+version before any restart. The old DB snapshot is not restored, preserving
+commits made by a restarted old daemon since STOP. An unexpected `current`
+value, an unrestorable previous version, or a lifecycle error aborts recovery
 fail-closed, preserving the stale journal and partials.
 
 For the ordinary pre-FLIP STOPPED case, restart is **fail-closed** (#5846):
