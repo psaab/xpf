@@ -283,19 +283,12 @@ func Test_nat_address_name_set_unresolvable_nonfeed_member_fails_closed_4925(t *
 				},
 			}},
 		}
-		snap := natFeedSnapHelper(t, cfg, overlay)
-		got := snatSourceAddrs(snap, "dead-scope")
-		if len(got) == 0 {
-			t.Fatal("source list collapsed to empty (match-any) — fail-OPEN; an " +
-				"unresolvable non-feed set member must stay non-empty + unmatchable (#4925)")
+		snaps := buildSourceNATSnapshotsWithFeeds(cfg, nil, overlay)
+		if len(snaps) != 1 {
+			t.Fatalf("expected one poisoned SNAT rule snapshot, got %d", len(snaps))
 		}
-		if !contains(got, natUnresolvedAddressNamePrefix+"dead-set") {
-			t.Fatalf("source list must carry the prefixed unmatchable set token to fail "+
-				"closed, got %v", got)
-		}
-		// Must NOT have leaked any other feed's prefixes into this set.
-		if contains(got, "198.51.100.0/24") {
-			t.Fatalf("unrelated feed prefixes must not leak into an unrelated set, got %v", got)
+		if len(snaps[0].SourceAddresses) != 0 || !snaps[0].LenientMatchDropped {
+			t.Fatalf("poisoned non-feed closure must clear its source side and drop: %+v", snaps[0])
 		}
 	})
 

@@ -65,10 +65,9 @@ func TestNATFallbackTokenUnparseableForCIDRShapedNames12626(t *testing.T) {
 	}
 }
 
-// Probe G (SNAT): a CIDR-named, poisoned set referenced by a SNAT rule
-// must publish only the unparseable fallback token — never the name
-// literal (which the Rust matcher would parse as 10.99.0.0/16) and never
-// the surviving member subset.
+// Probe G (SNAT): a CIDR-named poisoned set clears its entire selector side
+// and sets the whole-rule drop marker. The name literal and surviving member
+// subset must not publish as a partial match.
 func TestSNATCIDRNamedSetDoesNotMatchNameLiteral12626(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Security.AddressBook = cidrNamedBook12626()
@@ -86,38 +85,21 @@ func TestSNATCIDRNamedSetDoesNotMatchNameLiteral12626(t *testing.T) {
 			},
 		}},
 	}
-	snap := natFeedSnapHelper(t, cfg, nil)
-
-	src := snatSourceAddrs(snap, "cidr-named-src")
-	if len(src) == 0 {
-		t.Fatal("SNAT source list collapsed to empty (match-any) — fail-OPEN")
-	}
-	if contains(src, cidrNamedSet12626) {
-		t.Fatalf("SNAT source carries the parseable name literal %q: %v", cidrNamedSet12626, src)
-	}
-	if !contains(src, "unresolved-address-name:"+cidrNamedSet12626) {
-		t.Fatalf("SNAT source must carry the unparseable fallback token, got %v", src)
-	}
-	if contains(src, "192.0.2.0/24") {
-		t.Fatalf("SNAT source published the surviving member subset despite poisoned closure: %v", src)
-	}
-	for _, tok := range src {
-		if config.NATMatchPrefixParses(tok) {
-			t.Fatalf("SNAT source token %q parses as a prefix; rule would match it", tok)
+	snaps := buildSourceNATSnapshots(cfg, nil)
+	var sourceRule, destinationRule *SourceNATRuleSnapshot
+	for i := range snaps {
+		switch snaps[i].Name {
+		case "cidr-named-src":
+			sourceRule = &snaps[i]
+		case "cidr-named-dst":
+			destinationRule = &snaps[i]
 		}
 	}
-
-	dst := snatDestAddrs(snap, "cidr-named-dst")
-	if contains(dst, cidrNamedSet12626) || contains(dst, "192.0.2.0/24") {
-		t.Fatalf("SNAT destination carries the name literal or member subset: %v", dst)
+	if sourceRule == nil || len(sourceRule.SourceAddresses) != 0 || !sourceRule.LenientMatchDropped {
+		t.Fatalf("poisoned CIDR-named SNAT source must clear its side and drop: %+v", sourceRule)
 	}
-	if len(dst) != 0 && !contains(dst, "unresolved-address-name:"+cidrNamedSet12626) {
-		t.Fatalf("SNAT destination must carry only the unparseable fallback token, got %v", dst)
-	}
-	for _, tok := range dst {
-		if config.NATMatchPrefixParses(tok) {
-			t.Fatalf("SNAT destination token %q parses as a prefix; rule would match it", tok)
-		}
+	if destinationRule == nil || len(destinationRule.DestinationAddresses) != 0 || !destinationRule.LenientMatchDropped {
+		t.Fatalf("poisoned CIDR-named SNAT destination must clear its side and drop: %+v", destinationRule)
 	}
 }
 

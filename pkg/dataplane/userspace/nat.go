@@ -34,18 +34,11 @@ const natUnresolvedAddressNamePrefix = "unresolved-address-name:"
 // live feed-backed CIDR strings (resolved by the daemon from
 // feeds.Manager.SnapshotForBindings).
 //
-// The expander merges feedOverlay at the top level AND at every nested
-// address-set MEMBER:
-//   - a DIRECT `match ...-address-name <feed-name>` reference resolves its live
-//     feed prefixes (the #3303 NAT-side gap),
-//   - a reference to an address-SET whose member is feed-backed resolves the
-//     ready nested member's feed prefixes too (#4925), and
-//   - a name that is BOTH a static address and a feed binding accumulates both.
-//
-// One parity gap remains: if a feed-bound name is also a static set with a
-// dangling member, policy representability accepts the direct feed reference
-// while this NAT closure walk rejects the set. That conservative difference is
-// tracked by #12627.
+// A direct feed reference unions its live prefixes with a usable same-named
+// static address/set closure, matching policy book rows. If that static closure
+// is poisoned, the ready direct feed stands alone instead of exposing a
+// partial static subset. Nested feed members also contribute ready prefixes
+// alongside static members (#4925).
 //
 // Before #4925 this helper called the STATIC resolveUserspaceAddressBookEntry
 // expander, which never consulted feedOverlay for nested members and POISONED
@@ -60,45 +53,94 @@ const natUnresolvedAddressNamePrefix = "unresolved-address-name:"
 // Fail-closed is preserved for the WHOLE closure: any member not resolved by
 // a static book entry or ready feed overlay (e.g. an empty unbound nested
 // set, a dangling reference without a ready feed, an unusable static address
-// without a ready feed value, or an unready feed binding) poisons the name
-// and yields NO prefixes here.
-// The append helpers retain a non-empty fallback token with a fixed
-// non-address prefix, so even an address-book name that is itself an IP/CIDR
-// cannot become a matching literal prefix (#12626).
+// without a ready feed value, or an unready feed binding) poisons the name.
+// SNAT promotes any poisoned selector name to a whole-rule drop using its
+// existing LenientMatchDropped marker. DNAT has no corresponding poison field,
+// so it retains per-name filtering until the snapshot contract is changed.
+// All NAT append helpers use the fixed non-address prefix for fallback tokens,
+// preventing CIDR-shaped names from becoming literal prefixes (#12626).
 //
 // The output is sorted + deduped to match the static resolver's shape (so the
 // already-green #2416 exact-slice pins stay byte-identical); the NAT consumer
 // treats the list as an unordered prefix set (duplicates contribute no extra
 // table entry, ordering is irrelevant), so this canonicalization is inert.
 func resolveNATAddressNamePrefixes(cfg *config.Config, feedOverlay map[string][]string, name string) []string {
-	if cfg == nil || name == "" {
+	out, poisoned := resolveNATAddressNamePrefixesStatus(cfg, feedOverlay, name)
+	if poisoned || len(out) == 0 {
 		return nil
 	}
-	visited := make(map[string]bool)
-	out, unknownMember := expandBookNameRecursive(
-		cfg.Security.AddressBook, feedOverlay, cfg.Security.DynamicAddress.AddressBindings, name, visited, 0)
-	if unknownMember || len(out) == 0 {
-		return nil
-	}
-	sort.Strings(out)
-	return slices.Compact(out)
+	return out
 }
 
-// appendNATSourceAddressName resolves a NAT rule's `match source-address-name
-// <book-entry>` into concrete source prefixes and appends them to the rule's
-// source list (#2416). It reuses resolveNATAddressNamePrefixes — the same
-// feed-aware recursive expander the security-policy snapshot path uses
-// (expandBookNameRecursive), which unions the static address book with the
-// dynamic-address feed overlay at the top level AND at nested address-set
-// members (#3303 direct feed, #4925 nested-set feed member) — so a name-scoped
-// NAT rule carries the entry's prefixes (static AND feed-backed) into the #2394
-// source constraint instead of publishing an empty (match-any) source list.
+// resolveNATAddressNamePrefixesStatus distinguishes valid present-empty feeds
+// from unresolved closures. A ready direct feed is a fallback only when a
+// same-named static closure is poisoned; otherwise static and feed values are
+// unioned, as they are in the policy address-book row.
+func resolveNATAddressNamePrefixesStatus(cfg *config.Config, feedOverlay map[string][]string, name string) ([]string, bool) {
+	if cfg == nil || name == "" {
+		return nil, false
+	}
+	ab := cfg.Security.AddressBook
+	if ab != nil {
+		if _, collision := ab.CollidingNames[name]; collision {
+			return nil, true
+		}
+	}
+	feeds, directFeedReady := feedOverlay[name]
+	visited := make(map[string]bool)
+	out, unknownMember := expandBookNameRecursive(
+		ab, feedOverlay, cfg.Security.DynamicAddress.AddressBindings, name, visited, 0)
+	if unknownMember {
+		if !directFeedReady {
+			return nil, true
+		}
+		// Policy representability accepts the direct feed reference even when
+		// its same-named static closure is unusable. Do not publish a subset.
+		out = append([]string(nil), feeds...)
+	}
+	sort.Strings(out)
+	return slices.Compact(out), false
+}
+
+// appendNATAddressNames resolves one selector side and reports whether any
+// reference poisoned its closure. SNAT uses that status to clear the affected
+// side and attach its existing whole-rule drop marker.
+func appendNATAddressNames(cfg *config.Config, feedOverlay map[string][]string, addrs []string, names []string) ([]string, bool) {
+	addrs, poisonedName := appendNATAddressNamesPoisoned(cfg, feedOverlay, addrs, names)
+	return addrs, poisonedName != ""
+}
+
+// appendNATAddressNamesPoisoned is appendNATAddressNames but also returns the
+// first name whose closure poisoned the side, for operator diagnostics.
+func appendNATAddressNamesPoisoned(cfg *config.Config, feedOverlay map[string][]string, addrs []string, names []string) ([]string, string) {
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		values, poisoned := resolveNATAddressNamePrefixesStatus(cfg, feedOverlay, name)
+		if poisoned {
+			return nil, name
+		}
+		if len(values) == 0 {
+			addrs = append(addrs, natUnresolvedAddressNamePrefix+name)
+		} else {
+			addrs = append(addrs, values...)
+		}
+	}
+	return addrs, ""
+}
+
+// appendNATSourceAddressName resolves a DNAT rule's `match source-address-name
+// <book-entry>` into source prefixes for the destination-translation key
+// (#2416). A direct feed reference unions its live prefixes with a usable
+// same-named static closure, or uses the feed alone if that closure is poisoned.
+// This matches policy representability; nested static-set expansion still
+// includes ready feed members (#4925).
 //
-// On an unknown or unresolvable name, the prefixed token is appended so the
-// source list stays NON-EMPTY (source_constrained stays true on the Rust side).
-// The fixed non-address prefix ensures even a CIDR-shaped set name cannot match
-// a literal prefix (#12626). Commit validation rejects the reference on the
-// strict path.
+// On an unresolved name, the prefixed token is appended so the source list
+// stays NON-EMPTY (source_constrained stays true on the Rust side). The fixed
+// non-address prefix keeps CIDR-shaped names from matching literal prefixes
+// (#12626). Commit validation rejects the reference on the strict path.
 func appendNATSourceAddressName(cfg *config.Config, feedOverlay map[string][]string, sourceAddrs []string, name string) []string {
 	if name == "" {
 		return sourceAddrs
@@ -110,22 +152,18 @@ func appendNATSourceAddressName(cfg *config.Config, feedOverlay map[string][]str
 	return append(sourceAddrs, natUnresolvedAddressNamePrefix+name)
 }
 
-// appendNATDestinationAddressName resolves a NAT rule's `match
-// destination-address-name <book-entry>` into concrete destination prefixes and
-// appends them to the rule's destination list (#3229). It is the destination
-// twin of appendNATSourceAddressName and shares the same expander
-// (resolveNATAddressNamePrefixes) the security-policy and source-address-name
-// paths use — the feed-aware recursive expandBookNameRecursive, static address
-// book unioned with the dynamic-address feed overlay at the top level and at
-// nested address-set members (#3303 direct feed, #4925 nested-set feed member) —
-// so a name-scoped destination matches the same prefixes a literal `match
-// destination-address` would, including feed-backed members nested in a set.
+// appendNATDestinationAddressName resolves a DNAT rule's
+// `match destination-address-name <book-entry>` into destination prefixes
+// (#3229). A direct feed reference unions its live prefixes with a usable
+// same-named static closure, or uses the feed alone if that closure is poisoned.
+// This matches policy representability; nested static-set expansion still
+// includes ready feed members (#4925).
 //
-// On an unknown or unresolvable name, the prefixed token is appended so the
-// destination list stays NON-EMPTY (the rule does not collapse to no
-// destination = skip). The fixed non-address prefix ensures even a CIDR-shaped
-// name cannot become a translation prefix (#12626). Commit validation rejects
-// the reference on the strict path.
+// On an unresolved name, the prefixed token is appended so the destination
+// list stays NON-EMPTY (the rule does not collapse to no destination = skip).
+// The fixed non-address prefix keeps CIDR-shaped names from becoming a
+// translation prefix (#12626). Commit validation rejects the reference on the
+// strict path.
 func appendNATDestinationAddressName(cfg *config.Config, feedOverlay map[string][]string, destAddrs []string, name string) []string {
 	if name == "" {
 		return destAddrs

@@ -40,20 +40,15 @@ func emptySetCfgSNAT() *config.Config {
 	return cfg
 }
 
-// TestSNATEmptyAddressSetFailsClosed: the source list must carry the
-// unparseable fallback token and must NOT be empty (which would match any source).
+// TestSNATEmptyAddressSetFailsClosed: a poisoned selector is cleared and the
+// LenientMatchDropped marker makes the rule drop in its remaining scope.
 func TestSNATEmptyAddressSetFailsClosed(t *testing.T) {
 	snaps := buildSourceNATSnapshots(emptySetCfgSNAT(), nil)
 	if len(snaps) == 0 {
 		t.Fatal("expected a source NAT snapshot")
 	}
-	src := snaps[0].SourceAddresses
-	if len(src) == 0 {
-		t.Fatal("source list collapsed to empty (match-any) — fail-OPEN; an " +
-			"unresolvable source-address-name must stay non-empty + unmatchable (#3425)")
-	}
-	if !contains(src, natUnresolvedAddressNamePrefix+"EMPTY") {
-		t.Fatalf("source list must carry the prefixed unmatchable token to fail closed, got %v", src)
+	if len(snaps[0].SourceAddresses) != 0 || !snaps[0].LenientMatchDropped {
+		t.Fatalf("poisoned source side must be cleared and rule dropped: %+v", snaps[0])
 	}
 }
 
@@ -113,12 +108,8 @@ func TestSNATMixedAddressNameFailsClosed(t *testing.T) {
 	if len(snaps) == 0 {
 		t.Fatal("expected the fail-closed source NAT snapshot")
 	}
-	src := snaps[0].SourceAddresses
-	if !contains(src, natUnresolvedAddressNamePrefix+"MIXED") {
-		t.Fatalf("source constraint must retain the prefixed unmatchable name, got %v", src)
-	}
-	if contains(src, "10.0.0.0/8") {
-		t.Fatalf("mixed address's otherwise-usable prefix leaked into NAT source constraint: %v", src)
+	if len(snaps[0].SourceAddresses) != 0 || !snaps[0].LenientMatchDropped {
+		t.Fatalf("poisoned mixed source side must be cleared and rule dropped: %+v", snaps[0])
 	}
 }
 
