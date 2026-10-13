@@ -41,6 +41,7 @@ func TestZoneStatementTailIsRefused9656(t *testing.T) {
 		{"empty braces", `security { zones { security-zone [ zga zgb ] { } } }`, `with an empty braced body, only zone "zga" compiles, and "zgb" is dropped`},
 		{"without brackets", `security { zones { security-zone zga zgb screen edge; } }`, `only zone "zga" compiles, and "zgb screen edge" is dropped`},
 		{"body emptied by group expansion", groupG + `security { zones { security-zone [ zga zgb ] { apply-groups G; } } }`, `with an empty braced body, only zone "zga" compiles, and "zgb" is dropped`},
+		{"packed apply-groups group", groupG + `security { zones { security-zone [ zga zgb ] apply-groups G; } }`, `only zone "zga" compiles, and "zgb" is dropped`},
 		{"apply-macro with an extra packed tail", `security { zones { security-zone trust apply-macro M screen edge; } }`, `only zone "trust" compiles, and "apply-macro M screen edge" is dropped`},
 		{"apply-macro with an extra zone", `security { zones { security-zone trust apply-macro M untrust; } }`, `only zone "trust" compiles, and "apply-macro M untrust" is dropped`},
 		{"keyword-named first zone", `security { zones { security-zone [ tcp-rst zgb ]; } }`, `only zone "tcp-rst" compiles, and "zgb" is dropped`},
@@ -73,6 +74,7 @@ func TestZoneStatementTailIsRefused9656(t *testing.T) {
 		{"single zone with a packed statement", `security { zones { security-zone trust screen edge; } }`},
 		{"repeated name", `security { zones { security-zone [ zga zga ]; } }`},
 		{"single zone with an exact inline apply-macro", `security { zones { security-zone trust apply-macro M; } }`},
+		{"single zone with an inline apply-groups", groupG + `security { zones { security-zone trust apply-groups G; } }`},
 		{"single zones, leaf and empty braces", `security { zones { security-zone trust; security-zone untrust { } } }`},
 		{"quoted single zone with a statement", `security { zones { security-zone "zg a" description d; } }`},
 	}
