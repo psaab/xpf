@@ -86,7 +86,7 @@ func policyTermBody12537(leafSchema *schemaNode, term *Node, inline bool) []*Nod
 					part = keySpan12537(part, 0, cut)
 				}
 				if from == nil {
-					from = &Node{Keys: []string{"from"}}
+					from = &Node{Keys: []string{"from"}, InheritedFrom: term.InheritedFrom}
 					body = append(body, from)
 				}
 				from.Children = append(from.Children, part)
@@ -145,7 +145,11 @@ func policyTermClauseCut12537(part *Node, fromSchema *schemaNode) int {
 // and bracket provenance, plus the list-closed bit for a bracketed span, as
 // packedBodyChildren and expandFlatRun carry them onto synthesized nodes.
 func keySpan12537(n *Node, from, to int) *Node {
-	span := &Node{Keys: append([]string(nil), n.Keys[from:to]...), IsLeaf: true}
+	span := &Node{
+		Keys:          append([]string(nil), n.Keys[from:to]...),
+		IsLeaf:        true,
+		InheritedFrom: n.InheritedFrom,
+	}
 	if len(n.KeysQuoted) == len(n.Keys) {
 		span.setKeysQuoted(n.KeysQuoted[from:to])
 	}

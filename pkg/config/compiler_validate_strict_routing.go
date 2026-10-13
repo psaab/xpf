@@ -1559,6 +1559,49 @@ func validateRouteFilterMatchTypesStrict(cfg *Config) error {
 	return nil
 }
 
+// failClosedInheritedInvalidRouteFilters12687 quarantines malformed route
+// filters inherited through apply-groups on tolerant load/sync. Strict commits
+// already reject these forms; without this, the tolerant warning path can
+// publish an inherited `upto` as an open-ended match.
+func failClosedInheritedInvalidRouteFilters12687(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	for _, policy := range cfg.PolicyOptions.PolicyStatements {
+		if policy == nil {
+			continue
+		}
+		for _, term := range policy.Terms {
+			if term == nil {
+				continue
+			}
+			for _, rf := range term.RouteFilters {
+				if rf == nil || !rf.inherited {
+					continue
+				}
+				invalid := false
+				switch rf.MatchType {
+				case "upto":
+					invalid = rf.UptoLen == 0
+				case "prefix-length-range":
+					invalid = validatePrefixLengthRange(rf) != nil
+				case "through":
+					_, err := parseCIDRStrict(rf.ThroughPrefix, "10.0.0.0/24")
+					invalid = err != nil
+				case "exact", "longer", "orlonger":
+				default:
+					invalid = true
+				}
+				if invalid {
+					term.NextPolicy = false
+					term.Action = "reject"
+					break
+				}
+			}
+		}
+	}
+}
+
 // validatePrefixLengthRange enforces the semantic constraints on a
 // prefix-length-range route-filter (#2525): both bounds parsed (non-zero), the
 // per-family max not exceeded, low<=high, and low at least the base prefix

@@ -2062,6 +2062,7 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 						rf := &RouteFilter{
 							Prefix:    fc.Keys[1],
 							MatchType: fc.Keys[2],
+							inherited: fc.InheritedFrom != "",
 						}
 						// "upto", "prefix-length-range", and "through" all carry
 						// a trailing argument token (a "/N" length, a "/lo-/hi"
