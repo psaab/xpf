@@ -1146,6 +1146,102 @@ test_reassert_failure_names_a_real_signal_when_primed_7962() {
 	fi
 }
 
+# #12659: on the real `cluster-setup.sh deploy` path, CLUSTER_LAN_HOST was
+# never set (only LAN_HOST comes from the env file), so priming never ran and
+# every deploy verified in the fallback regime. Reproduce that exact env
+# shape: the deploy path must derive the remote-qualified CLUSTER_LAN_HOST
+# (the cluster-env.sh LAN_HOST -> CLUSTER_LAN_HOST bridge, via cluster-setup's
+# own r() remote qualification), and priming must then actually issue the ping
+# on the derived ref. A bare-name or missing derivation would ping a
+# nonexistent "local" instance on remote clusters, so the FULL argv ref is
+# asserted, not just that some ping happened.
+test_lan_host_bridge_derives_cluster_lan_host_12659() {
+	reset_cli_mock
+	local derived
+	derived=$( LAN_HOST="cluster-userspace-host" INCUS_REMOTE="loss" \
+		deploy_lan_host_ref ) || { bad "lan-host(12659): deploy_lan_host_ref failed with LAN_HOST+INCUS_REMOTE set"; return; }
+	if [[ "$derived" != "loss:cluster-userspace-host" ]]; then
+		bad "lan-host(12659): want loss:cluster-userspace-host, got '$derived'"
+		return
+	fi
+	derived=$( CLUSTER_LAN_HOST="$derived" INCUS_REMOTE="loss" deploy_lan_host_ref )
+	if [[ "$derived" != "loss:cluster-userspace-host" ]]; then
+		bad "lan-host(12659): repeated resolution changed the qualified ref to '$derived'"
+		return
+	fi
+	derived=$( LAN_HOST="cluster-lan-host" INCUS_REMOTE= \
+		deploy_lan_host_ref ) || { bad "lan-host(12659): deploy_lan_host_ref failed with no remote"; return; }
+	if [[ "$derived" != "cluster-lan-host" ]]; then
+		bad "lan-host(12659): want cluster-lan-host (no remote), got '$derived'"
+		return
+	fi
+	# Explicit operator override still wins, already-qualified included.
+	derived=$( LAN_HOST="ignored" CLUSTER_LAN_HOST="mine:lan" INCUS_REMOTE="loss" \
+		deploy_lan_host_ref ) || { bad "lan-host(12659): explicit CLUSTER_LAN_HOST override rejected"; return; }
+	if [[ "$derived" != "mine:lan" ]]; then
+		bad "lan-host(12659): explicit CLUSTER_LAN_HOST override lost: got '$derived'"
+		return
+	fi
+	ok "lan-host(12659): deploy path derives remote-qualified CLUSTER_LAN_HOST from LAN_HOST and honors an explicit override"
+}
+
+# Mutant-killing priming cell: with ONLY the cluster-setup deploy env shape
+# (LAN_HOST + INCUS_REMOTE + IPERF_TARGET4, CLUSTER_LAN_HOST unset), the
+# reassert must take the PRIMED regime and issue the ping against the derived
+# remote-qualified ref. If the derivation regresses to a bare name or drops
+# out, the ping line below no longer matches and the regime flips to fallback.
+test_reassert_primes_from_lan_host_without_cluster_lan_host_12659() {
+	reset_cli_mock
+	setup_fake_vm
+	CLI_STATUS_RESPONSES=("$STATUS_BOTH_RG_NODE0_PRIMARY")
+	local out rc=0
+	out=$(
+		unset CLUSTER_LAN_HOST
+		export LAN_HOST="cluster-userspace-host" INCUS_REMOTE="loss" IPERF_TARGET4="172.16.80.200"
+		CLUSTER_LAN_HOST=$(deploy_lan_host_ref)
+		export CLUSTER_LAN_HOST
+		DEPLOY_REASSERT_PRIME_COUNT=3 \
+			deploy_reassert_primary_node0 "fake:vm0" "fake:vm1" 2>&1
+	) || rc=$?
+	if (( rc != 0 )) || ! printf '%s' "$out" | grep -q "primed regime"; then
+		bad "reassert(12659): LAN_HOST-only deploy env did not reach the primed regime (rc=$rc)"
+		return
+	fi
+	if ! grep -qF "exec loss:cluster-userspace-host -- ping -c 3" "$FAKE_CALL_LOG"; then
+		bad "reassert(12659): priming ping was not issued on loss:cluster-userspace-host"
+		return
+	fi
+	ok "reassert(12659): cluster-setup deploy env (LAN_HOST only) primes liveness on the remote-qualified LAN host"
+	teardown_fake_vm
+}
+
+# The complement: when the LAN host genuinely cannot be named, priming must
+# stay off (fallback), not guess. Empty LAN_HOST and empty CLUSTER_LAN_HOST
+# must yield no ref and no ping.
+test_lan_host_bridge_empty_stays_unprimed_12659() {
+	reset_cli_mock
+	local derived
+	derived=$( LAN_HOST= CLUSTER_LAN_HOST= INCUS_REMOTE="loss" deploy_lan_host_ref )
+	if [[ -n "$derived" ]]; then
+		bad "lan-host(12659): empty LAN_HOST/CLUSTER_LAN_HOST yielded a phantom ref '$derived'"
+		return
+	fi
+	ok "lan-host(12659): no LAN host name -> no ref, priming stays off (fallback), nothing is guessed"
+}
+
+# Wiring: cluster-setup.sh must export the derived ref before cmd_deploy's
+# reassert runs. Deleting the derivation leaves the function defined but the
+# deploy path unset again, so the assignment line in cluster-setup.sh is
+# pinned, not just the lib helper.
+test_lan_host_bridge_is_wired_into_cluster_setup_12659() {
+	local f="${SCRIPT_DIR}/cluster-setup.sh"
+	if grep -q 'CLUSTER_LAN_HOST="$(deploy_lan_host_ref)"' "$f"; then
+		ok "wiring(12659): cluster-setup.sh derives CLUSTER_LAN_HOST from LAN_HOST via deploy_lan_host_ref"
+	else
+		bad "wiring(12659): cluster-setup.sh never derives CLUSTER_LAN_HOST — the deploy path still cannot prime liveness"
+	fi
+}
+
 test_reassert_issues_reset_transfer_reset_per_rg() {
 	reset_cli_mock
 	CLI_STATUS_RESPONSES=("$STATUS_BOTH_RG_NODE0_PRIMARY")
@@ -2120,6 +2216,10 @@ test_reassert_dies_when_role_not_achieved
 test_reassert_issues_reset_transfer_reset_per_rg
 test_reassert_failure_names_the_missing_precondition_7962
 test_reassert_failure_names_a_real_signal_when_primed_7962
+test_lan_host_bridge_derives_cluster_lan_host_12659
+test_reassert_primes_from_lan_host_without_cluster_lan_host_12659
+test_lan_host_bridge_empty_stays_unprimed_12659
+test_lan_host_bridge_is_wired_into_cluster_setup_12659
 test_reassert_transfer_rc_is_not_the_verdict
 test_rgs_not_role_lists_only_unowned_groups_12658
 test_reassert_resends_a_refused_transfer_12658
