@@ -112,7 +112,14 @@ func TestEveryRESTRouteCommandResolves9952(t *testing.T) {
 			t.Errorf("route %q maps to an empty command", route)
 			continue
 		}
+		if !cmdtree.EveryWordIsAKeyword(cmdtree.OperationalTree, words) {
+			t.Errorf("route %q maps to %q, which is not an argument-free command path: "+
+				"a value slot is absorbing a word, or a word follows a leaf (including "+
+				"an option after a complete command).", route, cmd)
+			continue
+		}
 		canon, res := cmdtree.Canonicalize(cmdtree.OperationalTree, words)
+
 		if res != cmdtree.CanonicalOK {
 			t.Errorf("route %q maps to %q, which does not resolve against the operational "+
 				"tree (%v)", route, cmd, res)
@@ -121,6 +128,27 @@ func TestEveryRESTRouteCommandResolves9952(t *testing.T) {
 		if got := strings.Join(canon, " "); got != cmd {
 			t.Errorf("route %q maps to %q, which canonicalizes to %q. The table must hold "+
 				"the CANONICAL spelling.", route, cmd, got)
+		}
+	}
+}
+
+// #12582: REST must validate table entries as argument-free keyword paths, not
+// merely as commands Canonicalize can accept by consuming arbitrary values or
+// option suffixes.
+func TestRESTKeywordArmRejectsNonCommandPaths12582(t *testing.T) {
+	for _, tc := range []struct {
+		cmd  string
+		want bool
+	}{
+		{"show security flow session summary zone", false},
+		{"show interfaces zzbogus", false},
+		{"show route <destination> exact", false},
+		{"show security flow session summary", true},
+		{"show interfaces detail", true},
+		{"show route", true},
+	} {
+		if got := cmdtree.EveryWordIsAKeyword(cmdtree.OperationalTree, strings.Fields(tc.cmd)); got != tc.want {
+			t.Errorf("EveryWordIsAKeyword(%q) = %v, want %v", tc.cmd, got, tc.want)
 		}
 	}
 }
