@@ -240,6 +240,46 @@ func buildSourceNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map[stri
 			// port/app-scoped rule no longer silently widens to every port.
 			matchDestPorts := sourceNATDestPortRanges(rule.Match.DestinationPorts, rule.Match.InvalidDestinationPorts)
 			matchApps := buildSourceNATAppTerms(cfg, rule.Match.ApplicationList())
+			if rule.Then.Off {
+				// #12631: malformed off-exemption constraints must over-exempt,
+				// not narrow the exemption into a never-match sentinel.
+				if len(matchDestPorts) == 1 && matchDestPorts[0] == natNeverMatchPortRange {
+					matchDestPorts = nil
+				}
+				if natOffAppReferenceBroken(cfg, rule.Match.ApplicationList()) {
+					slog.Warn("userspace snapshot: source NAT off exemption has an unresolved or broken application reference; widening that application axis to match all (#12631)",
+						"ruleset", rs.Name, "rule", rule.Name, "applications", rule.Match.ApplicationList())
+					// A broken reference makes the entire application union
+					// an over-exemption.
+					matchApps = []NatAppTermWire{{Protocol: natProtoAny}}
+				} else {
+					brokenTerm := false
+					for _, term := range matchApps {
+						brokenTerm = brokenTerm || term.Protocol == natProtoNever
+						for _, r := range term.Ports {
+							brokenTerm = brokenTerm || r == natNeverMatchPortRange
+						}
+						for _, r := range term.SrcPorts {
+							brokenTerm = brokenTerm || r == natNeverMatchPortRange
+						}
+					}
+					if brokenTerm {
+						slog.Warn("userspace snapshot: source NAT off exemption has an unrepresentable application constraint; widening it (#12631)",
+							"ruleset", rs.Name, "rule", rule.Name)
+					}
+					for i := range matchApps {
+						if matchApps[i].Protocol == natProtoNever {
+							matchApps[i].Protocol = natProtoAny
+						}
+						if len(matchApps[i].Ports) == 1 && matchApps[i].Ports[0] == natNeverMatchPortRange {
+							matchApps[i].Ports = nil
+						}
+						if len(matchApps[i].SrcPorts) == 1 && matchApps[i].SrcPorts[0] == natNeverMatchPortRange {
+							matchApps[i].SrcPorts = nil
+						}
+					}
+				}
+			}
 
 			out = append(out, SourceNATRuleSnapshot{
 				Name:                             rule.Name,
@@ -331,14 +371,16 @@ func sourceNATScopeTier(s SourceNATRuleSnapshot) int {
 // Rust SOURCE_NAT_PROTO_ANY (256): outside the 0-255 protocol range so it never
 // aliases protocol 0 (HOPOPT). It denotes a GENUINELY unconstrained term and
 // must never be used as a fallback for an unresolvable protocol (that is a
-// fail-open widen — Codex finding on PR #3471; see natAppProtoNumber). The
-// builder does not currently emit it: an application always constrains protocol,
-// and an unconstrained `match application` (empty / "any") produces NO term at
-// all rather than an any-protocol term. Kept defined to document the wire
-// wildcard the Rust matcher honors and to keep the two sides legible. #3429.
+// fail-open widen — Codex finding on PR #3471; see natAppProtoNumber). An
+// unconstrained `match application` (empty / "any") produces NO term at all
+// rather than an any-protocol term. Since #12631 the builder DOES emit it in
+// one sanctioned place: a broken `off` exemption over-exempts to this
+// wildcard (bounded by the rule's other authored dimensions) instead of the
+// never-match sentinel. That is the documented #12631 decision, not a
+// fallback for translate rules, which keep natProtoNever. #3429.
 const natProtoAny uint16 = 256
 
-var _ = natProtoAny // reserved wire wildcard; see doc above (not emitted today)
+var _ = natProtoAny // wire wildcard; emitted for broken `off` exemptions (#12631)
 
 // natProtoNever is a reserved protocol sentinel that can never equal a real
 // 0-255 protocol and is not the wildcard, so a term carrying it matches no flow
@@ -474,7 +516,7 @@ func buildSourceNATAppTerms(cfg *config.Config, appNames []string) []NatAppTermW
 		// whole reference with the same never-match sentinel used for an
 		// unresolvable application. This also covers nested application sets.
 		if drops := config.ApplicationReferenceMatchDrops(appName, &cfg.Applications); len(drops) > 0 {
-			slog.Warn("userspace snapshot: source NAT application has dropped match constraints; emitting a never-match term (fail-closed, #11587)",
+			slog.Warn("userspace snapshot: source NAT application has dropped match constraints; application term disposition depends on translate/off action (#11587/#12631)",
 				"application", appName, "drops", drops)
 			terms = append(terms, NatAppTermWire{Protocol: natProtoNever})
 			continue
@@ -505,6 +547,27 @@ func buildSourceNATAppTerms(cfg *config.Config, appNames []string) []NatAppTermW
 		terms = []NatAppTermWire{{Protocol: natProtoNever}}
 	}
 	return terms
+}
+
+// natOffAppReferenceBroken detects references omitted by tolerant expansion;
+// with a mixed list the valid terms remain, but an off exemption must also
+// include the broken reference's over-exemption.
+func natOffAppReferenceBroken(cfg *config.Config, names []string) bool {
+	for _, name := range names {
+		if name == "" || name == "any" {
+			continue
+		}
+		if len(config.ApplicationReferenceMatchDrops(name, &cfg.Applications)) > 0 {
+			return true
+		}
+		if _, ok := config.ResolveApplication(name, cfg.Applications.Applications); ok {
+			continue
+		}
+		if _, ok := config.ResolveApplicationSet(name, cfg.Applications.ApplicationSets); !ok {
+			return true
+		}
+	}
+	return false
 }
 
 // deterministicSourceNATFields computes the IPv4 (mode 1) deterministic CGNAT
