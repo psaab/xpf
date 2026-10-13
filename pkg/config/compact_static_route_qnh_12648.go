@@ -51,8 +51,31 @@ func splitPackedRouteQualifiedNextHop(route *Node) int {
 	changed := 0
 	for i := 0; i < len(route.Children); i++ {
 		nextHop := route.Children[i]
-		if nextHop == nil || nextHop.Name() != "next-hop" || len(nextHop.Keys) < 4 {
+		if nextHop == nil || nextHop.Name() != "next-hop" {
 			continue
+		}
+		for _, child := range nextHop.Children {
+			if child == nil || child.Name() != "interface" || len(child.Keys) < 4 {
+				continue
+			}
+			qnh := -1
+			for j := 2; j < len(child.Keys); j++ {
+				if child.Keys[j] == "qualified-next-hop" &&
+					!child.KeyQuoted(j) && !child.KeyBracketed(j) {
+					qnh = j
+					break
+				}
+			}
+			if qnh < 2 || qnh+1 >= len(child.Keys) {
+				continue
+			}
+			nextHop.Keys = append(nextHop.Keys, child.Keys[qnh:]...)
+			nextHop.setKeysQuoted(append(nextHop.KeysQuoted, maskSlice8921(child.KeysQuoted, qnh, len(child.Keys))...))
+			nextHop.setKeysBracketed(append(nextHop.KeysBracketed, maskSlice8921(child.KeysBracketed, qnh, len(child.Keys))...), child.BracketedClosed)
+			child.Keys = append([]string(nil), child.Keys[:qnh]...)
+			child.setKeysQuoted(maskSlice8921(child.KeysQuoted, 0, qnh))
+			child.setKeysBracketed(maskSlice8921(child.KeysBracketed, 0, qnh), child.BracketedClosed)
+			child.IsLeaf = len(child.Children) == 0
 		}
 		qnh := -1
 		for j := 1; j < len(nextHop.Keys); j++ {
