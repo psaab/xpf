@@ -21,7 +21,7 @@ func TestBootExpiredFirstRollbackRetiresHostAuth12621(t *testing.T) {
 	reloadAttempts := 0
 	sshdReloadCmd = func() ([]byte, error) {
 		reloadAttempts++
-		if reloadAttempts == 1 {
+		if reloadAttempts <= 2 {
 			return []byte("injected reload failure"), errors.New("sshd unavailable")
 		}
 		return nil, nil
@@ -84,23 +84,40 @@ func TestBootExpiredFirstRollbackRetiresHostAuth12621(t *testing.T) {
 	if err := markPasswordProvisioned("alice", 1001); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(sshdConfPath, []byte("# Managed by xpf\nPermitRootLogin yes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	d := &Daemon{store: store, applySem: semaphore.NewWeighted(1), opts: Options{ConfigFile: path, NoDataplane: true}}
 	// Keep this probe focused on the #12155 boot consumer; bootstrap networkd,
 	// FRR and dataplane effects are exercised by their existing teardown cells.
 	d.applyBodyForTest = func(*config.Config) {}
 	if d.teardownRecoveredFirstCommitBeforeDataplane() {
-		t.Fatal("teardown reported success despite failed sshd reload")
+		t.Fatal("teardown reported success despite sshd unlink/reload failure")
+	}
+	if _, err := os.Stat(sshdConfPath); !os.IsNotExist(err) {
+		t.Fatalf("injected sshd failure did not occur after drop-in unlink: %v", err)
 	}
 	markerPath := filepath.Join(root, ".configdb", "first-commit-teardown.json")
 	if _, err := os.Stat(markerPath); err != nil {
 		t.Fatalf("failed sshd reload cleared durable teardown intent: %v", err)
 	}
-	if !d.teardownRecoveredFirstCommitBeforeDataplane() {
-		t.Fatal("boot teardown did not converge after sshd reload retry")
+
+	// Simulate restart after unlink but before a successful sshd reload.
+	restarted := newConfigStore(t, path)
+	if err := restarted.Load(); err != nil {
+		t.Fatal(err)
 	}
-	if reloadAttempts < 3 {
-		t.Fatalf("sshd reload attempts=%d, want owner reload plus forced reload on each closeout attempt", reloadAttempts)
+	if !restarted.FirstCommitTeardownOwed() {
+		t.Fatal("fresh Store.Load did not re-arm durable teardown debt")
+	}
+	d = &Daemon{store: restarted, applySem: semaphore.NewWeighted(1), opts: Options{ConfigFile: path, NoDataplane: true}}
+	d.applyBodyForTest = func(*config.Config) {}
+	if !d.teardownRecoveredFirstCommitBeforeDataplane() {
+		t.Fatal("restarted boot teardown did not retry sshd reload")
+	}
+	if reloadAttempts != 3 {
+		t.Fatalf("sshd reload attempts=%d, want 3: owner failure, forced failure, restart forced success", reloadAttempts)
 	}
 	if _, err := os.Stat(markerPath); err != nil {
 		t.Fatalf("durable teardown intent disappeared before post-dataplane closeout: %v", err)
