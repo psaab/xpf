@@ -276,6 +276,10 @@ func collectSchedulerWindowPairFindings11358(tree *ConfigTree, findings map[sche
 					daily := dailyWindows[inst.name]
 					if prop.Name() == "start-time" {
 						daily.StartTime = nodeVal(prop)
+						if stop, ok := schedulerInlineModifierValue12637(prop, "stop-time"); ok {
+							daily.StopTime = stop
+							record(inst.name, "daily", "stop-time", stop)
+						}
 					} else {
 						daily.StopTime = nodeVal(prop)
 					}
@@ -290,7 +294,7 @@ func collectSchedulerWindowPairFindings11358(tree *ConfigTree, findings map[sche
 						if win.StopTime != "" {
 							daily.StopTime = win.StopTime
 						}
-						daily.AllDay = win.AllDay
+						daily.AllDay = daily.AllDay || win.AllDay
 						dailyWindows[inst.name] = daily
 					}
 					for _, leaf := range expandFlatRun(prop.Children, schedulerDayLeafSchema8939()) {
@@ -299,6 +303,11 @@ func collectSchedulerWindowPairFindings11358(tree *ConfigTree, findings map[sche
 						}
 						if boundary := leaf.Name(); boundary == "start-time" || boundary == "stop-time" {
 							record(inst.name, "daily", boundary, nodeVal(leaf))
+							if boundary == "start-time" {
+								if stop, ok := schedulerInlineModifierValue12637(leaf, "stop-time"); ok {
+									record(inst.name, "daily", "stop-time", stop)
+								}
+							}
 						}
 					}
 				case "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday":
@@ -325,6 +334,11 @@ func collectSchedulerWindowPairFindings11358(tree *ConfigTree, findings map[sche
 						}
 						if boundary := leaf.Name(); boundary == "start-time" || boundary == "stop-time" {
 							record(inst.name, prop.Name(), boundary, nodeVal(leaf))
+							if boundary == "start-time" {
+								if stop, ok := schedulerInlineModifierValue12637(leaf, "stop-time"); ok {
+									record(inst.name, prop.Name(), "stop-time", stop)
+								}
+							}
 						}
 					}
 				}

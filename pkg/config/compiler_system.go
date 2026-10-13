@@ -2896,7 +2896,7 @@ func compileSchedulers(node *Node, cfg *Config) error {
 					if win.StopTime != "" {
 						sched.StopTime = win.StopTime
 					}
-					sched.AllDay = win.AllDay
+					sched.AllDay = sched.AllDay || win.AllDay
 					sched.DailyExclude = win.Exclude
 				}
 			default:
