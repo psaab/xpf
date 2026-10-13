@@ -222,7 +222,11 @@ impl<'a> RecursiveGatewayRoutes<'a> {
         let address = u128::from(ip);
         for len in (0..=128).rev() {
             note_candidate_examination();
-            let mask = if len == 0 { 0 } else { u128::MAX << (128 - len) };
+            let mask = if len == 0 {
+                0
+            } else {
+                u128::MAX << (128 - len)
+            };
             if let Some(routes) = prefixes.get(&(address & mask, len as u8)) {
                 return Some(routes);
             }
@@ -1230,7 +1234,9 @@ mod recursive_prefix_index_12617_tests {
         let snapshot = snapshot_v4(65_536);
         let index = RecursiveGatewayRoutes::from_snapshot(&snapshot);
         reset_candidate_examinations();
-        let candidates = index.v4_candidates("10.0.0.17".parse().unwrap(), "inet.0").unwrap();
+        let candidates = index
+            .v4_candidates("10.0.0.17".parse().unwrap(), "inet.0")
+            .unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].destination, "10.0.0.17/32");
         assert_eq!(
@@ -1239,7 +1245,9 @@ mod recursive_prefix_index_12617_tests {
             "a /32 hit requires one keyed prefix probe regardless of 65,536 table rows"
         );
         reset_candidate_examinations();
-        assert!(index.v4_candidates("203.0.113.1".parse().unwrap(), "inet.0").is_none());
+        assert!(index
+            .v4_candidates("203.0.113.1".parse().unwrap(), "inet.0")
+            .is_none());
         assert_eq!(
             candidate_examinations(),
             33,
@@ -1279,12 +1287,16 @@ mod recursive_prefix_index_12617_tests {
             ..Default::default()
         };
         let index = RecursiveGatewayRoutes::from_snapshot(&snapshot);
-        let routes = index.v4_candidates("10.1.2.3".parse().unwrap(), "inet.0").unwrap();
+        let routes = index
+            .v4_candidates("10.1.2.3".parse().unwrap(), "inet.0")
+            .unwrap();
         assert_eq!(routes.len(), 2);
         assert_eq!(routes[0].preference, 10);
         assert_eq!(routes[1].preference, 20);
         assert_eq!(
-            index.v4_candidates("11.1.2.3".parse().unwrap(), "inet.0").unwrap()[0]
+            index
+                .v4_candidates("11.1.2.3".parse().unwrap(), "inet.0")
+                .unwrap()[0]
                 .destination,
             "0.0.0.0/0"
         );
@@ -1303,34 +1315,54 @@ mod recursive_prefix_index_12617_tests {
         let index = RecursiveGatewayRoutes::from_snapshot(&snapshot);
         reset_candidate_examinations();
         assert_eq!(
-            index.v6_candidates("2001:db8:1::42".parse().unwrap(), "inet6.0").unwrap()[0]
+            index
+                .v6_candidates("2001:db8:1::42".parse().unwrap(), "inet6.0")
+                .unwrap()[0]
                 .destination,
             "2001:db8:1::/64"
         );
         assert_eq!(candidate_examinations(), 65);
         reset_candidate_examinations();
-        assert!(index.v6_candidates("2001:db8:2::42".parse().unwrap(), "inet6.0").is_none());
+        assert!(index
+            .v6_candidates("2001:db8:2::42".parse().unwrap(), "inet6.0")
+            .is_none());
         assert_eq!(candidate_examinations(), 129);
     }
 
     #[test]
     fn recursive_static_probe_budget_exhausts_closed_at_512_12617() {
-        let route = RouteSnapshot {
-            table: "inet.0".into(),
-            destination: "10.0.0.0/24".into(),
-            next_hops: (1..=MAX_RECURSIVE_STATIC_WORK)
-                .map(|n| format!("192.0.{}.{}", n / 256, n % 256))
-                .collect(),
-            ..Default::default()
-        };
+        let misses = (1..=511).map(|n| format!("192.0.{}.{}", 2 + n / 256, n % 256));
+        let mut next_hops: Vec<String> = misses.collect();
+        next_hops.push("198.51.100.1".into());
         let snapshot = ConfigSnapshot {
-            routes: vec![route],
+            routes: vec![
+                RouteSnapshot {
+                    table: "inet.0".into(),
+                    destination: "10.0.0.0/24".into(),
+                    next_hops,
+                    ..Default::default()
+                },
+                RouteSnapshot {
+                    table: "inet.0".into(),
+                    destination: "198.51.100.1/32".into(),
+                    next_hops: vec!["192.0.4.1".into()],
+                    ..Default::default()
+                },
+            ],
             ..Default::default()
         };
         let index = RecursiveGatewayRoutes::from_snapshot(&snapshot);
+        let mut state = ForwardingState::default();
+        state.connected_v4.push(ConnectedRouteV4 {
+            prefix: PrefixV4::from_net("192.0.4.0/24".parse().unwrap()),
+            host: "192.0.4.1".parse().unwrap(),
+            ifindex: 7,
+            tunnel_endpoint_id: 0,
+            table: "inet.0".into(),
+        });
         let mut work = MAX_RECURSIVE_STATIC_WORK;
         let resolved = recursive_static_target_v4(
-            &ForwardingState::default(),
+            &state,
             &index,
             "10.0.0.1".parse().unwrap(),
             "inet.0",
@@ -1340,33 +1372,30 @@ mod recursive_prefix_index_12617_tests {
             0,
             &mut work,
         );
-        assert_eq!(resolved, None, "work exhaustion must fail closed");
-        assert_eq!(work, 0, "exactly the pinned 512 recursive probes are consumed");
+        assert_eq!(
+            resolved, None,
+            "the reachable terminal beyond the budget must fail closed"
+        );
+        assert_eq!(
+            work, 0,
+            "the 512th recursive probe consumes the whole budget"
+        );
     }
 
     #[test]
-    #[ignore = "manual release scaling probe for issue #12617"]
-    fn recursive_prefix_index_release_scaling_probe_12617() {
+    #[ignore = "manual learned-table build scaling probe for issue #12617"]
+    fn recursive_prefix_index_build_scaling_probe_12617() {
         for count in [1_000, 4_000, 16_000, 65_000] {
             let snapshot = snapshot_v4(count);
             let started = Instant::now();
-            let index = RecursiveGatewayRoutes::from_snapshot(&snapshot);
-            let build = started.elapsed();
-            let started = Instant::now();
-            for probe in 0..512 {
-                let ip = Ipv4Addr::new(
-                    10,
-                    ((probe >> 16) & 255) as u8,
-                    ((probe >> 8) & 255) as u8,
-                    (probe & 255) as u8,
-                );
-                std::hint::black_box(index.v4_candidates(ip, "inet.0"));
-            }
+            let state = build_forwarding_state(&snapshot);
             println!(
-                "rows={count} build_us={} 512_probes_us={}",
-                build.as_micros(),
+                "rows={count} full_build_us={}",
                 started.elapsed().as_micros()
             );
+            std::hint::black_box(state);
         }
     }
+
+
 }
