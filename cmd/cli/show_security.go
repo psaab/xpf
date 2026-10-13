@@ -96,7 +96,18 @@ func (c *ctl) handleShowSecurity(args []string) error {
 			return err
 		}
 		if len(args) >= 2 && args[1] == "brief" {
-			return c.showPoliciesBrief()
+			var fromZone, toZone string
+			for i := 2; i+1 < len(args); i++ {
+				switch args[i] {
+				case "from-zone":
+					fromZone = args[i+1]
+					i++
+				case "to-zone":
+					toZone = args[i+1]
+					i++
+				}
+			}
+			return c.showPoliciesBriefFiltered(fromZone, toZone)
 		}
 		if len(args) >= 2 && args[1] == "detail" {
 			var filterParts []string
@@ -820,39 +831,83 @@ func (c *ctl) showIPsec(args []string) error {
 }
 
 func (c *ctl) showPoliciesBrief() error {
+	return c.showPoliciesBriefFiltered("", "")
+}
+
+func (c *ctl) showPoliciesBriefFiltered(fromZone, toZone string) error {
 	resp, err := c.client.GetPolicies(c.ctx(), &pb.GetPoliciesRequest{})
 	if err != nil {
 		return fmt.Errorf("%v", err)
 	}
+	filtered := fromZone != "" || toZone != ""
+	var pairFilter policymatch.ZonePairPolicyFilter
+	if filtered {
+		zonesResp, err := c.client.GetZones(c.ctx(), &pb.GetZonesRequest{})
+		if err != nil {
+			return fmt.Errorf("resolving policy filter zones: %v", err)
+		}
+		zones := make(map[string]*config.ZoneConfig, len(zonesResp.GetZones()))
+		for _, zone := range zonesResp.GetZones() {
+			zones[zone.GetName()] = &config.ZoneConfig{Name: zone.GetName()}
+		}
+		zoneFilterConfig := &config.Config{Security: config.SecurityConfig{Zones: zones}}
+		pairFilter = policymatch.NewZonePairPolicyFilter(zoneFilterConfig, fromZone, toZone)
+	}
 	fmt.Printf("%-12s %-12s %-20s %-8s %s\n",
 		"From", "To", "Name", "Action", "Hits")
-	for _, pi := range resp.Policies {
+	renderRule := func(pi *pb.PolicyInfo, rule *pb.PolicyRule) {
+		hits := "-"
+		switch {
+		case rule.HitCountersUnavailable:
+			hits = "n/a" // #7016: no counter published for this rule
+		case rule.HitPackets > 0:
+			hits = fmt.Sprintf("%d", rule.HitPackets)
+		}
+		from, to := pi.FromZone, pi.ToZone
+		if zs := effectiveMatchFromZones(rule); len(zs) > 0 {
+			from = config.ZoneScopeSetLabel(zs)
+		}
+		if zs := effectiveMatchToZones(rule); len(zs) > 0 {
+			to = config.ZoneScopeSetLabel(zs)
+		}
+		fmt.Printf("%-12s %-12s %-20s %-8s %s\n",
+			from, to, rule.Name, rule.Action, hits)
+	}
+	renderGlobals := func(pi *pb.PolicyInfo) {
 		for _, rule := range pi.Rules {
-			hits := "-"
-			switch {
-			case rule.HitCountersUnavailable:
-				hits = "n/a" // #7016: no counter published for this rule
-			case rule.HitPackets > 0:
-				hits = fmt.Sprintf("%d", rule.HitPackets)
+			if filtered && !policymatch.GlobalPolicyAppliesToZonePair(
+				effectiveMatchFromZones(rule), effectiveMatchToZones(rule), fromZone, toZone) {
+				continue
 			}
-			// #3357: a scoped global (#3148) is exposed under the global group
-			// (pi.FromZone/ToZone == "*"), but its real zone scope is carried
-			// per-rule in MatchFromZone/MatchToZone. Render the effective scope
-			// so the brief view does not regress a scoped global to "*"/"*",
-			// matching the local-CLI #3286 display. Zone-pair rules and the
-			// default-policy row leave the match-scope empty and fall back to the
-			// group zones (real zones / "-"), so they are unchanged.
-			from, to := pi.FromZone, pi.ToZone
-			// #4626: prefer the full scoped-global zone SET; empty falls back
-			// to the group zones (zone-pair / default rows leave the scope empty).
-			if zs := effectiveMatchFromZones(rule); len(zs) > 0 {
-				from = config.ZoneScopeSetLabel(zs)
+			renderRule(pi, rule)
+		}
+	}
+	renderZonePair := func(pi *pb.PolicyInfo) {
+		for _, rule := range pi.Rules {
+			renderRule(pi, rule)
+		}
+	}
+	if filtered {
+		for tier := range 3 {
+			for _, pi := range resp.Policies {
+				if pi.FromZone == "*" && pi.ToZone == "*" {
+					continue
+				}
+				if !policymatch.ZonePairPolicyAppliesToFilterPair(pairFilter, pi.FromZone, pi.ToZone) ||
+					policymatch.ZonePairPolicyFilterTier(pi.FromZone, pi.ToZone) != tier {
+					continue
+				}
+				renderZonePair(pi)
 			}
-			if zs := effectiveMatchToZones(rule); len(zs) > 0 {
-				to = config.ZoneScopeSetLabel(zs)
-			}
-			fmt.Printf("%-12s %-12s %-20s %-8s %s\n",
-				from, to, rule.Name, rule.Action, hits)
+		}
+	}
+	for _, pi := range resp.Policies {
+		if pi.FromZone == "*" && pi.ToZone == "*" {
+			renderGlobals(pi)
+			continue
+		}
+		if !filtered {
+			renderZonePair(pi)
 		}
 	}
 	return nil
