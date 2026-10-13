@@ -8821,6 +8821,15 @@ commit fails until the entry is fixed. Coverage is in
 `pkg/configstore/route_filter_unknown_matchtype_12538_test.go`, and
 `pkg/frr/policy_route_filter_unknown_matchtype_12538_test.go`.
 
+The first route-filter argument is validated as a CIDR across compact and
+term-line spellings as well (#12654). Previously, a keyword in the prefix slot,
+garbage, a bare address, or an out-of-range prefix length could compile without
+an error and the renderer omitted the malformed entry. Strict compilation now
+rejects such a prefix; tolerant load and peer-sync warn and retain the existing
+renderer omission behavior. Valid IPv4/IPv6 CIDRs, including `/0`, `/32`, and
+`/128`, remain accepted. Coverage is in
+`pkg/config/route_filter_prefix_slot_12654_test.go`.
+
 ### The as-path REGEX is the whole token tail, and it is validated (#6686)
 
 `policy-options as-path <name> <regex>` is a `args: 2, multi: true` schema node
