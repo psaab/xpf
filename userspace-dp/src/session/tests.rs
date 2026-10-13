@@ -8613,12 +8613,8 @@ fn session_key_seeded_hash_depends_on_seed_and_s3_clique_disperses_12603() {
         .map(|i| SessionKey {
             addr_family: libc::AF_INET6 as u8,
             protocol: PROTO_UDP,
-            src_ip: IpAddr::V6(Ipv6Addr::new(
-                0x2001, 0x0db8, 0, i, 0, 0, 0, 1,
-            )),
-            dst_ip: IpAddr::V6(Ipv6Addr::new(
-                0x2001, 0x0db8, 0, 2, 0, 0, 0, 2,
-            )),
+            src_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, i, 0, 0, 0, 1)),
+            dst_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 2, 0, 0, 0, 2)),
             src_port: 40000,
             dst_port: 443,
             discriminator: Default::default(),
@@ -8640,7 +8636,6 @@ fn session_key_seeded_hash_depends_on_seed_and_s3_clique_disperses_12603() {
     assert_eq!(dist(42), dist(42), "hash placement must be stable per seed");
     assert_ne!(dist(42), dist(43), "seed must change the bucket layout");
 }
-
 
 /// The seeded session table must still behave correctly end-to-end:
 /// insert under the per-boot seed, look the key back up, get a hit.

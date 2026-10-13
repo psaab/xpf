@@ -15,7 +15,10 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 /// A keyed SipHash builder with explicit per-process key words preserves
 /// stable bucket placement locally while preventing offline collisions.
 type SeededKeyMap<V> = HashMap<SessionKey, V, HotPathSeededState>;
-/// #10985: per-(ingress-zone, IP) session-limit counter map.
+/// #10985: per-(ingress-zone, IP) session-limit counter map. Thresholds are
+/// per-zone (`screen_profiles[zone]`), so the counts must be too — an IP-keyed
+/// map lets sessions from other zones consume this zone's allowance
+/// (cross-zone false drops). Mirrors the scan/sweep `ScanKey = (u16, IpAddr)`.
 type SeededZoneIpMap<V> = HashMap<(u16, IpAddr), V, HotPathSeededState>;
 
 /// #4399/#4438: the 1:N bucket type shared by ALL THREE NAT session lookup
@@ -41,7 +44,8 @@ type SeededReverseTranslatedIndex = HashMap<SessionKey, NatIndexBucket, HotPathS
 type SeededL3ReverseIndex = HashMap<L3ReverseKey, NatIndexBucket, HotPathSeededState>;
 /// S9.4 bounds the combined native/IPsec reply-alias population per tuple.
 pub(crate) const IPSEC_INNER_ALIAS_BUCKET_BOUND: usize = 8;
-/// The alias index stores only tunnel-scoped forward candidates.
+/// The alias index stores only tunnel-scoped forward candidates. Native
+/// candidates already live in `nat_reverse_index` and are merged at lookup.
 type SeededReplyAliasIndex = HashMap<SessionKey, NatIndexBucket, HotPathSeededState>;
 
 pub(crate) fn normalized_reply_alias_key(key: &SessionKey) -> SessionKey {
