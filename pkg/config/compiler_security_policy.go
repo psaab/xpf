@@ -227,9 +227,13 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 			}
 		} else {
 			// The schema rejects unknown direct children at strict commit.
-			// Tolerant compilation skips their entire subtree, which may be a
-			// rulebase, so retain the name for a warning and snapshot poison.
+			// Tolerant compilation skips their subtree, so distinguish the
+			// known benign grammar from fused/unknown enforcement content.
 			recordUnknownSecurityPoliciesChild12217(sec, child.Name())
+			if !nonEnforcementSecurityPoliciesChild12628(child) && !isApplyStatementKeyword(child.Name()) {
+				recordEnforcementSecurityPoliciesChild12819(sec, child.Name(),
+					securityPoliciesChildContentShape12819(child))
+			}
 		}
 	}
 	if ambiguousDefaultPolicy {

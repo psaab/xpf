@@ -171,6 +171,12 @@ type SecurityConfig struct {
 	// children only produce a warning. The persisted AST reconstructs this
 	// compile diagnostic.
 	UnknownPoliciesChildren []string `json:"-"`
+	// EnforcementPoliciesChildren records policy-context children whose
+	// opaque subtree does not match a known non-enforcement grammar.
+	EnforcementPoliciesChildren []string `json:"-"`
+	// EnforcementPoliciesContent retains the corresponding rejected content
+	// shape for strict diagnostics and tolerant quarantine warnings.
+	EnforcementPoliciesContent []string `json:"-"`
 	// GlobalPolicies are global rules applied to all zone pairs.
 	GlobalPolicies     []*Policy
 	DefaultPolicy      PolicyAction // global fallback policy (permit-all or deny-all)
