@@ -49,11 +49,12 @@ var schemaSchedulers = &schemaNode{
 	desc: "Policy time-range schedulers ([edit schedulers])",
 	children: map[string]*schemaNode{
 		"scheduler": {
-			desc:        "Named scheduler bound to a policy via scheduler-name",
-			args:        1,
-			multi:       true,
-			placeholder: "<scheduler-name>",
-			closedWorld: true,
+			desc:          "Named scheduler bound to a policy via scheduler-name",
+			args:          1,
+			multi:         true,
+			placeholder:   "<scheduler-name>",
+			closedWorld:   true,
+			nodeValidator: validateSchedulerPackedWeekday12636,
 			children: map[string]*schemaNode{
 				// Junos `scheduler (Security Policies)` syntax includes
 				// `description text;` directly under `scheduler <name>`.
@@ -176,6 +177,16 @@ func validateSchedulerDatePair12637(tokens []string, _ [][]string) error {
 		return fmt.Errorf("unknown modifier %q", tokens[3])
 	}
 	return nil
+}
+
+// validateSchedulerPackedWeekday12636 rejects a weekday packed onto the
+// named scheduler line. The compiler reads scheduler properties only from
+// children, so both a recognized day and a typo in this position were dropped.
+func validateSchedulerPackedWeekday12636(node *Node, _ *schemaNode) error {
+	if node == nil || len(node.Keys) <= 2 {
+		return nil
+	}
+	return fmt.Errorf("unexpected %q after scheduler name %q: put weekday windows inside the scheduler block", node.Keys[2], node.Keys[1])
 }
 
 // validateSchedulerDayPackedTail12239 gates the packed day-leaf tail
