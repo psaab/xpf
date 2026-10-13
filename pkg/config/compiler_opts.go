@@ -2541,7 +2541,8 @@ type compileOpts struct {
 	// dropped term/session-options subtrees and unknown direct policy children
 	// to warnings on tolerant ingress, except scalar one-edit `description`
 	// typos with at most one value token and no children, plus Junos apply
-	// statements. compilePolicy poisons affected policies instead of publishing
+	// statements. Unresolved tails on known scalar policy leaves are included
+	// (#12634). compilePolicy poisons affected policies instead of publishing
 	// incomplete enforcement content.
 	lenientPolicyEnforcementSubtrees bool
 	// lenientPolicyMissingMatch (#3044) downgrades the security-policy

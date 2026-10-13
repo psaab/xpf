@@ -769,9 +769,9 @@ func validatePolicyUnsupportedThenSiblings(nodes []*Node, lenient bool) ([]strin
 }
 
 // validatePolicyEnforcementSubtrees rejects direct policy `term` and
-// `session-options` children, plus every other unknown direct child except
-// scalar one-edit `description` typos with at most one value token and no
-// children, and Junos apply statements skipped by this gate.
+// `session-options` children, unknown direct children except scalar one-edit
+// `description` typos with at most one value token and no children, unresolved
+// tails on known scalar policy leaves (#12634), and Junos apply statements.
 func validatePolicyEnforcementSubtrees(nodes []*Node, lenient bool) ([]string, error) {
 	var warnings []string
 	checkPolicy := func(scope, policyName string, polNode *Node) error {
@@ -780,6 +780,16 @@ func validatePolicyEnforcementSubtrees(nodes []*Node, lenient bool) ([]string, e
 				"security policies %s policy %q contains dropped enforcement subtree %q "+
 					"(nested enforcement is not compiled and could weaken the direct policy action) (#11014)",
 				scope, policyName, subtree,
+			)
+			if !lenient {
+				return fmt.Errorf("%s", msg)
+			}
+			warnings = append(warnings, msg)
+		}
+		for _, leaf := range policyUnresolvedScalarLeafTails(polNode) {
+			msg := fmt.Sprintf(
+				"security policies %s policy %q contains unresolved trailing content on scalar leaf %q; the incomplete policy is poisoned on tolerant load (#12634)",
+				scope, policyName, leaf,
 			)
 			if !lenient {
 				return fmt.Errorf("%s", msg)

@@ -510,7 +510,8 @@ func compilePolicy(polInst struct {
 	// where available. The unknown-child predicate exempts only scalar one-edit
 	// `description` typos with at most one value token and no children, plus
 	// Junos apply statements explicitly skipped by this gate; all other unknown
-	// direct children are quarantined.
+	// direct children are quarantined. The separate #12634 predicate detects
+	// unresolved tails that remain attached to recognized scalar policy leaves.
 	// Explicit `any` remains distinguishable from omitted or valueless match
 	// content; the AST predicates below preserve that distinction.
 	//
@@ -529,6 +530,7 @@ func compilePolicy(polInst struct {
 		len(policyUnsupportedThenSiblings(polInst.node)) > 0 ||
 		len(policyUnsupportedThenLogTokens(polInst.node)) > 0 ||
 		len(droppedEnforcementSubtrees) > 0 ||
+		len(policyUnresolvedScalarLeafTails(polInst.node)) > 0 ||
 		len(unknownEnforcementChildren) > 0 {
 		pol.LenientContentDropped = true
 	}
@@ -705,6 +707,28 @@ func policyUnknownEnforcementChildren(polNode *Node) []string {
 		}
 	}
 	return unknown
+}
+
+// policyUnresolvedScalarLeafTails finds recognized scalar leaves whose
+// trailing run was not fully resolved by the tolerant expander.
+func policyUnresolvedScalarLeafTails(polNode *Node) []string {
+	if polNode == nil {
+		return nil
+	}
+	expanded := expandResolvingRun9792(polNode, policySchema9792(false))
+	var bad []string
+	for _, child := range expanded.Children {
+		if child == nil || len(child.Keys) == 0 {
+			continue
+		}
+		if child.Keys[0] != "description" && child.Keys[0] != "scheduler-name" {
+			continue
+		}
+		if len(child.Keys) > 2 || len(child.Children) > 0 {
+			bad = append(bad, child.Keys[0])
+		}
+	}
+	return bad
 }
 
 // policyKeywordDiffersByOneEdit recognizes a single insertion, deletion,

@@ -601,6 +601,7 @@ type Policy struct {
 	// direct children poison tolerant loads except for scalar one-edit
 	// `description` typos with at most one value token and no children, and
 	// Junos apply statements skipped by the policy poison gate (#12234).
+	// Unresolved tails on known scalar leaves are separately poisoned (#12634).
 	// Recorded in config order for deterministic warnings.
 	UnknownChildren []string
 	// LenientContentDropped marks a policy the TOLERANT compile path
@@ -610,12 +611,12 @@ type Policy struct {
 	// load inactive: a MISSING required match dimension (#3044), an UNSUPPORTED
 	// `match` leaf (#3113, incl. #3142/#3673), an unsupported `then permit`
 	// modifier (#3114), an unrecognized `then` sibling (#11013), a DENY/REJECT
-	// referencing an undefined scheduler (#12244), or an unknown direct child
+	// referencing an undefined scheduler (#12244), an unknown direct child
 	// other than a scalar one-edit `description` typo with at most one value
-	// token and no children, or a Junos apply statement (#12234). Missing or
-	// dropped match content can widen a policy because empty match dimensions
-	// mean match-ANY; dropped policy actions or subtrees can also leave a direct
-	// permit active when the authored enforcement intent was different.
+	// token and no children or a Junos apply statement (#12234), or unresolved
+	// Missing or dropped match content can widen a policy because empty match
+	// dimensions mean match-ANY; dropped policy actions or subtrees can also
+	// leave a direct permit active when the authored enforcement intent differed.
 	// Strict gates reject unsupported content and strict schema
 	// validation rejects unknown policy children.
 	//
