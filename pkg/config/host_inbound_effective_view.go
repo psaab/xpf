@@ -227,6 +227,10 @@ func MergeHostInboundTraffic(a, b *HostInboundTraffic) *HostInboundTraffic {
 	appendUnique(&out.systemServicesExcept, b.systemServicesExcept)
 	appendUnique(&out.protocolsExcept, a.protocolsExcept)
 	appendUnique(&out.protocolsExcept, b.protocolsExcept)
+	appendUnique(&out.nonCanonicalSystemServices, a.nonCanonicalSystemServices)
+	appendUnique(&out.nonCanonicalSystemServices, b.nonCanonicalSystemServices)
+	appendUnique(&out.nonCanonicalProtocols, a.nonCanonicalProtocols)
+	appendUnique(&out.nonCanonicalProtocols, b.nonCanonicalProtocols)
 	return out
 }
 

@@ -1,5 +1,7 @@
 package config
 
+import "strings"
+
 // parseHostInboundNode parses a `host-inbound-traffic { system-services ...;
 // protocols ...; }` subtree into a HostInboundTraffic. It is the SSOT for both
 // the zone-level stanza and the per-interface override (#3362).
@@ -49,6 +51,8 @@ func parseHostInboundNode(n *Node) *HostInboundTraffic {
 	hib.Protocols = hostInboundFilterExcept(protocols, protocolsExcept, true)
 	hib.systemServicesExcept = servicesExcept
 	hib.protocolsExcept = protocolsExcept
+	hib.nonCanonicalSystemServices = hostInboundNonCanonicalTokens(services, KnownHostInboundSystemServices)
+	hib.nonCanonicalProtocols = hostInboundNonCanonicalTokens(protocols, KnownHostInboundProtocols)
 	hib.UnknownChildren = dedupHostInboundTokens(hib.UnknownChildren)
 	return hib
 }
@@ -131,6 +135,17 @@ func hostInboundExceptParts(n *Node) (values, excluded []string) {
 	return values, excluded
 }
 
+func hostInboundNonCanonicalTokens(tokens []string, known map[string]bool) []string {
+	var out []string
+	for _, token := range tokens {
+		canonical := strings.ToLower(token)
+		if token != canonical && known[canonical] {
+			out = append(out, token)
+		}
+	}
+	return out
+}
+
 // hostInboundFilterExcept applies exclusions to one complete leaf stanza.
 // Filtering after all same-key children are aggregated is required for flat
 // SetPath trees, where `all` and `X except` are sibling nodes.
@@ -148,12 +163,13 @@ func hostInboundFilterExcept(tokens, excluded []string, protocols bool) []string
 	}
 	excludedSet := make(map[string]bool, len(excluded))
 	for _, token := range excluded {
-		known := KnownHostInboundProtocols[token]
+		canonical := strings.ToLower(token)
+		known := KnownHostInboundProtocols[canonical]
 		if !protocols {
-			known = KnownHostInboundSystemServices[token]
+			known = KnownHostInboundSystemServices[canonical]
 		}
 		if known {
-			excludedSet[token] = true
+			excludedSet[canonical] = true
 		}
 	}
 	var expansion []string
@@ -167,23 +183,24 @@ func hostInboundFilterExcept(tokens, excluded []string, protocols bool) []string
 		// These meta-tokens have no tuple of their own. In particular,
 		// expanding an excluded `all` here would poison the union against
 		// every concrete token.
-		if token == "all" || token == "any-service" {
+		canonical := strings.ToLower(token)
+		if canonical == "all" || canonical == "any-service" {
 			continue
 		}
 		if protocols {
-			if !KnownHostInboundProtocols[token] {
+			if !KnownHostInboundProtocols[canonical] {
 				continue
 			}
 			for _, family := range []string{"ip", "ip6"} {
-				excludedMatches[family] = append(excludedMatches[family], HostInboundProtocolMatch(token, family)...)
+				excludedMatches[family] = append(excludedMatches[family], HostInboundProtocolMatch(canonical, family)...)
 			}
 			continue
 		}
-		if !KnownHostInboundSystemServices[token] {
+		if !KnownHostInboundSystemServices[canonical] {
 			continue
 		}
 		for _, family := range []string{"ip", "ip6"} {
-			for _, m := range HostInboundServiceMatch(token, family) {
+			for _, m := range HostInboundServiceMatch(canonical, family) {
 				if !m.Reject {
 					excludedMatches[family] = append(excludedMatches[family], m)
 				}
@@ -193,23 +210,24 @@ func hostInboundFilterExcept(tokens, excluded []string, protocols bool) []string
 	out := make([]string, 0, len(tokens)+len(expansion))
 	invalidExcept := false
 	for _, token := range tokens {
-		if token == "except" {
+		canonical := strings.ToLower(token)
+		if canonical == "except" {
 			invalidExcept = true
 			continue
 		}
-		if excludedSet[token] {
+		if excludedSet[canonical] {
 			continue
 		}
-		if token == "all" {
+		if canonical == "all" {
 			for _, expanded := range expansion {
-				if excludedSet[expanded] || hostInboundTokenMatchesAny(expanded, excludedMatches, protocols) {
+				if excludedSet[strings.ToLower(expanded)] || hostInboundTokenMatchesAny(expanded, excludedMatches, protocols) {
 					continue
 				}
 				out = append(out, expanded)
 			}
 			continue
 		}
-		if hostInboundTokenMatchesAny(token, excludedMatches, protocols) {
+		if hostInboundTokenMatchesAny(canonical, excludedMatches, protocols) {
 			continue
 		}
 		out = append(out, token)
@@ -279,6 +297,8 @@ func mergeHostInbound(dst, src *HostInboundTraffic) *HostInboundTraffic {
 	dst.Protocols = dedupHostInboundTokens(append(dst.Protocols, src.Protocols...))
 	dst.systemServicesExcept = append(dst.systemServicesExcept, src.systemServicesExcept...)
 	dst.protocolsExcept = append(dst.protocolsExcept, src.protocolsExcept...)
+	dst.nonCanonicalSystemServices = append(dst.nonCanonicalSystemServices, src.nonCanonicalSystemServices...)
+	dst.nonCanonicalProtocols = append(dst.nonCanonicalProtocols, src.nonCanonicalProtocols...)
 	dst.UnknownChildren = dedupHostInboundTokens(append(dst.UnknownChildren, src.UnknownChildren...))
 	dst.SystemServices = hostInboundFilterExcept(dst.SystemServices, dst.systemServicesExcept, false)
 	dst.Protocols = hostInboundFilterExcept(dst.Protocols, dst.protocolsExcept, true)
@@ -313,8 +333,10 @@ func cloneHostInbound(src *HostInboundTraffic) *HostInboundTraffic {
 		SystemServices:       append([]string(nil), src.SystemServices...),
 		Protocols:            append([]string(nil), src.Protocols...),
 		UnknownChildren:      append([]string(nil), src.UnknownChildren...),
-		systemServicesExcept: append([]string(nil), src.systemServicesExcept...),
-		protocolsExcept:      append([]string(nil), src.protocolsExcept...),
+		systemServicesExcept:       append([]string(nil), src.systemServicesExcept...),
+		protocolsExcept:            append([]string(nil), src.protocolsExcept...),
+		nonCanonicalSystemServices: append([]string(nil), src.nonCanonicalSystemServices...),
+		nonCanonicalProtocols:      append([]string(nil), src.nonCanonicalProtocols...),
 	}
 }
 
