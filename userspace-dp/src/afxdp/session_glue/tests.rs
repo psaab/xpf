@@ -830,7 +830,8 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         metadata: SessionMetadata {
             ingress_ifindex: 0,
             ingress_vlan_id: 0,
-            fabric_ingress: true,
+            fabric_ingress: false,
+            owner_rg_id: 0,
             ..test_metadata()
         },
         leak_incarnation: 0,
@@ -858,14 +859,17 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         dst_ip: wire_key.dst_ip,
         forward_key: wire_key,
     };
-    let resolved = resolve_flow_session_decision(
+    let mut resolved = resolve_flow_session_decision_with_conntrack(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
         &shared_sessions,
         &shared_nat_sessions,
         &shared_forward_wire_sessions,
         &shared_owner_rg_indexes,
         &peer_worker_commands,
+        empty_worker_commands_by_id(),
         &forwarding,
         &ha_state,
         &dynamic_neighbors,
@@ -877,10 +881,56 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         21,
         0, // #9383: arrival VLAN (untagged in this fixture)
         true,
+        true,
         0,
         0,
+        None,
     )
     .expect("resolved");
+
+    assert!(resolved.deferred_synced_promotion.is_some());
+    assert!(resolved.deferred_shared_materialization.is_some());
+
+    // #9519 foreign leg: discard both deferred effects. The shared entry and
+    // worker table remain unchanged; no peer row is materialized or promoted.
+    let deferred_promotion = resolved
+        .deferred_synced_promotion
+        .take()
+        .expect("promotion remains deferred until authority is known");
+    let deferred_materialization = resolved
+        .deferred_shared_materialization
+        .take()
+        .expect("materialization remains deferred until authority is known");
+    assert!(sessions.entry_with_origin(&key).is_none());
+    assert_eq!(
+        shared_sessions.lock().expect("shared sessions").get(&key).unwrap().origin,
+        SessionOrigin::SyncImport
+    );
+    resolved.deferred_synced_promotion = Some(deferred_promotion);
+    resolved.deferred_shared_materialization = Some(deferred_materialization);
+    apply_deferred_shared_materialization(
+        &mut sessions,
+        &forwarding,
+        1_000_000,
+        0x18,
+        &mut resolved,
+    );
+    apply_deferred_synced_promotion(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        SharedSessionRefs {
+            sessions: &shared_sessions,
+            nat_sessions: &shared_nat_sessions,
+            forward_wire_sessions: &shared_forward_wire_sessions,
+            owner_rg_indexes: &shared_owner_rg_indexes,
+        },
+        &peer_worker_commands,
+        empty_worker_commands_by_id(),
+        &forwarding,
+        &mut resolved,
+    );
 
     assert_eq!(
         resolved.decision.resolution.disposition,

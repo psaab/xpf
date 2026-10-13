@@ -988,6 +988,27 @@ pub(super) struct ResolvedFlowSessionDecision {
     /// the refreshed route. `None` when the cached resolution was fresh or no
     /// persist is owed.
     pub(super) deferred_forwarding_revalidation: Option<DeferredForwardingRevalidation>,
+    /// #12644: promotion writes held until the #9519 Owner verdict.
+    pub(super) deferred_synced_promotion: Option<DeferredSyncedPromotion>,
+    /// #12644: shared-map materialization held until an Owner verdict.
+    pub(super) deferred_shared_materialization: Option<DeferredSharedMaterialization>,
+    /// #12644: transient-hit teardown held until an Owner verdict.
+    pub(super) deferred_synced_purge: Option<DeferredSyncedPurge>,
+}
+
+/// #12644: materialization of a shared hit held until the packet's authority
+/// verdict, so a foreign packet cannot install peer state into the worker.
+#[derive(Clone, Debug)]
+pub(super) struct DeferredSharedMaterialization {
+    pub(super) entry: SyncedSessionEntry,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct DeferredSyncedPurge {
+    pub(super) key: SessionKey,
+    pub(super) decision: SessionDecision,
+    pub(super) metadata: SessionMetadata,
+    pub(super) origin: SessionOrigin,
 }
 
 /// #12265: the #11373 re-resolve a stale hit computed, held for the #9519
@@ -1002,6 +1023,25 @@ pub(super) struct DeferredForwardingRevalidation {
     /// cached policy verdict must be re-judged. Applied with the route, only
     /// after an Owner verdict (`invalidate_policy_revalidation`).
     pub(super) invalidate_policy_revalidation: bool,
+}
+
+/// #12644: a synced-session promotion computed during `resolve`, NOT yet
+/// persisted. Mirrors the #12265 deferred revalidation: the poll site
+/// applies it only after a #9519 Owner verdict and drops it with a foreign
+/// arrival. Persisting inside `resolve` lets a denied foreign packet
+/// re-home the owner's session (decision/owner_rg_id/fabric_ingress),
+/// republish it to shared/BPF/peer, and replicate it. Carries everything
+/// the Owner site needs to replay the promotion without recomputing.
+#[derive(Clone, Debug)]
+pub(super) struct DeferredSyncedPromotion {
+    pub(super) key: SessionKey,
+    pub(super) decision: SessionDecision,
+    pub(super) metadata: SessionMetadata,
+    pub(super) origin: SessionOrigin,
+    pub(super) now_ns: u64,
+    pub(super) fabric_ingress: bool,
+    pub(super) protocol: u8,
+    pub(super) tcp_flags: u8,
 }
 
 // Fabric-ingress SNAT-only forward entries are standby-side wire placeholders

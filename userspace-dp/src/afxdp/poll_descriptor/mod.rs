@@ -1902,6 +1902,50 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 on_admitting_interface,
                             } => (Some(arrival_zone), on_admitting_interface),
                         };
+                        if foreign_arrival_zone.is_none() {
+                            crate::afxdp::session_glue::apply_deferred_synced_purge(
+                                sessions,
+                                binding.bpf_maps.session_map.handle(),
+                                crate::afxdp::session_glue::SharedSessionRefs {
+                                    sessions: worker_ctx.shared_sessions,
+                                    nat_sessions: worker_ctx.shared_nat_sessions,
+                                    forward_wire_sessions: worker_ctx.shared_forward_wire_sessions,
+                                    owner_rg_indexes: &worker_ctx.shared_owner_rg_indexes,
+                                },
+                                worker_ctx.forwarding,
+                                now_ns,
+                                worker_id,
+                                &mut resolved,
+                            );
+                            crate::afxdp::session_glue::apply_deferred_shared_materialization(
+                                sessions,
+                                worker_ctx.forwarding,
+                                now_ns,
+                                meta.tcp_flags,
+                                &mut resolved,
+                            );
+                            crate::afxdp::session_glue::apply_deferred_synced_promotion(
+                                sessions,
+                                binding.bpf_maps.session_map.handle(),
+                                conntrack_v4_fd,
+                                conntrack_v6_fd,
+                                crate::afxdp::session_glue::SharedSessionRefs {
+                                    sessions: worker_ctx.shared_sessions,
+                                    nat_sessions: worker_ctx.shared_nat_sessions,
+                                    forward_wire_sessions: worker_ctx.shared_forward_wire_sessions,
+                                    owner_rg_indexes: &worker_ctx.shared_owner_rg_indexes,
+                                },
+                                worker_ctx.peer_worker_commands,
+                                worker_ctx.worker_commands_by_id,
+                                worker_ctx.forwarding,
+                                &mut resolved,
+                            );
+                        } else {
+                            // A foreign verdict discards promotion effects.
+                            resolved.deferred_shared_materialization = None;
+                            resolved.deferred_synced_promotion = None;
+                            resolved.deferred_synced_purge = None;
+                        }
                         // #12265/#11373: route revalidation may use this
                         // packet's ingress/fabric context. Persist it only
                         // after #9519 confirms Owner; a foreign packet may
@@ -1921,6 +1965,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 revalidation.resolution,
                                 revalidation.owner_rg_id,
                             );
+                            if let Some(owner_rg_id) = revalidation.owner_rg_id {
+                                resolved.metadata.owner_rg_id = owner_rg_id;
+                            }
                         }
                         // #10636: the resolve above deferred TCP close-state
                         // until THIS verdict. An owner applies it now — before

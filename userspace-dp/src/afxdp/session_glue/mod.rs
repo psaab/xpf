@@ -12,7 +12,8 @@ pub(in crate::afxdp) use install_table_purge::{
     INSTALL_TABLE_PURGE_BUDGET, InstallTablePurge, install_table_purge_predicate,
 };
 pub(in crate::afxdp) use promote::{
-    SharedSessionRefs, maybe_promote_synced_session, maybe_promote_synced_session_with_conntrack,
+    SharedSessionRefs, apply_deferred_synced_promotion, apply_deferred_synced_purge,
+    maybe_promote_synced_session, maybe_promote_synced_session_with_conntrack,
 };
 /// #10507 Cell 5a test seam: command-driven Demote/Refresh funnels for
 /// cross-module poll tests (unshared map, no BPF). Production `handle_*`
@@ -3083,6 +3084,43 @@ pub(super) fn resolve_flow_session_decision(
         worker_id,
         None,
     )?;
+    apply_deferred_synced_purge(
+        sessions,
+        session_map,
+        SharedSessionRefs {
+            sessions: shared_sessions,
+            nat_sessions: shared_nat_sessions,
+            forward_wire_sessions: shared_forward_wire_sessions,
+            owner_rg_indexes: shared_owner_rg_indexes,
+        },
+        forwarding,
+        now_ns,
+        worker_id,
+        &mut resolved,
+    );
+    apply_deferred_shared_materialization(
+        sessions,
+        forwarding,
+        now_ns,
+        tcp_flags,
+        &mut resolved,
+    );
+    apply_deferred_synced_promotion(
+        sessions,
+        session_map,
+        -1,
+        -1,
+        SharedSessionRefs {
+            sessions: shared_sessions,
+            nat_sessions: shared_nat_sessions,
+            forward_wire_sessions: shared_forward_wire_sessions,
+            owner_rg_indexes: shared_owner_rg_indexes,
+        },
+        peer_worker_commands,
+        empty_worker_commands_by_id(),
+        forwarding,
+        &mut resolved,
+    );
     if let Some(revalidation) = resolved.deferred_forwarding_revalidation.take() {
         if revalidation.invalidate_policy_revalidation {
             sessions.invalidate_policy_revalidation(&resolved.key);
@@ -3092,8 +3130,39 @@ pub(super) fn resolve_flow_session_decision(
             revalidation.resolution,
             revalidation.owner_rg_id,
         );
+        if let Some(owner_rg_id) = revalidation.owner_rg_id {
+            resolved.metadata.owner_rg_id = owner_rg_id;
+        }
     }
+
     Some(resolved)
+}
+
+/// Materialize a shared entry only after the packet's Owner verdict.
+pub(in crate::afxdp) fn apply_deferred_shared_materialization(
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    now_ns: u64,
+    tcp_flags: u8,
+    resolved: &mut ResolvedFlowSessionDecision,
+) {
+    let Some(entry) = resolved
+        .deferred_shared_materialization
+        .take()
+        .map(|deferred| deferred.entry)
+    else {
+        return;
+    };
+    let mut hit = ResolvedSessionLookup::shared(entry);
+    let (_, install_failed) =
+        materialize_shared_session_hit(sessions, &mut hit, forwarding, now_ns, tcp_flags);
+    resolved.install_failed = install_failed;
+    if resolved.session_id == 0 && !install_failed {
+        resolved.session_id = sessions.session_id_for(&resolved.key);
+    }
+    if install_failed {
+        resolved.deferred_synced_promotion = None;
+    }
 }
 
 pub(super) fn resolve_flow_session_decision_with_conntrack(
@@ -3180,6 +3249,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         // Preserve the shared session incarnation before materialization takes
         // its entry out of `hit`; local-only hits read it from the table below.
         let shared_session_id = hit.shared_entry.as_ref().map(|entry| entry.session_id);
+        let shared_leak_incarnation = hit.shared_entry.as_ref().map(|entry| entry.leak_incarnation);
         let source_nat_static = match hit.shared_entry.as_ref() {
             Some(entry) => entry.source_nat_static,
             None => sessions.source_nat_static_for(hit.key.as_ref(&flow.forward_key)),
@@ -3208,25 +3278,24 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         } else {
             None
         };
-        if keep_transient && let Some((key, decision, metadata, origin)) = poison_key {
-            purge_translated_synced_hit(
-                sessions,
-                session_map,
-                shared,
-                key,
+        let deferred_synced_purge = if keep_transient {
+            poison_key.map(|(key, decision, metadata, origin)| DeferredSyncedPurge {
+                key: key.clone(),
                 decision,
-                metadata,
+                metadata: metadata.clone(),
                 origin,
-                forwarding,
-                now_ns,
-                worker_id,
-            );
-        }
-        let (resolved, materialize_install_failed) = if keep_transient {
-            (hit.lookup.clone(), false)
+            })
         } else {
-            materialize_shared_session_hit(sessions, &mut hit, forwarding, now_ns, tcp_flags)
+            None
         };
+        let deferred_shared_materialization = if keep_transient {
+            None
+        } else {
+            hit.shared_entry
+                .clone()
+                .map(|entry| DeferredSharedMaterialization { entry })
+        };
+        let resolved = hit.lookup.clone();
         let resolved_key = hit.key.as_ref(&flow.forward_key);
         let forwarding_stale =
             sessions.forwarding_resolution_is_stale(resolved.forwarding_generation);
@@ -3248,7 +3317,9 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         });
         let mut decision = resolved.decision;
         let resolution_target = resolution_target_for_session(flow, decision);
-        let leak_incarnation = sessions.leak_incarnation(&resolved_key);
+        let leak_incarnation = shared_leak_incarnation
+            .filter(|incarnation| *incarnation != 0)
+            .or_else(|| sessions.leak_incarnation(&resolved_key));
         let leak_revoked = leak_incarnation.is_some_and(|incarnation| {
             !super::forwarding::leak_incarnation_is_live(forwarding, resolution_target, incarnation)
         });
@@ -3320,30 +3391,19 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         if decision.resolution.disposition == ForwardingDisposition::TableUnavailable {
             flag_install_table_purge(worker_id);
         }
-        let mut metadata = if keep_transient || materialize_install_failed {
-            resolved.metadata
-        } else {
-            maybe_promote_synced_session_with_conntrack(
-                sessions,
-                session_map,
-                conntrack_v4_fd,
-                conntrack_v6_fd,
-                shared,
-                peer_worker_commands,
-                worker_commands_by_id,
-                forwarding,
-                resolved_key,
-                decision,
-                resolved.metadata,
-                hit_origin,
-                fabric_ingress,
-                now_ns,
-                protocol,
-                tcp_flags,
-            )
-        };
+        let metadata = resolved.metadata.clone();
+        let deferred_synced_promotion = (!keep_transient).then(|| DeferredSyncedPromotion {
+            key: resolved_key.clone(),
+            decision,
+            metadata: metadata.clone(),
+            origin: hit_origin,
+            fabric_ingress,
+            protocol,
+            tcp_flags,
+            now_ns,
+        });
         let deferred_forwarding_revalidation =
-            if forwarding_stale && !keep_transient && !materialize_install_failed {
+            if forwarding_stale && !keep_transient {
                 let policy_to_zone_id =
                     if decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
                         metadata.egress_zone
@@ -3360,9 +3420,6 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
                         | ForwardingDisposition::LocalDelivery
                 )
                 .then(|| owner_rg_for_resolution(forwarding, decision.resolution));
-                if let Some(owner_rg_id) = owner_rg_id {
-                    metadata.owner_rg_id = owner_rg_id;
-                }
                 Some(DeferredForwardingRevalidation {
                     resolution: decision.resolution,
                     owner_rg_id,
@@ -3380,12 +3437,14 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
             origin: hit_origin,
             source_nat_validation_key,
             created: false,
-            install_failed: shared_was_present && materialize_install_failed,
+            install_failed: false,
             close_deferred: hit.close_deferred,
             deferred_forwarding_revalidation,
+            deferred_synced_promotion,
+            deferred_shared_materialization,
+            deferred_synced_purge,
         });
     }
-
     // #11061: a synthetic/quarantined reply domain cannot be reinterpreted
     // through a mixed-zero NAT candidate. Let policy/native routing handle it;
     // building a reverse decision here could borrow a domain-0 MAIN session.
@@ -3569,7 +3628,10 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         // #10636: reverse-synthesized from a forward match (close, if any,
         // was stamped at install); never a deferred local hit.
         close_deferred: false,
+        deferred_synced_promotion: None,
+        deferred_shared_materialization: None,
         deferred_forwarding_revalidation: None,
+        deferred_synced_purge: None,
     })
 }
 
