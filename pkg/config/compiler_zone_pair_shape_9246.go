@@ -1,6 +1,9 @@
 package config
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // malformedZonePairShape9246 reports zone-pair key shapes whose tail the
 // policy compiler cannot represent, or "" when the shape is valid.
@@ -49,24 +52,9 @@ func malformedZonePairShape9246(n *Node) string {
 			if n.Keys[i] != "to-zone" {
 				continue
 			}
-			destinations := make([]string, 0, len(n.Children))
-			seen := make(map[string]bool, len(n.Children))
-			for _, child := range n.Children {
-				if len(child.Keys) == 0 {
-					continue
-				}
-				destination := child.Keys[0]
-				if child.KeyBracketed(0) {
-					destination = "[ " + strings.Join(child.Keys, " ") + " ]"
-				}
-				if !seen[destination] {
-					destinations = append(destinations, destination)
-					seen[destination] = true
-				}
-			}
 			toZone := ""
-			if len(destinations) > 0 {
-				toZone = " " + strings.Join(destinations, ", ")
+			if destination := fromListDestination9246(n, i); destination != "" {
+				toZone = " " + destination
 			}
 			return "from-zone [ " + strings.Join(n.Keys[1:i], " ") + " ] to-zone" + toZone +
 				": a bracketed [ ... ] zone list is not valid on from-zone — a policy context is ONE " +
@@ -122,4 +110,78 @@ func malformedZonePairShape9246(n *Node) string {
 			"attached to any context on tolerant loads. Write one `from-zone <zone> to-zone <zone>` context per pair"
 	}
 	return ""
+}
+
+// fromListDestination9246 renders the destination of a malformed from-list
+// context whose `to-zone` keyword is n.Keys[toZone] (#12510). The producers
+// place it differently:
+//
+//   - Hierarchical text keeps every token between `to-zone` and `{` on the
+//     context node; its children are body statements.
+//   - Grouped and legacy set input end the context node at `to-zone` and fold
+//     each statement's destination into its body: a scalar leads a leaf
+//     (`B policy p1 ...`), a bracketed list becomes a container whose
+//     descendants carry the rest of the statement. Text formatted from such a
+//     tree reparses to the same shape. Prefix-identical contexts share the
+//     node, so every distinct destination is named, in child order.
+//
+// Either way the destination ends at the policy keyword, so a context that
+// authored none (`to-zone [ ]`) names no zone rather than `policy` or its tail.
+func fromListDestination9246(n *Node, toZone int) string {
+	if toZone+1 < len(n.Keys) {
+		destination, _ := zoneTokenRun9246(n, toZone+1, "")
+		return destination
+	}
+	var destinations []string
+	for _, c := range n.Children {
+		destinations = appendBodyDestinations9246(destinations, c, "")
+	}
+	return strings.Join(destinations, ", ")
+}
+
+// appendBodyDestinations9246 appends the destination spelled along each
+// statement path from n, continuing prefix, unless it is already listed.
+func appendBodyDestinations9246(destinations []string, n *Node, prefix string) []string {
+	destination, ended := zoneTokenRun9246(n, 0, prefix)
+	if !ended && len(n.Children) > 0 {
+		for _, c := range n.Children {
+			destinations = appendBodyDestinations9246(destinations, c, destination)
+		}
+		return destinations
+	}
+	if destination == "" || slices.Contains(destinations, destination) {
+		return destinations
+	}
+	return append(destinations, destination)
+}
+
+// zoneTokenRun9246 appends n.Keys[start:] up to the policy keyword (or the
+// `inactive:` prefix of a policy statement) to prefix, spelling each authored
+// [ ... ] run as a list. ended reports whether that keyword was reached.
+func zoneTokenRun9246(n *Node, start int, prefix string) (run string, ended bool) {
+	var b strings.Builder
+	b.WriteString(prefix)
+	inList := false
+	for i := start; i < len(n.Keys); i++ {
+		if n.Keys[i] == "policy" || n.Keys[i] == inactiveMarker {
+			ended = true
+			break
+		}
+		bracketed := n.KeyBracketed(i)
+		if inList && !bracketed {
+			b.WriteString(" ]")
+		}
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		if bracketed && !inList {
+			b.WriteString("[ ")
+		}
+		inList = bracketed
+		b.WriteString(n.Keys[i])
+	}
+	if inList {
+		b.WriteString(" ]")
+	}
+	return b.String(), ended
 }
