@@ -102,24 +102,27 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 			open:   "family inet",
 			closer: " } } }",
 			stmts: map[string]string{
-				"address": "address 10.0.0.1/24",
-				"filter":  "filter input f1",
+				"address":  "address 10.0.0.1/24",
+				"filter":   "filter input f1",
+				"sampling": "sampling input",
 				// #9932: a CONTAINER head, so its fixture statement is the bare
 				// keyword. Its sub-options are a separate chain, measured and
 				// filed rather than admitted here.
 				"dhcp": "dhcp",
 			},
 			second: map[string]string{
-				"address": "address 10.0.0.2/24",
-				"filter":  "filter output f2",
+				"address":  "address 10.0.0.2/24",
+				"filter":   "filter output f2",
+				"sampling": "sampling output",
 			},
 			read: func(c *Config) string {
 				out := ""
 				for _, i := range c.Interfaces.Interfaces {
 					for _, u := range i.Units {
-						out += fmt.Sprintf("addrs=%v fin4=%q fout4=%q fin6=%q fout6=%q dhcp=%v dhcpv6=%v",
+						out += fmt.Sprintf("addrs=%v fin4=%q fout4=%q fin6=%q fout6=%q sample=%v/%v dhcp=%v dhcpv6=%v",
 							u.Addresses, u.FilterInputV4, u.FilterOutputV4,
-							u.FilterInputV6, u.FilterOutputV6, u.DHCP, u.DHCPv6)
+							u.FilterInputV6, u.FilterOutputV6, u.SamplingInput, u.SamplingOutput,
+							u.DHCP, u.DHCPv6)
 					}
 				}
 				if out == "" {
@@ -133,24 +136,27 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 			open:   "family inet6",
 			closer: " } } }",
 			stmts: map[string]string{
-				"address": "address 2001:db8::1/64",
-				"filter":  "filter input f6",
+				"address":  "address 2001:db8::1/64",
+				"filter":   "filter input f6",
+				"sampling": "sampling input",
 				// #9932: a CONTAINER head. `dhcpv6-client` alone compiles
 				// DHCPv6=true, which is the value the elided spelling used to
 				// lose; its own sub-options are a separate chain.
 				"dhcpv6-client": "dhcpv6-client",
 			},
 			second: map[string]string{
-				"address": "address 2001:db8::2/64",
-				"filter":  "filter output f7",
+				"address":  "address 2001:db8::2/64",
+				"filter":   "filter output f7",
+				"sampling": "sampling output",
 			},
 			read: func(c *Config) string {
 				out := ""
 				for _, i := range c.Interfaces.Interfaces {
 					for _, u := range i.Units {
-						out += fmt.Sprintf("addrs=%v fin4=%q fout4=%q fin6=%q fout6=%q dhcp=%v dhcpv6=%v",
+						out += fmt.Sprintf("addrs=%v fin4=%q fout4=%q fin6=%q fout6=%q sample=%v/%v dhcp=%v dhcpv6=%v",
 							u.Addresses, u.FilterInputV4, u.FilterOutputV4,
-							u.FilterInputV6, u.FilterOutputV6, u.DHCP, u.DHCPv6)
+							u.FilterInputV6, u.FilterOutputV6, u.SamplingInput, u.SamplingOutput,
+							u.DHCP, u.DHCPv6)
 					}
 				}
 				if out == "" {

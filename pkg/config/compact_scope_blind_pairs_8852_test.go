@@ -247,6 +247,10 @@ var knownBlindScopePairs8852 = map[string]string{
 	// famOnlyCases records each pair as `recovery` -- the fold delivers exactly
 	// the braced result. This entry records only that arm 2 is blind to them,
 	// which stays true however the fold behaves. A boundary, not a clearance.
+	// #12596: family-only container heads; their valueless direction leaves
+	// are adjudicated separately by the normalizer's explicit tests.
+	"inet sampling":  "plain-container",
+	"inet6 sampling": "plain-container",
 	"inet dhcp":           "plain-container",
 	"inet6 dhcpv6-client": "plain-container",
 	// issue 8858. Unlike the two confirmed-broken entries above, this pair's

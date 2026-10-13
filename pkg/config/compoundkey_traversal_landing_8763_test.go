@@ -280,6 +280,12 @@ func famOnlyCases8763() []famOnlyCase8763 {
 		// interface, and the shape that committed with the client off.
 		{"inet dhcp", "", ifUnit("   family inet {\n    dhcp;\n   }"), ifUnit("   family inet dhcp;"), ifUnit("   family inet {\n   }"), recover8763},
 		{"inet6 dhcpv6-client", "", ifUnit("   family inet6 {\n    dhcpv6-client { client-type stateful; }\n   }"), ifUnit("   family inet6 dhcpv6-client { client-type stateful; }"), ifUnit("   family inet6 {\n   }"), recover8763},
+		// #12596: interface sampling flags are compiled only when both elided
+		// container and packed direction paths are normalized.
+		{"inet sampling", "", ifUnit("   family inet {\n    sampling { input; }\n   }"), ifUnit("   family inet sampling { input; }"), ifUnit("   family inet {\n   }"), recover8763},
+		{"inet6 sampling", "", ifUnit("   family inet6 {\n    sampling { output; }\n   }"), ifUnit("   family inet6 sampling { output; }"), ifUnit("   family inet6 {\n   }"), recover8763},
+		{"sampling input", "", ifUnit("   family inet {\n    sampling { input; }\n   }"), ifUnit("   family inet {\n    sampling input;\n   }"), ifUnit("   family inet {\n    sampling { }\n   }"), recover8763},
+		{"sampling output", "", ifUnit("   family inet6 {\n    sampling { output; }\n   }"), ifUnit("   family inet6 {\n    sampling output;\n   }"), ifUnit("   family inet6 {\n    sampling { }\n   }"), recover8763},
 		// Refused in both spellings by a live gate, so nothing the fold does can
 		// change the outcome. These two are also REMOVED from the scope list by
 		// this change -- see the note in compact_normalize_scope.go.
