@@ -75,15 +75,32 @@ already repointed `current` before the interruption. If `current` still names
 the journaled `PreviousVersion`, recovery restarts the known-good daemon. If
 `current` names the stale target, that target has NOT been health-confirmed:
 recovery first stops the unit, restores the journaled known-good version, and
-then restarts it. If recovery itself is interrupted after changing `current`
-but before `daemon-reload`, the journal remains STOPPED; the next run checks
-the loaded `ExecStart` and running executable and reloads the known-good
-version before any restart. The old DB snapshot is not restored, preserving
-commits made by a restarted old daemon since STOP. An unexpected `current`
-value, an unrestorable previous version, or a lifecycle error aborts recovery
-fail-closed, preserving the stale journal and partials.
+then restarts it. If that restore flip fails or is interrupted after changing
+`current` but before `daemon-reload`, the journal remains STOPPED while
+systemd still has the target's `ExecStart` loaded, and the postinst safety
+net may start that target before the retry. So the next run checks the
+loaded `ExecStart` and running executable, and stops and reloads the
+known-good version before restarting it.
 
-For the ordinary pre-FLIP STOPPED case, restart is **fail-closed** (#5846):
+The old DB snapshot is not restored, preserving commits made by a restarted
+old daemon since STOP. But once the target could have run, it may have
+migrated the live DB to an envelope `PreviousVersion` cannot read. Every
+recovery path that restarts `PreviousVersion` therefore first proves, with
+its `--capability-check` envelope reader, that it can read the live DB:
+before stopping the unit, again after the stop (a running target can commit
+while it is being stopped), and before a plain restart. If that proof fails,
+recovery neither flips nor restarts (a refusal after the stop leaves the unit
+down). It preserves `current`, the stale journal and partials, and leaves the
+choice to the operator: keep the target's DB and finish on a version that
+reads it, or install a DB `PreviousVersion` can read (such as the stale
+cut-boundary snapshot, which discards later commits). A refusal does not undo
+an earlier attempt's partial restore: if `current` and the unit drop-in
+already name `PreviousVersion`, a reboot would start it on the migrated DB, so
+resolve the refusal before rebooting. An unexpected `current` value, an
+unrestorable previous version, or a lifecycle error likewise aborts recovery
+fail-closed.
+
+On every STOPPED path the restart itself is **fail-closed** (#5846):
 if `StartUnit` FAILS, recovery ABORTS and returns the error — it does NOT
 sweep partials, reset the journal, or begin a fresh cut, because that would
 start a new cut whose rollback target is the version that JUST FAILED TO
