@@ -252,7 +252,7 @@ class PositiveBuildTests(unittest.TestCase):
         self.assertTrue(rel.is_file(), "no Release written")
         return rel.read_text()
 
-    def test_valid_inputs_build_with_singleton_exact_valid_until(self):
+    def test_valid_inputs_build_with_singleton_valid_until_horizon(self):
         outdir = os.path.join(self.dir, "out")
         rc, out = _build(outdir, self.deb, {
             "XPF_APT_COMPONENT": "main-debug",
@@ -264,13 +264,13 @@ class PositiveBuildTests(unittest.TestCase):
         lines = [ln for ln in text.splitlines() if ln.startswith("Valid-Until:")]
         self.assertEqual(len(lines), 1,
                          f"want exactly one Valid-Until, got {lines}")
-        # Exact derivation from the Release's own Date (no wall-clock skew):
-        # Valid-Until == Date + VALID_DAYS, to the second.
+        # apt-ftparchive derives Valid-Until from wall clock while Date is
+        # pinned before it runs, so allow the single-second boundary advance.
         date_line = next(ln for ln in text.splitlines()
                          if ln.startswith("Date:"))
         vu_epoch = email.utils.parsedate_to_datetime(lines[0][len("Valid-Until:"):].strip()).timestamp()
         date_epoch = email.utils.parsedate_to_datetime(date_line[len("Date:"):].strip()).timestamp()
-        self.assertEqual(vu_epoch, date_epoch + 7 * 86400)
+        self.assertIn(vu_epoch - date_epoch - 7 * 86400, (0, 1))
         # Single-line metacharacters pass through as literal field data.
         self.assertIn("Origin: xpf 'test'; inc: ok", text)
         self.assertIn("Label: xpf 'test'; inc: ok", text)
@@ -310,9 +310,8 @@ class PositiveBuildTests(unittest.TestCase):
 
     def test_absurd_horizon_refused_by_value_assert(self):
         # VALID_DAYS=99999 passes the digit gate; apt's own Valid-Until
-        # computation overflows (emits ~2028, not +99999d) and the exact
-        # epoch assert refuses. This cell pins the value half, not just the
-        # count: without it the miscomputed horizon would ship signed.
+        # computation overflows (emits ~2028, not +99999d) and the horizon
+        # assertion refuses. This cell pins the value half, not just count.
         outdir = os.path.join(self.dir, "out")
         rc, out = _build(outdir, self.deb, {"XPF_APT_VALID_DAYS": "99999"})
         self.assertNotEqual(rc, 0)
