@@ -54,11 +54,11 @@ func TestTheEnablePassTurnsV4OffAndV6On8637(t *testing.T) {
 	}
 
 	v6 := writesFor(*got, unix.AF_INET6)
-	if len(v6) != 1 || !v6[0].enable {
-		t.Fatalf("proxy_ndp for v6 = %+v, want exactly one ENABLE. Unlike v4, the "+
-			"v6 sysctl is a REQUIRED CONJUNCT in ndisc_recv_ns "+
-			"(forwarding && proxy_ndp && pndisc_is_router) — clearing it breaks "+
-			"IPv6 proxy NDP entirely", v6)
+	if len(v6) != 2 {
+		t.Fatalf("proxy_ndp writes = %+v, want per-interface and all-interface writes", v6)
+	}
+	if v6[0].iface != "all" || !v6[0].enable || v6[1].iface != "ge-0-0-2.80" || !v6[1].enable {
+		t.Fatalf("proxy_ndp writes = %+v, want all and per-interface enables", v6)
 	}
 }
 

@@ -1156,6 +1156,19 @@ evidence, not as active eBPF source-removal blockers.
   end-to-end. v6 is `pneigh_lookup`-gated (per-address by construction), so there
   is no v6 over-answer breadth; the narrowing concern below is IPv4-only. A
   v4-mapped (`::ffff:a.b.c.d`) literal classifies as IPv4 and takes the v4 path.
+
+- **Forwarded unicast NUD probes (#12611):** IPv6 proxy NDP also requires
+  `net.ipv6.conf.all.proxy_ndp=1`. The forwarding/kernel path for unicast NS
+  probes routed back out the proxy interface can leave the interface, with its
+  hop limit decremented, but receive no proxy NA when only
+  `net.ipv6.conf.<if>.proxy_ndp=1`; this is especially relevant with a default
+  route. Reconcile therefore asserts `all.proxy_ndp=1` whenever any configured
+  IPv6 proxy entry exists, as well as each interface's own bit. The global bit
+  is deliberately not cleared when one interface is removed: that teardown is
+  per-interface and cannot establish that no other proxy-NDP user depends on
+  the global gate. With `all.proxy_ndp=1`, the per-interface bit and matching
+  NTF_PROXY entry remain required; the global setting alone does not add proxy
+  entries or make every interface answer.
 - Periodic re-assert (#2197 item 2): the reconcile is idempotent and also driven
   by an always-on 30s ticker (`proxyARPReassertLoop`, started unconditionally when
   the dataplane is enabled, in both standalone and cluster modes). A kernel link

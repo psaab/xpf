@@ -90,11 +90,11 @@ func TestEnableProxyResponders_IPv6(t *testing.T) {
 		"ge-0-0-1": {unix.AF_INET6: {}},
 	})
 
-	if n != 1 {
-		t.Fatalf("enabled count = %d, want 1", n)
+	if n != 2 {
+		t.Fatalf("enabled count = %d, want 2 (per-interface and all): %+v", n, *writes)
 	}
-	if len(*writes) != 1 {
-		t.Fatalf("got %d sysctl writes, want 1", len(*writes))
+	if len(*writes) != 2 {
+		t.Fatalf("got %d sysctl writes, want 2: %+v", len(*writes), *writes)
 	}
 	w := (*writes)[0]
 	if w.iface != "ge-0-0-1" || w.family != unix.AF_INET6 || !w.enable {
@@ -112,14 +112,14 @@ func TestEnableProxyResponders_DualStack(t *testing.T) {
 		"ge-0-0-1": {unix.AF_INET: {}, unix.AF_INET6: {}},
 	})
 
-	if n != 2 {
-		t.Fatalf("enabled count = %d, want 2", n)
+	if n != 3 {
+		t.Fatalf("enabled count = %d, want 3 (per-interface v4, per-interface v6, and all): %+v", n, *writes)
 	}
-	if len(*writes) != 2 {
-		t.Fatalf("got %d sysctl writes, want 2: %+v", len(*writes), *writes)
+	if len(*writes) != 3 {
+		t.Fatalf("got %d sysctl writes, want 3: %+v", len(*writes), *writes)
 	}
-	if (*writes)[0].family != unix.AF_INET || (*writes)[1].family != unix.AF_INET6 {
-		t.Fatalf("families not deterministic v4-then-v6: %+v", *writes)
+	if (*writes)[0].family != unix.AF_INET || (*writes)[1].family != unix.AF_INET6 || (*writes)[2].iface != "all" {
+		t.Fatalf("families not deterministic v4-then-v6 with all last: %+v", *writes)
 	}
 }
 
