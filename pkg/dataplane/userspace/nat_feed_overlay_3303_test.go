@@ -191,10 +191,8 @@ func TestDNATSourceAddressNameResolvesFeedOverlay(t *testing.T) {
 	}
 }
 
-// TestNATAddressNameUnionsStaticBookAndFeedOverlay: a name that exists BOTH as a
-// static book entry and as a feed binding resolves to the union, mirroring the
-// policy address-book bucket merge. This guards against a revert that resolves
-// only one source.
+// TestNATAddressNameUnionsStaticBookAndFeedOverlay: a usable static alias and
+// direct feed binding publish both prefixes, matching the policy book row.
 func TestNATAddressNameUnionsStaticBookAndFeedOverlay(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Security.AddressBook = &config.AddressBook{
@@ -216,9 +214,9 @@ func TestNATAddressNameUnionsStaticBookAndFeedOverlay(t *testing.T) {
 	snap := natFeedSnapHelper(t, cfg, overlay)
 	got := snatSourceAddrs(snap, "union")
 	if !contains(got, "10.10.0.0/16") {
-		t.Fatalf("union must keep the static book prefix, got %v", got)
+		t.Fatalf("usable static alias must remain in the direct feed-bound match, got %v", got)
 	}
 	if !contains(got, "198.51.100.0/24") {
-		t.Fatalf("union must add the feed prefix, got %v #3303", got)
+		t.Fatalf("direct feed-bound name must resolve its live feed prefix, got %v", got)
 	}
 }

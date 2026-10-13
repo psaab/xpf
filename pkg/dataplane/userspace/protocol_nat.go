@@ -132,16 +132,18 @@ type SourceNATRuleSnapshot struct {
 	// rule` (#2218). The ID is stable across config reorder/removal (#2255), so
 	// it is u32-wide; the JSON wire is unchanged (a number is width-agnostic).
 	CounterID uint32 `json:"counter_id,omitempty"`
-	// LenientMatchDropped carries the #9874 poison: the rule AUTHORED a
-	// `match` container that constrains NOTHING, which the #8430 strict gate
-	// rejects at commit and the tolerant load / peer-sync path downgrades to
-	// a warning. The dataplane reads an empty match set as UNCONSTRAINED, so
-	// without this marker the rule installs as a catch-all translator. The
-	// Rust source-NAT table fails such a rule CLOSED (an in-scope flow gets
-	// Unavailable / drop + count, never a translation — including for `off`
-	// rules, whose exemption short-circuit would otherwise exempt every flow
-	// in scope). A scope-only rule (no `match` at all) leaves this false and
-	// still installs unconstrained, which is the legitimate catch-all.
+	// LenientMatchDropped carries the #9874/#12627 poison: the rule AUTHORED a
+	// `match` container that constrains NOTHING, or its address-name closure
+	// contains an unresolved member. The #8430 strict gate rejects empty
+	// authored matches at commit and the tolerant load / peer-sync path
+	// downgrades them to a warning. The dataplane reads an empty match set as
+	// UNCONSTRAINED, so without this marker the rule installs as a catch-all
+	// translator. The Rust source-NAT table fails such a rule CLOSED (an
+	// in-scope flow gets Unavailable / drop + count, never a translation —
+	// including for `off` rules, whose exemption short-circuit would otherwise
+	// exempt every flow in scope). A scope-only rule (no `match` at all) leaves
+	// this false and still installs unconstrained, which is the legitimate
+	// catch-all.
 	//
 	// Additive wire field (#1961): an old Go binary omits it (omitempty) and
 	// an old helper decodes it false. That pairing keeps the pre-#9874

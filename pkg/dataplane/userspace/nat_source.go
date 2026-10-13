@@ -82,28 +82,38 @@ func buildSourceNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map[stri
 				slog.Warn("userspace snapshot: source NAT rule authored an empty match; shipping fail-closed",
 					"ruleset", rs.Name, "rule", rule.Name)
 			}
+			lenientMatchDropped := rule.LenientMatchDropped
 			sourceAddrs := append([]string(nil), rule.Match.SourceAddresses...)
 			if len(sourceAddrs) == 0 && rule.Match.SourceAddress != "" {
 				sourceAddrs = append(sourceAddrs, rule.Match.SourceAddress)
 			}
-			// #2416: resolve `match source-address-name` for SNAT too — same
-			// builder gap as DNAT (the source list only carried literal
-			// prefixes). See appendNATSourceAddressName.
-			// #3431: resolve EVERY name of a bracket list / repeated leaf.
-			for _, name := range rule.Match.SourceAddressNameList() {
-				sourceAddrs = appendNATSourceAddressName(cfg, feedOverlay, sourceAddrs, name)
+			// #2416/#3431: resolve every source-address-name for SNAT. A
+			// poisoned closure clears this side and sets the existing
+			// LenientMatchDropped marker so the rule drops instead of matching a
+			// surviving subset.
+			sourceAddrs, poisonedSourceName := appendNATAddressNamesPoisoned(
+				cfg, feedOverlay, sourceAddrs, rule.Match.SourceAddressNameList())
+			if poisonedSourceName != "" {
+				slog.Warn("userspace snapshot: source NAT rule has poisoned source address-name closure; shipping fail-closed",
+					"ruleset", rs.Name, "rule", rule.Name, "address_name", poisonedSourceName)
+				sourceAddrs = nil
+				lenientMatchDropped = true
 			}
 			destAddrs := append([]string(nil), rule.Match.DestinationAddresses...)
 			if len(destAddrs) == 0 && rule.Match.DestinationAddress != "" {
 				destAddrs = append(destAddrs, rule.Match.DestinationAddress)
 			}
-			// #3229: resolve `match destination-address-name` the same way the
-			// source path resolves source-address-name — without this a
-			// name-scoped destination constraint published an EMPTY list =
-			// match-any destination (fail-open).
-			// #3431: resolve EVERY name of a bracket list / repeated leaf.
-			for _, name := range rule.Match.DestinationAddressNameList() {
-				destAddrs = appendNATDestinationAddressName(cfg, feedOverlay, destAddrs, name)
+			// #3229/#3431: resolve every destination-address-name. Like a
+			// poisoned source side, a poisoned destination side clears its
+			// addresses and marks the whole SNAT rule fail-closed.
+			var poisonedDestinationName string
+			destAddrs, poisonedDestinationName = appendNATAddressNamesPoisoned(
+				cfg, feedOverlay, destAddrs, rule.Match.DestinationAddressNameList())
+			if poisonedDestinationName != "" {
+				slog.Warn("userspace snapshot: source NAT rule has poisoned destination address-name closure; shipping fail-closed",
+					"ruleset", rs.Name, "rule", rule.Name, "address_name", poisonedDestinationName)
+				destAddrs = nil
+				lenientMatchDropped = true
 			}
 			var poolAddresses []string
 			var portLow, portHigh uint16
@@ -264,7 +274,7 @@ func buildSourceNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map[stri
 				DeterministicHostCount:           detHostCount,
 				CounterID:                        natCounterID(natCounterIDs, dataplane.NATCounterTypeSource, rs.Name, rule.Name),
 				// #9874: the fail-closed poison for an empty authored match.
-				LenientMatchDropped: rule.LenientMatchDropped,
+				LenientMatchDropped: lenientMatchDropped,
 			})
 		}
 	}

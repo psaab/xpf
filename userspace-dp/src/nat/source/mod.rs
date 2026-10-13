@@ -202,12 +202,12 @@ pub(crate) struct SourceNatRule {
     /// constraint at all. Same fail-closed semantics as `source_constrained`,
     /// for the destination match set.
     pub(crate) destination_constrained: bool,
-    /// #9874: the fail-closed poison for a rule whose AUTHORED `match`
-    /// constrains nothing (snapshot `lenient_match_dropped`). The match loop
+    /// #9874/#12627: the fail-closed poison for a rule whose authored match
+    /// is empty or whose address-name closure is poisoned. The match loop
     /// returns `Unavailable` for such a rule AFTER `matches()` but BEFORE the
     /// `off` short-circuit, so a poisoned rule — translating or exempting —
-    /// drops in-scope flows (drop + count) instead of installing the catch-all
-    /// its empty match set otherwise reads as. Governs NEW-flow lookup
+    /// drops in-scope flows (drop + count) instead of installing a catch-all
+    /// its empty/cleared match set otherwise reads as. Governs NEW-flow lookup
     /// admission only: synced/established translation retention bypasses the
     /// lookup check by design (`synced.rs` matches ignoring scope), so an
     /// established session keeps its translation across the poisoning apply.
@@ -1674,18 +1674,17 @@ fn parse_source_nat_rules_inner(
         // unscoped (empty) set keeps "match any" (anti-over-restrict).
         rule.source_constrained = !snap.source_addresses.is_empty();
         rule.destination_constrained = !snap.destination_addresses.is_empty();
-        // #9874: carry the fail-closed poison for an empty authored match. A
-        // marked rule installs but never translates: the match loop drops
-        // every in-scope flow (drop + count). Loud on purpose — without this
-        // marker the rule would install as an unconstrained catch-all
-        // translator, so its presence means the control plane admitted a
-        // config a commit would reject.
+        // #9874/#12627: carry the fail-closed poison for an empty authored
+        // match or poisoned address-name closure. A marked rule installs but
+        // never translates: the match loop drops every in-scope flow (drop +
+        // count). Loud on purpose — without this marker an empty/cleared match
+        // set would install as an unconstrained catch-all translator.
         rule.lenient_match_dropped = snap.lenient_match_dropped;
         if rule.lenient_match_dropped {
             eprintln!(
-                "xpf-dp: source-nat rule {:?} authored a match that constrains nothing; \
-                 matching flows are DROPPED instead of translated (a commit would reject \
-                 this rule, #9874)",
+                "xpf-dp: source-nat rule {:?} has an empty match or poisoned address-name \
+                 closure; matching flows are DROPPED instead of translated (a commit would \
+                 reject the empty match, #9874; poisoned name closure, #12627)",
                 snap.name,
             );
         }

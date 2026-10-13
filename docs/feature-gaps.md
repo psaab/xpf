@@ -172,11 +172,20 @@ Any member not resolved by either a static book entry or a ready feed overlay
 (for example, a dangling reference without a ready feed, an empty unbound nested
 set, an unusable static address without a ready feed value, or an unready
 binding) poisons the entire closure rather than publishing the surviving
-subset. The raw-name fallback keeps the NAT constraint non-empty: an ordinary
-name matches nothing, but a CIDR-shaped book name can parse as a literal prefix.
-Making the fallback unparseable by construction is tracked by #12626. A
-feed-bound name that is also a static set with a dangling member is accepted by
-the policy path but rejected by NAT; this parity gap is tracked by #12627.
+subset. Unresolved references retain a non-empty fixed-prefix, unparseable
+token, so CIDR-shaped book names cannot become literal prefixes (#12626).
+A present-empty live feed with no usable same-named static closure uses an
+unparseable match-none token, even when its name is CIDR-shaped. A direct feed
+reference unions with a usable same-named static closure; if that closure is
+poisoned, NAT uses the live feed alone rather than publishing a partial static
+subset, matching policy representability (#12627).
+On SNAT, any poisoned name taints the whole match and uses the existing
+`LenientMatchDropped` marker to drop and stop before later rules.
+The affected selector side is cleared so the marker can match; this drops
+traffic in the rule's remaining scope and constraints, not only the resolvable
+subset. DNAT still filters poisoned names per-name: its snapshot has no
+whole-rule poison/tombstone field, and adding one would change snapshot shape.
+Whole-side DNAT quarantine needs a separate snapshot-contract decision.
 
 | Feature | Junos Config Path | Description | Priority | Status |
 |---------|-------------------|-------------|----------|--------|

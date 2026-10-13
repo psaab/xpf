@@ -57,20 +57,12 @@ func Test_nat_mixed_static_and_unresolvable_set_fails_closed_6143(t *testing.T) 
 				},
 			}},
 		}
-		snap := natFeedSnapHelper(t, cfg, overlay)
-		got := snatSourceAddrs(snap, "mixed-src")
-		if !contains(got, natUnresolvedAddressNamePrefix+"mixed-static-ghost") {
-			t.Fatalf("SNAT source must retain the prefixed unmatchable set name after the "+
-				"dangling member poisons the whole set, got %v", got)
+		snaps := buildSourceNATSnapshotsWithFeeds(cfg, nil, overlay)
+		if len(snaps) != 1 {
+			t.Fatalf("expected one poisoned SNAT rule snapshot, got %d", len(snaps))
 		}
-		if contains(got, "10.20.0.0/16") {
-			t.Fatalf("SNAT source published a partial static subset despite dangling member: %v", got)
-		}
-		if contains(got, "0.0.0.0/0") || contains(got, "::/0") {
-			t.Fatalf("failed NAT address reference widened to match-any, got %v", got)
-		}
-		if contains(got, "198.51.100.0/24") {
-			t.Fatalf("unrelated feed prefixes leaked into this set: %v", got)
+		if len(snaps[0].SourceAddresses) != 0 || !snaps[0].LenientMatchDropped {
+			t.Fatalf("poisoned SNAT source closure must be cleared and dropped: %+v", snaps[0])
 		}
 	})
 
@@ -87,10 +79,12 @@ func Test_nat_mixed_static_and_unresolvable_set_fails_closed_6143(t *testing.T) 
 				},
 			}},
 		}
-		snap := natFeedSnapHelper(t, cfg, overlay)
-		got := snatDestAddrs(snap, "mixed-dst")
-		if !contains(got, natUnresolvedAddressNamePrefix+"mixed-static-ghost") || contains(got, "10.20.0.0/16") {
-			t.Fatalf("SNAT destination must poison the whole dangling set, got %v", got)
+		snaps := buildSourceNATSnapshotsWithFeeds(cfg, nil, overlay)
+		if len(snaps) != 1 {
+			t.Fatalf("expected one poisoned SNAT rule snapshot, got %d", len(snaps))
+		}
+		if len(snaps[0].DestinationAddresses) != 0 || !snaps[0].LenientMatchDropped {
+			t.Fatalf("poisoned SNAT destination closure must be cleared and dropped: %+v", snaps[0])
 		}
 	})
 

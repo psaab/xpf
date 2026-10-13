@@ -3499,8 +3499,8 @@ precedence to honor). The tolerant load / peer-sync path
 `cfg.Warnings` entry so an already-persisted or peer-synced config carrying a
 pre-existing collision still BOOTS and keeps collision metadata with both
 typed entries. Address-name paths that consult that metadata quarantine the
-whole reference; NAT's raw-name fallback still needs the CIDR-shaped-name fix
-tracked by #12626. Covered by
+whole reference; NAT's fixed-prefix fallback also keeps CIDR-shaped names from
+becoming literal prefixes (#12626). Covered by
 `pkg/config/addr_set_namespace_5676_test.go` (global + zone-local reject,
 both config orderings, lenient-warn, both-entry retention, namespace-aware
 absent-collision, non-colliding-commits), the strict-reject + lenient-warn cases
@@ -10991,19 +10991,17 @@ reserved for whole-dataplane selection where a rewrite shim
     destination-address` CIDR. An undefined name is hard-rejected at commit
     (`validateNATSourceAddressNameReferencesStrict`, which gates BOTH the
     source and destination name leaves) and remains loadable with a warning on
-    the lenient load / peer-sync path (#1960). The runtime keeps the raw name
-    as a non-empty constraint. A non-IP/CIDR token contributes no prefix, but
-    names may themselves be CIDRs: a CIDR-shaped fallback can match that
-    literal prefix or produce a DNAT translation row. Making the fallback
-    unparseable by construction is tracked by #12626.
+    the lenient load / peer-sync path (#1960). The runtime keeps the constraint
+    non-empty with a fixed, unparseable prefix token; even a CIDR-shaped name
+    cannot become a literal prefix or DNAT translation row (#12626).
     **#3425 — defined-but-unresolvable references**: the same gate rejects a
     name that IS defined under `security address-book` but resolves to NO
     concrete address — an empty unbound `address-set`, a set with any dangling
     or unusable member not resolved by a ready feed value, or an
     `address` with no usable value. At runtime,
     `expandBookNameRecursive` poisons the WHOLE closure when a member remains
-    unresolved rather than returning its surviving subset; the raw-name fallback
-    still applies as above. Strict
+    unresolved rather than returning its surviving subset; the fixed-prefix,
+    unparseable fallback still applies as above. Strict
     commit surfaces this as an operator-visible error using
     `policyMatchAddressBookResolves`, the policy-address representability
     check (#3149) and NAT match-application gate (#3434).
@@ -11019,6 +11017,17 @@ reserved for whole-dataplane selection where a rewrite shim
     strict path for ALL FOUR SNAT/DNAT source/destination combinations (the
     #3303 snapshot tests call the builder directly and bypassed the strict
     validator for three combinations).
+    #12627: a DIRECT feed-bound NAT address-name reference unions the live feed
+    with a usable same-named static closure; if that closure is poisoned, NAT
+    uses the feed alone rather than publishing a static subset. A present-empty
+    feed with no usable static closure matches nothing, even for a CIDR-shaped
+    name. A poisoned SNAT address-name taints the entire SNAT rule:
+    the existing `LenientMatchDropped` marker drops and stops before later rules.
+    Because the poisoned selector side is cleared to reach the existing marker,
+    this fails closed across the rule's remaining scope and constraints, not
+    only the resolvable subset. DNAT remains per-name because its snapshot has
+    no whole-rule poison or tombstone field; whole-side DNAT quarantine requires
+    a separate snapshot-shape decision.
   - `security nat source/destination rule-set rule then ... pool <name>`
     (#5626) — a NAT rule's `then source-nat pool` / `then destination-nat
     pool` names a pool that MUST be defined under `security nat source pool
