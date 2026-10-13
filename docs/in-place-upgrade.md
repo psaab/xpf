@@ -68,18 +68,27 @@ the running daemon and config untouched).
 finished).** When the journaled target differs from the newly-staged
 version, the live system is recovered to a consistent state BEFORE a fresh
 cut starts, so the new cut's rollback target (`PreviousVersion`, read from
-`current`) is always a verified-live version. For a stale **STOPPED**
-journal the old cut already stopped the daemon but never flipped `current`,
-so recovery restarts the still-current KNOWN-GOOD daemon. That restart is
-**fail-closed** (#5846): if `StartUnit` FAILS, recovery ABORTS and returns
-the error — it does NOT sweep partials, reset the journal, or begin a fresh
-cut, because doing so would start a new cut whose rollback target is the
-version that JUST FAILED TO RESTART while the control plane is DOWN
-(possible unrecoverable state). The stale journal + partials are PRESERVED
-so an operator or the next-boot re-run retries recovery; a fresh cut
-proceeds only once the known-good daemon is confirmed restarted. This
-mirrors the fail-closed-on-lifecycle-error posture of the rolling/kernel
-drain paths (#5845).
+`current`) is always a verified-live version.
+
+For a stale **STOPPED** journal, recovery must distinguish whether FLIP 6a
+already repointed `current` before the interruption. If `current` still names
+the journaled `PreviousVersion`, recovery restarts the known-good daemon. If
+`current` names the stale target, that target has NOT been health-confirmed:
+recovery first stops the unit, restores the journaled known-good version, and
+then restarts it. The old DB snapshot is not restored, preserving commits
+made by a restarted old daemon since STOP. An unexpected `current` value, an
+unrestorable previous version, or a lifecycle error aborts recovery
+fail-closed, preserving the stale journal and partials.
+
+For the ordinary pre-FLIP STOPPED case, restart is **fail-closed** (#5846):
+if `StartUnit` FAILS, recovery ABORTS and returns the error — it does NOT
+sweep partials, reset the journal, or begin a fresh cut, because that would
+start a new cut whose rollback target is the version that JUST FAILED TO
+RESTART while the control plane is DOWN (possible unrecoverable state). The
+stale journal + partials are PRESERVED so an operator or the next-boot re-run
+retries recovery; a fresh cut proceeds only once the known-good daemon is
+confirmed restarted. This mirrors the fail-closed-on-lifecycle-error posture
+of the rolling/kernel drain paths (#5845).
 
 - **PREFLIGHT** — check `/var` free ≥ staged size + config-DB snapshot
   size + margin; GC eligible versions if short; take the pre-upgrade

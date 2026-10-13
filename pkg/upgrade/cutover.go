@@ -409,9 +409,47 @@ func (r *Runner) Run(opts Options) (err error) {
 				j = &Journal{State: StateInit}
 			}
 		} else {
+			// STOPPED normally means current still names PreviousVersion, but
+			// FLIP 6a may have repointed it before the process was interrupted.
+			// If this stale cut is superseded, that target has not passed health
+			// and must not become the fresh cut's rollback base. Restore the
+			// journaled known-good version without restoring the old DB snapshot:
+			// a restarted old daemon may have committed changes since STOP.
+			if j.State == StateStopped {
+				current, currentErr := r.readCurrentVersion()
+				if currentErr != nil {
+					return fmt.Errorf("stale STOPPED recovery: read current version: %w", currentErr)
+				}
+				switch current {
+				case j.TargetVersion:
+					if j.PreviousVersion == "" {
+						return fmt.Errorf("stale STOPPED recovery: current names unverified target %s but journal has no known-good previous version; refusing to start a fresh cut",
+							j.TargetVersion)
+					}
+					if err := r.validateRestorableVersion(j.PreviousVersion); err != nil {
+						return fmt.Errorf("stale STOPPED recovery: known-good previous version %s is not restorable: %w",
+							j.PreviousVersion, err)
+					}
+					if err := r.cfg.Sys.StopUnit(r.cfg.Unit); err != nil {
+						return fmt.Errorf("stale STOPPED recovery: stop unit before restoring known-good version %s: %w",
+							j.PreviousVersion, err)
+					}
+					if err := r.flip(j.PreviousVersion); err != nil {
+						return fmt.Errorf("stale STOPPED recovery: restore known-good version %s: %w",
+							j.PreviousVersion, err)
+					}
+					// The shared STOPPED recovery path below starts the restored
+					// known-good runtime and fails closed if it cannot restart.
+				case j.PreviousVersion:
+					// Expected pre-FLIP STOPPED state; restart below.
+				default:
+					return fmt.Errorf("stale STOPPED recovery: current version %q is neither journaled previous %q nor unverified target %q; preserving journal for operator recovery",
+						current, j.PreviousVersion, j.TargetVersion)
+				}
+			}
 			// STAGED/PREFLIGHT/COPIED/VERIFIED (pure, live untouched) or
-			// STOPPED (unit down, `current` still OLD). Restart the unit if
-			// it was stopped, sweep partials, begin anew.
+			// STOPPED with current still at the known-good previous version.
+			// Restart the unit if it was stopped, sweep partials, begin anew.
 			r.logf("upgrade: staged version %s differs from journaled target %s; "+
 				"recovering and starting fresh", stagedVer, j.TargetVersion)
 			if j.State == StateStopped {
