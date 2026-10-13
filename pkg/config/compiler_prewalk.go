@@ -822,6 +822,16 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 		return nil, err
 	}
 
+	staticRouteQNHWarnings := []string(nil)
+	if err := validateStaticRouteInterfaceQNHChild12790(tree.Children); err != nil {
+		if opts.lenientStaticNextHopFamily {
+			staticRouteQNHWarnings = append(staticRouteQNHWarnings,
+				fmt.Sprintf("static route interface qualified-next-hop tail (downgraded to warning on tolerant path): %v", err))
+		} else {
+			return nil, err
+		}
+	}
+
 	// #10707: open-world routing schemas intentionally remain tolerant of
 	// incompletely modeled Junos subtrees, but a direct unknown child can still
 	// be silently discarded by the section compiler. Surface those keywords as
@@ -874,6 +884,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, rgArityWarnings...)
 	warnings = append(warnings, garpCountWarnings...)
 	warnings = append(warnings, bareLeafWarnings...)
+	warnings = append(warnings, staticRouteQNHWarnings...)
 	warnings = append(warnings, openWorldRoutingWarnings...)
 	return warnings, nil
 }
