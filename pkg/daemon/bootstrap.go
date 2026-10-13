@@ -1627,6 +1627,21 @@ func (d *Daemon) setupBootstrapLifeline() {
 	// and the required rename still runs (#12156/F1).
 	original, originalOK := positionalOriginalNameFor(lifeline, defaultMgmtInterface)
 	if !originalOK {
+		if lifeline == defaultMgmtInterface {
+			switch verdict := verifyRetainedMACLink(lifeline); verdict {
+			case retainedMACMismatch, retainedMACUnreadable:
+				name := linkPrefix + lifeline + ".link"
+				if err := neutralizeResurrectableLink(name); err != nil {
+					slog.Error("bootstrap: retained MAC-form .link "+verdict.reason()+
+						"; could not remove the file, so it may still claim fxp0 on a later boot",
+						"interface", lifeline, "file", name, "err", err)
+				} else {
+					slog.Error("bootstrap: retained MAC-form .link "+verdict.reason()+
+						"; removed the file so it cannot claim fxp0 on a later boot",
+						"interface", lifeline)
+				}
+			}
+		}
 		logUnknownOriginalLinkSkip("bootstrap", lifeline, defaultMgmtInterface)
 		if lifeline != defaultMgmtInterface {
 			// MAJOR-1 (same fail-open as the positional path): the lifeline

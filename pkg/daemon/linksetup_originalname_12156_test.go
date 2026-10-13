@@ -74,6 +74,7 @@ func captureLogs12156(t *testing.T) *bytes.Buffer {
 // makes the pass overwrite the MAC-form file with OriginalName=fxp0.
 func TestRenamePositionalRetainsMACFormLink12156(t *testing.T) {
 	logs := captureLogs12156(t)
+	stubIdentity12550(t, "52:54:00:12:34:56", nil)
 	dir := withTempLinkDir(t)
 	linkPath := writeMACFormFxp0Link12156(t, dir)
 
@@ -222,6 +223,7 @@ Name=fxp0
 // bootstrap write site overwrites the MAC-form file with OriginalName=fxp0.
 func TestBootstrapLifelineRetainsMACFormLink12156(t *testing.T) {
 	logs := captureLogs12156(t)
+	stubIdentity12550(t, "52:54:00:12:34:56", nil)
 	st := staticLifelineSeams(t)
 	linkPath := writeMACFormFxp0Link12156(t, st.linkDir)
 
@@ -257,6 +259,7 @@ func TestBootstrapLifelineRetainsMACFormLink12156(t *testing.T) {
 // rather than a default route. Both selection sources converge on the same
 // bootstrap .link write site, which must retain the MAC match.
 func TestBootstrapFactoryFallbackRetainsMACFormLink12156(t *testing.T) {
+	stubIdentity12550(t, "52:54:00:12:34:56", nil)
 	st := staticLifelineSeams(t)
 	linkPath := writeMACFormFxp0Link12156(t, st.linkDir)
 
