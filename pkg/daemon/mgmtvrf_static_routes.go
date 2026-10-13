@@ -142,12 +142,34 @@ func mgmtStaticRoutesDesired(
 		return desired
 	}
 
-	if route, family, ok := mgmtBackupRouterRoute(cfg.System.BackupRouter, cfg.System.BackupRouterDst); ok {
-		mgmtAddStaticRoute(desired, route, family)
+	backup, backupFamily, hasBackup := mgmtBackupRouterRoute(cfg.System.BackupRouter, cfg.System.BackupRouterDst)
+	// The backup-router gateway takes the same IPv6 next-hop inference as an
+	// interface-less static next-hop.
+	var backupV6Gateway string
+	var inferenceOverlay []config.RouteOverlayEntry
+	if hasBackup && backupFamily == netlink.FAMILY_V6 {
+		backupV6Gateway = backup.Gw.String()
+		inferenceOverlay = []config.RouteOverlayEntry{{NextHop: backupV6Gateway}}
+	}
+	connected := [2][]netlink.Route{current[0], current[1]}
+	inferredV6 := inferIPv6StaticNextHopInterfaces(cfg, inferenceOverlay)[""]
+	if hasBackup {
+		// #12583: the kernel lists a gateway route with the output link it
+		// chose, so the backup-router takes its gateway's management link
+		// like an interface-less static next-hop. The listed route then
+		// matches the desired one, and a gateway that moves to another link
+		// moves the route. A gateway that resolves to no management link
+		// keeps LinkIndex 0, which never matches the listed route: every
+		// reconcile replaces it, so the kernel re-checks the gateway, and an
+		// unreachable one fails the apply and has its stale route deleted
+		// (#5867).
+		if linkIndex, ok := mgmtStaticImplicitLinkIndex(nlh, cfg, mgmtSet, backup.Gw, backupFamily,
+			connected[mgmtStaticFamilyIndex(backupFamily)], inferredV6[backupV6Gateway]); ok {
+			backup.LinkIndex = linkIndex
+		}
+		mgmtAddStaticRoute(desired, backup, backupFamily)
 	}
 
-	connected := [2][]netlink.Route{current[0], current[1]}
-	inferredV6 := inferIPv6StaticNextHopInterfaces(cfg, nil)[""]
 	exclusions := config.StaticRouteExclusions(cfg)
 	allStatics := [][]*config.StaticRoute{
 		cfg.RoutingOptions.StaticRoutes,
@@ -202,18 +224,8 @@ func mgmtStaticRoutesDesired(
 						}
 						linkIndex = link.Attrs().Index
 					} else {
-						linkIndex, routeScoped = mgmtStaticConnectedLinkIndex(gateway, connected[mgmtStaticFamilyIndex(family)])
-						if !routeScoped && family == netlink.FAMILY_V6 {
-							if inferred := inferredV6[nextHop.Address]; inferred != "" {
-								linkName := cfg.ResolveKernelIfName(inferred)
-								if config.IsManagementIfName(linkName) && mgmtSet[linkName] {
-									link, err := nlh.LinkByName(linkName)
-									if err == nil && link != nil && link.Attrs() != nil && link.Attrs().Index > 0 {
-										linkIndex, routeScoped = link.Attrs().Index, true
-									}
-								}
-							}
-						}
+						linkIndex, routeScoped = mgmtStaticImplicitLinkIndex(nlh, cfg, mgmtSet, gateway, family,
+							connected[mgmtStaticFamilyIndex(family)], inferredV6[nextHop.Address])
 						if !routeScoped {
 							break
 						}
@@ -533,6 +545,36 @@ func mgmtStaticConnectedLinkIndex(gateway net.IP, routes []netlink.Route) (int, 
 		}
 	}
 	return linkIndex, found
+}
+
+// mgmtStaticImplicitLinkIndex resolves the management output link of a gateway
+// configured without an interface: the live table-999 connected route that
+// contains it or, for IPv6, the management link that the static next-hop
+// inference assigns from the configured prefixes (inferredIf).
+func mgmtStaticImplicitLinkIndex(
+	nlh mgmtRouteProgrammer,
+	cfg *config.Config,
+	mgmtSet map[string]bool,
+	gateway net.IP,
+	family int,
+	connected []netlink.Route,
+	inferredIf string,
+) (int, bool) {
+	if linkIndex, ok := mgmtStaticConnectedLinkIndex(gateway, connected); ok {
+		return linkIndex, true
+	}
+	if family != netlink.FAMILY_V6 || inferredIf == "" {
+		return 0, false
+	}
+	linkName := cfg.ResolveKernelIfName(inferredIf)
+	if !config.IsManagementIfName(linkName) || !mgmtSet[linkName] {
+		return 0, false
+	}
+	link, err := nlh.LinkByName(linkName)
+	if err != nil || link == nil || link.Attrs() == nil || link.Attrs().Index <= 0 {
+		return 0, false
+	}
+	return link.Attrs().Index, true
 }
 
 func mgmtAddStaticRoute(routes map[string]mgmtStaticRouteTarget, route netlink.Route, family int) {
