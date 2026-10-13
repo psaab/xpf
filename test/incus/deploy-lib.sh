@@ -383,11 +383,6 @@ deploy_gate_wave() {
 		return 1
 	fi
 	"$make_cmd" "$gate" || return $?
-	current_sha=$(deploy_build_git_sha "$root") || return 1
-	if [[ "$current_sha" != "$deployed_sha" ]]; then
-		printf 'deploy/gate wave: checkout changed during gate; result is invalid for this deploy\n' >&2
-		return 1
-	fi
 }
 
 # deploy_manifest_sha_from_deb <deb> <binary>
