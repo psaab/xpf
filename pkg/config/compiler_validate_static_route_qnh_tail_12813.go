@@ -26,17 +26,6 @@ func validateStaticRouteQNHTails12813(nodes []*Node) error {
 					}
 				}
 			}
-			if name == "interface" && inStaticNextHop {
-				for i := 2; i < len(node.Keys); i++ {
-					if node.Keys[i] != "qualified-next-hop" {
-						continue
-					}
-					if node.KeyQuoted(i) {
-						return fmt.Errorf("static route next-hop interface has a quoted qualified-next-hop tail at token %q (#12790)", node.Keys[i])
-					}
-					return fmt.Errorf("static route next-hop interface has a dangling qualified-next-hop keyword (#12790)")
-				}
-			}
 			if name == "qualified-next-hop" && inStaticRoute {
 				if err := validateStaticRouteQNHKeys12813(node); err != nil {
 					return err
