@@ -160,11 +160,11 @@ func (s *Server) showChassisClusterInformation(buf *strings.Builder) {
 	cc := cfg.Chassis.Cluster
 	hbInterval := cc.HeartbeatInterval
 	if hbInterval == 0 {
-		hbInterval = 1000
+		hbInterval = int(cluster.DefaultHeartbeatInterval.Milliseconds())
 	}
 	hbThreshold := cc.HeartbeatThreshold
 	if hbThreshold == 0 {
-		hbThreshold = 3
+		hbThreshold = cluster.DefaultHeartbeatThreshold
 	}
 	fmt.Fprintf(buf, "Cluster ID: %d\n", cc.ClusterID)
 	fmt.Fprintf(buf, "Node ID: %d\n", cc.NodeID)
