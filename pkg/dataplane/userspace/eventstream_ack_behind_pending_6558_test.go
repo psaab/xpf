@@ -54,11 +54,13 @@ import (
 // which is the precondition every case here needs.
 func dialEventStream(t *testing.T) (*EventStream, net.Conn) {
 	t.Helper()
-	sockPath := filepath.Join(t.TempDir(), "test-events.sock")
+	sockPath := filepath.Join(shortSockDir9322(t), "test-events.sock")
 	es := NewEventStream(sockPath)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	es.Start(ctx)
+	if err := es.Start(ctx); err != nil {
+		t.Fatalf("start event stream: %v", err)
+	}
 	t.Cleanup(func() { es.Close() })
 
 	deadline := time.Now().Add(2 * time.Second)

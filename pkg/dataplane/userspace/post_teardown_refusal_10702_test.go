@@ -38,10 +38,10 @@ func TestPostTeardownRefusalPrefixMatchesHelper10702(t *testing.T) {
 
 func serveRefusal10702(t *testing.T, message string) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "ctl.sock")
+	sock := filepath.Join(shortSockDir9322(t), "ctl.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
-		t.Skipf("unix socket unavailable: %v", err)
+		t.Fatalf("listen refusal socket: %v", err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {

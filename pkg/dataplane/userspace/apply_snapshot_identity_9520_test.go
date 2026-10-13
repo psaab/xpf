@@ -80,10 +80,10 @@ func TestContentConflictIsClassifiedOnTheRealSocketPath9520(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			sock := filepath.Join(t.TempDir(), "ctl.sock")
+			sock := filepath.Join(shortSockDir9322(t), "ctl.sock")
 			ln, err := net.Listen("unix", sock)
 			if err != nil {
-				t.Skipf("unix socket unavailable: %v", err)
+				t.Fatalf("listen conflict socket: %v", err)
 			}
 			defer ln.Close()
 			go func() {
