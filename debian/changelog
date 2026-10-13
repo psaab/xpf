@@ -1,5 +1,17 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Write a zero-padded static-route destination or IPsec traffic-selector
+    mask that the userspace dataplane parses (IPv4 up to two digits, IPv6 up
+    to three: `10.0.0.0/08`, `2001:db8::/032`) in canonical form at compile.
+    FRR now installs such a route in the kernel too; before, only the
+    userspace FIB had it. Reject longer padding (`10.0.0.0/008`,
+    `2001:db8::/0032`) at commit, including a spelling folded into a
+    same-prefix route. Tolerant loads warn per spelling and keep it; a
+    published route or policy-based VPN selector carrying it makes the
+    userspace dataplane refuse the whole snapshot (previous-good is kept, a
+    fresh boot is default-deny), and the snapshot rejection reasons name
+    it. Rewrite such masks before upgrading (#12507).
+
   * Reject undefined, forwarding-only, and reserved management routing
     instances as explicit tunnel targets at commit. Tolerant loads warn and
     clear such a target, so the tunnel runs in the default routing domain; a
