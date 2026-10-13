@@ -121,7 +121,8 @@ func TestMgmtVRFRouteInventoryIPv6UniverseConnected12721(t *testing.T) {
 
 func TestFRRExcludesStaticResolvedByIPv6UniverseConnectedRoute12721(t *testing.T) {
 	store := testStoreWithSetConfig(t, []string{
-		"set interfaces fxp0 unit 0 family inet6 address 2001:db8:10::2/64",
+		// No configured IPv6 prefix on fxp0: only its live universe-scope
+		// table-999 connected route can resolve this gateway for FRR exclusion.
 		"set interfaces ge-0/0/0 unit 0 family inet6 address 2001:db8:20::2/64",
 		"set routing-options rib inet6.0 static route 2001:db8:100::/64 next-hop 2001:db8:10::1",
 		"set routing-options rib inet6.0 static route 2001:db8:200::/64 next-hop 2001:db8:20::1",
