@@ -163,7 +163,14 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 						recordMisnestedPolicyChildren12629(sec, child, "to-zone",
 							fmt.Sprintf("from-zone %q", child.Keys[1]))
 					}
+					// The keyed destination carries the pair body itself.
+					// Its child names are policy keywords, not destination
+					// zones; use the key just as the combined spelling does.
 					for _, tzNode := range fzSub.FindChildren("to-zone") {
+						if len(tzNode.Keys) >= 2 {
+							pairs = append(pairs, zonePair{fzSub.Name(), tzNode.Keys[1], tzNode})
+							continue
+						}
 						for _, tzSub := range tzNode.Children {
 							pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
 						}

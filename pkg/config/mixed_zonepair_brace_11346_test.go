@@ -12,10 +12,8 @@ func mixedZonePairBrace11346(addPolicyZone bool) string {
 	}
 	return `security { ` + zones + ` policies {
     from-zone {
-        trust {
-            to-zone untrust {
-                policy p1 { match { source-address any; destination-address any; application any; } then { permit; } }
-            }
+        trust to-zone untrust {
+            policy p1 { match { source-address any; destination-address any; application any; } then { permit; } }
         }
     }
 } }`
@@ -24,7 +22,7 @@ func mixedZonePairBrace11346(addPolicyZone bool) string {
 func TestMixedKeyedZonePairBracesAreRejectedSpecifically11346(t *testing.T) {
 	_, err := compileText7523(t, mixedZonePairBrace11346(true))
 	if err == nil {
-		t.Fatal("the mixed from-zone container / keyed to-zone shape committed as trust->policy with zero policies")
+		t.Fatal("the mixed from-zone-key spelling committed with zero policies")
 	}
 	for _, want := range []string{"mixed zone-pair", "from-zone trust", "to-zone untrust", "zero policies"} {
 		if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(want)) {

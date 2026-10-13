@@ -172,6 +172,10 @@ func validatePolicyThenPermitStrict(nodes []*Node, lenient bool) ([]string, erro
 						// Flat set: from-zone → <name> → to-zone → <name> → policy ...
 						for _, fzSub := range child.Children {
 							for _, tzNode := range fzSub.FindChildren("to-zone") {
+								if len(tzNode.Keys) >= 2 {
+									pairs = append(pairs, zonePair{fzSub.Name(), tzNode.Keys[1], tzNode})
+									continue
+								}
 								for _, tzSub := range tzNode.Children {
 									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
 								}
@@ -318,6 +322,10 @@ func validatePolicyThenRejectStrict(nodes []*Node, lenient bool) ([]string, erro
 					} else {
 						for _, fzSub := range child.Children {
 							for _, tzNode := range fzSub.FindChildren("to-zone") {
+								if len(tzNode.Keys) >= 2 {
+									pairs = append(pairs, zonePair{fzSub.Name(), tzNode.Keys[1], tzNode})
+									continue
+								}
 								for _, tzSub := range tzNode.Children {
 									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
 								}
@@ -439,6 +447,10 @@ func validatePolicyThenCountAlarmStrict(nodes []*Node, lenient bool) ([]string, 
 					} else {
 						for _, fzSub := range child.Children {
 							for _, tzNode := range fzSub.FindChildren("to-zone") {
+								if len(tzNode.Keys) >= 2 {
+									pairs = append(pairs, zonePair{fzSub.Name(), tzNode.Keys[1], tzNode})
+									continue
+								}
 								for _, tzSub := range tzNode.Children {
 									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
 								}
@@ -641,6 +653,10 @@ func validatePolicyThenDenyStrict(nodes []*Node, lenient bool) ([]string, error)
 					} else {
 						for _, fzSub := range child.Children {
 							for _, tzNode := range fzSub.FindChildren("to-zone") {
+								if len(tzNode.Keys) >= 2 {
+									pairs = append(pairs, zonePair{fzSub.Name(), tzNode.Keys[1], tzNode})
+									continue
+								}
 								for _, tzSub := range tzNode.Children {
 									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
 								}
@@ -723,6 +739,10 @@ func validatePolicyUnsupportedThenSiblings(nodes []*Node, lenient bool) ([]strin
 					} else {
 						for _, fzSub := range child.Children {
 							for _, tzNode := range fzSub.FindChildren("to-zone") {
+								if len(tzNode.Keys) >= 2 {
+									pairs = append(pairs, zonePair{fzSub.Name(), tzNode.Keys[1], tzNode})
+									continue
+								}
 								for _, tzSub := range tzNode.Children {
 									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
 								}
@@ -801,6 +821,10 @@ func validatePolicyEnforcementSubtrees(nodes []*Node, lenient bool) ([]string, e
 					} else {
 						for _, fzSub := range child.Children {
 							for _, tzNode := range fzSub.FindChildren("to-zone") {
+								if len(tzNode.Keys) >= 2 {
+									pairs = append(pairs, zonePair{fzSub.Name(), tzNode.Keys[1], tzNode})
+									continue
+								}
 								for _, tzSub := range tzNode.Children {
 									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
 								}

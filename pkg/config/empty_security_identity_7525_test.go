@@ -203,6 +203,20 @@ func TestEmptyIdentityCaughtInHierarchicalShape7525(t *testing.T) {
 			"to-zone",
 		},
 		{
+			"keyed empty to-zone under from-zone container",
+			`security {
+    zones { security-zone trust; }
+    policies {
+        from-zone { trust { to-zone "" { policy p {
+            match { source-address any; destination-address any; application any; }
+            then { permit; }
+        } } } }
+    }
+}
+`,
+			"to-zone",
+		},
+		{
 			"hierarchical empty policy name",
 			`security {
     zones { security-zone trust; security-zone untrust; }
