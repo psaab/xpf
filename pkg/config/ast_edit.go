@@ -884,8 +884,8 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool,
 		// This is a container (or a leaf with trailing value tokens).
 		// Find or create matching node.
 		found := false
-		if interfaceFilterSamplingSchema12508(childSchema) {
-			// #12508: edit the sibling that supplies the binding.
+		if editorRepeatedSiblingSchema12714(childSchema) {
+			// Edit the sibling whose binding the compiler observes.
 			if k := interfaceFilterSamplingSetTarget12508(*current, nodeKeys, schema, path[0] == "groups"); k >= 0 {
 				n := (*current)[k]
 				if n.IsLeaf {
@@ -989,10 +989,10 @@ func deletePath(current *[]*Node, path []string, grouped []bool, schema *schemaN
 		return err
 	}
 	if schema != nil {
-		// #12508: an interface filter/sampling delete removes every matching
-		// sibling, after the refusals below, instead of one node here.
+		// Repeated bindings with compiler-visible sibling semantics are
+		// intercepted below; ordinary nodes retain first-match behavior.
 		siblingSchema := schemaChildFor(schema, path[i])
-		allSiblings := interfaceFilterSamplingSchema12508(siblingSchema)
+		allSiblings := editorRepeatedSiblingSchema12714(siblingSchema)
 		if !allSiblings {
 			if idx := findElidedNodeForPath(*current, path[i:], schema); idx >= 0 {
 				*current = append((*current)[:idx], (*current)[idx+1:]...)
@@ -1223,7 +1223,7 @@ func setInactiveAtPath(current *[]*Node, path []string, grouped []bool, schema *
 	if handled, err := editInterfaceFamily12661(current, path, grouped, schema, i, true, inactive); handled {
 		return err
 	}
-	if interfaceFilterSamplingSchema12508(childSchema) {
+	if editorRepeatedSiblingSchema12714(childSchema) {
 		if handled, err := setInterfaceFilterSamplingInactive12508(
 			current, path, childSchema, i, inactive,
 		); handled {
@@ -1308,6 +1308,36 @@ func removeMatchingNode(nodes *[]*Node, targetKeys []string) error {
 		}
 	}
 	return fmt.Errorf("%w: no node matching %q", ErrPathNotFound, strings.Join(targetKeys, " "))
+}
+
+// editorRepeatedSiblingSchema12714 identifies repeated container bindings
+// with compiler-visible sibling semantics. Interface filter/sampling retains
+// #12508 behavior; inet DHCP, DHCPv6 client, and forwarding-options sampling
+// were updated to read repeated siblings in authored order by #12595.
+func editorRepeatedSiblingSchema12714(candidate *schemaNode) bool {
+	if interfaceFilterSamplingSchema12508(candidate) {
+		return true
+	}
+	if candidate == nil {
+		return false
+	}
+	if schemaInterfaces != nil && schemaInterfaces.wildcard != nil {
+		unit := schemaInterfaces.wildcard.children["unit"]
+		if unit != nil {
+			family := unit.children["family"]
+			if family != nil {
+				inet, inet6 := family.children["inet"], family.children["inet6"]
+				if inet != nil && candidate == inet.children["dhcp"] {
+					return true
+				}
+				if inet6 != nil && candidate == inet6.children["dhcpv6-client"] {
+					return true
+				}
+			}
+		}
+	}
+	return schemaForwardingOptions != nil &&
+		candidate == schemaForwardingOptions.children["sampling"]
 }
 
 // interfaceFilterSamplingSchema12508 identifies the interface-family filter
@@ -1559,19 +1589,25 @@ func isInterfaceFamilyMutationRefusal12661(err error) bool {
 }
 
 // interfaceFilterSamplingSetTarget12508 returns the index of the repeated
-// filter/sampling sibling a set must edit, or -1 to append a new block.
+// binding sibling a set must edit, or -1 to append a new block.
 //
-// The compiler reads siblings in order, so the last active sibling supplies
-// the binding: a braced one is edited and a compact one is shadowed by the
-// appended block. Apply-groups expansion keeps the first group sibling
-// instead (firstWins), so there the first active braced or compact
-// single-statement sibling is edited and the caller braces a compact one in
-// place. Bare and packed leaves are skipped there, as the earlier first-block
-// walk skipped them; commit refuses a packed filter binding (#10293).
+// Filter/sampling contract (unchanged): the compiler reads siblings in
+// order, so the last active sibling supplies the binding: a braced one is
+// edited and a compact one is shadowed by the appended block (a stale
+// compact statement may remain rendered). Apply-groups expansion keeps the
+// first group sibling instead (firstWins), so there the first active braced
+// or compact single-statement sibling is edited and the caller braces a
+// compact one in place. Bare and packed leaves are skipped under groups, as
+// the earlier first-block walk skipped them; commit refuses a packed filter
+// binding (#10293).
 //
-// With no active sibling, the edit stays in the inactive statement that
-// activation makes effective (the last one, or the first under groups), so
-// set never activates a deactivated binding.
+// DHCP/DHCPv6-client/forwarding-options sampling summary: later active
+// siblings determine DHCP/client scalar values and replace duplicate
+// forwarding-options sampling instances. Apply-groups expansion keeps the
+// first group sibling instead (firstWins). With no active sibling, the edit
+// stays in the inactive statement that activation makes effective (the last
+// one, or the first under groups), so set never activates a deactivated
+// binding.
 func interfaceFilterSamplingSetTarget12508(nodes []*Node, nodeKeys []string, schema *schemaNode, firstWins bool) int {
 	target, inactive, live := -1, -1, false
 	for k, n := range nodes {
@@ -1670,8 +1706,14 @@ func deleteInterfaceFilterSampling12508(
 			}
 			continue
 		}
-		if keysEqual(n.Keys, nodeKeys) && removeAllMatchingNodes12508(&n.Children, childKeys) {
-			matched = true
+		if keysEqual(n.Keys, nodeKeys) {
+			if containerSchema == schemaForwardingOptions.children["sampling"] {
+				if deleteBelowRepeatedSibling12714(n, childKeys) {
+					matched = true
+				}
+			} else if removeAllMatchingNodes12508(&n.Children, childKeys) {
+				matched = true
+			}
 		}
 	}
 	if matched {
@@ -1712,9 +1754,14 @@ func setInterfaceFilterSamplingInactive12508(
 			}
 			continue
 		}
-		if keysEqual(n.Keys, nodeKeys) &&
-			markAllMatchingNodesInactive12508(&n.Children, childKeys, inactive) > 0 {
-			matched = true
+		if keysEqual(n.Keys, nodeKeys) {
+			if containerSchema == schemaForwardingOptions.children["sampling"] {
+				if markBelowRepeatedSiblingInactive12714(n, childKeys, inactive) {
+					matched = true
+				}
+			} else if markAllMatchingNodesInactive12508(&n.Children, childKeys, inactive) > 0 {
+				matched = true
+			}
 		}
 	}
 	if matched {
@@ -1745,6 +1792,70 @@ func markAllMatchingNodesInactive12508(nodes *[]*Node, targetKeys []string, inac
 		if n != nil && keysMatch(n.Keys, targetKeys) {
 			n.Inactive = inactive
 			matched++
+		}
+	}
+	return matched
+}
+
+// deleteBelowRepeatedSibling12714 descends through keyed child containers,
+// removing every matching descendant across the repeated parent siblings.
+func deleteBelowRepeatedSibling12714(parent *Node, keys []string) bool {
+	if len(keys) == 0 {
+		return false
+	}
+	keyCount := 1
+	for _, child := range parent.Children {
+		if child != nil && !child.IsLeaf && len(child.Keys) > keyCount &&
+			child.Keys[0] == keys[0] {
+			keyCount = len(child.Keys)
+		}
+	}
+	if len(keys) == keyCount {
+		return removeAllMatchingNodes12508(&parent.Children, keys)
+	}
+	if len(keys) < keyCount {
+		return false
+	}
+	rest := keys[keyCount:]
+	matched := false
+	for _, child := range parent.Children {
+		if child == nil || child.IsLeaf || !keysEqual(child.Keys, keys[:keyCount]) {
+			continue
+		}
+		if deleteBelowRepeatedSibling12714(child, rest) {
+			matched = true
+		}
+	}
+	return matched
+}
+
+// markBelowRepeatedSiblingInactive12714 is the deactivate/activate twin of
+// deleteBelowRepeatedSibling12714: same descent, marking instead of removing.
+func markBelowRepeatedSiblingInactive12714(parent *Node, keys []string, inactive bool) bool {
+	if len(keys) == 0 {
+		return false
+	}
+	keyCount := 1
+	for _, child := range parent.Children {
+		if child != nil && !child.IsLeaf && len(child.Keys) > keyCount &&
+			child.Keys[0] == keys[0] {
+			keyCount = len(child.Keys)
+		}
+	}
+	if len(keys) == keyCount {
+		return markAllMatchingNodesInactive12508(&parent.Children, keys, inactive) > 0
+	}
+	if len(keys) < keyCount {
+		return false
+	}
+	rest := keys[keyCount:]
+	matched := false
+	for _, child := range parent.Children {
+		if child == nil || child.IsLeaf || !keysEqual(child.Keys, keys[:keyCount]) {
+			continue
+		}
+		if markBelowRepeatedSiblingInactive12714(child, rest, inactive) {
+			matched = true
 		}
 	}
 	return matched
