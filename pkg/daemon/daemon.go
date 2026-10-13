@@ -1001,9 +1001,13 @@ type Daemon struct {
 	// (frr.conf/swanctl PSKs/Kea/login accounts) in the window between the wipe
 	// and the daemon stop. Read/written only via isResetting / enterReset...
 	// exitResetGeneration (sync/atomic), so the zeroize goroutine and any
-	// concurrent apply goroutine race safely. A failed wipe clears it again so
-	// the box stays recoverable (fail-closed, see factoryReset).
+	// concurrent apply goroutine race safely. A failure before any successful
+	// wipe clears it again so the box stays recoverable (see factoryReset).
 	resetting atomic.Bool
+	// resetWipeSucceeded is sticky for the daemon lifetime: once any reset
+	// invocation has completed its wipe, a later failed retry must not resume
+	// writers or leave the terminal reset generation.
+	resetWipeSucceeded atomic.Bool
 	// applyFenced marks the daemon as SHUTTING DOWN for the purpose of
 	// background config applies (#6788). runShutdownSequence sets it at the very
 	// start — before it cancels the in-flight apply and before the single

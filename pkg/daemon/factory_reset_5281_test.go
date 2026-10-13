@@ -225,3 +225,49 @@ func TestFactoryResetSuccessKeepsFeedHistoryFenceSticky12170(t *testing.T) {
 		t.Fatalf("failed re-entry lifted the successful wipe's history fence: %v", err)
 	}
 }
+
+// #12616: a failed retry after a successful wipe must not clear the terminal
+// reset generation. The first call wipes and returns nil (the caller would
+// stop the daemon, but before shutdown a second call must stay fenced).
+func TestFactoryResetFailedRetryAfterSuccessfulWipeKeepsTerminalGeneration(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
+	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+
+	if err := d.factoryReset(context.Background(), func() error { return fakePendingWipe(t)() }); err != nil {
+		t.Fatalf("successful factoryReset: %v", err)
+	}
+	if !d.isResetting() {
+		t.Fatal("successful wipe must enter the terminal reset generation")
+	}
+	wantErr := errors.New("retry wipe busy")
+	if err := d.factoryReset(context.Background(), func() error { return wantErr }); !errors.Is(err, wantErr) {
+		t.Fatalf("failed retry must surface the wipe error; got %v", err)
+	}
+	if !d.isResetting() {
+		t.Fatal("failed retry after a successful wipe must not clear the terminal reset generation")
+	}
+}
+
+// #12616: a failed wipe, then a successful retry, ends terminal.
+func TestFactoryResetFailureThenSuccessEndsTerminal12616(t *testing.T) {
+	isolateFactoryResetOwnershipPaths(t)
+	isolateFactoryResetIdentityPaths(t)
+	isolateHandoffFlag(t)
+	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+
+	wantErr := errors.New("first wipe boom")
+	if err := d.factoryReset(context.Background(), func() error { return wantErr }); !errors.Is(err, wantErr) {
+		t.Fatalf("failed wipe must surface error; got %v", err)
+	}
+	if d.isResetting() {
+		t.Fatal("first-attempt failed wipe must exit the reset generation")
+	}
+	if err := d.factoryReset(context.Background(), func() error { return fakePendingWipe(t)() }); err != nil {
+		t.Fatalf("successful retry: %v", err)
+	}
+	if !d.isResetting() {
+		t.Fatal("failure-then-success must end in the terminal reset generation")
+	}
+}
