@@ -9,6 +9,9 @@ import (
 
 // FAIL-ON-REVERT (#12517 R7-F2): a quoted/bracketed `then` inside the prepend
 // run must not turn the authored reject into a permit in tolerant rendering.
+// The split-term row adds a `then { accept; }` block for the same term; it
+// renders `permit 10` without the override at the end of
+// parsePolicyTermChildren.
 func TestQuotedThenNextHopRejectRendersDeny12517(t *testing.T) {
 	for _, tc := range []struct {
 		name, text string
@@ -24,6 +27,10 @@ func TestQuotedThenNextHopRejectRendersDeny12517(t *testing.T) {
 		{
 			name: "bracketed then",
 			text: `policy-options { policy-statement P { term t from protocol static then accept as-path-prepend [ 65001 "then" ] next-hop reject; term u then accept; } }`,
+		},
+		{
+			name: "term-line then accept block for the same term",
+			text: `policy-options { policy-statement P { term t then accept as-path-prepend 65001 "then" next-hop reject; term t { then { accept; } } term u then accept; } }`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

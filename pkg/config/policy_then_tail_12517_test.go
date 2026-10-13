@@ -23,9 +23,11 @@ func policyThenTailCases12517() []policyThenTailCase12517 {
 		{name: "metric-type", action: "metric-type 1", tail: "foo"},
 		{name: "origin", action: "origin igp", tail: "egp"},
 		{name: "community-none", action: "community none", tail: "foo"},
-		{name: "community-add", action: "community add [ 65001:100 ]", tail: "foo"},
-		{name: "community-set", action: "community set [ 65001:100 ]", tail: "foo"},
-		{name: "community-value", action: "community [ 65001:100 ]", tail: "foo"},
+		// A valid literal after the list: a non-community token there is
+		// rejected first by the community reference gate, with its own message.
+		{name: "community-add", action: "community add [ 65001:100 ]", tail: "65001:200"},
+		{name: "community-set", action: "community set [ 65001:100 ]", tail: "65001:200"},
+		{name: "community-value", action: "community [ 65001:100 ]", tail: "65001:200"},
 		{name: "load-balance", action: "load-balance per-packet", tail: "foo"},
 		{name: "accept", action: "accept", tail: "foo"},
 		{name: "reject", action: "reject", tail: "foo"},
@@ -49,22 +51,25 @@ func policyThenTailSpellings12517(tc policyThenTailCase12517) []struct {
 	name, text string
 } {
 	expr := policyThenTailExpr12517(tc)
+	// AP1 is defined so the term-line reader's as-path match is valid and
+	// the tail diagnostic, not an undefined-reference gate, reports first.
+	const defs = `as-path AP1 ".*"; `
 	return []struct{ name, text string }{
 		{
 			name: "compact",
-			text: "policy-options { policy-statement P { term t { then " + expr + "; } } }",
+			text: "policy-options { " + defs + "policy-statement P { term t { then " + expr + "; } } }",
 		},
 		{
 			name: "term-line",
-			text: "policy-options { policy-statement P { term t then " + expr + "; } }",
+			text: "policy-options { " + defs + "policy-statement P { term t then " + expr + "; } }",
 		},
 		{
 			name: "braced",
-			text: "policy-options { policy-statement P { term t { then { " + expr + "; } } } }",
+			text: "policy-options { " + defs + "policy-statement P { term t { then { " + expr + "; } } } }",
 		},
 		{
 			name: "set-path",
-			text: "set policy-options policy-statement P term t then " + expr,
+			text: "set policy-options as-path AP1 \".*\"\nset policy-options policy-statement P term t then " + expr,
 		},
 	}
 }
@@ -105,17 +110,34 @@ func policyThenTailStore12517(t *testing.T) *configstore.Store {
 	return store
 }
 
+// policyThenTailWant12517 is the diagnostic suffix every spelling and channel
+// reports for tc: the statement whose operands the first tail token followed,
+// and that token. The schema walk's typed-leaf message on store commit
+// channels shares it.
+func policyThenTailWant12517(tc policyThenTailCase12517) string {
+	return "then " + strings.Fields(tc.action)[0] + ": unknown modifier " + strconv.Quote(strings.Fields(tc.tail)[0])
+}
+
+// policyThenTailGateWant12517 is the full validatePolicyThenTailsStrict12517
+// diagnostic, which only the #12517 gate produces.
+func policyThenTailGateWant12517(tc policyThenTailCase12517) string {
+	return `policy-options policy-statement "P" term "t" ` + policyThenTailWant12517(tc)
+}
+
 // FAIL-ON-REVERT (#12517): the compiler must retain evidence of every unknown
 // then-tail token. All parser spellings feed the same strict gate and tolerant
-// warning; from-words must not silently become unvalidated matches.
+// warning; from-words must not silently become unvalidated matches. The exact
+// diagnostic is pinned: with the tail recorders turned into no-ops every row
+// fails, including those an older community or schema gate also rejects.
 func TestPolicyThenTailRejectedAcrossSpellings12517(t *testing.T) {
 	for _, tc := range policyThenTailCases12517() {
+		want := policyThenTailGateWant12517(tc)
 		for _, spelling := range policyThenTailSpellings12517(tc) {
 			t.Run(tc.name+"/"+spelling.name, func(t *testing.T) {
 				tree := policyTree12517(t, spelling.text)
 				t.Run("CompileConfig", func(t *testing.T) {
-					if _, err := config.CompileConfig(tree); err == nil {
-						t.Errorf("CompileConfig accepted unknown then-tail %q in %q", tc.tail, spelling.text)
+					if _, err := config.CompileConfig(tree); err == nil || !strings.Contains(err.Error(), want) {
+						t.Errorf("CompileConfig error = %v, want %q", err, want)
 					}
 				})
 				t.Run("CompileConfigLenient", func(t *testing.T) {
@@ -123,16 +145,8 @@ func TestPolicyThenTailRejectedAcrossSpellings12517(t *testing.T) {
 					if err != nil {
 						t.Fatalf("CompileConfigLenient rejected persisted then-tail: %v", err)
 					}
-					foundWarning := false
-					for _, warning := range cfg.Warnings {
-						if strings.Contains(warning, "policy then operand (downgraded to warning on tolerant path)") &&
-							strings.Contains(warning, strings.Fields(tc.tail)[0]) {
-							foundWarning = true
-							break
-						}
-					}
-					if !foundWarning {
-						t.Errorf("lenient compile omitted then-tail warning for %q: %v", tc.tail, cfg.Warnings)
+					if !hasPolicyThenTailWarning12517(cfg.Warnings, want) {
+						t.Errorf("lenient compile omitted %q: %v", want, cfg.Warnings)
 					}
 				})
 			})
@@ -141,33 +155,30 @@ func TestPolicyThenTailRejectedAcrossSpellings12517(t *testing.T) {
 }
 
 // CheckText, LoadOverride/LoadMerge + CommitCheck, and Commit are separate
-// strict entry points; tolerant ingress is covered independently below.
+// strict entry points; tolerant ingress is covered independently below. On
+// these channels the schema walk may name a typed leaf's tail first; both
+// diagnostics carry the same `then <action>: unknown modifier` suffix.
 func TestPolicyThenTailStrictStoreChannels12517(t *testing.T) {
 	for _, tc := range policyThenTailCases12517() {
-		setText := "set policy-options policy-statement P term t then " + policyThenTailExpr12517(tc)
+		setText := policyThenTailSpellings12517(tc)[3].text
+		want := policyThenTailWant12517(tc)
 		t.Run(tc.name, func(t *testing.T) {
 			t.Run("CheckText", func(t *testing.T) {
-				if _, err := configstore.CheckText(setText, 0); err == nil {
-					t.Errorf("CheckText accepted %q", setText)
+				if _, err := configstore.CheckText(setText, 0); err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("CheckText error = %v, want %q", err, want)
 				}
 			})
-			for _, load := range []struct {
-				name string
-				fn   func(*configstore.Store, string) error
-			}{
-				{name: "LoadOverride", fn: (*configstore.Store).LoadOverride},
-				{name: "LoadMerge", fn: (*configstore.Store).LoadMerge},
-			} {
+			for _, load := range policyThenLoads12517(setText) {
 				t.Run(load.name, func(t *testing.T) {
 					store := policyThenTailStore12517(t)
 					if err := load.fn(store, setText); err != nil {
 						t.Fatalf("%s rejected input before commit validation: %v", load.name, err)
 					}
-					if _, err := store.CommitCheck(); err == nil {
-						t.Errorf("%s + CommitCheck accepted %q", load.name, setText)
+					if _, err := store.CommitCheck(); err == nil || !strings.Contains(err.Error(), want) {
+						t.Errorf("%s + CommitCheck error = %v, want %q", load.name, err, want)
 					}
-					if _, err := store.Commit(); err == nil {
-						t.Errorf("%s + Commit accepted %q", load.name, setText)
+					if _, err := store.Commit(); err == nil || !strings.Contains(err.Error(), want) {
+						t.Errorf("%s + Commit error = %v, want %q", load.name, err, want)
 					}
 				})
 			}
@@ -178,6 +189,7 @@ func TestPolicyThenTailStrictStoreChannels12517(t *testing.T) {
 func TestPolicyThenTailTolerantSyncWarns12517(t *testing.T) {
 	for _, tc := range policyThenTailCases12517() {
 		syncText := policyThenTailSpellings12517(tc)[1].text
+		want := policyThenTailGateWant12517(tc)
 		t.Run(tc.name, func(t *testing.T) {
 			store, err := configstore.New(filepath.Join(t.TempDir(), "config"))
 			if err != nil {
@@ -187,21 +199,19 @@ func TestPolicyThenTailTolerantSyncWarns12517(t *testing.T) {
 			if err != nil {
 				t.Fatalf("SyncApply rejected persisted then-tail: %v", err)
 			}
-			foundWarning := false
-			for _, warning := range cfg.Warnings {
-				if strings.Contains(warning, "policy then operand (downgraded to warning on tolerant path)") &&
-					strings.Contains(warning, strings.Fields(tc.tail)[0]) {
-					foundWarning = true
-					break
-				}
-			}
-			if !foundWarning {
-				t.Fatalf("SyncApply omitted then-tail warning for %q: %v", tc.tail, cfg.Warnings)
+			if !hasPolicyThenTailWarning12517(cfg.Warnings, want) {
+				t.Fatalf("SyncApply omitted %q: %v", want, cfg.Warnings)
 			}
 		})
 	}
 }
 
+// FAIL-ON-REVERT (#12517 R7-F2): quoted or bracketed `then` inside the
+// prepend run diverts `next-hop reject` to the next-hop operand; tolerant
+// compilation must keep the authored deny. The split-term row authors the
+// same term as a term-line and then a `then { accept; }` block: only the
+// override at the end of parsePolicyTermChildren keeps it reject (RED when
+// that override is removed).
 func TestQuotedThenNextHopRejectRemainsDeny12517(t *testing.T) {
 	cases := []struct {
 		name, text string
@@ -217,6 +227,10 @@ func TestQuotedThenNextHopRejectRemainsDeny12517(t *testing.T) {
 		{
 			name: "term-line bracketed then",
 			text: `policy-options { policy-statement P { term t from protocol static then accept as-path-prepend [ 65001 "then" ] next-hop reject; term u then accept; } }`,
+		},
+		{
+			name: "term-line then accept block for the same term",
+			text: `policy-options { policy-statement P { term t then accept as-path-prepend 65001 "then" next-hop reject; term t { then { accept; } } term u then accept; } }`,
 		},
 	}
 	for _, tc := range cases {
