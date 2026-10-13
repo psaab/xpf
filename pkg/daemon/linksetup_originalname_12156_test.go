@@ -659,3 +659,60 @@ func TestRenamePositionalUnfreedOwnerWriteFailStaysFailClosed12156(t *testing.T)
 		}
 	}
 }
+
+// TestCHSingleFaultTempOKOwnerWriteFail12557 is the single-fault owner-write
+// failure shape: an unknown NIC is successfully temp-renamed while the known
+// owner's OriginalName glob makes writeLinkFile refuse its final write. The
+// unknown's MAC-form O.link must still be neutralized under its pre-temp name,
+// or the next boot resurrects it under the owner's identity. FAIL-ON-REVERT:
+// dropping the pre-temp-name carry leaves ge-0-0-0.link behind.
+func TestCHSingleFaultTempOKOwnerWriteFail12557(t *testing.T) {
+	chain := "# Managed by xpfd \u2014 do not edit\n[Match]\nOriginalName=enp5s0*\n\n[Link]\nName=fxp0"
+	macForm := "# Managed by xpfd \u2014 do not edit\n[Match]\nMACAddress=52:54:00:00:00:0b\n\n[Link]\nName=ge-0-0-0\nMTUBytes=1500\n"
+	for range 100 {
+		dir := withTempLinkDir(t)
+		if err := os.WriteFile(filepath.Join(dir, linkPrefix+"fxp0.link"), []byte(chain), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, linkPrefix+"ge-0-0-0.link"), []byte(macForm), 0644); err != nil {
+			t.Fatal(err)
+		}
+		nics := []pciNIC{
+			{sortKey: 1, busAddr: "0000:05:00.0", name: "ge-0-0-0"},
+			{sortKey: 1, busAddr: "0000:06:00.0", name: "fxp0"},
+		}
+		// Both temp renames succeed; the only fault is the known owner's
+		// refused .link write because its recorded OriginalName contains '*'.
+		_, errs := renamePositional(nics, 0, false, func(string, string) error { return nil })
+		if len(errs) == 0 {
+			t.Fatal("want the refused owner write, got no error")
+		}
+		if _, err := os.Stat(filepath.Join(dir, linkPrefix+"ge-0-0-0.link")); !os.IsNotExist(err) {
+			t.Fatalf("unknown's MAC-form claim survived owner write failure (resurrection), stat err=%v", err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, linkPrefix+"fxp0.link")); !os.IsNotExist(err) {
+			t.Fatalf("stale fxp0.link survived, stat err=%v", err)
+		}
+	}
+}
+
+func TestBreakNameCollisionsCarriesPreTempName12557(t *testing.T) {
+	desiredByCurrent := map[string]string{"fxp0": "ge-0-0-0", "enp5s0": "fxp0"}
+	originalByCurrent := map[string]string{"fxp0": originalNameUnknown, "enp5s0": "enp5s0"}
+	_, preTemp, _, _ := breakNameCollisions("test",
+		[]string{"enp5s0", "fxp0"},
+		map[string]bool{"fxp0": true, "ge-0-0-0": true},
+		desiredByCurrent, originalByCurrent,
+		func(string, string) error { return nil })
+	if len(preTemp) != 1 {
+		t.Fatalf("want one pre-temp carry entry, got %v", preTemp)
+	}
+	for tmp, pre := range preTemp {
+		if !strings.HasPrefix(tmp, "xpf-tmp-") || pre != "fxp0" {
+			t.Fatalf("carry must map temp key to pre-temp name, got %q -> %q", tmp, pre)
+		}
+		if desiredByCurrent[tmp] != "ge-0-0-0" {
+			t.Fatalf("temp key must carry desired final, got %v", desiredByCurrent)
+		}
+	}
+}

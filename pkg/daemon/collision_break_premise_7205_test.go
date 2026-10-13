@@ -44,7 +44,7 @@ func TestBreakNameCollisionsReportsUnfreedNames_7205(t *testing.T) {
 		return fmt.Errorf("simulated temp-rename failure")
 	}
 
-	_, unfreed, changed := breakNameCollisions("test", currentNames, desiredNames,
+	_, _, unfreed, changed := breakNameCollisions("test", currentNames, desiredNames,
 		desiredByCurrent, originalByCurrent, failTemp)
 
 	if !unfreed["fxp0"] {
@@ -67,7 +67,7 @@ func TestBreakNameCollisionsReportsNothingWhenTempRenameSucceeds_7205(t *testing
 	desiredByCurrent := map[string]string{"enp5s0": "fxp0", "fxp0": "ge-0-0-0"}
 	originalByCurrent := map[string]string{"enp5s0": "enp5s0", "fxp0": "enp6s0"}
 
-	_, unfreed, changed := breakNameCollisions("test", currentNames, desiredNames,
+	_, _, unfreed, changed := breakNameCollisions("test", currentNames, desiredNames,
 		desiredByCurrent, originalByCurrent, func(from, to string) error { return nil })
 
 	if len(unfreed) != 0 {
