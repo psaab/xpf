@@ -29,6 +29,31 @@ func securityPoliciesSchema12217() *schemaNode {
 	return schemaSecurity.children["policies"]
 }
 
+// These Junos-valid statements are not policy rulebases. They are currently
+// accepted but not consumed at this hierarchy by the policy compiler, so
+// tolerant compilation warns without poisoning the forwarding snapshot.
+func nonEnforcementSecurityPoliciesChild12628(keyword string) bool {
+	switch keyword {
+	case "traceoptions", "policy-stats", "pre-id-default-policy":
+		return true
+	default:
+		return false
+	}
+}
+
+func enforcementSecurityPoliciesChildren12217(sec *SecurityConfig) []string {
+	if sec == nil || len(sec.UnknownPoliciesChildren) == 0 {
+		return nil
+	}
+	var unknown []string
+	for _, keyword := range sec.UnknownPoliciesChildren {
+		if !nonEnforcementSecurityPoliciesChild12628(keyword) {
+			unknown = append(unknown, keyword)
+		}
+	}
+	return unknown
+}
+
 // Apply statements are valid at any Junos hierarchy point, so they are not
 // unknown policy-container children even though the compiler does not expand
 // apply-macro or apply-groups-except here.
@@ -45,11 +70,14 @@ func recordUnknownSecurityPoliciesChild12217(sec *SecurityConfig, keyword string
 }
 
 func validateUnknownSecurityPoliciesChild12217(cfg *Config) error {
-	if cfg == nil || len(cfg.Security.UnknownPoliciesChildren) == 0 {
+	if cfg == nil {
 		return nil
 	}
-	return fmt.Errorf("security policies: unknown child keyword %q is unsupported and would be silently dropped",
-		cfg.Security.UnknownPoliciesChildren[0])
+	children := enforcementSecurityPoliciesChildren12217(&cfg.Security)
+	if len(children) == 0 {
+		return nil
+	}
+	return fmt.Errorf("security policies: unknown child keyword %q is unsupported and would be silently dropped", children[0])
 }
 
 func toleratedUnknownSecurityPoliciesChildWarnings12217(cfg *Config) []string {
@@ -58,6 +86,11 @@ func toleratedUnknownSecurityPoliciesChildWarnings12217(cfg *Config) []string {
 	}
 	warnings := make([]string, 0, len(cfg.Security.UnknownPoliciesChildren))
 	for _, keyword := range cfg.Security.UnknownPoliciesChildren {
+		if nonEnforcementSecurityPoliciesChild12628(keyword) {
+			warnings = append(warnings, fmt.Sprintf(
+				"security policies: Junos-valid non-enforcement child %q is accepted but not consumed by the policy compiler (issue #12628)", keyword))
+			continue
+		}
 		warnings = append(warnings, fmt.Sprintf(
 			"security policies: unknown child keyword %q was dropped; the incomplete rulebase is quarantined and the userspace policy snapshot is refused (tolerant path; strict commit rejects this; issue #12217)",
 			keyword))

@@ -60,6 +60,52 @@ func TestLoadQuarantinesUnknownPoliciesChild12217(t *testing.T) {
 	}
 }
 
+func TestLoadKeepsPolicySnapshotForJunosValidTraceoptions12628(t *testing.T) {
+	text := `security {
+ zones {
+  security-zone trust;
+  security-zone untrust;
+ }
+ policies {
+  default-policy deny-all;
+  from-zone trust to-zone untrust {
+   policy valid-permit {
+    match { source-address any; destination-address any; application any; }
+    then { permit; }
+   }
+  }
+  traceoptions { file policies.log; }
+ }
+}`
+	tree, errs := config.NewParser(text).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("parse fixture: %v", errs[0])
+	}
+	path := filepath.Join(t.TempDir(), "config")
+	store := newTestStoreAt(t, path)
+	if err := store.db.WriteActiveMarker(tree, true); err != nil {
+		t.Fatalf("persist fixture: %v", err)
+	}
+	booted := newTestStoreAt(t, path)
+	if err := booted.Load(); err != nil {
+		t.Fatalf("tolerant Store.Load: %v", err)
+	}
+	cfg := booted.ActiveConfig()
+	if cfg == nil {
+		t.Fatal("Store.Load returned nil ActiveConfig")
+	}
+	if got := config.LenientDroppedPolicyLocator(cfg); got != "" {
+		t.Fatalf("Junos-valid traceoptions blacked out policy snapshot at %q", got)
+	}
+	if len(cfg.Security.Policies) != 1 || len(cfg.Security.Policies[0].Policies) != 1 {
+		t.Fatalf("valid policy snapshot was not retained: %+v", cfg.Security.Policies)
+	}
+	joined := strings.Join(cfg.Warnings, "\n")
+	if !strings.Contains(joined, "traceoptions") || !strings.Contains(joined, "#12628") {
+		t.Fatalf("tolerant Load warning does not identify compatibility handling: %v", cfg.Warnings)
+	}
+}
+
 const unknownPoliciesChildrenSyncApplyConfig12217 = `security {
  policies {
   globel { policy deny-bad { then { deny; } } }
