@@ -677,7 +677,12 @@ func catalogConfigWithNApps(n int) *config.Config {
 func TestUDP4500FallbackMatchesEnabledCatalog_12222(t *testing.T) {
 	disabled := &config.Config{}
 	disabled.Services.ApplicationIdentification = false
-	disabledName := ResolveSessionName(nil, disabled, 17, 40000, 4500, 0)
+	disabled.Security.GlobalPolicies = []*config.Policy{{Name: "ref", Match: config.PolicyMatch{Applications: []string{"junos-ike-nat"}}}}
+	offCatalog, err := BuildCatalog(disabled)
+	if err != nil {
+		t.Fatalf("BuildCatalog(disabled): %v", err)
+	}
+	disabledName := ResolveSessionName(offCatalog.AppNames, disabled, 17, 40000, 4500, 0)
 
 	enabled := &config.Config{}
 	enabled.Services.ApplicationIdentification = true

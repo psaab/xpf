@@ -38,11 +38,16 @@ func TestResolveSessionNameUserRedefinedBuiltinShadowed_11817(t *testing.T) {
 func TestResolveSessionNameBuiltinUnshadowedStillMatches_11817(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Services.ApplicationIdentification = false
+	cfg.Security.GlobalPolicies = []*config.Policy{{Name: "ref", Match: config.PolicyMatch{Applications: []string{"junos-http"}}}}
+	catalog, err := BuildCatalog(cfg)
+	if err != nil {
+		t.Fatalf("BuildCatalog: %v", err)
+	}
 
-	if got := ResolveSessionName(nil, cfg, 6, 40000, 80, 0); got != "junos-http" {
-		t.Fatalf("ResolveSessionName(tcp/80) with empty user map = %q, want junos-http (unshadowed builtin)", got)
+	if got := ResolveSessionName(catalog.AppNames, cfg, 6, 40000, 80, 0); got != "junos-http" {
+		t.Fatalf("ResolveSessionName(tcp/80) with referenced builtin = %q, want junos-http", got)
 	}
 	if got := ResolveSessionName(nil, nil, 6, 40000, 80, 0); got != "junos-http" {
-		t.Fatalf("ResolveSessionName(tcp/80) with nil cfg = %q, want junos-http (unshadowed builtin)", got)
+		t.Fatalf("ResolveSessionName(tcp/80) with nil cfg = %q, want junos-http (unconfigured fallback)", got)
 	}
 }
