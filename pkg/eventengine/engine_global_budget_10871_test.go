@@ -52,7 +52,16 @@ func TestFlappingTargetGlobalBudgetAndOperatorLatency10871(t *testing.T) {
 	// A failure edge matches all 64 policies. With no within threshold and a
 	// 30s per-policy cooldown, the former path could start 64 commits per edge
 	// and up to 128/min at a 3s probe flap cadence.
+	// Park the worker before the producer admits the initial batch. Once the
+	// worker has taken the queue head, it remains parked while HandleEvent
+	// completes the ordered enqueue loop; reopening the publication gate then
+	// makes the budget winners deterministic.
+	e.SetPublishEnabled(false)
 	e.HandleEvent(eventFor("ping_test_failed"))
+	waitFor(t, "worker parked on initial flap", func() bool {
+		return e.Stats().QueueDepth == policyCount-1
+	})
+	e.SetPublishEnabled(true)
 	waitFor(t, "initial global-budget decision", func() bool {
 		st := e.Stats()
 		return st.Committed > globalActionBudget ||
@@ -150,8 +159,18 @@ func TestFlappingTargetGlobalBudgetAndOperatorLatency10871(t *testing.T) {
 	clockMu.Lock()
 	now = time.Unix(1_800_000_060, 0)
 	clockMu.Unlock()
+	e.budgetMu.Lock()
+	refillCursor := e.budgetCursor
+	e.budgetMu.Unlock()
 	dropsBefore = e.Stats().DroppedGlobalBudget
+	// Park the worker while the producer admits the refill batch, so cursor
+	// selection is based on the complete event rather than scheduling.
+	e.SetPublishEnabled(false)
 	e.HandleEvent(eventFor("ping_test_failed"))
+	waitFor(t, "worker parked on refill flap", func() bool {
+		return e.Stats().QueueDepth == policyCount-1
+	})
+	e.SetPublishEnabled(true)
 	waitFor(t, "second rolling-window budget", func() bool {
 		st := e.Stats()
 		return st.Committed >= 2*globalActionBudget &&
@@ -162,8 +181,9 @@ func TestFlappingTargetGlobalBudgetAndOperatorLatency10871(t *testing.T) {
 		t.Fatalf("commits by t=60s = %d, want exactly %d (four per rolling minute)",
 			got, 2*globalActionBudget)
 	}
-	if got := store.ActiveConfig().System.DomainName; got != "flap-07" {
-		t.Fatalf("second budget refill committed through %q, want next policies ending at flap-07",
-			got)
+	wantDomain := fmt.Sprintf("flap-%02d", (refillCursor+globalActionBudget-1)%policyCount)
+	if got := store.ActiveConfig().System.DomainName; got != wantDomain {
+		t.Fatalf("second budget refill committed through %q, want next policies ending at %s from cursor %d",
+			got, wantDomain, refillCursor)
 	}
 }
