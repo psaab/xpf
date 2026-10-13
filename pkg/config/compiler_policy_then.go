@@ -171,12 +171,10 @@ func validatePolicyThenPermitStrict(nodes []*Node, lenient bool) ([]string, erro
 					} else {
 						// Flat set: from-zone → <name> → to-zone → <name> → policy ...
 						for _, fzSub := range child.Children {
-							tzNode := fzSub.FindChild("to-zone")
-							if tzNode == nil {
-								continue
-							}
-							for _, tzSub := range tzNode.Children {
-								pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+							for _, tzNode := range fzSub.FindChildren("to-zone") {
+								for _, tzSub := range tzNode.Children {
+									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+								}
 							}
 						}
 					}
@@ -319,12 +317,10 @@ func validatePolicyThenRejectStrict(nodes []*Node, lenient bool) ([]string, erro
 						pairs = append(pairs, zonePair{child.Keys[1], child.Keys[3], child})
 					} else {
 						for _, fzSub := range child.Children {
-							tzNode := fzSub.FindChild("to-zone")
-							if tzNode == nil {
-								continue
-							}
-							for _, tzSub := range tzNode.Children {
-								pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+							for _, tzNode := range fzSub.FindChildren("to-zone") {
+								for _, tzSub := range tzNode.Children {
+									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+								}
 							}
 						}
 					}
@@ -442,12 +438,10 @@ func validatePolicyThenCountAlarmStrict(nodes []*Node, lenient bool) ([]string, 
 						pairs = append(pairs, zonePair{child.Keys[1], child.Keys[3], child})
 					} else {
 						for _, fzSub := range child.Children {
-							tzNode := fzSub.FindChild("to-zone")
-							if tzNode == nil {
-								continue
-							}
-							for _, tzSub := range tzNode.Children {
-								pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+							for _, tzNode := range fzSub.FindChildren("to-zone") {
+								for _, tzSub := range tzNode.Children {
+									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+								}
 							}
 						}
 					}
@@ -646,12 +640,10 @@ func validatePolicyThenDenyStrict(nodes []*Node, lenient bool) ([]string, error)
 						pairs = append(pairs, zonePair{child.Keys[1], child.Keys[3], child})
 					} else {
 						for _, fzSub := range child.Children {
-							tzNode := fzSub.FindChild("to-zone")
-							if tzNode == nil {
-								continue
-							}
-							for _, tzSub := range tzNode.Children {
-								pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+							for _, tzNode := range fzSub.FindChildren("to-zone") {
+								for _, tzSub := range tzNode.Children {
+									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+								}
 							}
 						}
 					}
@@ -730,12 +722,10 @@ func validatePolicyUnsupportedThenSiblings(nodes []*Node, lenient bool) ([]strin
 						pairs = append(pairs, zonePair{child.Keys[1], child.Keys[3], child})
 					} else {
 						for _, fzSub := range child.Children {
-							tzNode := fzSub.FindChild("to-zone")
-							if tzNode == nil {
-								continue
-							}
-							for _, tzSub := range tzNode.Children {
-								pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+							for _, tzNode := range fzSub.FindChildren("to-zone") {
+								for _, tzSub := range tzNode.Children {
+									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+								}
 							}
 						}
 					}
@@ -810,12 +800,10 @@ func validatePolicyEnforcementSubtrees(nodes []*Node, lenient bool) ([]string, e
 						pairs = append(pairs, zonePair{child.Keys[1], child.Keys[3], child})
 					} else {
 						for _, fzSub := range child.Children {
-							tzNode := fzSub.FindChild("to-zone")
-							if tzNode == nil {
-								continue
-							}
-							for _, tzSub := range tzNode.Children {
-								pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+							for _, tzNode := range fzSub.FindChildren("to-zone") {
+								for _, tzSub := range tzNode.Children {
+									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+								}
 							}
 						}
 					}

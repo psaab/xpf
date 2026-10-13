@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // #12640: duplicate `to-zone {}` blocks under one from-zone source-zone
 // block are separate AST siblings (the parser appends, it does not merge).
@@ -147,5 +150,25 @@ security {
 	}
 	if seen["A->B"] != PolicyPermit || seen["A->C"] != PolicyDeny {
 		t.Fatalf("actions = %v, want A->B=permit A->C=deny", seen)
+	}
+}
+
+// A compiled second pair must also pass through strict policy gates. Otherwise
+// compilePolicies would now retain its policy while malformed enforcement
+// content in that block could bypass the matching validator.
+func TestDuplicateToZoneSecondPairRunsStrictPolicyGates12640(t *testing.T) {
+	const unsupportedPermit = "permit { application-services idp; }"
+	text := strings.Replace(dupToZoneText12640, "deny;", unsupportedPermit, 1)
+	tree, errs := NewParser(text).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse second-pair unsupported policy: %v", errs)
+	}
+	_, err := CompileConfig(tree)
+	if err == nil {
+		t.Fatal("strict compile accepted unsupported then-permit content in the second to-zone pair")
+	}
+	if !strings.Contains(err.Error(), `from-zone A to-zone C policy "p-ac" then permit "application-services"`) ||
+		!strings.Contains(err.Error(), "#3114") {
+		t.Fatalf("strict error = %q, want second-pair #3114 rejection", err)
 	}
 }

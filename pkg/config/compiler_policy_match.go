@@ -320,15 +320,14 @@ func validatePolicyMatchLeavesStrict(nodes []*Node, lenient bool) ([]string, err
 					} else {
 						// Flat set: from-zone → <name> → to-zone → <name> → policy ...
 						for _, fzSub := range child.Children {
-							tzNode := fzSub.FindChild("to-zone")
-							if tzNode == nil {
-								// This prewalk assigns scope only to real pairs. The
-								// compiler records and poisons a missing-to-zone
-								// source context instead of inventing a pair scope.
-								continue
-							}
-							for _, tzSub := range tzNode.Children {
-								pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+							// This prewalk assigns scope only to real pairs. The
+							// compiler records and poisons a missing-to-zone source
+							// context instead of inventing a pair scope. Iterate every
+							// to-zone sibling so each compiled pair is validated.
+							for _, tzNode := range fzSub.FindChildren("to-zone") {
+								for _, tzSub := range tzNode.Children {
+									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+								}
 							}
 						}
 					}
