@@ -110,12 +110,17 @@ upfront what they're getting and not getting.
    therefore means the value from the active catalog's assignment, including
    collision-displaced IDs — not simply the lowest natural hash. The
    AppID-disabled Go fallback (`resolveTupleFallback`, #2578) uses its
-   AppID-off catalog's assigned IDs for same-tier ties by default. If a tie
-   has a natural-ID collision and at least one tied candidate is absent from
-   that catalog, it ranks against the full predefined-plus-user assignment
-   so an unreferenced collision partner can be accounted for (#12225). If all
-   tied candidates are catalogued, the fallback keeps the off-catalog IDs so
-   an unstamped session retains the label of an already-stamped AppID-off
+   AppID-off catalog's assigned IDs for same-tier ties by default. Builtin
+   fallback candidates are considered only when present in that OFF catalog
+   (#12731): an unreferenced builtin cannot label an `app_id == 0` session
+   differently from the unknown stamped label. A referenced builtin and a
+   stamped session therefore resolve to the same name. Other unreferenced
+   user applications remain fallback-only; if a tie has a natural-ID
+   collision and at least one tied candidate is absent from the OFF catalog,
+   it ranks against the full predefined-plus-user assignment so an
+   unreferenced collision partner can be accounted for (#12225). If all tied
+   candidates are catalogued, the fallback keeps the off-catalog IDs so an
+   unstamped session retains the label of an already-stamped AppID-off
    session. The binary-specificity rule is shared across modes; the fixture
    `userspace-dp/tests/fixtures/appid_precedence_v1.json` pins its baseline
    cases (Go `TestAppIDPrecedenceParityFixture` + Rust
@@ -173,10 +178,14 @@ upfront what they're getting and not getting.
    - When **disabled**, return a tuple fallback: a configured
      `applications` entry whose `(protocol, source-port,
      destination-port)` constraints all match the session, else a
-     built-in port→name guess (`junos-http=80`, `junos-https=443`,
-     `junos-ssh=22`, `junos-ftp=21`, etc. — the 15-entry
-     `builtinFallbacks` map). If neither matches, return `UNKNOWN`,
-     the same filterable no-match sentinel used when AppID is enabled.
+     built-in port→name guess only if that builtin is present in the
+     referenced-only OFF catalog (#12731; e.g. `junos-http=80`,
+     `junos-https=443`, `junos-ssh=22`, `junos-ftp=21`, from the
+     15-entry `builtinFallbacks` map). An unreferenced builtin cannot be
+     stamped in OFF mode, so its fallback label is also `UNKNOWN`.
+     If neither a configured app nor a catalogued builtin matches, return
+     `UNKNOWN`, the same filterable no-match sentinel used when AppID is
+     enabled.
      The fallback honors a configured `source-port` constraint as well
      as the destination port, so a source-port-scoped custom app is not
      matched on dst-port alone (#3428); the session source port is

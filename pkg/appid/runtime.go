@@ -391,12 +391,11 @@ func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *co
 		// #10722/#12225: use assigned IDs, not natural StableAppID hashes, for
 		// same-tier ties involving an uncatalogued candidate and a hash
 		// collision. The per-request index makes that collision check O(1) and
-		// lazily caches the full-universe assignment. If all tied candidates are
-		// already in the AppID-off catalog, keep that catalog's own assigned-ID
-		// order: sessions stamped by the off dataplane and unstamped sessions
-		// must retain the same fallback label (#12225 F3). Candidates outside
-		// the OFF catalog are ranked too (#12630); that stamped/unstamped
-		// split is tracked in #12731.
+		// lazily caches the full-universe assignment. Catalogued candidates use
+		// the active OFF-catalog IDs so stamped and unstamped sessions agree.
+		// Uncatalogued user apps remain available to fallback; builtin
+		// candidates are admitted below only when the OFF catalog contains them
+		// (#12731).
 		best := ""
 		bestPortBased := false
 		var bestID uint16
@@ -468,11 +467,15 @@ func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *co
 		for name, app := range cfg.Applications.Applications {
 			consider(name, app)
 		}
-		// Rank live builtin fallback apps with user apps to match the enabled
-		// catalog without broadening the fallback's intentionally narrow set.
-		// A user definition shadows the same-named predefined application.
+		// Rank only builtins present in the OFF stamping catalog. An
+		// unreferenced builtin has no stamped app_id in this mode; guessing it
+		// here would give otherwise identical stamped and unstamped sessions
+		// different labels (#12731). A user definition shadows the builtin.
 		for name := range builtinFallbacks {
 			if _, shadowed := cfg.Applications.Applications[name]; shadowed {
+				continue
+			}
+			if _, catalogued := assignedIDForName(appNames, name); !catalogued {
 				continue
 			}
 			consider(name, config.PredefinedApplications[name])
