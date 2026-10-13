@@ -238,7 +238,10 @@ func TestFirewallFusedThenNestedMatchWasDropped12528(t *testing.T) {
 
 // The gate does not hide the older, more specific diagnostics on shapes those
 // gates already refuse (Review12678 minor 2): the #8437 fused-sibling schema
-// error and `from then` on N2, and the #10294 nameless-term error.
+// error and `from then` on N2, and the #10294 nameless-term error. Since
+// #12777 the #12526 pre-walk message fires FIRST for nameless shapes; it
+// names the same term and carries the #10294 tag, and the loop below pins
+// that first-error text so a future precedence shift is deliberate.
 func TestFirewallFusedThenKeepsOlderDiagnostics12528(t *testing.T) {
 	n2 := hier12528(t, `firewall { family inet { filter F { term T { from is-fragment then discard; } } } }`)
 	if err := SchemaValidate(n2, nil); err == nil || strings.Contains(err.Error(), "#12528") ||
@@ -263,8 +266,9 @@ func TestFirewallFusedThenKeepsOlderDiagnostics12528(t *testing.T) {
 		tree := hier12528(t, "firewall { "+body+" }")
 		_, err := CompileConfig(tree)
 		if err == nil || strings.Contains(err.Error(), "#12528") ||
-			!strings.Contains(err.Error(), "nameless") || !strings.Contains(err.Error(), "#10294") {
-			t.Errorf("%s: CompileConfig error = %v, want the #10294 nameless diagnostic", body, err)
+			!strings.Contains(err.Error(), "nameless `term` block starting with") ||
+			!strings.Contains(err.Error(), "#10294/#12092/#12526") {
+			t.Errorf("%s: CompileConfig error = %v, want the #12526 pre-walk nameless diagnostic first", body, err)
 		}
 		cfg, err := CompileConfigLenient(hier12528(t, "firewall { "+body+" }"))
 		if err != nil {

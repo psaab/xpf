@@ -168,3 +168,22 @@ func TestCompileConfigLenientNamelessFirewallTermStillWarns12526(t *testing.T) {
 		}
 	}
 }
+
+func TestCompileConfigLenientPackedNamelessFirewallTermWarns12526(t *testing.T) {
+	// The packed-container issue shape on the tolerant path: the existing
+	// lenient nameless warning fires and the term is neutralized (kept
+	// inert), never silently enforced — the #1960 no-brick posture. The
+	// strict/commit-check gate (#12777) owns refusal.
+	cfg, err := CompileConfigLenient(hierTree(t, `firewall { filter F { term { then discard; } } }`))
+	if err != nil {
+		t.Fatalf("tolerant compile rejected nameless term: %v", err)
+	}
+	warnings := strings.Join(cfg.Warnings, "\n")
+	if !strings.Contains(warnings, "nameless") || !strings.Contains(warnings, "#10294") {
+		t.Fatalf("tolerant packed nameless shape warnings = %q, want the nameless warning", cfg.Warnings)
+	}
+	f := cfg.Firewall.FiltersInet["F"]
+	if f == nil || len(f.Terms) != 1 {
+		t.Fatalf("tolerant packed nameless shape filter = %+v, want one neutralized term", f)
+	}
+}
