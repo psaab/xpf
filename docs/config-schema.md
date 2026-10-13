@@ -16636,9 +16636,12 @@ root `policy-options` and every `policy-options` subtree under `groups`. It does
 not expand the fragment; group references can resolve against the existing
 candidate, and inactive or `${node}` references remain deferred to the normal
 load/commit path. Inactive nameless terms are skipped by the preflight, matching
-`LoadOverride`; merge replay extends each flattened term's deactivate path with
-its first body key, so `deactivate ... term` cannot target a neighboring named
-term.
+`LoadOverride`. Merge replay extends each flattened term's deactivate path with
+that body statement's first key. If a named sibling in the input or candidate
+already has that identity (or an empty term cannot be distinguished from a
+sibling), LoadMerge rejects the ambiguous replay atomically instead of
+deactivating or merging the wrong term. Public `FormatSet` and non-policy
+`term` rendering are unchanged.
 
 An explicitly named nested term such as
 `policy-statement P { term { T { then accept; } } }` now compiles as term `T`;

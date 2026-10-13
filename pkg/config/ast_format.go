@@ -284,6 +284,18 @@ func formatSetNodes(b *strings.Builder, nodes []*Node, prefix []string, prefixQu
 	formatSetNodesMode(b, nodes, prefix, prefixQuote, prefixGroup, false)
 }
 
+func policyStatementTermPath12598(path []string) bool {
+	for i := 0; i+3 < len(path); i++ {
+		if path[i] == "policy-options" &&
+			path[i+1] == "policy-statement" &&
+			path[i+2] != "" &&
+			path[i+3] == "term" {
+			return true
+		}
+	}
+	return false
+}
+
 func formatSetNodesMode(b *strings.Builder, nodes []*Node, prefix []string, prefixQuote, prefixGroup []bool, preserveLeafBrackets bool) {
 	for _, n := range canonicalOrder(nodes) {
 		path, pathQuote, pathGroup := appendNodeKeysGroupedMode(prefix, prefixQuote, prefixGroup, n, preserveLeafBrackets)
@@ -319,7 +331,8 @@ func formatSetNodesMode(b *strings.Builder, nodes []*Node, prefix []string, pref
 			// its body makes each immediate body statement a replayed term
 			// keyed by that statement's first token. A bare `deactivate ...
 			// term` prefix-matches a named sibling instead.
-			if preserveLeafBrackets && len(n.Keys) == 1 && n.Keys[0] == "term" && len(n.Children) > 0 {
+			if preserveLeafBrackets && policyStatementTermPath12598(path) &&
+				len(n.Keys) == 1 && n.Keys[0] == "term" && len(n.Children) > 0 {
 				for _, child := range n.Children {
 					if len(child.Keys) == 0 {
 						continue

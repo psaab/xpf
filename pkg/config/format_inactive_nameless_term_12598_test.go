@@ -62,6 +62,17 @@ func TestFormatSetInactiveNamelessTerm12598(t *testing.T) {
 	})
 }
 
+func TestFormatSetInactiveNonPolicyTermUnchanged12598(t *testing.T) {
+	tree, errs := NewParser(`firewall { filter F { inactive: term { then reject; } } }`).Parse()
+	if len(errs) > 0 {
+		t.Fatalf("parse: %v", errs)
+	}
+	want := "deactivate firewall filter F term\n"
+	if got := tree.FormatSetForLoadMerge(); !strings.Contains(got, want) {
+		t.Fatalf("non-policy term deactivate changed: want %q in:\n%s", want, got)
+	}
+}
+
 func TestFormatSetInactiveMultiStatementNamelessTerm12598(t *testing.T) {
 	src := "policy-options {\n policy-statement P {\n  term ok { then accept; }\n  inactive: term { from protocol bgp; then reject; }\n }\n}"
 	tree, errs := NewParser(src).Parse()

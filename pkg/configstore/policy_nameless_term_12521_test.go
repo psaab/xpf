@@ -145,6 +145,64 @@ func TestLoadMergeInactiveNamelessPolicyTermTargetsExactTerm12598(t *testing.T) 
 	}
 }
 
+func TestLoadMergeRejectsAmbiguousInactiveNamelessTermReplay12598(t *testing.T) {
+	cases := []struct {
+		name      string
+		candidate string
+		input     string
+	}{
+		{
+			name:  "source named-term collision",
+			input: `policy-options { policy-statement P { term then { then accept; } inactive: term { then reject; } } }`,
+		},
+		{
+			name:      "candidate named-term collision",
+			candidate: `policy-options { policy-statement P { term then { then accept; } } }`,
+			input:     `policy-options { policy-statement P { inactive: term { then reject; } } }`,
+		},
+		{
+			name:  "empty term with named sibling",
+			input: `policy-options { policy-statement P { term ok { then accept; } inactive: term { } } }`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.EnterConfigure(); err != nil {
+				t.Fatalf("EnterConfigure: %v", err)
+			}
+			defer s.ExitConfigure()
+			if tc.candidate != "" {
+				if err := s.LoadOverride(tc.candidate); err != nil {
+					t.Fatalf("LoadOverride candidate: %v", err)
+				}
+			}
+			before := s.ShowCandidateSet()
+			err := s.LoadMerge(tc.input)
+			if err == nil || !strings.Contains(err.Error(), "#12598") {
+				t.Fatalf("LoadMerge error = %v, want atomic #12598 ambiguity rejection", err)
+			}
+			if got := s.ShowCandidateSet(); got != before {
+				t.Fatalf("rejected LoadMerge changed candidate:\nbefore:\n%s\nafter:\n%s", before, got)
+			}
+		})
+	}
+}
+
+func TestLoadMergePreservesUnambiguousInactiveEmptyTerm12598(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	defer s.ExitConfigure()
+	if err := s.LoadMerge(`policy-options { policy-statement P { inactive: term { } } }`); err != nil {
+		t.Fatalf("LoadMerge inactive empty term without siblings: %v", err)
+	}
+	if got := s.ShowCandidateSet(); !strings.Contains(got, "deactivate policy-options policy-statement P term\n") {
+		t.Fatalf("candidate lost the uniquely-targeted empty term inactivity:\n%s", got)
+	}
+}
+
 func TestLoadMergeStillRejectsActiveNamelessPolicyTerm12598(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.EnterConfigure(); err != nil {
