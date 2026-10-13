@@ -113,7 +113,9 @@ var (
 // for the static-NAT external address) is real, so enabling the sysctl is the
 // correct fix; we set net.ipv4.conf.<if>.proxy_arp (ARP) and
 // net.ipv6.conf.<if>.proxy_ndp (NDP) on every interface with a desired proxy
-// entry to guarantee a reply regardless of the topology.
+// entry. IPv6 forwarded unicast NUD probes additionally require the global
+// net.ipv6.conf.all.proxy_ndp gate (#12611), which is asserted once whenever
+// any configured proxy entry is IPv6.
 //
 // Breadth tradeoff: with the default medium_id=0, per-interface proxy_arp=1
 // makes the kernel (path 2 above) answer ARP on that interface for ANY target
@@ -226,8 +228,12 @@ func disableProxyResponders(ifaceFamilies map[string]map[int]struct{}) int {
 // toggleProxyResponders is the shared body of enableProxyResponders /
 // disableProxyResponders: it writes the proxy responder sysctl (value chosen
 // by enable) for every (interface, family) pair, in a deterministic
-// interface-name order with v4 before v6. A per-write failure is logged and
-// skipped (best-effort) without aborting the remaining writes.
+// interface-name order with v4 before v6. On enable, it also sets the global
+// IPv6 proxy-NDP gate once when any interface has a desired v6 proxy entry.
+// The global gate is intentionally not cleared by per-interface teardown:
+// this diff can remove one of several proxy-NDP interfaces and must not
+// disable the remaining interfaces (or other users of the kernel setting).
+// A per-write failure is logged and skipped (best-effort).
 func toggleProxyResponders(ifaceFamilies map[string]map[int]struct{}, enable bool) int {
 	count := 0
 	names := make([]string, 0, len(ifaceFamilies))
@@ -257,6 +263,23 @@ func toggleProxyResponders(ifaceFamilies map[string]map[int]struct{}, enable boo
 				continue
 			}
 			count++
+		}
+	}
+	if enable {
+		for _, fams := range ifaceFamilies {
+			if _, ok := fams[unix.AF_INET6]; !ok {
+				continue
+			}
+			// #12611: forwarded unicast NUD probes require both this global
+			// gate and the per-interface proxy_ndp bit. Do this once per
+			// reconcile, after the interface-specific values are asserted.
+			if err := proxyARPSysctlSeam("all", unix.AF_INET6, true); err != nil {
+				slog.Warn("proxy-arp: failed to enable all-interface proxy NDP sysctl",
+					"iface", "all", "family", unix.AF_INET6, "err", err)
+			} else {
+				count++
+			}
+			break
 		}
 	}
 	return count
