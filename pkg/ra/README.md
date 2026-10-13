@@ -455,9 +455,13 @@ never retried and the stale IPv6 default-router identity lingered on hosts
 - **RA lifetimes are bounded so one bad option cannot blackhole the whole
   segment (#3895).** The entire RA is built and sent in ONE `conn.WriteTo`,
   which internally marshals every option, so a single option whose lifetime
-  overflows its on-wire field aborts the ENTIRE advertisement — the segment
-  then silently stops receiving RAs and hosts lose their default route / SLAAC
-  when the current RAs expire. Four guards, in depth:
+  `ndp` refuses to encode aborts the ENTIRE advertisement — the segment then
+  silently stops receiving RAs and hosts lose their default route / SLAAC when
+  the current RAs expire. Other overflows never fail: `ndp` narrows Router
+  Lifetime and the PREF64 scaled lifetime to `uint16`, and RDNSS and PIO
+  lifetimes to `uint32`, before (or instead of) any range check, so those
+  values wrap to a wrong — often zero — lifetime on the wire. Five guards, in
+  depth:
   - **Primary (commit-time gate, `pkg/config` `schema_routing.go`):** the
     router-advertisement lifetime leaves are bounded to their wire fields —
     `default-lifetime` ≤ 65535 (RFC 4861 §4.2 16-bit), `prefix
@@ -472,7 +476,10 @@ never retried and the stale IPv6 default-router identity lingered on hosts
     config that predates the commit-time bound (e.g. a loaded `active.json`) —
     a bad option degrades to "missing that one option" instead of a total RA
     blackout. NDP options are independent on the wire, so per-option probing is
-    faithful to how the combined RA marshals.
+    faithful to how the combined RA marshals. The probe only sees what `ndp`
+    refuses to encode: a wrapping lifetime marshals cleanly and passes it,
+    which is why the send-sink guards below bound those fields before
+    conversion.
   - **Inherited lifetimes share one clamped source:** `buildRA` first bounds
     Router Lifetime to its 16-bit maximum (65535), and the header and inherited
     RDNSS lifetime use that same value. Inherited PREF64 uses it too, but its
@@ -480,6 +487,25 @@ never retried and the stale IPv6 default-router identity lingered on hosts
     saturate to 65528 with one warning per sender instead of pruning the option.
     If the router lifetime is 0, inherited RDNSS/PREF64 fall back to 1800 seconds
     (with PREF64 still subject to its 65528-second cap).
+  - **Explicit PREF64 lifetimes above 65528 are dropped at the send sink
+    (`buildRA`, `sender.go`, #12536):** an explicit `nat-prefix`/`nat64prefix
+    lifetime` is checked against the RFC 8781 maximum in integer seconds,
+    BEFORE the `time.Duration` conversion; an over-range value drops the
+    PREF64 option (warned on every build; the rest of the RA still goes out).
+    `ndp` narrows `round(seconds/8)` to `uint16` before its `> 8191` check, so
+    524284 seconds and up wrap instead of failing (524288, 2^31 and 2^32 reach
+    the wire as 0, which tells hosts to stop using the prefix; 524300 as 16)
+    and values above ~9.2e9 seconds overflow `Duration` first; the probe sees
+    none of it. 65532–524283 always failed marshal and were dropped by the
+    probe; 65529–65531, which `ndp` rounds down to 65528, are dropped now too,
+    so every over-range explicit value has one outcome. Dropping is omission,
+    not withdrawal: a host keeps a PREF64 it already learned until that
+    lifetime runs out. PREF64 drops where PIO saturates (next bullet) because
+    PIO has an in-band infinity (`0xffffffff`) and dropping a PIO would cost
+    SLAAC, while PREF64 has no infinity and the probe already dropped
+    65532–524283, so dropping keeps the over-range outcome uniform. Inherited
+    PREF64 still saturates (previous bullet): it derives from a valid Router
+    Lifetime, not an out-of-range operator value.
   - **PIO lifetimes saturate at the send sink (`buildRA`, `sender.go`,
     #12193):** valid and preferred lifetimes saturate to `0xffffffff`
     AFTER the `<=0` default substitution and BEFORE the
@@ -487,11 +513,11 @@ never retried and the stale IPv6 default-router identity lingered on hosts
     2^32 no longer wraps to 0 and larger values cannot overflow
     `Duration`. `ndp` marshals a PIO without error even when wrapping,
     so `pruneUnmarshalableOptions` never backstopped PIO — the doc gap
-    that led #12564 to implement prune. Saturate-not-prune because it
-    is monotone where wrapping is not, leaves in-range values
-    unchanged, matches the #8597/#9914/#12134 sink-clamp precedent, and
-    keeps SLAAC alive via RFC 4861 infinity instead of dropping the
-    operator prefix.
+    that led #12564 to propose pruning PIO, which it dropped in favor of
+    this guard. Saturate-not-prune because it is monotone where wrapping
+    is not, leaves in-range values unchanged, matches the
+    #8597/#9914/#12134 sink-clamp precedent, and keeps SLAAC alive via
+    RFC 4861 infinity instead of dropping the operator prefix.
 - **`configEqual` must track EVERY field `buildRA` stamps onto the wire.**
   `Apply` gates the sender restart on `configEqual(existing.cfg, cfg)` — an
   interface whose config compares EQUAL keeps running untouched (no RA gap),

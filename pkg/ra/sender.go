@@ -968,6 +968,7 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 		prefix, err := netip.ParsePrefix(s.cfg.NAT64Prefix)
 		if err == nil {
 			pref64Life := s.cfg.NAT64PrefixLife
+			prunePREF64 := false
 			if pref64Life <= 0 {
 				pref64Life = optLifetime
 				if pref64Life > config.RAPREF64MaxLifetimeSeconds {
@@ -979,11 +980,28 @@ func (s *sender) buildRA() *ndp.RouterAdvertisement {
 							"max", config.RAPREF64MaxLifetimeSeconds)
 					}
 				}
+			} else if int64(pref64Life) > config.RAPREF64MaxLifetimeSeconds {
+				// #12536: explicit value exceeds the RFC 8781 13-bit
+				// scaled-by-8 wire field. ndp narrows to uint16 BEFORE the
+				// >8191 check, so 524284s and up wrap instead of failing
+				// marshal (524288/2^31/2^32 to wire 0, 524300 to 16s) and
+				// values above ~9.2e9s overflow time.Duration first. Drop
+				// the option (omitted, not withdrawn; the rest of the RA
+				// still goes out per #3895) before any conversion. This
+				// also drops 65529-65531, which ndp would round down to
+				// 65528, so every strict-invalid explicit value has one
+				// outcome. Explicit only: inherited saturates per #12134.
+				prunePREF64 = true
+				slog.Warn("ra: dropping PREF64 with over-large explicit lifetime",
+					"interface", s.cfg.Interface, "lifetime", pref64Life,
+					"max", config.RAPREF64MaxLifetimeSeconds)
 			}
-			ra.Options = append(ra.Options, &ndp.PREF64{
-				Lifetime: time.Duration(pref64Life) * time.Second,
-				Prefix:   prefix,
-			})
+			if !prunePREF64 {
+				ra.Options = append(ra.Options, &ndp.PREF64{
+					Lifetime: time.Duration(pref64Life) * time.Second,
+					Prefix:   prefix,
+				})
+			}
 		} else {
 			slog.Warn("ra: invalid NAT64 prefix",
 				"prefix", s.cfg.NAT64Prefix, "err", err)
