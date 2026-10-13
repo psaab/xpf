@@ -16635,7 +16635,10 @@ clone while preserving each term-name key run and its body shape. It then scans
 root `policy-options` and every `policy-options` subtree under `groups`. It does
 not expand the fragment; group references can resolve against the existing
 candidate, and inactive or `${node}` references remain deferred to the normal
-load/commit path. The scan includes inactive nodes as a fail-safe.
+load/commit path. Inactive nameless terms are skipped by the preflight, matching
+`LoadOverride`; merge replay extends each flattened term's deactivate path with
+its first body key, so `deactivate ... term` cannot target a neighboring named
+term.
 
 An explicitly named nested term such as
 `policy-statement P { term { T { then accept; } } }` now compiles as term `T`;

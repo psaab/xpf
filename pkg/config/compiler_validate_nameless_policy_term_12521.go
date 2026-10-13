@@ -224,6 +224,9 @@ func ValidatePolicyNamelessTermsAST12521(tree *ConfigTree) error {
 				continue
 			}
 			for _, term := range ps.node.FindChildren("term") {
+				if term.Inactive {
+					continue
+				}
 				_, first, nameless := policyNamelessTermBody12521(term)
 				if nameless {
 					occurrences = append(occurrences, occurrence{policy: ps.name, first: first})

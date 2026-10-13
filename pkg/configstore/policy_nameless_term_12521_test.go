@@ -113,6 +113,54 @@ func TestLoadMergeRejectsNamelessPolicyTermsBeforeFlatten12521(t *testing.T) {
 	}
 }
 
+func TestLoadMergeInactiveNamelessPolicyTermTargetsExactTerm12598(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		terms string
+	}{
+		{"inactive-after-named", `term ok { then accept; } inactive: term { then reject; }`},
+		{"inactive-before-named", `inactive: term { then reject; } term ok { then accept; }`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.EnterConfigure(); err != nil {
+				t.Fatalf("EnterConfigure: %v", err)
+			}
+			defer s.ExitConfigure()
+			input := `policy-options { policy-statement P { ` + tc.terms + ` } }`
+			if err := s.LoadMerge(input); err != nil {
+				t.Fatalf("LoadMerge inactive nameless term: %v", err)
+			}
+			candidate := s.ShowCandidateSet()
+			if !strings.Contains(candidate, "deactivate policy-options policy-statement P term then") {
+				t.Fatalf("candidate does not deactivate the flattened nameless term:\n%s", candidate)
+			}
+			if strings.Contains(candidate, "deactivate policy-options policy-statement P term\n") {
+				t.Fatalf("candidate has ambiguous one-key deactivate:\n%s", candidate)
+			}
+			if _, err := s.CommitCheck(); err != nil {
+				t.Fatalf("inactive nameless term must be ignored by CommitCheck: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadMergeStillRejectsActiveNamelessPolicyTerm12598(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	defer s.ExitConfigure()
+	before := s.ShowCandidateSet()
+	err := s.LoadMerge(`policy-options { policy-statement P { term { then reject; } } }`)
+	if err == nil || !strings.Contains(err.Error(), "#12521") {
+		t.Fatalf("LoadMerge error = %v, want active nameless #12521 rejection", err)
+	}
+	if got := s.ShowCandidateSet(); got != before {
+		t.Fatalf("failed LoadMerge changed candidate:\nbefore:\n%s\nafter:\n%s", before, got)
+	}
+}
+
 func TestLoadMergeAcceptsNamedPolicyTerms12521(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -355,12 +403,6 @@ func TestLoadMergeRejectsCanonicalNamelessPolicyTermPaths12521(t *testing.T) {
 			name: "inactive-policy-options-root",
 			input: func(body string) string {
 				return `inactive: ` + policy(body)
-			},
-		},
-		{
-			name: "inactive-term",
-			input: func(body string) string {
-				return `policy-options { policy-statement P { inactive: term { ` + body + ` } } }`
 			},
 		},
 		{

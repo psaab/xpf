@@ -315,12 +315,31 @@ func formatSetNodesMode(b *strings.Builder, nodes []*Node, prefix []string, pref
 			formatSetNodesMode(b, n.Children, path, pathQuote, pathGroup, preserveLeafBrackets)
 		}
 		if n.Inactive {
-			if preserveLeafBrackets && n.IsLeaf {
-				pathText = joinKeysProvGroupedFrom(path, pathQuote, pathGroup, len(path)-len(n.Keys))
+			// A one-key routing-policy term has no authored name. Flattening
+			// its body makes each immediate body statement a replayed term
+			// keyed by that statement's first token. A bare `deactivate ...
+			// term` prefix-matches a named sibling instead.
+			if preserveLeafBrackets && len(n.Keys) == 1 && n.Keys[0] == "term" && len(n.Children) > 0 {
+				for _, child := range n.Children {
+					if len(child.Keys) == 0 {
+						continue
+					}
+					firstChildKey := *child
+					firstChildKey.Keys = firstChildKey.Keys[:1]
+					if len(firstChildKey.KeysQuoted) > 0 {
+						firstChildKey.KeysQuoted = firstChildKey.KeysQuoted[:1]
+					}
+					if len(firstChildKey.KeysBracketed) > 0 {
+						firstChildKey.KeysBracketed = firstChildKey.KeysBracketed[:1]
+					}
+					deactivatePath, deactivateQuote, deactivateGroup :=
+						appendNodeKeysGroupedMode(path, pathQuote, pathGroup, &firstChildKey, preserveLeafBrackets)
+					fmt.Fprintf(b, "deactivate %s\n",
+						joinKeysProvGrouped(deactivatePath, deactivateQuote, deactivateGroup))
+				}
 			} else {
-				pathText = joinKeysProvGrouped(path, pathQuote, pathGroup)
+				fmt.Fprintf(b, "deactivate %s\n", pathText)
 			}
-			fmt.Fprintf(b, "deactivate %s\n", pathText)
 		}
 	}
 }
