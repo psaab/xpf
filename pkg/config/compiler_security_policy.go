@@ -150,9 +150,15 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 				// gate owns the specific rejection; recording here makes the
 				// tolerant path attach the established snapshot poison.
 				if len(child.Keys) == 2 {
-					if tz := child.FindChild("to-zone"); tz != nil && len(tz.FindChildren("policy")) > 0 {
-						sec.MalformedZonePairs = append(sec.MalformedZonePairs,
-							nestedZonePolicyError12633(child.Keys[1], tz))
+					// Strict #7523 rejects direct nested `to-zone` forms.
+					// Tolerant compilation must poison every policy-bearing
+					// sibling, including keyless/nested shapes whose policy is
+					// below the destination node rather than its direct child.
+					for _, tz := range child.FindChildren("to-zone") {
+						if hasPolicyIntent12629(tz) {
+							sec.MalformedZonePairs = append(sec.MalformedZonePairs,
+								nestedZonePolicyError12633(child.Keys[1], tz))
+						}
 					}
 				}
 				if len(child.Keys) >= 2 && bodyHasToZoneLessPolicy12231(child) {
@@ -899,6 +905,11 @@ func nestedZonePolicyError12633(from string, toZone *Node) string {
 	to := ""
 	if toZone != nil && len(toZone.Keys) >= 2 {
 		to = toZone.Keys[1]
+	} else if toZone != nil && len(toZone.Children) > 0 &&
+		toZone.Children[0].Name() != "policy" {
+		// `to-zone { B { policy ... } }` carries its destination as a
+		// child name rather than a key.
+		to = toZone.Children[0].Name()
 	}
 	if to == "" {
 		return policyAsDestinationZone12633(from, "policy")
