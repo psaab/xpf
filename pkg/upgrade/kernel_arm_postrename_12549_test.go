@@ -84,3 +84,92 @@ func TestArmCandidateArmedPostRenameSyncProceedsToReboot_12549(t *testing.T) {
 			record, recordErr, j.PromoteBinary)
 	}
 }
+
+// #12549 fail-closed converse: the ARMED write fails because the rename ITSELF
+// fails, so the ARMED journal never landed. That error is not a
+// *PostRenameSyncError. Treating it as landed would reboot into the candidate
+// while the durable journal still says ARMING, which neither IsArmed nor the
+// boot-time promotion gate treats as a trial in flight. armCandidate must
+// refuse: Arm returns the rename error, the journal stays ARMING, BootNext is
+// cleared, nothing reboots, and the watchdog is disarmed. The refusal must
+// leave a clean retry: Arm re-arms from ARMING (contrast the landed case
+// above, where a second Arm is rejected).
+func TestArmCandidateArmedRenameFailureRefuses_12549(t *testing.T) {
+	f := newFakeKernelSystem()
+	r := newKernelRunner(t, f)
+	renameErr := errors.New("injected armed-write rename failure")
+	var restore func()
+	armedWrites := 0
+	t.Cleanup(func() {
+		if restore != nil {
+			restore()
+		}
+	})
+	r.cfg.Logf = func(_ string, args ...any) {
+		if restore != nil {
+			restore()
+			restore = nil
+		}
+		if len(args) != 0 && args[0] == KernelStateArmed {
+			armedWrites++
+			if armedWrites == 1 {
+				restore = fsatomic.SetRenameFileForTesting(func(string, string) error {
+					return renameErr
+				})
+			}
+		}
+	}
+
+	err := r.Arm("6.18.5-12-generic")
+	if restore != nil {
+		restore()
+		restore = nil
+	}
+	if !errors.Is(err, renameErr) {
+		t.Fatalf("Arm error = %v, want the refused ARMED rename failure", err)
+	}
+	var post *fsatomic.PostRenameSyncError
+	if errors.As(err, &post) {
+		t.Fatalf("Arm error = %v classifies as PostRenameSyncError; the rename never landed", err)
+	}
+	if armedWrites != 1 {
+		t.Fatalf("ARMED transitions = %d, want exactly one", armedWrites)
+	}
+	j, loadErr := r.loadKernelJournal()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if j.State != KernelStateArming || j.BootID != "" {
+		t.Errorf("durable journal = state %s BootID %q; want ARMING without BootID", j.State, j.BootID)
+	}
+	armed, _, err := r.IsArmed()
+	if err != nil || armed {
+		t.Errorf("IsArmed = %v err=%v, want false/nil for the unlanded ARMED write", armed, err)
+	}
+	if f.bootNext != "" || !contains(f.calls, "bootnext-clear") {
+		t.Errorf("BootNext=%q calls=%v; want the queued one-shot cleared", f.bootNext, f.calls)
+	}
+	if f.rebooted || contains(f.calls, "reboot") {
+		t.Errorf("rebooted=%v calls=%v; want no reboot after the refused arm", f.rebooted, f.calls)
+	}
+	if f.armWatchdogCalls != 1 || f.wdArmed || f.disarmWatchdogCalls != 1 {
+		t.Errorf("armCalls=%d watchdogArmed=%v disarmCalls=%d; want armed once, then disarmed once",
+			f.armWatchdogCalls, f.wdArmed, f.disarmWatchdogCalls)
+	}
+
+	if err := r.Arm("6.18.5-12-generic"); err != nil {
+		t.Fatalf("retry Arm from ARMING = %v, want a clean re-arm", err)
+	}
+	j, loadErr = r.loadKernelJournal()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if j.State != KernelStateArmed || j.BootID == "" || j.BootID != f.bootNext {
+		t.Errorf("after retry: journal = state %s BootID %q BootNext %q; want matching ARMED trial",
+			j.State, j.BootID, f.bootNext)
+	}
+	if !f.wdArmed || !f.rebooted {
+		t.Errorf("after retry: watchdogArmed=%v rebooted=%v; want protected trial and reboot",
+			f.wdArmed, f.rebooted)
+	}
+}
