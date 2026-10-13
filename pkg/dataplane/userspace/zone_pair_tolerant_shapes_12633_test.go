@@ -18,7 +18,7 @@ func TestTolerantZonePairShapesSnapshotRefused12633(t *testing.T) {
 		setCmds  []string
 	}{
 		{"S9-direct-nested", `from-zone A { to-zone B { ` + deny + ` } }`, nil},
-		{"S10-mixed-child-keyed-to-zone", `from-zone { A { to-zone B { ` + deny + ` } } }`, nil},
+		{"S10-mixed-child-keyed-to-zone", `from-zone { A to-zone B { ` + deny + ` } }`, nil},
 		{"S18-container-to-zone-policy", `from-zone { A { to-zone { ` + deny + ` } } }`, nil},
 		{"SET1-set-command-phantom", "", []string{
 			"set security policies from-zone A policy p1 match source-address any",

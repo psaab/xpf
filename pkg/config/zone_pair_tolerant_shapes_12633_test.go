@@ -61,14 +61,15 @@ func zonePairSetTree12633(t *testing.T) *ConfigTree {
 func TestTolerantZonePairShapesPoison12633(t *testing.T) {
 	deny := `policy p1 { match { source-address any; destination-address any; application any; } then { deny; } }`
 	for _, tc := range []struct {
-		name       string
-		fromZone   string
-		wantRecord string // substring naming the intended pair
+		name            string
+		fromZone        string
+		wantRecord      string
+		wantDestination string
 	}{
-		{"S9-direct-nested", `from-zone A { to-zone B { ` + deny + ` } }`, `from-zone "A"`},
-		{"S10-mixed-child-keyed-to-zone", `from-zone { A { to-zone B { ` + deny + ` } } }`, `to-zone B`},
-		{"S18-container-to-zone-policy", `from-zone { A { to-zone { ` + deny + ` } } }`, "`policy policy`"},
-		{"S18-keyed-to-zone-policy", `from-zone A { to-zone { ` + deny + ` } }`, "#12633"},
+		{"S9-direct-nested", `from-zone A { to-zone B { ` + deny + ` } }`, `from-zone "A"`, `to-zone B`},
+		{"S10-mixed-child-keyed-to-zone", `from-zone { A to-zone B { ` + deny + ` } }`, `from-zone { A`, `to-zone B`},
+		{"S18-container-to-zone-policy", `from-zone { A { to-zone { ` + deny + ` } } }`, `from-zone "A"`, "`policy policy`"},
+		{"S18-keyed-to-zone-policy", `from-zone A { to-zone { ` + deny + ` } }`, `from-zone "A"`, "#12633"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := zonePairShape12633(t, tc.fromZone)
@@ -83,8 +84,8 @@ func TestTolerantZonePairShapesPoison12633(t *testing.T) {
 				t.Fatalf("shape recorded nothing in MalformedZonePairs; dropped deny would fail open (pairs=%v)", cfg.Security.Policies)
 			}
 			joined := strings.Join(cfg.Security.MalformedZonePairs, "\n")
-			if !strings.Contains(joined, tc.wantRecord) {
-				t.Fatalf("MalformedZonePairs %q does not name intended pair via %q", joined, tc.wantRecord)
+			if !strings.Contains(joined, tc.wantRecord) || !strings.Contains(joined, tc.wantDestination) {
+				t.Fatalf("MalformedZonePairs %q does not name malformed pair via %q and %q", joined, tc.wantRecord, tc.wantDestination)
 			}
 			if got := LenientDroppedPolicyLocator(cfg); got == "" {
 				t.Fatal("tolerant compile did not add the snapshot poison carrier")

@@ -170,19 +170,14 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 						} else if bodyHasToZoneLessPolicy12231(fzSub) {
 							sec.MalformedZonePairs = append(sec.MalformedZonePairs, containerToZoneLess12231(fzSub.Name()))
 						}
-						// #12633: a keyed to-zone under a source container
-						// is another mixed shape; the old pair builder reads
-						// "policy" as its destination when the policy stanza
-						// itself is nested under that keyed node.
+						// #12633 S18 (container arm): `from-zone { A {
+						// to-zone { policy ... } } }` puts a `policy` where
+						// the destination zone belongs; the pair builder
+						// reads it as the phantom zone `policy`. A KEYED
+						// `to-zone B { policy ... }` is supported since
+						// #12782 and compiles a real A->B pair, so only
+						// the keyless form is recorded here.
 						for _, tzNode := range fzSub.FindChildren("to-zone") {
-							if len(tzNode.Keys) >= 2 && len(tzNode.FindChildren("policy")) > 0 {
-								sec.MalformedZonePairs = append(sec.MalformedZonePairs,
-									mixedKeyedZonePairError11346(fzSub.Name(), tzNode.Keys[1]).Error())
-								break
-							}
-							// In the fully-container spelling, `policy`
-							// in the to-zone body is consumed as a zone
-							// name by pair construction, making A->policy.
 							if len(tzNode.Keys) == 1 && len(tzNode.FindChildren("policy")) > 0 {
 								sec.MalformedZonePairs = append(sec.MalformedZonePairs,
 									policyAsDestinationZone12633(fzSub.Name(), "policy"))
