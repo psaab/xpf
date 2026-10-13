@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -217,7 +218,11 @@ func armedGateInvoke() map[string]func(m *Manager) error {
 		},
 
 		// class 2 (neutral; error-returning members return nil on fresh)
-		"SessionCount":       func(m *Manager) error { m.SessionCount(); return nil },
+		"SessionCount": func(m *Manager) error { m.SessionCount(); return nil },
+		"SessionCountContext": func(m *Manager) error {
+			_, _, err := m.SessionCountContext(context.Background())
+			return err
+		},
 		"GetMapStats":        func(m *Manager) error { m.GetMapStats(); return nil },
 		"ClearSessionCounts": func(m *Manager) error { return m.ClearSessionCounts() },
 		"UpdatePolicyScheduleState": func(m *Manager) error {

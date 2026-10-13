@@ -1,9 +1,81 @@
 package grpcapi
 
 import (
+	"context"
+	"errors"
+
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+// backendSessionCountContext counts forward-only sessions and discards partial
+// totals if the request is cancelled between either address-family pass.
+func backendSessionCountContext(ctx context.Context, backend any) (v4, v6 int, err error) {
+	counter, ok := backend.(interface {
+		SessionCountContext(context.Context) (int, int, error)
+	})
+	if ok {
+		return counter.SessionCountContext(ctx)
+	}
+	dp, ok := backend.(interface {
+		IterateSessions(func(dataplane.SessionKey, dataplane.SessionValue) bool) error
+		IterateSessionsV6(func(dataplane.SessionKeyV6, dataplane.SessionValueV6) bool) error
+	})
+	if !ok {
+		return 0, 0, status.Error(codes.Unavailable, "dataplane session iteration unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
+	cancelled := newSessionWalkCancelSampler(ctx, sessionWalkCancelInterval9060)
+	if err := dp.IterateSessions(func(_ dataplane.SessionKey, val dataplane.SessionValue) bool {
+		if cancelled() {
+			return false
+		}
+		if val.IsReverse == 0 {
+			v4++
+		}
+		return true
+	}); err != nil {
+		if ctx.Err() != nil {
+			return 0, 0, ctx.Err()
+		}
+		return 0, 0, err
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
+	if err := dp.IterateSessionsV6(func(_ dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
+		if cancelled() {
+			return false
+		}
+		if val.IsReverse == 0 {
+			v6++
+		}
+		return true
+	}); err != nil {
+		if ctx.Err() != nil {
+			return 0, 0, ctx.Err()
+		}
+		return 0, 0, err
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
+	return v4, v6, nil
+}
+
+func sessionCountStatus(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return status.FromContextError(ctx.Err()).Err()
+	}
+	if errors.Is(err, dataplane.ErrNotPublished) {
+		return status.Error(codes.Unavailable, "dataplane not loaded")
+	}
+	return status.Errorf(codes.Internal, "session count: %v", err)
+}
 
 // grpcRuntime is the gRPC server's domain-specific dataplane
 // surface. Lists exactly the methods the gRPC handlers consume on
@@ -114,27 +186,11 @@ func (s *Server) dpProbe() any {
 	return dataplane.Unwrap(s.dp)
 }
 
-// backendSessionCount and backendMapStats read the mandatory management
-// surface off an ALREADY-RESOLVED backend (Codex PR #6743 r7-F3).
-//
-// The buffer renders in server_show_system.go take exactly one
-// dataplane.Unwrap and must not take another: calling s.dp.SessionCount()
-// or s.dp.GetMapStats() there would each be a fresh cell load, and a
-// setDataplane(nil) landing between the publication check and the map read
-// made the render print "No BPF maps available" — a claim about a LOADED
-// backend's maps — for a daemon that had just lost its backend. Asserting
-// off the single resolution keeps the whole render describing one instant.
-//
-// Both narrow interfaces are part of grpcDataPlane, so every value that can
-// be stored in Server.dp satisfies them; the ok=false arms are the
-// forward-compatibility answer for a future backend that does not.
-func backendSessionCount(backend any) (v4, v6 int) {
-	c, ok := backend.(interface{ SessionCount() (int, int) })
-	if !ok {
-		return 0, 0
-	}
-	return c.SessionCount()
-}
+// backendMapStats reads map statistics off an ALREADY-RESOLVED backend
+// (#6743 r7-F3). The buffers renders use one dataplane.Unwrap so map
+// statistics and the context-aware session count describe the same backend
+// publication. Session totals are walked through backendSessionCountContext,
+// which stops on request cancellation and discards partial results.
 
 func backendMapStats(backend any) []dataplane.MapStats {
 	m, ok := backend.(interface{ GetMapStats() []dataplane.MapStats })

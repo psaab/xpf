@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -38,6 +39,10 @@ type sessionGaugeSnapshot struct {
 }
 
 func (c *xpfCollector) collectSessionGauges(ch chan<- prometheus.Metric, dp apiRuntimeDataPlane) {
+	c.collectSessionGaugesContext(context.Background(), ch, dp)
+}
+
+func (c *xpfCollector) collectSessionGaugesContext(ctx context.Context, ch chan<- prometheus.Metric, dp apiRuntimeDataPlane) {
 	// xpf_gc_sweep_duration_seconds reflects the last BPF GC sweep timing.
 	// On the userspace dataplane (the only live forwarding path) the BPF GC
 	// sweep is skipped (#333), so this is 0 — expected, and orthogonal to the
@@ -69,7 +74,7 @@ func (c *xpfCollector) collectSessionGauges(ch chan<- prometheus.Metric, dp apiR
 	// than a graph silently dropping toward zero. The cache is NOT poisoned on
 	// error — a failed walk leaves the previous good snapshot in place (and its
 	// TTL unchanged), so the next scrape retries the walk.
-	snap, ok := c.sessionGaugeSnapshotCached(dp)
+	snap, ok := c.sessionGaugeSnapshotCachedContext(ctx, dp)
 	if !ok {
 		ch <- prometheus.MustNewConstMetric(c.sessionScrapeOK, prometheus.GaugeValue, 0)
 		return
@@ -101,13 +106,25 @@ func (c *xpfCollector) sessionGaugeTTLEffective() time.Duration {
 //
 // Concurrency: the fast-path freshness check takes sessionGaugeMu only briefly.
 // On a miss the refresh runs under singleflight keyed on a constant, so N
-// concurrent stale scrapes coalesce onto ONE walk and all observe its result —
-// they never fan out to N parallel walks over the shared conntrack maps.
+// concurrent stale scrapes share ONE walk. DoChan lets each waiting scrape
+// abandon its wait on cancellation rather than pinning an HTTP handler behind
+// another scrape's walk.
 func (c *xpfCollector) sessionGaugeSnapshotCached(dp apiRuntimeDataPlane) (sessionGaugeSnapshot, bool) {
+	return c.sessionGaugeSnapshotCachedContext(context.Background(), dp)
+}
+
+func (c *xpfCollector) sessionGaugeSnapshotCachedContext(ctx context.Context, dp apiRuntimeDataPlane) (sessionGaugeSnapshot, bool) {
+	if ctx.Err() != nil {
+		return sessionGaugeSnapshot{}, false
+	}
 	ttl := c.sessionGaugeTTLEffective()
 
 	// Fast path: a fresh snapshot serves without a walk or singleflight entry.
 	c.sessionGaugeMu.Lock()
+	if ctx.Err() != nil {
+		c.sessionGaugeMu.Unlock()
+		return sessionGaugeSnapshot{}, false
+	}
 	if c.sessionGaugeValid && time.Since(c.sessionGaugeComputedAt) < ttl {
 		snap := c.sessionGaugeSnap
 		c.sessionGaugeMu.Unlock()
@@ -115,13 +132,17 @@ func (c *xpfCollector) sessionGaugeSnapshotCached(dp apiRuntimeDataPlane) (sessi
 	}
 	c.sessionGaugeMu.Unlock()
 
-	// Slow path: coalesce concurrent refreshes onto a single in-flight walk.
-	v, err, _ := c.sessionGaugeSF.Do("session-gauges", func() (interface{}, error) {
-		// Re-check under the lock: a sibling scrape may have refreshed the
-		// snapshot between our fast-path miss and acquiring the singleflight
-		// slot (singleflight only dedups callers that overlap the SAME in-flight
-		// call; a caller arriving just after a refresh completed would otherwise
-		// walk again immediately).
+	// Slow path: coalesce concurrent refreshes onto a single in-flight walk,
+	// while allowing this request to stop waiting when its own context ends.
+	resultCh := c.sessionGaugeSF.DoChan("session-gauges", func() (interface{}, error) {
+		// The walk is shared work: its lifetime must not be owned by the
+		// scrape which happened to win singleflight. A short-timeout probe
+		// may lead a healthy scraper into this call, and abandoning the walk
+		// at the leader's deadline would make that healthy joiner lose the
+		// result. Likewise, completing a walk beyond one scrape deadline
+		// populates the cache and lets later scrapes make progress.
+		// Re-check the cache in case a sibling refreshed after our fast-path
+		// miss and before this call acquired the singleflight slot.
 		c.sessionGaugeMu.Lock()
 		if c.sessionGaugeValid && time.Since(c.sessionGaugeComputedAt) < ttl {
 			snap := c.sessionGaugeSnap
@@ -130,7 +151,7 @@ func (c *xpfCollector) sessionGaugeSnapshotCached(dp apiRuntimeDataPlane) (sessi
 		}
 		c.sessionGaugeMu.Unlock()
 
-		snap, werr := walkSessionGauges(dp)
+		snap, werr := walkSessionGaugesContext(context.Background(), dp)
 		if werr != nil {
 			return sessionGaugeSnapshot{}, werr
 		}
@@ -141,12 +162,17 @@ func (c *xpfCollector) sessionGaugeSnapshotCached(dp apiRuntimeDataPlane) (sessi
 		c.sessionGaugeMu.Unlock()
 		return snap, nil
 	})
-	if err != nil {
-		// Walk failed. Do NOT poison the cache (leave any prior good snapshot
-		// and its TTL untouched so the next scrape retries). Signal scrape_ok=0.
+	select {
+	case <-ctx.Done():
 		return sessionGaugeSnapshot{}, false
+	case result := <-resultCh:
+		// A completion can race cancellation; never turn a successful shared
+		// result into a success for a request whose own deadline has expired.
+		if ctx.Err() != nil || result.Err != nil {
+			return sessionGaugeSnapshot{}, false
+		}
+		return result.Val.(sessionGaugeSnapshot), true
 	}
-	return v.(sessionGaugeSnapshot), true
 }
 
 // walkSessionGauges performs one full walk of the v4 and v6 conntrack tables
@@ -156,17 +182,20 @@ func (c *xpfCollector) sessionGaugeSnapshotCached(dp apiRuntimeDataPlane) (sessi
 //
 // active   = forward session entries (IsReverse == 0) — the live count.
 // established = forward entries whose State is ESTABLISHED (a distinct session
-//
-//	state). Half-open / opening sessions are counted in active but
-//	not established.
+// state). Half-open / opening sessions are counted in active but not
+// established.
 func walkSessionGauges(dp apiRuntimeDataPlane) (sessionGaugeSnapshot, error) {
+	return walkSessionGaugesContext(context.Background(), dp)
+}
+
+func walkSessionGaugesContext(ctx context.Context, dp apiRuntimeDataPlane) (sessionGaugeSnapshot, error) {
 	// #8001: take a sessionWalkLimiter slot like every other full-table walk in
 	// this package. Six siblings do (sessions.go x5, nat.go x1); this one did
 	// not, so the limiter's guarantee was not the guarantee anyone reading it
 	// would assume -- correct about every call site but this one.
 	//
-	// It matters more here than at a request-driven site, not less: this walk is
-	// driven by a Prometheus scraper on a fixed interval rather than by an
+	// It matters more here than at a request-driven site, not less: this walk
+	// is driven by a Prometheus scraper on a fixed interval rather than by an
 	// operator, so it is the call site least likely to be noticed under load and
 	// most likely to overlap with something else.
 	//
@@ -182,7 +211,15 @@ func walkSessionGauges(dp apiRuntimeDataPlane) (sessionGaugeSnapshot, error) {
 	}
 	defer release()
 
+	if err := ctx.Err(); err != nil {
+		return sessionGaugeSnapshot{}, err
+	}
 	var s sessionGaugeSnapshot
+	visited := 0
+	cancelled := func() bool {
+		visited++
+		return visited%sessionWalkCancelInterval == 0 && ctx.Err() != nil
+	}
 	countForward := func(state uint8, flags uint16, ipCounter *int) {
 		s.active++
 		*ipCounter++
@@ -197,19 +234,37 @@ func walkSessionGauges(dp apiRuntimeDataPlane) (sessionGaugeSnapshot, error) {
 		}
 	}
 	if err := dp.IterateSessions(func(_ dataplane.SessionKey, val dataplane.SessionValue) bool {
+		if cancelled() {
+			return false
+		}
 		if val.IsReverse == 0 {
 			countForward(val.State, val.Flags, &s.ipv4)
 		}
 		return true
 	}); err != nil {
+		if ctx.Err() != nil {
+			return sessionGaugeSnapshot{}, ctx.Err()
+		}
+		return sessionGaugeSnapshot{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return sessionGaugeSnapshot{}, err
 	}
 	if err := dp.IterateSessionsV6(func(_ dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
+		if cancelled() {
+			return false
+		}
 		if val.IsReverse == 0 {
 			countForward(val.State, val.Flags, &s.ipv6)
 		}
 		return true
 	}); err != nil {
+		if ctx.Err() != nil {
+			return sessionGaugeSnapshot{}, ctx.Err()
+		}
+		return sessionGaugeSnapshot{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return sessionGaugeSnapshot{}, err
 	}
 	return s, nil

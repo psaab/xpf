@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 
@@ -123,7 +124,7 @@ type liveDataPlaneSurface interface {
 	GetSessionV4(key dataplane.SessionKey) (dataplane.SessionValue, error)
 	GetSessionV6(key dataplane.SessionKeyV6) (dataplane.SessionValueV6, error)
 	SessionCount() (v4, v6 int)
-
+	SessionCountContext(context.Context) (v4, v6 int, err error)
 	ClearAllSessions() (v4 int, v6 int, err error)
 	DeleteSession(key dataplane.SessionKey) error
 	DeleteSessionV6(key dataplane.SessionKeyV6) error
@@ -423,6 +424,14 @@ func (a liveDataPlane) SessionCount() (v4, v6 int) {
 		return 0, 0
 	}
 	return s.SessionCount()
+}
+
+func (a liveDataPlane) SessionCountContext(ctx context.Context) (int, int, error) {
+	s, err := a.resolve()
+	if err != nil {
+		return 0, 0, err
+	}
+	return s.SessionCountContext(ctx)
 }
 
 // ClearAllSessions is serialized with config applies because a successful

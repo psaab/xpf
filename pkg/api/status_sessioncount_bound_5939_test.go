@@ -13,6 +13,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -38,6 +39,11 @@ func (*statusCountDP) IsLoaded() bool { return true }
 func (d *statusCountDP) SessionCount() (int, int) {
 	atomic.AddInt32(&d.countCalls, 1)
 	return d.v4, d.v6
+}
+
+func (d *statusCountDP) SessionCountContext(context.Context) (int, int, error) {
+	atomic.AddInt32(&d.countCalls, 1)
+	return d.v4, d.v6, nil
 }
 
 func TestRESTStatusSessionCountBound_5939(t *testing.T) {

@@ -547,12 +547,12 @@ func (s *Server) showText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 		s.showRootAuthentication(cfg, &buf)
 
 	case "buffers":
-		if err := s.showBuffers(cfg, &buf); err != nil {
+		if err := s.showBuffersContext(ctx, cfg, &buf); err != nil {
 			return nil, err
 		}
 
 	case "buffers-detail":
-		if err := s.showBuffersDetail(cfg, &buf); err != nil {
+		if err := s.showBuffersDetailContext(ctx, cfg, &buf); err != nil {
 			return nil, err
 		}
 

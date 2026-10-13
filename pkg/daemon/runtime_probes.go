@@ -60,9 +60,9 @@ type apiDataPlane interface {
 	IterateSessionsV6(func(dataplane.SessionKeyV6, dataplane.SessionValueV6) bool) error
 	GetSessionV4(dataplane.SessionKey) (dataplane.SessionValue, error)
 	GetSessionV6(dataplane.SessionKeyV6) (dataplane.SessionValueV6, error)
-	// SessionCount feeds the REST /status SessionCount from the live session
-	// table (#3929); mirrors the pkg/api apiRuntimeDataPlane addition.
+	// SessionCount feeds REST /status from the live session table (#3929).
 	SessionCount() (v4, v6 int)
+	SessionCountContext(context.Context) (v4, v6 int, err error)
 	ClearAllSessions() (int, int, error)
 
 	ReadGlobalCounter(uint32) (uint64, error)
@@ -103,7 +103,6 @@ type grpcDataPlane interface {
 	GetSessionV4(key dataplane.SessionKey) (dataplane.SessionValue, error)
 	GetSessionV6(key dataplane.SessionKeyV6) (dataplane.SessionValueV6, error)
 	SessionCount() (v4, v6 int)
-
 	ClearAllSessions() (v4 int, v6 int, err error)
 	DeleteSession(key dataplane.SessionKey) error
 	DeleteSessionV6(key dataplane.SessionKeyV6) error

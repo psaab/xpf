@@ -25,6 +25,10 @@ func (f *systemBuffersUserspaceDP) SessionCount() (int, int) {
 	return f.v4, f.v6
 }
 
+func (f *systemBuffersUserspaceDP) SessionCountContext(context.Context) (int, int, error) {
+	return f.v4, f.v6, nil
+}
+
 func TestShowTextSystemBuffersUsesUserspaceStatus(t *testing.T) {
 	s := &Server{
 		store: newConfigStore(t, t.TempDir()+"/xpf.conf"),

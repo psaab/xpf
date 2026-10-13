@@ -18,7 +18,7 @@ import (
 	"github.com/psaab/xpf/pkg/termsafe"
 )
 
-func (s *Server) GetStatus(_ context.Context, _ *pb.GetStatusRequest) (*pb.GetStatusResponse, error) {
+func (s *Server) GetStatus(ctx context.Context, _ *pb.GetStatusRequest) (*pb.GetStatusResponse, error) {
 	resp := &pb.GetStatusResponse{
 		Uptime:          time.Since(s.startTime).Truncate(time.Second).String(),
 		DataplaneLoaded: s.dp != nil && s.dp.IsLoaded(),
@@ -34,19 +34,21 @@ func (s *Server) GetStatus(_ context.Context, _ *pb.GetStatusRequest) (*pb.GetSt
 	// this reported 0 sessions on every real deployment. SessionCount counts
 	// forward entries only, so it is the live session total.
 	if s.dp != nil && s.dp.IsLoaded() {
-		// #5782: SessionCount() is a full v4+v6 session-map iteration holding the
-		// per-bucket BPF-map locks for O(table) — the SAME lock-contention DoS
-		// class #5708 bounded for the session read-scans, reachable UNGATED here.
-		// Gate it through the shared diagcmd.SessionWalkLimiter (the same instance
-		// the GetSessions/sessions-top scans use); on contention fail fast with
-		// ResourceExhausted rather than driving another concurrent full-table walk.
+		// Gate the cancellable full-table walk through the same admission
+		// limiter as the other session scans.
 		release, err := sessionWalkLimiter.Acquire()
 		if err != nil {
 			return nil, status.Error(codes.ResourceExhausted,
 				"session scan concurrency limit reached; retry shortly")
 		}
-		defer release() // idempotent; released on panic too (limiter contract)
-		v4, v6 := s.dp.SessionCount()
+		defer release()
+		v4, v6, err := backendSessionCountContext(ctx, s.dp)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, status.FromContextError(ctx.Err()).Err()
+			}
+			return nil, sessionCountStatus(ctx, err)
+		}
 		resp.SessionCount = int32(v4 + v6)
 	}
 	if s.cluster != nil {

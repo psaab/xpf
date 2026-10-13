@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -390,6 +391,62 @@ func (m *Manager) SessionCount() (v4, v6 int) {
 		}
 	}
 	return
+}
+
+// SessionCountContext counts forward-only sessions and stops when ctx is
+// cancelled. It returns zero counts on cancellation so callers cannot mistake a
+// partial walk for a successful total.
+func (m *Manager) SessionCountContext(ctx context.Context) (v4, v6 int, err error) {
+	if err = ctx.Err(); err != nil {
+		return 0, 0, err
+	}
+	if sm, present, _ := m.lookupMapLocked("sessions"); present {
+		var key SessionKey
+		var val bpfSessionValue
+		iter := sm.Iterate()
+		visited := 0
+		for iter.Next(&key, &val) {
+			visited++
+			if visited%1024 == 0 {
+				if err = ctx.Err(); err != nil {
+					return 0, 0, err
+				}
+			}
+			if val.IsReverse == 0 {
+				v4++
+			}
+		}
+		if err = iter.Err(); err != nil {
+			return 0, 0, err
+		}
+	}
+	if err = ctx.Err(); err != nil {
+		return 0, 0, err
+	}
+	if sm, present, _ := m.lookupMapLocked("sessions_v6"); present {
+		var key SessionKeyV6
+		var val bpfSessionValueV6
+		iter := sm.Iterate()
+		visited := 0
+		for iter.Next(&key, &val) {
+			visited++
+			if visited%1024 == 0 {
+				if err = ctx.Err(); err != nil {
+					return 0, 0, err
+				}
+			}
+			if val.IsReverse == 0 {
+				v6++
+			}
+		}
+		if err = iter.Err(); err != nil {
+			return 0, 0, err
+		}
+	}
+	if err = ctx.Err(); err != nil {
+		return 0, 0, err
+	}
+	return v4, v6, nil
 }
 
 // sessionClearBatchObserver, when non-nil, is invoked with the number of keys
