@@ -1650,10 +1650,11 @@ func TestReservedAliasManualRecoveryConverges10769(t *testing.T) {
 	if _, err := store.LoadSet("set system dataplane state-file " + fixed + "\n"); err != nil {
 		t.Fatalf("LoadSet fix: %v", err)
 	}
-	// A completed wipe followed by verification failure remains terminal:
-	// in-band config writes must not reopen the wiped prior-tenant state.
-	if _, err := d.commitAndApply(context.Background(), configstore.InternalCommitter(), "", peerSyncNever); !errors.Is(err, errDaemonResetting) {
-		t.Fatalf("in-band fix after completed wipe = %v, want terminal reset rejection", err)
+	// The wipe removed .configdb but left a dirty handoff, so an in-band fix
+	// is rejected as incomplete while direct persistence also cannot recreate
+	// the wiped prior-tenant state.
+	if _, err := d.commitAndApply(context.Background(), configstore.InternalCommitter(), "", peerSyncNever); !errors.Is(err, configstore.ErrResetHandoffDirty) {
+		t.Fatalf("in-band fix while dirty = %v, want incomplete", err)
 	}
 	if _, err := store.Commit(); err == nil {
 		t.Fatal("direct commit against the wiped DB must fail, got nil")

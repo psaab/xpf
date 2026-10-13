@@ -49,13 +49,13 @@ func (d *Daemon) isResetting() bool { return d.resetting.Load() }
 
 // enterResetGeneration marks the daemon as being factory-reset. Called by
 // factoryReset while it holds applySem, BEFORE the wipe, so any writer that
-// later acquires applySem re-renders nothing (#5281). It is left set for the
-// daemon's remaining lifetime after any successful wipe; only a failure before
-// a successful wipe clears it so the box stays recoverable.
+// later acquires applySem re-renders nothing (#5281). It remains set for the
+// daemon's remaining lifetime after the wipe passes post-verification and its
+// handoff is marked clean; failures before that point leave the box recoverable.
 func (d *Daemon) enterResetGeneration() { d.resetting.Store(true) }
 
 // exitResetGeneration leaves the reset generation after a failed reset only
-// when no invocation has already completed the wipe.
+// when no invocation has already completed successfully.
 func (d *Daemon) exitResetGeneration() { d.resetting.Store(false) }
 
 // quiesceDDNSForReset fences new reconcile launches and joins both guarded
@@ -468,8 +468,8 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 	kernelBeforeReset := ""
 	resetFailed := func(err error) error {
 		errs := []error{err}
-		// A previously completed wipe is terminal even if a subsequent
-		// factoryReset invocation fails before or during its own wipe.
+		// A previously completed factoryReset is terminal even if a later
+		// invocation fails before or during its own wipe.
 		if !d.resetWipeSucceeded.Load() {
 			// Restore the pre-wipe identity files only when the wipe itself ran
 			// and did not complete: after a completed wipe the config is gone
@@ -550,7 +550,6 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 	var verifyErr error
 	if wipeErr == nil {
 		wipeSucceeded = true
-		d.resetWipeSucceeded.Store(true)
 		d.markFeedShrinkHistoryWipeSucceeded()
 		// The config is gone: stop serving the prior tenant at once rather
 		// than until the process stop ~1s later. Kernel transit is disarmed
@@ -628,5 +627,6 @@ func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 	if ferr := configstore.FlipResetHandoffClean(); ferr != nil {
 		return resetFailed(ferr)
 	}
+	d.resetWipeSucceeded.Store(true)
 	return nil
 }

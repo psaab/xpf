@@ -991,22 +991,22 @@ type Daemon struct {
 	rxVlanAppliedParents map[string]struct{}
 	// resetting enters the TERMINAL factory-reset (zeroize) generation
 	// (#5281). A gRPC-initiated zeroize (factoryReset) sets it true while it
-	// holds applySem and erases on-disk state, and — on a successful wipe —
-	// leaves it set for the daemon's remaining lifetime (the daemon is stopped
-	// moments later). Once set, every config writer that acquires applySem
-	// (commitAndApply / commitConfirmedAndApply / syncAndApply /
+	// holds applySem and erases on-disk state, and — on a successful reset with
+	// a clean handoff — leaves it set for the daemon's remaining lifetime (the
+	// daemon is stopped moments later). Once set, every config writer that
+	// acquires applySem (commitAndApply / commitConfirmedAndApply / syncAndApply /
 	// executeConfirmedRollback, the applyConfigLocked reconcile, and the
 	// periodic DHCP-lease IPsec rebind) short-circuits, so nothing re-persists
 	// the just-erased .configdb SSOT or re-renders the wiped secrets
 	// (frr.conf/swanctl PSKs/Kea/login accounts) in the window between the wipe
 	// and the daemon stop. Read/written only via isResetting / enterReset...
 	// exitResetGeneration (sync/atomic), so the zeroize goroutine and any
-	// concurrent apply goroutine race safely. A failure before any successful
-	// wipe clears it again so the box stays recoverable (see factoryReset).
+	// concurrent apply goroutine race safely. A failed reset clears it again
+	// so the box stays recoverable (see factoryReset).
 	resetting atomic.Bool
-	// resetWipeSucceeded is sticky for the daemon lifetime: once any reset
-	// invocation has completed its wipe, a later failed retry must not resume
-	// writers or leave the terminal reset generation.
+	// resetWipeSucceeded is sticky for the daemon lifetime: once a factoryReset
+	// has fully succeeded, a later failed retry must not resume writers or leave
+	// the terminal reset generation.
 	resetWipeSucceeded atomic.Bool
 	// applyFenced marks the daemon as SHUTTING DOWN for the purpose of
 	// background config applies (#6788). runShutdownSequence sets it at the very

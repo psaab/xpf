@@ -226,27 +226,58 @@ func TestFactoryResetSuccessKeepsFeedHistoryFenceSticky12170(t *testing.T) {
 	}
 }
 
-// #12616: a failed retry after a successful wipe must not clear the terminal
-// reset generation. The first call wipes and returns nil (the caller would
-// stop the daemon, but before shutdown a second call must stay fenced).
+// #12616: a failed retry after a successful reset must not clear the terminal
+// generation or resume archive/rescue writes.
 func TestFactoryResetFailedRetryAfterSuccessfulWipeKeepsTerminalGeneration(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)
 	isolateHandoffFlag(t)
-	d := &Daemon{applySem: semaphore.NewWeighted(1)}
+	dir := t.TempDir()
+	store, err := configstore.New(filepath.Join(dir, "xpf.conf"))
+	if err != nil {
+		t.Fatalf("configstore.New: %v", err)
+	}
+	if _, err := store.SyncApply("system { host-name reset-retry; }", nil); err != nil {
+		t.Fatalf("SyncApply fixture: %v", err)
+	}
+	archiveDir := filepath.Join(dir, "archive")
+	if err := store.ArchiveConfig(archiveDir, 10); err != nil {
+		t.Fatalf("initial ArchiveConfig: %v", err)
+	}
+	if err := store.SaveRescueConfig(); err != nil {
+		t.Fatalf("initial SaveRescueConfig: %v", err)
+	}
+	d := &Daemon{applySem: semaphore.NewWeighted(1), store: store}
 
-	if err := d.factoryReset(context.Background(), func() error { return fakePendingWipe(t)() }); err != nil {
+	if err := d.factoryReset(context.Background(), func() error {
+		if err := os.RemoveAll(archiveDir); err != nil {
+			return err
+		}
+		if err := os.Remove(filepath.Join(dir, configstore.RescueConfigBase)); err != nil {
+			return err
+		}
+		return fakePendingWipe(t)()
+	}); err != nil {
 		t.Fatalf("successful factoryReset: %v", err)
 	}
 	if !d.isResetting() {
-		t.Fatal("successful wipe must enter the terminal reset generation")
+		t.Fatal("successful reset must enter the terminal reset generation")
 	}
 	wantErr := errors.New("retry wipe busy")
 	if err := d.factoryReset(context.Background(), func() error { return wantErr }); !errors.Is(err, wantErr) {
 		t.Fatalf("failed retry must surface the wipe error; got %v", err)
 	}
 	if !d.isResetting() {
-		t.Fatal("failed retry after a successful wipe must not clear the terminal reset generation")
+		t.Fatal("failed retry after a successful reset must not clear the terminal reset generation")
+	}
+	if err := store.SaveRescueConfig(); !errors.Is(err, configstore.ErrRescueSaveFenced) {
+		t.Fatalf("rescue save after failed retry = %v, want ErrRescueSaveFenced", err)
+	}
+	if err := store.ArchiveConfig(archiveDir, 10); err != nil {
+		t.Fatalf("ArchiveConfig after failed retry: %v", err)
+	}
+	if _, err := os.Stat(archiveDir); !os.IsNotExist(err) {
+		t.Fatalf("failed retry resumed archive writes; archive dir stat err=%v", err)
 	}
 }
 
