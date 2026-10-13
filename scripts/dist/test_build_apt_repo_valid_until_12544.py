@@ -209,6 +209,7 @@ class ShimFlatValidUntilTests(unittest.TestCase):
         _o, rc, out = self._run("plus-two-vu")
         self.assertNotEqual(rc, 0, "+2s Valid-Until accepted")
         self.assertIn("ValidTime-derived", out)
+
     def test_duplicate_date_refused(self):
         # Derivation from Date is only unambiguous with exactly one Date.
         _o, rc, out = self._run("dup-date")
