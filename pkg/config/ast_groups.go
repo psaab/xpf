@@ -580,15 +580,24 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				// decision then happens one level down against the expanded
 				// child, so an inline value still wins.
 				if !peer.IsLeaf {
-					if body := groupPackedLeafBody(ancestorPath, s); body != nil {
-						// Canonical alias peers can receive successive packed
-						// bodies (for example vrrp-group 01 after 1). Mark
-						// synthesized terminals so their scalar children take
-						// the same inline-wins leaf path as the first promotion.
-						if canonicalAliasLeaf9859(ancestorPath, s) {
-							markSynthTerminals9855(body)
-						}
-
+					body := groupPackedLeafBody(ancestorPath, s)
+					// Canonical alias peers can receive successive packed
+					// bodies (for example vrrp-group 01 after 1). Mark
+					// synthesized terminals so their scalar children take
+					// the same inline-wins leaf path as the first promotion.
+					if body != nil && canonicalAliasLeaf9859(ancestorPath, s) {
+						markSynthTerminals9855(body)
+					}
+					if body == nil {
+						// #12530: a tail outside the schema grammar merges as
+						// one leaf under the same peer. One level down it meets
+						// the peer's own same-instance children (an inline
+						// `unit 0`) and apply-groups-except, exactly as an
+						// expanded body does, instead of being overridden away
+						// before post-expansion gates can see it.
+						body = groupPackedLeafUnmodelledTail(ancestorPath, s)
+					}
+					if body != nil {
 						// #9862: the synthesized body carries s's provenance, so a
 						// nested group's packed leaf filters as nested below. The
 						// fallback covers only the impossible untagged case.
@@ -931,8 +940,9 @@ func schemaAtAncestorPath(ancestorPath [][]string) *schemaNode {
 //     the expanded child finds a peer and the ordinary apply-groups OVERRIDE
 //     applies, so INLINE STILL WINS. The fix does not weaken that.
 //
-// Returns nil unless the tail actually expands under the schema, so an
-// unmodelled or genuinely scalar leaf keeps its existing override behaviour.
+// Returns nil unless the tail actually expands under the schema. When it does
+// not and the peer is a container, mergeNodes merges the tail from
+// groupPackedLeafUnmodelledTail into it instead (#12530).
 func groupPackedLeafBody(ancestorPath [][]string, s *Node) []*Node {
 	if s == nil || len(s.Keys) < 2 {
 		return nil
@@ -954,6 +964,38 @@ func groupPackedLeafBody(ancestorPath [][]string, s *Node) []*Node {
 		return nil
 	}
 	return expanded
+}
+
+// groupPackedLeafUnmodelledTail returns the tail of a packed group leaf that
+// names a schema container, past its identity keys, as one leaf carrying the
+// tail tokens' quote/bracket provenance (#12530). mergeNodes merges it into the
+// inline container peer when groupPackedLeafBody cannot expand the tail, so the
+// ordinary peer rules run one level down and post-expansion gates still see
+// keywords outside the schema grammar.
+func groupPackedLeafUnmodelledTail(ancestorPath [][]string, s *Node) []*Node {
+	if s == nil || len(s.Keys) < 2 {
+		return nil
+	}
+	parent := schemaAtAncestorPath(ancestorPath)
+	if parent == nil {
+		return nil
+	}
+	leafSchema := resolveSchemaChild(parent, s.Keys[0])
+	if leafSchema == nil || leafSchema.children == nil {
+		return nil
+	}
+	consumed, _ := consumeNodeKeys(s.Keys, leafSchema)
+	if consumed <= 0 || consumed >= len(s.Keys) {
+		return nil
+	}
+	tail := &Node{Keys: append([]string(nil), s.Keys[consumed:]...), IsLeaf: true}
+	if len(s.KeysQuoted) == len(s.Keys) {
+		tail.setKeysQuoted(append([]bool(nil), s.KeysQuoted[consumed:]...))
+	}
+	if len(s.KeysBracketed) == len(s.Keys) {
+		tail.setKeysBracketed(append([]bool(nil), s.KeysBracketed[consumed:]...))
+	}
+	return []*Node{tail}
 }
 
 // leafListPeer returns the first dst node that expresses the leaf-list keyed
