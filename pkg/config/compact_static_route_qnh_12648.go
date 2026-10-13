@@ -48,7 +48,9 @@ func splitPackedRouteQualifiedNextHop(route *Node) int {
 	if route == nil {
 		return 0
 	}
-	for i, nextHop := range route.Children {
+	changed := 0
+	for i := 0; i < len(route.Children); i++ {
+		nextHop := route.Children[i]
 		if nextHop == nil || nextHop.Name() != "next-hop" || len(nextHop.Keys) < 4 {
 			continue
 		}
@@ -118,9 +120,10 @@ func splitPackedRouteQualifiedNextHop(route *Node) int {
 		children = append(children, qualified)
 		children = append(children, route.Children[i+1:]...)
 		route.Children = children
-		return 1
+		changed++
+		i++
 	}
-	return 0
+	return changed
 }
 
 func copyPackedRouteKeyMasks(source *Node, start, end int, dest *Node) {

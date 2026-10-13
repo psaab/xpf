@@ -6,24 +6,57 @@ import (
 	"testing"
 )
 
-// A fully packed static-route line must not let the multi-value next-hop leaf
-// consume a following qualified-next-hop statement as more ECMP gateways.
-// Before #12648, compilation succeeded but `qualified-next-hop`, its gateway,
-// and its preference were all compiled as plain next-hop addresses.
+// A packed static-route next-hop tail must not consume a following
+// qualified-next-hop statement as more ECMP gateways. This covers multiple
+// gateways and repeated packed next-hop children as well as the one-liner.
+// Before #12648, compilation succeeded but the QNH clause's tokens were
+// compiled as plain next-hop addresses.
 func TestPackedStaticRouteNextHopAndQualifiedNextHop_12648(t *testing.T) {
 	packed := hierTree(t, `routing-options { static { route 10.5.0.0/16 next-hop 10.0.0.1 qualified-next-hop 10.0.0.2 preference 250; } }`)
 	unpacked := hierTree(t, `routing-options { static { route 10.5.0.0/16 { next-hop 10.0.0.1; qualified-next-hop 10.0.0.2 { preference 250; } } } }`)
+	packedMulti := hierTree(t, `routing-options { static { route 10.5.0.0/16 next-hop 10.0.0.1 10.0.0.3 qualified-next-hop 10.0.0.2 preference 250; } }`)
+	packedRepeated := hierTree(t, `routing-options { static { route 10.5.0.0/16 { next-hop 10.0.0.1 qualified-next-hop 10.0.0.2 preference 250; next-hop 10.0.0.3 qualified-next-hop 10.0.0.4 preference 200; } } }`)
 
-	want := []NextHopEntry{
-		{Address: "10.0.0.1"},
-		{Address: "10.0.0.2", Preference: 250, HasPreference: true},
-	}
 	for _, tc := range []struct {
 		name string
 		tree *ConfigTree
+		want []NextHopEntry
 	}{
-		{name: "packed one-liner", tree: packed},
-		{name: "unpacked control", tree: unpacked},
+		{
+			name: "packed one-liner",
+			tree: packed,
+			want: []NextHopEntry{
+				{Address: "10.0.0.1"},
+				{Address: "10.0.0.2", Preference: 250, HasPreference: true},
+			},
+		},
+		{
+			name: "unpacked control",
+			tree: unpacked,
+			want: []NextHopEntry{
+				{Address: "10.0.0.1"},
+				{Address: "10.0.0.2", Preference: 250, HasPreference: true},
+			},
+		},
+		{
+			name: "packed multi-gateway next-hop",
+			tree: packedMulti,
+			want: []NextHopEntry{
+				{Address: "10.0.0.1"},
+				{Address: "10.0.0.3"},
+				{Address: "10.0.0.2", Preference: 250, HasPreference: true},
+			},
+		},
+		{
+			name: "repeated packed next-hop children",
+			tree: packedRepeated,
+			want: []NextHopEntry{
+				{Address: "10.0.0.1"},
+				{Address: "10.0.0.2", Preference: 250, HasPreference: true},
+				{Address: "10.0.0.3"},
+				{Address: "10.0.0.4", Preference: 200, HasPreference: true},
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := SchemaValidate(tc.tree, nil); err != nil {
@@ -34,8 +67,8 @@ func TestPackedStaticRouteNextHopAndQualifiedNextHop_12648(t *testing.T) {
 				t.Fatalf("CompileConfig: %v", err)
 			}
 			route := findStaticRoute3871(t, cfg.RoutingOptions.StaticRoutes, "10.5.0.0/16")
-			if !reflect.DeepEqual(route.NextHops, want) {
-				t.Fatalf("NextHops = %+v, want %+v", route.NextHops, want)
+			if !reflect.DeepEqual(route.NextHops, tc.want) {
+				t.Fatalf("NextHops = %+v, want %+v", route.NextHops, tc.want)
 			}
 		})
 	}
