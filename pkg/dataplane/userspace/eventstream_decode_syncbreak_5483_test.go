@@ -51,8 +51,7 @@ func waitForConnected(t *testing.T, es *EventStream) {
 // The resync/SessionSyncResyncs/DecodeErrors assertions stay GREEN across the
 // revert, so the advance is the single behaviour under test.
 func TestEventStreamUndecodableSessionFrameForcesResyncAndAdvances_5483_6130(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "test-events.sock")
+	sockPath := filepath.Join(shortSockDir9322(t), "test-events.sock")
 
 	es := NewEventStream(sockPath)
 	dispatched := make(chan uint64, 4)
@@ -68,7 +67,9 @@ func TestEventStreamUndecodableSessionFrameForcesResyncAndAdvances_5483_6130(t *
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	es.Start(ctx)
+	if err := es.Start(ctx); err != nil {
+		t.Fatalf("start event stream: %v", err)
+	}
 	defer es.Close()
 
 	time.Sleep(50 * time.Millisecond)
@@ -161,8 +162,7 @@ func TestEventStreamUndecodableSessionFrameForcesResyncAndAdvances_5483_6130(t *
 // assertion times out — all RED. With the fix all four post-baseline frames are
 // processed on the one connection.
 func TestEventStreamPersistentUndecodableSessionFramesDoNotLoop_6130(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "test-events.sock")
+	sockPath := filepath.Join(shortSockDir9322(t), "test-events.sock")
 
 	es := NewEventStream(sockPath)
 	dispatched := make(chan uint64, 8)
@@ -178,7 +178,9 @@ func TestEventStreamPersistentUndecodableSessionFramesDoNotLoop_6130(t *testing.
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	es.Start(ctx)
+	if err := es.Start(ctx); err != nil {
+		t.Fatalf("start event stream: %v", err)
+	}
 	defer es.Close()
 
 	time.Sleep(50 * time.Millisecond)
@@ -266,8 +268,7 @@ func TestEventStreamPersistentUndecodableSessionFramesDoNotLoop_6130(t *testing.
 // to telemetry frames, onFullResync would fire and the following telemetry frame
 // would not be dispatched.
 func TestEventStreamUndecodableTelemetryFrameStillSkips_5483(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "test-events.sock")
+	sockPath := filepath.Join(shortSockDir9322(t), "test-events.sock")
 
 	es := NewEventStream(sockPath)
 	gotSeqs := make(chan uint64, 4)
@@ -280,7 +281,9 @@ func TestEventStreamUndecodableTelemetryFrameStillSkips_5483(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	es.Start(ctx)
+	if err := es.Start(ctx); err != nil {
+		t.Fatalf("start event stream: %v", err)
+	}
 	defer es.Close()
 
 	time.Sleep(50 * time.Millisecond)

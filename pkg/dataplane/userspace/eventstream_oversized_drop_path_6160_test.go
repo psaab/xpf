@@ -110,8 +110,7 @@ func readAckThenDrop(t *testing.T, conn net.Conn, wantAckSeq uint64, deadline ti
 // `dropped` assertion goes RED ("connection was NOT dropped") — the drop, not the
 // ACK, is the behaviour the revert breaks here (the ACK is flushed on both paths).
 func Test_oversized_session_frame_over_ceiling_drops_and_flushes_ack_6160(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "test-events.sock")
+	sockPath := filepath.Join(shortSockDir9322(t), "test-events.sock")
 
 	es := NewEventStream(sockPath)
 	dispatched := make(chan uint64, 4)
@@ -127,7 +126,9 @@ func Test_oversized_session_frame_over_ceiling_drops_and_flushes_ack_6160(t *tes
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	es.Start(ctx)
+	if err := es.Start(ctx); err != nil {
+		t.Fatalf("start event stream: %v", err)
+	}
 	defer es.Close()
 
 	time.Sleep(50 * time.Millisecond)
@@ -228,8 +229,7 @@ func Test_oversized_session_frame_over_ceiling_drops_and_flushes_ack_6160(t *tes
 // synchronous ACK flush, not the drop (the half-close forces a drop either way), is
 // the behaviour the revert breaks here.
 func Test_oversized_session_frame_short_drain_drops_and_flushes_ack_6160(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "test-events.sock")
+	sockPath := filepath.Join(shortSockDir9322(t), "test-events.sock")
 
 	es := NewEventStream(sockPath)
 	dispatched := make(chan uint64, 4)
@@ -245,7 +245,9 @@ func Test_oversized_session_frame_short_drain_drops_and_flushes_ack_6160(t *test
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	es.Start(ctx)
+	if err := es.Start(ctx); err != nil {
+		t.Fatalf("start event stream: %v", err)
+	}
 	defer es.Close()
 
 	time.Sleep(50 * time.Millisecond)

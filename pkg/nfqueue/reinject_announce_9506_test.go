@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -88,7 +89,11 @@ func TestAnnounceReinjectPublishesPersistentAuthorityFrames9506(t *testing.T) {
 }
 
 func TestAnnounceReinjectReplaysLatestAuthorityBeforeSubmitAfterReconnect9506(t *testing.T) {
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp("", "x9506")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	rows := []ReinjectQueueEpoch{{Queue: 12, Epoch: 31}}
 	submitPath := filepath.Join(dir, "reinject-submit.sock")
 	listener, err := net.Listen("unix", submitPath)

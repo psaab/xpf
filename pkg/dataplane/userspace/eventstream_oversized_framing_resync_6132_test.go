@@ -40,8 +40,7 @@ import (
 // path, but the connection-survival + watermark-advance are the behaviours the
 // revert breaks.
 func Test_oversized_session_frame_recovers_via_resync_not_replay_loop_6132(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "test-events.sock")
+	sockPath := filepath.Join(shortSockDir9322(t), "test-events.sock")
 
 	es := NewEventStream(sockPath)
 	dispatched := make(chan uint64, 4)
@@ -57,7 +56,9 @@ func Test_oversized_session_frame_recovers_via_resync_not_replay_loop_6132(t *te
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	es.Start(ctx)
+	if err := es.Start(ctx); err != nil {
+		t.Fatalf("start event stream: %v", err)
+	}
 	defer es.Close()
 
 	time.Sleep(50 * time.Millisecond)
@@ -149,8 +150,7 @@ func Test_oversized_session_frame_recovers_via_resync_not_replay_loop_6132(t *te
 // 3, 4 and the recovery frame 5 are never read on it, lastAppliedSeq stays at the
 // baseline (1), and the recovery assertion times out — all RED.
 func Test_persistent_oversized_session_frames_do_not_replay_loop_6132(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "test-events.sock")
+	sockPath := filepath.Join(shortSockDir9322(t), "test-events.sock")
 
 	es := NewEventStream(sockPath)
 	dispatched := make(chan uint64, 8)
@@ -166,7 +166,9 @@ func Test_persistent_oversized_session_frames_do_not_replay_loop_6132(t *testing
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	es.Start(ctx)
+	if err := es.Start(ctx); err != nil {
+		t.Fatalf("start event stream: %v", err)
+	}
 	defer es.Close()
 
 	time.Sleep(50 * time.Millisecond)
