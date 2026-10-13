@@ -153,6 +153,7 @@ func policySchedulerConfigHash(cfg *config.Config) ([32]byte, bool) {
 		writePolicySchedulerHashString(h, sched.StartDate)
 		writePolicySchedulerHashString(h, sched.StopDate)
 		writePolicySchedulerHashBool(h, sched.Daily)
+		writePolicySchedulerHashBool(h, sched.AllDay)
 		writePolicySchedulerHashBool(h, sched.DailyExclude)
 		// Per-day windows, hashed in a stable weekday order so a change to
 		// any per-day arm forces a scheduler re-evaluation.
