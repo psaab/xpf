@@ -84,12 +84,19 @@ func writeMultiportSysfs12545(t *testing.T, devs []multiportDev12545) string {
 
 func intPtr12545(v int) *int { return &v }
 
-func enumerate12545(t *testing.T, devs []multiportDev12545) []pciNIC {
+// useMultiportSysfs12545 roots the real sysfs walk at a fresh fixture tree
+// for the rest of the test.
+func useMultiportSysfs12545(t *testing.T, devs []multiportDev12545) {
 	t.Helper()
 	root := writeMultiportSysfs12545(t, devs)
 	old := sysClassNetRoot
 	sysClassNetRoot = root
 	t.Cleanup(func() { sysClassNetRoot = old })
+}
+
+func enumerate12545(t *testing.T, devs []multiportDev12545) []pciNIC {
+	t.Helper()
+	useMultiportSysfs12545(t, devs)
 	nics, err := enumeratePCINICs()
 	if err != nil {
 		t.Fatalf("enumeratePCINICs: %v", err)
@@ -247,5 +254,49 @@ func TestEnumerateMultiportClaimedStaysIndexZero12545(t *testing.T) {
 	})
 	if len(nics) == 0 || nics[0].name != "fxp0" {
 		t.Fatalf("#12545: claimed fxp0 must enumerate at index 0, got %v", nicNames12545(nics))
+	}
+}
+
+// The reported bug at the seam where the refusal fired: the REAL
+// setupBootstrapLifeline over the PRODUCTION enumeratePCINICs walk of a
+// fixture sysfs, in the second-run shape from the report. Port 0 of an mlx4
+// function was already claimed and renamed to fxp0 and carries the default
+// route; its kernel-named sibling enp1s0d1 shares the busAddr. The claimed
+// port must stay enumeration index 0, so the remedy proceeds: the bootstrap
+// fxp0 .network is written and networkd reloaded, with no rename because
+// the NIC already wears fxp0. TestEnumerateMultiportClaimedStaysIndexZero12545
+// pins the enumeration alone; this cell pins the composed path.
+//
+// FAIL-ON-REVERT: the pre-fix (sortKey, busAddr) comparator and a
+// (sortKey, busAddr, name) tie-break both enumerate [enp1s0d1 fxp0], so the
+// lifeline sits at index 1 and the remedy refuses before any write — no
+// .network, no reload.
+func TestSetupBootstrapLifelineAcceptsClaimedMultiportPort12545(t *testing.T) {
+	const bus = "0000:01:00.0"
+	// Successful default-route observation on fxp0 with static addressing;
+	// every mutating seam is stubbed and restored (staticLifelineSeams).
+	st := lifelineIndexSeams12205(t, "fxp0", nil)
+	// Replace the canned enumeration with the production sysfs walk.
+	enumeratePCINICsFn = enumeratePCINICs
+	useMultiportSysfs12545(t, []multiportDev12545{
+		{name: "fxp0", busAddr: bus, driver: "mlx4_en", devPort: intPtr12545(0)},
+		{name: "enp1s0d1", busAddr: bus, driver: "mlx4_en", devPort: intPtr12545(1)},
+	})
+
+	d := &Daemon{store: newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))}
+	d.setupBootstrapLifeline()
+
+	netPath := filepath.Join(st.linkDir, linkPrefix+"fxp0.network")
+	if _, err := os.Stat(netPath); err != nil {
+		nics, enumErr := enumeratePCINICs()
+		t.Errorf("#12545: bootstrap remedy refused the claimed multiport port: no fxp0 "+
+			".network (%v); enumeration order %v (err %v) must keep fxp0 at index 0",
+			err, nicNames12545(nics), enumErr)
+	}
+	if !*st.reloaded {
+		t.Errorf("#12545: networkd was not reloaded; the index-0 remedy did not run for the claimed fxp0")
+	}
+	if *st.renamed {
+		t.Errorf("#12545: the claimed port already wears fxp0, but the remedy renamed an interface")
 	}
 }
