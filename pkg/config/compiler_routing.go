@@ -1514,7 +1514,7 @@ func compilePolicyOptions(node *Node, po *PolicyOptionsConfig) error {
 	// (a lost reject term over-exports/over-imports; a lost accept term withdraws
 	// reachability) while commit and daemon apply both looked successful.
 	psTermIndex := make(map[string]map[string]*PolicyTerm)
-	for _, inst := range namedInstances(node.FindChildren("policy-statement")) {
+	for _, inst := range bracketedGroupInstances8794(node.FindChildren("policy-statement")) {
 		ps := po.PolicyStatements[inst.name]
 		if ps == nil {
 			ps = &PolicyStatement{Name: inst.name}
@@ -1628,6 +1628,13 @@ func compilePolicyOptions(node *Node, po *PolicyOptionsConfig) error {
 				// which one won (split last-wins `reject`, packed `accept`),
 				// and a spelling difference on a contradictory input is still
 				// a spelling difference.
+				// #12674: packed `then accept from ...` keeps the trailing
+				// clause on this node, not the policy-statement node. Preserve
+				// it in UnknownFrom so strict and tolerant policy gates reject.
+				parsePolicyStatementInlineKeys11779(ps, prop.Keys)
+				for _, ac := range prop.Children {
+					parsePolicyStatementInlineKeys11779(ps, ac.Keys)
+				}
 				for _, ac := range expandFlatRun(prop.Children, policyStatementThenSchema8939()) {
 					switch ac.Name() {
 					case "accept":
@@ -1641,6 +1648,7 @@ func compilePolicyOptions(node *Node, po *PolicyOptionsConfig) error {
 				}
 			}
 		}
+		parsePolicyStatementInlineKeys11779(ps, instanceValueTail(inst.node, inst.name))
 		// #5824: NO unconditional overwrite here — ps is the SHARED map entry, so
 		// this instance's contributions are already merged into any earlier
 		// same-name block's terms/actions in authored order.
@@ -1696,8 +1704,41 @@ func policyStatementUnknownFrom11779(node *Node) []string {
 	if len(node.Keys) > 1 {
 		return []string{node.Keys[1]}
 	}
-	return policyFromOpaqueChildNames11779(node)
+	opaque := policyFromOpaqueChildNames11779(node)
+	if len(opaque) == 0 {
+		return []string{policyFromMissingPredicate11779}
+	}
+	return opaque
 }
+
+// parsePolicyStatementInlineKeys11779 records policy-level clauses packed
+// onto the named policy-statement node. Policy-level `from` has no typed
+// representation in the FRR compiler, so every such clause must remain
+// visible to the strict reject / tolerant fail-closed gate.
+func parsePolicyStatementInlineKeys11779(stmt *PolicyStatement, keys []string) {
+	if stmt == nil {
+		return
+	}
+	for i := range keys {
+		switch keys[i] {
+		case "from":
+			if i+1 >= len(keys) || keys[i+1] == "then" || keys[i+1] == "from" {
+				stmt.UnknownFrom = append(stmt.UnknownFrom, policyFromMissingPredicate11779)
+				continue
+			}
+			stmt.UnknownFrom = append(stmt.UnknownFrom, keys[i+1])
+		case "then":
+			if i+1 < len(keys) {
+				switch keys[i+1] {
+				case "accept", "reject":
+					stmt.DefaultAction = keys[i+1]
+				}
+			}
+		}
+	}
+}
+
+const policyFromMissingPredicate11779 = "<missing match predicate>"
 
 // collectProtocolList flattens a single "from protocol ..." node into the
 // protocol names it carries. After the lexer strips the brackets, a protocol
@@ -1979,7 +2020,11 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 		switch tc.Name() {
 		case "from":
 			fromSchema := schemaForPath("policy-options", "policy-statement", "term", "from")
-			for _, fc := range policyTermFromChildren11779(term, tc, fromSchema) {
+			fromChildren := policyTermFromChildren11779(term, tc, fromSchema)
+			if len(fromChildren) == 0 {
+				term.UnknownFrom = append(term.UnknownFrom, policyFromMissingPredicate11779)
+			}
+			for _, fc := range fromChildren {
 				switch fc.Name() {
 				case "protocol":
 					// Junos "from protocol [ bgp ospf static ]" matches any
@@ -2497,6 +2542,9 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 		switch keys[i] {
 		case "from":
 			inFrom = true
+			if i+1 >= len(keys) || keys[i+1] == "then" || keys[i+1] == "from" {
+				term.UnknownFrom = append(term.UnknownFrom, policyFromMissingPredicate11779)
+			}
 			continue
 		case "then":
 			seenThen = true

@@ -8713,6 +8713,19 @@ provenance: any observed unclosed bracketed `from` list fails closed, while a
 bare or quoted clause word inside a balanced list remains a value. Fail-on-revert
 coverage is in `pkg/config/routing_policy_unknown_from_11779_test.go`.
 
+Policy-level `from` predicates (the term-less `policy-statement { from ...;
+then ...; }` form) have no typed matcher in xpf's FRR compiler. They are
+retained as `PolicyStatement.UnknownFrom` and therefore strict-rejected; a
+tolerant boot/peer-sync forces the policy default and every term to reject.
+An empty `from;` is not equivalent to omitting the clause: it is retained as a
+missing-predicate marker and rejected on the same strict and tolerant paths.
+Policy-level packed text such as `then accept from route-filter ...` is
+normalized by `SetPath` into sibling policy clauses before the schema walk,
+so `LoadOverride`, `LoadMerge`, `LoadSet`, and direct `set` cannot file the
+predicate beneath `then accept` and widen the policy to default-accept. A
+policy with only `then accept;` remains a valid explicit default-accept.
+Coverage is in `pkg/configstore/policy_level_from_12674_test.go`.
+
 The policy-statement ACTION `then as-path-prepend "<asn> <asn> ..."` (#2892) is
 the same class on the `then` side. The leaf is `multi:true`
 (`schema_routing.go`: `policy-options policy-statement <name> term <name> then

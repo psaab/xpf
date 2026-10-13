@@ -10,6 +10,13 @@ xpf (0.0.0) unstable; urgency=medium
   * Reject a packed `unit <n> mac <address>` override on the unit node,
     even when no inline unit container exists. Tolerant loads warn, matching
     the existing H10 handling for braced unit MAC overrides (#12683).
+  * Reject unenforced policy-statement-level `from` predicates, including
+    then-first and compact replays, instead of dropping the match and
+    accepting every route. Bare `from` clauses are rejected too. Strict
+    commits refuse these policies; tolerant boot and peer sync force the
+    policy default and terms to reject. Remove the unsupported predicate or
+    replace the policy-level match with supported term-level conditions
+    before upgrading (#12674).
   * Write a zero-padded static-route destination or IPsec traffic-selector
     mask that the userspace dataplane parses (IPv4 up to two digits, IPv6 up
     to three: `10.0.0.0/08`, `2001:db8::/032`) in canonical form at compile.
