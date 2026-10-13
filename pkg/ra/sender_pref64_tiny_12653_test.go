@@ -11,7 +11,7 @@ package ra
 //
 // Fix contract: every valid explicit lifetime rounds UP to the next 8s
 // quantum (never down to 0 for a positive value, never down/early-expiry),
-// so 1-8s -> 8s, 9s -> 16s, non-multiples like 1800 -> 1808s. Unset (<=0)
+// so 1-8s -> 8s, 9s -> 16s, non-multiples like 1801 -> 1808s. Unset (<=0)
 // still inherits and dropped overflow (>65528) still drops (#12536).
 
 import (
