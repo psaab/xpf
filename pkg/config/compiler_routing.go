@@ -2215,7 +2215,24 @@ var policyTermThenInlineKeywords = map[string]bool{
 // can reject the invalid prepend tail (#12070 R7-F1).
 var policyTermFromMatchInlineKeywords12070 = map[string]bool{
 	"protocol": true, "prefix-list": true, "route-filter": true, "as-path": true,
+}
+
+// policyTermDroppedFromWords12517 are the remaining Junos from-match words the
+// inline main switch has no case for: after a then action it silently drops
+// them (#12517 RES-7). They are deliberately NOT added to the #12070 map above,
+// which #12513 also uses to decide that a term-line operand slot holds a
+// keyword: a community defined with one of these names stays a valid
+// `then community` value, and an AS-path-prepend run keeps absorbing them as
+// invalid operands so tolerant rendering still omits the whole prepend.
+var policyTermDroppedFromWords12517 = map[string]bool{
 	"family": true, "neighbor": true, "interface": true, "instance": true, "rib": true,
+}
+
+// isPolicyThenFromWord12517 reports a from-match word that the inline reader
+// reinterprets as a match (#12070 map) or drops (#12517 map) when it appears
+// in a then-action position.
+func isPolicyThenFromWord12517(tok string) bool {
+	return policyTermFromMatchInlineKeywords12070[tok] || policyTermDroppedFromWords12517[tok]
 }
 
 func recordPolicyThenTail12517(term *PolicyTerm, action, value string) {
@@ -2344,7 +2361,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 			i = skipUnknownPolicyTermFromTail11779(keys, i)
 			continue
 		}
-		if seenThen && !inFrom && policyTermFromMatchInlineKeywords12070[keys[i]] {
+		if seenThen && !inFrom && isPolicyThenFromWord12517(keys[i]) {
 			recordPolicyThenTail12517(term, "then", keys[i])
 		}
 		switch keys[i] {
@@ -2387,7 +2404,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				}
 				i++
 				term.Action = keys[i]
-				if policyTermFromMatchInlineKeywords12070[term.Action] {
+				if isPolicyThenFromWord12517(term.Action) {
 					recordPolicyThenTail12517(term, "then", term.Action)
 				}
 				if term.Action == "accept" || term.Action == "reject" {

@@ -308,3 +308,44 @@ func TestValidThenActionBoundaries12517(t *testing.T) {
 		})
 	}
 }
+
+// FAIL-ON-REVERT (#12517 B5): the from-match words #12517 adds for then-tail
+// detection must not join the #12513 operand-keyword map. A community defined
+// with one of those names stays a valid term-line or compact `then community`
+// value: strict commit accepts it and the operation keeps its resolved value.
+// RED when the five words are merged into policyTermFromMatchInlineKeywords12070:
+// every term-line row fails with `"<name>" is a policy keyword`.
+func TestThenCommunityNamedLikeFromWordStillCompiles12517(t *testing.T) {
+	for _, tc := range []struct {
+		name, text, op, value string
+		deleteNames           []string
+	}{
+		{name: "term-line add neighbor", text: "community neighbor members 65001:7; policy-statement P { term t then community add neighbor accept; }", op: "add", value: "65001:7"},
+		{name: "term-line set rib", text: "community rib members 65001:7; policy-statement P { term t then community set rib accept; }", op: "set", value: "65001:7"},
+		{name: "term-line delete instance", text: "community instance members 65001:7; policy-statement P { term t then community delete instance accept; }", op: "delete", deleteNames: []string{"instance"}},
+		{name: "term-line bare family", text: "community family members 65001:7; policy-statement P { term t then community family accept; }", op: "", value: "65001:7"},
+		{name: "term-line add interface", text: "community interface members 65001:7; policy-statement P { term t then community add interface accept; }", op: "add", value: "65001:7"},
+		{name: "compact accept add neighbor", text: "community neighbor members 65001:7; policy-statement P { term t { then accept community add neighbor; } }", op: "add", value: "65001:7"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := config.CompileConfig(policyTree12517(t, "policy-options { "+tc.text+" }"))
+			if err != nil {
+				t.Fatalf("strict compile rejected a community named like a from-match word: %v", err)
+			}
+			term := cfg.PolicyOptions.PolicyStatements["P"].Terms[0]
+			if term.Action != "accept" || term.CommunityOp != tc.op {
+				t.Fatalf("Action=%q CommunityOp=%q, want accept/%q", term.Action, term.CommunityOp, tc.op)
+			}
+			got := term.Community
+			if tc.op == "add" {
+				got = term.CommunityAdd
+			}
+			if tc.op != "delete" && got != tc.value {
+				t.Fatalf("community %s value = %q, want resolved %q", tc.op, got, tc.value)
+			}
+			if tc.op == "delete" && strings.Join(term.CommunityDelete, " ") != strings.Join(tc.deleteNames, " ") {
+				t.Fatalf("community delete names = %v, want %v", term.CommunityDelete, tc.deleteNames)
+			}
+		})
+	}
+}
