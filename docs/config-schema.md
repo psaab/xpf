@@ -2010,6 +2010,66 @@ part worth keeping:
 is already rejected by the existing typed-leaf trailing-token gate. The gap this
 closes is specifically **untyped** and **`multi`** leaves.
 
+### A fused `then` under `is-fragment` or `flexible-match-range` (#12528)
+
+The #8437 discriminator (an absorbed token names a sibling of the leaf) does
+not see a fused action: `then` is a sibling of `from`, not of the leaf inside
+it. Two `from` leaves read less than an operator can write under them.
+`is-fragment` is a bare flag (`compileFilterFrom` sets `IsFragment` and reads
+nothing else), and `flexible-match-range` is read only through its named
+`range` instances and their six fields. So
+
+```
+set ... term T from is-fragment then discard     # flat set: `then` nested under the flag
+term T { from { is-fragment then discard; } }    # braced: the tail rides on the leaf
+range R { byte-offset 9; then discard; }         # inside flexible-match-range
+```
+
+compiled to `Action=""` while `show configuration` printed the action. An
+empty action is a fall-through: later terms decide, and a filter that nothing
+terminates accepts. `validateFirewallFusedThenStrict12528`
+(`compiler_firewall_fused_then_12528.go`) now refuses the first offending term
+at strict commit. Tolerant load and peer-sync warn once per offending term and
+keep the historical compilation (#1960).
+
+**Positions, not spellings.** The first version matched the two words
+anywhere under `firewall`. It refused configs that compile correctly: a term,
+filter or prefix-list reference named `is-fragment` (quoting did not help), a
+range named `then`, `from is-fragment protocol udp;`, and a rename to
+`is-fragment`. That is the plain arity check above failing the way it failed
+for #8437. The gate now finds filters and terms with `namedInstances`, `from`
+statements with `firewallTermFromNodes`, and leaves with `packedBody` under the
+from-schema. These are the readers `compileFirewall` uses, as #8480 does. It
+reports only:
+
+- a token or statement after a real `is-fragment` leaf. That covers a fused
+  `then`, and also `set ... from is-fragment protocol udp`, which nests the
+  protocol under the flag where the compiler dropped it;
+- an unquoted `then` at a statement position inside a real
+  `flexible-match-range`: beside its ranges, in a range body, under or after a
+  range field's value, or in a packed run `packedBody` declines to expand. A
+  range NAMED `then` is spent as the range's argument and never matches;
+- the packed term spelling `term T from is-fragment then discard;`, with its
+  `flexible-match-range` and trailing `{ then ...; }` forms. These compile
+  with their action, but their set form (`display set`, the `load merge`
+  replay) nests `then` under the leaf. They are refused at their own commit
+  rather than at the next set-form load. Master committed them.
+
+Other unread statements under `flexible-match-range`, such as
+`range R { byte-offset 9; discard; }`, are outside this gate.
+
+**Order.** The gate runs in the compiler pre-walk beside #8480, not in the
+schema walk. `SchemaValidate` runs first on the commit path, so the typed-leaf
+(#1319) and #8437 messages keep precedence, and `Store.Load` still records its
+`[typed-leaf-tolerated]` warning for the same config. A first version ran
+before the walk and hid both. Nameless terms are skipped: the #10294 gate
+refuses them with the more specific message, and #12526 refuses them before
+`load merge` flattens them. The compact `term T { from is-fragment then
+discard; }` stays with #8437 and the `from then` gate.
+
+Fail-on-revert coverage is in `pkg/config/firewall_fused_then_12528_test.go`
+and `pkg/configstore/firewall_fused_then_12528_test.go`.
+
 ### Too FEW tokens, the other half of the same arity question (#8597)
 
 Every gate above is about a token too MANY. A token too FEW was accepted

@@ -621,6 +621,17 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// #12528: is-fragment is a bare flag and flexible-match-range is read only
+	// through its named ranges, so a `then` action fused under either compiles
+	// to an EMPTY Action -- a fall-through that accepts what the operator wrote
+	// to discard or reject. Runs pre-walk beside #8480 because the compiled
+	// term cannot tell a dropped action from an omitted one. Strict refuses
+	// the first offending term; lenient warns about every one (#1960).
+	firewallFusedThenWarnings, err := validateFirewallFusedThenStrict12528(
+		tree.Children, opts.lenientFirewallFusedThen12528)
+	if err != nil {
+		return nil, err
+	}
 
 	emptyIdentityWarnings, err := validateNonEmptySecurityIdentities(
 		tree.Children, opts.lenientEmptySecurityIdentity)
@@ -827,6 +838,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	warnings = append(warnings, policyEnforcementWarnings...)
 	warnings = append(warnings, policyMissingMatchWarnings...)
 	warnings = append(warnings, firewallValuelessFromWarnings...)
+	warnings = append(warnings, firewallFusedThenWarnings...)
 	warnings = append(warnings, emptyIdentityWarnings...)
 	warnings = append(warnings, zoneGroupWarnings...)
 	warnings = append(warnings, dnatToScopeWarnings...)

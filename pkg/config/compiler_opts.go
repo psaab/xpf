@@ -2603,6 +2603,11 @@ type compileOpts struct {
 	// must still BOOT (#1960), keeping its pre-existing match-any compilation
 	// with the finding flagged.
 	lenientFirewallValuelessFrom bool
+	// lenientFirewallFusedThen12528 (#12528) downgrades the firewall fused-tail
+	// gate to one cfg.Warnings entry per offending term, so a config an older
+	// binary persisted or a peer synced still BOOTS (#1960) with its historical
+	// compilation -- for a fused action, still a fall-through -- flagged.
+	lenientFirewallFusedThen12528 bool
 	// lenientEmptySecurityIdentity (#7525) downgrades the empty-security-
 	// identity gate — an empty zone name, an empty zone-pair from-zone or
 	// to-zone, or an empty policy name — from a hard compile error to a
@@ -3361,6 +3366,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyMissingMatch:              true,
 		lenientPolicyValuelessMatch:            true,
 		lenientFirewallValuelessFrom:           true,
+		lenientFirewallFusedThen12528:          true,
 		lenientEmptySecurityIdentity:           true,
 		lenientZoneStatementTail9656:           true,
 		lenientPolicyCommunityRef:              true,
