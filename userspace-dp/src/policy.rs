@@ -1488,22 +1488,6 @@ struct AppScanEntry {
 
 impl AppCatalog {
     pub(crate) fn from_snapshot(entries: &[crate::AppCatalogEntry]) -> Self {
-        let mut signature: Vec<_> = entries
-            .iter()
-            .filter(|entry| entry.app_id != 0)
-            .map(|entry| (
-                entry.protocol,
-                entry.app_id,
-                entry.dst_port_low,
-                entry.dst_port_high,
-                entry.src_port_low,
-                entry.src_port_high,
-            ))
-            .collect();
-        signature.sort_unstable();
-        let mut hasher = DefaultHasher::new();
-        signature.hash(&mut hasher);
-        let epoch = hasher.finish().max(1);
         let mut by_protocol: FxHashMap<u8, AppProtoEntries> = FxHashMap::default();
         for e in entries {
             // app_id 0 is the reserved "unknown" sentinel; never index it.
@@ -1538,6 +1522,32 @@ impl AppCatalog {
                 });
             }
         }
+        // Derive the fingerprint from the compiled lookup representation, not
+        // the raw snapshot: exact-port collisions are first-writer-wins, so
+        // snapshot order can change the selected AppID. Scan ordering is
+        // semantically irrelevant (lookup takes the minimum id per tier).
+        let mut signature = Vec::new();
+        for (&protocol, bucket) in &by_protocol {
+            for (&dst_port, &app_id) in &bucket.exact_dst {
+                signature.push((protocol, 0_u8, dst_port, dst_port, 0, 0, app_id, false));
+            }
+            for entry in &bucket.scan {
+                signature.push((
+                    protocol,
+                    1,
+                    entry.dst_low,
+                    entry.dst_high,
+                    entry.src_low,
+                    entry.src_high,
+                    entry.app_id,
+                    entry.port_constrained,
+                ));
+            }
+        }
+        signature.sort_unstable();
+        let mut hasher = DefaultHasher::new();
+        signature.hash(&mut hasher);
+        let epoch = hasher.finish().max(1);
         Self { by_protocol, epoch }
     }
 
