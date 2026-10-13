@@ -480,7 +480,7 @@ func TestPolicyInvalidationReauthorizationRefusesZoneIDCollision12532(t *testing
 		capture.deleted.policy = append(capture.deleted.policy, match)
 		capture.candidateRuleIDs[policyInvalidationMatchID(match)] = "trust->untrust/a"
 	}
-	kept, permitted := r.h.d.reauthorizePolicyCandidates(capture, c0)
+	kept, permitted := r.h.d.reauthorizePolicyCandidates(capture, c0, false)
 	if kept.candidateCount() != 0 || permitted.candidateCount() != candidates {
 		t.Fatalf("premise: root C0 permits every candidate: kept=%d permitted=%d",
 			kept.candidateCount(), permitted.candidateCount())
@@ -502,7 +502,7 @@ func TestPolicyInvalidationReauthorizationRefusesZoneIDCollision12532(t *testing
 	restored := *c0
 	restored.Security.Zones = maps.Clone(c0.Security.Zones)
 	restored.Security.Zones[collider] = &config.ZoneConfig{Name: collider}
-	kept, permitted = r.h.d.reauthorizePolicyCandidates(capture, &restored)
+	kept, permitted = r.h.d.reauthorizePolicyCandidates(capture, &restored, false)
 	if permitted != nil || kept.candidateCount() != candidates {
 		t.Fatalf("zones trust/%s share id %d, yet re-authorization permitted %d of %d candidates",
 			collider, trustID, permitted.candidateCount(), candidates)
