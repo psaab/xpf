@@ -26,6 +26,20 @@ func TestPolicySchedulerConfigHashIncludesDailyExclude12822(t *testing.T) {
 	if ordinaryHash == excludedHash {
 		t.Fatal("adding daily exclude must change the scheduler config hash")
 	}
+	// The hash must also cover the scheduler-level AllDay flag: toggling
+	// `daily all-day` alone forces a re-prime (regression: the DailyExclude
+	// line once replaced the AllDay line instead of joining it).
+	allDay := &config.Config{Schedulers: map[string]*config.SchedulerConfig{
+		"daily": {Name: "daily", AllDay: true},
+	}}
+	bareDaily := &config.Config{Schedulers: map[string]*config.SchedulerConfig{
+		"daily": {Name: "daily", Daily: true},
+	}}
+	allDayHash, _ := policySchedulerConfigHash(allDay)
+	bareHash, _ := policySchedulerConfigHash(bareDaily)
+	if allDayHash == bareHash {
+		t.Fatal("toggling daily all-day must change the scheduler config hash")
+	}
 }
 
 func TestStartPolicySchedulerLoopLockedWaitsForDaemonContext(t *testing.T) {
