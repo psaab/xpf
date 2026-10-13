@@ -1170,23 +1170,22 @@ func validateNATSourceAddressNameReferencesStrict(cfg *Config) error {
 				"%s NAT rule-set %q rule %q references undefined "+
 					"%s %q (define `security address-book "+
 					"address %s` / `address-set %s`, or fix the name — the "+
-					"lenient %s path keeps a raw-name fallback; if it parses as "+
-					"an IP/CIDR it may be used as a literal prefix instead "+
-					"(#12626))",
+					"lenient %s path retains a non-empty but unparseable fallback "+
+					"token, so the reference matches nothing (#12626))",
 				natType, ruleSet, ruleName, field, name, name, name, scope)
 		}
 		// #3425: a DEFINED name that strict resolution cannot reduce to a
 		// concrete address (empty address or any empty/dangling/unusable set
-		// member). Runtime poisons the whole closure and retains a raw-name
-		// fallback; a CIDR-shaped name can parse as a literal prefix (#12626).
+		// member). Runtime poisons the whole closure and retains a prefixed,
+		// unparseable fallback token; a CIDR-shaped name cannot become a
+		// literal prefix (#12626).
 		if cause := policyMatchAddressBookResolves(ab, name); cause != nil {
 			return fmt.Errorf(
 				"%s NAT rule-set %q rule %q match %s %q does not resolve to "+
-					"any address: %w — the lenient path retains a raw-name fallback "+
-					"for the %s (a CIDR-shaped name may parse as a literal prefix; "+
-					"#12626), so the rule may not match the intended closure "+
-					"(add at least one resolvable member / a usable prefix to the "+
-					"address, or remove the reference) (#3425)",
+					"any address: %w — the lenient path retains an unparseable "+
+					"fallback token for the %s, so the rule matches nothing "+
+					"(#12626; add at least one resolvable member / a usable prefix "+
+					"to the address, or remove the reference) (#3425)",
 				natType, ruleSet, ruleName, field, name, cause, scope)
 		}
 		return nil
@@ -1210,11 +1209,10 @@ func validateNATSourceAddressNameReferencesStrict(cfg *Config) error {
 			// #3229: destination-address-name is the destination twin of
 			// source-address-name and resolves through the same address-book
 			// expander (appendNATDestinationAddressName). NAT name expansion
-			// poisons a closure with any unresolved reference. Its raw-name
-			// fallback is not guaranteed to match nothing: a CIDR-shaped book
-			// name can parse as a literal prefix (#12626). The commit-time strict
-			// gate makes the problem operator-visible, exactly like the source
-			// name above.
+			// poisons a closure with any unresolved reference; the prefixed
+			// fallback token cannot parse as an address, even for a CIDR-shaped
+			// name (#12626). The commit-time strict gate makes the problem
+			// operator-visible, exactly like the source name above.
 			// #3431: validate every value of a bracket list / repeated leaf.
 			for _, name := range rule.Match.DestinationAddressNameList() {
 				if err := nameError(natType, rs.Name, rule.Name,

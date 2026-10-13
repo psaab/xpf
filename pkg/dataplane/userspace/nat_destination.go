@@ -170,13 +170,9 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 			// Each resolved host installs its own table entry below; a non-host
 			// prefix is stripped to its network address like a literal CIDR
 			// prefix destination. A failed expansion poisons its whole closure.
-			// The raw-name fallback keeps the constraint non-empty; ordinary
-			// names do not parse as IPs, but a CIDR-shaped book name can parse as
-			// a literal prefix (#12626), so this fallback is not guaranteed to
-			// match nothing. The commit-time strict gate
-			// (validateNATSourceAddressNameReferencesStrict) makes the reference
-			// operator-visible.
-			// #3431: resolve EVERY name of a bracket list / repeated leaf.
+			// The prefixed fallback token keeps the constraint non-empty while
+			// remaining unparseable even if the set name is a CIDR (#12626).
+			// The commit-time strict gate makes the reference operator-visible.
 			for _, name := range rule.Match.DestinationAddressNameList() {
 				destAddrs = appendNATDestinationAddressName(cfg, feedOverlay, destAddrs, name)
 			}
@@ -210,13 +206,11 @@ func buildDestinationNATSnapshotsWithFeeds(cfg *config.Config, natCounterIDs map
 			// source = fail-open (a destination translation the operator scoped
 			// to a named source set fired for everyone). Resolve the name to its
 			// concrete prefixes via the same address-book expander the policy
-			// path uses and append them. An unresolved member poisons the whole
-			// closure, while the raw-name fallback keeps source_constrained true.
-			// An ordinary name will not parse in Rust, but a CIDR-shaped book
-			// name can parse as a literal prefix (#12626), so this fallback is
-			// not guaranteed to match nothing. A commit-time strict gate
-			// (validateNATSourceAddressNameReferencesStrict) makes the typo
-			// operator-visible; this is the dataplane backstop.
+			// path uses. An unresolved member poisons the whole closure, while the
+			// prefixed fallback token keeps source_constrained true without parsing
+			// as a prefix, even for a CIDR-shaped name (#12626). The commit-time
+			// strict gate makes the typo operator-visible; this is the dataplane
+			// backstop.
 			// #3431: resolve EVERY name of a bracket list / repeated leaf.
 			for _, name := range rule.Match.SourceAddressNameList() {
 				sourceAddrs = appendNATSourceAddressName(cfg, feedOverlay, sourceAddrs, name)
