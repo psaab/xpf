@@ -26,8 +26,7 @@
 //!   so the safer choice is to recover-from-poison and keep forwarding.
 
 use super::types::{FastMap, FastSet, NeighborEntry};
-use rustc_hash::FxHasher;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard};
@@ -244,76 +243,18 @@ pub(crate) struct ShardedNeighborMap {
     rx_learn_overwrite_refusals: AtomicU64,
 }
 
-/// Shard index for a key. The Knuth multiplier `0x9E3779B97F4A7C15`
-/// (the 64-bit golden ratio) spreads entropy into the HIGH bits of
-/// the product, so we extract the top `log2(NUM_SHARDS) = 6` bits
-/// rather than the low bits. This decorrelates shard selection from
-/// `hashbrown`'s internal SwissTable bucket selection (which also
-/// uses high hash bits) by feeding it a freshly-rotated hash, and it
-/// produces a uniform distribution for adversarial input patterns
-/// like `/24` LANs (constant ifindex + sequential last octet).
-const SHARD_BITS: u32 = NUM_SHARDS.trailing_zeros();
+/// Seeded keyed-SipHash shard selection prevents offline targeting of the
+/// per-shard learn cap (#7752/#12794). The process seed is node-local and stable
+/// for this process.
+const _: () = assert!(NUM_SHARDS.is_power_of_two());
+static SHARD_SEED: LazyLock<u64> =
+    LazyLock::new(crate::hot_hash_seed::hot_path_hash_seed);
 
-/// #7752: per-process random seed mixed into shard selection.
-///
-/// The Knuth post-multiply above closes the ACCIDENTAL clustering case — a
-/// `/24` of neighbours whose low bits are correlated still spreads across
-/// shards. It cannot close the CHOSEN-input case, because `FxHash` is a fixed
-/// public function with no per-process secret: an attacker who can pick
-/// neighbour addresses can compute, offline, a set that lands in one shard.
-///
-/// That matters here specifically because of the #5673 per-shard learn cap.
-/// With `NUM_SHARDS = 64` and `MAX_DYNAMIC_NEIGHBORS_PER_SHARD = 2048`, filling
-/// ONE shard costs 2048 entries against an aggregate capacity of 131,072 — so
-/// an unkeyed hash hands the attacker a 64x discount AND lets them choose WHICH
-/// addresses are denied, since a new learn into a full shard is refused
-/// (`prior_mac.is_none() && shard.len() >= MAX`) while updates to already-known
-/// neighbours are not. Source learning runs on RX before screen/policy
-/// admission, so an L2-adjacent host spoofing sources reaches it.
-///
-/// The seed does not make `FxHash` a keyed MAC and this is NOT claimed as
-/// cryptographic keying. What it removes is OFFLINE precomputation: without the
-/// seed an attacker must probe the live mapping, which is slow and observable,
-/// instead of arriving with a prepared address set.
-///
-/// Seeded once per process. A `getrandom` failure does not refuse to start — a
-/// firewall that will not boot because the RNG hiccuped is a worse outcome than
-/// a weaker shard seed — but the fallback is still process-varying rather than
-/// a compile-time constant, and it says so on stderr.
-static SHARD_SEED: LazyLock<u64> = LazyLock::new(|| {
-    let mut b = [0u8; 8];
-    if getrandom::getrandom(&mut b).is_ok() {
-        return u64::from_ne_bytes(b);
-    }
-    eprintln!(
-        "xpf-dp: getrandom failed seeding the neighbor shard index; falling \
-         back to a process-varying seed (#7752)"
-    );
-    let mut h = FxHasher::default();
-    std::process::id().hash(&mut h);
-    (&b as *const u8 as usize).hash(&mut h);
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-        .hash(&mut h);
-    h.finish()
-});
-
-/// The seeded shard computation is split out so its seed contribution can be
-/// tested independently; reading the process seed inside this function would
-/// make "does the seed change the mapping?" unaskable — the property
-/// would make "does the seed change the mapping?" unaskable — the property
-/// would be true by construction and unfalsifiable, which is how a guard ends
-/// up unable to notice its own subject being deleted.
 #[inline]
 fn shard_idx_with(seed: u64, key: &(i32, IpAddr)) -> usize {
-    let mut hasher = FxHasher::default();
-    hasher.write_u64(seed);
+    let mut hasher = crate::hot_hash_seed::HotPathSeededState::new(seed).build_hasher();
     key.hash(&mut hasher);
-    let h = hasher.finish();
-    let mixed = h.wrapping_mul(0x9E3779B97F4A7C15);
-    (mixed >> (64 - SHARD_BITS)) as usize
+    (hasher.finish() as usize) & (NUM_SHARDS - 1)
 }
 
 fn shard_idx(key: &(i32, IpAddr)) -> usize {
