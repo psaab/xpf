@@ -961,6 +961,9 @@ type armedGateFakeLink struct {
 // pin file is missing, so a fake without them dereferences the embedded nil
 // link.Link (#12784). Pin records the call by writing the pin file the
 // verifier stats, exactly as a real pinned bpf_link would.
+func (l *armedGateFakeLink) Pin(path string) error {
+	return os.WriteFile(path, []byte("pin"), 0o600)
+}
 func (l *armedGateFakeLink) Unpin() error { l.unpinned = true; return nil }
 func (l *armedGateFakeLink) Close() error { l.closed = true; return nil }
 
