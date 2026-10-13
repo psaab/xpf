@@ -2865,12 +2865,19 @@ func compileSchedulers(node *Node, cfg *Config) error {
 			switch {
 			case name == "start-time":
 				// Legacy simplified shape: start-time/stop-time as direct
-				// children of the scheduler (the daily window).
+				// children of the scheduler. Junos also packs that canonical
+				// pair onto the start-time statement itself.
 				sched.StartTime = nodeVal(prop)
+				if stop, ok := schedulerInlineModifierValue12637(prop, "stop-time"); ok {
+					sched.StopTime = stop
+				}
 			case name == "stop-time":
 				sched.StopTime = nodeVal(prop)
 			case name == "start-date":
 				sched.StartDate = nodeVal(prop)
+				if stop, ok := schedulerInlineModifierValue12637(prop, "stop-date"); ok {
+					sched.StopDate = stop
+				}
 			case name == "stop-date":
 				sched.StopDate = nodeVal(prop)
 			case name == "daily":
@@ -2919,6 +2926,26 @@ func compileSchedulers(node *Node, cfg *Config) error {
 		// same-name block/root's days and scalars.
 	}
 	return nil
+}
+
+// schedulerInlineModifierValue12637 reads the Junos one-line scheduler
+// boundary that may follow a typed start-time/start-date leaf. It accepts
+// both parser representations: a packed Keys tail and a child modifier node.
+func schedulerInlineModifierValue12637(n *Node, keyword string) (string, bool) {
+	if n == nil {
+		return "", false
+	}
+	for i := 2; i+1 < len(n.Keys); i++ {
+		if n.Keys[i] == keyword {
+			return n.Keys[i+1], true
+		}
+	}
+	for _, child := range n.Children {
+		if child != nil && child.Name() == keyword {
+			return nodeVal(child), true
+		}
+	}
+	return "", false
 }
 
 // schedulerWindowFromNode extracts a time window from a `daily` or weekday

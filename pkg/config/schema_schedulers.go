@@ -73,7 +73,10 @@ var schemaSchedulers = &schemaNode{
 					valueType:     ValueTimeOfDay,
 					valueDesc:     "Time of day the daily window opens (seconds default to zero)",
 					valueExamples: []string{"09:00", "09:00:00", "17:30:00"},
-					validator:     ValidateTimeOfDay,
+					// Validate the canonical inline pair as one typed tail
+					// without adding artificial scheduler child paths.
+					validator:     nil,
+					tailValidator: validateSchedulerTimePair12637,
 					children:      nil,
 				},
 				"stop-time": {
@@ -93,7 +96,10 @@ var schemaSchedulers = &schemaNode{
 					valueType:     ValueDate,
 					valueDesc:     "First active date or local date-time",
 					valueExamples: []string{"2026-03-01", "2026-03-01.08:30"},
-					validator:     ValidateDate,
+					// Keep the inline range in this leaf's grammar without
+					// changing scheduler child paths used by other schema scans.
+					validator:     nil,
+					tailValidator: validateSchedulerDatePair12637,
 					children:      nil,
 				},
 				"stop-date": {
@@ -120,6 +126,56 @@ var schemaSchedulers = &schemaNode{
 			},
 		},
 	},
+}
+
+func validateSchedulerTimePair12637(tokens []string, _ [][]string) error {
+	if len(tokens) == 1 {
+		return ValidateTimeOfDay(tokens[0], nil)
+	}
+	if len(tokens) < 2 || tokens[1] != "stop-time" {
+		if len(tokens) > 1 {
+			return fmt.Errorf("unknown modifier %q", tokens[1])
+		}
+		return fmt.Errorf("missing value")
+	}
+	if len(tokens) == 2 {
+		return fmt.Errorf("stop-time: missing value")
+	}
+	if err := ValidateTimeOfDay(tokens[0], nil); err != nil {
+		return err
+	}
+	if err := ValidateTimeOfDay(tokens[2], nil); err != nil {
+		return fmt.Errorf("stop-time: %w", err)
+	}
+	if len(tokens) > 3 {
+		return fmt.Errorf("unknown modifier %q", tokens[3])
+	}
+	return nil
+}
+
+func validateSchedulerDatePair12637(tokens []string, _ [][]string) error {
+	if len(tokens) == 1 {
+		return ValidateDate(tokens[0], nil)
+	}
+	if len(tokens) < 2 || tokens[1] != "stop-date" {
+		if len(tokens) > 1 {
+			return fmt.Errorf("unknown modifier %q", tokens[1])
+		}
+		return fmt.Errorf("missing value")
+	}
+	if len(tokens) == 2 {
+		return fmt.Errorf("stop-date: missing value")
+	}
+	if err := ValidateDate(tokens[0], nil); err != nil {
+		return err
+	}
+	if err := ValidateDate(tokens[2], nil); err != nil {
+		return fmt.Errorf("stop-date: %w", err)
+	}
+	if len(tokens) > 3 {
+		return fmt.Errorf("unknown modifier %q", tokens[3])
+	}
+	return nil
 }
 
 // validateSchedulerDayPackedTail12239 gates the packed day-leaf tail
