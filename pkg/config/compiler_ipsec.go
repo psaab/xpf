@@ -599,9 +599,12 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 			case "ipsec-policy":
 				vpn.IPsecPolicy = v
 			case "local-identity":
-				vpn.LocalID = v
+				// #12507: selector-shaped identities feed the swanctl
+				// local_ts/remote_ts fallback; write helper-supported mask
+				// padding canonically, as for traffic-selector values below.
+				vpn.LocalID = normalizeHelperSupportedCIDRMaskPadding(v)
 			case "remote-identity":
-				vpn.RemoteID = v
+				vpn.RemoteID = normalizeHelperSupportedCIDRMaskPadding(v)
 			case "pre-shared-key":
 				vpn.PSK = Secret(v)
 			case "local-address":
@@ -637,9 +640,13 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 			for _, p := range expandFlatRun(tsInst.node.Children, ipsecTrafficSelectorSchema8939()) {
 				switch p.Name() {
 				case "local-ip":
-					ts.LocalIP = nodeVal(p)
+					// #12507: "/08" and "/032" reach swanctl, the bind-less
+					// fence and the #11380/#11422 selector models as one
+					// canonical spelling. Helper-refused padding is kept for
+					// the commit gate and the fail-closed fence row.
+					ts.LocalIP = normalizeHelperSupportedCIDRMaskPadding(nodeVal(p))
 				case "remote-ip":
-					ts.RemoteIP = nodeVal(p)
+					ts.RemoteIP = normalizeHelperSupportedCIDRMaskPadding(nodeVal(p))
 				}
 			}
 			vpn.TrafficSelectors[ts.Name] = ts

@@ -1146,6 +1146,15 @@ func (m *Manager) rebuildScheduledPolicySectionsWithLatchLocked(next *ConfigSnap
 		collectAddressBookCIDRMaskRejections(books)...)
 	next.Capabilities.PolicyContentRejected = append(next.Capabilities.PolicyContentRejected,
 		collectPolicyCIDRMaskRejections(policies)...)
+	// #12507: next.Routes and next.BindlessSelectorRows describe this same cfg
+	// (routeOnlyPublishHybrid above): inherited from its full build, or
+	// rebuilt by a route-overlay publish, which still publishes every
+	// helper-refused route. The cfg-derived route/selector refusals therefore
+	// name exactly what this snapshot carries.
+	next.Capabilities.PolicyContentRejected = append(next.Capabilities.PolicyContentRejected,
+		collectStaticRouteCIDRMaskRejections(cfg)...)
+	next.Capabilities.PolicyContentRejected = append(next.Capabilities.PolicyContentRejected,
+		collectBindlessSelectorCIDRMaskRejections(cfg)...)
 	return nil
 }
 

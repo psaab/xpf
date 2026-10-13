@@ -170,6 +170,14 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 //   - HELPER-REFUSED PADDED CIDR MASKS (#12047/#12178): strict commit rejects
 //     only leading-zero spellings the pinned parser cannot accept; the mirror
 //     prevents a tolerant load from publishing those raw tokens.
+//   - HELPER-REFUSED STATIC-ROUTE DESTINATIONS AND BIND-LESS IPSEC SELECTORS
+//     (#12507): a published route whose mask the helper's ipnet parser cannot
+//     read fails the whole snapshot (RouteDestinationUnparseable), as does a
+//     bind-less selector fence row (InvalidBindlessSelector). Only rows the
+//     builder actually publishes are named. A route excluded from the FIB or a
+//     route-based VPN's selector never reaches the helper, so it is not a
+//     refusal; helper-supported padding is written canonically by the compiler.
+//     See policies_reject_route_mask_12507.go.
 
 // A non-empty result means publication is refused before the helper receives
 // this snapshot; helper-rejection arms mirror its fail-closed checks. An empty
@@ -224,6 +232,12 @@ func PolicyContentRejectionReasons(cfg *config.Config, feedOverlay map[string][]
 	// this arm keeps tolerant loads from handing it to the helper.
 	reasons = append(reasons, collectAddressBookCIDRMaskRejections(books)...)
 	reasons = append(reasons, collectPolicyCIDRMaskRejections(policies)...)
+	// #12507: the same refusal for the published static-route destinations and
+	// bind-less IPsec selector fence rows. Both helpers walk exactly what the
+	// snapshot builder publishes, so this arm, the full-build stamp and the
+	// scheduler-republish stamp agree with the helper.
+	reasons = append(reasons, collectStaticRouteCIDRMaskRejections(cfg)...)
+	reasons = append(reasons, collectBindlessSelectorCIDRMaskRejections(cfg)...)
 	if len(reasons) == 0 {
 		if _, cerr := buildAppCatalogSnapshot(cfg); cerr != nil {
 			reasons = append(reasons, fmt.Sprintf(

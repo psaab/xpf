@@ -4877,6 +4877,54 @@ fn route_destination_unparseable_fails_closed() {
     }
 }
 
+/// #12507: Go's `config.CIDRMaskHelperRefusesPadding` must name exactly the
+/// padded route destinations this FIB refuses. ipnet reads at most two IPv4 and
+/// three IPv6 mask digits, so "/08" and "/032" install, while "/008" and
+/// "/0032" fail the whole snapshot closed — the refusal the Go snapshot stamp
+/// and `PolicyContentRejectionReasons` report for a tolerantly loaded route.
+#[test]
+fn padded_route_destinations_match_go_refusal_predicate_12507() {
+    for (table, dest) in [("inet.0", "10.0.0.0/08"), ("inet6.0", "2001:db8::/032")] {
+        let snapshot = ConfigSnapshot {
+            routes: vec![crate::RouteSnapshot {
+                table: table.into(),
+                destination: dest.into(),
+                discard: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        try_build_forwarding_state_with_policy_counters(
+            &snapshot,
+            &crate::policy::PolicyCounterStore::default(),
+        )
+        .unwrap_or_else(|err| panic!("helper-supported padding {dest:?} must install: {err:?}"));
+    }
+    for (table, dest) in [("inet.0", "10.0.0.0/008"), ("inet6.0", "2001:db8::/0032")] {
+        let snapshot = ConfigSnapshot {
+            routes: vec![crate::RouteSnapshot {
+                table: table.into(),
+                destination: dest.into(),
+                discard: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let err = try_build_forwarding_state_with_policy_counters(
+            &snapshot,
+            &crate::policy::PolicyCounterStore::default(),
+        )
+        .expect_err("helper-refused padding must fail the snapshot closed");
+        assert!(
+            matches!(
+                err,
+                crate::policy::SnapshotIntegrityError::RouteDestinationUnparseable { .. }
+            ),
+            "destination {dest:?}: expected RouteDestinationUnparseable, got {err:?}"
+        );
+    }
+}
+
 /// #11421: cross-family gateway literals fail the helper snapshot CLOSED.
 /// `parse_route_next_hop` parses v4 only, so the accepted v4-dst/v6-gateway
 /// form became `(None, None)` and then NoRoute; the mirror v6-dst/v4-gateway

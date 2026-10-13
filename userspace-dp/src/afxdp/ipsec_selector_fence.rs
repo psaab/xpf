@@ -304,6 +304,41 @@ mod tests {
         ));
     }
 
+    /// #12507: Go's `config.CIDRMaskHelperRefusesPadding` must name exactly
+    /// the padded selectors this fence refuses: "/08" and "/032" compile, while
+    /// "/008" and "/0032" fail the whole snapshot closed, which the Go
+    /// snapshot stamp reports for a tolerantly loaded bind-less VPN.
+    #[test]
+    fn bindless_selector_padded_masks_match_go_refusal_predicate_12507() {
+        let fence = BindlessIpsecSelectorFence::from_snapshot(&snapshot(
+            true,
+            vec![
+                row("10.0.0.0/08", "192.0.2.0/24"),
+                row("2001:db8:1::/048", "2001:db8:2::/032"),
+            ],
+        ))
+        .expect("helper-supported padding must compile");
+        assert!(fence.matches(
+            "10.1.2.3".parse().unwrap(),
+            "192.0.2.9".parse().unwrap()
+        ));
+        for (local, remote) in [
+            ("10.0.0.0/008", "192.0.2.0/24"),
+            ("2001:db8:1::/48", "2001:db8:2::/0032"),
+        ] {
+            assert!(
+                matches!(
+                    BindlessIpsecSelectorFence::from_snapshot(&snapshot(
+                        true,
+                        vec![row(local, remote)]
+                    )),
+                    Err(SnapshotIntegrityError::InvalidBindlessSelector { .. })
+                ),
+                "{local:?} -> {remote:?} must fail the snapshot closed"
+            );
+        }
+    }
+
     #[test]
     fn bindless_selector_fence_matches_original_and_post_nat_tuples() {
         let fence = BindlessIpsecSelectorFence::from_snapshot(&snapshot(

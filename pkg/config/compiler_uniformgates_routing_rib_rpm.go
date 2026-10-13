@@ -159,6 +159,25 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
+	// #12507: static-route destination spellings whose zero-padded mask the
+	// userspace helper cannot parse ("/008", "/0032"), including spellings
+	// folded into a same-prefix route. Helper-supported padding ("/08",
+	// "/032") was already written canonically and is not reported. Strict on
+	// commit / commit-check; the tolerant path warns once per spelling and
+	// keeps the route, so a published route that keeps the spelling fails the
+	// helper snapshot closed instead of silently losing a discard route.
+	if spellings := staticRouteHelperRefusedMaskSpellings(cfg); len(spellings) > 0 {
+		if !opts.lenientStaticRouteCIDRMaskSpelling {
+			return fmt.Errorf("%s", spellings[0])
+		}
+		for _, spelling := range spellings {
+			cfg.Warnings = append(cfg.Warnings,
+				"static-route CIDR mask spelling (downgraded to warning on tolerant path; "+
+					"a published route that keeps it makes the userspace helper refuse the "+
+					"whole snapshot): "+spelling)
+		}
+	}
+
 	if err := validatePolicyNextPolicyActions11780(cfg); err != nil {
 		if opts.lenientPolicyNextAction11780 {
 			failClosedMalformedNextPolicyActions11780(cfg)
