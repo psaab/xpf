@@ -30,7 +30,7 @@ func TestPolicySchedulerConfigHashIncludesDailyExclude12822(t *testing.T) {
 	// `daily all-day` alone forces a re-prime (regression: the DailyExclude
 	// line once replaced the AllDay line instead of joining it).
 	allDay := &config.Config{Schedulers: map[string]*config.SchedulerConfig{
-		"daily": {Name: "daily", AllDay: true},
+		"daily": {Name: "daily", Daily: true, AllDay: true},
 	}}
 	bareDaily := &config.Config{Schedulers: map[string]*config.SchedulerConfig{
 		"daily": {Name: "daily", Daily: true},
