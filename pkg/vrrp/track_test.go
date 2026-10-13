@@ -134,6 +134,13 @@ func TestCollectInstances_TrackInterfaceNormalized(t *testing.T) {
 func TestUpdateInstances_TrackFieldChangeInPlace(t *testing.T) {
 	m := NewManager()
 	defer stopManagerForTest(m)
+	// Pin resolveIface so the #2294 ifindex-drift probe is hermetic
+	// regardless of whether the host has a real eth0 (mirrors the
+	// vrrp_test.go:591 stub): return the same Index (0) the seeded
+	// instance binds, so no drift is detected.
+	m.resolveIface = func(name string) (*net.Interface, error) {
+		return &net.Interface{Name: name, Index: 0}, nil
+	}
 	m.linkState = func(name string) (bool, error) {
 		if name == "ge-0-0-9" {
 			return false, nil // tracked interface is down
