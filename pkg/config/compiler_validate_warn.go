@@ -1967,7 +1967,7 @@ func schedulerHasEffectiveWindow(s *SchedulerConfig) bool {
 	if s == nil {
 		return false
 	}
-	if s.AllDay || s.StartTime != "" || s.StopTime != "" || len(s.Days) > 0 {
+	if s.DailyExclude || s.AllDay || s.StartTime != "" || s.StopTime != "" || len(s.Days) > 0 {
 		return true
 	}
 	if s.StartDate != "" || s.StopDate != "" {
@@ -1986,7 +1986,7 @@ func schedulerEqualTimeWindowForm(s *SchedulerConfig) (string, bool) {
 	if s == nil {
 		return "", false
 	}
-	if !s.AllDay && schedulerTimeOfDayEqual(s.StartTime, s.StopTime) {
+	if !s.AllDay && !s.DailyExclude && schedulerTimeOfDayEqual(s.StartTime, s.StopTime) {
 		return "daily all-day", true
 	}
 	dayNames := make([]string, 0, len(s.Days))

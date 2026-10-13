@@ -134,6 +134,16 @@ func TestSchedulerEqualWindowWarns(t *testing.T) {
 			wantWarn: false,
 		},
 		{
+			name: "daily exclude plus equal bounds does not warn",
+			cfg: directSchedulerConfig(&config.SchedulerConfig{
+				Name:         "excluded-eq",
+				DailyExclude: true,
+				StartTime:    "09:00:00",
+				StopTime:     "09:00:00",
+			}),
+			wantWarn: false,
+		},
+		{
 			name: "per-day half-specified window does not warn",
 			cfg: compileHier(t, "schedulers {\n    scheduler dayhalf {\n        monday {\n"+
 				"            start-time 09:00:00;\n        }\n    }\n}"),

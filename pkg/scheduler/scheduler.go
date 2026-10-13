@@ -601,11 +601,12 @@ func effectiveDayWindow(sched *config.SchedulerConfig, wd time.Weekday) (config.
 			return *win, true
 		}
 	}
-	if sched.AllDay || sched.StartTime != "" || sched.StopTime != "" {
+	if sched.DailyExclude || sched.AllDay || sched.StartTime != "" || sched.StopTime != "" {
 		return config.SchedulerDayWindow{
 			StartTime: sched.StartTime,
 			StopTime:  sched.StopTime,
 			AllDay:    sched.AllDay,
+			Exclude:   sched.DailyExclude,
 		}, true
 	}
 	return config.SchedulerDayWindow{}, false
@@ -614,7 +615,7 @@ func effectiveDayWindow(sched *config.SchedulerConfig, wd time.Weekday) (config.
 // schedulerHasTimeWindow reports whether the scheduler carries any
 // time-of-day restriction (daily window or per-day arms).
 func schedulerHasTimeWindow(sched *config.SchedulerConfig) bool {
-	return sched.AllDay || sched.StartTime != "" || sched.StopTime != "" || len(sched.Days) > 0
+	return sched.DailyExclude || sched.AllDay || sched.StartTime != "" || sched.StopTime != "" || len(sched.Days) > 0
 }
 
 func schedulerHasDateRange(sched *config.SchedulerConfig) bool {
