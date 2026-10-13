@@ -37,6 +37,7 @@ func TestExpandGroupsRetainsPackedRouteFilterRange12529(t *testing.T) {
 		{"upto", "from route-filter 10.0.0.0/8 upto /24", []string{"route-filter", "10.0.0.0/8", "upto", "/24"}, false},
 		{"prefix-length-range", "from route-filter 10.0.0.0/8 prefix-length-range /16-/24", []string{"route-filter", "10.0.0.0/8", "prefix-length-range", "/16-/24"}, false},
 		{"through", "from route-filter 10.0.0.0/8 through 10.0.0.0/24", []string{"route-filter", "10.0.0.0/8", "through", "10.0.0.0/24"}, true},
+		{"protocol and range", "from protocol static route-filter 10.0.0.0/8 upto /24", []string{"route-filter", "10.0.0.0/8", "upto", "/24"}, false},
 		{"exact control", "from route-filter 10.0.0.0/8 exact", []string{"route-filter", "10.0.0.0/8", "exact"}, false},
 		{"orlonger control", "from route-filter 10.0.0.0/8 orlonger", []string{"route-filter", "10.0.0.0/8", "orlonger"}, false},
 	}
@@ -68,7 +69,7 @@ func TestExpandGroupsRetainsPackedRouteFilterRange12529(t *testing.T) {
 }
 
 func TestExpandGroupsRetainsBracedTermRouteFilterRange12529(t *testing.T) {
-	text := `groups { G { policy-options { policy-statement P { term T { from route-filter 10.0.0.0/8 upto /24; } } } } }
+	text := `groups { G { policy-options { policy-statement P { term T from route-filter 10.0.0.0/8 upto /24; } } } }
 policy-options { apply-groups G; policy-statement P { term T { then accept; } } }`
 	tree, errs := config.NewParser(text).Parse()
 	if len(errs) != 0 {
