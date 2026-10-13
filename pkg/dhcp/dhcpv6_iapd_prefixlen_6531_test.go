@@ -174,13 +174,13 @@ func TestIAPDPrefixLen6531_WireBoundaryTable(t *testing.T) {
 				"cannot re-enter through the length-0 door.",
 		},
 		{
-			name:    "length 1 accepted",
+			name:    "length 1 overlaps blocked address space and is refused",
 			prefLen: 1,
-			want:    "2001:db8:1000::/1",
-			why: "A legal encoding: net.CIDRMask(1, 128) is contiguous and RFC 8415 " +
-				"sets no floor on delegation size. Refusing it would be a new " +
-				"minimum-prefix-length policy, not a decode fix, and would break " +
-				"legitimate very-large delegations. Out of scope for #6531.",
+			want:    "",
+			why: "The decoded prefix masks to ::/1, which overlaps the unspecified, " +
+				"IPv4-compatible, and other blocked classes. The class blocklist " +
+				"uses whole-prefix overlap, so this extremely broad delegation is " +
+				"not a control-accept GUA prefix.",
 		},
 		{
 			name:    "length 48 accepted",
