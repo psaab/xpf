@@ -111,6 +111,8 @@ const (
 	feedShrinkGuardMinRetainPercentDefault = config.DefaultDynamicAddressShrinkGuardRetainPct
 	feedShrinkGuardMinDropDefault          = config.DefaultDynamicAddressShrinkGuardMinDrop
 	feedShrinkWarnInterval                 = time.Hour
+	feedDropRetryInitialDelay              = 5 * time.Second
+	feedDropRetryMaxDelay                  = time.Hour
 	maxShrinkAckReasonBytes                = 512
 )
 
@@ -332,6 +334,10 @@ type feedState struct {
 	// publishedHash) from a genuine all-zero digest, mirroring hasSnapshot.
 	publishedHash [32]byte
 	hasPublished  bool
+	// A rejected hold-drop keeps publication debt but backs off retries of the
+	// unchanged empty target. A successful apply/fetch clears this state.
+	dropRetryDelay time.Duration
+	dropRetryAt    time.Time
 
 	// Parse-quality of the INSTALLED snapshot (#2993). A feed body may mix
 	// valid + invalid lines: the valid prefixes are installed but the skipped
@@ -2011,6 +2017,8 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	fs.hash = res.hash
 	fs.hasSnapshot = true
 	fs.holdDropped = false
+	fs.dropRetryDelay = 0
+	fs.dropRetryAt = time.Time{}
 	fs.lastFetch = now
 	fs.lastSuccess = now
 	fs.lastError = ""
@@ -2142,10 +2150,12 @@ func (m *Manager) recordFailureLocked(fs *feedState, ferr error) feedFailureTran
 			transition.dropped = true
 		}
 	}
-	// A rejected hold-drop leaves the desired state empty but the dataplane's
-	// published hash unchanged. Retry that debt on the next failed fetch, just
-	// as installSnapshot retries rejected good content on an identical refetch.
-	if !transition.dropped && fs.holdDropped && feedPublicationDebt(fs) {
+	// A rejected hold-drop remains publication debt, but frequent fetches must
+	// not repeatedly run the full config apply when that desired state is still
+	// rejected. Retry on an exponential schedule; a changed successful fetch
+	// still publishes through installSnapshot immediately.
+	if !transition.dropped && fs.holdDropped && feedPublicationDebt(fs) &&
+		(fs.dropRetryAt.IsZero() || !now.Before(fs.dropRetryAt)) {
 		transition.retryDropped = true
 	}
 	return transition
@@ -2237,23 +2247,39 @@ func (m *Manager) finishFailure(fs *feedState, transition feedFailureTransition,
 			slog.Warn("dynamic-address: hold interval elapsed, dropping stale feed to empty",
 				"name", fs.name, "err", transition.lastError, "hold", transition.holdInterval)
 		}
+		var applyErr error
 		if m.onUpdate != nil {
 			// An empty set has no fixed safety direction: a denylist stops
 			// denying while an allowlist stops permitting. The existing binding
 			// fail-mode controls the dataplane consequence; keep the hold policy
 			// shared by ordinary fetch failures and shrink refusals.
-			if err := m.onUpdate(); err != nil {
-				slog.Warn("dynamic-address: drop-to-empty apply not confirmed — dataplane state may differ",
-					"name", fs.name, "err", err, "retry", transition.retryDropped)
-				return
-			}
+			applyErr = m.onUpdate()
 		}
 		m.mu.Lock()
 		if cur, ok := m.feeds[fs.name]; ok && cur == fs && fs.holdDropped {
-			fs.publishedHash = emptyFeedHash
-			fs.hasPublished = true
+			if applyErr != nil {
+				if fs.dropRetryDelay == 0 {
+					fs.dropRetryDelay = feedDropRetryInitialDelay
+				} else if fs.dropRetryDelay < feedDropRetryMaxDelay {
+					fs.dropRetryDelay *= 2
+					if fs.dropRetryDelay > feedDropRetryMaxDelay {
+						fs.dropRetryDelay = feedDropRetryMaxDelay
+					}
+				}
+				fs.dropRetryAt = m.now().Add(fs.dropRetryDelay)
+			} else {
+				fs.dropRetryDelay = 0
+				fs.dropRetryAt = time.Time{}
+				fs.publishedHash = emptyFeedHash
+				fs.hasPublished = true
+			}
 		}
 		m.mu.Unlock()
+		if applyErr != nil {
+			slog.Warn("dynamic-address: drop-to-empty apply not confirmed — dataplane state may differ",
+				"name", fs.name, "err", applyErr, "retry", transition.retryDropped)
+			return
+		}
 		if transition.retryDropped {
 			slog.Info("dynamic-address: retried hold-drop apply accepted",
 				"name", fs.name)

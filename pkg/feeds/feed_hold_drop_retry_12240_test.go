@@ -15,6 +15,7 @@ import (
 // empty state lands. Publication debt reflects the pending drop until then,
 // and a later accepted retry converges the dataplane to empty.
 func TestRejectedHoldDropPublishIsRetried12240(t *testing.T) {
+	now := time.Now()
 	var calls int
 	reject := false
 	m := New(func() error {
@@ -24,6 +25,7 @@ func TestRejectedHoldDropPublishIsRetried12240(t *testing.T) {
 		}
 		return nil
 	})
+	m.now = func() time.Time { return now }
 	server := &bodyServer{}
 	server.set("198.51.100.0/24\n", http.StatusOK)
 	ts := httptest.NewServer(server.handler())
@@ -41,7 +43,7 @@ func TestRejectedHoldDropPublishIsRetried12240(t *testing.T) {
 	// Exercise the #12241 wall-clock expiry path directly. It drops the
 	// snapshot and invokes onUpdate, whose empty-set apply is rejected.
 	server.set("", http.StatusInternalServerError)
-	fs.staleSince = time.Now().Add(-time.Minute)
+	fs.staleSince = now.Add(-time.Minute)
 	m.expireStaleHold(fs)
 	if calls != 2 {
 		t.Fatalf("hold expiry: onUpdate calls = %d, want 2 (one drop publish attempt)", calls)
@@ -54,12 +56,16 @@ func TestRejectedHoldDropPublishIsRetried12240(t *testing.T) {
 		t.Fatalf("rejected hold-drop status = %+v, want empty installed state with publication debt", info)
 	}
 
-	// The defect: a further failing fetch fires no retry, so the dataplane
-	// keeps the stale last-good contents indefinitely. A subsequent failing
-	// fetch must re-drive the drop publish.
+	// The first failed fetch inside the retry backoff is quiet; after the
+	// initial delay, the next failed fetch re-drives the rejected empty apply.
+	m.fetchFeed(context.Background(), fs)
+	if calls != 2 {
+		t.Fatalf("fetch inside retry backoff: onUpdate calls = %d, want 2", calls)
+	}
+	now = now.Add(feedDropRetryInitialDelay)
 	m.fetchFeed(context.Background(), fs)
 	if calls != 3 {
-		t.Fatalf("retry fetch: onUpdate calls = %d, want 3 — a rejected hold-drop publish MUST be retried, not single-shot", calls)
+		t.Fatalf("scheduled retry fetch: onUpdate calls = %d, want 3 — a rejected hold-drop MUST be retried after backoff", calls)
 	}
 	info = m.AllFeeds()["f"]
 	if !info.PublicationDebt {
@@ -68,9 +74,14 @@ func TestRejectedHoldDropPublishIsRetried12240(t *testing.T) {
 
 	// Once the apply is accepted, the empty state lands and debt clears.
 	reject = false
+	now = now.Add(2 * feedDropRetryInitialDelay)
 	m.fetchFeed(context.Background(), fs)
 	if calls != 4 {
 		t.Fatalf("accepted retry: onUpdate calls = %d, want 4", calls)
+	}
+	if fs.dropRetryDelay != 0 || !fs.dropRetryAt.IsZero() {
+		t.Fatalf("accepted drop retry state delay=%v at=%v, want cleared",
+			fs.dropRetryDelay, fs.dropRetryAt)
 	}
 	info = m.AllFeeds()["f"]
 	if info.PublicationDebt {

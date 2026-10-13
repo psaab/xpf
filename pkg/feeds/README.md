@@ -304,10 +304,8 @@ The fix decouples the **installed-content** hash from the **published** hash:
   content (so the display/`#5282`-carry hash stays truthful), but fires
   `onUpdate` whenever the fetched content differs from `publishedHash` — **not**
   from `fs.hash`. `publishedHash` advances **only** on a nil (accepted) return.
-- A **rejected** apply therefore leaves `publishedHash` stale, so the next
-  identical refetch re-evaluates `needsPublish == true` and **retries** the
-  apply. The retry fires on the normal refresh cadence — one publish attempt per
-  fetch, never a tight loop.
+- A **rejected** ordinary apply therefore leaves `publishedHash` stale, so the
+  next identical refetch retries it on the normal refresh cadence (#5646).
 - A successfully applied feed has `publishedHash == fs.hash`, so an identical
   refetch is suppressed (`needsPublish == false`) — no thrash and no busy-loop,
   preserving the `#5282` no-re-fire-on-carry-forward contract
@@ -315,11 +313,14 @@ The fix decouples the **installed-content** hash from the **published** hash:
 - A hold-interval drop changes the desired installed state to empty. Its apply
   advances the published marker to the empty-set hash only when accepted; a
   rejected apply retains the previous marker and therefore remains publication
-  debt. While the dropped state remains desired, a subsequent failed fetch
-  retries the empty apply (one attempt per fetch) and debt remains until the
-  callback accepts it. After an unconfirmed hold-drop, recovery republishes
-  even identical content, because the rejected apply staged and possibly landed
-  the dropped overlay. Changed content is published normally.
+  debt. For hold-dropped feeds, failed-fetch retries use per-feed exponential
+  backoff beginning at five seconds and capped at one hour. This bounds futile
+  full applies and repeated rejection warnings when retain-mode intentionally
+  refuses the whole snapshot (#12639), while changed successful content still
+  publishes immediately. A successful empty apply or successful fetch clears
+  the retry state. Recovery after an unconfirmed hold-drop republishes even
+  identical content, because the rejected apply staged and possibly landed the
+  dropped overlay.
 
 `show security dynamic-address` distinguishes the installed snapshot hash from
 the last published hash and marks pending publication as `PUBLICATION-DEBT`.
