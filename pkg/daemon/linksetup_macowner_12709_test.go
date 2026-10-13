@@ -259,3 +259,49 @@ func TestBootstrapTargetChangePreservesForeignMAC12709(t *testing.T) {
 		t.Error("the lifeline must still attempt the rename to fxp0")
 	}
 }
+
+// Temp-OK snapshot pin (GLM R2 F2): U wears fxp0 via a MAC-form claim
+// and targets ge-0-0-0, which the other NIC currently wears — so U is
+// temp-renamed before the neutralize runs. The identity stub only knows
+// PRE-temp names; a late lookup under the temp name errors. U's own
+// claim (filed under fxp0) must still be removed via the phase-0
+// snapshot — a late-lookup implementation preserves it and reports a
+// spurious error.
+func TestTargetChangeTempOKUsesPhase0Snapshot12709(t *testing.T) {
+	dir := withTempLinkDir(t)
+	own := writeLink12709(t, dir, "fxp0", macForm12709("52:54:00:00:00:0b", "fxp0"))
+	writeLink12709(t, dir, "ge-0-0-0", macForm12709("52:54:00:00:00:0c", "ge-0-0-0"))
+	// Identity follows the NIC across renames (as sysfs does): the stub
+	// resolves only currently-worn names, so a late lookup by the
+	// pre-temp name fails once phase 1 has moved the NIC.
+	worn := map[string]string{"fxp0": "52:54:00:00:00:0b", "ge-0-0-0": "52:54:00:00:00:0c"}
+	oldIdentity := nicIdentityMACFn
+	nicIdentityMACFn = func(name string) (string, error) {
+		if mac, ok := worn[name]; ok {
+			return mac, nil
+		}
+		return "", errors.New("no interface wears " + name)
+	}
+	t.Cleanup(func() { nicIdentityMACFn = oldIdentity })
+
+	// Index assigns targets: idx0 -> fxp0, idx1 -> ge-0-0-0. U (idx1)
+	// wears fxp0 and targets the name idx0's NIC currently wears.
+	nics := []pciNIC{
+		{sortKey: 1, busAddr: "0000:05:00.0", name: "ge-0-0-0"},
+		{sortKey: 1, busAddr: "0000:06:00.0", name: "fxp0"},
+	}
+	var renamed []string
+	_, errs := renamePositional(nics, 0, false, func(from, to string) error {
+		renamed = append(renamed, from+"->"+to)
+		worn[to] = worn[from]
+		delete(worn, from)
+		return nil
+	})
+	t.Logf("renames: %v", renamed)
+	if len(errs) != 0 {
+		t.Fatalf("swap with snapshot identities must not error: %v", errs)
+	}
+	if _, err := os.Stat(own); !os.IsNotExist(err) {
+		t.Fatalf("own MAC-form claim under pre-temp name must be removed via phase-0 snapshot, stat err=%v", err)
+	}
+}

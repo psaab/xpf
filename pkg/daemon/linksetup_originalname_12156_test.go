@@ -471,8 +471,10 @@ Name=fxp0
 // TestBootstrapLifelineNeutralizesResurrectableLinksOnRename12156 pins
 // finding A: the bootstrap half of the MAJOR-1 neutralize. The B1 shape —
 // the lifeline wears ge-0-0-0 via a MAC-form link while a stale fxp0.link
-// (another NIC's claim) exists — must remove BOTH links, attempt the rename
-// to fxp0, and log ERROR. Pre-fold this left the other NIC holding fxp0
+// (another NIC's claim) exists — the stale foreign fxp0.link SURVIVES
+// (#12709 MAC verification), the rename to fxp0 is attempted, and the
+// persistence loss is logged. Pre-#12709 this removed both links by
+// filename; pre-fold this left the other NIC holding fxp0
 // forever with no ERROR; a revert of the bootstrap branch must fail here.
 func TestBootstrapLifelineNeutralizesResurrectableLinksOnRename12156(t *testing.T) {
 	logs := captureLogs12156(t)
