@@ -470,7 +470,7 @@ func deferredPolicyRecoveryFixture12072(
 }
 func servePolicyList12072(t *testing.T, m *Manager) <-chan SessionPolicyListRequest {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "control.sock")
+	socket := filepath.Join(shortSockDir9322(t), "control.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen policy READ fixture: %v", err)
