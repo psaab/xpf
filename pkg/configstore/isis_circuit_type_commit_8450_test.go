@@ -54,8 +54,11 @@ func TestISISInterfaceLevelCanonicalAccepted_8450(t *testing.T) {
 // exposure one level down.
 func TestISISInterfaceLevelTypedInRoutingInstanceCopy_8450(t *testing.T) {
 	ri := func(level string) error {
+		// The RI must own the interface since #11310 (protocol refs gated
+		// by instance membership); the level validator is what this cell
+		// measures, not the membership gate.
 		_, err := CheckText(isisBase8446+
-			"routing-instances { vrf-a { instance-type virtual-router; protocols { isis { "+
+			"routing-instances { vrf-a { instance-type virtual-router; interface ge-0/0/0.0; protocols { isis { "+
 			"net 49.0001.1921.6800.1001.00; interface ge-0/0/0.0 { level "+level+"; } } } } }\n", 0)
 		return err
 	}
