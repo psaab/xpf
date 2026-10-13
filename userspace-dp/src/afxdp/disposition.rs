@@ -326,6 +326,11 @@ fn exception_sample_key(
     exception_sample_key_parts(reason, "", meta, debug)
 }
 
+/// Sampler key over (reason ++ suffix, 5-tuple). Hashing the base reason
+/// and the `'static` suffix as two adjacent parts (rather than a joined
+/// `String`) keeps the record path alloc-free while still giving each
+/// distinct `(base, suffix)` its own dedup key (#6101). The live wrapper
+/// supplies the per-process key (#12794); the seeded core is the test seam.
 fn exception_sample_key_parts(
     reason: &str,
     suffix: &str,
@@ -1324,6 +1329,21 @@ mod tests_5289_exception_ring {
     }
 
     #[test]
+fn exception_sample_key_wrapper_uses_process_seed_12794() {
+    assert_eq!(
+        exception_sample_key_parts("slow_path", "_rate_limited", None, None),
+        exception_sample_key_parts_seeded(
+            "slow_path",
+            "_rate_limited",
+            None,
+            None,
+            crate::hot_hash_seed::hot_path_hash_seed(),
+        ),
+        "live wrapper disagrees with the seeded core - the process seed is not wired"
+    );
+}
+
+#[test]
     fn exception_sample_key_is_keyed_and_seed_sensitive_12794() {
         let mut debug = debug_tuple();
         let mut assignment = |seed| {
