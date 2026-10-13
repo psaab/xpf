@@ -1030,6 +1030,24 @@ func validateHostInboundStanzaStrict(zone, ifName string, hib *HostInboundTraffi
 	if ifName != "" {
 		scope = fmt.Sprintf("interfaces %q host-inbound-traffic", ifName)
 	}
+	if len(hib.nonCanonicalSystemServices) > 0 {
+		svc := hib.nonCanonicalSystemServices[0]
+		return fmt.Errorf(
+			"security zone %q %s system-services %q "+
+				"is not a recognized system-service; an unknown token "+
+				"commits but enforces inconsistently (kernel nft path vs "+
+				"Rust dataplane disagree) — fix the typo or remove it",
+			zone, scope, svc)
+	}
+	if len(hib.nonCanonicalProtocols) > 0 {
+		proto := hib.nonCanonicalProtocols[0]
+		return fmt.Errorf(
+			"security zone %q %s protocols %q is not a "+
+				"recognized protocol; an unknown token commits but "+
+				"enforces inconsistently (kernel nft path vs Rust "+
+				"dataplane disagree) — fix the typo or remove it",
+			zone, scope, proto)
+	}
 	for _, svc := range hib.SystemServices {
 		if !KnownHostInboundSystemServices[svc] {
 			return fmt.Errorf(

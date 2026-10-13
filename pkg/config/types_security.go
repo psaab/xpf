@@ -546,6 +546,10 @@ type HostInboundTraffic struct {
 	// cloneHostInbound or MergeHostInboundTraffic.
 	systemServicesExcept []string
 	protocolsExcept      []string
+	// Preserve wrong-case spellings that a case-insensitive exclusion may
+	// remove before the strict token gate can reject them.
+	nonCanonicalSystemServices []string
+	nonCanonicalProtocols      []string
 }
 
 // SortedInterfaceHostInboundRefs returns the interface refs that declare a
