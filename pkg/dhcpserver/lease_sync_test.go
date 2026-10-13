@@ -91,6 +91,17 @@ func tmpSocket(t *testing.T, name string) string {
 	return filepath.Join(dir, name)
 }
 
+// missingSock9853 builds a missing control-socket path in a short directory
+// and asserts it stays within the 107-byte sun_path limit.
+func missingSock9853(t *testing.T, name string) string {
+	t.Helper()
+	sock := tmpSocket(t, name)
+	if len(sock) > 107 {
+		t.Fatalf("socket path %q is %d bytes, over the 107-byte sun_path limit", sock, len(sock))
+	}
+	return sock
+}
+
 func leaseGetAllResponse(leases []keaLeaseJSON) keaResponse {
 	args, _ := json.Marshal(keaLeaseGetAllArgs{Leases: leases})
 	return keaResponse{Result: keaResultSuccess, Text: "ok", Arguments: args}
@@ -1127,9 +1138,9 @@ func TestPreSeedMemfileMerged_DropsFallbackMemfileLeases9853(t *testing.T) {
 					memfile := filepath.Join(dir, "kea-leases.csv")
 					ctrl4, ctrl6, file4, file6 := "", "", "", ""
 					if tc.family == 4 {
-						ctrl4, file4 = filepath.Join(dir, "missing4.sock"), memfile
+						ctrl4, file4 = missingSock9853(t, "missing4.sock"), memfile
 					} else {
-						ctrl6, file6 = filepath.Join(dir, "missing6.sock"), memfile
+						ctrl6, file6 = missingSock9853(t, "missing6.sock"), memfile
 					}
 					m := New()
 					m.unitActive = func(string) (bool, error) { return false, nil }
@@ -1247,9 +1258,9 @@ func TestPreSeedMemfileMerged_StaggeredFailoverPreservesStillMastered9853(t *tes
 			memfile := filepath.Join(dir, "kea-leases.csv")
 			ctrl4, ctrl6, file4, file6 := "", "", "", ""
 			if tc.family == 4 {
-				ctrl4, file4 = filepath.Join(dir, "missing4.sock"), memfile
+				ctrl4, file4 = missingSock9853(t, "missing4.sock"), memfile
 			} else {
-				ctrl6, file6 = filepath.Join(dir, "missing6.sock"), memfile
+				ctrl6, file6 = missingSock9853(t, "missing6.sock"), memfile
 			}
 			m := New()
 			m.unitActive = func(string) (bool, error) { return false, nil }
