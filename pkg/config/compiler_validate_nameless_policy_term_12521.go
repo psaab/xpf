@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // policyNamelessTermErrors12521 collects malformed terms in stable policy and
@@ -224,6 +225,9 @@ func ValidatePolicyNamelessTermsAST12521(tree *ConfigTree) error {
 				continue
 			}
 			for _, term := range ps.node.FindChildren("term") {
+				if term.Inactive {
+					continue
+				}
 				_, first, nameless := policyNamelessTermBody12521(term)
 				if nameless {
 					occurrences = append(occurrences, occurrence{policy: ps.name, first: first})
@@ -258,6 +262,104 @@ func ValidatePolicyNamelessTermsAST12521(tree *ConfigTree) error {
 		return policyNamelessTermError12521(occurrences[0].policy, occurrences[0].first)
 	}
 	return nil
+}
+
+// ValidateInactiveNamelessPolicyTermReplay12598 refuses inactive terms whose
+// nameless identity would alias an existing named term after set-path
+// flattening. candidate is the pre-merge working tree, so this also catches
+// collisions with the already-staged configuration.
+func ValidateInactiveNamelessPolicyTermReplay12598(input, candidate *ConfigTree) error {
+	type statement struct {
+		terms []*Node
+	}
+	statements := make(map[string]statement)
+	collect := func(tree *ConfigTree, visit func(string, *Node)) {
+		if tree == nil {
+			return
+		}
+		logical := tree.Clone()
+		for _, root := range logical.Children {
+			unpackPolicyScanNode12521(root, nil)
+		}
+		var scanPolicyOptions func(*Node, []string)
+		scanPolicyOptions = func(po *Node, scope []string) {
+			for _, ps := range namedInstances(po.FindChildren("policy-statement")) {
+				if ps.node == nil {
+					continue
+				}
+				path := append(append([]string(nil), scope...), "policy-options", "policy-statement", ps.name)
+				visit(strings.Join(path, "\x00"), ps.node)
+			}
+		}
+		for _, po := range logical.FindChildren("policy-options") {
+			scanPolicyOptions(po, nil)
+		}
+		var walkGroup func(*Node, []string)
+		walkGroup = func(node *Node, scope []string) {
+			for _, child := range node.Children {
+				if child.Name() == "policy-options" {
+					scanPolicyOptions(child, scope)
+					continue
+				}
+				next := append(append([]string(nil), scope...), child.Keys...)
+				walkGroup(child, next)
+			}
+		}
+		for _, groups := range logical.FindChildren("groups") {
+			for _, group := range groups.Children {
+				scope := append([]string{"groups"}, group.Keys...)
+				walkGroup(group, scope)
+			}
+		}
+	}
+	collect(candidate, func(key string, ps *Node) {
+		terms := statements[key].terms
+		terms = append(terms, ps.FindChildren("term")...)
+		statements[key] = statement{terms: terms}
+	})
+	var err error
+	collect(input, func(key string, ps *Node) {
+		if err != nil {
+			return
+		}
+		terms := ps.FindChildren("term")
+		candidateTerms := statements[key].terms
+		for _, term := range terms {
+			if term == nil || !term.Inactive || len(term.Keys) != 1 || term.Keys[0] != "term" {
+				continue
+			}
+			names := make([]string, 0, len(term.Children))
+			for _, child := range term.Children {
+				if len(child.Keys) > 0 {
+					names = append(names, child.Keys[0])
+				}
+			}
+			if len(names) == 0 {
+				names = append(names, "")
+			}
+			for _, name := range names {
+				for _, sibling := range terms {
+					if sibling == term || len(sibling.Keys) < 2 {
+						continue
+					}
+					if name == "" || sibling.Keys[1] == name {
+						err = fmt.Errorf("inactive nameless policy term would alias named term %q after LoadMerge flattening (#12598)", sibling.Keys[1])
+						return
+					}
+				}
+				for _, sibling := range candidateTerms {
+					if sibling == nil || len(sibling.Keys) < 2 {
+						continue
+					}
+					if name == "" || sibling.Keys[1] == name {
+						err = fmt.Errorf("inactive nameless policy term would alias candidate term %q after LoadMerge flattening (#12598)", sibling.Keys[1])
+						return
+					}
+				}
+			}
+		}
+	})
+	return err
 }
 
 // neutralizePolicyNamelessTerms12521 keeps a typed placeholder so tolerant
