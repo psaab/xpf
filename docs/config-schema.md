@@ -13115,6 +13115,22 @@ Regression coverage: `pkg/config/compiler_default_policy_conflict_11821_test.go`
 checks both duplicate shapes and action orders, strict rejection, tolerant
 warnings and fail-closed compilation, and acceptance of identical duplicates.
 
+### #12821 — Contradictory action spellings within one `default-policy`
+
+One `default-policy` stanza can carry action values in flat trailing keys or
+nested block children. Reading only the first key/child made contradictory
+values such as `default-policy [ permit-all deny-all ]` or
+`default-policy permit-all { deny-all; }` compile as permit-all. Strict
+compilation now rejects distinct supported actions within one stanza.
+Tolerant `Load` and `SyncApply` warn with both actions and force the effective
+no-match default to deny-all. Repeated identical action tokens remain
+accepted; #11367 continues to reject multi-child choice blocks.
+
+Regression coverage: `pkg/config/compiler_default_policy_contradictory_12821_test.go`
+checks bracketed, mixed key/body, and nested block spellings in both action
+orders, strict rejection, tolerant warnings and fail-closed compilation, and
+single-action controls.
+
 ### #3534 — `default-policy-log session-init|session-close` (implicit default RT_FLOW logging)
 
 Split from #3363 Part 2. Operators want the implicit default-policy verdict to
