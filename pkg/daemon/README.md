@@ -1810,16 +1810,31 @@ Invariants worth keeping:
   Same shape as the #5114 host-scope retry debt.
 - **An empty allowlist is NOT, by itself, a withdrawal.**
   `UserspaceBoundLinuxInterfaces` degrades to nil when its snapshot build
-  fails (#2514), and `applyTailReconciles` still runs the tunable step on
-  a commit whose dataplane apply failed. Treating "no names" as "release
-  everything" would let a transient derivation error rip the tuning off
-  NICs the dataplane is still forwarding on, and `ethtool -X ... default`
+  fails (#2514) and when its xfrm-device dump hard-fails (#12580), and
+  `applyTailReconciles` still runs the tunable step on a commit whose
+  dataplane apply failed. Treating "no names" as "release everything"
+  would let a transient derivation error rip the tuning off NICs the
+  dataplane is still forwarding on, and `ethtool -X ... default`
   mid-traffic re-steers in-flight flows onto different RX queues. The
   withdrawal trigger is therefore the CONFIG signal — `userspaceDP ==
   false`, a pure config read with no error path — never an empty list.
   With userspace-dp still enabled and an empty list, ownership is
   retained untouched, mirroring the refusal `applyRSSIndirection` and
   `applyCoalescence` already make.
+- **The xfrm-dump degrade lands on a SUCCESSFUL commit.** A build error
+  also rejects the commit; a hard xfrm dump failure does not — the apply
+  snapshot excludes secure tunnels by configuration ownership alone. On
+  that commit the release and claim above, RSS reshaping (and the
+  kill-switch restore) and coalescence all see an empty list and do
+  nothing, and nothing retries them before the next apply (the next
+  commit, or the boot-time apply after a restart): a NIC released on
+  that commit is handed back one apply late. A NIC still on its default
+  RSS table (first boot, newly bound, re-enabled after the kill switch)
+  keeps feeding every hardware queue meanwhile; with more than 16 RX
+  queues (`BindingQueuesPerIface`) the transit hashed onto queues the
+  planner never binds takes `drop_degraded_transit`. The allowlist logs
+  a WARN naming the skipped work. An interrupted dump is not a failure —
+  its partial device list is used (#12710).
 - **A released name that is no longer an mlx5 netdev drops ownership
   without an ethtool call.** Unplugged, renamed by a `.link` change, or
   rebound to another driver — the ring/coalescence configuration went

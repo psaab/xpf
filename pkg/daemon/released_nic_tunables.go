@@ -41,17 +41,25 @@
 // # Why an EMPTY allowlist is not, by itself, a withdrawal
 //
 // UserspaceBoundLinuxInterfaces degrades to nil when its snapshot build
-// fails (see its #2514 comment), and applyTailReconciles still runs the
-// tunable step on a commit whose dataplane apply failed. Treating "no
-// names" as "release everything" would therefore let a transient
-// derivation error rip xpf's tuning off NICs the dataplane is still
-// forwarding on — and `ethtool -X ... default` mid-traffic re-steers
-// in-flight flows onto different RX queues. So the withdrawal trigger is
-// the CONFIG signal (`userspaceDP == false`, a pure config read with no
-// error path), never an empty list. With userspace-dp still enabled and
-// an empty list, ownership is retained untouched — the same refusal to
-// act on an empty allowlist that applyRSSIndirection and applyCoalescence
-// already make.
+// fails (see its #2514 comment) and when its xfrm-device dump hard-fails
+// (#12580), and applyTailReconciles still runs the tunable step on a
+// commit whose dataplane apply failed. Treating "no names" as "release
+// everything" would therefore let a transient derivation error rip xpf's
+// tuning off NICs the dataplane is still forwarding on — and `ethtool -X
+// ... default` mid-traffic re-steers in-flight flows onto different RX
+// queues. So the withdrawal trigger is the CONFIG signal (`userspaceDP ==
+// false`, a pure config read with no error path), never an empty list.
+// With userspace-dp still enabled and an empty list, ownership is
+// retained untouched — the same refusal to act on an empty allowlist that
+// applyRSSIndirection and applyCoalescence already make.
+//
+// The refusal DEFERS the hand-back; it does not lose it. The xfrm-dump
+// degrade lands on a commit that otherwise SUCCEEDS (a build error also
+// rejects the commit; a dump failure only narrows the apply snapshot's
+// secure-tunnel exclusion to configuration ownership), so a NIC released
+// on that commit keeps xpf's RSS table and coalescence until the next
+// apply derives a non-empty allowlist — nothing retries sooner. The
+// allowlist's WARN is the operator's record of the skip.
 //
 // # Retry debt (#5114 shape)
 //
