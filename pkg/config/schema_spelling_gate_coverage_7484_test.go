@@ -593,14 +593,11 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// group-level probe has no independently materialized output. #10078's
 	// security declarations also remove four unreachable ALG kind roots, so
 	// tighten this ceiling 137 -> 133 from the measured member registry.
-	// #12239 adds `schedulers scheduler <*> description`. SchedulerConfig
-	// has no Description field, so this accepted display-only Junos leaf is
-	// intentionally inert and adds exactly one `unreachable` member, named
-	// in the #7484 member registry: raise 133 -> 134 for it and nothing
-	// else. The base already measured 134 against 133 (net +1 from leaves
-	// other changes moved, which TestSpellingGateMembersAreRecorded7484
-	// names); that drift is not absorbed here and still reds this ratchet.
-	gateBlindUnreachable: 134,
+	// #12662 remeasured the master registry. Four `no-install` static-route
+	// leaves arrived as unreachable; seven RSS expectation leaves moved from
+	// `err` to `unreachable`, while two scheduler-name leaves became compared.
+	// The net ceiling change is 134 -> 135; the registry records each site.
+	gateBlindUnreachable: 135,
 	// #8830: read, value deliberately ignored, advisory says so. Measured at
 	// this head: vrrp-group track-interface priority-cost (inet and inet6),
 	// security log stream transport tls-profile, system dataplane
@@ -624,8 +621,12 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// tightens 28 -> 27. The family Interface-ID site reclassifies from
 	// `compared` to `valueMoves`; its value still moves output in one spelling,
 	// but the gate cannot retain a stable verdict across the rejected shapes.
-	// The dedicated #9553 flat tests cover the actual scalar wiring.
-	gateBlindAdvisory: 27,
+	// #12662 remeasured this class at 44. The 17-member rise is a measured
+	// reclassification of existing accepted-but-ignored fields to advisory;
+	// it includes four CoS rewrite code-point leaves and four BGP prefix-limit
+	// maximum leaves. Retain the names in the member registry rather than
+	// broadening the schema or treating Junos keywords as misspellings.
+	gateBlindAdvisory: 44,
 	// #7132 raised this 175 -> 176 for `system ntp server ... prefer`.
 	//
 	// Raised deliberately, and it is the one kind of raise that is not a
@@ -717,7 +718,7 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// named in the members registry diff, not just counted.
 	// #10078's four modeled ALG `disable` leaves are value-less flags, raising
 	// the measured ceiling 239 -> 243; their kind roots leave `unreachable`.
-	gateBlindFlag: 243, // 209 -> 201, issue 8939; coverage cost tracked at issue 8971
+	gateBlindFlag: 194, // #12662 tightens to the measured 194-member population.
 	// #9882 raises it 43 -> 44. The three-color twin,
 	// `firewall three-color-policer <*> then forwarding-class`, lands here
 	// because the differential's three-color parent stanza does not compile
@@ -729,7 +730,7 @@ var gateBlindCeiling = map[gateBlindClass]int{
 	// would move the whole then-family out together and is a harness change
 	// beyond this leaf's verdict, deliberately not folded in here. No leaf
 	// changed class (the members registry names only arrivals).
-	gateBlindErr: 44,
+	gateBlindErr: 37, // #12662 tightens to the measured 37-member population.
 	// TIGHTENED 1 -> 0. The single member of this class was
 	// `policy-options policy-statement <*> then`, and it is gone because the
 	// schema now declares that node's children instead of calling it a bare

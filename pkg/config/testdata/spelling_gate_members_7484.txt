@@ -23,6 +23,7 @@ COMPARED	applications application-set <*> application
 COMPARED	applications application-set <*> application-set
 err (parent stanza does not compile)	apply-groups
 COMPARED	bridge-domains <*> domain-type
+advisory (read, value ignored, warning says so)	bridge-domains <*> interface
 COMPARED	bridge-domains <*> routing-interface
 COMPARED	bridge-domains <*> vlan-id-list
 COMPARED	chassis cluster additional-authentication-key
@@ -48,13 +49,13 @@ COMPARED	chassis cluster node
 COMPARED	chassis cluster peer-address
 COMPARED	chassis cluster peer-fencing
 unreachable (leaf changed nothing)	chassis cluster private-rg-election
+flag (read, but value-less)	chassis cluster redundancy-group <*> allow-degraded-routing-takeover
 COMPARED	chassis cluster redundancy-group <*> gratuitous-arp-count
 COMPARED	chassis cluster redundancy-group <*> interface-monitor
 COMPARED	chassis cluster redundancy-group <*> ip-monitoring family inet <*> weight
 COMPARED	chassis cluster redundancy-group <*> ip-monitoring global-threshold
 COMPARED	chassis cluster redundancy-group <*> ip-monitoring global-weight
 COMPARED	chassis cluster redundancy-group <*> node <*> priority
-flag (read, but value-less)	chassis cluster redundancy-group <*> allow-degraded-routing-takeover
 flag (read, but value-less)	chassis cluster redundancy-group <*> strict-vip-ownership
 COMPARED	chassis cluster reth-advertise-interval
 COMPARED	chassis cluster reth-count
@@ -67,13 +68,13 @@ COMPARED	chassis device-map unmapped-interface-policy
 COMPARED	class-of-service classifiers dscp <*> forwarding-class <*> loss-priority <*> code-points
 COMPARED	class-of-service classifiers ieee-802.1 <*> forwarding-class <*> loss-priority <*> code-points
 COMPARED	class-of-service classifiers inet-precedence <*> forwarding-class <*> loss-priority <*> code-points
-err (parent stanza does not compile)	class-of-service fairness rss-expectation interface <*> queue <*> active-workers
-err (parent stanza does not compile)	class-of-service fairness rss-expectation interface <*> queue <*> any
-err (parent stanza does not compile)	class-of-service fairness rss-expectation interface <*> queue <*> at-least-active-workers
-err (parent stanza does not compile)	class-of-service fairness rss-expectation interface <*> queue <*> balanced
-err (parent stanza does not compile)	class-of-service fairness rss-expectation interface <*> queue <*> cstruct
-err (parent stanza does not compile)	class-of-service fairness rss-expectation interface <*> queue <*> cstruct-max
-err (parent stanza does not compile)	class-of-service fairness rss-expectation interface <*> queue <*> max-worker-flow-share
+unreachable (leaf changed nothing)	class-of-service fairness rss-expectation interface <*> queue <*> active-workers
+unreachable (leaf changed nothing)	class-of-service fairness rss-expectation interface <*> queue <*> any
+unreachable (leaf changed nothing)	class-of-service fairness rss-expectation interface <*> queue <*> at-least-active-workers
+unreachable (leaf changed nothing)	class-of-service fairness rss-expectation interface <*> queue <*> balanced
+unreachable (leaf changed nothing)	class-of-service fairness rss-expectation interface <*> queue <*> cstruct
+unreachable (leaf changed nothing)	class-of-service fairness rss-expectation interface <*> queue <*> cstruct-max
+unreachable (leaf changed nothing)	class-of-service fairness rss-expectation interface <*> queue <*> max-worker-flow-share
 COMPARED	class-of-service interfaces <*> classifiers dscp
 COMPARED	class-of-service interfaces <*> classifiers ieee-802.1
 COMPARED	class-of-service interfaces <*> classifiers inet-precedence
@@ -97,17 +98,17 @@ unreachable (leaf changed nothing)	class-of-service interfaces <*> unit <*> rewr
 unreachable (leaf changed nothing)	class-of-service interfaces <*> unit <*> scheduler-map
 unreachable (leaf changed nothing)	class-of-service interfaces <*> unit <*> shaping-rate <*> burst-size
 COMPARED	class-of-service rewrite-rules dscp <*> forwarding-class <*> loss-priority <*> code-point
-unreachable (leaf changed nothing)	class-of-service rewrite-rules exp <*> forwarding-class <*> loss-priority <*> code-point
-unreachable (leaf changed nothing)	class-of-service rewrite-rules exp <*> forwarding-class <*> loss-priority <*> code-points
+advisory (read, value ignored, warning says so)	class-of-service rewrite-rules exp <*> forwarding-class <*> loss-priority <*> code-point
+advisory (read, value ignored, warning says so)	class-of-service rewrite-rules exp <*> forwarding-class <*> loss-priority <*> code-points
 COMPARED	class-of-service rewrite-rules ieee-802.1 <*> forwarding-class <*> loss-priority <*> code-point
-unreachable (leaf changed nothing)	class-of-service rewrite-rules inet-precedence <*> forwarding-class <*> loss-priority <*> code-point
-unreachable (leaf changed nothing)	class-of-service rewrite-rules inet-precedence <*> forwarding-class <*> loss-priority <*> code-points
+advisory (read, value ignored, warning says so)	class-of-service rewrite-rules inet-precedence <*> forwarding-class <*> loss-priority <*> code-point
+advisory (read, value ignored, warning says so)	class-of-service rewrite-rules inet-precedence <*> forwarding-class <*> loss-priority <*> code-points
 COMPARED	class-of-service scheduler-maps <*> forwarding-class <*> scheduler
 unreachable (leaf changed nothing)	class-of-service schedulers <*> buffer-size <*> temporal
 COMPARED	class-of-service schedulers <*> codel-target
 err (parent stanza does not compile)	class-of-service schedulers <*> equal-flow-enforcement
 unreachable (leaf changed nothing)	class-of-service schedulers <*> equal-flow-target-policy
-COMPARED	class-of-service schedulers <*> priority
+advisory (read, value ignored, warning says so)	class-of-service schedulers <*> priority
 flag (read, but value-less)	class-of-service schedulers <*> surplus-sharing
 COMPARED	class-of-service schedulers <*> transmit-rate <*> exact
 COMPARED	class-of-service schedulers <*> transmit-rate <*> percent
@@ -276,7 +277,7 @@ COMPARED	interfaces <*> aggregated-ether-options minimum-links
 COMPARED	interfaces <*> bandwidth
 COMPARED	interfaces <*> description
 flag (read, but value-less)	interfaces <*> disable
-COMPARED	interfaces <*> duplex
+advisory (read, value ignored, warning says so)	interfaces <*> duplex
 COMPARED	interfaces <*> encapsulation
 COMPARED	interfaces <*> fabric-options member-interfaces
 flag (read, but value-less)	interfaces <*> flexible-vlan-tagging
@@ -389,6 +390,7 @@ COMPARED	policy-options policy-statement <*> term <*> then load-balance
 COMPARED	policy-options policy-statement <*> term <*> then local-preference
 COMPARED	policy-options policy-statement <*> term <*> then metric
 COMPARED	policy-options policy-statement <*> term <*> then metric-type
+flag (read, but value-less)	policy-options policy-statement <*> term <*> then next
 COMPARED	policy-options policy-statement <*> term <*> then next-hop
 COMPARED	policy-options policy-statement <*> term <*> then origin
 flag (read, but value-less)	policy-options policy-statement <*> term <*> then reject
@@ -407,8 +409,8 @@ unreachable (leaf changed nothing)	protocols bgp group <*> bfd-liveness-detectio
 flag (read, but value-less)	protocols bgp group <*> default-originate
 COMPARED	protocols bgp group <*> description
 COMPARED	protocols bgp group <*> export
-unreachable (leaf changed nothing)	protocols bgp group <*> family inet unicast prefix-limit maximum
-unreachable (leaf changed nothing)	protocols bgp group <*> family inet6 unicast prefix-limit maximum
+advisory (read, value ignored, warning says so)	protocols bgp group <*> family inet unicast prefix-limit maximum
+advisory (read, value ignored, warning says so)	protocols bgp group <*> family inet6 unicast prefix-limit maximum
 COMPARED	protocols bgp group <*> hold-time
 COMPARED	protocols bgp group <*> import
 COMPARED	protocols bgp group <*> local-address
@@ -536,8 +538,8 @@ unreachable (leaf changed nothing)	routing-instances <*> protocols bgp group <*>
 unreachable (leaf changed nothing)	routing-instances <*> protocols bgp group <*> default-originate
 unreachable (leaf changed nothing)	routing-instances <*> protocols bgp group <*> description
 unreachable (leaf changed nothing)	routing-instances <*> protocols bgp group <*> export
-unreachable (leaf changed nothing)	routing-instances <*> protocols bgp group <*> family inet unicast prefix-limit maximum
-unreachable (leaf changed nothing)	routing-instances <*> protocols bgp group <*> family inet6 unicast prefix-limit maximum
+advisory (read, value ignored, warning says so)	routing-instances <*> protocols bgp group <*> family inet unicast prefix-limit maximum
+advisory (read, value ignored, warning says so)	routing-instances <*> protocols bgp group <*> family inet6 unicast prefix-limit maximum
 unreachable (leaf changed nothing)	routing-instances <*> protocols bgp group <*> hold-time
 unreachable (leaf changed nothing)	routing-instances <*> protocols bgp group <*> import
 unreachable (leaf changed nothing)	routing-instances <*> protocols bgp group <*> local-address
@@ -629,19 +631,23 @@ COMPARED	routing-instances <*> routing-options interface-routes rib-group inet6
 unreachable (leaf changed nothing)	routing-instances <*> routing-options rib <*> static route <*> discard
 unreachable (leaf changed nothing)	routing-instances <*> routing-options rib <*> static route <*> next-hop <*> interface
 unreachable (leaf changed nothing)	routing-instances <*> routing-options rib <*> static route <*> next-table
+unreachable (leaf changed nothing)	routing-instances <*> routing-options rib <*> static route <*> no-install
 unreachable (leaf changed nothing)	routing-instances <*> routing-options rib <*> static route <*> preference
 unreachable (leaf changed nothing)	routing-instances <*> routing-options rib <*> static route <*> qualified-next-hop <*> interface
 unreachable (leaf changed nothing)	routing-instances <*> routing-options rib <*> static route <*> qualified-next-hop <*> metric
 unreachable (leaf changed nothing)	routing-instances <*> routing-options rib <*> static route <*> qualified-next-hop <*> preference
 unreachable (leaf changed nothing)	routing-instances <*> routing-options rib <*> static route <*> reject
+advisory (read, value ignored, warning says so)	routing-instances <*> routing-options rib <*> static route <*> rib-group
 flag (read, but value-less)	routing-instances <*> routing-options static route <*> discard
 COMPARED	routing-instances <*> routing-options static route <*> next-hop <*> interface
 COMPARED	routing-instances <*> routing-options static route <*> next-table
+unreachable (leaf changed nothing)	routing-instances <*> routing-options static route <*> no-install
 COMPARED	routing-instances <*> routing-options static route <*> preference
 COMPARED	routing-instances <*> routing-options static route <*> qualified-next-hop <*> interface
 COMPARED	routing-instances <*> routing-options static route <*> qualified-next-hop <*> metric
 COMPARED	routing-instances <*> routing-options static route <*> qualified-next-hop <*> preference
 flag (read, but value-less)	routing-instances <*> routing-options static route <*> reject
+advisory (read, value ignored, warning says so)	routing-instances <*> routing-options static route <*> rib-group
 advisory (read, value ignored, warning says so)	routing-instances <*> vrf-table-label
 advisory (read, value ignored, warning says so)	routing-instances <*> vrf-target
 COMPARED	routing-options autonomous-system
@@ -653,20 +659,26 @@ COMPARED	routing-options interface-routes rib-group inet6
 unreachable (leaf changed nothing)	routing-options rib <*> static route <*> discard
 unreachable (leaf changed nothing)	routing-options rib <*> static route <*> next-hop <*> interface
 unreachable (leaf changed nothing)	routing-options rib <*> static route <*> next-table
+unreachable (leaf changed nothing)	routing-options rib <*> static route <*> no-install
 unreachable (leaf changed nothing)	routing-options rib <*> static route <*> preference
 unreachable (leaf changed nothing)	routing-options rib <*> static route <*> qualified-next-hop <*> interface
 unreachable (leaf changed nothing)	routing-options rib <*> static route <*> qualified-next-hop <*> metric
 unreachable (leaf changed nothing)	routing-options rib <*> static route <*> qualified-next-hop <*> preference
 unreachable (leaf changed nothing)	routing-options rib <*> static route <*> reject
+advisory (read, value ignored, warning says so)	routing-options rib <*> static route <*> rib-group
+advisory (read, value ignored, warning says so)	routing-options rib-groups <*> import-policy
 COMPARED	routing-options rib-groups <*> import-rib
+advisory (read, value ignored, warning says so)	routing-options router-id
 flag (read, but value-less)	routing-options static route <*> discard
 COMPARED	routing-options static route <*> next-hop <*> interface
 COMPARED	routing-options static route <*> next-table
+unreachable (leaf changed nothing)	routing-options static route <*> no-install
 COMPARED	routing-options static route <*> preference
 COMPARED	routing-options static route <*> qualified-next-hop <*> interface
 COMPARED	routing-options static route <*> qualified-next-hop <*> metric
 COMPARED	routing-options static route <*> qualified-next-hop <*> preference
 flag (read, but value-less)	routing-options static route <*> reject
+advisory (read, value ignored, warning says so)	routing-options static route <*> rib-group
 flag (read, but value-less)	schedulers scheduler <*> daily all-day
 unreachable (leaf changed nothing)	schedulers scheduler <*> daily exclude
 COMPARED	schedulers scheduler <*> daily start-time
@@ -724,6 +736,7 @@ COMPARED	security dynamic-address feed-server <*> update-interval
 COMPARED	security dynamic-address feed-server <*> url
 flag (read, but value-less)	security flow allow-dns-reply
 flag (read, but value-less)	security flow allow-embedded-icmp
+flag (read, but value-less)	security flow allow-unstamped-fabric-ingress
 flag (read, but value-less)	security flow force-ip-reassembly
 flag (read, but value-less)	security flow gre-performance-acceleration
 COMPARED	security flow icmp-session timeout
@@ -897,7 +910,7 @@ COMPARED	security policies from-zone <*> <*> <*> policy <*> match destination-ad
 flag (read, but value-less)	security policies from-zone <*> <*> <*> policy <*> match destination-address-excluded
 COMPARED	security policies from-zone <*> <*> <*> policy <*> match source-address
 flag (read, but value-less)	security policies from-zone <*> <*> <*> policy <*> match source-address-excluded
-unreachable (leaf changed nothing)	security policies from-zone <*> <*> <*> policy <*> scheduler-name
+COMPARED	security policies from-zone <*> <*> <*> policy <*> scheduler-name
 flag (read, but value-less)	security policies from-zone <*> <*> <*> policy <*> then count
 flag (read, but value-less)	security policies from-zone <*> <*> <*> policy <*> then deny count
 flag (read, but value-less)	security policies from-zone <*> <*> <*> policy <*> then deny log
@@ -912,7 +925,7 @@ COMPARED	security policies global policy <*> match from-zone
 COMPARED	security policies global policy <*> match source-address
 flag (read, but value-less)	security policies global policy <*> match source-address-excluded
 COMPARED	security policies global policy <*> match to-zone
-unreachable (leaf changed nothing)	security policies global policy <*> scheduler-name
+COMPARED	security policies global policy <*> scheduler-name
 flag (read, but value-less)	security policies global policy <*> then count
 flag (read, but value-less)	security policies global policy <*> then deny count
 flag (read, but value-less)	security policies global policy <*> then deny log
