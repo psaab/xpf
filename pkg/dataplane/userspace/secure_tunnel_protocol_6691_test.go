@@ -148,7 +148,7 @@ const preSecureTunnelProtocolVersion = 4
 // weights and continues equal-cost selection for unequal routes. #11411 moves
 // it to v38 so old helpers honor Linux RTAX_MTU on imported routes; #11434
 // moves it to v39 so VID-0 ingress selects the configured native VLAN unit.
-// #11404 moves it to v40 for InterfaceSnapshot.LinkUp kernel liveness; #11420
+// #11404 moves it to v40 for InterfaceSnapshot.LinkUp kernel admin/oper state; #11420
 // moves it to v41 for ConfigSnapshot.ForwardingTables default-interface
 // gateway authorization, extended to interface-only members by #12036; #11503
 // moves it to v42 for unzoned-denial cause counters;
