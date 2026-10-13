@@ -301,12 +301,14 @@ mod tests {
                     table: "inet.0".to_string(),
                     family: "inet".to_string(),
                     destination: "203.0.113.0/24".to_string(),
+                    discard: true,
                     ..Default::default()
                 },
                 crate::RouteSnapshot {
                     table: "inet.0".to_string(),
                     family: "inet".to_string(),
                     destination: "198.51.100.0/24".to_string(),
+                    discard: true,
                     ..Default::default()
                 },
             ],
