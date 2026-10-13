@@ -330,21 +330,30 @@ NOWSTR=$(date -u -d "@$NOW" +"%a, %d %b %Y %H:%M:%S UTC" 2>/dev/null \
     -o "APT::FTPArchive::Release::Date=$NOWSTR" \
     -o "APT::FTPArchive::Release::ValidTime=$VALID_SECONDS" \
     release "dists/$SUITE" > "dists/$SUITE/Release" )
-# Assert the freshness field actually landed EXACTLY ONCE with the exact
-# ValidTime-derived value (F-066/#9921). A silent apt-ftparchive knob rename
-# must FAIL the build, never ship a repo without Valid-Until — and an injected
-# duplicate (e.g. via a newline-bearing Origin, now rejected above) must fail
-# it too. apt computes Valid-Until as Date + ValidTime, both second-precision
-# and both fixed above, so the epoch comparison is exact (no tolerance); the
-# epoch form also tolerates apt's +0000-vs-UTC suffix normalization.
+# Assert the freshness field actually landed EXACTLY ONCE and matches the
+# configured ValidTime horizon (F-066/#9921). A silent apt-ftparchive knob
+# rename must FAIL the build, never ship a repo without Valid-Until — and an
+# injected duplicate must fail it too. apt-ftparchive 3.3.3 derives
+# Valid-Until from time(NULL), ignoring the pinned Release Date; crossing a
+# second boundary after NOW was sampled can therefore add one second. Derive
+# the expected horizon from the emitted Date (which is pinned to NOW) and
+# accept only the one-second forward boundary skew. This also handles apt's
+# +0000-vs-UTC suffix normalization through epoch parsing.
+_date_count=$(grep -c "^Date:" "$APT/dists/$SUITE/Release" 2>/dev/null || true)
+[ "$_date_count" = "1" ] || die "Release has $_date_count Date fields, want exactly 1"
+_date_line=$(grep "^Date:" "$APT/dists/$SUITE/Release")
+_date_epoch=$(LC_ALL=C date -u -d "${_date_line#Date: }" +%s 2>/dev/null) \
+    || die "cannot parse Release Date '$_date_line' (need GNU date)"
 _vu_count=$(grep -c "^Valid-Until:" "$APT/dists/$SUITE/Release" 2>/dev/null || true)
 [ "$_vu_count" = "1" ] || die "Release has $_vu_count Valid-Until fields, want exactly 1 \
 (a duplicate means field injection — refusing to sign/publish)"
 _vu_line=$(grep "^Valid-Until:" "$APT/dists/$SUITE/Release")
 _vu_epoch=$(LC_ALL=C date -u -d "${_vu_line#Valid-Until: }" +%s 2>/dev/null) \
     || die "cannot parse Release Valid-Until '$_vu_line' (need GNU date)"
-[ "$_vu_epoch" = "$((NOW + VALID_SECONDS))" ] || die "Release Valid-Until '$_vu_line' != \
-ValidTime-derived value (want epoch $((NOW + VALID_SECONDS)), got $_vu_epoch)"
+_vu_expected=$((_date_epoch + VALID_SECONDS))
+[ "$_vu_epoch" -ge "$_vu_expected" ] && [ "$_vu_epoch" -le "$((_vu_expected + 1))" ] || die \
+    "Release Valid-Until '$_vu_line' != ValidTime-derived value \
+(want epoch $_vu_expected..$((_vu_expected + 1)), got $_vu_epoch)"
 info "wrote Release ($_vu_line)"
 
 # Sign Release -> InRelease (inline) + Release.gpg (detached).
