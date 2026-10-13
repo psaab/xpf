@@ -203,7 +203,7 @@ func (c *CLI) showPoliciesHitCount(cfg *config.Config, fromZone, toZone string) 
 				continue
 			}
 			// #3357: drop a scoped global that targets a different zone pair.
-			if !policymatch.GlobalPolicyAppliesToZonePair(pol.Match.FromZones, pol.Match.ToZones, fromZone, toZone) {
+			if !policymatch.GlobalPolicyAppliesToZonePairInZones(pol.Match.FromZones, pol.Match.ToZones, fromZone, toZone, policymatch.DefinedZoneNames(cfg)) {
 				continue
 			}
 			action := "Permit"
@@ -472,7 +472,7 @@ func (c *CLI) showPoliciesDetail(cfg *config.Config, fromZone, toZone string) er
 				continue
 			}
 			// #3357: drop a scoped global that targets a different zone pair.
-			if !policymatch.GlobalPolicyAppliesToZonePair(pol.Match.FromZones, pol.Match.ToZones, fromZone, toZone) {
+			if !policymatch.GlobalPolicyAppliesToZonePairInZones(pol.Match.FromZones, pol.Match.ToZones, fromZone, toZone, policymatch.DefinedZoneNames(cfg)) {
 				continue
 			}
 			action := "permit"

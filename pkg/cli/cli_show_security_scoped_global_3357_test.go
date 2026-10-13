@@ -21,6 +21,9 @@ import (
 // global for the off-pair trust->dmz, and an unscoped (all-zones) global.
 func scopedGlobalCLIConfig3357() *config.Config {
 	cfg := &config.Config{}
+	cfg.Security.Zones = map[string]*config.ZoneConfig{
+		"trust": {}, "untrust": {}, "dmz": {},
+	}
 	cfg.Security.GlobalPolicies = []*config.Policy{
 		{
 			Name:   "scoped-tu",

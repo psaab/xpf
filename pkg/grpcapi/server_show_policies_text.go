@@ -286,7 +286,7 @@ func (s *Server) showPoliciesHitCount(filter string, buf *strings.Builder) {
 				continue
 			}
 			// #3357: drop a scoped global that targets a different zone pair.
-			if !policymatch.GlobalPolicyAppliesToZonePair(pol.Match.FromZones, pol.Match.ToZones, filterFrom, filterTo) {
+			if !policymatch.GlobalPolicyAppliesToZonePairInZones(pol.Match.FromZones, pol.Match.ToZones, filterFrom, filterTo, policymatch.DefinedZoneNames(cfg)) {
 				continue
 			}
 			action := "permit"
@@ -606,7 +606,7 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 				continue
 			}
 			// #3357: drop a scoped global that targets a different zone pair.
-			if !policymatch.GlobalPolicyAppliesToZonePair(pol.Match.FromZones, pol.Match.ToZones, filterFrom, filterTo) {
+			if !policymatch.GlobalPolicyAppliesToZonePairInZones(pol.Match.FromZones, pol.Match.ToZones, filterFrom, filterTo, policymatch.DefinedZoneNames(cfg)) {
 				continue
 			}
 			if !globalHeaderPrinted {
