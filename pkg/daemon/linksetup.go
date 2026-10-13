@@ -426,12 +426,10 @@ func assignName(idx, fpc int, clusterMode bool) string {
 // can never feed a corrupted OriginalName into a later NIC's recovery), breaks
 // target-name collisions via temp names (so an enumeration shift does not
 // EEXIST-strand a rename), then writes eligible .link files and renames to the
-// final name. When the original is unknown and the NIC is already at its
-// target, it skips only the write (the retained file stays); when the target
-// differs, it neutralizes the resurrectable O.link + stale T.link claims
-// (MAJOR-1) and still attempts the rename. renameFn is injected so production
-// passes renameInterface and tests can model EEXIST semantics. Returns true
-// if any .link changed or any rename ran.
+// target. On a target change it removes MAC-form claims only after confirming
+// that their MAC belongs to this NIC; a foreign claim remains for its owner.
+// renameFn is injected so production passes renameInterface and tests can
+// model EEXIST semantics. Returns true if any .link changed or any rename ran.
 func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(from, to string) error) (bool, []error) {
 	// Phase 0: snapshot targets and capture each verified OriginalName or
 	// unknown sentinel up-front, from the .link set as it exists BEFORE this
@@ -440,6 +438,8 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 	// just-overwritten file, so an enumeration shift corrupted the chain.
 	desiredByCurrent := make(map[string]string, len(nics))
 	originalByCurrent := make(map[string]string, len(nics))
+	identityMACByCurrent := make(map[string]string, len(nics))
+	identityErrByCurrent := make(map[string]error, len(nics))
 	desiredNames := make(map[string]bool, len(nics))
 	currentNames := make([]string, len(nics))
 	for idx, nic := range nics {
@@ -455,6 +455,11 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 			// OriginalName=<logical name>.
 			originalByCurrent[nic.name] = originalNameUnknown
 			logUnknownOriginalLinkSkip("linksetup", nic.name, target)
+		}
+		if originalByCurrent[nic.name] == originalNameUnknown &&
+			(linkMACAddressFromFile(linkPrefix+nic.name+".link") ||
+				linkMACAddressFromFile(linkPrefix+target+".link")) {
+			identityMACByCurrent[nic.name], identityErrByCurrent[nic.name] = nicIdentityMACFn(nic.name)
 		}
 		desiredNames[target] = true
 		currentNames[idx] = nic.name
@@ -543,9 +548,9 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 			// resurrectable claims behind. Its own name-only O.link (whose
 			// MAC still matches it) and any stale T.link (another NIC's
 			// claim) would each re-apply at the next boot and put a NIC up
-			// under ANOTHER NIC's logical name — fail-open. Neutralize both
-			// so the next boot falls back to kernel names (fail-closed, the
-			// pre-fold behavior) and rename as required (stranding is worse).
+			// under ANOTHER NIC's logical name — fail-open. Remove claims
+			// whose MAC is verified as this NIC's, preserve foreign claims,
+			// and rename as required (stranding is worse).
 			// Persistence loss is reported via the phase-2 ERROR log below,
 			// not the #5842 errs channel (errs carries only failures: a
 			// neutralize that fails, a failed rename, or the #7205 unfreed
@@ -555,34 +560,33 @@ func renamePositional(nics []pciNIC, fpc int, clusterMode bool, renameFn func(fr
 			// above, this neutralize runs BEFORE the known owner's
 			// writeLinkFile(final, original) call in the else branch below,
 			// so there is no map-order race: the owner always rewrites its
-			// own name after every neutralize, and a failed owner write
-			// leaves NO claim behind (fail-closed: nothing is spared).
-			// The stale final link ALWAYS goes: for U→X with X unfreed,
-			// X's occupant V writes Y.link (its own final), never X.link —
-			// nobody else touches the stale claim, and sparing it would
-			// resurrect V under U's target (B-REG fail-open).
-			// current may be xpf-tmp-N; use the pre-temp name whose MAC-form
-			// link still matches this NIC, otherwise owner-write failure can
-			// leave that claim to resurrect the wrong identity (#12557).
+			// own name after every neutralize. A failed owner write leaves
+			// no removable claim belonging to the unknown behind; foreign
+			// MAC-form claims remain with their owner.
+			// current may be xpf-tmp-N; use the pre-temp name and its
+			// phase-0 MAC snapshot to verify the O.link claim (#12557).
 			removeName := current
 			if pre, ok := preTemp[current]; ok {
 				removeName = pre
 			}
 			neutralized := true
 			for _, name := range []string{linkPrefix + removeName + ".link", linkPrefix + final + ".link"} {
-				if err := neutralizeResurrectableLink(name); err != nil {
+				removed, err := neutralizeResurrectableLinkForMAC(name,
+					identityMACByCurrent[removeName], identityErrByCurrent[removeName])
+				if err != nil {
 					neutralized = false
 					slog.Error("linksetup: failed to neutralize resurrectable .link",
 						"file", name, "err", err)
 					errs = append(errs, err)
-				} else {
+				}
+				if removed {
 					changed = true
 				}
 			}
 			if neutralized {
 				slog.Error("linksetup: unknown-original NIC changed target without a "+
-					"verifiable kernel name; neutralized retained .link claims so the next "+
-					"boot falls back to kernel names",
+					"verifiable kernel name; neutralized retained .link claims (preserving "+
+					"claims with a foreign or unverifiable MAC) so the next boot falls back to kernel names",
 					"from", current, "to", final)
 			}
 		} else {
@@ -901,10 +905,8 @@ func containsLine(text, s string) bool {
 }
 
 // neutralizeResurrectableLink removes a managed .link file that udev could
-// otherwise re-apply at the next boot. Used on the MAJOR-1 path: an unknown
-// NIC renaming O→T must not leave O.link (MAC still matches it) or a stale
-// T.link (another NIC's claim) behind — either resurrects a wrong identity.
-// Missing files are not errors; only xpfd-managed names are ever removed.
+// otherwise re-apply at the next boot. Missing files are not errors; only
+// xpfd-managed names are ever removed.
 func neutralizeResurrectableLink(name string) error {
 	if !strings.HasPrefix(name, linkPrefix) || !strings.HasSuffix(name, ".link") {
 		return fmt.Errorf("linksetup: refusing to remove unmanaged link file %q", name)
@@ -914,6 +916,74 @@ func neutralizeResurrectableLink(name string) error {
 		return fmt.Errorf("remove resurrectable .link %s: %w", path, err)
 	}
 	return nil
+}
+
+func neutralizeResurrectableLinkForNIC(name, nicName string) (bool, error) {
+	if !linkMACAddressFromFile(name) {
+		return neutralizeResurrectableLinkForMAC(name, "", nil)
+	}
+	nicMAC, identityErr := nicIdentityMACFn(nicName)
+	return neutralizeResurrectableLinkForMAC(name, nicMAC, identityErr)
+}
+
+// neutralizeResurrectableLinkForMAC verifies MAC ownership before deleting a
+// managed link. Filename equality does not establish ownership: a mismatch
+// or unreadable identity preserves the claim, while links without a MAC
+// retain their prior cleanup behavior.
+func neutralizeResurrectableLinkForMAC(name, nicMAC string, identityErr error) (bool, error) {
+	if !strings.HasPrefix(name, linkPrefix) || !strings.HasSuffix(name, ".link") {
+		return false, fmt.Errorf("linksetup: refusing to remove unmanaged link file %q", name)
+	}
+	path := filepath.Join(linkDir, name)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read resurrectable .link %s before removal: %w", path, err)
+	}
+	fileMAC, hasMAC := linkMACAddress(string(data))
+	if hasMAC {
+		if identityErr != nil || strings.TrimSpace(nicMAC) == "" {
+			if identityErr == nil {
+				identityErr = errors.New("NIC MAC is empty")
+			}
+			return false, fmt.Errorf("linksetup: cannot verify MAC ownership of %s; preserving claim: %w", path, identityErr)
+		}
+		wantMAC, wantErr := net.ParseMAC(strings.TrimSpace(nicMAC))
+		fileMACParsed, fileErr := net.ParseMAC(strings.TrimSpace(fileMAC))
+		if wantErr != nil || fileErr != nil {
+			return false, fmt.Errorf("linksetup: cannot verify MAC ownership of %s; preserving claim: invalid MACAddress or NIC MAC", path)
+		}
+		if !bytes.Equal(wantMAC, fileMACParsed) {
+			slog.Info("linksetup: preserving MAC-form .link owned by another NIC",
+				"file", name)
+			return false, nil
+		}
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("remove resurrectable .link %s: %w", path, err)
+	}
+	return true, nil
+}
+
+func linkMACAddressFromFile(name string) bool {
+	data, err := os.ReadFile(filepath.Join(linkDir, name))
+	if err != nil {
+		return false
+	}
+	_, hasMAC := linkMACAddress(string(data))
+	return hasMAC
+}
+
+func linkMACAddress(content string) (string, bool) {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "MACAddress=") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "MACAddress=")), true
+		}
+	}
+	return "", false
 }
 
 // writeLinkFile writes a systemd .link file for the given target name.
