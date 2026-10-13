@@ -91,7 +91,8 @@ class DebRecipeMarkerTests(unittest.TestCase):
                 'package main\nimport "fixture.local/xpf/pkg"\n'
                 "func main() { _ = pkg.Value }\n")
         for rel in (".gitignore", "Makefile", "debian/.gitignore",
-                    "debian/rules", "scripts/image/build_provenance.py"):
+                    "debian/rules", "scripts/image/build_provenance.py",
+                    "scripts/image/validate-build-metadata.py"):
             shutil.copy2(_ROOT / rel, self.root / rel)
         (self.root / "debian/changelog").write_text(
             "xpf (0.0.0) unstable; urgency=medium\n\n"
