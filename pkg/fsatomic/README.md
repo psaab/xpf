@@ -130,6 +130,14 @@ inject via the Store's `writeActiveFn` seam, which bypasses that wrap). It is
 test-only — production code must never call it; it mutates a process-global
 seam and is not safe under `t.Parallel`.
 
+`SetRenameFileForTesting(fn) (restore func())` (#12549) exports the rename
+seam the same way for the PRE-rename converse: the rename itself fails, the
+error is NOT `*PostRenameSyncError`, and the OLD content stays in place.
+`pkg/upgrade` uses it to fail the ARMED kernel-journal rename and prove that
+an arm whose rename never landed is still refused (journal left at ARMING),
+while the post-rename hook proves a landed ARMED write proceeds. Same
+constraints: test-only, process-global, not safe under `t.Parallel`.
+
 ## Canary (`canary_test.go`)
 
 `TestNoDirectOsWriteFile` is the writer-class enforcement test. It walks
