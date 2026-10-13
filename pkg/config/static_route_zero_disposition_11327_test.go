@@ -18,19 +18,47 @@ func TestZeroDispositionStaticWarnsAndIsExcluded_11327(t *testing.T) {
 		{name: "permit-default", set: "permit-all", want: PolicyPermit},
 	} {
 		for _, routeForm := range []struct {
-			name         string
-			extra        string
-			wantEmptyHop bool
+			name string
+			// buildRoute constructs the zero-disposition vehicle. Text forms
+			// go through strict compile; the typed form carries the shape
+			// strict compile now rejects at parse (#12818: a valueless
+			// qualified-next-hop compiles to an empty placeholder hop).
+			buildRoute func(t *testing.T, policyLine string) *Config
 		}{
-			{name: "bare route"},
-			{name: "receive action", extra: " receive"},
-			{name: "empty qualified next-hop", extra: " qualified-next-hop", wantEmptyHop: true},
+			{name: "bare route", buildRoute: func(t *testing.T, policyLine string) *Config {
+				return compileSetLinesT(t, []string{
+					"set routing-options static route 10.1.0.0/24",
+					policyLine,
+				})
+			}},
+			{name: "receive action", buildRoute: func(t *testing.T, policyLine string) *Config {
+				return compileSetLinesT(t, []string{
+					"set routing-options static route 10.1.0.0/24 receive",
+					policyLine,
+				})
+			}},
+			{
+				name: "empty qualified next-hop",
+				buildRoute: func(t *testing.T, policyLine string) *Config {
+					// Typed vehicle (same style as
+					// TestZeroDispositionStaticWarningCoversAllRouteScopes_11327):
+					// the empty-placeholder hop #12818 removed from strict
+					// compile, constructed directly so the zero-disposition
+					// contract (empty hop is not a forwarding target) is
+					// still pinned where that shape can exist.
+					cfg := compileSetLinesT(t, []string{
+						"set routing-options static route 10.1.0.0/24",
+						policyLine,
+					})
+					route := cfg.RoutingOptions.StaticRoutes[0]
+					route.NextHops = []NextHopEntry{{Address: "", Interface: ""}}
+					cfg.Warnings = append(cfg.Warnings, ValidateConfig(cfg)...)
+					return cfg
+				},
+			},
 		} {
 			t.Run(policy.name+"/"+routeForm.name, func(t *testing.T) {
-				cfg := compileSetLinesT(t, []string{
-					"set routing-options static route 10.1.0.0/24" + routeForm.extra,
-					"set security policies default-policy " + policy.set,
-				})
+				cfg := routeForm.buildRoute(t, "set security policies default-policy "+policy.set)
 				if cfg.Security.DefaultPolicy != policy.want {
 					t.Fatalf("default policy = %v, want %v", cfg.Security.DefaultPolicy, policy.want)
 				}
@@ -38,7 +66,7 @@ func TestZeroDispositionStaticWarnsAndIsExcluded_11327(t *testing.T) {
 					t.Fatalf("compiled statics = %d, want one", len(cfg.RoutingOptions.StaticRoutes))
 				}
 				route := cfg.RoutingOptions.StaticRoutes[0]
-				if routeForm.wantEmptyHop {
+				if routeForm.name == "empty qualified next-hop" {
 					if len(route.NextHops) != 1 || route.NextHops[0].Address != "" || route.NextHops[0].Interface != "" {
 						t.Fatalf("fixture is not an empty qualified next-hop: %+v", route.NextHops)
 					}

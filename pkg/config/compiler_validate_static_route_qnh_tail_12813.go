@@ -1,18 +1,24 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // validateStaticRouteQNHTails12813 rejects incomplete qualified-next-hop tails
 // left fused by the static-route compact normalizer. The normalizer extracts
 // only complete, supported clauses; residual tokens otherwise pass through
-// compilation as ordinary next-hop addresses.
+// compilation as ordinary next-hop addresses. It also rejects a valueless
+// qualified-next-hop, which strict compilation otherwise turns into an empty
+// placeholder hop that is later skipped.
 func validateStaticRouteQNHTails12813(nodes []*Node) error {
-	var walk func(nodes []*Node, parent, grandparent, greatGrandparent *Node, inStaticRoute, inStaticNextHop bool) error
-	walk = func(nodes []*Node, parent, grandparent, greatGrandparent *Node, inStaticRoute, inStaticNextHop bool) error {
+	var walk func(nodes []*Node, parent, grandparent, greatGrandparent *Node, inStaticRoute, inStaticNextHop bool, path []string) error
+	walk = func(nodes []*Node, parent, grandparent, greatGrandparent *Node, inStaticRoute, inStaticNextHop bool, path []string) error {
 		for _, node := range nodes {
 			if node == nil || len(node.Keys) == 0 {
 				continue
 			}
+			nodePath := append(path, node.KeyPath())
 			name := node.Name()
 			staticRoute := inStaticRoute || (name == "route" && isStaticRouteNode12648(parent, grandparent, greatGrandparent))
 			staticNextHop := inStaticNextHop || (name == "next-hop" && staticRoute)
@@ -27,17 +33,20 @@ func validateStaticRouteQNHTails12813(nodes []*Node) error {
 				}
 			}
 			if name == "qualified-next-hop" && inStaticRoute {
+				if len(node.Keys) < 2 && len(node.Children) == 0 {
+					return fmt.Errorf("static route %s: qualified-next-hop declares a value and none was given (#12818)", strings.Join(nodePath[:len(nodePath)-1], " "))
+				}
 				if err := validateStaticRouteQNHKeys12813(node); err != nil {
 					return err
 				}
 			}
-			if err := walk(node.Children, node, parent, grandparent, staticRoute, staticNextHop); err != nil {
+			if err := walk(node.Children, node, parent, grandparent, staticRoute, staticNextHop, nodePath); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	return walk(nodes, nil, nil, nil, false, false)
+	return walk(nodes, nil, nil, nil, false, false, nil)
 }
 
 func validateStaticRouteQNHKeys12813(node *Node) error {
