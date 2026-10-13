@@ -1962,13 +1962,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // that was never its admitting table. The #10605
                         // blanket tunneled exemption used to decline this by
                         // accident; the exemption is now explicit.
-                        // #10808: the TUN-origin REVERSE declines too. Its
-                        // stamp is deliberately (0,0) while the live native
-                        // derivation yields the tunnel's instance identity,
-                        // so every VRF reply-packet revalidation revoked the
-                        // pair it should have delivered (domain-0 pinned by
-                        // accident). Same philosophy: no admitting identity,
-                        // nothing to re-derive.
+                        // #10808: the TUN-origin REVERSE declines too. When
+                        // its stamp was (0,0), the live native derivation
+                        // (the tunnel's instance identity) mismatched it and
+                        // every VRF reply-packet revalidation revoked the
+                        // pair it should have delivered. The stamp now names
+                        // the tunnel instance's table for stale re-resolves
+                        // (#12503); that is still no admitting identity, so
+                        // the same philosophy holds: nothing to re-derive.
                         let stale_pbr_route = if foreign_arrival_zone.is_none()
                             && !tun_origin_forward(
                                 &resolved.decision,

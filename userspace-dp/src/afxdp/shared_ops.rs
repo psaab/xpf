@@ -1674,9 +1674,11 @@ pub(super) fn build_reverse_session_from_forward_match(
     if table_unresolvable {
         lookup.decision.resolution = crate::afxdp::forwarding::table_unavailable_resolution();
     }
-    // `_in_table` is also the explicit TUN-origin API; keep that generic path
-    // zero-stamped. Only the native-RI wrapper carries this identity forward
-    // into later session re-resolves.
+    // `_in_table` stays zero-stamped because it resolves in whatever table its
+    // caller names; each caller stamps that table's identity. This native-RI
+    // wrapper stamps its derived identity and the TUN-origin builders stamp
+    // their tunnel instance's (#12503), so both carry it into later session
+    // re-resolves.
     lookup.decision.install_table_domain = install_table_domain;
     lookup.decision.install_table_check = install_table_check;
     lookup
@@ -1847,8 +1849,9 @@ pub(super) fn synthesized_synced_reverse_entry(
     if table_unresolvable {
         reverse.decision.resolution = crate::afxdp::forwarding::table_unavailable_resolution();
     }
-    // Keep explicit TUN-origin `_in_table` calls zero-stamped; native RI
-    // synthesis is the only untabled wrapper that carries this identity.
+    // `_in_table` stays zero-stamped; each caller stamps the identity of the
+    // table it named: this untabled wrapper the native-RI identity, the
+    // TUN-origin builders their tunnel instance's (#12503).
     reverse.decision.install_table_domain = install_table_domain;
     reverse.decision.install_table_check = install_table_check;
     Some(reverse)

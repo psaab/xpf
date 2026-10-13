@@ -3001,6 +3001,14 @@ fn gre_tun_origin_pair_needs_no_permit_10038() {
         "GRE forward must install via the UpsertLocal path"
     );
     let gre_reverse = plan.reverse_session_entry.clone().expect("GRE reverse");
+    assert_eq!(
+        (
+            gre_reverse.decision.install_table_domain,
+            gre_reverse.decision.install_table_check,
+        ),
+        (0, 0),
+        "the default-instance reverse remains unstamped"
+    );
     assert!(
         sessions.upsert_synced_with_origin(gre_reverse.into_session_install(now_ns), true),
         "GRE reverse must install via the UpsertLocal path"
@@ -3109,6 +3117,14 @@ fn gre_tun_origin_vrf_reverse_resolves_local_10038() {
         "the GRE builder must stamp the VRF domain"
     );
     let gre_reverse = plan.reverse_session_entry.clone().expect("GRE reverse");
+    assert_eq!(
+        (
+            gre_reverse.decision.install_table_domain,
+            gre_reverse.decision.install_table_check,
+        ),
+        crate::session::install_table_identity("cust"),
+        "the VRF reverse must retain its validated table identity for stale re-resolve"
+    );
     assert_eq!(
         gre_reverse.decision.resolution.disposition,
         ForwardingDisposition::LocalDelivery,
@@ -3574,6 +3590,14 @@ fn wg_tun_origin_domain_vrf_hit_delivers_10038() {
     let fwd_key = entries.forward.key.clone();
     let rev_key = crate::session::reverse_session_key(&fwd_key, entries.forward.decision.nat);
     assert_eq!(rev_key.routing_domain, 7, "the pair must live in domain 7");
+    assert_eq!(
+        (
+            entries.reverse.as_ref().expect("reverse").decision.install_table_domain,
+            entries.reverse.as_ref().expect("reverse").decision.install_table_check,
+        ),
+        crate::session::install_table_identity("cust"),
+        "the shared VRF reverse must retain its validated table identity for stale re-resolve"
+    );
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));

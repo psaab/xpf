@@ -258,9 +258,10 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
             transport_route_mtu: 0,
         },
     );
-    // #9752 fields are inert here (0,0): Part C declines TUN-origin before
-    // any re-resolve could run in an install table (same as the synthesized
-    // precedent in `shared_ops.rs`).
+    // #9752 fields stay (0,0) on this FORWARD: it is endpoint-pinned, so a
+    // re-resolve takes the table-free tunnel arm (the tunnel rule of
+    // `install_table_stamp_for_miss`). Only the reverse below carries the
+    // tunnel instance's identity (#12503).
     let decision = SessionDecision {
         resolution,
         nat: NatDecision::default(),
@@ -321,8 +322,10 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
     };
     // Table-scoped synthesis (item 6): the reply target resolves in the
     // tunnel's instance table, so a VRF reverse finds its connected/local
-    // view instead of NoRoute-ing against inet.0.
-    let table = crate::afxdp::tunnel::tun_origin_reverse_route_table(forwarding, logical_ifindex);
+    // view instead of NoRoute-ing against inet.0. The reverse carries that
+    // table's installing identity so a stale re-resolve stays there (#12503).
+    let (table, (install_table_domain, install_table_check)) =
+        crate::afxdp::tunnel::tun_origin_reverse_route_table(forwarding, logical_ifindex);
     let mut reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry_in_table(
         forwarding,
         ha_runtime,
@@ -333,6 +336,8 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
     );
     if let Some(rev) = reverse.as_mut() {
         rev.origin = SessionOrigin::TunOrigin;
+        rev.decision.install_table_domain = install_table_domain;
+        rev.decision.install_table_check = install_table_check;
     }
     Ok(WgTunOriginEntries { forward, reverse })
 }

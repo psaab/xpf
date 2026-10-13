@@ -1093,18 +1093,16 @@ pub(super) fn tun_origin_forward(
 /// #10808: the reverse half of #10038 Part C / #10630. A TUN-origin REVERSE
 /// hit declines PBR revalidation for the same reason the forward does:
 /// self-originated runs no PBR admission, so there is no admitting route
-/// identity to re-derive. The install stamp is deliberately (0,0) (the
-/// `_in_table` zero-stamp convention — both TUN-origin builders synthesize
-/// the reverse table-scoped but identity-free) while the live native
-/// derivation yields the tunnel's instance identity, a mismatch that
-/// revoked every VRF TUN-origin pair on its first reply-packet
-/// revalidation: the solicited reply HIT, then died to
-/// `filter_revoked_sessions` instead of delivering. Domain-0 pairs pinned
-/// by accident ((0,0)==(0,0)); VRF pairs died. The decline covers both
-/// uniformly. `TunOrigin` is positive provenance (stamped only by the two
-/// TUN-origin builders, never a peer wire import), so origin + direction
-/// names exactly the synthesized solicited-reply halves — ordinary
-/// (non-TUN-origin) reverses revalidate unchanged.
+/// identity to re-derive. The builders stamp their tunnel instance's
+/// installing-table identity (the registry validates it on each re-resolve)
+/// alongside their table-scoped reverse resolution, so a stale
+/// forwarding-generation refresh can resolve in the tunnel's instance rather
+/// than accidentally falling back to the default table. This does not create
+/// an admitting PBR identity; the decline covers both default and VRF pairs.
+/// `TunOrigin` is positive provenance (stamped only by the two TUN-origin
+/// builders, never a peer wire import), so origin + direction names exactly
+/// the synthesized solicited-reply halves — ordinary (non-TUN-origin) reverses
+/// revalidate unchanged.
 pub(super) fn tun_origin_reverse(metadata: &SessionMetadata, origin: SessionOrigin) -> bool {
     origin == SessionOrigin::TunOrigin && metadata.is_reverse
 }
