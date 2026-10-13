@@ -2681,9 +2681,10 @@ type compileOpts struct {
 	// authoring order. Same doctrine as lenientPolicyCommunityRef.
 	lenientPolicyASPathRegex    bool
 	lenientPolicyCommunityRegex bool // #8449: sibling of the as-path gate; see lenientPolicyASPathRegex
-	// lenientPolicyThenOperands downgrades the compiled #12070 policy operand
-	// gate to a warning for tolerant loads; the FRR renderer independently
-	// omits invalid next-hop/prepend clauses so an existing config still boots.
+	// lenientPolicyThenOperands downgrades the compiled #12070/#12513 policy
+	// operand gate to a warning for tolerant loads; the FRR renderer
+	// independently omits invalid next-hop, prepend, local-preference, metric,
+	// metric-type, and origin clauses so an existing config still boots.
 	lenientPolicyThenOperands bool
 	// lenientPolicyReservedRedistName (#5116/#12065) downgrades the reserved
 	// route-map-suffix gate (validatePolicyReservedRedistNameStrict) from a

@@ -1,20 +1,22 @@
 // render_validate.go holds the render-side value-sanitization and
 // validation belt: it keeps a leniently-loaded / peer-synced / rolled-back
-// malformed value (router-id, cluster-id, BGP origin, or a free-text
-// field carrying an embedded newline) out of the generated frr.conf so a
-// single bad token can neither inject commands nor fail the whole managed
-// frr-reload. Commit-time validation stays strict in pkg/config; this is
-// defense-in-depth for the tolerant load / no-brick paths.
+// malformed value (router-id, cluster-id, BGP origin, route-map u32
+// attribute, or a free-text field carrying an embedded newline) out of the
+// generated frr.conf so a single bad token can neither inject commands nor
+// fail the whole managed frr-reload. Commit-time validation stays strict in
+// pkg/config; this is defense-in-depth for the tolerant load / no-brick
+// paths.
 //
 // Split out of policy_render.go (#6424) as a pure code-motion refactor;
 // the emitted frr.conf is byte-identical.
 //
 // Symbols:
 //   - sanitizeFRRValue
-//   - validRouterID, validClusterID, validBGPOrigin
+//   - validRouterID, validClusterID, validBGPOrigin, validRouteMapU32
 package frr
 
 import (
+	"math"
 	"net"
 	"net/netip"
 	"strconv"
@@ -212,4 +214,16 @@ func validBGPOrigin(s string) bool {
 		return true
 	}
 	return false
+}
+
+// validRouteMapU32 reports whether a route-map `then local-preference` or
+// `then metric` value fits the unsigned 32-bit operand of FRR's
+// `set local-preference` / `set metric`. Render-side belt for #12513: a
+// larger value fails the whole frr-reload, and a negative one renders as
+// FRR's relative `-N` form (subtract from the existing value) instead of the
+// authored absolute value. Commit-check stays strict (the schema
+// ValidateInteger(0, 4294967295) plus the compiled-term gate for packed
+// spellings); tolerant loads only warn, so the renderer omits the clause.
+func validRouteMapU32(v int) bool {
+	return v >= 0 && uint64(v) <= math.MaxUint32
 }

@@ -171,6 +171,15 @@ type PolicyTerm struct {
 	// Compiler-only state, excluded from JSON.
 	invalidASPathPrependExtra12070      bool   `json:"-"`
 	invalidASPathPrependExtraValue12070 string `json:"-"`
+	// invalidThenOperand12513 / invalidThenOperandValue12513 keep the first
+	// compact/term-line operand of a value-carrying `then` action that its
+	// typed field cannot hold: a missing operand, a policy keyword left for
+	// the main parser, a non-integer, metric-type 0, or a keyword inside a
+	// bracketed community list (#12513). The schema validates child
+	// spellings; packed Keys tails bypass that walk, so strict compilation
+	// rejects this evidence instead. Compiler-only state, excluded from JSON.
+	invalidThenOperand12513      string `json:"-"`
+	invalidThenOperandValue12513 string `json:"-"`
 	// invalidNextPolicy11780 preserves malformed packed `then next <value>`
 	// tokens long enough for strict compilation to reject them. Tolerant
 	// compilation also records Action=reject so the renderer fails closed.

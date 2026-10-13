@@ -1293,14 +1293,17 @@ step. Both are required — neither sees the other's case:
   absent — Junos regex operates on whole AS-number terms, FRR uses POSIX ERE
   over the space-separated AS string — tracked separately, not part of #4097.)
 - **The route-map and prefix-list render guards are fail-closed where values
-  have typed grammars (#4482, #10823, #12070).** #4482 extended
+  have typed grammars (#4482, #10823, #12070, #12513).** #4482 extended
   `sanitizeFRRValue` to the route-map `set community` / `set community
   additive` / `set comm-list … delete` clauses, `match community` /
   `match as-path` names, and `ip/ipv6 prefix-list … permit <prefix>` values.
   `set as-path prepend` and `set ip/ipv6 next-hop` are no longer treated as
   sanitize-on-one-line slots: #12070 validates their operands and omits an
   invalid clause with a warning instead of collapsing bad input onto an
-  FRR-invalid line. The top-level `policy-options prefix-list` and inline
+  FRR-invalid line. #12513 does the same for `set local-preference` and
+  `set metric` outside 0..4294967295 (`validRouteMapU32`): a larger value
+  fails the reload, and a negative one would read as FRR's relative `-N`
+  form. The top-level `policy-options prefix-list` and inline
   route-filter entries run through their CIDR ParseCIDR belts first (#10823 /
   #2105), so malformed values are also omitted. Other emitted free-text slots
   still sanitize control chars while preserving legitimate spaces.

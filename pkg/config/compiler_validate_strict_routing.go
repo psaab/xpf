@@ -1976,23 +1976,26 @@ func validateGenerateRoutePolicyStrict(cfg *Config) error {
 
 // validatePolicyThenOperandsStrict hard-rejects compiled policy terms whose
 // `then next-hop` or `then as-path-prepend` operands are outside the
-// FRR-renderable subset (#12070).
+// FRR-renderable subset (#12070), or whose local-preference, metric,
+// metric-type, or origin values fail their schema validators (#12513).
 //
 // Schema validation expands child-based action chains, but compact
 // `then accept ...;` and term-line `term t then accept ...;` spellings pack
 // operands onto a Keys tail the schema walker ignores. The compiler's
 // parsePolicyTermInlineKeys reads those tails into the same PolicyTerm fields
-// as the expanded forms. Empty next-hop and prepend clauses, plus whitespace-
-// only or keyword-valued prepend operands, can otherwise disappear before this
-// gate; compiler-only presence flags preserve those cases for rejection.
+// as the expanded forms. Empty next-hop and prepend clauses, whitespace-only
+// or keyword-valued prepend operands, and #12513 operands a typed field cannot
+// hold (missing, keyword, non-integer) can otherwise disappear before this
+// gate; compiler-only presence state preserves those cases for rejection.
 // Checking every compiled term validates all spellings after parsing while
 // schema validation continues to cover child-based operands. It reuses the
 // exact predicates and errors name the policy, term, leaf, and value.
 //
 // Strict on commit / commit-check; the call site downgrades to a warning on
 // the tolerant load / peer-sync path (opts.lenientPolicyThenOperands, #1960)
-// so an existing config still boots. The FRR render belt omits invalid
-// next-hop/prepend clauses on that path. Runs on the fully-compiled *Config.
+// so an existing config still boots. The FRR render belts omit invalid
+// next-hop, prepend, local-preference, metric, metric-type, and origin
+// clauses on that path. Runs on the fully-compiled *Config.
 // Mirrors validateRouteFilterMatchTypesStrict.
 func validatePolicyThenOperandsStrict(cfg *Config) error {
 	if cfg == nil || cfg.PolicyOptions.PolicyStatements == nil {
@@ -2041,6 +2044,9 @@ func validatePolicyThenOperandsStrict(cfg *Config) error {
 				return fmt.Errorf(
 					"policy-options policy-statement %q term %q then as-path-prepend: invalid value %q: AS path prepend value %q contains no ASN operands",
 					name, term.Name, "", "")
+			}
+			if err := validatePolicyThenValueOperands12513(cfg, name, term); err != nil {
+				return err
 			}
 		}
 	}

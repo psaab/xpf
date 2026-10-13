@@ -875,16 +875,29 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 			// Emit on PRESENCE, not value: local-preference 0 is a
 			// valid BGP value (maximally deprioritize a route within
 			// the AS). Gating on LocalPreference > 0 silently dropped
-			// `set local-preference 0` (#2857).
+			// `set local-preference 0` (#2857). #12513: a value outside
+			// FRR's u32 operand fails the reload, and a negative one would
+			// read as FRR's relative `-N` form; strict commit rejects both,
+			// so omit a tolerant-load value with a warning.
 			if term.HasLocalPreference {
-				fmt.Fprintf(&b, " set local-preference %d\n", term.LocalPreference)
+				if validRouteMapU32(term.LocalPreference) {
+					fmt.Fprintf(&b, " set local-preference %d\n", term.LocalPreference)
+				} else {
+					slog.Warn("frr: omitting out-of-range then local-preference value",
+						"route_map", routeMapName, "term", term.Name, "value", term.LocalPreference)
+				}
 			}
 			// Emit on PRESENCE, not value: metric/MED 0 is a valid
 			// traffic-engineering value (advertise a highly preferred
 			// route). Gating on Metric > 0 silently dropped `set metric
-			// 0` (#2847).
+			// 0` (#2847). #12513: omit an out-of-range value as above.
 			if term.HasMetric {
-				fmt.Fprintf(&b, " set metric %d\n", term.Metric)
+				if validRouteMapU32(term.Metric) {
+					fmt.Fprintf(&b, " set metric %d\n", term.Metric)
+				} else {
+					slog.Warn("frr: omitting out-of-range then metric value",
+						"route_map", routeMapName, "term", term.Name, "value", term.Metric)
+				}
 			}
 			if term.MetricType == 1 || term.MetricType == 2 {
 				fmt.Fprintf(&b, " set metric-type type-%d\n", term.MetricType)
