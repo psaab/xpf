@@ -5667,7 +5667,8 @@ impl PortAllocator {
         // The refusal itself is correct and is KEPT for the two PINNED cases;
         // only the missing retry was the defect:
         //   * `address_persistent` — the address is `sticky_pool_index(src_ip)`,
-        //     a pure function of the source. Probing on would break the
+        //     a pure function of the source within this process (#12789).
+        //     Probing on would break the
         //     `address-persistent` contract, so the sibling
         //     `reserve_address_only_roundrobin` likewise sets
         //     `address_attempts = 1` here.
