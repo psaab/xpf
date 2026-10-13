@@ -1205,7 +1205,7 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// from. applyConfigLocked takes that capture at the publication boundary;
 	// without the plan it falls back to the pre-#6948 post-apply scan, which
 	// sweeps the sessions of whichever policy inherited a deleted policy's id.
-	d.armPolicyInvalidationPlan(oldActive, prevCfg)
+	d.armPolicyInvalidationRollbackPlan(oldActive, prevCfg)
 	// #9811: latch the outcome. The log alone left the node ENFORCING the
 	// abandoned config C2 while the store, `show configuration`, the peer
 	// resync and /health all reported C1, with nothing to retry it — this is a
