@@ -106,3 +106,41 @@ func TestResolveKernelIfName_DriftGuardVsSnapshotLinuxName(t *testing.T) {
 		}
 	}
 }
+
+// #12646: pin base-before-unit snapshot emission for a unit 0 sharing the
+// base's live netdev ifindex. Rust enforces the unit's host-inbound precedence
+// independently of input order; this producer-order assertion prevents an
+// accidental wire-contract change. Fail-on-revert: moving the base append below
+// the unit loop flips the two row names.
+func TestBuildInterfaceSnapshotsEmitsBaseBeforeUnitRows_12646(t *testing.T) {
+	prev := buildLinkSnapshot
+	defer func() { buildLinkSnapshot = prev }()
+	buildLinkSnapshot = func(linuxName string) (int, int, string, []InterfaceAddressSnapshot) {
+		if linuxName == "ge-0-0-9" {
+			return 9009, 1500, "02:00:00:00:00:09", nil
+		}
+		return 0, 0, "", nil
+	}
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/9": {
+			Name: "ge-0/0/9",
+			Units: map[int]*config.InterfaceUnit{
+				0: {Number: 0},
+			},
+		},
+	}
+
+	snapshots := buildInterfaceSnapshots(cfg)
+	if len(snapshots) < 2 {
+		t.Fatalf("snapshots = %+v, want base and unit-0 rows", snapshots)
+	}
+	if got, want := []string{snapshots[0].Name, snapshots[1].Name},
+		[]string{"ge-0/0/9", "ge-0/0/9.0"}; !equalStrings(got, want) {
+		t.Fatalf("first base/unit rows = %v, want %v", got, want)
+	}
+	if snapshots[0].Ifindex <= 0 || snapshots[0].Ifindex != snapshots[1].Ifindex {
+		t.Fatalf("base/unit ifindexes = %d/%d, want same positive live ifindex",
+			snapshots[0].Ifindex, snapshots[1].Ifindex)
+	}
+}

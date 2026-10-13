@@ -3344,6 +3344,76 @@ fn same_ifindex_contest_gets_host_inbound_deny_sentinel_10503() {
         "same-ifindex contest must deny host-bound ssh rather than use None=>true"
     );
 }
+
+// #12646: base and unit-0 rows share one netdev ifindex. Go resolves their
+// per-interface overrides with a #3720 physical→unit union, so both normally
+// carry the same effective set; a drifted snapshot with DIFFERENT sets must
+// still not decide by input order. The unit is the more specific identity, so
+// its set wins in BOTH orders. Fail-on-revert: restoring the plain
+// last-writer-wins insert in forwarding_build/interfaces.rs makes unit-first
+// admit https instead of the unit's ssh.
+#[test]
+fn shared_ifindex_host_inbound_unit0_wins_in_both_row_orders_12646() {
+    use crate::afxdp::forwarding::host_inbound_admits_iface;
+
+    const SHARED: i32 = 12646;
+    const PROTO_TCP: u8 = 6;
+    let base_row = InterfaceSnapshot {
+        name: "ge-0/0/9".into(),
+        zone: "wan".into(),
+        ifindex: SHARED,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["https".into()],
+        is_unit: Some(false),
+        ..Default::default()
+    };
+    let unit_row = InterfaceSnapshot {
+        name: "ge-0/0/9.0".into(),
+        zone: "wan".into(),
+        ifindex: SHARED,
+        host_inbound_configured: true,
+        host_inbound_system_services: vec!["ssh".into()],
+        is_unit: Some(true),
+        ..Default::default()
+    };
+    for (label, interfaces) in [
+        ("base first", vec![base_row.clone(), unit_row.clone()]),
+        ("unit first", vec![unit_row.clone(), base_row.clone()]),
+    ] {
+        let snapshot = ConfigSnapshot {
+            zones: vec![any_service_zone_10503("wan", 7)],
+            interfaces,
+            ..Default::default()
+        };
+        let state = build_forwarding_state(&snapshot);
+        assert!(
+            state.ifindex_host_inbound.contains_key(&SHARED),
+            "{label}: shared ifindex must carry a per-interface host-inbound set"
+        );
+        assert!(
+            host_inbound_admits_iface(&state, SHARED, 0, PROTO_TCP, 22, false, 0),
+            "{label}: unit-0 ssh override must win on the shared ifindex"
+        );
+        assert!(
+            !host_inbound_admits_iface(&state, SHARED, 0, PROTO_TCP, 443, false, 0),
+            "{label}: base-row https set must not win on the shared ifindex"
+        );
+    }
+    let base_only = ConfigSnapshot {
+        zones: vec![any_service_zone_10503("wan", 7)],
+        interfaces: vec![base_row],
+        ..Default::default()
+    };
+    let state = build_forwarding_state(&base_only);
+    assert!(
+        host_inbound_admits_iface(&state, SHARED, 0, PROTO_TCP, 443, false, 0),
+        "base-only host-inbound override must continue to admit its configured https service"
+    );
+    assert!(
+        !host_inbound_admits_iface(&state, SHARED, 0, PROTO_TCP, 22, false, 0),
+        "base-only https override must continue to deny ssh"
+    );
+}
 // #10556 Cell 1: an addressed base can be refused by an unzoned unit sharing
 // its ifindex. The base's zone is nonempty, while the unit has no address, so
 // neither row qualifies for #5659 and the refused ifindex misses #10503.
