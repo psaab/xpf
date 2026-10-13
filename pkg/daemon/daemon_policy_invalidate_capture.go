@@ -1133,21 +1133,25 @@ func clonePolicyInvalidationCapture(capture *policyInvalidationCapture) *policyI
 // restored config still forbids (kept) and those it permits. Positional policy
 // IDs may differ at every nesting level, so each candidate is judged by the
 // stable rule key recorded when it was captured. capture itself is never
-// modified: an authority refusal later in the same capture restores the
-// original debt, which must still own every candidate. Unknown provenance,
-// colliding zone IDs, and malformed tuples are kept and therefore fail closed.
+// modified: authority refusal later in the same capture restores the original
+// debt, which must still own every candidate. All-kept results are detached
+// from capture because downstream pruning compacts slices in place. Unknown
+// provenance, colliding zone IDs, and malformed tuples are kept and fail closed.
 // permitted is nil when the restored config permits no candidate.
 func (d *Daemon) reauthorizePolicyCandidates(
 	capture *policyInvalidationCapture, restored *config.Config, preserveDefaultRematch bool,
 ) (kept, permitted *policyInvalidationCapture) {
-	if capture == nil || restored == nil {
-		return capture, nil
+	if capture == nil {
+		return nil, nil
+	}
+	if restored == nil {
+		return clonePolicyInvalidationCapture(capture), nil
 	}
 	// A StableZoneID collision makes the zone attribution of every candidate
 	// ambiguous, so nothing can be shown to be permitted.
 	zoneNames, ok := zoneNamesByID(restored)
 	if !ok {
-		return capture, nil
+		return clonePolicyInvalidationCapture(capture), nil
 	}
 	policies := dpuserspace.PoliciesByStableKey(restored)
 	feedOverlay := d.feedSnapshotsForConfig(restored)
@@ -1297,7 +1301,7 @@ func (d *Daemon) reauthorizePolicyCandidates(
 	kept.modified, permitted.modified = split(capture.modified)
 	kept.deflt, permitted.deflt = split(capture.deflt)
 	if permitted.candidateCount() == 0 {
-		return capture, nil
+		return clonePolicyInvalidationCapture(capture), nil
 	}
 	return kept, permitted
 }
