@@ -859,62 +859,16 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool,
 
 		// This is a container (or a leaf with trailing value tokens).
 		// Find or create matching node.
-		//
-		// #12508: interface filter/sampling siblings are compiled in order,
-		// so the last active sibling supplies the binding. If no active
-		// sibling exists, keep edits in the inactive statement; inside
-		// `groups`, retain first-match editing because expansion is first-wins.
 		found := false
-		if interfaceFilterSamplingSchema12508(childSchema) && path[0] != "groups" {
-			last, inactiveOnly := -1, -1
-			for k, n := range *current {
-				if n == nil || len(n.Keys) == 0 || n.Keys[0] != nodeKeys[0] {
-					continue
-				}
-				if n.Inactive {
-					if !n.IsLeaf && keysEqual(n.Keys, nodeKeys) ||
-						n.IsLeaf && keysMatch(n.Keys, nodeKeys) &&
-							len(n.Keys) > len(nodeKeys) && elidedNodeIsExactlyOneStatement(n, schema) {
-						if inactiveOnly < 0 {
-							inactiveOnly = k
-						}
-					}
-					continue
-				}
-				last = k
-			}
-			if last >= 0 {
-				n := (*current)[last]
-				if !n.IsLeaf && keysEqual(n.Keys, nodeKeys) {
-					current = &n.Children
-					found = true
-				}
-			} else if inactiveOnly >= 0 {
-				n := (*current)[inactiveOnly]
+		if interfaceFilterSamplingSchema12508(childSchema) {
+			// #12508: edit the sibling that supplies the binding.
+			if k := interfaceFilterSamplingSetTarget12508(*current, nodeKeys, schema, path[0] == "groups"); k >= 0 {
+				n := (*current)[k]
 				if n.IsLeaf {
-					// Promote a single compact inactive statement so the edit
-					// can update or add its child without activating the node.
-					oldKeys, oldQuoted, oldBracketed := n.Keys, n.KeysQuoted, n.KeysBracketed
-					child := &Node{
-						Keys:   append([]string(nil), oldKeys[len(nodeKeys):]...),
-						IsLeaf: true,
-					}
-					if len(oldQuoted) == len(oldKeys) {
-						child.setKeysQuoted(oldQuoted[len(nodeKeys):])
-					}
-					if len(oldBracketed) == len(oldKeys) {
-						child.setKeysBracketed(oldBracketed[len(nodeKeys):])
-					}
-					n.Keys = append([]string(nil), nodeKeys...)
-					n.setKeysQuoted(quotedRange(keyStart, i))
-					n.setKeysBracketed(groupedRange(keyStart, i), closed...)
-					n.IsLeaf = false
-					n.Children = []*Node{child}
+					braceCompactStatement12508(n, nodeKeys, quotedRange(keyStart, i), groupedRange(keyStart, i), closed...)
 				}
-				if !n.IsLeaf && keysEqual(n.Keys, nodeKeys) {
-					current = &n.Children
-					found = true
-				}
+				current = &n.Children
+				found = true
 			}
 		} else {
 			for _, n := range *current {
@@ -969,10 +923,38 @@ func deletePath(current *[]*Node, path []string, grouped []bool, schema *schemaN
 	if i >= len(path) {
 		return ErrPathNotFound
 	}
+
+	// #8992: before anything else at the TOP level, a fully elided stanza --
+	// `system master-password ascii-text "x";` -- is ONE node whose Keys carry
+	// the whole path, so no descent by container name can find it. Handled
+	// here rather than in the not-found branch because the elided node may sit
+	// beside a BRACED container of the same name, in which case the descent
+	// succeeds, fails deeper, and reports "no node matching <leaf>" while the
+	// elided node is never examined at all. See elided_delete_8992.go for the
+	// bound: only a node encoding exactly ONE statement is removed.
+	// #8997: at EVERY level, not just the top. An elided node can sit at any
+	// depth -- `chassis { cluster strict-session-auth; }` puts it one level
+	// down -- and restricting this to i == 0 meant a partially elided stanza
+	// was never examined. `schema` is the schema node for the CURRENT
+	// container, so the bound below is evaluated in the right scope; where the
+	// descent has dropped the schema (nil) the check is skipped, which is the
+	// conservative direction for a delete.
 	if schema != nil {
-		// Refuse a delete that would remove packed siblings before the
-		// interface filter/sampling intercept can remove all matching nodes.
-		// #8992/#8997: an elided packed run can occur at any depth.
+		// #12508: an interface filter/sampling delete removes every matching
+		// sibling, after the refusals below, instead of one node here.
+		siblingSchema := schemaChildFor(schema, path[i])
+		allSiblings := interfaceFilterSamplingSchema12508(siblingSchema)
+		if !allSiblings {
+			if idx := findElidedNodeForPath(*current, path[i:], schema); idx >= 0 {
+				*current = append((*current)[:idx], (*current)[idx+1:]...)
+				return nil
+			}
+		}
+		// The stanza IS present, elided, but packed together with at least one
+		// other statement on the same node. Removing the node would take the
+		// others with it (#3846's fail-wide), and splitting it is
+		// consumeNodeKeys work #8932 records as unfinished -- so refuse, and
+		// say which.
 		if keys := elidedPackedRunCarrying(*current, path[i:], schema); keys != nil {
 			return fmt.Errorf("%w: %q is present in an ELIDED spelling packed together "+
 				"with other statements on one line (%q), and deleting it would remove "+
@@ -980,27 +962,24 @@ func deletePath(current *[]*Node, path []string, grouped []bool, schema *schemaN
 				"(#8992, #8932)",
 				ErrPathNotFound, strings.Join(path, " "), strings.Join(keys, " "), path[len(path)-1])
 		}
-		// #9799: a later member of a bracketed group cannot be deleted alone.
+		// #9799: a LATER member of a bracketed group (`zgb` in `security-zone
+		// [ zga zgb ]`) never matched the walk below and was reported as no
+		// node. It is the same one-line group, so it gets the same guidance.
 		if keys := groupCarryingLaterMember9799(*current, path[i:]); keys != nil {
 			return fmt.Errorf("%w: %q is one member of a group written on one line (%q), and "+
 				"deleting it would remove the others too. Re-author that line with braces "+
 				"around %q, then delete it (#9799, #8992)",
 				ErrPathNotFound, strings.Join(path, " "), strings.Join(keys, " "), path[len(path)-1])
 		}
-		if childSchema := schemaChildFor(schema, path[i]); interfaceFilterSamplingSchema12508(childSchema) {
+		if allSiblings {
 			if handled, err := deleteInterfaceFilterSampling12508(
-				current, path, childSchema, i,
+				current, path, siblingSchema, i,
 			); handled {
 				return err
 			}
 		}
-		// Remove one exactly-elided statement only after the packed refusals
-		// and the interface all-sibling delete have had a chance to run.
-		if idx := findElidedNodeForPath(*current, path[i:], schema); idx >= 0 {
-			*current = append((*current)[:idx], (*current)[idx+1:]...)
-			return nil
-		}
 	}
+
 	keyword := path[i]
 
 	// Look up keyword in current schema level (#9685).
@@ -1275,8 +1254,8 @@ func removeMatchingNode(nodes *[]*Node, targetKeys []string) error {
 
 // interfaceFilterSamplingSchema12508 identifies the interface-family filter
 // and sampling nodes affected by the editor/compiler mismatch. The `groups`
-// schema reuses these pointers, so SetPath separately excludes group-body
-// paths whose apply-groups expansion follows first-sibling merge semantics.
+// schema reuses these pointers, so SetPath tells the set-target selection
+// when a group body's apply-groups expansion keeps the first sibling.
 func interfaceFilterSamplingSchema12508(candidate *schemaNode) bool {
 	if candidate == nil || schemaInterfaces == nil || schemaInterfaces.wildcard == nil {
 		return false
@@ -1293,6 +1272,84 @@ func interfaceFilterSamplingSchema12508(candidate *schemaNode) bool {
 	inet6 := family.children["inet6"]
 	return inet != nil && (candidate == inet.children["filter"] || candidate == inet.children["sampling"]) ||
 		inet6 != nil && (candidate == inet6.children["filter"] || candidate == inet6.children["sampling"])
+}
+
+// interfaceFilterSamplingSetTarget12508 returns the index of the repeated
+// filter/sampling sibling a set must edit, or -1 to append a new block.
+//
+// The compiler reads siblings in order, so the last active sibling supplies
+// the binding: a braced one is edited and a compact one is shadowed by the
+// appended block. Apply-groups expansion keeps the first group sibling
+// instead (firstWins), so there the first active braced or compact
+// single-statement sibling is edited and the caller braces a compact one in
+// place. Bare and packed leaves are skipped there, as the earlier first-block
+// walk skipped them; commit refuses a packed filter binding (#10293).
+//
+// With no active sibling, the edit stays in the inactive statement that
+// activation makes effective (the last one, or the first under groups), so
+// set never activates a deactivated binding.
+func interfaceFilterSamplingSetTarget12508(nodes []*Node, nodeKeys []string, schema *schemaNode, firstWins bool) int {
+	target, inactive, live := -1, -1, false
+	for k, n := range nodes {
+		if n == nil || len(n.Keys) == 0 || n.Keys[0] != nodeKeys[0] {
+			continue
+		}
+		editable := editableStatement12508(n, nodeKeys, schema)
+		switch {
+		case n.Inactive:
+			if editable && (inactive < 0 || !firstWins) {
+				inactive = k
+			}
+		case !firstWins:
+			live, target = true, -1
+			if editable && !n.IsLeaf {
+				target = k
+			}
+		default:
+			live = true
+			if editable && target < 0 {
+				target = k
+			}
+		}
+	}
+	if !live {
+		return inactive
+	}
+	return target
+}
+
+// editableStatement12508 reports whether n is a braced filter/sampling block
+// or a compact leaf carrying exactly one statement, which
+// braceCompactStatement12508 can brace in place.
+func editableStatement12508(n *Node, nodeKeys []string, schema *schemaNode) bool {
+	if !n.IsLeaf {
+		return keysEqual(n.Keys, nodeKeys)
+	}
+	return keysMatch(n.Keys, nodeKeys) && len(n.Keys) > len(nodeKeys) &&
+		elidedNodeIsExactlyOneStatement(n, schema)
+}
+
+// braceCompactStatement12508 rewrites a compact single-statement leaf such as
+// `filter input A;` into its braced form in place. The node keeps its sibling
+// position and inactive marker, so the edit lands where the binding is read.
+// quoted and bracketed are the set path's masks for the container keys.
+func braceCompactStatement12508(n *Node, nodeKeys []string, quoted, bracketed []bool, closed ...bool) {
+	oldKeys, oldQuoted, oldBracketed := n.Keys, n.KeysQuoted, n.KeysBracketed
+	child := &Node{
+		Keys:   append([]string(nil), oldKeys[len(nodeKeys):]...),
+		IsLeaf: true,
+	}
+	if len(oldQuoted) == len(oldKeys) {
+		child.setKeysQuoted(oldQuoted[len(nodeKeys):])
+	}
+	if len(oldBracketed) == len(oldKeys) {
+		child.setKeysBracketed(oldBracketed[len(nodeKeys):])
+	}
+	n.Keys = append([]string(nil), nodeKeys...)
+	n.setKeysQuoted(quoted)
+	n.setKeysBracketed(bracketed, closed...)
+	n.IsLeaf = false
+	n.Children = []*Node{child}
 }
 
 // deleteInterfaceFilterSampling12508 removes the compiler-visible binding

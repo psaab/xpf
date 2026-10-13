@@ -6,18 +6,18 @@ import (
 	"testing"
 )
 
+// interfaceFilterShapes12508 are the four #12508 spellings of a repeated
+// interface filter binding, with A first and B last.
+var interfaceFilterShapes12508 = []struct{ name, bindings string }{
+	{"hierarchical repeats", `filter { input A; } filter { input B; }`},
+	{"compact repeats", `filter input A; filter input B;`},
+	{"compact then block", `filter input A; filter { input B; }`},
+	{"block then compact", `filter { input A; } filter input B;`},
+}
+
 func TestInterfaceFilterEditorLastWins12508(t *testing.T) {
-	shapes := []struct {
-		name     string
-		bindings string
-	}{
-		{"hierarchical repeats", `filter { input A; } filter { input B; }`},
-		{"compact repeats", `filter input A; filter input B;`},
-		{"compact then block", `filter input A; filter { input B; }`},
-		{"block then compact", `filter { input A; } filter input B;`},
-	}
 	for _, family := range []string{"inet", "inet6"} {
-		for _, shape := range shapes {
+		for _, shape := range interfaceFilterShapes12508 {
 			family, shape := family, shape
 			t.Run(family+"/"+shape.name, func(t *testing.T) {
 				tree := interfaceFilterTree12508(t, "ge-0/0/0", family, shape.bindings)
@@ -38,15 +38,6 @@ func TestInterfaceFilterEditorLastWins12508(t *testing.T) {
 }
 
 func TestInterfaceFilterEditorDeleteAndDeactivate12508(t *testing.T) {
-	shapes := []struct {
-		name     string
-		bindings string
-	}{
-		{"hierarchical repeats", `filter { input A; } filter { input B; }`},
-		{"compact repeats", `filter input A; filter input B;`},
-		{"compact then block", `filter input A; filter { input B; }`},
-		{"block then compact", `filter { input A; } filter input B;`},
-	}
 	operations := []struct {
 		name                                  string
 		path                                  []string
@@ -64,7 +55,7 @@ func TestInterfaceFilterEditorDeleteAndDeactivate12508(t *testing.T) {
 		{"deactivate sampling output", []string{"sampling", "output"}, (*ConfigTree).DeactivatePath, "B", true, false},
 	}
 	for _, family := range []string{"inet", "inet6"} {
-		for _, shape := range shapes {
+		for _, shape := range interfaceFilterShapes12508 {
 			for _, operation := range operations {
 				family, shape, operation := family, shape, operation
 				t.Run(family+"/"+shape.name+"/"+operation.name, func(t *testing.T) {
@@ -97,6 +88,60 @@ func TestInterfaceFilterEditorDeleteAndDeactivate12508(t *testing.T) {
 			}
 		}
 	}
+}
+
+// A bare deactivate marks every sibling inactive, so the next set must edit
+// the sibling that activation makes effective again: the last one.
+func TestInterfaceFilterDeactivateSetActivate12508(t *testing.T) {
+	for _, iface := range []string{"ge-0/0/0", "lo0"} {
+		for _, family := range []string{"inet", "inet6"} {
+			for _, shape := range interfaceFilterShapes12508 {
+				iface, family, shape := iface, family, shape
+				t.Run(iface+"/"+family+"/"+shape.name, func(t *testing.T) {
+					tree := interfaceFilterTree12508(t, iface, family, shape.bindings)
+					path := []string{"interfaces", iface, "unit", "0", "family", family, "filter"}
+					if err := tree.DeactivatePath(path); err != nil {
+						t.Fatalf("DeactivatePath filter: %v", err)
+					}
+					if err := tree.SetPath(append(append([]string(nil), path...), "input", "C")); err != nil {
+						t.Fatalf("SetPath filter input C: %v", err)
+					}
+					if got := compiledFilterInput12508(t, tree, iface, family); got != "" {
+						t.Fatalf("filter after set into deactivated siblings = %q, want off", got)
+					}
+					if err := tree.ActivatePath(path); err != nil {
+						t.Fatalf("ActivatePath filter: %v", err)
+					}
+					if got := compiledFilterInput12508(t, tree, iface, family); got != "C" {
+						t.Fatalf("filter after deactivate, set C, activate = %q, want C", got)
+					}
+				})
+			}
+		}
+	}
+}
+
+// compiledFilterInput12508 returns the compiled input filter of iface unit 0.
+// For lo0 it also requires System.Lo0FilterInputV4/V6, which the lo0 filter
+// apply path consumes, to carry the same value.
+func compiledFilterInput12508(t *testing.T, tree *ConfigTree, iface, family string) string {
+	t.Helper()
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("CompileConfig: %v", err)
+	}
+	ifc := cfg.Interfaces.Interfaces[iface]
+	if ifc == nil || len(ifc.Units) != 1 || ifc.Units[0] == nil {
+		t.Fatalf("compiled interface %q has no unit 0: %#v", iface, ifc)
+	}
+	unit, lo0 := ifc.Units[0].FilterInputV4, cfg.System.Lo0FilterInputV4
+	if family == "inet6" {
+		unit, lo0 = ifc.Units[0].FilterInputV6, cfg.System.Lo0FilterInputV6
+	}
+	if iface == "lo0" && lo0 != unit {
+		t.Fatalf("lo0 %s System filter = %q, unit filter = %q", family, lo0, unit)
+	}
+	return unit
 }
 
 func TestInterfaceSamplingEditorTargetsCompilerVisibleSiblings12508(t *testing.T) {
@@ -222,13 +267,14 @@ func TestInterfaceFilterLo0Consolidation12508(t *testing.T) {
 		})
 	}
 }
+
+// Apply-groups expansion keeps the first group sibling, so group edits must
+// land there for every shape, including when an inactive sibling precedes it.
 func TestInterfaceFilterGroupsEditorPreservesFirstCompilerSibling12508(t *testing.T) {
-	shapes := []struct {
-		name, bindings string
-	}{
-		{"hierarchical repeats", `filter { input A; } filter { input B; }`},
-		{"block then compact", `filter { input A; } filter input B;`},
-	}
+	shapes := append(append([]struct{ name, bindings string }(nil), interfaceFilterShapes12508...),
+		struct{ name, bindings string }{
+			"inactive then block", `inactive: filter { input B; } filter { input A; }`,
+		})
 	operations := []struct {
 		name, want string
 		run        func(*ConfigTree, []string) error
@@ -238,6 +284,15 @@ func TestInterfaceFilterGroupsEditorPreservesFirstCompilerSibling12508(t *testin
 		}},
 		{"delete", "", (*ConfigTree).DeletePath},
 		{"deactivate", "", (*ConfigTree).DeactivatePath},
+		{"deactivate set activate", "C", func(tree *ConfigTree, path []string) error {
+			if err := tree.DeactivatePath(path); err != nil {
+				return err
+			}
+			if err := tree.SetPath(append(append([]string(nil), path...), "input", "C")); err != nil {
+				return err
+			}
+			return tree.ActivatePath(path)
+		}},
 	}
 	for _, shape := range shapes {
 		for _, operation := range operations {
@@ -259,6 +314,47 @@ func TestInterfaceFilterGroupsEditorPreservesFirstCompilerSibling12508(t *testin
 				}
 			})
 		}
+	}
+}
+
+// The #12508 delete reorder is scoped to interface filter/sampling. Elsewhere
+// an exactly-elided statement is still removed before a packed or bracketed
+// sibling can trigger a refusal.
+func TestDeleteKeepsElidedFirstOutsideFilterSampling12508(t *testing.T) {
+	tests := []struct {
+		name, text    string
+		path          []string
+		removed, kept string
+	}{
+		{
+			"packed sibling",
+			`system host-name fw1; system host-name fw2 domain-name x.example;`,
+			[]string{"system", "host-name"},
+			"host-name fw1;", "host-name fw2 domain-name x.example;",
+		},
+		{
+			"bracket group",
+			`security { zones { security-zone [ zga zgb ] { tcp-rst; } security-zone zgb tcp-rst; } }`,
+			[]string{"security", "zones", "security-zone", "zgb"},
+			"security-zone zgb tcp-rst;", "security-zone zga zgb {",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			tree := hierTree(t, test.text)
+			if before := tree.Format(); !strings.Contains(before, test.removed) ||
+				!strings.Contains(before, test.kept) {
+				t.Fatalf("fixture does not render %q and %q:\n%s", test.removed, test.kept, before)
+			}
+			if err := tree.DeletePath(test.path); err != nil {
+				t.Fatalf("DeletePath %q: %v", strings.Join(test.path, " "), err)
+			}
+			if after := tree.Format(); strings.Contains(after, test.removed) ||
+				!strings.Contains(after, test.kept) {
+				t.Fatalf("delete did not remove only the exact elided statement:\n%s", after)
+			}
+		})
 	}
 }
 
