@@ -14,6 +14,7 @@ pub(in crate::afxdp) use install_table_purge::{
 pub(in crate::afxdp) use promote::{
     SharedSessionRefs, apply_deferred_synced_promotion, apply_deferred_synced_purge,
     maybe_promote_synced_session, maybe_promote_synced_session_with_conntrack,
+    SessionHitVerdict,
 };
 /// #10507 Cell 5a test seam: command-driven Demote/Refresh funnels for
 /// cross-module poll tests (unshared map, no BPF). Production `handle_*`
@@ -3056,6 +3057,7 @@ pub(super) fn resolve_flow_session_decision(
     fabric_ingress: bool,
     ha_startup_grace_until_secs: u64,
     worker_id: u32,
+    verdict: SessionHitVerdict,
 ) -> Option<ResolvedFlowSessionDecision> {
     let mut resolved = resolve_flow_session_decision_with_conntrack(
         sessions,
@@ -3096,6 +3098,7 @@ pub(super) fn resolve_flow_session_decision(
         forwarding,
         now_ns,
         worker_id,
+        verdict,
         &mut resolved,
     );
     apply_deferred_shared_materialization(
@@ -3103,6 +3106,7 @@ pub(super) fn resolve_flow_session_decision(
         forwarding,
         now_ns,
         tcp_flags,
+        verdict,
         &mut resolved,
     );
     apply_deferred_synced_promotion(
@@ -3119,9 +3123,12 @@ pub(super) fn resolve_flow_session_decision(
         peer_worker_commands,
         empty_worker_commands_by_id(),
         forwarding,
+        verdict,
         &mut resolved,
     );
-    if let Some(revalidation) = resolved.deferred_forwarding_revalidation.take() {
+    if verdict == SessionHitVerdict::Owner
+        && let Some(revalidation) = resolved.deferred_forwarding_revalidation.take()
+    {
         if revalidation.invalidate_policy_revalidation {
             sessions.invalidate_policy_revalidation(&resolved.key);
         }
@@ -3144,8 +3151,12 @@ pub(in crate::afxdp) fn apply_deferred_shared_materialization(
     forwarding: &ForwardingState,
     now_ns: u64,
     tcp_flags: u8,
+    verdict: SessionHitVerdict,
     resolved: &mut ResolvedFlowSessionDecision,
 ) {
+    if verdict != SessionHitVerdict::Owner {
+        return;
+    }
     let Some(entry) = resolved
         .deferred_shared_materialization
         .take()
@@ -3607,6 +3618,7 @@ pub(super) fn resolve_flow_session_decision_with_conntrack(
         now_ns,
         protocol,
         tcp_flags,
+        SessionHitVerdict::Unresolved,
     );
     Some(ResolvedFlowSessionDecision {
         key: flow.forward_key.clone(),

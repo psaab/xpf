@@ -555,6 +555,7 @@ fn maybe_promote_synced_session_sets_fabric_ingress_on_fabric_hit() {
         2_000_000,
         PROTO_TCP,
         0x10,
+        SessionHitVerdict::Owner,
     );
 
     assert!(promoted.fabric_ingress);
@@ -628,6 +629,7 @@ fn promote_republishes_the_live_close_class_9412() {
             2_000_000,
             PROTO_TCP,
             0x10,
+            SessionHitVerdict::Owner,
         );
         let published = shared_sessions
             .lock()
@@ -707,6 +709,7 @@ fn promote_republishes_the_session_id_for_replicas_to_adopt_9582() {
         2_000_000,
         PROTO_TCP,
         0x10,
+        SessionHitVerdict::Owner,
     );
     assert_eq!(sessions.session_id_for(&key), PEER_ID, "FIXTURE: the promote must keep the live entry's id");
     let published = shared_sessions
@@ -783,6 +786,7 @@ fn maybe_promote_synced_session_skips_worker_local_import() {
         2_000_000,
         PROTO_TCP,
         0x10,
+        SessionHitVerdict::Owner,
     );
 
     assert_eq!(promoted, metadata);
@@ -891,28 +895,14 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
     assert!(resolved.deferred_synced_promotion.is_some());
     assert!(resolved.deferred_shared_materialization.is_some());
 
-    // #9519 foreign leg: discard both deferred effects. The shared entry and
-    // worker table remain unchanged; no peer row is materialized or promoted.
-    let deferred_promotion = resolved
-        .deferred_synced_promotion
-        .take()
-        .expect("promotion remains deferred until authority is known");
-    let deferred_materialization = resolved
-        .deferred_shared_materialization
-        .take()
-        .expect("materialization remains deferred until authority is known");
-    assert!(sessions.entry_with_origin(&key).is_none());
-    assert_eq!(
-        shared_sessions.lock().expect("shared sessions").get(&key).unwrap().origin,
-        SessionOrigin::SyncImport
-    );
-    resolved.deferred_synced_promotion = Some(deferred_promotion);
-    resolved.deferred_shared_materialization = Some(deferred_materialization);
+    // #9519 foreign leg: the mutation boundaries reject the verdict and
+    // preserve both deferred effects for a later authorized decision.
     apply_deferred_shared_materialization(
         &mut sessions,
         &forwarding,
         1_000_000,
         0x18,
+        SessionHitVerdict::Foreign,
         &mut resolved,
     );
     apply_deferred_synced_promotion(
@@ -929,6 +919,47 @@ fn resolve_flow_session_decision_promotes_stale_fabric_shared_hit_to_local_owner
         &peer_worker_commands,
         empty_worker_commands_by_id(),
         &forwarding,
+        SessionHitVerdict::Foreign,
+        &mut resolved,
+    );
+    assert!(resolved.deferred_synced_promotion.is_some());
+    assert!(resolved.deferred_shared_materialization.is_some());
+    assert!(sessions.entry_with_origin(&key).is_none());
+    assert_eq!(
+        resolved.metadata.owner_rg_id, 0,
+        "Foreign must not stamp owner metadata"
+    );
+    assert!(
+        !resolved.metadata.fabric_ingress,
+        "Foreign must not stamp fabric ingress"
+    );
+    assert_eq!(
+        shared_sessions.lock().expect("shared sessions").get(&key).unwrap().origin,
+        SessionOrigin::SyncImport
+    );
+    apply_deferred_shared_materialization(
+        &mut sessions,
+        &forwarding,
+        1_000_000,
+        0x18,
+        SessionHitVerdict::Owner,
+        &mut resolved,
+    );
+    apply_deferred_synced_promotion(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        SharedSessionRefs {
+            sessions: &shared_sessions,
+            nat_sessions: &shared_nat_sessions,
+            forward_wire_sessions: &shared_forward_wire_sessions,
+            owner_rg_indexes: &shared_owner_rg_indexes,
+        },
+        &peer_worker_commands,
+        empty_worker_commands_by_id(),
+        &forwarding,
+        SessionHitVerdict::Owner,
         &mut resolved,
     );
 
@@ -1028,28 +1059,27 @@ fn quarantined_reply_domain_not_synthesized_from_main_forward_11061() {
             dst_ip: reply_key.dst_ip,
             forward_key: reply_key,
         };
-        let resolved = resolve_flow_session_decision(
-            &mut sessions,
-            SteeringMap::unshared_for_test(-1),
-            &shared_sessions,
-            &shared_nat_sessions,
-            &shared_forward_wire_sessions,
-            &shared_owner_rg_indexes,
-            &peer_worker_commands,
-            &forwarding,
-            &ha_state,
-            &dynamic_neighbors,
-            &flow,
-            1_000_000,
-            1,
-            PROTO_TCP,
-            0x18,
-            21,
-            0,
-            true,
-            0,
-            0,
-        );
+        let resolved = resolve_flow_session_decision(&mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &flow,
+        1_000_000,
+        1,
+        PROTO_TCP,
+        0x18,
+        21,
+        0,
+        true,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner);
         assert_eq!(
             resolved.is_some(),
             expect_some,
@@ -1161,32 +1191,31 @@ fn stale_local_nat_match_does_not_resurrect_shared_alias_9991() {
         .is_none(),
         "an idle-crossed local wire alias must not fall through to its shared clone"
     );
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &forwarding,
-        &ha_state,
-        &dynamic_neighbors,
-        &SessionFlow {
-            src_ip: reply_key.src_ip,
-            dst_ip: reply_key.dst_ip,
-            forward_key: reply_key.clone(),
-        },
-        now_ns,
-        now_secs,
-        PROTO_TCP,
-        TCP_FLAG_ACK,
-        6,
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &peer_worker_commands,
+    &forwarding,
+    &ha_state,
+    &dynamic_neighbors,
+    &SessionFlow {
+        src_ip: reply_key.src_ip,
+        dst_ip: reply_key.dst_ip,
+        forward_key: reply_key.clone(),
+    },
+    now_ns,
+    now_secs,
+    PROTO_TCP,
+    TCP_FLAG_ACK,
+    6,
+    0,
+    false,
+    0,
         0,
-        false,
-        0,
-        0,
-    );
+        crate::afxdp::session_glue::SessionHitVerdict::Owner);
     assert!(
         resolved.is_none(),
         "an idle-crossed local NAT candidate must not fall through to its shared clone"
@@ -1460,32 +1489,31 @@ fn resolve_flow_syn_on_closing_tuple_preserves_pair_before_authority_10886() {
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let now_ns = 3_000_000u64;
     let ha_state = BTreeMap::from([(1, active_ha_runtime(0))]);
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &forwarding,
-        &ha_state,
-        &dynamic_neighbors,
-        &SessionFlow {
-            src_ip: forward.src_ip,
-            dst_ip: forward.dst_ip,
-            forward_key: forward.clone(),
-        },
-        now_ns,
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &peer_worker_commands,
+    &forwarding,
+    &ha_state,
+    &dynamic_neighbors,
+    &SessionFlow {
+        src_ip: forward.src_ip,
+        dst_ip: forward.dst_ip,
+        forward_key: forward.clone(),
+    },
+    now_ns,
+    0,
+    PROTO_TCP,
+    TCP_SYN,
+    6,
+    0,
+    false,
+    0,
         0,
-        PROTO_TCP,
-        TCP_SYN,
-        6,
-        0,
-        false,
-        0,
-        0,
-    );
+        crate::afxdp::session_glue::SessionHitVerdict::Owner);
     assert!(
         resolved.is_some(),
         "the low-level resolver must preserve the closing hit before authority"
@@ -3300,28 +3328,27 @@ fn resolve_flow_session_decision_uses_canonical_key_for_translated_forward_hit()
     let forwarding = ForwardingState::default();
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let peer_worker_commands = Vec::new();
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &forwarding,
-        &BTreeMap::new(),
-        &dynamic_neighbors,
-        &flow,
-        1_000_000,
-        1,
-        PROTO_TCP,
-        0x10,
-        0,
-        0, // #9383: arrival VLAN (untagged in this fixture)
-        false,
-        0,
-        0,
-    )
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &peer_worker_commands,
+    &forwarding,
+    &BTreeMap::new(),
+    &dynamic_neighbors,
+    &flow,
+    1_000_000,
+    1,
+    PROTO_TCP,
+    0x10,
+    0,
+    0, // #9383: arrival VLAN (untagged in this fixture)
+    false,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner)
     .expect("translated forward hit should resolve");
 
     assert!(!resolved.created);
@@ -3395,28 +3422,27 @@ fn resolve_flow_session_decision_promotes_translated_shared_hit_on_active_fabric
         dst_ip: translated_key.dst_ip,
         forward_key: translated_key.clone(),
     };
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &forwarding,
-        &ha_state,
-        &dynamic_neighbors,
-        &flow,
-        1_000_000,
-        1,
-        PROTO_TCP,
-        0x18,
-        21,
-        0, // #9383: arrival VLAN (untagged in this fixture)
-        true,
-        0,
-        0,
-    )
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &peer_worker_commands,
+    &forwarding,
+    &ha_state,
+    &dynamic_neighbors,
+    &flow,
+    1_000_000,
+    1,
+    PROTO_TCP,
+    0x18,
+    21,
+    0, // #9383: arrival VLAN (untagged in this fixture)
+    true,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner)
     .expect("translated shared hit should resolve");
 
     assert_eq!(
@@ -3487,28 +3513,27 @@ fn resolve_flow_session_decision_promotes_local_synced_translated_hit_on_active_
         dst_ip: translated_key.dst_ip,
         forward_key: translated_key.clone(),
     };
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &forwarding,
-        &ha_state,
-        &dynamic_neighbors,
-        &flow,
-        1_000_000,
-        1,
-        PROTO_TCP,
-        0x18,
-        21,
-        0, // #9383: arrival VLAN (untagged in this fixture)
-        true,
-        0,
-        0,
-    )
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &peer_worker_commands,
+    &forwarding,
+    &ha_state,
+    &dynamic_neighbors,
+    &flow,
+    1_000_000,
+    1,
+    PROTO_TCP,
+    0x18,
+    21,
+    0, // #9383: arrival VLAN (untagged in this fixture)
+    true,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner)
     .expect("translated local hit should resolve");
 
     assert_eq!(
@@ -3585,28 +3610,27 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         dst_ip: translated_key.dst_ip,
         forward_key: translated_key.clone(),
     };
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &forwarding,
-        &ha_state,
-        &dynamic_neighbors,
-        &flow,
-        1_000_000,
-        1,
-        PROTO_TCP,
-        0x18,
-        21,
-        0, // #9383: arrival VLAN (untagged in this fixture)
-        true,
-        0,
-        0,
-    )
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &peer_worker_commands,
+    &forwarding,
+    &ha_state,
+    &dynamic_neighbors,
+    &flow,
+    1_000_000,
+    1,
+    PROTO_TCP,
+    0x18,
+    21,
+    0, // #9383: arrival VLAN (untagged in this fixture)
+    true,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner)
     .expect("translated shared hit should resolve");
 
     // T4 branch A: a packet arriving on the fabric link is held HAInactive.
@@ -3695,28 +3719,27 @@ fn resolve_flow_session_decision_keeps_translated_shared_hit_transient_on_inacti
         dst_ip: translated_key.dst_ip,
         forward_key: translated_key.clone(),
     };
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &forwarding,
-        &ha_state,
-        &dynamic_neighbors,
-        &flow,
-        1_000_000,
-        1,
-        PROTO_TCP,
-        0x18,
-        12,
-        0, // #9383: arrival VLAN (untagged in this fixture)
-        false,
-        0,
-        0,
-    )
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &peer_worker_commands,
+    &forwarding,
+    &ha_state,
+    &dynamic_neighbors,
+    &flow,
+    1_000_000,
+    1,
+    PROTO_TCP,
+    0x18,
+    12,
+    0, // #9383: arrival VLAN (untagged in this fixture)
+    false,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner)
     .expect("translated shared hit should resolve");
 
     // T4 branch B is the actual cacheable residual: non-fabric owner ingress
@@ -3818,28 +3841,27 @@ fn resolve_flow_session_decision_keeps_local_synced_translated_hit_transient_on_
         dst_ip: translated_key.dst_ip,
         forward_key: translated_key.clone(),
     };
-    let _resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &forwarding,
-        &ha_state,
-        &dynamic_neighbors,
-        &flow,
-        1_000_000,
-        1,
-        PROTO_TCP,
-        0x18,
-        12,
-        0, // #9383: arrival VLAN (untagged in this fixture)
-        false,
-        0,
-        0,
-    )
+    let _resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &peer_worker_commands,
+    &forwarding,
+    &ha_state,
+    &dynamic_neighbors,
+    &flow,
+    1_000_000,
+    1,
+    PROTO_TCP,
+    0x18,
+    12,
+    0, // #9383: arrival VLAN (untagged in this fixture)
+    false,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner)
     .expect("translated local hit should resolve");
 
     assert!(sessions.lookup(&translated_key, 1_000_000, 0x18).is_none());
@@ -4364,28 +4386,27 @@ fn demoted_local_session_promotes_as_synced_on_failback_lookup() {
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
     let active_state = BTreeMap::from([(1, active_ha_runtime(1))]);
 
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &forwarding,
-        &active_state,
-        &dynamic_neighbors,
-        &flow,
-        2_000_000,
-        2,
-        PROTO_TCP,
-        0x10,
-        6,
-        0, // #9383: arrival VLAN (untagged in this fixture)
-        false,
-        0,
-        0,
-    )
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &peer_worker_commands,
+    &forwarding,
+    &active_state,
+    &dynamic_neighbors,
+    &flow,
+    2_000_000,
+    2,
+    PROTO_TCP,
+    0x10,
+    6,
+    0, // #9383: arrival VLAN (untagged in this fixture)
+    false,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner)
     .expect("resolved demoted session");
 
     assert!(!resolved.created);
@@ -7774,32 +7795,31 @@ fn synced_session_hit_recomputes_local_resolution_after_failover() {
         },
     )]);
 
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &forwarding,
-        &ha_state,
-        &dynamic_neighbors,
-        &SessionFlow {
-            src_ip: key.src_ip,
-            dst_ip: key.dst_ip,
-            forward_key: key.clone(),
-        },
-        1_000_000,
-        monotonic_nanos() / 1_000_000_000,
-        PROTO_TCP,
-        0x10,
-        5,
-        0, // #9383: arrival VLAN (untagged in this fixture)
-        false,
-        0,
-        0,
-    )
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &peer_worker_commands,
+    &forwarding,
+    &ha_state,
+    &dynamic_neighbors,
+    &SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    },
+    1_000_000,
+    monotonic_nanos() / 1_000_000_000,
+    PROTO_TCP,
+    0x10,
+    5,
+    0, // #9383: arrival VLAN (untagged in this fixture)
+    false,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner)
     .expect("synced session should resolve");
 
     assert_eq!(
@@ -7898,32 +7918,31 @@ fn reverse_materialized_shared_hit_adopts_replica_session_id_6313() {
     let ha_state = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
 
     for key in [&reverse, &reverse_legacy] {
-        resolve_flow_session_decision(
-            &mut sessions,
-            SteeringMap::unshared_for_test(-1),
-            &shared_sessions,
-            &shared_nat_sessions,
-            &shared_forward_wire_sessions,
-            &shared_owner_rg_indexes,
-            &peer_worker_commands,
-            &forwarding,
-            &ha_state,
-            &dynamic_neighbors,
-            &SessionFlow {
-                src_ip: key.src_ip,
-                dst_ip: key.dst_ip,
-                forward_key: key.clone(),
-            },
-            1_000_000,
-            now_secs,
-            PROTO_TCP,
-            TCP_FLAG_ACK,
-            5,
-            0, // #9383: arrival VLAN (untagged in this fixture)
-            false,
-            0,
-            0,
-        )
+        resolve_flow_session_decision(&mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &peer_worker_commands,
+        &forwarding,
+        &ha_state,
+        &dynamic_neighbors,
+        &SessionFlow {
+            src_ip: key.src_ip,
+            dst_ip: key.dst_ip,
+            forward_key: key.clone(),
+        },
+        1_000_000,
+        now_secs,
+        PROTO_TCP,
+        TCP_FLAG_ACK,
+        5,
+        0, // #9383: arrival VLAN (untagged in this fixture)
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner)
         .expect("the reverse shared-session hit should resolve");
     }
 
@@ -8807,32 +8826,31 @@ fn capped_shared_hit_fixture_10582(
             source_nat_static: None,
         },
     );
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &[],
-        &forwarding,
-        &BTreeMap::from([(1, active_ha_runtime(1_000))]),
-        &Arc::new(ShardedNeighborMap::new()),
-        &SessionFlow {
-            src_ip: key.src_ip,
-            dst_ip: key.dst_ip,
-            forward_key: key.clone(),
-        },
-        1_000_000,
-        1_000,
-        PROTO_TCP,
-        TCP_FLAG_ACK,
-        24,
-        0,
-        false,
-        0,
-        0,
-    )
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &[],
+    &forwarding,
+    &BTreeMap::from([(1, active_ha_runtime(1_000))]),
+    &Arc::new(ShardedNeighborMap::new()),
+    &SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    },
+    1_000_000,
+    1_000,
+    PROTO_TCP,
+    TCP_FLAG_ACK,
+    24,
+    0,
+    false,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner)
     .expect("at-cap shared hit should materialize");
     (forwarding, sessions, key, resolved)
 }
@@ -9102,32 +9120,31 @@ fn resolve_shared_hit_clobber_fixture_with_paths(
                 source_nat_static: None,
             },
         );
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &[],
-        &forwarding,
-        &BTreeMap::from([(1, active_ha_runtime(1_000))]),
-        &Arc::new(ShardedNeighborMap::new()),
-        &SessionFlow {
-            src_ip: wire_key.src_ip,
-            dst_ip: wire_key.dst_ip,
-            forward_key: wire_key,
-        },
-        2_000_000,
-        1_000,
-        PROTO_TCP,
-        TCP_FLAG_ACK,
-        24,
-        0,
-        false,
-        0,
-        0,
-    )
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &[],
+    &forwarding,
+    &BTreeMap::from([(1, active_ha_runtime(1_000))]),
+    &Arc::new(ShardedNeighborMap::new()),
+    &SessionFlow {
+        src_ip: wire_key.src_ip,
+        dst_ip: wire_key.dst_ip,
+        forward_key: wire_key,
+    },
+    2_000_000,
+    1_000,
+    PROTO_TCP,
+    TCP_FLAG_ACK,
+    24,
+    0,
+    false,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner)
     .expect("fabric-wire shared hit must resolve");
     (
         sessions,
@@ -9362,32 +9379,31 @@ fn resolve_shared_hit_no_incumbent_fixture_10613() -> (
                 source_nat_static: None,
             },
         );
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &[],
-        &forwarding,
-        &BTreeMap::from([(1, active_ha_runtime(1_000))]),
-        &Arc::new(ShardedNeighborMap::new()),
-        &SessionFlow {
-            src_ip: wire_key.src_ip,
-            dst_ip: wire_key.dst_ip,
-            forward_key: wire_key,
-        },
-        2_000_000,
-        1_000,
-        PROTO_TCP,
-        TCP_FLAG_ACK,
-        24,
-        0,
-        false,
-        0,
-        0,
-    )
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &[],
+    &forwarding,
+    &BTreeMap::from([(1, active_ha_runtime(1_000))]),
+    &Arc::new(ShardedNeighborMap::new()),
+    &SessionFlow {
+        src_ip: wire_key.src_ip,
+        dst_ip: wire_key.dst_ip,
+        forward_key: wire_key,
+    },
+    2_000_000,
+    1_000,
+    PROTO_TCP,
+    TCP_FLAG_ACK,
+    24,
+    0,
+    false,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner)
     .expect("no-incumbent shared hit must resolve");
     (sessions, resolved, key)
 }
@@ -9473,6 +9489,7 @@ fn sync_import_legitimate_promotion_remains_enabled_10613() {
         2_000_000,
         PROTO_TCP,
         TCP_FLAG_ACK,
+        SessionHitVerdict::Owner,
     );
     assert_eq!(promoted, metadata);
     let (_, _, origin) = sessions
@@ -15176,30 +15193,29 @@ fn drive_trunk_reply_9383(arrival_vlan: u16) -> (bool, usize) {
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let ha_state = BTreeMap::new();
 
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &forwarding,
-        &ha_state,
-        &dynamic_neighbors,
-        &flow,
-        1_000_000,
-        1,
-        PROTO_TCP,
-        TCP_FLAG_ACK,
-        // The reply arrives on the trunk PARENT — the physical bind port — which
-        // is exactly what `meta.ingress_ifindex` carries for a tagged frame.
-        TRUNK_PARENT_IFINDEX,
-        arrival_vlan,
-        false,
-        0,
-        0,
-    );
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &peer_worker_commands,
+    &forwarding,
+    &ha_state,
+    &dynamic_neighbors,
+    &flow,
+    1_000_000,
+    1,
+    PROTO_TCP,
+    TCP_FLAG_ACK,
+    // The reply arrives on the trunk PARENT — the physical bind port — which
+    // is exactly what `meta.ingress_ifindex` carries for a tagged frame.
+    TRUNK_PARENT_IFINDEX,
+    arrival_vlan,
+    false,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner);
     (resolved.is_some(), sessions.len())
 }
 
@@ -17119,6 +17135,7 @@ fn promote_skips_republish_for_stale_zone_rows_10612() {
         1_000_000,
         PROTO_TCP,
         0x10,
+        SessionHitVerdict::Owner,
     );
     let drops_after =
         crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS.load(std::sync::atomic::Ordering::Relaxed);
@@ -17604,28 +17621,27 @@ fn session_hit_reresolves_after_manager_replace_removes_snapshot_neighbor_12255(
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, active_ha_runtime(1));
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &coordinator.forwarding,
-        &ha_state,
-        &dynamic,
-        &flow,
-        2_000_000,
-        1,
-        PROTO_TCP,
-        TCP_FLAG_ACK,
-        24,
-        0,
-        false,
-        0,
-        0,
-    )
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &peer_worker_commands,
+    &coordinator.forwarding,
+    &ha_state,
+    &dynamic,
+    &flow,
+    2_000_000,
+    1,
+    PROTO_TCP,
+    TCP_FLAG_ACK,
+    24,
+    0,
+    false,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner)
     .expect("established local ForwardFlow hit");
     assert_eq!(
         resolved.decision.resolution.disposition,
@@ -17706,28 +17722,27 @@ fn established_session_re_resolves_after_fib_generation_changes_11373() {
     assert!(withdrawn_forwarding
         .neighbors
         .contains_key(&(12, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1)))));
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &withdrawn_forwarding,
-        &ha_state,
-        &dynamic_neighbors,
-        &flow,
-        2_000_000,
-        2,
-        PROTO_TCP,
-        TCP_FLAG_ACK,
-        12,
-        0,
-        false,
-        0,
-        0,
-    )
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &peer_worker_commands,
+    &withdrawn_forwarding,
+    &ha_state,
+    &dynamic_neighbors,
+    &flow,
+    2_000_000,
+    2,
+    PROTO_TCP,
+    TCP_FLAG_ACK,
+    12,
+    0,
+    false,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner)
     .expect("established session hit");
     assert_eq!(
         resolved.decision.resolution.disposition,
@@ -17753,28 +17768,27 @@ fn established_session_re_resolves_after_fib_generation_changes_11373() {
         },
         "and stamp it with the live generation"
     );
-    let local_resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &withdrawn_forwarding,
-        &ha_state,
-        &dynamic_neighbors,
-        &local_flow,
-        2_000_001,
-        2,
-        PROTO_TCP,
-        TCP_FLAG_ACK,
-        12,
-        0,
-        false,
-        0,
-        0,
-    )
+    let local_resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &peer_worker_commands,
+    &withdrawn_forwarding,
+    &ha_state,
+    &dynamic_neighbors,
+    &local_flow,
+    2_000_001,
+    2,
+    PROTO_TCP,
+    TCP_FLAG_ACK,
+    12,
+    0,
+    false,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner)
     .expect("established local-delivery session hit");
     assert_eq!(
         local_resolved.decision.resolution.disposition,
@@ -17841,28 +17855,27 @@ fn established_session_re_resolves_discard_and_next_hop_changes_11373() {
     assert!(discard_forwarding
         .neighbors
         .contains_key(&(12, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1)))));
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &discard_forwarding,
-        &ha_state,
-        &dynamic_neighbors,
-        &flow,
-        2_000_000,
-        2,
-        PROTO_TCP,
-        TCP_FLAG_ACK,
-        12,
-        0,
-        false,
-        0,
-        0,
-    )
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &peer_worker_commands,
+    &discard_forwarding,
+    &ha_state,
+    &dynamic_neighbors,
+    &flow,
+    2_000_000,
+    2,
+    PROTO_TCP,
+    TCP_FLAG_ACK,
+    12,
+    0,
+    false,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner)
     .expect("established session hit");
     assert_eq!(
         resolved.decision.resolution.disposition,
@@ -17924,28 +17937,27 @@ fn established_session_re_resolves_discard_and_next_hop_changes_11373() {
     assert!(moved_forwarding
         .neighbors
         .contains_key(&(12, IpAddr::V4(Ipv4Addr::new(172, 16, 50, 1)))));
-    let resolved = resolve_flow_session_decision(
-        &mut sessions,
-        SteeringMap::unshared_for_test(-1),
-        &shared_sessions,
-        &shared_nat_sessions,
-        &shared_forward_wire_sessions,
-        &shared_owner_rg_indexes,
-        &peer_worker_commands,
-        &moved_forwarding,
-        &ha_state,
-        &dynamic_neighbors,
-        &flow,
-        2_000_000,
-        2,
-        PROTO_TCP,
-        TCP_FLAG_ACK,
-        12,
-        0,
-        false,
-        0,
-        0,
-    )
+    let resolved = resolve_flow_session_decision(&mut sessions,
+    SteeringMap::unshared_for_test(-1),
+    &shared_sessions,
+    &shared_nat_sessions,
+    &shared_forward_wire_sessions,
+    &shared_owner_rg_indexes,
+    &peer_worker_commands,
+    &moved_forwarding,
+    &ha_state,
+    &dynamic_neighbors,
+    &flow,
+    2_000_000,
+    2,
+    PROTO_TCP,
+    TCP_FLAG_ACK,
+    12,
+    0,
+    false,
+    0,
+    0,
+    crate::afxdp::session_glue::SessionHitVerdict::Owner)
     .expect("established session hit");
     assert_eq!(
         resolved.decision.resolution.disposition,
@@ -18795,6 +18807,7 @@ fn worker_list_excludes_promoted_unbound_row_from_positional_matching_12072() {
         monotonic_nanos(),
         PROTO_TCP,
         TCP_FLAG_ACK,
+        SessionHitVerdict::Owner,
     );
     assert!(
         promoted_metadata.policy_counter.is_none(),

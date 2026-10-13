@@ -58,6 +58,13 @@ pub(in crate::afxdp::session_glue) fn should_keep_synced_hit_transient(
         && is_translated_forward_session_key(key, decision, metadata)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::afxdp) enum SessionHitVerdict {
+    Owner,
+    Foreign,
+    Unresolved,
+}
+
 /// Promote a synced session hit into a locally-owned session when
 /// the local node is now the active owner. No-op if the session is
 /// not promotable or not currently in a `ForwardCandidate` state.
@@ -85,7 +92,11 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
     now_ns: u64,
     protocol: u8,
     tcp_flags: u8,
+    verdict: SessionHitVerdict,
 ) -> SessionMetadata {
+    if verdict != SessionHitVerdict::Owner {
+        return metadata;
+    }
     if !origin.is_promotable_synced()
         || decision.resolution.disposition != ForwardingDisposition::ForwardCandidate
     {
@@ -191,6 +202,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
     now_ns: u64,
     protocol: u8,
     tcp_flags: u8,
+    verdict: SessionHitVerdict,
 ) -> SessionMetadata {
     maybe_promote_synced_session_with_conntrack(
         sessions,
@@ -209,12 +221,12 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
         now_ns,
         protocol,
         tcp_flags,
+        verdict,
     )
 }
 
 /// Apply a promotion only after the caller has established that this packet
-/// is the session's owner. The poll path invokes this after the #9519 verdict;
-/// the resolver wrapper has no packet verdict and applies it immediately.
+/// is its owner. The resolved verdict is checked again at the mutation boundary.
 pub(in crate::afxdp) fn apply_deferred_synced_promotion(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
@@ -224,8 +236,12 @@ pub(in crate::afxdp) fn apply_deferred_synced_promotion(
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     worker_commands_by_id: &WorkerCommandQueues,
     forwarding: &ForwardingState,
+    verdict: SessionHitVerdict,
     resolved: &mut ResolvedFlowSessionDecision,
 ) {
+    if verdict != SessionHitVerdict::Owner {
+        return;
+    }
     let Some(promotion) = resolved.deferred_synced_promotion.take() else {
         return;
     };
@@ -246,8 +262,10 @@ pub(in crate::afxdp) fn apply_deferred_synced_promotion(
         promotion.now_ns,
         promotion.protocol,
         promotion.tcp_flags,
+        verdict,
     );
 }
+
 
 /// Purge a translated peer-synced hit: drop the entry from the shared
 /// maps, delete the kernel session-map entry, remove the local session-table
@@ -329,8 +347,12 @@ pub(in crate::afxdp) fn apply_deferred_synced_purge(
     forwarding: &ForwardingState,
     now_ns: u64,
     worker_id: u32,
+    verdict: SessionHitVerdict,
     resolved: &mut ResolvedFlowSessionDecision,
 ) {
+    if verdict != SessionHitVerdict::Owner {
+        return;
+    }
     let Some(purge) = resolved.deferred_synced_purge.take() else {
         return;
     };

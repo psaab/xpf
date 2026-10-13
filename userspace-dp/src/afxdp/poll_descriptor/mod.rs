@@ -1915,6 +1915,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 worker_ctx.forwarding,
                                 now_ns,
                                 worker_id,
+                                crate::afxdp::session_glue::SessionHitVerdict::Owner,
                                 &mut resolved,
                             );
                             crate::afxdp::session_glue::apply_deferred_shared_materialization(
@@ -1922,6 +1923,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 worker_ctx.forwarding,
                                 now_ns,
                                 meta.tcp_flags,
+                                crate::afxdp::session_glue::SessionHitVerdict::Owner,
                                 &mut resolved,
                             );
                             crate::afxdp::session_glue::apply_deferred_synced_promotion(
@@ -1938,6 +1940,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 worker_ctx.peer_worker_commands,
                                 worker_ctx.worker_commands_by_id,
                                 worker_ctx.forwarding,
+                                crate::afxdp::session_glue::SessionHitVerdict::Owner,
                                 &mut resolved,
                             );
                         } else {
