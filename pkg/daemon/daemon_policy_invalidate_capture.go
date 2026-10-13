@@ -944,16 +944,22 @@ func (d *Daemon) retainPolicyInvalidationCaptureLocked(capture *policyInvalidati
 			}
 			// Re-authorize only obligations retained before this rollback.
 			// Fresh candidates still follow ordinary deletion/rematch policy,
-			// including default-policy log-only rematches. Remove a permitted
-			// retained identity from the merged capture so a fresh sentinel
-			// classification cannot reintroduce it as a delete.
+			// including default-policy log-only rematches. Kept candidates are
+			// denied by the rollback target and remain deletion obligations.
+			// Merge them into this capture because exact-undo capture deliberately
+			// does not carry the target's landed set; rejection must not discard
+			// them before a superseding target can re-owe the candidates.
 			if debt.rollback && debt.rollbackSource != nil {
 				changed, unconditional := defaultPolicyChanged(debt.oldCfg, debt.newCfg)
 				preserveDefaultRematch := changed && !unconditional &&
 					debt.newCfg != nil && debt.newCfg.Security.PolicyRematch
-				_, permitted := d.reauthorizePolicyCandidates(
+				kept, permitted := d.reauthorizePolicyCandidates(
 					debt.rollbackSource, debt.newCfg, preserveDefaultRematch)
 				debt.reauthorized = mergePolicyInvalidationCaptures(debt.reauthorized, permitted)
+				capture = mergePolicyInvalidationCaptures(capture, kept)
+				// Remove permitted identities from the merged capture so a
+				// fresh sentinel classification cannot reintroduce them as a
+				// delete while the rollback target remains unpublished.
 				removeReauthorizedPolicyCandidates(capture, permitted)
 			}
 			debt.capture = capture
