@@ -399,10 +399,9 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		// warning (pkg/configstore/store.go), so a config an older build
 		// persisted, or a peer sends, still loads. Strict where the operator
 		// can fix it, tolerant where refusing would brick the node.
-		// #12628: these Junos-valid, non-enforcement children are accepted
-		// opaquely. The compiler records them for a warning but does not treat
-		// them as an unknown rulebase or poison a forwarding snapshot.
-		if parent == securityPoliciesSchema12217() && nonEnforcementSecurityPoliciesChild12628(keyword) {
+		// #12628: accept only the known non-enforcement shapes. A name-only
+		// exemption would also admit a fused policy/default-policy subtree.
+		if parent == securityPoliciesSchema12217() && nonEnforcementSecurityPoliciesChild12628(node) {
 			return nil
 		}
 		if closed {
@@ -416,6 +415,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 				return &unknownSecurityPoliciesChildSchemaError12217{
 					path:    strings.Join(redactSecretPath(path), " "),
 					keyword: keyword,
+					content: securityPoliciesChildContentShape12819(node),
 				}
 			}
 			return fmt.Errorf("%s: unknown configuration keyword %q under closed-world subtree",

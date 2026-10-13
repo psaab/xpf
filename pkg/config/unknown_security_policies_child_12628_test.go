@@ -81,7 +81,7 @@ func TestPoliciesJunosValidNonEnforcementChildrenDoNotPoison12628(t *testing.T) 
 			if err != nil {
 				t.Fatalf("lenient compile: %v", err)
 			}
-			if nonEnforcementSecurityPoliciesChild12628(tc.name) {
+			if tc.name == "traceoptions" || tc.name == "policy-stats" || tc.name == "pre-id-default-policy" {
 				if len(cfg.Security.UnknownPoliciesChildren) != 1 || cfg.Security.UnknownPoliciesChildren[0] != tc.name {
 					t.Fatalf("UnknownPoliciesChildren = %v, want [%s]", cfg.Security.UnknownPoliciesChildren, tc.name)
 				}
@@ -95,7 +95,7 @@ func TestPoliciesJunosValidNonEnforcementChildrenDoNotPoison12628(t *testing.T) 
 				t.Fatal("valid permit policy lost")
 			}
 			for _, w := range cfg.Warnings {
-				if nonEnforcementSecurityPoliciesChild12628(tc.name) && !strings.Contains(w, "#12628") {
+				if (tc.name == "traceoptions" || tc.name == "policy-stats" || tc.name == "pre-id-default-policy") && !strings.Contains(w, "#12628") {
 					t.Fatalf("missing non-enforcement compatibility warning: %q", w)
 				}
 			}

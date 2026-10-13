@@ -11,6 +11,8 @@ func recordMisnestedSecurityPolicyChild12629(sec *SecurityConfig, context, keywo
 		return
 	}
 	recordUnknownSecurityPoliciesChild12217(sec, fmt.Sprintf("%s %s", context, keyword))
+	recordEnforcementSecurityPoliciesChild12819(sec, fmt.Sprintf("%s %s", context, keyword),
+		fmt.Sprintf("%s/%s", context, keyword))
 }
 
 func recordMisnestedPolicyChildren12629(sec *SecurityConfig, node *Node, expected, context string) {
