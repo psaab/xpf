@@ -1,32 +1,25 @@
 use crate::afxdp::{ForwardingDisposition, ForwardingResolution};
 use crate::nat::NatDecision;
 use crate::nat64::Nat64ReverseInfo;
-use rustc_hash::{FxHashMap, FxHashSet, FxSeededState};
+use rustc_hash::{FxHashMap, FxHashSet};
+use crate::hot_hash_seed::HotPathSeededState;
 use smallvec::SmallVec;
 use std::collections::{BTreeSet, HashMap};
 use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-/// #2364: session-index maps keyed by attacker-controllable values (the
-/// externally-chosen 5-tuple `SessionKey`, per-IP `IpAddr`) use a SEEDED
-/// FxHasher instead of the unkeyed `FxBuildHasher`. With the default
-/// unseeded hasher an off-box sender can construct keys whose buckets
-/// collide, building collision chains that amplify lookup/insert/remove
-/// CPU — and for the maps placed behind `Arc<Mutex<..>>` in
-/// `coordinator/session_manager.rs`, lock-hold time as well. The seed is
-/// the per-boot, per-process secret (`crate::hot_hash_seed`): node-local
-/// (HA sync transmits explicit keys, never hash values, so peers re-bucket
-/// under their own seed), stable for the process lifetime (so a key's
-/// bucket is consistent across the session's life), and reshuffled per
-/// restart. Cost is one extra `usize` in the BuildHasher state and a seed
-/// write per hasher — no per-packet allocation.
-type SeededKeyMap<V> = HashMap<SessionKey, V, FxSeededState>;
+/// #12603: attacker-keyed session indices use SipHash keyed by the
+/// per-process seed. FxHasher's seed is additive, so key-pair deltas are
+/// seed-independent and v6 address words permit fixed collision families.
+/// A keyed SipHash builder with explicit per-process key words preserves
+/// stable bucket placement locally while preventing offline collisions.
+type SeededKeyMap<V> = HashMap<SessionKey, V, HotPathSeededState>;
 /// #10985: per-(ingress-zone, IP) session-limit counter map. Thresholds are
 /// per-zone (`screen_profiles[zone]`), so the counts must be too — an IP-keyed
 /// map lets sessions from other zones consume this zone's allowance
 /// (cross-zone false drops). Mirrors the scan/sweep `ScanKey = (u16, IpAddr)`.
-type SeededZoneIpMap<V> = HashMap<(u16, IpAddr), V, FxSeededState>;
+type SeededZoneIpMap<V> = HashMap<(u16, IpAddr), V, HotPathSeededState>;
 
 /// #4399/#4438: the 1:N bucket type shared by ALL THREE NAT session lookup
 /// indexes — `nat_reverse_index`, `forward_wire_index`, and
@@ -44,16 +37,16 @@ type SeededZoneIpMap<V> = HashMap<(u16, IpAddr), V, FxSeededState>;
 /// handle, so the displaced session's traffic was mis-delivered (a session
 /// hijack) or (once the later session closed) dropped.
 type NatIndexBucket = SmallVec<[u32; 2]>;
-type SeededReverseIndex = HashMap<SessionKey, NatIndexBucket, FxSeededState>;
-type SeededForwardWireIndex = HashMap<SessionKey, NatIndexBucket, FxSeededState>;
-type SeededReverseTranslatedIndex = HashMap<SessionKey, NatIndexBucket, FxSeededState>;
+type SeededReverseIndex = HashMap<SessionKey, NatIndexBucket, HotPathSeededState>;
+type SeededForwardWireIndex = HashMap<SessionKey, NatIndexBucket, HotPathSeededState>;
+type SeededReverseTranslatedIndex = HashMap<SessionKey, NatIndexBucket, HotPathSeededState>;
 /// #10130/#10674: address-only index key for session-gated reply fragments.
-type SeededL3ReverseIndex = HashMap<L3ReverseKey, NatIndexBucket, FxSeededState>;
+type SeededL3ReverseIndex = HashMap<L3ReverseKey, NatIndexBucket, HotPathSeededState>;
 /// S9.4 bounds the combined native/IPsec reply-alias population per tuple.
 pub(crate) const IPSEC_INNER_ALIAS_BUCKET_BOUND: usize = 8;
 /// The alias index stores only tunnel-scoped forward candidates. Native
 /// candidates already live in `nat_reverse_index` and are merged at lookup.
-type SeededReplyAliasIndex = HashMap<SessionKey, NatIndexBucket, FxSeededState>;
+type SeededReplyAliasIndex = HashMap<SessionKey, NatIndexBucket, HotPathSeededState>;
 
 pub(crate) fn normalized_reply_alias_key(key: &SessionKey) -> SessionKey {
     SessionKey {
@@ -136,7 +129,7 @@ impl BareTupleHandleBucket {
     }
 }
 
-type SeededBareTupleIndex = HashMap<BareSessionTuple, BareTupleHandleBucket, FxSeededState>;
+type SeededBareTupleIndex = HashMap<BareSessionTuple, BareTupleHandleBucket, HotPathSeededState>;
 
 // #1047 P2: SessionKey and the key-transform helpers (forward_wire_key,
 // translated_session_key, reverse_canonical_key, reverse_wire_key,
@@ -1723,14 +1716,11 @@ impl SessionTable {
     }
 
     pub fn new() -> Self {
-        // #2364: the per-boot, per-process secret seed for the
-        // attacker-keyed session indices. Drawn once (process-global
-        // OnceLock), so every worker's SessionTable on this node shares
-        // the same seed — fine, the seed only needs to be unknowable
-        // off-box and stable within the boot, not unique per table. A
-        // `usize` truncation of the 64-bit seed is the FxSeededState width.
-        let seed = crate::hot_hash_seed::hot_path_hash_seed() as usize;
-        let state = FxSeededState::with_seed(seed);
+        // #12603: keyed SipHash placement for attacker-controlled keys.
+        // All maps share one explicit process seed pair, keeping placement
+        // stable across this process while preventing offline collision sets.
+        let seed = crate::hot_hash_seed::hot_path_hash_seed();
+        let state = HotPathSeededState::new(seed);
         Self {
             pptp: crate::session::pptp::PptpAssociations::default(),
             // Start with an empty slab and let it grow on demand.
@@ -1743,10 +1733,9 @@ impl SessionTable {
             // extent of 0, so the budgeted refresh walk is a no-op until
             // the first install bumps this via `insert_record`.
             slot_high_watermark: 0,
-            // #2364: SessionKey-keyed indices use the per-boot secret seed
-            // so attacker-chosen 5-tuples cannot construct collision chains.
-            // `state` is the shared `FxSeededState` (carries the seed; a
-            // `Clone` per map is just a `usize` copy).
+            // #2364/#12603: SessionKey-keyed indices use the per-process
+            // keyed SipHash state so attacker-chosen tuples cannot form
+            // predictable collision chains. `state` is cloned across maps.
             key_to_handle: HashMap::with_hasher(state.clone()),
             bare_tuple_index: HashMap::with_hasher(state.clone()),
             pressure_shed_openings: HashMap::with_hasher(state.clone()),
@@ -4581,7 +4570,7 @@ fn remove_owner_rg_index_entry(
 /// than hijacked or dropped. A free function (not a method) so the caller can
 /// pass disjoint `&mut` borrows of the specific index map and the counter.
 fn nat_index_bucket_push(
-    map: &mut HashMap<SessionKey, NatIndexBucket, FxSeededState>,
+    map: &mut HashMap<SessionKey, NatIndexBucket, HotPathSeededState>,
     collisions: &mut u64,
     distinct_src_collisions: &mut u64,
     entries: &slab::Slab<SessionRecord>,
@@ -4628,7 +4617,7 @@ fn nat_index_bucket_push(
 /// survivor's lookup path intact (the single-value map wiped the whole key and
 /// stranded it). No-op when the key is absent.
 fn nat_index_bucket_remove(
-    map: &mut HashMap<SessionKey, NatIndexBucket, FxSeededState>,
+    map: &mut HashMap<SessionKey, NatIndexBucket, HotPathSeededState>,
     key: &SessionKey,
     handle: u32,
 ) {

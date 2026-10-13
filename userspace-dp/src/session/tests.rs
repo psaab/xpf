@@ -8601,53 +8601,40 @@ fn run_chunked_resync(table: &mut SessionTable, chunk: usize) -> usize {
     exported
 }
 
-// ---- #2364: seeded session-index hashing --------------------------------
+// ---- #2364/#12603: seeded session-index hashing -------------------------
 
-/// The session indices are private, so assert the hardening property at
-/// the BuildHasher the maps are constructed with: `FxSeededState` over a
-/// `SessionKey` must produce a seed-dependent bucket distribution (so an
-/// attacker cannot precompute a collision chain offline) while staying
-/// stable for a fixed seed (so the live table's lookup/insert agree).
-///
-/// Fail-on-revert: the reverted state used `FxHashMap::default()`
-/// (= `FxBuildHasher`, unseeded). `FxBuildHasher::hash_one` ignores any
-/// seed, so the "distribution depends on seed" arm below would fail.
+/// Session indices use keyed SipHash over attacker-controllable keys. Test
+/// the v6 s3 family that collides under additive FxHasher for every seed.
 #[test]
-fn session_key_seeded_hash_depends_on_seed_and_is_stable() {
+fn session_key_seeded_hash_depends_on_seed_and_s3_clique_disperses_12603() {
+    use crate::hot_hash_seed::HotPathSeededState;
     use std::hash::BuildHasher;
-
-    // 256 attacker-constructible keys (one src subnet, sweeping src_port).
     let keys: Vec<SessionKey> = (0..256u16)
-        .map(|i| make_v4_key((i & 0xff) as u8, 40000u16.wrapping_add(i)))
+        .map(|i| SessionKey {
+            addr_family: libc::AF_INET6 as u8,
+            protocol: PROTO_UDP,
+            src_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, i, 0, 0, 0, 1)),
+            dst_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0x0db8, 0, 2, 0, 0, 0, 2)),
+            src_port: 40000,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        })
         .collect();
-
-    // Low bits of the hash model the open-addressing bucket the map would
-    // probe; equal vectors ⇒ identical bucket layout.
-    let dist = |seed: usize| -> Vec<u64> {
-        let state = FxSeededState::with_seed(seed);
+    let dist = |seed: u64| -> Vec<u64> {
+        let state = HotPathSeededState::new(seed);
         keys.iter().map(|k| state.hash_one(k) & 0x3ff).collect()
     };
-
-    // Stability within one seed (cache/lookup consistency).
-    let s = 0x0123_4567usize;
-    assert_eq!(dist(s), dist(s), "seeded session hash must be stable per seed");
-
-    // Seed-dependence: some seed produces a different bucket layout for the
-    // SAME key set. With the unseeded FxBuildHasher this is impossible
-    // (the seed is ignored) → fail-on-revert.
-    let reference = dist(0xA5A5_5A5A);
-    let mut diverged = false;
-    for seed in 1usize..4096 {
-        if dist(seed) != reference {
-            diverged = true;
-            break;
-        }
+    for seed in [1, 42, 0x0123_4567_89AB_CDEF, u64::MAX] {
+        let buckets: std::collections::BTreeSet<u64> = dist(seed).into_iter().collect();
+        assert!(
+            buckets.len() > 64,
+            "#12603: v6 s3 clique collapsed to {} session buckets for seed {seed:#x}",
+            buckets.len()
+        );
     }
-    assert!(
-        diverged,
-        "session-key bucket layout did not change across seeds — index hash \
-         is seed-independent (unseeded FxHashMap regression, #2364)"
-    );
+    assert_eq!(dist(42), dist(42), "hash placement must be stable per seed");
+    assert_ne!(dist(42), dist(43), "seed must change the bucket layout");
 }
 
 /// The seeded session table must still behave correctly end-to-end:
