@@ -770,8 +770,9 @@ func validatePolicyUnsupportedThenSiblings(nodes []*Node, lenient bool) ([]strin
 
 // validatePolicyEnforcementSubtrees rejects direct policy `term` and
 // `session-options` children, unknown direct children except scalar one-edit
-// `description` typos with at most one value token and no children, unresolved
-// tails on known scalar policy leaves (#12634), and Junos apply statements.
+// `description` typos with at most one value token and no children or Junos
+// apply statements, plus unresolved tails on known scalar policy leaves
+// (#12634).
 func validatePolicyEnforcementSubtrees(nodes []*Node, lenient bool) ([]string, error) {
 	var warnings []string
 	checkPolicy := func(scope, policyName string, polNode *Node) error {

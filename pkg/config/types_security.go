@@ -612,11 +612,12 @@ type Policy struct {
 	// `match` leaf (#3113, incl. #3142/#3673), an unsupported `then permit`
 	// modifier (#3114), an unrecognized `then` sibling (#11013), a DENY/REJECT
 	// referencing an undefined scheduler (#12244), an unknown direct child
-	// other than a scalar one-edit `description` typo with at most one value
-	// token and no children or a Junos apply statement (#12234), or unresolved
-	// Missing or dropped match content can widen a policy because empty match
-	// dimensions mean match-ANY; dropped policy actions or subtrees can also
-	// leave a direct permit active when the authored enforcement intent differed.
+	// except a scalar one-edit `description` typo with at most one value token
+	// and no children or a Junos apply statement (#12234), or unresolved
+	// trailing content on a known scalar policy leaf (#12634). Missing match
+	// content can widen a policy because empty match dimensions mean match-ANY;
+	// dropped policy actions or subtrees can leave a direct permit active when
+	// the authored enforcement intent differed.
 	// Strict gates reject unsupported content and strict schema
 	// validation rejects unknown policy children.
 	//
