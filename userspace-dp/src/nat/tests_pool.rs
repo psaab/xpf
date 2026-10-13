@@ -9261,24 +9261,18 @@ fn pass2_still_falls_through_a_refusing_owner_6979_f1() {
 
 // --- #7360: persistent-NAT lease reconstruction on the HA standby ------------
 //
-// THE FIXTURE IS THE WHOLE TEST, twice over.
+// The fixture uses a multi-address pool and interleaved decoy flows from a
+// second client, so the selector has genuinely made a choice before the
+// failover session is imported. The test exercises explicit lease/session
+// reconstruction; the per-process sticky hash is deliberately NOT treated as
+// an HA contract. With `address-persistent` disabled, the translated address
+// and port both have to come from the imported lease.
 //
-// (1) A SINGLE-ADDRESS pool makes an address assertion pass by construction, and
-//     under `address-persistent` the address survives a failover for free
-//     anyway — `sticky_pool_index` is a pure function of `(src_ip, pool_len)`
-//     and the standby recomputes the same hash. So the property that can
-//     actually fail is the PORT, and the address is only worth asserting on a
-//     rule WITHOUT `address-persistent`, where it genuinely varies. Every cell
-//     below uses a multi-address pool with interleaved decoy flows from a
-//     SECOND client, so a chooser that had moved on cannot return to the same
-//     slot by luck.
-//
-// (2) ONE session proves nothing. A persistent lease is shared by every flow
-//     from one client, so the defect only appears with TWO sessions sharing a
-//     translation — which is also the shape that exposes the session DROP.
+// Each case uses TWO sessions sharing one client's lease. A single session
+// would not exercise the shared-lease reconstruction or the session-drop path.
 
-/// The 4-address persistent pool both nodes run. HA requires identical config,
-/// so the standby's rule set is built from the same snapshot.
+/// The 4-address persistent pool used by each node. HA requires identical
+/// config, so the standby's rule set is built from the same snapshot.
 fn ha_persistent_rules_7360(address_persistent: bool) -> Vec<SourceNatRule> {
     persistent_pool_rules_with_options(
         300,
@@ -9421,16 +9415,15 @@ fn a_persistent_client_keeps_its_translated_port_after_failover_7360() {
     let after = expect_snat_decision(tuple_snat_lookup(&standby, 12345, "1.1.1.1", 443, 3));
     assert_eq!(
         after.rewrite_src_port, before.rewrite_src_port,
-        "the client's translated PORT must survive the failover. This is the axis \
-         that fails: under `address-persistent` the ADDRESS survives for free \
-         because `sticky_pool_index` is a pure function of (src_ip, pool_len), so \
-         asserting the address here would measure the hash rather than the repair"
+        "the client's translated PORT must survive the failover. The sticky
+         selector is process-keyed and cannot provide a cross-node mapping
+         guarantee; this assertion measures the explicitly synchronized lease"
     );
 }
 
-/// The ADDRESS, asserted on the ONLY rule shape where it can vary: no
-/// `address-persistent`, multi-address pool, decoys interleaved. Under
-/// `address-persistent` this assertion would pass with the defect present.
+/// The ADDRESS, asserted with `address-persistent` disabled to isolate the
+/// synchronized lease from the node-local keyed selector. A multi-address pool
+/// with decoys ensures the pool would otherwise make a different choice.
 #[test]
 fn a_persistent_client_keeps_its_translated_address_after_failover_7360() {
     let active = ha_persistent_rules_7360(false);
@@ -9633,22 +9626,21 @@ fn a_synced_import_conflicting_with_an_existing_lease_is_refused_7360() {
 // reverse-identity token and nothing else, so the standby held zero leases.
 //
 // THE ASSERTION AXIS INVERTS. Under `port no-translation` the client keeps its
-// own source port on the wire, so there is no translated PORT to lose — what
-// the lease pins is the ADDRESS, and the address is what moves across a
-// failover. #7360's cells call the address "the axis that survives for free";
-// here it is the entire property.
+// own source port on the wire, so there is no translated PORT to lose. The
+// lease must pin the ADDRESS through failover; this is not provided by the
+// process-local sticky selector.
 //
 // So the fixture must be a MULTI-ADDRESS pool with `address-persistent` OFF and
-// interleaved decoys. With one pool address, or with `address-persistent` on
-// (where `sticky_pool_index` is a pure function of `(src_ip, pool_len)` and the
-// standby recomputes the same slot), the assertion passes by construction and
-// measures nothing.
+// interleaved decoys: this isolates synchronized address-lease reconstruction.
+// The keyed sticky selector is per-process and provides no independent-node
+// guarantee, so hash-only recomputation is not the behavior under test here.
 
-/// The 4-address `port no-translation` persistent pool both nodes run.
+/// The 4-address `port no-translation` persistent pool used by each node.
 ///
-/// `address_persistent` is a parameter only so the "this measures nothing"
-/// claim above can itself be tested (`the_same_cell_passes_under_address_persistent_8132`)
-/// rather than asserted.
+/// `address_persistent` is also covered by
+/// `same_process_address_persistent_recomputes_without_lease_8132`; that
+/// control verifies only stable recomputation under one process seed, not HA
+/// behavior between independent nodes.
 fn ha_address_only_rules_8132(address_persistent: bool) -> Vec<SourceNatRule> {
     let mut snap = persistent_pool_snapshot(
         300,
