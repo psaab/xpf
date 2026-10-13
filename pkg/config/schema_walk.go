@@ -356,6 +356,12 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	// Resolve the schema child for this keyword. Exact match first, then
 	// wildcard (instance-name slot).
 	childSchema := resolveSchemaChild(parent, keyword)
+	// Junos permits apply statements at any hierarchy level (#7029). The
+	// shared resolver handles wildcard slots, but the strict schema walk must
+	// also recognize them beneath inherited closed-world subtrees.
+	if childSchema == nil && closed && isApplyStatementKeyword(keyword) {
+		childSchema = applyStatementSchema
+	}
 	if childSchema == nil {
 		// Closed-world subtree (#4313): an unmodeled keyword here is operator
 		// garbage that would commit clean and be silently dropped. Reject it,
@@ -432,6 +438,16 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		// commits a typo under one armed subtree and requires a REJECT, so if
 		// open-world ever did become universal they would red rather than this
 		// prose quietly becoming true again.
+		return nil
+	}
+
+	// Apply statements are metadata rather than schema-owned containers.
+	// Their leaf-list names and apply-macro body are opaque to schema walk.
+	if childSchema == applyStatementSchema {
+		if len(node.Keys) < 2 && len(node.Children) == 0 {
+			return fmt.Errorf("%s: `%s` requires at least one value",
+				strings.Join(redactSecretPath(path), " "), keyword)
+		}
 		return nil
 	}
 
