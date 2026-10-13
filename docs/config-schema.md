@@ -16139,8 +16139,10 @@ The closed-world arm deliberately rejects unsupported children rather than
 silently dropping them. `apply-groups-except` and `apply-macro` inside this
 subtree are currently rejected by the shared walker; this known Junos
 compatibility gap is tracked as #12635. A weekday packed onto the scheduler
-line (`scheduler S monday { ... }`) is not validated as a day window and
-remains a known input-shape gap (#12636).
+line (`scheduler S monday { ... }`) is rejected by strict validation
+(#12636): the compiler consumes scheduler properties only as children and
+silently dropped that weekday otherwise. Put weekday windows inside the
+scheduler block.
 
 Scheduler-level Junos inline pairs are accepted: `start-time X stop-time Y`
 and `start-date X stop-date Y`. Their start-leaf tail validators accept only
