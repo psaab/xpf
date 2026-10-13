@@ -53,11 +53,10 @@
 //! ownerless and delete it after a publish landed in between. A claim is recorded only
 //! after its write succeeded.
 
-use std::hash::{Hash, Hasher};
+use std::hash::BuildHasher;
 use std::io;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
-use rustc_hash::FxHasher;
 use smallvec::SmallVec;
 
 use crate::afxdp::types::FastMap;
@@ -67,10 +66,9 @@ use crate::session::SessionKey;
 pub(crate) type SteeringRow = [u8; 40];
 
 const NUM_SHARDS: usize = 64;
-const SHARD_BITS: u32 = NUM_SHARDS.trailing_zeros();
 const _: () = assert!(
     NUM_SHARDS.is_power_of_two(),
-    "shard selection takes the top bits of the hash"
+    "shard selection masks keyed hash bits"
 );
 const _: () = assert!(
     crate::nat::MAX_NAT_HOLDER_WORKERS == u128::BITS,
@@ -205,50 +203,30 @@ impl Default for SteeringRowOwners {
     }
 }
 
-/// Per-process seed for shard selection. As with the neighbour map (#7752), a fixed
-/// public hash would let chosen tuples be precomputed into ONE shard. There is no
-/// per-shard cap here, so the cost would be lock contention on connection setup, not
-/// refusal; the seed removes the offline precomputation all the same.
-static SHARD_SEED: LazyLock<u64> = LazyLock::new(|| {
-    let mut b = [0u8; 8];
-    if getrandom::getrandom(&mut b).is_ok() {
-        return u64::from_ne_bytes(b);
-    }
-    eprintln!(
-        "xpf-dp: getrandom failed seeding the steering-row owner shard index; falling \
-         back to a process-varying seed (#9560)"
-    );
-    let mut h = FxHasher::default();
-    h.write_u32(std::process::id());
-    h.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos()),
-    );
-    h.finish()
-});
+/// Seeded keyed-SipHash selection prevents offline shard targeting (#12794).
+static SHARD_SEED: LazyLock<u64> =
+    LazyLock::new(crate::hot_hash_seed::hot_path_hash_seed);
 
-fn seeded_hasher() -> FxHasher {
-    let mut hasher = FxHasher::default();
-    hasher.write_u64(*SHARD_SEED);
-    hasher
+fn shard_of(hash: u64) -> usize {
+    (hash as usize) & (NUM_SHARDS - 1)
 }
 
-fn shard_of(hasher: FxHasher) -> usize {
-    let mixed = hasher.finish().wrapping_mul(0x9E3779B97F4A7C15);
-    (mixed >> (64 - SHARD_BITS)) as usize
+fn row_shard_idx_with(seed: u64, row: &SteeringRow) -> usize {
+    let state = crate::hot_hash_seed::HotPathSeededState::new(seed);
+    shard_of(state.hash_one(row))
+}
+
+fn key_shard_idx_with(seed: u64, key: &SessionKey) -> usize {
+    let state = crate::hot_hash_seed::HotPathSeededState::new(seed);
+    shard_of(state.hash_one(key))
 }
 
 fn row_shard_idx(row: &SteeringRow) -> usize {
-    let mut hasher = seeded_hasher();
-    hasher.write(row);
-    shard_of(hasher)
+    row_shard_idx_with(*SHARD_SEED, row)
 }
 
 fn key_shard_idx(key: &SessionKey) -> usize {
-    let mut hasher = seeded_hasher();
-    key.hash(&mut hasher);
-    shard_of(hasher)
+    key_shard_idx_with(*SHARD_SEED, key)
 }
 
 fn lock<T>(shard: &PaddedShard<T>) -> MutexGuard<'_, T> {
@@ -846,5 +824,30 @@ mod tests {
         .join();
         publish(&owners, &key(0, 1000), W0, &[22]);
         assert_eq!(release(&owners, &key(0, 1000), W0, &[22]), vec![22]);
+    }
+
+    #[test]
+    fn keyed_shards_disperse_and_depend_on_seed_12794() {
+        let rows: Vec<SteeringRow> = (0..256u16)
+            .map(|i| {
+                let mut r = [0u8; 40];
+                r[14..16].copy_from_slice(&i.to_be_bytes());
+                r
+            })
+            .collect();
+        let assignment = |seed| rows.iter().map(|r| row_shard_idx_with(seed, r)).collect::<Vec<_>>();
+        for seed in [1u64, 42, 0x0123_4567_89AB_CDEF, u64::MAX] {
+            let distinct: std::collections::BTreeSet<_> =
+                rows.iter().map(|r| row_shard_idx_with(seed, r)).collect();
+            assert!(
+                distinct.len() > 32,
+                "#12794: steering row clique collapsed to {} shards under seed {seed:#x}",
+                distinct.len()
+            );
+        }
+        assert_eq!(assignment(42), assignment(42));
+        assert_ne!(assignment(42), assignment(43));
+        assert_eq!(row_shard_idx_with(42, &row(1)), 3, "pinned row shard");
+        assert_eq!(key_shard_idx_with(42, &key(1, 1000)), 40, "pinned key shard");
     }
 }

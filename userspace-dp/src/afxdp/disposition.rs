@@ -326,21 +326,35 @@ fn exception_sample_key(
     exception_sample_key_parts(reason, "", meta, debug)
 }
 
-/// Sampler key over (reason ++ suffix, 5-tuple). Hashing the base reason and
-/// the `'static` suffix as two adjacent parts (rather than a joined `String`)
-/// keeps the record path alloc-free while still giving each distinct
-/// `(base, suffix)` its own dedup key — e.g. `slow_path` + `_rate_limited`
-/// and `slow_path` + `_queue_full` sample independently, exactly as the old
-/// `format!`-joined reasons did (#6101). Passing `suffix == ""` reproduces
-/// the plain `exception_sample_key` hash byte-for-byte.
+/// Sampler key over (reason ++ suffix, 5-tuple). Hashing the base reason
+/// and the `'static` suffix as two adjacent parts (rather than a joined
+/// `String`) keeps the record path alloc-free while still giving each
+/// distinct `(base, suffix)` its own dedup key (#6101). The live wrapper
+/// supplies the per-process key (#12794); the seeded core is the test seam.
 fn exception_sample_key_parts(
     reason: &str,
     suffix: &str,
     meta: Option<UserspaceDpMeta>,
     debug: Option<&ResolutionDebug>,
 ) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = rustc_hash::FxHasher::default();
+    exception_sample_key_parts_seeded(
+        reason,
+        suffix,
+        meta,
+        debug,
+        crate::hot_hash_seed::hot_path_hash_seed(),
+    )
+}
+
+fn exception_sample_key_parts_seeded(
+    reason: &str,
+    suffix: &str,
+    meta: Option<UserspaceDpMeta>,
+    debug: Option<&ResolutionDebug>,
+    seed: u64,
+) -> u64 {
+    use std::hash::{BuildHasher, Hash, Hasher};
+    let mut h = crate::hot_hash_seed::HotPathSeededState::new(seed).build_hasher();
     reason.hash(&mut h);
     if !suffix.is_empty() {
         suffix.hash(&mut h);
@@ -1311,6 +1325,64 @@ mod tests_5289_exception_ring {
         assert_eq!(
             reasons,
             vec!["slow_path_rate_limited", "slow_path_queue_full"]
+        );
+    }
+
+    #[test]
+fn exception_sample_key_wrapper_uses_process_seed_12794() {
+    assert_eq!(
+        exception_sample_key_parts("slow_path", "_rate_limited", None, None),
+        exception_sample_key_parts_seeded(
+            "slow_path",
+            "_rate_limited",
+            None,
+            None,
+            crate::hot_hash_seed::hot_path_hash_seed(),
+        ),
+        "live wrapper disagrees with the seeded core - the process seed is not wired"
+    );
+}
+
+#[test]
+    fn exception_sample_key_is_keyed_and_seed_sensitive_12794() {
+        let mut debug = debug_tuple();
+        let mut assignment = |seed| {
+            (0..256u16)
+                .map(|i| {
+                    debug.src_ip = Some(IpAddr::V6(Ipv6Addr::new(
+                        0x2001, 0xdb8, 0, i, 0, 0, 0, 1,
+                    )));
+                    exception_sample_key_parts_seeded(
+                        "policy_denied",
+                        "",
+                        None,
+                        Some(&debug),
+                        seed,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let keys = assignment(42);
+        let slots: std::collections::BTreeSet<_> =
+            keys.iter().map(|key| key & (EXCEPTION_GATE_SLOTS as u64 - 1)).collect();
+        assert!(
+            slots.len() > 12,
+            "#12794: v6 s3 clique occupied only {} of {} gate slots",
+            slots.len(),
+            EXCEPTION_GATE_SLOTS
+        );
+        assert_eq!(keys, assignment(42));
+        assert_ne!(keys, assignment(43));
+        assert_eq!(
+            exception_sample_key_parts_seeded(
+                "policy_denied",
+                "",
+                None,
+                Some(&debug_tuple()),
+                42,
+            ),
+            173452051336367422,
+            "pinned sampler key"
         );
     }
 }

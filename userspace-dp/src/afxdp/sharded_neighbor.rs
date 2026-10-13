@@ -8,9 +8,8 @@
 //! ## Design
 //!
 //! - 64 shards (`NUM_SHARDS = 64`). Standard choice; matches `dashmap`.
-//! - Shard hash mixes FxHash output with a Knuth multiplier so the
-//!   shard index is decorrelated from `hashbrown`'s internal bucket
-//!   selection (which uses high hash bits).
+//! - Shard selection uses the per-process keyed SipHash state shared by the
+//!   hot-path placement code, then masks to one of 64 shards (#12794).
 //! - Cache-line padding via `#[repr(align(64))]` ensures adjacent
 //!   shards do not share cache lines (false-sharing prevention).
 //! - Bulk operations via `BulkShardGuard`: locks all 64 shards in
@@ -26,8 +25,7 @@
 //!   so the safer choice is to recover-from-poison and keep forwarding.
 
 use super::types::{FastMap, FastSet, NeighborEntry};
-use rustc_hash::FxHasher;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard};
@@ -56,32 +54,28 @@ pub(super) const NUM_SHARDS: usize = 64;
 /// on-demand resolver (`insert_confirmed_if_unchanged`) bypass the cap:
 /// they install real, topology-bounded next-hops, not attacker-driven ones.
 ///
-/// Sizing and the shard-concentration residual: the shard hash (`shard_idx`,
-/// FxHash + Knuth mix) is FIXED, PUBLIC and UNKEYED. It spreads a RANDOM flood
-/// ~evenly across shards, but an attacker who PRECOMPUTES source IPs CAN
-/// concentrate them onto one shard — filling that shard's
-/// `MAX_DYNAMIC_NEIGHBORS_PER_SHARD` (2048) while the aggregate stays far below
-/// `MAX_DYNAMIC_NEIGHBORS` (131072). The cap's PRIMARY guarantees still hold
-/// under concentration: bounded memory and no all-shard serialization. The
-/// residual is that opportunistic pre-warm LEARNING of a legit neighbor whose
-/// IP hashes to a victim shard can be denied while that shard is attacker-full
-/// — but forwarding to it is NOT lost: the uncapped on-demand resolver
-/// (`insert_confirmed_if_unchanged`) still installs the real next-hop, at the
-/// cost of extra resolver round-trips. Related minor residual:
-/// `learn_pair_if_changed` refuses the WHOLE pair if EITHER key is new-at-cap,
-/// so a desynced-pair UPDATE could be dropped under concentration (vanishingly
-/// rare; resolver-recovered). A keyed/seeded shard hash would close the
-/// concentration residual if it ever matters. 2048/shard → 131072 aggregate is
-/// well above any realistic learned population (a firewall resolves neighbors
-/// for its directly-connected subnets — a /15 of on-link hosts — not the
-/// Internet).
+/// Sizing and the residual shard-concentration risk: keyed SipHash prevents an
+/// attacker from preparing a fixed address family offline and choosing its
+/// target shard. It does not remove the per-shard cap's online or operational
+/// limits. Attacker-driven dynamic learns remain bounded to
+/// `MAX_DYNAMIC_NEIGHBORS_PER_SHARD` (2048) per shard and
+/// `MAX_DYNAMIC_NEIGHBORS` (131072) in aggregate; a flood that manages to
+/// concentrate on one live shard can still consume that shard's capacity.
+/// Opportunistic pre-warm LEARNING of a legit neighbor whose IP lands on a
+/// victim-full shard can be denied, but forwarding to it is NOT lost: the
+/// uncapped on-demand resolver (`insert_confirmed_if_unchanged`) still installs
+/// the real next-hop at the cost of extra resolver round-trips. Related minor
+/// residual: `learn_pair_if_changed` refuses the WHOLE pair if EITHER key is
+/// new-at-cap, so a desynced-pair UPDATE could be dropped under concentration
+/// (rare; resolver-recovered). The aggregate cap remains far above any
+/// realistic learned population (a firewall resolves neighbors for directly
+/// connected subnets — a /15 of on-link hosts — not the Internet).
 pub(super) const MAX_DYNAMIC_NEIGHBORS_PER_SHARD: usize = 2048;
 
 /// #5673: aggregate cap on dynamically learned neighbor entries. Derived
-/// from the per-shard cap and the shard count (see
-/// `MAX_DYNAMIC_NEIGHBORS_PER_SHARD`, which also documents the
-/// shard-concentration residual on the fixed/unkeyed shard hash). Exposed
-/// for tests and any operator surface that wants to reason about the bound.
+/// from the per-shard cap and shard count (see
+/// `MAX_DYNAMIC_NEIGHBORS_PER_SHARD`, which bounds concentration even when
+/// traffic is highly skewed). Exposed for tests and operator capacity reasoning.
 pub(crate) const MAX_DYNAMIC_NEIGHBORS: usize = MAX_DYNAMIC_NEIGHBORS_PER_SHARD * NUM_SHARDS;
 
 const _: () = assert!(
@@ -244,76 +238,18 @@ pub(crate) struct ShardedNeighborMap {
     rx_learn_overwrite_refusals: AtomicU64,
 }
 
-/// Shard index for a key. The Knuth multiplier `0x9E3779B97F4A7C15`
-/// (the 64-bit golden ratio) spreads entropy into the HIGH bits of
-/// the product, so we extract the top `log2(NUM_SHARDS) = 6` bits
-/// rather than the low bits. This decorrelates shard selection from
-/// `hashbrown`'s internal SwissTable bucket selection (which also
-/// uses high hash bits) by feeding it a freshly-rotated hash, and it
-/// produces a uniform distribution for adversarial input patterns
-/// like `/24` LANs (constant ifindex + sequential last octet).
-const SHARD_BITS: u32 = NUM_SHARDS.trailing_zeros();
+/// Seeded keyed-SipHash shard selection prevents offline targeting of the
+/// per-shard learn cap (#7752/#12794). The process seed is node-local and stable
+/// for this process.
+const _: () = assert!(NUM_SHARDS.is_power_of_two());
+static SHARD_SEED: LazyLock<u64> =
+    LazyLock::new(crate::hot_hash_seed::hot_path_hash_seed);
 
-/// #7752: per-process random seed mixed into shard selection.
-///
-/// The Knuth post-multiply above closes the ACCIDENTAL clustering case — a
-/// `/24` of neighbours whose low bits are correlated still spreads across
-/// shards. It cannot close the CHOSEN-input case, because `FxHash` is a fixed
-/// public function with no per-process secret: an attacker who can pick
-/// neighbour addresses can compute, offline, a set that lands in one shard.
-///
-/// That matters here specifically because of the #5673 per-shard learn cap.
-/// With `NUM_SHARDS = 64` and `MAX_DYNAMIC_NEIGHBORS_PER_SHARD = 2048`, filling
-/// ONE shard costs 2048 entries against an aggregate capacity of 131,072 — so
-/// an unkeyed hash hands the attacker a 64x discount AND lets them choose WHICH
-/// addresses are denied, since a new learn into a full shard is refused
-/// (`prior_mac.is_none() && shard.len() >= MAX`) while updates to already-known
-/// neighbours are not. Source learning runs on RX before screen/policy
-/// admission, so an L2-adjacent host spoofing sources reaches it.
-///
-/// The seed does not make `FxHash` a keyed MAC and this is NOT claimed as
-/// cryptographic keying. What it removes is OFFLINE precomputation: without the
-/// seed an attacker must probe the live mapping, which is slow and observable,
-/// instead of arriving with a prepared address set.
-///
-/// Seeded once per process. A `getrandom` failure does not refuse to start — a
-/// firewall that will not boot because the RNG hiccuped is a worse outcome than
-/// a weaker shard seed — but the fallback is still process-varying rather than
-/// a compile-time constant, and it says so on stderr.
-static SHARD_SEED: LazyLock<u64> = LazyLock::new(|| {
-    let mut b = [0u8; 8];
-    if getrandom::getrandom(&mut b).is_ok() {
-        return u64::from_ne_bytes(b);
-    }
-    eprintln!(
-        "xpf-dp: getrandom failed seeding the neighbor shard index; falling \
-         back to a process-varying seed (#7752)"
-    );
-    let mut h = FxHasher::default();
-    std::process::id().hash(&mut h);
-    (&b as *const u8 as usize).hash(&mut h);
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-        .hash(&mut h);
-    h.finish()
-});
-
-/// The seeded shard computation is split out so its seed contribution can be
-/// tested independently; reading the process seed inside this function would
-/// make "does the seed change the mapping?" unaskable — the property
-/// would make "does the seed change the mapping?" unaskable — the property
-/// would be true by construction and unfalsifiable, which is how a guard ends
-/// up unable to notice its own subject being deleted.
 #[inline]
 fn shard_idx_with(seed: u64, key: &(i32, IpAddr)) -> usize {
-    let mut hasher = FxHasher::default();
-    hasher.write_u64(seed);
+    let mut hasher = crate::hot_hash_seed::HotPathSeededState::new(seed).build_hasher();
     key.hash(&mut hasher);
-    let h = hasher.finish();
-    let mixed = h.wrapping_mul(0x9E3779B97F4A7C15);
-    (mixed >> (64 - SHARD_BITS)) as usize
+    (hasher.finish() as usize) & (NUM_SHARDS - 1)
 }
 
 fn shard_idx(key: &(i32, IpAddr)) -> usize {
