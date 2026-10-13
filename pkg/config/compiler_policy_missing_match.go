@@ -318,6 +318,10 @@ func validatePolicyRequiredMatchStrict(nodes []*Node, lenientMissing, lenientVal
 						// Flat set: from-zone → <name> → to-zone → <name> → policy ...
 						for _, fzSub := range child.Children {
 							for _, tzNode := range fzSub.FindChildren("to-zone") {
+								if len(tzNode.Keys) >= 2 {
+									pairs = append(pairs, zonePair{fzSub.Name(), tzNode.Keys[1], tzNode})
+									continue
+								}
 								for _, tzSub := range tzNode.Children {
 									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
 								}

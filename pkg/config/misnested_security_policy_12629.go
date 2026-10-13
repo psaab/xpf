@@ -25,8 +25,9 @@ func recordMisnestedPolicyChildren12629(sec *SecurityConfig, node *Node, expecte
 }
 
 // hasPolicyIntent12629 recognizes a rule node under an unsupported context
-// spelling. The AST can either retain the `policy` node below the misspelling
-// or put the rule's match/then body directly on a misspelled policy node.
+// spelling. The AST can either retain a `policy` node below the misspelling
+// or put its `match`/`then` body directly on the misspelled node; match-only
+// policy-shaped children are surfaced too.
 // Ignore the pre-#2008 `inactive:` AST residue retained by upgrade-compat
 // tests; it is not an active policy context.
 func hasPolicyIntent12629(node *Node) bool {
@@ -37,7 +38,7 @@ func hasPolicyIntent12629(node *Node) bool {
 		return true
 	}
 	for _, child := range node.Children {
-		if child.Name() == "then" || hasPolicyIntent12629(child) {
+		if child.Name() == "then" || child.Name() == "match" || hasPolicyIntent12629(child) {
 			return true
 		}
 	}

@@ -4,29 +4,27 @@ import "fmt"
 
 // compiler_validate_strict_nested_zonepair_7523.go — #7523 and #11346.
 //
-// Two unsupported zone-pair brace spellings were accepted and silently
-// omitted: direct nesting, `from-zone X { to-zone Y { ... } }` (#7523), and
-// the mixed container/keyed spelling, `from-zone { X { to-zone Y { ... } } }`
-// (#11346). The mixed form can be interpreted as `from-zone X to-zone policy`
-// and compile an empty pair if a zone named `policy` exists; otherwise an
-// unrelated undefined-zone warning hides the malformed shape.
-//
-// Junos models one combined hierarchy, `from-zone X to-zone Y { ... }`.
+// The direct nested spelling compiles to no policy, so the strict prewalk
+// rejects it before commit. The separate #11346 mixed-key spelling
+// `from-zone { X to-zone Y { ... } }` is rejected by the keyed-context check.
+// A keyed destination node beneath a named `from-zone` child,
+// `from-zone { X { to-zone Y { ... } } }`, is supported and is intentionally
+// not rejected here.
+
+// Junos models a combined hierarchy, `from-zone X to-zone Y { ... }`.
 // xpf also supports the fully nested container spelling
-// `from-zone { X { to-zone { Y { ... } } } }`. That shape has a `from-zone`
-// node with one key and an unkeyed `to-zone` container, so neither key count
-// alone nor a recursive name-only search can distinguish it from #11346.
-//
+// `from-zone { X { to-zone { Y { ... } } } }`.
 // The relevant tree shapes are:
 //
 //	DIRECT-NESTED     Keys=[from-zone X]                children=[to-zone]
 //	COMBINED          Keys=[from-zone X to-zone Y]      children=[policy]
 //	FLAT-SET          Keys=[from-zone X to-zone Y]      children=[policy]
-//	MIXED-CONTAINER   Keys=[from-zone] -> [X] -> [to-zone Y]
+//	MIXED-KEYS        Keys=[from-zone] -> [X to-zone Y]
+//	KEYED-CHILD       Keys=[from-zone] -> [X] -> [to-zone Y]
 //	FULL-CONTAINER    Keys=[from-zone] -> [X] -> [to-zone] -> [Y]
-//
-// Reject-only on strict commit. The tolerant path retains its #1960
-// no-brick behavior and downgrades the same specific diagnostic to a warning.
+
+// Reject-only on strict commit for direct nesting. The tolerant path retains
+// its #1960 no-brick behavior and downgrades the specific diagnostic.
 func validateNestedZonePairStrict(tree *ConfigTree) error {
 	if tree == nil {
 		return nil
@@ -51,12 +49,6 @@ func validateNestedZonePairStrict(tree *ConfigTree) error {
 								to := fromNode.Keys[i+1]
 								return mixedKeyedZonePairError11346(from, to)
 							}
-						}
-						for _, sub := range fromNode.Children {
-							if sub.Name() != "to-zone" || len(sub.Keys) < 2 {
-								continue
-							}
-							return mixedKeyedZonePairError11346(from, sub.Keys[1])
 						}
 					}
 				}
@@ -89,10 +81,10 @@ func validateNestedZonePairStrict(tree *ConfigTree) error {
 
 func mixedKeyedZonePairError11346(from, to string) error {
 	return fmt.Errorf(
-		"security policies contain a MIXED zone-pair brace spelling: `to-zone %s { ... }` "+
-			"under `from-zone { %s { ... } }` is not implemented and can compile as "+
+		"security policies contain a MIXED zone-pair brace spelling: `from-zone { %s "+
+			"to-zone %s { ... } }` is not implemented and can compile as "+
 			"`from-zone %s to-zone policy` with zero policies. Write the combined "+
 			"`from-zone %s to-zone %s` form or the fully nested `from-zone { %s { "+
 			"to-zone { %s { ... } } } }` container form (#11346)",
-		to, from, from, from, to, from, to)
+		from, to, from, from, to, from, to)
 }

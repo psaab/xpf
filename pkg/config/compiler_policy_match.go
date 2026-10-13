@@ -325,6 +325,10 @@ func validatePolicyMatchLeavesStrict(nodes []*Node, lenient bool) ([]string, err
 							// context instead of inventing a pair scope. Iterate every
 							// to-zone sibling so each compiled pair is validated.
 							for _, tzNode := range fzSub.FindChildren("to-zone") {
+								if len(tzNode.Keys) >= 2 {
+									pairs = append(pairs, zonePair{fzSub.Name(), tzNode.Keys[1], tzNode})
+									continue
+								}
 								for _, tzSub := range tzNode.Children {
 									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
 								}
