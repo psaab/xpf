@@ -178,6 +178,25 @@ case "$1" in
 esac
 """)
 
+    def _shim_apt_install_rewrites_keyring_in_place(self):
+        self._shim("apt-get", """#!/bin/sh
+case "$1" in
+  update) exit 0 ;;
+  indextargets)
+    printf 'Sourcesentry: %s:1\\nSuite: stable\\nCodename: stable\\n' "$XPF_TEST_SOURCE"
+    exit 0 ;;
+  install)
+    # A truncating write through the live path (cp or a shell redirect, not
+    # dpkg's rename-over) keeps the bootstrap inode but changes its bytes
+    # (#12543). Trace the identity on both sides of the rewrite.
+    stat -c '%d:%i' "$XPF_TEST_KEYRING" >> "$XPF_TEST_IDENT_TRACE"
+    printf '%s\\n' "$XPF_TEST_PACKAGE_PAYLOAD" > "$XPF_TEST_KEYRING"
+    stat -c '%d:%i' "$XPF_TEST_KEYRING" >> "$XPF_TEST_IDENT_TRACE"
+    exit 100 ;;
+  *) exit 1 ;;
+esac
+""")
+
 
     def _run(self, body: str, *args: str, env=None):
         return subprocess.run(
@@ -348,6 +367,41 @@ do_install
         self.assertEqual(self.keyring.read_bytes(), (payload + "\n").encode())
         self.assertEqual(list(self.keyring_dir.glob(".xpf-archive-keyring.asc.*")), [])
 
+    def test_apt_in_place_rewrite_existing_key_is_left_intact_12543(self):
+        old = b"previous signed-by keyring bytes\x00\xff\n"
+        self.keyring.write_bytes(old)
+        self.before.write_bytes(old)
+        self._shim_apt_install_rewrites_keyring_in_place()
+        result, payload = self._run_apt_unpack_failure()
+        self.assertEqual(result.returncode, 100, result.stdout + result.stderr)
+        self.assertEqual(len(self.atomic_trace.read_text().splitlines()), 1)
+        trace = (self.root / "ident-trace").read_text().splitlines()
+        self.assertEqual(len(trace), 2, "ident trace must bracket the rewrite")
+        self.assertEqual(trace[0], trace[1], "in-place rewrite must keep the bootstrap inode")
+        # Same inode, other bytes: only the byte check keeps the stale backup
+        # from being restored over the rewrite.
+        self.assertEqual(self.keyring.read_bytes(), (payload + "\n").encode())
+        self.assertIn("changed after bootstrap; leaving it intact", result.stdout)
+        self.assertFalse(self.source.exists())
+        self.assertFalse(self.pin.exists())
+        self.assertEqual(list(self.keyring_dir.glob(".xpf-archive-keyring.asc.*")), [])
+
+    def test_apt_in_place_rewrite_first_install_is_left_intact_12543(self):
+        self._shim("mv", '#!/bin/sh\nexec /bin/mv "$@"\n')
+        self._shim_apt_install_rewrites_keyring_in_place()
+        result, payload = self._run_apt_unpack_failure()
+        self.assertEqual(result.returncode, 100, result.stdout + result.stderr)
+        trace = (self.root / "ident-trace").read_text().splitlines()
+        self.assertEqual(len(trace), 2, "ident trace must bracket the rewrite")
+        self.assertEqual(trace[0], trace[1], "in-place rewrite must keep the bootstrap inode")
+        # Same inode, other bytes: only the byte check keeps the first-install
+        # removal from deleting the rewrite.
+        self.assertEqual(self.keyring.read_bytes(), (payload + "\n").encode())
+        self.assertIn("changed after bootstrap; leaving it intact", result.stdout)
+        self.assertFalse(self.source.exists())
+        self.assertFalse(self.pin.exists())
+        self.assertEqual(list(self.keyring_dir.glob(".xpf-archive-keyring.asc.*")), [])
+
     def test_symlink_keyring_is_refused_without_touching_target(self):
         target = self.root / "keyring-target"
         old = b"symlink target bytes\n"
@@ -371,13 +425,21 @@ do_install
 
     def test_first_install_failure_removes_bootstrap_keyring(self):
         self.assertFalse(self.keyring.exists())
+        # Plain pass-through mv: the default stand-in compares the live path
+        # with keyring.before, which a first install never has, so it refuses
+        # the rename (exit 92) and the removal branch is never reached.
+        self._shim("mv", '#!/bin/sh\nexec /bin/mv "$@"\n')
         replacement = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nnew test key\n-----END PGP PUBLIC KEY BLOCK-----"
         script = """. "$1"; DRY=0; KEYRING="$2"; ARCHIVE_KEY="$3"
 install_keyring
+printf '%s\\n' "$ARCHIVE_KEY" | cmp -s - "$KEYRING" || exit 77
 false
 """
         result = self._run(script, self.keyring, replacement)
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        # rc 1 is the later `false`; 77 would mean the rename never put the
+        # bootstrap keyring at the live path.
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("removing new %s" % self.keyring, result.stdout)
         self.assertFalse(self.keyring.exists())
         self.assertEqual(list(self.keyring_dir.glob(".xpf-archive-keyring.asc.*")), [])
 
@@ -395,6 +457,40 @@ install_keyring
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.keyring.read_bytes(), old)
         self.assertEqual(list(self.keyring_dir.glob(".xpf-archive-keyring.asc.*")), [])
+
+    def test_identity_capture_failure_dies_before_rename_12543(self):
+        # An empty identity never matches the live path, so carrying on would
+        # keep the bootstrap key and discard the backup on any later failure.
+        # A stat that fails, or prints nothing, must stop before the rename.
+        self._shim("stat", """#!/bin/sh
+for a do
+    case "$a" in
+        "$XPF_TEST_KEYRING_DIR"/.xpf-archive-keyring.asc.tmp.*)
+            [ "$XPF_TEST_STAT_MODE" = "empty" ] && exit 0
+            exit 1 ;;
+    esac
+done
+exec /usr/bin/stat "$@"
+""")
+        replacement = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nnew test key\n-----END PGP PUBLIC KEY BLOCK-----"
+        script = """. "$1"; DRY=0; KEYRING="$2"; ARCHIVE_KEY="$3"
+install_keyring
+echo reached-after-install_keyring
+"""
+        for mode in ("fail", "empty"):
+            with self.subTest(stat=mode):
+                old = ("prior keyring survives stat %s\n" % mode).encode()
+                self.keyring.write_bytes(old)
+                self.before.write_bytes(old)
+                env = self._env()
+                env["XPF_TEST_STAT_MODE"] = mode
+                result = self._run(script, self.keyring, replacement, env=env)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("cannot record bootstrap keyring identity", result.stderr)
+                self.assertNotIn("reached-after-install_keyring", result.stdout)
+                self.assertEqual(self.keyring.read_bytes(), old)
+                self.assertEqual(self.atomic_trace.read_text(), "")
+                self.assertEqual(list(self.keyring_dir.glob(".xpf-archive-keyring.asc.*")), [])
 
     def test_interrupt_signals_run_exit_rollback(self):
         replacement = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nnew test key\n-----END PGP PUBLIC KEY BLOCK-----"
@@ -436,6 +532,36 @@ exec /bin/sleep "$@"
                     if proc.poll() is None:
                         os.killpg(proc.pid, signal.SIGKILL)
                         proc.communicate(timeout=10)
+
+    def test_signal_during_keyring_rename_restores_previous_keyring_12543(self):
+        # The signals above land after install_keyring returned. This one lands
+        # while mv runs, so the identity must already be on record: otherwise
+        # the bootstrap key stays and the backup is discarded.
+        old = b"keyring before rename-window signal\n"
+        self.keyring.write_bytes(old)
+        self.before.write_bytes(old)
+        self._shim("mv", """#!/bin/sh
+if [ "$#" -eq 3 ] && [ "$1" = "-f" ] && [ "$3" = "$XPF_TEST_KEYRING" ]; then
+    case "$2" in
+        "$XPF_TEST_KEYRING_DIR"/.xpf-archive-keyring.asc.tmp.*)
+            /bin/mv "$@" || exit $?
+            kill -TERM "$PPID"
+            exit 0 ;;
+    esac
+fi
+exec /bin/mv "$@"
+""")
+        replacement = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nnew test key\n-----END PGP PUBLIC KEY BLOCK-----"
+        script = """. "$1"; DRY=0; KEYRING="$2"; ARCHIVE_KEY="$3"
+install_keyring
+echo reached-after-install_keyring
+"""
+        result = self._run(script, self.keyring, replacement)
+        self.assertEqual(result.returncode, 143, result.stdout + result.stderr)
+        self.assertNotIn("reached-after-install_keyring", result.stdout)
+        self.assertIn("restoring previous %s" % self.keyring, result.stdout)
+        self.assertEqual(self.keyring.read_bytes(), old)
+        self.assertEqual(list(self.keyring_dir.glob(".xpf-archive-keyring.asc.*")), [])
 
 
 

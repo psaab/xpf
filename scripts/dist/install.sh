@@ -80,9 +80,14 @@ SRC=/etc/apt/sources.list.d/xpf.sources
 PIN=/etc/apt/preferences.d/xpf-channel.pref
 PIN_MARKER="# xpf appliance channel pin; Managed by install.sh (#11133)"
 
-# cleanup_on_fail removes the apt source written by this run, restores the
-# prior managed channel pin, and restores the keyring only while its live bytes
-# still match this installer's write. An unmarked preference is never changed.
+# cleanup_on_fail removes the apt source written by this run and restores the
+# prior managed channel pin. It rolls the keyring back (restores the previous
+# file, or removes the bootstrap write on first install) only while the live
+# path is still this installer's object: the device:inode recorded before the
+# rename AND the bytes it wrote (#12543). Equal bytes on a new inode (a dpkg
+# unpack renames over the path) and new bytes on the same inode (an in-place
+# rewrite) are both left intact, and the backup is discarded. An unmarked
+# preference is never changed.
 cleanup_on_fail() {
     _rc=$?
     if [ "$INSTALL_OK" != "1" ] && [ "$DRY" != "1" ]; then
