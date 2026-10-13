@@ -15,6 +15,8 @@ func TestPackedStaticRouteNextHopAndQualifiedNextHop_12648(t *testing.T) {
 	packed := hierTree(t, `routing-options { static { route 10.5.0.0/16 next-hop 10.0.0.1 qualified-next-hop 10.0.0.2 preference 250; } }`)
 	unpacked := hierTree(t, `routing-options { static { route 10.5.0.0/16 { next-hop 10.0.0.1; qualified-next-hop 10.0.0.2 { preference 250; } } } }`)
 	packedMulti := hierTree(t, `routing-options { static { route 10.5.0.0/16 next-hop 10.0.0.1 10.0.0.3 qualified-next-hop 10.0.0.2 preference 250; } }`)
+	packedModifiers := hierTree(t, `routing-options { static { route 10.5.0.0/16 next-hop 10.0.0.1 qualified-next-hop 10.0.0.2 interface ge-0/0/0.0 preference 250 metric 7; } }`)
+	unpackedModifiers := hierTree(t, `routing-options { static { route 10.5.0.0/16 { next-hop 10.0.0.1; qualified-next-hop 10.0.0.2 { interface ge-0/0/0.0; preference 250; metric 7; } } } }`)
 	packedRepeated := hierTree(t, `routing-options { static { route 10.5.0.0/16 { next-hop 10.0.0.1 qualified-next-hop 10.0.0.2 preference 250; next-hop 10.0.0.3 qualified-next-hop 10.0.0.4 preference 200; } } }`)
 
 	for _, tc := range []struct {
@@ -36,6 +38,22 @@ func TestPackedStaticRouteNextHopAndQualifiedNextHop_12648(t *testing.T) {
 			want: []NextHopEntry{
 				{Address: "10.0.0.1"},
 				{Address: "10.0.0.2", Preference: 250, HasPreference: true},
+			},
+		},
+		{
+			name: "packed interface and metric modifiers",
+			tree: packedModifiers,
+			want: []NextHopEntry{
+				{Address: "10.0.0.1"},
+				{Address: "10.0.0.2", Interface: "ge-0/0/0.0", Preference: 250, HasPreference: true, Metric: 7, HasMetric: true},
+			},
+		},
+		{
+			name: "unpacked interface and metric control",
+			tree: unpackedModifiers,
+			want: []NextHopEntry{
+				{Address: "10.0.0.1"},
+				{Address: "10.0.0.2", Interface: "ge-0/0/0.0", Preference: 250, HasPreference: true, Metric: 7, HasMetric: true},
 			},
 		},
 		{
@@ -76,8 +94,8 @@ func TestPackedStaticRouteNextHopAndQualifiedNextHop_12648(t *testing.T) {
 
 func TestPackedStaticRouteRejectsIncompleteQualifiedNextHop_12648(t *testing.T) {
 	for name, config := range map[string]string{
-		"missing gateway": `routing-options { static { route 10.5.0.0/16 next-hop 10.0.0.1 qualified-next-hop; } }`,
-		"route keyword as gateway": `routing-options { static { route 10.5.0.0/16 next-hop 10.0.0.1 qualified-next-hop no-install; } }`,
+		"missing gateway":             `routing-options { static { route 10.5.0.0/16 next-hop 10.0.0.1 qualified-next-hop; } }`,
+		"route keyword as gateway":    `routing-options { static { route 10.5.0.0/16 next-hop 10.0.0.1 qualified-next-hop no-install; } }`,
 		"unsupported trailing clause": `routing-options { static { route 10.5.0.0/16 next-hop 10.0.0.1 qualified-next-hop 10.0.0.2 preference 250 next-table blue.inet.0; } }`,
 	} {
 		t.Run(name, func(t *testing.T) {
