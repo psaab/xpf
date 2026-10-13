@@ -9,6 +9,23 @@ PREFIX ?= /usr/local
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
+# #12698: validate caller-provided environment data without interpolating it
+# into shell source. A VERSION space otherwise starts another -X flag. Make
+# already exports environment-origin variables to `$(shell ...)`; do not
+# explicitly export make's git-derived default, which would look like an
+# operator override to the deb recipe's dirty-version handoff.
+ifneq ($(origin VERSION),file)
+export VERSION
+endif
+ifneq ($(origin COMMIT),file)
+export COMMIT
+endif
+ifneq ($(origin BUILD_TIME),file)
+export BUILD_TIME
+endif
+ifneq ($(shell python3 scripts/image/validate-build-metadata.py),ok)
+$(error unsafe VERSION, COMMIT, or BUILD_TIME; see validator diagnostic (#12698))
+endif
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)
 
 # eBPF compilation flags

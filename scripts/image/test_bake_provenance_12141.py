@@ -51,6 +51,8 @@ class BuildProvenanceTests(unittest.TestCase):
             'func main() { fmt.Print(injected) }\n')
         (self.root / "scripts/image/build_provenance.py").write_bytes(
             (_HERE / "build_provenance.py").read_bytes())
+        (self.root / "scripts/image/validate-build-metadata.py").write_bytes(
+            (_HERE / "validate-build-metadata.py").read_bytes())
         makefile = (_REPO / "Makefile").read_text(encoding="utf-8")
         makefile += (
             "\n.PHONY: provenance-test-dirty\n"
