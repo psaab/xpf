@@ -240,12 +240,13 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 	// {source/destination-address (+excluded), application, plus global
 	// from-zone/to-zone}; then mirrors the compiler switch (canary in
 	// schema_policy_then_3377_test.go). from-zone inherits this arm
-	// (childClosed) so no separate flag; its fixed midKeyword is
-	// validated at the walk (spark-F1), flat keys and hierarchical peel.
-	// Same three-way verification as zones above. A typo OF a subtree
-	// root (`policie`) needs the security-level arm: #10078.
-	// #12217's tolerant compiler records unknown direct children here and
-	// poisons the policy snapshot; this arm remains the strict-commit reject.
+	// (childClosed) so no separate flag; its fixed midKeyword is validated at
+	// the walk (spark-F1), flat keys and hierarchical peel. Same three-way
+	// verification as zones above. A typo OF a subtree root (`policie`) needs
+	// the security-level arm: #10078. #12217 records unknown direct children
+	// and poisons tolerant snapshots; #12628 narrowly exempts Junos-valid
+	// non-enforcement statements at this node from the closed-world rejection.
+	// The rest remain strict commit rejects.
 	"policies": {desc: "Security policies", closedWorld: true, children: map[string]*schemaNode{
 		// #3065: explicit no-match default override. Unset = deny-all
 		// (fail-closed, matching the Junos default-security-policy);

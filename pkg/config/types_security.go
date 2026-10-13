@@ -163,11 +163,10 @@ type SecurityConfig struct {
 	// ConfigFingerprint comparisons the elision censuses run -- for a field
 	// that is nil in every valid config.
 	MalformedZonePairs []string `json:"-"`
-	// UnknownPoliciesChildren records unrecognized direct children of the
-	// `security policies` container. The compiler skips their contents, so
-	// tolerant ingestion records the loss and poisons the policy snapshot.
-	// json:"-" keeps this compile-time diagnostic out of semantic config
-	// fingerprints; the persisted AST reconstructs it on each Load/SyncApply.
+	// UnknownPoliciesChildren records unrecognized or policy-container-valid
+	// non-enforcement direct children of `security policies`. Enforcement-
+	// bearing unknowns poison tolerant snapshots; known-benign children only
+	// produce a warning. The persisted AST reconstructs this compile diagnostic.
 	UnknownPoliciesChildren []string `json:"-"`
 	// GlobalPolicies are global rules applied to all zone pairs.
 	GlobalPolicies     []*Policy

@@ -390,6 +390,12 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 		// warning (pkg/configstore/store.go), so a config an older build
 		// persisted, or a peer sends, still loads. Strict where the operator
 		// can fix it, tolerant where refusing would brick the node.
+		// #12628: these Junos-valid, non-enforcement children are accepted
+		// opaquely. The compiler records them for a warning but does not treat
+		// them as an unknown rulebase or poison a forwarding snapshot.
+		if parent == securityPoliciesSchema12217() && nonEnforcementSecurityPoliciesChild12628(keyword) {
+			return nil
+		}
 		if closed {
 			if parent == securityZoneSchema9792() && len(path) > 0 {
 				return &unknownSecurityZoneChildSchemaError{
