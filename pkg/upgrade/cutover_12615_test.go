@@ -10,7 +10,11 @@
 // current already names PreviousVersion makes the retry test start with the
 // stale target ExecStart after a crash during the restoration flip. Dropping
 // the PreviousVersion envelope-reader gate before the stop, after the stop, or
-// before a plain restart restarts 1.0.0 on a DB only 2.0.0 can read.
+// before a plain restart restarts 1.0.0 on a DB only 2.0.0 can read. The
+// remaining tables pin the fail-closed refusals (an unexpected current, a
+// missing or unrestorable previous version), stop-before-flip, the post-flip
+// execution check, and that post-STOP commits survive (the stale cut-boundary
+// snapshot is never restored).
 package upgrade
 
 import (
@@ -301,6 +305,208 @@ func TestCut_SupersededStoppedRechecksDBAfterStop_12615(t *testing.T) {
 			if fs.unitRunning {
 				t.Errorf("unit restarted after the post-stop refusal: exe=%q", fs.runningUnitExe)
 			}
+		})
+	}
+}
+
+// startRecorder12615 records the loaded executable at each StartUnit.
+type startRecorder12615 struct {
+	*fakeSystem
+	started []string
+}
+
+func (s *startRecorder12615) StartUnit(unit string) error {
+	s.started = append(s.started, fakeSystemdExecPath(s.loadedExecStart))
+	return s.fakeSystem.StartUnit(unit)
+}
+
+// pinnedExecStart12615 keeps the unverified target's ExecStart loaded across
+// a successful daemon-reload, modeling a higher-precedence unit override.
+type pinnedExecStart12615 struct {
+	*fakeSystem
+	exe string
+}
+
+func (p *pinnedExecStart12615) DaemonReload() error {
+	if err := p.fakeSystem.DaemonReload(); err != nil {
+		return err
+	}
+	p.loadedExecStart = fakeSystemdExecStart(p.exe)
+	return nil
+}
+
+// Commits made after the stale journal by a restarted old daemon must survive
+// recovery and the fresh cut's outcome: recovery never restores the stale
+// cut-boundary snapshot (DB "A").
+func TestCut_SupersededStoppedKeepsPostStopCommits_12615(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		unit    stoppedUnit12615
+		healthy bool
+	}{
+		{"current-target/old-daemon-running/3.0.0-unhealthy",
+			stoppedUnit12615{current: "2.0.0", loaded: "1.0.0", running: "1.0.0"}, false},
+		{"current-target/old-daemon-running/3.0.0-healthy",
+			stoppedUnit12615{current: "2.0.0", loaded: "1.0.0", running: "1.0.0"}, true},
+		{"current-target/unit-down/3.0.0-unhealthy",
+			stoppedUnit12615{current: "2.0.0", loaded: "2.0.0"}, false},
+		{"current-previous/target-loaded/3.0.0-unhealthy",
+			stoppedUnit12615{current: "1.0.0", loaded: "2.0.0"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeSystem(t, "2.0.0")
+			r, cfg, _ := seedSupersededStopped12615(t, fs, tc.unit)
+			fs.readerVersionsByDir = map[string]int{"1.0.0": 1}
+			mkfile(t, filepath.Join(cfg.ConfigDBDir, "active.json"),
+				readerV1DB12615+`{"gen":"B-post-stop-commit"}`)
+			if !tc.healthy {
+				fs.healthFailVersions["3.0.0"] = true
+			}
+
+			err := r.Run(Options{})
+			if tc.healthy != (err == nil) {
+				t.Fatalf("Run error = %v with 3.0.0 healthy=%v (calls=%v)", err, tc.healthy, fs.calls)
+			}
+			if db := liveDB12615(t, cfg); !strings.Contains(db, "B-post-stop-commit") {
+				t.Fatalf("post-STOP commit lost (stale cut-boundary snapshot restored?): live DB=%q", db)
+			}
+			want := "1.0.0"
+			if tc.healthy {
+				want = "3.0.0"
+			}
+			if cur, err := r.readCurrentVersion(); err != nil || cur != want {
+				t.Fatalf("current = %q (%v), want %q", cur, err, want)
+			}
+		})
+	}
+}
+
+// Ambiguous or unrestorable recovery state fails closed before any live
+// mutation: no stop, flip, reload or start, and the stale journal, partial and
+// current are preserved.
+func TestCut_SupersededStoppedFailsClosed_12615(t *testing.T) {
+	// xpfd stays intact, so only the lockstep restorability gate (not the
+	// envelope-reader probe) can notice the incomplete runtime.
+	breakPrevious := func(t *testing.T, _ *Runner, cfg Config) {
+		if err := os.Remove(filepath.Join(cfg.VersionsDir, "1.0.0", "xpf-userspace-dp")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name        string
+		unit        stoppedUnit12615
+		arm         func(t *testing.T, r *Runner, cfg Config)
+		wantCurrent string
+		wantErr     string
+	}{
+		{"previous-missing", stoppedUnit12615{current: "2.0.0", loaded: "2.0.0"},
+			func(t *testing.T, r *Runner, _ Config) {
+				j, err := r.loadJournal()
+				if err != nil {
+					t.Fatal(err)
+				}
+				j.PreviousVersion = ""
+				j.FirstCutSanctioned = true
+				if err := r.saveJournal(j); err != nil {
+					t.Fatal(err)
+				}
+			}, "2.0.0", "no known-good previous version"},
+		{"current-third-version", stoppedUnit12615{current: "2.0.0", loaded: "2.0.0"},
+			func(t *testing.T, _ *Runner, cfg Config) {
+				for _, b := range managedBins {
+					writeFakeBin(t, filepath.Join(cfg.VersionsDir, "9.9.9", b), "binary-"+b+"-9.9.9")
+				}
+				cur := filepath.Join(cfg.VersionsDir, currentLink)
+				if err := os.Remove(cur); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("9.9.9", cur); err != nil {
+					t.Fatal(err)
+				}
+			}, "9.9.9", "is neither journaled previous"},
+		{"current-target/previous-unrestorable", stoppedUnit12615{current: "2.0.0", loaded: "2.0.0"},
+			breakPrevious, "2.0.0", "is not restorable"},
+		{"current-previous/previous-unrestorable", stoppedUnit12615{current: "1.0.0", loaded: "2.0.0"},
+			breakPrevious, "1.0.0", "is not restorable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeSystem(t, "2.0.0")
+			r, cfg, partial := seedSupersededStopped12615(t, fs, tc.unit)
+			tc.arm(t, r, cfg)
+
+			err := r.Run(Options{})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Run error = %v; want fail-closed refusal containing %q (calls=%v)", err, tc.wantErr, fs.calls)
+			}
+			assertStaleStoppedPreserved12615(t, r, partial, tc.wantCurrent, fs.calls,
+				"stop", "dropin", "daemon-reload", "start")
+		})
+	}
+}
+
+// A running unverified target must be stopped before the restore flip, so the
+// unit's next start launches the known-good executable.
+func TestCut_SupersededStoppedStopsTargetBeforeRestoreFlip_12615(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		unit stoppedUnit12615
+	}{
+		{"current-target", stoppedUnit12615{current: "2.0.0", loaded: "2.0.0", running: "2.0.0"}},
+		{"current-previous", stoppedUnit12615{current: "1.0.0", loaded: "2.0.0", running: "2.0.0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeSystem(t, "2.0.0")
+			r, _, _ := seedSupersededStopped12615(t, fs, tc.unit)
+			rec := &startRecorder12615{fakeSystem: fs}
+			r.cfg.Sys = rec
+
+			if err := r.Run(Options{}); err != nil {
+				t.Fatalf("recovery + healthy 3.0.0 cut: %v (calls=%v)", err, fs.calls)
+			}
+			first := func(call string) int {
+				for i, c := range fs.calls {
+					if c == call {
+						return i
+					}
+				}
+				return -1
+			}
+			stop, dropin, reload, start := first("stop"), first("dropin"), first("daemon-reload"), first("start")
+			if stop < 0 || stop > dropin || dropin > reload || reload > start {
+				t.Fatalf("restore must stop the target, flip and reload 1.0.0, then start: stop=%d dropin=%d reload=%d start=%d calls=%v",
+					stop, dropin, reload, start, fs.calls)
+			}
+			if want := filepath.Join(r.versionDir("1.0.0"), "xpfd"); len(rec.started) == 0 || rec.started[0] != want {
+				t.Fatalf("first start launched %v, want known-good %s", rec.started, want)
+			}
+			if cur, err := r.readCurrentVersion(); err != nil || cur != "3.0.0" {
+				t.Fatalf("current = %q (%v), want 3.0.0 after the fresh cut", cur, err)
+			}
+		})
+	}
+}
+
+// A restore flip whose reload still leaves the unverified target's ExecStart
+// loaded must not be followed by a restart.
+func TestCut_SupersededStoppedVerifiesRestoredExecStart_12615(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		unit stoppedUnit12615
+	}{
+		{"current-target", stoppedUnit12615{current: "2.0.0", loaded: "2.0.0"}},
+		{"current-previous", stoppedUnit12615{current: "1.0.0", loaded: "2.0.0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newFakeSystem(t, "2.0.0")
+			r, _, partial := seedSupersededStopped12615(t, fs, tc.unit)
+			r.cfg.Sys = &pinnedExecStart12615{fakeSystem: fs, exe: filepath.Join(r.versionDir("2.0.0"), "xpfd")}
+
+			err := r.Run(Options{})
+			if err == nil || !strings.Contains(err.Error(), "unit execution remains unverified") {
+				t.Fatalf("Run error = %v; want the post-flip execution refusal (calls=%v)", err, fs.calls)
+			}
+			// The flip already repointed current; the journal keeps recovery alive.
+			assertStaleStoppedPreserved12615(t, r, partial, "1.0.0", fs.calls, "start")
 		})
 	}
 }
