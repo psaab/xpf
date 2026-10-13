@@ -29,14 +29,15 @@ import (
 // TestEveryMappedCommandIsCanonical7172 applies to the method table.
 //
 // The three arms run in order and only the first failure reports. Since
-// #12527 only the first and the last can fire. everyWordIsAKeyword rejects
-// any entry whose words are not one command path through the tree: garbage
-// in a VALUE slot (`show interfaces zzbogus` canonicalizes fine — value slots
-// absorb operator data by design, #8094), any word after a LEAF
-// (`show version zzbogus`, and `show security flow session summary zone`,
-// which Canonicalize accepts by re-entering the Options map, #9505), and an
-// abbreviation (`show ver`), because its lookups are EXACT.
-//
+// #12527 only the first and the last can fire. cmdtree.EveryWordIsAKeyword
+// rejects any entry whose words are not one command path through the tree:
+// garbage in a VALUE slot (`show interfaces zzbogus` canonicalizes fine —
+// value slots absorb operator data by design, #8094), literal placeholder
+// words, any word after a LEAF (`show version zzbogus`, and `show security
+// flow session summary zone`, which Canonicalize accepts by re-entering the
+// Options map, #9505), and an abbreviation (`show ver`), because its lookups
+// are EXACT.
+
 // The Canonicalize arm cannot fail on an entry the keyword arm passed. That
 // walk took one exact child-map hit per word with a leaf only at the end, and
 // resolveTreeWord takes its exact-hit branch for each of those words, so
@@ -45,10 +46,11 @@ import (
 // reading on, so Canonicalize was what refused `show version zzbogus`, and
 // canon != cmd caught an abbreviated option after a leaf (`monitor traffic
 // matching match`). The Canonicalize arm is kept rather than deleted because
-// it comes back to life the moment everyWordIsAKeyword is loosened — which is
-// exactly the direction a future change would loosen it — and it is
-// documented as unable to fire so nobody reads a green suite as evidence that
-// it was exercised.
+// it comes back to life if cmdtree.EveryWordIsAKeyword is loosened — exactly
+// the direction a future change would loosen it — and it is documented as
+// unable to fire so nobody reads a green suite as evidence that it was
+// exercised.
+//
 //
 // canon != cmd is now reached only by WHITESPACE. strings.Fields collapses
 // and trims it, so `show  version` or ` show version` passes both arms above
