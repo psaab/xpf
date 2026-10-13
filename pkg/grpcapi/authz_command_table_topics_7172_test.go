@@ -73,7 +73,7 @@ func assertCanonicalCommands(t *testing.T, what string, table map[string]string)
 			t.Errorf("%s %q maps to an empty command", what, key)
 			continue
 		}
-		if !everyWordIsAKeyword(words) {
+		if !cmdtree.EveryWordIsAKeyword(cmdtree.OperationalTree, words) {
 			t.Errorf("%s %q maps to %q, which is not an argument-free command path: "+
 				"either some word is not a command KEYWORD — a value slot (a dynamic, "+
 				"typed or placeholder child) is absorbing it — or a word follows a "+

@@ -55,7 +55,7 @@ func TestEveryMappedCommandIsCanonical7172(t *testing.T) {
 		// Canonicalize accepts it by re-entering the `session` Options map
 		// (#9505), but a leaf is a complete command, so whatever follows it
 		// is an argument or a second option.
-		if !everyWordIsAKeyword(words) {
+		if !cmdtree.EveryWordIsAKeyword(cmdtree.OperationalTree, words) {
 			t.Errorf("%s maps to %q, which is not a pure command path: either some word "+
 				"is not a command KEYWORD — a value slot (a dynamic, typed or "+
 				"placeholder child) is absorbing it — or a word follows a LEAF, which "+
@@ -130,39 +130,8 @@ func TestEveryPricedMethodIsMappedOrNamedAbsent7172(t *testing.T) {
 	}
 }
 
-// everyWordIsAKeyword reports whether words spell one argument-free command
-// path: every word names a real node in the operational tree rather than
-// being consumed by a value slot, and only the LAST word may be a leaf. A
-// leaf is a complete command, so a word after it is an argument or, under a
-// node that declares Options, a second option: `summary zone` under
-// `show security flow session` is two keywords and still not one path
-// (#12527).
-//
-// Deliberately NOT a change to cmdtree.Canonicalize: absorbing operator data
-// into value slots, and taking options in any order (#9505), is exactly what
-// canonicalization must do for a command an operator typed. The distinction
-// is that THIS table holds argument-free command paths, so the stricter rule
-// belongs to the table's validity check and not to the shared canonicalizer.
-func everyWordIsAKeyword(words []string) bool {
-	current := cmdtree.OperationalTree
-	for i, w := range words {
-		node, ok := current[w]
-		if !ok {
-			return false
-		}
-		if node.Children == nil {
-			// A leaf: any further word would be an argument or a second
-			// option, which this table must not contain (#12527). The old
-			// code returned true here unconditionally, so `show security
-			// flow session summary zone` passed: `summary` is a leaf and
-			// `zone` was never examined, while Canonicalize re-enters the
-			// Options map and also accepts it.
-			return i == len(words)-1
-		}
-		current = node.Children
-	}
-	return true
-}
+// #12527 and #12582: the shared pure-command-path predicate rejects trailing
+// keywords after a leaf and argument placeholders. Both authz surfaces use it.
 
 // #12527: option-suffixed mutants must be rejected by the keyword arm.
 func TestEveryWordIsAKeywordRejectsOptionSuffix12527(t *testing.T) {
@@ -183,8 +152,8 @@ func TestEveryWordIsAKeywordRejectsOptionSuffix12527(t *testing.T) {
 		{"show security flow session sort-by bytes", true}, // nested option path (sessions-top)
 		{"show version", true},
 	} {
-		if got := everyWordIsAKeyword(strings.Fields(tc.cmd)); got != tc.want {
-			t.Errorf("everyWordIsAKeyword(%q) = %v, want %v", tc.cmd, got, tc.want)
+		if got := cmdtree.EveryWordIsAKeyword(cmdtree.OperationalTree, strings.Fields(tc.cmd)); got != tc.want {
+			t.Errorf("EveryWordIsAKeyword(%q) = %v, want %v", tc.cmd, got, tc.want)
 		}
 	}
 	// Mechanism pin: Canonicalize legitimately accepts the runnable line
