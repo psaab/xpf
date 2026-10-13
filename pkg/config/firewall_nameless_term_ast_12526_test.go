@@ -90,6 +90,72 @@ func TestValidateFirewallNamelessTermsAST12526FamiliesGroupsPacked(t *testing.T)
 		}
 	})
 }
+
+// TestStrictCompileRejectsFirewallFilterNamelessTerms12777 is the #12777
+// pre-walk regression: strict compilation must run the #12526 firewall AST
+// validator from runPreWalkGates so nameless terms inside `firewall filter`
+// (with or without a family wrapper) reject instead of silently compiling to
+// a filter with zero terms. Covers the literal shapes from the issue plus
+// packed/group-expanded variants the typed post-compile gate cannot see.
+func TestStrictCompileRejectsFirewallFilterNamelessTerms12777(t *testing.T) {
+	rows := []struct{ name, src, first string }{
+		{"issue shape family-less discard", `firewall { filter { F term { then discard; } } }`, "then"},
+		{"family inet discard", `firewall { family inet { filter F { term { then discard; } } } }`, "then"},
+		{"family inet6 discard", `firewall { family inet6 { filter F6 { term { then discard; } } } }`, "then"},
+		{"bare foo", `firewall { family inet { filter F { term { foo; } } } }`, "foo"},
+		{"nested name discard", `firewall { family inet { filter F { term { T then discard { } } } } }`, "T"},
+		{"packed head", `firewall family inet filter F term { foo; }`, "foo"},
+		{"packed filter term", `firewall { family inet { filter F term { then discard; } } }`, "then"},
+		{"apply-groups", "groups {\n  G {\n    firewall {\n      family inet {\n        filter F {\n          term { then discard; }\n        }\n      }\n    }\n  }\n}\nfirewall {\n  apply-groups G;\n}", "then"},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := CompileConfig(hierTree(t, tc.src))
+			if err == nil {
+				t.Fatalf("strict CompileConfig accepted nameless firewall term in %q (cfg=%+v), want #12777 reject", tc.src, cfg)
+			}
+			for _, want := range []string{"nameless", "#12526", "starting with " + `"` + tc.first + `"`} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error = %q, want substring %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestStrictCompileAcceptsNamedFirewallTerm12777 is the named control:
+// wiring the strict gate must not reject correctly named terms.
+func TestStrictCompileAcceptsNamedFirewallTerm12777(t *testing.T) {
+	for _, src := range []string{
+		`firewall { filter F { term deny { then discard; } } }`,
+		`firewall { family inet { filter F { term deny { then discard; } } } }`,
+		`firewall { family inet { filter F { term { deny { then discard; } } } } }`,
+	} {
+		cfg, err := CompileConfig(hierTree(t, src))
+		if err != nil {
+			t.Fatalf("named term %q rejected: %v", src, err)
+		}
+		if f := cfg.Firewall.FiltersInet["F"]; f == nil || len(f.Terms) != 1 || f.Terms[0].Name != "deny" {
+			t.Fatalf("named term %q compiled to %+v, want one deny term", src, cfg.Firewall.FiltersInet)
+		}
+	}
+}
+
+// TestLenientCompileStillWarnsFirewallFilterNamelessTerm12777 pins the
+// tolerant posture: the strict gate must stay off on CompileConfigLenient so
+// persisted/peer-synced configs still boot with the #10294 warning.
+func TestLenientCompileStillWarnsFirewallFilterNamelessTerm12777(t *testing.T) {
+	cfg, err := CompileConfigLenient(hierTree(t, `firewall { filter F { term { then discard; } } }`))
+	if err != nil {
+		t.Fatalf("tolerant compile rejected nameless term: %v", err)
+	}
+	warnings := strings.Join(cfg.Warnings, "\n")
+	for _, want := range []string{"nameless", "#10294", "#12092", `"then"`} {
+		if !strings.Contains(warnings, want) {
+			t.Fatalf("warnings = %q, want %q", warnings, want)
+		}
+	}
+}
 func TestCompileConfigLenientNamelessFirewallTermStillWarns12526(t *testing.T) {
 	cfg, err := CompileConfigLenient(firewallNamelessASTTree12526(t, `term { T then discard { } }`))
 	if err != nil {

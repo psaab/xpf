@@ -42,6 +42,30 @@ func TestLoadMergeRejectsNamelessFirewallTermsBeforeFlattening12526(t *testing.T
 	}
 }
 
+// TestCommitCheckRejectsPackedNamelessFirewallFilter12777 pins the strict
+// pre-walk gate at the operator commit boundary. The packed, family-less
+// filter subtree is skipped by section lowering, so the compiled firewall
+// type cannot report it.
+func TestCommitCheckRejectsPackedNamelessFirewallFilter12777(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	defer s.ExitConfigure()
+	if err := s.LoadOverride(`firewall { filter { F term { then discard; } } }`); err != nil {
+		t.Fatalf("LoadOverride: %v", err)
+	}
+	if _, err := s.CommitCheck(); err == nil {
+		t.Fatal("CommitCheck accepted nameless family-less firewall filter term")
+	} else {
+		for _, want := range []string{`filter "F"`, "nameless", "#12526"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("CommitCheck error = %q, want diagnostic containing %q", err, want)
+			}
+		}
+	}
+}
+
 func TestLoadMergeNamelessFirewallTermsControls12526(t *testing.T) {
 	rows := []struct{ name, candidate, input, want string }{
 		{

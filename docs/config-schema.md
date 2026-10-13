@@ -2062,9 +2062,11 @@ Other unread statements under `flexible-match-range`, such as
 schema walk. `SchemaValidate` runs first on the commit path, so the typed-leaf
 (#1319) and #8437 messages keep precedence, and `Store.Load` still records its
 `[typed-leaf-tolerated]` warning for the same config. A first version ran
-before the walk and hid both. Nameless terms are skipped: the #10294 gate
-refuses them with the more specific message, and #12526 refuses them before
-`load merge` flattens them. The compact `term T { from is-fragment then
+before the walk and hid both. Nameless terms are skipped by the family-less
+packed `filter { F term { ... } }` section compiler path, so strict pre-walk
+now runs the #12526 AST validator before lowering; #10294 retains its typed
+diagnostic for other shapes, and #12526 also refuses them before `load merge`
+flattens them. The compact `term T { from is-fragment then
 discard; }` stays with #8437 and the `from then` gate.
 
 Fail-on-revert coverage is in `pkg/config/firewall_fused_then_12528_test.go`
