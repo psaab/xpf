@@ -764,7 +764,16 @@ func (r *KernelRunner) verifyAndPromote(j *KernelJournal, candID, running string
 	// The candidate slot is now the active/known-good slot; the OTHER slot
 	// (the former active) becomes the rollback target and keeps its kernel.
 	if err := r.ktransition(j, KernelStatePromoted); err != nil {
-		return KernelRollOutcome{}, err
+		if !isPostRenameJournalError(err) {
+			return KernelRollOutcome{}, err
+		}
+		// The PROMOTED rename landed: the gates passed and candidate-first
+		// BootOrder, the promotion marker, and last-roll outcome are already
+		// committed. Do not report an infra failure against that visible
+		// terminal state; clear the journal below. Power-loss durability of the
+		// rename remains unknown.
+		r.logf("kernel-upgrade promote: PROMOTED journal rename landed but directory sync failed "+
+			"(durability across power loss is unknown): %v; clearing terminal journal", err)
 	}
 	r.logf("kernel-upgrade: PROMOTED candidate %s (slot %s now default)", running, j.InactiveSlot)
 	if err := r.clearKernelJournal(); err != nil {
