@@ -67,11 +67,11 @@ func TestValidateFirewallNamelessTermsAST12526NamedControls(t *testing.T) {
 }
 
 func TestValidateFirewallNamelessTermsAST12526FamiliesGroupsPacked(t *testing.T) {
-	rows := []struct{ name, src, family string }{
-		{"inet6", `firewall { family inet6 { filter F6 { term { foo; } } } }`, "inet6"},
-		{"filter-no-family", `firewall { filter F { term { foo; } } }`, ""},
-		{"group body", `groups { g { firewall { family inet { filter F { term { foo; } } } } } }`, "inet"},
-		{"packed head", `firewall family inet filter F term { foo; }`, "inet"},
+	rows := []struct{ name, src, where string }{
+		{"inet6", `firewall { family inet6 { filter F6 { term { foo; } } } }`, `firewall family inet6 filter "F6"`},
+		{"filter-no-family", `firewall { filter F { term { foo; } } }`, `firewall filter "F"`},
+		{"group body", `groups { g { firewall { family inet { filter F { term { foo; } } } } } }`, `firewall family inet filter "F"`},
+		{"packed head", `firewall family inet filter F term { foo; }`, `firewall family inet filter "F"`},
 	}
 	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
@@ -79,8 +79,8 @@ func TestValidateFirewallNamelessTermsAST12526FamiliesGroupsPacked(t *testing.T)
 			if err == nil {
 				t.Fatalf("accepted nameless term in %q", tc.src)
 			}
-			if !strings.Contains(err.Error(), "#12526") || !strings.Contains(err.Error(), "family "+tc.family) {
-				t.Fatalf("error = %q, want #12526 family %q", err, tc.family)
+			if !strings.Contains(err.Error(), "#12526") || !strings.HasPrefix(err.Error(), tc.where+" contains a nameless") {
+				t.Fatalf("error = %q, want #12526 rejection at %s", err, tc.where)
 			}
 		})
 	}

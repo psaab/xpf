@@ -123,8 +123,8 @@ func ValidateFirewallNamelessTermsAST12526(tree *ConfigTree) error {
 	}
 	type occurrence struct{ family, filter, first string }
 	var found []occurrence
-	var visit func(*Node, string)
-	visit = func(node *Node, family string) {
+	var visit func(*Node)
+	visit = func(node *Node) {
 		if node == nil {
 			return
 		}
@@ -142,25 +142,27 @@ func ValidateFirewallNamelessTermsAST12526(tree *ConfigTree) error {
 						}
 					}
 				} else if child.Name() == "filter" {
+					// The family-less `firewall filter F` spelling has no
+					// family to report.
 					for _, filter := range namedInstances([]*Node{child}) {
 						for _, term := range filter.node.FindChildren("term") {
 							first, malformed := firewallNamelessTermBody12526(term)
 							if malformed {
-								found = append(found, occurrence{family, filter.name, first})
+								found = append(found, occurrence{"", filter.name, first})
 							}
 						}
 					}
 				}
-				visit(child, family)
+				visit(child)
 			}
 			return
 		}
 		for _, child := range node.Children {
-			visit(child, family)
+			visit(child)
 		}
 	}
 	for _, root := range logicalTree.Children {
-		visit(root, "")
+		visit(root)
 	}
 	if len(found) == 0 {
 		return nil
@@ -172,5 +174,9 @@ func ValidateFirewallNamelessTermsAST12526(tree *ConfigTree) error {
 		return found[i].filter < found[j].filter
 	})
 	bad := found[0]
-	return fmt.Errorf("firewall family %s filter %q contains a nameless `term` block starting with %q (#10294/#12092/#12526): give every term an explicit name", bad.family, bad.filter, bad.first)
+	where := fmt.Sprintf("firewall filter %q", bad.filter)
+	if bad.family != "" {
+		where = fmt.Sprintf("firewall family %s filter %q", bad.family, bad.filter)
+	}
+	return fmt.Errorf("%s contains a nameless `term` block starting with %q (#10294/#12092/#12526): give every term an explicit name", where, bad.first)
 }

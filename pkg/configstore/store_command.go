@@ -696,8 +696,9 @@ func (s *Store) LoadMergeAsPlantClass(sessionID, plantClass, content string) err
 			return fmt.Errorf("parse error: %v", errs[0])
 		}
 		// Inspect the literal input before hierarchical-to-set lowering erases
-		// whether a one-key policy term had a name. Group bodies are included,
-		// but references are not expanded using only this fragment.
+		// whether a one-key firewall-filter (#12526) or policy-statement
+		// (#12521) term had a name. Group bodies are included, but references
+		// are not expanded using only this fragment.
 		if err := config.ValidateFirewallNamelessTermsAST12526(tree); err != nil {
 			return fmt.Errorf("merge: %w", err)
 		}
