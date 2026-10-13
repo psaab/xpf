@@ -320,8 +320,9 @@ type compileOpts struct {
 	// lenientSchedulerWindowPairs11358 downgrades conflicting repeated
 	// start-time/stop-time boundaries (#11358) and weekday all-day, exclude,
 	// and time-window meanings split across separate weekday statements
-	// (#12238) from strict compile errors to warnings on tolerant load /
-	// peer-sync paths. The typed scheduler model has one window per day, so
+	// (#12238), and single-statement all-day/window contradictions
+	// however authored (#12643), from strict compile errors to warnings
+	// on tolerant load / peer-sync paths. The typed scheduler model has one window per day, so
 	// silently accepting either conflict loses authored scheduling semantics.
 	lenientSchedulerWindowPairs11358 bool
 

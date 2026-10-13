@@ -630,9 +630,8 @@ func compileConfigWithOpts(tree *ConfigTree, opts compileOpts) (*Config, error) 
 	// effective group expansions before this compiler chooses node0 fallback.
 	// Otherwise a peer-only repeated boundary, or weekday statements that a
 	// peer-only group supplies separately, could escape commit validation and
-	// reach the other node through sync. A peer-only group fragment that merges
-	// into an existing weekday statement is one statement and is not diagnosed
-	// (#12643).
+	// reach the other node through sync. Fragments merged into an existing
+	// weekday statement are diagnosed as one statement (#12643).
 	schedulerWindowWarnings11358, schedulerWindowErr11358 := validateSchedulerWindowPairs11358(
 		tree, opts.lenientSchedulerWindowPairs11358)
 	if schedulerWindowErr11358 != nil {
@@ -981,8 +980,8 @@ func compileConfigForNodeWithOpts(tree *ConfigTree, nodeID int, opts compileOpts
 	// #11358/#12238: evaluate both effective node views before this node-specific
 	// expansion, so a peer-only repeated boundary, or weekday statements that a
 	// peer-only group supplies separately, cannot bypass strict commit
-	// validation. Group fragments merged into one weekday statement are not
-	// diagnosed (#12643).
+	// validation. Group fragments merged into one weekday statement are
+	// diagnosed as one statement (#12643).
 	schedulerWindowWarnings11358, schedulerWindowErr11358 := validateSchedulerWindowPairs11358(
 		tree, opts.lenientSchedulerWindowPairs11358)
 	if schedulerWindowErr11358 != nil {

@@ -6,9 +6,11 @@ package config_test
 // directing the operator to the matching explicit all-day form
 // (`daily all-day` or `<weekday> all-day`).
 // Normal windows, overnight wraparound (start>stop), half-specified windows,
-// and explicit all-day/exclude windows must NOT warn. Invalid and
-// whitespace-padded direct-config controls must also stay silent because the
-// runtime parser fails closed on those raw values.
+// and daily all-day/exclude windows must NOT warn. A weekday all-day flag
+// plus a complete time window is no longer a strict commit shape (#12643);
+// the warning helper's typed-state case is constructed directly. Invalid and
+// whitespace-padded direct-config controls stay silent because the runtime
+// parser fails closed on those raw values.
 //
 // RED-on-revert: dropping the equality check in ValidateConfig makes the
 // want-warning cases below fire zero warnings and
@@ -106,9 +108,13 @@ func TestSchedulerEqualWindowWarns(t *testing.T) {
 			wantWarn: false,
 		},
 		{
-			name: "per-day all-day plus equal bounds does not warn",
-			cfg: compileHier(t, "schedulers {\n    scheduler dayallwithtimes {\n        monday {\n"+
-				"            all-day;\n            start-time 09:00:00;\n            stop-time 09:00:00;\n        }\n    }\n}"),
+			name: "per-day all-day plus equal bounds is not a strict commit shape",
+			cfg: directSchedulerConfig(&config.SchedulerConfig{
+				Name: "dayallwithtimes",
+				Days: map[string]*config.SchedulerDayWindow{
+					"monday": {AllDay: true, StartTime: "09:00:00", StopTime: "09:00:00"},
+				},
+			}),
 			wantWarn: false,
 		},
 		{
