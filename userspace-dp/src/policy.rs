@@ -13,6 +13,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 
 #[path = "policy_snapshot_error.rs"]
 mod snapshot_error;
@@ -1450,6 +1452,9 @@ impl CompiledApplications {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AppCatalog {
     by_protocol: FxHashMap<u8, AppProtoEntries>,
+    /// Fingerprint of the compiled entries, independent of snapshot ordering.
+    /// Only compared inside this process; zero is reserved for unconfigured.
+    epoch: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1483,6 +1488,22 @@ struct AppScanEntry {
 
 impl AppCatalog {
     pub(crate) fn from_snapshot(entries: &[crate::AppCatalogEntry]) -> Self {
+        let mut signature: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.app_id != 0)
+            .map(|entry| (
+                entry.protocol,
+                entry.app_id,
+                entry.dst_port_low,
+                entry.dst_port_high,
+                entry.src_port_low,
+                entry.src_port_high,
+            ))
+            .collect();
+        signature.sort_unstable();
+        let mut hasher = DefaultHasher::new();
+        signature.hash(&mut hasher);
+        let epoch = hasher.finish().max(1);
         let mut by_protocol: FxHashMap<u8, AppProtoEntries> = FxHashMap::default();
         for e in entries {
             // app_id 0 is the reserved "unknown" sentinel; never index it.
@@ -1517,7 +1538,11 @@ impl AppCatalog {
                 });
             }
         }
-        Self { by_protocol }
+        Self { by_protocol, epoch }
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     pub(crate) fn is_empty(&self) -> bool {

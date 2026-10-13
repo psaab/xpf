@@ -820,7 +820,9 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
                 &canonical_key,
                 policy_kind_for_resolution(input.decision.resolution),
             );
-            if matches!(&gate.target, PolicyRevalidationTarget::Stale(_)) {
+            if matches!(&gate.target, PolicyRevalidationTarget::Stale(_))
+                && sessions.app_id_catalog_stale(&canonical_key)
+            {
                 let app_id = forwarding.app_catalog.lookup_admitted(
                     canonical_key.protocol,
                     canonical_key.src_port,
@@ -828,12 +830,14 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
                     input.metadata.is_reverse,
                     input.decision.nat.rewrite_dst_port,
                 );
-                let _ = crate::afxdp::bpf_map::restamp_bpf_conntrack_app_id(
+                if crate::afxdp::bpf_map::restamp_bpf_conntrack_app_id(
                     conntrack_v4_fd,
                     conntrack_v6_fd,
                     &canonical_key,
                     app_id,
-                );
+                ) {
+                    sessions.mark_app_id_catalog_current(&canonical_key);
+                }
             }
             None
         }
@@ -1689,14 +1693,12 @@ fn reverse_hit_zone_policy(
                 &rev_canonical,
                 policy_kind_for_resolution(input.decision.resolution),
             );
-            if matches!(&rev_target, PolicyRevalidationTarget::Stale(_)) {
-                // #12191: worker installs publish a FORWARD conntrack row only
-                // (poll_descriptor `FORWARD ONLY`; reverse `show` skips
-                // `IsReverse`), so a reverse hit refreshes the user-visible
-                // forward row — never the reverse companion key, which has no
-                // row. The app resolution mirrors the create-time forward
-                // derivation (`lookup_admitted` with `is_reverse=false` and
-                // the forward NAT rewrite), best-effort like the forward arm.
+            if matches!(&rev_target, PolicyRevalidationTarget::Stale(_))
+                && sessions.app_id_catalog_stale(&fwd_key)
+            {
+                // Worker installs publish a FORWARD conntrack row only, so a
+                // reverse hit reconciles that forward label once per catalog
+                // epoch rather than once per newly stale session.
                 let app_id = forwarding.app_catalog.lookup_admitted(
                     fwd_key.protocol,
                     fwd_key.src_port,
@@ -1704,12 +1706,14 @@ fn reverse_hit_zone_policy(
                     false,
                     fwd_decision.nat.rewrite_dst_port,
                 );
-                let _ = crate::afxdp::bpf_map::restamp_bpf_conntrack_app_id(
+                if crate::afxdp::bpf_map::restamp_bpf_conntrack_app_id(
                     conntrack_v4_fd,
                     conntrack_v6_fd,
                     &fwd_key,
                     app_id,
-                );
+                ) {
+                    sessions.mark_app_id_catalog_current(&fwd_key);
+                }
             }
             None
         }

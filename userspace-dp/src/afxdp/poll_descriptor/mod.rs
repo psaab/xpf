@@ -502,6 +502,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
             .policy
             .scheduler_rules_expired_at(now_ns),
     );
+    sessions.set_app_id_catalog_epoch(worker_ctx.forwarding.app_catalog.epoch());
     // Load the immutable SA payload once for this RX batch. Stage 11 performs
     // only plain map lookups against this guard, never another ArcSwap load.
     let ipsec_sa_snapshot = worker_ctx.forwarding.ipsec_sa.load_snapshot();
