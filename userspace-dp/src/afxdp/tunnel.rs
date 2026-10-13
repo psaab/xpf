@@ -528,16 +528,27 @@ fn wait_for_local_tunnel_event(
 /// the TUNNEL's instance table (v4 name — the FIB canonicalizes per
 /// family). Default instance → `inet.0`, i.e. exactly the pre-item-6
 /// default-table behavior. Shared by the WG + GRE builders.
+///
+/// #12503: also returns that instance's installing-table identity
+/// `(domain, check)` for the reverse's stamp, so a stale-generation
+/// re-resolve stays in the tunnel's instance. The identity travels with the
+/// string, as in `pbr_table_target` (no reverse-parsing at the stamp site);
+/// the default instance is `(0, 0)`, never a hash of the empty name.
 pub(super) fn tun_origin_reverse_route_table(
     forwarding: &ForwardingState,
     tunnel_logical_ifindex: i32,
-) -> String {
+) -> (String, (u32, u32)) {
     let instance = forwarding
         .ifindex_to_routing_instance
         .get(&tunnel_logical_ifindex)
-        .cloned()
-        .unwrap_or_default();
-    connected_route_tables(&instance).0
+        .map(String::as_str)
+        .unwrap_or("");
+    let identity = if instance.is_empty() {
+        (0, 0)
+    } else {
+        crate::session::install_table_identity(instance)
+    };
+    (connected_route_tables(instance).0, identity)
 }
 
 pub(super) fn build_local_origin_tunnel_tx_request(
@@ -724,10 +735,12 @@ pub(super) fn build_local_origin_tunnel_tx_request(
     };
     // Table-scoped synthesis (#10038 item 6, the WG twin): VRF reverses
     // resolve against the tunnel's instance table instead of NoRoute-ing
-    // against inet.0. Only proven firewall-local traffic may create the
-    // reverse companion; an unproven packet remains encap-only.
+    // against inet.0, and carry that table's installing identity so a stale
+    // re-resolve stays there (#12503). Only proven firewall-local traffic may
+    // create the reverse companion; an unproven packet remains encap-only.
     let reverse_session_entry = session_entry.as_ref().and_then(|entry| {
-        let table = tun_origin_reverse_route_table(forwarding, decision.resolution.egress_ifindex);
+        let (table, (install_table_domain, install_table_check)) =
+            tun_origin_reverse_route_table(forwarding, decision.resolution.egress_ifindex);
         let mut reverse =
             crate::afxdp::shared_ops::synthesized_synced_reverse_entry_in_table(
                 forwarding,
@@ -739,10 +752,8 @@ pub(super) fn build_local_origin_tunnel_tx_request(
             );
         if let Some(rev) = reverse.as_mut() {
             rev.origin = SessionOrigin::TunOrigin;
-            if let Some(instance) = table.strip_suffix(".inet.0").filter(|name| !name.is_empty()) {
-                (rev.decision.install_table_domain, rev.decision.install_table_check) =
-                    crate::session::install_table_identity(instance);
-            }
+            rev.decision.install_table_domain = install_table_domain;
+            rev.decision.install_table_check = install_table_check;
         }
         reverse
     });

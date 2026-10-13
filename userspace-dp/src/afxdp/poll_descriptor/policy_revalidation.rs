@@ -1093,8 +1093,9 @@ pub(super) fn tun_origin_forward(
 /// #10808: the reverse half of #10038 Part C / #10630. A TUN-origin REVERSE
 /// hit declines PBR revalidation for the same reason the forward does:
 /// self-originated runs no PBR admission, so there is no admitting route
-/// identity to re-derive. The builders retain the validated installing-table
-/// identity alongside their table-scoped reverse resolution, so a stale
+/// identity to re-derive. The builders stamp their tunnel instance's
+/// installing-table identity (the registry validates it on each re-resolve)
+/// alongside their table-scoped reverse resolution, so a stale
 /// forwarding-generation refresh can resolve in the tunnel's instance rather
 /// than accidentally falling back to the default table. This does not create
 /// an admitting PBR identity; the decline covers both default and VRF pairs.
