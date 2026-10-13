@@ -4313,6 +4313,26 @@ fn app_catalog_skips_zero_app_id() {
     assert_eq!(cat.lookup_forward(6, 51000, 443), 0);
 }
 
+#[test]
+fn app_catalog_epoch_changes_only_with_catalog_contents_12620() {
+    let entries = [cat_entry(11, 6, 443, 443), cat_entry(22, 17, 53, 53)];
+    let reordered = [entries[1].clone(), entries[0].clone()];
+    let changed = [cat_entry(33, 6, 443, 443), cat_entry(22, 17, 53, 53)];
+
+    let epoch = AppCatalog::from_snapshot(&entries).epoch();
+    assert_ne!(epoch, 0);
+    assert_eq!(AppCatalog::from_snapshot(&reordered).epoch(), epoch);
+    assert_ne!(AppCatalog::from_snapshot(&changed).epoch(), epoch);
+    let collision_a = [cat_entry(22, 6, 8443, 8443), cat_entry(11, 6, 8443, 8443)];
+    let collision_b = [cat_entry(11, 6, 8443, 8443), cat_entry(22, 6, 8443, 8443)];
+    let catalog_a = AppCatalog::from_snapshot(&collision_a);
+    let catalog_b = AppCatalog::from_snapshot(&collision_b);
+    assert_eq!(catalog_a.lookup_forward(6, 40_000, 8443), 22);
+    assert_eq!(catalog_b.lookup_forward(6, 40_000, 8443), 11);
+    assert_ne!(catalog_a.epoch(), catalog_b.epoch());
+    assert_eq!(AppCatalog::default().epoch(), 0);
+}
+
 // Overlapping entries WITHIN THE SAME specificity tier: the lowest app_id wins,
 // deterministically (the Go builder emits ascending ids in sorted-name order).
 // #3612 changed only the CROSS-tier tiebreak (port-constrained beats

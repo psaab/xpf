@@ -848,6 +848,11 @@ thread_local! {
     static CONNTRACK_RESTORE_FAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static CONNTRACK_TEST_APP_ID_RESTAMP_WRITES: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    /// #12620: restamp lookups (the per-connection BPF read). Thread-local
+    /// like the writes counter: production cannot take a lock, and each
+    /// revalidation test drives its hits synchronously on its own thread.
+    static CONNTRACK_TEST_APP_ID_RESTAMP_LOOKUPS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -883,11 +888,17 @@ pub(crate) fn force_conntrack_restore_failure_for_test() -> ConntrackRestoreFail
 pub(crate) fn clear_conntrack_rows_for_test() {
     CONNTRACK_TEST_ROWS.with(|rows| rows.borrow_mut().clear());
     CONNTRACK_TEST_APP_ID_RESTAMP_WRITES.with(|writes| writes.set(0));
+    CONNTRACK_TEST_APP_ID_RESTAMP_LOOKUPS.with(|lookups| lookups.set(0));
 }
 
 #[cfg(test)]
 pub(crate) fn conntrack_app_id_restamp_writes_for_test() -> usize {
     CONNTRACK_TEST_APP_ID_RESTAMP_WRITES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn conntrack_app_id_restamp_lookups_for_test() -> usize {
+    CONNTRACK_TEST_APP_ID_RESTAMP_LOOKUPS.with(std::cell::Cell::get)
 }
 
 /// #6965/#8105: clear this thread's recorder so a sampling test starts from a
@@ -1633,6 +1644,7 @@ fn restamp_conntrack_lookup_v4(
 ) -> c_int {
     #[cfg(test)]
     if fd == CONNTRACK_TEST_MAP_FD {
+        CONNTRACK_TEST_APP_ID_RESTAMP_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
         return match CONNTRACK_TEST_ROWS.with(|rows| {
             rows.borrow()
                 .get(&bare_conntrack_test_key(session_key))
@@ -1665,6 +1677,7 @@ fn restamp_conntrack_lookup_v6(
 ) -> c_int {
     #[cfg(test)]
     if fd == CONNTRACK_TEST_MAP_FD {
+        CONNTRACK_TEST_APP_ID_RESTAMP_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
         return match CONNTRACK_TEST_ROWS.with(|rows| {
             rows.borrow()
                 .get(&bare_conntrack_test_key(session_key))

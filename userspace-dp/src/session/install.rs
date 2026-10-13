@@ -608,6 +608,7 @@ impl SessionTable {
                 // would pay for the re-derivation is served by the flow cache
                 // this install populates, not by the session-hit path.
                 policy_revalidated_gen: 0,
+                app_id_catalog_epoch: self.app_id_catalog_epoch,
                 policy_scheduler_expired: false,
                 policy_revalidation_kind: PolicyRevalidationKind::Unvalidated,
                 expires_after_ns: session_timeout_ns(
@@ -982,6 +983,7 @@ impl SessionTable {
                 // `filter_revalidated` gets, for the verdict #7323 accepted as a
                 // residual and this issue closes.
                 policy_revalidated_gen: 0,
+                app_id_catalog_epoch: 0,
                 policy_scheduler_expired: false,
                 policy_revalidation_kind: PolicyRevalidationKind::Unvalidated,
                 // #9412: a delivered Close class takes precedence over the

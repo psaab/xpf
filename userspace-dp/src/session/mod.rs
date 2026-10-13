@@ -1060,6 +1060,9 @@ struct SessionEntry {
     /// `SessionEntry` carries no serde, so this is on no wire and is not part of
     /// session identity.
     policy_revalidated_gen: u64,
+    /// Compiled AppID catalog epoch for the label in the node-local conntrack
+    /// mirror. Zero means the label has not been reconciled on this node.
+    app_id_catalog_epoch: u64,
     /// Whether this entry's scheduler-bound policy was validated during an
     /// expired scheduler-lease phase.
     policy_scheduler_expired: bool,
@@ -1467,6 +1470,9 @@ pub(crate) struct SessionTable {
     /// share a stamp, or one verdict's re-stamp suppresses the other's
     /// re-derivation.
     policy_revalidation_gen: u64,
+    /// Compiled catalog identity published once per poll pass. Installed local
+    /// sessions record this identity; imported sessions remain epoch-zero.
+    app_id_catalog_epoch: u64,
     /// Scheduler-lease phase sampled once per poll pass. Together with the
     /// config generation, it determines zone-policy stamp freshness.
     policy_scheduler_expired: bool,
@@ -1763,6 +1769,7 @@ impl SessionTable {
             filter_revalidation_gen: 0,
             forwarding_revalidation_gen: ForwardingGenerationStamp::default(),
             policy_revalidation_gen: 0,
+            app_id_catalog_epoch: 0,
             policy_scheduler_expired: false,
             epoch_counter: 0,
             expired: 0,
@@ -2259,6 +2266,28 @@ impl SessionTable {
     ) {
         self.policy_revalidation_gen = generation;
         self.policy_scheduler_expired = scheduler_expired;
+    }
+    /// Publish the compiled catalog identity used by this worker. Called once
+    /// per poll pass alongside the policy generation.
+    pub(crate) fn set_app_id_catalog_epoch(&mut self, epoch: u64) {
+        self.app_id_catalog_epoch = epoch;
+    }
+
+    /// Whether a canonical session label predates the current local catalog.
+    pub(crate) fn app_id_catalog_stale(&self, key: &SessionKey) -> bool {
+        self.revalidation_record(key)
+            .is_some_and(|record| record.entry.app_id_catalog_epoch != self.app_id_catalog_epoch)
+    }
+
+    /// Record that the canonical conntrack label was resolved against the live catalog.
+    pub(crate) fn mark_app_id_catalog_current(&mut self, key: &SessionKey) {
+        let epoch = self.app_id_catalog_epoch;
+        if let Some(handle) = self.key_to_handle.get(key).copied()
+            && let Some(record) = self.entries.get_mut(handle as usize)
+            && record.key == *key
+        {
+            record.entry.app_id_catalog_epoch = epoch;
+        }
     }
 
     #[cfg(test)]

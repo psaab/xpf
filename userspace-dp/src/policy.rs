@@ -8,6 +8,8 @@ use ipnet::IpNet;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
@@ -1450,6 +1452,9 @@ impl CompiledApplications {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AppCatalog {
     by_protocol: FxHashMap<u8, AppProtoEntries>,
+    /// Fingerprint of the compiled entries, independent of snapshot ordering.
+    /// Only compared inside this process; zero is reserved for unconfigured.
+    epoch: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1517,7 +1522,37 @@ impl AppCatalog {
                 });
             }
         }
-        Self { by_protocol }
+        // Derive the fingerprint from the compiled lookup representation, not
+        // the raw snapshot: exact-port collisions are first-writer-wins, so
+        // snapshot order can change the selected AppID. Scan ordering is
+        // semantically irrelevant (lookup takes the minimum id per tier).
+        let mut signature = Vec::new();
+        for (&protocol, bucket) in &by_protocol {
+            for (&dst_port, &app_id) in &bucket.exact_dst {
+                signature.push((protocol, 0_u8, dst_port, dst_port, 0, 0, app_id, false));
+            }
+            for entry in &bucket.scan {
+                signature.push((
+                    protocol,
+                    1,
+                    entry.dst_low,
+                    entry.dst_high,
+                    entry.src_low,
+                    entry.src_high,
+                    entry.app_id,
+                    entry.port_constrained,
+                ));
+            }
+        }
+        signature.sort_unstable();
+        let mut hasher = DefaultHasher::new();
+        signature.hash(&mut hasher);
+        let epoch = hasher.finish().max(1);
+        Self { by_protocol, epoch }
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     pub(crate) fn is_empty(&self) -> bool {

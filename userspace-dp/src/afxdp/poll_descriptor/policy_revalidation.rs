@@ -739,6 +739,11 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
         PolicyRevalidationTarget::Fresh if gate.force_cold => {
             sessions.revalidation_canonical_key(session_key)?
         }
+        // A prior permit can be policy-fresh while its BPF label update is
+        // still pending; revisit the permit path so a later hit can retry.
+        PolicyRevalidationTarget::Fresh if sessions.app_id_catalog_stale(session_key) => {
+            sessions.revalidation_canonical_key(session_key)?
+        }
         PolicyRevalidationTarget::Fresh => return None,
         // No entry this tuple may safely name (#2120 transient synced hit, or a
         // reused slab slot). There is nothing to stamp, tear down, or evict:
@@ -820,7 +825,9 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
                 &canonical_key,
                 policy_kind_for_resolution(input.decision.resolution),
             );
-            if matches!(&gate.target, PolicyRevalidationTarget::Stale(_)) {
+            // The label epoch is independent of policy freshness: retain this
+            // retry after a failed conntrack read/update has made policy fresh.
+            if sessions.app_id_catalog_stale(&canonical_key) {
                 let app_id = forwarding.app_catalog.lookup_admitted(
                     canonical_key.protocol,
                     canonical_key.src_port,
@@ -828,12 +835,14 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
                     input.metadata.is_reverse,
                     input.decision.nat.rewrite_dst_port,
                 );
-                let _ = crate::afxdp::bpf_map::restamp_bpf_conntrack_app_id(
+                if crate::afxdp::bpf_map::restamp_bpf_conntrack_app_id(
                     conntrack_v4_fd,
                     conntrack_v6_fd,
                     &canonical_key,
                     app_id,
-                );
+                ) {
+                    sessions.mark_app_id_catalog_current(&canonical_key);
+                }
             }
             None
         }
@@ -1536,7 +1545,12 @@ fn reverse_hit_zone_policy(
     // Decline keeps.
     let reverse_inconsistent_fail_closed =
         (reverse_has_intent && reverse_row_needs_cold) || companion_needs_live;
-    if matches!(rev_target, PolicyRevalidationTarget::Fresh) && !force_reverse_cold {
+    // Do not skip a fresh reverse policy entry while its forward AppID label
+    // is stale: the earlier conntrack attempt may have failed.
+    if matches!(rev_target, PolicyRevalidationTarget::Fresh)
+        && !force_reverse_cold
+        && !sessions.app_id_catalog_stale(&fwd_key)
+    {
         return None;
     }
     let Some((mut fwd_decision, fwd_metadata, fwd_origin, _)) = fwd_companion
@@ -1689,14 +1703,10 @@ fn reverse_hit_zone_policy(
                 &rev_canonical,
                 policy_kind_for_resolution(input.decision.resolution),
             );
-            if matches!(&rev_target, PolicyRevalidationTarget::Stale(_)) {
-                // #12191: worker installs publish a FORWARD conntrack row only
-                // (poll_descriptor `FORWARD ONLY`; reverse `show` skips
-                // `IsReverse`), so a reverse hit refreshes the user-visible
-                // forward row — never the reverse companion key, which has no
-                // row. The app resolution mirrors the create-time forward
-                // derivation (`lookup_admitted` with `is_reverse=false` and
-                // the forward NAT rewrite), best-effort like the forward arm.
+            if sessions.app_id_catalog_stale(&fwd_key) {
+                // Worker installs publish a FORWARD conntrack row only, so a
+                // reverse hit reconciles that forward label once per catalog
+                // epoch rather than once per newly stale session.
                 let app_id = forwarding.app_catalog.lookup_admitted(
                     fwd_key.protocol,
                     fwd_key.src_port,
@@ -1704,12 +1714,14 @@ fn reverse_hit_zone_policy(
                     false,
                     fwd_decision.nat.rewrite_dst_port,
                 );
-                let _ = crate::afxdp::bpf_map::restamp_bpf_conntrack_app_id(
+                if crate::afxdp::bpf_map::restamp_bpf_conntrack_app_id(
                     conntrack_v4_fd,
                     conntrack_v6_fd,
                     &fwd_key,
                     app_id,
-                );
+                ) {
+                    sessions.mark_app_id_catalog_current(&fwd_key);
+                }
             }
             None
         }
