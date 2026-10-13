@@ -149,15 +149,14 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 				// or compile a phantom destination. The existing strict tree
 				// gate owns the specific rejection; recording here makes the
 				// tolerant path attach the established snapshot poison.
-				if len(child.Keys) == 2 {
-					// Strict #7523 rejects direct nested `to-zone` forms.
-					// Tolerant compilation must poison every policy-bearing
-					// sibling, including keyless/nested shapes whose policy is
-					// below the destination node rather than its direct child.
+				// Strict #7523 rejects direct nested `to-zone` forms.
+				// Tolerant compilation must poison every policy-bearing
+				// destination child, including keyless/nested shapes whose
+				// policy is below the destination node rather than its direct child.
+				if len(child.Keys) == 2 || len(child.Keys) == 3 {
 					for _, tz := range child.FindChildren("to-zone") {
-						if hasPolicyIntent12629(tz) {
-							sec.MalformedZonePairs = append(sec.MalformedZonePairs,
-								nestedZonePolicyError12633(child.Keys[1], tz))
+						for _, message := range nestedZonePolicyErrors12633(child.Keys[1], tz) {
+							sec.MalformedZonePairs = append(sec.MalformedZonePairs, message)
 						}
 					}
 				}
@@ -901,6 +900,26 @@ func toZoneLess12231(from string) string {
 	return fmt.Sprintf("from-zone %q has no to-zone context; the policy context is skipped and not enforced (#12231)", from)
 }
 
+func nestedZonePolicyErrors12633(from string, toZone *Node) []string {
+	if toZone == nil || !hasPolicyIntent12629(toZone) {
+		return nil
+	}
+	if len(toZone.Keys) >= 2 {
+		return []string{nestedZonePolicyError12633(from, toZone)}
+	}
+	var messages []string
+	for _, child := range toZone.Children {
+		if child.Name() == "policy" || !hasPolicyIntent12629(child) {
+			continue
+		}
+		messages = append(messages, nestedZonePolicyErrorForDestination12633(from, child.Name()))
+	}
+	if len(messages) > 0 {
+		return messages
+	}
+	return []string{nestedZonePolicyError12633(from, toZone)}
+}
+
 func nestedZonePolicyError12633(from string, toZone *Node) string {
 	to := ""
 	if toZone != nil && len(toZone.Keys) >= 2 {
@@ -922,6 +941,10 @@ func nestedZonePolicyError12633(from string, toZone *Node) string {
 	if to == "" {
 		return policyAsDestinationZone12633(from, "policy")
 	}
+	return nestedZonePolicyErrorForDestination12633(from, to)
+}
+
+func nestedZonePolicyErrorForDestination12633(from, to string) string {
 	return fmt.Sprintf(
 		"security policies from-zone %q contains a NESTED `to-zone %s { ... }` block. "+
 			"Junos models one COMBINED hierarchy, so this spelling is not implemented: it "+
