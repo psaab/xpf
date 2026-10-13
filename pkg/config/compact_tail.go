@@ -193,6 +193,13 @@ func packedBodyChildren(node *Node, schema *schemaNode) []*Node {
 			return node.Children
 		}
 		n, refined := consumeNodeKeys(tail, childSchema)
+		// Route-filter's optional range modifier is attached to the same
+		// packed leaf as its prefix and match type, despite being beyond the
+		// schema's declared two arguments.
+		if tail[0] == "route-filter" && childSchema.args == 2 &&
+			childSchema.keyValidatorPos != nil {
+			n = packedRouteFilterWidth(tail, 0, n)
+		}
 		// A multi-value leaf authored as `keyword [ A B ]` is one
 		// statement even though the parser flattens the bracket contents into
 		// Keys. Consume the contiguous bracketed run as part of this
