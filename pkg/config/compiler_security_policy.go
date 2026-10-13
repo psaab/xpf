@@ -154,12 +154,10 @@ func compilePolicies(node *Node, sec *SecurityConfig) error {
 							sec.MalformedZonePairs = append(sec.MalformedZonePairs, containerToZoneLess12231(fzSub.Name()))
 						}
 					}
-					tzNode := fzSub.FindChild("to-zone")
-					if tzNode == nil {
-						continue
-					}
-					for _, tzSub := range tzNode.Children {
-						pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+					for _, tzNode := range fzSub.FindChildren("to-zone") {
+						for _, tzSub := range tzNode.Children {
+							pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+						}
 					}
 				}
 			}

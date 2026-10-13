@@ -317,12 +317,10 @@ func validatePolicyRequiredMatchStrict(nodes []*Node, lenientMissing, lenientVal
 					} else {
 						// Flat set: from-zone → <name> → to-zone → <name> → policy ...
 						for _, fzSub := range child.Children {
-							tzNode := fzSub.FindChild("to-zone")
-							if tzNode == nil {
-								continue
-							}
-							for _, tzSub := range tzNode.Children {
-								pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+							for _, tzNode := range fzSub.FindChildren("to-zone") {
+								for _, tzSub := range tzNode.Children {
+									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
+								}
 							}
 						}
 					}

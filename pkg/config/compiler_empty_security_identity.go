@@ -97,12 +97,10 @@ func validateNonEmptySecurityIdentities(nodes []*Node, lenient bool) ([]string, 
 					pairs = append(pairs, pair{fz.Keys[1], fz.Keys[3], fz})
 				} else {
 					for _, fzSub := range fz.Children {
-						tzNode := fzSub.FindChild("to-zone")
-						if tzNode == nil {
-							continue
-						}
-						for _, tzSub := range tzNode.Children {
-							pairs = append(pairs, pair{fzSub.Name(), tzSub.Name(), tzSub})
+						for _, tzNode := range fzSub.FindChildren("to-zone") {
+							for _, tzSub := range tzNode.Children {
+								pairs = append(pairs, pair{fzSub.Name(), tzSub.Name(), tzSub})
+							}
 						}
 					}
 				}
