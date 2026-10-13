@@ -422,15 +422,24 @@ func markResetHandoffDirtyQuiet(reason string) {
 //  3. Run the wipe while holding applySem. The wipe records a PENDING reset
 //     handoff (never clean): daemon post-verification below flips it clean
 //     only after passing, so a crash in between leaves repair-or-retry.
-//     - On FAILURE: exit the reset generation and release applySem (deferred)
-//     so the half-reset box is recoverable and a retry can run, and return
-//     the error. The caller must NOT stop the daemon — a stop here would
-//     strand a box whose secrets are still on disk.
+//     - On FAILURE while no invocation has yet completed a clean reset
+//     (including a wipe that ran but failed post-verification or the clean
+//     flip): exit the reset generation and release applySem (deferred) so
+//     the half-reset box is recoverable and a retry can run, and return the
+//     error. The caller must NOT stop the daemon — a stop here would strand
+//     a box whose secrets may still be on disk.
+//     - On FAILURE after an earlier invocation completed a clean reset
+//     (resetWipeSucceeded, #12616): skip every restore/resume step, stay in
+//     the terminal reset generation with every writer fence held, and
+//     return the error. The box is already wiped and verified, so a retry
+//     is not its recovery path: the daemon stays fenced until it exits, and
+//     the reboot completes the factory reset.
 //     - On SUCCESS: stop the helper, sweep and re-verify its state plus the
-//     Kea leases and DDNS/IPsec temps, flip the handoff clean, stay in the
-//     reset generation (never cleared) and return nil; the caller stops
-//     xpfd. applySem is released on return, but the resetting flag keeps
-//     every later writer from re-rendering during the stop window.
+//     Kea leases and DDNS/IPsec temps, flip the handoff clean, latch
+//     resetWipeSucceeded, stay in the reset generation (never cleared, not
+//     even by a later failed retry) and return nil; the caller stops xpfd.
+//     applySem is released on return, but the resetting flag keeps every
+//     later writer from re-rendering during the stop window.
 func (d *Daemon) factoryReset(ctx context.Context, wipe func() error) error {
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		return err

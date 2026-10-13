@@ -372,7 +372,11 @@ func (s *Server) SystemAction(ctx context.Context, req *pb.SystemActionRequest) 
 			// and the device is NOT safe to re-tenant. Do NOT stop xpfd here: the
 			// wipe did not finish, so stopping would strand a half-reset box (the
 			// daemon has already left the reset generation, so it keeps running
-			// normally until a retried zeroize succeeds).
+			// normally until a retried zeroize succeeds). Exception (#12616): if
+			// an earlier zeroize in this daemon lifetime already completed a
+			// clean reset, the daemon stays in the terminal reset generation with
+			// every writer fenced until it exits, and the reboot completes that
+			// earlier reset.
 			slog.Error("system zeroize did not fully erase config or firewall log state", "err", err)
 			return nil, status.Errorf(codes.Internal,
 				"zeroize incomplete: configuration or firewall log state may remain on disk: %v", err)
