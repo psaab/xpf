@@ -46,7 +46,8 @@ class BuildProvenanceTests(unittest.TestCase):
         (self.root / "cmd/xpfd/main.go").write_text(
             'package main\nimport "fixture.local/xpf/pkg"\nfunc main() { _ = pkg.Value }\n')
         (self.root / "cmd/cli/main.go").write_text(
-            'package main\nimport "fixture.local/xpf/pkg"\nfunc main() { _ = pkg.Value }\n')
+            'package main\nimport "fmt"\nvar injected = "clean"\n'
+            'func main() { fmt.Print(injected) }\n')
         (self.root / "scripts/image/build_provenance.py").write_bytes(
             (_HERE / "build_provenance.py").read_bytes())
         makefile = (_REPO / "Makefile").read_text(encoding="utf-8")
@@ -188,6 +189,25 @@ class BuildProvenanceTests(unittest.TestCase):
         with mock.patch.dict(os.environ, self.probe_env(), clear=True):
             self.assertEqual(bake.deb_version_for_head(str(self.root)), expected)
             self.assertEqual(self.make_suffix(), ".dirty" if dirty else "")
+
+    def test_build_ctl_pins_go_flags_ldflags_12546(self):
+        for goflags in (
+                "-ldflags=-X=main.injected=pwned",
+                "-ldflags=-s"):
+            with self.subTest(goflags=goflags):
+                env = self.probe_env()
+                env["GOENV"] = "off"
+                env["GOFLAGS"] = goflags
+                build = subprocess.run(
+                    ["make", "-s", "--no-print-directory", "-C",
+                     str(self.root), "build-ctl"],
+                    env=env, capture_output=True, text=True, check=False)
+                self.assertEqual(build.returncode, 0, build.stderr)
+                binary = subprocess.run(
+                    [str(self.root / "cli")], capture_output=True, text=True,
+                    check=False)
+                self.assertEqual(binary.returncode, 0, binary.stderr)
+                self.assertEqual(binary.stdout, "clean")
 
     def test_clean_source_is_clean_in_bake_and_make(self):
         self.assert_dirty_parity(False)
@@ -360,7 +380,6 @@ class BuildProvenanceTests(unittest.TestCase):
             env=env, capture_output=True, text=True, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("GOFLAGS -overlay redirects build inputs", result.stderr)
-
     def test_go_env_file_goflags_are_refused(self):
         # `go env -w` persisted GOFLAGS are honored by every go subprocess
         # but invisible to os.environ: read the effective flags (GLM defect).

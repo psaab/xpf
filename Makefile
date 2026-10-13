@@ -37,9 +37,10 @@ build-userspace-xdp: generate-userspace-xdp
 build:
 	CGO_ENABLED=0 $(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/xpfd
 
-# Build the remote CLI client
+# Build the remote CLI client. Pin empty linker flags so GOFLAGS cannot inject
+# linker options into the cli binary.
 build-ctl:
-	CGO_ENABLED=0 $(GO) build -o cli ./cmd/cli
+	CGO_ENABLED=0 $(GO) build -ldflags "" -o cli ./cmd/cli
 
 # #9726: build.rs re-records the linked libxdp/libbpf versions, and so relinks,
 # when libxdp.a, libxdp.pc or libbpf.pc changes. Cargo compares only mtimes, so
