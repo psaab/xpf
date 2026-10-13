@@ -530,7 +530,7 @@ func compilePolicy(polInst struct {
 		len(policyUnsupportedThenSiblings(polInst.node)) > 0 ||
 		len(policyUnsupportedThenLogTokens(polInst.node)) > 0 ||
 		len(droppedEnforcementSubtrees) > 0 ||
-		len(policyUnresolvedScalarLeafTails(polInst.node)) > 0 ||
+		len(policyUnresolvedScalarLeafTails(policyLeaves)) > 0 ||
 		len(unknownEnforcementChildren) > 0 {
 		pol.LenientContentDropped = true
 	}
@@ -710,12 +710,13 @@ func policyUnknownEnforcementChildren(polNode *Node) []string {
 }
 
 // policyUnresolvedScalarLeafTails finds recognized scalar leaves whose
-// trailing run was not fully resolved by the tolerant expander.
-func policyUnresolvedScalarLeafTails(polNode *Node) []string {
-	if polNode == nil {
+// trailing run was not fully resolved by the tolerant expander. The input
+// is the already-expanded policyLeaves (callers expand once with the
+// scope-correct schema, #12634 review fold).
+func policyUnresolvedScalarLeafTails(expanded *Node) []string {
+	if expanded == nil {
 		return nil
 	}
-	expanded := expandResolvingRun9792(polNode, policySchema9792(false))
 	var bad []string
 	for _, child := range expanded.Children {
 		if child == nil || len(child.Keys) == 0 {
