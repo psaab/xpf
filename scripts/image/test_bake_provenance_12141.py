@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -191,23 +192,31 @@ class BuildProvenanceTests(unittest.TestCase):
             self.assertEqual(self.make_suffix(), ".dirty" if dirty else "")
 
     def test_build_ctl_pins_go_flags_ldflags_12546(self):
+        def build_ctl(goflags):
+            env = self.probe_env()
+            env["GOENV"] = "off"
+            env["GOFLAGS"] = goflags
+            build = subprocess.run(
+                ["make", "-s", "--no-print-directory", "-C",
+                 str(self.root), "build-ctl"],
+                env=env, capture_output=True, text=True, check=False)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            binary = subprocess.run(
+                [str(self.root / "cli")], capture_output=True, text=True,
+                check=False)
+            self.assertEqual(binary.returncode, 0, binary.stderr)
+            self.assertEqual(binary.stdout, "clean")
+            return hashlib.sha256((self.root / "cli").read_bytes()).hexdigest()
+
+        # -ldflags=-s still prints "clean": it strips the binary and records
+        # -ldflags=-s in its build info. Only byte identity with the
+        # GOFLAGS-free build proves the inherited linker flags were dropped.
+        reference = build_ctl("")
         for goflags in (
                 "-ldflags=-X=main.injected=pwned",
                 "-ldflags=-s"):
             with self.subTest(goflags=goflags):
-                env = self.probe_env()
-                env["GOENV"] = "off"
-                env["GOFLAGS"] = goflags
-                build = subprocess.run(
-                    ["make", "-s", "--no-print-directory", "-C",
-                     str(self.root), "build-ctl"],
-                    env=env, capture_output=True, text=True, check=False)
-                self.assertEqual(build.returncode, 0, build.stderr)
-                binary = subprocess.run(
-                    [str(self.root / "cli")], capture_output=True, text=True,
-                    check=False)
-                self.assertEqual(binary.returncode, 0, binary.stderr)
-                self.assertEqual(binary.stdout, "clean")
+                self.assertEqual(build_ctl(goflags), reference)
 
     def test_clean_source_is_clean_in_bake_and_make(self):
         self.assert_dirty_parity(False)
@@ -380,6 +389,7 @@ class BuildProvenanceTests(unittest.TestCase):
             env=env, capture_output=True, text=True, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("GOFLAGS -overlay redirects build inputs", result.stderr)
+
     def test_go_env_file_goflags_are_refused(self):
         # `go env -w` persisted GOFLAGS are honored by every go subprocess
         # but invisible to os.environ: read the effective flags (GLM defect).
