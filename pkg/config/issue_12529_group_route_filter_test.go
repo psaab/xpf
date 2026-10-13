@@ -68,6 +68,44 @@ func TestExpandGroupsRetainsPackedRouteFilterRange12529(t *testing.T) {
 	}
 }
 
+// Modifier followed by another clause in the same packed group
+// statement: width over-consumption would swallow `then accept`
+// into the filter and silently compile rf=[] (GLM R1 F1).
+func TestExpandGroupsRouteFilterMidTailNotOverConsumed12529(t *testing.T) {
+	text := "groups { G { policy-options { policy-statement P { term T from route-filter 10.0.0.0/8 upto /24 then accept; } } } }\n" +
+		"policy-options { apply-groups G; policy-statement P { term T then reject; } }"
+	tree, errs := config.NewParser(text).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("parse: %v", errs[0])
+	}
+	if err := tree.ExpandGroups(); err != nil {
+		t.Fatalf("ExpandGroups: %v", err)
+	}
+	want := []string{"route-filter", "10.0.0.0/8", "upto", "/24"}
+	if got := findRouteFilter12529(tree.Children, want); got == nil {
+		var keys [][]string
+		dumpKeys12529(tree.Children, &keys)
+		t.Fatalf("mid-tail route-filter over-consumed; keys=%q", keys)
+	}
+	compiled, err := config.CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("CompileConfig after expansion: %v", err)
+	}
+	found := false
+	for _, pol := range compiled.PolicyOptions.PolicyStatements {
+		for _, term := range pol.Terms {
+			for _, rf := range term.RouteFilters {
+				if rf.Prefix == "10.0.0.0/8" {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("compiled policies lost the mid-tail route-filter: %+v", compiled.PolicyOptions)
+	}
+}
+
 func TestExpandGroupsRetainsBracedTermRouteFilterRange12529(t *testing.T) {
 	text := `groups { G { policy-options { policy-statement P { term T from route-filter 10.0.0.0/8 upto /24; } } } }
 policy-options { apply-groups G; policy-statement P { term T { then accept; } } }`
