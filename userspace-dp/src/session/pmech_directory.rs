@@ -17,13 +17,13 @@
 // Token/waiter scan paths take only the token-index mutex.
 
 use super::SessionKey;
-use rustc_hash::FxSeededState;
+use crate::hot_hash_seed::HotPathSeededState;
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::{
-    Mutex, OnceLock, RwLock,
     atomic::{AtomicU64, AtomicUsize, Ordering},
+    Mutex, OnceLock, RwLock,
 };
 
 /// Fixed token capacity: one slot per D11 input slot (V4 D.2).
@@ -285,7 +285,7 @@ struct TokenRecord {
     plan_expiry_ns: u64,
 }
 
-type ShardMap = HashMap<SessionKey, ClaimRecord, FxSeededState>;
+type ShardMap = HashMap<SessionKey, ClaimRecord, HotPathSeededState>;
 
 /// Sharded global/session-owner PMech directory (V3 + V4 E).
 ///
@@ -293,7 +293,7 @@ type ShardMap = HashMap<SessionKey, ClaimRecord, FxSeededState>;
 /// `Mutex`, atomics) makes the `global()` singleton shareable across workers.
 pub(crate) struct PMechSessionDirectory {
     shards: [RwLock<ShardMap>; NUM_SHARDS],
-    shard_hasher: FxSeededState,
+    shard_hasher: HotPathSeededState,
     tokens: Mutex<HashMap<u64, TokenRecord>>,
     active_claim_count: AtomicUsize,
     held_waiters: AtomicUsize,
@@ -304,12 +304,13 @@ pub(crate) struct PMechSessionDirectory {
 
 impl PMechSessionDirectory {
     pub(crate) fn new() -> Self {
-        let seed = crate::hot_hash_seed::hot_path_hash_seed() as usize;
+        Self::with_seed(crate::hot_hash_seed::hot_path_hash_seed())
+    }
+    fn with_seed(seed: u64) -> Self {
+        let state = HotPathSeededState::new(seed);
         Self {
-            shards: std::array::from_fn(|_| {
-                RwLock::new(HashMap::with_hasher(FxSeededState::with_seed(seed)))
-            }),
-            shard_hasher: FxSeededState::with_seed(seed),
+            shards: std::array::from_fn(|_| RwLock::new(HashMap::with_hasher(state))),
+            shard_hasher: state,
             tokens: Mutex::new(HashMap::new()),
             active_claim_count: AtomicUsize::new(0),
             held_waiters: AtomicUsize::new(0),
@@ -1089,5 +1090,38 @@ mod tests {
             false,
             None,
         ));
+    }
+
+    #[test]
+    fn keyed_siphash_spreads_v6_s3_directory_keys_12778() {
+        let key = ipsec_key();
+        let placement = |seed| {
+            let directory = PMechSessionDirectory::with_seed(seed);
+            (0..256u16)
+                .map(|i| {
+                    let candidate = SessionKey {
+                        addr_family: libc::AF_INET6 as u8,
+                        src_ip: IpAddr::V6(std::net::Ipv6Addr::new(
+                            0x2001, 0xdb8, 0, i, 0, 0, 0, 1,
+                        )),
+                        ..key.clone()
+                    };
+                    directory.shard_index(&candidate)
+                })
+                .collect::<Vec<_>>()
+        };
+        for seed in [1, 42, 0x0123_4567_89ab_cdef, u64::MAX] {
+            let shards: std::collections::HashSet<_> = placement(seed).into_iter().collect();
+            assert!(
+                shards.len() > 16,
+                "seed {seed:#x} spread to only {} shards",
+                shards.len()
+            );
+        }
+        assert_ne!(
+            placement(42),
+            placement(43),
+            "seed must change shard layout"
+        );
     }
 }

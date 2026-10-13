@@ -76,8 +76,8 @@
 //! deferred follow-up (out of scope for #5288); this limiter only ensures a
 //! repeat/flood no longer does unbounded socket work on the XSK worker.
 
-use rustc_hash::FxHasher;
-use std::hash::{Hash, Hasher};
+use crate::hot_hash_seed::HotPathSeededState;
+use std::hash::BuildHasher;
 use std::net::IpAddr;
 
 /// Number of buckets. Power of two so the bucket index is a single mask.
@@ -133,10 +133,8 @@ impl Default for Slot {
 /// One set-associative bucket: [`KERNEL_NEIGH_LIMITER_WAYS`] independent ways.
 type Bucket = [Slot; KERNEL_NEIGH_LIMITER_WAYS];
 
-fn bucket_index(key: &(i32, IpAddr)) -> usize {
-    let mut hasher = FxHasher::default();
-    key.hash(&mut hasher);
-    (hasher.finish() as usize) & (KERNEL_NEIGH_LIMITER_BUCKETS - 1)
+fn bucket_index_with(key: &(i32, IpAddr), state: HotPathSeededState) -> usize {
+    (state.hash_one(key) as usize) & (KERNEL_NEIGH_LIMITER_BUCKETS - 1)
 }
 
 /// Pick the way a genuine change should CLAIM when no way in `bucket` owns its
@@ -164,6 +162,7 @@ pub(in crate::afxdp) struct KernelNeighborProgramLimiter {
     /// `BindingWorker`.
     buckets: Box<[Bucket; KERNEL_NEIGH_LIMITER_BUCKETS]>,
     min_interval_ns: u64,
+    hash_state: HotPathSeededState,
 }
 
 impl KernelNeighborProgramLimiter {
@@ -172,11 +171,16 @@ impl KernelNeighborProgramLimiter {
     }
 
     fn with_interval(min_interval_ns: u64) -> Self {
+        Self::with_seed(min_interval_ns, crate::hot_hash_seed::hot_path_hash_seed())
+    }
+
+    fn with_seed(min_interval_ns: u64, seed: u64) -> Self {
         Self {
             buckets: Box::new(
                 [[Slot::default(); KERNEL_NEIGH_LIMITER_WAYS]; KERNEL_NEIGH_LIMITER_BUCKETS],
             ),
             min_interval_ns,
+            hash_state: HotPathSeededState::new(seed),
         }
     }
 
@@ -200,7 +204,7 @@ impl KernelNeighborProgramLimiter {
         now_ns: u64,
     ) -> bool {
         let min_interval_ns = self.min_interval_ns;
-        let bucket = &mut self.buckets[bucket_index(&key)];
+        let bucket = &mut self.buckets[bucket_index_with(&key, self.hash_state)];
 
         // Fast path: a way in this bucket already OWNS this key. Apply the
         // unchanged #5288 per-key decision on that way.
@@ -454,21 +458,13 @@ mod tests {
         }
     }
 
-    /// Raw FxHash of a key (same hasher the limiter indexes with). Used by the
-    /// #6129 test to construct a colliding key pair WITHOUT depending on the
-    /// production index function, so the test compiles and reproduces the
-    /// starvation against the pre-fix direct-mapped code too.
+    /// Raw keyed hash of a key (same keying scheme the limiter indexes with).
     fn full_hash(key: &(i32, IpAddr)) -> u64 {
-        let mut hasher = FxHasher::default();
-        key.hash(&mut hasher);
-        hasher.finish()
+        HotPathSeededState::new(crate::hot_hash_seed::hot_path_hash_seed()).hash_one(key)
     }
 
-    /// Two distinct keys whose FxHash agrees in the low 8 bits. Such a pair
-    /// collides in BOTH the pre-fix 256-slot direct-mapped table (index = low 8
-    /// bits) AND the post-fix bucketed table (bucket = low 6 bits ⊂ low 8
-    /// bits), so the #6129 test reproduces the starvation on the reverted code
-    /// and proves the fix on the current code.
+    /// Two distinct keys whose keyed hash agrees in the low 8 bits. Such a pair
+    /// collides in the limiter's bucket placement, reproducing the contention.
     fn find_colliding_keys() -> ((i32, IpAddr), (i32, IpAddr)) {
         let base = v4(1);
         let base_slot = full_hash(&base) & 0xff;
@@ -589,6 +585,37 @@ mod tests {
             "a no-genuine-change colliding flood must program at most once per \
              key ({} keys), got {fired} — #5288 bound preserved",
             colliding.len()
+        );
+    }
+
+    #[test]
+    fn keyed_siphash_spreads_neighbor_limiter_buckets_12778() {
+        let placement = |seed| {
+            (0..256u16)
+                .map(|i| {
+                    bucket_index_with(
+                        &(
+                            24,
+                            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, i, 0, 0, 0, 1)),
+                        ),
+                        HotPathSeededState::new(seed),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        for seed in [1, 42, 0x0123_4567_89ab_cdef, u64::MAX] {
+            let buckets = placement(seed);
+            let distinct: std::collections::HashSet<_> = buckets.iter().copied().collect();
+            assert!(
+                distinct.len() > 32,
+                "seed {seed:#x} spread to only {} buckets",
+                distinct.len()
+            );
+        }
+        assert_ne!(
+            placement(42),
+            placement(43),
+            "seed must change bucket layout"
         );
     }
 }

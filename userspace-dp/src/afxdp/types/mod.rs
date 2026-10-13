@@ -1,7 +1,7 @@
 use super::*;
-use std::collections::{HashMap, HashSet};
+use crate::hot_hash_seed::HotPathSeededState;
 use crate::session::{BareSessionTuple, PMechWaiterRef, SessionScope};
-use rustc_hash::FxSeededState;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // #1035 P4: shared CoS lease + V_min coordination types split into a
@@ -116,15 +116,15 @@ impl SharedNatAmbiguityIndex {
 
 enum SharedBareTupleScopes {
     One(SessionScope),
-    Many(HashSet<SessionScope, FxSeededState>),
+    Many(HashSet<SessionScope, HotPathSeededState>),
 }
 
 impl SharedBareTupleScopes {
-    fn insert(&mut self, scope: SessionScope, state: &FxSeededState) {
+    fn insert(&mut self, scope: SessionScope, state: &HotPathSeededState) {
         let replacement = match self {
             Self::One(existing) if *existing == scope => return,
             Self::One(existing) => {
-                let mut scopes = HashSet::with_hasher(state.clone());
+                let mut scopes = HashSet::with_hasher(*state);
                 scopes.insert(*existing);
                 scopes.insert(scope);
                 Some(Self::Many(scopes))
@@ -170,17 +170,21 @@ impl SharedBareTupleScopes {
 }
 
 pub(super) struct SharedSessionBareTupleIndex {
-    scopes: HashMap<BareSessionTuple, SharedBareTupleScopes, FxSeededState>,
-    state: FxSeededState,
+    scopes: HashMap<BareSessionTuple, SharedBareTupleScopes, HotPathSeededState>,
+    state: HotPathSeededState,
 }
 
 impl Default for SharedSessionBareTupleIndex {
     fn default() -> Self {
-        let state = FxSeededState::with_seed(
-            crate::hot_hash_seed::hot_path_hash_seed() as usize,
-        );
+        Self::with_seed(crate::hot_hash_seed::hot_path_hash_seed())
+    }
+}
+
+impl SharedSessionBareTupleIndex {
+    fn with_seed(seed: u64) -> Self {
+        let state = HotPathSeededState::new(seed);
         Self {
-            scopes: HashMap::with_hasher(state.clone()),
+            scopes: HashMap::with_hasher(state),
             state,
         }
     }
@@ -896,5 +900,72 @@ mod with_destination_port_tests_9034 {
             after.forward_key, before.forward_key,
             "no translation must leave the key untouched"
         );
+    }
+}
+
+#[cfg(test)]
+mod bare_tuple_keyed_hash_tests_12778 {
+    use super::*;
+    use std::hash::BuildHasher;
+    use std::net::{IpAddr, Ipv6Addr};
+
+    #[test]
+    fn shared_bare_tuple_index_uses_keyed_siphash_12778() {
+        let placement = |seed| {
+            let index = SharedSessionBareTupleIndex::with_seed(seed);
+            (0..256u16)
+                .map(|i| {
+                    let key = SessionKey {
+                        addr_family: libc::AF_INET6 as u8,
+                        protocol: crate::afxdp::PROTO_UDP,
+                        src_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, i, 0, 0, 0, 1)),
+                        dst_ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 2, 0, 0, 0, 2)),
+                        src_port: 40_000,
+                        dst_port: 443,
+                        discriminator: Default::default(),
+                        routing_domain: 0,
+                    };
+                    index.scopes.hasher().hash_one(&key.bare_tuple()) & 0x3f
+                })
+                .collect::<Vec<_>>()
+        };
+        for seed in [1, 42, 0x0123_4567_89ab_cdef, u64::MAX] {
+            let buckets: std::collections::HashSet<_> = placement(seed).into_iter().collect();
+            assert!(
+                buckets.len() > 32,
+                "seed {seed:#x} spread to only {} buckets",
+                buckets.len()
+            );
+        }
+        assert_ne!(
+            placement(42),
+            placement(43),
+            "seed must change bare tuple layout"
+        );
+    }
+
+    #[test]
+    fn shared_bare_tuple_index_preserves_cross_scope_lookup_12778() {
+        let key = SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::afxdp::PROTO_UDP,
+            src_ip: "192.0.2.1".parse().unwrap(),
+            dst_ip: "198.51.100.2".parse().unwrap(),
+            src_port: 40_000,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 1,
+        };
+        let other_scope = SessionKey {
+            routing_domain: 2,
+            ..key
+        };
+        let mut index = SharedSessionBareTupleIndex::default();
+        index.insert(&key);
+        assert!(!index.has_other_scope(&key));
+        index.insert(&other_scope);
+        assert!(index.has_other_scope(&key));
+        index.remove(&other_scope);
+        assert!(!index.has_other_scope(&key));
     }
 }
