@@ -120,7 +120,7 @@ func junosHostResolveAddrSet(cfg *Config, tokens []string, feedBound map[string]
 				continue
 			}
 			if _, found := ab.AddressSets[tok]; found {
-				names, err := ExpandAddressSet(tok, ab)
+				names, err := expandAddressSetLeaves(tok, ab)
 				if err != nil {
 					ok = false
 					continue

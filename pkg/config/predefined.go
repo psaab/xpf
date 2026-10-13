@@ -452,7 +452,16 @@ func addressSetExpansionErrorf(name, format string, args ...any) error {
 // an unknown member statement is rejected rather than expanded to its surviving
 // subset (#11822). Max depth is five nested edges.
 func ExpandAddressSet(name string, ab *AddressBook) ([]string, error) {
-	return expandAddrSet(name, ab, make(map[string]bool), 0)
+	return expandAddrSetMode(name, ab, make(map[string]bool), 0, false)
+}
+
+// expandAddressSetLeaves is for consumers that need literal address prefixes,
+// rather than the set-ID graph returned by ExpandAddressSet. Junos-host deny
+// and static-NAT prefix-name need scalar address values; a direct `address`
+// member naming a set therefore expands as a cross-kind reference. The
+// dataplane compiler intentionally keeps that member as the referenced set ID.
+func expandAddressSetLeaves(name string, ab *AddressBook) ([]string, error) {
+	return expandAddrSetMode(name, ab, make(map[string]bool), 0, true)
 }
 
 func addressSetForExpansion(
@@ -529,6 +538,16 @@ func validateAddrSetDepthAndCycles(
 }
 
 func expandAddrSet(name string, ab *AddressBook, visited map[string]bool, depth int) ([]string, error) {
+	return expandAddrSetMode(name, ab, visited, depth, false)
+}
+
+func expandAddrSetMode(
+	name string,
+	ab *AddressBook,
+	visited map[string]bool,
+	depth int,
+	resolveCrossKind bool,
+) ([]string, error) {
 	as, err := addressSetForExpansion(name, ab, visited, depth)
 	if err != nil {
 		return nil, err
@@ -540,8 +559,26 @@ func expandAddrSet(name string, ab *AddressBook, visited map[string]bool, depth 
 	var result []string
 	seen := make(map[string]bool)
 
-	// Direct address members
+	// Direct address members remain address names for the ID-graph API. Leaf
+	// consumers may opt into resolving a member that names a set.
 	for _, addrName := range as.Addresses {
+		if resolveCrossKind {
+			if _, isAddress := ab.Addresses[addrName]; !isAddress {
+				if _, isSet := ab.AddressSets[addrName]; isSet {
+					expanded, err := expandAddrSetMode(addrName, ab, visited, depth+1, true)
+					if err != nil {
+						return nil, err
+					}
+					for _, a := range expanded {
+						if !seen[a] {
+							seen[a] = true
+							result = append(result, a)
+						}
+					}
+					continue
+				}
+			}
+		}
 		if !seen[addrName] {
 			seen[addrName] = true
 			result = append(result, addrName)
@@ -550,7 +587,7 @@ func expandAddrSet(name string, ab *AddressBook, visited map[string]bool, depth 
 
 	// Nested address-set members
 	for _, setName := range as.AddressSets {
-		expanded, err := expandAddrSet(setName, ab, visited, depth+1)
+		expanded, err := expandAddrSetMode(setName, ab, visited, depth+1, resolveCrossKind)
 		if err != nil {
 			return nil, err
 		}
