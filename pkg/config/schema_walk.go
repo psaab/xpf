@@ -113,6 +113,9 @@ func SchemaValidateWithDefinitions(tree, defsSource *ConfigTree, cfg *Config) er
 	// persisted by the caller. Normalizing it in place here would rewrite the
 	// stored configuration as a side effect of validating it.
 	tree = normalizeCompactForValidation(tree)
+	if err := validateStaticRouteInterfaceQNHChild12790(tree.Children); err != nil {
+		return err
+	}
 	// #4060: reject the raw-AST redaction placeholder ("##SECRET-DATA##") on
 	// commit-ingest. This is the symmetric guard for #4051 display redaction:
 	// the value is a display artifact, never a valid configured secret.
