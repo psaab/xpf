@@ -404,18 +404,16 @@ func TestDeleteSessionItselfNamesTheDomainOnTheWire9146(t *testing.T) {
 	}
 
 	got := rec.all()
-	if len(got) == 0 {
-		t.Fatal("DeleteSession emitted no helper sync at all — the delete never reaches the standby")
+	if len(got) != 1 {
+		t.Fatalf("DeleteSession emitted %d helper requests, want exactly one mirror_delete: %+v", len(got), got)
 	}
-	for i, r := range got {
-		if r.Operation != "mirror_delete" {
-			continue
-		}
-		if r.RoutingDomain != tenant {
-			t.Fatalf("DeleteSession wire[%d] carried routing_domain=%d, want %d — the value is "+
-				"fetched three lines earlier and its domain must reach the wire (#9146)",
-				i, r.RoutingDomain, tenant)
-		}
+	if got[0].Operation != "mirror_delete" {
+		t.Fatalf("DeleteSession wire operation = %q, want mirror_delete", got[0].Operation)
+	}
+	if got[0].RoutingDomain != tenant {
+		t.Fatalf("DeleteSession wire carried routing_domain=%d, want %d — the value is "+
+			"fetched three lines earlier and its domain must reach the wire (#9146)",
+			got[0].RoutingDomain, tenant)
 	}
 }
 

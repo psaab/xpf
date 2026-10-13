@@ -59,16 +59,53 @@ func newMirrorOKManager5305(t *testing.T) *Manager {
 			go func() {
 				defer conn.Close()
 				var req ControlRequest
+				resp := ControlResponse{OK: false, Error: "invalid helper test request"}
 				if err := json.NewDecoder(conn).Decode(&req); err == nil && req.SessionSync != nil {
-					if req.SessionSync.AddrFamily == dataplane.AFInet {
-						_ = m.bpfShim.SetSessionV4(rollbackKeyV4(),
-							dataplane.SessionValue{IngressZone: 1, EgressZone: 2, PolicyID: 42})
-					} else if req.SessionSync.AddrFamily == dataplane.AFInet6 {
-						_ = m.bpfShim.SetSessionV6(rollbackKeyV6(),
-							dataplane.SessionValueV6{IngressZone: 1, EgressZone: 2, PolicyID: 42})
+					syncReq := req.SessionSync
+					switch syncReq.AddrFamily {
+					case dataplane.AFInet:
+						key := rollbackKeyV4()
+						if syncReq.Operation != "mirror_upsert" ||
+							syncReq.SrcIP != net.IP(key.SrcIP[:]).String() ||
+							syncReq.DstIP != net.IP(key.DstIP[:]).String() ||
+							syncReq.SrcPort != networkUint16ToHost(key.SrcPort) ||
+							syncReq.DstPort != networkUint16ToHost(key.DstPort) ||
+							syncReq.Protocol != key.Protocol ||
+							syncReq.IsReverse ||
+							syncReq.IngressZoneID != 1 || syncReq.EgressZoneID != 2 ||
+							syncReq.PolicyID != 42 {
+							resp = ControlResponse{OK: false, Error: "unexpected IPv4 helper request"}
+						} else if err := m.bpfShim.SetSessionV4(key,
+							dataplane.SessionValue{IngressZone: syncReq.IngressZoneID,
+								EgressZone: syncReq.EgressZoneID, PolicyID: syncReq.PolicyID}); err != nil {
+							resp = ControlResponse{OK: false, Error: err.Error()}
+						} else {
+							resp = ControlResponse{OK: true}
+						}
+					case dataplane.AFInet6:
+						key := rollbackKeyV6()
+						if syncReq.Operation != "mirror_upsert" ||
+							syncReq.SrcIP != net.IP(key.SrcIP[:]).String() ||
+							syncReq.DstIP != net.IP(key.DstIP[:]).String() ||
+							syncReq.SrcPort != networkUint16ToHost(key.SrcPort) ||
+							syncReq.DstPort != networkUint16ToHost(key.DstPort) ||
+							syncReq.Protocol != key.Protocol ||
+							syncReq.IsReverse ||
+							syncReq.IngressZoneID != 1 || syncReq.EgressZoneID != 2 ||
+							syncReq.PolicyID != 42 {
+							resp = ControlResponse{OK: false, Error: "unexpected IPv6 helper request"}
+						} else if err := m.bpfShim.SetSessionV6(key,
+							dataplane.SessionValueV6{IngressZone: syncReq.IngressZoneID,
+								EgressZone: syncReq.EgressZoneID, PolicyID: syncReq.PolicyID}); err != nil {
+							resp = ControlResponse{OK: false, Error: err.Error()}
+						} else {
+							resp = ControlResponse{OK: true}
+						}
+					default:
+						resp = ControlResponse{OK: false, Error: "unexpected address family"}
 					}
 				}
-				_ = json.NewEncoder(conn).Encode(ControlResponse{OK: true})
+				_ = json.NewEncoder(conn).Encode(resp)
 			}()
 		}
 	}()
