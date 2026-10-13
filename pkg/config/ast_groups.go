@@ -580,15 +580,24 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 				// decision then happens one level down against the expanded
 				// child, so an inline value still wins.
 				if !peer.IsLeaf {
-					if body := groupPackedLeafBody(ancestorPath, s); body != nil {
-						// Canonical alias peers can receive successive packed
-						// bodies (for example vrrp-group 01 after 1). Mark
-						// synthesized terminals so their scalar children take
-						// the same inline-wins leaf path as the first promotion.
-						if canonicalAliasLeaf9859(ancestorPath, s) {
-							markSynthTerminals9855(body)
-						}
-
+					body := groupPackedLeafBody(ancestorPath, s)
+					// Canonical alias peers can receive successive packed
+					// bodies (for example vrrp-group 01 after 1). Mark
+					// synthesized terminals so their scalar children take
+					// the same inline-wins leaf path as the first promotion.
+					if body != nil && canonicalAliasLeaf9859(ancestorPath, s) {
+						markSynthTerminals9855(body)
+					}
+					if body == nil {
+						// #12530: a tail outside the schema grammar merges as
+						// one leaf under the same peer. One level down it meets
+						// the peer's own same-instance children (an inline
+						// `unit 0`) and apply-groups-except, exactly as an
+						// expanded body does, instead of being overridden away
+						// before post-expansion gates can see it.
+						body = groupPackedLeafUnmodelledTail(ancestorPath, s)
+					}
+					if body != nil {
 						// #9862: the synthesized body carries s's provenance, so a
 						// nested group's packed leaf filters as nested below. The
 						// fallback covers only the impossible untagged case.
@@ -607,26 +616,6 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 							appendPath(ancestorPath, peer.Keys), budget, group, vars, level, haveExcept, deferWildcards); err != nil {
 							return err
 						}
-						continue
-					}
-					if body := groupPackedLeafUnmodelledTail(ancestorPath, s); body != nil {
-						if err := budget.charge(countNodes(body)); err != nil {
-							return err
-						}
-						if haveExcept {
-							contrib := s.fromGroups
-							if len(contrib) == 0 {
-								contrib = []string{group}
-							}
-							addNodeContrib9862(body, contrib)
-							bodyLevel := collectExceptNames9862(
-								peer.Children, vars, cloneExceptSet9862(level))
-							if contribExcluded9862(body[0], group, bodyLevel) {
-								continue
-							}
-						}
-						appendDuplicateBlockMergeMarkersToLeaves9023(body, markers)
-						peer.Children = append(peer.Children, body...)
 						continue
 					}
 				}
@@ -952,8 +941,8 @@ func schemaAtAncestorPath(ancestorPath [][]string) *schemaNode {
 //     applies, so INLINE STILL WINS. The fix does not weaken that.
 //
 // Returns nil unless the tail actually expands under the schema. When it does
-// not, groupPackedLeafUnmodelledTail preserves it if a matching inline
-// container peer would otherwise hide it.
+// not and the peer is a container, mergeNodes merges the tail from
+// groupPackedLeafUnmodelledTail into it instead (#12530).
 func groupPackedLeafBody(ancestorPath [][]string, s *Node) []*Node {
 	if s == nil || len(s.Keys) < 2 {
 		return nil
@@ -977,10 +966,12 @@ func groupPackedLeafBody(ancestorPath [][]string, s *Node) []*Node {
 	return expanded
 }
 
-// groupPackedLeafUnmodelledTail preserves an unexpandable packed tail as one
-// leaf under its inline container peer. Post-expansion validation must still
-// see keywords outside the schema grammar; valid tails use the structured
-// expansion above and retain ordinary inline-wins behavior.
+// groupPackedLeafUnmodelledTail returns the tail of a packed group leaf that
+// names a schema container, past its identity keys, as one leaf carrying the
+// tail tokens' quote/bracket provenance (#12530). mergeNodes merges it into the
+// inline container peer when groupPackedLeafBody cannot expand the tail, so the
+// ordinary peer rules run one level down and post-expansion gates still see
+// keywords outside the schema grammar.
 func groupPackedLeafUnmodelledTail(ancestorPath [][]string, s *Node) []*Node {
 	if s == nil || len(s.Keys) < 2 {
 		return nil
