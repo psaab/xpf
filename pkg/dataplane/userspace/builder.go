@@ -198,6 +198,8 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 	}
 	// #3261 / #10688 / #12047: stamp refusal reasons from the built policy rules
 	// and address-book rows. The cfg-only capability derivation cannot see feeds.
+	// #12507: then the static routes and bind-less selector fence rows this
+	// build publishes below whose CIDR mask the helper cannot parse.
 	caps := deriveUserspaceCapabilities(cfg)
 	caps.PolicyContentRejected = collectPolicyContentRejections(policies)
 	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
@@ -206,6 +208,10 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 		collectAddressBookCIDRMaskRejections(addressBooks)...)
 	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
 		collectPolicyCIDRMaskRejections(policies)...)
+	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
+		collectStaticRouteCIDRMaskRejections(cfg)...)
+	caps.PolicyContentRejected = append(caps.PolicyContentRejected,
+		collectBindlessSelectorCIDRMaskRejections(cfg)...)
 	// #3438: a BuildCatalog fault (overflow / malformed application-set) fails
 	// the snapshot closed rather than shipping an empty catalog that would
 	// silently degrade all session naming to UNKNOWN.
@@ -341,8 +347,24 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosed(cfg *config.Conf
 	return snap, nil
 }
 func buildBindlessSelectorRows(cfg *config.Config) []IpsecBindlessSelectorSnapshot {
+	var rows []IpsecBindlessSelectorSnapshot
+	forEachBindlessSelectorRow(cfg, func(vpn string) {
+		slog.Warn("bindless VPN skipped by swanctl render gets no fence rows; its selectors are unfenced until the render failure is fixed",
+			"vpn", vpn)
+	}, func(_ string, row IpsecBindlessSelectorSnapshot) {
+		rows = append(rows, row)
+	})
+	return rows
+}
+
+// forEachBindlessSelectorRow visits, in VPN-name order, each bind-less selector
+// fence row the snapshot publishes, with the VPN that owns it. skipped (may be
+// nil) is told about a bind-less VPN the swanctl render skips. The #12507
+// refusal collector walks the same rows without logging.
+func forEachBindlessSelectorRow(cfg *config.Config, skipped func(vpn string),
+	visit func(vpn string, row IpsecBindlessSelectorSnapshot)) {
 	if cfg == nil || len(cfg.Security.IPsec.VPNs) == 0 {
-		return nil
+		return
 	}
 	// #11083: fence only VPNs the swanctl render would load. A skipped
 	// (unrenderable gateway / unresolved IKE / malformed selectors) VPN
@@ -355,7 +377,6 @@ func buildBindlessSelectorRows(cfg *config.Config) []IpsecBindlessSelectorSnapsh
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	var rows []IpsecBindlessSelectorSnapshot
 	for _, name := range names {
 		vpn := cfg.Security.IPsec.VPNs[name]
 		if vpn == nil || vpn.BindInterface != "" {
@@ -363,8 +384,9 @@ func buildBindlessSelectorRows(cfg *config.Config) []IpsecBindlessSelectorSnapsh
 		}
 		if rendered != nil {
 			if !rendered[name] {
-				slog.Warn("bindless VPN skipped by swanctl render gets no fence rows; its selectors are unfenced until the render failure is fixed",
-					"vpn", name)
+				if skipped != nil {
+					skipped(name)
+				}
 				continue
 			}
 		}
@@ -373,13 +395,12 @@ func buildBindlessSelectorRows(cfg *config.Config) []IpsecBindlessSelectorSnapsh
 				!config.IsTrafficSelectorShape(selector.RemoteTS) {
 				continue
 			}
-			rows = append(rows, IpsecBindlessSelectorSnapshot{
+			visit(name, IpsecBindlessSelectorSnapshot{
 				LocalTS:  selector.LocalTS,
 				RemoteTS: selector.RemoteTS,
 			})
 		}
 	}
-	return rows
 }
 
 // snapshotContentHash computes a SHA-256 hash over the stable content of a

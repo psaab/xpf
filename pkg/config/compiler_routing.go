@@ -709,12 +709,70 @@ func canonicalizeStaticRoutesAcrossTables(cfg *Config) {
 			cfg.RoutingOptions.StaticRoutes,
 			cfg.RoutingOptions.Inet6StaticRoutes,
 		)
+	canonicalizeStaticRouteDestinationMasks(
+		cfg.RoutingOptions.StaticRoutes, cfg.RoutingOptions.Inet6StaticRoutes)
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil {
 			continue
 		}
 		ri.StaticRoutes, ri.Inet6StaticRoutes = canonicalizeStaticRouteCollections(
 			ri.StaticRoutes, ri.Inet6StaticRoutes)
+		canonicalizeStaticRouteDestinationMasks(ri.StaticRoutes, ri.Inet6StaticRoutes)
+	}
+}
+
+// canonicalizeStaticRouteDestinationMasks writes each folded route's
+// destination in the mask spelling every consumer parses (#12507).
+//
+// net.ParseCIDR accepts a zero-padded mask, so a padded destination compiles,
+// but its consumers disagree: the userspace helper's ipnet parser reads "/08"
+// and "/032" and refuses "/008" and "/0032" (CIDRMaskHelperRefusesPadding),
+// while the netip-based ones — the FRR render belt, the #9820/#11421 family
+// gate, the #11422 selector-coverage gate — refuse every padded mask. A "/08"
+// route therefore reached the userspace FIB but not FRR or the kernel. Writing
+// helper-supported padding canonically gives every consumer one spelling,
+// including the next-table ip-rule applier and the userspace FIB row.
+//
+// Helper-refused padding is kept: strict commit rejects it
+// (staticRouteHelperRefusedMaskSpellings), and a tolerant load publishes it so
+// the helper fails the snapshot closed instead of dropping a discard route.
+// The one exception is a route whose masked prefix was also authored in a
+// spelling the helper parses: that spelling becomes the destination, so a
+// redundant refused alias cannot take the route's merged next-hops with it.
+//
+// Every authored spelling other than the final destination stays in
+// destinationAliases for diagnostics.
+func canonicalizeStaticRouteDestinationMasks(routeLists ...[]*StaticRoute) {
+	for _, routes := range routeLists {
+		for _, route := range routes {
+			canonicalizeStaticRouteDestinationMask(route)
+		}
+	}
+}
+
+func canonicalizeStaticRouteDestinationMask(route *StaticRoute) {
+	if route == nil {
+		return
+	}
+	authored := route.Destination
+	destination := authored
+	if CIDRMaskHelperRefusesPadding(destination) {
+		for _, alias := range route.destinationAliases {
+			if !CIDRMaskHelperRefusesPadding(alias) {
+				destination = alias
+				break
+			}
+		}
+	}
+	destination = normalizeHelperSupportedCIDRMaskPadding(destination)
+	if destination == authored {
+		return
+	}
+	spellings := append([]string{authored}, route.destinationAliases...)
+	route.Destination = destination
+	route.destinationAliases = nil
+	for _, spelling := range spellings {
+		appendStaticRouteDestinationAlias(route, spelling)
 	}
 }
 

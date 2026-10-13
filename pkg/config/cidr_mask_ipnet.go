@@ -61,3 +61,27 @@ func normalizeCIDRMaskPadding(cidr string) string {
 	}
 	return cidr[:slash+1] + mask
 }
+
+// normalizeHelperSupportedCIDRMaskPadding writes the mask of a valid Go CIDR
+// without leading zeros when the userspace helper also parses its padding
+// ("10.0.0.0/08" -> "10.0.0.0/8", "2001:db8::/032" -> "2001:db8::/32"). Every
+// other value is returned unchanged: helper-refused padding stays visible to the
+// strict gates and to the fail-closed publication path (#12507), and ranges,
+// bare hosts, identities and malformed tokens keep the operator's text for their
+// own validators.
+//
+// The compiler applies it to static-route destinations and IPsec selector
+// values. Their netip-based consumers — the FRR render belt, FRRAddrFamily in
+// the #9820/#11421 family gate, the #11380/#11422 selector models — refuse every
+// padded mask, so a helper-supported padded value used to reach the userspace
+// helper but not FRR or those gates.
+func normalizeHelperSupportedCIDRMaskPadding(cidr string) string {
+	normalized := normalizeCIDRMaskPadding(cidr)
+	if normalized == cidr {
+		return cidr // no padded mask: skip the parse
+	}
+	if _, _, err := net.ParseCIDR(cidr); err != nil || CIDRMaskHelperRefusesPadding(cidr) {
+		return cidr
+	}
+	return normalized
+}

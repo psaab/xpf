@@ -232,8 +232,15 @@ func trafficSelectorValues(leaf *Node) []string {
 // address, or IP range. The control-character / whitespace check runs first so
 // the injection case gets an explicit reason; a value that clears it but is
 // not a routable selector shape is still rejected (operator hygiene).
+//
+// #12507: a CIDR whose zero-padded mask the userspace helper cannot parse
+// ("/008", "/0032") is a valid shape but is rejected here too: a bind-less
+// fence row carrying it fails the whole helper snapshot closed
+// (InvalidBindlessSelector). Helper-supported padding ("/08", "/032") is
+// accepted, and the compiler writes it canonically
+// (normalizeHelperSupportedCIDRMaskPadding).
 func trafficSelectorValueReject(v string) string {
-	for i := 0; i < len(v); i++ {
+	for i := range len(v) {
 		c := v[i]
 		if c < 0x20 || c == 0x7f {
 			return fmt.Sprintf("contains a control character (byte offset %d)", i)
@@ -245,6 +252,11 @@ func trafficSelectorValueReject(v string) string {
 	if !isTrafficSelectorShape(v) {
 		return "is not a valid CIDR prefix, host address, or IP range"
 	}
+	if CIDRMaskHelperRefusesPadding(v) {
+		return fmt.Sprintf(
+			"has redundant leading-zero CIDR mask digits the userspace helper cannot parse; write it as %q (#12507)",
+			normalizeCIDRMaskPadding(v))
+	}
 	return ""
 }
 
@@ -253,6 +265,12 @@ func trafficSelectorValueReject(v string) string {
 // MUST apply the SAME rule: two surfaces enforcing one rule from two
 // predicates is how they drift, which is the exact defect diagcmd.MaxArgLen
 // was created to end (#6904). One predicate, both surfaces.
+//
+// The commit gate also rejects helper-refused mask padding (#12507), but that
+// is deliberately not a shape failure here. A tolerantly loaded "/008"
+// selector of a policy-based VPN keeps its swanctl child and its bind-less
+// fence row, so the helper refuses the snapshot; dropping it in the belts
+// would leave that VPN's cleartext unfenced.
 func IsTrafficSelectorShape(v string) bool { return isTrafficSelectorShape(v) }
 
 // isTrafficSelectorShape reports whether v is a CIDR prefix (v4/v6), a bare

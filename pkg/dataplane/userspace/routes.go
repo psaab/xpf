@@ -319,7 +319,9 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 		addConnectedRoutes(v4Table, "inet", v4Prefixes)
 		addConnectedRoutes(v6Table, "inet6", v6Prefixes)
 	}
-	addRoutes := func(table, family string, routes []*config.StaticRoute, instanceName, instanceType string) {
+	// helperRefused selects the partition this call publishes: false for the
+	// ordinary pass below, true for the #12507 pass after applyRouteOverlay.
+	addRoutes := func(table, family string, routes []*config.StaticRoute, instanceName, instanceType string, helperRefused bool) {
 		for _, route := range routes {
 			if route == nil {
 				continue
@@ -338,8 +340,13 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 			if reason := staticRouteExclusions[route]; reason != "" {
 				continue
 			}
+			// #12507: a destination whose zero-padded mask the helper cannot
+			// parse is published only by the pass after applyRouteOverlay.
+			if config.CIDRMaskHelperRefusesPadding(route.Destination) != helperRefused {
+				continue
+			}
 			tableName, familyName := normalizeRouteSnapshotFamily(table, family, route.Destination)
-			if staticRouteHasOnlyUnresolvedBareGateways(
+			if !helperRefused && staticRouteHasOnlyUnresolvedBareGateways(
 				route, tableName, familyName, instanceName, instanceType,
 				connectedNetworks, interfaces,
 			) {
@@ -402,8 +409,8 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 			}
 		}
 	}
-	addRoutes("inet.0", "inet", cfg.RoutingOptions.StaticRoutes, "", "")
-	addRoutes("inet6.0", "inet6", cfg.RoutingOptions.Inet6StaticRoutes, "", "")
+	addRoutes("inet.0", "inet", cfg.RoutingOptions.StaticRoutes, "", "", false)
+	addRoutes("inet6.0", "inet6", cfg.RoutingOptions.Inet6StaticRoutes, "", "", false)
 
 	// FRR installs a blackhole route for every policy-less generate-route.
 	// Mirror that negative route even when it is acting as an aggregate over
@@ -438,8 +445,8 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 		}
 		sort.Slice(insts, func(i, j int) bool { return insts[i].Name < insts[j].Name })
 		for _, ri := range insts {
-			addRoutes(ri.Name+".inet.0", "inet", ri.StaticRoutes, ri.Name, ri.InstanceType)
-			addRoutes(ri.Name+".inet6.0", "inet6", ri.Inet6StaticRoutes, ri.Name, ri.InstanceType)
+			addRoutes(ri.Name+".inet.0", "inet", ri.StaticRoutes, ri.Name, ri.InstanceType, false)
+			addRoutes(ri.Name+".inet6.0", "inet6", ri.Inet6StaticRoutes, ri.Name, ri.InstanceType, false)
 		}
 	}
 
@@ -599,6 +606,28 @@ func buildRouteSnapshots(cfg *config.Config, interfaces []InterfaceSnapshot, ove
 	}
 
 	out = applyRouteOverlay(out, overlay)
+	// #12507: publish each non-excluded static route whose zero-padded
+	// destination mask the helper cannot parse ("/008", "/0032") AFTER every
+	// runtime filter above. The helper fails the whole snapshot closed on it
+	// (RouteDestinationUnparseable) — the fail-closed answer for a tolerantly
+	// loaded discard or reject route, which must not silently vanish. Gateway
+	// resolution, the ip-monitoring overlay and the live ip-rule mirror would
+	// otherwise decide whether the helper sees it. Publishing it here makes the
+	// refusal a function of the config alone, which is what
+	// collectStaticRouteCIDRMaskRejections — the snapshot stamp and
+	// PolicyContentRejectionReasons — reports. Strict commit rejects these
+	// spellings; helper-supported padding was written canonically at compile.
+	//
+	// These are the only rows added after the overlay. Its whole-entry
+	// replacement does not need to cover them: a snapshot that carries one is
+	// refused, so none of its routes forwards.
+	if configHasHelperRefusedStaticRoute(cfg) {
+		forEachHelperRefusedStaticRoute(cfg, staticRouteExclusions,
+			func(table, family string, route *config.StaticRoute) {
+				addRoutes(table, family, []*config.StaticRoute{route}, "", "", true)
+			})
+	}
+
 	// #10046: forwarding-instance static routes may use a gateway on an
 	// interface that remains in the default routing instance. The Rust FIB
 	// deliberately scopes bare-gateway inference to the route's own table

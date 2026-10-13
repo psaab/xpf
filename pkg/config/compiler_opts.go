@@ -1561,6 +1561,13 @@ type compileOpts struct {
 	// the shared exclusion omits the route from FRR/helper snapshots and its
 	// reason is visible on config-backed show surfaces.
 	lenientStaticNextHopFamily bool
+	// lenientStaticRouteCIDRMaskSpelling (#12507) downgrades the
+	// helper-refused static-route mask gate (staticRouteHelperRefusedMaskSpellings)
+	// to one cfg.Warnings entry per spelling. The route is NOT excluded: a
+	// published "/008" destination fails the helper snapshot closed, which is
+	// fail-closed for a discard/reject route, and the snapshot refusal stamps
+	// report it.
+	lenientStaticRouteCIDRMaskSpelling bool
 	// lenientGenerateRoutePolicy (#11456) downgrades an unsupported
 	// contributing-route policy on `routing-options generate route` from a
 	// strict compile error to a cfg.Warnings entry. xpf has no policy evaluator
@@ -3269,6 +3276,7 @@ func lenientCompileOpts() compileOpts {
 		lenientPolicyFromUnknown11779:          true,
 		lenientRouteDispositionConflict:        true,
 		lenientStaticNextHopFamily:             true,
+		lenientStaticRouteCIDRMaskSpelling:     true,
 		lenientGenerateRoutePolicy:             true,
 		lenientDHCPStaticBindings:              true,
 		lenientDHCPPoolSubnets:                 true,
