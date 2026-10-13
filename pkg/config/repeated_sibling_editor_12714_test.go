@@ -364,3 +364,165 @@ func TestEditorParityContainerSetNoTwin12714(t *testing.T) {
 		t.Errorf("dhcp sibling count = %d, want 2 (no twinning)", count)
 	}
 }
+
+// --- #12761 round-2 fold: deep descent below compoundKey family (B1/B2) ---
+
+func flowServerAddrs12714(t *testing.T, tree *ConfigTree, v6 bool) []string {
+	t.Helper()
+	inst := samplingInstance12714(compileTree12714(t, tree.Clone()), "i2")
+	if inst == nil {
+		return nil
+	}
+	fam := inst.FamilyInet
+	if v6 {
+		fam = inst.FamilyInet6
+	}
+	if fam == nil {
+		return nil
+	}
+	var out []string
+	for _, fs := range fam.FlowServers {
+		out = append(out, fs.Address)
+	}
+	return out
+}
+
+func TestEditorDeepSamplingFlowServer12761(t *testing.T) {
+	cases := []struct {
+		name       string
+		input      string
+		af         string
+		ip         string
+		v6         bool
+		otherAddrs []string
+	}{
+		{
+			name: "braced family inet",
+			input: `forwarding-options { sampling { instance i2 { family inet { output { flow-server 1.1.1.1; } } } } }`,
+			af: "inet", ip: "1.1.1.1",
+		},
+		{
+			name: "braced family inet6",
+			input: `forwarding-options { sampling { instance i2 { family inet6 { output { flow-server 2001:db8::1; } } } } }`,
+			af: "inet6", ip: "2001:db8::1", v6: true,
+		},
+		{
+			name: "elided output under braced family",
+			input: `forwarding-options { sampling { instance i2 { family inet { output flow-server 3.3.3.3; } } } }`,
+			af: "inet", ip: "3.3.3.3",
+		},
+		{
+			name: "distinct IP across repeated containers, later wins",
+			input: `forwarding-options {
+				sampling { instance i2 { family inet { output { flow-server 9.9.9.9 { version 9; } } } } }
+				sampling { instance i2 { family inet { output { flow-server 1.1.1.1; } } } }
+			}`,
+			af: "inet", ip: "1.1.1.1",
+		},
+		{
+			name: "earlier braced later elided same IP repeated sampling",
+			input: `forwarding-options {
+				sampling { instance i2 { family inet { output { flow-server 1.1.1.1 { version 9; } } } } }
+				sampling { instance i2 { family inet { output { flow-server 1.1.1.1; } } } }
+			}`,
+			af: "inet", ip: "1.1.1.1",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, operation := range []string{"delete", "deactivate"} {
+				t.Run(operation, func(t *testing.T) {
+					tree := tree12714(t, tc.input)
+					if got := flowServerAddrs12714(t, tree, tc.v6); len(got) != 1+len(tc.otherAddrs) {
+						t.Fatalf("precondition flow-servers = %v, want %v plus target", got, tc.otherAddrs)
+					}
+					before := tree.Format()
+					path := []string{"forwarding-options", "sampling", "instance", "i2", "family", tc.af, "output", "flow-server", tc.ip}
+					var err error
+					if operation == "delete" {
+						err = tree.DeletePath(path)
+					} else {
+						err = tree.DeactivatePath(path)
+					}
+					if err != nil {
+						t.Fatalf("%s: %v", operation, err)
+					}
+					if tree.Format() == before {
+						t.Errorf("%s reported success without changing the tree", operation)
+					}
+					got := flowServerAddrs12714(t, tree, tc.v6)
+					if len(got) != len(tc.otherAddrs) {
+						t.Errorf("after %s flow-servers = %v, want %v (winning sibling must not survive)", operation, got, tc.otherAddrs)
+					}
+				})
+			}
+		})
+	}
+}
+
+// --- #12761 round-2 fold: dhcpv6-client nested prefix-delegating (B3) ---
+
+func TestEditorDeepDHCPv6PrefixDelegating12761(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{
+			name: "fully braced prefix-delegating",
+			input: `interfaces { ge-0/0/0 { unit 0 { family inet6 {
+				dhcpv6-client { prefix-delegating { sub-prefix-length 64; } }
+			} } } }`,
+		},
+		{
+			name: "mixed braced and elided siblings",
+			input: `interfaces { ge-0/0/0 { unit 0 { family inet6 {
+				dhcpv6-client { prefix-delegating { sub-prefix-length 64; } }
+				dhcpv6-client prefix-delegating sub-prefix-length 56;
+			} } } }`,
+		},
+	}
+	path := []string{"interfaces", "ge-0/0/0", "unit", "0", "family", "inet6", "dhcpv6-client", "prefix-delegating", "sub-prefix-length"}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, operation := range []string{"delete", "deactivate"} {
+				t.Run(operation, func(t *testing.T) {
+					tree := tree12714(t, tc.input)
+					if got := dhcpv6Client12714(compileTree12714(t, tree.Clone())); got == nil || got.PrefixDelegatingSubPrefLen == 0 {
+						t.Fatalf("precondition dhcpv6-client = %+v, want non-zero sub-prefix-length", got)
+					}
+					before := tree.Format()
+					var err error
+					if operation == "delete" {
+						err = tree.DeletePath(path)
+					} else {
+						err = tree.DeactivatePath(path)
+					}
+					if err != nil {
+						t.Fatalf("%s: %v", operation, err)
+					}
+					if tree.Format() == before {
+						t.Errorf("%s reported success without changing the tree", operation)
+					}
+					if got := dhcpv6Client12714(compileTree12714(t, tree.Clone())); got != nil && got.PrefixDelegatingSubPrefLen != 0 {
+						t.Errorf("after %s sub-prefix-length = %d, want 0", operation, got.PrefixDelegatingSubPrefLen)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestEditorDeepSamplingPackedRunRefused12761(t *testing.T) {
+	tree := tree12714(t, `forwarding-options { sampling { instance i2 { family inet { output flow-server 1.1.1.1 inline-jflow; } } } }`)
+	before := tree.Format()
+	err := tree.DeletePath([]string{"forwarding-options", "sampling", "instance", "i2", "family", "inet", "output", "flow-server", "1.1.1.1"})
+	if err == nil {
+		t.Fatal("delete of one statement from a packed flow-server run succeeded; want refusal")
+	}
+	if tree.Format() != before {
+		t.Errorf("refused packed-run delete changed the tree")
+	}
+	if got := flowServerAddrs12714(t, tree, false); len(got) != 1 || got[0] != "1.1.1.1" {
+		t.Errorf("after refusal flow-servers = %v, want [1.1.1.1]", got)
+	}
+}

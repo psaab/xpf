@@ -1707,7 +1707,7 @@ func deleteInterfaceFilterSampling12508(
 			continue
 		}
 		if keysEqual(n.Keys, nodeKeys) {
-			if containerSchema == schemaForwardingOptions.children["sampling"] {
+			if deepRepeatedSiblingSchema12761(containerSchema) {
 				if deleteBelowRepeatedSibling12714(n, childKeys, containerSchema) {
 					matched = true
 				}
@@ -1755,7 +1755,7 @@ func setInterfaceFilterSamplingInactive12508(
 			continue
 		}
 		if keysEqual(n.Keys, nodeKeys) {
-			if containerSchema == schemaForwardingOptions.children["sampling"] {
+			if deepRepeatedSiblingSchema12761(containerSchema) {
 				if markBelowRepeatedSiblingInactive12714(n, childKeys, inactive, containerSchema) {
 					matched = true
 				}
@@ -1828,6 +1828,10 @@ func deleteBelowRepeatedSibling12714(parent *Node, keys []string, schema *schema
 	}
 	rest := keys[keyCount:]
 	childSchema := schemaChildFor(schema, keys[0])
+	if childSchema != nil {
+		keyCount, childSchema = consumeNodeKeys(keys, childSchema)
+		rest = keys[keyCount:]
+	}
 	for _, child := range parent.Children {
 		if child == nil || child.IsLeaf || !keysEqual(child.Keys, keys[:keyCount]) {
 			continue
@@ -1869,6 +1873,10 @@ func markBelowRepeatedSiblingInactive12714(parent *Node, keys []string, inactive
 	}
 	rest := keys[keyCount:]
 	childSchema := schemaChildFor(schema, keys[0])
+	if childSchema != nil {
+		keyCount, childSchema = consumeNodeKeys(keys, childSchema)
+		rest = keys[keyCount:]
+	}
 	for _, child := range parent.Children {
 		if child == nil || child.IsLeaf || !keysEqual(child.Keys, keys[:keyCount]) {
 			continue
@@ -1878,6 +1886,26 @@ func markBelowRepeatedSiblingInactive12714(parent *Node, keys []string, inactive
 		}
 	}
 	return matched
+}
+
+// deepRepeatedSiblingSchema12761 marks repeated containers whose editors
+// must descend through nested braced children as well as direct leaves.
+func deepRepeatedSiblingSchema12761(candidate *schemaNode) bool {
+	if candidate == schemaForwardingOptions.children["sampling"] {
+		return true
+	}
+	if schemaInterfaces == nil || schemaInterfaces.wildcard == nil {
+		return false
+	}
+	unit := schemaInterfaces.wildcard.children["unit"]
+	if unit == nil {
+		return false
+	}
+	family := unit.children["family"]
+	if family == nil || family.children["inet6"] == nil {
+		return false
+	}
+	return candidate == family.children["inet6"].children["dhcpv6-client"]
 }
 
 // removeMultiLeafMembers implements member-specific deletion for a value-list
