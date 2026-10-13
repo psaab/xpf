@@ -8,13 +8,13 @@ use ipnet::IpNet;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
 
 #[path = "policy_snapshot_error.rs"]
 mod snapshot_error;
