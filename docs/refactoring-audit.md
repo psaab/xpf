@@ -175,10 +175,12 @@ same PR; if a `[REFACTOR]` entry drops to 1500–1999 LOC, demote it to
 `[WATCH]` or prune it. `TestAcceptedFileWellFormed` still rejects an entry
 with no reason or a path the audit would never measure.
 
-There is no CI in this repository; `make test-go` is the enforcement surface.
-Run it before merging a split or shrink. If a change skips that target, the
-tree can remain red until the next invocation, which then names the stale
-entry even though that next developer did not cause the shrink.
+The pull-request Go workflow runs tests for changed packages and their reverse
+dependents, not repo-wide `make test-go`; that target is the enforcement
+surface for this tree-global gate. Run it before merging a split or shrink. If
+a change skips that target, the tree can remain red until the next invocation,
+which then names the stale entry even though that next developer did not cause
+the shrink.
 
 ### 2. The accepted-entry liveness gate (hard)
 

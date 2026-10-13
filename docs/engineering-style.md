@@ -618,8 +618,9 @@ inlining. Treat the trend as a defect, not a style preference.
   it drops below its tier floor. A [REFACTOR] entry at 1500–1999 LOC must
   be demoted to [WATCH] or pruned. `TestAcceptedEntriesAreLive` fails closed
   on the next `make test-go` run, even when the touched-file set is empty.
-  This repository has no CI, so a change that skips `make test-go` can leave
-  master red until the next developer runs it; run the target before merge.
+  GitHub Actions CI runs the harness self-test and changed-package Go tests
+  on every PR, but does not run repo-wide `make test-go`; run that target
+  before merge when the change affects the tree-global accepted-entry gate.
 - Keeping the global heatmap current is `make audit-refresh`'s job; its lag
   fails nothing. See `docs/refactoring-audit.md` "The three gates".
 
@@ -1356,23 +1357,20 @@ body does not save you.
 implements GitHub's documented grammar plus the two measured shapes above. It
 refuses a close pair that follows a negation, or a scoping heading, within its
 own clause, and names the issue and the spellings that pass. Verdicts are per
-pair, so a `Closes #N` in the same body goes through. Nothing runs
-automatically: this repo has no CI, and nothing checks a PR BODY unless
-someone runs `make close-keyword-lint PR=<n>`. Master is not
-branch-protected either (verified 2026-09-18 via the API: 404), so even a red
-check would not block `gh pr merge`. The PR-body workflow is preserved as a
-human step until the owner grants the required `workflow` OAuth scope:
+pair, so a `Closes #N` in the same body goes through. The
+`close-keyword-lint` GitHub Actions workflow checks the PR body and every
+commit message on `opened`, `edited`, `synchronize`, and `reopened` events;
+it runs on every PR but is advisory because master has no required status
+contexts. It passes the body through `env`, never interpolated into a command
+line. The separate `CI tests` workflow also runs on every PR; the current
+workflow contract and its manual-gate limits are in
+[`ci-gate-contract.md`](ci-gate-contract.md).
 
 - `make selftest` first runs `make close-keyword-lint`, which checks every
   commit message in this branch (`origin/master..HEAD`), then runs
-  `scripts/run-selftests.sh`. Invoke it before merge as an advisory pre-merge
-  check for the current tree (note: selftest is red at baseline today).
-- `scripts/close_keyword_lint_ci.sh` holds both pull-request legs (the PR body
-  and every commit message in the range). The exact GitHub Actions job,
-  including `opened`, `edited`, `synchronize`, and `reopened` triggers plus
-  `fetch-depth: 0`, is recorded in the "Human step: workflow wiring" section
-  of `docs/log/9551.md`. It passes the body through `env`, never interpolated
-  into a command line.
+  `scripts/run-selftests.sh`. Invoke it before merge when changing the
+  image/day-0/dist/deploy tooling covered by those self-tests.
+
 - `make close-keyword-lint` checks this branch's commit messages
   (`origin/master..HEAD`); with `PR=<n>` it checks that PR's body and commit
   messages.

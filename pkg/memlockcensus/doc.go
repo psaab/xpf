@@ -46,9 +46,12 @@
 //
 // #9337, TWO CORRECTIONS.
 //
-// The leg it deferred to did not exist. `.github/` holds only `instructions/`;
-// there are no workflow files and no CI in this repository at all, and nothing
-// anywhere set XPF_REQUIRE_MEMLOCK_GUARDS. 42 guards were deferring to a name.
+// The leg it deferred to did not exist. At the time, `.github/` held only
+// `instructions/`; there were no workflow files and no CI in this repository
+// at all, and nothing anywhere set XPF_REQUIRE_MEMLOCK_GUARDS. 42 guards were
+// deferring to a name. (The repository has since gained pull-request
+// workflows under `.github/workflows/`; the privileged leg still runs only
+// locally — GitHub-hosted runners have no CAP_BPF.)
 // `make test-memlock-guards` is now that leg (and a prerequisite of
 // `make test-root`): it derives the package set FROM the registry, runs it
 // under the required privilege, and verifies BY NAME that every registered
