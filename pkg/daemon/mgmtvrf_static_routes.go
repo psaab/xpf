@@ -531,9 +531,9 @@ func mgmtStaticFamilyIndex(family int) int {
 
 func mgmtStaticConnectedLinkIndex(gateway net.IP, routes []netlink.Route) (int, bool) {
 	linkIndex, found := 0, false
+	family := mgmtStaticIPFamily(gateway)
 	for _, route := range routes {
-		if route.Protocol != unix.RTPROT_KERNEL || route.Scope != netlink.SCOPE_LINK ||
-			route.Dst == nil || route.Gw != nil || !route.Dst.Contains(gateway) {
+		if !mgmtRouteIsConnected(route, family) || !route.Dst.Contains(gateway) {
 			continue
 		}
 		if !found {
