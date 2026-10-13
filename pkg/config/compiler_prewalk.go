@@ -823,10 +823,10 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) ([]string, error) {
 	}
 
 	staticRouteQNHWarnings := []string(nil)
-	if err := validateStaticRouteInterfaceQNHChild12790(tree.Children); err != nil {
+	if err := validateStaticRouteQNHTails12813(tree.Children); err != nil {
 		if opts.lenientStaticNextHopFamily {
 			staticRouteQNHWarnings = append(staticRouteQNHWarnings,
-				fmt.Sprintf("static route interface qualified-next-hop tail (downgraded to warning on tolerant path): %v", err))
+				fmt.Sprintf("static route qualified-next-hop tail (downgraded to warning on tolerant path): %v", err))
 		} else {
 			return nil, err
 		}
