@@ -8796,6 +8796,12 @@ instead of letting the compiler or FRR renderer discard or widen the authored
 constraint. This includes term-line forms whose `Keys` tail is not visited by
 the schema walk: a bare `from route-filter` is retained as an `UnknownFrom`
 marker, and a compiled `upto` with no parsed length is rejected before commit.
+Apply-groups packed-term expansion (#12537) keeps malformed route-filter
+operands visible to the same strict checks. On tolerant load and peer-sync,
+invalid inherited route-filter operands now produce a warning and force the
+affected term to `reject` rather than retaining a `then accept` action
+(#12687). Valid inherited `upto /24` and `through` operands retain their
+tolerant behavior.
 Packed `from` runs are segmented with the compiler's schema-arity rules, so a
 prefix-list, community, or as-path named `route-filter` remains a value
 reference rather than being mistaken for another filter head.

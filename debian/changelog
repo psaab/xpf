@@ -29,6 +29,13 @@ xpf (0.0.0) unstable; urgency=medium
     fresh boot is default-deny), and the snapshot rejection reasons name
     it. Rewrite such masks before upgrading (#12507).
 
+  * On tolerant load and peer sync, warn and reject terms with malformed
+    route-filter operands inherited through apply-groups. Preserve group
+    provenance through packed-term rebuilding so malformed `upto`,
+    `prefix-length-range`, or `through` operands cannot leave an inline
+    `then accept` unguarded. Valid inherited `upto /24` and `through` retain
+    their tolerant behavior (#12687).
+
   * Reject undefined, forwarding-only, and reserved management routing
     instances as explicit tunnel targets at commit. Tolerant loads warn and
     clear such a target, so the tunnel runs in the default routing domain; a

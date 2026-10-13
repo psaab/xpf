@@ -215,7 +215,10 @@ func packedBodyChildren(node *Node, schema *schemaNode) []*Node {
 		if n <= 0 {
 			return node.Children
 		}
-		next := &Node{Keys: append([]string(nil), tail[:n]...)}
+		next := &Node{
+			Keys:          append([]string(nil), tail[:n]...),
+			InheritedFrom: node.InheritedFrom,
+		}
 		if len(tailQuoted) == len(tail) {
 			next.setKeysQuoted(append([]bool(nil), tailQuoted[:n]...))
 		}

@@ -226,6 +226,7 @@ type RouteFilter struct {
 	// renderer skips the entry (match-nothing, fail-closed). Empty for every
 	// other match type.
 	ThroughPrefix string
+	inherited     bool // node came from apply-groups; used only for tolerant quarantine
 }
 
 // RoutingOptionsConfig holds static routing configuration.

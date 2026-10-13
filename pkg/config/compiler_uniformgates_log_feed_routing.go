@@ -452,6 +452,7 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 		if opts.lenientRouteFilterMatchTypes {
 			cfg.Warnings = append(cfg.Warnings,
 				fmt.Sprintf("route-filter match-type (downgraded to warning on tolerant path): %v", err))
+			failClosedInheritedInvalidRouteFilters12687(cfg)
 		} else {
 			return err
 		}

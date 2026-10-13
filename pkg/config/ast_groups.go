@@ -988,7 +988,11 @@ func groupPackedLeafUnmodelledTail(ancestorPath [][]string, s *Node) []*Node {
 	if consumed <= 0 || consumed >= len(s.Keys) {
 		return nil
 	}
-	tail := &Node{Keys: append([]string(nil), s.Keys[consumed:]...), IsLeaf: true}
+	tail := &Node{
+		Keys:          append([]string(nil), s.Keys[consumed:]...),
+		IsLeaf:        true,
+		InheritedFrom: s.InheritedFrom,
+	}
 	if len(s.KeysQuoted) == len(s.Keys) {
 		tail.setKeysQuoted(append([]bool(nil), s.KeysQuoted[consumed:]...))
 	}
