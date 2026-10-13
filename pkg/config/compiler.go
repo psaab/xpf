@@ -1130,7 +1130,8 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	if (opts.lenientDefaultPolicyBlock11367 &&
 		hasAmbiguousDefaultPolicyBlock11367(tree.Children)) ||
 		(opts.lenientDefaultPolicyConflict11821 &&
-			hasConflictingDefaultPolicyStanzas11821(tree.Children)) {
+			(hasConflictingDefaultPolicyStanzas11821(tree.Children) ||
+				hasConflictingDefaultPolicyValues12821(tree.Children))) {
 		cfg.Security.DefaultPolicy = PolicyDeny
 	}
 

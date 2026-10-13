@@ -992,6 +992,8 @@ selected by first-child order.
 
 **Conflicting duplicate default-policy stanzas are strict-rejected and tolerant-load fail-closed (#11821):** repeated `default-policy` values must agree. Strict compilation rejects conflicting actions and names both values. Tolerant `Load` and `SyncApply` warn with the same names and force the no-match default to `deny-all` after all security roots compile, so author order cannot silently flip the device-wide action. Identical repeated actions remain accepted. See `docs/config-schema.md` "#11821".
 
+**Contradictory action spellings within one default-policy stanza are rejected and tolerant-load fail-closed (#12821):** action tokens in trailing keys and nested children are all checked, so bracketed lists and mixed key/body forms cannot silently compile only the first value as permit-all. Strict compilation rejects differing supported actions; tolerant `Load` and `SyncApply` warn naming both and force the no-match default to deny-all. Identical repeated values remain accepted. See `docs/config-schema.md` "#12821".
+
 **Implicit default-policy RT_FLOW logging (#3534):** `set security policies
 default-policy-log session-init|session-close` emits RT_FLOW session logs for
 the implicit default verdict, mirroring a named policy's `then log`. It is a
