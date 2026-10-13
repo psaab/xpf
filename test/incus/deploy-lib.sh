@@ -366,6 +366,25 @@ deploy_build_git_sha() {
 	fi
 }
 
+# deploy_gate_wave <project_root> <gate> <make_command> <deploy_command...>
+# Fence the deploy/gate interval against checkout changes. The cluster lock
+# serializes cluster mutations, but does not lock Git operations.
+deploy_gate_wave() {
+	local root="$1" gate="$2" make_cmd="$3"
+	local deployed_sha current_sha
+	shift 3
+	local -a deploy_command=("$@")
+	[[ -n "$gate" && ${#deploy_command[@]} -gt 0 ]] || return 2
+	deployed_sha=$(deploy_build_git_sha "$root") || return 1
+	"${deploy_command[@]}" || return $?
+	current_sha=$(deploy_build_git_sha "$root") || return 1
+	if [[ "$current_sha" != "$deployed_sha" ]]; then
+		printf 'deploy/gate wave: checkout changed during deploy; refusing gate\n' >&2
+		return 1
+	fi
+	"$make_cmd" "$gate" || return $?
+}
+
 # deploy_manifest_sha_from_deb <deb> <binary>
 # Echo the sha256 of usr/local/share/xpf/staged/<binary> as packed in the
 # .deb (the exact bits deploy_install_deb pushes), or nothing (rc 1) when

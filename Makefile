@@ -1486,6 +1486,15 @@ else
 CLUSTER_DEPLOY_PREREQS = deb
 endif
 
+# Deploy and its smoke in one lock cell (#12651). Exact checkout
+# identity is required: a merge landing between deploy and gate
+# must not be papered over as a valid attestation.
+.PHONY: cluster-deploy-and-gate
+CLUSTER_GATE ?= test-connectivity
+cluster-deploy-and-gate: $(CLUSTER_DEPLOY_PREREQS)
+	./test/incus/with-cluster.sh "cluster deploy + $(CLUSTER_GATE)" -- \
+		bash -c 'source ./test/incus/deploy-lib.sh; deploy_gate_wave "$$PWD" "$$1" "$(MAKE)" env BPFRX_CLUSTER_ENV="$(CLUSTER_ENV)" $(if $(filter 1,$(XPF_DEPLOY_FAST)),,XPF_CLUSTER_SKIP_BUILD=1) ./test/incus/cluster-setup.sh deploy "$(NODE)"' -- "$(CLUSTER_GATE)"
+
 cluster-deploy: $(CLUSTER_DEPLOY_PREREQS)
 # The prereq already built, so the deb branch skips cmd_deploy's internal
 # rebuild (deb is .PHONY: without the guard it rebuilds the multi-minute
