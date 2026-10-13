@@ -1,7 +1,6 @@
 package userspace
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -132,12 +131,12 @@ func userspaceBindTargetNetdev(iface InterfaceSnapshot) string {
 // physical interface, we emit the parent Linux name — that is the netdev the
 // AF_XDP socket actually binds to.
 //
-// Returns nil on nil config, on a snapshot-build error (#2514), and when the
-// snapshot's xfrm-device dump HARD-failed (#12580): with no kernel evidence a
-// stale live xfrmi cannot be told from an ordinary NIC, so nothing is granted.
-// An INTERRUPTED dump is not a failure here — xfrmDumpNames keeps its partial
-// device list as the sample, so an xfrmi missing from that list still reads
-// as an ordinary NIC (#12710). Never returns an error.
+// Returns nil on nil config, on a snapshot-build error (#2514), and on any
+// xfrm-device dump error: a hard failure (#12580) or an interrupted dump
+// (#12710) is incomplete evidence, so this permission list cannot establish
+// that an omitted live xfrmi is an ordinary NIC. Known partial links remain
+// available to snapshot classification, but the allowlist degrades to nil.
+// Never returns an error.
 func UserspaceBoundLinuxInterfaces(cfg *config.Config) []string {
 	if cfg == nil {
 		return nil
@@ -201,13 +200,12 @@ func UserspaceBoundLinuxInterfaces(cfg *config.Config) []string {
 	//
 	// Safe here means: an entry in this list is permission to RESHAPE a NIC's
 	// RSS table and pin its coalescing, so the conservative answer to any doubt
-	// is to name FEWER netdevs, never more. That is what the degrade-to-nil
-	// above does for a build error and a hard dump failure, and it is why
-	// liveXfrmNetdevs no longer discards a partial dump: the interrupted-dump
-	// case was the measured way this sample came back EMPTY and re-admitted a
-	// device. Keeping the partial list does not make it complete — an xfrmi
-	// the interrupted dump did not return is still read as an ordinary NIC
-	// (#12710).
+	// is to name FEWER netdevs, never more. That is what the degrade-to-nil above
+	// does for a build error and any xfrm dump error. Known devices from an
+	// interrupted dump remain excluded in the snapshot, but its absence cannot
+	// safely admit an unlisted device: this list grants permission to reshape
+	// RSS, and an omitted stale xfrmi was measured re-entering it. #12710
+	// therefore withholds the whole list until a complete dump.
 	refused := buildUserspaceRefusedNetdevs(snap)
 	for _, iface := range snap.Interfaces {
 		if iface.Zone == "" || userspaceSkipsIngressInterface(iface) {
@@ -290,13 +288,12 @@ func UserspaceBoundLinuxInterfaces(cfg *config.Config) []string {
 func sampleLiveXfrmNetdevs() (map[string]bool, bool) {
 	liveXfrm, err := liveXfrmNetdevs()
 	if err != nil {
-		// The kernel half of snapshotSecureTunnel is unavailable for this
-		// build. Log LOUDLY and continue on the config half, which stays
-		// authoritative for every tunnel an IPsec stanza names. Return the
-		// failure status as well so the reshape allowlist can fail closed
-		// without changing this snapshot's established fallback.
-		slog.Error("userspace: could not classify xfrm netdevs; secure-tunnel "+
-			"exclusion falls back to configuration ownership only",
+		// The dump is incomplete, but classified links it returned remain
+		// useful alongside the config half. Log LOUDLY; return the failure
+		// status so the reshape allowlist can fail closed without changing
+		// this snapshot's established config-ownership fallback.
+		slog.Error("userspace: xfrm netdev dump incomplete; secure-tunnel exclusion "+
+			"uses configuration ownership plus any known partial links",
 			"err", err)
 	}
 	return liveXfrm, err != nil
@@ -809,27 +806,21 @@ func secureTunnelOwned(cfg *config.Config, ifName string) bool {
 // the interface four earlier rounds of this PR fought to keep adjudicated — is
 // not in this set, and no ordinary NIC ever can be.
 //
-// IT NO LONGER DISCARDS A PARTIAL DUMP (#6691 round 9). Round 8 wrote
-// `if err != nil { return nil }` and called the result "fails OPEN … because
-// the config half is the primary". That was not a considered trade: netlink
-// v1.3.1's LinkList returns the links it DID deserialize together with
-// ErrDumpInterrupted (link_linux.go — `if executeErr != nil &&
-// !errors.Is(executeErr, ErrDumpInterrupted) { return nil, executeErr }` then
-// `return res, executeErr`), so a dump interrupted by a concurrent link change
-// threw away REAL evidence, including the xfrm device itself, while the
-// per-row buildLinkSnapshot lookups that follow still resolved it — the stale
-// xfrmi came back Ifindex > 0 with SecureTunnel false, which is exactly the
-// state this belt exists to catch. The names are now taken from whatever the
-// dump did return, and only a HARD error (one that is not ErrDumpInterrupted,
-// i.e. one for which netlink itself returns no links) is reported to the
-// caller.
+// IT RETAINS PARTIAL LINKS, BUT REPORTS AN INTERRUPTED DUMP (#12710). Round 8
+// wrote `if err != nil { return nil }` and discarded the evidence. Netlink
+// v1.3.1 instead returns links it did deserialize with ErrDumpInterrupted
+// (link_linux.go returns early only for a non-interrupt error, then `return
+// res, executeErr`). Those known xfrmi names remain useful to the snapshot's
+// secure-tunnel exclusion; discarding them can readmit a known live tunnel
+// whose per-row buildLinkSnapshot lookup still resolves it.
 //
-// The error is REPORTED rather than swallowed because "no xfrm devices" and "I
-// could not tell" are different answers with opposite safe handlings, and each
-// consumer resolves it in its own conservative direction — see
-// buildInterfaceSnapshots (logs and falls back to the config half, which is
-// still authoritative for everything it covers) and UserspaceBoundLinuxInterfaces
-// (degrades to touching no NIC at all).
+// The incomplete status must also reach consumers. The reshape allowlist grants
+// permission from absence, and absence from a partial list proves nothing: an
+// interrupted dump that omits a stale xfrmi can grant that tunnel permission to
+// have its RSS table reshaped. UserspaceBoundLinuxInterfaces therefore degrades
+// to no NIC permission, while the snapshot builder preserves the partial
+// classification and config-ownership fallback. A dump error is reported, not
+// swallowed; the interrupted result is not a complete classification.
 //
 // A package var so a test can present a kernel state without one; production
 // never assigns it.
@@ -837,31 +828,13 @@ var liveXfrmNetdevs = func() (map[string]bool, error) {
 	return xfrmDumpNames(netlink.LinkList())
 }
 
-// xfrmDumpNames is the ERROR POLICY half of liveXfrmNetdevs, split out for the
-// same reason xfrmNetdevNames was (#6691 round 9): it is the half a test cannot
-// otherwise reach, because every test presents a kernel by replacing the whole
-// closure. Taking LinkList's (links, err) pair as arguments makes the policy a
-// pure function of that pair.
-//
-// The policy: netlink v1.3.1 returns the links it DID deserialize together with
-// ErrDumpInterrupted (link_linux.go returns early only for a non-interrupt
-// error, then `return res, executeErr`). So an interrupted dump carries real
-// evidence and is used; only a HARD error — one for which netlink returns no
-// links at all — is reported to the caller, because "no xfrm devices" and "I
-// could not tell" are different answers with opposite safe handlings.
-//
-// Round 8 wrote `if err != nil { return nil }` and called it "fails OPEN …
-// because the config half is the primary". The interrupted case is the one that
-// bit: a dump interrupted by concurrent link churn threw away the xfrm device
-// while the per-row buildLinkSnapshot lookups still resolved it, so the stale
-// xfrmi came back Ifindex > 0 with SecureTunnel false — exactly the state the
-// belt exists to catch.
+// xfrmDumpNames is the ERROR POLICY half of liveXfrmNetdevs, split out so tests
+// can drive the policy directly rather than replacing the whole closure. It
+// preserves any link evidence netlink returned, while reporting every error —
+// including ErrDumpInterrupted — so consumers can distinguish incomplete
+// classification from a complete dump with no xfrm devices.
 func xfrmDumpNames(links []netlink.Link, err error) (map[string]bool, error) {
-	names := xfrmNetdevNames(links)
-	if err != nil && !errors.Is(err, netlink.ErrDumpInterrupted) {
-		return names, err
-	}
-	return names, nil
+	return xfrmNetdevNames(links), err
 }
 
 // xfrmNetdevNames is the CLASSIFIER half of liveXfrmNetdevs, split out so the

@@ -1321,53 +1321,31 @@ func TestPlainUnitKeepsItsOwnIfindexUnderARefusedParent(t *testing.T) {
 	}
 }
 
-// TestXfrmDumpNamesKeepsAnInterruptedDump binds the ERROR POLICY half of the
-// kernel oracle — the half the first round-9b mutation grid found unbound.
+// TestXfrmDumpNamesRetainsInterruptedEvidence pins the error policy of the
+// kernel oracle: ErrDumpInterrupted carries partial links, which are retained
+// as evidence, and the error is also reported so consumers do not mistake the
+// partial classification for a complete one.
 //
-// Severing the partial-dump handling back to round 8's
-// `if err != nil { return nil }` SURVIVED the whole package, because every test
-// presents a kernel by replacing the liveXfrmNetdevs closure and so never
-// reaches the policy. The policy is now a pure function of LinkList's own
-// (links, err) return, which is what makes it drivable.
-//
-// The two cases are not symmetric, and that asymmetry IS the fix:
-//
-//   - ErrDumpInterrupted comes WITH the links netlink managed to deserialize
-//     (link_linux.go: it returns early only for a non-interrupt error, then
-//     `return res, executeErr`). Discarding them discards real evidence — and
-//     the per-row buildLinkSnapshot lookups that follow still resolve the
-//     device, so the row ships Ifindex > 0 with SecureTunnel false: a live
-//     xfrmi fully adjudicated and RSS-bound.
-//   - A hard error comes with nothing, so there is no evidence to keep and the
-//     caller must be told it could not be classified rather than reading the
-//     empty result as "no xfrm devices on this box".
-//
-// FAIL-ON-REVERT: restore `if err != nil { return nil, nil }` and the
-// interrupted case reds on the xfrmi being dropped; drop the error return and
-// the hard-error case reds on err being nil.
-func TestXfrmDumpNamesKeepsAnInterruptedDump(t *testing.T) {
+// FAIL-ON-REVERT: discard the links and the xfrmi assertion fails; swallow the
+// interruption and the error assertion fails. The reshape allowlist's
+// consumer-specific fail-closed decision is pinned in
+// TestAllowlistDegradesToNilOnInterruptedXfrmDump12710.
+func TestXfrmDumpNamesRetainsInterruptedEvidence(t *testing.T) {
 	partial := []netlink.Link{
 		&netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: "ge-0-0-0"}},
 		&netlink.Xfrmi{LinkAttrs: netlink.LinkAttrs{Name: "st10"}, Ifid: 0x50001},
 	}
-
-	t.Run("interrupted dump keeps its partial evidence", func(t *testing.T) {
-		got, err := xfrmDumpNames(partial, netlink.ErrDumpInterrupted)
-		if err != nil {
-			t.Fatalf("err = %v, want nil: an interrupted dump is not a failure to "+
-				"classify, it is a SHORTER classification", err)
-		}
-		if !got["st10"] {
-			t.Errorf("xfrmDumpNames = %v: the xfrm device netlink DID return was "+
-				"discarded. buildLinkSnapshot still resolves it afterwards, so the row "+
-				"ships Ifindex > 0 with SecureTunnel false — the live xfrmi is "+
-				"adjudicated and RSS-bound, which is the state this belt exists to "+
-				"catch", got)
-		}
-		if got["ge-0-0-0"] {
-			t.Errorf("xfrmDumpNames = %v classified an ordinary Device", got)
-		}
-	})
+	got, err := xfrmDumpNames(partial, netlink.ErrDumpInterrupted)
+	if !errors.Is(err, netlink.ErrDumpInterrupted) {
+		t.Fatalf("err = %v, want ErrDumpInterrupted: partial classification "+
+			"must not be presented as complete", err)
+	}
+	if !got["st10"] {
+		t.Errorf("xfrmDumpNames = %v: known xfrmi evidence was discarded", got)
+	}
+	if got["ge-0-0-0"] {
+		t.Errorf("xfrmDumpNames = %v classified an ordinary Device", got)
+	}
 
 	t.Run("hard error is reported, not read as an empty box", func(t *testing.T) {
 		wantErr := errors.New("netlink: socket closed")

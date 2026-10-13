@@ -1834,8 +1834,10 @@ Invariants worth keeping:
   keeps feeding every hardware queue meanwhile; with more than 16 RX
   queues (`BindingQueuesPerIface`) the transit hashed onto queues the
   planner never binds takes `drop_degraded_transit`. The allowlist logs
-  a WARN naming the skipped work. An interrupted dump is not a failure —
-  its partial device list is used (#12710).
+  a WARN naming skipped work. A complete dump is required before the
+  allowlist grants permission. An interrupted dump retains its known
+  partial xfrmi exclusions but withholds the allowlist until the next
+  apply (#12710).
 - **A released name that is no longer an mlx5 netdev drops ownership
   without an ethtool call.** Unplugged, renamed by a `.link` change, or
   rebound to another driver — the ring/coalescence configuration went

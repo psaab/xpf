@@ -782,9 +782,10 @@ nothing retries sooner. xpfd logs a WARN naming the skipped work. Meanwhile a
 NIC still on its default RSS table (first boot, newly bound, or re-enabled
 after the kill switch) keeps feeding every hardware queue, and on a NIC with
 more than 16 RX queues (`BindingQueuesPerIface`) the transit hashed onto queues
-the planner never binds takes `drop_degraded_transit`. An INTERRUPTED dump is
-not a failure: its partial device list is used as the sample, so an xfrmi
-missing from it is still granted (#12710).
+the planner never binds takes `drop_degraded_transit`. An interrupted xfrm dump
+is incomplete evidence: known partial xfrmi names remain excluded, while the
+reshape allowlist degrades to nil so an unlisted stale xfrmi cannot be granted
+permission (#12710). NIC tuning resumes on the next config apply.
 
 Mechanism, ownership records and retry-debt semantics: `pkg/daemon/README.md`,
 "NIC tuning ownership + released-interface teardown (#6801)".
@@ -3615,10 +3616,11 @@ the case an operator cannot fix by editing the config. Scoped that way, an
 operator with neither route-based IPsec nor a leftover xfrm device is never
 blocked by a helper-version mismatch that cannot affect them. The kernel half
 costs one `RTM_GETLINK` dump per SNAPSHOT BUILD (the builder, once, for all
-rows) — not one per gate call, and the gate itself takes none. That dump no
-longer discards a partial result: netlink returns the links it did deserialize
-together with `ErrDumpInterrupted`, and round 8's `if err != nil { return nil }`
-threw away real evidence including the xfrm device itself.
+rows) — not one per gate call, and the gate itself takes none. The dump
+retains partial links returned with `ErrDumpInterrupted`, and reports that
+error: the snapshot can exclude known xfrmi names, while the RSS allowlist
+degrades rather than treating absence from an incomplete classification as
+permission to reshape the device (#12710).
 
 **The gate arms on an OBSERVED version, never on the absence of one** (#6691
 round 10). `lastStatus.ConfigSnapshotProtocolVersion == 0` is two states with

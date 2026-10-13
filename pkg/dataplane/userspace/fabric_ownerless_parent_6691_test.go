@@ -512,10 +512,10 @@ func stubXfrmNetdevsErr(t *testing.T, err error) func() {
 // failed dump nothing can tell a stale live xfrmi (a zoned `st10` row the
 // config no longer binds, still in the kernel) from an ordinary NIC.
 //
-// SCOPE: a HARD dump error only. An interrupted dump (ErrDumpInterrupted) is
-// not reported as an error at all — xfrmDumpNames keeps its partial device
-// list as the sample — so an xfrmi missing from that list is still granted.
-// #12710 owns that decision; this test makes no claim about it.
+// SCOPE: a hard dump error. The interrupted-dump counterpart is
+// TestAllowlistDegradesToNilOnInterruptedXfrmDump12710: its partial links stay
+// available to the snapshot classifier, but their absence cannot grant the
+// reshape allowlist permission.
 //
 // The fixture is the issue's measured composition: a stale zoned `st10`
 // row (no VPN names it) beside an ordinary LAN NIC, with the dump stubbed
