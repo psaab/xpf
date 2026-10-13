@@ -1,6 +1,11 @@
 package config
 
-import "testing"
+import (
+	"fmt"
+	"net"
+	"strconv"
+	"testing"
+)
 
 func compile12595(t *testing.T, input string) *Config {
 	t.Helper()
@@ -17,7 +22,8 @@ func compile12595(t *testing.T, input string) *Config {
 }
 
 func TestRepeatedSamplingContainers12595(t *testing.T) {
-	cfg := compile12595(t, `forwarding-options {
+	tests := []struct{ name, input string }{
+		{"sampling siblings", `forwarding-options {
     sampling {
         instance i1 {
             input { rate 100; }
@@ -31,19 +37,47 @@ func TestRepeatedSamplingContainers12595(t *testing.T) {
         }
     }
 }
-`)
-	if cfg.ForwardingOptions.Sampling == nil {
-		t.Fatal("sampling nil")
+`},
+		// Every top-level stanza compiles into the same ForwardingOptionsConfig.
+		// Before #12595 each sampling container replaced the SamplingConfig,
+		// so the second stanza dropped i1.
+		{"top-level stanzas", `forwarding-options {
+    sampling {
+        instance i1 {
+            input { rate 100; }
+            family inet { output { flow-server 192.0.2.1 { port 2055; } } }
+        }
+    }
+}
+forwarding-options {
+    sampling {
+        instance i2 {
+            input { rate 200; }
+            family inet6 { output { flow-server 2001:db8::1 { port 2056; } } }
+        }
+    }
+}
+`},
 	}
-	insts := cfg.ForwardingOptions.Sampling.Instances
-	if len(insts) != 2 {
-		t.Fatalf("instances = %v, want i1+i2", keys12595(insts))
-	}
-	if insts["i1"] == nil || insts["i1"].InputRate != 100 || insts["i1"].FamilyInet == nil {
-		t.Errorf("i1 wrong: %+v", insts["i1"])
-	}
-	if insts["i2"] == nil || insts["i2"].InputRate != 200 || insts["i2"].FamilyInet6 == nil {
-		t.Errorf("i2 wrong (second sampling container dropped): %+v", insts["i2"])
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := compile12595(t, tc.input)
+			if cfg.ForwardingOptions.Sampling == nil {
+				t.Fatal("sampling nil")
+			}
+			insts := cfg.ForwardingOptions.Sampling.Instances
+			if len(insts) != 2 {
+				t.Fatalf("instances = %v, want exactly i1+i2", keys12595(insts))
+			}
+			for name, want := range map[string]string{
+				"i1": "rate=100 inet=[192.0.2.1:2055] inet6=<nil>",
+				"i2": "rate=200 inet=<nil> inet6=[[2001:db8::1]:2056]",
+			} {
+				if got := samplingSummary12595(insts[name]); got != want {
+					t.Errorf("%s = %s, want %s", name, got, want)
+				}
+			}
+		})
 	}
 }
 
@@ -53,6 +87,25 @@ func keys12595(m map[string]*SamplingInstance) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// samplingSummary12595 renders a compiled instance with every collector it
+// carries, so a dropped or doubled flow-server fails the comparison.
+func samplingSummary12595(inst *SamplingInstance) string {
+	if inst == nil {
+		return "<missing>"
+	}
+	family := func(sf *SamplingFamily) string {
+		if sf == nil {
+			return "<nil>"
+		}
+		var servers []string
+		for _, fs := range sf.FlowServers {
+			servers = append(servers, net.JoinHostPort(fs.Address, strconv.Itoa(fs.Port)))
+		}
+		return fmt.Sprint(servers)
+	}
+	return fmt.Sprintf("rate=%d inet=%s inet6=%s", inst.InputRate, family(inst.FamilyInet), family(inst.FamilyInet6))
 }
 
 func TestRepeatedDHCPBlocks12595(t *testing.T) {
