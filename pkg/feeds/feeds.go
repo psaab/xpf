@@ -334,6 +334,9 @@ type feedState struct {
 	// publishedHash) from a genuine all-zero digest, mirroring hasSnapshot.
 	publishedHash [32]byte
 	hasPublished  bool
+	// A rejected apply leaves the published hash unconfirmed: publication
+	// debt survives identical refetches until an apply is accepted.
+	publishUnconfirmed bool
 	// A rejected hold-drop keeps publication debt but backs off retries of the
 	// unchanged empty target. A successful apply/fetch clears this state.
 	dropRetryDelay time.Duration
@@ -896,6 +899,7 @@ func carryForwardSnapshot(dst, src *feedState) {
 	// published hash is needed to keep that debt visible until a later apply.
 	dst.publishedHash = src.publishedHash
 	dst.hasPublished = src.hasPublished
+	dst.publishUnconfirmed = src.publishUnconfirmed
 	if !src.hasSnapshot || len(src.prefixes) == 0 {
 		return
 	}
@@ -1108,6 +1112,9 @@ func (m *Manager) SnapshotForBindings(daCfg *config.DynamicAddressConfig) map[st
 // been confirmed applied. A hold-drop desires the empty set, represented by
 // emptyFeedHash even though it has no installed snapshot slice.
 func feedPublicationDebt(fs *feedState) bool {
+	if fs.publishUnconfirmed {
+		return true
+	}
 	if fs.hasSnapshot {
 		return !fs.hasPublished || fs.publishedHash != fs.hash
 	}
@@ -1905,7 +1912,7 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	// rejected empty apply staged (and possibly landed) the dropped overlay,
 	// so recovery must republish even content identical to publishedHash.
 	needsPublish := !fs.hasPublished || fs.publishedHash != res.hash ||
-		(fs.holdDropped && feedPublicationDebt(fs))
+		(fs.holdDropped && feedPublicationDebt(fs)) || fs.publishUnconfirmed
 	oldCount := len(fs.prefixes)
 	baselineHash := fs.hash
 	if fs.hasSnapshot && fs.shrinkHighWaterCount == 0 {
@@ -2082,11 +2089,14 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 		applyErr = m.onUpdate()
 	}
 	if applyErr != nil {
-		// Apply REJECTED: do NOT advance publishedHash. The content is installed
-		// (fs.prefixes/fs.hash) and enforced-in-intent, but the dataplane did
-		// not accept it. Leaving publishedHash stale means the next identical
-		// refetch re-fires this path and retries the apply (#5646). This is
-		// publication debt, surfaced loudly but bounded to one retry per fetch.
+		// Apply rejection can be followed by a refetch whose content hash
+		// equals the last confirmed hash (for example, recovery after a
+		// rejected hold-drop). Preserve explicit debt in that case.
+		m.mu.Lock()
+		if cur, ok := m.feeds[fs.name]; ok && cur == fs {
+			fs.publishUnconfirmed = true
+		}
+		m.mu.Unlock()
 		slog.Warn("dynamic-address: feed apply REJECTED — good content not yet enforced (publication debt), will retry on next refresh",
 			"name", fs.name, "prefixes", len(res.prefixes), "err", applyErr)
 		return
@@ -2098,6 +2108,7 @@ func (m *Manager) installSnapshot(fs *feedState, res fetchResult) {
 	if cur, ok := m.feeds[fs.name]; ok && cur == fs {
 		fs.publishedHash = res.hash
 		fs.hasPublished = true
+		fs.publishUnconfirmed = false
 	}
 	m.mu.Unlock()
 }
@@ -2258,6 +2269,7 @@ func (m *Manager) finishFailure(fs *feedState, transition feedFailureTransition,
 		m.mu.Lock()
 		if cur, ok := m.feeds[fs.name]; ok && cur == fs && fs.holdDropped {
 			if applyErr != nil {
+				fs.publishUnconfirmed = true
 				if fs.dropRetryDelay == 0 {
 					fs.dropRetryDelay = feedDropRetryInitialDelay
 				} else if fs.dropRetryDelay < feedDropRetryMaxDelay {
@@ -2271,6 +2283,7 @@ func (m *Manager) finishFailure(fs *feedState, transition feedFailureTransition,
 				fs.dropRetryDelay = 0
 				fs.dropRetryAt = time.Time{}
 				fs.publishedHash = emptyFeedHash
+				fs.publishUnconfirmed = false
 				fs.hasPublished = true
 			}
 		}

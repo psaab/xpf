@@ -281,6 +281,12 @@ binding's fail mode and enforced state.
 
 ## Publication-debt retry — a rejected apply is retried, not swallowed (#5646)
 
+Since #12638 the debt marker is explicit (`publishUnconfirmed`): a rejected
+install or drop-apply sets it, an accepted apply clears it, and it ORs into
+the publication-debt report independently of the recorded `publishedHash` —
+so even a double rejection of identical recovery content keeps the retry
+owed instead of reading as already-published.
+
 The `onUpdate` callback drives the daemon to APPLY the fetched feed content to
 the dataplane, and that apply can be **rejected** — a whole-snapshot preflight
 reject (`#3261`/`#5645`), a compile failure, or a transient control-socket
