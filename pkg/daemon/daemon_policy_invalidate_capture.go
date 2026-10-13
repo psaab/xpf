@@ -105,11 +105,13 @@ type policyInvalidationDebt struct {
 	// when this unlanded target's capture merged it forward. A superseded
 	// target's retire restores it instead of dropping the whole debt.
 	landed *policyInvalidationDebt
-	// reauthorized holds the retained helper candidates that a nested
-	// commit-confirmed rollback found permitted by its restored target
-	// (newCfg). They stop being owed only once that target is the helper's
-	// applied snapshot; a superseding target re-owes them (#12532).
+	// reauthorized holds retained helper candidates permitted by the rollback
+	// target. They stop being owed only once that target is applied; a
+	// superseding target re-owes them.
 	reauthorized *policyInvalidationCapture
+	// rollbackSource retains pre-rollback debt until the restored target lands.
+	rollbackSource *policyInvalidationCapture
+	rollback       bool
 }
 
 // deferredSnapshotApply retains the applied-marker digest and HA completion
@@ -562,14 +564,6 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 			debt.landed = nil
 			landed = debt
 			previousCapture = debt.capture
-			if plan.rollback {
-				// #12532: the bounded landed link cannot say which nested
-				// transition introduced each candidate. Re-authorize a copy
-				// against the restored target. Permitted candidates stay
-				// pending until that target lands, and an authority refusal
-				// below restores the original debt with every candidate.
-				previousCapture, reauthorized = d.reauthorizePolicyCandidates(debt.capture, plan.newCfg)
-			}
 		default:
 			// Carry landed obligations across superseding targets and same-target
 			// adopts. Reusing the existing record keeps the chain depth at one.
@@ -595,11 +589,29 @@ func (d *Daemon) capturePolicyInvalidationLocked(cfg *config.Config) {
 	if debt := d.policyInvalidationDebt; debt != nil && debt.newCfg == plan.newCfg {
 		predecessorCfg = debt.predecessorCfg
 	}
+	rollbackIntent := plan.rollback
+	var rollbackSource *policyInvalidationCapture
+	if originalDebt != nil {
+		switch {
+		case originalDebt.rollback && originalDebt.newCfg == plan.newCfg:
+			// A rejected same-target publish is a retry of the same rollback.
+			// Reuse its source, while incorporating any additional candidates
+			// found in the retry capture.
+			rollbackSource = mergePolicyInvalidationCaptures(
+				clonePolicyInvalidationCapture(originalDebt.rollbackSource),
+				clonePolicyInvalidationCapture(originalDebt.capture))
+			rollbackIntent = true
+		case plan.rollback:
+			// A different rollback target must re-owe the latest capture, not
+			// an earlier rollback source that predates newly retained rows.
+			rollbackSource = originalDebt.capture
+		}
+	}
 	d.policyInvalidationDebt = &policyInvalidationDebt{
 		oldCfg: plan.oldCfg, newCfg: plan.newCfg, predecessorCfg: predecessorCfg,
 		renameApply: plan.renameApply, scanFailure: previousScanFailure,
 		publishGeneration: previousGeneration, landed: landed, reauthorized: reauthorized,
-		tailFailed: tailFailed,
+		rollback: rollbackIntent, rollbackSource: rollbackSource, tailFailed: tailFailed,
 	}
 
 	// The three target sets are computed HERE, once, and the clears consume the
@@ -930,12 +942,20 @@ func (d *Daemon) retainPolicyInvalidationCaptureLocked(capture *policyInvalidati
 			if debt.scanFailure == nil && currentErr != nil {
 				debt.scanFailure = &policyInvalidationScanFailure{oldCfg: debt.oldCfg}
 			}
-			if capture.scanComplete {
-				debt.authorityRefusal = nil
+			// Re-authorize only obligations retained before this rollback.
+			// Fresh candidates still follow ordinary deletion/rematch policy,
+			// including default-policy log-only rematches. Remove a permitted
+			// retained identity from the merged capture so a fresh sentinel
+			// classification cannot reintroduce it as a delete.
+			if debt.rollback && debt.rollbackSource != nil {
+				changed, unconditional := defaultPolicyChanged(debt.oldCfg, debt.newCfg)
+				preserveDefaultRematch := changed && !unconditional &&
+					debt.newCfg != nil && debt.newCfg.Security.PolicyRematch
+				_, permitted := d.reauthorizePolicyCandidates(
+					debt.rollbackSource, debt.newCfg, preserveDefaultRematch)
+				debt.reauthorized = mergePolicyInvalidationCaptures(debt.reauthorized, permitted)
+				removeReauthorizedPolicyCandidates(capture, permitted)
 			}
-			// Keep the failure marker separate from this capture's own errors:
-			// only the capture that observed an incomplete scan returns it to
-			// the originating commit. Later retries do not repeat that error.
 			debt.capture = capture
 		}
 	}
@@ -1111,7 +1131,7 @@ func clonePolicyInvalidationCapture(capture *policyInvalidationCapture) *policyI
 // colliding zone IDs, and malformed tuples are kept and therefore fail closed.
 // permitted is nil when the restored config permits no candidate.
 func (d *Daemon) reauthorizePolicyCandidates(
-	capture *policyInvalidationCapture, restored *config.Config,
+	capture *policyInvalidationCapture, restored *config.Config, preserveDefaultRematch bool,
 ) (kept, permitted *policyInvalidationCapture) {
 	if capture == nil || restored == nil {
 		return capture, nil
@@ -1127,6 +1147,9 @@ func (d *Daemon) reauthorizePolicyCandidates(
 	policyInactive := dpuserspace.PolicyInactiveFn(
 		d.policySchedulerActiveStateForApplyLocked(restored, time.Now()))
 	isPermitted := func(key string, match dpuserspace.SessionPolicyMatch) bool {
+		if key == dataplane.DefaultPolicyName && preserveDefaultRematch {
+			return false
+		}
 		from, to := zoneNames[match.IngressZoneID], zoneNames[match.EgressZoneID]
 		if key == "" || from == "" || to == "" {
 			return false
@@ -1136,7 +1159,9 @@ func (d *Daemon) reauthorizePolicyCandidates(
 			zones := strings.SplitN(parts[0], "->", 2)
 			global := strings.HasPrefix(key, "junos-global->junos-global/")
 			if len(parts) != 2 || len(zones) != 2 ||
-				(!global && (zones[0] != from || zones[1] != to)) {
+				(!global &&
+					(zones[0] != "any" && zones[0] != from ||
+						zones[1] != "any" && zones[1] != to)) {
 				return false
 			}
 			policy, exists := policies[key]
@@ -1268,6 +1293,94 @@ func (d *Daemon) reauthorizePolicyCandidates(
 		return capture, nil
 	}
 	return kept, permitted
+}
+
+// removeReauthorizedPolicyCandidates removes only rows whose retained
+// provenance has already been proven permitted by the rollback target. The
+// fresh capture otherwise remains intact, preserving ordinary rematch clears.
+func removeReauthorizedPolicyCandidates(
+	capture, permitted *policyInvalidationCapture,
+) {
+	if capture == nil || permitted == nil || permitted.candidateCount() == 0 {
+		return
+	}
+	type sessionIdentityV4 struct {
+		key                 dataplane.SessionKey
+		routingDomain       uint32
+		sessionID           uint64
+		tunnelDiscriminator uint64
+	}
+	type sessionIdentityV6 struct {
+		key                 dataplane.SessionKeyV6
+		routingDomain       uint32
+		sessionID           uint64
+		tunnelDiscriminator uint64
+	}
+	ids := make(map[policyInvalidationMatchIdentity]struct{}, permitted.candidateCount())
+	sessionIDsV4 := make(map[sessionIdentityV4]struct{}, permitted.candidateCount())
+	sessionIDsV6 := make(map[sessionIdentityV6]struct{}, permitted.candidateCount())
+	for _, bucket := range []capturedSessions{permitted.deleted, permitted.modified, permitted.deflt} {
+		for _, match := range bucket.policy {
+			ids[policyInvalidationMatchID(match)] = struct{}{}
+			v4, v6, err := policyMatchEntries(match)
+			if err != nil {
+				continue
+			}
+			if v4 != nil {
+				sessionIDsV4[sessionIdentityV4{
+					key: v4.Key, routingDomain: v4.Value.RoutingDomain,
+					sessionID:           v4.Value.RTFlowSessionID,
+					tunnelDiscriminator: v4.Value.TunnelDiscriminator,
+				}] = struct{}{}
+			}
+			if v6 != nil {
+				sessionIDsV6[sessionIdentityV6{
+					key: v6.Key, routingDomain: v6.Value.RoutingDomain,
+					sessionID:           v6.Value.RTFlowSessionID,
+					tunnelDiscriminator: v6.Value.TunnelDiscriminator,
+				}] = struct{}{}
+			}
+		}
+	}
+	filter := func(bucket *capturedSessions) {
+		policy := bucket.policy[:0]
+		for _, match := range bucket.policy {
+			id := policyInvalidationMatchID(match)
+			if _, ok := ids[id]; ok {
+				delete(capture.candidateRuleIDs, id)
+				continue
+			}
+			policy = append(policy, match)
+		}
+		bucket.policy = policy
+		v4 := bucket.v4[:0]
+		for _, entry := range bucket.v4 {
+			id := sessionIdentityV4{
+				key: entry.Key, routingDomain: entry.Value.RoutingDomain,
+				sessionID:           entry.Value.RTFlowSessionID,
+				tunnelDiscriminator: entry.Value.TunnelDiscriminator,
+			}
+			if _, ok := sessionIDsV4[id]; !ok {
+				v4 = append(v4, entry)
+			}
+		}
+		bucket.v4 = v4
+		v6 := bucket.v6[:0]
+		for _, entry := range bucket.v6 {
+			id := sessionIdentityV6{
+				key: entry.Key, routingDomain: entry.Value.RoutingDomain,
+				sessionID:           entry.Value.RTFlowSessionID,
+				tunnelDiscriminator: entry.Value.TunnelDiscriminator,
+			}
+			if _, ok := sessionIDsV6[id]; !ok {
+				v6 = append(v6, entry)
+			}
+		}
+		bucket.v6 = v6
+	}
+	filter(&capture.deleted)
+	filter(&capture.modified)
+	filter(&capture.deflt)
 }
 
 // capturePolicyInvalidationBeforeDeferredPublish runs outside Manager.mu from
