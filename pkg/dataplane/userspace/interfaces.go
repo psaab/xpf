@@ -131,12 +131,12 @@ func userspaceBindTargetNetdev(iface InterfaceSnapshot) string {
 // physical interface, we emit the parent Linux name — that is the netdev the
 // AF_XDP socket actually binds to.
 //
-// Returns nil on nil config, on a snapshot-build error (#2514), and when the
-// snapshot's xfrm-device dump HARD-failed (#12580): with no kernel evidence a
-// stale live xfrmi cannot be told from an ordinary NIC, so nothing is granted.
-// Any xfrm dump error, including an interrupted dump, is incomplete evidence
-// (#12710): the snapshot keeps known partial links, but this permission list
-// degrades to nil. Never returns an error.
+// Returns nil on nil config, on a snapshot-build error (#2514), and on any
+// xfrm-device dump error: a hard failure (#12580) or an interrupted dump
+// (#12710) is incomplete evidence, so this permission list cannot establish
+// that an omitted live xfrmi is an ordinary NIC. Known partial links remain
+// available to snapshot classification, but the allowlist degrades to nil.
+// Never returns an error.
 func UserspaceBoundLinuxInterfaces(cfg *config.Config) []string {
 	if cfg == nil {
 		return nil

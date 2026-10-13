@@ -38,7 +38,9 @@ func TestAllowlistDegradesToNilOnInterruptedXfrmDump12710(t *testing.T) {
 	}
 
 	t.Run("interrupted partial list cannot grant permission", func(t *testing.T) {
-		defer stubInterruptedXfrmNetdevs12710(t, "ge-0-0-0")()
+		// The returned partial set contains no xfrmi; the ordinary LAN is
+		// filtered out by xfrmNetdevNames, leaving an empty classified map.
+		defer stubInterruptedXfrmNetdevs12710(t)()
 		cfg := compileForTest5619(t, lines...)
 		logs := captureInterruptedWarns12710(t)
 		if got := UserspaceBoundLinuxInterfaces(cfg); got != nil {
@@ -101,14 +103,12 @@ func TestAllowlistDegradesToNilOnInterruptedXfrmDump12710(t *testing.T) {
 	})
 }
 
-func stubInterruptedXfrmNetdevs12710(t *testing.T, names ...string) func() {
+func stubInterruptedXfrmNetdevs12710(t *testing.T) func() {
 	t.Helper()
 	prev := liveXfrmNetdevs
-	set := make(map[string]bool, len(names))
-	for _, name := range names {
-		set[name] = true
-	}
-	liveXfrmNetdevs = func() (map[string]bool, error) { return set, netlink.ErrDumpInterrupted }
+	partial := []netlink.Link{&netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: "ge-0-0-0"}}}
+	set, err := xfrmDumpNames(partial, netlink.ErrDumpInterrupted)
+	liveXfrmNetdevs = func() (map[string]bool, error) { return set, err }
 	return func() { liveXfrmNetdevs = prev }
 }
 
