@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/vishvananda/netlink"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/vishvananda/netlink"
 )
 
 type countingLinkListOps12657 struct {
