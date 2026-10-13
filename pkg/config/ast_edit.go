@@ -478,6 +478,13 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool,
 
 	for i < len(path) {
 		keyword := path[i]
+
+		if schemaInterfaces != nil && schemaInterfaces.wildcard != nil &&
+			schema == schemaInterfaces.wildcard.children["unit"] &&
+			keyword == "family" && i+1 < len(path) &&
+			familyElidedSibling12661(*current, path[i+1]) {
+			return fmt.Errorf("cannot edit interface family %q while an elided or packed family sibling is present; re-author it with braces (#12661)", path[i+1])
+		}
 		keyStart := i
 
 		// Look up keyword in current schema level (#9685: an apply statement at
@@ -887,6 +894,26 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool,
 				current = &n.Children
 				found = true
 			}
+		} else if interfaceFamilyEditorSchema12661(schema, childSchema, nodeKeys, path[i+1:]) {
+			// Interface compilers visit repeated family blocks in authored order.
+			k := interfaceFamilyPathSetTarget12661(*current, nodeKeys, path[i+1:], path[0] == "groups")
+			if k == -2 {
+				return fmt.Errorf("cannot safely edit repeated interface family %q under groups; re-author the group with one family block (#12661)", strings.Join(nodeKeys, " "))
+			}
+			if k >= 0 {
+				target := (*current)[k]
+				current = &target.Children
+				if keysEqual(target.Keys, []string{"family"}) {
+					child := interfaceFamilySplitChild12661(target, nodeKeys[1], false)
+					if child < 0 {
+						child = interfaceFamilySplitChild12661(target, nodeKeys[1], true)
+					}
+					if child >= 0 {
+						current = &target.Children[child].Children
+					}
+				}
+				found = true
+			}
 		} else {
 			for _, n := range *current {
 				if !n.IsLeaf && keysEqual(n.Keys, nodeKeys) {
@@ -958,6 +985,9 @@ func deletePath(current *[]*Node, path []string, grouped []bool, schema *schemaN
 	// container, so the bound below is evaluated in the right scope; where the
 	// descent has dropped the schema (nil) the check is skipped, which is the
 	// conservative direction for a delete.
+	if handled, err := editInterfaceFamily12661(current, path, grouped, schema, i, false, false); handled {
+		return err
+	}
 	if schema != nil {
 		// #12508: an interface filter/sampling delete removes every matching
 		// sibling, after the refusals below, instead of one node here.
@@ -1190,6 +1220,9 @@ func setInactiveAtPath(current *[]*Node, path []string, grouped []bool, schema *
 		// No schema match: remaining tokens form leaf keys.
 		return markMatchingNodeInactive(current, path[i:], inactive)
 	}
+	if handled, err := editInterfaceFamily12661(current, path, grouped, schema, i, true, inactive); handled {
+		return err
+	}
 	if interfaceFilterSamplingSchema12508(childSchema) {
 		if handled, err := setInterfaceFilterSamplingInactive12508(
 			current, path, childSchema, i, inactive,
@@ -1297,6 +1330,232 @@ func interfaceFilterSamplingSchema12508(candidate *schemaNode) bool {
 	inet6 := family.children["inet6"]
 	return inet != nil && (candidate == inet.children["filter"] || candidate == inet.children["sampling"]) ||
 		inet6 != nil && (candidate == inet6.children["filter"] || candidate == inet6.children["sampling"])
+}
+
+// interfaceFamilyEditorSchema12661 recognizes compound and split interface
+// family levels, without broadening sibling handling to other schemas.
+func interfaceFamilyEditorSchema12661(parent, candidate *schemaNode, keys, rest []string) bool {
+	if schemaInterfaces == nil || schemaInterfaces.wildcard == nil {
+		return false
+	}
+	unit := schemaInterfaces.wildcard.children["unit"]
+	family := unit.children["family"]
+	if len(rest) == 0 {
+		return false
+	}
+	if parent == unit && len(keys) == 2 && keys[0] == "family" {
+		return family.children[keys[1]] == candidate
+	}
+	if parent == unit && candidate == family && len(keys) == 1 && keys[0] == "family" {
+		return family.children[rest[0]] != nil
+	}
+	return parent == family && len(keys) == 1 && family.children[keys[0]] == candidate
+}
+
+// familyElidedSibling12661 reports a packed family leaf, either directly under
+// the unit or as an address-family child of a split `family` container.
+func familyElidedSibling12661(nodes []*Node, name string) bool {
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		if n.IsLeaf && keysMatch(n.Keys, []string{"family", name}) {
+			return true
+		}
+		if !n.IsLeaf && keysEqual(n.Keys, []string{"family"}) {
+			for _, child := range n.Children {
+				if child != nil && child.IsLeaf && keysMatch(child.Keys, []string{name}) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// interfaceFamilyPathSetTarget12661 chooses the last active compiler-visible
+// family block, including separate family/inet nodes. Group set refuses
+// repeated family siblings because group merge precedence is not equivalent
+// to the filter/sampling sibling rule.
+func interfaceFamilyPathSetTarget12661(nodes []*Node, keys, rest []string, firstWins bool) int {
+	target, inactive, live, matchCount := -1, -1, false, 0
+
+	for i, n := range nodes {
+		if n == nil || n.IsLeaf {
+			continue
+		}
+		matches := keysEqual(n.Keys, keys)
+		if !matches && len(keys) == 2 && keys[0] == "family" && keysEqual(n.Keys, []string{"family"}) {
+			matches = interfaceFamilySplitChild12661(n, keys[1], false) >= 0 ||
+				interfaceFamilySplitChild12661(n, keys[1], true) >= 0
+		}
+		if !matches {
+			continue
+		}
+		matchCount++
+		if keysEqual(n.Keys, []string{"family"}) {
+			for _, child := range n.Children {
+				if child != nil && keysEqual(child.Keys, []string{keys[1]}) {
+					matchCount++
+				}
+			}
+			matchCount-- // the split parent represents one family sibling
+		}
+		isInactive := n.Inactive
+		if keysEqual(n.Keys, []string{"family"}) {
+			child := interfaceFamilySplitChild12661(n, keys[1], false)
+			if child < 0 {
+				child = interfaceFamilySplitChild12661(n, keys[1], true)
+			}
+			if child >= 0 {
+				isInactive = n.Inactive || n.Children[child].Inactive
+			}
+		}
+		if isInactive {
+			if inactive < 0 || !firstWins {
+				inactive = i
+			}
+		} else {
+			if firstWins {
+				if !live {
+					live, target = true, i
+				}
+			} else {
+				live, target = true, i
+			}
+		}
+	}
+	if firstWins && matchCount > 1 {
+		return -2
+	}
+	if !live {
+		return inactive
+	}
+	return target
+}
+
+func interfaceFamilySplitChild12661(n *Node, name string, chooseInactive bool) int {
+	selected := -1
+	for i, child := range n.Children {
+		if child == nil || !keysEqual(child.Keys, []string{name}) {
+			continue
+		}
+		if chooseInactive && child.Inactive {
+			selected = i
+		} else if !chooseInactive && !child.Inactive {
+			selected = i
+		}
+	}
+	return selected
+}
+
+// editInterfaceFamily12661 applies family-path mutations to every matching
+// compound or split family block. Compiler traversal visits all such blocks.
+func editInterfaceFamily12661(
+	nodes *[]*Node, path []string, grouped []bool, parent *schemaNode, i int,
+	inactiveVerb bool, inactive bool,
+) (bool, error) {
+	if schemaInterfaces == nil || schemaInterfaces.wildcard == nil || parent != schemaInterfaces.wildcard.children["unit"] ||
+		i+1 >= len(path) || path[i] != "family" {
+		return false, nil
+	}
+	familySchema := parent.children["family"]
+	name := path[i+1]
+	afSchema := familySchema.children[name]
+	if afSchema == nil {
+		return false, nil
+	}
+	if familyElidedSibling12661(*nodes, name) {
+		return true, fmt.Errorf("cannot mutate interface family %q while an elided or packed family sibling is present; re-author it with braces (#12661)", name)
+	}
+	original := nodes
+	working := cloneNodes(*nodes)
+	nodes = &working
+	tail := path[i+2:]
+	tailGrouped := grouped
+	if grouped != nil {
+		tailGrouped = grouped[i+2:]
+	}
+	matched := false
+	remove := func(slice *[]*Node, index int) {
+		*slice = append((*slice)[:index], (*slice)[index+1:]...)
+	}
+	apply := func(af *Node) error {
+		if len(tail) == 0 {
+			if inactiveVerb {
+				af.Inactive = inactive
+			}
+			return nil
+		}
+		if inactiveVerb {
+			return setInactiveAtPath(&af.Children, tail, tailGrouped, afSchema, 0, inactive)
+		}
+		return deletePath(&af.Children, tail, tailGrouped, afSchema, 0)
+	}
+	for ni := 0; ni < len(*nodes); {
+		n := (*nodes)[ni]
+		if n == nil {
+			ni++
+			continue
+		}
+		if keysEqual(n.Keys, []string{"family", name}) {
+			if len(tail) == 0 && !inactiveVerb {
+				remove(nodes, ni)
+				matched = true
+				continue
+			}
+			if err := apply(n); err != nil {
+				if isInterfaceFamilyMutationRefusal12661(err) {
+					return true, err
+				}
+			} else {
+				matched = true
+			}
+			ni++
+			continue
+		}
+		if !keysEqual(n.Keys, []string{"family"}) {
+			ni++
+			continue
+		}
+		for ai := 0; ai < len(n.Children); {
+			af := n.Children[ai]
+			if af == nil || !keysEqual(af.Keys, []string{name}) {
+				ai++
+				continue
+			}
+			if len(tail) == 0 && !inactiveVerb {
+				remove(&n.Children, ai)
+				matched = true
+				continue
+			}
+			if err := apply(af); err != nil {
+				if isInterfaceFamilyMutationRefusal12661(err) {
+					return true, err
+				}
+			} else {
+				matched = true
+			}
+			ai++
+		}
+		if len(n.Children) == 0 && !inactiveVerb && len(tail) == 0 {
+			remove(nodes, ni)
+			continue
+		}
+		ni++
+	}
+	if !matched {
+		return false, nil
+	}
+	*original = working
+	return true, nil
+}
+
+func isInterfaceFamilyMutationRefusal12661(err error) bool {
+	if strings.Contains(err.Error(), "Re-author that line") {
+		return true
+	}
+	return !errors.Is(err, ErrPathNotFound) && !strings.HasPrefix(err.Error(), "path not found:")
 }
 
 // interfaceFilterSamplingSetTarget12508 returns the index of the repeated
