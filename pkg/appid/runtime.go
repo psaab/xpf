@@ -405,28 +405,14 @@ func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *co
 		var fullIDs map[string]uint16
 		fullIDsTried := false
 		fullIDsActive := false
-		for name, app := range cfg.Applications.Applications {
-			// #4865: skip a tolerated nil user-application value (a JSON null
-			// decoding to a nil pointer on a lenient/HA-synced load, #3494).
-			// icmpTypeConstrained is nil-safe, but matchTuple below dereferences
-			// app.Protocol/SourcePort/DestinationPort and would panic the
-			// AppID-disabled show/session-name path on a nil entry.
-			if app == nil {
-				continue
-			}
-			// #3781 interim (log-integrity): a type/code-constrained ICMP app
-			// (icmp-type/icmp-code set) match-alls every ICMP type here because
-			// matchTuple is protocol + port only (blind to the ICMP type/code).
-			// Skip it so a non-echo ICMP resolves to an honest UNKNOWN (or a
-			// protocol-only ICMP app when one is referenced) on the AppID-disabled
-			// show/session-name path rather than a false type-constrained label.
-			// The type/code-aware match is DEFERRED with the catalog wire per the
-			// #3781 /research plan. A protocol-only ICMP app is unaffected.
-			if icmpTypeConstrained(app) {
-				continue
-			}
-			if !matchTuple(proto, srcPort, dstPort, app.Protocol, app.SourcePort, app.DestinationPort) {
-				continue
+		// Keep candidate processing shared so user and predefined candidates
+		// cannot acquire separate precedence tiers.
+		consider := func(name string, app *config.Application) {
+			// A nil app is tolerated by the lenient config path (#4865), and
+			// the tuple matcher cannot model ICMP type/code constraints (#3781).
+			if app == nil || icmpTypeConstrained(app) ||
+				!matchTuple(proto, srcPort, dstPort, app.Protocol, app.SourcePort, app.DestinationPort) {
+				return
 			}
 			portBased := app.DestinationPort != "" || app.SourcePort != ""
 			id, catalogued := assignedIDForName(appNames, name)
@@ -456,10 +442,9 @@ func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *co
 						anyUncatalogued = !catalogued
 					}
 				}
-				// Switch the current tier to full-catalog IDs exactly once as
-				// soon as both conditions are known. Include the current best
-				// in that rank before comparing this candidate; continue selecting
-				// incrementally so no second tuple-matching scan is needed.
+				// Normally catalog IDs are already authoritative. Only when a
+				// tie has an uncatalogued name whose natural hash collides do we
+				// need the full-universe displaced IDs (#10722/#12225).
 				if needsAssignedIDs && anyUncatalogued && !fullIDsTried {
 					fullIDsTried = true
 					if ids, err := fallback.FullIDs(); err == nil {
@@ -478,24 +463,29 @@ func resolveTupleFallbackWithIndex(proto uint8, srcPort, dstPort uint16, cfg *co
 				}
 			}
 		}
+		for name, app := range cfg.Applications.Applications {
+			consider(name, app)
+		}
+		// Rank live builtin fallback apps with user apps to match the enabled
+		// catalog without broadening the fallback's intentionally narrow set.
+		// A user definition shadows the same-named predefined application.
+		for name := range builtinFallbacks {
+			if _, shadowed := cfg.Applications.Applications[name]; shadowed {
+				continue
+			}
+			consider(name, config.PredefinedApplications[name])
+		}
 		if best != "" {
 			return best
 		}
 	}
-	for name, ba := range builtinFallbacks {
-		// A user-defined app owns its name even when its tuple does not match
-		// this session. Do not resurrect the stale builtin tuple for a
-		// redefined predefined name on the AppID-disabled path (#11817).
-		if cfg != nil {
-			if _, shadowed := cfg.Applications.Applications[name]; shadowed {
-				continue
+	if cfg == nil {
+		for name, ba := range builtinFallbacks {
+			if ba.proto == proto && ba.port == dstPort {
+				return name
 			}
 		}
-		if ba.proto == proto && ba.port == dstPort {
-			return name
-		}
 	}
-	// #11818: a no-match is the filterable UNKNOWN sentinel for either mode.
 	return Unknown
 }
 
