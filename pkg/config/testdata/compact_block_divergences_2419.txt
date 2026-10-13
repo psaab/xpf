@@ -250,8 +250,6 @@ firewall three-color-policer xpfarg single-rate color-blind	empty
 firewall three-color-policer xpfarg two-rate color-aware	empty
 firewall three-color-policer xpfarg two-rate color-blind	empty
 forwarding-options allow-dataplane-sleep	empty
-forwarding-options sampling instance xpfarg family inet output inline-jflow	empty
-forwarding-options sampling instance xpfarg family inet6 output inline-jflow	empty
 interfaces xpfname aggregated-ether-options lacp active	empty
 interfaces xpfname aggregated-ether-options lacp passive	empty
 interfaces xpfname description	partial

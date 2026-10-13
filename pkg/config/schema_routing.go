@@ -816,7 +816,10 @@ var schemaForwardingOptions = &schemaNode{desc: "Packet forwarding options", chi
 		}},
 	}},
 	"sampling": {desc: "Traffic sampling for flow export", children: map[string]*schemaNode{
-		"instance": {desc: "Sampling instance", args: 1, placeholder: "<instance-name>", children: map[string]*schemaNode{
+		// #12810: `instance i2 input rate 100 family inet ...` packs
+		// multiple instance-body statements on the instance node. The
+		// compact fold can split them only when this container opts in.
+		"instance": {desc: "Sampling instance", args: 1, placeholder: "<instance-name>", packedStatements: true, children: map[string]*schemaNode{
 			// #1979 Layer B (Tier 2): `input rate <n>` feeds the Rust u32
 			// SamplingRate wire field (buildFlowExportSnapshot, Layer A caps
 			// >u32max). Q3 DECISION: bound is [0, u32max] — EXACT Layer-A

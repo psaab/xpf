@@ -943,6 +943,32 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 				return strings.Join(names, ",")
 			},
 		},
+		// #12810: instance tails may pack input and family siblings onto the
+		// instance key. Both direct statement classes are compared together,
+		// so a split which preserves only one remains observable.
+		"forwarding-options/sampling/instance": {
+			prefix: "forwarding-options { sampling { ",
+			open:   "instance i1",
+			closer: " } }",
+			stmts: map[string]string{
+				"input":  "input rate 100",
+				"family": "family inet output inline-jflow",
+			},
+			read: func(c *Config) string {
+				if c.ForwardingOptions.Sampling == nil {
+					return "<no sampling>"
+				}
+				i := c.ForwardingOptions.Sampling.Instances["i1"]
+				if i == nil {
+					return "<no instance>"
+				}
+				inline := false
+				if i.FamilyInet != nil {
+					inline = i.FamilyInet.InlineJflow
+				}
+				return fmt.Sprintf("rate=%d inline=%v", i.InputRate, inline)
+			},
+		},
 		"security/ike/policy": {
 			prefix: "security { ike { " + ikeProp + " " + ikeProp2 + " ",
 			open:   "policy p1",

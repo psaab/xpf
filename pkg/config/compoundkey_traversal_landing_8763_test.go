@@ -286,6 +286,11 @@ func famOnlyCases8763() []famOnlyCase8763 {
 		{"inet6 sampling", "", ifUnit("   family inet6 {\n    sampling { output; }\n   }"), ifUnit("   family inet6 sampling { output; }"), ifUnit("   family inet6 {\n   }"), recover8763},
 		{"sampling input", "", ifUnit("   family inet {\n    sampling { input; }\n   }"), ifUnit("   family inet {\n    sampling input;\n   }"), ifUnit("   family inet {\n    sampling { }\n   }"), recover8763},
 		{"sampling output", "", ifUnit("   family inet6 {\n    sampling { output; }\n   }"), ifUnit("   family inet6 {\n    sampling output;\n   }"), ifUnit("   family inet6 {\n    sampling { }\n   }"), recover8763},
+		// #12810: elided sampling-instance family bodies need both links
+		// measured; output's inline-jflow flag is the value-bearing leaf.
+		{"inet output", "", out("    output { source-address 198.51.100.80; }"), out("    output source-address 198.51.100.80;"), out("    "), recover8763},
+		{"inet6 output", "", "forwarding-options { sampling { instance i1 { family inet6 { output { source-address 2001:db8::80; } } } } }", "forwarding-options { sampling { instance i1 { family inet6 output source-address 2001:db8::80; } } }", "forwarding-options { sampling { instance i1 { family inet6 { } } } }", recover8763},
+		{"output inline-jflow", "", out("    output { inline-jflow; }"), out("    output inline-jflow;"), out("    output { }"), recover8763},
 		// Refused in both spellings by a live gate, so nothing the fold does can
 		// change the outcome. These two are also REMOVED from the scope list by
 		// this change -- see the note in compact_normalize_scope.go.
