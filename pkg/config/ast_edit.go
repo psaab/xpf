@@ -432,6 +432,12 @@ func (t *ConfigTree) SetPathQuotedGrouped(path []string, quoted, grouped []bool,
 	if grouped != nil && len(grouped) != len(path) {
 		return fmt.Errorf("grouped mask length %d != path length %d", len(grouped), len(path))
 	}
+	// #12674: policy-level `then accept from ...` has the same schema nesting
+	// hazard as a term-level line, but its `then` is a distinct container.
+	policyThenAt, policyFromAt := policyStatementThenFromSplit12674(path, grouped)
+	if policyFromAt >= 0 {
+		return t.setPolicyStatementThenFrom12674(path, quoted, grouped, policyThenAt, policyFromAt, closed...)
+	}
 	// #12516: a then-first policy term line (`term T then accept from ...`)
 	// is two statements, the term's `from` clause and its actions. Replay
 	// both halves, or refuse a `from` that cannot be placed, before the
