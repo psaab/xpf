@@ -115,10 +115,11 @@ func TestPolicyTermLineValuesRetained12513(t *testing.T) {
 
 // TestPolicyTermLineControlsAndChains12513 pins the edges of the dispatch.
 // accept and reject stay terminal actions, an unknown word keeps the generic
-// `then` branch (its validation is #12517's), chains keep every action, and
-// a bracketed community list ends where the chain resumes. RED-on-mutation:
-// dispatching every token after `then` turns the unknown row's Action into
-// "" and lets `then foo next policy` commit.
+// `then` branch (tolerant compilation stores it in Action; #12517 rejects it
+// at strict compile), chains keep every action, and a bracketed community
+// list ends where the chain resumes. RED-on-mutation: dispatching every token
+// after `then` turns the unknown word's Action into "" and lets `then foo
+// next policy` commit.
 func TestPolicyTermLineControlsAndChains12513(t *testing.T) {
 	for _, tc := range []struct {
 		name, text string
@@ -126,7 +127,6 @@ func TestPolicyTermLineControlsAndChains12513(t *testing.T) {
 	}{
 		{"accept control", "term t then accept;", thenFields12513{Action: "accept"}},
 		{"reject control", "term t then reject;", thenFields12513{Action: "reject"}},
-		{"unknown word keeps the generic branch", "term t then foo;", thenFields12513{Action: "foo"}},
 		{
 			"community then local-preference then accept",
 			"term t then community add 65001:100 local-preference 200 accept;",
@@ -162,6 +162,21 @@ func TestPolicyTermLineControlsAndChains12513(t *testing.T) {
 				t.Fatalf("%s compiled to\n %+v\nwant\n %+v", tc.text, got, tc.want)
 			}
 		})
+	}
+
+	unknown, parseErrors := NewParser("policy-options { policy-statement P { term t then foo; } }").Parse()
+	if len(parseErrors) > 0 {
+		t.Fatalf("parse: %v", parseErrors)
+	}
+	if _, err := CompileConfig(unknown); err == nil || !strings.Contains(err.Error(), `then: unknown action "foo"`) {
+		t.Fatalf("`then foo` must fail strict compile as an unknown #12517 action, got %v", err)
+	}
+	lenient, err := CompileConfigLenient(unknown)
+	if err != nil {
+		t.Fatalf("tolerant compile rejected `then foo`: %v", err)
+	}
+	if got, want := thenFieldsOf12513(lenient.PolicyOptions.PolicyStatements["P"].Terms[0]), (thenFields12513{Action: "foo"}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("tolerant `then foo` compiled to\n %+v\nwant the generic branch\n %+v", got, want)
 	}
 
 	tree, parseErrors := NewParser("policy-options { policy-statement P { term t then foo next policy; } }").Parse()

@@ -2040,6 +2040,7 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 					extraCount = 0
 				case "next":
 					recordPolicyNextAction11780(term, nodeVal(ac))
+					extraCount = 1
 				case "next-hop":
 					term.hasNextHopOperand12070 = true
 					term.NextHop = nodeVal(ac)
@@ -2451,6 +2452,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 						value = keys[i]
 					}
 					recordPolicyNextAction11780(term, value)
+					recordPolicyThenInlineTail12517(term, keys, i, "next", true)
 					continue
 				}
 				if keys[i+1] == "next-hop" || keys[i+1] == "as-path-prepend" {
@@ -2475,11 +2477,16 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 				}
 				i++
 				term.Action = keys[i]
-				if isPolicyThenFromWord12517(term.Action) {
-					recordPolicyThenTail12517(term, "then", term.Action)
-				}
 				if term.Action == "accept" || term.Action == "reject" {
 					recordPolicyThenInlineTail12517(term, keys, i, term.Action, true)
+				} else {
+					// #12517: neither a dispatched value action nor a
+					// terminal one. Unlike a braced statement, the packed
+					// word has no boundary of its own: it lands in Action
+					// and its operands fall through to the main switch.
+					// Action keeps it so #11780 still reports a `then foo
+					// next policy` conflict; the tail gate rejects it.
+					recordPolicyThenTail12517(term, "then", term.Action)
 				}
 			}
 		case "next":
@@ -2490,6 +2497,7 @@ func parsePolicyTermInlineKeys(term *PolicyTerm, keys []string, bracketed, quote
 					value = keys[i]
 				}
 				recordPolicyNextAction11780(term, value)
+				recordPolicyThenInlineTail12517(term, keys, i, "next", seenThen)
 			}
 		case "protocol":
 			// "from protocol [ bgp ospf static ]" — the lexer strips the

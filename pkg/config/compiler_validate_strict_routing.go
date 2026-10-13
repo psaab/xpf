@@ -2055,8 +2055,9 @@ func validatePolicyThenOperandsStrict(cfg *Config) error {
 
 // validatePolicyThenTailsStrict12517 hard-rejects a compiled policy term whose
 // `then` readers kept #12517 tail evidence: a token past a recognized action's
-// operands, or a then-side from-match word the inline reader would turn into
-// a match or drop. Both readers record only the first such token per term.
+// operands, an unknown packed action word, or a then-side from-match word the
+// inline reader would turn into a match or drop. Both readers record only the
+// first such token per term.
 //
 // It runs after the #11780 next-policy and #11779 from-match gates, so their
 // more specific diagnostics win when one input trips both (a bare
@@ -2083,16 +2084,35 @@ func validatePolicyThenTailsStrict12517(cfg *Config) error {
 			if term == nil || !term.invalidPolicyThenTail12517 {
 				continue
 			}
-			if term.invalidPolicyThenTailAction12517 == "then" {
-				return fmt.Errorf(
-					"policy-options policy-statement %q term %q then: unexpected trailing token %q",
-					name, term.Name, term.invalidPolicyThenTailValue12517)
-			}
-			return fmt.Errorf(
-				"policy-options policy-statement %q term %q then %s: unknown modifier %q",
-				name, term.Name, term.invalidPolicyThenTailAction12517,
-				term.invalidPolicyThenTailValue12517)
+			return policyThenTailError12517(name, term)
 		}
 	}
 	return nil
+}
+
+// policyThenTailError12517 words the kept evidence for the operator. Action
+// "then" means the token sat where an action belongs; any other action names
+// the statement whose operands the token followed.
+func policyThenTailError12517(policy string, term *PolicyTerm) error {
+	action, value := term.invalidPolicyThenTailAction12517, term.invalidPolicyThenTailValue12517
+	switch {
+	case action == "then" && isPolicyThenFromWord12517(value):
+		return fmt.Errorf(
+			"policy-options policy-statement %q term %q then: %q is a from-match keyword, not a then action",
+			policy, term.Name, value)
+	case action == "then":
+		return fmt.Errorf(
+			"policy-options policy-statement %q term %q then: unknown action %q",
+			policy, term.Name, value)
+	case policyTermClauseKeyword11779(value):
+		// A set-path replay nests a then-first term's `from` clause under
+		// the action (#12516); the reader never compiles it as a match.
+		return fmt.Errorf(
+			"policy-options policy-statement %q term %q then %s: unexpected %q clause after the action (not compiled as a match)",
+			policy, term.Name, action, value)
+	default:
+		return fmt.Errorf(
+			"policy-options policy-statement %q term %q then %s: unknown modifier %q",
+			policy, term.Name, action, value)
+	}
 }

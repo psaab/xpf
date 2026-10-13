@@ -615,3 +615,80 @@ func TestDisplaySetCommunityListReplays12517(t *testing.T) {
 		})
 	}
 }
+
+// FAIL-ON-REVERT (#12517 B4): the packed compact and term-line spellings have
+// no statement boundary, so an unknown word after `then` lands in Action and
+// its operands fall through to the main switch, and a token after `next
+// policy` was dropped. Both are rejected at strict commit and warn on the
+// tolerant path, like the braced and set-path `next` tail the schema walk
+// rejects. RED with the generic-branch and `next` tail records removed:
+// every row commits (`then foo accept` renders a plain permit).
+//
+// A LoadMerge replay of an unknown packed word is different input: set-path
+// lines give the word its own statement, which #10707 keeps open-world, so
+// it commits with the #10707 warning rather than silently.
+func TestPackedUnknownThenWordRejected12517(t *testing.T) {
+	for _, tc := range []struct {
+		name, expr, want, openWorld string
+	}{
+		{name: "unknown word", expr: "foo", want: `then: unknown action "foo"`, openWorld: "foo"},
+		{name: "unknown word then accept", expr: "foo accept", want: `then: unknown action "foo"`, openWorld: "foo"},
+		{name: "match word in action slot", expr: "protocol static", want: `then: "protocol" is a from-match keyword, not a then action`, openWorld: "protocol"},
+		{name: "dropped match word in action slot", expr: "neighbor 192.0.2.1 accept", want: `then: "neighbor" is a from-match keyword, not a then action`, openWorld: "neighbor"},
+		{name: "next policy tail", expr: "next policy foo", want: `then next: unknown modifier "foo"`},
+		{name: "chained next policy tail", expr: "local-preference 200 next policy foo", want: `then next: unknown modifier "foo"`},
+	} {
+		for _, spelling := range []struct{ name, text string }{
+			{name: "compact", text: "policy-options { policy-statement P { term t { then " + tc.expr + "; } } }"},
+			{name: "term-line", text: "policy-options { policy-statement P { term t then " + tc.expr + "; } }"},
+		} {
+			t.Run(tc.name+"/"+spelling.name, func(t *testing.T) {
+				tree := policyTree12517(t, spelling.text)
+				t.Run("CompileConfig", func(t *testing.T) {
+					if _, err := config.CompileConfig(tree); err == nil || !strings.Contains(err.Error(), tc.want) {
+						t.Fatalf("strict compile error = %v, want %q", err, tc.want)
+					}
+				})
+				t.Run("CompileConfigLenient", func(t *testing.T) {
+					cfg, err := config.CompileConfigLenient(tree)
+					if err != nil {
+						t.Fatalf("tolerant compile rejected a persisted config: %v", err)
+					}
+					if !hasPolicyThenTailWarning12517(cfg.Warnings, tc.want) {
+						t.Fatalf("tolerant compile omitted %q: %v", tc.want, cfg.Warnings)
+					}
+				})
+				t.Run("CheckText", func(t *testing.T) {
+					if _, err := configstore.CheckText(spelling.text, 0); err == nil || !strings.Contains(err.Error(), tc.want) {
+						t.Fatalf("CheckText error = %v, want %q", err, tc.want)
+					}
+				})
+				t.Run("LoadOverride", func(t *testing.T) {
+					load := policyThenLoads12517(spelling.text)[0]
+					if _, err := policyThenCommitCheck12517(t, load, spelling.text); err == nil || !strings.Contains(err.Error(), tc.want) {
+						t.Fatalf("LoadOverride + CommitCheck error = %v, want %q", err, tc.want)
+					}
+				})
+				t.Run("LoadMerge", func(t *testing.T) {
+					load := policyThenLoads12517(spelling.text)[1]
+					cfg, err := policyThenCommitCheck12517(t, load, spelling.text)
+					if tc.openWorld == "" {
+						if err == nil || !strings.Contains(err.Error(), tc.want) {
+							t.Fatalf("LoadMerge + CommitCheck error = %v, want %q", err, tc.want)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatalf("LoadMerge replay of an open-world statement rejected: %v", err)
+					}
+					for _, warning := range cfg.Warnings {
+						if strings.Contains(warning, "#10707") && strings.Contains(warning, strconv.Quote(tc.openWorld)) {
+							return
+						}
+					}
+					t.Fatalf("LoadMerge replay omitted the #10707 warning for %q: %v", tc.openWorld, cfg.Warnings)
+				})
+			})
+		}
+	}
+}
