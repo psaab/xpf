@@ -609,6 +609,26 @@ func mergeNodes(dst *[]*Node, src []*Node, ancestorPath [][]string, budget *grou
 						}
 						continue
 					}
+					if body := groupPackedLeafUnmodelledTail(ancestorPath, s); body != nil {
+						if err := budget.charge(countNodes(body)); err != nil {
+							return err
+						}
+						if haveExcept {
+							contrib := s.fromGroups
+							if len(contrib) == 0 {
+								contrib = []string{group}
+							}
+							addNodeContrib9862(body, contrib)
+							bodyLevel := collectExceptNames9862(
+								peer.Children, vars, cloneExceptSet9862(level))
+							if contribExcluded9862(body[0], group, bodyLevel) {
+								continue
+							}
+						}
+						appendDuplicateBlockMergeMarkersToLeaves9023(body, markers)
+						peer.Children = append(peer.Children, body...)
+						continue
+					}
 				}
 				// A same-key node already exists inline. UNION when the
 				// statement is a pure value-list leaf-list; otherwise OVERRIDE
@@ -931,8 +951,9 @@ func schemaAtAncestorPath(ancestorPath [][]string) *schemaNode {
 //     the expanded child finds a peer and the ordinary apply-groups OVERRIDE
 //     applies, so INLINE STILL WINS. The fix does not weaken that.
 //
-// Returns nil unless the tail actually expands under the schema, so an
-// unmodelled or genuinely scalar leaf keeps its existing override behaviour.
+// Returns nil unless the tail actually expands under the schema. When it does
+// not, groupPackedLeafUnmodelledTail preserves it if a matching inline
+// container peer would otherwise hide it.
 func groupPackedLeafBody(ancestorPath [][]string, s *Node) []*Node {
 	if s == nil || len(s.Keys) < 2 {
 		return nil
@@ -954,6 +975,36 @@ func groupPackedLeafBody(ancestorPath [][]string, s *Node) []*Node {
 		return nil
 	}
 	return expanded
+}
+
+// groupPackedLeafUnmodelledTail preserves an unexpandable packed tail as one
+// leaf under its inline container peer. Post-expansion validation must still
+// see keywords outside the schema grammar; valid tails use the structured
+// expansion above and retain ordinary inline-wins behavior.
+func groupPackedLeafUnmodelledTail(ancestorPath [][]string, s *Node) []*Node {
+	if s == nil || len(s.Keys) < 2 {
+		return nil
+	}
+	parent := schemaAtAncestorPath(ancestorPath)
+	if parent == nil {
+		return nil
+	}
+	leafSchema := resolveSchemaChild(parent, s.Keys[0])
+	if leafSchema == nil || leafSchema.children == nil {
+		return nil
+	}
+	consumed, _ := consumeNodeKeys(s.Keys, leafSchema)
+	if consumed <= 0 || consumed >= len(s.Keys) {
+		return nil
+	}
+	tail := &Node{Keys: append([]string(nil), s.Keys[consumed:]...), IsLeaf: true}
+	if len(s.KeysQuoted) == len(s.Keys) {
+		tail.setKeysQuoted(append([]bool(nil), s.KeysQuoted[consumed:]...))
+	}
+	if len(s.KeysBracketed) == len(s.Keys) {
+		tail.setKeysBracketed(append([]bool(nil), s.KeysBracketed[consumed:]...))
+	}
+	return []*Node{tail}
 }
 
 // leafListPeer returns the first dst node that expresses the leaf-list keyed

@@ -305,24 +305,26 @@ func TestCompactFilterHeadsRejectAndWarn12090(t *testing.T) {
 	}
 }
 
-func TestApplyGroupInlinePeerOverrideDropTracked12090(t *testing.T) {
-	tree := hierTree(t, `groups {
+func TestApplyGroupInlinePeerPackedFilterRejects12090(t *testing.T) {
+	src := `groups {
 		g { interfaces { ge-0/0/0 { unit 0 filter input f; } } }
 	}
 	apply-groups g;
-	interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }`)
-	if _, err := CompileConfig(tree); err != nil {
-		t.Fatalf("the existing inline-peer expansion gap is tracked by #12530: %v", err)
+	interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.0.1/24; } } } }`
+	_, err := CompileConfig(hierTree(t, src))
+	if err == nil || !strings.Contains(err.Error(), "#12090") {
+		t.Fatalf("inline peer must not hide the packed filter from #12090; got %v", err)
 	}
-	cfg, err := CompileConfigLenient(tree)
+	cfg, err := CompileConfigLenient(hierTree(t, src))
 	if err != nil {
-		t.Fatalf("lenient compile through the tracked #12530 gap: %v", err)
+		t.Fatalf("lenient compile: %v", err)
 	}
 	for _, warning := range cfg.Warnings {
 		if strings.Contains(warning, "#12090") {
-			t.Fatalf("the inline-peer override currently removes the packed tail before #12090: %q", warning)
+			return
 		}
 	}
+	t.Fatalf("lenient inline-peer load must warn with #12090, got %q", cfg.Warnings)
 }
 
 func TestDHCPRelayNamedGroupFilterRejects12090(t *testing.T) {
